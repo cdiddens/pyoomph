@@ -3,6 +3,8 @@ IMPORTANT NOTICE: This file stems from oomph-lib, but has been MODIFIED for pyoo
 MODIFICATIONS ARE INDICATED BY A COMMENT STARTING WITH //FOR PYOOMPH
 (Changed on 15th April 2024):    
 Made Problem::adapt(unsigned&, unsigned&) to a virtual  method
+(Changed on 24th May 2024):    
+Replaced mpi.h by pyoomph_mpi_wrap.h
 *******************************************************************************/
 
 // LIC// ====================================================================
@@ -43,7 +45,7 @@ Made Problem::adapt(unsigned&, unsigned&) to a virtual  method
 #endif
 
 #ifdef OOMPH_HAS_MPI
-#include "mpi.h"
+#include "pyoomph_mpi_wrap.hpp" // FOR_PYOOMPH
 #endif
 
 // OOMPH-LIB headers

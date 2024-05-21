@@ -58,10 +58,8 @@ ifeq ($(PYOOMPH_PARANOID),true)
 CXXFLAGS+=-DPARANOID
 endif
 
-ifneq ($(PYOOMPH_USE_MPI),false)
-CXXFLAGS+=  -I/usr/include/mpi -DOOMPH_HAS_MPI
-CXX=mpic++
-endif
+# Include the MPI wrapping
+CXXFLAGS+=  -I../.. -DOOMPH_HAS_MPI
 
 ifneq ($(PYOOMPH_DEBUG_INFOS),false)
  CXXFLAGS+=-g

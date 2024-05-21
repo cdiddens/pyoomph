@@ -4,8 +4,9 @@ MODIFICATIONS ARE INDICATED BY A COMMENT STARTING WITH //FOR PYOOMPH
 (Changed on 15th April 2024):    
 made QuadTreeForest::find_neighbours(), ::check_all_neighbours(DocInfo&) and ::construct_north_equivalents  virtual and protected
 added a flag to suppress some calls in QuadTreeForest::QuadTreeForest(Vector<TreeRoot*>&)
+(Changed on 24th May 2024):    
+Replaced mpi.h by pyoomph_mpi_wrap.h
 *******************************************************************************/
-
 
     
 // LIC// ====================================================================
@@ -44,7 +45,7 @@ added a flag to suppress some calls in QuadTreeForest::QuadTreeForest(Vector<Tre
 #endif
 
 #ifdef OOMPH_HAS_MPI
-#include "mpi.h"
+#include "pyoomph_mpi_wrap.hpp" // FOR_PYOOMPH
 #endif
 
 // OOMPH-LIB headers

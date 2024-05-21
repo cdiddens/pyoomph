@@ -4,6 +4,8 @@ MODIFICATIONS ARE INDICATED BY A COMMENT STARTING WITH //FOR PYOOMPH
 (Changed on 15th April 2024):    
 Removed the memory statistics, cannot be done in pyoomph
 Replaced SuperLUSolver by LinearSolver, since it is not always superlu doing the job
+(Changed on 24th May 2024):    
+Replaced mpi.h by pyoomph_mpi_wrap.h
 ************************************************/
 
 // LIC// ====================================================================
@@ -39,7 +41,7 @@ Replaced SuperLUSolver by LinearSolver, since it is not always superlu doing the
 #endif
 
 #ifdef OOMPH_HAS_MPI
-#include "mpi.h"
+#include "pyoomph_mpi_wrap.hpp" // FOR_PYOOMPH
 #endif
 
 // oomph-lib includes

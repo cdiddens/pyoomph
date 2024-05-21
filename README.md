@@ -43,7 +43,6 @@ During compilation, pyoomph includes/links against or makes use of the following
 
 - [`GiNaC`](https://www.ginac.de/) ([GPL v2 or later license](https://www.ginac.de/ginac.git/?p=ginac.git;a=blob_plain;f=COPYING;hb=HEAD)), GiNaC is statically included in the distribution as wheels.
 - [`CLN`](https://www.ginac.de/CLN) ([GPL v2 or later license](https://www.ginac.de/CLN/cln.git/?p=cln.git;a=blob_plain;f=COPYING;hb=HEAD)), CLN is statically included in the distribution as wheels.
-- `MPI`, depending on the system e.g. [`OpenMPI`](https://www.open-mpi.org) ([3-clause BSD license](https://www.open-mpi.org/community/license.php)), [`MPICH`](https://www.mpich.org/) ([MPICH license](https://github.com/pmodels/mpich/blob/main/COPYRIGHT)), [`Microsoft MPI`](https://github.com/Microsoft/Microsoft-MPI) ([MIT license](https://github.com/microsoft/Microsoft-MPI/blob/master/LICENSE.txt)), the wheels distributions are compiled without MPI support.
 - [`python3.8 or higher`](https://www.python.org/), ([PSF license](https://docs.python.org/3/license.html)).
 - [`pybind11`](https://github.com/pybind/pybind11), ([BSD-style license](https://github.com/sizmailov/pybind11-stubgen/blob/master/LICENSE)).
 - [`pybind11-stubgen`](https://github.com/sizmailov/pybind11-stubgen), ([BSD-style license](https://github.com/sizmailov/pybind11-stubgen/blob/master/LICENSE)).

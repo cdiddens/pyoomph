@@ -5,8 +5,9 @@ MODIFICATIONS ARE INDICATED BY A COMMENT STARTING WITH //FOR PYOOMPH
 Prevent a double call of MPI initialization. We also have to do it in python, so we don't want it twice,
 Suppressed some information written to stdout.
 More digits in time measurements output
-************************************************/
-
+(Changed on 24th May 2024):    
+Replaced mpi.h by pyoomph_mpi_wrap.h
+*******************************************************************************/
 
 // LIC// ====================================================================
 // LIC// This file forms part of oomph-lib, the object-oriented,
@@ -34,7 +35,7 @@ More digits in time measurements output
 // LIC//
 // LIC//====================================================================
 #ifdef OOMPH_HAS_MPI
-#include "mpi.h"
+#include "pyoomph_mpi_wrap.hpp" // FOR_PYOOMPH
 #endif
 
 #include <algorithm>

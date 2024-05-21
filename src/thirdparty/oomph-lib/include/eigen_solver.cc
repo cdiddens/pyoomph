@@ -4,6 +4,8 @@ MODIFICATIONS ARE INDICATED BY A COMMENT STARTING WITH //FOR PYOOMPH
 (Changed on 15th April 2024):    
 Removed cfortran, arpack and lapack_qz dependencies and disabled functionality.
 Eigensolving is handled in another way in pyoomph
+(Changed on 24th May 2024):    
+Replaced mpi.h by pyoomph_mpi_wrap.h
 *******************************************************************************/
 
 // LIC// ====================================================================
@@ -34,7 +36,7 @@ Eigensolving is handled in another way in pyoomph
 // Non-inline functions for the eigensolvers
 
 #ifdef OOMPH_HAS_MPI
-#include "mpi.h"
+#include "pyoomph_mpi_wrap.hpp" // FOR_PYOOMPH
 #endif
 
 //FOR PYOOMPH: Remove the dependencies

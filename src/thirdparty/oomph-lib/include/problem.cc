@@ -6,7 +6,10 @@ Do not call Triangle-dependent functions, i.e. wrap it by an #ifdef
 Suppressed some information written to stdout.
 Allows the global convergent Newton method to run with MPI but with only one process.
 Output the current arclength step on rejection.
+(Changed on 24th May 2024):    
+Replaced mpi.h by pyoomph_mpi_wrap.h
 *******************************************************************************/
+
 
 // LIC// ====================================================================
 // LIC// This file forms part of oomph-lib, the object-oriented,
@@ -35,7 +38,7 @@ Output the current arclength step on rejection.
 // LIC//====================================================================
 
 #ifdef OOMPH_HAS_MPI
-#include "mpi.h"
+#include "pyoomph_mpi_wrap.hpp" // FOR_PYOOMPH
 #endif
 
 #include <list>

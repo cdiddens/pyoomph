@@ -5,7 +5,6 @@
 export PYOOMPH_PACKAGE_NAME=pyoomph ### TODO
 
 
-export PYOOMPH_USE_MPI=false
 export PYOOMPH_MARCH_NATIVE=false
 export PYOOMPH_DEBUG_INFOS=false
 export PYOOMPH_PARANOID=false

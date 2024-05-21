@@ -4,6 +4,8 @@ MODIFICATIONS ARE INDICATED BY A COMMENT STARTING WITH //FOR PYOOMPH
 (Changed on 15th April 2024):    
 Removed elastic_problems.h to get rid of frontal_solver, HSL_MA42, etc
 Also removed SolidICProblem SolidMesh::Solid_IC_problem
+(Changed on 24th May 2024):    
+Replaced mpi.h by pyoomph_mpi_wrap.h
 *******************************************************************************/
 
 // LIC// ====================================================================
@@ -34,7 +36,7 @@ Also removed SolidICProblem SolidMesh::Solid_IC_problem
 // Non-inline member functions for general mesh classes
 
 #ifdef OOMPH_HAS_MPI
-#include "mpi.h"
+#include "pyoomph_mpi_wrap.hpp" // FOR_PYOOMPH
 #endif
 
 #include <algorithm>

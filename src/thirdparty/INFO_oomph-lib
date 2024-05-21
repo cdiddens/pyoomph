@@ -13,6 +13,9 @@ These changes are indicated by a comment start with "//FOR PYOOMPH"
 1) Only a portion of the folder src/generic was copied (oomph-lib from 15th April 2024)
 2) Following files have been changed and the positions marked with "//FOR PYOOMPH"
 
+All statements #include "mpi.h" have been replaced by #include "pyoomph_mpi_wrap.hpp" (Changed on 21st May 2024)
+Thereby, mpi support can be toggled from the python side.
+
 eigen_solver.cc (Changed on 15th April 2024):    
 Removed cfortran, arpack and lapack_qz dependencies and disabled functionality.
 Eigensolving is handled in another way in pyoomph.

@@ -28,29 +28,24 @@ echo "Sourcing custom config file $PYOOMPH_CONFIG_FILE"
 source "$PYOOMPH_CONFIG_FILE" ||  exit 1
 fi
 
-if $PYOOMPH_USE_MPI; then
- MPICCBINARY=mpic++
-else
- MPICCBINARY=$CXX
-fi
 
-if [[ $MPICCBINARY == "" ]]; then
-MPICCBINARY=g++
+if [[ $CXX == "" ]]; then
+CXX=g++
 fi
 
 
 if [[ "$OSTYPE" != "darwin"* ]]; then
 cd $(readlink -f $(dirname $0))
 if which ccache &>/dev/null; then 
-NPY_NUM_BUILD_JOBS=4 CXX="$MPICCBINARY -pthread -g3 -shared -Wl,-O1 -Wl,-Bsymbolic-functions  -Wl,-z,relro" CC="ccache $MPICCBINARY $COLOR_OUTPUT" LDSHARED="$MPICCBINARY -g3 -shared -Wl,-O1 -Wl,-Bsymbolic-functions -Wl,-z,relro"  python3 -m pip install  -v "$@"  .  $EDITABLE_MODE || exit 1
+NPY_NUM_BUILD_JOBS=4 CXX="$CXX -pthread -g3 -shared -Wl,-O1 -Wl,-Bsymbolic-functions  -Wl,-z,relro" CC="ccache $CXX $COLOR_OUTPUT" LDSHARED="$CXX -g3 -shared -Wl,-O1 -Wl,-Bsymbolic-functions -Wl,-z,relro"  python3 -m pip install  -v "$@"  .  $EDITABLE_MODE || exit 1
  else
- NPY_NUM_BUILD_JOBS=4 CXX="$MPICCBINARY -pthread -g3 -shared -Wl,-O1 -Wl,-Bsymbolic-functions -Wl,-z,relro" CC="$MPICCBINARY $COLOR_OUTPUT" LDSHARED="$MPICCBINARY -g3 -shared -Wl,-O1 -Wl,-Bsymbolic-functions -Wl,-z,relro"  python3 -m pip install  -v "$@"  $EDITABLE_MODE || exit 1
+ NPY_NUM_BUILD_JOBS=4 CXX="$CXX -pthread -g3 -shared -Wl,-O1 -Wl,-Bsymbolic-functions -Wl,-z,relro" CC="$CXX $COLOR_OUTPUT" LDSHARED="$CXX -g3 -shared -Wl,-O1 -Wl,-Bsymbolic-functions -Wl,-z,relro"  python3 -m pip install  -v "$@"  $EDITABLE_MODE || exit 1
  fi
 else
  if which ccache &>/dev/null; then 
-  NPY_NUM_BUILD_JOBS=4 CXX="$MPICCBINARY -L/usr/local/lib" CC="ccache $MPICCBINARY -I/usr/local/include $COLOR_OUTPUT" LD="$MPICCBINARY"  python3 -m pip install -v  "$@" . $EDITABLE_MODE || exit 1
+  NPY_NUM_BUILD_JOBS=4 CXX="$CXX -L/usr/local/lib" CC="ccache $CXX -I/usr/local/include $COLOR_OUTPUT" LD="$CXX"  python3 -m pip install -v  "$@" . $EDITABLE_MODE || exit 1
  else
-   NPY_NUM_BUILD_JOBS=4 CXX="$MPICCBINARY -L/usr/local/lib" CC="$MPICCBINARY -I/usr/local/include $COLOR_OUTPUT" LD="$MPICCBINARY"  python3 -m pip install -v  "$@" .  $EDITABLE_MODE || exit 1
+   NPY_NUM_BUILD_JOBS=4 CXX="$CXX -L/usr/local/lib" CC="$CXX -I/usr/local/include $COLOR_OUTPUT" LD="$CXX"  python3 -m pip install -v  "$@" .  $EDITABLE_MODE || exit 1
  fi
 fi
 

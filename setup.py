@@ -29,7 +29,6 @@ if os.path.isfile(config_file):
         os.environ[key] = value
     envfile.close()
         
-no_mpi=os.environ.get("PYOOMPH_USE_MPI")=="false"
 march_native=os.environ.get("PYOOMPH_MARCH_NATIVE")!="false"
 paranoid=os.environ.get("PYOOMPH_PARANOID")=="true"
 debug_symbols=os.environ.get("PYOOMPH_DEBUG_INFOS")!="false"
@@ -46,14 +45,7 @@ for k,v in os.environ.items():
 print("==========================================")
      
 
-no_mpi_indicator_file = pathlib.Path("pyoomph/NO_MPI")     
-if no_mpi:
-  if not no_mpi_indicator_file.exists():
-     f=open("pyoomph/NO_MPI","w")
-     f.close()
-else:  
-  if no_mpi_indicator_file.exists():    
-     no_mpi_indicator_file.unlink()
+
      
 __version__ = '0.1.2'
 
@@ -78,10 +70,7 @@ oldir=odir+"/lib/"
 tccdir="./src/thirdparty/tinycc"
 
 
-mpideps=["mpi_usempif08", "mpi_usempi_ignore_tkr", "mpi_mpifh","mpi"]
-mpideps=["mpi"]
-if no_mpi:
-  mpideps=[]
+
  
 c_source_files=([] if fast_multi_version_build else glob.glob("src/*.cpp"))+glob.glob("src/pybind/*.cpp")#+glob.glob("src/thirdparty/oomph-lib/include/*.cc")
 #c_source_files=list(set(c_source_files)-set(glob.glob("src/thirdparty/oomph-lib/include/*.template.cc")))
@@ -119,7 +108,7 @@ ext_modules = [
 				sorted(c_source_files),
         include_dirs=get_all_include_dirs(),
 				library_dirs=get_all_lib_dirs(),
-				libraries=(["pyoomph_main"] if fast_multi_version_build else [])+['generic',"ginac","cln"]+([] if cross_compile_for_win else ["dl"] )+(["tcc"] if with_tcc else [])+mpideps+win_cross_python_lib, #,
+				libraries=(["pyoomph_main"] if fast_multi_version_build else [])+['generic',"ginac","cln"]+([] if cross_compile_for_win else ["dl"] )+(["tcc"] if with_tcc else [])+win_cross_python_lib, #,
         language='c++'
     ),
 ]
@@ -233,7 +222,7 @@ class BuildExt(build_ext):
 
 
         for ext in self.extensions:
-            ext.define_macros = [('VERSION_INFO', '"{}"'.format(self.distribution.get_version()))] + ([] if no_mpi else [('OOMPH_HAS_MPI',None)])
+            ext.define_macros = [('VERSION_INFO', '"{}"'.format(self.distribution.get_version()))] + [('OOMPH_HAS_MPI',None)]
             ext.define_macros = ext.define_macros + ([('PARANOID', None)] if paranoid else []) + ([] if with_tcc else [('PYOOMPH_NO_TCC',None)])
             ext.extra_compile_args = opts
             ext.extra_link_args = link_opts
@@ -271,8 +260,8 @@ setup(
     setup_requires=['pybind11>=2.5.0'],
     cmdclass={'build_ext': BuildExt},
     zip_safe=False,
-    install_requires=["meshio", "pygmsh","numpy","scipy","matplotlib","mkl","more_itertools"]+([] if no_mpi else ["mpi4py"])+([] if with_tcc else ["tccbox"]),
-    package_data={'pyoomph.jitbridge': ['*.h']+(["libtcc1.a"] if with_tcc else []), 'pyoomph' : ["py.typed"]+(["NO_MPI"] if no_mpi else []), "_pyoomph-stubs" : ["py.typed","__init__.pyi"]},
+    install_requires=["meshio", "pygmsh","numpy","scipy","matplotlib","mkl","more_itertools"]+([] if with_tcc else ["tccbox"]),
+    package_data={'pyoomph.jitbridge': ['*.h']+(["libtcc1.a"] if with_tcc else []),  "_pyoomph-stubs" : ["py.typed","__init__.pyi"]},
     include_package_data=True,
     
 )

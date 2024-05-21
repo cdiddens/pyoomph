@@ -1,3 +1,10 @@
+/******************************************************************************
+IMPORTANT NOTICE: This file stems from oomph-lib, but has been MODIFIED for pyoomph!
+MODIFICATIONS ARE INDICATED BY A COMMENT STARTING WITH //FOR PYOOMPH
+(Changed on 24th May 2024):    
+Replaced mpi.h by pyoomph_mpi_wrap.h
+*******************************************************************************/
+
 // LIC// ====================================================================
 // LIC// This file forms part of oomph-lib, the object-oriented,
 // LIC// multi-physics finite-element library, available

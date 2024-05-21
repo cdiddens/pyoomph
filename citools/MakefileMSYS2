@@ -37,10 +37,8 @@ $(BUILDDIR)/src/%.o: ./src/pybind/%.cpp
 	@mkdir -p $(BUILDDIR)/src/pybind
 	g++ -Wno-unused-result -Wsign-compare $(ADDDEFS) -DPYOOMPH_WIN_CROSS -DNDEBUG -fwrapv -O2 -Wall -Wformat -Werror=format-security -fwrapv -O2  -Wformat -Werror=format-security -Wdate-time -D_FORTIFY_SOURCE=2 -fPIC -DVERSION_INFO="$(VERSION)"   $(TCCINCL) $(PYINCL)  $(GINACINCL) $(CLNINCL) $(OOMPHINCL) -g0 -c $< -o $@ -std=c++11 -fvisibility=hidden 
 
-# -DOOMPH_HAS_MPI $(MPIINCL)
 	
 $(DLL): $(OBJS)	
 	g++ -shared  -static-libgcc -static-libstdc++ $(OBJS) -o $(DLL)  -Wl,--out-implib,$(BUILDDIR)/$(DLLBASE).a  $(PYOOMPH_LINK) $(OOMPHLINK) $(PYLINK) $(GINACLINK) -Wl,-Bstatic -lstdc++ -lpthread -s
 
-#  $(MPILINK)
 	
