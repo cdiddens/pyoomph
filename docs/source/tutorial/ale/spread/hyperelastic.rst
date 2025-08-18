@@ -44,6 +44,6 @@ The issue without shifting the tangent node positions is shown in the left part 
 
 		:download:`Download this example <droplet_spread_hyperelastic_tangential_shift.py>`
 		
-		:download:`Download all examples <../tutorial_example_scripts.zip>`   
+		:download:`Download all examples <../../tutorial_example_scripts.zip>`   
 
 
