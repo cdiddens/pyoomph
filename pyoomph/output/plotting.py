@@ -334,6 +334,7 @@ class MatplotLibPartWithMeshData(MatplotLibPart):
 class MatplotlibTriangulationBased(MatplotLibPartWithMeshData):
     anchor_x="auto"
     anchor_y = "auto"
+    min_triangle_circle_ratio=None
 
     def __init__(self,plotter:"MatplotlibPlotter"):
         super(MatplotlibTriangulationBased, self).__init__(plotter)
@@ -461,8 +462,21 @@ class MatplotlibTriangulationBased(MatplotLibPartWithMeshData):
                 self.interpdata=interpdata
         else:
             reducedtris:NPIntArray = self.mshcache.elem_indices
+            
+        
+            
         if len(reducedtris)>0:
+            
             self.triang = tri.Triangulation(coordinates[0], coordinates[1], reducedtris)
+            if self.min_triangle_circle_ratio is None:                
+                self.min_triangle_circle_ratio=self.plotter.min_triangle_circle_ratio
+            if self.min_triangle_circle_ratio is not None:
+                # Filter out triangles that are too small
+                newmask = tri.TriAnalyzer(self.triang).get_flat_tri_mask(self.min_triangle_circle_ratio)
+                self.triang.set_mask(newmask) #type:ignore
+           
+                
+                
             # Also create the bounding box
             if self.ptsinside is not None:
                 
@@ -492,6 +506,68 @@ class MatplotlibTriangulationBased(MatplotLibPartWithMeshData):
                 pymin:float = numpy.amin(coordinates[1])  #type:ignore
                 pymax:float=numpy.amax(coordinates[1]) #type:ignore
             self.bounding_box = [pxmin, pxmax, pymin, pymax] #type:ignore
+            
+            if self.plotter.merge_duplicate_points:
+                xs,ys= self.triang.x, self.triang.y #type:ignore
+                xy=numpy.stack((xs,ys), axis=1)
+                
+                from scipy.spatial import KDTree
+                kdtree=KDTree(xy)
+                same=kdtree.query_pairs(1e-8*numpy.sqrt((pxmax-pxmin)**2+(pymax-pymin)**2)) #type:ignore
+                
+                for pinds in same:
+                    xs[pinds[1]]=xs[pinds[0]]
+                    ys[pinds[1]]=ys[pinds[0]]
+                    
+                xy=numpy.stack((xs,ys), axis=1)
+                dummy,inds,duplicarr=numpy.unique(["{} {}".format(i, j) for i,j in xy], return_index=True,return_inverse=True,)	
+                xs,ys=xs[inds],ys[inds]
+                self.triang.triangles=duplicarr[self.triang.triangles]+0 #type:ignore
+                if len(self.data.shape)>1:
+                        self.data=numpy.array([self.data[i,inds] for i in range(self.data.shape[0])])
+                else:
+                    self.data=self.data[inds]
+                data=self.data
+                #print("After processing",len(self.triang.x),len(xs),self.data.shape)
+                nondegen=[]
+                for t in self.triang.triangles:
+                    if t[0]==t[1] or t[0]==t[2] or t[1]==t[2]:
+                        pass
+                    else:
+                        nondegen.append(t)
+                self.triang.triangles=numpy.array(nondegen) #type:ignore
+                
+                self.triang.x=xs+0
+                self.triang.y=ys+0
+                self.triang=tri.Triangulation(xs,ys,self.triang.triangles) #type:ignore
+                coordinates=numpy.array([xs,ys])
+                
+                if self.min_triangle_circle_ratio is not None:
+                    # Filter out triangles that are too small
+                    newmask = tri.TriAnalyzer(self.triang).get_flat_tri_mask(self.min_triangle_circle_ratio)
+                    self.triang.set_mask(newmask) #type:ignore
+                
+             
+            if self.plotter.min_triangle_area is not None:
+                rescaled_coords_x=coordinates[0]/(pxmax-pxmin) #type:ignore
+                rescaled_coords_y=coordinates[1]/(pymax-pymin) #type:ignore
+                triangles = self.triang.triangles
+                x = rescaled_coords_x
+                y = rescaled_coords_y
+                # Calculate area using the shoelace formula for each triangle
+                areas = 0.5 * numpy.abs(
+                    (x[triangles[:,0]] * (y[triangles[:,1]] - y[triangles[:,2]]) +
+                     x[triangles[:,1]] * (y[triangles[:,2]] - y[triangles[:,0]]) +
+                     x[triangles[:,2]] * (y[triangles[:,0]] - y[triangles[:,1]]))
+                )
+                #print("MINAREA",numpy.amin(areas),self.plotter.min_triangle_area,numpy.amax(areas))
+                if self.triang.mask is None:
+                    self.triang.set_mask(areas <= self.plotter.min_triangle_area)                
+                else:
+                    self.triang.set_mask(numpy.logical_or(self.triang.mask, areas <= self.plotter.min_triangle_area))                
+                
+                
+                 
         else:
             self.triang = None
             self.bounding_box=None
@@ -687,7 +763,12 @@ class MatplotlibVectorFieldArrows(MatplotlibTriangulationBased):
         xis:NPFloatArray
         yis:NPFloatArray
         xis, yis = numpy.meshgrid(xls, yls) #type:ignore
+        
+        
+        
+
         if self.plotter.crash_on_invalid_triangulation:
+            #print(len(vx),len(self.triang.x))
             interp_u = tri.LinearTriInterpolator(self.triang, vx)
             interp_v = tri.LinearTriInterpolator(self.triang, vy)
         else:
@@ -2243,6 +2324,10 @@ class MatplotlibPlotter(BasePlotter):
         self.load_cb_ranges_dir:str=""
         #: Stop the execution if an invalid triangulation is detected. Otherwise, the plot will be just skipped
         self.crash_on_invalid_triangulation:bool=True
+        self.min_triangle_circle_ratio:Optional[float]=None
+        self.min_triangle_area:Optional[float]=None
+        #: Merge points that are multiple times in the mesh. Note that it does not average the data on these points
+        self.merge_duplicate_points:bool=False
         self._has_invalid_triangulation:bool=False
         self.add_eigen_to_mesh_positions=add_eigen_to_mesh_positions
         self.position_eigen_scale=position_eigen_scale
