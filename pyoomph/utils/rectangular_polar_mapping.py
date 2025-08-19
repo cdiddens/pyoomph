@@ -33,10 +33,11 @@ By using e.g. ``set_coordinate_system(rectangular_to_polar)``, a ``RectangularQu
 
 from ..expressions.coordsys import BaseCoordinateSystem
 from ..expressions import pi,nondim,var,Expression,ExpressionOrNum,vector,diff,matrix,scale_factor,testfunction,test_scale_factor
-from ..output.plotting import *
+from ..output.plotting import PlotTransform
+from ..meshes.meshdatacache import MeshDataCacheOperatorBase
 
-if TYPE_CHECKING:
-    from ..typings import FiniteElementSpaceEnum
+from ..typings import *
+import numpy
 
 class PlotTransformPolarToCartesian(PlotTransform):
     """
@@ -162,6 +163,20 @@ class RectangularToPolarMappingCoordinateSystem(BaseCoordinateSystem):
     
     def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int,with_scales:bool,)->Expression:        
         raise RuntimeError("Rectangular to polar mapping does not support tensors yet")
+
+
+class MeshDataPolarToCartesian(MeshDataCacheOperatorBase):
+    def apply(self, base):
         
-            
+        rs=base.nodal_values[:,base.nodal_field_inds["coordinate_x"]].copy()
+        phis=base.nodal_values[:,base.nodal_field_inds["coordinate_y"]].copy()
+        
+        base.nodal_values[:,base.nodal_field_inds["coordinate_x"]]=rs*numpy.cos(phis)
+        base.nodal_values[:,base.nodal_field_inds["coordinate_y"]]=rs*numpy.sin(phis)
+        for _vfield,compos in base.vector_fields.items():
+            ur=base.nodal_values[:,base.nodal_field_inds[compos[0]]].copy()
+            uphi=base.nodal_values[:,base.nodal_field_inds[compos[1]]].copy()
+            base.nodal_values[:,base.nodal_field_inds[compos[0]]]=ur*numpy.cos(phis) - uphi*numpy.sin(phis)
+            base.nodal_values[:,base.nodal_field_inds[compos[1]]]=ur*numpy.sin(phis) + uphi*numpy.cos(phis)
+
 rectangular_to_polar=RectangularToPolarMappingCoordinateSystem()
