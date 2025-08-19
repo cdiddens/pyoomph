@@ -58,8 +58,8 @@ class PlotTransformPolarToCartesian(PlotTransform):
         
         # Convert R, theta coordinates to x,y coordinates
         R, theta = cs[0].copy(), cs[1].copy()  # type:ignore
-        cs[0] = R * numpy.sin(theta)  # type:ignore
-        cs[1] = R * numpy.cos(theta)  # type:ignore
+        cs[0] = R * numpy.cos(theta)  # type:ignore
+        cs[1] = R * numpy.sin(theta)  # type:ignore
 
         # Convert vector values into new coordinate system
         if vecdim is not None and vecdim>1:
