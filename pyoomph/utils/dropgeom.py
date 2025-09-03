@@ -87,7 +87,7 @@ class DropletGeometry:
 
         if numgiven!=2:
             raise RuntimeError("Specify exactly two of the following parameters: "+", ".join(settings.keys())+" but got: "+str(settings))
-        if self.contact_angle is not None:
+        if self.contact_angle is not None and evalf:
             if float(self.contact_angle)<0:
                 raise RuntimeError("Negative contact angle!")
             elif float(self.contact_angle/pi)>=1:
@@ -117,10 +117,11 @@ class DropletGeometry:
                     h0 = 1.0 / pi * ((3 * v0 + (pi ** 2 * r0 ** 6 + 9 * v0 ** 2) ** rational_num(1, 2)) * pi ** 2) ** rational_num(1,3) - r0 ** 2 * pi / ((3 * v0 + (pi ** 2 * r0 ** 6 + 9 * v0 ** 2) ** rational_num(1, 2)) * pi ** 2) ** rational_num(1, 3)
                 #print("H02",float(h0/meter))
             elif ca is not None:
-                if float(ca) <= float(0.5 * pi):
-                    h0 = (- cos(ca)+1.0) / absolute(sin(ca)) * r0 # TODO: I don't think there is any difference
-                else:
-                    h0 = (1.0 + cos(pi - ca)) / absolute(sin(ca)) * r0 # TODO: I don't think there is any difference
+                #if float(ca) <= float(0.5 * pi):
+                    #h0 = (- cos(ca)+1) / absolute(sin(ca)) * r0 # TODO: I don't think there is any difference
+                    h0 = (- cos(ca)+1) / (sin(ca)) * r0 # TODO: I don't think there is any difference
+                #else:
+                #    h0 = (1.0 + cos(pi - ca)) / absolute(sin(ca)) * r0 # TODO: I don't think there is any difference
             elif rc is not None:
                 if ambiguous_low_contact_angle is None:
                     raise RuntimeError("Set ambiguous_low_contact_angle to either True or False if passing the base and curvature radius")
@@ -174,10 +175,11 @@ class DropletGeometry:
         else:
             self.volume = pi * h0 / 6.0 * (3.0 * r0 ** 2 + h0 ** 2) if self.volume is None else self.volume
         self.curv_radius = (r0 ** 2 + h0 ** 2) / (2.0 * h0) if self.curv_radius is None else self.curv_radius
-        if float(h0/r0) > 1:
-            self.contact_angle = pi - asin((r0 / self.curv_radius)) if self.contact_angle is None else self.contact_angle
-        else:
-            self.contact_angle = asin((r0 / self.curv_radius)) if self.contact_angle is None else self.contact_angle
+        if self.contact_angle is None:
+            if float(h0/r0) > 1:
+                self.contact_angle = pi - asin((r0 / self.curv_radius)) if self.contact_angle is None else self.contact_angle
+            else:
+                self.contact_angle = asin((r0 / self.curv_radius)) if self.contact_angle is None else self.contact_angle
         self.base_radius=r0 if self.base_radius is None else self.base_radius
         self.apex_height = h0 if self.apex_height is None else self.apex_height
 

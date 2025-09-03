@@ -1342,6 +1342,7 @@ class MatplotLibElementOutlines(MatplotLibPartWithMeshData):
     mode="outlines"
     linewidths=1
     linecolor="black"
+    zindex=20
     def __init__(self,plotter:"MatplotlibPlotter"):
         super().__init__(plotter=plotter)
 
@@ -1363,7 +1364,7 @@ class MatplotLibElementOutlines(MatplotLibPartWithMeshData):
             for l in outl:
                 allines += [[tuple(last), tuple(l)]]
                 last = l
-        lc = collections.LineCollection(allines, colors=self.linecolor, linewidths=self.linewidths) #type:ignore
+        lc = collections.LineCollection(allines, colors=self.linecolor, linewidths=self.linewidths,zorder=self.zindex) #type:ignore
         plt.gca().add_collection(lc) #type:ignore
 
         if isinstance(self.plotter.eigenvector,int):

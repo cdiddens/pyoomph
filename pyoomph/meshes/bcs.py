@@ -141,12 +141,14 @@ class EnforcedBC(InterfaceEquations):
         **constraints (Expression): Keyword arguments representing the enforced boundary conditions as pair of variable name to adjust and constraint expression to fulfill in residual form.
     """
  
-    def __init__(self,*, only_for_stationary_solve:bool=False, set_zero_on_normal_mode_eigensolve=False,**constraints:Expression):
+    def __init__(self,*, only_for_stationary_solve:bool=False, set_zero_on_normal_mode_eigensolve=False,domain:Optional[str]=None,space:Optional[FiniteElementSpaceEnum]=None,**constraints:Expression):
         super(EnforcedBC, self).__init__()
         self.constraints = constraints.copy()
         self.lagrangian:bool = False
         self.only_for_stationary_solve=only_for_stationary_solve
         self.set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve
+        self.domain=domain
+        self.space=space
 
     def get_lagrange_multiplier_name(self, varname:str)->str:
         return "_lagr_enf_bc_" + varname
@@ -154,23 +156,29 @@ class EnforcedBC(InterfaceEquations):
     def define_fields(self):
         allowed_spaces= {"C1","C1TB","C2","C2TB","D1","D1TB","D2","D2TB"}
         for k, _ in self.constraints.items():
-            sp = self.get_parent_domain().get_space_of_field(k)
-            if sp == "":
-                ppdom=self.get_parent_domain().get_parent_domain()
-                if ppdom is not None:
-                    sp = ppdom.get_space_of_field(k)
-                    if sp == "":
-                        # Test if it is a vector field
-                        # print(dir(self.get_parent_domain().get_equations()))
-                        # expanded = self.expand_additional_field(k, True, 0, self.get_current_code_generator(),False,False)
-                        # peqs = self.get_parent_domain().get_equations()
-                        raise RuntimeError("Cannot use EnforcedBC on an unknown field " + k)
-            if sp not in allowed_spaces:
-                if sp == "Pos":
-                    sp = self.get_current_code_generator()._coordinate_space
-                else:
-                    raise RuntimeError("EnforcedBC only works the following bulk spaces:"+", ".join(allowed_spaces)+". problem for field " + k + " on space " + sp)
-            self.define_scalar_field(self.get_lagrange_multiplier_name(k), cast(FiniteElementSpaceEnum, sp), scale=1 / test_scale_factor(k),testscale=1 / scale_factor(k))
+            if self.space is not None:
+                    sp = self.space                            
+            else:
+                if self.domain is not None:
+                    raise RuntimeError("Please specify the FEM space of the Lagrange multipliers when using domain")
+            
+                sp = self.get_parent_domain().get_space_of_field(k)
+                if sp == "":
+                    ppdom=self.get_parent_domain().get_parent_domain()
+                    if ppdom is not None:
+                        sp = ppdom.get_space_of_field(k)
+                        if sp == "":
+                            # Test if it is a vector field
+                            # print(dir(self.get_parent_domain().get_equations()))
+                            # expanded = self.expand_additional_field(k, True, 0, self.get_current_code_generator(),False,False)
+                            # peqs = self.get_parent_domain().get_equations()
+                            raise RuntimeError("Cannot use EnforcedBC on an unknown field " + k)
+                if sp not in allowed_spaces:
+                    if sp == "Pos":
+                        sp = self.get_current_code_generator()._coordinate_space
+                    else:
+                        raise RuntimeError("EnforcedBC only works the following bulk spaces:"+", ".join(allowed_spaces)+". problem for field " + k + " on space " + sp)
+            self.define_scalar_field(self.get_lagrange_multiplier_name(k), cast(FiniteElementSpaceEnum, sp), scale=1 / test_scale_factor(k,domain=self.domain),testscale=1 / scale_factor(k,domain=self.domain))
         
         aziinfo=self.get_azimuthal_r0_info()
         for k in self.constraints.keys():
@@ -187,7 +195,7 @@ class EnforcedBC(InterfaceEquations):
         for k, v in self.constraints.items():
             lagr_name=self.get_lagrange_multiplier_name(k)
             l, ltest = var_and_test(lagr_name)  # get the Lagrange multiplier
-            utest = testfunction(k)
+            utest = testfunction(k,domain=self.domain)
             self.add_residual(weak(v, ltest, lagrangian=self.lagrangian))
             self.add_residual(weak(l, utest,lagrangian=self.lagrangian))  # Lagrange multiplier pair to enforce it
             if self.only_for_stationary_solve:
@@ -353,10 +361,10 @@ class EnforcedDirichlet(EnforcedBC):
         **constraints (Expression): Keyword arguments representing the enforced boundary conditions as pair of variable name to adjust and constraint expression to fulfill in residual form.
     """
     
-    def __init__(self,*, only_for_stationary_solve:bool=False, set_zero_on_normal_mode_eigensolve=False,**constraints:Expression):
+    def __init__(self,*, only_for_stationary_solve:bool=False, set_zero_on_normal_mode_eigensolve=False,domain:Optional[str]=None,space:Optional[FiniteElementSpaceEnum]=None,**constraints:Expression):
         from ..expressions import var        
-        new_kwargs={k:var(k)-v for k,v in constraints.items()}
-        super(EnforcedDirichlet, self).__init__(only_for_stationary_solve=only_for_stationary_solve, set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve,**new_kwargs.copy())
+        new_kwargs={k:var(k,domain=domain)-v for k,v in constraints.items()}
+        super(EnforcedDirichlet, self).__init__(only_for_stationary_solve=only_for_stationary_solve, set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve,**new_kwargs.copy(),domain=domain,space=space)
 
 
 class InactiveDirichletBC(DirichletBC):
