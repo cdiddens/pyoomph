@@ -629,12 +629,13 @@ namespace pyoomph
       int expansion_mode = 0;
    };
 
- 
+   class Problem;
 
    class FiniteElementCode
    {
    protected:
       unsigned residual_index;
+      Problem *problem=NULL;
       std::vector<std::string> residual_names;
       std::vector<double> reference_pos_for_IC_and_DBC = {0, 0, 0, 0, 0, 0, 0}; // 0-2: x,y, 3: t, 4-6: nx,ny,nz
       Equations *equations;
@@ -811,6 +812,8 @@ namespace pyoomph
       virtual void set_temporal_error(std::string f, double factor);
       // This will resolve the code (either itself, or bulk/otherbulk, external), func=field,nondimfield,scale,testfunction
       virtual FiniteElementCode *resolve_corresponding_code(GiNaC::ex func, std::string *fname, FiniteElementFieldTagInfo *taginfo);
+      void set_problem(Problem * p);
+	   Problem * get_problem();
 
       FiniteElementField *get_field_by_name(std::string name);
       FiniteElementField *register_field(std::string name, std::string spacename);

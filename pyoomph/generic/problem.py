@@ -3143,6 +3143,7 @@ class Problem(_pyoomph.Problem):
         if self._suppress_code_writing or get_mpi_rank()>0:
             suppress_writing=True
         mpi_barrier()
+        
         res=self.generate_and_compile_bulk_element_code(elementtype,trunk,suppress_writing,suppress_compilation,bulkmesh,self.is_quiet(),self.extra_compiler_flags)
         #print("REt")
         mpi_barrier()

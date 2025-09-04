@@ -680,6 +680,7 @@ void PyReg_Problem(py::module &m)
 			 {
 	
 	       // Generate Hessian if desired
+		   my_element->set_problem(problem);
 	       my_element->generate_hessian=problem->are_hessian_products_calculated_analytically();
 	       my_element->assemble_hessian_by_symmetry=problem->get_symmetric_hessian_assembly();
 			 if (suppress_writing)

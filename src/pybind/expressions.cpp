@@ -492,6 +492,10 @@ void PyReg_Expressions(py::module &m)
 		.def("denom", &GiNaC::ex::denom, py::return_value_policy::reference)
 		.def("evalm", &GiNaC::ex::evalm, py::return_value_policy::reference)
 		.def("evalf", &GiNaC::ex::evalf, py::return_value_policy::reference)
+		.def("parameters_to_current_values",[](const GiNaC::ex &self)
+			 { 
+			   return 0+pyoomph::expressions::replace_global_params_by_current_values(self);			   
+			 }, py::return_value_policy::reference)
 		.def("is_zero", &GiNaC::ex::is_zero)
 		.def("__float__", [](const GiNaC::ex &self)
 			 { try 

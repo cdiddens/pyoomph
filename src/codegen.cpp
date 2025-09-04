@@ -296,6 +296,21 @@ namespace pyoomph
 				else
 					return inp.map(*this);
 			}
+			else if (GiNaC::is_a<GiNaC::GiNaCGlobalParameterWrapper>(inp))
+			{
+				if (!this->space->get_code()->get_problem()) throw_runtime_error("For some reason, the code generator is not able to access the problem here. Please report this bug to the developers. Happened on a variable named "+varname);
+				// check whether the parameter belongs to the same problem. Otherwise, things get messed up in the parameter indicies
+				auto &p = (GiNaC::ex_to<GiNaC::GiNaCGlobalParameterWrapper>(inp)).get_struct();
+				if (!(p.cme->get_problem() == this->space->get_code()->get_problem()))
+				{
+					std::ostringstream oss; 
+					oss<< "Problem of Parameter: " << p.cme->get_problem() ;
+					oss<< " vs. Current Problem: " << this->space->get_code()->get_problem();
+					oss << " Are the same? " << (p.cme->get_problem() == this->space->get_code()->get_problem() ? " yes " : "no");
+					throw_runtime_error("You added a global parameter '" + p.cme->get_name() + "' defined in one problem to the residuals of a different problem. This is not allowed.... "+oss.str());				
+				}
+				return inp.map(*this);
+			}
 			else
 				return inp.map(*this);
 		}
@@ -5724,6 +5739,9 @@ namespace pyoomph
 		__current_code = NULL;
 		expressions::el_dim = -1;
 	}
+
+	void FiniteElementCode::set_problem(Problem * p) {problem=p;}
+	Problem * FiniteElementCode::get_problem() {return problem;}
 
 	void FiniteElementCode::write_code_geometric_jacobian(std::ostream &os)
 	{

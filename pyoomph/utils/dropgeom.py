@@ -235,6 +235,10 @@ class DropletGeometry:
     def sample_gravity_shape(self,surface_tension:ExpressionOrNum,delta_rho_times_g:ExpressionOrNum,output_dir:str,fixations:Optional[YoungLaplaceFixationsType]=None,update_params:bool=True,N:int=200,output_text:bool=True,compiler:Any=None,ignore_command_line:bool=False,globally_convergent_newton:bool=False)->Tuple[NPFloatArray,ExpressionOrNum]:
         if self.rivulet_instead:
             raise RuntimeError("Not yet implemented")
+        if isinstance((0+surface_tension),(Expression)):
+            surface_tension=(0+surface_tension).parameters_to_current_values() #type:ignore
+        if isinstance((0+delta_rho_times_g),(Expression)):
+            delta_rho_times_g=(0+delta_rho_times_g).parameters_to_current_values()        
         with YoungLaplaceDropletShape(self,sigma=surface_tension,rho_g_ez=delta_rho_times_g,fixations=fixations,N=N) as problem:
             problem.logfile_name=None # Do not change the log file here
             problem.set_output_directory(output_dir)

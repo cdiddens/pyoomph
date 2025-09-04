@@ -176,6 +176,7 @@ namespace pyoomph
     bool is_restricted_to_positive_values() const { return positive;}
     void set_analytic_derivative(bool active);
     bool get_analytic_derivative(); 
+    Problem *get_problem() { return problem; }
   };
   
   class CustomResJacInformation

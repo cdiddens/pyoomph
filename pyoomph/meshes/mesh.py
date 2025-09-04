@@ -975,7 +975,7 @@ class MeshFromTemplateBase(BaseMesh):
         #self._problem.before_compile_equations(self._eqtree._equations)
         eqs.before_finalization(self._codegen)
         self._codegen._finalise()
-        eqs.before_compilation(self._codegen)
+        eqs.before_compilation(self._codegen)        
         self._codegen._code = self._problem.compile_bulk_element_code(
             self._codegen, assert_spatial_mesh(self), self._name)
         self._templatemesh.get_domain(
