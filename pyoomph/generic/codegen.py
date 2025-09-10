@@ -1601,7 +1601,7 @@ class EquationTree:
             v._fill_interinter_connections(iconns)
 
     def _set_parent_to_equations(self,problem:"Problem"):
-        if self._codegen is not None:
+        if self._codegen is not None:            
             self._codegen._set_problem(problem)
             for _,v in self._children.items():
                 if v._codegen is not None:
@@ -1685,7 +1685,7 @@ class EquationTree:
     def _finalize_equations(self,problem:"Problem",second_loop:bool=False):
         if self._equations is not None:
             if self._codegen is None:
-                self._codegen=FiniteElementCodeGenerator()
+                self._codegen=FiniteElementCodeGenerator()                
                 self._codegen.ccode_expression_mode=problem.default_ccode_expression_mode
                 self._codegen._name=self.get_my_path_name()
                 self._codegen.set_latex_printer(problem.latex_printer)
@@ -1701,9 +1701,7 @@ class EquationTree:
                     problem._meshdict[meshname]=mesh
 
         if self._codegen:
-            self._codegen._set_problem(problem) 
-            self._codegen.set_latex_printer(problem.latex_printer)
-            #print("SETTING EQS",self._codegen._name,self._equations)
+            self._codegen._set_problem(problem)             
             self._codegen._set_equations(self._equations)
         for _,v in self._children.items():
             v._finalize_equations(problem,second_loop=second_loop)

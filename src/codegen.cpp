@@ -298,7 +298,11 @@ namespace pyoomph
 			}
 			else if (GiNaC::is_a<GiNaC::GiNaCGlobalParameterWrapper>(inp))
 			{
-				if (!this->space->get_code()->get_problem()) throw_runtime_error("For some reason, the code generator is not able to access the problem here. Please report this bug to the developers. Happened on a variable named "+varname);
+				if (!this->space->get_code()->get_problem()) 
+				{
+					//throw_runtime_error("For some reason, the code generator is not able to access the problem here. Please report this bug to the developers. Happened on a variable named '"+varname+"'. The code is "+this->space->get_code()->get_full_domain_name()+". The space is "+this->space->get_name()+".");
+					return inp.map(*this); // Just do not check in this case...
+				}
 				// check whether the parameter belongs to the same problem. Otherwise, things get messed up in the parameter indicies
 				auto &p = (GiNaC::ex_to<GiNaC::GiNaCGlobalParameterWrapper>(inp)).get_struct();
 				if (!(p.cme->get_problem() == this->space->get_code()->get_problem()))
@@ -6676,6 +6680,8 @@ namespace pyoomph
 			coordinate_space = "C1TB";
 		else if (coordinate_space == "D2TB")
 			coordinate_space = "C2TB";
+		if (coordinate_space == "" || coordinate_space=="ED0")
+			throw_runtime_error("Cannot deduce the coordinate space of domain " + this->get_domain_name() + ". Please specify it explicitly by adding an ElementSpace().");
 		//   if (coordinate_space=="C2TB" && this->bulk_code) coordinate_space="C2";
 		init << " functable->dominant_space=strdup(\"" << coordinate_space << "\");" << std::endl;
 

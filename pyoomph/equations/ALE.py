@@ -584,7 +584,7 @@ class EnforcedInterfacialLaplaceSmoothing(InterfaceEquations):
 
     def with_corners(self, *corners):
         """Easy wrapper to add corners to the interface equations. These will pin the values of the arclength and deactivate the tangential shift at this nodes"""
-        res=self
+        res=Equations()+self
         for c in corners:
             res+=EnforcedInterfacialLaplaceSmoothingCorner()@c
         return res
