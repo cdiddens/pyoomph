@@ -29,6 +29,7 @@ import sys
 import os
 import json
 import argparse
+import tempfile
 
 import subprocess
 from typing import Dict, Tuple, Set, List
@@ -55,6 +56,70 @@ parser.add_argument("check_name", nargs='?',
 parser.add_argument("cbrange_in", nargs='*',
                     help="Input directories to merge the colorbar ranges")
 arglist = parser.parse_args()
+
+
+def test_solver(solver):
+   from . generic.problem import Problem
+   from . equations.harmonic_oscillator import HarmonicOscillator
+   from . equations.generic import InitialCondition
+   from . expressions import var
+   
+   with tempfile.TemporaryDirectory(prefix="pyoomph_test_"+solver+"_") as tempdir:
+      p=Problem()
+      p.quiet()
+      
+      p.set_linear_solver(solver)
+      p.set_output_directory(tempdir)      
+      
+      p+=HarmonicOscillator(omega=1,name="y")@"globals"
+      p+=InitialCondition(y=1-var("time"))@"globals"
+      
+      p.run(endtime=1,timestep=0.1)            
+      ydest=-0.25942176379851877854
+      if abs(float(p.get_ode("globals").get_value("y"))-ydest)>1e-7:
+         raise RuntimeError("Solver did not compute the correct result, got {}, expected {}".format(float(p.get_ode("globals").get_value("y")),ydest))
+      
+def test_compiler(compiler):
+   from . generic.problem import Problem
+   from . equations.harmonic_oscillator import HarmonicOscillator
+   from . equations.generic import InitialCondition
+   from . expressions import var
+   
+   with tempfile.TemporaryDirectory(prefix="pyoomph_test_"+compiler+"_") as tempdir:
+      p=Problem()
+      p.quiet()
+      
+      p.set_c_compiler(compiler)
+      p.set_output_directory(tempdir)      
+      
+      p+=HarmonicOscillator(omega=1,name="y")@"globals"
+      p+=InitialCondition(y=1-var("time"))@"globals"
+      
+      p.initialise()
+
+def test_eigen(eigensolver):
+   from . generic.problem import Problem
+   from . equations.harmonic_oscillator import HarmonicOscillator
+   from . equations.generic import InitialCondition
+   from . expressions import var
+   
+   with tempfile.TemporaryDirectory(prefix="pyoomph_test_"+eigensolver+"_") as tempdir:
+      p=Problem()
+      p.quiet()
+      
+      p.set_eigensolver(eigensolver)
+      p.set_output_directory(tempdir)      
+      
+      p+=HarmonicOscillator(omega=1,damping=0.1,name="y",first_derivative_name="yprime")@"globals"      
+      
+      p.initialise()   
+      p.solve()
+      p.solve_eigenproblem(1)
+      dest_eigenvalue=-0.1+0.99498743710662j
+      calced_eigenvalue=p.get_last_eigenvalues()[0]
+      if abs(calced_eigenvalue-dest_eigenvalue)>1e-7 and abs(calced_eigenvalue-dest_eigenvalue.conjugate())>1e-7:
+         raise RuntimeError("Eigensolver did not compute the correct result, got {}, expected {}".format(calced_eigenvalue,dest_eigenvalue))
+   
 
 if arglist.command == "cbrange":
    process_type = arglist.check_type
@@ -117,7 +182,16 @@ elif arglist.command=="check":
             print("Checking "+check_type+" / "+check)         
             try:
                GenericLinearSystemSolver.factory_solver(check,p)
-               print("","seems to work")
+               print("","loading seems to work")
+               try:
+                  test_solver(check)
+                  print("","running seems to work")
+               except Exception as e:
+                  print("","running does not work: "+str(e.with_traceback(None)))
+                  if check=="pardiso":
+                     print("Hint: Try downgrading MKL Pardiso via")
+                     print("","pip install mkl==2021.4.0")
+                  
             except Exception as e:
                print("","does not work: "+str(e.with_traceback(None)))
 
@@ -139,7 +213,13 @@ elif arglist.command=="check":
             print("Checking "+check_type+" / "+check)         
             try:
                GenericEigenSolver.factory_solver(check,p)
-               print("","seems to work")
+               print("","loading seems to work")
+               try:
+                  test_eigen(check)
+                  print("","running seems to work")
+               except Exception as e:
+                  print("","running does not work: "+str(e.with_traceback(None)))
+                  
             except Exception as e:
                print("","does not work: "+str(e.with_traceback(None)))
 
@@ -155,7 +235,12 @@ elif arglist.command=="check":
             try:
                cc=BaseCCompiler.factory_compiler(to_check)
                if cc.check_avail():
-                  print("","seems to work")
+                  print("","loading seems to work")
+                  try:
+                     test_compiler(to_check)
+                     print("","running seems to work")
+                  except Exception as e:
+                     print("","C compilation seems to work: "+str(e.with_traceback(None)))
                else:
                   raise RuntimeError("Sanity check not working...")
             except Exception as e:

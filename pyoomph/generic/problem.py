@@ -1106,7 +1106,8 @@ class Problem(_pyoomph.Problem):
         if isinstance(solv,str):
             solv=GenericEigenSolver.factory_solver(solv,self)
         self._eigensolver=solv        
-        print("EIGEN SOLVER WAS SET TO: "+self._eigensolver.idname)
+        if not self.is_quiet():
+            print("EIGEN SOLVER WAS SET TO: "+self._eigensolver.idname)
         return self._eigensolver
 
     def set_linear_solver(self,solv:Union[str,GenericLinearSystemSolver]):
@@ -1123,7 +1124,8 @@ class Problem(_pyoomph.Problem):
         if self._num_threads is not None:
             solv.set_num_threads(self._num_threads)
         self._lasolver=solv        
-        print("LINEAR SOLVER WAS SET TO: "+self._lasolver.idname)
+        if not self.is_quiet():
+            print("LINEAR SOLVER WAS SET TO: "+self._lasolver.idname)
         return self._lasolver
 
     def set_num_threads(self,nthread:Optional[int]):
@@ -1779,21 +1781,13 @@ class Problem(_pyoomph.Problem):
         return self.get_ccompiler()
 
 
-    def __iadd__(self,other:Union[MeshTemplate,EquationTree,GenericProblemHooks,"MatplotlibPlotter"]):
-        from pyoomph.output.plotting import BasePlotter
+    def __iadd__(self,other:Union[MeshTemplate,EquationTree,GenericProblemHooks,"MatplotlibPlotter"]):        
         if self._initialised and not isinstance(other,(BasePlotter,GenericProblemHooks)):
             raise RuntimeError("Cannot add anything to a problem once it is initialized!")
         if isinstance(other,MeshTemplate):
             self.add_mesh(other)
         elif isinstance(other,EquationTree):
-            self.additional_equations+=other
-        elif isinstance(other,BasePlotter):
-            if self.plotter is None:
-                self.plotter=other
-            elif isinstance(self.plotter,list):
-                self.plotter.append(other)
-            else:
-                self.plotter=[self.plotter,other]
+            self.additional_equations+=other        
         elif isinstance(other,GenericProblemHooks):
             if other._problem is None:
                 other._problem=self
@@ -1801,11 +1795,20 @@ class Problem(_pyoomph.Problem):
                 raise RuntimeError("Cannot add a problem hook to a different problem")
             self._hooks.append(other)
         else:
-            addinfo=""
-            if isinstance(other,BaseEquations):
-                addinfo="  -- You must restrict equations to a domain using e.g. @'domain'"
+            from pyoomph.output.plotting import BasePlotter
+            if isinstance(other,BasePlotter):
+                if self.plotter is None:
+                    self.plotter=other
+                elif isinstance(self.plotter,list):
+                    self.plotter.append(other)
+                else:
+                    self.plotter=[self.plotter,other]
+            else:
+                addinfo=""
+                if isinstance(other,BaseEquations):
+                    addinfo="  -- You must restrict equations to a domain using e.g. @'domain'"
 
-            raise RuntimeError("cannot add this to a Problem: " +str(other)+addinfo)
+                raise RuntimeError("cannot add this to a Problem: " +str(other)+addinfo)
         return self
 
     def cmdline_desc(self) -> str:

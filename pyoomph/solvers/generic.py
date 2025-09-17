@@ -408,5 +408,6 @@ class GenericEigenSolver:
 		if matM.nnz==0: #type:ignore
 			raise RuntimeError("The mass matrix has no entries. This likely means that you do not have any time derivatives in your system")
 
-		print("Matrices assembled. Invoking eigensolver")
+		if not self.problem.is_quiet():
+			print("Matrices assembled. Invoking eigensolver")
 		return matJ,matM,n,is_complex
