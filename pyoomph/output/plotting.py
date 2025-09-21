@@ -2200,6 +2200,7 @@ class MatplotLibTracers(MatplotLibPart):
     color:Optional[str]=None
     edgecolor="face"
     zindex=5
+    invisible=False
 
 
     def __init__(self,plotter:"MatplotlibPlotter"):
@@ -2239,7 +2240,8 @@ class MatplotLibTracers(MatplotLibPart):
             return
         if pos.shape[1]!=2:
             raise RuntimeError("Can only plot tracers on 2d meshes")
-        plt.gca().scatter(pos[:,0],pos[:,1],marker=self.marker,s=self.size,c=self.color, edgecolor=self.edgecolor,zorder=self.zindex) #type:ignore
+        if not self.invisible:
+            plt.gca().scatter(pos[:,0],pos[:,1],marker=self.marker,s=self.size,c=self.color, edgecolor=self.edgecolor,zorder=self.zindex) #type:ignore
 
 
 
