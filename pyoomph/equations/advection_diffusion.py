@@ -245,18 +245,27 @@ class AdvectionDiffusionInfinity(InterfaceEquations):
          u + R \\dfrac{\\partial u}{\\partial r} = u_{\\infty}
 
       where :math:`u` is the dependent variable, :math:`u_{\\infty}` is the value at infinity, and :math:`R` is the distance from the origin and :math:`r` is the radial coordinate.
+      Hence, works only correctly in axisymmetric or 3D.
+      For 2D, we use:
 
+      .. math::
+         u + R \\dfrac{\\partial u}{\\partial r} / \\log(R / L) = u_{\\infty}
+
+      Due to the logarithmic solution behavior in 2D, the farfield length L must be provided here.
 
       This class requires the parent equations to be of type :ref:`AdvectionDiffusionEquations <AdvectionDiffusionEquations>`, meaning that if :ref:`AdvectionDiffusionEquations <AdvectionDiffusionEquations>` (or subclasses) are not defined in the parent domain, an error will be raised.
 
       Args:
+         origin(ExpressionOrNum): The origin of the system. Default is vector([0]).
+         farfield_length(Optional[ExpressionNumOrNone]): The farfield length (only required for 2D). Default is None.
          **kwargs: name of the field and its value.
    """
    required_parent_type = AdvectionDiffusionEquations
-   def __init__(self,**kwargs:ExpressionOrNum):
+   def __init__(self,origin:ExpressionOrNum=vector([0]), farfield_length:ExpressionNumOrNone=None,**kwargs:ExpressionOrNum):
       super(AdvectionDiffusionInfinity, self).__init__()
       self.inftyvals={**kwargs}
-      self.origin=vector([0])
+      self.origin=origin
+      self.farfield_length=farfield_length
 
    def define_residuals(self):
       n = self.get_normal()
@@ -275,4 +284,12 @@ class AdvectionDiffusionInfinity(InterfaceEquations):
          if diffuD is None:
             raise RuntimeError("Cannot find any diffusion coefficient for field "+fn)
          y, y_test = var_and_test(fn)
-         self.add_residual(weak(diffuD * (y - val) * dot(n, d) / dot(d, d) , y_test) )
+         # 2D-axisymmetric (i.e. 3D) case
+         if isinstance(self.get_coordinate_system(),AxisymmetricCoordinateSystem) or isinstance(self.get_coordinate_system(),AxisymmetryBreakingCoordinateSystem) or (isinstance(self.get_coordinate_system(),CartesianCoordinateSystem) and self.get_nodal_dimension() == 3):
+            self.add_residual(weak(diffuD * (y - val) * dot(n, d) / dot(d, d) , y_test) )
+         # 2D case
+         else:
+            if self.farfield_length is None:
+               raise RuntimeError("For 2D CompositionDiffusionInfinityEquations, farfield_length must be provided")
+            R = square_root(dot(d, d))
+            self.add_residual(weak(diffuD * (y - val) * dot(n, d) / (dot(d, d) * log(R / self.farfield_length)) , y_test) )

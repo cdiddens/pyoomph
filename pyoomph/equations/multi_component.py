@@ -752,25 +752,35 @@ class CompositionDiffusionInfinityEquations(InterfaceEquations):
     """
         Represents the condition at infinity for the advection-diffusion equation, using the assumption that in the far field the mass fraction behaves as: 
         
-            w(r->infty) = w_infty + R/r(w_R-w_infty) for some large R and r>>R
+        .. math::
+            w + R \\dfrac{\\partial w}{\\partial r} = w_{\\infty}
     
-        Hence, works only correctly in axisymmetric or 3d.
+        Hence, works only correctly in axisymmetric or 3D.
+        For 2D, we use:
+
+            .. math::
+                w + \\dfrac{R}{\\log(R/L)} \\dfrac{\\partial w}{\\partial r} = w_{\\infty}
+
+        Due to the logarithmic solution behavior in 2D, the farfield length L must be provided here.
 
         We furthermore only assume diagonal diffusion here
         
         Additionally, advection in normal (radial) direction should be considered i.e. using:
 
-            u_r(r->infty)=u_R*(R/r)**2
+            .. math::
+                u_r(r \\to \\infty) = u_R \\left(\\frac{R}{r}\\right)^2
         
         Args:
             origin(ExpressionOrNum): The origin of the system. Default is vector([0]).
+            farfield_length(Optional[ExpressionNumOrNone]): The farfield length (only required for 2D). Default is None.
             **infinity_values(ExpressionOrNum): The values at infinity. The keys are the names of the components and the values are the mass fractions.
     """
-        
-    def __init__(self, origin:ExpressionOrNum=vector([0]), **infinity_values:ExpressionOrNum):
+
+    def __init__(self, origin:ExpressionOrNum=vector([0]), farfield_length:ExpressionNumOrNone=None, **infinity_values:ExpressionOrNum):
         super(CompositionDiffusionInfinityEquations, self).__init__()
         self.inftyvals = {**infinity_values}
         self.origin = origin
+        self.farfield_length = farfield_length
 
     def define_residuals(self):
         n = self.get_normal()
@@ -795,7 +805,15 @@ class CompositionDiffusionInfinityEquations(InterfaceEquations):
             D = parent.get_diffusion_coefficient(fn)
             assert D is not None
             y, y_test = var_and_test("massfrac_" + fn)
-            self.add_residual(weak(rho * D * (y - val) * dot(n, d) / dot(d, d), y_test))
+            R = square_root(dot(d, d))
+            # 2D-axisymmetric (i.e. 3D) case
+            if isinstance(self.get_coordinate_system(),AxisymmetricCoordinateSystem) or isinstance(self.get_coordinate_system(),AxisymmetryBreakingCoordinateSystem) or (isinstance(self.get_coordinate_system(),CartesianCoordinateSystem) and self.get_nodal_dimension() == 3):
+                self.add_residual(weak(rho * D * (y - val) * dot(n, d) / dot(d, d), y_test))
+            # 2D case
+            else:
+                if self.farfield_length is None:
+                    raise RuntimeError("For 2D CompositionDiffusionInfinityEquations, farfield_length must be provided")
+                self.add_residual(weak(- rho * D * (y - val) * dot(n, d) / (dot(d, d) * log(R/self.farfield_length)), y_test))
 
 
 class TemperatureConductionEquation(Equations):
