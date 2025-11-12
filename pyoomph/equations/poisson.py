@@ -111,9 +111,17 @@ class PoissonFarFieldMonopoleCondition(InterfaceEquations):
     """
     Represents a far-field condition for the Poisson equation in the form:
 
-        u + R * du/dr = far_value
+    .. math::
+        u + R \dfrac{\partial u}{\partial r} = u_{\infty}
 
     where u is the dependent variable, far_value is the value at infinity, and R is the distance from the origin and r is the radial coordinate.
+    Hence, works only correctly in axisymmetric or 3D.
+    For 2D, we use:
+
+    .. math::
+        u + R \dfrac{\partial u}{\partial r} / \log(R / L) = u_{\infty}
+
+    Due to the logarithmic solution behavior in 2D, the farfield length L must be provided here.
 
     This class requires the parent equations to be of type PoissonEquation, meaning that if PoissonEquation (or subclasses) are not defined in the parent domain, an error will be raised.
             
@@ -122,16 +130,17 @@ class PoissonFarFieldMonopoleCondition(InterfaceEquations):
         name(str): The name of the dependent variable. Default is None, meaning that the name of the parent Poisson equation is used.
         coefficient(ExpressionOrNum): The coefficient. Default is None, meaning that the coefficient of the parent Poisson equation is used.
         origin(ExpressionOrNum): The origin of the far-field condition. Default is (0,0,0).
+        farfield_length(ExpressionNumOrNone): The far-field length scale L used in the 2D case. Default is None, meaning that no length scale is used and the condition is applied as in 3D.
     """
     required_parent_type = PoissonEquation
 
-    def __init__(self,far_value:ExpressionOrNum=0,name:Optional[str]=None,coefficient:ExpressionNumOrNone=None,origin:ExpressionOrNum=vector([0])):
+    def __init__(self,far_value:ExpressionOrNum=0,name:Optional[str]=None,coefficient:ExpressionNumOrNone=None,origin:ExpressionOrNum=vector([0]),farfield_length:ExpressionNumOrNone=None):
         super(PoissonFarFieldMonopoleCondition, self).__init__()
         self.far_value=far_value
         self.name=name
         self.coefficient=coefficient
         self.origin=origin
-
+        self.farfield_length=farfield_length
 
     def define_residuals(self):
         n=self.get_normal()
@@ -146,8 +155,16 @@ class PoissonFarFieldMonopoleCondition(InterfaceEquations):
             assert isinstance(parent,PoissonEquation)
             coefficient = parent.coefficient
         c,c_test=var_and_test(name)
-        self.add_residual(weak(coefficient * (c - self.far_value) * dot(n,d)/dot(d,d),c_test))
-
+        R = square_root(dot(d, d))
+        if isinstance(self.get_coordinate_system(),AxisymmetricCoordinateSystem) or isinstance(self.get_coordinate_system(),AxisymmetryBreakingCoordinateSystem) or (isinstance(self.get_coordinate_system(),CartesianCoordinateSystem) and self.get_nodal_dimension() == 3):
+            # 2D-axisymmetric (i.e. 3D) case
+            coordsys_dim_factor = 1
+        else:
+            # 2D case
+            if self.farfield_length is None:
+                raise RuntimeError("For 2D far-field monopole conditions, a farfield_length must be provided")
+            coordsys_dim_factor = -1/log(R/self.farfield_length)
+        self.add_residual(weak(coefficient * coordsys_dim_factor * (c - self.far_value) * dot(n,d)/dot(d,d),c_test))
 
 
 class DiffusionEquation(PoissonEquation):
