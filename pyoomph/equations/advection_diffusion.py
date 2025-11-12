@@ -284,12 +284,13 @@ class AdvectionDiffusionInfinity(InterfaceEquations):
          if diffuD is None:
             raise RuntimeError("Cannot find any diffusion coefficient for field "+fn)
          y, y_test = var_and_test(fn)
-         # 2D-axisymmetric (i.e. 3D) case
+         R = square_root(dot(d, d))
          if isinstance(self.get_coordinate_system(),AxisymmetricCoordinateSystem) or isinstance(self.get_coordinate_system(),AxisymmetryBreakingCoordinateSystem) or (isinstance(self.get_coordinate_system(),CartesianCoordinateSystem) and self.get_nodal_dimension() == 3):
-            self.add_residual(weak(diffuD * (y - val) * dot(n, d) / dot(d, d) , y_test) )
-         # 2D case
+            # 2D-axisymmetric (i.e. 3D) case
+            coordsys_dim_factor = 1
          else:
+            # 2D case
             if self.farfield_length is None:
                raise RuntimeError("For 2D CompositionDiffusionInfinityEquations, farfield_length must be provided")
-            R = square_root(dot(d, d))
-            self.add_residual(weak(diffuD * (y - val) * dot(n, d) / (dot(d, d) * log(R / self.farfield_length)) , y_test) )
+            coordsys_dim_factor = -1/log(R/self.farfield_length)
+         self.add_residual(weak(diffuD * coordsys_dim_factor * (y - val) * dot(n, d) / (dot(d, d)) , y_test) )

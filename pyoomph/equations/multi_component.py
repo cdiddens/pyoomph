@@ -806,14 +806,15 @@ class CompositionDiffusionInfinityEquations(InterfaceEquations):
             assert D is not None
             y, y_test = var_and_test("massfrac_" + fn)
             R = square_root(dot(d, d))
-            # 2D-axisymmetric (i.e. 3D) case
             if isinstance(self.get_coordinate_system(),AxisymmetricCoordinateSystem) or isinstance(self.get_coordinate_system(),AxisymmetryBreakingCoordinateSystem) or (isinstance(self.get_coordinate_system(),CartesianCoordinateSystem) and self.get_nodal_dimension() == 3):
-                self.add_residual(weak(rho * D * (y - val) * dot(n, d) / dot(d, d), y_test))
-            # 2D case
+                # 2D-axisymmetric (i.e. 3D) case
+                coordsys_dim_factor = 1
             else:
+                # 2D case
                 if self.farfield_length is None:
                     raise RuntimeError("For 2D CompositionDiffusionInfinityEquations, farfield_length must be provided")
-                self.add_residual(weak(- rho * D * (y - val) * dot(n, d) / (dot(d, d) * log(R/self.farfield_length)), y_test))
+                coordsys_dim_factor = - 1 / log(R / self.farfield_length)
+            self.add_residual(weak(rho * D * coordsys_dim_factor (y - val) * dot(n, d) / dot(d, d), y_test))
 
 
 class TemperatureConductionEquation(Equations):

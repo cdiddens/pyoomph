@@ -156,14 +156,15 @@ class PoissonFarFieldMonopoleCondition(InterfaceEquations):
             coefficient = parent.coefficient
         c,c_test=var_and_test(name)
         R = square_root(dot(d, d))
-        # 2D-axisymmetric (i.e. 3D) case
         if isinstance(self.get_coordinate_system(),AxisymmetricCoordinateSystem) or isinstance(self.get_coordinate_system(),AxisymmetryBreakingCoordinateSystem) or (isinstance(self.get_coordinate_system(),CartesianCoordinateSystem) and self.get_nodal_dimension() == 3):
-            self.add_residual(weak(coefficient * (c - self.far_value) * dot(n,d)/dot(d,d),c_test))
-        # 2D case
+            # 2D-axisymmetric (i.e. 3D) case
+            coordsys_dim_factor = 1
         else:
+            # 2D case
             if self.farfield_length is None:
                 raise RuntimeError("For 2D far-field monopole conditions, a farfield_length must be provided")
-            self.add_residual(weak(coefficient * (c - self.far_value) * dot(n,d)/(dot(d,d)*log(R/self.farfield_length)),c_test))
+            coordsys_dim_factor = -1/log(R/self.farfield_length)
+        self.add_residual(weak(coefficient * coordsys_dim_factor * (c - self.far_value) * dot(n,d)/dot(d,d),c_test))
 
 
 class DiffusionEquation(PoissonEquation):
