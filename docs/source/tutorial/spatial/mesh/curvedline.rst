@@ -119,7 +119,7 @@ When defining the normalized tangent to the helix as :math:`\vec{t}=\partial_\xi
 
 .. math:: \nabla_S \phi=\left(\frac{1}{\|\partial_\xi\vec{R}\|}\frac{\partial \phi}{\partial \xi}\right)\cdot \vec{t}\,.
 
-Upon reparameterization with the arc length :math:`s=\xi/\|\partial_\xi\vec{R}\|`, we arrive at
+Upon reparameterization with the arc length :math:`s=\xi\|\partial_\xi\vec{R}\|`, we arrive at
 
 .. math:: \text{grad(phi)}=\nabla_S \phi=\frac{\partial \phi}{\partial s}\cdot \vec{t}\,,
 
