@@ -228,7 +228,7 @@ class _TextOutput(_BaseNumpyOutput):
             for i,ls in enumerate(lsegs): 
                 sortdata.append(data[ls]) 
                 if i+1<len(lsegs): 
-                    sortdata.append([[numpy.NAN]*len(data[0,:])])  #type:ignore
+                    sortdata.append([[numpy.nan]*len(data[0,:])])  #type:ignore
             data:NPFloatArray=numpy.vstack(sortdata) #type:ignore
 
 
@@ -415,7 +415,7 @@ class _OutputTxtAlongLine(_BaseOutputter):
                 inter=inter(self.coords[:,0],self.coords[:,1]) #type:ignore
                 if self.NaN_outside:                    
                     if f not in {"coordinate_x","coordinate_y","coordinate_z"}:                        
-                        inter[inter.mask] = numpy.NaN
+                        inter[inter.mask] = numpy.nan
                     elif f=="coordinate_x":
                         inter=self.coords[:,0]
                     elif f=="coordinate_y":
@@ -573,7 +573,7 @@ class _GridFileOutput(_BaseOutputter):
                 inter=inter(self.coords_x,self.coords_y) #type:ignore
                 if True:                    
                     if f not in {"coordinate_x","coordinate_y","coordinate_z"}:                        
-                        inter[inter.mask] = numpy.NaN
+                        inter[inter.mask] = numpy.nan
                     elif f=="coordinate_x":
                         inter=self.coords_x
                     elif f=="coordinate_y":
