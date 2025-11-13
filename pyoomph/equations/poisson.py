@@ -114,14 +114,17 @@ class PoissonFarFieldMonopoleCondition(InterfaceEquations):
     .. math::
         u + R \dfrac{\partial u}{\partial r} = u_{\infty}
 
-    where u is the dependent variable, far_value is the value at infinity, and R is the distance from the origin and r is the radial coordinate.
-    Hence, works only correctly in axisymmetric or 3D.
+    where u is the dependent variable, far_value is the value at infinity, and R is the distance from the origin and r is the radial coordinate.    
+    Hence, works only correctly in radialsymmetry, axisymmetric or 3D Cartesian. Also, it is only valid if the source vanishes sufficiently fast towards the far field.
     For 2D, we use:
 
     .. math::
         u + R \dfrac{\partial u}{\partial r} / \log(R / L) = u_{\infty}
+            
 
     Due to the logarithmic solution behavior in 2D, the farfield length L must be provided here.
+    
+    
 
     This class requires the parent equations to be of type PoissonEquation, meaning that if PoissonEquation (or subclasses) are not defined in the parent domain, an error will be raised.
             
@@ -156,15 +159,20 @@ class PoissonFarFieldMonopoleCondition(InterfaceEquations):
             coefficient = parent.coefficient
         c,c_test=var_and_test(name)
         R = square_root(dot(d, d))
-        if isinstance(self.get_coordinate_system(),AxisymmetricCoordinateSystem) or isinstance(self.get_coordinate_system(),AxisymmetryBreakingCoordinateSystem) or (isinstance(self.get_coordinate_system(),CartesianCoordinateSystem) and self.get_nodal_dimension() == 3):
-            # 2D-axisymmetric (i.e. 3D) case
-            coordsys_dim_factor = 1
-        else:
-            # 2D case
+        real_dim=self.get_coordinate_system().get_actual_dimension(self.get_nodal_dimension())
+        if real_dim==1:
             if self.farfield_length is None:
-                raise RuntimeError("For 2D far-field monopole conditions, a farfield_length must be provided")
-            coordsys_dim_factor = -1/log(R/self.farfield_length)
-        self.add_residual(weak(coefficient * coordsys_dim_factor * (c - self.far_value) * dot(n,d)/dot(d,d),c_test))
+                raise RuntimeError("For 1D far-field monopole conditions, a farfield_length must be provided")
+            dist_to_ff=dot(n,d)-self.farfield_length
+            self.add_residual(weak(-coefficient * (c - self.far_value) /dist_to_ff,c_test))
+        else:
+            if real_dim==3:
+                coordsys_dim_factor = 1
+            elif real_dim==2:
+                if self.farfield_length is None:
+                    raise RuntimeError("For 2D far-field monopole conditions, a farfield_length must be provided")
+                coordsys_dim_factor = -1/log(R/self.farfield_length)        
+            self.add_residual(weak(coefficient * coordsys_dim_factor * (c - self.far_value) * dot(n,d)/dot(d,d),c_test))
 
 
 class DiffusionEquation(PoissonEquation):

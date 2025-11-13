@@ -285,12 +285,19 @@ class AdvectionDiffusionInfinity(InterfaceEquations):
             raise RuntimeError("Cannot find any diffusion coefficient for field "+fn)
          y, y_test = var_and_test(fn)
          R = square_root(dot(d, d))
-         if isinstance(self.get_coordinate_system(),AxisymmetricCoordinateSystem) or isinstance(self.get_coordinate_system(),AxisymmetryBreakingCoordinateSystem) or (isinstance(self.get_coordinate_system(),CartesianCoordinateSystem) and self.get_nodal_dimension() == 3):
-            # 2D-axisymmetric (i.e. 3D) case
-            coordsys_dim_factor = 1
-         else:
-            # 2D case
+         
+         real_dim=self.get_coordinate_system().get_actual_dimension(self.get_nodal_dimension())
+         if real_dim==1:
             if self.farfield_length is None:
-               raise RuntimeError("For 2D CompositionDiffusionInfinityEquations, farfield_length must be provided")
-            coordsys_dim_factor = -1/log(R/self.farfield_length)
-         self.add_residual(weak(diffuD * coordsys_dim_factor * (y - val) * dot(n, d) / (dot(d, d)) , y_test) )
+                raise RuntimeError("For 1D far-field monopole conditions, a farfield_length must be provided")
+            dist_to_ff=dot(n,d)-self.farfield_length
+            self.add_residual(weak(-diffuD * (y - val) /dist_to_ff,y_test))
+         else:
+            if real_dim==3:
+                coordsys_dim_factor = 1
+            elif real_dim==2:
+                if self.farfield_length is None:
+                    raise RuntimeError("For 2D far-field monopole conditions, a farfield_length must be provided")
+                coordsys_dim_factor = -1/log(R/self.farfield_length)        
+            self.add_residual(weak(diffuD * coordsys_dim_factor * (y - val) * dot(n, d) / (dot(d, d)) , y_test) )
+            
