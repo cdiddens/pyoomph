@@ -3,9 +3,9 @@ stubfile="_pyoomph-stubs/_pyoomph.pyi"
 with open(stubfile, 'r') as file :
 	filedata = file.read()
     
-def patch_stub(sea:str,repl:str):
+def patch_stub(sea:str,repl:str,ignore_if_not_found:bool=False):
 	global filedata
-	if filedata.count(sea)==0:
+	if (not ignore_if_not_found) and filedata.count(sea)==0:
 		raise RuntimeError("Cannot replace in stub file (not found): "+sea)
 	filedata = filedata.replace(sea, repl)
 	pass
@@ -43,10 +43,10 @@ patch_stub("_set_problem(self, arg0: Problem, arg1: DynamicBulkElementInstance) 
 
 
 patch_stub("import numpy","import numpy; import numpy.typing")
-patch_stub("numpy.ndarray[numpy.float64]","numpy.typing.NDArray[numpy.float64]")
-patch_stub("numpy.ndarray[numpy.int32]","numpy.typing.NDArray[numpy.int32]")
-patch_stub("numpy.ndarray[numpy.uint64]","numpy.typing.NDArray[numpy.uint64]")
-patch_stub("numpy.ndarray[numpy.uint32]","numpy.typing.NDArray[numpy.uint32]")
+patch_stub("numpy.ndarray[numpy.float64]","numpy.typing.NDArray[numpy.float64]",True)
+patch_stub("numpy.ndarray[numpy.int32]","numpy.typing.NDArray[numpy.int32]",True)
+patch_stub("numpy.ndarray[numpy.uint64]","numpy.typing.NDArray[numpy.uint64]",True)
+patch_stub("numpy.ndarray[numpy.uint32]","numpy.typing.NDArray[numpy.uint32]",True)
 
 # Write the file out again
 with open(stubfile, 'w') as file:
