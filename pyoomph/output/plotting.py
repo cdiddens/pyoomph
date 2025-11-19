@@ -1228,7 +1228,8 @@ class MatplotlibInterfaceArrows(MatplotLibPartWithMeshData):
             nx/=nxl
             ny/=nxl*asp
             
-        vectorfield=len(data.shape)==2 and data.shape[0]==2
+        
+        vectorfield=len(data.shape)==2 and data.shape[0]>=2
         
         if not vectorfield:
             dx=data*nx
