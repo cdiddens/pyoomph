@@ -1227,13 +1227,23 @@ class MatplotlibInterfaceArrows(MatplotLibPartWithMeshData):
             nxl=numpy.sqrt(nx*nx+ny*ny*(asp*asp))
             nx/=nxl
             ny/=nxl*asp
+            
+        vectorfield=len(data.shape)==2 and data.shape[0]==2
         
-        dx=data*nx
-        dy=data*ny
-        if not self.transform is None:
-            coordinates, data = self.transform.apply(coordinates, numpy.array([dx,dy])) #type:ignore
+        if not vectorfield:
+            dx=data*nx
+            dy=data*ny
+            if not self.transform is None:
+                coordinates, data = self.transform.apply(coordinates, numpy.array([dx,dy])) #type:ignore
+                dx=data[0,:]
+                dy = data[1, :]
+        else:
             dx=data[0,:]
             dy = data[1, :]
+            if not self.transform is None:
+                coordinates, data = self.transform.apply(coordinates, data) #type:ignore
+                dx=data[0,:]
+                dy = data[1, :]
         lines, _ = self.mshcache.get_interface_line_segments()
 
         self._arrows=[]
@@ -1244,7 +1254,11 @@ class MatplotlibInterfaceArrows(MatplotLibPartWithMeshData):
             y:List[float] = [coordinates[1, lentry[i]] for i in range(len(lentry))]
             dxx:List[float]=[dx[lentry[i]]*asp for i in range(len(lentry))]
             dyy:List[float] = [dy[lentry[i]] for i in range(len(lentry))]
-            datasegs:List[float]=[self._data[lentry[i]] for i in range(len(lentry))]
+            if not vectorfield:
+                datasegs:List[float]=[self._data[lentry[i]] for i in range(len(lentry))]
+            else:
+                datasegs:List[float]=[self._data[0,lentry[i]]*nx[lentry[i]]+self._data[1,lentry[i]]*ny[lentry[i]] for i in range(len(lentry))]                
+                
 
             if self.arrowdensity is not None:
                 spacing:float=0.0
