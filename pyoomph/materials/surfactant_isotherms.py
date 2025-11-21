@@ -61,7 +61,7 @@ class SurfactantIsotherm:
             elif k_ads is None and k_des is not None:
                 k_ads=K*k_des
             elif k_des is None and k_ads is not None :
-                k_des=K/k_ads
+                k_des=k_ads/K
         self.k_ads:ExpressionOrNum=cast(ExpressionOrNum,k_ads) # Rates
         self.k_des:ExpressionOrNum=cast(ExpressionOrNum,k_des)
 

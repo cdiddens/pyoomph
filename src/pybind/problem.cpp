@@ -356,6 +356,7 @@ void PyReg_Problem(py::module &m)
 
 	py::class_<pyoomph::MyHopfHandler, oomph::AssemblyHandler>(m, "HopfHandler")
 		.def("get_nicely_rotated_eigenfunction", &pyoomph::MyHopfHandler::get_nicely_rotated_eigenfunction)
+		.def("set_eigenweight", &pyoomph::MyHopfHandler::set_eigenweight)	
 		.def("debug_analytical_filling", [](pyoomph::MyHopfHandler *self, oomph::GeneralisedElement *elem, double eps)		
 			 { self->debug_analytical_filling(elem, eps); });
 

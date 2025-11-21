@@ -873,6 +873,7 @@ class HopfTracker(CustomBifurcationTracker):
         if require_jacobian:
             assert dparameter is None, "dparameter not supported for require_jacobian=True"
             # If we need the augmented Jacobian, we also need dR/dP and dJ_ik/dU_j V_k
+            print("Currently at Hopf tracking with omega=",omega)
             R,J,M,dRdP,dJdP,dMdP,HVr,HVi,dMdUVr,dMdUVi=assembly.R().J().M().dRdp(self.parameter).dJdp(self.parameter).dMdp(self.parameter).dJdU(Vr,transposed=self.left_eigenvector).dJdU(Vi,transposed=self.left_eigenvector).dMdU(Vr,transposed=self.left_eigenvector).dMdU(Vi,transposed=self.left_eigenvector).assemble() # Assemble all quantities, will be given in the order of the requests
         else:
             if dparameter is not None:
