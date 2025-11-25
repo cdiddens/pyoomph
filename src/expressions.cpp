@@ -405,6 +405,7 @@ namespace pyoomph
 						if (bu.second == cl)
 						{
 							units *= cl;
+							units=GiNaC::expand(units);
 							found = true;
 							break;
 						}
@@ -437,6 +438,7 @@ namespace pyoomph
 					if (pyoomph_verbose)
 						std::cout << "  APPLY POWER " << cl.op(1) << " on " << sunits << "  ,  " << sfactor << " , " << srest << std::endl;
 					units *= GiNaC::power(sunits, cl.op(1));
+					units=GiNaC::expand(units);
 					factor *= GiNaC::power(sfactor, cl.op(1));
 					rest *= GiNaC::power(srest, cl.op(1));
 				}
@@ -457,6 +459,7 @@ namespace pyoomph
 							std::cerr << "Problem collecting units in " << cl.op(i) << std::endl;
 							return false;
 						}
+						sunits=GiNaC::expand(sunits);
 						if (i == 0)
 							common_unit = sunits;
 						else
@@ -473,6 +476,7 @@ namespace pyoomph
 						factors[i] = sfactor;
 					}
 					units *= common_unit;
+					units=GiNaC::expand(units);
 					factor *= dominant_factor;
 					GiNaC::ex normalized_rest = 0;
 					for (unsigned int i = 0; i < cl.nops(); i++)
@@ -492,6 +496,7 @@ namespace pyoomph
 						return false;
 					}
 					units *= sunits;
+					units=GiNaC::expand(units);
 					factor *= sfactor;
 					rest *= subexpression(srest);
 				}
@@ -520,6 +525,7 @@ namespace pyoomph
 								<< "numerical part: " << sfactor << "unit part:" << sunit << "rest part:" << srest << std::endl;
 							throw_runtime_error("Cannot extract the unit from the argument:" + oss.str());
 						}
+						sunit=GiNaC::expand(sunit);
 						if (sfactor.is_zero())
 						{
 						}
@@ -561,6 +567,7 @@ namespace pyoomph
 					else
 					{
 						units *= common_unit;
+						units=GiNaC::expand(units);
 						factor *= dominant_factor;
 						if (is_ex_the_function(cl, expressions::maximum))
 						{
@@ -615,6 +622,7 @@ namespace pyoomph
 										  << cl << std::endl;
 								return false;
 							}
+							sunits=GiNaC::expand(sunits);
 							newargs[i] = sfactor * sunits * srest;
 							if (pyoomph_verbose)
 								std::cout << "		NEW ARG " << newargs[i] << std::endl;
@@ -650,6 +658,7 @@ namespace pyoomph
 							if (bu.second == cl.op(i))
 							{
 								units *= cl.op(i);
+								units=GiNaC::expand(units);
 								found = true;
 								break;
 							}
@@ -668,6 +677,7 @@ namespace pyoomph
 							std::cerr << "Problem collecting units in basis " << cl.op(i).op(0) << std::endl;
 							return false;
 						}
+						sunits=GiNaC::expand(sunits);
 						GiNaC::ex erest = 1;
 						GiNaC::ex efactor = 1;
 						GiNaC::ex eunits = 1;
@@ -676,11 +686,13 @@ namespace pyoomph
 							std::cerr << "Problem collecting units in exponent " << cl.op(i).op(1) << std::endl;
 							return false;
 						}						
+						eunits=GiNaC::expand(eunits);
 						if (pyoomph_verbose)
 							std::cout << "  APPLY POWER " << cl.op(i).op(1) << " on " << sunits << "  ,  " << sfactor << " , " << srest << std::endl;
 						//std::cout << "EXPONENT FACTOR UNIT AND REST " << efactor << "  " << eunits << "  " << erest << std::endl;
 						
 						units *= GiNaC::power(sunits, cl.op(i).op(1));
+						units=GiNaC::expand(units);
 						factor *= GiNaC::power(sfactor, cl.op(i).op(1));
 						rest *= GiNaC::power(srest, cl.op(i).op(1));
 						if (pyoomph_verbose)
@@ -690,13 +702,14 @@ namespace pyoomph
 					{
 						GiNaC::ex srest = 1;
 						GiNaC::ex sfactor = 1;
-						GiNaC::ex sunits = 1;
+						GiNaC::ex sunits = 1;						
 						if (!collect_base_units(cl.op(i), sfactor, sunits, srest))
 						{
 							std::cerr << "Problem collecting units in " << cl.op(i) << std::endl;
 							return false;
 						}
 						units *= sunits;
+						units=GiNaC::expand(units);
 						factor *= sfactor;
 						rest *= srest;
 					}
