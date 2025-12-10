@@ -426,6 +426,7 @@ void PyReg_Problem(py::module &m)
 			{ return p.max_residuals(); },
 			[](pyoomph::Problem &p, const double &r)
 			{ p.max_residuals() = r; })
+		.def_property("minimum_time_step", [](pyoomph::Problem &p) {return p.minimum_dt();}, [](pyoomph::Problem &p, double v) {p.minimum_dt()=v;})
 		.def("_set_globally_convergent_newton_method", [](pyoomph::Problem &p, bool r)
 			 {if (r) p.enable_globally_convergent_newton_method(); else p.disable_globally_convergent_newton_method(); })
 		.def_property(

@@ -34,7 +34,7 @@ import os
 from pathlib import Path
 import meshio #type:ignore
 
-from ..meshes.meshdatacache import MeshDataEigenModes,MeshDataCacheOperatorBase
+from ..meshes.meshdatacache import MeshDataEigenModes,MeshDataCacheOperatorBase,MeshDataCombineWithEigenfunction,MeshDataCartesianExtrusion,MeshDataRotationalExtrusion
 
 # Hack, because the meshio version does not have a meshio._mesh.topological_dimension["wedge15"] set!
 class Wedge15Cellblock(meshio.CellBlock):
@@ -510,7 +510,7 @@ class _MeshFileOutput(_BaseNumpyOutput):
 
 
 
-class MeshFileOutput(GenericOutput):
+class MeshFileOutput(GenericOutput):    
 
 	"""
     A class for writing the solution at the current time step to a mesh file. Will be invoked whenever Problem.output is called.
@@ -529,6 +529,11 @@ class MeshFileOutput(GenericOutput):
         discontinuous (bool): Flag indicating whether discontinuous output should be written. In that case, each node can be written multiple times, potential with different values. Default is False.
         add_eigen_to_mesh_positions (bool): When outputting an eigenvector on a moving mesh, do we want to add the original mesh coordinates to the eigensolution or not. Default is True.
     """
+    
+	OpCombineWithEigenfunction=MeshDataCombineWithEigenfunction
+	OpCartesianExtrusion=MeshDataCartesianExtrusion
+	OpRotationalExtrusion=MeshDataRotationalExtrusion
+
 	def __init__(self,filetrunk:Optional[str]=None,tesselate_tri:bool=False,file_ext:str="vtu",eigenvector:Optional[Union[int,List[int]]]=None,eigenmode:"MeshDataEigenModes"="abs",nondimensional:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True,history_index:int=0,operator:Optional["MeshDataCacheOperatorBase"]=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True):
 		super(MeshFileOutput, self).__init__()
 		self.filetrunk=filetrunk

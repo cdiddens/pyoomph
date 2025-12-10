@@ -1149,8 +1149,8 @@ def evaluate_in_past(expr:ExpressionOrNum,timestep_offset:Union[int,float]=1)->E
 	if round(timestep_offset)==timestep_offset:
 		if timestep_offset==0:
 			return expr
-		else:
-			return _pyoomph.GiNaC_eval_in_past(expr,_pyoomph.Expression(int(timestep_offset)),_pyoomph.Expression(0))
+		else:			
+			return 0+_pyoomph.GiNaC_eval_in_past(expr,_pyoomph.Expression(int(timestep_offset)),_pyoomph.Expression(0))
 	elif isinstance(timestep_offset,float):
 		tlow:int=math.floor(timestep_offset)
 		thigh:int=math.ceil(timestep_offset)
