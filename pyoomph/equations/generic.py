@@ -647,6 +647,44 @@ class LocalExpressions(Equations):
             
 
 
+class BackupHistoryExpressions(Equations):
+    def __init__(self,*,space:FiniteElementSpaceEnum="C2",local_expression_format="_history_expr_{name}",**exprs:Expression):
+        super().__init__()
+        self.history_fields=exprs
+        self.space=space
+        self.update=True
+        self.local_expression_format=local_expression_format
+        
+    def define_fields(self):
+        for name,expr in self.history_fields.items():
+            self.define_scalar_field(name,space=self.space)
+            
+    def define_residuals(self):
+        for name,expr in self.history_fields.items():
+            self.set_Dirichlet_condition(name,True)
+            self.add_local_function(self.local_expression_format.format(name=name),expr)
+            
+    def update_history(self,mesh:"AnySpatialMesh"):
+        exprs=mesh.list_local_expressions()
+        nodalfields=mesh.get_nodal_field_indices()
+        for name,expr in self.history_fields.items():            
+            idx=exprs.index(self.local_expression_format.format(name=name))
+            vals=mesh.evaluate_local_expression_at_nodes(idx,True,False )            
+            if name not in nodalfields:
+                raise Exception(f"Field {name} not found in nodal fields. This must be improved for e.g. interface fields or discontinuous fields (DL/D0).")
+            nindx=nodalfields[name]            
+            for i,n in enumerate(mesh.nodes()):
+                n.set_value(nindx,vals[i])
+            
+            
+    def after_newton_solve(self):
+        if not self.update:
+            return
+        mesh=self.get_mesh()
+        self.update_history(mesh)
+        
+        
+
 
 class DependentIntegralObservable:
     def __init__(self,func:Callable[...,ExpressionOrNum],*argnames:str):

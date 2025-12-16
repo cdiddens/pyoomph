@@ -1306,12 +1306,12 @@ class PitchForkHandler(AssemblyHandler):
 class Problem:
     DTSF_max_increase_factor: float
     DTSF_min_decrease_factor: float
+    DTSF_minimum_dt: float
     _improved_pitchfork_tracking_on_unstructured_meshes: bool
     always_take_one_newton_step: bool
     keep_temporal_error_below_tolerance: bool
     max_residuals: float
     minimum_arclength_ds: float
-    minimum_time_step: float
     newton_relaxation_factor: float
     sparse_assembly_method: str
     use_custom_residual_jacobian: bool
