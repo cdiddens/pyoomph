@@ -4875,7 +4875,7 @@ class Problem(_pyoomph.Problem):
 
 
     def run(self, endtime:ExpressionOrNum, timestep:ExpressionNumOrNone=None,*, outstep:Union[ExpressionNumOrNone,bool]=None, numouts:Optional[int]=None, out_initially:Union[bool,None]=None,
-            temporal_error:Union[None,float]=None, outstep_relative_to_zero:bool=True,spatial_adapt:int=0,startstep:ExpressionNumOrNone=None,maxstep:ExpressionNumOrNone=None,newton_solver_tolerance:Union[None,float]=None,do_not_set_IC:bool=False,globally_convergent_newton:bool=False,max_newton_iterations:Union[None,int]=None,starttime:ExpressionNumOrNone=None,suppress_resolve_after_adapt=False,max_newton_to_increase_time_step:Optional[int]=None)->ExpressionOrNum:
+            temporal_error:Union[None,float]=None, outstep_relative_to_zero:bool=True,spatial_adapt:int=0,startstep:ExpressionNumOrNone=None,maxstep:ExpressionNumOrNone=None,newton_solver_tolerance:Union[None,float]=None,do_not_set_IC:Union[bool,Literal["auto"]]="auto",globally_convergent_newton:bool=False,max_newton_iterations:Union[None,int]=None,starttime:ExpressionNumOrNone=None,suppress_resolve_after_adapt=False,max_newton_to_increase_time_step:Optional[int]=None)->ExpressionOrNum:
         """
         Run the problem for a specified duration, potential with output calls and temporal and/or spatial adaptivity.
         All time quantities must be given in dimensional units, e.g. ``second``, if you use e.g. :py:meth:`~Problem.set_scaling` with e.g. ``temporal=1*second`` for a dimensional problem.
@@ -4939,6 +4939,11 @@ class Problem(_pyoomph.Problem):
         if starttime is not None:
             self.set_current_time(starttime)
         if (not self.is_initialised()) or self._taken_already_an_unsteady_step==False:
+            if do_not_set_IC=="auto":
+                if self.is_initialised():
+                    do_not_set_IC=True
+                else:
+                    do_not_set_IC=False
             #We need to calculate the initial time step already now to initialize appropriately!
             _tstart=self.get_current_time() #This might call initialise!
             if self._runmode!="continue":

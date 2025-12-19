@@ -57,7 +57,7 @@ class LyapunovExponentCalculator(GenericProblemHooks):
                     self.old_perturbation=[None]*self.N
                 self.old_perturbation[i]=None
                 self.renormalize(i) # and scale it to the length
-            
+        
         # Open the file if necessary
         if self.outputfile is None:
             if self.relative_to_output:                
@@ -74,6 +74,9 @@ class LyapunovExponentCalculator(GenericProblemHooks):
             w1=problem.timestepper.weightBDF2(1,1)
             w2=problem.timestepper.weightBDF2(1,2)            
         # Second history perturbation
+        
+        if w1==0:
+            return # Seems to be a stationary solve here
         
 
         # Get the mass matrix and the Jacobian
