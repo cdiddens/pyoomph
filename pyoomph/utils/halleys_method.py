@@ -59,7 +59,7 @@ class HalleySolver:
                 print("Converged!")
                 break            
             if step>=max_iterations:
-                raise RuntimeError("Newton solver did not converge within the maximum number of iterations")
+                raise RuntimeError("Halley solver did not converge within the maximum number of iterations")
             step+=1
             self.problem.actions_after_newton_step()
             
