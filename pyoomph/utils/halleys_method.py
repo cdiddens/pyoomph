@@ -50,10 +50,11 @@ class HalleySolver:
                         
             dofs=dofs-Rorig
             self.problem.set_current_dofs(dofs)
+            self.problem.invalidate_cached_mesh_data()
             self.problem.actions_before_newton_convergence_check()
             R=numpy.array(self.problem.get_residuals())
             err=numpy.linalg.norm(R, ord=numpy.inf)
-            print("Newton step ",str(step)+":","Residual norm:",err)            
+            print("Halley step ",str(step)+":","Residual norm:",err)            
             if err<accuracy:
                 print("Converged!")
                 break            
@@ -61,6 +62,7 @@ class HalleySolver:
                 raise RuntimeError("Newton solver did not converge within the maximum number of iterations")
             step+=1
             self.problem.actions_after_newton_step()
+            
                                                     
         self.problem.actions_after_newton_solve()                                                            
         for i in range(ntstep):
