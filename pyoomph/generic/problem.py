@@ -3875,6 +3875,100 @@ class Problem(_pyoomph.Problem):
         self.invalidate_cached_mesh_data()
         self.invalidate_eigendata()
         self.set_current_dofs(numpy.array(dofs)+dofpert) #type:ignore
+        
+        
+    def perturb_by_eigenfunction(self,*,dt:Optional[ExpressionNumOrNone]=None, eigenmode:int=0,time_steps_per_growth:float=20,desired_initial_residuals:Optional[float]=1e-1)->ExpressionNumOrNone:
+        """
+        Perturb the current solution by an eigenfunction corresponding to the specified eigenmode index.
+        The if the  time step dt is not set, it is chosen so that there are time_steps_per_growth time steps per growth time of the eigenmode.
+        Eigenindex selects which eigenmode to use (default 0 for the most unstable mode).
+        The perturbation amplitude is chosen so that the initial residuals after perturbation are approximately desired_initial_residuals (if not None).
+        Returns the time step dt to be used for time stepping after the perturbation.
+        
+        Args:
+            dt: Time step to use after perturbation. If None, it is computed based on the eigenvalue using time_steps_per_growth.
+            eigenmode: Index of the eigenmode to use for the perturbation.
+            time_steps_per_growth: Number of time steps per growth time of the eigenmode (used if dt is None).
+            desired_initial_residuals: Desired initial residuals after perturbation. If None, no scaling is done.
+        """
+        eigenvals=self.get_last_eigenvalues()
+        if eigenvals is None or eigenmode>=len(eigenvals):
+            raise ValueError("No eigenvalues computed or eigenmode index out of range")
+        
+        TS=self.get_scaling("temporal")
+        if dt is None:
+            dt=1.0/max(abs(eigenvals[eigenmode].real),abs(eigenvals[eigenmode].imag))*TS/time_steps_per_growth
+        self.initialise_dt(float(dt/TS))
+        dofs,_=self.get_current_dofs()
+        dofs=numpy.array(dofs)
+        evect=self.get_last_eigenvectors()[eigenmode]
+        
+        self._taken_already_an_unsteady_step=True
+        self.time_stepper_pt().set_num_unsteady_steps_done(2)
+        self.time_stepper_pt().undo_make_steady()
+        self.initialise_dt(float(dt/TS))
+        self.time_stepper_pt().set_weights()
+        
+        
+        
+        # TODO: look for complex conjugate pairs and handle appropriately
+        def get_dofs(scale,toffset):
+            return dofs+numpy.real(0.5*scale*(evect*numpy.exp(eigenvals[eigenmode]*float(toffset/TS))+numpy.conjugate(evect*numpy.exp(eigenvals[eigenmode]*float(toffset/TS)))))
+        
+        # TODO: Better way to  history dofs here:
+        self.set_history_dofs(3,0*dofs) # Newmark velo
+        self.set_history_dofs(4,0*dofs) # Newmark accel
+        self.set_history_dofs(5,0*dofs) # BDF2 velocity
+        self.set_history_dofs(6,0*dofs) # Predictor
+        def set_ic(scale):
+            self.set_current_dofs(get_dofs(scale,0.0))
+            self.set_history_dofs(1,get_dofs(scale,-dt))
+            self.set_history_dofs(2,get_dofs(scale,-2*dt))
+            self.set_history_dofs(3,get_dofs(scale,-3*dt))
+            maxres=numpy.amax(numpy.absolute(self.get_residuals()))
+            #print("Max residual after perturbation with scale {}: {}".format(scale,maxres))
+            return maxres
+    
+        if desired_initial_residuals is not None:        
+            scale0=1
+            res0=set_ic(scale0)
+            if res0>desired_initial_residuals:
+                while res0>desired_initial_residuals:
+                    scale1=scale0/2
+                    res1=set_ic(scale1)
+                    if res1<desired_initial_residuals:
+                        break
+                    else:
+                        res0=res1
+                        scale0=scale1
+            else:
+                while res0<desired_initial_residuals:  
+                    scale1=scale0*2
+                    res1=set_ic(scale1)
+                    if res1>desired_initial_residuals:
+                        break
+                    else:
+                        scale0=scale1
+                        res0=res1
+            #print("Final scale0: {}, residual0: {}".format(scale0,res0))
+            #print("Final scale1: {}, residual1: {}".format(scale1,res1))
+            if scale0>scale1:
+                scale0,scale1=scale1,scale0
+            # Now do a bisection between scale0 and scale1
+            for _ in range(20):
+                scale=(scale0+scale1)/2
+                res=set_ic(scale)
+                #print("Bisection scale: {}, residual: {}".format(scale,res),desired_initial_residuals)
+                if res>desired_initial_residuals:                    
+                    scale1=scale
+                else:
+                    scale0=scale
+        
+            res=set_ic(scale)
+            #print("Final scale: {}, residual: {}".format(scale,res))
+        self.invalidate_cached_mesh_data()
+        self.invalidate_eigendata()
+        return dt
 
     def deactivate_bifurcation_tracking(self):
         
