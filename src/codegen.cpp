@@ -2056,7 +2056,8 @@ namespace pyoomph
 			{
 				if (n == "coordinate_x" || n == "coordinate_y" || n == "coordinate_z")
 				{
-					throw_runtime_error("Cannot add residual contributions on the position test space as long as the bulk element has not activated the positions as dofs (i.e. via calling BulkElement.activate_coordinates_as_dofs");
+					std::string info=for_code->get_full_domain_name();
+					throw_runtime_error("Cannot add residual contributions on the position test space as long as the bulk element has not activated the positions as dofs (i.e. via calling BulkElement.activate_coordinates_as_dofs for domain "+info+")");
 				}
 			}
 		}

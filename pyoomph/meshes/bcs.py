@@ -35,7 +35,7 @@ from ..expressions import testfunction, weak, var_and_test, test_scale_factor, s
 from ..utils.smallest_circle import make_circle
 import scipy.spatial #type:ignore
 import numpy
-from ..expressions.coordsys import AxisymmetryBreakingCoordinateSystem,AxisymmetricCoordinateSystem
+from ..expressions.coordsys import AxisymmetryBreakingCoordinateSystem,AxisymmetricCoordinateSystem,BaseCoordinateSystem
 
 
 from ..typings import *
@@ -141,7 +141,7 @@ class EnforcedBC(InterfaceEquations):
         **constraints (Expression): Keyword arguments representing the enforced boundary conditions as pair of variable name to adjust and constraint expression to fulfill in residual form.
     """
  
-    def __init__(self,*, only_for_stationary_solve:bool=False, set_zero_on_normal_mode_eigensolve=False,domain:Optional[str]=None,space:Optional[FiniteElementSpaceEnum]=None,**constraints:Expression):
+    def __init__(self,*, only_for_stationary_solve:bool=False, set_zero_on_normal_mode_eigensolve=False,domain:Optional[str]=None,space:Optional[FiniteElementSpaceEnum]=None,coordinate_system:Optional[BaseCoordinateSystem]=None,**constraints:Expression):
         super(EnforcedBC, self).__init__()
         self.constraints = constraints.copy()
         self.lagrangian:bool = False
@@ -149,6 +149,7 @@ class EnforcedBC(InterfaceEquations):
         self.set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve
         self.domain=domain
         self.space=space
+        self.coordsys=coordinate_system
 
     def get_lagrange_multiplier_name(self, varname:str)->str:
         return "_lagr_enf_bc_" + varname
@@ -196,8 +197,8 @@ class EnforcedBC(InterfaceEquations):
             lagr_name=self.get_lagrange_multiplier_name(k)
             l, ltest = var_and_test(lagr_name)  # get the Lagrange multiplier
             utest = testfunction(k,domain=self.domain)
-            self.add_residual(weak(v, ltest, lagrangian=self.lagrangian))
-            self.add_residual(weak(l, utest,lagrangian=self.lagrangian))  # Lagrange multiplier pair to enforce it
+            self.add_residual(weak(v, ltest, lagrangian=self.lagrangian,coordinate_system=self.coordsys))  # Enforce the constraint
+            self.add_residual(weak(l, utest,lagrangian=self.lagrangian,coordinate_system=self.coordsys))  # Lagrange multiplier pair to enforce it
             if self.only_for_stationary_solve:
                 self.set_Dirichlet_condition(lagr_name,0)
 
@@ -361,10 +362,10 @@ class EnforcedDirichlet(EnforcedBC):
         **constraints (Expression): Keyword arguments representing the enforced boundary conditions as pair of variable name to adjust and constraint expression to fulfill in residual form.
     """
     
-    def __init__(self,*, only_for_stationary_solve:bool=False, set_zero_on_normal_mode_eigensolve=False,domain:Optional[str]=None,space:Optional[FiniteElementSpaceEnum]=None,**constraints:Expression):
+    def __init__(self,*, only_for_stationary_solve:bool=False, set_zero_on_normal_mode_eigensolve=False,domain:Optional[str]=None,space:Optional[FiniteElementSpaceEnum]=None,coordinate_system:Optional[BaseCoordinateSystem]=None, **constraints:Expression):
         from ..expressions import var        
         new_kwargs={k:var(k,domain=domain)-v for k,v in constraints.items()}
-        super(EnforcedDirichlet, self).__init__(only_for_stationary_solve=only_for_stationary_solve, set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve,**new_kwargs.copy(),domain=domain,space=space)
+        super(EnforcedDirichlet, self).__init__(only_for_stationary_solve=only_for_stationary_solve, set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve,coordinate_system=coordinate_system ,**new_kwargs.copy(),domain=domain,space=space)
 
 
 class InactiveDirichletBC(DirichletBC):

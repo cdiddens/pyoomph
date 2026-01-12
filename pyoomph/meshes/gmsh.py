@@ -995,7 +995,7 @@ class GmshTemplate(MeshTemplate):
             allres.append(res)
         return allres
 
-    def volume(self, *args:Union[str,Surface,PlaneSurface], name:Optional[str]=None) -> List[Volume]:
+    def volume(self, *args:Union[str,Surface,PlaneSurface], name:Optional[str]=None,reversed_order:bool=False) -> List[Volume]:
         resolved = self._resolve_name("surfaces", *args) #type:ignore
         #print(resolved)
         srted=resolved # TODO: Sort?
@@ -1008,9 +1008,16 @@ class GmshTemplate(MeshTemplate):
         #if kwargs.get("reversed", False) == True:
         #    srted = list(reversed([-x for x in srted]))
         s=srted #type:ignore
-
+        
+        #if reversed_order:
+        #    for entry in s:
+        #        entry._id=-entry._id
         ll = self._geom.add_surface_loop(s) #type:ignore
+        
         res = self._geom.add_volume(ll) #type:ignore
+        #if reversed_order:
+        #    for entry in s:
+        #        entry._id=-entry._id
         #print(res)
         if name is not None:
             self._store_name(name, res)
