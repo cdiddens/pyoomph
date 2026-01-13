@@ -1787,6 +1787,9 @@ class Problem(_pyoomph.Problem):
         if isinstance(other,MeshTemplate):
             self.add_mesh(other)
         elif isinstance(other,EquationTree):
+            if other._equations is not None:
+                raise RuntimeError("You try to add an EquationTree to the Problem with Equations defined on the root level. This is not allowed. Please restrict all Equations to a domain using e.g. @'domain'")
+            
             self.additional_equations+=other        
         elif isinstance(other,GenericProblemHooks):
             if other._problem is None:
