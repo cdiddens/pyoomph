@@ -121,7 +121,7 @@ class IncompressibleHookeanSolidConstitutiveLaw(IncompressibleSolidConstitutiveL
     
 
 class BaseDeformableSolidEquations(BaseMovingMeshEquations):
-    def __init__(self, mass_density:ExpressionOrNum=0,bulkforce:ExpressionOrNum=0,coordinate_space = None,first_order_time_derivative=False,scale_for_FSI:bool=False,modulus_for_scaling:ExpressionOrNum=None,isotropic_growth_factor:ExpressionOrNum=1,pressure_space:FiniteElementSpaceEnum="DL",with_error_estimator=False):        
+    def __init__(self, mass_density:ExpressionOrNum=0,bulkforce:ExpressionOrNum=0,coordinate_space = None,first_order_time_derivative=False,scale_for_FSI:bool=False,modulus_for_scaling:ExpressionOrNum=None,isotropic_growth_factor:ExpressionOrNum=1,pressure_space:FiniteElementSpaceEnum="DL",with_error_estimator=False,overdamped:bool=False):        
         super().__init__(coordinate_space, False, None)
         self.scale_for_FSI=scale_for_FSI
         self.mass_density=mass_density
@@ -132,6 +132,7 @@ class BaseDeformableSolidEquations(BaseMovingMeshEquations):
         self.pressure_space=pressure_space
         self.pressure_name="pressure" 
         self.with_error_estimator=with_error_estimator
+        self.overdamped=overdamped
         
     def is_incompressible(self):
         return False
@@ -144,6 +145,8 @@ class BaseDeformableSolidEquations(BaseMovingMeshEquations):
         if self.first_order_time_derivative:
             if self.coordinate_space is None:
                 raise RuntimeError("coordinate_space must be specified for first order time derivative")
+            if self.overdamped:
+                raise RuntimeError("overdamped=True is not compatible with first_order_time_derivative=True, since overdamped already reduces the time derivative order to one.")
             self.define_vector_field("dt_mesh",self.coordinate_space,scale=scale_factor("spatial")/scale_factor("temporal"),testscale=scale_factor("temporal")/scale_factor("spatial"))
                     
     def define_scaling(self):        
@@ -167,7 +170,10 @@ class BaseDeformableSolidEquations(BaseMovingMeshEquations):
             self.add_weak(var("dt_mesh")-mesh_velocity(),testfunction("dt_mesh"),lagrangian=True)            
             accel=partial_t(var("dt_mesh"),ALE=False)            
         else:
-            accel=partial_t(x,2,ALE=False)                
+            if self.overdamped:
+                accel=partial_t(x,ALE=False)
+            else:
+                accel=partial_t(x,2,ALE=False)                
                    
         self.add_weak(self.mass_density*accel-self.bulkforce,self.isotropic_growth_factor* xtest,lagrangian=True )
 
@@ -225,8 +231,8 @@ class DeformableSolidEquations(BaseDeformableSolidEquations):
             scale_for_FSI: If set, the scaling of the test function agrees with the scaling of the velocity test function ([X]/[P]). This is important to balance the tractions correctly
     """
     # TODO: Bulk force density in Lagrangian or Eulerian coordinates? Make two or a flag?
-    def __init__(self, constitutive_law:BaseSolidConstitutiveLaw, mass_density:ExpressionOrNum=0,bulkforce:ExpressionOrNum=0,coordinate_space = None,first_order_time_derivative=False,pressure_space:FiniteElementSpaceEnum="DL",with_error_estimator=False,isotropic_growth_factor:ExpressionOrNum=1,modulus_for_scaling:ExpressionOrNum=None,scale_for_FSI:bool=False):        
-        super().__init__(mass_density=mass_density,bulkforce=bulkforce,coordinate_space=coordinate_space, first_order_time_derivative=first_order_time_derivative,scale_for_FSI=scale_for_FSI,modulus_for_scaling=modulus_for_scaling,isotropic_growth_factor=isotropic_growth_factor,pressure_space=pressure_space,with_error_estimator=with_error_estimator)
+    def __init__(self, constitutive_law:BaseSolidConstitutiveLaw, mass_density:ExpressionOrNum=0,bulkforce:ExpressionOrNum=0,coordinate_space = None,first_order_time_derivative=False,pressure_space:FiniteElementSpaceEnum="DL",with_error_estimator=False,isotropic_growth_factor:ExpressionOrNum=1,modulus_for_scaling:ExpressionOrNum=None,scale_for_FSI:bool=False,overdamped:bool=False):        
+        super().__init__(mass_density=mass_density,bulkforce=bulkforce,coordinate_space=coordinate_space, first_order_time_derivative=first_order_time_derivative,scale_for_FSI=scale_for_FSI,modulus_for_scaling=modulus_for_scaling,isotropic_growth_factor=isotropic_growth_factor,pressure_space=pressure_space,with_error_estimator=with_error_estimator,overdamped=overdamped)
         self.constitutive_law=constitutive_law        
                 
     def is_incompressible(self):

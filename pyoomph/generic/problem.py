@@ -1797,6 +1797,8 @@ class Problem(_pyoomph.Problem):
             elif other._problem is not self:
                 raise RuntimeError("Cannot add a problem hook to a different problem")
             self._hooks.append(other)
+            if self._initialised:
+                other.actions_after_initialise()
         else:
             from pyoomph.output.plotting import BasePlotter
             if isinstance(other,BasePlotter):
