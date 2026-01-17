@@ -5333,7 +5333,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
     def deflated_continuation(self,deflation_alpha:float=0.1,deflation_p:int=2,perturbation_amplitude:float=0.5,max_newton_iterations:Optional[int]=None,newton_relaxation_factor:Optional[float]=None,use_eigenperturbation:bool=False,skip_initial_solution:bool=False,num_random_tries:int=1,max_branches:Optional[int]=None,branch_continue_iterations:int=10,**param_range):
         """Scan over a parameter range and try to find multiple solutions for each parameter step by deflation
         This is an implemetation according to: The computation of disconnected bifurcation diagrams by Patrick E. Farrell, Casper H. L. Beentjes, Ásgeir Birkisson
-         https://arxiv.org/pdf/1603.00809.pdf
+        https://arxiv.org/pdf/1603.00809.pdf
         
         Args:
             deflation_alpha : Shift of the deflation operator. Defaults to 0.1.

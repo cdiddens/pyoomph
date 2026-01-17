@@ -1,15 +1,188 @@
 from ..generic.problem import GenericProblemHooks
 import numpy
 from scipy.sparse import csr_matrix
-from ..expressions import ExpressionNumOrNone
+from ..expressions import ExpressionNumOrNone, ExpressionOrNum
 from ..typings import NPFloatArray,List,Optional
 from collections import deque
 
+from ..generic.problem import GenericProblemHooks
+import numpy
+from scipy.sparse import csr_matrix
+from ..expressions import ExpressionNumOrNone
+from ..typings import NPFloatArray,List,Optional
+
 class LyapunovExponentCalculator(GenericProblemHooks):
     """
+    A class for calculating multiple Lyapunov exponents. Add it to the problem by ``problem+=LyapunovExponentCalculator(...)`` and it will do the rest for you.
+    However, note that we cannot use BDF2 time derivatives in the calculation of new pertubations (B matrix). 
+    Therefore, we calculate trajectories using BFD2, but the perturbation vectors are updated using either implicit Euler (BDF1) or a Crank-Nicholson-like scheme.
+    
+    Args:
+        k: The number of Lyapunov exponents to calculate. k>=2 will invoke Gram-Schmidt on the perturbation vectors. Defaults to 1.
+        waiting_time: The time to wait before starting the Lyapunov calculation.
+        prerelaxation_time: The time to prerelax the perturbation vectors before starting the Lyapunov calculation. This allows to bypass initial transients.
+        use_crank_nicholson_integration: Whether to use a Crank-Nicholson-like integration for the perturbation vectors, instead of BDF1 integration. This may improve accuracy for problems with large time steps. Defaults to False.
+        filename: The name of the output file. Defaults to "lyapunov.txt".
+        relative_to_output: Whether to save the output file relative to the problem's output directory. Defaults to True.
+        store_as_eigenvectors: Whether to store the perturbation vectors as eigenvectors. Defaults to False.
+    """
+    def __init__(self,k: int = 1,waiting_time:ExpressionOrNum=None, prerelaxation_time:ExpressionOrNum=None,use_crank_nicholson_integration:bool=False, filename="lyapunov.txt",relative_to_output=True,store_as_eigenvectors:bool=False,gram_schmidt_dt:ExpressionNumOrNone=None):
+        super().__init__()
+        self.k = k
+        if self.k <= 0:
+            raise ValueError("k must be a positive integer")
+        self.waiting_time = waiting_time
+        self.prerelaxation_time = prerelaxation_time
+        self.use_crank_nicholson_integration = use_crank_nicholson_integration        
+        
+        self.filename = filename
+        self.relative_to_output = relative_to_output
+        self.store_as_eigenvectors = store_as_eigenvectors
+        self.B:NPFloatArray=numpy.zeros((0,0)) # Storing the k perturbation vectors        
+        self.Lambdas:NPFloatArray=numpy.zeros((0,)) # Storing the Lyapunov exponents sum
+        self._Tstart1,self._Tstart2=0,0 # Nondimensional times when (1) the vector calculation starts and (2) the prerelaxation ends (i.e. the lambda calculation starts)
+        self._oldJ=None
+        self._outputfile=None
+        self.gram_schmidt_dt=gram_schmidt_dt
+        self._gram_schmidt_dt=0
+        self._t_last_gram_schmidt=0
+
+    def actions_after_initialise(self):
+        problem=self.get_problem()
+        T0=problem.get_current_time(as_float=True)
+        TS=problem.get_scaling("temporal")
+        if self.waiting_time is not None:
+            TW=float(self.waiting_time/TS)
+        else:
+            TW=0
+        if self.prerelaxation_time is not None:
+            TP=float(self.prerelaxation_time/TS)
+        else:
+            TP=0
+        self._Tstart1=T0+TW
+        self._t_last_gram_schmidt=self._Tstart2
+        self._Tstart2=self._Tstart1+TP
+        if self.gram_schmidt_dt is None:
+            self._gram_schmidt_dt=0
+        else:
+            self._gram_schmidt_dt=float(self.gram_schmidt_dt/TS)
+
+    def actions_after_newton_solve(self):
+        problem = self.get_problem()
+        t = problem.get_current_time(as_float=True)
+
+        # Not started yet
+        if t < self._Tstart1:
+            return
+        Tdiff = t - self._Tstart2
+
+        # --- Initialization ---
+        if self.B.shape[1] != self.k:
+            if self.k > problem.ndof():
+                raise ValueError("number of Lyapunov exponents k must be less or equal to the number of degrees of freedom in the problem")
+            self.B = numpy.random.rand(problem.ndof(), self.k)            
+            # Prepare orthonormal random basis
+            for i in range(self.k):
+                self.B[:, i] /= numpy.linalg.norm(self.B[:, i])
+                for j in range(i + 1, self.k):
+                    self.B[:, j] -= numpy.dot(self.B[:, i], self.B[:, j]) * self.B[:, i]            
+            self.Lambdas = numpy.zeros((self.k,))
+        if self.B.shape[0] != problem.ndof():
+            print(self.B.shape)
+            raise ValueError("Internal error: wrong size of perturbation vectors. Probably, you adapted or remeshed the problem during the Lyapunov calculation, which is not supported.")
+
+        # --- BDF weights ---
+        ts = problem.timestepper
+        w0=ts.weightBDF1(1,0)
+        w1=ts.weightBDF1(1,1)
+        
+
+        if w0 == 0.0: # Stationary solve
+            return
+        
+                
+
+        # --- Matrices ---
+        was_steady=[problem.time_stepper_pt(i).is_steady() for i in range(problem.ntime_stepper())]
+        for i in range(problem.ntime_stepper()):
+            problem.time_stepper_pt(i).make_steady()
+        n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = problem.assemble_eigenproblem_matrices(0.0) #type:ignore # Mass and zero Jacobian
+        matJ=csr_matrix((J_val, J_ci, J_rs), shape=(n, n)).copy()	#type:ignore        
+        matM=csr_matrix((M_val, M_ci, M_rs), shape=(n, n)).copy()	#type:ignore        
+        for i,ws in enumerate(was_steady):
+            if not ws:
+                problem.time_stepper_pt(i).undo_make_steady()
+        matM.eliminate_zeros() #type:ignore
+
+        la = problem.get_la_solver()
+        
+        
+        if not self.use_crank_nicholson_integration or self._oldJ is None: # Just implicit Euler
+            if self.use_crank_nicholson_integration:
+                self._oldJ=matJ.copy()
+            matJ+=matM*w0
+        else: # Crank-Nicolson-like update         
+            tmp=self._oldJ.copy()
+            self._oldJ=matJ.copy()
+            matJ=matM*w0+0.5*(tmp+matJ) 
+
+        matM.eliminate_zeros() #type:ignore
+        matM.sort_indices()
+        # --- Solve for the new perturbations ---
+        la = problem.get_la_solver()
+        la.solve_serial(1,n,matJ.nnz,1,matJ.data,matJ.indices,matJ.indptr,numpy.zeros(n),0,1)
+
+        for i in range(self.k):
+            pert = self.B[:,i].copy()
+            rhs = -matM @ (w1 * pert)  # No second history perturbation for Lyapunov calculation
+            la.solve_serial(2,n,matJ.nnz,1,matJ.data,matJ.indices,matJ.indptr,rhs,0,1)
+            self.B[:,i] = rhs[:]
+
+        if t-self._t_last_gram_schmidt>self._gram_schmidt_dt:
+            # --- QR orthonormalization ---            
+            for i in range(self.k):
+                norm=numpy.linalg.norm(self.B[:,i])
+                if Tdiff>0:
+                    #print("R_ii",i,norm)
+                    self.Lambdas[i]+=numpy.log(norm)
+                self.B[:,i]/=norm                                                
+                # Gram-Schmidt
+                for j in range(i+1,self.k):
+                    proj=numpy.dot(self.B[:,i],self.B[:,j])
+                    #print("R_ij",i,j,proj)
+                    self.B[:,j]-=proj*self.B[:,i]
+                    
+
+            self._t_last_gram_schmidt=t
+
+            # --- Output ---
+            if self._outputfile is None:
+                fname = (problem.get_output_directory(self.filename)if self.relative_to_output else self.filename)
+                self._outputfile = open(fname, "w")
+
+            if Tdiff > 0:
+                lyap_estimate=self.Lambdas/Tdiff
+                self._outputfile.write(f"{t}\t" + "\t".join(map(str, lyap_estimate)) + "\n")
+                self._outputfile.flush()
+
+                if self.store_as_eigenvectors:
+                    problem._last_eigenvalues = lyap_estimate.copy()
+                    problem._last_eigenvalues_m = numpy.zeros(len(lyap_estimate), dtype="int")
+                    problem._last_eigenvectors = [self.B[:, i].copy() for i in range(self.k)]
+                    for i, ev in enumerate(problem._last_eigenvectors):
+                        problem._last_eigenvectors[i] = ev / numpy.linalg.norm(ev)
+                    problem.invalidate_cached_mesh_data(only_eigens=True)
+                    
+                    
+
+class LyapunovExponentCalculatorBDF2(GenericProblemHooks):
+    """
     A class for calculating Lyapunov exponents. Add it to the problem by ``problem+=LyapunovExponentCalculator(...)`` and it will do the rest for you.
+    It works a bit differently than the other Lyapunov exponent calculator: Here, we use the BDF2 time discretization to evolve both the state and the perturbation vectors.    
     However, note that we only may have first order time derivatives in the equations. Second order time derivatives must be rewritten as first order time derivatives before.
     Also, the time derivatives in the system must use the fully implicit "BDF2" time scheme, which is the default (unless set otherwise stated by either using ``scheme="..."`` in :py:func:`~pyoomph.expressions.generic.partial_t` or by altering :py:attr:`~pyoomph.generic.problem.Problem.default_timestepping_scheme` of the :py:class:`~pyoomph.generic.problem.Problem`).
+    Gram-Schmidt ortho*normalization* is only performed if the vectors grow too large or too small, to avoid numerical issues. Otherwise only ortho*gonalization* is performed. This is required since BDF2 has multiple time levels.
+    Also, instead of accumulating the Lyapunov exponents over time, we use a ring buffer to store recent growths and average over a specified time interval.
 
     Args:
         average_time: The time interval over which to average the Lyapunov exponents. If None, we average over the entire time

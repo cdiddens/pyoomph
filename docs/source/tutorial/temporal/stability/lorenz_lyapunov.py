@@ -53,8 +53,8 @@ class LorenzSystem(ODEEquations):
 class LorenzProblem(Problem):    
     def define_problem(self):
         eqs=LorenzSystem()
-        eqs+=InitialCondition(x=0.01)  # Some non-trivial initial position
-        eqs+=TemporalErrorEstimator(x=1,y=1,z=1) # Weight all temporal error with unity
+        eqs+=InitialCondition(x=-1.49160012010492360e+00, y=-7.07637299749291571e-01, z=2.07295045876768036e+01)  # Some non-trivial initial position
+        #eqs+=TemporalErrorEstimator(x=1,y=1,z=1) # Weight all temporal error with unity
         eqs+=ODEFileOutput()  
         self+=eqs@"lorenz_attractor"
 
@@ -69,7 +69,8 @@ if __name__=="__main__":
         # So we do not write state files for continue simulations
         problem.write_states=False 
         # Add the LyapunovExponentCalculator to the problem. 
-        # Averaging over T_avg=20 and calculating N=3 Lyapunov exponents
-        problem+=LyapunovExponentCalculator(average_time=20,N=3)
-        # Run it with a rather fine time step and temporal error
-        problem.run(endtime=200,outstep=0.0025,startstep=0.01,temporal_error=0.05,maxstep=0.01)        
+        # Calculating k=3 Lyapunov exponents. Starting after t=10, then relaxing perturbation vectors until t=10+5
+        # Then start the actual Lyapunov exponent calculation                
+        problem+=LyapunovExponentCalculator(k=3,waiting_time=10,prerelaxation_time=10,store_as_eigenvectors=False,use_crank_nicholson_integration=False)
+        # Run it with a rather fine time step 
+        problem.run(endtime=200,outstep=0.001)        
