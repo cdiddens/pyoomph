@@ -39,10 +39,10 @@ To calculate Lyapunov exponents, pyoomph comes the class :py:class:`~pyoomph.uti
 .. math:: :label: eqlyapavg
 
    \begin{aligned}
-   \lambda(t) = \frac{1}{t-T_\text{init}}\ln\frac{\|\delta\vec{x}(t)\|}{\|\delta\vec{x}(t-T_\text{init})\|}
+   \lambda(t) = \frac{1}{t-T_\text{init}}\ln\frac{\|\delta\vec{x}(t)\|}{\|\delta\vec{x}(T_0)\|}
    \end{aligned}
 
-where :math:`T_\text{init}=T_\text{wait}+T_\text{relax}`.
+where :math:`T_0=T_\text{wait}+T_\text{relax}`.
 
 As an example, we will check the Lorenz system (with the default parameters :math:`\sigma=10`, :math:`\rho=28` and :math:`\beta=8/3`) from :numref:`secODEtemporaladapt` for chaos in the following. When modifying the run code of section :numref:`secODEtemporaladapt` to 
 	
