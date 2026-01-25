@@ -615,3 +615,24 @@ class EnforcedInterfacialLaplaceSmoothingCorner(InterfaceEquations):
         iname="__".join(fn.split("/")[1:-1])
         self.set_Dirichlet_condition("_s_solved_"+iname,True) # fix the arclength of the corner
         self.set_Dirichlet_condition("_tang_shift_"+iname,0) # deactivate the tangential shift of the corner
+
+
+
+class PrescribedMovingMesh(BaseMovingMeshEquations):
+    """Instead of solving e.g. a Laplace-smoothed mesh, you can also directly prescribe the mesh velocity. This class allows you to do so by passing an expression for the mesh velocity.
+
+    Args:
+        umesh: The prescribed mesh velocity.
+        lagrangian: If True, the integration is performed in the Lagrangian frame. Default is False.
+        coordinate_space: The coordinate space. Default is None.
+        constrain_bulk_to_C1: If True, the bulk position space is constrained to C1. Default is False.
+        coordsys: The coordinate system. Default is cartesian.
+    """
+    def __init__(self, umesh:ExpressionOrNum,lagrangian=False,coordinate_space = None, constrain_bulk_to_C1 = False, coordsys = None):
+        super().__init__(coordinate_space, constrain_bulk_to_C1, coordsys)
+        self.umesh = umesh
+        self.lagrangian = lagrangian
+        
+        
+    def define_residuals(self):
+        self.add_weak((mesh_velocity() - self.umesh)*scale_factor("temporal"), "mesh",lagrangian=self.lagrangian)

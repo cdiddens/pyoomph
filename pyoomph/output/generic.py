@@ -694,16 +694,19 @@ class _ODEFileOutput(_BaseODEOutput):
 
         values, fieldinds = self.get_ODE_values()
         obs=self._eqtree.get_mesh().evaluate_all_observables()
+        #locs=self._eqtree.get_mesh().list_local_expressions()        
         compiled_ifuncs = self._eqtree.get_mesh().list_integral_functions()
-        descs=[""]*(len(values)+len(obs))
+        descs=[""]*(len(values)+len(obs)) #+len(locs)
         for d,ind in fieldinds.items():
             descs[ind]=d
         for i,n in enumerate(obs.keys(),start=len(values)):
             descs[i]=n
-        #TODO Scales
+        #for i,n in enumerate(locs,start=len(values)+len(obs)):
+         #   descs[i]=n
+        
         _, indices = self._element.to_numpy()
-        scales:List[ExpressionOrNum] = [1.0] * (len(indices)+len(obs))
-        for k, i in indices.items():
+        scales:List[ExpressionOrNum] = [1.0] * (len(indices)+len(obs)) #+len(locs)
+        for k, i in indices.items():            
             s = self._eqtree.get_equations().get_scaling(k)
             if not isinstance(s,Expression):
                 s=Expression(s)
@@ -718,6 +721,7 @@ class _ODEFileOutput(_BaseODEOutput):
                     float(unit)
                 except:
                     descs[i]=descs[i]+"["+unit_to_string(unit,estimate_prefix=False)+"]"
+        
         for (i, n),v in zip(enumerate(obs.keys(), start=len(values)),obs.values()):
             if n in compiled_ifuncs:
                 ieunit = self._eqtree.get_mesh().get_code_gen()._get_integral_function_unit_factor(n)
@@ -739,6 +743,8 @@ class _ODEFileOutput(_BaseODEOutput):
                         descs[i] = descs[i] + "[" + unit_to_string(unit,estimate_prefix=False) + "]"
                 else:
                     scales[i]=1.0
+                    
+        
 
         self._scales = scales
 

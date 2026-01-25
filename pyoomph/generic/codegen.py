@@ -2759,6 +2759,13 @@ class InterfaceEquations(Equations):
                         while current is not None:
                             assert current._codegen is not None
                             ceqs=cast(Equations,current._codegen.get_equations()) 
+                            if not isinstance(ceqs,Equations):
+                                #print(f"Something strange here. We have the mesh  and it does not have the expected equations."+str(ceqs)+" Looking for "+str(dv))
+                                if isinstance(current,InterfaceMesh):                                    
+                                    current = current._parent 
+                                else:
+                                    current = None
+                                continue
                             assert isinstance(ceqs,Equations)
                             if dv in ceqs._vectorfields.keys():
                                 vcomps = ceqs._vectorfields[dv]

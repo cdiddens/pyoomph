@@ -642,10 +642,14 @@ class LocalExpressions(Equations):
         self.local_expressions = {k:v for k,v in local_expressions.items()}
 
     def define_additional_functions(self):
+        if self._get_combined_element()._is_ode():
+            raise self.add_exception_info( RuntimeError("LocalExpressions cannot be used with ODE equations. Use IntegralObservables instead."))
         for k,v in self.local_expressions.items():
             self.add_local_function(k, v )
             
 
+    def _is_ode(self):
+        return None
 
 class BackupHistoryExpressions(Equations):
     def __init__(self,*,space:FiniteElementSpaceEnum="C2",local_expression_format="_history_expr_{name}",**exprs:Expression):
@@ -739,7 +743,8 @@ class IntegralObservables(Equations):
         for k,v in self.dependent_funcs.items():
             self.add_dependent_integral_function(k,v)
 
-
+    def _is_ode(self):
+        return None
 
 class ExtremumObservables(Equations):
     """You can add these to continuum Equations to find minima and maxima of given expressions. 
