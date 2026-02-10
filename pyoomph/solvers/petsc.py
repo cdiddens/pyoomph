@@ -380,7 +380,7 @@ class SlepcEigenSolver(GenericEigenSolver):
         if sort:
             if sort==True:
                 if target_set:
-                    srt = numpy.argsort(numpy.abs(evals-target))[0:min(neval, len(evals))]
+                    srt = numpy.argsort(numpy.abs(evals-complex(target)))[0:min(neval, len(evals))]
                 else:
                     srt = numpy.argsort(-evals)[0:min(neval, len(evals))] #type:ignore
             else:

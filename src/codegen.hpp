@@ -317,6 +317,95 @@ namespace GiNaC
       print_latex_FEM(std::ostream &, print_FEM_options *fem_opts, unsigned options = 0);
    };
 
+   class SortedGiNaC
+    {
+      public:
+        std::vector<SortedGiNaC*> op;        
+        virtual ~SortedGiNaC() ;        
+        static SortedGiNaC * factory(const ex & e,std::ostream &os, GiNaC::print_FEM_options &csrc_opts);                
+        virtual std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) =0;       
+        virtual int add_order()=0;
+        virtual int mul_order()=0;        
+        bool add_sort_compare(SortedGiNaC * other, std::ostream &os, GiNaC::print_FEM_options &csrc_opts);        
+        bool mul_sort_compare(SortedGiNaC * other, std::ostream &os, GiNaC::print_FEM_options &csrc_opts);        
+    };
+
+    class SortedGiNaCNumeric : public SortedGiNaC
+    {
+      public:
+        GiNaC::numeric value;
+
+        SortedGiNaCNumeric(GiNaC::numeric v) : SortedGiNaC(), value(v) {}
+        virtual std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;
+        virtual int add_order() override { return 0; }
+        virtual int mul_order() override { return 0; }
+        
+    };
+
+    class SortedGiNaCAdd : public SortedGiNaC
+    {
+      public:
+        SortedGiNaCAdd(const std::vector<SortedGiNaC*> & ops) : SortedGiNaC()  {op=ops;}
+        virtual std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;        
+        virtual int add_order() override;        
+        virtual int mul_order() override { return 5; }
+            
+    };
+
+    class SortedGiNaCMul : public SortedGiNaC
+    {
+      public:
+        SortedGiNaCMul(const std::vector<SortedGiNaC*> & ops) : SortedGiNaC(){op=ops;}
+        virtual std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;        
+        virtual int add_order() override { return 3; }
+        virtual int mul_order() override;        
+    };
+
+    class SortedGiNaCPow : public SortedGiNaC
+    {
+      public:
+        SortedGiNaCPow(SortedGiNaC * base, SortedGiNaC * exp) : SortedGiNaC()
+        {
+            op.push_back(base);
+            op.push_back(exp);
+        }
+        virtual std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;        
+        virtual int add_order() override { return 4; }
+        virtual int mul_order() override { return 4; }
+    };
+
+    class SortedGiNaCFunction : public SortedGiNaC
+    {
+      public:
+        std::string fname;
+        SortedGiNaCFunction(const std::string & fname, const std::vector<SortedGiNaC*> & ops) : SortedGiNaC(), fname(fname)     {            op=ops;        }
+        virtual std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;        
+        virtual int add_order() override { return 1; }
+        virtual int mul_order() override { return 1; }
+    };
+
+    class SortedGiNaCSymbol : public SortedGiNaC
+    {
+      public:
+        std::string vname;        
+        SortedGiNaCSymbol(const std::string & vname) : SortedGiNaC(), vname(vname) {}
+        virtual std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override {return vname;}
+        virtual int add_order() override {return 2;}
+        virtual int mul_order() override {return 2;}
+    };
+
+    class SortedGiNaCStruct : public SortedGiNaC
+    {
+      public:
+        ex contents;
+        SortedGiNaCStruct(GiNaC::ex _contents) : SortedGiNaC(), contents(_contents) {}
+        virtual std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;        
+        virtual int add_order() override { return 6; }
+        virtual int mul_order() override;
+    };
+
+    std::ostream & print_sorted_GiNaC(ex  e,std::ostream &os, GiNaC::print_FEM_options &csrc_opts);
+
 }
 
 namespace pyoomph
@@ -693,6 +782,7 @@ namespace pyoomph
       std::vector<bool> has_hessian_contribution = {false}; // Which of the residuals have hessian contributions
       std::vector<std::string> IC_names;                    // Names of the initial conditions
       std::vector<bool> has_constant_mass_matrix_for_sure;
+      
       virtual void write_code_initial_condition(std::ostream &os, unsigned int index, std::string name);
       virtual void write_code_Dirichlet_condition(std::ostream &os);
       virtual void write_code_integral_or_local_expressions(std::ostream &os, std::map<std::string, GiNaC::ex> &exprs, std::map<std::string, GiNaC::ex> &units, std::string funcname, std::string reqname, bool integrate);
@@ -722,6 +812,7 @@ namespace pyoomph
          reference_pos_for_IC_and_DBC[5] = ny;
          reference_pos_for_IC_and_DBC[6] = nz;
       }
+      GiNaC::archive archive;
       std::map<std::string, GiNaC::ex> expanded_scales;
       GiNaC::ex expand_placeholders(GiNaC::ex inp, std::string where, bool raise_error = true);
       // To prevent tons of Python callbacks in e.g. UNIFAC to substitute molefraction by subexpressions, we cache the expanded callbacks

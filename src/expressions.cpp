@@ -25,11 +25,16 @@ The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
 #include "problem.hpp"
 #include <cassert>
 #include <sstream>
+#include <limits>
 
 using namespace GiNaC;
 
 namespace GiNaC
 {
+
+	
+
+	/////////////////
 
 	template <>
 	void GiNaCPlaceHolderResolveInfo::print(const print_context &c, unsigned level) const

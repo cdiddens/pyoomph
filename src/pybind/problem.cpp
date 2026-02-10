@@ -24,7 +24,7 @@ The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
 #include <pybind11/stl.h>
 #include <pybind11/stl_bind.h>
 #include <pybind11/numpy.h>
-
+#include <fstream>
 #include <tuple>
 
 namespace py = pybind11;
@@ -696,6 +696,9 @@ void PyReg_Problem(py::module &m)
 				 std::ofstream ofs(code_trunk+".c");
 				 if (!quiet) std::cout << "Generating equation C code: " << code_trunk << std::endl;
 				 my_element->write_code(ofs);
+				 std::ofstream hfs(code_trunk+".gar",std::ios::binary);
+				 hfs << my_element->archive;
+				 hfs.close();
           }
 
 #ifdef OOMPH_HAS_MPI

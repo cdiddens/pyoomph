@@ -24,6 +24,7 @@ The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
 #include "expressions.hpp"
 #include "exception.hpp"
 #include "problem.hpp"
+#include <limits>
 
 namespace pyoomph
 {
@@ -71,8 +72,14 @@ namespace pyoomph
 	{
 		GiNaC::ex towrite;
 		std::string mode = csrc_opts.for_code->ccode_expression_mode;
-
-		if (mode == "factor")
+		csrc_opts.for_code->archive.archive_ex(expr, ("expression_",std::to_string(csrc_opts.for_code->archive.num_expressions())).c_str());
+		if (mode == "deterministic")
+		{
+			//GiNaC::print_sorted_GiNaC(GiNaC::expand(GiNaC::expand(expr)),os,csrc_opts);
+			GiNaC::print_sorted_GiNaC(expr,os,csrc_opts);
+			return;
+		}
+		else if (mode == "factor")
 			towrite = GiNaC::factor(GiNaC::normal(GiNaC::expand(GiNaC::expand(expr).evalf())));
 		else if (mode == "normal")
 			towrite = GiNaC::normal(GiNaC::expand(GiNaC::expand(expr).evalf()));
@@ -89,7 +96,7 @@ namespace pyoomph
 		else if (mode == "expand_no_evalf")
 			towrite = GiNaC::expand(expr);
 		else if (mode == "ccf_no_evalf")
-			towrite = GiNaC::collect_common_factors(GiNaC::expand(expr));
+			towrite = GiNaC::collect_common_factors(GiNaC::expand(expr));		
 		else
 			towrite = expr.evalf();
 		//	std::cout << "MODE WAS " << mode << std::endl;
@@ -1225,6 +1232,7 @@ namespace pyoomph
 		std::string shapeinfo = "";
 		std::string eleminfo = "";
 		std::set<std::string> handled;
+		std::vector<std::string> decl_lines;
 		for (auto &s : required_shapeexps)
 		{
 			if (s.dt_order == 0 || s.basis->get_space() != this)
@@ -1243,8 +1251,14 @@ namespace pyoomph
 					continue;
 				handled.insert(varname);
 				// os << indent << "double "<<varname << "["<< range << "];" << std::endl;
-				os << indent << "PYOOMPH_AQUIRE_ARRAY(double, " << varname << ", " << range << ")" << std::endl;
+				//os << indent << "PYOOMPH_AQUIRE_ARRAY(double, " << varname << ", " << range << ")" << std::endl;
+				decl_lines.push_back(indent + "PYOOMPH_AQUIRE_ARRAY(double, " + varname + ", " + range + ")");
 			}
+		}
+		std::sort(decl_lines.begin(), decl_lines.end());
+		for (auto &l : decl_lines)
+		{
+			os << l << std::endl;
 		}
 
 		if (!hascontrib)
@@ -1254,7 +1268,7 @@ namespace pyoomph
 		//		bool req_loop=this->need_interpolation_loop();
 		os << indent << "for (unsigned int l_shape=0;l_shape<" + range + ";l_shape++)" << std::endl;
 		os << indent << "{" << std::endl;
-
+		std::vector<std::string> init_lines;
 		for (auto &s : required_shapeexps)
 		{
 			if (s.dt_order == 0 || s.basis->get_space() != this)
@@ -1265,14 +1279,22 @@ namespace pyoomph
 				if (handled.count(varname))
 					continue;
 				handled.insert(varname);
-				os << indent << "  " << varname << "[l_shape]=0.0;" << std::endl;
+				//os << indent << "  " << varname << "[l_shape]=0.0;" << std::endl;
+				init_lines.push_back(indent + "  " + varname + "[l_shape]=0.0;");
 			}
+		}
+		std::sort(init_lines.begin(), init_lines.end());
+		for (auto &l : init_lines)
+		{
+			os << l << std::endl;
 		}
 
 		handled.clear();
 		os << indent << "  for (unsigned tindex=0;tindex<" << "shapeinfo->timestepper_ntstorage;tindex++)" << std::endl;
 		os << indent << "  {" << std::endl;
 
+
+		std::vector<std::string> compute_lines;
 		for (auto &s : required_shapeexps)
 		{
 			if (s.dt_order == 0 || s.basis->get_space() != this)
@@ -1295,15 +1317,22 @@ namespace pyoomph
 				std::string nodalindex = s.get_nodal_index_str(for_code);
 				if (s.dt_order == 1)
 				{
-					os << indent << "    " << varname << "[l_shape] += " <<  "shapeinfo->timestepper_weights_dt_" << timedisc_scheme << "[tindex]*" << eleminfo << "->" << nds << "[l_shape][" << nodalindex << "][tindex];" << std::endl;
+					//os << indent << "    " << varname << "[l_shape] += " <<  "shapeinfo->timestepper_weights_dt_" << timedisc_scheme << "[tindex]*" << eleminfo << "->" << nds << "[l_shape][" << nodalindex << "][tindex];" << std::endl;
+					compute_lines.push_back(indent + "    " + varname + "[l_shape] += " + "shapeinfo->timestepper_weights_dt_" + timedisc_scheme + "[tindex]*" + eleminfo + "->" + nds + "[l_shape][" + nodalindex + "][tindex];");
 				}
 				else if (s.dt_order == 2)
 				{
-					os << indent << "    " << varname << "[l_shape] += " <<   "shapeinfo->timestepper_weights_d2t_" << timedisc_scheme << "[tindex]*" << eleminfo << "->" << nds << "[l_shape][" << nodalindex << "][tindex];" << std::endl;
+					//os << indent << "    " << varname << "[l_shape] += " <<   "shapeinfo->timestepper_weights_d2t_" << timedisc_scheme << "[tindex]*" << eleminfo << "->" << nds << "[l_shape][" << nodalindex << "][tindex];" << std::endl;
+					compute_lines.push_back(indent + "    " + varname + "[l_shape] += " + "shapeinfo->timestepper_weights_d2t_" + timedisc_scheme + "[tindex]*" + eleminfo + "->" + nds + "[l_shape][" + nodalindex + "][tindex];");
 				}
 				else
 					throw_runtime_error("TODO Higher order time derivatives");
 			}
+		}
+		std::sort(compute_lines.begin(), compute_lines.end());
+		for (auto &l : compute_lines)
+		{
+			os << l << std::endl;
 		}
 
 		os << indent << "  }" << std::endl;
@@ -1316,6 +1345,7 @@ namespace pyoomph
 		std::string range = "";
 		std::string posrange = "";
 		std::set<ShapeExpansion> required_coorddiffs;
+		std::vector<std::string> decl_lines;
 		for (auto &s : required_shapeexps)
 		{
 			if (s.basis->get_space() != this)
@@ -1327,7 +1357,8 @@ namespace pyoomph
 				posrange = for_code->get_elem_info_str(s.basis->get_space()) + "->nnode";
 				hascontrib = true;
 			}
-			os << indent << "double " << varname << "=0.0;" << std::endl;
+			//os << indent << "double " << varname << "=0.0;" << std::endl;
+			decl_lines.push_back(indent + "double " + varname + "=0.0;");
 			if (including_nodal_diffs)
 			{
 				if (dynamic_cast<D1XBasisFunction *>(s.basis) && !dynamic_cast<D1XBasisFunctionLagr *>(s.basis))
@@ -1340,8 +1371,15 @@ namespace pyoomph
 		if (!hascontrib)
 			return;
 
+
+		std::sort(decl_lines.begin(), decl_lines.end());
+		for (auto &l : decl_lines)
+		{
+			os << l << std::endl;
+		}
 		os << indent << "for (unsigned int l_shape=0;l_shape<" + range + ";l_shape++)" << std::endl;
 		os << indent << "{" << std::endl;
+		std::vector<std::string> calc_lines;
 		for (auto &s : required_shapeexps)
 		{
 			if (s.basis->get_space() != this)
@@ -1349,12 +1387,20 @@ namespace pyoomph
 			std::string varname = s.get_spatial_interpolation_name(for_code);
 			std::string nodal_data = s.get_nodal_data_string(for_code, "l_shape");
 			std::string shapestr = s.get_shape_string(for_code, "l_shape");
-			os << indent << "  " << varname << "+= " << nodal_data << " * " << shapestr << ";" << std::endl;
+			//os << indent << "  " << varname << "+= " << nodal_data << " * " << shapestr << ";" << std::endl;
+			calc_lines.push_back(indent + "  " + varname + "+= " + nodal_data + " * " + shapestr + ";");
+		}
+		std::sort(calc_lines.begin(), calc_lines.end());
+		for (auto &l : calc_lines)
+		{
+			os << l << std::endl;
 		}
 		os << indent << "}" << std::endl;
 
+		
 		if (!required_coorddiffs.empty())
 		{
+			decl_lines.clear();
 			for (auto s : required_coorddiffs)
 			{
 				std::string dtstring = "d" + std::to_string(s.dt_order) + "t" + std::to_string(s.time_history_index);
@@ -1364,7 +1410,8 @@ namespace pyoomph
 				{
 					std::string code_type = for_code->get_owner_prefix(s.basis->get_space());
 					std::string coorddiffname = code_type + "intrp_" + dtstring + "_" + s.basis->get_dx_str() + "_COORDDIFF_" + std::to_string(i) + "_" + s.field->get_name();
-					os << indent << "PYOOMPH_AQUIRE_ARRAY(double," << coorddiffname << "," << posrange << ");" << std::endl;
+					//os << indent << "PYOOMPH_AQUIRE_ARRAY(double," << coorddiffname << "," << posrange << ");" << std::endl;
+					decl_lines.push_back(indent + "PYOOMPH_AQUIRE_ARRAY(double," + coorddiffname + "," + posrange + ");");
 				}
 				if (for_hessian)
 				{
@@ -1374,16 +1421,25 @@ namespace pyoomph
 						{
 							std::string code_type = for_code->get_owner_prefix(s.basis->get_space());
 							std::string coorddiffname = code_type + "intrp_" + dtstring + "_" + s.basis->get_dx_str() + "_2ndCOORDDIFF_" + std::to_string(i) + "_" + std::to_string(j) + "_" + s.field->get_name();
-							os << indent << "PYOOMPH_AQUIRE_TWO_D_ARRAY(double," << coorddiffname << "," << posrange << "," << posrange << ");" << std::endl;
+							//os << indent << "PYOOMPH_AQUIRE_TWO_D_ARRAY(double," << coorddiffname << "," << posrange << "," << posrange << ");" << std::endl;
+							decl_lines.push_back(indent + "PYOOMPH_AQUIRE_TWO_D_ARRAY(double," + coorddiffname + "," + posrange + "," + posrange + ");");
 						}
 					}
 				}
+				
+			}
+			std::sort(decl_lines.begin(), decl_lines.end());
+			for (auto &l : decl_lines)
+			{
+				os << l << std::endl;
 			}
 			if (!for_hessian)
 				os << indent << "if (flag)" << std::endl;
 			os << indent << "{" << std::endl
 			   << indent << " for (unsigned int m=0;m<" << posrange << ";m++)" << std::endl
 			   << indent << " {" << std::endl;
+			std::vector<std::string> init_lines;
+			calc_lines.clear();
 			for (auto s : required_coorddiffs)
 			{
 				std::string dtstring = "d" + std::to_string(s.dt_order) + "t" + std::to_string(s.time_history_index);
@@ -1393,9 +1449,15 @@ namespace pyoomph
 				{
 					std::string code_type = for_code->get_owner_prefix(s.basis->get_space());
 					std::string coorddiffname = code_type + "intrp_" + dtstring + "_" + s.basis->get_dx_str() + "_COORDDIFF_" + std::to_string(i) + "_" + s.field->get_name();
-					os << indent << "    " << coorddiffname << "[m]=0.0;" << std::endl;
-				}
+					//os << indent << "    " << coorddiffname << "[m]=0.0;" << std::endl;
+					init_lines.push_back(indent + "    " + coorddiffname + "[m]=0.0;");
+				}				
 			}
+			std::sort(init_lines.begin(), init_lines.end());
+			for (auto &l : init_lines)
+			{
+				os << l << std::endl;
+			}	
 
 			os << indent << "    for (unsigned int l_shape=0;l_shape<" + range + ";l_shape++)" << std::endl
 			   << indent << "    {" << std::endl;
@@ -1410,12 +1472,20 @@ namespace pyoomph
 					std::string coorddiffname = code_type + "intrp_" + dtstring + "_" + s.basis->get_dx_str() + "_COORDDIFF_" + std::to_string(i) + "_" + s.field->get_name();
 					std::string nodal_data = s.get_nodal_data_string(for_code, "l_shape");
 					std::string shapestr = for_code->get_shape_info_str(s.basis->get_space()) + "->d_dx_shape_dcoord_" + s.basis->get_space()->get_shape_name() + "[l_shape][" + std::to_string(dynamic_cast<D1XBasisFunction *>(s.basis)->get_direction()) + "][m][" + std::to_string(i) + "]";
-					os << indent << "       " << coorddiffname << "[m]+=" << nodal_data << " * " << shapestr << ";" << std::endl;
+					//os << indent << "       " << coorddiffname << "[m]+=" << nodal_data << " * " << shapestr << ";" << std::endl;
+					calc_lines.push_back(indent + "       " + coorddiffname + "[m]+=" + nodal_data + " * " + shapestr + ";");
 				}
 			}
-			os << indent << "    }" << std::endl;
+			std::sort(calc_lines.begin(), calc_lines.end());
+			for (auto &l : calc_lines)
+			{
+				os << l << std::endl;
+			}
+			os << indent << "    }" << std::endl;			
 			if (for_hessian)
 			{
+				init_lines.clear();
+				std::vector<std::string> hess_lines;
 				os << indent << "    for (unsigned int m2=0;m2<" << posrange << ";m2++)" << std::endl
 				   << indent << "    {" << std::endl;
 
@@ -1430,8 +1500,14 @@ namespace pyoomph
 						{
 							std::string code_type = for_code->get_owner_prefix(s.basis->get_space());
 							std::string coorddiffname = code_type + "intrp_" + dtstring + "_" + s.basis->get_dx_str() + "_2ndCOORDDIFF_" + std::to_string(i) + "_" + std::to_string(j) + "_" + s.field->get_name();
-							os << indent << "       " << coorddiffname << "[m][m2]=0.0;" << std::endl;
+							//os << indent << "       " << coorddiffname << "[m][m2]=0.0;" << std::endl;
+							init_lines.push_back(indent + "       " + coorddiffname + "[m][m2]=0.0;");
 						}
+					}
+					std::sort(init_lines.begin(), init_lines.end());
+					for (auto &l : init_lines)
+					{
+						os << l << std::endl;
 					}
 					os << indent << "       for (unsigned int l_shape=0;l_shape<" + range + ";l_shape++)" << std::endl
 					   << indent << "       {" << std::endl;
@@ -1450,8 +1526,14 @@ namespace pyoomph
 							std::string coorddiffname = code_type + "intrp_" + dtstring + "_" + s.basis->get_dx_str() + "_2ndCOORDDIFF_" + std::to_string(i) + "_" + std::to_string(j) + "_" + s.field->get_name();
 							std::string nodal_data = s.get_nodal_data_string(for_code, "l_shape");
 							std::string shapestr = for_code->get_shape_info_str(s.basis->get_space()) + "->d2_dx2_shape_dcoord_" + s.basis->get_space()->get_shape_name() + "[l_shape][" + std::to_string(dynamic_cast<D1XBasisFunction *>(s.basis)->get_direction()) + "][m][" + std::to_string(i) + "][m2][" + std::to_string(j) + "]";
-							os << indent << "             " << coorddiffname << "[m][m2]+=" << nodal_data << " * " << shapestr << ";" << std::endl;
+							//os << indent << "             " << coorddiffname << "[m][m2]+=" << nodal_data << " * " << shapestr << ";" << std::endl;
+							hess_lines.push_back(indent + "             " + coorddiffname + "[m][m2]+=" + nodal_data + " * " + shapestr + ";");
 						}
+					}
+					std::sort(hess_lines.begin(), hess_lines.end());
+					for (auto &l : hess_lines)
+					{
+						os << l << std::endl;
 					}
 					//					}
 					//					os << indent << "         }" << std::endl;
@@ -1934,7 +2016,11 @@ namespace pyoomph
 			}
 		}
 
-		std::set<FiniteElementField *> jacobian_fields;
+		auto cmp = [&for_code](FiniteElementField * a, FiniteElementField * b) 
+		{ 			
+			return a->get_nodal_index_str(for_code) < b->get_nodal_index_str(for_code); 
+		};
+		std::set<FiniteElementField *,decltype(cmp)> jacobian_fields(cmp);
 		for (auto &s : jacobian_shapes)
 		{
 			if (s.field->get_space() == this)
@@ -2104,7 +2190,7 @@ namespace pyoomph
 					oss << indent << "    BEGIN_RESIDUAL_CONTINUOUS_SPACE(" << eqn_index << ",";
 					if (for_code->is_current_residual_assembly_ignored())
 					{
-						oss << "0 /* IGNORED RESIDUAL: " << std::endl << var_part << std::endl << std::endl ;
+						oss << "0 /* IGNORED RESIDUAL " << std::endl; //<< var_part << std::endl << std::endl ;
 					}
 					//else
 					//{
@@ -2127,7 +2213,7 @@ namespace pyoomph
 					oss << indent << "    BEGIN_RESIDUAL(" << eqn_index << ", ";
 					if (for_code->is_current_residual_assembly_ignored())
 					{
-						oss << "0 /* IGNORED RESIDUAL: " << std::endl << var_part << std::endl << std::endl ;
+						oss << "0 /* IGNORED RESIDUAL: " << std::endl /*<< var_part << std::endl << std::endl */;
 					}
 					/*else
 					{*/
@@ -2178,10 +2264,18 @@ namespace pyoomph
 			{
 				if (!hessian)
 					oss << indent << "      BEGIN_JACOBIAN()" << std::endl;
-				std::set<FiniteElementField *> jacobian_fields;
+				auto cmp=[&for_code](FiniteElementField * a, FiniteElementField * b) 
+				{ 			
+					return a->get_nodal_index_str(for_code) < b->get_nodal_index_str(for_code); 
+				};
+				std::set<FiniteElementField *, decltype(cmp)> jacobian_fields(cmp);
 				for (auto &s : jacobian_shapes)
 					jacobian_fields.insert(s.field);
-				std::set<FiniteElementSpace *> jacobian_spaces;
+				auto cmp_spaces=[&for_code](FiniteElementSpace * a, FiniteElementSpace * b) 
+				{ 			
+					return a->get_name()<b->get_name() || (a->get_name()==b->get_name() &&  a->get_code()->get_full_domain_name() < b->get_code()->get_full_domain_name()); 
+				};
+				std::set<FiniteElementSpace *, decltype(cmp_spaces)> jacobian_spaces(cmp_spaces);
 				for (auto *s : jacobian_fields)
 					jacobian_spaces.insert(s->get_space());
 				if (pyoomph_verbose)
@@ -3804,9 +3898,16 @@ namespace pyoomph
 			}
 		}
 
+		std::vector<std::string> indices_lines;
 		for (auto *f : indices_required)
 		{
-			osh << "  const unsigned " << f->get_nodal_index_str(this) << " = " << f->index << ";" << std::endl;
+			//osh << "  const unsigned " << f->get_nodal_index_str(this) << " = " << f->index << ";" << std::endl;
+			indices_lines.push_back("  const unsigned " + f->get_nodal_index_str(this) + " = " + std::to_string(f->index) + ";");
+		}
+		std::sort(indices_lines.begin(), indices_lines.end());
+		for (auto &l : indices_lines)
+		{
+			osh << l << std::endl;
 		}
 		osh << "  //START: Precalculate time derivatives of the necessary data" << std::endl;
 		for (auto *sp : allspaces)
@@ -4007,9 +4108,16 @@ namespace pyoomph
 			}
 		}
 
+		std::vector<std::string> indices_lines;
 		for (auto *f : indices_required)
 		{
-			os << "  const unsigned " << f->get_nodal_index_str(this) << " = " << f->index << ";" << std::endl;
+			//os << "  const unsigned " << f->get_nodal_index_str(this) << " = " << f->index << ";" << std::endl;
+			indices_lines.push_back("  const unsigned " + f->get_nodal_index_str(this) + " = " + std::to_string(f->index) + ";");
+		}
+		std::sort(indices_lines.begin(), indices_lines.end());
+		for (auto &l : indices_lines)
+		{
+			os << l << std::endl;
 		}
 
 		os << "  //START: Precalculate time derivatives of the necessary data" << std::endl;
@@ -4704,6 +4812,7 @@ namespace pyoomph
 	void FiniteElementCode::write_code(std::ostream &os)
 	{
 		__current_code = this;
+		this->archive.clear();
 		CustomMathExpressionBase::code_map.clear();
 		CustomMultiReturnExpressionBase::code_map.clear();
 		find_all_accessible_spaces();
@@ -5852,6 +5961,7 @@ namespace pyoomph
 		bool require_bulk_bulk = false;
 		bool require_opposite_interface = false;
 		bool require_opposite_bulk = false;
+		std::vector<std::string> lines;
 		for (auto &fieldentry : entry)
 		{
 
@@ -5862,7 +5972,7 @@ namespace pyoomph
 				{
 					if (subentry.second)
 					{
-						os << indent << "functable->shapes_required_" << func_type << "." << subentry.first << " = true;" << std::endl;
+						lines.push_back(indent + "functable->shapes_required_" + func_type + "." + subentry.first + " = true;");
 					}
 				}
 				continue;
@@ -5951,7 +6061,9 @@ namespace pyoomph
 			{
 				if (psientry.second)
 				{
-					os << indent << "functable->shapes_required_" << func_type << "." << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
+					//os << indent << "functable->shapes_required_" << func_type << "." << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
+					lines.push_back(indent + "functable->shapes_required_" + func_type + "." + psientry.first + "_" + fieldentry.first->get_name() + " = true;");
+					
 				}
 			}
 		}
@@ -6011,14 +6123,16 @@ namespace pyoomph
 				{
 					if (psientry.second)
 					{
-						os << indent << "functable->shapes_required_" << func_type << ".bulk_shapes->" << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
+						//os << indent << "functable->shapes_required_" << func_type << ".bulk_shapes->" << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
+						lines.push_back(indent + "functable->shapes_required_" + func_type + ".bulk_shapes->" + psientry.first + "_" + fieldentry.first->get_name() + " = true;");
 					}
 				}
 			}
 
 			if (just_the_normal)
 			{
-				os << indent << "functable->shapes_required_" << func_type << ".bulk_shapes->psi_Pos = true;" << std::endl;
+				//os << indent << "functable->shapes_required_" << func_type << ".bulk_shapes->psi_Pos = true;" << std::endl;
+				lines.push_back(indent + "functable->shapes_required_" + func_type + ".bulk_shapes->psi_Pos = true;");
 			}
 
 			if (require_bulk_bulk)
@@ -6044,13 +6158,15 @@ namespace pyoomph
 					{
 						if (psientry.second)
 						{
-							os << indent << "functable->shapes_required_" << func_type << ".bulk_shapes->bulk_shapes->" << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
+							//os << indent << "functable->shapes_required_" << func_type << ".bulk_shapes->bulk_shapes->" << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
+							lines.push_back(indent + "functable->shapes_required_" + func_type + ".bulk_shapes->bulk_shapes->" + psientry.first + "_" + fieldentry.first->get_name() + " = true;");
 						}
 					}
 				}
 				if (just_the_parent_normal)
 				{
-					os << indent << "functable->shapes_required_" << func_type << ".bulk_shapes->bulk_shapes->psi_Pos = true;" << std::endl;
+					//os << indent << "functable->shapes_required_" << func_type << ".bulk_shapes->bulk_shapes->psi_Pos = true;" << std::endl;
+					lines.push_back(indent + "functable->shapes_required_" + func_type + ".bulk_shapes->bulk_shapes->psi_Pos = true;");
 				}
 			}
 		}
@@ -6089,14 +6205,16 @@ namespace pyoomph
 				{
 					if (psientry.second)
 					{
-						os << indent << "functable->shapes_required_" << func_type << ".opposite_shapes->" << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
+						//os << indent << "functable->shapes_required_" << func_type << ".opposite_shapes->" << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
+						lines.push_back(indent + "functable->shapes_required_" + func_type + ".opposite_shapes->" + psientry.first + "_" + fieldentry.first->get_name() + " = true;");
 					}
 				}
 			}
 
 			if (just_the_opposite_normal)
 			{
-				os << indent << "functable->shapes_required_" << func_type << ".opposite_shapes->psi_Pos = true;" << std::endl;
+				//os << indent << "functable->shapes_required_" << func_type << ".opposite_shapes->psi_Pos = true;" << std::endl;
+				lines.push_back(indent + "functable->shapes_required_" + func_type + ".opposite_shapes->psi_Pos = true;");
 			}
 			/*
 			if (just_the_normal) //TODO: THis required here?
@@ -6130,7 +6248,8 @@ namespace pyoomph
 				{
 					if (psientry.second)
 					{
-						os << indent << "functable->shapes_required_" << func_type << ".opposite_shapes->bulk_shapes->" << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
+						//os << indent << "functable->shapes_required_" << func_type << ".opposite_shapes->bulk_shapes->" << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
+						lines.push_back(indent + "functable->shapes_required_" + func_type + ".opposite_shapes->bulk_shapes->" + psientry.first + "_" + fieldentry.first->get_name() + " = true;");
 					}
 				}
 			}
@@ -6140,6 +6259,12 @@ namespace pyoomph
 			  os << indent << "functable->shapes_required_"  << func_type << ".bulk_shapes->psi_Pos = true;" << std::endl;
 			}
 			*/
+		}
+
+		std::sort(lines.begin(), lines.end());
+		for (auto &l : lines)
+		{
+			os << l << std::endl;
 		}
 	}
 
@@ -7205,6 +7330,186 @@ namespace pyoomph
 
 namespace GiNaC
 {
+
+
+	/// SORTED PRINTS
+	SortedGiNaC::~SortedGiNaC() 
+	{
+		for (auto ptr : op) {                
+			delete ptr;
+		}
+	}
+
+	bool SortedGiNaC::add_sort_compare(SortedGiNaC * other,std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
+	{
+		int add_order1 = this->add_order();
+		int add_order2 = other->add_order();
+		if (add_order1 != add_order2) {
+			return add_order1 < add_order2;
+		}
+		else {
+			return this->to_string(os, csrc_opts) < other->to_string(os, csrc_opts);
+		}
+	}
+
+    bool SortedGiNaC::mul_sort_compare(SortedGiNaC * other,std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
+	{
+		int mul_order1 = this->mul_order();
+		int mul_order2 = other->mul_order();
+		if (mul_order1 != mul_order2) {
+			return mul_order1 < mul_order2;
+		}
+		else {
+			return this->to_string(os, csrc_opts) < other->to_string(os, csrc_opts);
+		}
+	}
+
+
+	std::string SortedGiNaCNumeric::to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
+	{
+		std::ostringstream ss;
+		GiNaC::print_csrc_FEM p(ss, &csrc_opts);
+		value.print(p);
+		return ss.str();
+	}
+
+	std::string SortedGiNaCAdd::to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
+	{
+		std::string res="(";
+		for (size_t i=0;i<op.size();i++) {
+			if (i>0) res+="+";
+			res+=op[i]->to_string(os, csrc_opts);
+		}
+		res+=")";
+		return res;
+	}
+    int SortedGiNaCAdd::add_order() 
+    {
+        throw std::runtime_error("Not implemented. Add order for add makes no sense for expanded expressions.");
+    }
+
+	std::string SortedGiNaCMul::to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) 
+	{
+		std::string res="(";
+		for (size_t i=0;i<op.size();i++) {
+			if (i>0) res+="*";
+			res+=op[i]->to_string(os, csrc_opts);
+		}
+		res+=")";
+		return res;
+	}
+    int SortedGiNaCMul::mul_order() 
+    {
+            throw_runtime_error("Not implemented. Mul order for mul makes no sense for expanded expressions.");
+    }
+
+	std::string SortedGiNaCPow::to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) 
+	{
+		std::string res="pow(";
+		res+=op[0]->to_string(os, csrc_opts);
+		res+=",";
+		res+=op[1]->to_string(os, csrc_opts);
+		res+=")";
+		return res;
+	}
+
+	std::string SortedGiNaCFunction::to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
+	{
+		std::string res=fname+"(";
+		for (size_t i=0;i<op.size();i++) {
+			if (i>0) res+=",";
+			res+=op[i]->to_string(os, csrc_opts);
+		}
+		res+=")";
+		return res;
+	}
+
+	std::string SortedGiNaCStruct::to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) 
+	{
+		std::ostringstream ss;
+		GiNaC::print_csrc_FEM p(ss, &csrc_opts);
+		contents.print(p);
+		return ss.str();
+	}
+	int SortedGiNaCStruct::mul_order() 
+	{
+		return 6; 
+	}
+
+	SortedGiNaC * SortedGiNaC::factory(const ex & e,std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
+    {
+		ex expa=e.expand();
+		if (is_a<numeric>(expa)) 
+		{
+			/*if (ex_to<numeric>(expa).is_crational() && !is_zero(ex_to<numeric>(expa).denom())-1) 
+			{
+				return new SortedGiNaCNumeric(ex_to<numeric>(expa).to_int64());
+			}*/
+			return new SortedGiNaCNumeric(ex_to<numeric>(expa));
+		}
+		else if (is_a<constant>(expa)) {
+			return new SortedGiNaCNumeric(ex_to<numeric>(ex_to<constant>(expa).evalf()));
+		}
+		else if (is_a<add>(expa)) {
+			std::vector<SortedGiNaC*> ops;
+			for (size_t i=0;i<expa.nops();i++) {
+				ops.push_back(SortedGiNaC::factory(expa.op(i), os, csrc_opts));
+			}
+			std::sort(ops.begin(), ops.end(),
+						[&os,&csrc_opts](SortedGiNaC * a, SortedGiNaC * b) {
+							return a->add_sort_compare(b,os, csrc_opts);
+						});
+			return new SortedGiNaCAdd(ops);
+		}
+		else if (is_a<mul>(expa)) {
+			std::vector<SortedGiNaC*> ops;
+			for (size_t i=0;i<expa.nops();i++) {
+				ops.push_back(SortedGiNaC::factory(expa.op(i), os, csrc_opts));
+			}
+			std::sort(ops.begin(), ops.end(),                          
+						[&os,&csrc_opts](SortedGiNaC * a, SortedGiNaC * b) {
+							return a->mul_sort_compare(b,os, csrc_opts);
+						});
+			return new SortedGiNaCMul(ops);
+		}
+		else if (is_a<power>(expa)) {
+			SortedGiNaC * base=SortedGiNaC::factory(expa.op(0), os, csrc_opts);
+			SortedGiNaC * exp=SortedGiNaC::factory(expa.op(1), os, csrc_opts);
+			GINAC_ASSERT(expa.nops()==2);
+			return new SortedGiNaCPow(base, exp);
+		}
+		else if (is_a<function>(expa)) {
+			std::vector<SortedGiNaC*> ops;
+			for (size_t i=0;i<expa.nops();i++) {
+				ops.push_back(SortedGiNaC::factory(expa.op(i), os, csrc_opts));
+			}
+			return new SortedGiNaCFunction(ex_to<function>(expa).get_name(), ops);
+		}
+		else if (is_a<symbol>(expa)) {
+			return new SortedGiNaCSymbol(ex_to<symbol>(expa).get_name());
+		}
+		else if (is_a<GiNaCTestFunction>(expa) || is_a<GiNaCShapeExpansion>(expa) || is_a<GiNaCSubExpression>(expa) || is_a<GiNaCSpatialIntegralSymbol>(expa) || is_a<GiNaCNormalSymbol>(expa) || is_a<GiNaCFakeExponentialMode>(expa) || is_a<GiNaCGlobalParameterWrapper>(expa)) 
+		{
+			return new SortedGiNaCStruct(expa);
+		}
+		else if (expa.is_zero())
+		{
+			return new SortedGiNaCStruct(0+expa);
+		}
+		else {
+			std::ostringstream err;
+			err << "Non implemented type in SortedGiNaC factory, got: " << expa;
+			throw_runtime_error(err.str());
+		}
+    }
+
+	std::ostream &  print_sorted_GiNaC(ex  e,std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
+    {
+        SortedGiNaC * root=SortedGiNaC::factory(e, os, csrc_opts);
+        os << root->to_string(os, csrc_opts);
+        delete root;
+        return os; 
+    }
 
 	print_csrc_FEM::print_csrc_FEM() : GiNaC::print_csrc_double(std::cout)
 	{
