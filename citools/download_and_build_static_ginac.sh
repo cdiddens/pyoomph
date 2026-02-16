@@ -31,8 +31,8 @@ rm -rf "$PYOOMPH_STATIC_GINAC_DIR/ginac"  || exit 1
 
 
 cd $PYOOMPH_STATIC_GINAC_DIR || exit 1
-git clone git://www.ginac.de/cln.git || exit 1
-git clone git://www.ginac.de/ginac.git || exit 1
+git clone https://codeberg.org/ginac/cln.git || exit 1
+git clone https://codeberg.org/ginac/ginac.git || exit 1
 
 #cp -r $AUTOTTOLS_FILES/m4 cln/
 #cp -r $AUTOTTOLS_FILES/build-aux cln/

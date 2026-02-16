@@ -573,7 +573,7 @@ namespace pyoomph
       virtual void write_spatial_interpolation(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, std::set<ShapeExpansion> &required_shapeexps, bool including_nodal_diffs, bool for_hessian);
       virtual void write_nodal_time_interpolation(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, std::set<ShapeExpansion> &required_shapeexps);
       virtual bool write_generic_RJM_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hessian);
-      virtual void write_generic_RJM_jacobian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns);
+      virtual void write_generic_RJM_jacobian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns,FiniteElementField * residual_field);
       virtual bool write_generic_Hessian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns);
       FiniteElementSpace(FiniteElementCode *_code, const std::string &_name) : code(_code), name(_name), Basis(new BasisFunction(this)) {}
       virtual ~FiniteElementSpace()
@@ -603,7 +603,7 @@ namespace pyoomph
       virtual std::string get_num_nodes_str(FiniteElementCode *forcode) const;
       virtual std::string get_eqn_number_str(FiniteElementCode *forcode) const;
       PositionFiniteElementSpace(FiniteElementCode *_code, const std::string &_name) : ContinuousFiniteElementSpace(_code, _name) {}
-      virtual void write_generic_RJM_jacobian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns);
+      virtual void write_generic_RJM_jacobian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns,FiniteElementField * residual_field);
       virtual bool write_generic_Hessian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns);
    };
 
@@ -665,7 +665,8 @@ namespace pyoomph
       std::string name;
       FiniteElementSpace *space;
       GiNaC::symbol symb;
-
+      std::map<FiniteElementCode *, std::set<unsigned>> residual_contribution_for_code; // For each code, the residual indices for which this field has a contribution
+      std::map<FiniteElementCode *, std::map<unsigned ,std::set<FiniteElementField*> >> jacobian_contribution_for_code; // For each code, the residual indices for which this field has a contribution
    public:
       double discontinuous_refinement_exponent = 0.0;
       bool no_jacobian_at_all; // used for Lagrangian entries
@@ -693,6 +694,10 @@ namespace pyoomph
       }
       GiNaC::ex get_test_function() { return 0 + GiNaC::GiNaCTestFunction(TestFunction(this, space->get_basis())); }
       virtual std::string get_hanginfo_str(FiniteElementCode *forcode) const;
+      bool has_residual_contribution_for_code(FiniteElementCode *code,unsigned residual_index);
+      bool has_jacobian_contribution_for_code(FiniteElementCode *code,unsigned residual_index, FiniteElementField *other);
+      void mark_residual_contribution_for_code(FiniteElementCode *code,unsigned residual_index);
+      void mark_jacobian_contribution_for_code(FiniteElementCode *code,unsigned residual_index, FiniteElementField *other);
    };
 
    class FiniteElementCodeSubExpression
@@ -753,6 +758,7 @@ namespace pyoomph
 
       std::vector<FiniteElementSpace *> allspaces;
       std::vector<FiniteElementField *> myfields;
+      std::set<FiniteElementField*> contributing_fields;
       int stage; // 0: we can register fields, 1: fields are registered (cannot add any more), but now we can add residuals
 
       unsigned nodal_dim, lagr_dim;
@@ -801,6 +807,8 @@ namespace pyoomph
       virtual GiNaC::ex extract_spatial_integral_part(const GiNaC::ex &inp, bool eulerian, bool lagrangian);
 
    public:
+      void add_contributing_field(FiniteElementField *field) { contributing_fields.insert(field); }
+      unsigned get_current_residual_index() const { return residual_index; }
       virtual void mark_nonconstant_mass_matrix() {has_constant_mass_matrix_for_sure[residual_index]=false;}
       virtual void set_reference_point_for_IC_and_DBC(double x, double y, double z, double t, double nx, double ny, double nz)
       {

@@ -38,7 +38,7 @@ mkdir -p $PREFIX || exit 1
 # cln
 rm -rf "$PYOOMPH_STATIC_GINAC_DIR/cln"  || exit 1
 cd $PYOOMPH_STATIC_GINAC_DIR || exit 1
-git clone git://www.ginac.de/cln.git || exit 1
+git clone https://codeberg.org/ginac/cln.git || exit 1
 #cp -r $AUTOTTOLS_FILES/m4 cln/ || exit 1
 #cp -r $AUTOTTOLS_FILES/build-aux cln/ || exit 1
 cd cln || exit 1
@@ -50,7 +50,7 @@ make  MAKEINFO=true install -j 4 || exit
 # ginac
 rm -rf "$PYOOMPH_STATIC_GINAC_DIR/ginac"  || exit 1
 cd $PYOOMPH_STATIC_GINAC_DIR
-git clone git://www.ginac.de/ginac.git || exit 1
+git clone https://codeberg.org/ginac/ginac.git || exit 1
 cd ginac || exit 1
 autoreconf -i -f  || exit 1
 CLN_CFLAGS="-I$PREFIX/include" CLN_LIBS="-L$PREFIX/lib -l:libcln.a" ./configure --with-pic=yes $DEBUG_CONFIGURE --disable-shared --enable-static --prefix "$PREFIX" $PYOOMPH_GINAC_CONFIGURE_OPTIONS

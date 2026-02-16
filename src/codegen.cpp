@@ -1015,6 +1015,37 @@ namespace pyoomph
 		return field->get_nodal_index_str(forcode);
 	}
 
+	bool FiniteElementField::has_residual_contribution_for_code(FiniteElementCode *code,unsigned residual_index)
+	{
+		return this->residual_contribution_for_code.count(code) > 0 && this->residual_contribution_for_code[code].count(residual_index) > 0;
+	}
+
+    bool FiniteElementField::has_jacobian_contribution_for_code(FiniteElementCode *code,unsigned residual_index, FiniteElementField *other)
+	{
+		return this->jacobian_contribution_for_code.count(code) > 0 && this->jacobian_contribution_for_code[code].count(residual_index) > 0 && this->jacobian_contribution_for_code[code][residual_index].count(other) > 0;
+	}
+    void FiniteElementField::mark_residual_contribution_for_code(FiniteElementCode *code,unsigned residual_index)
+	{
+	  if (!this->residual_contribution_for_code.count(code))
+	  {
+		this->residual_contribution_for_code[code]=std::set<unsigned>();
+	  }
+      this->residual_contribution_for_code[code].insert(residual_index);
+	}
+    void FiniteElementField::mark_jacobian_contribution_for_code(FiniteElementCode *code,unsigned residual_index, FiniteElementField *other)
+	{
+		if (!this->jacobian_contribution_for_code.count(code))
+		{
+			this->jacobian_contribution_for_code[code]=std::map<unsigned,std::set<FiniteElementField*>>();
+		}
+		if (!this->jacobian_contribution_for_code[code].count(residual_index))
+		{
+			this->jacobian_contribution_for_code[code][residual_index]=std::set<FiniteElementField*>();
+		}
+		this->jacobian_contribution_for_code[code][residual_index].insert(other);
+
+	}
+
 	std::string FiniteElementField::get_nodal_index_str(FiniteElementCode *forcode) const
 	{
 		std::string code_type = forcode->get_owner_prefix(space);
@@ -1591,11 +1622,11 @@ namespace pyoomph
 			return false;
 	}
 
-	void PositionFiniteElementSpace::write_generic_RJM_jacobian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns)
+	void PositionFiniteElementSpace::write_generic_RJM_jacobian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns,FiniteElementField * residual_field)
 	{
 		// Only do it if the coordinates are Dofs
 		if (for_code->coordinates_as_dofs)
-			FiniteElementSpace::write_generic_RJM_jacobian_contribution(for_code, os, indent, for_what, hanging_eqns);
+			FiniteElementSpace::write_generic_RJM_jacobian_contribution(for_code, os, indent, for_what, hanging_eqns,residual_field);
 	}
 
 	bool FiniteElementSpace::write_generic_Hessian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns)
@@ -1981,7 +2012,7 @@ namespace pyoomph
 		return has_contribs;
 	}
 
-	void FiniteElementSpace::write_generic_RJM_jacobian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns)
+	void FiniteElementSpace::write_generic_RJM_jacobian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns,FiniteElementField * residual_field)
 	{
 		GiNaC::print_FEM_options csrc_opts;
 		csrc_opts.for_code = for_code;
@@ -2068,7 +2099,9 @@ namespace pyoomph
 			if (pyoomph_verbose)
 				std::cout << "DIFF PART IS " << diffpart << std::endl;
 			std::string eqn_index = f->get_equation_str(for_code, l_shape);
-
+			residual_field->mark_jacobian_contribution_for_code(for_code,for_code->get_current_residual_index(),f);
+			for_code->add_contributing_field(residual_field);
+			for_code->add_contributing_field(f);
 			if (hang)
 			{
 				std::string nodal_index = f->get_nodal_index_str(for_code);
@@ -2184,6 +2217,8 @@ namespace pyoomph
 			bool can_have_hanging = this->can_have_hanging_nodes() || for_code != this->code; // Always hang for external spaces
 			if (!hessian)
 			{
+				field->mark_residual_contribution_for_code(for_code,for_code->get_current_residual_index());
+				for_code->add_contributing_field(field);
 				has_contribs = true;
 				if (can_have_hanging)
 				{
@@ -2285,7 +2320,7 @@ namespace pyoomph
 					if (pyoomph_verbose)
 						std::cout << "writing contrib of domain " << s->get_code() << std::endl;
 					if (!hessian)
-						s->write_generic_RJM_jacobian_contribution(for_code, oss, indent + "        ", var_part, can_have_hanging);
+						s->write_generic_RJM_jacobian_contribution(for_code, oss, indent + "        ", var_part, can_have_hanging,field);
 					else
 					{
 						std::ostringstream hessian_inner;
@@ -6896,6 +6931,10 @@ namespace pyoomph
 		init << " functable->has_constant_mass_matrix_for_sure=(bool*)calloc(functable->num_res_jacs,sizeof(bool));" << std::endl;
 		cleanup << " pyoomph_tested_free(functable->has_constant_mass_matrix_for_sure); functable->has_constant_mass_matrix_for_sure=PYOOMPH_NULL; " << std::endl;
 
+		
+		
+		
+
 		for (unsigned int resiind = 0; resiind < residual.size(); resiind++)
 		{
 			init << " SET_INTERNAL_FIELD_NAME(functable->res_jac_names," << resiind << ", \"" << residual_names[resiind] << "\" );" << std::endl;
@@ -6903,7 +6942,7 @@ namespace pyoomph
 			if (!residual[resiind].is_zero())
 			{
 				init << " functable->ResidualAndJacobian_NoHang[" << resiind << "]=&ResidualAndJacobian" << resiind << ";" << std::endl;
-				init << " functable->ResidualAndJacobian[" << resiind << "]=&ResidualAndJacobian" << resiind << ";" << std::endl;
+				init << " functable->ResidualAndJacobian[" << resiind << "]=&ResidualAndJacobian" << resiind << ";" << std::endl;				
 				if (extra_steady_routine[resiind])
 				{
 					init << " functable->ResidualAndJacobianSteady[" << resiind << "]=&ResidualAndJacobianSteady" << resiind << ";" << std::endl;
@@ -6928,6 +6967,8 @@ namespace pyoomph
 			init << " functable->has_constant_mass_matrix_for_sure[" << resiind << "] = " << (has_constant_mass_matrix_for_sure[resiind] ? "true" : "false") << ";" << std::endl;	
 		}
 		cleanup << " pyoomph_tested_free(functable->res_jac_names); functable->res_jac_names=PYOOMPH_NULL; " << std::endl;	
+
+		
 
 		if (generate_hessian)
 			init << " functable->hessian_generated=true;" << std::endl
@@ -6990,6 +7031,7 @@ namespace pyoomph
 
 		std::vector<std::string> dirichlet_set_names;
 		std::vector<bool> dirichlet_set_true;
+		std::map<int, FiniteElementField*> dirichlet_index_to_field;
 		for (auto *f : myfields)
 		{
 			int myindex = f->index;
@@ -7022,6 +7064,7 @@ namespace pyoomph
 			// std::cout << "DIRICHLET INFO " << nam << "INDEX " << myindex << " SET " <<  f->Dirichlet_condition_set << std::endl;
 			dirichlet_set_names[myindex] = nam;
 			dirichlet_set_true[myindex] = f->Dirichlet_condition_set;
+			dirichlet_index_to_field[myindex] = f;
 		}
 
 		init << " functable->Dirichlet_set_size=" << dirichlet_set_names.size() << ";" << std::endl;
@@ -7042,6 +7085,67 @@ namespace pyoomph
 		}
       cleanup << " pyoomph_tested_free(functable->Dirichlet_names); functable->Dirichlet_names=PYOOMPH_NULL; " << std::endl;			         							
       cleanup << " pyoomph_tested_free(functable->Dirichlet_set); functable->Dirichlet_set=PYOOMPH_NULL; " << std::endl;
+
+
+	  // Build the contribution mapping
+	  std::vector<std::string> contribution_names;
+	  std::map<std::string, unsigned> contribution_name_to_index;	  
+	  std::map<FiniteElementField*, unsigned> contribution_field_to_index;
+	  for (auto *f : contributing_fields)
+	  {
+		std::string n=f->get_space()->get_code()->get_full_domain_name()+"/"+f->get_name();
+		if (contribution_name_to_index.count(n)==0)
+		{
+			int index=contribution_names.size();
+			contribution_names.push_back(n);
+			contribution_name_to_index[n]=index;
+			contribution_field_to_index[f]=index;
+		}		
+	  }
+
+	  init << " functable->contributes_to_residual=(bool**)calloc(functable->num_res_jacs,sizeof(*functable->contributes_to_residual));" << std::endl;
+	  init << " functable->contributes_to_jacobian=(bool***)calloc(functable->num_res_jacs,sizeof(*functable->contributes_to_jacobian));" << std::endl;
+	  init << " functable->contribution_entries_size=" << contribution_names.size() << ";" << std::endl;
+	  init << " functable->contribution_names=(char**)calloc(functable->contribution_entries_size,sizeof(char*));" << std::endl;
+	  cleanup << " for (unsigned int i=0;i<functable->contribution_entries_size;i++) { pyoomph_tested_free(functable->contribution_names[i]); functable->contribution_names[ i]=PYOOMPH_NULL; }" << std::endl;
+	  cleanup << " pyoomph_tested_free(functable->contribution_names); functable->contribution_names=PYOOMPH_NULL; " << std::endl;
+	  for (unsigned int i=0;i<contribution_names.size();i++)
+	  {
+		  init << " SET_INTERNAL_FIELD_NAME(functable->contribution_names," << i << ", \"" << contribution_names[i] << "\" );" << std::endl;
+		  
+	  }
+	  
+	  for (unsigned int resiind = 0; resiind < residual.size(); resiind++)
+	  {
+				init << " functable->contributes_to_residual[" << resiind << "]=(bool*)calloc("<< contribution_names.size() <<",sizeof(bool));" << std::endl;				
+				init << " functable->contributes_to_jacobian[" << resiind << "]=(bool**)calloc("<< contribution_names.size() <<",sizeof(**functable->contributes_to_jacobian));" << std::endl;				
+				init << " for (unsigned int _i=0;_i<"<< contribution_names.size() <<";_i++) { functable->contributes_to_jacobian[" << resiind << "][_i]=(bool*)calloc("<< contribution_names.size() <<",sizeof(bool)); }" << std::endl;				
+				for (auto &pair1 : contribution_field_to_index)
+				{
+					int i1 = pair1.second;
+					FiniteElementField *f = pair1.first;					
+					if (f->has_residual_contribution_for_code(this,resiind))
+					{
+						init << " functable->contributes_to_residual[" << resiind << "][" << i1 << "]=true; //" << contribution_names[i1] << std::endl;
+					}
+					for (auto &pair2 : contribution_field_to_index)
+					{
+						int i2 = pair2.second;
+						FiniteElementField *f2 = pair2.first;
+						if (f->has_jacobian_contribution_for_code(this,resiind,f2))
+						{
+							init << " functable->contributes_to_jacobian[" << resiind << "][" << i1 << "][" << i2 << "]=true; //" << contribution_names[i1] << " vs " << contribution_names[i2] << std::endl;
+						}
+					}
+				}
+				cleanup << " for (unsigned int _i=0;_i<functable->contribution_entries_size;_i++) { pyoomph_tested_free(functable->contributes_to_jacobian[" << resiind << "][_i]); functable->contributes_to_jacobian[" << resiind << "][_i]=PYOOMPH_NULL; }" << std::endl;
+				cleanup << " pyoomph_tested_free(functable->contributes_to_jacobian[" << resiind << "]); functable->contributes_to_jacobian[" << resiind << "]=PYOOMPH_NULL; " << std::endl;
+				cleanup << " pyoomph_tested_free(functable->contributes_to_residual[" << resiind << "]); functable->contributes_to_residual[" << resiind << "]=PYOOMPH_NULL; " << std::endl;
+	  
+	  }
+
+	  cleanup << " pyoomph_tested_free(functable->contributes_to_residual); functable->contributes_to_residual=PYOOMPH_NULL; " << std::endl;
+	  cleanup << " pyoomph_tested_free(functable->contributes_to_jacobian); functable->contributes_to_jacobian=PYOOMPH_NULL; " << std::endl;
 
 		// TODO: Numextdata?
 		int numcallbacks = CustomMathExpressionBase::code_map.size();

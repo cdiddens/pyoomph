@@ -291,6 +291,9 @@ class BaseEquations(_pyoomph.Equations):
     with_exception_info:bool=True
 
 
+    def __iter__(self):
+        return self._iter_helper(set())
+
     def __new__(cls, *args:Any, **kwargs:Any):
         new_instance = super(BaseEquations, cls).__new__(cls, *args, **kwargs)
         #print("WITH EX INFO",cls.with_exception_info)
@@ -2625,6 +2628,8 @@ class CombinedEquations(Equations):
         else:
             return super(CombinedEquations, self).get_coordinate_system()
 
+    def __iter__(self):
+        return iter(self._subelements)
 
 
 class InterfaceEquations(Equations):

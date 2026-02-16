@@ -130,12 +130,14 @@ typedef struct JITElementInfo
 #define MAX_TIME_WEIGHTS  7
 #define MAX_HANG 16
 #define MAX_FIELDS 32
+#define MAX_RESIDUAL_DESTINATIONS 16
 #define ARRAY_DECL_NDIM(what) what[MAX_NODAL_DIM]
 #define ARRAY_DECL_UNITY(what) what[1]
 #define ARRAY_DECL_NNODE(what) what[MAX_NODES]
 #define ARRAY_DECL_NDT(what) what[MAX_TIME_WEIGHTS]
 #define ARRAY_DECL_NHANG(what) what[MAX_HANG]
 #define ARRAY_DECL_NFIELDS(what) what[MAX_FIELDS]
+#define ARRAY_DECL_RESIDUAL_DESTINATION(what) what[MAX_RESIDUAL_DESTINATIONS]
 #define DX_SHAPE_FUNCTION_DECL(what) const double(*what)[MAX_NODAL_DIM]
 
 #else
@@ -146,6 +148,7 @@ typedef struct JITElementInfo
 #define ARRAY_DECL_NDT(what) *what
 #define ARRAY_DECL_NHANG(what) *what
 #define ARRAY_DECL_NFIELDS(what) *what
+#define ARRAY_DECL_RESIDUAL_DESTINATION(what) *what
 #define DX_SHAPE_FUNCTION_DECL(what) double * const * const what
 #endif
 
@@ -474,6 +477,13 @@ typedef struct JITFuncSpec_Table_FiniteElement
   JITFuncSpec_RequiredShapes_FiniteElement_t shapes_required_ExtremumExprs; // TODO: Split this into the individual contribs?
   JITFuncSpec_EvalTracerAdvection_FiniteElement EvalTracerAdvection;
   JITFuncSpec_RequiredShapes_FiniteElement_t shapes_required_TracerAdvection; // TODO: Split this into the individual contribs?
+
+  // Which residuals are actually contributed to by this code: 
+  // Bool from residual index, field
+  unsigned contribution_entries_size;
+  char **contribution_names;
+  bool ARRAY_DECL_RESIDUAL_DESTINATION(ARRAY_DECL_NFIELDS(contributes_to_residual));
+  bool ARRAY_DECL_RESIDUAL_DESTINATION(ARRAY_DECL_NFIELDS(ARRAY_DECL_NFIELDS(contributes_to_jacobian)));
 
   unsigned numcallbacks;
   JITFuncSpec_Callback_Entry_t *callback_infos;
