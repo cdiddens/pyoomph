@@ -719,8 +719,9 @@ class GmshTemplate(MeshTemplate):
         if not isinstance(centre,Point):
             centre=self.point(*centre)
         corners:List[Point]=[]
+        SS=self.get_problem().get_scaling("spatial")
         for signs in [[1,0],[0,1],[-1,0],[0,-1]]:
-            corners.append(self.point(centre.x[0]+signs[0]*radius,centre.x[1]+signs[1]*radius,size=mesh_size))
+            corners.append(self.point(centre.x[0]*SS +signs[0]*radius,centre.x[1]*SS+signs[1]*radius,size=mesh_size))
         corners.append(corners[0])
         lines:List[CircleArc]=[]
         for i in range(4):
