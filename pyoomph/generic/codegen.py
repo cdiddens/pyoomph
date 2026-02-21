@@ -134,11 +134,12 @@ class FiniteElementCodeGenerator(_pyoomph.FiniteElementCode):
 
     def _perform_external_ode_linkage(self):
         for myfield,linkinfo in self._external_ode_fields.items():
+            source_name=linkinfo[0].get_full_name()+"/"+linkinfo[1]            
             di = linkinfo[0].get_code().get_discontinuous_field_index(linkinfo[1])
             assert linkinfo[0]._mesh is not None
             data = linkinfo[0]._mesh.element_pt(0).internal_data_pt(di)
             index=0
-            self.get_code().link_external_data(myfield, data, index)
+            self.get_code().link_external_data(myfield, data, index,source_name)
 
 
     def _register_dependent_integral_function(self,name:str,func:Callable[...,"ExpressionOrNum"],vector_helper:bool=False):

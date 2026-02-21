@@ -3556,6 +3556,143 @@ namespace pyoomph
     return dynamic_cast<BulkElementBase *>(this->element_pt(0))->dim();
   }
 
+  void Mesh::pin_noncontributing_dofs()
+  {
+    if (!this->nelement()) return;
+    if (!this->problem->has_empty_jacobian_rows_marked()) return;
+    auto *el0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
+    auto *ft = el0->get_code_instance()->get_func_table();
+    int Doffset = 3;
+    for (unsigned int ei = 0; ei < this->nelement(); ei++)
+    {
+      auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ei));
+      for (unsigned int ni=0;ni<el->nnode();ni++)
+      {
+        pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(ni));
+        // Handle moving mesh dofs
+        for (unsigned int d = 0; d < nodept->ndim(); d++)
+        {
+          int valindex = -1 - d;                    
+          if (problem->is_field_removed_from_dofs_due_to_missing_jacobian_row(ft->dirichlet_field_index_to_global_field_index[valindex + Doffset]))
+          {
+            nodept->variable_position_pt()->pin(d);
+          }
+        }
+
+        // Handling continuous bulk dofs
+        for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C2TB_basebulk+ft->numfields_C2_basebulk+ft->numfields_C1TB_basebulk+ft->numfields_C1_basebulk; fieldindex++)
+        {
+          if (problem->is_field_removed_from_dofs_due_to_missing_jacobian_row(ft->dirichlet_field_index_to_global_field_index[fieldindex  + Doffset]))
+          {
+            nodept->pin(fieldindex);            
+          }
+        }                
+        unsigned offset = 0;
+      }
+      // Handling discontinuous dofs
+      if (ft->numfields_D2TB || ft->numfields_D2 || ft->numfields_D1TB || ft->numfields_D1)
+      {
+        for (unsigned int fieldindex = 0; fieldindex < ft->numfields_D2TB; fieldindex++)
+        {
+          unsigned bindex = el->get_D2TB_buffer_index(fieldindex);
+          if (problem->is_field_removed_from_dofs_due_to_missing_jacobian_row(ft->dirichlet_field_index_to_global_field_index[Doffset + bindex]))
+          {
+            oomph::Data *data = el->get_D2TB_nodal_data(fieldindex);
+            for (unsigned int nj = 0; nj < data->nvalue(); nj++) data->pin(nj);            
+          }
+        }
+        for (unsigned int fieldindex = 0; fieldindex < ft->numfields_D2; fieldindex++)
+        {
+          unsigned bindex = el->get_D2_buffer_index(fieldindex);
+          if (problem->is_field_removed_from_dofs_due_to_missing_jacobian_row(ft->dirichlet_field_index_to_global_field_index[Doffset + bindex]))
+          {
+            oomph::Data *data = el->get_D2_nodal_data(fieldindex);
+            for (unsigned int nj = 0; nj < data->nvalue(); nj++) data->pin(nj);            
+          }
+        }
+        for (unsigned int fieldindex = 0; fieldindex < ft->numfields_D1TB; fieldindex++)
+        {
+          unsigned bindex = el->get_D1TB_buffer_index(fieldindex);
+          if (problem->is_field_removed_from_dofs_due_to_missing_jacobian_row(ft->dirichlet_field_index_to_global_field_index[Doffset + bindex]))
+          {
+            oomph::Data *data = el->get_D1TB_nodal_data(fieldindex);
+            for (unsigned int nj = 0; nj < data->nvalue(); nj++) data->pin(nj);            
+          }
+        }
+        for (unsigned int fieldindex = 0; fieldindex < ft->numfields_D1; fieldindex++)
+        {
+          unsigned bindex = el->get_D1_buffer_index(fieldindex);
+          if (problem->is_field_removed_from_dofs_due_to_missing_jacobian_row(ft->dirichlet_field_index_to_global_field_index[Doffset + bindex]))
+          {
+            oomph::Data *data = el->get_D1_nodal_data(fieldindex);
+            for (unsigned int nj = 0; nj < data->nvalue(); nj++) data->pin(nj);            
+          }
+        }        
+      }
+      // Handling interface dofs
+      if (dynamic_cast<InterfaceElementBase*>(el))
+      {
+          for (unsigned int ni=0;ni<el->nnode();ni++)
+          {
+            pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(ni));
+            for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C2TB - ft->numfields_C2TB_basebulk; fieldindex++)
+            {
+              std::string fieldname = ft->fieldnames_C2TB[ft->numfields_C2TB_basebulk + fieldindex];
+              unsigned interf_id = el->get_code_instance()->resolve_interface_dof_id(fieldname);              
+              if (problem->is_field_removed_from_dofs_due_to_missing_jacobian_row(ft->dirichlet_field_index_to_global_field_index[fieldindex + ft->buffer_offset_C2TB_interf + Doffset]))
+              {
+                nodept->pin(dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(interf_id));
+              }
+            }
+            for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C2 - ft->numfields_C2_basebulk; fieldindex++)
+            {
+              std::string fieldname = ft->fieldnames_C2[ft->numfields_C2_basebulk + fieldindex];
+              unsigned interf_id = el->get_code_instance()->resolve_interface_dof_id(fieldname);              
+              if (problem->is_field_removed_from_dofs_due_to_missing_jacobian_row(ft->dirichlet_field_index_to_global_field_index[fieldindex + ft->buffer_offset_C2_interf + Doffset]))
+              {
+                nodept->pin(dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(interf_id));
+              }
+            }
+            for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C1TB - ft->numfields_C1TB_basebulk; fieldindex++)
+            {
+              std::string fieldname = ft->fieldnames_C1TB[ft->numfields_C1TB_basebulk + fieldindex];
+              unsigned interf_id = el->get_code_instance()->resolve_interface_dof_id(fieldname);              
+              if (problem->is_field_removed_from_dofs_due_to_missing_jacobian_row(ft->dirichlet_field_index_to_global_field_index[fieldindex + ft->buffer_offset_C1TB_interf + Doffset]))
+              {
+                nodept->pin(dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(interf_id));
+              }
+            }
+            for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C1 - ft->numfields_C1_basebulk; fieldindex++)
+            {
+              std::string fieldname = ft->fieldnames_C1[ft->numfields_C1_basebulk + fieldindex];
+              unsigned interf_id = el->get_code_instance()->resolve_interface_dof_id(fieldname);              
+              if (problem->is_field_removed_from_dofs_due_to_missing_jacobian_row(ft->dirichlet_field_index_to_global_field_index[fieldindex + ft->buffer_offset_C1_interf + Doffset]))
+              {
+                nodept->pin(dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(interf_id));
+              }
+            }
+          }
+      }
+      // Handling elemental dofs
+      for (unsigned int fieldindex = 0; fieldindex < ft->numfields_DL; fieldindex++)
+      {
+        if (problem->is_field_removed_from_dofs_due_to_missing_jacobian_row(ft->dirichlet_field_index_to_global_field_index[fieldindex + ft->buffer_offset_DL + Doffset]))
+        {
+         oomph::Data *data=this->element_pt(ei)->internal_data_pt(ft->internal_offset_DL + fieldindex);
+         for (unsigned int nj = 0; nj < data->nvalue(); nj++) data->pin(nj);
+        }
+      }
+      for (unsigned int fieldindex = 0; fieldindex < ft->numfields_D0; fieldindex++)
+      {
+        if (problem->is_field_removed_from_dofs_due_to_missing_jacobian_row(ft->dirichlet_field_index_to_global_field_index[fieldindex + ft->buffer_offset_D0 + Doffset]))
+        {
+         oomph::Data *data=this->element_pt(ei)->internal_data_pt(ft->internal_offset_D0 + fieldindex);
+         for (unsigned int nj = 0; nj < data->nvalue(); nj++) data->pin(nj);
+        }
+      }
+    }
+  }
+
   void Mesh::setup_Dirichlet_conditions(bool only_update_vals)
   {
     double x_buffer[3] = {0, 0, 0};

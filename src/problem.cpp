@@ -258,7 +258,7 @@ namespace pyoomph
 		 */
 	}
 
-	void DynamicBulkElementInstance::link_external_data(std::string name, oomph::Data *data, int index)
+	void DynamicBulkElementInstance::link_external_data(std::string name, oomph::Data *data, int index,std::string full_source_name)
 	{
 		int found = -1;
 		for (unsigned int i = 0; i < dyn->functable->numfields_ED0; i++)
@@ -272,6 +272,18 @@ namespace pyoomph
 		if (found == -1)
 			throw_runtime_error("Cannot link external data '" + name + "' since this is not required by the equation code");
 		linked_external_data[found] = ExternalDataLink(data, index);
+		// Replace the residual and jacobian information as well
+		std::string look_for=this->get_element_class()->get_full_domain_name()+"/"+name;
+		for (unsigned int i = 0; i < dyn->functable->contribution_entries_size; i++)
+		{
+			std::string res_name = dyn->functable->contribution_names[i];
+			if (res_name == look_for)
+			{
+				free((char*)dyn->functable->contribution_names[i]);
+				dyn->functable->contribution_names[i] = strdup(full_source_name.c_str());
+				break;
+			}
+		}
 		linked_external_data.reindex_elemental_data();
 	}
 
@@ -618,9 +630,13 @@ namespace pyoomph
 
 	*/
 
-	bool Problem::_set_solved_residual(std::string name,bool raise_error)
+	bool Problem::_set_solved_residual(std::string name,bool raise_error,bool remove_dofs_without_jacobian_row)
 	{
 		unsigned numfound = 0;
+		if (this->_solved_residual != name) 
+		{
+			for (unsigned int i=0;i<removed_fields_due_to_missing_jacobian_row.size();i++) removed_fields_due_to_missing_jacobian_row[i]=false;
+		}
 		for (unsigned int i = 0; i < bulk_element_codes.size(); i++)
 		{
 			numfound += bulk_element_codes[i]->_set_solved_residual(name);
@@ -630,8 +646,33 @@ namespace pyoomph
 			throw_runtime_error("Cannot activate the residual-Jacobian pair named '" + name + "', since it is defined in no equations at all");
 		}
 		this->_solved_residual = name;
+		unsigned resind=std::find(residual_names.begin(),residual_names.end(),name)-residual_names.begin();				
+		std::set<unsigned> fields_with_missing_jacobian_row;
+		if (remove_dofs_without_jacobian_row)
+		{
+			for (unsigned int i=0;i<removed_fields_due_to_missing_jacobian_row.size();i++) 
+			{
+				removed_fields_due_to_missing_jacobian_row[i]=pin_due_to_empty_jacobian_row[resind][i];
+				if (removed_fields_due_to_missing_jacobian_row[i]) fields_with_missing_jacobian_row.insert(i);
+			}
+		}
+		/*if (!fields_with_missing_jacobian_row.empty())
+		{
+			std::cout << "NOTE: The following fields have no Jacobian row in the active residual and will be pinned to their current value:" << std::endl;
+			for (unsigned int i=0;i<removed_fields_due_to_missing_jacobian_row.size();i++) 
+			{
+				if (removed_fields_due_to_missing_jacobian_row[i]) std::cout << "  - " << this->defined_fields[i] << std::endl;
+			}
+		}*/
 		return numfound;
 	}
+
+	bool Problem::has_empty_jacobian_rows_marked() const
+	{
+		for (unsigned int i=0;i<removed_fields_due_to_missing_jacobian_row.size();i++) if (removed_fields_due_to_missing_jacobian_row[i]) return true;
+		return false;
+	}
+
 
 	double &Problem::global_parameter(const std::string &n)
 	{
@@ -2370,8 +2411,357 @@ namespace pyoomph
 	}
 
 
+	void Problem::assemble_defined_field_list()
+	{
+		defined_fields.clear();
+		residual_names.clear();
+		std::set<std::string> field_set;
+		std::set<std::string> res_jac_combis;
+		std::map<std::string,unsigned> field_name_to_index;
+		
+		for (auto * dc : bulk_element_codes)
+		{
+			auto *ft=dc->get_func_table();
+			//std::cout << "Processing element code " << dc->get_file_name() << " has fields " << ft->num_defined_fields_on_this_domain << std::endl;
+			for (unsigned i=0;i<ft->num_defined_fields_on_this_domain;i++)
+			{
+				std::string fn=ft->defined_field_names_on_this_domain[i];
+				if (field_set.find(fn)==field_set.end())
+				{
+					field_set.insert(fn);
+					field_name_to_index[fn]=defined_fields.size();	
+					defined_fields.push_back(fn);	
+				}
+			}
+			for (unsigned i=0;i<ft->num_res_jacs;i++)
+			{				
+				std::string combi=ft->res_jac_names[i];
+				if (res_jac_combis.find(combi)==res_jac_combis.end())
+				{
+					res_jac_combis.insert(combi);							
+					residual_names.push_back(combi);
+				}
+			}
+		}
+
+		residual_contributing_fields.resize(residual_names.size());
+		jacobian_contributing_fields.resize(residual_names.size());
+		jacobian_contributing_codes.resize(residual_names.size());
+		residual_contributing_codes.resize(residual_names.size());
+		for (unsigned i=0;i<residual_names.size();i++)
+		{
+			residual_contributing_fields[i].resize(defined_fields.size(),false);
+			jacobian_contributing_fields[i].resize(defined_fields.size(),std::vector<bool>(defined_fields.size(),false));
+			jacobian_contributing_codes[i].resize(defined_fields.size(),std::vector<std::set<DynamicBulkElementCode*>>(defined_fields.size(),std::set<DynamicBulkElementCode*>()));
+			residual_contributing_codes[i].resize(defined_fields.size(),std::set<DynamicBulkElementCode*>());
+			// Go over all bulk codes and check the contributions
+			for (auto * dc : bulk_element_codes)
+			{
+				auto *ft=dc->get_func_table();
+				int my_i=-1;
+				for (unsigned j=0;j<ft->num_res_jacs;j++) 
+				{
+					if (ft->res_jac_names[j]==residual_names[i])
+					{
+						my_i=j;
+						break;
+					}
+				}
+				if (my_i==-1) continue; // This code does not contribute to this residual at all
+				for (unsigned j=0;j<ft->contribution_entries_size;j++)
+				{
+					std::string fn=ft->contribution_names[j];
+					if (field_name_to_index.find(fn)==field_name_to_index.end())
+					{
+						throw_runtime_error("Undefined field " + fn + " in contribution entry for residual/jacobian combination " + residual_names[i]);
+					}
+					unsigned row_index=field_name_to_index[fn];
+					residual_contributing_fields[i][row_index]=residual_contributing_fields[i][row_index]| ft->contributes_to_residual[i][j];
+
+					if (ft->contributes_to_residual[i][j])
+					{
+						residual_contributing_codes[i][row_index].insert(dc);
+					}
+
+					for (unsigned k=0;k<ft->contribution_entries_size;k++)
+					{
+						std::string fn2=ft->contribution_names[k];	
+						if (field_name_to_index.find(fn2)==field_name_to_index.end())
+						{
+							throw_runtime_error("Undefined field " + fn2 + " in contribution entry for residual/jacobian combination " + residual_names[i]);
+						}
+						unsigned col_index=field_name_to_index[fn2];
+						jacobian_contributing_fields[i][row_index][col_index]=jacobian_contributing_fields[i][row_index][col_index] | ft->contributes_to_jacobian[i][j][k];
+						if (ft->contributes_to_jacobian[i][j][k])
+						{
+							jacobian_contributing_codes[i][row_index][col_index].insert(dc);
+						}
+					}
+				}
+				
+			}
+		}
+		pin_due_to_empty_jacobian_row.resize(residual_names.size(),std::vector<bool>(defined_fields.size(),false));
+		for (unsigned i=0;i<residual_names.size();i++)
+		{
+			for (unsigned j=0;j<defined_fields.size();j++)
+			{
+				bool has_contribs=false;
+				for (unsigned k=0;k<defined_fields.size();k++)
+				{
+					if (jacobian_contributing_fields[i][j][k])
+					{
+						has_contribs=true;
+						break;
+					}
+				}
+				if (!has_contribs)
+				{
+					pin_due_to_empty_jacobian_row[i][j]=true;
+				}
+			}
+		}
+
+		
+		// Loop once more to fill all dirichlet_field_index_to_global_field_index
+		for (auto * dc : bulk_element_codes)
+		{
+			auto *ft=dc->get_func_table();
+			//std::cout << "Processing element code " << dc->get_file_name() << " has dirichlet fields " << ft->Dirichlet_set_size << std::endl;
+			for (unsigned int i=0;i<ft->Dirichlet_set_size;i++)
+			{
+				std::string dn=ft->Dirichlet_names[i];
+				if (dn=="" || dn.find("__EXT_ODE_")==0) continue;
+				if (!ft->moving_nodes && (dn=="coordinate_x" || dn=="coordinate_y" || dn=="coordinate_z")) continue;				
+				//std::cout << "Looking for a field index for dirichlet field " << dn << std::endl;
+				FiniteElementCode *current=dc->get_code();
+				bool found=false;
+				while (current)
+				{
+					std::string fullname=current->get_full_domain_name()+"/"+dn;
+					if (field_name_to_index.find(fullname)!=field_name_to_index.end())
+					{
+						unsigned index=field_name_to_index[fullname];
+						ft->dirichlet_field_index_to_global_field_index[i]=index;
+						//std::cout << "Found field index " << index << " for dirichlet field " << dn << " in code of " << current->get_full_domain_name() << std::endl;
+						found=true;
+						break;
+					}
+					current=current->get_bulk_element();
+				}
+				if (!found)
+				{
+					throw_runtime_error("Could not find a global field index for dirichlet field " + dn + " in code of " + dc->get_file_name()+ " or any of the parents. This should not happen");
+				}
+			}
+		}
+		
+		removed_fields_due_to_missing_jacobian_row.resize(defined_fields.size(),false);
+		
+	}
 
 
+	bool Problem::is_field_removed_from_dofs_due_to_missing_jacobian_row(int global_field_index)
+	{
+		if (global_field_index<0) return false;
+		else return removed_fields_due_to_missing_jacobian_row[global_field_index];
+	}
+	std::string Problem::get_jacobian_information_string()
+	{
+		std::ostringstream ss;
+		ss << "Defined fields: " << std::endl;
+		for (unsigned int i=0;i<defined_fields.size();i++)
+		{
+			ss << "\t" << i << "\t" << defined_fields[i] << std::endl;
+		}
+		ss << std::endl;
+		for (unsigned int ri=0;ri<residual_names.size();ri++)
+		{
+			std::string combi=residual_names[ri];
+			if (combi=="") ss << "Jacobian Structure -- Default Residuals" << std::endl;
+			else ss << "Jacobian Structure -- Custom Residuals \"" << combi << "\"" << std::endl;
+			if (defined_fields.size()>999)
+			{
+				throw_runtime_error("Too many defined fields to print jacobian structure");
+			}
+			else if (defined_fields.size()>99)
+			{
+				ss << "\t    | ";
+				for (unsigned int i=0;i<defined_fields.size();i++)				
+				{
+					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					else if (i/100) ss << i/100 << " ";
+					else ss << "  ";
+				}
+				ss << "|" << std::endl;
+				ss << "\t    | ";
+				for (unsigned int i=0;i<defined_fields.size();i++)				
+				{
+					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					else if ((i%100)/10) ss << (i%100)/10 << " ";
+					else ss << "  ";
+				}
+				ss <<"|" << std::endl;
+				ss << "\t    | ";
+				for (unsigned int i=0;i<defined_fields.size();i++)				
+				{
+					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					else ss << i%10 << " ";
+				}
+				ss << "|" << std::endl;
+				ss << "\t----|";
+				for (unsigned int i=0;i<defined_fields.size();i++)				
+				{
+					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					else ss  << "--";
+				}
+				ss <<"-|" << std::endl;
+			}
+			else if (defined_fields.size()>9)
+			{
+				ss << "\t    | ";
+				for (unsigned int i=0;i<defined_fields.size();i++)				
+				{
+					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					else if (i/10) ss << i/10 << " ";
+					else ss << "  ";
+				}
+				ss << "|" << std::endl;
+				ss << "\t    | ";
+				for (unsigned int i=0;i<defined_fields.size();i++)				
+				{
+					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					else ss << i%10 << " ";
+				}
+				ss << "|" << std::endl;
+				ss << "\t----|";
+				for (unsigned int i=0;i<defined_fields.size();i++)				
+				{
+					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					else ss  << "--";
+				}
+				ss << "-|" <<std::endl;
+			}
+			else
+			{
+				ss << "\t    | ";
+				for (unsigned int i=0;i<defined_fields.size();i++)				
+				{
+					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					else ss << i << " ";
+				}
+				ss <<"|"<< std::endl;
+				ss << "\t----|";
+				for (unsigned int i=0;i<defined_fields.size();i++)				
+				{
+					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					else ss  << "--";
+				}
+				ss << "-|" << std::endl;
+			}
+			
+			std::vector<std::set<DynamicBulkElementCode*>> listed_domain_contributions;
+			for (unsigned int i=0;i<defined_fields.size();i++)
+			{				
+				if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+				else ss << "  ";
+				ss<<"\t" << std::setfill(' ') << std::setw(3) << i << " | ";		
+				for (unsigned int j=0;j<defined_fields.size();j++)
+				{
+					if (pin_due_to_empty_jacobian_row[ri][j]) continue;
+					if (jacobian_contributing_fields[ri][i][j]) 
+					{
+						unsigned found=listed_domain_contributions.size();
+						for (unsigned int k=0;k<listed_domain_contributions.size();k++)
+						{
+							if (listed_domain_contributions[k]==jacobian_contributing_codes[ri][i][j])
+							{
+								found=k;
+								break;
+							}
+						}
+						if (found==listed_domain_contributions.size())
+						{
+							listed_domain_contributions.push_back(jacobian_contributing_codes[ri][i][j]);
+						}
+						std::string symbol=" ";
+						symbol[0]=(char)('A' + found + (found>25 ? 6 : 0));
+						
+						ss << symbol << " ";
+					}
+					else ss << "  ";
+				}
+				ss <<"|" << std::endl;				
+			}
+			//Residual separator
+			ss << "\t----|";
+			for (unsigned int i=0;i<defined_fields.size();i++)
+			{
+				if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+				ss << "--";
+			}
+			ss << "-|" << std::endl;
+			ss<< "\tRes | " ;
+			std::set<unsigned> residual_contributions_with_zero_jacobian_row;
+			for (unsigned int i=0;i<defined_fields.size();i++)
+			{
+				if (pin_due_to_empty_jacobian_row[ri][i]) 
+				{
+					if (residual_contributing_fields[ri][i]) residual_contributions_with_zero_jacobian_row.insert(i);
+					continue;
+				}
+				if (residual_contributing_fields[ri][i]) 
+					{
+						unsigned found=listed_domain_contributions.size();
+						for (unsigned int k=0;k<listed_domain_contributions.size();k++)
+						{
+							if (listed_domain_contributions[k]==residual_contributing_codes[ri][i])
+							{
+								found=k;
+								break;
+							}
+						}
+						if (found==listed_domain_contributions.size())
+						{
+							listed_domain_contributions.push_back(residual_contributing_codes[ri][i]);
+						}
+						std::string symbol=" ";
+						symbol[0]=(char)('A' + found + (found>25 ? 6 : 0));						
+						ss << symbol << " ";
+					}
+					else ss << "  ";
+			}
+			ss << "|" << std::endl;
+			ss << std::endl;
+
+			for (unsigned int k=0;k<listed_domain_contributions.size();k++)
+			{
+				ss << "\t" << (char)('A' + k + (k>25 ? 6 : 0)) << ": from:  ";
+				unsigned int count=listed_domain_contributions[k].size();
+				for (auto * dc : listed_domain_contributions[k])
+				{
+					ss << dc->get_code()->get_full_domain_name() << (--count ? " & " : "");
+				}
+				ss << std::endl;
+			}
+			ss << std::endl;
+
+			if (residual_contributions_with_zero_jacobian_row.size()>0)
+			{
+				ss << "\t|WARNING|: Following fields have residual contributions, but a zero Jacobian row: ";
+				unsigned int count=residual_contributions_with_zero_jacobian_row.size();
+				for (auto i : residual_contributions_with_zero_jacobian_row)
+				{
+					ss << i << (--count ? ", " : "");
+				}
+				ss << std::endl;
+				ss << std::endl;
+			}
+			
+		}
+		return ss.str();
+		
+	}
 
 
 

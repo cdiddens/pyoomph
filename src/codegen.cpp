@@ -1046,6 +1046,18 @@ namespace pyoomph
 
 	}
 
+	FiniteElementField * FiniteElementField::get_defined_on_domain_equivalent_field()
+	{
+		if (defined_on_domain_equivalent)
+			return defined_on_domain_equivalent;
+		else
+			return this;
+	}
+    void FiniteElementField::set_defined_on_domain_equivalent_field(FiniteElementField *equiv_field)
+	{
+		this->defined_on_domain_equivalent = equiv_field;
+	}
+
 	std::string FiniteElementField::get_nodal_index_str(FiniteElementCode *forcode) const
 	{
 		std::string code_type = forcode->get_owner_prefix(space);
@@ -2099,9 +2111,10 @@ namespace pyoomph
 			if (pyoomph_verbose)
 				std::cout << "DIFF PART IS " << diffpart << std::endl;
 			std::string eqn_index = f->get_equation_str(for_code, l_shape);
-			residual_field->mark_jacobian_contribution_for_code(for_code,for_code->get_current_residual_index(),f);
+			
 			for_code->add_contributing_field(residual_field);
 			for_code->add_contributing_field(f);
+			residual_field->mark_jacobian_contribution_for_code(for_code,for_code->get_current_residual_index(),f);
 			if (hang)
 			{
 				std::string nodal_index = f->get_nodal_index_str(for_code);
@@ -2218,6 +2231,7 @@ namespace pyoomph
 			if (!hessian)
 			{
 				field->mark_residual_contribution_for_code(for_code,for_code->get_current_residual_index());
+				//std::cout << "MARKING RESIDUAL CONTRIBUTION " << field->get_space()->get_code()->get_full_domain_name()+"/"+field->get_name() << " for " << for_code->get_full_domain_name()<< " PTR " << field << " FOR CODE " << for_code <<std::endl;
 				for_code->add_contributing_field(field);
 				has_contribs = true;
 				if (can_have_hanging)
@@ -2784,6 +2798,7 @@ namespace pyoomph
 					}
 					FiniteElementField *f = this->register_field(bulk_code->myfields[j]->get_name(), bulk_code->myfields[j]->get_space()->get_name());
 					f->index = bulk_code->myfields[j]->index;
+					f->set_defined_on_domain_equivalent_field(bulk_code->myfields[j]->get_defined_on_domain_equivalent_field());
 					bulk_coordinate_index_max= std::max(bulk_coordinate_index_max, f->index);
 				}
 			}
@@ -2828,6 +2843,7 @@ namespace pyoomph
 								fpresent->index = pc->myfields[j]->index;
 								if (fpresent->index >= walking_index)
 									walking_index = fpresent->index + 1;
+								
 							}
 							continue;
 						}
@@ -2837,11 +2853,12 @@ namespace pyoomph
 							pspacename="C2"; //Bubble does not transfer to the interfaces
 						   }*/
 						FiniteElementField *f = this->register_field(pc->myfields[j]->get_name(), pspacename);
+						f->set_defined_on_domain_equivalent_field(pc->myfields[j]->get_defined_on_domain_equivalent_field());
 						if (pc == deepest_bulk)
 						{
 							f->index = pc->myfields[j]->index;
 							if (f->index >= walking_index)
-								walking_index = f->index + 1;
+								walking_index = f->index + 1;						
 						}
 						else
 						{
@@ -7090,51 +7107,86 @@ namespace pyoomph
 	  // Build the contribution mapping
 	  std::vector<std::string> contribution_names;
 	  std::map<std::string, unsigned> contribution_name_to_index;	  
-	  std::map<FiniteElementField*, unsigned> contribution_field_to_index;
+	  std::map<FiniteElementField*, unsigned> contribution_field_to_index;	  
+	  std::map<FiniteElementField*,FiniteElementField*> to_where_it_was_defined;  
 	  for (auto *f : contributing_fields)
 	  {
-		std::string n=f->get_space()->get_code()->get_full_domain_name()+"/"+f->get_name();
+		FiniteElementField *wheredef = f->get_defined_on_domain_equivalent_field();
+		to_where_it_was_defined[f] = wheredef;
+		std::string n=wheredef->get_space()->get_code()->get_full_domain_name()+"/"+wheredef->get_name();
+		//std::cout << "CONTRIBUTING FIELD " << f->get_space()->get_code()->get_full_domain_name() << "/" << f->get_name() << " defined on " << n << std::endl;
+		//std::cout << "  name already in there " << n << " ? " << (contribution_name_to_index.count(n) ? "YES" : "NO") << std::endl;
 		if (contribution_name_to_index.count(n)==0)
 		{
 			int index=contribution_names.size();
 			contribution_names.push_back(n);
 			contribution_name_to_index[n]=index;
 			contribution_field_to_index[f]=index;
-		}		
+		}	
+		else
+		{
+			contribution_field_to_index[f]=contribution_name_to_index[n];
+		}	
+		//std::cout << "  setting index to " << contribution_field_to_index[f] << std::endl;
 	  }
 
+	  /*
+	  for (unsigned int i=0;i<contribution_names.size();i++)
+	  {
+		  std::cout << "CONTRIBUTION NAME " << contribution_names[i] << " INDEX " << i << " Other indeX " << contribution_name_to_index[contribution_names[i]] << std::endl;
+	  }	
+
+	  for (auto &pair : to_where_it_was_defined)
+	  {
+		  FiniteElementField *f = pair.first;
+		  FiniteElementField *wheredef = pair.second;
+		  std::string n1=f->get_space()->get_code()->get_full_domain_name()+"/"+f->get_name();
+		  std::string n2=wheredef->get_space()->get_code()->get_full_domain_name()+"/"+wheredef->get_name();
+		  std::cout << "CONTRIBUTION INFO " << n1 << " defined on " << n2 << " PTRS " << f << " " << wheredef << " for code " << this << std::endl;
+	  }
+		*/
 	  init << " functable->contributes_to_residual=(bool**)calloc(functable->num_res_jacs,sizeof(*functable->contributes_to_residual));" << std::endl;
 	  init << " functable->contributes_to_jacobian=(bool***)calloc(functable->num_res_jacs,sizeof(*functable->contributes_to_jacobian));" << std::endl;
 	  init << " functable->contribution_entries_size=" << contribution_names.size() << ";" << std::endl;
-	  init << " functable->contribution_names=(char**)calloc(functable->contribution_entries_size,sizeof(char*));" << std::endl;
-	  cleanup << " for (unsigned int i=0;i<functable->contribution_entries_size;i++) { pyoomph_tested_free(functable->contribution_names[i]); functable->contribution_names[ i]=PYOOMPH_NULL; }" << std::endl;
-	  cleanup << " pyoomph_tested_free(functable->contribution_names); functable->contribution_names=PYOOMPH_NULL; " << std::endl;
-	  for (unsigned int i=0;i<contribution_names.size();i++)
+	  if (contribution_names.size()>0)
 	  {
+	  	init << " functable->contribution_names=(char**)calloc(functable->contribution_entries_size,sizeof(char*));" << std::endl;
+	  	cleanup << " for (unsigned int i=0;i<functable->contribution_entries_size;i++) { pyoomph_tested_free(functable->contribution_names[i]); functable->contribution_names[ i]=PYOOMPH_NULL; }" << std::endl;
+	  	cleanup << " pyoomph_tested_free(functable->contribution_names); functable->contribution_names=PYOOMPH_NULL; " << std::endl;
+	  	for (unsigned int i=0;i<contribution_names.size();i++)
+	  	{
 		  init << " SET_INTERNAL_FIELD_NAME(functable->contribution_names," << i << ", \"" << contribution_names[i] << "\" );" << std::endl;
 		  
-	  }
+	  	}
+		
 	  
-	  for (unsigned int resiind = 0; resiind < residual.size(); resiind++)
-	  {
+	  	for (unsigned int resiind = 0; resiind < residual.size(); resiind++)
+	  	{
 				init << " functable->contributes_to_residual[" << resiind << "]=(bool*)calloc("<< contribution_names.size() <<",sizeof(bool));" << std::endl;				
 				init << " functable->contributes_to_jacobian[" << resiind << "]=(bool**)calloc("<< contribution_names.size() <<",sizeof(**functable->contributes_to_jacobian));" << std::endl;				
 				init << " for (unsigned int _i=0;_i<"<< contribution_names.size() <<";_i++) { functable->contributes_to_jacobian[" << resiind << "][_i]=(bool*)calloc("<< contribution_names.size() <<",sizeof(bool)); }" << std::endl;				
-				for (auto &pair1 : contribution_field_to_index)
+				std::vector<bool> written_residual_contribution(contribution_names.size(), false);
+				std::vector<std::vector<bool>> written_jacobian_contribution(contribution_names.size(), std::vector<bool>(contribution_names.size(), false));
+				for (auto &pair1 : to_where_it_was_defined)
 				{
-					int i1 = pair1.second;
 					FiniteElementField *f = pair1.first;					
-					if (f->has_residual_contribution_for_code(this,resiind))
+					int i1 = contribution_field_to_index[f];
+					//std::cout << "CHECK CONTRIB " << f->get_space()->get_code()->get_full_domain_name() << "/" << f->get_name() << " for residual " << residual_names[resiind] << " contributes to residual? " << f->has_residual_contribution_for_code(this,resiind) << " Corresponding index " << i1 << std::endl;
+					
+					if ((f->has_residual_contribution_for_code(this,resiind) || pair1.second->has_residual_contribution_for_code(this,resiind)) && !written_residual_contribution[i1])
 					{
 						init << " functable->contributes_to_residual[" << resiind << "][" << i1 << "]=true; //" << contribution_names[i1] << std::endl;
+						written_residual_contribution[i1] = true;
 					}
-					for (auto &pair2 : contribution_field_to_index)
+					for (auto &pair2 : to_where_it_was_defined)
 					{
-						int i2 = pair2.second;
 						FiniteElementField *f2 = pair2.first;
-						if (f->has_jacobian_contribution_for_code(this,resiind,f2))
+						int i2 = contribution_field_to_index[f2];
+						
+						if ((f->has_jacobian_contribution_for_code(this,resiind,f2) || f->has_jacobian_contribution_for_code(this,resiind,pair2.second)) && !written_jacobian_contribution[i1][i2])
 						{
 							init << " functable->contributes_to_jacobian[" << resiind << "][" << i1 << "][" << i2 << "]=true; //" << contribution_names[i1] << " vs " << contribution_names[i2] << std::endl;
+							written_jacobian_contribution[i1][i2] = true;
 						}
 					}
 				}
@@ -7142,10 +7194,41 @@ namespace pyoomph
 				cleanup << " pyoomph_tested_free(functable->contributes_to_jacobian[" << resiind << "]); functable->contributes_to_jacobian[" << resiind << "]=PYOOMPH_NULL; " << std::endl;
 				cleanup << " pyoomph_tested_free(functable->contributes_to_residual[" << resiind << "]); functable->contributes_to_residual[" << resiind << "]=PYOOMPH_NULL; " << std::endl;
 	  
-	  }
+	  	}
 
-	  cleanup << " pyoomph_tested_free(functable->contributes_to_residual); functable->contributes_to_residual=PYOOMPH_NULL; " << std::endl;
-	  cleanup << " pyoomph_tested_free(functable->contributes_to_jacobian); functable->contributes_to_jacobian=PYOOMPH_NULL; " << std::endl;
+	  	cleanup << " pyoomph_tested_free(functable->contributes_to_residual); functable->contributes_to_residual=PYOOMPH_NULL; " << std::endl;
+	  	cleanup << " pyoomph_tested_free(functable->contributes_to_jacobian); functable->contributes_to_jacobian=PYOOMPH_NULL; " << std::endl;
+	   }
+
+	   init << " functable->dirichlet_field_index_to_global_field_index=(int*)calloc(functable->Dirichlet_set_size,sizeof(int)); // Filling is done in the problem once all fields are defined" << std::endl;
+	   init << " for (unsigned int i=0;i<functable->Dirichlet_set_size;i++) { functable->dirichlet_field_index_to_global_field_index[i]=-1; }" << std::endl;
+	   cleanup << " pyoomph_tested_free(functable->dirichlet_field_index_to_global_field_index); functable->dirichlet_field_index_to_global_field_index=PYOOMPH_NULL; " << std::endl;
+
+	   std::vector<std::string> defined_fields_on_this_domain;
+	   for (auto &f : myfields)
+	   {
+		if (f->get_defined_on_domain_equivalent_field()==f) // Not transferred from parent
+		{
+			if (f->get_name() == "lagrangian_x" || f->get_name() == "lagrangian_y" || f->get_name() == "lagrangian_z") continue;
+			if (f->get_name() == "local_coordinate_1" || f->get_name() == "local_coordinate_2" || f->get_name() == "local_coordinate_3") continue;
+			if (f->get_name() == "zeta_coordinate_1" || f->get_name() == "zeta_coordinate_2" || f->get_name() == "zeta_coordinate_3") continue;
+			if ((f->get_name() == "mesh_x" || f->get_name() == "mesh_y" || f->get_name() == "mesh_z")) continue;
+			if (!this->coordinates_as_dofs &&  (f->get_name() == "coordinate_x" || f->get_name() == "coordinate_y" || f->get_name() == "coordinate_z")) continue;
+			if (dynamic_cast<ExternalD0Space*>(f->get_space())) continue;
+			defined_fields_on_this_domain.push_back(f->get_space()->get_code()->get_full_domain_name()+"/"+f->get_name());
+		}
+	   }
+	   if (defined_fields_on_this_domain.size()>0)
+	   {
+		init << " functable->num_defined_fields_on_this_domain=" << defined_fields_on_this_domain.size() << ";" << std::endl;
+		init << " functable->defined_field_names_on_this_domain=(char**)calloc(functable->num_defined_fields_on_this_domain,sizeof(char*));" << std::endl;
+		for (unsigned int i=0;i<defined_fields_on_this_domain.size();i++)
+		{
+			init << " SET_INTERNAL_FIELD_NAME(functable->defined_field_names_on_this_domain," << i << ", \"" << defined_fields_on_this_domain[i] << "\" );" << std::endl;
+			cleanup << " pyoomph_tested_free(functable->defined_field_names_on_this_domain[" << i << "]); functable->defined_field_names_on_this_domain[" << i << "]=PYOOMPH_NULL; " << std::endl;		
+		}
+		cleanup << " pyoomph_tested_free(functable->defined_field_names_on_this_domain); functable->defined_field_names_on_this_domain=PYOOMPH_NULL; " << std::endl;
+	 }
 
 		// TODO: Numextdata?
 		int numcallbacks = CustomMathExpressionBase::code_map.size();

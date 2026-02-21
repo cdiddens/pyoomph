@@ -543,7 +543,9 @@ class Problem(_pyoomph.Problem):
 
         self.default_ccode_expression_mode:str="" # Try to factor all expressions with "factor"
         self.extra_compiler_flags:List[str]=[]
-
+        
+        #: After analyzing the Jacobian, a field with an empty Jacobian row will be pinned automatically
+        self.automatically_remove_dofs_without_equations:bool=True
 
         #: Must be set to the participant name when using preCICE. Default is an empty string, if you do not use preCICE.
         self.precice_participant:str=""
@@ -1666,6 +1668,8 @@ class Problem(_pyoomph.Problem):
             if isinstance(mesh, ODEStorageMesh): continue
             assert not isinstance(mesh,InterfaceMesh)
             mesh._link_periodic_corner_nodes()  
+            
+
 
     
 
@@ -2362,6 +2366,7 @@ class Problem(_pyoomph.Problem):
         self.rebuild_global_mesh_from_list(rebuild=True)
 
         self.relink_external_data()
+        self._assemble_defined_field_list()
 
         self.setup_pinning()
         self.before_assigning_equation_numbers(self._dof_selector)
@@ -2566,8 +2571,13 @@ class Problem(_pyoomph.Problem):
         self.rebuild_global_mesh_from_list(rebuild=False)
 
         self.relink_external_data()
+        self._assemble_defined_field_list()
+        
+        infofile=open(os.path.join(self.get_output_directory(),self._ccode_dir,"_jacobian_structure.txt"),"w")
+        infofile.write(str(self._get_jacobian_information_string()))
+        infofile.close()
 
-
+        self._set_solved_residual("",True,True)
         self.setup_pinning()
         self.before_assigning_equation_numbers(self._dof_selector)
         self.reapply_boundary_conditions()
@@ -2752,6 +2762,8 @@ class Problem(_pyoomph.Problem):
             if isinstance(submesh,(MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d,InterfaceMesh,ODEStorageMesh)):
                 #print("DIRCHLET SET ", submesh, submesh.get_full_name())
                 submesh.setup_Dirichlet_conditions(False)
+                if self.automatically_remove_dofs_without_equations:
+                    submesh._pin_noncontributing_dofs()
                 assert submesh._codegen is not None 
                 submesh._codegen.on_apply_boundary_conditions(submesh) 
 
@@ -4326,10 +4338,10 @@ class Problem(_pyoomph.Problem):
             #print("EIGEN DOFS",eigen_zero_dofs)
             #print("OMEGA {:g}".format(omega))
             contribs={"azimuthal_real_eigen":self._cartesian_normal_mode_stability.real_contribution_name,"azimuthal_imag_eigen":self._cartesian_normal_mode_stability.imag_contribution_name}
-            has_imag=self._set_solved_residual(self._cartesian_normal_mode_stability.imag_contribution_name,raise_error=False)
+            has_imag=self._set_solved_residual(self._cartesian_normal_mode_stability.imag_contribution_name,False,False)
             if not has_imag:
                 contribs["azimuthal_imag_eigen"]="<NONE>"
-            self._set_solved_residual("")
+            self._set_solved_residual("",False,True)
             #print("GOING FOR IT ",parameter, bifurcation_type, blocksolve,  -omega,contribs)
             #print("KVALUE",self._normal_mode_param_k.value,"HAS IMAG",has_imag)
             

@@ -667,6 +667,7 @@ namespace pyoomph
       GiNaC::symbol symb;
       std::map<FiniteElementCode *, std::set<unsigned>> residual_contribution_for_code; // For each code, the residual indices for which this field has a contribution
       std::map<FiniteElementCode *, std::map<unsigned ,std::set<FiniteElementField*> >> jacobian_contribution_for_code; // For each code, the residual indices for which this field has a contribution
+      FiniteElementField * defined_on_domain_equivalent=NULL; // If a field is already defined on a bulk domain, it is transferred to interfaces and corners. This goes to the top level, i.e. where it is defined
    public:
       double discontinuous_refinement_exponent = 0.0;
       bool no_jacobian_at_all; // used for Lagrangian entries
@@ -698,6 +699,8 @@ namespace pyoomph
       bool has_jacobian_contribution_for_code(FiniteElementCode *code,unsigned residual_index, FiniteElementField *other);
       void mark_residual_contribution_for_code(FiniteElementCode *code,unsigned residual_index);
       void mark_jacobian_contribution_for_code(FiniteElementCode *code,unsigned residual_index, FiniteElementField *other);
+      FiniteElementField * get_defined_on_domain_equivalent_field();
+      void set_defined_on_domain_equivalent_field(FiniteElementField *equiv_field);
    };
 
    class FiniteElementCodeSubExpression

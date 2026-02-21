@@ -557,6 +557,9 @@ class PreciceReadData(BaseEquations):
     def define_scalar_field(self,name:str,space:FiniteElementSpaceEnum,scale:Optional[ExpressionNumOrNone]=None):
         # This is a bit dirty, but I cannot see how it can be done differently, except for providing different classes for ODEEquations and Equations
         return Equations.define_scalar_field(self,name,space,scale=scale)
+    
+    def _internal_define_scalar_field(self,name:str,space:FiniteElementSpaceEnum,scale:Optional[ExpressionNumOrNone]=None,testscale:Optional[ExpressionNumOrNone]=None,discontinuous_refinement_exponent:Optional[int]=None):
+        return Equations._internal_define_scalar_field(self,name,space,scale=scale,testscale=testscale,discontinuous_refinement_exponent=discontinuous_refinement_exponent)
 
     def define_fields(self):
         if self.get_combined_equations()._is_ode():

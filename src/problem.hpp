@@ -62,6 +62,7 @@ namespace pyoomph
     int get_integral_function_index(std::string n);
     int get_extremum_function_index(std::string n);
     unsigned _set_solved_residual(std::string name);
+    FiniteElementCode *get_code() { return element_class; }
   };
 
   // enum FieldSpace {C1=1, C2=2};
@@ -105,7 +106,7 @@ namespace pyoomph
     pyoomph::Mesh *bulkmesh; // Bulk mesh -> required to identify interface field indices
   public:
     std::set<int> nullify_bulk_residuals; // indices to nullify bulk residual contributions of continuous spaces at interface, negative is position dof
-    void link_external_data(std::string name, oomph::Data *data, int index);
+    void link_external_data(std::string name, oomph::Data *data, int index,std::string full_source_name);
     Problem *get_problem() { return dyn->problem; }
     pyoomph::Mesh *get_bulk_mesh() { return bulkmesh; }
     void set_bulk_mesh(pyoomph::Mesh *m) { bulkmesh = m; }
@@ -245,11 +246,22 @@ namespace pyoomph
     virtual void sparse_assemble_row_or_column_compressed_for_periodic_orbit(oomph::Vector<int*>& column_or_row_index,oomph::Vector<int*>& row_or_column_start,oomph::Vector<double*>& value,oomph::Vector<unsigned>& nnz,oomph::Vector<double*>& residuals,bool compressed_row_flag);
     void sparse_assemble_row_or_column_compressed(oomph::Vector<int*>& column_or_row_index,oomph::Vector<int*>& row_or_column_start,oomph::Vector<double*>& value,oomph::Vector<unsigned>& nnz,oomph::Vector<double*>& residual,bool compressed_row_flag) override;
     unsigned n_unaugmented_dofs=0;
+    std::vector<std::string> defined_fields;
+    std::vector<std::string> residual_names;
+    std::vector<std::vector<bool>> residual_contributing_fields; // [residual][defined_field] -> whether the defined field contributes to the residual (i.e. whether there is a least a test function contributing to it)
+    std::vector<std::vector<std::vector<bool>>> jacobian_contributing_fields; // [residual][defined_field][defined_field] -> whether the jacobian has a contribution from the derivative of the residual w.r.t. the defined field (i.e. whether there is at least a test function and trial function contributing to it)
+    std::vector<std::vector<std::set<DynamicBulkElementCode*>>> residual_contributing_codes; // [residual][defined_field] -> Contributions to the residual from the different codes (e.g. bulk, interface, different domains)
+    std::vector<std::vector<std::vector<std::set<DynamicBulkElementCode*>>>> jacobian_contributing_codes; // [residual][defined_field][defined_field] -> Contributions to the jacobian from the different codes (e.g. bulk, interface, different domains)
+    std::vector<std::vector<bool>> pin_due_to_empty_jacobian_row; // [residual][defined_field] -> whether this field has to be pinned due to an empty jacobian row (i.e. no contributions on the current residual which leads to a non-invertible jacobian)
+    std::vector<bool> removed_fields_due_to_missing_jacobian_row; // [defined_field] -> whether this field has been removed from the dofs due to missing jacobian row (i.e. no contributions on any residual, which leads to a non-invertible jacobian)
   public:
+    void assemble_defined_field_list();
+    std::string get_jacobian_information_string();
     void sparse_assemble_row_or_column_compressed_base_problem(oomph::Vector<int*>& column_or_row_index,oomph::Vector<int*>& row_or_column_start,oomph::Vector<double*>& value,oomph::Vector<unsigned>& nnz,oomph::Vector<double*>& residuals,bool compressed_row_flag);
     unsigned get_n_unaugmented_dofs() const {return n_unaugmented_dofs;}
     bool use_custom_residual_jacobian=false;
     bool improved_pitchfork_tracking_on_unstructured_meshes=false;
+    bool is_field_removed_from_dofs_due_to_missing_jacobian_row(int global_field_index);
 
     double * get_lambda_tracking_real() {return &lambda_tracking_real;}
 
@@ -375,7 +387,8 @@ namespace pyoomph
     oomph::Vector<oomph::Vector<unsigned>> &GetSparcseAssembleWithArraysPA() { return this->Sparse_assemble_with_arrays_previous_allocation; }
     
     virtual void quiet(bool _quiet);
-    virtual bool _set_solved_residual(std::string name, bool raise_error=true);
+    virtual bool _set_solved_residual(std::string name, bool raise_error=true,bool remove_dofs_without_jacobian_row=true);
+    bool has_empty_jacobian_rows_marked() const;
     virtual void _replace_RJM_by_param_deriv(std::string name,bool active);
     virtual std::string _get_solved_residual() { return _solved_residual; }
     virtual bool is_quiet() const { return _is_quiet; }

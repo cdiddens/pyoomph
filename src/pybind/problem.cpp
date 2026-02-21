@@ -411,6 +411,7 @@ void PyReg_Problem(py::module &m)
 		.def("enable_store_local_dof_pt_in_elements", &pyoomph::Problem::enable_store_local_dof_pt_in_elements)
 		.def("setup_pinning", &pyoomph::Problem::setup_pinning)
 		.def("set_initial_condition", &pyoomph::Problem::set_initial_condition)
+		.def("_get_jacobian_information_string", &pyoomph::Problem::get_jacobian_information_string)
 		.def("refine_uniformly", (void(pyoomph::Problem::*)()) & pyoomph::Problem::refine_uniformly)
 		.def("unrefine_uniformly", (unsigned(pyoomph::Problem::*)()) & pyoomph::Problem::unrefine_uniformly)
 		.def("assign_eqn_numbers", &pyoomph::Problem::assign_eqn_numbers)
@@ -574,7 +575,7 @@ void PyReg_Problem(py::module &m)
 		.def("_assemble_residual_jacobian", [](pyoomph::Problem *self, std::string name)
 			 {
 	    std::string oldresi=self->_get_solved_residual();
-	    if (name!=oldresi) self->_set_solved_residual(name);
+	    if (name!=oldresi) self->_set_solved_residual(name,true,false);
 	    oomph::DoubleVector resi;
 	    oomph::CRDoubleMatrix J;
 	    self->get_jacobian(resi,J);
@@ -584,7 +585,7 @@ void PyReg_Problem(py::module &m)
 		 unsigned int J_nrow_local=J.nrow_local();
  		 int *J_row_start=J.row_start(); //nrow_local+1
 		 int * J_colindex=J.column_index(); //nnz_local
-       if (name!=oldresi) self->_set_solved_residual(oldresi);
+       if (name!=oldresi) self->_set_solved_residual(oldresi,true,true);
 
  	    py::array_t<double> J_values_arr=py::array_t<double>({J_nzz});
 	    double * dest=(double*)J_values_arr.request().ptr;
@@ -616,7 +617,7 @@ void PyReg_Problem(py::module &m)
 		.def("adapt", [](pyoomph::Problem &self)
 			 {unsigned nref,nunref; self.adapt(nref,nunref); return std::make_tuple(nref,nunref); })
 		.def("_replace_RJM_by_param_deriv", &pyoomph::Problem::_replace_RJM_by_param_deriv)
-		.def("_set_solved_residual", &pyoomph::Problem::_set_solved_residual, py::arg("name"),py::arg("raise_error")=true)
+		.def("_set_solved_residual", &pyoomph::Problem::_set_solved_residual, py::arg("name"),py::arg("raise_error")=true,py::arg("remove_dofs_without_jacobian_row")=true)
 		.def("set_analytic_hessian_products", [](pyoomph::Problem *self, bool active, bool use_symmetry)
 			 { if (active) self->set_analytic_hessian_products();  else self->unset_analytic_hessian_products(); self->set_symmetric_hessian_assembly(use_symmetry); }, py::arg("active"), py::arg("use_symmetry") = false)
 		.def("set_FD_step_used_in_get_hessian_vector_products", &pyoomph::Problem::set_FD_step_used_in_get_hessian_vector_products)
@@ -639,6 +640,7 @@ void PyReg_Problem(py::module &m)
 				p->assemble_multiassembly(what,contributions,params,hessian_vectors,hessian_vector_indices,data,csrdata,ndof,return_indices);
 				return std::make_tuple(ndof,data,csrdata,return_indices);
 			 })
+		.def("_assemble_defined_field_list",&pyoomph::Problem::assemble_defined_field_list)
 		.def("distribute", [](pyoomph::Problem *self)
 			 {
 #ifdef OOMPH_HAS_MPI
@@ -696,10 +698,10 @@ void PyReg_Problem(py::module &m)
 				 std::ofstream ofs(code_trunk+".c");
 				 if (!quiet) std::cout << "Generating equation C code: " << code_trunk << std::endl;
 				 my_element->write_code(ofs);
-				 std::ofstream hfs(code_trunk+".gar",std::ios::binary);
-				 hfs << my_element->archive;
-				 hfs.close();
-          }
+				 //std::ofstream hfs(code_trunk+".gar",std::ios::binary);
+				 //hfs << my_element->archive;
+				 //hfs.close();
+             }
 
 #ifdef OOMPH_HAS_MPI
           MPI_Barrier(problem->communicator_pt()->mpi_comm());

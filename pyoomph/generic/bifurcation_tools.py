@@ -959,8 +959,8 @@ class _NormalModeBifurcationTrackerBase(CustomBifurcationTracker):
         
         self.has_imag=numpy.dot(numpy.imag(self.eigenvector),numpy.imag(self.eigenvector))>1e-15 # TODO: Make it adjustable
         if not self.has_imag:
-            self.has_imag=self.problem._set_solved_residual(self.imag_contribution,raise_error=False)
-            self.problem._set_solved_residual("")
+            self.has_imag=self.problem._set_solved_residual(self.imag_contribution,False,False)
+            self.problem._set_solved_residual("",False,False)
             if self.has_imag:
                 print("Strange, eigenvector is real, but it has imaginary jacobian contribution")
                 #raise RuntimeError("Strange, eigenvector is real, but it has imaginary jacobian contribution")

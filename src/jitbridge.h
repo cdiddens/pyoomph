@@ -484,6 +484,11 @@ typedef struct JITFuncSpec_Table_FiniteElement
   char **contribution_names;
   bool ARRAY_DECL_RESIDUAL_DESTINATION(ARRAY_DECL_NFIELDS(contributes_to_residual));
   bool ARRAY_DECL_RESIDUAL_DESTINATION(ARRAY_DECL_NFIELDS(ARRAY_DECL_NFIELDS(contributes_to_jacobian)));
+  // Fields defined on this domain (i.e. without taking over from parent)
+  unsigned num_defined_fields_on_this_domain;
+  char **defined_field_names_on_this_domain;
+  int * dirichlet_field_index_to_global_field_index; // The Dirichlet index is usually different from the contribution index, this maps the Dirichlet to the global field index (problem level). It is filled by the problem, but allocated in the functable. Used for automatic pinning of non-contributing fields (fields without equations on the current residual)
+  
 
   unsigned numcallbacks;
   JITFuncSpec_Callback_Entry_t *callback_infos;
