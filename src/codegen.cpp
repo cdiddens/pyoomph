@@ -1969,7 +1969,10 @@ namespace pyoomph
 							os << indent << "           const bool symmetry_assembly_same_field=false;" << std::endl;
 					}
 					if (!only_mass_part)
+					{
 						os << indent << "           ADD_TO_HESSIAN_" << (hanging_eqns ? "HANG" : "NOHANG") << "_" << (hang ? "HANG" : "NOHANG") << "_" << (hang2 ? "HANG" : "NOHANG") << "()" << std::endl;
+						//std::cout << "        HESSIAN CONTRIB: " << f->get_equation_str(for_code, l_shape) << " & " << f2->get_equation_str(for_code, l_shape2) << std::endl;
+					}
 
 					//					GiNaC::ex mass_part2 = GiNaC::diff(mass_part, pyoomph::expressions::__partial_t_mass_matrix);
 					for_code->subexpressions = __SE_to_struct_hessian->subexpressions;
@@ -2003,6 +2006,7 @@ namespace pyoomph
 						os << indent << "     }" << std::endl;
 					}
 				}
+				__derive_shapes_by_second_index = false;
 			}
 
 			if (loop2_written)
@@ -2220,12 +2224,13 @@ namespace pyoomph
 		}
 		for (auto &test_name : present_tests)
 		{
-			for_code->Hessian_symmetric_fields_completed.clear();
+			for_code->Hessian_symmetric_fields_completed.clear();			
 			MapOnTestSpace var_mapper(this, test_name);
 			GiNaC::ex var_part = var_mapper(mypart);
 			if (var_part.is_zero())
 				continue;
 			FiniteElementField *field = var_mapper.get_field();
+			//if (hessian) std::cout << "HESSIAN TEST: " << test_name << std::endl;
 			std::string eqn_index = field->get_equation_str(for_code, l_test);
 			std::string nodal_index = field->get_nodal_index_str(for_code);
 			std::string hang_info = field->get_hanginfo_str(for_code);
