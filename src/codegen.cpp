@@ -2325,7 +2325,7 @@ namespace pyoomph
 					jacobian_fields.insert(s.field);
 				auto cmp_spaces=[&for_code](FiniteElementSpace * a, FiniteElementSpace * b) 
 				{ 			
-					return a->get_name()<b->get_name() || (a->get_name()==b->get_name() &&  a->get_code()->get_full_domain_name() < b->get_code()->get_full_domain_name()); 
+					return a->get_name()<b->get_name() || (a->get_name()==b->get_name() &&  a->get_code()->get_full_domain_name() < b->get_code()->get_full_domain_name() || (a->get_name()==b->get_name() &&  a->get_code()->get_full_domain_name() == b->get_code()->get_full_domain_name() && a->get_num_nodes_str(for_code)<b->get_num_nodes_str(for_code))); 
 				};
 				std::set<FiniteElementSpace *, decltype(cmp_spaces)> jacobian_spaces(cmp_spaces);
 				for (auto *s : jacobian_fields)
