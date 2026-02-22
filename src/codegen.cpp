@@ -2008,6 +2008,7 @@ namespace pyoomph
 				}
 				__derive_shapes_by_second_index = false;
 			}
+			__derive_shapes_by_second_index = false;
 
 			if (loop2_written)
 			{
@@ -2023,11 +2024,13 @@ namespace pyoomph
 
 			for_code->Hessian_symmetric_fields_completed.insert(f);
 		}
+		
 
 		if (loop1_written)
 		{
 			os << indent << "}" << std::endl;
 		}
+		__derive_shapes_by_second_index = false; // Just to make sure....
 		return has_contribs;
 	}
 
