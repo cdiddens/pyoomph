@@ -1548,10 +1548,12 @@ namespace pyoomph
 						}
 					}
 					std::sort(init_lines.begin(), init_lines.end());
+					//os << indent << "       // INIT LINES RIGHT NOW" << std::endl;
 					for (auto &l : init_lines)
 					{
 						os << l << std::endl;
 					}
+					init_lines.clear();
 					os << indent << "       for (unsigned int l_shape=0;l_shape<" + range + ";l_shape++)" << std::endl
 					   << indent << "       {" << std::endl;
 					/*					os << indent << "         for (unsigned int l_shape2=0;l_shape2<" + range + ";l_shape2++)" << std::endl
@@ -1578,6 +1580,7 @@ namespace pyoomph
 					{
 						os << l << std::endl;
 					}
+					hess_lines.clear();
 					//					}
 					//					os << indent << "         }" << std::endl;
 					os << indent << "       }" << std::endl;
