@@ -13811,6 +13811,8 @@ namespace pyoomph
 			InterfaceElementBase *opp = dynamic_cast<InterfaceElementBase *>(this->opposite_side);
 			try
 			{
+				//std::cout << "Filling opposite hang info for interface element " << this << " with opposite " << opp << std::endl;
+				//for (unsigned int i=0;i<opp_interf_eqn_map.size();i++)  std::cout << "   " << i << "  " << opp_interf_eqn_map[i] << " and eq remap is " << eqn_remap <<std::endl;
 				opp->fill_hang_info_with_equations(*(required.opposite_shapes), shape_info->opposite_shapeinfo, (eqn_remap ? NULL : &(opp_interf_eqn_map[0])));
 			}
 			catch (...)

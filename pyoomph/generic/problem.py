@@ -2577,7 +2577,7 @@ class Problem(_pyoomph.Problem):
         infofile.write(str(self._get_jacobian_information_string()))
         infofile.close()
 
-        self._set_solved_residual("",True,True)
+        self._set_solved_residual("",False,True)
         self.setup_pinning()
         self.before_assigning_equation_numbers(self._dof_selector)
         self.reapply_boundary_conditions()

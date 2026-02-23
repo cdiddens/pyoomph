@@ -358,9 +358,13 @@ class ConnectMeshAtInterface(InterfaceEquations):
             l, l_test=var_and_test(self.lagr_mult_prefix+f)
             inside, inside_test=var_and_test(f)
             outside, outside_test=var_and_test(f,domain=self.get_opposite_side_of_interface())
+                            
             self.add_residual(weak(inside-outside,l_test))
-            self.add_residual(weak(l,inside_test))
-            self.add_residual(-weak(l,outside_test))
+            if self._coordinates_as_dofs:
+                self.add_residual(weak(l,inside_test))
+            if self.get_opposite_side_of_interface()._coordinates_as_dofs:
+                self.add_residual(-weak(l,outside_test))
+                
 
     def before_assigning_equations_postorder(self, mesh:"AnyMesh"):
         fields=self.get_required_fields()

@@ -1640,7 +1640,7 @@ namespace pyoomph
 	void PositionFiniteElementSpace::write_generic_RJM_jacobian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns,FiniteElementField * residual_field)
 	{
 		// Only do it if the coordinates are Dofs
-		if (for_code->coordinates_as_dofs)
+		if (this->code->coordinates_as_dofs)
 			FiniteElementSpace::write_generic_RJM_jacobian_contribution(for_code, os, indent, for_what, hanging_eqns,residual_field);
 	}
 
@@ -1666,14 +1666,20 @@ namespace pyoomph
 						{
 							jacobian_shapes.insert(ShapeExpansion(for_code->get_bulk_element()->get_bulk_element()->get_field_by_name("coordinate_" + d), 0, for_code->get_bulk_element()->get_bulk_element()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
 						}
-					}
-					if (for_code->get_opposite_interface_code())
+					}					
+				}
+			}
+		}
+		if (for_code->get_opposite_interface_code() && for_code->get_opposite_interface_code()->coordinates_as_dofs)
+		{
+			for (auto d : std::vector<std::string>{"x", "y", "z"})
+			{
+				if (for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d))
+				{
+					jacobian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
+					if (for_code->get_opposite_interface_code()->get_bulk_element())
 					{
-						jacobian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
-						if (for_code->get_opposite_interface_code()->get_bulk_element())
-						{
-							jacobian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
-						}
+						jacobian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
 					}
 				}
 			}
@@ -1767,13 +1773,19 @@ namespace pyoomph
 								hessian_shapes.insert(ShapeExpansion(for_code->get_bulk_element()->get_bulk_element()->get_field_by_name("coordinate_" + d), 0, for_code->get_bulk_element()->get_bulk_element()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
 							}
 						}
-						if (for_code->get_opposite_interface_code())
+					}
+				}
+			}
+			if (for_code->get_opposite_interface_code() && for_code->get_opposite_interface_code()->coordinates_as_dofs)
+			{
+				for (auto d : std::vector<std::string>{"x", "y", "z"})
+				{
+					if (for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d))
+					{
+						hessian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
+						if (for_code->get_opposite_interface_code()->get_bulk_element())
 						{
-							hessian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
-							if (for_code->get_opposite_interface_code()->get_bulk_element())
-							{
-								hessian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
-							}
+							hessian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
 						}
 					}
 				}
@@ -2056,14 +2068,20 @@ namespace pyoomph
 						{
 							jacobian_shapes.insert(ShapeExpansion(for_code->get_bulk_element()->get_bulk_element()->get_field_by_name("coordinate_" + d), 0, for_code->get_bulk_element()->get_bulk_element()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
 						}
-					}
-					if (for_code->get_opposite_interface_code())
+					}					
+				}
+			}
+		}
+		if (for_code->get_opposite_interface_code() && for_code->get_opposite_interface_code()->coordinates_as_dofs)
+		{
+			for (auto d : std::vector<std::string>{"x", "y", "z"})
+			{
+				if (for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d))
+				{
+					jacobian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
+					if (for_code->get_opposite_interface_code()->get_bulk_element())
 					{
-						jacobian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
-						if (for_code->get_opposite_interface_code()->get_bulk_element())
-						{
-							jacobian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
-						}
+						jacobian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
 					}
 				}
 			}
@@ -2308,15 +2326,22 @@ namespace pyoomph
 							{
 								jacobian_shapes.insert(ShapeExpansion(for_code->get_bulk_element()->get_bulk_element()->get_field_by_name("coordinate_" + d), 0, for_code->get_bulk_element()->get_bulk_element()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
 							}
-						}
-						if (for_code->get_opposite_interface_code())
+						}						
+					}
+				}
+			}
+			if (for_code->get_opposite_interface_code() && for_code->get_opposite_interface_code()->coordinates_as_dofs)
+			{
+				for (auto d : std::vector<std::string>{"x", "y", "z"})
+				{					
+					if (for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d))
+					{
+						//std::cout << "Adding coordinate " << d << " from opposite interface code " << for_code->get_opposite_interface_code()->get_full_domain_name() << " to Jacobian shapes for code " << for_code->get_full_domain_name() << std::endl;
+						jacobian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
+						if (for_code->get_opposite_interface_code()->get_bulk_element())
 						{
-							jacobian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
-							if (for_code->get_opposite_interface_code()->get_bulk_element())
-							{
-								jacobian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
-							}
-						}
+							jacobian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
+						}			
 					}
 				}
 			}
@@ -2330,7 +2355,10 @@ namespace pyoomph
 				};
 				std::set<FiniteElementField *, decltype(cmp)> jacobian_fields(cmp);
 				for (auto &s : jacobian_shapes)
+				{					
+					//std::cout << "Test function " << test_name << " Jacobian Field " << s.field->get_name() << " Space " << s.field->get_space()->get_name() << " on " << s.field->get_space()->get_code()->get_full_domain_name() << std::endl;
 					jacobian_fields.insert(s.field);
+				}
 				auto cmp_spaces=[&for_code](FiniteElementSpace * a, FiniteElementSpace * b) 
 				{ 			
 					return a->get_name()<b->get_name() || (a->get_name()==b->get_name() &&  a->get_code()->get_full_domain_name() < b->get_code()->get_full_domain_name() || (a->get_name()==b->get_name() &&  a->get_code()->get_full_domain_name() == b->get_code()->get_full_domain_name() && a->get_num_nodes_str(for_code)<b->get_num_nodes_str(for_code))); 
@@ -3948,14 +3976,20 @@ namespace pyoomph
 						{
 							indices_required.insert(this->bulk_code->bulk_code->get_field_by_name("coordinate_" + d));
 						}
-					}
-					if (this->opposite_interface_code)
+					}					
+				}
+			}
+		}
+		if (this->opposite_interface_code && this->opposite_interface_code->coordinates_as_dofs)
+		{
+			for (auto d : std::vector<std::string>{"x", "y", "z"})
+			{
+				if (this->opposite_interface_code->get_field_by_name("coordinate_" + d))
+				{
+					indices_required.insert(this->opposite_interface_code->get_field_by_name("coordinate_" + d));
+					if (this->opposite_interface_code->bulk_code)
 					{
-						indices_required.insert(this->opposite_interface_code->get_field_by_name("coordinate_" + d));
-						if (this->opposite_interface_code->bulk_code)
-						{
-							indices_required.insert(this->opposite_interface_code->bulk_code->get_field_by_name("coordinate_" + d));
-						}
+						indices_required.insert(this->opposite_interface_code->bulk_code->get_field_by_name("coordinate_" + d));
 					}
 				}
 			}
@@ -4158,14 +4192,20 @@ namespace pyoomph
 						{
 							indices_required.insert(this->bulk_code->bulk_code->get_field_by_name("coordinate_" + d));
 						}
-					}
-					if (this->opposite_interface_code)
+					}					
+				}
+			}
+		}
+		if (this->opposite_interface_code && this->opposite_interface_code->coordinates_as_dofs)
+		{
+			for (auto d : std::vector<std::string>{"x", "y", "z"})
+			{
+				if (this->opposite_interface_code->get_field_by_name("coordinate_" + d))
+				{
+					indices_required.insert(this->opposite_interface_code->get_field_by_name("coordinate_" + d));
+					if (this->opposite_interface_code->bulk_code)
 					{
-						indices_required.insert(this->opposite_interface_code->get_field_by_name("coordinate_" + d));
-						if (this->opposite_interface_code->bulk_code)
-						{
-							indices_required.insert(this->opposite_interface_code->bulk_code->get_field_by_name("coordinate_" + d));
-						}
+						indices_required.insert(this->opposite_interface_code->bulk_code->get_field_by_name("coordinate_" + d));
 					}
 				}
 			}
