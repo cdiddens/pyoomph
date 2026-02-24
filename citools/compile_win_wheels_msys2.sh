@@ -38,13 +38,24 @@ mkdir -p $PREFIX || exit 1
 # cln
 rm -rf "$PYOOMPH_STATIC_GINAC_DIR/cln"  || exit 1
 cd $PYOOMPH_STATIC_GINAC_DIR || exit 1
-git clone https://codeberg.org/ginac/cln.git || exit 1
+
+#git clone https://codeberg.org/ginac/cln.git || exit 1
+#######
 #cp -r $AUTOTTOLS_FILES/m4 cln/ || exit 1
 #cp -r $AUTOTTOLS_FILES/build-aux cln/ || exit 1
+###
+#cd cln || exit 1
+#./autogen.sh || exit 1
+#./configure --without-gmp --disable-shared --enable-static --with-pic=yes --prefix "$PREFIX" $PYOOMPH_GINAC_CONFIGURE_OPTIONS || exit 1
+#make  MAKEINFO=true install -j 4 || exit
+CLN_VESION=1.3.7
+wget https://www.ginac.de/CLN/cln-${CLN_VESION}.tar.bz2 || exit 1
+tar -xvjf cln-${CLN_VESION}.tar.bz2  || exit 1
+mv cln-${CLN_VESION} cln || exit 1
 cd cln || exit 1
-./autogen.sh || exit 1
 ./configure --without-gmp --disable-shared --enable-static --with-pic=yes --prefix "$PREFIX" $PYOOMPH_GINAC_CONFIGURE_OPTIONS || exit 1
 make  MAKEINFO=true install -j 4 || exit
+
 
 
 # ginac

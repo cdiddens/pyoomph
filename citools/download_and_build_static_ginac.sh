@@ -31,7 +31,12 @@ rm -rf "$PYOOMPH_STATIC_GINAC_DIR/ginac"  || exit 1
 
 
 cd $PYOOMPH_STATIC_GINAC_DIR || exit 1
-git clone https://codeberg.org/ginac/cln.git || exit 1
+CLN_VESION=1.3.7
+wget https://www.ginac.de/CLN/cln-${CLN_VESION}.tar.bz2 || exit 1
+tar -xvjf cln-${CLN_VESION}.tar.bz2  || exit 1
+mv cln-${CLN_VESION} cln || exit 1
+
+#git clone https://codeberg.org/ginac/cln.git || exit 1
 git clone https://codeberg.org/ginac/ginac.git || exit 1
 
 #cp -r $AUTOTTOLS_FILES/m4 cln/
@@ -67,7 +72,8 @@ echo "BUILDING CLN"
 echo 
 echo
 cd cln || exit 1
-./autogen.sh || exit 1
+#./autogen.sh || exit 1
+
 echo
 echo
 echo
@@ -75,6 +81,7 @@ echo "BUILDING CLN  - AUTOGEN DONE"
 echo 
 echo
 ./configure --without-gmp $DEBUG_CONFIGURE --disable-shared --enable-static --with-pic=yes --prefix "$PREFIX" $PYOOMPH_GINAC_CONFIGURE_OPTIONS || exit 1
+#./configure --without-gmp --disable-shared --enable-static --with-pic=yes --prefix "$PREFIX" $PYOOMPH_GINAC_CONFIGURE_OPTIONS || exit 1
 echo
 echo
 echo
