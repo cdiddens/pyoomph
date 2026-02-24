@@ -2,6 +2,8 @@ name: Wheels
 
 # BEFORE RUNNING: Adjust the version in pyproject.toml, setup.py, and docs/source/conf.py
 # otherwise it will fail at the upload stage
+# Also make sure 
+#	- Upgrade the CLN and GiNaC versions in citools/compile_win_wheels_msys2.sh AND citools/download_and_build_static_ginac.sh  
 
 on:
   workflow_dispatch:
