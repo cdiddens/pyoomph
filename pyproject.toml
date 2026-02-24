@@ -87,7 +87,7 @@ before-build = [
 "rm -rf build/"
 ]
 before-test = [
-"dnf -y install libglu1-mesa libxcursor1 libopengl0"
+"dnf -y install mesa-libGLU libXcursorlibglvnd-opengl" # sudo apt install libglu1-mesa libxcursor1 libopengl0
 ]
 
 [tool.cibuildwheel.macos]
