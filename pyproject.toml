@@ -86,6 +86,9 @@ before-build = [
 "python -m pip install pybind11 setuptools",
 "rm -rf build/"
 ]
+before-test = [
+"dnf -y install libglu1-mesa libxcursor1 libopengl0"
+]
 
 [tool.cibuildwheel.macos]
 environment={PYOOMPH_CONFIG_FILE="./citools/pyoomph_config_macwheel.env"}
