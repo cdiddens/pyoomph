@@ -73,6 +73,7 @@ before-all = [
 "echo set extra flags to $PYOOMPH_CXXFLAGS_EXTRA",
 "source {project}/citools/before_build_linux.sh {project}",
 "./clean.sh all",
+"sudo dnf -y install wget",
 "bash citools/download_and_build_static_ginac.sh",
 "bash ./prebuild.sh",
 "make -C src clean",

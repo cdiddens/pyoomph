@@ -35,6 +35,8 @@ rm -rf "$PYOOMPH_STATIC_GINAC_DIR/ginac"  || exit 1
 
 cd $PYOOMPH_STATIC_GINAC_DIR || exit 1
 
+
+
 wget https://www.ginac.de/CLN/cln-${CLN_VERSION}.tar.bz2 || exit 1
 tar -xvjf cln-${CLN_VERSION}.tar.bz2  || exit 1
 mv cln-${CLN_VERSION} cln || exit 1

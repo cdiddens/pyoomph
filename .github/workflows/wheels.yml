@@ -4,6 +4,8 @@ name: Wheels
 # otherwise it will fail at the upload stage
 # Also make sure 
 #	- Upgrade the CLN and GiNaC versions in citools/compile_win_wheels_msys2.sh AND citools/download_and_build_static_ginac.sh  
+#	- Comment the line:     if: github.event_name == 'release' && github.event.action == 'published' 
+#		to make the upload work
 
 on:
   workflow_dispatch:
