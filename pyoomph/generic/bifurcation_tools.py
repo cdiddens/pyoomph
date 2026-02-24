@@ -1278,8 +1278,8 @@ class NormalModeEigenbranchTracker(_NormalModeBifurcationTrackerBase):
                 if dparameter is not None:
                     assm=self.start_multiassembly().dRdp(dparameter).dJdp(dparameter,self.real_contribution).dJdp(dparameter,self.imag_contribution)
                     assm.dMdp(dparameter,self.real_contribution).dMdp(dparameter,self.imag_contribution)
-                    dRdp,=self.patch_residuals(eigen=False,R=[dRdp])
                     dRdp,dJRdp,dJIdp,dMRdp,dMIdp=assm.assemble()
+                    dRdp,=self.patch_residuals(eigen=False,R=[dRdp])                    
                     dJRdp,dJIdp,dMRdp,dMIdp=self.patch_matrices(eigen=True,J=[dJRdp,dJIdp],M=[dMRdp,dMIdp])                    
                     d_eq_V_re_dp=-dJIdp*Vi + dJRdp*Vr + lamb*(-dMIdp*Vi + dMRdp*Vr) + omega*(-dMIdp*Vr - dMRdp*Vi)
                     d_eq_V_im_dp=dJIdp*Vr + dJRdp*Vi + lamb*(dMIdp*Vr + dMRdp*Vi) + omega*(-dMIdp*Vi + dMRdp*Vr)                    
