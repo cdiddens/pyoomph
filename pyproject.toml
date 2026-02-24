@@ -56,8 +56,9 @@ build-backend = "setuptools.build_meta:__legacy__"
 [tool.cibuildwheel]
 manylinux-x86_64-image = "manylinux2014"
 build-frontend = { name = "pip", args = ["--no-build-isolation", "--verbose"] }
-#test-requires = "pytest"
-#test-command = "pytest {package}/tests" # does not work, since the gmsh library has unresolvable requirements
+test-requires = "pytest"
+test-command = "pytest {package}/tests" # does not work, since the gmsh library has unresolvable requirements
+test-sources = ["tests"]
 
 [tool.cibuildwheel.linux]
 environment={PYOOMPH_CONFIG_FILE="/project/citools/pyoomph_config_linuxwheel.env"}
