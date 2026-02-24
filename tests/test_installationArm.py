@@ -40,13 +40,13 @@ def test_imports():
     
     if not IMPORTS_OK:
         print_test("Import pyoomph modules", False, IMPORT_ERROR)
-        return False
+        assert False, "Failed to import pyoomph modules"
     
     print_test("Import pyoomph", True)
     print_test("Import pyoomph.expressions", True)
     print_test("Import specific equation module", True)
     
-    return True
+    assert True
 
 def test_simple_poisson():
     """Test solving a simple 1D Poisson problem"""
@@ -54,7 +54,7 @@ def test_simple_poisson():
     
     if not IMPORTS_OK:
         print_test("1D Poisson problem", False, "Imports failed")
-        return False
+        assert False, "Failed to import pyoomph modules"
     
     try:
         
@@ -75,12 +75,12 @@ def test_simple_poisson():
             problem.output()
         
         print_test("1D Poisson problem", True)
-        return True
+        assert True
         
     except Exception as e:
         print_test("1D Poisson problem", False, f"{type(e).__name__}: {str(e)}")
         traceback.print_exc()
-        return False
+        assert False, f"Failed to solve 1D Poisson problem: {type(e).__name__}: {str(e)}"
 
 def test_2d_problem():
     """Test a simple 2D problem"""
@@ -88,7 +88,7 @@ def test_2d_problem():
     
     if not IMPORTS_OK:
         print_test("2D rectangular mesh problem", False, "Imports failed")
-        return False
+        assert False, "Failed to import pyoomph modules"
     
     try:
         
@@ -110,11 +110,11 @@ def test_2d_problem():
             problem.solve()
         
         print_test("2D rectangular mesh problem", True)
-        return True
+        assert True
         
     except Exception as e:
         print_test("2D rectangular mesh problem", False, f"{type(e).__name__}: {str(e)}")
-        return False
+        assert False, f"Failed to solve 2D rectangular mesh problem: {type(e).__name__}: {str(e)}"
 
 def test_custom_equation():
     """Test defining a custom equation"""
@@ -122,7 +122,7 @@ def test_custom_equation():
     
     if not IMPORTS_OK:
         print_test("Custom equation definition", False, "Imports failed")
-        return False
+        assert False, "Failed to import pyoomph modules"
     
     try:
         
@@ -148,11 +148,11 @@ def test_custom_equation():
             problem.solve()
         
         print_test("Custom equation definition", True)
-        return True
+        assert True
         
     except Exception as e:
         print_test("Custom equation definition", False, f"{type(e).__name__}: {str(e)}")
-        return False
+        assert False, f"Failed to define custom equation: {type(e).__name__}: {str(e)}"
 
 def test_units():
     """Test units system"""
@@ -160,7 +160,7 @@ def test_units():
     
     if not IMPORTS_OK:
         print_test("Units system", False, "Imports failed")
-        return False
+        assert False, "Failed to import pyoomph modules"
     
     try:
         
@@ -170,11 +170,11 @@ def test_units():
         velocity = length / time
         
         print_test("Units system", True)
-        return True
+        assert True
         
     except Exception as e:
         print_test("Units system", False, f"{type(e).__name__}: {str(e)}")
-        return False
+        assert False, f"Failed to test units system: {type(e).__name__}: {str(e)}"
 
 def test_compiler():
     """Test C compiler availability"""
@@ -184,11 +184,11 @@ def test_compiler():
         from pyoomph.generic.ccompiler import get_ccompiler
         cc = get_ccompiler()
         print_test(f"C compiler ({type(cc).__name__})", True)
-        return True
+        assert True
         
     except Exception as e:
         print_test("C compiler", False, f"{type(e).__name__}: {str(e)}")
-        return False
+        assert False, f"Failed to test C compiler: {type(e).__name__}: {str(e)}"
 
 def test_solver_availability():
     """Test available solvers"""
@@ -218,11 +218,11 @@ def test_solver_availability():
             except:
                 print_test(f"Eigen solver: {solver}", False, "Not available")
         
-        return True
+        assert True
         
     except Exception as e:
         print_test("Solver availability check", False, f"{type(e).__name__}: {str(e)}")
-        return False
+        assert False, f"Failed to check solver availability: {type(e).__name__}: {str(e)}"
 
 def main():
     """Run all tests"""
