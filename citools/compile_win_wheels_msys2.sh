@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 
+
 # MUST BE CALLED FROM ROOT DIRECTORY
+
+CLN_VERSION=1.3.7
+GINAC_VERSION=1.8.10
 
 export PYOOMPH_PACKAGE_NAME=pyoomph ### TODO
 
@@ -48,10 +52,10 @@ cd $PYOOMPH_STATIC_GINAC_DIR || exit 1
 #./autogen.sh || exit 1
 #./configure --without-gmp --disable-shared --enable-static --with-pic=yes --prefix "$PREFIX" $PYOOMPH_GINAC_CONFIGURE_OPTIONS || exit 1
 #make  MAKEINFO=true install -j 4 || exit
-CLN_VESION=1.3.7
-wget https://www.ginac.de/CLN/cln-${CLN_VESION}.tar.bz2 || exit 1
-tar -xvjf cln-${CLN_VESION}.tar.bz2  || exit 1
-mv cln-${CLN_VESION} cln || exit 1
+
+wget https://www.ginac.de/CLN/cln-${CLN_VERSION}.tar.bz2 || exit 1
+tar -xvjf cln-${CLN_VERSION}.tar.bz2  || exit 1
+mv cln-${CLN_VERSION} cln || exit 1
 cd cln || exit 1
 ./configure --without-gmp --disable-shared --enable-static --with-pic=yes --prefix "$PREFIX" $PYOOMPH_GINAC_CONFIGURE_OPTIONS || exit 1
 make  MAKEINFO=true install -j 4 || exit
@@ -61,7 +65,10 @@ make  MAKEINFO=true install -j 4 || exit
 # ginac
 rm -rf "$PYOOMPH_STATIC_GINAC_DIR/ginac"  || exit 1
 cd $PYOOMPH_STATIC_GINAC_DIR
-git clone https://codeberg.org/ginac/ginac.git || exit 1
+#git clone https://codeberg.org/ginac/ginac.git || exit 1
+wget https://www.ginac.de/ginac-${GINAC_VERSION}.tar.bz2
+tar -xvjf ginac-${GINAC_VERSION}.tar.bz2  || exit 1
+mv ginac-${GINAC_VERSION}.tar.bz2 ginac || exit 1
 cd ginac || exit 1
 autoreconf -i -f  || exit 1
 CLN_CFLAGS="-I$PREFIX/include" CLN_LIBS="-L$PREFIX/lib -l:libcln.a" ./configure --with-pic=yes $DEBUG_CONFIGURE --disable-shared --enable-static --prefix "$PREFIX" $PYOOMPH_GINAC_CONFIGURE_OPTIONS

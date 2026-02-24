@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+CLN_VERSION=1.3.7
+GINAC_VERSION=1.8.10
+
 
 (
 
@@ -31,13 +34,16 @@ rm -rf "$PYOOMPH_STATIC_GINAC_DIR/ginac"  || exit 1
 
 
 cd $PYOOMPH_STATIC_GINAC_DIR || exit 1
-CLN_VESION=1.3.7
-wget https://www.ginac.de/CLN/cln-${CLN_VESION}.tar.bz2 || exit 1
-tar -xvjf cln-${CLN_VESION}.tar.bz2  || exit 1
-mv cln-${CLN_VESION} cln || exit 1
+
+wget https://www.ginac.de/CLN/cln-${CLN_VERSION}.tar.bz2 || exit 1
+tar -xvjf cln-${CLN_VERSION}.tar.bz2  || exit 1
+mv cln-${CLN_VERSION} cln || exit 1
 
 #git clone https://codeberg.org/ginac/cln.git || exit 1
-git clone https://codeberg.org/ginac/ginac.git || exit 1
+#git clone https://codeberg.org/ginac/ginac.git || exit 1
+wget https://www.ginac.de/ginac-${GINAC_VERSION}.tar.bz2
+tar -xvjf ginac-${GINAC_VERSION}.tar.bz2  || exit 1
+mv ginac-${GINAC_VERSION}.tar.bz2 ginac || exit 1
 
 #cp -r $AUTOTTOLS_FILES/m4 cln/
 #cp -r $AUTOTTOLS_FILES/build-aux cln/
