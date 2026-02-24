@@ -43,7 +43,7 @@ mv cln-${CLN_VERSION} cln || exit 1
 #git clone https://codeberg.org/ginac/ginac.git || exit 1
 wget https://www.ginac.de/ginac-${GINAC_VERSION}.tar.bz2
 tar -xvjf ginac-${GINAC_VERSION}.tar.bz2  || exit 1
-mv ginac-${GINAC_VERSION}.tar.bz2 ginac || exit 1
+mv ginac-${GINAC_VERSION} ginac || exit 1
 
 #cp -r $AUTOTTOLS_FILES/m4 cln/
 #cp -r $AUTOTTOLS_FILES/build-aux cln/

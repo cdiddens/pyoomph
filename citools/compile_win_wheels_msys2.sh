@@ -68,7 +68,7 @@ cd $PYOOMPH_STATIC_GINAC_DIR
 #git clone https://codeberg.org/ginac/ginac.git || exit 1
 wget https://www.ginac.de/ginac-${GINAC_VERSION}.tar.bz2
 tar -xvjf ginac-${GINAC_VERSION}.tar.bz2  || exit 1
-mv ginac-${GINAC_VERSION}.tar.bz2 ginac || exit 1
+mv ginac-${GINAC_VERSION} ginac || exit 1
 cd ginac || exit 1
 autoreconf -i -f  || exit 1
 CLN_CFLAGS="-I$PREFIX/include" CLN_LIBS="-L$PREFIX/lib -l:libcln.a" ./configure --with-pic=yes $DEBUG_CONFIGURE --disable-shared --enable-static --prefix "$PREFIX" $PYOOMPH_GINAC_CONFIGURE_OPTIONS
