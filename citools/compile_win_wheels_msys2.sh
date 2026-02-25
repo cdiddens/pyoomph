@@ -150,7 +150,7 @@ $CURRENT_PYTHON -m pip install wheelhouse/${NEWNAME} pytest
 cd tests  
 for f in *.py; do
 echo "Running $f"
-$CURRENT_PYTHON $f || exit 1; 
+$CURRENT_PYTHON -X faulthandler $f  >&2 || exit 1; 
 done 
 cd ..
 
