@@ -59,7 +59,7 @@ cd $PYOOMPH_STATIC_GINAC_DIR || exit 1
 #./configure --without-gmp --disable-shared --enable-static --with-pic=yes --prefix "$PREFIX" $PYOOMPH_GINAC_CONFIGURE_OPTIONS || exit 1
 #make  MAKEINFO=true install -j 4 || exit
 
-wget https://www.ginac.de/CLN/cln-${CLN_VERSION}.tar.bz2 || exit 1
+wget  --retry-connrefused  --read-timeout=20 --timeout=15 --tries=40 https://www.ginac.de/CLN/cln-${CLN_VERSION}.tar.bz2 || exit 1
 tar -xvjf cln-${CLN_VERSION}.tar.bz2  || exit 1
 mv cln-${CLN_VERSION} cln || exit 1
 cd cln || exit 1
@@ -72,7 +72,7 @@ make  MAKEINFO=true install -j 4 || exit
 rm -rf "$PYOOMPH_STATIC_GINAC_DIR/ginac"  || exit 1
 cd $PYOOMPH_STATIC_GINAC_DIR
 #git clone https://codeberg.org/ginac/ginac.git || exit 1
-wget https://www.ginac.de/ginac-${GINAC_VERSION}.tar.bz2
+wget  --retry-connrefused  --read-timeout=20 --timeout=15 --tries=40 https://www.ginac.de/ginac-${GINAC_VERSION}.tar.bz2
 tar -xvjf ginac-${GINAC_VERSION}.tar.bz2  || exit 1
 mv ginac-${GINAC_VERSION} ginac || exit 1
 cd ginac || exit 1

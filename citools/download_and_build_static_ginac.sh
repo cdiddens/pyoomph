@@ -37,13 +37,13 @@ cd $PYOOMPH_STATIC_GINAC_DIR || exit 1
 
 
 
-wget https://www.ginac.de/CLN/cln-${CLN_VERSION}.tar.bz2 || exit 1
+wget  --retry-connrefused  --read-timeout=20 --timeout=15 --tries=40 https://www.ginac.de/CLN/cln-${CLN_VERSION}.tar.bz2 || exit 1
 tar -xvjf cln-${CLN_VERSION}.tar.bz2  || exit 1
 mv cln-${CLN_VERSION} cln || exit 1
 
 #git clone https://codeberg.org/ginac/cln.git || exit 1
 #git clone https://codeberg.org/ginac/ginac.git || exit 1
-wget https://www.ginac.de/ginac-${GINAC_VERSION}.tar.bz2
+wget --retry-connrefused  --read-timeout=20 --timeout=15 --tries=40 https://www.ginac.de/ginac-${GINAC_VERSION}.tar.bz2
 tar -xvjf ginac-${GINAC_VERSION}.tar.bz2  || exit 1
 mv ginac-${GINAC_VERSION} ginac || exit 1
 
