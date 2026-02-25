@@ -146,12 +146,13 @@ cp *.whl wheelhouse/${NEWNAME}
 
 # Testing
 $CURRENT_PYTHON -m pip install wheelhouse/${NEWNAME} pytest
-#(cd tests ; $CURRENT_PYTHON -m pytest -rA *.py || exit 1; cd ..;) || exit 1
-cd tests  
-for f in *.py; do
-echo "Running $f"
-$CURRENT_PYTHON -X faulthandler $f  >&2 || exit 1; 
-done 
-cd ..
+(cd tests ; echo "Running with cp${PYOOMPH_SHORTPYVERSION}-${TAG}"; $CURRENT_PYTHON -m pytest -rA *.py || exit 1; cd ..;) || exit 1
+
+#cd tests  
+#for f in *.py; do
+#echo "Running $f"
+#$CURRENT_PYTHON -X faulthandler $f  >&2 || exit 1; 
+#done 
+#cd ..
 
 done
