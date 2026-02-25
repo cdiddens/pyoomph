@@ -35,6 +35,7 @@ jobs:
       - uses: msys2/setup-msys2@v2
         if: startsWith(matrix.os, 'windows')
         with:
+          msystem: ucrt64
           update: true          # mingw-w64-x86_64-toolchain
           install: >-
             autotools
