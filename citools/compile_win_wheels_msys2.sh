@@ -148,9 +148,9 @@ cp *.whl wheelhouse/${NEWNAME}
 $CURRENT_PYTHON -m pip install wheelhouse/${NEWNAME} pytest
 #(cd tests ; $CURRENT_PYTHON -m pytest -rA *.py || exit 1; cd ..;) || exit 1
 cd tests  
-for f in *.py; 
+for f in *.py; do
 echo "Running $f"
-do $CURRENT_PYTHON $f || exit 1; 
+$CURRENT_PYTHON $f || exit 1; 
 done 
 cd ..
 
