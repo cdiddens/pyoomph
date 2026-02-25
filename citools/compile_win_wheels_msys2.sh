@@ -25,15 +25,15 @@ export PYOOMPH_FAST_MULTI_VERSION_BUILD=true
 
 #AUTOTTOLS_FILES=$(readlink -f "citools/autotools_files")
 
-#export CFLAGS="-O2 -g0 -DNDEBUG"
-#export CXXFLAGS="-O2 -g0 -DNDEBUG"
-#export CPPFLAGS="-DNO_ASM -g0 -DNDEBUG"
-#export PYOOMPH_DEBUG_INFOS=false
+export CFLAGS="-O2 -g0 -DNDEBUG"
+export CXXFLAGS="-O2 -g0 -DNDEBUG"
+export CPPFLAGS="-DNO_ASM -g0 -DNDEBUG"
+export PYOOMPH_DEBUG_INFOS=false
 
-export CFLAGS="-O0 -g3 -DMS_WIN64"
-export CXXFLAGS="-O0 -g3 -DMS_WIN64"
-export CPPFLAGS="-DNO_ASM -g3 -DMS_WIN64"
-export PYOOMPH_DEBUG_INFOS=true
+#export CFLAGS="-O0 -g3 -DMS_WIN64"
+#export CXXFLAGS="-O0 -g3 -DMS_WIN64"
+#export CPPFLAGS="-DNO_ASM -g3 -DMS_WIN64"
+#export PYOOMPH_DEBUG_INFOS=true
 
 mkdir -p "$PYOOMPH_STATIC_GINAC_DIR" || exit 1
 
@@ -146,7 +146,7 @@ cp *.whl wheelhouse/${NEWNAME}
 
 # Testing
 $CURRENT_PYTHON -m pip install wheelhouse/${NEWNAME} pytest
-(cd tests ; echo "Running with cp${PYOOMPH_SHORTPYVERSION}-${TAG}"; $CURRENT_PYTHON -m pytest -rA *.py || exit 1; cd ..;) || exit 1
+(cd tests ; $CURRENT_PYTHON -m pytest *.py || exit 1; cd ..;) || exit 1
 
 #cd tests  
 #for f in *.py; do

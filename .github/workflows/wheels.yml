@@ -1,7 +1,5 @@
 name: Wheels
 
-# TODO: Make windows -O2 -g0 again !!!
-# TODO: Activate the other OS as well again
 
 # BEFORE RUNNING: Adjust the version in pyproject.toml, setup.py, and docs/source/conf.py
 # otherwise it will fail at the upload stage
@@ -19,7 +17,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ windows-latest] # ubuntu-latest, macos-15-intel,
+        os: [ubuntu-latest, macos-15-intel, windows-latest] 
 
     env:
       CIBW_SKIP: "cp38-* *-manylinux_i686 *-musllinux* *_ppc64le *_s390x *_universal2 *_arm64"  # cp36-* cp37-* pp*
@@ -35,7 +33,7 @@ jobs:
       - uses: msys2/setup-msys2@v2
         if: startsWith(matrix.os, 'windows')
         with:
-          msystem: ucrt64
+          msystem: UCRT64
           update: true          # mingw-w64-x86_64-toolchain
           install: >-
             autotools
