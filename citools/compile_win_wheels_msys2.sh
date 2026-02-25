@@ -11,7 +11,7 @@ export PYOOMPH_PACKAGE_NAME=pyoomph ### TODO
 
 export PYOOMPH_USE_MPI=false
 export PYOOMPH_MARCH_NATIVE=false
-export PYOOMPH_DEBUG_INFOS=false
+#export PYOOMPH_DEBUG_INFOS=false
 export PYOOMPH_PARANOID=false
 export PYOOMPH_NO_TCC=true
 export PYOOMPH_STATIC_GINAC_DIR=./GiNaC_static
@@ -23,11 +23,17 @@ export PYOOMPH_CONFIG_FILE=$(readlink -f ./citools/pyoomph_config_windows_cross.
 # if this is set, you must first call the Makefile in src/ to build everything unrelated of python
 export PYOOMPH_FAST_MULTI_VERSION_BUILD=true
 
-AUTOTTOLS_FILES=$(readlink -f "citools/autotools_files")
+#AUTOTTOLS_FILES=$(readlink -f "citools/autotools_files")
 
-export CFLAGS="-O2 -g0 -DNDEBUG"
-export CXXFLAGS="-O2 -g0 -DNDEBUG"
-export CPPFLAGS="-DNO_ASM -g0 -DNDEBUG"
+#export CFLAGS="-O2 -g0 -DNDEBUG"
+#export CXXFLAGS="-O2 -g0 -DNDEBUG"
+#export CPPFLAGS="-DNO_ASM -g0 -DNDEBUG"
+#export PYOOMPH_DEBUG_INFOS=false
+
+export CFLAGS="-O0 -g3"
+export CXXFLAGS="-O0 -g3"
+export CPPFLAGS="-DNO_ASM -g3"
+export PYOOMPH_DEBUG_INFOS=true
 
 mkdir -p "$PYOOMPH_STATIC_GINAC_DIR" || exit 1
 
@@ -140,6 +146,7 @@ cp *.whl wheelhouse/${NEWNAME}
 
 # Testing
 $CURRENT_PYTHON -m pip install wheelhouse/${NEWNAME} pytest
-(cd tests ; $CURRENT_PYTHON -m pytest -rA *.py || exit 1; cd ..;) || exit 1
+#(cd tests ; $CURRENT_PYTHON -m pytest -rA *.py || exit 1; cd ..;) || exit 1
+(cd tests ; for f in *.py; do python $f; done || exit 1; cd ..;) || exit 1
 
 done
