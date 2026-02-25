@@ -41,8 +41,9 @@ jobs:
             patch
             git
             base-devel
-            mingw-w64-ucrt-x86_64-toolchain # mingw-w64-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-toolchain
         
+         # mingw-w64-x86_64-toolchain
                     
       - shell: msys2 {0}
         if: startsWith(matrix.os, 'windows')
