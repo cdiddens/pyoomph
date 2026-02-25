@@ -30,9 +30,9 @@ export PYOOMPH_FAST_MULTI_VERSION_BUILD=true
 #export CPPFLAGS="-DNO_ASM -g0 -DNDEBUG"
 #export PYOOMPH_DEBUG_INFOS=false
 
-export CFLAGS="-O0 -g3"
-export CXXFLAGS="-O0 -g3"
-export CPPFLAGS="-DNO_ASM -g3"
+export CFLAGS="-O0 -g3 -DMS_WIN64"
+export CXXFLAGS="-O0 -g3 -DMS_WIN64"
+export CPPFLAGS="-DNO_ASM -g3 -DMS_WIN64"
 export PYOOMPH_DEBUG_INFOS=true
 
 mkdir -p "$PYOOMPH_STATIC_GINAC_DIR" || exit 1
