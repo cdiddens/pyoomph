@@ -14178,7 +14178,7 @@ namespace pyoomph
 							unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(n)->index_of_first_value_assigned_by_face_element(interf_id);						
 							int parent_no = from_elem->nodal_local_eqn(el_n_index, valindex);
 							std::string info = "C2TB";
-							int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(interf_id), from_elem, &info);
+							int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(valindex), from_elem, &info);
 							if (parent_no >= 0)
 							{
 								eq_map[parent_no] = my_no;
@@ -14255,7 +14255,9 @@ namespace pyoomph
 							unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(n)->index_of_first_value_assigned_by_face_element(interf_id);						
 							int parent_no = from_elem->nodal_local_eqn(el_n_index, valindex);
 							std::string info = "C2";
-							int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(interf_id), from_elem, &info);
+							//std::cout << "RESOLVING FOR INTERFACE FIELD " << fieldname << " AT NODE " << j << " OF " << from_elem->get_eleminfo()->nnode_C2 << " WITH PARENT NO " << parent_no << std::endl;
+							//std::cout << "    WHICH HAS GLOBAL EQN " << n->eqn_number(valindex) << std::endl;
+							int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(valindex), from_elem, &info);
 							if (parent_no >= 0)
 							{
 								eq_map[parent_no] = my_no;
@@ -14342,7 +14344,7 @@ namespace pyoomph
 							unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(n)->index_of_first_value_assigned_by_face_element(interf_id);						
 							int parent_no = from_elem->nodal_local_eqn(el_n_index, valindex);
 							std::string info = "C1TB";
-							int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(interf_id), from_elem, &info);
+							int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(valindex), from_elem, &info);
 							if (parent_no >= 0)
 							{
 								eq_map[parent_no] = my_no;
@@ -14418,7 +14420,7 @@ namespace pyoomph
 							unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(n)->index_of_first_value_assigned_by_face_element(interf_id);						
 							int parent_no = from_elem->nodal_local_eqn(el_n_index, valindex);
 							std::string info = "C1";
-							int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(interf_id), from_elem, &info);
+							int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(valindex), from_elem, &info);
 							if (parent_no >= 0)
 							{
 								eq_map[parent_no] = my_no;

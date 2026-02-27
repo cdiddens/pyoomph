@@ -679,6 +679,8 @@ namespace pyoomph
         }
       }
 
+      dynamic_cast<BulkElementBase *>(fe)->fill_element_info(true);
+
       return fe;
     };
 

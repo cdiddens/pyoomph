@@ -1,7 +1,6 @@
 name: Wheels
 
-
-# BEFORE RUNNING: Adjust the version in pyproject.toml, setup.py, and docs/source/conf.py
+# BEFORE RUNNING: Adjust the version in pyoomph/_version.py
 # otherwise it will fail at the upload stage
 # Also make sure 
 #	- Upgrade the CLN and GiNaC versions in citools/compile_win_wheels_msys2.sh AND citools/download_and_build_static_ginac.sh  
@@ -60,8 +59,8 @@ jobs:
     name: Upload if release
     needs: [build_wheels]
     runs-on: ubuntu-latest
-    if: github.event_name == 'release' && github.event.action == 'published'
-    environment: release
+    environment: release    
+    # if: github.event_name == 'release' && github.event.action == 'published'    
 
     permissions:
       id-token: write  # IMPORTANT: mandatory for trusted publishing
