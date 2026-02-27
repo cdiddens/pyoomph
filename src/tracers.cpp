@@ -204,7 +204,7 @@ namespace pyoomph
           for (unsigned int is = 0; is < s.size(); is++)
             sstep[is] = s[is] - sold[is];
 
-          /*  std::cout << "PARTICLE " << this<< " IS LEAVING THROUGH BOUNDARY " ; for (auto b : allbounds) std::cout << b << "  " ; std::cout << " WITH SNORMAL "<< s_normal[0] << "  " << s_normal[1] << "  AND  SSTEP " << sstep[0] << "  " << sstep[1];  std::cout << std::endl;
+          /*  //std::cout << "PARTICLE " << this<< " IS LEAVING THROUGH BOUNDARY " ; for (auto b : allbounds) std::cout << b << "  " ; std::cout << " WITH SNORMAL "<< s_normal[0] << "  " << s_normal[1] << "  AND  SSTEP " << sstep[0] << "  " << sstep[1];  std::cout << std::endl;
 
             for (unsigned int is=0;is<s.size();is++) sdot+=sstep[is]*s_normal[is];
 

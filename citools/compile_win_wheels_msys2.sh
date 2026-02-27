@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 
+
 # MUST BE CALLED FROM ROOT DIRECTORY
+
+CLN_VERSION=1.3.7
+GINAC_VERSION=1.8.10
 
 export PYOOMPH_PACKAGE_NAME=pyoomph ### TODO
 
 
 export PYOOMPH_USE_MPI=false
 export PYOOMPH_MARCH_NATIVE=false
-export PYOOMPH_DEBUG_INFOS=false
+#export PYOOMPH_DEBUG_INFOS=false
 export PYOOMPH_PARANOID=false
 export PYOOMPH_NO_TCC=true
 export PYOOMPH_STATIC_GINAC_DIR=./GiNaC_static
@@ -19,11 +23,17 @@ export PYOOMPH_CONFIG_FILE=$(readlink -f ./citools/pyoomph_config_windows_cross.
 # if this is set, you must first call the Makefile in src/ to build everything unrelated of python
 export PYOOMPH_FAST_MULTI_VERSION_BUILD=true
 
-AUTOTTOLS_FILES=$(readlink -f "citools/autotools_files")
+#AUTOTTOLS_FILES=$(readlink -f "citools/autotools_files")
 
 export CFLAGS="-O2 -g0 -DNDEBUG"
 export CXXFLAGS="-O2 -g0 -DNDEBUG"
 export CPPFLAGS="-DNO_ASM -g0 -DNDEBUG"
+export PYOOMPH_DEBUG_INFOS=false
+
+#export CFLAGS="-O0 -g3 -DMS_WIN64"
+#export CXXFLAGS="-O0 -g3 -DMS_WIN64"
+#export CPPFLAGS="-DNO_ASM -g3 -DMS_WIN64"
+#export PYOOMPH_DEBUG_INFOS=true
 
 mkdir -p "$PYOOMPH_STATIC_GINAC_DIR" || exit 1
 
@@ -38,19 +48,33 @@ mkdir -p $PREFIX || exit 1
 # cln
 rm -rf "$PYOOMPH_STATIC_GINAC_DIR/cln"  || exit 1
 cd $PYOOMPH_STATIC_GINAC_DIR || exit 1
-git clone git://www.ginac.de/cln.git || exit 1
-cp -r $AUTOTTOLS_FILES/m4 cln/ || exit 1
-cp -r $AUTOTTOLS_FILES/build-aux cln/ || exit 1
+
+#git clone https://codeberg.org/ginac/cln.git || exit 1
+#######
+#cp -r $AUTOTTOLS_FILES/m4 cln/ || exit 1
+#cp -r $AUTOTTOLS_FILES/build-aux cln/ || exit 1
+###
+#cd cln || exit 1
+#./autogen.sh || exit 1
+#./configure --without-gmp --disable-shared --enable-static --with-pic=yes --prefix "$PREFIX" $PYOOMPH_GINAC_CONFIGURE_OPTIONS || exit 1
+#make  MAKEINFO=true install -j 4 || exit
+
+wget  --retry-connrefused  --read-timeout=20 --timeout=15 --tries=40 https://www.ginac.de/CLN/cln-${CLN_VERSION}.tar.bz2 || exit 1
+tar -xvjf cln-${CLN_VERSION}.tar.bz2  || exit 1
+mv cln-${CLN_VERSION} cln || exit 1
 cd cln || exit 1
-./autogen.sh || exit 1
 ./configure --without-gmp --disable-shared --enable-static --with-pic=yes --prefix "$PREFIX" $PYOOMPH_GINAC_CONFIGURE_OPTIONS || exit 1
 make  MAKEINFO=true install -j 4 || exit
+
 
 
 # ginac
 rm -rf "$PYOOMPH_STATIC_GINAC_DIR/ginac"  || exit 1
 cd $PYOOMPH_STATIC_GINAC_DIR
-git clone git://www.ginac.de/ginac.git || exit 1
+#git clone https://codeberg.org/ginac/ginac.git || exit 1
+wget  --retry-connrefused  --read-timeout=20 --timeout=15 --tries=40 https://www.ginac.de/ginac-${GINAC_VERSION}.tar.bz2
+tar -xvjf ginac-${GINAC_VERSION}.tar.bz2  || exit 1
+mv ginac-${GINAC_VERSION} ginac || exit 1
 cd ginac || exit 1
 autoreconf -i -f  || exit 1
 CLN_CFLAGS="-I$PREFIX/include" CLN_LIBS="-L$PREFIX/lib -l:libcln.a" ./configure --with-pic=yes $DEBUG_CONFIGURE --disable-shared --enable-static --prefix "$PREFIX" $PYOOMPH_GINAC_CONFIGURE_OPTIONS
@@ -84,7 +108,7 @@ wget https://dist.nuget.org/win-x86-commandline/latest/nuget.exe -O build/nuget
 
 # TODO: Loop
 # see https://github.com/pypa/cibuildwheel/blob/main/cibuildwheel/resources/build-platforms.toml
-for pyversion in "3.9.13" "3.10.11" "3.11.9" "3.12.3" "3.13.1"; do
+for pyversion in "3.9.13" "3.10.11" "3.11.9" "3.12.10" "3.13.11" "3.14.2"; do
 export PYOOMPH_PYVERSION=$pyversion
 
 export PYOOMPH_SHORTPYVERSION=$(echo $PYOOMPH_PYVERSION | cut -d . -f 1,2 | tr -d . )
@@ -119,5 +143,16 @@ $CURRENT_PYTHON -m wheel pack ./unpack/*
 NEWNAME=$(ls *.whl | cut -d - -f 1,2)-cp${PYOOMPH_SHORTPYVERSION}-${TAG}.whl
 mkdir -p wheelhouse
 cp *.whl wheelhouse/${NEWNAME}
+
+# Testing
+$CURRENT_PYTHON -m pip install wheelhouse/${NEWNAME} pytest
+(cd tests ; $CURRENT_PYTHON -m pytest *.py || exit 1; cd ..;) || exit 1
+
+#cd tests  
+#for f in *.py; do
+#echo "Running $f"
+#$CURRENT_PYTHON -X faulthandler $f  >&2 || exit 1; 
+#done 
+#cd ..
 
 done

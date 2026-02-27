@@ -1,0 +1,52 @@
+name: temporary_wheels
+
+# BEFORE RUNNING: Adjust the version in pyproject.toml, setup.py, and docs/source/conf.py
+# otherwise it will fail at the upload stage
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build_wheels:
+    name: Build wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        # macos-13 is an intel runner, macos-14 is apple silicon
+        os: [ubuntu-latest, macos-13, windows-latest]
+
+    env:
+      CIBW_SKIP: "cp36-* cp37-* cp38-* pp* *-manylinux_i686 *-musllinux* *_ppc64le *_s390x *_universal2 *_arm64" 
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheels
+        if: startsWith(matrix.os, 'windows') != true
+        uses: pypa/cibuildwheel@v2.21.3
+        
+
+      - uses: msys2/setup-msys2@v2
+        if: startsWith(matrix.os, 'windows')
+        with:
+          update: true
+          install: >-
+            autotools
+            patch
+            git
+            base-devel
+            mingw-w64-x86_64-toolchain
+        
+                    
+      - shell: msys2 {0}
+        if: startsWith(matrix.os, 'windows')
+        run: |
+           source ./citools/compile_win_wheels_msys2.sh
+        
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cibw-wheels-${{ matrix.os }}-${{ strategy.job-index }}
+          path: ./wheelhouse/*.whl
+            
+

@@ -133,12 +133,24 @@ class FiniteElementCodeGenerator(_pyoomph.FiniteElementCode):
         self._external_ode_fields[myfieldname]=(odecodegen,odefieldname)
 
     def _perform_external_ode_linkage(self):
+        #print("Performing external ODE linkage")
         for myfield,linkinfo in self._external_ode_fields.items():
+            #print("info",myfield,linkinfo[0],linkinfo[1])
+            source_name=linkinfo[0].get_full_name()+"/"+linkinfo[1]            
+            #print("source name",source_name)
+            #print("code",linkinfo[0].get_code())
             di = linkinfo[0].get_code().get_discontinuous_field_index(linkinfo[1])
+            #print("di",di)            
             assert linkinfo[0]._mesh is not None
+            #print("mesh",linkinfo[0]._mesh)            
+            #print("nelement",linkinfo[0]._mesh.nelement())            
+            #print("elempt0",linkinfo[0]._mesh.element_pt(0))            
             data = linkinfo[0]._mesh.element_pt(0).internal_data_pt(di)
+            #print("data",data)            
             index=0
-            self.get_code().link_external_data(myfield, data, index)
+            #print("linking")            
+            self.get_code().link_external_data(myfield, data, index,source_name)
+            #print("done")            
 
 
     def _register_dependent_integral_function(self,name:str,func:Callable[...,"ExpressionOrNum"],vector_helper:bool=False):
@@ -290,6 +302,9 @@ class BaseEquations(_pyoomph.Equations):
     """
     with_exception_info:bool=True
 
+
+    def __iter__(self):
+        return self._iter_helper(set())
 
     def __new__(cls, *args:Any, **kwargs:Any):
         new_instance = super(BaseEquations, cls).__new__(cls, *args, **kwargs)
@@ -1601,7 +1616,7 @@ class EquationTree:
             v._fill_interinter_connections(iconns)
 
     def _set_parent_to_equations(self,problem:"Problem"):
-        if self._codegen is not None:
+        if self._codegen is not None:            
             self._codegen._set_problem(problem)
             for _,v in self._children.items():
                 if v._codegen is not None:
@@ -1685,7 +1700,7 @@ class EquationTree:
     def _finalize_equations(self,problem:"Problem",second_loop:bool=False):
         if self._equations is not None:
             if self._codegen is None:
-                self._codegen=FiniteElementCodeGenerator()
+                self._codegen=FiniteElementCodeGenerator()                
                 self._codegen.ccode_expression_mode=problem.default_ccode_expression_mode
                 self._codegen._name=self.get_my_path_name()
                 self._codegen.set_latex_printer(problem.latex_printer)
@@ -1701,9 +1716,7 @@ class EquationTree:
                     problem._meshdict[meshname]=mesh
 
         if self._codegen:
-            self._codegen._set_problem(problem) 
-            self._codegen.set_latex_printer(problem.latex_printer)
-            #print("SETTING EQS",self._codegen._name,self._equations)
+            self._codegen._set_problem(problem)             
             self._codegen._set_equations(self._equations)
         for _,v in self._children.items():
             v._finalize_equations(problem,second_loop=second_loop)
@@ -2627,6 +2640,8 @@ class CombinedEquations(Equations):
         else:
             return super(CombinedEquations, self).get_coordinate_system()
 
+    def __iter__(self):
+        return iter(self._subelements)
 
 
 class InterfaceEquations(Equations):
@@ -2761,6 +2776,13 @@ class InterfaceEquations(Equations):
                         while current is not None:
                             assert current._codegen is not None
                             ceqs=cast(Equations,current._codegen.get_equations()) 
+                            if not isinstance(ceqs,Equations):
+                                #print(f"Something strange here. We have the mesh  and it does not have the expected equations."+str(ceqs)+" Looking for "+str(dv))
+                                if isinstance(current,InterfaceMesh):                                    
+                                    current = current._parent 
+                                else:
+                                    current = None
+                                continue
                             assert isinstance(ceqs,Equations)
                             if dv in ceqs._vectorfields.keys():
                                 vcomps = ceqs._vectorfields[dv]

@@ -206,6 +206,7 @@ class BifurcationGUI:
         self.problem.continuation_data_in_states=True
         self.data_subdir="_bifurcation_gui_data"
         self.neigen=10
+        self.shift=0
         self.branches:List[BifurcationGUISolutionBranch]=[]
         self.current_branch=None
         self.current_point=None
@@ -282,7 +283,7 @@ class BifurcationGUI:
         self.branches.append(self.current_branch)
         self.problem.load_state(statefile,ignore_continuation_data=True,ignore_eigendata=True)
         self.problem.reset_arc_length_parameters()
-        self.problem.solve_eigenproblem(self.neigen)       
+        self.problem.solve_eigenproblem(self.neigen,self.shift)
         self._add_current_state()
         self._update_tangents()
         self.update_plot()
@@ -829,7 +830,7 @@ class BifurcationGUI:
         self.current_branch=self.branches[-1]
         self.selected_branch=self.current_branch
         self._tangs={}
-        self.problem.solve_eigenproblem(self.neigen)
+        self.problem.solve_eigenproblem(self.neigen,self.shift)
         self._add_current_state()  
         self._update_tangents()  
         self._mode="al"
@@ -856,7 +857,7 @@ class BifurcationGUI:
         self.problem.run(1000*ts,startstep=ts,temporal_error=1,outstep=False,do_not_set_IC=True)
         self.problem.set_current_time(0)
         self.problem.solve(max_newton_iterations=20)
-        self.problem.solve_eigenproblem(self.neigen)
+        self.problem.solve_eigenproblem(self.neigen,self.shift)
         self.branches.append(BifurcationGUISolutionBranch())
         self.current_branch=self.branches[-1]
         self.selected_branch=self.current_branch
@@ -990,7 +991,7 @@ class BifurcationGUI:
             return
         self.update_plot("ARCLENGTH STEPPING")
         ds=self.problem.arclength_continuation(self.get_bifurcation_parameter(),ds)
-        self.problem.solve_eigenproblem(self.neigen)
+        self.problem.solve_eigenproblem(self.neigen,self.shift)
        
         self._add_current_state()
 
@@ -1005,7 +1006,7 @@ class BifurcationGUI:
 
     def locate_bifurcation(self,pitchfork:bool=False):
         self.update_plot("BIFURCATION FINDING"+(" (PITCHFORK)" if pitchfork else ""))
-        self.problem.solve_eigenproblem(self.neigen)
+        self.problem.solve_eigenproblem(self.neigen,self.shift)
         self.problem.activate_bifurcation_tracking(self._paramname,"pitchfork" if pitchfork else None)
         self.problem.solve(max_newton_iterations=20)
         self._add_current_state()
@@ -1034,7 +1035,7 @@ class BifurcationGUI:
             self.problem.solve(max_newton_iterations=initial_max_newton_iterations)
         except:
             raise RuntimeError("Make sure the problem starts where it has a stationary solution")
-        self.problem.solve_eigenproblem(self.neigen)
+        self.problem.solve_eigenproblem(self.neigen,self.shift)
         self._avail_observables=[k for k in self.evalulate_observables().keys()]
         self._current_observable=self._avail_observables[0]
         self._add_current_state()

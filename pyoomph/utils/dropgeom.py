@@ -87,7 +87,7 @@ class DropletGeometry:
 
         if numgiven!=2:
             raise RuntimeError("Specify exactly two of the following parameters: "+", ".join(settings.keys())+" but got: "+str(settings))
-        if self.contact_angle is not None:
+        if self.contact_angle is not None and evalf:
             if float(self.contact_angle)<0:
                 raise RuntimeError("Negative contact angle!")
             elif float(self.contact_angle/pi)>=1:
@@ -117,10 +117,11 @@ class DropletGeometry:
                     h0 = 1.0 / pi * ((3 * v0 + (pi ** 2 * r0 ** 6 + 9 * v0 ** 2) ** rational_num(1, 2)) * pi ** 2) ** rational_num(1,3) - r0 ** 2 * pi / ((3 * v0 + (pi ** 2 * r0 ** 6 + 9 * v0 ** 2) ** rational_num(1, 2)) * pi ** 2) ** rational_num(1, 3)
                 #print("H02",float(h0/meter))
             elif ca is not None:
-                if float(ca) <= float(0.5 * pi):
-                    h0 = (- cos(ca)+1.0) / absolute(sin(ca)) * r0 # TODO: I don't think there is any difference
-                else:
-                    h0 = (1.0 + cos(pi - ca)) / absolute(sin(ca)) * r0 # TODO: I don't think there is any difference
+                #if float(ca) <= float(0.5 * pi):
+                    #h0 = (- cos(ca)+1) / absolute(sin(ca)) * r0 # TODO: I don't think there is any difference
+                    h0 = (- cos(ca)+1) / (sin(ca)) * r0 # TODO: I don't think there is any difference
+                #else:
+                #    h0 = (1.0 + cos(pi - ca)) / absolute(sin(ca)) * r0 # TODO: I don't think there is any difference
             elif rc is not None:
                 if ambiguous_low_contact_angle is None:
                     raise RuntimeError("Set ambiguous_low_contact_angle to either True or False if passing the base and curvature radius")
@@ -174,10 +175,11 @@ class DropletGeometry:
         else:
             self.volume = pi * h0 / 6.0 * (3.0 * r0 ** 2 + h0 ** 2) if self.volume is None else self.volume
         self.curv_radius = (r0 ** 2 + h0 ** 2) / (2.0 * h0) if self.curv_radius is None else self.curv_radius
-        if float(h0/r0) > 1:
-            self.contact_angle = pi - asin((r0 / self.curv_radius)) if self.contact_angle is None else self.contact_angle
-        else:
-            self.contact_angle = asin((r0 / self.curv_radius)) if self.contact_angle is None else self.contact_angle
+        if self.contact_angle is None:
+            if float(h0/r0) > 1:
+                self.contact_angle = pi - asin((r0 / self.curv_radius)) if self.contact_angle is None else self.contact_angle
+            else:
+                self.contact_angle = asin((r0 / self.curv_radius)) if self.contact_angle is None else self.contact_angle
         self.base_radius=r0 if self.base_radius is None else self.base_radius
         self.apex_height = h0 if self.apex_height is None else self.apex_height
 
@@ -233,6 +235,10 @@ class DropletGeometry:
     def sample_gravity_shape(self,surface_tension:ExpressionOrNum,delta_rho_times_g:ExpressionOrNum,output_dir:str,fixations:Optional[YoungLaplaceFixationsType]=None,update_params:bool=True,N:int=200,output_text:bool=True,compiler:Any=None,ignore_command_line:bool=False,globally_convergent_newton:bool=False)->Tuple[NPFloatArray,ExpressionOrNum]:
         if self.rivulet_instead:
             raise RuntimeError("Not yet implemented")
+        if isinstance((0+surface_tension),(Expression)):
+            surface_tension=(0+surface_tension).parameters_to_current_values() #type:ignore
+        if isinstance((0+delta_rho_times_g),(Expression)):
+            delta_rho_times_g=(0+delta_rho_times_g).parameters_to_current_values()        
         with YoungLaplaceDropletShape(self,sigma=surface_tension,rho_g_ez=delta_rho_times_g,fixations=fixations,N=N) as problem:
             problem.logfile_name=None # Do not change the log file here
             problem.set_output_directory(output_dir)

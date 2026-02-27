@@ -543,7 +543,9 @@ class Problem(_pyoomph.Problem):
 
         self.default_ccode_expression_mode:str="" # Try to factor all expressions with "factor"
         self.extra_compiler_flags:List[str]=[]
-
+        
+        #: After analyzing the Jacobian, a field with an empty Jacobian row will be pinned automatically
+        self.automatically_remove_dofs_without_equations:bool=True
 
         #: Must be set to the participant name when using preCICE. Default is an empty string, if you do not use preCICE.
         self.precice_participant:str=""
@@ -1106,7 +1108,8 @@ class Problem(_pyoomph.Problem):
         if isinstance(solv,str):
             solv=GenericEigenSolver.factory_solver(solv,self)
         self._eigensolver=solv        
-        print("EIGEN SOLVER WAS SET TO: "+self._eigensolver.idname)
+        if not self.is_quiet():
+            print("EIGEN SOLVER WAS SET TO: "+self._eigensolver.idname)
         return self._eigensolver
 
     def set_linear_solver(self,solv:Union[str,GenericLinearSystemSolver]):
@@ -1123,7 +1126,8 @@ class Problem(_pyoomph.Problem):
         if self._num_threads is not None:
             solv.set_num_threads(self._num_threads)
         self._lasolver=solv        
-        print("LINEAR SOLVER WAS SET TO: "+self._lasolver.idname)
+        if not self.is_quiet():
+            print("LINEAR SOLVER WAS SET TO: "+self._lasolver.idname)
         return self._lasolver
 
     def set_num_threads(self,nthread:Optional[int]):
@@ -1664,6 +1668,8 @@ class Problem(_pyoomph.Problem):
             if isinstance(mesh, ODEStorageMesh): continue
             assert not isinstance(mesh,InterfaceMesh)
             mesh._link_periodic_corner_nodes()  
+            
+
 
     
 
@@ -1779,33 +1785,39 @@ class Problem(_pyoomph.Problem):
         return self.get_ccompiler()
 
 
-    def __iadd__(self,other:Union[MeshTemplate,EquationTree,GenericProblemHooks,"MatplotlibPlotter"]):
-        from pyoomph.output.plotting import BasePlotter
+    def __iadd__(self,other:Union[MeshTemplate,EquationTree,GenericProblemHooks,"MatplotlibPlotter"]):        
         if self._initialised and not isinstance(other,(BasePlotter,GenericProblemHooks)):
             raise RuntimeError("Cannot add anything to a problem once it is initialized!")
         if isinstance(other,MeshTemplate):
             self.add_mesh(other)
         elif isinstance(other,EquationTree):
-            self.additional_equations+=other
-        elif isinstance(other,BasePlotter):
-            if self.plotter is None:
-                self.plotter=other
-            elif isinstance(self.plotter,list):
-                self.plotter.append(other)
-            else:
-                self.plotter=[self.plotter,other]
+            if other._equations is not None:
+                raise RuntimeError("You try to add an EquationTree to the Problem with Equations defined on the root level. This is not allowed. Please restrict all Equations to a domain using e.g. @'domain'")
+            
+            self.additional_equations+=other        
         elif isinstance(other,GenericProblemHooks):
             if other._problem is None:
                 other._problem=self
             elif other._problem is not self:
                 raise RuntimeError("Cannot add a problem hook to a different problem")
             self._hooks.append(other)
+            if self._initialised:
+                other.actions_after_initialise()
         else:
-            addinfo=""
-            if isinstance(other,BaseEquations):
-                addinfo="  -- You must restrict equations to a domain using e.g. @'domain'"
+            from pyoomph.output.plotting import BasePlotter
+            if isinstance(other,BasePlotter):
+                if self.plotter is None:
+                    self.plotter=other
+                elif isinstance(self.plotter,list):
+                    self.plotter.append(other)
+                else:
+                    self.plotter=[self.plotter,other]
+            else:
+                addinfo=""
+                if isinstance(other,BaseEquations):
+                    addinfo="  -- You must restrict equations to a domain using e.g. @'domain'"
 
-            raise RuntimeError("cannot add this to a Problem: " +str(other)+addinfo)
+                raise RuntimeError("cannot add this to a Problem: " +str(other)+addinfo)
         return self
 
     def cmdline_desc(self) -> str:
@@ -2354,6 +2366,7 @@ class Problem(_pyoomph.Problem):
         self.rebuild_global_mesh_from_list(rebuild=True)
 
         self.relink_external_data()
+        self._assemble_defined_field_list()
 
         self.setup_pinning()
         self.before_assigning_equation_numbers(self._dof_selector)
@@ -2558,8 +2571,13 @@ class Problem(_pyoomph.Problem):
         self.rebuild_global_mesh_from_list(rebuild=False)
 
         self.relink_external_data()
+        self._assemble_defined_field_list()
+        
+        infofile=open(os.path.join(self.get_output_directory(),self._ccode_dir,"_jacobian_structure.txt"),"w")
+        infofile.write(str(self._get_jacobian_information_string()))
+        infofile.close()
 
-
+        self._set_solved_residual("",False,True)
         self.setup_pinning()
         self.before_assigning_equation_numbers(self._dof_selector)
         self.reapply_boundary_conditions()
@@ -2744,6 +2762,8 @@ class Problem(_pyoomph.Problem):
             if isinstance(submesh,(MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d,InterfaceMesh,ODEStorageMesh)):
                 #print("DIRCHLET SET ", submesh, submesh.get_full_name())
                 submesh.setup_Dirichlet_conditions(False)
+                if self.automatically_remove_dofs_without_equations:
+                    submesh._pin_noncontributing_dofs()
                 assert submesh._codegen is not None 
                 submesh._codegen.on_apply_boundary_conditions(submesh) 
 
@@ -3143,6 +3163,7 @@ class Problem(_pyoomph.Problem):
         if self._suppress_code_writing or get_mpi_rank()>0:
             suppress_writing=True
         mpi_barrier()
+        
         res=self.generate_and_compile_bulk_element_code(elementtype,trunk,suppress_writing,suppress_compilation,bulkmesh,self.is_quiet(),self.extra_compiler_flags)
         #print("REt")
         mpi_barrier()
@@ -3871,6 +3892,100 @@ class Problem(_pyoomph.Problem):
         self.invalidate_cached_mesh_data()
         self.invalidate_eigendata()
         self.set_current_dofs(numpy.array(dofs)+dofpert) #type:ignore
+        
+        
+    def perturb_by_eigenfunction(self,*,dt:Optional[ExpressionNumOrNone]=None, eigenmode:int=0,time_steps_per_growth:float=20,desired_initial_residuals:Optional[float]=1e-1)->ExpressionNumOrNone:
+        """
+        Perturb the current solution by an eigenfunction corresponding to the specified eigenmode index.
+        The if the  time step dt is not set, it is chosen so that there are time_steps_per_growth time steps per growth time of the eigenmode.
+        Eigenindex selects which eigenmode to use (default 0 for the most unstable mode).
+        The perturbation amplitude is chosen so that the initial residuals after perturbation are approximately desired_initial_residuals (if not None).
+        Returns the time step dt to be used for time stepping after the perturbation.
+        
+        Args:
+            dt: Time step to use after perturbation. If None, it is computed based on the eigenvalue using time_steps_per_growth.
+            eigenmode: Index of the eigenmode to use for the perturbation.
+            time_steps_per_growth: Number of time steps per growth time of the eigenmode (used if dt is None).
+            desired_initial_residuals: Desired initial residuals after perturbation. If None, no scaling is done.
+        """
+        eigenvals=self.get_last_eigenvalues()
+        if eigenvals is None or eigenmode>=len(eigenvals):
+            raise ValueError("No eigenvalues computed or eigenmode index out of range")
+        
+        TS=self.get_scaling("temporal")
+        if dt is None:
+            dt=1.0/max(abs(eigenvals[eigenmode].real),abs(eigenvals[eigenmode].imag))*TS/time_steps_per_growth
+        self.initialise_dt(float(dt/TS))
+        dofs,_=self.get_current_dofs()
+        dofs=numpy.array(dofs)
+        evect=self.get_last_eigenvectors()[eigenmode]
+        
+        self._taken_already_an_unsteady_step=True
+        self.time_stepper_pt().set_num_unsteady_steps_done(2)
+        self.time_stepper_pt().undo_make_steady()
+        self.initialise_dt(float(dt/TS))
+        self.time_stepper_pt().set_weights()
+        
+        
+        
+        # TODO: look for complex conjugate pairs and handle appropriately
+        def get_dofs(scale,toffset):
+            return dofs+numpy.real(0.5*scale*(evect*numpy.exp(eigenvals[eigenmode]*float(toffset/TS))+numpy.conjugate(evect*numpy.exp(eigenvals[eigenmode]*float(toffset/TS)))))
+        
+        # TODO: Better way to  history dofs here:
+        self.set_history_dofs(3,0*dofs) # Newmark velo
+        self.set_history_dofs(4,0*dofs) # Newmark accel
+        self.set_history_dofs(5,0*dofs) # BDF2 velocity
+        self.set_history_dofs(6,0*dofs) # Predictor
+        def set_ic(scale):
+            self.set_current_dofs(get_dofs(scale,0.0))
+            self.set_history_dofs(1,get_dofs(scale,-dt))
+            self.set_history_dofs(2,get_dofs(scale,-2*dt))
+            self.set_history_dofs(3,get_dofs(scale,-3*dt))
+            maxres=numpy.amax(numpy.absolute(self.get_residuals()))
+            #print("Max residual after perturbation with scale {}: {}".format(scale,maxres))
+            return maxres
+    
+        if desired_initial_residuals is not None:        
+            scale0=1
+            res0=set_ic(scale0)
+            if res0>desired_initial_residuals:
+                while res0>desired_initial_residuals:
+                    scale1=scale0/2
+                    res1=set_ic(scale1)
+                    if res1<desired_initial_residuals:
+                        break
+                    else:
+                        res0=res1
+                        scale0=scale1
+            else:
+                while res0<desired_initial_residuals:  
+                    scale1=scale0*2
+                    res1=set_ic(scale1)
+                    if res1>desired_initial_residuals:
+                        break
+                    else:
+                        scale0=scale1
+                        res0=res1
+            #print("Final scale0: {}, residual0: {}".format(scale0,res0))
+            #print("Final scale1: {}, residual1: {}".format(scale1,res1))
+            if scale0>scale1:
+                scale0,scale1=scale1,scale0
+            # Now do a bisection between scale0 and scale1
+            for _ in range(20):
+                scale=(scale0+scale1)/2
+                res=set_ic(scale)
+                #print("Bisection scale: {}, residual: {}".format(scale,res),desired_initial_residuals)
+                if res>desired_initial_residuals:                    
+                    scale1=scale
+                else:
+                    scale0=scale
+        
+            res=set_ic(scale)
+            #print("Final scale: {}, residual: {}".format(scale,res))
+        self.invalidate_cached_mesh_data()
+        self.invalidate_eigendata()
+        return dt
 
     def deactivate_bifurcation_tracking(self):
         
@@ -4223,10 +4338,10 @@ class Problem(_pyoomph.Problem):
             #print("EIGEN DOFS",eigen_zero_dofs)
             #print("OMEGA {:g}".format(omega))
             contribs={"azimuthal_real_eigen":self._cartesian_normal_mode_stability.real_contribution_name,"azimuthal_imag_eigen":self._cartesian_normal_mode_stability.imag_contribution_name}
-            has_imag=self._set_solved_residual(self._cartesian_normal_mode_stability.imag_contribution_name,raise_error=False)
+            has_imag=self._set_solved_residual(self._cartesian_normal_mode_stability.imag_contribution_name,False,False)
             if not has_imag:
                 contribs["azimuthal_imag_eigen"]="<NONE>"
-            self._set_solved_residual("")
+            self._set_solved_residual("",False,True)
             #print("GOING FOR IT ",parameter, bifurcation_type, blocksolve,  -omega,contribs)
             #print("KVALUE",self._normal_mode_param_k.value,"HAS IMAG",has_imag)
             
@@ -4871,7 +4986,7 @@ class Problem(_pyoomph.Problem):
 
 
     def run(self, endtime:ExpressionOrNum, timestep:ExpressionNumOrNone=None,*, outstep:Union[ExpressionNumOrNone,bool]=None, numouts:Optional[int]=None, out_initially:Union[bool,None]=None,
-            temporal_error:Union[None,float]=None, outstep_relative_to_zero:bool=True,spatial_adapt:int=0,startstep:ExpressionNumOrNone=None,maxstep:ExpressionNumOrNone=None,newton_solver_tolerance:Union[None,float]=None,do_not_set_IC:bool=False,globally_convergent_newton:bool=False,max_newton_iterations:Union[None,int]=None,starttime:ExpressionNumOrNone=None,suppress_resolve_after_adapt=False,max_newton_to_increase_time_step:Optional[int]=None)->ExpressionOrNum:
+            temporal_error:Union[None,float]=None, outstep_relative_to_zero:bool=True,spatial_adapt:int=0,startstep:ExpressionNumOrNone=None,maxstep:ExpressionNumOrNone=None,newton_solver_tolerance:Union[None,float]=None,do_not_set_IC:Union[bool,Literal["auto"]]="auto",globally_convergent_newton:bool=False,max_newton_iterations:Union[None,int]=None,starttime:ExpressionNumOrNone=None,suppress_resolve_after_adapt=False,max_newton_to_increase_time_step:Optional[int]=None)->ExpressionOrNum:
         """
         Run the problem for a specified duration, potential with output calls and temporal and/or spatial adaptivity.
         All time quantities must be given in dimensional units, e.g. ``second``, if you use e.g. :py:meth:`~Problem.set_scaling` with e.g. ``temporal=1*second`` for a dimensional problem.
@@ -4935,6 +5050,11 @@ class Problem(_pyoomph.Problem):
         if starttime is not None:
             self.set_current_time(starttime)
         if (not self.is_initialised()) or self._taken_already_an_unsteady_step==False:
+            if do_not_set_IC=="auto":
+                if self.is_initialised():
+                    do_not_set_IC=True
+                else:
+                    do_not_set_IC=False
             #We need to calculate the initial time step already now to initialize appropriately!
             _tstart=self.get_current_time() #This might call initialise!
             if self._runmode!="continue":
@@ -5225,7 +5345,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
     def deflated_continuation(self,deflation_alpha:float=0.1,deflation_p:int=2,perturbation_amplitude:float=0.5,max_newton_iterations:Optional[int]=None,newton_relaxation_factor:Optional[float]=None,use_eigenperturbation:bool=False,skip_initial_solution:bool=False,num_random_tries:int=1,max_branches:Optional[int]=None,branch_continue_iterations:int=10,**param_range):
         """Scan over a parameter range and try to find multiple solutions for each parameter step by deflation
         This is an implemetation according to: The computation of disconnected bifurcation diagrams by Patrick E. Farrell, Casper H. L. Beentjes, Ásgeir Birkisson
-         https://arxiv.org/pdf/1603.00809.pdf
+        https://arxiv.org/pdf/1603.00809.pdf
         
         Args:
             deflation_alpha : Shift of the deflation operator. Defaults to 0.1.

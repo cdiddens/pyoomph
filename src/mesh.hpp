@@ -97,6 +97,7 @@ namespace pyoomph
 		std::vector<double> evaluate_local_expression_at_nodes(unsigned index, bool nondimensional, bool discontinuous = false);
 		void set_initial_condition(std::string fieldname, GiNaC::ex expression);
 		virtual void setup_initial_conditions(bool resetting_first_step, std::string ic_name);
+		virtual void pin_noncontributing_dofs();
 		virtual void setup_Dirichlet_conditions(bool only_update_vals);
 		virtual void set_dirichlet_active(std::string name, bool active);
 		virtual bool get_dirichlet_active(std::string name);

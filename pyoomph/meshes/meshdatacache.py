@@ -47,7 +47,8 @@ class MeshDataCacheEntry:
         self.merged_eigendata:Dict[int,Dict[str,Any]]={}
         self.discontinuous=discontinuous
         self.add_eigen_to_mesh_positions=add_eigen_to_mesh_positions
-
+        if self.eigenmode not in {"abs","real","imag","merge","angle"}:
+            raise RuntimeError("Unknown eigenmode "+str(self.eigenmode))
         if isinstance(self.eigenvector,int):
             if eigenmode=="merge":
                 self.eigenvector=[self.eigenvector]
@@ -621,7 +622,8 @@ class MeshDataCombineWithEigenfunction(MeshDataCacheOperatorBase):
                     if len(self.eigenindex) == 1:
                         base.vector_fields[prefix+vector_name]=[prefix+compo_name for compo_name in compo_names]
                     else:
-                        base.vector_fields[prefix +str(eigenindex)+"_"+ vector_name] = [prefix +str(eigenindex)+"_"+ compo_name for compo_name in compo_names]
+                        base.vector_fields[prefix+vector_name]=[prefix+compo_name for compo_name in compo_names]
+                        #base.vector_fields[prefix +str(eigenindex)+"_"+ vector_name] = [prefix +str(eigenindex)+"_"+ compo_name for compo_name in compo_names]
                 base.nodal_values = new_nodal_values
                 base.nodal_field_inds = new_nodal_field_inds
                 base.elemental_field_inds=new_elem_field_inds

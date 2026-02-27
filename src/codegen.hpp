@@ -317,6 +317,95 @@ namespace GiNaC
       print_latex_FEM(std::ostream &, print_FEM_options *fem_opts, unsigned options = 0);
    };
 
+   class SortedGiNaC
+    {
+      public:
+        std::vector<SortedGiNaC*> op;        
+        virtual ~SortedGiNaC() ;        
+        static SortedGiNaC * factory(const ex & e,std::ostream &os, GiNaC::print_FEM_options &csrc_opts);                
+        virtual std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) =0;       
+        virtual int add_order()=0;
+        virtual int mul_order()=0;        
+        bool add_sort_compare(SortedGiNaC * other, std::ostream &os, GiNaC::print_FEM_options &csrc_opts);        
+        bool mul_sort_compare(SortedGiNaC * other, std::ostream &os, GiNaC::print_FEM_options &csrc_opts);        
+    };
+
+    class SortedGiNaCNumeric : public SortedGiNaC
+    {
+      public:
+        GiNaC::numeric value;
+
+        SortedGiNaCNumeric(GiNaC::numeric v) : SortedGiNaC(), value(v) {}
+        virtual std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;
+        virtual int add_order() override { return 0; }
+        virtual int mul_order() override { return 0; }
+        
+    };
+
+    class SortedGiNaCAdd : public SortedGiNaC
+    {
+      public:
+        SortedGiNaCAdd(const std::vector<SortedGiNaC*> & ops) : SortedGiNaC()  {op=ops;}
+        virtual std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;        
+        virtual int add_order() override;        
+        virtual int mul_order() override { return 5; }
+            
+    };
+
+    class SortedGiNaCMul : public SortedGiNaC
+    {
+      public:
+        SortedGiNaCMul(const std::vector<SortedGiNaC*> & ops) : SortedGiNaC(){op=ops;}
+        virtual std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;        
+        virtual int add_order() override { return 3; }
+        virtual int mul_order() override;        
+    };
+
+    class SortedGiNaCPow : public SortedGiNaC
+    {
+      public:
+        SortedGiNaCPow(SortedGiNaC * base, SortedGiNaC * exp) : SortedGiNaC()
+        {
+            op.push_back(base);
+            op.push_back(exp);
+        }
+        virtual std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;        
+        virtual int add_order() override { return 4; }
+        virtual int mul_order() override { return 4; }
+    };
+
+    class SortedGiNaCFunction : public SortedGiNaC
+    {
+      public:
+        std::string fname;
+        SortedGiNaCFunction(const std::string & fname, const std::vector<SortedGiNaC*> & ops) : SortedGiNaC(), fname(fname)     {            op=ops;        }
+        virtual std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;        
+        virtual int add_order() override { return 1; }
+        virtual int mul_order() override { return 1; }
+    };
+
+    class SortedGiNaCSymbol : public SortedGiNaC
+    {
+      public:
+        std::string vname;        
+        SortedGiNaCSymbol(const std::string & vname) : SortedGiNaC(), vname(vname) {}
+        virtual std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override {return vname;}
+        virtual int add_order() override {return 2;}
+        virtual int mul_order() override {return 2;}
+    };
+
+    class SortedGiNaCStruct : public SortedGiNaC
+    {
+      public:
+        ex contents;
+        SortedGiNaCStruct(GiNaC::ex _contents) : SortedGiNaC(), contents(_contents) {}
+        virtual std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;        
+        virtual int add_order() override { return 6; }
+        virtual int mul_order() override;
+    };
+
+    std::ostream & print_sorted_GiNaC(ex  e,std::ostream &os, GiNaC::print_FEM_options &csrc_opts);
+
 }
 
 namespace pyoomph
@@ -484,7 +573,7 @@ namespace pyoomph
       virtual void write_spatial_interpolation(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, std::set<ShapeExpansion> &required_shapeexps, bool including_nodal_diffs, bool for_hessian);
       virtual void write_nodal_time_interpolation(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, std::set<ShapeExpansion> &required_shapeexps);
       virtual bool write_generic_RJM_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hessian);
-      virtual void write_generic_RJM_jacobian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns);
+      virtual void write_generic_RJM_jacobian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns,FiniteElementField * residual_field);
       virtual bool write_generic_Hessian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns);
       FiniteElementSpace(FiniteElementCode *_code, const std::string &_name) : code(_code), name(_name), Basis(new BasisFunction(this)) {}
       virtual ~FiniteElementSpace()
@@ -514,7 +603,7 @@ namespace pyoomph
       virtual std::string get_num_nodes_str(FiniteElementCode *forcode) const;
       virtual std::string get_eqn_number_str(FiniteElementCode *forcode) const;
       PositionFiniteElementSpace(FiniteElementCode *_code, const std::string &_name) : ContinuousFiniteElementSpace(_code, _name) {}
-      virtual void write_generic_RJM_jacobian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns);
+      virtual void write_generic_RJM_jacobian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns,FiniteElementField * residual_field);
       virtual bool write_generic_Hessian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns);
    };
 
@@ -576,7 +665,9 @@ namespace pyoomph
       std::string name;
       FiniteElementSpace *space;
       GiNaC::symbol symb;
-
+      std::map<FiniteElementCode *, std::set<unsigned>> residual_contribution_for_code; // For each code, the residual indices for which this field has a contribution
+      std::map<FiniteElementCode *, std::map<unsigned ,std::set<FiniteElementField*> >> jacobian_contribution_for_code; // For each code, the residual indices for which this field has a contribution
+      FiniteElementField * defined_on_domain_equivalent=NULL; // If a field is already defined on a bulk domain, it is transferred to interfaces and corners. This goes to the top level, i.e. where it is defined
    public:
       double discontinuous_refinement_exponent = 0.0;
       bool no_jacobian_at_all; // used for Lagrangian entries
@@ -604,6 +695,12 @@ namespace pyoomph
       }
       GiNaC::ex get_test_function() { return 0 + GiNaC::GiNaCTestFunction(TestFunction(this, space->get_basis())); }
       virtual std::string get_hanginfo_str(FiniteElementCode *forcode) const;
+      bool has_residual_contribution_for_code(FiniteElementCode *code,unsigned residual_index);
+      bool has_jacobian_contribution_for_code(FiniteElementCode *code,unsigned residual_index, FiniteElementField *other);
+      void mark_residual_contribution_for_code(FiniteElementCode *code,unsigned residual_index);
+      void mark_jacobian_contribution_for_code(FiniteElementCode *code,unsigned residual_index, FiniteElementField *other);
+      FiniteElementField * get_defined_on_domain_equivalent_field();
+      void set_defined_on_domain_equivalent_field(FiniteElementField *equiv_field);
    };
 
    class FiniteElementCodeSubExpression
@@ -629,12 +726,13 @@ namespace pyoomph
       int expansion_mode = 0;
    };
 
- 
+   class Problem;
 
    class FiniteElementCode
    {
    protected:
       unsigned residual_index;
+      Problem *problem=NULL;
       std::vector<std::string> residual_names;
       std::vector<double> reference_pos_for_IC_and_DBC = {0, 0, 0, 0, 0, 0, 0}; // 0-2: x,y, 3: t, 4-6: nx,ny,nz
       Equations *equations;
@@ -663,6 +761,7 @@ namespace pyoomph
 
       std::vector<FiniteElementSpace *> allspaces;
       std::vector<FiniteElementField *> myfields;
+      std::set<FiniteElementField*> contributing_fields;
       int stage; // 0: we can register fields, 1: fields are registered (cannot add any more), but now we can add residuals
 
       unsigned nodal_dim, lagr_dim;
@@ -692,6 +791,7 @@ namespace pyoomph
       std::vector<bool> has_hessian_contribution = {false}; // Which of the residuals have hessian contributions
       std::vector<std::string> IC_names;                    // Names of the initial conditions
       std::vector<bool> has_constant_mass_matrix_for_sure;
+      
       virtual void write_code_initial_condition(std::ostream &os, unsigned int index, std::string name);
       virtual void write_code_Dirichlet_condition(std::ostream &os);
       virtual void write_code_integral_or_local_expressions(std::ostream &os, std::map<std::string, GiNaC::ex> &exprs, std::map<std::string, GiNaC::ex> &units, std::string funcname, std::string reqname, bool integrate);
@@ -710,6 +810,8 @@ namespace pyoomph
       virtual GiNaC::ex extract_spatial_integral_part(const GiNaC::ex &inp, bool eulerian, bool lagrangian);
 
    public:
+      void add_contributing_field(FiniteElementField *field) { contributing_fields.insert(field); }
+      unsigned get_current_residual_index() const { return residual_index; }
       virtual void mark_nonconstant_mass_matrix() {has_constant_mass_matrix_for_sure[residual_index]=false;}
       virtual void set_reference_point_for_IC_and_DBC(double x, double y, double z, double t, double nx, double ny, double nz)
       {
@@ -721,6 +823,7 @@ namespace pyoomph
          reference_pos_for_IC_and_DBC[5] = ny;
          reference_pos_for_IC_and_DBC[6] = nz;
       }
+      GiNaC::archive archive;
       std::map<std::string, GiNaC::ex> expanded_scales;
       GiNaC::ex expand_placeholders(GiNaC::ex inp, std::string where, bool raise_error = true);
       // To prevent tons of Python callbacks in e.g. UNIFAC to substitute molefraction by subexpressions, we cache the expanded callbacks
@@ -811,6 +914,8 @@ namespace pyoomph
       virtual void set_temporal_error(std::string f, double factor);
       // This will resolve the code (either itself, or bulk/otherbulk, external), func=field,nondimfield,scale,testfunction
       virtual FiniteElementCode *resolve_corresponding_code(GiNaC::ex func, std::string *fname, FiniteElementFieldTagInfo *taginfo);
+      void set_problem(Problem * p);
+	   Problem * get_problem();
 
       FiniteElementField *get_field_by_name(std::string name);
       FiniteElementField *register_field(std::string name, std::string spacename);

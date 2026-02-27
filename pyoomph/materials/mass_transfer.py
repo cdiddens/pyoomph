@@ -324,7 +324,10 @@ class LagrangeMultiplierMassTransferModelLiquidGas(LagrangeMultiplierMassTransfe
                if space!="":
                    break
         if space=="":
-            raise RuntimeError("What??")
+            # This actually happens for a case with only one component. Damn
+            space=ieqs.get_opposite_side_of_interface().get_parent_domain()._coordinate_space
+            if space=="":
+                raise RuntimeError("What??")
         space=cast(FiniteElementSpaceEnum,space)
         return space
 

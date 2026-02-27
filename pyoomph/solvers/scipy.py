@@ -154,7 +154,7 @@ class ScipyEigenSolver(GenericEigenSolver):
 			shift=self.shift
 		if target is not None:
 			raise RuntimeError("implement target for this eigensolver")
-		self.problem._set_solved_residual(self.real_contribution)
+		self.problem._set_solved_residual(self.real_contribution,True,False)
 		
 		if with_left_eigenvectors:
 			raise RuntimeError("Implement with_left_eigenvectors")    

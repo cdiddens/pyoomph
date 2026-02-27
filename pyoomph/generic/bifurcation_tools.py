@@ -873,6 +873,7 @@ class HopfTracker(CustomBifurcationTracker):
         if require_jacobian:
             assert dparameter is None, "dparameter not supported for require_jacobian=True"
             # If we need the augmented Jacobian, we also need dR/dP and dJ_ik/dU_j V_k
+            print("Currently at Hopf tracking with omega=",omega)
             R,J,M,dRdP,dJdP,dMdP,HVr,HVi,dMdUVr,dMdUVi=assembly.R().J().M().dRdp(self.parameter).dJdp(self.parameter).dMdp(self.parameter).dJdU(Vr,transposed=self.left_eigenvector).dJdU(Vi,transposed=self.left_eigenvector).dMdU(Vr,transposed=self.left_eigenvector).dMdU(Vi,transposed=self.left_eigenvector).assemble() # Assemble all quantities, will be given in the order of the requests
         else:
             if dparameter is not None:
@@ -958,8 +959,8 @@ class _NormalModeBifurcationTrackerBase(CustomBifurcationTracker):
         
         self.has_imag=numpy.dot(numpy.imag(self.eigenvector),numpy.imag(self.eigenvector))>1e-15 # TODO: Make it adjustable
         if not self.has_imag:
-            self.has_imag=self.problem._set_solved_residual(self.imag_contribution,raise_error=False)
-            self.problem._set_solved_residual("")
+            self.has_imag=self.problem._set_solved_residual(self.imag_contribution,False,False)
+            self.problem._set_solved_residual("",False,False)
             if self.has_imag:
                 print("Strange, eigenvector is real, but it has imaginary jacobian contribution")
                 #raise RuntimeError("Strange, eigenvector is real, but it has imaginary jacobian contribution")
@@ -1277,8 +1278,8 @@ class NormalModeEigenbranchTracker(_NormalModeBifurcationTrackerBase):
                 if dparameter is not None:
                     assm=self.start_multiassembly().dRdp(dparameter).dJdp(dparameter,self.real_contribution).dJdp(dparameter,self.imag_contribution)
                     assm.dMdp(dparameter,self.real_contribution).dMdp(dparameter,self.imag_contribution)
-                    dRdp,=self.patch_residuals(eigen=False,R=[dRdp])
                     dRdp,dJRdp,dJIdp,dMRdp,dMIdp=assm.assemble()
+                    dRdp,=self.patch_residuals(eigen=False,R=[dRdp])                    
                     dJRdp,dJIdp,dMRdp,dMIdp=self.patch_matrices(eigen=True,J=[dJRdp,dJIdp],M=[dMRdp,dMIdp])                    
                     d_eq_V_re_dp=-dJIdp*Vi + dJRdp*Vr + lamb*(-dMIdp*Vi + dMRdp*Vr) + omega*(-dMIdp*Vr - dMRdp*Vi)
                     d_eq_V_im_dp=dJIdp*Vr + dJRdp*Vi + lamb*(dMIdp*Vr + dMRdp*Vi) + omega*(-dMIdp*Vi + dMRdp*Vr)                    

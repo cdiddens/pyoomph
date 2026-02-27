@@ -24,6 +24,7 @@ The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
 #include "expressions.hpp"
 #include "exception.hpp"
 #include "problem.hpp"
+#include <limits>
 
 namespace pyoomph
 {
@@ -71,8 +72,14 @@ namespace pyoomph
 	{
 		GiNaC::ex towrite;
 		std::string mode = csrc_opts.for_code->ccode_expression_mode;
-
-		if (mode == "factor")
+		csrc_opts.for_code->archive.archive_ex(expr, ("expression_",std::to_string(csrc_opts.for_code->archive.num_expressions())).c_str());
+		if (mode == "deterministic")
+		{
+			//GiNaC::print_sorted_GiNaC(GiNaC::expand(GiNaC::expand(expr)),os,csrc_opts);
+			GiNaC::print_sorted_GiNaC(expr,os,csrc_opts);
+			return;
+		}
+		else if (mode == "factor")
 			towrite = GiNaC::factor(GiNaC::normal(GiNaC::expand(GiNaC::expand(expr).evalf())));
 		else if (mode == "normal")
 			towrite = GiNaC::normal(GiNaC::expand(GiNaC::expand(expr).evalf()));
@@ -89,7 +96,7 @@ namespace pyoomph
 		else if (mode == "expand_no_evalf")
 			towrite = GiNaC::expand(expr);
 		else if (mode == "ccf_no_evalf")
-			towrite = GiNaC::collect_common_factors(GiNaC::expand(expr));
+			towrite = GiNaC::collect_common_factors(GiNaC::expand(expr));		
 		else
 			towrite = expr.evalf();
 		//	std::cout << "MODE WAS " << mode << std::endl;
@@ -295,6 +302,25 @@ namespace pyoomph
 				}
 				else
 					return inp.map(*this);
+			}
+			else if (GiNaC::is_a<GiNaC::GiNaCGlobalParameterWrapper>(inp))
+			{
+				if (!this->space->get_code()->get_problem()) 
+				{
+					//throw_runtime_error("For some reason, the code generator is not able to access the problem here. Please report this bug to the developers. Happened on a variable named '"+varname+"'. The code is "+this->space->get_code()->get_full_domain_name()+". The space is "+this->space->get_name()+".");
+					return inp.map(*this); // Just do not check in this case...
+				}
+				// check whether the parameter belongs to the same problem. Otherwise, things get messed up in the parameter indicies
+				auto &p = (GiNaC::ex_to<GiNaC::GiNaCGlobalParameterWrapper>(inp)).get_struct();
+				if (!(p.cme->get_problem() == this->space->get_code()->get_problem()))
+				{
+					std::ostringstream oss; 
+					oss<< "Problem of Parameter: " << p.cme->get_problem() ;
+					oss<< " vs. Current Problem: " << this->space->get_code()->get_problem();
+					oss << " Are the same? " << (p.cme->get_problem() == this->space->get_code()->get_problem() ? " yes " : "no");
+					throw_runtime_error("You added a global parameter '" + p.cme->get_name() + "' defined in one problem to the residuals of a different problem. This is not allowed.... "+oss.str());				
+				}
+				return inp.map(*this);
 			}
 			else
 				return inp.map(*this);
@@ -989,6 +1015,49 @@ namespace pyoomph
 		return field->get_nodal_index_str(forcode);
 	}
 
+	bool FiniteElementField::has_residual_contribution_for_code(FiniteElementCode *code,unsigned residual_index)
+	{
+		return this->residual_contribution_for_code.count(code) > 0 && this->residual_contribution_for_code[code].count(residual_index) > 0;
+	}
+
+    bool FiniteElementField::has_jacobian_contribution_for_code(FiniteElementCode *code,unsigned residual_index, FiniteElementField *other)
+	{
+		return this->jacobian_contribution_for_code.count(code) > 0 && this->jacobian_contribution_for_code[code].count(residual_index) > 0 && this->jacobian_contribution_for_code[code][residual_index].count(other) > 0;
+	}
+    void FiniteElementField::mark_residual_contribution_for_code(FiniteElementCode *code,unsigned residual_index)
+	{
+	  if (!this->residual_contribution_for_code.count(code))
+	  {
+		this->residual_contribution_for_code[code]=std::set<unsigned>();
+	  }
+      this->residual_contribution_for_code[code].insert(residual_index);
+	}
+    void FiniteElementField::mark_jacobian_contribution_for_code(FiniteElementCode *code,unsigned residual_index, FiniteElementField *other)
+	{
+		if (!this->jacobian_contribution_for_code.count(code))
+		{
+			this->jacobian_contribution_for_code[code]=std::map<unsigned,std::set<FiniteElementField*>>();
+		}
+		if (!this->jacobian_contribution_for_code[code].count(residual_index))
+		{
+			this->jacobian_contribution_for_code[code][residual_index]=std::set<FiniteElementField*>();
+		}
+		this->jacobian_contribution_for_code[code][residual_index].insert(other);
+
+	}
+
+	FiniteElementField * FiniteElementField::get_defined_on_domain_equivalent_field()
+	{
+		if (defined_on_domain_equivalent)
+			return defined_on_domain_equivalent;
+		else
+			return this;
+	}
+    void FiniteElementField::set_defined_on_domain_equivalent_field(FiniteElementField *equiv_field)
+	{
+		this->defined_on_domain_equivalent = equiv_field;
+	}
+
 	std::string FiniteElementField::get_nodal_index_str(FiniteElementCode *forcode) const
 	{
 		std::string code_type = forcode->get_owner_prefix(space);
@@ -1206,6 +1275,7 @@ namespace pyoomph
 		std::string shapeinfo = "";
 		std::string eleminfo = "";
 		std::set<std::string> handled;
+		std::vector<std::string> decl_lines;
 		for (auto &s : required_shapeexps)
 		{
 			if (s.dt_order == 0 || s.basis->get_space() != this)
@@ -1224,8 +1294,14 @@ namespace pyoomph
 					continue;
 				handled.insert(varname);
 				// os << indent << "double "<<varname << "["<< range << "];" << std::endl;
-				os << indent << "PYOOMPH_AQUIRE_ARRAY(double, " << varname << ", " << range << ")" << std::endl;
+				//os << indent << "PYOOMPH_AQUIRE_ARRAY(double, " << varname << ", " << range << ")" << std::endl;
+				decl_lines.push_back(indent + "PYOOMPH_AQUIRE_ARRAY(double, " + varname + ", " + range + ")");
 			}
+		}
+		std::sort(decl_lines.begin(), decl_lines.end());
+		for (auto &l : decl_lines)
+		{
+			os << l << std::endl;
 		}
 
 		if (!hascontrib)
@@ -1235,7 +1311,7 @@ namespace pyoomph
 		//		bool req_loop=this->need_interpolation_loop();
 		os << indent << "for (unsigned int l_shape=0;l_shape<" + range + ";l_shape++)" << std::endl;
 		os << indent << "{" << std::endl;
-
+		std::vector<std::string> init_lines;
 		for (auto &s : required_shapeexps)
 		{
 			if (s.dt_order == 0 || s.basis->get_space() != this)
@@ -1246,14 +1322,22 @@ namespace pyoomph
 				if (handled.count(varname))
 					continue;
 				handled.insert(varname);
-				os << indent << "  " << varname << "[l_shape]=0.0;" << std::endl;
+				//os << indent << "  " << varname << "[l_shape]=0.0;" << std::endl;
+				init_lines.push_back(indent + "  " + varname + "[l_shape]=0.0;");
 			}
+		}
+		std::sort(init_lines.begin(), init_lines.end());
+		for (auto &l : init_lines)
+		{
+			os << l << std::endl;
 		}
 
 		handled.clear();
 		os << indent << "  for (unsigned tindex=0;tindex<" << "shapeinfo->timestepper_ntstorage;tindex++)" << std::endl;
 		os << indent << "  {" << std::endl;
 
+
+		std::vector<std::string> compute_lines;
 		for (auto &s : required_shapeexps)
 		{
 			if (s.dt_order == 0 || s.basis->get_space() != this)
@@ -1276,15 +1360,22 @@ namespace pyoomph
 				std::string nodalindex = s.get_nodal_index_str(for_code);
 				if (s.dt_order == 1)
 				{
-					os << indent << "    " << varname << "[l_shape] += " <<  "shapeinfo->timestepper_weights_dt_" << timedisc_scheme << "[tindex]*" << eleminfo << "->" << nds << "[l_shape][" << nodalindex << "][tindex];" << std::endl;
+					//os << indent << "    " << varname << "[l_shape] += " <<  "shapeinfo->timestepper_weights_dt_" << timedisc_scheme << "[tindex]*" << eleminfo << "->" << nds << "[l_shape][" << nodalindex << "][tindex];" << std::endl;
+					compute_lines.push_back(indent + "    " + varname + "[l_shape] += " + "shapeinfo->timestepper_weights_dt_" + timedisc_scheme + "[tindex]*" + eleminfo + "->" + nds + "[l_shape][" + nodalindex + "][tindex];");
 				}
 				else if (s.dt_order == 2)
 				{
-					os << indent << "    " << varname << "[l_shape] += " <<   "shapeinfo->timestepper_weights_d2t_" << timedisc_scheme << "[tindex]*" << eleminfo << "->" << nds << "[l_shape][" << nodalindex << "][tindex];" << std::endl;
+					//os << indent << "    " << varname << "[l_shape] += " <<   "shapeinfo->timestepper_weights_d2t_" << timedisc_scheme << "[tindex]*" << eleminfo << "->" << nds << "[l_shape][" << nodalindex << "][tindex];" << std::endl;
+					compute_lines.push_back(indent + "    " + varname + "[l_shape] += " + "shapeinfo->timestepper_weights_d2t_" + timedisc_scheme + "[tindex]*" + eleminfo + "->" + nds + "[l_shape][" + nodalindex + "][tindex];");
 				}
 				else
 					throw_runtime_error("TODO Higher order time derivatives");
 			}
+		}
+		std::sort(compute_lines.begin(), compute_lines.end());
+		for (auto &l : compute_lines)
+		{
+			os << l << std::endl;
 		}
 
 		os << indent << "  }" << std::endl;
@@ -1297,6 +1388,7 @@ namespace pyoomph
 		std::string range = "";
 		std::string posrange = "";
 		std::set<ShapeExpansion> required_coorddiffs;
+		std::vector<std::string> decl_lines;
 		for (auto &s : required_shapeexps)
 		{
 			if (s.basis->get_space() != this)
@@ -1308,7 +1400,8 @@ namespace pyoomph
 				posrange = for_code->get_elem_info_str(s.basis->get_space()) + "->nnode";
 				hascontrib = true;
 			}
-			os << indent << "double " << varname << "=0.0;" << std::endl;
+			//os << indent << "double " << varname << "=0.0;" << std::endl;
+			decl_lines.push_back(indent + "double " + varname + "=0.0;");
 			if (including_nodal_diffs)
 			{
 				if (dynamic_cast<D1XBasisFunction *>(s.basis) && !dynamic_cast<D1XBasisFunctionLagr *>(s.basis))
@@ -1321,8 +1414,15 @@ namespace pyoomph
 		if (!hascontrib)
 			return;
 
+
+		std::sort(decl_lines.begin(), decl_lines.end());
+		for (auto &l : decl_lines)
+		{
+			os << l << std::endl;
+		}
 		os << indent << "for (unsigned int l_shape=0;l_shape<" + range + ";l_shape++)" << std::endl;
 		os << indent << "{" << std::endl;
+		std::vector<std::string> calc_lines;
 		for (auto &s : required_shapeexps)
 		{
 			if (s.basis->get_space() != this)
@@ -1330,12 +1430,20 @@ namespace pyoomph
 			std::string varname = s.get_spatial_interpolation_name(for_code);
 			std::string nodal_data = s.get_nodal_data_string(for_code, "l_shape");
 			std::string shapestr = s.get_shape_string(for_code, "l_shape");
-			os << indent << "  " << varname << "+= " << nodal_data << " * " << shapestr << ";" << std::endl;
+			//os << indent << "  " << varname << "+= " << nodal_data << " * " << shapestr << ";" << std::endl;
+			calc_lines.push_back(indent + "  " + varname + "+= " + nodal_data + " * " + shapestr + ";");
+		}
+		std::sort(calc_lines.begin(), calc_lines.end());
+		for (auto &l : calc_lines)
+		{
+			os << l << std::endl;
 		}
 		os << indent << "}" << std::endl;
 
+		
 		if (!required_coorddiffs.empty())
 		{
+			decl_lines.clear();
 			for (auto s : required_coorddiffs)
 			{
 				std::string dtstring = "d" + std::to_string(s.dt_order) + "t" + std::to_string(s.time_history_index);
@@ -1345,7 +1453,8 @@ namespace pyoomph
 				{
 					std::string code_type = for_code->get_owner_prefix(s.basis->get_space());
 					std::string coorddiffname = code_type + "intrp_" + dtstring + "_" + s.basis->get_dx_str() + "_COORDDIFF_" + std::to_string(i) + "_" + s.field->get_name();
-					os << indent << "PYOOMPH_AQUIRE_ARRAY(double," << coorddiffname << "," << posrange << ");" << std::endl;
+					//os << indent << "PYOOMPH_AQUIRE_ARRAY(double," << coorddiffname << "," << posrange << ");" << std::endl;
+					decl_lines.push_back(indent + "PYOOMPH_AQUIRE_ARRAY(double," + coorddiffname + "," + posrange + ");");
 				}
 				if (for_hessian)
 				{
@@ -1355,16 +1464,25 @@ namespace pyoomph
 						{
 							std::string code_type = for_code->get_owner_prefix(s.basis->get_space());
 							std::string coorddiffname = code_type + "intrp_" + dtstring + "_" + s.basis->get_dx_str() + "_2ndCOORDDIFF_" + std::to_string(i) + "_" + std::to_string(j) + "_" + s.field->get_name();
-							os << indent << "PYOOMPH_AQUIRE_TWO_D_ARRAY(double," << coorddiffname << "," << posrange << "," << posrange << ");" << std::endl;
+							//os << indent << "PYOOMPH_AQUIRE_TWO_D_ARRAY(double," << coorddiffname << "," << posrange << "," << posrange << ");" << std::endl;
+							decl_lines.push_back(indent + "PYOOMPH_AQUIRE_TWO_D_ARRAY(double," + coorddiffname + "," + posrange + "," + posrange + ");");
 						}
 					}
 				}
+				
+			}
+			std::sort(decl_lines.begin(), decl_lines.end());
+			for (auto &l : decl_lines)
+			{
+				os << l << std::endl;
 			}
 			if (!for_hessian)
 				os << indent << "if (flag)" << std::endl;
 			os << indent << "{" << std::endl
 			   << indent << " for (unsigned int m=0;m<" << posrange << ";m++)" << std::endl
 			   << indent << " {" << std::endl;
+			std::vector<std::string> init_lines;
+			calc_lines.clear();
 			for (auto s : required_coorddiffs)
 			{
 				std::string dtstring = "d" + std::to_string(s.dt_order) + "t" + std::to_string(s.time_history_index);
@@ -1374,9 +1492,15 @@ namespace pyoomph
 				{
 					std::string code_type = for_code->get_owner_prefix(s.basis->get_space());
 					std::string coorddiffname = code_type + "intrp_" + dtstring + "_" + s.basis->get_dx_str() + "_COORDDIFF_" + std::to_string(i) + "_" + s.field->get_name();
-					os << indent << "    " << coorddiffname << "[m]=0.0;" << std::endl;
-				}
+					//os << indent << "    " << coorddiffname << "[m]=0.0;" << std::endl;
+					init_lines.push_back(indent + "    " + coorddiffname + "[m]=0.0;");
+				}				
 			}
+			std::sort(init_lines.begin(), init_lines.end());
+			for (auto &l : init_lines)
+			{
+				os << l << std::endl;
+			}	
 
 			os << indent << "    for (unsigned int l_shape=0;l_shape<" + range + ";l_shape++)" << std::endl
 			   << indent << "    {" << std::endl;
@@ -1391,12 +1515,20 @@ namespace pyoomph
 					std::string coorddiffname = code_type + "intrp_" + dtstring + "_" + s.basis->get_dx_str() + "_COORDDIFF_" + std::to_string(i) + "_" + s.field->get_name();
 					std::string nodal_data = s.get_nodal_data_string(for_code, "l_shape");
 					std::string shapestr = for_code->get_shape_info_str(s.basis->get_space()) + "->d_dx_shape_dcoord_" + s.basis->get_space()->get_shape_name() + "[l_shape][" + std::to_string(dynamic_cast<D1XBasisFunction *>(s.basis)->get_direction()) + "][m][" + std::to_string(i) + "]";
-					os << indent << "       " << coorddiffname << "[m]+=" << nodal_data << " * " << shapestr << ";" << std::endl;
+					//os << indent << "       " << coorddiffname << "[m]+=" << nodal_data << " * " << shapestr << ";" << std::endl;
+					calc_lines.push_back(indent + "       " + coorddiffname + "[m]+=" + nodal_data + " * " + shapestr + ";");
 				}
 			}
-			os << indent << "    }" << std::endl;
+			std::sort(calc_lines.begin(), calc_lines.end());
+			for (auto &l : calc_lines)
+			{
+				os << l << std::endl;
+			}
+			os << indent << "    }" << std::endl;			
 			if (for_hessian)
 			{
+				init_lines.clear();
+				std::vector<std::string> hess_lines;
 				os << indent << "    for (unsigned int m2=0;m2<" << posrange << ";m2++)" << std::endl
 				   << indent << "    {" << std::endl;
 
@@ -1411,9 +1543,17 @@ namespace pyoomph
 						{
 							std::string code_type = for_code->get_owner_prefix(s.basis->get_space());
 							std::string coorddiffname = code_type + "intrp_" + dtstring + "_" + s.basis->get_dx_str() + "_2ndCOORDDIFF_" + std::to_string(i) + "_" + std::to_string(j) + "_" + s.field->get_name();
-							os << indent << "       " << coorddiffname << "[m][m2]=0.0;" << std::endl;
+							//os << indent << "       " << coorddiffname << "[m][m2]=0.0;" << std::endl;
+							init_lines.push_back(indent + "       " + coorddiffname + "[m][m2]=0.0;");
 						}
 					}
+					std::sort(init_lines.begin(), init_lines.end());
+					//os << indent << "       // INIT LINES RIGHT NOW" << std::endl;
+					for (auto &l : init_lines)
+					{
+						os << l << std::endl;
+					}
+					init_lines.clear();
 					os << indent << "       for (unsigned int l_shape=0;l_shape<" + range + ";l_shape++)" << std::endl
 					   << indent << "       {" << std::endl;
 					/*					os << indent << "         for (unsigned int l_shape2=0;l_shape2<" + range + ";l_shape2++)" << std::endl
@@ -1431,9 +1571,16 @@ namespace pyoomph
 							std::string coorddiffname = code_type + "intrp_" + dtstring + "_" + s.basis->get_dx_str() + "_2ndCOORDDIFF_" + std::to_string(i) + "_" + std::to_string(j) + "_" + s.field->get_name();
 							std::string nodal_data = s.get_nodal_data_string(for_code, "l_shape");
 							std::string shapestr = for_code->get_shape_info_str(s.basis->get_space()) + "->d2_dx2_shape_dcoord_" + s.basis->get_space()->get_shape_name() + "[l_shape][" + std::to_string(dynamic_cast<D1XBasisFunction *>(s.basis)->get_direction()) + "][m][" + std::to_string(i) + "][m2][" + std::to_string(j) + "]";
-							os << indent << "             " << coorddiffname << "[m][m2]+=" << nodal_data << " * " << shapestr << ";" << std::endl;
+							//os << indent << "             " << coorddiffname << "[m][m2]+=" << nodal_data << " * " << shapestr << ";" << std::endl;
+							hess_lines.push_back(indent + "             " + coorddiffname + "[m][m2]+=" + nodal_data + " * " + shapestr + ";");
 						}
 					}
+					std::sort(hess_lines.begin(), hess_lines.end());
+					for (auto &l : hess_lines)
+					{
+						os << l << std::endl;
+					}
+					hess_lines.clear();
 					//					}
 					//					os << indent << "         }" << std::endl;
 					os << indent << "       }" << std::endl;
@@ -1490,11 +1637,11 @@ namespace pyoomph
 			return false;
 	}
 
-	void PositionFiniteElementSpace::write_generic_RJM_jacobian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns)
+	void PositionFiniteElementSpace::write_generic_RJM_jacobian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns,FiniteElementField * residual_field)
 	{
 		// Only do it if the coordinates are Dofs
-		if (for_code->coordinates_as_dofs)
-			FiniteElementSpace::write_generic_RJM_jacobian_contribution(for_code, os, indent, for_what, hanging_eqns);
+		if (this->code->coordinates_as_dofs)
+			FiniteElementSpace::write_generic_RJM_jacobian_contribution(for_code, os, indent, for_what, hanging_eqns,residual_field);
 	}
 
 	bool FiniteElementSpace::write_generic_Hessian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns)
@@ -1519,14 +1666,20 @@ namespace pyoomph
 						{
 							jacobian_shapes.insert(ShapeExpansion(for_code->get_bulk_element()->get_bulk_element()->get_field_by_name("coordinate_" + d), 0, for_code->get_bulk_element()->get_bulk_element()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
 						}
-					}
-					if (for_code->get_opposite_interface_code())
+					}					
+				}
+			}
+		}
+		if (for_code->get_opposite_interface_code() && for_code->get_opposite_interface_code()->coordinates_as_dofs)
+		{
+			for (auto d : std::vector<std::string>{"x", "y", "z"})
+			{
+				if (for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d))
+				{
+					jacobian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
+					if (for_code->get_opposite_interface_code()->get_bulk_element())
 					{
-						jacobian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
-						if (for_code->get_opposite_interface_code()->get_bulk_element())
-						{
-							jacobian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
-						}
+						jacobian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
 					}
 				}
 			}
@@ -1620,13 +1773,19 @@ namespace pyoomph
 								hessian_shapes.insert(ShapeExpansion(for_code->get_bulk_element()->get_bulk_element()->get_field_by_name("coordinate_" + d), 0, for_code->get_bulk_element()->get_bulk_element()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
 							}
 						}
-						if (for_code->get_opposite_interface_code())
+					}
+				}
+			}
+			if (for_code->get_opposite_interface_code() && for_code->get_opposite_interface_code()->coordinates_as_dofs)
+			{
+				for (auto d : std::vector<std::string>{"x", "y", "z"})
+				{
+					if (for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d))
+					{
+						hessian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
+						if (for_code->get_opposite_interface_code()->get_bulk_element())
 						{
-							hessian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
-							if (for_code->get_opposite_interface_code()->get_bulk_element())
-							{
-								hessian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
-							}
+							hessian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
 						}
 					}
 				}
@@ -1822,7 +1981,10 @@ namespace pyoomph
 							os << indent << "           const bool symmetry_assembly_same_field=false;" << std::endl;
 					}
 					if (!only_mass_part)
+					{
 						os << indent << "           ADD_TO_HESSIAN_" << (hanging_eqns ? "HANG" : "NOHANG") << "_" << (hang ? "HANG" : "NOHANG") << "_" << (hang2 ? "HANG" : "NOHANG") << "()" << std::endl;
+						//std::cout << "        HESSIAN CONTRIB: " << f->get_equation_str(for_code, l_shape) << " & " << f2->get_equation_str(for_code, l_shape2) << std::endl;
+					}
 
 					//					GiNaC::ex mass_part2 = GiNaC::diff(mass_part, pyoomph::expressions::__partial_t_mass_matrix);
 					for_code->subexpressions = __SE_to_struct_hessian->subexpressions;
@@ -1856,7 +2018,9 @@ namespace pyoomph
 						os << indent << "     }" << std::endl;
 					}
 				}
+				__derive_shapes_by_second_index = false;
 			}
+			__derive_shapes_by_second_index = false;
 
 			if (loop2_written)
 			{
@@ -1872,15 +2036,17 @@ namespace pyoomph
 
 			for_code->Hessian_symmetric_fields_completed.insert(f);
 		}
+		
 
 		if (loop1_written)
 		{
 			os << indent << "}" << std::endl;
 		}
+		__derive_shapes_by_second_index = false; // Just to make sure....
 		return has_contribs;
 	}
 
-	void FiniteElementSpace::write_generic_RJM_jacobian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns)
+	void FiniteElementSpace::write_generic_RJM_jacobian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns,FiniteElementField * residual_field)
 	{
 		GiNaC::print_FEM_options csrc_opts;
 		csrc_opts.for_code = for_code;
@@ -1902,20 +2068,30 @@ namespace pyoomph
 						{
 							jacobian_shapes.insert(ShapeExpansion(for_code->get_bulk_element()->get_bulk_element()->get_field_by_name("coordinate_" + d), 0, for_code->get_bulk_element()->get_bulk_element()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
 						}
-					}
-					if (for_code->get_opposite_interface_code())
+					}					
+				}
+			}
+		}
+		if (for_code->get_opposite_interface_code() && for_code->get_opposite_interface_code()->coordinates_as_dofs)
+		{
+			for (auto d : std::vector<std::string>{"x", "y", "z"})
+			{
+				if (for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d))
+				{
+					jacobian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
+					if (for_code->get_opposite_interface_code()->get_bulk_element())
 					{
-						jacobian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
-						if (for_code->get_opposite_interface_code()->get_bulk_element())
-						{
-							jacobian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
-						}
+						jacobian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
 					}
 				}
 			}
 		}
 
-		std::set<FiniteElementField *> jacobian_fields;
+		auto cmp = [&for_code](FiniteElementField * a, FiniteElementField * b) 
+		{ 			
+			return a->get_nodal_index_str(for_code) < b->get_nodal_index_str(for_code); 
+		};
+		std::set<FiniteElementField *,decltype(cmp)> jacobian_fields(cmp);
 		for (auto &s : jacobian_shapes)
 		{
 			if (s.field->get_space() == this)
@@ -1963,7 +2139,10 @@ namespace pyoomph
 			if (pyoomph_verbose)
 				std::cout << "DIFF PART IS " << diffpart << std::endl;
 			std::string eqn_index = f->get_equation_str(for_code, l_shape);
-
+			
+			for_code->add_contributing_field(residual_field);
+			for_code->add_contributing_field(f);
+			residual_field->mark_jacobian_contribution_for_code(for_code,for_code->get_current_residual_index(),f);
 			if (hang)
 			{
 				std::string nodal_index = f->get_nodal_index_str(for_code);
@@ -2037,7 +2216,8 @@ namespace pyoomph
 			{
 				if (n == "coordinate_x" || n == "coordinate_y" || n == "coordinate_z")
 				{
-					throw_runtime_error("Cannot add residual contributions on the position test space as long as the bulk element has not activated the positions as dofs (i.e. via calling BulkElement.activate_coordinates_as_dofs");
+					std::string info=for_code->get_full_domain_name();
+					throw_runtime_error("Cannot add residual contributions on the position test space as long as the bulk element has not activated the positions as dofs (i.e. via calling BulkElement.activate_coordinates_as_dofs for domain "+info+")");
 				}
 			}
 		}
@@ -2065,12 +2245,13 @@ namespace pyoomph
 		}
 		for (auto &test_name : present_tests)
 		{
-			for_code->Hessian_symmetric_fields_completed.clear();
+			for_code->Hessian_symmetric_fields_completed.clear();			
 			MapOnTestSpace var_mapper(this, test_name);
 			GiNaC::ex var_part = var_mapper(mypart);
 			if (var_part.is_zero())
 				continue;
 			FiniteElementField *field = var_mapper.get_field();
+			//if (hessian) std::cout << "HESSIAN TEST: " << test_name << std::endl;
 			std::string eqn_index = field->get_equation_str(for_code, l_test);
 			std::string nodal_index = field->get_nodal_index_str(for_code);
 			std::string hang_info = field->get_hanginfo_str(for_code);
@@ -2078,13 +2259,16 @@ namespace pyoomph
 			bool can_have_hanging = this->can_have_hanging_nodes() || for_code != this->code; // Always hang for external spaces
 			if (!hessian)
 			{
+				field->mark_residual_contribution_for_code(for_code,for_code->get_current_residual_index());
+				//std::cout << "MARKING RESIDUAL CONTRIBUTION " << field->get_space()->get_code()->get_full_domain_name()+"/"+field->get_name() << " for " << for_code->get_full_domain_name()<< " PTR " << field << " FOR CODE " << for_code <<std::endl;
+				for_code->add_contributing_field(field);
 				has_contribs = true;
 				if (can_have_hanging)
 				{
 					oss << indent << "    BEGIN_RESIDUAL_CONTINUOUS_SPACE(" << eqn_index << ",";
 					if (for_code->is_current_residual_assembly_ignored())
 					{
-						oss << "0 /* IGNORED RESIDUAL: " << std::endl << var_part << std::endl << std::endl ;
+						oss << "0 /* IGNORED RESIDUAL " << std::endl; //<< var_part << std::endl << std::endl ;
 					}
 					//else
 					//{
@@ -2107,7 +2291,7 @@ namespace pyoomph
 					oss << indent << "    BEGIN_RESIDUAL(" << eqn_index << ", ";
 					if (for_code->is_current_residual_assembly_ignored())
 					{
-						oss << "0 /* IGNORED RESIDUAL: " << std::endl << var_part << std::endl << std::endl ;
+						oss << "0 /* IGNORED RESIDUAL: " << std::endl /*<< var_part << std::endl << std::endl */;
 					}
 					/*else
 					{*/
@@ -2142,15 +2326,22 @@ namespace pyoomph
 							{
 								jacobian_shapes.insert(ShapeExpansion(for_code->get_bulk_element()->get_bulk_element()->get_field_by_name("coordinate_" + d), 0, for_code->get_bulk_element()->get_bulk_element()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
 							}
-						}
-						if (for_code->get_opposite_interface_code())
+						}						
+					}
+				}
+			}
+			if (for_code->get_opposite_interface_code() && for_code->get_opposite_interface_code()->coordinates_as_dofs)
+			{
+				for (auto d : std::vector<std::string>{"x", "y", "z"})
+				{					
+					if (for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d))
+					{
+						//std::cout << "Adding coordinate " << d << " from opposite interface code " << for_code->get_opposite_interface_code()->get_full_domain_name() << " to Jacobian shapes for code " << for_code->get_full_domain_name() << std::endl;
+						jacobian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
+						if (for_code->get_opposite_interface_code()->get_bulk_element())
 						{
-							jacobian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
-							if (for_code->get_opposite_interface_code()->get_bulk_element())
-							{
-								jacobian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
-							}
-						}
+							jacobian_shapes.insert(ShapeExpansion(for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d), 0, for_code->get_opposite_interface_code()->get_bulk_element()->get_field_by_name("coordinate_" + d)->get_space()->get_basis()));
+						}			
 					}
 				}
 			}
@@ -2158,10 +2349,21 @@ namespace pyoomph
 			{
 				if (!hessian)
 					oss << indent << "      BEGIN_JACOBIAN()" << std::endl;
-				std::set<FiniteElementField *> jacobian_fields;
+				auto cmp=[&for_code](FiniteElementField * a, FiniteElementField * b) 
+				{ 			
+					return a->get_nodal_index_str(for_code) < b->get_nodal_index_str(for_code); 
+				};
+				std::set<FiniteElementField *, decltype(cmp)> jacobian_fields(cmp);
 				for (auto &s : jacobian_shapes)
+				{					
+					//std::cout << "Test function " << test_name << " Jacobian Field " << s.field->get_name() << " Space " << s.field->get_space()->get_name() << " on " << s.field->get_space()->get_code()->get_full_domain_name() << std::endl;
 					jacobian_fields.insert(s.field);
-				std::set<FiniteElementSpace *> jacobian_spaces;
+				}
+				auto cmp_spaces=[&for_code](FiniteElementSpace * a, FiniteElementSpace * b) 
+				{ 			
+					return a->get_name()<b->get_name() || (a->get_name()==b->get_name() &&  a->get_code()->get_full_domain_name() < b->get_code()->get_full_domain_name() || (a->get_name()==b->get_name() &&  a->get_code()->get_full_domain_name() == b->get_code()->get_full_domain_name() && a->get_num_nodes_str(for_code)<b->get_num_nodes_str(for_code))); 
+				};
+				std::set<FiniteElementSpace *, decltype(cmp_spaces)> jacobian_spaces(cmp_spaces);
 				for (auto *s : jacobian_fields)
 					jacobian_spaces.insert(s->get_space());
 				if (pyoomph_verbose)
@@ -2171,7 +2373,7 @@ namespace pyoomph
 					if (pyoomph_verbose)
 						std::cout << "writing contrib of domain " << s->get_code() << std::endl;
 					if (!hessian)
-						s->write_generic_RJM_jacobian_contribution(for_code, oss, indent + "        ", var_part, can_have_hanging);
+						s->write_generic_RJM_jacobian_contribution(for_code, oss, indent + "        ", var_part, can_have_hanging,field);
 					else
 					{
 						std::ostringstream hessian_inner;
@@ -2635,6 +2837,7 @@ namespace pyoomph
 					}
 					FiniteElementField *f = this->register_field(bulk_code->myfields[j]->get_name(), bulk_code->myfields[j]->get_space()->get_name());
 					f->index = bulk_code->myfields[j]->index;
+					f->set_defined_on_domain_equivalent_field(bulk_code->myfields[j]->get_defined_on_domain_equivalent_field());
 					bulk_coordinate_index_max= std::max(bulk_coordinate_index_max, f->index);
 				}
 			}
@@ -2679,6 +2882,7 @@ namespace pyoomph
 								fpresent->index = pc->myfields[j]->index;
 								if (fpresent->index >= walking_index)
 									walking_index = fpresent->index + 1;
+								
 							}
 							continue;
 						}
@@ -2688,11 +2892,12 @@ namespace pyoomph
 							pspacename="C2"; //Bubble does not transfer to the interfaces
 						   }*/
 						FiniteElementField *f = this->register_field(pc->myfields[j]->get_name(), pspacename);
+						f->set_defined_on_domain_equivalent_field(pc->myfields[j]->get_defined_on_domain_equivalent_field());
 						if (pc == deepest_bulk)
 						{
 							f->index = pc->myfields[j]->index;
 							if (f->index >= walking_index)
-								walking_index = f->index + 1;
+								walking_index = f->index + 1;						
 						}
 						else
 						{
@@ -3771,22 +3976,35 @@ namespace pyoomph
 						{
 							indices_required.insert(this->bulk_code->bulk_code->get_field_by_name("coordinate_" + d));
 						}
-					}
-					if (this->opposite_interface_code)
+					}					
+				}
+			}
+		}
+		if (this->opposite_interface_code && this->opposite_interface_code->coordinates_as_dofs)
+		{
+			for (auto d : std::vector<std::string>{"x", "y", "z"})
+			{
+				if (this->opposite_interface_code->get_field_by_name("coordinate_" + d))
+				{
+					indices_required.insert(this->opposite_interface_code->get_field_by_name("coordinate_" + d));
+					if (this->opposite_interface_code->bulk_code)
 					{
-						indices_required.insert(this->opposite_interface_code->get_field_by_name("coordinate_" + d));
-						if (this->opposite_interface_code->bulk_code)
-						{
-							indices_required.insert(this->opposite_interface_code->bulk_code->get_field_by_name("coordinate_" + d));
-						}
+						indices_required.insert(this->opposite_interface_code->bulk_code->get_field_by_name("coordinate_" + d));
 					}
 				}
 			}
 		}
 
+		std::vector<std::string> indices_lines;
 		for (auto *f : indices_required)
 		{
-			osh << "  const unsigned " << f->get_nodal_index_str(this) << " = " << f->index << ";" << std::endl;
+			//osh << "  const unsigned " << f->get_nodal_index_str(this) << " = " << f->index << ";" << std::endl;
+			indices_lines.push_back("  const unsigned " + f->get_nodal_index_str(this) + " = " + std::to_string(f->index) + ";");
+		}
+		std::sort(indices_lines.begin(), indices_lines.end());
+		for (auto &l : indices_lines)
+		{
+			osh << l << std::endl;
 		}
 		osh << "  //START: Precalculate time derivatives of the necessary data" << std::endl;
 		for (auto *sp : allspaces)
@@ -3974,22 +4192,35 @@ namespace pyoomph
 						{
 							indices_required.insert(this->bulk_code->bulk_code->get_field_by_name("coordinate_" + d));
 						}
-					}
-					if (this->opposite_interface_code)
+					}					
+				}
+			}
+		}
+		if (this->opposite_interface_code && this->opposite_interface_code->coordinates_as_dofs)
+		{
+			for (auto d : std::vector<std::string>{"x", "y", "z"})
+			{
+				if (this->opposite_interface_code->get_field_by_name("coordinate_" + d))
+				{
+					indices_required.insert(this->opposite_interface_code->get_field_by_name("coordinate_" + d));
+					if (this->opposite_interface_code->bulk_code)
 					{
-						indices_required.insert(this->opposite_interface_code->get_field_by_name("coordinate_" + d));
-						if (this->opposite_interface_code->bulk_code)
-						{
-							indices_required.insert(this->opposite_interface_code->bulk_code->get_field_by_name("coordinate_" + d));
-						}
+						indices_required.insert(this->opposite_interface_code->bulk_code->get_field_by_name("coordinate_" + d));
 					}
 				}
 			}
 		}
 
+		std::vector<std::string> indices_lines;
 		for (auto *f : indices_required)
 		{
-			os << "  const unsigned " << f->get_nodal_index_str(this) << " = " << f->index << ";" << std::endl;
+			//os << "  const unsigned " << f->get_nodal_index_str(this) << " = " << f->index << ";" << std::endl;
+			indices_lines.push_back("  const unsigned " + f->get_nodal_index_str(this) + " = " + std::to_string(f->index) + ";");
+		}
+		std::sort(indices_lines.begin(), indices_lines.end());
+		for (auto &l : indices_lines)
+		{
+			os << l << std::endl;
 		}
 
 		os << "  //START: Precalculate time derivatives of the necessary data" << std::endl;
@@ -4684,6 +4915,7 @@ namespace pyoomph
 	void FiniteElementCode::write_code(std::ostream &os)
 	{
 		__current_code = this;
+		this->archive.clear();
 		CustomMathExpressionBase::code_map.clear();
 		CustomMultiReturnExpressionBase::code_map.clear();
 		find_all_accessible_spaces();
@@ -5725,6 +5957,9 @@ namespace pyoomph
 		expressions::el_dim = -1;
 	}
 
+	void FiniteElementCode::set_problem(Problem * p) {problem=p;}
+	Problem * FiniteElementCode::get_problem() {return problem;}
+
 	void FiniteElementCode::write_code_geometric_jacobian(std::ostream &os)
 	{
 		os << "// Used for Z2 error estimators" << std::endl;
@@ -5829,6 +6064,7 @@ namespace pyoomph
 		bool require_bulk_bulk = false;
 		bool require_opposite_interface = false;
 		bool require_opposite_bulk = false;
+		std::vector<std::string> lines;
 		for (auto &fieldentry : entry)
 		{
 
@@ -5839,7 +6075,7 @@ namespace pyoomph
 				{
 					if (subentry.second)
 					{
-						os << indent << "functable->shapes_required_" << func_type << "." << subentry.first << " = true;" << std::endl;
+						lines.push_back(indent + "functable->shapes_required_" + func_type + "." + subentry.first + " = true;");
 					}
 				}
 				continue;
@@ -5928,7 +6164,9 @@ namespace pyoomph
 			{
 				if (psientry.second)
 				{
-					os << indent << "functable->shapes_required_" << func_type << "." << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
+					//os << indent << "functable->shapes_required_" << func_type << "." << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
+					lines.push_back(indent + "functable->shapes_required_" + func_type + "." + psientry.first + "_" + fieldentry.first->get_name() + " = true;");
+					
 				}
 			}
 		}
@@ -5988,14 +6226,16 @@ namespace pyoomph
 				{
 					if (psientry.second)
 					{
-						os << indent << "functable->shapes_required_" << func_type << ".bulk_shapes->" << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
+						//os << indent << "functable->shapes_required_" << func_type << ".bulk_shapes->" << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
+						lines.push_back(indent + "functable->shapes_required_" + func_type + ".bulk_shapes->" + psientry.first + "_" + fieldentry.first->get_name() + " = true;");
 					}
 				}
 			}
 
 			if (just_the_normal)
 			{
-				os << indent << "functable->shapes_required_" << func_type << ".bulk_shapes->psi_Pos = true;" << std::endl;
+				//os << indent << "functable->shapes_required_" << func_type << ".bulk_shapes->psi_Pos = true;" << std::endl;
+				lines.push_back(indent + "functable->shapes_required_" + func_type + ".bulk_shapes->psi_Pos = true;");
 			}
 
 			if (require_bulk_bulk)
@@ -6021,13 +6261,15 @@ namespace pyoomph
 					{
 						if (psientry.second)
 						{
-							os << indent << "functable->shapes_required_" << func_type << ".bulk_shapes->bulk_shapes->" << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
+							//os << indent << "functable->shapes_required_" << func_type << ".bulk_shapes->bulk_shapes->" << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
+							lines.push_back(indent + "functable->shapes_required_" + func_type + ".bulk_shapes->bulk_shapes->" + psientry.first + "_" + fieldentry.first->get_name() + " = true;");
 						}
 					}
 				}
 				if (just_the_parent_normal)
 				{
-					os << indent << "functable->shapes_required_" << func_type << ".bulk_shapes->bulk_shapes->psi_Pos = true;" << std::endl;
+					//os << indent << "functable->shapes_required_" << func_type << ".bulk_shapes->bulk_shapes->psi_Pos = true;" << std::endl;
+					lines.push_back(indent + "functable->shapes_required_" + func_type + ".bulk_shapes->bulk_shapes->psi_Pos = true;");
 				}
 			}
 		}
@@ -6066,14 +6308,16 @@ namespace pyoomph
 				{
 					if (psientry.second)
 					{
-						os << indent << "functable->shapes_required_" << func_type << ".opposite_shapes->" << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
+						//os << indent << "functable->shapes_required_" << func_type << ".opposite_shapes->" << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
+						lines.push_back(indent + "functable->shapes_required_" + func_type + ".opposite_shapes->" + psientry.first + "_" + fieldentry.first->get_name() + " = true;");
 					}
 				}
 			}
 
 			if (just_the_opposite_normal)
 			{
-				os << indent << "functable->shapes_required_" << func_type << ".opposite_shapes->psi_Pos = true;" << std::endl;
+				//os << indent << "functable->shapes_required_" << func_type << ".opposite_shapes->psi_Pos = true;" << std::endl;
+				lines.push_back(indent + "functable->shapes_required_" + func_type + ".opposite_shapes->psi_Pos = true;");
 			}
 			/*
 			if (just_the_normal) //TODO: THis required here?
@@ -6107,7 +6351,8 @@ namespace pyoomph
 				{
 					if (psientry.second)
 					{
-						os << indent << "functable->shapes_required_" << func_type << ".opposite_shapes->bulk_shapes->" << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
+						//os << indent << "functable->shapes_required_" << func_type << ".opposite_shapes->bulk_shapes->" << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
+						lines.push_back(indent + "functable->shapes_required_" + func_type + ".opposite_shapes->bulk_shapes->" + psientry.first + "_" + fieldentry.first->get_name() + " = true;");
 					}
 				}
 			}
@@ -6117,6 +6362,12 @@ namespace pyoomph
 			  os << indent << "functable->shapes_required_"  << func_type << ".bulk_shapes->psi_Pos = true;" << std::endl;
 			}
 			*/
+		}
+
+		std::sort(lines.begin(), lines.end());
+		for (auto &l : lines)
+		{
+			os << l << std::endl;
 		}
 	}
 
@@ -6658,6 +6909,8 @@ namespace pyoomph
 			coordinate_space = "C1TB";
 		else if (coordinate_space == "D2TB")
 			coordinate_space = "C2TB";
+		if (coordinate_space == "" || coordinate_space=="ED0")
+			throw_runtime_error("Cannot deduce the coordinate space of domain " + this->get_domain_name() + ". Please specify it explicitly by adding an ElementSpace().");
 		//   if (coordinate_space=="C2TB" && this->bulk_code) coordinate_space="C2";
 		init << " functable->dominant_space=strdup(\"" << coordinate_space << "\");" << std::endl;
 
@@ -6746,6 +6999,10 @@ namespace pyoomph
 		init << " functable->has_constant_mass_matrix_for_sure=(bool*)calloc(functable->num_res_jacs,sizeof(bool));" << std::endl;
 		cleanup << " pyoomph_tested_free(functable->has_constant_mass_matrix_for_sure); functable->has_constant_mass_matrix_for_sure=PYOOMPH_NULL; " << std::endl;
 
+		
+		
+		
+
 		for (unsigned int resiind = 0; resiind < residual.size(); resiind++)
 		{
 			init << " SET_INTERNAL_FIELD_NAME(functable->res_jac_names," << resiind << ", \"" << residual_names[resiind] << "\" );" << std::endl;
@@ -6753,7 +7010,7 @@ namespace pyoomph
 			if (!residual[resiind].is_zero())
 			{
 				init << " functable->ResidualAndJacobian_NoHang[" << resiind << "]=&ResidualAndJacobian" << resiind << ";" << std::endl;
-				init << " functable->ResidualAndJacobian[" << resiind << "]=&ResidualAndJacobian" << resiind << ";" << std::endl;
+				init << " functable->ResidualAndJacobian[" << resiind << "]=&ResidualAndJacobian" << resiind << ";" << std::endl;				
 				if (extra_steady_routine[resiind])
 				{
 					init << " functable->ResidualAndJacobianSteady[" << resiind << "]=&ResidualAndJacobianSteady" << resiind << ";" << std::endl;
@@ -6778,6 +7035,8 @@ namespace pyoomph
 			init << " functable->has_constant_mass_matrix_for_sure[" << resiind << "] = " << (has_constant_mass_matrix_for_sure[resiind] ? "true" : "false") << ";" << std::endl;	
 		}
 		cleanup << " pyoomph_tested_free(functable->res_jac_names); functable->res_jac_names=PYOOMPH_NULL; " << std::endl;	
+
+		
 
 		if (generate_hessian)
 			init << " functable->hessian_generated=true;" << std::endl
@@ -6840,6 +7099,7 @@ namespace pyoomph
 
 		std::vector<std::string> dirichlet_set_names;
 		std::vector<bool> dirichlet_set_true;
+		std::map<int, FiniteElementField*> dirichlet_index_to_field;
 		for (auto *f : myfields)
 		{
 			int myindex = f->index;
@@ -6872,6 +7132,7 @@ namespace pyoomph
 			// std::cout << "DIRICHLET INFO " << nam << "INDEX " << myindex << " SET " <<  f->Dirichlet_condition_set << std::endl;
 			dirichlet_set_names[myindex] = nam;
 			dirichlet_set_true[myindex] = f->Dirichlet_condition_set;
+			dirichlet_index_to_field[myindex] = f;
 		}
 
 		init << " functable->Dirichlet_set_size=" << dirichlet_set_names.size() << ";" << std::endl;
@@ -6892,6 +7153,133 @@ namespace pyoomph
 		}
       cleanup << " pyoomph_tested_free(functable->Dirichlet_names); functable->Dirichlet_names=PYOOMPH_NULL; " << std::endl;			         							
       cleanup << " pyoomph_tested_free(functable->Dirichlet_set); functable->Dirichlet_set=PYOOMPH_NULL; " << std::endl;
+
+
+	  // Build the contribution mapping
+	  std::vector<std::string> contribution_names;
+	  std::map<std::string, unsigned> contribution_name_to_index;	  
+	  std::map<FiniteElementField*, unsigned> contribution_field_to_index;	  
+	  std::map<FiniteElementField*,FiniteElementField*> to_where_it_was_defined;  
+	  for (auto *f : contributing_fields)
+	  {
+		FiniteElementField *wheredef = f->get_defined_on_domain_equivalent_field();
+		to_where_it_was_defined[f] = wheredef;
+		std::string n=wheredef->get_space()->get_code()->get_full_domain_name()+"/"+wheredef->get_name();
+		//std::cout << "CONTRIBUTING FIELD " << f->get_space()->get_code()->get_full_domain_name() << "/" << f->get_name() << " defined on " << n << std::endl;
+		//std::cout << "  name already in there " << n << " ? " << (contribution_name_to_index.count(n) ? "YES" : "NO") << std::endl;
+		if (contribution_name_to_index.count(n)==0)
+		{
+			int index=contribution_names.size();
+			contribution_names.push_back(n);
+			contribution_name_to_index[n]=index;
+			contribution_field_to_index[f]=index;
+		}	
+		else
+		{
+			contribution_field_to_index[f]=contribution_name_to_index[n];
+		}	
+		//std::cout << "  setting index to " << contribution_field_to_index[f] << std::endl;
+	  }
+
+	  /*
+	  for (unsigned int i=0;i<contribution_names.size();i++)
+	  {
+		  std::cout << "CONTRIBUTION NAME " << contribution_names[i] << " INDEX " << i << " Other indeX " << contribution_name_to_index[contribution_names[i]] << std::endl;
+	  }	
+
+	  for (auto &pair : to_where_it_was_defined)
+	  {
+		  FiniteElementField *f = pair.first;
+		  FiniteElementField *wheredef = pair.second;
+		  std::string n1=f->get_space()->get_code()->get_full_domain_name()+"/"+f->get_name();
+		  std::string n2=wheredef->get_space()->get_code()->get_full_domain_name()+"/"+wheredef->get_name();
+		  std::cout << "CONTRIBUTION INFO " << n1 << " defined on " << n2 << " PTRS " << f << " " << wheredef << " for code " << this << std::endl;
+	  }
+		*/
+	  init << " functable->contributes_to_residual=(bool**)calloc(functable->num_res_jacs,sizeof(*functable->contributes_to_residual));" << std::endl;
+	  init << " functable->contributes_to_jacobian=(bool***)calloc(functable->num_res_jacs,sizeof(*functable->contributes_to_jacobian));" << std::endl;
+	  init << " functable->contribution_entries_size=" << contribution_names.size() << ";" << std::endl;
+	  if (contribution_names.size()>0)
+	  {
+	  	init << " functable->contribution_names=(char**)calloc(functable->contribution_entries_size,sizeof(char*));" << std::endl;
+	  	cleanup << " for (unsigned int i=0;i<functable->contribution_entries_size;i++) { pyoomph_tested_free(functable->contribution_names[i]); functable->contribution_names[ i]=PYOOMPH_NULL; }" << std::endl;
+	  	cleanup << " pyoomph_tested_free(functable->contribution_names); functable->contribution_names=PYOOMPH_NULL; " << std::endl;
+	  	for (unsigned int i=0;i<contribution_names.size();i++)
+	  	{
+		  init << " SET_INTERNAL_FIELD_NAME(functable->contribution_names," << i << ", \"" << contribution_names[i] << "\" );" << std::endl;
+		  
+	  	}
+		
+	  
+	  	for (unsigned int resiind = 0; resiind < residual.size(); resiind++)
+	  	{
+				init << " functable->contributes_to_residual[" << resiind << "]=(bool*)calloc("<< contribution_names.size() <<",sizeof(bool));" << std::endl;				
+				init << " functable->contributes_to_jacobian[" << resiind << "]=(bool**)calloc("<< contribution_names.size() <<",sizeof(**functable->contributes_to_jacobian));" << std::endl;				
+				init << " for (unsigned int _i=0;_i<"<< contribution_names.size() <<";_i++) { functable->contributes_to_jacobian[" << resiind << "][_i]=(bool*)calloc("<< contribution_names.size() <<",sizeof(bool)); }" << std::endl;				
+				std::vector<bool> written_residual_contribution(contribution_names.size(), false);
+				std::vector<std::vector<bool>> written_jacobian_contribution(contribution_names.size(), std::vector<bool>(contribution_names.size(), false));
+				for (auto &pair1 : to_where_it_was_defined)
+				{
+					FiniteElementField *f = pair1.first;					
+					int i1 = contribution_field_to_index[f];
+					//std::cout << "CHECK CONTRIB " << f->get_space()->get_code()->get_full_domain_name() << "/" << f->get_name() << " for residual " << residual_names[resiind] << " contributes to residual? " << f->has_residual_contribution_for_code(this,resiind) << " Corresponding index " << i1 << std::endl;
+					
+					if ((f->has_residual_contribution_for_code(this,resiind) || pair1.second->has_residual_contribution_for_code(this,resiind)) && !written_residual_contribution[i1])
+					{
+						init << " functable->contributes_to_residual[" << resiind << "][" << i1 << "]=true; //" << contribution_names[i1] << std::endl;
+						written_residual_contribution[i1] = true;
+					}
+					for (auto &pair2 : to_where_it_was_defined)
+					{
+						FiniteElementField *f2 = pair2.first;
+						int i2 = contribution_field_to_index[f2];
+						
+						if ((f->has_jacobian_contribution_for_code(this,resiind,f2) || f->has_jacobian_contribution_for_code(this,resiind,pair2.second)) && !written_jacobian_contribution[i1][i2])
+						{
+							init << " functable->contributes_to_jacobian[" << resiind << "][" << i1 << "][" << i2 << "]=true; //" << contribution_names[i1] << " vs " << contribution_names[i2] << std::endl;
+							written_jacobian_contribution[i1][i2] = true;
+						}
+					}
+				}
+				cleanup << " for (unsigned int _i=0;_i<functable->contribution_entries_size;_i++) { pyoomph_tested_free(functable->contributes_to_jacobian[" << resiind << "][_i]); functable->contributes_to_jacobian[" << resiind << "][_i]=PYOOMPH_NULL; }" << std::endl;
+				cleanup << " pyoomph_tested_free(functable->contributes_to_jacobian[" << resiind << "]); functable->contributes_to_jacobian[" << resiind << "]=PYOOMPH_NULL; " << std::endl;
+				cleanup << " pyoomph_tested_free(functable->contributes_to_residual[" << resiind << "]); functable->contributes_to_residual[" << resiind << "]=PYOOMPH_NULL; " << std::endl;
+	  
+	  	}
+
+	  	cleanup << " pyoomph_tested_free(functable->contributes_to_residual); functable->contributes_to_residual=PYOOMPH_NULL; " << std::endl;
+	  	cleanup << " pyoomph_tested_free(functable->contributes_to_jacobian); functable->contributes_to_jacobian=PYOOMPH_NULL; " << std::endl;
+	   }
+
+	   init << " functable->dirichlet_field_index_to_global_field_index=(int*)calloc(functable->Dirichlet_set_size,sizeof(int)); // Filling is done in the problem once all fields are defined" << std::endl;
+	   init << " for (unsigned int i=0;i<functable->Dirichlet_set_size;i++) { functable->dirichlet_field_index_to_global_field_index[i]=-1; }" << std::endl;
+	   cleanup << " pyoomph_tested_free(functable->dirichlet_field_index_to_global_field_index); functable->dirichlet_field_index_to_global_field_index=PYOOMPH_NULL; " << std::endl;
+
+	   std::vector<std::string> defined_fields_on_this_domain;
+	   for (auto &f : myfields)
+	   {
+		if (f->get_defined_on_domain_equivalent_field()==f) // Not transferred from parent
+		{
+			if (f->get_name() == "lagrangian_x" || f->get_name() == "lagrangian_y" || f->get_name() == "lagrangian_z") continue;
+			if (f->get_name() == "local_coordinate_1" || f->get_name() == "local_coordinate_2" || f->get_name() == "local_coordinate_3") continue;
+			if (f->get_name() == "zeta_coordinate_1" || f->get_name() == "zeta_coordinate_2" || f->get_name() == "zeta_coordinate_3") continue;
+			if ((f->get_name() == "mesh_x" || f->get_name() == "mesh_y" || f->get_name() == "mesh_z")) continue;
+			if (!this->coordinates_as_dofs &&  (f->get_name() == "coordinate_x" || f->get_name() == "coordinate_y" || f->get_name() == "coordinate_z")) continue;
+			if (dynamic_cast<ExternalD0Space*>(f->get_space())) continue;
+			defined_fields_on_this_domain.push_back(f->get_space()->get_code()->get_full_domain_name()+"/"+f->get_name());
+		}
+	   }
+	   if (defined_fields_on_this_domain.size()>0)
+	   {
+		init << " functable->num_defined_fields_on_this_domain=" << defined_fields_on_this_domain.size() << ";" << std::endl;
+		init << " functable->defined_field_names_on_this_domain=(char**)calloc(functable->num_defined_fields_on_this_domain,sizeof(char*));" << std::endl;
+		for (unsigned int i=0;i<defined_fields_on_this_domain.size();i++)
+		{
+			init << " SET_INTERNAL_FIELD_NAME(functable->defined_field_names_on_this_domain," << i << ", \"" << defined_fields_on_this_domain[i] << "\" );" << std::endl;
+			cleanup << " pyoomph_tested_free(functable->defined_field_names_on_this_domain[" << i << "]); functable->defined_field_names_on_this_domain[" << i << "]=PYOOMPH_NULL; " << std::endl;		
+		}
+		cleanup << " pyoomph_tested_free(functable->defined_field_names_on_this_domain); functable->defined_field_names_on_this_domain=PYOOMPH_NULL; " << std::endl;
+	 }
 
 		// TODO: Numextdata?
 		int numcallbacks = CustomMathExpressionBase::code_map.size();
@@ -7180,6 +7568,186 @@ namespace pyoomph
 
 namespace GiNaC
 {
+
+
+	/// SORTED PRINTS
+	SortedGiNaC::~SortedGiNaC() 
+	{
+		for (auto ptr : op) {                
+			delete ptr;
+		}
+	}
+
+	bool SortedGiNaC::add_sort_compare(SortedGiNaC * other,std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
+	{
+		int add_order1 = this->add_order();
+		int add_order2 = other->add_order();
+		if (add_order1 != add_order2) {
+			return add_order1 < add_order2;
+		}
+		else {
+			return this->to_string(os, csrc_opts) < other->to_string(os, csrc_opts);
+		}
+	}
+
+    bool SortedGiNaC::mul_sort_compare(SortedGiNaC * other,std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
+	{
+		int mul_order1 = this->mul_order();
+		int mul_order2 = other->mul_order();
+		if (mul_order1 != mul_order2) {
+			return mul_order1 < mul_order2;
+		}
+		else {
+			return this->to_string(os, csrc_opts) < other->to_string(os, csrc_opts);
+		}
+	}
+
+
+	std::string SortedGiNaCNumeric::to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
+	{
+		std::ostringstream ss;
+		GiNaC::print_csrc_FEM p(ss, &csrc_opts);
+		value.print(p);
+		return ss.str();
+	}
+
+	std::string SortedGiNaCAdd::to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
+	{
+		std::string res="(";
+		for (size_t i=0;i<op.size();i++) {
+			if (i>0) res+="+";
+			res+=op[i]->to_string(os, csrc_opts);
+		}
+		res+=")";
+		return res;
+	}
+    int SortedGiNaCAdd::add_order() 
+    {
+        throw std::runtime_error("Not implemented. Add order for add makes no sense for expanded expressions.");
+    }
+
+	std::string SortedGiNaCMul::to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) 
+	{
+		std::string res="(";
+		for (size_t i=0;i<op.size();i++) {
+			if (i>0) res+="*";
+			res+=op[i]->to_string(os, csrc_opts);
+		}
+		res+=")";
+		return res;
+	}
+    int SortedGiNaCMul::mul_order() 
+    {
+            throw_runtime_error("Not implemented. Mul order for mul makes no sense for expanded expressions.");
+    }
+
+	std::string SortedGiNaCPow::to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) 
+	{
+		std::string res="pow(";
+		res+=op[0]->to_string(os, csrc_opts);
+		res+=",";
+		res+=op[1]->to_string(os, csrc_opts);
+		res+=")";
+		return res;
+	}
+
+	std::string SortedGiNaCFunction::to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
+	{
+		std::string res=fname+"(";
+		for (size_t i=0;i<op.size();i++) {
+			if (i>0) res+=",";
+			res+=op[i]->to_string(os, csrc_opts);
+		}
+		res+=")";
+		return res;
+	}
+
+	std::string SortedGiNaCStruct::to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) 
+	{
+		std::ostringstream ss;
+		GiNaC::print_csrc_FEM p(ss, &csrc_opts);
+		contents.print(p);
+		return ss.str();
+	}
+	int SortedGiNaCStruct::mul_order() 
+	{
+		return 6; 
+	}
+
+	SortedGiNaC * SortedGiNaC::factory(const ex & e,std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
+    {
+		ex expa=e.expand();
+		if (is_a<numeric>(expa)) 
+		{
+			/*if (ex_to<numeric>(expa).is_crational() && !is_zero(ex_to<numeric>(expa).denom())-1) 
+			{
+				return new SortedGiNaCNumeric(ex_to<numeric>(expa).to_int64());
+			}*/
+			return new SortedGiNaCNumeric(ex_to<numeric>(expa));
+		}
+		else if (is_a<constant>(expa)) {
+			return new SortedGiNaCNumeric(ex_to<numeric>(ex_to<constant>(expa).evalf()));
+		}
+		else if (is_a<add>(expa)) {
+			std::vector<SortedGiNaC*> ops;
+			for (size_t i=0;i<expa.nops();i++) {
+				ops.push_back(SortedGiNaC::factory(expa.op(i), os, csrc_opts));
+			}
+			std::sort(ops.begin(), ops.end(),
+						[&os,&csrc_opts](SortedGiNaC * a, SortedGiNaC * b) {
+							return a->add_sort_compare(b,os, csrc_opts);
+						});
+			return new SortedGiNaCAdd(ops);
+		}
+		else if (is_a<mul>(expa)) {
+			std::vector<SortedGiNaC*> ops;
+			for (size_t i=0;i<expa.nops();i++) {
+				ops.push_back(SortedGiNaC::factory(expa.op(i), os, csrc_opts));
+			}
+			std::sort(ops.begin(), ops.end(),                          
+						[&os,&csrc_opts](SortedGiNaC * a, SortedGiNaC * b) {
+							return a->mul_sort_compare(b,os, csrc_opts);
+						});
+			return new SortedGiNaCMul(ops);
+		}
+		else if (is_a<power>(expa)) {
+			SortedGiNaC * base=SortedGiNaC::factory(expa.op(0), os, csrc_opts);
+			SortedGiNaC * exp=SortedGiNaC::factory(expa.op(1), os, csrc_opts);
+			GINAC_ASSERT(expa.nops()==2);
+			return new SortedGiNaCPow(base, exp);
+		}
+		else if (is_a<function>(expa)) {
+			std::vector<SortedGiNaC*> ops;
+			for (size_t i=0;i<expa.nops();i++) {
+				ops.push_back(SortedGiNaC::factory(expa.op(i), os, csrc_opts));
+			}
+			return new SortedGiNaCFunction(ex_to<function>(expa).get_name(), ops);
+		}
+		else if (is_a<symbol>(expa)) {
+			return new SortedGiNaCSymbol(ex_to<symbol>(expa).get_name());
+		}
+		else if (is_a<GiNaCTestFunction>(expa) || is_a<GiNaCShapeExpansion>(expa) || is_a<GiNaCSubExpression>(expa) || is_a<GiNaCSpatialIntegralSymbol>(expa) || is_a<GiNaCNormalSymbol>(expa) || is_a<GiNaCFakeExponentialMode>(expa) || is_a<GiNaCGlobalParameterWrapper>(expa)) 
+		{
+			return new SortedGiNaCStruct(expa);
+		}
+		else if (expa.is_zero())
+		{
+			return new SortedGiNaCStruct(0+expa);
+		}
+		else {
+			std::ostringstream err;
+			err << "Non implemented type in SortedGiNaC factory, got: " << expa;
+			throw_runtime_error(err.str());
+		}
+    }
+
+	std::ostream &  print_sorted_GiNaC(ex  e,std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
+    {
+        SortedGiNaC * root=SortedGiNaC::factory(e, os, csrc_opts);
+        os << root->to_string(os, csrc_opts);
+        delete root;
+        return os; 
+    }
 
 	print_csrc_FEM::print_csrc_FEM() : GiNaC::print_csrc_double(std::cout)
 	{

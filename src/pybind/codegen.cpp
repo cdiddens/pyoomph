@@ -32,6 +32,7 @@ namespace py = pybind11;
 #include "../ccompiler.hpp"
 #include "../expressions.hpp"
 #include "../exception.hpp"
+#include "../problem.hpp"
 
 
 namespace pyoomph
@@ -297,6 +298,7 @@ void PyReg_CodeGen(py::module &m)
         .def("get_lagrangian_dimension", &pyoomph::FiniteElementCode::lagrangian_dimension)
         .def("_set_integration_order", &pyoomph::FiniteElementCode::set_integration_order)
         .def("_get_integration_order", &pyoomph::FiniteElementCode::get_integration_order)
+        .def("_set_problem", &pyoomph::FiniteElementCode::set_problem)
         .def("expand_additional_field", &pyoomph::FiniteElementCode::expand_additional_field, py::arg("name"), py::arg("dimensional"), py::arg("expression"), py::arg("in_domain"), py::arg("no_jacobian"), py::arg("no_hessian"), py::arg("where"))
         .def("_register_external_ode_linkage", &pyoomph::FiniteElementCode::_register_external_ode_linkage, py::arg("myfieldname"), py::arg("odecodegen"), py::arg("odefieldname"))
         .def("_activate_residual", &pyoomph::FiniteElementCode::_activate_residual)

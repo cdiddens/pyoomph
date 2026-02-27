@@ -2714,8 +2714,8 @@ namespace pyoomph
             jacobian(raw_ndof + m, n) = JHess_real(m, n) - JHess_imag(raw_ndof + m, n) - Omega * (MHess_real(raw_ndof + m, n) + MHess_imag(m, n));
             jacobian(raw_ndof + m, raw_ndof + n) = jacobian_real(m, n) - Omega * M_imag(m, n);
             jacobian(raw_ndof + m, 2 * raw_ndof + n) = -jacobian_imag(m, n) - Omega * M_real(m, n);
-            jacobian(raw_ndof + m, 3 * raw_ndof) += dJ_real_dparam(m, n) * Eig[n] - dJ_imag_dparam(m, n) * Eig[raw_ndof + n] - Omega * (dM_real_dparam(m, n) * Eig[raw_ndof + n] + dM_imag_dparam(m, n) * Eig[n]);
-            jacobian(raw_ndof + m, 3 * raw_ndof + 1) += M_real(m, n) * Eig[raw_ndof + n] + M_imag(m, n) * Eig[n];
+            jacobian(raw_ndof + m, 3 * raw_ndof) += dJ_real_dparam(m, n) * Eig[n] - dJ_imag_dparam(m, n) * Eig[raw_ndof + n] - Omega * (dM_real_dparam(m, n) * Eig[raw_ndof + n] + dM_imag_dparam(m, n) * Eig[n]);            
+            jacobian(raw_ndof + m, 3 * raw_ndof + 1) -= M_real(m, n) * Eig[raw_ndof + n] + M_imag(m, n) * Eig[n];
 
             jacobian(2 * raw_ndof + m, n) = JHess_real(raw_ndof + m, n) + JHess_imag(m, n) + Omega * (MHess_real(m, n) + MHess_imag(raw_ndof + m, n));
             jacobian(2 * raw_ndof + m, raw_ndof + n) = jacobian_imag(m, n) + Omega * M_real(m, n);
@@ -2811,7 +2811,7 @@ namespace pyoomph
 
     // DEBUG ANA    
     /*
-    if (false)
+    if (true)
     {
       oomph::DenseMatrix<double> J_FD(augmented_ndof,augmented_ndof,0.0);
       for (unsigned i = 0; i < augmented_ndof; i++)
@@ -2867,14 +2867,15 @@ namespace pyoomph
           for (unsigned m = 0; m < augmented_ndof ; m++)
           {
             double delta=jacobian(m, i)-J_FD(m,i);
-            if (std::fabs(delta)>0.1)
+            if (std::fabs(delta)>0.001)
             {
-              std::cout << "DIFFERENCE IN " << m << " " << i << ": " << delta << " ANA " << jacobian(m,i) << " FD " << J_FD(m,i) << " NDOF " << augmented_ndof << " NRAWDOF " << raw_ndof << " MPIN0 " << base_dofs_forced_zero.count(eqn_number(elem_pt,m)) << " " << eigen_dofs_forced_zero.count(eqn_number(elem_pt,m)) << " IPIN0 "  << base_dofs_forced_zero.count(global_eqn) << " " << eigen_dofs_forced_zero.count(global_eqn) << " GLOBM " << eqn_number(elem_pt,m) << " GLOBI " << global_eqn << std::endl;
+              std::cout << "DIFFERENCE " << (has_imaginary_part ? "WITH IMAGINARY PART" : "WITHOUT IMAGINARY PART") << " IN " << m << " " << i << ": " << delta << " ANA " << jacobian(m,i) << " FD " << J_FD(m,i) << " NDOF " << augmented_ndof << " NRAWDOF " << raw_ndof << " MPIN0 " << base_dofs_forced_zero.count(eqn_number(elem_pt,m)) << " " << eigen_dofs_forced_zero.count(eqn_number(elem_pt,m)) << " IPIN0 "  << base_dofs_forced_zero.count(global_eqn) << " " << eigen_dofs_forced_zero.count(global_eqn) << " GLOBM " << eqn_number(elem_pt,m) << " GLOBI " << global_eqn << std::endl;
             }
           }
           }              
     }
-    */
+          */
+    
 
     // DEBUG ANA
     /*

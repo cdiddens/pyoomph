@@ -261,6 +261,8 @@ def generate_mesh_to_file(geom:pygmsh.geo.Geometry, outdir:str, trunk:str, meshe
         
     if mesher:
         for n,v in mesher.gmsh_options.items():
+            if n=="algorithm":
+                continue
             #print("SETTING",n,v,"FOR",mesher,"IN",mesher.gmsh_options,"IN",mesher.gmsh_options.items())
             gmsh.option.setNumber(n,v) #type:ignore
         
@@ -717,8 +719,9 @@ class GmshTemplate(MeshTemplate):
         if not isinstance(centre,Point):
             centre=self.point(*centre)
         corners:List[Point]=[]
+        SS=self.get_problem().get_scaling("spatial")
         for signs in [[1,0],[0,1],[-1,0],[0,-1]]:
-            corners.append(self.point(centre.x[0]+signs[0]*radius,centre.x[1]+signs[1]*radius,size=mesh_size))
+            corners.append(self.point(centre.x[0]*SS +signs[0]*radius,centre.x[1]*SS+signs[1]*radius,size=mesh_size))
         corners.append(corners[0])
         lines:List[CircleArc]=[]
         for i in range(4):
@@ -995,7 +998,7 @@ class GmshTemplate(MeshTemplate):
             allres.append(res)
         return allres
 
-    def volume(self, *args:Union[str,Surface,PlaneSurface], name:Optional[str]=None) -> List[Volume]:
+    def volume(self, *args:Union[str,Surface,PlaneSurface], name:Optional[str]=None,reversed_order:bool=False) -> List[Volume]:
         resolved = self._resolve_name("surfaces", *args) #type:ignore
         #print(resolved)
         srted=resolved # TODO: Sort?
@@ -1008,9 +1011,16 @@ class GmshTemplate(MeshTemplate):
         #if kwargs.get("reversed", False) == True:
         #    srted = list(reversed([-x for x in srted]))
         s=srted #type:ignore
-
+        
+        #if reversed_order:
+        #    for entry in s:
+        #        entry._id=-entry._id
         ll = self._geom.add_surface_loop(s) #type:ignore
+        
         res = self._geom.add_volume(ll) #type:ignore
+        #if reversed_order:
+        #    for entry in s:
+        #        entry._id=-entry._id
         #print(res)
         if name is not None:
             self._store_name(name, res)

@@ -34,24 +34,20 @@ class DynamicODEEquations(ODEEquations):
 	"""
 		Represents a dynamic ordinary differential equation.
 	"""
-	def __init__(self):
+	def __init__(self,**eqs:ExpressionOrNum):
 		super().__init__() #Really important, otherwise it will crash
-		self._eqs:List[Tuple[str,ExpressionOrNum]]=[]
+		self._eqs:Dict[str,ExpressionOrNum]=eqs.copy()
 
-	def add_equation(self,name_or_sym:Union[str,Expression],eq:ExpressionOrNum):
-		if not isinstance(name_or_sym,str):
-			name_or_sym=str(name_or_sym.op(0))
-		to_add=(name_or_sym,eq)
-		self._eqs.append(to_add)
+	
 
 	def define_fields(self):
-		for e in self._eqs:
-			self.define_ode_variable(e[0])
+		for e in self._eqs.keys():
+			self.define_ode_variable(e)
 
 	def define_residuals(self):
-		for e in self._eqs:
-			_,test=var_and_test(e[0])
-			self.add_residual(test*e[1] )
+		for n,e in self._eqs.items():
+			_,test=var_and_test(n)
+			self.add_residual(test*e )
 
 
 

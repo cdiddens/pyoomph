@@ -54,10 +54,12 @@ requires = ["setuptools>=68.0","pybind11>=2.5.0","setuptools-scm>=8"]
 build-backend = "setuptools.build_meta:__legacy__"
 
 [tool.cibuildwheel]
-manylinux-x86_64-image = "manylinux2014"
+#manylinux-x86_64-image = "manylinux2014"
+manylinux-x86_64-image = "manylinux_2_28"
 build-frontend = { name = "pip", args = ["--no-build-isolation", "--verbose"] }
-#test-requires = "pytest"
-#test-command = "pytest {package}/tests" # does not work, since the gmsh library has unresolvable requirements
+test-requires = "pytest"
+test-command = "pytest {package}/tests" # does not work, since the gmsh library has unresolvable requirements
+test-sources = ["tests"]
 
 [tool.cibuildwheel.linux]
 environment={PYOOMPH_CONFIG_FILE="/project/citools/pyoomph_config_linuxwheel.env"}
@@ -71,6 +73,7 @@ before-all = [
 "echo set extra flags to $PYOOMPH_CXXFLAGS_EXTRA",
 "source {project}/citools/before_build_linux.sh {project}",
 "./clean.sh all",
+"dnf -y install wget",
 "bash citools/download_and_build_static_ginac.sh",
 "bash ./prebuild.sh",
 "make -C src clean",
@@ -82,6 +85,9 @@ before-build = [
 "source $PYOOMPH_CONFIG_FILE",
 "python -m pip install pybind11 setuptools",
 "rm -rf build/"
+]
+before-test = [
+"dnf -y install mesa-libGLU libXcursor libglvnd-opengl libXinerama" # sudo apt install libglu1-mesa libxcursor1 libopengl0
 ]
 
 [tool.cibuildwheel.macos]

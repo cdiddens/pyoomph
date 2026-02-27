@@ -414,7 +414,7 @@ class PardisoSolver(GenericLinearSystemSolver):
         return b
 
     def solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPIntArray,colptr:NPIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
-        #print("CALL WITH OP FLAG ",op_flag)
+        #print("CALL WITH OP FLAG ",op_flag,ldb,transpose)
         #print("PARDISO ", op_flag)
         if op_flag == 1:
 #            print("INFO",len(values),len(rowind),len(colptr))

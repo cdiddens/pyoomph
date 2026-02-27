@@ -51,7 +51,7 @@ for d in glob.glob("./*/"):
     all_okay=False
 
 if all_okay:  
-  print("ALL TESTS PASSED")
+  print("ALL TESTS PASSED -- But please check e.g. preCICE runs manually")
 else:
   print("SOME TESTS FAILED")
   

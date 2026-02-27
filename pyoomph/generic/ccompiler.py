@@ -237,6 +237,7 @@ int main (int argc, char **argv) {
             link_extra_postargs = ["/DLL"]            
 
         src=os.path.relpath(self.get_code_filename())
+        #print("Compiling "+src+" to shared library "+self.get_lib_filename()+" with compiler "+str(self.comp.compiler_type)+" i.e. "+self.comp.compiler_so[0]) #type:ignore
         obj=self.comp.compile([src],extra_preargs=preargs,extra_postargs=preargs,debug=os.environ.get('PYOOMPH_DEBUG') == "1")
         self.comp.link(self.comp.SHARED_LIBRARY, obj,self.get_lib_filename(),extra_postargs=link_extra_postargs) #type:ignore
         return True
@@ -266,3 +267,12 @@ def get_ccompiler(comp:Optional[str]=None)->_pyoomph.CCompiler:   #If None, we s
 
 
 
+@BaseCCompiler.register_compiler()
+class CCacheCCompiler(SystemCCompiler):
+    compiler_id = "ccache"
+    compiler_quality=6   
+    def __init__(self, compile_args = None):
+        super().__init__(compile_args)            
+        self.comp.compiler_so=["ccache"]+self.comp.compiler_so
+        self.comp.linker_so=["ccache"]+self.comp.linker_so
+        # TODO: Check whether the c expression mode is "deterministic" and warn if not?

@@ -269,6 +269,10 @@ namespace GiNaC
 
   //typedef symbol potential_real_symbol;
   typedef realsymbol potential_real_symbol;
+
+
+  
+    
 }
 
 namespace pyoomph

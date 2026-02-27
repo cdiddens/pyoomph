@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+CLN_VERSION=1.3.7
+GINAC_VERSION=1.8.10
+
 
 (
 
@@ -31,11 +34,21 @@ rm -rf "$PYOOMPH_STATIC_GINAC_DIR/ginac"  || exit 1
 
 
 cd $PYOOMPH_STATIC_GINAC_DIR || exit 1
-git clone git://www.ginac.de/cln.git || exit 1
-git clone git://www.ginac.de/ginac.git || exit 1
 
-cp -r $AUTOTTOLS_FILES/m4 cln/
-cp -r $AUTOTTOLS_FILES/build-aux cln/
+
+
+wget  --retry-connrefused  --read-timeout=20 --timeout=15 --tries=40 https://www.ginac.de/CLN/cln-${CLN_VERSION}.tar.bz2 || exit 1
+tar -xvjf cln-${CLN_VERSION}.tar.bz2  || exit 1
+mv cln-${CLN_VERSION} cln || exit 1
+
+#git clone https://codeberg.org/ginac/cln.git || exit 1
+#git clone https://codeberg.org/ginac/ginac.git || exit 1
+wget --retry-connrefused  --read-timeout=20 --timeout=15 --tries=40 https://www.ginac.de/ginac-${GINAC_VERSION}.tar.bz2
+tar -xvjf ginac-${GINAC_VERSION}.tar.bz2  || exit 1
+mv ginac-${GINAC_VERSION} ginac || exit 1
+
+#cp -r $AUTOTTOLS_FILES/m4 cln/
+#cp -r $AUTOTTOLS_FILES/build-aux cln/
 
 mkdir -p $PYOOMPH_STATIC_GINAC_DIR/install || exit 1
 
@@ -67,7 +80,8 @@ echo "BUILDING CLN"
 echo 
 echo
 cd cln || exit 1
-./autogen.sh || exit 1
+#./autogen.sh || exit 1
+
 echo
 echo
 echo
@@ -75,6 +89,7 @@ echo "BUILDING CLN  - AUTOGEN DONE"
 echo 
 echo
 ./configure --without-gmp $DEBUG_CONFIGURE --disable-shared --enable-static --with-pic=yes --prefix "$PREFIX" $PYOOMPH_GINAC_CONFIGURE_OPTIONS || exit 1
+#./configure --without-gmp --disable-shared --enable-static --with-pic=yes --prefix "$PREFIX" $PYOOMPH_GINAC_CONFIGURE_OPTIONS || exit 1
 echo
 echo
 echo
