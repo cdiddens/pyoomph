@@ -3124,9 +3124,10 @@ class Problem(_pyoomph.Problem):
 
     def actions_after_adapt(self):
         for m in self._interfacemeshes:
+            #print("REBUILDING INTERFACE MESH",m,m.get_name(), m.nelement())
             m.rebuild_after_adapt()
             m.ensure_external_data()
-            #print("REBUILD INTERFACE MESH",m,m.get_name(), m.nelement(),m.element_pt(0))
+            
         if not self.is_quiet():
             print("REBUILDING GLOBAL MESH")
         self.rebuild_global_mesh()

@@ -2093,6 +2093,37 @@ namespace pyoomph
 	}
 
 
+	void Problem::update_jacobian_csr_structure()
+	{
+		unsigned ndof = this->get_n_unaugmented_dofs();
+		if (this->get_n_unaugmented_dofs()!=0) throw_runtime_error("This does not work if you have augmented dofs");
+		global_eqs_to_jacobian_buffer_index.resize(this->ndof());
+		for (unsigned i = 0; i < this->ndof(); i++)
+		{
+			global_eqs_to_jacobian_buffer_index[i].clear();
+		}
+		throw_runtime_error("Implement and check performance");
+		for (unsigned int ie=0;ie<mesh_pt()->nelement();ie++)
+		{
+			/*
+			oomph::GeneralisedElement* elem_pt = mesh_pt()->element_pt(ie);
+			const unsigned nvar = assembly_handler_pt()->ndof(elem_pt);
+			for (unsigned i = 0; i < nvar; i++)
+			{
+				unsigned eqn_number = assembly_handler_pt()->eqn_number(elem_pt, i);
+				for (unsigned j = 0; j < nvar; j++)
+				{
+					double value = el_jacobian(i, j);
+					if (std::fabs(value) > Numerical_zero_for_sparse_assembly)
+					{
+						unsigned unknown = assembly_handler_pt()->eqn_number(elem_pt, j);	
+						global_eqs_to_jacobian_buffer_index[eqn_number].insert(unknown);
+					}
+				}
+			}
+				*/
+		}
+	}
 
  	void Problem::sparse_assemble_row_or_column_compressed_base_problem(oomph::Vector<int*>& column_or_row_index,oomph::Vector<int*>& row_or_column_start,oomph::Vector<double*>& value,oomph::Vector<unsigned>& nnz,oomph::Vector<double*>& residuals,bool compressed_row_flag)
   	{    				
@@ -2407,7 +2438,6 @@ namespace pyoomph
 			delete [] column_or_row_index[i];
 		}
 
-		//TODO: Fill the data
 	}
 
 

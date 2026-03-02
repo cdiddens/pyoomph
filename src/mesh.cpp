@@ -679,7 +679,7 @@ namespace pyoomph
         }
       }
 
-      dynamic_cast<BulkElementBase *>(fe)->fill_element_info(true);
+      //dynamic_cast<BulkElementBase *>(fe)->fill_element_info(true); // This makes somehow problems with adaptivity
 
       return fe;
     };

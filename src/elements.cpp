@@ -357,6 +357,12 @@ namespace pyoomph
 		}
 		return res;
 	}
+
+	void BulkElementBase::fill_dofs_to_dirichlet_set_indices(std::vector<unsigned> &indices)
+	{
+		throw_runtime_error("Implement");
+	}
+	
 	void BulkElementBase::get_dof_numbers_for_unknowns(std::list<std::pair<unsigned long, unsigned>> &dof_lookup_list) const
 	{
 
