@@ -192,7 +192,7 @@ class CSplineInterpolator(CustomMultiReturnExpression):
             self.x=data[:,xcol]
             self.y=data[:,ycol]
         else:
-            arr_or_fname=numpy.array(arr_or_fname)
+            data=numpy.array(arr_or_fname)
             self.x=data[:,xcol]
             self.y=data[:,ycol]
         self.k=k
