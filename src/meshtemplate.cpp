@@ -1324,14 +1324,24 @@ namespace pyoomph
 	{
 	}
 
+	void MeshTemplate::reset()
+	{
+		for (std::size_t i = 0; i < nodes.size(); i++) if (nodes[i]) delete nodes[i];
+		for (std::size_t i = 0; i < bulk_element_collections.size(); i++) if (bulk_element_collections[i]) delete bulk_element_collections[i];
+		nodes.clear();
+		bulk_element_collections.clear();
+		boundary_names.clear();
+		facets.clear();
+		dim=-1;
+		facetmap.clear();
+		domain=NULL;
+		inter_nodes_periodic.clear();
+		kdtree.reset(1);
+	}
+
 	MeshTemplate::~MeshTemplate()
 	{
-		for (std::size_t i = 0; i < nodes.size(); i++)
-			if (nodes[i])
-				delete nodes[i];
-		for (std::size_t i = 0; i < bulk_element_collections.size(); i++)
-			if (bulk_element_collections[i])
-				delete bulk_element_collections[i];
+		reset();
 	}
 
 	nodeindex_t MeshTemplate::add_node(double x, double y, double z)

@@ -131,6 +131,10 @@ namespace pyoomph
 		{
 			PYBIND11_OVERLOAD(void, MeshTemplate, _add_opposite_interface_connection, sideA, sideB);
 		}
+		void reset() override
+		{
+			PYBIND11_OVERLOAD(void, MeshTemplate, reset );			
+		}
 	};
 
 	
@@ -1174,6 +1178,7 @@ void PyReg_Mesh(py::module &m)
 		.def("add_periodic_node_pair", &pyoomph::MeshTemplate::add_periodic_node_pair, "n_mst"_a, "n_slv"_a)
 		.def("add_node_unique", &pyoomph::MeshTemplate::add_node_unique, "x"_a, "y"_a = 0.0, "z"_a = 0.0,"Adds a node at the given position. If there is already a node at this position,no new node is created")
 		.def("add_node", &pyoomph::MeshTemplate::add_node, "x"_a, "y"_a = 0.0, "z"_a = 0.0,"Adds a node at the given position. Creates overlapping nodes, if there is already a node at this position.")
+		.def("_reset", &pyoomph::MeshTemplate::reset)
 		.doc()="A base class for the MeshTemplate class in pyoomph";
 
 	py::class_<pyoomph::TemplatedMeshBase1d, pyoomph::Mesh, oomph::Mesh>(m, "TemplatedMeshBase1d")

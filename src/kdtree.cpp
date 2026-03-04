@@ -269,6 +269,17 @@ namespace pyoomph
       tree = new DynamicImplementedKDTree1d();
   };
 
+  void KDTree::reset(unsigned _dim)
+  {
+    delete tree;
+    if (_dim == 3)
+      tree = new DynamicImplementedKDTree3d();
+    else if (_dim == 2)
+      tree = new DynamicImplementedKDTree2d();
+    else
+      tree = new DynamicImplementedKDTree1d();
+  }
+
   KDTree::KDTree(std::vector<double> &coordarray, unsigned _dim) : dim(_dim), static_tree(true), tree(NULL)
   {
     if (dim == 3)

@@ -488,6 +488,32 @@ class Remesher2d(RemesherBase):
 
 
 
+class RemesherViaRecreation(RemesherBase):
+    def __init__(self,template:MeshTemplate):
+        super().__init__(template)
+        self.base_trunk=None
+
+    def get_new_template(self):
+        return self.template
+        
+    def remesh(self):
+        if self.base_trunk is None:
+            self.base_trunk=self.template._fntrunk
+        fnformat:str=self.base_trunk+"_REMESH_{:06d}"
+        
+                
+        self._old_meshes={}        
+        for k,m in self.template._problem._meshdict.items():
+            if isinstance(m,(MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d)):
+                if self.template.has_domain(k):
+                    self._old_meshes[k]=m
+                    
+        self.template._reset()
+        self.template._do_define_geometry(self.template._problem,fnformat.format(self._cnt))                 
+        self._cnt+=1        
+        
+        
+
 
 # Can be used for a GmshTemplate, which depends only on problem parameters, e.g. a droplet mesh with a prescribed contact angle
 # It will be remeshed by using the same GmshTemplate, but with the current value of the parameter

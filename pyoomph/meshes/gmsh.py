@@ -354,6 +354,20 @@ class GmshTemplate(MeshTemplate):
             self._load_mesh(self._loaded_from_mesh_file)
         pass
 
+    def _reset(self):
+        super()._reset()
+        self._geom = None
+        self._named_entities = {}
+        self._rev_names = {}
+        self._dim_tag_names = {}
+        self._entities2d = {}
+        self._entities1d = {}
+        self._entities0d = {}
+        self._pointhash = {}
+        self._point_size_hash = {}
+        self._onedims_attached_to_point={}        
+        self._mesh=None
+        self._maxdim=0
 
 
     def point(self, x:ExpressionOrNum, y:ExpressionOrNum=0.0, z:ExpressionOrNum=0.0, size:ExpressionNumOrNone=None, *,name:Optional[str]=None,consider_spatial_scale:Optional[bool]=None)->Point:

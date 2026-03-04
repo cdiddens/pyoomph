@@ -727,6 +727,7 @@ namespace pyoomph
 
   public:
     MeshTemplate();
+    virtual void reset();
     void _set_problem(Problem *p) { problem = p; }
     virtual ~MeshTemplate();
     void flush_oomph_nodes();

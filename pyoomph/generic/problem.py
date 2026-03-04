@@ -5032,6 +5032,7 @@ class Problem(_pyoomph.Problem):
             spatial_adapt=self.max_refinement_level
         elif isinstance(spatial_adapt,bool) and spatial_adapt==True:
             spatial_adapt=self.max_refinement_level
+                    
 
         if temporal_error is not None and temporal_error <= 0:
             temporal_error = None
@@ -5113,6 +5114,7 @@ class Problem(_pyoomph.Problem):
                 progress=(ct-self._nondim_time_after_last_run_statement)/(et-self._nondim_time_after_last_run_statement)
                 numouts=int(numouts*(1-progress))
             timestep = self.timestepper.time_pt().dt(0) * self.get_scaling("temporal")
+            self._first_step=False # TODO This would be better stored in the state file so that a solve from state_000000 will still have it true
 
         #TODO Further checking for the end time
 
@@ -5513,6 +5515,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                     # Clean up
                     # for iname,imesh in mesh._interfacemeshes.items():
                     #    imesh.clear_before_adapt()
+                    print("Creating new mesh for ",name,r,r.get_new_template())
                     mesh = MeshFromTemplate(self, r.get_new_template(), name, r._old_meshes[name]._eqtree,previous_mesh=r._old_meshes[name]) 
                     new_meshes[name] = mesh
                     old_meshes[name] = r._old_meshes[name] 

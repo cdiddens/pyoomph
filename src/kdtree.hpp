@@ -40,6 +40,7 @@ namespace pyoomph
     KDTree(unsigned _dim = 1);                              // Create a dynamic tree
     KDTree(std::vector<double> &coordarray, unsigned _dim); // Create a static tree coordarray[line*dim+coordindex_of_line]
     virtual ~KDTree();
+    void reset(unsigned _dim);
     unsigned add_point(double x, double y = 0.0, double z = 0.0);
     unsigned add_point_if_not_present(double x, double y = 0.0, double z = 0.0, double epsilon = 1e-8);
     int point_present(double x, double y = 0.0, double z = 0.0, double epsilon = 1e-8);

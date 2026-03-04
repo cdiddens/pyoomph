@@ -489,6 +489,14 @@ class MeshTemplate(_pyoomph.MeshTemplate):
         self._macrobounds: List[_pyoomph.MeshTemplateCurvedEntityBase] = []
         self._fntrunk:Optional[str]=None # To be set for remeshing
         self.all_nodes_as_boundary_nodes:bool=False
+        
+    def _reset(self):
+        super(MeshTemplate, self)._reset()
+        self._domains = {}
+        self._geometry_defined = False
+        self._template_override = None
+        self._interior_boundaries = set()
+        self._macrobounds = []
 
     def get_problem(self) -> "Problem":
         return self._problem
