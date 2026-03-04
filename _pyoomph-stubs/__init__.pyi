@@ -1309,6 +1309,7 @@ class PitchForkHandler(AssemblyHandler):
         ...
 class Problem:
     DTSF_max_increase_factor: float
+    DTSF_maximum_dt: float
     DTSF_min_decrease_factor: float
     DTSF_minimum_dt: float
     _improved_pitchfork_tracking_on_unstructured_meshes: bool
