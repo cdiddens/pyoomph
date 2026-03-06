@@ -189,10 +189,6 @@ class StokesEquations(Equations):
     def __init__(self, *, dynamic_viscosity:ExpressionOrNum=1.0, mode:Literal["TH","CR","SV","C1","D2D1","D1D0","D2TBD1","mini","C2DL"]="TH", bulkforce:ExpressionNumOrNone=None, fluid_props:Optional["AnyFluidProperties"]=None, gravity:ExpressionNumOrNone=None, boussinesq:bool=False, mass_density:ExpressionNumOrNone=None,
                  pressure_sign_flip:bool=False,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",wrong_strain:bool=False,pressure_factor:ExpressionOrNum=1, PFEM:Union[PFEMOptions,bool]=False, stress_tensor:ExpressionNumOrNone=None,velocity_name="velocity",pressure_name="pressure",DG_alpha:ExpressionNumOrNone=None,symmetric_test_function:Union[Literal['auto'],bool]='auto',pressure_test_scaling_factor:float=1, hele_shaw_thickness:ExpressionOrNum=None):
         super().__init__()
-        if hele_shaw_thickness is not None:
-            hsdamp = -12 * dynamic_viscosity * var("velocity") / hele_shaw_thickness ** 2
-            bulkforce = bulkforce + hsdamp
-        self.bulkforce = bulkforce  # Some arbitrary bulk-force vector
         self.gravity = gravity  # Some gravity direction, i.e. g*<unit vector of direction>
         if mode not in {"CR","TH","C1","C2","SV","D2TBD1","D2D1","D1D0","mini","C2DL"}:
             raise ValueError(
@@ -220,6 +216,12 @@ class StokesEquations(Equations):
             self.fluid_props = None
             self.dynamic_viscosity = dynamic_viscosity
             self.mass_density = mass_density
+
+        if hele_shaw_thickness is not None:
+            hsdamp = -12 * self.dynamic_viscosity * var("velocity") / hele_shaw_thickness ** 2
+            bulkforce = hsdamp if bulkforce is None else bulkforce+hsdamp
+        self.bulkforce = bulkforce  # Some arbitrary bulk-force vector
+        
         self.pressure_sign_flip=pressure_sign_flip
         self.momentum_scheme:TimeSteppingScheme=momentum_scheme        
         self.continuity_scheme:TimeSteppingScheme=continuity_scheme
