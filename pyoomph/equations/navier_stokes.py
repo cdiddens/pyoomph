@@ -184,10 +184,14 @@ class StokesEquations(Equations):
         DG_alpha (ExpressionNumOrNone, optional): If using Discontinuous Galerkin discretisation, set penalty coefficient alpha for jump terms of the stress tensor. Defaults to None.
         symmetric_test_function (Union[Literal['auto'],bool], optional): Use symmetric test functions for the momentum equation. Defaults to 'auto'.
         pressure_test_scaling_factor (float, optional): Multiplicative scaling factor for the pressure test function. Defaults to 1.0.
+        hele_shaw_thickness (ExpressionOrNum, optional): Adds a Hele-Shaw drag term to the bulk force i.e -12*mu*u/delta**2, with the given thickness as parameter. Defaults to None.
     """
     def __init__(self, *, dynamic_viscosity:ExpressionOrNum=1.0, mode:Literal["TH","CR","SV","C1","D2D1","D1D0","D2TBD1","mini","C2DL"]="TH", bulkforce:ExpressionNumOrNone=None, fluid_props:Optional["AnyFluidProperties"]=None, gravity:ExpressionNumOrNone=None, boussinesq:bool=False, mass_density:ExpressionNumOrNone=None,
-                 pressure_sign_flip:bool=False,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",wrong_strain:bool=False,pressure_factor:ExpressionOrNum=1, PFEM:Union[PFEMOptions,bool]=False, stress_tensor:ExpressionNumOrNone=None,velocity_name="velocity",pressure_name="pressure",DG_alpha:ExpressionNumOrNone=None,symmetric_test_function:Union[Literal['auto'],bool]='auto',pressure_test_scaling_factor:float=1):
+                 pressure_sign_flip:bool=False,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",wrong_strain:bool=False,pressure_factor:ExpressionOrNum=1, PFEM:Union[PFEMOptions,bool]=False, stress_tensor:ExpressionNumOrNone=None,velocity_name="velocity",pressure_name="pressure",DG_alpha:ExpressionNumOrNone=None,symmetric_test_function:Union[Literal['auto'],bool]='auto',pressure_test_scaling_factor:float=1, hele_shaw_thickness:ExpressionOrNum=None):
         super().__init__()
+        if hele_shaw_thickness is not None:
+            hsdamp = -12 * dynamic_viscosity * var("velocity") / hele_shaw_thickness ** 2
+            bulkforce = bulkforce + hsdamp
         self.bulkforce = bulkforce  # Some arbitrary bulk-force vector
         self.gravity = gravity  # Some gravity direction, i.e. g*<unit vector of direction>
         if mode not in {"CR","TH","C1","C2","SV","D2TBD1","D2D1","D1D0","mini","C2DL"}:
@@ -457,19 +461,24 @@ class NavierStokesEquations(StokesEquations):
         DG_alpha (ExpressionNumOrNone, optional): If using Discontinuous Galerkin discretisation, set coefficient alpha for stress tensor. Defaults to None.
         symmetric_test_function (Union[Literal['auto'],bool], optional): Use symmetric test functions for the momentum equation. Defaults to 'auto'.
         dt_factor (ExpressionOrNum, optional): Multiplicative factor to scale or deactivate the time derivative. Defaults to 1.
-        nonlinear_factor (ExpressionOrNum, optional): Multiplicative factor to scale or deactivate the nonlinearity, i.e. dot(u,grad(u))). Defaults to 1.
+        nonlinear_factor (ExpressionNumOrNone, optional): Multiplicative factor to scale or deactivate the nonlinearity, i.e. dot(u,grad(u))). Defaults to None.
         wrap_params_in_subexpressions (bool, optional): Wrap parameters in subexpressions using GiNaC. Defaults to True.
     """
                  
         
     def __init__(self, *, dynamic_viscosity:ExpressionOrNum=1.0, mode:Literal["TH","CR","SV"]="TH", mass_density:ExpressionOrNum=1.0, bulkforce:ExpressionNumOrNone=None, fluid_props:Optional["AnyFluidProperties"]=None,
-                 dt_factor:ExpressionOrNum=1, nonlinear_factor:ExpressionOrNum=1, gravity:ExpressionNumOrNone=None, boussinesq:bool=False,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",wrong_strain:bool=False,pressure_factor:ExpressionOrNum=1,wrap_params_in_subexpressions:bool=True,PFEM:Union[PFEMOptions,bool]=False, stress_tensor:ExpressionNumOrNone=None,velocity_name="velocity",pressure_name="pressure",symmetric_test_function:Union[Literal['auto'],bool]='auto',pressure_test_scaling_factor:float=1):
+                 dt_factor:ExpressionOrNum=1, nonlinear_factor:ExpressionNumOrNone=None, gravity:ExpressionNumOrNone=None, boussinesq:bool=False,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",wrong_strain:bool=False,pressure_factor:ExpressionOrNum=1,wrap_params_in_subexpressions:bool=True,PFEM:Union[PFEMOptions,bool]=False, stress_tensor:ExpressionNumOrNone=None,velocity_name="velocity",pressure_name="pressure",symmetric_test_function:Union[Literal['auto'],bool]='auto',pressure_test_scaling_factor:float=1, hele_shaw_thickness:ExpressionOrNum=None):
         super().__init__(dynamic_viscosity=dynamic_viscosity, mode=mode, bulkforce=bulkforce, fluid_props=fluid_props,
-                         gravity=gravity, boussinesq=boussinesq,momentum_scheme=momentum_scheme,continuity_scheme=continuity_scheme,wrong_strain=wrong_strain,pressure_factor=pressure_factor,PFEM=PFEM, stress_tensor=stress_tensor,velocity_name=velocity_name,pressure_name=pressure_name,symmetric_test_function=symmetric_test_function,pressure_test_scaling_factor=pressure_test_scaling_factor)
+                         gravity=gravity, boussinesq=boussinesq,momentum_scheme=momentum_scheme,continuity_scheme=continuity_scheme,wrong_strain=wrong_strain,pressure_factor=pressure_factor,PFEM=PFEM, stress_tensor=stress_tensor,velocity_name=velocity_name,pressure_name=pressure_name,symmetric_test_function=symmetric_test_function,pressure_test_scaling_factor=pressure_test_scaling_factor, hele_shaw_thickness=hele_shaw_thickness)
         if self.fluid_props is not None:
             self.mass_density = self.fluid_props.mass_density
         else:
             self.mass_density = mass_density
+        if nonlinear_factor is None: # nonlinear_factor overrides Hele-Shaw
+            if hele_shaw_thickness is None:
+                nonlinear_factor = 1
+            else:
+                nonlinear_factor = 6 / 5
         self.dt_factor = dt_factor  # Factors to scale or deactivate the time derivative
         self.nonlinear_factor = nonlinear_factor  # and the nonlinearity
         self.wrap_params_in_subexpressions=wrap_params_in_subexpressions

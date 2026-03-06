@@ -118,18 +118,9 @@ def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteE
     Returns:
         A coupled set of equations describing the multi-component flow of the mixture 
     """
-    if ns_nl_factor is None:
-        if hele_shaw_thickness is None:
-            ns_nl_factor = 1
-        else:
-            ns_nl_factor = 6 / 5
-    if hele_shaw_thickness is not None:
-        hsdamp = -12 * subexpression(fluid_props.dynamic_viscosity) * var("velocity") / subexpression(
-            hele_shaw_thickness) ** 2
-        bulkforce = hsdamp if bulkforce is None else bulkforce + hsdamp
-
+    
     ns = NavierStokesEquations(fluid_props=fluid_props, mode=ns_mode, boussinesq=boussinesq, gravity=gravity,
-                               bulkforce=bulkforce, dt_factor=ns_dt_factor, nonlinear_factor=ns_nl_factor,momentum_scheme=momentum_scheme,continuity_scheme=continuity_scheme,wrong_strain=wrong_strain,PFEM=PFEM,wrap_params_in_subexpressions=wrap_params_in_subexpressions)
+                               bulkforce=bulkforce, dt_factor=ns_dt_factor, nonlinear_factor=ns_nl_factor,momentum_scheme=momentum_scheme,continuity_scheme=continuity_scheme,wrong_strain=wrong_strain,PFEM=PFEM,wrap_params_in_subexpressions=wrap_params_in_subexpressions, hele_shaw_thickness=hele_shaw_thickness)
     wind=var("velocity")+additional_advection
     cp = CompositionAdvectionDiffusionEquations(fluid_props=fluid_props, space=compo_space, dt_factor=compo_dt_factor,
                                                 boussinesq=boussinesq, useSUPG=useCompoSUPG,wind=wind,integrate_advection_by_parts=integrate_advection_by_parts,wrap_params_in_subexpressions=wrap_params_in_subexpressions)
