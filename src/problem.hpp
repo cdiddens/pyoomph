@@ -274,6 +274,7 @@ namespace pyoomph
     std::string get_bifurcation_tracking_mode() const { return bifurcation_tracking_mode; }
     std::vector<std::complex<double>> get_bifurcation_eigenvector();
     double get_bifurcation_omega();
+    std::tuple<bool,std::complex<double>> get_bifurcation_tracking_info(); //Returns whether we are tracking a bifurcation, the eigenvalue, the azimuthal wavenumber and the cartesian normal mode if set
     std::vector<double> get_arclength_dof_derivative_vector();
     std::vector<double> get_arclength_dof_current_vector();
     void update_dof_vectors_for_continuation(const std::vector<double> & ddof, const std::vector<double> & curr);

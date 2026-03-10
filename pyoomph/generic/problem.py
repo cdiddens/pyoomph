@@ -487,6 +487,7 @@ class Problem(_pyoomph.Problem):
         self._azimuthal_mode_param_m=None
         self._normal_mode_param_k=None
         self._azimuthal_stability=_AzimuthalStabilityInfo()
+        self._bifurcation_reactivation_after_adaptation=None
         self._cartesian_normal_mode_stability=_CartesianNormalModeStabilityInfo()
         self._bifurcation_tracking_parameter_name:Optional[str]=None
         self._improved_pitchfork_tracking_coordinate_system:"OptionalCoordinateSystem"=None
@@ -1425,9 +1426,29 @@ class Problem(_pyoomph.Problem):
                 submesh.ensure_external_data()
 
 
+    
+
     def _adapt_with_interfacial_errors(self) -> Tuple[int, int]:
-        
+        biftrack_active,biftrack_eigen=self._get_bifurcation_tracking_info()
+        biftrack_mode = self.get_bifurcation_tracking_mode()
+        biftrack_param = self._bifurcation_tracking_parameter_name
+        self._bifurcation_reactivation_after_adaptation=None # We will reactivate the bifurcation tracking after the adaptation, but not during the adaptation, to avoid that we adapt with changing eigenvalues during the adaptation. We will reactivate it at the end of the function if it was active at the beginning.
+        if biftrack_active:
+            print("ADAPT WITH INTERFACIAL ERRORS. BIF TRACKING PARAM: ",self._bifurcation_tracking_parameter_name,self.get_bifurcation_tracking_mode())
+            m=None
+            k=None
+            self._last_eigenvalues=numpy.array([biftrack_eigen])
+            self._last_eigenvectors=numpy.array([self._get_bifurcation_eigenvector()])            
+            if biftrack_mode=="azimuthal" or biftrack_mode=="cartesian_normal_mode":
+                print("Azimuthal:",self._azimuthal_mode_param_m,self._azimuthal_mode_param_m.value)
+                print("Cartesian normal mode:",self._cartesian_normal_mode_param_k,self._cartesian_normal_mode_param_k.value)
+                raise RuntimeError("Check on the bifurcation tracking, whether the values of m and k are still correct")
+            self._adapt_eigenindex=0 # We will adapt with the first eigenfunction, which is the one that is critical at the bifurcation point. We could also make this user-definable in the future
+            self.deactivate_bifurcation_tracking()            
+            self._bifurcation_reactivation_after_adaptation={"mode":biftrack_mode,"param":biftrack_param,"azimuthal_m":m,"cartesian_k":k}
         #Resetting the element error override
+        if self._custom_assembler is not None:
+            raise RuntimeError("Adaption with custom assembler not supported yet")
         def reset(mesh:AnySpatialMesh):
             mesh._reset_elemental_error_max_override() 
             for _n,imesh in mesh._interfacemeshes.items():
@@ -1550,6 +1571,10 @@ class Problem(_pyoomph.Problem):
                 dof_current=self.get_arclength_dof_current_vector()
                 self.set_current_pinned_values(0*pinned_values,True,5)
                 self.set_current_pinned_values(0*pinned_values,True,6)
+                if len(dof_deriv)>len(_actual_dofs):
+                    # Strip the bifurcation tracker part... There is nothing you can do here
+                    dof_deriv=dof_deriv[:len(_actual_dofs)]
+                    dof_current=dof_current[:len(_actual_dofs)]                    
                 self.set_history_dofs(5,dof_deriv)
                 self.set_history_dofs(6,dof_current)
                 messed_around_in_history=True
@@ -1594,7 +1619,7 @@ class Problem(_pyoomph.Problem):
             
         if messed_around_in_history:
             self.assign_initial_values_impulsive() # We messed around. So me must reassign the initial values
-            
+        self._adapt_eigenindex=None
         return nref,nuref
 
     def _adapt(self) -> Tuple[int, int]:
@@ -2159,6 +2184,9 @@ class Problem(_pyoomph.Problem):
             self._custom_assembler.actions_after_successful_newton_solve()
         for hook in self._hooks:
             hook.actions_after_newton_solve()
+        if self._bifurcation_reactivation_after_adaptation is not None:
+            self._reactivate_bifurcation_tracking_after_adaption()
+        self._bifurcation_reactivation_after_adaptation=None
 
     def remeshing_necessary(self):        
         """
@@ -3146,6 +3174,17 @@ class Problem(_pyoomph.Problem):
             self.output()
         if self._custom_assembler:
             self._custom_assembler.actions_after_adapt()
+    
+    def _reactivate_bifurcation_tracking_after_adaption(self):
+        if self._bifurcation_reactivation_after_adaptation is not None:
+            info=self._bifurcation_reactivation_after_adaptation
+            self.deactivate_bifurcation_tracking()            
+            print("Reactivating bifurcation tracking after adaption with info",info,"eigenvalue",self._last_eigenvalues)
+            self.activate_bifurcation_tracking(info["param"],info["mode"],azimuthal_mode=info["azimuthal_m"],cartesian_wavenumber_k=info["cartesian_k"])
+            self._bifurcation_reactivation_after_adaptation=None
+            #self.reset_arc_length_parameters() # There is not much you can do here
+            
+            
 
 
     def compile_bulk_element_code(self,elementtype:FiniteElementCodeGenerator,bulkmesh:AnyMesh,subname:str) -> _pyoomph.DynamicBulkElementInstance:
@@ -3449,9 +3488,10 @@ class Problem(_pyoomph.Problem):
             raise ValueError("Eigenindex must be non-negative")
         elif eigenindex>=len(self.get_last_eigenvalues()):
             raise ValueError("Eigenindex must be smaller than the number of calculated eigenvalues")
-        self._adapt_eigenindex=eigenindex
         
+        self._adapt_eigenindex=eigenindex
         for i in range(numadapt):
+            
             with self.custom_adapt(True):
                 nref,nunref=self.adapt()
                 if nref==0 and nunref==0:                    
@@ -3552,7 +3592,9 @@ class Problem(_pyoomph.Problem):
         Returns:
             float: The new step size for the continuation.
         """
-        self._activate_solver_callback()
+        if spatial_adapt>0 and self.get_bifurcation_tracking_mode()!="":
+            raise RuntimeError("Cannot perform spatial adaptation during arclength continuation when bifurcation tracking is active. You can do the arclength step with spatial_adapt=0 followed by a solve(spatial_adapt="+str(spatial_adapt)+") to achieve a similar effect.")
+        self._activate_solver_callback()        
         self.invalidate_cached_mesh_data()
         if not self.is_initialised():
             self.initialise()
@@ -3711,6 +3753,9 @@ class Problem(_pyoomph.Problem):
 
 
     def invalidate_eigendata(self):
+        if self._bifurcation_reactivation_after_adaptation is not None:
+            self._reactivate_bifurcation_tracking_after_adaption()
+            self._bifurcation_reactivation_after_adaptation=None
         self._last_eigenvectors:NPComplexArray=numpy.array([],dtype=numpy.complex128) #type:ignore
         self._last_eigenvalues:NPComplexArray=numpy.array([],dtype=numpy.complex128) #type:ignore
         self._last_eigenvalues_m=None
@@ -4086,6 +4131,7 @@ class Problem(_pyoomph.Problem):
             azimuthal_mode (Optional[int]): The azimuthal mode for azimuthal bifurcation tracking. Defaults to None.
         """        
         
+        self.reset_arc_length_parameters()
 
         if parameter is None:
             # We track the current eigenbranch, i.e. Re(lambda) will be found and is not necessarily 0
@@ -4854,7 +4900,7 @@ class Problem(_pyoomph.Problem):
         - ExpressionOrNum: The current time after solving.
         """  
                 
-
+        self._bifurcation_reactivation_after_adaptation=None
         if isinstance(timestep,(list,tuple)):
             lastres=0
             for t in timestep: #type:ignore

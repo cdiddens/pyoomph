@@ -892,7 +892,10 @@ namespace pyoomph
 		oomph::DoubleVector dofs;
 		dofs.build(this->dof_distribution_pt(), 0.0);
 		if (inp.size() != this->ndof())
-			throw_runtime_error("Mismatch in dof vector size");
+		{
+			std::ostringstream oss; oss << "Try to set dofs of length " << inp.size() << " while problem has " << this->ndof() << " dofs";
+			throw_runtime_error("Mismatch in dof vector size. " + oss.str());
+		}
 		if (t>=this->time_stepper_pt()->ntstorage()) 
 		        throw_runtime_error("Wrong history offset");
 		for (unsigned int i = 0; i < this->ndof(); i++)
@@ -1241,6 +1244,33 @@ namespace pyoomph
 		{
 			return 0.0;
 		}
+	}
+
+	std::tuple<bool,std::complex<double>> Problem::get_bifurcation_tracking_info()
+	{
+		bool active=false;
+		std::complex<double> lambda(0.0,0.0);
+		if (bifurcation_tracking_mode == "hopf" && (dynamic_cast<MyHopfHandler *>(this->assembly_handler_pt())))
+		{
+			auto *h = dynamic_cast<MyHopfHandler *>(this->assembly_handler_pt());
+			active=true; lambda=std::complex<double>((h->bifurcation_parameter_pt()==&this->lambda_tracking_real ? this->lambda_tracking_real :0.0),h->omega());			
+		}
+		else if (bifurcation_tracking_mode == "azimuthal" && (dynamic_cast<AzimuthalSymmetryBreakingHandler *>(this->assembly_handler_pt())))
+		{
+			auto *h = dynamic_cast<AzimuthalSymmetryBreakingHandler *>(this->assembly_handler_pt());
+			active=true; lambda=std::complex<double>((h->bifurcation_parameter_pt()==&this->lambda_tracking_real ? this->lambda_tracking_real :0.0),h->omega()); 
+		}
+		else if (bifurcation_tracking_mode == "fold" && (dynamic_cast<MyFoldHandler *>(this->assembly_handler_pt())))
+		{
+			auto *h = dynamic_cast<MyFoldHandler *>(this->assembly_handler_pt());
+			active=true; lambda=std::complex<double>((h->bifurcation_parameter_pt()==&this->lambda_tracking_real ? this->lambda_tracking_real : 0.0),0.0);
+		}
+		else if (bifurcation_tracking_mode == "pitchfork" && (dynamic_cast<MyPitchForkHandler *>(this->assembly_handler_pt())))
+		{
+			auto *h = dynamic_cast<MyPitchForkHandler *>(this->assembly_handler_pt());
+			active=true; lambda=std::complex<double>((h->bifurcation_parameter_pt()==&this->lambda_tracking_real ? this->lambda_tracking_real : 0.0),0.0);
+		}
+		return std::make_tuple(active,lambda);
 	}
 
     void Problem::set_sparse_assembly_method(const std::string &method)

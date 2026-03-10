@@ -278,6 +278,7 @@ namespace pyoomph
     // rebuild the dof dist
     Problem_pt->GetDofDistributionPt()->build(Problem_pt->communicator_pt(),
                                               Ndof * 3 + 2, false);
+    
     // Remove all previous sparse storage used during Jacobian assembly
     Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
 
@@ -354,6 +355,7 @@ namespace pyoomph
     // rebuild the Dof_distribution_pt
     Problem_pt->GetDofDistributionPt()->build(Problem_pt->communicator_pt(),
                                               Ndof * 3 + 2, false);
+    //std::cout << "Rebuild DofDistribution for " << Ndof * 3 + 2 << " dofs vs " << Problem_pt->GetDofDistributionPt()->nrow_local() << " PTR Is " << Problem_pt->GetDofDistributionPt() << std::endl;                                            
     // Remove all previous sparse storage used during Jacobian assembly
     Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
   }

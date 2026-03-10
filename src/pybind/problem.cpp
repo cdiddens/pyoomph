@@ -346,22 +346,26 @@ void PyReg_Problem(py::module &m)
 		.def_property("FD_step", [](pyoomph::MyFoldHandler *h)
 					  { return h->FD_step; }, [](pyoomph::MyFoldHandler *h, double s)
 					  { h->FD_step = s; })
+		.def("get_base_ndof",&pyoomph::MyFoldHandler::get_problem_ndof)
 		.def("set_eigenweight", &pyoomph::MyFoldHandler::set_eigenweight)
 		.def_property("symmetric_FD", [](pyoomph::MyFoldHandler *h)
 					  { return h->symmetric_FD; }, [](pyoomph::MyFoldHandler *h, bool s)
 					  { h->symmetric_FD = s; });
 
 	py::class_<pyoomph::MyPitchForkHandler, oomph::AssemblyHandler>(m, "PitchForkHandler")
+		.def("get_base_ndof",&pyoomph::MyPitchForkHandler::get_problem_ndof)
 		.def("set_eigenweight", &pyoomph::MyPitchForkHandler::set_eigenweight);
 
 	py::class_<pyoomph::MyHopfHandler, oomph::AssemblyHandler>(m, "HopfHandler")
 		.def("get_nicely_rotated_eigenfunction", &pyoomph::MyHopfHandler::get_nicely_rotated_eigenfunction)
 		.def("set_eigenweight", &pyoomph::MyHopfHandler::set_eigenweight)	
+		.def("get_base_ndof",&pyoomph::MyHopfHandler::get_problem_ndof)
 		.def("debug_analytical_filling", [](pyoomph::MyHopfHandler *self, oomph::GeneralisedElement *elem, double eps)		
 			 { self->debug_analytical_filling(elem, eps); });
 
 	py::class_<pyoomph::AzimuthalSymmetryBreakingHandler, oomph::AssemblyHandler>(m, "AzimuthalSymmetryBreakingHandler")
 		.def("set_eigenweight", &pyoomph::AzimuthalSymmetryBreakingHandler::set_eigenweight)	
+		.def("get_base_ndof",&pyoomph::AzimuthalSymmetryBreakingHandler::get_problem_ndof)
 		.def("set_global_equations_forced_zero", &pyoomph::AzimuthalSymmetryBreakingHandler::set_global_equations_forced_zero);
 
 	py::class_<pyoomph::PeriodicOrbitHandler, oomph::AssemblyHandler>(m, "PeriodicOrbitHandler")
@@ -507,6 +511,7 @@ void PyReg_Problem(py::module &m)
 		.def("get_custom_residuals_jacobian", &pyoomph::Problem::get_custom_residuals_jacobian, py::arg("info"))
 		.def("get_bifurcation_tracking_mode", &pyoomph::Problem::get_bifurcation_tracking_mode)
 		.def("_get_bifurcation_eigenvector", &pyoomph::Problem::get_bifurcation_eigenvector)
+		.def("_get_bifurcation_tracking_info", &pyoomph::Problem::get_bifurcation_tracking_info)
 		.def("_get_bifurcation_omega", &pyoomph::Problem::get_bifurcation_omega)
 		.def("_get_lambda_tracking_real", [](pyoomph::Problem * self) {return *self->get_lambda_tracking_real(); })
 		.def("_set_lambda_tracking_real", [](pyoomph::Problem * self,double lr) {*self->get_lambda_tracking_real()=lr; })
