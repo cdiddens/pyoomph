@@ -126,9 +126,9 @@ class DropletGeometry:
                 if ambiguous_low_contact_angle is None:
                     raise RuntimeError("Set ambiguous_low_contact_angle to either True or False if passing the base and curvature radius")
                 if ambiguous_low_contact_angle:
-                    h0 = rc - (rc ** 2 - r0 ** 2) ** (1.0 / 2.0)
+                    h0 = rc - square_root(rc ** 2 - r0 ** 2)
                 else:
-                    h0 = rc + (rc ** 2 - r0 ** 2) ** (1.0 / 2.0)
+                    h0 = rc + square_root(rc ** 2 - r0 ** 2) 
             else:
                 raise RuntimeError("base_radius > curv_radius")
         elif h0 is not None:

@@ -4130,7 +4130,7 @@ namespace pyoomph
 	void FiniteElementCode::write_generic_RJM(std::ostream &os, std::string funcname, GiNaC::ex resi, bool with_hang)
 	{
 		__in_hessian = false;
-		os << "static void " << funcname << "(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo,double * residuals, double *jacobian, double *mass_matrix,unsigned flag)" << std::endl;
+		os << "static void " << funcname << "(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo,double * PYOOMPH_RESTRICT residuals, double * PYOOMPH_RESTRICT jacobian, double * PYOOMPH_RESTRICT mass_matrix,unsigned flag)" << std::endl;
 		os << "{" << std::endl;
 		os << "  int local_eqn, local_unknown;" << std::endl;
 		os << "  bool _has_residual_contribution,_has_jacobian_contribution;" << std::endl;

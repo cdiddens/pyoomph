@@ -78,7 +78,7 @@ namespace pyoomph
 	void my_alloc(T dest) {}
 
 	template <typename T, typename... Extra>
-	void my_alloc(T *&dest, size_t firstdim, const Extra &...extra)
+	void my_alloc(T * PYOOMPH_RESTRICT &  dest, size_t firstdim, const Extra &...extra)
 	{
 		if (!firstdim)
 		{
@@ -100,7 +100,7 @@ namespace pyoomph
 	void my_free(T dest) {}
 
 	template <typename T, typename... Extra>
-	void my_free(T *&dest, size_t firstdim, const Extra &...extra)
+	void my_free(T * PYOOMPH_RESTRICT &  dest, size_t firstdim, const Extra &...extra)
 	{
 		if (!dest)
 			return;
@@ -117,7 +117,7 @@ namespace pyoomph
 	}
 
 	template <typename T, typename... Extra>
-	void my_alloc_or_free(bool alloc, T *&dest, size_t firstdim, const Extra &...extra)
+	void my_alloc_or_free(bool alloc, T * PYOOMPH_RESTRICT &  dest, size_t firstdim, const Extra &...extra)
 	{
 		if (alloc)
 			my_alloc(dest, firstdim, extra...);
@@ -1456,7 +1456,7 @@ namespace pyoomph
 		}
 	}
 
-	void BulkElementBase::get_dnormal_dcoords_at_s(const oomph::Vector<double> &s, double ***dnormal_dcoord, double *****d2normal_dcoord2) const
+	void BulkElementBase::get_dnormal_dcoords_at_s(const oomph::Vector<double> &s, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dnormal_dcoord, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2normal_dcoord2) const
 	{
 
 		unsigned nodal_dim = this->nodal_dimension();
@@ -1727,7 +1727,7 @@ namespace pyoomph
 		}
 	}
 
-	void BulkElementBase::get_normal_at_s(const oomph::Vector<double> &s, oomph::Vector<double> &n, double ***dnormal_dcoord, double *****d2normal_dcoord2) const
+	void BulkElementBase::get_normal_at_s(const oomph::Vector<double> &s, oomph::Vector<double> &n, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT* PYOOMPH_RESTRICT dnormal_dcoord, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2normal_dcoord2) const
 	{
 		unsigned nodal_dim = this->nodal_dimension();
 		unsigned eldim = this->dim();
@@ -2398,7 +2398,7 @@ namespace pyoomph
 		}
 	}
 
-	void alloc_dealloc_single_shape_buffer(bool do_alloc, JITShapeInfo_t **buff, bool with_analytical_hessian_moving_mesh)
+	void alloc_dealloc_single_shape_buffer(bool do_alloc, JITShapeInfo_t * PYOOMPH_RESTRICT *buff, bool with_analytical_hessian_moving_mesh)
 	{
 		if (!(*buff))
 		{
@@ -2722,8 +2722,11 @@ namespace pyoomph
 
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
 
-		eleminfo.nodal_coords = (double ***)malloc(eleminfo.nnode * sizeof(double **));
-		//std::cout << "NODAL COORDS ALLOCATED FOR " << this << std::endl;
+		/*eleminfo.nodal_coords = (double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT )malloc(eleminfo.nnode * sizeof(double **));		
+		eleminfo.nodal_data = (double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT )calloc(eleminfo.nnode, sizeof(double **));
+		eleminfo.nodal_local_eqn = (int * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT )calloc(eleminfo.nnode, sizeof(int *));
+		eleminfo.pos_local_eqn = (int * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT )calloc(eleminfo.nnode, sizeof(int *));*/
+		eleminfo.nodal_coords = (double ***)malloc(eleminfo.nnode * sizeof(double **));		
 		eleminfo.nodal_data = (double ***)calloc(eleminfo.nnode, sizeof(double **));
 		eleminfo.nodal_local_eqn = (int **)calloc(eleminfo.nnode, sizeof(int *));
 		eleminfo.pos_local_eqn = (int **)calloc(eleminfo.nnode, sizeof(int *));
@@ -12887,7 +12890,7 @@ namespace pyoomph
 	 * @param d2normal_dcoord2 second derivatives with respect to coordinate positions (to be calculated if d2normal_dcoord2!=NULL)
 	 */
 
-	void InterfaceElementBase::get_dnormal_dcoords_at_s(const oomph::Vector<double> &s, double ***dnormal_dcoord, double *****d2normal_dcoord2) const
+	void InterfaceElementBase::get_dnormal_dcoords_at_s(const oomph::Vector<double> &s, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dnormal_dcoord, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2normal_dcoord2) const
 	{   
 		
 		bool new_vers = dim()!=2; // Fall back to old code for this case

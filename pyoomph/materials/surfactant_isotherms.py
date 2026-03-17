@@ -161,13 +161,16 @@ class LangmuirIsotherm(SurfactantIsotherm):
         k_des: Desorption rate (in 1/s)
         K: Equilibrium constant (in m). If K is passed, k_ads and k_des are not independent, and only two of these can be passed.
     """    
-    def __init__(self,surfactant_name:str,GammaInfty:ExpressionOrNum,k_ads:ExpressionNumOrNone=_default_k_ads,k_des:ExpressionNumOrNone=_default_k_des,K:ExpressionNumOrNone=None):
+    def __init__(self,surfactant_name:str,GammaInfty:ExpressionOrNum,k_ads:ExpressionNumOrNone=_default_k_ads,k_des:ExpressionNumOrNone=_default_k_des,K:ExpressionNumOrNone=None,max_Gamma_over_Gamma_Infty:ExpressionNumOrNone=None):
         super(LangmuirIsotherm, self).__init__(surfactant_name,k_ads,k_des,K=K)
         self.GammaInfty=GammaInfty
+        self.max_Gamma_over_Gamma_Infty=max_Gamma_over_Gamma_Infty
 
     def get_surface_pressure(self) -> Expression:
         T = self.get_T_variable()
         Gamma = self.get_Gamma_variable()
+        if self.max_Gamma_over_Gamma_Infty is not None:
+            Gamma=minimum(Gamma/self.GammaInfty,self.max_Gamma_over_Gamma_Infty)*self.GammaInfty
         # Preventing the log to get negative numbers
         log_arg=maximum(1e-50, 1 - Gamma / self.GammaInfty)
         return -gas_constant * T * self.GammaInfty * log(log_arg)

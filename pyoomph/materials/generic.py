@@ -455,6 +455,7 @@ class MaterialProperties:
                 v=v(self)
                 if v is None:
                     continue
+            print("Sampling property "+k+" to text file...")
             self.sample_property_to_text_file(os.path.join(dirname,k+".txt"),v,_name=k,_sort=_sort,_newlines=_newlines,**kwargs)
 
 

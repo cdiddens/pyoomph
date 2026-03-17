@@ -465,7 +465,7 @@ class RemeshMeshSize(BaseEquations):
 
 
 class ProjectExpression(Equations):
-    def __init__(self,scale:Union[ExpressionOrNum,str]=1,space:FiniteElementSpaceEnum="C2",field_type:Literal["scalar","vector"]="scalar",**projs:ExpressionOrNum):
+    def __init__(self,scale:Union[ExpressionOrNum,str]=1,space:FiniteElementSpaceEnum="C2",field_type:Literal["scalar","vector"]="scalar",coordinate_system:Optional["BaseCoordinateSystem"]=None, **projs:ExpressionOrNum):
         super(ProjectExpression, self).__init__()
         self.space:FiniteElementSpaceEnum=space
         self.scale=scale
@@ -473,6 +473,7 @@ class ProjectExpression(Equations):
             self.scale=scale_factor(scale)
         self.field_type=field_type
         self.projs=projs.copy()
+        self.coordinate_system=coordinate_system
 
     def define_fields(self):
         for n,_ in self.projs.items():
@@ -487,8 +488,8 @@ class ProjectExpression(Equations):
         import pyoomph.expressions.generic
         for n,e in self.projs.items():
             f,ftest=var_and_test(n)
-            self.add_residual(pyoomph.expressions.generic.weak(f,testfunction(n,dimensional=False)/scale_factor(n)))
-            self.add_residual(pyoomph.expressions.generic.weak(-e,testfunction(n,dimensional=False)/scale_factor(n)))
+            self.add_residual(pyoomph.expressions.generic.weak(f,testfunction(n,dimensional=False)/scale_factor(n),coordinate_system=self.coordinate_system))
+            self.add_residual(pyoomph.expressions.generic.weak(-e,testfunction(n,dimensional=False)/scale_factor(n),coordinate_system=self.coordinate_system))
 
 class InitialCondition(BaseEquations):
     """

@@ -182,7 +182,7 @@ namespace pyoomph
     virtual double fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds = NULL) const;
     virtual void fill_shape_info_at_s_dNodalPos_helper(JITShapeInfo_t *shape_info, const unsigned &index, const oomph::DenseMatrix<double> &interpolated_t, const oomph::DShape &dpsids_Element, const double det_Eulerian, const oomph::DenseMatrix<double> &aup, bool require_hessian, oomph::RankFourTensor<double> &DXdshape_il_jb, RankSixTensor *D2X2_dshape) const;
     virtual void fill_in_jacobian_from_lagragian_by_fd(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian);
-    virtual void get_dnormal_dcoords_at_s(const oomph::Vector<double> &s, double ***dnormal_dcoord, double *****d2normal_dcoord2) const;
+    virtual void get_dnormal_dcoords_at_s(const oomph::Vector<double> &s, double *  PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dnormal_dcoord, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2normal_dcoord2) const;
     void update_in_solid_position_fd(const unsigned &i) override; // For FD with element_sizes, we have to update the element size buffer
   public:
     unsigned _numpy_index;
@@ -195,7 +195,7 @@ namespace pyoomph
     virtual void describe_my_dofs(std::ostream &os, const std::string &in) { this->describe_local_dofs(os, in); }
     virtual double J_Lagrangian(const oomph::Vector<double> &s);
     virtual int get_internal_local_eqn(unsigned idindex, unsigned vindex) { return this->internal_local_eqn(idindex, vindex); }
-    virtual void get_normal_at_s(const oomph::Vector<double> &s, oomph::Vector<double> &n, double ***dnormal_dcoord, double *****d2normal_dcoord2) const;
+    virtual void get_normal_at_s(const oomph::Vector<double> &s, oomph::Vector<double> &n, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dnormal_dcoord, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2normal_dcoord2) const;
 
     // Discontinuous fields are stored as internal_data, on interfaces possibly also on external_data
     virtual oomph::Data *get_D0_nodal_data(const unsigned &fieldindex);
@@ -1456,7 +1456,7 @@ namespace pyoomph
     virtual void add_interface_dofs();
     virtual void fill_element_info_interface_part(bool without_equations=false);
     virtual std::vector<std::string> get_dof_names(bool not_a_root_call = false);
-    virtual void get_dnormal_dcoords_at_s(const oomph::Vector<double> &s, double ***dnormal_dcoord, double *****d2normal_dcoord2) const;
+    virtual void get_dnormal_dcoords_at_s(const oomph::Vector<double> &s, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dnormal_dcoord, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2normal_dcoord2) const;
     virtual void assign_additional_local_eqn_numbers_from_elem(const JITFuncSpec_RequiredShapes_FiniteElement_t *required, BulkElementBase *from_elem, std::vector<int> &eq_map);
     virtual oomph::Vector<double> local_coordinate_in_opposite_side(const oomph::Vector<double> &s) const { throw_runtime_error("Implement"); }
     virtual void fill_opposite_node_indices(JITShapeInfo_t *shape_info)
@@ -1628,7 +1628,7 @@ namespace pyoomph
       }
     }
 
-    virtual void get_normal_at_s(const oomph::Vector<double> &s, oomph::Vector<double> &n, double ***dnormal_dcoord, double *****d2normal_dcoord2) const
+    virtual void get_normal_at_s(const oomph::Vector<double> &s, oomph::Vector<double> &n, double *  PYOOMPH_RESTRICT  *  PYOOMPH_RESTRICT *  PYOOMPH_RESTRICT  dnormal_dcoord, double *  PYOOMPH_RESTRICT  *  PYOOMPH_RESTRICT  *  PYOOMPH_RESTRICT  *  PYOOMPH_RESTRICT *  PYOOMPH_RESTRICT d2normal_dcoord2) const
     {
       this->outer_unit_normal(s, n);
       if (dnormal_dcoord)
