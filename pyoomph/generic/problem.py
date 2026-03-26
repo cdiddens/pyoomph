@@ -547,6 +547,8 @@ class Problem(_pyoomph.Problem):
         
         #: After analyzing the Jacobian, a field with an empty Jacobian row will be pinned automatically
         self.automatically_remove_dofs_without_equations:bool=True
+        #: When you have e.g. a field without any equations, it will stop the simulation and give a warning about the Jacobian structure. Setting this to False, it will just go through
+        self.stop_on_jacobian_structure_warning=True
 
         #: Must be set to the participant name when using preCICE. Default is an empty string, if you do not use preCICE.
         self.precice_participant:str=""
@@ -2601,8 +2603,11 @@ class Problem(_pyoomph.Problem):
         self.relink_external_data()
         self._assemble_defined_field_list()
         
-        infofile=open(os.path.join(self.get_output_directory(),self._ccode_dir,"_jacobian_structure.txt"),"w")
-        infofile.write(str(self._get_jacobian_information_string()))
+        jinfo_string, info_good=self._get_jacobian_information_string()
+        if not info_good and self.stop_on_jacobian_structure_warning:
+            raise RuntimeError("\n\nJacobian structure information indicates potential problems.\nSet stop_on_jacobian_structure_warning=False to ignore this warning.\n\n"+jinfo_string+"\n\n"+"This could be a result of missing equations, or misspelling a method in your Equation class, as e.g. 'define_residual' or 'define_equations' instead of 'define_residuals'.\nSet stop_on_jacobian_structure_warning=False in the Problem class if you are sure what you are doing")
+        infofile=open(os.path.join(self.get_output_directory(),self._ccode_dir,"_jacobian_structure.txt"),"w")        
+        infofile.write(str(jinfo_string))
         infofile.close()
 
         self._set_solved_residual("",False,True)

@@ -247,18 +247,19 @@ namespace pyoomph
     void sparse_assemble_row_or_column_compressed(oomph::Vector<int*>& column_or_row_index,oomph::Vector<int*>& row_or_column_start,oomph::Vector<double*>& value,oomph::Vector<unsigned>& nnz,oomph::Vector<double*>& residual,bool compressed_row_flag) override;
     unsigned n_unaugmented_dofs=0;
     std::vector<std::string> defined_fields;
+    std::vector<DynamicBulkElementCode*> defined_fields_to_domain;
     std::vector<std::string> residual_names;
     std::vector<std::vector<bool>> residual_contributing_fields; // [residual][defined_field] -> whether the defined field contributes to the residual (i.e. whether there is a least a test function contributing to it)
     std::vector<std::vector<std::vector<bool>>> jacobian_contributing_fields; // [residual][defined_field][defined_field] -> whether the jacobian has a contribution from the derivative of the residual w.r.t. the defined field (i.e. whether there is at least a test function and trial function contributing to it)
     std::vector<std::vector<std::set<DynamicBulkElementCode*>>> residual_contributing_codes; // [residual][defined_field] -> Contributions to the residual from the different codes (e.g. bulk, interface, different domains)
     std::vector<std::vector<std::vector<std::set<DynamicBulkElementCode*>>>> jacobian_contributing_codes; // [residual][defined_field][defined_field] -> Contributions to the jacobian from the different codes (e.g. bulk, interface, different domains)
-    std::vector<std::vector<bool>> pin_due_to_empty_jacobian_row; // [residual][defined_field] -> whether this field has to be pinned due to an empty jacobian row (i.e. no contributions on the current residual which leads to a non-invertible jacobian)
-    std::vector<bool> removed_fields_due_to_missing_jacobian_row; // [defined_field] -> whether this field has been removed from the dofs due to missing jacobian row (i.e. no contributions on any residual, which leads to a non-invertible jacobian)
+    std::vector<std::vector<bool>> pin_due_to_empty_jacobian_row_or_col; // [residual][defined_field] -> whether this field has to be pinned due to an empty jacobian row (i.e. no contributions on the current residual which leads to a non-invertible jacobian)
+    std::vector<bool> removed_fields_due_to_missing_jacobian_row_or_col; // [defined_field] -> whether this field has been removed from the dofs due to missing jacobian row (i.e. no contributions on any residual, which leads to a non-invertible jacobian)
     std::vector<std::map<unsigned,unsigned>> global_eqs_to_jacobian_buffer_index; // [global col][global row]->[index in the jacobian buffer]
   public:
     void assemble_defined_field_list();
     void update_jacobian_csr_structure();
-    std::string get_jacobian_information_string();
+    std::tuple<std::string,bool> get_jacobian_information_string();
     void sparse_assemble_row_or_column_compressed_base_problem(oomph::Vector<int*>& column_or_row_index,oomph::Vector<int*>& row_or_column_start,oomph::Vector<double*>& value,oomph::Vector<unsigned>& nnz,oomph::Vector<double*>& residuals,bool compressed_row_flag);
     unsigned get_n_unaugmented_dofs() const {return n_unaugmented_dofs;}
     bool use_custom_residual_jacobian=false;

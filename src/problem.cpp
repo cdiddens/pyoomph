@@ -635,7 +635,7 @@ namespace pyoomph
 		unsigned numfound = 0;
 		if (this->_solved_residual != name) 
 		{
-			for (unsigned int i=0;i<removed_fields_due_to_missing_jacobian_row.size();i++) removed_fields_due_to_missing_jacobian_row[i]=false;
+			for (unsigned int i=0;i<removed_fields_due_to_missing_jacobian_row_or_col.size();i++) removed_fields_due_to_missing_jacobian_row_or_col[i]=false;
 		}
 		for (unsigned int i = 0; i < bulk_element_codes.size(); i++)
 		{
@@ -647,13 +647,13 @@ namespace pyoomph
 		}
 		this->_solved_residual = name;
 		unsigned resind=std::find(residual_names.begin(),residual_names.end(),name)-residual_names.begin();				
-		std::set<unsigned> fields_with_missing_jacobian_row;
+		std::set<unsigned> fields_with_missing_jacobian_row_or_col;
 		if (remove_dofs_without_jacobian_row)
 		{
-			for (unsigned int i=0;i<removed_fields_due_to_missing_jacobian_row.size();i++) 
+			for (unsigned int i=0;i<removed_fields_due_to_missing_jacobian_row_or_col.size();i++) 
 			{
-				removed_fields_due_to_missing_jacobian_row[i]=pin_due_to_empty_jacobian_row[resind][i];
-				if (removed_fields_due_to_missing_jacobian_row[i]) fields_with_missing_jacobian_row.insert(i);
+				removed_fields_due_to_missing_jacobian_row_or_col[i]=pin_due_to_empty_jacobian_row_or_col[resind][i];
+				if (removed_fields_due_to_missing_jacobian_row_or_col[i]) fields_with_missing_jacobian_row_or_col.insert(i);
 			}
 		}
 		/*if (!fields_with_missing_jacobian_row.empty())
@@ -669,7 +669,7 @@ namespace pyoomph
 
 	bool Problem::has_empty_jacobian_rows_marked() const
 	{
-		for (unsigned int i=0;i<removed_fields_due_to_missing_jacobian_row.size();i++) if (removed_fields_due_to_missing_jacobian_row[i]) return true;
+		for (unsigned int i=0;i<removed_fields_due_to_missing_jacobian_row_or_col.size();i++) if (removed_fields_due_to_missing_jacobian_row_or_col[i]) return true;
 		return false;
 	}
 
@@ -2474,6 +2474,7 @@ namespace pyoomph
 	void Problem::assemble_defined_field_list()
 	{
 		defined_fields.clear();
+		defined_fields_to_domain.clear();
 		residual_names.clear();
 		std::set<std::string> field_set;
 		std::set<std::string> res_jac_combis;
@@ -2491,6 +2492,7 @@ namespace pyoomph
 					field_set.insert(fn);
 					field_name_to_index[fn]=defined_fields.size();	
 					defined_fields.push_back(fn);	
+					defined_fields_to_domain.push_back(dc);
 				}
 			}
 			for (unsigned i=0;i<ft->num_res_jacs;i++)
@@ -2561,23 +2563,29 @@ namespace pyoomph
 				
 			}
 		}
-		pin_due_to_empty_jacobian_row.resize(residual_names.size(),std::vector<bool>(defined_fields.size(),false));
+		pin_due_to_empty_jacobian_row_or_col.resize(residual_names.size(),std::vector<bool>(defined_fields.size(),false));
 		for (unsigned i=0;i<residual_names.size();i++)
 		{
 			for (unsigned j=0;j<defined_fields.size();j++)
 			{
-				bool has_contribs=false;
+				bool has_row_contribs=false;
+				bool has_col_contribs=false;
 				for (unsigned k=0;k<defined_fields.size();k++)
 				{
 					if (jacobian_contributing_fields[i][j][k])
 					{
-						has_contribs=true;
-						break;
+						has_row_contribs=true;		
+						if (has_col_contribs) break;				
+					}
+					if (jacobian_contributing_fields[i][k][j])
+					{
+						has_col_contribs=true;
+						if (has_row_contribs) break;						
 					}
 				}
-				if (!has_contribs)
+				if (!has_row_contribs || !has_col_contribs)
 				{
-					pin_due_to_empty_jacobian_row[i][j]=true;
+					pin_due_to_empty_jacobian_row_or_col[i][j]=true;
 				}
 			}
 		}
@@ -2616,7 +2624,7 @@ namespace pyoomph
 			}
 		}
 		
-		removed_fields_due_to_missing_jacobian_row.resize(defined_fields.size(),false);
+		removed_fields_due_to_missing_jacobian_row_or_col.resize(defined_fields.size(),false);
 		
 	}
 
@@ -2624,17 +2632,19 @@ namespace pyoomph
 	bool Problem::is_field_removed_from_dofs_due_to_missing_jacobian_row(int global_field_index)
 	{
 		if (global_field_index<0) return false;
-		else return removed_fields_due_to_missing_jacobian_row[global_field_index];
+		else return removed_fields_due_to_missing_jacobian_row_or_col[global_field_index];
 	}
-	std::string Problem::get_jacobian_information_string()
+	std::tuple<std::string,bool> Problem::get_jacobian_information_string()
 	{
 		std::ostringstream ss;
+		bool all_good=true;
 		ss << "Defined fields: " << std::endl;
 		for (unsigned int i=0;i<defined_fields.size();i++)
 		{
 			ss << "\t" << i << "\t" << defined_fields[i] << std::endl;
 		}
 		ss << std::endl;
+		std::vector<bool> has_any_contributions(defined_fields.size(),false);
 		for (unsigned int ri=0;ri<residual_names.size();ri++)
 		{
 			std::string combi=residual_names[ri];
@@ -2649,15 +2659,16 @@ namespace pyoomph
 				ss << "\t    | ";
 				for (unsigned int i=0;i<defined_fields.size();i++)				
 				{
-					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
 					else if (i/100) ss << i/100 << " ";
 					else ss << "  ";
+					has_any_contributions[i]=true;
 				}
 				ss << "|" << std::endl;
 				ss << "\t    | ";
 				for (unsigned int i=0;i<defined_fields.size();i++)				
 				{
-					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
 					else if ((i%100)/10) ss << (i%100)/10 << " ";
 					else ss << "  ";
 				}
@@ -2665,14 +2676,14 @@ namespace pyoomph
 				ss << "\t    | ";
 				for (unsigned int i=0;i<defined_fields.size();i++)				
 				{
-					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
 					else ss << i%10 << " ";
 				}
 				ss << "|" << std::endl;
 				ss << "\t----|";
 				for (unsigned int i=0;i<defined_fields.size();i++)				
 				{
-					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
 					else ss  << "--";
 				}
 				ss <<"-|" << std::endl;
@@ -2682,22 +2693,23 @@ namespace pyoomph
 				ss << "\t    | ";
 				for (unsigned int i=0;i<defined_fields.size();i++)				
 				{
-					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
 					else if (i/10) ss << i/10 << " ";
 					else ss << "  ";
+					has_any_contributions[i]=true;
 				}
 				ss << "|" << std::endl;
 				ss << "\t    | ";
 				for (unsigned int i=0;i<defined_fields.size();i++)				
 				{
-					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
 					else ss << i%10 << " ";
 				}
 				ss << "|" << std::endl;
 				ss << "\t----|";
 				for (unsigned int i=0;i<defined_fields.size();i++)				
 				{
-					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
 					else ss  << "--";
 				}
 				ss << "-|" <<std::endl;
@@ -2707,14 +2719,15 @@ namespace pyoomph
 				ss << "\t    | ";
 				for (unsigned int i=0;i<defined_fields.size();i++)				
 				{
-					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
 					else ss << i << " ";
+					has_any_contributions[i]=true;
 				}
 				ss <<"|"<< std::endl;
 				ss << "\t----|";
 				for (unsigned int i=0;i<defined_fields.size();i++)				
 				{
-					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
 					else ss  << "--";
 				}
 				ss << "-|" << std::endl;
@@ -2723,12 +2736,12 @@ namespace pyoomph
 			std::vector<std::set<DynamicBulkElementCode*>> listed_domain_contributions;
 			for (unsigned int i=0;i<defined_fields.size();i++)
 			{				
-				if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+				if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
 				else ss << "  ";
 				ss<<"\t" << std::setfill(' ') << std::setw(3) << i << " | ";		
 				for (unsigned int j=0;j<defined_fields.size();j++)
 				{
-					if (pin_due_to_empty_jacobian_row[ri][j]) continue;
+					if (pin_due_to_empty_jacobian_row_or_col[ri][j]) continue;
 					if (jacobian_contributing_fields[ri][i][j]) 
 					{
 						unsigned found=listed_domain_contributions.size();
@@ -2757,17 +2770,17 @@ namespace pyoomph
 			ss << "\t----|";
 			for (unsigned int i=0;i<defined_fields.size();i++)
 			{
-				if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+				if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
 				ss << "--";
 			}
 			ss << "-|" << std::endl;
 			ss<< "\tRes | " ;
-			std::set<unsigned> residual_contributions_with_zero_jacobian_row;
+			std::set<unsigned> residual_contributions_with_zero_jacobian_row_or_col;
 			for (unsigned int i=0;i<defined_fields.size();i++)
 			{
-				if (pin_due_to_empty_jacobian_row[ri][i]) 
+				if (pin_due_to_empty_jacobian_row_or_col[ri][i]) 
 				{
-					if (residual_contributing_fields[ri][i]) residual_contributions_with_zero_jacobian_row.insert(i);
+					if (residual_contributing_fields[ri][i]) residual_contributions_with_zero_jacobian_row_or_col.insert(i);
 					continue;
 				}
 				if (residual_contributing_fields[ri][i]) 
@@ -2806,20 +2819,48 @@ namespace pyoomph
 			}
 			ss << std::endl;
 
-			if (residual_contributions_with_zero_jacobian_row.size()>0)
+			if (residual_contributions_with_zero_jacobian_row_or_col.size()>0)
 			{
-				ss << "\t|WARNING|: Following fields have residual contributions, but a zero Jacobian row: ";
-				unsigned int count=residual_contributions_with_zero_jacobian_row.size();
-				for (auto i : residual_contributions_with_zero_jacobian_row)
+				ss << "\t|WARNING|: Following fields have residual contributions, but a zero Jacobian row/column: ";
+				unsigned int count=residual_contributions_with_zero_jacobian_row_or_col.size();
+				for (auto i : residual_contributions_with_zero_jacobian_row_or_col)
 				{
-					ss << i << (--count ? ", " : "");
+					ss << i << +" ("+defined_fields[i]+")"+ (--count ? ", " : "");
 				}
 				ss << std::endl;
 				ss << std::endl;
+				all_good=false;
 			}
 			
 		}
-		return ss.str();
+
+		for (unsigned int i=0;i<defined_fields.size();i++)
+		{
+			if (!has_any_contributions[i])
+			{
+				// Check if it is pinned, then it is fine
+				DynamicBulkElementCode * dc=defined_fields_to_domain[i];
+				auto *ft=dc->get_func_table();
+				bool pinned=false;
+				for (unsigned int j=0;j<ft->Dirichlet_set_size;j++)
+				{
+					if (ft->dirichlet_field_index_to_global_field_index[j]==i)
+					{						
+						if (ft->Dirichlet_set[j])
+						{
+							//std::cout << "IT IS PINNED " << i << "  " << j << std::endl;
+							pinned=true;
+							break;
+						}
+					}
+				}
+				if (pinned) continue;
+				ss << "\t|WARNING|: Field " << i << " \"" << defined_fields[i] << "\" has an empty row or columum in all Jacobians." << std::endl;
+				all_good=false;
+			}
+		}
+
+		return std::make_tuple(ss.str(), all_good);
 		
 	}
 
