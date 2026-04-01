@@ -940,6 +940,7 @@ namespace pyoomph
       virtual void set_ignore_dpsi_coord_diffs_in_jacobian(std::string residual_name) { ignore_dpsi_coord_diffs_in_jacobian_set.insert(residual_name); }
       virtual void set_ignore_residual_assembly(std::string residual_name) { ignore_assemble_residuals.insert(residual_name); }   
       virtual bool is_current_residual_assembly_ignored() { return ignore_assemble_residuals.count(residual_names[residual_index]); }
+      virtual bool is_residual_assembly_ignored(std::string residual_name) { return ignore_assemble_residuals.count(residual_name); }
       virtual int * get_derive_jacobian_by_expansion_mode() { if (!derive_jacobian_by_expansion_mode.count(residual_names[residual_index])) return NULL; else return &(derive_jacobian_by_expansion_mode[residual_names[residual_index]]) ; }      
       virtual int * get_derive_hessian_by_expansion_mode() { if (!derive_hessian_by_expansion_mode.count(residual_names[residual_index])) return NULL; else return &(derive_hessian_by_expansion_mode[residual_names[residual_index]]) ; }            
       virtual bool ignore_dpsi_coord_diffs_in_jacobian() { return ignore_dpsi_coord_diffs_in_jacobian_set.count(residual_names[residual_index]); }

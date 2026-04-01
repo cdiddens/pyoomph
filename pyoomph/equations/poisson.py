@@ -112,14 +112,14 @@ class PoissonFarFieldMonopoleCondition(InterfaceEquations):
     Represents a far-field condition for the Poisson equation in the form:
 
     .. math::
-        u + R \dfrac{\partial u}{\partial r} = u_{\infty}
+        u + R \\dfrac{\partial u}{\partial r} = u_{\infty}
 
     where u is the dependent variable, far_value is the value at infinity, and R is the distance from the origin and r is the radial coordinate.    
     Hence, works only correctly in radialsymmetry, axisymmetric or 3D Cartesian. Also, it is only valid if the source vanishes sufficiently fast towards the far field.
     For 2D, we use:
 
     .. math::
-        u + R \dfrac{\partial u}{\partial r} / \log(R / L) = u_{\infty}
+        u + R \\dfrac{\partial u}{\partial r} / \\log(R / L) = u_{\infty}
             
 
     Due to the logarithmic solution behavior in 2D, the farfield length L must be provided here.

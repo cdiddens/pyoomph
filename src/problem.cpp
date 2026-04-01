@@ -2648,6 +2648,7 @@ namespace pyoomph
 		for (unsigned int ri=0;ri<residual_names.size();ri++)
 		{
 			std::string combi=residual_names[ri];
+			bool ignored_residuals=true; // Happens e.g. for azimuthal contributions
 			if (combi=="") ss << "Jacobian Structure -- Default Residuals" << std::endl;
 			else ss << "Jacobian Structure -- Custom Residuals \"" << combi << "\"" << std::endl;
 			if (defined_fields.size()>999)
@@ -2799,6 +2800,7 @@ namespace pyoomph
 							listed_domain_contributions.push_back(residual_contributing_codes[ri][i]);
 						}
 						std::string symbol=" ";
+						for  (auto * dc : listed_domain_contributions[found]) if (!dc->get_code()->is_residual_assembly_ignored(residual_names[ri])) ignored_residuals=false;
 						symbol[0]=(char)('A' + found + (found>25 ? 6 : 0));						
 						ss << symbol << " ";
 					}
@@ -2819,7 +2821,7 @@ namespace pyoomph
 			}
 			ss << std::endl;
 
-			if (residual_contributions_with_zero_jacobian_row_or_col.size()>0)
+			if (residual_contributions_with_zero_jacobian_row_or_col.size()>0 && !ignored_residuals)
 			{
 				ss << "\t|WARNING|: Following fields have residual contributions, but a zero Jacobian row/column: ";
 				unsigned int count=residual_contributions_with_zero_jacobian_row_or_col.size();
