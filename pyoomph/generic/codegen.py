@@ -789,7 +789,7 @@ class BaseEquations(_pyoomph.Equations):
             master._interior_facet_residuals[dn]=Expression(0)
         master._interior_facet_residuals[dn]+=expr
 
-    def add_residual(self, expr: "ExpressionOrNum", *, destination: Optional[str] = None) -> None:
+    def add_residual(self, expr: "ExpressionOrNum", *, destination: Optional[str] = None):
         """
         Adds a residual contribution to this equations.
 
@@ -833,6 +833,7 @@ class BaseEquations(_pyoomph.Equations):
                 self.add_exception_info(e)
             cg._activate_residual("")
         cg._activate_residual("")
+        return self
 
     def _setup_combined_element(self):
         self._set_final_element(None)
