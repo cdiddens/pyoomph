@@ -1,6 +1,6 @@
 # Installation
 
-When you have python 3.9 to 3.13 installed, 
+When you have python 3.9 to 3.14 (CPython, 64-bit, x86_64) installed, 
 
 > python -m pip install pyoomph
 

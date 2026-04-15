@@ -1,7 +1,7 @@
 Installing the precompiled wheels
 ---------------------------------
 
-The easiest method to get pyoomph installed on your system is using ``pip``, i.e. just enter the following in a terminal:
+The easiest method to get pyoomph installed on your system is using ``pip``, i.e. just enter the following in a terminal (works for CPython on an x86_64 system):
 
 .. code:: bash
 
