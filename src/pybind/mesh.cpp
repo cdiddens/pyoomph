@@ -318,6 +318,11 @@ void PyReg_Mesh(py::module &m)
 			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);
 			if (!be) return 0;
 			return be->refinement_level(); })
+		.def("ncont_interpolated_values", [](oomph::GeneralisedElement *self) -> unsigned int
+			 {
+			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);
+			if (!be) return 0;
+			return be->ncont_interpolated_values(); })
 		.def("non_halo_proc_ID", [](oomph::GeneralisedElement *self) -> int
 			 {
 			#ifdef OOMPH_HAS_MPI

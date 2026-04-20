@@ -8920,6 +8920,12 @@ namespace pyoomph
 			*/
 		}
 
+		/*if (dynamic_cast<InterfaceElementBase *>(this))
+		{
+		   // It does not seem to be called for interface meshes anyways...
+			throw_runtime_error("Cannot yet tesselate interface meshes [will fail in connecting hanging nodes and have to go via the parent mesh");
+		}*/
+
 		if (codeinst->get_func_table()->bulk_position_space_to_C1)
 		{
 			this->constrain_bulk_position_space_to_C1();
