@@ -1789,7 +1789,9 @@ class MatplotLibScaleBar(MatplotLibOverlayBase):
     linewidths=3
     textsize = 14
     text_yoffset=0
+    text_xoffset=0
     orientation="horizontal"
+    capstyle="round"
     invisible=False
 
     def _fit_length(self,scale:float):
@@ -1824,16 +1826,16 @@ class MatplotLibScaleBar(MatplotLibOverlayBase):
         x,y,l=self.xpos,self.ypos,figlength
         plt.gca().annotate("", xytext=(map_x(x - (1.0 - shift) * l * nx), map_y(y - (1.0 - shift) * l * ny)), #type:ignore
                          xy=(map_x(x + shift * l * nx), map_y(y + shift * l * ny)),
-                         arrowprops=dict(color=self.textcolor, fc=self.textcolor,arrowstyle="-", lw=self.linewidths),zorder=self.zindex)
+                         arrowprops=dict(color=self.textcolor, fc=self.textcolor,arrowstyle="-", capstyle=self.capstyle, lw=self.linewidths),zorder=self.zindex)
         # Bars at the end
         if self.stoplength>0:
             bl = self.stoplength #/TODO: Scale by x/y
             plt.gca().annotate("", xytext=(map_x(x - (1.0 - shift) * l * nx + bl * ny), map_y(y - (1.0 - shift) * l * ny + bl * nx)), #type:ignore
                              xy=(map_x(x - (1.0 - shift) * l * nx - bl * ny), map_y(y - (1.0 - shift) * l * ny - bl * nx)),
-                             arrowprops=dict(color=self.textcolor, fc=self.textcolor,arrowstyle="-", lw=self.linewidths),zorder=self.zindex)
+                             arrowprops=dict(color=self.textcolor, fc=self.textcolor,arrowstyle="-", capstyle=self.capstyle, lw=self.linewidths),zorder=self.zindex)
             plt.gca().annotate("", xytext=(map_x(x + (shift) * l * nx + bl * ny), map_y(y + (shift) * l * ny + bl * nx)), #type:ignore
                              xy=(map_x(x + (shift) * l * nx - bl * ny), map_y(y + (shift) * l * ny - bl * nx)),
-                             arrowprops=dict(color=self.textcolor, fc=self.textcolor,arrowstyle="-", lw=self.linewidths),zorder=self.zindex)
+                             arrowprops=dict(color=self.textcolor, fc=self.textcolor,arrowstyle="-", capstyle=self.capstyle, lw=self.linewidths),zorder=self.zindex)
 
         lstr=str(reallength)
         ss=self.plotter.get_problem().get_scaling("spatial") #type:ignore
@@ -1848,7 +1850,7 @@ class MatplotLibScaleBar(MatplotLibOverlayBase):
                 lstr = "{:.8g} mm".format(reallength * 1000)
             elif reallength < 1e-1:
                 lstr = "{:.8g} cm".format(reallength * (100))
-        plt.gca().text(map_x(x), map_y(y+self.text_yoffset),lstr, fontsize=self.textsize,color=self.textcolor,va="bottom",ha="center",zorder=self.zindex) #type:ignore
+        plt.gca().text(map_x(x+self.text_xoffset), map_y(y+self.text_yoffset),lstr, fontsize=self.textsize,color=self.textcolor,va="bottom",ha="center",zorder=self.zindex) #type:ignore
 
 
 
