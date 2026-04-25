@@ -8,7 +8,7 @@ For pyoomph, the conditions of the `GNU General Public License 3 <https://www.gn
    .. code-block:: text
 
       pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-      Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+      Copyright (C) 2021-2026  Christian Diddens & Duarte Rocha
 
       This program is free software: you can redistribute it and/or modify
       it under the terms of the GNU General Public License as published by

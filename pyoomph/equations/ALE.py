@@ -5,7 +5,7 @@
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens & Duarte Rocha
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -518,10 +518,11 @@ class EnforcedInterfacialLaplaceSmoothing(InterfaceEquations):
     
     """
     required_parent_type=BaseMovingMeshEquations
-    def __init__(self,coordinate_system=cartesian):
+    def __init__(self,coordinate_system=cartesian,sorting=None):
         super().__init__()
         self.coordsys=coordinate_system
         self.verbose=True
+        self.sorting=sorting
         
     def define_fields(self):        
         # Get the coordinate space
@@ -572,12 +573,29 @@ class EnforcedInterfacialLaplaceSmoothing(InterfaceEquations):
         coords=data.get_coordinates()                
         nodes=mesh.fill_node_index_to_node_map()
         fixed_index=mesh.has_interface_dof_id("_s_fixed_"+iname)
-        dyn_index=mesh.has_interface_dof_id("_s_solved_"+iname)        
+        dyn_index=mesh.has_interface_dof_id("_s_solved_"+iname)                
         for seg in segs:
             al=0.0
             lastx=coords[0,seg[0]]
             lasty=coords[1,seg[0]]
+            
             for s in seg:
+                if self.sorting is not None:
+                    if self.sorting=="x+":
+                        if coords[0,seg[0]]>coords[0,seg[-1]]:
+                            seg=seg[::-1]
+                    elif self.sorting=="x-":
+                        if coords[0,seg[0]]<coords[0,seg[-1]]:
+                            seg=seg[::-1]
+                    elif self.sorting=="y+":
+                        if coords[1,seg[0]]>coords[1,seg[-1]]:
+                            seg=seg[::-1]
+                    elif self.sorting=="y-":
+                        if coords[1,seg[0]]<coords[1,seg[-1]]:
+                            seg=seg[::-1]
+                    else:
+                        raise RuntimeError("Unknown sorting option "+str(self.sorting))
+                            
                 x,y=coords[0,s],coords[1,s]
                 delta=numpy.sqrt((x-lastx)**2+(y-lasty)**2)
                 al+=delta

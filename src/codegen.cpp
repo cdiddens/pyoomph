@@ -380,7 +380,9 @@ namespace pyoomph
 			if (pyoomph_verbose)
 				std::cout << "INP SE:  " << inp << std::endl;
 			GiNaC::ex factor, unit, rest;
-			GiNaC::ex arg = inp.map(*this).op(0); // Descent recursively through nested subexpressions
+			GiNaC::ex arg = inp.map(*this);
+			if (GiNaC::is_a<GiNaC::numeric>(arg) ) return arg; // No units here
+			arg=arg.op(0); // Descent recursively through nested subexpressions
 			if (pyoomph_verbose)
 				std::cout << "PROCESSING " << inp << std::endl
 						  << "YIELDS " << arg << std::endl
