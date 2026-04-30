@@ -248,7 +248,7 @@ class BifurcationGUI:
             return self.problem.get_global_parameter(self._paramname)
     
     # By default, we allow to access all integral observables (not beginning with _) and all ODE dofs
-    def evalulate_observables(self)->Dict[str,float]:
+    def evaluate_observables(self)->Dict[str,float]:
         if self._observable_funcs is None:
             obs={}
             def recursive_add_spatial_domains(eqtree:EquationTree):
@@ -294,7 +294,7 @@ class BifurcationGUI:
             self.selected_branch=self.current_branch
             self.branches.append(self.current_branch)
         state_file=self.problem.get_output_directory(os.path.join(self.data_subdir,"_states","state_{:06d}.dump".format(self._state_step))) 
-        p=BifurcationGUISolutionPoint(self.get_bifurcation_parameter().value,self.evalulate_observables(),self.problem.get_last_eigenvalues()[0],state_file,self._state_step)                                 
+        p=BifurcationGUISolutionPoint(self.get_bifurcation_parameter().value,self.evaluate_observables(),self.problem.get_last_eigenvalues()[0],state_file,self._state_step)                                 
         if p.eig_value_Re==0 and self.classify_bifurcations:
             from pyoomph.generic.bifurcation_tools import NormalFormCalculator
             p.bifurcation_info=NormalFormCalculator(self.problem).get_normal_form(self.get_bifurcation_parameter().get_name())            
@@ -771,7 +771,7 @@ class BifurcationGUI:
         ddof=numpy.array(self.problem.get_arclength_dof_derivative_vector())
         if len(ddof)>0:
             self.problem.set_current_dofs(backup+FD_eps*ddof)
-            po=self.evalulate_observables()
+            po=self.evaluate_observables()
         else:
             po=self.current_point.obs_values.copy()
 
@@ -788,7 +788,7 @@ class BifurcationGUI:
                 for dptr in [-dp,dp]:
                     ddof=numpy.array(bi["perturbation_predictor"](dptr))                    
                     self.problem.set_current_dofs(backup+FD_eps*ddof)
-                    po=self.evalulate_observables()
+                    po=self.evaluate_observables()
                     btangtangs={}
                     for k in self._avail_observables:
                         do=(po[k]-self.current_point.obs_values[k])/FD_eps
@@ -1036,7 +1036,7 @@ class BifurcationGUI:
         except:
             raise RuntimeError("Make sure the problem starts where it has a stationary solution")
         self.problem.solve_eigenproblem(self.neigen,self.shift)
-        self._avail_observables=[k for k in self.evalulate_observables().keys()]
+        self._avail_observables=[k for k in self.evaluate_observables().keys()]
         self._current_observable=self._avail_observables[0]
         self._add_current_state()
 

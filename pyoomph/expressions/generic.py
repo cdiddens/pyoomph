@@ -1163,7 +1163,7 @@ def evaluate_in_past(expr:ExpressionOrNum,timestep_offset:Union[int,float]=1)->E
 		high=_pyoomph.GiNaC_eval_in_past(expr,_pyoomph.Expression(thigh),_pyoomph.Expression(0))
 		return low*frac_low+high*frac_high
 	else:
-		raise RuntimeError("cannot yet evaluate at a variable step. But you can use e.g. (1-theta)*evalulate_at_past(expr,1)+theta*expr for some variable theta to blend between current and previous time step")
+		raise RuntimeError("cannot yet evaluate at a variable step. But you can use e.g. (1-theta)*evaluate_at_past(expr,1)+theta*expr for some variable theta to blend between current and previous time step")
 
 
 def evaluate_at_midpoint(expr:ExpressionOrNum, midpt:Union[float,int]=0.5)->Expression:

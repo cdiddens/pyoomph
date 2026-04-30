@@ -283,7 +283,7 @@ class PeriodicOrbit:
         
         return self.emerging_info["lyap_coeff"]<0
     
-    def evalulate_observable_time_integral(self,*observables:str):
+    def evaluate_observable_time_integral(self,*observables:str):
         if len(observables)==0:
             raise ValueError("No observables given")
         accus={n:0 for n in observables}

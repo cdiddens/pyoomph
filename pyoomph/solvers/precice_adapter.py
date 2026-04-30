@@ -505,7 +505,7 @@ class PreciceWriteData(BaseEquations):
                     buffer=mesh.evaluate_local_expression_at_nodes(expr_index,True,False)                
                     buffer=numpy.array(buffer)                                                            
                     if self.get_combined_equations()._is_ode():
-                        expr=mesh.element_pt(0).evalulate_local_expression_at_midpoint(expr_index)
+                        expr=mesh.element_pt(0).evaluate_local_expression_at_midpoint(expr_index)
                         buffer=numpy.array([expr])
                         #print("WRITE DATA",write_name,mesh._precice_vertex_ids,buffer)
                         interface.write_data(provider.name, write_name, mesh._precice_vertex_ids, buffer)

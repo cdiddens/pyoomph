@@ -359,18 +359,18 @@ void PyReg_Mesh(py::module &m)
 			oomph::Vector<double> so(s.size()); for (unsigned int i=0;i<s.size();i++) so[i]=s[i];
 			return be->get_macro_element_coordinate_at_s(so);			
 		   })
-		.def("evalulate_local_expression_at_s", [](oomph::GeneralisedElement *self, int index, std::vector<double> s) -> double
+		.def("evaluate_local_expression_at_s", [](oomph::GeneralisedElement *self, int index, std::vector<double> s) -> double
 			 {
 			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);
 			if (!be) return 0.0;
 			oomph::Vector<double> so(s.size()); for (unsigned int i=0;i<s.size();i++) so[i]=s[i];
 			return be->eval_local_expression_at_s(index,so); })
-		.def("evalulate_local_expression_at_midpoint", [](oomph::GeneralisedElement *self, int index) -> double
+		.def("evaluate_local_expression_at_midpoint", [](oomph::GeneralisedElement *self, int index) -> double
 			 {
 			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);
 			if (!be) return 0.0;
 			return be->eval_local_expression_at_midpoint(index); })
-		.def("evalulate_local_expression_at_node_index", [](oomph::GeneralisedElement *self, int index, unsigned node_index) -> double
+		.def("evaluate_local_expression_at_node_index", [](oomph::GeneralisedElement *self, int index, unsigned node_index) -> double
 			 {
 			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);
 			if (!be) return 0.0;
