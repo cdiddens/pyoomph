@@ -2857,7 +2857,7 @@ namespace pyoomph
 					}
 				}
 				if (pinned) continue;
-				ss << "\t|WARNING|: Field " << i << " \"" << defined_fields[i] << "\" has an empty row or columum in all Jacobians." << std::endl;
+				ss << "\t|WARNING|: Field " << i << " \"" << defined_fields[i] << "\" has an empty row or column in all Jacobians." << std::endl;
 				all_good=false;
 			}
 		}
