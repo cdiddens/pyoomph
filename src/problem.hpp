@@ -272,6 +272,10 @@ namespace pyoomph
     std::string get_sparse_assembly_method();
     
     std::vector<DynamicBulkElementCode *> &get_bulk_element_codes() { return bulk_element_codes; }
+
+    std::vector<int> get_dof_to_global_field_index_mapping();
+    std::vector<std::string> get_global_field_names();
+
     std::string get_bifurcation_tracking_mode() const { return bifurcation_tracking_mode; }
     std::vector<std::complex<double>> get_bifurcation_eigenvector();
     double get_bifurcation_omega();

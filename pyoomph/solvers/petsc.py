@@ -55,10 +55,19 @@ class PETSCSolver(GenericLinearSystemSolver):
         self.petsc_mat=None
         self.ksp=None
         self.x=None
+        self._dofs_to_field_info=None
 
     #		opts=PETSc.Options().getAll()
     #		if "add_zero_diagonal" in opts.keys():
     #			problem.set_diagonal_zero_entries(True)
+    
+    def _before_assigning_equation_numbers(self):
+        if self._dofs_to_field_info is not None:
+            if len(self._dofs_to_field_info)>2:
+                for IS in self._dofs_to_field_info[2:]:
+                    IS.destroy() #type:ignore
+        self._dofs_to_field_info=None # Reset the mapping, it will be re-created when needed. This is needed to properly handle changes in the dofs due to e.g. field splits or changes in the meshes
+        return super()._before_assigning_equation_numbers()
     
     def use_mumps(self,mumps_param14:Optional[int]=None):
         _SetDefaultPetscOption("mat_mumps_icntl_6",5)
@@ -80,6 +89,19 @@ class PETSCSolver(GenericLinearSystemSolver):
         return PETSc
 
     def setup_solver(self):        
+        if self._dofs_to_field_info is None:
+            names=self.problem._get_global_field_names()
+            mapping=self.problem._get_dof_to_global_field_index_mapping()            
+            unique_fields=numpy.unique(mapping)
+            print("PETSc DOF to field mapping:")
+            for uf in unique_fields:
+                print("  Field "+str(uf)+": "+names[uf])
+            field_is={}
+            for f in unique_fields:
+                indices = numpy.where(mapping == f)[0].astype(numpy.int32)
+                iset = PETSc.IS().createGeneral(indices)
+                field_is[f] = iset
+            self._dofs_to_field_info=[names,mapping,field_is]
         opts = PETSc.Options().getAll() #type:ignore
         if "add_zero_diagonal" in opts.keys(): #type:ignore
             #			print(dir(self.petsc_mat))
@@ -98,7 +120,12 @@ class PETSCSolver(GenericLinearSystemSolver):
             if hasattr(pc, "setFactorSolverPackage"): #type:ignore
                 if not self._do_not_set_any_args: #type:ignore
                     pc.setFactorSolverPackage(opts["pc_factor_mat_solver_type"]) #type:ignore
+
         pc.setFromOptions() #type:ignore
+        if self._dofs_to_field_info is not None:
+            field_is=self._dofs_to_field_info[2]
+            splt=[(str(a),b) for a,b in field_is.items()]
+            pc.setFieldSplitIS(*splt) #type:ignore
         self.ksp.setFromOptions() #type:ignore
         #print('Solving with:', self.ksp.getType())  # ,dir(pc)
 

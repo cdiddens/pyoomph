@@ -3589,7 +3589,6 @@ namespace pyoomph
             nodept->pin(fieldindex);            
           }
         }                
-        unsigned offset = 0;
       }
       // Handling discontinuous dofs
       if (ft->numfields_D2TB || ft->numfields_D2 || ft->numfields_D1TB || ft->numfields_D1)
@@ -3693,6 +3692,138 @@ namespace pyoomph
         }
       }
     }
+  }
+
+  void Mesh::fill_dof_to_global_field_index_buffer(std::vector<int> &dofs_to_global_field_index)
+  {
+    if (!this->nelement()) return;    
+    auto *el0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
+    auto *ft = el0->get_code_instance()->get_func_table();
+    int Doffset = 3;
+    long eqn_number=0;
+    for (unsigned int ei = 0; ei < this->nelement(); ei++)
+    {
+      auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ei));
+      for (unsigned int ni=0;ni<el->nnode();ni++)
+      {
+        pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(ni));
+        // Handle moving mesh dofs
+        for (unsigned int d = 0; d < nodept->ndim(); d++)
+        {
+          int valindex = -1 - d;                    
+          if (eqn_number=nodept->variable_position_pt()->eqn_number(d); eqn_number>=0) dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[valindex + Doffset];          
+        }
+
+        // Handling continuous bulk dofs
+        for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C2TB_basebulk+ft->numfields_C2_basebulk+ft->numfields_C1TB_basebulk+ft->numfields_C1_basebulk; fieldindex++)
+        {
+          if (eqn_number=nodept->eqn_number(fieldindex); eqn_number>=0) dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[fieldindex  + Doffset];          
+        }                
+      }
+      
+      // Handling discontinuous dofs
+      if (ft->numfields_D2TB || ft->numfields_D2 || ft->numfields_D1TB || ft->numfields_D1)
+      {
+        for (unsigned int fieldindex = 0; fieldindex < ft->numfields_D2TB; fieldindex++)
+        {
+          unsigned bindex = el->get_D2TB_buffer_index(fieldindex);
+          oomph::Data *data = el->get_D2TB_nodal_data(fieldindex);
+          for (unsigned int nj = 0; nj < data->nvalue(); nj++) 
+          {
+              if (eqn_number=data->eqn_number(nj); eqn_number>=0) dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[Doffset + bindex];          
+          }          
+        }
+        for (unsigned int fieldindex = 0; fieldindex < ft->numfields_D2; fieldindex++)
+        {
+          unsigned bindex = el->get_D2_buffer_index(fieldindex);
+          oomph::Data *data = el->get_D2_nodal_data(fieldindex);
+          for (unsigned int nj = 0; nj < data->nvalue(); nj++) 
+          {
+              if (eqn_number=data->eqn_number(nj); eqn_number>=0) dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[Doffset + bindex];          
+          }          
+        }
+        for (unsigned int fieldindex = 0; fieldindex < ft->numfields_D1TB; fieldindex++)
+        {
+          unsigned bindex = el->get_D1TB_buffer_index(fieldindex);
+          oomph::Data *data = el->get_D1TB_nodal_data(fieldindex);
+          for (unsigned int nj = 0; nj < data->nvalue(); nj++) 
+          {
+              if (eqn_number=data->eqn_number(nj); eqn_number>=0) dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[Doffset + bindex];          
+          }
+        }         
+        for (unsigned int fieldindex = 0; fieldindex < ft->numfields_D1; fieldindex++)
+        {
+          unsigned bindex = el->get_D1_buffer_index(fieldindex);
+          oomph::Data *data = el->get_D1_nodal_data(fieldindex);
+          for (unsigned int nj = 0; nj < data->nvalue(); nj++)          
+          {
+              if (eqn_number=data->eqn_number(nj); eqn_number>=0) dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[Doffset + bindex];          
+          }
+        }        
+      }      
+      // Handling interface dofs
+      if (dynamic_cast<InterfaceElementBase*>(el))
+      {
+          for (unsigned int ni=0;ni<el->nnode();ni++)
+          {
+            pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(ni));
+            for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C2TB - ft->numfields_C2TB_basebulk; fieldindex++)
+            {
+              std::string fieldname = ft->fieldnames_C2TB[ft->numfields_C2TB_basebulk + fieldindex];
+              unsigned interf_id = el->get_code_instance()->resolve_interface_dof_id(fieldname);              
+              if (eqn_number=nodept->eqn_number(dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(interf_id)); eqn_number>=0)
+              {
+               dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[fieldindex + ft->buffer_offset_C2TB_interf + Doffset];
+              }              
+            }
+            for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C2 - ft->numfields_C2_basebulk; fieldindex++)
+            {
+              std::string fieldname = ft->fieldnames_C2[ft->numfields_C2_basebulk + fieldindex];
+              unsigned interf_id = el->get_code_instance()->resolve_interface_dof_id(fieldname);              
+              if (eqn_number=nodept->eqn_number(dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(interf_id)); eqn_number>=0)
+              {
+                dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[fieldindex + ft->buffer_offset_C2_interf + Doffset];
+              }              
+            }
+            for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C1TB - ft->numfields_C1TB_basebulk; fieldindex++)
+            {
+              std::string fieldname = ft->fieldnames_C1TB[ft->numfields_C1TB_basebulk + fieldindex];
+              unsigned interf_id = el->get_code_instance()->resolve_interface_dof_id(fieldname);              
+              if (eqn_number=nodept->eqn_number(dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(interf_id)); eqn_number>=0)
+              {
+                dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[fieldindex + ft->buffer_offset_C1TB_interf + Doffset];
+              }              
+            }             
+            for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C1 - ft->numfields_C1_basebulk; fieldindex++)
+            {
+              std::string fieldname = ft->fieldnames_C1[ft->numfields_C1_basebulk + fieldindex];
+              unsigned interf_id = el->get_code_instance()->resolve_interface_dof_id(fieldname);              
+              if (eqn_number=nodept->eqn_number(dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(interf_id)); eqn_number>=0)
+              {
+                dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[fieldindex + ft->buffer_offset_C1_interf + Doffset];
+              }
+            }
+          }
+      }
+      // Handling elemental dofs
+      for (unsigned int fieldindex = 0; fieldindex < ft->numfields_DL; fieldindex++)
+      {
+        oomph::Data *data=this->element_pt(ei)->internal_data_pt(ft->internal_offset_DL + fieldindex);
+        for (unsigned int nj = 0; nj < data->nvalue(); nj++) 
+        {
+            if (eqn_number=data->eqn_number(nj); eqn_number>=0) dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[fieldindex + ft->buffer_offset_DL + Doffset];          
+        }        
+      }
+      for (unsigned int fieldindex = 0; fieldindex < ft->numfields_D0; fieldindex++)
+      {
+        oomph::Data *data=this->element_pt(ei)->internal_data_pt(ft->internal_offset_D0 + fieldindex);
+        for (unsigned int nj = 0; nj < data->nvalue(); nj++)        
+        {
+            if (eqn_number=data->eqn_number(nj); eqn_number>=0) dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[fieldindex + ft->buffer_offset_D0 + Doffset];          
+        }
+
+      }
+    }    
   }
 
   void Mesh::setup_Dirichlet_conditions(bool only_update_vals)

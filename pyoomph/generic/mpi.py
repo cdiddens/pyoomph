@@ -70,3 +70,10 @@ else:
 
 	def mpi_barrier(comm=MPI.COMM_WORLD)->None: #type:ignore
 		comm.barrier() #type:ignore
+  
+	if get_mpi_nproc()>1:
+		print("MPI initialized, rank",get_mpi_rank(),"of",get_mpi_nproc())
+		if get_mpi_rank()==0:
+			import mpi4py
+			mpi4py.rc(initialize=False) #type:ignore
+			print("MPI config",mpi4py.get_config())

@@ -710,6 +710,22 @@ namespace pyoomph
 		return sqrt(global_error);
 	}
 
+	std::vector<int> Problem::get_dof_to_global_field_index_mapping()
+	{
+		std::vector<int> res(this->ndof(), -1);
+		for (unsigned int ism = 0; ism < this->nsub_mesh(); ism++)
+		{
+			pyoomph::Mesh *m = dynamic_cast<pyoomph::Mesh *>(this->mesh_pt(ism));
+			m->fill_dof_to_global_field_index_buffer(res);
+		}
+		return res;
+	}
+
+	std::vector<std::string> Problem::get_global_field_names()
+	{
+		return defined_fields;
+	}
+
 	void Problem::ensure_dummy_values_to_be_dummy()
 	{
 		for (unsigned nmi = 0; nmi < this->nsub_mesh(); nmi++)

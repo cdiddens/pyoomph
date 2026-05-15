@@ -71,6 +71,10 @@ class GenericLinearSystemSolver:
 	def setup_solver(self)->None:
 		pass
 
+	def _before_assigning_equation_numbers(self)->None:		
+		pass
+
+
 	def solve_distributed(self, op_flag: int, allow_permutations: int, n: int, nnz_local: int, nrow_local: int, first_row: int, values: NPFloatArray, col_index: NPIntArray, row_start: NPIntArray, b: NPFloatArray, nprow: int, npcol: int, doc: int, data: NPUInt64Array, info: NPIntArray)->None:
 		raise RuntimeError("SuperLU solver cannot solve distributed")
 
@@ -318,6 +322,9 @@ class GenericEigenSolver:
 		self.matrix_manipulators:List[EigenMatrixManipulatorBase]=[]
 		self.real_contribution:str=""
 		self.imag_contribution:Optional[str]=None
+
+	def _before_assigning_equation_numbers(self)->None:		
+		pass
 
 	def supports_target(self)->bool:
 		return False

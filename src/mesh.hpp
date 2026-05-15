@@ -72,6 +72,7 @@ namespace pyoomph
 		// Function to activate the debugging.
 		bool duarte_debug = false;
 		virtual void activate_duarte_debug();
+		virtual void fill_dof_to_global_field_index_buffer(std::vector<int> &dofs_to_global_field_index);
 		// From the old mesh, map each element with the local coordinates associated to each integration point of the new mesh.
 		virtual void prepare_zeta_interpolation(pyoomph::Mesh *oldmesh);
 		virtual void set_time_level_for_projection(unsigned time_level);

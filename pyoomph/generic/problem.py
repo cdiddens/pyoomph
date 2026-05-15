@@ -2124,9 +2124,11 @@ class Problem(_pyoomph.Problem):
     def before_assigning_equation_numbers(self,dof_selector:Optional["_DofSelector"]):
         for hook in self._hooks:
             hook.before_assigning_equation_numbers(dof_selector,True)
-        self._equation_system._before_assigning_equations(dof_selector) 
+        self._equation_system._before_assigning_equations(dof_selector)         
         for hook in self._hooks:
             hook.before_assigning_equation_numbers(dof_selector,False)
+        self.get_la_solver()._before_assigning_equation_numbers()
+        self.get_eigen_solver()._before_assigning_equation_numbers()
 
 
     def actions_before_remeshing(self,active_remeshers:List["RemesherBase"]):
@@ -2516,10 +2518,12 @@ class Problem(_pyoomph.Problem):
             if len(dumps)==0 or keyfile is None or not os.path.isfile(keyfile):
                 print("Cannot continue, starting over")
                 self._runmode="overwrite"
-        elif self._runmode=="delete":
+        
+        elif self._runmode=="delete":            
+            mpi_barrier()
             if keyfile is not None and os.path.isfile(keyfile) and get_mpi_rank()<=0:
                 if not self.is_quiet():
-                    print("Removing contents of output dir")
+                    print("Removing contents of output dir",get_mpi_rank())
 
                     def rem_subdir(subdir:str,filter:Union[str,List[str],Tuple[str]],remglob:Optional[Iterable[str]]=None):
                         top=os.path.join(self._outdir,subdir)
