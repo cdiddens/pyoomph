@@ -87,13 +87,13 @@ class PETSCSolver(GenericLinearSystemSolver):
         If defining derived classes that need access to PETSc, get PETSc from here, do not import petsc4py again
         """
         return PETSc
-
-    def setup_solver(self):        
-        if self._dofs_to_field_info is None:
-            names=self.problem._get_global_field_names()
-            mapping=self.problem._get_dof_to_global_field_index_mapping()            
-            unique_fields=numpy.unique(mapping)
-            print("PETSc DOF to field mapping:")
+    
+    def setup_field_split(self):
+        names=self.problem._get_global_field_names()
+        mapping=self.problem._get_dof_to_global_field_index_mapping()            
+        unique_fields=numpy.unique(mapping)
+        if self.problem.petsc_fieldsplit is None:
+            print("Using default PETSc DOF to field mapping:")
             for uf in unique_fields:
                 print("  Field "+str(uf)+": "+names[uf])
             field_is={}
@@ -101,7 +101,49 @@ class PETSCSolver(GenericLinearSystemSolver):
                 indices = numpy.where(mapping == f)[0].astype(numpy.int32)
                 iset = PETSc.IS().createGeneral(indices)
                 field_is[f] = iset
-            self._dofs_to_field_info=[names,mapping,field_is]
+            
+        else:
+            print("Using user-defined PETSc DOF to field mapping:",self.problem.petsc_fieldsplit)
+            field_is={}
+            is_collections={}
+            handled_fields=set()
+            for k,v in self.problem.petsc_fieldsplit.items():
+                if not v in is_collections.keys():
+                    is_collections[v]=[]
+                if "*" in k:
+                    import fnmatch
+                    matches = fnmatch.filter(names, k)
+                    if len(matches)==0:
+                        raise RuntimeError("Cannot find any field matching "+k+" specified in petsc_fieldsplit")
+                    for m in matches:
+                        if m in handled_fields:
+                            raise RuntimeError("Field "+str(m)+" is already assigned to a field split. Cannot assign it again with "+k)
+                        is_collections[v].append(m)
+                        handled_fields.add(m)
+                else:                                        
+                    if k in handled_fields:
+                        raise RuntimeError("Field "+str(k)+" is already assigned to a field split. Cannot assign it again with "+k)
+                    if k not in names:
+                        raise RuntimeError("Cannot find the field "+k+" specified in petsc_fieldsplit")
+                    is_collections[v].append(k)
+                    handled_fields.add(k)
+                    
+            if len(handled_fields)<len(unique_fields):
+                raise RuntimeError("Not all fields are assigned to a field split. Unassigned fields: "+str(set(names)-handled_fields))
+            
+            for v, fields in is_collections.items():
+                v=str(v)
+                mergedindices=set(names.index(f) for f in fields)
+                #indices = numpy.where(mapping in mergedindices)[0].astype(numpy.int32)                        
+                indices= numpy.where(numpy.isin(mapping, list(mergedindices)))[0].astype(numpy.int32)     
+                iset = PETSc.IS().createGeneral(indices)
+                field_is[v] = iset
+                print("  Field "+str(v)+": "+str(fields))
+        self._dofs_to_field_info=[names,mapping,field_is]
+
+    def setup_solver(self):        
+        if self._dofs_to_field_info is None:
+            self.setup_field_split()
         opts = PETSc.Options().getAll() #type:ignore
         if "add_zero_diagonal" in opts.keys(): #type:ignore
             #			print(dir(self.petsc_mat))

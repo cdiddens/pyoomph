@@ -555,6 +555,8 @@ class Problem(_pyoomph.Problem):
         #: Must be set to the config file when using preCICE
         self.precice_config_file:str=""
         self._precice_interface=None #type:ignore
+        
+        self.petsc_fieldsplit=None
 
     # Use weak(u,psi) instead of vectorial U*Psi for the symmetry-breaking constraint
     def improve_pitchfork_tracking_on_unstructured_meshes(self,coord_sys:"OptionalCoordinateSystem"=None,pos_coord_sys:"OptionalCoordinateSystem"=None):
