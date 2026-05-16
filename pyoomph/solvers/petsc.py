@@ -89,9 +89,19 @@ class PETSCSolver(GenericLinearSystemSolver):
         return PETSc
     
     def setup_field_split(self):
+        def process_indices(indices):
+            if get_mpi_nproc()<2:
+                return indices
+            else:
+                ownership_range=self.petsc_mat.getOwnershipRange() #type:ignore                
+                if ownership_range[0]>0 or ownership_range[1]<self.petsc_mat.getSize()[0]:
+                    my_indices=indices[(indices < ownership_range[1]) & (indices >= ownership_range[0])]                    
+                return my_indices
+                
         names=self.problem._get_global_field_names()
         mapping=self.problem._get_dof_to_global_field_index_mapping()            
         unique_fields=numpy.unique(mapping)
+        unique_fields=unique_fields[unique_fields>=0] # Filter out any dofs that are not assigned to a field (e.g. due to field splits, where some dofs might be assigned to a new field index of -1 or similar)
         if self.problem.petsc_fieldsplit is None:
             print("Using default PETSc DOF to field mapping:")
             for uf in unique_fields:
@@ -99,7 +109,7 @@ class PETSCSolver(GenericLinearSystemSolver):
             field_is={}
             for f in unique_fields:
                 indices = numpy.where(mapping == f)[0].astype(numpy.int32)
-                iset = PETSc.IS().createGeneral(indices)
+                iset = PETSc.IS().createGeneral(process_indices(indices),comm=PETSc.COMM_WORLD)
                 field_is[f] = iset
             
         else:
@@ -129,14 +139,15 @@ class PETSCSolver(GenericLinearSystemSolver):
                     handled_fields.add(k)
                     
             if len(handled_fields)<len(unique_fields):
-                raise RuntimeError("Not all fields are assigned to a field split. Unassigned fields: "+str(set(names)-handled_fields))
+                raise RuntimeError("Not all fields are assigned to a field split. Unassigned fields: "+str(set(names)-handled_fields),handled_fields,unique_fields)
             
             for v, fields in is_collections.items():
                 v=str(v)
                 mergedindices=set(names.index(f) for f in fields)
                 #indices = numpy.where(mapping in mergedindices)[0].astype(numpy.int32)                        
                 indices= numpy.where(numpy.isin(mapping, list(mergedindices)))[0].astype(numpy.int32)     
-                iset = PETSc.IS().createGeneral(indices)
+                #print("ON",get_mpi_rank(), "INDICES FOR FIELD "+str(v)+": "+str(indices),"LEN",len(indices))
+                iset = PETSc.IS().createGeneral(process_indices(indices),comm=PETSc.COMM_WORLD)
                 field_is[v] = iset
                 print("  Field "+str(v)+": "+str(fields))
         self._dofs_to_field_info=[names,mapping,field_is]
@@ -208,8 +219,9 @@ class PETSCSolver(GenericLinearSystemSolver):
     def solve_distributed(self, op_flag: int, allow_permutations: int, n: int, nnz_local: int, nrow_local: int, first_row: int, values: NPFloatArray, col_index: NPIntArray, row_start: NPIntArray, b: NPFloatArray, nprow: int, npcol: int, doc: int, data: NPUInt64Array, info: NPIntArray)->None:
 
         if op_flag == 1:
-            #print("PETSCINF",nrow_local,n)
+            print("PETSCINF",nrow_local,n)
             self.petsc_mat = PETSc.Mat().createAIJ(size=((nrow_local, n), (nrow_local, n),),csr=(row_start, col_index, values)) #type:ignore
+            print("OWNERSHIP RANGE",self.petsc_mat.getOwnershipRange()) #type:ignore
         #			print("PROCESSOR Ns",get_mpi_rank(),nrow_local,n)
         #			print("PROCESSOR RS",get_mpi_rank(),row_start)
         #			print("PROCESSOR CI",get_mpi_rank(),col_index)

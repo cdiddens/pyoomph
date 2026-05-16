@@ -556,6 +556,7 @@ class Problem(_pyoomph.Problem):
         self.precice_config_file:str=""
         self._precice_interface=None #type:ignore
         
+        #: Set e.g. to {"domain/velocity_*":"u","domain/pressure":"p"} to automatically setup field split IS for PETSc with names "u" and "p". If None, the default split is set like the field indices in the Jacobian information file, i.e. using "0", "1", etc. as prefixes
         self.petsc_fieldsplit=None
 
     # Use weak(u,psi) instead of vectorial U*Psi for the symmetry-breaking constraint
@@ -2504,7 +2505,7 @@ class Problem(_pyoomph.Problem):
             keyfile=None
             
         if self.logfile_name is not None:
-            if not self.only_write_logfile_on_proc0 and get_mpi_rank()>1:
+            if not self.only_write_logfile_on_proc0 and get_mpi_rank()>=1:
                 raise RuntimeError("Cannot write log file on all processors yet")
             self._open_log_file(os.path.join(self._outdir,self.logfile_name),True)
             from . logging import pyoomph_activate_logging_to_file
