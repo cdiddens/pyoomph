@@ -1324,6 +1324,7 @@ class Problem:
     DTSF_minimum_dt: float
     _improved_pitchfork_tracking_on_unstructured_meshes: bool
     always_take_one_newton_step: bool
+    apply_Dirichlet_BCs_by_dof_removing: bool
     keep_temporal_error_below_tolerance: bool
     max_residuals: float
     minimum_arclength_ds: float

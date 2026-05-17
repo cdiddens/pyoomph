@@ -431,6 +431,12 @@ void PyReg_Problem(py::module &m)
 			{ return p.max_residuals(); },
 			[](pyoomph::Problem &p, const double &r)
 			{ p.max_residuals() = r; })
+		.def_property(
+			"apply_Dirichlet_BCs_by_dof_removing", [](pyoomph::Problem &p)
+			{ return p.are_Dirichlets_by_removing_from_dof_vector(); },
+			[](pyoomph::Problem &p, const bool &r)
+			{ p.set_Dirichlets_by_removing_from_dof_vector(r); }
+		)
 		.def_property("DTSF_minimum_dt", [](pyoomph::Problem &p) {return p.minimum_dt();}, [](pyoomph::Problem &p, double v) {p.minimum_dt()=v;})
 		.def_property("DTSF_maximum_dt", [](pyoomph::Problem &p) {return p.maximum_dt();}, [](pyoomph::Problem &p, double v) {p.maximum_dt()=v;})
 		.def("_set_globally_convergent_newton_method", [](pyoomph::Problem &p, bool r)

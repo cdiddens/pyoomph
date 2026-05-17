@@ -558,6 +558,9 @@ class Problem(_pyoomph.Problem):
         
         #: Set e.g. to {"domain/velocity_*":"u","domain/pressure":"p"} to automatically setup field split IS for PETSc with names "u" and "p". If None, the default split is set like the field indices in the Jacobian information file, i.e. using "0", "1", etc. as prefixes
         self.petsc_fieldsplit=None
+        
+        #: When set to True, we apply Dirichlet boundary conditions by removing the corresponding dofs from the system. This yields a smaller matrix, but iterative solvers using strided block matrices will run into troubles. If False, all DirichletBCs are kept in the dof vector and the matrix is augmented accordingly.
+        self.apply_Dirichlet_BCs_by_dof_removing=True
 
     # Use weak(u,psi) instead of vectorial U*Psi for the symmetry-breaking constraint
     def improve_pitchfork_tracking_on_unstructured_meshes(self,coord_sys:"OptionalCoordinateSystem"=None,pos_coord_sys:"OptionalCoordinateSystem"=None):

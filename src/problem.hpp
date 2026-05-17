@@ -220,10 +220,10 @@ namespace pyoomph
   // Problem class
   class Problem : public oomph::Problem
   {
-  protected:
+  protected:    
     CCompiler *compiler;
     std::ofstream * logfile;
-    bool _is_quiet;
+    bool _is_quiet;    
     friend class DynamicBulkElementInstance;
     //	 MeshTemplate *meshtemplate;
     std::vector<DynamicBulkElementCode *> bulk_element_codes;
@@ -238,6 +238,9 @@ namespace pyoomph
     std::string bifurcation_tracking_mode = "";
     std::string _solved_residual = "";
     bool symmetric_hessian_assembly=true;
+    // If true, we do it the oomph-lib way (remove dofs of Dirichlet). If false, all Dirichlets are kept as dofs and the system is manipulated afterwards 
+    // (note: completely pinned fields without any weak formulation (usually helper field, e.g. references for normalized arclength etc) are always removed from the dofs, independent of this setting)
+    bool dirichlets_by_removing_from_dof_vector=true;
     
     void actions_after_change_in_global_parameter(double *const &parameter_pt) override;
     void actions_after_parameter_increase(double *const &parameter_pt) override;    
@@ -257,6 +260,13 @@ namespace pyoomph
     std::vector<bool> removed_fields_due_to_missing_jacobian_row_or_col; // [defined_field] -> whether this field has been removed from the dofs due to missing jacobian row (i.e. no contributions on any residual, which leads to a non-invertible jacobian)
     std::vector<std::map<unsigned,unsigned>> global_eqs_to_jacobian_buffer_index; // [global col][global row]->[index in the jacobian buffer]
   public:
+    
+    bool are_Dirichlets_by_removing_from_dof_vector() const { return dirichlets_by_removing_from_dof_vector; }
+    void set_Dirichlets_by_removing_from_dof_vector(bool v) {  
+      if (v==dirichlets_by_removing_from_dof_vector) return; // No change      
+      // TODO: Check here whether the problem is already initialized and throw an error if this is the case, since changing this after initialization would require a reinitialization of the problem
+      dirichlets_by_removing_from_dof_vector=v;  
+    } 
     void assemble_defined_field_list();
     void update_jacobian_csr_structure();
     std::tuple<std::string,bool> get_jacobian_information_string();
