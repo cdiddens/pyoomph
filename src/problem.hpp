@@ -217,6 +217,19 @@ namespace pyoomph
       
   };
 
+
+  class DirichletMatrixManipulationInfo
+  {
+    protected:
+      std::map<oomph::Data *,std::set<unsigned>> data_to_dirichlet_dof_indices; 
+      std::map<unsigned, double*> eqn_number_to_value_ptr;
+    public:
+      void clear();
+      void add_dirichlet_dof(oomph::Data *d, unsigned dof_index);
+      void build_equation_to_value_map();
+
+  };
+
   // Problem class
   class Problem : public oomph::Problem
   {
@@ -259,6 +272,8 @@ namespace pyoomph
     std::vector<std::vector<bool>> pin_due_to_empty_jacobian_row_or_col; // [residual][defined_field] -> whether this field has to be pinned due to an empty jacobian row (i.e. no contributions on the current residual which leads to a non-invertible jacobian)
     std::vector<bool> removed_fields_due_to_missing_jacobian_row_or_col; // [defined_field] -> whether this field has been removed from the dofs due to missing jacobian row (i.e. no contributions on any residual, which leads to a non-invertible jacobian)
     std::vector<std::map<unsigned,unsigned>> global_eqs_to_jacobian_buffer_index; // [global col][global row]->[index in the jacobian buffer]
+
+    DirichletMatrixManipulationInfo dirichlet_info;  // only used if not dirichlets_by_removing_from_dof_vector
   public:
     
     bool are_Dirichlets_by_removing_from_dof_vector() const { return dirichlets_by_removing_from_dof_vector; }
@@ -342,6 +357,7 @@ namespace pyoomph
     }
 
     void ensure_dummy_values_to_be_dummy();
+    void unpin_Dirichlet_dofs_for_matrix_manipulation();
     virtual void actions_after_adapt();
     virtual void setup_pinning() {}
     virtual void set_initial_condition();
@@ -439,7 +455,8 @@ namespace pyoomph
     virtual void get_residuals(oomph::DoubleVector &residuals);
     virtual void get_jacobian(oomph::DoubleVector &residuals,oomph::CRDoubleMatrix &jacobian);
     virtual void get_derivative_wrt_global_parameter(double* const& parameter_pt,oomph::DoubleVector& result);
-    
+    virtual void remove_dirichlets_by_matrix_manipulation(oomph::DoubleVector &residuals,oomph::CRDoubleMatrix *jacobian=NULL);
+
     virtual SparseRank3Tensor assemble_hessian_tensor(bool symmetric);
     virtual std::vector<double> get_second_order_directional_derivative(std::vector<double> dir);
     

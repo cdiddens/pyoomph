@@ -516,6 +516,39 @@ namespace pyoomph
 		return false;
 	}
 
+///////////////////////////////////
+
+	void DirichletMatrixManipulationInfo::clear()
+	{
+		data_to_dirichlet_dof_indices.clear();
+		//throw_runtime_error("DirichletMatrixManipulationInfo::clear() is not implemented yet. This should be implemented if you want to use the Dirichlet matrix manipulation feature");
+	}
+
+	void DirichletMatrixManipulationInfo::add_dirichlet_dof(oomph::Data *d, unsigned dof_index)
+	{
+		data_to_dirichlet_dof_indices[d].insert(dof_index);
+		d->unpin(dof_index);
+	}
+
+	void DirichletMatrixManipulationInfo::build_equation_to_value_map()
+	{
+		eqn_number_to_value_ptr.clear();
+		for (const auto &pair : data_to_dirichlet_dof_indices)
+		{
+			for (unsigned dof_index : pair.second)
+			{
+				unsigned global_eqn=pair.first->eqn_number(dof_index);
+				eqn_number_to_value_ptr[global_eqn] = pair.first->value_pt(dof_index);
+			}
+		}
+	}
+
+
+
+///////////////////////////////////
+
+
+
     void CustomResJacInformation::set_custom_jacobian(const std::vector<double> &Jv, const std::vector<int> &col_index, const std::vector<int> &row_start)
 	{
 		Jvals.resize(Jv.size());
@@ -751,6 +784,33 @@ namespace pyoomph
 		}
 	}
 
+
+	void Problem::unpin_Dirichlet_dofs_for_matrix_manipulation()
+	{
+		dirichlet_info.clear();
+		for (unsigned nmi = 0; nmi < this->nsub_mesh(); nmi++)
+		{
+			unsigned nelem = mesh_pt(nmi)->nelement();
+			//		std::cout << "ENSURE PINNING NEL " << nelem << std::endl;
+			for (unsigned n = 0; n < nelem; n++)
+			{
+				auto el = dynamic_cast<BulkElementBase *>(mesh_pt(nmi)->element_pt(n));
+				if (el) el->unpin_Dirichlet_dofs_for_matrix_manipulation(dirichlet_info);
+			}
+		}
+		/////
+		for (unsigned int f=0; f<defined_fields.size();f++)
+		{
+			if (is_field_removed_from_dofs_due_to_missing_jacobian_row(f))
+			{
+				throw_runtime_error("This must be implemented. The dofs of removed fields should not be unpinned. Likely has to be done on an elemental level");
+			}
+		}
+		/////
+		dirichlet_info.build_equation_to_value_map();
+	}
+
+
 	void Problem::actions_after_adapt()
 	{
 		for (unsigned nmi = 0; nmi < this->nsub_mesh(); nmi++)
@@ -959,11 +1019,22 @@ namespace pyoomph
 		return res;
 	}
 
+	void Problem::remove_dirichlets_by_matrix_manipulation(oomph::DoubleVector &residuals,oomph::CRDoubleMatrix *jacobian)
+	{
+		// TODO
+	}
+
+
 	void Problem::get_residuals(oomph::DoubleVector &residuals)
 	{
 		if (!use_custom_residual_jacobian)
 		{
 			get_residuals_by_elemental_assembly(residuals);
+			if (!this->dirichlets_by_removing_from_dof_vector)
+			{
+				if (this->bifurcation_tracking_mode!="") throw_runtime_error("TODO: Cannot remove dirichlet dofs from the residual vector by matrix manipulation when bifurcation tracking is active, since the user-provided residual vector would still contain contributions from the dirichlet dofs, which would be wrong");
+				this->remove_dirichlets_by_matrix_manipulation(residuals);
+			}
 		}
 		else
 		{
@@ -974,6 +1045,11 @@ namespace pyoomph
 				oomph::LinearAlgebraDistribution dist(this->communicator_pt(), info.residuals.size(), false);
 				residuals.build(&dist, 0.0);
 			}
+			if (!this->dirichlets_by_removing_from_dof_vector)
+			{
+				throw_runtime_error("TODO: Cannot use custom residuals when dirichlet conditions are not removed from the dof vector, since the user-provided residual vector would still contain contributions from the dirichlet dofs, which would be wrong");
+			}
+
 			for (unsigned int i = 0; i < info.residuals.size(); i++)
 				residuals[i] = info.residuals[i];
 		}
@@ -984,6 +1060,10 @@ namespace pyoomph
 		if (!use_custom_residual_jacobian)
 		{
 			get_derivative_wrt_global_parameter_elemental_assembly(parameter_pt,result);
+			if (!this->dirichlets_by_removing_from_dof_vector)
+			{
+				 throw_runtime_error("TODO: Cannot remove dirichlet dofs from the derivative by a global parameter by matrix manipulation yet.");
+			}
 		}
 		else
 		{
@@ -996,6 +1076,11 @@ namespace pyoomph
 				oomph::LinearAlgebraDistribution dist(this->communicator_pt(), info.residuals.size(), false);
 				result.build(&dist, 0.0);
 			}
+			if (!this->dirichlets_by_removing_from_dof_vector)
+			{
+				 throw_runtime_error("TODO: Cannot remove dirichlet dofs from the derivative by a global parameter by matrix manipulation yet.");
+			}
+
 			for (unsigned int i = 0; i < info.residuals.size(); i++)
 				result[i] = info.residuals[i];
 		}
@@ -1006,6 +1091,11 @@ namespace pyoomph
 		if (!use_custom_residual_jacobian)
 		{
 			get_jacobian_by_elemental_assembly(residuals, jacobian);
+			if (!this->dirichlets_by_removing_from_dof_vector)
+			{
+				if (this->bifurcation_tracking_mode!="") throw_runtime_error("TODO: Cannot remove dirichlet dofs from the jacobian matrix by matrix manipulation when bifurcation tracking is active, since the user-provided jacobian matrix would still contain contributions from the dirichlet dofs, which would be wrong");
+				this->remove_dirichlets_by_matrix_manipulation(residuals,&jacobian);
+			}
 		}
 		else
 		{
@@ -1024,6 +1114,10 @@ namespace pyoomph
 			//       std::cout << "BUILD J  "<< info.residuals.size() << "  " << info.Jcolumn_index.size() << "  " << info.Jrow_start.size() << std::endl;
 			jacobian.build(info.residuals.size(), info.Jvals, info.Jcolumn_index, info.Jrow_start);
 			//       std::cout << "DONE BUILD J" << std::endl;
+			if (!this->dirichlets_by_removing_from_dof_vector)
+			{
+				throw_runtime_error("TODO: Cannot remove dirichlet dofs from the jacobian matrix by matrix manipulation when using custom jacobian, since the user-provided jacobian matrix would still contain contributions from the dirichlet dofs, which would be wrong");
+			}
 		}
 	}
 

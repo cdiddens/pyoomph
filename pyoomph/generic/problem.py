@@ -2811,6 +2811,8 @@ class Problem(_pyoomph.Problem):
                     submesh._pin_noncontributing_dofs()
                 assert submesh._codegen is not None 
                 submesh._codegen.on_apply_boundary_conditions(submesh) 
+        if not self.apply_Dirichlet_BCs_by_dof_removing:
+            self._unpin_Dirichlet_dofs_for_matrix_manipulation()
 
 
 

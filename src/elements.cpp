@@ -2398,6 +2398,105 @@ namespace pyoomph
 		}
 	}
 
+	void BulkElementBase::unpin_Dirichlet_dofs_for_matrix_manipulation(DirichletMatrixManipulationInfo & info)
+	{
+		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+
+
+		// TODO: Check if the entire field is pinned
+
+
+
+		if (functable->moving_nodes)
+		{
+			for (unsigned int l = 0; l < nnode(); l++)
+			{
+				oomph::Data * x=dynamic_cast<Node *>(this->node_pt(l))->variable_position_pt();
+				for (unsigned int i = 0; i < this->nodal_dimension(); i++)
+				{
+				  if (x->is_pinned(i)) info.add_dirichlet_dof(x,i);
+				}
+			}
+		}
+
+		for (unsigned n = 0; n < nnode(); n++)
+		{
+		   if (this->is_node_index_part_of_C2TB(n))
+		   {
+				for (unsigned int i = 0;i<functable->numfields_C2TB_basebulk; i++)
+				{
+				  if (this->node_pt(n)->is_pinned(i+functable->nodal_offset_C2TB_basebulk)) info.add_dirichlet_dof(this->node_pt(n),i+functable->nodal_offset_C2TB_basebulk);
+				}
+			}
+		   if (this->is_node_index_part_of_C2(n))
+		   {
+				for (unsigned int i = 0;i<functable->numfields_C2_basebulk; i++)
+				{
+				  if (this->node_pt(n)->is_pinned(i+functable->nodal_offset_C2_basebulk)) info.add_dirichlet_dof(this->node_pt(n),i+functable->nodal_offset_C2_basebulk);
+				}
+			}
+		   if (this->is_node_index_part_of_C1TB(n))
+		   {
+				for (unsigned int i = 0;i<functable->numfields_C1TB_basebulk; i++)
+				{
+				  if (this->node_pt(n)->is_pinned(i+functable->nodal_offset_C1TB_basebulk)) info.add_dirichlet_dof(this->node_pt(n),i+functable->nodal_offset_C1TB_basebulk);
+				}
+			}
+		   if (this->is_node_index_part_of_C1(n))
+		   {
+				for (unsigned int i = 0;i<functable->numfields_C1_basebulk; i++)
+				{
+				  if (this->node_pt(n)->is_pinned(i+functable->nodal_offset_C1_basebulk)) info.add_dirichlet_dof(this->node_pt(n),i+functable->nodal_offset_C1_basebulk);
+				}
+			}
+		}
+
+		for (unsigned int i = 0; i < functable->numfields_D2TB_basebulk; i++)
+		{
+				for (unsigned int v = 0; v < this->internal_data_pt(functable->internal_offset_D2TB_new + i)->nvalue(); v++)
+				{
+					if (this->internal_data_pt(functable->internal_offset_D2TB_new + i)->is_pinned(v)) info.add_dirichlet_dof(this->internal_data_pt(functable->internal_offset_D2TB_new + i),v);
+				}
+		}
+		for (unsigned int i = 0; i < functable->numfields_D2_basebulk; i++)
+		{
+				for (unsigned int v = 0; v < this->internal_data_pt(functable->internal_offset_D2_new + i)->nvalue(); v++)
+				{
+					if (this->internal_data_pt(functable->internal_offset_D2_new + i)->is_pinned(v)) info.add_dirichlet_dof(this->internal_data_pt(functable->internal_offset_D2_new + i),v);
+				}
+		}
+		for (unsigned int i = 0; i < functable->numfields_D1TB_basebulk; i++)
+		{
+				for (unsigned int v = 0; v < this->internal_data_pt(functable->internal_offset_D1TB_new + i)->nvalue(); v++)
+				{
+					if (this->internal_data_pt(functable->internal_offset_D1TB_new + i)->is_pinned(v)) info.add_dirichlet_dof(this->internal_data_pt(functable->internal_offset_D1TB_new + i),v);
+				}
+		}
+		for (unsigned int i = 0; i < functable->numfields_D1_basebulk; i++)
+		{
+				for (unsigned int v = 0; v < this->internal_data_pt(functable->internal_offset_D1_new + i)->nvalue(); v++)
+				{	
+					if (this->internal_data_pt(functable->internal_offset_D1_new + i)->is_pinned(v)) info.add_dirichlet_dof(this->internal_data_pt(functable->internal_offset_D1_new + i),v);
+				}
+		}
+		for (unsigned int i = 0; i < functable->numfields_DL; i++)
+		{
+				for (unsigned int v = 0; v < this->internal_data_pt(functable->internal_offset_DL + i)->nvalue(); v++)
+				{	
+					if (this->internal_data_pt(functable->internal_offset_DL + i)->is_pinned(v)) info.add_dirichlet_dof(this->internal_data_pt(functable->internal_offset_DL + i),v);
+				}
+		}	
+		for (unsigned int i = 0; i < functable->numfields_D0; i++)
+		{
+				for (unsigned int v = 0; v < this->internal_data_pt(functable->internal_offset_D0 + i)->nvalue(); v++)
+				{	
+					if (this->internal_data_pt(functable->internal_offset_D0 + i)->is_pinned(v)) info.add_dirichlet_dof(this->internal_data_pt(functable->internal_offset_D0 + i),v);
+				}
+		}
+		
+	}
+
+
 	void alloc_dealloc_single_shape_buffer(bool do_alloc, JITShapeInfo_t * PYOOMPH_RESTRICT *buff, bool with_analytical_hessian_moving_mesh)
 	{
 		if (!(*buff))
@@ -14061,6 +14160,17 @@ namespace pyoomph
 			}
 		}
 	}
+
+	void InterfaceElementBase::unpin_Dirichlet_dofs_for_matrix_manipulation(DirichletMatrixManipulationInfo & info)
+	{
+		BulkElementBase::unpin_Dirichlet_dofs_for_matrix_manipulation(info);
+		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		if ( (functable->numfields_C1 != functable->numfields_C1_basebulk || functable->numfields_C2 != functable->numfields_C2_basebulk || functable->numfields_C1TB != functable->numfields_C1TB_basebulk || functable->numfields_C2TB != functable->numfields_C2TB_basebulk ) )
+		{
+			throw_runtime_error("Implement unpin_Dirichlet_dofs_for_matrix_manipulation ");
+		}
+	}
+
 
 	void InterfaceElementBase::assign_additional_local_eqn_numbers_from_elem(const JITFuncSpec_RequiredShapes_FiniteElement_t *required, BulkElementBase *from_elem, std::vector<int> &eq_map)
 	{

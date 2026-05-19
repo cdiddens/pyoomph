@@ -445,6 +445,7 @@ namespace pyoomph
 
     virtual void unpin_dummy_values(); // C1 fields on C2 elements have dummy values on only C2 nodes, which needs to be pinned
     virtual void pin_dummy_values();
+    virtual void unpin_Dirichlet_dofs_for_matrix_manipulation(DirichletMatrixManipulationInfo & info);
 
     void dynamic_split(oomph::Vector<BulkElementBase *> &son_pt) const;
 
@@ -1478,6 +1479,8 @@ namespace pyoomph
     virtual void set_remaining_shapes_appropriately(JITShapeInfo_t *shape_info, const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes);
     void unpin_dummy_values(); // C1 fields on C2 elements have dummy values on only C2 nodes, which needs to be pinned
     void pin_dummy_values();
+    void unpin_Dirichlet_dofs_for_matrix_manipulation(DirichletMatrixManipulationInfo & info) override;
+
     void set_as_internal_facet_opposite_dummy() { Is_internal_facet_opposite_dummy = true; }
     bool is_internal_facet_opposite_dummy() const { return Is_internal_facet_opposite_dummy; }
 
