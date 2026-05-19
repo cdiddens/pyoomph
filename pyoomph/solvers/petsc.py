@@ -53,8 +53,10 @@ class PETSCSolver(GenericLinearSystemSolver):
         super().__init__(problem)
         self._do_not_set_any_args:bool=False
         self.petsc_mat=None
+        self.petsc_rhs=None
         self.ksp=None
         self.x=None
+        
         self._dofs_to_field_info=None
 
     #		opts=PETSc.Options().getAll()
@@ -151,10 +153,15 @@ class PETSCSolver(GenericLinearSystemSolver):
                 field_is[v] = iset
                 print("  Field "+str(v)+": "+str(fields))
         self._dofs_to_field_info=[names,mapping,field_is]
-
-    def setup_solver(self):        
+        
+    def get_field_split_IS(self,splitname:str)->PETSc.IS:
         if self._dofs_to_field_info is None:
-            self.setup_field_split()
+            raise RuntimeError("Field split IS requested but field split info is not set up yet. Please call this method only in setup_solver and with having set the petsc_fieldsplit attribute on the problem")
+        if splitname not in self._dofs_to_field_info[2].keys():
+            raise RuntimeError("Requested field split "+splitname+" not found. Available splits: "+str(self._dofs_to_field_info[2].keys()))
+        return self._dofs_to_field_info[2][splitname]
+
+    def setup_solver(self):                
         opts = PETSc.Options().getAll() #type:ignore
         if "add_zero_diagonal" in opts.keys(): #type:ignore
             #			print(dir(self.petsc_mat))
@@ -195,11 +202,15 @@ class PETSCSolver(GenericLinearSystemSolver):
                 self.x=None
                 
             #self.petsc_mat.destroy() #type:ignore
-            self.petsc_mat = PETSc.Mat().createAIJ(size=(n, n), csr=(colptr, rowind, values)) #type:ignore
+            self.petsc_mat = PETSc.Mat().createAIJ(size=(n, n), csr=(colptr.astype(numpy.int32), rowind.astype(numpy.int32), values.astype(numpy.float64))) #type:ignore
             self.x = PETSc.Vec().createSeq(n) #type:ignore
         elif op_flag == 2:
-            self.setup_solver()
+            if self._dofs_to_field_info is None:
+                self.setup_field_split()
             bv = PETSc.Vec().createWithArray(b) #type:ignore
+            self.petsc_rhs=bv
+            self.setup_solver()
+            
             if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine():
                 raise RuntimeError("Cannot use custom solve routine with PETSc yet. Also, iterative solving might require different handling here")
             else:
@@ -210,8 +221,9 @@ class PETSCSolver(GenericLinearSystemSolver):
             #print('Converged in', self.ksp.getIterationNumber(), 'iterations.') #type:ignore
 
             
-            
+            self.petsc_rhs=None
             bv.destroy() #type:ignore
+            
         else:
             raise RuntimeError("Cannot handle Petsc mode " + str(op_flag) + " yet")
         return 0  # TODO: Return sign of Jacobian
