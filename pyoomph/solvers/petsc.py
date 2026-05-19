@@ -66,7 +66,7 @@ class PETSCSolver(GenericLinearSystemSolver):
     def _before_assigning_equation_numbers(self):
         if self._dofs_to_field_info is not None:
             if len(self._dofs_to_field_info)>2:
-                for IS in self._dofs_to_field_info[2:]:
+                for IS in self._dofs_to_field_info[2].values():                    
                     IS.destroy() #type:ignore
         self._dofs_to_field_info=None # Reset the mapping, it will be re-created when needed. This is needed to properly handle changes in the dofs due to e.g. field splits or changes in the meshes
         return super()._before_assigning_equation_numbers()

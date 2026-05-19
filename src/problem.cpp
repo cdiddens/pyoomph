@@ -29,6 +29,8 @@ The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
 #include "ccompiler.hpp"
 #include "logging.hpp"
 
+#include <unordered_set>
+
 extern "C"
 {
 	void _pyoomph_check_compiler_size(unsigned long long jitsize, unsigned long long internal_size, char *name)
@@ -537,7 +539,8 @@ namespace pyoomph
 		{
 			for (unsigned dof_index : pair.second)
 			{
-				unsigned global_eqn=pair.first->eqn_number(dof_index);
+				unsigned long global_eqn=pair.first->eqn_number(dof_index);
+				//std::cout << "Mapping equation " << global_eqn << " to value pointer for data " << pair.first << " dof index " << dof_index << std::endl;
 				eqn_number_to_value_ptr[global_eqn] = pair.first->value_pt(dof_index);
 			}
 		}
@@ -806,8 +809,17 @@ namespace pyoomph
 				throw_runtime_error("This must be implemented. The dofs of removed fields should not be unpinned. Likely has to be done on an elemental level");
 			}
 		}
-		/////
+		/////		
+	}
+
+	unsigned long Problem::assign_eqn_numbers(const bool& assign_local_eqn_numbers)
+	{
+      unsigned long res=oomph::Problem::assign_eqn_numbers(assign_local_eqn_numbers);
+	  if (!this->dirichlets_by_removing_from_dof_vector)
+	  {
 		dirichlet_info.build_equation_to_value_map();
+	  }
+	  return res;
 	}
 
 
@@ -850,6 +862,10 @@ namespace pyoomph
 			J = eigen_JacobianMatrixPt;
 		}
 		this->get_eigenproblem_matrices(*M, *J, sigma_r);
+		if (!this->dirichlets_by_removing_from_dof_vector)
+		{
+			throw_runtime_error("This must be implemented. The rows and columns of the eigenproblem matrices corresponding to Dirichlet dofs should be removed. Likely has to be done on an elemental level");
+		}
 	}
 
 	std::vector<double> Problem::get_history_dofs(unsigned t)
@@ -1022,6 +1038,42 @@ namespace pyoomph
 	void Problem::remove_dirichlets_by_matrix_manipulation(oomph::DoubleVector &residuals,oomph::CRDoubleMatrix *jacobian)
 	{
 		// TODO
+		//std:: cout << "REMOVING DIRICHLETS by Matrix Manipulation " << jacobian << std::endl;
+		const std::map<unsigned long, double*> map=dirichlet_info.get_eqn_number_to_value_map();
+		for (const auto &pair : map)
+		{
+			unsigned long eqn_number = pair.first;
+			double *value_pt = pair.second;
+			//std::cout << "   Removing eqn " << eqn_number << " by setting residual to value " << *value_pt << std::endl;
+			residuals[eqn_number] = 0.0;
+		}
+		if (jacobian)
+		{
+			// Build a fast lookup set
+			std::unordered_set<unsigned long> dof_set;			
+			for (std::map<unsigned long, double*>::const_iterator mi = map.begin(); mi != map.end(); ++mi) dof_set.insert(mi->first);
+
+			const int num_rows = jacobian->nrow();
+			double * values=jacobian->value();
+			const int * col_index=jacobian->column_index();
+			const int * row_start=jacobian->row_start();
+
+			for (int row = 0; row < num_rows; ++row) {
+				bool is_constrained_row = dof_set.count(row);
+
+				for (int i = row_start[row]; i < row_start[row + 1]; ++i) {
+					int col = col_index[i];
+
+					if (is_constrained_row) 
+					{					
+						values[i] = (col == row) ? 1.0 : 0.0;
+					} else if (dof_set.count(col)) 
+					{						
+						values[i] = 0.0;
+					}
+				}
+			}
+		}
 	}
 
 

@@ -222,11 +222,12 @@ namespace pyoomph
   {
     protected:
       std::map<oomph::Data *,std::set<unsigned>> data_to_dirichlet_dof_indices; 
-      std::map<unsigned, double*> eqn_number_to_value_ptr;
+      std::map<unsigned long, double*> eqn_number_to_value_ptr;
     public:
       void clear();
       void add_dirichlet_dof(oomph::Data *d, unsigned dof_index);
       void build_equation_to_value_map();
+      const std::map<unsigned long, double*> &get_eqn_number_to_value_map() const { return eqn_number_to_value_ptr; }
 
   };
 
@@ -359,6 +360,7 @@ namespace pyoomph
     void ensure_dummy_values_to_be_dummy();
     void unpin_Dirichlet_dofs_for_matrix_manipulation();
     virtual void actions_after_adapt();
+    unsigned long assign_eqn_numbers(const bool& assign_local_eqn_numbers = true) override;
     virtual void setup_pinning() {}
     virtual void set_initial_condition();
     virtual std::tuple<std::vector<double>, std::vector<bool>> get_current_dofs();

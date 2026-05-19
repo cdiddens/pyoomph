@@ -17,6 +17,9 @@ Made
   void set_dofs(const unsigned& t, DoubleVector& dofs);
   void set_dofs(const unsigned& t, Vector<double*>& dof_pt)
 virtual. Noticed that it does not get/set the history of the variable_position_pt of moving nodes.
+(Changed on 19th May 2026):
+Made virtual 
+  unsigned long assign_eqn_numbers(const bool& assign_local_eqn_numbers = true);
 *******************************************************************************/
 
 // LIC// ====================================================================
@@ -1745,7 +1748,7 @@ namespace oomph
     /// can be overloaded in MPI problems.  Bool argument can be set to false
     /// to ignore assigning local equation numbers (found to be necessary in
     /// the parallel implementation of locate_zeta between multiple meshes).
-    unsigned long assign_eqn_numbers(
+    virtual unsigned long assign_eqn_numbers( // FOR PYOOMPH: made virtual 
       const bool& assign_local_eqn_numbers = true);
 
     /// Function to describe the dofs in terms of the global
