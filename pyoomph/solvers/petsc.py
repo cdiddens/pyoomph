@@ -101,7 +101,7 @@ class PETSCSolver(GenericLinearSystemSolver):
                 return my_indices
                 
         names=self.problem._get_global_field_names()
-        mapping=self.problem._get_dof_to_global_field_index_mapping()            
+        mapping=numpy.array(self.problem._get_dof_to_global_field_index_mapping())            
         unique_fields=numpy.unique(mapping)
         unique_fields=unique_fields[unique_fields>=0] # Filter out any dofs that are not assigned to a field (e.g. due to field splits, where some dofs might be assigned to a new field index of -1 or similar)
         if self.problem.petsc_fieldsplit is None:
@@ -141,7 +141,7 @@ class PETSCSolver(GenericLinearSystemSolver):
                     handled_fields.add(k)
                     
             if len(handled_fields)<len(unique_fields):
-                raise RuntimeError("Not all fields are assigned to a field split. Unassigned fields: "+str(set(names)-handled_fields),handled_fields,unique_fields)
+                raise RuntimeError("Not all fields are assigned to a field split.\nUnassigned fields: "+str(set(names)-handled_fields)+"\nHandled fields are: "+str(handled_fields))
             
             for v, fields in is_collections.items():
                 v=str(v)
@@ -152,6 +152,9 @@ class PETSCSolver(GenericLinearSystemSolver):
                 iset = PETSc.IS().createGeneral(process_indices(indices),comm=PETSc.COMM_WORLD)
                 field_is[v] = iset
                 print("  Field "+str(v)+": "+str(fields))
+                #print("    mapping", mapping[indices])
+                #print("    IS size",iset.getSize(),len(indices))
+                #print()
         self._dofs_to_field_info=[names,mapping,field_is]
         
     def get_field_split_IS(self,splitname:str)->PETSc.IS:

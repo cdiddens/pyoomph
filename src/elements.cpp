@@ -14165,7 +14165,48 @@ namespace pyoomph
 	{
 		BulkElementBase::unpin_Dirichlet_dofs_for_matrix_manipulation(info);
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
-		if ( (functable->numfields_C1 != functable->numfields_C1_basebulk || functable->numfields_C2 != functable->numfields_C2_basebulk || functable->numfields_C1TB != functable->numfields_C1TB_basebulk || functable->numfields_C2TB != functable->numfields_C2TB_basebulk ) )
+
+		int add_fields_C2=functable->numfields_C2 - functable->numfields_C2_basebulk;
+		std::vector<unsigned> interface_ids_C2(add_fields_C2);
+		for (int f = 0; f < add_fields_C2; f++)
+		{
+			std::string fieldname = functable->fieldnames_C2[functable->numfields_C2_basebulk + f];
+			unsigned interf_id = codeinst->resolve_interface_dof_id(fieldname);
+			interface_ids_C2[f] = interf_id;
+		}
+
+		for (int f=0; f<add_fields_C2; f++)
+		{
+				unsigned interf_id = functable->buffer_offset_C2_interf + f;
+				for (unsigned ni = 0; ni < this->eleminfo.nnode_C2 ; ni++)
+				{
+					oomph::Node * n = this->node_pt(get_node_index_C2_to_element(ni));
+					unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(n)->index_of_first_value_assigned_by_face_element(interface_ids_C2[f]);	
+					if (n->is_pinned(valindex)) info.add_dirichlet_dof(n,valindex);
+				}
+		}
+
+		int add_fields_C1=functable->numfields_C1 - functable->numfields_C1_basebulk;
+		std::vector<unsigned> interface_ids_C1(add_fields_C1);
+		for (int f = 0; f < add_fields_C1; f++)
+		{
+			std::string fieldname = functable->fieldnames_C1[functable->numfields_C1_basebulk + f];
+			unsigned interf_id = codeinst->resolve_interface_dof_id(fieldname);
+			interface_ids_C1[f] = interf_id;
+		}
+
+		for (int f=0; f<add_fields_C1; f++)
+		{
+				unsigned interf_id = functable->buffer_offset_C1_interf + f;
+				for (unsigned ni = 0; ni < this->eleminfo.nnode_C1 ; ni++)
+				{
+					oomph::Node * n = this->node_pt(get_node_index_C1_to_element(ni));
+					unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(n)->index_of_first_value_assigned_by_face_element(interface_ids_C1[f]);	
+					if (n->is_pinned(valindex)) info.add_dirichlet_dof(n,valindex);
+				}
+		}
+
+		if ( (functable->numfields_C1TB != functable->numfields_C1TB_basebulk || functable->numfields_C2TB != functable->numfields_C2TB_basebulk ) )
 		{
 			throw_runtime_error("Implement unpin_Dirichlet_dofs_for_matrix_manipulation ");
 		}
