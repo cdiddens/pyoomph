@@ -37,6 +37,10 @@ The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
 #include "../exception.hpp"
 
 
+// TODO: This must agree with the setting in partitioning.h from modified oomph-lib
+#define idx_t int64_t
+#define real_t double
+
 namespace py = pybind11;
 
 namespace pyoomph
@@ -54,7 +58,8 @@ namespace pyoomph
 
         virtual void solve_la_system_distributed(int op_flag, int allow_permutations, int n, int nnz_local, int nrow_local, int first_row, py::array_t<double> &values, py::array_t<int> &col_index, py::array_t<int> &row_start, py::array_t<double> &b, int nprow, int npcol, int doc, py::array_t<size_t> &data, py::array_t<int> &info){}; //,MPI_Comm comm
 
-        virtual void metis_partgraph_kway(int nvertex, py::array_t<int> &xadj_Py, py::array_t<int> &adjacency_vector_Py, py::array_t<int> &vwgt_Py, py::array_t<int> &adjwgt, int wgtflag, int numflag, int nparts, py::array_t<int> &options_Py, py::array_t<int> &edgecut_Py, py::array_t<int> &part_Py) {}
+        
+        virtual int metis_partgraph_kway(idx_t nvertex,idx_t nconnection, py::array_t<idx_t> &xadj_Py, py::array_t<idx_t> &adjacency_vector_Py, py::array_t<idx_t> &vwgt_Py, idx_t nparts, py::array_t<idx_t> &options_Py, py::array_t<idx_t> &edgecut_Py, py::array_t<idx_t> &part_Py) {throw_runtime_error("METIS Link is not properly set up!"); return -1;}
     };
 
     class PyGeneralSolverCallback : public GeneralSolverCallback
@@ -84,13 +89,13 @@ namespace pyoomph
                 op_flag, allow_permutations, n, nnz_local, nrow_local, first_row, values, col_index, row_start, b, nprow, npcol, doc, data, info); //,comm
         }
 
-        void metis_partgraph_kway(int nvertex, py::array_t<int> &xadj_Py, py::array_t<int> &adjacency_vector_Py, py::array_t<int> &vwgt_Py, py::array_t<int> &adjwgt_Py, int wgtflag, int numflag, int nparts, py::array_t<int> &options_Py, py::array_t<int> &edgecut_Py, py::array_t<int> &part_Py) override
+        int metis_partgraph_kway(idx_t nvertex,idx_t nconnection, py::array_t<idx_t> &xadj_Py, py::array_t<idx_t> &adjacency_vector_Py, py::array_t<idx_t> &vwgt_Py, idx_t nparts, py::array_t<idx_t> &options_Py, py::array_t<idx_t> &edgecut_Py, py::array_t<idx_t> &part_Py)
         {
             PYBIND11_OVERLOAD(
-                void,                  /* Return type */
+                int,                  /* Return type */
                 GeneralSolverCallback, /* Parent class */
                 metis_partgraph_kway,  /* Name of function in C++ (must match Python name) */
-                nvertex, xadj_Py, adjacency_vector_Py, vwgt_Py, adjwgt_Py, wgtflag, numflag, nparts, options_Py, edgecut_Py, part_Py);
+                nvertex, nconnection, xadj_Py, adjacency_vector_Py, vwgt_Py, nparts, options_Py, edgecut_Py, part_Py);
         }
     };
 
@@ -200,43 +205,52 @@ extern "C"
         throw_runtime_error("SUPERLU DIST IMPLEM CR TO CC");
     }
 
-    void METIS_PartGraphKway(int *nvertex_pt, int *xadj, int *adjacency_vector, int *vwgt, int *adjwgt, int *wgtflag_pt, int *numflag_pt, int *nparts_pt, int *options, int *edgecut, int *part)
+    
+    int METIS_PartGraphKway(idx_t * nvtxs,idx_t * ncon,idx_t * xadj,idx_t * adjncy,idx_t * vwgt,idx_t * vsize,idx_t * adjwgt,idx_t * nparts,real_t * tpwgts,real_t * ubvec,idx_t * options,idx_t * edgecut,idx_t * part)
+    //void METIS_PartGraphKway(int *nvertex_pt, int *xadj, int *adjacency_vector, int *vwgt, int *adjwgt, int *wgtflag_pt, int *numflag_pt, int *nparts_pt, int *options, int *edgecut, int *part)
     {
-        int nvertex = *nvertex_pt; //=total_number_of_root_elements
-
-        py::array_t<int> xadj_Py; // xadj [total_number_of_root_elements+1]
+        idx_t nvertex = *nvtxs; //=total_number_of_root_elements
+        idx_t nconnection=*ncon; // number of coennections
+        py::array_t<idx_t> xadj_Py; // xadj [total_number_of_root_elements+1]
         if (xadj)
-            xadj_Py = py::array_t<int>({nvertex + 1}, {sizeof(int)}, xadj, py::capsule(xadj, [](void *f) {}));
+            xadj_Py = py::array_t<idx_t>({nvertex + 1}, {sizeof(idx_t)}, xadj, py::capsule(xadj, [](void *f) {}));
 
-        py::array_t<int> adjacency_vector_Py; // adjacency_vector // [xadj[-1]]
-        if (adjacency_vector)
-            adjacency_vector_Py = py::array_t<int>({xadj[nvertex]}, {sizeof(int)}, adjacency_vector, py::capsule(adjacency_vector, [](void *f) {}));
+        py::array_t<idx_t> adjacency_vector_Py; // adjacency_vector // [xadj[-1]]
+        if (adjncy)
+            adjacency_vector_Py = py::array_t<idx_t>({xadj[nvertex]}, {sizeof(idx_t)}, adjncy, py::capsule(adjncy, [](void *f) {}));
 
-        py::array_t<int> vwgt_Py; // vwgt //Assembly times [total_number_of_root_elements]
+        py::array_t<idx_t> vwgt_Py; // vwgt //Assembly times [total_number_of_root_elements]
         if (vwgt)
-            vwgt_Py = py::array_t<int>({nvertex}, {sizeof(int)}, vwgt, py::capsule(vwgt, [](void *f) {}));
-
-        py::array_t<int> adjwgt_Py; // vwgt //Assembly times [total_number_of_root_elements]
+            vwgt_Py = py::array_t<idx_t>({nvertex}, {sizeof(idx_t)}, vwgt, py::capsule(vwgt, [](void *f) {}));
+        
+        // vsize=NULL in oomph-lib, so we don't need to convert it to a numpy array
+        if (vsize)
+            throw_runtime_error("METIS IMPLEM: vsize should be NULL");        
+        // *adjwgt=0 in oomph-lib, so we don't need to convert it to a numpy array
         if (adjwgt)
-            adjwgt_Py = py::array_t<int>({xadj[nvertex]}, {sizeof(int)}, adjwgt, py::capsule(adjwgt, [](void *f) {}));
+            throw_runtime_error("METIS IMPLEM: *adjwgt should be 0");
+        if (*nparts<=0)
+            throw_runtime_error("METIS IMPLEM: nparts should be > 0");
+        if (tpwgts)
+            throw_runtime_error("METIS IMPLEM: tpwgts should be NULL");
+        if (ubvec)            
+            throw_runtime_error("METIS IMPLEM: ubvec should be NULL");    
 
-        int wgtflag = *wgtflag_pt; // 0 not weighted, 2: vertex weighted
-        int numflag = *numflag_pt; // 0
-        int nparts = *nparts_pt;   // mpi.nproc
-
-        py::array_t<int> options_Py; // options 10
+        
+        py::array_t<idx_t> options_Py; // options 
         if (options)
-            options_Py = py::array_t<int>({10}, {sizeof(int)}, options, py::capsule(options, [](void *f) {}));
+            options_Py = py::array_t<idx_t>({40}, {sizeof(idx_t)}, options, py::capsule(options, [](void *f) {}));
 
-        py::array_t<int> edgecut_Py; // edgecut [ = total_number_of_root_elements]
+        py::array_t<idx_t> edgecut_Py; // edgecut [ = total_number_of_root_elements]
         if (edgecut)
-            edgecut_Py = py::array_t<int>({nvertex}, {sizeof(int)}, edgecut, py::capsule(edgecut, [](void *f) {}));
+            edgecut_Py = py::array_t<idx_t>({nvertex}, {sizeof(idx_t)}, edgecut, py::capsule(edgecut, [](void *f) {}));
 
-        py::array_t<int> part_Py; // part : partition
+        py::array_t<idx_t> part_Py; // part : partition
         if (part_Py)
-            part_Py = py::array_t<int>({nvertex}, {sizeof(int)}, part, py::capsule(part, [](void *f) {}));
-        pyoomph::g_solver_cb->metis_partgraph_kway(nvertex, xadj_Py, adjacency_vector_Py, vwgt_Py, adjwgt_Py, wgtflag, numflag, nparts, options_Py, edgecut_Py, part_Py);
+            part_Py = py::array_t<idx_t>({nvertex}, {sizeof(idx_t)}, part, py::capsule(part, [](void *f) {}));
+        return pyoomph::g_solver_cb->metis_partgraph_kway(nvertex,nconnection, xadj_Py, adjacency_vector_Py, vwgt_Py, *nparts, options_Py, edgecut_Py, part_Py);
     }
+
 
     void METIS_PartGraphVKway(int *, int *, int *, int *, int *, int *, int *, int *, int *, int *, int *)
     {
@@ -250,7 +264,7 @@ void PyReg_Solvers(py::module &m)
 {
     py::class_<pyoomph::GeneralSolverCallback, pyoomph::PyGeneralSolverCallback /* <--- trampoline*/>(m, "GeneralSolverCallback")
         .def(py::init<>())        
-        .def("metis_partgraph_kway",&pyoomph::GeneralSolverCallback::metis_partgraph_kway,py::arg("nvertex"), py::arg("xadj"), py::arg("adjacency_vector"), py::arg("vwgt"), py::arg("adjwgt"), py::arg("wgtflag"), py::arg("numflag"), py::arg("nparts"), py::arg("options"), py::arg("edgecut"), py::arg("part"))
+        .def("metis_partgraph_kway",&pyoomph::GeneralSolverCallback::metis_partgraph_kway)
         .def("solve_la_system_distributed",&pyoomph::GeneralSolverCallback::solve_la_system_distributed,py::arg("op_flag"), py::arg("allow_permutations"), py::arg("n"), py::arg("nnz_local"), py::arg("nrow_local"), py::arg("first_row"), py::arg("values"), py::arg("col_index"),py::arg("row_start"), py::arg("b"), py::arg("nprow"), py::arg("npcol"), py::arg("doc"), py::arg("data"), py::arg("info"))
         .def("solve_la_system_serial", &pyoomph::GeneralSolverCallback::solve_la_system_serial,py::arg("op_flag"),py::arg("n"),py::arg("nnz"),py::arg("nrhs"),py::arg("values"),py::arg("rowind"),py::arg("colptr"),py::arg("b"),py::arg("ldb"),py::arg("transpose"));
 

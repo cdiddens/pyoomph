@@ -720,8 +720,8 @@ class Problem(_pyoomph.Problem):
     def assemble_jacobian(self,with_residual:Literal[False],which_one:str)->DefaultMatrixType: ...
     
     def assemble_jacobian(self,with_residual:bool=True,which_one:str="")->Union[DefaultMatrixType,Tuple[List[float],DefaultMatrixType]]:
-        res, n, _, _, J_values_arr, J_colindex_arr, J_row_start_arr=self._assemble_residual_jacobian(which_one)
-        J = scipy.sparse.csr_matrix((J_values_arr, J_colindex_arr, J_row_start_arr), shape=(n, n)) #type:ignore
+        res, n, _nzz, J_nrow_local, J_values_arr, J_colindex_arr, J_row_start_arr=self._assemble_residual_jacobian(which_one)        
+        J = scipy.sparse.csr_matrix((J_values_arr, J_colindex_arr, J_row_start_arr), shape=(n, n)) #type:ignore ## TODO: Not J_nrow_local ?
         if with_residual:
             return res,J #type:ignore
         else:

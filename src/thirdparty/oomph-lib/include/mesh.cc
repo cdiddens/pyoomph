@@ -4,6 +4,8 @@ MODIFICATIONS ARE INDICATED BY A COMMENT STARTING WITH //FOR PYOOMPH
 (Changed on 15th April 2024):    
 Removed elastic_problems.h to get rid of frontal_solver, HSL_MA42, etc
 Also removed SolidICProblem SolidMesh::Solid_IC_problem
+(Changed on 21th May 2026):
+Since meshes do not know whether they are TreeBased or not, we have to check whether tree_pt() is not null before calling flush_object() 
 *******************************************************************************/
 
 // LIC// ====================================================================
@@ -32,6 +34,8 @@ Also removed SolidICProblem SolidMesh::Solid_IC_problem
 // LIC//
 // LIC//====================================================================
 // Non-inline member functions for general mesh classes
+
+
 
 #ifdef OOMPH_HAS_MPI
 #include "mpi.h"
@@ -5351,7 +5355,8 @@ namespace oomph
         RefineableElement* ref_el_pt = dynamic_cast<RefineableElement*>(el_pt);
         if (ref_el_pt != 0)
         {
-          ref_el_pt->tree_pt()->flush_object();
+          //FOR PYOOMPH: Since meshes do not know whether they are TreeBased or not, we have eto check it
+          if (ref_el_pt->tree_pt() != 0)ref_el_pt->tree_pt()->flush_object();
         }
 
 

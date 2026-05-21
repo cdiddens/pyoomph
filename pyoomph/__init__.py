@@ -118,13 +118,44 @@ class GeneralSolverCallback(_pyoomph.GeneralSolverCallback):
 			raise RuntimeError("The problem has not been set yet")
 		return self._current_problem.get_la_solver().solve_distributed(op_flag,allow_permutations,n,nnz_local,nrow_local,first_row,values,col_index,row_start,b,nprow,npcol,doc,data,info) #,comm
 
-	def metis_partgraph_kway(self, nvertex:int,xadj:NPIntArray,adjacency_vector:NPIntArray,vwgt:NPIntArray,adjwgt:NPIntArray,wgtflag:int, numflag:int,nparts:int,options:NPIntArray,edgecut:NPIntArray,part:NPIntArray):
-		print("TODO: METIS")
-		part[:]=numpy.arange(len(part))[:]/len(part)*nparts #type:ignore
-		print("USING DEFAULT DISTRI on",nparts,"procs:",part)
-#		print("IN PYMET", nvertex,xadj,adjacency_vector,vwgt,adjwgt,wgtflag, numflag,nparts,options,edgecut,part_Py)
-
+	def metis_partgraph_kway(self, nvertex,nconnection, xadj, adjacency_vector, vwgt, nparts, options, edgecut, part):
+		#print("IN PYMETIS")
+		#print("nvertex",nvertex)
+		#print("nconnection",nconnection)
+		#print("xadj",xadj)
+		#print("adjacency_vector",adjacency_vector)
+		#print("vwgt",vwgt)
+		#print("nparts",nparts)
+		#print("options",options)
+		#print("edgecut",edgecut)
+		#print("part",part)
 		
+		try:
+			import pymetis #type:ignore			
+			adj=pymetis.CSRAdjacency(xadj, adjacency_vector) #type:ignore
+			if len(vwgt)==0:
+				vwgt=None
+			opts=pymetis.Options()
+			opts.set_defaults()
+			if options[0]==0:
+				opts.objtype=pymetis.ObjType.CUT
+			elif options[0]==1:
+				opts.objtype=pymetis.ObjType.VOL
+			else:
+				print("ERROR: Unknown METIS option for OBJTYPE:",options[0])
+				exit(1)
+			for i in range(1,len(options)):
+				if options[i]!=0:
+					print("ERROR: METIS option",i)
+					exit(1)			
+			res=pymetis.part_graph(nparts,adjacency=adj,vweights=vwgt)
+			part[:]=res[1] #type:ignore
+			
+		except ImportError:
+			raise ImportError("PyMetis is not installed, cannot perform graph partitioning for distributed meshes. Please install PyMetis via e.g. 'pip install pymetis'")
+			#part[:]=numpy.arange(len(part))[:]/len(part)*nparts #type:ignore		
+
+		return 0
 
 solver_cb=GeneralSolverCallback()
 _pyoomph.set_Solver_callback(solver_cb)

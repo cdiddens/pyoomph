@@ -535,6 +535,7 @@ namespace pyoomph
 	void DirichletMatrixManipulationInfo::build_equation_to_value_map()
 	{
 		eqn_number_to_value_ptr.clear();
+		std::cout << "REMOVE DIRICHLET ENTRIES: " << data_to_dirichlet_dof_indices.size() << std::endl;
 		for (const auto &pair : data_to_dirichlet_dof_indices)
 		{
 			for (unsigned dof_index : pair.second)
@@ -544,6 +545,7 @@ namespace pyoomph
 				eqn_number_to_value_ptr[global_eqn] = pair.first->value_pt(dof_index);
 			}
 		}
+		// TODO: If distributed, we have to merge the map from all processes and make sure that the global equation numbers are consistent across processes. This is not implemented yet.
 	}
 
 
@@ -1040,36 +1042,54 @@ namespace pyoomph
 		// TODO
 		//std:: cout << "REMOVING DIRICHLETS by Matrix Manipulation " << jacobian << std::endl;
 		const std::map<unsigned long, double*> map=dirichlet_info.get_eqn_number_to_value_map();
-		for (const auto &pair : map)
+		
+		if (map.empty()) { std::cout << "NOTE: No Dirichlet dofs to remove by matrix manipulation" << std::endl; return; }
+
+		if (!map.empty())
 		{
-			unsigned long eqn_number = pair.first;
-			double *value_pt = pair.second;
-			//std::cout << "   Removing eqn " << eqn_number << " by setting residual to value " << *value_pt << std::endl;
-			residuals[eqn_number] = 0.0;
-		}
-		if (jacobian)
-		{
-			// Build a fast lookup set
-			std::unordered_set<unsigned long> dof_set;			
-			for (std::map<unsigned long, double*>::const_iterator mi = map.begin(); mi != map.end(); ++mi) dof_set.insert(mi->first);
+			//std::cout << "INFO DIRICHLET MAP (FIRST ROW : " << residuals.first_row() << " LOCAL ROWS " << residuals.nrow_local() << " TOTAL ROWS " << residuals.nrow() << "): "; 
+			for (const auto &pair : map)
+			{
+				unsigned long eqn_number = pair.first;
+				double *value_pt = pair.second;
+				int eqn_number_local=static_cast<int>(eqn_number)-residuals.first_row();
+				if (eqn_number_local>=0 && eqn_number_local<residuals.nrow_local())
+				{
+					//std::cout << "   Removing eqn " << eqn_number << " by setting residual to value " << *value_pt << " LENGHT OF RESIDUAL VECTOR " << residuals.nrow() << " LOCAL " << residuals.nrow_local() << "  DISTRIBUTED " << this->distributed() <<std::endl;				
+					residuals[eqn_number_local] = 0.0;	
+				}
+				//std::cout << eqn_number << " ";
+			}
+		//	std::cout << std::endl;
+			if (jacobian)
+			{
+				// Build a fast lookup set
+				std::unordered_set<unsigned long> dof_set;			
+				for (std::map<unsigned long, double*>::const_iterator mi = map.begin(); mi != map.end(); ++mi) dof_set.insert(mi->first);
 
-			const int num_rows = jacobian->nrow();
-			double * values=jacobian->value();
-			const int * col_index=jacobian->column_index();
-			const int * row_start=jacobian->row_start();
+				const int num_rows = jacobian->nrow();
+				const int num_cols = jacobian->ncol();
+				const int first_row=jacobian->distribution_pt()->first_row();
+				const int num_local_rows=jacobian->nrow_local();
+				//std::cout << "Jacobian size: " << num_rows << " x " << num_cols << std::endl << "LOCAL START " << first_row << " LOCAL ROWS " << num_local_rows << std::endl << std::flush;
 
-			for (int row = 0; row < num_rows; ++row) {
-				bool is_constrained_row = dof_set.count(row);
+				double * values=jacobian->value();
+				const int * col_index=jacobian->column_index();
+				const int * row_start=jacobian->row_start();
 
-				for (int i = row_start[row]; i < row_start[row + 1]; ++i) {
-					int col = col_index[i];
+				for (int row = 0; row < num_local_rows; ++row) {
+					bool is_constrained_row = dof_set.count(row+first_row);
 
-					if (is_constrained_row) 
-					{					
-						values[i] = (col == row) ? 1.0 : 0.0;
-					} else if (dof_set.count(col)) 
-					{						
-						values[i] = 0.0;
+					for (int i = row_start[row]; i < row_start[row + 1]; ++i) {
+						int col = col_index[i];
+
+						if (is_constrained_row) 
+						{					
+							values[i] = (col == row+first_row) ? 1.0 : 0.0;
+						} else if (dof_set.count(col)) 
+						{						
+							values[i] = 0.0;
+						}
 					}
 				}
 			}

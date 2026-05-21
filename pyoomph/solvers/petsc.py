@@ -80,6 +80,10 @@ class PETSCSolver(GenericLinearSystemSolver):
             _SetDefaultPetscOption("mat_mumps_icntl_14",mumps_param14)
         return self    
 
+    def set_options(self,**kwargs:Any):
+        for a,b in kwargs.items():
+            PETSc.Options().setValue(a,b) #type:ignore
+            
     def set_default_petsc_option(self,name:str,val:Any=None,force:bool=False)->None:
         _SetDefaultPetscOption(name,val, force) #type:ignore
 
@@ -96,8 +100,10 @@ class PETSCSolver(GenericLinearSystemSolver):
                 return indices
             else:
                 ownership_range=self.petsc_mat.getOwnershipRange() #type:ignore                
-                if ownership_range[0]>0 or ownership_range[1]<self.petsc_mat.getSize()[0]:
-                    my_indices=indices[(indices < ownership_range[1]) & (indices >= ownership_range[0])]                    
+                print("OWNERSHIP RANGE",get_mpi_rank(),ownership_range,"TOTAL INDICES",len(indices)) #type:ignore
+                #if ownership_range[0]>0 or ownership_range[1]<self.petsc_mat.getSize()[0]:
+                my_indices=indices[(indices < ownership_range[1]) & (indices >= ownership_range[0])]                    
+                print("PROCESSED INDICES FOR FIELD SPLIT ON RANK",get_mpi_rank(),": ","LEN",len(my_indices)) #type:ignore                
                 return my_indices
                 
         names=self.problem._get_global_field_names()
@@ -203,11 +209,16 @@ class PETSCSolver(GenericLinearSystemSolver):
             if self.x is not None:
                 self.x.destroy() #type:ignore
                 self.x=None
+            if self._dofs_to_field_info is not None:
+                for IS in self._dofs_to_field_info[2].values():
+                    IS.destroy() #type:ignore
+                self._dofs_to_field_info=None
                 
             #self.petsc_mat.destroy() #type:ignore
             self.petsc_mat = PETSc.Mat().createAIJ(size=(n, n), csr=(colptr.astype(numpy.int32), rowind.astype(numpy.int32), values.astype(numpy.float64))) #type:ignore
             self.x = PETSc.Vec().createSeq(n) #type:ignore
         elif op_flag == 2:
+            #print("Solving linear system with PETSc", op_flag, n, nnz, nrhs, transpose, "SPLIT INFO",self._dofs_to_field_info)
             if self._dofs_to_field_info is None:
                 self.setup_field_split()
             bv = PETSc.Vec().createWithArray(b) #type:ignore
@@ -234,25 +245,49 @@ class PETSCSolver(GenericLinearSystemSolver):
     def solve_distributed(self, op_flag: int, allow_permutations: int, n: int, nnz_local: int, nrow_local: int, first_row: int, values: NPFloatArray, col_index: NPIntArray, row_start: NPIntArray, b: NPFloatArray, nprow: int, npcol: int, doc: int, data: NPUInt64Array, info: NPIntArray)->None:
 
         if op_flag == 1:
-            print("PETSCINF",nrow_local,n)
+            if self.petsc_mat is not None:
+                self.petsc_mat.destroy()
+                self.petsc_mat=None
+            if self.ksp is not None:
+                self.ksp.destroy() #type:ignore
+                self.ksp=None
+            if self.x is not None:
+                self.x.destroy() #type:ignore
+                self.x=None
+            if self._dofs_to_field_info is not None:
+                for IS in self._dofs_to_field_info[2].values():
+                    IS.destroy() #type:ignore
+                self._dofs_to_field_info=None
+            #print("PETSCINF",nrow_local,n)
             self.petsc_mat = PETSc.Mat().createAIJ(size=((nrow_local, n), (nrow_local, n),),csr=(row_start, col_index, values)) #type:ignore
-            print("OWNERSHIP RANGE",self.petsc_mat.getOwnershipRange()) #type:ignore
+            #print("OWNERSHIP RANGE",self.petsc_mat.getOwnershipRange()) #type:ignore
         #			print("PROCESSOR Ns",get_mpi_rank(),nrow_local,n)
         #			print("PROCESSOR RS",get_mpi_rank(),row_start)
         #			print("PROCESSOR CI",get_mpi_rank(),col_index)
         #			print("FIRST ROW",get_mpi_rank(),first_row)
         # self.petsc_mat
+            
         elif op_flag == 2:
+            
+            if self._dofs_to_field_info is None:
+                self.setup_field_split()
+            bv = PETSc.Vec().createWithArray(b) #type:ignore
+            self.petsc_rhs=bv
+            self.x = self.petsc_rhs.duplicate()
+            
             self.setup_solver()
-            bv = PETSc.Vec().createWithArray(b, (len(b), n)) #type:ignore
-            xv = bv.duplicate() #type:ignore
-            self.ksp.solve(bv, xv) #type:ignore
-            res = xv.getArray() #type:ignore
-            b[:] = res[:] #type:ignore
+            
+            if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine():
+                raise RuntimeError("Cannot use custom solve routine with PETSc yet. Also, iterative solving might require different handling here")
+            else:
+                self.ksp.solve(bv, self.x) #type:ignore
+                xv = self.x.getArray() #type:ignore
+            b[:] = xv[:] #type:ignore
 
-            self.petsc_mat.destroy() #type:ignore
-            self.ksp.destroy() #type:ignore
-            xv.destroy() #type:ignore
+            #print('Converged in', self.ksp.getIterationNumber(), 'iterations.') #type:ignore
+
+            
+            self.petsc_rhs=None
             bv.destroy() #type:ignore
         else:
             raise RuntimeError("Cannot handle Petsc mode " + str(op_flag) + " yet")

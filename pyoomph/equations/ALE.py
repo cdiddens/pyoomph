@@ -271,7 +271,8 @@ class YeohSmoothedMesh(BaseMovingMeshEquations):
         I1=trace( matproduct(transpose(dxdX),dxdX) )*J**rational_num(-2,3)
         I1min=I1-self.get_nodal_dimension()
         F=(self.C1*I1min+self.C2*I1min**2+self.C3*I1min**3+self.kappa*(J-1)**2)/2                                
-        self.add_functional_minimization(scale_factor("spatial")*F,dxdX,dimensional_testfunctions=False,coordinate_system=self.coordsys,lagrangian=True)
+        #self.add_functional_minimization(scale_factor("spatial")*F,dxdX,dimensional_testfunctions=False,coordinate_system=self.coordsys,lagrangian=True)
+        self.add_functional_minimization(F,dimensional_testfunctions=False,coordinate_system=self.coordsys,lagrangian=True)
         
 
 

@@ -48,6 +48,7 @@ from pygmsh.common.surface import Surface #type:ignore
 
 from pygmsh.common.volume import Volume #type:ignore
 
+from ..generic.mpi import get_mpi_rank, mpi_barrier, get_mpi_nproc
 
 import gmsh #type:ignore
 import os
@@ -265,8 +266,11 @@ def generate_mesh_to_file(geom:pygmsh.geo.Geometry, outdir:str, trunk:str, meshe
                 continue
             #print("SETTING",n,v,"FOR",mesher,"IN",mesher.gmsh_options,"IN",mesher.gmsh_options.items())
             gmsh.option.setNumber(n,v) #type:ignore
-        
-    gmsh.write(os.path.join(outdir, trunk + ".geo_unrolled")) #type:ignore
+            
+    mpi_barrier()
+    if get_mpi_rank() == 0 or get_mpi_nproc()<=1:        
+        gmsh.write(os.path.join(outdir, trunk + ".geo_unrolled")) #type:ignore
+    mpi_barrier()
 
     
 
@@ -284,7 +288,10 @@ def generate_mesh_to_file(geom:pygmsh.geo.Geometry, outdir:str, trunk:str, meshe
     if postgen_cb is not None:
         postgen_cb()
 
-    gmsh.write(os.path.join(outdir, trunk + ".msh")) #type:ignore
+    mpi_barrier()
+    if get_mpi_rank() == 0 or get_mpi_nproc()<=1:
+        gmsh.write(os.path.join(outdir, trunk + ".msh")) #type:ignore
+    mpi_barrier()
     gmsh.clear()
 
 
