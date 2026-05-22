@@ -116,7 +116,7 @@ class RectangularQuadMesh(MeshTemplate):
         name: The name of the domain or a function that returns the name based on the center coordinates of each element. The interfaces   in between are automatically generated and named based on the domain names separated with an underscore.
         size: The size of the mesh, either by a single value (for both directions) or by two values (for x and y directions).            
         N: The number of elements in each dimension.. Can be a single value or a list of two values for x and y dimensions respectively.
-        lower_left: The coordinates of the lower-left corner of the mesh, i.e. the mesh ranges from ``lower_left[0]`` to ``lower_left[0] + size[0]`` in x-direction and ``lower_left[1]`` to ``lower_left[1] + size[1]]`` in y-direction.            
+        lower_left: The coordinates of the lower-left corner of the mesh, i.e. the mesh ranges from ``lower_left[0]`` to ``lower_left[0] + size[0]`` in x-direction and ``lower_left[1]`` to ``lower_left[1] + size[1]]`` in y-direction. Can be set to ``"centered"`` to automatically center the mesh around the origin.            
         periodic: Whether the mesh is periodic, either in both directions or in x and y directions separately.
         split_in_tris: Split the quadrilateral elements into triangles.
         split_scott_vogelius: Whether to use splitting into Scott-Vogelius elements.
@@ -124,7 +124,7 @@ class RectangularQuadMesh(MeshTemplate):
         nodal_dimension: The nodal dimension of the mesh, can be used to curve the mesh later on.
     """
     
-    def __init__(self, *, name:Union[str,Callable[[float,float],str]]="domain", size:Union[ExpressionOrNum,List[ExpressionOrNum]]=1.0, N:Union[int,List[int]]=10, lower_left:Union[ExpressionOrNum,List[ExpressionOrNum]]=[0, 0], periodic:Union[bool,List[bool]]=False, split_in_tris:Literal[False, "alternate_left", "alternate_right", "left", "right", "crossed"]=False,split_scott_vogelius:bool=False, boundary_names:Dict[str,Union[str,Callable[[float],str]]]={},nodal_dimension:Optional[int]=None):
+    def __init__(self, *, name:Union[str,Callable[[float,float],str]]="domain", size:Union[ExpressionOrNum,List[ExpressionOrNum]]=1.0, N:Union[int,List[int]]=10, lower_left:Union[ExpressionOrNum,List[ExpressionOrNum],Literal["centered"]]=[0, 0], periodic:Union[bool,List[bool]]=False, split_in_tris:Literal[False, "alternate_left", "alternate_right", "left", "right", "crossed"]=False,split_scott_vogelius:bool=False, boundary_names:Dict[str,Union[str,Callable[[float],str]]]={},nodal_dimension:Optional[int]=None):
         super().__init__()
         self.name:Union[str,Callable[[float,float],str]] = name
         self.size = size
@@ -192,7 +192,9 @@ class RectangularQuadMesh(MeshTemplate):
             raise ValueError("Mesh size must be a positive integer, but got " + str(nN))
 
         lower_left = self.lower_left
-        if isinstance(lower_left, list) or isinstance(lower_left, tuple) or isinstance(lower_left, numpy.ndarray):
+        if self.lower_left == "centered":
+            lower_left = [-size[0] / 2, -size[1] / 2]
+        elif isinstance(lower_left, list) or isinstance(lower_left, tuple) or isinstance(lower_left, numpy.ndarray):
             lower_left=list(lower_left)
             lower_left = [self.nondim_size(x) for x in lower_left]
         else:

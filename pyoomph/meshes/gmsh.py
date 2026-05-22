@@ -629,7 +629,7 @@ class GmshTemplate(MeshTemplate):
 
 
     # Add lines as p1, <name>, p2, <name>, p3, <name>, p4...
-    def create_lines(self, *args:Union[Point,List[ExpressionOrNum],Tuple[ExpressionOrNum],str]) -> List[Line]:
+    def create_lines(self, *args:Union[Point,List[ExpressionOrNum],Tuple[ExpressionOrNum,...],str]) -> List[Line]:
         """
         Creates multiple lines with different names based on the given arguments. 
         For line loop around a box, you can e.g. do
