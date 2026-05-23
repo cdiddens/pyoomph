@@ -216,6 +216,13 @@ class PETSCSolver(GenericLinearSystemSolver):
                 
             #self.petsc_mat.destroy() #type:ignore
             self.petsc_mat = PETSc.Mat().createAIJ(size=(n, n), csr=(colptr.astype(numpy.int32), rowind.astype(numpy.int32), values.astype(numpy.float64))) #type:ignore
+            
+            self.petsc_mat.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False)
+            # Force diagonal:
+            diag = self.petsc_mat.getDiagonal()
+            self.petsc_mat.setDiagonal(diag, addv=PETSc.InsertMode.INSERT_VALUES)
+            self.petsc_mat .assemble()
+            
             self.x = PETSc.Vec().createSeq(n) #type:ignore
         elif op_flag == 2:
             #print("Solving linear system with PETSc", op_flag, n, nnz, nrhs, transpose, "SPLIT INFO",self._dofs_to_field_info)
@@ -260,6 +267,12 @@ class PETSCSolver(GenericLinearSystemSolver):
                 self._dofs_to_field_info=None
             #print("PETSCINF",nrow_local,n)
             self.petsc_mat = PETSc.Mat().createAIJ(size=((nrow_local, n), (nrow_local, n),),csr=(row_start, col_index, values)) #type:ignore
+            
+            self.petsc_mat.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False)
+            # Force diagonal:
+            diag = self.petsc_mat.getDiagonal()
+            self.petsc_mat.setDiagonal(diag, addv=PETSc.InsertMode.INSERT_VALUES)
+            self.petsc_mat .assemble()
             #print("OWNERSHIP RANGE",self.petsc_mat.getOwnershipRange()) #type:ignore
         #			print("PROCESSOR Ns",get_mpi_rank(),nrow_local,n)
         #			print("PROCESSOR RS",get_mpi_rank(),row_start)

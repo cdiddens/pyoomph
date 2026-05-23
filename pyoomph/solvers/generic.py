@@ -64,6 +64,7 @@ def get_default_eigen_solver()->Optional[Union["GenericEigenSolver",CoreEigenSol
 class GenericLinearSystemSolver:
 	_registered_solvers:Dict[str,Type["GenericLinearSystemSolver"]]={}
 	idname:str
+	
 
 	def __init__(self,problem:"Problem"):
 		self.problem=problem

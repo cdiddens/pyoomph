@@ -662,6 +662,12 @@ void PyReg_Problem(py::module &m)
 				 self->distribute();
 #endif
 			 })
+			.def("load_balance", [](pyoomph::Problem *self)
+			 {
+#ifdef OOMPH_HAS_MPI
+				 self->load_balance();
+#endif
+			 })			 
 		.def("is_distributed", &pyoomph::Problem::distributed)
 		.def("_redistribute_local_to_global_double_vector", [](pyoomph::Problem *self, const py::array_t<double> &local_v)
 			 {

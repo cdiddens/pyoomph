@@ -23,11 +23,15 @@ The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
 #pragma once
 
 #include "oomph_lib.hpp"
+
 #include <vector>
 #include <map>
+#include <unordered_set>
+#include <memory>
+
 #include "jitbridge.h"
 #include "mesh.hpp"
-#include <memory>
+
 #include "hessian_tensor.hpp"
 
 namespace pyoomph
@@ -222,12 +226,15 @@ namespace pyoomph
   {
     protected:
       std::map<oomph::Data *,std::set<unsigned>> data_to_dirichlet_dof_indices; 
-      std::map<unsigned long, double*> eqn_number_to_value_ptr;
+      //std::map<unsigned long, double*> eqn_number_to_value_ptr;
+      std::unordered_set<unsigned long> global_pinned_dof_set;
     public:
       void clear();
       void add_dirichlet_dof(oomph::Data *d, unsigned dof_index);
-      void build_equation_to_value_map();
-      const std::map<unsigned long, double*> &get_eqn_number_to_value_map() const { return eqn_number_to_value_ptr; }
+      //void build_equation_to_value_map();
+      void build_global_pinned_equation_set(Problem *prob);
+      const std::unordered_set<unsigned long> & get_global_pinned_equation_set() const {return global_pinned_dof_set;}
+      //const std::map<unsigned long, double*> &get_eqn_number_to_value_map() const { return eqn_number_to_value_ptr; }
 
   };
 

@@ -151,7 +151,11 @@ namespace pyoomph
 
     virtual void setup_tree_forest()
     {
-      setup_quadtree_forest();
+      if (refinement_possible())  setup_quadtree_forest();      
+      else {
+        std::cout << "WARNING: Found a tri or something in the mesh "<< this->domainname << " -> cannot be adaptive right now. Requires to implement a good tree for mixed meshes" << std::endl;
+        this->disable_adaptation();
+      }
 //      std::cout << "TREE FORESET SET UP " << this->Forest_pt << "  " << dynamic_cast<DynamicQuadTreeForest *>(this->Forest_pt) << std::endl;
     }
 

@@ -132,29 +132,26 @@ class GeneralSolverCallback(_pyoomph.GeneralSolverCallback):
 		
 		try:
 			import pymetis #type:ignore			
-			adj=pymetis.CSRAdjacency(xadj, adjacency_vector) #type:ignore
-			if len(vwgt)==0:
-				vwgt=None
-			opts=pymetis.Options()
-			opts.set_defaults()
-			if options[0]==0:
-				opts.objtype=pymetis.ObjType.CUT
-			elif options[0]==1:
-				opts.objtype=pymetis.ObjType.VOL
-			else:
-				print("ERROR: Unknown METIS option for OBJTYPE:",options[0])
-				exit(1)
-			for i in range(1,len(options)):
-				if options[i]!=0:
-					print("ERROR: METIS option",i)
-					exit(1)			
-			res=pymetis.part_graph(nparts,adjacency=adj,vweights=vwgt)
-			part[:]=res[1] #type:ignore
-			
-		except ImportError:
+		except:
 			raise ImportError("PyMetis is not installed, cannot perform graph partitioning for distributed meshes. Please install PyMetis via e.g. 'pip install pymetis'")
-			#part[:]=numpy.arange(len(part))[:]/len(part)*nparts #type:ignore		
-
+		adj=pymetis.CSRAdjacency(xadj, adjacency_vector) #type:ignore
+		if len(vwgt)==0:
+			vwgt=None
+		opts=pymetis.Options()
+		opts.set_defaults()
+		if options[0]==0:
+			opts.objtype=pymetis.ObjType.CUT
+		elif options[0]==1:
+			opts.objtype=pymetis.ObjType.VOL
+		else:
+			raise RuntimeError("ERROR: Unknown METIS option for OBJTYPE: " + str(options[0]))
+		for i in range(1,len(options)):
+			if options[i]!=0:
+				raise RuntimeError("ERROR: METIS option " + str(i) + " is not supported")				
+		res=pymetis.part_graph(nparts,adjacency=adj,vweights=vwgt)
+		part[:]=res[1] #type:ignore		
+		edgecut[0]=res[0] #type:ignore
+		#part[:]=numpy.arange(len(part))[:]/len(part)*nparts #type:ignore		
 		return 0
 
 solver_cb=GeneralSolverCallback()

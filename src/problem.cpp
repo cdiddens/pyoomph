@@ -29,7 +29,7 @@ The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
 #include "ccompiler.hpp"
 #include "logging.hpp"
 
-#include <unordered_set>
+
 
 extern "C"
 {
@@ -532,20 +532,49 @@ namespace pyoomph
 		d->unpin(dof_index);
 	}
 
-	void DirichletMatrixManipulationInfo::build_equation_to_value_map()
+	void DirichletMatrixManipulationInfo::build_global_pinned_equation_set(Problem *prob)
 	{
-		eqn_number_to_value_ptr.clear();
-		std::cout << "REMOVE DIRICHLET ENTRIES: " << data_to_dirichlet_dof_indices.size() << std::endl;
+		global_pinned_dof_set.clear();
+		//std::cout << "REMOVE DIRICHLET ENTRIES: " << data_to_dirichlet_dof_indices.size() << std::endl;
 		for (const auto &pair : data_to_dirichlet_dof_indices)
 		{
 			for (unsigned dof_index : pair.second)
 			{
 				unsigned long global_eqn=pair.first->eqn_number(dof_index);
 				//std::cout << "Mapping equation " << global_eqn << " to value pointer for data " << pair.first << " dof index " << dof_index << std::endl;
-				eqn_number_to_value_ptr[global_eqn] = pair.first->value_pt(dof_index);
+				//eqn_number_to_value_ptr[global_eqn] = pair.first->value_pt(dof_index);
+				global_pinned_dof_set.insert(global_eqn);
 			}
 		}
-		// TODO: If distributed, we have to merge the map from all processes and make sure that the global equation numbers are consistent across processes. This is not implemented yet.
+
+		// If distributed, we have to merge the map from all processes and make sure that the global equation numbers are consistent across processes. 
+#ifdef OOMPH_HAS_MPI
+		if (prob->distributed())
+		{
+
+			int rank=prob->communicator_pt()->my_rank();
+			int size=prob->communicator_pt()->nproc();			
+			std::vector<unsigned long> local_vec(global_pinned_dof_set.begin(), global_pinned_dof_set.end());
+			int local_count = static_cast<int>(local_vec.size());
+			std::vector<int> recvcounts(size);
+			MPI_Allgather(&local_count, 1, MPI_INT,recvcounts.data(), 1, MPI_INT,prob->communicator_pt()->mpi_comm());
+
+			std::vector<int> displs(size, 0);
+			int total_count = recvcounts[0];
+			for (int i = 1; i < size; ++i)
+			{
+				displs[i] = displs[i - 1] + recvcounts[i - 1];
+				total_count += recvcounts[i];
+			}
+			
+			std::vector<unsigned long> global_vec(total_count);
+
+			MPI_Allgatherv(local_vec.data(),local_count,MPI_UNSIGNED_LONG,global_vec.data(),recvcounts.data(),displs.data(),MPI_UNSIGNED_LONG,prob->communicator_pt()->mpi_comm());
+
+			global_pinned_dof_set=std::unordered_set<unsigned long>(global_vec.begin(),global_vec.end());
+
+		}
+#endif
 	}
 
 
@@ -819,7 +848,8 @@ namespace pyoomph
       unsigned long res=oomph::Problem::assign_eqn_numbers(assign_local_eqn_numbers);
 	  if (!this->dirichlets_by_removing_from_dof_vector)
 	  {
-		dirichlet_info.build_equation_to_value_map();
+		//dirichlet_info.build_equation_to_value_map();
+		dirichlet_info.build_global_pinned_equation_set(this);
 	  }
 	  return res;
 	}
@@ -1038,34 +1068,22 @@ namespace pyoomph
 	}
 
 	void Problem::remove_dirichlets_by_matrix_manipulation(oomph::DoubleVector &residuals,oomph::CRDoubleMatrix *jacobian)
-	{
-		// TODO
-		//std:: cout << "REMOVING DIRICHLETS by Matrix Manipulation " << jacobian << std::endl;
-		const std::map<unsigned long, double*> map=dirichlet_info.get_eqn_number_to_value_map();
-		
-		if (map.empty()) { std::cout << "NOTE: No Dirichlet dofs to remove by matrix manipulation" << std::endl; return; }
+	{		
+		const std::unordered_set<unsigned long> dof_set=dirichlet_info.get_global_pinned_equation_set();
+				
 
-		if (!map.empty())
-		{
-			//std::cout << "INFO DIRICHLET MAP (FIRST ROW : " << residuals.first_row() << " LOCAL ROWS " << residuals.nrow_local() << " TOTAL ROWS " << residuals.nrow() << "): "; 
-			for (const auto &pair : map)
+		if (!dof_set.empty())
+		{		
+			for (const auto &eqn_number : dof_set)
 			{
-				unsigned long eqn_number = pair.first;
-				double *value_pt = pair.second;
 				int eqn_number_local=static_cast<int>(eqn_number)-residuals.first_row();
 				if (eqn_number_local>=0 && eqn_number_local<residuals.nrow_local())
 				{
-					//std::cout << "   Removing eqn " << eqn_number << " by setting residual to value " << *value_pt << " LENGHT OF RESIDUAL VECTOR " << residuals.nrow() << " LOCAL " << residuals.nrow_local() << "  DISTRIBUTED " << this->distributed() <<std::endl;				
 					residuals[eqn_number_local] = 0.0;	
 				}
-				//std::cout << eqn_number << " ";
 			}
-		//	std::cout << std::endl;
 			if (jacobian)
-			{
-				// Build a fast lookup set
-				std::unordered_set<unsigned long> dof_set;			
-				for (std::map<unsigned long, double*>::const_iterator mi = map.begin(); mi != map.end(); ++mi) dof_set.insert(mi->first);
+			{			
 
 				const int num_rows = jacobian->nrow();
 				const int num_cols = jacobian->ncol();
