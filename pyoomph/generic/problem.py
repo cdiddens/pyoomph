@@ -561,6 +561,9 @@ class Problem(_pyoomph.Problem):
         
         #: When set to True, we apply Dirichlet boundary conditions by removing the corresponding dofs from the system. This yields a smaller matrix, but iterative solvers using strided block matrices will run into troubles. If False, all DirichletBCs are kept in the dof vector and the matrix is augmented accordingly.
         self.apply_Dirichlet_BCs_by_dof_removing=True
+        
+        #: When set to True, we assign the initial conditions via projection, not on a nodal basis
+        self.project_initial_conditions=False
 
     # Use weak(u,psi) instead of vectorial U*Psi for the symmetry-breaking constraint
     def improve_pitchfork_tracking_on_unstructured_meshes(self,coord_sys:"OptionalCoordinateSystem"=None,pos_coord_sys:"OptionalCoordinateSystem"=None):
@@ -2643,7 +2646,7 @@ class Problem(_pyoomph.Problem):
         if self._runmode!="continue" and self._runmode!="replot":
             if self.initial_adaption_steps is None:
                 self.initial_adaption_steps=self.max_refinement_level
-            if  (self.initial_adaption_steps>0):
+            if  (self.initial_adaption_steps>0 and not self.project_initial_conditions):
                 no_need_to_reassign=False
                 for s in range(self.initial_adaption_steps):
                     self.map_nodes_on_macro_elements()
@@ -2660,8 +2663,13 @@ class Problem(_pyoomph.Problem):
                     self.map_nodes_on_macro_elements()
                     self.set_initial_condition()
             else:
-                self.map_nodes_on_macro_elements()
-                self.set_initial_condition()
+                self.map_nodes_on_macro_elements()                                
+                if not self.project_initial_conditions:
+                    self.set_initial_condition()
+            if self.project_initial_conditions:
+                self._initialised = True
+                self._during_initialization=False
+                self.set_initial_condition(numadapt=self.initial_adaption_steps)
         else:
             self._initialised=True
             self._during_initialization=False
@@ -2817,7 +2825,7 @@ class Problem(_pyoomph.Problem):
 
 
 
-    def set_initial_condition(self, ic_name: str = "", all_unset_dofs_to_zero: bool = False):
+    def set_initial_condition(self, ic_name: str = "", all_unset_dofs_to_zero: bool = False,numadapt:Optional[int]=0):
         """
         Set the initial condition for the problem.
 
@@ -2829,6 +2837,16 @@ class Problem(_pyoomph.Problem):
             self.set_current_dofs([0.0] * self.ndof())
         if not self.is_quiet():
             print("SETTING IC", ic_name)
+        
+        if self.project_initial_conditions:            
+            
+            self._set_solved_residual("_IC_"+ic_name, True, True)
+            self.reapply_boundary_conditions()
+            print("Projecting initial condition",ic_name,numadapt)
+            self.solve(spatial_adapt=numadapt)
+            self._set_solved_residual("", False, True)
+            self.reapply_boundary_conditions()
+            
         if self._runmode != "continue":
             for _, m in self._meshdict.items():
                 m.setup_initial_conditions_with_interfaces(self._resetting_first_step, ic_name)

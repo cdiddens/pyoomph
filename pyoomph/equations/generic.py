@@ -514,6 +514,8 @@ class InitialCondition(BaseEquations):
         for n, val in self._ics.items():
             assert isinstance(self._degraded_start, bool) or self._degraded_start == "auto"
             self.set_initial_condition(n, val, degraded_start=self._degraded_start, IC_name=self._ic_name)
+            if self.get_problem().project_initial_conditions:
+                self.add_weak(var(n)-val,testfunction(n,dimensional=False)/scale_factor(n),destination="_IC_"+self._ic_name) 
 
 
 class TemporalErrorEstimator(BaseEquations):

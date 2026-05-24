@@ -549,7 +549,7 @@ class PardisoSolver(GenericLinearSystemSolver):
             else:
                 displs = None
                 x_global = None
-            print("GATHERV SOLUTION",displs,counts)
+            #print("GATHERV SOLUTION",displs,counts)
             x_local = np.empty(len(b), dtype=np.float64)
             
             comm.Scatterv([x_global, counts, displs, MPI.DOUBLE],x_local,root=0)

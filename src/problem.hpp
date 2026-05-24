@@ -303,6 +303,9 @@ namespace pyoomph
 
     void set_sparse_assembly_method(const std::string & method);
     std::string get_sparse_assembly_method();
+
+    void set_dist_problem_matrix_distribution(const std::string & mode);
+    std::string get_dist_problem_matrix_distribution() ;
     
     std::vector<DynamicBulkElementCode *> &get_bulk_element_codes() { return bulk_element_codes; }
 
@@ -402,6 +405,9 @@ namespace pyoomph
     virtual void actions_after_parameter_increase(const  std::string &  paramname) {}
     virtual void actions_after_change_in_bifurcation_parameter() {}
     virtual void actions_before_newton_convergence_check() {}
+    
+    virtual void _build_mesh() { throw_runtime_error("You must implement the function _build_mesh for load_balancing"); }
+    void build_mesh() override {this->_build_mesh();}
     void reset_assembly_handler_to_default() override;
     virtual std::vector<double> get_parameter_derivative(const std::string param);
     void activate_my_fold_tracking(double *const &parameter_pt, const oomph::DoubleVector &eigenvector, const bool &block_solve);

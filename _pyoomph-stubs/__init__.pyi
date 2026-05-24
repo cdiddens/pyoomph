@@ -1325,6 +1325,7 @@ class Problem:
     _improved_pitchfork_tracking_on_unstructured_meshes: bool
     always_take_one_newton_step: bool
     apply_Dirichlet_BCs_by_dof_removing: bool
+    dist_problem_matrix_distribution: str
     keep_temporal_error_below_tolerance: bool
     max_residuals: float
     minimum_arclength_ds: float
@@ -1346,6 +1347,8 @@ class Problem:
     def _assemble_multiassembly(self, arg0: list[str], arg1: list[str], arg2: list[str], arg3: list[list[float]], arg4: list[int]) -> tuple[int, list[list[float]], list[list[int]], list[int]]:
         ...
     def _assemble_residual_jacobian(self, arg0: str) -> tuple[list[float], int, int, int, numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.int32], numpy.typing.NDArray[numpy.int32]]:
+        ...
+    def _build_mesh(self) -> None:
         ...
     def _create_dof_augmentation(self) -> DofAugmentations:
         ...

@@ -95,19 +95,23 @@ class PETSCSolver(GenericLinearSystemSolver):
         return PETSc
     
     def setup_field_split(self):
-        def process_indices(indices):
+        print("Setting up field split for PETSc solver")
+        def process_indices(indices,name):
             if get_mpi_nproc()<2:
                 return indices
             else:
                 ownership_range=self.petsc_mat.getOwnershipRange() #type:ignore                
-                print("OWNERSHIP RANGE",get_mpi_rank(),ownership_range,"TOTAL INDICES",len(indices)) #type:ignore
+                print("OWNERSHIP RANGE",name,get_mpi_rank(),ownership_range,"TOTAL INDICES",len(indices)) #type:ignore
+                print("On rank",name,get_mpi_rank(), "ALL INDICES FOR FIELD SPLIT: ", indices) #type:ignore
                 #if ownership_range[0]>0 or ownership_range[1]<self.petsc_mat.getSize()[0]:
                 my_indices=indices[(indices < ownership_range[1]) & (indices >= ownership_range[0])]                    
-                print("PROCESSED INDICES FOR FIELD SPLIT ON RANK",get_mpi_rank(),": ","LEN",len(my_indices)) #type:ignore                
+                print("PROCESSED INDICES FOR FIELD SPLIT ON RANK",name, get_mpi_rank(),": ","LEN",len(my_indices),my_indices) #type:ignore                
                 return my_indices
                 
         names=self.problem._get_global_field_names()
         mapping=numpy.array(self.problem._get_dof_to_global_field_index_mapping())            
+        print("Global field names:", names)
+        print("DOF to field mapping:", get_mpi_rank(),mapping)
         unique_fields=numpy.unique(mapping)
         unique_fields=unique_fields[unique_fields>=0] # Filter out any dofs that are not assigned to a field (e.g. due to field splits, where some dofs might be assigned to a new field index of -1 or similar)
         if self.problem.petsc_fieldsplit is None:
@@ -117,7 +121,7 @@ class PETSCSolver(GenericLinearSystemSolver):
             field_is={}
             for f in unique_fields:
                 indices = numpy.where(mapping == f)[0].astype(numpy.int32)
-                iset = PETSc.IS().createGeneral(process_indices(indices),comm=PETSc.COMM_WORLD)
+                iset = PETSc.IS().createGeneral(process_indices(indices,names[f]),comm=PETSc.COMM_WORLD)
                 field_is[f] = iset
             
         else:
@@ -155,7 +159,9 @@ class PETSCSolver(GenericLinearSystemSolver):
                 #indices = numpy.where(mapping in mergedindices)[0].astype(numpy.int32)                        
                 indices= numpy.where(numpy.isin(mapping, list(mergedindices)))[0].astype(numpy.int32)     
                 #print("ON",get_mpi_rank(), "INDICES FOR FIELD "+str(v)+": "+str(indices),"LEN",len(indices))
-                iset = PETSc.IS().createGeneral(process_indices(indices),comm=PETSc.COMM_WORLD)
+                print("CHECKING ON RANK",v,get_mpi_rank(),mapping[indices])                
+                print("PROCESSES ON RANK",v,get_mpi_rank(),mapping[process_indices(indices,v)])                
+                iset = PETSc.IS().createGeneral(process_indices(indices,v),comm=PETSc.COMM_WORLD)
                 field_is[v] = iset
                 print("  Field "+str(v)+": "+str(fields))
                 #print("    mapping", mapping[indices])
@@ -171,11 +177,12 @@ class PETSCSolver(GenericLinearSystemSolver):
         return self._dofs_to_field_info[2][splitname]
 
     def setup_solver(self):                
+        #print("Setting up solver")
         opts = PETSc.Options().getAll() #type:ignore
-        if "add_zero_diagonal" in opts.keys(): #type:ignore
+        #if "add_zero_diagonal" in opts.keys(): #type:ignore
             #			print(dir(self.petsc_mat))
-            self.petsc_mat.setOption(19, 0) #type:ignore
-            self.petsc_mat.shift(0) #type:ignore
+        #    self.petsc_mat.setOption(19, 0) #type:ignore
+        #    self.petsc_mat.shift(0) #type:ignore
 
         self.ksp = PETSc.KSP().create() #type:ignore
         self.ksp.setOperators(self.petsc_mat) #type:ignore
@@ -219,9 +226,11 @@ class PETSCSolver(GenericLinearSystemSolver):
             
             self.petsc_mat.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False)
             # Force diagonal:
-            diag = self.petsc_mat.getDiagonal()
-            self.petsc_mat.setDiagonal(diag, addv=PETSc.InsertMode.INSERT_VALUES)
-            self.petsc_mat .assemble()
+            #diag = self.petsc_mat.getDiagonal()
+            #self.petsc_mat.setDiagonal(diag, addv=PETSc.InsertMode.INSERT_VALUES)
+            self.petsc_mat.shift(0.0)
+            
+            self.petsc_mat.assemble()
             
             self.x = PETSc.Vec().createSeq(n) #type:ignore
         elif op_flag == 2:
@@ -250,7 +259,7 @@ class PETSCSolver(GenericLinearSystemSolver):
         return 0  # TODO: Return sign of Jacobian
 
     def solve_distributed(self, op_flag: int, allow_permutations: int, n: int, nnz_local: int, nrow_local: int, first_row: int, values: NPFloatArray, col_index: NPIntArray, row_start: NPIntArray, b: NPFloatArray, nprow: int, npcol: int, doc: int, data: NPUInt64Array, info: NPIntArray)->None:
-
+        #print("solve distributed with flag ",op_flag)
         if op_flag == 1:
             if self.petsc_mat is not None:
                 self.petsc_mat.destroy()
@@ -266,13 +275,17 @@ class PETSCSolver(GenericLinearSystemSolver):
                     IS.destroy() #type:ignore
                 self._dofs_to_field_info=None
             #print("PETSCINF",nrow_local,n)
+            #print("Creating petsc mat ")
             self.petsc_mat = PETSc.Mat().createAIJ(size=((nrow_local, n), (nrow_local, n),),csr=(row_start, col_index, values)) #type:ignore
             
-            self.petsc_mat.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False)
+            self.petsc_mat.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False)                        
             # Force diagonal:
-            diag = self.petsc_mat.getDiagonal()
-            self.petsc_mat.setDiagonal(diag, addv=PETSc.InsertMode.INSERT_VALUES)
-            self.petsc_mat .assemble()
+            #diag = self.petsc_mat.getDiagonal()
+            #self.petsc_mat.setDiagonal(diag, addv=PETSc.InsertMode.INSERT_VALUES)
+            self.petsc_mat.shift(0.0)
+            
+            self.petsc_mat.assemble()
+            
             #print("OWNERSHIP RANGE",self.petsc_mat.getOwnershipRange()) #type:ignore
         #			print("PROCESSOR Ns",get_mpi_rank(),nrow_local,n)
         #			print("PROCESSOR RS",get_mpi_rank(),row_start)
@@ -304,6 +317,17 @@ class PETSCSolver(GenericLinearSystemSolver):
             bv.destroy() #type:ignore
         else:
             raise RuntimeError("Cannot handle Petsc mode " + str(op_flag) + " yet")
+
+
+    def assemble_matrix(self,which_one:str):
+        res, n, _nzz, nrow_local, values, col_index, row_start=self.problem._assemble_residual_jacobian(which_one)                                
+        res=PETSc.Mat().createAIJ(size=((nrow_local, n), (n, n),),csr=(row_start.astype(numpy.int32), col_index.astype(numpy.int32), values.astype(numpy.float64)), comm=PETSc.COMM_WORLD) #type:ignore
+        res.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False)
+        res.shift(0.0)
+        res.assemble()
+        return res
+        
+
 
     def set_options(self,**kwargs:Any):
         for a,b in kwargs.items():

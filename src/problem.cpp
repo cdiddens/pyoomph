@@ -1526,6 +1526,37 @@ namespace pyoomph
 		}
 	}
 
+	void Problem::set_dist_problem_matrix_distribution(const std::string & mode)
+	{
+		#ifdef OOMPH_HAS_MPI
+		if (mode =="default") {this->distributed_problem_matrix_distribution()=oomph::Problem::Default_matrix_distribution;}
+		else if (mode=="problem") {this->distributed_problem_matrix_distribution()=oomph::Problem::Problem_matrix_distribution;}
+		else if (mode=="uniform") {this->distributed_problem_matrix_distribution()=oomph::Problem::Uniform_matrix_distribution;}
+		else
+		{
+			throw_runtime_error("Unknown distributed problem matrix distribution mode: " + mode);
+		}
+		#endif
+	}
+    std::string Problem::get_dist_problem_matrix_distribution() 
+	{
+		#ifdef OOMPH_HAS_MPI
+		switch (this->distributed_problem_matrix_distribution())
+		{
+		case oomph::Problem::Default_matrix_distribution:
+			return "default";
+		case oomph::Problem::Problem_matrix_distribution:
+			return "problem";
+		case oomph::Problem::Uniform_matrix_distribution:
+			return "uniform";
+		default:
+			return "unknown";
+		}
+		#else
+		return "nompi";
+		#endif
+	}
+
     std::vector<std::complex<double>> Problem::get_bifurcation_eigenvector()
     {
 		if (bifurcation_tracking_mode == "")

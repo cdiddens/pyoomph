@@ -137,6 +137,11 @@ namespace pyoomph
 		{
 			PYBIND11_OVERLOAD(void, pyoomph::Problem, get_custom_residuals_jacobian, info);
 		}
+
+		void _build_mesh() override
+		{
+			PYBIND11_OVERLOAD(void, pyoomph::Problem, _build_mesh);
+		}
 	};
 
 }
@@ -488,6 +493,7 @@ void PyReg_Problem(py::module &m)
 					  { return p.improved_pitchfork_tracking_on_unstructured_meshes; }, [](pyoomph::Problem &p, bool s)
 					  { p.improved_pitchfork_tracking_on_unstructured_meshes = s; })
 		.def_property("sparse_assembly_method", &pyoomph::Problem::get_sparse_assembly_method,&pyoomph::Problem::set_sparse_assembly_method)
+		.def_property("dist_problem_matrix_distribution",&pyoomph::Problem::get_dist_problem_matrix_distribution,&pyoomph::Problem::set_dist_problem_matrix_distribution)
 		.def("adaptive_unsteady_newton_solve", (double(pyoomph::Problem::*)(const double &, const double &)) & pyoomph::Problem::adaptive_unsteady_newton_solve)
 		.def("_adapt", &pyoomph::Problem::_adapt)
 		.def("adaptive_unsteady_newton_solve", (double(pyoomph::Problem::*)(const double &, const double &, const bool &)) & pyoomph::Problem::adaptive_unsteady_newton_solve)
@@ -668,6 +674,7 @@ void PyReg_Problem(py::module &m)
 				 self->load_balance();
 #endif
 			 })			 
+		.def("_build_mesh",&pyoomph::Problem::_build_mesh)
 		.def("is_distributed", &pyoomph::Problem::distributed)
 		.def("_redistribute_local_to_global_double_vector", [](pyoomph::Problem *self, const py::array_t<double> &local_v)
 			 {

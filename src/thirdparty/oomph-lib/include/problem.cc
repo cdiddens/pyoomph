@@ -17832,8 +17832,8 @@ namespace oomph
         // Delete the mesh if it is not an unstructured mesh
         if (!is_unstructured_mesh[0])
         {
-          delete old_mesh_pt[0];
-          old_mesh_pt[0] = 0;
+          //delete old_mesh_pt[0]; // FOR PYOOMPH: Do not delete the mesh here since we require it in the python side
+          //old_mesh_pt[0] = 0;
         } // if (!is_unstructured_mesh[0])
       } // if (n_mesh==0)
       else
@@ -17858,8 +17858,8 @@ namespace oomph
           // Delete the mesh if it is not an unstructured mesh
           if (!is_unstructured_mesh[i_mesh])
           {
-            delete old_mesh_pt[i_mesh];
-            old_mesh_pt[i_mesh] = 0;
+            //delete old_mesh_pt[i_mesh]; // FOR PYOOMPH: Do not delete the mesh here since we require it in the python side
+            //old_mesh_pt[i_mesh] = 0;
           } // if (!is_unstructured_mesh[i_mesh])
 
         } // for (i_mesh<n_mesh)

@@ -77,7 +77,7 @@ class GenericLinearSystemSolver:
 
 
 	def solve_distributed(self, op_flag: int, allow_permutations: int, n: int, nnz_local: int, nrow_local: int, first_row: int, values: NPFloatArray, col_index: NPIntArray, row_start: NPIntArray, b: NPFloatArray, nprow: int, npcol: int, doc: int, data: NPUInt64Array, info: NPIntArray)->None:
-		raise RuntimeError("SuperLU solver cannot solve distributed")
+		raise RuntimeError("This solver cannot be used with multiple MPI processes.")
 
 	def solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPIntArray,colptr:NPIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
 		raise NotImplementedError("You need to specialise the function 'solve_serial'")

@@ -312,6 +312,9 @@ class _MeshFileOutput(_BaseNumpyOutput):
 		if (not mesh.is_mesh_distributed()) and self.mpi_rank>0:
 			return
 
+		if (mesh.nelement()==0):
+			return
+
 		#eleminds,elemtypes,D0_data,DL_data,elemental_fields,nodal_data,field_names=self.get_nodal_values(self.mesh,with_elem_indices=True,with_discontinuous=True,tesselate_tri=self.tesselate_tri,hide_fields=self.hide_fields,eigenvector=self.eigenvector,eigenvector_mode=self.eigenvector_mode,nondimensional=self.nondimensional)
 		cache=self.get_cached_mesh_data(self.mesh,nondimensional=self.nondimensional,tesselate_tri=self.tesselate_tri,eigenvector=evarg_for_cache,eigenmode=self.eigenmode,history_index=self.history_index,operator=self.operator,discontinuous=self.discontinuous,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions)
 		#print("GEETING CACHE",self.operator,cache,cache.operator)
