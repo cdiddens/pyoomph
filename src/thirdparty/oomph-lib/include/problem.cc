@@ -326,7 +326,7 @@ namespace oomph
     // a uniform distributed distribution
     else if (!Problem_has_been_distributed)
     {
-      dist_pt = new LinearAlgebraDistribution(Communicator_pt, nrow, true);
+      dist_pt = new LinearAlgebraDistribution(Communicator_pt, nrow,Block_dof_pt_start , true);
     }
     // otherwise the problem is a distributed problem
     else
@@ -335,7 +335,7 @@ namespace oomph
       {
         case Uniform_matrix_distribution:
 
-          dist_pt = new LinearAlgebraDistribution(Communicator_pt, nrow, true);
+          dist_pt = new LinearAlgebraDistribution(Communicator_pt, nrow,Block_dof_pt_start, true);
           break;
 
         case Problem_matrix_distribution:
@@ -2204,18 +2204,27 @@ namespace oomph
       // pushed back onto it -- if it's not reset here then we get into
       // trouble during mesh refinement when we reassign all dofs
       Dof_pt.resize(0);
-
+      
       // Reserve from previous allocation if we're going around again
       Dof_pt.reserve(n_dof);
+      Block_dof_pt_start.resize(0); //FOR PYOOMPH
+      Block_dof_pt_start.reserve(n_dof); //FOR PYOOMPH
 
       // Reset the equation number
       unsigned long equation_number = 0;
 
       // Now set equation numbers for the global Data
       unsigned Nglobal_data = nglobal_data();
+      
+      Block_dof_pt_start.push_back(0); //FOR PYOOMPH
       for (unsigned i = 0; i < Nglobal_data; i++)
       {
+        unsigned long old_equation_number = equation_number; //FOR PYOOMPH
         Global_data_pt[i]->assign_eqn_numbers(equation_number, Dof_pt);
+        if (old_equation_number != equation_number)
+        {
+          Block_dof_pt_start.push_back(equation_number); //FOR PYOOMPH
+        }
       }
 
       if (Global_timings::Doc_comprehensive_timings)
@@ -2224,7 +2233,7 @@ namespace oomph
       }
 
       // Call assign equation numbers on the global mesh
-      n_dof = Mesh_pt->assign_global_eqn_numbers(Dof_pt);
+      n_dof = Mesh_pt->assign_global_eqn_numbers(Dof_pt,Block_dof_pt_start);
 
       // Deal with the spine meshes additional numbering
       // If there is only one mesh
@@ -2232,7 +2241,12 @@ namespace oomph
       {
         if (SpineMesh* const spine_mesh_pt = dynamic_cast<SpineMesh*>(Mesh_pt))
         {
-          n_dof = spine_mesh_pt->assign_global_spine_eqn_numbers(Dof_pt);
+          unsigned long old_equation_number = equation_number; //FOR PYOOMPH
+          n_dof = spine_mesh_pt->assign_global_spine_eqn_numbers(Dof_pt); 
+          if (old_equation_number != n_dof)
+          {
+            Block_dof_pt_start.push_back(n_dof); //FOR PYOOMPH
+          }
         }
       }
       // Otherwise loop over the sub meshes
@@ -2244,7 +2258,12 @@ namespace oomph
           if (SpineMesh* const spine_mesh_pt =
                 dynamic_cast<SpineMesh*>(Sub_mesh_pt[i]))
           {
+            unsigned long old_equation_number = equation_number; //FOR PYOOMPH
             n_dof = spine_mesh_pt->assign_global_spine_eqn_numbers(Dof_pt);
+            if (old_equation_number != n_dof)
+            {
+              Block_dof_pt_start.push_back(n_dof); //FOR PYOOMPH
+            }
           }
         }
       }
@@ -2280,7 +2299,7 @@ namespace oomph
       else
 #endif
       {
-        Dof_distribution_pt->build(Communicator_pt, n_dof, false);
+        Dof_distribution_pt->build(Communicator_pt, n_dof, Block_dof_pt_start,false);
       }
 
       if (Global_timings::Doc_comprehensive_timings)

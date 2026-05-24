@@ -585,6 +585,9 @@ namespace oomph
 
     /// Vector of pointers to dofs
     Vector<double*> Dof_pt;
+    /// FOR PYOOMPH:
+    Vector<unsigned long> Block_dof_pt_start; // When Dof_pt is set up, we store here the offset of each node or element's internal dof. 
+    // Thereby, we can split it better so that blocks (e.g. velocity_x,velocity_y) would not put on different processes, which gives issues in block_mat_size in e.g. Hypre AMG
 
     /// Counter that records how many elements contribute to each dof.
     /// Used to determine the (discrete) arc-length automatically.
@@ -1874,6 +1877,8 @@ namespace oomph
     {
       return Dof_pt[i];
     }
+
+    oomph::Vector<unsigned long> & block_dof_pt_start() { return Block_dof_pt_start; }
 
     /// Return the residual vector multiplied by the inverse mass matrix
     /// Virtual so that it can be overloaded for mpi problems

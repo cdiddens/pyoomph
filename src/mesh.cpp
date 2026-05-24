@@ -48,9 +48,15 @@ namespace pyoomph
   {
     unsigned nelement = this->nelement();
 
+    unsigned cnt=0;
     for (unsigned int ne = 0; ne < nelement; ne++)
     {
-      dynamic_cast<BulkElementBase *>(this->element_pt(ne))->_numpy_index = ne;
+/*
+#ifdef OOMPH_HAS_MPI
+      if (this->element_pt(ne)->is_halo()) continue; // Skip halo elements, as they will be handled by the owning process
+#endif
+*/
+      dynamic_cast<BulkElementBase *>(this->element_pt(ne))->_numpy_index = cnt++;
     }
     std::vector<std::vector<std::set<oomph::Node *>>> additional_elemental_tri_nodes(nelement);
     if (tesselate_tri && !discontinuous)
@@ -72,6 +78,11 @@ namespace pyoomph
     nelem = 0;
     for (unsigned int ne = 0; ne < nelement; ne++)
     {
+/*
+#ifdef OOMPH_HAS_MPI
+      if (this->element_pt(ne)->is_halo()) continue; // Skip halo elements, as they will be handled by the owning process
+#endif      
+*/
       BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(ne));
       unsigned nsubelem = 0;
       res = std::max(res, be->get_num_numpy_elemental_indices(tesselate_tri, nsubelem, additional_elemental_tri_nodes));

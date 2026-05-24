@@ -151,7 +151,7 @@ namespace oomph
     /// Assign the global equation numbers in the Data stored at the
     /// nodes and also internal element Data. Also, build (via push_back) the
     /// Vector of pointers to the dofs (variables).
-    unsigned long assign_global_eqn_numbers(Vector<double*>& Dof_pt);
+    unsigned long assign_global_eqn_numbers(Vector<double*>& Dof_pt, Vector<unsigned long>& Block_dof_pt_start); // FOR PYOOMPH: Including the Block_dof_pt_start vector to store the offsets of each node or element's internal dof.
 
     /// Function to describe the dofs of the Mesh. The ostream
     /// specifies the output stream to which the description

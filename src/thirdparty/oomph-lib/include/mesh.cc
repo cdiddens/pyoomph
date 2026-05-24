@@ -687,7 +687,8 @@ namespace oomph
   //========================================================
   /// Assign (global) equation numbers to the nodes
   //========================================================
-  unsigned long Mesh::assign_global_eqn_numbers(Vector<double*>& Dof_pt)
+  // FOR PYOOMPH: Including the Block_dof_pt_start vector to store the offsets of each node or element's internal dof.
+  unsigned long Mesh::assign_global_eqn_numbers(Vector<double*>& Dof_pt, Vector<unsigned long>& Block_dof_pt_start)
   {
     // Find out the current number of equations
     unsigned long equation_number = Dof_pt.size();
@@ -697,14 +698,26 @@ namespace oomph
 
     for (unsigned long i = 0; i < nnod; i++)
     {
+      unsigned long old_equation_number = equation_number; // FOR PYOOMPH
       Node_pt[i]->assign_eqn_numbers(equation_number, Dof_pt);
+      if (equation_number!=old_equation_number) // FOR PYOOMPH
+      {
+        // If the node has added dofs, add the offset to the Block_dof_pt_start vector
+        Block_dof_pt_start.push_back(equation_number); // FOR PYOOMPH
+      }
     }
 
     // Loop over the elements and number their internals
     unsigned long nel = Element_pt.size();
     for (unsigned long i = 0; i < nel; i++)
     {
+      unsigned long old_equation_number = equation_number; // FOR PYOOMPH
       Element_pt[i]->assign_internal_eqn_numbers(equation_number, Dof_pt);
+      if (equation_number!=old_equation_number) // FOR PYOOMPH
+      {
+        // If the element has added dofs, add the offset to the Block_dof_pt_start vector
+        Block_dof_pt_start.push_back(equation_number); // FOR PYOOMPH
+      }
     }
 
     // Return the total number of equations

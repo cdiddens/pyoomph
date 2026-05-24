@@ -175,6 +175,7 @@ namespace oomph
   //============================================================================
   void LinearAlgebraDistribution::build(const OomphCommunicator* const comm_pt,
                                         const unsigned& global_nrow,
+                                        const oomph::Vector<unsigned long>& block_dof_pt_start, // FOR PYOOMPH
                                         const bool& distribute)
   {
     // copy the communicator
@@ -209,6 +210,35 @@ namespace oomph
         First_row[p] =
           unsigned((double(p) / double(nproc)) * double(global_nrow));
       }
+
+      // FOR PYOOMPH: Patch the first row vector to be consistent with the block dof starts
+      /*if (block_dof_pt_start.empty() && global_nrow > 0)
+      {
+        throw OomphLibError(
+          "PYOOMPH: block_dof_pt_start is empty but global_nrow > 0",
+          "LinearAlgebraDistribution::build(...)",
+          OOMPH_EXCEPTION_LOCATION);
+      } */           
+      if (!block_dof_pt_start.empty())
+      {
+        
+        for (int p = 0; p < nproc; p++)
+        {
+          std::cout << "Patching first row for processor " << p << " from " << First_row[p] << " to ";
+          std::vector<unsigned long>::const_iterator lower_bound_iter = std::lower_bound(block_dof_pt_start.begin(), block_dof_pt_start.end(), First_row[p]);
+          if (lower_bound_iter == block_dof_pt_start.end())
+          {
+            throw OomphLibError(
+              "PYOOMPH: lower_bound_iter is at the end of block_dof_pt_start",
+              "LinearAlgebraDistribution::build(...)",
+              OOMPH_EXCEPTION_LOCATION);
+          }
+          unsigned lower_bound_index = lower_bound_iter - block_dof_pt_start.begin();
+          First_row[p] = block_dof_pt_start[lower_bound_index];
+          std::cout << First_row[p] << std::endl;
+        }
+      }
+
 
       // compute local nrow
       for (int p = 0; p < nproc - 1; p++)

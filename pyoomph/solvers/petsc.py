@@ -101,17 +101,17 @@ class PETSCSolver(GenericLinearSystemSolver):
                 return indices
             else:
                 ownership_range=self.petsc_mat.getOwnershipRange() #type:ignore                
-                print("OWNERSHIP RANGE",name,get_mpi_rank(),ownership_range,"TOTAL INDICES",len(indices)) #type:ignore
-                print("On rank",name,get_mpi_rank(), "ALL INDICES FOR FIELD SPLIT: ", indices) #type:ignore
+                #print("OWNERSHIP RANGE",name,get_mpi_rank(),ownership_range,"TOTAL INDICES",len(indices)) #type:ignore
+                #print("On rank",name,get_mpi_rank(), "ALL INDICES FOR FIELD SPLIT: ", indices) #type:ignore
                 #if ownership_range[0]>0 or ownership_range[1]<self.petsc_mat.getSize()[0]:
                 my_indices=indices[(indices < ownership_range[1]) & (indices >= ownership_range[0])]                    
-                print("PROCESSED INDICES FOR FIELD SPLIT ON RANK",name, get_mpi_rank(),": ","LEN",len(my_indices),my_indices) #type:ignore                
+                #print("PROCESSED INDICES FOR FIELD SPLIT ON RANK",name, get_mpi_rank(),": ","LEN",len(my_indices),my_indices) #type:ignore                
                 return my_indices
                 
         names=self.problem._get_global_field_names()
         mapping=numpy.array(self.problem._get_dof_to_global_field_index_mapping())            
-        print("Global field names:", names)
-        print("DOF to field mapping:", get_mpi_rank(),mapping)
+        #print("Global field names:", names)
+        #print("DOF to field mapping:", get_mpi_rank(),mapping)
         unique_fields=numpy.unique(mapping)
         unique_fields=unique_fields[unique_fields>=0] # Filter out any dofs that are not assigned to a field (e.g. due to field splits, where some dofs might be assigned to a new field index of -1 or similar)
         if self.problem.petsc_fieldsplit is None:
@@ -159,8 +159,8 @@ class PETSCSolver(GenericLinearSystemSolver):
                 #indices = numpy.where(mapping in mergedindices)[0].astype(numpy.int32)                        
                 indices= numpy.where(numpy.isin(mapping, list(mergedindices)))[0].astype(numpy.int32)     
                 #print("ON",get_mpi_rank(), "INDICES FOR FIELD "+str(v)+": "+str(indices),"LEN",len(indices))
-                print("CHECKING ON RANK",v,get_mpi_rank(),mapping[indices])                
-                print("PROCESSES ON RANK",v,get_mpi_rank(),mapping[process_indices(indices,v)])                
+                #print("CHECKING ON RANK",v,get_mpi_rank(),mapping[indices])                
+                #print("PROCESSES ON RANK",v,get_mpi_rank(),mapping[process_indices(indices,v)])                
                 iset = PETSc.IS().createGeneral(process_indices(indices,v),comm=PETSc.COMM_WORLD)
                 field_is[v] = iset
                 print("  Field "+str(v)+": "+str(fields))
@@ -244,7 +244,11 @@ class PETSCSolver(GenericLinearSystemSolver):
             if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine():
                 raise RuntimeError("Cannot use custom solve routine with PETSc yet. Also, iterative solving might require different handling here")
             else:
+                import time
+                start_time = time.time()
                 self.ksp.solve(bv, self.x) #type:ignore
+                end_time = time.time()
+                print("PETSc KSP solve time:", end_time - start_time, "seconds")
                 xv = self.x.getArray() #type:ignore
             b[:] = xv[:] #type:ignore
 
@@ -306,7 +310,11 @@ class PETSCSolver(GenericLinearSystemSolver):
             if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine():
                 raise RuntimeError("Cannot use custom solve routine with PETSc yet. Also, iterative solving might require different handling here")
             else:
+                import time
+                start_time = time.time()
                 self.ksp.solve(bv, self.x) #type:ignore
+                end_time = time.time()
+                print("PETSc KSP solve time:", end_time - start_time, "seconds")
                 xv = self.x.getArray() #type:ignore
             b[:] = xv[:] #type:ignore
 

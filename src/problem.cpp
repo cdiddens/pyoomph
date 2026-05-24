@@ -1152,7 +1152,11 @@ namespace pyoomph
 			get_derivative_wrt_global_parameter_elemental_assembly(parameter_pt,result);
 			if (!this->dirichlets_by_removing_from_dof_vector)
 			{
-				 throw_runtime_error("TODO: Cannot remove dirichlet dofs from the derivative by a global parameter by matrix manipulation yet.");
+				 //throw_runtime_error("TODO: Cannot remove dirichlet dofs from the derivative by a global parameter by matrix manipulation yet.");
+
+				 //This is of course problematic if the DirichletBC depends on the parameter, but it is also problematic in the case of removing Dirichlets from the dofs
+				 //TODO: However, here, it could be patched by providing a corresponding function to calculate dDirichlet/dparam 
+				 this->remove_dirichlets_by_matrix_manipulation(result);
 			}
 		}
 		else
