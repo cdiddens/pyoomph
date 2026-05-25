@@ -442,6 +442,12 @@ void PyReg_Problem(py::module &m)
 			[](pyoomph::Problem &p, const bool &r)
 			{ p.set_Dirichlets_by_removing_from_dof_vector(r); }
 		)
+		.def_property(
+			"nodal_block_dof_arrangement_used", [](pyoomph::Problem &p)
+			{ return p.is_block_dof_arrangement_used(); },
+			[](pyoomph::Problem &p, const bool &r)
+			{ p.set_block_dof_arrangement_used(r); }
+		)
 		.def_property("DTSF_minimum_dt", [](pyoomph::Problem &p) {return p.minimum_dt();}, [](pyoomph::Problem &p, double v) {p.minimum_dt()=v;})
 		.def_property("DTSF_maximum_dt", [](pyoomph::Problem &p) {return p.maximum_dt();}, [](pyoomph::Problem &p, double v) {p.maximum_dt()=v;})
 		.def("_set_globally_convergent_newton_method", [](pyoomph::Problem &p, bool r)

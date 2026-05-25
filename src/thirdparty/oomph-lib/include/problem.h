@@ -587,6 +587,7 @@ namespace oomph
     Vector<double*> Dof_pt;
     /// FOR PYOOMPH:
     Vector<unsigned long> Block_dof_pt_start; // When Dof_pt is set up, we store here the offset of each node or element's internal dof. 
+    bool Block_dof_arrangement_used; // If true, we make sure that the sharing of the processes is never split between e.g. u_x and u_y 
     // Thereby, we can split it better so that blocks (e.g. velocity_x,velocity_y) would not put on different processes, which gives issues in block_mat_size in e.g. Hypre AMG
 
     /// Counter that records how many elements contribute to each dof.
@@ -1015,6 +1016,8 @@ namespace oomph
       Problem_has_been_distributed = false;
     }
 
+    
+
     /// Set default first and last elements for parallel assembly
     /// of non-distributed problem.
     void set_default_first_and_last_element_for_assembly();
@@ -1052,6 +1055,15 @@ namespace oomph
 
 #endif
 
+    bool is_block_dof_arrangement_used() const
+    {
+      return Block_dof_arrangement_used;
+    }
+
+    void set_block_dof_arrangement_used(bool block_dof_arrangement_used)
+    {
+      Block_dof_arrangement_used = block_dof_arrangement_used;
+    }
     /// Actions that are to be performed before a mesh adaptation.
     /// These might include removing any additional elements, such as traction
     /// boundary elements before the adaptation.

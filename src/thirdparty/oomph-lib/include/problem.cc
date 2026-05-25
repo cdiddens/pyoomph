@@ -93,6 +93,7 @@ namespace oomph
       Must_recompute_load_balance_for_assembly(true),
       Halo_scheme_pt(0),
 #endif
+      Block_dof_arrangement_used(false),
       Relaxation_factor(1.0),
       Newton_solver_tolerance(1.0e-8),
       Max_newton_iterations(10),
@@ -326,7 +327,7 @@ namespace oomph
     // a uniform distributed distribution
     else if (!Problem_has_been_distributed)
     {
-      dist_pt = new LinearAlgebraDistribution(Communicator_pt, nrow,Block_dof_pt_start , true);
+      dist_pt = new LinearAlgebraDistribution(Communicator_pt, nrow,is_block_dof_arrangement_used() ? Block_dof_pt_start : Vector<unsigned long>(), true);
     }
     // otherwise the problem is a distributed problem
     else
@@ -335,7 +336,7 @@ namespace oomph
       {
         case Uniform_matrix_distribution:
 
-          dist_pt = new LinearAlgebraDistribution(Communicator_pt, nrow,Block_dof_pt_start, true);
+          dist_pt = new LinearAlgebraDistribution(Communicator_pt, nrow,is_block_dof_arrangement_used() ? Block_dof_pt_start : Vector<unsigned long>(), true);
           break;
 
         case Problem_matrix_distribution:
@@ -2299,7 +2300,7 @@ namespace oomph
       else
 #endif
       {
-        Dof_distribution_pt->build(Communicator_pt, n_dof, Block_dof_pt_start,false);
+        Dof_distribution_pt->build(Communicator_pt, n_dof, is_block_dof_arrangement_used() ? Block_dof_pt_start : Vector<unsigned long>(), false);
       }
 
       if (Global_timings::Doc_comprehensive_timings)

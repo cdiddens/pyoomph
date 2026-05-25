@@ -57,6 +57,8 @@ class PETSCSolver(GenericLinearSystemSolver):
         self.ksp=None
         self.x=None
         
+        
+        
         self._dofs_to_field_info=None
 
     #		opts=PETSc.Options().getAll()
@@ -106,7 +108,7 @@ class PETSCSolver(GenericLinearSystemSolver):
                 #if ownership_range[0]>0 or ownership_range[1]<self.petsc_mat.getSize()[0]:
                 my_indices=indices[(indices < ownership_range[1]) & (indices >= ownership_range[0])]                    
                 #print("PROCESSED INDICES FOR FIELD SPLIT ON RANK",name, get_mpi_rank(),": ","LEN",len(my_indices),my_indices) #type:ignore                
-                return my_indices
+                return numpy.sort(my_indices)
                 
         names=self.problem._get_global_field_names()
         mapping=numpy.array(self.problem._get_dof_to_global_field_index_mapping())            
@@ -222,7 +224,7 @@ class PETSCSolver(GenericLinearSystemSolver):
                 self._dofs_to_field_info=None
                 
             #self.petsc_mat.destroy() #type:ignore
-            self.petsc_mat = PETSc.Mat().createAIJ(size=(n, n), csr=(colptr.astype(numpy.int32), rowind.astype(numpy.int32), values.astype(numpy.float64))) #type:ignore
+            self.petsc_mat = PETSc.Mat().createAIJ(size=(n, n), csr=(colptr.astype(numpy.int32), rowind.astype(numpy.int32), values.astype(numpy.float64)),comm=get_mpi_world_comm()) #type:ignore
             
             self.petsc_mat.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False)
             # Force diagonal:

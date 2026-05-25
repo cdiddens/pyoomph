@@ -1330,6 +1330,7 @@ class Problem:
     max_residuals: float
     minimum_arclength_ds: float
     newton_relaxation_factor: float
+    nodal_block_dof_arrangement_used: bool
     sparse_assembly_method: str
     use_custom_residual_jacobian: bool
     def __init__(self) -> None:
