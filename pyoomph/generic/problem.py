@@ -414,6 +414,8 @@ class Problem(_pyoomph.Problem):
         #: Spatial adaption steps for the initial condition. If set to ``None``, we refine initially up to :py:attr:`max_refinement_level`.
         self.initial_adaption_steps:Union[None,int]=None #Adapting in the first step
         self.remove_macro_elements_after_initial_adaption:Union[bool,Literal["auto"]]="auto" # "auto" means: Only if the coordinates are free
+        #: In distributed runs, we call load balance after each non-uniform adaptions
+        self.call_load_balance_in_initial_adaption=False
 
         #: Minimum error of all meshes for spatial adaptivity. If the error is below this threshold, we may unrefine locally.
         self.min_permitted_error:float=0.0001	#Some defaults for the meshes
@@ -2693,6 +2695,8 @@ class Problem(_pyoomph.Problem):
                         if nref==0 and nunref==0:
                             no_need_to_reassign=True
                             break
+                    if self.is_distributed() and self.call_load_balance_in_initial_adaption:                        
+                        self.load_balance()
                 if self.initial_adaption_steps>0 and not (no_need_to_reassign):
                     self.map_nodes_on_macro_elements()
                     self.set_initial_condition()
@@ -6038,7 +6042,79 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         if relative_to_output_dir:
             filename=self.get_output_directory(filename)
         return NumericalTextOutputFile(filename,header=header)
+
+
+    # Called from load_balance
+    def _build_mesh(self):
+        print("Building mesh in Python","On enter, we have",self.nsub_mesh(),"submeshes, and the mesh dict keys are: "+str(self._meshdict.keys()))
+        for meshname,eqtree in self._equation_system.get_children().items(): 
+            #Find the mesh that generates the mesh we want to have
+            if eqtree._equations is None: 
+                raise RuntimeError("Empty bulk equations")
+            mesh=None
+            for m in self._meshtemplate_list:
+                if m.has_domain(meshname):
+                    mesh=MeshFromTemplate(self,m,meshname,eqtree,previous_mesh=self._meshdict.get(meshname,None))                    
+                    
+                    self._meshdict[meshname]=mesh
+                    assert eqtree._equations is not None
+                    eqtree._equations._mesh=mesh  #type:ignore
+                    eqtree.get_code_gen()._mesh=mesh
+                    mesh._finalise_creation()
+                    print("Mesh '"+meshname+"' generated from template '"+str(m)+"'","NELEMENTS: ",mesh.nelement())
+            if eqtree._equations._is_ode(): 
+                if mesh is not None:
+                    if not isinstance(mesh,ODEStorageMesh):
+                        raise RuntimeError("Cannot add an ODE to a spatial mesh yet")
+                mesh=ODEStorageMesh(self,eqtree,meshname)
+                eqtree.get_code_gen()._mesh=mesh 
+                eqtree.get_code_gen().set_latex_printer(self.latex_printer)
+                self._meshdict[meshname]=mesh
+                raise RuntimeError("ODE meshes are not fully implemented yet. Please check whether this works")
+            else:
+                if mesh is None:
+                    #print(str(self._equation_system))
+                    avdoms=set()
+                    for m in self._meshtemplate_list:
+                        avdoms.update(set(m._domains.keys()))
+                    raise RuntimeError("No mesh template with a domain named '"+meshname+'" was added, but there are equations defined on this domain. Available domains are '+str(avdoms))
+        print("Finished building mesh in Python")
+        print("Mesh dict keys: "+str(self._meshdict.keys()))
+        self._interfacemeshes=[]
+        print(self._interfacemeshes)
+        self.rebuild_global_mesh_from_list(rebuild=False)
+        #self.rebuild_global_mesh()
+        print("NSUBMESH",self.nsub_mesh())
+        import gc
+        gc.collect()
+        gc.collect()
+        gc.collect()
+        gc.collect()
+        self.rebuild_global_mesh()
         
+        self.invalidate_cached_mesh_data()
+        #eqs=self._equation_system.get_by_path("domain")
+        
+        #out=cast(CombinedEquations,eqs)
+        #out.
+        #print(eqs)
+        #exit()
+        
+    def load_balance(self):
+        if not self.is_distributed():
+            return
+        
+        super().load_balance()
+        
+        self.rebuild_global_mesh_from_list(rebuild=True)
+        self.actions_after_remeshing()
+        self.reapply_boundary_conditions()
+        print("After load balance, we have",self.nsub_mesh(),"submeshes, and the mesh dict keys are: "+str(self._meshdict.keys()))
+        print("ON PROC",get_mpi_rank(),self.ndof(),self.nsub_mesh(),self.mesh_pt(0).nelement())
+        
+        
+        
+                
 
 ############## DOF SELECTOR ###################
 class _DofSelector:
