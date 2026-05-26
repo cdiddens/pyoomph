@@ -738,6 +738,7 @@ class MeshFromTemplateBase(BaseMesh):
         self._error_estimator: Z2ErrorEstimator  # =None
         self._solves_since_remesh = 0  # Counting the number of solves since last remesh
         self._periodic_corner_node_info: Dict[Node, Node] = {}
+        self._initial_uniform_refinement_level=0
 
         T = TypeVar("T")
 

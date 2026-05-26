@@ -148,6 +148,7 @@ class GeneralSolverCallback(_pyoomph.GeneralSolverCallback):
 		for i in range(1,len(options)):
 			if options[i]!=0:
 				raise RuntimeError("ERROR: METIS option " + str(i) + " is not supported")				
+		print("Calling PyMetis with nparts=",nparts,"and objtype=",opts.objtype,"and vwgt=",vwgt)
 		res=pymetis.part_graph(nparts,adjacency=adj,vweights=vwgt)
 		part[:]=res[1] #type:ignore		
 		edgecut[0]=res[0] #type:ignore

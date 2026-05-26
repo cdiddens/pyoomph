@@ -2407,6 +2407,14 @@ class Problem(_pyoomph.Problem):
         self.compile_meshes()
 
         self.rebuild_global_mesh_from_list(rebuild=True)
+        
+        must_uniform_refine=False
+        for mesh in self._meshdict.values():
+            if isinstance(mesh,MeshFromTemplateBase) and mesh._initial_interface_refinement>0:
+                must_uniform_refine=True  
+                break
+        if must_uniform_refine:
+            raise NotImplementedError("Not implemented yet: Uniform refinement of all meshes before redefining the problem...")
 
         self.relink_external_data()
         self._assemble_defined_field_list()
@@ -2416,6 +2424,7 @@ class Problem(_pyoomph.Problem):
         self.reapply_boundary_conditions()
 
         if self.cmdlineargs.distribute:
+            raise NotImplementedError("Not implemented yet: Redefining the problem with distribution...")
             self.distribute()
 
         self.init_output(redefined=True)
@@ -2604,9 +2613,10 @@ class Problem(_pyoomph.Problem):
         self.compile_meshes()
         #print("MESH COMPILE DONE")
 
-        infofile = open(os.path.join(self.get_output_directory(), "_numerical_factors.txt"), "w")
-        infofile.write(self._equation_system.numerical_factors_to_string())
-        infofile.close()
+        if get_mpi_rank()==0:
+            infofile = open(os.path.join(self.get_output_directory(), "_numerical_factors.txt"), "w")
+            infofile.write(self._equation_system.numerical_factors_to_string())
+            infofile.close()
 
         if self.latex_printer is not None:
 #            raise RuntimeError("LATEX PRINTER")
@@ -2614,6 +2624,19 @@ class Problem(_pyoomph.Problem):
 
 
         self.rebuild_global_mesh_from_list(rebuild=False)
+        
+        must_uniform_refine=False
+        for mesh in self._meshdict.values():
+            if isinstance(mesh,MeshFromTemplateBase) and mesh._initial_uniform_refinement_level>0:
+                must_uniform_refine=True  
+                break
+        if must_uniform_refine:
+            self.actions_before_adapt()
+            for mesh in self._meshdict.values():
+                if isinstance(mesh,MeshFromTemplateBase) and mesh._initial_uniform_refinement_level>0:
+                    for _ in range(mesh._initial_uniform_refinement_level):
+                        mesh.refine_uniformly()
+            self.actions_after_adapt()
 
         self.relink_external_data()
         self._assemble_defined_field_list()
@@ -2632,9 +2655,11 @@ class Problem(_pyoomph.Problem):
 
 
         if self.cmdlineargs.distribute:
-            self.actions_before_distribute()
+            print("DISTRIBUTING THE PROBLEM")
+            self.actions_before_distribute()            
             self.distribute()
             self.actions_after_distribute()
+            print("DISTRIBUTING DONE")
             
             
         if self.check_mesh_integrity:
@@ -2656,9 +2681,18 @@ class Problem(_pyoomph.Problem):
                     if not self.is_quiet():
                         print("Initial adaption:",s,"of",self.initial_adaption_steps)
                     nref,nunref=self._adapt()
-                    if nref==0 and nunref==0:
-                        no_need_to_reassign=True
-                        break
+                    if get_mpi_nproc()>1:
+                        # Make sure nref and nunref are all considered
+                        nref_sum = get_mpi_sum(nref)
+                        nunref_sum = get_mpi_sum(nunref)
+                        if nref_sum == 0 and nunref_sum == 0:
+                            no_need_to_reassign = True
+                            break
+                        pass
+                    else:
+                        if nref==0 and nunref==0:
+                            no_need_to_reassign=True
+                            break
                 if self.initial_adaption_steps>0 and not (no_need_to_reassign):
                     self.map_nodes_on_macro_elements()
                     self.set_initial_condition()
@@ -5171,7 +5205,7 @@ class Problem(_pyoomph.Problem):
                     self.initialise_dt(_ts)
                     if not do_not_set_IC:
                         self.set_initial_condition()
-                else:
+                else:                    
                     raise RuntimeError("TODO: Init with a suitable time step. Pass e.g. startstep as keyword arg")
                 if out_initially is None:
                         out_initially = outstep != False

@@ -71,6 +71,10 @@ else:
 	def mpi_barrier(comm=MPI.COMM_WORLD)->None: #type:ignore
 		comm.barrier() #type:ignore
   
+  
+	def get_mpi_sum(value, comm=MPI.COMM_WORLD):
+		return comm.allreduce(value, op=MPI.SUM) #type:ignore
+  
 	if get_mpi_nproc()>1:
 		print("MPI initialized, rank",get_mpi_rank(),"of",get_mpi_nproc())
 		if get_mpi_rank()==0:

@@ -245,6 +245,12 @@ class RefineToLevel(Equations):
                     e._elemental_error_max_override = max(e._elemental_error_max_override,may_not_unrefine)
                     continue
             e._elemental_error_max_override=must_refine
+            
+    def after_compilation(self,codegen):
+        mesh=codegen._mesh
+        assert mesh is not None
+        mesh._initial_uniform_refinement_level=max(mesh._initial_uniform_refinement_level,self.level if self.level!="max" else (mesh._problem.initial_adaption_steps if mesh._problem.initial_adaption_steps is not None else mesh._problem.max_refinement_level) )
+        
 
 
 RefineToMaxLevel=RefineToLevel
