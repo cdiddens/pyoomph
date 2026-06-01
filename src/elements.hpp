@@ -466,7 +466,31 @@ namespace pyoomph
     virtual std::vector<std::pair<oomph::Data *, int>> get_field_data_list(std::string name, bool use_elemental_indices);
   };
 
-  class BulkElementODE0d : public virtual BulkElementBase
+
+  class ODEElementBase : public virtual oomph::FiniteElement
+  {
+  public:
+    /// Constructor
+    ODEElementBase()
+    {      
+      this->set_n_node(0);      
+    }
+
+    /// Broken copy constructor
+    ODEElementBase(const ODEElementBase&) = delete;
+
+    /// Calculate the geometric shape functions at local coordinate s
+    void shape(const oomph::Vector<double>& s, oomph::Shape& psi) const {}
+
+    void local_coordinate_of_node(const unsigned& j, oomph::Vector<double>& s) const
+    {
+      s.resize(0);
+    }
+    
+  };
+
+
+  class BulkElementODE0d :  public virtual BulkElementBase, public virtual ODEElementBase
   {
   protected:
     //	virtual void fill_element_info(); //TODO simplify this
@@ -506,6 +530,7 @@ namespace pyoomph
     void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const { isubelem = 0; }
 
     BulkElementODE0d(DynamicBulkElementInstance *code_inst, oomph::TimeStepper *tstepper);
+    virtual ~BulkElementODE0d();
 
     static BulkElementODE0d *construct_new(DynamicBulkElementInstance *code_inst, oomph::TimeStepper *tstepper)
     {

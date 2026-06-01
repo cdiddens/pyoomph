@@ -7602,6 +7602,7 @@ namespace pyoomph
 
 	BulkElementODE0d::BulkElementODE0d(DynamicBulkElementInstance *code_inst, oomph::TimeStepper *tstepper) : timestepper(tstepper)
 	{
+		//std::cout << "CONSTRUCT BULK ODE 0D " << this << std::endl;
 		this->codeinst = code_inst;
 		eleminfo.elem_ptr = this;
 		eleminfo.nnode = 1; // One dummy node... Necessary to create the buffers
@@ -7615,6 +7616,11 @@ namespace pyoomph
 		{
 			this->internal_data_pt(i)->set_time_stepper(timestepper, true);
 		}
+	}
+
+	BulkElementODE0d::~BulkElementODE0d()
+	{
+		//std::cout << "DESTRUCT BULK ODE 0D " << this << "  " << dynamic_cast<oomph::GeneralisedElement*>(this) << std::endl;
 	}
 
 	void BulkElementODE0d::to_numpy(double *dest)

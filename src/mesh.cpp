@@ -539,9 +539,9 @@ namespace pyoomph
   GiNaC::ex Mesh::evaluate_integral_function(std::string name)
   {
     unsigned nelement = this->nelement();
-    if (!nelement)
-      return 0;
-    int index = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_code_instance()->get_integral_function_index(name);
+    int index;
+    if (!nelement) index=0; //Can't skip out here, since it might run into an MPI call later
+     index= dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_code_instance()->get_integral_function_index(name);
     if (index < 0)
       throw_runtime_error("Integral function " + name + " not defined on this mesh");
     double res = 0.0;
@@ -563,7 +563,9 @@ namespace pyoomph
       res = sum;
     }
 #endif
-    GiNaC::ex factor_and_unit = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_code_instance()->get_element_class()->get_integral_expression_unit_factor(name);
+    
+    GiNaC::ex factor_and_unit = this->codeinst->get_element_class()->get_integral_expression_unit_factor(name);
+    //GiNaC::ex factor_and_unit = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_code_instance()->get_element_class()->get_integral_expression_unit_factor(name);
     return factor_and_unit * res;
   }
 
@@ -4182,6 +4184,29 @@ namespace pyoomph
         }
       }
     }
+  }
+
+
+  ODEStorageMesh::ODEStorageMesh() : Mesh()
+		{
+			this->disable_adaptation();
+			this->spatial_error_estimator_pt() = new DummyErrorEstimator();
+			#ifdef OOMPH_HAS_MPI
+			 	//this->set_keep_all_elements_as_halos();
+			#endif
+		}
+		ODEStorageMesh::~ODEStorageMesh()
+		{
+			this->Element_pt.clear(); // Keep the ODEs alive, they are killed by python
+		}
+
+  oomph::GeneralisedElement *ODEStorageMesh::_create_ode_element(oomph::TimeStepper *ts)
+  {
+    BulkElementBase::__CurrentCodeInstance = this->codeinst;            
+    oomph::GeneralisedElement *ode = new BulkElementODE0d(this->codeinst, ts);
+    BulkElementBase::__CurrentCodeInstance = NULL;
+    this->add_element_pt(ode);
+    return ode;
   }
 
   void ODEStorageMesh::setup_initial_conditions(bool resetting_first_step, std::string ic_name)

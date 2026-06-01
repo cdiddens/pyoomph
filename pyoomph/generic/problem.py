@@ -1563,10 +1563,13 @@ class Problem(_pyoomph.Problem):
                         for ie in imesh.elements():
                             be=ie.get_bulk_element()
                             obe=ie.get_opposite_bulk_element()
-                            if obe._elemental_error_max_override<opp_minerr and be._elemental_error_max_override>=my_minerr:
-                                obe._elemental_error_max_override=0.5*(opp_minerr+opp_maxerr)
-                            elif obe._elemental_error_max_override>=opp_minerr and be._elemental_error_max_override<my_minerr:
-                                be._elemental_error_max_override=0.5*(my_minerr+my_maxerr)
+                            if obe is None:                            
+                                raise RuntimeError("Interface mesh "+imesh.get_full_name()+" has an opposite interface mesh, but the opposite bulk element is None. This should not happen.")
+                            if obe is not None:                            
+                                if obe._elemental_error_max_override<opp_minerr and be._elemental_error_max_override>=my_minerr:
+                                    obe._elemental_error_max_override=0.5*(opp_minerr+opp_maxerr)
+                                elif obe._elemental_error_max_override>=opp_minerr and be._elemental_error_max_override<my_minerr:
+                                    be._elemental_error_max_override=0.5*(my_minerr+my_maxerr)
                         for i,e in enumerate(mesh.elements()):
                             errs[name][i]=max(errs[name][i],e._elemental_error_max_override)
                         for i,e in enumerate(obm.elements()):
@@ -2919,11 +2922,23 @@ class Problem(_pyoomph.Problem):
 
 
     def actions_before_distribute(self):
+        for im in self._interfacemeshes:
+            if im._opposite_interface_mesh is not None:
+                opp=im._opposite_interface_mesh
+                for e in opp.elements():
+                    e.get_bulk_element().set_must_be_kept_as_halo(True)
+        
+        # Halo all ODEs
+        for m in self._meshdict.values():            
+            if isinstance(m,ODEStorageMesh):                                
+                m.get_element().set_must_be_kept_as_halo(True)                
+            
         self.actions_before_adapt()
         for _, m in self._meshdict.items():
             if isinstance(m, ODEStorageMesh):
                 continue
             m.ensure_halos_for_periodic_boundaries()
+        
             
     def actions_after_distribute(self):
         self.actions_after_adapt()

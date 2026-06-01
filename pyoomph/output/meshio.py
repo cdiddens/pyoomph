@@ -35,6 +35,7 @@ from pathlib import Path
 import meshio #type:ignore
 
 from ..meshes.meshdatacache import MeshDataEigenModes,MeshDataCacheOperatorBase,MeshDataCombineWithEigenfunction,MeshDataCartesianExtrusion,MeshDataRotationalExtrusion
+from mpi4py import MPI
 
 # Hack, because the meshio version does not have a meshio._mesh.topological_dimension["wedge15"] set!
 class Wedge15Cellblock(meshio.CellBlock):
@@ -270,6 +271,7 @@ class _MeshFileOutput(_BaseNumpyOutput):
 		assert self.write_pvd_file is not None
 		if all_files is None:
 			all_files=[new_filename]
+		#print("WRITING PVD FILE",self.write_pvd_file,all_files)
 		for i,f in enumerate(all_files):
 			pvd_entry=ET.SubElement(self.pvdcollection,"DataSet")
 			pvd_entry.set("timestep",str(self.mesh.get_problem().get_current_time(dimensional=not self.nondimensional, as_float=True)))
@@ -291,6 +293,20 @@ class _MeshFileOutput(_BaseNumpyOutput):
 			return
 
 
+
+
+		if (not mesh.is_mesh_distributed()) and self.mpi_rank>0:
+			return
+
+		if get_mpi_nproc()>1 and mesh.is_mesh_distributed():
+			# Get nelement for all meshes and merge them via MPI
+			my_nelement=mesh.nelement()
+			comm = MPI.COMM_WORLD
+			all_nelement = numpy.array(comm.allgather(my_nelement))
+   
+		
+   
+
 		additional_eigenvectors:List[int]=[]
 		evarg_for_cache=self.eigenvector
 		if isinstance(self.eigenvector,(list,set,tuple)):
@@ -309,186 +325,185 @@ class _MeshFileOutput(_BaseNumpyOutput):
 
 
 
-		if (not mesh.is_mesh_distributed()) and self.mpi_rank>0:
-			return
+		if mesh.nelement()>0:
+				
 
-		if (mesh.nelement()==0):
-			return
+			#eleminds,elemtypes,D0_data,DL_data,elemental_fields,nodal_data,field_names=self.get_nodal_values(self.mesh,with_elem_indices=True,with_discontinuous=True,tesselate_tri=self.tesselate_tri,hide_fields=self.hide_fields,eigenvector=self.eigenvector,eigenvector_mode=self.eigenvector_mode,nondimensional=self.nondimensional)
+			cache=self.get_cached_mesh_data(self.mesh,nondimensional=self.nondimensional,tesselate_tri=self.tesselate_tri,eigenvector=evarg_for_cache,eigenmode=self.eigenmode,history_index=self.history_index,operator=self.operator,discontinuous=self.discontinuous,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions)
+			#print("GEETING CACHE",self.operator,cache,cache.operator)
+			#print("GOT CACHE",cache,cache.nodal_values)
+			nodal_data=cache.nodal_values
+			field_names=cache.nodal_field_inds
+			elemtypes=cache.elem_types
+			elemental_fields=cache.elemental_field_inds
+			eleminds=cache.elem_indices
+			numDL=cache.DL_data.shape[1]
+			numD0 = cache.D0_data.shape[1] #type:ignore
 
-		#eleminds,elemtypes,D0_data,DL_data,elemental_fields,nodal_data,field_names=self.get_nodal_values(self.mesh,with_elem_indices=True,with_discontinuous=True,tesselate_tri=self.tesselate_tri,hide_fields=self.hide_fields,eigenvector=self.eigenvector,eigenvector_mode=self.eigenvector_mode,nondimensional=self.nondimensional)
-		cache=self.get_cached_mesh_data(self.mesh,nondimensional=self.nondimensional,tesselate_tri=self.tesselate_tri,eigenvector=evarg_for_cache,eigenmode=self.eigenmode,history_index=self.history_index,operator=self.operator,discontinuous=self.discontinuous,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions)
-		#print("GEETING CACHE",self.operator,cache,cache.operator)
-		#print("GOT CACHE",cache,cache.nodal_values)
-		nodal_data=cache.nodal_values
-		field_names=cache.nodal_field_inds
-		elemtypes=cache.elem_types
-		elemental_fields=cache.elemental_field_inds
-		eleminds=cache.elem_indices
-		numDL=cache.DL_data.shape[1]
-		numD0 = cache.D0_data.shape[1] #type:ignore
+			if "coordinate_x" in field_names.keys():
+				x:NPFloatArray=nodal_data[:,field_names["coordinate_x"]] 
+			else:
+				x:NPFloatArray = numpy.zeros(len(nodal_data)) #type:ignore	
+			if "coordinate_y" in field_names.keys():
+				y:NPFloatArray = nodal_data[:, field_names["coordinate_y"]] #type:ignore
+			else:
+				y:NPFloatArray = 0*x
+			if "coordinate_z" in field_names.keys():
+				z:NPFloatArray = nodal_data[:, field_names["coordinate_z"]] #type:ignore
+			else:
+				z:NPFloatArray = 0*x
+			field_data={}
+			outfields=cache.get_default_output_fields(rem_lagrangian=self.hide_lagrangian,rem_underscore=self.hide_underscore)
 
-		if "coordinate_x" in field_names.keys():
-			x:NPFloatArray=nodal_data[:,field_names["coordinate_x"]] 
-		else:
-			x:NPFloatArray = numpy.zeros(len(nodal_data)) #type:ignore	
-		if "coordinate_y" in field_names.keys():
-			y:NPFloatArray = nodal_data[:, field_names["coordinate_y"]] #type:ignore
-		else:
-			y:NPFloatArray = 0*x
-		if "coordinate_z" in field_names.keys():
-			z:NPFloatArray = nodal_data[:, field_names["coordinate_z"]] #type:ignore
-		else:
-			z:NPFloatArray = 0*x
-		field_data={}
-		outfields=cache.get_default_output_fields(rem_lagrangian=self.hide_lagrangian,rem_underscore=self.hide_underscore)
+			group_vector_fields=True
+			rev_vector_fields:Dict[str,str]={}
+			if group_vector_fields:
+				vector_fields = cache.vector_fields			
+				for a,_ in vector_fields.items():
+					for c in ["_x","_y","_z"]:
+						rev_vector_fields[a+c]=a
+			vector_fields_written:Set[str]=set()
 
-		group_vector_fields=True
-		rev_vector_fields:Dict[str,str]={}
-		if group_vector_fields:
-			vector_fields = cache.vector_fields			
-			for a,_ in vector_fields.items():
-				for c in ["_x","_y","_z"]:
-					rev_vector_fields[a+c]=a
-		vector_fields_written:Set[str]=set()
-
-		for n in outfields:
-			if n!="coordinate_x" and n!="coordinate_y" and n!="coordinate_z":
-				if group_vector_fields and n in rev_vector_fields:
-					vector_name=rev_vector_fields[n]
-					if vector_name in vector_fields_written:
+			for n in outfields:
+				if n!="coordinate_x" and n!="coordinate_y" and n!="coordinate_z":
+					if group_vector_fields and n in rev_vector_fields:
+						vector_name=rev_vector_fields[n]
+						if vector_name in vector_fields_written:
+							continue
+						data:List[NPFloatArray]=[]
+						for k in "_x","_y","_z":
+							if vector_name+k in outfields:
+								#print("GETTING DATA",vector_name,k,cache.get_data(vector_name+k))
+								data.append(cache.get_data(vector_name+k)) #type:ignore
+							else:
+								if len(data)>0:
+									data.append(numpy.zeros(len(data[0]))) #type:ignore
+						if len(data)>0:
+							field_data[vector_name]=numpy.transpose(numpy.array(data)) #type:ignore
+							vector_fields_written.add(vector_name)
 						continue
-					data:List[NPFloatArray]=[]
-					for k in "_x","_y","_z":
-						if vector_name+k in outfields:
-							#print("GETTING DATA",vector_name,k,cache.get_data(vector_name+k))
-							data.append(cache.get_data(vector_name+k)) #type:ignore
-						else:
-							if len(data)>0:
-								data.append(numpy.zeros(len(data[0]))) #type:ignore
-					if len(data)>0:
-						field_data[vector_name]=numpy.transpose(numpy.array(data)) #type:ignore
-						vector_fields_written.add(vector_name)
-					continue
 
-				field_data[n]=cache.get_data(n)
-				#print("MESHIO FIELDADTA",n,field_data[n])
-				if field_data[n] is None:
-					del field_data[n]
-				if additional_eigenvectors is not None:
-					for eigenv in additional_eigenvectors:
-						re_name="EIGEN_"+str(eigenv)+"_REAL_"+n
-						im_name = "EIGEN_" + str(eigenv) + "_IMAG_"+n
-						field_data[re_name] = cache.get_data(n,additional_eigenvector=eigenv,eigen_real_imag=0)
-						field_data[im_name] = cache.get_data(n, additional_eigenvector=eigenv, eigen_real_imag=1)
-		
-		if cache.discontinuous:
-			for k,v in elemental_fields.items():
-				if k in outfields:
-					if v>=numDL:
-						field_data[k]=cache.D0_data[:,v-numDL]
-					else:
-						field_data[k]=cache.DL_data[:,v] 
-
-		points=numpy.transpose(numpy.array([x,y,z])) #type:ignore
-		cells = []
-		cell_data:Dict[str,List[NPFloatArray]] = {}
-
-		if self.tesselate_tri and self.mesh.get_dimension()>1:
-			if self.mesh.get_dimension()==3:
-				raise RuntimeError("TODO")
-			cells = [("triangle", eleminds)]
-			#print(eleminds)
-			#print(len(cache.D0_data),len(eleminds))
-			if not cache.discontinuous:
-				for k, v in elemental_fields.items():
+					field_data[n]=cache.get_data(n)
+					#print("MESHIO FIELDADTA",n,field_data[n])
+					if field_data[n] is None:
+						del field_data[n]
+					if additional_eigenvectors is not None:
+						for eigenv in additional_eigenvectors:
+							re_name="EIGEN_"+str(eigenv)+"_REAL_"+n
+							im_name = "EIGEN_" + str(eigenv) + "_IMAG_"+n
+							field_data[re_name] = cache.get_data(n,additional_eigenvector=eigenv,eigen_real_imag=0)
+							field_data[im_name] = cache.get_data(n, additional_eigenvector=eigenv, eigen_real_imag=1)
+			
+			if cache.discontinuous:
+				for k,v in elemental_fields.items():
 					if k in outfields:
-						if cell_data.get(k) is None:
-							cell_data[k] = []
-						if v >= numDL:
-							cell_data[k].append(cache.D0_data[:, v - numDL]) #type:ignore
+						if v>=numDL:
+							field_data[k]=cache.D0_data[:,v-numDL]
 						else:
-							cell_data[k].append(cache.DL_data[:, v, 0])	#type:ignore #TODO: Slopes
+							field_data[k]=cache.DL_data[:,v] 
 
-		else:
-			present_elem_types,inds = numpy.unique(elemtypes,return_inverse=True) #type:ignore
-			#print("ELEMTYPES",elemtypes)
-			pointperm = numpy.array([0], dtype=int) #type:ignore
-			lperm = numpy.array([0, 1], dtype=int) #type:ignore
-			lperm3 = numpy.array([0, 2, 1], dtype=int) #type:ignore
-			triperm = numpy.array([0, 1, 2], dtype=int) #type:ignore
-			triC1TBperm = numpy.array([0, 1, 2], dtype=int) #type:ignore			
-			tetraperm = numpy.array([0, 1, 2,3], dtype=int) #type:ignore
-			wedgeperm=numpy.array([0,1,2,3,4,5],dtype=int) #type:ignore
-			wedge18perm=numpy.array([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17],dtype=int) #type:ignore
-			wedge12perm=numpy.array([0,1,2,3,4,5,6,7,8,9,10,11],dtype=int) #type:ignore
-			#tetra10perm = numpy.array([0, 1, 2, 3,4,5,6,7,8,9], dtype=int)
-			tetra10perm = numpy.array([0, 1, 2, 3, 4, 7, 5, 6,  9,8], dtype=int) #type:ignore
-			triperm6 = numpy.array([0, 1, 2, 3, 4, 5], dtype=int) #type:ignore
-			triperm7 = numpy.array([0, 1, 2, 3, 4, 5,6], dtype=int) #type:ignore
-			quadperm = numpy.array([0, 1, 3, 2], dtype=int) #type:ignore
-			quad9perm = numpy.array([0, 2, 8, 6, 1, 5, 7, 3, 4], dtype=int) #type:ignore
-			hexahedronperm = numpy.array([0, 1, 3, 2, 4, 5, 7, 6], dtype=int) #type:ignore
-			#hexahedronperm27 = numpy.array([0, 8, 1, 11, 24, 9, 3, 10,2,16,22,17,20,26,21,19,23,18,4,12,5,15,25,13,7,14,6], dtype=int)
-			hexahedronperm27 = numpy.array([0, 2, 8, 6, 18, 20, 26, 24, 1, 5, 7, 3, 19, 23, 25, 21, 9, 11, 17, 15, 12, 14, 10, 16, 4, 22, 13]) #type:ignore
-			for et in present_elem_types:
-				elinds=numpy.argwhere(elemtypes==et) #type:ignore
-				#print(et,elinds)
-				#rint((et,elemental_fields))
+			points=numpy.transpose(numpy.array([x,y,z])) #type:ignore
+			cells = []
+			cell_data:Dict[str,List[NPFloatArray]] = {}
+
+			if self.tesselate_tri and self.mesh.get_dimension()>1:
+				if self.mesh.get_dimension()==3:
+					raise RuntimeError("TODO")
+				cells = [("triangle", eleminds)]
+				#print(eleminds)
+				#print(len(cache.D0_data),len(eleminds))
 				if not cache.discontinuous:
-					for k,v in elemental_fields.items():
+					for k, v in elemental_fields.items():
 						if k in outfields:
 							if cell_data.get(k) is None:
-								cell_data[k]=[]
-							if v>=numDL:
-								cell_data[k].append(cache.D0_data[elinds,v-numDL])
+								cell_data[k] = []
+							if v >= numDL:
+								cell_data[k].append(cache.D0_data[:, v - numDL]) #type:ignore
 							else:
-								cell_data[k].append(cache.DL_data[elinds,v,0]) #TODO: Slopes
-				if et==0:
-					cells.append(("vertex",eleminds[elinds, pointperm])) #type:ignore
-				elif et==1: #line
-					cells.append(("line", eleminds[elinds, lperm])) #type:ignore
-				elif et==2: #line3
-					cells.append(("line3", eleminds[elinds, lperm3])) #type:ignore
-				elif et==3: #tri
-					cells.append(("triangle", eleminds[elinds, triperm])) #type:ignore
-				elif et==66: #tri C1TB (ignore the center node)
-					cells.append(("triangle", eleminds[elinds, triC1TBperm])) #type:ignore					
-				elif et==4: #tetra
-					cells.append(("tetra", eleminds[elinds, tetraperm])) #type:ignore
-				elif et == 9:  # tri6
-					cells.append(("triangle6", eleminds[elinds, triperm6])) #type:ignore
-				elif et == 99:  # tri6
-					if "topological_dimension" not in dir(meshio._mesh) or "triangle7" in meshio._mesh.topological_dimension.keys(): #type:ignore
-						cells.append(("triangle7", eleminds[elinds, triperm7])) #type:ignore
-					else:
+								cell_data[k].append(cache.DL_data[:, v, 0])	#type:ignore #TODO: Slopes
+
+			else:
+				present_elem_types,inds = numpy.unique(elemtypes,return_inverse=True) #type:ignore
+				#print("ELEMTYPES",elemtypes)
+				pointperm = numpy.array([0], dtype=int) #type:ignore
+				lperm = numpy.array([0, 1], dtype=int) #type:ignore
+				lperm3 = numpy.array([0, 2, 1], dtype=int) #type:ignore
+				triperm = numpy.array([0, 1, 2], dtype=int) #type:ignore
+				triC1TBperm = numpy.array([0, 1, 2], dtype=int) #type:ignore			
+				tetraperm = numpy.array([0, 1, 2,3], dtype=int) #type:ignore
+				wedgeperm=numpy.array([0,1,2,3,4,5],dtype=int) #type:ignore
+				wedge18perm=numpy.array([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17],dtype=int) #type:ignore
+				wedge12perm=numpy.array([0,1,2,3,4,5,6,7,8,9,10,11],dtype=int) #type:ignore
+				#tetra10perm = numpy.array([0, 1, 2, 3,4,5,6,7,8,9], dtype=int)
+				tetra10perm = numpy.array([0, 1, 2, 3, 4, 7, 5, 6,  9,8], dtype=int) #type:ignore
+				triperm6 = numpy.array([0, 1, 2, 3, 4, 5], dtype=int) #type:ignore
+				triperm7 = numpy.array([0, 1, 2, 3, 4, 5,6], dtype=int) #type:ignore
+				quadperm = numpy.array([0, 1, 3, 2], dtype=int) #type:ignore
+				quad9perm = numpy.array([0, 2, 8, 6, 1, 5, 7, 3, 4], dtype=int) #type:ignore
+				hexahedronperm = numpy.array([0, 1, 3, 2, 4, 5, 7, 6], dtype=int) #type:ignore
+				#hexahedronperm27 = numpy.array([0, 8, 1, 11, 24, 9, 3, 10,2,16,22,17,20,26,21,19,23,18,4,12,5,15,25,13,7,14,6], dtype=int)
+				hexahedronperm27 = numpy.array([0, 2, 8, 6, 18, 20, 26, 24, 1, 5, 7, 3, 19, 23, 25, 21, 9, 11, 17, 15, 12, 14, 10, 16, 4, 22, 13]) #type:ignore
+				for et in present_elem_types:
+					elinds=numpy.argwhere(elemtypes==et) #type:ignore
+					#print(et,elinds)
+					#rint((et,elemental_fields))
+					if not cache.discontinuous:
+						for k,v in elemental_fields.items():
+							if k in outfields:
+								if cell_data.get(k) is None:
+									cell_data[k]=[]
+								if v>=numDL:
+									cell_data[k].append(cache.D0_data[elinds,v-numDL])
+								else:
+									cell_data[k].append(cache.DL_data[elinds,v,0]) #TODO: Slopes
+					if et==0:
+						cells.append(("vertex",eleminds[elinds, pointperm])) #type:ignore
+					elif et==1: #line
+						cells.append(("line", eleminds[elinds, lperm])) #type:ignore
+					elif et==2: #line3
+						cells.append(("line3", eleminds[elinds, lperm3])) #type:ignore
+					elif et==3: #tri
+						cells.append(("triangle", eleminds[elinds, triperm])) #type:ignore
+					elif et==66: #tri C1TB (ignore the center node)
+						cells.append(("triangle", eleminds[elinds, triC1TBperm])) #type:ignore					
+					elif et==4: #tetra
+						cells.append(("tetra", eleminds[elinds, tetraperm])) #type:ignore
+					elif et == 9:  # tri6
 						cells.append(("triangle6", eleminds[elinds, triperm6])) #type:ignore
-				elif et==10 or et==100: #tetra10 (or with bubbles, which are not possible)
-					cells.append(("tetra10", eleminds[elinds, tetra10perm])) #type:ignore
-				elif et==6: #quad
-					cells.append(("quad", eleminds[elinds, quadperm])) #type:ignore
-				elif et==8: #quad9
-					cells.append(("quad9", eleminds[elinds,quad9perm])) #type:ignore
-				elif et==11: #hexahedron
-					cells.append(("hexahedron", eleminds[elinds,hexahedronperm])) #type:ignore
-				elif et==14: #hexahedron27
-					cells.append(("hexahedron27", eleminds[elinds,hexahedronperm27])) #type:ignore
-				elif et==7: # wegde (only from rotational extrusion at the moment)
-					cells.append(("wedge",eleminds[elinds,wedgeperm])) #type:ignore
-				elif et==77: # wedge12 (only from rotational extrusion at the moment)
-					if "topological_dimension" not in dir(meshio._mesh) or "wedge12" in meshio._mesh.topological_dimension.keys(): #type:ignore
-						cells.append(("wedge12", eleminds[elinds, wedge12perm])) #type:ignore
+					elif et == 99:  # tri6
+						if "topological_dimension" not in dir(meshio._mesh) or "triangle7" in meshio._mesh.topological_dimension.keys(): #type:ignore
+							cells.append(("triangle7", eleminds[elinds, triperm7])) #type:ignore
+						else:
+							cells.append(("triangle6", eleminds[elinds, triperm6])) #type:ignore
+					elif et==10 or et==100: #tetra10 (or with bubbles, which are not possible)
+						cells.append(("tetra10", eleminds[elinds, tetra10perm])) #type:ignore
+					elif et==6: #quad
+						cells.append(("quad", eleminds[elinds, quadperm])) #type:ignore
+					elif et==8: #quad9
+						cells.append(("quad9", eleminds[elinds,quad9perm])) #type:ignore
+					elif et==11: #hexahedron
+						cells.append(("hexahedron", eleminds[elinds,hexahedronperm])) #type:ignore
+					elif et==14: #hexahedron27
+						cells.append(("hexahedron27", eleminds[elinds,hexahedronperm27])) #type:ignore
+					elif et==7: # wegde (only from rotational extrusion at the moment)
+						cells.append(("wedge",eleminds[elinds,wedgeperm])) #type:ignore
+					elif et==77: # wedge12 (only from rotational extrusion at the moment)
+						if "topological_dimension" not in dir(meshio._mesh) or "wedge12" in meshio._mesh.topological_dimension.keys(): #type:ignore
+							cells.append(("wedge12", eleminds[elinds, wedge12perm])) #type:ignore
+						else:
+							cells.append(("wedge", eleminds[elinds, wedgeperm])) #type:ignore
+
+						#cells.append(Wedge15Cellblock("wedge15",numpy.asarray(eleminds[elinds[:,0],:])))
 					else:
-						cells.append(("wedge", eleminds[elinds, wedgeperm])) #type:ignore
+						raise RuntimeError("Unknown element type "+str(et))
 
-					#cells.append(Wedge15Cellblock("wedge15",numpy.asarray(eleminds[elinds[:,0],:])))
-				else:
-					raise RuntimeError("Unknown element type "+str(et))
-
-		meshout = meshio.Mesh(points, cells, point_data=field_data,cell_data=cell_data) #type:ignore
+			
+			meshout = meshio.Mesh(points, cells, point_data=field_data,cell_data=cell_data) #type:ignore
 		allfiles =None
 		if self.mesh.is_mesh_distributed():
 			fname = self.fname_trunk + "_{:06d}_{:d}".format(step,self.mpi_rank) + "." + self.file_ext
-			allfiles=[self.fname_trunk + "_{:06d}_{:d}".format(step,i) + "." + self.file_ext for i in range(get_mpi_nproc())]
+			contributing_procs = numpy.argwhere(all_nelement>0)[:,0] #type:ignore
+			allfiles=[self.fname_trunk + "_{:06d}_{:d}".format(step,i) + "." + self.file_ext for i in contributing_procs]
 		else:
 			fname = self.fname_trunk + "_{:06d}".format(step) + "." + self.file_ext
 		if self.in_subdir:
@@ -502,7 +517,8 @@ class _MeshFileOutput(_BaseNumpyOutput):
 			fname = os.path.join(self.problem.get_output_directory(), fname)
 
 		#print(mesh)
-		meshio.write(fname, meshout) #type:ignore
+		if mesh.nelement()>0:
+			meshio.write(fname, meshout) #type:ignore
 
 		if self.write_pvd_file and self.mpi_rank==0:
 			self.write_pvd(rel_filename,allfiles)

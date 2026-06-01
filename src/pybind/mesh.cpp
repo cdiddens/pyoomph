@@ -333,6 +333,25 @@ void PyReg_Mesh(py::module &m)
 			return -1;
 			#endif
 			})
+		
+		.def("set_must_be_kept_as_halo", [](oomph::GeneralisedElement *self,bool halo)
+			 {
+			#ifdef OOMPH_HAS_MPI				
+			if (halo) self->set_must_be_kept_as_halo(); 
+			else self->unset_must_be_kept_as_halo();
+			#endif
+			})
+		.def("must_be_kept_as_halo", [](oomph::GeneralisedElement *self) -> bool
+			 {
+			#ifdef OOMPH_HAS_MPI				
+			return self->must_be_kept_as_halo(); 
+			#else
+			return false;
+			#endif
+			})
+		.def_property_readonly("_cpp_ptr_address", [](const oomph::GeneralisedElement & self) {
+            return reinterpret_cast<uintptr_t>(&self);
+        })
 		.def("describe_my_dofs", [](oomph::GeneralisedElement *self, std::string in)
 			 {
 	   std::ostringstream oss;
@@ -605,6 +624,21 @@ void PyReg_Mesh(py::module &m)
 			if (!be) return 0;
 			return dynamic_cast<pyoomph::Node*>(be->boundary_node_pt(dir,index)); },
 			py::return_value_policy::reference)
+		.def("_ode_elem_to_numpy", [](oomph::GeneralisedElement *self)
+			 {
+			 
+			 pyoomph::BulkElementODE0d * ode=dynamic_cast<pyoomph::BulkElementODE0d *>(self);
+			 if (!ode) { throw_runtime_error("Not an ODE element"); }
+			 unsigned ndata=ode->get_code_instance()->get_func_table()->numfields_D0;
+			 auto data=py::array_t<double>({ndata});
+			 ode->to_numpy((double*)data.request().ptr);
+			 std::map<std::string,unsigned> field_desc;
+			 auto  nfd=ode->get_code_instance()->get_elemental_field_indices();
+			 for (auto & nf : nfd)
+			 {
+				field_desc[nf.first]=nf.second;
+			 }
+			 return std::make_tuple(data,field_desc); })
 
 		.def("ninternal_data", [](oomph::GeneralisedElement *self) -> int
 			 {
@@ -858,6 +892,15 @@ void PyReg_Mesh(py::module &m)
 			 { m->ensure_external_data(); })
 		.def("ensure_halos_for_periodic_boundaries", [](pyoomph::Mesh *m)
 			 { m->ensure_halos_for_periodic_boundaries(); })
+		.def("nroot_halo_element", [](pyoomph::Mesh *m)
+			 { 
+				#ifdef OOMPH_HAS_MPI
+					return m->nroot_halo_element(); 
+				#else
+					return 0;
+				#endif
+			 }
+			)
 		.def("nrefined", [](pyoomph::Mesh *m)
 			 { return m->nrefined(); })
 		.def("nunrefined", [](pyoomph::Mesh *m)
@@ -1091,6 +1134,7 @@ void PyReg_Mesh(py::module &m)
  	   for (unsigned int i=0;i<errs.size();i++) oerrs[i]=errs[i];
  	   self->adapt(oerrs); });
 
+	   /*
 	py::class_<pyoomph::BulkElementODE0d, oomph::GeneralisedElement>(m, "BulkElementODE0d")
       .def("_debug",[](pyoomph::BulkElementODE0d * self)
       {
@@ -1121,19 +1165,25 @@ void PyReg_Mesh(py::module &m)
 			 return std::make_tuple(data,field_desc); })
 		.def_static("construct_new", &pyoomph::BulkElementODE0d::construct_new, py::return_value_policy::reference)
 		.def(py::init<pyoomph::DynamicBulkElementInstance *, oomph::TimeStepper *>()); // Constructor does not work
-
+*/
 	py::class_<pyoomph::ODEStorageMesh, pyoomph::Mesh, oomph::Mesh>(m, "ODEStorageMesh")
 		.def(py::init<>())
 		.def("_set_problem", [](pyoomph::ODEStorageMesh *self, pyoomph::Problem *p, pyoomph::DynamicBulkElementInstance *inst)
 			 { self->_set_problem(p, inst); })
-		.def(
+		.def("_create_ode_element", [](pyoomph::ODEStorageMesh *self, oomph::TimeStepper *ts)	->  oomph::GeneralisedElement *	
+			 {   oomph::GeneralisedElement * res=self->_create_ode_element(ts); 				
+				return dynamic_cast<pyoomph::BulkElementBase *>(res);				
+			}, py::return_value_policy::reference
+			)	;		
+		/*.def(
 			"_add_ODE", [](pyoomph::ODEStorageMesh *self, std::string name, pyoomph::BulkElementODE0d *ode)
+
 			{ return self->add_ODE(name, ode); },
-			py::keep_alive<1, 3>())
-		.def(
+			py::keep_alive<1, 3>())*/
+		/*.def(
 			"_get_ODE", [](pyoomph::ODEStorageMesh *self, std::string name)
 			{ return dynamic_cast<pyoomph::BulkElementODE0d *>(self->get_ODE(name)); },
-			py::return_value_policy::reference);
+			py::return_value_policy::reference);*/
 
 	py::class_<pyoomph::MeshTemplateElementPoint>(m, "MeshTemplateElementPoint");
 	py::class_<pyoomph::MeshTemplateElementLineC1>(m, "MeshTemplateElementLineC1");

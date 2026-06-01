@@ -1712,6 +1712,7 @@ class EquationTree:
                     self.setup_codegen_to_equations(reset_info=backup)
                     meshname=self.get_my_path_name()
                     #print(meshname)
+                    print("Creating ODE storage mesh for ",meshname)
                     mesh=ODEStorageMesh(problem,self,meshname)
                     self.get_code_gen()._mesh=mesh 
                     problem._meshdict[meshname]=mesh
@@ -2298,8 +2299,8 @@ class ODEEquations(BaseEquations):
         """
         from ..meshes.mesh import ODEStorageMesh
         assert isinstance(mesh, ODEStorageMesh)
-        e = mesh._get_ODE("ODE")
-        _, inds = e.to_numpy()
+        e = mesh.get_element()
+        _, inds = e._ode_elem_to_numpy()
         for k, v in self._pinned_dofs.items():
             if not (k in inds.keys()):
                 raise RuntimeError("Cannot pin the degree " + str(k) + " since it is not defined on this ODE: "

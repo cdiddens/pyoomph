@@ -2773,9 +2773,9 @@ namespace pyoomph
 						throw_runtime_error("Undefined field " + fn + " in contribution entry for residual/jacobian combination " + residual_names[i]);
 					}
 					unsigned row_index=field_name_to_index[fn];
-					residual_contributing_fields[i][row_index]=residual_contributing_fields[i][row_index]| ft->contributes_to_residual[i][j];
+					residual_contributing_fields[i][row_index]=residual_contributing_fields[i][row_index]| ft->contributes_to_residual[my_i][j];
 
-					if (ft->contributes_to_residual[i][j])
+					if (ft->contributes_to_residual[my_i][j])
 					{
 						residual_contributing_codes[i][row_index].insert(dc);
 					}
@@ -2788,8 +2788,8 @@ namespace pyoomph
 							throw_runtime_error("Undefined field " + fn2 + " in contribution entry for residual/jacobian combination " + residual_names[i]);
 						}
 						unsigned col_index=field_name_to_index[fn2];
-						jacobian_contributing_fields[i][row_index][col_index]=jacobian_contributing_fields[i][row_index][col_index] | ft->contributes_to_jacobian[i][j][k];
-						if (ft->contributes_to_jacobian[i][j][k])
+						jacobian_contributing_fields[i][row_index][col_index]=jacobian_contributing_fields[i][row_index][col_index] | ft->contributes_to_jacobian[my_i][j][k];
+						if (ft->contributes_to_jacobian[my_i][j][k])
 						{
 							jacobian_contributing_codes[i][row_index][col_index].insert(dc);
 						}

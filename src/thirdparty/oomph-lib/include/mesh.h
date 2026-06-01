@@ -1755,6 +1755,12 @@ namespace oomph
           // Vector of pointers to leaves in tree emanating from
           // current root halo element
           Vector<Tree*> leaf_pt;
+          // FOR PYOOMPH
+          if (!ref_el_pt->tree_pt())
+          {
+            vec_el_pt.push_back(el_pt);
+            continue;
+          }
           ref_el_pt->tree_pt()->stick_leaves_into_vector(leaf_pt);
 
           // Loop over leaves and add their objects (the finite elements)
@@ -1791,6 +1797,12 @@ namespace oomph
         RefineableElement* ref_el_pt = dynamic_cast<RefineableElement*>(el_pt);
         if (ref_el_pt != 0)
         {
+          // FOR PYOOMPH
+          if (!ref_el_pt->tree_pt())
+          {
+            vec_el_pt.push_back(el_pt);
+            continue;
+          }
           // Vector of pointers to leaves in tree emanating from
           // current root haloed element
           Vector<Tree*> leaf_pt;

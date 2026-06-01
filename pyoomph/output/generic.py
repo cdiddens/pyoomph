@@ -39,6 +39,7 @@ import _pyoomph
 from scipy.io import savemat,loadmat #type:ignore
 
 from ..typings import *
+from ..generic.mpi import get_mpi_rank
 import numpy
 
 if TYPE_CHECKING:
@@ -642,12 +643,11 @@ class _BaseODEOutput(_BaseOutputter):
 
     def init(self,eqtree:"EquationTree",continue_info:Optional[Dict[str,Any]]=None,rank:int=0):
         self._eqtree=eqtree
-        self._mpi_rank=rank
-        self._element=self._odemesh._get_ODE("ODE")
+        self._mpi_rank=rank        
         pass
 
     def get_ODE_values(self)->Tuple[NPFloatArray,Dict[str,int]]:
-        values,fieldinds=self._element.to_numpy()
+        values,fieldinds=self._eqtree._mesh._element._ode_elem_to_numpy()
         return values,fieldinds
 
     def output(self,step:int)->None:
@@ -668,8 +668,7 @@ class _ODEFileOutput(_BaseODEOutput):
         self.hide_underscore=hide_underscore
         if self.hide_underscore:
             raise RecursionError("TODO: Hiding underscore")
-        self.file:Any=None
-        self._element=self._odemesh._get_ODE("ODE")
+        self.file:Any=None        
         self._eqtree=eqtree
         self.first_column=first_column
         self.continue_info=continue_info
@@ -687,10 +686,11 @@ class _ODEFileOutput(_BaseODEOutput):
     def init(self,eqtree:"EquationTree",continue_info:Optional[Dict[str,Any]]=None,rank:int=0):
         super().init(eqtree,continue_info,rank)
         assert self.fname is not None
-        if continue_info is None:
-            self.file = open(self.fname, "w")
-        else:            
-            self.file=open(self.fname,"a")
+        if get_mpi_rank()==0:
+            if continue_info is None:
+                self.file = open(self.fname, "w")
+            else:            
+                self.file=open(self.fname,"a")
 
         values, fieldinds = self.get_ODE_values()
         obs=self._eqtree.get_mesh().evaluate_all_observables()
@@ -704,7 +704,7 @@ class _ODEFileOutput(_BaseODEOutput):
         #for i,n in enumerate(locs,start=len(values)+len(obs)):
          #   descs[i]=n
         
-        _, indices = self._element.to_numpy()
+        _, indices = self._odemesh._element._ode_elem_to_numpy()
         scales:List[ExpressionOrNum] = [1.0] * (len(indices)+len(obs)) #+len(locs)
         for k, i in indices.items():            
             s = self._eqtree.get_equations().get_scaling(k)
@@ -766,15 +766,17 @@ class _ODEFileOutput(_BaseODEOutput):
             else:
                 raise RuntimeError(repr(fc))
 
-        if continue_info is None:
-            self.file.write("#"+"\t".join(firstcols+descs)+"\n")
+        if get_mpi_rank()==0:
+            if continue_info is None:
+                self.file.write("#"+"\t".join(firstcols+descs)+"\n")
         self.firsttime=True
 
     def output(self,step:int):
+        
         values,_=self.get_ODE_values()
         obs=self._eqtree.get_mesh().evaluate_all_observables()
         
-        _, indices = self._element.to_numpy()
+        _, indices = self._odemesh._element._ode_elem_to_numpy()
         self._scales:List[ExpressionOrNum] = [1.0] * (len(indices)+len(obs))
         for k, i in indices.items():
             s = self._eqtree.get_equations().get_scaling(k)
@@ -810,9 +812,10 @@ class _ODEFileOutput(_BaseODEOutput):
                 firstcols.append(str(fc.value))
             else:
                 raise RuntimeError(repr(fc))
-
-        self.file.write("\t".join(firstcols+list(map(str,values)))+addstr+"\n")
-        self.file.flush()
+        
+        if get_mpi_rank()==0:
+            self.file.write("\t".join(firstcols+list(map(str,values)))+addstr+"\n")
+            self.file.flush()
 ######################
 
 class GenericOutput(BaseEquations):
@@ -1185,18 +1188,20 @@ class _IntegralObservableOutput(_BaseOutputter):
         assert fexts is not None
         if not isinstance(fexts,list):
             fexts=[fexts]
-        for ext in fexts:
-            if ext in ["mat","MAT"]:
-                continue
-            if ext not in self._files.keys():
-                _filename=self._filetrunk+"."+ext
-                if self._continue_info is None:
-                    self._files[ext]=open(_filename,"wt")
-                else:
-                    self._files[ext] = open(_filename, "at")
-                    #TODO: Trim here the output
-                    #print(self._continue_info)
-                    #raise RuntimeError("TODO")
+        
+        if get_mpi_rank()==0:
+            for ext in fexts:
+                if ext in ["mat","MAT"]:
+                    continue
+                if ext not in self._files.keys():
+                    _filename=self._filetrunk+"."+ext
+                    if self._continue_info is None:
+                        self._files[ext]=open(_filename,"wt")
+                    else:
+                        self._files[ext] = open(_filename, "at")
+                        #TODO: Trim here the output
+                        #print(self._continue_info)
+                        #raise RuntimeError("TODO")        
         firsttime=False
         if self._iexprs is None:
             firsttime=True
@@ -1249,6 +1254,7 @@ class _IntegralObservableOutput(_BaseOutputter):
                 raise RuntimeError(repr(fc))
 
         #line=[self.get_time()]
+        
         for n, v in sorted(all.items()):
             if n[0] != "_":
                 line.append(str(v))

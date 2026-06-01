@@ -5239,6 +5239,7 @@ namespace oomph
       // Get element and its domain
       GeneralisedElement* el_pt = backed_up_el_pt[e];
       unsigned el_domain = element_domain[e];
+      //std::cout << "Element " << e << " is not on current processor but may be a halo element:" << e << "  " << el_pt->ndof() << "  " << el_pt->must_be_kept_as_halo() << "  " << el_pt<< "  " << overrule_keep_as_halo_element_status << std::endl;
 
       // If element is located on current processor add it back to the mesh
       if (el_domain == unsigned(my_rank))
@@ -5250,6 +5251,7 @@ namespace oomph
       // Otherwise we may still need it if it's a halo element:
       else
       {
+        
         // If this current mesh has been told to keep all elements as halos,
         // OR the element itself knows that it must be kept then
         // keep it
@@ -5368,7 +5370,7 @@ namespace oomph
         RefineableElement* ref_el_pt = dynamic_cast<RefineableElement*>(el_pt);
         if (ref_el_pt != 0)
         {
-          //FOR PYOOMPH: Since meshes do not know whether they are TreeBased or not, we have eto check it
+          //FOR PYOOMPH: Since meshes do not know whether they are TreeBased or not, we have to check it
           if (ref_el_pt->tree_pt() != 0)ref_el_pt->tree_pt()->flush_object();
         }
 

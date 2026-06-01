@@ -190,15 +190,8 @@ namespace pyoomph
 		std::map<std::string, unsigned> name_to_index;
 
 	public:
-		ODEStorageMesh() : Mesh()
-		{
-			this->disable_adaptation();
-			this->spatial_error_estimator_pt() = new DummyErrorEstimator();
-		}
-		virtual ~ODEStorageMesh()
-		{
-			this->Element_pt.clear(); // Keep the ODEs alive, they are killed by python
-		}
+		ODEStorageMesh();
+		virtual ~ODEStorageMesh();		
 		virtual double get_temporal_error_norm_contribution();
 		virtual void adapt(const oomph::Vector<double> &elemental_error) {}
 		virtual void refine_uniformly(oomph::DocInfo &doc_info) {}
@@ -209,6 +202,7 @@ namespace pyoomph
 		virtual oomph::GeneralisedElement *get_ODE(std::string name);
 		virtual unsigned get_nodal_dimension() { return 0; }
 		virtual int get_element_dimension() { return 0; }
+		virtual oomph::GeneralisedElement *_create_ode_element(oomph::TimeStepper *ts);
 	};
 
 	class DynamicTree : public virtual oomph::Tree

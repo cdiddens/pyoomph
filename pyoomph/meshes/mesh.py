@@ -37,7 +37,7 @@ import numpy
 import _pyoomph
 
 from ..expressions.generic import Expression, ExpressionOrNum, is_zero, NameStrSequence
-
+from ..generic.mpi import get_mpi_rank
 
 
 
@@ -1504,6 +1504,7 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
     """
     def __init__(self, problem: "Problem", eqtree: "EquationTree", domainname: str):
         super().__init__()
+        print("ODEStorageMesh: Creating ODE storage mesh for domain", domainname,get_mpi_rank())
         self._problem: "Problem" = problem
         self._eqtree: Optional["EquationTree"] = eqtree
         self._eqtree._mesh = self  # type:ignore
@@ -1532,7 +1533,7 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
     def _setup_output_scales(self):
         ocg = self._codegen.get_equations()._get_current_codegen()  
         self._codegen.get_equations()._set_current_codegen(self._codegen)  
-        _, indices = self._element.to_numpy()
+        _, indices = self._element._ode_elem_to_numpy()
         scales: List[ExpressionOrNum] = [1.0] * len(indices)
         for k, i in indices.items():
             s = self._eqtree.get_equations().get_scaling(k)
@@ -1559,10 +1560,12 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
 
         eqs.before_compilation(self._codegen)  
         self._codegen._code = self._problem.compile_bulk_element_code(self._codegen, self, self._name)  
-        self._element = _pyoomph.BulkElementODE0d.construct_new(self._codegen.get_code(), self._problem.timestepper)  
+        #self._element = _pyoomph.BulkElementODE0d.construct_new(self._codegen.get_code(), self._problem.timestepper)  
+        #self._element.set_must_be_kept_as_halo(True) # ODE Dofs are always halo dofs, so they can be accessed from everywhere
         self._set_problem(self._problem, self._codegen._code)  
+        self._element=self._create_ode_element(self._problem.timestepper)
         self._setup_output_scales()
-        self._add_ODE("ODE", self._element)
+#        self._add_ODE("ODE", self._element)
         # self._transfer_mesh_functions()
         self._codegen.get_equations()._set_current_codegen(ocg) 
         self._eqtree.get_equations().after_compilation(self._codegen)
@@ -1582,8 +1585,11 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
     def evaluate_all_observables(self) -> Dict[str, ExpressionOrNum]:
         return BaseMesh.evaluate_all_observables(self)  # type:ignore
 
-    def get_element(self) -> _pyoomph.BulkElementODE0d:
-        return self._get_ODE("ODE")
+    #def get_element(self) -> _pyoomph.BulkElementODE0d:
+    def get_element(self) -> Element:
+        #print("GET ELEMENT",self._element)
+        return self._element
+        #return self._get_ODE("ODE")
 
     @overload
     def get_value(self, name: str, *,dimensional: bool=..., as_float: Literal[False]=...) -> _pyoomph.Expression: ...

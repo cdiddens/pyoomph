@@ -208,7 +208,8 @@ class EnforcedBC(InterfaceEquations):
         assert mesh._eqtree._parent is not None #type: ignore
         bulkmesh = mesh._eqtree._parent._mesh #type: ignore
         assert bulkmesh is not None
-        codeinst_inside = mesh.element_pt(0).get_code_instance()
+        codeinst_inside=mesh.get_code_gen().get_code()
+        #codeinst_inside = mesh.element_pt(0).get_code_instance()
         for k, _ in self.constraints.items():            
             index = [codeinst_inside.get_nodal_field_index(k)]  # TODO: Vectors
             psindex = None
