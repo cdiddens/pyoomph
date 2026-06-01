@@ -33,7 +33,7 @@ from ..expressions.generic import ExpressionOrNum,ExpressionNumOrNone,FiniteElem
 #Connects one or multiple fields at both sides of the interfaces via Lagrange multipliers
 #i.e. it ensures the same Neumann flux on both sides, whereas the magnitude of this flux is given by the Lagrange multiplier
 #which is automatically chosen that way that the condition <inner>=<outer> is satisfied.
-from ..meshes.mesh import MeshFromTemplateBase,Element
+from ..meshes.mesh import MeshFromTemplateBase,Element,InterfaceMesh
 
 from ..typings import *
 if TYPE_CHECKING:
@@ -249,7 +249,8 @@ class RefineToLevel(Equations):
     def after_compilation(self,codegen):
         mesh=codegen._mesh
         assert mesh is not None
-        mesh._initial_uniform_refinement_level=max(mesh._initial_uniform_refinement_level,self.level if self.level!="max" else (mesh._problem.initial_adaption_steps if mesh._problem.initial_adaption_steps is not None else mesh._problem.max_refinement_level) )
+        if not isinstance(mesh,InterfaceMesh):
+            mesh._initial_uniform_refinement_level=max(mesh._initial_uniform_refinement_level,self.level if self.level!="max" else (mesh._problem.initial_adaption_steps if mesh._problem.initial_adaption_steps is not None else mesh._problem.max_refinement_level) )
         
 
 

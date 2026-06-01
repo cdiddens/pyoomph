@@ -1712,7 +1712,7 @@ class EquationTree:
                     self.setup_codegen_to_equations(reset_info=backup)
                     meshname=self.get_my_path_name()
                     #print(meshname)
-                    print("Creating ODE storage mesh for ",meshname)
+                    #print("Creating ODE storage mesh for ",meshname)
                     mesh=ODEStorageMesh(problem,self,meshname)
                     self.get_code_gen()._mesh=mesh 
                     problem._meshdict[meshname]=mesh

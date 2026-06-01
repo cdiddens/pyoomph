@@ -53,7 +53,9 @@ class ElementSizeForSUPG(Equations):
         self.set_test_scaling(**{self.varname:1/scale_factor(self.varname)})
 
     def define_residuals(self):
-        elemsize,elemsize_test=var_and_test(self.varname)
+        elemsize,elemsize_test=var_and_test(self.varname)        
+        if not self.get_combined_equations()._assert_codegen()._coordinates_as_dofs:
+            self.set_Dirichlet_condition(self.varname,True)
         self.add_residual(eval_flag("moving_mesh")*(elemsize * elemsize_test * self.get_nodal_delta() - weak(1, elemsize_test, coordinate_system=cartesian,dimensional_dx=True)))
 
     # Size for SUPG

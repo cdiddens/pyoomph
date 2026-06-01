@@ -4336,7 +4336,7 @@ class Problem(_pyoomph.Problem):
                 raise RuntimeError("Cannot use azimuthal_mode or cartesian_wavenumber_k for fold solving")
             if eigenvector is None:
                 eigenvector = next(iter(self.get_last_eigenvectors()), None)
-            if eigenvector is None or len(eigenvector)==0:
+            if eigenvector is None or len(eigenvector)==0:                
                 self._start_bifurcation_tracking(parameter,bifurcation_type,blocksolve,[],[],0.0,{})
             else:
                 self._start_bifurcation_tracking(parameter,bifurcation_type,blocksolve,numpy.real(eigenvector),[],0.0,{}) #type:ignore
@@ -4404,7 +4404,9 @@ class Problem(_pyoomph.Problem):
                     omega = 0
 
             # First, we get all equations which must be zero for the base state and on the eigenvector
+          
             must_reapply_bcs=self._equation_system._before_eigen_solve(self.get_eigen_solver(), azimuthal_mode)
+          
             if must_reapply_bcs:
                 self.reapply_boundary_conditions() # Equation numbering might have been changed. Update it here!
                 self.reapply_boundary_conditions()

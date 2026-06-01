@@ -1504,7 +1504,7 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
     """
     def __init__(self, problem: "Problem", eqtree: "EquationTree", domainname: str):
         super().__init__()
-        print("ODEStorageMesh: Creating ODE storage mesh for domain", domainname,get_mpi_rank())
+        #print("ODEStorageMesh: Creating ODE storage mesh for domain", domainname,get_mpi_rank())
         self._problem: "Problem" = problem
         self._eqtree: Optional["EquationTree"] = eqtree
         self._eqtree._mesh = self  # type:ignore
@@ -1619,8 +1619,8 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
             RuntimeError: If the ODE has no value with the given name(s).
         """
         assert self._eqtree is not None
-        ode = self._get_ODE("ODE")
-        vals, inds = ode.to_numpy()
+        ode = self.get_element()
+        vals, inds = ode._ode_elem_to_numpy()
         if isinstance(name, str):
             names = [name]
         else:
@@ -1664,8 +1664,8 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
             None
         """
         assert self._eqtree is not None
-        ode = self._get_ODE("ODE")
-        _, inds = ode.to_numpy()
+        ode = self.get_element()
+        _, inds = ode._ode_elem_to_numpy()
         for n, v in namvals.items():
             if not n in inds.keys():
                 raise RuntimeError("The ODE has no value "+str(n))
@@ -1683,8 +1683,8 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
             ode.internal_data_pt(inds[n]).set_value(0, val)
 
     def define_state_file(self, state: "DumpFile",additional_info={}):
-        ode = self._get_ODE("ODE")
-        _, inds = ode.to_numpy()
+        ode = self._element
+        _, inds = ode._ode_elem_to_numpy()
         inds_sorted = list(sorted(list(inds)))
         numinds = len(inds_sorted)
         numinds = state.int_data(
