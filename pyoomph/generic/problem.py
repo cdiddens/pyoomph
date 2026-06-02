@@ -2641,6 +2641,7 @@ class Problem(_pyoomph.Problem):
                 if isinstance(mesh,MeshFromTemplateBase) and mesh._initial_uniform_refinement_level>0:
                     for _ in range(mesh._initial_uniform_refinement_level):
                         mesh.refine_uniformly()
+            self.relink_external_data()
             self.actions_after_adapt()
 
         self.relink_external_data()

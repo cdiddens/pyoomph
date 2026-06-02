@@ -165,8 +165,8 @@ class EigenMatrixManipulatorBase:
 			raise RuntimeError("Cannot find field "+str(fieldname)+" in mesh "+root.get_full_name())
 		res:Set[int]=set()
 		if  isinstance(root,ODEStorageMesh):
-			ode = root._get_ODE("ODE")
-			_, inds = ode.to_numpy()
+			ode = root.get_element()
+			_, inds = ode._ode_elem_to_numpy()
 			if not fieldname in inds.keys():
 				raise RuntimeError("Cannot get the field '"+fieldname+"' on ODE domain "+root.get_full_name())
 			eqn=ode.internal_data_pt(inds[fieldname]).eqn_number(0)
