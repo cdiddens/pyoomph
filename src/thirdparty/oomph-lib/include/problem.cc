@@ -327,7 +327,7 @@ namespace oomph
     // a uniform distributed distribution
     else if (!Problem_has_been_distributed)
     {
-      dist_pt = new LinearAlgebraDistribution(Communicator_pt, nrow,is_block_dof_arrangement_used() ? Block_dof_pt_start : Vector<unsigned long>(), true);
+      dist_pt = new LinearAlgebraDistribution(Communicator_pt, nrow,/*is_block_dof_arrangement_used() ? Block_dof_pt_start : Vector<unsigned long>(),*/ true);
     }
     // otherwise the problem is a distributed problem
     else
@@ -336,7 +336,7 @@ namespace oomph
       {
         case Uniform_matrix_distribution:
 
-          dist_pt = new LinearAlgebraDistribution(Communicator_pt, nrow,is_block_dof_arrangement_used() ? Block_dof_pt_start : Vector<unsigned long>(), true);
+          dist_pt = new LinearAlgebraDistribution(Communicator_pt, nrow,/*is_block_dof_arrangement_used() ? Block_dof_pt_start : Vector<unsigned long>(),*/ true);
           break;
 
         case Problem_matrix_distribution:
@@ -2279,6 +2279,8 @@ namespace oomph
       }
 
 
+      //Block_dof_pt_start.clear(); //FOR PYOOMPH - Deactivate this
+
 #ifdef OOMPH_HAS_MPI
 
       // reset previous allocation
@@ -2300,7 +2302,7 @@ namespace oomph
       else
 #endif
       {
-        Dof_distribution_pt->build(Communicator_pt, n_dof, is_block_dof_arrangement_used() ? Block_dof_pt_start : Vector<unsigned long>(), false);
+        Dof_distribution_pt->build(Communicator_pt, n_dof, /*is_block_dof_arrangement_used() ? Block_dof_pt_start : Vector<unsigned long>(),*/ false);
       }
 
       if (Global_timings::Doc_comprehensive_timings)

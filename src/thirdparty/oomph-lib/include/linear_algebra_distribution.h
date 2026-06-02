@@ -87,18 +87,18 @@ namespace oomph
                               const bool& distributed_ = true)
       : Comm_pt(0)
     {
-      this->build(&comm, n_row, oomph::Vector<unsigned long>(), distributed_);
+      this->build(&comm, n_row, /*oomph::Vector<unsigned long>(),*/ distributed_);
     };
-
+/*
     LinearAlgebraDistribution(const OomphCommunicator& comm,
                               const unsigned& n_row,
-                              const oomph::Vector<unsigned long> block_dof_pt_start, // FOR PYOOMPH
+                              //const oomph::Vector<unsigned long> block_dof_pt_start, // FOR PYOOMPH
                               const bool& distributed_ = true)
       : Comm_pt(0)
     {
       this->build(&comm, n_row, block_dof_pt_start, distributed_);
     };
-
+*/
     /// Constructor. Takes the first_row, nrow_local (both for this
     /// processor) and nrow as arguments. If nrow is not provided
     /// or equal to 0 then it will be computed automatically
@@ -119,7 +119,7 @@ namespace oomph
                               const bool& distributed_ = true)
       : Comm_pt(0)
     {
-      this->build(comm_pt, n_row, oomph::Vector<unsigned long>(), distributed_);
+      this->build(comm_pt, n_row,/* oomph::Vector<unsigned long>(),*/ distributed_);
     };
 
     /// Copy Constructor.
@@ -163,7 +163,7 @@ namespace oomph
     /// then every row is held on every processor
     void build(const OomphCommunicator* const comm_pt,
                const unsigned& nrow,
-               const oomph::Vector<unsigned long>& block_dof_pt_start, // FOR PYOOMPH
+               //const oomph::Vector<unsigned long>& block_dof_pt_start, // FOR PYOOMPH
                const bool& distributed = true);
 
     /// Copy the argument distribution.

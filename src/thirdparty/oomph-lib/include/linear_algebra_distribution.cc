@@ -175,7 +175,7 @@ namespace oomph
   //============================================================================
   void LinearAlgebraDistribution::build(const OomphCommunicator* const comm_pt,
                                         const unsigned& global_nrow,
-                                        const oomph::Vector<unsigned long>& block_dof_pt_start, // FOR PYOOMPH
+                                        //const oomph::Vector<unsigned long>& block_dof_pt_start, // FOR PYOOMPH
                                         const bool& distribute)
   {
     // copy the communicator
@@ -219,7 +219,7 @@ namespace oomph
           "LinearAlgebraDistribution::build(...)",
           OOMPH_EXCEPTION_LOCATION);
       } */           
-      if (!block_dof_pt_start.empty())
+      /* if (!block_dof_pt_start.empty())
       {
         
         for (int p = 0; p < nproc; p++)
@@ -237,7 +237,7 @@ namespace oomph
           First_row[p] = block_dof_pt_start[lower_bound_index];
           std::cout << First_row[p] << std::endl;
         }
-      }
+      } */
 
 
       // compute local nrow
