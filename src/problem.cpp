@@ -2764,7 +2764,11 @@ namespace pyoomph
 						break;
 					}
 				}
-				if (my_i==-1) continue; // This code does not contribute to this residual at all
+				if (my_i==-1) 
+				{
+					//std::cout << "Warning: Could not find a contribution entry for residual/jacobian combination " << residual_names[i] << " in code of " << dc->get_file_name() << ". This code will not contribute to this residual/jacobian combination." << std::endl;
+					continue; // This code does not contribute to this residual at all
+				}
 				for (unsigned j=0;j<ft->contribution_entries_size;j++)
 				{
 					std::string fn=ft->contribution_names[j];
@@ -2788,6 +2792,7 @@ namespace pyoomph
 							throw_runtime_error("Undefined field " + fn2 + " in contribution entry for residual/jacobian combination " + residual_names[i]);
 						}
 						unsigned col_index=field_name_to_index[fn2];
+						//std::cout << "in code " << dc->get_file_name() << ": Checking jacobian contribution for residual/jacobian combination " << residual_names[i] << " for row field " << fn << " and column field " << fn2 << " indices " << row_index << "," << col_index << "  my_i " << my_i << " j,k "<< j << "," << k << " VALUE " << ft->contributes_to_jacobian[my_i][j][k] << std::endl;
 						jacobian_contributing_fields[i][row_index][col_index]=jacobian_contributing_fields[i][row_index][col_index] | ft->contributes_to_jacobian[my_i][j][k];
 						if (ft->contributes_to_jacobian[my_i][j][k])
 						{
@@ -2820,6 +2825,7 @@ namespace pyoomph
 				}
 				if (!has_row_contribs || !has_col_contribs)
 				{
+					//std::cout << "Pinning field " << defined_fields[j] << " for residual/jacobian combination " << residual_names[i] << " because it has no jacobian contributions in row or column direction" << std::endl;
 					pin_due_to_empty_jacobian_row_or_col[i][j]=true;
 				}
 			}

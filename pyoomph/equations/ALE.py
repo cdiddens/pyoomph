@@ -361,7 +361,7 @@ class ConnectMeshAtInterface(InterfaceEquations):
             outside, outside_test=var_and_test(f,domain=self.get_opposite_side_of_interface())
                             
             self.add_residual(weak(inside-outside,l_test))
-            if self._coordinates_as_dofs:
+            if self.get_combined_equations()._assert_codegen()._coordinates_as_dofs:
                 self.add_residual(weak(l,inside_test))
             if self.get_opposite_side_of_interface()._coordinates_as_dofs:
                 self.add_residual(-weak(l,outside_test))
