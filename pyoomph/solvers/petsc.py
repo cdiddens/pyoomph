@@ -411,7 +411,7 @@ class SlepcEigenSolver(GenericEigenSolver):
             Jin,Min,n,complex_mat=self.get_J_M_n_and_type()
             upscale_to_complex=complex_mat and (PETSc.ScalarType in {numpy.float64,numpy.float128,numpy.float32})
             if upscale_to_complex:
-                raise RuntimeError("SLEPc cannot handle a complex matrix here...")
+                raise RuntimeError("Your PETSc/SLEPc installation cannot handle a complex eigenvalue problem. Please compile another PETSc/SLEPc version with complex number and adjust the PYTHONPATH accordingly so that the complex petsc4py / slepc4py is used.")
             M=PETSc.Mat().createAIJ(size=((n, n), (n, n),), csr=(Min.indptr, Min.indices, Min.data))
             J=PETSc.Mat().createAIJ(size=((n, n), (n, n),), csr=(Jin.indptr, Jin.indices, Jin.data))
             
