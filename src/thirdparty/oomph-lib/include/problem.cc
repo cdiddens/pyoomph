@@ -6523,6 +6523,7 @@ namespace oomph
     // Index to keep track of the equations counted
     unsigned my_eqns_index = 0;
 
+
     // Loop over the selection of elements
     for (unsigned long e = el_lo; e <= el_hi; e++)
     {
@@ -6667,8 +6668,10 @@ namespace oomph
     Vector<unsigned> my_eqns;
     if (n_elements != 0)
     {
-      this->get_my_eqns(
-        assembly_handler_pt, el_lo, el_hi_plus_one - 1, my_eqns);
+      if (el_hi_plus_one>0) // TODO: Patch to avoid underflow when el_hi_plus_one is unsigned and el_hi is 0, which somehow happens if you only have one element
+      {
+        this->get_my_eqns(assembly_handler_pt, el_lo, el_hi_plus_one - 1, my_eqns);
+      }
     }
 
     // number of equations
