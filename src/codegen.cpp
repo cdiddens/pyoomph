@@ -2088,12 +2088,14 @@ namespace pyoomph
 				}
 			}
 		}
-
+		
 		auto cmp = [&for_code](FiniteElementField * a, FiniteElementField * b) 
 		{ 			
 			return a->get_nodal_index_str(for_code) < b->get_nodal_index_str(for_code); 
 		};
 		std::set<FiniteElementField *,decltype(cmp)> jacobian_fields(cmp);
+		//std::set<FiniteElementField *> jacobian_fields;
+		
 		for (auto &s : jacobian_shapes)
 		{
 			if (s.field->get_space() == this)
@@ -2104,9 +2106,20 @@ namespace pyoomph
 				}
 			}
 		}
+		/*
+		std::cout << " IN RJM JACOBIAN CONTRIB, NUMBER OF SHAPES: " << jacobian_shapes.size() << std::endl;
+		for (auto &s : jacobian_shapes)
+		{
+			std::cout << "  SHAPE: " << s.get_nodal_data_string(for_code,"INDEX") << " " << s.get_shape_string(for_code,"INDEX") << "  " << s.get_nodal_index_str(for_code) << std::endl;
+		}
+		std::cout << " IN RJM JACOBIAN CONTRIB, NUMBER OF FIELDS: " << jacobian_fields.size() << std::endl;
+		for (auto &f : jacobian_fields)
+		{
+			std::cout << "  FIELD: " << f->get_name() << "   NODAL INDEX: " << f->get_nodal_index_str(for_code) << std::endl;
+		}
 		if (jacobian_fields.empty())
 			return;
-
+		*/
 		std::string numnodes_str = this->get_num_nodes_str(for_code);
 		std::string l_shape;
 		if (numnodes_str == "1")
@@ -2351,21 +2364,31 @@ namespace pyoomph
 			{
 				if (!hessian)
 					oss << indent << "      BEGIN_JACOBIAN()" << std::endl;
+				
 				auto cmp=[&for_code](FiniteElementField * a, FiniteElementField * b) 
 				{ 			
 					return a->get_nodal_index_str(for_code) < b->get_nodal_index_str(for_code); 
 				};
 				std::set<FiniteElementField *, decltype(cmp)> jacobian_fields(cmp);
+				//std::set<FiniteElementField *> jacobian_fields;
 				for (auto &s : jacobian_shapes)
 				{					
 					//std::cout << "Test function " << test_name << " Jacobian Field " << s.field->get_name() << " Space " << s.field->get_space()->get_name() << " on " << s.field->get_space()->get_code()->get_full_domain_name() << std::endl;
 					jacobian_fields.insert(s.field);
 				}
+				// This might be problematic for DG methods... HDG e.g. accesses both sides, but they are somehow the same
+				
 				auto cmp_spaces=[&for_code](FiniteElementSpace * a, FiniteElementSpace * b) 
 				{ 			
-					return a->get_name()<b->get_name() || (a->get_name()==b->get_name() &&  a->get_code()->get_full_domain_name() < b->get_code()->get_full_domain_name() || (a->get_name()==b->get_name() &&  a->get_code()->get_full_domain_name() == b->get_code()->get_full_domain_name() && a->get_num_nodes_str(for_code)<b->get_num_nodes_str(for_code))); 
+					return a->get_name()<b->get_name() || 
+						   (a->get_name()==b->get_name() &&  a->get_code()->get_full_domain_name() < b->get_code()->get_full_domain_name() || 
+						   (a->get_name()==b->get_name() &&  a->get_code()->get_full_domain_name() == b->get_code()->get_full_domain_name() && a->get_num_nodes_str(for_code)<b->get_num_nodes_str(for_code)) || 
+						   (a->get_name()==b->get_name() &&  a->get_code()->get_full_domain_name() == b->get_code()->get_full_domain_name() && a->get_num_nodes_str(for_code)==b->get_num_nodes_str(for_code)) && for_code->get_elem_info_str(a)<for_code->get_elem_info_str(b));
 				};
 				std::set<FiniteElementSpace *, decltype(cmp_spaces)> jacobian_spaces(cmp_spaces);
+				
+				//std::set<FiniteElementSpace *> jacobian_spaces;
+				
 				for (auto *s : jacobian_fields)
 					jacobian_spaces.insert(s->get_space());
 				if (pyoomph_verbose)
