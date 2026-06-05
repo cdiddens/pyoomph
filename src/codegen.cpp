@@ -2116,10 +2116,10 @@ namespace pyoomph
 		for (auto &f : jacobian_fields)
 		{
 			std::cout << "  FIELD: " << f->get_name() << "   NODAL INDEX: " << f->get_nodal_index_str(for_code) << std::endl;
-		}
+		}		
+		*/
 		if (jacobian_fields.empty())
 			return;
-		*/
 		std::string numnodes_str = this->get_num_nodes_str(for_code);
 		std::string l_shape;
 		if (numnodes_str == "1")
