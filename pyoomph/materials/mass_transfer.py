@@ -24,6 +24,9 @@
 #
 # ========================================================================
  
+from pyoomph.expressions import Expression
+from pyoomph.expressions.units import Expression
+
 from ..expressions import Union
 from ..expressions.units import Union
 from .generic import MixtureGasProperties, MixtureLiquidProperties, PureGasProperties, PureLiquidProperties
@@ -115,8 +118,15 @@ class ProjectedMassTransferModelBase(MassTransferModelBase):
 
     def get_mass_transfer_space(self,name:str,ieqs:InterfaceEquations) -> FiniteElementSpaceEnum:
         if self.projection_space is None:
-            opp_pdom=ieqs.get_opposite_side_of_interface().get_parent_domain()
             pdom=ieqs.get_parent_domain()
+            opp_interface=ieqs.get_opposite_side_of_interface(raise_error_if_none=False)
+            if opp_interface is None:
+                # Try to infer it from the inside
+                space=pdom.get_space_of_field("massfrac_"+name)
+                if space=="":
+                    raise RuntimeError("Cannot find a space for the field "+name+". Please set the projection_space attribute of the mass transfer model.")
+
+            opp_pdom=ieqs.get_opposite_side_of_interface().get_parent_domain()
             assert opp_pdom is not None
             space=opp_pdom.get_space_of_field("massfrac_"+name)
             if space=="":
@@ -182,6 +192,7 @@ class PrescribedMassTransfer(ProjectedMassTransferModelBase):
     def __init__(self,**rates:ExpressionOrNum):
         super(PrescribedMassTransfer, self).__init__()
         self.rates=rates.copy()
+        self.latent_heats:Dict[str,ExpressionOrNum]={}
 
     def identify_transfer_components(self) -> Set[str]:
         return set(self.rates.keys())
@@ -195,6 +206,15 @@ class PrescribedMassTransfer(ProjectedMassTransferModelBase):
                 return Expression(rate)
         else:
             return Expression(0)
+        
+    def get_latent_heat_flux(self) -> Expression:
+        total=Expression(0)
+        for name,rate in self.rates.items():
+            if name not in self.latent_heats.keys():
+                raise RuntimeError("Must set the latent heat of "+str(name)+" to get the latent heat flux for a prescribed mass transfer model. You can set it in the latent_heats dict attribute of the model")
+            latent_heat = self.latent_heats.get(name, 0)
+            total += latent_heat * rate
+        return total
 
 
 class FluidPropMassTransferModel(ProjectedMassTransferModelBase):

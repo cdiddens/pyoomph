@@ -502,7 +502,7 @@ class GmshTemplate(MeshTemplate):
                 res.append(a)
         return res
 
-    def line(self, *args:Union[Sequence[ExpressionOrNum],Point], name:Optional[str]=None)->Optional[Line]:
+    def line(self, *args:Union[Sequence[ExpressionOrNum],Point], name:Optional[str]=None)->Optional[Union[Line,List[Line]]]:
         """
         Create a line (segment-wise) line for the mesh. When given a name, it can be used to identify the line later, e.g. for boundary conditions.
 
@@ -536,18 +536,33 @@ class GmshTemplate(MeshTemplate):
                 if len(other.points)==len(argsc) and ((other.points[0]==argsc[0] and other.points[1]==argsc[1]) or (other.points[0]==argsc[1] and other.points[1]==argsc[0])):
                     #TODO CHeck name
                     return other
-        
-        res = self._geom.add_line(*argsc) #type:ignore
-        self._store_name(name, res)
-        self._entities1d[res._id] = res #type:ignore
+
+
         self._maxdim = max(self._maxdim, 1)
+
+        if len(argsc)==2:
+            res = self._geom.add_line(*argsc) #type:ignore
+            self._store_name(name, res)
+            self._entities1d[res._id] = res #type:ignore
+            
+            for p in argsc:
+                if p not in self._onedims_attached_to_point:
+                    self._onedims_attached_to_point[p]=set()
+                self._onedims_attached_to_point[p].add(res)
+            return res
         
-        for p in argsc:
-            if p not in self._onedims_attached_to_point:
-                self._onedims_attached_to_point[p]=set()
-            self._onedims_attached_to_point[p].add(res)
-        
-        return res
+        elif len(argsc)<2:
+            raise ValueError("A line must have at least 2 points")
+        else:
+            resg:List[Line]=[]
+            for p1,p2 in zip(argsc[:-1],argsc[1:]):
+                if p1==p2:
+                    raise ValueError("Degenerate line with identical points")
+                ll=self.line(p1, p2, name=name)
+                if ll is not None:
+                    assert isinstance(ll,Line) 
+                    resg.append(ll)
+            return resg
 
     def make_lines_transfinite(self,*linesIn:Union[Line,str],numnodes:Union[Literal["auto"],int]="auto",mode:str="Progression",coeff:Optional[float]=None,dry_run:bool=False) -> List[Tuple[int, float]]:
         lines=self._resolve_name("lines", *linesIn)
