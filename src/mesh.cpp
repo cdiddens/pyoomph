@@ -1326,7 +1326,9 @@ namespace pyoomph
     //    std::cout << "MESHOUT " << nDGfields << "  " << nDGfields_basebulk << "   " << naddD1 << "  " << naddD2 << "  " << naddD2TB << "   consistenccy "  << nDGfields-(nDGfields_basebulk+naddD1+naddD2+naddD2TB) << std::endl;
 
     unsigned nnormal = 0;
-    if (be->nodal_dimension() == be->dim() + 1) // TODO: Also >= ? But what is e.g. the normal of a curved line element in 3d space? Is it the tangent?
+    bool is_interface=false;
+    
+    if (be->nodal_dimension() == be->dim() + 1 || dynamic_cast<InterfaceMesh *>(this)) // TODO: Also >= ? But what is e.g. the normal of a curved line element in 3d space? Is it the tangent?
     //													XXX MAKE SURE TO ADJUST IT ALSO IN pybind -> to_numpy and in python/output/generic.py indicated by "TODO must agree with the C code"
     {
       nnormal = be->nodal_dimension();

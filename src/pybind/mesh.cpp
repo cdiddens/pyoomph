@@ -1039,7 +1039,7 @@ void PyReg_Mesh(py::module &m)
 			 unsigned naddC1TB=(be ? be->nadditional_fields_C1TB() : 0);			 			 
 			 unsigned naddC1=(be ? be->nadditional_fields_C1() : 0);
 			 unsigned nnormal=0;
-			 if (be->nodal_dimension()==be->dim()+1) {nnormal=be->nodal_dimension();} //TODO: >= ? But what is a normal of a 1d line in 3d. XXX MAKE SURE TO ADJUST IT ALSO IN Mesh::to_numpy
+			 if (be->nodal_dimension()==be->dim()+1 || dynamic_cast<pyoomph::InterfaceMesh *>(self)) {nnormal=be->nodal_dimension();} //TODO: >= ? But what is a normal of a 1d line in 3d. XXX MAKE SURE TO ADJUST IT ALSO IN Mesh::to_numpy
 			 auto nodal_data=py::array_t<double>({nnode,nodal_dim+nlagrange+ncontfields+nDGfields+naddC2TB+naddC2+naddC1TB+naddC1+nnormal});
 			 unsigned nelem;
 			 unsigned numelem_indices=self->get_num_numpy_elemental_indices(tesselate_tri,nelem,discontinuous);

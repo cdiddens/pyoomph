@@ -1690,7 +1690,7 @@ class Problem(_pyoomph.Problem):
                             internal_eqs._additional_residuals[destination]=int_contrib
 
 
-        for tree_depth in range(2):
+        for tree_depth in range(3):
             for _,mesh in self._meshdict.items():
                 mesh._problem=self
                 mesh._eqtree._equations.get_combined_equations()._problem=self
@@ -5669,7 +5669,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             oldmesh._codegen._code._exchange_mesh(newmesh) 
             newmesh._construct_after_remesh() 
 
-            for tree_depth in range(2):
+            for tree_depth in range(3):
                 newmesh._generate_interface_elements(tree_depth)
 
             newmesh._tracers=oldmesh._tracers 
@@ -5805,7 +5805,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                 oldmesh._codegen._code._exchange_mesh(newmesh) 
 #                print("REPLACING MESH ",name,"from",oldmesh,"to",newmesh)
                 newmesh._construct_after_remesh() 
-                for tree_depth in range(2):
+                for tree_depth in range(3):
                     newmesh._generate_interface_elements(tree_depth) 
             # Rebuild
             if len(new_meshes)>=0:
