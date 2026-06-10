@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from ..meshes import AnyMesh
     from ..generic.problem import Problem,EquationTree
     
+import warnings
 
 
 # TODO Check this
@@ -253,8 +254,15 @@ class RefineToLevel(Equations):
             mesh._initial_uniform_refinement_level=max(mesh._initial_uniform_refinement_level,self.level if self.level!="max" else (mesh._problem.initial_adaption_steps if mesh._problem.initial_adaption_steps is not None else mesh._problem.max_refinement_level) )
         
 
+class  RefineToMaxLevel(RefineToLevel):
+    """
+    Deprecated: Use RefineToLevel() instead.
+    """
+    def __init__(self, level:Union[Literal["max"],int]="max"):
+        warnings.warn("RefineToMaxLevel is deprecated, use RefineToLevel() instead.", DeprecationWarning, stacklevel=2)
+        super(RefineToMaxLevel, self).__init__(level="max")
+    
 
-RefineToMaxLevel=RefineToLevel
 
 # An "equation" that will refine elements whenever they are larger than a non-dimensional element size threshold
 class RefineMaxElementSize(Equations):
@@ -891,6 +899,7 @@ class _AverageOrIntegralConstraintBase(Equations):
         
     def after_fill_dummy_equations(self, problem: "Problem", eqtree: "EquationTree",pathname:str,elem_dim:Optional[int]=None):
         from ..generic.codegen import GlobalLagrangeMultiplier
+
         if len(self.constraints)==0:
             return super().after_fill_dummy_equations(problem,eqtree,pathname,elem_dim)        
         odestorage=self.get_global_dof_storage_name(pathname=pathname)  
