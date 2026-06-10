@@ -108,16 +108,15 @@ However, fully-implicit solvers, as used in pyoomph, are capable to invert the p
    \end{aligned}
 
 i.e. we adjust :math:`T` so that we have the desired average velocity inside the cavity.
-Since the definition of :math:`U` involves a square root, we first modify the equation to
+To incorporate this equation into the problem, we first reformulate it to
 
 .. math::
 
    \begin{aligned}
-   U-U_\text{desired}&=0 \Rightarrow\\
    R_T=\int (\vec{u}^2  - U_\text{desired}^2)\:\mathrm{d}^2x&=0
    \end{aligned} 
    
-:math:`R_T` is now in a good residual formulation to be used directly in a weak form to find the suitable value for :math:`T`.
+:math:`R_T` is now in a suitable residual formulation to be used directly in a weak form to find the value for :math:`T`.
 
 So we first remove :math:`T` as parameter and introduce :math:`U_\text{desired}` instead. Then, :math:`T` must be defined as an unknown:
 
@@ -130,7 +129,7 @@ So we first remove :math:`T` as parameter and introduce :math:`U_\text{desired}`
 	T,Ttest=problem.add_global_dof("T",initial_condition=10)
 	
 	
-Since :math:`T` is a single degree of freedom, we add it to the problem with :py:meth:`~pyoomph.generic.problem.Problem.add_global_dof`. It is important to provide a reasonable initial condition for :math:`T`, since Newton's method can run into convergence issues otherwise.
+Since :math:`T` is a single degree of freedom (i.e. not a field), we add it to the problem with :py:meth:`~pyoomph.generic.problem.Problem.add_global_dof`. It is important to provide a reasonable initial condition for :math:`T`, since Newton's method can run into convergence issues otherwise.
 
 Then, we add the equation for :math:`T`, which can be achieved by 
 
