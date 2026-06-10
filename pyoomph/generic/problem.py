@@ -421,7 +421,7 @@ class Problem(_pyoomph.Problem):
         self.min_permitted_error:float=0.0001	#Some defaults for the meshes
         #: Maximum error of all meshes for spatial adaptivity. If the error is above this threshold, we must refine locally.
         self.max_permitted_error:float=0.001
-        #: Maximum number of refinements of all meshes. 
+        #: Maximum number of refinements of all meshes. After initialization, use set_max_refinement_level instead of this property.
         self.max_refinement_level:int=8
         #: Minimum refinement level of all meshes.       
         self.min_refinement_level:int=0
@@ -3995,11 +3995,12 @@ class Problem(_pyoomph.Problem):
             param0=param1
 
     def set_max_refinement_level(self,level:int,do_adapt:bool=True):
+        """After initialisation, the property max_refinement_level is not considered anymore. You can set the maximum refinement level of the meshes with this function"""
         if level<0:
             raise RuntimeError("Must be >=0")
         
         def set_level_for_mesh(mesh:AnySpatialMesh,level):            
-            assert isinstance(mesh,MeshFromTemplate2d)            
+            assert not isinstance(mesh,InterfaceMesh)            
             mesh._templatemesh.get_template()._max_refinement_level=level            
             maxref=0
             for e in mesh.elements():
