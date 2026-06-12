@@ -6740,6 +6740,7 @@ namespace pyoomph
 		}
 
 		bool coordinate_space_validated = false;
+		bool has_C1TB_fields=false;
 		index_offset = 0;
 		unsigned int base_bulk_nodal_offset = 0;
 		unsigned int internal_data_offset = 0;
@@ -6770,12 +6771,12 @@ namespace pyoomph
 				{
 					if (coordinate_space != space->get_name())
 					{
-						throw_runtime_error("Cannot use a coordinate space on " + coordinate_space + ", which is inferior to the required nodal field space " + space->get_name());
+						throw_runtime_error("Cannot use a coordinate space of " + coordinate_space + ", which is inferior to the required nodal field space " + space->get_name());
 					}
 					else
 						coordinate_space_validated = true;
 				}
-				init << " functable->numfields_" << space->get_name() << "=" << numfields << ";" << std::endl;
+				init << " functable->numfields_" << space->get_name() << "=" << numfields << ";" << std::endl;				
 
 				if (dynamic_cast<ContinuousFiniteElementSpace *>(space) || dynamic_cast<DGFiniteElementSpace *>(space))
 				{
@@ -6786,6 +6787,9 @@ namespace pyoomph
 						init << " functable->numfields_" << space->get_name() << "_bulk=" << numfields << ";" << std::endl;
 						init << " functable->numfields_" << space->get_name() << "_basebulk=" << numfields << ";" << std::endl;
 						init << " functable->numfields_" << space->get_name() << "_new=" << numfields << ";" << std::endl;
+						
+						if (space->get_name()=="C1TB" && numfields>0) has_C1TB_fields=true;
+						
 						if (dynamic_cast<ContinuousFiniteElementSpace *>(space))
 						{
 							init << " functable->nodal_offset_" << space->get_name() << "_basebulk =" << base_bulk_nodal_offset << ";" << std::endl;
@@ -6934,6 +6938,7 @@ namespace pyoomph
 			coordinate_space = "C1TB";
 		else if (coordinate_space == "D2TB")
 			coordinate_space = "C2TB";
+		if (coordinate_space=="C2" && has_C1TB_fields ) coordinate_space="C2TB"; // Only here, we have the bubble
 		if (coordinate_space == "" || coordinate_space=="ED0")
 			throw_runtime_error("Cannot deduce the coordinate space of domain " + this->get_domain_name() + ". Please specify it explicitly by adding an ElementSpace().");
 		//   if (coordinate_space=="C2TB" && this->bulk_code) coordinate_space="C2";
