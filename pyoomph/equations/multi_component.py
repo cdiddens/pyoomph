@@ -430,6 +430,8 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
                             self.define_scalar_field(self.velo_connect_prefix + f, conn_space)  # TODO: Other velocity spaces?
                         self._has_opposite_flow = True
 
+        facet_space=nseqs.get_velocity_space_from_mode(for_interface=True)
+
         has_surfactants = False
         surfsI = self.interface_props.surfactants
         if surfsI is None:
@@ -439,7 +441,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         else:
             surfs=surfsI
         for s in surfs:
-            self.define_scalar_field("surfconc_" + s, "C2")
+            self.define_scalar_field("surfconc_" + s, facet_space)
             has_surfactants = True
         if has_surfactants:
             self.define_vector_field(self.surfactant_advect_velo_name, self.surfactant_advect_velo_space)
@@ -453,7 +455,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
             self.define_scalar_field("_surf_tension", self.surface_tension_projection_space)
             
         if self.project_interface_flux:
-            self.define_scalar_field("interface_flux", "C2",scale=scale_factor("velocity"),testscale=1/scale_factor("velocity"))
+            self.define_scalar_field("interface_flux", facet_space, scale=scale_factor("velocity"), testscale=1/scale_factor("velocity"))
 
         
         if self.get_opposite_side_of_interface(raise_error_if_none=False):

@@ -180,3 +180,7 @@ At this point, one could of course do a scan in :math:`U_\text{desired}`, but th
 		
 		:download:`Download all examples <../../tutorial_example_scripts.zip>`   
 		
+.. note::
+
+	Finding a suitable initial condition for the parameter to be adjusted (:math:`T` in the discussed inverse problem) is crucial. If it is hard to guess a reasonable initial value, one can replace :math:`T \leftarrow (1-\mu)T_0+\mu T`, where :math:`T_0` is a constant (some initial guess) and :math:`\mu` is a blending parameter. One can then start with :math:`\mu=0` and gradually blend :math:`\mu\to 1`, e.g. via :py:meth:`~pyoomph.generic.problem.Problem.go_to_param`. However, to close the problem for :math:`\mu=0`, one has to add e.g. ``equation_contribution=(1-mu)*(var("T")-T0)`` to the ``add_global_dof`` definition of :math:`T` and augment the ``WeakContribution`` with the factor :math:`\mu`, e.g. by using ``mu*Ttest`` as second argument. Thereby, for :math:`\mu=0`, the residual for :math:`T` will be just :math:`T-T_0=0`, whereas for :math:`\mu=1` one recovers the original form. In particular, also the issue with Newton's method in the first step (due to the zero velocity field) is circumvented when starting with :math:`\mu<1` (e.g. :math:`\mu=0`).
+		
