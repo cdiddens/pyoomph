@@ -212,6 +212,7 @@ class EnforcedBC(InterfaceEquations):
         #codeinst_inside = mesh.element_pt(0).get_code_instance()
         for k, _ in self.constraints.items():            
             index = [codeinst_inside.get_nodal_field_index(k)]  # TODO: Vectors
+            print("Index is ",index," for field ",k)
             psindex = None
             nfi=None
             spaceDG=None

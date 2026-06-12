@@ -1037,7 +1037,7 @@ namespace pyoomph
     unsigned int get_node_index_C1_to_element(const unsigned int &i) const { return i; }
     unsigned int get_node_index_C2_to_element(const unsigned int &i) const { return i; }
     unsigned int get_node_index_C2TB_to_element(const unsigned int &i) const { return i; }
-    //    unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const { return i; }
+    unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const { return i; } // This is of course only true for a facet on a Tetra
     void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const;
     void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
     void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const;
