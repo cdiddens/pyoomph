@@ -67,6 +67,10 @@ However, you can easily make a table of float values by scanning ranges of the t
 
 Likewise, you can write this data to a file. Thereby, you can easily check whether the implemented expression indeed agrees with the experimental data. Note that we have made use of Python's *Literal String Interpolation (PEP 498)* here.
 
+.. note::
+
+   In general, instead of  :py:meth:`~pyoomph.materials.generic.MaterialProperties.evaluate_at_condition`, you can also use e.g. ``air.mass_density(temperature=18*celsius,absolute_pressure=1*atm)`` to evaluate properties at a given condition. This way of substitution of ``var`` terms can be applied for arbitrary expressions, i.e. also outside of the context of material properties. However, in case of property expressions of mixtures (see next page), :py:meth:`~pyoomph.materials.generic.MaterialProperties.evaluate_at_condition` automatically casts mass, mole and volume fractions accordingly and is hence preferred.
+
 
 .. only:: html
 

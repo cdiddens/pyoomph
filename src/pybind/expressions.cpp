@@ -549,6 +549,28 @@ void PyReg_Expressions(py::module &m)
 			}
 			GiNaC::matrix m=GiNaC::ex_to<GiNaC::matrix>(evm);
 			return m(ind[0].cast<int>(),ind[1].cast<int>()); }, py::return_value_policy::reference)
+		.def("__call__",[](const GiNaC::ex &self, const py::kwargs& kwargs)
+			 { 
+			   std::vector<GiNaC::ex> exargs;
+			   std::map<std::string,GiNaC::ex> fields;
+			   std::map<std::string,GiNaC::ex> nondimfields;
+			   std::map<std::string,GiNaC::ex> globalparams;
+			   auto python_int_type = py::globals()["__builtins__"].attr("int");			   
+			   auto python_float_type = py::globals()["__builtins__"].attr("float");
+			   auto python_complex_type = py::globals()["__builtins__"].attr("complex");
+			   for (auto item : kwargs)
+			   {
+				GiNaC::ex rhs;
+				if (py::isinstance<GiNaC::ex>(item.second))				  rhs = item.second.cast<GiNaC::ex>();				
+				else if (py::isinstance(item.second,python_float_type))				  rhs = item.second.cast<double>();		
+				else if (py::isinstance(item.second,python_int_type))				  rhs = item.second.cast<long int>();
+				else if (py::isinstance<GiNaC::GiNaCGlobalParameterWrapper>(item.second))				  rhs = item.second.cast<GiNaC::GiNaCGlobalParameterWrapper>();
+				else if (py::isinstance(item.second,python_complex_type))				  rhs = item.second.cast<std::complex<double>>().real()+GiNaC::I*item.second.cast<std::complex<double>>().imag();
+				else throw_runtime_error("Unsupported argument type for calling a GiNaC expression: only int, double, complex and Expressions are supported, but got "+std::string(py::str(item.first)) + "="+std::string(py::repr(item.second).cast<std::string>())+" of type "+std::string(py::str(item.second.get_type()).cast<std::string>()));
+				fields.insert({py::str(item.first), rhs});
+			   }			  
+			   return 0 + pyoomph::expressions::subs_fields(self, fields, nondimfields, fields);
+			 }, py::return_value_policy::reference)
 		.def("__repr__", [](const GiNaC::ex &self)
 			 { 
   	 std::ostringstream oss; 
