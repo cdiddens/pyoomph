@@ -637,10 +637,9 @@ namespace pyoomph
         fe = new InterfaceElementLine1dC1(jitcode, be, fi);
       }
 
-      // TODO: Tris? Are they different from Quads regarding the interface elements
+      
       else if (dynamic_cast<BulkElementTri2dC2 *>(be))
-      {
-        //      std::cout << "TRID 2d " << be << "  FI "  << fi << std::endl;
+      {      
         fe = new InterfaceTElementLine1dC2(jitcode, be, fi);
       }
       else if (dynamic_cast<BulkElementTri2dC1 *>(be))
@@ -664,9 +663,14 @@ namespace pyoomph
       {
         fe = new InterfaceElementQuad2dC2(jitcode, be, fi);
       }
+      // TODO: BulkElementTetra3dC1TB here
       else if (dynamic_cast<BulkElementTetra3dC1 *>(be))
       {
         fe = new InterfaceElementTri2dC1(jitcode, be, fi);
+      }
+      else if (dynamic_cast<BulkElementTetra3dC2TB *>(be))
+      {        
+        fe = new InterfaceElementTri2dC2TB(jitcode, be, fi);
       }
       else if (dynamic_cast<BulkElementTetra3dC2 *>(be))
       {
@@ -686,7 +690,21 @@ namespace pyoomph
           oomph::Node *n = fe->node_pt(in);
           if (!dynamic_cast<oomph::BoundaryNodeBase*>(n)) 
           {
-            //std::cout << "ERROR: Node " << n << " in interface element " << fe << " is not a boundary node!" << std::endl;
+            std::ostringstream oss;
+            oss  << "Node " << " at index " << in << " ptr: " << n << " in interface element " << fe << " is not a boundary node. Bulk element was " << be << " of type index " << be->get_meshio_type_index() << " and face index was " << fi << std::endl << "Interface nodes are located at:" << std::endl;
+            for (unsigned int in2=0;in2<fe->nnode();in2++)
+            {
+              oomph::Node *n2 = fe->node_pt(in2);
+              oss << "  Node " << in2 << " ptr: " << n2 << " at ";
+              for (unsigned int iv=0;iv<n2->ndim();iv++)
+              {
+                oss << n2->x(iv) << (iv+1 < n2->ndim()  ? ", " : "");
+              }
+              oss << " is boundary node: " << dynamic_cast<oomph::BoundaryNodeBase*>(n2) << std::endl;
+            }
+            oss << "Boundary is " << jitcode->get_code()->get_file_name() << std::endl;
+            throw_runtime_error(oss.str());
+            delete fe;
             return NULL; // Do not create such elements...
           }
         }

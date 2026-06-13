@@ -11824,6 +11824,23 @@ namespace pyoomph
 		}
 	}
 
+	 void BulkElementTetra3dC2TB::build_face_element(const int& face_index, oomph::FaceElement* face_element_pt)
+	{		
+		BulkElementTetra3dC2::build_face_element(face_index, face_element_pt);		
+		face_element_pt->nbulk_value_resize(7);
+		face_element_pt->bulk_node_number_resize(7);
+		// So the faces are
+		// 0 : s_0 fixed
+		// 1 : s_1 fixed
+		// 2 : s_2 fixed
+		// 3 : sloping face		
+		std::vector<int> Central_node_on_face{13, 12, 10, 11};
+		unsigned bulk_number = Central_node_on_face[face_index];
+		face_element_pt->node_pt(6) = node_pt(bulk_number);
+		face_element_pt->bulk_node_number(6) = bulk_number;		
+		face_element_pt->nbulk_value(6) =required_nvalue(bulk_number);
+   }
+
 	///////////////////////////////
 
 	void RefineableSolidLineElement::build(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt,

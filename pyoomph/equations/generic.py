@@ -743,8 +743,9 @@ class IntegralObservables(Equations):
     """
     def __init__(self,_coordinate_system:Optional["BaseCoordinateSystem"]=None,_lagrangian:bool=False, **integral_observables:Union[ExpressionOrNum,Callable[...,ExpressionOrNum]]):
         super(IntegralObservables, self).__init__()
-        self.integral_observables = {k:v for k,v in integral_observables.items() if not callable(v)}
-        self.dependent_funcs={k:v for k,v in integral_observables.items() if callable(v)}
+        is_dependent_func=lambda v: callable(v) and not isinstance(v,Expression)
+        self.integral_observables = {k:v for k,v in integral_observables.items() if not is_dependent_func(v)}
+        self.dependent_funcs={k:v for k,v in integral_observables.items() if is_dependent_func(v)}
         self._coordinate_system=_coordinate_system
         self._lagrangian=_lagrangian
 
@@ -810,8 +811,9 @@ class ODEObservables(ODEEquations):
 
     def __init__(self, **ode_observables:ExpressionOrNum):
         super(ODEObservables, self).__init__()
-        self.ode_observables = {k:v for k,v in ode_observables.items() if not callable(v)}
-        self.dependent_funcs={k:v for k,v in ode_observables.items() if callable(v)}
+        is_callable=lambda v: callable(v) and not isinstance(v,Expression)
+        self.ode_observables = {k:v for k,v in ode_observables.items() if not is_callable(v)}
+        self.dependent_funcs={k:v for k,v in ode_observables.items() if is_callable(v)}
 
     def define_additional_functions(self):
         dx = nondim("dx")

@@ -1399,6 +1399,7 @@ namespace pyoomph
     inline void local_coordinate_of_node(const unsigned &j, oomph::Vector<double> &s) const { oomph::TBubbleEnrichedElementShape<3, 3>::local_coordinate_of_node(j, s); }
     bool has_bubble() const { return true; }
     virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 3, order, true)); }
+    void build_face_element(const int& face_index, oomph::FaceElement* face_element_pt) override;
   };
 
   class PointElement0d : public virtual BulkElementBase, public virtual oomph::PointElement
@@ -2366,59 +2367,7 @@ namespace pyoomph
         res[1] = s[1];
       }
       return res;
-      /*
-      oomph::Vector<double> mypos(3,0.0);
-      this->interpolated_x(s,mypos);
-      oomph::Vector<double> opos(3,0.0);
-      opposite_side->interpolated_x(res,opos);
-
-      double diff=0.0;
-      for (unsigned int i=0;i<3;i++) diff+=(mypos[i]-opos[i])*(mypos[i]-opos[i]);
-      if (diff<1e-14) {
-         std::cout << "PERM " <<  opposite_orientation << " SEEMS TO BE GOOD" << std::endl;
-        return res;
-      }
-
-      std::cout << "DIFF " << diff << " AT PERM " << opposite_orientation << "  SIN " << s[0] << " " << s[1] << " SOUT " << res[0] << "  " << res[1] << std::endl;
-      std::cout << "  MY POS " << mypos[0] << "  " << mypos[1] << "  " << mypos[2] << std::endl;
-      std::cout << "  OT POS " << opos[0] << "  " << opos[1] << "  " << opos[2] << std::endl;
-
-      oomph::DenseMatrix<double> my_t(2,3,0.0);
-      oomph::Shape mypsi(this->nnode());
-      oomph::DShape mydpsids(this->nnode(),2);
-      this->dshape_local(s,mypsi,mydpsids);
-      for(unsigned l=0;l<this->nnode();l++)
-     {
-       for(unsigned i=0;i<3;i++)
-        {
-         for(unsigned j=0;j<2;j++)
-          {
-           my_t(j,i) += this->nodal_position(l,i)*mydpsids(l,j);
-          }
-        }
-     }
-      std::cout << "  MY TANG1 " << my_t(0,0) << "  " << my_t(0,1) << "  " << my_t(0,2) << std::endl;
-      std::cout << "  MY TANG2 " << my_t(1,0) << "  " << my_t(1,1) << "  " << my_t(1,2) << std::endl;
-
-      oomph::DenseMatrix<double> ot_t(2,3,0.0);
-      oomph::Shape otpsi(opposite_side->nnode());
-      oomph::DShape otdpsids(opposite_side->nnode(),2);
-      opposite_side->dshape_local(s,otpsi,otdpsids);
-      for(unsigned l=0;l<opposite_side->nnode();l++)
-     {
-       for(unsigned i=0;i<3;i++)
-        {
-         for(unsigned j=0;j<2;j++)
-          {
-           ot_t(j,i) += opposite_side->nodal_position(l,i)*otdpsids(l,j);
-          }
-        }
-     }
-      std::cout << "  OT TANG1 " << ot_t(0,0) << "  " << ot_t(0,1) << "  " << ot_t(0,2) << std::endl;
-      std::cout << "  OT TANG2 " << ot_t(1,0) << "  " << ot_t(1,1) << "  " << ot_t(1,2) << std::endl;
-
-      return res;
-      */
+     
     }
 
     void analyze_opposite_orientation(const std::vector<double> & offset)
@@ -2487,23 +2436,129 @@ namespace pyoomph
           }
         }
       }
-      /*
-          if (opposite_side->nnode()>3)
-          {
-           double test_dist=0.0;
-           for (unsigned int i=0;i<this->nnode();i++)
-           {
-                  pyoomph::Node* nthis=dynamic_cast<pyoomph::Node*>(this->node_pt(i));
-                  pyoomph::Node* nopp=dynamic_cast<pyoomph::Node*>(opposite_side->node_pt(opposite_node_index[i]));
-                    for (unsigned int k=0;k<std::min(nthis->ndim(),nopp->ndim());k++) test_dist+=(nthis->x(k)-nopp->x(k))*(nthis->x(k)-nopp->x(k));
-           }
-           std::cout << "PERM IS " << opposite_orientation << "  BEST DIST " << best_dist << "  TEST DIST " << test_dist << std::endl;
-           std::cout << "    OPPMAP IS "  << opposite_node_index[0] << "  "  << opposite_node_index[1] << "  "  << opposite_node_index[2] << "  "  << opposite_node_index[3] << "  "  << opposite_node_index[4] << "  "  << opposite_node_index[5] << std::endl;
-           //std::cout << "    PDISTS ARE "  << pdists[0] << "  "  << pdists[1] << "  "  << pdists[2] << "  "  << pdists[3] << "  "  << pdists[4] << "  "  << pdists[5] << std::endl;
-         }
-      */
     }
   };
+
+
+
+  class InterfaceElementTri2dC2TB : public InterfaceElement<BulkElementTri2dC2TB>
+  {
+  protected:
+  public:
+    InterfaceElementTri2dC2TB(DynamicBulkElementInstance *jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkElementTri2dC2TB>(jitcode, bulk_el_pt, face_index)
+    {
+    }
+
+    oomph::Vector<double> local_coordinate_in_opposite_side(const oomph::Vector<double> &s) const
+    {
+      oomph::Vector<double> res = s;
+      if (opposite_orientation == 0)
+      {
+        res[0] = s[0];
+        res[1] = s[1];
+      }
+      else if (opposite_orientation == 1)
+      {
+        res[0] = s[0];
+        res[1] = 1 - s[0] - s[1];
+      }
+      else if (opposite_orientation == 2)
+      {
+        res[0] = s[1];
+        res[1] = s[0];
+      }
+      else if (opposite_orientation == 3)
+      {
+        res[0] = 1 - s[0] - s[1];
+        res[1] = s[0];
+      }
+      else if (opposite_orientation == 4)
+      {
+        res[0] = s[1];
+        res[1] = 1 - s[0] - s[1];
+      }
+      else
+      {
+        res[0] = 1 - s[0] - s[1];
+        res[1] = s[1];
+      }
+      return res;
+     
+    }
+
+    void analyze_opposite_orientation(const std::vector<double> & offset)
+    {
+      if (opposite_side->dim() != 2)
+      {
+        throw_runtime_error("Can only connect a 2d InterfaceElement to a 2d InterfaceElement");
+      }
+      if (this->nvertex_node() != opposite_side->nvertex_node())
+      {
+        throw_runtime_error("Can only connect InterfaceElements with same number of vertex nodes");
+      }
+      std::vector<std::vector<int>> perms = {{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}};
+      std::vector<double> pdists(perms.size(), 0.0);
+      for (unsigned int i = 0; i < this->nvertex_node(); i++)
+      {
+        pyoomph::Node *nthis = dynamic_cast<pyoomph::Node *>(this->vertex_node_pt(i));
+        for (unsigned int p = 0; p < perms.size(); p++)
+        {
+          pyoomph::Node *nopp = dynamic_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(perms[p][i]));
+          for (unsigned int k = 0; k < std::min(nthis->ndim(), nopp->ndim()); k++)
+            pdists[p] += (nthis->x(k) - nopp->x(k)+offset[k]) * (nthis->x(k) - nopp->x(k)+offset[k]);
+        }
+      }
+      double best_dist = pdists[0];
+      opposite_orientation = 0;
+      for (unsigned int p = 1; p < perms.size(); p++)
+      {
+        if (pdists[p] < best_dist)
+        {
+          best_dist = pdists[p];
+          opposite_orientation = p;
+        }
+      }
+      if (best_dist > 1e-14)
+      {
+        throw_runtime_error("Vertex nodes are not matching here");
+      }
+      opposite_node_index = perms[opposite_orientation];
+      opposite_node_index.resize(7, -1);      
+      if (opposite_side->nnode() > 3)
+      {
+        if (opposite_side->nnode() > 6)
+        {
+          opposite_node_index[6] = 6; // The center node is always 6 in the opposite element, so we can directly set it here
+        }
+        if (opposite_orientation == 1)
+        { // 3 5 4
+          opposite_node_index[3] = 5;
+          opposite_node_index[4] = 4;
+          opposite_node_index[5] = 3;          
+        }
+        else if (opposite_orientation == 2)
+        { // 4 3 5
+          opposite_node_index[3] = 3;
+          opposite_node_index[4] = 5;
+          opposite_node_index[5] = 4;
+        }
+        else if (opposite_orientation == 5)
+        { // 5 4 3, 4 5 3, 3 5 4, 5 3 4,
+          opposite_node_index[3] = 4;
+          opposite_node_index[4] = 3;
+          opposite_node_index[5] = 5;
+        }
+        else
+        {
+          for (unsigned int k = 3; k < 6; k++)
+          {
+            opposite_node_index[k] = opposite_node_index[k - 3] + 3; // Seem to work
+          }
+        }
+      }
+    }
+  };
+
 
   extern double *__replace_RJM_by_param_deriv;
 }

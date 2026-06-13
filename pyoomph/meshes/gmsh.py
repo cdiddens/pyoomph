@@ -1406,7 +1406,7 @@ class GmshTemplate(MeshTemplate):
         #exit()
 
         for name, cs in self._mesh.cell_sets.items():
-            if name == "gmsh:bounding_entities": continue
+            if name == "gmsh:bounding_entities": continue            
             for i, idx in enumerate(cs):
                 if len(idx) > 0:
                     cells = self._mesh.cells[i]
@@ -1436,6 +1436,7 @@ class GmshTemplate(MeshTemplate):
                     #        self.add_nodes_to_boundary(name, ninds)
                     #        print(name,ninds)
                     #        exit()
+                                        
 
 
     def _construct_template_domain_1d(self, name:str, entry:Any):
