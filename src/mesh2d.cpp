@@ -238,6 +238,41 @@ namespace pyoomph
 
     setup_boundary_element_info_quads(outfile);
     setup_boundary_element_info_tris(outfile);
+
+    // Now process the boundary elements once more    
+    for (unsigned int bi=0;bi<Boundary_element_pt.size();bi++)
+    {
+      std::vector<unsigned> remove;
+      for (unsigned int i=0;i<Boundary_element_pt[bi].size();i++)
+      {
+        oomph::FiniteElement *fe_pt=Boundary_element_pt[bi][i];
+        // TODO: Check whether all nodes are indeed on the boundary
+        for (unsigned int j=0;j<fe_pt->nnode_on_face();j++)
+        {          
+          oomph::Node *n=fe_pt->node_pt(fe_pt->get_bulk_node_number(Face_index_at_boundary[bi][i], j));
+          if (n->is_on_boundary(bi))
+          {
+          }
+          else
+          {
+            remove.push_back(i);
+            break;
+          }
+        }
+      }
+      // Remove elements that are not actually on the boundary
+      // TODO: This is a bit of a hack, we might want to consider:
+      //   Pure refineable QuadMesh -> just call the normal quad setup 
+      //   Mixed Tri/Quad mesh -> can't be refined -> take facets from the MeshTemplate and add them as boundary elements by hand (might be faster and for sure more robust)
+      //   however, the add_nodes_to_boundary method of the mesh template should be add_facet_to_boundary -> facet identification
+      //   Deprecate the add_node_to_boundary method
+      for (unsigned int i=remove.size();i>0;i--)
+      {
+        Boundary_element_pt[bi].erase(Boundary_element_pt[bi].begin()+remove[i-1]);
+        Face_index_at_boundary[bi].erase(Face_index_at_boundary[bi].begin()+remove[i-1]);
+      }
+    }
+
     Lookup_for_elements_next_boundary_is_setup = true;
   }
 
