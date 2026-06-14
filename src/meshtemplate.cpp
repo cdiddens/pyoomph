@@ -32,7 +32,7 @@ The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
 namespace pyoomph
 {
 
-	MeshTemplateFacet::MeshTemplateFacet(std::vector<unsigned> &inds, MeshTemplateCurvedEntity *curved, std::vector<MeshTemplateNode *> *nodes) : nodeinds(inds), curved_entity(curved)
+	MeshTemplateFacet::MeshTemplateFacet(const std::vector<nodeindex_t> &inds, MeshTemplateCurvedEntity *curved, std::vector<MeshTemplateNode *> *nodes) : nodeinds(inds), curved_entity(curved)
 	{
 		sorted_inds = inds;
 		std::sort(sorted_inds.begin(), sorted_inds.end());
@@ -324,7 +324,7 @@ namespace pyoomph
 		else
 			return NULL;
 		ni1 = node_indices[ni1];
-		std::vector<unsigned> inds = {ni1};
+		std::vector<nodeindex_t> inds = {ni1};
 		return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 
@@ -352,7 +352,7 @@ namespace pyoomph
 		else
 			return NULL;
 		ni1 = node_indices[ni1];
-		std::vector<unsigned> inds = {ni1};
+		std::vector<nodeindex_t> inds = {ni1};
 		return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 
@@ -394,7 +394,7 @@ namespace pyoomph
 			return NULL;
 		ni1 = node_indices[ni1];
 		ni2 = node_indices[ni2];
-		std::vector<unsigned> inds = {ni1, ni2};
+		std::vector<nodeindex_t> inds = {ni1, ni2};
 		return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 
@@ -451,7 +451,7 @@ namespace pyoomph
 			return NULL;
 		ni1 = node_indices[ni1];
 		ni2 = node_indices[ni2];
-		std::vector<unsigned> inds = {ni1, ni2};
+		std::vector<nodeindex_t> inds = {ni1, ni2};
 		return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 
@@ -487,7 +487,7 @@ namespace pyoomph
 			return NULL;
 		ni1 = node_indices[ni1];
 		ni2 = node_indices[ni2];
-		std::vector<unsigned> inds = {ni1, ni2};
+		std::vector<nodeindex_t> inds = {ni1, ni2};
 		return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 
@@ -540,7 +540,7 @@ namespace pyoomph
 			return NULL;
 		ni1 = node_indices[ni1];
 		ni2 = node_indices[ni2];
-		std::vector<unsigned> inds = {ni1, ni2};
+		std::vector<nodeindex_t> inds = {ni1, ni2};
 		return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 
@@ -696,7 +696,7 @@ namespace pyoomph
 		ni2 = node_indices[ni2];
 		ni3 = node_indices[ni3];
 		ni4 = node_indices[ni4];
-		std::vector<unsigned> inds = {ni1, ni2, ni3, ni4};
+		std::vector<nodeindex_t> inds = {ni1, ni2, ni3, ni4};
 		// std::sort(inds.begin(),inds.end());
 		return new MeshTemplateFacet(inds, NULL, NULL);
 	}
@@ -754,7 +754,7 @@ namespace pyoomph
 		ni2 = node_indices[ni2];
 		ni3 = node_indices[ni3];
 		ni4 = node_indices[ni4];
-		std::vector<unsigned> inds = {ni1, ni2, ni3, ni4};
+		std::vector<nodeindex_t> inds = {ni1, ni2, ni3, ni4};
 		// std::sort(inds.begin(),inds.end());
 		return new MeshTemplateFacet(inds, NULL, NULL);
 	}
@@ -822,7 +822,7 @@ namespace pyoomph
 		ni1 = node_indices[ni1];
 		ni2 = node_indices[ni2];
 		ni3 = node_indices[ni3];
-		std::vector<unsigned> inds = {ni1, ni2, ni3};
+		std::vector<nodeindex_t> inds = {ni1, ni2, ni3};
 		// std::sort(inds.begin(),inds.end());
 		return new MeshTemplateFacet(inds, NULL, NULL);
 	}
@@ -861,7 +861,7 @@ namespace pyoomph
 		ni1 = node_indices[ni1];
 		ni2 = node_indices[ni2];
 		ni3 = node_indices[ni3];
-		std::vector<unsigned> inds = {ni1, ni2, ni3};
+		std::vector<nodeindex_t> inds = {ni1, ni2, ni3};
 		// std::sort(inds.begin(),inds.end());
 		return new MeshTemplateFacet(inds, NULL, NULL);
 	}
@@ -1551,21 +1551,57 @@ namespace pyoomph
 			nodes[ni[i]]->on_boundaries.insert(bi);
 	}
 
-	void MeshTemplate::add_facet_to_curve_entity(std::vector<unsigned> &facetnodes, MeshTemplateCurvedEntity *curved)
+	void MeshTemplate::add_facet_to_curve_entity(const std::vector<nodeindex_t> &vertexindices, MeshTemplateCurvedEntity *curved)
 	{
-		MeshTemplateFacet *nf = new MeshTemplateFacet(facetnodes, curved, &this->nodes);
+		MeshTemplateFacet *nf = new MeshTemplateFacet(vertexindices, curved, &this->nodes);
 
 		if (facetmap.count(nf))
 		{
 			MeshTemplateFacet *old = facets[facetmap[nf]];
 			if (old->curved_entity && old->curved_entity != nf->curved_entity)
 				throw_runtime_error("Cannot add a facet on two different curved entities");
-			delete nf;
+			old->curved_entity=curved;
 			return;
 		}
 
 		facetmap[nf] = facets.size();
 		facets.push_back(nf);
+	}
+
+	void MeshTemplate::add_facet_to_boundary(const std::string &boundname, const std::vector<nodeindex_t> &ni,const std::vector<nodeindex_t> &vertexindices, MeshTemplateCurvedEntity *curved)
+	{
+		if (vertexindices.empty())
+		{
+			this->add_nodes_to_boundary(boundname, ni);				
+			this->add_facet_to_curve_entity(ni, curved); // This is not necessarily curved. Can be also just a facet
+		}
+		else
+		{
+			if (vertexindices.size() > ni.size())
+			{
+				throw_runtime_error("Vertex indices must be empty (in which case they are set to the node indices) or a subset of the node indices");
+			}
+			for (unsigned int i = 0; i < vertexindices.size(); i++)
+			{
+				bool found = false;
+				for (unsigned int j = 0; j < ni.size(); j++)
+				{
+					if (vertexindices[i] == ni[j])
+					{
+						found = true;				
+						break;	
+					}
+				}
+				if (!found)
+				{
+					throw_runtime_error("Vertex indices must be empty (in which case they are set to the node indices) or a subset of the node indices");
+				}
+			}
+			this->add_nodes_to_boundary(boundname, ni);				
+			this->add_facet_to_curve_entity(vertexindices, curved); // This is not necessarily curved. Can be also just a facet
+		}
+
+		
 	}
 
 	MeshTemplateElementCollection *MeshTemplate::new_bulk_element_collection(std::string name)

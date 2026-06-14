@@ -1337,18 +1337,22 @@ class GmshTemplate(MeshTemplate):
                         for li, l in enumerate(mycells): #type:ignore 
                             ninds:List[int] = self._nodeinds[l] #type:ignore 
                             if -1 in ninds:  # Do only consider lines full inside
-                                continue
+                                continue                            
                             if no_macro_elements:
-                                self.add_nodes_to_boundary(name, ninds)
+                                curved = None
                             else:
-                                curved = self._curved_entities2d.get(mygeoms[li])
+                                curved = self._curved_entities1d.get(mygeoms[li]) #type:ignore
                                 if curved:
                                     self._has_curved_entries = True
-                                #									print("MARKIN MACRO",ninds)
-                                self.add_nodes_to_boundary(name, ninds)
-                                if curved:
-                                    raise RuntimeError("CURVED 3d Bounds")
-                                    self.add_facet_to_curve_entity(ninds[[0, 1]], curved)
+                            if cells.type=="triangle":
+                                vertex_inds=ninds[[0, 1, 2]] #type:ignore
+                            elif cells.type=="triangle6":
+                                raise RuntimeError("TODO: Implement curved facets for second order triangles")
+                                vertex_inds=ninds[[0, 1, 2]] #type:ignore
+                            elif cells.type=="quad" or cells.type=="quad9":
+                                raise RuntimeError("TODO: Implement curved facets for second order triangles")
+                                vertex_inds=ninds[[0, 1, 2, 3]] #type:ignore                            
+                            self.add_facet_to_boundary(name, ninds,vertex_inds,curved)
 
 
 
@@ -1418,16 +1422,26 @@ class GmshTemplate(MeshTemplate):
                             ninds = self._nodeinds[l] #type:ignore
                             if -1 in ninds:  #type:ignore # Do only consider lines full inside
                                 continue
+                            
                             if no_macro_elements:
-                                self.add_nodes_to_boundary(name, ninds) #type:ignore
+                                curved = None
                             else:
-                                curved = self._curved_entities1d.get(mygeoms[li])
+                                curved = self._curved_entities1d.get(mygeoms[li]) #type:ignore
                                 if curved:
                                     self._has_curved_entries = True
-                                #									print("MARKIN MACRO",ninds)
-                                self.add_nodes_to_boundary(name, ninds) #type:ignore
-                                if curved: 
-                                    self.add_facet_to_curve_entity(ninds[[0, 1]], curved) #type:ignore
+                            vertex_inds=ninds[[0, 1]] #type:ignore
+                            self.add_facet_to_boundary(name, ninds,vertex_inds,curved)
+                            
+                            #if no_macro_elements:
+                            #    self.add_nodes_to_boundary(name, ninds) #type:ignore
+                            #else:
+                            #    curved = self._curved_entities1d.get(mygeoms[li])
+                            #    if curved:
+                            #        self._has_curved_entries = True                             
+                            #    self.add_nodes_to_boundary(name, ninds) #type:ignore
+                            #    if curved: 
+                            #        self.add_facet_to_curve_entity(ninds[[0, 1]], curved) #type:ignore
+                            
                     #elif cells.type=="vertex":
                     #    mycells = cells.data[idx]
                     #    mygeoms = self._mesh.cell_data["gmsh:geometrical"][i][idx]
@@ -1475,16 +1489,15 @@ class GmshTemplate(MeshTemplate):
                             ninds = self._nodeinds[l] #type:ignore
                             if -1 in ninds:  #type:ignore # Do only consider lines full inside
                                 continue
+                            
                             if no_macro_elements:
-                                self.add_nodes_to_boundary(name, ninds)  #type:ignore
+                                curved = None
                             else:
-                                curved = self._curved_entities0d.get(mygeoms[li]) #type:ignore
+                                curved = self._curved_entities1d.get(mygeoms[li]) #type:ignore
                                 if curved:
-                                    self._has_curved_entries = True
-                                #									print("MARKIN MACRO",ninds)
-                                self.add_nodes_to_boundary(name, ninds) #type:ignore
-                                if curved:
-                                    self.add_facet_to_curve_entity(ninds, curved) #type:ignore
+                                    self._has_curved_entries = True                            
+                            self.add_facet_to_boundary(name, ninds,ninds,curved)
+                            
 
 
     def write_curved_entities(self,fname:str):

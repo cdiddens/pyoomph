@@ -364,9 +364,9 @@ namespace pyoomph
   class MeshTemplateFacet
   {
   public:
-    MeshTemplateFacet(std::vector<unsigned> &inds, MeshTemplateCurvedEntity *curved, std::vector<MeshTemplateNode *> *nodes);
-    std::vector<unsigned> sorted_inds; // For fast finding
-    std::vector<unsigned> nodeinds;
+    MeshTemplateFacet(const  std::vector<nodeindex_t> &inds, MeshTemplateCurvedEntity *curved, std::vector<MeshTemplateNode *> *nodes);
+    std::vector<nodeindex_t> sorted_inds; // For fast finding
+    std::vector<nodeindex_t> nodeinds;
     MeshTemplateCurvedEntity *curved_entity;
     std::vector<std::vector<double>> parametrics;
   };
@@ -737,7 +737,7 @@ namespace pyoomph
     nodeindex_t add_intermediate_node_unique(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, bool boundary_possible); // For tri C2TB
     nodeindex_t add_intermediate_node_unique(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, bool boundary_possible);
 
-    void add_facet_to_curve_entity(std::vector<unsigned> &facetnodes, MeshTemplateCurvedEntity *curved);
+    void add_facet_to_curve_entity(const std::vector<nodeindex_t> &vertexindices, MeshTemplateCurvedEntity *curved);
 
     void add_periodic_node_pair(const nodeindex_t &n1, const nodeindex_t &n2);
 
@@ -752,6 +752,7 @@ namespace pyoomph
     unsigned int get_boundary_index(const std::string &boundname) const;
     void add_node_to_boundary(const std::string &boundname, const nodeindex_t &ni);
     void add_nodes_to_boundary(const std::string &boundname, const std::vector<nodeindex_t> &ni);
+    void add_facet_to_boundary(const std::string &boundname, const std::vector<nodeindex_t> &ni,const std::vector<nodeindex_t> &vertexindices, MeshTemplateCurvedEntity *curved=nullptr);
 
     std::map<MeshTemplateNode *, nodeindex_t, std::function<bool(const MeshTemplateNode *, const MeshTemplateNode *)>> &get_unique_node_map() { return nodemap; }
     MeshTemplateElementCollection *new_bulk_element_collection(std::string name);

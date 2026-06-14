@@ -7,6 +7,14 @@ import zipfile,glob,subprocess
 import shutil
 
 
+try:
+  from  petsc4py import PETSc
+except ImportError:
+  raise ImportError("petsc4py not found, cannot run tests with eigenvalue solvers. Please install petsc4py and make sure it is in the PYTHONPATH")
+
+import numpy
+assert PETSc.ScalarType is numpy.complex128, "PETSc does not support complex numbers, cannot run tests with eigenvalue solvers. Please install a version of PETSc with complex support and make sure petsc4py is using that version."
+  
 
 bundle= Path("../docs/source/tutorial/tutorial_example_scripts.zip")
 

@@ -876,10 +876,12 @@ class MeshTemplate:
         ...
     def _set_problem(self, arg0: Problem) -> None:
         ...
+    def add_facet_to_boundary(self, boundary_name: str, all_node_indices: list[int], vertex_node_indices: list[int] = [], curved_entity: MeshTemplateCurvedEntityBase = None) -> None:
+        """
+        Adds a list of nodes, i.e. a facet, to a boundary. Must pass all nodes of the facet, the vertex nodes and a potential curved entity for MacroElements
+        """
     def add_facet_to_curve_entity(self, arg0: list[int], arg1: MeshTemplateCurvedEntityBase) -> None:
-        """
-        Adds a facet to a curved boundary so that e.g. additional nodes of refined meshes will be exactly on this curve
-        """
+        ...
     def add_node(self, x: float, y: float = 0.0, z: float = 0.0) -> int:
         """
         Adds a node at the given position. Creates overlapping nodes, if there is already a node at this position.
@@ -889,9 +891,7 @@ class MeshTemplate:
         Adds a node at the given position. If there is already a node at this position,no new node is created
         """
     def add_nodes_to_boundary(self, arg0: str, arg1: list[int]) -> None:
-        """
-        Adds a list of nodes, i.e. a facet, to a boundary
-        """
+        ...
     def add_periodic_node_pair(self, n_mst: int, n_slv: int) -> None:
         ...
     def get_node_position(self, arg0: int) -> list[float]:
