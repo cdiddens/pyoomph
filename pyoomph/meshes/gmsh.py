@@ -1347,10 +1347,12 @@ class GmshTemplate(MeshTemplate):
                             if cells.type=="triangle":
                                 vertex_inds=ninds[[0, 1, 2]] #type:ignore
                             elif cells.type=="triangle6":
-                                raise RuntimeError("TODO: Implement curved facets for second order triangles")
-                                vertex_inds=ninds[[0, 1, 2]] #type:ignore
-                            elif cells.type=="quad" or cells.type=="quad9":
-                                raise RuntimeError("TODO: Implement curved facets for second order triangles")
+                                vertex_inds=ninds[[0, 1, 2]] # Let hope that this is correct
+                            elif cells.type=="quad":
+                                vertex_inds=ninds[[0, 1, 2, 3]] #type:ignore
+                            elif cells.type=="quad9":
+                                #raise RuntimeError("TODO: Implement curved facets for second order triangles")
+                                # This has to be checked, but I think this is correct
                                 vertex_inds=ninds[[0, 1, 2, 3]] #type:ignore                            
                             self.add_facet_to_boundary(name, ninds,vertex_inds,curved)
 
