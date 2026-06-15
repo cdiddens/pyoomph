@@ -1341,7 +1341,7 @@ class GmshTemplate(MeshTemplate):
                             if no_macro_elements:
                                 curved = None
                             else:
-                                curved = self._curved_entities1d.get(mygeoms[li]) #type:ignore
+                                curved = self._curved_entities2d.get(mygeoms[li]) #type:ignore
                                 if curved:
                                     self._has_curved_entries = True
                             if cells.type=="triangle":
