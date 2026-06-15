@@ -51,7 +51,7 @@ class LShapedMesh(MeshTemplate):
 			# add a quadrilateral element from (x_l,y_l) to (x_u,y_u)
 			domain.add_quad_2d_C1(node_ll,node_ul,node_lu,node_uu)
 			if ix==0: # Marking the left boundary:
-				self.add_nodes_to_boundary("left",[node_ll,node_lu])
+				self.add_facet_to_boundary("left",[node_ll,node_lu])
 
 		# row of quads in y direction
 		for iy in range(1,self.Ny): # we must start from 1, since the element in the corner is already present
@@ -63,7 +63,7 @@ class LShapedMesh(MeshTemplate):
 			node_uu = self.add_node_unique(x_u, y_u)
 			domain.add_quad_2d_C1(node_ll,node_ul,node_lu,node_uu)
 			if iy == self.Ny-1: # Marking the top boundary:
-				self.add_nodes_to_boundary("top",[node_lu, node_uu])
+				self.add_facet_to_boundary("top",[node_lu, node_uu])
 
 
 class MeshTestProblem(Problem):

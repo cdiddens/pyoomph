@@ -52,9 +52,9 @@ class TwoDomainMesh1d(MeshTemplate):
 			domainB.add_line_1d_C1(x0,x1)
 			
 		# marking boundaries
-		self.add_nodes_to_boundary("left",[nodesA[0]])
-		self.add_nodes_to_boundary("interface",[nodesB[0]]) # coordsB[0] is acutally = coordsA[-1]
-		self.add_nodes_to_boundary("right",[nodesB[-1]])
+		self.add_facet_to_boundary("left",[nodesA[0]])
+		self.add_facet_to_boundary("interface",[nodesB[0]]) # coordsB[0] is acutally = coordsA[-1]
+		self.add_facet_to_boundary("right",[nodesB[-1]])
 		
 
 class ConnectTAtInterface(InterfaceEquations):		

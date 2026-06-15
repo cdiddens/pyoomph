@@ -45,7 +45,7 @@ class RectangularQuadMeshWithInterface(RectangularQuadMesh):
 			nl = self.add_node_unique(ix * self.size[0] / self.N[0] + self.lower_left[0], y)
 			nr = self.add_node_unique((ix+1) * self.size[0] / self.N[0] + self.lower_left[0], y)
    			# And add them to the internal interface boundary
-			self.add_nodes_to_boundary(self.interface_name, [nl, nr]) 
+			self.add_facet_to_boundary(self.interface_name, [nl, nr]) 
 		# Also mark it as an internal boundary
 		self.set_boundary_as_interior(self.interface_name)
   

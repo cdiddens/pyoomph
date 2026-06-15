@@ -54,9 +54,9 @@ class HelicalLineMesh(MeshTemplate):
             n2 = node_at_parameter((i + 1) / self.N)
             domain.add_line_1d_C2(n0, n1, n2)  # add a second order line element
             if i == 0:  # Marking the start boundary:
-                self.add_nodes_to_boundary("start", [n0])
+                self.add_facet_to_boundary("start", [n0])
             elif i == self.N - 1:  # Marking the end boundary:
-                self.add_nodes_to_boundary("end", [n2])
+                self.add_facet_to_boundary("end", [n2])
 
 
 class MeshTestProblem(Problem):

@@ -65,14 +65,17 @@ class FishMesh(MeshTemplate):
         # Curved entities
         upper_body_curve=self.create_curved_entity("circle_arc",n_upper_jaw,n_upper_body_fin,center=[0,0])
         lower_body_curve = self.create_curved_entity("circle_arc", n_lower_jaw, n_lower_body_fin, center=[0, 0])
-        self.add_facet_to_curve_entity([n_upper_jaw,n_upper_body_fin],upper_body_curve) # top body curve
-        self.add_facet_to_curve_entity([n_lower_body_fin, n_lower_jaw], lower_body_curve) # bottom body curve
+        self.add_facet_to_boundary("curved",[n_upper_jaw,n_upper_body_fin],curved_entity= upper_body_curve) # top body curve
+        self.add_facet_to_boundary("curved",[n_lower_body_fin, n_lower_jaw], curved_entity=lower_body_curve) # bottom body curve
 
         # Add nodes to boundaries
-        self.add_nodes_to_boundary("curved",[n_upper_body_fin, n_lower_body_fin,n_lower_jaw,n_upper_jaw]) # nodes on curved body parts
-        self.add_nodes_to_boundary("mouth", [ n_lower_jaw,n_upper_jaw,n_mouth_center])  # nodes of the mouth
-        self.add_nodes_to_boundary("fin",[n_upper_body_fin,n_lower_body_fin,n_center_fin_end,n_upper_fin_corner,n_lower_fin_corner]) # fin
-
+        self.add_facet_to_boundary("mouth", [ n_lower_jaw,n_mouth_center])  # nodes of the mouth
+        self.add_facet_to_boundary("mouth", [ n_upper_jaw,n_mouth_center])  # nodes of the mouth
+        self.add_facet_to_boundary("fin",[n_upper_body_fin,n_upper_fin_corner])
+        self.add_facet_to_boundary("fin",[n_upper_fin_corner,n_center_fin_end])
+        self.add_facet_to_boundary("fin",[n_lower_body_fin,n_lower_fin_corner])
+        self.add_facet_to_boundary("fin",[n_lower_fin_corner,n_center_fin_end])
+        
 
 class MeshTestProblem(Problem):
     def __init__(self):
