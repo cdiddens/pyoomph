@@ -35,9 +35,9 @@ For a simple start, a static (i.e. non-moving) one-dimensional mesh consisting o
    			domainB.add_line_1d_C1(x0,x1)
    			
    		# marking boundaries
-   		self.add_nodes_to_boundary("left",[nodesA[0]])
-   		self.add_nodes_to_boundary("interface",[nodesB[0]]) # coordsB[0] is actually = coordsA[-1]
-   		self.add_nodes_to_boundary("right",[nodesB[-1]])
+   		self.add_facet_to_boundary("left",[nodesA[0]])
+   		self.add_facet_to_boundary("interface",[nodesB[0]]) # coordsB[0] is actually = coordsA[-1]
+   		self.add_facet_to_boundary("right",[nodesB[-1]])
 
 Note how we create two domains with the :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.new_domain` calls and add line elements to both of these domains. During the latter, we use ``zip`` with a shifted node list to get the nodes in pairs, i.e. (node0,node1), (node1,node2), etc., to build the elements. It is important to note, since :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.add_node_unique` will not create new nodes if a node is already existing at a point, that ``domainA[-1]`` is the very same node as ``domainB[0]``. Thereby, this node, which is marked to be the interface ``"interface"``, is part of both domains.
 

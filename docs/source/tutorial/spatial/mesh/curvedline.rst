@@ -37,9 +37,9 @@ Until now the meshes have always be conforming in the number of dimensions, i.e.
                n2 = node_at_parameter((i + 1) / self.N)
                domain.add_line_1d_C2(n0, n1, n2)  # add a second order line element
                if i == 0:  # Marking the start boundary:
-                   self.add_nodes_to_boundary("start", [n0])
+                   self.add_facet_to_boundary("start", [n0])
                elif i == self.N - 1:  # Marking the end boundary:
-                   self.add_nodes_to_boundary("end", [n2])
+                   self.add_facet_to_boundary("end", [n2])
 
 Note how we name the domain by default ``"helix"``, so that we must add equations to the domain ``"helix"`` in the :py:meth:`~pyoomph.generic.problem.Problem.add_equations` method of the problem class to restrict them on this helix. Furthermore, in the :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.new_domain` calls, we add a second argument, ``3``, which sets the nodal dimension space of this domain to :math:`3`. The rest works analogous to the previous example, however, this time we create second order line elements instead of first order quadrilateral elements by the call of :py:meth:`~_pyoomph.MeshTemplateElementCollection.add_line_1d_C2`. Due to the second order, we must supply a third node so that we in total have a start, a center and an end node of each line element. pyoomph automatically converts first order elements to second order elements, if equations on the space ``"C2"`` are defined on this domain. Vice versa, if we only have ``"C1"`` fields defined on a domain, pyoomph will simplify all generated second order elements to first order elements.
 

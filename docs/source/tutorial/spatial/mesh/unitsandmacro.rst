@@ -48,13 +48,16 @@ We will implement a fish mesh, which was inspired by the fish mesh example of oo
            # Curved entities
            upper_body_curve=self.create_curved_entity("circle_arc",n_upper_jaw,n_upper_body_fin,center=[0,0])
            lower_body_curve = self.create_curved_entity("circle_arc", n_lower_jaw, n_lower_body_fin, center=[0, 0])
-           self.add_facet_to_curve_entity([n_upper_jaw,n_upper_body_fin],upper_body_curve) # top body curve
-           self.add_facet_to_curve_entity([n_lower_body_fin, n_lower_jaw], lower_body_curve) # bottom body curve
+           self.add_facet_to_boundary("curved",[n_upper_jaw,n_upper_body_fin],curved_entity= upper_body_curve) # top body curve
+           self.add_facet_to_boundary("curved",[n_lower_body_fin, n_lower_jaw], curved_entity=lower_body_curve) # bottom body curve
 
            # Add nodes to boundaries
-           self.add_nodes_to_boundary("curved",[n_upper_body_fin, n_lower_body_fin,n_lower_jaw,n_upper_jaw]) # nodes on curved body parts
-           self.add_nodes_to_boundary("mouth", [ n_lower_jaw,n_upper_jaw,n_mouth_center])  # nodes of the mouth
-           self.add_nodes_to_boundary("fin",[n_upper_body_fin,n_lower_body_fin,n_center_fin_end,n_upper_fin_corner,n_lower_fin_corner]) # fin
+           self.add_facet_to_boundary("mouth", [ n_lower_jaw,n_mouth_center])  # nodes of the mouth
+           self.add_facet_to_boundary("mouth", [ n_upper_jaw,n_mouth_center])  # nodes of the mouth
+           self.add_facet_to_boundary("fin",[n_upper_body_fin,n_upper_fin_corner])
+           self.add_facet_to_boundary("fin",[n_upper_fin_corner,n_center_fin_end])
+           self.add_facet_to_boundary("fin",[n_lower_body_fin,n_lower_fin_corner])
+           self.add_facet_to_boundary("fin",[n_lower_fin_corner,n_center_fin_end])
 
 The first new aspect is the call of :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.nondim_size`, will calculate a corresponding non-dimensional size of an optionally dimensional argument. The dimensional argument will just be divided by ``scale_factor("spatial")``, i.e. the ``spatial`` scale set by :py:meth:`~pyoomph.generic.problem.Problem.set_scaling` in the :py:class:`~pyoomph.generic.problem.Problem` class. Every potentially metric argument passed to the mesh should be handled that way. Thereby, the mesh will be generated in the correct non-dimensional coordinates.
 
@@ -68,9 +71,7 @@ The first new aspect is the call of :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.
 	(left) Fish mesh as initially defined. (middle) mesh after converting the elements to ``"C2"`` space: The additional nodes will be mapped on the circular boundaries. (right) Final adaptive solution of the Poisson equation on the fish mesh.
 
 
-The definition of the corner node looks more complicated than it is. It are just the corners of the fish mesh, but the calculation of the coordinates from the parameters is a bit longish. The basic fish mesh without any adaption can be seen in :numref:`figspatialfishmesh`. Also the elements are the same as before, but then we have to tell the ``FishMesh``, that we have facets that are located on curved boundaries. To that end, we construct the curved boundaries by the calls of :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.create_curved_entity`. The first argument ``"circle_arc"`` tells that we want to have a curved boundary in shape of a circle segment. Then we specify the start and end node and the ``center``, which can either be a node nor, as here, a ``list`` of coordinates. We then still have to inform the ``FishMesh`` which facets shall be mapped onto this curve, since in principle there could be multiple facets sharing the same curved entity. This is done with the :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.add_facet_to_curve_entity` call, one for each facet.
-
-Finally, we assign the boundary names. We split it into different names to separate between the ``"curved"`` boundaries and the straight lines.
+The definition of the corner node looks more complicated than it is. It are just the corners of the fish mesh, but the calculation of the coordinates from the parameters is a bit longish. The basic fish mesh without any adaption can be seen in :numref:`figspatialfishmesh`. Also the elements are the same as before, but then we have to tell the ``FishMesh``, that we have facets that are located on curved boundaries. To that end, we construct the curved boundaries by the calls of :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.create_curved_entity`. The first argument ``"circle_arc"`` tells that we want to have a curved boundary in shape of a circle segment. Then we specify the start and end node and the ``center``, which can either be a node nor, as here, a ``list`` of coordinates. We then still have to inform the ``FishMesh`` which facets shall be mapped onto this curve, since in principle there could be multiple facets sharing the same curved entity. This is done within the :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.add_facet_to_boundary` call, by passing it via the ``curved_entity`` kwarg.
 
 As a driver code, we use the following with a dimensional ``fish_size``:
 

@@ -29,26 +29,26 @@ To do so, we write a mesh class that inherits from the :py:class:`~pyoomph.meshe
    			x_l,x_u=self.W*ix,self.W*(ix+1) # lower and upper x coordinate
    			y_l, y_u = 0, self.H # lower and upper y coordinate
    			# add the corner nodes. These will be unique, i.e. no additional node will be added if it is already present
-   			node_ll=self.add_node_unique(x_l,y_l)
+   			node_ll = self.add_node_unique(x_l,y_l)
    			node_ul = self.add_node_unique(x_u, y_l)
    			node_lu = self.add_node_unique(x_l, y_u)
    			node_uu = self.add_node_unique(x_u, y_u)
    			# add a quadrilateral element from (x_l,y_l) to (x_u,y_u)
    			domain.add_quad_2d_C1(node_ll,node_ul,node_lu,node_uu)
    			if ix==0: # Marking the left boundary:
-   				self.add_nodes_to_boundary("left",[node_ll,node_lu])
+   				self.add_facet_to_boundary("left",[node_ll,node_lu])
 
    		# row of quads in y direction
    		for iy in range(1,self.Ny): # we must start from 1, since the element in the corner is already present
    			x_l,x_u=self.W*(self.Nx-1),self.W*self.Nx # lower and upper x coordinate
    			y_l, y_u = self.H*iy, self.H*(iy+1) # lower and upper y coordinate
-   			node_ll=self.add_node_unique(x_l,y_l)
+   			node_ll = self.add_node_unique(x_l,y_l)
    			node_ul = self.add_node_unique(x_u, y_l)
    			node_lu = self.add_node_unique(x_l, y_u)
    			node_uu = self.add_node_unique(x_u, y_u)
    			domain.add_quad_2d_C1(node_ll,node_ul,node_lu,node_uu)
    			if iy == self.Ny-1: # Marking the top boundary:
-   				self.add_nodes_to_boundary("top",[node_lu, node_uu])
+   				self.add_facet_to_boundary("top",[node_lu, node_uu])
 
 Again, we pass arguments to the constructor, e.g. the number of elements ``Nx``\ :math:`\times`\ ``Ny`` in :math:`x` and :math:`y` direction. These are stored as properties of the class. The generation happens in the method :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.define_geometry`. A :py:class:`~pyoomph.meshes.mesh.MeshTemplate` consists of *nodes* and *elements*. Nodes are part of the :py:class:`~pyoomph.meshes.mesh.MeshTemplate` itself, whereas elements are stored in domains. This will allow to create multiple domains in the very same :py:class:`~pyoomph.meshes.mesh.MeshTemplate`, which is relevant for multi-domain problems in :numref:`secmultidom` later on. Therefore, before adding elements, we must create a domain to store these. This is done with the :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.new_domain` method, which takes a name of this domain as argument. The name is arbitrary, but it is relevant to identify the domain. In particular, in the :py:class:`~pyoomph.generic.problem.Problem` class, we have to restrict the equations to the very same domain name, e.g. in the call ``add_equations(eqs@"domain")``.
 
@@ -56,7 +56,7 @@ The, we perform a loop over the :math:`x`-direction. We calculate the corner :ma
 
 We do the same in :math:`y`-direction. However, opposed to nodes, it is not checked whether elements were already added. Therefore, it is important that the :math:`y`-loop starts with ``iy=1``, not ``iy=0``, to prevent the dual generation of the element in the corner of the L-shape.
 
-Lastly, we also can add boundary markers. This is done with the :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.add_nodes_to_boundary` method, that takes first an interface name and then a list of nodes that should be added to this boundary. It is not required to add all nodes to one boundary in a single call of :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.add_nodes_to_boundary`. You can also e.g. replace ``add_nodes_to_boundary("left",[node_ll,node_lu])`` by two calls ``add_nodes_to_boundary("left",[node_ll])`` and ``add_nodes_to_boundary("left",[node_lu])``, which do exactly the same.
+Lastly, we also can add boundary markers. This is done with the :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.add_facet_to_boundary` method, that takes first an interface name and then a list of nodes defining a single facet. This function must be called for each facet on the boundary. For higher order facets, a further argument, namely a list of vertex nodes is required as additional argument.
 
 ..  figure:: meshtemplate1.*
 	:name: figspatialmeshtemplate1
