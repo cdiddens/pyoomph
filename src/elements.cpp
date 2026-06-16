@@ -12559,6 +12559,29 @@ namespace pyoomph
 			}
 		}
 
+		for (unsigned i = ft->numfields_C1TB_bulk; i < ft->numfields_C1TB; i++)
+		{
+			std::string fieldname = ft->fieldnames_C1TB[i];
+			unsigned value_index = codeinst->resolve_interface_dof_id(fieldname);
+			oomph::Vector<unsigned> additional_data_values(eleminfo.nnode, 0);
+			bool add_values = false;
+			std::vector<bool> already_allocated;
+			for (unsigned l = 0; l < eleminfo.nnode; ++l)
+			{
+				additional_data_values[l] = 1;
+				already_allocated.push_back(dynamic_cast<BoundaryNode*>(this->node_pt(l))->has_additional_dof(value_index));
+				add_values = true;
+			}
+			if (add_values)
+			{
+				this->add_additional_values(additional_data_values, value_index);
+			   for (unsigned l = 0; l < eleminfo.nnode; ++l)
+			   {
+				  if (additional_data_values[l] && !already_allocated[l] && interpolate_new_interface_dofs) this->interpolate_newly_constructed_additional_dof(l,value_index,"C1TB");
+				}
+			}
+		}
+
 		for (unsigned i = ft->numfields_C1_bulk; i < ft->numfields_C1; i++)
 		{
 			std::string fieldname = ft->fieldnames_C1[i];
