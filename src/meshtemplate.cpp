@@ -797,6 +797,8 @@ namespace pyoomph
 		return new MeshTemplateElementTetraC2(ninds);
 	}
 
+	
+
 	MeshTemplateFacet *MeshTemplateElementTetraC1::construct_facet(unsigned i)
 	{
 //oomph ordering : {1, 2, 3}, {0, 2, 3}, {0, 1, 3}, {1, 2, 0}
@@ -825,6 +827,21 @@ namespace pyoomph
 		std::vector<nodeindex_t> inds = {ni1, ni2, ni3};
 		// std::sort(inds.begin(),inds.end());
 		return new MeshTemplateFacet(inds, NULL, NULL);
+	}
+
+	MeshTemplateElement *MeshTemplateElementTetraC1::convert_for_C1TB_space(MeshTemplate *templ)
+	{
+
+		std::vector<nodeindex_t> nnodes = node_indices;		
+		nnodes.push_back(templ->add_intermediate_node_unique(node_indices[0], node_indices[1], node_indices[2], node_indices[3], false));
+
+		return new MeshTemplateElementTetraC1TB(nnodes[0], nnodes[1], nnodes[2], nnodes[3], nnodes[4]);
+	}
+
+
+	MeshTemplateElementTetraC1TB::MeshTemplateElementTetraC1TB(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5) : MeshTemplateElementTetraC1(n1, n2, n3, n4)
+	{
+		node_indices.push_back(n5);
 	}
 
 	/////////////////////////////////
@@ -1183,7 +1200,13 @@ namespace pyoomph
 						elements[ie] = dynamic_cast<MeshTemplateElementTriC2 *>(e)->convert_for_C2TB_space(mesh_template);
 						delete e;
 						e = elements[ie];				   
-				}				
+				}
+				else if (dynamic_cast<MeshTemplateElementTetraC1 *>(e) && !dynamic_cast<MeshTemplateElementTetraC1TB *>(e) )
+				{
+						elements[ie] = dynamic_cast<MeshTemplateElementTetraC1 *>(e)->convert_for_C1TB_space(mesh_template);
+						delete e;
+						e = elements[ie];
+				}
 			}
 		}
 		else if (code_inst->get_func_table()->numfields_C2 || dom_space == "C2" || code_inst->get_func_table()->numfields_C2TB || dom_space == "C2TB") 
@@ -1754,7 +1777,7 @@ namespace pyoomph
 		{
 			// Reduce the element
 			nodeindices = {nodeindices[0], nodeindices[1], nodeindices[2]};
-		}
+		}		
 		else if (el->get_geometric_type_index() == 2 && (domspace == "C1" || domspace == "C1TB")) // LC2->LC1
 		{
 			// Reduce the element

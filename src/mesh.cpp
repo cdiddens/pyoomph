@@ -663,7 +663,7 @@ namespace pyoomph
       {
         fe = new InterfaceElementQuad2dC2(jitcode, be, fi);
       }
-      // TODO: BulkElementTetra3dC1TB here
+      // BulkElementTetra3dC1TB is an instance of BulkElementTetra3dC1, so but Tri2dC1 is the right facet
       else if (dynamic_cast<BulkElementTetra3dC1 *>(be))
       {
         fe = new InterfaceElementTri2dC1(jitcode, be, fi);
@@ -2472,11 +2472,23 @@ namespace pyoomph
         from_interface_dofs[name2find] = from_ci->resolve_interface_dof_id(name2find);
         from_interface_spaces[from_interface_dofs[name2find]] = "C2";
       }
+    for (unsigned int i = 0; i < from_ft->numfields_C2TB - from_ft->numfields_C2TB_basebulk; i++)
+      {
+        std::string name2find = from_ft->fieldnames_C2TB[from_ft->numfields_C2TB_basebulk + i];
+        from_interface_dofs[name2find] = from_ci->resolve_interface_dof_id(name2find);
+        from_interface_spaces[from_interface_dofs[name2find]] = "C2TB";
+      }      
       for (unsigned int i = 0; i < from_ft->numfields_C1 - from_ft->numfields_C1_basebulk; i++)
       {
         std::string name2find = from_ft->fieldnames_C1[from_ft->numfields_C1_basebulk + i];
         from_interface_dofs[name2find] = from_ci->resolve_interface_dof_id(name2find);
         from_interface_spaces[from_interface_dofs[name2find]] = "C1";
+      }
+      for (unsigned int i = 0; i < from_ft->numfields_C1TB - from_ft->numfields_C1TB_basebulk; i++)
+      {
+        std::string name2find = from_ft->fieldnames_C1TB[from_ft->numfields_C1TB_basebulk + i];
+        from_interface_dofs[name2find] = from_ci->resolve_interface_dof_id(name2find);
+        from_interface_spaces[from_interface_dofs[name2find]] = "C1TB";
       }
       for (auto my : my_interface_dofs)
       {

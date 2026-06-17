@@ -212,6 +212,7 @@ namespace pyoomph
 		T3d[3] = new oomph::TGauss<3, 3>();
 		T3d[5] = new oomph::TGauss<3, 5>();
 
+		//TODO: Having a C1TB here?
 		T3dTB[3] = new oomph::TBubbleEnrichedGauss<3, 3>();
 	}
 
@@ -449,6 +450,72 @@ namespace pyoomph
 			}
 			cnt++;
 		}
+	}
+
+
+	bool BulkElementBase::fill_hang_info_with_equations_for_pos(JITShapeInfo_t *shape_info)
+	{
+		bool res = false;
+		for (unsigned int l = 0; l < eleminfo.nnode; l++)
+		{
+			if (node_pt(l)->is_hanging())
+			{
+				res = true;
+				auto hang_info_pt = node_pt(l)->hanging_pt();				
+				shape_info->hanginfo_Pos[l].nummaster = hang_info_pt->nmaster();
+				for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
+				{					
+					shape_info->hanginfo_Pos[l].masters[m].weight = hang_info_pt->master_weight(m);				
+					for (unsigned int f = 0; f < this->nodal_dimension(); f++)
+					{						
+						oomph::DenseMatrix<int> position_local_eqn_at_node = this->local_position_hang_eqn(hang_info_pt->master_node_pt(m));
+						for (unsigned int f = 0; f < this->nodal_dimension(); f++) // TODO: More nnodal_position_type ?
+						{
+							shape_info->hanginfo_Pos[l].masters[m].local_eqn[f] = position_local_eqn_at_node(0, f);
+						}
+					}
+				}
+			}
+			else
+			{				
+				shape_info->hanginfo_Pos[l].nummaster = 0;
+			}
+		}
+
+		for (unsigned int l = 0; l < eleminfo.nnode; l++)
+		{
+			shape_info->hanginfo_Discont[l].nummaster = 0;
+		}
+
+		return res;
+	}
+
+	bool BulkElementBase::fill_hang_info_with_equations_for_space(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, const unsigned nnode_space, const int hangindex_space, JITHangInfo_t * hangbuffer, unsigned numfields_basebulk,const unsigned buffer_offset_basebulk,const unsigned nodal_offset_basebulk,unsigned int (BulkElementBase::*space_node_to_elem_node_index)(const unsigned int &) const)
+	{
+		bool res = false;
+		for (unsigned int l = 0; l < nnode_space; l++)
+		{
+			unsigned l_elem=(this->*space_node_to_elem_node_index)(l);
+			if (node_pt(l_elem)->is_hanging(hangindex_space))
+			{
+				res = true;
+				auto hang_info_pt = node_pt(l_elem)->hanging_pt(hangindex_space);
+				hangbuffer[l].nummaster = hang_info_pt->nmaster();				
+				for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
+				{
+					hangbuffer[l].masters[m].weight = hang_info_pt->master_weight(m);					
+					for (unsigned int f = 0; f < numfields_basebulk; f++)
+					{
+						hangbuffer[l].masters[m].local_eqn[f+buffer_offset_basebulk] = this->local_hang_eqn(hang_info_pt->master_node_pt(m), f+nodal_offset_basebulk);
+					}
+				}
+			}
+			else
+			{
+				hangbuffer[l].nummaster = 0;
+			}
+		}
+		return res;
 	}
 
 	void BulkElementBase::interpolate_hang_values()
@@ -827,9 +894,7 @@ namespace pyoomph
 				unsigned nfields = this->nodal_dimension();
 
 				for (unsigned int l = 0; l < eleminfo.nnode; l++) // Lagrangian part
-				{
-
-					//    std::cout << "POSNMASTER " << l <<  shape_info->hanginfo_Pos[l].nummaster << std::endl;
+				{					    
 					if (!shape_info->hanginfo_Pos[l].nummaster)
 					{
 						// NON HANGING -> HANGING WITH WEIGHT 1 for external element data
@@ -858,7 +923,7 @@ namespace pyoomph
 								{
 									std::ostringstream oss;
 									oss << this;
-									throw_runtime_error("MISSING EXTERNAL POS DEPENDENCY ON ELEM PTR: " + oss.str() + "\nThis is part of the Lagrangian field index " + std::to_string(f) + " of " + std::to_string(nfields) + " at node " + std::to_string(l));
+									throw_runtime_error("MISSING EXTERNAL POS DEPENDENCY ON ELEM PTR: " + oss.str() + "\nThis is part of the Lagrangian field index " + std::to_string(f) + " of " + std::to_string(nfields) + " at node " + std::to_string(l)+ " of "+std::to_string(eleminfo.nnode));
 								}
 							}
 						}
@@ -2100,7 +2165,18 @@ namespace pyoomph
 		  }
 		}
 		else if (el->get_geometric_type_index() == 4)
-			res = new BulkElementTetra3dC1();
+		{
+			if (dynamic_cast<MeshTemplateElementTetraC1TB*>(el))
+			{
+				res = new BulkElementTetra3dC1TB();
+			}
+			else
+			{
+				res = new BulkElementTetra3dC1();
+			}
+		}
+		else if (el->get_geometric_type_index() == 44)
+			res = new BulkElementTetra3dC1TB();
 		else if (el->get_geometric_type_index() == 6)
 			res = new BulkElementQuad2dC1();
 		else if (el->get_geometric_type_index() == 8)
@@ -7669,14 +7745,12 @@ namespace pyoomph
 		for (unsigned int l = 0; l < eleminfo.nnode_C2; l++) // C2 nodes
 		{
 			shape_info->hanginfo_C2[l].nummaster = 0;
-		}
-		if (codeinst->get_func_table()->numfields_C1)
+		}		
+		for (unsigned int l = 0; l < eleminfo.nnode_C1; l++) // C1 nodes
 		{
-			for (unsigned int l = 0; l < eleminfo.nnode_C1; l++) // C1 nodes
-			{
 				shape_info->hanginfo_C1[l].nummaster = 0;
-			}
 		}
+		
 		/*
 		if (codeinst->get_func_table()->numfields_DL)
 		{
@@ -7850,12 +7924,6 @@ namespace pyoomph
 		{
 			shape_info->hanginfo_Pos[l].nummaster = 0;
 		}
-/*		for (unsigned int l = 0; l < eleminfo.nnode_DL; l++)
-		{
-			shape_info->hanginfo_Discont[l].nummaster = 0;
-		}
-		shape_info->hanginfo_Discont[0].nummaster = 0;
-*/
 		for (unsigned int l = 0; l < eleminfo.nnode; l++)
 		{
 			shape_info->hanginfo_Discont[l].nummaster = 0;
@@ -8077,7 +8145,6 @@ namespace pyoomph
 		for (unsigned int l = 0; l < eleminfo.nnode; l++) // C2 nodes
 		{
 			shape_info->hanginfo_Pos[l].nummaster = 0;
-			//    std::cout << "REM SHAPEINFO " << l << "  " << shape_info->hanginfo_Pos[l].nummaster << std::endl;
 		}
 		for (unsigned int l = 0; l < eleminfo.nnode_C2TB; l++) // C2 nodes
 		{
@@ -8087,30 +8154,15 @@ namespace pyoomph
 		{
 			shape_info->hanginfo_C2[l].nummaster = 0;
 		}
-		if (codeinst->get_func_table()->numfields_C1)
+		for (unsigned int l = 0; l < eleminfo.nnode_C1; l++) // C1 nodes
 		{
-			for (unsigned int l = 0; l < eleminfo.nnode_C1; l++) // C1 nodes
-			{
 				shape_info->hanginfo_C1[l].nummaster = 0;
-			}
-		}
-		if (codeinst->get_func_table()->numfields_C1TB)
-		{
-			for (unsigned int l = 0; l < eleminfo.nnode_C1TB; l++) // C1 nodes
-			{
-				shape_info->hanginfo_C1TB[l].nummaster = 0;
-			}
 		}		
-/*
-		if (codeinst->get_func_table()->numfields_DL)
+		for (unsigned int l = 0; l < eleminfo.nnode_C1TB; l++) // C1 nodes
 		{
-			for (unsigned int l = 0; l < eleminfo.nnode_DL; l++)
-			{
-				shape_info->hanginfo_Discont[l].nummaster = 0;
-			}
-		}
-		shape_info->hanginfo_Discont[0].nummaster = 0;
-*/
+				shape_info->hanginfo_C1TB[l].nummaster = 0;		
+		}		
+		
 		for (unsigned int l = 0; l < eleminfo.nnode; l++)
 		{
 			shape_info->hanginfo_Discont[l].nummaster = 0;
@@ -8184,25 +8236,15 @@ namespace pyoomph
 		for (unsigned int l = 0; l < eleminfo.nnode_C1; l++) // C1 nodes
 		{
 			shape_info->hanginfo_C1[l].nummaster = 0;
-		}
-		if (codeinst->get_func_table()->numfields_C1TB)
+		}		
+		for (unsigned int l = 0; l < eleminfo.nnode_C1TB; l++) // C1 nodes
 		{
-			for (unsigned int l = 0; l < eleminfo.nnode_C1TB; l++) // C1 nodes
-			{
 				shape_info->hanginfo_C1TB[l].nummaster = 0;
-			}
-		}				
+		}		
 		for (unsigned int l = 0; l < eleminfo.nnode; l++)
 		{
 			shape_info->hanginfo_Pos[l].nummaster = 0;
-		}
-		/*
-		for (unsigned int l = 0; l < eleminfo.nnode_DL; l++)
-		{
-			shape_info->hanginfo_Discont[l].nummaster = 0;
-		}
-		shape_info->hanginfo_Discont[0].nummaster = 0;
-		*/
+		}		
 		for (unsigned int l = 0; l < eleminfo.nnode; l++)
 		{
 			shape_info->hanginfo_Discont[l].nummaster = 0;
@@ -8334,16 +8376,12 @@ namespace pyoomph
 	{
 		for (unsigned int l = 0; l < eleminfo.nnode; l++) // C2 nodes
 		{
-			shape_info->hanginfo_Pos[l].nummaster = 0;
-			//    std::cout << "REM SHAPEINFO " << l << "  " << shape_info->hanginfo_Pos[l].nummaster << std::endl;
+			shape_info->hanginfo_Pos[l].nummaster = 0;			
 		}
-		if (codeinst->get_func_table()->numfields_C1TB)
+		for (unsigned int l = 0; l < eleminfo.nnode_C1TB; l++) // C1 nodes
 		{
-			for (unsigned int l = 0; l < eleminfo.nnode_C1TB; l++) // C1 nodes
-			{
-				shape_info->hanginfo_C1TB[l].nummaster = 0;
-			}
-		}				
+			shape_info->hanginfo_C1TB[l].nummaster = 0;
+		}		
 		for (unsigned int l = 0; l < eleminfo.nnode_C2TB; l++) // C2 nodes
 		{
 			shape_info->hanginfo_C2TB[l].nummaster = 0;
@@ -8352,24 +8390,10 @@ namespace pyoomph
 		{
 			shape_info->hanginfo_C2[l].nummaster = 0;
 		}
-		if (codeinst->get_func_table()->numfields_C1)
+		for (unsigned int l = 0; l < eleminfo.nnode_C1; l++) // C1 nodes
 		{
-			for (unsigned int l = 0; l < eleminfo.nnode_C1; l++) // C1 nodes
-			{
 				shape_info->hanginfo_C1[l].nummaster = 0;
-			}
-		}
-		/*
-
-		if (codeinst->get_func_table()->numfields_DL)
-		{
-			for (unsigned int l = 0; l < eleminfo.nnode_DL; l++)
-			{
-				shape_info->hanginfo_Discont[l].nummaster = 0;
-			}
-		}
-		shape_info->hanginfo_Discont[0].nummaster = 0;
-		*/
+		}		
 		for (unsigned int l = 0; l < eleminfo.nnode; l++)
 		{
 			shape_info->hanginfo_Discont[l].nummaster = 0;
@@ -8401,62 +8425,14 @@ namespace pyoomph
 
 	bool BulkElementQuad2dC1::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
 	{
-		bool res = false;
-		for (unsigned int l = 0; l < eleminfo.nnode_C1; l++)
-		{
-			if (node_pt(l)->is_hanging())
-			{
-				res = true;
-				auto hang_info_pt = node_pt(l)->hanging_pt();
-				shape_info->hanginfo_C1[l].nummaster = hang_info_pt->nmaster();
-				shape_info->hanginfo_C1TB[l].nummaster = hang_info_pt->nmaster();				
-				shape_info->hanginfo_Pos[l].nummaster = hang_info_pt->nmaster();
-				for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
-				{
-					shape_info->hanginfo_C1[l].masters[m].weight = hang_info_pt->master_weight(m);
-					shape_info->hanginfo_Pos[l].masters[m].weight = hang_info_pt->master_weight(m);
-					for (unsigned int f = 0; f < codeinst->get_func_table()->numfields_C1_basebulk+codeinst->get_func_table()->numfields_C1TB_basebulk; f++)
-					{
-						shape_info->hanginfo_C1[l].masters[m].local_eqn[f] = this->local_hang_eqn(hang_info_pt->master_node_pt(m), f);
-						shape_info->hanginfo_C1TB[l].masters[m].local_eqn[f] = this->local_hang_eqn(hang_info_pt->master_node_pt(m), f);						
-					}
-					for (unsigned int f = 0; f < this->nodal_dimension(); f++)
-					{
-						//	      oomph::DenseMatrix<int> position_local_eqn_at_node(this->nnodal_position_type(),this->nodal_dimension());
-						oomph::DenseMatrix<int> position_local_eqn_at_node = this->local_position_hang_eqn(hang_info_pt->master_node_pt(m));
-						for (unsigned int f = 0; f < this->nodal_dimension(); f++) // TODO: More nnodal_position_type ?
-						{
-							shape_info->hanginfo_Pos[l].masters[m].local_eqn[f] = position_local_eqn_at_node(0, f);
-						}
-					}
-				}
-			}
-			else
-			{
-				shape_info->hanginfo_C1[l].nummaster = 0;
-				shape_info->hanginfo_C1TB[l].nummaster = 0;				
-				shape_info->hanginfo_Pos[l].nummaster = 0;
-			}
-		}
-		/*
-
-		if (codeinst->get_func_table()->numfields_DL)
-		{
-			for (unsigned int l = 0; l < eleminfo.nnode_DL; l++)
-			{
-				shape_info->hanginfo_Discont[l].nummaster = 0;
-			}
-		}
-		shape_info->hanginfo_Discont[0].nummaster = 0;
-		*/
-		for (unsigned int l = 0; l < eleminfo.nnode; l++)
-		{
-			shape_info->hanginfo_Discont[l].nummaster = 0;
-		}
-
+		auto *ft = codeinst->get_func_table();
+		bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
+		if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
+		if (ft->numfields_C1TB) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1TB, ft->hangindex_C1TB, shape_info->hanginfo_C1TB, ft->numfields_C1TB_basebulk,ft->buffer_offset_C1TB_basebulk,ft->nodal_offset_C1TB_basebulk,&BulkElementBase::get_node_index_C1TB_to_element) || res;
+				
 		if (eqn_remap)
 		{
-			return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap);
+			return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
 		}
 		else
 			return res;
@@ -9038,111 +9014,18 @@ namespace pyoomph
 	}
 
 	bool BulkElementQuad2dC2::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
-	{
-		bool res = false;
-
-		for (unsigned int l = 0; l < eleminfo.nnode; l++)
-		{
-			if (node_pt(l)->is_hanging())
-			{
-				res = true;
-				auto hang_info_pt = node_pt(l)->hanging_pt();
-				shape_info->hanginfo_Pos[l].nummaster = hang_info_pt->nmaster();
-				for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
-				{
-					shape_info->hanginfo_Pos[l].masters[m].weight = hang_info_pt->master_weight(m);
-					for (unsigned int f = 0; f < this->nodal_dimension(); f++)
-					{
-						oomph::DenseMatrix<int> position_local_eqn_at_node = this->local_position_hang_eqn(hang_info_pt->master_node_pt(m));
-						for (unsigned int f = 0; f < this->nodal_dimension(); f++) // TODO: More nnodal_position_type ?
-						{
-							shape_info->hanginfo_Pos[l].masters[m].local_eqn[f] = position_local_eqn_at_node(0, f);
-						}
-					}
-				}
-			}
-			else
-			{
-				shape_info->hanginfo_Pos[l].nummaster = 0;
-			}
-		}
-
-		int hanging_index = (codeinst->get_func_table()->bulk_position_space_to_C1 ? 0 : -1);
-
-		if (codeinst->get_func_table()->numfields_C2_basebulk || codeinst->get_func_table()->numfields_C2TB_basebulk)
-		{
-			for (unsigned int l = 0; l < eleminfo.nnode_C2; l++) // C2 nodes
-			{
-				if (node_pt(l)->is_hanging(hanging_index))
-				{
-					res = true;
-					auto hang_info_pt = node_pt(l)->hanging_pt(hanging_index);
-					shape_info->hanginfo_C2TB[l].nummaster = shape_info->hanginfo_C2[l].nummaster = hang_info_pt->nmaster();
-					for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
-					{
-						shape_info->hanginfo_C2TB[l].masters[m].weight = shape_info->hanginfo_C2[l].masters[m].weight = hang_info_pt->master_weight(m);
-
-						for (unsigned int f = 0; f < codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk; f++)
-						{
-							shape_info->hanginfo_C2TB[l].masters[m].local_eqn[f] = shape_info->hanginfo_C2[l].masters[m].local_eqn[f] = this->local_hang_eqn(hang_info_pt->master_node_pt(m), f);
-						}
-					}
-				}
-				else
-				{
-					shape_info->hanginfo_C2TB[l].nummaster = shape_info->hanginfo_C2[l].nummaster = 0;
-				}
-			}
-		}
-
-		if (codeinst->get_func_table()->numfields_C1_basebulk || codeinst->get_func_table()->numfields_C1TB_basebulk)
-		{
-			for (unsigned int l = 0; l < eleminfo.nnode_C1; l++) // C1 nodes
-			{
-				unsigned nel = get_node_index_C1_to_element(l);
-				if (node_pt(nel)->is_hanging(codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk))
-				{
-					res = true;
-					auto hang_info_pt = node_pt(nel)->hanging_pt(codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk);
-					shape_info->hanginfo_C1[l].nummaster = hang_info_pt->nmaster();
-					shape_info->hanginfo_C1TB[l].nummaster = hang_info_pt->nmaster();					
-					for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
-					{
-						shape_info->hanginfo_C1[l].masters[m].weight = hang_info_pt->master_weight(m);
-						shape_info->hanginfo_C1TB[l].masters[m].weight = hang_info_pt->master_weight(m);						
-						for (unsigned int f = 0; f < codeinst->get_func_table()->numfields_C1_basebulk; f++)
-						{
-							shape_info->hanginfo_C1[l].masters[m].local_eqn[f + codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk] = this->local_hang_eqn(hang_info_pt->master_node_pt(m), f + codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk);
-							shape_info->hanginfo_C1TB[l].masters[m].local_eqn[f + codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk] = this->local_hang_eqn(hang_info_pt->master_node_pt(m), f + codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk);							
-						}
-					}
-				}
-				else
-				{
-					shape_info->hanginfo_C1[l].nummaster = 0;
-					shape_info->hanginfo_C1TB[l].nummaster = 0;					
-				}
-			}
-		}
-		/*
-
-		if (codeinst->get_func_table()->numfields_DL)
-		{
-			for (unsigned int l = 0; l < eleminfo.nnode_DL; l++)
-			{
-				shape_info->hanginfo_Discont[l].nummaster = 0;
-			}
-		}
-		shape_info->hanginfo_Discont[0].nummaster = 0;
-		*/
-		for (unsigned int l = 0; l < eleminfo.nnode; l++)
-		{
-			shape_info->hanginfo_Discont[l].nummaster = 0;
-		}
+	{		
+		bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
+		auto * ft = codeinst->get_func_table();
+		if (ft->numfields_C2TB) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C2TB, ft->hangindex_C2TB, shape_info->hanginfo_C2TB, ft->numfields_C2TB_basebulk,ft->buffer_offset_C2TB_basebulk,ft->nodal_offset_C2TB_basebulk,&BulkElementBase::get_node_index_C2TB_to_element) || res;
+		if (ft->numfields_C2) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C2, ft->hangindex_C2, shape_info->hanginfo_C2, ft->numfields_C2_basebulk,ft->buffer_offset_C2_basebulk,ft->nodal_offset_C2_basebulk,&BulkElementBase::get_node_index_C2_to_element) || res;
+		if (ft->numfields_C1TB) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1TB, ft->hangindex_C1TB, shape_info->hanginfo_C1TB, ft->numfields_C1TB_basebulk,ft->buffer_offset_C1TB_basebulk,ft->nodal_offset_C1TB_basebulk,&BulkElementBase::get_node_index_C1TB_to_element) || res;
+		if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
+		
 
 		if (eqn_remap)
 		{
-			return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap);
+			return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
 		}
 		else
 			return res;
@@ -9823,60 +9706,15 @@ namespace pyoomph
 
 	bool BulkElementTri2dC1::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
 	{
-		bool res = false;
-		for (unsigned int l = 0; l < eleminfo.nnode_C1; l++)
-		{
-			if (node_pt(l)->is_hanging())
-			{
-				res = true;
-				auto hang_info_pt = node_pt(l)->hanging_pt();
-				shape_info->hanginfo_C1[l].nummaster = hang_info_pt->nmaster();
-				shape_info->hanginfo_Pos[l].nummaster = hang_info_pt->nmaster();
-				for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
-				{
-					shape_info->hanginfo_C1[l].masters[m].weight = hang_info_pt->master_weight(m);
-					for (unsigned int f = 0; f < codeinst->get_func_table()->numfields_C1_basebulk; f++)
-					{
-						shape_info->hanginfo_C1[l].masters[m].local_eqn[codeinst->get_func_table()->buffer_offset_C1_basebulk+f] = this->local_hang_eqn(hang_info_pt->master_node_pt(m), f);
-					}
-					
+		bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
+		auto * ft = codeinst->get_func_table();
+		if (ft->numfields_C1TB) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1TB, ft->hangindex_C1TB, shape_info->hanginfo_C1TB, ft->numfields_C1TB_basebulk,ft->buffer_offset_C1TB_basebulk,ft->nodal_offset_C1TB_basebulk,&BulkElementBase::get_node_index_C1TB_to_element) || res;
+		if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
 
-					for (unsigned int f = 0; f < this->nodal_dimension(); f++)
-					{
-						//	      oomph::DenseMatrix<int> position_local_eqn_at_node(this->nnodal_position_type(),this->nodal_dimension());
-						oomph::DenseMatrix<int> position_local_eqn_at_node = this->local_position_hang_eqn(hang_info_pt->master_node_pt(m));
-						for (unsigned int f = 0; f < this->nodal_dimension(); f++) // TODO: More nnodal_position_type ?
-						{
-							shape_info->hanginfo_Pos[l].masters[m].local_eqn[f] = position_local_eqn_at_node(0, f);
-						}
-					}
-				}
-			}
-			else
-			{
-				shape_info->hanginfo_C1[l].nummaster = 0;
-				shape_info->hanginfo_Pos[l].nummaster = 0;
-			}
-		}
-		/*
-
-		if (codeinst->get_func_table()->numfields_DL)
-		{
-			for (unsigned int l = 0; l < eleminfo.nnode_DL; l++)
-			{
-				shape_info->hanginfo_Discont[l].nummaster = 0;
-			}
-		}
-		shape_info->hanginfo_Discont[0].nummaster = 0;
-		*/
-		for (unsigned int l = 0; l < eleminfo.nnode; l++)
-		{
-			shape_info->hanginfo_Discont[l].nummaster = 0;
-		}
 
 		if (eqn_remap)
 		{
-			return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap);
+			return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
 		}
 		else
 			return res;
@@ -10028,101 +9866,15 @@ namespace pyoomph
 	
 	bool BulkElementTri2dC2::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
 	{
-		bool res = false;
-
-		for (unsigned int l = 0; l < eleminfo.nnode; l++) // Pos nodes
-		{
-			if (node_pt(l)->is_hanging())
-			{
-				res = true;
-				auto hang_info_pt = node_pt(l)->hanging_pt();
-				shape_info->hanginfo_Pos[l].nummaster = hang_info_pt->nmaster();
-				for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
-				{
-					shape_info->hanginfo_Pos[l].masters[m].weight = hang_info_pt->master_weight(m);
-					for (unsigned int f = 0; f < this->nodal_dimension(); f++)
-					{
-						oomph::DenseMatrix<int> position_local_eqn_at_node = this->local_position_hang_eqn(hang_info_pt->master_node_pt(m));
-						for (unsigned int f = 0; f < this->nodal_dimension(); f++) // TODO: More nnodal_position_type ?
-						{
-							shape_info->hanginfo_Pos[l].masters[m].local_eqn[f] = position_local_eqn_at_node(0, f);
-						}
-					}
-				}
-			}
-			else
-			{
-				shape_info->hanginfo_Pos[l].nummaster = 0;
-			}
-		}
-
-		int hanging_index = (codeinst->get_func_table()->bulk_position_space_to_C1 ? 0 : -1);
-		for (unsigned int l = 0; l < eleminfo.nnode_C2; l++) // C2 nodes
-		{
-			if (node_pt(l)->is_hanging(hanging_index))
-			{
-				res = true;
-				auto hang_info_pt = node_pt(l)->hanging_pt(hanging_index);
-				shape_info->hanginfo_C2[l].nummaster = hang_info_pt->nmaster();
-				for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
-				{
-					shape_info->hanginfo_C2[l].masters[m].weight = hang_info_pt->master_weight(m);
-					for (unsigned int f = 0; f < codeinst->get_func_table()->numfields_C2_basebulk; f++)
-					{
-						shape_info->hanginfo_C2[l].masters[m].local_eqn[f] = this->local_hang_eqn(hang_info_pt->master_node_pt(m), f);
-					}
-				}
-			}
-			else
-			{
-				shape_info->hanginfo_C2[l].nummaster = 0;
-			}
-		}
-
-		if (codeinst->get_func_table()->numfields_C1_basebulk)
-		{
-			for (unsigned int l = 0; l < eleminfo.nnode_C1; l++) // C1 nodes
-			{
-				unsigned nel = get_node_index_C1_to_element(l);
-				if (node_pt(nel)->is_hanging(codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk))
-				{
-					res = true;
-					auto hang_info_pt = node_pt(nel)->hanging_pt(codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk);
-					shape_info->hanginfo_C1[l].nummaster = hang_info_pt->nmaster();
-					for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
-					{
-						shape_info->hanginfo_C1[l].masters[m].weight = hang_info_pt->master_weight(m);
-						for (unsigned int f = 0; f < codeinst->get_func_table()->numfields_C1_basebulk; f++)
-						{
-							shape_info->hanginfo_C1[l].masters[m].local_eqn[f] = this->local_hang_eqn(hang_info_pt->master_node_pt(m), f + codeinst->get_func_table()->numfields_C2_basebulk);
-						}
-					}
-				}
-				else
-				{
-					shape_info->hanginfo_C1[l].nummaster = 0;
-				}
-			}
-		}
-
-		/*
-		if (codeinst->get_func_table()->numfields_DL)
-		{
-			for (unsigned int l = 0; l < eleminfo.nnode_DL; l++)
-			{
-				shape_info->hanginfo_Discont[l].nummaster = 0;
-			}
-		}
-		shape_info->hanginfo_Discont[0].nummaster = 0;
-		*/
-		for (unsigned int l = 0; l < eleminfo.nnode; l++)
-		{
-			shape_info->hanginfo_Discont[l].nummaster = 0;
-		}
+		bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
+		auto * ft = codeinst->get_func_table();		
+		if (ft->numfields_C2) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C2, ft->hangindex_C2, shape_info->hanginfo_C2, ft->numfields_C2_basebulk,ft->buffer_offset_C2_basebulk,ft->nodal_offset_C2_basebulk,&BulkElementBase::get_node_index_C2_to_element) || res;
+		if (ft->numfields_C1TB) throw_runtime_error("C1TB fields not yet supported for C2 elements");
+		if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
 
 		if (eqn_remap)
 		{
-			return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap);
+			return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
 		}
 		else
 			return res;
@@ -10381,40 +10133,18 @@ namespace pyoomph
    
    bool BulkElementTri2dC1TB::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
    {
-     bool res=false;
-     for (unsigned int l = 0; l < eleminfo.nnode_C1TB; l++)
-		{
-			if (node_pt(l)->is_hanging())
-			{
-				res = true;
-				auto hang_info_pt = node_pt(l)->hanging_pt();
-				shape_info->hanginfo_C1TB[l].nummaster = hang_info_pt->nmaster();
-				for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
-				{
-					shape_info->hanginfo_C1TB[l].masters[m].weight = hang_info_pt->master_weight(m);
-					for (unsigned int f = 0; f < codeinst->get_func_table()->numfields_C1TB_basebulk; f++)
-					{
-						shape_info->hanginfo_C1TB[l].masters[m].local_eqn[codeinst->get_func_table()->buffer_offset_C1TB_basebulk+f] = this->local_hang_eqn(hang_info_pt->master_node_pt(m), f);
-					}
-					for (unsigned int f = 0; f < this->nodal_dimension(); f++)
-					{
-						//	      oomph::DenseMatrix<int> position_local_eqn_at_node(this->nnodal_position_type(),this->nodal_dimension());
-						oomph::DenseMatrix<int> position_local_eqn_at_node = this->local_position_hang_eqn(hang_info_pt->master_node_pt(m));
-						for (unsigned int f = 0; f < this->nodal_dimension(); f++) // TODO: More nnodal_position_type ?
-						{
-							shape_info->hanginfo_Pos[l].masters[m].local_eqn[f] = position_local_eqn_at_node(0, f);
-						}
-					}					
-				}
-			}
-			else
-			{
-				shape_info->hanginfo_C1TB[l].nummaster = 0;
-				shape_info->hanginfo_Pos[l].nummaster = 0;
-			}
-		}
-		
-     return BulkElementTri2dC1::fill_hang_info_with_equations(required,shape_info, eqn_remap) || res;
+	bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
+	auto * ft = codeinst->get_func_table();
+	if (ft->numfields_C2TB) throw_runtime_error("C2TB fields not yet supported for C1TB elements");
+	if (ft->numfields_C2) throw_runtime_error("C2 fields not yet supported for C1TB elements");
+	if (ft->numfields_C1TB) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1TB, ft->hangindex_C1TB, shape_info->hanginfo_C1TB, ft->numfields_C1TB_basebulk,ft->buffer_offset_C1TB_basebulk,ft->nodal_offset_C1TB_basebulk,&BulkElementBase::get_node_index_C1TB_to_element) || res;
+	if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
+    
+	if (eqn_remap)
+	{
+		return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
+	}
+	else return res;
    }
    
    void BulkElementTri2dC1TB::shape(const oomph::Vector<double> &s, oomph::Shape &psi) const
@@ -10580,58 +10310,17 @@ namespace pyoomph
     
    bool BulkElementTri2dC2TB::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
 	{
-    	bool res=false;	
-    	int hanging_index = (codeinst->get_func_table()->bulk_position_space_to_C1 ? 0 : -1);
-		for (unsigned int l = 0; l < eleminfo.nnode_C2TB; l++) // C2TB nodes
-		{
-			if (node_pt(l)->is_hanging(hanging_index))
-			{
-				res = true;
-				auto hang_info_pt = node_pt(l)->hanging_pt(hanging_index);
-				shape_info->hanginfo_C2TB[l].nummaster = hang_info_pt->nmaster();
-				for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
-				{
-					shape_info->hanginfo_C2TB[l].masters[m].weight = hang_info_pt->master_weight(m);
-					for (unsigned int f = 0; f < codeinst->get_func_table()->numfields_C2TB_basebulk; f++)
-					{
-						shape_info->hanginfo_C2TB[l].masters[m].local_eqn[codeinst->get_func_table()->buffer_offset_C2TB_basebulk+f] = this->local_hang_eqn(hang_info_pt->master_node_pt(m), f);
-					}
-				}
-			}
-			else
-			{
-				shape_info->hanginfo_C2TB[l].nummaster = 0;
-			}
-		}
-		
-    	hanging_index = (codeinst->get_func_table()->numfields_C2_basebulk +codeinst->get_func_table()->numfields_C2TB_basebulk);		
-    	if (codeinst->get_func_table()->numfields_C1TB_basebulk)
-    	{
-			for (unsigned int li = 0; li < eleminfo.nnode_C1TB; li++) // C1TB nodes
-			{
-				unsigned int l=this->get_node_index_C1TB_to_element(li);
-				if (node_pt(l)->is_hanging(hanging_index))
-				{
-					res = true;
-					auto hang_info_pt = node_pt(l)->hanging_pt(hanging_index);
-					shape_info->hanginfo_C1TB[li].nummaster = hang_info_pt->nmaster();
-					for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
-					{
-						shape_info->hanginfo_C1TB[li].masters[m].weight = hang_info_pt->master_weight(m);
-						for (unsigned int f = 0; f < codeinst->get_func_table()->numfields_C1TB_basebulk; f++)
-						{
-							shape_info->hanginfo_C1TB[li].masters[m].local_eqn[codeinst->get_func_table()->buffer_offset_C1TB_basebulk+f] = this->local_hang_eqn(hang_info_pt->master_node_pt(m), f);
-						}
-					}
-				}
-				else
-				{
-//				   std::cout << "Setting master to 0 at l=" << l << std::endl;
-					shape_info->hanginfo_C1TB[li].nummaster = 0;
-				}
-			}				
-		}
-	  return  BulkElementTri2dC2::fill_hang_info_with_equations(required,shape_info,eqn_remap)  || res;
+	   bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
+	   auto * ft = codeinst->get_func_table();
+	   if (ft->numfields_C2TB) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C2TB, ft->hangindex_C2TB, shape_info->hanginfo_C2TB, ft->numfields_C2TB_basebulk,ft->buffer_offset_C2TB_basebulk,ft->nodal_offset_C2TB_basebulk,&BulkElementBase::get_node_index_C2TB_to_element) || res;
+	   if (ft->numfields_C2) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C2, ft->hangindex_C2, shape_info->hanginfo_C2, ft->numfields_C2_basebulk,ft->buffer_offset_C2_basebulk,ft->nodal_offset_C2_basebulk,&BulkElementBase::get_node_index_C2_to_element) || res;
+	   if (ft->numfields_C1TB) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1TB, ft->hangindex_C1TB, shape_info->hanginfo_C1TB, ft->numfields_C1TB_basebulk,ft->buffer_offset_C1TB_basebulk,ft->nodal_offset_C1TB_basebulk,&BulkElementBase::get_node_index_C1TB_to_element) || res;
+	   if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
+       if (eqn_remap)
+	   {
+		return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
+	   }
+	   else return res;
 	}
 
 	void BulkElementTri2dC2TB::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
@@ -10745,58 +10434,15 @@ namespace pyoomph
 
 	bool BulkElementBrick3dC1::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
 	{
-		bool res = false;
-		for (unsigned int l = 0; l < eleminfo.nnode_C1; l++)
-		{
-			if (node_pt(l)->is_hanging())
-			{
-				res = true;
-				auto hang_info_pt = node_pt(l)->hanging_pt();
-				shape_info->hanginfo_C1[l].nummaster = hang_info_pt->nmaster();
-				shape_info->hanginfo_Pos[l].nummaster = hang_info_pt->nmaster();
-				for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
-				{
-					shape_info->hanginfo_C1[l].masters[m].weight = hang_info_pt->master_weight(m);
-					shape_info->hanginfo_Pos[l].masters[m].weight = hang_info_pt->master_weight(m);
-					for (unsigned int f = 0; f < codeinst->get_func_table()->numfields_C1_basebulk; f++)
-					{
-						shape_info->hanginfo_C1[l].masters[m].local_eqn[f] = this->local_hang_eqn(hang_info_pt->master_node_pt(m), f);
-					}
-					for (unsigned int f = 0; f < this->nodal_dimension(); f++)
-					{
-						//	      oomph::DenseMatrix<int> position_local_eqn_at_node(this->nnodal_position_type(),this->nodal_dimension());
-						oomph::DenseMatrix<int> position_local_eqn_at_node = this->local_position_hang_eqn(hang_info_pt->master_node_pt(m));
-						for (unsigned int f = 0; f < this->nodal_dimension(); f++) // TODO: More nnodal_position_type ?
-						{
-							shape_info->hanginfo_Pos[l].masters[m].local_eqn[f] = position_local_eqn_at_node(0, f);
-						}
-					}
-				}
-			}
-			else
-			{
-				shape_info->hanginfo_C1[l].nummaster = 0;
-				shape_info->hanginfo_Pos[l].nummaster = 0;
-			}
-		}
-
-		/*
-		if (codeinst->get_func_table()->numfields_DL)
-		{
-			for (unsigned int l = 0; l < eleminfo.nnode_DL; l++)
-			{
-				shape_info->hanginfo_Discont[l].nummaster = 0;
-			}
-		}
-		shape_info->hanginfo_Discont[0].nummaster = 0;
-		*/
-
-		if (eqn_remap)
-		{
-			return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap);
-		}
-		else
-			return res;
+	   bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
+	   auto * ft = codeinst->get_func_table();	
+	   if (ft->numfields_C1TB) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1TB, ft->hangindex_C1TB, shape_info->hanginfo_C1TB, ft->numfields_C1TB_basebulk,ft->buffer_offset_C1TB_basebulk,ft->nodal_offset_C1TB_basebulk,&BulkElementBase::get_node_index_C1TB_to_element) || res;
+	   if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
+       if (eqn_remap)
+	   {
+		return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
+	   }
+	   else return res;
 	}
 
 	void BulkElementBrick3dC1::interpolate_hang_values()
@@ -10962,113 +10608,17 @@ namespace pyoomph
 
 	bool BulkElementBrick3dC2::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
 	{
-		bool res = false;
-
-		for (unsigned int l = 0; l < eleminfo.nnode; l++)
-		{
-			if (node_pt(l)->is_hanging())
-			{
-				res = true;
-				auto hang_info_pt = node_pt(l)->hanging_pt();
-				shape_info->hanginfo_Pos[l].nummaster = hang_info_pt->nmaster();
-				for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
-				{
-					shape_info->hanginfo_Pos[l].masters[m].weight = hang_info_pt->master_weight(m);
-					for (unsigned int f = 0; f < this->nodal_dimension(); f++)
-					{
-						oomph::DenseMatrix<int> position_local_eqn_at_node = this->local_position_hang_eqn(hang_info_pt->master_node_pt(m));
-						for (unsigned int f = 0; f < this->nodal_dimension(); f++) // TODO: More nnodal_position_type ?
-						{
-							shape_info->hanginfo_Pos[l].masters[m].local_eqn[f] = position_local_eqn_at_node(0, f);
-						}
-					}
-				}
-			}
-			else
-			{
-				shape_info->hanginfo_Pos[l].nummaster = 0;
-			}
-		}
-
-		int hanging_index = (codeinst->get_func_table()->bulk_position_space_to_C1 ? 0 : -1);
-
-		if (codeinst->get_func_table()->numfields_C2_basebulk || codeinst->get_func_table()->numfields_C2TB_basebulk)
-		{
-			for (unsigned int l = 0; l < eleminfo.nnode_C2; l++) // C2 nodes
-			{
-				if (node_pt(l)->is_hanging(hanging_index))
-				{
-					res = true;
-					auto hang_info_pt = node_pt(l)->hanging_pt(hanging_index);
-					shape_info->hanginfo_C2TB[l].nummaster = shape_info->hanginfo_C2[l].nummaster = hang_info_pt->nmaster();
-					for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
-					{
-						shape_info->hanginfo_C2TB[l].masters[m].weight = shape_info->hanginfo_C2[l].masters[m].weight = hang_info_pt->master_weight(m);
-
-						for (unsigned int f = 0; f < codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk; f++)
-						{
-							shape_info->hanginfo_C2TB[l].masters[m].local_eqn[f] = shape_info->hanginfo_C2[l].masters[m].local_eqn[f] = this->local_hang_eqn(hang_info_pt->master_node_pt(m), f);
-						}
-					}
-				}
-				else
-				{
-					shape_info->hanginfo_C2TB[l].nummaster = shape_info->hanginfo_C2[l].nummaster = 0;
-				}
-			}
-		}
-
-		if (codeinst->get_func_table()->numfields_C1_basebulk || codeinst->get_func_table()->numfields_C1TB_basebulk)
-		{
-			for (unsigned int l = 0; l < eleminfo.nnode_C1; l++) // C1 nodes
-			{
-				unsigned nel = get_node_index_C1_to_element(l);
-				if (node_pt(nel)->is_hanging(codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk))
-				{
-					res = true;
-					auto hang_info_pt = node_pt(nel)->hanging_pt(codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk);
-					shape_info->hanginfo_C1[l].nummaster = hang_info_pt->nmaster();
-					shape_info->hanginfo_C1TB[l].nummaster = hang_info_pt->nmaster();					
-					for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
-					{
-						shape_info->hanginfo_C1[l].masters[m].weight = hang_info_pt->master_weight(m);
-						shape_info->hanginfo_C1TB[l].masters[m].weight = hang_info_pt->master_weight(m);						
-						for (unsigned int f = 0; f < codeinst->get_func_table()->numfields_C1_basebulk; f++)
-						{
-							shape_info->hanginfo_C1[l].masters[m].local_eqn[f + codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk] = this->local_hang_eqn(hang_info_pt->master_node_pt(m), f + codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk);
-							shape_info->hanginfo_C1TB[l].masters[m].local_eqn[f + codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk] = this->local_hang_eqn(hang_info_pt->master_node_pt(m), f + codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk);							
-						}
-					}
-				}
-				else
-				{
-					shape_info->hanginfo_C1[l].nummaster = 0;
-					shape_info->hanginfo_C1TB[l].nummaster = 0;					
-				}
-			}
-		}
-		/*
-
-		if (codeinst->get_func_table()->numfields_DL)
-		{
-			for (unsigned int l = 0; l < eleminfo.nnode_DL; l++)
-			{
-				shape_info->hanginfo_Discont[l].nummaster = 0;
-			}
-		}
-		shape_info->hanginfo_Discont[0].nummaster = 0;
-		*/
-		for (unsigned int l = 0; l < eleminfo.nnode; l++)
-		{
-			shape_info->hanginfo_Discont[l].nummaster = 0;
-		}
-
-		if (eqn_remap)
-		{
-			return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap);
-		}
-		else
-			return res;
+	   bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
+	   auto * ft = codeinst->get_func_table();
+	   if (ft->numfields_C2TB) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C2TB, ft->hangindex_C2TB, shape_info->hanginfo_C2TB, ft->numfields_C2TB_basebulk,ft->buffer_offset_C2TB_basebulk,ft->nodal_offset_C2TB_basebulk,&BulkElementBase::get_node_index_C2TB_to_element) || res;
+	   if (ft->numfields_C2) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C2, ft->hangindex_C2, shape_info->hanginfo_C2, ft->numfields_C2_basebulk,ft->buffer_offset_C2_basebulk,ft->nodal_offset_C2_basebulk,&BulkElementBase::get_node_index_C2_to_element) || res;
+	   if (ft->numfields_C1TB) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1TB, ft->hangindex_C1TB, shape_info->hanginfo_C1TB, ft->numfields_C1TB_basebulk,ft->buffer_offset_C1TB_basebulk,ft->nodal_offset_C1TB_basebulk,&BulkElementBase::get_node_index_C1TB_to_element) || res;
+	   if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
+       if (eqn_remap)
+	   {
+		return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
+	   }
+	   else return res;
 	}
 
 	void BulkElementBrick3dC2::interpolate_hang_values()
@@ -11374,62 +10924,14 @@ namespace pyoomph
 
 	bool BulkElementTetra3dC1::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
 	{
-		bool res = false;
-		for (unsigned int l = 0; l < eleminfo.nnode_C1; l++)
-		{
-			if (node_pt(l)->is_hanging())
-			{
-				res = true;
-				auto hang_info_pt = node_pt(l)->hanging_pt();
-				shape_info->hanginfo_C1[l].nummaster = hang_info_pt->nmaster();
-				shape_info->hanginfo_Pos[l].nummaster = hang_info_pt->nmaster();
-				for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
-				{
-					shape_info->hanginfo_C1[l].masters[m].weight = hang_info_pt->master_weight(m);
-					shape_info->hanginfo_Pos[l].masters[m].weight = hang_info_pt->master_weight(m);
-					for (unsigned int f = 0; f < codeinst->get_func_table()->numfields_C1_basebulk; f++)
-					{
-						shape_info->hanginfo_C1[l].masters[m].local_eqn[f] = this->local_hang_eqn(hang_info_pt->master_node_pt(m), f);
-					}
-					for (unsigned int f = 0; f < this->nodal_dimension(); f++)
-					{
-						//	      oomph::DenseMatrix<int> position_local_eqn_at_node(this->nnodal_position_type(),this->nodal_dimension());
-						oomph::DenseMatrix<int> position_local_eqn_at_node = this->local_position_hang_eqn(hang_info_pt->master_node_pt(m));
-						for (unsigned int f = 0; f < this->nodal_dimension(); f++) // TODO: More nnodal_position_type ?
-						{
-							shape_info->hanginfo_Pos[l].masters[m].local_eqn[f] = position_local_eqn_at_node(0, f);
-						}
-					}
-				}
-			}
-			else
-			{
-				shape_info->hanginfo_C1[l].nummaster = 0;
-				shape_info->hanginfo_Pos[l].nummaster = 0;
-			}
-		}
-
-		/*
-		if (codeinst->get_func_table()->numfields_DL)
-		{
-			for (unsigned int l = 0; l < eleminfo.nnode_DL; l++)
-			{
-				shape_info->hanginfo_Discont[l].nummaster = 0;
-			}
-		}
-		shape_info->hanginfo_Discont[0].nummaster = 0;
-		*/
-		for (unsigned int l = 0; l < eleminfo.nnode; l++)
-		{
-			shape_info->hanginfo_Discont[l].nummaster = 0;
-		}
-
-		if (eqn_remap)
-		{
-			return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap);
-		}
-		else
-			return res;
+	   bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
+	   auto * ft = codeinst->get_func_table();	   	   
+	   if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
+       if (eqn_remap)
+	   {
+		return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
+	   }
+	   else return res;
 	}
 
 	void BulkElementTetra3dC1::interpolate_hang_values()
@@ -11508,6 +11010,89 @@ namespace pyoomph
 		return res;
 	}
 
+
+
+	////////////////////////////////
+
+	BulkElementTetra3dC1TB::BulkElementTetra3dC1TB()
+	{
+		unsigned n_node = this->nnode();
+        this->set_n_node(n_node +1);      
+        this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 3, 2,true));
+		eleminfo.elem_ptr = this;
+		eleminfo.nnode = 5;
+		eleminfo.nnode_C1 = 4;
+		eleminfo.nnode_C1TB = 5;
+		eleminfo.nnode_DL = 4;
+		eleminfo.nodal_dim = codeinst->get_func_table()->nodal_dim;
+		this->set_nodal_dimension(eleminfo.nodal_dim);
+		allocate_discontinous_fields();
+	}
+
+    void BulkElementTetra3dC1TB::interpolate_hang_values()
+	{
+		BulkElementTetra3dC1::interpolate_hang_values();
+		for (unsigned int l = 0; l < eleminfo.nnode_C1TB; l++)
+		{
+			if (node_pt(l)->is_hanging())
+			{
+				for (unsigned int i = 0; i < node_pt(l)->nvalue(); i++)
+				{
+					for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
+					{
+						node_pt(l)->value_pt(i)[t] = node_pt(l)->value(t, i);
+					}
+				}
+
+				for (unsigned int i = 0; i < node_pt(l)->ndim(); i++)
+				{
+					for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
+					{
+						dynamic_cast<Node *>(node_pt(l))->variable_position_pt()->set_value(t, i, node_pt(l)->position(t, i));
+					}
+				}
+			}
+		}
+	}
+
+    
+
+    bool BulkElementTetra3dC1TB::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
+	{
+	   bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
+	   auto * ft = codeinst->get_func_table();	   	   
+	   if (ft->numfields_C1TB) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1TB, ft->hangindex_C1TB, shape_info->hanginfo_C1TB, ft->numfields_C1TB_basebulk,ft->buffer_offset_C1TB_basebulk,ft->nodal_offset_C1TB_basebulk,&BulkElementBase::get_node_index_C1TB_to_element) || res;
+	   if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
+       if (eqn_remap)
+	   {
+		return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
+	   }
+	   else return res;		
+	}
+    
+    void BulkElementTetra3dC1TB::shape(const oomph::Vector<double> &s, oomph::Shape &psi) const
+	{
+		throw_runtime_error("Tetra3dC1TB not implemented yet");
+	}
+    void BulkElementTetra3dC1TB::dshape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsids) const
+	{
+		throw_runtime_error("Tetra3dC1TB not implemented yet");
+	}
+    void BulkElementTetra3dC1TB::shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const
+	{
+		throw_runtime_error("Tetra3dC1TB not implemented yet");
+	}
+    
+    void BulkElementTetra3dC1TB::dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const
+	{
+		throw_runtime_error("Tetra3dC1TB not implemented yet");
+	}    
+    void BulkElementTetra3dC1TB::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+	{
+		throw_runtime_error("Tetra3dC1TB not implemented yet");
+	}
+
+
 	////////////////////////////////
 
 	unsigned int BulkElementTetra3dC2::index_C1_to_element[4] = {0, 1, 2, 3};
@@ -11551,88 +11136,16 @@ namespace pyoomph
 
 	bool BulkElementTetra3dC2::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
 	{
-		bool res = false;
-		int hanging_index = (codeinst->get_func_table()->bulk_position_space_to_C1 ? 0 : -1);
-		for (unsigned int l = 0; l < eleminfo.nnode_C2; l++) // C2 nodes
-		{
-			if (node_pt(l)->is_hanging(hanging_index))
-			{
-				res = true;
-				auto hang_info_pt = node_pt(l)->hanging_pt(hanging_index);
-				shape_info->hanginfo_C2[l].nummaster = hang_info_pt->nmaster();
-				shape_info->hanginfo_Pos[l].nummaster = hang_info_pt->nmaster();
-				for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
-				{
-					shape_info->hanginfo_C2[l].masters[m].weight = hang_info_pt->master_weight(m);
-					for (unsigned int f = 0; f < codeinst->get_func_table()->numfields_C2_basebulk; f++)
-					{
-						shape_info->hanginfo_C2[l].masters[m].local_eqn[f] = this->local_hang_eqn(hang_info_pt->master_node_pt(m), f);
-					}
-
-					for (unsigned int f = 0; f < this->nodal_dimension(); f++)
-					{
-						//	      oomph::DenseMatrix<int> position_local_eqn_at_node(this->nnodal_position_type(),this->nodal_dimension());
-						oomph::DenseMatrix<int> position_local_eqn_at_node = this->local_position_hang_eqn(hang_info_pt->master_node_pt(m));
-						for (unsigned int f = 0; f < this->nodal_dimension(); f++) // TODO: More nnodal_position_type ?
-						{
-							shape_info->hanginfo_Pos[l].masters[m].local_eqn[f] = position_local_eqn_at_node(0, f);
-						}
-					}
-				}
-			}
-			else
-			{
-				shape_info->hanginfo_C2[l].nummaster = 0;
-				shape_info->hanginfo_Pos[l].nummaster = 0;
-			}
-		}
-
-		if (codeinst->get_func_table()->numfields_C1_basebulk)
-		{
-			for (unsigned int l = 0; l < eleminfo.nnode_C1; l++) // C1 nodes
-			{
-				unsigned nel = get_node_index_C1_to_element(l);
-				if (node_pt(nel)->is_hanging(codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk))
-				{
-					res = true;
-					auto hang_info_pt = node_pt(nel)->hanging_pt(codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk);
-					shape_info->hanginfo_C1[l].nummaster = hang_info_pt->nmaster();
-					for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
-					{
-						shape_info->hanginfo_C1[l].masters[m].weight = hang_info_pt->master_weight(m);
-						for (unsigned int f = 0; f < codeinst->get_func_table()->numfields_C1_basebulk; f++)
-						{
-							shape_info->hanginfo_C1[l].masters[m].local_eqn[f + codeinst->get_func_table()->numfields_C2_basebulk] = this->local_hang_eqn(hang_info_pt->master_node_pt(m), f + codeinst->get_func_table()->numfields_C2_basebulk);
-						}
-					}
-				}
-				else
-				{
-					shape_info->hanginfo_C1[l].nummaster = 0;
-				}
-			}
-		}
-		/*
-		if (codeinst->get_func_table()->numfields_DL)
-		{
-			for (unsigned int l = 0; l < eleminfo.nnode_DL; l++)
-			{
-				shape_info->hanginfo_Discont[l].nummaster = 0;
-			}
-		}
-		shape_info->hanginfo_Discont[0].nummaster = 0;
-		*/
-		for (unsigned int l = 0; l < eleminfo.nnode; l++)
-		{
-			shape_info->hanginfo_Discont[l].nummaster = 0;
-		}
-
-		if (eqn_remap)
-		{
-			return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap);
-		}
-		else
-			return res;
+	   bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
+	   auto * ft = codeinst->get_func_table();
+	   if (ft->numfields_C2) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C2, ft->hangindex_C2, shape_info->hanginfo_C2, ft->numfields_C2_basebulk,ft->buffer_offset_C2_basebulk,ft->nodal_offset_C2_basebulk,&BulkElementBase::get_node_index_C2_to_element) || res;	   
+	   if (ft->numfields_C1TB) throw_runtime_error("C1TB should not be present in C2 elements");
+	   if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
+       if (eqn_remap)
+	   {
+		return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
+	   }
+	   else return res;
 	}
 
 	void BulkElementTetra3dC2::interpolate_hang_values()
@@ -11805,6 +11318,21 @@ namespace pyoomph
 		this->set_n_node(eleminfo.nnode);
 		this->set_nodal_dimension(eleminfo.nodal_dim);
 		this->set_integration_scheme(&Default_enriched_integration_scheme);
+	}
+
+	bool BulkElementTetra3dC2TB::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
+	{
+	   bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
+	   auto * ft = codeinst->get_func_table();
+	   if (ft->numfields_C2TB) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C2TB, ft->hangindex_C2TB, shape_info->hanginfo_C2TB, ft->numfields_C2TB_basebulk,ft->buffer_offset_C2TB_basebulk,ft->nodal_offset_C2TB_basebulk,&BulkElementBase::get_node_index_C2TB_to_element) || res;	   
+	   if (ft->numfields_C2) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C2, ft->hangindex_C2, shape_info->hanginfo_C2, ft->numfields_C2_basebulk,ft->buffer_offset_C2_basebulk,ft->nodal_offset_C2_basebulk,&BulkElementBase::get_node_index_C2_to_element) || res;	   
+	   if (ft->numfields_C1TB) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1TB, ft->hangindex_C1TB, shape_info->hanginfo_C1TB, ft->numfields_C1TB_basebulk,ft->buffer_offset_C1TB_basebulk,ft->nodal_offset_C1TB_basebulk,&BulkElementBase::get_node_index_C1TB_to_element) || res;	   
+	   if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
+       if (eqn_remap)
+	   {
+		return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
+	   }
+	   else return res;
 	}
 
 	void BulkElementTetra3dC2TB::interpolate_hang_values()

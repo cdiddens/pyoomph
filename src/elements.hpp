@@ -184,6 +184,8 @@ namespace pyoomph
     virtual void fill_in_jacobian_from_lagragian_by_fd(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian);
     virtual void get_dnormal_dcoords_at_s(const oomph::Vector<double> &s, double *  PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dnormal_dcoord, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2normal_dcoord2) const;
     void update_in_solid_position_fd(const unsigned &i) override; // For FD with element_sizes, we have to update the element size buffer
+    bool fill_hang_info_with_equations_for_pos(JITShapeInfo_t *shape_info);
+    bool fill_hang_info_with_equations_for_space(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, const unsigned nnode_space, const int hangindex_space, JITHangInfo_t * hangbuffer, unsigned numfields_basebulk,const unsigned buffer_offset_basebulk,const unsigned nodal_offset_basebulk, unsigned int (BulkElementBase::*space_node_to_elem_node_index)(const unsigned int &) const);
   public:
     unsigned _numpy_index;
     double initial_cartesian_nondim_size = 0.0;
@@ -1294,6 +1296,43 @@ namespace pyoomph
     oomph::Vector<double> get_midpoint_s() override { return oomph::Vector<double>(this->dim(), 1.0 / 3.0); }
   };
 
+class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
+{
+  public:
+    BulkElementTetra3dC1TB();
+    virtual void interpolate_hang_values();
+    virtual bool fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap);
+    virtual unsigned get_meshio_type_index() const { return 44; }
+    void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const;
+    void dshape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsids) const;    
+    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const;
+    void shape_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
+    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
+    void dshape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
+    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
+     int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+     {
+      if (tesselate_tri)
+      {
+        throw_runtime_error("Tesselation of 3d not possible");
+      }
+      else
+      {
+        nsubdiv = 1;
+        return 5;
+      }
+     }
+      virtual BulkElementBase *create_son_instance() const
+      {
+        BulkElementBase::__CurrentCodeInstance = codeinst;
+        auto res = new BulkElementTetra3dC1TB();
+        res->codeinst = codeinst;
+        BulkElementBase::__CurrentCodeInstance = NULL;
+        return res;
+      }
+      virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 3, order,true)); }
+  };
+
   class BulkElementTetra3dC2TB;
   class BulkElementTetra3dC2 : public virtual BulkElementBase, public virtual oomph::TElement<3, 3>, public virtual oomph::RefineableTElement<3>
   {
@@ -1367,7 +1406,7 @@ namespace pyoomph
     //  static const unsigned Central_node_on_face[3];
   public:
     BulkElementTetra3dC2TB();
-
+    bool fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap);
     virtual unsigned get_meshio_type_index() const { return 100; } // Just some otherwise unused value here
 
     virtual void interpolate_hang_values();
@@ -1624,9 +1663,10 @@ namespace pyoomph
       this->add_interface_dofs();
       const JITFuncSpec_Table_FiniteElement_t *functable = this->get_code_instance()->get_func_table();
 
+      const JITFuncSpec_Table_FiniteElement_t *bfunctable = dynamic_cast<BulkElementBase *>(bulk_el_pt)->get_code_instance()->get_func_table();
+      
       if (std::string(functable->dominant_space) == "C2")
-      {
-        const JITFuncSpec_Table_FiniteElement_t *bfunctable = dynamic_cast<BulkElementBase *>(bulk_el_pt)->get_code_instance()->get_func_table();
+      {      
         if (std::string(bfunctable->dominant_space) == "C1")
         {
           throw_runtime_error("Cannot attach an interface element with C2 fields to a parent domain with max. C1 space");

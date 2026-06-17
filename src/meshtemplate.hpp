@@ -623,9 +623,19 @@ namespace pyoomph
     virtual unsigned nfacets() { return 4; }
     virtual MeshTemplateElement *convert_for_C2_space(MeshTemplate *templ);
     virtual MeshTemplateFacet *construct_facet(unsigned i);
+    virtual MeshTemplateElement *convert_for_C1TB_space(MeshTemplate *templ);
   };
   
  
+  class MeshTemplateElementTetraC1TB : public MeshTemplateElementTetraC1
+  {
+  protected:
+  public:
+    MeshTemplateElementTetraC1TB(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5);
+    unsigned int get_nnode_C1TB() const { return 5; }
+    unsigned int get_node_index_C1TB(const unsigned int &i) const { return i; }
+  };
+
 
   class MeshTemplateElementTetraC2 : public MeshTemplateElement
   {
