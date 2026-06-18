@@ -1708,8 +1708,9 @@ class EquationTree:
 
                 self._codegen._dummy_codegen_for_internal_facets_bulk._find_all_accessible_spaces()
                 print("Calling do define fields on ",self._codegen._dummy_codegen_for_internal_facets_bulk.get_full_name(),self._codegen._dummy_codegen_for_internal_facets_bulk.get_domain_name(),"with",elemdim+1)
-                self._codegen._transfer_my_fields_to_dummy_codegen(self._codegen._dummy_codegen_for_internal_facets_bulk)
-                #self._codegen._dummy_codegen_for_internal_facets_bulk._do_define_fields(elemdim+1)
+                #self._codegen._transfer_my_fields_to_dummy_codegen(self._codegen._dummy_codegen_for_internal_facets_bulk)
+                self._codegen._dummy_codegen_for_internal_facets_bulk._set_opposite_interface(self._codegen._get_opposite_interface())
+                self._codegen._dummy_codegen_for_internal_facets_bulk._do_define_fields(elemdim+1)
 
                 self._codegen._dummy_codegen_for_internal_facets._coordinates_as_dofs=self._codegen._dummy_codegen_for_internal_facets_bulk._coordinates_as_dofs
                 self._codegen._dummy_codegen_for_internal_facets._coordinate_space=self._codegen._dummy_codegen_for_internal_facets_bulk._coordinate_space                
