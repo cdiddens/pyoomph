@@ -11070,26 +11070,120 @@ namespace pyoomph
 	   else return res;		
 	}
     
-    void BulkElementTetra3dC1TB::shape(const oomph::Vector<double> &s, oomph::Shape &psi) const
+   
+	void BulkElementTetra3dC1TB::shape(const oomph::Vector<double> &s, oomph::Shape &psi) const
 	{
-		throw_runtime_error("Tetra3dC1TB not implemented yet");
+		const double s4 = 1.0 - s[0] - s[1] - s[2];
+		const double b = 256.0 * s[0] * s[1] * s[2] * s4;
+
+		psi[0] = s[0] - 0.25 * b;
+		psi[1] = s[1] - 0.25 * b;
+		psi[2] = s[2] - 0.25 * b;
+		psi[3] = s4 - 0.25 * b;
+		psi[4] = b;
 	}
-    void BulkElementTetra3dC1TB::dshape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsids) const
-	{
-		throw_runtime_error("Tetra3dC1TB not implemented yet");
+
+	void BulkElementTetra3dC1TB::dshape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const
+	{		
+		const double s4 = 1.0 - s[0] - s[1] - s[2];
+		const double b = 256.0 * s[0] * s[1] * s[2] * s4;
+
+		psi[0] = s[0] - 0.25 * b;
+		psi[1] = s[1] - 0.25 * b;
+		psi[2] = s[2] - 0.25 * b;
+		psi[3] = s4 - 0.25 * b;
+		psi[4] = b;
+
+		const double db_ds1 = 256.0 * s[1] * s[2] * (s4 - s[0]);
+		const double db_ds2 = 256.0 * s[0] * s[2] * (s4 - s[1]);
+		const double db_ds3 = 256.0 * s[0] * s[1] * (s4 - s[2]);
+
+		dpsi(0, 0) =  1.0 - 0.25 * db_ds1;
+		dpsi(0, 1) =       - 0.25 * db_ds2;
+		dpsi(0, 2) =       - 0.25 * db_ds3;
+
+		dpsi(1, 0) =       - 0.25 * db_ds1;
+		dpsi(1, 1) =  1.0 - 0.25 * db_ds2;
+		dpsi(1, 2) =       - 0.25 * db_ds3;
+
+		dpsi(2, 0) =       - 0.25 * db_ds1;
+		dpsi(2, 1) =       - 0.25 * db_ds2;
+		dpsi(2, 2) =  1.0 - 0.25 * db_ds3;
+
+		dpsi(3, 0) = -1.0 - 0.25 * db_ds1;
+		dpsi(3, 1) = -1.0 - 0.25 * db_ds2;
+		dpsi(3, 2) = -1.0 - 0.25 * db_ds3;
+
+		dpsi(4, 0) = db_ds1;
+		dpsi(4, 1) = db_ds2;
+		dpsi(4, 2) = db_ds3;
 	}
+
     void BulkElementTetra3dC1TB::shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const
 	{
-		throw_runtime_error("Tetra3dC1TB not implemented yet");
+		psi[0] = s[0];
+		psi[1] = s[1];
+		psi[2] = s[2];
+		psi[3] = 1.0 - s[0] - s[1] - s[2];
 	}
     
     void BulkElementTetra3dC1TB::dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const
 	{
-		throw_runtime_error("Tetra3dC1TB not implemented yet");
+		psi[0] = s[0];
+		psi[1] = s[1];
+		psi[2] = s[2];
+		psi[3] = 1.0 - s[0] - s[1] - s[2];
+
+		dpsi(0, 0) = 1.0;
+		dpsi(0, 1) = 0.0;
+		dpsi(0, 2) = 0.0;
+		dpsi(1, 0) = 0.0;
+		dpsi(1, 1) = 1.0;
+		dpsi(1, 2) = 0.0;
+		dpsi(2, 0) = 0.0;
+		dpsi(2, 1) = 0.0;
+		dpsi(2, 2) = 1.0;
+		dpsi(3, 0) = -1.0;
+		dpsi(3, 1) = -1.0;
+		dpsi(3, 2) = -1.0;
 	}    
+	
     void BulkElementTetra3dC1TB::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
 	{
-		throw_runtime_error("Tetra3dC1TB not implemented yet");
+		if (tesselate_tri)
+		{
+			throw_runtime_error("Tesselation not implemented in 3d");
+		}
+		else
+		{
+			for (unsigned int i = 0; i < this->nnode(); i++)
+				indices[i] = i;
+		}
+	}
+
+	void BulkElementTetra3dC1TB::local_coordinate_of_node(const unsigned &j, oomph::Vector<double> &s) const
+	{
+		if (j==0)
+		{
+			s[0]=1.0; s[1]=0.0; s[2]=0.0;
+		}
+		else if (j==1)
+		{
+			s[0]=0.0; s[1]=1.0; s[2]=0.0;
+		}
+		else if (j==2)
+		{
+			s[0]=0.0; s[1]=0.0; s[2]=1.0;
+		}
+		else if (j==3)
+		{
+			s[0]=0.0; s[1]=0.0; s[2]=0.0;
+		}
+		else if (j==4)
+		{
+			s[0]=0.25; s[1]=0.25; s[2]=0.25;
+		}
+		
 	}
 
 
@@ -11244,7 +11338,7 @@ namespace pyoomph
 		psi[1] = s[1];
 		psi[2] = s[2];
 		psi[3] = 1.0 - s[0] - s[1] - s[2];
-	}
+	}	
 
 	void BulkElementTetra3dC2::dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const
 	{
@@ -11269,6 +11363,54 @@ namespace pyoomph
 		dpsi(3, 0) = -1.0;
 		dpsi(3, 1) = -1.0;
 		dpsi(3, 2) = -1.0;
+	}
+
+	void BulkElementTetra3dC2TB::shape_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi) const
+	{
+		const double s4 = 1.0 - s[0] - s[1] - s[2];
+		const double b = 256.0 * s[0] * s[1] * s[2] * s4;
+
+		psi[0] = s[0] - 0.25 * b;
+		psi[1] = s[1] - 0.25 * b;
+		psi[2] = s[2] - 0.25 * b;
+		psi[3] = s4 - 0.25 * b;
+		psi[4] = b;
+	}
+
+	void BulkElementTetra3dC2TB::dshape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const
+	{		
+		const double s4 = 1.0 - s[0] - s[1] - s[2];
+		const double b = 256.0 * s[0] * s[1] * s[2] * s4;
+
+		psi[0] = s[0] - 0.25 * b;
+		psi[1] = s[1] - 0.25 * b;
+		psi[2] = s[2] - 0.25 * b;
+		psi[3] = s4 - 0.25 * b;
+		psi[4] = b;
+
+		const double db_ds1 = 256.0 * s[1] * s[2] * (s4 - s[0]);
+		const double db_ds2 = 256.0 * s[0] * s[2] * (s4 - s[1]);
+		const double db_ds3 = 256.0 * s[0] * s[1] * (s4 - s[2]);
+
+		dpsi(0, 0) =  1.0 - 0.25 * db_ds1;
+		dpsi(0, 1) =       - 0.25 * db_ds2;
+		dpsi(0, 2) =       - 0.25 * db_ds3;
+
+		dpsi(1, 0) =       - 0.25 * db_ds1;
+		dpsi(1, 1) =  1.0 - 0.25 * db_ds2;
+		dpsi(1, 2) =       - 0.25 * db_ds3;
+
+		dpsi(2, 0) =       - 0.25 * db_ds1;
+		dpsi(2, 1) =       - 0.25 * db_ds2;
+		dpsi(2, 2) =  1.0 - 0.25 * db_ds3;
+
+		dpsi(3, 0) = -1.0 - 0.25 * db_ds1;
+		dpsi(3, 1) = -1.0 - 0.25 * db_ds2;
+		dpsi(3, 2) = -1.0 - 0.25 * db_ds3;
+
+		dpsi(4, 0) = db_ds1;
+		dpsi(4, 1) = db_ds2;
+		dpsi(4, 2) = db_ds3;
 	}
 
 	void BulkElementTetra3dC2::interpolating_basis(const oomph::Vector<double> &s, oomph::Shape &psi, const int &value_id) const

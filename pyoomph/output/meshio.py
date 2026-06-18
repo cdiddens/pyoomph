@@ -431,6 +431,7 @@ class _MeshFileOutput(_BaseNumpyOutput):
 				triperm = numpy.array([0, 1, 2], dtype=int) #type:ignore
 				triC1TBperm = numpy.array([0, 1, 2], dtype=int) #type:ignore			
 				tetraperm = numpy.array([0, 1, 2,3], dtype=int) #type:ignore
+				tetraC1TBperm = numpy.array([0, 1, 2,3], dtype=int) #type:ignore
 				wedgeperm=numpy.array([0,1,2,3,4,5],dtype=int) #type:ignore
 				wedge18perm=numpy.array([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17],dtype=int) #type:ignore
 				wedge12perm=numpy.array([0,1,2,3,4,5,6,7,8,9,10,11],dtype=int) #type:ignore
@@ -466,7 +467,7 @@ class _MeshFileOutput(_BaseNumpyOutput):
 						cells.append(("triangle", eleminds[elinds, triperm])) #type:ignore
 					elif et==66: #tri C1TB (ignore the center node)
 						cells.append(("triangle", eleminds[elinds, triC1TBperm])) #type:ignore					
-					elif et==4: #tetra
+					elif et==4 or et==44: #tetra, C1TB is not supported for tetra, so ignore the center node if it is there
 						cells.append(("tetra", eleminds[elinds, tetraperm])) #type:ignore
 					elif et == 9:  # tri6
 						cells.append(("triangle6", eleminds[elinds, triperm6])) #type:ignore

@@ -1310,6 +1310,8 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
     void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
     void dshape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
     void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
+    void local_coordinate_of_node(const unsigned &j, oomph::Vector<double> &s) const;
+    unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const { return i; }
      int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
      {
       if (tesselate_tri)
@@ -1428,9 +1430,11 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
     unsigned int get_node_index_C2TB_to_element(const unsigned int &i) const { return i; }
     unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const { return (i < 4 ? i : 14); }
     bool is_node_index_part_of_C2(const unsigned &n) override { return n < 14; }
+    void shape_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi) const;    
     void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const { BulkElementTetra3dC2::shape(s, psi); }
     void shape_at_s_C2TB(const oomph::Vector<double> &s, oomph::Shape &psi) const { oomph::TBubbleEnrichedElementShape<3, 3>::shape(s, psi); }
     void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { BulkElementTetra3dC2::dshape_local(s, psi, dpsi); }
+    void dshape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
     void dshape_local_at_s_C2TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { oomph::TBubbleEnrichedElementShape<3, 3>::dshape_local(s, psi, dpsi); }
     inline void d2shape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsids, oomph::DShape &d2psids) const { throw_runtime_error("Implement"); }
     inline void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const { oomph::TBubbleEnrichedElementShape<3, 3>::shape(s, psi); }
