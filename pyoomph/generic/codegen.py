@@ -73,6 +73,8 @@ class FiniteElementCodeGenerator(_pyoomph.FiniteElementCode):
         self._dummy_codegen_for_internal_facets_bulk_bulk:Optional[FiniteElementCodeGenerator]=None
         self._dummy_codegen_for_internal_facets_bulk_opp:Optional[FiniteElementCodeGenerator]=None
 
+        self._fields_defined_on_my_domain:Dict[str,"FiniteElementSpaceEnum"]={}
+
         self._custom_domain_name:Optional[str]=None
 
     def get_default_timestepping_scheme(self,order:int):        
@@ -280,6 +282,31 @@ class FiniteElementCodeGenerator(_pyoomph.FiniteElementCode):
         else:
             assert self._problem
             return self._problem.get_default_spatial_integration_order()
+
+
+    def _transfer_my_fields_to_dummy_codegen(self,dummy:"FiniteElementCodeGenerator"):  
+        raise NotImplementedError("This function is not implemented yet. It should transfer all fields defined on this codegen to the dummy codegen, so that the dummy codegen can be used for internal facets and still have access to all fields defined on the parent domain")  
+        print("Transfer called", self.get_parent_domain(), dummy)
+        if self.get_parent_domain() is not None:
+           pself=self.get_parent_domain()
+           if pself.get_parent_domain() is not None:
+               ppself=pself.get_parent_domain()
+               for fieldname,space in ppself._fields_defined_on_my_domain.items():
+                if fieldname not in dummy._fields_defined_on_my_domain.keys():
+                    dummy._fields_defined_on_my_domain[fieldname]=space
+                    print("Transferring parent parent field",fieldname,space,"to",dummy)
+
+
+           for fieldname,space in pself._fields_defined_on_my_domain.items():
+            if fieldname not in dummy._fields_defined_on_my_domain.keys():
+                dummy._fields_defined_on_my_domain[fieldname]=space
+                print("Transferring parent field",fieldname,space,"to",dummy)
+
+        for fieldname,space in self._fields_defined_on_my_domain.items():
+            if fieldname not in dummy._fields_defined_on_my_domain.keys():
+                dummy._fields_defined_on_my_domain[fieldname]=space
+                print("Transferring field",fieldname,space,"to",dummy)
+        exit()
 
 class ScalingException(Exception):
     def __init__(self, msg:str, obj:Optional["BaseEquations"]=None):
@@ -1626,6 +1653,7 @@ class EquationTree:
             v._set_parent_to_equations(problem)
 
     def _create_dummy_domains_for_DG(self,problem:"Problem",elemdim=None):
+        
         if elemdim is None and self._codegen is not None:
             elemdim=self._codegen.get_element_dimension()
             if self.get_parent() and self.get_parent()._codegen is not None:
@@ -1636,8 +1664,8 @@ class EquationTree:
         #print("############")
         if self._equations is not None:
             if self._codegen._name=="_internal_facets_":
+                print("Creating dummy domains for DG, current path:",self.get_full_path(),", elemdim:",elemdim)
                 def generate_dummy_domain(source:EquationTree):
-
                     dummy=FiniteElementCodeGenerator()
                     dummy._set_equations(source._equations)
                     dummy._set_problem(problem)
@@ -1679,8 +1707,9 @@ class EquationTree:
                     self._codegen._dummy_codegen_for_internal_facets_bulk_bulk._do_define_fields(elemdim+2)
 
                 self._codegen._dummy_codegen_for_internal_facets_bulk._find_all_accessible_spaces()
-                #print("Calling do define fields on ",self._codegen._dummy_codegen_for_internal_facets_bulk.get_full_name(),self._codegen._dummy_codegen_for_internal_facets_bulk.get_domain_name(),"with",elemdim+1)
-                self._codegen._dummy_codegen_for_internal_facets_bulk._do_define_fields(elemdim+1)
+                print("Calling do define fields on ",self._codegen._dummy_codegen_for_internal_facets_bulk.get_full_name(),self._codegen._dummy_codegen_for_internal_facets_bulk.get_domain_name(),"with",elemdim+1)
+                self._codegen._transfer_my_fields_to_dummy_codegen(self._codegen._dummy_codegen_for_internal_facets_bulk)
+                #self._codegen._dummy_codegen_for_internal_facets_bulk._do_define_fields(elemdim+1)
 
                 self._codegen._dummy_codegen_for_internal_facets._coordinates_as_dofs=self._codegen._dummy_codegen_for_internal_facets_bulk._coordinates_as_dofs
                 self._codegen._dummy_codegen_for_internal_facets._coordinate_space=self._codegen._dummy_codegen_for_internal_facets_bulk._coordinate_space                
@@ -2037,6 +2066,7 @@ class Equations(BaseEquations):
                     raise RuntimeError("Discontinuous refinement exponents only work for D0 at the moment")
                 cg._set_discontinuous_refinement_exponent(name,discontinuous_refinement_exponent)
         cg._coordinate_space=find_dominant_element_space(cg._coordinate_space,space)
+        cg._fields_defined_on_my_domain[name]=space
                 
         if scale is not None:
             self.set_scaling(**{name: scale})

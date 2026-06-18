@@ -32,6 +32,29 @@ The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
 namespace pyoomph
 {
 
+
+
+/*
+0: MeshTemplateElementPoint
+1: MeshTemplateElementLineC1
+2: MeshTemplateElementLineC2 
+6: MeshTemplateElementQuadC1
+8: MeshTemplateElementQuadC2
+3: MeshTemplateElementTriC1
+9: MeshTemplateElementTriC2
+4: MeshTemplateElementTetraC1
+10: MeshTemplateElementTetraC2
+11: MeshTemplateElementBrickC1
+14: MeshTemplateElementBrickC2
+
+
+MeshTemplateElementTriC1TB -> MeshTemplateElementTriC1
+MeshTemplateElementTriC2TB -> MeshTemplateElementTriC2
+MeshTemplateElementTetraC1TB -> MeshTemplateElementTetraC1
+MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
+
+*/
+
 	MeshTemplateFacet::MeshTemplateFacet(const std::vector<nodeindex_t> &inds, MeshTemplateCurvedEntity *curved, std::vector<MeshTemplateNode *> *nodes) : nodeinds(inds), curved_entity(curved)
 	{
 		sorted_inds = inds;
@@ -1207,6 +1230,12 @@ namespace pyoomph
 						delete e;
 						e = elements[ie];
 				}
+				else if (dynamic_cast<MeshTemplateElementTetraC2 *>(e) && !dynamic_cast<MeshTemplateElementTetraC2TB *>(e) )
+				{
+						elements[ie] = dynamic_cast<MeshTemplateElementTetraC2 *>(e)->convert_for_C2TB_space(mesh_template); // Must be upgraded here to contain the C1TB bubble
+						delete e;
+						e = elements[ie];
+				}				
 			}
 		}
 		else if (code_inst->get_func_table()->numfields_C2 || dom_space == "C2" || code_inst->get_func_table()->numfields_C2TB || dom_space == "C2TB") 

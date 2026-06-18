@@ -2213,7 +2213,7 @@ namespace pyoomph
 				res = new BulkElementTri2dC2TB();
 			}
 		}
-		else if (el->get_geometric_type_index() == 10)
+		else if (el->get_geometric_type_index() == 10) // Tetra C2
 		{
 			if (domspace == "C1")
 			{
@@ -2222,7 +2222,12 @@ namespace pyoomph
 			}
 			else if (domspace=="C1TB")
 			{
-			 throw_runtime_error("Implement BulkElementTetra3dC1TB");
+			 if (!dynamic_cast<MeshTemplateElementTetraC2TB*>(el))
+			 {
+			  throw_runtime_error("Strange: Tetra C1TB element should be created, but the template element is not a C2TB one, which is required for the bubble node in the center");
+			 }
+			 nodemap = {0, 1, 2, 3,14};
+			 res = new BulkElementTetra3dC1TB();
 			}
 			else if (domspace == "C2")
 			{
