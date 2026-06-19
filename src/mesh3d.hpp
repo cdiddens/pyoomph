@@ -60,29 +60,10 @@ namespace pyoomph
 
   class TemplatedMeshBase3d : public virtual TemplatedMeshBase
   {
-
+  private:
+    bool issued_tri_refinement_warning = false;
   public:
-    bool refinement_possible()
-    {
-      bool allQ = true;
-      for (unsigned int i = 0; i < this->nelement(); i++)
-      {
-        allQ = allQ && (dynamic_cast<oomph::BrickElementBase *>(this->element_pt(i)) != NULL);
-      }
-      if (allQ)
-      {
-        return true;
-      }
-      else
-      {
-        if (this->max_refinement_level())
-        {
-          std::cerr << "WARNING: Found a tri or something in the mesh -> cannot be adaptive right now. Requires to implement a good tree for mixed meshes" << std::endl;
-        }
-        return false;
-      }
-    }
-
+    bool refinement_possible();
     /*
     TemplatedMeshBase3d(MeshTemplate * templ) : pyoomph::Mesh(),TemplatedMeshBase()
     {

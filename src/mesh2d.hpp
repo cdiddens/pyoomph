@@ -84,31 +84,14 @@ namespace pyoomph
 
   class TemplatedMeshBase2d : public virtual TemplatedMeshBase
   {
+  private:
+    bool issued_tri_refinement_warning = false;
   public:
     virtual unsigned add_tri_C1( Node* & n1, Node* & n2, Node* & n3);
     virtual unsigned add_tri_C1TB( Node* & n1, Node* & n2, Node* & n3, Node* & n4);
     
     virtual void setup_interior_boundary_elements(unsigned bindex);
-    bool refinement_possible()
-    {
-      bool allquads = true;
-      for (unsigned int i = 0; i < this->nelement(); i++)
-      {
-        allquads = allquads && (dynamic_cast<oomph::QuadElementBase *>(this->element_pt(i)) != NULL);
-      }
-      if (allquads)
-      {
-        return true;
-      }
-      else
-      {
-        if (this->max_refinement_level())
-        {
-          std::cerr << "WARNING: Found a tri or something in the mesh "<< this->domainname << " -> cannot be adaptive right now. Requires to implement a good tree for mixed meshes" << std::endl;
-        }
-        return false;
-      }
-    }
+    bool refinement_possible();
 
     /*
     TemplatedMeshBase2d(MeshTemplate * templ) : pyoomph::Mesh(),TemplatedMeshBase()
@@ -149,15 +132,8 @@ namespace pyoomph
     /// Destructor:
     virtual ~TemplatedMeshBase2d() {}
 
-    virtual void setup_tree_forest()
-    {
-      if (refinement_possible())  setup_quadtree_forest();      
-      else {
-        std::cout << "WARNING: Found a tri or something in the mesh "<< this->domainname << " -> cannot be adaptive right now. Requires to implement a good tree for mixed meshes" << std::endl;
-        this->disable_adaptation();
-      }
-//      std::cout << "TREE FORESET SET UP " << this->Forest_pt << "  " << dynamic_cast<DynamicQuadTreeForest *>(this->Forest_pt) << std::endl;
-    }
+    virtual void setup_tree_forest();
+    
 
     void setup_quadtree_forest()
     {

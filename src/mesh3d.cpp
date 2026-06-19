@@ -36,6 +36,29 @@ The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
 namespace pyoomph
 {
 
+
+	bool TemplatedMeshBase3d::refinement_possible()
+    {
+      bool allQ = true;
+      for (unsigned int i = 0; i < this->nelement(); i++)
+      {
+        allQ = allQ && (dynamic_cast<oomph::BrickElementBase *>(this->element_pt(i)) != NULL);
+      }
+      if (allQ)
+      {
+        return true;
+      }
+      else
+      {
+        if (this->max_refinement_level() && !issued_tri_refinement_warning && !this->problem->is_quiet())
+        {
+          std::cerr << "WARNING: Found a tri or something in the mesh -> cannot be adaptive right now. Requires to implement a good tree for mixed meshes" << std::endl;
+		  issued_tri_refinement_warning = true;
+        }
+        return false;
+      }
+    }
+
 	void TemplatedMeshBase3d::setup_boundary_element_info()
 	{
 		std::ostringstream oss;

@@ -1429,7 +1429,9 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
     int get_node_index_element_to_C1TB(const unsigned int &i) const override { throw_runtime_error("TODO"); }
     unsigned int get_node_index_C2TB_to_element(const unsigned int &i) const { return i; }
     unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const { return (i < 4 ? i : 14); }
-    bool is_node_index_part_of_C2(const unsigned &n) override { return n < 14; }
+    bool is_node_index_part_of_C2(const unsigned &n) override { return n < 14; }    
+    bool is_node_index_part_of_C2TB(const unsigned &n) override { return true; }
+    bool is_node_index_part_of_C1TB(const unsigned &n) override { return (n<4 || n==14);}
     void shape_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi) const;    
     void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const { BulkElementTetra3dC2::shape(s, psi); }
     void shape_at_s_C2TB(const oomph::Vector<double> &s, oomph::Shape &psi) const { oomph::TBubbleEnrichedElementShape<3, 3>::shape(s, psi); }

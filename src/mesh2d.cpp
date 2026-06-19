@@ -187,6 +187,41 @@ namespace pyoomph
     }
   }
 
+  bool TemplatedMeshBase2d::refinement_possible()
+    {
+      bool allquads = true;
+      for (unsigned int i = 0; i < this->nelement(); i++)
+      {
+        allquads = allquads && (dynamic_cast<oomph::QuadElementBase *>(this->element_pt(i)) != NULL);
+      }
+      if (allquads)
+      {
+        return true;
+      }
+      else
+      {
+        if (this->max_refinement_level() && issued_tri_refinement_warning==false && !this->problem->is_quiet())
+        {
+          std::cout << "WARNING: Found a tri or something in the mesh "<< this->domainname << " -> cannot be adaptive right now. Requires to implement a good tree for mixed meshes" << std::endl;
+          issued_tri_refinement_warning = true;
+        }
+        return false;
+      }
+    }
+
+  void TemplatedMeshBase2d::setup_tree_forest()
+    {
+      if (refinement_possible())  setup_quadtree_forest();      
+      else {        
+        if (issued_tri_refinement_warning==false && !this->problem->is_quiet())
+        {
+          std::cout << "WARNING: Found a tri or something in the mesh "<< this->domainname << " -> cannot be adaptive right now. Requires to implement a good tree for mixed meshes" << std::endl;
+          issued_tri_refinement_warning = true;
+        }
+        this->disable_adaptation();
+      }
+    }
+
   void TemplatedMeshBase2d::setup_boundary_element_info()
   {
     std::ostringstream oss;

@@ -192,7 +192,9 @@ class GmshSizeCallback:
 
 
 def generate_mesh_to_file(geom:pygmsh.geo.Geometry, outdir:str, trunk:str, mesher:Optional["GmshTemplate"]=None,dim:int=2, order:Optional[int]=None, algorithm:Optional[int]=None, verbose:bool=False, recombine_algo:Optional[int]=None,
-                          postgen_cb:Optional[Callable[[],None]]=None, only_geo:bool=False,mesh_mode:Optional[str]=None,mesh_size_callback:Optional[Union[GmshSizeCallback,Callable[[int,int,float,float,float],float]]]=None):
+                          postgen_cb:Optional[Callable[[],None]]=None, only_geo:bool=False,mesh_mode:Optional[str]=None,mesh_size_callback:Optional[Union[GmshSizeCallback,Callable[[int,int,float,float,float],float]]]=None,quiet:bool=False):
+    if quiet:
+        gmsh.option.setNumber("General.Terminal", 0) #type:ignore
     geom.synchronize()
 
     for item in geom._AFTER_SYNC_QUEUE: #type:ignore
@@ -284,6 +286,8 @@ def generate_mesh_to_file(geom:pygmsh.geo.Geometry, outdir:str, trunk:str, meshe
             mesh_size_callback=mesh_size_callback._setup_for_mesh(mesher) #type:ignore
         gmsh.model.mesh.setSizeCallback(None) #type:ignore
         gmsh.model.mesh.setSizeCallback(mesh_size_callback) #type:ignore
+    if quiet:
+            gmsh.option.setNumber("General.Terminal",0)
     gmsh.model.mesh.generate(dim)
     if postgen_cb is not None:
         postgen_cb()
@@ -918,7 +922,7 @@ class GmshTemplate(MeshTemplate):
                 generate_mesh_to_file(self._geom, mshdir, mshtrunk, mesher=self,dim=self._maxdim, order=self.order,
                                       algorithm=self.gmsh_options.get("algorithm",None),
                                       recombine_algo=self.gmsh_options.get("recombine_algo",None),
-                                      postgen_cb=lambda: self.post_process(),mesh_mode=self.mesh_mode,mesh_size_callback=self._mesh_size_callback)
+                                      postgen_cb=lambda: self.post_process(),mesh_mode=self.mesh_mode,mesh_size_callback=self._mesh_size_callback, quiet=self._problem.is_quiet())
                 raise RuntimeError("Cannot close line loop" + (
                     "" if name is None else " for surface " + name) + ". Cannot find the next element in the loop.\nLoop so far: " + (
                                        "\n".join(debug_info)) + "\n\nLine list:\n" + "\n".join(llist))
@@ -931,7 +935,7 @@ class GmshTemplate(MeshTemplate):
             generate_mesh_to_file(self._geom, mshdir, mshtrunk, mesher=self, dim=self._maxdim, order=self.order,
                                   algorithm=self.gmsh_options.get("algorithm",None),
                                   recombine_algo=self.gmsh_options.get("recombine_algo",None),
-                                  postgen_cb=lambda: self.post_process(),mesh_mode=self.mesh_mode,mesh_size_callback=self._mesh_size_callback)
+                                  postgen_cb=lambda: self.post_process(),mesh_mode=self.mesh_mode,mesh_size_callback=self._mesh_size_callback, quiet=self._problem.is_quiet())
             raise RuntimeError("Could not close line loop" + (
                 "" if name is None else " for surface " + name) + ". Start and end not matching.\nLoop so far: " + (
                                    "\n".join(debug_info)) + "\n\nLine list:\n" + "\n".join(llist))
@@ -1163,7 +1167,8 @@ class GmshTemplate(MeshTemplate):
         exit()
     
     def _load_mesh(self,mshfilename:str):
-        print("Loading mesh file: "+mshfilename)
+        if not self._problem.is_quiet():
+            print("Loading mesh file: "+mshfilename)
         self._mesh = meshio.read(mshfilename, file_format="gmsh") #type:ignore
         curvedfile,_=os.path.splitext(mshfilename)
         curvedfile=curvedfile+".geo_unrolled"
@@ -1241,6 +1246,7 @@ class GmshTemplate(MeshTemplate):
 
     def _do_define_geometry(self, problem:"Problem", filename_trunk:Optional[str]=None):
         self._problem=problem
+        
         if not self._geometry_defined:
             mshdir = os.path.join(self._problem._outdir, "_gmsh") #type:ignore
             Path(mshdir).mkdir(parents=True, exist_ok=True)
@@ -1277,7 +1283,7 @@ class GmshTemplate(MeshTemplate):
                         generate_mesh_to_file(geom, mshdir, mshtrunk, mesher=self, dim=self._maxdim, order=self.order,
                                           algorithm=self.gmsh_options.get("algorithm",None),
                                           recombine_algo=self.gmsh_options.get("recombine_algo",None),
-                                          postgen_cb=lambda: self.post_process(),mesh_mode=self.mesh_mode,mesh_size_callback=self._mesh_size_callback)
+                                          postgen_cb=lambda: self.post_process(),mesh_mode=self.mesh_mode,mesh_size_callback=self._mesh_size_callback, quiet=self._problem.is_quiet())
 
                         #self.write_curved_entities(os.path.join(mshdir, mshtrunk + ".curved"))
             else:

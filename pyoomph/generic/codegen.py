@@ -1664,7 +1664,7 @@ class EquationTree:
         #print("############")
         if self._equations is not None:
             if self._codegen._name=="_internal_facets_":
-                print("Creating dummy domains for DG, current path:",self.get_full_path(),", elemdim:",elemdim)
+                #print("Creating dummy domains for DG, current path:",self.get_full_path(),", elemdim:",elemdim)
                 def generate_dummy_domain(source:EquationTree):
                     dummy=FiniteElementCodeGenerator()
                     dummy._set_equations(source._equations)
@@ -1690,7 +1690,7 @@ class EquationTree:
                 # TODO: This is a bit problematic
                 if self.get_parent():
                     if self.get_parent().get_parent() and self.get_parent().get_parent()._equations is not None:
-                        print(self.get_parent().get_parent(),self.get_parent().get_parent().get_equations())
+                        #print(self.get_parent().get_parent(),self.get_parent().get_parent().get_equations())
                         dummy_pp=generate_dummy_domain(self.get_parent().get_parent())
                         dummy_p._set_bulk_element(dummy_pp)
                         self._codegen._dummy_codegen_for_internal_facets_bulk_bulk=dummy_pp                        
@@ -1707,7 +1707,7 @@ class EquationTree:
                     self._codegen._dummy_codegen_for_internal_facets_bulk_bulk._do_define_fields(elemdim+2)
 
                 self._codegen._dummy_codegen_for_internal_facets_bulk._find_all_accessible_spaces()
-                print("Calling do define fields on ",self._codegen._dummy_codegen_for_internal_facets_bulk.get_full_name(),self._codegen._dummy_codegen_for_internal_facets_bulk.get_domain_name(),"with",elemdim+1)
+                #print("Calling do define fields on ",self._codegen._dummy_codegen_for_internal_facets_bulk.get_full_name(),self._codegen._dummy_codegen_for_internal_facets_bulk.get_domain_name(),"with",elemdim+1)
                 #self._codegen._transfer_my_fields_to_dummy_codegen(self._codegen._dummy_codegen_for_internal_facets_bulk)
                 self._codegen._dummy_codegen_for_internal_facets_bulk._set_opposite_interface(self._codegen._get_opposite_interface())
                 self._codegen._dummy_codegen_for_internal_facets_bulk._do_define_fields(elemdim+1)
