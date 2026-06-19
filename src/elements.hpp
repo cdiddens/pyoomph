@@ -939,6 +939,7 @@ namespace pyoomph
     void check_integrity(double &max_error) { max_error = 0; } // TODO
     unsigned int get_node_index_C1_to_element(const unsigned int &i) const { return i; }
     unsigned int get_node_index_C2_to_element(const unsigned int &i) const { return 0; }
+    unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const { return i; }
     void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
     void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const { throw_runtime_error("Makes no sense"); }
     void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const;
@@ -987,7 +988,7 @@ namespace pyoomph
     int get_node_index_element_to_C1(const unsigned int &i) const override { return (i < 4 ? i : -1); }
     int get_node_index_element_to_C1TB(const unsigned int &i) const override { return i; }
     void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const;
-    void shape_at_s_C2TB(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
+    void shape_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
     void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
     void dshape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
     unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const { return i; }

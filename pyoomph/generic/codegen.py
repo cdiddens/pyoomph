@@ -2055,6 +2055,23 @@ class Equations(BaseEquations):
     
     def _internal_define_scalar_field(self,name:str, space:"FiniteElementSpaceEnum", scale:Optional[Union["ExpressionOrNum",str]]=None, testscale:Optional[Union["ExpressionOrNum",str]]=None, discontinuous_refinement_exponent:Optional[float]=None):
         master = self._get_combined_element()
+        if master.get_parent_domain() is not None:
+            # Check a bit what is possible
+            pdom=master.get_parent_domain()
+            if space=="C2TB" or space=="D2TB":
+                if pdom._coordinate_space!="C2TB":
+                    raise self.add_exception_info(RuntimeError("You tried to define a "+str(space)+" field '"+str(name)+"' at an interface attached to a bulk domain with element space "+str(pdom._coordinate_space)+". This does not work"))
+            elif space=="C2" or space=="D2":
+                if pdom._coordinate_space not in {"C2TB","C2"}:
+                    raise self.add_exception_info(RuntimeError("You tried to define a "+str(space)+" field '"+str(name)+"' at an interface attached to a bulk domain with element space "+str(pdom._coordinate_space)+". This does not work"))
+            elif space=="C1TB" or space=="D1TB":    
+                if pdom._coordinate_space=="C1":
+                    raise self.add_exception_info(RuntimeError("You tried to define a "+str(space)+" field '"+str(name)+"' at an interface attached to a bulk domain with element space "+str(pdom._coordinate_space)+". This does not work"))
+                elif pdom._coordinate_space=="C2" or pdom._coordinate_space=="C1TB":
+                    if pdom.dimension==3:
+                        raise self.add_exception_info(RuntimeError("You tried to define a "+str(space)+" field '"+str(name)+"' at an interface attached to 3d bulk domain with element space "+str(pdom._coordinate_space)+". This does not work, since 3d tetrahedral elements of "+str(pdom._coordinate_space)+" do not provide the face bubble node for "+str(space)+" on 2d facets. Consider upgrading the 3d space to C2TB using an ElementSpace('C2TB') for the 3d domain or adjust the facet space to "+("C1" if space=="C1TB" else "D1")+"."))
+            
+            
         if _pyoomph.get_verbosity_flag() != 0:
             print("REGISTER", name, self, master, self == master, space)
         master._register_field(name, space)
