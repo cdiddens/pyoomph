@@ -21,6 +21,7 @@ The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
 
 
 #include "mesh.hpp"
+#include "meshtemplate.hpp"
 #include "exception.hpp"
 #include <cassert>
 #include <functional>
@@ -2738,6 +2739,8 @@ namespace pyoomph
 
     BulkElementBase::zeta_coordinate_type=old_setting;
   }
+
+  
 
   std::vector<pyoomph::Node*> Mesh::add_interpolated_nodes_at(const std::vector<std::vector<double> > & coords,bool all_as_boundary_nodes)
   {
@@ -5702,6 +5705,133 @@ namespace pyoomph
   }
 
 #endif
+
+  void  TemplatedMeshBase::setup_boundary_element_info(std::ostream &outfile)
+  {
+    if (!identication_of_boundary_elements_by_facets)
+    {
+      throw_runtime_error("This method should only be called if identication_of_boundary_elements_by_facets is false");
+    }
+
+    unsigned nbound = nboundary();
+    Boundary_element_pt.clear();
+    Face_index_at_boundary.clear();
+    Boundary_element_pt.resize(nbound);
+    Face_index_at_boundary.resize(nbound);
+
+    std::cout << "Number of facets found " << facets.size() << std::endl;
+    for (unsigned int ie=0;ie<this->nelement();ie++)
+    {
+      pyoomph::BulkElementBase *el = dynamic_cast<pyoomph::BulkElementBase *>(this->element_pt(ie));
+      if (!el)
+      {
+        throw_runtime_error("This method should only be called for meshes with BulkElementBase elements");
+      }      
+      for (int face_id : el->get_possible_face_indices())
+      {
+        std::vector<pyoomph::Node *> el_face_nodes=el->get_vertex_nodes_of_face(face_id);
+        bool may_skip=false;
+        for (unsigned int i=0;i<el_face_nodes.size();i++)
+        {
+          if (!dynamic_cast<oomph::BoundaryNodeBase *>(el_face_nodes[i]))
+          {
+            //std::cout << "Element " << ie << " face " << face_id << " has node " << i << " which is not a boundary node" << std::endl;
+            may_skip=true; break;            
+          }          
+        }
+        if (may_skip) continue;
+        std::set<pyoomph::Node *> facet_nodes(el_face_nodes.begin(), el_face_nodes.end());
+        if (facets.count(facet_nodes))
+        {
+          std::vector<unsigned int> facet_boundaries=facets[facet_nodes];
+          for (unsigned int boundary_id : facet_boundaries)
+          {
+            may_skip=false;
+            for (unsigned int i=0;i<el_face_nodes.size();i++) 
+            {
+               if (!dynamic_cast<oomph::BoundaryNodeBase *>(el_face_nodes[i])->is_on_boundary(boundary_id))
+               {
+                 //std::cout << "Element " << ie << " face " << face_id << " has node " << i << " which is not on boundary " << boundary_id << std::endl;
+                 may_skip=true; break;            
+               }
+            }
+            if (!may_skip)
+            {
+              Boundary_element_pt[boundary_id].push_back(el);
+              Face_index_at_boundary[boundary_id].push_back(face_id);
+            }
+          }
+        }
+        
+      }
+      //throw_runtime_error("This method is not implemented yet");
+      // std::cout << "Element " << ie << " has " << el_facets.size() << " facets" << std::endl;
+    }
+    
+  }
+
+
+
+  void TemplatedMeshBase::setup_facets_from_template(MeshTemplate *templ)
+  {
+      facets.clear();
+      std::vector<MeshTemplateFacet *> templ_facets = templ->get_facets();
+      std::vector<MeshTemplateNode *> templ_nodes = templ->get_nodes();
+      
+      for (auto *tfacet : templ_facets)
+      {
+        std::set<pyoomph::Node *> facet_nodes;
+        bool first_time = true;
+        std::set<unsigned int> facet_boundaries;
+        bool skip_facet=false;
+        for (nodeindex_t nindex : tfacet->nodeinds)
+        {
+          pyoomph::Node *tnode = dynamic_cast<pyoomph::Node *>(templ_nodes[nindex]->oomph_node);
+          oomph::BoundaryNodeBase *bn = dynamic_cast<oomph::BoundaryNodeBase *>(tnode);
+          if (!bn || !tnode)
+          {
+            skip_facet=true;
+            break;
+          }
+          
+          std::set<unsigned int> *boundaries_pt;
+          bn->get_boundaries_pt(boundaries_pt);
+          if (!boundaries_pt) {
+            skip_facet=true;
+            break;
+          }          
+          if (first_time)
+          {
+            facet_boundaries = *boundaries_pt;
+            first_time = false;
+          }
+          else
+          {
+            std::set<unsigned int> intersection;
+            std::set_intersection(facet_boundaries.begin(), facet_boundaries.end(),
+                                  boundaries_pt->begin(), boundaries_pt->end(),
+                                  std::inserter(intersection, intersection.begin()));
+            if (intersection.empty())
+            {
+              skip_facet = true;
+              break;
+            }
+            facet_boundaries = intersection;
+          }
+          if (tnode)
+          {
+            facet_nodes.insert(tnode);
+          }
+        }
+        if (!skip_facet)
+        {
+          for (unsigned int boundary_id : facet_boundaries)
+          {          
+            facets[facet_nodes].push_back(boundary_id);
+          }
+        }
+      }
+  }
 
   ////////////////
 

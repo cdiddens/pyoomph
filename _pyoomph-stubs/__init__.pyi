@@ -1602,6 +1602,7 @@ class SparseRank3Tensor:
     def right_vector_mult(self, arg0: numpy.typing.NDArray[numpy.float64]) -> numpy.typing.NDArray[numpy.float64]:
         ...
 class TemplatedMeshBase1d(Mesh, OomphMesh):
+    identication_of_boundary_elements_by_facets: bool
     def __init__(self) -> None:
         ...
     def _get_problem(self) -> Problem:
@@ -1621,6 +1622,7 @@ class TemplatedMeshBase1d(Mesh, OomphMesh):
     def setup_tree_forest(self) -> None:
         ...
 class TemplatedMeshBase2d(Mesh, OomphMesh):
+    identication_of_boundary_elements_by_facets: bool
     def __init__(self) -> None:
         ...
     def _get_problem(self) -> Problem:
@@ -1646,6 +1648,7 @@ class TemplatedMeshBase2d(Mesh, OomphMesh):
     def setup_tree_forest(self) -> None:
         ...
 class TemplatedMeshBase3d(Mesh, OomphMesh):
+    identication_of_boundary_elements_by_facets: bool
     def __init__(self) -> None:
         ...
     def _get_problem(self) -> Problem:

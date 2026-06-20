@@ -11677,7 +11677,8 @@ namespace pyoomph
 		eleminfo.nnode_DL = 4;
 		eleminfo.nodal_dim = codeinst->get_func_table()->nodal_dim;
 		this->set_n_node(eleminfo.nnode);
-		this->set_nodal_dimension(eleminfo.nodal_dim);		
+		this->set_nodal_dimension(eleminfo.nodal_dim);	
+		allocate_discontinous_fields();	
 	}
 
 	bool BulkElementWedge3dC1::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
@@ -14708,5 +14709,167 @@ namespace pyoomph
 	oomph::TBubbleEnrichedGauss<3, 3> BulkElementTetra3dC2TB::Default_enriched_integration_scheme;
 	
 	bool InterfaceElementBase::interpolate_new_interface_dofs=true;
+
+	const std::vector<int> BulkElementODE0d::Possible_Face_Indices={};
+	const std::vector<int> PointElement0d::Possible_Face_Indices={};
+	const std::vector<int> BulkElementLine1dC1::Possible_Face_Indices={-1,1};
+	const std::vector<int> BulkElementLine1dC2::Possible_Face_Indices={-1,1};
+	
+	const std::vector<int> BulkTElementLine1dC1::Possible_Face_Indices={-1,1};
+	const std::vector<int> BulkTElementLine1dC2::Possible_Face_Indices={-1,1};
+
+	const std::vector<int> BulkElementQuad2dC1::Possible_Face_Indices={-2,-1,1,2};
+	const std::vector<int> BulkElementQuad2dC2::Possible_Face_Indices={-2,-1,1,2};
+
+	const std::vector<int> BulkElementTri2dC1::Possible_Face_Indices={0,1,2};
+	const std::vector<int> BulkElementTri2dC2::Possible_Face_Indices={0,1,2};
+
+	const std::vector<int> BulkElementBrick3dC1::Possible_Face_Indices={-3,-2,-1,1,2,3};
+	const std::vector<int> BulkElementBrick3dC2::Possible_Face_Indices={-3,-2,-1,1,2,3};
+
+	const std::vector<int> BulkElementTetra3dC1::Possible_Face_Indices={0,1,2,3};
+	const std::vector<int> BulkElementTetra3dC2::Possible_Face_Indices={0,1,2,3};
+
+	const std::vector<int> BulkElementWedge3dC1::Possible_Face_Indices={0,1,2,3,4,5};
+
+	std::vector<pyoomph::Node*> BulkElementLine1dC1::get_vertex_nodes_of_face(const int &face) const
+	{
+      if (face==-1) return {dynamic_cast<pyoomph::Node*>(this->node_pt(0))};
+	  else if (face==1) return {dynamic_cast<pyoomph::Node*>(this->node_pt(1))};	  
+	  else throw_runtime_error("Invalid face index for line element");
+	}
+
+	std::vector<pyoomph::Node*> BulkElementLine1dC2::get_vertex_nodes_of_face(const int &face) const
+	{
+	  if (face==-1) return {dynamic_cast<pyoomph::Node*>(this->node_pt(0))};
+	  else if (face==1) return {dynamic_cast<pyoomph::Node*>(this->node_pt(2))};
+	  else throw_runtime_error("Invalid face index for line element");
+	}
+
+	std::vector<pyoomph::Node*> BulkTElementLine1dC1::get_vertex_nodes_of_face(const int &face) const
+	{
+	  if (face==-1) return {dynamic_cast<pyoomph::Node*>(this->node_pt(0))};
+	  else if (face==1) return {dynamic_cast<pyoomph::Node*>(this->node_pt(1))};	  
+	  else throw_runtime_error("Invalid face index for line element");
+	}
+
+	std::vector<pyoomph::Node*> BulkTElementLine1dC2::get_vertex_nodes_of_face(const int &face) const
+	{
+	  if (face==-1) return {dynamic_cast<pyoomph::Node*>(this->node_pt(0))};
+	  else if (face==1) return {dynamic_cast<pyoomph::Node*>(this->node_pt(2))};
+	  else throw_runtime_error("Invalid face index for line element");
+	}
+
+	void help_me_with_the_facets(const BulkElementBase *elem,int face_index)
+	{
+
+	  unsigned nnode_face;
+	  if (dynamic_cast<const BulkElementTetra3dC1*>(elem)) nnode_face=3;
+	  else if (dynamic_cast<const BulkElementTetra3dC2TB*>(elem)) nnode_face=7;
+	  else if (dynamic_cast<const BulkElementTetra3dC2*>(elem)) nnode_face=6;
+	  else nnode_face=elem->nnode_on_face();	  
+	  std::set<oomph::Node*> vertex_nodes;
+	  for (unsigned int i=0;i<elem->nvertex_node();i++)
+	  {
+	    vertex_nodes.insert(elem->vertex_node_pt(i));
+	  }
+	  std::cout << " if (face=="<<face_index<<") { return {";
+	  bool comma=false;
+	  for (unsigned i = 0; i < nnode_face; i++)
+      {      
+        unsigned bulk_number = elem->get_bulk_node_number(face_index, i);
+		if (vertex_nodes.count(elem->node_pt(bulk_number)))
+		{
+			//std::cout << typeid(*elem).name() << " FACE " << face_index << " NODE " << i << " BULK NUMBER " << bulk_number << " IS A VERTEX NODE " << std::endl;
+			if (comma) std::cout << ",";
+			else comma=true;
+			std::cout << "dynamic_cast<pyoomph::Node*>(this->node_pt(" << bulk_number << "))";
+		}
+	  }     
+	  std::cout << "};}" << std::endl; 
+    }
+	
+
+	std::vector<pyoomph::Node*> BulkElementQuad2dC1::get_vertex_nodes_of_face(const int &face) const
+	{	  
+	  	if (face==-2) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(0)),dynamic_cast<pyoomph::Node*>(this->node_pt(1))};}
+ 		else if (face==-1) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(0)),dynamic_cast<pyoomph::Node*>(this->node_pt(2))};}
+ 		else if (face==1) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(1)),dynamic_cast<pyoomph::Node*>(this->node_pt(3))};}
+ 		else if (face==2) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(2)),dynamic_cast<pyoomph::Node*>(this->node_pt(3))};}
+		else throw_runtime_error("Invalid face index for quadrilateral element");
+	}
+
+	std::vector<pyoomph::Node*> BulkElementQuad2dC2::get_vertex_nodes_of_face(const int &face) const
+	{	  	  
+	  if (face==-2) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(0)),dynamic_cast<pyoomph::Node*>(this->node_pt(2))};}
+      else if (face==-1) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(0)),dynamic_cast<pyoomph::Node*>(this->node_pt(6))};}
+      else if (face==1) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(2)),dynamic_cast<pyoomph::Node*>(this->node_pt(8))};}
+      else if (face==2) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(6)),dynamic_cast<pyoomph::Node*>(this->node_pt(8))};}
+	  else throw_runtime_error("Invalid face index for quadrilateral element");
+	}
+
+	std::vector<pyoomph::Node*> BulkElementTri2dC1::get_vertex_nodes_of_face(const int &face) const
+	{	  
+	  if (face==0) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(2)),dynamic_cast<pyoomph::Node*>(this->node_pt(1))};}
+      else if (face==1) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(2)),dynamic_cast<pyoomph::Node*>(this->node_pt(0))};}
+      else if (face==2) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(0)),dynamic_cast<pyoomph::Node*>(this->node_pt(1))};}
+	  else throw_runtime_error("Invalid face index for triangular element");
+	}
+
+	std::vector<pyoomph::Node*> BulkElementTri2dC2::get_vertex_nodes_of_face(const int &face) const
+	{	  
+	  if (face==0) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(2)),dynamic_cast<pyoomph::Node*>(this->node_pt(1))};}
+      else if (face==1) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(2)),dynamic_cast<pyoomph::Node*>(this->node_pt(0))};}
+      else if (face==2) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(0)),dynamic_cast<pyoomph::Node*>(this->node_pt(1))};}
+	  else throw_runtime_error("Invalid face index for triangular element");	  
+	}
+
+	std::vector<pyoomph::Node*> BulkElementBrick3dC1::get_vertex_nodes_of_face(const int &face) const
+	{	  
+	  	if (face==-3) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(0)),dynamic_cast<pyoomph::Node*>(this->node_pt(1)),dynamic_cast<pyoomph::Node*>(this->node_pt(2)),dynamic_cast<pyoomph::Node*>(this->node_pt(3))};}
+ 		else if (face==-2) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(0)),dynamic_cast<pyoomph::Node*>(this->node_pt(1)),dynamic_cast<pyoomph::Node*>(this->node_pt(4)),dynamic_cast<pyoomph::Node*>(this->node_pt(5))};}
+ 		else if (face==-1) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(0)),dynamic_cast<pyoomph::Node*>(this->node_pt(2)),dynamic_cast<pyoomph::Node*>(this->node_pt(4)),dynamic_cast<pyoomph::Node*>(this->node_pt(6))};}
+ 		else if (face==1) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(1)),dynamic_cast<pyoomph::Node*>(this->node_pt(3)),dynamic_cast<pyoomph::Node*>(this->node_pt(5)),dynamic_cast<pyoomph::Node*>(this->node_pt(7))};}
+ 		else if (face==2) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(2)),dynamic_cast<pyoomph::Node*>(this->node_pt(3)),dynamic_cast<pyoomph::Node*>(this->node_pt(6)),dynamic_cast<pyoomph::Node*>(this->node_pt(7))};}
+ 		else if (face==3) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(4)),dynamic_cast<pyoomph::Node*>(this->node_pt(5)),dynamic_cast<pyoomph::Node*>(this->node_pt(6)),dynamic_cast<pyoomph::Node*>(this->node_pt(7))};}				
+		else throw_runtime_error("Invalid face index for brick element");
+	}
+
+	std::vector<pyoomph::Node*> BulkElementBrick3dC2::get_vertex_nodes_of_face(const int &face) const
+	{	  
+	 if (face==3) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(18)),dynamic_cast<pyoomph::Node*>(this->node_pt(20)),dynamic_cast<pyoomph::Node*>(this->node_pt(24)),dynamic_cast<pyoomph::Node*>(this->node_pt(26))};}
+     else if (face==-3) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(0)),dynamic_cast<pyoomph::Node*>(this->node_pt(2)),dynamic_cast<pyoomph::Node*>(this->node_pt(6)),dynamic_cast<pyoomph::Node*>(this->node_pt(8))};}
+     else if (face==-2) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(0)),dynamic_cast<pyoomph::Node*>(this->node_pt(2)),dynamic_cast<pyoomph::Node*>(this->node_pt(18)),dynamic_cast<pyoomph::Node*>(this->node_pt(20))};}
+ 	 else if (face==-1) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(0)),dynamic_cast<pyoomph::Node*>(this->node_pt(6)),dynamic_cast<pyoomph::Node*>(this->node_pt(18)),dynamic_cast<pyoomph::Node*>(this->node_pt(24))};}
+     else if (face==1) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(2)),dynamic_cast<pyoomph::Node*>(this->node_pt(8)),dynamic_cast<pyoomph::Node*>(this->node_pt(20)),dynamic_cast<pyoomph::Node*>(this->node_pt(26))};}
+     else if (face==2) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(6)),dynamic_cast<pyoomph::Node*>(this->node_pt(8)),dynamic_cast<pyoomph::Node*>(this->node_pt(24)),dynamic_cast<pyoomph::Node*>(this->node_pt(26))};}
+     else if (face==3) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(18)),dynamic_cast<pyoomph::Node*>(this->node_pt(20)),dynamic_cast<pyoomph::Node*>(this->node_pt(24)),dynamic_cast<pyoomph::Node*>(this->node_pt(26))};}
+	 else throw_runtime_error("Invalid face index for brick element");
+	}	
+
+	std::vector<pyoomph::Node*> BulkElementTetra3dC1::get_vertex_nodes_of_face(const int &face) const
+	{	  
+	  if (face==0) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(1)),dynamic_cast<pyoomph::Node*>(this->node_pt(2)),dynamic_cast<pyoomph::Node*>(this->node_pt(3))};}
+      else if (face==1) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(0)),dynamic_cast<pyoomph::Node*>(this->node_pt(2)),dynamic_cast<pyoomph::Node*>(this->node_pt(3))};}
+      else if (face==2) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(0)),dynamic_cast<pyoomph::Node*>(this->node_pt(1)),dynamic_cast<pyoomph::Node*>(this->node_pt(3))};}
+      else if (face==3) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(1)),dynamic_cast<pyoomph::Node*>(this->node_pt(2)),dynamic_cast<pyoomph::Node*>(this->node_pt(0))};}
+	  else throw_runtime_error("Invalid face index for tetrahedral element");
+	}
+
+	std::vector<pyoomph::Node*> BulkElementTetra3dC2::get_vertex_nodes_of_face(const int &face) const
+	{	  
+	  if (face==0) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(1)),dynamic_cast<pyoomph::Node*>(this->node_pt(2)),dynamic_cast<pyoomph::Node*>(this->node_pt(3))};}
+      else if (face==1) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(0)),dynamic_cast<pyoomph::Node*>(this->node_pt(2)),dynamic_cast<pyoomph::Node*>(this->node_pt(3))};}
+      else if (face==2) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(0)),dynamic_cast<pyoomph::Node*>(this->node_pt(1)),dynamic_cast<pyoomph::Node*>(this->node_pt(3))};}
+      else if (face==3) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(1)),dynamic_cast<pyoomph::Node*>(this->node_pt(2)),dynamic_cast<pyoomph::Node*>(this->node_pt(0))};}
+	  else throw_runtime_error("Invalid face index for tetrahedral element");
+	}
+
+	std::vector<pyoomph::Node*> BulkElementWedge3dC1::get_vertex_nodes_of_face(const int &face) const
+	{	  
+	 help_me_with_the_facets(this,face);
+	  return {};
+	}
+
 
 }

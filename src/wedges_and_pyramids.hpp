@@ -40,6 +40,7 @@ class WedgeElementBase :  public virtual FiniteElement
       }
       return node_pt(j);
     }
+    unsigned nnode_on_face() const override { throw_runtime_error("nnode_on_face cannot be implemented for a Wedge, damn."); }
 };
 
 class RefineableWedgeElement : public virtual RefineableElement, public virtual WedgeElementBase

@@ -254,6 +254,11 @@ namespace pyoomph
 		}
 	};
 
+
+
+	
+	
+
 	// The basis class for all templated meshes // TODO Move elsewhere
 	class TemplatedMeshBase : public virtual oomph::TreeBasedRefineableMeshBase, public virtual pyoomph::Mesh
 	{
@@ -261,9 +266,9 @@ namespace pyoomph
 	protected:
 		//  std::string domainname;
 		//  std::vector<std::string> boundary_names;
-
+		std::map<std::set<pyoomph::Node *> ,std::vector<unsigned>> facets; // Map from facets (vertex node sets) to boundary indices
 		unsigned add_new_element(pyoomph::BulkElementBase *new_el, std::vector<pyoomph::Node *> nodes);
-
+        virtual void setup_facets_from_template(MeshTemplate *templ);
 		void split_elements_if_required()
 		{
 			// Find the number of trees in the forest
@@ -303,6 +308,7 @@ namespace pyoomph
 #endif
 
 	public:
+	    bool identication_of_boundary_elements_by_facets=true;
 		//	void set_spatial_error_estimator_pt(oomph::Z2ErrorEstimator * errest) {this->spatial_error_estimator_pt()=errest;}
 		TemplatedMeshBase() : pyoomph::Mesh() {}
 		//	Problem * get_problem() {return problem;}
@@ -321,6 +327,8 @@ namespace pyoomph
 			oomph::BrokenCopy::broken_assign("TemplatedMeshBase");
 		}
 
+
+		virtual void setup_boundary_element_info(std::ostream &outfile) ;
 		virtual void generate_from_template(MeshTemplateElementCollection *coll) = 0;
 
 		virtual std::vector<double> update_elemental_errors(std::vector<double> &errors)

@@ -745,7 +745,7 @@ namespace pyoomph
     std::vector<MeshTemplateElementCollection *> bulk_element_collections;
     //   std::vector<MeshTemplateElementCollection*> interface_element_collections;
     std::vector<std::string> boundary_names;
-    std::vector<MeshTemplateFacet *> facets;                                                                                     // Only special facets are usually added, i.e. curved ones
+    std::vector<MeshTemplateFacet *> facets;
     std::map<MeshTemplateFacet *, unsigned, std::function<bool(const MeshTemplateFacet *, const MeshTemplateFacet *)>> facetmap; // Required for fast finding facets
     MeshTemplateDomain *domain;
     std::vector<MeshTemplatePeriodicIntermediateNodeInfo> inter_nodes_periodic;
@@ -768,7 +768,7 @@ namespace pyoomph
 
     const std::vector<MeshTemplateNode *> &get_nodes() const { return nodes; }
     std::vector<MeshTemplateNode *> &get_nodes() { return nodes; }
-
+    const std::vector<MeshTemplateFacet *> &get_facets() const { return facets; }
     const std::vector<std::string> &get_boundary_names() const { return boundary_names; }
     std::vector<double> get_node_position(nodeindex_t index) const { return std::vector<double>{nodes[index]->x, nodes[index]->y, nodes[index]->z}; }
     void _find_opposite_interface_connections();

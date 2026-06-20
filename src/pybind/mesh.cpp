@@ -931,7 +931,7 @@ void PyReg_Mesh(py::module &m)
 			"max_keep_unrefined", [](pyoomph::Mesh *m)
 			{ return dynamic_cast<oomph::TreeBasedRefineableMeshBase *>(m)->max_keep_unrefined(); },
 			[](pyoomph::Mesh *m, unsigned l)
-			{ dynamic_cast<oomph::TreeBasedRefineableMeshBase *>(m)->max_keep_unrefined() = l; })
+			{ dynamic_cast<oomph::TreeBasedRefineableMeshBase *>(m)->max_keep_unrefined() = l; })		
 		.def("boundary_coordinate_bool", &pyoomph::Mesh::boundary_coordinates_bool)
 		.def("is_boundary_coordinate_defined", &pyoomph::Mesh::is_boundary_coordinate_defined)
 		.def("fill_node_index_to_node_map",[](pyoomph::Mesh *self) 
@@ -1260,6 +1260,9 @@ void PyReg_Mesh(py::module &m)
 			 { oomph::Vector<unsigned> oomphvec(inds.size()); for (unsigned int i=0;i<inds.size();i++) oomphvec[i]=inds[i]; m->refine_selected_elements(oomphvec); })
 		.def("setup_boundary_element_info", [](pyoomph::TemplatedMeshBase1d *self)
 			 { std::ostringstream oss; self->setup_boundary_element_info(oss); })
+		.def_property("identication_of_boundary_elements_by_facets", [](pyoomph::TemplatedMeshBase1d *self)
+			 { return self->identication_of_boundary_elements_by_facets; },
+			 [](pyoomph::TemplatedMeshBase1d *self, bool val) { self->identication_of_boundary_elements_by_facets=val; })
 		.def("setup_tree_forest", &pyoomph::TemplatedMeshBase1d::setup_tree_forest);
 
 	py::class_<pyoomph::TemplatedMeshBase2d, pyoomph::Mesh, oomph::Mesh>(m, "TemplatedMeshBase2d")
@@ -1283,6 +1286,9 @@ void PyReg_Mesh(py::module &m)
 		.def("setup_tree_forest", &pyoomph::TemplatedMeshBase2d::setup_tree_forest)
 		.def("refine_selected_elements", [](pyoomph::TemplatedMeshBase2d *m, std::vector<unsigned int> inds)
 			 { oomph::Vector<unsigned> oomphvec(inds.size()); for (unsigned int i=0;i<inds.size();i++) oomphvec[i]=inds[i]; m->refine_selected_elements(oomphvec); })
+		 .def_property("identication_of_boundary_elements_by_facets", [](pyoomph::TemplatedMeshBase2d *self)
+			 { return self->identication_of_boundary_elements_by_facets; },
+			 [](pyoomph::TemplatedMeshBase2d *self, bool val) { self->identication_of_boundary_elements_by_facets=val; })			 
 		.def("setup_boundary_element_info", [](pyoomph::TemplatedMeshBase2d *self)
 			 { std::ostringstream oss; self->setup_boundary_element_info(oss); });
 
@@ -1303,6 +1309,9 @@ void PyReg_Mesh(py::module &m)
 		.def("setup_tree_forest", &pyoomph::TemplatedMeshBase3d::setup_tree_forest)
 		.def("refine_selected_elements", [](pyoomph::TemplatedMeshBase3d *m, std::vector<unsigned int> inds)
 			 { oomph::Vector<unsigned> oomphvec(inds.size()); for (unsigned int i=0;i<inds.size();i++) oomphvec[i]=inds[i]; m->refine_selected_elements(oomphvec); })
+		.def_property("identication_of_boundary_elements_by_facets", [](pyoomph::TemplatedMeshBase3d *self)
+			 { return self->identication_of_boundary_elements_by_facets; },
+			 [](pyoomph::TemplatedMeshBase3d *self, bool val) { self->identication_of_boundary_elements_by_facets=val; })			 
 		.def("setup_boundary_element_info", [](pyoomph::TemplatedMeshBase3d *self)
 			 { std::ostringstream oss; self->setup_boundary_element_info(oss); });
 

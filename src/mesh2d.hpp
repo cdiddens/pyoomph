@@ -288,6 +288,12 @@ namespace pyoomph
         }
       }
       templ->link_periodic_nodes();
+
+
+      setup_facets_from_template(templ);
+      
+      
+
     }
 
     void setup_boundary_element_info_quads(std::ostream &outfile);
@@ -296,5 +302,8 @@ namespace pyoomph
     void setup_boundary_element_info() override;
 	 void fill_internal_facet_buffers(std::vector<BulkElementBase*> & internal_elements, std::vector<int> & internal_face_dir,std::vector<BulkElementBase*> & opposite_elements,std::vector<int> & opposite_face_dir,std::vector<int> & opposite_already_at_index) override;        
   };
+
+
+  
 
 }

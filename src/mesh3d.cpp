@@ -75,6 +75,20 @@ namespace pyoomph
 		Boundary_element_pt.resize(nbound);
 		Face_index_at_boundary.resize(nbound);
 
+		if (identication_of_boundary_elements_by_facets)
+        {
+         if (is_adaptation_enabled() &&refinement_possible() )
+         {
+          identication_of_boundary_elements_by_facets=false; // For adaptive meshes, we find the facets conventionally, but for non-adaptive meshes we can use the facet information from the mesh template which is always accurate, even at mixed corners
+         } 
+        }
+        if (identication_of_boundary_elements_by_facets)
+        {
+         TemplatedMeshBase::setup_boundary_element_info(outfile);
+		 Lookup_for_elements_next_boundary_is_setup = true;
+         return;
+        }
+
 		setup_boundary_element_info_bricks(outfile);
 		setup_boundary_element_info_tris(outfile);
 		Lookup_for_elements_next_boundary_is_setup = true;

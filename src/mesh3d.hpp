@@ -310,6 +310,8 @@ namespace pyoomph
         }
       }
       templ->link_periodic_nodes();
+
+      setup_facets_from_template(templ);
     }
 
     void setup_boundary_element_info_bricks(std::ostream &outfile);

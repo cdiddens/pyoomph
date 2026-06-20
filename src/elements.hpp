@@ -191,6 +191,8 @@ namespace pyoomph
     unsigned _numpy_index;
     double initial_cartesian_nondim_size = 0.0;
     double initial_quality_factor = 0.0;
+    virtual const std::vector<int> & get_possible_face_indices() const=0;
+    virtual  std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const=0;
     virtual void fill_dofs_to_dirichlet_set_indices(std::vector<unsigned> &indices);
     virtual void fill_shape_buffer_for_integration_point(unsigned ipt, const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag);
     virtual void set_remaining_shapes_appropriately(JITShapeInfo_t *shape_info, const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes);
@@ -499,8 +501,10 @@ namespace pyoomph
     //	virtual void fill_element_info(); //TODO simplify this
     oomph::TimeStepper *timestepper;
     static oomph::PointIntegral Default_integration_scheme;
-
+    static const std::vector<int> Possible_Face_Indices;
   public:
+    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override { return std::vector<pyoomph::Node*>(); }
     int nedges() const { return 0; }
     virtual double fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds = NULL) const;
     virtual unsigned get_meshio_type_index() const { return 0; }
@@ -588,7 +592,10 @@ namespace pyoomph
                               public virtual RefineableSolidLineElement
   {
   protected:
+    static const std::vector<int> Possible_Face_Indices;
   public:
+    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const { return 2; }
     BulkElementLine1dC1();
     bool fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap);
@@ -649,7 +656,10 @@ namespace pyoomph
     static int element_index_to_C1[3];
     static bool node_only_C2[3];
 
+    static const std::vector<int> Possible_Face_Indices;
   public:
+    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const { return 2; }
     virtual unsigned get_meshio_type_index() const { return 2; }
     BulkElementLine1dC2();
@@ -705,7 +715,10 @@ namespace pyoomph
   class BulkTElementLine1dC1 : public virtual BulkElementBase, public virtual oomph::TElement<1, 2>, public virtual oomph::RefineableTElement<1>
   {
   protected:
+    static const std::vector<int> Possible_Face_Indices;
   public:
+    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const { return 2; }
     BulkTElementLine1dC1();
     bool fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap);
@@ -761,7 +774,10 @@ namespace pyoomph
     static int element_index_to_C1[3];
     static bool node_only_C2[3];
 
+     static const std::vector<int> Possible_Face_Indices;
   public:
+    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const { return 2; }
     virtual unsigned get_meshio_type_index() const { return 2; }
     BulkTElementLine1dC2();
@@ -813,7 +829,10 @@ namespace pyoomph
   class BulkElementQuad2dC1 : public virtual BulkElementBase, public virtual oomph::QElement<2, 2>, public virtual oomph::RefineableSolidQElement<2>
   {
   protected:
+    static const std::vector<int> Possible_Face_Indices;
   public:
+    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const { return 4; }
     BulkElementQuad2dC1();
     virtual void interpolate_hang_values();
@@ -866,7 +885,10 @@ namespace pyoomph
     static bool node_only_C2[9];
     virtual void constrain_bulk_position_space_to_C1();
 
+    static const std::vector<int> Possible_Face_Indices;
   public:
+    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     virtual void get_supporting_C1_nodes_of_C2_node(const unsigned &n, std::vector<oomph::Node *> &support);
     int nedges() const { return 4; }
     BulkElementQuad2dC2();
@@ -929,7 +951,10 @@ namespace pyoomph
   class BulkElementTri2dC1 : public virtual BulkElementBase, public virtual oomph::TElement<2, 2>, public virtual oomph::RefineableTElement<2>
   {
   protected:
+    static const std::vector<int> Possible_Face_Indices;
   public:
+    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     virtual oomph::Node *boundary_node_pt(const int &face_index, const unsigned int index);
     int nedges() const { return 3; }
     unsigned nnode_on_face() const override { return 2; }
@@ -1023,7 +1048,10 @@ namespace pyoomph
   protected:
     virtual void constrain_bulk_position_space_to_C1();
 
+    static const std::vector<int> Possible_Face_Indices;
   public:
+    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     void interpolate_hang_values_at_interface();
     virtual void get_supporting_C1_nodes_of_C2_node(const unsigned &n, std::vector<oomph::Node *> &support);
     virtual oomph::Node *boundary_node_pt(const int &face_index, const unsigned int index);
@@ -1120,7 +1148,10 @@ namespace pyoomph
   class BulkElementBrick3dC1 : public virtual BulkElementBase, public virtual oomph::QElement<3, 2>, public virtual oomph::RefineableSolidQElement<3>
   {
   protected:
+    static const std::vector<int> Possible_Face_Indices;
   public:
+    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const { return 8; }
     BulkElementBrick3dC1();
     virtual void interpolate_hang_values();
@@ -1178,7 +1209,10 @@ namespace pyoomph
     static int element_index_to_C1[27];
     static bool node_only_C2[27];
 
+    static const std::vector<int> Possible_Face_Indices;
   public:
+    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const { return 8; }
     BulkElementBrick3dC2();
     virtual unsigned get_meshio_type_index() const { return 14; }
@@ -1246,7 +1280,10 @@ namespace pyoomph
   class BulkElementTetra3dC1 : public virtual BulkElementBase, public virtual oomph::TElement<3, 2>, public virtual oomph::RefineableTElement<3>
   {
   protected:
+     static const std::vector<int> Possible_Face_Indices;
   public:
+    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const { return 6; }
     BulkElementTetra3dC1();
     virtual void interpolate_hang_values();
@@ -1345,7 +1382,10 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
     static int element_index_to_C1[15];
     static bool node_only_C2[15]; // Including the C2TBs
 
+    static const std::vector<int> Possible_Face_Indices;
   public:
+    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const { return 6; }
     BulkElementTetra3dC2(bool has_bubble = false);
     virtual unsigned get_meshio_type_index() const { return 10; }
@@ -1451,7 +1491,11 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
 
   class BulkElementWedge3dC1 : public virtual BulkElementBase, public virtual oomph::WedgeElementC1
   {
+    protected:
+      static const std::vector<int> Possible_Face_Indices;
     public:
+      virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+      std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
       BulkElementWedge3dC1();
       int nedges() const { throw_runtime_error("Not implemented"); }
       virtual unsigned get_meshio_type_index() const { return 13; }
@@ -1493,12 +1537,16 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
           return res;
       }
       virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 4, order)); }
+      oomph::Vector<double> get_midpoint_s() override { oomph::Vector<double> res(this->dim(), 1.0 / 3.0); res[2]=0.5; return res; }
   };
 
   class PointElement0d : public virtual BulkElementBase, public virtual oomph::PointElement
   {
   protected:
+    static const std::vector<int> Possible_Face_Indices;
   public:
+    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override {return std::vector<pyoomph::Node*>{}; }
     int nedges() const { return 0; }
     PointElement0d();
     virtual unsigned get_meshio_type_index() const { return 0; }
