@@ -9153,7 +9153,7 @@ namespace pyoomph
 				}
 			}
 			// Now we still need to handle the dummy pinned dofs, which are not considered so far
-			for (unsigned int i = codeinst->get_func_table()->nodal_offset_C1_basebulk; i < codeinst->get_func_table()->nodal_offset_C1_basebulk + codeinst->get_func_table()->numfields_C1_basebulk+ codeinst->get_func_table()->numfields_C1TB_basebulk + codeinst->get_func_table()->numfields_C1_basebulk; i++)
+			for (unsigned int i = codeinst->get_func_table()->nodal_offset_C1_basebulk; i < codeinst->get_func_table()->nodal_offset_C1_basebulk + codeinst->get_func_table()->numfields_C1_basebulk+ codeinst->get_func_table()->numfields_C1TB_basebulk; i++)
 			{
 				for (unsigned t = 0; t < node_pt(0)->ntstorage(); t++)
 				{
