@@ -208,5 +208,207 @@ const double WedgeGaussC1::Weight[6] =
 
 
 
+  
+
+
+  //////////////////
+
   WedgeGaussC1  WedgeElementC1::Default_integration_scheme;
+
+  unsigned int WedgeElementC1::get_bulk_node_number(const int & face_index, const unsigned int& i) const
+  {
+    if (face_index==0 && i<3) { return i; }
+    else if (face_index==1 && i<3) { return i+3; }
+    else if (face_index==2) {  // 3 0 5 2
+        switch (i)
+        {
+            case 0: return 3;
+            case 1: return 0;
+            case 2: return 5;
+            case 3: return 2;
+            default: throw_runtime_error("Invalid node index for face");
+        }
+    }
+    else if (face_index==3) {  // 1 0 4 3
+        switch (i)
+        {
+            case 0: return 1;
+            case 1: return 0;
+            case 2: return 4;
+            case 3: return 3;
+            default: throw_runtime_error("Invalid node index for face");
+        }
+    }
+    else if (face_index==4) {  // 1 4 2 5
+        switch (i)
+        {
+            case 0: return 1;
+            case 1: return 4;
+            case 2: return 2;
+            case 3: return 5;
+            default: throw_runtime_error("Invalid node index for face");
+        }
+    }
+    
+    throw_runtime_error("Invalid node or face index for wedge element "+std::to_string(face_index)+", "+std::to_string(i));
+    return 0;
+  }
+
+  void WedgeElementBase::build_face_element(const int& face_index,FaceElement* face_element_pt)
+  {    
+    face_element_pt->set_nodal_dimension(nodal_dimension());   
+    face_element_pt->bulk_element_pt() = this;
+
+#ifdef OOMPH_HAS_MPI    
+    face_element_pt->set_halo(Non_halo_proc_ID);
+#endif    
+    face_element_pt->face_index() = face_index;
+    const unsigned nnode_face = nnode_on_face_by_index(face_index);
+    
+    face_element_pt->face_to_bulk_coordinate_fct_pt() = face_to_bulk_coordinate_fct_pt(face_index);    
+    face_element_pt->bulk_coordinate_derivatives_fct_pt() = bulk_coordinate_derivatives_fct_pt(face_index);    
+    face_element_pt->nbulk_value_resize(nnode_face);    
+    face_element_pt->bulk_node_number_resize(nnode_face);
+    
+    for (unsigned i = 0; i < nnode_face; i++)
+    {
+      unsigned bulk_number = get_bulk_node_number(face_index, i);     
+      face_element_pt->node_pt(i) = node_pt(bulk_number);
+      face_element_pt->bulk_node_number(i) = bulk_number;      
+      face_element_pt->nbulk_value(i) = required_nvalue(bulk_number);
+    }    
+    face_element_pt->normal_sign() = face_outer_unit_normal_sign(face_index);
+  }
+
+  
+
+  namespace WedgeElementFaceToBulkCoordinates
+  {    
+    void face0(const Vector<double>& s, Vector<double>& s_bulk)
+    {
+        s_bulk[0] = s[0];
+        s_bulk[1] = s[1];
+        s_bulk[2] = 0.0;
+    }
+   
+    void face1(const Vector<double>& s, Vector<double>& s_bulk)
+    {        
+        s_bulk[0] = s[0];
+        s_bulk[1] = s[1];
+        s_bulk[2] = 1.0;
+    }
+    
+    void face2(const Vector<double>& s, Vector<double>& s_bulk)
+    {
+        throw_runtime_error("Implement");
+    }
+    
+    void face3(const Vector<double>& s, Vector<double>& s_bulk)
+    {
+        throw_runtime_error("Implement");    
+    }
+    
+    void face4(const Vector<double>& s, Vector<double>& s_bulk)
+    {
+        throw_runtime_error("Implement");
+    }
+    
+  } 
+
+  namespace WedgeElementBulkCoordinateDerivatives
+  {    
+    void faces0(const Vector<double>& s,DenseMatrix<double>& dsbulk_dsface,unsigned& interior_direction)
+    {
+        throw_runtime_error("Implement");
+    }
+    
+    void faces1(const Vector<double>& s,DenseMatrix<double>& dsbulk_dsface,unsigned& interior_direction)
+    {
+        throw_runtime_error("Implement");
+    }
+
+    void faces2(const Vector<double>& s,DenseMatrix<double>& dsbulk_dsface,unsigned& interior_direction)
+    {
+        throw_runtime_error("Implement");
+    }
+
+    void faces3(const Vector<double>& s,DenseMatrix<double>& dsbulk_dsface,unsigned& interior_direction)
+    {
+        throw_runtime_error("Implement");
+    }
+
+    void faces4(const Vector<double>& s,DenseMatrix<double>& dsbulk_dsface,unsigned& interior_direction)
+    {
+        throw_runtime_error("Implement");
+    }
+  } 
+
+
+  
+
+  CoordinateMappingFctPt WedgeElementBase::face_to_bulk_coordinate_fct_pt(const int& face_index) const
+    {
+      if (face_index == 0)
+      {
+        return &WedgeElementFaceToBulkCoordinates::face0;
+      }
+      else if (face_index == 1)
+      {
+        return &WedgeElementFaceToBulkCoordinates::face1;
+      }
+      else if (face_index == 2)
+      {
+        return &WedgeElementFaceToBulkCoordinates::face2;
+      }
+      else if (face_index == 3)
+      {
+        return &WedgeElementFaceToBulkCoordinates::face3;
+      }
+      else if (face_index == 4)
+      {
+        return &WedgeElementFaceToBulkCoordinates::face4;
+      }      
+      {
+        std::string err = "Face index should be in {0..4}.";
+        throw OomphLibError(
+          err, OOMPH_EXCEPTION_LOCATION, OOMPH_CURRENT_FUNCTION);
+      }
+    }
+
+    /// Get a pointer to the derivative of the mapping from face to bulk
+    /// coordinates.
+    BulkCoordinateDerivativesFctPt WedgeElementBase::bulk_coordinate_derivatives_fct_pt(const int& face_index) const
+    {
+      if (face_index == 0)
+      {
+        return &WedgeElementBulkCoordinateDerivatives::faces0;
+      }
+      else if (face_index == 1)
+      {
+        return &WedgeElementBulkCoordinateDerivatives::faces1;
+      }
+      else if (face_index == 2)
+      {
+        return &WedgeElementBulkCoordinateDerivatives::faces2;
+      }
+      else if (face_index == 3)
+      {
+        return &WedgeElementBulkCoordinateDerivatives::faces3;
+      }
+      else if (face_index == 4)
+      {
+        return &WedgeElementBulkCoordinateDerivatives::faces4;
+      }      
+      else
+      {
+        std::string err = "Face index should be in {0..4}.";
+        throw OomphLibError(
+          err, OOMPH_EXCEPTION_LOCATION, OOMPH_CURRENT_FUNCTION);
+      }
+    }
+
+    int WedgeElementBase::face_outer_unit_normal_sign(const int&) const
+    {
+        return 1; // This is a placeholder. The actual sign will depend on the face orientation and the convention used for the normal vector.
+    }
 }

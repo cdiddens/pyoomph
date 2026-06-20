@@ -27,6 +27,10 @@ class WedgeGaussC1 : public Integral
 class WedgeElementBase :  public virtual FiniteElement
 {
   public:
+    void build_face_element(const int& face_index,FaceElement* face_element_pt) override;
+    CoordinateMappingFctPt face_to_bulk_coordinate_fct_pt(const int& face_index) const override;
+    BulkCoordinateDerivativesFctPt bulk_coordinate_derivatives_fct_pt(const int& face_index) const override ;
+    int face_outer_unit_normal_sign(const int&) const override;
     double s_min() const    { return 0.0; }
     double s_max() const    { return 1.0; }
     unsigned nvertex_node() const { return 6; }
@@ -41,6 +45,7 @@ class WedgeElementBase :  public virtual FiniteElement
       return node_pt(j);
     }
     unsigned nnode_on_face() const override { throw_runtime_error("nnode_on_face cannot be implemented for a Wedge, damn."); }
+    unsigned nnode_on_face_by_index(const int& face_index) const  { return (face_index<2) ? 3 : 4; }
 };
 
 class RefineableWedgeElement : public virtual RefineableElement, public virtual WedgeElementBase
@@ -165,6 +170,8 @@ class WedgeElementC1 :  public virtual RefineableWedgeElement
     }
     WedgeElementC1(const WedgeElementC1&) = delete;
     ~WedgeElementC1() {}
+
+    unsigned int get_bulk_node_number(const int & face_index, const unsigned int& i) const override;
         
     inline void shape(const Vector<double>& s, Shape& psi) const
     {

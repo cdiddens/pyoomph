@@ -677,6 +677,13 @@ namespace pyoomph
       {
         fe = new InterfaceElementTri2dC2(jitcode, be, fi);
       }
+      else if (dynamic_cast<BulkElementWedge3dC1 *>(be))
+      {
+        if (fi < 2)
+          fe = new InterfaceElementTri2dC1(jitcode, be, fi);
+        else
+          fe = new InterfaceElementQuad2dC1(jitcode, be, fi);
+      }      
       else
         throw_runtime_error("Implement interface element generation for this elementtype");
       if (jitcode->get_func_table()->integration_order)

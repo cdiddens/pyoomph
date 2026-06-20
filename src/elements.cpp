@@ -14730,7 +14730,7 @@ namespace pyoomph
 	const std::vector<int> BulkElementTetra3dC1::Possible_Face_Indices={0,1,2,3};
 	const std::vector<int> BulkElementTetra3dC2::Possible_Face_Indices={0,1,2,3};
 
-	const std::vector<int> BulkElementWedge3dC1::Possible_Face_Indices={0,1,2,3,4,5};
+	const std::vector<int> BulkElementWedge3dC1::Possible_Face_Indices={0,1,2,3,4};
 
 	std::vector<pyoomph::Node*> BulkElementLine1dC1::get_vertex_nodes_of_face(const int &face) const
 	{
@@ -14767,12 +14767,16 @@ namespace pyoomph
 	  if (dynamic_cast<const BulkElementTetra3dC1*>(elem)) nnode_face=3;
 	  else if (dynamic_cast<const BulkElementTetra3dC2TB*>(elem)) nnode_face=7;
 	  else if (dynamic_cast<const BulkElementTetra3dC2*>(elem)) nnode_face=6;
+	  else if (dynamic_cast<const BulkElementWedge3dC1*>(elem)) {nnode_face=(face_index<2 ? 3 : 4);}
 	  else nnode_face=elem->nnode_on_face();	  
 	  std::set<oomph::Node*> vertex_nodes;
+	 // std::cout << "ELEMENT TYPE " << typeid(*elem).name() << " FACE INDEX " << face_index << " NODES ON FACE " << nnode_face << std::endl;
+	  //std::cout << " NNODE " << elem->nnode() << " NVERTEX NODE " << elem->nvertex_node() << std::endl;
 	  for (unsigned int i=0;i<elem->nvertex_node();i++)
 	  {
 	    vertex_nodes.insert(elem->vertex_node_pt(i));
 	  }
+	  //std::cout << "VERTEX NODES ARE " <<  vertex_nodes.size() << std::endl;
 	  std::cout << " if (face=="<<face_index<<") { return {";
 	  bool comma=false;
 	  for (unsigned i = 0; i < nnode_face; i++)
@@ -14867,8 +14871,12 @@ namespace pyoomph
 
 	std::vector<pyoomph::Node*> BulkElementWedge3dC1::get_vertex_nodes_of_face(const int &face) const
 	{	  
-	 help_me_with_the_facets(this,face);
-	  return {};
+	  if (face==0) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(0)),dynamic_cast<pyoomph::Node*>(this->node_pt(1)),dynamic_cast<pyoomph::Node*>(this->node_pt(2))};}
+      else if (face==1) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(3)),dynamic_cast<pyoomph::Node*>(this->node_pt(4)),dynamic_cast<pyoomph::Node*>(this->node_pt(5))};}
+      else if (face==2) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(3)),dynamic_cast<pyoomph::Node*>(this->node_pt(0)),dynamic_cast<pyoomph::Node*>(this->node_pt(5)),dynamic_cast<pyoomph::Node*>(this->node_pt(2))};}
+      else if (face==3) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(1)),dynamic_cast<pyoomph::Node*>(this->node_pt(0)),dynamic_cast<pyoomph::Node*>(this->node_pt(4)),dynamic_cast<pyoomph::Node*>(this->node_pt(3))};}
+      else if (face==4) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(1)),dynamic_cast<pyoomph::Node*>(this->node_pt(4)),dynamic_cast<pyoomph::Node*>(this->node_pt(2)),dynamic_cast<pyoomph::Node*>(this->node_pt(5))};}
+	  else throw_runtime_error("Invalid face index for wedge element");
 	}
 
 
