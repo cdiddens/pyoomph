@@ -1176,7 +1176,7 @@ class GmshTemplate(MeshTemplate):
         # Find the maximum element dimension. All domains of this dimension will be considered to be bulk domains, the rest are interfaces
         maxeldim = -1
         named_eldims = {"line": 1, "line3": 1, "quad": 2, "quad9": 2, "triangle": 2, "triangle6": 2, "hexahedron27": 3,
-                        "hexahedron": 3, "vertex": 0, "tetra10":3,"tetra":3}
+                        "hexahedron": 3, "vertex": 0, "tetra10":3,"tetra":3,"wedge":3}
         for name, entry in self._mesh.cell_sets.items(): #type:ignore
             if name == "gmsh:bounding_entities":
                 continue
@@ -1324,6 +1324,10 @@ class GmshTemplate(MeshTemplate):
                     perm=[1,9,2,8,24,10,0,11,3,17,21,18,22,26,23,16,20,19,5,13,6,12,25,14,4,15,7]
                     for q in mycells:
                         domain.add_brick_3d_C2(self._nodeinds[q[perm]]) #type:ignore
+                elif cells.type == "wedge":
+                    perm = [0, 1, 2, 3, 4, 5]
+                    for q in mycells:
+                        domain.add_wedge_3d_C1(*self._nodeinds[q[perm]]) #type:ignore
                 else:
                     raise RuntimeError("Unsupported cell type: " + cells.type)
 
@@ -1599,7 +1603,7 @@ class GmshTemplate(MeshTemplate):
                 del self._rev_names[a]
                 self._store_name(start_name(name_list[-1]),a)
         for a in args:
-            if isinstance(a,list):
+            if isinstance(a,list):                
                 for aa in a:
                     dimtags.append(aa.dim_tag)
                     to_extrude.append(aa)

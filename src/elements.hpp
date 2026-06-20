@@ -29,7 +29,7 @@ The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
 #include "refineable_brick_element.h"
 
 #include "refineable_telements.hpp"
-
+#include "wedges_and_pyramids.hpp"
 #include "problem.hpp"
 
 #include "mesh_as_geometric_object.h"
@@ -150,6 +150,7 @@ namespace pyoomph
     std::map<unsigned, oomph::Integral *> Q3d;
     std::map<unsigned, oomph::Integral *> T3d;
     std::map<unsigned, oomph::Integral *> T3dTB;
+    std::map<unsigned, oomph::Integral *> Wedge3d;
     std::map<unsigned, oomph::Integral *> &get_integral_order_map(bool tri, unsigned edim, bool bubble);
     void clean_up_map(std::map<unsigned, oomph::Integral *> &map);
 
@@ -1446,6 +1447,52 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
     bool has_bubble() const { return true; }
     virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 3, order, true)); }
     void build_face_element(const int& face_index, oomph::FaceElement* face_element_pt) override;
+  };
+
+  class BulkElementWedge3dC1 : public virtual BulkElementBase, public virtual oomph::WedgeElementC1
+  {
+    public:
+      BulkElementWedge3dC1();
+      int nedges() const { throw_runtime_error("Not implemented"); }
+      virtual unsigned get_meshio_type_index() const { return 13; }
+      bool fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap);
+      void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const {oomph::WedgeElementC1::shape(s, psi); }
+      void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
+      void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const { throw_runtime_error("Makes no sense"); }
+      void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const;
+      void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
+      void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { throw_runtime_error("Makes no sense"); }
+      void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
+      unsigned int get_node_index_C1_to_element(const unsigned int &i) const { return i; }
+      unsigned int get_node_index_C2_to_element(const unsigned int &i) const { return 0; }
+      int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+      {
+          if (tesselate_tri)
+          {
+            throw_runtime_error("Tesselation of 3d not possible");
+          }
+          else
+          {
+            nsubdiv = 1;
+            return 6;
+          }
+      }
+      void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
+      virtual std::vector<double> get_outline(bool lagrangian);
+      unsigned nrecovery_order() { return 1; }
+      void output(std::ostream &outfile, const unsigned &n_plot) { BulkElementBase::output(outfile, n_plot); }      
+      unsigned nvertex_node() const { return oomph::WedgeElementC1::nvertex_node(); }
+      oomph::Node *vertex_node_pt(const unsigned &j) const { return WedgeElementC1::vertex_node_pt(j); }      
+      void further_setup_hanging_nodes() { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
+      virtual BulkElementBase *create_son_instance() const
+      {
+          BulkElementBase::__CurrentCodeInstance = codeinst;
+          auto res = new BulkElementWedge3dC1();
+          res->codeinst = codeinst;
+          BulkElementBase::__CurrentCodeInstance = NULL;
+          return res;
+      }
+      virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 4, order)); }
   };
 
   class PointElement0d : public virtual BulkElementBase, public virtual oomph::PointElement

@@ -46,6 +46,8 @@ namespace pyoomph
 10: MeshTemplateElementTetraC2
 11: MeshTemplateElementBrickC1
 14: MeshTemplateElementBrickC2
+13: MeshTemplateElementWedgeC1
+26: ---MeshTemplateElementWedgeC2---
 
 
 MeshTemplateElementTriC1TB -> MeshTemplateElementTriC1
@@ -931,6 +933,67 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		}
 	}
 
+
+    /////////////////////////////////
+	MeshTemplateElementWedgeC1::MeshTemplateElementWedgeC1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5, const nodeindex_t &n6) : MeshTemplateElement(13)
+	{
+		node_indices.reserve(6);
+		node_indices.push_back(n1);
+		node_indices.push_back(n2);
+		node_indices.push_back(n3);
+		node_indices.push_back(n4);
+		node_indices.push_back(n5);
+		node_indices.push_back(n6);
+	}	
+
+    MeshTemplateFacet *MeshTemplateElementWedgeC1::construct_facet(unsigned i)
+	{	
+		/*
+	          5 o
+               /\
+              /  \
+             /    \
+            /      \
+         3 o--------o 4
+           |        |
+           |  2 o   |
+           |   /\   |
+           |  /  \  |
+           | /    \ |
+           |/      \|
+         0 o--------o 1
+
+	facet 0: s[2] = 0, nodes 0,1,2
+    facet 1: s[2] = 1, nodes 3,4,5
+    facet 2: s[0] = 0, nodes 0,2,3,5
+    facet 3: s[1] = 0, nodes 0,1,3,4
+    facet 4: s[0]+s[1] = 1, nodes 1,2,4,5
+		 */
+	  std::vector<nodeindex_t> inds;
+	  switch (i)
+	  {
+	  case 0:
+		inds = {node_indices[0], node_indices[1], node_indices[2]};
+		break;
+	  case 1:
+		inds = {node_indices[3], node_indices[4], node_indices[5]};
+		break;
+	  case 2:
+		inds = {node_indices[0], node_indices[2], node_indices[3], node_indices[5]};
+		break;
+	  case 3:
+		inds = {node_indices[0], node_indices[1], node_indices[3], node_indices[4]};
+		break;
+	  case 4:
+		inds = {node_indices[1], node_indices[2], node_indices[4], node_indices[5]};
+		break;
+	  default:
+		throw_runtime_error("A wedge element only has 5 facets");
+	  }
+	  return new MeshTemplateFacet(inds, NULL, NULL);
+	}
+	
+	
 	/////////////////////////////////
 
 	std::vector<double> MeshTemplateElementCollection::get_reference_position_for_IC_and_DBC(std::set<unsigned int> boundindices)
@@ -1195,6 +1258,20 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		else if (dim != 3)
 			throw_runtime_error("Tried to add a 3d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
 		MeshTemplateElementTetraC2 *res = new MeshTemplateElementTetraC2(inds);
+		elements.push_back(res);
+		res->link_nodes_with_domain(this);
+		return res;
+	}
+
+	MeshTemplateElementWedgeC1 *MeshTemplateElementCollection::add_wedge_3d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5, const nodeindex_t &n6)
+	{
+		if (dim == -1)
+		{
+			dim = 3;
+		}
+		else if (dim != 3)
+			throw_runtime_error("Tried to add a 3d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
+		MeshTemplateElementWedgeC1 *res = new MeshTemplateElementWedgeC1(n1, n2, n3, n4, n5, n6);
 		elements.push_back(res);
 		res->link_nodes_with_domain(this);
 		return res;

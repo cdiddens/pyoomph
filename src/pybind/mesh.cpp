@@ -1196,6 +1196,7 @@ void PyReg_Mesh(py::module &m)
 	py::class_<pyoomph::MeshTemplateElementBrickC2>(m, "MeshTemplateElementBrickC2");
 	py::class_<pyoomph::MeshTemplateElementTetraC1>(m, "MeshTemplateElementTetraC1");
 	py::class_<pyoomph::MeshTemplateElementTetraC2>(m, "MeshTemplateElementTetraC2");
+	py::class_<pyoomph::MeshTemplateElementWedgeC1>(m, "MeshTemplateElementWedgeC1");
 
 	py::class_<pyoomph::MeshTemplateElementCollection>(m, "MeshTemplateElementCollection")
 		.def("_get_reference_position_for_IC_and_DBC", &pyoomph::MeshTemplateElementCollection::get_reference_position_for_IC_and_DBC)
@@ -1211,6 +1212,7 @@ void PyReg_Mesh(py::module &m)
 		.def("add_brick_3d_C2", &pyoomph::MeshTemplateElementCollection::add_brick_3d_C2, py::return_value_policy::reference,"Adds a second-order hexahedral element by 27 node indices")
 		.def("add_tetra_3d_C1", &pyoomph::MeshTemplateElementCollection::add_tetra_3d_C1, py::return_value_policy::reference,"Adds a tetrahedral element by four node indices")
 		.def("add_tetra_3d_C2", &pyoomph::MeshTemplateElementCollection::add_tetra_3d_C2, py::return_value_policy::reference,"Adds a second-order tetrahedral element by ten node indices")
+		.def("add_wedge_3d_C1", &pyoomph::MeshTemplateElementCollection::add_wedge_3d_C1, py::return_value_policy::reference,"Adds a wedge element by six node indices")
 		.def("nodal_dimension", &pyoomph::MeshTemplateElementCollection::nodal_dimension,"Returns the dimension of the Eulerian coordinates")
 		.def("lagrangian_dimension", &pyoomph::MeshTemplateElementCollection::lagrangian_dimension,"Returns the dimension of the Lagrangian coordinates")
 		.def("set_nodal_dimension", &pyoomph::MeshTemplateElementCollection::set_nodal_dimension,"Sets the dimension of the Eulerian coordinates")

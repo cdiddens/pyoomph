@@ -432,9 +432,14 @@ class _MeshFileOutput(_BaseNumpyOutput):
 				triC1TBperm = numpy.array([0, 1, 2], dtype=int) #type:ignore			
 				tetraperm = numpy.array([0, 1, 2,3], dtype=int) #type:ignore
 				tetraC1TBperm = numpy.array([0, 1, 2,3], dtype=int) #type:ignore
-				wedgeperm=numpy.array([0,1,2,3,4,5],dtype=int) #type:ignore
+				wedgeperm_extrusion=numpy.array([0,1,2,3,4,5],dtype=int) #type:ignore
 				wedge18perm=numpy.array([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17],dtype=int) #type:ignore
-				wedge12perm=numpy.array([0,1,2,3,4,5,6,7,8,9,10,11],dtype=int) #type:ignore
+				wedge12perm_extrusion=numpy.array([0,1,2,3,4,5,6,7,8,9,10,11],dtype=int) #type:ignore
+    
+    
+    #Base Triangle (Node 0): Vertex 0Base Triangle (Node 1): Vertex 1Base Triangle (Node 2): Vertex 2Top Triangle (Node 3): Vertex connected to 0Top Triangle (Node 4): Vertex connected to 1Top Triangle (Node 5): Vertex connected to 2
+				wedgeperm=numpy.array([0,1,2,3,4,5],dtype=int) #type:ignore
+    
 				#tetra10perm = numpy.array([0, 1, 2, 3,4,5,6,7,8,9], dtype=int)
 				tetra10perm = numpy.array([0, 1, 2, 3, 4, 7, 5, 6,  9,8], dtype=int) #type:ignore
 				triperm6 = numpy.array([0, 1, 2, 3, 4, 5], dtype=int) #type:ignore
@@ -486,13 +491,16 @@ class _MeshFileOutput(_BaseNumpyOutput):
 						cells.append(("hexahedron", eleminds[elinds,hexahedronperm])) #type:ignore
 					elif et==14: #hexahedron27
 						cells.append(("hexahedron27", eleminds[elinds,hexahedronperm27])) #type:ignore
-					elif et==7: # wegde (only from rotational extrusion at the moment)
-						cells.append(("wedge",eleminds[elinds,wedgeperm])) #type:ignore
-					elif et==77: # wedge12 (only from rotational extrusion at the moment)
+					elif et==13: # Wedge from pyoomph
+						cells.append(("wedge", eleminds[elinds, wedgeperm])) #type:ignore
+						#cells.append(Wedge15Cellblock("wedge15",
+					elif et==7: # wegde (from rotational extrusion)
+						cells.append(("wedge",eleminds[elinds,wedgeperm_extrusion])) #type:ignore    
+					elif et==77: # wedge12 (from rotational extrusion)
 						if "topological_dimension" not in dir(meshio._mesh) or "wedge12" in meshio._mesh.topological_dimension.keys(): #type:ignore
-							cells.append(("wedge12", eleminds[elinds, wedge12perm])) #type:ignore
+							cells.append(("wedge12", eleminds[elinds, wedge12perm_extrusion])) #type:ignore
 						else:
-							cells.append(("wedge", eleminds[elinds, wedgeperm])) #type:ignore
+							cells.append(("wedge", eleminds[elinds, wedgeperm_extrusion])) #type:ignore
 
 						#cells.append(Wedge15Cellblock("wedge15",numpy.asarray(eleminds[elinds[:,0],:])))
 					else:
