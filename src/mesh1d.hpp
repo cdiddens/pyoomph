@@ -149,6 +149,7 @@ namespace pyoomph
         }
       }
       templ->link_periodic_nodes();
+      setup_facets_from_template(templ,bound_map);
     }
 
     void setup_boundary_element_info(std::ostream &outfile);

@@ -5726,7 +5726,7 @@ namespace pyoomph
     Boundary_element_pt.resize(nbound);
     Face_index_at_boundary.resize(nbound);
 
-    std::cout << "Number of facets found " << facets.size() << std::endl;
+    //std::cout << "Number of facets found " << facets.size() << std::endl;
     for (unsigned int ie=0;ie<this->nelement();ie++)
     {
       pyoomph::BulkElementBase *el = dynamic_cast<pyoomph::BulkElementBase *>(this->element_pt(ie));
@@ -5751,6 +5751,13 @@ namespace pyoomph
         if (facets.count(facet_nodes))
         {
           std::vector<unsigned int> facet_boundaries=facets[facet_nodes];
+          /*std::cout << "Adding a facet for a patch of " << facet_nodes.size() << " nodes for element " << ie << " face " << face_id << " with boundaries: ";
+          for (unsigned int boundary_id : facet_boundaries)
+          {
+            std::cout << boundary_id << " ";
+          }
+          std::cout << std::endl;*/
+          
           for (unsigned int boundary_id : facet_boundaries)
           {
             may_skip=false;
@@ -5779,18 +5786,61 @@ namespace pyoomph
 
 
 
-  void TemplatedMeshBase::setup_facets_from_template(MeshTemplate *templ)
+  void TemplatedMeshBase::setup_facets_from_template(MeshTemplate *templ,const std::vector<int> & bound_map)
   {
       facets.clear();
+
+      for (unsigned int i=0;i<templ->get_nodes().size();i++)
+      {
+        MeshTemplateNode *tnode = templ->get_nodes()[i];
+        pyoomph::Node *onode = dynamic_cast<pyoomph::Node *>(tnode->oomph_node);
+        /*std::cout << "Template Node " << i << " is on boundaries: ";
+        for (unsigned b : tnode->on_boundaries)
+        {
+          std::cout << bound_map[b] << " ";
+        }         std::cout << std::endl;
+        std::cout << "Template Node " << i << " has oomph node pointer: " << onode << std::endl;        
+        if (onode)
+        {
+          std::cout << "oomph Node " << i << " is on boundaries: ";
+          oomph::BoundaryNodeBase *bn = dynamic_cast<oomph::BoundaryNodeBase *>(onode);
+          if (bn)
+          {
+            std::set<unsigned int> * boundaries;
+            bn->get_boundaries_pt(boundaries);
+            for (unsigned int boundary_id : * boundaries)
+            {
+              std::cout << boundary_id << " ";
+            }
+          }
+        }
+         std::cout << std::endl;*/
+
+      }
+
       std::vector<MeshTemplateFacet *> templ_facets = templ->get_facets();
       std::vector<MeshTemplateNode *> templ_nodes = templ->get_nodes();
-      
+      //std::cout << "Number of facets in template: " << templ_facets.size() << std::endl;
       for (auto *tfacet : templ_facets)
       {
-        std::set<pyoomph::Node *> facet_nodes;
-        bool first_time = true;
+        std::set<pyoomph::Node *> facet_nodes;        
         std::set<unsigned int> facet_boundaries;
         bool skip_facet=false;
+        for (unsigned int b : tfacet->on_boundaries)
+        {
+          facet_boundaries.insert(bound_map[b]);
+        }        
+        
+        /*std::cout << "Processing facet with nodes: ";
+        for (nodeindex_t nindex : tfacet->nodeinds)
+        {
+          std::cout << nindex << " ";
+        }        std::cout << " and boundaries: ";
+        for (unsigned int boundary_id : facet_boundaries)
+        {
+          std::cout << boundary_id << " ";
+        }        std::cout << std::endl;*/
+
         for (nodeindex_t nindex : tfacet->nodeinds)
         {
           pyoomph::Node *tnode = dynamic_cast<pyoomph::Node *>(templ_nodes[nindex]->oomph_node);
@@ -5801,30 +5851,41 @@ namespace pyoomph
             break;
           }
           
+          
           std::set<unsigned int> *boundaries_pt;
           bn->get_boundaries_pt(boundaries_pt);
           if (!boundaries_pt) {
             skip_facet=true;
             break;
           }          
-          if (first_time)
+          /*
+          std::cout << "Node " << nindex << " is on boundaries: ";
+          for (unsigned int boundary_id : *boundaries_pt)
           {
-            facet_boundaries = *boundaries_pt;
-            first_time = false;
-          }
-          else
+            std::cout << boundary_id << " ";
+          }          std::cout << std::endl;
+          std::cout << "Intersecting with facet boundaries: ";
+          for (unsigned int boundary_id : facet_boundaries)
+          {            std::cout << boundary_id << " ";
+          }          std::cout << std::endl;
+          */
+          std::set<unsigned int> intersection;
+          std::set_intersection(facet_boundaries.begin(), facet_boundaries.end(),
+                                boundaries_pt->begin(), boundaries_pt->end(),
+                                std::inserter(intersection, intersection.begin()));
+
+          /*std::cout << "Intersection afterwards is: ";
+          for (unsigned int boundary_id : intersection)
+          {            std::cout << boundary_id << " ";
+          }          std::cout << std::endl;*/
+
+          if (intersection.empty())
           {
-            std::set<unsigned int> intersection;
-            std::set_intersection(facet_boundaries.begin(), facet_boundaries.end(),
-                                  boundaries_pt->begin(), boundaries_pt->end(),
-                                  std::inserter(intersection, intersection.begin()));
-            if (intersection.empty())
-            {
-              skip_facet = true;
-              break;
-            }
-            facet_boundaries = intersection;
+            skip_facet = true;
+            break;
           }
+          facet_boundaries = intersection;
+         
           if (tnode)
           {
             facet_nodes.insert(tnode);
@@ -5833,7 +5894,7 @@ namespace pyoomph
         if (!skip_facet)
         {
           for (unsigned int boundary_id : facet_boundaries)
-          {          
+          {                      
             facets[facet_nodes].push_back(boundary_id);
           }
         }

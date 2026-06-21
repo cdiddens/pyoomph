@@ -290,7 +290,7 @@ namespace pyoomph
       templ->link_periodic_nodes();
 
 
-      setup_facets_from_template(templ);
+      setup_facets_from_template(templ,bound_map);
       
       
 

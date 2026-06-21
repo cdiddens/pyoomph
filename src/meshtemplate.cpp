@@ -1680,7 +1680,7 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 			nodes[ni[i]]->on_boundaries.insert(bi);
 	}
 
-	void MeshTemplate::add_facet_to_curve_entity(const std::vector<nodeindex_t> &vertexindices, MeshTemplateCurvedEntity *curved)
+	MeshTemplateFacet * MeshTemplate::add_facet_to_curve_entity(const std::vector<nodeindex_t> &vertexindices, MeshTemplateCurvedEntity *curved)
 	{
 		MeshTemplateFacet *nf = new MeshTemplateFacet(vertexindices, curved, &this->nodes);
 
@@ -1690,11 +1690,12 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 			if (old->curved_entity && old->curved_entity != nf->curved_entity)
 				throw_runtime_error("Cannot add a facet on two different curved entities");
 			old->curved_entity=curved;
-			return;
+			return old;
 		}
 
 		facetmap[nf] = facets.size();
 		facets.push_back(nf);
+		return facets.back();
 	}
 
 	void MeshTemplate::add_facet_to_boundary(const std::string &boundname, const std::vector<nodeindex_t> &ni,const std::vector<nodeindex_t> &vertexindices, MeshTemplateCurvedEntity *curved)
@@ -1702,7 +1703,8 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		if (vertexindices.empty())
 		{
 			this->add_nodes_to_boundary(boundname, ni);				
-			this->add_facet_to_curve_entity(ni, curved); // This is not necessarily curved. Can be also just a facet
+			MeshTemplateFacet * facet = this->add_facet_to_curve_entity(ni, curved); // This is not necessarily curved. Can be also just a facet			
+			facet->on_boundaries.insert(this->get_boundary_index(boundname));
 		}
 		else
 		{
@@ -1727,7 +1729,8 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 				}
 			}
 			this->add_nodes_to_boundary(boundname, ni);				
-			this->add_facet_to_curve_entity(vertexindices, curved); // This is not necessarily curved. Can be also just a facet
+			MeshTemplateFacet * facet=this->add_facet_to_curve_entity(vertexindices, curved); // This is not necessarily curved. Can be also just a facet
+			facet->on_boundaries.insert(this->get_boundary_index(boundname));
 		}
 
 		

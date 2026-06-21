@@ -268,7 +268,7 @@ namespace pyoomph
 		//  std::vector<std::string> boundary_names;
 		std::map<std::set<pyoomph::Node *> ,std::vector<unsigned>> facets; // Map from facets (vertex node sets) to boundary indices
 		unsigned add_new_element(pyoomph::BulkElementBase *new_el, std::vector<pyoomph::Node *> nodes);
-        virtual void setup_facets_from_template(MeshTemplate *templ);
+        virtual void setup_facets_from_template(MeshTemplate *templ,const std::vector<int> & bound_map);
 		void split_elements_if_required()
 		{
 			// Find the number of trees in the forest

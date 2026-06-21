@@ -369,6 +369,7 @@ namespace pyoomph
     std::vector<nodeindex_t> nodeinds;
     MeshTemplateCurvedEntity *curved_entity;
     std::vector<std::vector<double>> parametrics;
+    std::set<unsigned int> on_boundaries;
   };
 
   class MeshTemplateDomain;
@@ -762,7 +763,7 @@ namespace pyoomph
     nodeindex_t add_intermediate_node_unique(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, bool boundary_possible); // For tri C2TB
     nodeindex_t add_intermediate_node_unique(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, bool boundary_possible);
 
-    void add_facet_to_curve_entity(const std::vector<nodeindex_t> &vertexindices, MeshTemplateCurvedEntity *curved);
+    MeshTemplateFacet * add_facet_to_curve_entity(const std::vector<nodeindex_t> &vertexindices, MeshTemplateCurvedEntity *curved);
 
     void add_periodic_node_pair(const nodeindex_t &n1, const nodeindex_t &n2);
 
