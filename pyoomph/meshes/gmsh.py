@@ -25,6 +25,8 @@
 # ========================================================================
  
 from pathlib import Path
+
+from ufl_legacy import inv
 from ..typings import *
 import numpy
 
@@ -255,6 +257,7 @@ def generate_mesh_to_file(geom:pygmsh.geo.Geometry, outdir:str, trunk:str, meshe
         gmsh.option.setNumber("Mesh.ElementOrder", 2) #type:ignore
         gmsh.option.setNumber("Mesh.SecondOrderLinear", 0) #type:ignore
         gmsh.option.setNumber("Mesh.HighOrderOptimize", 1) #type:ignore
+        gmsh.option.setNumber("Mesh.SecondOrderIncomplete", 0) # This is important to not generate serendipity elements, e.g. Wedge15 instead of Wedge18 #type:ignore
 
 
     if mesh_mode in ["only_quads"]:
@@ -1176,7 +1179,7 @@ class GmshTemplate(MeshTemplate):
         # Find the maximum element dimension. All domains of this dimension will be considered to be bulk domains, the rest are interfaces
         maxeldim = -1
         named_eldims = {"line": 1, "line3": 1, "quad": 2, "quad9": 2, "triangle": 2, "triangle6": 2, "hexahedron27": 3,
-                        "hexahedron": 3, "vertex": 0, "tetra10":3,"tetra":3,"wedge":3}
+                        "hexahedron": 3, "vertex": 0, "tetra10":3,"tetra":3,"wedge":3,"wedge18":3}
         for name, entry in self._mesh.cell_sets.items(): #type:ignore
             if name == "gmsh:bounding_entities":
                 continue
@@ -1328,7 +1331,21 @@ class GmshTemplate(MeshTemplate):
                     perm = [0, 1, 2, 3, 4, 5]
                     for q in mycells:
                         domain.add_wedge_3d_C1(*self._nodeinds[q[perm]]) #type:ignore
+                elif cells.type == "wedge18":
+                    # pyoomph = perm[meshio]
+                    # const unsigned perm[18] = {0, 1, 2, 12, 13, 14, 3, 4, 6, 5, 7, 8, 15, 16, 17, 9, 10, 11};
+                    # meshio = inv[pyoomph]
+                    # const unsigned inv[18]  = {0, 1, 2, 6, 7, 9, 8, 10, 11, 15, 16, 17, 3, 4, 5, 12, 13, 14};
+                    #perm=[0, 1, 2, 12, 13, 14, 3, 4, 6, 5, 7, 8, 15, 16, 17, 9, 10, 11]
+                    perm=[0, 1, 2, 6, 7, 9, 8, 10, 11, 15, 16, 17, 3, 4, 5, 12, 13, 14]
+                    for q in mycells:
+                        domain.add_wedge_3d_C2(self._nodeinds[q[perm]]) #type:ignore
                 else:
+                    print("Unsupported cell type in 3d domain:", cells.type)
+                    q0=mycells[0]
+                    print("Example cell:", q0)
+                    for inode,n in enumerate(q0):
+                        print("Node", inode, "position:", self.get_node_position(self._nodeinds[n]))
                     raise RuntimeError("Unsupported cell type: " + cells.type)
 
         domain.set_nodal_dimension(self._max_nodal_dim)
@@ -1599,7 +1616,9 @@ class GmshTemplate(MeshTemplate):
         def add_name(a):
             name_list.append(self._rev_names.get(a,None))
             if a in self._rev_names:
-                del self._named_entities[self._rev_names[a]]
+                #print("Removing name",self._rev_names[a],"from entity",a.dim_tag,self._named_entities[self._rev_names[a]])                
+                if self._rev_names[a] in self._named_entities:
+                    del self._named_entities[self._rev_names[a]]
                 del self._rev_names[a]
                 self._store_name(start_name(name_list[-1]),a)
         for a in args:
@@ -1624,7 +1643,111 @@ class GmshTemplate(MeshTemplate):
         self._maxdim=max(self._maxdim,newdim)
         res=gmsh.model.geo.extrude(dimtags,shift[0],shift[1],shift[2],recombine=recombine,numElements=([layers]*len(dimtags) if layers is not None else None))        
         
+        
+        
         gmsh.model.geo.synchronize()
+        bulk_name_index=0
+        for i,entry in enumerate(res):            
+            #print("ADD PHYSICAL GROUP",entry[0],[entry[1]])
+            if entry[0]==newdim:
+                name=name_list[bulk_name_index]
+                if name is not None:
+                    self._store_name(name,GmshTemplate.GmshFakeEntry(entry[1],(entry[0],entry[1])))
+                    assert i>=1
+                    self._store_name(end_name(name),GmshTemplate.GmshFakeEntry(res[i-1][1],(res[i-1][0],res[i-1][1])))                
+                bulk_name_index+=1
+            elif entry[0]==newdim-1:
+                pass
+
+        # Go over it once more, finding the missing entities
+        given_names={a._id for a in self._rev_names}
+        start_index=-1
+        
+        for entry in res:
+            if entry[0]==newdim:
+                start_index+=1
+                sub_index=0
+            if entry[0]==newdim-1:
+                if entry[1] not in given_names:
+                    original=to_extrude[start_index]                    
+                    if isinstance(original,PlaneSurface):
+                        orig_curv=original.curve_loop.curves[sub_index]
+                        dim_tag=(orig_curv.dim_tag[0],abs(orig_curv.dim_tag[1]))
+                        if self._dim_tag_names.get(dim_tag,None) is not None:
+                            #print("Already exists",dim_tag,self._dim_tag_names.get(dim_tag,None))
+                            del self._rev_names[self._dim_tag_names[dim_tag][1]]
+                            del self._named_entities[self._dim_tag_names[dim_tag][0]]                                                        
+                            self._store_name(self._dim_tag_names[dim_tag][0],GmshTemplate.GmshFakeEntry(entry[1],entry))
+                            del self._dim_tag_names[dim_tag]
+                    else:
+                        raise RuntimeError("Not implemented:"+str(original  ))                        
+                    
+                    sub_index+=1                    
+        
+
+        return res
+    
+    
+    def revolve(self,*args,angle:ExpressionOrNum=0,axis:List[ExpressionOrNum]=[0,0,1],center:List[ExpressionOrNum]=[0,0,0],start_name=lambda s: s+"_start",end_name=lambda s: s+"_end",layers:Optional[int]=None,recombine:bool=False):
+        """Rotates the given entities by the given angle around the given axis and center.
+        
+        Args:
+            *args: Variable length arguments representing the entities to rotate. Can be names or the entities themselves.
+            angle: The angle to rotate by. Can be an expression or a number.
+            axis: The axis to rotate around. Can be a list of expressions or numbers.
+            center: The center of rotation. Can be a list of expressions or numbers.        
+        """        
+        for i, c in enumerate(axis):            
+            if isinstance(c,Expression):
+                c=c.float_value()
+            axis[i] = c
+        for i, c in enumerate(center):
+            c = c / self._problem.get_scaling("spatial")
+            if isinstance(c,Expression):
+                c=c.float_value()
+            center[i] = c
+        if isinstance(angle,Expression):
+            angle=angle.float_value()
+        
+        
+        gmsh.model.geo.synchronize()
+        dimtags=[]
+        newdim=0
+        name_list=[]
+        to_extrude=[]
+        def add_name(a):
+            name_list.append(self._rev_names.get(a,None))
+            if a in self._rev_names:
+                #print("Removing name",self._rev_names[a],"from entity",a.dim_tag,self._named_entities[self._rev_names[a]])                
+                if self._rev_names[a] in self._named_entities:
+                    del self._named_entities[self._rev_names[a]]
+                del self._rev_names[a]
+                self._store_name(start_name(name_list[-1]),a)
+        for a in args:
+            if isinstance(a,list):                
+                for aa in a:
+                    dimtags.append(aa.dim_tag)
+                    to_extrude.append(aa)
+                    add_name(aa)
+            elif isinstance(a,str):
+                raise RuntimeError("Not implemented: Supporting strings as names here")
+                a=gmsh.model.getEntitiesForPhysicalGroup(2,self.get_physical_group(a))[0]
+                dimtags.append(a)
+                to_extrude.append(a)
+                
+            else:
+                dimtags.append(a.dim_tag)
+                to_extrude.append(a)
+                add_name(a)
+            newdim=max(newdim,dimtags[-1][0])
+
+        newdim+=1 # The new dimension
+        self._maxdim=max(self._maxdim,newdim)
+        
+        res=gmsh.model.geo.revolve(dimtags,center[0],center[1],center[2],axis[0],axis[1],axis[2],angle,recombine=recombine,numElements=([layers]*len(dimtags) if layers is not None else None)) 
+        
+        gmsh.model.geo.synchronize()
+        
         bulk_name_index=0
         for i,entry in enumerate(res):            
             #print("ADD PHYSICAL GROUP",entry[0],[entry[1]])

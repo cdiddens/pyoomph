@@ -676,6 +676,20 @@ namespace pyoomph
     virtual MeshTemplateFacet *construct_facet(unsigned i);
   };
 
+  class MeshTemplateElementWedgeC2 : public MeshTemplateElement
+  {
+  protected:
+  public:
+    MeshTemplateElementWedgeC2(std::vector<nodeindex_t> ninds);
+    unsigned int get_nnode_C1() const { return 6; }
+    unsigned int get_node_index_C1(const unsigned int &i) const { throw_runtime_error("TODO"); return -1; }
+    unsigned int get_nnode_C2() const { return 18; }
+    unsigned int get_node_index_C2(const unsigned int &i) const { return i; }
+    unsigned int nodal_dimension() const { return 3; }
+    virtual unsigned nfacets() { return 5; }
+    virtual MeshTemplateFacet *construct_facet(unsigned i);
+  };
+
   class MeshTemplateElementCollection
   {
   protected:
@@ -714,6 +728,7 @@ namespace pyoomph
     MeshTemplateElementTetraC1 *add_tetra_3d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4);
     MeshTemplateElementTetraC2 *add_tetra_3d_C2(const std::vector<nodeindex_t> &inds);
     MeshTemplateElementWedgeC1 *add_wedge_3d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5, const nodeindex_t &n6);
+    MeshTemplateElementWedgeC2 *add_wedge_3d_C2(const std::vector<nodeindex_t> &inds);
 
     const std::vector<MeshTemplateElement *> &get_elements() const { return elements; }
     std::vector<std::string> get_adjacent_boundary_names();

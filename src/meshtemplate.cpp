@@ -47,7 +47,7 @@ namespace pyoomph
 11: MeshTemplateElementBrickC1
 14: MeshTemplateElementBrickC2
 13: MeshTemplateElementWedgeC1
-26: ---MeshTemplateElementWedgeC2---
+26: MeshTemplateElementWedgeC2
 
 
 MeshTemplateElementTriC1TB -> MeshTemplateElementTriC1
@@ -993,6 +993,45 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 	  return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 	
+	/////////////////////////////////
+
+	MeshTemplateElementWedgeC2::MeshTemplateElementWedgeC2(std::vector<nodeindex_t> ninds) : MeshTemplateElement(26)
+	{
+		if (ninds.size() != 18)
+			throw_runtime_error("Need exactly 18 nodes for a wedge element with C2 space");
+		node_indices = ninds;
+	}	
+
+	MeshTemplateFacet *MeshTemplateElementWedgeC2::construct_facet(unsigned i)
+{
+    std::vector<nodeindex_t> inds;
+    switch (i)
+    {
+    case 0:
+        // s2 = 0 : corners are our nodes 0,1,2  (same as C1)
+        inds = {node_indices[0], node_indices[1], node_indices[2]};
+        break;
+    case 1:
+        // s2 = 1 : corners are our nodes 12,13,14  (C1 used 3,4,5)
+        inds = {node_indices[12], node_indices[13], node_indices[14]};
+        break;
+    case 2:
+        // s0 = 0 : corners are our nodes 0,2,12,14  (C1 used 0,2,3,5)
+        inds = {node_indices[0], node_indices[2], node_indices[12], node_indices[14]};
+        break;
+    case 3:
+        // s1 = 0 : corners are our nodes 0,1,12,13  (C1 used 0,1,3,4)
+        inds = {node_indices[0], node_indices[1], node_indices[12], node_indices[13]};
+        break;
+    case 4:
+        // s0+s1 = 1 : corners are our nodes 1,2,13,14  (C1 used 1,2,4,5)
+        inds = {node_indices[1], node_indices[2], node_indices[13], node_indices[14]};
+        break;
+    default:
+        throw_runtime_error("A wedge element only has 5 facets");
+    }
+    return new MeshTemplateFacet(inds, NULL, NULL);
+   }
 	
 	/////////////////////////////////
 
@@ -1272,6 +1311,20 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		else if (dim != 3)
 			throw_runtime_error("Tried to add a 3d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
 		MeshTemplateElementWedgeC1 *res = new MeshTemplateElementWedgeC1(n1, n2, n3, n4, n5, n6);
+		elements.push_back(res);
+		res->link_nodes_with_domain(this);
+		return res;
+	}
+
+	MeshTemplateElementWedgeC2 *MeshTemplateElementCollection::add_wedge_3d_C2(const std::vector<nodeindex_t> &inds)
+	{
+		if (dim == -1)
+		{
+			dim = 3;
+		}
+		else if (dim != 3)
+			throw_runtime_error("Tried to add a 3d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
+		MeshTemplateElementWedgeC2 *res = new MeshTemplateElementWedgeC2(inds);
 		elements.push_back(res);
 		res->link_nodes_with_domain(this);
 		return res;

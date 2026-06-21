@@ -1540,6 +1540,59 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
       oomph::Vector<double> get_midpoint_s() override { oomph::Vector<double> res(this->dim(), 1.0 / 3.0); res[2]=0.5; return res; }
   };
 
+
+  class BulkElementWedge3dC2 : public virtual BulkElementBase, public virtual oomph::WedgeElementC2
+  {
+    protected:
+      static const std::vector<int> Possible_Face_Indices;
+    public:
+      virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+      std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
+      BulkElementWedge3dC2();
+      int nedges() const { throw_runtime_error("Not implemented"); }
+      virtual unsigned get_meshio_type_index() const { return 26; }
+      bool fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap);
+      void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const {oomph::WedgeElementC2::shape(s, psi); }
+      void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const { throw_runtime_error("to be done") }
+      void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }      
+      void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const;
+      void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
+      void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { throw_runtime_error("To be done"); }
+      void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
+      unsigned int get_node_index_C1_to_element(const unsigned int &i) const { return (i<3 ? i : (i+9)); } //3->12, 4->13, 5->14, 
+      unsigned int get_node_index_C2_to_element(const unsigned int &i) const { return i; }
+      int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+      {
+          if (tesselate_tri)
+          {
+            throw_runtime_error("Tesselation of 3d not possible");
+          }
+          else
+          {
+            nsubdiv = 1;
+            return 18;
+          }
+      }
+      void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
+      virtual std::vector<double> get_outline(bool lagrangian);
+      unsigned nrecovery_order() { return 1; }
+      void output(std::ostream &outfile, const unsigned &n_plot) { BulkElementBase::output(outfile, n_plot); }      
+      unsigned nvertex_node() const { return oomph::WedgeElementC2::nvertex_node(); }
+      oomph::Node *vertex_node_pt(const unsigned &j) const { return WedgeElementC2::vertex_node_pt(j); }      
+      void further_setup_hanging_nodes() { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
+      virtual BulkElementBase *create_son_instance() const
+      {
+          BulkElementBase::__CurrentCodeInstance = codeinst;
+          auto res = new BulkElementWedge3dC2();
+          res->codeinst = codeinst;
+          BulkElementBase::__CurrentCodeInstance = NULL;
+          return res;
+      }
+      virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 4, order)); }
+      oomph::Vector<double> get_midpoint_s() override { oomph::Vector<double> res(this->dim(), 1.0 / 3.0); res[2]=0.5; return res; }
+  };
+
+
   class PointElement0d : public virtual BulkElementBase, public virtual oomph::PointElement
   {
   protected:

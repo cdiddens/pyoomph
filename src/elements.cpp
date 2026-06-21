@@ -223,6 +223,7 @@ namespace pyoomph
 		T3dTB[3] = new oomph::TBubbleEnrichedGauss<3, 3>();
 
 		Wedge3d[2] = new oomph::WedgeGaussC1();
+		Wedge3d[3] = new oomph::WedgeGaussC2();
 	}
 
 	oomph::Integral *IntegrationSchemeStorage::get_integration_scheme(bool tris, unsigned edim, unsigned order, bool bubble)
@@ -2267,6 +2268,10 @@ namespace pyoomph
 		else if (el->get_geometric_type_index() == 13)
 		{
 			res= new BulkElementWedge3dC1();
+		}
+		else if (el->get_geometric_type_index() == 26)
+		{
+			res= new BulkElementWedge3dC2();
 		}
 		else
 		{
@@ -11741,6 +11746,86 @@ namespace pyoomph
 		return res;
 	}
 
+	////////////////////////////////
+
+	///////////////////////////////
+    BulkElementWedge3dC2::BulkElementWedge3dC2() 
+	{
+		eleminfo.elem_ptr = this;
+		eleminfo.nnode = 18;
+		eleminfo.nnode_C1 = 6; // To be done
+		eleminfo.nnode_C1TB = 0;		
+		eleminfo.nnode_C2TB = 0;
+		eleminfo.nnode_C2 = 18;
+		eleminfo.nnode_DL = 4;
+		eleminfo.nodal_dim = codeinst->get_func_table()->nodal_dim;
+		this->set_n_node(eleminfo.nnode);
+		this->set_nodal_dimension(eleminfo.nodal_dim);	
+		allocate_discontinous_fields();	
+	}
+
+	bool BulkElementWedge3dC2::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
+	{
+	   bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
+	   auto * ft = codeinst->get_func_table();	   	   
+	   if (ft->numfields_C2) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C2, ft->hangindex_C2, shape_info->hanginfo_C2, ft->numfields_C2_basebulk,ft->buffer_offset_C2_basebulk,ft->nodal_offset_C2_basebulk,&BulkElementBase::get_node_index_C2_to_element) || res;
+	   if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
+       if (eqn_remap)
+	   {
+		return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
+	   }
+	   else return res;
+	}
+
+    void BulkElementWedge3dC2::shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const
+	{
+		psi[0] = 1.0;
+		psi[1] = s[0];
+		psi[2] = s[1];
+		psi[3] = s[2];
+	}
+
+	void BulkElementWedge3dC2::dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const
+	{
+		psi[0] = 1.0;
+		psi[1] = s[0];
+		psi[2] = s[1];
+		psi[3] = s[2];
+		dpsi(0, 0) = 0.0;
+		dpsi(1, 0) = 1.0;
+		dpsi(2, 0) = 0.0;
+		dpsi(3, 0) = 0.0;
+		dpsi(0, 1) = 0.0;
+		dpsi(1, 1) = 0.0;
+		dpsi(2, 1) = 1.0;
+		dpsi(3, 1) = 0.0;
+		dpsi(0, 2) = 0.0;
+		dpsi(1, 2) = 0.0;
+		dpsi(2, 2) = 0.0;
+		dpsi(3, 2) = 1.0;
+	}
+
+	void BulkElementWedge3dC2::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+	{
+		if (tesselate_tri)
+		{
+			throw_runtime_error("Tesselation not implemented in 3d");
+		}
+		else
+		{
+			for (unsigned int i = 0; i < this->nnode(); i++)
+				indices[i] = i;
+		}
+	}
+
+	std::vector<double> BulkElementWedge3dC2::get_outline(bool lagrangian)
+	{
+		std::vector<double> res(0);
+		throw_runtime_error("Cannot get outline from 3d elements yet");
+		return res;
+	}
+
+
 	///////////////////////////////
 
 	void RefineableSolidLineElement::build(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt,
@@ -14731,6 +14816,7 @@ namespace pyoomph
 	const std::vector<int> BulkElementTetra3dC2::Possible_Face_Indices={0,1,2,3};
 
 	const std::vector<int> BulkElementWedge3dC1::Possible_Face_Indices={0,1,2,3,4};
+	const std::vector<int> BulkElementWedge3dC2::Possible_Face_Indices={0,1,2,3,4};	
 
 	std::vector<pyoomph::Node*> BulkElementLine1dC1::get_vertex_nodes_of_face(const int &face) const
 	{
@@ -14879,5 +14965,27 @@ namespace pyoomph
 	  else throw_runtime_error("Invalid face index for wedge element");
 	}
 
+	std::vector<pyoomph::Node*> BulkElementWedge3dC2::get_vertex_nodes_of_face(const int &face) const
+	{
+		if      (face==0) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(0)),
+									dynamic_cast<pyoomph::Node*>(this->node_pt(1)),
+									dynamic_cast<pyoomph::Node*>(this->node_pt(2))}; }
+		else if (face==1) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(12)),
+									dynamic_cast<pyoomph::Node*>(this->node_pt(13)),
+									dynamic_cast<pyoomph::Node*>(this->node_pt(14))}; }
+		else if (face==2) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(12)),
+									dynamic_cast<pyoomph::Node*>(this->node_pt(0)),
+									dynamic_cast<pyoomph::Node*>(this->node_pt(14)),
+									dynamic_cast<pyoomph::Node*>(this->node_pt(2))}; }
+		else if (face==3) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(1)),
+									dynamic_cast<pyoomph::Node*>(this->node_pt(0)),
+									dynamic_cast<pyoomph::Node*>(this->node_pt(13)),
+									dynamic_cast<pyoomph::Node*>(this->node_pt(12))}; }
+		else if (face==4) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(1)),
+									dynamic_cast<pyoomph::Node*>(this->node_pt(13)),
+									dynamic_cast<pyoomph::Node*>(this->node_pt(2)),
+									dynamic_cast<pyoomph::Node*>(this->node_pt(14))}; }
+		else throw_runtime_error("Invalid face index for wedge element");
+  	}
 
 }

@@ -25,6 +25,65 @@ const double WedgeGaussC1::Weight[6] =
 };
 
 
+const double WedgeGaussC2::Knot[18][3] =
+{
+  // ── Orbit A, triangle point 0: (s0,s1) = (a1, a1) ──────────────────────
+  {0.445948490915965, 0.445948490915965, 0.112701665379258},  //  0
+  {0.445948490915965, 0.445948490915965, 0.500000000000000},  //  1
+  {0.445948490915965, 0.445948490915965, 0.887298334620742},  //  2
+  // ── Orbit A, triangle point 1: (s0,s1) = (a1, 1-2a1) ───────────────────
+  {0.445948490915965, 0.108103018168070, 0.112701665379258},  //  3
+  {0.445948490915965, 0.108103018168070, 0.500000000000000},  //  4
+  {0.445948490915965, 0.108103018168070, 0.887298334620742},  //  5
+  // ── Orbit A, triangle point 2: (s0,s1) = (1-2a1, a1) ───────────────────
+  {0.108103018168070, 0.445948490915965, 0.112701665379258},  //  6
+  {0.108103018168070, 0.445948490915965, 0.500000000000000},  //  7
+  {0.108103018168070, 0.445948490915965, 0.887298334620742},  //  8
+  // ── Orbit B, triangle point 0: (s0,s1) = (a2, a2) ──────────────────────
+  {0.091576213509771, 0.091576213509771, 0.112701665379258},  //  9
+  {0.091576213509771, 0.091576213509771, 0.500000000000000},  // 10
+  {0.091576213509771, 0.091576213509771, 0.887298334620742},  // 11
+  // ── Orbit B, triangle point 1: (s0,s1) = (a2, 1-2a2) ───────────────────
+  {0.091576213509771, 0.816847572980458, 0.112701665379258},  // 12
+  {0.091576213509771, 0.816847572980458, 0.500000000000000},  // 13
+  {0.091576213509771, 0.816847572980458, 0.887298334620742},  // 14
+  // ── Orbit B, triangle point 2: (s0,s1) = (1-2a2, a2) ───────────────────
+  {0.816847572980458, 0.091576213509771, 0.112701665379258},  // 15
+  {0.816847572980458, 0.091576213509771, 0.500000000000000},  // 16
+  {0.816847572980458, 0.091576213509771, 0.887298334620742},  // 17
+};
+
+// Weight[i] = triangle_weight * s2_weight.
+//
+//   Orbit A triangle weight per point : 0.223381589678011 / 2
+//   Orbit B triangle weight per point : 0.109951743655322 / 2
+//
+//   s2 weights (3-point GL on [0,1]) : 5/18, 4/9, 5/18
+//
+//   So within each orbit the three weights repeat as (wt*5/18, wt*4/9, wt*5/18).
+const double WedgeGaussC2::Weight[18] =
+{
+  // Orbit A (triangle weight = 0.111690794839005 per point)
+  0.031025220788613,  //  0  wA * 5/18
+  0.049640353261780,  //  1  wA * 4/9
+  0.031025220788613,  //  2  wA * 5/18
+  0.031025220788613,  //  3  wA * 5/18
+  0.049640353261780,  //  4  wA * 4/9
+  0.031025220788613,  //  5  wA * 5/18
+  0.031025220788613,  //  6  wA * 5/18
+  0.049640353261780,  //  7  wA * 4/9
+  0.031025220788613,  //  8  wA * 5/18
+  // Orbit B (triangle weight = 0.054975871827661 per point)
+  0.015271075507684,  //  9  wB * 5/18
+  0.024433720812294,  // 10  wB * 4/9
+  0.015271075507684,  // 11  wB * 5/18
+  0.015271075507684,  // 12  wB * 5/18
+  0.024433720812294,  // 13  wB * 4/9
+  0.015271075507684,  // 14  wB * 5/18
+  0.015271075507684,  // 15  wB * 5/18
+  0.024433720812294,  // 16  wB * 4/9
+  0.015271075507684,  // 17  wB * 5/18
+};
 
 
  void RefineableWedgeElement::setup_father_bounds()
@@ -271,6 +330,115 @@ const double WedgeGaussC1::Weight[6] =
     throw_runtime_error("Invalid node or face index for wedge element "+std::to_string(face_index)+", "+std::to_string(i));
     return 0;
   }
+
+
+
+///////////
+
+WedgeGaussC2  WedgeElementC2::Default_integration_scheme;
+
+ unsigned WedgeElementC2::get_bulk_node_number(const int& face_index,const unsigned int& i) const
+    {
+        // ---- Face 0 : s2 = 0, 6-node triangular facet ----
+        // Reversed winding (outward normal = -s2 direction).
+        // Corners: 2, 1, 0.
+        // Edge midpoints in the same winding:
+        //   mid(2,1) = node 5,  mid(1,0) = node 3,  mid(0,2) = node 4.
+        if (face_index == 0)
+        {
+            switch (i)
+            {
+                case 0: return 2;
+                case 1: return 1;
+                case 2: return 0;
+                case 3: return 5;   // midpoint of edge 1–2
+                case 4: return 3;   // midpoint of edge 0–1
+                case 5: return 4;   // midpoint of edge 0–2
+                default: throw_runtime_error("Invalid node index for face 0");
+            }
+        }
+
+        // ---- Face 1 : s2 = 1, 6-node triangular facet ----
+        // Forward winding (outward normal = +s2 direction).
+        // Matches C1 ordering 3,4,5 extended to layer-2 nodes.
+        else if (face_index == 1)
+        {
+            switch (i)
+            {
+                case 0: return 12;  // corner (0,0,1)
+                case 1: return 13;  // corner (1,0,1)
+                case 2: return 14;  // corner (0,1,1)
+                case 3: return 15;  // midpoint of edge 12–13
+                case 4: return 16;  // midpoint of edge 12–14
+                case 5: return 17;  // midpoint of edge 13–14
+                default: throw_runtime_error("Invalid node index for face 1");
+            }
+        }
+
+        // ---- Face 2 : s0 = 0, 9-node quadrilateral facet ----
+        // Parametric coords on this face: (s1, s2).
+        else if (face_index == 2)
+        {
+            switch (i)
+            {
+                case 0: return 0;   // (s1=0,   s2=0  )  corner
+                case 1: return 12;  // (s1=0,   s2=1  )  corner
+                case 2: return 2;   // (s1=1,   s2=0  )  corner
+                case 3: return 14;  // (s1=1,   s2=1  )  corner
+                case 4: return 6;   // (s1=0,   s2=1/2)  s2-mid of i=0,1
+                case 5: return 8;   // (s1=1,   s2=1/2)  s2-mid of i=2,3
+                case 6: return 4;   // (s1=1/2, s2=0  )  s1-mid of i=0,2
+                case 7: return 16;  // (s1=1/2, s2=1  )  s1-mid of i=1,3
+                case 8: return 10;  // (s1=1/2, s2=1/2)  centre
+                default: throw_runtime_error("Invalid node index for face 2");
+            }
+        }
+
+        // ---- Face 3 : s1 = 0, 9-node quadrilateral facet ----
+        // Parametric coords on this face: (s0, s2).
+        else if (face_index == 3)
+        {
+            switch (i)
+            {
+                case 0: return 0;   // (s0=0,   s2=0  )  corner
+                case 1: return 12;  // (s0=0,   s2=1  )  corner
+                case 2: return 1;   // (s0=1,   s2=0  )  corner
+                case 3: return 13;  // (s0=1,   s2=1  )  corner
+                case 4: return 6;   // (s0=0,   s2=1/2)  s2-mid of i=0,1
+                case 5: return 7;   // (s0=1,   s2=1/2)  s2-mid of i=2,3
+                case 6: return 3;   // (s0=1/2, s2=0  )  s0-mid of i=0,2
+                case 7: return 15;  // (s0=1/2, s2=1  )  s0-mid of i=1,3
+                case 8: return 9;   // (s0=1/2, s2=1/2)  centre
+                default: throw_runtime_error("Invalid node index for face 3");
+            }
+        }
+
+        // ---- Face 4 : s0+s1 = 1, 9-node quadrilateral facet ----
+        // Parametric coord t runs along the hypotenuse:
+        //   t=0 at (s0=1, s1=0),  t=1 at (s0=0, s1=1).
+        else if (face_index == 4)
+        {
+            switch (i)
+            {
+                case 0: return 1;   // (t=0,   s2=0  )  corner
+                case 1: return 13;  // (t=0,   s2=1  )  corner
+                case 2: return 2;   // (t=1,   s2=0  )  corner
+                case 3: return 14;  // (t=1,   s2=1  )  corner
+                case 4: return 7;   // (t=0,   s2=1/2)  s2-mid of i=0,1
+                case 5: return 8;   // (t=1,   s2=1/2)  s2-mid of i=2,3
+                case 6: return 5;   // (t=1/2, s2=0  )  t-mid  of i=0,2
+                case 7: return 17;  // (t=1/2, s2=1  )  t-mid  of i=1,3
+                case 8: return 11;  // (t=1/2, s2=1/2)  centre
+                default: throw_runtime_error("Invalid node index for face 4");
+            }
+        }
+
+        throw_runtime_error("Invalid face index for wedge element: "
+                            + std::to_string(face_index));
+        return 0;
+    }
+
+///////////
 
   void WedgeElementBase::build_face_element(const int& face_index,FaceElement* face_element_pt)
   {    
