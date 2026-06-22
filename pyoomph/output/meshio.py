@@ -499,6 +499,9 @@ class _MeshFileOutput(_BaseNumpyOutput):
 						cells.append(("hexahedron27", eleminds[elinds,hexahedronperm27])) #type:ignore
 					elif et==13: # Wedge from pyoomph
 						cells.append(("wedge", eleminds[elinds, wedgeperm])) #type:ignore
+					elif et==15: 
+						raise RuntimeError("Maxim: Here you have to find your the permutation of the nodes by inspecting it with Paraview. This is quite annoying, and only doable by trial and error")
+						cells.append(("pyramid", eleminds[elinds, pyramidperm])) #type:ignore
 						#cells.append(Wedge15Cellblock("wedge15",
 					elif et==7: # wegde (from rotational extrusion)
 						cells.append(("wedge",eleminds[elinds,wedgeperm_extrusion])) #type:ignore    

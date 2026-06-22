@@ -1568,7 +1568,7 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
       std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
       BulkElementPyramid3dC1();
       int nedges() const { throw_runtime_error("Not implemented"); } // No need tom implement this now
-      virtual unsigned get_meshio_type_index() const { return 14; }
+      virtual unsigned get_meshio_type_index() const { return 15; }
       bool fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap);
       void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const {oomph::PyramidElementC1::shape(s, psi); }
       void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
