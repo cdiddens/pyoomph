@@ -4,7 +4,7 @@ This module exposes the compiled C++ core of pyoomph via pybind11 to python. Her
 from __future__ import annotations
 import numpy; import numpy.typing
 import typing
-__all__ = ['AssemblyHandler', 'AzimuthalSymmetryBreakingHandler', 'CCompiler', 'CurvedEntityCatmullRomSpline', 'CurvedEntityCircleArc', 'CurvedEntityCylinderArc', 'CurvedEntitySpherePart', 'CustomCoordinateSystem', 'CustomMathExpression', 'CustomMathExpressionBase', 'CustomMultiReturnExpression', 'CustomMultiReturnExpressionBase', 'CustomResJacInfo', 'DofAugmentations', 'Domain', 'DynamicBulkElementInstance', 'Equations', 'Expression', 'FinaliseMPI', 'FiniteElementCode', 'FiniteElementField', 'FoldHandler', 'GeneralSolverCallback', 'GeomObject', 'GiNaC_Diff', 'GiNaC_EvalFlag', 'GiNaC_FakeExponentialMode', 'GiNaC_GlobalParam', 'GiNaC_Matrix', 'GiNaC_SymSubs', 'GiNaC_TimeSymbol', 'GiNaC_UnitVect', 'GiNaC_Vect', 'GiNaC_absolute', 'GiNaC_acos', 'GiNaC_asin', 'GiNaC_atan', 'GiNaC_atan2', 'GiNaC_collect', 'GiNaC_collect_common_factors', 'GiNaC_collect_units', 'GiNaC_contract', 'GiNaC_cos', 'GiNaC_cosh', 'GiNaC_debug_ex', 'GiNaC_delayed_expansion', 'GiNaC_determinant', 'GiNaC_diff', 'GiNaC_dimtestfunction', 'GiNaC_dimtestfunction_from_var', 'GiNaC_directional_derivative', 'GiNaC_div', 'GiNaC_dot', 'GiNaC_double_dot', 'GiNaC_eval_at_expansion_mode', 'GiNaC_eval_in_domain', 'GiNaC_eval_in_past', 'GiNaC_exp', 'GiNaC_expand', 'GiNaC_factor', 'GiNaC_field', 'GiNaC_general_weak_differential_contribution', 'GiNaC_get_global_symbol', 'GiNaC_get_imag_part', 'GiNaC_get_real_part', 'GiNaC_grad', 'GiNaC_heaviside', 'GiNaC_imaginary_i', 'GiNaC_internal_function_with_element_arg', 'GiNaC_inverse_matrix', 'GiNaC_is_a_matrix', 'GiNaC_log', 'GiNaC_matproduct', 'GiNaC_maximum', 'GiNaC_minimize_functional_derivative', 'GiNaC_minimum', 'GiNaC_new_symbol', 'GiNaC_nondimfield', 'GiNaC_normal', 'GiNaC_piecewise_geq0', 'GiNaC_print_FEM_options', 'GiNaC_python_cb_function', 'GiNaC_python_multi_cb_function', 'GiNaC_python_multi_cb_indexed_result', 'GiNaC_rational_number', 'GiNaC_remove_mode_from_jacobian_or_hessian', 'GiNaC_scale', 'GiNaC_sep_base_units', 'GiNaC_series', 'GiNaC_signum', 'GiNaC_sin', 'GiNaC_sinh', 'GiNaC_split_subexpressions_in_real_and_imaginary_parts', 'GiNaC_subexpression', 'GiNaC_subs', 'GiNaC_subsfields', 'GiNaC_tan', 'GiNaC_tanh', 'GiNaC_testfunction', 'GiNaC_testfunction_from_var', 'GiNaC_testscale', 'GiNaC_time_stepper_weight', 'GiNaC_trace', 'GiNaC_transpose', 'GiNaC_unit', 'GiNaC_unit_matrix', 'GiNaC_vector_dim', 'GiNaC_weak', 'GiNaC_wrap_coordinate_system', 'HopfHandler', 'InitMPI', 'InterfaceMesh', 'LaTeXPrinter', 'MacroElement', 'Mesh', 'MeshTemplate', 'MeshTemplateCurvedEntity', 'MeshTemplateCurvedEntityBase', 'MeshTemplateElementBrickC1', 'MeshTemplateElementBrickC2', 'MeshTemplateElementCollection', 'MeshTemplateElementLineC1', 'MeshTemplateElementLineC2', 'MeshTemplateElementPoint', 'MeshTemplateElementQuadC1', 'MeshTemplateElementQuadC2', 'MeshTemplateElementTetraC1', 'MeshTemplateElementTetraC2', 'MeshTemplateElementTriC1', 'MeshTemplateElementTriC2', 'MeshTemplateElementWedgeC1', 'MeshTemplateElementWedgeC2', 'MultiTimeStepper', 'Node', 'ODEStorageMesh', 'OomphData', 'OomphDomain', 'OomphGeneralisedElement', 'OomphMesh', 'PeriodicOrbitHandler', 'PitchForkHandler', 'Problem', 'QMacroElement2', 'SharedLibCCompiler', 'SparseRank3Tensor', 'TemplatedMeshBase1d', 'TemplatedMeshBase2d', 'TemplatedMeshBase3d', 'Time', 'TimeStepper', 'TracerCollection', 'VectorDouble', 'Z2ErrorEstimator', 'csr_rows_to_coo_rows', 'feenableexcept', 'get_Solver_callback', 'get_verbosity_flag', 'has_tcc', 'set_Solver_callback', 'set_interpolate_new_interface_dofs', 'set_jit_include_dir', 'set_tolerance_for_singular_jacobian', 'set_use_eigen_Z2_error_estimators', 'set_verbosity_flag']
+__all__ = ['AssemblyHandler', 'AzimuthalSymmetryBreakingHandler', 'CCompiler', 'CurvedEntityCatmullRomSpline', 'CurvedEntityCircleArc', 'CurvedEntityCylinderArc', 'CurvedEntitySpherePart', 'CustomCoordinateSystem', 'CustomMathExpression', 'CustomMathExpressionBase', 'CustomMultiReturnExpression', 'CustomMultiReturnExpressionBase', 'CustomResJacInfo', 'DofAugmentations', 'Domain', 'DynamicBulkElementInstance', 'Equations', 'Expression', 'FinaliseMPI', 'FiniteElementCode', 'FiniteElementField', 'FoldHandler', 'GeneralSolverCallback', 'GeomObject', 'GiNaC_Diff', 'GiNaC_EvalFlag', 'GiNaC_FakeExponentialMode', 'GiNaC_GlobalParam', 'GiNaC_Matrix', 'GiNaC_SymSubs', 'GiNaC_TimeSymbol', 'GiNaC_UnitVect', 'GiNaC_Vect', 'GiNaC_absolute', 'GiNaC_acos', 'GiNaC_asin', 'GiNaC_atan', 'GiNaC_atan2', 'GiNaC_collect', 'GiNaC_collect_common_factors', 'GiNaC_collect_units', 'GiNaC_contract', 'GiNaC_cos', 'GiNaC_cosh', 'GiNaC_debug_ex', 'GiNaC_delayed_expansion', 'GiNaC_determinant', 'GiNaC_diff', 'GiNaC_dimtestfunction', 'GiNaC_dimtestfunction_from_var', 'GiNaC_directional_derivative', 'GiNaC_div', 'GiNaC_dot', 'GiNaC_double_dot', 'GiNaC_eval_at_expansion_mode', 'GiNaC_eval_in_domain', 'GiNaC_eval_in_past', 'GiNaC_exp', 'GiNaC_expand', 'GiNaC_factor', 'GiNaC_field', 'GiNaC_general_weak_differential_contribution', 'GiNaC_get_global_symbol', 'GiNaC_get_imag_part', 'GiNaC_get_real_part', 'GiNaC_grad', 'GiNaC_heaviside', 'GiNaC_imaginary_i', 'GiNaC_internal_function_with_element_arg', 'GiNaC_inverse_matrix', 'GiNaC_is_a_matrix', 'GiNaC_log', 'GiNaC_matproduct', 'GiNaC_maximum', 'GiNaC_minimize_functional_derivative', 'GiNaC_minimum', 'GiNaC_new_symbol', 'GiNaC_nondimfield', 'GiNaC_normal', 'GiNaC_piecewise_geq0', 'GiNaC_print_FEM_options', 'GiNaC_python_cb_function', 'GiNaC_python_multi_cb_function', 'GiNaC_python_multi_cb_indexed_result', 'GiNaC_rational_number', 'GiNaC_remove_mode_from_jacobian_or_hessian', 'GiNaC_scale', 'GiNaC_sep_base_units', 'GiNaC_series', 'GiNaC_signum', 'GiNaC_sin', 'GiNaC_sinh', 'GiNaC_split_subexpressions_in_real_and_imaginary_parts', 'GiNaC_subexpression', 'GiNaC_subs', 'GiNaC_subsfields', 'GiNaC_tan', 'GiNaC_tanh', 'GiNaC_testfunction', 'GiNaC_testfunction_from_var', 'GiNaC_testscale', 'GiNaC_time_stepper_weight', 'GiNaC_trace', 'GiNaC_transpose', 'GiNaC_unit', 'GiNaC_unit_matrix', 'GiNaC_vector_dim', 'GiNaC_weak', 'GiNaC_wrap_coordinate_system', 'HopfHandler', 'InitMPI', 'InterfaceMesh', 'LaTeXPrinter', 'MacroElement', 'Mesh', 'MeshTemplate', 'MeshTemplateCurvedEntity', 'MeshTemplateCurvedEntityBase', 'MeshTemplateElementCollection', 'MultiTimeStepper', 'Node', 'ODEStorageMesh', 'OomphData', 'OomphDomain', 'OomphGeneralisedElement', 'OomphMesh', 'PeriodicOrbitHandler', 'PitchForkHandler', 'Problem', 'QMacroElement2', 'SharedLibCCompiler', 'SparseRank3Tensor', 'TemplatedMeshBase1d', 'TemplatedMeshBase2d', 'TemplatedMeshBase3d', 'Time', 'TimeStepper', 'TracerCollection', 'VectorDouble', 'Z2ErrorEstimator', 'csr_rows_to_coo_rows', 'feenableexcept', 'get_Solver_callback', 'get_verbosity_flag', 'has_tcc', 'set_Solver_callback', 'set_interpolate_new_interface_dofs', 'set_jit_include_dir', 'set_tolerance_for_singular_jacobian', 'set_use_eigen_Z2_error_estimators', 'set_verbosity_flag']
 class AssemblyHandler:
     pass
 class AzimuthalSymmetryBreakingHandler(AssemblyHandler):
@@ -920,67 +920,67 @@ class MeshTemplateCurvedEntityBase:
         ...
     def get_pos_from_parametric(self, arg0: int, arg1: list[float], arg2: list[float]) -> None:
         ...
-class MeshTemplateElementBrickC1:
-    pass
-class MeshTemplateElementBrickC2:
-    pass
 class MeshTemplateElementCollection:
     """
     A collection of bulk elements, i.e. a bulk domain of a mesh. Must be created as part of a :py:class:`~pyoomph.meshes.mesh.MeshTemplate` by :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.new_domain`
     """
     def _get_reference_position_for_IC_and_DBC(self, arg0: set[int]) -> list[float]:
         ...
-    def add_SV_tri_2d_C1(self, arg0: int, arg1: int, arg2: int) -> list[MeshTemplateElementTriC1]:
+    def add_SV_tri_2d_C1(self, arg0: int, arg1: int, arg2: int) -> None:
         ...
-    def add_brick_3d_C1(self, arg0: int, arg1: int, arg2: int, arg3: int, arg4: int, arg5: int, arg6: int, arg7: int) -> MeshTemplateElementBrickC1:
+    def add_brick_3d_C1(self, arg0: int, arg1: int, arg2: int, arg3: int, arg4: int, arg5: int, arg6: int, arg7: int) -> None:
         """
         Adds a hexahedral element by eight node indices
         """
-    def add_brick_3d_C2(self, arg0: list[int]) -> MeshTemplateElementBrickC2:
+    def add_brick_3d_C2(self, arg0: list[int]) -> None:
         """
         Adds a second-order hexahedral element by 27 node indices
         """
-    def add_line_1d_C1(self, arg0: int, arg1: int) -> MeshTemplateElementLineC1:
+    def add_line_1d_C1(self, arg0: int, arg1: int) -> None:
         """
         Adds a line element by two node indices
         """
-    def add_line_1d_C2(self, arg0: int, arg1: int, arg2: int) -> MeshTemplateElementLineC2:
+    def add_line_1d_C2(self, arg0: int, arg1: int, arg2: int) -> None:
         """
         Adds a second order line element by three node indices
         """
-    def add_point_element(self, arg0: int) -> MeshTemplateElementPoint:
+    def add_point_element(self, arg0: int) -> None:
         """
         Adds a single point element to the domain
         """
-    def add_quad_2d_C1(self, arg0: int, arg1: int, arg2: int, arg3: int) -> MeshTemplateElementQuadC1:
+    def add_pyramid_3d_C1(self, arg0: int, arg1: int, arg2: int, arg3: int, arg4: int) -> None:
+        """
+        Adds a pyramid element by five node indices
+        """
+    def add_quad_2d_C1(self, arg0: int, arg1: int, arg2: int, arg3: int) -> None:
         """
         Adds a quadrilateral element by four node indices
         """
-    def add_quad_2d_C2(self, arg0: int, arg1: int, arg2: int, arg3: int, arg4: int, arg5: int, arg6: int, arg7: int, arg8: int) -> MeshTemplateElementQuadC2:
+    def add_quad_2d_C2(self, arg0: int, arg1: int, arg2: int, arg3: int, arg4: int, arg5: int, arg6: int, arg7: int, arg8: int) -> None:
         """
         Adds a second-order quadrilateral element by nine node indices
         """
-    def add_tetra_3d_C1(self, arg0: int, arg1: int, arg2: int, arg3: int) -> MeshTemplateElementTetraC1:
+    def add_tetra_3d_C1(self, arg0: int, arg1: int, arg2: int, arg3: int) -> None:
         """
         Adds a tetrahedral element by four node indices
         """
-    def add_tetra_3d_C2(self, arg0: list[int]) -> MeshTemplateElementTetraC2:
+    def add_tetra_3d_C2(self, arg0: list[int]) -> None:
         """
         Adds a second-order tetrahedral element by ten node indices
         """
-    def add_tri_2d_C1(self, arg0: int, arg1: int, arg2: int) -> MeshTemplateElementTriC1:
+    def add_tri_2d_C1(self, arg0: int, arg1: int, arg2: int) -> None:
         """
         Adds a triangular element by three node indices
         """
-    def add_tri_2d_C2(self, arg0: int, arg1: int, arg2: int, arg3: int, arg4: int, arg5: int) -> MeshTemplateElementTriC2:
+    def add_tri_2d_C2(self, arg0: int, arg1: int, arg2: int, arg3: int, arg4: int, arg5: int) -> None:
         """
         Adds a second-order triangular element by six node indices
         """
-    def add_wedge_3d_C1(self, arg0: int, arg1: int, arg2: int, arg3: int, arg4: int, arg5: int) -> MeshTemplateElementWedgeC1:
+    def add_wedge_3d_C1(self, arg0: int, arg1: int, arg2: int, arg3: int, arg4: int, arg5: int) -> None:
         """
         Adds a wedge element by six node indices
         """
-    def add_wedge_3d_C2(self, arg0: list[int]) -> MeshTemplateElementWedgeC2:
+    def add_wedge_3d_C2(self, arg0: list[int]) -> None:
         """
         Adds a second-order wedge element by eighteen node indices
         """
@@ -1008,28 +1008,6 @@ class MeshTemplateElementCollection:
         """
         Sets the dimension of the Eulerian coordinates
         """
-class MeshTemplateElementLineC1:
-    pass
-class MeshTemplateElementLineC2:
-    pass
-class MeshTemplateElementPoint:
-    pass
-class MeshTemplateElementQuadC1:
-    pass
-class MeshTemplateElementQuadC2:
-    pass
-class MeshTemplateElementTetraC1:
-    pass
-class MeshTemplateElementTetraC2:
-    pass
-class MeshTemplateElementTriC1:
-    pass
-class MeshTemplateElementTriC2:
-    pass
-class MeshTemplateElementWedgeC1:
-    pass
-class MeshTemplateElementWedgeC2:
-    pass
 class MultiTimeStepper(TimeStepper):
     def __init__(self, arg0: bool) -> None:
         ...

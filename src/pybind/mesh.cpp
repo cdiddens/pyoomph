@@ -1185,36 +1185,24 @@ void PyReg_Mesh(py::module &m)
 			{ return dynamic_cast<pyoomph::BulkElementODE0d *>(self->get_ODE(name)); },
 			py::return_value_policy::reference);*/
 
-	py::class_<pyoomph::MeshTemplateElementPoint>(m, "MeshTemplateElementPoint");
-	py::class_<pyoomph::MeshTemplateElementLineC1>(m, "MeshTemplateElementLineC1");
-	py::class_<pyoomph::MeshTemplateElementLineC2>(m, "MeshTemplateElementLineC2");
-	py::class_<pyoomph::MeshTemplateElementQuadC1>(m, "MeshTemplateElementQuadC1");
-	py::class_<pyoomph::MeshTemplateElementQuadC2>(m, "MeshTemplateElementQuadC2");
-	py::class_<pyoomph::MeshTemplateElementTriC1>(m, "MeshTemplateElementTriC1");
-	py::class_<pyoomph::MeshTemplateElementTriC2>(m, "MeshTemplateElementTriC2");
-	py::class_<pyoomph::MeshTemplateElementBrickC1>(m, "MeshTemplateElementBrickC1");
-	py::class_<pyoomph::MeshTemplateElementBrickC2>(m, "MeshTemplateElementBrickC2");
-	py::class_<pyoomph::MeshTemplateElementTetraC1>(m, "MeshTemplateElementTetraC1");
-	py::class_<pyoomph::MeshTemplateElementTetraC2>(m, "MeshTemplateElementTetraC2");
-	py::class_<pyoomph::MeshTemplateElementWedgeC1>(m, "MeshTemplateElementWedgeC1");
-	py::class_<pyoomph::MeshTemplateElementWedgeC2>(m, "MeshTemplateElementWedgeC2");
 
 	py::class_<pyoomph::MeshTemplateElementCollection>(m, "MeshTemplateElementCollection")
 		.def("_get_reference_position_for_IC_and_DBC", &pyoomph::MeshTemplateElementCollection::get_reference_position_for_IC_and_DBC)
-		.def("add_point_element", &pyoomph::MeshTemplateElementCollection::add_point_element, py::return_value_policy::reference,"Adds a single point element to the domain")
-		.def("add_line_1d_C1", &pyoomph::MeshTemplateElementCollection::add_line_1d_C1, py::return_value_policy::reference,"Adds a line element by two node indices")
-		.def("add_line_1d_C2", &pyoomph::MeshTemplateElementCollection::add_line_1d_C2, py::return_value_policy::reference,"Adds a second order line element by three node indices")
-		.def("add_quad_2d_C1", &pyoomph::MeshTemplateElementCollection::add_quad_2d_C1, py::return_value_policy::reference,"Adds a quadrilateral element by four node indices")
-		.def("add_quad_2d_C2", &pyoomph::MeshTemplateElementCollection::add_quad_2d_C2, py::return_value_policy::reference,"Adds a second-order quadrilateral element by nine node indices")
-		.def("add_tri_2d_C1", &pyoomph::MeshTemplateElementCollection::add_tri_2d_C1, py::return_value_policy::reference,"Adds a triangular element by three node indices")
-		.def("add_SV_tri_2d_C1", &pyoomph::MeshTemplateElementCollection::add_SV_tri_2d_C1, py::return_value_policy::reference)		
-		.def("add_tri_2d_C2", &pyoomph::MeshTemplateElementCollection::add_tri_2d_C2, py::return_value_policy::reference,"Adds a second-order triangular element by six node indices")
-		.def("add_brick_3d_C1", &pyoomph::MeshTemplateElementCollection::add_brick_3d_C1, py::return_value_policy::reference,"Adds a hexahedral element by eight node indices")
-		.def("add_brick_3d_C2", &pyoomph::MeshTemplateElementCollection::add_brick_3d_C2, py::return_value_policy::reference,"Adds a second-order hexahedral element by 27 node indices")
-		.def("add_tetra_3d_C1", &pyoomph::MeshTemplateElementCollection::add_tetra_3d_C1, py::return_value_policy::reference,"Adds a tetrahedral element by four node indices")
-		.def("add_tetra_3d_C2", &pyoomph::MeshTemplateElementCollection::add_tetra_3d_C2, py::return_value_policy::reference,"Adds a second-order tetrahedral element by ten node indices")
-		.def("add_wedge_3d_C1", &pyoomph::MeshTemplateElementCollection::add_wedge_3d_C1, py::return_value_policy::reference,"Adds a wedge element by six node indices")
-		.def("add_wedge_3d_C2", &pyoomph::MeshTemplateElementCollection::add_wedge_3d_C2, py::return_value_policy::reference,"Adds a second-order wedge element by eighteen node indices")
+		.def("add_point_element", &pyoomph::MeshTemplateElementCollection::add_point_element,"Adds a single point element to the domain")
+		.def("add_line_1d_C1", &pyoomph::MeshTemplateElementCollection::add_line_1d_C1,"Adds a line element by two node indices")
+		.def("add_line_1d_C2", &pyoomph::MeshTemplateElementCollection::add_line_1d_C2,"Adds a second order line element by three node indices")
+		.def("add_quad_2d_C1", &pyoomph::MeshTemplateElementCollection::add_quad_2d_C1,"Adds a quadrilateral element by four node indices")
+		.def("add_quad_2d_C2", &pyoomph::MeshTemplateElementCollection::add_quad_2d_C2,"Adds a second-order quadrilateral element by nine node indices")
+		.def("add_tri_2d_C1", &pyoomph::MeshTemplateElementCollection::add_tri_2d_C1, "Adds a triangular element by three node indices")
+		.def("add_SV_tri_2d_C1", &pyoomph::MeshTemplateElementCollection::add_SV_tri_2d_C1)		
+		.def("add_tri_2d_C2", &pyoomph::MeshTemplateElementCollection::add_tri_2d_C2,"Adds a second-order triangular element by six node indices")
+		.def("add_brick_3d_C1", &pyoomph::MeshTemplateElementCollection::add_brick_3d_C1,"Adds a hexahedral element by eight node indices")
+		.def("add_brick_3d_C2", &pyoomph::MeshTemplateElementCollection::add_brick_3d_C2,"Adds a second-order hexahedral element by 27 node indices")
+		.def("add_tetra_3d_C1", &pyoomph::MeshTemplateElementCollection::add_tetra_3d_C1,"Adds a tetrahedral element by four node indices")
+		.def("add_tetra_3d_C2", &pyoomph::MeshTemplateElementCollection::add_tetra_3d_C2,"Adds a second-order tetrahedral element by ten node indices")
+		.def("add_wedge_3d_C1", &pyoomph::MeshTemplateElementCollection::add_wedge_3d_C1,"Adds a wedge element by six node indices")
+		.def("add_wedge_3d_C2", &pyoomph::MeshTemplateElementCollection::add_wedge_3d_C2,"Adds a second-order wedge element by eighteen node indices")
+		.def("add_pyramid_3d_C1", &pyoomph::MeshTemplateElementCollection::add_pyramid_3d_C1,"Adds a pyramid element by five node indices")
 		.def("nodal_dimension", &pyoomph::MeshTemplateElementCollection::nodal_dimension,"Returns the dimension of the Eulerian coordinates")
 		.def("lagrangian_dimension", &pyoomph::MeshTemplateElementCollection::lagrangian_dimension,"Returns the dimension of the Lagrangian coordinates")
 		.def("set_nodal_dimension", &pyoomph::MeshTemplateElementCollection::set_nodal_dimension,"Sets the dimension of the Eulerian coordinates")

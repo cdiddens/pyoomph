@@ -35,6 +35,8 @@ namespace pyoomph
 
 
 /*
+Type indices:
+
 0: MeshTemplateElementPoint
 1: MeshTemplateElementLineC1
 2: MeshTemplateElementLineC2 
@@ -48,6 +50,11 @@ namespace pyoomph
 14: MeshTemplateElementBrickC2
 13: MeshTemplateElementWedgeC1
 26: MeshTemplateElementWedgeC2
+15: MeshTemplateElementPyramidC1
+27: MeshTemplateElementPyramidC2
+
+@ Maxim: You can use any free index for your MeshTemplateElementPyramidC1 (later also for the MeshTemplateElementPyramidC2)
+Please add it  to the list above and use the same number in the constructor of the MeshTemplateElementPyramidC1 class
 
 
 MeshTemplateElementTriC1TB -> MeshTemplateElementTriC1
@@ -935,8 +942,13 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 
 
     /////////////////////////////////
-	MeshTemplateElementWedgeC1::MeshTemplateElementWedgeC1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5, const nodeindex_t &n6) : MeshTemplateElement(13)
+
+	// @ Maxim: This is the constructor, similar to __init__ in Python
+	MeshTemplateElementWedgeC1::MeshTemplateElementWedgeC1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5, const nodeindex_t &n6) 
+	   	: MeshTemplateElement(13) // This is the super() call. Here, we pass a value of 13 to the base class constructor, which indicates some identification number	   
+	   // At the top of this file, all indices are given. Just take any free index for your MeshTemplateElementPyramidC1
 	{
+		// Add the nodes to the vector and store them internally
 		node_indices.reserve(6);
 		node_indices.push_back(n1);
 		node_indices.push_back(n2);
@@ -993,6 +1005,7 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 	  return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 
+	// @ Maxim: This is the method to convert this element to a C2 space. Just leave it out initially
 	MeshTemplateElement *MeshTemplateElementWedgeC1::convert_for_C2_space(MeshTemplate *templ)
 	{
 		std::vector<nodeindex_t> ninds(18);
@@ -1021,7 +1034,20 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		return new MeshTemplateElementWedgeC2(ninds);
 	}
 
-	
+	/////////////////////////////////
+	MeshTemplateElementPyramidC1::MeshTemplateElementPyramidC1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5):
+	MeshTemplateElement(15) // This is the super() call. Here, we pass a value of 14 to the base class constructor, which indicates some identification number	   
+	   // At the top of this file, all indices are given. 
+	{
+		throw_runtime_error("Maxim: Do it the same way as e.g MeshTemplateElementWedgeC1::MeshTemplateElementWedgeC1");
+	}
+
+	MeshTemplateFacet *MeshTemplateElementPyramidC1::construct_facet(unsigned i)
+	{
+		throw_runtime_error("Maxim: Do it analogously as e.g MeshTemplateElementWedgeC1::construct_facet");
+	}
+
+
 	/////////////////////////////////
 
 	MeshTemplateElementWedgeC2::MeshTemplateElementWedgeC2(std::vector<nodeindex_t> ninds) : MeshTemplateElement(26)
@@ -1163,7 +1189,7 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		return Lagr_dimension;
 	}
 
-	MeshTemplateElementPoint *MeshTemplateElementCollection::add_point_element(const nodeindex_t &n1)
+	void MeshTemplateElementCollection::add_point_element(const nodeindex_t &n1)
 	{
 		if (dim == -1)
 		{
@@ -1174,10 +1200,9 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		MeshTemplateElementPoint *res = new MeshTemplateElementPoint(n1);
 		elements.push_back(res);
 		res->link_nodes_with_domain(this);
-		return res;
 	}
 
-	MeshTemplateElementLineC1 *MeshTemplateElementCollection::add_line_1d_C1(const nodeindex_t &n1, const nodeindex_t &n2)
+	void MeshTemplateElementCollection::add_line_1d_C1(const nodeindex_t &n1, const nodeindex_t &n2)
 	{
 		if (dim == -1)
 		{
@@ -1188,10 +1213,9 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		MeshTemplateElementLineC1 *res = new MeshTemplateElementLineC1(n1, n2);
 		elements.push_back(res);
 		res->link_nodes_with_domain(this);
-		return res;
 	}
 
-	MeshTemplateElementLineC2 *MeshTemplateElementCollection::add_line_1d_C2(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3)
+	void MeshTemplateElementCollection::add_line_1d_C2(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3)
 	{
 		if (dim == -1)
 		{
@@ -1201,11 +1225,10 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 			throw_runtime_error("Tried to add a 1d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
 		MeshTemplateElementLineC2 *res = new MeshTemplateElementLineC2(n1, n2, n3);
 		elements.push_back(res);
-		res->link_nodes_with_domain(this);
-		return res;
+		res->link_nodes_with_domain(this);		
 	}
 
-	MeshTemplateElementQuadC1 *MeshTemplateElementCollection::add_quad_2d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4)
+	void MeshTemplateElementCollection::add_quad_2d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4)
 	{
 		if (dim == -1)
 		{
@@ -1215,11 +1238,10 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 			throw_runtime_error("Tried to add a 2d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
 		MeshTemplateElementQuadC1 *res = new MeshTemplateElementQuadC1(n1, n2, n3, n4);
 		elements.push_back(res);
-		res->link_nodes_with_domain(this);
-		return res;
+		res->link_nodes_with_domain(this);		
 	}
 
-	MeshTemplateElementQuadC2 *MeshTemplateElementCollection::add_quad_2d_C2(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4,
+	void MeshTemplateElementCollection::add_quad_2d_C2(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4,
 																			 const nodeindex_t &n5, const nodeindex_t &n6, const nodeindex_t &n7, const nodeindex_t &n8, const nodeindex_t &n9)
 	{
 		if (dim == -1)
@@ -1231,10 +1253,9 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		MeshTemplateElementQuadC2 *res = new MeshTemplateElementQuadC2(n1, n2, n3, n4, n5, n6, n7, n8, n9);
 		elements.push_back(res);
 		res->link_nodes_with_domain(this);
-		return res;
 	}
 
-	MeshTemplateElementTriC1 *MeshTemplateElementCollection::add_tri_2d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3)
+	void MeshTemplateElementCollection::add_tri_2d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3)
 	{
 		if (dim == -1)
 		{
@@ -1244,12 +1265,11 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 			throw_runtime_error("Tried to add a 2d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
 		MeshTemplateElementTriC1 *res = new MeshTemplateElementTriC1(n1, n2, n3);
 		elements.push_back(res);
-		res->link_nodes_with_domain(this);
-		return res;
+		res->link_nodes_with_domain(this);		
 	}
 
    //Scott-Vogelius splitting
-	std::vector<MeshTemplateElementTriC1*> MeshTemplateElementCollection::add_SV_tri_2d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3)
+	void MeshTemplateElementCollection::add_SV_tri_2d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3)
 	{
 	 std::vector<double> p1=mesh_template->get_node_position(n1);	 
 	 std::vector<double> p2=mesh_template->get_node_position(n2);	 
@@ -1257,10 +1277,12 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 	 std::vector<double> pbc(3,0.0);
 	 for (unsigned int i=0;i<p1.size();i++) pbc[i]=(p1[i]+p2[i]+p3[i])/3.0;
 	 nodeindex_t bc=mesh_template->add_node_unique(pbc[0],pbc[1],pbc[2]);
-    return {add_tri_2d_C1(n1,n2,bc),add_tri_2d_C1(n2,n3,bc),add_tri_2d_C1(n3,n1,bc)};
+    add_tri_2d_C1(n1,n2,bc);
+	add_tri_2d_C1(n2,n3,bc);
+	add_tri_2d_C1(n3,n1,bc);
 	}
 
-	MeshTemplateElementTriC2 *MeshTemplateElementCollection::add_tri_2d_C2(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5, const nodeindex_t &n6)
+	void MeshTemplateElementCollection::add_tri_2d_C2(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5, const nodeindex_t &n6)
 	{
 		if (dim == -1)
 		{
@@ -1270,11 +1292,10 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 			throw_runtime_error("Tried to add a 2d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
 		MeshTemplateElementTriC2 *res = new MeshTemplateElementTriC2(n1, n2, n3, n4, n5, n6);
 		elements.push_back(res);
-		res->link_nodes_with_domain(this);
-		return res;
+		res->link_nodes_with_domain(this);		
 	}
 
-	MeshTemplateElementBrickC1 *MeshTemplateElementCollection::add_brick_3d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4,
+	void MeshTemplateElementCollection::add_brick_3d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4,
 																			   const nodeindex_t &n5, const nodeindex_t &n6, const nodeindex_t &n7, const nodeindex_t &n8)
 	{
 		if (dim == -1)
@@ -1286,10 +1307,9 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		MeshTemplateElementBrickC1 *res = new MeshTemplateElementBrickC1(n1, n2, n3, n4, n5, n6, n7, n8);
 		elements.push_back(res);
 		res->link_nodes_with_domain(this);
-		return res;
 	}
 
-	MeshTemplateElementBrickC2 *MeshTemplateElementCollection::add_brick_3d_C2(const std::vector<nodeindex_t> &inds)
+	void MeshTemplateElementCollection::add_brick_3d_C2(const std::vector<nodeindex_t> &inds)
 	{
 		if (dim == -1)
 		{
@@ -1300,10 +1320,9 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		MeshTemplateElementBrickC2 *res = new MeshTemplateElementBrickC2(inds);
 		elements.push_back(res);
 		res->link_nodes_with_domain(this);
-		return res;
 	}
 
-	MeshTemplateElementTetraC1 *MeshTemplateElementCollection::add_tetra_3d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4)
+	void MeshTemplateElementCollection::add_tetra_3d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4)
 	{
 		if (dim == -1)
 		{
@@ -1313,11 +1332,10 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 			throw_runtime_error("Tried to add a 3d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
 		MeshTemplateElementTetraC1 *res = new MeshTemplateElementTetraC1(n1, n2, n3, n4);
 		elements.push_back(res);
-		res->link_nodes_with_domain(this);
-		return res;
+		res->link_nodes_with_domain(this);		
 	}
 
-	MeshTemplateElementTetraC2 *MeshTemplateElementCollection::add_tetra_3d_C2(const std::vector<nodeindex_t> &inds)
+	void MeshTemplateElementCollection::add_tetra_3d_C2(const std::vector<nodeindex_t> &inds)
 	{
 		if (dim == -1)
 		{
@@ -1328,10 +1346,9 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		MeshTemplateElementTetraC2 *res = new MeshTemplateElementTetraC2(inds);
 		elements.push_back(res);
 		res->link_nodes_with_domain(this);
-		return res;
 	}
 
-	MeshTemplateElementWedgeC1 *MeshTemplateElementCollection::add_wedge_3d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5, const nodeindex_t &n6)
+	void MeshTemplateElementCollection::add_wedge_3d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5, const nodeindex_t &n6)
 	{
 		if (dim == -1)
 		{
@@ -1342,10 +1359,14 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		MeshTemplateElementWedgeC1 *res = new MeshTemplateElementWedgeC1(n1, n2, n3, n4, n5, n6);
 		elements.push_back(res);
 		res->link_nodes_with_domain(this);
-		return res;
 	}
 
-	MeshTemplateElementWedgeC2 *MeshTemplateElementCollection::add_wedge_3d_C2(const std::vector<nodeindex_t> &inds)
+	void MeshTemplateElementCollection::add_pyramid_3d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5)
+	{
+		throw_runtime_error("Maxim: Do it the same way as e.g MeshTemplateElementWedgeC1::add_wedge_3d_C1");
+	}
+
+	void MeshTemplateElementCollection::add_wedge_3d_C2(const std::vector<nodeindex_t> &inds)
 	{
 		if (dim == -1)
 		{
@@ -1355,8 +1376,7 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 			throw_runtime_error("Tried to add a 3d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
 		MeshTemplateElementWedgeC2 *res = new MeshTemplateElementWedgeC2(inds);
 		elements.push_back(res);
-		res->link_nodes_with_domain(this);
-		return res;
+		res->link_nodes_with_domain(this);		
 	}
 
 	

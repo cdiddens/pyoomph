@@ -160,9 +160,12 @@ namespace pyoomph
 				return Q3d;
 			else if (edim==4)
 				Wedge3d;
+			else if (edim==5)
+				Pyramid3d;
 			else
 				throw_runtime_error("Implement");
 		}
+		throw_runtime_error("Invalid combination of tri/quad, edim and bubble");
 	}
 
 	void IntegrationSchemeStorage::clean_up_map(std::map<unsigned, oomph::Integral *> &map)
@@ -186,6 +189,7 @@ namespace pyoomph
 		clean_up_map(T2dTB);
 		clean_up_map(T3dTB);
 		clean_up_map(Wedge3d);
+		clean_up_map(Pyramid3d);
 	}
 
 	IntegrationSchemeStorage::IntegrationSchemeStorage()
@@ -224,6 +228,8 @@ namespace pyoomph
 
 		Wedge3d[2] = new oomph::WedgeGaussC1();
 		Wedge3d[3] = new oomph::WedgeGaussC2();
+
+		Pyramid3d[2]= new oomph::PyramidGaussC1();
 	}
 
 	oomph::Integral *IntegrationSchemeStorage::get_integration_scheme(bool tris, unsigned edim, unsigned order, bool bubble)
@@ -2150,7 +2156,9 @@ namespace pyoomph
 		std::vector<int> nodemap;
 		std::string domspace=std::string(BulkElementBase::__CurrentCodeInstance->get_func_table()->dominant_space);
 		if (el->get_geometric_type_index() == 1)
+		{
 			res = new BulkElementLine1dC1();
+		}
 		else if (el->get_geometric_type_index() == 2)
 		{
 			if ( domspace == "C1" || domspace=="C1TB")
@@ -2249,7 +2257,9 @@ namespace pyoomph
 			}
 		}
 		else if (el->get_geometric_type_index() == 11)
+		{
 			res = new BulkElementBrick3dC1();
+		}
 		else if (el->get_geometric_type_index() == 14)
 		{
 			if (domspace == "C1" || domspace=="C1TB")
@@ -2267,6 +2277,7 @@ namespace pyoomph
 		}
 		else if (el->get_geometric_type_index() == 13)
 		{
+			if (domspace!="C1") throw_runtime_error("Found a wedge/prism element, which cannot be generalized to the space "+domspace);
 			res= new BulkElementWedge3dC1();
 		}
 		else if (el->get_geometric_type_index() == 26)
@@ -2276,9 +2287,24 @@ namespace pyoomph
 			  nodemap = {0, 1, 2, 12, 13, 14};
 			  res= new BulkElementWedge3dC1();
 			}
-			else
+			else if (domspace=="C2")
 			{
               res= new BulkElementWedge3dC2();
+			}
+			else
+			{
+				throw_runtime_error("Found a wedge/prism element, which cannot be generalized to the space "+domspace);				
+			}
+		}
+		else if (el->get_geometric_type_index() == 15)
+		{
+			if (domspace == "C1")
+			{			  
+			  res= new BulkElementPyramid3dC1();
+			}			
+			else
+			{
+				throw_runtime_error("Pyramids are not implemented yet for space "+domspace);				
 			}
 		}
 		else
@@ -11756,6 +11782,82 @@ namespace pyoomph
 
 	////////////////////////////////
 
+
+	BulkElementPyramid3dC1::BulkElementPyramid3dC1() 
+	{
+		eleminfo.elem_ptr = this;
+		eleminfo.nnode = 5;
+		eleminfo.nnode_C1 = 5;
+		eleminfo.nnode_C1TB = 0;		
+		eleminfo.nnode_C2TB = 0;
+		eleminfo.nnode_C2 = 0;
+		eleminfo.nnode_DL = 4;
+		eleminfo.nodal_dim = codeinst->get_func_table()->nodal_dim;
+		this->set_n_node(eleminfo.nnode);
+		this->set_nodal_dimension(eleminfo.nodal_dim);	
+		allocate_discontinous_fields();	
+	}
+
+	bool BulkElementPyramid3dC1::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
+	{
+	   bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
+	   auto * ft = codeinst->get_func_table();	   	   
+	   if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
+       if (eqn_remap)
+	   {
+		return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
+	   }
+	   else return res;
+	}
+
+    void BulkElementPyramid3dC1::shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const
+	{
+		psi[0] = 1.0;
+		psi[1] = s[0];
+		psi[2] = s[1];
+		psi[3] = s[2];
+	}
+
+	void BulkElementPyramid3dC1::dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const
+	{
+		psi[0] = 1.0;
+		psi[1] = s[0];
+		psi[2] = s[1];
+		psi[3] = s[2];
+		dpsi(0, 0) = 0.0;
+		dpsi(1, 0) = 1.0;
+		dpsi(2, 0) = 0.0;
+		dpsi(3, 0) = 0.0;
+		dpsi(0, 1) = 0.0;
+		dpsi(1, 1) = 0.0;
+		dpsi(2, 1) = 1.0;
+		dpsi(3, 1) = 0.0;
+		dpsi(0, 2) = 0.0;
+		dpsi(1, 2) = 0.0;
+		dpsi(2, 2) = 0.0;
+		dpsi(3, 2) = 1.0;
+	}
+
+	void BulkElementPyramid3dC1::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+	{
+		if (tesselate_tri)
+		{
+			throw_runtime_error("Tesselation not implemented in 3d");
+		}
+		else
+		{
+			for (unsigned int i = 0; i < this->nnode(); i++)
+				indices[i] = i;
+		}
+	}
+
+	std::vector<double> BulkElementPyramid3dC1::get_outline(bool lagrangian)
+	{
+		std::vector<double> res(0);
+		throw_runtime_error("Cannot get outline from 3d elements yet");
+		return res;
+	}
+
 	///////////////////////////////
 
 	int BulkElementWedge3dC2::element_index_to_C1[18]={0,1,2,-1,-1,-1,-1,-1,-1,-1,-1,-1,3,4,5,-1,-1,-1};
@@ -14897,7 +14999,9 @@ namespace pyoomph
 	const std::vector<int> BulkElementTetra3dC2::Possible_Face_Indices={0,1,2,3};
 
 	const std::vector<int> BulkElementWedge3dC1::Possible_Face_Indices={0,1,2,3,4};
-	const std::vector<int> BulkElementWedge3dC2::Possible_Face_Indices={0,1,2,3,4};	
+	const std::vector<int> BulkElementWedge3dC2::Possible_Face_Indices={0,1,2,3,4};
+	
+	const std::vector<int> BulkElementPyramid3dC1::Possible_Face_Indices={0,1,2,3,4};
 
 	std::vector<pyoomph::Node*> BulkElementLine1dC1::get_vertex_nodes_of_face(const int &face) const
 	{
@@ -15046,6 +15150,11 @@ namespace pyoomph
 	  else throw_runtime_error("Invalid face index for wedge element");
 	}
 
+	std::vector<pyoomph::Node*> BulkElementPyramid3dC1::get_vertex_nodes_of_face(const int &face) const
+	{	  	  
+	  throw_runtime_error("Maxim: This should return the vertex nodes of the face.");
+	}
+
 	std::vector<pyoomph::Node*> BulkElementWedge3dC2::get_vertex_nodes_of_face(const int &face) const
 	{
 		if      (face==0) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(0)),
@@ -15092,6 +15201,11 @@ namespace pyoomph
 	{ 
 		if (face_index<2) return  new InterfaceElementTri2dC1(jitcode, this, face_index);
 		else return new InterfaceElementQuad2dC1(jitcode, this, face_index);
+	}
+
+	oomph::FaceElement * BulkElementPyramid3dC1::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index)
+	{ 
+		throw_runtime_error("TODO: Constructing face elements for pyramid elements with C1 interpolation on the face. The different face types depend on the face index");
 	}
 	
 	oomph::FaceElement * BulkElementWedge3dC2::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index)

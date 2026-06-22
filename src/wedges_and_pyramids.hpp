@@ -7,7 +7,7 @@
 namespace oomph
 {
 
-
+// Gauss-Legendre quadrature for the C1 wedge element, with 6 points (2 in each direction)
 class WedgeGaussC1 : public Integral
   {
   private:    
@@ -22,6 +22,7 @@ class WedgeGaussC1 : public Integral
     double weight(const unsigned& i) const   {   return Weight[i];   }
  };
 
+ // Gauss-Legendre quadrature for the C2 wedge element, with 18 points (3 in each direction)
 class WedgeGaussC2 : public Integral
 {
 private:
@@ -37,6 +38,26 @@ public:
     double knot(const unsigned& i, const unsigned& j) const { return Knot[i][j]; }
     double weight(const unsigned& i) const { return Weight[i]; }
 };
+
+
+// Gauss-Legendre quadrature for the C1 wedge element, with 6 points (2 in each direction)
+// Maxim: Ask an AI to do it for a linear Pyramid element. 
+// However, make sure that all three local coordinates have the same bounds, usually 0<=s_i<=1 here (and potentially some constraints like s_0+s_1<=1 or similar)
+class PyramidGaussC1 : public Integral
+  {
+  private:    
+    //static const unsigned Npts = 6;     // Maxim: Adjust this accordingly to the points. Also, implement them in the .cpp file.
+    //static const double Knot[6][3], Weight[6];
+  public:    
+    PyramidGaussC1(){};
+    PyramidGaussC1(const PyramidGaussC1& dummy) = delete;
+    void operator=(const PyramidGaussC1&) = delete;
+    // Essentially, just copy from WedgeGaussC1, but adjust the number of points and the values of the knots and weights. 
+    unsigned nweight() const    {   throw_runtime_error("Maxim: Implement this method. Make sure the Npts and the size of the Knot and Weight array match (also in the .cpp file)"); }
+    double knot(const unsigned& i, const unsigned& j) const   {  throw_runtime_error("Maxim: Implement this method. Make sure the Npts and the size of the Knot and Weight array match (also in the .cpp file)"); }
+    double weight(const unsigned& i) const   {   throw_runtime_error("Maxim: Implement this method. Make sure the Npts and the size of the Knot and Weight array match (also in the .cpp file)");   }
+ };
+
 
 class WedgeElementShapeC1
 {
@@ -95,6 +116,25 @@ class WedgeElementShapeC1
         dpsids(3,2) =  l1;
         dpsids(4,2) =  s0;
         dpsids(5,2) =  s1;
+    }
+};
+
+
+
+
+class PyramidElementShapeC1
+{
+ public:
+    static void shape(const Vector<double>& s, Shape& psi) 
+    {
+        throw_runtime_error("Maxim: Implement this method. The shape functions for a linear pyramid element can be found by AI");
+        // However, when asking AI, make sure that all three local coordinates have the same bounds, usually 0<=s_i<=1 here (and potentially some constraints like s_0+s_1<=1 or similar). This is important for the implementation of the get_bulk_node_number method, which relies on the local coordinates of the nodes.
+    }
+
+    
+    static void dshape_local(const Vector<double>& s,Shape& psi,DShape& dpsids) 
+    {
+        throw_runtime_error("Maxim: Implement this method. This method should evaluate the shape functions and their local derivatives for a linear pyramid element.");
     }
 };
 
@@ -290,7 +330,6 @@ class WedgeElementShapeC2
 };
 
 
-// No need to template these classes, wedges only exist in 3d, and the number of nodes along a line is either 2 or 3
 class WedgeElementBase :  public virtual FiniteElement
 {
   public:
@@ -385,6 +424,98 @@ class RefineableWedgeElement : public virtual RefineableElement, public virtual 
   };
 
 
+class PyramidElementBase :  public virtual FiniteElement
+{
+  public:
+    void build_face_element(const int& face_index,FaceElement* face_element_pt) override;
+    CoordinateMappingFctPt face_to_bulk_coordinate_fct_pt(const int& face_index) const override;
+    BulkCoordinateDerivativesFctPt bulk_coordinate_derivatives_fct_pt(const int& face_index) const override ;
+    int face_outer_unit_normal_sign(const int&) const override;
+    double s_min() const    { throw_runtime_error("Maxim: the lower value of the element's local coordinate. All three must have the same bounds.") }
+    double s_max() const    { throw_runtime_error("Maxim: the upper value of the element's local coordinate. All three must have the same bounds.") }
+    unsigned nvertex_node() const { throw_runtime_error("Maxim: Implement this method. It should return the number of vertex nodes for a linear pyramid element, which is 5."); }
+    Node* vertex_node_pt(const unsigned& j) const override
+    {           
+      throw_runtime_error("Maxim: Implement this method. It should return a pointer to the j-th vertex node of the pyramid element, where j ranges from 0 to 4.");
+    }
+    unsigned nnode_on_face() const override { throw_runtime_error("nnode_on_face cannot be implemented for a Wedge, damn."); } // Here you don't have to do anything. nnode_on_face is from oomph-lib, but it is not unique here (quad vs tri facets), so we just throw an error if someone tries to call it. The nnode_on_face_by_index method is what should be used instead, and it is implemented below.
+    virtual unsigned nnode_on_face_by_index(const int& face_index) const  { throw_runtime_error("Maxim: Implement this method. It should return the number of nodes on a facet, which depends on the index here"); }
+};
+
+// Maxim: You don't have to do anything with this class
+class RefineablePyramidElement : public virtual RefineableElement, public virtual PyramidElementBase
+  {
+
+  public:
+    /// \short Shorthand for pointer to an argument-free void member
+    /// function of the refineable element
+    typedef void (RefineablePyramidElement::*VoidMemberFctPt)();
+
+    /// Constructor: Pass refinement level (default 0 = root)
+    RefineablePyramidElement() : RefineableElement()
+    {
+    }
+
+    /// Broken copy constructor
+    RefineablePyramidElement(const RefineablePyramidElement &dummy)
+    {
+      BrokenCopy::broken_copy("RefineablePyramidElement");
+    }
+
+    virtual ~RefineablePyramidElement()
+    {
+    }
+
+    unsigned required_nsons() const
+    {
+      throw_runtime_error("TODO"); // Here, nothing is do be done for now
+      return 4;
+    }
+
+    virtual Node *node_created_by_neighbour(const Vector<double> &s_fraction, bool &is_periodic);
+
+    virtual Node *node_created_by_son_of_neighbour(const Vector<double> &s_fraction, bool &is_periodic)
+    {
+      return 0;
+    }
+
+    virtual void build(Mesh *&mesh_pt, Vector<Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file);
+
+    void check_integrity(double &max_error);
+
+    void output_corners(std::ostream &outfile, const std::string &colour) const;
+
+    OcTree *octree_pt() { return dynamic_cast<OcTree *>(Tree_pt); }
+
+    OcTree *octree_pt() const { return dynamic_cast<OcTree *>(Tree_pt); }
+
+    void setup_hanging_nodes(Vector<std::ofstream *> &output_stream);
+
+    virtual void further_setup_hanging_nodes() = 0;
+
+  protected:
+    static std::map<unsigned, DenseMatrix<int>> Father_bound;
+
+    void setup_father_bounds();
+
+    void get_edge_bcs(const int &edge, Vector<int> &bound_cons) const;
+
+  public:
+    void get_boundaries(const int &edge, std::set<unsigned> &boundaries) const;
+
+    void get_bcs(int bound, Vector<int> &bound_cons) const;
+    void interpolated_zeta_on_edge(const unsigned &boundary, const int &edge, const Vector<double> &s, Vector<double> &zeta);
+
+  protected:
+    void setup_hang_for_value(const int &value_id);
+
+    virtual void quad_hang_helper(const int &value_id, const int &my_edge, std::ofstream &output_hangfile);
+  };
+
+
+
+
+
 class WedgeElementC1 :  public virtual RefineableWedgeElement
 {
  // A first order wedge element 
@@ -469,6 +600,41 @@ class WedgeElementC1 :  public virtual RefineableWedgeElement
 
 };
 
+
+
+class PyramidElementC1 :  public virtual RefineablePyramidElement
+{ 
+ private:
+    //static PyramidGaussC1 Default_integration_scheme; // Maxim: It must be declared in the cpp file
+ public:    
+    unsigned nnode_1d() const { return 2;}
+
+    PyramidElementC1() : PyramidElementBase() 
+    {
+        throw_runtime_error("Maxim: Implement the constructor for the PyramidElementC1 class. It should set the number of nodes, dimension, and integration scheme (which should be an instance of PyramidGaussC1).");
+    }
+    PyramidElementC1(const PyramidElementC1&) = delete;
+    ~PyramidElementC1() {}
+
+    unsigned int get_bulk_node_number(const int & face_index, const unsigned int& i) const override;
+        
+    void shape(const Vector<double>& s, Shape& psi) const override
+    {
+        PyramidElementShapeC1::shape(s, psi);
+    }
+
+    void dshape_local(const Vector<double>& s,Shape& psi,DShape& dpsids) const override
+    {
+        PyramidElementShapeC1::dshape_local(s, psi, dpsids);
+    }
+
+    inline void local_coordinate_of_node(const unsigned& j,Vector<double>& s) const
+    {
+      throw_runtime_error("Maxim: Implement this method. It should set the local coordinates s for the j-th node of the pyramid element, where j ranges from 0 to 4.");
+    }
+
+
+};
 
 
 
