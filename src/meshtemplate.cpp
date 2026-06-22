@@ -992,6 +992,35 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 	  }
 	  return new MeshTemplateFacet(inds, NULL, NULL);
 	}
+
+	MeshTemplateElement *MeshTemplateElementWedgeC1::convert_for_C2_space(MeshTemplate *templ)
+	{
+		std::vector<nodeindex_t> ninds(18);
+		ninds[0] = node_indices[0];
+		ninds[1] = node_indices[1];
+		ninds[2] = node_indices[2];
+
+		ninds[12] = node_indices[3];
+		ninds[13] = node_indices[4];
+		ninds[14] = node_indices[5];
+		
+
+		ninds[3] = templ->add_intermediate_node_unique(ninds[0], ninds[1]);
+		ninds[4] = templ->add_intermediate_node_unique(ninds[0], ninds[2]);
+		ninds[5] = templ->add_intermediate_node_unique(ninds[1], ninds[2]);
+
+		ninds[15] = templ->add_intermediate_node_unique(ninds[12], ninds[13]);
+		ninds[16] = templ->add_intermediate_node_unique(ninds[12], ninds[14]);
+		ninds[17] = templ->add_intermediate_node_unique(ninds[13], ninds[14]);
+
+		for (unsigned offs = 0; offs < 6; offs++)
+		{
+		  ninds[6 + offs] = templ->add_intermediate_node_unique(ninds[offs], ninds[offs + 12]);
+		}
+		
+		return new MeshTemplateElementWedgeC2(ninds);
+	}
+
 	
 	/////////////////////////////////
 

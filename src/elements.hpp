@@ -191,6 +191,7 @@ namespace pyoomph
     unsigned _numpy_index;
     double initial_cartesian_nondim_size = 0.0;
     double initial_quality_factor = 0.0;
+    virtual oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) {throw_runtime_error(std::string("Specify the face element constructor for the element type ")+typeid(*this).name()); return NULL;}
     virtual const std::vector<int> & get_possible_face_indices() const=0;
     virtual  std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const=0;
     virtual void fill_dofs_to_dirichlet_set_indices(std::vector<unsigned> &indices);
@@ -503,6 +504,7 @@ namespace pyoomph
     static oomph::PointIntegral Default_integration_scheme;
     static const std::vector<int> Possible_Face_Indices;
   public:
+    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override {throw_runtime_error("ODE Elements do not have faces"); return NULL;}
     virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override { return std::vector<pyoomph::Node*>(); }
     int nedges() const { return 0; }
@@ -594,6 +596,7 @@ namespace pyoomph
   protected:
     static const std::vector<int> Possible_Face_Indices;
   public:
+    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
     virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const { return 2; }
@@ -658,6 +661,7 @@ namespace pyoomph
 
     static const std::vector<int> Possible_Face_Indices;
   public:
+    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
     virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const { return 2; }
@@ -717,6 +721,7 @@ namespace pyoomph
   protected:
     static const std::vector<int> Possible_Face_Indices;
   public:
+    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
     virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const { return 2; }
@@ -776,6 +781,7 @@ namespace pyoomph
 
      static const std::vector<int> Possible_Face_Indices;
   public:
+    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
     virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const { return 2; }
@@ -831,6 +837,7 @@ namespace pyoomph
   protected:
     static const std::vector<int> Possible_Face_Indices;
   public:
+    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
     virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const { return 4; }
@@ -887,6 +894,7 @@ namespace pyoomph
 
     static const std::vector<int> Possible_Face_Indices;
   public:
+    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
     virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     virtual void get_supporting_C1_nodes_of_C2_node(const unsigned &n, std::vector<oomph::Node *> &support);
@@ -953,6 +961,7 @@ namespace pyoomph
   protected:
     static const std::vector<int> Possible_Face_Indices;
   public:
+    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
     virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     virtual oomph::Node *boundary_node_pt(const int &face_index, const unsigned int index);
@@ -1050,6 +1059,7 @@ namespace pyoomph
 
     static const std::vector<int> Possible_Face_Indices;
   public:
+    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
     virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     void interpolate_hang_values_at_interface();
@@ -1150,6 +1160,7 @@ namespace pyoomph
   protected:
     static const std::vector<int> Possible_Face_Indices;
   public:
+    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
     virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const { return 8; }
@@ -1211,6 +1222,7 @@ namespace pyoomph
 
     static const std::vector<int> Possible_Face_Indices;
   public:
+    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
     virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const { return 8; }
@@ -1282,6 +1294,7 @@ namespace pyoomph
   protected:
      static const std::vector<int> Possible_Face_Indices;
   public:
+    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
     virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const { return 6; }
@@ -1337,7 +1350,7 @@ namespace pyoomph
 
 class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
 {
-  public:
+  public:    
     BulkElementTetra3dC1TB();
     virtual void interpolate_hang_values();
     virtual bool fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap);
@@ -1384,6 +1397,7 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
 
     static const std::vector<int> Possible_Face_Indices;
   public:
+    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
     virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const { return 6; }
@@ -1449,6 +1463,7 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
     static oomph::TBubbleEnrichedGauss<3, 3> Default_enriched_integration_scheme;
     //  static const unsigned Central_node_on_face[3];
   public:
+    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
     BulkElementTetra3dC2TB();
     bool fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap);
     virtual unsigned get_meshio_type_index() const { return 100; } // Just some otherwise unused value here
@@ -1494,6 +1509,7 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
     protected:
       static const std::vector<int> Possible_Face_Indices;
     public:
+      oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
       virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
       std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
       BulkElementWedge3dC1();
@@ -1548,6 +1564,7 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
       static int element_index_to_C1[18];
       static bool node_only_C2[18]; // TODO Including the C2TBs
     public:
+      oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
       virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
       std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
       BulkElementWedge3dC2();
@@ -1603,6 +1620,7 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
   protected:
     static const std::vector<int> Possible_Face_Indices;
   public:
+    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override {throw_runtime_error("A point element has no faces");}
     virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override {return std::vector<pyoomph::Node*>{}; }
     int nedges() const { return 0; }

@@ -674,6 +674,7 @@ namespace pyoomph
     unsigned int nodal_dimension() const { return 3; }
     virtual unsigned nfacets() { return 5; }
     virtual MeshTemplateFacet *construct_facet(unsigned i);
+    virtual MeshTemplateElement *convert_for_C2_space(MeshTemplate *templ);
   };
 
   class MeshTemplateElementWedgeC2 : public MeshTemplateElement

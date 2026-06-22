@@ -2271,7 +2271,15 @@ namespace pyoomph
 		}
 		else if (el->get_geometric_type_index() == 26)
 		{
-			res= new BulkElementWedge3dC2();
+			if (domspace == "C1")
+			{
+			  nodemap = {0, 1, 2, 12, 13, 14};
+			  res= new BulkElementWedge3dC1();
+			}
+			else
+			{
+              res= new BulkElementWedge3dC2();
+			}
 		}
 		else
 		{
@@ -15060,5 +15068,37 @@ namespace pyoomph
 									dynamic_cast<pyoomph::Node*>(this->node_pt(14))}; }
 		else throw_runtime_error("Invalid face index for wedge element");
   	}
+
+	//oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
+
+	oomph::FaceElement * BulkElementQuad2dC2::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) { return new InterfaceElementLine1dC2(jitcode, this, face_index); }
+	oomph::FaceElement * BulkElementQuad2dC1::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) { return new InterfaceElementLine1dC1(jitcode, this, face_index); }
+    oomph::FaceElement * BulkElementTri2dC1::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) { return new InterfaceTElementLine1dC1(jitcode, this, face_index); }
+	oomph::FaceElement * BulkElementTri2dC2::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) { return new InterfaceTElementLine1dC2(jitcode, this, face_index); }
+
+	oomph::FaceElement * BulkElementLine1dC1::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) { return new InterfaceElementPoint0d(jitcode, this, face_index); }
+	oomph::FaceElement * BulkElementLine1dC2::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) { return new InterfaceElementPoint0d(jitcode, this, face_index); }
+	oomph::FaceElement * BulkTElementLine1dC1::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) { return new InterfaceElementPoint0d(jitcode, this, face_index); }
+	oomph::FaceElement * BulkTElementLine1dC2::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) { return new InterfaceElementPoint0d(jitcode, this, face_index); }
+
+	oomph::FaceElement * BulkElementBrick3dC1::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) { return new InterfaceElementQuad2dC1(jitcode, this, face_index); }
+	oomph::FaceElement * BulkElementBrick3dC2::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) { return new InterfaceElementQuad2dC2(jitcode, this, face_index); }
+
+	oomph::FaceElement * BulkElementTetra3dC1::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) { return new InterfaceElementTri2dC1(jitcode, this, face_index); }	
+	oomph::FaceElement * BulkElementTetra3dC2::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) { return new InterfaceElementTri2dC2(jitcode, this, face_index); }	
+	oomph::FaceElement * BulkElementTetra3dC2TB::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) { return new InterfaceElementTri2dC2TB(jitcode, this, face_index); }
+
+	oomph::FaceElement * BulkElementWedge3dC1::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index)
+	{ 
+		if (face_index<2) return  new InterfaceElementTri2dC1(jitcode, this, face_index);
+		else return new InterfaceElementQuad2dC1(jitcode, this, face_index);
+	}
+	
+	oomph::FaceElement * BulkElementWedge3dC2::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index)
+	{
+		if (face_index<2) return  new InterfaceElementTri2dC2(jitcode, this, face_index);
+	    else return new InterfaceElementQuad2dC2(jitcode, this, face_index);					
+	}
+    
 
 }

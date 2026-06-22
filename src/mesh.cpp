@@ -628,71 +628,7 @@ namespace pyoomph
 
     auto gen_face_elem = [jitcode,internal_facets](BulkElementBase *be, int fi)->oomph::FaceElement *
     {
-      oomph::FaceElement *fe = NULL;
-      if (dynamic_cast<BulkElementQuad2dC2 *>(be))
-      {
-        fe = new InterfaceElementLine1dC2(jitcode, be, fi);
-      }
-      else if (dynamic_cast<BulkElementQuad2dC1 *>(be))
-      {
-        fe = new InterfaceElementLine1dC1(jitcode, be, fi);
-      }
-
-      
-      else if (dynamic_cast<BulkElementTri2dC2 *>(be))
-      {      
-        fe = new InterfaceTElementLine1dC2(jitcode, be, fi);
-      }
-      else if (dynamic_cast<BulkElementTri2dC1 *>(be))
-      {
-        fe = new InterfaceTElementLine1dC1(jitcode, be, fi);
-      }
-
-      else if (dynamic_cast<BulkElementLine1dC1 *>(be) || dynamic_cast<BulkElementLine1dC2 *>(be))
-      {
-        fe = new InterfaceElementPoint0d(jitcode, be, fi);
-      }
-      else if (dynamic_cast<BulkTElementLine1dC1 *>(be) || dynamic_cast<BulkTElementLine1dC2 *>(be))
-      {
-        fe = new InterfaceElementPoint0d(jitcode, be, fi); // TODO: IS this right for tris?
-      }
-      else if (dynamic_cast<BulkElementBrick3dC1 *>(be))
-      {
-        fe = new InterfaceElementQuad2dC1(jitcode, be, fi);
-      }
-      else if (dynamic_cast<BulkElementBrick3dC2 *>(be))
-      {
-        fe = new InterfaceElementQuad2dC2(jitcode, be, fi);
-      }
-      // BulkElementTetra3dC1TB is an instance of BulkElementTetra3dC1, so but Tri2dC1 is the right facet
-      else if (dynamic_cast<BulkElementTetra3dC1 *>(be))
-      {
-        fe = new InterfaceElementTri2dC1(jitcode, be, fi);
-      }
-      else if (dynamic_cast<BulkElementTetra3dC2TB *>(be))
-      {        
-        fe = new InterfaceElementTri2dC2TB(jitcode, be, fi);
-      }
-      else if (dynamic_cast<BulkElementTetra3dC2 *>(be))
-      {
-        fe = new InterfaceElementTri2dC2(jitcode, be, fi);
-      }
-      else if (dynamic_cast<BulkElementWedge3dC1 *>(be))
-      {
-        if (fi < 2)
-          fe = new InterfaceElementTri2dC1(jitcode, be, fi);
-        else
-          fe = new InterfaceElementQuad2dC1(jitcode, be, fi);
-      }      
-      else if (dynamic_cast<BulkElementWedge3dC2 *>(be))
-      {
-        if (fi < 2)
-          fe = new InterfaceElementTri2dC2(jitcode, be, fi);
-        else
-          fe = new InterfaceElementQuad2dC2(jitcode, be, fi);
-      }
-      else
-        throw_runtime_error("Implement interface element generation for this elementtype");
+      oomph::FaceElement *fe = be->construct_face_element(jitcode,fi);      
       if (jitcode->get_func_table()->integration_order)
       {
         dynamic_cast<BulkElementBase *>(fe)->set_integration_order(jitcode->get_func_table()->integration_order);
