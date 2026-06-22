@@ -364,13 +364,13 @@ WedgeGaussC2  WedgeElementC2::Default_integration_scheme;
         else if (face_index == 1)
         {
             switch (i)
-            {
+            {              
                 case 0: return 12;  // corner (0,0,1)
                 case 1: return 13;  // corner (1,0,1)
-                case 2: return 14;  // corner (0,1,1)
-                case 3: return 15;  // midpoint of edge 12–13
-                case 4: return 16;  // midpoint of edge 12–14
-                case 5: return 17;  // midpoint of edge 13–14
+                case 2: return 14;  // corner (0,1,1)                
+                case 3: return 15;  // midpoint of edge 12–14 // 15,16,17, 
+                case 4: return 17;  // midpoint of edge 13–14
+                case 5: return 16;  // midpoint of edge 12–13
                 default: throw_runtime_error("Invalid node index for face 1");
             }
         }
@@ -378,18 +378,18 @@ WedgeGaussC2  WedgeElementC2::Default_integration_scheme;
         // ---- Face 2 : s0 = 0, 9-node quadrilateral facet ----
         // Parametric coords on this face: (s1, s2).
         else if (face_index == 2)
-        {
+        {            
             switch (i)
             {
-                case 0: return 0;   // (s1=0,   s2=0  )  corner
-                case 1: return 12;  // (s1=0,   s2=1  )  corner
-                case 2: return 2;   // (s1=1,   s2=0  )  corner
-                case 3: return 14;  // (s1=1,   s2=1  )  corner
-                case 4: return 6;   // (s1=0,   s2=1/2)  s2-mid of i=0,1
-                case 5: return 8;   // (s1=1,   s2=1/2)  s2-mid of i=2,3
-                case 6: return 4;   // (s1=1/2, s2=0  )  s1-mid of i=0,2
-                case 7: return 16;  // (s1=1/2, s2=1  )  s1-mid of i=1,3
-                case 8: return 10;  // (s1=1/2, s2=1/2)  centre
+                case 0: return 0;   // (s1=0,   s2=0  )  corner                
+                case 1: return 6;   // (s1=0,   s2=1/2)  s2-mid of i=0,1                                
+                case 2: return 12;  // (s1=0,   s2=1  )  corner                                
+                case 3: return 4;   // (s1=1/2, s2=0  )  s1-mid of i=0,2
+                case 4: return 10;  // (s1=1/2, s2=1/2)  centre
+                case 5: return 16;  // (s1=1/2, s2=1  )  s1-mid of i=1,3
+                case 6: return 2;   // (s1=1,   s2=0  )  corner                                
+                case 7: return 8;   // (s1=1,   s2=1/2)  s2-mid of i=2,3                                
+                case 8: return 14;  // (s1=1,   s2=1  )  corner                
                 default: throw_runtime_error("Invalid node index for face 2");
             }
         }
@@ -401,14 +401,14 @@ WedgeGaussC2  WedgeElementC2::Default_integration_scheme;
             switch (i)
             {
                 case 0: return 0;   // (s0=0,   s2=0  )  corner
-                case 1: return 12;  // (s0=0,   s2=1  )  corner
+                case 1: return 3;   // (s0=1/2, s2=0  )  s0-mid of i=0,2
                 case 2: return 1;   // (s0=1,   s2=0  )  corner
-                case 3: return 13;  // (s0=1,   s2=1  )  corner
-                case 4: return 6;   // (s0=0,   s2=1/2)  s2-mid of i=0,1
+                case 3: return 6;   // (s0=0,   s2=1/2)  s2-mid of i=0,1
+                case 4: return 9;   // (s0=1/2, s2=1/2)  centre
                 case 5: return 7;   // (s0=1,   s2=1/2)  s2-mid of i=2,3
-                case 6: return 3;   // (s0=1/2, s2=0  )  s0-mid of i=0,2
+                case 6: return 12;  // (s0=0,   s2=1  )  corner
                 case 7: return 15;  // (s0=1/2, s2=1  )  s0-mid of i=1,3
-                case 8: return 9;   // (s0=1/2, s2=1/2)  centre
+                case 8: return 13;  // (s0=1,   s2=1  )  corner                
                 default: throw_runtime_error("Invalid node index for face 3");
             }
         }
@@ -420,15 +420,15 @@ WedgeGaussC2  WedgeElementC2::Default_integration_scheme;
         {
             switch (i)
             {
-                case 0: return 1;   // (t=0,   s2=0  )  corner
-                case 1: return 13;  // (t=0,   s2=1  )  corner
-                case 2: return 2;   // (t=1,   s2=0  )  corner
-                case 3: return 14;  // (t=1,   s2=1  )  corner
-                case 4: return 7;   // (t=0,   s2=1/2)  s2-mid of i=0,1
-                case 5: return 8;   // (t=1,   s2=1/2)  s2-mid of i=2,3
-                case 6: return 5;   // (t=1/2, s2=0  )  t-mid  of i=0,2
-                case 7: return 17;  // (t=1/2, s2=1  )  t-mid  of i=1,3
-                case 8: return 11;  // (t=1/2, s2=1/2)  centre
+                case 0: return 13;  // (t=0,   s2=1  )  corner                
+                case 1: return 7;   // (t=0,   s2=1/2)  s2-mid of i=0,1
+                case 2: return 1;   // (t=0,   s2=0  )  corner
+                case 3: return 17;  // (t=1/2, s2=1  )  t-mid  of i=1,3
+                case 4: return 11;  // (t=1/2, s2=1/2)  centre                
+                case 5: return 5;   // (t=1/2, s2=0  )  t-mid  of i=0,2
+                case 6: return 14;  // (t=1,   s2=1  )  corner                
+                case 7: return 8;   // (t=1,   s2=1/2)  s2-mid of i=2,3                
+                case 8: return 2;   // (t=1,   s2=0  )  corner                                
                 default: throw_runtime_error("Invalid node index for face 4");
             }
         }
@@ -455,17 +455,68 @@ WedgeGaussC2  WedgeElementC2::Default_integration_scheme;
     face_element_pt->bulk_coordinate_derivatives_fct_pt() = bulk_coordinate_derivatives_fct_pt(face_index);    
     face_element_pt->nbulk_value_resize(nnode_face);    
     face_element_pt->bulk_node_number_resize(nnode_face);
-    
+        
     for (unsigned i = 0; i < nnode_face; i++)
     {
-      unsigned bulk_number = get_bulk_node_number(face_index, i);     
+      unsigned bulk_number = get_bulk_node_number(face_index, i);           
       face_element_pt->node_pt(i) = node_pt(bulk_number);
       face_element_pt->bulk_node_number(i) = bulk_number;      
       face_element_pt->nbulk_value(i) = required_nvalue(bulk_number);
     }    
     face_element_pt->normal_sign() = face_outer_unit_normal_sign(face_index);
 
+//////////////////////
+    // Consistency check: make sure that the order of the get_bulk_node_number matches the order of the nodes in the face element (requires the facet->bulk mapping to be correct, see below)
+    /*
+    std::vector<oomph::Vector<double>> xface_buffer;
+    std::vector<oomph::Vector<double>> xbulk_buffer;
+    for (unsigned int i=0; i<nnode_face; i++)
+    {
+      oomph::Vector<double> sface(face_element_pt->dim(),0.0);
+      oomph::Vector<double> xface(face_element_pt->nodal_dimension(),0.0);
+      face_element_pt->local_coordinate_of_node(i,sface);
+      face_element_pt->face_to_bulk_coordinate_fct_pt()(sface,xface);
+      xface_buffer.push_back(xface);
+      unsigned bulk_number = face_element_pt->bulk_node_number(i);
+      oomph::Vector<double> s_bulk(this->dim(),0.0);
+      this->local_coordinate_of_node(bulk_number,s_bulk);      
+      xbulk_buffer.push_back(s_bulk);
+    }
+    //Find the permutation so that xface_buffer[i] matches xbulk_buffer[perm[i]]
+    std::vector<unsigned int> perm(nnode_face);
+    for (unsigned int i=0; i<nnode_face; i++)    {
+      bool found_match=false;
+      for (unsigned int j=0; j<nnode_face; j++)      {
+        double dist=0.0;
+        for (unsigned int k=0; k<xface_buffer[i].size(); k++)        {
+          dist+=(xface_buffer[i][k]-xbulk_buffer[j][k])*(xface_buffer[i][k]-xbulk_buffer[j][k]);
+        }
+        if (dist<1e-8)        {
+          perm[i]=j;
+          found_match=true;
+          break;
+        }      }
+      if (!found_match)      {
+        std::ostringstream error_message;
+        error_message << "Inconsistency in face to bulk node mapping for face " << face_index << ": no match found for face node " << i;
+        throw OomphLibError(error_message.str(), OOMPH_CURRENT_FUNCTION, OOMPH_EXCEPTION_LOCATION);
+      }
+    }
+    // Check that the permutation is the identity (i.e. that the order of the face nodes matches the order of the bulk nodes as given by get_bulk_node_number)
+    for (unsigned int i=0; i<nnode_face; i++)    {
+      if (perm[i]!=i)      {
+        std::ostringstream error_message;
+        std::cout << "Permutation for face " << face_index << ": ";
+        for (unsigned int j=0; j<nnode_face; j++)        {
+          std::cout << perm[j] << " ";        }
+        std::cout << std::endl;
+        error_message << "Inconsistency in face to bulk node mapping for face " << face_index << ": face node " << i << " matches bulk node " << perm[i] << " but should match bulk node " << i;
+        throw OomphLibError(error_message.str(), OOMPH_CURRENT_FUNCTION, OOMPH_EXCEPTION_LOCATION);
+      }
+    }
 
+*/
+//////////////////////
     // Consistency check: make sure that the facet -> bulk is correct
     /*
     std::vector<std::vector<double>> sface_test={ {1.0,0.0},{0.0,1.0},{0.2,0.2},{0.2,0.3}, {0.1,0.4}, {0.7,0.1} }; // For triangular faces
@@ -645,9 +696,7 @@ WedgeGaussC2  WedgeElementC2::Default_integration_scheme;
     }
 
     int WedgeElementBase::face_outer_unit_normal_sign(const int& face_index) const
-    {
-        if (face_index==0) return 1;
-        
-        return 1; // This is a placeholder. The actual sign will depend on the face orientation and the convention used for the normal vector.
+    {                
+        return 1;
     }
 }

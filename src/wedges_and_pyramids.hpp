@@ -22,7 +22,7 @@ class WedgeGaussC1 : public Integral
     double weight(const unsigned& i) const   {   return Weight[i];   }
  };
 
- class WedgeGaussC2 : public Integral
+class WedgeGaussC2 : public Integral
 {
 private:
     static const unsigned Npts = 18;
@@ -38,6 +38,257 @@ public:
     double weight(const unsigned& i) const { return Weight[i]; }
 };
 
+class WedgeElementShapeC1
+{
+ public:
+    static void shape(const Vector<double>& s, Shape& psi) 
+    {
+        const double s0 = s[0];
+        const double s1 = s[1];
+        const double s2 = s[2];
+        const double l1 = 1.0 - s0 - s1;
+        psi[0] = l1 * (1.0 - s2);
+        psi[1] = s0 * (1.0 - s2);
+        psi[2] = s1 * (1.0 - s2);
+        psi[3] = l1 * s2;
+        psi[4] = s0 * s2;
+        psi[5] = s1 * s2;
+    }
+
+    
+    static void dshape_local(const Vector<double>& s,Shape& psi,DShape& dpsids) 
+    {
+        const double s0 = s[0];
+        const double s1 = s[1];
+        const double s2 = s[2];
+        const double l1 = 1.0 - s0 - s1;
+
+        // Shape functions
+        psi[0] = l1 * (1.0 - s2);
+        psi[1] = s0 * (1.0 - s2);
+        psi[2] = s1 * (1.0 - s2);
+
+        psi[3] = l1 * s2;
+        psi[4] = s0 * s2;
+        psi[5] = s1 * s2;
+
+        // Derivatives wrt s0
+        dpsids(0,0) = -(1.0 - s2);
+        dpsids(1,0) =  (1.0 - s2);
+        dpsids(2,0) =  0.0;
+        dpsids(3,0) = -s2;
+        dpsids(4,0) =  s2;
+        dpsids(5,0) =  0.0;
+
+        // Derivatives wrt s1
+        dpsids(0,1) = -(1.0 - s2);
+        dpsids(1,1) =  0.0;
+        dpsids(2,1) =  (1.0 - s2);
+        dpsids(3,1) = -s2;
+        dpsids(4,1) =  0.0;
+        dpsids(5,1) =  s2;
+
+        // Derivatives wrt s2
+        dpsids(0,2) = -l1;
+        dpsids(1,2) = -s0;
+        dpsids(2,2) = -s1;
+        dpsids(3,2) =  l1;
+        dpsids(4,2) =  s0;
+        dpsids(5,2) =  s1;
+    }
+};
+
+class WedgeElementShapeC2
+{
+ public:
+    // ---------------------------------------------------------------
+    // shape
+    // ---------------------------------------------------------------
+    // Evaluate all 18 shape functions at local coordinate s=(s0,s1,s2).
+    //
+    //   psi[layer*6 + k] = T_k(s0,s1) * L_layer(s2)
+    //
+    // Triangle bases  (lambda = 1 - s0 - s1):
+    //   T0 = lambda*(2*lambda - 1)
+    //   T1 = s0*(2*s0 - 1)
+    //   T2 = s1*(2*s1 - 1)
+    //   T3 = 4*s0*lambda
+    //   T4 = 4*s1*lambda
+    //   T5 = 4*s0*s1
+    //
+    // 1-D Lagrange bases on [0,1]:
+    //   L0 = (1-s2)*(1-2*s2)
+    //   L1 = 4*s2*(1-s2)
+    //   L2 = s2*(2*s2-1)
+    // ---------------------------------------------------------------
+    static void shape(const Vector<double>& s, Shape& psi) 
+    {
+        const double s0 = s[0];
+        const double s1 = s[1];
+        const double s2 = s[2];
+        const double l  = 1.0 - s0 - s1;   // barycentric lambda
+
+        // Quadratic triangle bases
+        const double T0 = l  * (2.0*l  - 1.0);
+        const double T1 = s0 * (2.0*s0 - 1.0);
+        const double T2 = s1 * (2.0*s1 - 1.0);
+        const double T3 = 4.0 * s0 * l;
+        const double T4 = 4.0 * s1 * l;
+        const double T5 = 4.0 * s0 * s1;
+
+        // Quadratic 1-D Lagrange bases along s2
+        const double L0 = (1.0 - s2) * (1.0 - 2.0*s2);
+        const double L1 = 4.0 * s2 * (1.0 - s2);
+        const double L2 = s2 * (2.0*s2 - 1.0);
+
+        // Layer s2 = 0  (nodes 0-5)
+        psi[0]  = T0 * L0;
+        psi[1]  = T1 * L0;
+        psi[2]  = T2 * L0;
+        psi[3]  = T3 * L0;
+        psi[4]  = T4 * L0;
+        psi[5]  = T5 * L0;
+
+        // Layer s2 = 1/2  (nodes 6-11)
+        psi[6]  = T0 * L1;
+        psi[7]  = T1 * L1;
+        psi[8]  = T2 * L1;
+        psi[9]  = T3 * L1;
+        psi[10] = T4 * L1;
+        psi[11] = T5 * L1;
+
+        // Layer s2 = 1  (nodes 12-17)
+        psi[12] = T0 * L2;
+        psi[13] = T1 * L2;
+        psi[14] = T2 * L2;
+        psi[15] = T3 * L2;
+        psi[16] = T4 * L2;
+        psi[17] = T5 * L2;
+    }
+
+    // ---------------------------------------------------------------
+    // dshape_local
+    // ---------------------------------------------------------------
+    // Evaluate shape functions and their local-coordinate derivatives.
+    //
+    //   dpsids(i,j) = d(psi_i)/d(s_j),   j in {0,1,2}
+    //
+    // By the product rule:
+    //   d/ds0 [T_k * L_m] = (dT_k/ds0) * L_m
+    //   d/ds1 [T_k * L_m] = (dT_k/ds1) * L_m
+    //   d/ds2 [T_k * L_m] = T_k * (dL_m/ds2)
+    //
+    // Triangle basis derivatives (lambda = 1 - s0 - s1):
+    //   dT0/ds0 = 1 - 4*lambda           dT0/ds1 = 1 - 4*lambda
+    //   dT1/ds0 = 4*s0 - 1               dT1/ds1 = 0
+    //   dT2/ds0 = 0                       dT2/ds1 = 4*s1 - 1
+    //   dT3/ds0 = 4*(1 - 2*s0 - s1)      dT3/ds1 = -4*s0
+    //   dT4/ds0 = -4*s1                   dT4/ds1 = 4*(1 - s0 - 2*s1)
+    //   dT5/ds0 = 4*s1                    dT5/ds1 = 4*s0
+    //
+    // 1-D Lagrange derivatives:
+    //   dL0/ds2 = -3 + 4*s2
+    //   dL1/ds2 =  4*(1 - 2*s2)
+    //   dL2/ds2 =  4*s2 - 1
+    // ---------------------------------------------------------------
+    static void dshape_local(const Vector<double>& s,
+                              Shape&  psi,
+                              DShape& dpsids)
+    {
+        const double s0 = s[0];
+        const double s1 = s[1];
+        const double s2 = s[2];
+        const double l  = 1.0 - s0 - s1;
+
+        // ---- Triangle bases ----
+        const double T0 = l  * (2.0*l  - 1.0);
+        const double T1 = s0 * (2.0*s0 - 1.0);
+        const double T2 = s1 * (2.0*s1 - 1.0);
+        const double T3 = 4.0 * s0 * l;
+        const double T4 = 4.0 * s1 * l;
+        const double T5 = 4.0 * s0 * s1;
+
+        // ---- Triangle basis derivatives wrt s0 ----
+        const double dT0ds0 = 1.0 - 4.0*l;
+        const double dT1ds0 = 4.0*s0 - 1.0;
+        const double dT2ds0 = 0.0;
+        const double dT3ds0 = 4.0*(1.0 - 2.0*s0 - s1);
+        const double dT4ds0 = -4.0*s1;
+        const double dT5ds0 = 4.0*s1;
+
+        // ---- Triangle basis derivatives wrt s1 ----
+        const double dT0ds1 = 1.0 - 4.0*l;
+        const double dT1ds1 = 0.0;
+        const double dT2ds1 = 4.0*s1 - 1.0;
+        const double dT3ds1 = -4.0*s0;
+        const double dT4ds1 = 4.0*(1.0 - s0 - 2.0*s1);
+        const double dT5ds1 = 4.0*s0;
+
+        // ---- 1-D Lagrange bases ----
+        const double L0 = (1.0 - s2) * (1.0 - 2.0*s2);
+        const double L1 = 4.0 * s2 * (1.0 - s2);
+        const double L2 = s2 * (2.0*s2 - 1.0);
+
+        // ---- 1-D Lagrange derivatives wrt s2 ----
+        const double dL0ds2 = -3.0 + 4.0*s2;
+        const double dL1ds2 =  4.0 * (1.0 - 2.0*s2);
+        const double dL2ds2 =  4.0*s2 - 1.0;
+
+        // ---- Shape functions ----
+        // Layer 0
+        psi[0]  = T0*L0;  psi[1]  = T1*L0;  psi[2]  = T2*L0;
+        psi[3]  = T3*L0;  psi[4]  = T4*L0;  psi[5]  = T5*L0;
+        // Layer 1
+        psi[6]  = T0*L1;  psi[7]  = T1*L1;  psi[8]  = T2*L1;
+        psi[9]  = T3*L1;  psi[10] = T4*L1;  psi[11] = T5*L1;
+        // Layer 2
+        psi[12] = T0*L2;  psi[13] = T1*L2;  psi[14] = T2*L2;
+        psi[15] = T3*L2;  psi[16] = T4*L2;  psi[17] = T5*L2;
+
+        // ---- d/ds0 ----
+        // Layer 0
+        dpsids(0,0)  = dT0ds0*L0;  dpsids(1,0)  = dT1ds0*L0;
+        dpsids(2,0)  = dT2ds0*L0;  dpsids(3,0)  = dT3ds0*L0;
+        dpsids(4,0)  = dT4ds0*L0;  dpsids(5,0)  = dT5ds0*L0;
+        // Layer 1
+        dpsids(6,0)  = dT0ds0*L1;  dpsids(7,0)  = dT1ds0*L1;
+        dpsids(8,0)  = dT2ds0*L1;  dpsids(9,0)  = dT3ds0*L1;
+        dpsids(10,0) = dT4ds0*L1;  dpsids(11,0) = dT5ds0*L1;
+        // Layer 2
+        dpsids(12,0) = dT0ds0*L2;  dpsids(13,0) = dT1ds0*L2;
+        dpsids(14,0) = dT2ds0*L2;  dpsids(15,0) = dT3ds0*L2;
+        dpsids(16,0) = dT4ds0*L2;  dpsids(17,0) = dT5ds0*L2;
+
+        // ---- d/ds1 ----
+        // Layer 0
+        dpsids(0,1)  = dT0ds1*L0;  dpsids(1,1)  = dT1ds1*L0;
+        dpsids(2,1)  = dT2ds1*L0;  dpsids(3,1)  = dT3ds1*L0;
+        dpsids(4,1)  = dT4ds1*L0;  dpsids(5,1)  = dT5ds1*L0;
+        // Layer 1
+        dpsids(6,1)  = dT0ds1*L1;  dpsids(7,1)  = dT1ds1*L1;
+        dpsids(8,1)  = dT2ds1*L1;  dpsids(9,1)  = dT3ds1*L1;
+        dpsids(10,1) = dT4ds1*L1;  dpsids(11,1) = dT5ds1*L1;
+        // Layer 2
+        dpsids(12,1) = dT0ds1*L2;  dpsids(13,1) = dT1ds1*L2;
+        dpsids(14,1) = dT2ds1*L2;  dpsids(15,1) = dT3ds1*L2;
+        dpsids(16,1) = dT4ds1*L2;  dpsids(17,1) = dT5ds1*L2;
+
+        // ---- d/ds2 ----
+        // Layer 0
+        dpsids(0,2)  = T0*dL0ds2;  dpsids(1,2)  = T1*dL0ds2;
+        dpsids(2,2)  = T2*dL0ds2;  dpsids(3,2)  = T3*dL0ds2;
+        dpsids(4,2)  = T4*dL0ds2;  dpsids(5,2)  = T5*dL0ds2;
+        // Layer 1
+        dpsids(6,2)  = T0*dL1ds2;  dpsids(7,2)  = T1*dL1ds2;
+        dpsids(8,2)  = T2*dL1ds2;  dpsids(9,2)  = T3*dL1ds2;
+        dpsids(10,2) = T4*dL1ds2;  dpsids(11,2) = T5*dL1ds2;
+        // Layer 2
+        dpsids(12,2) = T0*dL2ds2;  dpsids(13,2) = T1*dL2ds2;
+        dpsids(14,2) = T2*dL2ds2;  dpsids(15,2) = T3*dL2ds2;
+        dpsids(16,2) = T4*dL2ds2;  dpsids(17,2) = T5*dL2ds2;
+    } 
+};
+
 
 // No need to template these classes, wedges only exist in 3d, and the number of nodes along a line is either 2 or 3
 class WedgeElementBase :  public virtual FiniteElement
@@ -50,7 +301,7 @@ class WedgeElementBase :  public virtual FiniteElement
     double s_min() const    { return 0.0; }
     double s_max() const    { return 1.0; }
     unsigned nvertex_node() const { return 6; }
-    Node* vertex_node_pt(const unsigned& j) const
+    Node* vertex_node_pt(const unsigned& j) const override
     {           
       if (j > 5)
       {
@@ -61,7 +312,7 @@ class WedgeElementBase :  public virtual FiniteElement
       return node_pt(j);
     }
     unsigned nnode_on_face() const override { throw_runtime_error("nnode_on_face cannot be implemented for a Wedge, damn."); }
-    unsigned nnode_on_face_by_index(const int& face_index) const  { return (face_index<2) ? 3 : 4; }
+    virtual unsigned nnode_on_face_by_index(const int& face_index) const  { return (face_index<2) ? 3 : 4; }
 };
 
 class RefineableWedgeElement : public virtual RefineableElement, public virtual WedgeElementBase
@@ -189,60 +440,14 @@ class WedgeElementC1 :  public virtual RefineableWedgeElement
 
     unsigned int get_bulk_node_number(const int & face_index, const unsigned int& i) const override;
         
-    inline void shape(const Vector<double>& s, Shape& psi) const
+    void shape(const Vector<double>& s, Shape& psi) const override
     {
-        const double s0 = s[0];
-        const double s1 = s[1];
-        const double s2 = s[2];
-        const double l1 = 1.0 - s0 - s1;
-        psi[0] = l1 * (1.0 - s2);
-        psi[1] = s0 * (1.0 - s2);
-        psi[2] = s1 * (1.0 - s2);
-        psi[3] = l1 * s2;
-        psi[4] = s0 * s2;
-        psi[5] = s1 * s2;
+        WedgeElementShapeC1::shape(s, psi);
     }
 
-    
-    inline void dshape_local(const Vector<double>& s,Shape& psi,DShape& dpsids) const
+    void dshape_local(const Vector<double>& s,Shape& psi,DShape& dpsids) const override
     {
-        const double s0 = s[0];
-        const double s1 = s[1];
-        const double s2 = s[2];
-        const double l1 = 1.0 - s0 - s1;
-
-        // Shape functions
-        psi[0] = l1 * (1.0 - s2);
-        psi[1] = s0 * (1.0 - s2);
-        psi[2] = s1 * (1.0 - s2);
-
-        psi[3] = l1 * s2;
-        psi[4] = s0 * s2;
-        psi[5] = s1 * s2;
-
-        // Derivatives wrt s0
-        dpsids(0,0) = -(1.0 - s2);
-        dpsids(1,0) =  (1.0 - s2);
-        dpsids(2,0) =  0.0;
-        dpsids(3,0) = -s2;
-        dpsids(4,0) =  s2;
-        dpsids(5,0) =  0.0;
-
-        // Derivatives wrt s1
-        dpsids(0,1) = -(1.0 - s2);
-        dpsids(1,1) =  0.0;
-        dpsids(2,1) =  (1.0 - s2);
-        dpsids(3,1) = -s2;
-        dpsids(4,1) =  0.0;
-        dpsids(5,1) =  s2;
-
-        // Derivatives wrt s2
-        dpsids(0,2) = -l1;
-        dpsids(1,2) = -s0;
-        dpsids(2,2) = -s1;
-        dpsids(3,2) =  l1;
-        dpsids(4,2) =  s0;
-        dpsids(5,2) =  s1;
+        WedgeElementShapeC1::dshape_local(s, psi, dpsids);
     }
 
     inline void local_coordinate_of_node(const unsigned& j,Vector<double>& s) const
@@ -300,12 +505,14 @@ class WedgeElementC2 : public virtual RefineableWedgeElement
  //    3    1/2   0     0
  //    4    0     1/2   0
  //    5    1/2   1/2   0
+
  //    6    0     0     1/2
  //    7    1     0     1/2
  //    8    0     1     1/2
  //    9    1/2   0     1/2
  //   10    0     1/2   1/2
  //   11    1/2   1/2   1/2
+ 
  //   12    0     0     1
  //   13    1     0     1
  //   14    0     1     1
@@ -407,6 +614,19 @@ class WedgeElementC2 : public virtual RefineableWedgeElement
     WedgeElementC2(const WedgeElementC2&) = delete;
     ~WedgeElementC2() {}
 
+    Node* vertex_node_pt(const unsigned& j) const override
+    {           
+      if (j > 5)
+      {
+          std::ostringstream error_message;
+          error_message  << "Element only has six vertex nodes; called with node number " << j << std::endl;
+          throw OomphLibError(error_message.str(),OOMPH_CURRENT_FUNCTION,OOMPH_EXCEPTION_LOCATION);
+      }
+      return node_pt((j<3 ? j : j+9)); // vertex nodes are the first 3, then a gap of 9 to skip the mid-edge nodes, then the last 3 vertex nodes at the end of the numbering
+    }
+    unsigned nnode_on_face() const override { throw_runtime_error("nnode_on_face cannot be implemented for a Wedge, damn."); }
+    virtual unsigned nnode_on_face_by_index(const int& face_index) const  { return (face_index<2) ? 6 : 9; }
+
     // ---------------------------------------------------------------
     // get_bulk_node_number
     // ---------------------------------------------------------------
@@ -425,193 +645,16 @@ class WedgeElementC2 : public virtual RefineableWedgeElement
     // ---------------------------------------------------------------
     unsigned get_bulk_node_number(const int& face_index,const unsigned int& i) const;
 
-
-    // ---------------------------------------------------------------
-    // shape
-    // ---------------------------------------------------------------
-    // Evaluate all 18 shape functions at local coordinate s=(s0,s1,s2).
-    //
-    //   psi[layer*6 + k] = T_k(s0,s1) * L_layer(s2)
-    //
-    // Triangle bases  (lambda = 1 - s0 - s1):
-    //   T0 = lambda*(2*lambda - 1)
-    //   T1 = s0*(2*s0 - 1)
-    //   T2 = s1*(2*s1 - 1)
-    //   T3 = 4*s0*lambda
-    //   T4 = 4*s1*lambda
-    //   T5 = 4*s0*s1
-    //
-    // 1-D Lagrange bases on [0,1]:
-    //   L0 = (1-s2)*(1-2*s2)
-    //   L1 = 4*s2*(1-s2)
-    //   L2 = s2*(2*s2-1)
-    // ---------------------------------------------------------------
-    inline void shape(const Vector<double>& s, Shape& psi) const
+    void shape(const Vector<double>& s, Shape& psi) const override
     {
-        const double s0 = s[0];
-        const double s1 = s[1];
-        const double s2 = s[2];
-        const double l  = 1.0 - s0 - s1;   // barycentric lambda
-
-        // Quadratic triangle bases
-        const double T0 = l  * (2.0*l  - 1.0);
-        const double T1 = s0 * (2.0*s0 - 1.0);
-        const double T2 = s1 * (2.0*s1 - 1.0);
-        const double T3 = 4.0 * s0 * l;
-        const double T4 = 4.0 * s1 * l;
-        const double T5 = 4.0 * s0 * s1;
-
-        // Quadratic 1-D Lagrange bases along s2
-        const double L0 = (1.0 - s2) * (1.0 - 2.0*s2);
-        const double L1 = 4.0 * s2 * (1.0 - s2);
-        const double L2 = s2 * (2.0*s2 - 1.0);
-
-        // Layer s2 = 0  (nodes 0-5)
-        psi[0]  = T0 * L0;
-        psi[1]  = T1 * L0;
-        psi[2]  = T2 * L0;
-        psi[3]  = T3 * L0;
-        psi[4]  = T4 * L0;
-        psi[5]  = T5 * L0;
-
-        // Layer s2 = 1/2  (nodes 6-11)
-        psi[6]  = T0 * L1;
-        psi[7]  = T1 * L1;
-        psi[8]  = T2 * L1;
-        psi[9]  = T3 * L1;
-        psi[10] = T4 * L1;
-        psi[11] = T5 * L1;
-
-        // Layer s2 = 1  (nodes 12-17)
-        psi[12] = T0 * L2;
-        psi[13] = T1 * L2;
-        psi[14] = T2 * L2;
-        psi[15] = T3 * L2;
-        psi[16] = T4 * L2;
-        psi[17] = T5 * L2;
+        WedgeElementShapeC2::shape(s, psi);
     }
 
-    // ---------------------------------------------------------------
-    // dshape_local
-    // ---------------------------------------------------------------
-    // Evaluate shape functions and their local-coordinate derivatives.
-    //
-    //   dpsids(i,j) = d(psi_i)/d(s_j),   j in {0,1,2}
-    //
-    // By the product rule:
-    //   d/ds0 [T_k * L_m] = (dT_k/ds0) * L_m
-    //   d/ds1 [T_k * L_m] = (dT_k/ds1) * L_m
-    //   d/ds2 [T_k * L_m] = T_k * (dL_m/ds2)
-    //
-    // Triangle basis derivatives (lambda = 1 - s0 - s1):
-    //   dT0/ds0 = 1 - 4*lambda           dT0/ds1 = 1 - 4*lambda
-    //   dT1/ds0 = 4*s0 - 1               dT1/ds1 = 0
-    //   dT2/ds0 = 0                       dT2/ds1 = 4*s1 - 1
-    //   dT3/ds0 = 4*(1 - 2*s0 - s1)      dT3/ds1 = -4*s0
-    //   dT4/ds0 = -4*s1                   dT4/ds1 = 4*(1 - s0 - 2*s1)
-    //   dT5/ds0 = 4*s1                    dT5/ds1 = 4*s0
-    //
-    // 1-D Lagrange derivatives:
-    //   dL0/ds2 = -3 + 4*s2
-    //   dL1/ds2 =  4*(1 - 2*s2)
-    //   dL2/ds2 =  4*s2 - 1
-    // ---------------------------------------------------------------
-    inline void dshape_local(const Vector<double>& s,
-                              Shape&  psi,
-                              DShape& dpsids) const
+    void dshape_local(const Vector<double>& s,Shape& psi,DShape& dpsids) const override
     {
-        const double s0 = s[0];
-        const double s1 = s[1];
-        const double s2 = s[2];
-        const double l  = 1.0 - s0 - s1;
-
-        // ---- Triangle bases ----
-        const double T0 = l  * (2.0*l  - 1.0);
-        const double T1 = s0 * (2.0*s0 - 1.0);
-        const double T2 = s1 * (2.0*s1 - 1.0);
-        const double T3 = 4.0 * s0 * l;
-        const double T4 = 4.0 * s1 * l;
-        const double T5 = 4.0 * s0 * s1;
-
-        // ---- Triangle basis derivatives wrt s0 ----
-        const double dT0ds0 = 1.0 - 4.0*l;
-        const double dT1ds0 = 4.0*s0 - 1.0;
-        const double dT2ds0 = 0.0;
-        const double dT3ds0 = 4.0*(1.0 - 2.0*s0 - s1);
-        const double dT4ds0 = -4.0*s1;
-        const double dT5ds0 = 4.0*s1;
-
-        // ---- Triangle basis derivatives wrt s1 ----
-        const double dT0ds1 = 1.0 - 4.0*l;
-        const double dT1ds1 = 0.0;
-        const double dT2ds1 = 4.0*s1 - 1.0;
-        const double dT3ds1 = -4.0*s0;
-        const double dT4ds1 = 4.0*(1.0 - s0 - 2.0*s1);
-        const double dT5ds1 = 4.0*s0;
-
-        // ---- 1-D Lagrange bases ----
-        const double L0 = (1.0 - s2) * (1.0 - 2.0*s2);
-        const double L1 = 4.0 * s2 * (1.0 - s2);
-        const double L2 = s2 * (2.0*s2 - 1.0);
-
-        // ---- 1-D Lagrange derivatives wrt s2 ----
-        const double dL0ds2 = -3.0 + 4.0*s2;
-        const double dL1ds2 =  4.0 * (1.0 - 2.0*s2);
-        const double dL2ds2 =  4.0*s2 - 1.0;
-
-        // ---- Shape functions ----
-        // Layer 0
-        psi[0]  = T0*L0;  psi[1]  = T1*L0;  psi[2]  = T2*L0;
-        psi[3]  = T3*L0;  psi[4]  = T4*L0;  psi[5]  = T5*L0;
-        // Layer 1
-        psi[6]  = T0*L1;  psi[7]  = T1*L1;  psi[8]  = T2*L1;
-        psi[9]  = T3*L1;  psi[10] = T4*L1;  psi[11] = T5*L1;
-        // Layer 2
-        psi[12] = T0*L2;  psi[13] = T1*L2;  psi[14] = T2*L2;
-        psi[15] = T3*L2;  psi[16] = T4*L2;  psi[17] = T5*L2;
-
-        // ---- d/ds0 ----
-        // Layer 0
-        dpsids(0,0)  = dT0ds0*L0;  dpsids(1,0)  = dT1ds0*L0;
-        dpsids(2,0)  = dT2ds0*L0;  dpsids(3,0)  = dT3ds0*L0;
-        dpsids(4,0)  = dT4ds0*L0;  dpsids(5,0)  = dT5ds0*L0;
-        // Layer 1
-        dpsids(6,0)  = dT0ds0*L1;  dpsids(7,0)  = dT1ds0*L1;
-        dpsids(8,0)  = dT2ds0*L1;  dpsids(9,0)  = dT3ds0*L1;
-        dpsids(10,0) = dT4ds0*L1;  dpsids(11,0) = dT5ds0*L1;
-        // Layer 2
-        dpsids(12,0) = dT0ds0*L2;  dpsids(13,0) = dT1ds0*L2;
-        dpsids(14,0) = dT2ds0*L2;  dpsids(15,0) = dT3ds0*L2;
-        dpsids(16,0) = dT4ds0*L2;  dpsids(17,0) = dT5ds0*L2;
-
-        // ---- d/ds1 ----
-        // Layer 0
-        dpsids(0,1)  = dT0ds1*L0;  dpsids(1,1)  = dT1ds1*L0;
-        dpsids(2,1)  = dT2ds1*L0;  dpsids(3,1)  = dT3ds1*L0;
-        dpsids(4,1)  = dT4ds1*L0;  dpsids(5,1)  = dT5ds1*L0;
-        // Layer 1
-        dpsids(6,1)  = dT0ds1*L1;  dpsids(7,1)  = dT1ds1*L1;
-        dpsids(8,1)  = dT2ds1*L1;  dpsids(9,1)  = dT3ds1*L1;
-        dpsids(10,1) = dT4ds1*L1;  dpsids(11,1) = dT5ds1*L1;
-        // Layer 2
-        dpsids(12,1) = dT0ds1*L2;  dpsids(13,1) = dT1ds1*L2;
-        dpsids(14,1) = dT2ds1*L2;  dpsids(15,1) = dT3ds1*L2;
-        dpsids(16,1) = dT4ds1*L2;  dpsids(17,1) = dT5ds1*L2;
-
-        // ---- d/ds2 ----
-        // Layer 0
-        dpsids(0,2)  = T0*dL0ds2;  dpsids(1,2)  = T1*dL0ds2;
-        dpsids(2,2)  = T2*dL0ds2;  dpsids(3,2)  = T3*dL0ds2;
-        dpsids(4,2)  = T4*dL0ds2;  dpsids(5,2)  = T5*dL0ds2;
-        // Layer 1
-        dpsids(6,2)  = T0*dL1ds2;  dpsids(7,2)  = T1*dL1ds2;
-        dpsids(8,2)  = T2*dL1ds2;  dpsids(9,2)  = T3*dL1ds2;
-        dpsids(10,2) = T4*dL1ds2;  dpsids(11,2) = T5*dL1ds2;
-        // Layer 2
-        dpsids(12,2) = T0*dL2ds2;  dpsids(13,2) = T1*dL2ds2;
-        dpsids(14,2) = T2*dL2ds2;  dpsids(15,2) = T3*dL2ds2;
-        dpsids(16,2) = T4*dL2ds2;  dpsids(17,2) = T5*dL2ds2;
+        WedgeElementShapeC2::dshape_local(s, psi, dpsids);
     }
+    
 
     // ---------------------------------------------------------------
     // local_coordinate_of_node

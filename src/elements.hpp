@@ -1545,19 +1545,22 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
   {
     protected:
       static const std::vector<int> Possible_Face_Indices;
+      static int element_index_to_C1[18];
+      static bool node_only_C2[18]; // TODO Including the C2TBs
     public:
       virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
       std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
       BulkElementWedge3dC2();
+      void interpolate_hang_values() override;
       int nedges() const { throw_runtime_error("Not implemented"); }
       virtual unsigned get_meshio_type_index() const { return 26; }
       bool fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap);
       void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const {oomph::WedgeElementC2::shape(s, psi); }
-      void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const { throw_runtime_error("to be done") }
+      void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const { oomph::WedgeElementShapeC1::shape(s, psi); }
       void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }      
       void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const;
       void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
-      void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { throw_runtime_error("To be done"); }
+      void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { oomph::WedgeElementShapeC1::dshape_local(s, psi, dpsi); }
       void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
       unsigned int get_node_index_C1_to_element(const unsigned int &i) const { return (i<3 ? i : (i+9)); } //3->12, 4->13, 5->14, 
       unsigned int get_node_index_C2_to_element(const unsigned int &i) const { return i; }
@@ -1590,6 +1593,8 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
       }
       virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 4, order)); }
       oomph::Vector<double> get_midpoint_s() override { oomph::Vector<double> res(this->dim(), 1.0 / 3.0); res[2]=0.5; return res; }
+      bool is_node_index_part_of_C1(const unsigned &n) override { return !node_only_C2[n]; }
+      int get_node_index_element_to_C1(const unsigned int &i) const override { return element_index_to_C1[i]; }
   };
 
 

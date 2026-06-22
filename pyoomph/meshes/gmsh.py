@@ -1616,7 +1616,7 @@ class GmshTemplate(MeshTemplate):
         def add_name(a):
             name_list.append(self._rev_names.get(a,None))
             if a in self._rev_names:
-                #print("Removing name",self._rev_names[a],"from entity",a.dim_tag,self._named_entities[self._rev_names[a]])                
+                #print("Removing name",self._rev_names[a],"from entity",a.dim_tag,self._named_entities[self._rev_names[a]])                                
                 if self._rev_names[a] in self._named_entities:
                     del self._named_entities[self._rev_names[a]]
                 del self._rev_names[a]
@@ -1626,7 +1626,9 @@ class GmshTemplate(MeshTemplate):
                 for aa in a:
                     dimtags.append(aa.dim_tag)
                     to_extrude.append(aa)
+                    #print("Before Rev name is ",self._rev_names,"a",aa.dim_tag,self._rev_names[aa])
                     add_name(aa)
+                    #print("After Rev name is ",self._rev_names,"a",aa.dim_tag,self._rev_names[aa])
             elif isinstance(a,str):
                 raise RuntimeError("Not implemented: Supporting strings as names here")
                 a=gmsh.model.getEntitiesForPhysicalGroup(2,self.get_physical_group(a))[0]
@@ -1663,7 +1665,9 @@ class GmshTemplate(MeshTemplate):
         given_names={a._id for a in self._rev_names}
         start_index=-1
         
+        
         for entry in res:
+            print("Entry",entry,given_names)
             if entry[0]==newdim:
                 start_index+=1
                 sub_index=0
@@ -1671,12 +1675,23 @@ class GmshTemplate(MeshTemplate):
                 if entry[1] not in given_names:
                     original=to_extrude[start_index]                    
                     if isinstance(original,PlaneSurface):
+                        #print("Found missing entity, trying to find name for it. Original was",original,"with dim_tag",original.dim_tag,"subindex",sub_index)
                         orig_curv=original.curve_loop.curves[sub_index]
                         dim_tag=(orig_curv.dim_tag[0],abs(orig_curv.dim_tag[1]))
                         if self._dim_tag_names.get(dim_tag,None) is not None:
                             #print("Already exists",dim_tag,self._dim_tag_names.get(dim_tag,None))
                             del self._rev_names[self._dim_tag_names[dim_tag][1]]
-                            del self._named_entities[self._dim_tag_names[dim_tag][0]]                                                        
+                            #print("To remove from here",self._named_entities[self._dim_tag_names[dim_tag][0]],orig_curv)
+                            # Remove all list entries from self._named_entities[self._dim_tag_names[dim_tag][0]] which ar enot a GmshFakeEntry
+                            self._named_entities[self._dim_tag_names[dim_tag][0]] = [
+                                entry for entry in self._named_entities[self._dim_tag_names[dim_tag][0]] 
+                                if isinstance(entry, GmshTemplate.GmshFakeEntry)
+                            ]
+                            
+                            #self._named_entities[self._dim_tag_names[dim_tag][0]].remove((orig_curv.dim_tag[0],orig_curv.dim_tag[1]))
+                            if len(self._named_entities[self._dim_tag_names[dim_tag][0]])==0:
+                                del self._named_entities[self._dim_tag_names[dim_tag][0]]             
+                            #print("Storing name",self._dim_tag_names[dim_tag][0],"for entity",entry)                                           
                             self._store_name(self._dim_tag_names[dim_tag][0],GmshTemplate.GmshFakeEntry(entry[1],entry))
                             del self._dim_tag_names[dim_tag]
                     else:
@@ -1765,7 +1780,7 @@ class GmshTemplate(MeshTemplate):
         given_names={a._id for a in self._rev_names}
         start_index=-1
         
-        for entry in res:
+        for entry in res:            
             if entry[0]==newdim:
                 start_index+=1
                 sub_index=0
@@ -1773,12 +1788,23 @@ class GmshTemplate(MeshTemplate):
                 if entry[1] not in given_names:
                     original=to_extrude[start_index]                    
                     if isinstance(original,PlaneSurface):
+                        #print("Found missing entity, trying to find name for it. Original was",original,"with dim_tag",original.dim_tag,"subindex",sub_index)
                         orig_curv=original.curve_loop.curves[sub_index]
                         dim_tag=(orig_curv.dim_tag[0],abs(orig_curv.dim_tag[1]))
                         if self._dim_tag_names.get(dim_tag,None) is not None:
                             #print("Already exists",dim_tag,self._dim_tag_names.get(dim_tag,None))
                             del self._rev_names[self._dim_tag_names[dim_tag][1]]
-                            del self._named_entities[self._dim_tag_names[dim_tag][0]]                                                        
+                            #print("To remove from here",self._named_entities[self._dim_tag_names[dim_tag][0]],orig_curv)
+                            # Remove all list entries from self._named_entities[self._dim_tag_names[dim_tag][0]] which ar enot a GmshFakeEntry
+                            self._named_entities[self._dim_tag_names[dim_tag][0]] = [
+                                entry for entry in self._named_entities[self._dim_tag_names[dim_tag][0]] 
+                                if isinstance(entry, GmshTemplate.GmshFakeEntry)
+                            ]
+                            
+                            #self._named_entities[self._dim_tag_names[dim_tag][0]].remove((orig_curv.dim_tag[0],orig_curv.dim_tag[1]))
+                            if len(self._named_entities[self._dim_tag_names[dim_tag][0]])==0:
+                                del self._named_entities[self._dim_tag_names[dim_tag][0]]             
+                            #print("Storing name",self._dim_tag_names[dim_tag][0],"for entity",entry)                                           
                             self._store_name(self._dim_tag_names[dim_tag][0],GmshTemplate.GmshFakeEntry(entry[1],entry))
                             del self._dim_tag_names[dim_tag]
                     else:
