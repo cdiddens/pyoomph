@@ -575,5 +575,22 @@ def div(arg:ExpressionOrNum,lagrangian:bool=False,matrix:Optional[bool]=None,non
 	return _pyoomph.GiNaC_div(arg,_pyoomph.Expression(-1),_pyoomph.Expression(-1),coordsysE,_pyoomph.Expression(flag))
 
 
-
-
+def time_derivative_of_integral(expr:ExpressionOrNum,scheme:Literal["BDF1","BDF2","Newmark2","BDF2_degr","Newmark2_degr"]="BDF1")->Expression:    
+    """
+    Computes the time derivative of an integral expression using a given time stepping scheme. 
+    For moving meshes, this can be different, i.e.
+        weak(partial_t(u),v) != d_by_dt_of_integral(weak(u,v))
+    The latter is d/dt (Integral_Element(t) u(t)*v(t)*dx ), i.e. considers the change of the element size as well.
+    
+    Args:
+        expr: The expression to differentiate.
+        scheme: The time stepping scheme to apply ("BDF1","BDF2","Newmark2","BDF2_degr","Newmark2_degr"). Defaults to "BDF1", "_degr" means that the time derivative is approximated with a lower order scheme in the first step, since initial conditions might not have history values.
+    """        
+    numterms={"BDF1":2,"BDF2":3,"Newmark2":3,"BDF2_degr":3,"Newmark2_degr":3}
+    if scheme not in numterms.keys():
+        raise RuntimeError("Time scheme "+str(scheme)+" not supported for d_by_dt_of_integrals. Supported schemes are "+str(list(numterms.keys())))
+    res=0
+    # Time derivatives are just approximated as d/dt(expr) = sum_i weight_i * expr(t=t_i), where t0=t, t1=t-dt_0, t2=t1-dt_1, etc. The weights are given by the timestepper_weight function.
+    for i in range(numterms[scheme]):
+        res+=timestepper_weight(1,i,scheme=scheme)*evaluate_in_past(expr,i,apply_on_integral_dx=True)
+    return res/scale_factor("temporal") # And we divide by the temporal scaling, since the time derivative is scaled with the temporal scaling

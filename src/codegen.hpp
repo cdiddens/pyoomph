@@ -740,7 +740,7 @@ namespace pyoomph
       FiniteElementCode *opposite_interface_code;     // Code of the interface elements at the opposite side of the interface
       std::vector<FiniteElementSpace *> spaces;       // Spaces in descending complexity order
       std::vector<FiniteElementCode *> required_odes; // Codes of coupled ODEs
-
+      std::set<int> integral_dx_history_required; // Stores the history indices where the history of dx is required. This can be relevant for moving meshes, where dx changes with time
       std::vector<GiNaC::ex> residual;
       std::set<std::string> ignore_assemble_residuals; // E.g. for azimuthal eigenvalue matrices. Residual is not used => don't assemble
       //std::map<std::string,std::set<int> > remove_underived_modes; // If in the Jacobian still modes are present that are not derived from interpolated_... to shape_..., they are removed. They can appear in eigenderivatives

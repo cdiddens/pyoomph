@@ -1827,7 +1827,7 @@ def GiNaC_eval_in_domain(arg0: Expression, arg1: FiniteElementCode, arg2: list[s
     """
     Expand vars and nondims in a particular domain
     """
-def GiNaC_eval_in_past(arg0: Expression, arg1: Expression, arg2: Expression) -> Expression:
+def GiNaC_eval_in_past(arg0: Expression, arg1: Expression, arg2: Expression, arg3: Expression) -> Expression:
     """
     Expand vars and nondims in a particular domain
     """

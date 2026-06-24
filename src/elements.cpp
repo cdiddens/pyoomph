@@ -3260,9 +3260,9 @@ namespace pyoomph
 		*/
 	}
 
-	double BulkElementBase::fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds) const
+	double BulkElementBase::fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds,unsigned history_index) const
 	{
-		return fill_shape_info_at_s(s, index, required, shape_info, JLagr, flag, dxds);
+		return fill_shape_info_at_s(s, index, required, this->shape_info, JLagr, flag, dxds,history_index);
 	}
 
 	/**
@@ -3650,7 +3650,7 @@ namespace pyoomph
           //double w = integral_pt()->weight(ipt_for_esize);
           oomph::Vector<double> s_for_esize(this->dim());
           for (unsigned int _i = 0; _i < this->dim(); _i++)	s_for_esize[_i] = integral_pt()->knot(ipt_for_esize, _i);
-          this->fill_shape_info_at_s(s_for_esize,0,req_dummy, JLagr, flag);
+          this->fill_shape_info_at_s(s_for_esize,0,req_dummy, JLagr, flag,NULL,0); // TODO: Potentially other history indices here
           oomph::Vector<double> x_for_esize(this->nodal_dimension(),0.0);
           std::vector<double> dJdx(this->nodal_dimension(),0.0);
           std::vector<double> d2Jdx2(this->nodal_dimension()*this->nodal_dimension(),0.0);   
@@ -3676,7 +3676,7 @@ namespace pyoomph
 				 if (required.elemsize_Eulerian_Pos)
 				 {
 				   shape_info->elemsize_d_coords[i][l]+=shape_info->int_pt_weights_d_coords[i][l]*J;				  
-				   shape_info->elemsize_d_coords[i][l]+=shape_info->int_pt_weight*dJdx[i]*shape_info->shape_Pos[l];
+				   shape_info->elemsize_d_coords[i][l]+=shape_info->int_pt_weight[0]*dJdx[i]*shape_info->shape_Pos[l];
 				 }
 				 if (require_hessian)
 				 {
@@ -3689,7 +3689,7 @@ namespace pyoomph
 				         {
 				            //TODO: Check this
 					   		shape_info->elemsize_d2_coords[i][j][l][m]+=shape_info->int_pt_weights_d2_coords[i][j][l][m]*J;
-					   		shape_info->elemsize_d2_coords[i][j][l][m]+=shape_info->int_pt_weight*d2Jdx2[i*this->nodal_dimension()+j]*shape_info->shape_Pos[l]*shape_info->shape_Pos[m];  
+					   		shape_info->elemsize_d2_coords[i][j][l][m]+=shape_info->int_pt_weight[0]*d2Jdx2[i*this->nodal_dimension()+j]*shape_info->shape_Pos[l]*shape_info->shape_Pos[m];  
 					   		shape_info->elemsize_d2_coords[i][j][l][m]+=shape_info->int_pt_weights_d_coords[i][l]*dJdx[j]*shape_info->shape_Pos[m];
 //					   		std::cout << "For i,l = "<< i << "," << l <<  " : dJdx[" << j<< "] = " <<  dJdx[j] << " and shape_Pos["<<m<<"] = "<<shape_info->shape_Pos[m] << std::endl;
 //					   		shape_info->elemsize_d2_coords[i][j][l][m]+=shape_info->int_pt_weights_d_coords[j][m]*dJdx[i]*shape_info->shape_Pos[l];    
@@ -3832,7 +3832,7 @@ namespace pyoomph
 	   }	   
 	}
 
-	double BulkElementBase::fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds) const
+	double BulkElementBase::fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds,unsigned history_index) const
 	{
 		bool require_hessian = flag > 2;
 
@@ -3854,7 +3854,7 @@ namespace pyoomph
 			{
 				for (unsigned j = 0; j < el_dim; j++)
 				{
-					interpolated_t(j, i) += this->nodal_position(l, i) * dpsids_Element(l, j);
+					interpolated_t(j, i) += this->nodal_position(history_index, l, i) * dpsids_Element(l, j);
 				}
 			}
 			for (unsigned i = 0; i < n_lagr; i++)
@@ -4808,12 +4808,32 @@ namespace pyoomph
 		oomph::Vector<double> s(this->dim());
 		for (unsigned int i = 0; i < this->dim(); i++)
 			s[i] = integral_pt()->knot(ipt, i);
+        double w = integral_pt()->weight(ipt);
+		
+		if (required_shapes.history_integral_dx1 || required_shapes.history_integral_dx2)
+		{			
+			JITFuncSpec_RequiredShapes_FiniteElement_t simplified_required_shapes;
+			memset(&simplified_required_shapes, 0, sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t));			
+			double JLagr_dummy;			
+			if (required_shapes.history_integral_dx1)
+			{
+			  double Jhistory = fill_shape_info_at_s(s, ipt, simplified_required_shapes, JLagr_dummy, 0,NULL,1);
+			  shape_info->int_pt_weight[1] = w * Jhistory;
+			}
+			if (required_shapes.history_integral_dx2)
+			{
+			  double Jhistory = fill_shape_info_at_s(s, ipt, simplified_required_shapes, JLagr_dummy, 0,NULL,2);
+			  shape_info->int_pt_weight[2] = w * Jhistory;
+			}
+		}
+
 		double JLagr;
 		double J = fill_shape_info_at_s(s, ipt, required_shapes, JLagr, flag);
-		double w = integral_pt()->weight(ipt);
+		
 		shape_info->int_pt_weight_unity= w;
-		shape_info->int_pt_weight = w * J;
+		shape_info->int_pt_weight[0] = w * J;
 		shape_info->int_pt_weight_Lagrangian = w * JLagr;
+		
 	}
 
 	void BulkElementBase::prepare_shape_buffer_for_integration(const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag)
@@ -4856,7 +4876,7 @@ namespace pyoomph
 					shape_info->timestepper_weights_dt_BDF2_degr = shape_info->timestepper_weights_dt_BDF1;
 					shape_info->timestepper_weights_dt_Newmark2_degr = shape_info->timestepper_weights_dt_BDF1;
 				}
-				else if (unsteady_steps_done <= 4)
+				else if (unsteady_steps_done <= 4) // TODO: Does this make sense? I don't think so
 				{
 					shape_info->timestepper_weights_dt_BDF2_degr = shape_info->timestepper_weights_dt_BDF2;
 					shape_info->timestepper_weights_dt_Newmark2_degr = shape_info->timestepper_weights_dt_BDF2;
@@ -7764,7 +7784,7 @@ namespace pyoomph
 			dest[i] = this->internal_data_pt(i)->value(0); // TODO Scaling
 	}
 
-	double BulkElementODE0d::fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds) const
+	double BulkElementODE0d::fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds,unsigned history_index) const
 	{
 		JLagr = 1.0;
 		return 1.0;
@@ -13996,11 +14016,11 @@ namespace pyoomph
 
 		{
 			std::ostringstream oss;
-			oss << "CANNOT RESOLVE EXTERNAL GLOBAL EQUATION NUMBER " << globeq << " in " << codeinst->get_code()->get_file_name();
+			oss << "CANNOT RESOLVE EXTERNAL GLOBAL EQUATION NUMBER " << globeq << " in " << codeinst->get_code()->get_file_name() << std::endl;
 			if (from_elem)
-				oss << " FROM ELEM " << from_elem << " which is in domain " << from_elem->get_code_instance()->get_code()->get_file_name();
+				oss << " FROM ELEM " << from_elem << " which is in domain " << from_elem->get_code_instance()->get_code()->get_file_name() << std::endl;
 			if (info)
-				oss << "INFOSTR: " << (*info);
+				oss << "INFOSTR: " << (*info) << std::endl;
 			oss << "THE ELEMENT ITSELF " << this << " HAS THE " << this->ndof() << " EQUATIONS " << std::endl;
 			auto dofnames = this->get_dof_names();
 			for (unsigned iloc = 0; iloc < this->ndof(); iloc++)
@@ -14020,9 +14040,9 @@ namespace pyoomph
 		return -1;
 	}
 
-	double InterfaceElementBase::fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds) const
+	double InterfaceElementBase::fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds,unsigned history_index) const
 	{
-		BulkElementBase::fill_shape_info_at_s(s, index, required, shape_info, JLagr, flag, dxds);
+		BulkElementBase::fill_shape_info_at_s(s, index, required, shape_info, JLagr, flag, dxds,history_index);
 
 		if (required.bulk_shapes)
 		{

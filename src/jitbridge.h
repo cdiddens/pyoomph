@@ -179,7 +179,7 @@ typedef struct JITHangInfo
 typedef struct JITShapeInfo
 {
   unsigned int n_int_pt;             // Number of integration points
-  double int_pt_weight;            // Eulerian weight at the current integration point
+  double int_pt_weight[2];            // Eulerian weight at the current integration point (or at history steps 1 and 2)
   double int_pt_weight_Lagrangian; // Lagrangian weight at the current integration point
   double int_pt_weight_unity;            // Weight at the current integration point in s space, i.e. without any mapping [ sqrt(det(g_ab)) ]
   double ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(int_pt_weights_d_coords)); // Weights derived by coordinates, [i_dim,l_node], i.e. w*dJ_Eulerian/dX^l_i
@@ -314,6 +314,8 @@ typedef struct JITFuncSpec_RequiredShapes_FiniteElement
   bool normal_Pos;                                   // Normal required /( Normal is just considered to be defined on the Pos space)
   bool elemsize_Eulerian_Pos,elemsize_Lagrangian_Pos;
   bool elemsize_Eulerian_cartesian_Pos,elemsize_Lagrangian_cartesian_Pos;  
+  bool history_integral_dx1;
+  bool history_integral_dx2;
   struct JITFuncSpec_RequiredShapes_FiniteElement *bulk_shapes;
   struct JITFuncSpec_RequiredShapes_FiniteElement *opposite_shapes;
   // struct JITFuncSpec_RequiredShapes_FiniteElement * otherbulk_shapes;

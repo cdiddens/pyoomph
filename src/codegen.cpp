@@ -350,6 +350,21 @@ namespace pyoomph
 				}
 				return inp;
 			}
+			else if (GiNaC::is_a<GiNaC::GiNaCSpatialIntegralSymbol>(inp))
+			{
+				auto &si = (GiNaC::ex_to<GiNaC::GiNaCSpatialIntegralSymbol>(inp)).get_struct();
+				if (si.history_step > 0)
+				{
+					SpatialIntegralSymbol repl = si;
+					repl.history_step = 0; // Evaluate at current time
+					extra_steady_routine = true; // We require an extra steady routine in that case
+					return GiNaC::GiNaCSpatialIntegralSymbol(repl);
+				}
+				else
+				{
+					return inp.map(*this);
+				}
+			}
 			else
 				return inp.map(*this);
 		}
@@ -3458,7 +3473,7 @@ namespace pyoomph
 		}
 		if (!eulerian_part.is_zero())
 		{
-			os << indent << "  const double dx = shapeinfo->int_pt_weight;" << std::endl;
+			os << indent << "  const double dx = shapeinfo->int_pt_weight[0];" << std::endl;
 		}
 		if (!lagrangian_part.is_zero())
 		{
@@ -3851,6 +3866,10 @@ namespace pyoomph
 					if (pyoomph_verbose)
 					{
 						std::cout << " ADDING IT TO THE SET " << (*i) << " which has currently " << dx_symbs.size() << " elements " << std::endl;
+					}
+					if (eulerian)
+					{
+					  if (sp.history_step!=0) this->integral_dx_history_required.insert(sp.history_step);
 					}
 					dx_symbs.insert(0+GiNaC::ex_to<GiNaC::GiNaCSpatialIntegralSymbol>(*i));
 					if (pyoomph_verbose)
@@ -4486,7 +4505,7 @@ namespace pyoomph
 			}
 		}
 
-		os << "    const double dx = shapeinfo->int_pt_weight;" << std::endl;
+		os << "    const double dx = shapeinfo->int_pt_weight[0];" << std::endl;
 		os << "    const double dX = shapeinfo->int_pt_weight_Lagrangian;" << std::endl;
 		os << "    const double dx_unity = shapeinfo->int_pt_weight_unity;" << std::endl;
 		os << "    switch (index)" << std::endl;
@@ -4572,7 +4591,7 @@ namespace pyoomph
 		GiNaC::print_FEM_options csrc_opts;
 		csrc_opts.for_code = this;
 
-		os << "    const double dx = shapeinfo->int_pt_weight;" << std::endl; // TODO: Lagrangian part
+		os << "    const double dx = shapeinfo->int_pt_weight[0];" << std::endl; // TODO: Lagrangian part
 		os << "    switch (index)" << std::endl;
 		os << "    {" << std::endl;
 		unsigned index = 0;
@@ -6228,6 +6247,7 @@ namespace pyoomph
 			{
 				just_the_opposite_normal = true;
 				require_opposite_interface = true;
+				require_opposite_bulk=true;
 			}
 		}
 
@@ -6265,6 +6285,7 @@ namespace pyoomph
 				lines.push_back(indent + "functable->shapes_required_" + func_type + ".bulk_shapes->psi_Pos = true;");
 			}
 
+			
 			if (require_bulk_bulk)
 			{
 
@@ -6298,6 +6319,7 @@ namespace pyoomph
 					//os << indent << "functable->shapes_required_" << func_type << ".bulk_shapes->bulk_shapes->psi_Pos = true;" << std::endl;
 					lines.push_back(indent + "functable->shapes_required_" + func_type + ".bulk_shapes->bulk_shapes->psi_Pos = true;");
 				}
+
 			}
 		}
 
@@ -6337,6 +6359,10 @@ namespace pyoomph
 					{
 						//os << indent << "functable->shapes_required_" << func_type << ".opposite_shapes->" << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
 						lines.push_back(indent + "functable->shapes_required_" + func_type + ".opposite_shapes->" + psientry.first + "_" + fieldentry.first->get_name() + " = true;");
+						if (psientry.first + "_" + fieldentry.first->get_name()=="normal_Pos")
+						{
+							lines.push_back(indent + "functable->shapes_required_" + func_type + ".opposite_shapes->bulk_shapes->psi_Pos = true;");
+						}
 					}
 				}
 			}
@@ -6344,8 +6370,9 @@ namespace pyoomph
 			if (just_the_opposite_normal)
 			{
 				//os << indent << "functable->shapes_required_" << func_type << ".opposite_shapes->psi_Pos = true;" << std::endl;
-				lines.push_back(indent + "functable->shapes_required_" + func_type + ".opposite_shapes->psi_Pos = true;");
+				lines.push_back(indent + "functable->shapes_required_" + func_type + ".opposite_shapes->bulk_shapes->psi_Pos = true;");
 			}
+			
 			/*
 			if (just_the_normal) //TODO: THis required here?
 			{
@@ -6390,6 +6417,12 @@ namespace pyoomph
 			}
 			*/
 		}
+
+		for (int history_step : this->integral_dx_history_required)
+        {
+		  lines.push_back(indent + "functable->shapes_required_" + func_type + ".history_integral_dx"+std::to_string(history_step) + "= true;");
+		}
+
 
 		std::sort(lines.begin(), lines.end());
 		for (auto &l : lines)
@@ -7028,7 +7061,7 @@ namespace pyoomph
 		init << " functable->res_jac_names=(char**)calloc(functable->num_res_jacs,sizeof(char*));" << std::endl;
 		init << " functable->missing_residual_assembly=(bool*)calloc(functable->num_res_jacs,sizeof(bool));" << std::endl;
 		cleanup << " pyoomph_tested_free(functable->missing_residual_assembly); functable->missing_residual_assembly=PYOOMPH_NULL; " << std::endl;
-		init << " functable->has_constant_mass_matrix_for_sure=(bool*)calloc(functable->num_res_jacs,sizeof(bool));" << std::endl;
+		init << " functable->has_constant_mass_matrix_for_sure=(bool*)calloc(functable->num_res_jacs,sizeof(bool));" << std::endl;		
 		cleanup << " pyoomph_tested_free(functable->has_constant_mass_matrix_for_sure); functable->has_constant_mass_matrix_for_sure=PYOOMPH_NULL; " << std::endl;
 
 		
@@ -8096,7 +8129,10 @@ namespace GiNaC
 				else if (get_struct().is_lagrangian())
 					c.s << "dX";
 				else if (!get_struct().is_derived())
-					c.s << "dx";
+				{
+					if (get_struct().history_step==0) c.s << "dx";				
+					else c.s << "shapeinfo->int_pt_weight[" << get_struct().history_step << "]";
+				}
 				else if (!get_struct().is_derived2())
 				{
 					c.s << "shapeinfo->int_pt_weights_d_coords[" << get_struct().get_derived_direction() << "][" << (get_struct().is_derived_by_lshape2() ? "l_shape2" : "l_shape") << "]"; // TODO: Other spaces, e.g. bulk
@@ -8119,6 +8155,8 @@ namespace GiNaC
 				texinfo["derived_in_direction"] = get_struct().is_derived() ? std::to_string(get_struct().get_derived_direction()) : "none";
 				texinfo["derived_in_direction2"] = get_struct().is_derived2() ? std::to_string(get_struct().get_derived_direction2()) : "none";
 				texinfo["derived_to_lshape2"] = get_struct().is_derived_by_lshape2() ? "true" : "false";
+				texinfo["simple_unity_integral"] = get_struct().simple_unity_integral ? "true" : "false";
+				texinfo["history_step"] = std::to_string(get_struct().history_step);
 				c.s << femprint.FEM_opts->for_code->latex_printer->_get_LaTeX_expression(texinfo, femprint.FEM_opts->for_code);
 				return;
 			}
@@ -8154,6 +8192,11 @@ namespace GiNaC
 			}
 			else
 			{
+				if (get_struct().history_step > 0)
+				{
+					c.s << "<DX"+modestr<< "|History step " << get_struct().history_step << "|" << modestr <<">";
+				}
+				else
 				c.s << "<DX"+modestr+">";
 			}
 		}
@@ -8161,7 +8204,7 @@ namespace GiNaC
 	template <>
 	GiNaC::ex GiNaCSpatialIntegralSymbol::derivative(const GiNaC::symbol &s) const
 	{
-		if (get_struct().is_lagrangian() || get_struct().simple_unity_integral)
+		if (get_struct().is_lagrangian() || get_struct().simple_unity_integral || get_struct().history_step>0)
 			return 0;
 		
 		if (pyoomph::__derive_only_by_expansion_mode &&  get_struct().expansion_mode!=*pyoomph::__derive_only_by_expansion_mode)

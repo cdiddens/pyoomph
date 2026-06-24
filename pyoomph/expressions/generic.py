@@ -1122,13 +1122,14 @@ def evaluate_in_domain(expr:ExpressionOrNum,domain:Union[str,_pyoomph.FiniteElem
 	return _pyoomph.GiNaC_eval_in_domain(expr,domain,tags)
 
 
-def evaluate_in_past(expr:ExpressionOrNum,timestep_offset:Union[int,float]=1)->Expression:
+def evaluate_in_past(expr:ExpressionOrNum,timestep_offset:Union[int,float]=1,apply_on_integral_dx:bool=False)->Expression:
 	"""
 	Evaluate the given expression in the past at a specified time offset.
 
 	Args:
 		expr: The expression to be evaluated.
 		timestep_offset: The time offset in the past. Defaults to 1, i.e. the previously converged solution.
+		apply_on_integral_dx: Whether to apply the evaluation on dx symbols. Defaults to False.
 
 	Returns:
 		The evaluated expression in the past.
@@ -1150,7 +1151,7 @@ def evaluate_in_past(expr:ExpressionOrNum,timestep_offset:Union[int,float]=1)->E
 		if timestep_offset==0:
 			return expr
 		else:			
-			return 0+_pyoomph.GiNaC_eval_in_past(expr,_pyoomph.Expression(int(timestep_offset)),_pyoomph.Expression(0))
+			return 0+_pyoomph.GiNaC_eval_in_past(expr,_pyoomph.Expression(int(timestep_offset)),_pyoomph.Expression(0),_pyoomph.Expression(apply_on_integral_dx))
 	elif isinstance(timestep_offset,float):
 		tlow:int=math.floor(timestep_offset)
 		thigh:int=math.ceil(timestep_offset)
@@ -1159,20 +1160,21 @@ def evaluate_in_past(expr:ExpressionOrNum,timestep_offset:Union[int,float]=1)->E
 		if tlow==0:
 			low=expr
 		else:
-			low=_pyoomph.GiNaC_eval_in_past(expr,_pyoomph.Expression(tlow),_pyoomph.Expression(0))
-		high=_pyoomph.GiNaC_eval_in_past(expr,_pyoomph.Expression(thigh),_pyoomph.Expression(0))
+			low=_pyoomph.GiNaC_eval_in_past(expr,_pyoomph.Expression(tlow),_pyoomph.Expression(0),_pyoomph.Expression(apply_on_integral_dx))
+		high=_pyoomph.GiNaC_eval_in_past(expr,_pyoomph.Expression(thigh),_pyoomph.Expression(0),_pyoomph.Expression(apply_on_integral_dx))
 		return low*frac_low+high*frac_high
 	else:
 		raise RuntimeError("cannot yet evaluate at a variable step. But you can use e.g. (1-theta)*evaluate_at_past(expr,1)+theta*expr for some variable theta to blend between current and previous time step")
 
 
-def evaluate_at_midpoint(expr:ExpressionOrNum, midpt:Union[float,int]=0.5)->Expression:
+def evaluate_at_midpoint(expr:ExpressionOrNum, midpt:Union[float,int]=0.5,apply_on_integral_dx:bool=False)->Expression:
 	"""
 	Evaluates the given expression by replacing each var by a blending between the history values.
 
 	Args:
 		expr: The expression to be evaluated.
 		midpt: The blending at which to evaluate the var statements. Defaults to 0.5, i.e. all variables are evaluated at the average between current and previous time step (midpoint rule)
+		apply_on_integral_dx: Whether to apply the evaluation on dx symbols. Defaults to False.
 
 	Returns:
 		The evaluated expression.
@@ -1190,13 +1192,13 @@ def evaluate_at_midpoint(expr:ExpressionOrNum, midpt:Union[float,int]=0.5)->Expr
 		if midpt == 0:
 			return expr
 		else:
-			return _pyoomph.GiNaC_eval_in_past(expr, _pyoomph.Expression(int(midpt)),_pyoomph.Expression(0))
+			return _pyoomph.GiNaC_eval_in_past(expr, _pyoomph.Expression(int(midpt)),_pyoomph.Expression(0), _pyoomph.Expression(int(apply_on_integral_dx)))
 	elif isinstance(midpt, float):
-		return _pyoomph.GiNaC_eval_in_past(expr, _pyoomph.Expression(midpt),_pyoomph.Expression(0))
+		return _pyoomph.GiNaC_eval_in_past(expr, _pyoomph.Expression(midpt),_pyoomph.Expression(0), _pyoomph.Expression(int(apply_on_integral_dx)))
 	else:
 		raise RuntimeError("cannot yet evaluate at a variable midpoint fraction")
 
-def time_scheme(scheme:TimeSteppingScheme,expr:ExpressionOrNum,only_implicit_terms:bool=False)->Expression:
+def time_scheme(scheme:TimeSteppingScheme,expr:ExpressionOrNum,only_implicit_terms:bool=False,apply_on_integral_dx:bool=False)->Expression:
 	"""
 	Selects a time stepping scheme for the given expression by replacing all partial_t terms by the corresponding time stepping and expanding all other terms by appropriate evalulations in the past.
 
@@ -1204,6 +1206,7 @@ def time_scheme(scheme:TimeSteppingScheme,expr:ExpressionOrNum,only_implicit_ter
 		scheme: The time stepping scheme to apply ("BDF1","BDF2","Newmark2","TPZ","MPT","Simpson","Boole")
 		expr: The expression to apply the time stepping scheme to.
 		only_implicit_terms: Whether to only evaluate the implicit terms (history terms will be not affected). Defaults to False.
+		apply_on_integral_dx: Whether to apply the evaluation on dx symbols. Defaults to False.
 
 	Returns:
 		The result of applying the time stepping scheme to the expression.
@@ -1217,13 +1220,13 @@ def time_scheme(scheme:TimeSteppingScheme,expr:ExpressionOrNum,only_implicit_ter
 	def ev(expr:Expression,where:float,taction:int)->Expression:
 		if only_implicit_terms:
 			if where==0:
-				return _pyoomph.GiNaC_eval_in_past(expr, _pyoomph.Expression(where), _pyoomph.Expression(taction))
+				return _pyoomph.GiNaC_eval_in_past(expr, _pyoomph.Expression(where), _pyoomph.Expression(taction), _pyoomph.Expression(int(apply_on_integral_dx)))
 			elif where!=1 and where!=2:
 				raise RuntimeError("Cannot do this right now")
 			else:
 				return Expression(0)
 		else:
-			return _pyoomph.GiNaC_eval_in_past(expr, _pyoomph.Expression(where),_pyoomph.Expression(taction))
+			return _pyoomph.GiNaC_eval_in_past(expr, _pyoomph.Expression(where),_pyoomph.Expression(taction),_pyoomph.Expression(int(apply_on_integral_dx)))
 	if scheme=="BDF1":
 		return ev(expr, 0,1)
 	elif scheme=="BDF2":

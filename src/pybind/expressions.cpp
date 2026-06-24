@@ -1079,8 +1079,8 @@ void PyReg_Expressions(py::module &m)
 		return 0+pyoomph::expressions::eval_in_domain(expr,ri); },
 		"Expand vars and nondims in a particular domain");
 	m.def(
-		"GiNaC_eval_in_past", [&](GiNaC::ex expr, GiNaC::ex offset, GiNaC::ex tstep_action)
-		{ return 0 + pyoomph::expressions::eval_in_past(expr, offset, tstep_action); },
+		"GiNaC_eval_in_past", [&](GiNaC::ex expr, GiNaC::ex offset, GiNaC::ex tstep_action, GiNaC::ex apply_on_integral_dx)
+		{ return 0 + pyoomph::expressions::eval_in_past(expr, offset, tstep_action,apply_on_integral_dx); },
 		"Expand vars and nondims in a particular domain");
 	m.def(
 		"GiNaC_eval_at_expansion_mode", [&](GiNaC::ex expr, GiNaC::ex index)
