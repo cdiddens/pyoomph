@@ -74,6 +74,7 @@ class SuperLUSerial(GenericLinearSystemSolver):
 						print("Singular matrix detected!")
 						print("Doing nullspace investigation!")
 						nsp=scipy.linalg.null_space(A.todense()) #type:ignore
+						print("Nullspace has shape",nsp.shape)
 						for k in range(nsp.shape[1]): #type:ignore
 							nspv=nsp[:,k] #type:ignore
 							maxi=numpy.argsort(numpy.absolute(nspv)) #type:ignore

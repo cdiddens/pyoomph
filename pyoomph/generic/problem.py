@@ -2831,12 +2831,27 @@ class Problem(_pyoomph.Problem):
         if rebuild:
             self.flush_sub_meshes()
             self._interfacemeshes=[]
-        for _,m in self._meshdict.items():
-            assert m._codegen is not None
-            m._codegen._mesh=m 
-            self.add_sub_mesh(m)
+
+        # First odes
+        for _, m in self._meshdict.items():
+            if isinstance(m,ODEStorageMesh):
+                assert m._codegen is not None
+                m._codegen._mesh=m 
+                self.add_sub_mesh(m)
+        # Now bulks
+        for _, m in self._meshdict.items():            
+            if isinstance(m,(MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d)):
+                assert m._codegen is not None
+                m._codegen._mesh=m 
+                self.add_sub_mesh(m)
+
+        # And finally interfaces
+        for _, m in self._meshdict.items():
             if isinstance(m,(MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d)):
                 recu_add_imeshes(m)
+
+
+
         if rebuild:
             if not self.is_quiet():
                 print("REBUILDING GLOBAL MESH FROM LIST")

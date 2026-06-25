@@ -14021,19 +14021,25 @@ namespace pyoomph
 				oss << " FROM ELEM " << from_elem << " which is in domain " << from_elem->get_code_instance()->get_code()->get_file_name() << std::endl;
 			if (info)
 				oss << "INFOSTR: " << (*info) << std::endl;
-			oss << "THE ELEMENT ITSELF " << this << " HAS THE " << this->ndof() << " EQUATIONS " << std::endl;
-			auto dofnames = this->get_dof_names();
-			for (unsigned iloc = 0; iloc < this->ndof(); iloc++)
+			if (this->eleminfo.alloced)
 			{
-				long int iglob = this->eqn_number(iloc);
-				oss << "   " << iloc << "  " << iglob << "  " << dofnames[iloc] << std::endl;
+			    oss << "THE ELEMENT ITSELF " << this << " HAS THE " << this->ndof() << " EQUATIONS " << std::endl;			
+				auto dofnames = this->get_dof_names();
+				for (unsigned iloc = 0; iloc < this->ndof(); iloc++)
+				{
+					long int iglob = this->eqn_number(iloc);
+					oss << "   " << iloc << "  " << iglob << "  " << dofnames[iloc] << std::endl;
+				}
 			}
-			dofnames = from_elem->get_dof_names();
-			oss << "THE SOURCE ELEMENT " << from_elem << " HAS THE " << from_elem->ndof() << " EQUATIONS " << std::endl;
-			for (unsigned iloc = 0; iloc < from_elem->ndof(); iloc++)
+			if (from_elem->get_eleminfo()->alloced)
 			{
-				long int iglob = from_elem->eqn_number(iloc);
-				oss << "   " << iloc << "  " << iglob << "  " << dofnames[iloc] << std::endl;
+				auto dofnames = from_elem->get_dof_names();
+				oss << "THE SOURCE ELEMENT " << from_elem << " HAS THE " << from_elem->ndof() << " EQUATIONS " << std::endl;
+				for (unsigned iloc = 0; iloc < from_elem->ndof(); iloc++)
+				{
+					long int iglob = from_elem->eqn_number(iloc);
+					oss << "   " << iloc << "  " << iglob << "  " << dofnames[iloc] << std::endl;
+				}
 			}
 			throw_runtime_error(oss.str());
 		}

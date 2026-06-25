@@ -405,9 +405,14 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
                 pos_space=self.get_current_code_generator().get_parent_domain()._coordinate_space
                 if pos_space=="":
                     raise RuntimeError("Find out the coordinate space:"+str())
-                kinbc_space=pos_space
+                if pos_space=="C2TB":                    
+                    kinbc_space="C2"
+                elif pos_space=="C1TB":
+                    kinbc_space="C1"                
+                else:
+                    kinbc_space=pos_space
         
-            self.define_scalar_field(self.kinbc_name, inside_space )
+            self.define_scalar_field(self.kinbc_name, kinbc_space )
         # If other side has a NavierStokes equation, add also velocity connection
         self._has_opposite_flow = False
         if self.get_opposite_side_of_interface(raise_error_if_none=False):
