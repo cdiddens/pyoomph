@@ -14042,8 +14042,12 @@ namespace pyoomph
 
 	double InterfaceElementBase::fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds,unsigned history_index) const
 	{
-		BulkElementBase::fill_shape_info_at_s(s, index, required, shape_info, JLagr, flag, dxds,history_index);
+		double JEulerian=BulkElementBase::fill_shape_info_at_s(s, index, required, shape_info, JLagr, flag, dxds,history_index);
 
+		if (history_index>0)
+		{
+			return JEulerian; // Make it simple here
+		}
 		if (required.bulk_shapes)
 		{
 			oomph::Vector<double> sbulk = this->local_coordinate_in_bulk(s);
@@ -14075,7 +14079,7 @@ namespace pyoomph
 			}
 		}
 
-		return this->J_eulerian(s);
+		return this->J_eulerian(s); // TODO: This likely can be just set to JEulerian from above
 	}
 
 	void InterfaceElementBase::prepare_shape_buffer_for_integration(const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag)

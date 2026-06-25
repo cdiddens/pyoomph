@@ -83,7 +83,7 @@ def CompositionDiffusionEquations(fluid_props:AnyFluidProperties, space:FiniteEl
     return res
 
 
-def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteElementSpaceEnum="C1", compo_dt_factor:ExpressionOrNum=1, ns_mode:Literal["TH","CR"]="TH", boussinesq:bool=False,
+def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteElementSpaceEnum="C1", compo_dt_factor:ExpressionOrNum=1, ns_mode:Literal["TH","CR","mini"]="TH", boussinesq:bool=False,
                              gravity:ExpressionNumOrNone=None, bulkforce:ExpressionNumOrNone=None, ns_dt_factor:ExpressionOrNum=1, ns_nl_factor:ExpressionNumOrNone=None, with_IC:bool=True,
                              hele_shaw_thickness:ExpressionNumOrNone=None, spatial_errors:Optional[float]=None, useCompoSUPG:bool=False,isothermal:bool=True,initial_temperature:ExpressionNumOrNone=None,additional_advection:ExpressionOrNum=0,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",wrong_strain:bool=False,integrate_advection_by_parts:bool=False,PFEM:Union[PFEMOptions, bool]=False,wrap_params_in_subexpressions=True,thermal_dt_factor:ExpressionOrNum=1,thermal_adv_factor:ExpressionOrNum=1) -> Equations:
     """
@@ -93,7 +93,7 @@ def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteE
         fluid_props: The fluid properties.
         compo_space: Space for the mass fraction fields
         compo_dt_factor: Factor for the time derivative of the mass fraction fields
-        ns_mode: Which Navier-Stokes discretization to use, Taylor-Hood (``"TH"``) or Crouzeix-Raviart (``"CR"``).
+        ns_mode: Which Navier-Stokes discretization to use, Taylor-Hood (``"TH"``) or Crouzeix-Raviart (``"CR"``) or MINI Elements (``"mini"``).
         boussinesq: Use Boussinesq approximation
         gravity: Gravity vector [in m/s^2].
         bulkforce: Additional bulk force term.

@@ -1813,3 +1813,29 @@ class GmshTemplate(MeshTemplate):
         
 
         return res
+    
+    
+     
+    def add_mesh_size_field(self,typ:Literal["AttractorAnisoCurve","AutomaticMeshSizeField","Ball","BoundaryLayer","Box","Constant","Curvature","Cylinder","Distance","Extend","ExternalProcess","Frustum","Gradient","IntersectAniso","Laplacian","LonLat","MathEval","MathEvalAniso","Max","MaxEigenHessian","Mean","Min","MinAniso","Octree","Param","PostView","Restrict","Structured","Threshold"],*,tag:int=-1, **kwargs):
+        """
+        Adds a mesh size field of the given type with the given parameters. Returns the field id.
+        See https://gmsh.info/doc/texinfo/#Gmsh-mesh-size-fields for more information on the available field types and their parameters.
+        """
+        field_id=gmsh.model.mesh.field.add(typ,tag)
+        for k,v in kwargs.items():
+            if isinstance(v,(list,tuple)):                
+                newv=[v_i._id if hasattr(v_i,"_id") else v_i for v_i in v]
+                gmsh.model.mesh.field.setNumbers(field_id,k,newv)                
+            elif isinstance(v,(int,float)):
+                gmsh.model.mesh.field.setNumber(field_id,k,v)
+            elif isinstance(v,str):
+                gmsh.model.mesh.field.setString(field_id,k,v)
+        return field_id
+    
+    def set_mesh_size_background_field(self,field_id:int):
+        """
+        Sets the given mesh size field as the background mesh size field.
+        See https://gmsh.info/doc/texinfo/#Gmsh-mesh-size-fields for more information on the available field types and their parameters.
+        """
+        gmsh.model.mesh.field.setAsBackgroundMesh(field_id)
+    
