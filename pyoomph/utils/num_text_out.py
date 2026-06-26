@@ -84,12 +84,16 @@ class LoadedTextDataFile:
         f.close()
         if len(header) == 0 or header[0] != "#":
             raise RuntimeError("Found no header in the file "+str(filename))
-        header = header.lstrip("#")
-        self.descs = header.split("\t")
-        self.data: NPFloatArray = numpy.loadtxt(
-            filename, ndmin=2)  # type:ignore
+                
+        self.data: NPFloatArray = numpy.loadtxt(filename, ndmin=2)  # type:ignore
+        header_names=header.strip().strip("#").strip().split()        
+        header_keys=[s.lstrip("@") for s in header_names[self.data.shape[1]:]]
+        self.params={s.split("=")[0]:s.split("=")[1] for s in header_keys}                
+        self.columns=header_names[:self.data.shape[1]]
+                    
+        
 
-    def get_column(self, index_or_name_start: Union[Sequence[Union[str, int]], str, int], exact_name: bool = False) -> NPFloatArray:
+    def get_column_index(self, index_or_name_start: Union[Sequence[Union[str, int]], str, int], exact_name: bool = False) -> NPFloatArray:
         if isinstance(index_or_name_start, (list, tuple)):
             rs: List[NPFloatArray] = []
             for i in index_or_name_start:
@@ -99,7 +103,7 @@ class LoadedTextDataFile:
         if isinstance(index_or_name_start, str):
             # Find a unique column
             index = None
-            for i, d in enumerate(self.descs):
+            for i, d in enumerate(self.columns):
                 if (exact_name and d == index_or_name_start) or (not exact_name and d.startswith(index_or_name_start)):
                     if index is None:
                         index = i
@@ -111,5 +115,15 @@ class LoadedTextDataFile:
                     "Could not find a column beginning with the identifier '"+index_or_name_start+"'")
         else:
             index = index_or_name_start
+            
+        return index
 
+    def get_column_data(self, index_or_name_start: Union[Sequence[Union[str, int]], str, int], exact_name: bool = False) -> NPFloatArray:
+        index=self.get_column_index(index_or_name_start, exact_name=exact_name)
         return self.data[:, index]  # type:ignore
+    
+    def __getitem__(self, key):
+        return self.data[key]
+
+    def __setitem__(self, key, value):
+        self.data[key] = value
