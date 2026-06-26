@@ -5337,7 +5337,7 @@ class Problem(_pyoomph.Problem):
 
             self._in_transient_newton_solve=True
             nextdt = self.solve(timestep=currentdt, temporal_error=temporal_error,spatial_adapt=spatial_adapt,newton_solver_tolerance=newton_solver_tolerance,do_not_set_IC=do_not_set_IC,globally_convergent_newton=globally_convergent_newton,max_newton_iterations=max_newton_iterations,suppress_resolve_after_adapt=suppress_resolve_after_adapt)
-            if first_step and nextdt>currentdt:
+            if first_step and float(nextdt/currentdt)>=1.0-1e-14:
                 if single_step_desired:
                     test=self.get_current_time(as_float=True, dimensional=False) - float(endtime / TS)
                     if test>-1e-14:

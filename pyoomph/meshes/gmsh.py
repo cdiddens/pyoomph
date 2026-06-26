@@ -839,6 +839,43 @@ class GmshTemplate(MeshTemplate):
         return res
 
 
+    def ellipse_arc(self,startpt:Union[Point,Sequence[ExpressionOrNum]],endpt:Union[Point,Sequence[ExpressionOrNum]],center:Union[Point,Sequence[ExpressionOrNum]],pt_on_major_axis:Optional[:Union[Point,Sequence[ExpressionOrNum]]]=None,name="ellipse"):
+        """
+        Adds an ellipse arc to the mesh geometry.
+
+        Parameters:
+            startpt: The starting point of the ellipse arc (must be on the major axis if ).
+            endpt: The ending point of the ellipse arc.
+            center: The center point of the ellipse arc. 
+            pt_on_major_axis: A point on the major axis of the ellipse. If not provided, startpt is assumed to be on the major axis.
+            name: The name of the circle arc to identify it later e.g. as boundary.    
+
+        Returns:
+            The created ellipse arc or a line if the ellipse arc is degenerate.
+        """
+                        
+        if self._geom is None:
+            raise RuntimeError("Can only add geometry inside the function 'define_geometry'")
+        if isinstance(startpt,(list,tuple)):
+                startpt=self.point(*startpt)
+        if isinstance(endpt,(list,tuple)):
+                endpt=self.point(*endpt)
+        if isinstance(center,(list,tuple)):
+                center=self.point(*center)                
+        if isinstance(pt_on_major_axis,(list,tuple)):
+                pt_on_major_axis=self.point(*pt_on_major_axis)        
+        res=self._geom.add_ellipse_arc(startpt,center,pt_on_major_axis if pt_on_major_axis is not None else startpt, endpt)        
+        self._store_name(name, res)
+        self._entities1d[res._id] = res #type:ignore
+        # self._curved_entities1d[res._id] = CurvedEntityCircleArc(startpt,center, endpt)        
+        self._maxdim = max(self._maxdim, 1)
+        for p in [startpt, endpt]: 
+            assert isinstance(p,Point)
+            if p not in self._onedims_attached_to_point: 
+                self._onedims_attached_to_point[p]=set()
+            self._onedims_attached_to_point[p].add(res)
+        return res
+
 
     def _get_boundary_corner_size_map(self)->Dict[str,Dict[Tuple[float,...],float]]:
         entlist:Dict[Union[Line,Spline,BSpline,CircleArc],Set[Point]]=dict()

@@ -66,7 +66,7 @@ Then, we perform the steps mentioned at the top, i.e. create an initial mesh or 
         
 The axis of symmetry is always the same in this case, so we can always create these points. We do not set any mesh size here, since it will be treated in another way soon. For the initial mesh, we just make a box, for the remeshing steps, we get the coordinates of the current interface by :py:meth:`~pyoomph.meshes.remesher.RemeshableGmshTemplate2d.get_boundary_coordinates`. This results in a list of boundary segments. Here, however, we only have a single segment, since the interface will always be a single connected curve. We can sort the points along the boundary automatically with the argument ``sort_along_axis="y+"``. Even in case of overhangs, the order is still following the curve, i.e. this sorting is performed based on the end points only. We then construct the points, pass them to a spline and extract the start and end points of the surface at the bottom and top, before meshing the domain as usual in both scenarios, the initial mesh and each reconstructed mesh.
 
-For the mesh size, we use gmsh's `mesh size fields <https://gmsh.info/doc/texinfo/#Gmsh-mesh-size-fields>__`, which can be added with :py:meth:`~pyoomph.meshes.gmsh.GmshTemplate.add_mesh_size_field` method:
+For the mesh size, we use `gmsh's mesh size fields <https://gmsh.info/doc/texinfo/#Gmsh-mesh-size-fields>`__, which can be added with :py:meth:`~pyoomph.meshes.gmsh.GmshTemplate.add_mesh_size_field` method:
 
 .. code:: python
 
@@ -195,7 +195,7 @@ The second method above just runs the simulation over small intervals in time, w
 		    problem.output()
 		    minimum_out.add_row(t,*problem.get_minimum_radius_and_position())
 
-The results in figure :numref:`figrayleighplateauinstab` show how the remeshing indeed generates a neatly smoothed mesh.
+The results in figure :numref:`figrayleighplateauinstab` show how the remeshing indeed generates a neatly smoothed mesh and reproduces the data of Ref. :cite:`Kamat2018` well (provided the resolution is increased, i.e. increased ``min_elements_per_radius`` and ``max_elements_per_radius``).
 
 
 ..  figure:: rayleighplateauinstab.*
@@ -205,7 +205,7 @@ The results in figure :numref:`figrayleighplateauinstab` show how the remeshing 
 	:class: with-shadow
 	:width: 100%
 
-	Rayleigh-Plateau instability with advanced mesh size control and accurate boundary interpolation by :math:`\zeta` coordinates : (left) Full view at the end of the simulation. (center) :math:`300\times` zoom near on the position of minimum radius (right) Validation against literature :cite:`Kamat2018` (a higher resolution, e.g. increased ``min_elements_per_radius`` and `max_elements_per_radius`` is required to obtain this).
+	Rayleigh-Plateau instability with advanced mesh size control and accurate boundary interpolation by :math:`\zeta` coordinates : (left) Full view at the end of the simulation. (center) :math:`300\times` zoom near on the position of minimum radius (right) Validation against literature (a higher mesh resolution used here).
 
 
 .. only:: html
