@@ -5272,7 +5272,7 @@ class Problem(_pyoomph.Problem):
             self._first_step=False # TODO This would be better stored in the state file so that a solve from state_000000 will still have it true
 
         #TODO Further checking for the end time
-
+        single_step_desired=False
         if timestep is None:
             if not self.is_initialised():
                 self.initialise()
@@ -5282,6 +5282,7 @@ class Problem(_pyoomph.Problem):
             _tdiff,_tunit=assert_dimensional_value(starttime+timestep-endtime)
             if _tdiff>0:
                 timestep=endtime-starttime
+                single_step_desired=True
         if startstep is not None:
             timestep=startstep
 
@@ -5318,6 +5319,7 @@ class Problem(_pyoomph.Problem):
             currentdt = timestep
 
         nextdt_was_clamped_for_output:ExpressionNumOrNone=None # When clamping a time step to hit the next output dt, enlarge it afterwards
+        first_step=True
         while self.get_current_time(as_float=True, dimensional=False) < float(endtime / TS):
             if self._abort_current_run:
                 self._abort_current_run=False
@@ -5335,6 +5337,15 @@ class Problem(_pyoomph.Problem):
 
             self._in_transient_newton_solve=True
             nextdt = self.solve(timestep=currentdt, temporal_error=temporal_error,spatial_adapt=spatial_adapt,newton_solver_tolerance=newton_solver_tolerance,do_not_set_IC=do_not_set_IC,globally_convergent_newton=globally_convergent_newton,max_newton_iterations=max_newton_iterations,suppress_resolve_after_adapt=suppress_resolve_after_adapt)
+            if first_step and nextdt>currentdt:
+                if single_step_desired:
+                    test=self.get_current_time(as_float=True, dimensional=False) - float(endtime / TS)
+                    if test>-1e-14:
+                        self.set_current_time(float(endtime/TS),dimensional=False) # Will stop the run loop for sure
+            else:
+                single_step_desired=False
+                
+            first_step=False
             self._in_transient_newton_solve=False
             if max_newton_to_increase_time_step is not None and float(nextdt/TS)>float(currentdt/TS*1.00001):
                 last_res=self.get_last_residual_convergence()

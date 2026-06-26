@@ -1109,9 +1109,33 @@ class MeshFromTemplateBase(BaseMesh):
             return val
                     
     def evaluate_maximum(self,name:Union[str,List[str]],dimensional:bool=True,as_float:bool=False,return_x:bool=False)->Union[ExpressionOrNum,List[ExpressionOrNum],Tuple[ExpressionOrNum,List[ExpressionOrNum]]]:
+        """Evaluate the maximum of a quantity defined by ExtremumObservables on the mesh.
+        
+        Args:
+            name: The name of the observable or a list of names
+            dimensional: If True, return the value(s) with units, otherwise return float(s)
+            as_float: If True, return the value(s) as float(s) (without units)
+            return_x: If True, also return the position(s) of the maximum(s)
+        
+        Returns:
+            If return_x is False, returns the maximum value(s) as ExpressionOrNum or list of ExpressionOrNum.
+            If return_x is True, returns a tuple of (maximum value(s), position(s)) where position(s) is a list of coordinates corresponding to the maximum value(s).
+        """
         return self._evaluate_extremum_wrapper(name,1,dimensional=dimensional,as_float=as_float,return_x=return_x)
            
     def evaluate_minimum(self,name:Union[str,List[str]],dimensional:bool=True,as_float:bool=False,return_x:bool=False)->Union[ExpressionOrNum,List[ExpressionOrNum],Tuple[ExpressionOrNum,List[ExpressionOrNum]]]:
+        """Evaluate the minimum of a quantity defined by ExtremumObservables on the mesh.
+        
+        Args:
+            name: The name of the observable or a list of names
+            dimensional: If True, return the value(s) with units, otherwise return float(s)
+            as_float: If True, return the value(s) as float(s) (without units)
+            return_x: If True, also return the position(s) of the minimum(s)
+        
+        Returns:
+            If return_x is False, returns the minimum value(s) as ExpressionOrNum or list of ExpressionOrNum.
+            If return_x is True, returns a tuple of (minimum value(s), position(s)) where position(s) is a list of coordinates corresponding to the minimum value(s).
+        """
         return self._evaluate_extremum_wrapper(name,-1,dimensional=dimensional,as_float=as_float,return_x=return_x)
 
 
@@ -1186,6 +1210,9 @@ def MeshFromTemplate(problem: "Problem", templatemesh: MeshTemplate, domainname:
 ######################################################
 
 class InterfaceMesh(_pyoomph.InterfaceMesh, BaseMesh):
+    """
+    A mesh that is added to the boundary to add Neumann terms or setting Dirichlet conditions or add new fields directly on the interface, like e.g. surfactants.    
+    """
     def __init__(self, problem: "Problem", parent: "AnySpatialMesh", intername: str, eqtree: "EquationTree", previous_mesh: Optional["InterfaceMesh"] = None):
         super(InterfaceMesh, self).__init__()
         BaseMesh.__init__(self)
@@ -1492,9 +1519,33 @@ class InterfaceMesh(_pyoomph.InterfaceMesh, BaseMesh):
             return val
                     
     def evaluate_maximum(self,name:Union[str,List[str]],dimensional:bool=True,as_float:bool=False,return_x:bool=False)->Union[ExpressionOrNum,List[ExpressionOrNum],Tuple[ExpressionOrNum,List[ExpressionOrNum]]]:
+        """Evaluate the maximum of a quantity defined by ExtremumObservables on the mesh.
+        
+        Args:
+            name: The name of the observable or a list of names
+            dimensional: If True, return the value(s) with units, otherwise return float(s)
+            as_float: If True, return the value(s) as float(s) (without units)
+            return_x: If True, also return the position(s) of the maximum(s)
+        
+        Returns:
+            If return_x is False, returns the maximum value(s) as ExpressionOrNum or list of ExpressionOrNum.
+            If return_x is True, returns a tuple of (maximum value(s), position(s)) where position(s) is a list of coordinates corresponding to the maximum value(s).
+        """
         return self._evaluate_extremum_wrapper(name,1,dimensional=dimensional,as_float=as_float,return_x=return_x)
            
     def evaluate_minimum(self,name:Union[str,List[str]],dimensional:bool=True,as_float:bool=False,return_x:bool=False)->Union[ExpressionOrNum,List[ExpressionOrNum],Tuple[ExpressionOrNum,List[ExpressionOrNum]]]:
+        """Evaluate the minimum of a quantity defined by ExtremumObservables on the mesh.
+        
+        Args:
+            name: The name of the observable or a list of names
+            dimensional: If True, return the value(s) with units, otherwise return float(s)
+            as_float: If True, return the value(s) as float(s) (without units)
+            return_x: If True, also return the position(s) of the minimum(s)
+        
+        Returns:
+            If return_x is False, returns the minimum value(s) as ExpressionOrNum or list of ExpressionOrNum.
+            If return_x is True, returns a tuple of (minimum value(s), position(s)) where position(s) is a list of coordinates corresponding to the minimum value(s).
+        """
         return self._evaluate_extremum_wrapper(name,-1,dimensional=dimensional,as_float=as_float,return_x=return_x)
 
 
