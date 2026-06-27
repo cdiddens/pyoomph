@@ -4513,6 +4513,13 @@ namespace pyoomph
 		unsigned index = 0;
 		for (auto &e : sexprs)
 		{
+			if (!integrate)
+			{
+				// Check whether there is a field with the same name accessible
+				FiniteElementField * f=this->get_field_by_name(e.first);					
+				if (f) throw_runtime_error("The name '" + e.first + "' cannot be used for a local expression on '"+this->get_full_domain_name()+"', because it is already used for a here accessible field defined on the domain '"+f->get_defined_on_domain_equivalent_field()->get_space()->get_code()->get_full_domain_name()+"'");
+			}
+
 			os << "      case " << index << " :  res" << (integrate ? "+" : "") << "= ";
 
 			// flux.evalf().print(GiNaC::print_csrc_FEM(os,&csrc_opts));

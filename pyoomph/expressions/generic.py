@@ -501,6 +501,8 @@ def mesh_velocity(scheme:OptionalTimeSteppingScheme=None,nondim:bool=False)->Exp
 	Returns:
 		Expression: Just a shorthand for `partial_t(var("mesh"),ALE=False)`.
 	"""
+	if scheme in ["TPZ","MPT","Simpson","Boole","trapezoidal","Kepler","Milne","midpoint"]:
+		scheme="BDF1"
 	return partial_t(nondim("mesh") if nondim else var("mesh"),ALE=False,scheme=scheme,nondim=nondim)
 
 

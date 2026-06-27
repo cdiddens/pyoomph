@@ -575,7 +575,7 @@ def div(arg:ExpressionOrNum,lagrangian:bool=False,matrix:Optional[bool]=None,non
 	return _pyoomph.GiNaC_div(arg,_pyoomph.Expression(-1),_pyoomph.Expression(-1),coordsysE,_pyoomph.Expression(flag))
 
 
-def time_derivative_of_integral(expr:ExpressionOrNum,scheme:Literal["BDF1","BDF2","Newmark2","BDF2_degr","Newmark2_degr"]="BDF1")->Expression:    
+def time_derivative_of_integral(expr:ExpressionOrNum,scheme:TimeSteppingScheme="BDF1")->Expression:    
     """
     Computes the time derivative of an integral expression using a given time stepping scheme. 
     For moving meshes, this can be different, i.e.
@@ -586,6 +586,8 @@ def time_derivative_of_integral(expr:ExpressionOrNum,scheme:Literal["BDF1","BDF2
         expr: The expression to differentiate.
         scheme: The time stepping scheme to apply ("BDF1","BDF2","Newmark2","BDF2_degr","Newmark2_degr"). Defaults to "BDF1", "_degr" means that the time derivative is approximated with a lower order scheme in the first step, since initial conditions might not have history values.
     """        
+    if scheme in ["TPZ","MPT","Simpson","Boole","trapezoidal","Kepler","Milne","midpoint"]:
+        scheme="BDF1" # These schemes are not supported for time derivatives of integrals, since they are not linear multistep methods. We just use BDF1 instead, which is the same as the trapezoidal rule for linear functions.    
     numterms={"BDF1":2,"BDF2":3,"Newmark2":3,"BDF2_degr":3,"Newmark2_degr":3}
     if scheme not in numterms.keys():
         raise RuntimeError("Time scheme "+str(scheme)+" not supported for d_by_dt_of_integrals. Supported schemes are "+str(list(numterms.keys())))

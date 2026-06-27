@@ -266,6 +266,7 @@ namespace pyoomph
 	}
 
 	JITShapeInfo_t *Default_shape_info_buffer = NULL;
+	//JITShapeInfo_t *temp_shape_info_buffer = NULL;
 	DynamicBulkElementInstance *BulkElementBase::__CurrentCodeInstance = NULL;
 	unsigned BulkElementBase::zeta_time_history = 0;
 	unsigned BulkElementBase::zeta_coordinate_type = 0; // 0 means Lagrangian, 1 Eulerian, on co-dimensional meshes it will be the boundary coordinate (if set)
@@ -2833,16 +2834,17 @@ namespace pyoomph
 		if (do_alloc)
 		{
 			__shape_buffer_mem_usage = 0;
-			alloc_dealloc_single_shape_buffer(true, &Default_shape_info_buffer, with_analytical_hessian_moving_mesh);
-			alloc_dealloc_single_shape_buffer(true, &(Default_shape_info_buffer->bulk_shapeinfo), with_analytical_hessian_moving_mesh);
-			alloc_dealloc_single_shape_buffer(true, &(Default_shape_info_buffer->opposite_shapeinfo), with_analytical_hessian_moving_mesh);
-			alloc_dealloc_single_shape_buffer(true, &(Default_shape_info_buffer->opposite_shapeinfo->bulk_shapeinfo), with_analytical_hessian_moving_mesh);
-			alloc_dealloc_single_shape_buffer(true, &(Default_shape_info_buffer->bulk_shapeinfo->bulk_shapeinfo), with_analytical_hessian_moving_mesh);
+			alloc_dealloc_single_shape_buffer(true, buff, with_analytical_hessian_moving_mesh);
+			alloc_dealloc_single_shape_buffer(true, &((*buff)->bulk_shapeinfo), with_analytical_hessian_moving_mesh);
+			alloc_dealloc_single_shape_buffer(true, &((*buff)->opposite_shapeinfo), with_analytical_hessian_moving_mesh);
+			alloc_dealloc_single_shape_buffer(true, &((*buff)->opposite_shapeinfo->bulk_shapeinfo), with_analytical_hessian_moving_mesh);
+			alloc_dealloc_single_shape_buffer(true, &((*buff)->bulk_shapeinfo->bulk_shapeinfo), with_analytical_hessian_moving_mesh);
 		//	std::cout << "Allocated " << __shape_buffer_mem_usage / (1024.0 * 1024.0) << " MB for the shape buffer" << std::endl;
 		}
 		else
 		{
-			alloc_dealloc_single_shape_buffer(false, &Default_shape_info_buffer, with_analytical_hessian_moving_mesh);
+			// Deallocation of bulk_shapeinfo and opposite_shapeinfo is done in alloc_dealloc_single_shape_buffer
+			alloc_dealloc_single_shape_buffer(false, buff, with_analytical_hessian_moving_mesh);
 		}
 	}
 
@@ -2862,11 +2864,15 @@ namespace pyoomph
 		if (!Default_shape_info_buffer)
 		{
 			alloc_dealloc_all_shape_buffers(true, &Default_shape_info_buffer, require_moving_hessian_buffer);
+			//alloc_dealloc_all_shape_buffers(true, &temp_shape_info_buffer, require_moving_hessian_buffer);
 		}
 		else if (require_moving_hessian_buffer && Default_shape_info_buffer->int_pt_weights_d2_coords == NULL)
 		{
 			alloc_dealloc_all_shape_buffers(false, &Default_shape_info_buffer, require_moving_hessian_buffer);
 			alloc_dealloc_all_shape_buffers(true, &Default_shape_info_buffer, require_moving_hessian_buffer);
+
+			//alloc_dealloc_all_shape_buffers(false, &temp_shape_info_buffer, require_moving_hessian_buffer);
+			//alloc_dealloc_all_shape_buffers(true, &temp_shape_info_buffer, require_moving_hessian_buffer);
 		}
 		shape_info = Default_shape_info_buffer;
 
@@ -4817,7 +4823,7 @@ namespace pyoomph
 			double JLagr_dummy;			
 			if (required_shapes.history_integral_dx1)
 			{
-			  double Jhistory = fill_shape_info_at_s(s, ipt, simplified_required_shapes, JLagr_dummy, 0,NULL,1);
+			  double Jhistory = fill_shape_info_at_s(s, ipt, simplified_required_shapes,  JLagr_dummy, 0,NULL,1);
 			  shape_info->int_pt_weight[1] = w * Jhistory;
 			}
 			if (required_shapes.history_integral_dx2)
@@ -4875,12 +4881,7 @@ namespace pyoomph
 				{
 					shape_info->timestepper_weights_dt_BDF2_degr = shape_info->timestepper_weights_dt_BDF1;
 					shape_info->timestepper_weights_dt_Newmark2_degr = shape_info->timestepper_weights_dt_BDF1;
-				}
-				else if (unsteady_steps_done <= 4) // TODO: Does this make sense? I don't think so
-				{
-					shape_info->timestepper_weights_dt_BDF2_degr = shape_info->timestepper_weights_dt_BDF2;
-					shape_info->timestepper_weights_dt_Newmark2_degr = shape_info->timestepper_weights_dt_BDF2;
-				}
+				}				
 				else
 				{
 					shape_info->timestepper_weights_dt_BDF2_degr = shape_info->timestepper_weights_dt_BDF2;

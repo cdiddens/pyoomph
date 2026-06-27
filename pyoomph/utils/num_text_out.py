@@ -75,6 +75,18 @@ class NumericalTextOutputFile:
 
 
 class LoadedTextDataFile:
+    """
+    A wrapper to load pyoomph's text files including the header. This class serves as numpy.array, but also is aware of the header.
+    You can still use it as numpy.array directly (or alternatively access its ``data`` member), but you can also directly access e.g.
+    
+        data=LoadedTextDataFile("my_file.txt")
+        data[:,"velocity_x"]  # get the column with name starting with "velocity_x"
+        data["velocity_x"]  # same as above, i.e. it is a column access, not a row access when used with a single string
+        data["param"]           # get the parameter value of "param"
+        
+        data.get_column_index("velocity_x")  # get the column index of the column with name starting with "velocity_x"
+        
+    """
     def __init__(self, filename: str) -> None:
         try:
             f = open(filename, "r")
@@ -90,6 +102,7 @@ class LoadedTextDataFile:
         header_keys=[s.lstrip("@") for s in header_names[self.data.shape[1]:]]
         self.params={s.split("=")[0]:s.split("=")[1] for s in header_keys}                
         self.columns=header_names[:self.data.shape[1]]
+        self.access_params_via_brackets=True
                     
         
 
@@ -121,9 +134,44 @@ class LoadedTextDataFile:
     def get_column_data(self, index_or_name_start: Union[Sequence[Union[str, int]], str, int], exact_name: bool = False) -> NPFloatArray:
         index=self.get_column_index(index_or_name_start, exact_name=exact_name)
         return self.data[:, index]  # type:ignore
+
+
+    def _translate(self, key):        
+        if isinstance(key, str):
+            return self.get_column_index(key)
+
+        if isinstance(key, slice):
+            start = self._translate(key.start) if key.start is not None else None
+            stop = self._translate(key.stop) + 1 if key.stop is not None else None
+            return slice(start, stop, key.step)
+
+        if isinstance(key, list):
+            return [self._translate(k) for k in key]
+
+        if isinstance(key, tuple):
+            return tuple(self._translate(k) for k in key)
+
+        return key    
     
-    def __getitem__(self, key):
-        return self.data[key]
+    def __getitem__(self, key):       
+        if isinstance(key,str) and self.access_params_via_brackets and key in self.params:
+            return self.params[key]
+        if not isinstance(key, tuple):
+            if isinstance(key, (str, list, slice)):
+                key = (slice(None), key)
+        return self.data[self._translate(key)]
 
     def __setitem__(self, key, value):
-        self.data[key] = value
+        if isinstance(key,str) and self.access_params_via_brackets and key in self.params:
+            self.params[key]=value
+            return
+        if not isinstance(key, tuple):
+            if isinstance(key, (str, list, slice)):
+                key = (slice(None), key)
+        self.data[self._translate(key)] = value
+
+    def __getattr__(self, name):
+        return getattr(self.data, name)
+    
+    def __array__(self, dtype=None):
+        return numpy.asarray(self.data, dtype=dtype)

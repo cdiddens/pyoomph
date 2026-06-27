@@ -116,6 +116,7 @@ class BaseInterfaceProperties:
         Sets the mass transfer model.
         """
         self._mass_transfer_model=mdl
+        return mdl # For convenience, return the model so that it can be used in the same line as the function call.
 ######
 
 class MaterialProperties:
