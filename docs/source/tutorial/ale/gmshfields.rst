@@ -187,6 +187,8 @@ The second method above just runs the simulation over small intervals in time, w
 		problem.DTSF_max_increase_factor=1.25 # increase dt by 25% for successful steps
 		problem.DTSF_min_decrease_factor=0.75 # decrease dt by 25% for failed steps
 		
+		problem.initialise()
+		
 		# Monitor the minimum radius and its position along the interface and write to a text file
 		minimum_out=problem.create_text_file_output("minimum.txt",header=["t","r_min","z_min"])
 		

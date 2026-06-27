@@ -1744,7 +1744,7 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
     virtual void update_in_external_fd(const unsigned &i);
     virtual bool add_required_ext_data(oomph::Data *data, bool is_geometric);
     virtual void add_required_external_data(JITFuncSpec_RequiredShapes_FiniteElement_t *required, BulkElementBase *from_elem);
-    virtual int resolve_local_equation_for_external_contributions(long int globeq, BulkElementBase *from_elem = NULL, std::string *info = NULL);
+    virtual int resolve_local_equation_for_external_contributions(long int globeq, BulkElementBase *from_elem = NULL, std::string *info = NULL,const JITFuncSpec_RequiredShapes_FiniteElement_t *required = NULL);
     virtual void prepare_shape_buffer_for_integration(const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag);
     double fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds = NULL, unsigned history_index=0) const;
     virtual bool fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap);

@@ -907,40 +907,43 @@ namespace pyoomph
 			// std::cout << "APPlYING REMAP " << std::endl;
 			if (ft->moving_nodes)
 			{
+				if (required.dx_psi_C2TB  || required.dx_psi_C2 || required.dx_psi_C1 || required.dx_psi_C1TB  ||   required.psi_Pos  || required.dx_psi_DL || required.normal_Pos || required.elemsize_Eulerian_Pos || required.elemsize_Eulerian_cartesian_Pos) 
+				{
+					
+					unsigned nfields = this->nodal_dimension();
 
-				unsigned nfields = this->nodal_dimension();
-
-				for (unsigned int l = 0; l < eleminfo.nnode; l++) // Lagrangian part
-				{					    
-					if (!shape_info->hanginfo_Pos[l].nummaster)
-					{
-						// NON HANGING -> HANGING WITH WEIGHT 1 for external element data
-						shape_info->hanginfo_Pos[l].nummaster = 1;
-						shape_info->hanginfo_Pos[l].masters[0].weight = 1.0;
-						for (unsigned int f = 0; f < nfields; f++)
+					for (unsigned int l = 0; l < eleminfo.nnode; l++) // Lagrangian part
+					{					    
+						if (!shape_info->hanginfo_Pos[l].nummaster)
 						{
-							if (eleminfo.pos_local_eqn[l][f] >= 0)
+							// NON HANGING -> HANGING WITH WEIGHT 1 for external element data
+							shape_info->hanginfo_Pos[l].nummaster = 1;
+							shape_info->hanginfo_Pos[l].masters[0].weight = 1.0;
+							for (unsigned int f = 0; f < nfields; f++)
 							{
-								shape_info->hanginfo_Pos[l].masters[0].local_eqn[f] = eleminfo.pos_local_eqn[l][f];
-							}
-							else
-							{
-								shape_info->hanginfo_Pos[l].masters[0].local_eqn[f] = -1;
+								if (eleminfo.pos_local_eqn[l][f] >= 0)
+								{
+									shape_info->hanginfo_Pos[l].masters[0].local_eqn[f] = eleminfo.pos_local_eqn[l][f];
+								}
+								else
+								{
+									shape_info->hanginfo_Pos[l].masters[0].local_eqn[f] = -1;
+								}
 							}
 						}
-					}
-					for (int m = 0; m < shape_info->hanginfo_Pos[l].nummaster; m++)
-					{
-						for (unsigned int f = 0; f < nfields; f++)
+						for (int m = 0; m < shape_info->hanginfo_Pos[l].nummaster; m++)
 						{
-							if (shape_info->hanginfo_Pos[l].masters[m].local_eqn[f] >= 0)
+							for (unsigned int f = 0; f < nfields; f++)
 							{
-								shape_info->hanginfo_Pos[l].masters[m].local_eqn[f] = eqn_remap[shape_info->hanginfo_Pos[l].masters[m].local_eqn[f]];
-								if (shape_info->hanginfo_Pos[l].masters[m].local_eqn[f] == -666)
+								if (shape_info->hanginfo_Pos[l].masters[m].local_eqn[f] >= 0)
 								{
-									std::ostringstream oss;
-									oss << this;
-									throw_runtime_error("MISSING EXTERNAL POS DEPENDENCY ON ELEM PTR: " + oss.str() + "\nThis is part of the Lagrangian field index " + std::to_string(f) + " of " + std::to_string(nfields) + " at node " + std::to_string(l)+ " of "+std::to_string(eleminfo.nnode));
+									shape_info->hanginfo_Pos[l].masters[m].local_eqn[f] = eqn_remap[shape_info->hanginfo_Pos[l].masters[m].local_eqn[f]];
+									if (shape_info->hanginfo_Pos[l].masters[m].local_eqn[f] == -666)
+									{
+										std::ostringstream oss;
+										oss << this;
+										throw_runtime_error("MISSING EXTERNAL POS DEPENDENCY ON ELEM PTR: " + oss.str() + "\nThis is part of the Lagrangian field index " + std::to_string(f) + " of " + std::to_string(nfields) + " at node " + std::to_string(l)+ " of "+std::to_string(eleminfo.nnode)+"\n"+"This can happen when you add additional fields or residualsfrom both sides of a single interface. Please only add fields and residuals from one side.");
+									}
 								}
 							}
 						}
@@ -1017,7 +1020,7 @@ namespace pyoomph
 								{
 									std::ostringstream oss;
 									oss << this;
-									throw_runtime_error("MISSING EXTERNAL ADD_INTERFACE C2TB DEPENDENCY ON ELEM PTR: " + oss.str());
+									throw_runtime_error("MISSING EXTERNAL ADD_INTERFACE C2TB DEPENDENCY ON ELEM PTR: " + oss.str()+"\n"+"This can happen when you add additional fields or residuals from both sides of a single interface. Please only add fields and residuals from one side.");
 								}
 							}
 						}	
@@ -1089,7 +1092,7 @@ namespace pyoomph
 								{
 									std::ostringstream oss;
 									oss << this;
-									throw_runtime_error("MISSING EXTERNAL ADD_INTERFACE C2 DEPENDENCY ON ELEM PTR: " + oss.str());
+									throw_runtime_error("MISSING EXTERNAL ADD_INTERFACE C2 DEPENDENCY ON ELEM PTR: " + oss.str()+"\n"+"This can happen when you add additional fields or residuals from both sides of a single interface. Please only add fields and residuals from one side.");
 								}
 							}
 						}	
@@ -1164,7 +1167,7 @@ namespace pyoomph
 								{
 									std::ostringstream oss;
 									oss << this;
-									throw_runtime_error("MISSING EXTERNAL ADD_INTERFACE C1TB DEPENDENCY ON ELEM PTR: " + oss.str());
+									throw_runtime_error("MISSING EXTERNAL ADD_INTERFACE C1TB DEPENDENCY ON ELEM PTR: " + oss.str()+"\n"+"This can happen when you add additional fields or residuals from both sides of a single interface. Please only add fields and residuals from one side.");
 								}
 							}
 						}								
@@ -1235,7 +1238,7 @@ namespace pyoomph
 								{
 									std::ostringstream oss;
 									oss << this;
-									throw_runtime_error("MISSING EXTERNAL ADD_INTERFACE C1 DEPENDENCY ON ELEM PTR: " + oss.str());
+									throw_runtime_error("MISSING EXTERNAL ADD_INTERFACE C1 DEPENDENCY ON ELEM PTR: " + oss.str()+"\n"+"This can happen when you add additional fields or residuals from both sides of a single interface. Please only add fields and residuals from one side.");
 								}
 							}
 						}								
@@ -13050,7 +13053,10 @@ namespace pyoomph
 
 		if (fft->moving_nodes)
 		{
-			if (required->dx_psi_C2TB || required->psi_C2TB || required->dX_psi_C2TB || required->dx_psi_C2 || required->psi_C2 || required->dX_psi_C2 || required->dx_psi_C1 || required->psi_C1TB || required->dx_psi_C1TB || required->dX_psi_C1TB || required->psi_C1 || required->dX_psi_C1 || required->psi_Pos || required->psi_DL || required->dx_psi_DL || required->dX_psi_DL)
+			// Isn't this overkill? For normal psi's we don't use it at all....
+			// Should be enough to check for the dx_... and for Pos and normal			
+			//if (required->dx_psi_C2TB || required->psi_C2TB || required->dX_psi_C2TB || required->dx_psi_C2 || required->psi_C2 || required->dX_psi_C2 || required->dx_psi_C1 || required->psi_C1TB || required->dx_psi_C1TB || required->dX_psi_C1TB || required->psi_C1 || required->dX_psi_C1 || required->psi_Pos || required->psi_DL || required->dx_psi_DL || required->dX_psi_DL || required->psi_D0) 
+			if (required->dx_psi_C2TB  || required->dx_psi_C2 || required->dx_psi_C1 || required->dx_psi_C1TB  ||   required->psi_Pos  || required->dx_psi_DL || required->normal_Pos || required->elemsize_Eulerian_Pos || required->elemsize_Eulerian_cartesian_Pos) 
 			{
 				// Add required geometric external data to be finite differenced
 				
@@ -14004,7 +14010,7 @@ namespace pyoomph
 		}
 	}
 
-	int InterfaceElementBase::resolve_local_equation_for_external_contributions(long int globeq, BulkElementBase *from_elem, std::string *info)
+	int InterfaceElementBase::resolve_local_equation_for_external_contributions(long int globeq, BulkElementBase *from_elem, std::string *info,const JITFuncSpec_RequiredShapes_FiniteElement_t *required)
 	{
 		if (globeq < 0)
 			return -1;
@@ -14042,6 +14048,53 @@ namespace pyoomph
 					oss << "   " << iloc << "  " << iglob << "  " << dofnames[iloc] << std::endl;
 				}
 			}
+
+			oss << "REQUIRED SHAPES: " << std::endl;
+			oss << "   bulk_shapes: " << (required->bulk_shapes ? "YES" : "NO") << std::endl;			
+			oss << "   bulk_shapes->bulk_shapes: " << (required->bulk_shapes && required->bulk_shapes->bulk_shapes ? "YES" : "NO") << std::endl;
+			oss << "   opposite_shapes: " << (required->opposite_shapes ? "YES" : "NO") << std::endl;
+			oss << "   opposite_shapes->bulk_shapes: " << (required->opposite_shapes && required->opposite_shapes->bulk_shapes ? "YES" : "NO") << std::endl;
+			
+			/*
+			  bool psi_C1,psi_C1TB, psi_C2, psi_C2TB, psi_DL, psi_D0;
+  bool dx_psi_C1, dx_psi_C1TB, dx_psi_C2, dx_psi_C2TB, dx_psi_DL, dx_psi_D0; // Eulerian derivatives
+  bool dX_psi_C1, dX_psi_C1TB,dX_psi_C2, dX_psi_C2TB, dX_psi_DL, dX_psi_D0; // Lagrangian derivatives
+  bool psi_Pos, dx_psi_Pos, dX_psi_Pos;              // Position space. This is always the dominant element space, i.e. C2TB>C2>C1TB>C1. If an element has a "C2" and a "C1TB" space, it will be C2TB.
+  bool normal_Pos;                                   // Normal required /( Normal is just considered to be defined on the Pos space)
+  bool elemsize_Eulerian_Pos,elemsize_Lagrangian_Pos;
+  bool elemsize_Eulerian_cartesian_Pos,elemsize_Lagrangian_cartesian_Pos;  
+  bool history_integral_dx1;
+  bool history_integral_dx2;
+			*/
+			oss << "   psi_C1: " << (required->psi_C1 ? "YES" : "NO") << std::endl;
+			oss << "   psi_C1TB: " << (required->psi_C1TB ? "YES" : "NO") << std::endl;
+			oss << "   psi_C2: " << (required->psi_C2 ? "YES" : "NO") << std::endl;
+			oss << "   psi_C2TB: " << (required->psi_C2TB ? "YES" : "NO") << std::endl;
+			oss << "   psi_DL: " << (required->psi_DL ? "YES" : "NO") << std::endl;
+			oss << "   psi_D0: " << (required->psi_D0 ? "YES" : "NO") << std::endl;
+			oss << "   dx_psi_C1: " << (required->dx_psi_C1 ? "YES" : "NO") << std::endl;
+			oss << "   dx_psi_C1TB: " << (required->dx_psi_C1TB ? "YES" : "NO") << std::endl;
+			oss << "   dx_psi_C2: " << (required->dx_psi_C2	? "YES" : "NO") << std::endl;
+			oss << "   dx_psi_C2TB: " << (required->dx_psi_C2TB ? "YES" : "NO") << std::endl;
+			oss << "   dx_psi_DL: " << (required->dx_psi_DL ? "YES" : "NO") << std::endl;
+			oss << "   dx_psi_D0: " << (required->dx_psi_D0 ? "YES" : "NO") << std::endl;
+			oss << "   dX_psi_C1: " << (required->dX_psi_C1 ? "YES" : "NO") << std::endl;
+			oss << "   dX_psi_C1TB: " << (required->dX_psi_C1TB ? "YES" : "NO") << std::endl;
+			oss << "   dX_psi_C2: " << (required->dX_psi_C2 ? "YES" : "NO") << std::endl;
+			oss << "   dX_psi_C2TB: " << (required->dX_psi_C2TB ? "YES" : "NO") << std::endl;
+			oss << "   dX_psi_DL: " << (required->dX_psi_DL ? "YES" : "NO") << std::endl;
+			oss << "   dX_psi_D0: " << (required->dX_psi_D0 ? "YES" : "NO") << std::endl;
+			oss << "   psi_Pos: " << (required->psi_Pos ? "YES" : "NO") << std::endl;
+			oss << "  dx_psi_Pos: " << (required->dx_psi_Pos ? "YES" : "NO") << std::endl;
+			oss << "  dX_psi_Pos: " << (required->dX_psi_Pos ? "YES" : "NO") << std::endl;
+			oss << "  normal_Pos: " << (required->normal_Pos ? "YES" : "NO") << std::endl;
+			oss << "  elemsize_Eulerian_Pos: " << (required->elemsize_Eulerian_Pos ? "YES" : "NO") << std::endl;
+			oss << "  elemsize_Lagrangian_Pos: " << (required->elemsize_Lagrangian_Pos ? "YES" : "NO") << std::endl;
+			oss << "  elemsize_Eulerian_cartesian_Pos: " << (required->elemsize_Eulerian_cartesian_Pos ? "YES" : "NO") << std::endl;
+			oss << "  elemsize_Lagrangian_cartesian_Pos: " << (required->elemsize_Lagrangian_cartesian_Pos ? "YES" : "NO") << std::endl;
+			oss << "  history_integral_dx1: " << (required->history_integral_dx1 ? "YES" : "NO") << std::endl;
+			oss << "  history_integral_dx2: " << (required->history_integral_dx2 ? "YES" : "NO") << std::endl;
+
 			throw_runtime_error(oss.str());
 		}
 		return -1;
@@ -14488,59 +14541,62 @@ namespace pyoomph
 			const JITFuncSpec_Table_FiniteElement_t *functable = from_elem->get_code_instance()->get_func_table();
 			if (functable->moving_nodes)
 			{
-				for (unsigned int l = 0; l < from_elem->get_eleminfo()->nnode; l++)
+				if (required->dx_psi_C2TB  || required->dx_psi_C2 || required->dx_psi_C1 || required->dx_psi_C1TB  ||   required->psi_Pos  || required->dx_psi_DL || required->normal_Pos || required->elemsize_Eulerian_Pos || required->elemsize_Eulerian_cartesian_Pos) 
 				{
-					auto *n = from_elem->node_pt(l);
-					auto *vp = dynamic_cast<pyoomph::Node *>(n)->variable_position_pt();
-					if (n->is_hanging())
+					for (unsigned int l = 0; l < from_elem->get_eleminfo()->nnode; l++)
 					{
-						oomph::HangInfo *const hang_pt = n->hanging_pt();
-						const unsigned nmaster = hang_pt->nmaster();
-						for (unsigned m = 0; m < nmaster; m++)
+						auto *n = from_elem->node_pt(l);
+						auto *vp = dynamic_cast<pyoomph::Node *>(n)->variable_position_pt();
+						if (n->is_hanging())
 						{
-							oomph::Node *const master_node_pt = hang_pt->master_node_pt(m);
-							oomph::DenseMatrix<int> Position_local_eqn_at_node = from_elem->local_position_hang_eqn(master_node_pt);
-							unsigned n_position_type = 1;
-							for (unsigned k = 0; k < n_position_type; k++)
+							oomph::HangInfo *const hang_pt = n->hanging_pt();
+							const unsigned nmaster = hang_pt->nmaster();
+							for (unsigned m = 0; m < nmaster; m++)
 							{
-								for (unsigned i = 0; i < vp->nvalue(); i++)
+								oomph::Node *const master_node_pt = hang_pt->master_node_pt(m);
+								oomph::DenseMatrix<int> Position_local_eqn_at_node = from_elem->local_position_hang_eqn(master_node_pt);
+								unsigned n_position_type = 1;
+								for (unsigned k = 0; k < n_position_type; k++)
 								{
-									int parent_no = Position_local_eqn_at_node(k, i);
-									if (parent_no >= 0)
+									for (unsigned i = 0; i < vp->nvalue(); i++)
 									{
-										//				         std::cout << "HANG VAR POS " << l << "  " << k << "  " << "  " << m << "  " <<i <<  "   " << dynamic_cast<pyoomph::Node*>(master_node_pt)->variable_position_pt()->eqn_number(i) << "  " << parent_no << std::endl;
-										std::string info = "VARIABLE POSITION HANG";
-										int my_no = resolve_local_equation_for_external_contributions(dynamic_cast<pyoomph::Node *>(master_node_pt)->variable_position_pt()->eqn_number(i), from_elem, &info);
-										eq_map[parent_no] = my_no;
+										int parent_no = Position_local_eqn_at_node(k, i);
+										if (parent_no >= 0)
+										{
+											//				         std::cout << "HANG VAR POS " << l << "  " << k << "  " << "  " << m << "  " <<i <<  "   " << dynamic_cast<pyoomph::Node*>(master_node_pt)->variable_position_pt()->eqn_number(i) << "  " << parent_no << std::endl;
+											std::string info = "VARIABLE POSITION HANG";
+											int my_no = resolve_local_equation_for_external_contributions(dynamic_cast<pyoomph::Node *>(master_node_pt)->variable_position_pt()->eqn_number(i), from_elem, &info,required);
+											eq_map[parent_no] = my_no;
+										}
 									}
 								}
 							}
-						}
 
-						//			 	throw_runtime_error("Hanging bulk Lagrange");
-					}
-					else
-					{
-						for (unsigned int k = 0; k < vp->nvalue(); k++)
+							//			 	throw_runtime_error("Hanging bulk Lagrange");
+						}
+						else
 						{
-							int parent_no = from_elem->position_local_eqn(l, 0, k);
-							//				   std::cout << "FROM ELEM " << from_elem << "( nnode " << from_elem->nnode() << ") NONHANG VAR POS " << l << "  " << k << "  " << "  " <<  "   " << vp->eqn_number(k) << std::endl;
-							std::string info = "VARIABLE POSITION";
-							int my_no = resolve_local_equation_for_external_contributions(vp->eqn_number(k), from_elem, &info);
-							//			  	 	std::cout << "DONE" << std::endl;
-							if (parent_no >= 0)
+							for (unsigned int k = 0; k < vp->nvalue(); k++)
 							{
-								eq_map[parent_no] = my_no;
+								int parent_no = from_elem->position_local_eqn(l, 0, k);
+								//				   std::cout << "FROM ELEM " << from_elem << "( nnode " << from_elem->nnode() << ") NONHANG VAR POS " << l << "  " << k << "  " << "  " <<  "   " << vp->eqn_number(k) << std::endl;
+								std::string info = "VARIABLE POSITION, Parent node " +std::to_string(l) + " , direction " + std::to_string(k);
+								int my_no = resolve_local_equation_for_external_contributions(vp->eqn_number(k), from_elem, &info,required);
+								//			  	 	std::cout << "DONE" << std::endl;
+								if (parent_no >= 0)
+								{
+									eq_map[parent_no] = my_no;
+								}
 							}
 						}
 					}
+					/*      }
+							else
+							{
+									throw_runtime_error("Adding also bulk Lagrange for C1");
+							}
+					*/
 				}
-				/*      }
-						 else
-						 {
-								throw_runtime_error("Adding also bulk Lagrange for C1");
-						 }
-				*/
 			}
 
 			int hanging_index = (functable->bulk_position_space_to_C1 ? 0 : -1);
@@ -14565,7 +14621,7 @@ namespace pyoomph
 								int parent_no = from_elem->local_hang_eqn(master_nod_pt, functable->nodal_offset_C2TB_basebulk+k);
 								//			  	 	std::cout << "HANG C2 " << j << "  " << "  " << k << "  " << m << master_nod_pt->eqn_number(k) << std::endl;
 								std::string info = "C2TB HANGIG";
-								int my_no = resolve_local_equation_for_external_contributions(master_nod_pt->eqn_number(functable->nodal_offset_C2TB_basebulk+k), from_elem, &info);
+								int my_no = resolve_local_equation_for_external_contributions(master_nod_pt->eqn_number(functable->nodal_offset_C2TB_basebulk+k), from_elem, &info,required);
 								if (parent_no >= 0)
 								{
 									eq_map[parent_no] = my_no;
@@ -14577,7 +14633,7 @@ namespace pyoomph
 							int parent_no = from_elem->nodal_local_eqn(el_n_index, functable->nodal_offset_C2TB_basebulk+k);
 							//  		  	 	   std::cout << "C2 " << j << "  " << "  " << k << "  " << n->eqn_number(k) << std::endl;
 							std::string info = "C2TB";
-							int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(functable->nodal_offset_C2TB_basebulk+k), from_elem, &info);
+							int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(functable->nodal_offset_C2TB_basebulk+k), from_elem, &info,required);
 							// std::cout << "DONE" << std::endl;
 							if (parent_no >= 0)
 							{
@@ -14599,7 +14655,7 @@ namespace pyoomph
 							unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(n)->index_of_first_value_assigned_by_face_element(interf_id);						
 							int parent_no = from_elem->nodal_local_eqn(el_n_index, valindex);
 							std::string info = "C2TB";
-							int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(valindex), from_elem, &info);
+							int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(valindex), from_elem, &info,required);
 							if (parent_no >= 0)
 							{
 								eq_map[parent_no] = my_no;
@@ -14613,7 +14669,7 @@ namespace pyoomph
 						std::string info = "D2TB";
 						oomph::Data * DGdata=from_elem->get_D2TB_nodal_data(fiDG);
 						int DG_value_index=from_elem->get_D2TB_node_index(fiDG,j);
-						int my_no=resolve_local_equation_for_external_contributions(DGdata->eqn_number(DG_value_index), from_elem, &info);						
+						int my_no=resolve_local_equation_for_external_contributions(DGdata->eqn_number(DG_value_index), from_elem, &info,required);						
 						if (parent_no >= 0)
 						{
 							eq_map[parent_no] = my_no;
@@ -14642,7 +14698,7 @@ namespace pyoomph
 								int parent_no = from_elem->local_hang_eqn(master_nod_pt, functable->nodal_offset_C2_basebulk+k);
 								//			  	 	std::cout << "HANG C2 " << j << "  " << "  " << k << "  " << m << master_nod_pt->eqn_number(k) << std::endl;
 								std::string info = "C2 HANGIG";
-								int my_no = resolve_local_equation_for_external_contributions(master_nod_pt->eqn_number(functable->nodal_offset_C2_basebulk+k), from_elem, &info);
+								int my_no = resolve_local_equation_for_external_contributions(master_nod_pt->eqn_number(functable->nodal_offset_C2_basebulk+k), from_elem, &info,required);
 								if (parent_no >= 0)
 								{
 									eq_map[parent_no] = my_no;
@@ -14654,7 +14710,7 @@ namespace pyoomph
 							int parent_no = from_elem->nodal_local_eqn(el_n_index, functable->nodal_offset_C2_basebulk+k);
 							  		  	 	   //std::cout << "C2 " << j << "  " << "  " << k << "  " << n->eqn_number(k) << std::endl;
 							std::string info = "C2";
-							int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(functable->nodal_offset_C2_basebulk+k), from_elem, &info);
+							int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(functable->nodal_offset_C2_basebulk+k), from_elem, &info,required);
 							// std::cout << "DONE" << std::endl;
 							if (parent_no >= 0)
 							{
@@ -14678,7 +14734,7 @@ namespace pyoomph
 							std::string info = "C2";
 							//std::cout << "RESOLVING FOR INTERFACE FIELD " << fieldname << " AT NODE " << j << " OF " << from_elem->get_eleminfo()->nnode_C2 << " WITH PARENT NO " << parent_no << std::endl;
 							//std::cout << "    WHICH HAS GLOBAL EQN " << n->eqn_number(valindex) << std::endl;
-							int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(valindex), from_elem, &info);
+							int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(valindex), from_elem, &info,required);
 							if (parent_no >= 0)
 							{
 								eq_map[parent_no] = my_no;
@@ -14693,7 +14749,7 @@ namespace pyoomph
 						std::string info = "D2";
 						oomph::Data * DGdata=from_elem->get_D2_nodal_data(fiDG);
 						int DG_value_index=from_elem->get_D2_node_index(fiDG,j);
-						int my_no=resolve_local_equation_for_external_contributions(DGdata->eqn_number(DG_value_index), from_elem, &info);						
+						int my_no=resolve_local_equation_for_external_contributions(DGdata->eqn_number(DG_value_index), from_elem, &info,required);						
 						if (parent_no >= 0)
 						{
 							eq_map[parent_no] = my_no;
@@ -14731,7 +14787,7 @@ namespace pyoomph
 								int parent_no = from_elem->local_hang_eqn(master_nod_pt, functable->nodal_offset_C1TB_basebulk + k);
 								//			  	 	std::cout << "HANG C1 " << j << "  " << "  " << k << "  " << m << master_nod_pt->eqn_number(k) << std::endl;
 								std::string info = "C1TB HANG";
-								int my_no = resolve_local_equation_for_external_contributions(master_nod_pt->eqn_number(functable->nodal_offset_C1TB_basebulk + k), from_elem, &info);
+								int my_no = resolve_local_equation_for_external_contributions(master_nod_pt->eqn_number(functable->nodal_offset_C1TB_basebulk + k), from_elem, &info,required);
 								if (parent_no >= 0)
 								{
 									eq_map[parent_no] = my_no;
@@ -14743,7 +14799,7 @@ namespace pyoomph
 					//						   std::cout << "    DOES NOT HANG " << std::endl;																	
 							int parent_no = from_elem->nodal_local_eqn(el_n_index, functable->nodal_offset_C1TB_basebulk + k);
 							std::string info = "C1TB";
-							int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(functable->nodal_offset_C1TB_basebulk + k), from_elem, &info);
+							int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(functable->nodal_offset_C1TB_basebulk + k), from_elem, &info,required);
 						//					   std::cout << "    OWN EQ " << my_no  << " PARENT NOT " << parent_no <<std::endl;																								
 							if (parent_no >= 0)
 							{
@@ -14765,7 +14821,7 @@ namespace pyoomph
 							unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(n)->index_of_first_value_assigned_by_face_element(interf_id);						
 							int parent_no = from_elem->nodal_local_eqn(el_n_index, valindex);
 							std::string info = "C1TB";
-							int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(valindex), from_elem, &info);
+							int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(valindex), from_elem, &info,required);
 							if (parent_no >= 0)
 							{
 								eq_map[parent_no] = my_no;
@@ -14780,7 +14836,7 @@ namespace pyoomph
 						std::string info = "D1TB";
 						oomph::Data * DGdata=from_elem->get_D1TB_nodal_data(fiDG);
 						int DG_value_index=from_elem->get_D1TB_node_index(fiDG,j);
-						int my_no=resolve_local_equation_for_external_contributions(DGdata->eqn_number(DG_value_index), from_elem, &info);						
+						int my_no=resolve_local_equation_for_external_contributions(DGdata->eqn_number(DG_value_index), from_elem, &info,required);						
 						if (parent_no >= 0)
 						{
 							eq_map[parent_no] = my_no;
@@ -14809,7 +14865,7 @@ namespace pyoomph
 								int parent_no = from_elem->local_hang_eqn(master_nod_pt, functable->nodal_offset_C1_basebulk + k);
 								//			  	 	std::cout << "HANG C1 " << j << "  " << "  " << k << "  " << m << master_nod_pt->eqn_number(k) << std::endl;
 								std::string info = "C1 HANG";
-								int my_no = resolve_local_equation_for_external_contributions(master_nod_pt->eqn_number(functable->nodal_offset_C1_basebulk + k), from_elem, &info);
+								int my_no = resolve_local_equation_for_external_contributions(master_nod_pt->eqn_number(functable->nodal_offset_C1_basebulk + k), from_elem, &info,required);
 								if (parent_no >= 0)
 								{
 									eq_map[parent_no] = my_no;
@@ -14820,7 +14876,7 @@ namespace pyoomph
 						{
 							int parent_no = from_elem->nodal_local_eqn(el_n_index, functable->nodal_offset_C1_basebulk + k);
 							std::string info = "C1";
-							int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(functable->nodal_offset_C1_basebulk + k), from_elem, &info);
+							int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(functable->nodal_offset_C1_basebulk + k), from_elem, &info,required);
 							if (parent_no >= 0)
 							{
 								eq_map[parent_no] = my_no;
@@ -14841,7 +14897,7 @@ namespace pyoomph
 							unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(n)->index_of_first_value_assigned_by_face_element(interf_id);						
 							int parent_no = from_elem->nodal_local_eqn(el_n_index, valindex);
 							std::string info = "C1";
-							int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(valindex), from_elem, &info);
+							int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(valindex), from_elem, &info,required);
 							if (parent_no >= 0)
 							{
 								eq_map[parent_no] = my_no;
@@ -14856,7 +14912,7 @@ namespace pyoomph
 						std::string info = "D1";
 						oomph::Data * DGdata=from_elem->get_D1_nodal_data(fiDG);
 						int DG_value_index=from_elem->get_D1_node_index(fiDG,j);
-						int my_no=resolve_local_equation_for_external_contributions(DGdata->eqn_number(DG_value_index), from_elem, &info);						
+						int my_no=resolve_local_equation_for_external_contributions(DGdata->eqn_number(DG_value_index), from_elem, &info,required);						
 						if (parent_no >= 0)
 						{
 							eq_map[parent_no] = my_no;
@@ -14876,7 +14932,7 @@ namespace pyoomph
 					{
 						int parent_no = from_elem->get_internal_local_eqn(functable->internal_offset_DL+k, j);
 						std::string info = "DL";
-						int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(j), from_elem, &info);
+						int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(j), from_elem, &info,required);
 						if (parent_no >= 0)
 						{
 							eq_map[parent_no] = my_no;
@@ -14895,7 +14951,7 @@ namespace pyoomph
 						auto *n = from_elem->internal_data_pt(functable->internal_offset_D0 + k);
 						int parent_no = from_elem->get_internal_local_eqn(functable->internal_offset_D0 + k, j);
 						std::string info = "D0";
-						int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(j), from_elem, &info);
+						int my_no = resolve_local_equation_for_external_contributions(n->eqn_number(j), from_elem, &info,required);
 						if (parent_no >= 0)
 						{
 							eq_map[parent_no] = my_no;
@@ -14987,6 +15043,10 @@ namespace pyoomph
 			{
 				//   std::cout << "ADDING OPPOSITE INTERFACE DOFS , THIS NNODE " << this->nnode() <<" OPP" <<dynamic_cast<InterfaceElementBase*>(opposite_side)  <<   " OPP NNODE " << dynamic_cast<InterfaceElementBase*>(opposite_side)->nnode() <<std::endl;
 				assign_additional_local_eqn_numbers_from_elem(functable->merged_required_shapes.opposite_shapes, opposite_side, opp_interf_eqn_map);
+				/*std::cout << "OPP INTERFACE EQUATION MAP " << this << std::endl;
+				for (unsigned int i=0;i < opp_interf_eqn_map.size();i++) {
+					 std::cout << "  " << i << "  " << opp_interf_eqn_map[i] << std::endl;
+				}*/
 				if (functable->merged_required_shapes.opposite_shapes->bulk_shapes)
 				{
 					if (!dynamic_cast<InterfaceElementBase *>(opposite_side)->bulk_element_pt())

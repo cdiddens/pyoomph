@@ -76,7 +76,7 @@ namespace pyoomph
 		dest->elemsize_Eulerian_Pos |= src->elemsize_Eulerian_Pos;
 		dest->elemsize_Lagrangian_Pos |= src->elemsize_Lagrangian_Pos;
 		dest->elemsize_Eulerian_cartesian_Pos |= src->elemsize_Eulerian_cartesian_Pos;
-		dest->elemsize_Lagrangian_cartesian_Pos |= src->elemsize_Lagrangian_cartesian_Pos;
+		dest->elemsize_Lagrangian_cartesian_Pos |= src->elemsize_Lagrangian_cartesian_Pos;		
 		if (src->bulk_shapes)
 		{
 			if (!dest->bulk_shapes)
