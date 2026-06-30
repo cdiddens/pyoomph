@@ -853,6 +853,13 @@ namespace pyoomph
 	unsigned long Problem::assign_eqn_numbers(const bool& assign_local_eqn_numbers)
 	{
       unsigned long res=oomph::Problem::assign_eqn_numbers(assign_local_eqn_numbers);
+	  for (unsigned nmi = 0; nmi < this->nsub_mesh(); nmi++)
+	  {
+		if (dynamic_cast<InterfaceMesh *>(this->mesh_pt(nmi)))
+		{
+			dynamic_cast<InterfaceMesh *>(this->mesh_pt(nmi))->update_equation_remapping();
+		}
+	  }
 	  if (!this->dirichlets_by_removing_from_dof_vector)
 	  {
 		//dirichlet_info.build_equation_to_value_map();

@@ -4305,6 +4305,15 @@ namespace pyoomph
     //	 if (this->spatial_error_estimator_pt()) delete this->spatial_error_estimator_pt();
   }
 
+  void InterfaceMesh::update_equation_remapping()
+  {
+    for (unsigned int ie = 0; ie < this->nelement(); ie++)
+    {
+      InterfaceElementBase *ife = dynamic_cast<InterfaceElementBase *>(this->element_pt(ie));
+      ife->update_equation_remapping();
+    }
+  }
+
   void InterfaceMesh::update_zeta_in_buffer()
   {
     for (unsigned int ie = 0; ie < this->nelement(); ie++)

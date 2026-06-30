@@ -1313,6 +1313,7 @@ void PyReg_Mesh(py::module &m)
 		.def("set_opposite_interface_offset_vector",&pyoomph::InterfaceMesh::set_opposite_interface_offset_vector)
 		.def("get_opposite_interface_offset_vector",&pyoomph::InterfaceMesh::get_opposite_interface_offset_vector)		
 		.def("update_zeta_in_buffer",&pyoomph::InterfaceMesh::update_zeta_in_buffer)
+		.def("update_equation_remapping",&pyoomph::InterfaceMesh::update_equation_remapping)
 		.def("get_bulk_mesh", &pyoomph::InterfaceMesh::get_bulk_mesh)
 		.def(
 			"_get_problem", [](pyoomph::InterfaceMesh *self)

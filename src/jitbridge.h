@@ -179,7 +179,7 @@ typedef struct JITHangInfo
 typedef struct JITShapeInfo
 {
   unsigned int n_int_pt;             // Number of integration points
-  double int_pt_weight[2];            // Eulerian weight at the current integration point (or at history steps 1 and 2)
+  double int_pt_weight[3];            // Eulerian weight at the current integration point (or at history steps 1 and 2)
   double int_pt_weight_Lagrangian; // Lagrangian weight at the current integration point
   double int_pt_weight_unity;            // Weight at the current integration point in s space, i.e. without any mapping [ sqrt(det(g_ab)) ]
   double ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(int_pt_weights_d_coords)); // Weights derived by coordinates, [i_dim,l_node], i.e. w*dJ_Eulerian/dX^l_i
@@ -512,6 +512,15 @@ typedef struct JITFuncSpec_Table_FiniteElement
   char * domain_name;
 
   bool * has_constant_mass_matrix_for_sure;
+
+  // Quick resolving interface dofs by index. Filled for interface codes in the core
+  /*
+  //TODO: This should be implemented at some point, however, these are created more or less dynamically, so it is not trivial. Potentially, it works when first time creating an interface element
+  unsigned int * interface_dof_ids_C1;
+  unsigned int * interface_dof_ids_CTB1;
+  unsigned int * interface_dof_ids_C2;
+  unsigned int * interface_dof_ids_C2TB;
+  */
 
   // Exported functions
   void (*check_compiler_size)(unsigned long long,unsigned long long,char *);  

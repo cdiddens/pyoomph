@@ -202,6 +202,7 @@ namespace pyoomph
     virtual void describe_my_dofs(std::ostream &os, const std::string &in) { this->describe_local_dofs(os, in); }
     virtual double J_Lagrangian(const oomph::Vector<double> &s);
     virtual int get_internal_local_eqn(unsigned idindex, unsigned vindex) { return this->internal_local_eqn(idindex, vindex); }
+    virtual int get_external_local_eqn(unsigned idindex, unsigned vindex) { return this->external_local_eqn(idindex, vindex); }
     virtual void get_normal_at_s(const oomph::Vector<double> &s, oomph::Vector<double> &n, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dnormal_dcoord, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2normal_dcoord2) const;
 
     // Discontinuous fields are stored as internal_data, on interfaces possibly also on external_data
@@ -849,8 +850,8 @@ namespace pyoomph
 
     void check_integrity(double &max_error) { max_error = 0; } // TODO
 
-    unsigned int get_node_index_C1_to_element(const unsigned int &i) const { return i; }
-    unsigned int get_node_index_C2_to_element(const unsigned int &i) const { return 0; }
+    unsigned int get_node_index_C1_to_element(const unsigned int &i) const { return i; }    
+    unsigned int get_node_index_C2_to_element(const unsigned int &i) const { return 0; }    
     unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const { return i; }
 
     void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
@@ -1170,9 +1171,11 @@ namespace pyoomph
     virtual bool fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap);
     virtual unsigned get_meshio_type_index() const { return 11; }
 
+
     void check_integrity(double &max_error) { max_error = 0; } // TODO
 
     unsigned int get_node_index_C1_to_element(const unsigned int &i) const { return i; }
+    unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const override { return i; }    
     unsigned int get_node_index_C2_to_element(const unsigned int &i) const { return 0; }
 
     void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
@@ -1740,11 +1743,13 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
     int opposite_orientation;
     std::vector<int> bulk_eqn_map, opp_interf_eqn_map, opp_bulk_eqn_map, bulk_bulk_eqn_map;
     std::vector<bool> external_data_is_geometric;
-
+    virtual void interpolate_hang_values_for_additional_interface_space_on_quads(unsigned addfields, unsigned nnode_space, int hangindex, unsigned numfields_basebulk, char *fieldnames[], unsigned (BulkElementBase::*node_index_to_element)(const unsigned &) const,bool C1_on_C2);
+    virtual bool fill_hang_info_with_equations_for_additional_interface_space_on_quads(unsigned addfields,unsigned buffer_offset_interf, unsigned nnode_space, int hangindex, JITHangInfo_t* hangbuffer, unsigned (BulkElementBase::*node_index_to_element)(const unsigned &) const, std::map<Node*, int> *& add_interf_local_hang_eqs);
+    virtual void assign_hanging_additional_interface_local_equations_for_space(const bool &store_local_dof_pt,unsigned addfields,unsigned basebulk_offset,unsigned nnode, int hangindex,  char * fieldnames[], unsigned (BulkElementBase::*node_index_to_element)(const unsigned &) const,  std::map<Node*, int> *& add_interf_local_hang_eqs);
+    virtual void update_equation_remapping_from_element(BulkElementBase *source_elem,const JITFuncSpec_RequiredShapes_FiniteElement_t *required_shapes,std::vector<int> &eqn_map,int bulk_indicator);
     virtual void update_in_external_fd(const unsigned &i);
     virtual bool add_required_ext_data(oomph::Data *data, bool is_geometric);
-    virtual void add_required_external_data(JITFuncSpec_RequiredShapes_FiniteElement_t *required, BulkElementBase *from_elem);
-    virtual int resolve_local_equation_for_external_contributions(long int globeq, BulkElementBase *from_elem = NULL, std::string *info = NULL,const JITFuncSpec_RequiredShapes_FiniteElement_t *required = NULL);
+    virtual void add_required_external_data(JITFuncSpec_RequiredShapes_FiniteElement_t *required, BulkElementBase *from_elem);    
     virtual void prepare_shape_buffer_for_integration(const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag);
     double fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds = NULL, unsigned history_index=0) const;
     virtual bool fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap);
@@ -1755,7 +1760,7 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
     virtual void fill_element_info_interface_part(bool without_equations=false);
     virtual std::vector<std::string> get_dof_names(bool not_a_root_call = false);
     virtual void get_dnormal_dcoords_at_s(const oomph::Vector<double> &s, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dnormal_dcoord, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2normal_dcoord2) const;
-    virtual void assign_additional_local_eqn_numbers_from_elem(const JITFuncSpec_RequiredShapes_FiniteElement_t *required, BulkElementBase *from_elem, std::vector<int> &eq_map);
+  
     virtual oomph::Vector<double> local_coordinate_in_opposite_side(const oomph::Vector<double> &s) const { throw_runtime_error("Implement"); }
     virtual void fill_opposite_node_indices(JITShapeInfo_t *shape_info)
     {
@@ -1768,11 +1773,18 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
     virtual void add_DG_external_data();
     virtual void interpolate_newly_constructed_additional_dof(const unsigned &lnode, const unsigned &valindex, const std::string &space);
 
+
+    virtual void assign_hanging_additional_interface_local_equations(const bool &store_local_dof_pt) {}
+    inline void assign_nodal_local_eqn_numbers(const bool &store_local_dof_pt)
+    {
+      BulkElementBase::assign_nodal_local_eqn_numbers(store_local_dof_pt);
+      assign_hanging_additional_interface_local_equations(store_local_dof_pt);
+    }
   public:
     InterfaceElementBase() : opposite_side(NULL), Is_internal_facet_opposite_dummy(false) {}
 
     static bool interpolate_new_interface_dofs;
-
+    virtual void update_equation_remapping();
     virtual void set_remaining_shapes_appropriately(JITShapeInfo_t *shape_info, const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes);
     void unpin_dummy_values(); // C1 fields on C2 elements have dummy values on only C2 nodes, which needs to be pinned
     void pin_dummy_values();
@@ -2498,19 +2510,48 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
   class InterfaceElementQuad2dC1 : public InterfaceElement<BulkElementQuad2dC1>
   {
   protected:
+    std::map<Node*, int>* add_interf_local_hang_eqs_C1, *add_interf_local_hang_eqs_C1TB;
   public:
-    InterfaceElementQuad2dC1(DynamicBulkElementInstance *jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkElementQuad2dC1>(jitcode, bulk_el_pt, face_index)
+    InterfaceElementQuad2dC1(DynamicBulkElementInstance *jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkElementQuad2dC1>(jitcode, bulk_el_pt, face_index), add_interf_local_hang_eqs_C1(NULL), add_interf_local_hang_eqs_C1TB(NULL)
     {
     }
+    void assign_hanging_additional_interface_local_equations(const bool &store_local_dof_pt) override;
+    ~InterfaceElementQuad2dC1() override
+    {
+      if (add_interf_local_hang_eqs_C1)
+        delete[] add_interf_local_hang_eqs_C1;
+      if (add_interf_local_hang_eqs_C1TB)
+        delete[] add_interf_local_hang_eqs_C1TB;
+    }
+    bool fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap) override;
+    void interpolate_hang_values() override;
+	
   };
 
   class InterfaceElementQuad2dC2 : public InterfaceElement<BulkElementQuad2dC2>
   {
   protected:
+    std::map<Node*, int>* add_interf_local_hang_eqs_C1, *add_interf_local_hang_eqs_C1TB,* add_interf_local_hang_eqs_C2, *add_interf_local_hang_eqs_C2TB;
   public:
-    InterfaceElementQuad2dC2(DynamicBulkElementInstance *jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkElementQuad2dC2>(jitcode, bulk_el_pt, face_index)
+    InterfaceElementQuad2dC2(DynamicBulkElementInstance *jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkElementQuad2dC2>(jitcode, bulk_el_pt, face_index), add_interf_local_hang_eqs_C1(NULL), add_interf_local_hang_eqs_C1TB(NULL), add_interf_local_hang_eqs_C2(NULL), add_interf_local_hang_eqs_C2TB(NULL)
     {
     }
+    
+    ~InterfaceElementQuad2dC2() override
+    {
+      if (add_interf_local_hang_eqs_C1)
+        delete[] add_interf_local_hang_eqs_C1;
+      if (add_interf_local_hang_eqs_C1TB)
+        delete[] add_interf_local_hang_eqs_C1TB;
+      if (add_interf_local_hang_eqs_C2)
+        delete[] add_interf_local_hang_eqs_C2;
+      if (add_interf_local_hang_eqs_C2TB)
+        delete[] add_interf_local_hang_eqs_C2TB;
+    }
+
+    void assign_hanging_additional_interface_local_equations(const bool &store_local_dof_pt) ;
+    bool fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap) ;
+    void interpolate_hang_values() ;
   };
 
   class InterfaceElementTri2dC1 : public InterfaceElement<BulkElementTri2dC1>
