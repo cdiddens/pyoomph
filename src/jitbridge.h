@@ -338,10 +338,36 @@ typedef struct JITFuncSpec_MultiRet_Entry
 } JITFuncSpec_MultiRet_Entry_t;
 
 
+typedef struct JITFuncSpec_Table_FiniteElement_SpaceInfo
+{
+  // numfields are the total number of fields, numfields_bulk are the ones which are defined on the 
+  //   bulk mesh (including the additional field of all parent interface meshes)
+  // numfields_basebulk are indeed the fields that are directly implemented only at the lowest level. 
+  // numfields__new are the number of fields defined directly at this element level, i.e for deepest level
+  //   ON BULK ELEMENTS (lowest level): numfields_new=numfields_bulk=numfields_basebulk=numfields 
+  //   ON INTERFACE ELEMENTS:           numfields_new=numfields-numfields_bulk;
+ unsigned int numfields,numfields_bulk,numfields_basebulk,numfields_new;
+ char **fieldnames;
+ int hangindex;
+
+ unsigned int buffer_offset_basebulk; // Offsets in the nodal data buffer (basebulk fields only)
+ unsigned int buffer_offset_interf; // Offsets in the nodal data buffer (interface fields only)
+ // For continuous fields
+ unsigned int nodal_offset_basebulk; //Offsets to the indices in the nodal values (basebulk fields only)
+ // For discontinuous fields
+ unsigned int internal_offset_new; // Offset to the internal_data entries. These are only there on the current element level  
+ unsigned int external_offset_bulk; // Offset to the external_data entries. These refer to DG spaces on parent elements    
+ char space_name[16]; // Name of the space, e.g. C1, C2, C1TB, C2TB, DL, D0, ED0
+} JITFuncSpec_Table_FiniteElement_SpaceInfo_t;
+
+
 typedef struct JITFuncSpec_Table_FiniteElement
 {
   unsigned int nodal_dim, lagr_dim;
 
+  bool bulk_position_space_to_C1;
+
+  // Old way of handling things
   unsigned int numfields_C1, numfields_C1_bulk, numfields_C1_basebulk,numfields_C1_new; // Fields numfields_C1 are the total number of fields, numfields_C1_bulk are the ones which are defined on the bulk mesh (including the additional field of all parent interface meshes, numfields_C1_basebulk are indeed the fields that are directly implemented only at the lowest level. numfields_C1_new are the number of fields defined directly at this element level, i.e for lowest bulk level, numfields_C1_new=numfields_C1_bulk=numfields_C1_basebulk=numfields_C1. For interface elements, we get numfields_C1_new=numfields_C1-numfields_C1_bulk;
   char **fieldnames_C1;
 
@@ -368,7 +394,7 @@ typedef struct JITFuncSpec_Table_FiniteElement
 
   unsigned int numfields_Pos;
   char **fieldnames_Pos;
-  bool bulk_position_space_to_C1;
+  
   
   int hangindex_C1,hangindex_C2,hangindex_C1TB,hangindex_C2TB,hangindex_Pos; //Hang indices
 
@@ -396,6 +422,9 @@ typedef struct JITFuncSpec_Table_FiniteElement
   unsigned int internal_offset_DL,internal_offset_D0;
   unsigned int buffer_offset_DL,buffer_offset_D0; 
   unsigned int buffer_offset_ED0,external_offset_ED0;
+
+  // New way of handling things 
+  JITFuncSpec_Table_FiniteElement_SpaceInfo_t info_C1,info_C2,info_C2TB,info_C1TB,info_D1,info_D1TB,info_D2,info_D2TB,info_DL,info_D0,info_ED0,info_Pos;
 
   //Exponents for the D0 fields upon refinement. 
   // If zero [default]: 
