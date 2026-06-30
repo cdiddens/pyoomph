@@ -839,7 +839,7 @@ class GmshTemplate(MeshTemplate):
         return res
 
 
-    def ellipse_arc(self,startpt:Union[Point,Sequence[ExpressionOrNum]],endpt:Union[Point,Sequence[ExpressionOrNum]],center:Union[Point,Sequence[ExpressionOrNum]],pt_on_major_axis:Optional[:Union[Point,Sequence[ExpressionOrNum]]]=None,name="ellipse"):
+    def ellipse_arc(self,startpt:Union[Point,Sequence[ExpressionOrNum]],endpt:Union[Point,Sequence[ExpressionOrNum]],center:Union[Point,Sequence[ExpressionOrNum]],pt_on_major_axis:Optional[Union[Point,Sequence[ExpressionOrNum]]]=None,name:Optional[str]=None):
         """
         Adds an ellipse arc to the mesh geometry.
 
@@ -864,7 +864,7 @@ class GmshTemplate(MeshTemplate):
                 center=self.point(*center)                
         if isinstance(pt_on_major_axis,(list,tuple)):
                 pt_on_major_axis=self.point(*pt_on_major_axis)        
-        res=self._geom.add_ellipse_arc(startpt,center,pt_on_major_axis if pt_on_major_axis is not None else startpt, endpt)        
+        res=self._geom.add_ellipse_arc(startpt,center,pt_on_major_axis if pt_on_major_axis is not None else startpt, endpt)    #type:ignore    
         self._store_name(name, res)
         self._entities1d[res._id] = res #type:ignore
         # self._curved_entities1d[res._id] = CurvedEntityCircleArc(startpt,center, endpt)        
