@@ -13083,8 +13083,12 @@ namespace pyoomph
 			for (unsigned int i=space_info->numfields_bulk;i<space_info->numfields;i++)
 			{
 				std::string fieldname = space_info->fieldnames[i];
-				//unsigned value_index = codeinst->resolve_interface_dof_id(fieldname);
-				unsigned value_index=space_info->interface_dof_indices[i-space_info->numfields_bulk];
+				
+				unsigned value_index=space_info->interface_dof_indices[i-space_info->numfields_basebulk];
+				// TODO: Can be removed once we are sure that the interface dof indices are always correct
+				unsigned value_index1 = codeinst->resolve_interface_dof_id(fieldname);
+				if (value_index1!=value_index) throw_runtime_error("Mismatch between resolved interface dof id and space info index for field "+fieldname+" "+std::to_string(value_index1)+" vs. "+std::to_string(value_index));
+				
 				oomph::Vector<unsigned> additional_data_values(eleminfo.nnode, 0);
 				bool add_values = false;
 				std::vector<bool> already_allocated;

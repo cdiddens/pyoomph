@@ -28,6 +28,7 @@ include $(PYOOMPH_CONFIG_FILE)
 
 
 
+
 ifneq ($(PYOOMPH_MARCH_NATIVE),false)
 #-Wdate-time
 CXXFLAGS =   -fwrapv -O2 -Wall -Wformat -Werror=format-security  -D_FORTIFY_SOURCE=2 -fPIC -DVERSION_INFO="0.0.1" -DNDEBUG 
@@ -35,7 +36,7 @@ ifeq ($(OS),Windows_NT)
  CXXFLAGS+=-fno-stack-protector
 else
 ifeq ($(shell uname),Darwin)
- CXXFLAGS+= -fstack-protector-strong    -march=native
+ CXXFLAGS+= -fstack-protector-strong    -arch $(shell uname -m)
 else
  CXXFLAGS+= -fstack-protector-strong   -fvisibility=hidden -march=native
 endif
@@ -70,7 +71,6 @@ else
 endif
 
 CXXFLAGS+=-std=c++11
-
 
 
 
