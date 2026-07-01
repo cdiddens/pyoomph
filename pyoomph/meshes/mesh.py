@@ -222,7 +222,7 @@ class BaseMesh:
                 imsh._codegen._perform_external_ode_linkage()
                 imsh.ensure_external_data()
                 assert imsh._codegen._code is not None
-                imsh._codegen._code._exchange_mesh(imsh)
+                imsh._codegen._code._exchange_mesh(imsh)                                
                 imsh._setup_output_scales()
                 assert isinstance(self, _pyoomph.Mesh)
                 self.generate_interface_elements(n, imsh, imsh._codegen._code)
@@ -1445,6 +1445,7 @@ class InterfaceMesh(_pyoomph.InterfaceMesh, BaseMesh):
         self._eqtree._equations._set_current_codegen(oldmy)  # type:ignore
 
         self._eqtree._equations.after_compilation(self._codegen)  # type:ignore
+                
         mpi_barrier()
 
     def nodes(self) -> Iterator[_pyoomph.Node]:

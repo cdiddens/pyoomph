@@ -4900,6 +4900,11 @@ namespace pyoomph
     bulkmesh = _bulkmesh;
     interfacename = intername;
     code = jitcode;
+    auto idofs=code->setup_interface_dof_indices();
+    /*for (auto &idof : idofs)
+    {
+      std::cout << "INTERFACE DOF " << idof.first << "  " << idof.second << std::endl;
+    }*/
   }
 
   void InterfaceMesh::connect_interface_elements_by_kdtree(InterfaceMesh *other)

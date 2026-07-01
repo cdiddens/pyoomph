@@ -13077,117 +13077,39 @@ namespace pyoomph
 				if (!dynamic_cast<BoundaryNode*>(this->node_pt(l))) throw_runtime_error("Interface element has a node which is not a BoundaryNode. This can happen in meshes when you have sharp corners in a boundary. Happened in "+this->codeinst->get_code()->get_file_name());
 			}
 		}
-		auto *ft = codeinst->get_func_table();
-		std::vector<unsigned> mapping_C2TB;
-		for (unsigned i = ft->numfields_C2TB_bulk; i < ft->numfields_C2TB; i++)
-		{
-			std::string fieldname = ft->fieldnames_C2TB[i];
-			unsigned value_index = codeinst->resolve_interface_dof_id(fieldname);
-			mapping_C2TB.push_back(value_index);
-			oomph::Vector<unsigned> additional_data_values(eleminfo.nnode, 0);
-			bool add_values = false;
-			std::vector<bool> already_allocated;
-			for (unsigned l = 0; l < eleminfo.nnode; ++l)
-			{
-				additional_data_values[l] = 1;
-				already_allocated.push_back(dynamic_cast<BoundaryNode*>(this->node_pt(l))->has_additional_dof(value_index));
-				add_values = true;
-			}
-			if (add_values)
-			{
-				this->add_additional_values(additional_data_values, value_index);
-			   for (unsigned l = 0; l < eleminfo.nnode; ++l)
-			   {
-				  if (additional_data_values[l] && !already_allocated[l] && interpolate_new_interface_dofs) this->interpolate_newly_constructed_additional_dof(l,value_index,"C2TB");
-				}				
-			}
-		}
 
-		std::vector<unsigned> mapping_C2;
-		for (unsigned i = ft->numfields_C2_bulk; i < ft->numfields_C2; i++)
+		auto do_for_space=[this](JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info)
 		{
-			std::string fieldname = ft->fieldnames_C2[i];
-			unsigned value_index = codeinst->resolve_interface_dof_id(fieldname);
-			mapping_C2.push_back(value_index);
-			oomph::Vector<unsigned> additional_data_values(eleminfo.nnode, 0);
-			bool add_values = false;
-			std::vector<bool> already_allocated;
-			for (unsigned l = 0; l < eleminfo.nnode; ++l)
+			for (unsigned int i=space_info->numfields_bulk;i<space_info->numfields;i++)
 			{
-				additional_data_values[l] = 1;
-				if (!dynamic_cast<BoundaryNode*>(this->node_pt(l))) 
+				std::string fieldname = space_info->fieldnames[i];
+				//unsigned value_index = codeinst->resolve_interface_dof_id(fieldname);
+				unsigned value_index=space_info->interface_dof_indices[i-space_info->numfields_bulk];
+				oomph::Vector<unsigned> additional_data_values(eleminfo.nnode, 0);
+				bool add_values = false;
+				std::vector<bool> already_allocated;
+				for (unsigned l = 0; l < eleminfo.nnode; ++l)
 				{
-					std::ostringstream oss;
-					oss << "Interface element has a node which is not a BoundaryNode. This can happen in meshes when you have sharp corners in a boundary. Happened in " << this->codeinst->get_code()->get_file_name() << std::endl;
-					for (unsigned int inx=0;inx<this->node_pt(l)->ndim();inx++)
-					{
-						oss << "Node " << l << " x(" << inx << ") is " << this->node_pt(l)->x(inx) << std::endl;
-					}
-
-					throw_runtime_error(oss.str());
+					additional_data_values[l] = 1;
+					already_allocated.push_back(dynamic_cast<BoundaryNode*>(this->node_pt(l))->has_additional_dof(value_index));
+					add_values = true;
 				}
-				already_allocated.push_back(dynamic_cast<BoundaryNode*>(this->node_pt(l))->has_additional_dof(value_index));
-				add_values = true;
+				if (add_values)
+				{
+					this->add_additional_values(additional_data_values, value_index);
+				   for (unsigned l = 0; l < eleminfo.nnode; ++l)
+				   {
+					  if (additional_data_values[l] && !already_allocated[l] && interpolate_new_interface_dofs) this->interpolate_newly_constructed_additional_dof(l,value_index,space_info->space_name);
+					}				
+				}
 			}
-			if (add_values)
-			{
-				this->add_additional_values(additional_data_values, value_index);
-			   for (unsigned l = 0; l < eleminfo.nnode; ++l)
-			   {
-				  if (additional_data_values[l && !already_allocated[l]] && interpolate_new_interface_dofs) this->interpolate_newly_constructed_additional_dof(l,value_index,"C2");
-				}				
-			}
-		}
-
-		std::vector<unsigned> mapping_C1TB;
-		for (unsigned i = ft->numfields_C1TB_bulk; i < ft->numfields_C1TB; i++)
+		};
+		
+		auto *ft = codeinst->get_func_table();
+		for (unsigned int i=0;i<ft->num_continuous_spaces;i++)
 		{
-			std::string fieldname = ft->fieldnames_C1TB[i];
-			unsigned value_index = codeinst->resolve_interface_dof_id(fieldname);
-			mapping_C1TB.push_back(value_index);
-			oomph::Vector<unsigned> additional_data_values(eleminfo.nnode, 0);
-			bool add_values = false;
-			std::vector<bool> already_allocated;
-			for (unsigned l = 0; l < eleminfo.nnode; ++l)
-			{
-				additional_data_values[l] = 1;
-				already_allocated.push_back(dynamic_cast<BoundaryNode*>(this->node_pt(l))->has_additional_dof(value_index));
-				add_values = true;
-			}
-			if (add_values)
-			{
-				this->add_additional_values(additional_data_values, value_index);
-			   for (unsigned l = 0; l < eleminfo.nnode; ++l)
-			   {
-				  if (additional_data_values[l] && !already_allocated[l] && interpolate_new_interface_dofs) this->interpolate_newly_constructed_additional_dof(l,value_index,"C1TB");
-				}
-			}
+			do_for_space(ft->continuous_spaces[i]);
 		}
-
-		std::vector<unsigned> mapping_C1;
-		for (unsigned i = ft->numfields_C1_bulk; i < ft->numfields_C1; i++)
-		{
-			std::string fieldname = ft->fieldnames_C1[i];
-			unsigned value_index = codeinst->resolve_interface_dof_id(fieldname);
-			oomph::Vector<unsigned> additional_data_values(eleminfo.nnode, 0);
-			bool add_values = false;
-			std::vector<bool> already_allocated;
-			for (unsigned l = 0; l < eleminfo.nnode; ++l)
-			{
-				additional_data_values[l] = 1;
-				already_allocated.push_back(dynamic_cast<BoundaryNode*>(this->node_pt(l))->has_additional_dof(value_index));
-				add_values = true;
-			}
-			if (add_values)
-			{
-				this->add_additional_values(additional_data_values, value_index);
-			   for (unsigned l = 0; l < eleminfo.nnode; ++l)
-			   {
-				  if (additional_data_values[l] && !already_allocated[l] && interpolate_new_interface_dofs) this->interpolate_newly_constructed_additional_dof(l,value_index,"C1");
-				}
-			}
-		}
-
 		
 	}
 

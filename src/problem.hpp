@@ -113,6 +113,7 @@ namespace pyoomph
     void link_external_data(std::string name, oomph::Data *data, int index,std::string full_source_name);
     Problem *get_problem() { return dyn->problem; }
     pyoomph::Mesh *get_bulk_mesh() { return bulkmesh; }
+    std::map<std::string, unsigned> setup_interface_dof_indices(); // Populates the interface_dof_indices array in the space_info of the functable. This is required for continuous fields (C2TB-C1) to identify the additional dofs on interface nodes
     void set_bulk_mesh(pyoomph::Mesh *m) { bulkmesh = m; }
     FiniteElementCode *get_element_class() { return dyn->element_class; }
     void sanity_check();

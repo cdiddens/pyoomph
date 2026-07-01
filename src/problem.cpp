@@ -115,6 +115,12 @@ namespace pyoomph
 		functable->check_compiler_size = _pyoomph_check_compiler_size;
 		initfunc(functable);
 
+		functable->num_continuous_spaces=4;
+		functable->continuous_spaces[0]=&functable->info_C2TB;
+		functable->continuous_spaces[1]=&functable->info_C2;
+		functable->continuous_spaces[2]=&functable->info_C1TB;
+		functable->continuous_spaces[3]=&functable->info_C1;
+
 		// Merge the required shapes to add all external data
 		JITFuncSpec_RequiredShapes_FiniteElement *merged = &(functable->merged_required_shapes);
 
@@ -449,7 +455,40 @@ namespace pyoomph
 
 	unsigned DynamicBulkElementInstance::resolve_interface_dof_id(std::string n)
 	{
+		//std::cout << "->Resolving interface dof for field " << n << " on mesh " <<  this->get_bulk_mesh() << std::endl;
 		return this->get_bulk_mesh()->resolve_interface_dof_id(n);
+	}
+
+	std::map<std::string, unsigned> DynamicBulkElementInstance::setup_interface_dof_indices()
+	{
+		std::map<std::string, unsigned> res;
+		auto do_for_space=[this, &res](JITFuncSpec_Table_FiniteElement_SpaceInfo_t & space_info)
+		{
+			if (space_info.interface_dof_indices) {
+				free(space_info.interface_dof_indices);
+				space_info.interface_dof_indices=NULL;
+			}
+			if (space_info.numfields-space_info.numfields_basebulk>0)
+			{
+				space_info.interface_dof_indices=(unsigned int*)std::calloc(space_info.numfields-space_info.numfields_basebulk,sizeof(unsigned int));
+				for (unsigned int i=0;i<space_info.numfields-space_info.numfields_basebulk;i++)
+				{
+					std::string field_name=space_info.fieldnames[i+space_info.numfields_basebulk];
+					unsigned dof_index=this->resolve_interface_dof_id(field_name);
+					//std::cout << "Resolving interface dof for field " << field_name << " on space " << space_info.space_name << " bulkmesh is " << this->get_bulk_mesh() << " gave " << dof_index << std::endl;
+					space_info.interface_dof_indices[i]=dof_index;
+					res[field_name]=dof_index;
+				}
+			}
+		};
+
+		for (JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info : dyn->functable->continuous_spaces)
+		{
+			do_for_space(*space_info);
+		}
+
+		return res;
+
 	}
 
 	std::string DynamicBulkElementInstance::get_space_of_field(std::string name)

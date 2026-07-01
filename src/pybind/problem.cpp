@@ -407,6 +407,7 @@ void PyReg_Problem(py::module &m)
 		.def("get_max_dt_order", &pyoomph::DynamicBulkElementInstance::get_max_dt_order)
 		.def("can_be_time_adaptive", &pyoomph::DynamicBulkElementInstance::can_be_time_adaptive)
 		.def("has_parameter_contribution",&pyoomph::DynamicBulkElementInstance::has_parameter_contribution)
+		.def("setup_interface_dof_indices", &pyoomph::DynamicBulkElementInstance::setup_interface_dof_indices)
 		.def("get_nodal_field_indices", &pyoomph::DynamicBulkElementInstance::get_nodal_field_indices)
 		.def("set_analytical_jacobian", [](pyoomph::DynamicBulkElementInstance *self, bool ana, bool anapos)
 			 {

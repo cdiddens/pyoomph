@@ -358,6 +358,8 @@ typedef struct JITFuncSpec_Table_FiniteElement_SpaceInfo
  unsigned int internal_offset_new; // Offset to the internal_data entries. These are only there on the current element level  
  unsigned int external_offset_bulk; // Offset to the external_data entries. These refer to DG spaces on parent elements    
  char space_name[16]; // Name of the space, e.g. C1, C2, C1TB, C2TB, DL, D0, ED0
+
+ unsigned int * interface_dof_indices; // For continuous fields (C2TB-C1), this is of length numfields-numfields_basebulk and gives the index for additional dofs on interface nodes. Created at problem level
 } JITFuncSpec_Table_FiniteElement_SpaceInfo_t;
 
 
@@ -425,6 +427,9 @@ typedef struct JITFuncSpec_Table_FiniteElement
 
   // New way of handling things 
   JITFuncSpec_Table_FiniteElement_SpaceInfo_t info_C1,info_C2,info_C2TB,info_C1TB,info_D1,info_D1TB,info_D2,info_D2TB,info_DL,info_D0,info_ED0,info_Pos;
+
+  JITFuncSpec_Table_FiniteElement_SpaceInfo_t *continuous_spaces[4]; // points to the infos C2TB,C2,C1TB,C1 for looping
+  unsigned num_continuous_spaces; // set to 4, but could be changed at some points
 
   //Exponents for the D0 fields upon refinement. 
   // If zero [default]: 
