@@ -2191,15 +2191,16 @@ namespace pyoomph
 			bool is_int;
 			double frac_part;
 			int partial_t_action; // 0: No change, 1: change all partial_t schemes of first order to BDF1
+			bool apply_on_integral_dx; // If true, also apply on the integral_dx symbols (for ALE)
 		public:
-			EvaluateShapeExpansionsInPast(int _index, int tstep_action) : index(_index), is_int(true), frac_part(0), partial_t_action(tstep_action)
+			EvaluateShapeExpansionsInPast(int _index, int tstep_action,bool _apply_on_integral_dx) : index(_index), is_int(true), frac_part(0), partial_t_action(tstep_action), apply_on_integral_dx(_apply_on_integral_dx)
 			{
 				if (index > 2)
 				{
 					throw_runtime_error("Cannot evaluate earlier in past than two steps");
 				}
 			}
-			EvaluateShapeExpansionsInPast(double frac, int tstep_action) : index(std::floor(frac)), is_int(false), frac_part(frac - std::floor(frac)), partial_t_action(tstep_action)
+			EvaluateShapeExpansionsInPast(double frac, int tstep_action,bool _apply_on_integral_dx) : index(std::floor(frac)), is_int(false), frac_part(frac - std::floor(frac)), partial_t_action(tstep_action), apply_on_integral_dx(_apply_on_integral_dx)
 			{
 				if (index > 2 || (index > 1 && frac > 0))
 				{
@@ -2278,6 +2279,24 @@ namespace pyoomph
 					}
 				}
 				// TODO: Also dx for ALE
+				else if (apply_on_integral_dx && GiNaC::is_a<GiNaC::GiNaCSpatialIntegralSymbol>(inp))
+				{
+					GiNaC::GiNaCSpatialIntegralSymbol se = GiNaC::ex_to<GiNaC::GiNaCSpatialIntegralSymbol>(inp);
+					auto &sp = se.get_struct();
+					SpatialIntegralSymbol sp_past = sp;
+					if (sp.is_lagrangian()) return  inp.map(*this);; // Do not apply on Lagrangian integrals
+					sp_past.history_step = index;
+					if (is_int)
+					{
+						return GiNaC::GiNaCSpatialIntegralSymbol(sp_past);
+					}
+					else
+					{
+						SpatialIntegralSymbol sp_past1 = sp;
+						sp_past1.history_step = index + 1;
+						return (1 - frac_part) * GiNaC::GiNaCSpatialIntegralSymbol(sp_past) + frac_part * GiNaC::GiNaCSpatialIntegralSymbol(sp_past1);
+					}
+				}
 				else
 				{
 					return inp.map(*this);
@@ -2285,33 +2304,38 @@ namespace pyoomph
 			}
 		};
 
-		static ex eval_in_past_eval(const ex &expr, const ex &index, const ex &tstep_action)
+		static ex eval_in_past_eval(const ex &expr, const ex &index, const ex &tstep_action, const ex &apply_on_integral_dx)
 		{
 			if (need_to_hold(expr))
-				return eval_in_past(expr, index, tstep_action).hold();
+				return eval_in_past(expr, index, tstep_action, apply_on_integral_dx).hold();
 
 			if (!GiNaC::is_a<GiNaC::numeric>(index))
 			{
-				throw_runtime_error("Cannot use evaluate_in_past(expression,timeoffset,timestepper_action) with a non-numeric timeoffset");
+				throw_runtime_error("Cannot use evaluate_in_past(expression,timeoffset,timestepper_action,apply_on_integral_dx) with a non-numeric timeoffset");
 			}
 			if (!GiNaC::is_a<GiNaC::numeric>(tstep_action))
 			{
-				throw_runtime_error("Cannot use evaluate_in_past(expression,timeoffset,timestepper_action) with a non-numeric timestepper_action (0: nothing, 1: convert all to BDF1)");
+				throw_runtime_error("Cannot use evaluate_in_past(expression,timeoffset,timestepper_action,apply_on_integral_dx) with a non-numeric timestepper_action (0: nothing, 1: convert all to BDF1)");
+			}
+			if (!GiNaC::is_a<GiNaC::numeric>(apply_on_integral_dx))
+			{
+				throw_runtime_error("Cannot use evaluate_in_past(expression,timeoffset,timestepper_action,apply_on_integral_dx) with a non-numeric apply_on_integral_dx value");
 			}
 			GiNaC::numeric index_n = GiNaC::ex_to<GiNaC::numeric>(index);
 			GiNaC::numeric index_ts = GiNaC::ex_to<GiNaC::numeric>(tstep_action);
+			bool apply_on_integral_dx_bool = !GiNaC::is_zero(apply_on_integral_dx);
 			if (index_n.is_zero() && index_ts.is_zero())
 			{
 				return expr;
 			}
 			else if (index_n.is_pos_integer())
 			{
-				EvaluateShapeExpansionsInPast in_past(index_n.to_int(), index_ts.to_int());
+				EvaluateShapeExpansionsInPast in_past(index_n.to_int(), index_ts.to_int(),apply_on_integral_dx_bool);
 				return in_past(expr);
 			}
 			else if (!index_n.is_negative())
 			{
-				EvaluateShapeExpansionsInPast in_past(index_n.to_double(), index_ts.to_int());
+				EvaluateShapeExpansionsInPast in_past(index_n.to_double(), index_ts.to_int(),apply_on_integral_dx_bool);
 				return in_past(expr);
 			}
 			else
@@ -2521,7 +2545,7 @@ namespace pyoomph
 			std::ostringstream oss;
 			oss << scheme;
 			std::string scheme_str = oss.str();
-			if (scheme_str != "BDF1")
+			if (scheme_str != "BDF1" && scheme_str != "BDF2" && scheme_str != "Newmark2" && scheme_str != "BDF2_degr" && scheme_str != "Newmark2_degr" )
 			{
 				throw_runtime_error("Strange time scheme");
 			}

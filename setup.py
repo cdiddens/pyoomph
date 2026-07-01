@@ -61,7 +61,10 @@ try:
 except:
     raise
     
-
+import platform
+if sys.platform == "darwin":
+    detected_arch = platform.machine()  # 'arm64' or 'x86_64' under Rosetta
+    os.environ.setdefault("ARCHFLAGS", f"-arch {detected_arch}")
 
 class get_pybind_include(object):
     """Helper class to determine the pybind11 include path

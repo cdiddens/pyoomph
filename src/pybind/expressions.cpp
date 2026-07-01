@@ -360,6 +360,8 @@ void PyReg_Expressions(py::module &m)
 		.def(py::self /= int())
 		.def(py::self /= double())
 
+		
+
 		.def("__add__", [](const GiNaC::ex &lh, const std::complex<double> &rh)
 			 { return lh + (rh.real()+GiNaC::I*rh.imag()); }, py::is_operator())
 		.def("__sub__", [](const GiNaC::ex &lh, const std::complex<double> &rh)
@@ -407,6 +409,58 @@ void PyReg_Expressions(py::module &m)
 			 { return lh + rh; }, py::is_operator())
 		.def("__isub__", [](const GiNaC::ex &lh, const GiNaC::GiNaCGlobalParameterWrapper &rh)
 			 { return lh - rh; }, py::is_operator())
+		.def("__lt__", [](const GiNaC::ex &lh, const double &rh)
+			{ 
+			   try 
+			   {
+			     double res=pyoomph::expressions::eval_to_double(lh);
+			     return res< rh;
+			   }
+			   catch (const std::exception &e) 
+			   {
+			     std::ostringstream oss; oss<<"Cannot convert " << lh << " to double for comparison with a numeric value";
+			     throw_runtime_error(oss.str());
+			   } 				
+			}, py::is_operator())
+         .def("__gt__", [](const GiNaC::ex &lh, const double &rh)
+			{ 
+			   try 
+			   {
+			     double res=pyoomph::expressions::eval_to_double(lh);
+			     return res> rh;
+			   }
+			   catch (const std::exception &e) 
+			   {
+			     std::ostringstream oss; oss<<"Cannot convert " << lh << " to double for comparison with a numeric value";
+			     throw_runtime_error(oss.str());
+			   } 				
+			}, py::is_operator())	
+            .def("__le__", [](const GiNaC::ex &lh, const double &rh)
+			{ 
+			   try 
+			   {
+			     double res=pyoomph::expressions::eval_to_double(lh);
+			     return res<= rh;
+			   }
+			   catch (const std::exception &e) 
+			   {
+			     std::ostringstream oss; oss<<"Cannot convert " << lh << " to double for comparison with a numeric value";
+			     throw_runtime_error(oss.str());
+			   } 				
+			}, py::is_operator())
+         .def("__ge__", [](const GiNaC::ex &lh, const double &rh)
+			{ 
+			   try 
+			   {
+			     double res=pyoomph::expressions::eval_to_double(lh);
+			     return res>= rh;
+			   }
+			   catch (const std::exception &e) 
+			   {
+			     std::ostringstream oss; oss<<"Cannot convert " << lh << " to double for comparison with a numeric value";
+			     throw_runtime_error(oss.str());
+			   } 				
+			}, py::is_operator())						
 		.def("__round__",[](const GiNaC::ex &self)
 		{
 		  try 
@@ -1079,8 +1133,8 @@ void PyReg_Expressions(py::module &m)
 		return 0+pyoomph::expressions::eval_in_domain(expr,ri); },
 		"Expand vars and nondims in a particular domain");
 	m.def(
-		"GiNaC_eval_in_past", [&](GiNaC::ex expr, GiNaC::ex offset, GiNaC::ex tstep_action)
-		{ return 0 + pyoomph::expressions::eval_in_past(expr, offset, tstep_action); },
+		"GiNaC_eval_in_past", [&](GiNaC::ex expr, GiNaC::ex offset, GiNaC::ex tstep_action, GiNaC::ex apply_on_integral_dx)
+		{ return 0 + pyoomph::expressions::eval_in_past(expr, offset, tstep_action,apply_on_integral_dx); },
 		"Expand vars and nondims in a particular domain");
 	m.def(
 		"GiNaC_eval_at_expansion_mode", [&](GiNaC::ex expr, GiNaC::ex index)

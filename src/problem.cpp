@@ -76,7 +76,7 @@ namespace pyoomph
 		dest->elemsize_Eulerian_Pos |= src->elemsize_Eulerian_Pos;
 		dest->elemsize_Lagrangian_Pos |= src->elemsize_Lagrangian_Pos;
 		dest->elemsize_Eulerian_cartesian_Pos |= src->elemsize_Eulerian_cartesian_Pos;
-		dest->elemsize_Lagrangian_cartesian_Pos |= src->elemsize_Lagrangian_cartesian_Pos;
+		dest->elemsize_Lagrangian_cartesian_Pos |= src->elemsize_Lagrangian_cartesian_Pos;		
 		if (src->bulk_shapes)
 		{
 			if (!dest->bulk_shapes)
@@ -114,6 +114,38 @@ namespace pyoomph
 
 		functable->check_compiler_size = _pyoomph_check_compiler_size;
 		initfunc(functable);
+
+		functable->info_Pos.nnode_index=0;
+		functable->info_C2TB.nnode_index=1;
+		functable->info_C2.nnode_index=2;
+		functable->info_C1TB.nnode_index=3;
+		functable->info_C1.nnode_index=4;
+
+		functable->info_C2TB.element_node_to_space_node_index=0;
+		functable->info_C2.element_node_to_space_node_index=1;
+		functable->info_C1TB.element_node_to_space_node_index=2;
+		functable->info_C1.element_node_to_space_node_index=3;
+		
+		// Only add the spaces which are really present to the continuous_spaces array, in order of dominance
+		functable->num_continuous_spaces=0;
+		if (functable->info_C2TB.numfields>0) {functable->continuous_spaces[functable->num_continuous_spaces]=&functable->info_C2TB; functable->num_continuous_spaces++;}
+		if (functable->info_C2.numfields>0) {functable->continuous_spaces[functable->num_continuous_spaces]=&functable->info_C2; functable->num_continuous_spaces++;}
+		if (functable->info_C1TB.numfields>0) {functable->continuous_spaces[functable->num_continuous_spaces]=&functable->info_C1TB; functable->num_continuous_spaces++;}
+		if (functable->info_C1.numfields>0) {functable->continuous_spaces[functable->num_continuous_spaces]=&functable->info_C1; functable->num_continuous_spaces++;}
+
+		std::string dominant_space=functable->dominant_space;
+		if (dominant_space=="C2TB") {functable->info_C2TB.is_dominant=true; functable->info_Pos.element_node_to_space_node_index=0;}
+		else if (dominant_space=="C2") {functable->info_C2.is_dominant=true; functable->info_Pos.element_node_to_space_node_index=1;}
+		else if (dominant_space=="C1TB") {functable->info_C1TB.is_dominant=true; functable->info_Pos.element_node_to_space_node_index=2;}
+		else if (dominant_space=="C1") {functable->info_C1.is_dominant=true; functable->info_Pos.element_node_to_space_node_index=3;}
+		else
+		{
+			std::ostringstream errmsg;
+			errmsg << "Unknown dominant space " << dominant_space << " in JIT code " << filename;
+			throw_runtime_error(errmsg.str());
+		}
+		
+		
 
 		// Merge the required shapes to add all external data
 		JITFuncSpec_RequiredShapes_FiniteElement *merged = &(functable->merged_required_shapes);
@@ -449,7 +481,40 @@ namespace pyoomph
 
 	unsigned DynamicBulkElementInstance::resolve_interface_dof_id(std::string n)
 	{
+		//std::cout << "->Resolving interface dof for field " << n << " on mesh " <<  this->get_bulk_mesh() << std::endl;
 		return this->get_bulk_mesh()->resolve_interface_dof_id(n);
+	}
+
+	std::map<std::string, unsigned> DynamicBulkElementInstance::setup_interface_dof_indices()
+	{
+		std::map<std::string, unsigned> res;
+		auto do_for_space=[this, &res](JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info)
+		{
+			if (space_info->interface_dof_indices) {
+				free(space_info->interface_dof_indices);
+				space_info->interface_dof_indices=NULL;
+			}
+			if (space_info->numfields-space_info->numfields_basebulk>0)
+			{
+				space_info->interface_dof_indices=(unsigned int*)std::calloc(space_info->numfields-space_info->numfields_basebulk,sizeof(unsigned int));
+				for (unsigned int i=0;i<space_info->numfields-space_info->numfields_basebulk;i++)
+				{
+					std::string field_name=space_info->fieldnames[i+space_info->numfields_basebulk];
+					unsigned dof_index=this->resolve_interface_dof_id(field_name);
+					//std::cout << "Resolving interface dof for field " << field_name << " on space " << space_info->space_name << " bulkmesh is " << this->get_bulk_mesh() << " gave " << dof_index << std::endl;
+					space_info->interface_dof_indices[i]=dof_index;
+					res[field_name]=dof_index;
+				}
+			}
+		};
+
+		for (unsigned int i = 0; i < dyn->functable->num_continuous_spaces; i++	)
+		{
+			do_for_space(dyn->functable->continuous_spaces[i]);
+		}
+
+		return res;
+
 	}
 
 	std::string DynamicBulkElementInstance::get_space_of_field(std::string name)
@@ -853,6 +918,13 @@ namespace pyoomph
 	unsigned long Problem::assign_eqn_numbers(const bool& assign_local_eqn_numbers)
 	{
       unsigned long res=oomph::Problem::assign_eqn_numbers(assign_local_eqn_numbers);
+	  for (unsigned nmi = 0; nmi < this->nsub_mesh(); nmi++)
+	  {
+		if (dynamic_cast<InterfaceMesh *>(this->mesh_pt(nmi)))
+		{
+			dynamic_cast<InterfaceMesh *>(this->mesh_pt(nmi))->update_equation_remapping();
+		}
+	  }
 	  if (!this->dirichlets_by_removing_from_dof_vector)
 	  {
 		//dirichlet_info.build_equation_to_value_map();

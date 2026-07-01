@@ -30,7 +30,7 @@ import _pyoomph
 from ..typings import Optional
 
 from ..meshes.mesh import assert_spatial_mesh,InterfaceMesh,ODEStorageMesh
-from ..expressions import AxisymmetryBreakingCoordinateSystem,AxisymmetricCoordinateSystem, find_dominant_element_space, scale_factor, vector,matrix,evaluate_in_domain,testfunction,weak,var,nondim,Expression,rational_num,minimize_functional_derivative
+from ..expressions import AxisymmetryBreakingCoordinateSystem,AxisymmetricCoordinateSystem, find_dominant_element_space, scale_factor, vector,matrix,evaluate_in_domain,testfunction,weak,var,nondim,Expression,rational_num,minimize_functional_derivative,time_derivative_of_integral
 
 # from ..expressions import var, get_global_symbol, nondim, vector, testfunction, scale_factor, cartesian, partial_t
 from ..expressions.coordsys import ODECoordinateSystem, BaseCoordinateSystem
@@ -351,6 +351,12 @@ class BaseEquations(_pyoomph.Equations):
         if isinstance(b,str):
             b=testfunction(b)
         self.add_residual(weak(a,b,dimensional_dx=dimensional_dx,coordinate_system=coordinate_system,lagrangian=lagrangian),destination=destination)
+        return self
+    
+    def add_dweak_dt(self,a:"ExpressionOrNum",b:Union[str,"ExpressionOrNum"],*,dimensional_dx:bool=False,lagrangian:bool=False,coordinate_system:"OptionalCoordinateSystem"=None,destination:Optional[str]=None,scheme:"TimeSteppingScheme"="BDF1"):
+        if isinstance(b,str):
+            b=testfunction(b)
+        self.add_residual(time_derivative_of_integral(weak(a,b,dimensional_dx=dimensional_dx,coordinate_system=coordinate_system,lagrangian=lagrangian),scheme=scheme),destination=destination)
         return self
     
     def add_functional_minimization(self,F:"ExpressionOrNum",with_respect_to:Optional[Union[Expression,List[Expression]]]=None,*,dimensional_dx:bool=False,dimensional_testfunctions:bool=True,lagrangian:bool=False,coordinate_system:"OptionalCoordinateSystem"=None,destination:Optional[str]=None):

@@ -90,11 +90,20 @@ float __mzerosf=-0.0;
 
 typedef struct JITElementInfo
 {
-  unsigned int nnode; // Total number of nodes
-  unsigned int nnode_C1;
-  unsigned int nnode_C2;
-  unsigned int nnode_C1TB; // C1 on quadrilaterals, C1+Bubble on TElements, on interfaces, these are C1
-  unsigned int nnode_C2TB; // C2 on quadrilaterals, C2+Bubble on TElements, on interfaces, these are C2  
+
+  union
+  {
+    unsigned int nnode_of_space[5]; // Number of nodes per type (Pos,C2TB,C2,C1TB,C1) // Set during problem level
+    struct
+    {
+      unsigned int nnode; // Total number of nodes
+      unsigned int nnode_C2TB; // C2 on quadrilaterals, C2+Bubble on TElements, on interfaces, these are C2  
+      unsigned int nnode_C2;
+      unsigned int nnode_C1TB; // C1 on quadrilaterals, C1+Bubble on TElements, on interfaces, these are C1      
+      unsigned int nnode_C1;
+    };
+  };
+     
   unsigned int nnode_DL;   // This are actually not nodes, but internal data (since discontinous)
   // unsigned int nnode_D0;  //This are actually not nodes, but internal data (since discontinous), This is always 1
   unsigned int nodal_dim; // Nodal dimension
@@ -179,7 +188,7 @@ typedef struct JITHangInfo
 typedef struct JITShapeInfo
 {
   unsigned int n_int_pt;             // Number of integration points
-  double int_pt_weight;            // Eulerian weight at the current integration point
+  double int_pt_weight[3];            // Eulerian weight at the current integration point (or at history steps 1 and 2)
   double int_pt_weight_Lagrangian; // Lagrangian weight at the current integration point
   double int_pt_weight_unity;            // Weight at the current integration point in s space, i.e. without any mapping [ sqrt(det(g_ab)) ]
   double ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(int_pt_weights_d_coords)); // Weights derived by coordinates, [i_dim,l_node], i.e. w*dJ_Eulerian/dX^l_i
@@ -314,6 +323,8 @@ typedef struct JITFuncSpec_RequiredShapes_FiniteElement
   bool normal_Pos;                                   // Normal required /( Normal is just considered to be defined on the Pos space)
   bool elemsize_Eulerian_Pos,elemsize_Lagrangian_Pos;
   bool elemsize_Eulerian_cartesian_Pos,elemsize_Lagrangian_cartesian_Pos;  
+  bool history_integral_dx1;
+  bool history_integral_dx2;
   struct JITFuncSpec_RequiredShapes_FiniteElement *bulk_shapes;
   struct JITFuncSpec_RequiredShapes_FiniteElement *opposite_shapes;
   // struct JITFuncSpec_RequiredShapes_FiniteElement * otherbulk_shapes;
@@ -336,10 +347,42 @@ typedef struct JITFuncSpec_MultiRet_Entry
 } JITFuncSpec_MultiRet_Entry_t;
 
 
+typedef struct JITFuncSpec_Table_FiniteElement_SpaceInfo
+{
+  // numfields are the total number of fields, numfields_bulk are the ones which are defined on the 
+  //   bulk mesh (including the additional field of all parent interface meshes)
+  // numfields_basebulk are indeed the fields that are directly implemented only at the lowest level. 
+  // numfields__new are the number of fields defined directly at this element level, i.e for deepest level
+  //   ON BULK ELEMENTS (lowest level): numfields_new=numfields_bulk=numfields_basebulk=numfields 
+  //   ON INTERFACE ELEMENTS:           numfields_new=numfields-numfields_bulk;
+ unsigned int numfields,numfields_bulk,numfields_basebulk,numfields_new;
+ char **fieldnames;
+ int hangindex;
+
+ unsigned int buffer_offset_basebulk; // Offsets in the nodal data buffer (basebulk fields only)
+ unsigned int buffer_offset_interf; // Offsets in the nodal data buffer (interface fields only)
+ // For continuous fields
+ unsigned int nodal_offset_basebulk; //Offsets to the indices in the nodal values (basebulk fields only)
+ // For discontinuous fields
+ unsigned int internal_offset_new; // Offset to the internal_data entries. These are only there on the current element level  
+ unsigned int external_offset_bulk; // Offset to the external_data entries. These refer to DG spaces on parent elements    
+ char space_name[16]; // Name of the space, e.g. C1, C2, C1TB, C2TB, DL, D0, ED0
+
+ unsigned int * interface_dof_indices; // For continuous fields (C2TB-C1), this is of length numfields-numfields_basebulk and gives the index for additional dofs on interface nodes. Created at problem level
+
+ unsigned nnode_index; // Pointing to the element info nnode array (in a mixed mesh, a quad and a tri have e.g. different nnode, but it also depends on the space) // Set during problem level
+ bool is_dominant; // Is this the dominant space for the element, i.e. the geometric space where also the coordinates live? (e.g. C2TB>C2>C1TB>C1) // Set during problem level
+ unsigned element_node_to_space_node_index; // A C1 space on C2 quad does not use all spaces. We therefore have arrays which map the element node index to the space node index. This is the index for that array. // Set during problem level
+} JITFuncSpec_Table_FiniteElement_SpaceInfo_t;
+
+
 typedef struct JITFuncSpec_Table_FiniteElement
 {
   unsigned int nodal_dim, lagr_dim;
 
+  bool bulk_position_space_to_C1;
+
+  // Old way of handling things
   unsigned int numfields_C1, numfields_C1_bulk, numfields_C1_basebulk,numfields_C1_new; // Fields numfields_C1 are the total number of fields, numfields_C1_bulk are the ones which are defined on the bulk mesh (including the additional field of all parent interface meshes, numfields_C1_basebulk are indeed the fields that are directly implemented only at the lowest level. numfields_C1_new are the number of fields defined directly at this element level, i.e for lowest bulk level, numfields_C1_new=numfields_C1_bulk=numfields_C1_basebulk=numfields_C1. For interface elements, we get numfields_C1_new=numfields_C1-numfields_C1_bulk;
   char **fieldnames_C1;
 
@@ -366,7 +409,7 @@ typedef struct JITFuncSpec_Table_FiniteElement
 
   unsigned int numfields_Pos;
   char **fieldnames_Pos;
-  bool bulk_position_space_to_C1;
+  
   
   int hangindex_C1,hangindex_C2,hangindex_C1TB,hangindex_C2TB,hangindex_Pos; //Hang indices
 
@@ -394,6 +437,12 @@ typedef struct JITFuncSpec_Table_FiniteElement
   unsigned int internal_offset_DL,internal_offset_D0;
   unsigned int buffer_offset_DL,buffer_offset_D0; 
   unsigned int buffer_offset_ED0,external_offset_ED0;
+
+  // New way of handling things 
+  JITFuncSpec_Table_FiniteElement_SpaceInfo_t info_C1,info_C2,info_C2TB,info_C1TB,info_D1,info_D1TB,info_D2,info_D2TB,info_DL,info_D0,info_ED0,info_Pos;
+
+  JITFuncSpec_Table_FiniteElement_SpaceInfo_t *continuous_spaces[4]; // points to the infos C2TB,C2,C1TB,C1 for looping
+  unsigned num_continuous_spaces; // set to 4, but could be changed at some points
 
   //Exponents for the D0 fields upon refinement. 
   // If zero [default]: 
@@ -510,6 +559,15 @@ typedef struct JITFuncSpec_Table_FiniteElement
   char * domain_name;
 
   bool * has_constant_mass_matrix_for_sure;
+
+  // Quick resolving interface dofs by index. Filled for interface codes in the core
+  /*
+  //TODO: This should be implemented at some point, however, these are created more or less dynamically, so it is not trivial. Potentially, it works when first time creating an interface element
+  unsigned int * interface_dof_ids_C1;
+  unsigned int * interface_dof_ids_CTB1;
+  unsigned int * interface_dof_ids_C2;
+  unsigned int * interface_dof_ids_C2TB;
+  */
 
   // Exported functions
   void (*check_compiler_size)(unsigned long long,unsigned long long,char *);  

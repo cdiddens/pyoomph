@@ -159,6 +159,7 @@ namespace pyoomph
 		InterfaceMesh();
 		virtual ~InterfaceMesh();
 		virtual void update_zeta_in_buffer();
+		virtual void update_equation_remapping();
 		virtual void set_opposite_interface_offset_vector(const std::vector<double> & offset);
 		virtual std::vector<double>  get_opposite_interface_offset_vector() {return opposite_offset_vector;}
 		virtual void fill_internal_facet_buffers(std::vector<BulkElementBase *> &internal_elements, std::vector<int> &internal_face_dir, std::vector<BulkElementBase *> &opposite_elements, std::vector<int> &opposite_face_dir, std::vector<int> &opposite_already_at_index);

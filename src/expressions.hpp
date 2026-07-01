@@ -365,7 +365,7 @@ namespace pyoomph
     DECLARE_FUNCTION_2P(field)
     DECLARE_FUNCTION_2P(nondimfield)
     DECLARE_FUNCTION_2P(eval_in_domain)
-    DECLARE_FUNCTION_3P(eval_in_past)
+    DECLARE_FUNCTION_4P(eval_in_past)
     DECLARE_FUNCTION_2P(eval_at_expansion_mode)
     DECLARE_FUNCTION_2P(testfunction)    // Placeholder for a test function of a field -> expanded to test_function later on
     DECLARE_FUNCTION_2P(dimtestfunction) // Dimensional test function

@@ -56,6 +56,12 @@ class AssignZetaCoordinatesBase(InterfaceEquations):
         return super().after_remeshing(eqtree)
 
 class AssignZetaCoordinatesByEulerianCoordinate(AssignZetaCoordinatesBase):
+    """Assigns a zeta coordinate which coindices with the Eulerian coordinate in a given direction. 
+    This is useful for example to get a direct mapping from the old to the new boundary during remeshing and improves the interpolation along boundaries considerably. 
+    
+    Args:
+        direction: The direction along which the zeta coordinate is assigned. Can be an integer (0,1,2) or a string ("x","y","z")
+    """
     def __init__(self,direction:Union[int,Literal["x","y","z"]]):
         super().__init__()
         if isinstance(direction,str):
@@ -94,6 +100,16 @@ class AssignZetaCoordinatesByEulerianCoordinate(AssignZetaCoordinatesBase):
 
 
 class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
+    """Assigns a zeta coordinate which is the arclength along the interface.
+    This is useful for example to get a direct mapping from the old to the new boundary during remeshing and improves the interpolation along boundaries considerably.
+    
+    Args:
+        start_near_point: If given, the zeta coordinate is assigned starting from the point closest to this point. Either this or sort_along_axis must be given, but not both.
+        sort_along_axis: If given, the zeta coordinate is assigned starting from the point with the lowest/highest coordinate in this direction. Can be "x+","x-","y+","y-" for the respective directions. Either this or start_near_point must be given, but not both.
+        normalized: If True, the zeta coordinate is normalized to [0,1]. If False, the zeta coordinate is the actual arclength along the interface.
+        segment_jump_offset: This offset is added to the arclength when changing to a new segment of the boundary in case of disconnected curves.
+        individual_segments: Mainly concerns normalization. If True, each segment is normalized individually, otherwise all segments are normalized together. 
+    """
     def __init__(self,start_near_point:Optional[Tuple[ExpressionOrNum,ExpressionOrNum]]=None,sort_along_axis:Optional[Literal["x+","x-","y+","y-"]]=None,normalized:bool=True,segment_jump_offset:float=1.0,individual_segments:bool=True):
         super().__init__()
         self.start_near_point=start_near_point
