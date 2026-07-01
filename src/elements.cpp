@@ -11420,7 +11420,7 @@ namespace pyoomph
 	BulkElementTetra3dC2::BulkElementTetra3dC2(bool has_bubble)
 	{
 		eleminfo.elem_ptr = this;
-		eleminfo.nnode = 10;
+		eleminfo.nnode = (has_bubble ? 15 : 10);
 		eleminfo.nnode_C1 = 4;
 		eleminfo.nnode_C2TB = (has_bubble ? 15 : 10);
 		eleminfo.nnode_C1TB = (has_bubble ? 5 : 4);		
@@ -14818,6 +14818,153 @@ namespace pyoomph
 	oomph::TBubbleEnrichedGauss<3, 3> BulkElementTetra3dC2TB::Default_enriched_integration_scheme;
 	
 	bool InterfaceElementBase::interpolate_new_interface_dofs=true;
+
+	const std::vector<std::vector<unsigned>> BulkElementLine1dC1::Nodal_Space_Index_To_Element_Index_Map={
+		{}, // C2TB 
+		{}, // C2
+		{0,1}, // C1TB
+		{0,1}  // C1
+	};
+
+	const std::vector<std::vector<unsigned>> BulkElementLine1dC2::Nodal_Space_Index_To_Element_Index_Map={
+		{0,1,2}, // C2TB 
+		{0,1,2}, // C2
+		{0,2}, // C1TB
+		{0,2}  // C1
+	};
+
+	const std::vector<std::vector<unsigned>> BulkTElementLine1dC1::Nodal_Space_Index_To_Element_Index_Map={
+		{}, // C2TB 
+		{}, // C2
+		{0,1}, // C1TB
+		{0,1}  // C1
+	};
+
+	const std::vector<std::vector<unsigned>> BulkTElementLine1dC2::Nodal_Space_Index_To_Element_Index_Map={
+		{0,1,2}, // C2TB 
+		{0,1,2}, // C2
+		{0,2}, // C1TB
+		{0,2}  // C1
+	};
+
+	const std::vector<std::vector<unsigned>> BulkElementQuad2dC1::Nodal_Space_Index_To_Element_Index_Map={
+		{}, // C2TB 
+		{}, // C2
+		{0,1,2,3}, // C1TB
+		{0,1,2,3}  // C1
+	};
+
+	const std::vector<std::vector<unsigned>> BulkElementQuad2dC2::Nodal_Space_Index_To_Element_Index_Map={
+		{0,1,2,3,4,5,6,7,8}, // C2TB 
+		{0,1,2,3,4,5,6,7,8}, // C2
+		{0,2,6,8}, // C1TB
+		{0,2,6,8}  // C1
+	};
+
+	const std::vector<std::vector<unsigned>> BulkElementTri2dC1::Nodal_Space_Index_To_Element_Index_Map={
+		{}, // C2TB 
+		{}, // C2
+		{0,1,2}, // C1TB
+		{0,1,2}  // C1
+	};
+
+	const std::vector<std::vector<unsigned>> BulkElementTri2dC1TB::Nodal_Space_Index_To_Element_Index_Map={
+		{}, // C2TB 
+		{}, // C2
+		{0,1,2,3}, // C1TB
+		{0,1,2}  // C1
+	};
+
+	const std::vector<std::vector<unsigned>> BulkElementTri2dC2::Nodal_Space_Index_To_Element_Index_Map={
+		{}, // C2TB 
+		{0,1,2,3,4,5}, // C2
+		{}, // C1TB
+		{0,1,2}  // C1
+	};
+
+	const std::vector<std::vector<unsigned>> BulkElementTri2dC2TB::Nodal_Space_Index_To_Element_Index_Map={
+		{0,1,2,3,4,5,6}, // C2TB 
+		{0,1,2,3,4,5}, // C2
+		{0,1,2,6}, // C1TB
+		{0,1,2}  // C1
+	};
+
+	const std::vector<std::vector<unsigned>> BulkElementBrick3dC1::Nodal_Space_Index_To_Element_Index_Map={
+		{}, // C2TB 
+		{}, // C2
+		{0,1,2,3,4,5,6,7}, // C1TB
+		{0,1,2,3,4,5,6,7}  // C1
+	};
+
+	const std::vector<std::vector<unsigned>> BulkElementBrick3dC2::Nodal_Space_Index_To_Element_Index_Map={
+		{0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26}, // C2TB 
+		{0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26}, // C2
+		{0, 2, 6, 8, 18, 20, 24, 26}, // C1TB
+		{0, 2, 6, 8, 18, 20, 24, 26}  // C1
+	};
+
+	const std::vector<std::vector<unsigned>> BulkElementTetra3dC1::Nodal_Space_Index_To_Element_Index_Map={
+		{}, // C2TB 
+		{}, // C2
+		{}, // C1TB
+		{0,1,2,3}  // C1
+	};
+
+	const std::vector<std::vector<unsigned>> BulkElementTetra3dC1TB::Nodal_Space_Index_To_Element_Index_Map={
+		{}, // C2TB 
+		{}, // C2
+		{0,1,2,3,4}, // C1TB
+		{0,1,2,3}  // C1
+	};
+
+	const std::vector<std::vector<unsigned>> BulkElementTetra3dC2::Nodal_Space_Index_To_Element_Index_Map={
+		{}, // C2TB 
+		{0,1,2,3,4,5,6,7,8,9}, // C2
+		{}, // C1TB
+		{0,1,2,3}  // C1
+	};
+
+	const std::vector<std::vector<unsigned>> BulkElementTetra3dC2TB::Nodal_Space_Index_To_Element_Index_Map={
+		{0,1,2,3,4,5,6,7,8,9,10,11,12,13,14}, // C2TB 
+		{0,1,2,3,4,5,6,7,8,9}, // C2
+		{0,1,2,3,14}, // C1TB
+		{0,1,2,3}  // C1
+	};
+
+	const std::vector<std::vector<unsigned>> BulkElementWedge3dC1::Nodal_Space_Index_To_Element_Index_Map={
+		{}, // C2TB 
+		{}, // C2
+		{}, // C1TB
+		{0,1,2,3,4,5}  // C1
+	};
+
+	const std::vector<std::vector<unsigned>> BulkElementWedge3dC2::Nodal_Space_Index_To_Element_Index_Map={
+		{}, // C2TB 
+		{0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17}, // C2
+		{}, // C1TB
+		{0,1,2,12,13,14}  // C1
+	};
+
+	const std::vector<std::vector<unsigned>> BulkElementPyramid3dC1::Nodal_Space_Index_To_Element_Index_Map={
+		{}, // C2TB 
+		{}, // C2
+		{}, // C1TB
+		{0,1,2,3,4}  // C1
+	};
+
+	const std::vector<std::vector<unsigned>> BulkElementODE0d::Nodal_Space_Index_To_Element_Index_Map={
+		{}, // C2TB 
+		{}, // C2
+		{}, // C1TB
+		{}  // C1
+	};
+
+	const std::vector<std::vector<unsigned>> PointElement0d::Nodal_Space_Index_To_Element_Index_Map={
+		{0}, // C2TB 
+		{0}, // C2
+		{0}, // C1TB
+		{0}  // C1
+	};
 
 	const std::vector<int> BulkElementODE0d::Possible_Face_Indices={};
 	const std::vector<int> PointElement0d::Possible_Face_Indices={};

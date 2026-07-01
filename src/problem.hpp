@@ -408,7 +408,9 @@ namespace pyoomph
     virtual void actions_before_newton_convergence_check() {}
     
     virtual void _build_mesh() { throw_runtime_error("You must implement the function _build_mesh for load_balancing"); }
+    #ifdef OOMPH_HAS_MPI
     void build_mesh() override {this->_build_mesh();}
+    #endif
     void reset_assembly_handler_to_default() override;
     virtual std::vector<double> get_parameter_derivative(const std::string param);
     void activate_my_fold_tracking(double *const &parameter_pt, const oomph::DoubleVector &eigenvector, const bool &block_solve);

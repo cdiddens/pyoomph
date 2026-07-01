@@ -90,11 +90,20 @@ float __mzerosf=-0.0;
 
 typedef struct JITElementInfo
 {
-  unsigned int nnode; // Total number of nodes
-  unsigned int nnode_C1;
-  unsigned int nnode_C2;
-  unsigned int nnode_C1TB; // C1 on quadrilaterals, C1+Bubble on TElements, on interfaces, these are C1
-  unsigned int nnode_C2TB; // C2 on quadrilaterals, C2+Bubble on TElements, on interfaces, these are C2  
+
+  union
+  {
+    unsigned int nnode_of_space[5]; // Number of nodes per type (Pos,C2TB,C2,C1TB,C1) // Set during problem level
+    struct
+    {
+      unsigned int nnode; // Total number of nodes
+      unsigned int nnode_C2TB; // C2 on quadrilaterals, C2+Bubble on TElements, on interfaces, these are C2  
+      unsigned int nnode_C2;
+      unsigned int nnode_C1TB; // C1 on quadrilaterals, C1+Bubble on TElements, on interfaces, these are C1      
+      unsigned int nnode_C1;
+    };
+  };
+     
   unsigned int nnode_DL;   // This are actually not nodes, but internal data (since discontinous)
   // unsigned int nnode_D0;  //This are actually not nodes, but internal data (since discontinous), This is always 1
   unsigned int nodal_dim; // Nodal dimension
@@ -360,6 +369,10 @@ typedef struct JITFuncSpec_Table_FiniteElement_SpaceInfo
  char space_name[16]; // Name of the space, e.g. C1, C2, C1TB, C2TB, DL, D0, ED0
 
  unsigned int * interface_dof_indices; // For continuous fields (C2TB-C1), this is of length numfields-numfields_basebulk and gives the index for additional dofs on interface nodes. Created at problem level
+
+ unsigned nnode_index; // Pointing to the element info nnode array (in a mixed mesh, a quad and a tri have e.g. different nnode, but it also depends on the space) // Set during problem level
+ bool is_dominant; // Is this the dominant space for the element, i.e. the geometric space where also the coordinates live? (e.g. C2TB>C2>C1TB>C1) // Set during problem level
+ unsigned element_node_to_space_node_index; // A C1 space on C2 quad does not use all spaces. We therefore have arrays which map the element node index to the space node index. This is the index for that array. // Set during problem level
 } JITFuncSpec_Table_FiniteElement_SpaceInfo_t;
 
 
