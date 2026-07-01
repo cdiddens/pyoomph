@@ -53,6 +53,15 @@ else
  CXXFLAGS+=-fstack-protector-strong -fvisibility=hidden
 endif
 endif
+
+
+
+ifeq ($(shell uname),Darwin)
+CXXFLAGS += -fstack-protector-strong -arch $(shell uname -m)
+endif
+
+
+
 endif
 
 ifeq ($(PYOOMPH_PARANOID),true)
