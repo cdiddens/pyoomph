@@ -26,7 +26,7 @@
  
 from pathlib import Path
 
-from ufl_legacy import inv
+# from ufl_legacy import inv
 from ..typings import *
 import numpy
 

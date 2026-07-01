@@ -39,23 +39,20 @@ public:
     double weight(const unsigned& i) const { return Weight[i]; }
 };
 
+// Gauss-Legendre quadrature for the C1 pyramid element, with 5 points (2 in each direction)
 
-// Gauss-Legendre quadrature for the C1 wedge element, with 6 points (2 in each direction)
-// Maxim: Ask an AI to do it for a linear Pyramid element. 
-// However, make sure that all three local coordinates have the same bounds, usually 0<=s_i<=1 here (and potentially some constraints like s_0+s_1<=1 or similar)
 class PyramidGaussC1 : public Integral
   {
   private:    
-    //static const unsigned Npts = 6;     // Maxim: Adjust this accordingly to the points. Also, implement them in the .cpp file.
-    //static const double Knot[6][3], Weight[6];
+    static const unsigned Npts = 12;
+    static const double Knot[12][3], Weight[12];
   public:    
     PyramidGaussC1(){};
     PyramidGaussC1(const PyramidGaussC1& dummy) = delete;
     void operator=(const PyramidGaussC1&) = delete;
-    // Essentially, just copy from WedgeGaussC1, but adjust the number of points and the values of the knots and weights. 
-    unsigned nweight() const    {   throw_runtime_error("Maxim: Implement this method. Make sure the Npts and the size of the Knot and Weight array match (also in the .cpp file)"); }
-    double knot(const unsigned& i, const unsigned& j) const   {  throw_runtime_error("Maxim: Implement this method. Make sure the Npts and the size of the Knot and Weight array match (also in the .cpp file)"); }
-    double weight(const unsigned& i) const   {   throw_runtime_error("Maxim: Implement this method. Make sure the Npts and the size of the Knot and Weight array match (also in the .cpp file)");   }
+    unsigned nweight() const    {   return Npts;   }
+    double knot(const unsigned& i, const unsigned& j) const   {    return Knot[i][j];  }
+    double weight(const unsigned& i) const   {   return Weight[i];   }
  };
 
 
@@ -127,14 +124,68 @@ class PyramidElementShapeC1
  public:
     static void shape(const Vector<double>& s, Shape& psi) 
     {
-        throw_runtime_error("Maxim: Implement this method. The shape functions for a linear pyramid element can be found by AI");
-        // However, when asking AI, make sure that all three local coordinates have the same bounds, usually 0<=s_i<=1 here (and potentially some constraints like s_0+s_1<=1 or similar). This is important for the implementation of the get_bulk_node_number method, which relies on the local coordinates of the nodes.
+        const double s0 = s[0];
+        const double s1 = s[1];
+        const double s2 = s[2];
+
+        const double w  = 1.0 - s2;
+        const double iw = 1.0 / w;
+
+        const double w_s0 = w - s0;
+        const double w_s1 = w - s1;
+
+        // shape functions
+        psi[0] = w_s0 * w_s1 * iw;
+        psi[1] = s0    * w_s1 * iw;
+        psi[2] = s0    * s1  * iw;
+        psi[3] = w_s0  * s1  * iw;
+        psi[4] = s2;
     }
+
 
     
     static void dshape_local(const Vector<double>& s,Shape& psi,DShape& dpsids) 
     {
-        throw_runtime_error("Maxim: Implement this method. This method should evaluate the shape functions and their local derivatives for a linear pyramid element.");
+        const double s0 = s[0];
+        const double s1 = s[1];
+        const double s2 = s[2];
+
+        const double w  = 1.0 - s2;
+        const double iw = 1.0 / w;
+        const double iw2 = iw * iw;
+
+        const double w_s0 = w - s0;
+        const double w_s1 = w - s1;
+
+        psi[0] = w_s0 * w_s1 * iw;
+        psi[1] = s0   * w_s1 * iw;
+        psi[2] = s0   * s1   * iw;
+        psi[3] = w_s0 * s1   * iw;
+        psi[4] = s2;
+
+        // derivatives wrt s0
+        dpsids(0,0) = -(w_s1) * iw;
+        dpsids(1,0) =  (w_s1) * iw;
+        dpsids(2,0) =  s1     * iw;
+        dpsids(3,0) = -s1     * iw;
+        dpsids(4,0) = 0.0;
+
+        // derivatives wrt s1
+        dpsids(0,1) = -(w_s0) * iw;
+        dpsids(1,1) = -s0     * iw;
+        dpsids(2,1) =  s0     * iw;
+        dpsids(3,1) =  w_s0   * iw;
+        dpsids(4,1) = 0.0;
+
+
+        // derivatives wrt s2
+        const double s0s1 = s0 * s1;
+
+        dpsids(0,2) = s0s1 * iw2 - 1.0;
+        dpsids(1,2) = - s0s1 * iw2;
+        dpsids(2,2) = s0s1 * iw2;
+        dpsids(3,2) = - s0s1 * iw2;
+        dpsids(4,2) = 1.0;
     }
 };
 
@@ -431,18 +482,24 @@ class PyramidElementBase :  public virtual FiniteElement
     CoordinateMappingFctPt face_to_bulk_coordinate_fct_pt(const int& face_index) const override;
     BulkCoordinateDerivativesFctPt bulk_coordinate_derivatives_fct_pt(const int& face_index) const override ;
     int face_outer_unit_normal_sign(const int&) const override;
-    double s_min() const    { throw_runtime_error("Maxim: the lower value of the element's local coordinate. All three must have the same bounds.") }
-    double s_max() const    { throw_runtime_error("Maxim: the upper value of the element's local coordinate. All three must have the same bounds.") }
-    unsigned nvertex_node() const { throw_runtime_error("Maxim: Implement this method. It should return the number of vertex nodes for a linear pyramid element, which is 5."); }
+    double s_min() const    { return 0.0; }
+    double s_max() const    { return 1.0; }
+    unsigned nvertex_node() const   { return 5; }
     Node* vertex_node_pt(const unsigned& j) const override
-    {           
-      throw_runtime_error("Maxim: Implement this method. It should return a pointer to the j-th vertex node of the pyramid element, where j ranges from 0 to 4.");
+    {       
+      if (j > 4)
+      {
+          std::ostringstream error_message;
+          error_message  << "Element only has five vertex nodes; called with node number " << j << std::endl;
+          throw OomphLibError(error_message.str(),OOMPH_CURRENT_FUNCTION,OOMPH_EXCEPTION_LOCATION);
+      }
+      return node_pt(j);    
     }
-    unsigned nnode_on_face() const override { throw_runtime_error("nnode_on_face cannot be implemented for a Wedge, damn."); } // Here you don't have to do anything. nnode_on_face is from oomph-lib, but it is not unique here (quad vs tri facets), so we just throw an error if someone tries to call it. The nnode_on_face_by_index method is what should be used instead, and it is implemented below.
-    virtual unsigned nnode_on_face_by_index(const int& face_index) const  { throw_runtime_error("Maxim: Implement this method. It should return the number of nodes on a facet, which depends on the index here"); }
+    unsigned nnode_on_face() const override { throw_runtime_error("nnode_on_face cannot be implemented for a Pyramid, damn."); }
+    virtual unsigned nnode_on_face_by_index(const int& face_index) const  { return (face_index==4) ? 4 : 3; } 
 };
 
-// Maxim: You don't have to do anything with this class
+
 class RefineablePyramidElement : public virtual RefineableElement, public virtual PyramidElementBase
   {
 
@@ -603,15 +660,50 @@ class WedgeElementC1 :  public virtual RefineableWedgeElement
 
 
 class PyramidElementC1 :  public virtual RefineablePyramidElement
+// A first order pyramid element
+// Nodes are ordered as follows:
+/*
+Index : Local coordinates (s0,s1,s2)
+  0: (0,0,0)
+  1: (1,0,0)
+  2: (1,1,0)
+  3: (0,1,0)
+
+  4: (0,0,1)  <- apex (degenerate point, s2=1 collapses to a point at s0=s1=0)
+
+
+              4 o
+               /|\
+              / | \
+             /  |  \
+            / [2]|[3]\
+           /    |    \
+        3 o-----|-----o 2
+          |  [4]|     |
+  [1]     |     |     |   [0]
+          |   [4]     |
+        0 o-----------o 1
+
+  s[0] and s[1] run from 0 to 1-s[2], s[2] runs from 0 to 1
+
+  facets are numbered as follows:
+  facet 0: s[1] = 0,        nodes 0,1,4     (triangle)
+  facet 1: s[0] = 1-s[2],   nodes 1,2,4     (triangle)
+  facet 2: s[1] = 1-s[2],   nodes 2,3,4     (triangle)
+  facet 3: s[0] = 0,        nodes 0,3,4     (triangle)
+  facet 4: s[2] = 0,        nodes 0,1,2,3   (quad base)
+*/
 { 
  private:
-    //static PyramidGaussC1 Default_integration_scheme; // Maxim: It must be declared in the cpp file
+    static PyramidGaussC1 Default_integration_scheme; 
  public:    
     unsigned nnode_1d() const { return 2;}
 
     PyramidElementC1() : PyramidElementBase() 
     {
-        throw_runtime_error("Maxim: Implement the constructor for the PyramidElementC1 class. It should set the number of nodes, dimension, and integration scheme (which should be an instance of PyramidGaussC1).");
+        set_n_node(5);
+        set_dimension(3);
+        set_integration_scheme(&Default_integration_scheme);
     }
     PyramidElementC1(const PyramidElementC1&) = delete;
     ~PyramidElementC1() {}
@@ -630,7 +722,17 @@ class PyramidElementC1 :  public virtual RefineablePyramidElement
 
     inline void local_coordinate_of_node(const unsigned& j,Vector<double>& s) const
     {
-      throw_runtime_error("Maxim: Implement this method. It should set the local coordinates s for the j-th node of the pyramid element, where j ranges from 0 to 4.");
+      if (j==0) { s[0] = 0.0; s[1] = 0.0; s[2] = 0.0;}
+      else if (j==1) { s[0] = 1.0; s[1] = 0.0; s[2] = 0.0;}
+      else if (j==2) { s[0] = 1.0; s[1] = 1.0; s[2] = 0.0;}
+      else if (j==3) { s[0] = 0.0; s[1] = 1.0; s[2] = 0.0;}
+      else if (j==4) { s[0] = 0.0; s[1] = 0.0; s[2] = 1.0;}
+      else
+      {
+          std::ostringstream error_message;
+          error_message  << "Element only has five nodes; called with node number " << j << std::endl;
+          throw OomphLibError(error_message.str(),OOMPH_CURRENT_FUNCTION,OOMPH_EXCEPTION_LOCATION);
+      }
     }
 
 

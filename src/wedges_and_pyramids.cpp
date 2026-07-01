@@ -24,6 +24,172 @@ const double WedgeGaussC1::Weight[6] =
   1.0/12.0
 };
 
+const double PyramidGaussC1::Knot[12][3] =
+{
+    // Stroud conical based 12 point rule
+    // z = 0.5*(1 - sqrt(3/5))
+    { 0.5*(1-1/sqrt(3)), 0.5*(1-1/sqrt(3)), 0.5*(1-sqrt(3.0/5.0)) },
+    { 0.5*(1+1/sqrt(3)), 0.5*(1-1/sqrt(3)), 0.5*(1-sqrt(3.0/5.0)) },
+    { 0.5*(1-1/sqrt(3)), 0.5*(1+1/sqrt(3)), 0.5*(1-sqrt(3.0/5.0)) },
+    { 0.5*(1+1/sqrt(3)), 0.5*(1+1/sqrt(3)), 0.5*(1-sqrt(3.0/5.0)) },
+
+    // z = 0.5
+    { 0.5*(1-1/sqrt(3)), 0.5*(1-1/sqrt(3)), 0.5 },
+    { 0.5*(1+1/sqrt(3)), 0.5*(1-1/sqrt(3)), 0.5 },
+    { 0.5*(1-1/sqrt(3)), 0.5*(1+1/sqrt(3)), 0.5 },
+    { 0.5*(1+1/sqrt(3)), 0.5*(1+1/sqrt(3)), 0.5 },
+
+    // z = 0.5*(1 + sqrt(3/5))
+    { 0.5*(1-1/sqrt(3)), 0.5*(1-1/sqrt(3)), 0.5*(1+sqrt(3.0/5.0)) },
+    { 0.5*(1+1/sqrt(3)), 0.5*(1-1/sqrt(3)), 0.5*(1+sqrt(3.0/5.0)) },
+    { 0.5*(1-1/sqrt(3)), 0.5*(1+1/sqrt(3)), 0.5*(1+sqrt(3.0/5.0)) },
+    { 0.5*(1+1/sqrt(3)), 0.5*(1+1/sqrt(3)), 0.5*(1+sqrt(3.0/5.0))}
+};
+
+const double PyramidGaussC1::Weight[12] =
+{
+    // --- z0 = 0.5*(1 - sqrt(3/5)) ---
+    0.25 * (5.0/18.0) * 0.25,  // (1-z0)^2
+    0.25 * (5.0/18.0) * 0.25,
+    0.25 * (5.0/18.0) * 0.25,
+    0.25 * (5.0/18.0) * 0.25,
+
+    // --- z1 = 0.5 ---
+    0.25 * (8.0/18.0) * 0.25,
+    0.25 * (8.0/18.0) * 0.25,
+    0.25 * (8.0/18.0) * 0.25,
+    0.25 * (8.0/18.0) * 0.25,
+
+    // --- z2 = 0.5*(1 + sqrt(3/5)) ---
+    0.25 * (5.0/18.0) * 0.25,
+    0.25 * (5.0/18.0) * 0.25,
+    0.25 * (5.0/18.0) * 0.25,
+    0.25 * (5.0/18.0) * 0.25
+};
+
+// const double PyramidGaussC1::Knot[36][3] =
+// {
+//     // =========================
+//     // z0
+//     // =========================
+//     {0.069431844202973712, 0.069431844202973712, 0.069431844202973712},
+//     {0.5,                  0.069431844202973712, 0.069431844202973712},
+//     {0.9305681557970263,   0.069431844202973712, 0.069431844202973712},
+
+//     {0.069431844202973712, 0.5,                  0.069431844202973712},
+//     {0.5,                  0.5,                  0.069431844202973712},
+//     {0.9305681557970263,   0.5,                  0.069431844202973712},
+
+//     {0.069431844202973712, 0.9305681557970263,   0.069431844202973712},
+//     {0.5,                  0.9305681557970263,   0.069431844202973712},
+//     {0.9305681557970263,   0.9305681557970263,   0.069431844202973712},
+
+
+//     // =========================
+//     // z1
+//     // =========================
+//     {0.069431844202973712, 0.069431844202973712, 0.33000947820757187},
+//     {0.5,                  0.069431844202973712, 0.33000947820757187},
+//     {0.9305681557970263,   0.069431844202973712, 0.33000947820757187},
+
+//     {0.069431844202973712, 0.5,                  0.33000947820757187},
+//     {0.5,                  0.5,                  0.33000947820757187},
+//     {0.9305681557970263,   0.5,                  0.33000947820757187},
+
+//     {0.069431844202973712, 0.9305681557970263,   0.33000947820757187},
+//     {0.5,                  0.9305681557970263,   0.33000947820757187},
+//     {0.9305681557970263,   0.9305681557970263,   0.33000947820757187},
+
+
+//     // =========================
+//     // z2
+//     // =========================
+//     {0.069431844202973712, 0.069431844202973712, 0.6699905217924281},
+//     {0.5,                  0.069431844202973712, 0.6699905217924281},
+//     {0.9305681557970263,   0.069431844202973712, 0.6699905217924281},
+
+//     {0.069431844202973712, 0.5,                  0.6699905217924281},
+//     {0.5,                  0.5,                  0.6699905217924281},
+//     {0.9305681557970263,   0.5,                  0.6699905217924281},
+
+//     {0.069431844202973712, 0.9305681557970263,   0.6699905217924281},
+//     {0.5,                  0.9305681557970263,   0.6699905217924281},
+//     {0.9305681557970263,   0.9305681557970263,   0.6699905217924281},
+
+
+//     // =========================
+//     // z3
+//     // =========================
+//     {0.069431844202973712, 0.069431844202973712, 0.9305681557970263},
+//     {0.5,                  0.069431844202973712, 0.9305681557970263},
+//     {0.9305681557970263,   0.069431844202973712, 0.9305681557970263},
+
+//     {0.069431844202973712, 0.5,                  0.9305681557970263},
+//     {0.5,                  0.5,                  0.9305681557970263},
+//     {0.9305681557970263,   0.5,                  0.9305681557970263},
+
+//     {0.069431844202973712, 0.9305681557970263,   0.9305681557970263},
+//     {0.5,                  0.9305681557970263,   0.9305681557970263},
+//     {0.9305681557970263,   0.9305681557970263,   0.9305681557970263}
+// };
+
+// const double PyramidGaussC1::Weight[36] =
+// {
+//     // z0 block (wz = 0.173927422568727)
+//     0.004335185302,
+//     0.006126403023,
+//     0.004335185302,
+
+//     0.006126403023,
+//     0.008656135861,
+//     0.006126403023,
+
+//     0.004335185302,
+//     0.006126403023,
+//     0.004335185302,
+
+
+//     // z1 block (wz = 0.326072577431273)
+//     0.008133481224,
+//     0.011490340248,
+//     0.008133481224,
+
+//     0.011490340248,
+//     0.016218515254,
+//     0.011490340248,
+
+//     0.008133481224,
+//     0.011490340248,
+//     0.008133481224,
+
+
+//     // z2 block (same pattern)
+//     0.008133481224,
+//     0.011490340248,
+//     0.008133481224,
+
+//     0.011490340248,
+//     0.016218515254,
+//     0.011490340248,
+
+//     0.008133481224,
+//     0.011490340248,
+//     0.008133481224,
+
+
+//     // z3 block
+//     0.004335185302,
+//     0.006126403023,
+//     0.004335185302,
+
+//     0.006126403023,
+//     0.008656135861,
+//     0.006126403023,
+
+//     0.004335185302,
+//     0.006126403023,
+//     0.004335185302
+// };
 
 const double WedgeGaussC2::Knot[18][3] =
 {
@@ -509,9 +675,61 @@ const double WedgeGaussC2::Weight[18] =
 
 ///////////
 
+PyramidGaussC1  PyramidElementC1::Default_integration_scheme;
+
   unsigned int PyramidElementC1::get_bulk_node_number(const int & face_index, const unsigned int& i) const
   {     
-    throw_runtime_error("Maxim: Implement get_bulk_node_number for PyramidElementC1. It should give the i-th node of this element which is also a node of the face element with index face_index");
+        if (face_index==0) 
+    { 
+      switch (i)
+      {
+        case 0: return 0;
+        case 1: return 1;
+        case 2: return 4;
+        default: throw_runtime_error("Invalid node index for face");        
+      }      
+    }
+    else if (face_index==1) 
+    {
+        switch (i)
+        {
+            case 0: return 1;
+            case 1: return 2;
+            case 2: return 4;
+            default: throw_runtime_error("Invalid node index for face");
+        }
+    }
+    else if (face_index==2) {
+        switch (i)
+        {
+            case 0: return 2;
+            case 1: return 3;
+            case 2: return 4;
+            default: throw_runtime_error("Invalid node index for face");
+        }
+    }
+    else if (face_index==3) {
+        switch (i)
+        {
+            case 0: return 0;
+            case 1: return 4;
+            case 2: return 3;
+            default: throw_runtime_error("Invalid node index for face");
+        }
+    }
+    else if (face_index==4) {
+        switch (i)
+        {
+            case 0: return 0;
+            case 1: return 3;
+            case 2: return 1;
+            case 3: return 2;
+            default: throw_runtime_error("Invalid node index for face");
+        }
+    }
+    
+    throw_runtime_error("Invalid node or face index for wedge element "+std::to_string(face_index)+", "+std::to_string(i));
+    return 0;
   }
 
 ///////////
@@ -883,9 +1101,30 @@ WedgeGaussC2  WedgeElementC2::Default_integration_scheme;
 
 
 //////////////////////////////////
-void PyramidElementBase::build_face_element(const int& face_index,FaceElement* face_element_pt)
+  void PyramidElementBase::build_face_element(const int& face_index,FaceElement* face_element_pt)
   {    
-    throw_runtime_error("Maxim: Just adapt from again from the corresponding WedgeElementBase class. There is also a block commented, which helps to make sure that the nodes and mappings are consistent. ");
+    face_element_pt->set_nodal_dimension(nodal_dimension());   
+    face_element_pt->bulk_element_pt() = this;
+
+#ifdef OOMPH_HAS_MPI    
+    face_element_pt->set_halo(Non_halo_proc_ID);
+#endif    
+    face_element_pt->face_index() = face_index;
+    const unsigned nnode_face = nnode_on_face_by_index(face_index);
+    
+    face_element_pt->face_to_bulk_coordinate_fct_pt() = face_to_bulk_coordinate_fct_pt(face_index);    
+    face_element_pt->bulk_coordinate_derivatives_fct_pt() = bulk_coordinate_derivatives_fct_pt(face_index);    
+    face_element_pt->nbulk_value_resize(nnode_face);    
+    face_element_pt->bulk_node_number_resize(nnode_face);
+        
+    for (unsigned i = 0; i < nnode_face; i++)
+    {
+      unsigned bulk_number = get_bulk_node_number(face_index, i);           
+      face_element_pt->node_pt(i) = node_pt(bulk_number);
+      face_element_pt->bulk_node_number(i) = bulk_number;      
+      face_element_pt->nbulk_value(i) = required_nvalue(bulk_number);
+    }    
+    face_element_pt->normal_sign() = face_outer_unit_normal_sign(face_index);
   }
 
   
@@ -893,36 +1132,133 @@ void PyramidElementBase::build_face_element(const int& face_index,FaceElement* f
   namespace PyramidElementFaceToBulkCoordinates
   {    
     void face0(const Vector<double>& s, Vector<double>& s_bulk)
-    {  
-       throw_runtime_error("Maxim: Implement, also for the other face");
+    {
+        s_bulk[0] = s[1];
+        s_bulk[1] = 0.0;
+        s_bulk[2] = 1-s[0]-s[1];
     }
-       
+
+    void face1(const Vector<double>& s, Vector<double>& s_bulk)
+    {
+        s_bulk[0] = s[0]+s[1];
+        s_bulk[1] = s[1];
+        s_bulk[2] = 1-s[0]-s[1];
+    }
+
+    void face2(const Vector<double>& s, Vector<double>& s_bulk)
+    {
+        s_bulk[0] = s[0];
+        s_bulk[1] = s[1]+s[0];
+        s_bulk[2] = 1-s[0]-s[1];
+    }
+
+    void face3(const Vector<double>& s, Vector<double>& s_bulk)
+    {
+        s_bulk[0] = 0.0;
+        s_bulk[1] = 1-s[0]-s[1];
+        s_bulk[2] = s[1];
+    }
+
+    void face4(const Vector<double>& s, Vector<double>& s_bulk)
+    {
+        s_bulk[0] = (s[1]+1.0)/2.0;
+        s_bulk[1] = (s[0]+1.0)/2.0;
+        s_bulk[2] = 0.0;
+    }
   } 
 
   namespace PyramidElementBulkCoordinateDerivatives
   {    
     void faces0(const Vector<double>& s,DenseMatrix<double>& dsbulk_dsface,unsigned& interior_direction)
     {
-        throw_runtime_error("Implement"); // Actually, these are never used so far, so feel free to leave them empty with an error like this
-    }    
+        throw_runtime_error("Implement");
+    }
+    
+    void faces1(const Vector<double>& s,DenseMatrix<double>& dsbulk_dsface,unsigned& interior_direction)
+    {
+        throw_runtime_error("Implement");
+    }
+
+    void faces2(const Vector<double>& s,DenseMatrix<double>& dsbulk_dsface,unsigned& interior_direction)
+    {
+        throw_runtime_error("Implement");
+    }
+
+    void faces3(const Vector<double>& s,DenseMatrix<double>& dsbulk_dsface,unsigned& interior_direction)
+    {
+        throw_runtime_error("Implement");
+    }
+
+    void faces4(const Vector<double>& s,DenseMatrix<double>& dsbulk_dsface,unsigned& interior_direction)
+    {
+        throw_runtime_error("Implement");
+    }
   } 
 
  
 
   CoordinateMappingFctPt PyramidElementBase::face_to_bulk_coordinate_fct_pt(const int& face_index) const
     {
-      throw_runtime_error("Maxim: This should give back the mapping function from face coordinate s_face to bulk coordinate s_bulk");
+      if (face_index == 0)
+      {
+        return &PyramidElementFaceToBulkCoordinates::face0;
+      }
+      else if (face_index == 1)
+      {
+        return &PyramidElementFaceToBulkCoordinates::face1;
+      }
+      else if (face_index == 2)
+      {
+        return &PyramidElementFaceToBulkCoordinates::face2;
+      }
+      else if (face_index == 3)
+      {
+        return &PyramidElementFaceToBulkCoordinates::face3;
+      }
+      else if (face_index == 4)
+      {
+        return &PyramidElementFaceToBulkCoordinates::face4;
+      }      
+      {
+        std::string err = "Face index should be in {0..4}.";
+        throw OomphLibError(
+          err, OOMPH_EXCEPTION_LOCATION, OOMPH_CURRENT_FUNCTION);
+      }
     }
 
     BulkCoordinateDerivativesFctPt PyramidElementBase::bulk_coordinate_derivatives_fct_pt(const int& face_index) const
     {
-      throw_runtime_error("Maxim: The same for the derivative, but they are not used anyways");
+      if (face_index == 0)
+      {
+        return &PyramidElementBulkCoordinateDerivatives::faces0;
+      }
+      else if (face_index == 1)
+      {
+        return &PyramidElementBulkCoordinateDerivatives::faces1;
+      }
+      else if (face_index == 2)
+      {
+        return &PyramidElementBulkCoordinateDerivatives::faces2;
+      }
+      else if (face_index == 3)
+      {
+        return &PyramidElementBulkCoordinateDerivatives::faces3;
+      }
+      else if (face_index == 4)
+      {
+        return &PyramidElementBulkCoordinateDerivatives::faces4;
+      }      
+      else
+      {
+        std::string err = "Face index should be in {0..4}.";
+        throw OomphLibError(
+          err, OOMPH_EXCEPTION_LOCATION, OOMPH_CURRENT_FUNCTION);
+      }
     }
 
     int PyramidElementBase::face_outer_unit_normal_sign(const int& face_index) const
-    {                
-        throw_runtime_error("Maxim: Facets can be oriented differently, i.e. the normal could point in different direction. It is however best if all facets have a positive sign to the the normal in paraview is pointing outwards from the bulk element and this function just returns 1  ");
+    {         
+      return 1;       
     }
-
 
 }
