@@ -1036,15 +1036,71 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 
 	/////////////////////////////////
 	MeshTemplateElementPyramidC1::MeshTemplateElementPyramidC1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5):
-	MeshTemplateElement(15) // This is the super() call. Here, we pass a value of 14 to the base class constructor, which indicates some identification number	   
-	   // At the top of this file, all indices are given. 
+	MeshTemplateElement(15)
 	{
-		throw_runtime_error("Maxim: Do it the same way as e.g MeshTemplateElementWedgeC1::MeshTemplateElementWedgeC1");
-	}
+		// Add the nodes to the vector and store them internally
+		node_indices.reserve(5);
+		node_indices.push_back(n1);
+		node_indices.push_back(n2);
+		node_indices.push_back(n3);
+		node_indices.push_back(n4);
+		node_indices.push_back(n5);
+	}	
 
 	MeshTemplateFacet *MeshTemplateElementPyramidC1::construct_facet(unsigned i)
 	{
-		throw_runtime_error("Maxim: Do it analogously as e.g MeshTemplateElementWedgeC1::construct_facet");
+		/*
+Index : Local coordinates (s0,s1,s2)
+  0: (0,0,0)
+  1: (1,0,0)
+  2: (1,1,0)
+  3: (0,1,0)
+  4: (0,0,1)  <- apex (degenerate point, s2=1 collapses to a point at s0=s1=0)
+
+
+              4 o
+               /|\
+              / | \
+             /  |  \
+            / [2]|[3]\
+           /    |    \
+        3 o-----|-----o 2
+          |  [4]|     |
+  [1]     |     |     |   [0]
+          |   [4]     |
+        0 o-----------o 1
+
+  s[0] and s[1] run from 0 to 1-s[2], s[2] runs from 0 to 1
+
+  facets are numbered as follows:
+  facet 0: s[1] = 0,        nodes 0,1,4     (triangle)
+  facet 1: s[0] = 1-s[2],   nodes 1,2,4     (triangle)
+  facet 2: s[1] = 1-s[2],   nodes 2,3,4     (triangle)
+  facet 3: s[0] = 0,        nodes 0,3,4     (triangle)
+  facet 4: s[2] = 0,        nodes 0,1,2,3   (quad base)
+*/
+	  std::vector<nodeindex_t> inds;
+	  switch (i)
+	  {
+	  case 0:
+		inds = {node_indices[0], node_indices[1], node_indices[4]};
+		break;
+	  case 1:
+		inds = {node_indices[1], node_indices[2], node_indices[4]};
+		break;
+	  case 2:
+		inds = {node_indices[2], node_indices[3], node_indices[4]};
+		break;
+	  case 3:
+		inds = {node_indices[0], node_indices[4], node_indices[3]};
+		break;
+	  case 4:
+		inds = {node_indices[0], node_indices[3], node_indices[1], node_indices[2]};
+		break;
+	  default:
+		throw_runtime_error("A pyramid element only has 5 facets");
+	  }
+	  return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 
 
@@ -1363,7 +1419,15 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 
 	void MeshTemplateElementCollection::add_pyramid_3d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5)
 	{
-		throw_runtime_error("Maxim: Do it the same way as e.g MeshTemplateElementWedgeC1::add_wedge_3d_C1");
+		if (dim == -1)
+		{
+			dim = 3;
+		}
+		else if (dim != 3)
+			throw_runtime_error("Tried to add a 3d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
+		MeshTemplateElementPyramidC1 *res = new MeshTemplateElementPyramidC1(n1, n2, n3, n4, n5);
+		elements.push_back(res);
+		res->link_nodes_with_domain(this);
 	}
 
 	void MeshTemplateElementCollection::add_wedge_3d_C2(const std::vector<nodeindex_t> &inds)

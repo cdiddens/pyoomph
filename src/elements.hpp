@@ -1649,7 +1649,7 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
           return res;
       }
       virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 5, order)); }
-      oomph::Vector<double> get_midpoint_s() override { throw_runtime_error("Maxim: This should give the local coordinates of the barycenter.") }
+      oomph::Vector<double> get_midpoint_s() override { oomph::Vector<double> res(this->dim(), 0.375); res[2]=0.25; return res; }
   };
 
 

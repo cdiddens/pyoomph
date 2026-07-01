@@ -15143,8 +15143,13 @@ namespace pyoomph
 	}
 
 	std::vector<pyoomph::Node*> BulkElementPyramid3dC1::get_vertex_nodes_of_face(const int &face) const
-	{	  	  
-	  throw_runtime_error("Maxim: This should return the vertex nodes of the face.");
+	{
+		if (face==0) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(0)),dynamic_cast<pyoomph::Node*>(this->node_pt(1)),dynamic_cast<pyoomph::Node*>(this->node_pt(4))};}
+      else if (face==1) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(1)),dynamic_cast<pyoomph::Node*>(this->node_pt(2)),dynamic_cast<pyoomph::Node*>(this->node_pt(4))};}
+      else if (face==2) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(2)),dynamic_cast<pyoomph::Node*>(this->node_pt(3)),dynamic_cast<pyoomph::Node*>(this->node_pt(4))};}
+      else if (face==3) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(0)),dynamic_cast<pyoomph::Node*>(this->node_pt(4)),dynamic_cast<pyoomph::Node*>(this->node_pt(3))};}
+      else if (face==4) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(0)),dynamic_cast<pyoomph::Node*>(this->node_pt(3)),dynamic_cast<pyoomph::Node*>(this->node_pt(1)),dynamic_cast<pyoomph::Node*>(this->node_pt(2))};}
+	  else throw_runtime_error("Invalid face index for pyramid element");
 	}
 
 	std::vector<pyoomph::Node*> BulkElementWedge3dC2::get_vertex_nodes_of_face(const int &face) const
@@ -15197,7 +15202,9 @@ namespace pyoomph
 
 	oomph::FaceElement * BulkElementPyramid3dC1::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index)
 	{ 
-		throw_runtime_error("TODO: Constructing face elements for pyramid elements with C1 interpolation on the face. The different face types depend on the face index");
+		if (face_index==4) return  new InterfaceElementQuad2dC1(jitcode, this, face_index);
+		else return new InterfaceElementTri2dC1(jitcode, this, face_index);
+		// throw_runtime_error("TODO: Constructing face elements for pyramid elements with C1 interpolation on the face. The different face types depend on the face index");
 	}
 	
 	oomph::FaceElement * BulkElementWedge3dC2::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index)

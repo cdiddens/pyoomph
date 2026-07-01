@@ -432,6 +432,7 @@ class _MeshFileOutput(_BaseNumpyOutput):
 				triC1TBperm = numpy.array([0, 1, 2], dtype=int) #type:ignore			
 				tetraperm = numpy.array([0, 1, 2,3], dtype=int) #type:ignore
 				tetraC1TBperm = numpy.array([0, 1, 2,3], dtype=int) #type:ignore
+				pyramidperm = numpy.array([0, 1, 2, 3, 4], dtype=int) #type:ignore
 				wedgeperm_extrusion=numpy.array([0,1,2,3,4,5],dtype=int) #type:ignore
 				#wedge18perm=numpy.array([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17],dtype=int) #type:ignore
 				#wedge18perm=numpy.array([0, 1, 2, 12, 13, 14, 3, 4, 6, 5, 7, 8, 15, 16, 17, 9, 10, 11],dtype=int) #type:ignore
@@ -500,7 +501,6 @@ class _MeshFileOutput(_BaseNumpyOutput):
 					elif et==13: # Wedge from pyoomph
 						cells.append(("wedge", eleminds[elinds, wedgeperm])) #type:ignore
 					elif et==15: 
-						raise RuntimeError("Maxim: Here you have to find your the permutation of the nodes by inspecting it with Paraview. This is quite annoying, and only doable by trial and error")
 						cells.append(("pyramid", eleminds[elinds, pyramidperm])) #type:ignore
 						#cells.append(Wedge15Cellblock("wedge15",
 					elif et==7: # wegde (from rotational extrusion)
