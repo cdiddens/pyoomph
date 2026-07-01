@@ -366,6 +366,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         surface_tension_gradient_directly(bool): Whether to consider the surface tension gradient directly. Default is False.
         use_highest_space_for_velo_connection(bool): Whether to use the highest space for the velocity connection. Default is False.
         kinematic_bc_coordinate_sys(Optional[BaseCoordinateSystem]): The coordinate system for the kinematic boundary condition. Default is None.
+        kinematic_bc_space: The finite element space for the kinematic boundary condition. Default is None, means auto-select.
         additional_masstransfer_scale(ExpressionOrNum): Additional mass transfer scale. Default is 1.
         additional_kin_bc_test_scale(ExpressionOrNum): Additional kinematic boundary condition test scale. Default is 1.
         static_normal_interface_motion(ExpressionOrNum): If solved on a static mesh, we can mimic the interface motion by moving it in normal direction with this rate. Default is 0.
@@ -378,7 +379,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
     from ..materials.mass_transfer import MassTransferModelBase
     def __init__(self, interface_props:AnyFluidFluidInterface, *, kinbc_name:str="_kin_bc", velo_connect_prefix:str="_lagr_conn_",
                  masstransfer_model:Optional[Union[MassTransferModelBase,Literal[False]]]=None, static:Union[Literal["auto"],bool]="auto", surface_tension_theta:float=1, total_mass_loss_factor_inside:ExpressionOrNum=1,total_mass_loss_factor_outside:ExpressionOrNum=1,
-                 surface_tension_projection_space:Optional[FiniteElementSpaceEnum]=None,additional_normal_traction:ExpressionOrNum=0,surface_tension_gradient_directly:bool=False,use_highest_space_for_velo_connection:bool=False,kinematic_bc_coordinate_sys:Optional[BaseCoordinateSystem]=None,additional_masstransfer_scale=1,additional_kin_bc_test_scale=1,static_normal_interface_motion:ExpressionOrNum=0,static_interface_motion_testfunction:ExpressionNumOrNone=None,project_interface_flux:bool=False,surface_tension_factor:ExpressionOrNum=1):
+                 surface_tension_projection_space:Optional[FiniteElementSpaceEnum]=None,additional_normal_traction:ExpressionOrNum=0,surface_tension_gradient_directly:bool=False,use_highest_space_for_velo_connection:bool=False,kinematic_bc_coordinate_sys:Optional[BaseCoordinateSystem]=None,kinematic_bc_space:Optional[FiniteElementSpaceEnum]=None,additional_masstransfer_scale=1,additional_kin_bc_test_scale=1,static_normal_interface_motion:ExpressionOrNum=0,static_interface_motion_testfunction:ExpressionNumOrNone=None,project_interface_flux:bool=False,surface_tension_factor:ExpressionOrNum=1):
         super(MultiComponentNavierStokesInterface, self).__init__()
         self.interface_props = interface_props
         self.kinbc_name = kinbc_name
@@ -402,6 +403,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         self.surfactant_advect_velo_space:FiniteElementSpaceEnum="C2"
         self.use_highest_space_for_velo_connection=use_highest_space_for_velo_connection
         self.kinematic_bc_coordinate_sys=kinematic_bc_coordinate_sys
+        self.kinematic_bc_space=kinematic_bc_space
         self.additional_masstransfer_scale=additional_masstransfer_scale
         self.additional_kin_bc_test_scale=additional_kin_bc_test_scale
         self.static_normal_interface_motion=static_normal_interface_motion
@@ -414,25 +416,29 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         nseqs=self.get_parent_equations(of_type=NavierStokesEquations)
         assert isinstance(nseqs,NavierStokesEquations)
         inside_space=nseqs.get_velocity_space_from_mode(for_interface=True)
-        kinbc_space=inside_space
+        
 #        if nseqs.mode=="mini"        
         if not nseqs.PFEM_options or not nseqs.PFEM_options.active:            
-            static=self.static
+            kinbc_space=inside_space
+            static=self.static            
             if static=="auto":
                 static=not self.get_current_code_generator().get_parent_domain()._coordinates_as_dofs
 
             if not static in {"auto",False,True}:
                 raise RuntimeError("property static must be either 'auto', True or False")
-            if not static:
-                pos_space=self.get_current_code_generator().get_parent_domain()._coordinate_space
-                if pos_space=="":
-                    raise RuntimeError("Find out the coordinate space:"+str())
-                if pos_space=="C2TB":                    
-                    kinbc_space="C2"
-                elif pos_space=="C1TB":
-                    kinbc_space="C1"                
-                else:
-                    kinbc_space=pos_space
+            if self.kinematic_bc_space is None:
+                if not static:
+                    pos_space=self.get_current_code_generator().get_parent_domain()._coordinate_space
+                    if pos_space=="":
+                        raise RuntimeError("Find out the coordinate space:"+str())
+                    if pos_space=="C2TB":                    
+                        kinbc_space="C2"
+                    elif pos_space=="C1TB":
+                        kinbc_space="C1"                
+                    else:
+                        kinbc_space=pos_space
+            else:
+                kinbc_space=self.kinematic_bc_space
         
             self.define_scalar_field(self.kinbc_name, kinbc_space )
         # If other side has a NavierStokes equation, add also velocity connection
@@ -757,7 +763,8 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         if static == "auto":
             static = not self.get_current_code_generator()._coordinates_as_dofs
         assert isinstance(mesh,InterfaceMesh)
-        self.pin_redundant_lagrange_multipliers(mesh, self.kinbc_name, "velocity" if static else "mesh")
+        if self.kinematic_bc_space is None or self.kinematic_bc_space not in ["DL","D0"]:
+            self.pin_redundant_lagrange_multipliers(mesh, self.kinbc_name, "velocity" if static else "mesh")
 
         # Pin velo connection where necessary
         if self._has_opposite_flow:
