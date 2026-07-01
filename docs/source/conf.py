@@ -10,8 +10,8 @@ sys.path.insert(0, os.path.abspath('../../pyoomph'))
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = 'pyoomph'
-copyright = '2025, Christian Diddens & Duarte Rocha'
-author = 'Christian Diddens & Duarte Rocha'
+copyright = '2025, Christian Diddens, Duarte Rocha & Maxim de Wildt'
+author = 'Christian Diddens, Duarte Rocha & Maxim de Wildt'
 
 import re
 try:

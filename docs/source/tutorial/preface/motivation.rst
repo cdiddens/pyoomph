@@ -12,3 +12,4 @@ While my work with oomph-lib resulted in several publications :cite:`li2019bounc
 I therefore decided to aim for the best of both worlds - and pyoomph was born\ :math:`\ldots`
 
 In 2022, Duarte Rocha joined our group as PhD student and started to contribute to the development of pyoomph.
+Maxim de Wildt joined the development in 2025.

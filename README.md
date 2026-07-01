@@ -73,15 +73,15 @@ Be aware that some of these libraries can have further dependencies.
 
 ## Authors and acknowledgements
 
-pyoomph was founded in 2021 by [**Christian Diddens**](https://github.com/cdiddens). Later, [**Duarte Rocha**](https://github.com/duarterocha) joined the team.
-Additional contributors are [**Vatsal Sanjay**](https://github.com/VatsalSy), [**Maxim de Wildt**](https://github.com/maksimdw) and [**Jnandeep Talukdar**](https://github.com/spilltheT). Pyoomph is developed at the [**Physics of Fluids group**](https://pof.tnw.utwente.nl) of the [**University of Twente**](https://www.utwente.nl/).
+pyoomph was founded in 2021 by [**Christian Diddens**](https://github.com/cdiddens). Later, [**Duarte Rocha**](https://github.com/duarterocha) and [**Maxim de Wildt**](https://github.com/maksimdw) joined the team.
+Additional contributors are [**Vatsal Sanjay**](https://github.com/VatsalSy) and [**Jnandeep Talukdar**](https://github.com/spilltheT). Pyoomph is developed at the [**Physics of Fluids group**](https://pof.tnw.utwente.nl) of the [**University of Twente**](https://www.utwente.nl/).
 
 The authors gratefully acknowledge financial support by the Industrial Partnership Programme `Fundamental Fluid Dynamics Challenges in Inkjet Printing` of the Netherlands Organisation for Scientific Research (NWO) & High Tech Systems and Materials (HTSM), co-financed by Canon Production Printing Netherlands B.V., IamFluidics B.V., TNO Holst Centre, University of Twente, Eindhoven University of Technology and Utrecht University. This work was supported by an Industrial Partnership Programme, High Tech Systems and Materials (HTSM), of the Netherlands Organisation for Scientific Research (NWO); a funding for public-private partnerships (PPS) of the Netherlands Enterprise Agency (RVO) and the Ministry of Economic Affairs (EZ); Canon Production Printing Netherlands B.V.; and the University of Twente.
 
 ## Contributing
 
 If you want to contribute by e.g. adding new equations, meshes, problems, materials or additional features, get in contact with us or send us a pull request.
-If you encounter a bug, please also let us know at c.diddens@utwente.nl or d.rocha@utwente.nl.
+If you encounter a bug, please also let us know at c.diddens@utwente.nl.
 
 ## How to cite
 At the moment, just cite the following paper for pyoomph:
