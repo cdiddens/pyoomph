@@ -159,9 +159,9 @@ namespace pyoomph
 			else if (edim == 3)
 				return Q3d;
 			else if (edim==4)
-				Wedge3d;
+				return Wedge3d;
 			else if (edim==5)
-				Pyramid3d;
+				return Pyramid3d;
 			else
 				throw_runtime_error("Implement");
 		}
@@ -507,30 +507,40 @@ namespace pyoomph
 		return res;
 	}
 
-	bool BulkElementBase::fill_hang_info_with_equations_for_space(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, const unsigned nnode_space, const int hangindex_space, JITHangInfo_t * hangbuffer, unsigned numfields_basebulk,const unsigned buffer_offset_basebulk,const unsigned nodal_offset_basebulk,unsigned int (BulkElementBase::*space_node_to_elem_node_index)(const unsigned int &) const)
+	bool BulkElementBase::fill_hang_info_with_equations_basebulk(JITShapeInfo_t *shape_info)
 	{
-		bool res = false;
-		for (unsigned int l = 0; l < nnode_space; l++)
+		bool res=false;
+		auto * ft = codeinst->get_func_table();
+		for (unsigned int ispace=0;ispace<ft->num_continuous_spaces;ispace++)
 		{
-			unsigned l_elem=(this->*space_node_to_elem_node_index)(l);
-			if (node_pt(l_elem)->is_hanging(hangindex_space))
+			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info = ft->continuous_spaces[ispace];
+			unsigned nnode_space=eleminfo.nnode_of_space[space_info->nnode_index];
+			const std::vector<unsigned> & space_node_to_elem_node=this->get_nodal_space_index_to_element_index_map()[space_info->element_node_to_space_node_index];
+			int hangindex=space_info->hangindex;
+			JITHangInfo_t * hangbuffer=shape_info->hanginfo[space_info->hangbuffer_index];
+			for (unsigned int l = 0; l < nnode_space; l++)
 			{
-				res = true;
-				auto hang_info_pt = node_pt(l_elem)->hanging_pt(hangindex_space);
-				hangbuffer[l].nummaster = hang_info_pt->nmaster();				
-				for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
+				const unsigned l_elem=space_node_to_elem_node[l];
+				if (node_pt(l_elem)->is_hanging(hangindex))
 				{
-					hangbuffer[l].masters[m].weight = hang_info_pt->master_weight(m);					
-					for (unsigned int f = 0; f < numfields_basebulk; f++)
+					res = true;
+					auto hang_info_pt = node_pt(l_elem)->hanging_pt(hangindex);
+					hangbuffer[l].nummaster = hang_info_pt->nmaster();				
+					for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
 					{
-						hangbuffer[l].masters[m].local_eqn[f+buffer_offset_basebulk] = this->local_hang_eqn(hang_info_pt->master_node_pt(m), f+nodal_offset_basebulk);
+						hangbuffer[l].masters[m].weight = hang_info_pt->master_weight(m);					
+						for (unsigned int f = 0; f < space_info->numfields_basebulk; f++)
+						{
+							hangbuffer[l].masters[m].local_eqn[f+space_info->buffer_offset_basebulk] = this->local_hang_eqn(hang_info_pt->master_node_pt(m), f+space_info->nodal_offset_basebulk);
+						}
 					}
 				}
+				else
+				{
+					hangbuffer[l].nummaster = 0;
+				}
 			}
-			else
-			{
-				hangbuffer[l].nummaster = 0;
-			}
+
 		}
 		return res;
 	}
@@ -900,7 +910,14 @@ namespace pyoomph
 	}
 
 	bool BulkElementBase::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
-	{
+	{		
+		bool res=this->fill_hang_info_with_equations_for_pos(shape_info); // Potentially only do if required
+		res=this->fill_hang_info_with_equations_basebulk(shape_info) || res; 
+		for (unsigned int l = 0; l < eleminfo.nnode; l++)
+		{
+			shape_info->hanginfo_Discont[l].nummaster = 0;
+		}
+
 		if (eqn_remap)
 		{
 		   auto * ft=codeinst->get_func_table();
@@ -1520,9 +1537,8 @@ namespace pyoomph
 							}
 					}
 			}
-			return true;
 		}
-		return false;
+		return res;
 	}
 
 	oomph::Node *BulkElementBase::boundary_node_pt(const int &face_index, const unsigned int index)
@@ -7812,52 +7828,7 @@ namespace pyoomph
 		allocate_discontinous_fields();
 	}
 
-	bool PointElement0d::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
-	{
-		for (unsigned int l = 0; l < eleminfo.nnode; l++) // C2 nodes
-		{
-			shape_info->hanginfo_Pos[l].nummaster = 0;
-		}
-		for (unsigned int l = 0; l < eleminfo.nnode_C2TB; l++) // C2 nodes
-		{
-			shape_info->hanginfo_C2TB[l].nummaster = 0;
-		}
-		for (unsigned int l = 0; l < eleminfo.nnode_C1TB; l++) // C1TB nodes
-		{
-			shape_info->hanginfo_C1TB[l].nummaster = 0;
-		}		
-		for (unsigned int l = 0; l < eleminfo.nnode_C2; l++) // C2 nodes
-		{
-			shape_info->hanginfo_C2[l].nummaster = 0;
-		}		
-		for (unsigned int l = 0; l < eleminfo.nnode_C1; l++) // C1 nodes
-		{
-				shape_info->hanginfo_C1[l].nummaster = 0;
-		}
-		
-		/*
-		if (codeinst->get_func_table()->numfields_DL)
-		{
-			for (unsigned int l = 0; l < eleminfo.nnode_DL; l++)
-			{
-				shape_info->hanginfo_Discont[l].nummaster = 0;
-			}
-		}
-		shape_info->hanginfo_Discont[0].nummaster = 0;
-		*/
-		for (unsigned int l = 0; l < eleminfo.nnode; l++)
-		{
-			shape_info->hanginfo_Discont[l].nummaster = 0;
-		}
-
-
-		if (eqn_remap)
-		{
-			return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap);
-		}
-		else
-			return false;
-	}
+	
 
 	double PointElement0d::invert_jacobian_mapping(const oomph::DenseMatrix<double> &jacobian, oomph::DenseMatrix<double> &inverse_jacobian) const
 	{
@@ -7994,32 +7965,7 @@ namespace pyoomph
 		return res;
 	}
 
-	bool BulkElementLine1dC1::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
-	{
-		for (unsigned int l = 0; l < eleminfo.nnode_C1; l++) // C1 nodes
-		{
-			shape_info->hanginfo_C1[l].nummaster = 0;
-		}
-		for (unsigned int l = 0; l < eleminfo.nnode_C1TB; l++) // C1TB nodes
-		{
-			shape_info->hanginfo_C1TB[l].nummaster = 0;
-		}				
-		for (unsigned int l = 0; l < eleminfo.nnode; l++)
-		{
-			shape_info->hanginfo_Pos[l].nummaster = 0;
-		}
-		for (unsigned int l = 0; l < eleminfo.nnode; l++)
-		{
-			shape_info->hanginfo_Discont[l].nummaster = 0;
-		}
-
-		if (eqn_remap)
-		{
-			return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap);
-		}
-		else
-			return false;
-	}
+	
 	
 	void BulkElementLine1dC1::get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather)
 	{
@@ -8250,41 +8196,7 @@ namespace pyoomph
 		}
 	}
 
-	bool BulkElementLine1dC2::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
-	{
-		for (unsigned int l = 0; l < eleminfo.nnode; l++) // C2 nodes
-		{
-			shape_info->hanginfo_Pos[l].nummaster = 0;
-		}
-		for (unsigned int l = 0; l < eleminfo.nnode_C2TB; l++) // C2 nodes
-		{
-			shape_info->hanginfo_C2TB[l].nummaster = 0;
-		}
-		for (unsigned int l = 0; l < eleminfo.nnode_C2; l++) // C2 nodes
-		{
-			shape_info->hanginfo_C2[l].nummaster = 0;
-		}
-		for (unsigned int l = 0; l < eleminfo.nnode_C1; l++) // C1 nodes
-		{
-				shape_info->hanginfo_C1[l].nummaster = 0;
-		}		
-		for (unsigned int l = 0; l < eleminfo.nnode_C1TB; l++) // C1 nodes
-		{
-				shape_info->hanginfo_C1TB[l].nummaster = 0;		
-		}		
-		
-		for (unsigned int l = 0; l < eleminfo.nnode; l++)
-		{
-			shape_info->hanginfo_Discont[l].nummaster = 0;
-		}
-
-		if (eqn_remap)
-		{
-			return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap);
-		}
-		else
-			return false;
-	}
+	
 
 	////////////////////////////
 
@@ -8341,33 +8253,7 @@ namespace pyoomph
 		return res;
 	}
 
-	bool BulkTElementLine1dC1::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
-	{
-		for (unsigned int l = 0; l < eleminfo.nnode_C1; l++) // C1 nodes
-		{
-			shape_info->hanginfo_C1[l].nummaster = 0;
-		}		
-		for (unsigned int l = 0; l < eleminfo.nnode_C1TB; l++) // C1 nodes
-		{
-				shape_info->hanginfo_C1TB[l].nummaster = 0;
-		}		
-		for (unsigned int l = 0; l < eleminfo.nnode; l++)
-		{
-			shape_info->hanginfo_Pos[l].nummaster = 0;
-		}		
-		for (unsigned int l = 0; l < eleminfo.nnode; l++)
-		{
-			shape_info->hanginfo_Discont[l].nummaster = 0;
-		}
-
-
-		if (eqn_remap)
-		{
-			return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap);
-		}
-		else
-			return false;
-	}
+	
 
 	unsigned int BulkTElementLine1dC2::index_C1_to_element[2] = {0, 2};
 	int BulkTElementLine1dC2::element_index_to_C1[3] = {0,-1,1};
@@ -8508,42 +8394,8 @@ namespace pyoomph
 		}
 	}
 
-	bool BulkTElementLine1dC2::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
-	{
-		for (unsigned int l = 0; l < eleminfo.nnode; l++) // C2 nodes
-		{
-			shape_info->hanginfo_Pos[l].nummaster = 0;			
-		}
-		for (unsigned int l = 0; l < eleminfo.nnode_C1TB; l++) // C1 nodes
-		{
-			shape_info->hanginfo_C1TB[l].nummaster = 0;
-		}		
-		for (unsigned int l = 0; l < eleminfo.nnode_C2TB; l++) // C2 nodes
-		{
-			shape_info->hanginfo_C2TB[l].nummaster = 0;
-		}
-		for (unsigned int l = 0; l < eleminfo.nnode_C2; l++) // C2 nodes
-		{
-			shape_info->hanginfo_C2[l].nummaster = 0;
-		}
-		for (unsigned int l = 0; l < eleminfo.nnode_C1; l++) // C1 nodes
-		{
-				shape_info->hanginfo_C1[l].nummaster = 0;
-		}		
-		for (unsigned int l = 0; l < eleminfo.nnode; l++)
-		{
-			shape_info->hanginfo_Discont[l].nummaster = 0;
-		}
-
-		if (eqn_remap)
-		{
-			return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap);
-		}
-		else
-			return false;
-	}
-
-	////////////////////////////
+	
+	
 
 	////////////////////////////
 
@@ -8559,20 +8411,6 @@ namespace pyoomph
 		allocate_discontinous_fields();
 	}
 
-	bool BulkElementQuad2dC1::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
-	{
-		auto *ft = codeinst->get_func_table();
-		bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
-		if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
-		if (ft->numfields_C1TB) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1TB, ft->hangindex_C1TB, shape_info->hanginfo_C1TB, ft->numfields_C1TB_basebulk,ft->buffer_offset_C1TB_basebulk,ft->nodal_offset_C1TB_basebulk,&BulkElementBase::get_node_index_C1TB_to_element) || res;
-				
-		if (eqn_remap)
-		{
-			return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
-		}
-		else
-			return res;
-	}
 
 	void BulkElementQuad2dC1::interpolate_hang_values()
 	{
@@ -9149,23 +8987,8 @@ namespace pyoomph
 		}
 	}
 
-	bool BulkElementQuad2dC2::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
-	{		
-		bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
-		auto * ft = codeinst->get_func_table();
-		if (ft->numfields_C2TB) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C2TB, ft->hangindex_C2TB, shape_info->hanginfo_C2TB, ft->numfields_C2TB_basebulk,ft->buffer_offset_C2TB_basebulk,ft->nodal_offset_C2TB_basebulk,&BulkElementBase::get_node_index_C2TB_to_element) || res;
-		if (ft->numfields_C2) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C2, ft->hangindex_C2, shape_info->hanginfo_C2, ft->numfields_C2_basebulk,ft->buffer_offset_C2_basebulk,ft->nodal_offset_C2_basebulk,&BulkElementBase::get_node_index_C2_to_element) || res;
-		if (ft->numfields_C1TB) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1TB, ft->hangindex_C1TB, shape_info->hanginfo_C1TB, ft->numfields_C1TB_basebulk,ft->buffer_offset_C1TB_basebulk,ft->nodal_offset_C1TB_basebulk,&BulkElementBase::get_node_index_C1TB_to_element) || res;
-		if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
-		
+	
 
-		if (eqn_remap)
-		{
-			return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
-		}
-		else
-			return res;
-	}
 
 	void BulkElementQuad2dC2::interpolate_hang_values()
 	{
@@ -9903,21 +9726,7 @@ namespace pyoomph
 		return this->node_pt(this->get_bulk_node_number(face_index, i));
 	}
 
-	bool BulkElementTri2dC1::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
-	{
-		bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
-		auto * ft = codeinst->get_func_table();
-		if (ft->numfields_C1TB) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1TB, ft->hangindex_C1TB, shape_info->hanginfo_C1TB, ft->numfields_C1TB_basebulk,ft->buffer_offset_C1TB_basebulk,ft->nodal_offset_C1TB_basebulk,&BulkElementBase::get_node_index_C1TB_to_element) || res;
-		if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
 
-
-		if (eqn_remap)
-		{
-			return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
-		}
-		else
-			return res;
-	}
 
 	void BulkElementTri2dC1::interpolate_hang_values()
 	{
@@ -10060,24 +9869,7 @@ namespace pyoomph
 		return this->node_pt(this->get_bulk_node_number(face_index, i));
 	}
 
-
    
-	
-	bool BulkElementTri2dC2::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
-	{
-		bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
-		auto * ft = codeinst->get_func_table();		
-		if (ft->numfields_C2) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C2, ft->hangindex_C2, shape_info->hanginfo_C2, ft->numfields_C2_basebulk,ft->buffer_offset_C2_basebulk,ft->nodal_offset_C2_basebulk,&BulkElementBase::get_node_index_C2_to_element) || res;
-		if (ft->numfields_C1TB) throw_runtime_error("C1TB fields not yet supported for C2 elements");
-		if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
-
-		if (eqn_remap)
-		{
-			return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
-		}
-		else
-			return res;
-	}
 
 	void BulkElementTri2dC2::interpolate_hang_values()
 	{
@@ -10349,21 +10141,6 @@ namespace pyoomph
      }
    }
    
-   bool BulkElementTri2dC1TB::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
-   {
-	bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
-	auto * ft = codeinst->get_func_table();
-	if (ft->numfields_C2TB) throw_runtime_error("C2TB fields not yet supported for C1TB elements");
-	if (ft->numfields_C2) throw_runtime_error("C2 fields not yet supported for C1TB elements");
-	if (ft->numfields_C1TB) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1TB, ft->hangindex_C1TB, shape_info->hanginfo_C1TB, ft->numfields_C1TB_basebulk,ft->buffer_offset_C1TB_basebulk,ft->nodal_offset_C1TB_basebulk,&BulkElementBase::get_node_index_C1TB_to_element) || res;
-	if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
-    
-	if (eqn_remap)
-	{
-		return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
-	}
-	else return res;
-   }
    
    void BulkElementTri2dC1TB::shape(const oomph::Vector<double> &s, oomph::Shape &psi) const
    {
@@ -10526,20 +10303,7 @@ namespace pyoomph
 		dpsi(3, 1) = 27*x*(-x - 2*y + 1);		
    }
     
-   bool BulkElementTri2dC2TB::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
-	{
-	   bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
-	   auto * ft = codeinst->get_func_table();
-	   if (ft->numfields_C2TB) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C2TB, ft->hangindex_C2TB, shape_info->hanginfo_C2TB, ft->numfields_C2TB_basebulk,ft->buffer_offset_C2TB_basebulk,ft->nodal_offset_C2TB_basebulk,&BulkElementBase::get_node_index_C2TB_to_element) || res;
-	   if (ft->numfields_C2) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C2, ft->hangindex_C2, shape_info->hanginfo_C2, ft->numfields_C2_basebulk,ft->buffer_offset_C2_basebulk,ft->nodal_offset_C2_basebulk,&BulkElementBase::get_node_index_C2_to_element) || res;
-	   if (ft->numfields_C1TB) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1TB, ft->hangindex_C1TB, shape_info->hanginfo_C1TB, ft->numfields_C1TB_basebulk,ft->buffer_offset_C1TB_basebulk,ft->nodal_offset_C1TB_basebulk,&BulkElementBase::get_node_index_C1TB_to_element) || res;
-	   if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
-       if (eqn_remap)
-	   {
-		return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
-	   }
-	   else return res;
-	}
+
 
 	void BulkElementTri2dC2TB::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
 	{
@@ -10651,18 +10415,7 @@ namespace pyoomph
 	}
 
 
-	bool BulkElementBrick3dC1::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
-	{
-	   bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
-	   auto * ft = codeinst->get_func_table();	
-	   if (ft->numfields_C1TB) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1TB, ft->hangindex_C1TB, shape_info->hanginfo_C1TB, ft->numfields_C1TB_basebulk,ft->buffer_offset_C1TB_basebulk,ft->nodal_offset_C1TB_basebulk,&BulkElementBase::get_node_index_C1TB_to_element) || res;
-	   if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
-       if (eqn_remap)
-	   {
-		return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
-	   }
-	   else return res;
-	}
+
 
 	void BulkElementBrick3dC1::interpolate_hang_values()
 	{
@@ -10830,21 +10583,7 @@ namespace pyoomph
 		}
 	}
 
-	bool BulkElementBrick3dC2::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
-	{
-	   bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
-	   auto * ft = codeinst->get_func_table();
-	   if (ft->numfields_C2TB) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C2TB, ft->hangindex_C2TB, shape_info->hanginfo_C2TB, ft->numfields_C2TB_basebulk,ft->buffer_offset_C2TB_basebulk,ft->nodal_offset_C2TB_basebulk,&BulkElementBase::get_node_index_C2TB_to_element) || res;
-	   if (ft->numfields_C2) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C2, ft->hangindex_C2, shape_info->hanginfo_C2, ft->numfields_C2_basebulk,ft->buffer_offset_C2_basebulk,ft->nodal_offset_C2_basebulk,&BulkElementBase::get_node_index_C2_to_element) || res;
-	   if (ft->numfields_C1TB) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1TB, ft->hangindex_C1TB, shape_info->hanginfo_C1TB, ft->numfields_C1TB_basebulk,ft->buffer_offset_C1TB_basebulk,ft->nodal_offset_C1TB_basebulk,&BulkElementBase::get_node_index_C1TB_to_element) || res;
-	   if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
-       if (eqn_remap)
-	   {
-		return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
-	   }
-	   else return res;
-	}
-
+	
 	void BulkElementBrick3dC2::interpolate_hang_values()
 	{
 		BulkElementBase::interpolate_hang_values();
@@ -11146,18 +10885,7 @@ namespace pyoomph
 		allocate_discontinous_fields();
 	}
 
-	bool BulkElementTetra3dC1::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
-	{
-	   bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
-	   auto * ft = codeinst->get_func_table();	   	   
-	   if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
-       if (eqn_remap)
-	   {
-		return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
-	   }
-	   else return res;
-	}
-
+	
 	void BulkElementTetra3dC1::interpolate_hang_values()
 	{
 		BulkElementBase::interpolate_hang_values();
@@ -11281,18 +11009,6 @@ namespace pyoomph
 
     
 
-    bool BulkElementTetra3dC1TB::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
-	{
-	   bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
-	   auto * ft = codeinst->get_func_table();	   	   
-	   if (ft->numfields_C1TB) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1TB, ft->hangindex_C1TB, shape_info->hanginfo_C1TB, ft->numfields_C1TB_basebulk,ft->buffer_offset_C1TB_basebulk,ft->nodal_offset_C1TB_basebulk,&BulkElementBase::get_node_index_C1TB_to_element) || res;
-	   if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
-       if (eqn_remap)
-	   {
-		return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
-	   }
-	   else return res;		
-	}
     
    
 	void BulkElementTetra3dC1TB::shape(const oomph::Vector<double> &s, oomph::Shape &psi) const
@@ -11452,20 +11168,7 @@ namespace pyoomph
 		}
 	}
 
-	bool BulkElementTetra3dC2::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
-	{
-	   bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
-	   auto * ft = codeinst->get_func_table();
-	   if (ft->numfields_C2) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C2, ft->hangindex_C2, shape_info->hanginfo_C2, ft->numfields_C2_basebulk,ft->buffer_offset_C2_basebulk,ft->nodal_offset_C2_basebulk,&BulkElementBase::get_node_index_C2_to_element) || res;	   
-	   if (ft->numfields_C1TB) throw_runtime_error("C1TB should not be present in C2 elements");
-	   if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
-       if (eqn_remap)
-	   {
-		return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
-	   }
-	   else return res;
-	}
-
+	
 	void BulkElementTetra3dC2::interpolate_hang_values()
 	{
 		BulkElementBase::interpolate_hang_values();
@@ -11686,21 +11389,7 @@ namespace pyoomph
 		this->set_integration_scheme(&Default_enriched_integration_scheme);
 	}
 
-	bool BulkElementTetra3dC2TB::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
-	{
-	   bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
-	   auto * ft = codeinst->get_func_table();
-	   if (ft->numfields_C2TB) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C2TB, ft->hangindex_C2TB, shape_info->hanginfo_C2TB, ft->numfields_C2TB_basebulk,ft->buffer_offset_C2TB_basebulk,ft->nodal_offset_C2TB_basebulk,&BulkElementBase::get_node_index_C2TB_to_element) || res;	   
-	   if (ft->numfields_C2) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C2, ft->hangindex_C2, shape_info->hanginfo_C2, ft->numfields_C2_basebulk,ft->buffer_offset_C2_basebulk,ft->nodal_offset_C2_basebulk,&BulkElementBase::get_node_index_C2_to_element) || res;	   
-	   if (ft->numfields_C1TB) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1TB, ft->hangindex_C1TB, shape_info->hanginfo_C1TB, ft->numfields_C1TB_basebulk,ft->buffer_offset_C1TB_basebulk,ft->nodal_offset_C1TB_basebulk,&BulkElementBase::get_node_index_C1TB_to_element) || res;	   
-	   if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
-       if (eqn_remap)
-	   {
-		return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
-	   }
-	   else return res;
-	}
-
+	
 	void BulkElementTetra3dC2TB::interpolate_hang_values()
 	{
 		BulkElementTetra3dC2::interpolate_hang_values();
@@ -11752,17 +11441,6 @@ namespace pyoomph
 		allocate_discontinous_fields();	
 	}
 
-	bool BulkElementWedge3dC1::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
-	{
-	   bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
-	   auto * ft = codeinst->get_func_table();	   	   
-	   if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
-       if (eqn_remap)
-	   {
-		return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
-	   }
-	   else return res;
-	}
 
     void BulkElementWedge3dC1::shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const
 	{
@@ -11830,17 +11508,6 @@ namespace pyoomph
 		allocate_discontinous_fields();	
 	}
 
-	bool BulkElementPyramid3dC1::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
-	{
-	   bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
-	   auto * ft = codeinst->get_func_table();	   	   
-	   if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
-       if (eqn_remap)
-	   {
-		return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
-	   }
-	   else return res;
-	}
 
     void BulkElementPyramid3dC1::shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const
 	{
@@ -11910,18 +11577,6 @@ namespace pyoomph
 		allocate_discontinous_fields();	
 	}
 
-	bool BulkElementWedge3dC2::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
-	{
-	   bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
-	   auto * ft = codeinst->get_func_table();	   	   
-	   if (ft->numfields_C2) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C2, ft->hangindex_C2, shape_info->hanginfo_C2, ft->numfields_C2_basebulk,ft->buffer_offset_C2_basebulk,ft->nodal_offset_C2_basebulk,&BulkElementBase::get_node_index_C2_to_element) || res;
-	   if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
-       if (eqn_remap)
-	   {
-		return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
-	   }
-	   else return res;
-	}
 
     void BulkElementWedge3dC2::shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const
 	{
@@ -12311,7 +11966,7 @@ namespace pyoomph
 	   return res;
 	}
 
-	bool InterfaceElementQuad2dC1::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
+	/*bool InterfaceElementQuad2dC1::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
 	{
 		auto *ft = codeinst->get_func_table();
 		bool res=InterfaceElement<BulkElementQuad2dC1>::fill_hang_info_with_equations(required, shape_info, NULL);		
@@ -12326,7 +11981,7 @@ namespace pyoomph
 		}
 		else
 			return res;
-	}
+	}*/
 
 	void InterfaceElementQuad2dC2::assign_hanging_additional_interface_local_equations(const bool &store_local_dof_pt)
 	{
@@ -12426,7 +12081,7 @@ namespace pyoomph
 
 	}
 
-	bool InterfaceElementQuad2dC2::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
+	/*bool InterfaceElementQuad2dC2::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
 	{		
 		auto *ft = codeinst->get_func_table();
 		bool res=InterfaceElement<BulkElementQuad2dC2>::fill_hang_info_with_equations(required, shape_info, NULL);		
@@ -12445,7 +12100,7 @@ namespace pyoomph
 		}
 		else
 			return res;
-	}
+	}*/
 
 
 
@@ -13077,9 +12732,11 @@ namespace pyoomph
 				if (!dynamic_cast<BoundaryNode*>(this->node_pt(l))) throw_runtime_error("Interface element has a node which is not a BoundaryNode. This can happen in meshes when you have sharp corners in a boundary. Happened in "+this->codeinst->get_code()->get_file_name());
 			}
 		}
-
-		auto do_for_space=[this](JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info)
+		
+		auto *ft = codeinst->get_func_table();
+		for (unsigned int i=0;i<ft->num_continuous_spaces;i++)
 		{
+			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info = ft->continuous_spaces[i];
 			for (unsigned int i=space_info->numfields_bulk;i<space_info->numfields;i++)
 			{
 				std::string fieldname = space_info->fieldnames[i];
@@ -13107,12 +12764,6 @@ namespace pyoomph
 					}				
 				}
 			}
-		};
-		
-		auto *ft = codeinst->get_func_table();
-		for (unsigned int i=0;i<ft->num_continuous_spaces;i++)
-		{
-			do_for_space(ft->continuous_spaces[i]);
 		}
 		
 	}

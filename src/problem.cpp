@@ -121,6 +121,12 @@ namespace pyoomph
 		functable->info_C1TB.nnode_index=3;
 		functable->info_C1.nnode_index=4;
 
+		functable->info_Pos.hangbuffer_index=0;
+		functable->info_C2TB.hangbuffer_index=1;
+		functable->info_C2.hangbuffer_index=2;
+		functable->info_C1TB.hangbuffer_index=3;
+		functable->info_C1.hangbuffer_index=4;
+
 		functable->info_C2TB.element_node_to_space_node_index=0;
 		functable->info_C2.element_node_to_space_node_index=1;
 		functable->info_C1TB.element_node_to_space_node_index=2;

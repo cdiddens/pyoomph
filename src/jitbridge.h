@@ -285,14 +285,20 @@ typedef struct JITShapeInfo
   double * PYOOMPH_RESTRICT timestepper_weights_dt_BDF2_degr;
   double * PYOOMPH_RESTRICT timestepper_weights_dt_Newmark2_degr;
 
-  JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_C1);   //[nodenum]
-  JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_C1TB); //[nodenum]  
-  JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_C2);   //[nodenum]
-  JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_C2TB); //[nodenum]
-  JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_Pos);
-
-// Not really hanging, but used for bulk elements etc to remap the eqs  
-  JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_Discont);   
+  union
+  {
+   JITHangInfo_t ARRAY_DECL_NNODE(hanginfo)[6]; // Hang info for each space (Pos,C2TB,C2,C1TB,C1)
+   struct
+   {     
+    JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_Pos);
+    JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_C2TB); //[nodenum]
+    JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_C2);   //[nodenum]
+    JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_C1TB); //[nodenum]  
+    JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_C1);   //[nodenum]  
+    JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_Discont);  // Not really hanging, but used for bulk elements etc to remap the eqs  
+   };
+  };
+  
 
 
   struct JITShapeInfo * PYOOMPH_RESTRICT bulk_shapeinfo;
@@ -373,6 +379,7 @@ typedef struct JITFuncSpec_Table_FiniteElement_SpaceInfo
  unsigned nnode_index; // Pointing to the element info nnode array (in a mixed mesh, a quad and a tri have e.g. different nnode, but it also depends on the space) // Set during problem level
  bool is_dominant; // Is this the dominant space for the element, i.e. the geometric space where also the coordinates live? (e.g. C2TB>C2>C1TB>C1) // Set during problem level
  unsigned element_node_to_space_node_index; // A C1 space on C2 quad does not use all spaces. We therefore have arrays which map the element node index to the space node index. This is the index for that array. // Set during problem level
+ unsigned int hangbuffer_index;
 } JITFuncSpec_Table_FiniteElement_SpaceInfo_t;
 
 

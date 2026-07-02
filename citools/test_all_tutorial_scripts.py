@@ -1,5 +1,11 @@
 from pathlib import Path
 import sys,os
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--quick-test", help="Stops after the first successful Newton method. Useful for quick testing", action="store_true")
+parser.add_argument("--tcc", help="Used TCC", action="store_true")
+args = parser.parse_args()
 
 os.chdir(Path(__file__).parent)
 
@@ -40,7 +46,13 @@ for d in glob.glob("./*/"):
     if f=="bifurcation_fold_param_change.py":
       continue
     print("   Testing",f)  
-    proc = subprocess.Popen([sys.executable, '-u', f], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    cmd=[sys.executable, '-u', f]
+    if args.quick_test:
+      cmd.append("--quick-test")
+    if args.tcc:
+      cmd.append("--tcc")
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    #proc = subprocess.Popen([sys.executable, '-u', f], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     (stdout,_) = proc.communicate()
     if proc.returncode!=0:
       logf=Path(f).stem+".log"
