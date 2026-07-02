@@ -943,10 +943,8 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 
     /////////////////////////////////
 
-	// @ Maxim: This is the constructor, similar to __init__ in Python
 	MeshTemplateElementWedgeC1::MeshTemplateElementWedgeC1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5, const nodeindex_t &n6) 
-	   	: MeshTemplateElement(13) // This is the super() call. Here, we pass a value of 13 to the base class constructor, which indicates some identification number	   
-	   // At the top of this file, all indices are given. Just take any free index for your MeshTemplateElementPyramidC1
+	   	: MeshTemplateElement(13)
 	{
 		// Add the nodes to the vector and store them internally
 		node_indices.reserve(6);
@@ -1005,7 +1003,6 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 	  return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 
-	// @ Maxim: This is the method to convert this element to a C2 space. Just leave it out initially
 	MeshTemplateElement *MeshTemplateElementWedgeC1::convert_for_C2_space(MeshTemplate *templ)
 	{
 		std::vector<nodeindex_t> ninds(18);
@@ -1103,6 +1100,27 @@ Index : Local coordinates (s0,s1,s2)
 	  return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 
+	MeshTemplateElement *MeshTemplateElementPyramidC1::convert_for_C2_space(MeshTemplate *templ)
+	{
+		std::vector<nodeindex_t> ninds(14);
+		ninds[0] = node_indices[0];
+		ninds[1] = node_indices[1];
+		ninds[2] = node_indices[2];
+		ninds[3] = node_indices[3];
+		ninds[4] = node_indices[4];
+
+		ninds[5] = templ->add_intermediate_node_unique(ninds[0], ninds[1]);
+		ninds[6] = templ->add_intermediate_node_unique(ninds[1], ninds[2]);
+		ninds[7] = templ->add_intermediate_node_unique(ninds[2], ninds[3]);
+		ninds[8] = templ->add_intermediate_node_unique(ninds[3], ninds[0]);
+		ninds[9] = templ->add_intermediate_node_unique(ninds[0], ninds[4]);
+		ninds[10] = templ->add_intermediate_node_unique(ninds[1], ninds[4]);
+		ninds[11] = templ->add_intermediate_node_unique(ninds[2], ninds[4]);
+		ninds[12] = templ->add_intermediate_node_unique(ninds[3], ninds[4]);
+		ninds[13] = templ->add_intermediate_node_unique(ninds[0], ninds[2]);
+
+		return new MeshTemplateElementWedgeC2(ninds);
+	}
 
 	/////////////////////////////////
 
@@ -1143,7 +1161,40 @@ Index : Local coordinates (s0,s1,s2)
     }
     return new MeshTemplateFacet(inds, NULL, NULL);
    }
-	
+
+	MeshTemplateElementPyramidC2::MeshTemplateElementPyramidC2(std::vector<nodeindex_t> ninds) : MeshTemplateElement(27)
+	{
+		if (ninds.size() != 14)
+			throw_runtime_error("Need exactly 14 nodes for a pyramid element with C2 space");
+		node_indices = ninds;
+	}	
+
+	MeshTemplateFacet *MeshTemplateElementPyramidC2::construct_facet(unsigned i)
+{
+    std::vector<nodeindex_t> inds;
+    switch (i)
+    {
+	case 0:
+		inds = {node_indices[0], node_indices[1], node_indices[4]};
+		break;
+	case 1:
+		inds = {node_indices[1], node_indices[2], node_indices[4]};
+		break;
+	case 2:
+		inds = {node_indices[2], node_indices[3], node_indices[4]};
+		break;
+	case 3:
+		inds = {node_indices[0], node_indices[4], node_indices[3]};
+		break;
+	case 4:
+		inds = {node_indices[0], node_indices[3], node_indices[1], node_indices[2]};
+		break;
+	default:
+        throw_runtime_error("A pyramid element only has 5 facets");
+    }
+    return new MeshTemplateFacet(inds, NULL, NULL);
+   }
+
 	/////////////////////////////////
 
 	std::vector<double> MeshTemplateElementCollection::get_reference_position_for_IC_and_DBC(std::set<unsigned int> boundindices)

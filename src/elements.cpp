@@ -12040,6 +12040,154 @@ namespace pyoomph
 		}
 	}
 
+	// Maxim: add Bulk element Pyramid3dC2 here, similar to BulkElementWedge3dC2, if needed
+	int BulkElementPyramid3dC2::element_index_to_C1[14]={0,1,2,3,4,-1,-1,-1,-1,-1,-1,-1,-1,-1};
+	bool BulkElementPyramid3dC2::node_only_C2[14] = {false, false, false, true,true,true,true,true,true,true,true,true,true,true};
+
+    BulkElementWedge3dC2::BulkElementWedge3dC2() 
+	{
+		eleminfo.elem_ptr = this;
+		eleminfo.nnode = 18;
+		eleminfo.nnode_C1 = 6; // To be done
+		eleminfo.nnode_C1TB = 0;		
+		eleminfo.nnode_C2TB = 0;
+		eleminfo.nnode_C2 = 18;
+		eleminfo.nnode_DL = 4;
+		eleminfo.nodal_dim = codeinst->get_func_table()->nodal_dim;
+		this->set_n_node(eleminfo.nnode);
+		this->set_nodal_dimension(eleminfo.nodal_dim);	
+		allocate_discontinous_fields();	
+	}
+
+	bool BulkElementWedge3dC2::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
+	{
+	   bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
+	   auto * ft = codeinst->get_func_table();	   	   
+	   if (ft->numfields_C2) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C2, ft->hangindex_C2, shape_info->hanginfo_C2, ft->numfields_C2_basebulk,ft->buffer_offset_C2_basebulk,ft->nodal_offset_C2_basebulk,&BulkElementBase::get_node_index_C2_to_element) || res;
+	   if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
+       if (eqn_remap)
+	   {
+		return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
+	   }
+	   else return res;
+	}
+
+    void BulkElementWedge3dC2::shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const
+	{
+		psi[0] = 1.0;
+		psi[1] = s[0];
+		psi[2] = s[1];
+		psi[3] = s[2];
+	}
+
+	void BulkElementWedge3dC2::dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const
+	{
+		psi[0] = 1.0;
+		psi[1] = s[0];
+		psi[2] = s[1];
+		psi[3] = s[2];
+		dpsi(0, 0) = 0.0;
+		dpsi(1, 0) = 1.0;
+		dpsi(2, 0) = 0.0;
+		dpsi(3, 0) = 0.0;
+		dpsi(0, 1) = 0.0;
+		dpsi(1, 1) = 0.0;
+		dpsi(2, 1) = 1.0;
+		dpsi(3, 1) = 0.0;
+		dpsi(0, 2) = 0.0;
+		dpsi(1, 2) = 0.0;
+		dpsi(2, 2) = 0.0;
+		dpsi(3, 2) = 1.0;
+	}
+
+	void BulkElementWedge3dC2::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+	{
+		if (tesselate_tri)
+		{
+			throw_runtime_error("Tesselation not implemented in 3d");
+		}
+		else
+		{
+			for (unsigned int i = 0; i < this->nnode(); i++)
+				indices[i] = i;
+		}
+	}
+
+	std::vector<double> BulkElementWedge3dC2::get_outline(bool lagrangian)
+	{
+		std::vector<double> res(0);
+		throw_runtime_error("Cannot get outline from 3d elements yet");
+		return res;
+	}
+
+	void BulkElementWedge3dC2::interpolate_hang_values()
+	{
+		BulkElementBase::interpolate_hang_values();
+		for (unsigned int l = 0; l < eleminfo.nnode; l++)
+		{
+			if (node_pt(l)->is_hanging())
+			{
+				for (unsigned int i = 0; i < node_pt(l)->ndim(); i++)
+				{
+					for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
+					{
+						dynamic_cast<Node *>(node_pt(l))->variable_position_pt()->set_value(t, i, node_pt(l)->position(t, i));
+					}
+				}
+			}
+		}
+		auto * ft = codeinst->get_func_table();
+		for (unsigned int l = 0; l < eleminfo.nnode_C2; l++)
+		{
+			if (node_pt(l)->is_hanging(ft->hangindex_C2))
+			{
+				for (unsigned int i = 0; i < codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk; i++)
+				{
+					for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
+					{
+						node_pt(l)->value_pt(i)[t] = node_pt(l)->value(t, i);
+					}
+				}
+			}
+		}
+		if (ft->numfields_C1_basebulk)
+		{
+			for (unsigned int l_C1 = 0; l_C1 < eleminfo.nnode_C1; l_C1++)
+			{
+				unsigned l = get_node_index_C1_to_element(l_C1);
+				if (node_pt(l)->is_hanging(ft->hangindex_C1))
+				{
+					// std::cout << "C1 hang" << std::endl;
+					for (unsigned int i = ft->nodal_offset_C1_basebulk; i < ft->nodal_offset_C1_basebulk + ft->numfields_C1_basebulk; i++)
+					{
+						for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
+						{
+							node_pt(l)->value_pt(i)[t] = node_pt(l)->value(t, i); // Does this really work here?
+						}
+					}
+				}
+			}
+			for (unsigned int i = ft->nodal_offset_C1_basebulk; i < ft->nodal_offset_C1_basebulk + ft->numfields_C1_basebulk; i++)
+			{
+				for (unsigned t = 0; t < node_pt(0)->ntstorage(); t++)
+				{
+                    //Fill the midpoint nodes of the first triangle
+					node_pt(3)->value_pt(i)[t] = 0.5 * (node_pt(0)->value(t, i) + node_pt(1)->value(t, i));
+					node_pt(4)->value_pt(i)[t] = 0.5 * (node_pt(0)->value(t, i) + node_pt(2)->value(t, i));
+					node_pt(5)->value_pt(i)[t] = 0.5 * (node_pt(1)->value(t, i) + node_pt(2)->value(t, i));
+					//Fill the midpoint nodes of the second triangle
+					node_pt(15)->value_pt(i)[t] = 0.5 * (node_pt(12)->value(t, i) + node_pt(13)->value(t, i));
+					node_pt(16)->value_pt(i)[t] = 0.5 * (node_pt(12)->value(t, i) + node_pt(14)->value(t, i));
+					node_pt(17)->value_pt(i)[t] = 0.5 * (node_pt(13)->value(t, i) + node_pt(14)->value(t, i));
+					//Fill the midpoint nodes along the lines
+					for (unsigned offs = 0; offs < 6; offs++)
+					{
+						node_pt(6 + offs)->value_pt(i)[t] = 0.5 * (node_pt(offs)->value(t, i) + node_pt(offs + 12)->value(t, i));
+					}
+				}
+			}
+		}
+	}
 
 	///////////////////////////////
 

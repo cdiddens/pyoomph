@@ -674,7 +674,6 @@ namespace pyoomph
     unsigned int nodal_dimension() const { return 3; } // Wedge is a 3D element
     virtual unsigned nfacets() { return 5; } // How many facets does a wedge have? 2 triangles and 3 quadrilaterals, so 5 in total
     virtual MeshTemplateFacet *construct_facet(unsigned i); // Construct the facet for the i-th facet of the wedge
-    // @ Maxim: For your MeshTemplateElementPyramidC1, just leave out the following function first
     virtual MeshTemplateElement *convert_for_C2_space(MeshTemplate *templ); // Convert this C1 wedge element to a C2 wedge element
   };
 
@@ -704,7 +703,21 @@ namespace pyoomph
     unsigned int nodal_dimension() const { return 3; } // Pyramid is a 3D element
     virtual unsigned nfacets() { return 5; } // How many facets does a pyramid have? 
     virtual MeshTemplateFacet *construct_facet(unsigned i); // Construct the facet for the i-th facet of the pyramid
-    //virtual MeshTemplateElement *convert_for_C2_space(MeshTemplate *templ); // Convert this C1 wedge element to a C2 wedge element. Leave it out for now
+    virtual MeshTemplateElement *convert_for_C2_space(MeshTemplate *templ); // Convert this C1 wedge element to a C2 wedge element. Leave it out for now
+  };
+
+  class MeshTemplateElementPyramidC2 : public MeshTemplateElement
+  {
+  protected:
+  public:    
+    MeshTemplateElementPyramidC2(std::vector<nodeindex_t> ninds);
+    unsigned int get_nnode_C1() const { return 5; }
+    unsigned int get_node_index_C1(const unsigned int &i) const { throw_runtime_error("TODO"); return -1; }
+    unsigned int get_nnode_C2() const { return 14; } 
+    unsigned int get_node_index_C2(const unsigned int &i) const { return i; }
+    unsigned int nodal_dimension() const { return 3; }
+    virtual unsigned nfacets() { return 5; } 
+    virtual MeshTemplateFacet *construct_facet(unsigned i); 
   };
 
   class MeshTemplateElementCollection
@@ -747,6 +760,7 @@ namespace pyoomph
     void add_wedge_3d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5, const nodeindex_t &n6);
     void add_wedge_3d_C2(const std::vector<nodeindex_t> &inds);
     void add_pyramid_3d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5);
+    void add_pyramid_3d_C2(const std::vector<nodeindex_t> &inds);
 
     const std::vector<MeshTemplateElement *> &get_elements() const { return elements; }
     std::vector<std::string> get_adjacent_boundary_names();
