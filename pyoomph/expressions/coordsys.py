@@ -65,8 +65,8 @@ class BaseCoordinateSystem(_pyoomph.CustomCoordinateSystem):
             return _pyoomph.GiNaC_SymSubs(diff(_pyoomph.GiNaC_expand(input), self.expansion_eps), self.expansion_eps, Expression(0))*(self.expansion_eps if with_epsilon else 1)            
 
 
-    def define_scalar_field(self, name:str, space:"FiniteElementSpaceEnum", element:"Equations", scale:Optional[ExpressionOrNum]=None, testscale:Optional[ExpressionOrNum]=None, discontinuous_refinement_exponent:Optional[ExpressionOrNum]=None):
-        element._internal_define_scalar_field(name, space, scale=scale, testscale=testscale, discontinuous_refinement_exponent=discontinuous_refinement_exponent)
+    def define_scalar_field(self, name:str, space:"FiniteElementSpaceEnum", element:"Equations", scale:Optional[ExpressionOrNum]=None, testscale:Optional[ExpressionOrNum]=None, discontinuous_refinement_exponent:Optional[ExpressionOrNum]=None,allow_scales_with_fields:bool=False):
+        element._internal_define_scalar_field(name, space, scale=scale, testscale=testscale, discontinuous_refinement_exponent=discontinuous_refinement_exponent,allow_scales_with_fields=allow_scales_with_fields)
 
     def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations")->Tuple[List[Expression],List[Expression],List[str]]:
         raise RuntimeError("Implement the define_vector_field function for this coordinate system")

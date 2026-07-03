@@ -25,6 +25,7 @@
 #
 # ========================================================================
  
+from doctest import master
 from os import path
 import re
 import _pyoomph
@@ -35,6 +36,7 @@ from ..expressions import AxisymmetryBreakingCoordinateSystem,AxisymmetricCoordi
 
 # from ..expressions import var, get_global_symbol, nondim, vector, testfunction, scale_factor, cartesian, partial_t
 from ..expressions.coordsys import ODECoordinateSystem, BaseCoordinateSystem
+from ..expressions.units import assert_dimensional_value
 import numpy
 
 from ..typings import *
@@ -456,6 +458,8 @@ class BaseEquations(_pyoomph.Equations):
         self._code:Optional[_pyoomph.DynamicBulkElementInstance] = None
         self._scaling:Dict[str,Union["ExpressionOrNum",str]] = {}
         self._test_scaling:Dict[str,Union["ExpressionOrNum",str]]={}
+        self._scales_to_check_for_fields:Set[str] = set()
+        self._test_scales_to_check_for_fields:Set[str] = set()
         #self._external_data_links:Dict[str,Tuple["ODEEquations",str]] = {}
         self._dimension = None
         self.default_timestepping_scheme:Optional[Literal["BDF2","BDF1","Newmark2"]] = None
@@ -609,7 +613,7 @@ class BaseEquations(_pyoomph.Equations):
         if also_on_interface:
             master._additional_testfuncs_also_on_interface[fieldname] = expr
 
-    def set_scaling(self, **args:Union["ExpressionOrNum",str]):
+    def set_scaling(self,*,allow_scales_with_fields=False, **args:Union["ExpressionOrNum",str]):
         mst = self._get_combined_element()
         for n, v in args.items():
             if not isinstance(v,str):
@@ -617,14 +621,25 @@ class BaseEquations(_pyoomph.Equations):
                     v=_pyoomph.Expression(v)
             self._scaling[n] = v
             mst._scaling[n] = v
+            if not allow_scales_with_fields:
+                mst._scales_to_check_for_fields.add(n)
+            else:
+                if n in mst._scales_to_check_for_fields:
+                    mst._scales_to_check_for_fields.remove(n)
 
-    def set_test_scaling(self, **args:Union["ExpressionOrNum",str]):
+    def set_test_scaling(self, *, allow_scales_with_fields=False, **args:Union["ExpressionOrNum",str]):
         mst = self._get_combined_element()
         for n, v in args.items():
             if not isinstance(v, (_pyoomph.Expression,str)):
                 v=_pyoomph.Expression(v)
             self._test_scaling[n] = v
             mst._test_scaling[n] = v
+            if not allow_scales_with_fields:
+                mst._test_scales_to_check_for_fields.add(n)
+                self._scales_to_check_for_fields.add(n)
+            else:
+                if n in mst._test_scales_to_check_for_fields:
+                    mst._test_scales_to_check_for_fields.remove(n)
 
     def get_element_dimension(self):
         """
@@ -878,6 +893,26 @@ class BaseEquations(_pyoomph.Equations):
 #        print("IN DEFINE FIELDS. Master is ",master,self._assert_codegen())
         master._perform_define_fields()
 
+
+    def _check_scalings(self):
+        # Check all scalings and test scalings
+        for n in self._scales_to_check_for_fields:
+            scal=self.get_scaling(n)
+            if scal is not None:
+                scal_expa=self.expand_expression_for_debugging(scal)
+                try:
+                    assert_dimensional_value(scal_expa)
+                except Exception as e:
+                    raise RuntimeError("Scaling for '"+str(n)+"' is not a simple dimensional number, but:\n    "+str(scal)+"\n   expands to: "+str(scal_expa)+"\n. '.")
+        for n in self._test_scales_to_check_for_fields:
+            scal=self.get_scaling(n,testscale=True)
+            if scal is not None:
+                scal_expa=self.expand_expression_for_debugging(scal)
+                try:
+                    assert_dimensional_value(scal_expa)
+                except Exception as e:
+                    raise RuntimeError("Test scaling for '"+str(n)+"' is not a simple dimensional number, but:\n    "+str(scal)+"\n   it expands to: "+str(scal_expa)+"\n. '.") 
+
     def _define_element(self):
         
 
@@ -898,6 +933,8 @@ class BaseEquations(_pyoomph.Equations):
         master._perform_initial_and_Dirichlet_conditions()
         master.define_additional_functions()
         master._problem.before_compile_equations(master)
+        master._check_scalings()
+        
 
     def get_coordinate_system(self)->BaseCoordinateSystem:
         master = self._get_combined_element()
@@ -2060,7 +2097,7 @@ class Equations(BaseEquations):
             master._azimuthal_r0_info[1].add("mesh"+zcomponent)
             master._azimuthal_r0_info[2].add("mesh"+zcomponent)
     
-    def _internal_define_scalar_field(self,name:str, space:"FiniteElementSpaceEnum", scale:Optional[Union["ExpressionOrNum",str]]=None, testscale:Optional[Union["ExpressionOrNum",str]]=None, discontinuous_refinement_exponent:Optional[float]=None):
+    def _internal_define_scalar_field(self,name:str, space:"FiniteElementSpaceEnum", scale:Optional[Union["ExpressionOrNum",str]]=None, testscale:Optional[Union["ExpressionOrNum",str]]=None, discontinuous_refinement_exponent:Optional[float]=None,allow_scales_with_fields:bool=False):
         master = self._get_combined_element()
         if master.get_parent_domain() is not None:
             # Check a bit what is possible
@@ -2094,9 +2131,9 @@ class Equations(BaseEquations):
         cg._fields_defined_on_my_domain[name]=space
                 
         if scale is not None:
-            self.set_scaling(**{name: scale})
+            self.set_scaling(**{name: scale},allow_scales_with_fields=allow_scales_with_fields)
         if testscale is not None:
-            self.set_test_scaling(**{name:testscale})
+            self.set_test_scaling(**{name:testscale},allow_scales_with_fields=allow_scales_with_fields)
             
         # Scalar fields are pinned by default for |m|=1 and |m|>=2
         if space!="D0" and space!="DL":
@@ -2104,7 +2141,7 @@ class Equations(BaseEquations):
             master._azimuthal_r0_info[2].add(name)
 
 
-    def define_scalar_field(self, name:Union[str,List[str]], space:"FiniteElementSpaceEnum",scale:Optional[Union["ExpressionOrNum",str]]=None,testscale:Optional[Union["ExpressionOrNum",str]]=None,discontinuous_refinement_exponent:Optional[float]=None):
+    def define_scalar_field(self, name:Union[str,List[str]], space:"FiniteElementSpaceEnum",scale:Optional[Union["ExpressionOrNum",str]]=None,testscale:Optional[Union["ExpressionOrNum",str]]=None,discontinuous_refinement_exponent:Optional[float]=None,allow_scales_with_fields:bool=False):
         """
         Define a scalar field on this domain. Must be called within the specified implementation of the method :py:meth:`~BaseEquations.define_fields`.
 
@@ -2114,14 +2151,15 @@ class Equations(BaseEquations):
             scale (ExpressionNumOrNone): The scale for the vector field for nondimensionalization. Defaults to None.
             testscale (ExpressionNumOrNone): The scale for the test function of the vector field for nondimensionalization. Defaults to None.
             discontinuous_refinement_exponent (Optional[float]): The exponent for the discontinuous refinement. Defaults to None.
+            allow_scales_with_fields (bool): Whether to allow scales/testscales with fields included. Defaults to False.
         """
         if not isinstance(name, str):
             for n in name:
-                self.define_scalar_field(n, space, scale=scale, testscale=testscale,discontinuous_refinement_exponent=discontinuous_refinement_exponent)
+                self.define_scalar_field(n, space, scale=scale, testscale=testscale,discontinuous_refinement_exponent=discontinuous_refinement_exponent,allow_scales_with_fields=allow_scales_with_fields)
             return        
-        self.get_coordinate_system().define_scalar_field(name, space, self,scale,testscale,discontinuous_refinement_exponent)
+        self.get_coordinate_system().define_scalar_field(name, space, self,scale,testscale,discontinuous_refinement_exponent,allow_scales_with_fields=allow_scales_with_fields)
 
-    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", dim:Optional[int]=None,scale:"ExpressionNumOrNone"=None,testscale:"ExpressionNumOrNone"=None):
+    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", dim:Optional[int]=None,scale:"ExpressionNumOrNone"=None,testscale:"ExpressionNumOrNone"=None,allow_scales_with_fields:bool=False):
         """
         Define a vector field on this domain. Must be called within the specified implementation of the method :py:meth:`~BaseEquations.define_fields`.
 
@@ -2143,10 +2181,10 @@ class Equations(BaseEquations):
         self.define_testfunction_by_substitution(name, vector(*vtest),
                                                  also_on_interface=also_on_interface)
         if scale is not None:
-            self.set_scaling(**{name:scale})
+            self.set_scaling(**{name:scale}, allow_scales_with_fields=allow_scales_with_fields)
         if testscale is not None:
-            self.set_test_scaling(**{name:testscale})
-            
+            self.set_test_scaling(**{name:testscale}, allow_scales_with_fields=allow_scales_with_fields)
+
         # Vector fields are pinned by default for |m|=1 and |m|>=2
         if space!="D0":
             rcomponent="_x"
@@ -2173,7 +2211,7 @@ class Equations(BaseEquations):
                 
     
 
-    def define_tensor_field(self, name:str, space:"FiniteElementSpaceEnum", dim:Optional[int]=None,scale:"ExpressionNumOrNone"=None,testscale:"ExpressionNumOrNone"=None, symmetric:bool=False):
+    def define_tensor_field(self, name:str, space:"FiniteElementSpaceEnum", dim:Optional[int]=None,scale:"ExpressionNumOrNone"=None,testscale:"ExpressionNumOrNone"=None, symmetric:bool=False,allow_scales_with_fields:bool=False):
         dim = dim if dim is not None else self.get_nodal_dimension()  # TODO: Here, it should be nodal_dimension!
         t, ttest,comps = self.get_coordinate_system().define_tensor_field(name, space, dim, self, symmetric)
         also_on_interface:bool = space in { "C1","C2","C1TB","C2TB","D2TB","D2","D1","D1TB"}
@@ -2183,9 +2221,9 @@ class Equations(BaseEquations):
         self.define_field_by_substitution(name, matrix(t), also_on_interface=also_on_interface)
         self.define_testfunction_by_substitution(name, matrix(ttest),also_on_interface=also_on_interface)
         if scale is not None:
-            self.set_scaling(**{name:scale})
+            self.set_scaling(**{name:scale}, allow_scales_with_fields=allow_scales_with_fields)
         if testscale is not None:
-            self.set_test_scaling(**{name:testscale})
+            self.set_test_scaling(**{name:testscale}, allow_scales_with_fields=allow_scales_with_fields)
         # TODO: set the azimuthal r=0 info for tensor fields
 
 
@@ -2383,6 +2421,8 @@ class CombinedEquations(Equations):
                     else:
                         res+=contrib
         return res
+
+        
     
     def setup_remeshing_size(self,remesher:"RemesherBase",preorder:bool):
         for e in self._subelements:
