@@ -554,18 +554,59 @@ namespace pyoomph
 			if (n->is_hanging())
 			{
 				for (unsigned i = 0; i < n->ndim(); i++)
-				{
-					//         	double old=n->x(i);
-					n->x(i) = n->position(i); // Use the hang values to interpolate
-											  /*
-											  if (old!=n->x(i))
-											  {
-												  std::cout << "CHANGE in coordinade " << l << "  " << i << "   " << old-n->x(i) << std::endl;
-											  }
-											  */
+				{					
+					n->x(i) = n->position(i);  // position() considers the hanging
 				}
 			}
 		}
+
+		auto * ft=codeinst->get_func_table();
+		const std::vector<std::vector<unsigned>> & space_node_to_elem_node_map=this->get_nodal_space_index_to_element_index_map();
+		const std::vector<std::vector<std::vector<unsigned>>> & dummy_value_interpolation_map=this->get_dummy_value_interpolation_map();
+		for (unsigned ispace=0;ispace<ft->num_continuous_spaces;ispace++)
+		{
+			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info = ft->continuous_spaces[ispace];
+			unsigned nnode_space=eleminfo.nnode_of_space[space_info->nnode_index];
+			const std::vector<unsigned> & space_node_to_elem_node=space_node_to_elem_node_map[space_info->element_node_to_space_node_index];
+			int hangindex=space_info->hangindex;
+			for (unsigned l = 0; l < nnode_space; l++)
+			{
+				const unsigned l_elem=space_node_to_elem_node[l];
+				pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(this->node_pt(l_elem));
+				unsigned ntstorage = node_pt(l_elem)->ntstorage();
+				if (n->is_hanging(hangindex))
+				{
+					for (unsigned f = 0; f < space_info->numfields_basebulk; f++)
+					{
+						for (unsigned t = 0; t < ntstorage; t++)
+						{
+							node_pt(l_elem)->value_pt(space_info->nodal_offset_basebulk+f)[t] = node_pt(l_elem)->value(t, space_info->nodal_offset_basebulk+f);
+						}						
+					}
+				}
+			}
+			const std::vector<std::vector<unsigned>> & dummy_value_interpolation=dummy_value_interpolation_map[space_info->element_node_to_space_node_index];
+			if (dummy_value_interpolation.size()>0)
+			{
+				unsigned ntstorage = node_pt(0)->ntstorage();
+				for (const std::vector<unsigned> & interp : dummy_value_interpolation)
+				{															
+					for (unsigned f = 0; f < space_info->numfields_basebulk; f++)
+					{
+						for (unsigned t = 0; t < ntstorage; t++)
+						{
+							double val=0.0;
+							for (unsigned m=1;m<interp.size();m++)
+							{								
+								val+=node_pt(interp[m])->value(t, space_info->nodal_offset_basebulk+f);
+							}
+							node_pt(interp[0])->value_pt(space_info->nodal_offset_basebulk+f)[t] = val/(double)(interp.size()-1);
+						}						
+					}
+				}
+			}
+		}
+
 	}
 	
 	std::vector<std::pair<oomph::Data*,int> > BulkElementBase::get_field_data_list(std::string name,bool use_elemental_indices)
@@ -4931,8 +4972,7 @@ namespace pyoomph
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
 		if (index >= functable->numintegral_expressions)
-			throw_runtime_error("Cannot evaluate integral expression at too large index " + std::to_string(index));
-		// this->fill_hang_info_with_equations(functable->shapes_required_IntegralExprs,this->shape_info,NULL);
+			throw_runtime_error("Cannot evaluate integral expression at too large index " + std::to_string(index));		
 		this->interpolate_hang_values();
 		prepare_shape_buffer_for_integration(functable->shapes_required_IntegralExprs, 0);
 		return functable->EvalIntegralExpression(&eleminfo, this->shape_info, index);
@@ -4950,8 +4990,7 @@ namespace pyoomph
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
 		if (index >= functable->numlocal_expressions)
 			throw_runtime_error("Cannot evaluate local expression at too large index " + std::to_string(index));
-
-		// this->fill_hang_info_with_equations(functable->shapes_required_LocalExprs,this->shape_info,NULL);
+		
 		this->interpolate_hang_values();
 
 		double JLagr;
@@ -8134,68 +8173,6 @@ namespace pyoomph
 		return res;
 	}
 
-	void BulkElementLine1dC2::interpolate_hang_values()
-	{
-		BulkElementBase::interpolate_hang_values();
-		if (codeinst->get_func_table()->numfields_C1_basebulk)
-		{
-			for (unsigned int i = codeinst->get_func_table()->nodal_offset_C1_basebulk; i < codeinst->get_func_table()->nodal_offset_C1_basebulk + codeinst->get_func_table()->numfields_C1_basebulk; i++)
-			{
-				for (unsigned t = 0; t < node_pt(1)->ntstorage(); t++)
-				{
-					node_pt(1)->value_pt(i)[t] = 0.5 * (node_pt(0)->value_pt(i)[t] + node_pt(2)->value_pt(i)[t]);
-				}
-			}
-		}
-		if (codeinst->get_func_table()->numfields_C1TB_basebulk)
-		{
-			for (unsigned int i = codeinst->get_func_table()->nodal_offset_C1TB_basebulk; i < codeinst->get_func_table()->nodal_offset_C1TB_basebulk + codeinst->get_func_table()->numfields_C1TB_basebulk; i++)
-			{
-				for (unsigned t = 0; t < node_pt(1)->ntstorage(); t++)
-				{
-					node_pt(1)->value_pt(i)[t] = 0.5 * (node_pt(0)->value_pt(i)[t] + node_pt(2)->value_pt(i)[t]);
-				}
-			}
-		}
-	}
-
-	void BulkElementLine1dC2::interpolate_hang_values_at_interface()
-	{
-		auto *functable = codeinst->get_func_table();
-		unsigned numC1 = functable->numfields_C1 - functable->numfields_C1_basebulk;
-		if (numC1)
-		{
-			for (unsigned int i = 0; i < numC1; i++)
-			{
-				std::string fieldname = functable->fieldnames_C1[functable->numfields_C1_basebulk + i];
-				unsigned interf_id = codeinst->resolve_interface_dof_id(fieldname);
-				unsigned valindex0 = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(0))->index_of_first_value_assigned_by_face_element(interf_id);
-				unsigned valindex1 = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(1))->index_of_first_value_assigned_by_face_element(interf_id);
-				unsigned valindex2 = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(2))->index_of_first_value_assigned_by_face_element(interf_id);
-				for (unsigned t = 0; t < node_pt(1)->ntstorage(); t++)
-				{
-					node_pt(1)->value_pt(valindex1)[t] = 0.5 * (node_pt(0)->value_pt(valindex0)[t] + node_pt(2)->value_pt(valindex2)[t]);
-				}
-			}
-		}
-		unsigned numC1TB = functable->numfields_C1TB - functable->numfields_C1TB_basebulk;
-		if (numC1TB)		
-		{
-			for (unsigned int i = 0; i < numC1TB; i++)
-			{
-				std::string fieldname = functable->fieldnames_C1TB[functable->numfields_C1TB_basebulk + i];
-				unsigned interf_id = codeinst->resolve_interface_dof_id(fieldname);
-				unsigned valindex0 = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(0))->index_of_first_value_assigned_by_face_element(interf_id);
-				unsigned valindex1 = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(1))->index_of_first_value_assigned_by_face_element(interf_id);
-				unsigned valindex2 = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(2))->index_of_first_value_assigned_by_face_element(interf_id);
-				for (unsigned t = 0; t < node_pt(1)->ntstorage(); t++)				
-				{
-					node_pt(1)->value_pt(valindex1)[t] = 0.5 * (node_pt(0)->value_pt(valindex0)[t] + node_pt(2)->value_pt(valindex2)[t]);
-				}	
-			}
-		}
-	}
-
 	
 
 	////////////////////////////
@@ -8332,69 +8309,6 @@ namespace pyoomph
 		return res;
 	}
 
-	void BulkTElementLine1dC2::interpolate_hang_values()
-	{
-		BulkElementBase::interpolate_hang_values();
-		if (codeinst->get_func_table()->numfields_C1_basebulk)
-		{
-			for (unsigned int i = codeinst->get_func_table()->nodal_offset_C1_basebulk; i < codeinst->get_func_table()->nodal_offset_C1_basebulk +  codeinst->get_func_table()->numfields_C1_basebulk; i++)
-			{
-				for (unsigned t = 0; t < node_pt(1)->ntstorage(); t++)
-				{
-					node_pt(1)->value_pt(i)[t] = 0.5 * (node_pt(0)->value_pt(i)[t] + node_pt(2)->value_pt(i)[t]);
-				}
-			}
-		}
-		if (codeinst->get_func_table()->numfields_C1TB_basebulk)
-		{
-			for (unsigned int i = codeinst->get_func_table()->nodal_offset_C1TB_basebulk; i < codeinst->get_func_table()->nodal_offset_C1TB_basebulk +  codeinst->get_func_table()->numfields_C1TB_basebulk; i++)
-			{
-				for (unsigned t = 0; t < node_pt(1)->ntstorage(); t++)
-				{
-					node_pt(1)->value_pt(i)[t] = 0.5 * (node_pt(0)->value_pt(i)[t] + node_pt(2)->value_pt(i)[t]);
-				}
-			}
-		}
-	}
-
-	void BulkTElementLine1dC2::interpolate_hang_values_at_interface()
-	{
-		auto *functable = codeinst->get_func_table();
-		unsigned numC1 = functable->numfields_C1 - functable->numfields_C1_basebulk;
-		if (numC1)
-		{
-			for (unsigned int i = 0; i < numC1; i++)
-			{
-				std::string fieldname = functable->fieldnames_C1[functable->numfields_C1_basebulk + i];
-				unsigned interf_id = codeinst->resolve_interface_dof_id(fieldname);
-				unsigned valindex0 = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(0))->index_of_first_value_assigned_by_face_element(interf_id);
-				unsigned valindex1 = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(1))->index_of_first_value_assigned_by_face_element(interf_id);
-				unsigned valindex2 = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(2))->index_of_first_value_assigned_by_face_element(interf_id);
-				for (unsigned t = 0; t < node_pt(1)->ntstorage(); t++)
-				{
-					node_pt(1)->value_pt(valindex1)[t] = 0.5 * (node_pt(0)->value_pt(valindex0)[t] + node_pt(2)->value_pt(valindex2)[t]);
-				}
-			}
-		}
-		unsigned numC1TB = functable->numfields_C1TB - functable->numfields_C1TB_basebulk;
-		if (numC1TB)
-		{
-			for (unsigned int i = 0; i < numC1TB; i++)
-			{
-				std::string fieldname = functable->fieldnames_C1TB[functable->numfields_C1TB_basebulk + i];
-				unsigned interf_id = codeinst->resolve_interface_dof_id(fieldname);
-				unsigned valindex0 = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(0))->index_of_first_value_assigned_by_face_element(interf_id);
-				unsigned valindex1 = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(1))->index_of_first_value_assigned_by_face_element(interf_id);
-				unsigned valindex2 = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(2))->index_of_first_value_assigned_by_face_element(interf_id);
-				for (unsigned t = 0; t < node_pt(1)->ntstorage(); t++)				
-				{
-					node_pt(1)->value_pt(valindex1)[t] = 0.5 * (node_pt(0)->value_pt(valindex0)[t] + node_pt(2)->value_pt(valindex2)[t]);
-				}	
-			}
-		}
-	}
-
-	
 	
 
 	////////////////////////////
@@ -8411,32 +8325,6 @@ namespace pyoomph
 		allocate_discontinous_fields();
 	}
 
-
-	void BulkElementQuad2dC1::interpolate_hang_values()
-	{
-		BulkElementBase::interpolate_hang_values();
-		for (unsigned int l = 0; l < eleminfo.nnode_C1; l++)
-		{
-			if (node_pt(l)->is_hanging())
-			{
-				for (unsigned int i = 0; i < this->ncont_interpolated_values(); i++)
-				{
-					for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-					{
-						node_pt(l)->value_pt(i)[t] = node_pt(l)->value(t, i);
-					}
-				}
-
-				for (unsigned int i = 0; i < node_pt(l)->ndim(); i++)
-				{
-					for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-					{
-						dynamic_cast<Node *>(node_pt(l))->variable_position_pt()->set_value(t, i, node_pt(l)->position(t, i));
-					}
-				}
-			}
-		}
-	}
 
 	void BulkElementQuad2dC1::shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const
 	{
@@ -8990,200 +8878,6 @@ namespace pyoomph
 	
 
 
-	void BulkElementQuad2dC2::interpolate_hang_values()
-	{
-		BulkElementBase::interpolate_hang_values();
-
-		for (unsigned int l = 0; l < eleminfo.nnode; l++)
-		{
-			if (node_pt(l)->is_hanging())
-			{
-				for (unsigned int i = 0; i < node_pt(l)->ndim(); i++)
-				{
-					for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-					{
-						dynamic_cast<Node *>(node_pt(l))->variable_position_pt()->set_value(t, i, node_pt(l)->position(t, i));
-					}
-				}
-			}
-		}
-
-		int hanging_index = (codeinst->get_func_table()->bulk_position_space_to_C1 ? 0 : -1);
-
-		for (unsigned int l = 0; l < eleminfo.nnode_C2; l++)
-		{
-			if (node_pt(l)->is_hanging(hanging_index))
-			{
-				for (unsigned int i = 0; i < codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk; i++)
-				{
-					for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-					{
-						node_pt(l)->value_pt(i)[t] = node_pt(l)->value(t, i);
-					}
-				}
-			}
-		}
-		if (codeinst->get_func_table()->numfields_C1_basebulk)
-		{
-			for (unsigned int l_C1 = 0; l_C1 < eleminfo.nnode_C1; l_C1++)
-			{
-				unsigned l = get_node_index_C1_to_element(l_C1);
-				if (node_pt(l)->is_hanging(codeinst->get_func_table()->hangindex_C1))
-				{
-					// std::cout << "C1 hang" << std::endl;
-					for (unsigned int i = codeinst->get_func_table()->nodal_offset_C1_basebulk; i < codeinst->get_func_table()->nodal_offset_C1_basebulk + codeinst->get_func_table()->numfields_C1_basebulk; i++)
-					{
-						for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-						{
-							node_pt(l)->value_pt(i)[t] = node_pt(l)->value(t, i); 
-						}
-					}
-				}
-			}
-			// Now we still need to handle the dummy pinned dofs, which are not considered so far
-			for (unsigned int i = codeinst->get_func_table()->nodal_offset_C1_basebulk; i < codeinst->get_func_table()->nodal_offset_C1_basebulk + codeinst->get_func_table()->numfields_C1_basebulk+ codeinst->get_func_table()->numfields_C1TB_basebulk; i++)
-			{
-				for (unsigned t = 0; t < node_pt(0)->ntstorage(); t++)
-				{
-					node_pt(1)->value_pt(i)[t] = 0.5 * (node_pt(0)->value(t, i) + node_pt(2)->value(t, i));
-					node_pt(3)->value_pt(i)[t] = 0.5 * (node_pt(0)->value(t, i) + node_pt(6)->value(t, i));
-					node_pt(5)->value_pt(i)[t] = 0.5 * (node_pt(2)->value(t, i) + node_pt(8)->value(t, i));
-					node_pt(7)->value_pt(i)[t] = 0.5 * (node_pt(6)->value(t, i) + node_pt(8)->value(t, i));
-					node_pt(4)->value_pt(i)[t] = 0.25 * (node_pt(0)->value(t, i) + node_pt(2)->value(t, i) + node_pt(6)->value(t, i) + node_pt(8)->value(t, i));
-				}
-			}
-		}
-
-		if (codeinst->get_func_table()->numfields_C1TB_basebulk)
-		{
-			for (unsigned int l_C1TB = 0; l_C1TB < eleminfo.nnode_C1TB; l_C1TB++)
-			{
-				unsigned l = get_node_index_C1TB_to_element(l_C1TB);
-				if (node_pt(l)->is_hanging(codeinst->get_func_table()->hangindex_C1TB))
-				{
-					// std::cout << "C1 hang" << std::endl;
-					for (unsigned int i = codeinst->get_func_table()->nodal_offset_C1TB_basebulk; i < codeinst->get_func_table()->nodal_offset_C1TB_basebulk + codeinst->get_func_table()->numfields_C1TB_basebulk; i++)
-					{
-						for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-						{
-							node_pt(l)->value_pt(i)[t] = node_pt(l)->value(t, i); 
-						}
-					}
-				}
-			}
-			// Now we still need to handle the dummy pinned dofs, which are not considered so far
-			for (unsigned int i = codeinst->get_func_table()->nodal_offset_C1TB_basebulk; i < codeinst->get_func_table()->nodal_offset_C1TB_basebulk + codeinst->get_func_table()->numfields_C1TB_basebulk+ codeinst->get_func_table()->numfields_C1TB_basebulk + codeinst->get_func_table()->numfields_C1TB_basebulk; i++)
-			{
-				for (unsigned t = 0; t < node_pt(0)->ntstorage(); t++)
-				{
-					node_pt(1)->value_pt(i)[t] = 0.5 * (node_pt(0)->value(t, i) + node_pt(2)->value(t, i));
-					node_pt(3)->value_pt(i)[t] = 0.5 * (node_pt(0)->value(t, i) + node_pt(6)->value(t, i));
-					node_pt(5)->value_pt(i)[t] = 0.5 * (node_pt(2)->value(t, i) + node_pt(8)->value(t, i));
-					node_pt(7)->value_pt(i)[t] = 0.5 * (node_pt(6)->value(t, i) + node_pt(8)->value(t, i));
-					node_pt(4)->value_pt(i)[t] = 0.25 * (node_pt(0)->value(t, i) + node_pt(2)->value(t, i) + node_pt(6)->value(t, i) + node_pt(8)->value(t, i));
-				}
-			}
-		}
-
-		if (codeinst->get_func_table()->bulk_position_space_to_C1)
-		{
-			for (unsigned int l = 0; l < eleminfo.nnode; l++)
-			{
-				Node *n = dynamic_cast<Node *>(this->node_pt(l));
-				if (!this->is_node_index_part_of_C1(l) && !n->is_on_boundary())
-				{
-					std::vector<oomph::Node *> sn;
-					this->get_supporting_C1_nodes_of_C2_node(l, sn);
-					if (sn.empty())
-						continue;
-					double w = 1.0 / sn.size();
-					for (unsigned t = 0; t < node_pt(0)->ntstorage(); t++)
-					{
-						for (unsigned int i = 0; i < this->nodal_dimension(); i++)
-						{
-							double res = 0.0;
-							for (auto *s : sn)
-							{
-								res += s->position(t, i);
-							}
-							dynamic_cast<Node *>(node_pt(l))->variable_position_pt()->set_value(t, i, res * w);
-						}
-					}
-				}
-			}
-		}
-	}
-
-	void BulkElementQuad2dC2::interpolate_hang_values_at_interface()
-	{
-		auto *functable = codeinst->get_func_table();
-		unsigned numC1 = functable->numfields_C1 - functable->numfields_C1_basebulk;
-		// TODO: HANGING!
-		if (numC1)
-		{
-			for (unsigned int i = 0; i < numC1; i++)
-			{
-				std::string fieldname = functable->fieldnames_C1[functable->numfields_C1_basebulk + i];
-				unsigned interf_id = codeinst->resolve_interface_dof_id(fieldname);
-
-				std::vector<int> dirs{-1, 1, -2, 2};
-				for (int dir : dirs)
-				{
-					unsigned valindex0 = dynamic_cast<oomph::BoundaryNodeBase *>(this->boundary_node_pt(dir, 0))->index_of_first_value_assigned_by_face_element(interf_id);
-					unsigned valindex1 = dynamic_cast<oomph::BoundaryNodeBase *>(this->boundary_node_pt(dir, 1))->index_of_first_value_assigned_by_face_element(interf_id);
-					unsigned valindex2 = dynamic_cast<oomph::BoundaryNodeBase *>(this->boundary_node_pt(dir, 2))->index_of_first_value_assigned_by_face_element(interf_id);
-					for (unsigned t = 0; t < boundary_node_pt(dir, 1)->ntstorage(); t++)
-					{
-						boundary_node_pt(dir, 1)->value_pt(valindex1)[t] = 0.5 * (boundary_node_pt(dir, 0)->value_pt(valindex0)[t] + boundary_node_pt(dir, 2)->value_pt(valindex2)[t]);
-					}
-				}
-				// And the central node
-				unsigned valindex0 = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(0))->index_of_first_value_assigned_by_face_element(interf_id);
-				unsigned valindex2 = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(2))->index_of_first_value_assigned_by_face_element(interf_id);
-				unsigned valindex4 = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(4))->index_of_first_value_assigned_by_face_element(interf_id);
-				unsigned valindex6 = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(6))->index_of_first_value_assigned_by_face_element(interf_id);
-				unsigned valindex8 = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(8))->index_of_first_value_assigned_by_face_element(interf_id);
-
-				for (unsigned t = 0; t < node_pt(4)->ntstorage(); t++)
-				{
-					node_pt(4)->value_pt(valindex4)[t] = 0.25 * (node_pt(0)->value_pt(valindex0)[t] + node_pt(2)->value_pt(valindex2)[t] + node_pt(6)->value_pt(valindex6)[t] + node_pt(8)->value_pt(valindex8)[t]);
-				}
-			}
-		}
-
-		unsigned numC1TB = functable->numfields_C1TB - functable->numfields_C1TB_basebulk;
-		if (numC1TB)
-		{
-			for (unsigned int i = 0; i < numC1TB; i++)
-			{
-				std::string fieldname = functable->fieldnames_C1TB[functable->numfields_C1TB_basebulk + i];
-				unsigned interf_id = codeinst->resolve_interface_dof_id(fieldname);
-				std::vector<int> dirs{-1, 1, -2, 2};
-				for (int dir : dirs)
-				{
-					unsigned valindex0 = dynamic_cast<oomph::BoundaryNodeBase *>(this->boundary_node_pt(dir, 0))->index_of_first_value_assigned_by_face_element(interf_id);
-					unsigned valindex1 = dynamic_cast<oomph::BoundaryNodeBase *>(this->boundary_node_pt(dir, 1))->index_of_first_value_assigned_by_face_element(interf_id);
-					unsigned valindex2 = dynamic_cast<oomph::BoundaryNodeBase *>(this->boundary_node_pt(dir, 2))->index_of_first_value_assigned_by_face_element(interf_id);
-					for (unsigned t = 0; t < boundary_node_pt(dir, 1)->ntstorage(); t++)
-					{
-						boundary_node_pt(dir, 1)->value_pt(valindex1)[t] = 0.5 * (boundary_node_pt(dir, 0)->value_pt(valindex0)[t] + boundary_node_pt(dir, 2)->value_pt(valindex2)[t]);
-					}
-				}
-				// And the central node
-				unsigned valindex0 = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(0))->index_of_first_value_assigned_by_face_element(interf_id);
-				unsigned valindex2 = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(2))->index_of_first_value_assigned_by_face_element(interf_id);
-				unsigned valindex4 = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(4))->index_of_first_value_assigned_by_face_element(interf_id);
-				unsigned valindex6 = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(6))->index_of_first_value_assigned_by_face_element(interf_id);
-				unsigned valindex8 = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(8))->index_of_first_value_assigned_by_face_element(interf_id);
-
-				for (unsigned t = 0; t < node_pt(4)->ntstorage(); t++)
-				{
-					node_pt(4)->value_pt(valindex4)[t] = 0.25 * (node_pt(0)->value_pt(valindex0)[t] + node_pt(2)->value_pt(valindex2)[t] + node_pt(6)->value_pt(valindex6)[t] + node_pt(8)->value_pt(valindex8)[t]);
-				}
-			}
-		}
-	}
-
 	oomph::Node *BulkElementQuad2dC2::interpolating_node_pt(const unsigned &n, const int &value_id)
 	{
 		if (value_id >= static_cast<int>(codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk))
@@ -9728,31 +9422,6 @@ namespace pyoomph
 
 
 
-	void BulkElementTri2dC1::interpolate_hang_values()
-	{
-		BulkElementBase::interpolate_hang_values();
-		for (unsigned int l = 0; l < eleminfo.nnode_C1; l++)
-		{
-			if (node_pt(l)->is_hanging())
-			{
-				for (unsigned int i = 0; i < node_pt(l)->nvalue(); i++)
-				{
-					for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-					{
-						node_pt(l)->value_pt(i)[t] = node_pt(l)->value(t, i);
-					}
-				}
-				for (unsigned int i = 0; i < node_pt(l)->ndim(); i++)
-				{
-					for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-					{
-						dynamic_cast<Node *>(node_pt(l))->variable_position_pt()->set_value(t, i, node_pt(l)->position(t, i));
-					}
-				}
-			}
-		}
-	}
-
 	void BulkElementTri2dC1::shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const
 	{
 		psi[0] = 1.0;
@@ -9870,124 +9539,11 @@ namespace pyoomph
 	}
 
    
-
-	void BulkElementTri2dC2::interpolate_hang_values()
-	{
-		BulkElementBase::interpolate_hang_values();
-		for (unsigned int l = 0; l < eleminfo.nnode; l++)
-		{
-			if (node_pt(l)->is_hanging())
-			{
-				for (unsigned int i = 0; i < node_pt(l)->ndim(); i++)
-				{
-					for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-					{
-						dynamic_cast<Node *>(node_pt(l))->variable_position_pt()->set_value(t, i, node_pt(l)->position(t, i));
-					}
-				}
-			}
-		}
-		int hanging_index = (codeinst->get_func_table()->bulk_position_space_to_C1 ? 0 : -1);
-		for (unsigned int l = 0; l < eleminfo.nnode_C2; l++)
-		{
-			if (node_pt(l)->is_hanging(hanging_index))
-			{
-				for (unsigned int i = 0; i < codeinst->get_func_table()->numfields_C2_basebulk; i++)
-				{
-					for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-					{
-						node_pt(l)->value_pt(i)[t] = node_pt(l)->value(t, i);
-					}
-				}
-			}
-		}
-		if (codeinst->get_func_table()->numfields_C1_basebulk || codeinst->get_func_table()->numfields_C1TB_basebulk)
-		{
-			for (unsigned int l_C1 = 0; l_C1 < eleminfo.nnode_C1; l_C1++)
-			{
-				unsigned l = get_node_index_C1_to_element(l_C1);
-				if (node_pt(l)->is_hanging(codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk))
-				{
-					// std::cout << "C1 hang" << std::endl;
-					for (unsigned int i = codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk; i < codeinst->get_func_table()->numfields_C2TB_basebulk + codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C1_basebulk+codeinst->get_func_table()->numfields_C1TB_basebulk; i++)
-					{
-						for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-						{
-							node_pt(l)->value_pt(i)[t] = node_pt(l)->value(t, i); // Does this really work here?
-						}
-					}
-				}
-			}
-			for (unsigned int i = codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk; i < codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk + codeinst->get_func_table()->numfields_C1_basebulk+codeinst->get_func_table()->numfields_C1TB_basebulk; i++)
-			{
-				for (unsigned t = 0; t < node_pt(0)->ntstorage(); t++)
-				{
-					node_pt(3)->value_pt(i)[t] = 0.5 * (node_pt(0)->value(t, i) + node_pt(1)->value(t, i));
-					node_pt(4)->value_pt(i)[t] = 0.5 * (node_pt(1)->value(t, i) + node_pt(2)->value(t, i));
-					node_pt(5)->value_pt(i)[t] = 0.5 * (node_pt(2)->value(t, i) + node_pt(0)->value(t, i));
-				}
-			}
-		}
-	}
-
-	void BulkElementTri2dC2::interpolate_hang_values_at_interface()
-	{
-		auto *functable = codeinst->get_func_table();
-		unsigned numC1 = functable->numfields_C1 - functable->numfields_C1_basebulk;
-		// TODO: HANGING!
-		if (numC1)
-		{
-			for (unsigned int i = 0; i < numC1; i++)
-			{
-				std::string fieldname = functable->fieldnames_C1[functable->numfields_C1_basebulk + i];
-				unsigned interf_id = codeinst->resolve_interface_dof_id(fieldname);
-
-				std::vector<int> dirs{0, 1, 2};
-				for (int dir : dirs)
-				{
-					unsigned valindex0 = dynamic_cast<oomph::BoundaryNodeBase *>(this->boundary_node_pt(dir, 0))->index_of_first_value_assigned_by_face_element(interf_id);
-					unsigned valindex1 = dynamic_cast<oomph::BoundaryNodeBase *>(this->boundary_node_pt(dir, 1))->index_of_first_value_assigned_by_face_element(interf_id);
-					unsigned valindex2 = dynamic_cast<oomph::BoundaryNodeBase *>(this->boundary_node_pt(dir, 2))->index_of_first_value_assigned_by_face_element(interf_id);
-					for (unsigned t = 0; t < boundary_node_pt(dir, 1)->ntstorage(); t++)
-					{
-						boundary_node_pt(dir, 1)->value_pt(valindex1)[t] = 0.5 * (boundary_node_pt(dir, 0)->value_pt(valindex0)[t] + boundary_node_pt(dir, 2)->value_pt(valindex2)[t]);
-					}
-				}
-			}
-		}
-		unsigned numC1TB = functable->numfields_C1TB - functable->numfields_C1TB_basebulk;
-		if (numC1TB)
-		{
-			for (unsigned int i = 0; i < numC1TB; i++)
-			{
-				std::string fieldname = functable->fieldnames_C1TB[functable->numfields_C1TB_basebulk + i];
-				unsigned interf_id = codeinst->resolve_interface_dof_id(fieldname);
-				for (int dir : {0, 1, 2})
-				{
-					unsigned valindex0 = dynamic_cast<oomph::BoundaryNodeBase *>(this->boundary_node_pt(dir, 0))->index_of_first_value_assigned_by_face_element(interf_id);
-					unsigned valindex1 = dynamic_cast<oomph::BoundaryNodeBase *>(this->boundary_node_pt(dir, 1))->index_of_first_value_assigned_by_face_element(interf_id);
-					unsigned valindex2 = dynamic_cast<oomph::BoundaryNodeBase *>(this->boundary_node_pt(dir, 2))->index_of_first_value_assigned_by_face_element(interf_id);
-					for (unsigned t = 0; t < boundary_node_pt(dir, 1)->ntstorage(); t++)
-					{
-						boundary_node_pt(dir, 1)->value_pt(valindex1)[t] = 0.5 * (boundary_node_pt(dir, 0)->value_pt(valindex0)[t] + boundary_node_pt(dir, 2)->value_pt(valindex2)[t]);
-					}
-				}
-			}
-		}
-	}
-
 	void BulkElementTri2dC2::shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const
 	{
 		psi[0] = s[0];
 		psi[1] = s[1];
-		psi[2] = 1.0 - s[0] - s[1];
-		/* double s_2=1.0-s[0]-s[1];
-		 psi[0] = 2.0*s[0]*(s[0]-0.5);
-		 psi[1] = 2.0*s[1]*(s[1]-0.5);
-		 psi[2] = 2.0*s_2 *(s_2 -0.5);
-		 psi[3] = 4.0*s[0]*s[1];
-		 psi[4] = 4.0*s[1]*s_2;
-		 psi[5] = 4.0*s_2*s[0];*/
+		psi[2] = 1.0 - s[0] - s[1];	
 	}
 
 	void BulkElementTri2dC2::dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const
@@ -10126,19 +9682,6 @@ namespace pyoomph
 		this->set_n_node(eleminfo.nnode);
 		this->set_nodal_dimension(eleminfo.nodal_dim);
 		this->set_integration_scheme(&Default_enriched_integration_scheme);      
-   }
-   void BulkElementTri2dC1TB::interpolate_hang_values()
-   {
-     BulkElementTri2dC1::interpolate_hang_values();
-     auto * ft=codeinst->get_func_table();
-	  for (unsigned int f = 0; f < ft->numfields_C1; f++)
-	  {
-	    unsigned i=f+ft->nodal_offset_C1_basebulk;
- 		 for (unsigned t = 0; t < node_pt(0)->ntstorage(); t++)
-		 {
-				node_pt(3)->value_pt(i)[t] = (node_pt(0)->value(t, i) + node_pt(1)->value(t, i) + node_pt(2)->value(t, i)) / 3.0;
-			}
-     }
    }
    
    
@@ -10340,28 +9883,6 @@ namespace pyoomph
 		}
 	}
 
-	void BulkElementTri2dC2TB::interpolate_hang_values()
-	{
-//	 return;
-		BulkElementTri2dC2::interpolate_hang_values();
-		// C2 node at the center
-		for (unsigned int i = codeinst->get_func_table()->numfields_C2TB_basebulk; i < codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk ; i++)
-		{
-			for (unsigned t = 0; t < node_pt(0)->ntstorage(); t++)
-			{
-				node_pt(6)->value_pt(i)[t] = (node_pt(0)->value(t, i) + node_pt(1)->value(t, i) + node_pt(2)->value(t, i) + node_pt(3)->value(t, i) + node_pt(4)->value(t, i) + node_pt(5)->value(t, i)) / 6.0;
-			}
-		}
-		// C1 nodes at the center
-		for (unsigned int i = codeinst->get_func_table()->numfields_C2TB_basebulk+codeinst->get_func_table()->numfields_C2_basebulk+codeinst->get_func_table()->numfields_C1TB_basebulk; i < codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk+ codeinst->get_func_table()->numfields_C1TB_basebulk+ codeinst->get_func_table()->numfields_C1_basebulk ; i++)
-		{
-			for (unsigned t = 0; t < node_pt(0)->ntstorage(); t++)
-			{
-				node_pt(6)->value_pt(i)[t] = (node_pt(0)->value(t, i) + node_pt(1)->value(t, i) + node_pt(2)->value(t, i) + node_pt(3)->value(t, i) + node_pt(4)->value(t, i) + node_pt(5)->value(t, i)) / 6.0;
-			}
-		}		
-	}
-
 	//////////////////////////////
 
 	BulkElementBrick3dC1::BulkElementBrick3dC1()
@@ -10416,32 +9937,6 @@ namespace pyoomph
 
 
 
-
-	void BulkElementBrick3dC1::interpolate_hang_values()
-	{
-		BulkElementBase::interpolate_hang_values();
-		for (unsigned int l = 0; l < eleminfo.nnode_C1; l++)
-		{
-			if (node_pt(l)->is_hanging())
-			{
-				for (unsigned int i = 0; i < node_pt(l)->nvalue(); i++)
-				{
-					for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-					{
-						node_pt(l)->value_pt(i)[t] = node_pt(l)->value(t, i);
-					}
-				}
-
-				for (unsigned int i = 0; i < node_pt(l)->ndim(); i++)
-				{
-					for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-					{
-						dynamic_cast<Node *>(node_pt(l))->variable_position_pt()->set_value(t, i, node_pt(l)->position(t, i));
-					}
-				}
-			}
-		}
-	}
 
 	void BulkElementBrick3dC1::shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const
 	{
@@ -10583,94 +10078,6 @@ namespace pyoomph
 		}
 	}
 
-	
-	void BulkElementBrick3dC2::interpolate_hang_values()
-	{
-		BulkElementBase::interpolate_hang_values();
-		for (unsigned int l = 0; l < eleminfo.nnode; l++)
-		{
-			if (node_pt(l)->is_hanging())
-			{
-				for (unsigned int i = 0; i < node_pt(l)->ndim(); i++)
-				{
-					for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-					{
-						dynamic_cast<Node *>(node_pt(l))->variable_position_pt()->set_value(t, i, node_pt(l)->position(t, i));
-					}
-				}
-			}
-		}
-		int hanging_index = (codeinst->get_func_table()->bulk_position_space_to_C1 ? 0 : -1);
-		for (unsigned int l = 0; l < eleminfo.nnode_C2; l++)
-		{
-			if (node_pt(l)->is_hanging(hanging_index))
-			{
-				for (unsigned int i = 0; i < codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk; i++)
-				{
-					for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-					{
-						node_pt(l)->value_pt(i)[t] = node_pt(l)->value(t, i);
-					}
-				}
-			}
-		}
-		if (codeinst->get_func_table()->numfields_C1_basebulk)
-		{
-			for (unsigned int l_C1 = 0; l_C1 < eleminfo.nnode_C1; l_C1++)
-			{
-				unsigned l = get_node_index_C1_to_element(l_C1);
-				if (node_pt(l)->is_hanging(codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk))
-				{
-					// std::cout << "C1 hang" << std::endl;
-					for (unsigned int i = codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk; i < codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk + codeinst->get_func_table()->numfields_C1_basebulk; i++)
-					{
-						for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-						{
-							node_pt(l)->value_pt(i)[t] = node_pt(l)->value(t, i); // Does this really work here?
-						}
-					}
-				}
-			}
-			for (unsigned int i = codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk; i < codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C1_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk; i++)
-			{
-				for (unsigned t = 0; t < node_pt(0)->ntstorage(); t++)
-				{
-					// Bottom
-					unsigned offs = 0;
-					node_pt(offs + 1)->value_pt(i)[t] = 0.5 * (node_pt(offs + 0)->value(t, i) + node_pt(offs + 2)->value(t, i));
-					node_pt(offs + 3)->value_pt(i)[t] = 0.5 * (node_pt(offs + 0)->value(t, i) + node_pt(offs + 6)->value(t, i));
-					node_pt(offs + 5)->value_pt(i)[t] = 0.5 * (node_pt(offs + 2)->value(t, i) + node_pt(offs + 8)->value(t, i));
-					node_pt(offs + 7)->value_pt(i)[t] = 0.5 * (node_pt(offs + 6)->value(t, i) + node_pt(offs + 8)->value(t, i));
-					node_pt(offs + 4)->value_pt(i)[t] = 0.25 * (node_pt(offs + 0)->value(t, i) + node_pt(offs + 2)->value(t, i) + node_pt(offs + 6)->value(t, i) + node_pt(offs + 8)->value(t, i));
-
-					// Top
-					offs = 18;
-					node_pt(offs + 1)->value_pt(i)[t] = 0.5 * (node_pt(offs + 0)->value(t, i) + node_pt(offs + 2)->value(t, i));
-					node_pt(offs + 3)->value_pt(i)[t] = 0.5 * (node_pt(offs + 0)->value(t, i) + node_pt(offs + 6)->value(t, i));
-					node_pt(offs + 5)->value_pt(i)[t] = 0.5 * (node_pt(offs + 2)->value(t, i) + node_pt(offs + 8)->value(t, i));
-					node_pt(offs + 7)->value_pt(i)[t] = 0.5 * (node_pt(offs + 6)->value(t, i) + node_pt(offs + 8)->value(t, i));
-					node_pt(offs + 4)->value_pt(i)[t] = 0.25 * (node_pt(offs + 0)->value(t, i) + node_pt(offs + 2)->value(t, i) + node_pt(offs + 6)->value(t, i) + node_pt(offs + 8)->value(t, i));
-
-					// Central nodes along vertical edge lines
-					offs = 0;
-					node_pt(offs + 9)->value_pt(i)[t] = 0.5 * (node_pt(offs + 0)->value(t, i) + node_pt(offs + 18)->value(t, i));
-					offs = 2;
-					node_pt(offs + 9)->value_pt(i)[t] = 0.5 * (node_pt(offs + 0)->value(t, i) + node_pt(offs + 18)->value(t, i));
-					offs = 6;
-					node_pt(offs + 9)->value_pt(i)[t] = 0.5 * (node_pt(offs + 0)->value(t, i) + node_pt(offs + 18)->value(t, i));
-					offs = 8;
-					node_pt(offs + 9)->value_pt(i)[t] = 0.5 * (node_pt(offs + 0)->value(t, i) + node_pt(offs + 18)->value(t, i));
-
-					node_pt(10)->value_pt(i)[t] = 0.25 * (node_pt(0)->value(t, i) + node_pt(2)->value(t, i) + node_pt(18)->value(t, i) + node_pt(20)->value(t, i));
-					node_pt(12)->value_pt(i)[t] = 0.25 * (node_pt(0)->value(t, i) + node_pt(6)->value(t, i) + node_pt(18)->value(t, i) + node_pt(24)->value(t, i));
-					node_pt(16)->value_pt(i)[t] = 0.25 * (node_pt(6)->value(t, i) + node_pt(26)->value(t, i) + node_pt(8)->value(t, i) + node_pt(24)->value(t, i));
-					node_pt(14)->value_pt(i)[t] = 0.25 * (node_pt(2)->value(t, i) + node_pt(8)->value(t, i) + node_pt(20)->value(t, i) + node_pt(26)->value(t, i));
-
-					node_pt(13)->value_pt(i)[t] = 0.125 * (node_pt(0)->value(t, i) + node_pt(2)->value(t, i) + node_pt(6)->value(t, i) + node_pt(8)->value(t, i) + node_pt(18)->value(t, i) + node_pt(20)->value(t, i) + node_pt(24)->value(t, i) + node_pt(26)->value(t, i));
-				}
-			}
-		}
-	}
 
 	oomph::Node *BulkElementBrick3dC2::interpolating_node_pt(const unsigned &n, const int &value_id)
 	{
@@ -10886,31 +10293,6 @@ namespace pyoomph
 	}
 
 	
-	void BulkElementTetra3dC1::interpolate_hang_values()
-	{
-		BulkElementBase::interpolate_hang_values();
-		for (unsigned int l = 0; l < eleminfo.nnode_C1; l++)
-		{
-			if (node_pt(l)->is_hanging())
-			{
-				for (unsigned int i = 0; i < node_pt(l)->nvalue(); i++)
-				{
-					for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-					{
-						node_pt(l)->value_pt(i)[t] = node_pt(l)->value(t, i);
-					}
-				}
-
-				for (unsigned int i = 0; i < node_pt(l)->ndim(); i++)
-				{
-					for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-					{
-						dynamic_cast<Node *>(node_pt(l))->variable_position_pt()->set_value(t, i, node_pt(l)->position(t, i));
-					}
-				}
-			}
-		}
-	}
 
 	void BulkElementTetra3dC1::shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const
 	{
@@ -10981,33 +10363,6 @@ namespace pyoomph
 		allocate_discontinous_fields();
 	}
 
-    void BulkElementTetra3dC1TB::interpolate_hang_values()
-	{
-		BulkElementTetra3dC1::interpolate_hang_values();
-		for (unsigned int l = 0; l < eleminfo.nnode_C1TB; l++)
-		{
-			if (node_pt(l)->is_hanging())
-			{
-				for (unsigned int i = 0; i < node_pt(l)->nvalue(); i++)
-				{
-					for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-					{
-						node_pt(l)->value_pt(i)[t] = node_pt(l)->value(t, i);
-					}
-				}
-
-				for (unsigned int i = 0; i < node_pt(l)->ndim(); i++)
-				{
-					for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-					{
-						dynamic_cast<Node *>(node_pt(l))->variable_position_pt()->set_value(t, i, node_pt(l)->position(t, i));
-					}
-				}
-			}
-		}
-	}
-
-    
 
     
    
@@ -11169,67 +10524,6 @@ namespace pyoomph
 	}
 
 	
-	void BulkElementTetra3dC2::interpolate_hang_values()
-	{
-		BulkElementBase::interpolate_hang_values();
-		for (unsigned int l = 0; l < eleminfo.nnode; l++)
-		{
-			if (node_pt(l)->is_hanging())
-			{
-				for (unsigned int i = 0; i < node_pt(l)->ndim(); i++)
-				{
-					for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-					{
-						dynamic_cast<Node *>(node_pt(l))->variable_position_pt()->set_value(t, i, node_pt(l)->position(t, i));
-					}
-				}
-			}
-		}
-		int hanging_index = (codeinst->get_func_table()->bulk_position_space_to_C1 ? 0 : -1);
-		for (unsigned int l = 0; l < eleminfo.nnode_C2; l++)
-		{
-			if (node_pt(l)->is_hanging(hanging_index))
-			{
-				for (unsigned int i = 0; i < codeinst->get_func_table()->numfields_C2_basebulk; i++)
-				{
-					for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-					{
-						node_pt(l)->value_pt(i)[t] = node_pt(l)->value(t, i);
-					}
-				}
-			}
-		}
-		if (codeinst->get_func_table()->numfields_C1_basebulk)
-		{
-			for (unsigned int l_C1 = 0; l_C1 < eleminfo.nnode_C1; l_C1++)
-			{
-				unsigned l = get_node_index_C1_to_element(l_C1);
-				if (node_pt(l)->is_hanging(codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk))
-				{
-					// std::cout << "C1 hang" << std::endl;
-					for (unsigned int i = codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk; i < codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk + codeinst->get_func_table()->numfields_C1_basebulk; i++)
-					{
-						for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-						{
-							node_pt(l)->value_pt(i)[t] = node_pt(l)->value(t, i); // Does this really work here?
-						}
-					}
-				}
-			}
-			for (unsigned int i = codeinst->get_func_table()->numfields_C2_basebulk; i < codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C1_basebulk; i++)
-			{
-				for (unsigned t = 0; t < node_pt(0)->ntstorage(); t++)
-				{
-					node_pt(4)->value_pt(i)[t] = 0.5 * (node_pt(0)->value(t, i) + node_pt(1)->value(t, i));
-					node_pt(5)->value_pt(i)[t] = 0.5 * (node_pt(0)->value(t, i) + node_pt(2)->value(t, i));
-					node_pt(6)->value_pt(i)[t] = 0.5 * (node_pt(0)->value(t, i) + node_pt(3)->value(t, i));
-					node_pt(7)->value_pt(i)[t] = 0.5 * (node_pt(1)->value(t, i) + node_pt(2)->value(t, i));
-					node_pt(8)->value_pt(i)[t] = 0.5 * (node_pt(2)->value(t, i) + node_pt(3)->value(t, i));
-					node_pt(9)->value_pt(i)[t] = 0.5 * (node_pt(1)->value(t, i) + node_pt(3)->value(t, i));
-				}
-			}
-		}
-	}
 
 	void BulkElementTetra3dC2::shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const
 	{
@@ -11389,23 +10683,6 @@ namespace pyoomph
 		this->set_integration_scheme(&Default_enriched_integration_scheme);
 	}
 
-	
-	void BulkElementTetra3dC2TB::interpolate_hang_values()
-	{
-		BulkElementTetra3dC2::interpolate_hang_values();
-		for (unsigned int i = codeinst->get_func_table()->numfields_C2TB_basebulk; i < codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk; i++)
-		{
-			for (unsigned t = 0; t < node_pt(0)->ntstorage(); t++)
-			{
-				node_pt(10)->value_pt(i)[t] = (node_pt(0)->value(t, i) + node_pt(1)->value(t, i) + node_pt(3)->value(t, i)) / 3.0;
-				node_pt(11)->value_pt(i)[t] = (node_pt(0)->value(t, i) + node_pt(1)->value(t, i) + node_pt(2)->value(t, i)) / 3.0;
-				node_pt(12)->value_pt(i)[t] = (node_pt(0)->value(t, i) + node_pt(2)->value(t, i) + node_pt(3)->value(t, i)) / 3.0;
-				node_pt(13)->value_pt(i)[t] = (node_pt(1)->value(t, i) + node_pt(2)->value(t, i) + node_pt(3)->value(t, i)) / 3.0;
-
-				node_pt(14)->value_pt(i)[t] = (node_pt(0)->value(t, i) + node_pt(1)->value(t, i) + node_pt(2)->value(t, i) + node_pt(3)->value(t, i)) / 4.0; // TODO Possibly also consider C2 contribs?
-			}
-		}
-	}
 
 	 void BulkElementTetra3dC2TB::build_face_element(const int& face_index, oomph::FaceElement* face_element_pt)
 	{		
@@ -11626,74 +10903,6 @@ namespace pyoomph
 		return res;
 	}
 
-	void BulkElementWedge3dC2::interpolate_hang_values()
-	{
-		BulkElementBase::interpolate_hang_values();
-		for (unsigned int l = 0; l < eleminfo.nnode; l++)
-		{
-			if (node_pt(l)->is_hanging())
-			{
-				for (unsigned int i = 0; i < node_pt(l)->ndim(); i++)
-				{
-					for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-					{
-						dynamic_cast<Node *>(node_pt(l))->variable_position_pt()->set_value(t, i, node_pt(l)->position(t, i));
-					}
-				}
-			}
-		}
-		auto * ft = codeinst->get_func_table();
-		for (unsigned int l = 0; l < eleminfo.nnode_C2; l++)
-		{
-			if (node_pt(l)->is_hanging(ft->hangindex_C2))
-			{
-				for (unsigned int i = 0; i < codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk; i++)
-				{
-					for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-					{
-						node_pt(l)->value_pt(i)[t] = node_pt(l)->value(t, i);
-					}
-				}
-			}
-		}
-		if (ft->numfields_C1_basebulk)
-		{
-			for (unsigned int l_C1 = 0; l_C1 < eleminfo.nnode_C1; l_C1++)
-			{
-				unsigned l = get_node_index_C1_to_element(l_C1);
-				if (node_pt(l)->is_hanging(ft->hangindex_C1))
-				{
-					// std::cout << "C1 hang" << std::endl;
-					for (unsigned int i = ft->nodal_offset_C1_basebulk; i < ft->nodal_offset_C1_basebulk + ft->numfields_C1_basebulk; i++)
-					{
-						for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-						{
-							node_pt(l)->value_pt(i)[t] = node_pt(l)->value(t, i); // Does this really work here?
-						}
-					}
-				}
-			}
-			for (unsigned int i = ft->nodal_offset_C1_basebulk; i < ft->nodal_offset_C1_basebulk + ft->numfields_C1_basebulk; i++)
-			{
-				for (unsigned t = 0; t < node_pt(0)->ntstorage(); t++)
-				{
-                    //Fill the midpoint nodes of the first triangle
-					node_pt(3)->value_pt(i)[t] = 0.5 * (node_pt(0)->value(t, i) + node_pt(1)->value(t, i));
-					node_pt(4)->value_pt(i)[t] = 0.5 * (node_pt(0)->value(t, i) + node_pt(2)->value(t, i));
-					node_pt(5)->value_pt(i)[t] = 0.5 * (node_pt(1)->value(t, i) + node_pt(2)->value(t, i));
-					//Fill the midpoint nodes of the second triangle
-					node_pt(15)->value_pt(i)[t] = 0.5 * (node_pt(12)->value(t, i) + node_pt(13)->value(t, i));
-					node_pt(16)->value_pt(i)[t] = 0.5 * (node_pt(12)->value(t, i) + node_pt(14)->value(t, i));
-					node_pt(17)->value_pt(i)[t] = 0.5 * (node_pt(13)->value(t, i) + node_pt(14)->value(t, i));
-					//Fill the midpoint nodes along the lines
-					for (unsigned offs = 0; offs < 6; offs++)
-					{
-						node_pt(6 + offs)->value_pt(i)[t] = 0.5 * (node_pt(offs)->value(t, i) + node_pt(offs + 12)->value(t, i));
-					}
-				}
-			}
-		}
-	}
 
 
 	///////////////////////////////
@@ -11814,6 +11023,79 @@ namespace pyoomph
 		}
 	}
 
+	void InterfaceElementBase::interpolate_hang_values_at_interface()
+	{
+		auto * ft=this->get_code_instance()->get_func_table();
+		const std::vector<std::vector<std::vector<unsigned>>> & dummy_value_interpolation_map=this->get_dummy_value_interpolation_map();
+		for (unsigned int ispace;ispace<ft->num_continuous_spaces;ispace++)
+		{
+			auto space_info=ft->continuous_spaces[ispace];
+			const std::vector<unsigned> & get_nodal_space_index_to_element_index=this->get_nodal_space_index_to_element_index_map()[space_info->element_node_to_space_node_index];
+			unsigned nnode=eleminfo.nnode_of_space[space_info->nnode_index];
+			int hangindex=space_info->hangindex;
+			for (unsigned int inode=0;inode<nnode;inode++)
+			{
+				pyoomph::Node * node=dynamic_cast<pyoomph::Node*>(this->node_pt(get_nodal_space_index_to_element_index[inode]));
+				if (node->is_hanging(hangindex))
+				{
+					pyoomph::BoundaryNode * dest_bn=dynamic_cast<pyoomph::BoundaryNode*>(node);
+					if (!dest_bn) throw_runtime_error("dest_bn is not a BoundaryNode");
+					oomph::HangInfo * hang_info=node->hanging_pt(hangindex);
+					for (unsigned int field_index=0;field_index<space_info->numfields-space_info->numfields_basebulk;field_index++)
+					{
+					   unsigned add_field_index=space_info->interface_dof_indices[field_index];
+					   unsigned dest_value_index=dest_bn->index_of_first_value_assigned_by_face_element(add_field_index);	
+					   for (unsigned int t=0;t<node->ntstorage();t++)
+					   {
+						   double val=0.0;
+						   for (unsigned int m=0;m<hang_info->nmaster();m++)
+						   {
+								pyoomph::Node * master_node=dynamic_cast<pyoomph::Node*>(hang_info->master_node_pt(m));
+								BoundaryNode * boundnode=dynamic_cast<BoundaryNode*>(master_node);
+								if (!boundnode) throw_runtime_error("master_node is not a BoundaryNode");
+								unsigned master_value_index=boundnode->index_of_first_value_assigned_by_face_element(add_field_index);
+								val+=master_node->value(t,master_value_index)*hang_info->master_weight(m);
+						   }
+						   node->value_pt(add_field_index)[t]=val;					   
+					   }
+					}
+				
+				}
+			}
+
+			const std::vector<std::vector<unsigned>> & dummy_value_interpolation=dummy_value_interpolation_map[space_info->element_node_to_space_node_index];
+			if (!dummy_value_interpolation.empty() && space_info->numfields-space_info->numfields_basebulk>0)
+			{
+				for (unsigned int idummy=0;idummy<nnode;idummy++)
+				{
+					pyoomph::Node * dummynode=dynamic_cast<pyoomph::Node*>(this->node_pt(dummy_value_interpolation[idummy][0]));
+					pyoomph::BoundaryNode * dest_boundnode=dynamic_cast<pyoomph::BoundaryNode*>(dummynode);
+					if (!dest_boundnode) throw_runtime_error("dummynode is not a BoundaryNode");
+					for (unsigned int t=0;t<dummynode->ntstorage();t++)
+					{
+						for (unsigned int field_index=0;field_index<space_info->numfields-space_info->numfields_basebulk;field_index++)
+						{
+					   	   unsigned add_field_index=space_info->interface_dof_indices[field_index];
+						   double val=0.0;
+						   for (unsigned int m=1;m<dummy_value_interpolation[idummy].size();m++)
+						   {
+							  pyoomph::Node * master_node=dynamic_cast<pyoomph::Node*>(this->node_pt(dummy_value_interpolation[idummy][m]));
+							  pyoomph::BoundaryNode * boundnode=dynamic_cast<pyoomph::BoundaryNode*>(master_node);
+							  if (!boundnode) throw_runtime_error("master_node is not a BoundaryNode");
+							  unsigned master_index=boundnode->index_of_first_value_assigned_by_face_element(space_info->interface_dof_indices[field_index]);
+							  val+=master_node->value(t, master_index);
+						   }
+						   val/=(dummy_value_interpolation[idummy].size()-1);
+						   unsigned dest_index=dest_boundnode->index_of_first_value_assigned_by_face_element(space_info->interface_dof_indices[field_index]);
+						   dummynode->value_pt(add_field_index)[t]=val;
+						}
+					}
+					
+				}
+			}
+		}
+	}
+
 
 	void InterfaceElementBase::assign_hanging_additional_interface_local_equations_for_space(const bool &store_local_dof_pt,unsigned addfields,unsigned basebulk_offset,unsigned nnode, int hangindex,  char * fieldnames[], unsigned (BulkElementBase::*node_index_to_element)(const unsigned &) const,  std::map<Node*, int> *& add_interf_local_hang_eqs)
 	{				
@@ -11927,61 +11209,6 @@ namespace pyoomph
 		
 	}
 
-	void InterfaceElementQuad2dC1::interpolate_hang_values()
-	{
-		BulkElementQuad2dC1::interpolate_hang_values();		
-		auto * ft=this->get_code_instance()->get_func_table();
-		interpolate_hang_values_for_additional_interface_space_on_quads(ft->numfields_C1-ft->numfields_C1_basebulk,ft->buffer_offset_C1_interf,this->eleminfo.nnode_C1,ft->hangindex_C1,ft->fieldnames_C1,&BulkElementBase::get_node_index_C1_to_element,false);
-		interpolate_hang_values_for_additional_interface_space_on_quads(ft->numfields_C1TB-ft->numfields_C1TB_basebulk,ft->buffer_offset_C1TB_interf,this->eleminfo.nnode_C1TB,ft->hangindex_C1TB,ft->fieldnames_C1TB,&BulkElementBase::get_node_index_C1TB_to_element,false);
-	}
-
-	bool InterfaceElementBase::fill_hang_info_with_equations_for_additional_interface_space_on_quads(unsigned addfields,unsigned buffer_offset_interf, unsigned nnode_space, int hangindex, JITHangInfo_t* hangbuffer, unsigned (BulkElementBase::*node_index_to_element)(const unsigned &) const, std::map<Node*, int> *& add_interf_local_hang_eqs)
-	{
-	  if (!addfields ) return false;
-	  auto *ft = codeinst->get_func_table();
-	  bool res=false;
-	  for (unsigned int l = 0; l < nnode_space; l++)
-	  {		
-		unsigned l_elem=(this->*node_index_to_element)(l);
-		if (node_pt(l_elem)->is_hanging(hangindex))
-		{
-			res = true;
-			auto hang_info_pt = node_pt(l_elem)->hanging_pt(hangindex);
-			hangbuffer[l].nummaster = hang_info_pt->nmaster(); // Should be set already before
-			for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
-			{
-				hangbuffer[l].masters[m].weight = hang_info_pt->master_weight(m); // Should be already set before
-				pyoomph::Node * master_node = dynamic_cast<pyoomph::Node *>(hang_info_pt->master_node_pt(m));
-				for (unsigned int fi=0;fi<addfields;fi++)
-				{
-						hangbuffer[l].masters[m].local_eqn[buffer_offset_interf] = add_interf_local_hang_eqs[fi][master_node]; 
-				}
-			}
-		}
-		else
-		{
-			hangbuffer[l].nummaster = 0;
-		}
-	   }			
-	   return res;
-	}
-
-	/*bool InterfaceElementQuad2dC1::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
-	{
-		auto *ft = codeinst->get_func_table();
-		bool res=InterfaceElement<BulkElementQuad2dC1>::fill_hang_info_with_equations(required, shape_info, NULL);		
-		res=fill_hang_info_with_equations_for_additional_interface_space_on_quads(ft->numfields_C1-ft->numfields_C1_basebulk,ft->buffer_offset_C1_interf,this->eleminfo.nnode_C1,ft->hangindex_C1,shape_info->hanginfo_C1,
-			&BulkElementBase::get_node_index_C1_to_element,add_interf_local_hang_eqs_C1)  || res;
-		res=fill_hang_info_with_equations_for_additional_interface_space_on_quads(ft->numfields_C1TB-ft->numfields_C1TB_basebulk,ft->buffer_offset_C1TB_interf,this->eleminfo.nnode_C1TB,ft->hangindex_C1TB,shape_info->hanginfo_C1TB,
-			&BulkElementBase::get_node_index_C1TB_to_element,add_interf_local_hang_eqs_C1TB) || res;
-
-		if (eqn_remap)
-		{
-			return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
-		}
-		else
-			return res;
-	}*/
 
 	void InterfaceElementQuad2dC2::assign_hanging_additional_interface_local_equations(const bool &store_local_dof_pt)
 	{
@@ -12008,99 +11235,6 @@ namespace pyoomph
 		
 	}
 
-
-
-	void InterfaceElementBase::interpolate_hang_values_for_additional_interface_space_on_quads(unsigned addfields, unsigned nnode_space, int hangindex, unsigned numfields_basebulk, char *fieldnames[], unsigned (BulkElementBase::*node_index_to_element)(const unsigned &) const,bool C1_on_C2)
-	{
-		if (!addfields) return;
-		auto * ft=this->get_code_instance()->get_func_table();
-		for (unsigned int l = 0; l < nnode_space; l++)
-		{
-			pyoomph::Node * node = dynamic_cast<pyoomph::Node*>(this->node_pt((this->*node_index_to_element)(l)));
-			if (node->is_hanging(hangindex))
-			{
-				for (unsigned int i = 0; i < addfields; i++)
-				{
-					unsigned field_index=this->get_code_instance()->resolve_interface_dof_id(fieldnames[numfields_basebulk+i]);
-					unsigned destindex=dynamic_cast<BoundaryNode*>(node)->index_of_first_value_assigned_by_face_element(field_index);					
-					oomph::HangInfo * hang_info=node->hanging_pt(hangindex);
-					for (unsigned t = 0; t < node->ntstorage(); t++)
-					{						
-						node->value_pt(destindex)[t]=0.0;
-					}
-					for (unsigned int m=0;m<hang_info->nmaster();m++)
-					{
-						pyoomph::Node * master_node=dynamic_cast<pyoomph::BoundaryNode*>(hang_info->master_node_pt(m));						
-						unsigned sourceindex=dynamic_cast<BoundaryNode*>(master_node)->index_of_first_value_assigned_by_face_element(field_index);						
-						for (unsigned t = 0; t < node->ntstorage(); t++)
-						{
-							node->value_pt(destindex)[t]+= hang_info->master_weight(m)*master_node->value(t,sourceindex);
-						}
-					}
-				}
-			}
-		}
-
-		if (C1_on_C2)
-		{
-			// Now we still need to handle the dummy pinned dofs, which are not considered so far
-			for (unsigned int i = 0; i < addfields; i++)
-			{
-				unsigned field_index=this->get_code_instance()->resolve_interface_dof_id(fieldnames[numfields_basebulk+i]);
-				std::vector<unsigned> source_indices(this->nnode(),0);
-				for (unsigned int j = 0; j < this->nnode(); j++)
-				{
-					pyoomph::BoundaryNode * node = dynamic_cast<pyoomph::BoundaryNode*>(this->node_pt(j));
-					source_indices[i]=node->index_of_first_value_assigned_by_face_element(field_index);					
-				}
-				for (unsigned t = 0; t < node_pt(0)->ntstorage(); t++)
-				{
-					node_pt(1)->value_pt(source_indices[1])[t] = 0.5 * (node_pt(0)->value(t, source_indices[0]) + node_pt(2)->value(t, source_indices[2]));
-					node_pt(3)->value_pt(source_indices[3])[t] = 0.5 * (node_pt(0)->value(t, source_indices[0]) + node_pt(6)->value(t, source_indices[6]));
-					node_pt(5)->value_pt(source_indices[5])[t] = 0.5 * (node_pt(2)->value(t, source_indices[2]) + node_pt(8)->value(t, source_indices[8]));
-					node_pt(7)->value_pt(source_indices[7])[t] = 0.5 * (node_pt(6)->value(t, source_indices[6]) + node_pt(8)->value(t, source_indices[8]));
-					node_pt(4)->value_pt(source_indices[4])[t] = 0.25 * (node_pt(0)->value(t, source_indices[0]) + node_pt(2)->value(t, source_indices[2]) + node_pt(6)->value(t, source_indices[6]) + node_pt(8)->value(t, source_indices[8]));
-				}
-			}
-
-		}
-	}
-
-	void InterfaceElementQuad2dC2::interpolate_hang_values()
-	{
-		BulkElementQuad2dC2::interpolate_hang_values();		
-		auto * ft=this->get_code_instance()->get_func_table();
-		this->interpolate_hang_values_for_additional_interface_space_on_quads(ft->numfields_C1-ft->numfields_C1_basebulk,this->eleminfo.nnode_C1,ft->hangindex_C1,ft->numfields_C1_basebulk,ft->fieldnames_C1,
-			&BulkElementBase::get_node_index_C1_to_element,true);
-		this->interpolate_hang_values_for_additional_interface_space_on_quads(ft->numfields_C1TB-ft->numfields_C1TB_basebulk,this->eleminfo.nnode_C1TB,ft->hangindex_C1TB,ft->numfields_C1TB_basebulk,ft->fieldnames_C1TB,
-			&BulkElementBase::get_node_index_C1TB_to_element,true);
-		this->interpolate_hang_values_for_additional_interface_space_on_quads(ft->numfields_C2-ft->numfields_C2_basebulk,this->eleminfo.nnode_C2,ft->hangindex_C2,ft->numfields_C2_basebulk,ft->fieldnames_C2,
-			&BulkElementBase::get_node_index_C2_to_element,false);
-		this->interpolate_hang_values_for_additional_interface_space_on_quads(ft->numfields_C2TB-ft->numfields_C2TB_basebulk,this->eleminfo.nnode_C2TB,ft->hangindex_C2TB,ft->numfields_C2TB_basebulk,ft->fieldnames_C2TB,
-			&BulkElementBase::get_node_index_C2TB_to_element,false);
-
-	}
-
-	/*bool InterfaceElementQuad2dC2::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
-	{		
-		auto *ft = codeinst->get_func_table();
-		bool res=InterfaceElement<BulkElementQuad2dC2>::fill_hang_info_with_equations(required, shape_info, NULL);		
-		res=fill_hang_info_with_equations_for_additional_interface_space_on_quads(ft->numfields_C1-ft->numfields_C1_basebulk,ft->buffer_offset_C1_interf,this->eleminfo.nnode_C1,ft->hangindex_C1,shape_info->hanginfo_C1,
-			&BulkElementBase::get_node_index_C1_to_element,add_interf_local_hang_eqs_C1) || res;
-		res=fill_hang_info_with_equations_for_additional_interface_space_on_quads(ft->numfields_C1TB-ft->numfields_C1TB_basebulk,ft->buffer_offset_C1TB_interf,this->eleminfo.nnode_C1TB,ft->hangindex_C1TB,shape_info->hanginfo_C1TB,
-			&BulkElementBase::get_node_index_C1TB_to_element,add_interf_local_hang_eqs_C1TB) || res;
-		res=fill_hang_info_with_equations_for_additional_interface_space_on_quads(ft->numfields_C2-ft->numfields_C2_basebulk,ft->buffer_offset_C2_interf,this->eleminfo.nnode_C2,ft->hangindex_C2,shape_info->hanginfo_C2,
-			&BulkElementBase::get_node_index_C2_to_element,add_interf_local_hang_eqs_C2) || res;
-		res=fill_hang_info_with_equations_for_additional_interface_space_on_quads(ft->numfields_C2TB-ft->numfields_C2TB_basebulk,ft->buffer_offset_C2TB_interf,this->eleminfo.nnode_C2TB,ft->hangindex_C2TB,shape_info->hanginfo_C2TB,
-			&BulkElementBase::get_node_index_C2TB_to_element,add_interf_local_hang_eqs_C2TB) || res;
-
-		if (eqn_remap)
-		{
-			return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
-		}
-		else
-			return res;
-	}*/
 
 
 
@@ -14063,7 +13197,7 @@ namespace pyoomph
 
 	bool InterfaceElementBase::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
 	{
-		//	bool ret_self=BulkElementBase::fill_hang_info_with_equations(required,shape_info,eqn_remap);
+		//	Bulk is setup elsewhere
 		bool ret_bulk = false;
 
 		if (required.bulk_shapes)
@@ -14474,6 +13608,14 @@ namespace pyoomph
 	
 	bool InterfaceElementBase::interpolate_new_interface_dofs=true;
 
+	const std::vector<std::vector<std::vector<unsigned>>> BulkElementBase::Dummy_Value_Interpolation_Map=
+	{
+		{}, // C2TB 
+		{}, // C2
+		{}, // C1TB
+		{}  // C1		
+	};
+
 	const std::vector<std::vector<unsigned>> BulkElementLine1dC1::Nodal_Space_Index_To_Element_Index_Map={
 		{}, // C2TB 
 		{}, // C2
@@ -14486,6 +13628,13 @@ namespace pyoomph
 		{0,1,2}, // C2
 		{0,2}, // C1TB
 		{0,2}  // C1
+	};
+
+	const std::vector<std::vector<std::vector<unsigned>>> BulkElementLine1dC2::Dummy_Value_Interpolation_Map={
+		{}, // C2TB 
+		{}, // C2
+		{{1,0,2}}, // C1TB
+		{{1,0,2}}  // C1
 	};
 
 	const std::vector<std::vector<unsigned>> BulkTElementLine1dC1::Nodal_Space_Index_To_Element_Index_Map={
@@ -14502,6 +13651,13 @@ namespace pyoomph
 		{0,2}  // C1
 	};
 
+	const std::vector<std::vector<std::vector<unsigned>>> BulkTElementLine1dC2::Dummy_Value_Interpolation_Map={
+		{}, // C2TB 
+		{}, // C2
+		{{1,0,2}}, // C1TB
+		{{1,0,2}}  // C1
+	};
+
 	const std::vector<std::vector<unsigned>> BulkElementQuad2dC1::Nodal_Space_Index_To_Element_Index_Map={
 		{}, // C2TB 
 		{}, // C2
@@ -14514,6 +13670,13 @@ namespace pyoomph
 		{0,1,2,3,4,5,6,7,8}, // C2
 		{0,2,6,8}, // C1TB
 		{0,2,6,8}  // C1
+	};
+
+	const std::vector<std::vector<std::vector<unsigned>>> BulkElementQuad2dC2::Dummy_Value_Interpolation_Map={
+		{}, // C2TB 
+		{}, // C2
+		{{1, 0,2}, {3,0,6}, {5,2,8}, {7,6,8}, {4,1,3,5,7} }, // C1TB
+		{{1, 0,2}, {3,0,6}, {5,2,8}, {7,6,8}, {4,1,3,5,7} }  // C1
 	};
 
 	const std::vector<std::vector<unsigned>> BulkElementTri2dC1::Nodal_Space_Index_To_Element_Index_Map={
@@ -14530,6 +13693,13 @@ namespace pyoomph
 		{0,1,2}  // C1
 	};
 
+	const std::vector<std::vector<std::vector<unsigned>>> BulkElementTri2dC1TB::Dummy_Value_Interpolation_Map={
+		{}, // C2TB 
+		{}, // C2
+		{ }, // C1TB
+		{{3, 0,1,2} }  // C1
+	};
+
 	const std::vector<std::vector<unsigned>> BulkElementTri2dC2::Nodal_Space_Index_To_Element_Index_Map={
 		{}, // C2TB 
 		{0,1,2,3,4,5}, // C2
@@ -14537,11 +13707,25 @@ namespace pyoomph
 		{0,1,2}  // C1
 	};
 
+	const std::vector<std::vector<std::vector<unsigned>>> BulkElementTri2dC2::Dummy_Value_Interpolation_Map={
+		{}, // C2TB 
+		{}, // C2
+		{}, // C1TB
+		{{3, 0,1}, {4, 1,2}, {5, 0, 2} }  // C1		
+	};
+
 	const std::vector<std::vector<unsigned>> BulkElementTri2dC2TB::Nodal_Space_Index_To_Element_Index_Map={
 		{0,1,2,3,4,5,6}, // C2TB 
 		{0,1,2,3,4,5}, // C2
 		{0,1,2,6}, // C1TB
 		{0,1,2}  // C1
+	};
+
+	const std::vector<std::vector<std::vector<unsigned>>> BulkElementTri2dC2TB::Dummy_Value_Interpolation_Map={
+		{}, // C2TB 
+		{{6, 0, 1, 2}}, // C2
+		{{3, 0,1}, {4, 1,2}, {5, 0, 2}}, // C1TB
+		{{3, 0,1}, {4, 1,2}, {5, 0, 2}, {6, 0, 1, 2} }  // C1		
 	};
 
 	const std::vector<std::vector<unsigned>> BulkElementBrick3dC1::Nodal_Space_Index_To_Element_Index_Map={
@@ -14558,18 +13742,39 @@ namespace pyoomph
 		{0, 2, 6, 8, 18, 20, 24, 26}  // C1
 	};
 
+	const std::vector<std::vector<std::vector<unsigned>>> BulkElementBrick3dC2::Dummy_Value_Interpolation_Map={
+		{}, // C2TB 
+		{}, // C2
+		{{1, 0, 2}, {3, 0, 6}, {5, 2, 8}, {7, 6, 8}, {4, 0,2,6,8},
+		 {19, 18, 20}, {21, 18, 24}, {23, 20, 26}, {25, 24, 26}, {22, 18,20,24,26},
+		 {9, 0, 18}, {11, 2, 20}, {15, 6, 24}, {17, 8, 26}, {10, 0,2,18,20}, {12, 0,6,18,24},  {16, 6,8,24,26}, {14, 2,8,20,26},
+		 {13, 0,2,6,8,18,20,24,26}},  // C1TB		
+		{{1, 0, 2}, {3, 0, 6}, {5, 2, 8}, {7, 6, 8}, {4, 0,2,6,8},
+		 {19, 18, 20}, {21, 18, 24}, {23, 20, 26}, {25, 24, 26}, {22, 18,20,24,26},
+		 {9, 0, 18}, {11, 2, 20}, {15, 6, 24}, {17, 8, 26}, {10, 0,2,18,20}, {12, 0,6,18,24},  {16, 6,8,24,26}, {14, 2,8,20,26},
+		 {13, 0,2,6,8,18,20,24,26}}  // C1		
+	};
+
 	const std::vector<std::vector<unsigned>> BulkElementTetra3dC1::Nodal_Space_Index_To_Element_Index_Map={
 		{}, // C2TB 
 		{}, // C2
 		{}, // C1TB
 		{0,1,2,3}  // C1
 	};
+	
 
 	const std::vector<std::vector<unsigned>> BulkElementTetra3dC1TB::Nodal_Space_Index_To_Element_Index_Map={
 		{}, // C2TB 
 		{}, // C2
 		{0,1,2,3,4}, // C1TB
 		{0,1,2,3}  // C1
+	};
+
+	const std::vector<std::vector<std::vector<unsigned>>> BulkElementTetra3dC1TB::Dummy_Value_Interpolation_Map={
+		{}, // C2TB 
+		{}, // C2
+		{}, // C1TB
+		{{4, 0,1,2,3}}  // C1
 	};
 
 	const std::vector<std::vector<unsigned>> BulkElementTetra3dC2::Nodal_Space_Index_To_Element_Index_Map={
@@ -14579,11 +13784,27 @@ namespace pyoomph
 		{0,1,2,3}  // C1
 	};
 
+	const std::vector<std::vector<std::vector<unsigned>>> BulkElementTetra3dC2::Dummy_Value_Interpolation_Map=
+	{
+		{}, // C2TB 
+		{}, // C2
+		{}, // C1TB
+		{{4,0,1},{5,0,2},{6,0,3},{7,1,2},{8,2,3},{9,1,3}}  // C1		
+	};
+
 	const std::vector<std::vector<unsigned>> BulkElementTetra3dC2TB::Nodal_Space_Index_To_Element_Index_Map={
 		{0,1,2,3,4,5,6,7,8,9,10,11,12,13,14}, // C2TB 
 		{0,1,2,3,4,5,6,7,8,9}, // C2
 		{0,1,2,3,14}, // C1TB
 		{0,1,2,3}  // C1
+	};
+
+	const std::vector<std::vector<std::vector<unsigned>>> BulkElementTetra3dC2TB::Dummy_Value_Interpolation_Map=
+	{
+		{}, // C2TB 
+		{{10,0,1,3},{11,0,1,2},{12,0,2,3},{13,1,2,3},{14,0,1,2,3}}, // C2
+		{{4,0,1},{5,0,2},{6,0,3},{7,1,2},{8,2,3},{9,1,3},{10,0,1,3},{11,0,1,2},{12,0,2,3},{13,1,2,3}}, // C1TB
+		{{4,0,1},{5,0,2},{6,0,3},{7,1,2},{8,2,3},{9,1,3},{10,0,1,3},{11,0,1,2},{12,0,2,3},{13,1,2,3},{14,0,1,2,3}}  // C1		
 	};
 
 	const std::vector<std::vector<unsigned>> BulkElementWedge3dC1::Nodal_Space_Index_To_Element_Index_Map={
@@ -14598,6 +13819,14 @@ namespace pyoomph
 		{0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17}, // C2
 		{}, // C1TB
 		{0,1,2,12,13,14}  // C1
+	};
+
+	const std::vector<std::vector<std::vector<unsigned>>> BulkElementWedge3dC2::Dummy_Value_Interpolation_Map=
+	{
+		{}, // C2TB 
+		{}, // C2
+		{}, // C1TB
+		{{3,0,1},{4,1,2},{5,0,2},{15,12,13},{16,12,14},{17,13,14},{6,0,12},{7,1,13},{8,2,14},{9,3,15},{10,4,16},{11,5,17}}  // C1		
 	};
 
 	const std::vector<std::vector<unsigned>> BulkElementPyramid3dC1::Nodal_Space_Index_To_Element_Index_Map={
