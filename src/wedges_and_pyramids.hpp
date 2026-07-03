@@ -743,7 +743,7 @@ Index : Local coordinates (s0,s1,s2)
 
 class WedgeElementC2 : public virtual RefineableWedgeElement
 {
- // Admittably, with the help of Claude.ai ...
+ /* Admittably, with the help of Claude.ai ...
  // An 18-node quadratic (serendipity-style) wedge / triangular prism element.
  //
  // Node numbering
@@ -866,7 +866,7 @@ class WedgeElementC2 : public virtual RefineableWedgeElement
  //     6       5      1/2   0    t-edge  mid (between corners i=0 & i=2)
  //     7      17      1/2   1    t-edge  mid (between corners i=1 & i=3)
  //     8      11      1/2  1/2   centre
-
+ */
  private:
     static WedgeGaussC2 Default_integration_scheme;
 

@@ -378,7 +378,7 @@ typedef struct JITFuncSpec_Table_FiniteElement_SpaceInfo
 
  unsigned nnode_index; // Pointing to the element info nnode array (in a mixed mesh, a quad and a tri have e.g. different nnode, but it also depends on the space) // Set during problem level
  bool is_dominant; // Is this the dominant space for the element, i.e. the geometric space where also the coordinates live? (e.g. C2TB>C2>C1TB>C1) // Set during problem level
- unsigned element_node_to_space_node_index; // A C1 space on C2 quad does not use all spaces. We therefore have arrays which map the element node index to the space node index. This is the index for that array. // Set during problem level
+ unsigned space_node_to_element_index; // A C1 space on C2 quad does not use all spaces. We therefore have arrays which map the space node index (0..eleminfo.nnode_of_space[nnode_index]-1) to the element node index.
  unsigned int hangbuffer_index;
 } JITFuncSpec_Table_FiniteElement_SpaceInfo_t;
 
@@ -387,7 +387,6 @@ typedef struct JITFuncSpec_Table_FiniteElement
 {
   unsigned int nodal_dim, lagr_dim;
 
-  bool bulk_position_space_to_C1;
 
   // Old way of handling things
   unsigned int numfields_C1, numfields_C1_bulk, numfields_C1_basebulk,numfields_C1_new; // Fields numfields_C1 are the total number of fields, numfields_C1_bulk are the ones which are defined on the bulk mesh (including the additional field of all parent interface meshes, numfields_C1_basebulk are indeed the fields that are directly implemented only at the lowest level. numfields_C1_new are the number of fields defined directly at this element level, i.e for lowest bulk level, numfields_C1_new=numfields_C1_bulk=numfields_C1_basebulk=numfields_C1. For interface elements, we get numfields_C1_new=numfields_C1-numfields_C1_bulk;
@@ -448,8 +447,8 @@ typedef struct JITFuncSpec_Table_FiniteElement
   // New way of handling things 
   JITFuncSpec_Table_FiniteElement_SpaceInfo_t info_C1,info_C2,info_C2TB,info_C1TB,info_D1,info_D1TB,info_D2,info_D2TB,info_DL,info_D0,info_ED0,info_Pos;
 
-  JITFuncSpec_Table_FiniteElement_SpaceInfo_t *continuous_spaces[4]; // points to the infos C2TB,C2,C1TB,C1 for looping
-  unsigned num_continuous_spaces; // set to 4, but could be changed at some points
+  JITFuncSpec_Table_FiniteElement_SpaceInfo_t *continuous_spaces[4]; // points to the infos C2TB,C2,C1TB,C1 for looping. Note that not all are filled, only if they are present
+  unsigned num_continuous_spaces; // Only the ones that are actually present, i.e. num_continuous_spaces<=4
 
   //Exponents for the D0 fields upon refinement. 
   // If zero [default]: 

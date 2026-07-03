@@ -127,10 +127,10 @@ namespace pyoomph
 		functable->info_C1TB.hangbuffer_index=3;
 		functable->info_C1.hangbuffer_index=4;
 
-		functable->info_C2TB.element_node_to_space_node_index=0;
-		functable->info_C2.element_node_to_space_node_index=1;
-		functable->info_C1TB.element_node_to_space_node_index=2;
-		functable->info_C1.element_node_to_space_node_index=3;
+		functable->info_C2TB.space_node_to_element_index  =0;
+		functable->info_C2.space_node_to_element_index=1;
+		functable->info_C1TB.space_node_to_element_index=2;
+		functable->info_C1.space_node_to_element_index=3;
 		
 		// Only add the spaces which are really present to the continuous_spaces array, in order of dominance
 		functable->num_continuous_spaces=0;
@@ -140,10 +140,10 @@ namespace pyoomph
 		if (functable->info_C1.numfields>0) {functable->continuous_spaces[functable->num_continuous_spaces]=&functable->info_C1; functable->num_continuous_spaces++;}
 
 		std::string dominant_space=functable->dominant_space;
-		if (dominant_space=="C2TB") {functable->info_C2TB.is_dominant=true; functable->info_Pos.element_node_to_space_node_index=0;}
-		else if (dominant_space=="C2") {functable->info_C2.is_dominant=true; functable->info_Pos.element_node_to_space_node_index=1;}
-		else if (dominant_space=="C1TB") {functable->info_C1TB.is_dominant=true; functable->info_Pos.element_node_to_space_node_index=2;}
-		else if (dominant_space=="C1") {functable->info_C1.is_dominant=true; functable->info_Pos.element_node_to_space_node_index=3;}
+		if (dominant_space=="C2TB") {functable->info_C2TB.is_dominant=true; functable->info_Pos.space_node_to_element_index=0;}
+		else if (dominant_space=="C2") {functable->info_C2.is_dominant=true; functable->info_Pos.space_node_to_element_index=1;}
+		else if (dominant_space=="C1TB") {functable->info_C1TB.is_dominant=true; functable->info_Pos.space_node_to_element_index=2;}
+		else if (dominant_space=="C1") {functable->info_C1.is_dominant=true; functable->info_Pos.space_node_to_element_index=3;}
 		else
 		{
 			std::ostringstream errmsg;

@@ -176,8 +176,7 @@ namespace pyoomph
     JITShapeInfo_t *shape_info;
 
     void free_element_info();
-
-    virtual void constrain_bulk_position_space_to_C1();
+    
     virtual void allocate_discontinous_fields();
     virtual void prepare_shape_buffer_for_integration(const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag);
     virtual void fill_shape_info_element_sizes(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, unsigned flag) const;
@@ -197,8 +196,7 @@ namespace pyoomph
     double initial_quality_factor = 0.0;
     virtual oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) {throw_runtime_error(std::string("Specify the face element constructor for the element type ")+typeid(*this).name()); return NULL;}
     virtual const std::vector<int> & get_possible_face_indices() const=0;
-    virtual  std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const=0;
-    virtual void fill_dofs_to_dirichlet_set_indices(std::vector<unsigned> &indices);
+    virtual  std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const=0;    
     virtual void fill_shape_buffer_for_integration_point(unsigned ipt, const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag);
     virtual void set_remaining_shapes_appropriately(JITShapeInfo_t *shape_info, const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes);
     virtual void fill_element_info(bool without_equations=false);
@@ -353,9 +351,7 @@ namespace pyoomph
     //  virtual void assign_all_generic_local_eqn_numbers(const bool &store_local_dof_pt);
 
     virtual ~BulkElementBase();
-
-    unsigned ndof_types() const;
-    void get_dof_numbers_for_unknowns(std::list<std::pair<unsigned long, unsigned>> &dof_lookup_list) const;
+    
 
     virtual BulkElementBase *create_son_instance() const = 0;
     unsigned ncont_interpolated_values() const;
@@ -453,7 +449,7 @@ namespace pyoomph
       //	 fill_element_info();
     }
 
-    virtual void unpin_dummy_values(); // C1 fields on C2 elements have dummy values on only C2 nodes, which needs to be pinned
+    virtual void unpin_dummy_values(); 
     virtual void pin_dummy_values();
     virtual void unpin_Dirichlet_dofs_for_matrix_manipulation(DirichletMatrixManipulationInfo & info);
 
@@ -900,8 +896,7 @@ namespace pyoomph
   protected:
     static unsigned int index_C1_to_element[4];
     static int element_index_to_C1[9];
-    static bool node_only_C2[9];
-    virtual void constrain_bulk_position_space_to_C1();
+    static bool node_only_C2[9];    
 
     static const std::vector<int> Possible_Face_Indices;
     static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
@@ -1068,8 +1063,7 @@ namespace pyoomph
   class BulkElementTri2dC2TB;
   class BulkElementTri2dC2 : public virtual BulkElementBase, public virtual oomph::TElement<2, 3>, public virtual oomph::RefineableTElement<2>
   {
-  protected:
-    virtual void constrain_bulk_position_space_to_C1();
+  protected:    
 
     static const std::vector<int> Possible_Face_Indices;
     static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
@@ -1813,9 +1807,8 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
 
     static bool interpolate_new_interface_dofs;
     virtual void update_equation_remapping();
-    virtual void set_remaining_shapes_appropriately(JITShapeInfo_t *shape_info, const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes);
-    void unpin_dummy_values(); // C1 fields on C2 elements have dummy values on only C2 nodes, which needs to be pinned
-    void pin_dummy_values();
+    virtual void set_remaining_shapes_appropriately(JITShapeInfo_t *shape_info, const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes);    
+    void pin_dummy_values() override;
     void unpin_Dirichlet_dofs_for_matrix_manipulation(DirichletMatrixManipulationInfo & info) override;
 
     void set_as_internal_facet_opposite_dummy() { Is_internal_facet_opposite_dummy = true; }

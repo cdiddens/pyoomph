@@ -27,6 +27,7 @@ The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
 namespace py = pybind11;
 
 #include <sstream>
+#include <map>
 
 #include "../codegen.hpp"
 #include "../ccompiler.hpp"
@@ -384,8 +385,7 @@ void PyReg_CodeGen(py::module &m)
         .def("_set_reference_point_for_IC_and_DBC", &pyoomph::FiniteElementCode::set_reference_point_for_IC_and_DBC)
         .def("_index_fields", &pyoomph::FiniteElementCode::index_fields)
         .def("get_domain_name", &pyoomph::FiniteElementCode::get_domain_name)
-        .def("set_latex_printer", &pyoomph::FiniteElementCode::set_latex_printer)
-        .def_readwrite("bulk_position_space_to_C1", &pyoomph::FiniteElementCode::bulk_position_space_to_C1)
+        .def("set_latex_printer", &pyoomph::FiniteElementCode::set_latex_printer)        
         .def_readwrite("debug_jacobian_epsilon", &pyoomph::FiniteElementCode::debug_jacobian_epsilon)
         .def_readwrite("with_adaptivity", &pyoomph::FiniteElementCode::with_adaptivity)
         .def_readwrite("ccode_expression_mode", &pyoomph::FiniteElementCode::ccode_expression_mode)

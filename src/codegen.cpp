@@ -7631,10 +7631,7 @@ namespace pyoomph
 				init << " functable->JacobianForElementSizeSecondSpatialDerivative=&JacobianForElementSizeSecondSpatialDerivatives;" << std::endl;
 			}
 		}
-		if (this->bulk_position_space_to_C1)
-		{
-			init << "   functable->bulk_position_space_to_C1=true;" << std::endl;
-		}
+		
 		init << " SET_INTERNAL_NAME(functable->domain_name,\"" << this->get_domain_name() << "\");" << std::endl;
 		cleanup << " pyoomph_tested_free(functable->domain_name); functable->domain_name=PYOOMPH_NULL; " << std::endl;
 		init << " functable->clean_up=&clean_up;" << std::endl;

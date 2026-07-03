@@ -978,8 +978,7 @@ namespace pyoomph
          else return this->get_domain_name();
       }      
       virtual void set_discontinuous_refinement_exponent(std::string field, double exponent);
-      double warn_on_large_numerical_factor = 0.0;
-      bool bulk_position_space_to_C1 = false;
+      double warn_on_large_numerical_factor = 0.0;      
       bool use_shared_shape_buffer_during_multi_assemble = false;
       LaTeXPrinter *latex_printer;
       virtual void set_latex_printer(LaTeXPrinter *lp) { latex_printer = lp; }

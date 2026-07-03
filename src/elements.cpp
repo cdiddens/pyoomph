@@ -365,110 +365,6 @@ namespace pyoomph
 		// Otherwise, we can't do anything
 	}
 
-	unsigned BulkElementBase::ndof_types() const
-	{
-		auto *ft = codeinst->get_func_table();
-		unsigned res = ft->numfields_C2TB + ft->numfields_C2 + ft->numfields_C1 + ft->numfields_D1 + ft->numfields_D2 +ft->numfields_D2TB+ft->numfields_D1TB+  ft->numfields_DL + ft->numfields_D0 ; // TODO: Optionally, allow for splitting of the DL space
-		if (ft->moving_nodes)
-		{
-			res += this->nodal_dimension(); // position dofs
-		}
-		return res;
-	}
-
-	void BulkElementBase::fill_dofs_to_dirichlet_set_indices(std::vector<unsigned> &indices)
-	{
-		throw_runtime_error("Implement");
-	}
-	
-	void BulkElementBase::get_dof_numbers_for_unknowns(std::list<std::pair<unsigned long, unsigned>> &dof_lookup_list) const
-	{
-
-		auto *ft = codeinst->get_func_table();
-		//   unsigned n_node = this->nnode();
-		std::pair<unsigned, unsigned> dof_lookup;
-		unsigned cnt = 0;
-	   for (unsigned f = 0; f < ft->numfields_C2TB_basebulk; f++)
-		{
-			unsigned nind = f;
-			for (unsigned l = 0; l < eleminfo.nnode_C2TB; l++)
-			{
-				int local_eqn_number = this->nodal_local_eqn(this->get_node_index_C2TB_to_element(l), nind);
-				if (local_eqn_number >= 0)
-				{
-					dof_lookup.first = this->eqn_number(local_eqn_number);
-					dof_lookup.second = cnt;
-					dof_lookup_list.push_front(dof_lookup);
-				}
-			}
-			cnt++;
-		}
-				
-		for (unsigned f = 0; f < ft->numfields_C2_basebulk; f++)
-		{
-			unsigned nind = f;
-			for (unsigned l = 0; l < eleminfo.nnode_C2; l++)
-			{
-				int local_eqn_number = this->nodal_local_eqn(this->get_node_index_C2_to_element(l), nind);
-				if (local_eqn_number >= 0)
-				{
-					dof_lookup.first = this->eqn_number(local_eqn_number);
-					dof_lookup.second = cnt;
-					dof_lookup_list.push_front(dof_lookup);
-				}
-			}
-			cnt++;
-		}
-
-		for (unsigned f = 0; f < ft->numfields_C1_basebulk; f++)
-		{
-			unsigned nind = f + ft->numfields_C2_basebulk;
-			for (unsigned l = 0; l < this->eleminfo.nnode_C2; l++)
-			{
-				int local_eqn_number = this->nodal_local_eqn(this->get_node_index_C1_to_element(l), nind);
-				if (local_eqn_number >= 0)
-				{
-					dof_lookup.first = this->eqn_number(local_eqn_number);
-					dof_lookup.second = cnt;
-					dof_lookup_list.push_front(dof_lookup);
-				}
-			}
-			cnt++;
-		}
-		
-      // TODO: DG				
-		// TODO: Interface stuff
-
-		for (unsigned f = 0; f < ft->numfields_DL; f++)
-		{
-			unsigned nind = f;
-			for (unsigned l = 0; l < eleminfo.nnode_DL; l++)
-			{
-				int local_eqn_number = this->internal_local_eqn(nind, l);
-				if (local_eqn_number >= 0)
-				{
-					dof_lookup.first = this->eqn_number(local_eqn_number);
-					dof_lookup.second = cnt;
-					dof_lookup_list.push_front(dof_lookup);
-				}
-			}
-			cnt++;
-		}
-
-		for (unsigned f = 0; f < ft->numfields_D0; f++)
-		{
-			unsigned nind = f + ft->numfields_DL;
-			int local_eqn_number = this->internal_local_eqn(nind, 0);
-			if (local_eqn_number >= 0)
-			{
-				dof_lookup.first = this->eqn_number(local_eqn_number);
-				dof_lookup.second = cnt;
-				dof_lookup_list.push_front(dof_lookup);
-			}
-			cnt++;
-		}
-	}
-
 
 	bool BulkElementBase::fill_hang_info_with_equations_for_pos(JITShapeInfo_t *shape_info)
 	{
@@ -499,11 +395,6 @@ namespace pyoomph
 			}
 		}
 
-		for (unsigned int l = 0; l < eleminfo.nnode; l++)
-		{
-			shape_info->hanginfo_Discont[l].nummaster = 0;
-		}
-
 		return res;
 	}
 
@@ -515,7 +406,7 @@ namespace pyoomph
 		{
 			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info = ft->continuous_spaces[ispace];
 			unsigned nnode_space=eleminfo.nnode_of_space[space_info->nnode_index];
-			const std::vector<unsigned> & space_node_to_elem_node=this->get_nodal_space_index_to_element_index_map()[space_info->element_node_to_space_node_index];
+			const std::vector<unsigned> & space_node_to_elem_node=this->get_nodal_space_index_to_element_index_map()[space_info->space_node_to_element_index];
 			int hangindex=space_info->hangindex;
 			JITHangInfo_t * hangbuffer=shape_info->hanginfo[space_info->hangbuffer_index];
 			for (unsigned int l = 0; l < nnode_space; l++)
@@ -548,6 +439,7 @@ namespace pyoomph
 	void BulkElementBase::interpolate_hang_values()
 	{
 
+		// First positional hanging
 		for (unsigned l = 0; l < this->nnode(); l++)
 		{
 			pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(this->node_pt(l));
@@ -560,6 +452,7 @@ namespace pyoomph
 			}
 		}
 
+		// Then going over the basebulk fields of all continuous spaces
 		auto * ft=codeinst->get_func_table();
 		const std::vector<std::vector<unsigned>> & space_node_to_elem_node_map=this->get_nodal_space_index_to_element_index_map();
 		const std::vector<std::vector<std::vector<unsigned>>> & dummy_value_interpolation_map=this->get_dummy_value_interpolation_map();
@@ -567,7 +460,7 @@ namespace pyoomph
 		{
 			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info = ft->continuous_spaces[ispace];
 			unsigned nnode_space=eleminfo.nnode_of_space[space_info->nnode_index];
-			const std::vector<unsigned> & space_node_to_elem_node=space_node_to_elem_node_map[space_info->element_node_to_space_node_index];
+			const std::vector<unsigned> & space_node_to_elem_node=space_node_to_elem_node_map[space_info->space_node_to_element_index];
 			int hangindex=space_info->hangindex;
 			for (unsigned l = 0; l < nnode_space; l++)
 			{
@@ -585,7 +478,8 @@ namespace pyoomph
 					}
 				}
 			}
-			const std::vector<std::vector<unsigned>> & dummy_value_interpolation=dummy_value_interpolation_map[space_info->element_node_to_space_node_index];
+			// If you are e.g. on a C2 element, C1 fields have dummy values on the C2 only nodes. These are filled now by averaging the values of the C1 nodes. This is needed for hanging node interpolation, since the C2 nodes are not hanging, but the C1 nodes are.
+			const std::vector<std::vector<unsigned>> & dummy_value_interpolation=dummy_value_interpolation_map[space_info->space_node_to_element_index];
 			if (dummy_value_interpolation.size()>0)
 			{
 				unsigned ntstorage = node_pt(0)->ntstorage();
@@ -600,7 +494,7 @@ namespace pyoomph
 							{								
 								val+=node_pt(interp[m])->value(t, space_info->nodal_offset_basebulk+f);
 							}
-							node_pt(interp[0])->value_pt(space_info->nodal_offset_basebulk+f)[t] = val/(double)(interp.size()-1);
+							node_pt(interp[0])->value_pt(space_info->nodal_offset_basebulk+f)[t] = val/(double)(interp.size()-1.0);
 						}						
 					}
 				}
@@ -614,220 +508,73 @@ namespace pyoomph
 	 auto *ft=codeinst->get_func_table();
 	 std::vector<std::pair<oomph::Data*,int> > result;
 	 auto find_by_name=[name](char **fnames,unsigned numf)->int {for(unsigned int i=0;i<numf;i++) if (name==std::string(fnames[i])) return i;  return -1;};
-	 int ind;
-	 if (ft->numfields_C2TB && ((ind=find_by_name(ft->fieldnames_C2TB,ft->numfields_C2TB))>=0))
+
+	 for (unsigned int ispace=0;ispace<ft->num_continuous_spaces;ispace++)
 	 {
-		if (ind<(int)ft->numfields_C2TB_basebulk)
+		const JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info = ft->continuous_spaces[ispace];
+		// Basebulk fields of continuous spaces
+		for (unsigned int f=0;f<space_info->numfields_basebulk;f++)
 		{
-			if (!use_elemental_indices)
+			if (name==std::string(space_info->fieldnames[f]))
 			{
-			  for (unsigned int i=0;i<eleminfo.nnode_C2TB;i++) result.push_back(std::make_pair(this->node_pt(this->get_node_index_C2TB_to_element(i)),ind+ft->nodal_offset_C2TB_basebulk));
-			}
-			else
-			{
-			  for (unsigned int i=0;i<eleminfo.nnode;i++) 
-			  {
-				int nind=this->get_node_index_element_to_C2TB(i);
-				if (nind>=0)
-				{
-					result.push_back(std::make_pair(this->node_pt(i),ind+ft->nodal_offset_C2TB_basebulk));
+				std::vector<unsigned> space_node_to_elem_node=this->get_nodal_space_index_to_element_index_map()[space_info->space_node_to_element_index];
+				if (!use_elemental_indices)
+				{					
+					for (unsigned int i=0;i<eleminfo.nnode_of_space[space_info->nnode_index];i++)
+					{
+						result.push_back(std::make_pair(this->node_pt(space_node_to_elem_node[i]),f+space_info->nodal_offset_basebulk));
+					}					
 				}
 				else
-				{
-					result.push_back(std::make_pair(nullptr,-1));
+				{					
+					result.resize(eleminfo.nnode,std::make_pair(nullptr,-1));
+					for (unsigned int i=0;i<eleminfo.nnode_of_space[space_info->nnode_index];i++)
+					{
+						int nind=space_node_to_elem_node[i];
+						result[nind]=std::make_pair(this->node_pt(nind),f+space_info->nodal_offset_basebulk);						
+					}
 				}
-			  }
+				return result;
 			}
 		}
-		else
+		// Additional interface fields of continuous spaces
+		for (unsigned int i=space_info->numfields_basebulk;i<space_info->numfields;i++)
 		{
-			unsigned interf_id = codeinst->resolve_interface_dof_id(name);
-			if (!use_elemental_indices)
+			if (name==std::string(space_info->fieldnames[i]))
 			{
-			  for (unsigned int i=0;i<eleminfo.nnode_C2TB;i++) 
-			  {
-				auto *n=this->node_pt(this->get_node_index_C2TB_to_element(i));
-				result.push_back(std::make_pair(n,dynamic_cast<oomph::BoundaryNodeBase *>(n)->index_of_first_value_assigned_by_face_element(interf_id)));
-			  }
-			}
-			else
-			{
-			  for (unsigned int i=0;i<eleminfo.nnode;i++) 
-			  {
-				int nind=this->get_node_index_element_to_C2TB(i);
-				if (nind>=0)
-				{
-					auto *n=this->node_pt(i);
-					result.push_back(std::make_pair(n,dynamic_cast<oomph::BoundaryNodeBase *>(n)->index_of_first_value_assigned_by_face_element(interf_id)));
+				unsigned interf_id = space_info->interface_dof_indices[i-space_info->numfields_basebulk];
+				std::vector<unsigned> space_node_to_elem_node=this->get_nodal_space_index_to_element_index_map()[space_info->space_node_to_element_index];
+				if (!use_elemental_indices)
+				{					
+					for (unsigned int i=0;i<eleminfo.nnode_of_space[space_info->nnode_index];i++)
+					{
+						auto *n=this->node_pt(space_node_to_elem_node[i]);
+						pyoomph::BoundaryNode *bn=dynamic_cast<pyoomph::BoundaryNode *>(n);
+						if (!bn) throw_runtime_error("Node is not a boundary node, but the field is an interface field");
+						result.push_back(std::make_pair(n,bn->index_of_first_value_assigned_by_face_element(interf_id)));
+					}					
 				}
 				else
-				{
-					result.push_back(std::make_pair(nullptr,-1));
+				{					
+					result.resize(eleminfo.nnode,std::make_pair(nullptr,-1));
+					for (unsigned int i=0;i<eleminfo.nnode_of_space[space_info->nnode_index];i++)
+					{
+						int nind=space_node_to_elem_node[i];
+						auto *n=this->node_pt(nind);
+						pyoomph::BoundaryNode *bn=dynamic_cast<pyoomph::BoundaryNode *>(n);
+						if (!bn) throw_runtime_error("Node is not a boundary node, but the field is an interface field");
+						result[nind]=std::make_pair(n,bn->index_of_first_value_assigned_by_face_element(interf_id));						
+					}
 				}
-			  }
+				return result;
 			}
 		}
+		
 	 }
-	 else if (ft->numfields_C2 && ((ind=find_by_name(ft->fieldnames_C2,ft->numfields_C2))>=0))
-	 {
-		if (ind<(int)ft->numfields_C2_basebulk)
-		{
-			if (!use_elemental_indices)
-			{
-			  for (unsigned int i=0;i<eleminfo.nnode_C2;i++) result.push_back(std::make_pair(this->node_pt(this->get_node_index_C2_to_element(i)),ind+ft->nodal_offset_C2_basebulk));
-			}
-			else
-			{
-			  for (unsigned int i=0;i<eleminfo.nnode;i++) 
-			  {
-				int nind=this->get_node_index_element_to_C2(i);
-				if (nind>=0)
-				{
-					result.push_back(std::make_pair(this->node_pt(i),ind+ft->nodal_offset_C2_basebulk));
-				}
-				else
-				{
-					result.push_back(std::make_pair(nullptr,-1));
-				}
-			  }
-			}
-		}
-		else
-		{
-			unsigned interf_id = codeinst->resolve_interface_dof_id(name);
-			if (!use_elemental_indices)
-			{
-			  for (unsigned int i=0;i<eleminfo.nnode_C2;i++) 
-			  {
-				auto *n=this->node_pt(this->get_node_index_C2_to_element(i));
-				result.push_back(std::make_pair(n,dynamic_cast<oomph::BoundaryNodeBase *>(n)->index_of_first_value_assigned_by_face_element(interf_id)));
-			  }
-			}
-			else
-			{
-			  for (unsigned int i=0;i<eleminfo.nnode;i++) 
-			  {
-				int nind=this->get_node_index_element_to_C2(i);
-				if (nind>=0)
-				{
-					auto *n=this->node_pt(i);
-					result.push_back(std::make_pair(n,dynamic_cast<oomph::BoundaryNodeBase *>(n)->index_of_first_value_assigned_by_face_element(interf_id)));
-				}
-				else
-				{
-					result.push_back(std::make_pair(nullptr,-1));
-				}
-			  }
-			}
-		}
-	 }
-    else if (ft->numfields_C1TB && ((ind=find_by_name(ft->fieldnames_C1TB,ft->numfields_C1TB))>=0))
-	 {
-		if (ind<(int)ft->numfields_C1TB_basebulk)
-		{
-			if (!use_elemental_indices)
-			{
-			  for (unsigned int i=0;i<eleminfo.nnode_C1TB;i++) result.push_back(std::make_pair(this->node_pt(this->get_node_index_C1TB_to_element(i)),ind+ft->nodal_offset_C1TB_basebulk));
-			}
-			else
-			{
-			  for (unsigned int i=0;i<eleminfo.nnode;i++) 
-			  {
-				int nind=this->get_node_index_element_to_C1TB(i);
-				if (nind>=0)
-				{
-					result.push_back(std::make_pair(this->node_pt(i),ind+ft->nodal_offset_C1TB_basebulk));
-				}
-				else
-				{
-					result.push_back(std::make_pair(nullptr,-1));
-				}
-			  }
-			}
-		}
-		else
-		{
-			unsigned interf_id = codeinst->resolve_interface_dof_id(name);
-			if (!use_elemental_indices)
-			{
-			  for (unsigned int i=0;i<eleminfo.nnode_C1TB;i++) 
-			  {
-				auto *n=this->node_pt(this->get_node_index_C1TB_to_element(i));
-				result.push_back(std::make_pair(n,dynamic_cast<oomph::BoundaryNodeBase *>(n)->index_of_first_value_assigned_by_face_element(interf_id)));
-			  }
-			}
-			else
-			{
-			  for (unsigned int i=0;i<eleminfo.nnode;i++) 
-			  {
-				int nind=this->get_node_index_element_to_C1TB(i);
-				if (nind>=0)
-				{
-					auto *n=this->node_pt(i);
-					result.push_back(std::make_pair(n,dynamic_cast<oomph::BoundaryNodeBase *>(n)->index_of_first_value_assigned_by_face_element(interf_id)));
-				}
-				else
-				{
-					result.push_back(std::make_pair(nullptr,-1));
-				}
-			  }
-			}
-		}
-	 }	 
-	 else if (ft->numfields_C1 && ((ind=find_by_name(ft->fieldnames_C1,ft->numfields_C1))>=0))
-	 {
-		if (ind<(int)ft->numfields_C1_basebulk)
-		{
-			if (!use_elemental_indices)
-			{
-			  for (unsigned int i=0;i<eleminfo.nnode_C1;i++) result.push_back(std::make_pair(this->node_pt(this->get_node_index_C1_to_element(i)),ind+ft->nodal_offset_C1_basebulk));
-			}
-			else
-			{
-			  for (unsigned int i=0;i<eleminfo.nnode;i++) 
-			  {
-				int nind=this->get_node_index_element_to_C1(i);
-				if (nind>=0)
-				{
-					result.push_back(std::make_pair(this->node_pt(i),ind+ft->nodal_offset_C1_basebulk));
-				}
-				else
-				{
-					result.push_back(std::make_pair(nullptr,-1));
-				}
-			  }
-			}
-		}
-		else
-		{
-			unsigned interf_id = codeinst->resolve_interface_dof_id(name);
-			if (!use_elemental_indices)
-			{
-			  for (unsigned int i=0;i<eleminfo.nnode_C1;i++) 
-			  {
-				auto *n=this->node_pt(this->get_node_index_C1_to_element(i));
-				result.push_back(std::make_pair(n,dynamic_cast<oomph::BoundaryNodeBase *>(n)->index_of_first_value_assigned_by_face_element(interf_id)));
-			  }
-			}
-			else
-			{
-			  for (unsigned int i=0;i<eleminfo.nnode;i++) 
-			  {
-				int nind=this->get_node_index_element_to_C1(i);
-				if (nind>=0)
-				{
-					auto *n=this->node_pt(i);
-					result.push_back(std::make_pair(n,dynamic_cast<oomph::BoundaryNodeBase *>(n)->index_of_first_value_assigned_by_face_element(interf_id)));
-				}
-				else
-				{
-					result.push_back(std::make_pair(nullptr,-1));
-				}
-			  }
-			}
-		}
-	 }
-	 else if (ft->numfields_D2TB && ((ind=find_by_name(ft->fieldnames_D2TB,ft->numfields_D2TB))>=0))	 
+
+	 // TODO: DG loop here
+	 int ind=-1;
+	 if (ft->numfields_D2TB && ((ind=find_by_name(ft->fieldnames_D2TB,ft->numfields_D2TB))>=0))	 
 	 {	 
         oomph::Data * data=this->get_D2TB_nodal_data(ind);
 	    if (!use_elemental_indices)
@@ -1653,63 +1400,18 @@ namespace pyoomph
 							for (unsigned lp = 0; lp < n_node; lp++)
 							{
 								for (unsigned int jp = 0; jp < nodal_dim; jp++)
-								{
-								 //d2normal_dcoord2[i][l][j][lp][jp]=(i==1 ? -1: 1)*dpsi(l,0)*dpsi(lp,0)*denom*(dxds[1-jp]-3*cross*dxds[jp]/denom_sqr);
+								{								 
 								 d2normal_dcoord2[i][l][j][lp][jp]=(i==1 ? -1 : 1)*(dpsi(l,0)*dpsi(lp,0))*denom*(( (j==jp && j!=i) ? 3*dxds[1-i] : dxds[1-(j==i ? jp : j)])-3*dxds[1-i]*dxds[j]*dxds[jp]/denom_sqr);
 								}												
 							}
 						}
 					}
 				}
-				/*
-				//TODO: REMOVE
-				double ***dnpert;
-				dnpert=(double ***)calloc(nodal_dim,sizeof(double**));
-				for (unsigned int i=0;i < nodal_dim; i++) 
-				{
-				  dnpert[i]=(double **)calloc(n_node,sizeof(double*));
-   			  for (unsigned int l=0;l < n_node; l++) 
-   			  {
-   			   dnpert[i][l]=(double *)calloc(n_node,sizeof(double));
-   			  }
-				}
-				for (unsigned int lp=0;lp<n_node;lp++)
-				{
-				  for (unsigned jp=0;jp<nodal_dim;jp++)
-				  {
-  					 pyoomph::Node * nod=dynamic_cast<pyoomph::Node *>(this->node_pt(lp));
-					 double old=nod->variable_position_pt()->value(jp);
-					 double eps=1e-8;
-					 nod->variable_position_pt()->set_value(jp,old+eps);
-				    this->get_dnormal_dcoords_at_s(s,dnpert,NULL);
-				    std::cout << "FOR LP JP " << lp << "  " << jp << std::endl;
-				    for (unsigned int i=0;i<nodal_dim;i++)
-				    {
-				     for (unsigned int l=0;l<n_node;l++)
-				     {
-				      for (unsigned int j=0;j<nodal_dim;j++)
-				      {
-				        double ana=d2normal_dcoord2[i][l][j][lp][jp];
-				        double fd=(dnpert[i][l][j]-dnormal_dcoord[i][l][j])/eps;
-				        std::cout << "   " << i << "  " << l << "  " << j << " :  "  <<  ana << "  " << fd << "   DIFF " << ana-fd << std::endl; 
-				      }
-				     }
-				    }
-				    
-					 nod->variable_position_pt()->set_value(jp,old);				   
-				  }
-				}
-				*/ 
-
-//			 std::cerr << "DOES NOT WORK: Hessian here" << std::endl << std::flush;
-//			 throw_runtime_error("Hessian here");
+				
 			}
 		}
 		else if (nodal_dim==3 && eldim==2)
 		{
-/************************/
-
-
 			const unsigned n_node = this->nnode();
 			oomph::Shape psi(n_node);
 			oomph::DShape dpsids(n_node, 2);
@@ -1805,18 +1507,6 @@ namespace pyoomph
 				throw_runtime_error("Implement second order moving mesh coordinate derivatives of the normal here");
 			}
 
-
-
-
-
-
-
-
-/**************************////
-
-
-
-					  
 		}
 		else if (eldim==0 && nodal_dim==1)
 		{ 
@@ -1947,7 +1637,6 @@ namespace pyoomph
 	oomph::Data *BulkElementBase::get_DL_nodal_data(const unsigned &fieldindex)
     {
 		auto * ft=this->get_code_instance()->get_func_table();
-//		std::cout << "GETTING INTERNAL DATA " << ft->internal_offset_DL+fieldindex <<  " OF " << this->ninternal_data() << std::endl << std::flush;
         return this->internal_data_pt(ft->internal_offset_DL+fieldindex);
     }
 
@@ -2195,18 +1884,7 @@ namespace pyoomph
 		oomph::TElementBase *telem = dynamic_cast<oomph::TElementBase *>(this);
 		if (telem)
 		{
-			/* for (unsigned int ni=0;ni<this->nnode();ni++)
-			 {
-			  this->local_coordinate_of_node(ni,s);
-			  oomph::Vector<double> s_macro(el_dim);
-			  for(unsigned i=0;i<el_dim;i++)
-			  {
-				 s_macro[i]=telem->s_macro_ll(i)+0.5*(s[i]+1.0)*(telem->s_macro_ur(i)-telem->s_macro_ll(i));
-			  }
-
-			  macro_elem_pt()->macro_map(s_macro,r); //TODO: Time loop
-			  for (unsigned int id=0;id<r.size();id++) this->node_pt(ni)->x(id)=r[id];
-			 }*/
+			/* TODO*/
 			return;
 		}
 	}
@@ -2259,8 +1937,7 @@ namespace pyoomph
 		else if (el->get_geometric_type_index() == 6)
 			res = new BulkElementQuad2dC1();
 		else if (el->get_geometric_type_index() == 8)
-		{
-			//   std::cout << "DOMSPACE " << BulkElementBase::__CurrentCodeInstance->get_func_table()->dominant_space << std::endl;
+		{			
 			if ( domspace == "C1" || domspace=="C1TB")
 			{
 				nodemap = {0, 2, 6, 8};
@@ -2389,7 +2066,6 @@ namespace pyoomph
 		{
 			for (unsigned int i = 0; i < res->nnode(); i++)
 			{
-//			   std::cout << "I " << i << " " << el->get_node_indices().size() << " SI  " << mt->get_nodes().size() << " NM " << nodemap.size()  << " NMU " << nodemap[i] << std::endl;
 				res->node_pt(i) = mt->get_nodes()[el->get_node_indices()[nodemap[i]]]->oomph_node;
 			}
 		}
@@ -2397,32 +2073,7 @@ namespace pyoomph
 		for (unsigned int i = 0; i < res->ninternal_data(); i++)
 			res->internal_data_pt(i)->set_time_stepper(res->node_pt(0)->time_stepper_pt(), false);
 
-		/*
-		 {
-		 const unsigned n_node = res->nnode();
-		  const unsigned n_position_type = res->nnodal_position_type();
-		  //Find the dimension of the node and element
-		  const unsigned n_dim_node = res->nodal_dimension();
-		  const unsigned n_dim_element = res->dim();
-		  std::cout << "INFO " << n_node << "  " << n_position_type << "  " << n_dim_node << "  " << n_dim_element << std::endl;
-		   for(unsigned i=0;i<n_dim_element;i++)
-		   {
-			for(unsigned j=0;j<n_dim_node;j++)
-			 {
-			  //Initialise the j-th component of the i-th base vector to zero
-			  for(unsigned l=0;l<n_node;l++)
-			   {
-				for(unsigned k=0;k<n_position_type;k++)
-				 {
-				   std::cout << "   GETTING " << l << "  " << k << "  " << j << std::endl << std::flush;
-				   std::cout << "     " << res->nodal_position_gen(l,k,j) << std::endl << std::flush;
-				 }
-			   }
-			 }
-		   }
-
-		 }
-		  */
+		
 		res->initial_cartesian_nondim_size = res->size();
 		res->initial_quality_factor = res->get_quality_factor();
 
@@ -2445,18 +2096,13 @@ namespace pyoomph
 			}
 			this->node_pt(l)->unconstrain_positions();
 		}
-
-		if ((!functable->numfields_C1_basebulk) && (!functable->numfields_C2_basebulk) && (!functable->numfields_C2TB_basebulk) && (!functable->numfields_C1TB_basebulk))
-			return; // Nothing to do in this case ///TODO: Check in case of ElasticPVD of C1 only
+		
 		for (unsigned int l = 0; l < nnode(); l++)
 		{
 
 			for (unsigned int i = 0; i < node_pt(l)->nvalue(); i++)
 			{
-				// if (!node_pt(l)->is_hanging())
-				//{
-				node_pt(l)->unpin(i); // After that, the BCs are applied to repin what is necessary
-									  //}
+				node_pt(l)->unpin(i); 
 			}
 		}
 
@@ -2473,11 +2119,7 @@ namespace pyoomph
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
 
-		if (this->eleminfo.nnode_C2 && codeinst->get_func_table()->bulk_position_space_to_C1)
-		{
-			this->constrain_bulk_position_space_to_C1();
-		}
-
+		
 		if (!functable->moving_nodes)
 		{
 			for (unsigned int l = 0; l < nnode(); l++)
@@ -2499,94 +2141,29 @@ namespace pyoomph
 			}
 		}
 
-	//	if ((!functable->numfields_C2TB_basebulk) && (!functable->numfields_C1_basebulk) && (!functable->numfields_C2_basebulk))
-	//		return; // Nothing to do in this case ///TODO: Check in case of ElasticPVD of C1 only
-		for (unsigned n = 0; n < nnode(); n++)
+
+		const std::vector<std::vector<unsigned>> & space_nodes_to_element_nodes=this->get_nodal_space_index_to_element_index_map();
+		const std::vector<std::vector<std::vector<unsigned>>> & dummy_interpolation_mapping=this->get_dummy_value_interpolation_map();
+		for (unsigned int space_index=0;space_index<functable->num_continuous_spaces;space_index++)
 		{
-		   if (!this->is_node_index_part_of_C2TB(n))
-		   {
-				for (unsigned int i = 0;i<functable->numfields_C2TB_basebulk; i++)
-				{
-				  this->node_pt(n)->pin(i+functable->nodal_offset_C2TB_basebulk);
-				}
-			}
-		   if (!this->is_node_index_part_of_C2(n))
-		   {
-				for (unsigned int i = 0;i<functable->numfields_C2_basebulk; i++)
-				{
-				  this->node_pt(n)->pin(i+functable->nodal_offset_C2_basebulk);
-				}
-			}
-		   if (!this->is_node_index_part_of_C1TB(n))
-		   {
-				for (unsigned int i = 0;i<functable->numfields_C1TB_basebulk; i++)
-				{
-				  this->node_pt(n)->pin(i+functable->nodal_offset_C1TB_basebulk);
-				}
-			}
-		   if (!this->is_node_index_part_of_C1(n))
-		   {
-				for (unsigned int i = 0;i<functable->numfields_C1_basebulk; i++)
-				{
-				  this->node_pt(n)->pin(i+functable->nodal_offset_C1_basebulk);
-				}
-			}									
-/*				
-			if (!this->is_node_index_part_of_C1(n))
+			auto *space_info=functable->continuous_spaces[space_index];
+			// Pin all dummy values for this space
+			const std::vector<std::vector<unsigned>> & dummies=dummy_interpolation_mapping[space_info->space_node_to_element_index];
+			for (const std::vector<unsigned> &dummy_entry : dummies)
 			{
-				for (unsigned int i = functable->numfields_C2TB_basebulk + functable->numfields_C2_basebulk; i < functable->numfields_C2TB_basebulk + functable->numfields_C2_basebulk + functable->numfields_C1_basebulk ; i++)
+				for (unsigned int fi=0;fi<space_info->numfields_basebulk;fi++)
 				{
-					this->node_pt(n)->pin(i);
-				}
-				if (!this->is_node_index_part_of_C2(n))
-				{
-					for (unsigned int i = functable->numfields_C2TB_basebulk; i < functable->numfields_C2TB_basebulk + functable->numfields_C2_basebulk; i++)
-					{
-						this->node_pt(n)->pin(i);
-					}
-				}
+					this->node_pt(dummy_entry[0])->pin(space_info->nodal_offset_basebulk+fi);
+				}				
 			}
-*/			
-			if (functable->numfields_C2TB_basebulk)
+			// Check whether non-dummy values are hanging, and if so, constrain them
+			for (unsigned int ni : space_nodes_to_element_nodes[space_info->space_node_to_element_index])
 			{
-				int hanging_index = (codeinst->get_func_table()->bulk_position_space_to_C1 ? 0 : -1);
-				if (node_pt(n)->is_hanging(hanging_index))
+				if (this->node_pt(ni)->is_hanging(space_info->hangindex))
 				{
-					for (unsigned int i = 0; i < functable->numfields_C2TB_basebulk; i++)
+					for (unsigned int fi=0;fi<space_info->numfields_basebulk;fi++)
 					{
-						node_pt(n)->constrain(functable->nodal_offset_C2TB_basebulk+i);
-					}
-				}
-			}
-			if (functable->numfields_C2_basebulk)
-			{
-				int hanging_index = (codeinst->get_func_table()->bulk_position_space_to_C1 ? 0 : -1);
-				if (node_pt(n)->is_hanging(hanging_index))
-				{
-					for (unsigned int i = 0; i < functable->numfields_C2_basebulk; i++)
-					{
-						node_pt(n)->constrain(functable->nodal_offset_C2_basebulk + i);
-					}
-				}
-			}
-			if (functable->numfields_C1TB_basebulk)
-			{
-				if ((this->is_node_index_part_of_C1TB(n)) && node_pt(n)->is_hanging(functable->numfields_C2TB_basebulk + functable->numfields_C2_basebulk))
-				{
-					for (unsigned int i = 0; i < functable->numfields_C1TB_basebulk; i++)
-					{
-						node_pt(n)->constrain(functable->nodal_offset_C1TB_basebulk + functable->numfields_C2_basebulk + i);
-					}
-				}
-			}
-			
-			if (functable->numfields_C1_basebulk)
-			{
-				if ((this->is_node_index_part_of_C1(n)) && node_pt(n)->is_hanging(functable->numfields_C2TB_basebulk + functable->numfields_C2_basebulk))
-				{
-					for (unsigned int i = 0; i < functable->numfields_C1_basebulk; i++)
-					{
-						node_pt(n)->constrain(functable->nodal_offset_C1_basebulk + i);
+						this->node_pt(ni)->constrain(space_info->nodal_offset_basebulk+fi);
 					}
 				}
 			}
@@ -2614,38 +2191,20 @@ namespace pyoomph
 			}
 		}
 
-		for (unsigned n = 0; n < nnode(); n++)
+		const std::vector<std::vector<unsigned>> & space_node_to_element_map=this->get_nodal_space_index_to_element_index_map();
+		for (unsigned int i_space=0;i_space<functable->num_continuous_spaces;i_space++)
 		{
-		   if (this->is_node_index_part_of_C2TB(n))
-		   {
-				for (unsigned int i = 0;i<functable->numfields_C2TB_basebulk; i++)
+			auto *space_info=functable->continuous_spaces[i_space];
+			for (unsigned ni : space_node_to_element_map[space_info->space_node_to_element_index])
+			{
+				for (unsigned int i = 0;i<space_info->numfields_basebulk; i++)
 				{
-				  if (this->node_pt(n)->is_pinned(i+functable->nodal_offset_C2TB_basebulk)) info.add_dirichlet_dof(this->node_pt(n),i+functable->nodal_offset_C2TB_basebulk);
-				}
-			}
-		   if (this->is_node_index_part_of_C2(n))
-		   {
-				for (unsigned int i = 0;i<functable->numfields_C2_basebulk; i++)
-				{
-				  if (this->node_pt(n)->is_pinned(i+functable->nodal_offset_C2_basebulk)) info.add_dirichlet_dof(this->node_pt(n),i+functable->nodal_offset_C2_basebulk);
-				}
-			}
-		   if (this->is_node_index_part_of_C1TB(n))
-		   {
-				for (unsigned int i = 0;i<functable->numfields_C1TB_basebulk; i++)
-				{
-				  if (this->node_pt(n)->is_pinned(i+functable->nodal_offset_C1TB_basebulk)) info.add_dirichlet_dof(this->node_pt(n),i+functable->nodal_offset_C1TB_basebulk);
-				}
-			}
-		   if (this->is_node_index_part_of_C1(n))
-		   {
-				for (unsigned int i = 0;i<functable->numfields_C1_basebulk; i++)
-				{
-				  if (this->node_pt(n)->is_pinned(i+functable->nodal_offset_C1_basebulk)) info.add_dirichlet_dof(this->node_pt(n),i+functable->nodal_offset_C1_basebulk);
+				  if (this->node_pt(ni)->is_pinned(i+space_info->nodal_offset_basebulk)) info.add_dirichlet_dof(this->node_pt(ni),i+space_info->nodal_offset_basebulk);
 				}
 			}
 		}
 
+		// TODO: DG fields here
 		for (unsigned int i = 0; i < functable->numfields_D2TB_basebulk; i++)
 		{
 				for (unsigned int v = 0; v < this->internal_data_pt(functable->internal_offset_D2TB_new + i)->nvalue(); v++)
@@ -8761,68 +8320,7 @@ namespace pyoomph
 		sfather[1] = s_lo[1] + (s_hi[1] - s_lo[1]) * s_fraction[1];
 	}
 
-	void BulkElementBase::constrain_bulk_position_space_to_C1()
-	{
-		for (unsigned int in = 0; in < this->nnode(); in++)
-		{
-			Node *n = dynamic_cast<Node *>(this->node_pt(in));
-			if (!this->is_node_index_part_of_C1(in) && !n->is_on_boundary())
-			{
-				std::vector<oomph::Node *> sn;
-				this->get_supporting_C1_nodes_of_C2_node(in, sn);
-				if (sn.empty())
-					throw_runtime_error("Should not happen");
-				double w = 1.0 / sn.size();
-				std::map<oomph::Node *, double> hangdata;
-				for (auto *s : sn)
-				{
-					if (s->is_hanging(-1))
-					{
-						oomph::HangInfo *hi = s->hanging_pt(-1);
-						for (unsigned int m = 0; m < hi->nmaster(); m++)
-						{
-							oomph::Node *mn = hi->master_node_pt(m);
-							double mw = hi->master_weight(m);
-							if (hangdata.count(mn))
-								hangdata[mn] += w * mw;
-							else
-								hangdata[mn] = w * mw;
-						}
-					}
-					else
-					{
-						if (hangdata.count(s))
-							hangdata[s] += w;
-						else
-							hangdata[s] = w;
-					}
-				}
-				oomph::HangInfo *hang_pt = new oomph::HangInfo(hangdata.size());
-				unsigned cnt = 0;
-				double hangsum = 0.0;
-				for (auto &hd : hangdata)
-				{
-					hang_pt->set_master_node_pt(cnt, hd.first, hd.second);
-					hangsum += hd.second;
-					cnt++;
-					std::cout << "ADDING HANG INFO " << in << "  " << cnt << " " << hd.first << "  " << hd.second << std::endl;
-				}
-				std::cout << "HANGSUM " << hangsum << std::endl;
-				n->set_hanging_pt(hang_pt, -1);
-			}
-		}
-	}
-
-	void BulkElementQuad2dC2::constrain_bulk_position_space_to_C1()
-	{
-
-		BulkElementBase::constrain_bulk_position_space_to_C1();
-
-		for (unsigned int i = 0; i < codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk; i++)
-		{
-			setup_hang_for_value(i);
-		}
-	}
+	
 
 	void BulkElementQuad2dC2::get_supporting_C1_nodes_of_C2_node(const unsigned &n, std::vector<oomph::Node *> &support)
 	{
@@ -8869,10 +8367,7 @@ namespace pyoomph
 			throw_runtime_error("Cannot yet tesselate interface meshes [will fail in connecting hanging nodes and have to go via the parent mesh");
 		}*/
 
-		if (codeinst->get_func_table()->bulk_position_space_to_C1)
-		{
-			this->constrain_bulk_position_space_to_C1();
-		}
+		
 	}
 
 	
@@ -9517,21 +9012,7 @@ namespace pyoomph
 			support.clear();
 	}
 
-	void BulkElementTri2dC2::constrain_bulk_position_space_to_C1()
-	{
-		BulkElementBase::constrain_bulk_position_space_to_C1();
-		for (unsigned int ni = 0; ni < eleminfo.nnode; ni++)
-		{
-			for (unsigned int i = 0; i < codeinst->get_func_table()->numfields_C2_basebulk; i++)
-			{
-				this->node_pt(ni)->set_hanging_pt(NULL, i);
-			}
-		}
-		for (unsigned int i = 0; i < codeinst->get_func_table()->numfields_C2_basebulk; i++)
-		{
-			// setup_hang_for_value(i); //TODO: Activate this!
-		}
-	}
+	
 
 	oomph::Node *BulkElementTri2dC2::boundary_node_pt(const int &face_index, const unsigned int i)
 	{
@@ -11027,17 +10508,18 @@ namespace pyoomph
 	{
 		auto * ft=this->get_code_instance()->get_func_table();
 		const std::vector<std::vector<std::vector<unsigned>>> & dummy_value_interpolation_map=this->get_dummy_value_interpolation_map();
-		for (unsigned int ispace;ispace<ft->num_continuous_spaces;ispace++)
+		for (unsigned int ispace=0;ispace<ft->num_continuous_spaces;ispace++)
 		{
 			auto space_info=ft->continuous_spaces[ispace];
-			const std::vector<unsigned> & get_nodal_space_index_to_element_index=this->get_nodal_space_index_to_element_index_map()[space_info->element_node_to_space_node_index];
+			const std::vector<unsigned> & get_nodal_space_index_to_element_index=this->get_nodal_space_index_to_element_index_map()[space_info->space_node_to_element_index];
 			unsigned nnode=eleminfo.nnode_of_space[space_info->nnode_index];
 			int hangindex=space_info->hangindex;
 			for (unsigned int inode=0;inode<nnode;inode++)
 			{
 				pyoomph::Node * node=dynamic_cast<pyoomph::Node*>(this->node_pt(get_nodal_space_index_to_element_index[inode]));
 				if (node->is_hanging(hangindex))
-				{
+				{					
+					throw_runtime_error("Hanging node ");
 					pyoomph::BoundaryNode * dest_bn=dynamic_cast<pyoomph::BoundaryNode*>(node);
 					if (!dest_bn) throw_runtime_error("dest_bn is not a BoundaryNode");
 					oomph::HangInfo * hang_info=node->hanging_pt(hangindex);
@@ -11063,10 +10545,10 @@ namespace pyoomph
 				}
 			}
 
-			const std::vector<std::vector<unsigned>> & dummy_value_interpolation=dummy_value_interpolation_map[space_info->element_node_to_space_node_index];
+			const std::vector<std::vector<unsigned>> & dummy_value_interpolation=dummy_value_interpolation_map[space_info->space_node_to_element_index];
 			if (!dummy_value_interpolation.empty() && space_info->numfields-space_info->numfields_basebulk>0)
 			{
-				for (unsigned int idummy=0;idummy<nnode;idummy++)
+				for (unsigned int idummy=0;idummy<dummy_value_interpolation.size();idummy++)
 				{
 					pyoomph::Node * dummynode=dynamic_cast<pyoomph::Node*>(this->node_pt(dummy_value_interpolation[idummy][0]));
 					pyoomph::BoundaryNode * dest_boundnode=dynamic_cast<pyoomph::BoundaryNode*>(dummynode);
@@ -11082,12 +10564,14 @@ namespace pyoomph
 							  pyoomph::Node * master_node=dynamic_cast<pyoomph::Node*>(this->node_pt(dummy_value_interpolation[idummy][m]));
 							  pyoomph::BoundaryNode * boundnode=dynamic_cast<pyoomph::BoundaryNode*>(master_node);
 							  if (!boundnode) throw_runtime_error("master_node is not a BoundaryNode");
-							  unsigned master_index=boundnode->index_of_first_value_assigned_by_face_element(space_info->interface_dof_indices[field_index]);
+							  unsigned master_index=boundnode->index_of_first_value_assigned_by_face_element(add_field_index);
 							  val+=master_node->value(t, master_index);
 						   }
-						   val/=(dummy_value_interpolation[idummy].size()-1);
-						   unsigned dest_index=dest_boundnode->index_of_first_value_assigned_by_face_element(space_info->interface_dof_indices[field_index]);
-						   dummynode->value_pt(add_field_index)[t]=val;
+						   val/=(dummy_value_interpolation[idummy].size()-1.0);
+						   //if (t==0) std::cout << " Patching interface node "<<  dummy_value_interpolation[idummy][0] <<"  of space " << space_info->space_name << " field " << field_index << " " << space_info->fieldnames[field_index+space_info->numfields_basebulk] << " at time " << t << " with value " << val << std::endl;
+						   unsigned dest_index=dest_boundnode->index_of_first_value_assigned_by_face_element(add_field_index);
+						   //std::cout << " Patching interface node "<<  dummy_value_interpolation[idummy][0] <<"  of space " << space_info->space_name << " field " << field_index << " " << space_info->fieldnames[field_index+space_info->numfields_basebulk] << " at time " << t << " with value " << val << "field index" << add_field_index << "value index" << dest_index << " is pinned " << dummynode->is_pinned(dest_index) << std::endl;
+						   dummynode->value_pt(dest_index)[t]=val;
 						}
 					}
 					
@@ -12175,7 +11659,7 @@ namespace pyoomph
 			}
 		}
 
-		int hanging_index = (fft->bulk_position_space_to_C1 ? 0 : -1);
+		int hanging_index = -1;
 		if (required->dx_psi_C2TB || required->psi_C2TB || required->dX_psi_C2TB)
 		{
 			for (unsigned int j = 0; j < from_elem->get_eleminfo()->nnode_C2TB; j++)
@@ -13416,74 +12900,47 @@ namespace pyoomph
 		return res;
 	}
 
-	void InterfaceElementBase::unpin_dummy_values() // C1 fields on C2 elements have dummy values on only C2 nodes, which needs to be pinned
-	{
-		// return;
-		BulkElementBase::unpin_dummy_values();
-
-		for (unsigned int l = 0; l < nnode(); l++)
-		{
-			for (unsigned int i = 0; i < node_pt(l)->nvalue(); i++)
-				node_pt(l)->unpin(i); // After that, the BCs are applied to repin what is necessary
-		}
-	}
+	
 
 	void InterfaceElementBase::pin_dummy_values()
 	{
-		// return;
 		BulkElementBase::pin_dummy_values();
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
 
-		// TODO: Alloc these in advance
-		std::vector<unsigned> interface_ids_C1(functable->numfields_C1 - functable->numfields_C1_basebulk);
-		for (unsigned int j = 0; j < functable->numfields_C1 - functable->numfields_C1_basebulk; j++)
+		const std::vector<std::vector<unsigned>> & space_nodes_to_element_nodes=this->get_nodal_space_index_to_element_index_map();
+		const std::vector<std::vector<std::vector<unsigned>>> & dummy_interpolation_mapping=this->get_dummy_value_interpolation_map();
+		for (unsigned int space_index=0;space_index<functable->num_continuous_spaces;space_index++)
 		{
-			std::string fieldname = functable->fieldnames_C1[functable->numfields_C1_basebulk + j];
-			unsigned interf_id = codeinst->resolve_interface_dof_id(fieldname);
-			interface_ids_C1[j] = interf_id;
-		}
-		std::vector<unsigned> interface_ids_C2(functable->numfields_C2 - functable->numfields_C2_basebulk);
-		for (unsigned int j = 0; j < functable->numfields_C2 - functable->numfields_C2_basebulk; j++)
-		{
-			std::string fieldname = functable->fieldnames_C2[functable->numfields_C2_basebulk + j];
-			unsigned interf_id = codeinst->resolve_interface_dof_id(fieldname);
-			interface_ids_C2[j] = interf_id;
-		}
-
-
-		for (unsigned int i = 0; i < eleminfo.nnode; i++)
-		{
-			if (!this->is_node_index_part_of_C1(i))
+			auto *space_info=functable->continuous_spaces[space_index];
+			// Pin all dummy values for this space
+			const std::vector<std::vector<unsigned>> & dummies=dummy_interpolation_mapping[space_info->space_node_to_element_index];
+			for (const std::vector<unsigned> &dummy_entry : dummies)
 			{
-				for (unsigned int j = 0; j < functable->numfields_C1 - functable->numfields_C1_basebulk; j++)
-				{
-					unsigned interf_id = interface_ids_C1[j];
-					unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(i))->index_of_first_value_assigned_by_face_element(interf_id);
-					this->node_pt(i)->pin(valindex); // Constrained
-				}
-				if (!this->is_node_index_part_of_C2(i))
-				{
-					for (unsigned int j = 0; j < functable->numfields_C2 - functable->numfields_C2_basebulk; j++)
-					{
-						unsigned interf_id = interface_ids_C2[j];
-						unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(i))->index_of_first_value_assigned_by_face_element(interf_id);
-						this->node_pt(i)->pin(valindex); // Constrained
-					}
-				}
+				pyoomph::BoundaryNode * bn=dynamic_cast<pyoomph::BoundaryNode*>(this->node_pt(dummy_entry[0]));
+				if (!bn) throw_runtime_error("This should be a boundary node here");
+				for (unsigned int fi=space_info->numfields_basebulk;fi<space_info->numfields;fi++)
+				{					
+					//std::cout << "Pinning dummy value for space " << space_info->space_name << " at node " << dummy_entry[0] << " for field " << fi << " with index " << space_info->interface_dof_indices[fi-space_info->numfields_basebulk] << " and name " << space_info->fieldnames[space_info->numfields_basebulk+fi] << " value index " << bn->index_of_first_value_assigned_by_face_element(space_info->interface_dof_indices[fi-space_info->numfields_basebulk]) << std::endl;
+					bn->pin(bn->index_of_first_value_assigned_by_face_element(space_info->interface_dof_indices[fi-space_info->numfields_basebulk]));
+				}				
 			}
-			else // But the C1 node could be hanging 
+			// Check whether non-dummy values are hanging, and if so, constrain them
+			for (unsigned int ni : space_nodes_to_element_nodes[space_info->space_node_to_element_index])
 			{
-				if (this->node_pt(i)->is_hanging(functable->hangindex_C1)) 
+				pyoomph::BoundaryNode * bn=dynamic_cast<pyoomph::BoundaryNode*>(this->node_pt(ni));
+				if (!bn) throw_runtime_error("This should be a boundary node here");
+				if (bn->is_hanging(space_info->hangindex))
 				{
-					for (unsigned int j = 0; j < functable->numfields_C1 - functable->numfields_C1_basebulk; j++)
+					for (unsigned int fi=space_info->numfields_basebulk;fi<space_info->numfields;fi++)
 					{
-						unsigned interf_id = interface_ids_C1[j];
-						unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(i))->index_of_first_value_assigned_by_face_element(interf_id);
-						this->node_pt(i)->constrain(valindex); // Constrained
+						//std::cout << "Cosntrainting for space " << space_info->space_name << " at node " << ni << " for field " << fi << " with index " << space_info->interface_dof_indices[fi-space_info->numfields_basebulk] << " and name " << space_info->fieldnames[space_info->numfields_basebulk+fi] << std::endl;
+						this->node_pt(ni)->constrain(bn->index_of_first_value_assigned_by_face_element(space_info->interface_dof_indices[fi-space_info->numfields_basebulk]));
 					}
 				}
 			}
 		}
+
+
 	}
 
 	void InterfaceElementBase::unpin_Dirichlet_dofs_for_matrix_manipulation(DirichletMatrixManipulationInfo & info)
@@ -13491,49 +12948,21 @@ namespace pyoomph
 		BulkElementBase::unpin_Dirichlet_dofs_for_matrix_manipulation(info);
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
 
-		int add_fields_C2=functable->numfields_C2 - functable->numfields_C2_basebulk;
-		std::vector<unsigned> interface_ids_C2(add_fields_C2);
-		for (int f = 0; f < add_fields_C2; f++)
-		{
-			std::string fieldname = functable->fieldnames_C2[functable->numfields_C2_basebulk + f];
-			unsigned interf_id = codeinst->resolve_interface_dof_id(fieldname);
-			interface_ids_C2[f] = interf_id;
-		}
 
-		for (int f=0; f<add_fields_C2; f++)
+		const std::vector<std::vector<unsigned>> & space_node_to_element_map=this->get_nodal_space_index_to_element_index_map();
+		for (unsigned int i_space=0;i_space<functable->num_continuous_spaces;i_space++)
 		{
-				unsigned interf_id = functable->buffer_offset_C2_interf + f;
-				for (unsigned ni = 0; ni < this->eleminfo.nnode_C2 ; ni++)
+			auto *space_info=functable->continuous_spaces[i_space];
+			for (unsigned ni : space_node_to_element_map[space_info->space_node_to_element_index])
+			{
+				pyoomph::BoundaryNode * bn=dynamic_cast<pyoomph::BoundaryNode *>(this->node_pt(ni));
+				if (!bn) throw_runtime_error("This should be a boundary node here");
+				for (unsigned int i = 0;i<space_info->numfields-space_info->numfields_basebulk; i++)
 				{
-					oomph::Node * n = this->node_pt(get_node_index_C2_to_element(ni));
-					unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(n)->index_of_first_value_assigned_by_face_element(interface_ids_C2[f]);	
-					if (n->is_pinned(valindex)) info.add_dirichlet_dof(n,valindex);
+				  unsigned value_index=bn->index_of_first_value_assigned_by_face_element(space_info->interface_dof_indices[i]);
+				  if (this->node_pt(ni)->is_pinned(value_index)) info.add_dirichlet_dof(this->node_pt(ni),value_index);
 				}
-		}
-
-		int add_fields_C1=functable->numfields_C1 - functable->numfields_C1_basebulk;
-		std::vector<unsigned> interface_ids_C1(add_fields_C1);
-		for (int f = 0; f < add_fields_C1; f++)
-		{
-			std::string fieldname = functable->fieldnames_C1[functable->numfields_C1_basebulk + f];
-			unsigned interf_id = codeinst->resolve_interface_dof_id(fieldname);
-			interface_ids_C1[f] = interf_id;
-		}
-
-		for (int f=0; f<add_fields_C1; f++)
-		{
-				unsigned interf_id = functable->buffer_offset_C1_interf + f;
-				for (unsigned ni = 0; ni < this->eleminfo.nnode_C1 ; ni++)
-				{
-					oomph::Node * n = this->node_pt(get_node_index_C1_to_element(ni));
-					unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(n)->index_of_first_value_assigned_by_face_element(interface_ids_C1[f]);	
-					if (n->is_pinned(valindex)) info.add_dirichlet_dof(n,valindex);
-				}
-		}
-
-		if ( (functable->numfields_C1TB != functable->numfields_C1TB_basebulk || functable->numfields_C2TB != functable->numfields_C2TB_basebulk ) )
-		{
-			throw_runtime_error("Implement unpin_Dirichlet_dofs_for_matrix_manipulation ");
+			}
 		}
 	}
 
