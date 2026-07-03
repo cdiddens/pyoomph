@@ -480,7 +480,7 @@ namespace pyoomph
                }
                if (this->ensure_dt_order!=-1)
                {
-                 if (shp.dt_order!=this->ensure_dt_order) return 0;
+                 if ((int)shp.dt_order!=this->ensure_dt_order) return 0;
                }
                if (this->ensure_dt_scheme!="")
                {

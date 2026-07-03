@@ -215,10 +215,7 @@ namespace pyoomph
     virtual oomph::Data *get_D2TB_nodal_data(const unsigned &fieldindex);
 
     // Indices to the nodal buffer of the code generation
-    virtual unsigned get_C2TB_buffer_index(const unsigned &fieldindex);
-    virtual unsigned get_C2_buffer_index(const unsigned &fieldindex);
-    virtual unsigned get_C1TB_buffer_index(const unsigned &fieldindex);
-    virtual unsigned get_C1_buffer_index(const unsigned &fieldindex);
+    
     virtual unsigned get_D2TB_buffer_index(const unsigned &fieldindex);
     virtual unsigned get_D2_buffer_index(const unsigned &fieldindex);
     virtual unsigned get_D1TB_buffer_index(const unsigned &fieldindex);
@@ -1860,10 +1857,7 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
     virtual int get_nodal_index_by_name(oomph::Node *n, std::string fieldname);
     virtual double get_interpolated_interface_field(const oomph::Vector<double> &s, const unsigned &ifindex, const std::string &space, const unsigned &t = 0) const;
 
-    unsigned get_C2TB_buffer_index(const unsigned &fieldindex) override;
-    unsigned get_C2_buffer_index(const unsigned &fieldindex) override;
-    unsigned get_C1TB_buffer_index(const unsigned &fieldindex) override;
-    unsigned get_C1_buffer_index(const unsigned &fieldindex) override;
+    
     unsigned get_D2TB_buffer_index(const unsigned &fieldindex) override;
     unsigned get_D2_buffer_index(const unsigned &fieldindex) override;
     unsigned get_D1TB_buffer_index(const unsigned &fieldindex) override;

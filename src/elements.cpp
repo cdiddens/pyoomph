@@ -1665,29 +1665,6 @@ namespace pyoomph
         return this->internal_data_pt(ft->internal_offset_D1TB_new+fieldindex);
     }    
 
-	unsigned BulkElementBase::get_C2TB_buffer_index(const unsigned &fieldindex)
-    {
-		auto * ft=this->get_code_instance()->get_func_table();
-        return ft->buffer_offset_C2TB_basebulk+ fieldindex;
-    }
-    
-	unsigned BulkElementBase::get_C2_buffer_index(const unsigned &fieldindex)
-    {
-		auto * ft=this->get_code_instance()->get_func_table();
-        return ft->buffer_offset_C2_basebulk+ fieldindex;
-    }
-
-	unsigned BulkElementBase::get_C1TB_buffer_index(const unsigned &fieldindex)
-    {
-		auto * ft=this->get_code_instance()->get_func_table();
-        return ft->buffer_offset_C1TB_basebulk+ fieldindex;
-    }    
-
-	unsigned BulkElementBase::get_C1_buffer_index(const unsigned &fieldindex)
-    {
-		auto * ft=this->get_code_instance()->get_func_table();
-        return ft->buffer_offset_C1_basebulk+ fieldindex;
-    }    
 
 	unsigned BulkElementBase::get_D2TB_buffer_index(const unsigned &fieldindex)
     {
@@ -10771,58 +10748,6 @@ namespace pyoomph
 	}
 
 
-	unsigned InterfaceElementBase::get_C2TB_buffer_index(const unsigned &fieldindex)
-    {
-		auto * ft=this->get_code_instance()->get_func_table();
-	if (fieldindex<ft->numfields_C2TB_basebulk)
-	{
-          return ft->buffer_offset_C2TB_basebulk+ fieldindex;
-        }
-        else
-        {
-         return  ft->buffer_offset_C2TB_interf +(fieldindex-ft->buffer_offset_C2TB_basebulk);
-        }
-    }
-
-	unsigned InterfaceElementBase::get_C2_buffer_index(const unsigned &fieldindex)
-    {
-		auto * ft=this->get_code_instance()->get_func_table();
-	if (fieldindex<ft->numfields_C2_basebulk)
-	{
-          return ft->buffer_offset_C2_basebulk+ fieldindex;
-        }
-        else
-        {
-         return  ft->buffer_offset_C2_interf +(fieldindex-ft->buffer_offset_C2_basebulk);
-        }    
-        }
-        
-
-	unsigned InterfaceElementBase::get_C1TB_buffer_index(const unsigned &fieldindex)
-    {
-		auto * ft=this->get_code_instance()->get_func_table();
-	if (fieldindex<ft->numfields_C1TB_basebulk)
-	{
-          return ft->buffer_offset_C1TB_basebulk+ fieldindex;
-        }
-        else
-        {
-         return  ft->buffer_offset_C1TB_interf +(fieldindex-ft->buffer_offset_C1TB_basebulk);
-        }
-    }        
-
-	unsigned InterfaceElementBase::get_C1_buffer_index(const unsigned &fieldindex)
-    {
-			auto * ft=this->get_code_instance()->get_func_table();
-	if (fieldindex<ft->numfields_C1_basebulk)
-	{
-          return ft->buffer_offset_C1_basebulk+ fieldindex;
-        }
-        else
-        {
-         return  ft->buffer_offset_C1_interf +(fieldindex-ft->buffer_offset_C1_basebulk);
-        }
-    }
 
 	unsigned InterfaceElementBase::get_D2TB_buffer_index(const unsigned &fieldindex)
     {
