@@ -1685,7 +1685,7 @@ namespace pyoomph
 			while (_n>0)
 			{
 				bool found_nonzero=false;
-				for (unsigned int i=0;i<_n;i++)
+				for (int i=0;i<_n;i++)
 				{							
 					if (!ma(i,_n-1).is_zero())
 					{
@@ -1723,12 +1723,12 @@ namespace pyoomph
 				}
 								
 				// Extract the block
-				if (ma.cols() < _n) throw_runtime_error("Block size is larger than the matrix (colums)");
-				if (ma.rows() < _n) throw_runtime_error("Block size is larger than the matrix (rows)");
+				if ((int)ma.cols() < _n) throw_runtime_error("Block size is larger than the matrix (colums)");
+				if ((int)ma.rows() < _n) throw_runtime_error("Block size is larger than the matrix (rows)");
 				std::vector<GiNaC::ex> entries;
-				for (unsigned int i = 0; i < _n; i++)
+				for ( int i = 0; i < _n; i++)
 				{
-					for (unsigned int j = 0; j < _n; j++)
+					for ( int j = 0; j < _n; j++)
 					{
 						entries.push_back(ma(i, j));
 					}
@@ -1828,8 +1828,8 @@ namespace pyoomph
 					if (_n==0) throw_runtime_error("Matrix is empty and cannot be inverted");
 				}
 												
-				if (ma.cols() < _n) throw_runtime_error("Block size is larger than the matrix (colums)");
-				if (ma.rows() < _n) throw_runtime_error("Block size is larger than the matrix (rows)");
+				if ((int)ma.cols() < _n) throw_runtime_error("Block size is larger than the matrix (colums)");
+				if ((int)ma.rows() < _n) throw_runtime_error("Block size is larger than the matrix (rows)");
 				std::vector<GiNaC::ex> entries;
 				if (_n==1) { entries.push_back(1/ma(0,0));}
 				else if (_n==2) {
@@ -1856,7 +1856,7 @@ namespace pyoomph
 					entries.push_back((ma(0,0)*ma(1,1)-ma(0,1)*ma(1,0))/det);					
 				}
 				
-				if (flag & 2==0)
+				if ((flag & 2)==0)
 				{
 				  GiNaC::lst entries_lst(GiNaC::lst(entries.begin(), entries.end()));
 				  return GiNaC::matrix(_n, _n, entries_lst);				
@@ -1865,9 +1865,9 @@ namespace pyoomph
 				{
 					//Return a 3x3 matrix with zero filling
 					std::vector<GiNaC::ex> entries3x3(9,0);
-					for (unsigned int i = 0; i < _n; i++)
+					for ( int i = 0; i < _n; i++)
 					{
-						for (unsigned int j = 0; j < _n; j++)
+						for ( int j = 0; j < _n; j++)
 						{
 						  entries3x3[3*i+j] = entries[_n*i+j];
 						}

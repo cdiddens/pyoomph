@@ -548,7 +548,7 @@ void PyReg_Expressions(py::module &m)
 		.def("evalf", &GiNaC::ex::evalf, py::return_value_policy::reference)
 		.def("merge_units",[](const GiNaC::ex &self)
 			 { 
-			 GiNaC::ex factor,units,rest; bool res=pyoomph::expressions::collect_base_units(self,factor,units,rest); return 0+factor*rest*units;			   
+			 GiNaC::ex factor,units,rest; pyoomph::expressions::collect_base_units(self,factor,units,rest); return 0+factor*rest*units;			   
 			 }, py::return_value_policy::reference)
 		.def("parameters_to_current_values",[](const GiNaC::ex &self)
 			 { 

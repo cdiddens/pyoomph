@@ -51,6 +51,12 @@ namespace pyoomph
 
 	void RequiredShapes_merge(JITFuncSpec_RequiredShapes_FiniteElement_t *src, JITFuncSpec_RequiredShapes_FiniteElement_t *dest)
 	{
+		for (unsigned int i = 0; i < NUM_CONTINUOUS_SPACES; i++)
+		{
+			dest->continuous_spaces[i].psi |= src->continuous_spaces[i].psi;
+			dest->continuous_spaces[i].dx_psi |= src->continuous_spaces[i].dx_psi;
+			dest->continuous_spaces[i].dX_psi |= src->continuous_spaces[i].dX_psi;
+		}
 		dest->psi_C1 |= src->psi_C1;
 		dest->psi_C2 |= src->psi_C2;
 		dest->psi_C2TB |= src->psi_C2TB;
@@ -77,6 +83,13 @@ namespace pyoomph
 		dest->elemsize_Lagrangian_Pos |= src->elemsize_Lagrangian_Pos;
 		dest->elemsize_Eulerian_cartesian_Pos |= src->elemsize_Eulerian_cartesian_Pos;
 		dest->elemsize_Lagrangian_cartesian_Pos |= src->elemsize_Lagrangian_cartesian_Pos;		
+
+		dest->normal |= src->normal;
+		dest->elemsize_Eulerian |= src->elemsize_Eulerian;
+		dest->elemsize_Lagrangian |= src->elemsize_Lagrangian;
+		dest->elemsize_Eulerian_cartesian |= src->elemsize_Eulerian_cartesian;
+		dest->elemsize_Lagrangian_cartesian |= src->elemsize_Lagrangian_cartesian;		
+
 		if (src->bulk_shapes)
 		{
 			if (!dest->bulk_shapes)
@@ -97,6 +110,7 @@ namespace pyoomph
 			RequiredShapes_free(p->bulk_shapes);
 		if (p->opposite_shapes)
 			RequiredShapes_free(p->opposite_shapes);
+		
 		std::free(p);
 	}
 
@@ -115,36 +129,38 @@ namespace pyoomph
 		functable->check_compiler_size = _pyoomph_check_compiler_size;
 		initfunc(functable);
 
-		functable->info_Pos.nnode_index=0;
-		functable->info_C2TB.nnode_index=1;
-		functable->info_C2.nnode_index=2;
-		functable->info_C1TB.nnode_index=3;
-		functable->info_C1.nnode_index=4;
-
-		functable->info_Pos.hangbuffer_index=0;
-		functable->info_C2TB.hangbuffer_index=1;
-		functable->info_C2.hangbuffer_index=2;
-		functable->info_C1TB.hangbuffer_index=3;
-		functable->info_C1.hangbuffer_index=4;
-
-		functable->info_C2TB.space_node_to_element_index  =0;
-		functable->info_C2.space_node_to_element_index=1;
-		functable->info_C1TB.space_node_to_element_index=2;
-		functable->info_C1.space_node_to_element_index=3;
+		functable->info_Pos.space_index=0;
 		
-		// Only add the spaces which are really present to the continuous_spaces array, in order of dominance
-		functable->num_continuous_spaces=0;
-		if (functable->info_C2TB.numfields>0) {functable->continuous_spaces[functable->num_continuous_spaces]=&functable->info_C2TB; functable->num_continuous_spaces++;}
-		if (functable->info_C2.numfields>0) {functable->continuous_spaces[functable->num_continuous_spaces]=&functable->info_C2; functable->num_continuous_spaces++;}
-		if (functable->info_C1TB.numfields>0) {functable->continuous_spaces[functable->num_continuous_spaces]=&functable->info_C1TB; functable->num_continuous_spaces++;}
-		if (functable->info_C1.numfields>0) {functable->continuous_spaces[functable->num_continuous_spaces]=&functable->info_C1; functable->num_continuous_spaces++;}
 
+		for (unsigned int i=0;i<NUM_CONTINUOUS_SPACES;i++)
+		{
+			functable->continuous_spaces[i].space_index=i;
+		}
+		
+
+	// Only add the spaces which are really present to the present continuous_spaces array, in order of dominance
+		functable->num_present_continuous_spaces=0;
+		for (unsigned int i=0;i<NUM_CONTINUOUS_SPACES;i++)
+		{
+			if (functable->continuous_spaces[i].numfields>0)
+			{
+				functable->present_continuous_spaces[functable->num_present_continuous_spaces]=&functable->continuous_spaces[i];
+				functable->num_present_continuous_spaces++;
+			}
+		}
 		std::string dominant_space=functable->dominant_space;
-		if (dominant_space=="C2TB") {functable->info_C2TB.is_dominant=true; functable->info_Pos.space_node_to_element_index=0;}
-		else if (dominant_space=="C2") {functable->info_C2.is_dominant=true; functable->info_Pos.space_node_to_element_index=1;}
-		else if (dominant_space=="C1TB") {functable->info_C1TB.is_dominant=true; functable->info_Pos.space_node_to_element_index=2;}
-		else if (dominant_space=="C1") {functable->info_C1.is_dominant=true; functable->info_Pos.space_node_to_element_index=3;}
-		else
+		bool found_dominant=false;
+		for (unsigned int i=0;i<NUM_CONTINUOUS_SPACES;i++)
+		{
+			if (std::string(functable->continuous_spaces[i].space_name)==dominant_space)
+			{
+				found_dominant=true;
+				functable->info_Pos.space_index=i; 
+				break;
+			}
+		}
+
+		if(!found_dominant)
 		{
 			std::ostringstream errmsg;
 			errmsg << "Unknown dominant space " << dominant_space << " in JIT code " << filename;
@@ -493,9 +509,12 @@ namespace pyoomph
 
 	std::map<std::string, unsigned> DynamicBulkElementInstance::setup_interface_dof_indices()
 	{
-		std::map<std::string, unsigned> res;
-		auto do_for_space=[this, &res](JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info)
+		std::map<std::string, unsigned> res;		
+
+		for (unsigned int i = 0; i < dyn->functable->num_present_continuous_spaces; i++	)
 		{
+			JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info= dyn->functable->present_continuous_spaces[i];
+
 			if (space_info->interface_dof_indices) {
 				free(space_info->interface_dof_indices);
 				space_info->interface_dof_indices=NULL;
@@ -506,17 +525,11 @@ namespace pyoomph
 				for (unsigned int i=0;i<space_info->numfields-space_info->numfields_basebulk;i++)
 				{
 					std::string field_name=space_info->fieldnames[i+space_info->numfields_basebulk];
-					unsigned dof_index=this->resolve_interface_dof_id(field_name);
-					//std::cout << "Resolving interface dof for field " << field_name << " on space " << space_info->space_name << " bulkmesh is " << this->get_bulk_mesh() << " gave " << dof_index << std::endl;
+					unsigned dof_index=this->resolve_interface_dof_id(field_name);					
 					space_info->interface_dof_indices[i]=dof_index;
 					res[field_name]=dof_index;
 				}
-			}
-		};
-
-		for (unsigned int i = 0; i < dyn->functable->num_continuous_spaces; i++	)
-		{
-			do_for_space(dyn->functable->continuous_spaces[i]);
+			}			
 		}
 
 		return res;
@@ -629,8 +642,7 @@ namespace pyoomph
 #ifdef OOMPH_HAS_MPI
 		if (prob->distributed())
 		{
-
-			int rank=prob->communicator_pt()->my_rank();
+			
 			int size=prob->communicator_pt()->nproc();			
 			std::vector<unsigned long> local_vec(global_pinned_dof_set.begin(), global_pinned_dof_set.end());
 			int local_count = static_cast<int>(local_vec.size());
@@ -1162,7 +1174,7 @@ namespace pyoomph
 			for (const auto &eqn_number : dof_set)
 			{
 				int eqn_number_local=static_cast<int>(eqn_number)-residuals.first_row();
-				if (eqn_number_local>=0 && eqn_number_local<residuals.nrow_local())
+				if (eqn_number_local>=0 && eqn_number_local<(int)residuals.nrow_local())
 				{
 					residuals[eqn_number_local] = 0.0;	
 				}
@@ -1170,8 +1182,8 @@ namespace pyoomph
 			if (jacobian)
 			{			
 
-				const int num_rows = jacobian->nrow();
-				const int num_cols = jacobian->ncol();
+				//const int num_rows = jacobian->nrow();
+				//const int num_cols = jacobian->ncol();
 				const int first_row=jacobian->distribution_pt()->first_row();
 				const int num_local_rows=jacobian->nrow_local();
 				//std::cout << "Jacobian size: " << num_rows << " x " << num_cols << std::endl << "LOCAL START " << first_row << " LOCAL ROWS " << num_local_rows << std::endl << std::flush;
@@ -2445,7 +2457,7 @@ namespace pyoomph
 
 	void Problem::update_jacobian_csr_structure()
 	{
-		unsigned ndof = this->get_n_unaugmented_dofs();
+		//unsigned ndof = this->get_n_unaugmented_dofs();
 		if (this->get_n_unaugmented_dofs()!=0) throw_runtime_error("This does not work if you have augmented dofs");
 		global_eqs_to_jacobian_buffer_index.resize(this->ndof());
 		for (unsigned i = 0; i < this->ndof(); i++)
@@ -3172,7 +3184,7 @@ namespace pyoomph
 				bool pinned=false;
 				for (unsigned int j=0;j<ft->Dirichlet_set_size;j++)
 				{
-					if (ft->dirichlet_field_index_to_global_field_index[j]==i)
+					if (ft->dirichlet_field_index_to_global_field_index[j]==(int)i)
 					{						
 						if (ft->Dirichlet_set[j])
 						{
@@ -3257,8 +3269,9 @@ namespace pyoomph
 		if (dofptr.size()!=split_offsets.back()) throw_runtime_error("Invalid number of dofs. Likely, the dofs has changed meanwhile");
 		std::vector<std::vector<double>> res;
 		if (endindex<0) endindex=split_offsets.size()+(endindex);		
-		if (endindex>=split_offsets.size())  throw_runtime_error("Invalid end index");
-		for (unsigned int i=startindex;i<endindex;i++)
+		if (endindex<0) return res;
+		if (endindex>=(int)split_offsets.size())  throw_runtime_error("Invalid end index");
+		for (int i=(int)startindex;i<endindex;i++)
 		{
 			unsigned length=split_offsets[i+1]-split_offsets[i];
 			//std::cout << "SPlIT INDEX "<< i << " " << length << " FROM " << split_offsets[i] << " TO " << split_offsets[i+1] <<std::endl;

@@ -87,8 +87,7 @@ namespace pyoomph
     {
       double phi=2.0*MathematicalConstants::Pi*double(iphi)/double(n_phi_samples);      
       // If res==0, <Re(eigenvector),Im(eigenvector)> will be rotated to zero
-      double res=-GiGi*sin(phi)*cos(phi) - GrGi*sin(phi)*sin(phi) + GrGi*cos(phi)*cos(phi) + GrGr*sin(phi)*cos(phi);
-      unsigned iter=0;
+      double res=-GiGi*sin(phi)*cos(phi) - GrGi*sin(phi)*sin(phi) + GrGi*cos(phi)*cos(phi) + GrGr*sin(phi)*cos(phi);      
       bool success=false;
       for  ( unsigned  iter=0; iter<n_inter;iter++)
       {
@@ -2330,7 +2329,7 @@ namespace pyoomph
   {
     // Get the raw value
     unsigned raw_ndof = elem_pt->ndof();
-    unsigned long global_eqn;
+    unsigned long global_eqn=0;
     if (ieqn_local < raw_ndof)
     {
       global_eqn = elem_pt->eqn_number(ieqn_local);
@@ -2531,8 +2530,7 @@ namespace pyoomph
           }
           else
           {
-            jacobian(raw_ndof + n, raw_ndof + m) = jacobian_real(n, m);
-            unsigned global_eqn = elem_pt->eqn_number(m);
+            jacobian(raw_ndof + n, raw_ndof + m) = jacobian_real(n, m);            
           }
         }
 
@@ -2772,8 +2770,7 @@ namespace pyoomph
       }
     }
 
-    // Get total number of dofs in the element
-    unsigned ndof = elem_pt->ndof();
+    
     // Loop through the dofs
     for (unsigned i = 0; i < raw_ndof; i++)
     {
@@ -3236,7 +3233,6 @@ namespace pyoomph
           // Central difference first order accurate
           this->FD_ds_weights[i].resize(2);
           this->FD_ds_inds[i].resize(2);
-          double si=get_knot_value(i);
           double sip1=get_knot_value(i+1);
           double sim1=get_knot_value(i-1);
           this->FD_ds_weights[i][0]=-1.0/(sip1-sim1);

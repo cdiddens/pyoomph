@@ -903,7 +903,8 @@ class BaseEquations(_pyoomph.Equations):
                 try:
                     assert_dimensional_value(scal_expa)
                 except Exception as e:
-                    raise RuntimeError("Scaling for '"+str(n)+"' is not a simple dimensional number, but:\n    "+str(scal)+"\n   expands to: "+str(scal_expa)+"\n. '.")
+                    cg=self._assert_codegen()
+                    raise RuntimeError("The scale for '"+str(n)+"' on domain '"+self._assert_codegen().get_full_name()+"' is not a simple dimensional number, but:\n    "+str(scal)+"\n   expands to: "+str(scal_expa)+"\n.")
         for n in self._test_scales_to_check_for_fields:
             scal=self.get_scaling(n,testscale=True)
             if scal is not None:
@@ -911,7 +912,8 @@ class BaseEquations(_pyoomph.Equations):
                 try:
                     assert_dimensional_value(scal_expa)
                 except Exception as e:
-                    raise RuntimeError("Test scaling for '"+str(n)+"' is not a simple dimensional number, but:\n    "+str(scal)+"\n   it expands to: "+str(scal_expa)+"\n. '.") 
+                    cg=self._assert_codegen()
+                    raise RuntimeError("The test function scale for '"+str(n)+"' on domain '"+cg.get_full_name()+"' is not a simple dimensional number, but:\n    "+str(scal)+"\n   it expands to: "+str(scal_expa)+"\n.") 
 
     def _define_element(self):
         

@@ -993,7 +993,7 @@ namespace pyoomph
       for (unsigned ind : D2TBindices)
       {
         oomph::Data *dgdata = el->get_D2TB_nodal_data(ind);
-        for (unsigned ni = 0; ni < el->get_eleminfo()->nnode_C2TB; ni++)
+        for (unsigned ni = 0; ni < el->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2TB]; ni++)
         {
           bool must_pin_me = true;
           oomph::Node *n = el->node_pt(el->get_node_index_C2TB_to_element(ni));
@@ -1014,7 +1014,7 @@ namespace pyoomph
       for (unsigned ind : D2indices)
       {
         oomph::Data *dgdata = el->get_D2_nodal_data(ind);
-        for (unsigned ni = 0; ni < el->get_eleminfo()->nnode_C2; ni++)
+        for (unsigned ni = 0; ni < el->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2]; ni++)
         {
           bool must_pin_me = true;
           oomph::Node *n = el->node_pt(el->get_node_index_C2_to_element(ni));
@@ -1035,7 +1035,7 @@ namespace pyoomph
       for (unsigned ind : D1indices)
       {
         oomph::Data *dgdata = el->get_D1_nodal_data(ind);
-        for (unsigned ni = 0; ni < el->get_eleminfo()->nnode_C1; ni++)
+        for (unsigned ni = 0; ni < el->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1]; ni++)
         {
           bool must_pin_me = true;
           oomph::Node *n = el->node_pt(el->get_node_index_C1_to_element(ni));
@@ -1295,8 +1295,7 @@ namespace pyoomph
     //    std::cout << "MESHOUT " << nDGfields << "  " << nDGfields_basebulk << "   " << naddD1 << "  " << naddD2 << "  " << naddD2TB << "   consistenccy "  << nDGfields-(nDGfields_basebulk+naddD1+naddD2+naddD2TB) << std::endl;
 
     unsigned nnormal = 0;
-    bool is_interface=false;
-    
+        
     if (be->nodal_dimension() == be->dim() + 1 || dynamic_cast<InterfaceMesh *>(this)) // TODO: Also >= ? But what is e.g. the normal of a curved line element in 3d space? Is it the tangent?
     //													XXX MAKE SURE TO ADJUST IT ALSO IN pybind -> to_numpy and in python/output/generic.py indicated by "TODO must agree with the C code"
     {
@@ -2878,7 +2877,7 @@ namespace pyoomph
 
       for (unsigned nf = 0; nf < ft->numfields_D2TB; nf++)
       {
-        for (unsigned int ni = 0; ni < e->get_eleminfo()->nnode_C2TB; ni++)
+        for (unsigned int ni = 0; ni < e->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2TB]; ni++)
         {
           int eqn_no = e->get_D2TB_nodal_data(nf)->eqn_number(e->get_D2TB_node_index(nf, ni));
           if (eqn_no >= 0)
@@ -2889,7 +2888,7 @@ namespace pyoomph
       }
       for (unsigned nf = 0; nf < ft->numfields_D2; nf++)
       {
-        for (unsigned int ni = 0; ni < e->get_eleminfo()->nnode_C2; ni++)
+        for (unsigned int ni = 0; ni < e->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2]; ni++)
         {
           int eqn_no = e->get_D2_nodal_data(nf)->eqn_number(e->get_D2_node_index(nf, ni));
           if (eqn_no >= 0)
@@ -2900,7 +2899,7 @@ namespace pyoomph
       }
       for (unsigned nf = 0; nf < ft->numfields_D1TB; nf++)
       {
-        for (unsigned int ni = 0; ni < e->get_eleminfo()->nnode_C1TB; ni++)
+        for (unsigned int ni = 0; ni < e->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1TB]; ni++)
         {
           int eqn_no = e->get_D1TB_nodal_data(nf)->eqn_number(e->get_D1TB_node_index(nf, ni));
           if (eqn_no >= 0)
@@ -2912,7 +2911,7 @@ namespace pyoomph
 
       for (unsigned nf = 0; nf < ft->numfields_D1; nf++)
       {
-        for (unsigned int ni = 0; ni < e->get_eleminfo()->nnode_C1; ni++)
+        for (unsigned int ni = 0; ni < e->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1]; ni++)
         {
           int eqn_no = e->get_D1_nodal_data(nf)->eqn_number(e->get_D1_node_index(nf, ni));
           if (eqn_no >= 0)
@@ -3245,7 +3244,7 @@ namespace pyoomph
         auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ei));
         if (ft->numfields_D2TB)
         {
-          for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_C2TB; ni++)
+          for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2TB]; ni++)
           {
             pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(el->get_node_index_C2TB_to_element(ni)));
             for (unsigned int i = 0; i < nodept->ndim(); i++)
@@ -3260,7 +3259,7 @@ namespace pyoomph
         }
         if (ft->numfields_D2)
         {
-          for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_C2; ni++)
+          for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2]; ni++)
           {
             pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(el->get_node_index_C2_to_element(ni)));
             for (unsigned int i = 0; i < nodept->ndim(); i++)
@@ -3275,7 +3274,7 @@ namespace pyoomph
         }
         if (ft->numfields_D1TB)
         {
-          for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_C1TB; ni++)
+          for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1TB]; ni++)
           {
             pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(el->get_node_index_C1TB_to_element(ni)));
             for (unsigned int i = 0; i < nodept->ndim(); i++)
@@ -3290,7 +3289,7 @@ namespace pyoomph
         }
         if (ft->numfields_D1)
         {
-          for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_C1; ni++)
+          for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1]; ni++)
           {
             pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(el->get_node_index_C1_to_element(ni)));
             for (unsigned int i = 0; i < nodept->ndim(); i++)
@@ -3902,7 +3901,7 @@ namespace pyoomph
         auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ei));
         if (ft->numfields_D2TB)
         {
-          for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_C2TB; ni++)
+          for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2TB]; ni++)
           {
             pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(el->get_node_index_C2TB_to_element(ni)));
             for (unsigned int i = 0; i < nodept->ndim(); i++)
@@ -3922,7 +3921,7 @@ namespace pyoomph
 
         if (ft->numfields_D2)
         {
-          for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_C2; ni++)
+          for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2]; ni++)
           {
             pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(el->get_node_index_C2_to_element(ni)));
             for (unsigned int i = 0; i < nodept->ndim(); i++)
@@ -3942,7 +3941,7 @@ namespace pyoomph
 
         if (ft->numfields_D1TB)
         {
-          for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_C1TB; ni++)
+          for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1TB]; ni++)
           {
             pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(el->get_node_index_C1TB_to_element(ni)));
             for (unsigned int i = 0; i < nodept->ndim(); i++)
@@ -3964,7 +3963,7 @@ namespace pyoomph
 
         if (ft->numfields_D1)
         {
-          for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_C1; ni++)
+          for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1]; ni++)
           {
             pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(el->get_node_index_C1_to_element(ni)));
             for (unsigned int i = 0; i < nodept->ndim(); i++)
@@ -4322,8 +4321,7 @@ namespace pyoomph
       DynamicBulkElementInstance *ci = be->get_code_instance();
       auto *functable = ci->get_func_table();
       auto &eleminfo = *be->get_eleminfo();
-      unsigned offset_zeta=eleminfo.nodal_dim + functable->lagr_dim +be->dim(); // This is the offset for the zeta coordinate in the nodal data ( first Eulerian, then Lagrangian, then local coords. Finally zeta coords)
-      auto *ft = ci->get_func_table();
+      unsigned offset_zeta=eleminfo.nodal_dim + functable->lagr_dim +be->dim(); // This is the offset for the zeta coordinate in the nodal data ( first Eulerian, then Lagrangian, then local coords. Finally zeta coords)      
       oomph::Vector<double> zeta(be->dim(), 0.0);
       oomph::Vector<double> sinter(be->dim(), 0.0);
       for (unsigned int in=0;in<be->nnode();in++)
@@ -4405,7 +4403,7 @@ namespace pyoomph
     {
       be = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
       // C1 Nodes
-      for (unsigned int in = 0; in < be->get_eleminfo()->nnode_C1; in++)
+      for (unsigned int in = 0; in < be->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1]; in++)
       {
         pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(be->node_pt_C1(in));
         if (handled_nodes.count(n))
@@ -5749,8 +5747,8 @@ namespace pyoomph
 
       for (unsigned int i=0;i<templ->get_nodes().size();i++)
       {
-        MeshTemplateNode *tnode = templ->get_nodes()[i];
-        pyoomph::Node *onode = dynamic_cast<pyoomph::Node *>(tnode->oomph_node);
+        //MeshTemplateNode *tnode = templ->get_nodes()[i];
+        //pyoomph::Node *onode = dynamic_cast<pyoomph::Node *>(tnode->oomph_node);
         /*std::cout << "Template Node " << i << " is on boundaries: ";
         for (unsigned b : tnode->on_boundaries)
         {

@@ -88,21 +88,18 @@ float __mzerosf=-0.0;
 
 // This file defines the structures which are required to transfer the oomph-lib data (e.g. shape functions) to the C-compiled code
 
+#define NUM_CONTINUOUS_SPACES 4 // C2TB,C2,C1TB,C1
+#define SPACE_INDEX_C2TB 0
+#define SPACE_INDEX_C2 1
+#define SPACE_INDEX_C1TB 2
+#define SPACE_INDEX_C1 3
+
 typedef struct JITElementInfo
 {
 
-  union
-  {
-    unsigned int nnode_of_space[5]; // Number of nodes per type (Pos,C2TB,C2,C1TB,C1) // Set during problem level
-    struct
-    {
-      unsigned int nnode; // Total number of nodes
-      unsigned int nnode_C2TB; // C2 on quadrilaterals, C2+Bubble on TElements, on interfaces, these are C2  
-      unsigned int nnode_C2;
-      unsigned int nnode_C1TB; // C1 on quadrilaterals, C1+Bubble on TElements, on interfaces, these are C1      
-      unsigned int nnode_C1;
-    };
-  };
+  unsigned int nnode; // Total number of nodes
+  unsigned int nnode_of_space[NUM_CONTINUOUS_SPACES]; // Number of nodes per type (C2TB,C2,C1TB,C1) // Set during problem level
+  
      
   unsigned int nnode_DL;   // This are actually not nodes, but internal data (since discontinous)
   // unsigned int nnode_D0;  //This are actually not nodes, but internal data (since discontinous), This is always 1
@@ -285,19 +282,19 @@ typedef struct JITShapeInfo
   double * PYOOMPH_RESTRICT timestepper_weights_dt_BDF2_degr;
   double * PYOOMPH_RESTRICT timestepper_weights_dt_Newmark2_degr;
 
+  JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_Pos);
   union
   {
-   JITHangInfo_t ARRAY_DECL_NNODE(hanginfo)[6]; // Hang info for each space (Pos,C2TB,C2,C1TB,C1)
+   JITHangInfo_t ARRAY_DECL_NNODE(hanginfo)[NUM_CONTINUOUS_SPACES]; // Hang info for each space (C2TB,C2,C1TB,C1)
    struct
-   {     
-    JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_Pos);
-    JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_C2TB); //[nodenum]
-    JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_C2);   //[nodenum]
-    JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_C1TB); //[nodenum]  
-    JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_C1);   //[nodenum]  
-    JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_Discont);  // Not really hanging, but used for bulk elements etc to remap the eqs  
+   {         
+    JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_C2TB); 
+    JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_C2);   
+    JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_C1TB); 
+    JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_C1);   
    };
   };
+   JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_Discont);  // Not really hanging, but used for bulk elements etc to remap the eqs  
   
 
 
@@ -320,15 +317,43 @@ typedef double (*JITFuncSpec_GeometricJacobian)(const JITElementInfo_t *, const 
 
 typedef void (*JITFuncSpec_GeometricJacobianSpatialDerivative)(const JITElementInfo_t *, const double *, double *);
 
+typedef struct JITFuncSpec_RequiredShapes_For_Space
+{
+  bool psi,dx_psi,dX_psi;  
+} JITFuncSpec_RequiredShapes_For_Space_t;
+
 typedef struct JITFuncSpec_RequiredShapes_FiniteElement
 {
-  bool psi_C1,psi_C1TB, psi_C2, psi_C2TB, psi_DL, psi_D0;
-  bool dx_psi_C1, dx_psi_C1TB, dx_psi_C2, dx_psi_C2TB, dx_psi_DL, dx_psi_D0; // Eulerian derivatives
-  bool dX_psi_C1, dX_psi_C1TB,dX_psi_C2, dX_psi_C2TB, dX_psi_DL, dX_psi_D0; // Lagrangian derivatives
+  JITFuncSpec_RequiredShapes_For_Space_t Pos;
+  
   bool psi_Pos, dx_psi_Pos, dX_psi_Pos;              // Position space. This is always the dominant element space, i.e. C2TB>C2>C1TB>C1. If an element has a "C2" and a "C1TB" space, it will be C2TB.
-  bool normal_Pos;                                   // Normal required /( Normal is just considered to be defined on the Pos space)
+  
+
+  JITFuncSpec_RequiredShapes_For_Space_t continuous_spaces[NUM_CONTINUOUS_SPACES]; // C2TB,C2,C1TB,C1
+    
+    
+  
+  bool psi_C2TB, dx_psi_C2TB, dX_psi_C2TB; // C2TB space.      
+  bool psi_C2, dx_psi_C2, dX_psi_C2; // C2 space.      
+  bool psi_C1TB, dx_psi_C1TB, dX_psi_C1TB; // C1TB space.      
+  bool psi_C1, dx_psi_C1, dX_psi_C1; // C1 space.      
+
+  JITFuncSpec_RequiredShapes_For_Space_t DL;  
+  bool psi_DL, dx_psi_DL, dX_psi_DL; // DL space
+  
+  JITFuncSpec_RequiredShapes_For_Space_t D0;  
+  bool psi_D0, dx_psi_D0, dX_psi_D0; // D0 space    
+    
+  
+  // 
+  bool normal_Pos;                                   
   bool elemsize_Eulerian_Pos,elemsize_Lagrangian_Pos;
   bool elemsize_Eulerian_cartesian_Pos,elemsize_Lagrangian_cartesian_Pos;  
+
+  bool normal;                                   
+  bool elemsize_Eulerian,elemsize_Lagrangian;
+  bool elemsize_Eulerian_cartesian,elemsize_Lagrangian_cartesian;  
+
   bool history_integral_dx1;
   bool history_integral_dx2;
   struct JITFuncSpec_RequiredShapes_FiniteElement *bulk_shapes;
@@ -376,10 +401,9 @@ typedef struct JITFuncSpec_Table_FiniteElement_SpaceInfo
 
  unsigned int * interface_dof_indices; // For continuous fields (C2TB-C1), this is of length numfields-numfields_basebulk and gives the index for additional dofs on interface nodes. Created at problem level
 
- unsigned nnode_index; // Pointing to the element info nnode array (in a mixed mesh, a quad and a tri have e.g. different nnode, but it also depends on the space) // Set during problem level
- bool is_dominant; // Is this the dominant space for the element, i.e. the geometric space where also the coordinates live? (e.g. C2TB>C2>C1TB>C1) // Set during problem level
- unsigned space_node_to_element_index; // A C1 space on C2 quad does not use all spaces. We therefore have arrays which map the space node index (0..eleminfo.nnode_of_space[nnode_index]-1) to the element node index.
- unsigned int hangbuffer_index;
+ unsigned space_index; // Index to the arrays [4]
+ bool is_dominant; // Is this the dominant space for the element, i.e. the geometric space where also the coordinates live? (e.g. C2TB>C2>C1TB>C1) // Set during problem level 
+
 } JITFuncSpec_Table_FiniteElement_SpaceInfo_t;
 
 
@@ -445,10 +469,11 @@ typedef struct JITFuncSpec_Table_FiniteElement
   unsigned int buffer_offset_ED0,external_offset_ED0;
 
   // New way of handling things 
-  JITFuncSpec_Table_FiniteElement_SpaceInfo_t info_C1,info_C2,info_C2TB,info_C1TB,info_D1,info_D1TB,info_D2,info_D2TB,info_DL,info_D0,info_ED0,info_Pos;
+  JITFuncSpec_Table_FiniteElement_SpaceInfo_t continuous_spaces[NUM_CONTINUOUS_SPACES]; // C2TB,C2,C1TB,C1
+  JITFuncSpec_Table_FiniteElement_SpaceInfo_t info_D1,info_D1TB,info_D2,info_D2TB,info_DL,info_D0,info_ED0,info_Pos;
 
-  JITFuncSpec_Table_FiniteElement_SpaceInfo_t *continuous_spaces[4]; // points to the infos C2TB,C2,C1TB,C1 for looping. Note that not all are filled, only if they are present
-  unsigned num_continuous_spaces; // Only the ones that are actually present, i.e. num_continuous_spaces<=4
+  JITFuncSpec_Table_FiniteElement_SpaceInfo_t *present_continuous_spaces[NUM_CONTINUOUS_SPACES]; // points to the infos C2TB,C2,C1TB,C1 for looping. Note that not all are filled, only if they are present
+  unsigned num_present_continuous_spaces; // Only the ones that are actually present, i.e. num_continuous_spaces<=4
 
   //Exponents for the D0 fields upon refinement. 
   // If zero [default]: 
