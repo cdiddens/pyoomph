@@ -137,7 +137,7 @@ PeriodicBSplineBasis::PeriodicBSplineBasis(const std::vector<double> &knots, uns
             gl_weights[i][j]=GL_w[gl_order][j]*0.5*(augknots[start+1]-augknots[start]);
             shape_values[i][j].resize(k+1);
             dshape_values[i][j].resize(k+1);
-            for (int l = 0; l < k+1; l++)
+            for (unsigned int l = 0; l < k+1; l++)
             {
                 shape_values[i][j][l]=get_shape(shape_indices[i][l], x);
                 dshape_values[i][j][l]=get_dshape(shape_indices[i][l], x);

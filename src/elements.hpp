@@ -351,11 +351,7 @@ namespace pyoomph
     
 
     virtual BulkElementBase *create_son_instance() const = 0;
-    unsigned ncont_interpolated_values() const;
-    virtual unsigned nadditional_fields_C1();
-    virtual unsigned nadditional_fields_C1TB();
-    virtual unsigned nadditional_fields_C2();
-    virtual unsigned nadditional_fields_C2TB();
+    unsigned ncont_interpolated_values() const;    
     virtual unsigned required_nvalue(const unsigned &n) const;
 
     virtual void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const = 0;
@@ -363,6 +359,24 @@ namespace pyoomph
     virtual void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const = 0;
     virtual void shape_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi) const;
     virtual void shape_at_s_C2TB(const oomph::Vector<double> &s, oomph::Shape &psi) const;
+
+    inline void shape_of_space(const unsigned &space_index, const oomph::Vector<double> &s, oomph::Shape &psi) const
+    {
+      switch (space_index)
+      {
+      case 0:
+        this->shape_at_s_C2TB(s, psi); break;
+      case 1:
+        this->shape_at_s_C2(s, psi); break;
+      case 2:
+        this->shape_at_s_C1TB(s, psi); break;
+      case 3:
+        this->shape_at_s_C1(s, psi); break;
+      default:
+        throw_runtime_error("Invalid space index " + std::to_string(space_index));
+      }
+    
+    }
 
     virtual int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const = 0;
     virtual void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const = 0;
@@ -372,6 +386,24 @@ namespace pyoomph
     virtual void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const = 0;
     virtual void dshape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
     virtual void dshape_local_at_s_C2TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
+
+    inline void dshape_local_of_space(const unsigned &space_index, const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const
+    {
+      switch (space_index)
+      {
+      case 0:
+        this->dshape_local_at_s_C2TB(s, psi, dpsi); break;
+      case 1:
+        this->dshape_local_at_s_C2(s, psi, dpsi); break;
+      case 2:
+        this->dshape_local_at_s_C1TB(s, psi, dpsi); break;
+      case 3:
+        this->dshape_local_at_s_C1(s, psi, dpsi); break;
+      default:
+        throw_runtime_error("Invalid space index " + std::to_string(space_index));
+      }
+    
+    }
 
     virtual unsigned int get_node_index_C1_to_element(const unsigned int &i) const = 0;
     virtual unsigned int get_node_index_C2_to_element(const unsigned int &i) const = 0;
@@ -396,11 +428,7 @@ namespace pyoomph
     virtual bool is_node_index_part_of_C1TB(const unsigned &n) { return this->is_node_index_part_of_C1(n); }
 
     virtual void get_supporting_C1_nodes_of_C2_node(const unsigned &n, std::vector<oomph::Node *> &support) { throw_runtime_error("Implement"); }
-
-    void get_interpolated_fields_C2TB(const oomph::Vector<double> &s, std::vector<double> &res, const unsigned &t = 0) const;
-    void get_interpolated_fields_C2(const oomph::Vector<double> &s, std::vector<double> &res, const unsigned &t = 0) const;
-    void get_interpolated_fields_C1TB(const oomph::Vector<double> &s, std::vector<double> &res, const unsigned &t = 0) const;
-    void get_interpolated_fields_C1(const oomph::Vector<double> &s, std::vector<double> &res, const unsigned &t = 0) const;
+    
     void get_interpolated_fields_DL(const oomph::Vector<double> &s, std::vector<double> &res, const unsigned &t = 0) const;
     void get_interpolated_fields_D0(const oomph::Vector<double> &s, std::vector<double> &res, const unsigned &t = 0) const;
 
@@ -428,7 +456,7 @@ namespace pyoomph
     virtual void further_setup_hanging_nodes();
 
     virtual int get_nodal_index_by_name(oomph::Node *n, std::string fieldname);
-    oomph::Node *node_pt_C1(const unsigned &n_C1) { return this->node_pt(this->get_node_index_C1_to_element(n_C1)); }
+
 
     /*
      inline void assign_nodal_local_eqn_numbers(const bool &store_local_dof_pt)
@@ -2526,19 +2554,19 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
   class InterfaceElementQuad2dC1 : public InterfaceElement<BulkElementQuad2dC1>
   {
   protected:
-    std::map<Node*, int>* add_interf_local_hang_eqs_C1, *add_interf_local_hang_eqs_C1TB;
+  //  std::map<Node*, int>* add_interf_local_hang_eqs_C1, *add_interf_local_hang_eqs_C1TB;
   public:
-    InterfaceElementQuad2dC1(DynamicBulkElementInstance *jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkElementQuad2dC1>(jitcode, bulk_el_pt, face_index), add_interf_local_hang_eqs_C1(NULL), add_interf_local_hang_eqs_C1TB(NULL)
+    InterfaceElementQuad2dC1(DynamicBulkElementInstance *jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkElementQuad2dC1>(jitcode, bulk_el_pt, face_index)//, add_interf_local_hang_eqs_C1(NULL), add_interf_local_hang_eqs_C1TB(NULL)
     {
     }
-    void assign_hanging_additional_interface_local_equations(const bool &store_local_dof_pt) override;
-    ~InterfaceElementQuad2dC1() override
+    //void assign_hanging_additional_interface_local_equations(const bool &store_local_dof_pt) override;
+    /*~InterfaceElementQuad2dC1() override
     {
       if (add_interf_local_hang_eqs_C1)
         delete[] add_interf_local_hang_eqs_C1;
       if (add_interf_local_hang_eqs_C1TB)
         delete[] add_interf_local_hang_eqs_C1TB;
-    }
+    }*/
     
 	
   };
@@ -2546,13 +2574,13 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
   class InterfaceElementQuad2dC2 : public InterfaceElement<BulkElementQuad2dC2>
   {
   protected:
-    std::map<Node*, int>* add_interf_local_hang_eqs_C1, *add_interf_local_hang_eqs_C1TB,* add_interf_local_hang_eqs_C2, *add_interf_local_hang_eqs_C2TB;
+    //std::map<Node*, int>* add_interf_local_hang_eqs_C1, *add_interf_local_hang_eqs_C1TB,* add_interf_local_hang_eqs_C2, *add_interf_local_hang_eqs_C2TB;
   public:
-    InterfaceElementQuad2dC2(DynamicBulkElementInstance *jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkElementQuad2dC2>(jitcode, bulk_el_pt, face_index), add_interf_local_hang_eqs_C1(NULL), add_interf_local_hang_eqs_C1TB(NULL), add_interf_local_hang_eqs_C2(NULL), add_interf_local_hang_eqs_C2TB(NULL)
+    InterfaceElementQuad2dC2(DynamicBulkElementInstance *jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkElementQuad2dC2>(jitcode, bulk_el_pt, face_index)//, add_interf_local_hang_eqs_C1(NULL), add_interf_local_hang_eqs_C1TB(NULL), add_interf_local_hang_eqs_C2(NULL), add_interf_local_hang_eqs_C2TB(NULL)
     {
     }
     
-    ~InterfaceElementQuad2dC2() override
+    /*~InterfaceElementQuad2dC2() override
     {
       if (add_interf_local_hang_eqs_C1)
         delete[] add_interf_local_hang_eqs_C1;
@@ -2562,9 +2590,9 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
         delete[] add_interf_local_hang_eqs_C2;
       if (add_interf_local_hang_eqs_C2TB)
         delete[] add_interf_local_hang_eqs_C2TB;
-    }
+    }*/
 
-    void assign_hanging_additional_interface_local_equations(const bool &store_local_dof_pt) ;
+    //void assign_hanging_additional_interface_local_equations(const bool &store_local_dof_pt) ;
     
   };
 

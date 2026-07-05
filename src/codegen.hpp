@@ -594,6 +594,7 @@ namespace pyoomph
    {
    public:
       bool can_have_hanging_nodes() override;
+      std::string get_hang_name() const override { return "Cont[SPACE_INDEX_" + name + "]"; }
       ContinuousFiniteElementSpace(FiniteElementCode *_code, const std::string &_name) : FiniteElementSpace(_code, _name) {}
    };
 
@@ -602,6 +603,7 @@ namespace pyoomph
    public:
       virtual std::string get_num_nodes_str(FiniteElementCode *forcode) const;
       virtual std::string get_eqn_number_str(FiniteElementCode *forcode) const;
+      std::string get_hang_name() const override { return name; } 
       PositionFiniteElementSpace(FiniteElementCode *_code, const std::string &_name) : ContinuousFiniteElementSpace(_code, _name) {}
       virtual void write_generic_RJM_jacobian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns,FiniteElementField * residual_field);
       virtual bool write_generic_Hessian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns);

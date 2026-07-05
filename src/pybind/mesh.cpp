@@ -1034,13 +1034,15 @@ void PyReg_Mesh(py::module &m)
  			 unsigned nlagrange=(node0 ? node0 ->nlagrangian() : 0);
 			 unsigned ncontfields=(be ? be->ncont_interpolated_values() : 0);
 			 unsigned nDGfields=(be ? be->num_DG_fields(false) :0);
-			 unsigned naddC2TB=(be ? be->nadditional_fields_C2TB() : 0);			 			 
-			 unsigned naddC2=(be ? be->nadditional_fields_C2() : 0);
-			 unsigned naddC1TB=(be ? be->nadditional_fields_C1TB() : 0);			 			 
-			 unsigned naddC1=(be ? be->nadditional_fields_C1() : 0);
+			 unsigned nadd_interf=0;
+			 auto *ft=be->get_code_instance()->get_func_table();
+			 for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
+			 {
+				nadd_interf+=ft->present_continuous_spaces[si]->numfields-ft->present_continuous_spaces[si]->numfields_basebulk;
+			 }			 
 			 unsigned nnormal=0;
 			 if (be->nodal_dimension()==be->dim()+1 || dynamic_cast<pyoomph::InterfaceMesh *>(self)) {nnormal=be->nodal_dimension();} //TODO: >= ? But what is a normal of a 1d line in 3d. XXX MAKE SURE TO ADJUST IT ALSO IN Mesh::to_numpy
-			 auto nodal_data=py::array_t<double>({nnode,nodal_dim+nlagrange+ncontfields+nDGfields+naddC2TB+naddC2+naddC1TB+naddC1+nnormal});
+			 auto nodal_data=py::array_t<double>({nnode,nodal_dim+nlagrange+ncontfields+nDGfields+nadd_interf+nnormal});
 			 unsigned nelem;
 			 unsigned numelem_indices=self->get_num_numpy_elemental_indices(tesselate_tri,nelem,discontinuous);
 			 auto elemtypes=py::array_t<int>({nelem});

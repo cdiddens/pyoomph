@@ -2211,6 +2211,8 @@ class Problem(_pyoomph.Problem):
         self._bifurcation_reactivation_after_adaptation=None
         
         if self.cmdlineargs.quick_test:
+            print("QUICK TEST: STOPPING AFTER FIRST SUCCESSFUL NEWTON SOLVE, BUT DOING OUTPUT FIRST")
+            self.output()
             print("QUICK TEST: STOPPING AFTER FIRST SUCCESSFUL NEWTON SOLVE")
             sys.exit(0)
 

@@ -70,7 +70,7 @@ namespace pyoomph
 		{
 			throw_runtime_error("Domain::macro_element_boundary not specialised");
 		}
-
+		using oomph::Domain::macro_element_boundary;
 		void macro_element_boundary(const unsigned &t, const unsigned &i_macro, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f)
 		{
 			if (PyS_buff.shape[0] != (int)s.size())

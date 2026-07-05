@@ -282,19 +282,10 @@ typedef struct JITShapeInfo
   double * PYOOMPH_RESTRICT timestepper_weights_dt_BDF2_degr;
   double * PYOOMPH_RESTRICT timestepper_weights_dt_Newmark2_degr;
 
-  JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_Pos);
-  union
-  {
-   JITHangInfo_t ARRAY_DECL_NNODE(hanginfo)[NUM_CONTINUOUS_SPACES]; // Hang info for each space (C2TB,C2,C1TB,C1)
-   struct
-   {         
-    JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_C2TB); 
-    JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_C2);   
-    JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_C1TB); 
-    JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_C1);   
-   };
-  };
-   JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_Discont);  // Not really hanging, but used for bulk elements etc to remap the eqs  
+  JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_Pos);  // Not really hanging, but used for bulk elements etc to remap the eqs  
+  JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_Cont)[NUM_CONTINUOUS_SPACES]; // Hang info for each space (C2TB,C2,C1TB,C1)
+  
+  JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_Discont);  // Not really hanging, but used for bulk elements etc to remap the eqs  
   
 
 
@@ -439,6 +430,9 @@ typedef struct JITFuncSpec_Table_FiniteElement
 
   unsigned int numfields_Pos;
   char **fieldnames_Pos;
+
+  unsigned int total_num_fields;
+  unsigned int total_num_fields_basebulk;
   
   
   int hangindex_C1,hangindex_C2,hangindex_C1TB,hangindex_C2TB,hangindex_Pos; //Hang indices

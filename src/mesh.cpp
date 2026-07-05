@@ -1145,6 +1145,8 @@ namespace pyoomph
 
   std::vector<std::vector<double>> Mesh::get_values_at_zetas(const std::vector<std::vector<double>> &zetas, std::vector<bool> &masked_lines, bool with_scales)
   {
+    throw_runtime_error("Implement");
+    /*
     auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(0));
     auto *ft = el->get_code_instance()->get_func_table();
     unsigned numfields = el->nodal_dimension() + ft->numfields_C2TB + ft->numfields_C2 + ft->numfields_C1TB + ft->numfields_C1 + ft->numfields_DL + ft->numfields_D0;
@@ -1206,6 +1208,7 @@ namespace pyoomph
     }
 
     return result;
+    */
   }
 
   std::vector<double> Mesh::evaluate_local_expression_at_nodes(unsigned index, bool nondimensional, bool discontinuous)
@@ -1283,10 +1286,10 @@ namespace pyoomph
     unsigned nDGfields = (be ? be->num_DG_fields(false) : 0);
     unsigned nDGfields_basebulk = (be ? be->num_DG_fields(true) : 0);
 
-    unsigned naddC1 = be->nadditional_fields_C1();
-    unsigned naddC1TB = be->nadditional_fields_C1TB();
-    unsigned naddC2 = be->nadditional_fields_C2();
-    unsigned naddC2TB = be->nadditional_fields_C2TB();
+    unsigned naddC1 = ft->continuous_spaces[SPACE_INDEX_C1].numfields- ft->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk;//  be->nadditional_fields_C1();
+    unsigned naddC1TB = ft->continuous_spaces[SPACE_INDEX_C1TB].numfields- ft->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk;//  be->nadditional_fields_C1TB();
+    unsigned naddC2 = ft->continuous_spaces[SPACE_INDEX_C2].numfields- ft->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk;//  be->nadditional_fields_C2();
+    unsigned naddC2TB = ft->continuous_spaces[SPACE_INDEX_C2TB].numfields- ft->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk;//  be->nadditional_fields_C2TB();
     unsigned naddD1 = ft->numfields_D1 - ft->numfields_D1_basebulk;
     unsigned naddD1TB = ft->numfields_D1TB - ft->numfields_D1TB_basebulk;
     unsigned naddD2 = ft->numfields_D2 - ft->numfields_D2_basebulk;
@@ -4388,121 +4391,77 @@ namespace pyoomph
     double res = 0.0;
     double denom = 0.0;
 
-    std::vector<unsigned> add_indices_C1, add_indices_C2;
-    for (unsigned int i = ft->numfields_C2_basebulk; i < ft->numfields_C2; i++)
-    {
-      add_indices_C2.push_back(ci->resolve_interface_dof_id(ft->fieldnames_C2[i]));
-    }
-    for (unsigned int i = ft->numfields_C1_basebulk; i < ft->numfields_C1; i++)
-    {
-      add_indices_C1.push_back(ci->resolve_interface_dof_id(ft->fieldnames_C1[i]));
-    }
 
     std::set<pyoomph::Node *> handled_nodes;
+    std::vector<std::set<pyoomph::Node *>> handled_nodes_on_conti_spaces(ft->num_present_continuous_spaces);
     for (unsigned int ie = 0; ie < this->nelement(); ie++)
     {
       be = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
-      // C1 Nodes
-      for (unsigned int in = 0; in < be->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1]; in++)
+      const std::vector<std::vector<unsigned>> & node_index_to_elem=be->get_nodal_space_index_to_element_index_map();
+      for (unsigned int is=0;is<ft->num_present_continuous_spaces;is++)
       {
-        pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(be->node_pt_C1(in));
-        if (handled_nodes.count(n))
-          continue;
-        for (unsigned int j = 0; j < ft->numfields_C2_basebulk; j++)
+        auto * space_info=ft->present_continuous_spaces[is];
+        for (unsigned int in=0;in<be->get_eleminfo()->nnode_of_space[space_info->space_index];in++)
         {
-          if (ft->temporal_error_scales[j] == 0.0)
+          pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(be->node_pt(node_index_to_elem[space_info->space_index][in]));
+          if (handled_nodes_on_conti_spaces[is].count(n))
             continue;
-          double nodal_err = n->time_stepper_pt()->temporal_error_in_value(n, j);
-          res += nodal_err * nodal_err * ft->temporal_error_scales[j];
-          denom += 1.0;
+          handled_nodes_on_conti_spaces[is].insert(n);
+          for (unsigned int j=0;j<space_info->numfields;j++)
+          {
+            if (ft->temporal_error_scales[j + space_info->buffer_offset_basebulk] == 0.0)
+              continue;
+            double nodal_err = n->time_stepper_pt()->temporal_error_in_value(n, j + space_info->nodal_offset_basebulk);
+            res += nodal_err * nodal_err * ft->temporal_error_scales[j + space_info->buffer_offset_basebulk];
+            denom += 1.0;
+          }
+          for (unsigned int j=0;j<space_info->numfields-space_info->numfields_basebulk;j++)
+          {
+            if (ft->temporal_error_scales[j + space_info->buffer_offset_interf] == 0.0)
+              continue;
+            unsigned int interf_id=space_info->interface_dof_indices[j];
+            unsigned int valindex=dynamic_cast<oomph::BoundaryNodeBase *>(n)->index_of_first_value_assigned_by_face_element(interf_id);
+            double nodal_err = n->time_stepper_pt()->temporal_error_in_value(n, valindex);
+            res += nodal_err * nodal_err * ft->temporal_error_scales[j + space_info->buffer_offset_interf];
+            denom += 1.0;            
+          }
+          
+          handled_nodes_on_conti_spaces[is].insert(n);
         }
-        for (unsigned int j = 0; j < ft->numfields_C1_basebulk; j++)
-        {
-          if (ft->temporal_error_scales[j + ft->numfields_C2_basebulk] == 0.0)
-            continue;
-          double nodal_err = n->time_stepper_pt()->temporal_error_in_value(n, j + ft->numfields_C2_basebulk);
-          res += nodal_err * nodal_err * ft->temporal_error_scales[j + ft->numfields_C2_basebulk];
-          denom += 1.0;
-        }
-        pyoomph::BoundaryNode *bn = dynamic_cast<pyoomph::BoundaryNode *>(n);
-        if (!bn)
-          continue; // Should not happen
-        // Now potential interface fields
-        for (unsigned int j = 0; j < add_indices_C2.size(); j++)
-        {
-          if (ft->temporal_error_scales[j + ft->numfields_C2_basebulk + ft->numfields_C1_basebulk] == 0.0)
-            continue;
-          double nodal_err = bn->time_stepper_pt()->temporal_error_in_value(bn, bn->index_of_first_value_assigned_by_face_element(add_indices_C2[j]));
-          res += nodal_err * nodal_err * ft->temporal_error_scales[j + ft->numfields_C2_basebulk + ft->numfields_C1_basebulk];
-          denom += 1.0;
-        }
-        for (unsigned int j = 0; j < add_indices_C1.size(); j++)
-        {
-          if (ft->temporal_error_scales[j + ft->numfields_C2 + ft->numfields_C1_basebulk] == 0.0)
-            continue;
-          double nodal_err = bn->time_stepper_pt()->temporal_error_in_value(bn, bn->index_of_first_value_assigned_by_face_element(add_indices_C1[j]));
-          res += nodal_err * nodal_err * ft->temporal_error_scales[j + ft->numfields_C2 + ft->numfields_C1_basebulk];
-          denom += 1.0;
-        }
-        handled_nodes.insert(n);
       }
-      // C2 Nodes, C1 are already handled now
-      for (unsigned int in = 0; in < be->nnode(); in++)
-      {
-        pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(be->node_pt(in));
-        if (handled_nodes.count(n))
-          continue;
-        for (unsigned int j = 0; j < ft->numfields_C2_basebulk; j++)
-        {
-          if (ft->temporal_error_scales[j] == 0.0)
-            continue;
-          double nodal_err = n->time_stepper_pt()->temporal_error_in_value(n, j);
-          res += nodal_err * nodal_err * ft->temporal_error_scales[j];
-          denom += 1.0;
-        }
-        pyoomph::BoundaryNode *bn = dynamic_cast<pyoomph::BoundaryNode *>(n);
-        if (!bn)
-          continue; // Should not happen
-        // Now potential interface fields
-        for (unsigned int j = 0; j < add_indices_C2.size(); j++)
-        {
-          if (ft->temporal_error_scales[j + ft->numfields_C2_basebulk + ft->numfields_C1_basebulk] == 0.0)
-            continue;
-          double nodal_err = bn->time_stepper_pt()->temporal_error_in_value(bn, bn->index_of_first_value_assigned_by_face_element(add_indices_C2[j]));
-          res += nodal_err * nodal_err * ft->temporal_error_scales[j + ft->numfields_C2_basebulk + ft->numfields_C1_basebulk];
-          denom += 1.0;
-        }
-        handled_nodes.insert(n);
-      }
-    }
 
-    for (unsigned int i = 0; i < ft->numfields_DL; i++)
-    {
-      if (ft->temporal_error_scales[i + ft->numfields_C2 + ft->numfields_C1] == 0.0)
-        continue;
-      for (unsigned int j = 0; j < this->nelement(); j++)
+      //TODO: DG Spaces
+
+
+
+      for (unsigned int i = 0; i < ft->numfields_DL; i++)
       {
-        BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(j));
-        oomph::Data *d = be->internal_data_pt(i);
-        for (unsigned int v = 0; v < d->nvalue(); v++)
+        if (ft->temporal_error_scales[i + ft->buffer_offset_DL] == 0.0)
+          continue;
+        for (unsigned int j = 0; j < this->nelement(); j++)
         {
-          double derr = d->time_stepper_pt()->temporal_error_in_value(d, v);
-          res += derr * derr * ft->temporal_error_scales[i + ft->numfields_C2 + ft->numfields_C1];
-          denom += 1.0;
+          BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(j));
+          oomph::Data *d = be->internal_data_pt(i);
+          for (unsigned int v = 0; v < d->nvalue(); v++)
+          {
+            double derr = d->time_stepper_pt()->temporal_error_in_value(d, v);
+            res += derr * derr * ft->temporal_error_scales[i + ft->buffer_offset_DL];
+            denom += 1.0;
+          }
         }
       }
-    }
-    for (unsigned int i = 0; i < ft->numfields_D0; i++)
-    {
-      if (ft->temporal_error_scales[i + ft->numfields_C2 + ft->numfields_C1 + ft->numfields_DL] == 0.0)
-        continue;
-      for (unsigned int j = 0; j < this->nelement(); j++)
+      for (unsigned int i = 0; i < ft->numfields_D0; i++)
       {
-        BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(j));
-        oomph::Data *d = be->internal_data_pt(i + ft->numfields_DL);
-        double derr = d->time_stepper_pt()->temporal_error_in_value(d, 0);
-        res += derr * derr * ft->temporal_error_scales[i + ft->numfields_C2 + ft->numfields_C1 + ft->numfields_DL];
-        denom += 1.0;
+        if (ft->temporal_error_scales[i + ft->buffer_offset_D0] == 0.0)
+          continue;
+        for (unsigned int j = 0; j < this->nelement(); j++)
+        {
+          BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(j));
+          oomph::Data *d = be->internal_data_pt(i + ft->numfields_DL);
+          double derr = d->time_stepper_pt()->temporal_error_in_value(d, 0);
+          res += derr * derr * ft->temporal_error_scales[i + ft->buffer_offset_D0];
+          denom += 1.0;
+        }
       }
     }
     //	std::cout << " RESDENOM " << res << " " << denom << std::endl;

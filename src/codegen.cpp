@@ -1265,7 +1265,7 @@ namespace pyoomph
 	std::string FiniteElementSpace::get_num_nodes_str(FiniteElementCode *forcode) const
 	{
 		std::string eleminfo = forcode->get_elem_info_str(this);
-		if (this->get_shape_name()=="DL")
+		if (this->get_shape_name()=="DL") //TODO: Make this in another way
 		{
 			return eleminfo + "->" + "nnode_DL";
 		}
@@ -6877,6 +6877,8 @@ namespace pyoomph
 		unsigned int base_bulk_nodal_offset = 0;
 		unsigned int internal_data_offset = 0;
 		unsigned int DG_external_offset = 0;
+		unsigned int total_numfields=0;
+		unsigned int total_numfields_basebulk=0;
 //		unsigned int interf_buffer_offset = 0;
 		for (auto &space : spaces)
 		{
@@ -6917,6 +6919,7 @@ namespace pyoomph
 				init << " functable->numfields_" << space->get_name() << "=" << numfields << ";" << std::endl;				
 				init << " // New way" << std::endl;
 				init << " functable->" << info_name << ".numfields=" << numfields << ";" << std::endl;
+				total_numfields += numfields;
 
 				if (dynamic_cast<ContinuousFiniteElementSpace *>(space) || dynamic_cast<DGFiniteElementSpace *>(space))
 				{
@@ -6932,6 +6935,7 @@ namespace pyoomph
 						init << " functable->" << info_name << ".numfields_bulk=" << numfields << ";" << std::endl;
 						init << " functable->" << info_name << ".numfields_basebulk=" << numfields << ";" << std::endl;
 						init << " functable->" << info_name << ".numfields_new=" << numfields << ";" << std::endl;
+						total_numfields_basebulk += numfields;
 						
 						if (space->get_name()=="C1TB" && numfields>0) has_C1TB_fields=true;
 						
@@ -7006,6 +7010,7 @@ namespace pyoomph
 						init << " functable->" << info_name << ".numfields_bulk=" << ncbulk << ";" << std::endl;
 						init << " functable->" << info_name << ".numfields_basebulk=" << ncbasebulk << ";" << std::endl;
 						init << " functable->" << info_name << ".numfields_new=" << numfields - ncbulk << ";" << std::endl;
+						total_numfields_basebulk += ncbasebulk;
 						if (dynamic_cast<ContinuousFiniteElementSpace *>(space))
 						{
 							init << " // Old way" << std::endl;
