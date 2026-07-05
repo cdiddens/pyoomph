@@ -228,11 +228,7 @@ namespace pyoomph
     virtual unsigned get_D2_node_index(const unsigned &fieldindex, const unsigned &nodeindex) const { return nodeindex; }
     virtual unsigned get_D1TB_node_index(const unsigned &fieldindex, const unsigned &nodeindex) const { return nodeindex; }
     virtual unsigned get_D1_node_index(const unsigned &fieldindex, const unsigned &nodeindex) const { return nodeindex; }
-
-    virtual int get_C2TB_local_equation(const unsigned &fieldindex, const unsigned &nodeindex, const bool &by_elemental_node_index = false);
-    virtual int get_C2_local_equation(const unsigned &fieldindex, const unsigned &nodeindex, const bool &by_elemental_node_index = false);
-    virtual int get_C1TB_local_equation(const unsigned &fieldindex, const unsigned &nodeindex, const bool &by_elemental_node_index = false);
-    virtual int get_C1_local_equation(const unsigned &fieldindex, const unsigned &nodeindex, const bool &by_elemental_node_index = false);
+    
     virtual int get_D2TB_local_equation(const unsigned &fieldindex, const unsigned &nodeindex);
     virtual int get_D2_local_equation(const unsigned &fieldindex, const unsigned &nodeindex);
     virtual int get_D1TB_local_equation(const unsigned &fieldindex, const unsigned &nodeindex);

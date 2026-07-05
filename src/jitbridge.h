@@ -404,6 +404,7 @@ typedef struct JITFuncSpec_Table_FiniteElement
 
 
   // Old way of handling things
+  /*
   unsigned int numfields_C1, numfields_C1_bulk, numfields_C1_basebulk,numfields_C1_new; // Fields numfields_C1 are the total number of fields, numfields_C1_bulk are the ones which are defined on the bulk mesh (including the additional field of all parent interface meshes, numfields_C1_basebulk are indeed the fields that are directly implemented only at the lowest level. numfields_C1_new are the number of fields defined directly at this element level, i.e for lowest bulk level, numfields_C1_new=numfields_C1_bulk=numfields_C1_basebulk=numfields_C1. For interface elements, we get numfields_C1_new=numfields_C1-numfields_C1_bulk;
   char **fieldnames_C1;
 
@@ -415,7 +416,7 @@ typedef struct JITFuncSpec_Table_FiniteElement
   
   unsigned int numfields_C1TB, numfields_C1TB_bulk, numfields_C1TB_basebulk,numfields_C1TB_new;
   char **fieldnames_C1TB;  
-  
+  */
   unsigned int numfields_D1, numfields_D1_bulk, numfields_D1_basebulk,numfields_D1_new; 
   char **fieldnames_D1;
   
@@ -431,11 +432,12 @@ typedef struct JITFuncSpec_Table_FiniteElement
   unsigned int numfields_Pos;
   char **fieldnames_Pos;
 
-  unsigned int total_num_fields;
-  unsigned int total_num_fields_basebulk;
+  // Filled at problem level
+  unsigned int total_num_fields; // Including all fields, DG, interfaces, DL, D0, but not ED0
+  unsigned int total_num_fields_basebulk; // Only the continuous fields, i.e. C2TB,C2,C1TB,C1
   
   
-  int hangindex_C1,hangindex_C2,hangindex_C1TB,hangindex_C2TB,hangindex_Pos; //Hang indices
+  int hangindex_Pos; //Hang indices
 
   unsigned int numfields_DL;
   char **fieldnames_DL;
@@ -445,11 +447,11 @@ typedef struct JITFuncSpec_Table_FiniteElement
 
   unsigned int numfields_ED0;
   char **fieldnames_ED0;
-  
+  /*
   unsigned int nodal_offset_C2TB_basebulk,nodal_offset_C2_basebulk,nodal_offset_C1TB_basebulk,nodal_offset_C1_basebulk; //Offsets to the indices in the nodal values (basebulk fields only)
   unsigned int buffer_offset_C2TB_basebulk,buffer_offset_C2_basebulk,buffer_offset_C1TB_basebulk,buffer_offset_C1_basebulk; // Offsets in the nodal data buffer (basebulk fields only)
   unsigned int buffer_offset_C2TB_interf,buffer_offset_C2_interf,buffer_offset_C1TB_interf,buffer_offset_C1_interf; // Offsets in the nodal data buffer (interface fields only)
-  
+  */
     
   
   unsigned int internal_offset_D2TB_new,internal_offset_D2_new,internal_offset_D1TB_new,internal_offset_D1_new; // Offset to the internal_data entries. These are only there on the current element level

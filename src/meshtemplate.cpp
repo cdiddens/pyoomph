@@ -1481,7 +1481,7 @@ Index : Local coordinates (s0,s1,s2)
 				}				
 			}
 		}
-		else if (code_inst->get_func_table()->numfields_C2 || dom_space == "C2" || code_inst->get_func_table()->numfields_C2TB || dom_space == "C2TB") 
+		else if (code_inst->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields || dom_space == "C2" || code_inst->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields || dom_space == "C2TB") 
 		{
 			for (unsigned int ie = 0; ie < elements.size(); ie++)
 			{
@@ -2028,12 +2028,12 @@ Index : Local coordinates (s0,s1,s2)
 	{
 		// Generate all nodes if not present
 		const JITFuncSpec_Table_FiniteElement_t *functable = coll->code_instance->get_func_table();
-		BulkElementBase::__CurrentCodeInstance = coll->code_instance;
-		unsigned nC1 = functable->numfields_C1;
-		unsigned nC2 = functable->numfields_C2;
-		unsigned nC1TB = functable->numfields_C1TB;		
-		unsigned nC2TB = functable->numfields_C2TB;
-		unsigned ntot = nC1 +nC1TB+ nC2 + nC2TB;
+		BulkElementBase::__CurrentCodeInstance = coll->code_instance;		
+		unsigned ntot = 0;
+		for (unsigned int si=0;si<functable->num_present_continuous_spaces;si++)
+		{
+			ntot+=functable->present_continuous_spaces[si]->numfields_basebulk;
+		}
 
 		unsigned n_lagrangian_type = 1;
 

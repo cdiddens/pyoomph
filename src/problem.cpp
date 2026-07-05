@@ -137,6 +137,8 @@ namespace pyoomph
 			functable->continuous_spaces[i].space_index=i;
 		}
 		
+		functable->total_num_fields=0;
+		functable->total_num_fields_basebulk=0;
 
 	// Only add the spaces which are really present to the present continuous_spaces array, in order of dominance
 		functable->num_present_continuous_spaces=0;
@@ -145,9 +147,12 @@ namespace pyoomph
 			if (functable->continuous_spaces[i].numfields>0)
 			{
 				functable->present_continuous_spaces[functable->num_present_continuous_spaces]=&functable->continuous_spaces[i];
+				functable->total_num_fields+=functable->continuous_spaces[i].numfields;
+				functable->total_num_fields_basebulk+=functable->continuous_spaces[i].numfields_basebulk;
 				functable->num_present_continuous_spaces++;
 			}
 		}
+		functable->total_num_fields+=functable->numfields_D2TB+functable->numfields_D1TB+functable->numfields_D0+functable->numfields_DL;
 		std::string dominant_space=functable->dominant_space;
 		bool found_dominant=false;
 		for (unsigned int i=0;i<NUM_CONTINUOUS_SPACES;i++)
@@ -347,26 +352,15 @@ namespace pyoomph
 	{
 		std::map<std::string, unsigned> res;
 		unsigned offs = 0;
-		for (unsigned int i = 0; i < dyn->functable->numfields_C2TB_basebulk; i++)
+		for (unsigned int si=0;si<dyn->functable->num_present_continuous_spaces;si++)
 		{
-			res[dyn->functable->fieldnames_C2TB[i]] = offs + i;
-		}
-		offs += dyn->functable->numfields_C2TB_basebulk;
-		for (unsigned int i = 0; i < dyn->functable->numfields_C2_basebulk; i++)
-		{
-			res[dyn->functable->fieldnames_C2[i]] = offs + i;
-		}
-		offs += dyn->functable->numfields_C2_basebulk;
-		for (unsigned int i = 0; i < dyn->functable->numfields_C1TB_basebulk; i++)
-		{
-			res[dyn->functable->fieldnames_C1TB[i]] = offs + i;
-		}
-		offs += dyn->functable->numfields_C1TB_basebulk;
-		for (unsigned int i = 0; i < dyn->functable->numfields_C1_basebulk; i++)
-		{
-			res[dyn->functable->fieldnames_C1[i]] = offs + i;
-		}
-		offs += dyn->functable->numfields_C1_basebulk;
+			auto *space = dyn->functable->present_continuous_spaces[si];
+			for (unsigned int i = 0; i < space->numfields_basebulk; i++)
+			{
+				res[space->fieldnames[i]] = offs + i;
+			}
+			offs += space->numfields_basebulk;
+		}		
 
 		for (unsigned int i = 0; i < dyn->functable->numfields_D2TB_basebulk; i++)
 		{
@@ -390,26 +384,16 @@ namespace pyoomph
 		offs += dyn->functable->numfields_D1_basebulk;
 
 		// Now the additional ones
-		for (unsigned int i = 0; i < dyn->functable->numfields_C2TB - dyn->functable->numfields_C2TB_basebulk; i++)
+		for (unsigned int si=0;si<dyn->functable->num_present_continuous_spaces;si++)
 		{
-			res[dyn->functable->fieldnames_C2TB[i + dyn->functable->numfields_C2TB_basebulk]] = offs + i;
+			auto *space = dyn->functable->present_continuous_spaces[si];
+			for (unsigned int i = 0; i < space->numfields - space->numfields_basebulk; i++)
+			{
+				res[space->fieldnames[i + space->numfields_basebulk]] = offs + i;
+			}
+			offs += space->numfields - space->numfields_basebulk;
 		}
-		offs += dyn->functable->numfields_C2TB - dyn->functable->numfields_C2TB_basebulk;
-		for (unsigned int i = 0; i < dyn->functable->numfields_C2 - dyn->functable->numfields_C2_basebulk; i++)
-		{
-			res[dyn->functable->fieldnames_C2[i + dyn->functable->numfields_C2_basebulk]] = offs + i;
-		}
-		offs += dyn->functable->numfields_C2 - dyn->functable->numfields_C2_basebulk;
-		for (unsigned int i = 0; i < dyn->functable->numfields_C1TB - dyn->functable->numfields_C1TB_basebulk; i++)
-		{
-			res[dyn->functable->fieldnames_C1TB[i + dyn->functable->numfields_C1TB_basebulk]] = offs + i;
-		}
-		offs += dyn->functable->numfields_C1TB - dyn->functable->numfields_C1TB_basebulk;
-		for (unsigned int i = 0; i < dyn->functable->numfields_C1 - dyn->functable->numfields_C1_basebulk; i++)
-		{
-			res[dyn->functable->fieldnames_C1[i + dyn->functable->numfields_C1_basebulk]] = offs + i;
-		}
-		offs += dyn->functable->numfields_C1 - dyn->functable->numfields_C1_basebulk;
+
 
 		// Now the additional ones
 		for (unsigned int i = 0; i < dyn->functable->numfields_D2TB - dyn->functable->numfields_D2TB_basebulk; i++)
@@ -470,34 +454,17 @@ namespace pyoomph
 
 	int DynamicBulkElementInstance::get_nodal_field_index(std::string name)
 	{
-		for (unsigned int i = 0; i < dyn->functable->numfields_C2TB_basebulk; i++)
+		for (unsigned int si=0;si<dyn->functable->num_present_continuous_spaces;si++)
 		{
-			if (!strcmp(name.c_str(), dyn->functable->fieldnames_C2TB[i]))
+			auto *space = dyn->functable->present_continuous_spaces[si];
+			for (unsigned int i = 0; i < space->numfields_basebulk; i++)
 			{
-				return i;
+				if (!strcmp(name.c_str(), space->fieldnames[i]))
+				{
+					return i + space->nodal_offset_basebulk;
+				}
 			}
 		}
-		for (unsigned int i = 0; i < dyn->functable->numfields_C2_basebulk; i++)
-		{
-			if (!strcmp(name.c_str(), dyn->functable->fieldnames_C2[i]))
-			{
-				return i+ dyn->functable->numfields_C2TB_basebulk;
-			}
-		}
-		for (unsigned int i = 0; i < dyn->functable->numfields_C1TB_basebulk; i++)
-		{
-			if (!strcmp(name.c_str(), dyn->functable->fieldnames_C1TB[i]))
-			{
-				return i + dyn->functable->numfields_C2TB_basebulk+ dyn->functable->numfields_C2_basebulk;
-			}
-		}
-		for (unsigned int i = 0; i < dyn->functable->numfields_C1_basebulk; i++)
-		{
-			if (!strcmp(name.c_str(), dyn->functable->fieldnames_C1[i]))
-			{
-				return i + dyn->functable->numfields_C2TB_basebulk+ dyn->functable->numfields_C2_basebulk+dyn->functable->numfields_C1TB_basebulk;
-			}
-		}		
 		return -1;
 	}
 
@@ -538,27 +505,18 @@ namespace pyoomph
 
 	std::string DynamicBulkElementInstance::get_space_of_field(std::string name)
 	{
-		for (unsigned int i = 0; i < dyn->functable->numfields_C2TB_basebulk; i++)
+		for (unsigned int si=0;si<dyn->functable->num_present_continuous_spaces;si++)
 		{
-			if (!strcmp(name.c_str(), dyn->functable->fieldnames_C2TB[i]))
+			auto *space = dyn->functable->present_continuous_spaces[si];
+			for (unsigned int i = 0; i < space->numfields_basebulk; i++)
 			{
-				return "C2TB";
+				if (!strcmp(name.c_str(), space->fieldnames[i]))
+				{
+					return space->space_name;
+				}
 			}
 		}
-		for (unsigned int i = 0; i < dyn->functable->numfields_C2_basebulk; i++)
-		{
-			if (!strcmp(name.c_str(), dyn->functable->fieldnames_C2[i]))
-			{
-				return "C2";
-			}
-		}
-		for (unsigned int i = 0; i < dyn->functable->numfields_C1_basebulk; i++)
-		{
-			if (!strcmp(name.c_str(), dyn->functable->fieldnames_C1[i]))
-			{
-				return "C1";
-			}
-		}
+		
 		for (unsigned int i = 0; i < dyn->functable->numfields_DL; i++)
 		{
 			if (!strcmp(name.c_str(), dyn->functable->fieldnames_DL[i]))

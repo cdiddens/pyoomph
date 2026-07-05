@@ -1488,33 +1488,6 @@ namespace pyoomph
         return ft->buffer_offset_D0+ fieldindex;
     }
 
-	int BulkElementBase::get_C2TB_local_equation(const unsigned &fieldindex,const unsigned & nodeindex,const bool & by_elemental_node_index)
-	{
-	  auto * ft=this->get_code_instance()->get_func_table();
-	  if (by_elemental_node_index) return this->nodal_local_eqn(nodeindex,ft->nodal_offset_C2TB_basebulk+fieldindex);
-	  else return this->nodal_local_eqn(this->get_node_index_C2TB_to_element(nodeindex),ft->nodal_offset_C2TB_basebulk+fieldindex);
-	}
-
-    int BulkElementBase::get_C2_local_equation(const unsigned &fieldindex,const unsigned & nodeindex,const bool & by_elemental_node_index)
-	{
-	  auto * ft=this->get_code_instance()->get_func_table();
-	  if (by_elemental_node_index) return this->nodal_local_eqn(nodeindex,ft->nodal_offset_C2_basebulk+fieldindex);
-	  else return this->nodal_local_eqn(this->get_node_index_C2_to_element(nodeindex),ft->nodal_offset_C2_basebulk+fieldindex);		
-	}
-
-    int BulkElementBase::get_C1TB_local_equation(const unsigned &fieldindex,const unsigned & nodeindex,const bool & by_elemental_node_index)    
-	{
-	  auto * ft=this->get_code_instance()->get_func_table();
-	  if (by_elemental_node_index) return this->nodal_local_eqn(nodeindex,ft->nodal_offset_C1TB_basebulk+fieldindex);
-	  else return this->nodal_local_eqn(this->get_node_index_C1TB_to_element(nodeindex),ft->nodal_offset_C1TB_basebulk+fieldindex);		
-	}
-	
-    int BulkElementBase::get_C1_local_equation(const unsigned &fieldindex,const unsigned & nodeindex,const bool & by_elemental_node_index)
-	{
-	  auto * ft=this->get_code_instance()->get_func_table();
-	  if (by_elemental_node_index) return this->nodal_local_eqn(nodeindex,ft->nodal_offset_C1_basebulk+fieldindex);
-	  else return this->nodal_local_eqn(this->get_node_index_C1_to_element(nodeindex),ft->nodal_offset_C1_basebulk+fieldindex);		
-	}
 
     int BulkElementBase::get_D2TB_local_equation(const unsigned &fieldindex,const unsigned & nodeindex)
 	{
@@ -9484,7 +9457,7 @@ namespace pyoomph
 
 	void BulkElementTetra3dC2::interpolating_basis(const oomph::Vector<double> &s, oomph::Shape &psi, const int &value_id) const
 	{
-		if (value_id >= static_cast<int>(codeinst->get_func_table()->numfields_C2_basebulk))
+		if (value_id >= static_cast<int>(codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk + codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk))
 		{
 			return this->shape_at_s_C1(s, psi);
 		}
@@ -10934,13 +10907,10 @@ namespace pyoomph
 
 		if (required->dx_psi_C1TB || required->psi_C1TB || required->dX_psi_C1TB) // C1 < C2, so nothing to do
 		{
-			int hang_index = (from_elem->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2] ? fft->nodal_offset_C1_basebulk : -1); // Hangs also like C1!
-			// std::cout << "   HANG INDEX " <<  hang_index << "  NNODE C1TB " << from_elem->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1TB] << std::endl;
-//						std::cout << "REQ AND FROM ELEM HAs " << from_elem->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1TB] << std::endl;			
+			int hang_index =  (from_elem->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2] ? fft->continuous_spaces[SPACE_INDEX_C1TB].nodal_offset_basebulk : -1);		
 			for (unsigned int j = 0; j < from_elem->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1TB]; j++)
 			{
 				auto *nod_pt = from_elem->node_pt(from_elem->get_node_index_C1TB_to_element(j));
-				//	std::cout << "      MAPPOING " << j << "  " << from_elem->get_node_index_C1_to_element(j) << "  HANING " << nod_pt->is_hanging(hang_index) << std::endl;
 				if (nod_pt->is_hanging(hang_index))
 				{
 					oomph::HangInfo *const hang_pt = nod_pt->hanging_pt(hang_index);
@@ -10969,7 +10939,7 @@ namespace pyoomph
 		// std::cout << " CODE " << codeinst->get_code()->get_file_name() << "  DEP ON " << fcodeinst->get_code()->get_file_name() << "  REQ C1 " << required->psi_C1 << std::endl;
 		if (required->dx_psi_C1 || required->psi_C1 || required->dX_psi_C1) // C1 < C2, so nothing to do
 		{
-			int hang_index = (from_elem->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2] ? fft->nodal_offset_C1_basebulk : -1);
+			int hang_index = (from_elem->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2] ? fft->continuous_spaces[SPACE_INDEX_C1].nodal_offset_basebulk : -1);
 			// std::cout << "   HANG INDEX " <<  hang_index << "  NNODE C1 " << from_elem->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1] << std::endl;
 			for (unsigned int j = 0; j < from_elem->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1]; j++)
 			{

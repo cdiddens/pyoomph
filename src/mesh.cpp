@@ -762,22 +762,15 @@ namespace pyoomph
       auto *cft = cel->get_code_instance()->get_func_table();
       if (!dynamic_cast<InterfaceMesh *>(current))
       {
-        for (unsigned int i = 0; i < cft->numfields_C2TB_basebulk; i++)
+        for (unsigned int si = 0; si < cft->num_present_continuous_spaces; si++)
         {
-          res[cft->fieldnames_C2TB[i]] = prefix + "C2TB";
+          auto * space_info=cft->present_continuous_spaces[si];
+          for (unsigned int i = 0; i < space_info->numfields_basebulk; i++)
+          {
+            res[space_info->fieldnames[i]] = prefix + std::string(space_info->space_name);
+          }
         }
-        for (unsigned int i = 0; i < cft->numfields_C2_basebulk; i++)
-        {
-          res[cft->fieldnames_C2[i]] = prefix + "C2";
-        }
-        for (unsigned int i = 0; i < cft->numfields_C1TB_basebulk; i++)
-        {
-          res[cft->fieldnames_C1TB[i]] = prefix + "C1TB";
-        }
-        for (unsigned int i = 0; i < cft->numfields_C1_basebulk; i++)
-        {
-          res[cft->fieldnames_C1[i]] = prefix + "C1";
-        }
+
 
         for (unsigned int i = 0; i < cft->numfields_D2TB_basebulk; i++)
         {
@@ -804,23 +797,15 @@ namespace pyoomph
       }
       else
       {
-        for (unsigned int i = cft->numfields_C2TB_bulk; i < cft->numfields_C2TB; i++)
+        for (unsigned int si = 0; si < cft->num_present_continuous_spaces; si++)
         {
-          res[cft->fieldnames_C2TB[i]] = prefix + "C2TB";
+          auto * space_info=cft->present_continuous_spaces[si];
+          for (unsigned int i = space_info->numfields_bulk; i < space_info->numfields; i++)
+          {
+            res[space_info->fieldnames[i]] = prefix + std::string(space_info->space_name);
+          }
         }
-        for (unsigned int i = cft->numfields_C2_bulk; i < cft->numfields_C2; i++)
-        {
-          res[cft->fieldnames_C2[i]] = prefix + "C2";
-        }
-        for (unsigned int i = cft->numfields_C1TB_bulk; i < cft->numfields_C1TB; i++)
-        {
-          res[cft->fieldnames_C1TB[i]] = prefix + "C1TB";
-        }
-        for (unsigned int i = cft->numfields_C1_bulk; i < cft->numfields_C1; i++)
-        {
-          res[cft->fieldnames_C1[i]] = prefix + "C1";
-        }
-
+        
         for (unsigned int i = cft->numfields_D2TB_bulk; i < cft->numfields_D2TB; i++)
         {
           res[cft->fieldnames_D2TB[i]] = prefix + "D2TB";
@@ -870,47 +855,23 @@ namespace pyoomph
         posindices.insert(i);
     }
     std::set<unsigned> valindices;
-    for (unsigned int i = 0; i < ft->numfields_C2TB_basebulk; i++)
-    {
-      if (mustpin(ft->fieldnames_C2TB[i]))
-        valindices.insert(i);
-    }
-    for (unsigned int i = 0; i < ft->numfields_C2_basebulk; i++)
-    {
-      if (mustpin(ft->fieldnames_C2[i]))
-        valindices.insert(i + ft->numfields_C2TB_basebulk);
-    }
-    for (unsigned int i = 0; i < ft->numfields_C1TB_basebulk; i++)
-    {
-      if (mustpin(ft->fieldnames_C1TB[i]))
-        valindices.insert(i + ft->numfields_C2TB_basebulk + ft->numfields_C2_basebulk);
-    }
-    for (unsigned int i = 0; i < ft->numfields_C1_basebulk; i++)
-    {
-      if (mustpin(ft->fieldnames_C1[i]))
-        valindices.insert(i + ft->numfields_C2TB_basebulk + ft->numfields_C2_basebulk + ft->numfields_C1TB_basebulk);
-    }
     std::set<unsigned> add_indices;
-    for (unsigned int i = ft->numfields_C2TB_basebulk; i < ft->numfields_C2TB; i++)
+    for (unsigned int si = 0; si < ft->num_present_continuous_spaces; si++)
     {
-      if (mustpin(ft->fieldnames_C2TB[i]))
-        add_indices.insert(ci->resolve_interface_dof_id(ft->fieldnames_C2TB[i]));
+      auto * space_info=ft->present_continuous_spaces[si];
+      for (unsigned int i = 0; i < space_info->numfields_basebulk; i++)
+      {
+        if (mustpin(space_info->fieldnames[i]))
+          valindices.insert(i + space_info->buffer_offset_basebulk);
+      }
+      for (unsigned int i = space_info->numfields_basebulk; i < space_info->numfields; i++)
+      {
+        if (mustpin(space_info->fieldnames[i]))
+          add_indices.insert(space_info->interface_dof_indices[i - space_info->numfields_basebulk]);
+      }
     }
-    for (unsigned int i = ft->numfields_C2_basebulk; i < ft->numfields_C2; i++)
-    {
-      if (mustpin(ft->fieldnames_C2[i]))
-        add_indices.insert(ci->resolve_interface_dof_id(ft->fieldnames_C2[i]));
-    }
-    for (unsigned int i = ft->numfields_C1TB_basebulk; i < ft->numfields_C1TB; i++)
-    {
-      if (mustpin(ft->fieldnames_C1TB[i]))
-        add_indices.insert(ci->resolve_interface_dof_id(ft->fieldnames_C1TB[i]));
-    }
-    for (unsigned int i = ft->numfields_C1_basebulk; i < ft->numfields_C1; i++)
-    {
-      if (mustpin(ft->fieldnames_C1[i]))
-        add_indices.insert(ci->resolve_interface_dof_id(ft->fieldnames_C1[i]));
-    }
+    
+    
 
     std::set<unsigned> D2TBindices;
     for (unsigned int i = 0; i < ft->numfields_D2TB; i++)
@@ -1286,10 +1247,6 @@ namespace pyoomph
     unsigned nDGfields = (be ? be->num_DG_fields(false) : 0);
     unsigned nDGfields_basebulk = (be ? be->num_DG_fields(true) : 0);
 
-    unsigned naddC1 = ft->continuous_spaces[SPACE_INDEX_C1].numfields- ft->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk;//  be->nadditional_fields_C1();
-    unsigned naddC1TB = ft->continuous_spaces[SPACE_INDEX_C1TB].numfields- ft->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk;//  be->nadditional_fields_C1TB();
-    unsigned naddC2 = ft->continuous_spaces[SPACE_INDEX_C2].numfields- ft->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk;//  be->nadditional_fields_C2();
-    unsigned naddC2TB = ft->continuous_spaces[SPACE_INDEX_C2TB].numfields- ft->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk;//  be->nadditional_fields_C2TB();
     unsigned naddD1 = ft->numfields_D1 - ft->numfields_D1_basebulk;
     unsigned naddD1TB = ft->numfields_D1TB - ft->numfields_D1TB_basebulk;
     unsigned naddD2 = ft->numfields_D2 - ft->numfields_D2_basebulk;
@@ -1305,55 +1262,40 @@ namespace pyoomph
       nnormal = be->nodal_dimension();
     }
 
-    unsigned contstride = nodal_dim + nlagrangian + ncontfields + nDGfields + naddC1 + naddC1TB + naddC2 + naddC2TB + nnormal;
+    unsigned nadd_interface=0;
+    for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
+    {
+      auto * space_info=ft->present_continuous_spaces[si];
+      nadd_interface+=space_info->numfields-space_info->numfields_basebulk;
+    }
+
+    unsigned contstride = nodal_dim + nlagrangian + ncontfields + nDGfields + nadd_interface + nnormal;
     double spatial_scale = (output_scales.count("spatial") && (!nondimensional) ? output_scales["spatial"] : 1.0);
-    std::vector<double> nodal_scales(ncontfields + nDGfields + naddC1 + naddC1TB + naddC2 + naddC2TB + nnormal, 1.0);
+    std::vector<double> nodal_scales(ncontfields + nDGfields + nadd_interface+ nnormal, 1.0);
     for (auto &fi : be->get_code_instance()->get_nodal_field_indices())
     {
       nodal_scales[fi.second] = (output_scales.count(fi.first) && (!nondimensional) ? output_scales[fi.first] : 1.0);
     }
-    std::vector<int> add_C2TB(naddC2TB);
-    std::vector<double> add_C2TB_scales(naddC2TB, 1.0);
-    for (unsigned int i = 0; i < naddC2TB; i++)
+
+    std::vector<int> add_conti(nadd_interface);
+    std::vector<double> add_conti_scales(nadd_interface, 1.0);
+    unsigned add_conti_index = 0;
+    for (unsigned int si = 0; si < ft->num_present_continuous_spaces; si++)
     {
-      std::string fn = ft->fieldnames_C2TB[i + ft->numfields_C2TB_basebulk];
-      add_C2TB[i] = this->has_interface_dof_id(fn);
-      if (add_C2TB[i] < 0)
-        throw_runtime_error("Something is wrong with the interface field " + fn);
-      add_C2TB_scales[i] = (output_scales.count(fn) && (!nondimensional) ? output_scales[fn] : 1.0);
+      auto * space_info=ft->present_continuous_spaces[si];
+      for (unsigned int i = space_info->numfields_basebulk; i < space_info->numfields; i++)
+      {
+        std::string fn = space_info->fieldnames[i];
+        add_conti[add_conti_index] = space_info->interface_dof_indices[i-space_info->numfields_basebulk];
+        if (add_conti[add_conti_index] < 0)
+          throw_runtime_error("Something is wrong with the interface field " + fn);
+        add_conti_scales[add_conti_index] = (output_scales.count(fn) && (!nondimensional) ? output_scales[fn] : 1.0);
+        add_conti_index++;
+      }
     }
 
-    std::vector<int> add_C2(naddC2);
-    std::vector<double> add_C2_scales(naddC2, 1.0);
-    for (unsigned int i = 0; i < naddC2; i++)
-    {
-      std::string fn = ft->fieldnames_C2[i + ft->numfields_C2_basebulk];
-      add_C2[i] = this->has_interface_dof_id(fn);
-      if (add_C2[i] < 0)
-        throw_runtime_error("Something is wrong with the interface field " + fn);
-      add_C2_scales[i] = (output_scales.count(fn) && (!nondimensional) ? output_scales[fn] : 1.0);
-    }
-    std::vector<int> add_C1(naddC1);
-    std::vector<double> add_C1_scales(naddC1, 1.0);
-    for (unsigned int i = 0; i < naddC1; i++)
-    {
-      std::string fn = ft->fieldnames_C1[i + ft->numfields_C1_basebulk];
-      add_C1[i] = this->has_interface_dof_id(fn);
-      if (add_C1[i] < 0)
-        throw_runtime_error("Something is wrong with the interface field " + fn);
-      add_C1_scales[i] = (output_scales.count(fn) && (!nondimensional) ? output_scales[fn] : 1.0);
-    }
-    std::vector<int> add_C1TB(naddC1TB);
-    std::vector<double> add_C1TB_scales(naddC1TB, 1.0);
-    for (unsigned int i = 0; i < naddC1TB; i++)
-    {
-      std::string fn = ft->fieldnames_C1TB[i + ft->numfields_C1TB_basebulk];
-      add_C1TB[i] = this->has_interface_dof_id(fn);
-      if (add_C1TB[i] < 0)
-        throw_runtime_error("Something is wrong with the interface field " + fn);
-      add_C1TB_scales[i] = (output_scales.count(fn) && (!nondimensional) ? output_scales[fn] : 1.0);
-    }
 
+    
     std::map<oomph::Node *, unsigned> nodemap;
     this->fill_node_map(nodemap);
     std::vector<oomph::Node *> rev_nodemap = this->fill_reversed_node_map(discontinuous);
@@ -1401,41 +1343,21 @@ namespace pyoomph
         xbuffer[ni * contstride + nd + nodal_dim + nlagrangian] = node->value(history_index, nd) * nodal_scales[nd];
       }
 
-      for (unsigned nd = 0; nd < naddC2TB; nd++)
-      {
-        int ind = node->additional_value_index(add_C2TB[nd]);
-        if (ind < 0)
-          throw_runtime_error("Missing additional entry in this node");
-        xbuffer[ni * contstride + nd + ncontfields + nDGfields_basebulk + nodal_dim + nlagrangian] = node->value(history_index, ind) * add_C2TB_scales[nd];
-      }
 
-      for (unsigned nd = 0; nd < naddC2; nd++)
+      for (unsigned nd = 0; nd < nadd_interface; nd++)
       {
-        int ind = node->additional_value_index(add_C2[nd]);
+        int ind = node->additional_value_index(add_conti[nd]);
         if (ind < 0)
           throw_runtime_error("Missing additional entry in this node");
-        xbuffer[ni * contstride + nd + ncontfields + nDGfields_basebulk + naddC2TB + nodal_dim + nlagrangian] = node->value(history_index, ind) * add_C2_scales[nd];
+        xbuffer[ni * contstride + nd + ncontfields + nDGfields_basebulk + nodal_dim + nlagrangian] = node->value(history_index, ind) * add_conti_scales[nd];
       }
-      for (unsigned nd = 0; nd < naddC1TB; nd++)
-      {
-        int ind = node->additional_value_index(add_C1TB[nd]);
-        if (ind < 0)
-          throw_runtime_error("Missing additional entry in this node");
-        xbuffer[ni * contstride + nd + ncontfields + nDGfields_basebulk + naddC2TB + naddC2 + nodal_dim + nlagrangian] = node->value(history_index, ind) * add_C1TB_scales[nd];
-      }
-      for (unsigned nd = 0; nd < naddC1; nd++)
-      {
-        int ind = node->additional_value_index(add_C1[nd]);
-        if (ind < 0)
-          throw_runtime_error("Missing additional entry in this node");
-        xbuffer[ni * contstride + nd + ncontfields + nDGfields_basebulk + naddC2TB + naddC2 + naddC1TB + nodal_dim + nlagrangian] = node->value(history_index, ind) * add_C1_scales[nd];
-      }
+     
     }
 
     // DG fields and normals by averaging contributions
     if (nnormal || nDGfields)
     {
-      unsigned interface_DG_fields_offset = nDGfields_basebulk + naddC2TB + naddC2 + naddC1TB + naddC1;
+      unsigned interface_DG_fields_offset = nDGfields_basebulk + nadd_interface;
       if (!discontinuous)
       {
         // Fill be zero
@@ -1445,7 +1367,7 @@ namespace pyoomph
           {
             for (unsigned nd = 0; nd < be->nodal_dimension(); nd++)
             {
-              xbuffer[ni * contstride + nd + ncontfields + nDGfields + naddC2TB + naddC2 + naddC1TB + naddC1 + nodal_dim + nlagrangian] = 0.0;
+              xbuffer[ni * contstride + nd + ncontfields + nDGfields + nadd_interface + nodal_dim + nlagrangian] = 0.0;
             }
           }
           for (unsigned nd = 0; nd < ft->numfields_D2TB_basebulk + ft->numfields_D2_basebulk + ft->numfields_D1_basebulk; nd++)
@@ -1473,7 +1395,7 @@ namespace pyoomph
               e->get_normal_at_s(sn, normal, NULL, NULL);
               for (unsigned nd = 0; nd < normal.size(); nd++)
               {
-                xbuffer[nodemap[n] * contstride + nd + ncontfields + nDGfields + naddC2TB + naddC2 + naddC1TB + naddC1 + nodal_dim + nlagrangian] += normal[nd];
+                xbuffer[nodemap[n] * contstride + nd + ncontfields + nDGfields + nadd_interface + nodal_dim + nlagrangian] += normal[nd];
               }
             }
             if (ft->numfields_D2TB)
@@ -1527,7 +1449,7 @@ namespace pyoomph
             double nl = 0.0;
             for (unsigned nd = 0; nd < be->nodal_dimension(); nd++)
             {
-              double nc = xbuffer[ni * contstride + nd + ncontfields + nDGfields + naddC2TB + naddC2 + naddC1TB + naddC1 + nodal_dim + nlagrangian];
+              double nc = xbuffer[ni * contstride + nd + ncontfields + nDGfields + nadd_interface + nodal_dim + nlagrangian];
               nl += nc * nc;
             }
             if (nl < 1e-40)
@@ -1536,7 +1458,7 @@ namespace pyoomph
               nl = 1.0 / sqrt(nl);
             for (unsigned nd = 0; nd < be->nodal_dimension(); nd++)
             {
-              xbuffer[ni * contstride + nd + ncontfields + naddC2TB + nDGfields + naddC2 + naddC1TB + naddC1 + nodal_dim + nlagrangian] *= nl;
+              xbuffer[ni * contstride + nd + ncontfields + nadd_interface + nodal_dim + nlagrangian] *= nl;
             }
           }
         }
@@ -1569,7 +1491,7 @@ namespace pyoomph
               e->get_normal_at_s(sn, normal, NULL, NULL);
               for (unsigned nd = 0; nd < normal.size(); nd++)
               {
-                xbuffer[cnt * contstride + nd + ncontfields + nDGfields + naddC2TB + naddC2 + naddC1TB + naddC1 + nodal_dim + nlagrangian] = normal[nd];
+                xbuffer[cnt * contstride + nd + ncontfields + nDGfields + nadd_interface + nodal_dim + nlagrangian] = normal[nd];
               }
             }
             if (ft->numfields_D2TB)
@@ -1780,7 +1702,13 @@ namespace pyoomph
     double res = 0.0;
     double denom = 0.0;
     unsigned nnode = this->nnode();
-    unsigned numcontifields = ft->numfields_C2TB_basebulk + ft->numfields_C2_basebulk + ft->numfields_C1TB_basebulk + ft->numfields_C1_basebulk; // TODO: Interface time errors
+    
+    unsigned numcontifields =0;
+    for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
+    {
+      auto * space_info=ft->present_continuous_spaces[si];
+      numcontifields+=space_info->numfields_basebulk;
+    }     
     for (unsigned int i = 0; i < numcontifields; i++)
     {
       if (ft->temporal_error_scales[i] == 0.0)
@@ -1797,7 +1725,7 @@ namespace pyoomph
     }
     for (unsigned int i = 0; i < ft->numfields_DL; i++)
     {
-      if (ft->temporal_error_scales[i + ft->numfields_C2TB + ft->numfields_C2 + ft->numfields_C1TB + ft->numfields_C1] == 0.0)
+      if (ft->temporal_error_scales[i + ft->buffer_offset_DL] == 0.0)
         continue;
       for (unsigned int j = 0; j < this->nelement(); j++)
       {
@@ -1806,21 +1734,21 @@ namespace pyoomph
         for (unsigned int v = 0; v < d->nvalue(); v++)
         {
           double derr = d->time_stepper_pt()->temporal_error_in_value(d, v);
-          res += derr * derr * ft->temporal_error_scales[i + ft->numfields_C2TB + ft->numfields_C2 + ft->numfields_C1TB + ft->numfields_C1];
+          res += derr * derr * ft->temporal_error_scales[i + ft->buffer_offset_DL];
           denom += 1.0;
         }
       }
     }
     for (unsigned int i = 0; i < ft->numfields_D0; i++)
     {
-      if (ft->temporal_error_scales[i + ft->numfields_C2TB + ft->numfields_C2 + ft->numfields_C1 + ft->numfields_C1TB + ft->numfields_DL] == 0.0)
+      if (ft->temporal_error_scales[i + ft->buffer_offset_D0] == 0.0)
         continue;
       for (unsigned int j = 0; j < this->nelement(); j++)
       {
         BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(j));
         oomph::Data *d = be->internal_data_pt(i + ft->numfields_DL);
         double derr = d->time_stepper_pt()->temporal_error_in_value(d, 0);
-        res += derr * derr * ft->temporal_error_scales[i + ft->numfields_C2TB + ft->numfields_C2 + ft->numfields_C1TB + ft->numfields_C1 + ft->numfields_DL];
+        res += derr * derr * ft->temporal_error_scales[i + ft->buffer_offset_D0];
         denom += 1.0;
       }
     }
@@ -1972,7 +1900,13 @@ namespace pyoomph
     auto *my_ft = my_ci->get_func_table();
     auto *from_ft = from_ci->get_func_table();
     std::vector<int> field_map;
-    field_map.resize(my_ft->numfields_C2TB_basebulk + my_ft->numfields_C2_basebulk + my_ft->numfields_C1TB_basebulk + my_ft->numfields_C1_basebulk);
+    unsigned ncontfields=0;
+    for (unsigned int si=0;si<my_ft->num_present_continuous_spaces;si++)
+    {
+      auto * space_info=my_ft->present_continuous_spaces[si];
+      ncontfields+=space_info->numfields_basebulk;
+    }
+    field_map.resize(ncontfields);
     if (my_ci != from_ci)
     {
       if (my_be0->dim() != from_be0->dim())
@@ -1988,54 +1922,32 @@ namespace pyoomph
         field_map[i] = -1;
         // Iterate over the fields and find the same name
         std::string name2find;
-        if (i < my_ft->numfields_C2TB_basebulk)
-          name2find = my_ft->fieldnames_C2TB[i];
-        else if (i < my_ft->numfields_C2TB_basebulk + my_ft->numfields_C2_basebulk)
-          name2find = my_ft->fieldnames_C2[i - my_ft->numfields_C2TB_basebulk];
-        else if (i < my_ft->numfields_C2TB_basebulk + my_ft->numfields_C2_basebulk + my_ft->numfields_C1TB_basebulk)
-          name2find = my_ft->fieldnames_C1TB[i - my_ft->numfields_C2TB_basebulk - my_ft->numfields_C2_basebulk];
-        else
-          name2find = my_ft->fieldnames_C1[i - my_ft->numfields_C2_basebulk - my_ft->numfields_C2TB_basebulk - my_ft->numfields_C1TB_basebulk];
-        for (unsigned int j = 0; j < from_ft->numfields_C2TB_basebulk; j++)
+        unsigned accu=0;
+        for (unsigned int si=0;si<my_ft->num_present_continuous_spaces;si++)
         {
-          if (std::string(from_ft->fieldnames_C2TB[j]) == name2find)
+          auto * space_info=my_ft->present_continuous_spaces[si];
+          if (i<space_info->numfields_basebulk+accu)
           {
-            field_map[i] = j;
+            name2find=space_info->fieldnames[i - accu];
             break;
           }
+          accu+=space_info->numfields_basebulk;
         }
-        if (field_map[i] < 0)
+
+        accu=0;
+        for (unsigned int si=0;si<from_ft->num_present_continuous_spaces;si++)
         {
-          for (unsigned int j = 0; j < from_ft->numfields_C2_basebulk; j++)
+          auto * space_info=from_ft->present_continuous_spaces[si];
+          for (unsigned int j = 0; j < space_info->numfields_basebulk; j++)
           {
-            if (std::string(from_ft->fieldnames_C2[j]) == name2find)
+            if (std::string(space_info->fieldnames[j]) == name2find)
             {
-              field_map[i] = j + from_ft->numfields_C2TB_basebulk;
+              field_map[i] = j + accu;
               break;
             }
           }
-          if (field_map[i] < 0)
-          {
-            for (unsigned int j = 0; j < from_ft->numfields_C1TB_basebulk; j++)
-            {
-              if (std::string(from_ft->fieldnames_C1TB[j]) == name2find)
-              {
-                field_map[i] = j + from_ft->numfields_C2_basebulk + from_ft->numfields_C2TB_basebulk;
-                break;
-              }
-            }
-            if (field_map[i] < 0)
-            {
-              for (unsigned int j = 0; j < from_ft->numfields_C1_basebulk; j++)
-              {
-                if (std::string(from_ft->fieldnames_C1[j]) == name2find)
-                {
-                  field_map[i] = j + from_ft->numfields_C2_basebulk + from_ft->numfields_C2TB_basebulk + from_ft->numfields_C1TB_basebulk;
-                  break;
-                }
-              }
-            }
-          }
+          if (field_map[i]>=0) break;
+          accu+=space_info->numfields_basebulk;
         }
       }
     }
@@ -2071,28 +1983,27 @@ namespace pyoomph
     if (my_fft && from_fft)
     {
       std::map<unsigned, std::string> my_interface_dofs;
-      for (unsigned int i = 0; i < my_fft->numfields_C2 - my_fft->numfields_C2_basebulk; i++)
+      for (unsigned int si=0;si<my_ft->num_present_continuous_spaces;si++)
       {
-        std::string name2find = my_fft->fieldnames_C2[my_fft->numfields_C2_basebulk + i];
-        my_interface_dofs[my_fci->resolve_interface_dof_id(name2find)] = name2find;
+        auto * space_info=my_ft->present_continuous_spaces[si];
+        for (unsigned int i = 0; i < space_info->numfields-space_info->numfields_basebulk; i++)
+        {
+          std::string name2find = space_info->fieldnames[i+space_info->numfields_basebulk];
+          my_interface_dofs[space_info->interface_dof_indices[i]] = name2find;
+        }
       }
-      for (unsigned int i = 0; i < my_fft->numfields_C1 - my_fft->numfields_C1_basebulk; i++)
-      {
-        std::string name2find = my_fft->fieldnames_C1[my_fft->numfields_C1_basebulk + i];
-        my_interface_dofs[my_fci->resolve_interface_dof_id(name2find)] = name2find;
-      }
+
+
       std::map<std::string, unsigned> from_interface_dofs;
-      for (unsigned int i = 0; i < from_fft->numfields_C2 - from_fft->numfields_C2_basebulk; i++)
+
+      for (unsigned int si=0;si<from_ft->num_present_continuous_spaces;si++)
       {
-        std::string name2find = from_fft->fieldnames_C2[from_fft->numfields_C2_basebulk + i];
-        from_interface_dofs[name2find] = from_fci->resolve_interface_dof_id(name2find);
-      }
-      for (unsigned int i = 0; i < from_fft->numfields_C1 - from_fft->numfields_C1_basebulk; i++)
-      {
-        std::cout << "STARTING LOOP " << this->domainname << "  " << i << std::endl << std::flush;
-        std::string name2find = from_fft->fieldnames_C1[from_fft->numfields_C1_basebulk + i];
-        std::cout << "RESOLVING " << name2find << std::endl << std::flush;
-        from_interface_dofs[name2find] = from_fci->resolve_interface_dof_id(name2find);
+        auto * space_info=from_ft->present_continuous_spaces[si];
+        for (unsigned int i = 0; i < space_info->numfields-space_info->numfields_basebulk; i++)
+        {
+          std::string name2find = space_info->fieldnames[i+space_info->numfields_basebulk];
+          from_interface_dofs[name2find] = space_info->interface_dof_indices[i];
+        }
       }
       for (auto my : my_interface_dofs)
       {
@@ -2324,7 +2235,13 @@ namespace pyoomph
       throw_runtime_error("Cannot interpolate DG fields at interfaces yet");
     }
 
-    field_map.resize(my_ft->numfields_C2TB_basebulk + my_ft->numfields_C2_basebulk + my_ft->numfields_C1_basebulk + my_ft->numfields_C1TB_basebulk);
+    unsigned ncontfields=0;
+    for (unsigned int si=0;si<my_ft->num_present_continuous_spaces;si++)
+    {
+      auto * space_info=my_ft->present_continuous_spaces[si];
+      ncontfields+=space_info->numfields_basebulk;
+    }
+    field_map.resize(ncontfields);
 
     if (my_ci != from_ci)
     {
@@ -2341,55 +2258,35 @@ namespace pyoomph
         field_map[i] = -1;
         // Iterate over the fields and find the same name
 
+        
+
         std::string name2find;
-        if (i < my_ft->numfields_C2TB_basebulk)
-          name2find = my_ft->fieldnames_C2TB[i];
-        else if (i < my_ft->numfields_C2TB_basebulk + my_ft->numfields_C2_basebulk)
-          name2find = my_ft->fieldnames_C2[i - my_ft->numfields_C2TB_basebulk];
-        else if (i < my_ft->numfields_C2TB_basebulk + my_ft->numfields_C2_basebulk + my_ft->numfields_C1TB_basebulk)
-          name2find = my_ft->fieldnames_C2[i - my_ft->numfields_C2TB_basebulk - my_ft->numfields_C2_basebulk];
-        else
-          name2find = my_ft->fieldnames_C1[i - my_ft->numfields_C2_basebulk - my_ft->numfields_C2TB_basebulk - my_ft->numfields_C1TB_basebulk];
-        for (unsigned int j = 0; j < from_ft->numfields_C2TB_basebulk; j++)
+        unsigned int accu=0;
+        for (unsigned int si=0;si<my_ft->num_present_continuous_spaces;si++)
         {
-          if (std::string(from_ft->fieldnames_C2TB[j]) == name2find)
+          auto * space_info=my_ft->present_continuous_spaces[si];
+          if (i<space_info->numfields_basebulk+accu)
           {
-            field_map[i] = j;
+            name2find=space_info->fieldnames[i-accu];
             break;
           }
+          accu+=space_info->numfields_basebulk;
         }
-        if (field_map[i] < 0)
+
+        accu=0;
+        for (unsigned int si=0;si<from_ft->num_present_continuous_spaces;si++)
         {
-          for (unsigned int j = 0; j < from_ft->numfields_C2_basebulk; j++)
+          auto * space_info=from_ft->present_continuous_spaces[si];
+          for (unsigned int j = 0; j < space_info->numfields_basebulk; j++)
           {
-            if (std::string(from_ft->fieldnames_C2[j]) == name2find)
+            if (std::string(space_info->fieldnames[j]) == name2find)
             {
-              field_map[i] = j + from_ft->numfields_C2TB_basebulk;
+              field_map[i] = j + accu;
               break;
             }
           }
-          if (field_map[i] < 0)
-          {
-            for (unsigned int j = 0; j < from_ft->numfields_C1TB_basebulk; j++)
-            {
-              if (std::string(from_ft->fieldnames_C1TB[j]) == name2find)
-              {
-                field_map[i] = j + from_ft->numfields_C2_basebulk + from_ft->numfields_C2TB_basebulk;
-                break;
-              }
-            }
-            if (field_map[i] < 0)
-            {
-              for (unsigned int j = 0; j < from_ft->numfields_C1_basebulk; j++)
-              {
-                if (std::string(from_ft->fieldnames_C1[j]) == name2find)
-                {
-                  field_map[i] = j + from_ft->numfields_C2_basebulk + from_ft->numfields_C2TB_basebulk + from_ft->numfields_C1TB_basebulk;
-                  break;
-                }
-              }
-            }
-          }
+          if (field_map[i]>=0) break;
+          accu+=space_info->numfields_basebulk;
         }
       }
     }
@@ -2407,42 +2304,30 @@ namespace pyoomph
     if (my_ft && from_ft)
     {
       std::map<unsigned, std::string> my_interface_dofs;
-      for (unsigned int i = 0; i < my_ft->numfields_C2 - my_ft->numfields_C2_basebulk; i++)
+      for (unsigned int si=0;si<my_ft->num_present_continuous_spaces;si++)
       {
-        std::string name2find = my_ft->fieldnames_C2[my_ft->numfields_C2_basebulk + i];
-        my_interface_dofs[my_ci->resolve_interface_dof_id(name2find)] = name2find;
+        auto * space_info=my_ft->present_continuous_spaces[si];
+        for (unsigned int i = 0; i < space_info->numfields-space_info->numfields_basebulk; i++)
+        {
+          std::string name2find = space_info->fieldnames[i+space_info->numfields_basebulk];
+          my_interface_dofs[space_info->interface_dof_indices[i]] = name2find;
+        }
       }
-      for (unsigned int i = 0; i < my_ft->numfields_C1 - my_ft->numfields_C1_basebulk; i++)
-      {
-        std::string name2find = my_ft->fieldnames_C1[my_ft->numfields_C1_basebulk + i];
-        my_interface_dofs[my_ci->resolve_interface_dof_id(name2find)] = name2find;
-      }
-      std::map<std::string, unsigned> from_interface_dofs;
+
+      std::map<std::string, unsigned> from_interface_dofs;      
       std::map<unsigned, std::string> from_interface_spaces;
-      for (unsigned int i = 0; i < from_ft->numfields_C2 - from_ft->numfields_C2_basebulk; i++)
+
+      for (unsigned int si=0;si<from_ft->num_present_continuous_spaces;si++)
       {
-        std::string name2find = from_ft->fieldnames_C2[from_ft->numfields_C2_basebulk + i];
-        from_interface_dofs[name2find] = from_ci->resolve_interface_dof_id(name2find);
-        from_interface_spaces[from_interface_dofs[name2find]] = "C2";
+        auto * space_info=from_ft->present_continuous_spaces[si];
+        for (unsigned int i = 0; i < space_info->numfields-space_info->numfields_basebulk; i++)
+        {
+          std::string name2find = space_info->fieldnames[i+space_info->numfields_basebulk];
+          from_interface_dofs[name2find] = space_info->interface_dof_indices[i];
+          from_interface_spaces[from_interface_dofs[name2find]] = space_info->space_name;
+        }
       }
-    for (unsigned int i = 0; i < from_ft->numfields_C2TB - from_ft->numfields_C2TB_basebulk; i++)
-      {
-        std::string name2find = from_ft->fieldnames_C2TB[from_ft->numfields_C2TB_basebulk + i];
-        from_interface_dofs[name2find] = from_ci->resolve_interface_dof_id(name2find);
-        from_interface_spaces[from_interface_dofs[name2find]] = "C2TB";
-      }      
-      for (unsigned int i = 0; i < from_ft->numfields_C1 - from_ft->numfields_C1_basebulk; i++)
-      {
-        std::string name2find = from_ft->fieldnames_C1[from_ft->numfields_C1_basebulk + i];
-        from_interface_dofs[name2find] = from_ci->resolve_interface_dof_id(name2find);
-        from_interface_spaces[from_interface_dofs[name2find]] = "C1";
-      }
-      for (unsigned int i = 0; i < from_ft->numfields_C1TB - from_ft->numfields_C1TB_basebulk; i++)
-      {
-        std::string name2find = from_ft->fieldnames_C1TB[from_ft->numfields_C1TB_basebulk + i];
-        from_interface_dofs[name2find] = from_ci->resolve_interface_dof_id(name2find);
-        from_interface_spaces[from_interface_dofs[name2find]] = "C1TB";
-      }
+
       for (auto my : my_interface_dofs)
       {
         if (from_interface_dofs.count(my.second))
@@ -2797,23 +2682,7 @@ namespace pyoomph
         typnames.push_back(ft->Dirichlet_names[i]);
     }
 
-    std::vector<int> idof_C2TB, idof_C2, idof_C1, idof_C1TB;
-    for (unsigned int f = ft->numfields_C2TB_basebulk; f < ft->numfields_C2TB; f++)
-    {
-      idof_C2TB.push_back(ci->resolve_interface_dof_id(ft->fieldnames_C2TB[f]));
-    }
-    for (unsigned int f = ft->numfields_C2_basebulk; f < ft->numfields_C2; f++)
-    {
-      idof_C2.push_back(ci->resolve_interface_dof_id(ft->fieldnames_C2[f]));
-    }
-    for (unsigned int f = ft->numfields_C1TB_basebulk; f < ft->numfields_C1TB; f++)
-    {
-      idof_C1TB.push_back(ci->resolve_interface_dof_id(ft->fieldnames_C1TB[f]));
-    }
-    for (unsigned int f = ft->numfields_C1_basebulk; f < ft->numfields_C1; f++)
-    {
-      idof_C1.push_back(ci->resolve_interface_dof_id(ft->fieldnames_C1[f]));
-    }
+   
 
     unsigned moving_node_offset = typnames.size();
     if (ft->moving_nodes)
@@ -2825,7 +2694,12 @@ namespace pyoomph
       if (ft->nodal_dim > 2)
         typnames.push_back("mesh_z");
     }
-    unsigned int num_bulk_nodal = ft->numfields_C2TB_basebulk + ft->numfields_C2_basebulk + ft->numfields_C1TB_basebulk + ft->numfields_C1_basebulk;
+    unsigned int num_bulk_nodal=0;
+    for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
+    {
+      auto * space_info=ft->present_continuous_spaces[si];
+      num_bulk_nodal+=space_info->numfields_basebulk;      
+    }    
 
     for (unsigned int ne = 0; ne < this->nelement(); ne++)
     {
@@ -2843,38 +2717,18 @@ namespace pyoomph
         oomph::BoundaryNodeBase *bn = dynamic_cast<oomph::BoundaryNodeBase *>(n);
         if (bn)
         {
-          for (unsigned int f = 0; f < idof_C2TB.size(); f++)
+          for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
           {
-            int nv = bn->index_of_first_value_assigned_by_face_element(idof_C2TB[f]);
-            if (n->eqn_number(nv) >= 0)
+            auto * space_info=ft->present_continuous_spaces[si];
+            for (unsigned int f = 0; f < space_info->numfields-space_info->numfields_basebulk; f++)
             {
-              doftype[n->eqn_number(nv)] = ft->buffer_offset_C2TB_interf + f;
+              int nv = bn->index_of_first_value_assigned_by_face_element(space_info->interface_dof_indices[f]);
+              if (n->eqn_number(nv) >= 0)
+              {
+                doftype[n->eqn_number(nv)] = space_info->buffer_offset_interf + f;
+              }
             }
-          }
-          for (unsigned int f = 0; f < idof_C2.size(); f++)
-          {
-            int nv = bn->index_of_first_value_assigned_by_face_element(idof_C2[f]);
-            if (n->eqn_number(nv) >= 0)
-            {
-              doftype[n->eqn_number(nv)] = ft->buffer_offset_C2_interf + f;
-            }
-          }
-          for (unsigned int f = 0; f < idof_C1TB.size(); f++)
-          {
-            int nv = bn->index_of_first_value_assigned_by_face_element(idof_C1TB[f]);
-            if (n->eqn_number(nv) >= 0)
-            {
-              doftype[n->eqn_number(nv)] = ft->buffer_offset_C1TB_interf + f;
-            }
-          }
-          for (unsigned int f = 0; f < idof_C1.size(); f++)
-          {
-            int nv = bn->index_of_first_value_assigned_by_face_element(idof_C1[f]);
-            if (n->eqn_number(nv) >= 0)
-            {
-              doftype[n->eqn_number(nv)] = ft->buffer_offset_C1_interf + f;
-            }
-          }
+          }          
         }
       }
 
@@ -3219,25 +3073,15 @@ namespace pyoomph
           normal[i] = 0;
       }
       unsigned offset = 0;
-      for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C2TB_basebulk; fieldindex++)
+      for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
       {
-        Generic_SetInitialCondition(el, nodept, el->get_code_instance(), fieldindex + offset, fieldindex + offset, x_buffer, x_lagr, normal, true, false, ic_index);
-      }
-      offset += ft->numfields_C2TB_basebulk;
-      for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C2_basebulk; fieldindex++)
-      {
-        Generic_SetInitialCondition(el, nodept, el->get_code_instance(), fieldindex + offset, fieldindex + offset, x_buffer, x_lagr, normal, true, false, ic_index);
-      }
-      offset += ft->numfields_C2_basebulk;
-      for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C1TB_basebulk; fieldindex++)
-      {
-        Generic_SetInitialCondition(el, nodept, el->get_code_instance(), fieldindex + offset, fieldindex + offset, x_buffer, x_lagr, normal, true, false, ic_index);
-      }
-      offset += ft->numfields_C1TB_basebulk;
-      for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C1_basebulk; fieldindex++)
-      {
-        Generic_SetInitialCondition(el, nodept, el->get_code_instance(), fieldindex + offset, fieldindex + offset, x_buffer, x_lagr, normal, true, false, ic_index);
-      }
+        auto * space_info=ft->present_continuous_spaces[si];
+        for (unsigned int fieldindex = 0; fieldindex < space_info->numfields_basebulk; fieldindex++)
+        {
+          Generic_SetInitialCondition(el, nodept, el->get_code_instance(), fieldindex + offset, fieldindex + offset, x_buffer, x_lagr, normal, true, false, ic_index);
+        }
+        offset += space_info->numfields_basebulk;
+      }      
     }
 
     if (ft->numfields_D2TB || ft->numfields_D2 || ft->numfields_D1TB || ft->numfields_D1)
@@ -3338,51 +3182,22 @@ namespace pyoomph
             Generic_SetInitialCondition(el, nodept->variable_position_pt(), el->get_code_instance(), valindex, d, x_buffer, x_lagr, normal, true, resetting_first_step, ic_index);
           }
 
-          for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C2TB_basebulk; fieldindex++)
+          for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
           {
-            Generic_SetInitialCondition(el, nodept, el->get_code_instance(), fieldindex + ft->buffer_offset_C2TB_basebulk, fieldindex + +ft->buffer_offset_C2TB_basebulk, x_buffer, x_lagr, normal, true, false, ic_index);
+            auto * space_info=ft->present_continuous_spaces[si];
+            for (unsigned int fieldindex = 0; fieldindex < space_info->numfields_basebulk; fieldindex++)
+            {
+              Generic_SetInitialCondition(el, nodept, el->get_code_instance(), fieldindex + space_info->buffer_offset_basebulk, fieldindex + space_info->buffer_offset_basebulk, x_buffer, x_lagr, normal, true, false, ic_index);
+            }
           }
-          for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C2_basebulk; fieldindex++)
+          for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
           {
-            Generic_SetInitialCondition(el, nodept, el->get_code_instance(), fieldindex + ft->buffer_offset_C2_basebulk, fieldindex + ft->buffer_offset_C2_basebulk, x_buffer, x_lagr, normal, true, false, ic_index);
-          }
-          for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C1TB_basebulk; fieldindex++)
-          {
-            Generic_SetInitialCondition(el, nodept, el->get_code_instance(), fieldindex + ft->buffer_offset_C1TB_basebulk, fieldindex + ft->buffer_offset_C1TB_basebulk, x_buffer, x_lagr, normal, true, false, ic_index);
-          }
-          for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C1_basebulk; fieldindex++)
-          {
-            Generic_SetInitialCondition(el, nodept, el->get_code_instance(), fieldindex + ft->buffer_offset_C1_basebulk, fieldindex + ft->buffer_offset_C1_basebulk, x_buffer, x_lagr, normal, true, false, ic_index);
-          }
-
-          for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C2TB - ft->numfields_C2TB_basebulk; fieldindex++)
-          {
-            std::string fieldname = ft->fieldnames_C2TB[ft->numfields_C2TB_basebulk + fieldindex];
-            unsigned interf_id = el->get_code_instance()->resolve_interface_dof_id(fieldname);
-            unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(interf_id);
-            Generic_SetInitialCondition(el, nodept, el->get_code_instance(), fieldindex + ft->buffer_offset_C2TB_interf, valindex, x_buffer, x_lagr, normal, true, false, ic_index);
-          }
-          for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C2 - ft->numfields_C2_basebulk; fieldindex++)
-          {
-            std::string fieldname = ft->fieldnames_C2[ft->numfields_C2_basebulk + fieldindex];
-            unsigned interf_id = el->get_code_instance()->resolve_interface_dof_id(fieldname);
-            unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(interf_id);
-            Generic_SetInitialCondition(el, nodept, el->get_code_instance(), fieldindex + ft->buffer_offset_C2_interf, valindex, x_buffer, x_lagr, normal, true, false, ic_index);
-          }
-          for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C1TB - ft->numfields_C1TB_basebulk; fieldindex++)
-          {
-            std::string fieldname = ft->fieldnames_C1TB[ft->numfields_C1TB_basebulk + fieldindex];
-            unsigned interf_id = el->get_code_instance()->resolve_interface_dof_id(fieldname);
-            unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(interf_id);
-            Generic_SetInitialCondition(el, nodept, el->get_code_instance(), fieldindex + ft->buffer_offset_C1TB_interf, valindex, x_buffer, x_lagr, normal, true, false, ic_index);
-          }
-
-          for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C1 - ft->numfields_C1_basebulk; fieldindex++)
-          {
-            std::string fieldname = ft->fieldnames_C1[ft->numfields_C1_basebulk + fieldindex];
-            unsigned interf_id = el->get_code_instance()->resolve_interface_dof_id(fieldname);
-            unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(interf_id);
-            Generic_SetInitialCondition(el, nodept, el->get_code_instance(), fieldindex + ft->buffer_offset_C1_interf, valindex, x_buffer, x_lagr, normal, true, false, ic_index);
+            auto * space_info=ft->present_continuous_spaces[si];
+            for (unsigned int fieldindex = 0; fieldindex < space_info->numfields-space_info->numfields_basebulk; fieldindex++)
+            {              
+              unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(space_info->interface_dof_indices[fieldindex]);
+              Generic_SetInitialCondition(el, nodept, el->get_code_instance(), fieldindex + space_info->buffer_offset_interf, valindex, x_buffer, x_lagr, normal, true, false, ic_index);
+            }
           }
         }
       }
@@ -3565,6 +3380,12 @@ namespace pyoomph
     auto *el0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
     auto *ft = el0->get_code_instance()->get_func_table();
     int Doffset = 3;
+    unsigned int ncontfields=0;
+    for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
+    {
+      auto * space_info=ft->present_continuous_spaces[si];
+      ncontfields+=space_info->numfields_basebulk;
+    }
     for (unsigned int ei = 0; ei < this->nelement(); ei++)
     {
       auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ei));
@@ -3582,7 +3403,7 @@ namespace pyoomph
         }
 
         // Handling continuous bulk dofs
-        for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C2TB_basebulk+ft->numfields_C2_basebulk+ft->numfields_C1TB_basebulk+ft->numfields_C1_basebulk; fieldindex++)
+        for (unsigned int fieldindex = 0; fieldindex < ncontfields; fieldindex++)
         {
           if (problem->is_field_removed_from_dofs_due_to_missing_jacobian_row(ft->dirichlet_field_index_to_global_field_index[fieldindex  + Doffset]))
           {
@@ -3636,40 +3457,16 @@ namespace pyoomph
           for (unsigned int ni=0;ni<el->nnode();ni++)
           {
             pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(ni));
-            for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C2TB - ft->numfields_C2TB_basebulk; fieldindex++)
+            for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
             {
-              std::string fieldname = ft->fieldnames_C2TB[ft->numfields_C2TB_basebulk + fieldindex];
-              unsigned interf_id = el->get_code_instance()->resolve_interface_dof_id(fieldname);              
-              if (problem->is_field_removed_from_dofs_due_to_missing_jacobian_row(ft->dirichlet_field_index_to_global_field_index[fieldindex + ft->buffer_offset_C2TB_interf + Doffset]))
-              {
-                nodept->pin(dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(interf_id));
-              }
-            }
-            for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C2 - ft->numfields_C2_basebulk; fieldindex++)
-            {
-              std::string fieldname = ft->fieldnames_C2[ft->numfields_C2_basebulk + fieldindex];
-              unsigned interf_id = el->get_code_instance()->resolve_interface_dof_id(fieldname);              
-              if (problem->is_field_removed_from_dofs_due_to_missing_jacobian_row(ft->dirichlet_field_index_to_global_field_index[fieldindex + ft->buffer_offset_C2_interf + Doffset]))
-              {
-                nodept->pin(dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(interf_id));
-              }
-            }
-            for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C1TB - ft->numfields_C1TB_basebulk; fieldindex++)
-            {
-              std::string fieldname = ft->fieldnames_C1TB[ft->numfields_C1TB_basebulk + fieldindex];
-              unsigned interf_id = el->get_code_instance()->resolve_interface_dof_id(fieldname);              
-              if (problem->is_field_removed_from_dofs_due_to_missing_jacobian_row(ft->dirichlet_field_index_to_global_field_index[fieldindex + ft->buffer_offset_C1TB_interf + Doffset]))
-              {
-                nodept->pin(dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(interf_id));
-              }
-            }
-            for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C1 - ft->numfields_C1_basebulk; fieldindex++)
-            {
-              std::string fieldname = ft->fieldnames_C1[ft->numfields_C1_basebulk + fieldindex];
-              unsigned interf_id = el->get_code_instance()->resolve_interface_dof_id(fieldname);              
-              if (problem->is_field_removed_from_dofs_due_to_missing_jacobian_row(ft->dirichlet_field_index_to_global_field_index[fieldindex + ft->buffer_offset_C1_interf + Doffset]))
-              {
-                nodept->pin(dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(interf_id));
+              auto * space_info=ft->present_continuous_spaces[si];
+              for (unsigned int fieldindex = 0; fieldindex < space_info->numfields-space_info->numfields_basebulk; fieldindex++)
+              {              
+                unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(space_info->interface_dof_indices[fieldindex]);
+                if (problem->is_field_removed_from_dofs_due_to_missing_jacobian_row(ft->dirichlet_field_index_to_global_field_index[fieldindex + space_info->buffer_offset_interf + Doffset]))
+                {
+                  nodept->pin(valindex);
+                }
               }
             }
           }
@@ -3701,6 +3498,12 @@ namespace pyoomph
     auto *ft = el0->get_code_instance()->get_func_table();
     int Doffset = 3;
     long eqn_number=0;
+    unsigned int ncontfields=0;
+    for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
+    {
+      auto * space_info=ft->present_continuous_spaces[si];
+      ncontfields+=space_info->numfields_basebulk;
+    }
     for (unsigned int ei = 0; ei < this->nelement(); ei++)
     {
       auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ei));
@@ -3715,7 +3518,7 @@ namespace pyoomph
         }
 
         // Handling continuous bulk dofs
-        for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C2TB_basebulk+ft->numfields_C2_basebulk+ft->numfields_C1TB_basebulk+ft->numfields_C1_basebulk; fieldindex++)
+        for (unsigned int fieldindex = 0; fieldindex < ncontfields; fieldindex++)
         {
           if (eqn_number=nodept->eqn_number(fieldindex); eqn_number>=0) dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[fieldindex  + Doffset];          
         }                
@@ -3767,40 +3570,13 @@ namespace pyoomph
           for (unsigned int ni=0;ni<el->nnode();ni++)
           {
             pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(ni));
-            for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C2TB - ft->numfields_C2TB_basebulk; fieldindex++)
+            for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
             {
-              std::string fieldname = ft->fieldnames_C2TB[ft->numfields_C2TB_basebulk + fieldindex];
-              unsigned interf_id = el->get_code_instance()->resolve_interface_dof_id(fieldname);              
-              if (eqn_number=nodept->eqn_number(dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(interf_id)); eqn_number>=0)
-              {
-               dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[fieldindex + ft->buffer_offset_C2TB_interf + Doffset];
-              }              
-            }
-            for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C2 - ft->numfields_C2_basebulk; fieldindex++)
-            {
-              std::string fieldname = ft->fieldnames_C2[ft->numfields_C2_basebulk + fieldindex];
-              unsigned interf_id = el->get_code_instance()->resolve_interface_dof_id(fieldname);              
-              if (eqn_number=nodept->eqn_number(dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(interf_id)); eqn_number>=0)
-              {
-                dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[fieldindex + ft->buffer_offset_C2_interf + Doffset];
-              }              
-            }
-            for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C1TB - ft->numfields_C1TB_basebulk; fieldindex++)
-            {
-              std::string fieldname = ft->fieldnames_C1TB[ft->numfields_C1TB_basebulk + fieldindex];
-              unsigned interf_id = el->get_code_instance()->resolve_interface_dof_id(fieldname);              
-              if (eqn_number=nodept->eqn_number(dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(interf_id)); eqn_number>=0)
-              {
-                dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[fieldindex + ft->buffer_offset_C1TB_interf + Doffset];
-              }              
-            }             
-            for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C1 - ft->numfields_C1_basebulk; fieldindex++)
-            {
-              std::string fieldname = ft->fieldnames_C1[ft->numfields_C1_basebulk + fieldindex];
-              unsigned interf_id = el->get_code_instance()->resolve_interface_dof_id(fieldname);              
-              if (eqn_number=nodept->eqn_number(dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(interf_id)); eqn_number>=0)
-              {
-                dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[fieldindex + ft->buffer_offset_C1_interf + Doffset];
+              auto * space_info=ft->present_continuous_spaces[si];
+              for (unsigned int fieldindex = 0; fieldindex < space_info->numfields-space_info->numfields_basebulk; fieldindex++)
+              {              
+                unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(space_info->interface_dof_indices[fieldindex]);
+                if (eqn_number=nodept->eqn_number(valindex); eqn_number>=0) dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[fieldindex + space_info->buffer_offset_interf + Doffset];          
               }
             }
           }
@@ -3864,36 +3640,17 @@ namespace pyoomph
         x_lagr[i] = nodept->xi(i);
 
       unsigned offset = 0;
-      for (unsigned int fieldindex = 0; fieldindex < el->get_code_instance()->get_func_table()->numfields_C2TB_basebulk; fieldindex++)
+      for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
       {
-        if (dirichlet_active[fieldindex + offset + Doffset])
+        auto * space_info=ft->present_continuous_spaces[si];
+        for (unsigned int fieldindex = 0; fieldindex < space_info->numfields_basebulk; fieldindex++)
         {
-          Generic_SetDirichletCondition(el, nodept, el->get_code_instance(), fieldindex + offset, fieldindex + offset, x_buffer, x_lagr, normal, only_update_vals);
+          if (dirichlet_active[fieldindex + offset + Doffset])
+          {
+            Generic_SetDirichletCondition(el, nodept, el->get_code_instance(), fieldindex + offset, fieldindex + offset, x_buffer, x_lagr, normal, only_update_vals);
+          }
         }
-      }
-      offset += el->get_code_instance()->get_func_table()->numfields_C2TB_basebulk;
-      for (unsigned int fieldindex = 0; fieldindex < el->get_code_instance()->get_func_table()->numfields_C2_basebulk; fieldindex++)
-      {
-        if (dirichlet_active[fieldindex + offset + Doffset])
-        {
-          Generic_SetDirichletCondition(el, nodept, el->get_code_instance(), fieldindex + offset, fieldindex + offset, x_buffer, x_lagr, normal, only_update_vals);
-        }
-      }
-      offset += el->get_code_instance()->get_func_table()->numfields_C2_basebulk;
-      for (unsigned int fieldindex = 0; fieldindex < el->get_code_instance()->get_func_table()->numfields_C1TB_basebulk; fieldindex++)
-      {
-        if (dirichlet_active[fieldindex + offset + Doffset])
-        {
-          Generic_SetDirichletCondition(el, nodept, el->get_code_instance(), fieldindex + offset, fieldindex + offset, x_buffer, x_lagr, normal, only_update_vals);
-        }
-      }
-      offset += el->get_code_instance()->get_func_table()->numfields_C1TB_basebulk;
-      for (unsigned int fieldindex = 0; fieldindex < el->get_code_instance()->get_func_table()->numfields_C1_basebulk; fieldindex++)
-      {
-        if (dirichlet_active[fieldindex + offset + Doffset])
-        {
-          Generic_SetDirichletCondition(el, nodept, el->get_code_instance(), fieldindex + offset, fieldindex + offset, x_buffer, x_lagr, normal, only_update_vals);
-        }
+        offset += space_info->numfields_basebulk;
       }
     }
 
@@ -4021,77 +3778,28 @@ namespace pyoomph
             }
           }
 
-          for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C2TB_basebulk; fieldindex++)
+          for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
           {
-            if (dirichlet_active[fieldindex + ft->buffer_offset_C2TB_basebulk + Doffset])
+            auto * space_info=ft->present_continuous_spaces[si];
+            for (unsigned int fieldindex = 0; fieldindex < space_info->numfields_basebulk; fieldindex++)
             {
-              Generic_SetDirichletCondition(el, nodept, el->get_code_instance(), fieldindex + ft->buffer_offset_C2TB_basebulk, fieldindex + ft->buffer_offset_C2TB_basebulk, x_buffer, x_lagr, normal, only_update_vals);
+              if (dirichlet_active[fieldindex + space_info->buffer_offset_basebulk + Doffset])
+              {
+                Generic_SetDirichletCondition(el, nodept, el->get_code_instance(), fieldindex + space_info->buffer_offset_basebulk, fieldindex + space_info->buffer_offset_basebulk, x_buffer, x_lagr, normal, only_update_vals);
+              }
             }
           }
-
-          for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C2_basebulk; fieldindex++)
+          
+          for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
           {
-            if (dirichlet_active[fieldindex + ft->buffer_offset_C2_basebulk + Doffset])
+            auto * space_info=ft->present_continuous_spaces[si];
+            for (unsigned int fieldindex = 0; fieldindex < space_info->numfields-space_info->numfields_basebulk; fieldindex++)
             {
-              Generic_SetDirichletCondition(el, nodept, el->get_code_instance(), fieldindex + ft->buffer_offset_C2_basebulk, fieldindex + ft->buffer_offset_C2_basebulk, x_buffer, x_lagr, normal, only_update_vals);
-            }
-          }
-          for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C1TB_basebulk; fieldindex++)
-          {
-            if (dirichlet_active[fieldindex + ft->buffer_offset_C1TB_basebulk + Doffset])
-            {
-              Generic_SetDirichletCondition(el, nodept, el->get_code_instance(), fieldindex + ft->buffer_offset_C1TB_basebulk, fieldindex + ft->buffer_offset_C1TB_basebulk, x_buffer, x_lagr, normal, only_update_vals);
-            }
-          }
-
-          for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C1_basebulk; fieldindex++)
-          {
-            if (dirichlet_active[fieldindex + ft->buffer_offset_C1_basebulk + Doffset])
-            {
-              Generic_SetDirichletCondition(el, nodept, el->get_code_instance(), fieldindex + ft->buffer_offset_C1_basebulk, fieldindex + ft->buffer_offset_C1_basebulk, x_buffer, x_lagr, normal, only_update_vals);
-            }
-          }
-
-          for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C2TB - ft->numfields_C2TB_basebulk; fieldindex++)
-          {
-            std::string fieldname = ft->fieldnames_C2TB[ft->numfields_C2TB_basebulk + fieldindex];
-            unsigned interf_id = el->get_code_instance()->resolve_interface_dof_id(fieldname);
-            unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(interf_id);
-            if (dirichlet_active[fieldindex + ft->buffer_offset_C2TB_interf + Doffset])
-            {
-              Generic_SetDirichletCondition(el, nodept, el->get_code_instance(), fieldindex + ft->buffer_offset_C2TB_interf, valindex, x_buffer, x_lagr, normal, only_update_vals);
-            }
-          }
-
-          for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C2 - ft->numfields_C2_basebulk; fieldindex++)
-          {
-            std::string fieldname = ft->fieldnames_C2[ft->numfields_C2_basebulk + fieldindex];
-            unsigned interf_id = el->get_code_instance()->resolve_interface_dof_id(fieldname);
-            unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(interf_id);
-            if (dirichlet_active[fieldindex + ft->buffer_offset_C2_interf + Doffset])
-            {
-              Generic_SetDirichletCondition(el, nodept, el->get_code_instance(), fieldindex + ft->buffer_offset_C2_interf, valindex, x_buffer, x_lagr, normal, only_update_vals);
-            }
-          }
-          for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C1TB - ft->numfields_C1TB_basebulk; fieldindex++)
-          {
-            std::string fieldname = ft->fieldnames_C1TB[ft->numfields_C1TB_basebulk + fieldindex];
-            unsigned interf_id = el->get_code_instance()->resolve_interface_dof_id(fieldname);
-            unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(interf_id);
-            if (dirichlet_active[fieldindex + ft->buffer_offset_C1TB_interf + Doffset])
-            {
-              Generic_SetDirichletCondition(el, nodept, el->get_code_instance(), fieldindex + ft->buffer_offset_C1TB_interf, valindex, x_buffer, x_lagr, normal, only_update_vals);
-            }
-          }
-
-          for (unsigned int fieldindex = 0; fieldindex < ft->numfields_C1 - ft->numfields_C1_basebulk; fieldindex++)
-          {
-            std::string fieldname = ft->fieldnames_C1[ft->numfields_C1_basebulk + fieldindex];
-            unsigned interf_id = el->get_code_instance()->resolve_interface_dof_id(fieldname);
-            unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(interf_id);
-            if (dirichlet_active[fieldindex + ft->buffer_offset_C1_interf + Doffset])
-            {
-              Generic_SetDirichletCondition(el, nodept, el->get_code_instance(), fieldindex + ft->buffer_offset_C1_interf, valindex, x_buffer, x_lagr, normal, only_update_vals);
+              unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(space_info->interface_dof_indices[fieldindex]);
+              if (dirichlet_active[fieldindex + space_info->buffer_offset_interf + Doffset])
+              {
+                Generic_SetDirichletCondition(el, nodept, el->get_code_instance(), fieldindex + space_info->buffer_offset_interf, valindex, x_buffer, x_lagr, normal, only_update_vals);
+              }
             }
           }
         }
