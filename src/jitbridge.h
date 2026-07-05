@@ -93,6 +93,11 @@ float __mzerosf=-0.0;
 #define SPACE_INDEX_C2 1
 #define SPACE_INDEX_C1TB 2
 #define SPACE_INDEX_C1 3
+// Same for the DG variants
+#define SPACE_INDEX_D2TB 0
+#define SPACE_INDEX_D2 1
+#define SPACE_INDEX_D1TB 2
+#define SPACE_INDEX_D1 3
 
 typedef struct JITElementInfo
 {
@@ -335,12 +340,7 @@ typedef struct JITFuncSpec_RequiredShapes_FiniteElement
   JITFuncSpec_RequiredShapes_For_Space_t D0;  
   bool psi_D0, dx_psi_D0, dX_psi_D0; // D0 space    
     
-  
-  // 
-  bool normal_Pos;                                   
-  bool elemsize_Eulerian_Pos,elemsize_Lagrangian_Pos;
-  bool elemsize_Eulerian_cartesian_Pos,elemsize_Lagrangian_cartesian_Pos;  
-
+    
   bool normal;                                   
   bool elemsize_Eulerian,elemsize_Lagrangian;
   bool elemsize_Eulerian_cartesian,elemsize_Lagrangian_cartesian;  
@@ -466,10 +466,14 @@ typedef struct JITFuncSpec_Table_FiniteElement
 
   // New way of handling things 
   JITFuncSpec_Table_FiniteElement_SpaceInfo_t continuous_spaces[NUM_CONTINUOUS_SPACES]; // C2TB,C2,C1TB,C1
-  JITFuncSpec_Table_FiniteElement_SpaceInfo_t info_D1,info_D1TB,info_D2,info_D2TB,info_DL,info_D0,info_ED0,info_Pos;
+  JITFuncSpec_Table_FiniteElement_SpaceInfo_t dg_spaces[NUM_CONTINUOUS_SPACES]; // D2TB,D2,D1TB,D1
+  JITFuncSpec_Table_FiniteElement_SpaceInfo_t info_DL,info_D0,info_ED0,info_Pos;
 
-  JITFuncSpec_Table_FiniteElement_SpaceInfo_t *present_continuous_spaces[NUM_CONTINUOUS_SPACES]; // points to the infos C2TB,C2,C1TB,C1 for looping. Note that not all are filled, only if they are present
   unsigned num_present_continuous_spaces; // Only the ones that are actually present, i.e. num_continuous_spaces<=4
+  JITFuncSpec_Table_FiniteElement_SpaceInfo_t *present_continuous_spaces[NUM_CONTINUOUS_SPACES]; // points to the infos C2TB,C2,C1TB,C1 for looping. Note that not all are filled, only if they are present
+  unsigned num_present_dg_spaces; // Only the ones that are actually present, i.e. num_dg_spaces<=4
+  JITFuncSpec_Table_FiniteElement_SpaceInfo_t *present_dg_spaces[NUM_CONTINUOUS_SPACES]; // points to the infos D2TB,D2,D1TB,D1 for looping. Note that not all are filled, only if they are present
+  
 
   //Exponents for the D0 fields upon refinement. 
   // If zero [default]: 

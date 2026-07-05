@@ -711,7 +711,7 @@ namespace pyoomph
 			// If the mesh moves, we have to setup the mapping in the hanging scheme
 			if (ft->moving_nodes)
 			{
-				if (required.dx_psi_C2TB  || required.dx_psi_C2 || required.dx_psi_C1 || required.dx_psi_C1TB  ||   required.psi_Pos  || required.dx_psi_DL || required.normal_Pos || required.elemsize_Eulerian_Pos || required.elemsize_Eulerian_cartesian_Pos) 
+				if (required.dx_psi_C2TB  || required.dx_psi_C2 || required.dx_psi_C1 || required.dx_psi_C1TB  ||   required.psi_Pos  || required.dx_psi_DL || required.normal || required.elemsize_Eulerian || required.elemsize_Eulerian_cartesian) 
 				{
 					
 					unsigned nfields = this->nodal_dimension();
@@ -2948,7 +2948,7 @@ namespace pyoomph
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();	
 		bool require_hessian = flag > 2;
 		bool require_dxdshape = (flag && functable->moving_nodes && (!functable->fd_position_jacobian)); //&& (required.dx_psi_C2 || required.dx_psi_C1 || required.dx_psi_DL)			
-		bool require_dx_elemsize=require_dxdshape && (required.elemsize_Eulerian_Pos ||  required.elemsize_Eulerian_cartesian_Pos);
+		bool require_dx_elemsize=require_dxdshape && (required.elemsize_Eulerian ||  required.elemsize_Eulerian_cartesian);
 		if (require_dx_elemsize)
 		{
 		 // Fill the derivative buffer
@@ -2985,7 +2985,7 @@ namespace pyoomph
           std::vector<double> dJdx(this->nodal_dimension(),0.0);
           std::vector<double> d2Jdx2(this->nodal_dimension()*this->nodal_dimension(),0.0);   
           double J=1.0;       
-          if (required.elemsize_Eulerian_Pos)
+          if (required.elemsize_Eulerian)
           {          
             this->interpolated_x(s_for_esize,x_for_esize);
             J=functable->JacobianForElementSize(&eleminfo, &(x_for_esize[0]));
@@ -3003,7 +3003,7 @@ namespace pyoomph
 			  	for (unsigned int l=0;l<this->nnode();l++)
 				{
 				 shape_info->elemsize_Cart_d_coords[i][l]+=shape_info->int_pt_weights_d_coords[i][l];
-				 if (required.elemsize_Eulerian_Pos)
+				 if (required.elemsize_Eulerian)
 				 {
 				   shape_info->elemsize_d_coords[i][l]+=shape_info->int_pt_weights_d_coords[i][l]*J;				  
 				   shape_info->elemsize_d_coords[i][l]+=shape_info->int_pt_weight[0]*dJdx[i]*shape_info->shape_Pos[l];
@@ -3015,7 +3015,7 @@ namespace pyoomph
 				  		for (unsigned int m=0;m<this->nnode();m++)
 						{
 	  		      		shape_info->elemsize_Cart_d2_coords[i][j][l][m]+=shape_info->int_pt_weights_d2_coords[i][j][l][m];		    		    
-	  		      		if (required.elemsize_Eulerian_Pos)
+	  		      		if (required.elemsize_Eulerian)
 				         {
 					   		shape_info->elemsize_d2_coords[i][j][l][m]+=shape_info->int_pt_weights_d2_coords[i][j][l][m]*J;
 					   		shape_info->elemsize_d2_coords[i][j][l][m]+=shape_info->int_pt_weight[0]*d2Jdx2[i*this->nodal_dimension()+j]*shape_info->shape_Pos[l]*shape_info->shape_Pos[m];  
@@ -3032,7 +3032,8 @@ namespace pyoomph
 		
 		
 		
-		if (required.elemsize_Eulerian_Pos || required.elemsize_Lagrangian_Pos)
+		
+		if (required.elemsize_Eulerian || required.elemsize_Lagrangian)
 		{
         //TODO: A bit redundant to do this for each integration point -> Move it in some other routine
 		  shape_info->elemsize_Eulerian=0.0;
@@ -3043,13 +3044,13 @@ namespace pyoomph
           oomph::Vector<double> s_for_esize(this->dim());
           for (unsigned int _i = 0; _i < this->dim(); _i++)	s_for_esize[_i] = integral_pt()->knot(ipt_for_esize, _i);
           oomph::Vector<double> x_for_esize(this->nodal_dimension(),0.0);
-          if (required.elemsize_Eulerian_Pos)
+          if (required.elemsize_Eulerian)
           {          
             this->interpolated_x(s_for_esize,x_for_esize);
             double J = J_eulerian_at_knot(ipt_for_esize);            
             shape_info->elemsize_Eulerian += w*J*functable->JacobianForElementSize(&eleminfo, &(x_for_esize[0]));
           }
-          if (required.elemsize_Lagrangian_Pos)
+          if (required.elemsize_Lagrangian)
           {
             this->interpolated_xi(s_for_esize,x_for_esize);
             double J = J_lagrangian_at_knot(ipt_for_esize);            
@@ -3057,7 +3058,7 @@ namespace pyoomph
           }
         }
 		}
-		if (required.elemsize_Eulerian_cartesian_Pos || required.elemsize_Lagrangian_cartesian_Pos)
+		if (required.elemsize_Eulerian_cartesian || required.elemsize_Lagrangian_cartesian)
 		{
 		  shape_info->elemsize_Eulerian_cartesian=0.0;
 		  shape_info->elemsize_Lagrangian_cartesian=0.0;		  
@@ -3067,13 +3068,13 @@ namespace pyoomph
           oomph::Vector<double> s_for_esize(this->dim());
           for (unsigned int _i = 0; _i < this->dim(); _i++)	s_for_esize[_i] = integral_pt()->knot(ipt_for_esize, _i);
           oomph::Vector<double> x_for_esize(this->nodal_dimension(),0.0);
-          if (required.elemsize_Eulerian_cartesian_Pos)
+          if (required.elemsize_Eulerian_cartesian)
           {          
             this->interpolated_x(s_for_esize,x_for_esize);
             double J = J_eulerian_at_knot(ipt_for_esize);            
             shape_info->elemsize_Eulerian_cartesian += w*J;
           }
-          if (required.elemsize_Lagrangian_cartesian_Pos)
+          if (required.elemsize_Lagrangian_cartesian)
           {
             this->interpolated_xi(s_for_esize,x_for_esize);
             double J = J_lagrangian_at_knot(ipt_for_esize);            
@@ -3759,7 +3760,7 @@ namespace pyoomph
 			}
 		}
 
-		if (required.normal_Pos) // TODO: Better normal
+		if (required.normal) // TODO: Better normal
 		{
 			oomph::Vector<double> unit_normal(this->nodal_dimension());
 			this->get_normal_at_s(s, unit_normal, (require_dxdshape ? shape_info->d_normal_dcoord : NULL), ((require_hessian && require_dxdshape) ? shape_info->d2_normal_d2coord : NULL));
@@ -5577,7 +5578,7 @@ namespace pyoomph
 	void BulkElementBase::update_in_solid_position_fd(const unsigned &i) // For FD with element_sizes, we have to update the element size buffer
 	{
 	 const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
-	 if (functable->moving_nodes && (functable->shapes_required_ResJac[functable->current_res_jac].elemsize_Eulerian_cartesian_Pos || functable->shapes_required_ResJac[functable->current_res_jac].elemsize_Eulerian_Pos))
+	 if (functable->moving_nodes && (functable->shapes_required_ResJac[functable->current_res_jac].elemsize_Eulerian_cartesian || functable->shapes_required_ResJac[functable->current_res_jac].elemsize_Eulerian))
 	 {
 //	  std::cout << "UPDATE CALL" << std::endl;
 	  this->fill_shape_info_element_sizes(functable->shapes_required_ResJac[functable->current_res_jac],shape_info,0);
@@ -5703,21 +5704,12 @@ namespace pyoomph
 
 	unsigned BulkElementBase::required_nvalue(const unsigned &n) const
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
-		unsigned basebulk=0;
-		for (unsigned int si=0;si<NUM_CONTINUOUS_SPACES;si++)
-		{
-			if (eleminfo.nnode_of_space[si])
-			{
-				basebulk+=functable->continuous_spaces[si].numfields_basebulk;
-			}
-		}
-		return basebulk;
+		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();		
+		return functable->total_num_fields_basebulk; 
 	}
 
 	oomph::Node *BulkElementBase::construct_node(const unsigned &n)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
 		unsigned ntot = this->required_nvalue(n);
 		//	 std::cout << "NLAGR " <<  this->nlagrangian() << "  " << this->nnodal_lagrangian_type() << std::endl;
 		node_pt(n) = new Node(this->nlagrangian(), this->nnodal_lagrangian_type(), this->nodal_dimension(), this->nnodal_position_type(), ntot);
@@ -5734,16 +5726,14 @@ namespace pyoomph
 	}
 
 	oomph::Node *BulkElementBase::construct_boundary_node(const unsigned &n)
-	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+	{	
 		unsigned ntot = required_nvalue(n);
 		node_pt(n) = new BoundaryNode(this->nlagrangian(), this->nnodal_lagrangian_type(), this->nodal_dimension(), this->nnodal_position_type(), ntot);
 		return node_pt(n);
 	}
 
 	oomph::Node *BulkElementBase::construct_boundary_node(const unsigned &n, oomph::TimeStepper *const &time_stepper_pt)
-	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+	{		
 		unsigned ntot = required_nvalue(n);
 		node_pt(n) = new BoundaryNode(time_stepper_pt, this->nlagrangian(), this->nnodal_lagrangian_type(), this->nodal_dimension(), this->nnodal_position_type(), ntot);
 		return node_pt(n);
@@ -5753,7 +5743,7 @@ namespace pyoomph
 	unsigned BulkElementBase::ncont_interpolated_values() const
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
-		return required_nvalue(0);
+		return functable->total_num_fields_basebulk;
 	}
 
 	oomph::Vector<double> BulkElementBase::get_midpoint_s() // Set s=[0.5*(smin+smax), ... ] (but modified e.g. for tris)
@@ -10815,7 +10805,7 @@ namespace pyoomph
 			// Isn't this overkill? For normal psi's we don't use it at all....
 			// Should be enough to check for the dx_... and for Pos and normal			
 			//if (required->dx_psi_C2TB || required->psi_C2TB || required->dX_psi_C2TB || required->dx_psi_C2 || required->psi_C2 || required->dX_psi_C2 || required->dx_psi_C1 || required->psi_C1TB || required->dx_psi_C1TB || required->dX_psi_C1TB || required->psi_C1 || required->dX_psi_C1 || required->psi_Pos || required->psi_DL || required->dx_psi_DL || required->dX_psi_DL || required->psi_D0) 
-			if (required->dx_psi_C2TB  || required->dx_psi_C2 || required->dx_psi_C1 || required->dx_psi_C1TB  ||   required->psi_Pos  || required->dx_psi_DL || required->normal_Pos || required->elemsize_Eulerian_Pos || required->elemsize_Eulerian_cartesian_Pos) 
+			if (required->dx_psi_C2TB  || required->dx_psi_C2 || required->dx_psi_C1 || required->dx_psi_C1TB  ||   required->psi_Pos  || required->dx_psi_DL || required->normal || required->elemsize_Eulerian || required->elemsize_Eulerian_cartesian) 
 			{
 				// Add required geometric external data to be finite differenced
 				
@@ -11964,7 +11954,7 @@ namespace pyoomph
 					int leq = eleminfo.nodal_local_eqn[i][node_index];
 					if (leq >= 0 && res[leq] == "<unknown>")
 					{
-						res[leq] = "IFIELD_" + std::string(functable->continuous_spaces[si].fieldnames[functable->continuous_spaces[si].numfields_basebulk + j]) + "__" + std::to_string(si) + "__" + std::to_string(i); // TODO: Interhangs?
+						res[leq] = "IFIELD_" + std::string(functable->continuous_spaces[si].fieldnames[functable->continuous_spaces[si].numfields_basebulk + j]) + "__" + std::string(functable->continuous_spaces[si].space_name) + "__" + std::to_string(i); // TODO: Interhangs?
 					}
 				}
 			}
@@ -12055,7 +12045,9 @@ namespace pyoomph
 		const std::vector<std::vector<std::vector<unsigned>>> & dummy_interpolation_mapping=this->get_dummy_value_interpolation_map();
 		for (unsigned int space_index=0;space_index<functable->num_present_continuous_spaces;space_index++)
 		{
+			
 			auto *space_info=functable->present_continuous_spaces[space_index];
+			if (space_info->numfields==space_info->numfields_basebulk) continue; // No interface fields for this space
 			// Pin all dummy values for this space
 			const std::vector<std::vector<unsigned>> & dummies=dummy_interpolation_mapping[space_info->space_index];
 			for (const std::vector<unsigned> &dummy_entry : dummies)

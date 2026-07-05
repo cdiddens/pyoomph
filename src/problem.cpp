@@ -78,11 +78,7 @@ namespace pyoomph
 		dest->psi_Pos |= src->psi_Pos;
 		dest->dx_psi_Pos |= src->dx_psi_Pos;
 		dest->dX_psi_Pos |= src->dX_psi_Pos;
-		dest->normal_Pos |= src->normal_Pos;
-		dest->elemsize_Eulerian_Pos |= src->elemsize_Eulerian_Pos;
-		dest->elemsize_Lagrangian_Pos |= src->elemsize_Lagrangian_Pos;
-		dest->elemsize_Eulerian_cartesian_Pos |= src->elemsize_Eulerian_cartesian_Pos;
-		dest->elemsize_Lagrangian_cartesian_Pos |= src->elemsize_Lagrangian_cartesian_Pos;		
+		
 
 		dest->normal |= src->normal;
 		dest->elemsize_Eulerian |= src->elemsize_Eulerian;
@@ -135,6 +131,7 @@ namespace pyoomph
 		for (unsigned int i=0;i<NUM_CONTINUOUS_SPACES;i++)
 		{
 			functable->continuous_spaces[i].space_index=i;
+			functable->dg_spaces[i].space_index=i;
 		}
 		
 		functable->total_num_fields=0;
@@ -151,8 +148,14 @@ namespace pyoomph
 				functable->total_num_fields_basebulk+=functable->continuous_spaces[i].numfields_basebulk;
 				functable->num_present_continuous_spaces++;
 			}
+			if (functable->dg_spaces[i].numfields>0)
+			{
+				functable->present_dg_spaces[functable->num_present_dg_spaces]=&functable->dg_spaces[i];
+				functable->total_num_fields+=functable->dg_spaces[i].numfields;				
+				functable->num_present_dg_spaces++;
+			}
 		}
-		functable->total_num_fields+=functable->numfields_D2TB+functable->numfields_D1TB+functable->numfields_D0+functable->numfields_DL;
+		functable->total_num_fields+=functable->numfields_D0+functable->numfields_DL;
 		std::string dominant_space=functable->dominant_space;
 		bool found_dominant=false;
 		for (unsigned int i=0;i<NUM_CONTINUOUS_SPACES;i++)

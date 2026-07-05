@@ -741,8 +741,7 @@ namespace pyoomph
       FiniteElementCode *bulk_code;                   // Code of the bulk element
       FiniteElementCode *opposite_interface_code;     // Code of the interface elements at the opposite side of the interface
       std::vector<FiniteElementSpace *> spaces;       // Spaces in descending complexity order
-      std::vector<FiniteElementCode *> required_odes; // Codes of coupled ODEs
-      std::set<int> integral_dx_history_required; // Stores the history indices where the history of dx is required. This can be relevant for moving meshes, where dx changes with time
+      std::vector<FiniteElementCode *> required_odes; // Codes of coupled ODEs      
       std::vector<GiNaC::ex> residual;
       std::set<std::string> ignore_assemble_residuals; // E.g. for azimuthal eigenvalue matrices. Residual is not used => don't assemble
       //std::map<std::string,std::set<int> > remove_underived_modes; // If in the Jacobian still modes are present that are not derived from interpolated_... to shape_..., they are removed. They can appear in eigenderivatives
@@ -810,7 +809,7 @@ namespace pyoomph
       virtual GiNaC::ex write_code_subexpressions(std::ostream &os, std::string indent, GiNaC::ex for_what, const std::set<ShapeExpansion> &required_shapeexps, bool hessian);
       virtual GiNaC::ex expand_initial_or_Dirichlet(const std::string &fieldname, GiNaC::ex expression);
       virtual GiNaC::ex extract_spatial_integral_part(const GiNaC::ex &inp, bool eulerian, bool lagrangian);
-
+      virtual void write_required_shapes_for_code(std::ostream & os, std::string func_type, std::string indent, FiniteElementCode *for_code, int type);
    public:
       void add_contributing_field(FiniteElementField *field) { contributing_fields.insert(field); }
       unsigned get_current_residual_index() const { return residual_index; }
