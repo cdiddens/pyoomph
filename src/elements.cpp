@@ -571,6 +571,7 @@ namespace pyoomph
 
 	 // TODO: DG loop here
 	 int ind=-1;
+	 const std::vector<std::vector<int>> & elem_to_space_index_map=this->get_element_index_to_nodal_space_index_map();
 	 if (ft->numfields_D2TB && ((ind=find_by_name(ft->fieldnames_D2TB,ft->numfields_D2TB))>=0))	 
 	 {	 
         oomph::Data * data=this->get_D2TB_nodal_data(ind);
@@ -585,7 +586,7 @@ namespace pyoomph
 		{
 			for (unsigned int i=0;i<eleminfo.nnode;i++) 
 			{
-				int nind=this->get_node_index_element_to_C2TB(i);
+				int nind=elem_to_space_index_map[SPACE_INDEX_C2TB][i];
 				if (nind>=0)
 				{
 					result.push_back(std::make_pair(data,nind));
@@ -611,7 +612,7 @@ namespace pyoomph
 		{
 			for (unsigned int i=0;i<eleminfo.nnode;i++) 
 			{
-				int nind=this->get_node_index_element_to_C2(i);
+				int nind=elem_to_space_index_map[SPACE_INDEX_C2][i];
 				if (nind>=0)
 				{
 					result.push_back(std::make_pair(data,nind));
@@ -637,7 +638,7 @@ namespace pyoomph
 		{
 			for (unsigned int i=0;i<eleminfo.nnode;i++) 
 			{
-				int nind=this->get_node_index_element_to_C1TB(i);
+				int nind=elem_to_space_index_map[SPACE_INDEX_C1TB][i];
 				if (nind>=0)
 				{
 					result.push_back(std::make_pair(data,nind));
@@ -663,7 +664,7 @@ namespace pyoomph
 		{
 			for (unsigned int i=0;i<eleminfo.nnode;i++) 
 			{
-				int nind=this->get_node_index_element_to_C1(i);
+				int nind=elem_to_space_index_map[SPACE_INDEX_C1][i];
 				if (nind>=0)
 				{
 					result.push_back(std::make_pair(data,nind));
@@ -6055,6 +6056,7 @@ namespace pyoomph
 
 		// DG fields	
 		const std::vector<std::vector<unsigned>> &this_space_node_to_elem = this->get_nodal_space_index_to_element_index_map();	
+		const std::vector<std::vector<int>> & this_elem_to_space_nodal_index = this->get_element_index_to_nodal_space_index_map();
 		if (functable->numfields_D2TB_new || functable->numfields_D2_new || functable->numfields_D1_new || functable->numfields_D1TB_new)
 		{
 			for (unsigned t = 0; t < node_pt(0)->time_stepper_pt()->ntstorage(); t++)
@@ -6081,7 +6083,7 @@ namespace pyoomph
 								int nn=this->get_node_number(my_node);
 								if (nn>=0)
 								{
-									nn=this->get_node_index_element_to_C2TB(nn);
+									nn=this_elem_to_space_nodal_index[SPACE_INDEX_C2TB][nn];
 									if (nn>=0)
 									{
 										for (unsigned int iindex = functable->internal_offset_D2TB_new; iindex < functable->internal_offset_D2TB_new+functable->numfields_D2TB_new; iindex++) 
@@ -6127,7 +6129,7 @@ namespace pyoomph
 								int nn=this->get_node_number(my_node);
 								if (nn>=0)
 								{
-									nn= this->get_node_index_element_to_C2(nn);
+									nn= this_elem_to_space_nodal_index[SPACE_INDEX_C2][nn];
 									if (nn>=0)
 									{
 										for (unsigned int iindex = functable->internal_offset_D2_new; iindex < functable->internal_offset_D2_new+functable->numfields_D2_new; iindex++) 
@@ -6174,7 +6176,7 @@ namespace pyoomph
 								int nn=this->get_node_number(my_node);
 								if (nn>=0)
 								{
-									nn=this->get_node_index_element_to_C1TB(nn);
+									nn=this_elem_to_space_nodal_index[SPACE_INDEX_C1TB][nn];
 									if (nn>=0)
 									{
 										for (unsigned int iindex = functable->internal_offset_D1TB_new; iindex < functable->internal_offset_D1TB_new+functable->numfields_D1TB_new; iindex++) 
@@ -6221,7 +6223,7 @@ namespace pyoomph
 								int nn=this->get_node_number(my_node);
 								if (nn>=0)
 								{
-									nn=this->get_node_index_element_to_C1(nn);
+									nn=this_elem_to_space_nodal_index[SPACE_INDEX_C1][nn];
 									if (nn>=0)
 									{
 										for (unsigned int iindex = functable->internal_offset_D1_new; iindex < functable->internal_offset_D1_new+functable->numfields_D1_new; iindex++) 
@@ -10172,7 +10174,7 @@ namespace pyoomph
 			if (pnodeindex<0) throw_runtime_error("Strange");
 			pnodeindex=this->bulk_node_number(pnodeindex);			
 			BulkElementBase* be=dynamic_cast<BulkElementBase*>(this->bulk_element_pt());
-			return be->get_D2TB_node_index(fieldindex,be->get_node_index_element_to_C2TB(pnodeindex));
+			return be->get_D2TB_node_index(fieldindex,be->get_element_index_to_nodal_space_index_map()[SPACE_INDEX_C2TB][pnodeindex]);
 		}
 	}
     unsigned InterfaceElementBase::get_D2_node_index(const unsigned &fieldindex,const unsigned &nodeindex) const 
@@ -10185,7 +10187,7 @@ namespace pyoomph
 			if (pnodeindex<0) throw_runtime_error("Strange");
 			pnodeindex=this->bulk_node_number(pnodeindex);
 			BulkElementBase* be=dynamic_cast<BulkElementBase*>(this->bulk_element_pt());
-			return be->get_D2_node_index(fieldindex,be->get_node_index_element_to_C2(pnodeindex));
+			return be->get_D2_node_index(fieldindex,be->get_element_index_to_nodal_space_index_map()[SPACE_INDEX_C2][pnodeindex]);
 		}
 	}
 
@@ -10199,7 +10201,7 @@ namespace pyoomph
 			if (pnodeindex<0) throw_runtime_error("Strange");
 			pnodeindex=this->bulk_node_number(pnodeindex);			
 			BulkElementBase* be=dynamic_cast<BulkElementBase*>(this->bulk_element_pt());
-			return be->get_D1TB_node_index(fieldindex,be->get_node_index_element_to_C1TB(pnodeindex));
+			return be->get_D1TB_node_index(fieldindex,be->get_element_index_to_nodal_space_index_map()[SPACE_INDEX_C1TB][pnodeindex]);
 		}
 	}
 	
@@ -10213,7 +10215,7 @@ namespace pyoomph
 			if (pnodeindex<0) throw_runtime_error("Strange");
 			pnodeindex=this->bulk_node_number(pnodeindex);
 			BulkElementBase* be=dynamic_cast<BulkElementBase*>(this->bulk_element_pt());
-			return be->get_D1_node_index(fieldindex,be->get_node_index_element_to_C1(pnodeindex));
+			return be->get_D1_node_index(fieldindex,be->get_element_index_to_nodal_space_index_map()[SPACE_INDEX_C1][pnodeindex]);
 		}		
 	}
 
@@ -12420,6 +12422,160 @@ namespace pyoomph
 
 	const std::vector<std::vector<unsigned>> PointElement0d::Nodal_Space_Index_To_Element_Index_Map={
 		{0}, // C2TB 
+		{0}, // C2
+		{0}, // C1TB
+		{0}  // C1
+	};
+
+
+
+	const std::vector<std::vector<int>> BulkElementLine1dC1::Element_Index_To_Nodal_Space_Index_Map={
+		{}, // C2TB
+		{}, // C2
+		{0,1}, // C1TB
+		{0,1}  // C1
+	};
+
+	const std::vector<std::vector<int>> BulkElementLine1dC2::Element_Index_To_Nodal_Space_Index_Map={
+		{0,1,2}, // C2TB
+		{0,1,2}, // C2
+		{0,-1,1}, // C1TB
+		{0,-1,1}  // C1
+	};
+
+	const std::vector<std::vector<int>> BulkTElementLine1dC1::Element_Index_To_Nodal_Space_Index_Map={
+		{}, // C2TB
+		{}, // C2
+		{0,1}, // C1TB
+		{0,1}  // C1
+	};
+
+	const std::vector<std::vector<int>> BulkTElementLine1dC2::Element_Index_To_Nodal_Space_Index_Map={
+		{0,1,2}, // C2TB
+		{0,1,2}, // C2
+		{0,-1,1}, // C1TB
+		{0,-1,1}  // C1
+	};
+
+
+	const std::vector<std::vector<int>> BulkElementQuad2dC1::Element_Index_To_Nodal_Space_Index_Map={
+		{}, // C2TB
+		{}, // C2
+		{0,1,2,3}, // C1TB
+		{0,1,2,3}  // C1
+	};
+
+	const std::vector<std::vector<int>> BulkElementQuad2dC2::Element_Index_To_Nodal_Space_Index_Map={
+		{0,1,2,3,4,5,6,7,8}, // C2TB
+		{0,1,2,3,4,5,6,7,8}, // C2
+		{0,-1,1,-1,-1,-1,2,-1,3}, // C1TB
+		{0,-1,1,-1,-1,-1,2,-1,3}  // C1
+	};
+
+	const std::vector<std::vector<int>> BulkElementTri2dC1::Element_Index_To_Nodal_Space_Index_Map={
+		{}, // C2TB
+		{}, // C2
+		{0,1,2}, // C1TB
+		{0,1,2}  // C1
+	};
+
+	const std::vector<std::vector<int>> BulkElementTri2dC1TB::Element_Index_To_Nodal_Space_Index_Map={
+		{}, // C2TB
+		{}, // C2
+		{0,1,2,3}, // C1TB
+		{0,1,2}  // C1
+	};
+
+	const std::vector<std::vector<int>> BulkElementTri2dC2::Element_Index_To_Nodal_Space_Index_Map={
+		{}, // C2TB
+		{0,1,2,3,4,5}, // C2
+		{}, // C1TB
+		{0,1,2}  // C1
+	};
+
+	const std::vector<std::vector<int>> BulkElementTri2dC2TB::Element_Index_To_Nodal_Space_Index_Map={
+		{0,1,2,3,4,5,6}, // C2TB
+		{0,1,2,3,4,5}, // C2
+		{0,1,2,-1,-1,-1,3}, // C1TB
+		{0,1,2}  // C1
+	};
+
+	const std::vector<std::vector<int>> BulkElementBrick3dC1::Element_Index_To_Nodal_Space_Index_Map={
+		{}, // C2TB
+		{}, // C2
+		{0,1,2,3,4,5,6,7}, // C1TB
+		{0,1,2,3,4,5,6,7}  // C1
+	};
+
+	const std::vector<std::vector<int>> BulkElementBrick3dC2::Element_Index_To_Nodal_Space_Index_Map={
+		{0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26}, // C2TB
+		{0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26}, // C2
+		{0,-1,1,-1,-1,-1,2,-1,3,-1,-1,-1,-1,-1,-1,-1,-1,-1,4,-1,5,-1,-1,-1,6,-1,7}, // C1TB
+		{0,-1,1,-1,-1,-1,2,-1,3,-1,-1,-1,-1,-1,-1,-1,-1,-1,4,-1,5,-1,-1,-1,6,-1,7}  // C1
+	};
+
+	const std::vector<std::vector<int>> BulkElementTetra3dC1::Element_Index_To_Nodal_Space_Index_Map={
+		{}, // C2TB
+		{}, // C2
+		{}, // C1TB
+		{0,1,2,3}  // C1
+	};	
+
+	const std::vector<std::vector<int>> BulkElementTetra3dC1TB::Element_Index_To_Nodal_Space_Index_Map={
+		{}, // C2TB
+		{}, // C2
+		{0,1,2,3,4}, // C1TB
+		{0,1,2,3}  // C1
+	};
+
+	const std::vector<std::vector<int>> BulkElementTetra3dC2::Element_Index_To_Nodal_Space_Index_Map={
+		{}, // C2TB
+		{0,1,2,3,4,5,6,7,8,9}, // C2
+		{}, // C1TB
+		{0,1,2,3}  // C1
+	};
+
+	const std::vector<std::vector<int>> BulkElementTetra3dC2TB::Element_Index_To_Nodal_Space_Index_Map={
+		{0,1,2,3,4,5,6,7,8,9,10,11,12,13,14}, // C2TB
+		{0,1,2,3,4,5,6,7,8,9}, // C2
+		{0,1,2,3,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,4}, // C1TB
+		{0,1,2,3}  // C1
+	};
+
+
+	const std::vector<std::vector<int>> BulkElementWedge3dC1::Element_Index_To_Nodal_Space_Index_Map={
+		{}, // C2TB
+		{}, // C2
+		{}, // C1TB
+		{0,1,2,3,4,5}  // C1
+	};
+
+	const std::vector<std::vector<int>> BulkElementWedge3dC2::Element_Index_To_Nodal_Space_Index_Map={
+		{}, // C2TB
+		{0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17}, // C2
+		{}, // C1TB
+		{0,1,2,-1,-1,-1,-1,-1,-1,-1,-1,-1,3,4,5}  // C1
+	};
+
+
+	const std::vector<std::vector<int>> BulkElementPyramid3dC1::Element_Index_To_Nodal_Space_Index_Map={
+		{}, // C2TB
+		{}, // C2
+		{}, // C1TB
+		{0,1,2,3,4}  // C1
+	};
+
+	
+	const std::vector<std::vector<int>> BulkElementODE0d::Element_Index_To_Nodal_Space_Index_Map={
+		{}, // C2TB
+		{}, // C2
+		{}, // C1TB
+		{}  // C1
+	};
+
+
+	const std::vector<std::vector<int>> PointElement0d::Element_Index_To_Nodal_Space_Index_Map={
+		{0}, // C2TB
 		{0}, // C2
 		{0}, // C1TB
 		{0}  // C1

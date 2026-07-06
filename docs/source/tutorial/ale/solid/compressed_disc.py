@@ -32,11 +32,12 @@ from pyoomph.meshes.simplemeshes import CircularMesh
 
 class CompressedDiscProblem(Problem):
     def __init__(self):
-        super().__init__()
+        super().__init__()    
         self.Gamma=1.1 # isotropic growth factor
-        self.claw=GeneralizedHookeanSolidConstitutiveLaw(E=1,nu=0.3) # Generalized Hookean solid constitutive law
         self.P=self.define_global_parameter(P=0) # Pressure on the circumference of the disc
         self.polar_implementation=True # Use radial polar coordinates only
+         # Generalized Hookean solid constitutive law
+        self.claw=GeneralizedHookeanSolidConstitutiveLaw(E=1,nu=0.3,use_inverse_routine=not self.polar_implementation)
         
     def define_problem(self):        
         # Base equations, irrespective of the coordinate system

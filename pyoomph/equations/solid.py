@@ -37,8 +37,9 @@ class BaseSolidConstitutiveLaw:
         # G^ij=(G^(-1))_ij
         Gij=self.get_Gij(dim)        
         if self.use_inverse_routine:
-            from pyoomph.expressions.tensor_funcs import InvertSymmetricMatrix            
-            inv=InvertSymmetricMatrix(n=dim)        
+            from pyoomph.expressions.tensor_funcs import InvertMatrix
+            #inv=InvertSymmetricMatrix(n=dim)        
+            inv=InvertMatrix(n=dim,matrix_type="symmetric")            
             return self._subexpression(inv(Gij))
         else:
             return self._subexpression(inverse_matrix(Gij,fill_to_vector_dim_3=True,skip_empty_rows_and_cols=True))
@@ -89,13 +90,15 @@ class GeneralizedHookeanSolidConstitutiveLaw(BaseSolidConstitutiveLaw):
             E: Young's modulus
             nu: Poisson's ratio
             use_subexpressions (bool, optional): Use subexpressions for the tensor entries. Defaults to True.
+            use_inverse_routine (bool, optional): Use a specific routine for the inversion of the metric tensor. It cannot be used when requiring Hessians, e.g. for bifurcation tracking. Defaults to True.
     """
-    def __init__(self, E:ExpressionOrNum=1, nu:ExpressionOrNum=0.4,use_subexpressions=True):
+    def __init__(self, E:ExpressionOrNum=1, nu:ExpressionOrNum=0.4,use_subexpressions=True,use_inverse_routine:bool=True):
         
-        super().__init__()
+        super().__init__(use_subexpressions=use_subexpressions,use_inverse_routine=use_inverse_routine)
         self.E=E
         self.nu=nu
-        self.use_subexpressions=use_subexpressions
+        
+        
         
 
     def get_sigma(self,dim:int,isotropic_growth_factor:ExpressionOrNum=1,pressure_var:Optional[Expression]=None):
@@ -111,8 +114,15 @@ class GeneralizedHookeanSolidConstitutiveLaw(BaseSolidConstitutiveLaw):
         return se(sigma)
         
 class IncompressibleHookeanSolidConstitutiveLaw(IncompressibleSolidConstitutiveLaw):
-    def __init__(self,E:ExpressionOrNum=1,use_subexpressions=True):
-        super().__init__(use_subexpressions=use_subexpressions)
+    """
+        Incompressible Hookean solid constitutive law.
+        Args:
+            E: Young's modulus
+            use_subexpressions (bool, optional): Use subexpressions for the tensor entries. Defaults to True.
+            use_inverse_routine (bool, optional): Use a specific routine for the inversion of the metric tensor. It cannot be used when requiring Hessians, e.g. for bif
+    """
+    def __init__(self,E:ExpressionOrNum=1,use_subexpressions=True,use_inverse_routine:bool=True):
+        super().__init__(use_subexpressions=use_subexpressions,use_inverse_routine=use_inverse_routine)
         self.E=E
 
     def get_sigma(self,dim:int,isotropic_growth_factor:ExpressionNumOrNone=1,pressure_var:Optional[Expression]=None):
@@ -265,7 +275,9 @@ class DeformableSolidEquations(BaseDeformableSolidEquations):
         super().define_residuals()  # Call the base class method to define the residuals for the inertia and bulk force terms
         
         dim=self.get_coordinate_system().get_actual_dimension(self.get_nodal_dimension())
-        pvar=var(self.pressure_name) if self.constitutive_law.is_incompressible() else None        
+        pvar=var(self.pressure_name) if self.constitutive_law.is_incompressible() else None       
+        #print("TEST",dim,self.expand_expression_for_debugging(self.constitutive_law.get_Gij(dim)))
+        #exit() 
         sigma=self.constitutive_law.get_sigma(dim,self.isotropic_growth_factor,pvar)       
                                 
         self.add_weak((matproduct(grad(x,lagrangian=True),sigma)),self.isotropic_growth_factor*grad(xtest,lagrangian=True),lagrangian=True)

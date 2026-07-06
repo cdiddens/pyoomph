@@ -191,6 +191,7 @@ namespace pyoomph
   public:
     virtual const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const {return Dummy_Value_Interpolation_Map;}
     virtual const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const=0;
+    virtual const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const=0;
     unsigned _numpy_index;
     double initial_cartesian_nondim_size = 0.0;
     double initial_quality_factor = 0.0;
@@ -402,11 +403,7 @@ namespace pyoomph
     }
     
 
-    // Mapping nnode-> -1 if not defined here or index
-    virtual int get_node_index_element_to_C1(const unsigned int &i) const { return i; }
-    virtual int get_node_index_element_to_C2(const unsigned int &i) const { return i; }
-    virtual int get_node_index_element_to_C2TB(const unsigned int &i) const { return this->get_node_index_element_to_C2(i); }
-    virtual int get_node_index_element_to_C1TB(const unsigned int &i) const { return this->get_node_index_element_to_C1(i); }
+    
 
     virtual oomph::Node *construct_node(const unsigned &n);
     virtual oomph::Node *construct_node(const unsigned &n, oomph::TimeStepper *const &time_stepper_pt);
@@ -516,9 +513,11 @@ namespace pyoomph
     oomph::TimeStepper *timestepper;
     static oomph::PointIntegral Default_integration_scheme;
     static const std::vector<int> Possible_Face_Indices;
-    static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
+    static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;    
     bool fill_hang_info_with_equations_for_pos(JITShapeInfo_t *shape_info) override {return false;} // An ODE never has positions
+    static const std::vector<std::vector<int>> Element_Index_To_Nodal_Space_Index_Map;
   public:    
+    const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override {throw_runtime_error("ODE Elements do not have faces"); return NULL;}
     virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
@@ -609,7 +608,9 @@ namespace pyoomph
   protected:
     static const std::vector<int> Possible_Face_Indices;
     static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
-  public:
+    static const std::vector<std::vector<int>> Element_Index_To_Nodal_Space_Index_Map;
+  public:    
+    const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
     virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
@@ -674,7 +675,9 @@ namespace pyoomph
     static const std::vector<int> Possible_Face_Indices;
     static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
     static const std::vector<std::vector<std::vector<unsigned>>> Dummy_Value_Interpolation_Map;
-  public:
+    static const std::vector<std::vector<int>> Element_Index_To_Nodal_Space_Index_Map;
+  public:    
+    const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
@@ -687,8 +690,7 @@ namespace pyoomph
 
     
 
-    int get_node_index_element_to_C1(const unsigned int &i) const override { return element_index_to_C1[i]; }
-    int get_node_index_element_to_C1TB(const unsigned int &i) const override { return element_index_to_C1[i]; }
+    
     
     void output(std::ostream &outfile, const unsigned &n_plot) { BulkElementBase::output(outfile, n_plot); }
 
@@ -731,7 +733,9 @@ namespace pyoomph
   protected:
     static const std::vector<int> Possible_Face_Indices;
     static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
-  public:
+    static const std::vector<std::vector<int>> Element_Index_To_Nodal_Space_Index_Map;
+  public:    
+    const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
     virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
@@ -791,7 +795,9 @@ namespace pyoomph
     static const std::vector<int> Possible_Face_Indices;
     static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
     static const std::vector<std::vector<std::vector<unsigned>>> Dummy_Value_Interpolation_Map;
-  public:
+    static const std::vector<std::vector<int>> Element_Index_To_Nodal_Space_Index_Map;
+  public:    
+    const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
@@ -803,8 +809,7 @@ namespace pyoomph
     void check_integrity(double &max_error) { max_error = 0; } // TODO
 
     
-    int get_node_index_element_to_C1(const unsigned int &i) const override { return element_index_to_C1[i]; }
-    int get_node_index_element_to_C1TB(const unsigned int &i) const override { return element_index_to_C1[i]; }
+    
     
     void output(std::ostream &outfile, const unsigned &n_plot) { BulkElementBase::output(outfile, n_plot); }
 
@@ -843,7 +848,9 @@ namespace pyoomph
   protected:
     static const std::vector<int> Possible_Face_Indices;
     static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
-  public:
+    static const std::vector<std::vector<int>> Element_Index_To_Nodal_Space_Index_Map;
+  public:    
+    const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
     virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
@@ -898,7 +905,9 @@ namespace pyoomph
     static const std::vector<int> Possible_Face_Indices;
     static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
     static const std::vector<std::vector<std::vector<unsigned>>> Dummy_Value_Interpolation_Map;
-  public:
+    static const std::vector<std::vector<int>> Element_Index_To_Nodal_Space_Index_Map;
+  public:    
+    const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}  
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
@@ -923,8 +932,7 @@ namespace pyoomph
     virtual oomph::Node *boundary_node_pt(const int &face_index, const unsigned int index);
     
 
-    int get_node_index_element_to_C1(const unsigned int &i) const override { return element_index_to_C1[i]; }
-    int get_node_index_element_to_C1TB(const unsigned int &i) const override { return element_index_to_C1[i]; }
+    
     
 
     void add_node_from_finer_neighbor_for_tesselated_numpy(int edge, oomph::Node *n, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes);
@@ -962,7 +970,9 @@ namespace pyoomph
   protected:
     static const std::vector<int> Possible_Face_Indices;
     static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
-  public:
+    static const std::vector<std::vector<int>> Element_Index_To_Nodal_Space_Index_Map;
+  public:    
+    const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
     virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
@@ -1012,7 +1022,9 @@ namespace pyoomph
     //  static const unsigned Central_node_on_face[3];
     static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
     static const std::vector<std::vector<std::vector<unsigned>>> Dummy_Value_Interpolation_Map;    
-  public:
+    static const std::vector<std::vector<int>> Element_Index_To_Nodal_Space_Index_Map;
+  public:    
+    const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}  
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     BulkElementTri2dC1TB();
@@ -1020,8 +1032,7 @@ namespace pyoomph
     void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const;
     void dshape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsids) const;
 
-    int get_node_index_element_to_C1(const unsigned int &i) const override { return (i < 4 ? i : -1); }
-    int get_node_index_element_to_C1TB(const unsigned int &i) const override { return i; }
+    
     void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const;
     void shape_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
     void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
@@ -1057,7 +1068,9 @@ namespace pyoomph
     static const std::vector<int> Possible_Face_Indices;
     static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
     static const std::vector<std::vector<std::vector<unsigned>>> Dummy_Value_Interpolation_Map;
-  public:
+    static const std::vector<std::vector<int>> Element_Index_To_Nodal_Space_Index_Map;
+  public:    
+    const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}  
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
@@ -1071,8 +1084,7 @@ namespace pyoomph
     virtual unsigned get_meshio_type_index() const { return 9; }
     
     void check_integrity(double &max_error) { max_error = 0; } // TODO
-    int get_node_index_element_to_C1(const unsigned int &i) const override { return (i < 3 ? i : -1); }
-    int get_node_index_element_to_C1TB(const unsigned int &i) const override { return (i < 3 ? i : (i == 6 ? 3 : -1)); }
+    
     
     void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const;
     void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
@@ -1113,7 +1125,9 @@ namespace pyoomph
     //  static const unsigned Central_node_on_face[3];
     static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
     static const std::vector<std::vector<std::vector<unsigned>>> Dummy_Value_Interpolation_Map;
-  public:
+    static const std::vector<std::vector<int>> Element_Index_To_Nodal_Space_Index_Map;
+  public:    
+    const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}  
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     BulkElementTri2dC2TB();
@@ -1154,7 +1168,9 @@ namespace pyoomph
   protected:
     static const std::vector<int> Possible_Face_Indices;
     static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
-  public:
+    static const std::vector<std::vector<int>> Element_Index_To_Nodal_Space_Index_Map;
+  public:    
+    const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
     virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
@@ -1217,7 +1233,9 @@ namespace pyoomph
     static const std::vector<int> Possible_Face_Indices;
     static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
     static const std::vector<std::vector<std::vector<unsigned>>> Dummy_Value_Interpolation_Map;
-  public:
+    static const std::vector<std::vector<int>> Element_Index_To_Nodal_Space_Index_Map;
+  public:    
+    const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}  
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
@@ -1240,8 +1258,7 @@ namespace pyoomph
 
     
 
-    int get_node_index_element_to_C1(const unsigned int &i) const override { return element_index_to_C1[i]; }
-    int get_node_index_element_to_C1TB(const unsigned int &i) const override { return element_index_to_C1[i]; }
+    
     
 
     int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
@@ -1287,7 +1304,9 @@ namespace pyoomph
   protected:
      static const std::vector<int> Possible_Face_Indices;
     static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;    
-  public:
+    static const std::vector<std::vector<int>> Element_Index_To_Nodal_Space_Index_Map;
+  public:    
+    const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
     virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
@@ -1299,8 +1318,7 @@ namespace pyoomph
     void check_integrity(double &max_error) { max_error = 0; } // TODO
 
     
-    int get_node_index_element_to_C1(const unsigned int &i) const override { return i; }
-    int get_node_index_element_to_C1TB(const unsigned int &i) const override { return i; }
+    
     void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
     void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const { throw_runtime_error("Makes no sense"); }
     void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const;
@@ -1344,7 +1362,9 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
 {
     static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
     static const std::vector<std::vector<std::vector<unsigned>>> Dummy_Value_Interpolation_Map;
-  public:
+    static const std::vector<std::vector<int>> Element_Index_To_Nodal_Space_Index_Map;
+  public:    
+    const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}  
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     BulkElementTetra3dC1TB();    
@@ -1391,7 +1411,9 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
     static const std::vector<int> Possible_Face_Indices;
     static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
     static const std::vector<std::vector<std::vector<unsigned>>> Dummy_Value_Interpolation_Map;
-  public:
+    static const std::vector<std::vector<int>> Element_Index_To_Nodal_Space_Index_Map;
+  public:    
+    const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}  
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
@@ -1414,8 +1436,7 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
 
     
 
-    int get_node_index_element_to_C1(const unsigned int &i) const override { return element_index_to_C1[i]; }
-    int get_node_index_element_to_C1TB(const unsigned int &i) const override { throw_runtime_error("TODO"); }
+    
     
 
     int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
@@ -1457,7 +1478,9 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
     //  static const unsigned Central_node_on_face[3];
     static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
     static const std::vector<std::vector<std::vector<unsigned>>> Dummy_Value_Interpolation_Map;
-  public:
+    static const std::vector<std::vector<int>> Element_Index_To_Nodal_Space_Index_Map;
+  public:    
+    const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}  
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
@@ -1478,7 +1501,7 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
     }
     //   void fill_element_nodal_indices_for_numpy(int *indices,unsigned isubelem,bool tesselate_tri,std::vector<std::vector<std::set<oomph::Node*>>> & add_nodes) const;
 
-    int get_node_index_element_to_C1TB(const unsigned int &i) const override { throw_runtime_error("TODO"); }
+    
     
     
     void shape_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi) const;    
@@ -1501,7 +1524,9 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
     protected:
       static const std::vector<int> Possible_Face_Indices;
       static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
-  public:
+    static const std::vector<std::vector<int>> Element_Index_To_Nodal_Space_Index_Map;
+  public:    
+    const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
       const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
       oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
       virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
@@ -1554,7 +1579,9 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
     protected:
       static const std::vector<int> Possible_Face_Indices;
       static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
-    public:
+    static const std::vector<std::vector<int>> Element_Index_To_Nodal_Space_Index_Map;
+  public:    
+    const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
       const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
       oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
       virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
@@ -1609,7 +1636,9 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
       static bool node_only_C2[18]; // TODO Including the C2TBs
       static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
       static const std::vector<std::vector<std::vector<unsigned>>> Dummy_Value_Interpolation_Map;
-    public:
+    static const std::vector<std::vector<int>> Element_Index_To_Nodal_Space_Index_Map;
+  public:    
+    const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
       const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}    
       const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
       oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
@@ -1654,8 +1683,7 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
           return res;
       }
       virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 4, order)); }
-      oomph::Vector<double> get_midpoint_s() override { oomph::Vector<double> res(this->dim(), 1.0 / 3.0); res[2]=0.5; return res; }      
-      int get_node_index_element_to_C1(const unsigned int &i) const override { return element_index_to_C1[i]; }
+      oomph::Vector<double> get_midpoint_s() override { oomph::Vector<double> res(this->dim(), 1.0 / 3.0); res[2]=0.5; return res; }            
   };
 
 
@@ -1664,7 +1692,9 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
   protected:
     static const std::vector<int> Possible_Face_Indices;
     static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
-  public:
+    static const std::vector<std::vector<int>> Element_Index_To_Nodal_Space_Index_Map;
+  public:    
+    const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override {throw_runtime_error("A point element has no faces");}
     virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
