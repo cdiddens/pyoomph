@@ -950,6 +950,7 @@ namespace pyoomph
         }
       }
 
+      const std::vector<std::vector<unsigned>> & space_to_element_nodes=el->get_nodal_space_index_to_element_index_map();
       // DG fields
       for (unsigned ind : D2TBindices)
       {
@@ -957,7 +958,7 @@ namespace pyoomph
         for (unsigned ni = 0; ni < el->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2TB]; ni++)
         {
           bool must_pin_me = true;
-          oomph::Node *n = el->node_pt(el->get_node_index_C2TB_to_element(ni));
+          oomph::Node *n = el->node_pt(space_to_element_nodes[SPACE_INDEX_C2TB][ni]);
           for (auto b : ignore_continuous_at_interfaces)
           {
             if (n->is_on_boundary(b))
@@ -978,7 +979,7 @@ namespace pyoomph
         for (unsigned ni = 0; ni < el->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2]; ni++)
         {
           bool must_pin_me = true;
-          oomph::Node *n = el->node_pt(el->get_node_index_C2_to_element(ni));
+          oomph::Node *n = el->node_pt(space_to_element_nodes[SPACE_INDEX_C2][ni]);
           for (auto b : ignore_continuous_at_interfaces)
           {
             if (n->is_on_boundary(b))
@@ -999,7 +1000,7 @@ namespace pyoomph
         for (unsigned ni = 0; ni < el->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1]; ni++)
         {
           bool must_pin_me = true;
-          oomph::Node *n = el->node_pt(el->get_node_index_C1_to_element(ni));
+          oomph::Node *n = el->node_pt(space_to_element_nodes[SPACE_INDEX_C1][ni]);
           for (auto b : ignore_continuous_at_interfaces)
           {
             if (n->is_on_boundary(b))
@@ -3084,6 +3085,7 @@ namespace pyoomph
       }      
     }
 
+    const std::vector<std::vector<unsigned>> & space_to_elem_node_index = el->get_nodal_space_index_to_element_index_map();
     if (ft->numfields_D2TB || ft->numfields_D2 || ft->numfields_D1TB || ft->numfields_D1)
     {
       for (unsigned int ei = 0; ei < this->nelement(); ei++)
@@ -3093,7 +3095,7 @@ namespace pyoomph
         {
           for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2TB]; ni++)
           {
-            pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(el->get_node_index_C2TB_to_element(ni)));
+            pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(space_to_elem_node_index[SPACE_INDEX_C2TB][ni]));
             for (unsigned int i = 0; i < nodept->ndim(); i++)
               x_buffer[i] = nodept->x(i);
             for (unsigned int i = 0; i < nodept->nlagrangian(); i++)
@@ -3108,7 +3110,7 @@ namespace pyoomph
         {
           for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2]; ni++)
           {
-            pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(el->get_node_index_C2_to_element(ni)));
+            pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(space_to_elem_node_index[SPACE_INDEX_C2][ni]));
             for (unsigned int i = 0; i < nodept->ndim(); i++)
               x_buffer[i] = nodept->x(i);
             for (unsigned int i = 0; i < nodept->nlagrangian(); i++)
@@ -3123,7 +3125,7 @@ namespace pyoomph
         {
           for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1TB]; ni++)
           {
-            pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(el->get_node_index_C1TB_to_element(ni)));
+            pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(space_to_elem_node_index[SPACE_INDEX_C1TB][ni]));
             for (unsigned int i = 0; i < nodept->ndim(); i++)
               x_buffer[i] = nodept->x(i);
             for (unsigned int i = 0; i < nodept->nlagrangian(); i++)
@@ -3138,7 +3140,7 @@ namespace pyoomph
         {
           for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1]; ni++)
           {
-            pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(el->get_node_index_C1_to_element(ni)));
+            pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(space_to_elem_node_index[SPACE_INDEX_C1][ni]));
             for (unsigned int i = 0; i < nodept->ndim(); i++)
               x_buffer[i] = nodept->x(i);
             for (unsigned int i = 0; i < nodept->nlagrangian(); i++)
@@ -3654,6 +3656,7 @@ namespace pyoomph
       }
     }
 
+    const std::vector<std::vector<unsigned int>> space_to_elem_node_index = el->get_nodal_space_index_to_element_index_map();
     if (ft->numfields_D2TB || ft->numfields_D2 || ft->numfields_D1TB || ft->numfields_D1)
     {
       for (unsigned int ei = 0; ei < this->nelement(); ei++)
@@ -3663,7 +3666,7 @@ namespace pyoomph
         {
           for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2TB]; ni++)
           {
-            pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(el->get_node_index_C2TB_to_element(ni)));
+            pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(space_to_elem_node_index[SPACE_INDEX_C2TB][ni]));
             for (unsigned int i = 0; i < nodept->ndim(); i++)
               x_buffer[i] = nodept->x(i);
             for (unsigned int i = 0; i < nodept->nlagrangian(); i++)
@@ -3683,7 +3686,7 @@ namespace pyoomph
         {
           for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2]; ni++)
           {
-            pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(el->get_node_index_C2_to_element(ni)));
+            pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(space_to_elem_node_index[SPACE_INDEX_C2][ni]));
             for (unsigned int i = 0; i < nodept->ndim(); i++)
               x_buffer[i] = nodept->x(i);
             for (unsigned int i = 0; i < nodept->nlagrangian(); i++)
@@ -3703,7 +3706,7 @@ namespace pyoomph
         {
           for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1TB]; ni++)
           {
-            pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(el->get_node_index_C1TB_to_element(ni)));
+            pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(space_to_elem_node_index[SPACE_INDEX_C1TB][ni]));
             for (unsigned int i = 0; i < nodept->ndim(); i++)
               x_buffer[i] = nodept->x(i);
             for (unsigned int i = 0; i < nodept->nlagrangian(); i++)
@@ -3725,7 +3728,7 @@ namespace pyoomph
         {
           for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1]; ni++)
           {
-            pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(el->get_node_index_C1_to_element(ni)));
+            pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(space_to_elem_node_index[SPACE_INDEX_C1][ni]));
             for (unsigned int i = 0; i < nodept->ndim(); i++)
               x_buffer[i] = nodept->x(i);
             for (unsigned int i = 0; i < nodept->nlagrangian(); i++)

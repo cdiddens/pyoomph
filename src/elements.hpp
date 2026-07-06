@@ -400,11 +400,7 @@ namespace pyoomph
       }
     
     }
-
-    virtual unsigned int get_node_index_C1_to_element(const unsigned int &i) const = 0;
-    virtual unsigned int get_node_index_C2_to_element(const unsigned int &i) const = 0;
-    virtual unsigned int get_node_index_C2TB_to_element(const unsigned int &i) const { throw_runtime_error("Implement"); }
-    virtual unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const { throw_runtime_error("Implement for meshio type index "+std::to_string(this->get_meshio_type_index())); }
+    
 
     // Mapping nnode-> -1 if not defined here or index
     virtual int get_node_index_element_to_C1(const unsigned int &i) const { return i; }
@@ -418,11 +414,7 @@ namespace pyoomph
     virtual oomph::Node *construct_boundary_node(const unsigned &n, oomph::TimeStepper *const &time_stepper_pt);
     virtual oomph::Node *boundary_node_pt(const int &face_index, const unsigned int index);
 
-    virtual bool is_node_index_part_of_C2(const unsigned &n) { return true; }
-    virtual bool is_node_index_part_of_C2TB(const unsigned &n) { return this->is_node_index_part_of_C2(n); }
-    virtual bool is_node_index_part_of_C1(const unsigned &n) { return true; }
-    virtual bool is_node_index_part_of_C1TB(const unsigned &n) { return this->is_node_index_part_of_C1(n); }
-
+   
     virtual void get_supporting_C1_nodes_of_C2_node(const unsigned &n, std::vector<oomph::Node *> &support) { throw_runtime_error("Implement"); }
     
     void get_interpolated_fields_DL(const oomph::Vector<double> &s, std::vector<double> &res, const unsigned &t = 0) const;
@@ -538,10 +530,7 @@ namespace pyoomph
     void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { throw_runtime_error("Makes no sense"); }
     void dshape_local_at_s_C2TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { throw_runtime_error("Makes no sense"); }
     void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { throw_runtime_error("Makes no sense"); }
-    unsigned int get_node_index_C1_to_element(const unsigned int &i) const { return 0; }
-    unsigned int get_node_index_C2_to_element(const unsigned int &i) const { return 0; }
-    unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const { return 0; }
-    unsigned int get_node_index_C2TB_to_element(const unsigned int &i) const { return 0; }
+    
     unsigned nrecovery_order() { return 0; }
     unsigned nvertex_node() const { return 0; }
     oomph::Node *vertex_node_pt(const unsigned &j) const { return NULL; }
@@ -630,9 +619,7 @@ namespace pyoomph
     virtual unsigned get_meshio_type_index() const { return 1; }
     void check_integrity(double &max_error) { max_error = 0; } // TODO throw_runtime_error("IMPLEMENT");
 
-    unsigned int get_node_index_C1_to_element(const unsigned int &i) const { return i; }
-    unsigned int get_node_index_C2_to_element(const unsigned int &i) const { return 0; }
-    unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const { return i; }
+    
 
     void output(std::ostream &outfile, const unsigned &n_plot) { BulkElementBase::output(outfile, n_plot); }
     void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
@@ -698,14 +685,11 @@ namespace pyoomph
     BulkElementLine1dC2();    
     void check_integrity(double &max_error) { max_error = 0; } // TODO
 
-    bool is_node_index_part_of_C1(const unsigned &n) override { return !node_only_C2[n]; }
+    
 
     int get_node_index_element_to_C1(const unsigned int &i) const override { return element_index_to_C1[i]; }
     int get_node_index_element_to_C1TB(const unsigned int &i) const override { return element_index_to_C1[i]; }
-    unsigned int get_node_index_C1_to_element(const unsigned int &i) const { return index_C1_to_element[i]; }
-    unsigned int get_node_index_C2_to_element(const unsigned int &i) const { return i; }
-    unsigned int get_node_index_C2TB_to_element(const unsigned int &i) const { return i; }
-    unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const { return index_C1_to_element[i]; }
+    
     void output(std::ostream &outfile, const unsigned &n_plot) { BulkElementBase::output(outfile, n_plot); }
 
     void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const;
@@ -757,9 +741,7 @@ namespace pyoomph
     virtual unsigned get_meshio_type_index() const { return 1; }
     void check_integrity(double &max_error) { max_error = 0; } // TODO throw_runtime_error("IMPLEMENT");
 
-    unsigned int get_node_index_C1_to_element(const unsigned int &i) const { return i; }
-    unsigned int get_node_index_C2_to_element(const unsigned int &i) const { return 0; }
-    unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const { return i; }
+    
     void output(std::ostream &outfile, const unsigned &n_plot) { BulkElementBase::output(outfile, n_plot); }
     void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
     void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const { throw_runtime_error("Makes no sense"); }
@@ -820,14 +802,10 @@ namespace pyoomph
     BulkTElementLine1dC2();    
     void check_integrity(double &max_error) { max_error = 0; } // TODO
 
-    bool is_node_index_part_of_C1(const unsigned &n) override { return !node_only_C2[n]; }
-    bool is_node_index_part_of_C1TB(const unsigned &n) override { return !node_only_C2[n]; }
+    
     int get_node_index_element_to_C1(const unsigned int &i) const override { return element_index_to_C1[i]; }
     int get_node_index_element_to_C1TB(const unsigned int &i) const override { return element_index_to_C1[i]; }
-    unsigned int get_node_index_C1_to_element(const unsigned int &i) const { return index_C1_to_element[i]; }
-    unsigned int get_node_index_C2_to_element(const unsigned int &i) const { return i; }
-    unsigned int get_node_index_C2TB_to_element(const unsigned int &i) const { return i; }
-    unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const { return index_C1_to_element[i]; }
+    
     void output(std::ostream &outfile, const unsigned &n_plot) { BulkElementBase::output(outfile, n_plot); }
 
     void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const;
@@ -876,9 +854,7 @@ namespace pyoomph
 
     void check_integrity(double &max_error) { max_error = 0; } // TODO
 
-    unsigned int get_node_index_C1_to_element(const unsigned int &i) const { return i; }    
-    unsigned int get_node_index_C2_to_element(const unsigned int &i) const { return 0; }    
-    unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const { return i; }
+    
 
     void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
     void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const { throw_runtime_error("Makes no sense"); }
@@ -945,14 +921,11 @@ namespace pyoomph
     void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
 
     virtual oomph::Node *boundary_node_pt(const int &face_index, const unsigned int index);
-    bool is_node_index_part_of_C1(const unsigned &n) override { return !node_only_C2[n]; }
+    
 
     int get_node_index_element_to_C1(const unsigned int &i) const override { return element_index_to_C1[i]; }
     int get_node_index_element_to_C1TB(const unsigned int &i) const override { return element_index_to_C1[i]; }
-    unsigned int get_node_index_C1_to_element(const unsigned int &i) const { return index_C1_to_element[i]; }
-    unsigned int get_node_index_C2_to_element(const unsigned int &i) const { return i; }
-    unsigned int get_node_index_C2TB_to_element(const unsigned int &i) const { return i; }
-    unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const { return index_C1_to_element[i]; }
+    
 
     void add_node_from_finer_neighbor_for_tesselated_numpy(int edge, oomph::Node *n, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes);
     void inform_coarser_neighbors_for_tesselated_numpy(std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes);
@@ -1000,9 +973,7 @@ namespace pyoomph
     BulkElementTri2dC1(bool has_bubble = false);    
     virtual unsigned get_meshio_type_index() const { return 3; }
     void check_integrity(double &max_error) { max_error = 0; } // TODO
-    unsigned int get_node_index_C1_to_element(const unsigned int &i) const { return i; }
-    unsigned int get_node_index_C2_to_element(const unsigned int &i) const { return 0; }
-    unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const { return i; }
+    
     void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
     void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const { throw_runtime_error("Makes no sense"); }
     void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const;
@@ -1045,8 +1016,7 @@ namespace pyoomph
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}  
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     BulkElementTri2dC1TB();
-    bool is_node_index_part_of_C1(const unsigned &n) override { return n < 3; }
-    bool is_node_index_part_of_C1TB(const unsigned &n) override { return true; }    
+    
     void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const;
     void dshape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsids) const;
 
@@ -1055,9 +1025,7 @@ namespace pyoomph
     void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const;
     void shape_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
     void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
-    void dshape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
-    unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const { return i; }
-    unsigned int get_node_index_C1_to_element(const unsigned int &i) const { return i; }
+    void dshape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }    
     inline void d2shape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsids, oomph::DShape &d2psids) const { throw_runtime_error("Implement"); }
 
     void local_coordinate_of_node(const unsigned &j, oomph::Vector<double> &s) const;
@@ -1101,15 +1069,11 @@ namespace pyoomph
     unsigned nnode_on_face() const override { return 3; }
     BulkElementTri2dC2(bool with_bubble = false);    
     virtual unsigned get_meshio_type_index() const { return 9; }
-    bool is_node_index_part_of_C1(const unsigned &n) override { return n < 3; }
-    bool is_node_index_part_of_C1TB(const unsigned &n) override { return n < 3 || n == 6; }
+    
     void check_integrity(double &max_error) { max_error = 0; } // TODO
     int get_node_index_element_to_C1(const unsigned int &i) const override { return (i < 3 ? i : -1); }
     int get_node_index_element_to_C1TB(const unsigned int &i) const override { return (i < 3 ? i : (i == 6 ? 3 : -1)); }
-    unsigned int get_node_index_C1_to_element(const unsigned int &i) const { return i; }
-    unsigned int get_node_index_C2_to_element(const unsigned int &i) const { return i; }
-    unsigned int get_node_index_C2TB_to_element(const unsigned int &i) const { return i; }
-    unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const { return i; } // This is of course only true for a facet on a Tetra
+    
     void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const;
     void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
     void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const;
@@ -1153,16 +1117,14 @@ namespace pyoomph
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}  
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     BulkElementTri2dC2TB();
-    bool is_node_index_part_of_C2(const unsigned &n) override { return n < 6; }
-    bool is_node_index_part_of_C2TB(const unsigned &n) override { return true; }    
+    
     void shape_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
     void dshape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
     void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const { BulkElementTri2dC2::shape(s, psi); }
     void shape_at_s_C2TB(const oomph::Vector<double> &s, oomph::Shape &psi) const { oomph::TBubbleEnrichedElementShape<2, 3>::shape(s, psi); }
     void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { BulkElementTri2dC2::dshape_local(s, psi, dpsi); }
     void dshape_local_at_s_C2TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { oomph::TBubbleEnrichedElementShape<2, 3>::dshape_local(s, psi, dpsi); }
-    unsigned int get_node_index_C2TB_to_element(const unsigned int &i) const { return i; }
-    unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const { return (i < 3 ? i : 6); }
+    
     inline void d2shape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsids, oomph::DShape &d2psids) const { throw_runtime_error("Implement"); }
     inline void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const { oomph::TBubbleEnrichedElementShape<2, 3>::shape(s, psi); }
     inline void dshape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsids) const { oomph::TBubbleEnrichedElementShape<2, 3>::dshape_local(s, psi, dpsids); }
@@ -1204,9 +1166,7 @@ namespace pyoomph
 
     void check_integrity(double &max_error) { max_error = 0; } // TODO
 
-    unsigned int get_node_index_C1_to_element(const unsigned int &i) const { return i; }
-    unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const override { return i; }    
-    unsigned int get_node_index_C2_to_element(const unsigned int &i) const { return 0; }
+    
 
     void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
     void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const { throw_runtime_error("Makes no sense"); }
@@ -1278,14 +1238,11 @@ namespace pyoomph
     void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
     void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
 
-    bool is_node_index_part_of_C1(const unsigned &n) override { return !node_only_C2[n]; }
+    
 
     int get_node_index_element_to_C1(const unsigned int &i) const override { return element_index_to_C1[i]; }
     int get_node_index_element_to_C1TB(const unsigned int &i) const override { return element_index_to_C1[i]; }
-    unsigned int get_node_index_C1_to_element(const unsigned int &i) const { return index_C1_to_element[i]; }
-    unsigned int get_node_index_C2_to_element(const unsigned int &i) const { return i; }
-    unsigned int get_node_index_C2TB_to_element(const unsigned int &i) const { return i; }
-    unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const { return i; }
+    
 
     int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
     {
@@ -1341,8 +1298,7 @@ namespace pyoomph
 
     void check_integrity(double &max_error) { max_error = 0; } // TODO
 
-    unsigned int get_node_index_C1_to_element(const unsigned int &i) const { return i; }
-    unsigned int get_node_index_C2_to_element(const unsigned int &i) const { return 0; }
+    
     int get_node_index_element_to_C1(const unsigned int &i) const override { return i; }
     int get_node_index_element_to_C1TB(const unsigned int &i) const override { return i; }
     void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
@@ -1400,8 +1356,7 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
     void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
     void dshape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
     void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
-    void local_coordinate_of_node(const unsigned &j, oomph::Vector<double> &s) const;
-    unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const { return i; }
+    void local_coordinate_of_node(const unsigned &j, oomph::Vector<double> &s) const;    
      int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
      {
       if (tesselate_tri)
@@ -1457,13 +1412,11 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
     void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
     void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
 
-    bool is_node_index_part_of_C1(const unsigned &n) override { return !node_only_C2[n]; }
+    
 
     int get_node_index_element_to_C1(const unsigned int &i) const override { return element_index_to_C1[i]; }
     int get_node_index_element_to_C1TB(const unsigned int &i) const override { throw_runtime_error("TODO"); }
-    unsigned int get_node_index_C1_to_element(const unsigned int &i) const { return index_C1_to_element[i]; }
-    unsigned int get_node_index_C2_to_element(const unsigned int &i) const { return i; }
-    unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const { return index_C1_to_element[i]; }
+    
 
     int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
     {
@@ -1526,11 +1479,8 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
     //   void fill_element_nodal_indices_for_numpy(int *indices,unsigned isubelem,bool tesselate_tri,std::vector<std::vector<std::set<oomph::Node*>>> & add_nodes) const;
 
     int get_node_index_element_to_C1TB(const unsigned int &i) const override { throw_runtime_error("TODO"); }
-    unsigned int get_node_index_C2TB_to_element(const unsigned int &i) const { return i; }
-    unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const { return (i < 4 ? i : 14); }
-    bool is_node_index_part_of_C2(const unsigned &n) override { return n < 14; }    
-    bool is_node_index_part_of_C2TB(const unsigned &n) override { return true; }
-    bool is_node_index_part_of_C1TB(const unsigned &n) override { return (n<4 || n==14);}
+    
+    
     void shape_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi) const;    
     void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const { BulkElementTetra3dC2::shape(s, psi); }
     void shape_at_s_C2TB(const oomph::Vector<double> &s, oomph::Shape &psi) const { oomph::TBubbleEnrichedElementShape<3, 3>::shape(s, psi); }
@@ -1566,8 +1516,7 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
       void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
       void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { throw_runtime_error("Makes no sense"); }
       void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
-      unsigned int get_node_index_C1_to_element(const unsigned int &i) const { return i; }
-      unsigned int get_node_index_C2_to_element(const unsigned int &i) const { return 0; }
+      
       int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
       {
           if (tesselate_tri)
@@ -1619,9 +1568,7 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
       void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const;
       void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
       void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { throw_runtime_error("Makes no sense"); }
-      void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
-      unsigned int get_node_index_C1_to_element(const unsigned int &i) const { return i; }
-      unsigned int get_node_index_C2_to_element(const unsigned int &i) const { return 0; }
+      void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;      
       int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
       {
           if (tesselate_tri)
@@ -1678,8 +1625,7 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
       void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
       void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { oomph::WedgeElementShapeC1::dshape_local(s, psi, dpsi); }
       void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
-      unsigned int get_node_index_C1_to_element(const unsigned int &i) const { return (i<3 ? i : (i+9)); } //3->12, 4->13, 5->14, 
-      unsigned int get_node_index_C2_to_element(const unsigned int &i) const { return i; }
+      
       int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
       {
           if (tesselate_tri)
@@ -1708,8 +1654,7 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
           return res;
       }
       virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 4, order)); }
-      oomph::Vector<double> get_midpoint_s() override { oomph::Vector<double> res(this->dim(), 1.0 / 3.0); res[2]=0.5; return res; }
-      bool is_node_index_part_of_C1(const unsigned &n) override { return !node_only_C2[n]; }
+      oomph::Vector<double> get_midpoint_s() override { oomph::Vector<double> res(this->dim(), 1.0 / 3.0); res[2]=0.5; return res; }      
       int get_node_index_element_to_C1(const unsigned int &i) const override { return element_index_to_C1[i]; }
   };
 
@@ -1731,10 +1676,7 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
     virtual double invert_jacobian_mapping(const oomph::DenseMatrix<double> &jacobian, oomph::DenseMatrix<double> &inverse_jacobian) const;
     void build(oomph::Mesh *&, oomph::Vector<oomph::Node *> &, bool &, std::ofstream &) {}
     void check_integrity(double &max_error) { max_error = 0; }
-    unsigned int get_node_index_C1_to_element(const unsigned int &i) const { return i; }
-    unsigned int get_node_index_C2_to_element(const unsigned int &i) const { return i; }
-    unsigned int get_node_index_C2TB_to_element(const unsigned int &i) const { return i; }
-    unsigned int get_node_index_C1TB_to_element(const unsigned int &i) const { return i; }
+    
     void output(std::ostream &outfile, const unsigned &n_plot) { BulkElementBase::output(outfile, n_plot); }
     void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const;
     void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const;

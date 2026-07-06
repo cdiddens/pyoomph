@@ -758,17 +758,18 @@ namespace pyoomph
 
 			//std::cout << "HERE IN REMAPPING" << std::endl;
 
-			for (unsigned int i_space=0;i_space<NUM_CONTINUOUS_SPACES;i_space++)
+			for (unsigned int i_space=0;i_space<ft->num_present_continuous_spaces;i_space++)
 			{
 				//std::cout << " IN SPACE " << i_space << std::endl;
 				//std::cout << " REQUIRES CONTINUOUS SHAPE FUNCTIONS: " << (required.continuous_spaces[i_space].psi || required.continuous_spaces[i_space].dx_psi || required.continuous_spaces[i_space].dX_psi) << std::endl;
 				//std::cout << " NUMBER OF FIELDS: " << ft->continuous_spaces[i_space].numfields << std::endl;
-				if ((required.continuous_spaces[i_space].psi || required.continuous_spaces[i_space].dx_psi || required.continuous_spaces[i_space].dX_psi) && ft->continuous_spaces[i_space].numfields>0)
+				const JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info = ft->present_continuous_spaces[i_space];
+				if ((required.continuous_spaces[space_info->space_index].psi || required.continuous_spaces[space_info->space_index].dx_psi || required.continuous_spaces[space_info->space_index].dX_psi) && space_info->numfields>0)
 				{
 					//std::cout << " IN SPACE " << i_space << " REQUIRES CONTINUOUS SHAPE FUNCTIONS" << std::endl;
-					const JITFuncSpec_Table_FiniteElement_SpaceInfo_t & space_info = ft->continuous_spaces[i_space];
-					unsigned nnode_space=eleminfo.nnode_of_space[space_info.space_index];
-					JITHangInfo_t * hangbuffer=shape_info->hanginfo_Cont[space_info.space_index];
+					
+					unsigned nnode_space=eleminfo.nnode_of_space[space_info->space_index];
+					JITHangInfo_t * hangbuffer=shape_info->hanginfo_Cont[space_info->space_index];
 					/*if (space_info.space_index==0) hangbuffer = shape_info->hanginfo_C2TB;
 					else if (space_info.space_index==1) hangbuffer = shape_info->hanginfo_C2;
 					else if (space_info.space_index==2) hangbuffer = shape_info->hanginfo_C1TB;
@@ -782,36 +783,36 @@ namespace pyoomph
 							// NON HANGING -> Set the hanging to 1 node, which is just the remapped equation
 							hangbuffer[l].nummaster = 1;
 							hangbuffer[l].masters[0].weight = 1.0;
-							for (unsigned int f = 0; f < space_info.numfields_basebulk; f++)
+							for (unsigned int f = 0; f < space_info->numfields_basebulk; f++)
 							{
-								if (eleminfo.nodal_local_eqn[l][f + space_info.buffer_offset_basebulk] >= 0)
+								if (eleminfo.nodal_local_eqn[l][f + space_info->buffer_offset_basebulk] >= 0)
 								{
-									hangbuffer[l].masters[0].local_eqn[f + space_info.buffer_offset_basebulk] = eleminfo.nodal_local_eqn[l][f + space_info.buffer_offset_basebulk];
+									hangbuffer[l].masters[0].local_eqn[f + space_info->buffer_offset_basebulk] = eleminfo.nodal_local_eqn[l][f + space_info->buffer_offset_basebulk];
 								}
 								else
 								{
-									hangbuffer[l].masters[0].local_eqn[f + space_info.buffer_offset_basebulk] = -1;
+									hangbuffer[l].masters[0].local_eqn[f + space_info->buffer_offset_basebulk] = -1;
 								}
 							}
 
-							for (unsigned int f = 0; f < space_info.numfields-space_info.numfields_basebulk; f++)
+							for (unsigned int f = 0; f < space_info->numfields-space_info->numfields_basebulk; f++)
 							{
-								if (eleminfo.nodal_local_eqn[l][f + space_info.buffer_offset_interf] >= 0)
+								if (eleminfo.nodal_local_eqn[l][f + space_info->buffer_offset_interf] >= 0)
 								{
-									hangbuffer[l].masters[0].local_eqn[f+ space_info.buffer_offset_interf] = eleminfo.nodal_local_eqn[l][f + space_info.buffer_offset_interf];							
+									hangbuffer[l].masters[0].local_eqn[f+ space_info->buffer_offset_interf] = eleminfo.nodal_local_eqn[l][f + space_info->buffer_offset_interf];							
 								}
 								else
 								{
-									hangbuffer[l].masters[0].local_eqn[f+ space_info.buffer_offset_interf] = -1;
+									hangbuffer[l].masters[0].local_eqn[f+ space_info->buffer_offset_interf] = -1;
 								}
 							}
 						}	
 			
 						for (int m = 0; m < hangbuffer[l].nummaster; m++)
 						{
-							for (unsigned int f = 0; f < space_info.numfields_basebulk; f++)
+							for (unsigned int f = 0; f < space_info->numfields_basebulk; f++)
 							{
-								unsigned foffs=f+ space_info.buffer_offset_basebulk;
+								unsigned foffs=f+ space_info->buffer_offset_basebulk;
 								if (hangbuffer[l].masters[m].local_eqn[foffs] >= 0)
 								{
 									hangbuffer[l].masters[m].local_eqn[foffs] = eqn_remap[hangbuffer[l].masters[m].local_eqn[foffs]];
@@ -819,14 +820,14 @@ namespace pyoomph
 									{
 										std::ostringstream oss;
 										oss << this;
-										oss << " node: " << l << ", master " << m << " of " << hangbuffer[l].nummaster  << ", index " << f << ", " << foffs << " of " << space_info.numfields_basebulk;
-										throw_runtime_error("MISSING EXTERNAL DEPENDENCY ON SPACE '"+std::string(space_info.space_name)+"' ON ELEM PTR: " + oss.str());
+										oss << " node: " << l << ", master " << m << " of " << hangbuffer[l].nummaster  << ", index " << f << ", " << foffs << " of " << space_info->numfields_basebulk;
+										throw_runtime_error("MISSING EXTERNAL DEPENDENCY ON SPACE '"+std::string(space_info->space_name)+"' ON ELEM PTR: " + oss.str());
 									}
 								}
 							}
-							for (unsigned int f = 0; f < space_info.numfields-space_info.numfields_basebulk; f++)
+							for (unsigned int f = 0; f < space_info->numfields-space_info->numfields_basebulk; f++)
 							{
-								unsigned foffs=f+ space_info.buffer_offset_interf;
+								unsigned foffs=f+ space_info->buffer_offset_interf;
 								if (hangbuffer[l].masters[m].local_eqn[foffs] >= 0)
 								{
 									hangbuffer[l].masters[m].local_eqn[foffs] = eqn_remap[hangbuffer[l].masters[m].local_eqn[foffs]];
@@ -834,8 +835,8 @@ namespace pyoomph
 									{
 										std::ostringstream oss;
 										oss << this;
-										oss << " node: " << l << ", master " << m << " of " << hangbuffer[l].nummaster  << ", index " << f << ", " << foffs << " of " << space_info.numfields-space_info.numfields_basebulk;
-										throw_runtime_error("MISSING EXTERNAL DEPENDENCY ON SPACE '"+std::string(space_info.space_name)+"' ON ELEM PTR: " + oss.str());
+										oss << " node: " << l << ", master " << m << " of " << hangbuffer[l].nummaster  << ", index " << f << ", " << foffs << " of " << space_info->numfields-space_info->numfields_basebulk;
+										throw_runtime_error("MISSING EXTERNAL DEPENDENCY ON SPACE '"+std::string(space_info->space_name)+"' ON ELEM PTR: " + oss.str());
 									}
 								}
 							}
@@ -5902,14 +5903,14 @@ namespace pyoomph
 				}
 			}
 
-
+			const std::vector<std::vector<unsigned>> &space_node_to_elem = this->get_nodal_space_index_to_element_index_map();
 			//DG 			
 			if (functable->numfields_D2TB_new)
 			{
 				for (unsigned l=0;l<this->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2TB];l++)
 				{
 					oomph::Vector<double> sfather,father_data;				
-					this->get_nodal_s_in_father(this->get_node_index_C2TB_to_element(l), sfather);
+					this->get_nodal_s_in_father(space_node_to_elem[SPACE_INDEX_C2TB][l], sfather);
 					father->get_D2TB_fields_at_s(t,sfather,father_data);
 					for (unsigned iindex=0;iindex<functable->numfields_D2TB_new;iindex++)
 					{
@@ -5922,7 +5923,7 @@ namespace pyoomph
 				for (unsigned l=0;l<this->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2];l++)
 				{
 					oomph::Vector<double> sfather,father_data;				
-					this->get_nodal_s_in_father(this->get_node_index_C2_to_element(l), sfather);
+					this->get_nodal_s_in_father(space_node_to_elem[SPACE_INDEX_C2][l], sfather);
 					father->get_D2_fields_at_s(t,sfather,father_data);
 					for (unsigned iindex=0;iindex<functable->numfields_D2_new;iindex++)
 					{
@@ -5935,7 +5936,7 @@ namespace pyoomph
 				for (unsigned l=0;l<this->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1TB];l++)
 				{
 					oomph::Vector<double> sfather,father_data;				
-					this->get_nodal_s_in_father(this->get_node_index_C1TB_to_element(l), sfather);
+					this->get_nodal_s_in_father(space_node_to_elem[SPACE_INDEX_C1TB][l], sfather);
 					father->get_D1TB_fields_at_s(t,sfather,father_data);
 					for (unsigned iindex=0;iindex<functable->numfields_D1TB_new;iindex++)
 					{
@@ -5949,7 +5950,7 @@ namespace pyoomph
 				for (unsigned l=0;l<this->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1];l++)
 				{
 					oomph::Vector<double> sfather,father_data;				
-					this->get_nodal_s_in_father(this->get_node_index_C1_to_element(l), sfather);
+					this->get_nodal_s_in_father(space_node_to_elem[SPACE_INDEX_C1][l], sfather);
 					father->get_D1_fields_at_s(t,sfather,father_data);
 					for (unsigned iindex=0;iindex<functable->numfields_D1_new;iindex++)
 					{
@@ -6052,7 +6053,8 @@ namespace pyoomph
 			this->set_integration_order(functable->integration_order);
 		}
 
-		// DG fields
+		// DG fields	
+		const std::vector<std::vector<unsigned>> &this_space_node_to_elem = this->get_nodal_space_index_to_element_index_map();	
 		if (functable->numfields_D2TB_new || functable->numfields_D2_new || functable->numfields_D1_new || functable->numfields_D1TB_new)
 		{
 			for (unsigned t = 0; t < node_pt(0)->time_stepper_pt()->ntstorage(); t++)
@@ -6068,10 +6070,11 @@ namespace pyoomph
 					for (unsigned ison = 0; ison < this->required_nsons(); ison++)
 					{
 						BulkElementBase* son=dynamic_cast<BulkElementBase*>(Tree_pt->son_pt(ison)->object_pt());
+						const std::vector<unsigned> &son_space_node_to_elem = son->get_nodal_space_index_to_element_index_map()[SPACE_INDEX_C2TB];
 						for (unsigned int in=0;in<Nn;in++)
 						{
 							oomph::Vector<double> s;				
-							son->get_nodal_s_in_father(son->get_node_index_C2TB_to_element(in), s);
+							son->get_nodal_s_in_father(son_space_node_to_elem[in], s);
 							oomph::Node * my_node=this->get_node_at_local_coordinate(s);
 							if (my_node)
 							{
@@ -6113,17 +6116,18 @@ namespace pyoomph
 					for (unsigned ison = 0; ison < this->required_nsons(); ison++)
 					{
 						BulkElementBase* son=dynamic_cast<BulkElementBase*>(Tree_pt->son_pt(ison)->object_pt());
+						const std::vector<unsigned> &son_space_node_to_elem = son->get_nodal_space_index_to_element_index_map()[SPACE_INDEX_C2];
 						for (unsigned int in=0;in<Nn;in++)
 						{
 							oomph::Vector<double> s;				
-							son->get_nodal_s_in_father(son->get_node_index_C2_to_element(in), s);
+							son->get_nodal_s_in_father(son_space_node_to_elem[in], s);
 							oomph::Node * my_node=this->get_node_at_local_coordinate(s);
 							if (my_node)
 							{
 								int nn=this->get_node_number(my_node);
 								if (nn>=0)
 								{
-									nn=this->get_node_index_element_to_C2(nn);
+									nn= this->get_node_index_element_to_C2(nn);
 									if (nn>=0)
 									{
 										for (unsigned int iindex = functable->internal_offset_D2_new; iindex < functable->internal_offset_D2_new+functable->numfields_D2_new; iindex++) 
@@ -6158,10 +6162,11 @@ namespace pyoomph
 					for (unsigned ison = 0; ison < this->required_nsons(); ison++)
 					{
 						BulkElementBase* son=dynamic_cast<BulkElementBase*>(Tree_pt->son_pt(ison)->object_pt());
+						const std::vector<unsigned> &son_space_node_to_elem = son->get_nodal_space_index_to_element_index_map()[SPACE_INDEX_C1TB];
 						for (unsigned int in=0;in<Nn;in++)
 						{
 							oomph::Vector<double> s;				
-							son->get_nodal_s_in_father(son->get_node_index_C1TB_to_element(in), s);
+							son->get_nodal_s_in_father(son_space_node_to_elem[in], s);
 							oomph::Node * my_node=this->get_node_at_local_coordinate(s);
 //							std::cout << "INFO " << this << " ISON " << ison << "  " << in << " sfather " << s[0] << " MY NODE " << my_node << std::endl;
 							if (my_node)
@@ -6204,10 +6209,11 @@ namespace pyoomph
 					for (unsigned ison = 0; ison < this->required_nsons(); ison++)
 					{
 						BulkElementBase* son=dynamic_cast<BulkElementBase*>(Tree_pt->son_pt(ison)->object_pt());
+						const std::vector<unsigned> &son_space_node_to_elem = son->get_nodal_space_index_to_element_index_map()[SPACE_INDEX_C1];
 						for (unsigned int in=0;in<Nn;in++)
 						{
 							oomph::Vector<double> s;				
-							son->get_nodal_s_in_father(son->get_node_index_C1_to_element(in), s);
+							son->get_nodal_s_in_father(son_space_node_to_elem[in], s);
 							oomph::Node * my_node=this->get_node_at_local_coordinate(s);
 //							std::cout << "INFO " << this << " ISON " << ison << "  " << in << " sfather " << s[0] << " MY NODE " << my_node << std::endl;
 							if (my_node)
@@ -10162,7 +10168,7 @@ namespace pyoomph
 		if (fieldindex>=ft->numfields_D2TB_bulk) 	return nodeindex;
 		else
 		{
-			int pnodeindex=this->get_node_index_C2TB_to_element(nodeindex);
+			int pnodeindex=this->get_nodal_space_index_to_element_index_map()[SPACE_INDEX_C2TB][nodeindex];
 			if (pnodeindex<0) throw_runtime_error("Strange");
 			pnodeindex=this->bulk_node_number(pnodeindex);			
 			BulkElementBase* be=dynamic_cast<BulkElementBase*>(this->bulk_element_pt());
@@ -10175,7 +10181,7 @@ namespace pyoomph
 		if (fieldindex>=ft->numfields_D2_bulk) 	return nodeindex;
 		else
 		{
-			int pnodeindex=this->get_node_index_C2_to_element(nodeindex);
+			int pnodeindex=this->get_nodal_space_index_to_element_index_map()[SPACE_INDEX_C2][nodeindex];
 			if (pnodeindex<0) throw_runtime_error("Strange");
 			pnodeindex=this->bulk_node_number(pnodeindex);
 			BulkElementBase* be=dynamic_cast<BulkElementBase*>(this->bulk_element_pt());
@@ -10189,7 +10195,7 @@ namespace pyoomph
 		if (fieldindex>=ft->numfields_D1TB_bulk) 	return nodeindex;
 		else
 		{
-			int pnodeindex=this->get_node_index_C1TB_to_element(nodeindex);
+			int pnodeindex=this->get_nodal_space_index_to_element_index_map()[SPACE_INDEX_C1TB][nodeindex];
 			if (pnodeindex<0) throw_runtime_error("Strange");
 			pnodeindex=this->bulk_node_number(pnodeindex);			
 			BulkElementBase* be=dynamic_cast<BulkElementBase*>(this->bulk_element_pt());
@@ -10203,7 +10209,7 @@ namespace pyoomph
 		if (fieldindex>=ft->numfields_D1_bulk) 	return nodeindex;
 		else
 		{			
-			int pnodeindex=this->get_node_index_C1_to_element(nodeindex);
+			int pnodeindex=this->get_nodal_space_index_to_element_index_map()[SPACE_INDEX_C1][nodeindex];
 			if (pnodeindex<0) throw_runtime_error("Strange");
 			pnodeindex=this->bulk_node_number(pnodeindex);
 			BulkElementBase* be=dynamic_cast<BulkElementBase*>(this->bulk_element_pt());
@@ -10575,6 +10581,7 @@ namespace pyoomph
 	   if (father)
 	   {
 		  	  unsigned myvalindex = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(lnode))->index_of_first_value_assigned_by_face_element(valindex);	   
+			const std::vector<std::vector<unsigned>> & father_space_to_elem_index = father->get_nodal_space_index_to_element_index_map();
 	        oomph::Vector<double> my_s,s_bulk,sfather;
 	        oomph::Node * bulknode=NULL;
 	        oomph::Node * mynode=this->node_pt(lnode);
@@ -10603,7 +10610,7 @@ namespace pyoomph
 		  		  {
 		  		   if (abs(psi[lf])>1e-9)
 		  		   {
-		  		    unsigned fnode_index=father->get_node_index_C1_to_element(lf);
+		  		    unsigned fnode_index=father->get_nodal_space_index_to_element_index_map()[SPACE_INDEX_C1][lf];
 		  		    pyoomph::BoundaryNode * bn=dynamic_cast<pyoomph::BoundaryNode *>(father->node_pt(fnode_index));
 		  		    if (!bn) continue;
 		  		    if (!bn->has_additional_dof(valindex)) continue;
@@ -10622,7 +10629,7 @@ namespace pyoomph
 		  		  {
 		  		   if (abs(psi[lf])>1e-9)
 		  		   {
-		  		    unsigned fnode_index=father->get_node_index_C1TB_to_element(lf);
+		  		    unsigned fnode_index=father->get_nodal_space_index_to_element_index_map()[SPACE_INDEX_C1TB][lf];
 		  		    pyoomph::BoundaryNode * bn=dynamic_cast<pyoomph::BoundaryNode *>(father->node_pt(fnode_index));
 		  		    if (!bn) continue;
 		  		    if (!bn->has_additional_dof(valindex)) continue;
@@ -10641,7 +10648,7 @@ namespace pyoomph
 		  		  {
 		  		   if (abs(psi[lf])>1e-9)
 		  		   {
-		  		    unsigned fnode_index=father->get_node_index_C2_to_element(lf);
+		  		    unsigned fnode_index=father->get_nodal_space_index_to_element_index_map()[SPACE_INDEX_C2][lf];
 		  		    pyoomph::BoundaryNode * bn=dynamic_cast<pyoomph::BoundaryNode *>(father->node_pt(fnode_index));
 		  		    if (!bn) continue;
 		  		    if (!bn->has_additional_dof(valindex)) continue;
@@ -10660,7 +10667,7 @@ namespace pyoomph
 		  		  {
 		  		   if (abs(psi[lf])>1e-9)
 		  		   {
-		  		    unsigned fnode_index=father->get_node_index_C2TB_to_element(lf);
+		  		    unsigned fnode_index=father->get_nodal_space_index_to_element_index_map()[SPACE_INDEX_C2TB][lf];
 		  		    pyoomph::BoundaryNode * bn=dynamic_cast<pyoomph::BoundaryNode *>(father->node_pt(fnode_index));
 		  		    if (!bn) continue;
 		  		    if (!bn->has_additional_dof(valindex)) continue;
@@ -10831,11 +10838,12 @@ namespace pyoomph
 		}
 
 		int hanging_index = -1;
+		const std::vector<std::vector<unsigned>> & from_space_to_elem_index = from_elem->get_nodal_space_index_to_element_index_map();
 		if (required->dx_psi_C2TB || required->psi_C2TB || required->dX_psi_C2TB)
 		{
 			for (unsigned int j = 0; j < from_elem->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2TB]; j++)
 			{
-				auto *nod_pt = from_elem->node_pt(from_elem->get_node_index_C2TB_to_element(j));
+				auto *nod_pt = from_elem->node_pt(from_space_to_elem_index[SPACE_INDEX_C2TB][j]);
 		//		std::cout << "ADDING C2TB EXTERNAL " << j << " NODE " << nod_pt << " " << this << "  " << from_elem <<  std::endl;
 				/*		for(unsigned i=0;i<nod_pt->nvalue();i++)
 				 *	{*/
@@ -10867,7 +10875,7 @@ namespace pyoomph
 		{
 			for (unsigned int j = 0; j < from_elem->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2]; j++)
 			{
-				auto *nod_pt = from_elem->node_pt(from_elem->get_node_index_C2_to_element(j));
+				auto *nod_pt = from_elem->node_pt(from_space_to_elem_index[SPACE_INDEX_C2][j]);
 				/*		for(unsigned i=0;i<nod_pt->nvalue();i++)
 				 *	{*/
 				if (nod_pt->is_hanging(hanging_index))
@@ -10900,7 +10908,7 @@ namespace pyoomph
 			int hang_index =  (from_elem->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2] ? fft->continuous_spaces[SPACE_INDEX_C1TB].nodal_offset_basebulk : -1);		
 			for (unsigned int j = 0; j < from_elem->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1TB]; j++)
 			{
-				auto *nod_pt = from_elem->node_pt(from_elem->get_node_index_C1TB_to_element(j));
+				auto *nod_pt = from_elem->node_pt(from_space_to_elem_index[SPACE_INDEX_C1TB][j]);
 				if (nod_pt->is_hanging(hang_index))
 				{
 					oomph::HangInfo *const hang_pt = nod_pt->hanging_pt(hang_index);
@@ -10933,7 +10941,7 @@ namespace pyoomph
 			// std::cout << "   HANG INDEX " <<  hang_index << "  NNODE C1 " << from_elem->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1] << std::endl;
 			for (unsigned int j = 0; j < from_elem->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1]; j++)
 			{
-				auto *nod_pt = from_elem->node_pt(from_elem->get_node_index_C1_to_element(j));
+				auto *nod_pt = from_elem->node_pt(from_space_to_elem_index[SPACE_INDEX_C1][j]);
 				//	std::cout << "      MAPPOING " << j << "  " << from_elem->get_node_index_C1_to_element(j) << "  HANING " << nod_pt->is_hanging(hang_index) << std::endl;
 				if (nod_pt->is_hanging(hang_index))
 				{
@@ -11944,17 +11952,18 @@ namespace pyoomph
 		const JITFuncSpec_Table_FiniteElement_t *functable = this->codeinst->get_func_table();
 
 
-		for (unsigned int si=0;si<NUM_CONTINUOUS_SPACES;si++)
+		for (unsigned int si=0;si<functable->num_present_continuous_spaces;si++)
 		{
-			for (unsigned int i = 0; i < eleminfo.nnode_of_space[si]; i++)
+			auto space_info=functable->present_continuous_spaces[si];
+			for (unsigned int i = 0; i < eleminfo.nnode_of_space[space_info->space_index]; i++)
 			{
-				for (unsigned int j = 0; j < functable->continuous_spaces[si].numfields - functable->continuous_spaces[si].numfields_basebulk; j++)
+				for (unsigned int j = 0; j < space_info->numfields - space_info->numfields_basebulk; j++)
 				{
-					unsigned node_index = j + functable->continuous_spaces[si].buffer_offset_interf; // TODO: This index right?
+					unsigned node_index = j + space_info->buffer_offset_interf; // TODO: This index right?
 					int leq = eleminfo.nodal_local_eqn[i][node_index];
 					if (leq >= 0 && res[leq] == "<unknown>")
 					{
-						res[leq] = "IFIELD_" + std::string(functable->continuous_spaces[si].fieldnames[functable->continuous_spaces[si].numfields_basebulk + j]) + "__" + std::string(functable->continuous_spaces[si].space_name) + "__" + std::to_string(i); // TODO: Interhangs?
+						res[leq] = "IFIELD_" + std::string(space_info->fieldnames[space_info->numfields_basebulk + j]) + "__" + std::string(space_info->space_name) + "__" + std::to_string(i); // TODO: Interhangs?
 					}
 				}
 			}
@@ -12109,33 +12118,34 @@ namespace pyoomph
 		double res=0.0;		
 		oomph::Shape psi;
       std::vector<unsigned> node_index;		
+	  const std::vector<std::vector<unsigned>> & space_nodes_to_element_nodes=this->get_nodal_space_index_to_element_index_map();
 		if (space=="C2TB")
 		{
 		  psi.resize(eleminfo.nnode_of_space[SPACE_INDEX_C2TB]);
 		  node_index.resize(psi.nindex1());
   		  this->shape_at_s_C2TB(s, psi);				 
-  		  for (unsigned int i=0;i<node_index.size();i++) node_index[i]=this->get_node_index_C2TB_to_element(i);
+  		  for (unsigned int i=0;i<node_index.size();i++) node_index[i]=space_nodes_to_element_nodes[SPACE_INDEX_C2TB][i];
 		}
 		else if (space=="C2")
 		{
 		  psi.resize(eleminfo.nnode_of_space[SPACE_INDEX_C2]);
 		  node_index.resize(psi.nindex1());
   		  this->shape_at_s_C2(s, psi);				 
-  		  for (unsigned int i=0;i<node_index.size();i++) node_index[i]=this->get_node_index_C2_to_element(i);
+  		  for (unsigned int i=0;i<node_index.size();i++) node_index[i]=space_nodes_to_element_nodes[SPACE_INDEX_C2][i];
 		}
 		else if (space=="C1TB")
 		{
 		  psi.resize(eleminfo.nnode_of_space[SPACE_INDEX_C1TB]);
 		  node_index.resize(psi.nindex1());
   		  this->shape_at_s_C1TB(s, psi);				 
-  		  for (unsigned int i=0;i<node_index.size();i++) node_index[i]=this->get_node_index_C1TB_to_element(i);
+  		  for (unsigned int i=0;i<node_index.size();i++) node_index[i]=space_nodes_to_element_nodes[SPACE_INDEX_C1TB][i];
 		}		
 		else if (space=="C1")
 		{
 		  psi.resize(eleminfo.nnode_of_space[SPACE_INDEX_C1]);
 		  node_index.resize(psi.nindex1());
   		  this->shape_at_s_C1(s, psi);				 
-  		  for (unsigned int i=0;i<node_index.size();i++) node_index[i]=this->get_node_index_C1_to_element(i);
+  		  for (unsigned int i=0;i<node_index.size();i++) node_index[i]=space_nodes_to_element_nodes[SPACE_INDEX_C1][i];
 		}
 		else 
 		{

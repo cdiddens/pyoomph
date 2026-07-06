@@ -3353,14 +3353,14 @@ namespace pyoomph
     double L=this->s_knots.back()-this->s_knots.front();
     double offs=0.0;
     while (i<0) { i+=this->s_knots.size()-1; offs-=L; }
-    while (i>=this->s_knots.size()-1) { i-=this->s_knots.size()-1; offs+=L; }
+    while (i>=(int)(this->s_knots.size())-1) { i-=(int)this->s_knots.size()-1; offs+=L; }
     return this->s_knots[i]+offs;
   }
 
   unsigned PeriodicOrbitHandler::get_periodic_knot_index(int i)
   {    
     while (i<0) { i+=this->s_knots.size()-1; }
-    while (i>=this->s_knots.size()-1) { i-=this->s_knots.size()-1;  }
+    while (i>=(int)this->s_knots.size()-1) { i-=(int)this->s_knots.size()-1;  }
     return i;
   }
 
@@ -3381,7 +3381,7 @@ namespace pyoomph
                                               Ndof, false);
     // Remove all previous sparse storage used during Jacobian assembly
     Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
-    if (basis) delete this->basis; this->basis=NULL;
+    if (basis) {delete this->basis; this->basis=NULL;}
   }
   unsigned long PeriodicOrbitHandler::eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local)
   {
@@ -3840,7 +3840,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
           Uplus[i]=Tadd[ti][glob_eqs[i]];
         }
         double invds=this->FD_ds_weights[ti][0];
-        unsigned index0,indexplus;        
+        unsigned index0;         //,indexplus
         for (unsigned int i=0;i<raw_ndof;i++)
         {
             U[i]=0.5*(U0[i]+Uplus[i]);
@@ -4085,7 +4085,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
 
           for (unsigned int i=0;i<raw_ndof;i++)
           {
-            unsigned glob_eq=elem_pt->eqn_number(i);
+            //unsigned glob_eq=elem_pt->eqn_number(i);
             *(alldofs[glob_eqs[i]])=Ulocal[i]; // Set the unknowns
           }
 
