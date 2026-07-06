@@ -7,10 +7,12 @@ class BaseSolidConstitutiveLaw:
         Base class for solid constitutive laws. The method get_sigma must be implemented in derived classes.
 
         Args:
-            use_subexpressions (bool, optional): Use subexpressions for the tensor entries. Defaults to True.
+            use_subexpressions: Use subexpressions for the tensor entries. Defaults to True.
+            use_inverse_routine: Use a specific routine for the inversion of the metric tensor. It cannot be used when requiring Hessians, e.g. for bifurcation tracking. Defaults to True.
     """
-    def __init__(self,use_subexpressions=True):        
+    def __init__(self,use_subexpressions=True,use_inverse_routine:bool=True):        
         self.use_subexpressions=use_subexpressions
+        self.use_inverse_routine=use_inverse_routine
         
     def _subexpression(self,expr):
         if self.use_subexpressions:
@@ -24,17 +26,22 @@ class BaseSolidConstitutiveLaw:
         """
         return False
     
-    def get_Gij(self):     
+    def get_Gij(self,dim):     
         """
         Returns the covariant metric tensor of the deformed configuration. 
         """           
         x=var("mesh")
         return self._subexpression(matproduct(transpose(grad(x,lagrangian=True)),grad(x,lagrangian=True)))
     
-    def get_G_up_ij(self):
+    def get_G_up_ij(self,dim):
         # G^ij=(G^(-1))_ij
-        Gij=self.get_Gij()        
-        return self._subexpression(inverse_matrix(Gij,fill_to_vector_dim_3=True,skip_empty_rows_and_cols=True))
+        Gij=self.get_Gij(dim)        
+        if self.use_inverse_routine:
+            from pyoomph.expressions.tensor_funcs import InvertSymmetricMatrix            
+            inv=InvertSymmetricMatrix(n=dim)        
+            return self._subexpression(inv(Gij))
+        else:
+            return self._subexpression(inverse_matrix(Gij,fill_to_vector_dim_3=True,skip_empty_rows_and_cols=True))
         
     
     def get_gij(self,dim:int,isotropic_growth_factor:ExpressionOrNum=1):
@@ -50,7 +57,7 @@ class BaseSolidConstitutiveLaw:
         """
         Returns the Green strain tensor 
         """
-        return self._subexpression((self.get_Gij()-self.get_gij(dim,isotropic_growth_factor))/2)
+        return self._subexpression((self.get_Gij(dim)-self.get_gij(dim,isotropic_growth_factor))/2)
     
     def get_sigma(self,dim:int,isotropic_growth_factor:ExpressionNumOrNone=1,pressure_var:Optional[Expression]=None):
         """
@@ -93,7 +100,7 @@ class GeneralizedHookeanSolidConstitutiveLaw(BaseSolidConstitutiveLaw):
 
     def get_sigma(self,dim:int,isotropic_growth_factor:ExpressionOrNum=1,pressure_var:Optional[Expression]=None):
         se=lambda x : self._subexpression(x)
-        Gup=self.get_G_up_ij()
+        Gup=self.get_G_up_ij(dim)
         gammakl=self.get_gammaij(dim,isotropic_growth_factor)
         if dim is None:
             raise RuntimeError("dim must be specified")
@@ -246,7 +253,7 @@ class DeformableSolidEquations(BaseDeformableSolidEquations):
             rho_deformed=self.mass_density
         else:
             dim=self.get_coordinate_system().get_actual_dimension(self.get_nodal_dimension())
-            detG=self.constitutive_law._subexpression(determinant(self.constitutive_law.get_Gij()))
+            detG=self.constitutive_law._subexpression(determinant(self.constitutive_law.get_Gij(dim)))
             detg=self.constitutive_law._subexpression(determinant(self.constitutive_law.get_gij(dim,self.isotropic_growth_factor)))
             rho_deformed=self.constitutive_law._subexpression(self.mass_density*square_root(detg/detG))
         self.define_field_by_substitution("deformed_mass_density",rho_deformed,also_on_interface=True)
@@ -264,7 +271,7 @@ class DeformableSolidEquations(BaseDeformableSolidEquations):
         self.add_weak((matproduct(grad(x,lagrangian=True),sigma)),self.isotropic_growth_factor*grad(xtest,lagrangian=True),lagrangian=True)
                 
         if self.constitutive_law.is_incompressible():
-            detG=self.constitutive_law._subexpression(determinant(self.constitutive_law.get_Gij()))
+            detG=self.constitutive_law._subexpression(determinant(self.constitutive_law.get_Gij(dim)))
             detg=self.constitutive_law._subexpression(determinant(self.constitutive_law.get_gij(dim,self.isotropic_growth_factor)))
             self.add_weak(detG - detg,testfunction(self.pressure_name),lagrangian=True)
 

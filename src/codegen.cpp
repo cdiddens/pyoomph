@@ -6766,21 +6766,47 @@ namespace pyoomph
 		}
 		else
 		{
+			GiNaC::matrix expam = GiNaC::ex_to<GiNaC::matrix>(expanded);
 			std::vector<std::string> dirindex = {"x", "y", "z"};
 			std::vector<std::string> res;
-			for (unsigned int cd = 0; cd < std::max(expanded.nops(), (size_t)(3)); cd++)
+			if (expam.rows()>1 || expam.cols()>1)
 			{
-				std::string nam = name + "_" + dirindex[cd];
-				if (!GiNaC::is_zero(expanded[cd]))
+				
+				for (unsigned int row = 0; row < std::min(expam.rows(), (unsigned int)3); row++)
 				{
-					this->integral_expressions[nam] = expanded[cd];
-					this->integral_expression_units[nam] = this->integral_expression_units[name];
-					res.push_back(nam);
+					for (unsigned int col = 0; col < std::min(expam.cols(), (unsigned int)3); col++)
+					{
+						std::string nam = name + "_" + dirindex[row] + dirindex[col];
+						if (!GiNaC::is_zero(expam(row, col)))
+						{
+							this->integral_expressions[nam] = expam(row, col);
+							this->integral_expression_units[nam] = this->integral_expression_units[name];
+							res.push_back(nam);
+						}
+						else
+						{
+							res.push_back("");
+						}
+					}
 				}
-				else
+			}
+			else
+			{						
+				for (unsigned int cd = 0; cd < std::max(expanded.nops(), (size_t)(3)); cd++)
 				{
-					res.push_back("");
+					std::string nam = name + "_" + dirindex[cd];
+					if (!GiNaC::is_zero(expanded[cd]))
+					{
+						this->integral_expressions[nam] = expanded[cd];
+						this->integral_expression_units[nam] = this->integral_expression_units[name];
+						res.push_back(nam);
+					}
+					else
+					{
+						res.push_back("");
+					}
 				}
+				
 			}
 			return res;
 		}
@@ -7684,7 +7710,11 @@ namespace pyoomph
 	  {
 		FiniteElementField *wheredef = f->get_defined_on_domain_equivalent_field();
 		to_where_it_was_defined[f] = wheredef;
-		std::string n=wheredef->get_space()->get_code()->get_full_domain_name()+"/"+wheredef->get_name();
+		std::string nn=wheredef->get_name();
+		if (nn=="mesh_x") nn="coordinate_x";
+		else if (nn=="mesh_y") nn="coordinate_y";
+		else if (nn=="mesh_z") nn="coordinate_z";
+		std::string n=wheredef->get_space()->get_code()->get_full_domain_name()+"/"+nn;
 		//std::cout << "CONTRIBUTING FIELD " << f->get_space()->get_code()->get_full_domain_name() << "/" << f->get_name() << " defined on " << n << std::endl;
 		//std::cout << "  name already in there " << n << " ? " << (contribution_name_to_index.count(n) ? "YES" : "NO") << std::endl;
 		if (contribution_name_to_index.count(n)==0)

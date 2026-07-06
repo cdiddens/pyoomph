@@ -1602,4 +1602,200 @@ class SymmetricMatrixExponential(CustomMultiReturnExpression):
         else:
             raise RuntimeError("TODO: Axisymmetric case here")
 
+
+
+
+
+class InvertSymmetricMatrix(CustomMultiReturnExpression):
+    def __init__(self,n):
+        self.n=n        
+        if self.n!=2 and self.n!=3:
+            raise ValueError("InvertSymmetricMatrix only supports n=2 or n=3")
+        super().__init__()
+        
+    def process_args_to_scalar_list(self, *args):
+        if len(args)!=1:
+            raise ValueError("InvertSymmetricMatrix only supports one argument")
+        M=args[0]
+        if self.n==2:
+            return [M[0,0],M[0,1],M[1,1]]
+        elif self.n==3:
+            # a,b,c,d,e,g = M00,M01,M02,M11,M12,M22
+            return [M[0,0],M[0,1],M[0,2],M[1,1],M[1,2],M[2,2]]
+        return super().process_args_to_scalar_list(*args)
     
+    def process_result_list_to_results(self, result_list: List["Expression"]) -> Tuple["ExpressionOrNum", ...]:
+        if self.n==2:
+            return matrix([[result_list[0],result_list[1]], [result_list[1],result_list[2]]])
+        elif self.n==3:
+            return matrix([[result_list[0],result_list[1],result_list[2]],
+                            [result_list[1],result_list[3],result_list[4]],
+                            [result_list[2],result_list[4],result_list[5]]])
+    
+    def get_num_returned_scalars(self,nargs:int) -> int:
+        if self.n==2:
+            return 3
+        elif self.n==3:
+            return 6
+        else:
+            raise ValueError("InvertSymmetricMatrix only supports n=2 or n=3")        
+    
+    def eval(self, flag, arg_list, result_list, derivative_matrix):
+        if self.n==2:
+            a=arg_list[0]
+            b=arg_list[1]
+            c=arg_list[2]
+            det=a*c-b*b
+
+            # cofactors (= adjugate entries, since M is symmetric)
+            C0=c    # -> inv00
+            C1=-b   # -> inv01
+            C2=a    # -> inv11
+
+            result_list[0]=C0/det
+            result_list[1]=C1/det
+            result_list[2]=C2/det
+
+            if flag:
+                ddet_da=c
+                ddet_db=-2*b
+                ddet_dc=a
+                ddet=[ddet_da,ddet_db,ddet_dc]
+
+                # dC_i/d(a,b,c)
+                dC=[[0,0,1],   # dC0/da,dC0/db,dC0/dc
+                    [0,-1,0],  # dC1/da,dC1/db,dC1/dc
+                    [1,0,0]]   # dC2/da,dC2/db,dC2/dc
+                Cs=[C0,C1,C2]
+
+                for i in range(3):
+                    for j in range(3):
+                        derivative_matrix[i,j]=dC[i][j]/det - Cs[i]*ddet[j]/(det*det)
+
+        elif self.n==3:
+            a=arg_list[0]  # M00
+            b=arg_list[1]  # M01
+            c=arg_list[2]  # M02
+            d=arg_list[3]  # M11
+            e=arg_list[4]  # M12
+            g=arg_list[5]  # M22
+
+            # cofactors (= adjugate entries, since M is symmetric)
+            C00 = d*g - e*e
+            C01 = c*e - b*g
+            C02 = b*e - c*d
+            C11 = a*g - c*c
+            C12 = b*c - a*e
+            C22 = a*d - b*b
+
+            det = a*C00 + b*C01 + c*C02
+
+            result_list[0]=C00/det
+            result_list[1]=C01/det
+            result_list[2]=C02/det
+            result_list[3]=C11/det
+            result_list[4]=C12/det
+            result_list[5]=C22/det
+
+            if flag:
+                # d(det)/d(a,b,c,d,e,g).
+                # Off-diagonal params (b,d... wait: off-diag entries are b,c,e) get a factor 2
+                # because they appear twice in M (e.g. M01 and M10 are both the parameter b).
+                ddet_da = C00
+                ddet_db = 2*C01
+                ddet_dc = 2*C02
+                ddet_dd = C11
+                ddet_de = 2*C12
+                ddet_dg = C22
+                ddet=[ddet_da,ddet_db,ddet_dc,ddet_dd,ddet_de,ddet_dg]
+
+                # dC_i/d(a,b,c,d,e,g)
+                dC00=[0,    0,    0,   g,   -2*e,  d]
+                dC01=[0,   -g,    e,   0,    c,   -b]
+                dC02=[0,    e,   -d,  -c,    b,    0]
+                dC11=[g,    0,  -2*c,  0,    0,    a]
+                dC12=[-e,   c,    b,   0,   -a,    0]
+                dC22=[d,  -2*b,   0,   a,    0,    0]
+
+                Cs=[C00,C01,C02,C11,C12,C22]
+                dCs=[dC00,dC01,dC02,dC11,dC12,dC22]
+
+                for i in range(6):
+                    for j in range(6):
+                        derivative_matrix[i,j]=dCs[i][j]/det - Cs[i]*ddet[j]/(det*det)
+                        
+    def generate_c_code(self) -> str:
+        lines = []
+        if self.n==2:
+            nargs=3
+            lines.append("double a=arg_list[0];")
+            lines.append("double b=arg_list[1];")
+            lines.append("double c=arg_list[2];")
+            lines.append("double det=a*c-b*b;")
+            lines.append("double C0=c;")
+            lines.append("double C1=-b;")
+            lines.append("double C2=a;")
+            lines.append("result_list[0]=C0/det;")
+            lines.append("result_list[1]=C1/det;")
+            lines.append("result_list[2]=C2/det;")
+            lines.append("if (flag) {")
+            lines.append("  double ddet_da=c;")
+            lines.append("  double ddet_db=-2*b;")
+            lines.append("  double ddet_dc=a;")
+            lines.append("  double ddet[3]={ddet_da,ddet_db,ddet_dc};")
+            lines.append("  double Cs[3]={C0,C1,C2};")
+            lines.append("  double dC[3][3]={{0,0,1},{0,-1,0},{1,0,0}};")
+            lines.append(f"  int nargs={nargs};")
+            lines.append("  for (int i=0;i<3;i++) {")
+            lines.append("    for (int j=0;j<3;j++) {")
+            lines.append("      derivative_matrix[i*nargs+j]=dC[i][j]/det - Cs[i]*ddet[j]/(det*det);")
+            lines.append("    }")
+            lines.append("  }")
+            lines.append("}")
+        elif self.n==3:
+            nargs=6
+            lines.append("double a=arg_list[0];")
+            lines.append("double b=arg_list[1];")
+            lines.append("double c=arg_list[2];")
+            lines.append("double d=arg_list[3];")
+            lines.append("double e=arg_list[4];")
+            lines.append("double g=arg_list[5];")
+            lines.append("double C00=d*g-e*e;")
+            lines.append("double C01=c*e-b*g;")
+            lines.append("double C02=b*e-c*d;")
+            lines.append("double C11=a*g-c*c;")
+            lines.append("double C12=b*c-a*e;")
+            lines.append("double C22=a*d-b*b;")
+            lines.append("double det=a*C00+b*C01+c*C02;")
+            lines.append("result_list[0]=C00/det;")
+            lines.append("result_list[1]=C01/det;")
+            lines.append("result_list[2]=C02/det;")
+            lines.append("result_list[3]=C11/det;")
+            lines.append("result_list[4]=C12/det;")
+            lines.append("result_list[5]=C22/det;")
+            lines.append("if (flag) {")
+            lines.append("  double ddet[6];")
+            lines.append("  ddet[0]=C00;")
+            lines.append("  ddet[1]=2*C01;")
+            lines.append("  ddet[2]=2*C02;")
+            lines.append("  ddet[3]=C11;")
+            lines.append("  ddet[4]=2*C12;")
+            lines.append("  ddet[5]=C22;")
+            lines.append("  double Cs[6]={C00,C01,C02,C11,C12,C22};")
+            lines.append("  double dC[6][6];")
+            lines.append("  dC[0][0]=0;    dC[0][1]=0;    dC[0][2]=0;   dC[0][3]=g;    dC[0][4]=-2*e; dC[0][5]=d;")
+            lines.append("  dC[1][0]=0;    dC[1][1]=-g;   dC[1][2]=e;   dC[1][3]=0;    dC[1][4]=c;    dC[1][5]=-b;")
+            lines.append("  dC[2][0]=0;    dC[2][1]=e;    dC[2][2]=-d;  dC[2][3]=-c;   dC[2][4]=b;    dC[2][5]=0;")
+            lines.append("  dC[3][0]=g;    dC[3][1]=0;    dC[3][2]=-2*c;dC[3][3]=0;    dC[3][4]=0;    dC[3][5]=a;")
+            lines.append("  dC[4][0]=-e;   dC[4][1]=c;    dC[4][2]=b;   dC[4][3]=0;    dC[4][4]=-a;   dC[4][5]=0;")
+            lines.append("  dC[5][0]=d;    dC[5][1]=-2*b; dC[5][2]=0;   dC[5][3]=a;    dC[5][4]=0;    dC[5][5]=0;")
+            lines.append(f"  int nargs={nargs};")
+            lines.append("  for (int i=0;i<6;i++) {")
+            lines.append("    for (int j=0;j<6;j++) {")
+            lines.append("      derivative_matrix[i*nargs+j]=dC[i][j]/det - Cs[i]*ddet[j]/(det*det);")
+            lines.append("    }")
+            lines.append("  }")
+            lines.append("}")
+        else:
+            raise ValueError("InvertSymmetricMatrix only supports n=2 or n=3")
+        return "\n".join(lines)           
