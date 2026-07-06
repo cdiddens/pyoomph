@@ -712,7 +712,16 @@ namespace pyoomph
 			// If the mesh moves, we have to setup the mapping in the hanging scheme
 			if (ft->moving_nodes)
 			{
-				if (required.dx_psi_C2TB  || required.dx_psi_C2 || required.dx_psi_C1 || required.dx_psi_C1TB  ||   required.psi_Pos  || required.dx_psi_DL || required.normal || required.elemsize_Eulerian || required.elemsize_Eulerian_cartesian) 
+				bool require_dx_terms=false;
+				for (unsigned int i_space=0;i_space<ft->num_present_continuous_spaces;i_space++)
+				{
+					if (required.continuous_spaces[ft->present_continuous_spaces[i_space]->space_index].dx_psi)
+					{
+						require_dx_terms=true;
+						break;
+					}
+				}
+				if (require_dx_terms ||   required.Pos.psi  || required.dx_psi_DL || required.normal || required.elemsize_Eulerian || required.elemsize_Eulerian_cartesian) 
 				{
 					
 					unsigned nfields = this->nodal_dimension();
@@ -848,7 +857,7 @@ namespace pyoomph
 
 
 			// TODO: DG loop
-			if (codeinst->get_func_table()->numfields_D2TB && (required.dx_psi_C2TB || required.psi_C2TB || required.dX_psi_C2TB))
+			if (codeinst->get_func_table()->numfields_D2TB && (required.continuous_spaces[SPACE_INDEX_C2TB].dx_psi || required.continuous_spaces[SPACE_INDEX_C2TB].psi || required.continuous_spaces[SPACE_INDEX_C2TB].dX_psi))
 			{
 				for (unsigned int l = 0; l < eleminfo.nnode_of_space[SPACE_INDEX_C2TB]; l++)
 				{
@@ -900,7 +909,7 @@ namespace pyoomph
 				}
 			}
 
-			if (codeinst->get_func_table()->numfields_D2 && (required.dx_psi_C2 || required.psi_C2 || required.dX_psi_C2))
+			if (codeinst->get_func_table()->numfields_D2 && (required.continuous_spaces[SPACE_INDEX_C2].dx_psi || required.continuous_spaces[SPACE_INDEX_C2].psi || required.continuous_spaces[SPACE_INDEX_C2].dX_psi))
 			{
 				for (unsigned int l = 0; l < eleminfo.nnode_of_space[SPACE_INDEX_C2]; l++)
 				{
@@ -952,7 +961,7 @@ namespace pyoomph
 				}
 			}
 			
-			if (codeinst->get_func_table()->numfields_D1TB && (required.dx_psi_C1TB || required.psi_C1TB || required.dX_psi_C1TB))
+			if (codeinst->get_func_table()->numfields_D1TB && (required.continuous_spaces[SPACE_INDEX_C1TB].dx_psi || required.continuous_spaces[SPACE_INDEX_C1TB].psi || required.continuous_spaces[SPACE_INDEX_C1TB].dX_psi))
 			{
 				for (unsigned int l = 0; l < eleminfo.nnode_of_space[SPACE_INDEX_C1TB]; l++)
 				{
@@ -1004,7 +1013,7 @@ namespace pyoomph
 				}
 			}
 
-			if (codeinst->get_func_table()->numfields_D1 && (required.dx_psi_C1 || required.psi_C1 || required.dX_psi_C1))
+			if (codeinst->get_func_table()->numfields_D1 && (required.continuous_spaces[SPACE_INDEX_C1].dx_psi || required.continuous_spaces[SPACE_INDEX_C1].psi || required.continuous_spaces[SPACE_INDEX_C1].dX_psi))
 			{
 				for (unsigned int l = 0; l < eleminfo.nnode_of_space[SPACE_INDEX_C1]; l++)
 				{
@@ -2975,7 +2984,7 @@ namespace pyoomph
 		 }
 		 JITFuncSpec_RequiredShapes_FiniteElement_t req_dummy;
 		 memset(&req_dummy,0,sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t));
-		 req_dummy.psi_Pos=req_dummy.dx_psi_Pos=true; // Calculate these
+		 req_dummy.Pos.psi=req_dummy.Pos.dx_psi=true; // Calculate these
 		 double JLagr;
        for(unsigned ipt_for_esize=0;ipt_for_esize<integral_pt()->nweight();ipt_for_esize++)		 
        {  
@@ -3390,8 +3399,8 @@ namespace pyoomph
 		//  bool C2_required_since_C2TB_is_C2=false;
 		//  if (this->has_bubble())
 		//  {
-		bool required_C2TB = required.dx_psi_C2TB || required.psi_C2TB;
-		required_C2TB |= eleminfo.nnode_of_space[SPACE_INDEX_C2TB] && (required.psi_Pos || required.dx_psi_Pos || required.dX_psi_Pos || required.dX_psi_C2TB) && ((!strcmp(functable->dominant_space, "C2TB")) || (!strcmp(functable->dominant_space, "")));
+		bool required_C2TB = required.continuous_spaces[SPACE_INDEX_C2TB].dx_psi || required.continuous_spaces[SPACE_INDEX_C2TB].psi;
+		required_C2TB |= eleminfo.nnode_of_space[SPACE_INDEX_C2TB] && (required.Pos.psi || required.Pos.dx_psi || required.Pos.dX_psi || required.continuous_spaces[SPACE_INDEX_C2TB].dX_psi) && ((!strcmp(functable->dominant_space, "C2TB")) || (!strcmp(functable->dominant_space, "")));
 		if (required_C2TB)
 		{
 			oomph::Shape psi(eleminfo.nnode_of_space[SPACE_INDEX_C2TB]);
@@ -3471,8 +3480,8 @@ namespace pyoomph
 		//    }
 		//  }
 		// C2_required_since_C2TB_is_C2 ||
-		bool required_C2 = required.dx_psi_C2 || required.psi_C2;
-		required_C2 |= eleminfo.nnode_of_space[SPACE_INDEX_C2] && (required.psi_Pos || required.dx_psi_Pos || required.dX_psi_Pos || required.dX_psi_C2) && ((!strcmp(functable->dominant_space, "C2")) || ((!strcmp(functable->dominant_space, "")) && !eleminfo.nnode_of_space[SPACE_INDEX_C2TB]));
+		bool required_C2 = required.continuous_spaces[SPACE_INDEX_C2].dx_psi || required.continuous_spaces[SPACE_INDEX_C2].psi;
+		required_C2 |= eleminfo.nnode_of_space[SPACE_INDEX_C2] && (required.Pos.psi || required.Pos.dx_psi || required.Pos.dX_psi || required.continuous_spaces[SPACE_INDEX_C2].dX_psi) && ((!strcmp(functable->dominant_space, "C2")) || ((!strcmp(functable->dominant_space, "")) && !eleminfo.nnode_of_space[SPACE_INDEX_C2TB]));
 
 		if (required_C2)
 		{
@@ -3545,8 +3554,8 @@ namespace pyoomph
 			}
 		}
 
-		bool required_C1TB = required.dx_psi_C1TB || required.psi_C1TB;
-		required_C1TB |= eleminfo.nnode_of_space[SPACE_INDEX_C1TB] && (required.psi_Pos || required.dx_psi_Pos || required.dX_psi_Pos || required.dX_psi_C1TB) && ((!strcmp(functable->dominant_space, "C1TB")) || ((!strcmp(functable->dominant_space, "")) && !eleminfo.nnode_of_space[SPACE_INDEX_C2TB]));
+		bool required_C1TB = required.continuous_spaces[SPACE_INDEX_C1TB].dx_psi || required.continuous_spaces[SPACE_INDEX_C1TB].psi;
+		required_C1TB |= eleminfo.nnode_of_space[SPACE_INDEX_C1TB] && (required.Pos.psi || required.Pos.dx_psi || required.Pos.dX_psi || required.continuous_spaces[SPACE_INDEX_C1TB].dX_psi) && ((!strcmp(functable->dominant_space, "C1TB")) || ((!strcmp(functable->dominant_space, "")) && !eleminfo.nnode_of_space[SPACE_INDEX_C2TB]));
 
 		if (required_C1TB)
 		{
@@ -3620,8 +3629,8 @@ namespace pyoomph
 		}
 		
 
-		bool required_C1 = required.dx_psi_C1 || required.psi_C1;
-		required_C1 |= eleminfo.nnode_of_space[SPACE_INDEX_C1] && (required.psi_Pos || required.dx_psi_Pos || required.dX_psi_Pos || required.dX_psi_C1) && ((!strcmp(functable->dominant_space, "C1")) || ((!strcmp(functable->dominant_space, "")) && !eleminfo.nnode_of_space[SPACE_INDEX_C2]));
+		bool required_C1 = required.continuous_spaces[SPACE_INDEX_C1].dx_psi || required.continuous_spaces[SPACE_INDEX_C1].psi;
+		required_C1 |= eleminfo.nnode_of_space[SPACE_INDEX_C1] && (required.Pos.psi || required.Pos.dx_psi || required.Pos.dX_psi || required.continuous_spaces[SPACE_INDEX_C1].dX_psi) && ((!strcmp(functable->dominant_space, "C1")) || ((!strcmp(functable->dominant_space, "")) && !eleminfo.nnode_of_space[SPACE_INDEX_C2]));
 
 		if (required_C1)
 		{
@@ -4015,11 +4024,11 @@ namespace pyoomph
 
 	void BulkElementBase::set_remaining_shapes_appropriately(JITShapeInfo_t *shape_info, const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes)
 	{
-		bool required_C2TB = required_shapes.dx_psi_C2TB || required_shapes.psi_C2TB;
-		required_C2TB |= eleminfo.nnode_of_space[SPACE_INDEX_C2TB] && (required_shapes.psi_Pos || required_shapes.dx_psi_Pos || required_shapes.dX_psi_Pos || required_shapes.dX_psi_C2TB) && (!strcmp(this->codeinst->get_func_table()->dominant_space, "C2TB"));
+		bool required_C2TB = required_shapes.continuous_spaces[SPACE_INDEX_C2TB].dx_psi || required_shapes.continuous_spaces[SPACE_INDEX_C2TB].psi;
+		required_C2TB |= eleminfo.nnode_of_space[SPACE_INDEX_C2TB] && (required_shapes.Pos.psi || required_shapes.Pos.dx_psi || required_shapes.Pos.dX_psi || required_shapes.continuous_spaces[SPACE_INDEX_C2TB].dX_psi) && (!strcmp(this->codeinst->get_func_table()->dominant_space, "C2TB"));
 		
-		bool required_C1TB = required_shapes.dx_psi_C1TB || required_shapes.psi_C1TB;		
-		required_C1TB |= eleminfo.nnode_of_space[SPACE_INDEX_C1TB] && (required_shapes.psi_Pos || required_shapes.dx_psi_Pos || required_shapes.dX_psi_Pos || required_shapes.dX_psi_C1TB) && (!strcmp(this->codeinst->get_func_table()->dominant_space, "C1TB"));
+		bool required_C1TB = required_shapes.continuous_spaces[SPACE_INDEX_C1TB].dx_psi || required_shapes.continuous_spaces[SPACE_INDEX_C1TB].psi;		
+		required_C1TB |= eleminfo.nnode_of_space[SPACE_INDEX_C1TB] && (required_shapes.Pos.psi || required_shapes.Pos.dx_psi || required_shapes.Pos.dX_psi || required_shapes.continuous_spaces[SPACE_INDEX_C1TB].dX_psi) && (!strcmp(this->codeinst->get_func_table()->dominant_space, "C1TB"));
 		
 		if (required_C2TB)
 		{
@@ -10814,7 +10823,13 @@ namespace pyoomph
 			// Isn't this overkill? For normal psi's we don't use it at all....
 			// Should be enough to check for the dx_... and for Pos and normal			
 			//if (required->dx_psi_C2TB || required->psi_C2TB || required->dX_psi_C2TB || required->dx_psi_C2 || required->psi_C2 || required->dX_psi_C2 || required->dx_psi_C1 || required->psi_C1TB || required->dx_psi_C1TB || required->dX_psi_C1TB || required->psi_C1 || required->dX_psi_C1 || required->psi_Pos || required->psi_DL || required->dx_psi_DL || required->dX_psi_DL || required->psi_D0) 
-			if (required->dx_psi_C2TB  || required->dx_psi_C2 || required->dx_psi_C1 || required->dx_psi_C1TB  ||   required->psi_Pos  || required->dx_psi_DL || required->normal || required->elemsize_Eulerian || required->elemsize_Eulerian_cartesian) 
+			bool require_dx_psi=false;
+			for (unsigned int i=0;i<fft->num_present_continuous_spaces;i++)
+			{
+				auto * space_info=fft->present_continuous_spaces[i];			
+				require_dx_psi|=required->continuous_spaces[space_info->space_index].dx_psi;
+			}
+			if (require_dx_psi ||   required->Pos.psi  || required->dx_psi_DL || required->normal || required->elemsize_Eulerian || required->elemsize_Eulerian_cartesian) 
 			{
 				// Add required geometric external data to be finite differenced
 				
@@ -10841,7 +10856,7 @@ namespace pyoomph
 
 		int hanging_index = -1;
 		const std::vector<std::vector<unsigned>> & from_space_to_elem_index = from_elem->get_nodal_space_index_to_element_index_map();
-		if (required->dx_psi_C2TB || required->psi_C2TB || required->dX_psi_C2TB)
+		if (required->continuous_spaces[SPACE_INDEX_C2TB].dx_psi || required->continuous_spaces[SPACE_INDEX_C2TB].psi || required->continuous_spaces[SPACE_INDEX_C2TB].dX_psi)
 		{
 			for (unsigned int j = 0; j < from_elem->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2TB]; j++)
 			{
@@ -10873,7 +10888,7 @@ namespace pyoomph
 			  this->add_required_ext_data(from_elem->get_D2TB_nodal_data(fiDG),false);
 			}			
 		}
-		if (required->dx_psi_C2 || required->psi_C2 || required->dX_psi_C2)
+		if (required->continuous_spaces[SPACE_INDEX_C2].dx_psi || required->continuous_spaces[SPACE_INDEX_C2].psi || required->continuous_spaces[SPACE_INDEX_C2].dX_psi)
 		{
 			for (unsigned int j = 0; j < from_elem->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2]; j++)
 			{
@@ -10905,7 +10920,7 @@ namespace pyoomph
 		}
 
 
-		if (required->dx_psi_C1TB || required->psi_C1TB || required->dX_psi_C1TB) // C1 < C2, so nothing to do
+		if (required->continuous_spaces[SPACE_INDEX_C1TB].dx_psi || required->continuous_spaces[SPACE_INDEX_C1TB].psi || required->continuous_spaces[SPACE_INDEX_C1TB].dX_psi) // C1 < C2, so nothing to do
 		{
 			int hang_index =  (from_elem->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2] ? fft->continuous_spaces[SPACE_INDEX_C1TB].nodal_offset_basebulk : -1);		
 			for (unsigned int j = 0; j < from_elem->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1TB]; j++)
@@ -10937,7 +10952,7 @@ namespace pyoomph
 		}
 		
 		// std::cout << " CODE " << codeinst->get_code()->get_file_name() << "  DEP ON " << fcodeinst->get_code()->get_file_name() << "  REQ C1 " << required->psi_C1 << std::endl;
-		if (required->dx_psi_C1 || required->psi_C1 || required->dX_psi_C1) // C1 < C2, so nothing to do
+		if (required->continuous_spaces[SPACE_INDEX_C1].dx_psi || required->continuous_spaces[SPACE_INDEX_C1].psi || required->continuous_spaces[SPACE_INDEX_C1].dX_psi) // C1 < C2, so nothing to do
 		{
 			int hang_index = (from_elem->get_eleminfo()->nnode_of_space[SPACE_INDEX_C2] ? fft->continuous_spaces[SPACE_INDEX_C1].nodal_offset_basebulk : -1);
 			// std::cout << "   HANG INDEX " <<  hang_index << "  NNODE C1 " << from_elem->get_eleminfo()->nnode_of_space[SPACE_INDEX_C1] << std::endl;

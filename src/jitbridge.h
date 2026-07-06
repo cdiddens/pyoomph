@@ -320,19 +320,12 @@ typedef struct JITFuncSpec_RequiredShapes_For_Space
 
 typedef struct JITFuncSpec_RequiredShapes_FiniteElement
 {
-  JITFuncSpec_RequiredShapes_For_Space_t Pos;
-  
-  bool psi_Pos, dx_psi_Pos, dX_psi_Pos;              // Position space. This is always the dominant element space, i.e. C2TB>C2>C1TB>C1. If an element has a "C2" and a "C1TB" space, it will be C2TB.
-  
+  JITFuncSpec_RequiredShapes_For_Space_t Pos;              // Position space. This is always the dominant element space, i.e. C2TB>C2>C1TB>C1. If an element has a "C2" and a "C1TB" space, it will be C2TB.
+    
 
   JITFuncSpec_RequiredShapes_For_Space_t continuous_spaces[NUM_CONTINUOUS_SPACES]; // C2TB,C2,C1TB,C1
     
-    
-  
-  bool psi_C2TB, dx_psi_C2TB, dX_psi_C2TB; // C2TB space.      
-  bool psi_C2, dx_psi_C2, dX_psi_C2; // C2 space.      
-  bool psi_C1TB, dx_psi_C1TB, dX_psi_C1TB; // C1TB space.      
-  bool psi_C1, dx_psi_C1, dX_psi_C1; // C1 space.      
+       
 
   JITFuncSpec_RequiredShapes_For_Space_t DL;  
   bool psi_DL, dx_psi_DL, dX_psi_DL; // DL space

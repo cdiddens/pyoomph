@@ -56,28 +56,17 @@ namespace pyoomph
 			dest->continuous_spaces[i].psi |= src->continuous_spaces[i].psi;
 			dest->continuous_spaces[i].dx_psi |= src->continuous_spaces[i].dx_psi;
 			dest->continuous_spaces[i].dX_psi |= src->continuous_spaces[i].dX_psi;
-		}
-		dest->psi_C1 |= src->psi_C1;
-		dest->psi_C2 |= src->psi_C2;
-		dest->psi_C2TB |= src->psi_C2TB;
-		dest->psi_C1TB |= src->psi_C1TB;
+		}		
 		dest->psi_DL |= src->psi_DL;
 		dest->psi_D0 |= src->psi_D0;
-		dest->dx_psi_C1 |= src->dx_psi_C1;
-		dest->dx_psi_C2 |= src->dx_psi_C2;
-		dest->dx_psi_C2TB |= src->dx_psi_C2TB;
-		dest->dx_psi_C1TB |= src->dx_psi_C1TB;
+	
 		dest->dx_psi_DL |= src->dx_psi_DL;
 		dest->dx_psi_D0 |= src->dx_psi_D0;
-		dest->dX_psi_C1 |= src->dX_psi_C1;
-		dest->dX_psi_C2 |= src->dX_psi_C2;
-		dest->dX_psi_C2TB |= src->dX_psi_C2TB;
-		dest->dX_psi_C1TB |= src->dX_psi_C1TB;
 		dest->dX_psi_DL |= src->dX_psi_DL;
 		dest->dX_psi_D0 |= src->dX_psi_D0;
-		dest->psi_Pos |= src->psi_Pos;
-		dest->dx_psi_Pos |= src->dx_psi_Pos;
-		dest->dX_psi_Pos |= src->dX_psi_Pos;
+		dest->Pos.psi |= src->Pos.psi;
+		dest->Pos.dx_psi |= src->Pos.dx_psi;
+		dest->Pos.dX_psi |= src->Pos.dX_psi;
 		
 
 		dest->normal |= src->normal;
@@ -85,6 +74,9 @@ namespace pyoomph
 		dest->elemsize_Lagrangian |= src->elemsize_Lagrangian;
 		dest->elemsize_Eulerian_cartesian |= src->elemsize_Eulerian_cartesian;
 		dest->elemsize_Lagrangian_cartesian |= src->elemsize_Lagrangian_cartesian;		
+
+		dest->history_integral_dx1 |= src->history_integral_dx1;
+		dest->history_integral_dx2 |= src->history_integral_dx2;
 
 		if (src->bulk_shapes)
 		{
