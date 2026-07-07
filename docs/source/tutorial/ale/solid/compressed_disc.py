@@ -37,7 +37,7 @@ class CompressedDiscProblem(Problem):
         self.P=self.define_global_parameter(P=0) # Pressure on the circumference of the disc
         self.polar_implementation=True # Use radial polar coordinates only
          # Generalized Hookean solid constitutive law
-        self.claw=GeneralizedHookeanSolidConstitutiveLaw(E=1,nu=0.3,use_inverse_routine=not self.polar_implementation)
+        self.claw=GeneralizedHookeanSolidConstitutiveLaw(E=1,nu=0.3)
         
     def define_problem(self):        
         # Base equations, irrespective of the coordinate system

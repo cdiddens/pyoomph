@@ -439,7 +439,7 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
             if self.use_x_as_symmetry_axis:
                 raise RuntimeError("Cannot have use_x_as_symmetry_axis in an axisymmetric coordinate system in 1d")
             r, = self.get_coords(ndim, with_scales, lagrangian)
-            res:List[List[ExpressionOrNum]] = [[diff(arg[0], r), 0, 0], [0, 0, 0], [0, 0, arg[0] / r]]
+            res:List[List[ExpressionOrNum]] = [[diff(arg[0], r), 0, 0], [0, arg[0] / r, 0], [0, 0, 0]]
         else:
             if arg.nops() != 3:
                 raise RuntimeError(
@@ -493,7 +493,7 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
             taa = var(name + "_aa")
             element.set_scaling(**{name + "_xx": name,name+"_aa":name})
             element.set_test_scaling(**{name + "_xx": name, name + "_aa": name})
-            return [[txx / s, 0, 0], [0, 0, 0], [0, 0, taa/s]], [[testfunction(name + "_xx") / S, 0, 0], [0, 0, 0], [0, 0, testfunction(name + "_aa") / S]], [[name + "_xx", 0,0], [0,0, 0], [0, 0, name + "_aa"]] 
+            return [[txx / s, 0, 0], [0, taa/s, 0], [0, 0, 0]], [[testfunction(name + "_xx") / S, 0, 0], [0, testfunction(name + "_aa") / S, 0], [0, 0, 0]], [[name + "_xx", 0,0], [0,name + "_aa", 0], [0, 0, 0]] 
         elif ndim==2:
             txx = element.define_scalar_field(name + "_xx", space)
             txx = var(name + "_xx")
@@ -527,14 +527,14 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
                 div_y=diff(T[0,1],coords[0])+diff(T[1,1],coords[1])+(T[1,1]-T[2,2]) / coords[1]
                 div_theta=diff(T[0,2],coords[0])+diff(T[1,2],coords[1])+(T[1,2] - T[2,1]) / coords[1]
             return vector(div_x,div_y,div_theta)
-        else:
+        elif ndim==1:
             div_x=diff(T[0,0],coords[0])+(T[0,0] - T[2,2]) / coords[0]
-            div_y=diff(T[0,1],coords[0])+T[0,1] / coords[0]
-            div_theta=diff(T[0,2],coords[0])+(T[0,2] - T[2,0]) / coords[0]
-            if ndim==2:
-                div_x+=diff(T[1,0],coords[1])
-                div_y+= diff(T[1,1],coords[1])
-                div_theta+=diff(T[1,2],coords[1])
+            div_theta=diff(T[0,1],coords[0])+(2*T[0,1] - T[1,0]) / coords[0]            
+            return vector(div_x,  div_theta,0)
+        else:
+            div_x=diff(T[0,0],coords[0])+ diff(T[1,0],coords[1]) + (T[0,0] - T[2,2]) / coords[0]
+            div_y=diff(T[0,1],coords[0])+diff(T[1,1],coords[1])+(T[0,1] / coords[0])
+            div_theta=diff(T[0,2],coords[0])+(T[0,2] - T[2,0]) / coords[0]+diff(T[1,2],coords[1])                                    
             return vector(div_x, div_y, div_theta)
 
     def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int,with_scales:bool,)->Expression:        
@@ -544,9 +544,9 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
             res:List[List[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
             coords = self.get_coords(1, with_scales, lagrangian)
             res[0][0]=diff(T[0,0],coords[0])*direct[0]
-            res[0][2]=1/coords[0]*(T[0,0]-T[2,2])*direct[2]
-            res[2][0]=res[0][2]
-            res[2][2]=diff(T[2,2],coords[0])*direct[0]
+            res[0][1]=1/coords[0]*(T[0,0]-T[1,1])*direct[1]
+            res[1][0]=res[0][1]
+            res[1][1]=diff(T[1,1],coords[0])*direct[0]
 
             return matrix(res)
         elif ndim==2:
@@ -1136,7 +1136,7 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
                 res[1][0]+=mm*(-diff(Xm, X0)*diff(arg[1], X0))
                 res[1][1]+=mm*(-I*m*Xm*diff(arg[1], X0)/X0 - Xm*arg[0]/X0**2 - Xm*diff(arg[1], phi)/X0**2)
             else:
-                res:List[List[ExpressionOrNum]] = [[diff(arg[0], r), 0, 0], [0, 0, 0], [0, 0, arg[0] / r]]
+                res:List[List[ExpressionOrNum]] = [[diff(arg[0], r), 0, 0], [0, arg[0] / r, 0], [0, 0, 0]]
         else:
             if arg.nops() != 3:
                 raise RuntimeError(
