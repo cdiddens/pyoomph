@@ -396,40 +396,16 @@ typedef struct JITFuncSpec_Table_FiniteElement
   unsigned int nodal_dim, lagr_dim;
 
 
-
-  unsigned int numfields_Pos;
-  char **fieldnames_Pos;
-
   // Filled at problem level
   unsigned int total_num_fields; // Including all fields, DG, interfaces, DL, D0, but not ED0
   unsigned int total_num_fields_basebulk; // Only the continuous fields, i.e. C2TB,C2,C1TB,C1
   
-  
-  int hangindex_Pos; //Hang indices
-
-  unsigned int numfields_DL;
-  char **fieldnames_DL;
-
-  unsigned int numfields_D0;
-  char **fieldnames_D0;
-
-  unsigned int numfields_ED0;
-  char **fieldnames_ED0;
-  /*
-  unsigned int nodal_offset_C2TB_basebulk,nodal_offset_C2_basebulk,nodal_offset_C1TB_basebulk,nodal_offset_C1_basebulk; //Offsets to the indices in the nodal values (basebulk fields only)
-  unsigned int buffer_offset_C2TB_basebulk,buffer_offset_C2_basebulk,buffer_offset_C1TB_basebulk,buffer_offset_C1_basebulk; // Offsets in the nodal data buffer (basebulk fields only)
-  unsigned int buffer_offset_C2TB_interf,buffer_offset_C2_interf,buffer_offset_C1TB_interf,buffer_offset_C1_interf; // Offsets in the nodal data buffer (interface fields only)
-  */
-    
-    
-  unsigned int internal_offset_DL,internal_offset_D0;
-  unsigned int buffer_offset_DL,buffer_offset_D0; 
-  unsigned int buffer_offset_ED0,external_offset_ED0;
 
   // New way of handling things 
+  JITFuncSpec_Table_FiniteElement_SpaceInfo_t info_Pos; 
   JITFuncSpec_Table_FiniteElement_SpaceInfo_t continuous_spaces[NUM_CONTINUOUS_SPACES]; // C2TB,C2,C1TB,C1
   JITFuncSpec_Table_FiniteElement_SpaceInfo_t dg_spaces[NUM_CONTINUOUS_SPACES]; // D2TB,D2,D1TB,D1
-  JITFuncSpec_Table_FiniteElement_SpaceInfo_t info_DL,info_D0,info_ED0,info_Pos;
+  JITFuncSpec_Table_FiniteElement_SpaceInfo_t info_DL,info_D0,info_ED0;
 
   unsigned num_present_continuous_spaces; // Only the ones that are actually present, i.e. num_continuous_spaces<=4
   JITFuncSpec_Table_FiniteElement_SpaceInfo_t *present_continuous_spaces[NUM_CONTINUOUS_SPACES]; // points to the infos C2TB,C2,C1TB,C1 for looping. Note that not all are filled, only if they are present

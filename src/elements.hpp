@@ -652,11 +652,7 @@ namespace pyoomph
 
   class BulkElementLine1dC2 : public virtual BulkElementBase, public virtual oomph::QElement<1, 3>, public virtual RefineableSolidLineElement
   {
-  protected:
-    static unsigned int index_C1_to_element[2];
-    static int element_index_to_C1[3];
-    static bool node_only_C2[3];
-
+  protected:    
     static const std::vector<int> Possible_Face_Indices;
     static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
     static const std::vector<std::vector<std::vector<unsigned>>> Dummy_Value_Interpolation_Map;
@@ -772,11 +768,7 @@ namespace pyoomph
 
   class BulkTElementLine1dC2 : public virtual BulkElementBase, public virtual oomph::TElement<1, 3>, public virtual oomph::RefineableTElement<1>
   {
-  protected:
-    static unsigned int index_C1_to_element[2];
-    static int element_index_to_C1[3];
-    static bool node_only_C2[3];
-
+  protected:    
     static const std::vector<int> Possible_Face_Indices;
     static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
     static const std::vector<std::vector<std::vector<unsigned>>> Dummy_Value_Interpolation_Map;
@@ -882,11 +874,7 @@ namespace pyoomph
 
   class BulkElementQuad2dC2 : public virtual BulkElementBase, public virtual oomph::QElement<2, 3>, public virtual oomph::RefineableSolidQElement<2>
   {
-  protected:
-    static unsigned int index_C1_to_element[4];
-    static int element_index_to_C1[9];
-    static bool node_only_C2[9];    
-
+  protected:  
     static const std::vector<int> Possible_Face_Indices;
     static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
     static const std::vector<std::vector<std::vector<unsigned>>> Dummy_Value_Interpolation_Map;
@@ -1211,10 +1199,6 @@ namespace pyoomph
   class BulkElementBrick3dC2 : public virtual BulkElementBase, public virtual oomph::QElement<3, 3>, public virtual oomph::RefineableSolidQElement<3>
   {
   protected:
-    static unsigned int index_C1_to_element[8];
-    static int element_index_to_C1[27];
-    static bool node_only_C2[27];
-
     static const std::vector<int> Possible_Face_Indices;
     static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
     static const std::vector<std::vector<std::vector<unsigned>>> Dummy_Value_Interpolation_Map;
@@ -1389,10 +1373,6 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
   class BulkElementTetra3dC2 : public virtual BulkElementBase, public virtual oomph::TElement<3, 3>, public virtual oomph::RefineableTElement<3>
   {
   protected:
-    static unsigned int index_C1_to_element[4];
-    static int element_index_to_C1[15];
-    static bool node_only_C2[15]; // Including the C2TBs
-
     static const std::vector<int> Possible_Face_Indices;
     static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
     static const std::vector<std::vector<std::vector<unsigned>>> Dummy_Value_Interpolation_Map;
@@ -1616,9 +1596,7 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
   class BulkElementWedge3dC2 : public virtual BulkElementBase, public virtual oomph::WedgeElementC2
   {
     protected:
-      static const std::vector<int> Possible_Face_Indices;
-      static int element_index_to_C1[18];
-      static bool node_only_C2[18]; // TODO Including the C2TBs
+      static const std::vector<int> Possible_Face_Indices;      
       static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
       static const std::vector<std::vector<std::vector<unsigned>>> Dummy_Value_Interpolation_Map;
     static const std::vector<std::vector<int>> Element_Index_To_Nodal_Space_Index_Map;

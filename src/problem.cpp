@@ -147,7 +147,7 @@ namespace pyoomph
 				functable->num_present_dg_spaces++;
 			}
 		}
-		functable->total_num_fields+=functable->numfields_D0+functable->numfields_DL;
+		functable->total_num_fields+=functable->info_D0.numfields+functable->info_DL.numfields;
 		std::string dominant_space=functable->dominant_space;
 		bool found_dominant=false;
 		for (unsigned int i=0;i<NUM_CONTINUOUS_SPACES;i++)
@@ -293,7 +293,7 @@ namespace pyoomph
 	DynamicBulkElementInstance::DynamicBulkElementInstance(DynamicBulkElementCode *d, pyoomph::Mesh *bm) : dyn(d), // local_field_to_global_field_index_C1(d->functable->numfields_C1,-1),
 																												   //		local_field_to_global_field_index_C2(d->functable->numfields_C2,-1),
 																												   //		local_global_parameter_to_global_index(d->functable->numglobal_params,-1),
-																										   linked_external_data(d->functable->numfields_ED0),
+																										   linked_external_data(d->functable->info_ED0.numfields),
 																										   bulkmesh(bm)
 	{
 		/*
@@ -317,9 +317,9 @@ namespace pyoomph
 	void DynamicBulkElementInstance::link_external_data(std::string name, oomph::Data *data, int index,std::string full_source_name)
 	{
 		int found = -1;
-		for (unsigned int i = 0; i < dyn->functable->numfields_ED0; i++)
+		for (unsigned int i = 0; i < dyn->functable->info_ED0.numfields; i++)
 		{
-			if (name == std::string(dyn->functable->fieldnames_ED0[i]))
+			if (name == std::string(dyn->functable->info_ED0.fieldnames[i]))
 			{
 				found = i;
 				break;
@@ -357,26 +357,17 @@ namespace pyoomph
 			offs += space->numfields_basebulk;
 		}		
 
-		for (unsigned int i = 0; i < dyn->functable->numfields_D2TB_basebulk; i++)
+
+		for (unsigned int si=0;si<dyn->functable->num_present_dg_spaces;si++)
 		{
-			res[dyn->functable->fieldnames_D2TB[i]] = offs + i;
+			auto *space = dyn->functable->present_dg_spaces[si];
+			for (unsigned int i = 0; i < space->numfields_basebulk; i++)
+			{
+				res[space->fieldnames[i]] = offs + i;
+			}
+			offs += space->numfields_basebulk;
 		}
-		offs += dyn->functable->numfields_D2TB_basebulk;
-		for (unsigned int i = 0; i < dyn->functable->numfields_D2_basebulk; i++)
-		{
-			res[dyn->functable->fieldnames_D2[i]] = offs + i;
-		}
-		offs += dyn->functable->numfields_D2_basebulk;
-		for (unsigned int i = 0; i < dyn->functable->numfields_D1TB_basebulk; i++)
-		{
-			res[dyn->functable->fieldnames_D1TB[i]] = offs + i;
-		}
-		offs += dyn->functable->numfields_D1TB_basebulk;
-		for (unsigned int i = 0; i < dyn->functable->numfields_D1_basebulk; i++)
-		{
-			res[dyn->functable->fieldnames_D1[i]] = offs + i;
-		}
-		offs += dyn->functable->numfields_D1_basebulk;
+
 
 		// Now the additional ones
 		for (unsigned int si=0;si<dyn->functable->num_present_continuous_spaces;si++)
@@ -389,27 +380,16 @@ namespace pyoomph
 			offs += space->numfields - space->numfields_basebulk;
 		}
 
-
-		// Now the additional ones
-		for (unsigned int i = 0; i < dyn->functable->numfields_D2TB - dyn->functable->numfields_D2TB_basebulk; i++)
+		for (unsigned int si=0;si<dyn->functable->num_present_dg_spaces;si++)
 		{
-			res[dyn->functable->fieldnames_D2TB[i + dyn->functable->numfields_D2TB_basebulk]] = offs + i;
+			auto *space = dyn->functable->present_dg_spaces[si];
+			for (unsigned int i = 0; i < space->numfields - space->numfields_basebulk; i++)
+			{
+				res[space->fieldnames[i + space->numfields_basebulk]] = offs + i;
+			}
+			offs += space->numfields - space->numfields_basebulk;
 		}
-		offs += dyn->functable->numfields_D2TB - dyn->functable->numfields_D2TB_basebulk;
-		for (unsigned int i = 0; i < dyn->functable->numfields_D2 - dyn->functable->numfields_D2_basebulk; i++)
-		{
-			res[dyn->functable->fieldnames_D2[i + dyn->functable->numfields_D2_basebulk]] = offs + i;
-		}
-		offs += dyn->functable->numfields_D2 - dyn->functable->numfields_D2_basebulk;
-		for (unsigned int i = 0; i < dyn->functable->numfields_D1TB - dyn->functable->numfields_D1TB_basebulk; i++)
-		{
-			res[dyn->functable->fieldnames_D1TB[i + dyn->functable->numfields_D1TB_basebulk]] = offs + i;
-		}
-		offs += dyn->functable->numfields_D1TB - dyn->functable->numfields_D1TB_basebulk;
-		for (unsigned int i = 0; i < dyn->functable->numfields_D1 - dyn->functable->numfields_D1_basebulk; i++)
-		{
-			res[dyn->functable->fieldnames_D1[i + dyn->functable->numfields_D1_basebulk]] = offs + i;
-		}
+		
 
 		return res;
 	}
@@ -417,31 +397,31 @@ namespace pyoomph
 	std::map<std::string, unsigned> DynamicBulkElementInstance::get_elemental_field_indices()
 	{
 		std::map<std::string, unsigned> res;
-		for (unsigned int i = 0; i < dyn->functable->numfields_DL; i++)
+		for (unsigned int i = 0; i < dyn->functable->info_DL.numfields; i++)
 		{
-			res[dyn->functable->fieldnames_DL[i]] = i;
+			res[dyn->functable->info_DL.fieldnames[i]] = i;
 		}
-		for (unsigned int i = 0; i < dyn->functable->numfields_D0; i++)
+		for (unsigned int i = 0; i < dyn->functable->info_D0.numfields; i++)
 		{
-			res[dyn->functable->fieldnames_D0[i]] = i + dyn->functable->numfields_DL;
+			res[dyn->functable->info_D0.fieldnames[i]] = i + dyn->functable->info_DL.numfields;
 		}
 		return res;
 	}
 
 	int DynamicBulkElementInstance::get_discontinuous_field_index(std::string name)
 	{
-		for (unsigned int i = 0; i < dyn->functable->numfields_DL; i++)
+		for (unsigned int i = 0; i < dyn->functable->info_DL.numfields; i++)
 		{
-			if (!strcmp(name.c_str(), dyn->functable->fieldnames_DL[i]))
+			if (!strcmp(name.c_str(), dyn->functable->info_DL.fieldnames[i]))
 			{
-				return i + dyn->functable->internal_offset_DL;
+				return i + dyn->functable->info_DL.internal_offset_new;
 			}
 		}
-		for (unsigned int i = 0; i < dyn->functable->numfields_D0; i++)
+		for (unsigned int i = 0; i < dyn->functable->info_D0.numfields; i++)
 		{
-			if (!strcmp(name.c_str(), dyn->functable->fieldnames_D0[i]))
+			if (!strcmp(name.c_str(), dyn->functable->info_D0.fieldnames[i]))
 			{
-				return i + dyn->functable->internal_offset_D0;
+				return i + dyn->functable->info_D0.internal_offset_new;
 			}
 		}
 		return -1;
@@ -511,17 +491,29 @@ namespace pyoomph
 				}
 			}
 		}
-		
-		for (unsigned int i = 0; i < dyn->functable->numfields_DL; i++)
+
+		for (unsigned int si=0;si<dyn->functable->num_present_dg_spaces;si++)
 		{
-			if (!strcmp(name.c_str(), dyn->functable->fieldnames_DL[i]))
+			auto *space = dyn->functable->present_dg_spaces[si];
+			for (unsigned int i = 0; i < space->numfields_basebulk; i++)
+			{
+				if (!strcmp(name.c_str(), space->fieldnames[i]))
+				{
+					return space->space_name;
+				}
+			}
+		}
+		
+		for (unsigned int i = 0; i < dyn->functable->info_DL.numfields; i++)
+		{
+			if (!strcmp(name.c_str(), dyn->functable->info_DL.fieldnames[i]))
 			{
 				return "DL";
 			}
 		}
-		for (unsigned int i = 0; i < dyn->functable->numfields_D0; i++)
+		for (unsigned int i = 0; i < dyn->functable->info_D0.numfields; i++)
 		{
-			if (!strcmp(name.c_str(), dyn->functable->fieldnames_D0[i]))
+			if (!strcmp(name.c_str(), dyn->functable->info_D0.fieldnames[i]))
 			{
 				return "D0";
 			}

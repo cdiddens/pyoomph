@@ -629,7 +629,7 @@ void PyReg_Mesh(py::module &m)
 			 
 			 pyoomph::BulkElementODE0d * ode=dynamic_cast<pyoomph::BulkElementODE0d *>(self);
 			 if (!ode) { throw_runtime_error("Not an ODE element"); }
-			 unsigned ndata=ode->get_code_instance()->get_func_table()->numfields_D0;
+			 unsigned ndata=ode->get_code_instance()->get_func_table()->info_D0.numfields;
 			 auto data=py::array_t<double>({ndata});
 			 ode->to_numpy((double*)data.request().ptr);
 			 std::map<std::string,unsigned> field_desc;
@@ -1047,8 +1047,8 @@ void PyReg_Mesh(py::module &m)
 			 unsigned numelem_indices=self->get_num_numpy_elemental_indices(tesselate_tri,nelem,discontinuous);
 			 auto elemtypes=py::array_t<int>({nelem});
 			 auto elem_node_inds=py::array_t<int>({nelem,numelem_indices});
-			 unsigned numD0=be->get_code_instance()->get_func_table()->numfields_D0;
-			 unsigned numDL=be->get_code_instance()->get_func_table()->numfields_DL;
+			 unsigned numD0=be->get_code_instance()->get_func_table()->info_D0.numfields;
+			 unsigned numDL=be->get_code_instance()->get_func_table()->info_DL.numfields;
 			 unsigned DL_stride=(be->dim()+1);
 			 auto D0_data=py::array_t<double>({(discontinuous ? nnode : nelem),numD0});
 			 py::array_t<double> DL_data;
