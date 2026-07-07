@@ -209,38 +209,23 @@ namespace pyoomph
 
     // Discontinuous fields are stored as internal_data, on interfaces possibly also on external_data
     virtual oomph::Data *get_D0_nodal_data(const unsigned &fieldindex);
-    virtual oomph::Data *get_DL_nodal_data(const unsigned &fieldindex);
-    virtual oomph::Data *get_D1_nodal_data(const unsigned &fieldindex);
-    virtual oomph::Data *get_D1TB_nodal_data(const unsigned &fieldindex);
-    virtual oomph::Data *get_D2_nodal_data(const unsigned &fieldindex);
-    virtual oomph::Data *get_D2TB_nodal_data(const unsigned &fieldindex);
+    virtual oomph::Data *get_DL_nodal_data(const unsigned &fieldindex);    
+    virtual oomph::Data *get_DG_nodal_data(const unsigned &space_index,const unsigned &fieldindex);
 
     // Indices to the nodal buffer of the code generation
     
-    virtual unsigned get_D2TB_buffer_index(const unsigned &fieldindex);
-    virtual unsigned get_D2_buffer_index(const unsigned &fieldindex);
-    virtual unsigned get_D1TB_buffer_index(const unsigned &fieldindex);
-    virtual unsigned get_D1_buffer_index(const unsigned &fieldindex);
+    virtual unsigned get_DG_buffer_index(const unsigned &space_index, const unsigned &fieldindex);    
     virtual unsigned get_DL_buffer_index(const unsigned &fieldindex);
     virtual unsigned get_D0_buffer_index(const unsigned &fieldindex);
 
     // Parent elements may have more nodal data entries than the interfaces. These functions cast a interface nodal index to the nodal index of the defining element
-    virtual unsigned get_D2TB_node_index(const unsigned &fieldindex, const unsigned &nodeindex) const { return nodeindex; }
-    virtual unsigned get_D2_node_index(const unsigned &fieldindex, const unsigned &nodeindex) const { return nodeindex; }
-    virtual unsigned get_D1TB_node_index(const unsigned &fieldindex, const unsigned &nodeindex) const { return nodeindex; }
-    virtual unsigned get_D1_node_index(const unsigned &fieldindex, const unsigned &nodeindex) const { return nodeindex; }
+    virtual unsigned get_DG_node_index(const unsigned &space_index, const unsigned &fieldindex, const unsigned &nodeindex) const { return nodeindex; }
+    virtual int get_DG_local_equation(const unsigned &space_index, const unsigned &fieldindex, const unsigned &nodeindex);
     
-    virtual int get_D2TB_local_equation(const unsigned &fieldindex, const unsigned &nodeindex);
-    virtual int get_D2_local_equation(const unsigned &fieldindex, const unsigned &nodeindex);
-    virtual int get_D1TB_local_equation(const unsigned &fieldindex, const unsigned &nodeindex);
-    virtual int get_D1_local_equation(const unsigned &fieldindex, const unsigned &nodeindex);
     virtual int get_DL_local_equation(const unsigned &fieldindex, const unsigned &nodeindex);
     virtual int get_D0_local_equation(const unsigned &fieldindex);
 
-    virtual void get_D1_fields_at_s(unsigned history_index, const oomph::Vector<double> &s, oomph::Vector<double> &result) const;
-    virtual void get_D2_fields_at_s(unsigned history_index, const oomph::Vector<double> &s, oomph::Vector<double> &result) const;
-    virtual void get_D1TB_fields_at_s(unsigned history_index, const oomph::Vector<double> &s, oomph::Vector<double> &result) const;
-    virtual void get_D2TB_fields_at_s(unsigned history_index, const oomph::Vector<double> &s, oomph::Vector<double> &result) const;
+    virtual void get_DG_fields_at_s(unsigned space_index,unsigned history_index, const oomph::Vector<double> &s, oomph::Vector<double> &result) const;    
     virtual int nedges() const = 0;
     virtual void add_node_from_finer_neighbor_for_tesselated_numpy(int edge, oomph::Node *n, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) {}
     virtual void inform_coarser_neighbors_for_tesselated_numpy(std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) {}
@@ -1853,24 +1838,11 @@ class BulkElementTetra3dC1TB : public virtual BulkElementTetra3dC1
     virtual int get_nodal_index_by_name(oomph::Node *n, std::string fieldname);
     virtual double get_interpolated_interface_field(const oomph::Vector<double> &s, const unsigned &ifindex, const std::string &space, const unsigned &t = 0) const;
 
+    unsigned get_DG_buffer_index(const unsigned &space_index, const unsigned &fieldindex) override;    
+    unsigned get_DG_node_index(const unsigned & space_index, const unsigned &fieldindex, const unsigned &nodeindex) const override;
+    oomph::Data *get_DG_nodal_data(const unsigned & space_index,const unsigned &fieldindex) override;
+    int get_DG_local_equation(const unsigned &space_index, const unsigned &fieldindex, const unsigned &nodeindex) override;
     
-    unsigned get_D2TB_buffer_index(const unsigned &fieldindex) override;
-    unsigned get_D2_buffer_index(const unsigned &fieldindex) override;
-    unsigned get_D1TB_buffer_index(const unsigned &fieldindex) override;
-    unsigned get_D1_buffer_index(const unsigned &fieldindex) override;
-
-    unsigned get_D2TB_node_index(const unsigned &fieldindex, const unsigned &nodeindex) const override;
-    unsigned get_D2_node_index(const unsigned &fieldindex, const unsigned &nodeindex) const override;
-    unsigned get_D1TB_node_index(const unsigned &fieldindex, const unsigned &nodeindex) const override;
-    unsigned get_D1_node_index(const unsigned &fieldindex, const unsigned &nodeindex) const override;
-    oomph::Data *get_D1_nodal_data(const unsigned &fieldindex) override;
-    oomph::Data *get_D2_nodal_data(const unsigned &fieldindex) override;
-    oomph::Data *get_D2TB_nodal_data(const unsigned &fieldindex) override;
-    oomph::Data *get_D1TB_nodal_data(const unsigned &fieldindex) override;
-    int get_D2TB_local_equation(const unsigned &fieldindex, const unsigned &nodeindex) override;
-    int get_D2_local_equation(const unsigned &fieldindex, const unsigned &nodeindex) override;
-    int get_D1TB_local_equation(const unsigned &fieldindex, const unsigned &nodeindex) override;
-    int get_D1_local_equation(const unsigned &fieldindex, const unsigned &nodeindex) override;
   };
 
   template <class BASE>

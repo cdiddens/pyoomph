@@ -396,31 +396,6 @@ typedef struct JITFuncSpec_Table_FiniteElement
   unsigned int nodal_dim, lagr_dim;
 
 
-  // Old way of handling things
-  /*
-  unsigned int numfields_C1, numfields_C1_bulk, numfields_C1_basebulk,numfields_C1_new; // Fields numfields_C1 are the total number of fields, numfields_C1_bulk are the ones which are defined on the bulk mesh (including the additional field of all parent interface meshes, numfields_C1_basebulk are indeed the fields that are directly implemented only at the lowest level. numfields_C1_new are the number of fields defined directly at this element level, i.e for lowest bulk level, numfields_C1_new=numfields_C1_bulk=numfields_C1_basebulk=numfields_C1. For interface elements, we get numfields_C1_new=numfields_C1-numfields_C1_bulk;
-  char **fieldnames_C1;
-
-  unsigned int numfields_C2, numfields_C2_bulk, numfields_C2_basebulk,numfields_C2_new;
-  char **fieldnames_C2;
-
-  unsigned int numfields_C2TB, numfields_C2TB_bulk, numfields_C2TB_basebulk,numfields_C2TB_new;
-  char **fieldnames_C2TB;
-  
-  unsigned int numfields_C1TB, numfields_C1TB_bulk, numfields_C1TB_basebulk,numfields_C1TB_new;
-  char **fieldnames_C1TB;  
-  */
-  unsigned int numfields_D1, numfields_D1_bulk, numfields_D1_basebulk,numfields_D1_new; 
-  char **fieldnames_D1;
-  
-  unsigned int numfields_D1TB, numfields_D1TB_bulk, numfields_D1TB_basebulk,numfields_D1TB_new;
-  char **fieldnames_D1TB;    
-
-  unsigned int numfields_D2, numfields_D2_bulk, numfields_D2_basebulk,numfields_D2_new;
-  char **fieldnames_D2;
-
-  unsigned int numfields_D2TB, numfields_D2TB_bulk, numfields_D2TB_basebulk,numfields_D2TB_new;
-  char **fieldnames_D2TB;  
 
   unsigned int numfields_Pos;
   char **fieldnames_Pos;
@@ -446,13 +421,7 @@ typedef struct JITFuncSpec_Table_FiniteElement
   unsigned int buffer_offset_C2TB_interf,buffer_offset_C2_interf,buffer_offset_C1TB_interf,buffer_offset_C1_interf; // Offsets in the nodal data buffer (interface fields only)
   */
     
-  
-  unsigned int internal_offset_D2TB_new,internal_offset_D2_new,internal_offset_D1TB_new,internal_offset_D1_new; // Offset to the internal_data entries. These are only there on the current element level
-  unsigned int buffer_offset_D2TB_basebulk,buffer_offset_D2_basebulk,buffer_offset_D1TB_basebulk,buffer_offset_D1_basebulk; // Offsets in the nodal data buffer (basebulk fields only)
-  unsigned int buffer_offset_D2TB_interf,buffer_offset_D2_interf,buffer_offset_D1TB_interf,buffer_offset_D1_interf; // Offsets in the nodal data buffer (interface fields only)  
-  
-  unsigned int external_offset_D2TB_bulk,external_offset_D2_bulk,external_offset_D1TB_bulk,external_offset_D1_bulk; // Offset to the external_data entries. These refer to DG spaces on parent elements
-  
+    
   unsigned int internal_offset_DL,internal_offset_D0;
   unsigned int buffer_offset_DL,buffer_offset_D0; 
   unsigned int buffer_offset_ED0,external_offset_ED0;
