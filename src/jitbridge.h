@@ -324,15 +324,9 @@ typedef struct JITFuncSpec_RequiredShapes_FiniteElement
     
 
   JITFuncSpec_RequiredShapes_For_Space_t continuous_spaces[NUM_CONTINUOUS_SPACES]; // C2TB,C2,C1TB,C1
-    
-       
-
-  JITFuncSpec_RequiredShapes_For_Space_t DL;  
-  bool psi_DL, dx_psi_DL, dX_psi_DL; // DL space
-  
-  JITFuncSpec_RequiredShapes_For_Space_t D0;  
-  bool psi_D0, dx_psi_D0, dX_psi_D0; // D0 space    
-    
+          
+  JITFuncSpec_RequiredShapes_For_Space_t DL;    
+  JITFuncSpec_RequiredShapes_For_Space_t D0;      
     
   bool normal;                                   
   bool elemsize_Eulerian,elemsize_Lagrangian;

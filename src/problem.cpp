@@ -57,13 +57,13 @@ namespace pyoomph
 			dest->continuous_spaces[i].dx_psi |= src->continuous_spaces[i].dx_psi;
 			dest->continuous_spaces[i].dX_psi |= src->continuous_spaces[i].dX_psi;
 		}		
-		dest->psi_DL |= src->psi_DL;
-		dest->psi_D0 |= src->psi_D0;
+		dest->DL.psi |= src->DL.psi;
+		dest->D0.psi |= src->D0.psi;
 	
-		dest->dx_psi_DL |= src->dx_psi_DL;
-		dest->dx_psi_D0 |= src->dx_psi_D0;
-		dest->dX_psi_DL |= src->dX_psi_DL;
-		dest->dX_psi_D0 |= src->dX_psi_D0;
+		dest->DL.dx_psi |= src->DL.dx_psi;
+		dest->D0.dx_psi |= src->D0.dx_psi;
+		dest->DL.dX_psi |= src->DL.dX_psi;
+		dest->D0.dX_psi |= src->D0.dX_psi;
 		dest->Pos.psi |= src->Pos.psi;
 		dest->Pos.dx_psi |= src->Pos.dx_psi;
 		dest->Pos.dX_psi |= src->Pos.dX_psi;

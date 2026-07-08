@@ -6305,19 +6305,10 @@ namespace pyoomph
 						{
 							os << prefix  << "continuous_spaces[SPACE_INDEX_"+fieldentry.first->get_name()+"]" << "." << psientry.first << " = true;" << std::endl;
 						}						
-						else if (fieldentry.first->get_name()=="Pos" )
-						{
-							os << prefix  << "Pos." << psientry.first << " = true;" << std::endl;
-						}
-						else if (fieldentry.first->get_name()=="DL" || fieldentry.first->get_name()=="D0")
-						{
-							os << prefix  << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
-						}
 						else
 						{
-							throw_runtime_error("Unknown space for required shapes: " + fieldentry.first->get_name());
-						}
-						
+							os << prefix  << fieldentry.first->get_name() << "." << psientry.first << " = true;" << std::endl;
+						}												
 					}
 					else
 					{

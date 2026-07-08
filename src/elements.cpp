@@ -649,7 +649,7 @@ namespace pyoomph
 						break;
 					}
 				}
-				if (require_dx_terms ||   required.Pos.psi  || required.dx_psi_DL || required.normal || required.elemsize_Eulerian || required.elemsize_Eulerian_cartesian) 
+				if (require_dx_terms ||   required.Pos.psi  || required.DL.dx_psi || required.normal || required.elemsize_Eulerian || required.elemsize_Eulerian_cartesian) 
 				{
 					
 					unsigned nfields = this->nodal_dimension();
@@ -843,7 +843,7 @@ namespace pyoomph
 
 
 
-			if (codeinst->get_func_table()->info_DL.numfields && (required.dx_psi_DL || required.psi_DL || required.dX_psi_DL))
+			if (codeinst->get_func_table()->info_DL.numfields && (required.DL.dx_psi || required.DL.psi || required.DL.dX_psi))
 			{
 				for (unsigned int l = 0; l < eleminfo.nnode_DL; l++)
 				{
@@ -877,7 +877,7 @@ namespace pyoomph
 			}
 
 
-			if (codeinst->get_func_table()->info_D0.numfields && (required.psi_D0))
+			if (codeinst->get_func_table()->info_D0.numfields && (required.D0.psi))
 			{
 				if (!shape_info->hanginfo_Discont[0].nummaster)
 					{
@@ -2941,7 +2941,7 @@ namespace pyoomph
 		else if (el_dim == 0)
 		{
 			det_Eulerian = 1.0;
-			JLagr = 1.0;
+			JLagr = 1.0;			
 			for (unsigned l = 0; l < eleminfo.nnode_of_space[SPACE_INDEX_C2TB]; l++)
 			{
 				shape_info->shape_C2TB[l] = 1.0;
@@ -3388,7 +3388,7 @@ namespace pyoomph
 				}
 			}
 		}
-		if (required.dx_psi_DL || required.psi_DL)
+		if (required.DL.dx_psi || required.DL.psi)
 		{
 			oomph::Shape psi(eleminfo.nnode_DL);
 			oomph::DShape dpsids(eleminfo.nnode_DL, std::max((unsigned int)1, el_dim));
@@ -3471,243 +3471,6 @@ namespace pyoomph
 		return det_Eulerian;
 	}
 
-	/*double BulkElementBase::fill_shape_info_at_s(const oomph::Vector<double> & s,const unsigned int & index,const JITFuncSpec_RequiredShapes_FiniteElement_t & required,JITShapeInfo_t * shape_info,double & JLagr) const
-	{
-		//Get the elemental stuff
-	  oomph::Shape element_psi(eleminfo.nnode);
-	  oomph::DShape element_dpsi(eleminfo.nnode,eleminfo.nodal_dim);
-	  dshape_local(s,element_psi,element_dpsi);
-	  oomph::DenseMatrix<double> inverse_jacobian(eleminfo.nodal_dim);
-	  double det;
-
-	  if (required.dx_psi_C2 || required.dx_psi_C1 || required.dx_psi_DL)
-	  {
-		det = local_to_eulerian_mapping(element_dpsi,inverse_jacobian); //This one causes trouble on interface elements
-	  }
-	  else
-	  {
-		det=J_eulerian(s);
-	  }
-
-	  if (required.normal)
-	  {
-		oomph::Vector<double> unit_normal(this->nodal_dimension());
-		this->get_normal_at_s(s,unit_normal);
-		for (unsigned int i=0;i<nodal_dimension();i++) shape_info->normal[index][i]=unit_normal[i];
-	  }
-
-
-
-		if (required.dx_psi_C2)
-		{
-			oomph::Shape psi(eleminfo.nnode_of_space[SPACE_INDEX_C2]);
-			oomph::DShape dpsidx(eleminfo.nnode_of_space[SPACE_INDEX_C2],eleminfo.nodal_dim);
-			this->dshape_local_at_s_C2(s,psi,dpsidx);
-		  transform_derivatives(inverse_jacobian,dpsidx);
-		  for (unsigned l=0;l<eleminfo.nnode_of_space[SPACE_INDEX_C2];l++)
-			{
-				shape_info->shape_C2[index][l]=psi[l];
-				for (unsigned int i=0;i<eleminfo.nodal_dim;i++) shape_info->dx_shape_C2[index][l][i]=dpsidx(l,i);
-			}
-		}
-		else if (required.psi_C2 || (eleminfo.nnode==eleminfo.nnode_of_space[SPACE_INDEX_C2] && eleminfo.nnode_of_space[SPACE_INDEX_C2]>0))
-		{
-			oomph::Shape psi(eleminfo.nnode_of_space[SPACE_INDEX_C2]);
-			this->shape_at_s_C2(s,psi);
-		  for (unsigned l=0;l<eleminfo.nnode_of_space[SPACE_INDEX_C2];l++)
-			{
-				shape_info->shape_C2[index][l]=psi[l];
-			}
-		}
-
-		if (required.dx_psi_C1 )
-		{
-			oomph::Shape psi(eleminfo.nnode_of_space[SPACE_INDEX_C1]);
-			oomph::DShape dpsidx(eleminfo.nnode_of_space[SPACE_INDEX_C1],eleminfo.nodal_dim);
-			this->dshape_local_at_s_C1(s,psi,dpsidx);
-		  transform_derivatives(inverse_jacobian,dpsidx);
-		  for (unsigned l=0;l<eleminfo.nnode_of_space[SPACE_INDEX_C1];l++)
-			{
-				shape_info->shape_C1[index][l]=psi[l];
-				for (unsigned int i=0;i<eleminfo.nodal_dim;i++) shape_info->dx_shape_C1[index][l][i]=dpsidx(l,i);
-			}
-		}
-		else if (required.psi_C1 || (eleminfo.nnode==eleminfo.nnode_of_space[SPACE_INDEX_C1] && eleminfo.nnode_of_space[SPACE_INDEX_C1]>0))
-		{
-			oomph::Shape psi(eleminfo.nnode_of_space[SPACE_INDEX_C1]);
-			this->shape_at_s_C1(s,psi);
-		  for (unsigned l=0;l<eleminfo.nnode_of_space[SPACE_INDEX_C1];l++)
-			{
-				shape_info->shape_C1[index][l]=psi[l];
-			}
-		}
-
-
-		if (required.dx_psi_DL)
-		{
-			oomph::Shape psi(eleminfo.nnode_DL);
-			oomph::DShape dpsidx(eleminfo.nnode_DL,eleminfo.nodal_dim);
-			this->dshape_local_at_s_DL(s,psi,dpsidx);
-
-		  transform_derivatives(inverse_jacobian,dpsidx);
-		  for (unsigned l=0;l<eleminfo.nnode_DL;l++)
-			{
-				shape_info->shape_DL[index][l]=psi[l];
-				for (unsigned int i=0;i<eleminfo.nodal_dim;i++) shape_info->dx_shape_DL[index][l][i]=dpsidx(l,i);
-			}
-		}
-		else if (required.psi_DL)
-		{
-			oomph::Shape psi(eleminfo.nnode_DL);
-			this->shape_at_s_DL(s,psi);
-		  for (unsigned l=0;l<eleminfo.nnode_DL;l++)
-			{
-				shape_info->shape_DL[index][l]=psi[l];
-			}
-		}
-
-
-		if (required.dx_psi_Lagr || required.psi_Lagr)
-		{
-		  oomph::Shape element_psi_Lagr(eleminfo.nnode);
-		  oomph::DShape element_dpsi_Lagr(eleminfo.nnode,eleminfo.nodal_dim);
-		//  for (unsigned int l=0;l<this->nnode();l++) std::cout << "L " << l << " x " << dynamic_cast<Node*>(this->node_pt(l))->xi(0) << "  " << dynamic_cast<Node*>(this->node_pt(l))->xi(1) << std::endl;
-		  JLagr=this->dshape_lagrangian(s,element_psi_Lagr,element_dpsi_Lagr);
-	//	  std::cout << index <<  "  JLagr " << JLagr << " psi " << element_psi_Lagr[0] <<  "  " << element_dpsi_Lagr(0,0) << std::endl;
-		  for (unsigned l=0;l<eleminfo.nnode;l++)
-		  {
-				shape_info->shape_Lagr[index][l]=element_psi_Lagr[l];
-				for (unsigned int i=0;i<eleminfo.nodal_dim;i++) shape_info->dx_shape_Lagr[index][l][i]=element_dpsi_Lagr(l,i);
-		  }
-		}
-
-
-
-	//Manifold surface derivatives
-	 if (required.dS_psi_C2 || required.dS_psi_C1 || required.dS_psi_DL)
-	 {
-		 unsigned el_dim=this->dim();
-		 unsigned n_dim=this->nodal_dimension();
-		unsigned n_node=this->nnode();
-
-		 //Tangent vectors
-		oomph::DenseMatrix<double> interpolated_t(el_dim,n_dim,0.0);
-		 oomph::Shape psif(n_node);
-		 oomph::DShape dpsifds(n_node,el_dim);
-		this->dshape_local(s,psif,dpsifds);
-		for(unsigned l=0;l<n_node;l++)
-		{
-		  for(unsigned i=0;i<n_dim;i++)
-		   {
-			for(unsigned j=0;j<el_dim;j++)
-			 {
-			  interpolated_t(j,i) += this->nodal_position(l,i)*dpsifds(l,j);
-			 }
-		   }
-		}
-
-		//Calculate and invert metric tensor depending on the element dimension
-		if (el_dim==2)
-		{
-			  double amet[2][2];
-			  for(unsigned al=0;al<2;al++)
-				{
-				 for(unsigned be=0;be<2;be++)
-				  {
-					amet[al][be] = 0.0;
-					for(unsigned i=0;i<n_dim;i++)
-					 {
-					  amet[al][be] += interpolated_t(al,i)*interpolated_t(be,i);
-					 }
-				  }
-				}
-
-			  double det_a = amet[0][0]*amet[1][1] - amet[0][1]*amet[1][0];
-			  double aup[2][2];
-			  aup[0][0] = amet[1][1]/det_a;
-			  aup[0][1] = -amet[0][1]/det_a;
-			  aup[1][0] = -amet[1][0]/det_a;
-			  aup[1][1] = amet[0][0]/det_a;
-
-			  for(unsigned l=0;l<this->eleminfo.nnode_of_space[SPACE_INDEX_C2];l++)
-			  {
-				const double dpsi_temp[2] =     {aup[0][0]*dpsifds(l,0) + aup[0][1]*dpsifds(l,1),    aup[1][0]*dpsifds(l,0) + aup[1][1]*dpsifds(l,1)};
-				for(unsigned i=0;i<n_dim;i++)
-				{
-				  shape_info->dS_shape_C2[index][l][i] = dpsi_temp[0]*interpolated_t(0,i)+ dpsi_temp[1]*interpolated_t(1,i);
-				}
-			  }
-			  if (required.dS_psi_C1 || required.dS_psi_DL) throw_runtime_error("IMPLEM ");
-		}
-		else if (el_dim==1)
-		{
-		  double a11 = interpolated_t(0,0)*interpolated_t(0,0) +    interpolated_t(0,1)*interpolated_t(0,1);
-		  if (required.dS_psi_C2)
-		  {
-			  for(unsigned l=0;l<this->eleminfo.nnode_of_space[SPACE_INDEX_C2];l++)
-				{
-				 for(unsigned i=0;i<n_dim;i++)
-				  {
-					shape_info->dS_shape_C2[index][l][i] = dpsifds(l,0)*interpolated_t(0,i)/a11;
-				  }
-				}
-		  }
-		  if (required.dS_psi_C1 || required.dS_psi_DL) throw_runtime_error("IMPLEM above");
-		}
-		else
-		{
-		 throw_runtime_error("implement element dim "+std::to_string(el_dim));
-		}
-
-
-
-	 }
-
-	 if (required.dS_psi_Lagr)
-	 {
-
-		 unsigned el_dim=this->dim();
-		 unsigned n_dim=this->nodal_dimension();
-		unsigned n_node=this->nnode();
-
-		 //Tangent vectors
-		oomph::DenseMatrix<double> interpolated_t(el_dim,n_dim,0.0);
-		 oomph::Shape psif(n_node);
-		 oomph::DShape dpsifds(n_node,el_dim);
-		this->dshape_lagrangian(s,psif,dpsifds);
-		for(unsigned l=0;l<n_node;l++)
-		{
-		  for(unsigned i=0;i<n_dim;i++)
-		   {
-			for(unsigned j=0;j<el_dim;j++)
-			 {
-			  interpolated_t(j,i) += dynamic_cast<pyoomph::Node*>(this->node_pt(l))->xi(i)*dpsifds(l,j);
-			 }
-		   }
-		}
-
-		 if (el_dim==1)
-		{
-		  double a11 = interpolated_t(0,0)*interpolated_t(0,0) +    interpolated_t(0,1)*interpolated_t(0,1);
-		  for(unsigned l=0;l<this->eleminfo.nnode_of_space[SPACE_INDEX_C2];l++)
-			{
-				 for(unsigned i=0;i<n_dim;i++)
-				  {
-					shape_info->dS_shape_Lagr[index][l][i] = dpsifds(l,0)*interpolated_t(0,i)/a11;
-				  }
-			}
-		}
-		else
-		{
-		 throw_runtime_error("implement element dim "+std::to_string(el_dim));
-		}
-
-	 }
-
-
-
-	 return det;
-	}*/
 
 	void BulkElementBase::set_remaining_shapes_appropriately(JITShapeInfo_t *shape_info, const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes)
 	{
@@ -3719,13 +3482,6 @@ namespace pyoomph
 		
 		if (required_C2TB)
 		{
-			/*  if (!this->has_bubble())
-			  {
-			   shape_info->shape_C2TB=shape_info->shape_C2;
-			   shape_info->dx_shape_C2TB=shape_info->dx_shape_C2;
-			   shape_info->dX_shape_C2TB=shape_info->dX_shape_C2;
-			   shape_info->d_dx_shape_dcoord_C2TB=shape_info->d_dx_shape_dcoord_C2;
-			  }*/
 			shape_info->shape_Pos = shape_info->shape_C2TB;
 			shape_info->dx_shape_Pos = shape_info->dx_shape_C2TB;
 			shape_info->dX_shape_Pos = shape_info->dX_shape_C2TB;
@@ -9418,52 +9174,8 @@ namespace pyoomph
         	delete[] add_interf_local_hang_eqs;
         	add_interf_local_hang_eqs = 0;
       	}
-		/*if (has_hanging_interface_dofs)
-		{
-			std::cout << "InterfaceElementBase::assign_hanging_additional_interface_local_equations: has_hanging_interface_dofs=" << has_hanging_interface_dofs << std::endl;
-			std::cout << "  done on element " << this << std::endl;
-		}*/
+	
 	}
-	/*
-	void InterfaceElementQuad2dC1::assign_hanging_additional_interface_local_equations(const bool &store_local_dof_pt)
-	{		
-		auto * ft=this->get_code_instance()->get_func_table();
-		assign_hanging_additional_interface_local_equations_for_space(store_local_dof_pt,ft->numfields_C1-ft->numfields_C1_basebulk,
-			ft->numfields_C1_basebulk,this->eleminfo.nnode_of_space[SPACE_INDEX_C1],ft->hangindex_C1,ft->fieldnames_C1,
-			&BulkElementBase::get_node_index_C1_to_element,add_interf_local_hang_eqs_C1);
-		assign_hanging_additional_interface_local_equations_for_space(store_local_dof_pt,ft->numfields_C1TB-ft->numfields_C1TB_basebulk,
-			ft->numfields_C1TB_basebulk,this->eleminfo.nnode_of_space[SPACE_INDEX_C1TB],ft->hangindex_C1TB,ft->fieldnames_C1TB,
-			&BulkElementBase::get_node_index_C1TB_to_element,add_interf_local_hang_eqs_C1TB);
-		
-	}
-*/
-/*
-	void InterfaceElementQuad2dC2::assign_hanging_additional_interface_local_equations(const bool &store_local_dof_pt)
-	{
-		auto * ft=this->get_code_instance()->get_func_table();
-		if (!ft->numfields_C1_basebulk && !ft->numfields_C1TB_basebulk) // In this case, the hangbuffer is not setup
-		{
-			if (ft->numfields_C1 || ft->numfields_C1TB)
-			{
-				throw_runtime_error("C1 interface dofs are present, but no C1 bulk dofs are present, so the hangbuffer is not setup. Please add any pinned \"C1\" dummy field to the bulk or upgrade the interface dofs to \"C2\"");
-			}
-		}		
-		assign_hanging_additional_interface_local_equations_for_space(store_local_dof_pt,ft->numfields_C1-ft->numfields_C1_basebulk,
-			ft->numfields_C1_basebulk,this->eleminfo.nnode_of_space[SPACE_INDEX_C1],ft->hangindex_C1,ft->fieldnames_C1,
-			&BulkElementBase::get_node_index_C1_to_element,add_interf_local_hang_eqs_C1);
-		assign_hanging_additional_interface_local_equations_for_space(store_local_dof_pt,ft->numfields_C1TB-ft->numfields_C1TB_basebulk,
-			ft->numfields_C1TB_basebulk,this->eleminfo.nnode_of_space[SPACE_INDEX_C1TB],ft->hangindex_C1TB,ft->fieldnames_C1TB,
-			&BulkElementBase::get_node_index_C1TB_to_element,add_interf_local_hang_eqs_C1TB);
-		assign_hanging_additional_interface_local_equations_for_space(store_local_dof_pt,ft->numfields_C2-ft->numfields_C2_basebulk,
-			ft->numfields_C2_basebulk,this->eleminfo.nnode_of_space[SPACE_INDEX_C2],ft->hangindex_C2,ft->fieldnames_C2,
-			&BulkElementBase::get_node_index_C2_to_element,add_interf_local_hang_eqs_C2);
-		assign_hanging_additional_interface_local_equations_for_space(store_local_dof_pt,ft->numfields_C2TB-ft->numfields_C2TB_basebulk,
-			ft->numfields_C2TB_basebulk,this->eleminfo.nnode_of_space[SPACE_INDEX_C2TB],ft->hangindex_C2TB,ft->fieldnames_C2TB,
-			&BulkElementBase::get_node_index_C2TB_to_element,add_interf_local_hang_eqs_C2TB);
-		*
-		
-	}
-*/
 
 
 
@@ -9479,11 +9191,7 @@ namespace pyoomph
 		*/
 
 		const JITFuncSpec_Table_FiniteElement_t *functable = this->codeinst->get_func_table();
-		// std::cout << "ADDING BULK ELEMENT DOFS, THIS NNODE " << this->nnode() <<" BULK " << dynamic_cast<BulkElementBase*>(this->bulk_element_pt()) << " BULK NNODE " << this->bulk_element_pt()->nnode() <<std::endl;
-		update_equation_remapping_from_element(dynamic_cast<BulkElementBase *>(this->bulk_element_pt()),functable->merged_required_shapes.bulk_shapes , bulk_eqn_map,1);
-	//	for (unsigned int i=0;i<bulk_eqn_map.size();i++) {
-	//	 std::cout << "BULK EQUATION MAP " << i << "  " << bulk_eqn_map[i] << std::endl;
-	//	}
+		update_equation_remapping_from_element(dynamic_cast<BulkElementBase *>(this->bulk_element_pt()),functable->merged_required_shapes.bulk_shapes , bulk_eqn_map,1);	
 		if (functable->merged_required_shapes.bulk_shapes && functable->merged_required_shapes.bulk_shapes->bulk_shapes)
 		{
 			update_equation_remapping_from_element(dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(this->bulk_element_pt())->bulk_element_pt()),functable->merged_required_shapes.bulk_shapes->bulk_shapes,  bulk_bulk_eqn_map,2);
@@ -9495,20 +9203,14 @@ namespace pyoomph
 				throw_runtime_error("Missing opposite element");
 			}
 			if (!this->is_internal_facet_opposite_dummy())
-			{
-				//   std::cout << "ADDING OPPOSITE INTERFACE DOFS , THIS NNODE " << this->nnode() <<" OPP" <<dynamic_cast<InterfaceElementBase*>(opposite_side)  <<   " OPP NNODE " << dynamic_cast<InterfaceElementBase*>(opposite_side)->nnode() <<std::endl;
+			{		
 				update_equation_remapping_from_element(opposite_side,functable->merged_required_shapes.opposite_shapes,  opp_interf_eqn_map,-1);
-				/*std::cout << "OPP INTERFACE EQUATION MAP " << this << std::endl;
-				for (unsigned int i=0;i < opp_interf_eqn_map.size();i++) {
-					 std::cout << "  " << i << "  " << opp_interf_eqn_map[i] << std::endl;
-				}*/
 				if (functable->merged_required_shapes.opposite_shapes->bulk_shapes)
 				{
 					if (!dynamic_cast<InterfaceElementBase *>(opposite_side)->bulk_element_pt())
 					{
 						throw_runtime_error("Missing opposite bulk element");
-					}
-					//        std::cout << "ADDING OPPOSITE BULK DOFS " << dynamic_cast<InterfaceElementBase*>(opposite_side)->bulk_element_pt() << std::endl;
+					}			
 					update_equation_remapping_from_element(dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(opposite_side)->bulk_element_pt()),functable->merged_required_shapes.opposite_shapes->bulk_shapes , opp_bulk_eqn_map,-2);
 				}
 			}
@@ -9633,7 +9335,7 @@ namespace pyoomph
 			{
 				unsigned node_index = j + space_info->buffer_offset_interf;
 				oomph::Data * data=this->get_DG_nodal_data(space_info->space_index, space_info->numfields_basebulk+j);
-				for (unsigned int i=0;i<eleminfo.nnode_of_space[SPACE_INDEX_C2TB];i++)
+				for (unsigned int i=0;i<eleminfo.nnode_of_space[space_info->space_index];i++)
 				{
 					unsigned valindex=this->get_DG_node_index(space_info->space_index, space_info->numfields_basebulk+j, i);
 					eleminfo.nodal_data[i][node_index] = data->value_pt(valindex);
@@ -10051,7 +9753,7 @@ namespace pyoomph
 				auto * space_info=fft->present_continuous_spaces[i];			
 				require_dx_psi|=required->continuous_spaces[space_info->space_index].dx_psi;
 			}
-			if (require_dx_psi ||   required->Pos.psi  || required->dx_psi_DL || required->normal || required->elemsize_Eulerian || required->elemsize_Eulerian_cartesian) 
+			if (require_dx_psi ||   required->Pos.psi  || required->DL.dx_psi || required->normal || required->elemsize_Eulerian || required->elemsize_Eulerian_cartesian) 
 			{
 				// Add required geometric external data to be finite differenced
 				
@@ -10119,8 +9821,8 @@ namespace pyoomph
 		}
 		
 
-		// std::cout << " AT REQ " << codeinst->get_code()->get_file_name() << " FROM " << fcodeinst->get_code()->get_file_name() << " USE DL " << (required->psi_DL || required->dx_psi_DL || required->dX_psi_DL) << std::endl;
-		if (required->psi_DL || required->dx_psi_DL || required->dX_psi_DL)
+		// std::cout << " AT REQ " << codeinst->get_code()->get_file_name() << " FROM " << fcodeinst->get_code()->get_file_name() << " USE DL " << (required->psi_DL || required->DL.dx_psi || required->DL.dX_psi) << std::endl;
+		if (required->DL.psi || required->DL.dx_psi || required->DL.dX_psi)
 		{
 
 			for (unsigned int j = 0; j < fft->info_DL.numfields; j++)
@@ -10130,7 +9832,7 @@ namespace pyoomph
 			}
 		}
 
-		if (required->psi_D0)
+		if (required->D0.psi)
 		{
 			for (unsigned int j = 0; j < fft->info_D0.numfields; j++)
 			{
