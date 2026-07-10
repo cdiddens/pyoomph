@@ -21,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -877,7 +877,10 @@ class MeshFromTemplateBase(BaseMesh):
         for k in itertools.chain(code.get_nodal_field_indices().keys(), code.get_elemental_field_indices().keys()):
             s = codegen.get_scaling(k)
             s = codegen.expand_placeholders(s, False)
-            _, unit, _, _ = _pyoomph.GiNaC_collect_units(s)
+            _factor, unit, _rest, _success = _pyoomph.GiNaC_collect_units(s)
+            if not (_rest-1).is_zero():
+                raise RuntimeError(
+                    "Cannot set output scale for field "+k+" to "+str(s)+" because it has a non-unit factor "+str(_factor)+" and a non-unit rest "+str(_rest))            
             self.set_output_scale(k, unit, code)
         
     def _finalise_creation(self):

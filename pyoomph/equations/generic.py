@@ -21,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -74,11 +74,13 @@ class ConnectFieldsAtInterface(InterfaceEquations):
         fields: Either a single field name or a list of field names when the fields have the same name on both sides. Alternatively, a dict mapping each inner to each outer name if the fields have different names.
         lagr_mult_prefix: Prefix for the Lagrange multipliers. Defaults to "_lagr_conn_".
         use_highest_space: Flag indicating whether to use the highest space for the Lagrange multipliers. If the fields have different spatial discretizations on both sides, we have to decide which space to use for the Lagrange multipliers. If this flag is set to True, the highest space will be used. Defaults to False.
+        check_consistent_scaling: Flag indicating whether to check for consistent scaling of the fields on both sides. Defaults to True.
     """
-    def __init__(self,fields:Union[str,Dict[str,str],List[str]],*,lagr_mult_prefix:str="_lagr_conn_",use_highest_space:bool=False):
+    def __init__(self,fields:Union[str,Dict[str,str],List[str]],*,lagr_mult_prefix:str="_lagr_conn_",use_highest_space:bool=False,check_consistent_scaling:bool=True):
         super(ConnectFieldsAtInterface, self).__init__()
         self.lagr_mult_prefix=lagr_mult_prefix
         self.use_highest_space=use_highest_space
+        self.check_consistent_scaling=check_consistent_scaling
         if not isinstance(fields,dict):
             if isinstance(fields,list):
                 self.fields={x:x for x in fields}
@@ -113,6 +115,22 @@ class ConnectFieldsAtInterface(InterfaceEquations):
     def define_residuals(self):
         dx = self.get_dx(use_scaling=False)
         for finner,fouter in self.fields.items():
+            if self.check_consistent_scaling:
+                testdiff=test_scale_factor(finner)-test_scale_factor(fouter,domain=self.get_opposite_side_of_interface())
+                testdiff=self.expand_expression_for_debugging(testdiff,raise_error=False,unit_error=False)
+                if not testdiff.is_zero():
+                    testscale_inside=self.expand_expression_for_debugging(test_scale_factor(finner))
+                    testscale_outside=self.expand_expression_for_debugging(test_scale_factor(fouter,domain=self.get_opposite_side_of_interface()))
+                    
+                    raise self.add_exception_info(RuntimeError("When connecting fields "+str(finner)+" and "+str(fouter)+" at the interface, the test function scaling is inconsistent.\nPlease either set check_consistent_scaling=False or ensure that the test function scaling is consistent.\n   test_scale("+str(finner)+")_inside = "+str(testscale_inside)+"\n   test_scale("+str(fouter)+")_outside = "+str(testscale_outside)))
+                testdiff=scale_factor(finner)-scale_factor(fouter,domain=self.get_opposite_side_of_interface())
+                testdiff=self.expand_expression_for_debugging(testdiff,raise_error=False,unit_error=False)
+                if not testdiff.is_zero():
+                    scale_inside=self.expand_expression_for_debugging(scale_factor(finner))
+                    scale_outside=self.expand_expression_for_debugging(scale_factor(fouter,domain=self.get_opposite_side_of_interface()))
+                    raise self.add_exception_info(RuntimeError("When connecting fields "+str(finner)+" and "+str(fouter)+" at the interface, the scaling is inconsistent.\nPlease either set check_consistent_scaling=False or ensure that the scaling is consistent.\n   scale("+str(finner)+")_inside = "+str(scale_inside)+"\n   scale("+str(fouter)+")_outside = "+str(scale_outside)))
+
+
             l, l_test=var_and_test(self.lagr_mult_prefix+finner+"_"+fouter)
             inside, inside_test=var_and_test(finner)
             outside, outside_test=var_and_test(fouter,domain=self.get_opposite_side_of_interface())
@@ -120,7 +138,7 @@ class ConnectFieldsAtInterface(InterfaceEquations):
             self.add_residual((inside-outside)/scal*l_test*dx) #TODO: Possibly nodal connection?
             self.add_residual(l*inside_test*dx)
             self.add_residual(-l*outside_test*dx)
-
+           
     def before_assigning_equations_postorder(self, mesh: "AnyMesh") -> None:
         for finner,fouter in self.fields.items():
             lname=self.lagr_mult_prefix+finner+"_"+fouter

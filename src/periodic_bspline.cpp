@@ -15,7 +15,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 
-The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+The main author may be contacted at c.diddens@utwente.nl
 
 ================================================================================*/
 
@@ -69,15 +69,15 @@ PeriodicBSplineBasis::PeriodicBSplineBasis(const std::vector<double> &knots, uns
     }    
 
     zero_offset=(k-1)/2+3;
-    for (int i = 0; i < k+3; i++)
+    for (int i = 0; i < (int)k+3; i++)
     {
         this->augknots.insert(this->augknots.begin(),knots[knots.size()-i-2]-L+x0);
     }
-    for (int i = 0; i < knots.size(); i++)
+    for (size_t i = 0; i < knots.size(); i++)
     {
         this->augknots.push_back(knots[i]);
     }
-    for (int i = 0; i < k+3; i++)
+    for (int i = 0; i < (int)k+3; i++)
     {
         this->augknots.push_back(L+knots[i+1]-x0);
     }
@@ -87,7 +87,7 @@ PeriodicBSplineBasis::PeriodicBSplineBasis(const std::vector<double> &knots, uns
     if (k%2==0)
     {        
       std::vector<double> newknots(augknots.size()-1);
-      for (int i = 0; i < augknots.size()-1; i++)
+      for (size_t i = 0; i < augknots.size()-1; i++)
       {
             newknots[i] = 0.5*(augknots[i]+augknots[i+1]);
       }
@@ -131,13 +131,13 @@ PeriodicBSplineBasis::PeriodicBSplineBasis(const std::vector<double> &knots, uns
         dshape_values[i].resize(GL_x[gl_order].size());
         gl_weights[i].resize(GL_x[gl_order].size());
         //std::cout << "INTEGRATING OVER " << augknots[start] << " to " << augknots[start+1] << std::endl;
-        for (int j = 0; j < GL_x[gl_order].size(); j++)
+        for (size_t j = 0; j < GL_x[gl_order].size(); j++)
         {
             double x=0.5*(augknots[start]+augknots[start+1])+0.5*(augknots[start+1]-augknots[start])*GL_x[gl_order][j];
             gl_weights[i][j]=GL_w[gl_order][j]*0.5*(augknots[start+1]-augknots[start]);
             shape_values[i][j].resize(k+1);
             dshape_values[i][j].resize(k+1);
-            for (int l = 0; l < k+1; l++)
+            for (unsigned int l = 0; l < k+1; l++)
             {
                 shape_values[i][j][l]=get_shape(shape_indices[i][l], x);
                 dshape_values[i][j][l]=get_dshape(shape_indices[i][l], x);
@@ -325,7 +325,7 @@ double PeriodicBSplineBasis::get_dshape(unsigned int i, double x) const
 std::vector<double> PeriodicBSplineBasis::get_shape(unsigned int i, const std::vector<double> &x) const
 {
     std::vector<double> res(x.size());
-    for (int j = 0; j < x.size(); j++)
+    for (size_t j = 0; j < x.size(); j++)
     {        
         res[j] = get_shape(i, x[j]);
     }
@@ -337,7 +337,7 @@ std::vector<double> PeriodicBSplineBasis::get_shape(unsigned int i, const std::v
 std::vector<double> PeriodicBSplineBasis::get_dshape(unsigned int i, const std::vector<double> &x) const
 {
     std::vector<double> res(x.size());
-    for (int j = 0; j < x.size(); j++)
+    for (size_t j = 0; j < x.size(); j++)
     {
         res[j] = get_dshape(i, x[j]);
     }

@@ -15,7 +15,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 
-The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+The main author may be contacted at c.diddens@utwente.nl
 
 ================================================================================*/
 
@@ -239,15 +239,18 @@ namespace pyoomph
     }
     std::vector<std::pair<uint32_t, double>> radius_search(double radius, double x, double y, double z) override
     {
-      std::vector<std::pair<uint32_t, double>> ret_matches;
+      std::vector<nanoflann::ResultItem<uint32_t, num_t>> ret_matches;
 
-      nanoflann::SearchParams params;
+      nanoflann::SearchParameters params;
       // params.sorted = false;
       num_t query_pt[3] = {x, y, z};
       const size_t nMatches = this->tree.radiusSearch(&query_pt[0], radius * radius, ret_matches, params);
+      std::vector<std::pair<uint32_t, double>> ret_matches_vec(ret_matches.size());
+      
       for (size_t i = 0; i < nMatches; i++)
-        ret_matches[i].second = sqrt(ret_matches[i].second);
-      return ret_matches;
+        ret_matches_vec[i] = std::make_pair(ret_matches[i].first, sqrt(ret_matches[i].second));
+        //ret_matches_vec[i].second = sqrt(ret_matches_vec[i].second);
+      return ret_matches_vec;
     }
   };
 

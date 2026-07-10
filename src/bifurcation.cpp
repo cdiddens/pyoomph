@@ -15,7 +15,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 
-The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+The main author may be contacted at c.diddens@utwente.nl
 
 ================================================================================*/
 
@@ -87,8 +87,7 @@ namespace pyoomph
     {
       double phi=2.0*MathematicalConstants::Pi*double(iphi)/double(n_phi_samples);      
       // If res==0, <Re(eigenvector),Im(eigenvector)> will be rotated to zero
-      double res=-GiGi*sin(phi)*cos(phi) - GrGi*sin(phi)*sin(phi) + GrGi*cos(phi)*cos(phi) + GrGr*sin(phi)*cos(phi);
-      unsigned iter=0;
+      double res=-GiGi*sin(phi)*cos(phi) - GrGi*sin(phi)*sin(phi) + GrGi*cos(phi)*cos(phi) + GrGr*sin(phi)*cos(phi);      
       bool success=false;
       for  ( unsigned  iter=0; iter<n_inter;iter++)
       {
@@ -2330,7 +2329,7 @@ namespace pyoomph
   {
     // Get the raw value
     unsigned raw_ndof = elem_pt->ndof();
-    unsigned long global_eqn;
+    unsigned long global_eqn=0;
     if (ieqn_local < raw_ndof)
     {
       global_eqn = elem_pt->eqn_number(ieqn_local);
@@ -2531,8 +2530,7 @@ namespace pyoomph
           }
           else
           {
-            jacobian(raw_ndof + n, raw_ndof + m) = jacobian_real(n, m);
-            unsigned global_eqn = elem_pt->eqn_number(m);
+            jacobian(raw_ndof + n, raw_ndof + m) = jacobian_real(n, m);            
           }
         }
 
@@ -2772,8 +2770,7 @@ namespace pyoomph
       }
     }
 
-    // Get total number of dofs in the element
-    unsigned ndof = elem_pt->ndof();
+    
     // Loop through the dofs
     for (unsigned i = 0; i < raw_ndof; i++)
     {
@@ -3236,7 +3233,6 @@ namespace pyoomph
           // Central difference first order accurate
           this->FD_ds_weights[i].resize(2);
           this->FD_ds_inds[i].resize(2);
-          double si=get_knot_value(i);
           double sip1=get_knot_value(i+1);
           double sim1=get_knot_value(i-1);
           this->FD_ds_weights[i][0]=-1.0/(sip1-sim1);
@@ -3357,14 +3353,14 @@ namespace pyoomph
     double L=this->s_knots.back()-this->s_knots.front();
     double offs=0.0;
     while (i<0) { i+=this->s_knots.size()-1; offs-=L; }
-    while (i>=this->s_knots.size()-1) { i-=this->s_knots.size()-1; offs+=L; }
+    while (i>=(int)(this->s_knots.size())-1) { i-=(int)this->s_knots.size()-1; offs+=L; }
     return this->s_knots[i]+offs;
   }
 
   unsigned PeriodicOrbitHandler::get_periodic_knot_index(int i)
   {    
     while (i<0) { i+=this->s_knots.size()-1; }
-    while (i>=this->s_knots.size()-1) { i-=this->s_knots.size()-1;  }
+    while (i>=(int)this->s_knots.size()-1) { i-=(int)this->s_knots.size()-1;  }
     return i;
   }
 
@@ -3385,7 +3381,7 @@ namespace pyoomph
                                               Ndof, false);
     // Remove all previous sparse storage used during Jacobian assembly
     Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
-    if (basis) delete this->basis; this->basis=NULL;
+    if (basis) {delete this->basis; this->basis=NULL;}
   }
   unsigned long PeriodicOrbitHandler::eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local)
   {
@@ -3844,7 +3840,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
           Uplus[i]=Tadd[ti][glob_eqs[i]];
         }
         double invds=this->FD_ds_weights[ti][0];
-        unsigned index0,indexplus;        
+        unsigned index0;         //,indexplus
         for (unsigned int i=0;i<raw_ndof;i++)
         {
             U[i]=0.5*(U0[i]+Uplus[i]);
@@ -4089,7 +4085,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
 
           for (unsigned int i=0;i<raw_ndof;i++)
           {
-            unsigned glob_eq=elem_pt->eqn_number(i);
+            //unsigned glob_eq=elem_pt->eqn_number(i);
             *(alldofs[glob_eqs[i]])=Ulocal[i]; // Set the unknowns
           }
 

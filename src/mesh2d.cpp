@@ -15,7 +15,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 
-The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+The main author may be contacted at c.diddens@utwente.nl
 
 ================================================================================*/
 
@@ -242,7 +242,7 @@ namespace pyoomph
     if (!n4)
     {
       auto * functable=codeinst->get_func_table();
-      unsigned ntot = functable->numfields_C2TB_basebulk + functable->numfields_C2_basebulk + functable->numfields_C1TB_basebulk+ functable->numfields_C1_basebulk;
+      unsigned ntot = functable->total_num_fields_basebulk;
       n4=new pyoomph::BoundaryNode(n1->time_stepper_pt(),n1->nlagrangian(), n1->nlagrangian_type(), n1->ndim(), n1->nposition_type(), ntot);
       for (unsigned t=0;t<n1->time_stepper_pt()->ntstorage();t++)
       {

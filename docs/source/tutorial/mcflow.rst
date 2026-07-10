@@ -14,6 +14,7 @@ pyoomph has a set of predefined equations, that allows to easily add flow of mul
    mcflow/rtinstab.rst
    mcflow/freesurf.rst
    mcflow/marainstab.rst
+   mcflow/gcl.rst   
    mcflow/contact.rst
    mcflow/surfact.rst
    mcflow/unifac.rst

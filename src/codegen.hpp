@@ -15,7 +15,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 
-The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+The main author may be contacted at c.diddens@utwente.nl
 
 ================================================================================*/
 
@@ -480,7 +480,7 @@ namespace pyoomph
                }
                if (this->ensure_dt_order!=-1)
                {
-                 if (shp.dt_order!=this->ensure_dt_order) return 0;
+                 if ((int)shp.dt_order!=this->ensure_dt_order) return 0;
                }
                if (this->ensure_dt_scheme!="")
                {
@@ -594,6 +594,7 @@ namespace pyoomph
    {
    public:
       bool can_have_hanging_nodes() override;
+      std::string get_hang_name() const override { return "Cont[SPACE_INDEX_" + name + "]"; }
       ContinuousFiniteElementSpace(FiniteElementCode *_code, const std::string &_name) : FiniteElementSpace(_code, _name) {}
    };
 
@@ -602,6 +603,7 @@ namespace pyoomph
    public:
       virtual std::string get_num_nodes_str(FiniteElementCode *forcode) const;
       virtual std::string get_eqn_number_str(FiniteElementCode *forcode) const;
+      std::string get_hang_name() const override { return name; } 
       PositionFiniteElementSpace(FiniteElementCode *_code, const std::string &_name) : ContinuousFiniteElementSpace(_code, _name) {}
       virtual void write_generic_RJM_jacobian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns,FiniteElementField * residual_field);
       virtual bool write_generic_Hessian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns);
@@ -739,8 +741,7 @@ namespace pyoomph
       FiniteElementCode *bulk_code;                   // Code of the bulk element
       FiniteElementCode *opposite_interface_code;     // Code of the interface elements at the opposite side of the interface
       std::vector<FiniteElementSpace *> spaces;       // Spaces in descending complexity order
-      std::vector<FiniteElementCode *> required_odes; // Codes of coupled ODEs
-      std::set<int> integral_dx_history_required; // Stores the history indices where the history of dx is required. This can be relevant for moving meshes, where dx changes with time
+      std::vector<FiniteElementCode *> required_odes; // Codes of coupled ODEs      
       std::vector<GiNaC::ex> residual;
       std::set<std::string> ignore_assemble_residuals; // E.g. for azimuthal eigenvalue matrices. Residual is not used => don't assemble
       //std::map<std::string,std::set<int> > remove_underived_modes; // If in the Jacobian still modes are present that are not derived from interpolated_... to shape_..., they are removed. They can appear in eigenderivatives
@@ -808,7 +809,7 @@ namespace pyoomph
       virtual GiNaC::ex write_code_subexpressions(std::ostream &os, std::string indent, GiNaC::ex for_what, const std::set<ShapeExpansion> &required_shapeexps, bool hessian);
       virtual GiNaC::ex expand_initial_or_Dirichlet(const std::string &fieldname, GiNaC::ex expression);
       virtual GiNaC::ex extract_spatial_integral_part(const GiNaC::ex &inp, bool eulerian, bool lagrangian);
-
+      virtual void write_required_shapes_for_code(std::ostream & os, std::string func_type, std::string indent, FiniteElementCode *for_code, int type);
    public:
       void add_contributing_field(FiniteElementField *field) { contributing_fields.insert(field); }
       unsigned get_current_residual_index() const { return residual_index; }
@@ -978,8 +979,7 @@ namespace pyoomph
          else return this->get_domain_name();
       }      
       virtual void set_discontinuous_refinement_exponent(std::string field, double exponent);
-      double warn_on_large_numerical_factor = 0.0;
-      bool bulk_position_space_to_C1 = false;
+      double warn_on_large_numerical_factor = 0.0;      
       bool use_shared_shape_buffer_during_multi_assemble = false;
       LaTeXPrinter *latex_printer;
       virtual void set_latex_printer(LaTeXPrinter *lp) { latex_printer = lp; }

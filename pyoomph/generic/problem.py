@@ -21,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -1893,6 +1893,7 @@ class Problem(_pyoomph.Problem):
         self.cmdlineparser.add_argument("--where",help="Python bool expression involving variables time or step. Only used in runmodes c and p",type=str,default="True")
         self.cmdlineparser.add_argument("--largest_residuals",help="Debug the largest residuals",type=int,default=self._debug_largest_residual)
         self.cmdlineparser.add_argument("--generate_precice_cfg",help="Generate some parts of a preCICE configuration file from the coupling equations",action="store_true")
+        self.cmdlineparser.add_argument("--quick-test",help="Stops after the first successful Newton method. Useful for quick testing",action="store_true")
 
     def parse_cmd_line(self):
         from ..materials.generic import MaterialProperties
@@ -2208,6 +2209,12 @@ class Problem(_pyoomph.Problem):
         if self._bifurcation_reactivation_after_adaptation is not None:
             self._reactivate_bifurcation_tracking_after_adaption()
         self._bifurcation_reactivation_after_adaptation=None
+        
+        if self.cmdlineargs.quick_test:
+            print("QUICK TEST: STOPPING AFTER FIRST SUCCESSFUL NEWTON SOLVE, BUT DOING OUTPUT FIRST")
+            self.output()
+            print("QUICK TEST: STOPPING AFTER FIRST SUCCESSFUL NEWTON SOLVE")
+            sys.exit(0)
 
     def remeshing_necessary(self):        
         """

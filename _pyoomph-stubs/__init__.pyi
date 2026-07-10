@@ -438,7 +438,6 @@ class FiniteElementCode:
     _coordinates_as_dofs: bool
     analytical_jacobian: bool
     analytical_position_jacobian: bool
-    bulk_position_space_to_C1: bool
     ccode_expression_mode: str
     debug_jacobian_epsilon: float
     stop_on_jacobian_difference: bool

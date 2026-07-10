@@ -15,7 +15,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 
-The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+The main author may be contacted at c.diddens@utwente.nl
 
 ================================================================================*/
 
@@ -629,7 +629,7 @@ void PyReg_Mesh(py::module &m)
 			 
 			 pyoomph::BulkElementODE0d * ode=dynamic_cast<pyoomph::BulkElementODE0d *>(self);
 			 if (!ode) { throw_runtime_error("Not an ODE element"); }
-			 unsigned ndata=ode->get_code_instance()->get_func_table()->numfields_D0;
+			 unsigned ndata=ode->get_code_instance()->get_func_table()->info_D0.numfields;
 			 auto data=py::array_t<double>({ndata});
 			 ode->to_numpy((double*)data.request().ptr);
 			 std::map<std::string,unsigned> field_desc;
@@ -1034,19 +1034,21 @@ void PyReg_Mesh(py::module &m)
  			 unsigned nlagrange=(node0 ? node0 ->nlagrangian() : 0);
 			 unsigned ncontfields=(be ? be->ncont_interpolated_values() : 0);
 			 unsigned nDGfields=(be ? be->num_DG_fields(false) :0);
-			 unsigned naddC2TB=(be ? be->nadditional_fields_C2TB() : 0);			 			 
-			 unsigned naddC2=(be ? be->nadditional_fields_C2() : 0);
-			 unsigned naddC1TB=(be ? be->nadditional_fields_C1TB() : 0);			 			 
-			 unsigned naddC1=(be ? be->nadditional_fields_C1() : 0);
+			 unsigned nadd_interf=0;
+			 auto *ft=be->get_code_instance()->get_func_table();
+			 for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
+			 {
+				nadd_interf+=ft->present_continuous_spaces[si]->numfields-ft->present_continuous_spaces[si]->numfields_basebulk;
+			 }			 
 			 unsigned nnormal=0;
 			 if (be->nodal_dimension()==be->dim()+1 || dynamic_cast<pyoomph::InterfaceMesh *>(self)) {nnormal=be->nodal_dimension();} //TODO: >= ? But what is a normal of a 1d line in 3d. XXX MAKE SURE TO ADJUST IT ALSO IN Mesh::to_numpy
-			 auto nodal_data=py::array_t<double>({nnode,nodal_dim+nlagrange+ncontfields+nDGfields+naddC2TB+naddC2+naddC1TB+naddC1+nnormal});
+			 auto nodal_data=py::array_t<double>({nnode,nodal_dim+nlagrange+ncontfields+nDGfields+nadd_interf+nnormal});
 			 unsigned nelem;
 			 unsigned numelem_indices=self->get_num_numpy_elemental_indices(tesselate_tri,nelem,discontinuous);
 			 auto elemtypes=py::array_t<int>({nelem});
 			 auto elem_node_inds=py::array_t<int>({nelem,numelem_indices});
-			 unsigned numD0=be->get_code_instance()->get_func_table()->numfields_D0;
-			 unsigned numDL=be->get_code_instance()->get_func_table()->numfields_DL;
+			 unsigned numD0=be->get_code_instance()->get_func_table()->info_D0.numfields;
+			 unsigned numDL=be->get_code_instance()->get_func_table()->info_DL.numfields;
 			 unsigned DL_stride=(be->dim()+1);
 			 auto D0_data=py::array_t<double>({(discontinuous ? nnode : nelem),numD0});
 			 py::array_t<double> DL_data;

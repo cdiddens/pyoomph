@@ -15,7 +15,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 
-The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+The main author may be contacted at c.diddens@utwente.nl
 
 ================================================================================*/
 
@@ -72,7 +72,7 @@ namespace pyoomph
 	{
 		GiNaC::ex towrite;
 		std::string mode = csrc_opts.for_code->ccode_expression_mode;
-		csrc_opts.for_code->archive.archive_ex(expr, ("expression_",std::to_string(csrc_opts.for_code->archive.num_expressions())).c_str());
+		csrc_opts.for_code->archive.archive_ex(expr, ("expression_"+std::to_string(csrc_opts.for_code->archive.num_expressions())).c_str());
 		if (mode == "deterministic")
 		{
 			//GiNaC::print_sorted_GiNaC(GiNaC::expand(GiNaC::expand(expr)),os,csrc_opts);
@@ -1265,7 +1265,11 @@ namespace pyoomph
 	std::string FiniteElementSpace::get_num_nodes_str(FiniteElementCode *forcode) const
 	{
 		std::string eleminfo = forcode->get_elem_info_str(this);
-		return eleminfo + "->" + "nnode_" + this->get_shape_name();
+		if (this->get_shape_name()=="DL") //TODO: Make this in another way
+		{
+			return eleminfo + "->" + "nnode_DL";
+		}
+		else return eleminfo + "->" + "nnode_of_space[SPACE_INDEX_" + this->get_shape_name() + "]";
 	}
 
 	std::string D0FiniteElementSpace::get_num_nodes_str(FiniteElementCode *forcode) const
@@ -2395,10 +2399,10 @@ namespace pyoomph
 				
 				auto cmp_spaces=[&for_code](FiniteElementSpace * a, FiniteElementSpace * b) 
 				{ 			
-					return a->get_name()<b->get_name() || 
-						   (a->get_name()==b->get_name() &&  a->get_code()->get_full_domain_name() < b->get_code()->get_full_domain_name() || 
-						   (a->get_name()==b->get_name() &&  a->get_code()->get_full_domain_name() == b->get_code()->get_full_domain_name() && a->get_num_nodes_str(for_code)<b->get_num_nodes_str(for_code)) || 
-						   (a->get_name()==b->get_name() &&  a->get_code()->get_full_domain_name() == b->get_code()->get_full_domain_name() && a->get_num_nodes_str(for_code)==b->get_num_nodes_str(for_code)) && for_code->get_elem_info_str(a)<for_code->get_elem_info_str(b));
+					return (a->get_name()<b->get_name()) || 
+						   ((a->get_name()==b->get_name()) &&  (a->get_code()->get_full_domain_name() < b->get_code()->get_full_domain_name())) || 
+						   ((a->get_name()==b->get_name()) &&  (a->get_code()->get_full_domain_name() == b->get_code()->get_full_domain_name()) && (a->get_num_nodes_str(for_code)<b->get_num_nodes_str(for_code))) || 
+						   ((a->get_name()==b->get_name()) &&  (a->get_code()->get_full_domain_name() == b->get_code()->get_full_domain_name()) && (a->get_num_nodes_str(for_code)==b->get_num_nodes_str(for_code)) && (for_code->get_elem_info_str(a)<for_code->get_elem_info_str(b)));
 				};
 				std::set<FiniteElementSpace *, decltype(cmp_spaces)> jacobian_spaces(cmp_spaces);
 				
@@ -3786,21 +3790,53 @@ namespace pyoomph
 				if (sp.get_code() == this || sp.get_code() == NULL)
 				{
 					this->mark_shapes_required(for_what, this->get_my_position_space(), "normal");
+					if (this->bulk_code)
+					{
+						this->mark_shapes_required(for_what, this->bulk_code->get_my_position_space(), "psi");
+					}
+					else
+					{
+						this->mark_shapes_required(for_what, this->get_my_position_space(), "psi");
+					}
 				}
 				else if (this->bulk_code && sp.get_code() == this->bulk_code)
 				{
 					this->mark_shapes_required(for_what, this->bulk_code->get_my_position_space(), "normal");
+					if (this->bulk_code->bulk_code)
+					{
+						this->mark_shapes_required(for_what, this->bulk_code->bulk_code->get_my_position_space(), "psi");
+					}
+					else
+					{
+						this->mark_shapes_required(for_what, this->bulk_code->get_my_position_space(), "psi");
+					}
 				}
 				else if (this->opposite_interface_code && sp.get_code() == this->opposite_interface_code)
 				{
 					this->mark_shapes_required(for_what, this->opposite_interface_code->get_my_position_space(), "normal");
+					if (this->opposite_interface_code->bulk_code)
+					{
+						this->mark_shapes_required(for_what, this->opposite_interface_code->bulk_code->get_my_position_space(), "psi");
+					}
+					else
+					{
+						this->mark_shapes_required(for_what, this->opposite_interface_code->get_my_position_space(), "psi");
+					}
 				}
 				else
 				{
 					throw_runtime_error("Normal of this domain not accessible");
 				}
 			}
-			if (GiNaC::is_a<GiNaC::GiNaCElementSizeSymbol>(*i))
+			else if (GiNaC::is_a<GiNaC::GiNaCSpatialIntegralSymbol>(*i))
+			{				
+				auto &sp = GiNaC::ex_to<GiNaC::GiNaCSpatialIntegralSymbol>(*i).get_struct();				
+				if (!sp.is_lagrangian())
+				{
+					  if (sp.history_step!=0) this->mark_shapes_required(for_what, this->get_my_position_space(), "history_integral_dx"+std::to_string(sp.history_step));
+				}									
+			}
+			else if (GiNaC::is_a<GiNaC::GiNaCElementSizeSymbol>(*i))
 			{
 				const pyoomph::ElementSizeSymbol &sp = GiNaC::ex_to<GiNaC::GiNaCElementSizeSymbol>(*i).get_struct();
 				std::string es_name = (sp.is_lagrangian() ? "elemsize_Lagrangian" : "elemsize_Eulerian");
@@ -3867,10 +3903,10 @@ namespace pyoomph
 					{
 						std::cout << " ADDING IT TO THE SET " << (*i) << " which has currently " << dx_symbs.size() << " elements " << std::endl;
 					}
-					if (eulerian)
+					/*if (eulerian)
 					{
 					  if (sp.history_step!=0) this->integral_dx_history_required.insert(sp.history_step);
-					}
+					}*/
 					dx_symbs.insert(0+GiNaC::ex_to<GiNaC::GiNaCSpatialIntegralSymbol>(*i));
 					if (pyoomph_verbose)
 					{
@@ -4214,13 +4250,7 @@ namespace pyoomph
 
 		// Mark other requirements
 		mark_further_required_fields(resi, "ResJac[" + std::to_string(residual_index) + "]");
-		/*for (GiNaC::const_preorder_iterator i = resi.preorder_begin(); i != resi.preorder_end(); ++i)
-		{
-		 if (GiNaC::is_a<GiNaC::GiNaCNormalSymbol>(*i))
-		 {
-			   this->mark_shapes_required("ResJac",NULL,"normal");
-		 }
-		}*/
+
 
 		if (this->coordinates_as_dofs)
 		{
@@ -6117,25 +6147,12 @@ namespace pyoomph
 		bool require_bulk_bulk = false;
 		bool require_opposite_interface = false;
 		bool require_opposite_bulk = false;
-		std::vector<std::string> lines;
 		for (auto &fieldentry : entry)
 		{
-
 			if (fieldentry.first == NULL)
 			{
-				// Write the stuff like normal and so on
-				for (auto &subentry : fieldentry.second)
-				{
-					if (subentry.second)
-					{
-						lines.push_back(indent + "functable->shapes_required_" + func_type + "." + subentry.first + " = true;");
-					}
-				}
-				continue;
+				continue; // No space attached
 			}
-
-			if (pyoomph_verbose)
-				std::cout << "REQUIRED FIELDS FOR " << func_type << "  " << fieldentry.first->get_name() << "  code " << fieldentry.first->get_code() << " [this " << this << "]" << std::endl;
 			bool is_in_my_space = false;
 			for (auto &s : spaces)
 			{
@@ -6145,298 +6162,164 @@ namespace pyoomph
 					break;
 				}
 			}
-			if (!is_in_my_space)
+			if (is_in_my_space) continue;			
+			bool found_elsewhere = false;
+			if (bulk_code)
 			{
-				bool found_elsewhere = false;
-				if (bulk_code)
-				{
-					for (auto &s : bulk_code->spaces)
-					{
-						if (s == fieldentry.first)
-						{
-							require_bulk = true;
-							found_elsewhere = true;
-							break;
-						}
-					}
-					if (pyoomph_verbose)
-						std::cout << "IIIII Test if func in bulk space " << fieldentry.first << " returns in: " << require_bulk << std::endl;
-					if (!found_elsewhere && bulk_code->bulk_code)
-					{
-						for (auto &s : bulk_code->bulk_code->spaces)
-						{
-							if (s == fieldentry.first)
-							{
-								require_bulk = true;
-								require_bulk_bulk = true;
-								found_elsewhere = true;
-								break;
-							}
-						}
-						if (pyoomph_verbose)
-							std::cout << "IIIII Test if func in bulk->bulk space " << fieldentry.first << " returns in: " << require_bulk_bulk << std::endl;
-					}
-				}
-				if (!found_elsewhere && opposite_interface_code)
-				{
-					for (auto &s : opposite_interface_code->spaces)
-					{
-						if (s == fieldentry.first)
-						{
-							require_opposite_interface = true;
-							found_elsewhere = true;
-							break;
-						}
-					}
-					if (pyoomph_verbose)
-						std::cout << "IIIII Test if func in opposite interface space " << fieldentry.first << " returns in: " << require_opposite_interface << std::endl;
-				}
-				if (!found_elsewhere && opposite_interface_code && opposite_interface_code->bulk_code)
-				{
-					for (auto &s : opposite_interface_code->bulk_code->spaces)
-					{
-						if (s == fieldentry.first)
-						{
-							require_opposite_bulk = true;
-							found_elsewhere = true;
-							break;
-						}
-					}
-					if (pyoomph_verbose)
-						std::cout << "IIIII Test if func in opposite interface space " << fieldentry.first << " returns in: " << require_opposite_bulk << std::endl;
-				}
-				if (!found_elsewhere)
-				{
-					std::ostringstream oss;
-					oss << "Cannot find a required space " << fieldentry.first;
-					throw_runtime_error(oss.str());
-				}
-				continue;
-			}
-			for (auto &psientry : fieldentry.second)
-			{
-				if (psientry.second)
-				{
-					//os << indent << "functable->shapes_required_" << func_type << "." << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
-					lines.push_back(indent + "functable->shapes_required_" + func_type + "." + psientry.first + "_" + fieldentry.first->get_name() + " = true;");
-					
-				}
-			}
-		}
-
-		// Check if we need the bulk for the normal
-		bool just_the_normal = false;
-		if (!require_bulk && bulk_code)
-		{
-			if (this->required_shapes[func_type].count(get_my_position_space()) && this->required_shapes[func_type][get_my_position_space()].count("normal"))
-			{
-				just_the_normal = true;
-				require_bulk = true;
-			}
-		}
-
-		bool just_the_parent_normal = false;
-		if (!require_bulk_bulk && bulk_code && bulk_code->bulk_code)
-		{
-			if (this->required_shapes[func_type].count(bulk_code->get_my_position_space()) && this->required_shapes[func_type][bulk_code->get_my_position_space()].count("normal"))
-			{
-				just_the_parent_normal = true;
-				require_bulk = true;
-				require_bulk_bulk = true;
-			}
-		}
-
-		// Check if we need the bulk for the normal
-		bool just_the_opposite_normal = false;
-		if (!require_opposite_interface && opposite_interface_code)
-		{
-			if (this->required_shapes[func_type].count(opposite_interface_code->get_my_position_space()) && this->required_shapes[func_type][opposite_interface_code->get_my_position_space()].count("normal"))
-			{
-				just_the_opposite_normal = true;
-				require_opposite_interface = true;
-				require_opposite_bulk=true;
-			}
-		}
-
-		if (require_bulk)
-		{
-			os << " functable->shapes_required_" << func_type << ".bulk_shapes=(JITFuncSpec_RequiredShapes_FiniteElement_t*)calloc(sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t),1);" << std::endl;
-			for (auto &fieldentry : entry)
-			{
-				bool is_in_my_space = false;
 				for (auto &s : bulk_code->spaces)
 				{
 					if (s == fieldentry.first)
 					{
-						is_in_my_space = true;
+						require_bulk = true;
+						found_elsewhere = true;
 						break;
 					}
 				}
-				if (!is_in_my_space)
+				if (!found_elsewhere && bulk_code->bulk_code)
 				{
-					continue;
-				}
-				for (auto &psientry : fieldentry.second)
-				{
-					if (psientry.second)
-					{
-						//os << indent << "functable->shapes_required_" << func_type << ".bulk_shapes->" << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
-						lines.push_back(indent + "functable->shapes_required_" + func_type + ".bulk_shapes->" + psientry.first + "_" + fieldentry.first->get_name() + " = true;");
-					}
-				}
-			}
-
-			if (just_the_normal)
-			{
-				//os << indent << "functable->shapes_required_" << func_type << ".bulk_shapes->psi_Pos = true;" << std::endl;
-				lines.push_back(indent + "functable->shapes_required_" + func_type + ".bulk_shapes->psi_Pos = true;");
-			}
-
-			
-			if (require_bulk_bulk)
-			{
-
-				os << " functable->shapes_required_" << func_type << ".bulk_shapes->bulk_shapes=(JITFuncSpec_RequiredShapes_FiniteElement_t*)calloc(sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t),1);" << std::endl;
-				for (auto &fieldentry : entry)
-				{
-					bool is_in_my_space = false;
 					for (auto &s : bulk_code->bulk_code->spaces)
 					{
 						if (s == fieldentry.first)
 						{
-							is_in_my_space = true;
+							require_bulk = true;
+							require_bulk_bulk = true;
+							found_elsewhere = true;
 							break;
 						}
 					}
-					if (!is_in_my_space)
-					{
-						continue;
-					}
-					for (auto &psientry : fieldentry.second)
-					{
-						if (psientry.second)
-						{
-							//os << indent << "functable->shapes_required_" << func_type << ".bulk_shapes->bulk_shapes->" << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
-							lines.push_back(indent + "functable->shapes_required_" + func_type + ".bulk_shapes->bulk_shapes->" + psientry.first + "_" + fieldentry.first->get_name() + " = true;");
-						}
-					}
 				}
-				if (just_the_parent_normal)
-				{
-					//os << indent << "functable->shapes_required_" << func_type << ".bulk_shapes->bulk_shapes->psi_Pos = true;" << std::endl;
-					lines.push_back(indent + "functable->shapes_required_" + func_type + ".bulk_shapes->bulk_shapes->psi_Pos = true;");
-				}
-
 			}
-		}
-
-		/* //Opposite side of the interface
-		just_the_normal=false;
-		if (!require_opposite_interface && opposite_interface_code) //TODO: THis required here?
-		{
-		 if (this->required_shapes[func_type].count(NULL) && this->required_shapes[func_type][NULL].count("normal"))
-		 {
-		  just_the_normal=true;
-		  require_bulk=true;
-		 }
-		}*/
-
-		if (require_opposite_interface || require_opposite_bulk)
-		{
-			os << " functable->shapes_required_" << func_type << ".opposite_shapes=(JITFuncSpec_RequiredShapes_FiniteElement_t*)calloc(sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t),1);" << std::endl;
-
-			for (auto &fieldentry : entry)
+			if (!found_elsewhere && opposite_interface_code)
 			{
-				bool is_in_my_space = false;
 				for (auto &s : opposite_interface_code->spaces)
 				{
 					if (s == fieldentry.first)
 					{
-						is_in_my_space = true;
+						require_opposite_interface = true;
+						found_elsewhere = true;
 						break;
 					}
 				}
-				if (!is_in_my_space)
-				{
-					continue;
-				}
-				for (auto &psientry : fieldentry.second)
-				{
-					if (psientry.second)
-					{
-						//os << indent << "functable->shapes_required_" << func_type << ".opposite_shapes->" << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
-						lines.push_back(indent + "functable->shapes_required_" + func_type + ".opposite_shapes->" + psientry.first + "_" + fieldentry.first->get_name() + " = true;");
-						if (psientry.first + "_" + fieldentry.first->get_name()=="normal_Pos")
-						{
-							lines.push_back(indent + "functable->shapes_required_" + func_type + ".opposite_shapes->bulk_shapes->psi_Pos = true;");
-						}
-					}
-				}
 			}
-
-			if (just_the_opposite_normal)
+			if (!found_elsewhere && opposite_interface_code && opposite_interface_code->bulk_code)
 			{
-				//os << indent << "functable->shapes_required_" << func_type << ".opposite_shapes->psi_Pos = true;" << std::endl;
-				lines.push_back(indent + "functable->shapes_required_" + func_type + ".opposite_shapes->bulk_shapes->psi_Pos = true;");
-			}
-			
-			/*
-			if (just_the_normal) //TODO: THis required here?
-			{
-			  os << indent << "functable->shapes_required_"  << func_type << ".bulk_shapes->psi_Pos = true;" << std::endl;
-			}
-			*/
-		}
-
-		if (require_opposite_bulk)
-		{
-
-			os << " functable->shapes_required_" << func_type << ".opposite_shapes->bulk_shapes=(JITFuncSpec_RequiredShapes_FiniteElement_t*)calloc(sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t),1);" << std::endl;
-
-			for (auto &fieldentry : entry)
-			{
-				bool is_in_my_space = false;
 				for (auto &s : opposite_interface_code->bulk_code->spaces)
 				{
 					if (s == fieldentry.first)
 					{
-						is_in_my_space = true;
+						require_opposite_interface = true;
+						require_opposite_bulk = true;
+						found_elsewhere = true;
 						break;
 					}
 				}
-				if (!is_in_my_space)
+			}
+			if (!found_elsewhere)
+			{
+				std::ostringstream oss;
+				oss << "Cannot find a required space " << fieldentry.first;
+				throw_runtime_error(oss.str());
+			}						
+		}
+
+		write_required_shapes_for_code(os,func_type,indent,this,0);
+		if (require_bulk)
+		{
+			write_required_shapes_for_code(os,func_type,indent,this->bulk_code,1);
+			if (require_bulk_bulk)
+			{
+				write_required_shapes_for_code(os,func_type,indent,this->bulk_code->bulk_code,2);
+			}
+		}
+		
+		if (require_opposite_interface)
+		{
+			write_required_shapes_for_code(os,func_type,indent,this->opposite_interface_code,-1);
+			if (require_opposite_bulk)
+			{
+				write_required_shapes_for_code(os,func_type,indent,this->opposite_interface_code->bulk_code,-2);
+			}
+		}
+		
+	}
+
+
+	void FiniteElementCode::write_required_shapes_for_code(std::ostream & os, std::string func_type, std::string indent, FiniteElementCode *for_code, int type)
+	{
+		auto &entry = this->required_shapes[func_type];
+		std::string prefix=indent+"functable->shapes_required_" + func_type+".";
+		if (type==1)
+		{
+			os << " functable->shapes_required_" << func_type << ".bulk_shapes=(JITFuncSpec_RequiredShapes_FiniteElement_t*)calloc(sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t),1);" << std::endl;
+			prefix+= "bulk_shapes->";
+		}
+		else if (type==2)
+		{
+			os << " functable->shapes_required_" << func_type << ".bulk_shapes->bulk_shapes=(JITFuncSpec_RequiredShapes_FiniteElement_t*)calloc(sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t),1);" << std::endl;
+			prefix+= "bulk_shapes->bulk_shapes->";
+		}
+		else if (type==-1)
+		{
+			os << " functable->shapes_required_" << func_type << ".opposite_shapes=(JITFuncSpec_RequiredShapes_FiniteElement_t*)calloc(sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t),1);" << std::endl;
+			prefix+= "opposite_shapes->";
+		}
+		else if (type==-2)
+		{
+			os << " functable->shapes_required_" << func_type << ".opposite_shapes->bulk_shapes=(JITFuncSpec_RequiredShapes_FiniteElement_t*)calloc(sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t),1);" << std::endl;
+			prefix+= "opposite_shapes->bulk_shapes->";
+		}
+			
+		for (auto &fieldentry : entry)
+		{
+			bool is_in_my_space = false;
+			for (auto &s : for_code->spaces)
+			{
+				if (s == fieldentry.first)
 				{
-					continue;
+					is_in_my_space = true;
+					break;
 				}
-				for (auto &psientry : fieldentry.second)
+			}
+			if  (!is_in_my_space) continue;
+
+			if (fieldentry.first == NULL)
+			{
+				// Write the stuff without a space
+				for (auto &subentry : fieldentry.second)
 				{
-					if (psientry.second)
+					if (subentry.second)
 					{
-						//os << indent << "functable->shapes_required_" << func_type << ".opposite_shapes->bulk_shapes->" << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
-						lines.push_back(indent + "functable->shapes_required_" + func_type + ".opposite_shapes->bulk_shapes->" + psientry.first + "_" + fieldentry.first->get_name() + " = true;");
+						os << prefix  << subentry.first << " = true; THESE SHOULD NOT APPEAR" << std::endl;
+					}
+				}
+				continue;
+			}
+
+			for (auto &psientry : fieldentry.second)
+			{
+				if (psientry.second)
+				{
+					if (psientry.first=="psi" || psientry.first=="dx_psi" || psientry.first=="dX_psi")
+					{
+						if (fieldentry.first->get_name()=="C1" || fieldentry.first->get_name()=="C1TB"||  fieldentry.first->get_name()=="C2" || fieldentry.first->get_name()=="C2TB")
+						{
+							os << prefix  << "continuous_spaces[SPACE_INDEX_"+fieldentry.first->get_name()+"]" << "." << psientry.first << " = true;" << std::endl;
+						}						
+						else
+						{
+							os << prefix  << fieldentry.first->get_name() << "." << psientry.first << " = true;" << std::endl;
+						}												
+					}
+					else
+					{
+						os << prefix  << psientry.first  << " = true;" << std::endl;
 					}
 				}
 			}
-			/*
-			if (just_the_normal) //TODO: THis required here?
-			{
-			  os << indent << "functable->shapes_required_"  << func_type << ".bulk_shapes->psi_Pos = true;" << std::endl;
-			}
-			*/
-		}
-
-		for (int history_step : this->integral_dx_history_required)
-        {
-		  lines.push_back(indent + "functable->shapes_required_" + func_type + ".history_integral_dx"+std::to_string(history_step) + "= true;");
-		}
-
-
-		std::sort(lines.begin(), lines.end());
-		for (auto &l : lines)
-		{
-			os << l << std::endl;
 		}
 	}
+
+	
 
 	GiNaC::ex FiniteElementCode::eval_flag(std::string flagname)
 	{
@@ -6514,21 +6397,47 @@ namespace pyoomph
 		}
 		else
 		{
+			GiNaC::matrix expam = GiNaC::ex_to<GiNaC::matrix>(expanded);
 			std::vector<std::string> dirindex = {"x", "y", "z"};
 			std::vector<std::string> res;
-			for (unsigned int cd = 0; cd < std::max(expanded.nops(), (size_t)(3)); cd++)
+			if (expam.rows()>1 || expam.cols()>1)
 			{
-				std::string nam = name + "_" + dirindex[cd];
-				if (!GiNaC::is_zero(expanded[cd]))
+				
+				for (unsigned int row = 0; row < std::min(expam.rows(), (unsigned int)3); row++)
 				{
-					this->integral_expressions[nam] = expanded[cd];
-					this->integral_expression_units[nam] = this->integral_expression_units[name];
-					res.push_back(nam);
+					for (unsigned int col = 0; col < std::min(expam.cols(), (unsigned int)3); col++)
+					{
+						std::string nam = name + "_" + dirindex[row] + dirindex[col];
+						if (!GiNaC::is_zero(expam(row, col)))
+						{
+							this->integral_expressions[nam] = expam(row, col);
+							this->integral_expression_units[nam] = this->integral_expression_units[name];
+							res.push_back(nam);
+						}
+						else
+						{
+							res.push_back("");
+						}
+					}
 				}
-				else
+			}
+			else
+			{						
+				for (unsigned int cd = 0; cd < std::max(expanded.nops(), (size_t)(3)); cd++)
 				{
-					res.push_back("");
+					std::string nam = name + "_" + dirindex[cd];
+					if (!GiNaC::is_zero(expanded[cd]))
+					{
+						this->integral_expressions[nam] = expanded[cd];
+						this->integral_expression_units[nam] = this->integral_expression_units[name];
+						res.push_back(nam);
+					}
+					else
+					{
+						res.push_back("");
+					}
 				}
+				
 			}
 			return res;
 		}
@@ -6748,10 +6657,18 @@ namespace pyoomph
 		init << " functable->debug_jacobian_epsilon = " << debug_jacobian_epsilon << ";" << std::endl;
 		init << " functable->stop_on_jacobian_difference = " << (stop_on_jacobian_difference ? "true" : "false") << ";" << std::endl;
 
-		init << " //New way" << std::endl;
-		for (std::string my_sp : std::vector<std::string>{"Pos","C2TB","C2","C1TB","C1","D2TB","D2","D1TB","D1","DL","D0"})
+		
+		for (std::string my_sp : std::vector<std::string>{"Pos","DL","D0"})
 		{
 			init << " strcpy(functable->info_" << my_sp << ".space_name, \"" << my_sp << "\");" << std::endl;
+		}
+		for (std::string my_sp : std::vector<std::string>{"C2TB","C2","C1TB","C1"})
+		{
+			init << " strcpy(functable->continuous_spaces[SPACE_INDEX_" << my_sp << "].space_name, \"" << my_sp << "\");" << std::endl;
+		}		
+		for (std::string my_sp : std::vector<std::string>{"D2TB","D2","D1TB","D1"})
+		{
+			init << " strcpy(functable->dg_spaces[SPACE_INDEX_" << my_sp << "].space_name, \"" << my_sp << "\");" << std::endl;
 		}
 
 		int index_offset = 0;
@@ -6771,30 +6688,21 @@ namespace pyoomph
 			}
 			if (numfields)
 			{
-				init << " // Old way" << std::endl;
-				init << " functable->numfields_" << space->get_name() << "=" << numfields << ";" << std::endl;
-				init << " functable->fieldnames_" << space->get_name() << "=(char **)malloc(sizeof(char*)*functable->numfields_" << space->get_name() << ");" << std::endl;
-				init << " // New way" << std::endl;
+								
 				init << " functable->info_" << space->get_name() << ".numfields=" << numfields << ";" << std::endl;
-				init << " functable->info_" << space->get_name() << ".fieldnames=(char **)malloc(sizeof(char*)*functable->info_" << space->get_name() << ".numfields);" << std::endl;
+				init << " functable->info_" << space->get_name() << ".fieldnames=(char **)malloc(sizeof(char*)*functable->info_" << space->get_name() << ".numfields);" << std::endl;				
 				for (auto &f : myfields)
 				{
 					if (f->get_space() != space)
 						continue;
 					if (f->get_name() == "mesh_x" || f->get_name() == "mesh_y" || f->get_name() == "mesh_z")
 						continue;
-					init << " // Old way" << std::endl;
-					init << " SET_INTERNAL_FIELD_NAME(functable->fieldnames_" << space->get_name() << "," << (f->index - index_offset) << ", \"" << f->get_name() << "\" );" << std::endl;
-					init << " // New way" << std::endl;
-					init << " SET_INTERNAL_FIELD_NAME(functable->info_" << space->get_name() << ".fieldnames," << (f->index - index_offset) << ", \"" << f->get_name() << "\" );" << std::endl;
-					cleanup << " // Old way" << std::endl;
-					cleanup << " pyoomph_tested_free(functable->fieldnames_" << space->get_name() << "[ " << (f->index - index_offset) <<"]); functable->fieldnames_" << space->get_name()<< "[" <<(f->index - index_offset) << "]=PYOOMPH_NULL; " << std::endl;
-					cleanup << " // New way" << std::endl;
+					
+					
+					init << " SET_INTERNAL_FIELD_NAME(functable->info_" << space->get_name() << ".fieldnames," << (f->index - index_offset) << ", \"" << f->get_name() << "\" );" << std::endl;										
 					cleanup << " pyoomph_tested_free(functable->info_" << space->get_name() << ".fieldnames[" << (f->index - index_offset) << "]); functable->info_" << space->get_name() << ".fieldnames[" << (f->index - index_offset) << "]=PYOOMPH_NULL; " << std::endl;
 				}
-				cleanup << " // Old way" << std::endl;
-				cleanup << " pyoomph_tested_free(functable->fieldnames_" << space->get_name() << "); functable->fieldnames_" << space->get_name() << "=PYOOMPH_NULL; " << std::endl;
-				cleanup << " // New way" << std::endl;
+								
 				cleanup << " pyoomph_tested_free(functable->info_" << space->get_name() << ".fieldnames); functable->info_" << space->get_name() << ".fieldnames=PYOOMPH_NULL; " << std::endl;
 				index_offset += numfields;
 			}
@@ -6806,6 +6714,8 @@ namespace pyoomph
 		unsigned int base_bulk_nodal_offset = 0;
 		unsigned int internal_data_offset = 0;
 		unsigned int DG_external_offset = 0;
+		unsigned int total_numfields=0;
+		unsigned int total_numfields_basebulk=0;
 //		unsigned int interf_buffer_offset = 0;
 		for (auto &space : spaces)
 		{
@@ -6819,6 +6729,15 @@ namespace pyoomph
 				if (f->get_space() == space)
 					numfields++;
 			}
+			std::string info_name = "info_" + space->get_name();
+			if (space->get_name() == "C1" || space->get_name() == "C1TB" || space->get_name() == "C2" || space->get_name() == "C2TB")
+			{
+				info_name = "continuous_spaces[SPACE_INDEX_" + space->get_name() + "]";
+			}
+			else if (space->get_name() == "D2TB" || space->get_name() == "D2" || space->get_name() == "D1TB" || space->get_name() == "D1" )
+			{
+				info_name = "dg_spaces[SPACE_INDEX_" + space->get_name() + "]";
+			}			
 			//		std::cout << "NUMFIELDS " << numfields << std::endl;
 			if (numfields)
 			{
@@ -6837,10 +6756,8 @@ namespace pyoomph
 					else
 						coordinate_space_validated = true;
 				}
-				init << " // Old way" << std::endl;
-				init << " functable->numfields_" << space->get_name() << "=" << numfields << ";" << std::endl;				
-				init << " // New way" << std::endl;
-				init << " functable->info_" << space->get_name() << ".numfields=" << numfields << ";" << std::endl;
+				init << " functable->" << info_name << ".numfields=" << numfields << ";" << std::endl;
+				total_numfields += numfields;
 
 				if (dynamic_cast<ContinuousFiniteElementSpace *>(space) || dynamic_cast<DGFiniteElementSpace *>(space))
 				{
@@ -6848,36 +6765,24 @@ namespace pyoomph
 					// Other fields stem from the interface
 					if (!bulk_code)
 					{
-						init << " // Old way" << std::endl;
-						init << " functable->numfields_" << space->get_name() << "_bulk=" << numfields << ";" << std::endl;
-						init << " functable->numfields_" << space->get_name() << "_basebulk=" << numfields << ";" << std::endl;
-						init << " functable->numfields_" << space->get_name() << "_new=" << numfields << ";" << std::endl;
-						init << " // New way" << std::endl;
-						init << " functable->info_" << space->get_name() << ".numfields_bulk=" << numfields << ";" << std::endl;
-						init << " functable->info_" << space->get_name() << ".numfields_basebulk=" << numfields << ";" << std::endl;
-						init << " functable->info_" << space->get_name() << ".numfields_new=" << numfields << ";" << std::endl;
+						
+						init << " functable->" << info_name << ".numfields_bulk=" << numfields << ";" << std::endl;
+						init << " functable->" << info_name << ".numfields_basebulk=" << numfields << ";" << std::endl;
+						init << " functable->" << info_name << ".numfields_new=" << numfields << ";" << std::endl;
+						total_numfields_basebulk += numfields;
 						
 						if (space->get_name()=="C1TB" && numfields>0) has_C1TB_fields=true;
 						
 						if (dynamic_cast<ContinuousFiniteElementSpace *>(space))
 						{
-							init << " // Old way" << std::endl;
-							init << " functable->nodal_offset_" << space->get_name() << "_basebulk =" << base_bulk_nodal_offset << ";" << std::endl;
-							init << " // New way" << std::endl;
-							init << " functable->info_" << space->get_name() << ".nodal_offset_basebulk =" << base_bulk_nodal_offset << ";" << std::endl;
+							init << " functable->" << info_name << ".nodal_offset_basebulk =" << base_bulk_nodal_offset << ";" << std::endl;
 						}
 						else if (dynamic_cast<DGFiniteElementSpace *>(space))
 						{
-							init << " // Old way" << std::endl;
-							init << " functable->internal_offset_" << space->get_name() << "_new =" << internal_data_offset << ";" << std::endl;
-							init << " // New way" << std::endl;
-							init << " functable->info_" << space->get_name() << ".internal_offset_new =" << internal_data_offset << ";" << std::endl;
+							init << " functable->" << info_name << ".internal_offset_new =" << internal_data_offset << ";" << std::endl;
 							internal_data_offset += numfields;
 						}
-						init << " // Old way" << std::endl;
-						init << " functable->buffer_offset_" << space->get_name() << "_basebulk =" << base_bulk_nodal_offset << ";" << std::endl;
-						init << " // New way" << std::endl;
-						init << " functable->info_" << space->get_name() << ".buffer_offset_basebulk =" << base_bulk_nodal_offset << ";" << std::endl;
+						init << " functable->" << info_name << ".buffer_offset_basebulk =" << base_bulk_nodal_offset << ";" << std::endl;
 						base_bulk_nodal_offset += numfields;
 					}
 					else
@@ -6922,66 +6827,43 @@ namespace pyoomph
 							}
 						}
 
-						init << " // Old way" << std::endl;
-						init << " functable->numfields_" << space->get_name() << "_bulk=" << ncbulk << ";" << std::endl;
-						init << " functable->numfields_" << space->get_name() << "_basebulk=" << ncbasebulk << ";" << std::endl;
-						init << " functable->numfields_" << space->get_name() << "_new=" << numfields - ncbulk << ";" << std::endl;
-						init << " // New way" << std::endl;
-						init << " functable->info_" << space->get_name() << ".numfields_bulk=" << ncbulk << ";" << std::endl;
-						init << " functable->info_" << space->get_name() << ".numfields_basebulk=" << ncbasebulk << ";" << std::endl;
-						init << " functable->info_" << space->get_name() << ".numfields_new=" << numfields - ncbulk << ";" << std::endl;
+						init << " functable->" << info_name << ".numfields_bulk=" << ncbulk << ";" << std::endl;
+						init << " functable->" << info_name << ".numfields_basebulk=" << ncbasebulk << ";" << std::endl;
+						init << " functable->" << info_name << ".numfields_new=" << numfields - ncbulk << ";" << std::endl;
+						total_numfields_basebulk += ncbasebulk;
 						if (dynamic_cast<ContinuousFiniteElementSpace *>(space))
 						{
-							init << " // Old way" << std::endl;
-							init << " functable->nodal_offset_" << space->get_name() << "_basebulk =" << base_bulk_nodal_offset << ";" << std::endl;
-							init << " // New way" << std::endl;
-							init << " functable->info_" << space->get_name() << ".nodal_offset_basebulk =" << base_bulk_nodal_offset << ";" << std::endl;
+
+							init << " functable->" << info_name << ".nodal_offset_basebulk =" << base_bulk_nodal_offset << ";" << std::endl;
 						}
 						else if (dynamic_cast<DGFiniteElementSpace *>(space))
 						{
-							init << " // Old way" << std::endl;
-							init << " functable->internal_offset_" << space->get_name() << "_new =" << internal_data_offset << ";" << std::endl;							
-							init << " functable->external_offset_" << space->get_name() << "_bulk = " << DG_external_offset << ";" << std::endl;
-							init << " // New way" << std::endl;
-							init << " functable->info_" << space->get_name() << ".internal_offset_new =" << internal_data_offset << ";" << std::endl;							
-							init << " functable->info_" << space->get_name() << ".external_offset_bulk = " << DG_external_offset << ";" << std::endl;
+							init << " functable->" << info_name << ".internal_offset_new =" << internal_data_offset << ";" << std::endl;							
+							init << " functable->" << info_name << ".external_offset_bulk = " << DG_external_offset << ";" << std::endl;
 							internal_data_offset += (numfields - ncbulk);
 							DG_external_offset += ncbulk;
 						}
-						init << " // Old way" << std::endl;
-						init << " functable->buffer_offset_" << space->get_name() << "_basebulk =" << base_bulk_nodal_offset << ";" << std::endl;
-						init << " // New way" << std::endl;
-						init << " functable->info_" << space->get_name() << ".buffer_offset_basebulk =" << base_bulk_nodal_offset << ";" << std::endl;
+
+						
+						init << " functable->" << info_name << ".buffer_offset_basebulk =" << base_bulk_nodal_offset << ";" << std::endl;
 						base_bulk_nodal_offset += ncbasebulk;
 					}
 				}
 				else if (dynamic_cast<DiscontinuousFiniteElementSpace *>(space))
-				{
-					init << " // Old way" << std::endl;
-					init << " functable->buffer_offset_" << space->get_name() << " =" << index_offset << ";" << std::endl;
-					init << " // New way" << std::endl;
-					init << " functable->info_" << space->get_name() << ".buffer_offset_basebulk =" << index_offset << "; // Using _basebulk here" << std::endl;
+				{					
+					init << " functable->" << info_name << ".buffer_offset_basebulk =" << index_offset << "; // Using _basebulk here" << std::endl;
 					if (!dynamic_cast<ExternalD0Space *>(space))
-					{
-						init << " // Old way" << std::endl;
-						init << " functable->internal_offset_" << space->get_name() << " =" << internal_data_offset << ";" << std::endl;
-						init << " // New way" << std::endl;
-						init << " functable->info_" << space->get_name() << ".internal_offset_new =" << internal_data_offset << "; // using _new here" << std::endl;
+					{						
+						init << " functable->" << info_name << ".internal_offset_new =" << internal_data_offset << "; // using _new here" << std::endl;
 						internal_data_offset += numfields;
 					}
 					else
-					{
-						init << " // Old way" << std::endl;
-						init << " functable->external_offset_" << space->get_name() << " = " << DG_external_offset << ";" << std::endl;
-						init << " // New way" << std::endl;
-						init << " functable->info_" << space->get_name() << ".external_offset_bulk = " << DG_external_offset << "; // using _bulk here" << std::endl;
+					{						
+						init << " functable->" << info_name << ".external_offset_bulk = " << DG_external_offset << "; // using _bulk here" << std::endl;
 						DG_external_offset += numfields;
 					}
 				}
-				init << " // Old way" << std::endl;
-				init << " functable->fieldnames_" << space->get_name() << "=(char **)malloc(sizeof(char*)*functable->numfields_" << space->get_name() << ");" << std::endl;
-				init << " // New way" << std::endl;
-				init << " functable->info_" << space->get_name() << ".fieldnames=(char **)malloc(sizeof(char*)*functable->info_" << space->get_name() << ".numfields);" << std::endl;
+				init << " functable->" << info_name << ".fieldnames=(char **)malloc(sizeof(char*)*functable->" << info_name << ".numfields);" << std::endl;
 				std::map<unsigned, FiniteElementField *> reindex;
 				for (auto &f : myfields)
 				{
@@ -7000,19 +6882,10 @@ namespace pyoomph
 					if (f->get_space() != space)
 						continue;
 					unsigned contiindex = reindex2[f->index];
-					init << " // Old way" << std::endl;
-					init << " SET_INTERNAL_FIELD_NAME(functable->fieldnames_" << space->get_name() << "," << contiindex << ", \"" << f->get_name() << "\" );" << std::endl;
-					init << " // New way" << std::endl;
-					init << " SET_INTERNAL_FIELD_NAME(functable->info_" << space->get_name() << ".fieldnames," << contiindex << ", \"" << f->get_name() << "\" );" << std::endl;
-					cleanup << " // Old way" << std::endl;
-					cleanup << " pyoomph_tested_free(functable->fieldnames_" << space->get_name() << "[ " << (contiindex) <<"]); functable->fieldnames_" << space->get_name()<<    "[" <<(contiindex) << "]=PYOOMPH_NULL; " << std::endl;
-					cleanup << " // New way" << std::endl;
-					cleanup << " pyoomph_tested_free(functable->info_" << space->get_name() << ".fieldnames[" << (contiindex) <<"]); functable->info_" << space->get_name()<<    ".fieldnames[" <<(contiindex) << "]=PYOOMPH_NULL; " << std::endl;
+					init << " SET_INTERNAL_FIELD_NAME(functable->" << info_name << ".fieldnames," << contiindex << ", \"" << f->get_name() << "\" );" << std::endl;					
+					cleanup << " pyoomph_tested_free(functable->" << info_name << ".fieldnames[" << (contiindex) <<"]); functable->" << info_name << ".fieldnames[" <<(contiindex) << "]=PYOOMPH_NULL; " << std::endl;
 				}
-				cleanup << " // Old way" << std::endl;
-				cleanup << " pyoomph_tested_free(functable->fieldnames_" << space->get_name() << "); functable->fieldnames_" << space->get_name() << "=PYOOMPH_NULL; " << std::endl;								
-				cleanup << " // New way" << std::endl;
-				cleanup << " pyoomph_tested_free(functable->info_" << space->get_name() << ".fieldnames); functable->info_" << space->get_name() << ".fieldnames=PYOOMPH_NULL; " << std::endl;
+				cleanup << " pyoomph_tested_free(functable->" << info_name << ".fieldnames); functable->" << info_name << ".fieldnames=PYOOMPH_NULL; " << std::endl;
 				index_offset += numfields;
 			}
 			else if (!coordinate_space_validated && coordinate_space != "")
@@ -7026,38 +6899,20 @@ namespace pyoomph
 
 		if (bulk_code)
 		{
-			init << " //Old way" << std::endl;
-			init << " functable->buffer_offset_C2TB_interf=functable->numfields_C2TB_basebulk+functable->numfields_C2_basebulk+functable->numfields_C1TB_basebulk+functable->numfields_C1_basebulk" << std::endl;
-			init << "                                     +functable->numfields_D2TB_basebulk+functable->numfields_D2_basebulk+functable->numfields_D1TB_basebulk+functable->numfields_D1_basebulk;" << std::endl;
-			init << " functable->buffer_offset_C2_interf=functable->buffer_offset_C2TB_interf+(functable->numfields_C2TB-functable->numfields_C2TB_basebulk);" << std::endl;
-			init << " functable->buffer_offset_C1TB_interf=functable->buffer_offset_C2_interf+(functable->numfields_C2-functable->numfields_C2_basebulk);" << std::endl;
-			init << " functable->buffer_offset_C1_interf=functable->buffer_offset_C1TB_interf+(functable->numfields_C1TB-functable->numfields_C1TB_basebulk);" << std::endl;
-			init << " functable->buffer_offset_D2TB_interf=functable->buffer_offset_C1_interf+(functable->numfields_C1-functable->numfields_C1_basebulk);" << std::endl;
-			init << " functable->buffer_offset_D2_interf=functable->buffer_offset_D2TB_interf+(functable->numfields_D2TB-functable->numfields_D2TB_basebulk);" << std::endl;
-			init << " functable->buffer_offset_D1TB_interf=functable->buffer_offset_D2_interf+(functable->numfields_D2-functable->numfields_D2_basebulk);" << std::endl;
-			init << " functable->buffer_offset_D1_interf=functable->buffer_offset_D1TB_interf+(functable->numfields_D1TB-functable->numfields_D1TB_basebulk);" << std::endl;
+					
+			init << " functable->continuous_spaces[SPACE_INDEX_C2TB].buffer_offset_interf=functable->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk+functable->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk+functable->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk+functable->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk" << std::endl;
+			init << "                                     +functable->dg_spaces[SPACE_INDEX_D2TB].numfields_basebulk+functable->dg_spaces[SPACE_INDEX_D2].numfields_basebulk+functable->dg_spaces[SPACE_INDEX_D1TB].numfields_basebulk+functable->dg_spaces[SPACE_INDEX_D1].numfields_basebulk;" << std::endl;
+			init << " functable->continuous_spaces[SPACE_INDEX_C2].buffer_offset_interf=functable->continuous_spaces[SPACE_INDEX_C2TB].buffer_offset_interf+(functable->continuous_spaces[SPACE_INDEX_C2TB].numfields-functable->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk);" << std::endl;
+			init << " functable->continuous_spaces[SPACE_INDEX_C1TB].buffer_offset_interf=functable->continuous_spaces[SPACE_INDEX_C2].buffer_offset_interf+(functable->continuous_spaces[SPACE_INDEX_C2].numfields-functable->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk);" << std::endl;
+			init << " functable->continuous_spaces[SPACE_INDEX_C1].buffer_offset_interf=functable->continuous_spaces[SPACE_INDEX_C1TB].buffer_offset_interf+(functable->continuous_spaces[SPACE_INDEX_C1TB].numfields-functable->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk);" << std::endl;
+			init << " functable->dg_spaces[SPACE_INDEX_D2TB].buffer_offset_interf=functable->continuous_spaces[SPACE_INDEX_C1].buffer_offset_interf+(functable->continuous_spaces[SPACE_INDEX_C1].numfields-functable->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk);" << std::endl;
+			init << " functable->dg_spaces[SPACE_INDEX_D2].buffer_offset_interf=functable->dg_spaces[SPACE_INDEX_D2TB].buffer_offset_interf+(functable->dg_spaces[SPACE_INDEX_D2TB].numfields-functable->dg_spaces[SPACE_INDEX_D2TB].numfields_basebulk);" << std::endl;
+			init << " functable->dg_spaces[SPACE_INDEX_D1TB].buffer_offset_interf=functable->dg_spaces[SPACE_INDEX_D2].buffer_offset_interf+(functable->dg_spaces[SPACE_INDEX_D2].numfields-functable->dg_spaces[SPACE_INDEX_D2].numfields_basebulk);" << std::endl;
+			init << " functable->dg_spaces[SPACE_INDEX_D1].buffer_offset_interf=functable->dg_spaces[SPACE_INDEX_D1TB].buffer_offset_interf+(functable->dg_spaces[SPACE_INDEX_D1TB].numfields-functable->dg_spaces[SPACE_INDEX_D1TB].numfields_basebulk);" << std::endl;
 			init << "#ifndef PYOOMPH_TCC_TO_MEMORY" << std::endl;
-			init << " if (functable->buffer_offset_D1_interf+(functable->numfields_D1-functable->numfields_D1_basebulk)+functable->numfields_DL+functable->numfields_D0+functable->numfields_ED0!=" << index_offset << ")" << std::endl;
+			init << " if (functable->dg_spaces[SPACE_INDEX_D1].buffer_offset_interf+(functable->dg_spaces[SPACE_INDEX_D1].numfields-functable->dg_spaces[SPACE_INDEX_D1].numfields_basebulk)+functable->info_DL.numfields+functable->info_D0.numfields+functable->info_ED0.numfields!=" << index_offset << ")" << std::endl;
 			init << " {" << std::endl;
-			init << "   printf(\"Error in the buffer offsets. Please report with the script you have used to create this error!\\nbuffer_offset_C2TB_interf=%d\\nbuffer_offset_C2_interf=%d\\nbuffer_offset_C1TB_interf=%d\\nbuffer_offset_C1_interf=%d\\nbuffer_offset_D2TB_interf=%d\\nbuffer_offset_D2_interf=%d\\nbuffer_offset_D1TB_interf=%d\\nbuffer_offset_D1_interf=%d\\n\",functable->buffer_offset_C2TB_interf,functable->buffer_offset_C2_interf,functable->buffer_offset_C1TB_interf,functable->buffer_offset_C1_interf,functable->buffer_offset_D2TB_interf,functable->buffer_offset_D2_interf,functable->buffer_offset_D1TB_interf,functable->buffer_offset_D1_interf);" << std::endl;
-			init << "   exit(1);" << std::endl;
-			init << " }" << std::endl;
-			init << "#endif" << std::endl;
-
-			init << " //New way" << std::endl;
-			init << " functable->info_C2TB.buffer_offset_interf=functable->info_C2TB.numfields_basebulk+functable->info_C2.numfields_basebulk+functable->info_C1TB.numfields_basebulk+functable->info_C1.numfields_basebulk" << std::endl;
-			init << "                                     +functable->info_D2TB.numfields_basebulk+functable->info_D2.numfields_basebulk+functable->info_D1TB.numfields_basebulk+functable->info_D1.numfields_basebulk;" << std::endl;
-			init << " functable->info_C2.buffer_offset_interf=functable->info_C2TB.buffer_offset_interf+(functable->info_C2TB.numfields-functable->info_C2TB.numfields_basebulk);" << std::endl;
-			init << " functable->info_C1TB.buffer_offset_interf=functable->info_C2.buffer_offset_interf+(functable->info_C2.numfields-functable->info_C2.numfields_basebulk);" << std::endl;
-			init << " functable->info_C1.buffer_offset_interf=functable->info_C1TB.buffer_offset_interf+(functable->info_C1TB.numfields-functable->info_C1TB.numfields_basebulk);" << std::endl;
-			init << " functable->info_D2TB.buffer_offset_interf=functable->info_C1.buffer_offset_interf+(functable->info_C1.numfields-functable->info_C1.numfields_basebulk);" << std::endl;
-			init << " functable->info_D2.buffer_offset_interf=functable->info_D2TB.buffer_offset_interf+(functable->info_D2TB.numfields-functable->info_D2TB.numfields_basebulk);" << std::endl;
-			init << " functable->info_D1TB.buffer_offset_interf=functable->info_D2.buffer_offset_interf+(functable->info_D2.numfields-functable->info_D2.numfields_basebulk);" << std::endl;
-			init << " functable->info_D1.buffer_offset_interf=functable->info_D1TB.buffer_offset_interf+(functable->info_D1TB.numfields-functable->info_D1TB.numfields_basebulk);" << std::endl;
-			init << "#ifndef PYOOMPH_TCC_TO_MEMORY" << std::endl;
-			init << " if (functable->info_D1.buffer_offset_interf+(functable->info_D1.numfields-functable->info_D1.numfields_basebulk)+functable->info_DL.numfields+functable->info_D0.numfields+functable->info_ED0.numfields!=" << index_offset << ")" << std::endl;
-			init << " {" << std::endl;
-			init << "   printf(\"Error in the buffer offsets. Please report with the script you have used to create this error!\\nbuffer_offset_C2TB_interf=%d\\nbuffer_offset_C2_interf=%d\\nbuffer_offset_C1TB_interf=%d\\nbuffer_offset_C1_interf=%d\\nbuffer_offset_D2TB_interf=%d\\nbuffer_offset_D2_interf=%d\\nbuffer_offset_D1TB_interf=%d\\nbuffer_offset_D1_interf=%d\\n\",functable->info_C2TB.buffer_offset_interf,functable->info_C2.buffer_offset_interf,functable->info_C1TB.buffer_offset_interf,functable->info_C1.buffer_offset_interf,functable->info_D2TB.buffer_offset_interf,functable->info_D2.buffer_offset_interf,functable->info_D1TB.buffer_offset_interf,functable->info_D1.buffer_offset_interf);" << std::endl;
+			init << "   printf(\"Error in the buffer offsets. Please report with the script you have used to create this error!\\nbuffer_offset_C2TB_interf=%d\\nbuffer_offset_C2_interf=%d\\nbuffer_offset_C1TB_interf=%d\\nbuffer_offset_C1_interf=%d\\nbuffer_offset_D2TB_interf=%d\\nbuffer_offset_D2_interf=%d\\nbuffer_offset_D1TB_interf=%d\\nbuffer_offset_D1_interf=%d\\n\",functable->continuous_spaces[SPACE_INDEX_C2TB].buffer_offset_interf,functable->continuous_spaces[SPACE_INDEX_C2].buffer_offset_interf,functable->continuous_spaces[SPACE_INDEX_C1TB].buffer_offset_interf,functable->continuous_spaces[SPACE_INDEX_C1].buffer_offset_interf,functable->dg_spaces[SPACE_INDEX_D2TB].buffer_offset_interf,functable->dg_spaces[SPACE_INDEX_D2].buffer_offset_interf,functable->dg_spaces[SPACE_INDEX_D1TB].buffer_offset_interf,functable->dg_spaces[SPACE_INDEX_D1].buffer_offset_interf);" << std::endl;
 			init << "   exit(1);" << std::endl;
 			init << " }" << std::endl;
 			init << "#endif" << std::endl;
@@ -7076,32 +6931,20 @@ namespace pyoomph
 		//   if (coordinate_space=="C2TB" && this->bulk_code) coordinate_space="C2";
 		init << " functable->dominant_space=strdup(\"" << coordinate_space << "\");" << std::endl;
 
-		init << " functable->hangindex_Pos=-1; //Position always hangs on the max space" << std::endl;
+		init << " functable->info_Pos.hangindex=-1; //Position always hangs on the max space" << std::endl;
 		if (coordinate_space == "C1" || coordinate_space == "C1TB")
-		{
-			init << " // Old way" << std::endl;
-			init << " functable->hangindex_C2TB=-1;" << std::endl;
-			init << " functable->hangindex_C2=-1;" << std::endl;
-			init << " functable->hangindex_C1TB=-1;" << std::endl;
-			init << " functable->hangindex_C1=-1;" << std::endl;
-			init << " // New way" << std::endl;
-			init << " functable->info_C2TB.hangindex=-1;" << std::endl;
-			init << " functable->info_C2.hangindex=-1;" << std::endl;
-			init << " functable->info_C1TB.hangindex=-1;" << std::endl;
-			init << " functable->info_C1.hangindex=-1;" << std::endl;
+		{			
+			init << " functable->continuous_spaces[SPACE_INDEX_C2TB].hangindex=-1;" << std::endl;
+			init << " functable->continuous_spaces[SPACE_INDEX_C2].hangindex=-1;" << std::endl;
+			init << " functable->continuous_spaces[SPACE_INDEX_C1TB].hangindex=-1;" << std::endl;
+			init << " functable->continuous_spaces[SPACE_INDEX_C1].hangindex=-1;" << std::endl;
 		}
 		else
-		{
-			init << " // Old way" << std::endl;
-			init << " functable->hangindex_C2TB=-1;" << std::endl;
-			init << " functable->hangindex_C2=-1;" << std::endl;
-			init << " functable->hangindex_C1TB=functable->numfields_C2TB_basebulk+functable->numfields_C2_basebulk;" << std::endl;
-			init << " functable->hangindex_C1=functable->numfields_C2TB_basebulk+functable->numfields_C2_basebulk;" << std::endl;
-			init << " // New way" << std::endl;
-			init << " functable->info_C2TB.hangindex=-1;" << std::endl;
-			init << " functable->info_C2.hangindex=-1;" << std::endl;
-			init << " functable->info_C1TB.hangindex=functable->info_C2TB.numfields_basebulk+functable->info_C2.numfields_basebulk;" << std::endl;
-			init << " functable->info_C1.hangindex=functable->info_C2TB.numfields_basebulk+functable->info_C2.numfields_basebulk;" << std::endl;
+		{			
+			init << " functable->continuous_spaces[SPACE_INDEX_C2TB].hangindex=-1;" << std::endl;
+			init << " functable->continuous_spaces[SPACE_INDEX_C2].hangindex=-1;" << std::endl;
+			init << " functable->continuous_spaces[SPACE_INDEX_C1TB].hangindex=functable->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk+functable->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk;" << std::endl;
+			init << " functable->continuous_spaces[SPACE_INDEX_C1].hangindex=functable->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk+functable->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk;" << std::endl;
 		}
 
 		init << " functable->max_dt_order=" << this->max_dt_order << ";" << std::endl;
@@ -7338,7 +7181,11 @@ namespace pyoomph
 	  {
 		FiniteElementField *wheredef = f->get_defined_on_domain_equivalent_field();
 		to_where_it_was_defined[f] = wheredef;
-		std::string n=wheredef->get_space()->get_code()->get_full_domain_name()+"/"+wheredef->get_name();
+		std::string nn=wheredef->get_name();
+		if (nn=="mesh_x") nn="coordinate_x";
+		else if (nn=="mesh_y") nn="coordinate_y";
+		else if (nn=="mesh_z") nn="coordinate_z";
+		std::string n=wheredef->get_space()->get_code()->get_full_domain_name()+"/"+nn;
 		//std::cout << "CONTRIBUTING FIELD " << f->get_space()->get_code()->get_full_domain_name() << "/" << f->get_name() << " defined on " << n << std::endl;
 		//std::cout << "  name already in there " << n << " ? " << (contribution_name_to_index.count(n) ? "YES" : "NO") << std::endl;
 		if (contribution_name_to_index.count(n)==0)
@@ -7631,10 +7478,7 @@ namespace pyoomph
 				init << " functable->JacobianForElementSizeSecondSpatialDerivative=&JacobianForElementSizeSecondSpatialDerivatives;" << std::endl;
 			}
 		}
-		if (this->bulk_position_space_to_C1)
-		{
-			init << "   functable->bulk_position_space_to_C1=true;" << std::endl;
-		}
+		
 		init << " SET_INTERNAL_NAME(functable->domain_name,\"" << this->get_domain_name() << "\");" << std::endl;
 		cleanup << " pyoomph_tested_free(functable->domain_name); functable->domain_name=PYOOMPH_NULL; " << std::endl;
 		init << " functable->clean_up=&clean_up;" << std::endl;

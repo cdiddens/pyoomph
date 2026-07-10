@@ -20,7 +20,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
 
@@ -32,11 +32,12 @@ from pyoomph.meshes.simplemeshes import CircularMesh
 
 class CompressedDiscProblem(Problem):
     def __init__(self):
-        super().__init__()
+        super().__init__()    
         self.Gamma=1.1 # isotropic growth factor
-        self.claw=GeneralizedHookeanSolidConstitutiveLaw(E=1,nu=0.3) # Generalized Hookean solid constitutive law
         self.P=self.define_global_parameter(P=0) # Pressure on the circumference of the disc
         self.polar_implementation=True # Use radial polar coordinates only
+         # Generalized Hookean solid constitutive law
+        self.claw=GeneralizedHookeanSolidConstitutiveLaw(E=1,nu=0.3)
         
     def define_problem(self):        
         # Base equations, irrespective of the coordinate system
