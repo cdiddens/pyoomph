@@ -67,130 +67,6 @@ const double PyramidGaussC1::Weight[12] =
     0.25 * (5.0/18.0) * pow(1.0 - 0.5*(1+sqrt(3.0/5.0)),2)
 };
 
-// const double PyramidGaussC1::Knot[36][3] =
-// {
-//     // =========================
-//     // z0
-//     // =========================
-//     {0.069431844202973712, 0.069431844202973712, 0.069431844202973712},
-//     {0.5,                  0.069431844202973712, 0.069431844202973712},
-//     {0.9305681557970263,   0.069431844202973712, 0.069431844202973712},
-
-//     {0.069431844202973712, 0.5,                  0.069431844202973712},
-//     {0.5,                  0.5,                  0.069431844202973712},
-//     {0.9305681557970263,   0.5,                  0.069431844202973712},
-
-//     {0.069431844202973712, 0.9305681557970263,   0.069431844202973712},
-//     {0.5,                  0.9305681557970263,   0.069431844202973712},
-//     {0.9305681557970263,   0.9305681557970263,   0.069431844202973712},
-
-
-//     // =========================
-//     // z1
-//     // =========================
-//     {0.069431844202973712, 0.069431844202973712, 0.33000947820757187},
-//     {0.5,                  0.069431844202973712, 0.33000947820757187},
-//     {0.9305681557970263,   0.069431844202973712, 0.33000947820757187},
-
-//     {0.069431844202973712, 0.5,                  0.33000947820757187},
-//     {0.5,                  0.5,                  0.33000947820757187},
-//     {0.9305681557970263,   0.5,                  0.33000947820757187},
-
-//     {0.069431844202973712, 0.9305681557970263,   0.33000947820757187},
-//     {0.5,                  0.9305681557970263,   0.33000947820757187},
-//     {0.9305681557970263,   0.9305681557970263,   0.33000947820757187},
-
-
-//     // =========================
-//     // z2
-//     // =========================
-//     {0.069431844202973712, 0.069431844202973712, 0.6699905217924281},
-//     {0.5,                  0.069431844202973712, 0.6699905217924281},
-//     {0.9305681557970263,   0.069431844202973712, 0.6699905217924281},
-
-//     {0.069431844202973712, 0.5,                  0.6699905217924281},
-//     {0.5,                  0.5,                  0.6699905217924281},
-//     {0.9305681557970263,   0.5,                  0.6699905217924281},
-
-//     {0.069431844202973712, 0.9305681557970263,   0.6699905217924281},
-//     {0.5,                  0.9305681557970263,   0.6699905217924281},
-//     {0.9305681557970263,   0.9305681557970263,   0.6699905217924281},
-
-
-//     // =========================
-//     // z3
-//     // =========================
-//     {0.069431844202973712, 0.069431844202973712, 0.9305681557970263},
-//     {0.5,                  0.069431844202973712, 0.9305681557970263},
-//     {0.9305681557970263,   0.069431844202973712, 0.9305681557970263},
-
-//     {0.069431844202973712, 0.5,                  0.9305681557970263},
-//     {0.5,                  0.5,                  0.9305681557970263},
-//     {0.9305681557970263,   0.5,                  0.9305681557970263},
-
-//     {0.069431844202973712, 0.9305681557970263,   0.9305681557970263},
-//     {0.5,                  0.9305681557970263,   0.9305681557970263},
-//     {0.9305681557970263,   0.9305681557970263,   0.9305681557970263}
-// };
-
-// const double PyramidGaussC1::Weight[36] =
-// {
-//     // z0 block (wz = 0.173927422568727)
-//     0.004335185302,
-//     0.006126403023,
-//     0.004335185302,
-
-//     0.006126403023,
-//     0.008656135861,
-//     0.006126403023,
-
-//     0.004335185302,
-//     0.006126403023,
-//     0.004335185302,
-
-
-//     // z1 block (wz = 0.326072577431273)
-//     0.008133481224,
-//     0.011490340248,
-//     0.008133481224,
-
-//     0.011490340248,
-//     0.016218515254,
-//     0.011490340248,
-
-//     0.008133481224,
-//     0.011490340248,
-//     0.008133481224,
-
-
-//     // z2 block (same pattern)
-//     0.008133481224,
-//     0.011490340248,
-//     0.008133481224,
-
-//     0.011490340248,
-//     0.016218515254,
-//     0.011490340248,
-
-//     0.008133481224,
-//     0.011490340248,
-//     0.008133481224,
-
-
-//     // z3 block
-//     0.004335185302,
-//     0.006126403023,
-//     0.004335185302,
-
-//     0.006126403023,
-//     0.008656135861,
-//     0.006126403023,
-
-//     0.004335185302,
-//     0.006126403023,
-//     0.004335185302
-// };
-
 const double WedgeGaussC2::Knot[18][3] =
 {
   // ── Orbit A, triangle point 0: (s0,s1) = (a1, a1) ──────────────────────
@@ -251,6 +127,67 @@ const double WedgeGaussC2::Weight[18] =
   0.015271075507684,  // 17  wB * 5/18
 };
 
+const double PyramidGaussC2::Knot[27][3] =
+{
+  { 0.104475117303480, 0.104475117303480, 0.072994024073149 },
+  { 0.104475117303480, 0.463502987963425, 0.072994024073149 },
+  { 0.104475117303480, 0.822530858623369, 0.072994024073149 },
+  { 0.463502987963425, 0.104475117303480, 0.072994024073149 },
+  { 0.463502987963425, 0.463502987963425, 0.072994024073149 },
+  { 0.463502987963425, 0.822530858623369, 0.072994024073149 },
+  { 0.822530858623369, 0.104475117303480, 0.072994024073149 },
+  { 0.822530858623369, 0.463502987963425, 0.072994024073149 },
+  { 0.822530858623369, 0.822530858623369, 0.072994024073149 },
+  { 0.073593763053861, 0.073593763053861, 0.347003766038351 },
+  { 0.073593763053861, 0.326498116980824, 0.347003766038351 },
+  { 0.073593763053861, 0.579402470907786, 0.347003766038351 },
+  { 0.326498116980824, 0.073593763053861, 0.347003766038351 },
+  { 0.326498116980824, 0.326498116980824, 0.347003766038351 },
+  { 0.326498116980824, 0.579402470907786, 0.347003766038351 },
+  { 0.579402470907786, 0.073593763053861, 0.347003766038351 },
+  { 0.579402470907786, 0.326498116980824, 0.347003766038351 },
+  { 0.579402470907786, 0.579402470907786, 0.347003766038351 },
+  { 0.033246742228767, 0.033246742228767, 0.705002209888498 },
+  { 0.033246742228767, 0.147498895055750, 0.705002209888498 },
+  { 0.033246742228767, 0.261751047882734, 0.705002209888498 },
+  { 0.147498895055750, 0.033246742228767, 0.705002209888498 },
+  { 0.147498895055750, 0.147498895055750, 0.705002209888498 },
+  { 0.147498895055750, 0.261751047882734, 0.705002209888498 },
+  { 0.261751047882734, 0.033246742228767, 0.705002209888498 },
+  { 0.261751047882734, 0.147498895055750, 0.705002209888498 },
+  { 0.261751047882734, 0.261751047882734, 0.705002209888498 },
+};
+
+const double PyramidGaussC2::Weight[27] =
+{
+  0.012124719217969,
+  0.019399550748751,
+  0.012124719217969,
+  0.019399550748751,
+  0.031039281198002,
+  0.019399550748751,
+  0.012124719217969,
+  0.019399550748751,
+  0.012124719217969,
+  0.011284434356471,
+  0.018055094970353,
+  0.011284434356471,
+  0.018055094970353,
+  0.028888151952566,
+  0.018055094970353,
+  0.011284434356471,
+  0.018055094970353,
+  0.011284434356471,
+  0.002311011034612,
+  0.003697617655380,
+  0.002311011034612,
+  0.003697617655380,
+  0.005916188248608,
+  0.003697617655380,
+  0.002311011034612,
+  0.003697617655380,
+  0.002311011034612,
+};
 
  void RefineableWedgeElement::setup_father_bounds()
   {
@@ -837,6 +774,86 @@ WedgeGaussC2  WedgeElementC2::Default_integration_scheme;
         return 0;
     }
 
+PyramidGaussC2  PyramidElementC2::Default_integration_scheme;
+
+ unsigned PyramidElementC2::get_bulk_node_number(const int& face_index,const unsigned int& i) const
+    {
+        if (face_index == 0)
+        {
+            switch (i)
+            {
+                case 0: return 0;
+                case 1: return 1;
+                case 2: return 4;
+                case 3: return 5; 
+                case 4: return 10;  
+                case 5: return 9;   
+                default: throw_runtime_error("Invalid node index for face 0");
+            }
+        }
+        else if (face_index == 1)
+        {
+            switch (i)
+            {              
+                case 0: return 1;  
+                case 1: return 2;  
+                case 2: return 4;            
+                case 3: return 6;  
+                case 4: return 11;  
+                case 5: return 10; 
+                default: throw_runtime_error("Invalid node index for face 1");
+            }
+        }
+        else if (face_index == 2)
+        {
+            switch (i)
+            {              
+                case 0: return 2;  
+                case 1: return 3;  
+                case 2: return 4;            
+                case 3: return 7;  
+                case 4: return 12;  
+                case 5: return 11; 
+                default: throw_runtime_error("Invalid node index for face 2");
+            }
+        }
+
+        else if (face_index == 3)
+        {
+            switch (i)
+            {              
+                case 0: return 0;  
+                case 1: return 4;  
+                case 2: return 3;            
+                case 3: return 9;  
+                case 4: return 12;  
+                case 5: return 8; 
+                default: throw_runtime_error("Invalid node index for face 3");
+            }
+        }
+
+        else if (face_index == 4)
+        {
+            switch (i)
+            {
+                case 0: return 0;                 
+                case 1: return 8;   
+                case 2: return 3;   
+                case 3: return 5;  
+                case 4: return 13;           
+                case 5: return 7;   
+                case 6: return 1; 
+                case 7: return 6;
+                case 8: return 2;
+                default: throw_runtime_error("Invalid node index for face 4");
+            }
+        }
+
+        throw_runtime_error("Invalid face index for pyramid element: "
+                            + std::to_string(face_index));
+        return 0;
+    }
+
 ///////////
 
   void WedgeElementBase::build_face_element(const int& face_index,FaceElement* face_element_pt)
@@ -1125,6 +1142,101 @@ WedgeGaussC2  WedgeElementC2::Default_integration_scheme;
       face_element_pt->nbulk_value(i) = required_nvalue(bulk_number);
     }    
     face_element_pt->normal_sign() = face_outer_unit_normal_sign(face_index);
+  
+      // Consistency check: make sure that the order of the get_bulk_node_number matches the order of the nodes in the face element (requires the facet->bulk mapping to be correct, see below)
+    // /*
+    std::vector<oomph::Vector<double>> xface_buffer;
+    std::vector<oomph::Vector<double>> xbulk_buffer;
+    for (unsigned int i=0; i<nnode_face; i++)
+    {
+      oomph::Vector<double> sface(face_element_pt->dim(),0.0);
+      oomph::Vector<double> xface(face_element_pt->nodal_dimension(),0.0);
+      face_element_pt->local_coordinate_of_node(i,sface);
+      face_element_pt->face_to_bulk_coordinate_fct_pt()(sface,xface);
+      xface_buffer.push_back(xface);
+      unsigned bulk_number = face_element_pt->bulk_node_number(i);
+      oomph::Vector<double> s_bulk(this->dim(),0.0);
+      this->local_coordinate_of_node(bulk_number,s_bulk);      
+      xbulk_buffer.push_back(s_bulk);
+    }
+    //Find the permutation so that xface_buffer[i] matches xbulk_buffer[perm[i]]
+    std::vector<unsigned int> perm(nnode_face);
+    for (unsigned int i=0; i<nnode_face; i++)    {
+      bool found_match=false;
+      for (unsigned int j=0; j<nnode_face; j++)      {
+        double dist=0.0;
+        for (unsigned int k=0; k<xface_buffer[i].size(); k++)        {
+          dist+=(xface_buffer[i][k]-xbulk_buffer[j][k])*(xface_buffer[i][k]-xbulk_buffer[j][k]);
+        }
+        if (dist<1e-8)        {
+          perm[i]=j;
+          found_match=true;
+          break;
+        }      }
+      if (!found_match)      {
+        std::ostringstream error_message;
+        error_message << "Inconsistency in face to bulk node mapping for face " << face_index << ": no match found for face node " << i;
+        throw OomphLibError(error_message.str(), OOMPH_CURRENT_FUNCTION, OOMPH_EXCEPTION_LOCATION);
+      }
+    }
+    // Check that the permutation is the identity (i.e. that the order of the face nodes matches the order of the bulk nodes as given by get_bulk_node_number)
+    for (unsigned int i=0; i<nnode_face; i++)    {
+      if (perm[i]!=i)      {
+        std::ostringstream error_message;
+        std::cout << "Permutation for face " << face_index << ": ";
+        for (unsigned int j=0; j<nnode_face; j++)        {
+          std::cout << perm[j] << " ";        }
+        std::cout << std::endl;
+        error_message << "Inconsistency in face to bulk node mapping for face " << face_index << ": face node " << i << " matches bulk node " << perm[i] << " but should match bulk node " << i;
+        throw OomphLibError(error_message.str(), OOMPH_CURRENT_FUNCTION, OOMPH_EXCEPTION_LOCATION);
+      }
+    }
+
+// */
+//////////////////////
+    // Consistency check: make sure that the facet -> bulk is correct
+    // /*
+    std::vector<std::vector<double>> sface_test={ {1.0,0.0},{0.0,1.0},{0.2,0.2},{0.2,0.3}, {0.1,0.4}, {0.7,0.1} }; // For triangular faces
+    std::ostringstream ai_request;
+    ai_request << "I need a affine mapping from a 2d vector sface to a 3d vector s_bulk, which should realize the following mapping:" << std::endl;
+    bool has_fails=false;
+    for (const auto& sface_ : sface_test)
+    {
+      Vector<double> sface(sface_.size());
+      for (unsigned i = 0; i < sface_.size(); i++)      {
+        sface[i] = sface_[i];
+      }
+      Vector<double> s_bulk=face_element_pt->local_coordinate_in_bulk(sface);
+      Vector<double> xface(3);
+      Vector<double> x_bulk(3);
+      face_element_pt->FiniteElement::interpolated_x(sface,xface);
+      this->interpolated_x(s_bulk,x_bulk);
+      std::cout << "Testing face to bulk coordinate mapping for face " << face_index << " and sface = [" << sface[0] << ", " << sface[1] << "]" << std::endl;
+      std::cout << "Mapped to bulk coordinates s_bulk = [" << s_bulk[0] << ", " << s_bulk[1] << ", " << s_bulk[2] << "]" << std::endl;
+      std::cout << "Interpolated x at face coordinates: [" << xface[0] << ", " << xface[1] << ", " << xface[2] << "]" << std::endl;
+      std::cout << "Interpolated x at bulk coordinates: [" << x_bulk[0] << ", " << x_bulk[1] << ", " << x_bulk[2] << "]" << std::endl;
+      
+      // This only works if the bulk element has the same eulerian coordinates at the local bulk coordinates sbulk
+      ai_request << "[" << sface[0] << ", " << sface[1] << "] ->  [" << xface[0] << ", " << xface[1] << ", " << xface[2] << "]" << std::endl;
+      for (unsigned i = 0; i < 3; i++)
+      {
+        if (std::abs(xface[i]-x_bulk[i])>1e-8)
+        {
+          std::ostringstream error_message;
+          error_message << "Inconsistency in face to bulk coordinate mapping for face " << face_index
+                        << ": xface[" << i << "] = " << xface[i] << " but x_bulk[" << i << "] = " << x_bulk[i];
+          //throw OomphLibError(error_message.str(), OOMPH_CURRENT_FUNCTION, OOMPH_EXCEPTION_LOCATION);
+          std::cout << "WARNING: " << error_message.str() << std::endl;
+          has_fails=true;
+        }
+      }
+    }
+    if (has_fails)
+    {
+      std::cout << "FACE INDEX " << face_index << ": AI Request for affine mapping from face to bulk coordinates:" << std::endl;
+      std::cout << ai_request.str() << std::endl;
+    }
+    // */
   }
 
   

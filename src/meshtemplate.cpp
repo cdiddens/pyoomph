@@ -1494,6 +1494,18 @@ Index : Local coordinates (s0,s1,s2)
 		res->link_nodes_with_domain(this);		
 	}
 
+	void MeshTemplateElementCollection::add_pyramid_3d_C2(const std::vector<nodeindex_t> &inds)
+	{
+		if (dim == -1)
+		{
+			dim = 3;
+		}
+		else if (dim != 3)
+			throw_runtime_error("Tried to add a 3d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
+		MeshTemplateElementPyramidC2 *res = new MeshTemplateElementPyramidC2(inds);
+		elements.push_back(res);
+		res->link_nodes_with_domain(this);		
+	}
 	
 	void MeshTemplateElementCollection::set_element_code(DynamicBulkElementInstance *code_inst)
 	{
