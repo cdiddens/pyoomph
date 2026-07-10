@@ -1029,6 +1029,8 @@ class MeshFromTemplateBase(BaseMesh):
                 refinementL.append(list(state.numpy_data(
                     lambda: refinementL[n], lambda v: v)))  # type:ignore
             # print("REFINEMEHT",refinement,self.nelement())
+            while not self.unrefine_uniformly(): # Unrefine until we hit the rock bottom
+                pass
             self.refine_base_mesh(refinementL)
             self.reorder_nodes(old_ordering)
 

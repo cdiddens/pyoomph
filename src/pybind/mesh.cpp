@@ -1247,6 +1247,10 @@ void PyReg_Mesh(py::module &m)
 			"refine_uniformly", [](pyoomph::TemplatedMeshBase1d *self, unsigned int num)
 			{for (unsigned int i=0;i<num;i++) self->refine_uniformly(); },
 			"num"_a = 1)
+		.def(
+			"unrefine_uniformly", [](pyoomph::TemplatedMeshBase1d *self, unsigned int num)
+			{for (unsigned int i=0;i<num;i++) if (self->unrefine_uniformly()) return true; return false; },
+			"num"_a = 1)			
 		.def("generate_from_template", &pyoomph::TemplatedMeshBase1d::generate_from_template)
 		.def("refine_selected_elements", [](pyoomph::TemplatedMeshBase1d *m, std::vector<unsigned int> inds)
 			 { oomph::Vector<unsigned> oomphvec(inds.size()); for (unsigned int i=0;i<inds.size();i++) oomphvec[i]=inds[i]; m->refine_selected_elements(oomphvec); })
@@ -1275,6 +1279,10 @@ void PyReg_Mesh(py::module &m)
 			"refine_uniformly", [](pyoomph::TemplatedMeshBase2d *self, unsigned int num)
 			{for (unsigned int i=0;i<num;i++) self->refine_uniformly(); },
 			"num"_a = 1)
+		.def(
+			"unrefine_uniformly", [](pyoomph::TemplatedMeshBase2d *self, unsigned int num)
+			{for (unsigned int i=0;i<num;i++) if (self->unrefine_uniformly()) return true; return false; },
+			"num"_a = 1)						
 		.def("setup_tree_forest", &pyoomph::TemplatedMeshBase2d::setup_tree_forest)
 		.def("refine_selected_elements", [](pyoomph::TemplatedMeshBase2d *m, std::vector<unsigned int> inds)
 			 { oomph::Vector<unsigned> oomphvec(inds.size()); for (unsigned int i=0;i<inds.size();i++) oomphvec[i]=inds[i]; m->refine_selected_elements(oomphvec); })
@@ -1298,6 +1306,10 @@ void PyReg_Mesh(py::module &m)
 			"refine_uniformly", [](pyoomph::TemplatedMeshBase3d *self, unsigned int num)
 			{for (unsigned int i=0;i<num;i++) self->refine_uniformly(); },
 			"num"_a = 1)
+		.def(
+			"unrefine_uniformly", [](pyoomph::TemplatedMeshBase3d *self, unsigned int num)
+			{ for (unsigned int i=0;i<num;i++) if (self->unrefine_uniformly()) return true; return false; },
+			"num"_a = 1)						
 		.def("setup_tree_forest", &pyoomph::TemplatedMeshBase3d::setup_tree_forest)
 		.def("refine_selected_elements", [](pyoomph::TemplatedMeshBase3d *m, std::vector<unsigned int> inds)
 			 { oomph::Vector<unsigned> oomphvec(inds.size()); for (unsigned int i=0;i<inds.size();i++) oomphvec[i]=inds[i]; m->refine_selected_elements(oomphvec); })
