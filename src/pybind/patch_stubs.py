@@ -1,4 +1,5 @@
-stubfile="_pyoomph-stubs/_pyoomph.pyi"
+import sys
+stubfile=sys.argv[1]
 
 with open(stubfile, 'r') as file :
 	filedata = file.read()

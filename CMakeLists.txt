@@ -20,6 +20,7 @@ option(PYOOMPH_USE_MPI       "Build with MPI support (defines OOMPH_HAS_MPI)"   
 option(PYOOMPH_PARANOID      "Build with extra runtime sanity checks (defines PARANOID)" OFF)
 option(PYOOMPH_DOWNLOAD_CLN  "Download and build CLN from source via its own autotools ./configure" OFF)
 option(PYOOMPH_DOWNLOAD_GINAC "Download and build GiNaC from source via its own autotools ./configure" OFF)
+option(PYOOMPH_GENERATE_STUBS "Generate .pyi stubs for the _core extension via pybind11-stubgen (best effort, non-fatal)"  ON)
 
 set(PYOOMPH_CLN_VERSION "1.3.7" CACHE STRING "CLN version to download when PYOOMPH_DOWNLOAD_CLN=ON")
 set(PYOOMPH_GINAC_VERSION "1.8.7" CACHE STRING "GiNaC version to download when PYOOMPH_DOWNLOAD_GINAC=ON")
@@ -191,6 +192,31 @@ target_compile_definitions(_pyoomph_core PRIVATE
 if(PYOOMPH_USE_MPI)
   target_link_libraries(_pyoomph_core PRIVATE MPI::MPI_CXX)
 endif()
+
+
+ 
+if(PYOOMPH_GENERATE_STUBS)
+  set(PYOOMPH_STUB_STAGE_DIR "${CMAKE_BINARY_DIR}/pyi-stage")
+ 
+  add_custom_command(TARGET _pyoomph_core POST_BUILD
+    COMMAND "${Python_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/cmake/generate_stubs.py"
+            --module-dir "$<TARGET_FILE_DIR:_pyoomph_core>"
+            --module-name "_pyoomph_core"
+            --stage-dir "${PYOOMPH_STUB_STAGE_DIR}"
+            --patch-script "${CMAKE_SOURCE_DIR}/src/pybind/patch_stubs.py"
+            --python "${Python_EXECUTABLE}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    COMMENT "Generating .pyi stubs for pyoomph._pyoomph_core (best effort)"
+    VERBATIM
+  )
+ 
+  # Whatever generate_stubs.py normalizes into PYOOMPH_STUB_STAGE_DIR (either
+  # "_core.pyi" or a "_core/" package directory) is copied straight next to
+  # the built extension. OPTIONAL means a missing stage dir (stub generation
+  # skipped/failed) is silently ignored rather than breaking `make install`.
+  install(DIRECTORY "${PYOOMPH_STUB_STAGE_DIR}/" DESTINATION pyoomph OPTIONAL)
+endif()
+
 
 # ----------------------------------------------------------------------------
 # Install: _core lands inside the pyoomph/ package directory, so it is
