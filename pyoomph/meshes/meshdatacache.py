@@ -25,7 +25,7 @@
 #
 # ========================================================================
  
-import _pyoomph
+import pyoomph._pyoomph_core as _pyoomph
 from ..typings import *
 import numpy
 

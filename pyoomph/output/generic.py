@@ -35,7 +35,7 @@ from ..meshes.mesh import ODEStorageMesh
 
 from ..generic.codegen import BaseEquations
 import inspect
-import _pyoomph
+import pyoomph._pyoomph_core as _pyoomph
 
 from scipy.io import savemat,loadmat #type:ignore
 

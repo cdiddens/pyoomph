@@ -37,7 +37,7 @@ void PyReg_Solvers(py::module &m);
 void PyReg_GeomObjects(py::module &m);
 void PyReg_Vector(py::module &m);
 
-#define PYOOMPH_MODULE_NAME _pyoomph
+#define PYOOMPH_MODULE_NAME _pyoomph_core
 
 PYBIND11_MODULE(PYOOMPH_MODULE_NAME, m)
 {

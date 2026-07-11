@@ -25,7 +25,7 @@
 #
 # ========================================================================
  
-import _pyoomph
+import pyoomph._pyoomph_core as _pyoomph
 import os
 import itertools
 from pathlib import Path

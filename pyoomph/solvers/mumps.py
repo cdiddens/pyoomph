@@ -28,7 +28,7 @@
 from .generic import GenericLinearSystemSolver
 from scipy.sparse import csr_matrix #type: ignore
 from mumps import DMumpsContext #type: ignore # Requires PyMUMPS: python3 -m pip install PyMUMPS
-import _pyoomph
+import pyoomph._pyoomph_core as _pyoomph
 
 from mpi4py import MPI
 

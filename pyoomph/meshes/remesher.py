@@ -33,7 +33,7 @@ from ..typings import *
 import numpy
 
 
-import _pyoomph
+import pyoomph._pyoomph_core as _pyoomph
 
 from .gmsh import GmshTemplate, Point, Line,Spline
 from .mesh import MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d,MeshTemplate

@@ -33,7 +33,7 @@ from ..expressions.generic import is_zero #type:ignore
 
 #import pyoomph.generic
 from .mpi import *
-import _pyoomph
+import pyoomph._pyoomph_core as _pyoomph
 import math
 
 
@@ -1095,7 +1095,7 @@ class Problem(_pyoomph.Problem):
                 continue
             elif isinstance(v,_pyoomph.Expression):
                 def merge_units(expr):
-                    import _pyoomph
+                    import pyoomph._pyoomph_core as _pyoomph
                     numfactor,unit,rest,success=_pyoomph.GiNaC_collect_units(expr)
                     if not success:
                         return expr
@@ -4702,7 +4702,7 @@ class Problem(_pyoomph.Problem):
         TODO; Add documentation
         """
         # Main ideas from here: https://arxiv.org/html/2407.18230v1#S2.E6
-        import _pyoomph
+        import pyoomph._pyoomph_core as _pyoomph
         import scipy
         if not isinstance(self.assembly_handler_pt(),_pyoomph.PeriodicOrbitHandler):
             raise RuntimeError("Periodic orbit handler not active. Call activate_periodic_orbit_handler first, then solve the orbit, then call this function")

@@ -26,7 +26,7 @@
 # ========================================================================
  
  
-import _pyoomph
+import pyoomph._pyoomph_core as _pyoomph
 
 from ..expressions import eval_flag,evaluate_in_past,partial_t,scale_factor,mesh_velocity
 from ..expressions.generic import Expression,ExpressionOrNum

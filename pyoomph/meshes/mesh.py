@@ -35,7 +35,7 @@ from ..typings import *
 
 import numpy
 
-import _pyoomph
+import pyoomph._pyoomph_core as _pyoomph
 
 from ..expressions.generic import Expression, ExpressionOrNum, is_zero, NameStrSequence
 from ..generic.mpi import get_mpi_rank

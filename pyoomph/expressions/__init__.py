@@ -29,7 +29,7 @@
 This module provides the core functionality to formulate mathematical expressions in the pyoomph library. 
 """
  
-import _pyoomph
+import  pyoomph._pyoomph_core as _pyoomph
 
 from .generic import *
 from .coordsys import *

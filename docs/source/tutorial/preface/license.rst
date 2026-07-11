@@ -145,6 +145,8 @@ A `copy of the license <https://github.com/pyoomph/pyoomph/blob/main/COPYING>`__
    -  `paraview <https://www.paraview.org/>`__, `[BSD 3-clause license] <https://www.paraview.org/license/>`__
    
    -  `setuptools <https://github.com/pypa/setuptools>`__, `[MIT license] <https://github.com/pypa/setuptools?tab=MIT-1-ov-file#readme>`__
+      
+   -  `scikit-build-core <https://github.com/scikit-build/scikit-build-core>`__, `[Apache 2.0 license] <https://github.com/scikit-build/scikit-build-core?tab=Apache-2.0-1-ov-file>`__ is used for installation and wheel generation
    
    -  `pybind11-stubgen <https://github.com/sizmailov/pybind11-stubgen>`__, `[BSD 3-Clause license] <https://github.com/sizmailov/pybind11-stubgen?tab=License-1-ov-file#readme>`__ is used to generate python stubs from the C++ core
    

@@ -3,7 +3,7 @@ import scipy.sparse.linalg
 from .problem import Problem
 from ..expressions import GlobalParameter,ExpressionNumOrNone
 from ..typings import *
-import _pyoomph
+import pyoomph._pyoomph_core as _pyoomph
 import numpy,scipy
 from .assembly import CustomAssemblyBase
 from ..solvers.generic import DefaultMatrixType,EigenMatrixManipulatorBase

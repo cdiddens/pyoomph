@@ -28,7 +28,7 @@
 from doctest import master
 from os import path
 import re
-import _pyoomph
+import pyoomph._pyoomph_core as _pyoomph
 from ..typings import Optional
 
 from ..meshes.mesh import assert_spatial_mesh,InterfaceMesh,ODEStorageMesh

@@ -40,8 +40,6 @@ classifiers=[
     ]
 dynamic = ["version"]
 
-[tool.setuptools_scm]
-
 [project.urls]
 homepage = "https://pyoomph.github.io"
 documentation = "https://pyoomph.readthedocs.io/en/latest/index.html"
@@ -49,68 +47,65 @@ source = "https://github.com/pyoomph/pyoomph"
 download = "https://pypi.org/project/pyoomph/"
 tracker = "https://github.com/pyoomph/pyoomph/issues"
 
+
 [build-system]
-requires = ["setuptools>=68.0","pybind11>=2.5.0","setuptools-scm>=8"]
-build-backend = "setuptools.build_meta:__legacy__"
+requires = ["scikit-build-core>=0.10", "pybind11>=2.5.0"]
+build-backend = "scikit_build_core.build"
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+build-dir = "build/{wheel_tag}"
+cmake.build-type = "Release"
+# The pure-Python package; the compiled extension is now installed as
+# `pyoomph/_core*.so` (importable as `pyoomph._core`) directly by
+# CMakeLists.txt's `install(TARGETS _core LIBRARY DESTINATION pyoomph)`, so
+# it lives inside the "pyoomph" package below and needs no separate entry
+# here.
+wheel.packages = ["pyoomph"]
+
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "pyoomph/_version.py"
+
+# Defaults for the CMake options declared in CMakeLists.txt. Override these
+# per-build via `pip install --config-settings=cmake.define.PYOOMPH_USE_MPI=ON`,
+# or more conveniently through the ./configure wrapper script's
+# --with-mpi / --with-debug / --paranoid / --download-cln / --download-ginac
+# flags, which translate to exactly this mechanism.
+#[tool.scikit-build.cmake.define]
+#PYOOMPH_USE_MPI = "OFF"
+#PYOOMPH_PARANOID = "OFF"
+#PYOOMPH_DOWNLOAD_CLN = "OFF"
+#PYOOMPH_DOWNLOAD_GINAC = "OFF"
 
 [tool.cibuildwheel]
-#manylinux-x86_64-image = "manylinux2014"
 manylinux-x86_64-image = "manylinux_2_28"
 build-frontend = { name = "pip", args = ["--no-build-isolation", "--verbose"] }
 test-requires = "pytest"
 test-command = "pytest {package}/tests" # does not work, since the gmsh library has unresolvable requirements
 test-sources = ["tests"]
+# CMake now downloads+builds GiNaC/CLN itself (see cmake/ThirdPartyGiNaC.cmake)
+# instead of the old citools/download_and_build_static_ginac.sh script, so
+# wheel builds just need to turn that on.
+config-settings = { "cmake.define.PYOOMPH_DOWNLOAD_CLN" = "ON", "cmake.define.PYOOMPH_DOWNLOAD_GINAC" = "ON" }
 
 [tool.cibuildwheel.linux]
-environment={PYOOMPH_CONFIG_FILE="/project/citools/pyoomph_config_linuxwheel.env"}
-
 before-all = [
-"export PYOOMPH_CONFIG_FILE=$(readlink -f ./citools/pyoomph_config_linuxwheel.env)",
-"source $PYOOMPH_CONFIG_FILE",
-"echo Loaded $PYOOMPH_CONFIG_FILE",
-"mkdir -p $PYOOMPH_GINAC_INCLUDE_DIR",
-"export PYOOMPH_CXXFLAGS_EXTRA=-I`readlink -f $PYOOMPH_GINAC_INCLUDE_DIR`",
-"echo set extra flags to $PYOOMPH_CXXFLAGS_EXTRA",
-"source {project}/citools/before_build_linux.sh {project}",
-"./clean.sh all",
-"dnf -y install wget",
-"bash citools/download_and_build_static_ginac.sh",
-"bash ./prebuild.sh",
-"make -C src clean",
-"make -C src -B"
-]
-before-build = [
-"export PYOOMPH_CONFIG_FILE={project}/citools/pyoomph_config_linuxwheel.env",
-"echo SOURCING $PYOOMPH_CONFIG_FILE",
-"source $PYOOMPH_CONFIG_FILE",
-"python -m pip install pybind11 setuptools",
-"rm -rf build/"
+"dnf -y install wget bzip2 patch",
+# NOTE: the old before-all also `source`d citools/pyoomph_config_linuxwheel.env
+# and citools/before_build_linux.sh; if those did anything beyond setting the
+# PYOOMPH_* env vars that CMakeLists.txt's options now cover directly (e.g.
+# installing extra system packages), re-add those specific steps here.
+"bash ./prebuild.sh"
 ]
 before-test = [
 "dnf -y install mesa-libGLU libXcursor libglvnd-opengl libXinerama" # sudo apt install libglu1-mesa libxcursor1 libopengl0
 ]
 
 [tool.cibuildwheel.macos]
-environment={PYOOMPH_CONFIG_FILE="./citools/pyoomph_config_macwheel.env"}
-
 before-all = [
-"export PYOOMPH_CONFIG_FILE=$(readlink -f ./citools/pyoomph_config_macwheel.env)",
-"source $PYOOMPH_CONFIG_FILE",
-"echo Loaded $PYOOMPH_CONFIG_FILE",
-"mkdir -p $PYOOMPH_GINAC_INCLUDE_DIR",
-"export PYOOMPH_CXXFLAGS_EXTRA=-I`readlink -f $PYOOMPH_GINAC_INCLUDE_DIR`",
-"echo set extra flags to $PYOOMPH_CXXFLAGS_EXTRA",
-"./clean.sh all",
 "brew install automake",
-"bash citools/download_and_build_static_ginac.sh",
-"bash ./prebuild.sh",
-"make -C src clean",
-"make -C src -B"
-]
-before-build = [
-"export PYOOMPH_CONFIG_FILE=$(readlink -f ./citools/pyoomph_config_macwheel.env)",
-"echo SOURCING $PYOOMPH_CONFIG_FILE",
-"source $PYOOMPH_CONFIG_FILE",
-"python -m pip install pybind11 setuptools wheel",
-"rm -rf build/"
+# NOTE: see the same caveat as the Linux before-all above, re:
+# citools/pyoomph_config_macwheel.env.
+"bash ./prebuild.sh"
 ]
