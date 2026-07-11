@@ -44,7 +44,7 @@ class CapillaryEvaporationProblem(Problem):
         # Initial Liquid mixture composition (glycerol/water)
         self.mixture=Mixture(20*percent*get_pure_liquid("glycerol")+get_pure_liquid("water"))
         # Gas phase composition (air with 20% relative humidity)
-        self.gas=Mixture(get_pure_gas("air")+20*percent*get_pure_gas("water"),quantity="relative_humidity",temperature=20*celsius)
+        self.gas=Mixture(get_pure_gas("air")+100*percent*get_pure_gas("water"),quantity="relative_humidity",temperature=20*celsius)
         # Gravity and ambient pressure
         self.g=9.81*meter/second**2
         self.ambient_pressure=1*atm
@@ -57,14 +57,18 @@ class CapillaryEvaporationProblem(Problem):
         # Get the interface properties
         interf=self.mixture | self.gas
         c_water=self.mixture.get_vapor_mass_concentration("water",at_mixture_composition=False)
-        # get the water mole fraction in the gas phase
+        # get the water mole fraction in the gas phase, calculate the relative humidity and use it to calculate the far-field water vapor concentration
         xWater=self.gas.evaluate_at_condition(self.gas.get_mole_fraction_field("water"),"IC", temperature=self.temperature,pressure=self.ambient_pressure)
+        psat=self.mixture.evaluate_at_condition(self.mixture.get_vapor_pressure_for("water",pure=True),temperature=self.temperature)
+        xSat=psat/self.ambient_pressure
+        RH=xWater/xSat        
         # and use it to calulate the far-field water vapor concentration
-        c_infty=self.mixture.get_vapor_mass_concentration("water",relative_humidity_for_far_field=xWater,temperature=self.temperature)
+        c_infty=self.mixture.get_vapor_mass_concentration("water",relative_humidity_for_far_field=RH,temperature=self.temperature)
         # Get the diffusion coefficient of water in air at the given temperature
         D_vap=self.gas.get_diffusion_coefficient("water")(temperature=self.temperature)
-        # And the evaporation rate
+        # And the evaporation rate        
         j_water=4*D_vap*(c_water-c_infty)/self.R        
+        
         # The evaporation rate at the initial condition is used to define the velocity scale for the problem
         j_water0=self.mixture.evaluate_at_condition(j_water,"IC",temperature=self.temperature)
         rho0=self.mixture.evaluate_at_condition(self.mixture.mass_density, "IC", temperature=self.temperature)
@@ -108,6 +112,6 @@ class CapillaryEvaporationProblem(Problem):
         
 if __name__=="__main__":
     with CapillaryEvaporationProblem() as problem:
-        problem.DTSF_max_increase_factor=1.5
+        problem.DTSF_max_increase_factor=1.25
         problem.DTSF_min_decrease_factor=0.75
         problem.run(48*hour,outstep=True,startstep=0.001*second,temporal_error=1)
