@@ -35,8 +35,8 @@ import pyoomph.materials.default_materials
 class CapillaryEvaporationProblem(Problem):
     def __init__(self):
         super().__init__()
-        # Length of the capillary
-        self.L=10*centi*meter
+        # Filled height in the capillary
+        self.L=20*milli*meter
         # Capillary radius
         self.R=0.5*milli*meter        
         # Temperature of the system
@@ -48,6 +48,8 @@ class CapillaryEvaporationProblem(Problem):
         # Gravity and ambient pressure
         self.g=9.81*meter/second**2
         self.ambient_pressure=1*atm
+        # Whether we use the GCL or not
+        self.use_GCL=True
         
     def define_problem(self):
         self+=LineMesh(size=self.L,N=1000)
@@ -73,8 +75,8 @@ class CapillaryEvaporationProblem(Problem):
         self.define_named_var(temperature=self.temperature)
         self.mixture.set_reference_scaling_to_problem(self,temperature=self.temperature)
         
-        # Flow, using the GCL
-        eqs=CompositionFlowEquations(self.mixture,gravity=self.g*vector(-1),GCL=False)
+        # Flow and composition in the bulk, optionally using the GCL
+        eqs=CompositionFlowEquations(self.mixture,gravity=self.g*vector(-1),GCL=self.use_GCL)
         # output and a fixed position at the left side (bottom of the capillary) where the liquid evaporates
         eqs+=LaplaceSmoothedMesh()
         eqs+=TextFileOutput()
@@ -92,10 +94,15 @@ class CapillaryEvaporationProblem(Problem):
         
         # Get the total mass of glycerol
         eqs+=IntegralObservables(M_glycerol=var("massfrac_glycerol")*self.mixture.mass_density)
-        eqs+=IntegralObservableOutput("evolution")
+        eqs+=IntegralObservableOutput("mass_evolution")
+        # Get the filled height and it's velocity
+        eqs+=IntegralObservables(y=self.L-var("mesh_x"),u=-mesh_velocity()[0])@"right"
+        eqs+=IntegralObservableOutput("top_interface")@"right"
+        
+        
         
         # Refine the region near the evaporating interface to better resolve the gradients in the solution
-        eqs+=RefineToLevel(3)@"left"
+        eqs+=RefineToLevel(4)@"left"
         
         self+=eqs@"domain"
         
