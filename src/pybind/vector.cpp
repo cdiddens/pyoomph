@@ -33,10 +33,18 @@ namespace py = pybind11;
 void PyReg_Vector(py::module &m)
 {
 
-	py::class_<oomph::Vector<double>>(m, "VectorDouble")
-		.def("__getitem__", [](const oomph::Vector<double> *self, const int &i)
-			 { return (*self)[i]; })
-		.def("__setitem__", [](oomph::Vector<double> *self, const int &i, const double &v)
-			 { (*self)[i] = v; })
-		.def("size", &oomph::Vector<double>::size);
+	py::class_<oomph::Vector<double>>(
+		m, "VectorDouble",
+		"Thin Python wrapper around oomph-lib's oomph::Vector<double>, a std::vector<double> subclass with "
+		"optional range checking. Used to expose plain C++ double vectors (e.g. eigenvectors, arclength "
+		"direction vectors) to Python without copying them into a numpy array.")
+		.def(
+			"__getitem__", [](const oomph::Vector<double> *self, const int &i)
+			{ return (*self)[i]; },
+			py::arg("i"), "Return the entry at index ``i``.")
+		.def(
+			"__setitem__", [](oomph::Vector<double> *self, const int &i, const double &v)
+			{ (*self)[i] = v; },
+			py::arg("i"), py::arg("value"), "Set the entry at index ``i`` to ``value``.")
+		.def("size", &oomph::Vector<double>::size, "Return the number of entries in the vector.");
 }
