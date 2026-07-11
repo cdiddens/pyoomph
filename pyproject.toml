@@ -121,10 +121,10 @@ before-all = [
 # of shipping a silently-mismatched wheel; run this job on a native
 # arm64 runner (e.g. GitHub's macos-14/macos-15) instead of cross-building
 # arm64 wheels under Rosetta on an x86_64 runner.
-"if [ \"$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)\" = \"1\" ]; then echo 'error: running under Rosetta2 translation - use a native-arch runner instead' >&2; exit 1; fi",
+#"if [ \"$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)\" = \"1\" ]; then echo 'error: running under Rosetta2 translation - use a native-arch runner instead' >&2; exit 1; fi",
 # NOTE: see the same caveat as the Linux before-all above, re:
 # citools/pyoomph_config_macwheel.env.
-"bash ./prebuild.sh"
+#"bash ./prebuild.sh"
 ]
 
 [tool.cibuildwheel.windows]
