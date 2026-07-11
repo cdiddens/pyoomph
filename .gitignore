@@ -1,4 +1,4 @@
-build/
+cmake_build/
 wheelhouse/
 tmp/
 GiNaC_static/

@@ -1,1 +1,1 @@
-rm -rf build/
+rm -rf cmake_build/
