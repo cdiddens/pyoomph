@@ -5,6 +5,7 @@ GiNaC_static/
 .eggs/
 pyoomph.egg-info/
 _pyoomph-stubs/_pyoomph.pyi
+pyoomph/_pyoomph_core.pyi
 pytest/
 __pycache__
 *.pyc

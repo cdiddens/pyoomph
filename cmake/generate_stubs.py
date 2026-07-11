@@ -16,16 +16,23 @@ Design goals, matching the old script's spirit:
 
 Usage (called from CMakeLists.txt):
     generate_stubs.py --module-dir DIR --module-name _core \
-        --stage-dir DIR [--patch-script PATH] [--python EXE]
+        --stage-dir DIR [--extra-copy-dir DIR] [--patch-script PATH] [--python EXE]
 
 On success, `<stage-dir>` ends up containing either:
   - `<module-name>.pyi`               (flat module, the common case), or
   - `<module-name>/__init__.pyi` (+.pyi siblings) (module with submodules)
 so that `install(DIRECTORY "<stage-dir>/" DESTINATION pyoomph OPTIONAL)`
 in CMakeLists.txt can drop it straight next to the built extension.
+
+`--extra-copy-dir` additionally mirrors the same stub into a second
+location - normally the source-tree `pyoomph/` package directory - so that
+static analyzers (Pylance/Pyright/mypy) editing the checked-out source can
+resolve `pyoomph._core` even without a full `pip install`, since they never
+see the build/install directory.
 """
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -44,6 +51,11 @@ def main() -> int:
                          help="Import name of the extension module (default: _core)")
     parser.add_argument("--stage-dir", required=True,
                          help="Directory the final stub(s) are normalized into")
+    parser.add_argument("--extra-copy-dir", action="append", default=[],
+                         help="Additional directory (e.g. the source-tree pyoomph/ "
+                              "package) to mirror the final stub(s) into, so editors "
+                              "like Pylance can resolve pyoomph._core without needing "
+                              "a full `pip install`. May be given multiple times.")
     parser.add_argument("--patch-script", default=None,
                          help="Optional patch_stubs.py-style script run on the generated stub")
     parser.add_argument("--python", default=sys.executable,
@@ -107,6 +119,20 @@ def main() -> int:
                   file=sys.stderr)
 
     print(f"Generated stub: {target}")
+
+    for extra_dir in args.extra_copy_dir:
+        dest_root = Path(extra_dir)
+        dest_root.mkdir(parents=True, exist_ok=True)
+        if target.is_dir():
+            dest = dest_root / target.name
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.copytree(target, dest)
+        else:
+            dest = dest_root / target.name
+            shutil.copy2(target, dest)
+        print(f"Mirrored stub into: {dest}")
+
     return 0
 
 

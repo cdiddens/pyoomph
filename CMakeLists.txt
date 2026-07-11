@@ -26,6 +26,7 @@ option(PYOOMPH_PARANOID      "Build with extra runtime sanity checks (defines PA
 option(PYOOMPH_DOWNLOAD_CLN  "Download and build CLN from source via its own autotools ./configure" OFF)
 option(PYOOMPH_DOWNLOAD_GINAC "Download and build GiNaC from source via its own autotools ./configure" OFF)
 option(PYOOMPH_GENERATE_STUBS "Generate .pyi stubs for the _core extension via pybind11-stubgen (best effort, non-fatal)"  ON)
+option(PYOOMPH_COPY_STUBS_TO_SOURCE_TREE "Also mirror the generated .pyi stub into the source-tree pyoomph/ directory, so Pylance/Pyright/mypy can resolve pyoomph._core while editing without a full pip install" ON)
 
 set(PYOOMPH_CLN_VERSION "1.3.7" CACHE STRING "CLN version to download when PYOOMPH_DOWNLOAD_CLN=ON")
 set(PYOOMPH_GINAC_VERSION "1.8.10" CACHE STRING "GiNaC version to download when PYOOMPH_DOWNLOAD_GINAC=ON")
@@ -203,6 +204,12 @@ endif()
 if(PYOOMPH_GENERATE_STUBS)
   set(PYOOMPH_STUB_STAGE_DIR "${CMAKE_BINARY_DIR}/pyi-stage")
  
+  set(PYOOMPH_STUB_EXTRA_COPY_ARGS "")
+  if(PYOOMPH_COPY_STUBS_TO_SOURCE_TREE)
+    list(APPEND PYOOMPH_STUB_EXTRA_COPY_ARGS
+         --extra-copy-dir "${CMAKE_SOURCE_DIR}/pyoomph")
+  endif()
+
   add_custom_command(TARGET _pyoomph_core POST_BUILD
     COMMAND "${Python_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/cmake/generate_stubs.py"
             --module-dir "$<TARGET_FILE_DIR:_pyoomph_core>"
@@ -210,6 +217,7 @@ if(PYOOMPH_GENERATE_STUBS)
             --stage-dir "${PYOOMPH_STUB_STAGE_DIR}"
             --patch-script "${CMAKE_SOURCE_DIR}/src/pybind/patch_stubs.py"
             --python "${Python_EXECUTABLE}"
+            ${PYOOMPH_STUB_EXTRA_COPY_ARGS}
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Generating .pyi stubs for pyoomph._pyoomph_core (best effort)"
     VERBATIM

@@ -9,5 +9,5 @@ $PYTHON -m pip install  --no-build-isolation -e . -v \
     --config-settings=build.verbose=true \
     --config-settings=build.tool-args=-j4 \
     --config-settings=cmake.build-type=RelWithDebInfo \
-    --config-settings=cmake.define.PYOOMPH_USE_MPI=ON
+    --config-settings=cmake.define.PYOOMPH_USE_MPI=ON 
 
