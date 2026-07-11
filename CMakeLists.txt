@@ -1,4 +1,9 @@
-cmake_minimum_required(VERSION 3.18)
+
+cmake_minimum_required(VERSION 3.24)
+
+if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)
+endif()
 
 # Project version is normally supplied by scikit-build-core (via
 # setuptools-scm, see pyproject.toml) as SKBUILD_PROJECT_VERSION. Fall back
@@ -23,7 +28,7 @@ option(PYOOMPH_DOWNLOAD_GINAC "Download and build GiNaC from source via its own 
 option(PYOOMPH_GENERATE_STUBS "Generate .pyi stubs for the _core extension via pybind11-stubgen (best effort, non-fatal)"  ON)
 
 set(PYOOMPH_CLN_VERSION "1.3.7" CACHE STRING "CLN version to download when PYOOMPH_DOWNLOAD_CLN=ON")
-set(PYOOMPH_GINAC_VERSION "1.8.7" CACHE STRING "GiNaC version to download when PYOOMPH_DOWNLOAD_GINAC=ON")
+set(PYOOMPH_GINAC_VERSION "1.8.10" CACHE STRING "GiNaC version to download when PYOOMPH_DOWNLOAD_GINAC=ON")
 set(PYOOMPH_THIRDPARTY_PREFIX "${CMAKE_BINARY_DIR}/thirdparty-install" CACHE PATH
     "Install prefix used for a downloaded/built CLN and/or GiNaC")
 

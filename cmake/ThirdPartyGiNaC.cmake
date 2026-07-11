@@ -22,11 +22,11 @@
 include(ExternalProject)
 include(GNUInstallDirs)
 
-set(CLN_EXTRA_CONFIGURE_FLAGS "" CACHE STRING "Extra flags passed to CLN's ./configure")
+set(CLN_EXTRA_CONFIGURE_FLAGS   "CXXFLAGS=-MD -DNO_ASM -O2" CACHE STRING "Extra flags passed to CLN's ./configure")
 set(GINAC_EXTRA_CONFIGURE_FLAGS "" CACHE STRING "Extra flags passed to GiNaC's ./configure")
 
 set(_pyoomph_autotools_common_flags
-    "--enable-static" "--disable-shared" "CFLAGS=-fPIC" "CXXFLAGS=-fPIC")
+    "--enable-static" "--disable-shared" "--with-pic=yes" "CFLAGS=-fPIC" "CXXFLAGS=-fPIC -g0")
 
 # ---------------------------------------------------------------- CLN -----
 if(PYOOMPH_DOWNLOAD_CLN)
@@ -37,10 +37,9 @@ if(PYOOMPH_DOWNLOAD_CLN)
     BUILD_IN_SOURCE 1
     CONFIGURE_COMMAND <SOURCE_DIR>/configure
                        --prefix=${PYOOMPH_THIRDPARTY_PREFIX}
+                       --without-gmp                                              
                        ${_pyoomph_autotools_common_flags}
-                       ${CLN_EXTRA_CONFIGURE_FLAGS}
-    BUILD_COMMAND $(MAKE)
-    INSTALL_COMMAND $(MAKE) install
+                       ${CLN_EXTRA_CONFIGURE_FLAGS}    
     BUILD_BYPRODUCTS "${_cln_lib}"
   )
   set(PYOOMPH_CLN_INCLUDE_DIR_RESOLVED "${PYOOMPH_THIRDPARTY_PREFIX}/include")
@@ -86,11 +85,9 @@ if(PYOOMPH_DOWNLOAD_GINAC)
                        "CPPFLAGS=-I${PYOOMPH_CLN_INCLUDE_DIR_RESOLVED}"
                        "LDFLAGS=-L${PYOOMPH_THIRDPARTY_PREFIX}/${CMAKE_INSTALL_LIBDIR}"
                        <SOURCE_DIR>/configure
-                       --prefix=${PYOOMPH_THIRDPARTY_PREFIX}
+                       --prefix=${PYOOMPH_THIRDPARTY_PREFIX} 
                        ${_pyoomph_autotools_common_flags}
                        ${GINAC_EXTRA_CONFIGURE_FLAGS}
-    BUILD_COMMAND $(MAKE)
-    INSTALL_COMMAND $(MAKE) install
     BUILD_BYPRODUCTS "${_ginac_lib}"
   )
   set(PYOOMPH_GINAC_INCLUDE_DIR_RESOLVED "${PYOOMPH_THIRDPARTY_PREFIX}/include")
