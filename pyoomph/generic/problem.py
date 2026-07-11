@@ -353,7 +353,6 @@ class Problem(_pyoomph.Problem):
     Attributes:
         
         additional_equations (Union[Literal[0], EquationTree]): Additional equations for the problem.
-        always_take_one_newton_step (bool): Flag indicating whether to always take one Newton step.
         continuation_data_in_states (bool): Flag indicating whether to store continuation data in the states.
         default_1d_file_extension (Union[Literal["txt", "mat"], List[Literal["txt", "mat"]]]): Default file extension for 1D files.
         default_ccode_expression_mode (str): Default C code expression mode.
@@ -364,7 +363,6 @@ class Problem(_pyoomph.Problem):
         extra_compiler_flags (List[str]): Extra compiler flags for the problem.
         ignore_command_line (bool): Flag indicating whether to ignore command line arguments.
         latex_printer (Optional[LaTeXPrinter]): LaTeX printer for the problem.
-        max_residuals (float): Maximum residuals for the problem.
         plot_in_dedicated_process (bool): Flag indicating whether to plot in a dedicated process.
         remove_macro_elements_after_initial_adaption (Union[bool, Literal["auto"]]): Flag indicating whether to remove macro elements after initial adaption.
         scaling (Dict[str, Union[str, ExpressionOrNum]]): Dictionary of scaling factors.

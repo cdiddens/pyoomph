@@ -43,6 +43,12 @@ extensions = [
     # 'sphinx.ext.imgmath',
     ]
 
+# Auto-generated section labels (from sphinx.ext.autosectionlabel) are just the section title
+# text by default, e.g. "Module contents" - and every sphinx-apidoc-generated page reuses those
+# same generic titles, so without this they collide across (almost) every pyoomph.*.rst page.
+# Prefixing with the document path makes them unique.
+autosectionlabel_prefix_document = True
+
 favicons = [
     {"href": "favicon.ico"},
     {"href": "android-chrome-192x192.png"},      
