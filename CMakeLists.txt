@@ -23,8 +23,8 @@ project(pyoomph LANGUAGES C CXX VERSION ${SKBUILD_PROJECT_VERSION})
 # ----------------------------------------------------------------------------
 option(PYOOMPH_USE_MPI       "Build with MPI support (defines OOMPH_HAS_MPI)"        OFF)
 option(PYOOMPH_PARANOID      "Build with extra runtime sanity checks (defines PARANOID)" OFF)
-option(PYOOMPH_DOWNLOAD_CLN  "Download and build CLN from source via its own autotools ./configure" OFF)
-option(PYOOMPH_DOWNLOAD_GINAC "Download and build GiNaC from source via its own autotools ./configure" OFF)
+option(PYOOMPH_DOWNLOAD_CLN  "Download and build CLN from source via its own autotools ./configure" ON)
+option(PYOOMPH_DOWNLOAD_GINAC "Download and build GiNaC from source via its own autotools ./configure" ON)
 option(PYOOMPH_GENERATE_STUBS "Generate .pyi stubs for the _core extension via pybind11-stubgen (best effort, non-fatal)"  ON)
 option(PYOOMPH_COPY_STUBS_TO_SOURCE_TREE "Also mirror the generated .pyi stub into the source-tree pyoomph/ directory, so Pylance/Pyright/mypy can resolve pyoomph._core while editing without a full pip install" ON)
 
