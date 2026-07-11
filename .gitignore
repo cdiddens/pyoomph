@@ -1,3 +1,5 @@
+build/
+docs/build
 cmake_build/
 wheelhouse/
 tmp/
