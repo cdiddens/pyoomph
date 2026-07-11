@@ -80,23 +80,20 @@ input = "pyoomph/_version.py"
 
 [tool.cibuildwheel]
 manylinux-x86_64-image = "manylinux_2_28"
-build-frontend = { name = "pip", args = ["--no-build-isolation", "--verbose"] }
+build-frontend = { name = "pip", args = ["--no-build-isolation", "--verbose", "--no-clean"] }
+
+    
 test-requires = "pytest"
 test-command = "pytest {package}/tests" # does not work, since the gmsh library has unresolvable requirements
 test-sources = ["tests"]
 # CMake now downloads+builds GiNaC/CLN itself (see cmake/ThirdPartyGiNaC.cmake)
 # instead of the old citools/download_and_build_static_ginac.sh script, so
 # wheel builds just need to turn that on.
-config-settings = { "cmake.define.PYOOMPH_DOWNLOAD_CLN" = "ON", "cmake.define.PYOOMPH_DOWNLOAD_GINAC" = "ON" }
+config-settings = { "cmake.define.PYOOMPH_DOWNLOAD_CLN" = "ON", "cmake.define.PYOOMPH_DOWNLOAD_GINAC" = "ON", "cmake.define.PYOOMPH_USE_MPI" = "OFF" }
 
 [tool.cibuildwheel.linux]
 before-all = [
 "dnf -y install wget bzip2 patch",
-# NOTE: the old before-all also `source`d citools/pyoomph_config_linuxwheel.env
-# and citools/before_build_linux.sh; if those did anything beyond setting the
-# PYOOMPH_* env vars that CMakeLists.txt's options now cover directly (e.g.
-# installing extra system packages), re-add those specific steps here.
-"bash ./prebuild.sh"
 ]
 before-test = [
 "dnf -y install mesa-libGLU libXcursor libglvnd-opengl libXinerama" # sudo apt install libglu1-mesa libxcursor1 libopengl0
