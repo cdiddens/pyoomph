@@ -62,7 +62,7 @@ We can easily assemble such simple problems by using the predefined equations cl
 	    out_file.add_row(T, U_val)
 
 
-Main steps are again to define :math:`T` as global parameter, so that it can be scanned afterwards. Then, for the calculation of :math:`U`, we first have to split it into spatial integrals first and finally express :math:`U` in terms of this integrals.
+Main steps are again to define :math:`T` as a global parameter, so that it can be scanned afterwards. Then, for the calculation of :math:`U`, we first have to split it into spatial integrals and finally express :math:`U` in terms of these integrals.
 
 .. math::
 
@@ -72,7 +72,7 @@ Main steps are again to define :math:`T` as global parameter, so that it can be 
    U&=\sqrt{U_\text{sqr}/A}
    \end{aligned}
 
-This can all be achieved in a single :py:class:`~pyoomph.equations.generic.IntegralObservables`, where the last step in the calculation is obtained by a ``lambda`` using the correct parameter names to get the values from the spatial integrals. :py:meth:`~pyoomph.generic.problem.Problem.create_text_file_output` generates a file in the output direction, which is then written by scanning over :math:`T` using :py:meth:`~pyoomph.generic.problem.Problem.go_to_param`. The results are plotted in :numref:`figspatialcavity`.
+This can all be achieved in a single :py:class:`~pyoomph.equations.generic.IntegralObservables`, where the last step in the calculation is obtained by a ``lambda`` using the correct parameter names to get the values from the spatial integrals. :py:meth:`~pyoomph.generic.problem.Problem.create_text_file_output` generates a file in the output directory, which is then written by scanning over :math:`T` using :py:meth:`~pyoomph.generic.problem.Problem.go_to_param`. The results are plotted in :numref:`figspatialcavity`.
 
 ..  figure:: cavity.*
 	:name: figspatialcavity
@@ -99,7 +99,7 @@ Inverse problem
 
 Consider you now want to adjust :math:`T` so that the observable :math:`U` attains some specific value :math:`U_\text{desired}`. Of course, you can look up the appropriate value of :math:`T` from the graph in :numref:`figspatialcavity`, but this requires to first solve the forward problem for an entire range of the parameter :math:`T`. A more sophisticated approach would be bisection in :math:`T` until the condition :math:`U=U_\text{desired}` is met.
 
-However, fully-implicit solvers, as used in pyoomph, are capable to invert the problem and to directly solve for :math:`T` so that :math:`U=U_\text{desired}` holds. Obviously, :math:`T` is then not a free parameter anymore, but an unknown. Instead, we get :math:`U_\text{desired}` as parameter and the residual equation for :math:`T` becomes
+However, fully-implicit solvers, as used in pyoomph, are capable of inverting the problem and of directly solving for :math:`T` so that :math:`U=U_\text{desired}` holds. Obviously, :math:`T` is then not a free parameter anymore, but an unknown. Instead, we get :math:`U_\text{desired}` as a parameter and the residual equation for :math:`T` becomes
 
 .. math::
 
@@ -140,7 +140,7 @@ Then, we add the equation for :math:`T`, which can be achieved by
 	eqs += WeakContribution(dot(var("velocity"), var("velocity")) - Udesired*Udesired, Ttest)
 	
 	
-:py:meth:`~pyoomph.generic.codegen.WeakContribution` is just an equation class which just adds the a single contribution to the weak formulation. Here, just the spatial integral of :math:`\vec{u}^2  - U_\text{desired}^2` over the domain to the residuals of :math:`T`. 
+:py:meth:`~pyoomph.generic.codegen.WeakContribution` is just an equation class which just adds a single contribution to the weak formulation. Here, just the spatial integral of :math:`\vec{u}^2  - U_\text{desired}^2` over the domain to the residuals of :math:`T`. 
 
 There is one caveat for this particular equation, namely that it is quadratic in the velocity, i.e. :math:`\vec{u}^2`. By default, pyoomph starts with a zero velocity field, which then produces a zero Jacobian row in the first Newton iteration. So we first must find a reasonable guess for the velocity field without trying to adjust the unknown forcing :math:`T`. We therefore remove :math:`T` from the degrees of freedom and solve for the velocity and pressure only:
 

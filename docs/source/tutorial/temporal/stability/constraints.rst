@@ -1,5 +1,5 @@
 Stability of second order ODEs or in the presence of constraints
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Let us revert back to the pendulum equation of :numref:`secODEpendulum`. There, the dynamics has been implemented in two ways, namely (i) by solving the second order ODE
 

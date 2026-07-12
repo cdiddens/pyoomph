@@ -71,7 +71,7 @@ namespace pyoomph
   public:
     // Whether this mesh's element type actually supports tree-based h-refinement (true for bricks,
     // false for plain tetrahedra).
-    bool refinement_possible();
+    bool refinement_possible() override; 
     /*
     TemplatedMeshBase3d(MeshTemplate * templ) : pyoomph::Mesh(),TemplatedMeshBase()
     {

@@ -133,7 +133,7 @@ The divergence of a vector field :math:`\vec{\psi}` defined on a manifold reads 
 
 Finally, when changing the coordinate system by :py:meth:`~pyoomph.generic.problem.Problem.set_coordinate_system`, the corresponding scale factors are also considered in the differential operators on manifolds.
 
-As conclusion, we can just use :py:func:`~pyoomph.expressions.generic.grad` and :py:func:`~pyoomph.expressions.div` in our equations. When any equation involving these differential operators is restricted to a manifold, the only reasonable differential operator is selected automatically. This allows to use the same :py:class:`~pyoomph.equations.poisson.PoissonEquation` either in the bulk (with co-dimension 0) or at any manifold with co-dimension :math:`>0`. In the latter case, the Poisson equation reads
+As conclusion, we can just use :py:func:`~pyoomph.expressions.generic.grad` and :py:func:`~pyoomph.expressions.div` in our equations. When any equation involving these differential operators is restricted to a manifold, the only reasonable differential operator is selected automatically. This allows us to use the same :py:class:`~pyoomph.equations.poisson.PoissonEquation` either in the bulk (with co-dimension 0) or at any manifold with co-dimension :math:`>0`. In the latter case, the Poisson equation reads
 
 .. math:: -\nabla_S^2 u=g
 

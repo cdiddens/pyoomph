@@ -83,6 +83,12 @@ namespace pyoomph
       oomph::BrokenCopy::broken_assign("TemplatedMeshBase1d");
     }
 
+    bool refinement_possible() override
+    {
+      // 1d elements are always tree-refineable (via a binary tree)
+      return true;
+    }
+
     /// Destructor:
     virtual ~TemplatedMeshBase1d() {}
 

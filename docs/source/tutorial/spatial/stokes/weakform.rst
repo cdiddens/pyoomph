@@ -1,7 +1,7 @@
 Strong and weak formulation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The Stokes-equations for the velocity field :math:`\vec{u}` and the pressure :math:`p` read
+The Stokes equations for the velocity field :math:`\vec{u}` and the pressure :math:`p` read
 
 .. math::
 
@@ -10,7 +10,7 @@ The Stokes-equations for the velocity field :math:`\vec{u}` and the pressure :ma
    \nabla\cdot u&=0
    \end{aligned}
 
-Here, :math:`\mu` is the dynamic viscosity of the liquid. Obviously, we have to solve two field, one vector field for the velocity :math:`\vec{u}` and a scalar pressure field :math:`p`. The second equation, the continuity equation, is a scalar equation and reads as a constraint to the velocity field :math:`\vec{u}`, namely that its divergence vanishes. For an :math:`n`-dimensional Stokes flow problem, there are hence :math:`n` momentum equations and :math:`1` constraining equation. To solve this, we have a :math:`n`-dimensional vector field :math:`\vec{u}` and a single scalar :math:`p`, which gives rise to the generic weak form of the Stokes equations by solving the vectorial momentum equation on the test spaces of the velocity and the continuity equation on the test space of the pressure. Let :math:`\vec{v}` and :math:`q` be the corresponding test functions, the weak form thus reads
+Here, :math:`\mu` is the dynamic viscosity of the liquid. Obviously, we have to solve two fields, one vector field for the velocity :math:`\vec{u}` and a scalar pressure field :math:`p`. The second equation, the continuity equation, is a scalar equation and reads as a constraint on the velocity field :math:`\vec{u}`, namely that its divergence vanishes. For an :math:`n`-dimensional Stokes flow problem, there are hence :math:`n` momentum equations and :math:`1` constraining equation. To solve this, we have a :math:`n`-dimensional vector field :math:`\vec{u}` and a single scalar :math:`p`, which gives rise to the generic weak form of the Stokes equations by solving the vectorial momentum equation on the test spaces of the velocity and the continuity equation on the test space of the pressure. Let :math:`\vec{v}` and :math:`q` be the corresponding test functions, the weak form thus reads
 
 .. math:: :label: eqspatialstokesweak
 

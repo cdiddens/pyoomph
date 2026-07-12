@@ -106,7 +106,7 @@ namespace pyoomph
     virtual void setup_interior_boundary_elements(unsigned bindex);
     // Whether this mesh's element type actually supports tree-based h-refinement (true for quads,
     // false for plain triangles, which cannot be refined via a QuadTree forest).
-    bool refinement_possible();
+    bool refinement_possible() override;
 
     /*
     TemplatedMeshBase2d(MeshTemplate * templ) : pyoomph::Mesh(),TemplatedMeshBase()

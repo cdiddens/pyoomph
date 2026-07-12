@@ -1,7 +1,7 @@
 Two-dimensional Poisson equation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-All previous discussions so far were exemplified on a 1d domain. Pyoomph makes it very simple to use equations on arbitrary domains. Since we have formulated the ``PoissonEquation`` and the Neumann boundary conditions in :download:`poisson.py` and :download:`poisson_robin_via_neumann.py` with :py:func:`~pyoomph.expressions.generic.grad`, the definition is not restricted to any particular number of the dimensions. To solve it on a 2d rectangular domain, we can hence directly reuse the equation classes and the boundary conditions defined above. To solve i.e. the system
+All previous discussions so far were exemplified on a 1d domain. Pyoomph makes it very simple to use equations on arbitrary domains. Since we have formulated the ``PoissonEquation`` and the Neumann boundary conditions in :download:`poisson.py` and :download:`poisson_robin_via_neumann.py` with :py:func:`~pyoomph.expressions.generic.grad`, the definition is not restricted to any particular number of dimensions. To solve it on a 2d rectangular domain, we can hence directly reuse the equation classes and the boundary conditions defined above. To solve i.e. the system
 
 .. math::
 
@@ -13,7 +13,7 @@ All previous discussions so far were exemplified on a 1d domain. Pyoomph makes i
    u+\partial_y u&=-1 \quad \text{at} \quad y=1
    \end{aligned}
 
-We just have to assemble the system on a 2d geometry, which is predefinned in pyoomph in the :py:class:`~pyoomph.meshes.simplemeshes.RectangularQuadMesh`:
+We just have to assemble the system on a 2d geometry, which is predefined in pyoomph in the :py:class:`~pyoomph.meshes.simplemeshes.RectangularQuadMesh`:
 
 .. code:: python
 

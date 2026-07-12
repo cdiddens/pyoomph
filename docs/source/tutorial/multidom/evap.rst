@@ -3,7 +3,7 @@
 Evaporation of a sessile droplet
 --------------------------------
 
-Evaporation, as mass transfer between phases in general, always requires more than a single phase. We have seen how we can couple different equations on individual domains and hence we can solve evaporating sessile droplets. To that end, we have to solve the Navier-Stokes equation for the droplet, the interface dynamics and for the gas phase, the diffusion equation of the vapor field. While there is actually also advective vapor transport, it usually negligible for temperatures below the boiling point.
+Evaporation, as mass transfer between phases in general, always requires more than a single phase. We have seen how we can couple different equations on individual domains and hence we can solve evaporating sessile droplets. To that end, we have to solve the Navier-Stokes equation for the droplet, the interface dynamics and for the gas phase, the diffusion equation of the vapor field. While there is actually also advective vapor transport, it is usually negligible for temperatures below the boiling point.
 
 First of all, we must have a mesh that comprises a sessile droplet and a surrounding gas domain:
 
@@ -82,7 +82,7 @@ In the gas phase, we will solve the vapor diffusion equation for the partial vap
            n = var("normal")
            self.evap_rate = -self.vapor_diffusivity * dot(grad(c_vap), n)
 
-It is again important to tell :py:func:`~pyoomph.expressions.generic.var` that we want to evaluate ``"c_vap"`` in the ``domain="gas"``, i.e. in the bulk domain. Otherwise, we might get the wrong gradient (i.e. the surface gradient instead the bulk gradient).
+It is again important to tell :py:func:`~pyoomph.expressions.generic.var` that we want to evaluate ``"c_vap"`` in the ``domain="gas"``, i.e. in the bulk domain. Otherwise, we might get the wrong gradient (i.e. the surface gradient instead of the bulk gradient).
 
 In the :py:meth:`~pyoomph.generic.problem.Problem.define_problem`, we first set some reasonable scales for non-dimensionalization and add the mesh:
 
@@ -161,14 +161,14 @@ The gas equations are just a diffusion equation, i.e. an :py:class:`~pyoomph.equ
            g_eqs+=DirichletBC(c_vap=self.c_sat)@"droplet_gas"
            g_eqs+=AdvectionDiffusionInfinity(c_vap=self.c_infty)@"gas_infinity"
 
-Note how we impose saturated vapor strongly at the liquid-gas interface, whereas the ambient vapor is imposed by a :py:class:`~pyoomph.equations.advection_diffusion.AdvectionDiffusionInfinity` equation. This equations mimics an infinite mesh by a Robin boundary condition. This condition can be derived by knowing that in three-dimensions, the diffusion equation will follow a :math:`1/r` behavior in the far field (with :math:`r` being the distance from the droplet). Far away from the droplet, the vapor field will hence read :math:`c=c_\infty+(c(R)-c_\infty)R/r` for any reasonably large distance :math:`R` and for :math:`r>R`. Deriving this with respect to :math:`r` and plugging it again into the expression gives the Robin condition
+Note how we impose saturated vapor strongly at the liquid-gas interface, whereas the ambient vapor is imposed by a :py:class:`~pyoomph.equations.advection_diffusion.AdvectionDiffusionInfinity` equation. This equation mimics an infinite mesh by a Robin boundary condition. This condition can be derived by knowing that in three dimensions, the diffusion equation will follow a :math:`1/r` behavior in the far field (with :math:`r` being the distance from the droplet). Far away from the droplet, the vapor field will hence read :math:`c=c_\infty+(c(R)-c_\infty)R/r` for any reasonably large distance :math:`R` and for :math:`r>R`. Deriving this with respect to :math:`r` and plugging it again into the expression gives the Robin condition
 
 .. math:: c(R)+R\partial_r c(R)=c_\infty\,.
 
 This condition is implemented by the :py:class:`~pyoomph.equations.advection_diffusion.AdvectionDiffusionInfinity` class as weak Neumann contribution.
 
 
-Finally, we also add some remeshing options which invoke a mesh reconstruction whenever the mesh deforms to strongly and also output the volume and the interface data with evaporation to files:
+Finally, we also add some remeshing options which invoke a mesh reconstruction whenever the mesh deforms too strongly and also output the volume and the interface data with evaporation to files:
 
 .. code:: python
 

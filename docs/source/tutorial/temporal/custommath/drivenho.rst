@@ -1,7 +1,7 @@
 A harmonic oscillator driven by a trapezoidal forcing
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Let us again consider a nondimensional harmonic oscillator, but now with a custom driving function, which resembles a trapezoidal pulse. This custom pulse function can be implemented in pyoomph via the :py:class:`~pyoomph.expressions.cb.CustomMathExpression` class from the :py:mod:`pyoomph.expressions.cb` as follows:
+Let us again consider a nondimensional harmonic oscillator, but now with a custom driving function, which resembles a trapezoidal pulse. This custom pulse function can be implemented in pyoomph via the :py:class:`~pyoomph.expressions.cb.CustomMathExpression` class from the :py:mod:`pyoomph.expressions.cb` module as follows:
 
 .. code:: python
 

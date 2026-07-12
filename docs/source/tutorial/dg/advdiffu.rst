@@ -89,7 +89,7 @@ While this considers a conservative and reasonable diffusive transport across th
 
 Here, :math:`\alpha` is a penalty parameter and :math:`h` is the average element size of both elements attached to the facet. The penalty term ensures coercivity of the problem, i.e. the existence of a unique solution. The penalty parameter :math:`\alpha` should be chosen large enough to ensure coercivity, but small enough to not dominate the solution. The average element size :math:`h` is calculated by the average of the element sizes of both elements attached to the facet. 
 
-For the implementation, the equation starts as usual. We allow to pass an arbitrary finite element space, continuous or discontinuous:
+For the implementation, the equation starts as usual. We can pass an arbitrary finite element space, continuous or discontinuous:
 
 .. code:: python
 

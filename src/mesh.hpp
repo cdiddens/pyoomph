@@ -427,11 +427,18 @@ namespace pyoomph
 			return errors;
 		}
 
+		// Can we refine the mesh? By defult, no: only the dimension-specific subclasses implement refinement.
+		virtual bool refinement_possible() {return false;} 
+
 		// Wraps oomph-lib's TreeBasedRefineableMeshBase::adapt: lets the Python-side
 		// update_elemental_errors hook post-process the per-element error estimates (e.g. to bias
 		// refinement) before handing them to the actual oomph-lib refinement/coarsening logic.
 		void adapt(const oomph::Vector<double> &elemental_error)
 		{
+			if (!this->refinement_possible())
+			{
+				return; // No-op if the mesh type does not support refinement
+			}
 			// For python, we need to convert it to a std::vector...
 			std::vector<double> errors(elemental_error.size());
 			for (unsigned int i = 0; i < elemental_error.size(); i++)

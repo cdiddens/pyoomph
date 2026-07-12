@@ -3,7 +3,7 @@
 Stokes' law for a falling droplet with insoluble surfactants
 ------------------------------------------------------------
 
-In :numref:`secpdestokes_law`, a transient Stokes law is solved. We will now slightly modify this problem and exchange the rigid spherical object by a droplet. For simplicity, we still assume that the capillary number is small, i.e. the droplet does not deform when falling. Thereby, we do not have to consider moving meshes. The necessary modifications are first in the mesh class, so that also a droplet mesh is generated:
+In :numref:`secpdestokes_law`, a transient Stokes law is solved. We will now slightly modify this problem and exchange the rigid spherical object for a droplet. For simplicity, we still assume that the capillary number is small, i.e. the droplet does not deform when falling. Thereby, we do not have to consider moving meshes. The necessary modifications are first in the mesh class, so that also a droplet mesh is generated:
 
 .. code:: python
 
@@ -57,7 +57,7 @@ In the :py:meth:`~pyoomph.generic.problem.Problem.define_problem` method, we rem
 
 When we have static meshes (i.e. no equations for the mesh positions are added), we must add ``static_interface=True`` to the :py:class:`~pyoomph.equations.navier_stokes.NavierStokesFreeSurface`. With that, the action of the Lagrange multiplier of the kinematic boundary condition :math:numref:`eqalekinbcweak` will be added to the velocity, not the mesh motion. Since the latter is not allowed to move, only an adjustment of the velocity can guarantee the kinematic boundary condition to hold. Thereby, the kinematic boundary condition is effectively replaced by a zero normal flow condition, i.e. :math:numref:`eqspatialnofluxlagrange`.
 
-The results of this modifications are shown in :numref:`figmultidomfallingdroplet`. The value of the surface tension does not matter here, since on static meshes, the droplet will remain perfectly spherical, i.e. corresponding to a zero capillary number. However, surface tension gradients can still drive Marangoni flow, as we will see next.
+The results of these modifications are shown in :numref:`figmultidomfallingdroplet`. The value of the surface tension does not matter here, since on static meshes, the droplet will remain perfectly spherical, i.e. corresponding to a zero capillary number. However, surface tension gradients can still drive Marangoni flow, as we will see next.
 
 To obtain surface tension gradients, we add an insoluble surfactant to the droplet-outside interface. The corresponding transport equation for a surfactant interface concentration :math:`\Gamma` with surface diffusivity :math:`D_S` reads
 
@@ -87,7 +87,7 @@ In pyoomph, it is again trivial to implement this:
            self.add_residual(weak(partial_t(G)+div(u*G),Gtest))
            self.add_residual(weak(self.D*grad(G), grad(Gtest)))
 
-Again, if we solve it on an interface, i.e. a manifold with co-dimension, :py:func:`~pyoomph.expressions.div` and :py:func:`~pyoomph.expressions.generic.grad` will expand to their surface counterparts as discussed in :numref:`secspatialhelicalmesh`.
+Again, if we solve it on an interface, i.e. a manifold with co-dimension 1, :py:func:`~pyoomph.expressions.div` and :py:func:`~pyoomph.expressions.generic.grad` will expand to their surface counterparts as discussed in :numref:`secspatialhelicalmesh`.
 
 .. warning::
 
@@ -116,11 +116,11 @@ The surfactants get advected to the top of the droplet and hamper the flow in th
 ..  figure:: falling_droplet.*
 	:name: figmultidomfallingdroplet
 	:align: center
-	:alt: Droplet falling due gravity without and with surfactants
+	:alt: Droplet falling due to gravity without and with surfactants
 	:class: with-shadow
 	:width: 100%
 
-	Droplet falling due due gravitiy without (left) and with surfactants (right).
+	Droplet falling due to gravity without (left) and with surfactants (right).
 
 
 .. only:: html

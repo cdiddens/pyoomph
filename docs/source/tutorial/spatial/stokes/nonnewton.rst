@@ -1,4 +1,4 @@
-Non-Newtoninan fluids
+Non-Newtonian fluids
 ~~~~~~~~~~~~~~~~~~~~~
 
 We now want to consider a nonlinear Stokes equation by letting the viscosity depend on the shear rate. Thereby, the normally linear Stokes equation becomes nonlinear and highly dependent on the initial guess. However, shear-thickening or -thinning fluids can be found in reality. We can easily reuse our previous implementation of the Stokes problem by passing a shear dependent viscosity to the :py:class:`~pyoomph.generic.problem.Problem` class which forwards it to the :py:class:`~pyoomph.generic.codegen.Equations` class, where it is ultimately evaluated in the weak form implementation. For simplicity, we set the viscosity to :math:`\mu=1+\dot{\gamma}`, where :math:`\dot{\gamma}=\sqrt{2\mathbf{S}:\mathbf{S}}` with the shear tensor :math:`\mathbf{S}=\frac{1}{2}\left(\nabla\vec{u}+\nabla\vec{u}^\text{t}\right)`:

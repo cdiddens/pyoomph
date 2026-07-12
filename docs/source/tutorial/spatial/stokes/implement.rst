@@ -3,7 +3,7 @@
 Implementation of the Stokes equations and the inf-sup condition
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Let us now implement the aforementioned weak form of the Stokes equation. As usual, this requires only a few lines in pyoomph. However, there is some important requirement on the selection on the basis functions for the velocity and the pressure fields. To try out which choices of the discretizations work, we will allow the user to pass the spaces, e.g. ``"C1"`` or ``"C2"``, for the velocity and the pressure.
+Let us now implement the aforementioned weak form of the Stokes equation. As usual, this requires only a few lines in pyoomph. However, there is some important requirement on the selection of the basis functions for the velocity and the pressure fields. To try out which choices of the discretizations work, we let user pass the spaces, e.g. ``"C1"`` or ``"C2"``, for the velocity and the pressure.
 
 .. code:: python
 
@@ -66,7 +66,7 @@ By that, we can now easily try out different combinations for the finite element
    		problem.solve() # solve and output
    		problem.output()
 
-It is trivial to try out other pairs of spaces, but it turns out that for the choice of the continuous spaces ``"C1"`` and ``"C2"``, the only combination that leads to convergence and reasonable solutions is ``"C2"`` for the velocity and ``"C1"`` for the pressure. These combination is called *Taylor-Hood element*. Mathematically, the convergence or divergence/oscillations can be proven and the corresponding theorem is the so-called *inf-sup criterion* or *Ladyzhenskaya-Babuška-Brezzi condition*. In simple words, we have to be aware of the fact that the pressure acts as a field of Lagrange multipliers that enforces the incompressibility, i.e. :math:`\nabla\cdot \mathbf{u}=0`. The pressure field adjusts hence that way and couples back to the momentum equation that this condition is fulfilled. However, if we choose equal spaces for both velocity and pressure, we are actually over-constraining the requirement of :math:`\nabla\cdot \mathbf{u}=0`, i.e. we enforce it at too many localizations so that a solution cannot be found or suffers from checkerboard-like oscillations.
+It is trivial to try out other pairs of spaces, but it turns out that for the choice of the continuous spaces ``"C1"`` and ``"C2"``, the only combination that leads to convergence and reasonable solutions is ``"C2"`` for the velocity and ``"C1"`` for the pressure. This combination is called *Taylor-Hood element*. Mathematically, the convergence or divergence/oscillations can be proven and the corresponding theorem is the so-called *inf-sup criterion* or *Ladyzhenskaya-Babuška-Brezzi condition*. In simple words, we have to be aware of the fact that the pressure acts as a field of Lagrange multipliers that enforces the incompressibility, i.e. :math:`\nabla\cdot \mathbf{u}=0`. The pressure field adjusts hence that way and couples back to the momentum equation so that this condition is fulfilled. However, if we choose equal spaces for both velocity and pressure, we are actually over-constraining the requirement of :math:`\nabla\cdot \mathbf{u}=0`, i.e. we enforce it at too many localizations so that a solution cannot be found or suffers from checkerboard-like oscillations.
 
 .. warning::
 

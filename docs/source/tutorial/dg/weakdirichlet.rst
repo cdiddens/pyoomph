@@ -50,7 +50,7 @@ However, we now also add a special function which gives the correct weak terms f
          facet_terms-=weak(grad(u),v*n)
          return facet_terms
 
-The problem is as usual, but we allow to select the space and whether we want to use the weak Dirichlet boundary conditions when possible:
+The problem is as usual, but we allow the user to select the space and whether we want to use the weak Dirichlet boundary conditions when possible:
 
 .. code:: python
 

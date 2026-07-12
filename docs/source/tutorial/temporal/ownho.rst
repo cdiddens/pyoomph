@@ -22,7 +22,7 @@ The corresponding code reads as follows:
 
    # We define a new class called HarmonicOscillator, which is inherited from the generic ODEEquations
    class HarmonicOscillator(ODEEquations):
-   	# Constructor, allow to set some parameters like the name of the variable, omega, damping and driving
+   	# Constructor, allow us to set some parameters like the name of the variable, omega, damping and driving
    	def __init__(self,*,name="y",omega=1,damping=0,driving=0):
    		super(HarmonicOscillator,self).__init__()
    		self.name=name #Store these as members of the equation object
