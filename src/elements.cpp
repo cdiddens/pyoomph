@@ -1866,38 +1866,23 @@ namespace pyoomph
 		my_alloc_or_free(do_alloc, (*buff)->dt, MAX_TIME_WEIGHTS);
 		my_alloc_or_free(do_alloc, (*buff)->int_pt_weights_d_coords, MAX_NODAL_DIM, MAX_NODES);
 		my_alloc_or_free(do_alloc, (*buff)->elemsize_d_coords, MAX_NODAL_DIM, MAX_NODES);
-		my_alloc_or_free(do_alloc, (*buff)->elemsize_Cart_d_coords, MAX_NODAL_DIM, MAX_NODES);						
-		my_alloc_or_free(do_alloc, (*buff)->d_dx_shape_dcoord_C2TB, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
-		my_alloc_or_free(do_alloc, (*buff)->d_dx_shape_dcoord_C2, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
-		my_alloc_or_free(do_alloc, (*buff)->d_dx_shape_dcoord_C1TB, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
-		my_alloc_or_free(do_alloc, (*buff)->d_dx_shape_dcoord_C1, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
+		my_alloc_or_free(do_alloc, (*buff)->elemsize_Cart_d_coords, MAX_NODAL_DIM, MAX_NODES);
+		for (unsigned int i = 0; i < NUM_CONTINUOUS_SPACES; i++)
+		{
+			my_alloc_or_free(do_alloc, (*buff)->d_dx_shape_dcoord[i], MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);			
+		}
+				
 		my_alloc_or_free(do_alloc, (*buff)->d_dx_shape_dcoord_DL, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
 		my_alloc_or_free(do_alloc, (*buff)->d_dshape_dx_tensor, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM, MAX_NODAL_DIM);
 
-		my_alloc_or_free(do_alloc, (*buff)->shape_C2TB, MAX_NODES);
-		my_alloc_or_free(do_alloc, (*buff)->nodal_shape_C2TB, MAX_NODES, MAX_NODES);
-		my_alloc_or_free(do_alloc, (*buff)->dx_shape_C2TB, MAX_NODES, MAX_NODAL_DIM);
-		my_alloc_or_free(do_alloc, (*buff)->dX_shape_C2TB, MAX_NODES, MAX_NODAL_DIM);
-		my_alloc_or_free(do_alloc, (*buff)->dS_shape_C2TB, MAX_NODES, MAX_NODAL_DIM);
-
-		my_alloc_or_free(do_alloc, (*buff)->shape_C2, MAX_NODES);
-		my_alloc_or_free(do_alloc, (*buff)->nodal_shape_C2, MAX_NODES, MAX_NODES);
-		my_alloc_or_free(do_alloc, (*buff)->dx_shape_C2, MAX_NODES, MAX_NODAL_DIM);
-		my_alloc_or_free(do_alloc, (*buff)->dX_shape_C2, MAX_NODES, MAX_NODAL_DIM);
-		my_alloc_or_free(do_alloc, (*buff)->dS_shape_C2, MAX_NODES, MAX_NODAL_DIM);
-
-
-		my_alloc_or_free(do_alloc, (*buff)->shape_C1TB, MAX_NODES);
-		my_alloc_or_free(do_alloc, (*buff)->nodal_shape_C1TB, MAX_NODES, MAX_NODES);
-		my_alloc_or_free(do_alloc, (*buff)->dx_shape_C1TB, MAX_NODES, MAX_NODAL_DIM);
-		my_alloc_or_free(do_alloc, (*buff)->dX_shape_C1TB, MAX_NODES, MAX_NODAL_DIM);
-		my_alloc_or_free(do_alloc, (*buff)->dS_shape_C1TB, MAX_NODES, MAX_NODAL_DIM);
-
-		my_alloc_or_free(do_alloc, (*buff)->shape_C1, MAX_NODES);
-		my_alloc_or_free(do_alloc, (*buff)->nodal_shape_C1, MAX_NODES, MAX_NODES);
-		my_alloc_or_free(do_alloc, (*buff)->dx_shape_C1, MAX_NODES, MAX_NODAL_DIM);
-		my_alloc_or_free(do_alloc, (*buff)->dX_shape_C1, MAX_NODES, MAX_NODAL_DIM);
-		my_alloc_or_free(do_alloc, (*buff)->dS_shape_C1, MAX_NODES, MAX_NODAL_DIM);
+		for (unsigned int i = 0; i < NUM_CONTINUOUS_SPACES; i++)
+		{
+			my_alloc_or_free(do_alloc, (*buff)->shapes[i], MAX_NODES);
+			my_alloc_or_free(do_alloc, (*buff)->nodal_shapes[i], MAX_NODES, MAX_NODES);
+			my_alloc_or_free(do_alloc, (*buff)->dx_shapes[i], MAX_NODES, MAX_NODAL_DIM);
+			my_alloc_or_free(do_alloc, (*buff)->dX_shapes[i], MAX_NODES, MAX_NODAL_DIM);
+			my_alloc_or_free(do_alloc, (*buff)->dS_shapes[i], MAX_NODES, MAX_NODAL_DIM);
+		}
 
 		my_alloc_or_free(do_alloc, (*buff)->shape_DL, MAX_NODES);
 		my_alloc_or_free(do_alloc, (*buff)->nodal_shape_DL, MAX_NODES, MAX_NODES);
@@ -1924,11 +1909,11 @@ namespace pyoomph
 		{
 			my_alloc_or_free(do_alloc, (*buff)->int_pt_weights_d2_coords, MAX_NODAL_DIM, MAX_NODAL_DIM, MAX_NODES, MAX_NODES);
 			my_alloc_or_free(do_alloc, (*buff)->elemsize_d2_coords, MAX_NODAL_DIM, MAX_NODAL_DIM, MAX_NODES, MAX_NODES);
-			my_alloc_or_free(do_alloc, (*buff)->elemsize_Cart_d2_coords, MAX_NODAL_DIM, MAX_NODAL_DIM, MAX_NODES, MAX_NODES);									
-			my_alloc_or_free(do_alloc, (*buff)->d2_dx2_shape_dcoord_C2TB, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
-			my_alloc_or_free(do_alloc, (*buff)->d2_dx2_shape_dcoord_C2, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
-			my_alloc_or_free(do_alloc, (*buff)->d2_dx2_shape_dcoord_C1TB, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);						
-			my_alloc_or_free(do_alloc, (*buff)->d2_dx2_shape_dcoord_C1, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
+			my_alloc_or_free(do_alloc, (*buff)->elemsize_Cart_d2_coords, MAX_NODAL_DIM, MAX_NODAL_DIM, MAX_NODES, MAX_NODES);	
+			for (unsigned int i = 0; i < NUM_CONTINUOUS_SPACES; i++)
+			{
+				my_alloc_or_free(do_alloc, (*buff)->d2_dx2_shape_dcoord[i], MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
+			}			
 			my_alloc_or_free(do_alloc, (*buff)->d2_dx2_shape_dcoord_DL, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
 
 			my_alloc_or_free(do_alloc, (*buff)->d2_normal_d2coord, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
@@ -1938,10 +1923,10 @@ namespace pyoomph
 			(*buff)->int_pt_weights_d2_coords = NULL;
 			(*buff)->elemsize_d2_coords=NULL;
 			(*buff)->elemsize_Cart_d2_coords=NULL;
-			(*buff)->d2_dx2_shape_dcoord_C2TB = NULL;
-			(*buff)->d2_dx2_shape_dcoord_C2 = NULL;
-			(*buff)->d2_dx2_shape_dcoord_C1TB = NULL;			
-			(*buff)->d2_dx2_shape_dcoord_C1 = NULL;
+			for (unsigned int i = 0; i < NUM_CONTINUOUS_SPACES; i++)
+			{
+				(*buff)->d2_dx2_shape_dcoord[i] = NULL;
+			}
 			(*buff)->d2_dx2_shape_dcoord_DL = NULL;
 			(*buff)->d2_normal_d2coord = NULL;
 		}
@@ -3129,49 +3114,22 @@ namespace pyoomph
 		{
 			det_Eulerian = 1.0;
 			JLagr = 1.0;			
-			for (unsigned l = 0; l < eleminfo.nnode_of_space[SPACE_INDEX_C2TB]; l++)
+			for (unsigned int ispace=0;ispace<NUM_CONTINUOUS_SPACES;ispace++)
 			{
-				shape_info->shape_C2TB[l] = 1.0;
-				for (unsigned int i = 0; i < n_dim; i++)
-					shape_info->dx_shape_C2TB[l][i] = 0.0;
-				for (unsigned int i = 0; i < n_lagr; i++)
-					shape_info->dX_shape_C2TB[l][i] = 0.0;
-				for (unsigned int i = 0; i < el_dim; i++)
-					shape_info->dS_shape_C2TB[l][i] = 0.0;
-			}
-			for (unsigned l = 0; l < eleminfo.nnode_of_space[SPACE_INDEX_C2]; l++)
-			{
-				shape_info->shape_C2[l] = 1.0;
-				for (unsigned int i = 0; i < n_dim; i++)
-					shape_info->dx_shape_C2[l][i] = 0.0;
-				for (unsigned int i = 0; i < n_lagr; i++)
-					shape_info->dX_shape_C2[l][i] = 0.0;
-				for (unsigned int i = 0; i < el_dim; i++)
-					shape_info->dS_shape_C2[l][i] = 0.0;
-			}
-			for (unsigned l = 0; l < eleminfo.nnode_of_space[SPACE_INDEX_C1TB]; l++)
-			{
-				shape_info->shape_C1TB[l] = 1.0;
-				for (unsigned int i = 0; i < n_dim; i++)
-					shape_info->dx_shape_C1TB[l][i] = 0.0;
-				for (unsigned int i = 0; i < n_lagr; i++)
-					shape_info->dX_shape_C1TB[l][i] = 0.0;
-				for (unsigned int i = 0; i < el_dim; i++)
-					shape_info->dS_shape_C1TB[l][i] = 0.0;
-			}
-			for (unsigned l = 0; l < eleminfo.nnode_of_space[SPACE_INDEX_C1]; l++)
-			{
-				shape_info->shape_C1[l] = 1.0;
-				for (unsigned int i = 0; i < n_dim; i++)
-					shape_info->dx_shape_C1[l][i] = 0.0;
-				for (unsigned int i = 0; i < n_lagr; i++)
-					shape_info->dX_shape_C1[l][i] = 0.0;
-				for (unsigned int i = 0; i < el_dim; i++)
-					shape_info->dS_shape_C1[l][i] = 0.0;
-			}
+				for (unsigned l = 0; l < eleminfo.nnode_of_space[ispace]; l++)
+				{
+					shape_info->shapes[ispace][l] = 1.0;
+					for (unsigned int i = 0; i < n_dim; i++)					
+						shape_info->dx_shapes[ispace][l][i] = 0.0;
+					for (unsigned int i = 0; i < n_lagr; i++)
+						shape_info->dX_shapes[ispace][l][i] = 0.0;
+					for (unsigned int i = 0; i < el_dim; i++)
+						shape_info->dS_shapes[ispace][l][i] = 0.0;
+				}
+			}			
 			for (unsigned l = 0; l < eleminfo.nnode_DL; l++)
 			{
-				shape_info->shape_C2[l] = 1.0;
+				shape_info->shape_DL[l] = 1.0;
 				for (unsigned int i = 0; i < n_dim; i++)
 					shape_info->dx_shape_DL[l][i] = 0.0;
 				for (unsigned int i = 0; i < n_lagr; i++)
@@ -3268,319 +3226,89 @@ namespace pyoomph
 			throw_runtime_error("Implement for this dimension");
 		}
 
-		// Now to the parts for the spaces
-		// TODO: Optimize this
-		//  bool C2_required_since_C2TB_is_C2=false;
-		//  if (this->has_bubble())
-		//  {
+		// Now to the parts for the spaces				
 		// A space's shapes are needed either because fields living in that space were explicitly
 		// requested, or because it is the "dominant" (i.e. geometry-defining, Pos) space of this
-		// element and Pos-shapes were requested.
-		bool required_C2TB = required.continuous_spaces[SPACE_INDEX_C2TB].dx_psi || required.continuous_spaces[SPACE_INDEX_C2TB].psi;
-		required_C2TB |= eleminfo.nnode_of_space[SPACE_INDEX_C2TB] && (required.Pos.psi || required.Pos.dx_psi || required.Pos.dX_psi || required.continuous_spaces[SPACE_INDEX_C2TB].dX_psi) && ((!strcmp(functable->dominant_space, "C2TB")) || (!strcmp(functable->dominant_space, "")));
-		if (required_C2TB)
-		{
-			oomph::Shape psi(eleminfo.nnode_of_space[SPACE_INDEX_C2TB]);
-			oomph::DShape dpsids(eleminfo.nnode_of_space[SPACE_INDEX_C2TB], std::max((unsigned int)1, el_dim));
-			this->dshape_local_at_s_C2TB(s, psi, dpsids);
-			for (unsigned l = 0; l < eleminfo.nnode_of_space[SPACE_INDEX_C2TB]; l++)
-			{
-				shape_info->shape_C2TB[l] = psi[l];
-				for (unsigned int i = 0; i < n_dim; i++)
-				{
-					shape_info->dx_shape_C2TB[l][i] = 0.0;
-					for (unsigned b = 0; b < el_dim; b++)
-					{
-						shape_info->dx_shape_C2TB[l][i] += gab_gai[b][i] * dpsids(l, b);						
-					}
-				}
-				
-				for (unsigned int i=0; i < this->dim();i++) shape_info->dS_shape_C2TB[l][i] =  dpsids(l, i);
+		// element and Pos-shapes were requested.		
 
-				for (unsigned int i = 0; i < n_lagr; i++)
+		for (unsigned int ispace=0;ispace<NUM_CONTINUOUS_SPACES;ispace++)
+		{
+			bool req = required.continuous_spaces[ispace].dx_psi || required.continuous_spaces[ispace].psi;
+			req |= eleminfo.nnode_of_space[ispace] && (required.Pos.psi || required.Pos.dx_psi || required.Pos.dX_psi || required.continuous_spaces[ispace].dX_psi) && ((!strcmp(functable->dominant_space, functable->continuous_spaces[ispace].space_name)) || ((!strcmp(functable->dominant_space, "")) && !eleminfo.nnode_of_space[ispace]));
+
+			if (req)
+			{
+				oomph::Shape psi(eleminfo.nnode_of_space[ispace]);
+				oomph::DShape dpsids(eleminfo.nnode_of_space[ispace], std::max((unsigned int)1, el_dim));
+				this->dshape_local_of_space(ispace, s, psi, dpsids);				
+				for (unsigned l = 0; l < eleminfo.nnode_of_space[ispace]; l++)
 				{
-					shape_info->dX_shape_C2TB[l][i] = 0.0;
-					for (unsigned b = 0; b < el_dim; b++)
-					{
-						shape_info->dX_shape_C2TB[l][i] += gab_gai_Lagr[b][i] * dpsids(l, b);
-					}
-				}
-				// TODO: Only if neccessary!
-				if (require_dxdshape)
-				{
+					shape_info->shapes[ispace][l] = psi[l];
 					for (unsigned int i = 0; i < n_dim; i++)
 					{
-						for (unsigned l2 = 0; l2 < eleminfo.nnode; l2++)
+						shape_info->dx_shapes[ispace][l][i] = 0.0;
+						for (unsigned b = 0; b < el_dim; b++)
 						{
-							for (unsigned int i2 = 0; i2 < n_dim; i2++)
+							shape_info->dx_shapes[ispace][l][i] += gab_gai[b][i] * dpsids(l, b);
+						}
+					}
+
+					for (unsigned int i=0; i < this->dim();i++) shape_info->dS_shapes[ispace][l][i] =  dpsids(l, i);
+
+					for (unsigned int i = 0; i < n_lagr; i++)
+					{
+						shape_info->dX_shapes[ispace][l][i] = 0.0;
+						for (unsigned b = 0; b < el_dim; b++)
+						{
+							shape_info->dX_shapes[ispace][l][i] += gab_gai_Lagr[b][i] * dpsids(l, b);
+						}
+					}
+					// TODO: Only if neccessary!
+					if (require_dxdshape)
+					{
+						for (unsigned int i = 0; i < n_dim; i++)
+						{
+							for (unsigned l2 = 0; l2 < eleminfo.nnode; l2++)
 							{
-								shape_info->d_dx_shape_dcoord_C2TB[l][i][l2][i2] = 0.0;
-								for (unsigned int b = 0; b < el_dim; b++)
+								for (unsigned int i2 = 0; i2 < n_dim; i2++)
 								{
-									shape_info->d_dx_shape_dcoord_C2TB[l][i][l2][i2] += DXdshape_il_jb(i2, l2, i, b) * dpsids(l, b); // TODO: Also for all other shapes (C1, DL)
+									shape_info->d_dx_shape_dcoord[ispace][l][i][l2][i2] = 0.0;
+									for (unsigned int b = 0; b < el_dim; b++)
+									{
+										shape_info->d_dx_shape_dcoord[ispace][l][i][l2][i2] += DXdshape_il_jb(i2, l2, i, b) * dpsids(l, b); // TODO: Also for all other shapes (C1, DL)
+									}
 								}
 							}
 						}
-					}
-					if (require_hessian)
-					{
-					  for (unsigned int i = 0; i < n_dim; i++)
+						if (require_hessian)
 						{
-							for (unsigned lel= 0; lel < eleminfo.nnode; lel++)
+						for (unsigned int i = 0; i < n_dim; i++)
 							{
-							 for (unsigned lel2= 0; lel2 < eleminfo.nnode; lel2++)
-							 {
-								for (unsigned int j = 0; j < n_dim; j++)
+								for (unsigned lel= 0; lel < eleminfo.nnode; lel++)
 								{
-								 for (unsigned int j2 = 0; j2 < n_dim; j2++)
-								 {
-									shape_info->d2_dx2_shape_dcoord_C2TB[l][i][lel][j][lel2][j2] = 0.0;
-									for (unsigned int b = 0; b < el_dim; b++)
+								for (unsigned lel2= 0; lel2 < eleminfo.nnode; lel2++)
+								{
+									for (unsigned int j = 0; j < n_dim; j++)
 									{
-										shape_info->d2_dx2_shape_dcoord_C2TB[l][i][lel][j][lel2][j2] += (*D2X2_dshape)(i,b,lel,lel2,j,j2) * dpsids(l, b);
+									for (unsigned int j2 = 0; j2 < n_dim; j2++)
+									{
+										shape_info->d2_dx2_shape_dcoord[ispace][l][i][lel][j][lel2][j2] = 0.0;
+										for (unsigned int b = 0; b < el_dim; b++)
+										{
+											shape_info->d2_dx2_shape_dcoord[ispace][l][i][lel][j][lel2][j2] += (*D2X2_dshape)(i,b,lel,lel2,j,j2) * dpsids(l, b);
+										}
 									}
-								 }
-								}
-							}
-						  }
-					  }
-					}
-				}
-			}
-		}
-		//}
-		//  else
-		//  {
-		//    if ((required.dx_psi_C2TB || required.psi_C2TB ) && (eleminfo.nnode_of_space[SPACE_INDEX_C2TB]) )
-		//    {
-		//      C2_required_since_C2TB_is_C2=true;
-		//    }
-		//  }
-		// C2_required_since_C2TB_is_C2 ||
-		// Same pattern as C2TB above, for the C2 space.
-		bool required_C2 = required.continuous_spaces[SPACE_INDEX_C2].dx_psi || required.continuous_spaces[SPACE_INDEX_C2].psi;
-		required_C2 |= eleminfo.nnode_of_space[SPACE_INDEX_C2] && (required.Pos.psi || required.Pos.dx_psi || required.Pos.dX_psi || required.continuous_spaces[SPACE_INDEX_C2].dX_psi) && ((!strcmp(functable->dominant_space, "C2")) || ((!strcmp(functable->dominant_space, "")) && !eleminfo.nnode_of_space[SPACE_INDEX_C2TB]));
-
-		if (required_C2)
-		{
-			oomph::Shape psi(eleminfo.nnode_of_space[SPACE_INDEX_C2]);
-			oomph::DShape dpsids(eleminfo.nnode_of_space[SPACE_INDEX_C2], std::max((unsigned int)1, el_dim));
-			this->dshape_local_at_s_C2(s, psi, dpsids);
-			for (unsigned l = 0; l < eleminfo.nnode_of_space[SPACE_INDEX_C2]; l++)
-			{
-				shape_info->shape_C2[l] = psi[l];
-				for (unsigned int i = 0; i < n_dim; i++)
-				{
-					shape_info->dx_shape_C2[l][i] = 0.0;
-					for (unsigned b = 0; b < el_dim; b++)
-					{
-						shape_info->dx_shape_C2[l][i] += gab_gai[b][i] * dpsids(l, b);
-					}
-				}
-
-				for (unsigned int i=0; i < this->dim();i++) shape_info->dS_shape_C2[l][i] =  dpsids(l, i);
-
-				for (unsigned int i = 0; i < n_lagr; i++)
-				{
-					shape_info->dX_shape_C2[l][i] = 0.0;
-					for (unsigned b = 0; b < el_dim; b++)
-					{
-						shape_info->dX_shape_C2[l][i] += gab_gai_Lagr[b][i] * dpsids(l, b);
-					}
-				}
-				// TODO: Only if neccessary!
-				if (require_dxdshape)
-				{
-					for (unsigned int i = 0; i < n_dim; i++)
-					{
-						for (unsigned l2 = 0; l2 < eleminfo.nnode; l2++)
-						{
-							for (unsigned int i2 = 0; i2 < n_dim; i2++)
-							{
-								shape_info->d_dx_shape_dcoord_C2[l][i][l2][i2] = 0.0;
-								for (unsigned int b = 0; b < el_dim; b++)
-								{
-									shape_info->d_dx_shape_dcoord_C2[l][i][l2][i2] += DXdshape_il_jb(i2, l2, i, b) * dpsids(l, b); // TODO: Also for all other shapes (C1, DL)
+									}
 								}
 							}
 						}
-					}
-					if (require_hessian)
-					{
-					  for (unsigned int i = 0; i < n_dim; i++)
-						{
-							for (unsigned lel= 0; lel < eleminfo.nnode; lel++)
-							{
-							 for (unsigned lel2= 0; lel2 < eleminfo.nnode; lel2++)
-							 {
-								for (unsigned int j = 0; j < n_dim; j++)
-								{
-								 for (unsigned int j2 = 0; j2 < n_dim; j2++)
-								 {
-									shape_info->d2_dx2_shape_dcoord_C2[l][i][lel][j][lel2][j2] = 0.0;
-									for (unsigned int b = 0; b < el_dim; b++)
-									{
-										shape_info->d2_dx2_shape_dcoord_C2[l][i][lel][j][lel2][j2] += (*D2X2_dshape)(i,b,lel,lel2,j,j2) * dpsids(l, b);
-									}
-								 }
-								}
-							}
-						  }
-					  }
-					}
-				}
-			}
-		}
-
-		// Same pattern as C2TB above, for the C1TB space.
-		bool required_C1TB = required.continuous_spaces[SPACE_INDEX_C1TB].dx_psi || required.continuous_spaces[SPACE_INDEX_C1TB].psi;
-		required_C1TB |= eleminfo.nnode_of_space[SPACE_INDEX_C1TB] && (required.Pos.psi || required.Pos.dx_psi || required.Pos.dX_psi || required.continuous_spaces[SPACE_INDEX_C1TB].dX_psi) && ((!strcmp(functable->dominant_space, "C1TB")) || ((!strcmp(functable->dominant_space, "")) && !eleminfo.nnode_of_space[SPACE_INDEX_C2TB]));
-
-		if (required_C1TB)
-		{
-			oomph::Shape psi(eleminfo.nnode_of_space[SPACE_INDEX_C1TB]);
-//			std::cout << "NNODE C1TB : " << eleminfo.nnode_of_space[SPACE_INDEX_C1TB] << std::endl << std::flush;
-			oomph::DShape dpsids(eleminfo.nnode_of_space[SPACE_INDEX_C1TB], std::max((unsigned int)1, el_dim));
-			this->dshape_local_at_s_C1TB(s, psi, dpsids);
-			for (unsigned l = 0; l < eleminfo.nnode_of_space[SPACE_INDEX_C1TB]; l++)
-			{
-				shape_info->shape_C1TB[l] = psi[l];
-				for (unsigned int i = 0; i < n_dim; i++)
-				{
-					shape_info->dx_shape_C1TB[l][i] = 0.0;
-					for (unsigned b = 0; b < el_dim; b++)
-					{
-						shape_info->dx_shape_C1TB[l][i] += gab_gai[b][i] * dpsids(l, b);
-					}
-				}
-
-				for (unsigned int i=0; i < this->dim();i++) shape_info->dS_shape_C1TB[l][i] =  dpsids(l, i);
-
-				for (unsigned int i = 0; i < n_lagr; i++)
-				{
-					shape_info->dX_shape_C1TB[l][i] = 0.0;
-					for (unsigned b = 0; b < el_dim; b++)
-					{
-						shape_info->dX_shape_C1TB[l][i] += gab_gai_Lagr[b][i] * dpsids(l, b);
-					}
-				}
-				if (require_dxdshape)
-				{
-					for (unsigned int i = 0; i < n_dim; i++)
-					{
-						for (unsigned l2 = 0; l2 < eleminfo.nnode; l2++)
-						{
-							for (unsigned int i2 = 0; i2 < n_dim; i2++)
-							{
-								shape_info->d_dx_shape_dcoord_C1TB[l][i][l2][i2] = 0.0;
-								for (unsigned int b = 0; b < el_dim; b++)
-								{
-									shape_info->d_dx_shape_dcoord_C1TB[l][i][l2][i2] += DXdshape_il_jb(i2, l2, i, b) * dpsids(l, b);
-								}
-							}
 						}
-					}
-					if (require_hessian)
-					{
-					  for (unsigned int i = 0; i < n_dim; i++)
-						{
-							for (unsigned lel= 0; lel < eleminfo.nnode; lel++)
-							{
-							 for (unsigned lel2= 0; lel2 < eleminfo.nnode; lel2++)
-							 {
-								for (unsigned int j = 0; j < n_dim; j++)
-								{
-								 for (unsigned int j2 = 0; j2 < n_dim; j2++)
-								 {
-									shape_info->d2_dx2_shape_dcoord_C1TB[l][i][lel][j][lel2][j2] = 0.0;
-									for (unsigned int b = 0; b < el_dim; b++)
-									{
-										shape_info->d2_dx2_shape_dcoord_C1TB[l][i][lel][j][lel2][j2] += (*D2X2_dshape)(i,b,lel,lel2,j,j2) * dpsids(l, b);
-									}
-								 }
-								}
-							}
-						  }
-					  }
 					}
 				}
 			}
 		}
 		
 
-		// Same pattern as C2TB above, for the C1 space.
-		bool required_C1 = required.continuous_spaces[SPACE_INDEX_C1].dx_psi || required.continuous_spaces[SPACE_INDEX_C1].psi;
-		required_C1 |= eleminfo.nnode_of_space[SPACE_INDEX_C1] && (required.Pos.psi || required.Pos.dx_psi || required.Pos.dX_psi || required.continuous_spaces[SPACE_INDEX_C1].dX_psi) && ((!strcmp(functable->dominant_space, "C1")) || ((!strcmp(functable->dominant_space, "")) && !eleminfo.nnode_of_space[SPACE_INDEX_C2]));
-
-		if (required_C1)
-		{
-			oomph::Shape psi(eleminfo.nnode_of_space[SPACE_INDEX_C1]);
-			oomph::DShape dpsids(eleminfo.nnode_of_space[SPACE_INDEX_C1], std::max((unsigned int)1, el_dim));
-			this->dshape_local_at_s_C1(s, psi, dpsids);
-			for (unsigned l = 0; l < eleminfo.nnode_of_space[SPACE_INDEX_C1]; l++)
-			{
-				shape_info->shape_C1[l] = psi[l];
-				for (unsigned int i = 0; i < n_dim; i++)
-				{
-					shape_info->dx_shape_C1[l][i] = 0.0;
-					for (unsigned b = 0; b < el_dim; b++)
-					{
-						shape_info->dx_shape_C1[l][i] += gab_gai[b][i] * dpsids(l, b);
-					}
-				}
-
-				for (unsigned int i=0; i < this->dim();i++) shape_info->dS_shape_C1[l][i] =  dpsids(l, i);
-
-				for (unsigned int i = 0; i < n_lagr; i++)
-				{
-					shape_info->dX_shape_C1[l][i] = 0.0;
-					for (unsigned b = 0; b < el_dim; b++)
-					{
-						shape_info->dX_shape_C1[l][i] += gab_gai_Lagr[b][i] * dpsids(l, b);
-					}
-				}
-				if (require_dxdshape)
-				{
-					for (unsigned int i = 0; i < n_dim; i++)
-					{
-						for (unsigned l2 = 0; l2 < eleminfo.nnode; l2++)
-						{
-							for (unsigned int i2 = 0; i2 < n_dim; i2++)
-							{
-								shape_info->d_dx_shape_dcoord_C1[l][i][l2][i2] = 0.0;
-								for (unsigned int b = 0; b < el_dim; b++)
-								{
-									shape_info->d_dx_shape_dcoord_C1[l][i][l2][i2] += DXdshape_il_jb(i2, l2, i, b) * dpsids(l, b);
-								}
-							}
-						}
-					}
-					if (require_hessian)
-					{
-					  for (unsigned int i = 0; i < n_dim; i++)
-						{
-							for (unsigned lel= 0; lel < eleminfo.nnode; lel++)
-							{
-							 for (unsigned lel2= 0; lel2 < eleminfo.nnode; lel2++)
-							 {
-								for (unsigned int j = 0; j < n_dim; j++)
-								{
-								 for (unsigned int j2 = 0; j2 < n_dim; j2++)
-								 {
-									shape_info->d2_dx2_shape_dcoord_C1[l][i][lel][j][lel2][j2] = 0.0;
-									for (unsigned int b = 0; b < el_dim; b++)
-									{
-										shape_info->d2_dx2_shape_dcoord_C1[l][i][lel][j][lel2][j2] += (*D2X2_dshape)(i,b,lel,lel2,j,j2) * dpsids(l, b);
-									}
-								 }
-								}
-							}
-						  }
-					  }
-					}
-				}
-			}
-		}
 		// Same pattern as above, for the discontinuous-Lagrange (DL) space (no "dominant space"
 		// fallback since DL fields are never used to represent the geometry).
 		if (required.DL.dx_psi || required.DL.psi)
@@ -3681,40 +3409,40 @@ namespace pyoomph
 		
 		if (required_C2TB)
 		{
-			shape_info->shape_Pos = shape_info->shape_C2TB;
-			shape_info->dx_shape_Pos = shape_info->dx_shape_C2TB;
-			shape_info->dX_shape_Pos = shape_info->dX_shape_C2TB;
-			shape_info->dS_shape_Pos = shape_info->dS_shape_C2TB;
-			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord_C2TB;
-			shape_info->d2_dx2_shape_dcoord_Pos=shape_info->d2_dx2_shape_dcoord_C2TB;
+			shape_info->shape_Pos = shape_info->shapes[SPACE_INDEX_C2TB];
+			shape_info->dx_shape_Pos = shape_info->dx_shapes[SPACE_INDEX_C2TB];
+			shape_info->dX_shape_Pos = shape_info->dX_shapes[SPACE_INDEX_C2TB];
+			shape_info->dS_shape_Pos = shape_info->dS_shapes[SPACE_INDEX_C2TB];
+			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord[SPACE_INDEX_C2TB];
+			shape_info->d2_dx2_shape_dcoord_Pos=shape_info->d2_dx2_shape_dcoord[SPACE_INDEX_C2TB];
 		}
 		else if (this->eleminfo.nnode_of_space[SPACE_INDEX_C2])
 		{
-			shape_info->shape_Pos = shape_info->shape_C2;
-			shape_info->dx_shape_Pos = shape_info->dx_shape_C2;
-			shape_info->dX_shape_Pos = shape_info->dX_shape_C2;
-			shape_info->dS_shape_Pos = shape_info->dS_shape_C2;
-			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord_C2;
-			shape_info->d2_dx2_shape_dcoord_Pos=shape_info->d2_dx2_shape_dcoord_C2;
+			shape_info->shape_Pos = shape_info->shapes[SPACE_INDEX_C2];
+			shape_info->dx_shape_Pos = shape_info->dx_shapes[SPACE_INDEX_C2];
+			shape_info->dX_shape_Pos = shape_info->dX_shapes[SPACE_INDEX_C2];
+			shape_info->dS_shape_Pos = shape_info->dS_shapes[SPACE_INDEX_C2];
+			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord[SPACE_INDEX_C2];
+			shape_info->d2_dx2_shape_dcoord_Pos=shape_info->d2_dx2_shape_dcoord[SPACE_INDEX_C2];
 		}
 		else if (required_C1TB)
 		{
-			shape_info->shape_Pos = shape_info->shape_C1TB;
-			shape_info->dx_shape_Pos = shape_info->dx_shape_C1TB;
-			shape_info->dX_shape_Pos = shape_info->dX_shape_C1TB;
-			shape_info->dS_shape_Pos = shape_info->dS_shape_C1TB;
-			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord_C1TB;		
-			shape_info->d2_dx2_shape_dcoord_Pos=shape_info->d2_dx2_shape_dcoord_C1TB;
+			shape_info->shape_Pos = shape_info->shapes[SPACE_INDEX_C1TB];
+			shape_info->dx_shape_Pos = shape_info->dx_shapes[SPACE_INDEX_C1TB];
+			shape_info->dX_shape_Pos = shape_info->dX_shapes[SPACE_INDEX_C1TB];
+			shape_info->dS_shape_Pos = shape_info->dS_shapes[SPACE_INDEX_C1TB];
+			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord[SPACE_INDEX_C1TB];		
+			shape_info->d2_dx2_shape_dcoord_Pos=shape_info->d2_dx2_shape_dcoord[SPACE_INDEX_C1TB];
 		}		
 		else
 		{
 		  
-			shape_info->shape_Pos = shape_info->shape_C1;
-			shape_info->dx_shape_Pos = shape_info->dx_shape_C1;
-			shape_info->dX_shape_Pos = shape_info->dX_shape_C1;
-			shape_info->dS_shape_Pos = shape_info->dS_shape_C1;
-			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord_C1;
-			shape_info->d2_dx2_shape_dcoord_Pos=shape_info->d2_dx2_shape_dcoord_C1;
+			shape_info->shape_Pos = shape_info->shapes[SPACE_INDEX_C1];
+			shape_info->dx_shape_Pos = shape_info->dx_shapes[SPACE_INDEX_C1];
+			shape_info->dX_shape_Pos = shape_info->dX_shapes[SPACE_INDEX_C1];
+			shape_info->dS_shape_Pos = shape_info->dS_shapes[SPACE_INDEX_C1];
+			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord[SPACE_INDEX_C1];
+			shape_info->d2_dx2_shape_dcoord_Pos=shape_info->d2_dx2_shape_dcoord[SPACE_INDEX_C1];
 		}
 	}
 

@@ -204,39 +204,14 @@ typedef struct JITShapeInfo
   double ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(elemsize_Cart_d_coords)); // Eulerian element size derived by coordinates, [i_dim,l_node], i.e. sum(w*dJ_Eulerian)/dX^l_i
   double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT  elemsize_Cart_d2_coords; // Weights derived by coordinates, [i_dim,j_dim,l_node_i,l_node_j], i.e. sum(w*d2J_Eulerian)/(dX^l_i*dX^l_j)  
 
-  double ARRAY_DECL_NNODE(shape_C2);                // C2 shapes (node index)
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dx_shape_C2));            // C2 shapes ( node index, coord index)
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dX_shape_C2));            // Corresponding Lagrangian version
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dS_shape_C2));            // Corresponding local coordinate version
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(d_dx_shape_dcoord_C2)))); // derivative of dx_shape_C2 w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index)
-  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_dx2_shape_dcoord_C2; // second derivative of dx_shape_C2 w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index,deriv. coord node index2, deriv coord dir index2)
 
-  double ARRAY_DECL_NNODE(ARRAY_DECL_NNODE(nodal_shape_C2)); // C2 shapes (node index, node index). In principle just delta_{i,j}
-
-  double ARRAY_DECL_NNODE(shape_C2TB);                // C2TB shapes (node index)
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dx_shape_C2TB));            // C2TB shapes (node index, coord index)
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dX_shape_C2TB));            // Lagrangian version
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dS_shape_C2TB));            // Corresponding local coordinate version
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(d_dx_shape_dcoord_C2TB)))); // derivative of dx_shape_C2TB w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index)
-  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_dx2_shape_dcoord_C2TB; // second derivative of dx_shape_C2TB w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index,deriv. coord node index2, deriv coord dir index2)
-
-  double ARRAY_DECL_NNODE(ARRAY_DECL_NNODE(nodal_shape_C2TB)); // C2TB shapes (node index, node index). In principle just delta_{i,j}
-
-  double ARRAY_DECL_NNODE(shape_C1);                // C1 shapes (node index)
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dx_shape_C1));            // C1 shapes (node index, coord index)
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dX_shape_C1));            // Corresponding Lagrangian version
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dS_shape_C1));            // Corresponding local coordinate version
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(d_dx_shape_dcoord_C1)))); // derivative of dx_shape_C1 w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index)
-  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_dx2_shape_dcoord_C1; // second derivative of dx_shape_C2 w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index,deriv. coord node index2, deriv coord dir index2)
-  double ARRAY_DECL_NNODE(ARRAY_DECL_NNODE(nodal_shape_C1)); // C1 shapes (node index, node index). In principle just delta_{i,j}
-  
-  double ARRAY_DECL_NNODE(shape_C1TB);                // C1TB shapes (node index)
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dx_shape_C1TB));            // C1TB shapes (node index, coord index)
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dX_shape_C1TB));            // Corresponding Lagrangian version
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dS_shape_C1TB));            // Corresponding local coordinate version
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(d_dx_shape_dcoord_C1TB)))); // derivative of dx_shape_C1TB w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index)
-  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_dx2_shape_dcoord_C1TB; // second derivative of dx_shape_C2 w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index,deriv. coord node index2, deriv coord dir index2)
-  double ARRAY_DECL_NNODE(ARRAY_DECL_NNODE(nodal_shape_C1TB)); // C1TB shapes (node index, node index). In principle just delta_{i,j}  
+  double ARRAY_DECL_NNODE(shapes)[NUM_CONTINUOUS_SPACES];               // non-derived shapes
+  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dx_shapes))[NUM_CONTINUOUS_SPACES]; // Derived shapes (node index, coord index)
+  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dX_shapes))[NUM_CONTINUOUS_SPACES]; // Corresponding Lagrangian version
+  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dS_shapes))[NUM_CONTINUOUS_SPACES]; // Corresponding local coordinate version
+  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(d_dx_shape_dcoord))))[NUM_CONTINUOUS_SPACES]; // derivative of dx_shape w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index)
+  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_dx2_shape_dcoord[NUM_CONTINUOUS_SPACES]; // second derivative of dx_shape_C2 w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index,deriv. coord node index2, deriv coord dir index2)
+  double ARRAY_DECL_NNODE(ARRAY_DECL_NNODE(nodal_shapes))[NUM_CONTINUOUS_SPACES]; // shapes (node index, node index). In principle just delta_{i,j}
 
   double ARRAY_DECL_NNODE(shape_DL);                // DL shapes (node index)
   double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dx_shape_DL));            // DL shapes (node index, coord index)

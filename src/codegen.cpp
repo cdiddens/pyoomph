@@ -1254,7 +1254,14 @@ namespace pyoomph
 
 	std::string BasisFunction::get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const
 	{
-		return "shape_" + space->get_shape_name() + "[" + nodal_index + "]";
+		if (space->get_shape_name()=="C2TB" || space->get_shape_name()=="C2" || space->get_shape_name()=="C1TB" || space->get_shape_name()=="C1")
+		{
+			return "shapes[SPACE_INDEX_" + space->get_shape_name() + "][" + nodal_index + "]";
+		}
+		else
+		{
+			return "shape_" + space->get_shape_name() + "[" + nodal_index + "]";
+		}
 	}
 
 	BasisFunction::~BasisFunction()
@@ -1306,7 +1313,14 @@ namespace pyoomph
 
 	std::string D1XBasisFunction::get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const
 	{
-		return "dx_shape_" + space->get_shape_name() + "[" + nodal_index + "][" + std::to_string(direction) + "]";
+		if (space->get_shape_name()=="C2TB" || space->get_shape_name()=="C2" || space->get_shape_name()=="C1TB" || space->get_shape_name()=="C1")
+		{
+			return "dx_shapes[SPACE_INDEX_" + space->get_shape_name() + "][" + nodal_index + "][" + std::to_string(direction) + "]";
+		}
+		else
+		{
+			return "dx_shape_" + space->get_shape_name() + "[" + nodal_index + "][" + std::to_string(direction) + "]";
+		}
 	}
 
 	std::string D1XBasisFunctionLagr::get_c_varname(FiniteElementCode *forcode, std::string test_index)
@@ -1327,7 +1341,14 @@ namespace pyoomph
 
 	std::string D1XBasisFunctionLagr::get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const
 	{
-		return "dX_shape_" + space->get_shape_name() + "[" + nodal_index + "][" + std::to_string(direction) + "]";
+		if (space->get_shape_name()=="C2TB" || space->get_shape_name()=="C2" || space->get_shape_name()=="C1TB" || space->get_shape_name()=="C1")
+		{
+			return "dX_shapes[SPACE_INDEX_" + space->get_shape_name() + "][" + nodal_index + "][" + std::to_string(direction) + "]";
+		}
+		else
+		{
+			return "dX_shape_" + space->get_shape_name() + "[" + nodal_index + "][" + std::to_string(direction) + "]";
+		}
 	}
 
 
@@ -1350,7 +1371,14 @@ namespace pyoomph
 
 	std::string D1XBasisFunctionLocalCoord::get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const
 	{
-		return "dS_shape_" + space->get_shape_name() + "[" + nodal_index + "][" + std::to_string(direction) + "]";
+		if (space->get_shape_name()=="C2TB" || space->get_shape_name()=="C2" || space->get_shape_name()=="C1TB" || space->get_shape_name()=="C1")
+		{
+			return "dS_shapes[SPACE_INDEX_" + space->get_shape_name() + "][" + nodal_index + "][" + std::to_string(direction) + "]";
+		}
+		else
+		{
+			return "dS_shape_" + space->get_shape_name() + "[" + nodal_index + "][" + std::to_string(direction) + "]";
+		}
 	}
 
 
@@ -1663,7 +1691,16 @@ namespace pyoomph
 					std::string code_type = for_code->get_owner_prefix(s.basis->get_space());
 					std::string coorddiffname = code_type + "intrp_" + dtstring + "_" + s.basis->get_dx_str() + "_COORDDIFF_" + std::to_string(i) + "_" + s.field->get_name();
 					std::string nodal_data = s.get_nodal_data_string(for_code, "l_shape");
-					std::string shapestr = for_code->get_shape_info_str(s.basis->get_space()) + "->d_dx_shape_dcoord_" + s.basis->get_space()->get_shape_name() + "[l_shape][" + std::to_string(dynamic_cast<D1XBasisFunction *>(s.basis)->get_direction()) + "][m][" + std::to_string(i) + "]";
+					std::string shapename=s.basis->get_space()->get_shape_name();
+					if (shapename=="C2TB" || shapename=="C2" || shapename=="C1TB" || shapename=="C1")
+					{
+						shapename="d_dx_shape_dcoord[SPACE_INDEX_"+shapename+"]";
+					}
+					else
+					{
+						shapename="d_dx_shape_dcoord_" + s.basis->get_space()->get_shape_name();
+					}
+					std::string shapestr = for_code->get_shape_info_str(s.basis->get_space()) + "->" + shapename + "[l_shape][" + std::to_string(dynamic_cast<D1XBasisFunction *>(s.basis)->get_direction()) + "][m][" + std::to_string(i) + "]";
 					//os << indent << "       " << coorddiffname << "[m]+=" << nodal_data << " * " << shapestr << ";" << std::endl;
 					calc_lines.push_back(indent + "       " + coorddiffname + "[m]+=" + nodal_data + " * " + shapestr + ";");
 				}
@@ -1719,7 +1756,16 @@ namespace pyoomph
 							std::string code_type = for_code->get_owner_prefix(s.basis->get_space());
 							std::string coorddiffname = code_type + "intrp_" + dtstring + "_" + s.basis->get_dx_str() + "_2ndCOORDDIFF_" + std::to_string(i) + "_" + std::to_string(j) + "_" + s.field->get_name();
 							std::string nodal_data = s.get_nodal_data_string(for_code, "l_shape");
-							std::string shapestr = for_code->get_shape_info_str(s.basis->get_space()) + "->d2_dx2_shape_dcoord_" + s.basis->get_space()->get_shape_name() + "[l_shape][" + std::to_string(dynamic_cast<D1XBasisFunction *>(s.basis)->get_direction()) + "][m][" + std::to_string(i) + "][m2][" + std::to_string(j) + "]";
+							std::string shapename=s.basis->get_space()->get_shape_name();
+							if (shapename=="C2TB" || shapename=="C2" || shapename=="C1TB" || shapename=="C1")
+							{
+								shapename="d2_dx2_shape_dcoord[SPACE_INDEX_"+shapename+"]";
+							}
+							else
+							{
+								shapename="d2_dx2_shape_dcoord_" + s.basis->get_space()->get_shape_name();
+							}
+							std::string shapestr = for_code->get_shape_info_str(s.basis->get_space()) + "->" + shapename + "[l_shape][" + std::to_string(dynamic_cast<D1XBasisFunction *>(s.basis)->get_direction()) + "][m][" + std::to_string(i) + "][m2][" + std::to_string(j) + "]";
 							//os << indent << "             " << coorddiffname << "[m][m2]+=" << nodal_data << " * " << shapestr << ";" << std::endl;
 							hess_lines.push_back(indent + "             " + coorddiffname + "[m][m2]+=" + nodal_data + " * " + shapestr + ";");
 						}
@@ -2450,10 +2496,20 @@ namespace pyoomph
 		if (numnodes_str != "1")
 		{
 
-			oss << indent << "  double const * testfunction = " << shapeinfo << "->shape_" << this->get_shape_name() << ";" << std::endl;
-			oss << indent << "  DX_SHAPE_FUNCTION_DECL(dx_testfunction) = " << shapeinfo << "->dx_shape_" << this->get_shape_name() << ";" << std::endl;
-			oss << indent << "  DX_SHAPE_FUNCTION_DECL(dX_testfunction) = " << shapeinfo << "->dX_shape_" << this->get_shape_name() << ";" << std::endl;
-			oss << indent << "  DX_SHAPE_FUNCTION_DECL(dS_testfunction) = " << shapeinfo << "->dS_shape_" << this->get_shape_name() << ";" << std::endl;
+			if (this->get_shape_name()=="C2TB" || this->get_shape_name()=="C2" || this->get_shape_name()=="C1TB" || this->get_shape_name()=="C1")
+			{
+				oss << indent << "  double const * testfunction = " << shapeinfo << "->shapes[SPACE_INDEX_" << this->get_shape_name() << "];" << std::endl;
+				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dx_testfunction) = " << shapeinfo << "->dx_shapes[SPACE_INDEX_" << this->get_shape_name() << "];" << std::endl;
+				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dX_testfunction) = " << shapeinfo << "->dX_shapes[SPACE_INDEX_" << this->get_shape_name() << "];" << std::endl;
+				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dS_testfunction) = " << shapeinfo << "->dS_shapes[SPACE_INDEX_" << this->get_shape_name() << "];" << std::endl;
+			}
+			else
+			{
+				oss << indent << "  double const * testfunction = " << shapeinfo << "->shape_" << this->get_shape_name() << ";" << std::endl;
+				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dx_testfunction) = " << shapeinfo << "->dx_shape_" << this->get_shape_name() << ";" << std::endl;
+				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dX_testfunction) = " << shapeinfo << "->dX_shape_" << this->get_shape_name() << ";" << std::endl;
+				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dS_testfunction) = " << shapeinfo << "->dS_shape_" << this->get_shape_name() << ";" << std::endl;
+			}
 
 			oss << indent << "  for (unsigned int l_test=0;l_test<" << numnodes_str << ";l_test++)" << std::endl;
 			oss << indent << "  {" << std::endl;
@@ -9423,16 +9479,27 @@ namespace GiNaC
 						if (sp.is_derived && (sp.nodal_coord_dir >= 0 || sp.nodal_coord_dir2 >= 0))
 						{
 							if (sp.nodal_coord_dir >= 0 && sp.nodal_coord_dir2 >= 0)
-								throw_runtime_error("DD");
+							{
+								throw_runtime_error("DD")
+							}
+							std::string shapename=sp.basis->get_space()->get_shape_name();
+							if (shapename=="C2TB" || shapename=="C2" || shapename=="C1TB" || shapename=="C1")
+							{
+								shapename="d_dx_shape_dcoord[SPACE_INDEX_" + sp.basis->get_space()->get_shape_name() + "]";
+							}						
+							else
+							{
+								shapename="d_dx_shape_dcoord_" + sp.basis->get_space()->get_shape_name();
+							}
 							if (sp.nodal_coord_dir >= 0)
 							{
-								std::string shapestr = femprint.FEM_opts->for_code->get_shape_info_str(sp.basis->get_space()) + "->d_dx_shape_dcoord_" + sp.basis->get_space()->get_shape_name();
+								std::string shapestr = femprint.FEM_opts->for_code->get_shape_info_str(sp.basis->get_space()) + "->" + shapename;
 								shapestr += "[l_shape2][" + std::to_string(dynamic_cast<pyoomph::D1XBasisFunction *>(sp.basis)->get_direction()) + "][l_shape][" + std::to_string(sp.nodal_coord_dir) + "]";
 								c.s << shapestr;
 							}
 							else
 							{
-								std::string shapestr = femprint.FEM_opts->for_code->get_shape_info_str(sp.basis->get_space()) + "->d_dx_shape_dcoord_" + sp.basis->get_space()->get_shape_name();
+								std::string shapestr = femprint.FEM_opts->for_code->get_shape_info_str(sp.basis->get_space()) + "->" + shapename;
 								shapestr += "[l_shape][" + std::to_string(dynamic_cast<pyoomph::D1XBasisFunction *>(sp.basis)->get_direction()) + "][" + "l_shape2" + "][" + std::to_string(sp.nodal_coord_dir2) + "]";
 								c.s << shapestr;
 							}
@@ -9880,19 +9947,31 @@ namespace GiNaC
 			const auto &femprint = dynamic_cast<const print_csrc_FEM &>(c);
 			if (femprint.FEM_opts->for_code)
 			{
+				std::string shapename = sp.basis->get_space()->get_shape_name();
+				std::string shapename2;
+				if (shapename == "C2TB" || shapename == "C2" || shapename == "C1TB" || shapename == "C1")
+				{
+					shapename = "d_dx_shape_dcoord[SPACE_INDEX_" + sp.basis->get_space()->get_shape_name() + "]";
+					shapename2="d2_dx2_shape_dcoord[SPACE_INDEX_" + sp.basis->get_space()->get_shape_name() + "]";
+				}
+				else
+				{
+					shapename = "d_dx_shape_dcoord_" + sp.basis->get_space()->get_shape_name();
+					shapename2 = "d2_dx2_shape_dcoord_" + sp.basis->get_space()->get_shape_name();
+				}
 				if (sp.nodal_coord_dir == -1)
 				{
 					c.s << sp.basis->get_c_varname(femprint.FEM_opts->for_code, "l_test");
 				}
 				else if (sp.nodal_coord_dir2 == -1)
 				{
-					std::string shapestr = femprint.FEM_opts->for_code->get_shape_info_str(sp.basis->get_space()) + "->d_dx_shape_dcoord_" + sp.basis->get_space()->get_shape_name();
+					std::string shapestr = femprint.FEM_opts->for_code->get_shape_info_str(sp.basis->get_space()) + "->"+ shapename;
 					shapestr += "[l_test][" + std::to_string(dynamic_cast<pyoomph::D1XBasisFunction *>(sp.basis)->get_direction()) + "][" + (sp.is_derived_other_index ? "l_shape2" : "l_shape") + "][" + std::to_string(sp.nodal_coord_dir) + "]";
 					c.s << shapestr;
 				}
 				else
 				{
-					std::string shapestr = femprint.FEM_opts->for_code->get_shape_info_str(sp.basis->get_space()) + "->d2_dx2_shape_dcoord_" + sp.basis->get_space()->get_shape_name();
+					std::string shapestr = femprint.FEM_opts->for_code->get_shape_info_str(sp.basis->get_space()) + "->"+ shapename2;
 					shapestr += "[l_test][" + std::to_string(dynamic_cast<pyoomph::D1XBasisFunction *>(sp.basis)->get_direction()) + "][l_shape][" + std::to_string(sp.nodal_coord_dir) + "][l_shape2][" + std::to_string(sp.nodal_coord_dir2) + "]";
 					c.s << shapestr;
 				}
