@@ -524,6 +524,12 @@ class NavierStokesEquations(StokesEquations):
 
 
 class NavierStokesNormalTraction(InterfaceEquations):
+    """
+    Adds a normal traction (~ pressure) boundary condition to the (Navier-)Stokes equations:
+    
+    Args:
+        normal_traction: The normal traction (~ pressure) to be applied
+    """    
     required_parent_type = StokesEquations
 
     def __init__(self, normal_traction:ExpressionOrNum):

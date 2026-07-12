@@ -50,11 +50,11 @@ However, on the discrete level, there is another aspect to consider: *the geomet
 
 .. note::
 
-    At the moment, pyoomph does not fully handle the GCL for higher order time stepping, but the results are still much better in conservative form as seen below.
+    At the moment, pyoomph does not fully handle the GCL for higher order time stepping, but the results are still much better in conservative form as seen below. The flag is still called ``GCL`` in the :py:class:`~pyoomph.equations.multi_component.CompositionFlowEquations` class, since it might be updated in future.
 
 The multi-component flow equations can activate the conservative form by setting ``GCL=True`` in the :py:class:`~pyoomph.equations.multi_component.CompositionFlowEquations`. This also augments the Navier-Stokes equation and adjusts e.g. the evaporation boundary conditions to account for the changed Neumann terms. Custom Neumann conditions, e.g. a diffusive influx on a boundary, must be adjusted accordingly. 
 
-Let us now assess the conservation of the total mass of glycerol in the capillary tube. The code is just a quite simple 1d problem, i.e. the problem is defined as follows:
+Let us now assess the conservation of the total mass of glycerol in the capillary tube. The code is just a quite simple 1d problem, i.e. the problem is initialized as follows:
 
 .. code:: python
 
@@ -83,6 +83,83 @@ Let us now assess the conservation of the total mass of glycerol in the capillar
             self.ambient_pressure=1*atm
             # Whether we use the conservative form (better GCL agreement) or not
             self.use_GCL=True    
+
+
+For the :py:meth:`~pyoomph.generic.problem.Problem.define_problem` method
+we must setup a 1d moving mesh with multi-component flow equations. The ``"left"`` boundary represents the bottom of the capillary, the ``"right"`` boundary represents the top. We also have to extract a reasonable time and velocity scale, which can be inferred from the water evaporation rate. For the evaporation rate, we need the far field water mass concentration, which we extract from the gas mixture provided.
+
+.. code:: python
+
+    def define_problem(self):
+        self+=LineMesh(size=self.L,N=1000)
+        
+        # Get the interface properties
+        interf=self.mixture | self.gas
+        c_water=self.mixture.get_vapor_mass_concentration("water",at_mixture_composition=False)
+        # get the water mole fraction in the gas phase, calculate the relative humidity and use it to calculate the far-field water vapor concentration
+        xWater=self.gas.evaluate_at_condition(self.gas.get_mole_fraction_field("water"),"IC", temperature=self.temperature,pressure=self.ambient_pressure)
+        psat=self.mixture.evaluate_at_condition(self.mixture.get_vapor_pressure_for("water",pure=True),temperature=self.temperature)
+        xSat=psat/self.ambient_pressure
+        RH=xWater/xSat        
+        # and use it to calulate the far-field water vapor concentration
+        c_infty=self.mixture.get_vapor_mass_concentration("water",relative_humidity_for_far_field=RH,temperature=self.temperature)
+        # Get the diffusion coefficient of water in air at the given temperature
+        D_vap=self.gas.get_diffusion_coefficient("water")(temperature=self.temperature)
+        # And the evaporation rate        
+        j_water=4*D_vap*(c_water-c_infty)/self.R        
+        
+        # The evaporation rate at the initial condition is used to define the velocity scale for the problem
+        j_water0=self.mixture.evaluate_at_condition(j_water,"IC",temperature=self.temperature)
+        rho0=self.mixture.evaluate_at_condition(self.mixture.mass_density, "IC", temperature=self.temperature)
+        Uscale=j_water0/rho0
+       
+        # Set reasonable scaling for the problem
+        self.set_scaling(spatial=self.L,velocity=Uscale,pressure=rho0*self.g*self.L)
+        self.define_named_var(temperature=self.temperature)
+        self.mixture.set_reference_scaling_to_problem(self,temperature=self.temperature)
+        
+        # Flow and composition in the bulk, optionally using the GCL
+        eqs=CompositionFlowEquations(self.mixture,gravity=self.g*vector(-1),GCL=self.use_GCL)
+        # output and a fixed position at the left side (bottom of the capillary) where the liquid evaporates
+        eqs+=LaplaceSmoothedMesh()
+        eqs+=TextFileOutput()
+        eqs+=DirichletBC(mesh_x=0)@"left" # Open part of the capillary, evaporating from here
+        
+        # Use a prescribed mass transfer model to impose the evaporation rate at the interface
+        mdl=interf.set_mass_transfer_model(PrescribedMassTransfer(water=j_water))
+        mdl.projection_space="C2" # Project the evaporation rate onto a continuous quadratic space (here, the space does not matter)
+        eqs+=MultiComponentNavierStokesInterface(interf,static=True)@"left"
+        
+        # The right side of the capillary is allowed to move, but no evaporation is allowed there
+        interf_no_evap=self.mixture | self.gas
+        interf_no_evap.set_mass_transfer_model(None)
+        eqs+=MultiComponentNavierStokesInterface(interf_no_evap)@"right"
+        
+        # Get the total mass of glycerol
+        eqs+=IntegralObservables(M_glycerol=var("massfrac_glycerol")*self.mixture.mass_density*pi*self.R**2)
+        eqs+=IntegralObservableOutput("mass_evolution")
+        # Get the filled height and it's velocity
+        eqs+=IntegralObservables(y=self.L-var("mesh_x"),u=-mesh_velocity()[0])@"right"
+        eqs+=IntegralObservableOutput("top_interface")@"right"
+        
+        # Refine the region near the evaporating interface to better resolve the gradients in the solution
+        eqs+=RefineToLevel(4)@"left"
+        
+        self+=eqs@"domain"
+
+There are two :py:class:`~pyoomph.equations.multi_component.MultiComponentNavierStokesInterface` objects, one at the bottom (``"left"``) and one at the top (``"right"``). The bottom interface is where the evaporation takes place, and we prescribe the evaporation rate using a :py:class:`~pyoomph.materials.mass_transfer.PrescribedMassTransfer` model. This interface is ``static``, i.e. fixed in position. The kinematic boundary condition therefore acts on the velocity, not on the mesh motion. The top interface is allowed to move, but no evaporation is allowed there, here, the kinematic boundary condition acts on the mesh motion. Note also that we pass ``GCL=self.use_GCL`` to the :py:class:`~pyoomph.equations.multi_component.CompositionFlowEquations` object, which will ensure that the conservative form of the equations is used when ``self.use_GCL=True``.
+
+To run the simulation, we again use dynamic time stepping, which perfectly adapts to the logarithmic plots in :numref:`figgclcapillary`:
+
+.. code:: python
+
+    if __name__=="__main__":
+        with CapillaryEvaporationProblem() as problem:
+            problem.DTSF_max_increase_factor=1.25
+            problem.DTSF_min_decrease_factor=0.75
+            problem.run(48*hour,outstep=True,startstep=0.001*second,temporal_error=1)
+
+The results in :numref:`figgclcapillary` show the concentration of glycerol in the capillary at different times, the velocity of the top interface, receding due to evaporation at the bottom, and the total mass of glycerol in the capillary. The total mass of glycerol is not perfectly conserved when using ALE with `GCL=False`, but is conserved nicely when using the it.
 
 
 

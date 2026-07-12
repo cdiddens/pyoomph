@@ -103,8 +103,6 @@ class CapillaryEvaporationProblem(Problem):
         eqs+=IntegralObservables(y=self.L-var("mesh_x"),u=-mesh_velocity()[0])@"right"
         eqs+=IntegralObservableOutput("top_interface")@"right"
         
-        
-        
         # Refine the region near the evaporating interface to better resolve the gradients in the solution
         eqs+=RefineToLevel(4)@"left"
         
