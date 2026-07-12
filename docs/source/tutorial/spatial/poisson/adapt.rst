@@ -33,7 +33,7 @@ The previous example has a very steep source function and due to the boundary co
            problem.solve(spatial_adapt=problem.max_refinement_level)
            problem.output()
 
-By using the ``super`` call, the original non-adaptive problem is defined. Then, the :py:class:`~pyoomph.equations.generic.SpatialErrorEstimator` is applied on the field ``u`` with a weighting factor of ``1.0``. If you have multiple fields, you can weight the estimated errors of the individual fields differently. Finally, the :py:meth:`~pyoomph.generic.problem.Problem.solve` call has to be augmented with a ``spatial_adapt`` keyword to specify the number of spatial adaption steps. However, the problem will never refine to a level finer than :py:attr:`~pyoomph.genric.problem.Problem.max_refinement_level`. To check whether any element has to be refined, the estimated error is compared to the :py:attr:`~pyoomph.genric.problem.Problem.max_permitted_error` value. If this threshold is exceeded, the element is refined. When any element got refined, the solution has to be recalculated and the next adaption step starts. If neighboring previously refined elements have an error lower than :py:attr:`~pyoomph.genric.problem.Problem.min_permitted_error`, they also might be recombined to a coarser element within these adaption routine.
+By using the ``super`` call, the original non-adaptive problem is defined. Then, the :py:class:`~pyoomph.equations.generic.SpatialErrorEstimator` is applied on the field ``u`` with a weighting factor of ``1.0``. If you have multiple fields, you can weight the estimated errors of the individual fields differently. Finally, the :py:meth:`~pyoomph.generic.problem.Problem.solve` call has to be augmented with a ``spatial_adapt`` keyword to specify the number of spatial adaption steps. However, the problem will never refine to a level finer than :py:attr:`~pyoomph.genric.problem.Problem.max_refinement_level`. To check whether any element has to be refined, the estimated error is compared to the :py:attr:`~pyoomph.genric.problem.Problem.max_permitted_error` value. If this threshold is exceeded, the element is refined. When any element got refined, the solution has to be recalculated and the next adaption step starts. If neighboring previously refined elements have an error lower than :py:attr:`~pyoomph.genric.problem.Problem.min_permitted_error`, they also might be recombined to a coarser element within this adaption routine.
 
 The result is depicted in :numref:`figspatialpoissonadapt`. Obviously, the adaption is done near the corners and in the center, where the source function is prominent.
 
@@ -44,7 +44,7 @@ The result is depicted in :numref:`figspatialpoissonadapt`. Obviously, the adapt
 	:class: with-shadow
 	:width: 50%
 	
-	Automatic spatial adaptivity based or error estimation in the Poisson problem.
+	Automatic spatial adaptivity based on error estimation in the Poisson problem.
 
 
 .. only:: html

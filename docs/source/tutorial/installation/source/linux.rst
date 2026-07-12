@@ -8,7 +8,7 @@ To obtain the code, clone the GitHub repository
       git clone https://www.github.com/pyoomph/pyoomph.git 
 
 
-Once you have cloned the repository with git, you first have to install a few packages. On a Debian/Ubuntu distribution, you habe to do e.g.
+Once you have cloned the repository with git, you first have to install a few packages. On a Debian/Ubuntu distribution, you have to do e.g.
 
 .. code:: bash
 

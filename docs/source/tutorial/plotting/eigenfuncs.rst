@@ -1,9 +1,9 @@
 Plotting of eigenfunctions
 --------------------------
 
-When investigating the stability of stationary solutions by bifurcation analysis, one is frequently interested in the eigenfunction corresponding to the critical eigenvalue which real value passes the zero. To plot these functions, we can directly use the very same plotting class, but just pass a few additional arguments to the constructor.
+When investigating the stability of stationary solutions by bifurcation analysis, one is frequently interested in the eigenfunction corresponding to the critical eigenvalue whose real value passes through zero. To plot these functions, we can directly use the very same plotting class, but just pass a few additional arguments to the constructor.
 
-As illustration, let us consider the problem of :numref:`secpdeksebiftrack`, which depends on the scripts :download:`kuramoto_sivanshinsky_bifurcation.py <../pde/patterns/kuramoto_sivanshinsky_bifurcation.py>`, :download:`kuramoto_sivanshinsky_arclength_eigen.py <../pde/patterns/kuramoto_sivanshinsky_arclength_eigen.py>` and :download:`kuramoto_sivanshinsky.py <../pde/patterns/kuramoto_sivanshinsky.py>`. The plotting class can be rather short, since we only have to plot the height field. However, we directly add the functionality for the plots of the eigenfunction:
+As an illustration, let us consider the problem of :numref:`secpdeksebiftrack`, which depends on the scripts :download:`kuramoto_sivanshinsky_bifurcation.py <../pde/patterns/kuramoto_sivanshinsky_bifurcation.py>`, :download:`kuramoto_sivanshinsky_arclength_eigen.py <../pde/patterns/kuramoto_sivanshinsky_arclength_eigen.py>` and :download:`kuramoto_sivanshinsky.py <../pde/patterns/kuramoto_sivanshinsky.py>`. The plotting class can be rather short, since we only have to plot the height field. However, we directly add the functionality for the plots of the eigenfunction:
 
 .. code:: python
 
@@ -52,7 +52,7 @@ To use this plotting class for the normal solution and different eigenfunction p
 
 The :py:attr:`~pyoomph.generic.problem.Problem.plotter` property is now a ``list`` containing multiple plotters. Without further arguments, the plotter will plot the normal solution. If ``eigenvector`` is set, it indexes the desired eigenfunction to be plotted and ``eigenmode`` selects the desired mode (see above). Since all plots would write to the same file, we also have to specify ``filetrunk``, which takes a format string, which is formatted based on the output step. All plotters are instructed to plot both *pdf* and *png* files.
 
-Some plots are depicted in :numref:`figplottingeigenkse`. As expected, the critical eigenfunction is only real valued an similar to the solution itself, i.e. the collapse to the flat solution beyond the fold bifurcation is apparent.
+Some plots are depicted in :numref:`figplottingeigenkse`. As expected, the critical eigenfunction is only real valued and similar to the solution itself, i.e. the collapse to the flat solution beyond the fold bifurcation is apparent.
 
 ..  figure:: eigenkse.*
 	:name: figplottingeigenkse

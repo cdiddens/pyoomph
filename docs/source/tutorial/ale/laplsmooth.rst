@@ -1,7 +1,7 @@
 Laplace smoothed mesh
 ---------------------
 
-Since the Lagrangian coordinates are initialized with the undeformed initial Eulerian coordinates, we can define the displacement from the initial configuration as :math:`\vec{d}=\vec{x}-\vec{\xi}`. One can smooth this displacement by solving a Laplace equation for :math:`\vec{d}`, i.e. :math:`\nabla_\xi^2\vec{d}=0`, where :math:`\nabla_\xi` denotes the derivatives with respect to the Lagrangian coordinates. Thereby, any deformation that is imposed e.g. on the boundaries, will be smooth out along the mesh.
+Since the Lagrangian coordinates are initialized with the undeformed initial Eulerian coordinates, we can define the displacement from the initial configuration as :math:`\vec{d}=\vec{x}-\vec{\xi}`. One can smooth this displacement by solving a Laplace equation for :math:`\vec{d}`, i.e. :math:`\nabla_\xi^2\vec{d}=0`, where :math:`\nabla_\xi` denotes the derivatives with respect to the Lagrangian coordinates. Thereby, any deformation that is imposed e.g. on the boundaries, will be smoothed out along the mesh.
 
 The weak formulation with test function :math:`\vec{\chi}` reads
 
@@ -11,7 +11,7 @@ The weak formulation with test function :math:`\vec{\chi}` reads
    \left(\nabla_\xi\left(\vec{x}-\vec{\xi}\right),\nabla_\xi \vec{\chi}\right)_\xi-\left\langle \vec{n}_\xi\cdot\nabla_\xi \left(\vec{x}-\vec{\xi}\right) ,\vec{\chi} \right\rangle_\xi =0 
    \end{aligned}
 
-Let use hence define this equation class:
+Let us hence define this equation class:
 
 .. code:: python
 
@@ -31,7 +31,7 @@ Let use hence define this equation class:
    		# Weak formulation: gradients and integrals are carried out with respect to the Lagrangian coordinates
    		self.add_residual(weak(grad(d,lagrangian=True), grad(xtest, lagrangian=True),lagrangian=True) )
 
-We do not define fields, but we activate the mesh coordinates as dependent variables with the call :py:meth:`~pyoomph.generic.codegen.Equations.activate_coordinates_as_dofs`. You can pass an argument ``coordinate_space`` to select the space. If further fields are added, the coordinate space must at least comprise the highest space of all defined fields, i.e. we cannot have a ``coordinate_space`` of ``"C1"`` and defining other fields on the space ``"C2"``. If the argument is omitted, the coordinate space will be automatically determined by the highest space of all added fields. The rest is trivial, except the usage of the variables ``"mesh"`` and ``"lagrangian"`` and the keyword arguments ``lagrangian=True`` to the :py:func:`~pyoomph.expressions.generic.grad` and :py:func:`~pyoomph.expressions.generic.weak` calls.
+We do not define fields, but we activate the mesh coordinates as dependent variables with the call :py:meth:`~pyoomph.generic.codegen.Equations.activate_coordinates_as_dofs`. You can pass an argument ``coordinate_space`` to select the space. If further fields are added, the coordinate space must at least comprise the highest space of all defined fields, i.e. we cannot have a ``coordinate_space`` of ``"C1"`` and define other fields on the space ``"C2"``. If the argument is omitted, the coordinate space will be automatically determined by the highest space of all added fields. The rest is trivial, except the usage of the variables ``"mesh"`` and ``"lagrangian"`` and the keyword arguments ``lagrangian=True`` to the :py:func:`~pyoomph.expressions.generic.grad` and :py:func:`~pyoomph.expressions.generic.weak` calls.
 
 As an example problem, let us deform a rectangular mesh by prescribing Dirichlet boundary conditions at the interfaces and let the internal mesh relax based on the Laplace smoothing:
 

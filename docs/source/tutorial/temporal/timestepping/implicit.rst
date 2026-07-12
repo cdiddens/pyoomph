@@ -1,7 +1,7 @@
 .. _secodetimesteppingsimple:
 
-Testing different time stepping method
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Testing different time stepping methods
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 A good way to test whether the chosen time stepping method is appropriate is to compare the numerical results of a simple test problem with the corresponding analytical solution. Furthermore, one can test for conserved quantities, e.g. the total energy of an undamped harmonic oscillator. This will be done for all time stepping methods in the following.
 
@@ -18,7 +18,7 @@ whereas for the other methods, i.e. the ones which evaluate only first order tim
    \partial_t y-z&=0
    \end{aligned}
 
-i.e. where :math:`z=\partial_t y`. The code for the oscillator equation that allows to select the time stepping scheme is the following:
+i.e. where :math:`z=\partial_t y`. The code for the oscillator equation that allows one to select the time stepping scheme is the following:
 
 .. code:: python
 

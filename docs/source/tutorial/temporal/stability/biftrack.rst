@@ -3,9 +3,9 @@
 Bifurcation tracking
 ~~~~~~~~~~~~~~~~~~~~
 
-Finally, when a bifurcation point is a function of multiple parameters, one can jump on the bifurcation by adjusting one parameter and find the position of the bifurcation as function of another parameter by arc length continuation. To that end, let us consider the Lorenz system :math:numref:`eqodelorenz` from :numref:`secODEtemporaladapt`. It is known that the Lorenz system has one trivial fix point for :math:`\rho<1`, after what a supercritical pitchfork bifurcation can be found at :math:`\rho=1`, which eventually loses the stability in a subcritical *Hopf bifurcation*, which location and presence is dependent on the parameters :math:`\sigma` and :math:`\beta`. Beyond the Hopf bifurcation, chaotic behavior can be expected.
+Finally, when a bifurcation point is a function of multiple parameters, one can jump on the bifurcation by adjusting one parameter and find the position of the bifurcation as a function of another parameter by arc length continuation. To that end, let us consider the Lorenz system :math:numref:`eqodelorenz` from :numref:`secODEtemporaladapt`. It is known that the Lorenz system has one trivial fixed point for :math:`\rho<1`, after which a supercritical pitchfork bifurcation can be found at :math:`\rho=1`, which eventually loses its stability in a subcritical *Hopf bifurcation*, whose location and presence are dependent on the parameters :math:`\sigma` and :math:`\beta`. Beyond the Hopf bifurcation, chaotic behavior can be expected.
 
-First of all, let us find the pitchfork bifurcation at :math:`\rho=1` with pyoomph. To that end, the equations are loaded from the code from :numref:`secODEtemporaladapt` and a problem class is define where all three parameters can be adjusted at run time, i.e. are bound by :py:meth:`~pyoomph.generic.problem.Problem.define_global_parameter` and can hence be changed after the C code generation and can be used for arc length continuation and bifurcation tracking. We reuse the code of the file :download:`adaptive_lorenz_attractor.py <../timestepping/adaptive_lorenz_attractor.py>` from :numref:`secODEtemporaladapt` here:
+First of all, let us find the pitchfork bifurcation at :math:`\rho=1` with pyoomph. To that end, the equations are loaded from the code from :numref:`secODEtemporaladapt` and a problem class is defined where all three parameters can be adjusted at run time, i.e. are bound by :py:meth:`~pyoomph.generic.problem.Problem.define_global_parameter` and can hence be changed after the C code generation and can be used for arc length continuation and bifurcation tracking. We reuse the code of the file :download:`adaptive_lorenz_attractor.py <../timestepping/adaptive_lorenz_attractor.py>` from :numref:`secODEtemporaladapt` here:
 
 .. code:: python
 
@@ -23,7 +23,7 @@ First of all, let us find the pitchfork bifurcation at :math:`\rho=1` with pyoom
            ode=LorenzSystem(sigma=self.sigma,beta=self.beta,rho=self.rho)
            self.add_equations(ode@"lorenz")
 
-First, find the pitchfork bifurcation as described in the previous section, including the analytically derived Hessian terms using :py:meth:`~pyoomph.generic.problem.Problem.setup_for_stability_analysis`. We must be somewhat close to pitchfork bifurcation, so we start at :math:`\rho=0.5`, solve for the stationary solution and find the critical eigenvector as guess for :math:`\vec{v}_\text{g}`:
+First, find the pitchfork bifurcation as described in the previous section, including the analytically derived Hessian terms using :py:meth:`~pyoomph.generic.problem.Problem.setup_for_stability_analysis`. We must be somewhat close to the pitchfork bifurcation, so we start at :math:`\rho=0.5`, solve for the stationary solution and find the critical eigenvector as guess for :math:`\vec{v}_\text{g}`:
 
 .. code:: python
 
@@ -68,7 +68,7 @@ To jump on the stable branch of the pitchfork bifurcation, we can add this eigen
            problem.solve(timestep=[0.1,1,2,None]) # do a few time steps and then a stationary solve (timestep=None)
            eigvals, eigvects=problem.solve_eigenproblem(1) # get the initial eigenvalues
 
-Then, we gradually increase :math:`\rho` by arc length continuation, solve the eigenvalues and monitor whether the largest real part of the eigenvalues crosses zero:
+Then, we gradually increase :math:`\rho` by arc length continuation, solve for the eigenvalues and monitor whether the largest real part of the eigenvalues crosses zero:
 
 .. code:: python
 
@@ -80,7 +80,7 @@ Then, we gradually increase :math:`\rho` by arc length continuation, solve the e
                eigvals, eigvects = problem.solve_eigenproblem(1)
                print(f"On pitchfork branch rho={problem.rho.value}, x,y,z={x, y, z}, eigenvalue={eigvals[0]}")
 
-The eigenvalue will have a non-zero imaginary value, which indicates a Hopf bifurcation. This means the critical eigenvalue will not be zero, but in fact a pair of imaginary values :math:`\pm i\omega`. For the same reason, the eigenvector :math:`\vec{v}` will be complex (and a complex conjugate counter-pair), i.e. :math:`\vec{v}=\vec{\phi}+i\vec{\psi}` with real valued :math:`\vec{\phi}` and :math:`\vec{\psi}`. The bifurcation tracking of a Hopf bifurcation with respect to parameter :math:`r` (:math:`=\rho` here) is internally again handled by augmenting the system as follows:
+The eigenvalue will have a non-zero imaginary value, which indicates a Hopf bifurcation. This means the critical eigenvalue will not be zero, but in fact a pair of imaginary values :math:`\pm i\omega`. For the same reason, the eigenvector :math:`\vec{v}` will be complex (and a complex conjugate counter-pair), i.e. :math:`\vec{v}=\vec{\phi}+i\vec{\psi}` with real valued :math:`\vec{\phi}` and :math:`\vec{\psi}`. The bifurcation tracking of a Hopf bifurcation with respect to the parameter :math:`r` (:math:`=\rho` here) is internally again handled by augmenting the system as follows:
 
 .. math::
 
@@ -123,13 +123,13 @@ Since we do not :py:meth:`~pyoomph.generic.problem.Problem.deactivate_bifurcatio
 	:class: with-shadow
 	:width: 70%
 	
-	Position of the Hopf bifurcation of the Lorenz system as function of the parameters :math:`\rho` and :math:`\sigma` at :math:`\beta=8/3`. The analytical solution :math:`\rho_\text{c}=\sigma(\sigma+\beta+3)/(\sigma-\beta-1)` agrees perfectly.
+	Position of the Hopf bifurcation of the Lorenz system as a function of the parameters :math:`\rho` and :math:`\sigma` at :math:`\beta=8/3`. The analytical solution :math:`\rho_\text{c}=\sigma(\sigma+\beta+3)/(\sigma-\beta-1)` agrees perfectly.
 
 
 
 Thereby, one can directly generate phase diagrams as e.g. depicted in :numref:`figodelorenzbifurc`.
 
-The very same methods also work for spatio-temporal differential equation. An example will be discussed in :numref:`secpdekse`.
+The very same methods also work for spatio-temporal differential equations. An example will be discussed in :numref:`secpdekse`.
 
 .. only:: html
 

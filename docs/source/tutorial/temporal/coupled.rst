@@ -16,7 +16,7 @@ Coupled harmonic oscillators
 
    **Method I**
 
-We start by the naive way of implementing this, i.e. by defining a specific equation class, inherited from the generic :py:class:`~pyoomph.generic.codegen.ODEEquations` class:
+We start with the naive way of implementing this, i.e. by defining a specific equation class, inherited from the generic :py:class:`~pyoomph.generic.codegen.ODEEquations` class:
 
 .. code:: python
 
@@ -80,7 +80,7 @@ Here, in particular the line
 
    **Method II**
 
-The previous method is straightforward, but would require to rewrite a lot of code if e.g. a third oscillator should be coupled to the system. Of course, one could use ``len`` to obtain the dimension of the coupling matrix ``Kmatrix`` and perform the calls for :py:meth:`~pyoomph.generic.codegen.ODEEquations.define_ode_variable` and the residual calculation in a loop. However, pyoomph also offers another way of coupling multiple equations. We have already seen that we can augment an equation e.g. with an :py:class:`~pyoomph.equations.generic.InitialCondition` object to set an initial condition or an :py:class:`~pyoomph.output.generic.ODEFileOutput` object to make sure that output is written. By the very same way, also multiple equations can be coupled. To that end, we write an equation class for a general second order equation of the form
+The previous method is straightforward, but would require rewriting a lot of code if e.g. a third oscillator should be coupled to the system. Of course, one could use ``len`` to obtain the dimension of the coupling matrix ``Kmatrix`` and perform the calls for :py:meth:`~pyoomph.generic.codegen.ODEEquations.define_ode_variable` and the residual calculation in a loop. However, pyoomph also offers another way of coupling multiple equations. We have already seen that we can augment an equation e.g. with an :py:class:`~pyoomph.equations.generic.InitialCondition` object to set an initial condition or an :py:class:`~pyoomph.output.generic.ODEFileOutput` object to make sure that output is written. By the very same way, also multiple equations can be coupled. To that end, we write an equation class for a general second order equation of the form
 
 .. math:: \partial_t^2y+T=0\,,
 
@@ -172,7 +172,7 @@ Also, the initial conditions are now separated, since initial conditions can onl
 	:class: with-shadow
 	:width: 100%
 	
-	Output for the user-defined harmonic oscillatior equation with damping and driving.
+	Output for the user-defined harmonic oscillator equation with damping and driving.
 	
 .. only:: html
 

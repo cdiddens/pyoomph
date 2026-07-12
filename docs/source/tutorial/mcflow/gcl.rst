@@ -3,7 +3,7 @@
 Evaporation from a capillary & the geometric conservation law (GCL)
 -------------------------------------------------------------------
 
-We want to use the multi-component flow equation to the evaporation of a mixture from a capillary tube, analogously to what has been done in Ref. :cite:`Raju2024`.
+We want to apply the multi-component flow equations to the evaporation of a mixture from a capillary tube, analogously to what has been done in Ref. :cite:`Raju2024`.
 As in this reference, we consider the tube, filled with a mixture of glycerol and water, as a 1d system. At the bottom of the tube, water is evaporating, leaving the non-volatile glycerol behind. This implies that the total mass of glycerol inside the liquid must be conserved.
 
 However, for simple ALE methods which just use ``partial_t(...,ALE=True)``, i.e. the ALE-corrected time derivative :py:func:`~pyoomph.expressions.generic.partial_t` (see :numref:`secALEtimediff`), we will see that it does not perfectly conserve the total mass of glycerol. Instead, we get a time-step-dependent conservation, which is a typical result when using ALE without respecting the *geometric conservation law*.
@@ -24,7 +24,7 @@ For a test function :math:`\phi`, the weak form of this equation reads
     \left(\rho\left(\partial_t w_\mathrm{g}+\vec{u}\cdot\nabla w_\mathrm{g}\right),\phi\right) + \left(\rho D_{\mathrm{gw}} \nabla w_\mathrm{g},\nabla \phi\right)=\left\langle\rho D_{\mathrm{gw}} \nabla w_\mathrm{g},\mathbf{n} \phi\right\rangle
     \end{aligned}
 
-This is how pyoomph implements the equation by default, where the time derivative considers the ALE correction on moving meshes. However, as shown below, this does not perfectly conserve the total mass of glycerol in the capillary
+This is how pyoomph implements the equation by default, where the time derivative considers the ALE correction on moving meshes. However, as shown below, this does not perfectly conserve the total mass of glycerol in the capillary.
 
 Alternatively, we can use the continuity equation of :math:numref:`eqmcflowwadvdiff` to rewrite :math:numref:`eqmcflowwadvdiffnonconservative` in a *conservative form* as
 
@@ -147,7 +147,7 @@ we must setup a 1d moving mesh with multi-component flow equations. The ``"left"
         
         self+=eqs@"domain"
 
-There are two :py:class:`~pyoomph.equations.multi_component.MultiComponentNavierStokesInterface` objects, one at the bottom (``"left"``) and one at the top (``"right"``). The bottom interface is where the evaporation takes place, and we prescribe the evaporation rate using a :py:class:`~pyoomph.materials.mass_transfer.PrescribedMassTransfer` model. This interface is ``static``, i.e. fixed in position. The kinematic boundary condition therefore acts on the velocity, not on the mesh motion. The top interface is allowed to move, but no evaporation is allowed there, here, the kinematic boundary condition acts on the mesh motion. Note also that we pass ``GCL=self.use_GCL`` to the :py:class:`~pyoomph.equations.multi_component.CompositionFlowEquations` object, which will ensure that the conservative form of the equations is used when ``self.use_GCL=True``.
+There are two :py:class:`~pyoomph.equations.multi_component.MultiComponentNavierStokesInterface` objects, one at the bottom (``"left"``) and one at the top (``"right"``). The bottom interface is where the evaporation takes place, and we prescribe the evaporation rate using a :py:class:`~pyoomph.materials.mass_transfer.PrescribedMassTransfer` model. This interface is ``static``, i.e. fixed in position. The kinematic boundary condition therefore acts on the velocity, not on the mesh motion. The top interface is allowed to move, but no evaporation is allowed there. Here, the kinematic boundary condition acts on the mesh motion. Note also that we pass ``GCL=self.use_GCL`` to the :py:class:`~pyoomph.equations.multi_component.CompositionFlowEquations` object, which will ensure that the conservative form of the equations is used when ``self.use_GCL=True``.
 
 To run the simulation, we again use dynamic time stepping, which perfectly adapts to the logarithmic plots in :numref:`figgclcapillary`:
 
@@ -159,7 +159,7 @@ To run the simulation, we again use dynamic time stepping, which perfectly adapt
             problem.DTSF_min_decrease_factor=0.75
             problem.run(48*hour,outstep=True,startstep=0.001*second,temporal_error=1)
 
-The results in :numref:`figgclcapillary` show the concentration of glycerol in the capillary at different times, the velocity of the top interface, receding due to evaporation at the bottom, and the total mass of glycerol in the capillary. The total mass of glycerol is not perfectly conserved when using ALE with `GCL=False`, but is conserved nicely when using the it.
+The results in :numref:`figgclcapillary` show the concentration of glycerol in the capillary at different times, the velocity of the top interface, receding due to evaporation at the bottom, and the total mass of glycerol in the capillary. The total mass of glycerol is not perfectly conserved when using ALE with `GCL=False`, but is conserved nicely when using the GCL.
 
 
 

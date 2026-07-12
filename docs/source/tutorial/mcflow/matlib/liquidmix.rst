@@ -1,7 +1,7 @@
 Liquid mixtures
 ~~~~~~~~~~~~~~~
 
-Properties of liquid mixtures are defined similarly to gas mixtures. Again, we define the required components for this particular mixture and can select one species as passive field, i.e. the composition field which is not explicitly solved for. When we define a pure liquid name ``"glycerol"`` analogous to the pure liquid ``"water"``, we can define the mixture properties e.g. as follows:
+Properties of liquid mixtures are defined similarly to gas mixtures. Again, we define the required components for this particular mixture and can select one species as passive field, i.e. the composition field which is not explicitly solved for. When we define a pure liquid named ``"glycerol"`` analogous to the pure liquid ``"water"``, we can define the mixture properties e.g. as follows:
 
 .. code:: python
 
@@ -38,7 +38,7 @@ Properties of liquid mixtures are defined similarly to gas mixtures. Again, we d
 
 Again, as in the case of gas mixtures, the :py:attr:`~pyoomph.materials.generic.MaterialProperties.components` and :py:attr:`~pyoomph.materials.generic.BaseMixedProperties.passive_field` must be set. The constructor takes again a ``dict`` of the pure properties.
 
-If one does not know details on the particular change of the liquid properties with the composition, one always can use :py:meth:`~pyoomph.materials.generic.BaseMixedProperties.set_by_weighted_average` to calculate the average of the pure properties weighted by the local mass fractions. This makes at least sure that the properties are correct when taking the pure limits. One can also modify the optional argument ``fraction_type`` to ``"mole_fraction"`` to blend between the pure properties weighted by the mole fractions instead the mass fractions. The local mass and mole fractions of each component can be obtained by :py:meth:`~pyoomph.materials.generic.BaseMixedProperties.get_mass_fraction_field` and :py:meth:`~pyoomph.materials.generic.BaseMixedProperties.get_mole_fraction_field`, respectively. Alternatively, one can directly use e.g. ``var("massfrac_water")`` or ``var("molefrac_glycerol")`` to bind these fields to form arbitrary expressions.
+If one does not know details on the particular change of the liquid properties with the composition, one always can use :py:meth:`~pyoomph.materials.generic.BaseMixedProperties.set_by_weighted_average` to calculate the average of the pure properties weighted by the local mass fractions. This makes at least sure that the properties are correct when taking the pure limits. One can also modify the optional argument ``fraction_type`` to ``"mole_fraction"`` to blend between the pure properties weighted by the mole fractions instead of the mass fractions. The local mass and mole fractions of each component can be obtained by :py:meth:`~pyoomph.materials.generic.BaseMixedProperties.get_mass_fraction_field` and :py:meth:`~pyoomph.materials.generic.BaseMixedProperties.get_mole_fraction_field`, respectively. Alternatively, one can directly use e.g. ``var("massfrac_water")`` or ``var("molefrac_glycerol")`` to bind these fields to form arbitrary expressions.
 
 As shown in the above example for the :py:meth:`~pyoomph.materials.generic.BaseLiquidProperties.dynamic_viscosity`, one can assemble functions of the composition and temperature easily. Here, we have used a viscosity model developed by :cite:t:`Cheng2008`, while the surface tension was obtained by a fit of experimental data :cite:`Takamura2012`. The same holds true for the diffusion coefficient based on the data of :cite:t:`DErrico2004`.
 

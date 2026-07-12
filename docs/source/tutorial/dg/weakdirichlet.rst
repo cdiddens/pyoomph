@@ -5,7 +5,7 @@ Weakly imposing Dirichlet boundary conditions
 
 The last example illustrated how the continuity of the concentration field :math:`c` across the facets can be enforced in a weak sense by adding facet terms. If you use the conventional :py:class:`~pyoomph.meshes.bcs.DirichletBC` on the exterior boundaries, it will enforce the conditions strongly, also in discontinuous Galerkin methods. However, in some cases, you may want to enforce the Dirichlet boundary conditions weakly, i.e. in the same way as the facet terms. In order to easily switch between continuous and discontinuous Galerkin spaces, one can still use the :py:class:`~pyoomph.meshes.bcs.DirichletBC` class, but one has to add the implementation of the weak Dirichlet boundary conditions manually to the equation class. This will be discussed in the following.
 
-We consider a simple Poisson equation, again implemented for both continuous and discontinuous Galerkin spaces. The facet terms can be directly copied from the diffusion term of the advection-diffusion equation. The only modification we do is adding the keyword argument ``allow_DL_and_D0=True`` to the test for discontinuous spaces via the :py:func:`~pyoomph.expressions.generic.is_DG_space` function. Thereby, we can use the discontinous spaces without degrees of freedom at the nodes, i.e. ``"DL"`` and ``"D0"``, as well.
+We consider a simple Poisson equation, again implemented for both continuous and discontinuous Galerkin spaces. The facet terms can be directly copied from the diffusion term of the advection-diffusion equation. The only modification we make is adding the keyword argument ``allow_DL_and_D0=True`` to the test for discontinuous spaces via the :py:func:`~pyoomph.expressions.generic.is_DG_space` function. Thereby, we can use the discontinuous spaces without degrees of freedom at the nodes, i.e. ``"DL"`` and ``"D0"``, as well.
 
 .. code:: python
 
@@ -34,7 +34,7 @@ We consider a simple Poisson equation, again implemented for both continuous and
 		      facet_terms-=weak(avg(grad(u)),jump(v)*n)          
 		      self.add_interior_facet_residual(facet_terms)
 
-However, we now also add a special function which gives the correct weak terms for weakly imposed Dirichlet boundary conditions. This function must return the weak terms that are necessary to enforce some particular Dirichlet value. These are essentially the same as the facet terms, however, instead of :py:func:`~pyoomph.expressions.generic.jump`, we just take the current value on the boundary minus the prescribed value. The function :py:func:`~pyoomph.expressions.generic.avg` is just replaced by the evaluation of the variable on the boundary. In case we do not provide such a field or the field is continuous, we just return ``None``, advising the :py:class:`~pyoomph.meshes.bcs.DirichletBC` to impose the value strongy:
+However, we now also add a special function which gives the correct weak terms for weakly imposed Dirichlet boundary conditions. This function must return the weak terms that are necessary to enforce some particular Dirichlet value. These are essentially the same as the facet terms, however, instead of :py:func:`~pyoomph.expressions.generic.jump`, we just take the current value on the boundary minus the prescribed value. The function :py:func:`~pyoomph.expressions.generic.avg` is just replaced by the evaluation of the variable on the boundary. In case we do not provide such a field or the field is continuous, we just return ``None``, advising the :py:class:`~pyoomph.meshes.bcs.DirichletBC` to impose the value strongly:
 
 .. code:: python
 
@@ -96,15 +96,15 @@ By default, :py:class:`~pyoomph.meshes.bcs.DirichletBC` will impose the conditio
 		:download:`Download all examples <../tutorial_example_scripts.zip>`   	
  
 
-Finally, we want to address that the discontinous Galerkin implementation can easily be switched to a *finite volume method*. In such methods, quantities are usually element-wise constant, i.e. approximated on the space ``"D0"``. If setting ``space="D0"``, all terms involving ``grad(u)`` and ``grad(v)`` will vanish, since the gradients are zero in the element-wise constant space. The weak formulation will hence only read 
+Finally, we want to address that the discontinuous Galerkin implementation can easily be switched to a *finite volume method*. In such methods, quantities are usually element-wise constant, i.e. approximated on the space ``"D0"``. If setting ``space="D0"``, all terms involving ``grad(u)`` and ``grad(v)`` will vanish, since the gradients are zero in the element-wise constant space. The weak formulation will hence only read 
 
 .. math::
 
    -\left(f,v\right)_\Omega + \sum_F \left\langle \frac{\alpha}{h_\text{avg}}(u^+-u^-) ,v^+-v^- \right\rangle_F = 0\,,
 
-i.e. we only integate over the source :math:`f` in the bulk and the fluxes are just represented by the jumps of the field values. The flux terms can be understood as finite difference approximation of the fluxes, i.e. we just take the difference of the values at the cell centers, divided by the distance :math:`h_\text{avg}`. While :math:`\alpha` is a penalty parameter for higher order polynominal approximations, it is now crucial to set the penalty parameter to :math:`\alpha=1` to recover the correct finite difference approximations when using the ``"D0"`` space. Upon setting ``space="D0"`` and ``alpha_DG=1`` and increasing the number of elements to ``N=40``, we obtain the solution plotted on  the left side of :numref:`figdgpoissond0andd2`.
+i.e. we only integrate over the source :math:`f` in the bulk and the fluxes are just represented by the jumps of the field values. The flux terms can be understood as finite difference approximation of the fluxes, i.e. we just take the difference of the values at the cell centers, divided by the distance :math:`h_\text{avg}`. While :math:`\alpha` is a penalty parameter for higher order polynomial approximations, it is now crucial to set the penalty parameter to :math:`\alpha=1` to recover the correct finite difference approximations when using the ``"D0"`` space. Upon setting ``space="D0"`` and ``alpha_DG=1`` and increasing the number of elements to ``N=40``, we obtain the solution plotted on  the left side of :numref:`figdgpoissond0andd2`.
 
-Discontinous Galerkin methods can hence be understood as generalization of finite volume methods by allowing for higher order polynominal approximations inside the elements. However, it is important to note that if we use e.g. a second order space, ``"D2"``, as depicted on the right side of :numref:`figdgpoissond0andd2`, it is necessary to increase the penalty parameter (here we used :math:`\alpha=6`) to obtain stable solution.
+Discontinuous Galerkin methods can hence be understood as a generalization of finite volume methods by allowing for higher order polynomial approximations inside the elements. However, it is important to note that if we use e.g. a second order space, ``"D2"``, as depicted on the right side of :numref:`figdgpoissond0andd2`, it is necessary to increase the penalty parameter (here we used :math:`\alpha=6`) to obtain a stable solution.
 
 ..  figure:: dg_fvm_d2.*
 	:name: figdgpoissond0andd2
@@ -113,5 +113,5 @@ Discontinous Galerkin methods can hence be understood as generalization of finit
 	:class: with-shadow
 	:width: 100%
 
-	(left) Using the space ``"D0"`` requires to set :math:`\alpha=1` and resembles a finite volume method. (right) for the ``"D2"`` space it is necessary to increase the penalty parameter.
+	(left) Using the space ``"D0"`` requires setting :math:`\alpha=1` and resembles a finite volume method. (right) for the ``"D2"`` space it is necessary to increase the penalty parameter.
 

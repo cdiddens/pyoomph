@@ -1,7 +1,7 @@
 Numerically obtaining the dispersion relation of a Turing instability
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The additional Cartesian mode can be even used if :math:`N=0` holds, i.e. we can expand a single point to an interval of length :math:`[0:2\pi/k)` (with periodic boundary conditions) and determine the eigenvalues and eigenfunctions here. This allows to quickly scan over :math:`k` to numerically extract a dispersion relation. We will discuss this here for a simple Turing instability (see :cite:`Turing1952,Gierer1972,Schnorr2023` for more details).
+The additional Cartesian mode can be even used if :math:`N=0` holds, i.e. we can expand a single point to an interval of length :math:`[0:2\pi/k)` (with periodic boundary conditions) and determine the eigenvalues and eigenfunctions here. This allows us to quickly scan over :math:`k` to numerically extract a dispersion relation. We will discuss this here for a simple Turing instability (see :cite:`Turing1952,Gierer1972,Schnorr2023` for more details).
 
 We begin by the equation class, which takes the diffusivity ratio and the reaction terms of the activator and inhibitor as arguments:
 
@@ -23,7 +23,7 @@ We begin by the equation class, which takes the diffusivity ratio and the reacti
 		self.add_weak(partial_t(u)-self.f,utest).add_weak(grad(u),grad(utest)) 
 		self.add_weak(partial_t(v)-self.g,vtest).add_weak(self.d*grad(v),grad(vtest))
 
-The problem class now just defines the reaction terms according to the Gierer-Meinhardt model :cite:`Gierer1972,Schnorr2023`. We then add a :py:class:`~pyoomph.meshes.simplemeshes.PointMesh`, which is :math:`0`-dimensional mesh consisting only of a single point and define the just developed equations on this mesh. Of course, on such a mesh, we could only get the eigendynamics of the ODEs :math:`\dot u=f, \dot v=g`, arising in absence of the diffusion terms. However, we will soon use the additional Cartesian normal mode to add a single :math:`x`-coordinate to quickly and exactly (i.e. without any spatial discretization) calculate the eigenvalues of the corresponding one-dimensional system, i.e. with diffusion terms.
+The problem class now just defines the reaction terms according to the Gierer-Meinhardt model :cite:`Gierer1972,Schnorr2023`. We then add a :py:class:`~pyoomph.meshes.simplemeshes.PointMesh`, which is a :math:`0`-dimensional mesh consisting only of a single point and define the just developed equations on this mesh. Of course, on such a mesh, we could only get the eigendynamics of the ODEs :math:`\dot u=f, \dot v=g`, arising in absence of the diffusion terms. However, we will soon use the additional Cartesian normal mode to add a single :math:`x`-coordinate to quickly and exactly (i.e. without any spatial discretization) calculate the eigenvalues of the corresponding one-dimensional system, i.e. with diffusion terms.
 
 .. code:: python
 

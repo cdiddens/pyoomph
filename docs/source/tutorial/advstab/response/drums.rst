@@ -1,15 +1,15 @@
 .. _secadvstabdrumresponse:
 
-Drums getting exited by a guitar
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Drums getting excited by a guitar
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-A band has a rest during rehearsal. As usual, the guitar guy cannot resist to play. By the incident sound wave, the drums are put into motion. We solve the drum exitation height :math:`h` by a driven damped wave equation on a circular membrane, where we assume axisymmetric modes only, i.e.
+A band has a rest during rehearsal. As usual, the guitar guy cannot resist playing. By the incident sound wave, the drums are put into motion. We solve the drum excitation height :math:`h` by a driven damped wave equation on a circular membrane, where we assume axisymmetric modes only, i.e.
 
 .. math:: \partial_t^2 h + \delta \partial_t h=c^2 \nabla^2 h + F\cos \omega t
 
-where :math:`\omega=2\pi f` is the frequency of the guitar sound incidenting as planar wave with a forcing amplitude of :math:`F`. :math:`c` depends on the drum and the surrounding gas and :math:`\delta` is a damping coefficient. We demand that :math:`h(r=R)=0` at the radius :math:`R` of the drum.
+where :math:`\omega=2\pi f` is the frequency of the guitar sound incident as a planar wave with a forcing amplitude of :math:`F`. :math:`c` depends on the drum and the surrounding gas and :math:`\delta` is a damping coefficient. We demand that :math:`h(r=R)=0` at the radius :math:`R` of the drum.
 
-As usual, we start by the drum equation in a coordinate system indepedent weak formulation:
+As usual, we start with the drum equation in a coordinate-system-independent weak formulation:
 
 .. code:: python
 
@@ -104,7 +104,7 @@ The general procedure is the same as before for a simple harmonic oscillator. Ho
                # add a row to the output
                outfile.add_row(pdr.get_driving_frequency()/hertz,*bessel_data)
 
-To obtain the full response data, we can access the eigenvector of the problem. Here, the response is stored in the ``eigenvector=0``. The nondimensional eigenfunction is stored as real and imaginary contribution, which can be accessed by :py:meth:`~pyoomph.generic.problem.Problem.get_cached_mesh_data` for each mesh. Then, cubic interpolators are generated and in the loop, the individual Bessel modes are projected. The result is plotted in :numref:`figstabilitypdrdrum`.
+To obtain the full response data, we can access the eigenvector of the problem. Here, the response is stored in the ``eigenvector=0``. The nondimensional eigenfunction is stored as real and imaginary contributions, which can be accessed by :py:meth:`~pyoomph.generic.problem.Problem.get_cached_mesh_data` for each mesh. Then, cubic interpolators are generated and in the loop, the individual Bessel modes are projected. The result is plotted in :numref:`figstabilitypdrdrum`.
 
 ..  figure:: pdrdrum.*
 	:name: figstabilitypdrdrum

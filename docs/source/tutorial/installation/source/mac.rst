@@ -5,7 +5,7 @@ On Mac
 
 .. warning::
 
-   If you are using a recent Mac with an Apple silicon (arm64 architecture) processor, you might encounter some problems, since not all required python packages are present in the pip repository yet. Therefore, you must use Rosetta 2 to emulate the x86 64 architecture. You must execute the following commands in a Rosetta terminal. At https://www.courier.com/blog/tips-and-tricks-to-setup-your-apple-m1-for-development/ you can find instructions how to create such a Rosetta terminal. On more recent systems, please refer to https://developer.apple.com/forums/thread/718666 to setup a corresponding terminal.
+   If you are using a recent Mac with an Apple silicon (arm64 architecture) processor, you might encounter some problems, since not all required python packages are present in the pip repository yet. Therefore, you must use Rosetta 2 to emulate the x86_64 architecture. You must execute the following commands in a Rosetta terminal. At https://www.courier.com/blog/tips-and-tricks-to-setup-your-apple-m1-for-development/ you can find instructions on how to create such a Rosetta terminal. On more recent systems, please refer to https://developer.apple.com/forums/thread/718666 to setup a corresponding terminal.
    
    
 .. note::
@@ -33,7 +33,7 @@ for a terminal. After that, you should have git so that you can clone the reposi
 
 
 
-Before building it, a bunch of additional software has to be installed. For Mac, there is e.g. homebrew (https://brew.sh), which easily manage these additional packages. Hence, install homebrew by pasting the installation command from https://brew.sh.
+Before building it, a bunch of additional software has to be installed. For Mac, there is e.g. homebrew (https://brew.sh), which easily manages these additional packages. Hence, install homebrew by pasting the installation command from https://brew.sh.
 
 Afterwards, you can install some required tools, by
 

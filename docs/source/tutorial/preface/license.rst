@@ -23,7 +23,7 @@ For pyoomph, the conditions of the `GNU General Public License 3 <https://www.gn
       You should have received a copy of the GNU General Public License
       along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-A `copy of the license <https://github.com/pyoomph/pyoomph/blob/main/COPYING>`__ can be found in distribution. Mind also the following licenses
+A `copy of the license <https://github.com/pyoomph/pyoomph/blob/main/COPYING>`__ can be found in the distribution. Mind also the following licenses:
 
 #. pyoomph contains code taken from other authors/projects:
 
@@ -94,7 +94,7 @@ A `copy of the license <https://github.com/pyoomph/pyoomph/blob/main/COPYING>`__
 
    -  The file `src/pyginacstruct.hpp <https://github.com/pyoomph/pyoomph/blob/main/src/pyginacstruct.hpp>`__ is strongly based on the file `structure.h <https://www.ginac.de/ginac.git/?p=ginac.git;a=blob_plain;f=ginac/structure.h;hb=HEAD>`__ of `GiNaC <https://www.ginac.de/>`__, `[GPL v2 or later license] <https://www.ginac.de/ginac.git/?p=ginac.git;a=blob_plain;f=COPYING;hb=HEAD>`__.
 
-   -  A copy of the library `Project Nayuki/smallest enslosing circle <https://www.nayuki.io/page/smallest-enclosing-circle>`__, `[LGPL v3 or later license] <https://github.com/nayuki/Nayuki-web-published-code/blob/master/smallest-enclosing-circle/COPYING.LESSER.txt>`__ is added (after adding type specifications) to `pyoomph/utils/smallest_circle.py <https://github.com/pyoomph/pyoomph/blob/main/pyoomph/utils/smallest_circle.py>`__.
+   -  A copy of the library `Project Nayuki/smallest enclosing circle <https://www.nayuki.io/page/smallest-enclosing-circle>`__, `[LGPL v3 or later license] <https://github.com/nayuki/Nayuki-web-published-code/blob/master/smallest-enclosing-circle/COPYING.LESSER.txt>`__ is added (after adding type specifications) to `pyoomph/utils/smallest_circle.py <https://github.com/pyoomph/pyoomph/blob/main/pyoomph/utils/smallest_circle.py>`__.
 
    -  Also, when using materials or the thermodynamic activity models AIOMFAC, original UNIFAC or modified UNIFAC (Dortmund), :ref:`please cite the relevant publications <secboxunifacinfo>`.
 

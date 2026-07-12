@@ -1,7 +1,7 @@
 Replotting of existing data
 ---------------------------
 
-The default file extension of plots are *png* files. You can change this by the :py:attr:`~pyoomph.output.plotting.MatplotlibPlotter.file_ext` to e.g. *pdf* files. *Png* files are more suitable to assemble a movie out of the plots, whereas *pdf* files are better for inclusion in publications.
+The default file extension of plots is *png* files. You can change this by the :py:attr:`~pyoomph.output.plotting.MatplotlibPlotter.file_ext` to e.g. *pdf* files. *Png* files are more suitable to assemble a movie out of the plots, whereas *pdf* files are better for inclusion in publications.
 
 To change the file extension, you can just set it after :py:attr:`~pyoomph.generic.problem.Problem.plotter` has been assigned, e.g.
 
@@ -36,4 +36,4 @@ If you only want to recreate e.g. the plot number :math:`10`, you can add the ``
 
 Alternatively, you can also create something like ``--where 'step in [10,11,20]'`` or alternative python ``bool`` expressions involving the output step ``step``.
 
-Note that this replotting only works, if :py:attr:`~pyoomph.generic.problem.Problem.write_states` is ``True`` (which is default). Replotting, just like continuing a simulation (cf. :numref:`secpdecontinue`), relies on the state files which contain all information of the current state of the simulation.
+Note that this replotting only works, if :py:attr:`~pyoomph.generic.problem.Problem.write_states` is ``True`` (which is the default). Replotting, just like continuing a simulation (cf. :numref:`secpdecontinue`), relies on the state files which contain all information of the current state of the simulation.

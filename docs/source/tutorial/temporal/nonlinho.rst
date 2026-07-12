@@ -24,7 +24,7 @@ Here, the parameter :math:`\mu` controls the nonlinearity. It is obvious that a 
    		residual=partial_t(y,2)-self.mu*(1-y**2)*partial_t(y)+y
    		self.add_residual(residual*testfunction(y))
 
-It is not a problem to add the nonlinear damping term to the residuals - a step where FEniCS would complain unless explictly implemented as nonlinear problem. 
+It is not a problem to add the nonlinear damping term to the residuals - a step where FEniCS would complain unless explicitly implemented as a nonlinear problem. 
 
 .. only:: html
 
@@ -51,12 +51,12 @@ Here, we use inheritance, i.e. the methods :py:meth:`~pyoomph.generic.codegen.Ba
 
 .. math:: \partial_t^2 y+2\delta \partial_t y +\omega^2 y=0\,.
 
-If we replace :math:`\delta=-1/2 \mu(1-y)^2`, we get in fact the Van der Pol oscillator :math:numref:`eqvdposci`. This fact is used here: when calling the constructor ``_init__`` of the super-class :py:class:`~pyoomph.equations.harmonic_oscillator.HarmonicOscillator`, we pass exactly this expression as damping parameter and thereby recover the Van der Pol oscillator. Obviously, there are always multiple ways in pyoomph to achieve the same goal. A plot of the numerical solution is shown in :numref:`figodevdpoln`.
+If we replace :math:`\delta=-1/2 \mu(1-y)^2`, we get in fact the Van der Pol oscillator :math:numref:`eqvdposci`. This fact is used here: when calling the constructor ``__init__`` of the super-class :py:class:`~pyoomph.equations.harmonic_oscillator.HarmonicOscillator`, we pass exactly this expression as damping parameter and thereby recover the Van der Pol oscillator. Obviously, there are always multiple ways in pyoomph to achieve the same goal. A plot of the numerical solution is shown in :numref:`figodevdpoln`.
 
 ..  figure:: vdpol.*
 	:name: figodevdpoln
 	:align: center
-	:alt: Van der Pol oscillatior
+	:alt: Van der Pol oscillator
 	:class: with-shadow
 	:width: 70%
 	

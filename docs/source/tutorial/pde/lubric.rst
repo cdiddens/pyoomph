@@ -1,7 +1,7 @@
 Lubrication equation
 --------------------
 
-The *lubrication approximation* is commonly used for low-Reynolds number flow with a shallow aspect ratio. Instead of solving the (Navier-)Stokes equations with a free interface (which will be done later in :numref:`secALEfreesurfNS`), one instead solves the equation for the fluid height :math:`z=h(\vec{x},t)` as function of the lateral coordinate :math:`\vec{x}` and time :math:`t`. The height of the fluid changes due to pressure gradients, while the viscosity :math:`\mu` and the no-slip boundary condition at :math:`z=0` hampers the flow velocity in relaxing these pressure gradients. The corresponding equations, where the Laplace pressure :math:`p` due to the surface tension :math:`\sigma` and potentially the Marangoni effect are driving the flow, read
+The *lubrication approximation* is commonly used for low-Reynolds number flow with a shallow aspect ratio. Instead of solving the (Navier-)Stokes equations with a free interface (which will be done later in :numref:`secALEfreesurfNS`), one instead solves the equation for the fluid height :math:`z=h(\vec{x},t)` as function of the lateral coordinate :math:`\vec{x}` and time :math:`t`. The height of the fluid changes due to pressure gradients, while the viscosity :math:`\mu` and the no-slip boundary condition at :math:`z=0` hamper the flow velocity in relaxing these pressure gradients. The corresponding equations, where the Laplace pressure :math:`p` due to the surface tension :math:`\sigma` and potentially the Marangoni effect are driving the flow, read
 
 .. math:: :label: eqpdelubricationstrong
 

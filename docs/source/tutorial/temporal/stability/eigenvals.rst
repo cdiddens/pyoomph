@@ -3,7 +3,7 @@ Calculating eigenvalues and eigenfunctions
 
 In the previous example, we have found stationary solutions, but we could not obtain the stability of these solutions. To explicitly calculate the eigenvalues, we can use the method :py:meth:`~pyoomph.generic.problem.Problem.solve_eigenproblem` of the problem class, which requires the number of eigenvalues we want to calculate. Here, there is just one degree of freedom, namely :math:`x`, so we should only aim for a single eigenvalue. The method will return a list of eigenvalues (complex numbers) and a list of the corresponding eigenvectors. Of course, using :py:meth:`~pyoomph.generic.problem.Problem.solve_eigenproblem` is only meaningful if the problem is currently on a stationary solution.
 
-The rest is more or less the same as the previous code, i.e. first importing the problem and equation from the previous example :download:`bifurcation_transient_transcritical.py` and then use :py:meth:`~pyoomph.generic.problem.Problem.solve_eigenproblem` after finding the stationary solutions via the :py:meth:`~pyoomph.generic.problem.Problem.solve` call.
+The rest is more or less the same as the previous code, i.e. first importing the problem and equation from the previous example :download:`bifurcation_transient_transcritical.py` and then using :py:meth:`~pyoomph.generic.problem.Problem.solve_eigenproblem` after finding the stationary solutions via the :py:meth:`~pyoomph.generic.problem.Problem.solve` call.
 
 .. code:: python
 

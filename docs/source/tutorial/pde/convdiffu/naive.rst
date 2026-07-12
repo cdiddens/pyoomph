@@ -29,7 +29,7 @@ Let us first ignore this complication and implement the equation naively. We wil
 
 Depending on the value of ``advection_in_partial_integration``, we either use :math:numref:`eqpdeconvdiffuweakA` or :math:numref:`eqpdeconvdiffuweakB` for the weak form. Furthermore, we changed the time stepping from the default ``"BDF2"`` to ``"TPZ"``, which can be of advantage (cf. :numref:`secODEtimescheme` for time stepping methods).
 
-As a problem class, we use bump which is swirled around by one period. When the diffusivity is low, we expect the bump to be only slightly smaller in amplitude and only slightly coarser due to diffusion. The problem class hence reads:
+As a problem class, we use a bump which is swirled around by one period. When the diffusivity is low, we expect the bump to be only slightly smaller in amplitude and only slightly coarser due to diffusion. The problem class hence reads:
 
 .. code:: python
 
@@ -68,7 +68,7 @@ As a problem class, we use bump which is swirled around by one period. When the 
    		
    		self.add_equations(eqs@"domain") # adding the equation
 
-The most interesting thing here is that we can also define a :py:class:`~pyoomph.equations.generic.SpatialErrorEstimator` based on history values. Instead of passing keyword arguments, we can also pass positional arguments to the :py:class:`~pyoomph.equations.generic.SpatialErrorEstimator`. The error estimator requires gradients, but these can also be evaluated at previous time steps. This ensures that the wake remains finer resolved.
+The most interesting thing here is that we can also define a :py:class:`~pyoomph.equations.generic.SpatialErrorEstimator` based on history values. Instead of passing keyword arguments, we can also pass positional arguments to the :py:class:`~pyoomph.equations.generic.SpatialErrorEstimator`. The error estimator requires gradients, but these can also be evaluated at previous time steps. This ensures that the wake remains more finely resolved.
 
 The run code is again simple:
 
