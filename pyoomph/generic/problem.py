@@ -1812,10 +1812,7 @@ class Problem(_pyoomph.Problem):
         from .ccompiler import get_ccompiler
         if isinstance(compiler_or_name,str):
             if compiler_or_name=="tcc":
-                if _pyoomph.has_tcc():
-                    compiler_or_name="_internal_"
-                else:
-                    compiler_or_name="tccbox"
+                compiler_or_name="tccbox"
             elif compiler_or_name=="distutils":
                 compiler_or_name="system"
             cc=get_ccompiler(compiler_or_name)
@@ -3314,8 +3311,7 @@ class Problem(_pyoomph.Problem):
                 suppress_compilation=True
         if self._suppress_code_writing or get_mpi_rank()>0:
             suppress_writing=True
-        mpi_barrier()
-        
+        mpi_barrier()        
         res=self.generate_and_compile_bulk_element_code(elementtype,trunk,suppress_writing,suppress_compilation,bulkmesh,self.is_quiet(),self.extra_compiler_flags)
         #print("REt")
         mpi_barrier()

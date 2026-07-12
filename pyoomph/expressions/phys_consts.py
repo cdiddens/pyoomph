@@ -28,9 +28,12 @@
  
 from .units import *
 
-gas_constant=8.31446261815324*joule/(kelvin*mol)
-k_Boltzmann= 1.38064852e-23 * joule/kelvin
 
+#: Universal gas constant
+gas_constant=8.31446261815324*joule/(kelvin*mol) 
+#: Boltzmann constant
+k_Boltzmann= 1.38064852e-23 * joule/kelvin
+#: Avogadro's number
 N_Avogadro=6.02214076e23/mol
 
 epsilon_0=8.854187817e-12*farad/meter # vacuum permittivity

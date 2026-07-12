@@ -561,7 +561,7 @@ void PyReg_Problem(py::module &m)
 
 	py::class_<pyoomph::DynamicBulkElementInstance>(
 		m, "DynamicBulkElementInstance",
-		"A JIT-compiled and instantiated finite element code, attached to a particular bulk mesh. Created via "
+		"A JIT-compiled and instantiated finite element code, attached to a particular mesh. Created via "
 		"Problem.generate_and_compile_bulk_element_code(); provides the low-level bookkeeping (field indices, "
 		"external data links, ...) required by the Python-level Equations/Mesh classes.")
 		.def("_exchange_mesh", &pyoomph::DynamicBulkElementInstance::set_bulk_mesh, py::arg("mesh"),

@@ -43,25 +43,51 @@ The main author may be contacted at c.diddens@utwente.nl
 
 namespace py = pybind11;
 
+// This file implements a "solver shim": oomph-lib's linear algebra / mesh-partitioning code
+// calls out to external C libraries (SuperLU, SuperLU_DIST, METIS) through a handful of
+// extern "C" functions (superlu(), superlu_dist_*(), METIS_PartGraphKway(), ...). Instead of
+// linking the real libraries, pyoomph provides its own implementations of exactly those C
+// symbols (further below, in the extern "C" block) with matching signatures, so that oomph-lib's
+// calls get intercepted here and forwarded to a Python-side GeneralSolverCallback object (set via
+// set_Solver_callback()). This lets pyoomph's Python solver backends (see pyoomph/solvers/*.py,
+// e.g. scipy/MUMPS/Pardiso wrappers) act as the actual linear solver / graph partitioner beneath
+// oomph-lib's usual SuperLU/METIS call sites, without those libraries actually having to be
+// present.
 namespace pyoomph
 {
 
     typedef void *fptr;
 
+    // Abstract callback interface (overridden in Python) that actually performs the linear
+    // solves / graph partitioning requested by oomph-lib. The array arguments mirror the raw
+    // pointer/size arguments of the C library functions being shimmed (see the extern "C" block
+    // below), wrapped as (typically zero-copy) numpy arrays over the same underlying buffers.
     class GeneralSolverCallback
     {
     public:
         unsigned last_nrow_local;
+        // Solve a serial (non-distributed) sparse linear system, mirroring SuperLU's serial
+        // "superlu" driver interface. op_flag selects the requested operation (factorize/solve/
+        // free, as used by oomph-lib); values/rowind/colptr describe the matrix in compressed
+        // column format; rhs is overwritten with the solution.
         virtual int solve_la_system_serial(int op_flag, int n, int nnz, int nrhs,
                                            py::array_t<double> &values, py::array_t<int> &rowind, py::array_t<int> &colptr,
                                            py::array_t<double> &rhs, int ldb, int transpose) { return -1; };
 
+        // Solve a distributed (MPI) sparse linear system, mirroring SuperLU_DIST's interface.
+        // values/col_index/row_start describe the process-local rows of the matrix in compressed
+        // row format; b is overwritten with the (process-local) solution.
         virtual void solve_la_system_distributed(int op_flag, int allow_permutations, int n, int nnz_local, int nrow_local, int first_row, py::array_t<double> &values, py::array_t<int> &col_index, py::array_t<int> &row_start, py::array_t<double> &b, int nprow, int npcol, int doc, py::array_t<size_t> &data, py::array_t<int> &info){}; //,MPI_Comm comm
 
-        
+        // Partition a graph into nparts parts, mirroring METIS's METIS_PartGraphKway(). The
+        // graph is given in CSR-like form via xadj_Py/adjacency_vector_Py; part_Py is overwritten
+        // with the resulting partition index of each vertex. Not implemented by default - a
+        // Python override is required if graph partitioning is actually used.
         virtual int metis_partgraph_kway(idx_t nvertex,idx_t nconnection, py::array_t<idx_t> &xadj_Py, py::array_t<idx_t> &adjacency_vector_Py, py::array_t<idx_t> &vwgt_Py, idx_t nparts, py::array_t<idx_t> &options_Py, py::array_t<idx_t> &edgecut_Py, py::array_t<idx_t> &part_Py) {throw_runtime_error("METIS Link is not properly set up!"); return -1;}
     };
 
+    // pybind11 trampoline: forwards the three virtual solve/partition calls above to Python
+    // overrides.
     class PyGeneralSolverCallback : public GeneralSolverCallback
     {
     public:
@@ -99,14 +125,22 @@ namespace pyoomph
         }
     };
 
+    // The single active callback that the extern "C" shim functions below forward to; NULL
+    // until a Python GeneralSolverCallback instance is installed via set_Solver_callback().
     GeneralSolverCallback *g_solver_cb = NULL;
     void set_Solver_callback(GeneralSolverCallback *cb) { g_solver_cb = cb; }
 
 }
 
+// C-linkage functions with the exact names/signatures oomph-lib's linear solver / mesh
+// partitioning code expects from the real SuperLU / SuperLU_DIST / METIS libraries. Since these
+// are defined here instead, oomph-lib's calls resolve to pyoomph's own shims, which wrap the raw
+// pointers into numpy arrays and forward everything to pyoomph::g_solver_cb (see above).
 extern "C"
 {
     typedef void *fptr;
+    // Shim for SuperLU's serial factorize/solve driver (the actual op_flag semantics come from
+    // oomph-lib's SuperLU wrapper); forwards to GeneralSolverCallback::solve_la_system_serial().
     int superlu(int *op_flag, int *n, int *nnz, int *nrhs,
                 double *values, int *rowind, int *colptr,
                 double *b, int *ldb, int *transpose, int *doc,
@@ -136,7 +170,7 @@ extern "C"
         if (nnz)
             nnz_val = *nnz;
         int ldb_val = 0;
-        if (ldb_val)
+        if (ldb)
             ldb_val = *ldb;
 
         int res = pyoomph::g_solver_cb->solve_la_system_serial(*op_flag, *n, nnz_val, nrhs_val, values_arr, rowind_arr, colptr_arr, b_arr, ldb_val, (transpose ? 1 : 0));
@@ -147,6 +181,8 @@ extern "C"
     }
 
 #ifdef OOMPH_HAS_MPI
+    // Shim for SuperLU_DIST's globally-replicated-matrix solve entry point; not implemented
+    // (pyoomph only supports the row-distributed variant below).
     void superlu_dist_global_matrix(int opt_flag, int allow_permutations,
                                     int n, int nnz, double *values,
                                     int *row_index, int *col_start,
@@ -157,6 +193,11 @@ extern "C"
         throw_runtime_error("SUPERLU DIST IMPLEM GLOBAL MATRIX");
     }
 
+    // Shim for SuperLU_DIST's row-distributed matrix solve entry point; forwards to
+    // GeneralSolverCallback::solve_la_system_distributed(). b is wrapped with
+    // g_solver_cb->last_nrow_local entries: on a factorize call (opt_flag==1) that count is
+    // (re-)captured from nrow_local first, so a later solve-only call (which may not know
+    // nrow_local itself) still wraps b with the correct length.
     void superlu_dist_distributed_matrix(int opt_flag, int allow_permutations,
                                          int n, int nnz_local,
                                          int nrow_local, int first_row,
@@ -198,6 +239,8 @@ extern "C"
 
     }
 
+    // Shim for SuperLU_DIST's compressed-row-to-compressed-column conversion helper; not
+    // implemented (pyoomph's Python solvers work directly with compressed-row data).
     void superlu_cr_to_cc(int nrow, int ncol, int nnz, double *cr_values,
                           int *cr_index, int *cr_start, double **cc_values,
                           int **cc_index, int **cc_start)
@@ -205,7 +248,11 @@ extern "C"
         throw_runtime_error("SUPERLU DIST IMPLEM CR TO CC");
     }
 
-    
+
+    // Shim for METIS's k-way graph partitioning entry point (used by oomph-lib to partition the
+    // mesh's element connectivity graph across MPI processes). Validates the handful of
+    // parameters oomph-lib is known to pass (e.g. vsize/adjwgt/tpwgts/ubvec unused) and forwards
+    // the rest to GeneralSolverCallback::metis_partgraph_kway().
     int METIS_PartGraphKway(idx_t * nvtxs,idx_t * ncon,idx_t * xadj,idx_t * adjncy,idx_t * vwgt,idx_t * vsize,idx_t * adjwgt,idx_t * nparts,real_t * tpwgts,real_t * ubvec,idx_t * options,idx_t * edgecut,idx_t * part)
     //void METIS_PartGraphKway(int *nvertex_pt, int *xadj, int *adjacency_vector, int *vwgt, int *adjwgt, int *wgtflag_pt, int *numflag_pt, int *nparts_pt, int *options, int *edgecut, int *part)
     {
@@ -246,12 +293,14 @@ extern "C"
             edgecut_Py = py::array_t<idx_t>({nvertex}, {sizeof(idx_t)}, edgecut, py::capsule(edgecut, [](void *f) {}));
 
         py::array_t<idx_t> part_Py; // part : partition
-        if (part_Py)
+        if (part)
             part_Py = py::array_t<idx_t>({nvertex}, {sizeof(idx_t)}, part, py::capsule(part, [](void *f) {}));
         return pyoomph::g_solver_cb->metis_partgraph_kway(nvertex,nconnection, xadj_Py, adjacency_vector_Py, vwgt_Py, *nparts, options_Py, edgecut_Py, part_Py);
     }
 
 
+    // Shim for METIS's alternative "VKway" (minimal-communication-volume) partitioner variant;
+    // not implemented (only the k-way edge-cut variant above is supported).
     void METIS_PartGraphVKway(int *, int *, int *, int *, int *, int *, int *, int *, int *, int *, int *)
     {
         throw_runtime_error("METIS IMPLEM: METIS_PartGraphVKway");
@@ -262,38 +311,60 @@ extern "C"
 
 void PyReg_Solvers(py::module &m)
 {
-    py::class_<pyoomph::GeneralSolverCallback, pyoomph::PyGeneralSolverCallback /* <--- trampoline*/>(m, "GeneralSolverCallback")
-        .def(py::init<>())        
-        .def("metis_partgraph_kway",&pyoomph::GeneralSolverCallback::metis_partgraph_kway)
-        .def("solve_la_system_distributed",&pyoomph::GeneralSolverCallback::solve_la_system_distributed,py::arg("op_flag"), py::arg("allow_permutations"), py::arg("n"), py::arg("nnz_local"), py::arg("nrow_local"), py::arg("first_row"), py::arg("values"), py::arg("col_index"),py::arg("row_start"), py::arg("b"), py::arg("nprow"), py::arg("npcol"), py::arg("doc"), py::arg("data"), py::arg("info"))
-        .def("solve_la_system_serial", &pyoomph::GeneralSolverCallback::solve_la_system_serial,py::arg("op_flag"),py::arg("n"),py::arg("nnz"),py::arg("nrhs"),py::arg("values"),py::arg("rowind"),py::arg("colptr"),py::arg("b"),py::arg("ldb"),py::arg("transpose"));
+    py::class_<pyoomph::GeneralSolverCallback, pyoomph::PyGeneralSolverCallback /* <--- trampoline*/>(
+        m, "GeneralSolverCallback",
+        "Base class, to be subclassed in Python, that implements the actual sparse linear solves "
+        "and/or graph partitioning oomph-lib requests through its (shimmed) SuperLU/SuperLU_DIST/"
+        "METIS call sites. Install an instance via set_Solver_callback() to make it active.")
+        .def(py::init<>())
+        .def("metis_partgraph_kway", &pyoomph::GeneralSolverCallback::metis_partgraph_kway,
+             py::arg("nvertex"), py::arg("nconnection"), py::arg("xadj"), py::arg("adjacency_vector"), py::arg("vwgt"),
+             py::arg("nparts"), py::arg("options"), py::arg("edgecut"), py::arg("part"),
+             "Partition a graph with ``nvertex`` vertices into ``nparts`` parts using a METIS-compatible k-way partitioning "
+             "interface; must fill ``part`` with the resulting partition index of each vertex.")
+        .def("solve_la_system_distributed", &pyoomph::GeneralSolverCallback::solve_la_system_distributed,
+             py::arg("op_flag"), py::arg("allow_permutations"), py::arg("n"), py::arg("nnz_local"), py::arg("nrow_local"), py::arg("first_row"),
+             py::arg("values"), py::arg("col_index"), py::arg("row_start"), py::arg("b"), py::arg("nprow"), py::arg("npcol"), py::arg("doc"),
+             py::arg("data"), py::arg("info"),
+             "Solve (or factorize, depending on ``op_flag``) a distributed (MPI, row-partitioned) sparse linear system given "
+             "in compressed row format by ``values``/``col_index``/``row_start``, overwriting ``b`` with the solution.")
+        .def("solve_la_system_serial", &pyoomph::GeneralSolverCallback::solve_la_system_serial,
+             py::arg("op_flag"), py::arg("n"), py::arg("nnz"), py::arg("nrhs"), py::arg("values"), py::arg("rowind"), py::arg("colptr"),
+             py::arg("b"), py::arg("ldb"), py::arg("transpose"),
+             "Solve (or factorize, depending on ``op_flag``) a serial (non-distributed) sparse linear system given in "
+             "compressed column format by ``values``/``rowind``/``colptr``, overwriting ``b`` with the solution.");
 
-    m.def("set_Solver_callback", [](pyoomph::GeneralSolverCallback *cb)
-          { pyoomph::g_solver_cb = cb; });
+    m.def(
+        "set_Solver_callback", [](pyoomph::GeneralSolverCallback *cb)
+        { pyoomph::g_solver_cb = cb; },
+        py::arg("callback"), "Install ``callback`` as the active GeneralSolverCallback used by oomph-lib's (shimmed) SuperLU/METIS call sites.");
     m.def(
         "get_Solver_callback", []()
         { return pyoomph::g_solver_cb; },
-        py::return_value_policy::reference);
-        
-   m.def("csr_rows_to_coo_rows",[](const py::array_t<int> &csr_rows,unsigned nzz,unsigned first_row) {
-     auto coo_rows=py::array_t<int>({nzz});
-	  int *in_buf = (int *)csr_rows.request().ptr;
-     int *res_buff=(int*)coo_rows.request().ptr;
-     unsigned i_row=0;
-     for (unsigned count=0;count<nzz;count++)
-     {
-         if (count<(unsigned)in_buf[i_row+1])
-         {
-           res_buff[count] = first_row+i_row;
-         }
-         else
-         {
-          i_row++;
-          res_buff[count] = first_row+i_row;
-         }
-     }
-     return coo_rows;
-   });
-   
-   
+        py::return_value_policy::reference, "Return the currently installed GeneralSolverCallback, or None if none has been set.");
+
+    m.def(
+        "csr_rows_to_coo_rows", [](const py::array_t<int> &csr_rows, unsigned nzz, unsigned first_row)
+        {
+            auto coo_rows = py::array_t<int>({nzz});
+            int *in_buf = (int *)csr_rows.request().ptr;
+            int *res_buff = (int *)coo_rows.request().ptr;
+            unsigned i_row = 0;
+            for (unsigned count = 0; count < nzz; count++)
+            {
+                if (count < (unsigned)in_buf[i_row + 1])
+                {
+                    res_buff[count] = first_row + i_row;
+                }
+                else
+                {
+                    i_row++;
+                    res_buff[count] = first_row + i_row;
+                }
+            }
+            return coo_rows;
+        },
+        py::arg("csr_rows"), py::arg("nnz"), py::arg("first_row") = 0,
+        "Expand a compressed-sparse-row ``row_start`` array (``csr_rows``, length nrow+1) into a plain row-index array of "
+        "length ``nnz`` in coordinate (COO) format, i.e. one entry per non-zero giving its (``first_row``-offset) row index.");
 }
