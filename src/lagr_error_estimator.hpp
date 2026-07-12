@@ -42,6 +42,9 @@ namespace pyoomph
   class LagrZ2ErrorEstimator : public virtual oomph::ErrorEstimator
   {
   public:
+    // If true, patches/recovery use the Lagrangian (reference) node position xi() instead
+    // of the current Eulerian position x(); this makes the estimated error track the
+    // (fixed) material configuration rather than a possibly moving/deforming mesh.
     bool use_Lagrangian;
 
     /// \short Function pointer to combined error estimator function

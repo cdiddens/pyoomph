@@ -41,6 +41,7 @@ namespace pyoomph
   {
   }
 
+  // Platform-specific extension used for on-disk shared libraries produced by compile().
   std::string CCompiler::get_shared_lib_extension()
   {
 #ifdef _WIN32
@@ -54,20 +55,28 @@ namespace pyoomph
 #endif
   }
 
-
-
+  // Default: assume in-memory compilation (the historical TCC-based mode). Subclasses that
+  // compile to an on-disk shared library (e.g. via a system C++ compiler from Python) override
+  // this to return false.
   bool CCompiler::compile_to_memory()
   {
     return true;
   }
 
+  // Actual compilation is delegated to a derived class (typically a Python-side compiler
+  // implementation that shells out to a system C++ compiler); the C++ base class does not
+  // implement compilation itself.
   bool CCompiler::compile(bool suppress_compilation, bool suppress_code_writing, bool quiet, const std::vector<std::string> &extra_flags)
-  {    
+  {
      throw_runtime_error("This method should be implemented in a derived class");
-    return false; 
-    
+    return false;
+
   }
 
+  // Compile-if-needed and resolve the JIT_ELEMENT_init entry point of the generated code: for
+  // in-memory compilation, current_handle must already have been set by a prior compile() call;
+  // for on-disk shared libraries, the library is dlopen'd/LoadLibrary'd here and the symbol
+  // looked up by name.
   JIT_ELEMENT_init_SPEC CCompiler::get_init_func()
   {
     if (this->compile_to_memory())
@@ -118,6 +127,8 @@ namespace pyoomph
     }
   }
 
+  // Unload a previously loaded shared library handle; no-op for in-memory compilation, since
+  // there is no separate OS-level library to unload.
   void CCompiler::close_handle(void *handle)
   {
     if (this->compile_to_memory())
@@ -133,5 +144,6 @@ namespace pyoomph
     }
   }
 
+  // Directory containing jitbridge.h and friends, set once at startup from the Python side.
   std::string g_jit_include_dir = "";
 }

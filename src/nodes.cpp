@@ -28,6 +28,9 @@ The main author may be contacted at c.diddens@utwente.nl
 namespace pyoomph
 {
 
+	// Explicit template instantiation of pyoomph's Node type (see the typedef in
+	// nodes.hpp), so that its member functions are compiled once here rather than in every
+	// translation unit that uses pyoomph::Node.
 	template class NodeWithFieldIndices<oomph::SolidNode>;
 
 }

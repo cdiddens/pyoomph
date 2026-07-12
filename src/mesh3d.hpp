@@ -28,6 +28,7 @@ The main author may be contacted at c.diddens@utwente.nl
 namespace pyoomph
 {
 
+  // DynamicTree specialization for 3d brick-refined (OcTree) elements.
   class DynamicOcTree : public virtual oomph::OcTree, public virtual DynamicTree
   {
   protected:
@@ -41,6 +42,7 @@ namespace pyoomph
       this->Root_pt = father_pt->root_pt();
     }
 
+    // Factory used by oomph-lib's tree-refinement code to create a son tree of the correct dynamic type.
     Tree *construct_son(oomph::RefineableElement *const &object_pt,
                         Tree *const &father_pt, const int &son_type)
     {
@@ -49,6 +51,7 @@ namespace pyoomph
     }
   };
 
+  // Root of a DynamicOcTree, i.e. the tree node associated with a top-level (unrefined) brick element.
   class DynamicOcTreeRoot : virtual public DynamicOcTree, public virtual DynamicTreeRoot, public virtual oomph::OcTreeRoot
   {
 
@@ -58,11 +61,16 @@ namespace pyoomph
     }
   };
 
+  // 3d specialization of TemplatedMeshBase: builds/refines meshes of brick (hex) or tetrahedral
+  // elements. Bricks use an octree forest for h-refinement; tets are not tree-refineable (see
+  // refinement_possible()).
   class TemplatedMeshBase3d : public virtual TemplatedMeshBase
   {
   private:
-    bool issued_tri_refinement_warning = false;
+    bool issued_tri_refinement_warning = false; // Guards against spamming the "cannot refine tets" warning repeatedly
   public:
+    // Whether this mesh's element type actually supports tree-based h-refinement (true for bricks,
+    // false for plain tetrahedra).
     bool refinement_possible();
     /*
     TemplatedMeshBase3d(MeshTemplate * templ) : pyoomph::Mesh(),TemplatedMeshBase()
@@ -107,6 +115,10 @@ namespace pyoomph
       setup_octree_forest();
     }
 
+    // (Re)build the OcTreeForest. If a forest already exists, this "flattens" it down to the coarsest
+    // common refinement level present (min_ref, reduced across MPI ranks if applicable) by promoting
+    // each tree node at that level to a new tree root and discarding levels below it; if no forest
+    // exists yet, one is created from scratch with one tree root per current element.
     void setup_octree_forest()
     {
       if (this->Forest_pt != 0)
@@ -264,6 +276,8 @@ namespace pyoomph
       }
     }
 
+    // Populate this mesh's elements, nodes and boundaries from a MeshTemplateElementCollection; see
+    // TemplatedMeshBase1d::generate_from_template for the (identical) algorithm description.
     void generate_from_template(MeshTemplateElementCollection *coll)
     {
 

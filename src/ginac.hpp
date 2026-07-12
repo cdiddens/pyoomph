@@ -20,6 +20,11 @@ The main author may be contacted at c.diddens@utwente.nl
 ================================================================================*/
 
 
+// Central include shim for GiNaC (the symbolic-differentiation library pyoomph uses to
+// generate the residual/Jacobian C code in codegen.cpp): all other pyoomph source files
+// should #include "ginac.hpp" rather than <ginac/ginac.h> directly, so the actual GiNaC
+// source (system-installed vs. the bundled thirdparty copy) can be swapped in one place.
+
 #pragma once
 
 #include <ginac/ginac.h>

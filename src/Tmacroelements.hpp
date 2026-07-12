@@ -29,11 +29,18 @@ The main author may be contacted at c.diddens@utwente.nl
 namespace oomph
 {
 
+   // Generic (unimplemented) template: oomph-lib's MacroElement concept (used for curved/mapped
+   // domain boundaries via Domain objects) is only specialized for 2D (triangular) T-elements
+   // below; other dimensions get an empty, unusable class.
    template <int DIM>
    class TMacroElement : public MacroElement
    {
    };
 
+   // 2d specialization allowing MacroElements to be attached to T (triangular) elements. oomph-lib's
+   // own MacroElement machinery is written for quad/brick elements; this class exists purely so a
+   // MacroElement pointer can be associated with a TElement-based mesh without crashing, but none of
+   // the actual macro-mapping functionality is implemented (all overrides throw "Not implemented").
    template <>
    class TMacroElement<2> : public MacroElement
    {
@@ -66,26 +73,31 @@ namespace oomph
       /// Empty destructor
       virtual ~TMacroElement(){};
 
+      // Stub: not needed for triangular macro elements, calling it is a bug
       void output(const unsigned &t, std::ostream &outfile, const unsigned &nplot)
       {
          throw_runtime_error("Not implemented");
       }
 
+      // Stub: not needed for triangular macro elements, calling it is a bug
       void output_macro_element_boundaries(std::ostream &outfile, const unsigned &nplot)
       {
          throw_runtime_error("Not implemented");
       }
 
+      // Stub: mapping from macro-element to Eulerian coordinates is unused here
       void macro_map(const unsigned &t, const Vector<double> &S, Vector<double> &r)
       {
          throw_runtime_error("Not implemented");
       }
 
+      // Stub: Jacobian of the macro-to-Eulerian map is unused here
       virtual void assemble_macro_to_eulerian_jacobian(const unsigned &t, const Vector<double> &s, DenseMatrix<double> &jacobian)
       {
          throw_runtime_error("Not implemented");
       }
 
+      // Stub: second derivative of the macro-to-Eulerian map is unused here
       virtual void assemble_macro_to_eulerian_jacobian2(const unsigned &t, const Vector<double> &s, DenseMatrix<double> &jacobian2)
       {
          throw_runtime_error("Not implemented");

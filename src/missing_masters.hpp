@@ -24,6 +24,19 @@ The main author may be contacted at c.diddens@utwente.nl
  This file is an adapted version of missing_masters.template.cc from oomph-lib
 ********************************/
 
+// Background: in a distributed (MPI) pyoomph problem, each process owns a subset of the mesh's
+// elements/nodes, plus "halo" copies of the elements/nodes on neighbouring processes that it needs
+// read-only access to (e.g. to assemble its own elements or to keep the load-balanced mesh
+// consistent). The process that owns the real data is "haloed"; the read-only copy on the receiving
+// process is the "halo" version. When a halo node is itself a *hanging* node (i.e. constrained, on a
+// non-conforming/refined mesh, to interpolate between other "master" nodes via a HangInfo of
+// (master node, weight) pairs), the receiving process must also reconstruct copies of all of its
+// master nodes (and, recursively, the masters of those masters) -- otherwise the halo node's hanging
+// constraint could not be evaluated locally. That reconstruction is what the functions in this file
+// ("missing masters") perform, using a previously serialized flat stream of unsigneds/doubles
+// (recv_unsigneds/recv_doubles, with counter_for_recv_* acting as read cursors into them) sent over
+// by the haloed process. The counterpart (packing) functions living in missing_masters.h/.cc are not
+// templated and are used as-is from oomph-lib.
 #pragma once
 
 // Oomph-lib headers
@@ -43,6 +56,10 @@ namespace oomph
 {
 
   //// Templated helper functions for missing master methods,
+  // These four functions are templated on EXT_ELEMENT (the concrete external-element type owning the
+  // node update, needed when a *new* node-update element has to be constructed) purely because
+  // Missing_masters_functions is a plain namespace, not a class, so the template parameter has to be
+  // threaded through every call in the recursion instead of being fixed once on a class.
 
 #ifdef OOMPH_HAS_MPI
 
@@ -50,6 +67,10 @@ namespace oomph
   /// Helper function to add external halo nodes, including any masters,
   /// based on information received from the haloed process
   //=========================================================================
+  // Public entry point of the reconstruction: loc_p identifies the haloed (sending) process and
+  // node_index/new_el_pt identify which node of which locally-being-built halo element new_nod_pt is.
+  // First materializes new_nod_pt itself (or reuses an existing copy), then recurses to pull in any
+  // master nodes it depends on (see recursively_add_masters_of_external_halo_node_to_storage below).
   template <class EXT_ELEMENT>
   void Missing_masters_functions::add_external_halo_node_to_storage(Node *&new_nod_pt, Mesh *const &mesh_pt, unsigned &loc_p,
                                                                     unsigned &node_index, FiniteElement *const &new_el_pt,
@@ -82,6 +103,11 @@ namespace oomph
   /// Recursively add masters of external halo nodes (and their masters, etc)
   /// based on information received from the haloed process
   //=========================================================================
+  // For every "continuously interpolated value" index i_cont (-1 stands for the nodal position/geometry,
+  // 0..n_cont_inter_values-1 stand for the individual continuously-interpolated field values), checks
+  // whether new_nod_pt is hanging in that respect and, if so, rebuilds its HangInfo: for each master
+  // node it fetches (or constructs) the corresponding halo copy via add_external_halo_master_node_helper()
+  // and recurses into itself so that masters-of-masters are pulled in as well (a master can itself be hanging).
   template <class EXT_ELEMENT>
   void Missing_masters_functions::
       recursively_add_masters_of_external_halo_node_to_storage(Node *&new_nod_pt, Mesh *const &mesh_pt, unsigned &loc_p,
@@ -115,7 +141,8 @@ namespace oomph
         unsigned n_master = recv_unsigneds
             [counter_for_recv_unsigneds++];
 
-        // Setup new HangInfo
+        // Setup new HangInfo: this will hold, for the current i_cont, the n_master (master node, weight)
+        // pairs that new_nod_pt's hanging value/position is interpolated from
         HangInfo *hang_pt = new HangInfo(n_master);
         for (unsigned m = 0; m < n_master; m++)
         {
@@ -150,6 +177,11 @@ namespace oomph
   //========================================================================
   /// Helper function to add external halo node that is a master
   //========================================================================
+  // Decides, based on a flag sent by the haloed process, whether the master node needs to be built from
+  // scratch here (construct_new_external_halo_master_node_helper(), only the first time a given master
+  // is encountered) or whether a copy already exists -- either as a genuinely shared node with process
+  // loc_p (mesh_pt->shared_node_pt) or as a previously created external halo node (mesh_pt->external_halo_node_pt)
+  // -- and can simply be reused by pointer, avoiding duplicate node objects for the same physical node.
   template <class EXT_ELEMENT>
   void Missing_masters_functions::add_external_halo_master_node_helper(Node *&new_master_nod_pt, Node *&new_nod_pt, Mesh *const &mesh_pt,
                                                                        unsigned &loc_p, int &ncont_inter_values,
@@ -217,6 +249,17 @@ namespace oomph
   /// Helper function which constructs a new external halo master node
   /// with the required information sent from the haloed process
   //========================================================================
+  // This is the core (and by far largest) function of the file: it deserializes a full description of a
+  // master node from the flat recv_unsigneds/recv_doubles stream and creates the matching local Node
+  // object. Which concrete node type to build is decided by dynamic_cast'ing the node the master belongs
+  // to (nod_pt): AlgebraicNode, MacroElementNodeUpdateNode and SolidNode all carry extra node-update
+  // information (geometric objects / node-update elements / Lagrangian position dofs, respectively) that
+  // must be reconstructed alongside the plain nodal data, and a plain Node is the fallback. Each branch
+  // also handles whether the master lives on a mesh boundary (in which case a BoundaryNode<...> wrapper
+  // is used instead) and whether face elements have contributed additional values to it. After the
+  // type-specific setup, the function falls through to a shared tail that reads the node's history values,
+  // its (possibly time-history of) nodal coordinates, and its owning ("non-halo") processor ID -- data
+  // that is common to every node type.
   template <class EXT_ELEMENT>
   void Missing_masters_functions::construct_new_external_halo_master_node_helper(Node *&new_master_nod_pt, Node *&nod_pt, unsigned &loc_p,
                                                                                  Mesh *const &mesh_pt,
@@ -289,7 +332,9 @@ namespace oomph
 
     // Null TimeStepper for now
     TimeStepper *time_stepper_pt = 0;
-    // Default number of previous values to 1
+    // Default number of previous values to 1 (i.e. only the current time level is copied below,
+    // regardless of how many history/previous timesteps time_stepper_pt actually stores) -- inherited
+    // as-is from upstream oomph-lib, kept unchanged here
     unsigned n_prev = 1;
 
     // Just take timestepper from a node
@@ -304,7 +349,10 @@ namespace oomph
     // What type of node was the node for which we are constructing a master?
     if (alg_nod_pt != 0)
     {
-      // The master node should also be algebraic
+      // The master node should also be algebraic: its position is updated via AlgebraicMesh's node-update
+      // functions applied to a set of reference geometric objects, so those (an update_id, reference values,
+      // and the list of GeomObjects, looked up by index into the local AlgebraicMesh's own object list) must
+      // be reconstructed and registered below via add_node_update_info()/update_node_update()
 #ifdef ANNOTATE_MISSING_MASTERS_COMMUNICATION
       oomph_info
           << "Rec:" << counter_for_recv_unsigneds
@@ -657,6 +705,9 @@ namespace oomph
             OOMPH_EXCEPTION_LOCATION);
 
         //      GeneralisedElement* new_node_update_el_pt = new EXT_ELEMENT;
+        // NOTE: unlike upstream oomph-lib (which constructs "new EXT_ELEMENT" here), pyoomph does not
+        // support constructing a brand-new external-halo MacroElementNodeUpdate element on the fly;
+        // this code path is intentionally left unimplemented and will abort if ever reached.
         GeneralisedElement *new_node_update_el_pt = NULL;
         throw_runtime_error("IMPLEMENT");
 
@@ -789,6 +840,9 @@ namespace oomph
       }
       else // The node update element exists already
       {
+        // "Found internally" means the element is already a genuine (non-external) halo element of this
+        // process (mesh_pt->halo_element_pt), as opposed to one previously created in the external-halo
+        // storage (mesh_pt->external_halo_element_pt) further down; either way it's reused, not rebuilt.
 #ifdef ANNOTATE_MISSING_MASTERS_COMMUNICATION
         oomph_info << "Rec:" << counter_for_recv_unsigneds
                    << "  Found internally? "
@@ -930,7 +984,9 @@ namespace oomph
     }
     else if (solid_nod_pt != 0)
     {
-      // The master node should also be a SolidNode
+      // The master node should also be a SolidNode: it has its own Lagrangian (reference/undeformed)
+      // position degrees of freedom in addition to the usual Eulerian ones, held by variable_position_pt(),
+      // which are populated separately below (after construction) from n_lag_dim/n_lag_type read earlier
       // If this node was on a boundary then it needs to
       // be on the same boundary here
 #ifdef ANNOTATE_MISSING_MASTERS_COMMUNICATION

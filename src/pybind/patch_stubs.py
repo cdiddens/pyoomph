@@ -13,34 +13,34 @@ def patch_stub(sea:str,repl:str,ignore_if_not_found:bool=False):
 
 
 try:
-	patch_stub("GiNaC_field(arg0: str, arg1: FiniteElementCode, arg2: typing.List[str]) -> Expression","GiNaC_field(arg0: str, arg1: typing.Optional[FiniteElementCode], arg2: typing.List[str]) -> Expression")
+	patch_stub("GiNaC_field(id: str, code: FiniteElementCode, tags: list[str]) -> Expression","GiNaC_field(id: str, code: typing.Optional[FiniteElementCode], tags: list[str]) -> Expression")
 
-	patch_stub("GiNaC_nondimfield(arg0: str, arg1: FiniteElementCode, arg2: typing.List[str]) -> Expression","GiNaC_nondimfield(arg0: str, arg1: typing.Optional[FiniteElementCode], arg2: typing.List[str]) -> Expression")
+	patch_stub("GiNaC_nondimfield(id: str, code: FiniteElementCode, tags: list[str]) -> Expression","GiNaC_nondimfield(id: str, code: typing.Optional[FiniteElementCode], tags: list[str]) -> Expression")
 
-	patch_stub("GiNaC_scale(arg0: str, arg1: FiniteElementCode, arg2: typing.List[str]) -> Expression","GiNaC_scale(arg0: str, arg1: typing.Optional[FiniteElementCode], arg2: typing.List[str]) -> Expression")
+	patch_stub("GiNaC_scale(id: str, code: FiniteElementCode, tags: list[str]) -> Expression","GiNaC_scale(id: str, code: typing.Optional[FiniteElementCode], tags: list[str]) -> Expression")
 
-	patch_stub("GiNaC_testscale(arg0: str, arg1: FiniteElementCode, arg2: typing.List[str]) -> Expression","GiNaC_testscale(arg0: str, arg1: typing.Optional[FiniteElementCode], arg2: typing.List[str]) -> Expression")
+	patch_stub("GiNaC_testscale(id: str, code: FiniteElementCode, tags: list[str]) -> Expression","GiNaC_testscale(id: str, code: typing.Optional[FiniteElementCode], tags: list[str]) -> Expression")
 
-	patch_stub("GiNaC_dimtestfunction(arg0: str, arg1: FiniteElementCode, arg2: typing.List[str]) -> Expression","GiNaC_dimtestfunction(arg0: str, arg1: typing.Optional[FiniteElementCode], arg2: typing.List[str]) -> Expression")
+	patch_stub("GiNaC_dimtestfunction(arg0: str, arg1: FiniteElementCode, arg2: list[str]) -> Expression","GiNaC_dimtestfunction(arg0: str, arg1: typing.Optional[FiniteElementCode], arg2: list[str]) -> Expression")
 
-	patch_stub("GiNaC_testfunction(arg0: str, arg1: FiniteElementCode, arg2: typing.List[str]) -> Expression","GiNaC_testfunction(arg0: str, arg1: typing.Optional[FiniteElementCode], arg2: typing.List[str]) -> Expression")
+	patch_stub("GiNaC_testfunction(arg0: str, arg1: FiniteElementCode, arg2: list[str]) -> Expression","GiNaC_testfunction(arg0: str, arg1: typing.Optional[FiniteElementCode], arg2: list[str]) -> Expression")
 
-	patch_stub("GiNaC_eval_in_domain(arg0: Expression, arg1: FiniteElementCode, arg2: typing.List[str]) -> Expression","GiNaC_eval_in_domain(arg0: Expression, arg1: typing.Optional[FiniteElementCode], arg2: typing.List[str]) -> Expression")
+	patch_stub("GiNaC_eval_in_domain(expr: Expression, code: FiniteElementCode, tags: list[str]) -> Expression","GiNaC_eval_in_domain(expr: Expression, code: typing.Optional[FiniteElementCode], tags: list[str]) -> Expression")
 
 	patch_stub("set_macro_element(self, arg0: MacroElement, arg1: bool) -> None","set_macro_element(self, arg0: typing.Optional[MacroElement], arg1: bool) -> None")
 
-	patch_stub("_set_current_codegen(self, arg0: FiniteElementCode) -> None","_set_current_codegen(self, arg0: typing.Optional[FiniteElementCode]) -> None")
+	patch_stub("_set_current_codegen(self, codegen: FiniteElementCode) -> None","_set_current_codegen(self, codegen: typing.Optional[FiniteElementCode]) -> None")
 
 	patch_stub("_resolve_based_on_domain_name(self, domainname: str) -> FiniteElementCode","_resolve_based_on_domain_name(self, domainname: str) -> typing.Optional[FiniteElementCode]")
 except:
 	pass
-	
-patch_stub("set_latex_printer(self, arg0: LaTeXPrinter) -> None","set_latex_printer(self, arg0: typing.Optional[LaTeXPrinter]) -> None")
+
+patch_stub("set_latex_printer(self, printer: LaTeXPrinter) -> None","set_latex_printer(self, printer: typing.Optional[LaTeXPrinter]) -> None")
 
 patch_stub("_get_parent_domain(self) -> FiniteElementCode","_get_parent_domain(self) -> typing.Optional[FiniteElementCode]")
 patch_stub("_get_opposite_interface(self) -> FiniteElementCode","_get_opposite_interface(self) -> typing.Optional[FiniteElementCode]")
 
-patch_stub("_set_problem(self, arg0: Problem, arg1: DynamicBulkElementInstance) -> None","_set_problem(self, arg0: Problem, arg1: typing.Optional[DynamicBulkElementInstance]) -> None")
+patch_stub("_set_problem(self, problem: Problem, code_instance: DynamicBulkElementInstance) -> None","_set_problem(self, problem: Problem, code_instance: typing.Optional[DynamicBulkElementInstance]) -> None")
 
 
 patch_stub("import numpy","import numpy; import numpy.typing")

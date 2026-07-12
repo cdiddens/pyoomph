@@ -28,6 +28,8 @@ The main author may be contacted at c.diddens@utwente.nl
 namespace pyoomph
 {
 
+  // QuadTreeForest specialization that knows how to rebuild neighbour information for pyoomph's
+  // dynamic (JIT-compiled) elements.
   class DynamicQuadTreeForest : public oomph::QuadTreeForest
   {
   public:
@@ -49,9 +51,12 @@ namespace pyoomph
     }
 
   protected:
+    // Recompute neighbour (edge-adjacency) information across the forest's quadtrees, needed after
+    // topology changes (refinement/coarsening) so hanging-node/halo logic can find adjacent elements.
     void find_neighbours() override;
   };
 
+  // DynamicTree specialization for 2d quad-refined (QuadTree) elements.
   class DynamicQuadTree : public virtual oomph::QuadTree, public virtual DynamicTree
   {
   protected:
@@ -65,6 +70,7 @@ namespace pyoomph
       this->Root_pt = father_pt->root_pt();
     }
 
+    // Factory used by oomph-lib's tree-refinement code to create a son tree of the correct dynamic type.
     Tree *construct_son(oomph::RefineableElement *const &object_pt,
                         Tree *const &father_pt, const int &son_type)
     {
@@ -73,6 +79,7 @@ namespace pyoomph
     }
   };
 
+  // Root of a DynamicQuadTree, i.e. the tree node associated with a top-level (unrefined) quad element.
   class DynamicQuadTreeRoot : virtual public DynamicQuadTree, public virtual DynamicTreeRoot, public virtual oomph::QuadTreeRoot
   {
 
@@ -82,15 +89,23 @@ namespace pyoomph
     }
   };
 
+  // 2d specialization of TemplatedMeshBase: builds/refines meshes of quad or triangle elements.
+  // Quads use a quadtree forest for h-refinement; triangles are not tree-refineable in the usual
+  // sense (see refinement_possible()) and instead support explicit local subdivision via add_tri_C1*.
   class TemplatedMeshBase2d : public virtual TemplatedMeshBase
   {
   private:
-    bool issued_tri_refinement_warning = false;
+    bool issued_tri_refinement_warning = false; // Guards against spamming the "cannot refine triangles" warning repeatedly
   public:
+    // Split a C1 (linear) triangle defined by corner nodes n1,n2,n3 into sub-elements by adding new
+    // (possibly newly-created) nodes; returns the number of new elements created.
     virtual unsigned add_tri_C1( Node* & n1, Node* & n2, Node* & n3);
+    // Split a C1TB (linear + bubble/edge) triangle defined by n1..n4 analogously to add_tri_C1.
     virtual unsigned add_tri_C1TB( Node* & n1, Node* & n2, Node* & n3, Node* & n4);
-    
+
     virtual void setup_interior_boundary_elements(unsigned bindex);
+    // Whether this mesh's element type actually supports tree-based h-refinement (true for quads,
+    // false for plain triangles, which cannot be refined via a QuadTree forest).
     bool refinement_possible();
 
     /*
@@ -133,8 +148,13 @@ namespace pyoomph
     virtual ~TemplatedMeshBase2d() {}
 
     virtual void setup_tree_forest();
-    
 
+
+    // (Re)build the QuadTreeForest. If a forest already exists, this "flattens" it down to the
+    // globally coarsest common refinement level (min_ref, reduced via MPI_Allreduce under MPI) by
+    // promoting each tree node at that level to a new tree root and discarding levels below it -
+    // used e.g. when starting a fresh adaptation cycle from the current uniform base level. If no
+    // forest exists yet, one is created from scratch with one tree root per current element.
     void setup_quadtree_forest()
     {
       if (this->Forest_pt != 0)
@@ -242,6 +262,8 @@ namespace pyoomph
       }
     }
 
+    // Populate this mesh's elements, nodes and boundaries from a MeshTemplateElementCollection; see
+    // TemplatedMeshBase1d::generate_from_template for the (identical) algorithm description.
     void generate_from_template(MeshTemplateElementCollection *coll)
     {
       //      std::cout << "GEN FROM TEMPLATE " << std::endl;

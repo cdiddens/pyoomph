@@ -32,7 +32,14 @@ The main author may be contacted at c.diddens@utwente.nl
 namespace pyoomph
 {
 
-
+// This file implements pyoomph's MeshTemplate machinery (declared in meshtemplate.hpp):
+// the geometric/topological description of a mesh (nodes, elements of various shapes and
+// orders, curved-boundary facets, named boundaries, periodicity) that is assembled from
+// Python (e.g. from a GMSH file) before it is turned into concrete oomph-lib Node/Element
+// objects. Key entry points are MeshTemplateElementCollection::set_element_code() (which
+// upgrades template elements to the nodal space required by the compiled element code) and
+// MeshTemplate::factory_element() (which actually builds the oomph-lib elements/nodes,
+// including any curved-geometry MacroElements).
 
 /*
 Type indices:
@@ -64,6 +71,10 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 
 */
 
+	// Build a facet from its (global) node indices. If `curved` is given, the facet is
+	// attached to that curved geometry: each node's position is converted to the entity's
+	// parametric coordinate (stored in `parametrics`, same order as `nodeinds`), and
+	// apply_periodicity() is used to resolve any periodic wrap-around ambiguity between them.
 	MeshTemplateFacet::MeshTemplateFacet(const std::vector<nodeindex_t> &inds, MeshTemplateCurvedEntity *curved, std::vector<MeshTemplateNode *> *nodes) : nodeinds(inds), curved_entity(curved)
 	{
 		sorted_inds = inds;
@@ -91,6 +102,9 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		}
 	}
 
+	// Precompute the element's "default" (straight-sided) facet node pointers, used as the
+	// fallback for facets that aren't attached to a curved entity, and initialise per-facet
+	// storage (facets/permutation) to be filled in later via set_facet().
 	MeshTemplateMacroElementBase::MeshTemplateMacroElementBase(MeshTemplateElement *e, std::vector<MeshTemplateNode *> *nodes) : facets(e->nfacets(), NULL), permutation(e->nfacets(), std::vector<unsigned>()), default_facet_nodes(e->nfacets())
 	{
 		for (unsigned int i = 0; i < e->nfacets(); i++)
@@ -102,6 +116,9 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		}
 	}
 
+	// Attach `new_facet` as local facet `ifacet` and compute the node permutation that maps
+	// the macro element's canonical facet-node order onto new_facet's own order, using
+	// `for_orientation` (the element's straight-sided version of the same facet) as reference.
 	void MeshTemplateMacroElementBase::set_facet(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation)
 	{
 		facets[ifacet] = new_facet;
@@ -112,6 +129,8 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 	{
 	}
 
+	// A 2d quad edge only has 2 nodes, hence only 2 possible orderings: return whichever
+	// ordering makes new_facet's first node coincide with for_orientation's first node.
 	std::vector<unsigned> MeshTemplateQMacroElement2::find_permutation(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation)
 	{
 		if (new_facet->nodeinds[0] == for_orientation->nodeinds[0])
@@ -124,6 +143,10 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		}
 	}
 
+	// Evaluate the physical position on local facet (i_direct-4, one of the 4 edges of the
+	// reference square) at parametric position s. Without a curved entity, linearly blend
+	// between the two facet corner nodes; with one, blend the corners' curve parameters and
+	// map that through the curved entity's parametric_to_position().
 	void MeshTemplateQMacroElement2::macro_element_boundary(const unsigned &t, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f)
 	{
 		unsigned fi = i_direct - 4;
@@ -155,6 +178,7 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 	{
 	}
 
+	// Same 2-node edge-orientation logic as MeshTemplateQMacroElement2::find_permutation, for the triangular macro element.
 	std::vector<unsigned> MeshTemplateTMacroElement2::find_permutation(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation)
 	{
 		if (new_facet->nodeinds[0] == for_orientation->nodeinds[0])
@@ -167,6 +191,8 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		}
 	}
 
+	// Triangle counterpart of MeshTemplateQMacroElement2::macro_element_boundary: linear
+	// (or curved-entity) blending along local edge (i_direct-4) of the reference triangle.
 	void MeshTemplateTMacroElement2::macro_element_boundary(const unsigned &t, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f)
 	{
 		unsigned fi = i_direct - 4;
@@ -198,6 +224,9 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 	{
 	}
 
+	// A 3d brick face has 4 nodes and its node order relative to the element isn't fixed a
+	// priori, so brute-force search over all 4! permutations for the one under which
+	// for_orientation's nodes (reordered by perm) match new_facet's node order.
 	std::vector<unsigned> MeshTemplateQMacroElement3::find_permutation(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation)
 	{
 		std::vector<unsigned> perm(4);
@@ -229,6 +258,12 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		}
 	}
 
+	// Evaluate the physical position on local face (i_direct-20, one of the 6 faces of the
+	// reference cube) at parametric position s, by bilinearly blending in the face's two
+	// local directions (lambda0, lambda1). Falls back to blending nodal positions directly
+	// if the face has no curved entity attached; otherwise blends the corner curve
+	// parameters (permuted via `permutation` into the facet's own node order) and maps
+	// through the curved entity. Note: contains left-over std::cout debug output.
 	void MeshTemplateQMacroElement3::macro_element_boundary(const unsigned &t, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f)
 	{
 
@@ -294,10 +329,14 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		}
 	}
 
+	// oomph-lib Domain used only to dispatch macro_element_boundary() calls; no state of its own.
 	MeshTemplateDomain::MeshTemplateDomain()
 	{
 	}
 
+	// Forward the boundary evaluation to the concrete MeshTemplateXMacroElementN stored at
+	// Macro_element_pt[i_macro] (identified via dynamic_cast, since oomph-lib's MacroElement
+	// base doesn't know about our curved-facet extension).
 	void MeshTemplateDomain::macro_element_boundary(const unsigned &t, const unsigned &i_macro, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f)
 	{
 		// TODO: Remove the if via virtual base
@@ -313,6 +352,9 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		}
 	}
 
+	// Register this element's nodes as belonging to collection `dom`, so that later
+	// add_intermediate_node_unique() calls can infer which domain(s) a newly created
+	// mid-side/center node belongs to (by intersecting its parent nodes' domain sets).
 	void MeshTemplateElement::link_nodes_with_domain(MeshTemplateElementCollection *dom)
 	{
 		auto *mt = dom->get_template();
@@ -324,11 +366,13 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 	}
 
 
+	// Single-node point element.
 	MeshTemplateElementPoint::MeshTemplateElementPoint(const nodeindex_t &n1) : MeshTemplateElement(0)
   	{
 		node_indices.push_back(n1);
   	}
 	/////////////////
+	// Store the two corner node indices, in order.
 	MeshTemplateElementLineC1::MeshTemplateElementLineC1(const nodeindex_t &n1, const nodeindex_t &n2) : MeshTemplateElement(1)
 	{
 		node_indices.reserve(2);
@@ -336,12 +380,14 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		node_indices.push_back(n2);
 	}
 
+	// Upgrade to a quadratic line by inserting/reusing the mid-point node.
 	MeshTemplateElement *MeshTemplateElementLineC1::convert_for_C2_space(MeshTemplate *templ)
 	{
 		nodeindex_t n3 = templ->add_intermediate_node_unique(node_indices[0], node_indices[1]);
 		return new MeshTemplateElementLineC2(node_indices[0], n3, node_indices[1]);
 	}
 
+	// A line's "facets" are its two end points (i=0: first node, i=1: second node).
 	MeshTemplateFacet *MeshTemplateElementLineC1::construct_facet(unsigned i)
 	{
 		unsigned ni1;
@@ -362,6 +408,7 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 
 	/////////////////
 
+	// Store the two corner nodes (n1,n2) plus the mid-side node (n3), in that order.
 	MeshTemplateElementLineC2::MeshTemplateElementLineC2(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3) : MeshTemplateElement(2)
 	{
 		node_indices.reserve(3);
@@ -370,6 +417,7 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		node_indices.push_back(n3);
 	}
 
+	// End points of the C2 line are local nodes 0 and 2 (index 1 is the mid-point).
 	MeshTemplateFacet *MeshTemplateElementLineC2::construct_facet(unsigned i)
 	{
 		unsigned ni1;
@@ -390,6 +438,7 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 
 	/////////////////////////
 
+	// Store the four corner nodes in the element's local (row-major, s0 fastest) ordering.
 	MeshTemplateElementQuadC1::MeshTemplateElementQuadC1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4) : MeshTemplateElement(6)
 	{
 		node_indices.reserve(4);
@@ -399,6 +448,7 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		node_indices.push_back(n4);
 	}
 
+	// Return one of the 4 edges (N/E/S/W, in that fixed local order) as a 2-node facet.
 	MeshTemplateFacet *MeshTemplateElementQuadC1::construct_facet(unsigned i)
 	{
 		unsigned ni1, ni2;
@@ -430,6 +480,8 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 
+	// Upgrade to a biquadratic (9-node) quad: insert/reuse the 4 edge mid-points and the
+	// cell-center node, then reassemble in the QuadC2 node ordering.
 	MeshTemplateElement *MeshTemplateElementQuadC1::convert_for_C2_space(MeshTemplate *templ)
 	{
 		nodeindex_t n1 = templ->add_intermediate_node_unique(node_indices[0], node_indices[1]);
@@ -441,6 +493,7 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 	}
 
 	/////////////////////////
+	// Store all 9 nodes (4 corners, 4 edge mid-points, 1 center) in local ordering.
 	MeshTemplateElementQuadC2::MeshTemplateElementQuadC2(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4,
 														 const nodeindex_t &n5, const nodeindex_t &n6, const nodeindex_t &n7, const nodeindex_t &n8, const nodeindex_t &n9) : MeshTemplateElement(8)
 	{
@@ -456,6 +509,8 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		node_indices.push_back(n9);
 	}
 
+	// Return one of the 4 edges (N/E/S/W) as a 2-node (corner-only) facet, using the
+	// corresponding corner node indices within the 9-node local numbering.
 	MeshTemplateFacet *MeshTemplateElementQuadC2::construct_facet(unsigned i)
 	{
 		unsigned ni1, ni2;
@@ -489,6 +544,7 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 
 	/////////////////////////////////
 
+	// Store the three corner nodes in local ordering.
 	MeshTemplateElementTriC1::MeshTemplateElementTriC1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3) : MeshTemplateElement(3)
 	{
 		node_indices.reserve(3);
@@ -497,6 +553,7 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		node_indices.push_back(n3);
 	}
 
+	// Return one of the 3 edges (0-1, 1-2, 2-0) as a 2-node facet.
 	MeshTemplateFacet *MeshTemplateElementTriC1::construct_facet(unsigned i)
 	{
       unsigned ni1, ni2;
@@ -523,6 +580,7 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 
+	// Upgrade to a quadratic (6-node) triangle: insert/reuse the 3 edge mid-points.
 	MeshTemplateElement *MeshTemplateElementTriC1::convert_for_C2_space(MeshTemplate *templ)
 	{
 		nodeindex_t n3 = templ->add_intermediate_node_unique(node_indices[0], node_indices[1]);
@@ -531,6 +589,8 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		return new MeshTemplateElementTriC2(node_indices[0], node_indices[1], node_indices[2], n3, n4, n5);
 	}
 	
+	// Upgrade to a linear triangle with an added centroid "bubble" node (not treated as a
+	// boundary node even if the corners are, hence boundary_possible=false).
 	MeshTemplateElement *MeshTemplateElementTriC1::convert_for_C1TB_space(MeshTemplate *templ)
 	{
 		nodeindex_t n3 = templ->add_intermediate_node_unique(node_indices[0], node_indices[1],node_indices[2],false);
@@ -539,6 +599,7 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 
 	/////////////////////////////////
 
+	// Store the 3 corners followed by the 3 edge mid-points, in local ordering.
 	MeshTemplateElementTriC2::MeshTemplateElementTriC2(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5, const nodeindex_t &n6) : MeshTemplateElement(9)
 	{
 		node_indices.reserve(6);
@@ -550,6 +611,7 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		node_indices.push_back(n6);
 	}
 
+	// Return one of the 3 edges (as corner-only 2-node facets; same local corner ordering as TriC1).
 	MeshTemplateFacet *MeshTemplateElementTriC2::construct_facet(unsigned i)
 	{
 		unsigned ni1, ni2;
@@ -576,17 +638,20 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 
+	// Upgrade to a quadratic triangle with an added centroid "bubble" node.
 	MeshTemplateElement *MeshTemplateElementTriC2::convert_for_C2TB_space(MeshTemplate *templ)
 	{
 		nodeindex_t n7 = templ->add_intermediate_node_unique(node_indices[0], node_indices[1], node_indices[2], false);
 		return new MeshTemplateElementTriC2TB(node_indices[0], node_indices[1], node_indices[2], node_indices[3], node_indices[4], node_indices[5], n7);
 	}
 
+	// Corner nodes are inherited from TriC1; just append the centroid bubble node.
 	MeshTemplateElementTriC1TB::MeshTemplateElementTriC1TB(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4) : MeshTemplateElementTriC1(n1, n2, n3)
 	{
 		node_indices.push_back(n4);
 	}
 
+	// Corner + mid-side nodes are inherited from TriC2; just append the centroid bubble node.
 	MeshTemplateElementTriC2TB::MeshTemplateElementTriC2TB(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5, const nodeindex_t &n6, const nodeindex_t &n7) : MeshTemplateElementTriC2(n1, n2, n3, n4, n5, n6)
 	{
 		node_indices.push_back(n7);
@@ -594,6 +659,7 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 
 	//////////////////////////////////
 
+	// Store the 8 corner nodes in local (row-major over s0,s1,s2) ordering.
 	MeshTemplateElementBrickC1::MeshTemplateElementBrickC1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4,
 														   const nodeindex_t &n5, const nodeindex_t &n6, const nodeindex_t &n7, const nodeindex_t &n8) : MeshTemplateElement(11)
 	{
@@ -608,6 +674,9 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		node_indices.push_back(n8);
 	}
 
+	// Upgrade to a triquadratic (27-node) brick by inserting/reusing all edge mid-points,
+	// face centers and the body center, laid out plate-by-plate (bottom z=0, middle, top
+	// z=1) to match the standard 27-node local node ordering.
 	MeshTemplateElement *MeshTemplateElementBrickC1::convert_for_C2_space(MeshTemplate *templ)
 	{
 		std::vector<nodeindex_t> ninds(27);
@@ -677,6 +746,7 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		return new MeshTemplateElementBrickC2(ninds);
 	}
 
+	// Return one of the 6 faces (LEFT/RIGHT/DOWN/UP/BACK/FRONT, fixed local order) as a 4-node facet.
 	MeshTemplateFacet *MeshTemplateElementBrickC1::construct_facet(unsigned i)
 	{
 		unsigned ni1, ni2, ni3, ni4;
@@ -735,6 +805,8 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 
 	/////////////////////////////////
 
+	// Return one of the 6 faces as a 4-node (corner-only) facet, using the corresponding
+	// corner indices within the 27-node local numbering.
 	MeshTemplateFacet *MeshTemplateElementBrickC2::construct_facet(unsigned i)
 	{
 		unsigned ni1, ni2, ni3, ni4;
@@ -791,6 +863,7 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 
+	// Store all 27 nodes (already in the standard local ordering) directly.
 	MeshTemplateElementBrickC2::MeshTemplateElementBrickC2(std::vector<nodeindex_t> ninds) : MeshTemplateElement(14)
 	{
 		if (ninds.size() != 27)
@@ -802,6 +875,7 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 
 	/////////////////////////////////
 
+	// Store the 4 corner nodes in local ordering.
 	MeshTemplateElementTetraC1::MeshTemplateElementTetraC1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4) : MeshTemplateElement(4)
 	{
 		node_indices.resize(4);
@@ -811,6 +885,7 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		node_indices[3] = n4;
 	}
 
+	// Upgrade to a quadratic (10-node) tetrahedron: insert/reuse the 6 edge mid-points.
 	MeshTemplateElement *MeshTemplateElementTetraC1::convert_for_C2_space(MeshTemplate *templ)
 	{
 		std::vector<nodeindex_t> ninds(10);
@@ -831,6 +906,8 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 
 	
 
+	// Return one of the 4 triangular faces, using oomph-lib's tet face-node convention
+	// {1,2,3},{0,2,3},{0,1,3},{1,2,0} (i.e. face i is opposite to corner i, in this fixed order).
 	MeshTemplateFacet *MeshTemplateElementTetraC1::construct_facet(unsigned i)
 	{
 //oomph ordering : {1, 2, 3}, {0, 2, 3}, {0, 1, 3}, {1, 2, 0}
@@ -861,6 +938,7 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 
+	// Upgrade to a linear tetrahedron with an added body-centroid "bubble" node.
 	MeshTemplateElement *MeshTemplateElementTetraC1::convert_for_C1TB_space(MeshTemplate *templ)
 	{
 
@@ -871,6 +949,7 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 	}
 
 
+	// Corner nodes inherited from TetraC1; just append the body-centroid bubble node.
 	MeshTemplateElementTetraC1TB::MeshTemplateElementTetraC1TB(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5) : MeshTemplateElementTetraC1(n1, n2, n3, n4)
 	{
 		node_indices.push_back(n5);
@@ -878,6 +957,7 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 
 	/////////////////////////////////
 
+	// Store all 10 nodes (4 corners + 6 edge mid-points, already in local ordering) directly.
 	MeshTemplateElementTetraC2::MeshTemplateElementTetraC2(std::vector<nodeindex_t> ninds) : MeshTemplateElement(10)
 	{
 		if (ninds.size() != 10)
@@ -885,6 +965,8 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		node_indices = ninds;
 	}
 
+	// Same face convention as MeshTemplateElementTetraC1::construct_facet, applied to the
+	// corner nodes within the 10-node local numbering.
 	MeshTemplateFacet *MeshTemplateElementTetraC2::construct_facet(unsigned i)
 	{
 //oomph ordering : {1, 2, 3}, {0, 2, 3}, {0, 1, 3}, {1, 2, 0}
@@ -915,6 +997,8 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 
+	// Upgrade to a quadratic tetrahedron with 4 added face-centroid bubble nodes and 1 added
+	// body-centroid bubble node (15 nodes total).
 	MeshTemplateElement *MeshTemplateElementTetraC2::convert_for_C2TB_space(MeshTemplate *templ)
 	{
 
@@ -930,6 +1014,8 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 
 	/////////////////////////////////
 
+	// First 10 nodes (corners + edge mid-points) are handled by the TetraC2 base class;
+	// append the remaining 5 (4 face-centroid + 1 body-centroid) bubble nodes here.
 	MeshTemplateElementTetraC2TB::MeshTemplateElementTetraC2TB(std::vector<nodeindex_t> ninds) : MeshTemplateElementTetraC2(std::vector<nodeindex_t>(ninds.begin(), ninds.begin() + 10))
 	{
 		if (ninds.size() != 15)
@@ -958,8 +1044,10 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		node_indices.push_back(n6);
 	}	
 
-    MeshTemplateFacet *MeshTemplateElementWedgeC1::construct_facet(unsigned i)
-	{	
+	// Return one of the wedge's 5 facets (2 triangular end-caps + 3 quadrilateral side
+	// faces); see the local node/coordinate layout sketched in the comment below.
+	MeshTemplateFacet *MeshTemplateElementWedgeC1::construct_facet(unsigned i)
+	{
 		/*
 	          5 o
                /\
@@ -1006,6 +1094,9 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 	}
 
 	// @ Maxim: This is the method to convert this element to a C2 space. Just leave it out initially
+	// Upgrade to an 18-node quadratic wedge: nodes 0-2/12-14 are the bottom/top triangle
+	// corners (inherited), 3-5/15-17 their edge mid-points, and 6-11 the 6 "vertical" edge
+	// mid-points connecting corresponding bottom/top corners and mid-points.
 	MeshTemplateElement *MeshTemplateElementWedgeC1::convert_for_C2_space(MeshTemplate *templ)
 	{
 		std::vector<nodeindex_t> ninds(18);
@@ -1035,6 +1126,8 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 	}
 
 	/////////////////////////////////
+	// Store the 4 base corners followed by the apex node; see the local coordinate layout
+	// sketched in construct_facet() below.
 	MeshTemplateElementPyramidC1::MeshTemplateElementPyramidC1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5):
 	MeshTemplateElement(15)
 	{
@@ -1047,6 +1140,8 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		node_indices.push_back(n5);
 	}	
 
+	// Return one of the pyramid's 5 facets (4 triangular side faces meeting at the apex,
+	// plus the quadrilateral base); see the local coordinate sketch below.
 	MeshTemplateFacet *MeshTemplateElementPyramidC1::construct_facet(unsigned i)
 	{
 		/*
@@ -1106,6 +1201,7 @@ Index : Local coordinates (s0,s1,s2)
 
 	/////////////////////////////////
 
+	// Store all 18 nodes (already in local ordering, see WedgeC1::convert_for_C2_space) directly.
 	MeshTemplateElementWedgeC2::MeshTemplateElementWedgeC2(std::vector<nodeindex_t> ninds) : MeshTemplateElement(26)
 	{
 		if (ninds.size() != 18)
@@ -1113,6 +1209,8 @@ Index : Local coordinates (s0,s1,s2)
 		node_indices = ninds;
 	}	
 
+	// Same 5-facet convention as MeshTemplateElementWedgeC1::construct_facet, using the
+	// corresponding corner nodes within the 18-node local numbering (see inline comments per case).
 	MeshTemplateFacet *MeshTemplateElementWedgeC2::construct_facet(unsigned i)
 {
     std::vector<nodeindex_t> inds;
@@ -1146,6 +1244,10 @@ Index : Local coordinates (s0,s1,s2)
 	
 	/////////////////////////////////
 
+	// Find any node of this collection that lies on every boundary in `boundindices`, and
+	// return its position; used as a representative point for evaluating position-dependent
+	// initial conditions / Dirichlet BCs when no more specific point is available. Returns
+	// the origin if no such node exists.
 	std::vector<double> MeshTemplateElementCollection::get_reference_position_for_IC_and_DBC(std::set<unsigned int> boundindices)
 	{
 		const std::vector<MeshTemplateNode *> &nodes = mesh_template->get_nodes();
@@ -1179,6 +1281,10 @@ Index : Local coordinates (s0,s1,s2)
 		return res;
 	}
 
+	// Determine the set of mesh boundary names that this collection's elements touch: for
+	// each element with at least one boundary node, intersect the boundary sets of all nodes
+	// of each of its facets (so only boundaries shared by an entire facet count) and collect
+	// the resulting boundary indices.
 	std::vector<std::string> MeshTemplateElementCollection::get_adjacent_boundary_names()
 	{
 		std::set<unsigned int> binds;
@@ -1227,6 +1333,8 @@ Index : Local coordinates (s0,s1,s2)
 		return res;
 	}
 
+	// Lazily determine (and cache) the nodal dimension from the first element, unless
+	// explicitly overridden via set_nodal_dimension().
 	int MeshTemplateElementCollection::nodal_dimension()
 	{
 		if (Nodal_dimension < 0 && (!elements.empty()))
@@ -1236,6 +1344,8 @@ Index : Local coordinates (s0,s1,s2)
 		return Nodal_dimension;
 	}
 
+	// Lazily determine (and cache) the Lagrangian dimension from the first element, unless
+	// explicitly overridden via set_lagrangian_dimension().
 	int MeshTemplateElementCollection::lagrangian_dimension()
 	{
 		if (Lagr_dimension < 0 && (!elements.empty()))
@@ -1245,6 +1355,8 @@ Index : Local coordinates (s0,s1,s2)
 		return Lagr_dimension;
 	}
 
+	// Add a 0d point element; all elements added to a collection must share the same
+	// geometric dimension, which is fixed by the first element added.
 	void MeshTemplateElementCollection::add_point_element(const nodeindex_t &n1)
 	{
 		if (dim == -1)
@@ -1324,6 +1436,9 @@ Index : Local coordinates (s0,s1,s2)
 		res->link_nodes_with_domain(this);		
 	}
 
+   // Scott-Vogelius splitting: split a triangle (n1,n2,n3) into 3 sub-triangles that
+   // share a new node at the barycenter, which is required for the Scott-Vogelius
+   // finite-element pair (discontinuous pressure) to be stable/well defined.
    //Scott-Vogelius splitting
 	void MeshTemplateElementCollection::add_SV_tri_2d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3)
 	{
@@ -1444,6 +1559,14 @@ Index : Local coordinates (s0,s1,s2)
 	}
 
 	
+	// Attach the compiled element code `code_inst` to this collection and, if the code's
+	// dominant nodal space requires more nodes than what the elements currently have
+	// (e.g. C1TB/C2/C2TB), convert every element in-place to that higher-order space (via
+	// convert_for_C*_space, which creates/reuses the required extra nodes). If any element
+	// was upgraded to C2, additionally re-derive periodicity for the newly created mid-side
+	// nodes: an intermediate node is periodic iff *all* of its parent corner nodes have a
+	// periodic master, in which case its master is the intermediate node between those
+	// masters (found by matching the sorted parent-id keys in inter_nodes_periodic).
 	void MeshTemplateElementCollection::set_element_code(DynamicBulkElementInstance *code_inst)
 	{
 		code_instance = code_inst;
@@ -1590,6 +1713,7 @@ Index : Local coordinates (s0,s1,s2)
 		}
 	}
 
+	// Elements are owned by the collection; nodes/facets are owned by the MeshTemplate and outlive it.
 	MeshTemplateElementCollection::~MeshTemplateElementCollection()
 	{
 		// if (oomph_mesh) delete  oomph_mesh;
@@ -1599,6 +1723,10 @@ Index : Local coordinates (s0,s1,s2)
 
 	/////////////////////////////////
 
+	// Strict weak ordering on facets by their sorted node-index list (first by length, then
+	// lexicographically); used as the comparator for MeshTemplate::facetmap so that two
+	// facets referencing the same set of nodes (regardless of the order they were built in)
+	// map to the same map key and are therefore correctly deduplicated.
 	bool facet_order_function(const MeshTemplateFacet *a, const MeshTemplateFacet *b)
 	{
 		if (a->sorted_inds.size() < b->sorted_inds.size())
@@ -1615,10 +1743,14 @@ Index : Local coordinates (s0,s1,s2)
 		return false;
 	}
 
+	// facetmap uses facet_order_function as its comparator so that facets with the same node set collapse to one entry.
 	MeshTemplate::MeshTemplate() : problem(NULL), dim(-1),kdtree(1), facetmap(&facet_order_function), domain(NULL)
 	{
 	}
 
+	// Discard all nodes and element collections (freeing their heap memory) and reset every
+	// derived lookup structure (kdtree, facetmap, boundary/periodicity bookkeeping) so the
+	// template can be rebuilt from scratch.
 	void MeshTemplate::reset()
 	{
 		for (std::size_t i = 0; i < nodes.size(); i++) if (nodes[i]) delete nodes[i];
@@ -1639,6 +1771,8 @@ Index : Local coordinates (s0,s1,s2)
 		reset();
 	}
 
+	// Unconditionally append a new node and register its position in the KD-tree (used by
+	// add_node_unique() for fast coincident-point lookup).
 	nodeindex_t MeshTemplate::add_node(double x, double y, double z)
 	{
 		MeshTemplateNode *res = new MeshTemplateNode(x, y, z);
@@ -1651,6 +1785,8 @@ Index : Local coordinates (s0,s1,s2)
 		return res->index;
 	}
 
+	// Declare n2 as periodic slave of master n1. Master chains are only resolved later, in
+	// link_periodic_nodes() (which follows periodic_master pointers to the ultimate root).
 	void MeshTemplate::add_periodic_node_pair(const nodeindex_t &n1, const nodeindex_t &n2)
 	{
 		nodes[n2]->periodic_master = n1; // Just put the link here
@@ -1680,6 +1816,8 @@ Index : Local coordinates (s0,s1,s2)
 		*/
 	}
 
+	// Return the index of an existing node at (x,y,z) (found via the KD-tree, which uses a
+	// small coincidence tolerance) if one exists, otherwise create and register a new node.
 	nodeindex_t MeshTemplate::add_node_unique(double x, double y, double z)
 	{
 		int present = kdtree.point_present(x, y, z);
@@ -1702,6 +1840,12 @@ Index : Local coordinates (s0,s1,s2)
 		return res->index;
 	}
 
+	// Get-or-create the node exactly half-way between n1 and n2 (e.g. an edge mid-side
+	// node). Its boundary set and domain membership are inherited as the intersection of
+	// its parents' (a mid-edge node is only on a boundary if *both* endpoints are). If this
+	// call actually created a new node (rather than finding an existing boundary one), and
+	// that node lies on a boundary, record it in inter_nodes_periodic so a matching
+	// intermediate node on the periodic partner side can later be linked up (see set_element_code).
 	nodeindex_t MeshTemplate::add_intermediate_node_unique(const nodeindex_t &n1, const nodeindex_t &n2)
 	{
 		nodeindex_t ni = add_node_unique(0.5 * (nodes[n1]->x + nodes[n2]->x), 0.5 * (nodes[n1]->y + nodes[n2]->y), 0.5 * (nodes[n1]->z + nodes[n2]->z));
@@ -1722,6 +1866,10 @@ Index : Local coordinates (s0,s1,s2)
 		return ni;
 	}
 
+	// Get-or-create the node at the centroid of (n1,n2,n3) (e.g. a triangle-face bubble
+	// node). If `boundary_possible` is false the node is never considered a boundary node
+	// (used for interior "bubble" nodes that sit at a face/cell centroid and thus cannot
+	// truly lie on a domain boundary even if all three parents do).
 	nodeindex_t MeshTemplate::add_intermediate_node_unique(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, bool boundary_possible)
 	{
 		nodeindex_t ni = add_node_unique((nodes[n1]->x + nodes[n2]->x + nodes[n3]->x) / 3, (nodes[n1]->y + nodes[n2]->y + nodes[n3]->y) / 3, (nodes[n1]->z + nodes[n2]->z + nodes[n3]->z) / 3);
@@ -1757,6 +1905,8 @@ Index : Local coordinates (s0,s1,s2)
 		return ni;
 	}
 
+	// Same as the 3-parent overload above, but for the centroid of 4 nodes (e.g. a
+	// quadrilateral face/cell-center node).
 	nodeindex_t MeshTemplate::add_intermediate_node_unique(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, bool boundary_possible)
 	{
 		nodeindex_t ni = add_node_unique(0.25 * (nodes[n1]->x + nodes[n2]->x + nodes[n3]->x + nodes[n4]->x), 0.25 * (nodes[n1]->y + nodes[n2]->y + nodes[n3]->y + nodes[n4]->y),
@@ -1799,6 +1949,8 @@ Index : Local coordinates (s0,s1,s2)
 		return ni;
 	}
 
+	// Look up the numeric index of an already-registered boundary name; throws if unknown
+	// (unlike add_node_to_boundary, this does not create the boundary).
 	unsigned int MeshTemplate::get_boundary_index(const std::string &boundname) const
 	{
 		unsigned int bi = boundary_names.size();
@@ -1813,6 +1965,8 @@ Index : Local coordinates (s0,s1,s2)
 		return bi;
 	}
 
+	// Mark node `ni` as lying on boundary `boundname`, registering the boundary name (and
+	// assigning it a new index) on first use.
 	void MeshTemplate::add_node_to_boundary(const std::string &boundname, const nodeindex_t &ni)
 	{
 		unsigned int bi = boundary_names.size();
@@ -1829,6 +1983,7 @@ Index : Local coordinates (s0,s1,s2)
 		nodes[ni]->on_boundaries.insert(bi);
 	}
 
+	// Batch version of add_node_to_boundary() for a list of nodes.
 	void MeshTemplate::add_nodes_to_boundary(const std::string &boundname, const std::vector<nodeindex_t> &ni)
 	{
 		unsigned int bi = boundary_names.size();
@@ -1846,6 +2001,10 @@ Index : Local coordinates (s0,s1,s2)
 			nodes[ni[i]]->on_boundaries.insert(bi);
 	}
 
+	// Get-or-create (deduplicated via facetmap) the facet spanned by `vertexindices` and
+	// attach curved geometry `curved` to it. If the facet already exists with a different
+	// curved entity already set, that's an error; otherwise the (possibly still unset)
+	// curved entity is (re-)assigned.
 	MeshTemplateFacet * MeshTemplate::add_facet_to_curve_entity(const std::vector<nodeindex_t> &vertexindices, MeshTemplateCurvedEntity *curved)
 	{
 		MeshTemplateFacet *nf = new MeshTemplateFacet(vertexindices, curved, &this->nodes);
@@ -1864,6 +2023,9 @@ Index : Local coordinates (s0,s1,s2)
 		return facets.back();
 	}
 
+	// Mark all of `ni` as boundary nodes and register the facet they (or, if given, the
+	// subset `vertexindices`, which must be a subset of `ni`) span as living on boundary
+	// `boundname`, optionally attaching curved geometry `curved` to it.
 	void MeshTemplate::add_facet_to_boundary(const std::string &boundname, const std::vector<nodeindex_t> &ni,const std::vector<nodeindex_t> &vertexindices, MeshTemplateCurvedEntity *curved)
 	{
 		if (vertexindices.empty())
@@ -1902,6 +2064,7 @@ Index : Local coordinates (s0,s1,s2)
 		
 	}
 
+	// Create and register a new, initially empty element collection under `name`.
 	MeshTemplateElementCollection *MeshTemplate::new_bulk_element_collection(std::string name)
 	{
 		MeshTemplateElementCollection *res = new MeshTemplateElementCollection(this, name);
@@ -1909,6 +2072,7 @@ Index : Local coordinates (s0,s1,s2)
 		return res;
 	}
 
+	// Look up an existing collection by name, or return NULL if none matches.
 	MeshTemplateElementCollection *MeshTemplate::get_collection(std::string name)
 	{
 		for (unsigned int i = 0; i < bulk_element_collections.size(); i++)
@@ -1917,6 +2081,10 @@ Index : Local coordinates (s0,s1,s2)
 		return NULL;
 	}
 
+	// Turn the periodic_master index links (set up via add_periodic_node_pair /
+	// set_element_code) into actual oomph-lib node periodicity: for every node with both a
+	// periodic master and a built oomph_node, follow the master chain to its root (the node
+	// with no master of its own) and call make_periodic() against that root's oomph_node.
 	void MeshTemplate::link_periodic_nodes()
 	{
 		for (unsigned int i = 0; i < nodes.size(); i++)
@@ -1940,6 +2108,8 @@ Index : Local coordinates (s0,s1,s2)
 		}
 	}
 
+	// Detach (without deleting) the oomph-lib Node pointers from all template nodes, e.g.
+	// before discarding an old mesh so the template's geometric description can be reused to build a new one.
 	void MeshTemplate::flush_oomph_nodes()
 	{
 		for (unsigned int i = 0; i < nodes.size(); i++)
@@ -1948,6 +2118,11 @@ Index : Local coordinates (s0,s1,s2)
 		}
 	}
 
+	// For each mesh boundary, find the (at most 2) element collections whose elements
+	// actually touch it (by intersecting, node by node, the running set of "still
+	// possible" domains with each boundary node's part_of_domain set). If exactly two
+	// domains remain, that boundary is an internal interface between them, so register the
+	// pairing via _add_opposite_interface_connection (implemented on the Python side).
 	void MeshTemplate::_find_opposite_interface_connections()
 	{
 		for (unsigned int bi = 0; bi < boundary_names.size(); bi++)
@@ -1982,6 +2157,11 @@ Index : Local coordinates (s0,s1,s2)
 		}
 	}
 
+	// Detect boundaries of interface/facet collections that intersect each other (e.g. a
+	// triple/contact line where two or more interfaces meet): for each collection, find
+	// nodes lying on 2 or more of its adjacent boundaries and record every ordered
+	// combination of those boundary names (as "<collection>/<bnd1>/<bnd2>/...") as an
+	// intersection name.
 	std::set<std::string> MeshTemplate::_find_interface_intersections()
 	{
 		std::set<std::string> all_intersects;
@@ -2024,6 +2204,20 @@ Index : Local coordinates (s0,s1,s2)
 		return all_intersects;
 	}
 
+	// Build the concrete oomph-lib element for geometric element `el` in collection `coll`.
+	// Steps: (1) if the element code's dominant space is lower-order (e.g. C1) than the
+	// template element's own geometric order (e.g. a C2-type quad/tri/line/brick), reduce
+	// to just the corner node indices; (2) create any oomph-lib Node objects that don't yet
+	// exist for the needed nodes (as plain Node or BoundaryNode, depending on whether the
+	// node lies on a mesh boundary), copying position into both Eulerian and Lagrangian
+	// coordinates; (3) instantiate the element via BulkElementBase::create_from_template();
+	// (4) delete any newly-created oomph_node that the instantiated element ended up not
+	// using (happens when the template holds higher-order nodes than the element's actual
+	// nodal space needs); (5) if any of the element's nodes sit on a curved facet, wire up
+	// an oomph-lib MacroElement (Q/T, 2d/3d, chosen by the concrete BulkElement class of
+	// `res`) so that node positions during refinement follow the curved geometry rather than
+	// straight-sided interpolation: for each local facet, look up whether the corresponding
+	// mesh facet carries a curved entity and, if so, attach it via macro->set_facet().
 	BulkElementBase *MeshTemplate::factory_element(MeshTemplateElement *el, MeshTemplateElementCollection *coll)
 	{
 		// Generate all nodes if not present
@@ -2311,12 +2505,18 @@ Index : Local coordinates (s0,s1,s2)
 		return res;
 	}
 
+	// TODO: not yet implemented -- intended to reconstruct curved entities from the string
+	// representation produced by get_information_string().
 	std::map<int, MeshTemplateCurvedEntity *> MeshTemplateCurvedEntity::load_from_strings(const std::vector<std::string> &s, size_t &currline)
 	{
 		throw_runtime_error("IMPLEM");
 		return std::map<int, MeshTemplateCurvedEntity *>();
 	}
 
+	// Extend the given control points with two "phantom" points obtained by linear
+	// extrapolation beyond the first/last point (vs = 2*p0 - p1, ve = 2*p_last - p_second_last),
+	// which Catmull-Rom splines need to define the tangent at the open ends. Then precompute
+	// a dense sample table (gen_samples) used to numerically invert the spline in position_to_parametric().
 	CurvedEntityCatmullRomSpline::CurvedEntityCatmullRomSpline(const std::vector<std::vector<double>> &_pts) : MeshTemplateCurvedEntity(1), pts(_pts)
 	{
 		N = pts.size();
@@ -2332,6 +2532,7 @@ Index : Local coordinates (s0,s1,s2)
 		gen_samples(100);
 	}
 
+	// Serialize the (already phantom-point-extended) control point list.
 	std::string CurvedEntityCatmullRomSpline::get_information_string()
 	{
 		std::ostringstream oss;
@@ -2341,6 +2542,8 @@ Index : Local coordinates (s0,s1,s2)
 		return oss.str();
 	}
 
+	// Evaluate the spline at `num` evenly spaced parameter values, used as a lookup table
+	// for the initial guess in position_to_parametric()'s Newton iteration.
 	void CurvedEntityCatmullRomSpline::gen_samples(unsigned num)
 	{
 		samples.resize(num);
@@ -2353,6 +2556,8 @@ Index : Local coordinates (s0,s1,s2)
 		}
 	}
 
+	// Evaluate the Catmull-Rom spline position at global parameter t in [0, N-1], using the
+	// standard cubic Catmull-Rom basis functions (s0..s3) on the local segment [offs, offs+1].
 	void CurvedEntityCatmullRomSpline::interpolate(double t, std::vector<double> &pos)
 	{
 		t = std::min(std::max(t, 0.0), N - 1.0);
@@ -2376,6 +2581,7 @@ Index : Local coordinates (s0,s1,s2)
 		}
 	}
 
+	// Derivative (tangent) of interpolate() w.r.t. t, using the derivative of the Catmull-Rom basis functions.
 	void CurvedEntityCatmullRomSpline::dinterpolate(double t, std::vector<double> &dpos)
 	{
 		t = std::min(std::max(t, 0.0), N - 1.0);
@@ -2399,10 +2605,16 @@ Index : Local coordinates (s0,s1,s2)
 		}
 	}
 
+	// Trivial forward map: just evaluate the spline at parameter[0].
 	void CurvedEntityCatmullRomSpline::parametric_to_position(const unsigned &t, const std::vector<double> &parametric, std::vector<double> &position)
 	{
 		interpolate(parametric[0], position);
 	}
+	// Numerically invert the spline (no closed form exists): first find the closest
+	// precomputed sample point to `position`, pick the coordinate direction with the
+	// largest tangent component there (to get a well-conditioned 1d root-finding problem),
+	// then Newton-iterate on that single coordinate to refine the parameter. If Newton
+	// doesn't converge to tolerance, refine the sample table (double its resolution) and retry recursively.
 	void CurvedEntityCatmullRomSpline::position_to_parametric(const unsigned &t, const std::vector<double> &position, std::vector<double> &parametric)
 	{
 		double mindist = 1.0e20;

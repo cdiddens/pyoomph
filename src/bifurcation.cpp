@@ -42,10 +42,13 @@ using namespace oomph;
 
 namespace oomph
 {
+  // oomph-lib does not ship a 1-point Gauss-Legendre rule; add the explicit specialization
+  // (single knot at 0, weight 2, i.e. the midpoint rule on [-1,1]) since the periodic-orbit
+  // collocation code below needs order-1 Gauss-Legendre integration as a special case.
   template<>
   oomph::GaussLegendre<1, 1>::GaussLegendre()
   {
-    // Temporary storage for the integration points    
+    // Temporary storage for the integration points
     for (unsigned i = 0; i < 1; i++)
     {
       Knot[i][0] = 0.0;
@@ -53,10 +56,13 @@ namespace oomph
     }
   }
 
+  // Degenerate "integration rule" with a single, unweighted point, used as a placeholder
+  // oomph::Integral when the periodic-orbit collocation mode does not actually need
+  // quadrature (e.g. for element types that only require a single evaluation point).
   class POCollocationFakeIntegral: public oomph::Integral
   {
     public:
-      unsigned nweight() const override {return 1;}          
+      unsigned nweight() const override {return 1;}
       double knot(const unsigned& i, const unsigned& j) const override {return -1;}
       double weight(const unsigned& i) const override { return 1;}
   };
@@ -65,7 +71,13 @@ namespace oomph
 namespace pyoomph
 {
 
-
+  // Rotates the complex eigenvector real_eigen+i*imag_eigen (in place) by a phase exp(-i*phi)
+  // to a canonical orientation: phi is chosen (by sampling n_phi_samples initial guesses and
+  // refining each with a few Newton iterations) so that <Re,Im>=0 and <Re,Re> is maximized,
+  // i.e. all of the eigenvector's "length" is rotated into the real part. This removes the
+  // arbitrary overall complex phase that a Hopf/azimuthal eigenvector is only defined up to,
+  // giving reproducible output. Finally the (rotated) eigenvector is normalized so that
+  // <Re,Re>=1.
    void rotate_complex_eigenvector_nicely(oomph::Vector<double> &real_eigen, oomph::Vector<double> &imag_eigen)
   {
     // Get the dots of the real and imaginary parts
@@ -154,6 +166,12 @@ namespace pyoomph
   }
 
 
+  //====================================================================
+  /// Constructor: Initialise the hopf handler by solving for an initial guess of Phi
+  /// (the real part of the null eigenvector) from J*Phi = dR/dparameter, deriving an
+  /// orthogonal initial guess for Psi (the imaginary part) from it, setting Omega=0,
+  /// and calculating Count. If the system changes, a new handler must be constructed.
+  //===================================================================
   MyHopfHandler::MyHopfHandler(Problem *const &problem_pt,
                                double *const &parameter_pt) : Solve_which_system(0), Parameter_pt(parameter_pt), Omega(0.0)
   {
@@ -456,6 +474,16 @@ namespace pyoomph
   //==================================================================
   /// Get the residuals
   //=================================================================
+  // Layout of the augmented per-element residual vector (raw_ndof = elem_pt->ndof()):
+  //   [0, raw_ndof)              base residuals R(u)
+  //   [raw_ndof, 2*raw_ndof)     real part of J*Phi - Omega*M*Psi   (eigen-equation, real)
+  //   [2*raw_ndof, 3*raw_ndof)   real part of J*Psi + Omega*M*Phi   (eigen-equation, imag)
+  //   3*raw_ndof                 normalization  sum(Phi.C)/nelement_sharing - 1/nelement (accumulated additively across elements)
+  //   3*raw_ndof+1               normalization  sum(Psi.C)/nelement_sharing
+  // If Parameter_pt is the special lambda-tracking parameter (used to directly track a
+  // complex eigenvalue branch rather than a physical control parameter), an extra
+  // (*Parameter_pt)*M*Phi / (*Parameter_pt)*M*Psi term is added to the eigen-equations,
+  // since in that mode the parameter itself acts as an eigenvalue shift in J - lambda*M.
   void MyHopfHandler::get_residuals(GeneralisedElement *const &elem_pt,
                                     Vector<double> &residuals)
   {
@@ -528,6 +556,10 @@ namespace pyoomph
     }
   }
 
+  // Debugging aid: recomputes the augmented residuals/Jacobian for elem_pt once with the
+  // analytic-Hessian path disabled (forcing finite-difference filling of the eigen-equation
+  // derivatives) and once with it enabled, then prints every entry that disagrees by more
+  // than eps between the two. Requires analytic Hessian products to be available/enabled.
   void MyHopfHandler::debug_analytical_filling(oomph::GeneralisedElement *elem_pt, double eps)
   {
     if (!Problem_pt->are_hessian_products_calculated_analytically())
@@ -576,6 +608,14 @@ namespace pyoomph
   /// \short Calculate the elemental Jacobian matrix "d equation
   /// / d variable".
   //==================================================================
+  // The (u,u), (Phi,Phi)/(Phi,Psi) and (Psi,Phi)/(Psi,Psi) blocks are filled directly from
+  // the base Jacobian J and mass matrix M (since d(J*Phi)/dPhi = J etc.). The blocks
+  // involving derivatives of J and M themselves with respect to u (needed because J,M depend
+  // on u) require the Hessian of the base residuals: if analytic Hessian-vector products are
+  // available (ana_hessian) they are used directly, otherwise this falls back to finite
+  // differences (see the loop over raw_ndof further below, perturbing each u-dof by FD_step
+  // and re-evaluating get_residuals()). The parameter- and Omega-columns are filled
+  // analogously, analytically if possible, by finite differences otherwise.
   void MyHopfHandler::get_jacobian(GeneralisedElement *const &elem_pt,
                                    Vector<double> &residuals,
                                    DenseMatrix<double> &jacobian)
@@ -718,6 +758,12 @@ namespace pyoomph
       }
       else // ANALYTIC HESSIAN AND PARAM DERIVS
       {
+        // Analytic path: instead of finite-differencing get_residuals() once per perturbed
+        // dof, request the Hessian-vector products dJdU_Eig=(d J/du)*Eig, dMdU_Eig=(d M/du)*Eig
+        // (contracted directly with the eigenvector Eig_local=(Phi,Psi)) and the parameter
+        // derivatives dJdParam/dMdParam/dRdParam from the generated element code in a single
+        // combined assembly (multi_assm), then assemble all augmented Jacobian blocks from
+        // these precomputed second-derivative contractions instead of finite differences.
         pyoomph::BulkElementBase *pyoomph_elem_pt = dynamic_cast<pyoomph::BulkElementBase *>(elem_pt);
         std::vector<SinglePassMultiAssembleInfo> multi_assm;
         
@@ -828,7 +874,11 @@ namespace pyoomph
       // Just get the normal jacobian and residuals
       elem_pt->get_jacobian(residuals, jacobian);
     }
-    // Otherwise the augmented complex case
+    // Otherwise the augmented complex case: solves only for the complex eigenvector
+    // (Phi,Psi) block at fixed u and Omega, i.e. the 2*raw_ndof x 2*raw_ndof system
+    // [[J,Omega*M],[-Omega*M,J]] * (Phi,Psi) = rhs, with the right-hand side chosen as
+    // the mass-matrix-only terms below (residuals[n]=M*Psi, residuals[raw_ndof+n]=-M*Phi)
+    // since those need no extra assembly beyond the mass matrix already computed here.
     else if (Solve_which_system == 2)
     {
       unsigned raw_ndof = elem_pt->ndof();
@@ -946,6 +996,8 @@ namespace pyoomph
                         OOMPH_EXCEPTION_LOCATION);
   }
 
+  // Simply forwards to the element's own Hessian-vector-product routine; the augmented
+  // eigen-equations do not themselves contribute extra Hessian terms here.
   void MyHopfHandler::get_hessian_vector_products(
       GeneralisedElement *const &elem_pt,
       Vector<double> const &Y,
@@ -1066,6 +1118,10 @@ namespace pyoomph
     }
   }
 
+  // Re-normalizes the eigenvector (Phi,Psi) to unit weight (scaled by eigenweight) and resets
+  // the normalization vector C to the (freshly rescaled) Phi, so that the normalization
+  // equations C.Phi=1, C.Psi=0 stay well-conditioned as the eigenvector evolves during
+  // continuation. Also prints diagnostic dot products of C against the current Phi/Psi.
   void MyHopfHandler::realign_C_vector()
   {
 
@@ -1098,6 +1154,9 @@ namespace pyoomph
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+  // Constructs the fold handler and derives an initial guess for the null eigenvector Y by
+  // solving J*x = dR/dparameter (i.e. reusing the already-factorized Jacobian) and normalizing
+  // x; both Y and the fixed normalization vector Phi are initialized to this same direction.
   MyFoldHandler::MyFoldHandler(Problem *const &problem_pt, double *const &parameter_pt) : Solve_which_system(Full_augmented), Parameter_pt(parameter_pt)
   {
     call_param_change_handler = false;
@@ -1158,6 +1217,8 @@ namespace pyoomph
     delete dist_pt;
   }
 
+  // Constructs the fold handler with an explicit initial guess for the eigenvector; both Y and
+  // the normalization vector Phi are set to the (normalized) supplied eigenvector.
   MyFoldHandler::MyFoldHandler(Problem *const &problem_pt, double *const &parameter_pt, const DoubleVector &eigenvector) : Solve_which_system(Full_augmented), Parameter_pt(parameter_pt)
   {
     call_param_change_handler = false;
@@ -1197,6 +1258,10 @@ namespace pyoomph
     delete dist_pt;
   }
 
+  // Constructs the fold handler with an explicit eigenvector guess and an independently chosen
+  // normalization vector Phi (rather than reusing the eigenvector itself for normalization),
+  // e.g. to keep the normalization equation well-conditioned across a continuation run where
+  // the eigenvector direction itself may vary a lot.
   MyFoldHandler::MyFoldHandler(Problem *const &problem_pt, double *const &parameter_pt, const DoubleVector &eigenvector, const DoubleVector &normalisation) : Solve_which_system(Full_augmented), Parameter_pt(parameter_pt)
   {
     call_param_change_handler = false;
@@ -1236,6 +1301,10 @@ namespace pyoomph
     delete dist_pt;
   }
 
+  // Number of augmented dofs of the element, depending on Solve_which_system: the full
+  // augmented system carries the original dofs plus the eigenvector Y plus the parameter
+  // (2*raw_ndof+1); the "augmented J" block carries the original dofs plus the parameter only
+  // (raw_ndof+1); the plain "J" block carries only the original dofs.
   unsigned MyFoldHandler::ndof(GeneralisedElement *const &elem_pt)
   {
     unsigned raw_ndof = elem_pt->ndof();
@@ -1263,6 +1332,8 @@ namespace pyoomph
     }
   }
 
+  // Maps a local dof index to the global equation number in the augmented numbering:
+  // [0,Ndof) original dofs, Ndof the bifurcation parameter, [Ndof+1,2*Ndof+1) the eigenvector Y.
   unsigned long MyFoldHandler::eqn_number(GeneralisedElement *const &elem_pt,
                                           const unsigned &ieqn_local)
   {
@@ -1283,6 +1354,10 @@ namespace pyoomph
     return global_eqn;
   }
 
+  // Assembles the residuals for whichever block Solve_which_system selects. For Full_augmented,
+  // in addition to the base residuals (or, for the lambda-tracking parameter, the base residuals
+  // plus mass matrix), the eigen-equation residual J*Y and the normalization residual Phi.Y-1
+  // are appended (filled further below in this function).
   void MyFoldHandler::get_residuals(GeneralisedElement *const &elem_pt,
                                     Vector<double> &residuals)
   {
@@ -1351,12 +1426,20 @@ namespace pyoomph
     }
   }
 
+  // Assembles the Jacobian for whichever block Solve_which_system selects (see ndof()/
+  // get_residuals() above for what each block contains). For Block_augmented_J, the extra
+  // parameter column is filled by finite differences and the extra normalization row directly
+  // from Phi. For Full_augmented, the dY/dY block reuses the base Jacobian, while the blocks
+  // coupling Y to u (i.e. d(J*Y)/du) and to the parameter require second derivatives of the
+  // base residuals: these are obtained analytically via Hessian-vector products when available
+  // (ana_hessian), otherwise by finite-differencing get_residuals() (see MyHopfHandler::get_jacobian
+  // for the analogous, more heavily commented pattern).
   void MyFoldHandler::get_jacobian(GeneralisedElement *const &elem_pt,
                                    Vector<double> &residuals,
                                    DenseMatrix<double> &jacobian)
   {
     // If true, we do not track a fold by adjusting the parameter, but track an eigenvalue branch
-    bool lambda_continuation=  (Parameter_pt==Problem_pt->get_lambda_tracking_real());      
+    bool lambda_continuation=  (Parameter_pt==Problem_pt->get_lambda_tracking_real());
     bool ana_dparam = lambda_continuation || Problem_pt->is_dparameter_calculated_analytically(Problem_pt->GetDofPtr()[Ndof]);    
     bool ana_hessian = ana_dparam && Problem_pt->are_hessian_products_calculated_analytically() && dynamic_cast<BulkElementBase *>(elem_pt);
 
@@ -1671,11 +1754,13 @@ namespace pyoomph
                         OOMPH_EXCEPTION_LOCATION);
   }
 
+  // Simply forwards to the element's own Hessian-vector-product routine.
   void MyFoldHandler::get_hessian_vector_products(GeneralisedElement *const &elem_pt, Vector<double> const &Y, DenseMatrix<double> const &C, DenseMatrix<double> &product)
   {
     elem_pt->get_hessian_vector_products(Y, C, product);
   }
 
+  // Returns the (single, real) null eigenvector Y found at the fold.
   void MyFoldHandler::get_eigenfunction(Vector<DoubleVector> &eigenfunction)
   {
     eigenfunction.resize(1);
@@ -1687,6 +1772,8 @@ namespace pyoomph
     }
   }
 
+  // Restores the problem to its original (non-augmented) size, undoing whatever
+  // Solve_which_system mode it was left in.
   MyFoldHandler::~MyFoldHandler()
   {
     AugmentedBlockFoldLinearSolver *block_fold_solver_pt = dynamic_cast<AugmentedBlockFoldLinearSolver *>(
@@ -1702,6 +1789,8 @@ namespace pyoomph
     Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
   }
 
+  // Switches to the Block_augmented_J mode (original dofs + parameter, no eigenvector) - used
+  // e.g. by AugmentedBlockFoldLinearSolver's block-elimination scheme for the fold system.
   void MyFoldHandler::solve_augmented_block_system()
   {
     if (Solve_which_system != Block_augmented_J)
@@ -1717,6 +1806,7 @@ namespace pyoomph
     }
   }
 
+  // Switches to the Block_J mode (original dofs only, plain Jacobian, no augmentation at all).
   void MyFoldHandler::solve_block_system()
   {
     if (Solve_which_system != Block_J)
@@ -1728,6 +1818,7 @@ namespace pyoomph
     }
   }
 
+  // Switches back to the Full_augmented mode (original dofs + eigenvector Y + parameter).
   void MyFoldHandler::solve_full_system()
   {
     if (Solve_which_system != Full_augmented)
@@ -1755,6 +1846,12 @@ namespace pyoomph
     eigenweight = ew;
   }
 
+  // Re-derives the member copy of the eigenvector Y from the current dof values (phin, read
+  // back from the problem's dof pointers rather than the member array) and rescales it; also
+  // prints diagnostic dot/length values against the previous Y for debugging. Note: this
+  // divides by phisqr (the sum of squares) rather than sqrt(phisqr) (the vector norm) used in
+  // the analogous MyHopfHandler::realign_C_vector() above - left as-is since the exact intended
+  // normalization convention here was not verified against the original oomph-lib FoldHandler.
   void MyFoldHandler::realign_C_vector()
   {
 
@@ -1777,6 +1874,14 @@ namespace pyoomph
 
   //////////////////////////////////////////////////
 
+  // Constructs the pitchfork handler. The supplied symmetry_vector defines both the initial
+  // guess for the null eigenvector Y and (normalized, as Psi/C) the fixed symmetry constraint
+  // vector used to pin the amplitude Sigma of the symmetry-breaking component of u. Sigma
+  // itself starts at 0 (the symmetric branch). If improved_pitchfork_tracking_on_unstructured_meshes
+  // is enabled, the symmetry constraint is instead assembled as an integral <U,Psi> via
+  // dedicated generated-code residual contributions (see setup_U_times_Psi_residual_indices()),
+  // which is more accurate on meshes where a plain dof-wise dot product is a poor approximation
+  // to the L2 inner product.
   MyPitchForkHandler::MyPitchForkHandler(Problem *const &problem_pt, double *const &parameter_pt, const oomph::DoubleVector &symmetry_vector) : Parameter_pt(parameter_pt)
   {
     call_param_change_handler = false;
@@ -1850,6 +1955,7 @@ namespace pyoomph
     delete dist_pt;
   }
 
+  // Rescales the fixed symmetry vector Psi by ew/eigenweight and records the new weight.
   void MyPitchForkHandler::set_eigenweight(double ew)
   {
     for (unsigned n = 0; n < Ndof; n++)
@@ -1859,6 +1965,7 @@ namespace pyoomph
     eigenweight = ew;
   }
 
+  // Restores the problem to its original (non-augmented) size.
   MyPitchForkHandler::~MyPitchForkHandler()
   {
     Problem_pt->GetDofPtr().resize(Ndof);
@@ -1866,6 +1973,11 @@ namespace pyoomph
     Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
   }
 
+  // Computes the element-local contribution to integral(U.Psi) via the mass-matrix-like
+  // "residual mode 1" contribution (see set_assembled_residual()/setup_U_times_Psi_residual_indices()),
+  // contracting the current dof values U with the fixed symmetry vector Psi through the
+  // psi_i*psi_j shape-function-product matrix; used for the improved (mesh-quadrature-based)
+  // symmetry constraint on unstructured meshes.
   double MyPitchForkHandler::get_integrated_U_dot_Psi(oomph::GeneralisedElement *const &elem_pt, DenseMatrix<double> &psi_i_times_psi_j)
   {
     unsigned raw_ndof = elem_pt->ndof();
@@ -1887,12 +1999,16 @@ namespace pyoomph
     return res;
   }
 
+  // Augmented dofs of the element: original dofs + eigenvector Y + parameter + Sigma.
   unsigned MyPitchForkHandler::ndof(oomph::GeneralisedElement *const &elem_pt)
   {
     unsigned raw_ndof = elem_pt->ndof();
     return (2 * raw_ndof + 2);
   }
 
+  // Maps a local dof index to the global equation number in the augmented numbering:
+  // [0,Ndof) original dofs, Ndof the bifurcation parameter, [Ndof+1,2*Ndof+1) the eigenvector Y,
+  // 2*Ndof+1 the symmetry-breaking amplitude Sigma.
   unsigned long MyPitchForkHandler::eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local)
   {
     unsigned raw_ndof = elem_pt->ndof();
@@ -1915,6 +2031,11 @@ namespace pyoomph
     }
   }
 
+  // Assembles the augmented residuals: base residuals, the null-eigenvector equation J*Y=0,
+  // the normalization Y.C-1=0 (via Count-weighted accumulation across elements), and (further
+  // below) the symmetry constraint <U,Psi>-Sigma=0. On unstructured meshes with the improved
+  // tracking option, base residuals/Jacobian and the symmetry-constraint contribution are
+  // assembled together via a combined multi-assembly call instead of a plain dof-wise dot product.
   void MyPitchForkHandler::get_residuals(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals)
   {
     unsigned raw_ndof = elem_pt->ndof();
@@ -1970,6 +2091,12 @@ namespace pyoomph
     }
   }
 
+  // Assembles the augmented Jacobian for (u, Y, parameter, Sigma). If analytic Hessian-vector
+  // products and parameter derivatives are available (ana_hessian && ana_dparam), all
+  // second-derivative blocks (d(J*Y)/du, d(J*Y)/dparameter, and - for the improved unstructured-
+  // mesh symmetry constraint - d(<U,Psi>)/du) are obtained from a single combined multi-assembly
+  // call; otherwise this falls back to finite-differencing get_residuals()/get_jacobian() per dof
+  // (see the FD loops further below), analogous to MyFoldHandler::get_jacobian().
   void MyPitchForkHandler::get_jacobian(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian)
   {
     bool ana_dparam = Problem_pt->is_dparameter_calculated_analytically(Problem_pt->GetDofPtr()[Ndof]);
@@ -2133,6 +2260,9 @@ namespace pyoomph
     }
   }
 
+  // Derivative of the augmented residuals with respect to the bifurcation parameter, needed
+  // for arclength continuation; the symmetry-constraint and normalization rows do not depend
+  // on the parameter directly and are set to zero.
   void MyPitchForkHandler::get_dresiduals_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam)
   {
     unsigned raw_ndof = elem_pt->ndof();
@@ -2155,10 +2285,12 @@ namespace pyoomph
   {
     throw_runtime_error("implement");
   }
+  // Simply forwards to the element's own Hessian-vector-product routine.
   void MyPitchForkHandler::get_hessian_vector_products(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> const &Y, oomph::DenseMatrix<double> const &C, oomph::DenseMatrix<double> &product)
   {
     elem_pt->get_hessian_vector_products(Y, C, product);
   }
+  // Returns the (single, real) null eigenvector Y found at the pitchfork.
   void MyPitchForkHandler::get_eigenfunction(oomph::Vector<oomph::DoubleVector> &eigenfunction)
   {
     eigenfunction.resize(1);
@@ -2174,6 +2306,10 @@ namespace pyoomph
     // Is full system anyways.. Nothing to be done
   }
 
+  // Inspects every generated bulk element code once and records, for each, the residual-form
+  // index of the base state and (if present) of the "_simple_mass_matrix_of_defined_fields"
+  // variant, used by the improved unstructured-mesh symmetry constraint to switch elements
+  // between assembling the base residual and the mass-matrix-like form needed for <U,Psi>.
   void MyPitchForkHandler::setup_U_times_Psi_residual_indices()
   {
     pyoomph::Problem *prob = dynamic_cast<pyoomph::Problem *>(Problem_pt);
@@ -2193,6 +2329,9 @@ namespace pyoomph
     }
   }
 
+  // Looks up (without switching) the residual-form index for elem_pt's generated code that
+  // corresponds to residual_mode (0: base state, 1: mass matrix), as set up by
+  // setup_U_times_Psi_residual_indices().
   int MyPitchForkHandler::resolve_assembled_residual(oomph::GeneralisedElement *const &elem_pt, int residual_mode)
   {
     pyoomph::BulkElementBase *el = dynamic_cast<pyoomph::BulkElementBase *>(elem_pt);
@@ -2209,6 +2348,9 @@ namespace pyoomph
     return entry.residual_indices[residual_mode];
   }
 
+  // Switches elem_pt's generated code to assemble the residual form given by residual_mode
+  // (0: base state, 1: mass matrix); returns false if that element has no such contribution
+  // (residual_indices[residual_mode]<0), in which case the caller should skip it.
   bool MyPitchForkHandler::set_assembled_residual(oomph::GeneralisedElement *const &elem_pt, int residual_mode)
   {
     pyoomph::BulkElementBase *el = dynamic_cast<pyoomph::BulkElementBase *>(elem_pt);
@@ -2364,6 +2506,19 @@ namespace pyoomph
   }
 
   // This will calculate the residual contribution of the original weak form by calling the function of the element
+  // Layout of the augmented residual vector (raw_ndof = elem_pt->ndof()), analogous to
+  // MyHopfHandler::get_residuals() but with the azimuthal mode number m folded into the
+  // generated code's "residual mode" (0: base/axisymmetric state, 1: real part of the m!=0
+  // Jacobian/mass matrix, 2: imaginary part - selected here via set_assembled_residual()):
+  //   [0, raw_ndof)              base (axisymmetric) residuals R(u)
+  //   [raw_ndof, 2*raw_ndof)     real part of (J_real+i*J_imag)*(Re+i*Im) - i*Omega*(M_real+i*M_imag)*(Re+i*Im)
+  //   [2*raw_ndof, 3*raw_ndof)   imag part of the same (only if has_imaginary_part)
+  //   3*raw_ndof [+1]            normalization equations, accumulated additively across elements
+  // If has_imaginary_part is false, Omega is fixed at 0 and only the real eigen-equation/
+  // normalization are assembled, shifting the layout by one block (see the ndof()/eqn_number()
+  // comments for the exact offsets in that case). Degrees of freedom listed in
+  // base_dofs_forced_zero/eigen_dofs_forced_zero (fixed by the axis boundary condition for the
+  // given m) have their residuals patched to zero after the general assembly.
   void AzimuthalSymmetryBreakingHandler::get_residuals(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals)
   {
     bool lambda_tracking=(Parameter_pt==Problem_pt->get_lambda_tracking_real());
@@ -2474,6 +2629,15 @@ namespace pyoomph
   }
 
   // Assembling the Jacobian matrix
+  // Two independent code paths, selected by whether analytic Hessian-vector products and
+  // parameter derivatives are available (ana_hessian): the !ana_hessian branch fills the
+  // eigen-equation/normalization blocks directly from the real/imag Jacobian and mass-matrix
+  // contributions (obtained by switching the generated code's residual mode via
+  // set_assembled_residual()) and finite-differences the remaining u- and parameter-derivative
+  // blocks by perturbing get_residuals(); the analytic branch instead requests Hessian-vector
+  // products (JHess_real/imag, MHess_real/imag = second derivatives of J/M contracted with the
+  // eigenvector Eig=(Re,Im)) and parameter derivatives directly from the generated code via a
+  // combined multi-assembly call, avoiding any finite differencing.
   void AzimuthalSymmetryBreakingHandler::get_jacobian(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian)
   {
     bool lambda_tracking=(Parameter_pt==Problem_pt->get_lambda_tracking_real());
@@ -2770,7 +2934,12 @@ namespace pyoomph
       }
     }
 
-    
+
+    // Enforce the axis boundary conditions for the current azimuthal mode m: for dofs listed in
+    // base_dofs_forced_zero/eigen_dofs_forced_zero, overwrite their Jacobian row with the
+    // identity (and zero the residual, for the analytic-Hessian path where residuals were
+    // already filled above) so that Newton's method simply keeps them at zero rather than
+    // solving the (physically meaningless, for this m) original equation there.
     // Loop through the dofs
     for (unsigned i = 0; i < raw_ndof; i++)
     {
@@ -3082,6 +3251,9 @@ namespace pyoomph
     }
   }
 
+  // Looks up (without switching) the residual-form index for elem_pt's generated code that
+  // corresponds to residual_mode (0: base/axisymmetric, 1: real azimuthal, 2: imag azimuthal),
+  // as set up by setup_solved_azimuthal_contributions().
   // Please reset it to the base state at the end via
   // set_assembled_residual(element,0)
   int AzimuthalSymmetryBreakingHandler::resolve_assembled_residual(oomph::GeneralisedElement *const &elem_pt, int residual_mode)
@@ -3100,6 +3272,9 @@ namespace pyoomph
     return entry.residual_indices[residual_mode];
   }
 
+  // Switches elem_pt's generated code to assemble the residual form given by residual_mode
+  // (0: base/axisymmetric, 1: real azimuthal, 2: imag azimuthal); returns false if that element
+  // has no such contribution, in which case the caller should skip it.
   bool AzimuthalSymmetryBreakingHandler::set_assembled_residual(oomph::GeneralisedElement *const &elem_pt, int residual_mode)
   {
     pyoomph::BulkElementBase *el = dynamic_cast<pyoomph::BulkElementBase *>(elem_pt);
@@ -3120,6 +3295,10 @@ namespace pyoomph
 
 
 
+  // A 1D oomph::Node used purely as a bookkeeping device for the periodic-orbit time mesh:
+  // its single "spatial" coordinate stores the normalized orbit coordinate s in [0,1), and
+  // 'index' records which entry of the augmented dof set (which discrete time point / Tadd
+  // slot) this node corresponds to.
   class TimeNode : public oomph::Node
   {
     protected:
@@ -3136,11 +3315,21 @@ namespace pyoomph
 
   //////// PERIODIC ORBIT TRACKER
 
+  // Sets up the augmented dof set for periodic-orbit tracking: the current problem dofs
+  // (at s=0) become x0, and 'tadd' (the caller's initial guess for the orbit at further
+  // discrete time points) is pushed onto the problem's dof pointers as additional unknowns,
+  // together with the period T itself. The Poincare-plane constraint (x0, n0, d_plane) used
+  // to fix the phase of the orbit (when T_constraint_mode==0) is derived from the initial
+  // guess: n0 is the (normalized) direction from the first to the last extra time point,
+  // i.e. approximately the orbit's velocity direction at s=0, so that the plane x.n0=d_plane
+  // cuts transversally through the orbit near the starting point. The remainder of the
+  // constructor (below) sets up whichever discretization (B-spline / Floquet / collocation)
+  // was requested; see the class comment in bifurcation.hpp for the three modes.
   PeriodicOrbitHandler::PeriodicOrbitHandler(Problem *const &problem_pt, const double &period, const std::vector<std::vector<double>> &tadd, int bspline_order, int gl_order, std::vector<double> knots,unsigned T_constraint) : Problem_pt(problem_pt), T(period), T_constraint_mode(T_constraint), time_mesh(NULL), collocation_gl(NULL)
   {
-    Ndof = problem_pt->ndof();    
+    Ndof = problem_pt->ndof();
     n_element = problem_pt->mesh_pt()->nelement();
-    Tadd=tadd;    
+    Tadd=tadd;
     x0.resize(Ndof);
     n0.resize(Ndof);
     double nlength=0;
@@ -3199,6 +3388,8 @@ namespace pyoomph
 
     
     
+    // If not given explicitly, distribute the knots (normalized orbit coordinates s in [0,1])
+    // uniformly over the discrete time points; otherwise just validate the caller-supplied knots.
     if (knots.empty())
     {
       knots.resize(Tadd.size()+(floquet_mode ? 1: 2));
@@ -3221,6 +3412,12 @@ namespace pyoomph
     this->s_knots.back()=1.0;
 
     /// Setup the finite difference information here
+    // For the (non-B-spline, non-collocation) modes, precompute the finite-difference weights
+    // and neighboring-knot indices used to approximate du/ds at each knot: bspline_order==-1
+    // gives a first-order-accurate central difference, bspline_order==-2 a second-order-accurate
+    // backward difference, and bspline_order==0 a simple forward difference between consecutive
+    // knots (used in the plain Floquet/time-nodal mode). Indices wrap periodically via
+    // get_periodic_knot_index()/get_knot_value() since the orbit is periodic in s.
     if (bspline_order<=0 && bspline_order>=-2)
     {
       this->FD_ds_order=1; 
@@ -3272,6 +3469,11 @@ namespace pyoomph
     }
     else if (bspline_order<0) // Time mesh mode
     {
+      // Orthogonal-collocation ("time mesh") mode: build a 1D finite-element mesh whose
+      // "spatial" coordinate is the orbit parameter s, with elements of collocation order
+      // 'order' (encoded as bspline_order=-(order+2)) and Gauss-Legendre integration of order
+      // gl_order=order within each element; time_mesh/collocation_gl are then used by
+      // get_residuals_collocation_mode()/get_jacobian_collocation_mode().
       unsigned order=-bspline_order-2;
       if (order==0) throw_runtime_error("Orthogonal collocation method order "+std::to_string(order)+" is not implemented");      
       if ((s_knots.size()-1)%order!=0) throw_runtime_error("The (number of knots-1) must be a multiple of the orthogonal collocation method order");
@@ -3348,6 +3550,10 @@ namespace pyoomph
 
   }
 
+  // Returns the s-value of knot index i, extended periodically: indices outside [0,s_knots.size()-1)
+  // wrap around by +-L (L being the total period length in s, i.e. 1.0) so that finite-difference
+  // stencils near the start/end of the orbit can transparently reference "neighboring" knots on
+  // the other side of the periodic boundary.
   double PeriodicOrbitHandler::get_knot_value(int i)
   {
     double L=this->s_knots.back()-this->s_knots.front();
@@ -3357,13 +3563,17 @@ namespace pyoomph
     return this->s_knots[i]+offs;
   }
 
+  // Like get_knot_value(), but returns the wrapped-around knot *index* (without an offset),
+  // e.g. to index into Tadd/dof arrays for a periodically-extended stencil position.
   unsigned PeriodicOrbitHandler::get_periodic_knot_index(int i)
-  {    
+  {
     while (i<0) { i+=this->s_knots.size()-1; }
     while (i>=(int)this->s_knots.size()-1) { i-=(int)this->s_knots.size()-1;  }
     return i;
   }
 
+  // Frees the time mesh/collocation integral/B-spline basis (if any) and restores the problem
+  // to its original (non-augmented) size.
   PeriodicOrbitHandler::~PeriodicOrbitHandler()
   {
     if (time_mesh) 
@@ -3383,11 +3593,16 @@ namespace pyoomph
     Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
     if (basis) {delete this->basis; this->basis=NULL;}
   }
+  // Maps a local dof index to the global equation number: the first nT*raw_ndof local dofs
+  // are the element's raw dofs replicated over all nT=n_tsteps() discrete time points
+  // (tindex = which time point, local_eqn = which raw dof; the global numbering groups all
+  // dofs of one time point together, offset by Ndof*tindex), and the final local dof is the
+  // shared unknown period T (T_global_eqn).
   unsigned long PeriodicOrbitHandler::eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local)
   {
     unsigned raw_ndof = elem_pt->ndof();
     unsigned long global_eqn;
-    unsigned nT=this->n_tsteps();  
+    unsigned nT=this->n_tsteps();
     //std::cout << "GETTING GLOB EQ " << ieqn_local << " " << nT << " " << raw_ndof << std::endl;  
     if (ieqn_local < nT*raw_ndof)
     {
@@ -3406,10 +3621,12 @@ namespace pyoomph
   
  
 
+  // Augmented dofs of the element: its raw dofs replicated at each of the nT discrete time
+  // points making up the orbit, plus one shared dof for the period T.
   unsigned PeriodicOrbitHandler::ndof(oomph::GeneralisedElement *const &elem_pt)
   {
-      unsigned nT=this->n_tsteps();    
-      return elem_pt->ndof()*nT +1; 
+      unsigned nT=this->n_tsteps();
+      return elem_pt->ndof()*nT +1;
   }
 
 /*
@@ -3563,6 +3780,23 @@ namespace pyoomph
   }
 */
 
+  // Orthogonal-collocation residual assembly. The periodic BVP being discretized is
+  // (1/T) dU/ds = f(U) (f being the original problem's residual-implied time derivative,
+  // s in [0,1) the normalized orbit coordinate, T the unknown period), enforced pointwise at
+  // the Gauss-Legendre collocation points within each element of time_mesh. At each collocation
+  // point: U(s) and dU/ds(s) are interpolated from the surrounding nodal dof values (dof_backup
+  // for the node aliased to the problem's current dofs, Tadd[index-1] for the other nodes), the
+  // interpolated U is temporarily written into the problem's dof pointers so that the original
+  // element's get_jacobian_and_mass_matrix() (or its parameter-derivative variant, if
+  // parameter_pt!=NULL) evaluates f and M at that state, and the weighted residual
+  // f(U)*w + M(U)/T*(dU/ds)*w is accumulated into the residual block belonging to that
+  // collocation node's time index. Afterwards the temporarily overwritten dofs are restored.
+  // If floquet_mode, an extra closure residual enforces periodicity between the last explicit
+  // time point and the (aliased) starting point. Finally, unless computing a parameter
+  // derivative, one additional scalar residual enforces the phase-fixing constraint: either the
+  // Poincare-plane condition (T_constraint_mode==0, using x0/n0/d_plane) or, for
+  // T_constraint_mode==1, orthogonality of the current orbit's velocity to the reference orbit's
+  // velocity du0ds (integrated collocation-wise inside the main loop above).
 void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals,double *const &parameter_pt)
   {
       residuals.initialise(0.0);
@@ -3704,7 +3938,15 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
   }
 
   
-  void PeriodicOrbitHandler::get_residuals_floquet_mode(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals,double *const &parameter_pt)  
+  // Floquet-mode residual assembly: a trapezoidal-like (midpoint-rule) discretization of
+  // (1/T) dU/ds = f(U) between each pair of consecutive discrete time points (U0 at ti, Uplus
+  // at ti+1): evaluates f and M at the midpoint state U=(U0+Uplus)/2 and forms
+  // f(U) + M(U)/T*dUds, with dUds obtained from the finite-difference weight FD_ds_weights[ti][0]
+  // precomputed in the constructor. The final explicit time point is not looped over directly;
+  // instead a closure residual ties it to the (aliased) starting point, enforcing periodicity.
+  // As in get_residuals_collocation_mode(), one extra scalar residual fixes the phase, via
+  // either the Poincare-plane condition or orthogonality to the reference orbit's velocity du0ds.
+  void PeriodicOrbitHandler::get_residuals_floquet_mode(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals,double *const &parameter_pt)
   {
       residuals.initialise(0.0);
       unsigned raw_ndof = elem_pt->ndof();
@@ -3792,6 +4034,11 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
   }
 
 
+  // Analytic-Hessian counterpart of get_residuals_floquet_mode(): requires analytic Hessian-
+  // vector products (the du/ds-contracted Hessian dMdU_dUdsterm is requested per midpoint via a
+  // multi-assembly call) since finite-differencing the whole periodic-orbit Jacobian would be
+  // far too expensive; reuses the same midpoint/finite-difference discretization as the residual
+  // routine to fill in the corresponding Jacobian blocks between each pair of time points.
    void PeriodicOrbitHandler::get_jacobian_floquet_mode(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian)
   {
       if (!Problem_pt->are_hessian_products_calculated_analytically())
@@ -3930,7 +4177,14 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       }
   }
 
-  void PeriodicOrbitHandler::get_residuals_time_nodal_mode(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals,double *const &parameter_pt)  
+  // Plain nodal finite-difference residual assembly (used for bspline_order in {-1,-2}, i.e.
+  // central or backward-difference discretizations of dU/ds): unlike the Floquet-mode midpoint
+  // rule, here f(U) and M(U) are evaluated directly at each nodal time point ti (not a midpoint),
+  // and dU/ds at that point is formed from the precomputed FD_ds_weights[ti]/FD_ds_inds[ti]
+  // stencil (a linear combination of dof_backup and the relevant Tadd entries). Otherwise
+  // mirrors get_residuals_floquet_mode(): accumulates f(U)+M(U)/T*dUds into the residual block
+  // for time index ti, plus the phase-fixing constraint residual.
+  void PeriodicOrbitHandler::get_residuals_time_nodal_mode(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals,double *const &parameter_pt)
   {
       residuals.initialise(0.0);
       unsigned raw_ndof = elem_pt->ndof();
@@ -4024,7 +4278,15 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
 
   }
 
-  void PeriodicOrbitHandler::get_residuals_bspline_mode(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals,double *const &parameter_pt)  
+  // Weighted-residual (Galerkin) assembly for the B-spline discretization: for each B-spline
+  // basis element and each of its Gauss-Legendre integration points (weights/shape functions
+  // psi_s/dpsi_ds and the contributing dof indices given by this->basis->get_integration_info()),
+  // interpolate U(s)/dU/ds(s), evaluate f(U) and M(U) there, and scatter the weighted residual
+  // f(U)*w + M(U)/T*dUds*w into the residual blocks of every time index the basis function
+  // touches (weighted by its shape-function value psi_s), i.e. a standard Galerkin projection of
+  // (1/T) dU/ds = f(U) onto the periodic B-spline space. As in the other modes, one extra scalar
+  // residual fixes the orbit's phase (Poincare-plane or reference-orbit-orthogonality constraint).
+  void PeriodicOrbitHandler::get_residuals_bspline_mode(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals,double *const &parameter_pt)
   {
       residuals.initialise(0.0);
       unsigned raw_ndof = elem_pt->ndof();
@@ -4141,12 +4403,17 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       }
   }
 
-  void PeriodicOrbitHandler::get_residuals(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals)  
-  {        
+  // Dispatches to the residual-assembly routine matching the active discretization: collocation
+  // (time_mesh set), Floquet (explicit periodic node), plain nodal finite differences, or
+  // B-spline (basis set), in that priority order. Under PYOOMPH_BIFURCATION_HANDLER_DEBUG, also
+  // cross-checks the result against the corresponding get_jacobian_*_mode()'s own residual
+  // output as a consistency check between the two.
+  void PeriodicOrbitHandler::get_residuals(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals)
+  {
     unsigned raw_ndof=elem_pt->ndof();
     if (!raw_ndof) {residuals.initialise(0.0); return;}
       if (!this->basis)
-      {                
+      {
         if (time_mesh) 
         {
           
@@ -4403,6 +4670,13 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
   }
   */
 
+  // Analytic-Hessian counterpart of get_residuals_collocation_mode(): re-evaluates the same
+  // per-collocation-point residual (f(U)+M(U)/T*dUds) while additionally requesting the
+  // Hessian-vector product of J and M contracted with dUds (via multi-assembly, when the mass
+  // matrix is not provably constant) so that the du/ds-dependent Jacobian terms can be filled
+  // analytically instead of by finite differences; the resulting element Jacobian and mass
+  // matrix are scattered into the (time-index, time-index) blocks weighted by the collocation
+  // shape functions, mirroring the residual scatter pattern of the residual routine.
  void PeriodicOrbitHandler::get_jacobian_collocation_mode(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals,oomph::DenseMatrix<double> & jacobian)
   {
       residuals.initialise(0.0);
@@ -4591,6 +4865,12 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
   }
 
 
+  // Analytic-Hessian counterpart of get_residuals_bspline_mode(): requires analytic Hessian-
+  // vector products; re-runs the same Galerkin quadrature loop over B-spline basis elements
+  // and Gauss-Legendre points, additionally scattering the element Jacobian/mass-matrix (and,
+  // where the mass matrix is not constant, the du/ds-contracted Hessian) into the Jacobian
+  // blocks for every pair of time indices touched by the current integration point, weighted
+  // by products of shape-function values/derivatives.
   void PeriodicOrbitHandler::get_jacobian_bspline_mode(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian)
   {
       if (!Problem_pt->are_hessian_products_calculated_analytically())
@@ -4778,6 +5058,15 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
 
   }
 
+  // Snapshots the current orbit (the reference orbit at the time this is called, typically
+  // right after a converged solve) into du0ds, the nodal values used by the T_constraint_mode==1
+  // phase constraint (orthogonality of the new orbit's velocity to the reference orbit's
+  // velocity). Only relevant when T_constraint_mode==1; a no-op otherwise. In the collocation
+  // and B-spline modes, the *values* of the reference orbit are stored (its derivative is later
+  // formed via the same shape-function derivatives used for the unknown orbit, inside the
+  // residual/Jacobian routines); in the Floquet and plain finite-difference modes, the
+  // (unscaled, since any constant ds-factor cancels in the resulting integral) finite-difference
+  // derivative is precomputed directly here.
   void PeriodicOrbitHandler::update_phase_constraint_information()
   {
     if (T_constraint_mode==1)
@@ -4871,6 +5160,10 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
     }
   }
 
+  // Analytic-Hessian counterpart of get_residuals_time_nodal_mode(): re-evaluates f(U) and M(U)
+  // at each nodal time point (not a midpoint) and fills in the corresponding Jacobian blocks
+  // using the precomputed FD_ds_weights/FD_ds_inds stencil for the du/ds dependence, requesting
+  // Hessian-vector products where the mass matrix is not provably constant.
   void PeriodicOrbitHandler::get_jacobian_time_nodal_mode(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian)
   {
       //std::cout << "FD MODE STARTED " << std::endl;
@@ -5034,6 +5327,13 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       }
   }
 
+  // Dispatches to the Jacobian-assembly routine matching the active discretization (same
+  // priority order as get_residuals()). Under PYOOMPH_BIFURCATION_HANDLER_DEBUG, both a finite-
+  // difference Jacobian (obtained by perturbing every augmented dof and calling get_residuals())
+  // and the analytic one from the dispatched *_mode() routine are computed and compared
+  // entry-by-entry, printing any mismatch; the analytic values are then used regardless. This
+  // debug path is expensive (one extra residual evaluation per dof) and only active when the
+  // macro is defined.
   void PeriodicOrbitHandler::get_jacobian(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian)
   {
     unsigned raw_ndof=elem_pt->ndof();
@@ -5189,6 +5489,9 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
 #endif   
   }
 
+  // Saves the current (s=0) problem dof values into backed_up_dofs, so they can be temporarily
+  // overwritten (via set_dofs_to_interpolated_values()) and later restored with restore_dofs().
+  // Throws if a backup is already in progress (nested backup/restore is not supported).
   void PeriodicOrbitHandler::backup_dofs()
   {
     oomph::Vector<double *> & alldofs=this->Problem_pt->GetDofPtr();
@@ -5203,6 +5506,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       for (unsigned int i=0;i<Ndof;i++) std::cout << " LOOP CHECK " << i << "  " << backed_up_dofs[i] << " vs " << Tadd.back()[i] << " DIFFERENCE " << (backed_up_dofs[i]-Tadd.back()[i])*10000<< "  PTSRS " << alldofs[i] << " vs " << &(Tadd.back()[i]) << std::endl;
     }*/
   }
+  // Restores the problem dofs saved by backup_dofs() and clears the backup.
   void PeriodicOrbitHandler::restore_dofs()
   {
     if (backed_up_dofs.size()!=Ndof) throw_runtime_error("The dofs have not been backed up");
@@ -5213,6 +5517,12 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
     }
     backed_up_dofs.resize(0); // Clear the backup
   }
+  // Overwrites the problem's dofs with the orbit state interpolated at normalized orbit
+  // coordinate s (wrapped periodically into [0,1) via clamped_s), using linear interpolation
+  // between the two bracketing discrete time points in the non-B-spline modes, or the B-spline
+  // basis's own interpolation (basis->get_interpolation_info()) otherwise. Requires backup_dofs()
+  // to have been called first, since the s=0 state is read from backed_up_dofs rather than the
+  // (already overwritten, in a typical sampling loop) live dof values.
   void PeriodicOrbitHandler::set_dofs_to_interpolated_values(const double &s)
   {
     if (backed_up_dofs.size()!=Ndof) throw_runtime_error("The dofs have not been backed up");
@@ -5276,6 +5586,10 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
     }
   }
 
+  // Returns quadrature samples (s_i, w_i) such that integral_0^1 f(U(s)) ds ~= sum_i f(U(s_i))*w_i,
+  // matching whichever discretization is active: midpoint-rule samples between knots for the
+  // collocation/Floquet modes, knot-centered samples with a locally averaged spacing for the
+  // plain finite-difference mode, or the true Gauss-Legendre points/weights of the B-spline basis.
   std::vector<std::tuple<double,double>> PeriodicOrbitHandler::get_s_integration_samples()
   {
     std::vector<std::tuple<double,double>> samples;
@@ -5327,6 +5641,10 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
   }
 
 
+  // Derivative of the augmented residuals with respect to a parameter: dispatches to the same
+  // *_mode() residual routines used by get_residuals(), but with parameter_pt!=NULL so that
+  // they evaluate the parameter-derivative variant of the element residual/mass matrix instead
+  // (see the "if (!parameter_pt) ... else ..." branches inside each get_residuals_*_mode()).
   void PeriodicOrbitHandler::get_dresiduals_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt,oomph::Vector<double> &dres_dparam)
   {
     unsigned raw_ndof=elem_pt->ndof();

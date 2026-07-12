@@ -30,12 +30,19 @@ The main author may be contacted at c.diddens@utwente.nl
 namespace pyoomph
 {
 
+  // Overload used by the generic (oomph-lib) interface: discards the documentation output.
   void TemplatedMeshBase1d::setup_boundary_element_info()
   {
     std::ostringstream oss;
     setup_boundary_element_info(oss);
   }
 
+  // Build Boundary_element_pt / Face_index_at_boundary for a 1d (line-element) mesh: for every 1D
+  // element, check whether its end nodes lie on a boundary and, if so, record the element as adjacent
+  // to that boundary together with which end (-1 = left, +1 = right) touches it. In 1D every boundary
+  // node is a vertex node of exactly one boundary element, so (unlike 2D/3D) elements can be added to
+  // Boundary_element_pt immediately without a two-pass "candidate then confirm" scheme. If PARANOID and
+  // not MPI-distributed, also checks that every boundary has exactly one adjacent element.
   void TemplatedMeshBase1d::setup_boundary_element_info(std::ostream &outfile)
   {
     // Initialise documentation flag
@@ -216,6 +223,13 @@ namespace pyoomph
     Lookup_for_elements_next_boundary_is_setup = true;
   }
   
+  // Find all "internal facets" of a 1d mesh, i.e. vertex nodes shared between two neighbouring bulk
+  // elements (as opposed to nodes lying on an external mesh boundary), and pair each element/side with
+  // its opposite neighbour across that shared node. Used e.g. to assemble DG-type interior-facet terms.
+  // Algorithm: walk every element's two vertex nodes (resolving node copies to their master via
+  // copied_node_pt), and use nodemap to remember, per (master) node, the first element/side that
+  // touches it; when a second element touches the same node, the pair is complete and both sides are
+  // recorded as opposite of one another.
   void TemplatedMeshBase1d::fill_internal_facet_buffers(std::vector<BulkElementBase*> & internal_elements, std::vector<int> & internal_face_dir,std::vector<BulkElementBase*> & opposite_elements,std::vector<int> & opposite_face_dir,std::vector<int> & opposite_already_at_index)
   {
     internal_elements.clear();

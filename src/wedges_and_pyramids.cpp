@@ -1,8 +1,14 @@
 #include "wedges_and_pyramids.hpp"
 
+// This file implements the geometry (Gauss integration rules, shape functions, face/node
+// numbering, and refinement glue) for the wedge/prism and pyramid element types that
+// oomph-lib itself does not support; see wedges_and_pyramids.hpp for the class overview.
 namespace oomph
-{ 
+{
 
+// 6-point rule for the linear (C1) wedge: the tensor product of a 3-point symmetric rule
+// exact for linear functions on the triangular (s0,s1) cross-section and a 2-point
+// Gauss-Legendre rule (at (1 -+ 1/sqrt(3))/2) along the extrusion direction s2.
 const double WedgeGaussC1::Knot[6][3] =
 {
   {1.0/6.0, 1.0/6.0, (1.0-1.0/sqrt(3.0))/2.0},
@@ -24,6 +30,9 @@ const double WedgeGaussC1::Weight[6] =
   1.0/12.0
 };
 
+// 12-point Stroud "conical product" rule for the linear pyramid: a 2x2 Gauss-Legendre grid
+// in (s0,s1) collapsed conically towards the apex, combined with a 3-point Gauss rule along
+// s2 (whose weights are scaled by (1-z)^2 below to account for the shrinking cross-section).
 const double PyramidGaussC1::Knot[12][3] =
 {
     // Stroud conical based 12 point rule
@@ -616,8 +625,10 @@ const double WedgeGaussC2::Weight[18] =
 
   WedgeGaussC1  WedgeElementC1::Default_integration_scheme;
 
+  // Map local face-node index i (on facet face_index, see the node/facet sketch in the
+  // WedgeElementC1 class comment) to the bulk element's node index.
   unsigned int WedgeElementC1::get_bulk_node_number(const int & face_index, const unsigned int& i) const
-  {     
+  {
     if (face_index==0) 
     { 
       switch (i)
@@ -677,8 +688,10 @@ const double WedgeGaussC2::Weight[18] =
 
 PyramidGaussC1  PyramidElementC1::Default_integration_scheme;
 
+  // Map local face-node index i (on facet face_index, see the node/facet sketch in the
+  // PyramidElementC1 class comment) to the bulk element's node index.
   unsigned int PyramidElementC1::get_bulk_node_number(const int & face_index, const unsigned int& i) const
-  {     
+  {
         if (face_index==0) 
     { 
       switch (i)
@@ -839,8 +852,14 @@ WedgeGaussC2  WedgeElementC2::Default_integration_scheme;
 
 ///////////
 
+  // Populate a FaceElement representing local facet `face_index` of this bulk wedge
+  // element: wire up its nodes (via get_bulk_node_number()), the face-to-bulk coordinate
+  // mapping, and the outward normal sign, so the FaceElement can be used for e.g. boundary
+  // integrals/conditions. The commented-out block below is a self-consistency check (not
+  // normally compiled in) verifying that get_bulk_node_number()'s ordering actually matches
+  // the local node ordering implied by face_to_bulk_coordinate_fct_pt().
   void WedgeElementBase::build_face_element(const int& face_index,FaceElement* face_element_pt)
-  {    
+  {
     face_element_pt->set_nodal_dimension(nodal_dimension());   
     face_element_pt->bulk_element_pt() = this;
 
@@ -963,8 +982,13 @@ WedgeGaussC2  WedgeElementC2::Default_integration_scheme;
 
   
 
+  // Per-facet affine maps from a facet's own 2d local coordinate s to the wedge's 3d bulk
+  // local coordinate s_bulk (facet numbering/geometry as sketched in the WedgeElementC1
+  // class comment: faces 0/1 are the triangular s2=const end-caps in (s0,s1)-like
+  // coordinates, faces 2-4 are quadrilateral side faces parametrized by a standard
+  // [-1,1]x[-1,1] quad coordinate s that gets rescaled to the relevant [0,1] bulk range.
   namespace WedgeElementFaceToBulkCoordinates
-  {    
+  {
     void face0(const Vector<double>& s, Vector<double>& s_bulk)
     {  
         s_bulk[0] = s[1];
@@ -1002,13 +1026,16 @@ WedgeGaussC2  WedgeElementC2::Default_integration_scheme;
     
   } 
 
+  // Derivatives d(s_bulk)/d(s_face) of the maps above, plus the bulk direction that is
+  // "interior" (perpendicular to the facet) -- needed e.g. for evaluating bulk shape
+  // function derivatives from a FaceElement. Not yet implemented for wedges.
   namespace WedgeElementBulkCoordinateDerivatives
-  {    
+  {
     void faces0(const Vector<double>& s,DenseMatrix<double>& dsbulk_dsface,unsigned& interior_direction)
     {
         throw_runtime_error("Implement");
     }
-    
+
     void faces1(const Vector<double>& s,DenseMatrix<double>& dsbulk_dsface,unsigned& interior_direction)
     {
         throw_runtime_error("Implement");
@@ -1028,11 +1055,12 @@ WedgeGaussC2  WedgeElementC2::Default_integration_scheme;
     {
         throw_runtime_error("Implement");
     }
-  } 
+  }
 
 
-  
 
+
+  // Dispatch to the appropriate WedgeElementFaceToBulkCoordinates::faceN function pointer for face_index in {0,...,4}.
   CoordinateMappingFctPt WedgeElementBase::face_to_bulk_coordinate_fct_pt(const int& face_index) const
     {
       if (face_index == 0)
@@ -1054,7 +1082,8 @@ WedgeGaussC2  WedgeElementC2::Default_integration_scheme;
       else if (face_index == 4)
       {
         return &WedgeElementFaceToBulkCoordinates::face4;
-      }      
+      }
+      else
       {
         std::string err = "Face index should be in {0..4}.";
         throw OomphLibError(
@@ -1094,15 +1123,18 @@ WedgeGaussC2  WedgeElementC2::Default_integration_scheme;
       }
     }
 
+    // Sign to apply to the geometrically-computed face normal to make it point outward;
+    // always +1 here (i.e. the face node orderings above are already chosen consistently).
     int WedgeElementBase::face_outer_unit_normal_sign(const int& face_index) const
-    {                
+    {
         return 1;
     }
 
 
 //////////////////////////////////
+  // Pyramid counterpart of WedgeElementBase::build_face_element(); see that function's comment.
   void PyramidElementBase::build_face_element(const int& face_index,FaceElement* face_element_pt)
-  {    
+  {
     face_element_pt->set_nodal_dimension(nodal_dimension());   
     face_element_pt->bulk_element_pt() = this;
 
@@ -1129,8 +1161,12 @@ WedgeGaussC2  WedgeElementC2::Default_integration_scheme;
 
   
 
+  // Per-facet affine/rational maps from a facet's own 2d local coordinate s to the
+  // pyramid's 3d bulk local coordinate s_bulk; faces 0-3 are the triangular side faces
+  // meeting at the apex, face 4 is the quadrilateral base (see the PyramidElementC1 class
+  // comment for the facet/node sketch).
   namespace PyramidElementFaceToBulkCoordinates
-  {    
+  {
     void face0(const Vector<double>& s, Vector<double>& s_bulk)
     {
         s_bulk[0] = s[1];
@@ -1167,13 +1203,14 @@ WedgeGaussC2  WedgeElementC2::Default_integration_scheme;
     }
   } 
 
+  // Derivatives of the maps above; see WedgeElementBulkCoordinateDerivatives. Not yet implemented for pyramids.
   namespace PyramidElementBulkCoordinateDerivatives
-  {    
+  {
     void faces0(const Vector<double>& s,DenseMatrix<double>& dsbulk_dsface,unsigned& interior_direction)
     {
         throw_runtime_error("Implement");
     }
-    
+
     void faces1(const Vector<double>& s,DenseMatrix<double>& dsbulk_dsface,unsigned& interior_direction)
     {
         throw_runtime_error("Implement");
@@ -1197,6 +1234,7 @@ WedgeGaussC2  WedgeElementC2::Default_integration_scheme;
 
  
 
+  // Dispatch to the appropriate PyramidElementFaceToBulkCoordinates::faceN function pointer for face_index in {0,...,4}.
   CoordinateMappingFctPt PyramidElementBase::face_to_bulk_coordinate_fct_pt(const int& face_index) const
     {
       if (face_index == 0)
@@ -1218,7 +1256,8 @@ WedgeGaussC2  WedgeElementC2::Default_integration_scheme;
       else if (face_index == 4)
       {
         return &PyramidElementFaceToBulkCoordinates::face4;
-      }      
+      }
+      else
       {
         std::string err = "Face index should be in {0..4}.";
         throw OomphLibError(
@@ -1256,9 +1295,10 @@ WedgeGaussC2  WedgeElementC2::Default_integration_scheme;
       }
     }
 
+    // See WedgeElementBase::face_outer_unit_normal_sign(): always +1, the face node orderings above are already outward-consistent.
     int PyramidElementBase::face_outer_unit_normal_sign(const int& face_index) const
-    {         
-      return 1;       
+    {
+      return 1;
     }
 
 }
