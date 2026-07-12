@@ -4788,7 +4788,7 @@ namespace pyoomph
 
 	// Emits the top-of-file preprocessor boilerplate for the generated element's C source: the
 	// shared-library marker, an optional flag enabling Hessian-by-symmetry assembly, and the
-	// jitbridge headers that declare the runtime data structures (JITElementInfo_t, JITShapeInfo_t,
+	// jitbridge header that declares the runtime data structures (JITElementInfo_t, JITShapeInfo_t,
 	// hanging-node macros, ...) used throughout the rest of the generated code.
 	void FiniteElementCode::write_code_header(std::ostream &os)
 	{
@@ -4799,8 +4799,7 @@ namespace pyoomph
 		}
 		os << "#include \"jitbridge.h\"" << std::endl
 		   << std::endl;
-		os << "static JITFuncSpec_Table_FiniteElement_t * my_func_table;" << std::endl;
-		os << "#include \"jitbridge_hang.h\"" << std::endl
+		os << "static JITFuncSpec_Table_FiniteElement_t * my_func_table;" << std::endl
 		   << std::endl;
 	}
 
