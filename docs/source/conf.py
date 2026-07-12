@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.abspath('../../pyoomph'))
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = 'pyoomph'
-copyright = '2025, Christian Diddens, Duarte Rocha & Maxim de Wildt'
+copyright = '2026, Christian Diddens, Duarte Rocha & Maxim de Wildt'
 author = 'Christian Diddens, Duarte Rocha & Maxim de Wildt'
 
 import re
@@ -81,13 +81,7 @@ autodoc_inherit_docstrings=False
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
 
 html_theme = 'sphinx_rtd_theme'
-# sphinx_rtd_theme collapses everything but the current page's branch by default, so a fresh
-# load of index.html just shows the single top-level "Pyoomph Tutorial" entry. Disabling that
-# renders the full nested toctree open in the sidebar right away.
-html_theme_options = {
-    'collapse_navigation': False,
-    'navigation_depth': -1,
-}
+
 html_static_path = ['_static']
 
 html_css_files = [

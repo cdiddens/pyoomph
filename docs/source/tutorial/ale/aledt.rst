@@ -94,6 +94,9 @@ In conclusion, if one has a moving mesh, but want to keep spatio-temporal fields
 The field :math:`c` is now not following the oscillatory motion of the mesh, but stays in place.
 
 
+.. note::
+	When demanding conservation of quantities, this approach is often not sufficient. This is discussed in detail later in :numref:`secgcl`.
+
 .. only:: html
 
 	.. container:: downloadbutton

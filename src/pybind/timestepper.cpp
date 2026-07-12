@@ -32,27 +32,25 @@ void PyReg_TimeStepper(py::module &m)
 	py::class_<oomph::Time>(
 		m, "Time",
 		"Holds the current continuous simulation time and the history of previous time step sizes (dt), "
-		"shared by all TimeStepper objects of a Problem.")
-		// NOTE: intentionally no default value for ``t`` here - omitting the argument from Python must fall
-		// through (via pybind11's overload resolution) to the zero-argument "current time" overload below.
+		"shared by all TimeStepper objects of a Problem (although we only have one time stepper).")		
 		.def("time", (double(oomph::Time::*)(const unsigned &) const) & oomph::Time::time, py::arg("t"),
 			 "Return the continuous time value at history level ``t`` (t=0: current time, t>0: the time ``t`` steps ago).")
 		.def("time", (double &(oomph::Time::*)()) & oomph::Time::time,
-			 "Return the current continuous time value (equivalent to time(0)).")
+			 "Return the current continuous nondimensional time value (equivalent to time(0)).")
 		.def(
 			"set_time", [](oomph::Time &self, double t)
 			{ self.time() = t; },
-			py::arg("t"), "Set the current continuous time value.")
+			py::arg("t"), "Set the current continuous nondimensional time value.")
 		.def(
 			"ndt", [](oomph::Time &self)
 			{ return self.ndt(); },
 			"Return the number of previous time step sizes stored.")
 		.def("dt", (double(oomph::Time::*)(const unsigned &) const) & oomph::Time::dt, py::arg("t") = 0,
-			 "Return the value of the ``t``-th stored time step size (t=0: current/most recent step size, t>0: further in the past).")
+			 "Return the value of the nondimensional  time steps ``t``-th stored time step size (t=0: current/most recent step size, t>0: further in the past).")
 		.def(
 			"set_dt", [](oomph::Time *self, const unsigned &index, const double &v)
 			{ self->dt(index) = v; },
-			py::arg("index"), py::arg("value"), "Set the value of the ``index``-th stored time step size.");
+			py::arg("index"), py::arg("value"), "Set the value of the ``index``-th stored nondimensional time step size.");
 
 	py::class_<oomph::TimeStepper>(
 		m, "TimeStepper",
