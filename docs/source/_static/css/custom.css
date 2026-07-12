@@ -1,3 +1,23 @@
+/* sphinx_rtd_theme hides nested <ul> in the sidebar TOC unless the ancestor <li> is
+   the "current" page's branch (see theme.css ".wy-menu-vertical li ul{display:none}"),
+   independent of the collapse_navigation setting in conf.py. Force it open always. */
+.wy-menu-vertical li ul {
+    display: block !important;
+}
+
+/* Forcing the <ul>s open above isn't enough on its own: the light background that the theme
+   normally paints behind an expanded ("current") branch - which is what makes the dark text
+   of the nested entries readable - only gets applied via a JS click, not by our CSS override.
+   Since "Pyoomph Tutorial" is the only top-level entry, replicate that one background here,
+   which then shows through underneath all of its (always-visible) descendants as well. */
+.wy-menu-vertical li.toctree-l1 {
+    background: #e3e3e3;
+}
+.wy-menu-vertical li.toctree-l1 > a {
+    background: #fcfcfc;
+    color: #404040;
+}
+
 /* Align equation number at right center */
 .eqno {
     float: right;
