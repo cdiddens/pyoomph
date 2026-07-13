@@ -1,30 +1,87 @@
-name: Devcontainer CI
+name: Native Build CI
 
 on:
   workflow_dispatch:
 
 jobs:
-  build_devcontainer:
-    name: Build devcontainer on ${{ matrix.os }}
+  build_and_test:
+    name: Build and test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        # macos-13 is an intel runner, macos-14/-15 is apple silicon
-        os: [ubuntu-latest, macos-15-intel, macos-latest] #, windows-latest
+        # macos-15-intel is an intel runner, macos-latest is apple silicon
+        os: [ubuntu-latest, macos-15-intel, macos-latest, windows-latest]
 
     steps:
       - uses: actions/checkout@v4
 
-      # Windows runners can't build/run this Linux devcontainer via Docker Desktop
-      # the way the other hosts do, so this leg is disabled for now.
-      # - name: Build and run devcontainer task (Windows)
-      #   if: startsWith(matrix.os, 'windows')
-      #   uses: devcontainers/ci@v0.3
-      #   with:
-      #     runCmd: python3 -m pyoomph check all
-
-      - name: Build and run devcontainer task
+      - name: Set up Python
         if: startsWith(matrix.os, 'windows') != true
-        uses: devcontainers/ci@v0.3
+        uses: actions/setup-python@v5
         with:
-          runCmd: python3 -m pyoomph check all
+          python-version: "3.12"
+
+      # See INSTALL.md "Compilation from source" (Linux)
+      - name: Install system dependencies (Linux)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ccache git \
+            python3-dev libopenmpi-dev gfortran libblas-dev liblapack-dev \
+            pybind11-dev libginac-dev libcln-dev libgmp-dev \
+            libglu1-mesa libxcursor1 libopengl0
+
+      # See INSTALL.md "Compilation from source" (Mac): brew install openmpi ccache ginac
+      - name: Install system dependencies (Mac)
+        if: startsWith(matrix.os, 'macos')
+        run: brew install openmpi ccache ginac
+
+      # Linux module list from INSTALL.md, minus petsc4py
+      - name: Install Python build/test dependencies (Linux)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install gmsh mpi4py matplotlib numpy pybind11 \
+            pygmsh scipy meshio pybind11-stubgen scikit-build-core pytest
+
+      # Mac module list from INSTALL.md; mkl version is resolved automatically
+      # from the platform markers in pyproject.toml
+      - name: Install Python build/test dependencies (Mac)
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pybind11 gmsh commonmark six pyparsing pygments pillow \
+            numpy mpi4py kiwisolver fonttools cycler scipy rich python-dateutil packaging \
+            meshio matplotlib pygmsh pybind11-stubgen scikit-build-core pytest
+
+      - name: Build pyoomph
+        if: startsWith(matrix.os, 'windows') != true
+        run: bash ./build_for_develop.sh
+
+      - name: Run self test
+        if: startsWith(matrix.os, 'windows') != true
+        run: cd tests/ && python -m pyoomph check all && python -m pytest *.py
+
+      # Windows has no MSVC-compatible CLN/GiNaC build, so it's built from
+      # source with the MinGW toolchain instead - see the comment in
+      # pyproject.toml under [tool.cibuildwheel.windows] for why. This reuses
+      # the same MSYS2 pipeline as the Wheels workflow, which also runs the
+      # test suite at the end of the script for each Python version it builds.
+      - uses: msys2/setup-msys2@v2
+        if: startsWith(matrix.os, 'windows')
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            autotools
+            patch
+            git
+            base-devel
+            mingw-w64-ucrt-x86_64-toolchain
+
+      - name: Build and test pyoomph (Windows)
+        if: startsWith(matrix.os, 'windows')
+        shell: msys2 {0}
+        run: source ./citools/compile_win_wheels_msys2.sh
