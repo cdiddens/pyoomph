@@ -1107,6 +1107,7 @@ Index : Local coordinates (s0,s1,s2)
 		ninds[1] = node_indices[1];
 		ninds[2] = node_indices[2];
 		ninds[3] = node_indices[3];
+		
 		ninds[4] = node_indices[4];
 
 		ninds[5] = templ->add_intermediate_node_unique(ninds[0], ninds[1]);
@@ -1119,7 +1120,7 @@ Index : Local coordinates (s0,s1,s2)
 		ninds[12] = templ->add_intermediate_node_unique(ninds[3], ninds[4]);
 		ninds[13] = templ->add_intermediate_node_unique(ninds[0], ninds[2]);
 
-		return new MeshTemplateElementWedgeC2(ninds);
+		return new MeshTemplateElementPyramidC2(ninds);
 	}
 
 	/////////////////////////////////

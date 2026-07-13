@@ -1144,7 +1144,7 @@ PyramidGaussC2  PyramidElementC2::Default_integration_scheme;
     face_element_pt->normal_sign() = face_outer_unit_normal_sign(face_index);
   
       // Consistency check: make sure that the order of the get_bulk_node_number matches the order of the nodes in the face element (requires the facet->bulk mapping to be correct, see below)
-    // /*
+    /*
     std::vector<oomph::Vector<double>> xface_buffer;
     std::vector<oomph::Vector<double>> xbulk_buffer;
     for (unsigned int i=0; i<nnode_face; i++)
@@ -1192,10 +1192,10 @@ PyramidGaussC2  PyramidElementC2::Default_integration_scheme;
       }
     }
 
-// */
+*/
 //////////////////////
     // Consistency check: make sure that the facet -> bulk is correct
-    // /*
+    /*
     std::vector<std::vector<double>> sface_test={ {1.0,0.0},{0.0,1.0},{0.2,0.2},{0.2,0.3}, {0.1,0.4}, {0.7,0.1} }; // For triangular faces
     std::ostringstream ai_request;
     ai_request << "I need a affine mapping from a 2d vector sface to a 3d vector s_bulk, which should realize the following mapping:" << std::endl;
@@ -1236,7 +1236,7 @@ PyramidGaussC2  PyramidElementC2::Default_integration_scheme;
       std::cout << "FACE INDEX " << face_index << ": AI Request for affine mapping from face to bulk coordinates:" << std::endl;
       std::cout << ai_request.str() << std::endl;
     }
-    // */
+    */
   }
 
   
