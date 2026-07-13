@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Remove the cmake_build/ directory, i.e. force a full rebuild of pyoomph's own code.
+# Remove the build/ directory, i.e. force a full rebuild of pyoomph's own code.
 #
-# By default, the downloaded/compiled CLN and GiNaC (cmake_build/{cln_build,ginac_build,thirdparty-install})
+# By default, the downloaded/compiled CLN and GiNaC (build/{cln_build,ginac_build,thirdparty-install})
 # are kept, since rebuilding them from source via autotools takes several minutes. Pass
 # --with-thirdparty to also wipe those and force CLN/GiNaC to be re-downloaded and rebuilt from scratch.
 
@@ -30,10 +30,10 @@ for arg in "$@"; do
 done
 
 if [ "$wipe_thirdparty" = 1 ]; then
-	rm -rf cmake_build/
+	rm -rf build/
 else
-	if [ -d cmake_build ]; then
-		find cmake_build -mindepth 1 -maxdepth 1 \
+	if [ -d build ]; then
+		find build -mindepth 1 -maxdepth 1 \
 			! -name cln_build ! -name ginac_build ! -name thirdparty-install \
 			-exec rm -rf {} +
 	fi

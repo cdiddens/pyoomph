@@ -63,7 +63,7 @@ minimum-version = "build-system.requires"
 # (src/pybind/*.cpp) actually needs to recompile per Python version.
 # {state} just keeps wheel/editable/sdist builds from reconfiguring on top
 # of each other; it is not Python-version-specific.
-build-dir = "cmake_build/{state}"
+build-dir = "build/{state}"
 cmake.build-type = "Release"
 # The pure-Python package; the compiled extension is now installed as
 # `pyoomph/_core*.so` (importable as `pyoomph._core`) directly by
