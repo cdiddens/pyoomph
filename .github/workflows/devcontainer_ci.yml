@@ -90,6 +90,9 @@ jobs:
         if: startsWith(matrix.os, 'windows')
         shell: msys2 {0}
         run: |
+          # MSYS2's own python.exe (no pip) otherwise shadows the
+          # actions/setup-python one on PATH, even with path-type: inherit.
+          export PATH="$(cygpath -u "$pythonLocation"):$PATH"
           python -m pip install --upgrade pip
           python -m pip install pybind11 gmsh matplotlib numpy \
             pygmsh scipy meshio pybind11-stubgen scikit-build-core pytest
@@ -101,6 +104,7 @@ jobs:
           CC: gcc
           CXX: g++
         run: |
+          export PATH="$(cygpath -u "$pythonLocation"):$PATH"
           python -m pip install --no-build-isolation -e . -v \
             --config-settings=build-dir=cmake_build \
             --config-settings=cmake.args=-G"Unix Makefiles" \
@@ -110,4 +114,6 @@ jobs:
       - name: Run self test (Windows)
         if: startsWith(matrix.os, 'windows')
         shell: msys2 {0}
-        run: cd tests/ && python -m pyoomph check all && python -m pytest *.py
+        run: |
+          export PATH="$(cygpath -u "$pythonLocation"):$PATH"
+          cd tests/ && python -m pyoomph check all && python -m pytest *.py
