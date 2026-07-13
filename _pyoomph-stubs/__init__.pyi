@@ -963,6 +963,10 @@ class MeshTemplateElementCollection:
         """
         Adds a pyramid element by five node indices
         """
+    def add_pyramid_3d_C2(self, arg0: list[int]) -> None:
+        """
+        Adds a second-order pyramid element by fourteen node indices
+        """
     def add_quad_2d_C1(self, arg0: int, arg1: int, arg2: int, arg3: int) -> None:
         """
         Adds a quadrilateral element by four node indices

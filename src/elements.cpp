@@ -246,6 +246,7 @@ namespace pyoomph
 		Wedge3d[3] = new oomph::WedgeGaussC2();
 
 		Pyramid3d[2]= new oomph::PyramidGaussC1();
+		Pyramid3d[3] = new oomph::PyramidGaussC2();
 	}
 
 	// Returns the cached scheme for the exact requested order if available; otherwise picks the
@@ -1627,6 +1628,22 @@ namespace pyoomph
 			else
 			{
 				throw_runtime_error("Pyramids are not implemented yet for space "+domspace);				
+			}
+		}
+		else if (el->get_geometric_type_index() == 27)
+		{
+			if (domspace == "C1")
+			{
+			  nodemap = {0, 1, 2, 3, 4};
+			  res= new BulkElementPyramid3dC1();
+			}
+			else if (domspace=="C2")
+			{
+              res= new BulkElementPyramid3dC2();
+			}
+			else
+			{
+				throw_runtime_error("Found a pyramid element, which cannot be generalized to the space "+domspace);				
 			}
 		}
 		else
@@ -9153,6 +9170,219 @@ namespace pyoomph
 	}
 
 
+	// Maxim: add Bulk element Pyramid3dC2 here, similar to BulkElementWedge3dC2, if needed
+	// int BulkElementPyramid3dC2::element_index_to_C1[14]={0,1,2,3,4,-1,-1,-1,-1,-1,-1,-1,-1,-1};
+	// bool BulkElementPyramid3dC2::node_only_C2[14] = {false, false, false, false,false,true,true,true,true,true,true,true,true,true};
+
+    // BulkElementPyramid3dC2::BulkElementPyramid3dC2() 
+	// {
+	// 	eleminfo.elem_ptr = this;
+	// 	eleminfo.nnode = 14;
+	// 	eleminfo.nnode_C1 = 5; // To be done
+	// 	eleminfo.nnode_C1TB = 0;		
+	// 	eleminfo.nnode_C2TB = 0;
+	// 	eleminfo.nnode_C2 = 14;
+	// 	eleminfo.nnode_DL = 4;
+	// 	eleminfo.nodal_dim = codeinst->get_func_table()->nodal_dim;
+	// 	this->set_n_node(eleminfo.nnode);
+	// 	this->set_nodal_dimension(eleminfo.nodal_dim);	
+	// 	allocate_discontinous_fields();	
+	// }
+
+	// bool BulkElementPyramid3dC2::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
+	// {
+	//    bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
+	//    auto * ft = codeinst->get_func_table();	   	   
+	//    if (ft->numfields_C2) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C2, ft->hangindex_C2, shape_info->hanginfo_C2, ft->numfields_C2_basebulk,ft->buffer_offset_C2_basebulk,ft->nodal_offset_C2_basebulk,&BulkElementBase::get_node_index_C2_to_element) || res;
+	//    if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
+    //    if (eqn_remap)
+	//    {
+	// 	return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
+	//    }
+	//    else return res;
+	// }
+
+    // void BulkElementPyramid3dC2::shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const
+	// {
+	// 	psi[0] = 1.0;
+	// 	psi[1] = s[0];
+	// 	psi[2] = s[1];
+	// 	psi[3] = s[2];
+	// }
+
+	// void BulkElementPyramid3dC2::dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const
+	// {
+	// 	psi[0] = 1.0;
+	// 	psi[1] = s[0];
+	// 	psi[2] = s[1];
+	// 	psi[3] = s[2];
+	// 	dpsi(0, 0) = 0.0;
+	// 	dpsi(1, 0) = 1.0;
+	// 	dpsi(2, 0) = 0.0;
+	// 	dpsi(3, 0) = 0.0;
+	// 	dpsi(0, 1) = 0.0;
+	// 	dpsi(1, 1) = 0.0;
+	// 	dpsi(2, 1) = 1.0;
+	// 	dpsi(3, 1) = 0.0;
+	// 	dpsi(0, 2) = 0.0;
+	// 	dpsi(1, 2) = 0.0;
+	// 	dpsi(2, 2) = 0.0;
+	// 	dpsi(3, 2) = 1.0;
+	// }
+
+	// void BulkElementPyramid3dC2::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+	// {
+	// 	if (tesselate_tri)
+	// 	{
+	// 		throw_runtime_error("Tesselation not implemented in 3d");
+	// 	}
+	// 	else
+	// 	{
+	// 		for (unsigned int i = 0; i < this->nnode(); i++)
+	// 			indices[i] = i;
+	// 	}
+	// }
+
+	// std::vector<double> BulkElementPyramid3dC2::get_outline(bool lagrangian)
+	// {
+	// 	std::vector<double> res(0);
+	// 	throw_runtime_error("Cannot get outline from 3d elements yet");
+	// 	return res;
+	// }
+
+	// void BulkElementPyramid3dC2::interpolate_hang_values()
+	// {
+	// 	BulkElementBase::interpolate_hang_values();
+	// 	for (unsigned int l = 0; l < eleminfo.nnode; l++)
+	// 	{
+	// 		if (node_pt(l)->is_hanging())
+	// 		{
+	// 			for (unsigned int i = 0; i < node_pt(l)->ndim(); i++)
+	// 			{
+	// 				for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
+	// 				{
+	// 					dynamic_cast<Node *>(node_pt(l))->variable_position_pt()->set_value(t, i, node_pt(l)->position(t, i));
+	// 				}
+	// 			}
+	// 		}
+	// 	}
+	// 	auto * ft = codeinst->get_func_table();
+	// 	for (unsigned int l = 0; l < eleminfo.nnode_C2; l++)
+	// 	{
+	// 		if (node_pt(l)->is_hanging(ft->hangindex_C2))
+	// 		{
+	// 			for (unsigned int i = 0; i < codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk; i++)
+	// 			{
+	// 				for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
+	// 				{
+	// 					node_pt(l)->value_pt(i)[t] = node_pt(l)->value(t, i);
+	// 				}
+	// 			}
+	// 		}
+	// 	}
+	// 	if (ft->numfields_C1_basebulk)
+	// 	{
+	// 		for (unsigned int l_C1 = 0; l_C1 < eleminfo.nnode_C1; l_C1++)
+	// 		{
+	// 			unsigned l = get_node_index_C1_to_element(l_C1);
+	// 			if (node_pt(l)->is_hanging(ft->hangindex_C1))
+	// 			{
+	// 				// std::cout << "C1 hang" << std::endl;
+	// 				for (unsigned int i = ft->nodal_offset_C1_basebulk; i < ft->nodal_offset_C1_basebulk + ft->numfields_C1_basebulk; i++)
+	// 				{
+	// 					for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
+	// 					{
+	// 						node_pt(l)->value_pt(i)[t] = node_pt(l)->value(t, i); // Does this really work here?
+	// 					}
+	// 				}
+	// 			}
+	// 		}
+	// 		for (unsigned int i = ft->nodal_offset_C1_basebulk; i < ft->nodal_offset_C1_basebulk + ft->numfields_C1_basebulk; i++)
+	// 		{
+	// 			for (unsigned t = 0; t < node_pt(0)->ntstorage(); t++)
+	// 			{
+    //                 //Fill the midpoint nodes of the square base
+	// 				node_pt(5)->value_pt(i)[t] = 0.5 * (node_pt(0)->value(t, i) + node_pt(1)->value(t, i));
+	// 				node_pt(6)->value_pt(i)[t] = 0.5 * (node_pt(1)->value(t, i) + node_pt(2)->value(t, i));
+	// 				node_pt(7)->value_pt(i)[t] = 0.5 * (node_pt(2)->value(t, i) + node_pt(3)->value(t, i));
+	// 				node_pt(8)->value_pt(i)[t] = 0.5 * (node_pt(3)->value(t, i) + node_pt(0)->value(t, i));
+
+	// 				//Fill the midpoint nodes to apex
+	// 				node_pt(9)->value_pt(i)[t] = 0.5 * (node_pt(0)->value(t, i) + node_pt(4)->value(t, i));
+	// 				node_pt(10)->value_pt(i)[t] = 0.5 * (node_pt(1)->value(t, i) + node_pt(4)->value(t, i));
+	// 				node_pt(11)->value_pt(i)[t] = 0.5 * (node_pt(2)->value(t, i) + node_pt(4)->value(t, i));
+	// 				node_pt(12)->value_pt(i)[t] = 0.5 * (node_pt(3)->value(t, i) + node_pt(4)->value(t, i));
+
+	// 				//Fill the midpoint of square base
+	// 				node_pt(13)->value_pt(i)[t] = 0.5 * (node_pt(0)->value(t, i) + node_pt(2)->value(t, i));
+	// 			}
+	// 		}
+	// 	}
+	// }
+
+    BulkElementPyramid3dC2::BulkElementPyramid3dC2() 
+	{
+		eleminfo.elem_ptr = this;
+		eleminfo.nnode = 14;
+		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 5; 
+		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 0;		
+		eleminfo.nnode_of_space[SPACE_INDEX_C2TB] = 0;
+		eleminfo.nnode_of_space[SPACE_INDEX_C2] = 14;
+		eleminfo.nnode_DL = 4;
+		eleminfo.nodal_dim = codeinst->get_func_table()->nodal_dim;
+		this->set_n_node(eleminfo.nnode);
+		this->set_nodal_dimension(eleminfo.nodal_dim);	
+		allocate_discontinous_fields();	
+	}
+
+
+    void BulkElementPyramid3dC2::shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const
+	{
+		psi[0] = 1.0;
+		psi[1] = s[0];
+		psi[2] = s[1];
+		psi[3] = s[2];
+	}
+
+	void BulkElementPyramid3dC2::dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const
+	{
+		psi[0] = 1.0;
+		psi[1] = s[0];
+		psi[2] = s[1];
+		psi[3] = s[2];
+		dpsi(0, 0) = 0.0;
+		dpsi(1, 0) = 1.0;
+		dpsi(2, 0) = 0.0;
+		dpsi(3, 0) = 0.0;
+		dpsi(0, 1) = 0.0;
+		dpsi(1, 1) = 0.0;
+		dpsi(2, 1) = 1.0;
+		dpsi(3, 1) = 0.0;
+		dpsi(0, 2) = 0.0;
+		dpsi(1, 2) = 0.0;
+		dpsi(2, 2) = 0.0;
+		dpsi(3, 2) = 1.0;
+	}
+
+	void BulkElementPyramid3dC2::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+	{
+		if (tesselate_tri)
+		{
+			throw_runtime_error("Tesselation not implemented in 3d");
+		}
+		else
+		{
+			for (unsigned int i = 0; i < this->nnode(); i++)
+				indices[i] = i;
+		}
+	}
+
+	std::vector<double> BulkElementPyramid3dC2::get_outline(bool lagrangian)
+	{
+		std::vector<double> res(0);
+		throw_runtime_error("Cannot get outline from 3d elements yet");
+		return res;
+	}
 
 	///////////////////////////////
 	// RefineableSolidLineElement::build is oomph-lib's own pattern (mirrored here for the 1d solid/Lagrangian
@@ -11660,6 +11890,21 @@ namespace pyoomph
 		{0,1,2,3,4}  // C1
 	};
 
+	const std::vector<std::vector<unsigned>> BulkElementPyramid3dC2::Nodal_Space_Index_To_Element_Index_Map={
+		{}, // C2TB 
+		{0,1,2,3,4,5,6,7,8,9,10,11,12,13}, // C2
+		{}, // C1TB
+		{0,1,2,3,4}  // C1
+	};
+
+	const std::vector<std::vector<std::vector<unsigned>>> BulkElementPyramid3dC2::Dummy_Value_Interpolation_Map=
+	{
+		{}, // C2TB 
+		{}, // C2
+		{}, // C1TB
+		{{5,0,1},{6,1,2},{7,2,3},{8,0,3},{9,0,4},{10,1,4},{11,2,4},{12,3,4},{13,0,2}}  // C1		
+	};
+
 	const std::vector<std::vector<unsigned>> BulkElementODE0d::Nodal_Space_Index_To_Element_Index_Map={
 		{}, // C2TB 
 		{}, // C2
@@ -11812,6 +12057,12 @@ namespace pyoomph
 		{0,1,2,3,4}  // C1
 	};
 
+	const std::vector<std::vector<int>> BulkElementPyramid3dC2::Element_Index_To_Nodal_Space_Index_Map={
+		{}, // C2TB
+		{0,1,2,3,4,5,6,7,8,9,10,11,12,13}, // C2
+		{}, // C1TB
+		{0,1,2,3,4,-1,-1,-1,-1,-1,-1,-1,-1,-1}  // C1
+	};
 	
 	const std::vector<std::vector<int>> BulkElementODE0d::Element_Index_To_Nodal_Space_Index_Map={
 		{}, // C2TB
@@ -11852,6 +12103,7 @@ namespace pyoomph
 	const std::vector<int> BulkElementWedge3dC2::Possible_Face_Indices={0,1,2,3,4};
 	
 	const std::vector<int> BulkElementPyramid3dC1::Possible_Face_Indices={0,1,2,3,4};
+	const std::vector<int> BulkElementPyramid3dC2::Possible_Face_Indices={0,1,2,3,4};
 
 	// get_vertex_nodes_of_face() implementations below: for each element type and each valid face index
 	// (see that type's Possible_Face_Indices table above), return the element's *corner/vertex* nodes
@@ -12039,6 +12291,16 @@ namespace pyoomph
 		else throw_runtime_error("Invalid face index for wedge element");
   	}
 
+	std::vector<pyoomph::Node*> BulkElementPyramid3dC2::get_vertex_nodes_of_face(const int &face) const
+	{
+	  if (face==0) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(0)),dynamic_cast<pyoomph::Node*>(this->node_pt(1)),dynamic_cast<pyoomph::Node*>(this->node_pt(4))};}
+      else if (face==1) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(1)),dynamic_cast<pyoomph::Node*>(this->node_pt(2)),dynamic_cast<pyoomph::Node*>(this->node_pt(4))};}
+      else if (face==2) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(2)),dynamic_cast<pyoomph::Node*>(this->node_pt(3)),dynamic_cast<pyoomph::Node*>(this->node_pt(4))};}
+      else if (face==3) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(0)),dynamic_cast<pyoomph::Node*>(this->node_pt(4)),dynamic_cast<pyoomph::Node*>(this->node_pt(3))};}
+      else if (face==4) { return {dynamic_cast<pyoomph::Node*>(this->node_pt(0)),dynamic_cast<pyoomph::Node*>(this->node_pt(3)),dynamic_cast<pyoomph::Node*>(this->node_pt(1)),dynamic_cast<pyoomph::Node*>(this->node_pt(2))};}
+	  else throw_runtime_error("Invalid face index for pyramid element");
+	}
+
 	//oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
 
 	// construct_face_element() implementations: create the appropriate InterfaceElement<...> FaceElement type
@@ -12074,7 +12336,6 @@ namespace pyoomph
 	{
 		if (face_index==4) return  new InterfaceElementQuad2dC1(jitcode, this, face_index);
 		else return new InterfaceElementTri2dC1(jitcode, this, face_index);
-		// throw_runtime_error("TODO: Constructing face elements for pyramid elements with C1 interpolation on the face. The different face types depend on the face index");
 	}
 	
 	oomph::FaceElement * BulkElementWedge3dC2::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index)
@@ -12082,6 +12343,11 @@ namespace pyoomph
 		if (face_index<2) return  new InterfaceElementTri2dC2(jitcode, this, face_index);
 	    else return new InterfaceElementQuad2dC2(jitcode, this, face_index);					
 	}
-    
+
+	oomph::FaceElement * BulkElementPyramid3dC2::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index)
+	{
+		if (face_index==4) return  new InterfaceElementQuad2dC1(jitcode, this, face_index);
+	    else return new InterfaceElementTri2dC1(jitcode, this, face_index);				
+	}
 
 }
