@@ -22,6 +22,10 @@ import numpy
 assert PETSc.ScalarType is numpy.complex128, "PETSc does not support complex numbers, cannot run tests with eigenvalue solvers. Please install a version of PETSc with complex support and make sure petsc4py is using that version."
   
 
+if Path("pyoomph_tutorial_scripts").exists():
+  print("Removing old pyoomph_tutorial_scripts folder")
+  shutil.rmtree("pyoomph_tutorial_scripts",ignore_errors=True)
+
 bundle= Path("../docs/source/tutorial/tutorial_example_scripts.zip")
 
 with zipfile.ZipFile(str(bundle), 'r') as zipf:
