@@ -3,7 +3,7 @@
 A helical line mesh & differential operators on manifolds
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Until now the meshes have always be conforming in the number of dimensions, i.e. either one-dimensional meshes with one-dimensional elements or two-dimensional meshes with two-dimensional elements. However, you can also have a mesh with one-dimensional elements embedded in a two-dimensional or three-dimensional space. The same holds for a mesh consisting of two-dimensional elements embedded in a three-dimensional space. These meshes represent manifolds with a non-vanishing *co-dimension*. We will now create a line mesh that resembles a helical shape, i.e. has a co-dimension of 2:
+Until now the meshes have always been conforming in the number of dimensions, i.e. either one-dimensional meshes with one-dimensional elements or two-dimensional meshes with two-dimensional elements. However, you can also have a mesh with one-dimensional elements embedded in a two-dimensional or three-dimensional space. The same holds for a mesh consisting of two-dimensional elements embedded in a three-dimensional space. These meshes represent manifolds with a non-vanishing *co-dimension*. We will now create a line mesh that resembles a helical shape, i.e. has a co-dimension of 2:
 
 .. code:: python
 
@@ -111,7 +111,7 @@ To illustrate that, let us consider the case of a 1d manifold embedded in a 3d s
 
 .. math:: \vec{g}=\vec{g}_1=\frac{\partial\vec{R}(\xi)}{\partial \xi}
 
-is indeed the local normalized tangent on the helix. The metric tensor is just :math:`\mathbf{g}=[g_{11}]=[\vec{g}\cdot\vec{g}]=[(\partial_\xi\vec{R})^2]`. Hence, the contravariant metric tensor is just given by the single component :math:`g^{11}=1/g_{11}`. With that, :math:`\nabla_S\phi` reads according to the definition :math:numref:`eqspatialsurfacegrad`
+This is indeed the local normalized tangent on the helix. The metric tensor is just :math:`\mathbf{g}=[g_{11}]=[\vec{g}\cdot\vec{g}]=[(\partial_\xi\vec{R})^2]`. Hence, the contravariant metric tensor is just given by the single component :math:`g^{11}=1/g_{11}`. With that, :math:`\nabla_S\phi` reads according to the definition :math:numref:`eqspatialsurfacegrad`
 
 .. math:: \nabla_S \phi=\frac{1}{(\partial_\xi\vec{R})^2}\left(\partial_\xi\vec{R}\right) \frac{\partial \phi}{\partial \xi}\,.
 
@@ -133,7 +133,7 @@ The divergence of a vector field :math:`\vec{\psi}` defined on a manifold reads 
 
 Finally, when changing the coordinate system by :py:meth:`~pyoomph.generic.problem.Problem.set_coordinate_system`, the corresponding scale factors are also considered in the differential operators on manifolds.
 
-As conclusion, we can just use :py:func:`~pyoomph.expressions.generic.grad` and :py:func:`~pyoomph.expressions.div` in our equations. When any equation involving these differential operators is restricted to a manifold, the only reasonable differential operator is selected automatically. This allows to use the same :py:class:`~pyoomph.equations.poisson.PoissonEquation` either in the bulk (with co-dimension 0) or at any manifold with co-dimension :math:`>0`. In the latter case, the Poisson equation reads
+As conclusion, we can just use :py:func:`~pyoomph.expressions.generic.grad` and :py:func:`~pyoomph.expressions.div` in our equations. When any equation involving these differential operators is restricted to a manifold, the only reasonable differential operator is selected automatically. This allows us to use the same :py:class:`~pyoomph.equations.poisson.PoissonEquation` either in the bulk (with co-dimension 0) or at any manifold with co-dimension :math:`>0`. In the latter case, the Poisson equation reads
 
 .. math:: -\nabla_S^2 u=g
 

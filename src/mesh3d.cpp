@@ -37,34 +37,42 @@ namespace pyoomph
 {
 
 
+	// True only if every element in the mesh is a brick (h-refinement via an OcTreeForest is only
+	// implemented for pure-brick meshes). Also issues a one-off warning (per mesh) if adaptive
+	// refinement was requested but the mesh contains non-brick (e.g. tetrahedral) elements.
 	bool TemplatedMeshBase3d::refinement_possible()
-    {
-      bool allQ = true;
-      for (unsigned int i = 0; i < this->nelement(); i++)
-      {
-        allQ = allQ && (dynamic_cast<oomph::BrickElementBase *>(this->element_pt(i)) != NULL);
-      }
-      if (allQ)
-      {
-        return true;
-      }
-      else
-      {
-        if (this->max_refinement_level() && !issued_tri_refinement_warning && !this->problem->is_quiet())
-        {
-          std::cerr << "WARNING: Found a tri or something in the mesh -> cannot be adaptive right now. Requires to implement a good tree for mixed meshes" << std::endl;
-		  issued_tri_refinement_warning = true;
-        }
-        return false;
-      }
-    }
+	{
+		bool allQ = true;
+		for (unsigned int i = 0; i < this->nelement(); i++)
+		{
+			allQ = allQ && (dynamic_cast<oomph::BrickElementBase *>(this->element_pt(i)) != NULL);
+		}
+		if (allQ)
+		{
+			return true;
+		}
+		else
+		{
+			if (this->max_refinement_level() && !issued_tri_refinement_warning && !this->problem->is_quiet())
+			{
+				std::cerr << "WARNING: Found a tri or something in the mesh -> cannot be adaptive right now. Requires to implement a good tree for mixed meshes" << std::endl;
+				issued_tri_refinement_warning = true;
+			}
+			return false;
+		}
+	}
 
+	// Overload used by the generic (oomph-lib) interface: discards the documentation output.
 	void TemplatedMeshBase3d::setup_boundary_element_info()
 	{
 		std::ostringstream oss;
 		setup_boundary_element_info(oss);
 	}
 
+	// Build Boundary_element_pt / Face_index_at_boundary for a (possibly mixed brick/tet) 3d mesh.
+	// For adaptive, pure-brick meshes, delegates to the generic facet-based TemplatedMeshBase
+	// implementation (identication_of_boundary_elements_by_facets), which is robust under refinement.
+	// Otherwise (non-adaptive or mixed meshes), uses the brick- and tet-specific helpers below.
 	void TemplatedMeshBase3d::setup_boundary_element_info(std::ostream &outfile)
 	{
 
@@ -80,7 +88,7 @@ namespace pyoomph
          if (is_adaptation_enabled() &&refinement_possible() )
          {
           identication_of_boundary_elements_by_facets=false; // For adaptive meshes, we find the facets conventionally, but for non-adaptive meshes we can use the facet information from the mesh template which is always accurate, even at mixed corners
-         } 
+         }
         }
         if (identication_of_boundary_elements_by_facets)
         {
@@ -94,6 +102,11 @@ namespace pyoomph
 		Lookup_for_elements_next_boundary_is_setup = true;
 	}
 
+	// Legacy (non-facet-based) boundary-element detection for the brick elements of the mesh: for every
+	// brick element, tabulate which of its nodes lie on which boundaries, then use that per-node
+	// boundary-membership pattern (via boundary_identifier, counting how many of a face's 4 corner
+	// nodes agree on a given +/-x/y/z face indicator) to work out which local face(s) of the element
+	// coincide with a boundary. Skips non-brick elements (handled separately by the tet counterpart).
 	void TemplatedMeshBase3d::setup_boundary_element_info_bricks(std::ostream &outfile)
 	{
 		bool doc = false;
@@ -110,6 +123,9 @@ namespace pyoomph
 		Face_index_at_boundary.resize(nbound);
 		oomph::Vector<oomph::Vector<oomph::FiniteElement *>> vector_of_boundary_element_pt;
 		vector_of_boundary_element_pt.resize(nbound);
+		// For each (boundary, element) pair, collects one signed direction indicator
+		// per corner node of that element which lies on the boundary; a face is only
+		// confirmed once all 4 corners belonging to it contribute the same indicator.
 		oomph::MapMatrixMixed<unsigned, oomph::FiniteElement *, oomph::Vector<int> *> boundary_identifier;
 		oomph::Vector<oomph::Vector<int> *> tmp_vect_pt;
 
@@ -124,6 +140,7 @@ namespace pyoomph
 			if (doc)
 				outfile << "Element: " << e << " " << fe_pt << std::endl;
 			unsigned nnode_1d = fe_pt->nnode_1d();
+			// Loop over all nodes of the element in the 3d tensor-product node ordering
 			for (unsigned i0 = 0; i0 < nnode_1d; i0++)
 			{
 				for (unsigned i1 = 0; i1 < nnode_1d; i1++)
@@ -155,6 +172,9 @@ namespace pyoomph
 									boundary_identifier(boundary_id, fe_pt) = tmp_pt;
 								}
 
+								// Only corner nodes (vertices of the brick) can identify a whole face;
+								// each corner belongs to exactly 3 of the 6 faces, so push one signed
+								// indicator per relevant local direction (+/-1 for x, +/-2 for y, +/-3 for z).
 								if (((i0 == 0) || (i0 == nnode_1d - 1)) && ((i1 == 0) || (i1 == nnode_1d - 1)) && ((i2 == 0) || (i2 == nnode_1d - 1)))
 								{
 									(*boundary_identifier(boundary_id, fe_pt)).push_back(1 * (2 * i0 / (nnode_1d - 1) - 1));
@@ -168,6 +188,9 @@ namespace pyoomph
 			}
 		}
 
+		// For each element found to touch a boundary, tally how many corner nodes
+		// contributed each possible face indicator; an indicator that was contributed
+		// by all 4 corners of a face confirms that face lies entirely on the boundary.
 		for (unsigned i = 0; i < nbound; i++)
 		{
 			// Loop over elements on given boundary
@@ -194,6 +217,8 @@ namespace pyoomph
 
 				int indicator = -10;
 
+				// A face has 4 corners, so an indicator seen exactly 4 times means
+				// that whole face lies on boundary i; record it as a boundary face.
 				for (int ii = 0; ii < 3; ii++)
 				{
 					for (int sign = -1; sign < 3; sign += 2)
@@ -209,6 +234,9 @@ namespace pyoomph
 			}
 		}
 
+		// Free the per-(boundary,element) indicator vectors allocated above via
+		// boundary_identifier (they were collected in tmp_vect_pt since the map
+		// itself does not own them).
 		unsigned n = tmp_vect_pt.size();
 		for (unsigned i = 0; i < n; i++)
 		{
@@ -216,6 +244,12 @@ namespace pyoomph
 		}
 	}
 
+	// Legacy (non-facet-based) boundary-element detection for the tetrahedral elements of the mesh
+	// (despite the name "tris", these are the 4-noded tets of a 3d mesh, analogous to the triangle
+	// case in 2d). For each tet, each of its 4 faces is checked by intersecting the boundary-index
+	// sets of its 3 corner nodes: if all three nodes share exactly one common boundary, that face is
+	// recorded as lying on that boundary (a face shared by more than one boundary triggers a warning,
+	// as it indicates a degenerate/too-coarse mesh).
 	void TemplatedMeshBase3d::setup_boundary_element_info_tris(std::ostream &outfile)
 	{
 		unsigned nel = nelement();

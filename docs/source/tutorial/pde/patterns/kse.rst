@@ -1,5 +1,5 @@
-Damped Kuramoto-Sivashisky equation with periodic boundaries
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Damped Kuramoto-Sivashinsky equation with periodic boundaries
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Before delving into the stability analysis and bifurcation tracking, let us first define an interesting equation and integrate it temporally with pyoomph to see potential behavior of the equation. The example equation here will be the linearly and quadratically damped *Kuramoto-Sivashinsky equation*
 
@@ -30,7 +30,7 @@ and cast it into the weak formulation with test functions :math:`v` and :math:`w
 
 Alternatively, of course, one could also add :math:`g` to the first weak contribution term instead of the :math:`\nabla h` term in the third contribution to account for the :math:`-\nabla^2h` term in :math:numref:`eqpdeksestrong`, which would yield different Neumann terms.
 
-The implementation is straight-forward:
+The implementation is straightforward:
 
 .. code:: python
 
@@ -55,7 +55,7 @@ The implementation is straight-forward:
            self.add_residual(-weak(grad(h) + grad(lapl_h), grad(v)))
            self.add_residual(weak(lapl_h, w) + weak(grad(h), grad(w)))
 
-For the problem, we want to use two new features, namely periodic boundaries and a random initial condition. We use a :py:class:`~pyoomph.meshes.simplemeshes.RectangularQuadMesh` and connect the ``"left"`` with the ``"right"`` interface and the ``"top"`` with the ``"bottom"`` interface, so that the domain is virtually infinite in all directions due to periodicity. Thereby, there is no single Neumann term relevant. This can be done with the :py:class:`~pyoomph.meshes.bcs.PeriodicBC`, which must be added to an interface and gets the opposite interface as first argument. Furthermore, we must tell pyoomph, how to find the corresponding node on the other boundary to connect these. We can just pass an ``offset``, so that each pair of nodes on both connected periodic boundary pair is found by applying this offset to the position of the source node to the destination node:
+For the problem, we want to use two new features, namely periodic boundaries and a random initial condition. We use a :py:class:`~pyoomph.meshes.simplemeshes.RectangularQuadMesh` and connect the ``"left"`` with the ``"right"`` interface and the ``"top"`` with the ``"bottom"`` interface, so that the domain is virtually infinite in all directions due to periodicity. Thereby, there is no single Neumann term relevant. This can be done with the :py:class:`~pyoomph.meshes.bcs.PeriodicBC`, which must be added to an interface and gets the opposite interface as the first argument. Furthermore, we must tell pyoomph how to find the corresponding node on the other boundary to connect these. We can just pass an ``offset``, so that each pair of nodes on both connected periodic boundaries is found by applying this offset to the position of the source node to obtain the destination node:
 
 .. code:: python
 
@@ -88,7 +88,7 @@ For the problem, we want to use two new features, namely periodic boundaries and
 
 .. warning::
 
-   The :py:class:`~pyoomph.meshes.bcs.PeriodicBC` object enforces periodicity to all fields defined on this domain. It is hence not possible to have e.g. one field periodic and another one discontinuous across the interface with the :py:class:`~pyoomph.meshes.bcs.PeriodicBC` object.
+   The :py:class:`~pyoomph.meshes.bcs.PeriodicBC` object enforces periodicity on all fields defined on this domain. It is hence not possible to have e.g. one field periodic and another one discontinuous across the interface with the :py:class:`~pyoomph.meshes.bcs.PeriodicBC` object.
 
 Additionally, note that we use a :py:class:`~pyoomph.expressions.utils.DeterministicRandomField` to create our initial condition. Since pyoomph requires that successive function calls with the same arguments yield the same values (i.e. deterministic functions), it is necessary to precalculate the random numbers in advance. This is done internally in the :py:class:`~pyoomph.expressions.utils.DeterministicRandomField`. To that end, we must specify the minimum and maximum coordinates, so that internally an :math:`n`-dimensional array of random numbers with the prescribed ``amplitude`` is created. Whenever the function is evaluated, it is interpolated between the initially generated random numbers to ensure the deterministic requirement.
 

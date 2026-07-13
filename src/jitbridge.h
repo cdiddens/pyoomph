@@ -204,39 +204,14 @@ typedef struct JITShapeInfo
   double ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(elemsize_Cart_d_coords)); // Eulerian element size derived by coordinates, [i_dim,l_node], i.e. sum(w*dJ_Eulerian)/dX^l_i
   double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT  elemsize_Cart_d2_coords; // Weights derived by coordinates, [i_dim,j_dim,l_node_i,l_node_j], i.e. sum(w*d2J_Eulerian)/(dX^l_i*dX^l_j)  
 
-  double ARRAY_DECL_NNODE(shape_C2);                // C2 shapes (node index)
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dx_shape_C2));            // C2 shapes ( node index, coord index)
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dX_shape_C2));            // Corresponding Lagrangian version
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dS_shape_C2));            // Corresponding local coordinate version
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(d_dx_shape_dcoord_C2)))); // derivative of dx_shape_C2 w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index)
-  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_dx2_shape_dcoord_C2; // second derivative of dx_shape_C2 w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index,deriv. coord node index2, deriv coord dir index2)
 
-  double ARRAY_DECL_NNODE(ARRAY_DECL_NNODE(nodal_shape_C2)); // C2 shapes (node index, node index). In principle just delta_{i,j}
-
-  double ARRAY_DECL_NNODE(shape_C2TB);                // C2TB shapes (node index)
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dx_shape_C2TB));            // C2TB shapes (node index, coord index)
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dX_shape_C2TB));            // Lagrangian version
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dS_shape_C2TB));            // Corresponding local coordinate version
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(d_dx_shape_dcoord_C2TB)))); // derivative of dx_shape_C2TB w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index)
-  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_dx2_shape_dcoord_C2TB; // second derivative of dx_shape_C2TB w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index,deriv. coord node index2, deriv coord dir index2)
-
-  double ARRAY_DECL_NNODE(ARRAY_DECL_NNODE(nodal_shape_C2TB)); // C2TB shapes (node index, node index). In principle just delta_{i,j}
-
-  double ARRAY_DECL_NNODE(shape_C1);                // C1 shapes (node index)
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dx_shape_C1));            // C1 shapes (node index, coord index)
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dX_shape_C1));            // Corresponding Lagrangian version
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dS_shape_C1));            // Corresponding local coordinate version
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(d_dx_shape_dcoord_C1)))); // derivative of dx_shape_C1 w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index)
-  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_dx2_shape_dcoord_C1; // second derivative of dx_shape_C2 w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index,deriv. coord node index2, deriv coord dir index2)
-  double ARRAY_DECL_NNODE(ARRAY_DECL_NNODE(nodal_shape_C1)); // C1 shapes (node index, node index). In principle just delta_{i,j}
-  
-  double ARRAY_DECL_NNODE(shape_C1TB);                // C1TB shapes (node index)
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dx_shape_C1TB));            // C1TB shapes (node index, coord index)
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dX_shape_C1TB));            // Corresponding Lagrangian version
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dS_shape_C1TB));            // Corresponding local coordinate version
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(d_dx_shape_dcoord_C1TB)))); // derivative of dx_shape_C1TB w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index)
-  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_dx2_shape_dcoord_C1TB; // second derivative of dx_shape_C2 w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index,deriv. coord node index2, deriv coord dir index2)
-  double ARRAY_DECL_NNODE(ARRAY_DECL_NNODE(nodal_shape_C1TB)); // C1TB shapes (node index, node index). In principle just delta_{i,j}  
+  double ARRAY_DECL_NNODE(shapes)[NUM_CONTINUOUS_SPACES];               // non-derived shapes
+  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dx_shapes))[NUM_CONTINUOUS_SPACES]; // Derived shapes (node index, coord index)
+  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dX_shapes))[NUM_CONTINUOUS_SPACES]; // Corresponding Lagrangian version
+  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dS_shapes))[NUM_CONTINUOUS_SPACES]; // Corresponding local coordinate version
+  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(d_dx_shape_dcoord))))[NUM_CONTINUOUS_SPACES]; // derivative of dx_shape w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index)
+  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_dx2_shape_dcoord[NUM_CONTINUOUS_SPACES]; // second derivative of dx_shape_C2 w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index,deriv. coord node index2, deriv coord dir index2)
+  double ARRAY_DECL_NNODE(ARRAY_DECL_NNODE(nodal_shapes))[NUM_CONTINUOUS_SPACES]; // shapes (node index, node index). In principle just delta_{i,j}
 
   double ARRAY_DECL_NNODE(shape_DL);                // DL shapes (node index)
   double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dx_shape_DL));            // DL shapes (node index, coord index)
@@ -597,6 +572,324 @@ static double signum(double x)
     strncpy(var, name, strlen(name));                        \
     var[strlen(name)] = '\0';                                \
   }
+
+// Residual/Jacobian/Hessian assembly macros used by the generated element code (formerly
+// in the separate jitbridge_hang.h, always included right after this file). BEGIN_RESIDUAL/
+// BEGIN_JACOBIAN_NOHANG/BEGIN_HESSIAN_* are the plain (no hanging nodes involved) variants;
+// the *_CONTINUOUS_SPACE/_HANG variants below additionally loop over the master nodes of a
+// hanging node, distributing the contribution via the hanging weights.
+
+#ifndef PYOOMPH_TCC_TO_MEMORY
+#include <assert.h>
+#else
+#define assert(expr) ((void)0)
+#endif
+
+// No hanging spaces or without considering hang infos
+#define BEGIN_RESIDUAL(EQN, CONTRIB)                                                                              \
+  local_eqn = EQN;                                                                                                \
+  if (local_eqn >= 0) /*&& (!eleminfo->nullified_residual_dof || !eleminfo->nullified_residual_dof[local_eqn] )*/ \
+  {                                                                                                               \
+    _res_contrib = CONTRIB;
+
+#define ADD_TO_RESIDUAL()             \
+  assert(local_eqn < eleminfo->ndof); \
+  residuals[local_eqn] += _res_contrib;
+#define END_RESIDUAL() }
+
+#define BEGIN_JACOBIAN() \
+  if (flag)              \
+  {
+
+#define ADD_TO_JACOBIAN_NOHANG_NOHANG() jacobian[local_eqn * shapeinfo->jacobian_size + local_unknown] += _J_contrib;
+
+#define ADD_TO_MASS_MATRIX_NOHANG_NOHANG(MPART)                                    \
+  if (flag == 2)                                                                   \
+  {                                                                                \
+    mass_matrix[local_eqn * shapeinfo->mass_matrix_size + local_unknown] += MPART; \
+  }
+
+#define END_JACOBIAN() }
+
+#define BEGIN_JACOBIAN_NOHANG(EQN, CONTRIB) \
+  local_unknown = EQN;                      \
+  if (local_unknown >= 0)                   \
+  {                                         \
+    double _J_contrib = CONTRIB;
+
+#define END_JACOBIAN_NOHANG() }
+
+#define BEGIN_HESSIAN_TEST_LOOP(EQN)                                                                               \
+  local_eqn = EQN;                                                                                                 \
+  if (local_eqn >= 0) /*&& (!eleminfo->nullified_residual_dof || !eleminfo->nullified_residual_dof[local_eqn] ) */ \
+  {
+
+#define END_HESSIAN_TEST_LOOP() }
+
+#define BEGIN_HESSIAN_SHAPE_LOOP1(EQN) \
+  local_unknown = EQN;                 \
+  if (local_unknown >= 0)              \
+  {
+
+#define BEGIN_HESSIAN_SHAPE_LOOP2(EQN, CONTRIB) \
+  local_deriv = EQN;                            \
+  if (local_deriv >= 0)                         \
+  {                                             \
+    _H_contrib = CONTRIB;
+
+// Hanging macros
+#define BEGIN_RESIDUAL_CONTINUOUS_SPACE(EQN, CONTRIB, HANGINFO, NODALIND, LINDEX)                                   \
+  if (HANGINFO[LINDEX].nummaster)                                                                                   \
+  {                                                                                                                 \
+    nummaster = HANGINFO[LINDEX].nummaster;                                                                         \
+  }                                                                                                                 \
+  else                                                                                                              \
+  {                                                                                                                 \
+    nummaster = 1;                                                                                                  \
+  }                                                                                                                 \
+  _res_contrib = CONTRIB;                                                                                       \
+  for (int m = 0; m < nummaster; m++)                                                                               \
+  {                                                                                                                 \
+    if (HANGINFO[LINDEX].nummaster)                                                                                 \
+    {                                                                                                               \
+      local_eqn = HANGINFO[LINDEX].masters[m].local_eqn[NODALIND];                                                  \
+      hang_weight = HANGINFO[LINDEX].masters[m].weight;                                                             \
+    }                                                                                                               \
+    else                                                                                                            \
+    {                                                                                                               \
+      local_eqn = EQN;                                                                                              \
+      hang_weight = 1.0;                                                                                            \
+    }                                                                                                               \
+    if (local_eqn >= 0) /*&& (!eleminfo->nullified_residual_dof || !eleminfo->nullified_residual_dof[local_eqn] )*/ \
+    {
+
+#define ADD_TO_RESIDUAL_CONTINUOUS_SPACE() \
+  assert(local_eqn < eleminfo->ndof);      \
+  residuals[local_eqn] += hang_weight * _res_contrib;
+
+#define END_RESIDUAL_CONTINUOUS_SPACE() \
+  }                                     \
+  }
+
+#define BEGIN_JACOBIAN_HANG(EQN, CONTRIB, HANGINFO, NODALIND, LINDEX)   \
+  if (HANGINFO[LINDEX].nummaster)                                       \
+  {                                                                     \
+    nummaster2 = HANGINFO[LINDEX].nummaster;                            \
+  }                                                                     \
+  else                                                                  \
+  {                                                                     \
+    nummaster2 = 1;                                                     \
+  }                                                                     \
+  _J_contrib = CONTRIB;                                               \
+  for (int m2 = 0; m2 < nummaster2; m2++)                               \
+  {                                                                     \
+    if (HANGINFO[LINDEX].nummaster)                                     \
+    {                                                                   \
+      local_unknown = HANGINFO[LINDEX].masters[m2].local_eqn[NODALIND]; \
+      hang_weight2 = HANGINFO[LINDEX].masters[m2].weight;               \
+    }                                                                   \
+    else                                                                \
+    {                                                                   \
+      local_unknown = EQN;                                              \
+      hang_weight2 = 1.0;                                               \
+    }                                                                   \
+    if (local_unknown >= 0)                                             \
+    {
+
+#define ADD_TO_JACOBIAN_HANG_NOHANG() jacobian[local_eqn * shapeinfo->jacobian_size + local_unknown] += hang_weight * _J_contrib;
+#define ADD_TO_JACOBIAN_NOHANG_HANG() jacobian[local_eqn * shapeinfo->jacobian_size + local_unknown] += hang_weight2 * _J_contrib;
+#define ADD_TO_JACOBIAN_HANG_HANG() jacobian[local_eqn * shapeinfo->jacobian_size + local_unknown] += hang_weight * hang_weight2 * _J_contrib;
+
+#define ADD_TO_MASS_MATRIX_HANG_NOHANG(MPART)                                                      \
+  if (flag == 2)                                                                                   \
+  {                                                                                                \
+    mass_matrix[local_eqn * shapeinfo->mass_matrix_size + local_unknown] += hang_weight * (MPART); \
+  }
+#define ADD_TO_MASS_MATRIX_NOHANG_HANG(MPART)                                                       \
+  if (flag == 2)                                                                                    \
+  {                                                                                                 \
+    mass_matrix[local_eqn * shapeinfo->mass_matrix_size + local_unknown] += hang_weight2 * (MPART); \
+  }
+#define ADD_TO_MASS_MATRIX_HANG_HANG(MPART)                                                                       \
+  if (flag == 2)                                                                                                  \
+  {                                                                                                               \
+    mass_matrix[local_eqn * shapeinfo->mass_matrix_size + local_unknown] += hang_weight * hang_weight2 * (MPART); \
+  }
+
+#define END_JACOBIAN_HANG() \
+  }                         \
+  }
+
+// Hanging macros (Hessian)
+#define BEGIN_HESSIAN_TEST_LOOP_CONTINUOUS_SPACE(EQN, HANGINFO, NODALIND, LINDEX)                                     \
+  if (HANGINFO[LINDEX].nummaster)                                                                                     \
+  {                                                                                                                   \
+    nummaster = HANGINFO[LINDEX].nummaster;                                                                           \
+  }                                                                                                                   \
+  else                                                                                                                \
+  {                                                                                                                   \
+    nummaster = 1;                                                                                                    \
+  }                                                                                                                   \
+  for (int m = 0; m < nummaster; m++)                                                                                 \
+  {                                                                                                                   \
+    if (HANGINFO[LINDEX].nummaster)                                                                                   \
+    {                                                                                                                 \
+      local_eqn = HANGINFO[LINDEX].masters[m].local_eqn[NODALIND];                                                    \
+      hang_weight = HANGINFO[LINDEX].masters[m].weight;                                                               \
+    }                                                                                                                 \
+    else                                                                                                              \
+    {                                                                                                                 \
+      local_eqn = EQN;                                                                                                \
+      hang_weight = 1.0;                                                                                              \
+    }                                                                                                                 \
+    if (local_eqn >= 0) /* && (!eleminfo->nullified_residual_dof || !eleminfo->nullified_residual_dof[local_eqn] ) */ \
+    {
+
+#define END_HESSIAN_TEST_LOOP_CONTINUOUS_SPACE() \
+  }                                              \
+  }
+
+#define BEGIN_HESSIAN_SHAPE_LOOP1_CONTINUOUS_SPACE(EQN, HANGINFO, NODALIND, LINDEX) \
+  if (HANGINFO[LINDEX].nummaster)                                                   \
+  {                                                                                 \
+    nummaster2 = HANGINFO[LINDEX].nummaster;                                        \
+  }                                                                                 \
+  else                                                                              \
+  {                                                                                 \
+    nummaster2 = 1;                                                                 \
+  }                                                                                 \
+  for (int m2 = 0; m2 < nummaster2; m2++)                                           \
+  {                                                                                 \
+    if (HANGINFO[LINDEX].nummaster)                                                 \
+    {                                                                               \
+      local_unknown = HANGINFO[LINDEX].masters[m2].local_eqn[NODALIND];             \
+      hang_weight2 = HANGINFO[LINDEX].masters[m2].weight;                           \
+    }                                                                               \
+    else                                                                            \
+    {                                                                               \
+      local_unknown = EQN;                                                          \
+      hang_weight2 = 1.0;                                                           \
+    }                                                                               \
+    if (local_unknown >= 0)                                                         \
+    {
+
+#define END_HESSIAN_SHAPE_LOOP1_CONTINUOUS_SPACE() \
+  }                                                \
+  }
+
+#define BEGIN_HESSIAN_SHAPE_LOOP2_CONTINUOUS_SPACE(EQN, CONTRIB, HANGINFO, NODALIND, LINDEX) \
+  if (HANGINFO[LINDEX].nummaster)                                                            \
+  {                                                                                          \
+    nummaster3 = HANGINFO[LINDEX].nummaster;                                                 \
+  }                                                                                          \
+  else                                                                                       \
+  {                                                                                          \
+    nummaster3 = 1;                                                                          \
+  }                                                                                          \
+  _H_contrib = CONTRIB;                                                                      \
+  for (int m3 = 0; m3 < nummaster3; m3++)                                                    \
+  {                                                                                          \
+    if (HANGINFO[LINDEX].nummaster)                                                          \
+    {                                                                                        \
+      local_deriv = HANGINFO[LINDEX].masters[m3].local_eqn[NODALIND];                        \
+      hang_weight3 = HANGINFO[LINDEX].masters[m3].weight;                                    \
+    }                                                                                        \
+    else                                                                                     \
+    {                                                                                        \
+      local_deriv = EQN;                                                                     \
+      hang_weight3 = 1.0;                                                                    \
+    }                                                                                        \
+    if (local_deriv >= 0)                                                                    \
+    {
+
+#define END_HESSIAN_SHAPE_LOOP2_CONTINUOUS_SPACE() \
+  }                                                \
+  }
+
+#define END_HESSIAN_SHAPE_LOOP1() }
+#define END_HESSIAN_SHAPE_LOOP2() }
+
+
+// HESSIAN ASSEMBLY USING H_{ijk}=H_{ikj}
+#ifdef ASSEMBLE_HESSIAN_VIA_SYMMETRY
+
+#define ADD_TO_HESSIAN_FACTOR(FACTOR) \
+   const double _H_symm_contrib=(FACTOR) * (_H_contrib); \
+   hessian_buffer[local_eqn*n_dof*n_dof+local_unknown*n_dof+local_deriv] +=_H_symm_contrib;\
+   if (!symmetry_assembly_same_field) hessian_buffer[local_eqn*n_dof*n_dof+local_deriv*n_dof+local_unknown] +=_H_symm_contrib;\
+
+#define ADD_TO_HESSIAN_NOHANG_NOHANG_NOHANG()  \
+   const double _H_symm_contrib=_H_contrib; \
+   hessian_buffer[local_eqn*n_dof*n_dof+local_unknown*n_dof+local_deriv] += _H_symm_contrib;\
+   if (!symmetry_assembly_same_field) hessian_buffer[local_eqn*n_dof*n_dof+local_deriv*n_dof+local_unknown] +=_H_symm_contrib;\
+
+// Mass matrix not symmetric!
+#define __ADD_TO_MASS_HESSIAN_FACTOR(FACTOR, MCONTRIB)                               \
+  if (flag >= 2)                                                                   \
+  { \
+    const double _M_symm_contrib=(FACTOR)*(MCONTRIB);                                        \
+    hessian_M_buffer[local_eqn*n_dof*n_dof+local_unknown*n_dof+local_deriv] +=_M_symm_contrib;\
+    if (!symmetry_assembly_same_field) hessian_M_buffer[local_eqn*n_dof*n_dof+local_deriv*n_dof+local_unknown] +=_M_symm_contrib;\
+  }
+#define __ADD_TO_MASS_HESSIAN_NOHANG_NOHANG_NOHANG(MCONTRIB)                \
+  if (flag >= 2)                                                          \
+  {                                                                       \
+    const double _M_symm_contrib=(MCONTRIB);\
+    hessian_M_buffer[local_eqn*n_dof*n_dof+local_unknown*n_dof+local_deriv] += _M_symm_contrib;\
+    if (!symmetry_assembly_same_field) hessian_M_buffer[local_eqn*n_dof*n_dof+local_deriv*n_dof+local_unknown] +=_M_symm_contrib;\
+  }
+
+
+// HESSIAN ASSEMBLY __NOT__ USING H_{ijk}=H_{ikj}
+#else
+
+#define ADD_TO_HESSIAN_FACTOR(FACTOR) \
+   hessian_buffer[local_eqn*n_dof*n_dof+local_unknown*n_dof+local_deriv] +=(FACTOR) * _H_contrib;
+
+#define ADD_TO_HESSIAN_NOHANG_NOHANG_NOHANG()  \
+   hessian_buffer[local_eqn*n_dof*n_dof+local_unknown*n_dof+local_deriv] += _H_contrib;
+
+
+
+// End of Hessian assembly information
+#endif
+
+
+#define ADD_TO_MASS_HESSIAN_FACTOR(FACTOR, MCONTRIB)                               \
+  if (flag>=2) \
+  {\
+    hessian_M_buffer[local_eqn*n_dof*n_dof+local_unknown*n_dof+local_deriv] += (FACTOR) *  (MCONTRIB); \
+  }
+
+#define ADD_TO_MASS_HESSIAN_NOHANG_NOHANG_NOHANG(MCONTRIB)                \
+  if (flag >= 2) \
+  { \
+   hessian_M_buffer[local_eqn*n_dof*n_dof+local_unknown*n_dof+local_deriv] += (MCONTRIB); \
+  }
+
+
+#define ADD_TO_HESSIAN_HANG_NOHANG_NOHANG() ADD_TO_HESSIAN_FACTOR(hang_weight)
+#define ADD_TO_HESSIAN_NOHANG_HANG_NOHANG() ADD_TO_HESSIAN_FACTOR(hang_weight2)
+#define ADD_TO_HESSIAN_NOHANG_NOHANG_HANG() ADD_TO_HESSIAN_FACTOR(hang_weight3)
+
+#define ADD_TO_HESSIAN_HANG_HANG_NOHANG() ADD_TO_HESSIAN_FACTOR(hang_weight *hang_weight2)
+#define ADD_TO_HESSIAN_NOHANG_HANG_HANG() ADD_TO_HESSIAN_FACTOR(hang_weight2 *hang_weight3)
+#define ADD_TO_HESSIAN_HANG_NOHANG_HANG() ADD_TO_HESSIAN_FACTOR(hang_weight *hang_weight3)
+
+#define ADD_TO_HESSIAN_HANG_HANG_HANG() ADD_TO_HESSIAN_FACTOR(hang_weight *hang_weight2 *hang_weight3)
+
+
+#define ADD_TO_MASS_HESSIAN_HANG_NOHANG_NOHANG(MCONTRIB) ADD_TO_MASS_HESSIAN_FACTOR(hang_weight, MCONTRIB)
+#define ADD_TO_MASS_HESSIAN_NOHANG_HANG_NOHANG(MCONTRIB) ADD_TO_MASS_HESSIAN_FACTOR(hang_weight2, MCONTRIB)
+#define ADD_TO_MASS_HESSIAN_NOHANG_NOHANG_HANG(MCONTRIB) ADD_TO_MASS_HESSIAN_FACTOR(hang_weight3, MCONTRIB)
+
+#define ADD_TO_MASS_HESSIAN_HANG_HANG_NOHANG(MCONTRIB) ADD_TO_MASS_HESSIAN_FACTOR(hang_weight *hang_weight2, MCONTRIB)
+#define ADD_TO_MASS_HESSIAN_NOHANG_HANG_HANG(MCONTRIB) ADD_TO_MASS_HESSIAN_FACTOR(hang_weight2 *hang_weight3, MCONTRIB)
+#define ADD_TO_MASS_HESSIAN_HANG_NOHANG_HANG(MCONTRIB) ADD_TO_MASS_HESSIAN_FACTOR(hang_weight *hang_weight3, MCONTRIB)
+
+#define ADD_TO_MASS_HESSIAN_HANG_HANG_HANG(MCONTRIB) ADD_TO_MASS_HESSIAN_FACTOR(hang_weight *hang_weight2 *hang_weight3, MCONTRIB)
+
+#define Pi 3.14159265359
 
 #endif
 

@@ -29,7 +29,7 @@
 import math
 from ..typings import *
 
-import _pyoomph
+import pyoomph._pyoomph_core as _pyoomph
 import numpy
 
 

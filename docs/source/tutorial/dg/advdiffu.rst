@@ -1,7 +1,7 @@
 Advection-diffusion equation with an upwind scheme
 --------------------------------------------------
 
-To illustrate how to define the neccessary facet terms in the weak formulation of DG methods, we will refer back to the example of the advection-diffusion equation from :numref:`secpdecconvdiffusupg` where we discussed the SUPG stabilization.
+To illustrate how to define the necessary facet terms in the weak formulation of DG methods, we will refer back to the example of the advection-diffusion equation from :numref:`secpdecconvdiffusupg` where we discussed the SUPG stabilization.
 
 In strong formulation, we want to solve
 
@@ -15,7 +15,7 @@ Upon multiplication with a test function :math:`d` and subsequent spatial integr
 
    \left(\partial_t c,d \right) +\left(\nabla \cdot (\vec{u} c),d\right) - \left(\nabla \cdot (D \nabla c),d\right)  = 0
 
-Our first focus is now the advection term, :math:`(\nabla \cdot (\vec{u} c),d)`, which be split into the contributions of each element :math:`E`, i.e. 
+Our first focus is now the advection term, :math:`(\nabla \cdot (\vec{u} c),d)`, which can be split into the contributions of each element :math:`E`, i.e.
 
 .. math::
 
@@ -59,7 +59,7 @@ For the diffusion term, similar facet terms must be derived. Doing the same spli
 
    -\left(D\nabla^2 c,d\right)=\left(D\nabla c,\nabla d\right)_\Omega- \left\langle D\vec{n}\cdot\nabla c, d\right\rangle_{\partial\Omega}+  \sum_F\left\{\left\langle J_n^+, d^+\right\rangle_{F}+\left\langle J_n^-, d^-\right\rangle_{F}\right\}
 
-where we abbreviated the diffusive fluxes through to the facet by
+where we abbreviated the diffusive fluxes through the facet by
 
 .. math::
 
@@ -77,7 +77,7 @@ For such a term, we can use the :py:func:`~pyoomph.expressions.generic.avg` func
 
    \left\langle J_n^+, d^+\right\rangle_{F}+\left\langle J_n^-, d^-\right\rangle_{F}=\left\langle \vec{J}_n^\text{avg}\cdot\vec{n}^+, d^+-d^-\right\rangle_{F}=-\left\langle D \operatorname{avg}(\nabla c)\cdot\vec{n}^+, \operatorname{jump}(d)\right\rangle_{F}
 
-While this considers a conservative and reasonable diffusive transport across the facet, this form neither penalizes huge jumps in the concentraction :math:`c` (which should be smoothed by diffusion) nor is it symmetric. For a symmetric, consistent and coercive formulation we can weakly enforce continuity of :math:`c` in the sense of *Nitsche's method* by adding a symmetric and a penalty term to the facet terms, i.e. we write
+While this considers a conservative and reasonable diffusive transport across the facet, this form neither penalizes huge jumps in the concentration :math:`c` (which should be smoothed by diffusion) nor is it symmetric. For a symmetric, consistent and coercive formulation we can weakly enforce continuity of :math:`c` in the sense of *Nitsche's method* by adding a symmetric and a penalty term to the facet terms, i.e. we write
 
 .. math::
 
@@ -89,7 +89,7 @@ While this considers a conservative and reasonable diffusive transport across th
 
 Here, :math:`\alpha` is a penalty parameter and :math:`h` is the average element size of both elements attached to the facet. The penalty term ensures coercivity of the problem, i.e. the existence of a unique solution. The penalty parameter :math:`\alpha` should be chosen large enough to ensure coercivity, but small enough to not dominate the solution. The average element size :math:`h` is calculated by the average of the element sizes of both elements attached to the facet. 
 
-For the implementation, the equation starts as usual. We allow to pass and arbitrary finite element space, continuous or discontinuous:
+For the implementation, the equation starts as usual. We can pass an arbitrary finite element space, continuous or discontinuous:
 
 .. code:: python
 
@@ -140,11 +140,11 @@ The definition of the weak form now also tests whether we have an continuous spa
 Again, we make use of :py:func:`~pyoomph.expressions.generic.is_DG_space` to check whether the space is discontinuous. If this is the case, we define the facet terms.
 For these terms, we first define the upwind convection, which is only giving a contribution if the velocity is advecting in the same direction as the facet normal, which can be bound by ``var("normal")``. The normal of the element itself, i.e. not the facet normal, can be obtained by ``var("normal",domain="..")``. This is a consequence from the expansions of the variables at the domain where you add the residual terms, which are here the facets. For the elements, you hence must go one level up in the domain hierarchy.
 
-We furthermore define the average element length :math:`h`, which is calculated by the average :py:func:`~pyoomph.expressions.generic.avg` of both elements sizes attached to the facet. The element size can be obtained by the special variable name ``var("cartesian_element_length_h")``. You can also use ``var("element_length_h")`` instead, which is identical for Cartesian coordinate systems, however, for other coordinate systems, both will differ. In fact, these lengths are calculated by integrating the elemental length/area/volume (depending on the element dimension :math:`N_\text{el}`) and subsequently taking the :math:`N_\text{el}`-th root of the result. The length/area/volume calculation is done in a Cartesian coordinate system for ``var("cartesian_element_length_h")`` and in the coordinate system of the current equations for ``var("element_length_h")``. In dimensional problems, both consider the scaling ``scale_factor("spatial")``, i.e. :math:`h` will be measured in meters if the problem is dimensional.
+We furthermore define the average element length :math:`h`, which is calculated by the average :py:func:`~pyoomph.expressions.generic.avg` of both element sizes attached to the facet. The element size can be obtained by the special variable name ``var("cartesian_element_length_h")``. You can also use ``var("element_length_h")`` instead, which is identical for Cartesian coordinate systems, however, for other coordinate systems, both will differ. In fact, these lengths are calculated by integrating the elemental length/area/volume (depending on the element dimension :math:`N_\text{el}`) and subsequently taking the :math:`N_\text{el}`-th root of the result. The length/area/volume calculation is done in a Cartesian coordinate system for ``var("cartesian_element_length_h")`` and in the coordinate system of the current equations for ``var("element_length_h")``. In dimensional problems, both consider the scaling ``scale_factor("spatial")``, i.e. :math:`h` will be measured in meters if the problem is dimensional.
 
 Also, we use :py:func:`~pyoomph.expressions.generic.jump` to calculate the jumps of the variables across the facets. By default, both :py:func:`~pyoomph.expressions.generic.avg` and :py:func:`~pyoomph.expressions.generic.jump` expands all contained variables at the bulk element domains on both sides. Both attached bulk elements can also be accessed directly via the domains ``"+"`` and ``"-"``. Here, we could e.g. replace ``avg(var("cartesian_element_length_h"))`` by ``(var("cartesian_element_length_h",domain="+"))+var("cartesian_element_length_h",domain="-"))/2``, which is exactly what :py:func:`~pyoomph.expressions.generic.avg` does.
 
-However, in the last :py:func:`~pyoomph.expressions.generic.jump`, we want to calculate the jump of the upwind convection term. Since this term requires the facet normal, we must make sure that ``var("normal")`` is indeed evaluated at both sides of the facet, not the attached bulk elements. Therefore, we must use the ``at_facet=True`` flag to indicate that the variables should be expanded at the facet domain. It is also possible to explicitly on both sides of the facet domain by using the domains ``"+|"`` and ``"|-"``, respectively.
+However, in the last :py:func:`~pyoomph.expressions.generic.jump`, we want to calculate the jump of the upwind convection term. Since this term requires the facet normal, we must make sure that ``var("normal")`` is indeed evaluated at both sides of the facet, not the attached bulk elements. Therefore, we must use the ``at_facet=True`` flag to indicate that the variables should be expanded at the facet domain. It is also possible to explicitly expand on both sides of the facet domain by using the domains ``"+|"`` and ``"|-"``, respectively.
 
 Note that one cannot know a priori which element is on the ``"+"`` and which is on the ``"-"`` side of the facet. The order of the elements is not guaranteed. However, in reasonable formulations of such facet terms, the order of the elements should not matter. 
 
@@ -187,7 +187,7 @@ The discontinuous output is plotted in :numref:`figdgconvdiffu`.
 	:class: with-shadow
 	:width: 100%
 
-	Discontinuous Galerkin method for the advection-diffusion equation on spaces ``"D1"`` (left) and ``"D2"`` (right). The solutions is shown at times steps of 10. The discontinuities are clearly visible. Also, ``"D1"`` has too few degrees of freedom, which leads to severe numerical diffusion. This is typical for underresolved upwind schemes, as also seen in the in the SUPG implementation, cf. :numref:`figpdesupg`.
+	Discontinuous Galerkin method for the advection-diffusion equation on spaces ``"D1"`` (left) and ``"D2"`` (right). The solution is shown at time steps of 10. The discontinuities are clearly visible. Also, ``"D1"`` has too few degrees of freedom, which leads to severe numerical diffusion. This is typical for underresolved upwind schemes, as also seen in the SUPG implementation, cf. :numref:`figpdesupg`.
 
 .. only:: html
 

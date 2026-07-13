@@ -65,43 +65,61 @@ namespace oomph
 
     unsigned required_nsons() const { return 2; }
 
+    // Return the node already created by a neighbouring element at fractional local
+    // position s_fraction (if any), so it can be shared rather than duplicated; see .cpp.
     virtual Node *node_created_by_neighbour(const Vector<double> &s_fraction, bool &is_periodic);
 
+    // As above, but checking sons of neighbours (not yet implemented; always returns 0 here).
     virtual Node *node_created_by_son_of_neighbour(const Vector<double> &s_fraction, bool &is_periodic)
     {
       return 0;
     }
 
+    // Build this (son) element from its father during refinement: establish node pointers,
+    // creating shared/new nodes as needed, and set up boundary/periodicity info; see .cpp.
     virtual void build(Mesh *&mesh_pt, Vector<Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file);
 
+    // Check inter-element continuity of nodal positions and interpolated values.
     void check_integrity(double &max_error);
 
+    // Debug output of the element's corner node positions.
     void output_corners(std::ostream &outfile, const std::string &colour) const;
 
     BinaryTree *binarytree_pt() { return dynamic_cast<BinaryTree *>(Tree_pt); }
 
     BinaryTree *binarytree_pt() const { return dynamic_cast<BinaryTree *>(Tree_pt); }
 
+    // Set up all hanging nodes of this element (opens/passes debug output streams if given).
     void setup_hanging_nodes(Vector<std::ofstream *> &output_stream);
 
+    // Element-type-specific part of the hanging node setup; must be overridden by concrete elements.
     virtual void further_setup_hanging_nodes() = 0;
 
   protected:
+    // Static lookup table (keyed by nnode_1d) encoding, for each son type and local node,
+    // which boundary/vertex of the father element that son node coincides with (see .cpp).
     static std::map<unsigned, DenseMatrix<int>> Father_bound;
 
+    // Populate Father_bound for this element's node count (called lazily on first use).
     void setup_father_bounds();
 
+    // Boundary conditions along a whole element edge (least restrictive combination of its nodes).
     void get_edge_bcs(const int &edge, Vector<int> &bound_cons) const;
 
   public:
+    // Mesh-boundary indices that a given local edge/vertex lies on.
     void get_boundaries(const int &edge, std::set<unsigned> &boundaries) const;
 
+    // Boundary conditions at an edge/vertex, combining adjacent-edge BCs at vertices.
     void get_bcs(int bound, Vector<int> &bound_cons) const;
+    // Intrinsic boundary coordinate interpolated to local position s along an edge.
     void interpolated_zeta_on_edge(const unsigned &boundary, const int &edge, const Vector<double> &s, Vector<double> &zeta);
 
   protected:
+    // Set up the hanging-node scheme for one continuously-interpolated value.
     void setup_hang_for_value(const int &value_id);
 
+    // Set up hanging nodes on one particular edge of the element for a given value.
     virtual void quad_hang_helper(const int &value_id, const int &my_edge, std::ofstream &output_hangfile);
   };
 
@@ -132,43 +150,61 @@ namespace oomph
 
     unsigned required_nsons() const { return 4; }
 
+    // Return the node already created by a neighbouring element at fractional local
+    // position s_fraction (if any), so it can be shared rather than duplicated; see .cpp.
     virtual Node *node_created_by_neighbour(const Vector<double> &s_fraction, bool &is_periodic);
 
+    // As above, but checking sons of neighbours (not yet implemented; always returns 0 here).
     virtual Node *node_created_by_son_of_neighbour(const Vector<double> &s_fraction, bool &is_periodic)
     {
       return 0;
     }
 
+    // Build this (son) element from its father during refinement: establish node pointers,
+    // creating shared/new nodes as needed, and set up boundary/periodicity info; see .cpp.
     virtual void build(Mesh *&mesh_pt, Vector<Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file);
 
+    // Check inter-element continuity of nodal positions and interpolated values.
     void check_integrity(double &max_error);
 
+    // Debug output of the element's corner node positions.
     void output_corners(std::ostream &outfile, const std::string &colour) const;
 
     QuadTree *quadtree_pt() { return dynamic_cast<QuadTree *>(Tree_pt); }
 
     QuadTree *quadtree_pt() const { return dynamic_cast<QuadTree *>(Tree_pt); }
 
+    // Set up all hanging nodes of this element (opens/passes debug output streams if given).
     void setup_hanging_nodes(Vector<std::ofstream *> &output_stream);
 
+    // Element-type-specific part of the hanging node setup; must be overridden by concrete elements.
     virtual void further_setup_hanging_nodes() = 0;
 
   protected:
+    // Static lookup table (keyed by nnode_1d) encoding, for each son type and local node,
+    // which boundary/vertex of the father element that son node coincides with (see .cpp).
     static std::map<unsigned, DenseMatrix<int>> Father_bound;
 
+    // Populate Father_bound for this element's node count (called lazily on first use).
     void setup_father_bounds();
 
+    // Boundary conditions along a whole element edge (least restrictive combination of its nodes).
     void get_edge_bcs(const int &edge, Vector<int> &bound_cons) const;
 
   public:
+    // Mesh-boundary indices that a given local edge/vertex lies on.
     void get_boundaries(const int &edge, std::set<unsigned> &boundaries) const;
 
+    // Boundary conditions at an edge/vertex, combining adjacent-edge BCs at vertices.
     void get_bcs(int bound, Vector<int> &bound_cons) const;
+    // Intrinsic boundary coordinate interpolated to local position s along an edge.
     void interpolated_zeta_on_edge(const unsigned &boundary, const int &edge, const Vector<double> &s, Vector<double> &zeta);
 
   protected:
+    // Set up the hanging-node scheme for one continuously-interpolated value.
     void setup_hang_for_value(const int &value_id);
 
+    // Set up hanging nodes on one particular edge of the element for a given value.
     virtual void quad_hang_helper(const int &value_id, const int &my_edge, std::ofstream &output_hangfile);
   };
 
@@ -203,43 +239,61 @@ namespace oomph
       return 4;
     }
 
+    // Return the node already created by a neighbouring element at fractional local
+    // position s_fraction (if any), so it can be shared rather than duplicated; see .cpp.
     virtual Node *node_created_by_neighbour(const Vector<double> &s_fraction, bool &is_periodic);
 
+    // As above, but checking sons of neighbours (not yet implemented; always returns 0 here).
     virtual Node *node_created_by_son_of_neighbour(const Vector<double> &s_fraction, bool &is_periodic)
     {
       return 0;
     }
 
+    // Build this (son) element from its father during refinement: establish node pointers,
+    // creating shared/new nodes as needed, and set up boundary/periodicity info; see .cpp.
     virtual void build(Mesh *&mesh_pt, Vector<Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file);
 
+    // Check inter-element continuity of nodal positions and interpolated values.
     void check_integrity(double &max_error);
 
+    // Debug output of the element's corner node positions.
     void output_corners(std::ostream &outfile, const std::string &colour) const;
 
     OcTree *octree_pt() { return dynamic_cast<OcTree *>(Tree_pt); }
 
     OcTree *octree_pt() const { return dynamic_cast<OcTree *>(Tree_pt); }
 
+    // Set up all hanging nodes of this element (opens/passes debug output streams if given).
     void setup_hanging_nodes(Vector<std::ofstream *> &output_stream);
 
+    // Element-type-specific part of the hanging node setup; must be overridden by concrete elements.
     virtual void further_setup_hanging_nodes() = 0;
 
   protected:
+    // Static lookup table (keyed by nnode_1d) encoding, for each son type and local node,
+    // which boundary/vertex of the father element that son node coincides with (see .cpp).
     static std::map<unsigned, DenseMatrix<int>> Father_bound;
 
+    // Populate Father_bound for this element's node count (called lazily on first use).
     void setup_father_bounds();
 
+    // Boundary conditions along a whole element edge (least restrictive combination of its nodes).
     void get_edge_bcs(const int &edge, Vector<int> &bound_cons) const;
 
   public:
+    // Mesh-boundary indices that a given local edge/vertex lies on.
     void get_boundaries(const int &edge, std::set<unsigned> &boundaries) const;
 
+    // Boundary conditions at an edge/vertex, combining adjacent-edge BCs at vertices.
     void get_bcs(int bound, Vector<int> &bound_cons) const;
+    // Intrinsic boundary coordinate interpolated to local position s along an edge.
     void interpolated_zeta_on_edge(const unsigned &boundary, const int &edge, const Vector<double> &s, Vector<double> &zeta);
 
   protected:
+    // Set up the hanging-node scheme for one continuously-interpolated value.
     void setup_hang_for_value(const int &value_id);
 
+    // Set up hanging nodes on one particular edge of the element for a given value.
     virtual void quad_hang_helper(const int &value_id, const int &my_edge, std::ofstream &output_hangfile);
   };
 

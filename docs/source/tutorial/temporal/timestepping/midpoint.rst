@@ -1,7 +1,7 @@
 Trapezoidal rule and the implicit midpoint rule
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-So far, we have used different time stepping method, but there are obviously more possibilities. Let us focus on systems of first order ODEs only, which can be written in general as
+So far, we have used different time stepping methods, but there are obviously more possibilities. Let us focus on systems of first order ODEs only, which can be written in general as
 
 .. math:: \partial_t \vec{U}=\vec{F}(\vec{U},t)
 
@@ -33,7 +33,7 @@ However, there are time integration methods, where also previous values of :math
 
 In pyoomph, the lhs can easily be obtained by writing ``partial_t(...,scheme="BDF1")``, but how to evaluate the right hand side appropriately? As mentioned before, :py:func:`~pyoomph.expressions.generic.var` statements are always evaluated at the current time step :math:`n` we are currently solving for, so how to access the values of :math:`\vec{U}` at previous time steps?
 
-The answer is the function :py:func:`~pyoomph.expressions.generic.evaluate_in_past`, which takes an expression as argument and evaluate it previous time steps. Without an argument, ``evaluate_in_past(expr)`` evaluates ``expr`` at the time step :math:`n-1`. A second optional argument gives the offset, e.g. ``evaluate_in_past(expr,2)`` evaluates the expression ``expr`` at the time step :math:`n-2` and, beyond that, e.g. ``evaluate_in_past(expr,0.5)`` is equal to ``0.5*expr+0.5*evaluate_in_past(expr,1)``, i.e. with fractional values as second argument, one can linearly interpolate between two time steps.
+The answer is the function :py:func:`~pyoomph.expressions.generic.evaluate_in_past`, which takes an expression as argument and evaluates it at previous time steps. Without an argument, ``evaluate_in_past(expr)`` evaluates ``expr`` at the time step :math:`n-1`. A second optional argument gives the offset, e.g. ``evaluate_in_past(expr,2)`` evaluates the expression ``expr`` at the time step :math:`n-2` and, beyond that, e.g. ``evaluate_in_past(expr,0.5)`` is equal to ``0.5*expr+0.5*evaluate_in_past(expr,1)``, i.e. with fractional values as second argument, one can linearly interpolate between two time steps.
 
 This means that the trapezoidal rule :math:numref:`eqodetrapzrule` in residual form in pyoomph can be written as ``partial_t(...,scheme="BDF1")-evaluate_in_past(...,0.5)``, where we have cast the equation already in residual form, i.e. all terms are on the lhs and the rhs is zero.
 

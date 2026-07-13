@@ -23,7 +23,7 @@ To register an insoluble surfactant to the material library, one has to inherit 
            super(MyInsolubleSurfactant, self).__init__()
            self.surface_diffusivity = 1e-9 * meter ** 2 / second  # default surface diffusivity
 
-An insoluble surfactant will reduce the surface tension according to some relation. Therefore, we must define interface properties in the material library for each combination of the liquid composition and the surfactants on the interface (and potentially also for different gas compositions). This can be done similar to the specification of liquid-gas interface properties as discussed in :numref:`secmcflowlginterfaces`. We just inherit from the class :py:class:`~pyoomph.materials.generic.DefaultLiquidGasInterface`, which automatically sets the surface tension to the liquid-gas surface tension from the :py:attr:`~pyoomph.materials.generic.BaseLiquidProperties.default_surface_tension`. We can then modify the surface tension and potentially also the surface diffusivity for this particular interface.
+An insoluble surfactant will reduce the surface tension according to some relation. Therefore, we must define interface properties in the material library for each combination of the liquid composition and the surfactants on the interface (and potentially also for different gas compositions). This can be done similarly to the specification of liquid-gas interface properties as discussed in :numref:`secmcflowlginterfaces`. We just inherit from the class :py:class:`~pyoomph.materials.generic.DefaultLiquidGasInterface`, which automatically sets the surface tension to the liquid-gas surface tension from the :py:attr:`~pyoomph.materials.generic.BaseLiquidProperties.default_surface_tension`. We can then modify the surface tension and potentially also the surface diffusivity for this particular interface.
 
 .. code:: python
 
@@ -51,7 +51,7 @@ When the gas phase may be an arbitrary pure gas or gaseous mixture, we can just 
 
 Additionally, we can change the surface diffusivity :math:`D_S` to give a different value on each interface, i.e. overriding the default :py:attr:`~pyoomph.materials.generic.SurfactantProperties.surface_diffusivity` set in the :py:class:`~pyoomph.materials.generic.SurfactantProperties` class.
 
-When the surfactant is defined, we can obtain the interface properties by a combination of liquid properties, gas properties and a surfactant ``dict``. We cannot use the operator ``|`` anymore, i.e. ``liquid | gas`` to get the properties, since the surfactant table must be passed as third argument. Therefore, one must call the :py:func:`~pyoomph.materials.generic.get_interface_properties` function, which finds the right interface properties based on the passed phases and the ``surfactants``. The latter is just a ``dict``, where the keys are either surfactant names (strings) or surfactant properties loaded by :py:func:`~pyoomph.materials.generic.get_surfactant`. The values of the ``dict`` ``surfactants`` are the initial concentrations:
+When the surfactant is defined, we can obtain the interface properties by a combination of liquid properties, gas properties and a surfactant ``dict``. We cannot use the operator ``|`` anymore, i.e. ``liquid | gas`` to get the properties, since the surfactant table must be passed as a third argument. Therefore, one must call the :py:func:`~pyoomph.materials.generic.get_interface_properties` function, which finds the right interface properties based on the passed phases and the ``surfactants``. The latter is just a ``dict``, where the keys are either surfactant names (strings) or surfactant properties loaded by :py:func:`~pyoomph.materials.generic.get_surfactant`. The values of the ``dict`` ``surfactants`` are the initial concentrations:
 
 .. code:: python
 
@@ -81,7 +81,7 @@ Again, we can just get the properties, as e.g. the :py:attr:`~pyoomph.materials.
    	sigma2=interface.evaluate_at_initial_surfactant_concentrations(sigma1) # plug in initial surfactant concentration
    	print(sigma2)
 
-However, ``sigma1`` will still depend on the surface concentration :math:`\Gamma` of the surfactant ``"my_insoluble_surfactant"``. To plug in the initial surface concentrations, one to call the :py:meth:`~pyoomph.materials.generic.LiquidGasInterfaceProperties.evaluate_at_initial_surfactant_concentrations` method of the interface properties. Thereby, ``sigma2`` will be just a constant value, corresponding to the initial surface tension of this interface.
+However, ``sigma1`` will still depend on the surface concentration :math:`\Gamma` of the surfactant ``"my_insoluble_surfactant"``. To plug in the initial surface concentrations, one has to call the :py:meth:`~pyoomph.materials.generic.LiquidGasInterfaceProperties.evaluate_at_initial_surfactant_concentrations` method of the interface properties. Thereby, ``sigma2`` will be just a constant value, corresponding to the initial surface tension of this interface.
 
 
 .. only:: html

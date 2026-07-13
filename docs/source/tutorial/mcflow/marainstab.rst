@@ -3,7 +3,7 @@
 Example: Marangoni instability in a Hele-Shaw cell
 --------------------------------------------------
 
-We want to investigate the Marangoni instability (cf. :numref:`secpdemarainstab`) of an evaporating ethanol-water mixture which is confined between two plates at the top and bottom, i.e. by a *Hele-Shaw cell*. The flow in such a cell is usually three-dimensional, but when the plate distance :math:`\delta` is small compared to the flow structures, one can assume that the flow in :math:`z`-direction (i.e. the direction between both plates) is parabolic due to the no-slip boundary conditions at the top and bottom plate, i.e. at :math:`z=0` and :math:`z=\delta`. The velocity :math:`\vec{u}_\text{3d}(x,y,z,t)` is then just given by the average flow :math:`\vec{u}(x,y,t)` by :math:`\vec{u}_\text{3d}=6z(\delta-z)\vec{u}/\delta^2`. The presence of the no-slip boundary conditions modify the Navier-Stokes equations for the projected two-dimensional by a factor :math:`6/5` for the nonlinear term and an additional Brinkman term of :math:`-12\mu\vec{u}/\delta^2`:
+We want to investigate the Marangoni instability (cf. :numref:`secpdemarainstab`) of an evaporating ethanol-water mixture which is confined between two plates at the top and bottom, i.e. by a *Hele-Shaw cell*. The flow in such a cell is usually three-dimensional, but when the plate distance :math:`\delta` is small compared to the flow structures, one can assume that the flow in :math:`z`-direction (i.e. the direction between both plates) is parabolic due to the no-slip boundary conditions at the top and bottom plate, i.e. at :math:`z=0` and :math:`z=\delta`. The velocity :math:`\vec{u}_\text{3d}(x,y,z,t)` is then just given by the average flow :math:`\vec{u}(x,y,t)` via :math:`\vec{u}_\text{3d}=6z(\delta-z)\vec{u}/\delta^2`. The presence of the no-slip boundary conditions modifies the Navier-Stokes equations for the projected two-dimensional flow by a factor :math:`6/5` for the nonlinear term and an additional Brinkman term of :math:`-12\mu\vec{u}/\delta^2`:
 
 .. math:: :label: eqmcflowheleshawns
 
@@ -11,7 +11,7 @@ We want to investigate the Marangoni instability (cf. :numref:`secpdemarainstab`
 
 In pyoomph, we can just pass the plate distance :math:`\delta` via the ``hele_shaw_thickness`` argument to the :py:func:`~pyoomph.equations.multi_component.CompositionFlowEquations` to automatically account for these modifications of the Navier-Stokes equations.
 
-Experimentally, numerically and analytically, this setting has been investigated in Ref. :cite:`de2021marangoni`. Here, we will use the multi-component equations of pyoomph to reprocude the problem by simulation:
+Experimentally, numerically and analytically, this setting has been investigated in Ref. :cite:`de2021marangoni`. Here, we will use the multi-component equations of pyoomph to reproduce the problem by simulation:
 
 .. code:: python
 
@@ -38,9 +38,9 @@ Experimentally, numerically and analytically, this setting has been investigated
            self.gas_mixture = Mixture(get_pure_gas("air") + 20*percent * get_pure_gas("ethanol") + 40*percent * get_pure_gas("water"),quantity="relative_humidity",temperature=self.temperature)
            self.interface_props=None # Interface properties, are determined automatically if not set
 
-In the experiments, the evaporation happens in open space. Here, we only have a two-dimensional setting. While in 3d the ambient conditions could be imposed at infinite distances due to the far field decay of :math:`1/r` with the distance :math:`r` of the vapor concentration from the interface, in 2d it does not work: The corresponding Green's function is :math:`\ln(r)` and hence it is not bounded at infinity. Therefore, we must strongly impose the vapor concentration at a finite distance. This artificial vapor concentration can be set with by the composition of the ``gas_mixture`` and must be adjusted so that the typical evaporation rates match with the experiment.
+In the experiments, the evaporation happens in open space. Here, we only have a two-dimensional setting. While in 3d the ambient conditions could be imposed at infinite distances due to the far field decay of :math:`1/r` with the distance :math:`r` of the vapor concentration from the interface, in 2d it does not work: The corresponding Green's function is :math:`\ln(r)` and hence it is not bounded at infinity. Therefore, we must strongly impose the vapor concentration at a finite distance. This artificial vapor concentration can be set by the composition of the ``gas_mixture`` and must be adjusted so that the typical evaporation rates match with the experiment.
 
-Again, in the :py:meth:`~pyoomph.generic.problem.Problem.define_problem`, we setup the ``spatial`` and ``temporal`` scale by hand and let the remaining scales be determined automatically from the properties of the ``liquid_mixture``. However, we adjust the ``velocity`` and ``pressure`` scale by hand afterwards to better match the typical orders of magnitude for this particular problem (e.g. by measurements in the experiments). Since properties may depend on the ``temperature`` and potentially the ``absolute_pressure``, we must again set these on a global (i.e. :py:class:`~pyoomph.generic.problem.Problem`-wide) level with the :py:meth:`~pyoomph.generic.problem.Problem.define_named_var`:
+Again, in the :py:meth:`~pyoomph.generic.problem.Problem.define_problem`, we set up the ``spatial`` and ``temporal`` scale by hand and let the remaining scales be determined automatically from the properties of the ``liquid_mixture``. However, we adjust the ``velocity`` and ``pressure`` scale by hand afterwards to better match the typical orders of magnitude for this particular problem (e.g. by measurements in the experiments). Since properties may depend on the ``temperature`` and potentially the ``absolute_pressure``, we must again set these on a global (i.e. :py:class:`~pyoomph.generic.problem.Problem`-wide) level with the :py:meth:`~pyoomph.generic.problem.Problem.define_named_var`:
 
 .. code:: python
 
@@ -64,7 +64,7 @@ The mesh is just a :py:class:`~pyoomph.meshes.simplemeshes.RectangularQuadMesh`,
            self.add_mesh(mesh)
 
 
-Then, the equations have to be assembled. If the user does not explicitly selects the ``interface_props`` by hand, it will be determined from the material library:
+Then, the equations have to be assembled. If the user does not explicitly select the ``interface_props`` by hand, it will be determined from the material library:
 
 .. code:: python
 

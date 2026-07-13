@@ -1,7 +1,7 @@
 .. _secodetimesteppingsimple:
 
-Testing different time stepping method
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Testing different time stepping methods
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 A good way to test whether the chosen time stepping method is appropriate is to compare the numerical results of a simple test problem with the corresponding analytical solution. Furthermore, one can test for conserved quantities, e.g. the total energy of an undamped harmonic oscillator. This will be done for all time stepping methods in the following.
 
@@ -18,7 +18,7 @@ whereas for the other methods, i.e. the ones which evaluate only first order tim
    \partial_t y-z&=0
    \end{aligned}
 
-i.e. where :math:`z=\partial_t y`. The code for the oscillator equation that allows to select the time stepping scheme is the following:
+i.e. where :math:`z=\partial_t y`. The code for the oscillator equation that allows one to select the time stepping scheme is the following:
 
 .. code:: python
 
@@ -83,7 +83,7 @@ In the problem class, also some modifications are necessary:
 
 First of all, we take an argument ``scheme`` already in the constructor of the problem class. This is stored as member of the problem and passed later on to the equation class, namely in the method :py:meth:`~pyoomph.generic.problem.Problem.define_problem`. We make sure that the initial condition is perfectly accurate, i.e. that the derivatives at the beginning are approximated correctly by passing the full time-dependent analytical solution :math:`y(t)=A\cos(\omega t+\phi)` as initial condition. This condition and its temporal derivatives will be evaluated at :math:`t=0` and the corresponding discretized history values are set appropriately. If ``"BDF1"`` or ``"BDF2"`` are selected, we also have to explicitly add an initial condition for :math:`z`, i.e. for ``dot_y``, here.
 
-In a next step, we want to monitor the total energy :math:`E=1/2\:(\partial_t y)^2+1/2\:\omega^2y^2`. This is an observable which depends on the unknowns, but it is not an unknown itself. Therefore, we use the class :py:class:`~pyoomph.equations.generic.ODEObservables`, which allows to add exactly these kind of observables to the output. After running, there will be an additional column in the output file containing the values of ``"Etot"``.
+In a next step, we want to monitor the total energy :math:`E=1/2\:(\partial_t y)^2+1/2\:\omega^2y^2`. This is an observable which depends on the unknowns, but it is not an unknown itself. Therefore, we use the class :py:class:`~pyoomph.equations.generic.ODEObservables`, which allows us to add exactly these kind of observables to the output. After running, there will be an additional column in the output file containing the values of ``"Etot"``.
 
 Finally, we let our script successively create a problem for each of the time stepping methods, set an individual output directory with :py:meth:`~pyoomph.generic.problem.Problem.set_output_directory` to prevent overwriting of the previous results and run the simulations:
 

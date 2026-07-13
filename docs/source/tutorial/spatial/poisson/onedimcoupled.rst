@@ -1,7 +1,7 @@
 Coupled one-dimensional Poisson equations with Dirichlet boundary conditions
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The power of defining the equations in classes easily let you combine multiple equations. Let us now solve the following system
+The power of defining the equations in classes easily lets you combine multiple equations. Let us now solve the following system
 
 .. math::
 
@@ -10,7 +10,7 @@ The power of defining the equations in classes easily let you combine multiple e
    -\nabla^2 w&=-10u \\
    \end{aligned}
 
-subject to :math:`u(-1)=u(1)=0` and :math:`w(-1)=-w(1)=1`. The code just create two instances of the ``PoissonEquation`` from the previous file :download:`poisson.py` with different names, combines both and couple both equations via the source terms:
+subject to :math:`u(-1)=u(1)=0` and :math:`w(-1)=-w(1)=1`. The code just creates two instances of the ``PoissonEquation`` from the previous file :download:`poisson.py` with different names, combines both and couple both equations via the source terms:
 
 .. code:: python
 
@@ -46,7 +46,7 @@ Also note how :py:class:`~pyoomph.meshes.bcs.DirichletBC` takes multiple keyword
 	:class: with-shadow
 	:width: 50%
 	
-	Coupled Poisson equations with Dirchlet boundaries.
+	Coupled Poisson equations with Dirichlet boundaries.
 
 
 .. only:: html

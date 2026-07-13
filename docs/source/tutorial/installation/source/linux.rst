@@ -8,7 +8,7 @@ To obtain the code, clone the GitHub repository
       git clone https://www.github.com/pyoomph/pyoomph.git 
 
 
-Once you have cloned the repository with git, you first have to install a few packages. On a Debian/Ubuntu distribution, you habe to do e.g.
+Once you have cloned the repository with git, you first have to install a few packages. On a Debian/Ubuntu distribution, you have to do e.g.
 
 .. code:: bash
 
@@ -18,13 +18,13 @@ There are additional python packages required. You can either install these with
 
 .. code:: bash
 
-      gmsh mkl mpi4py matplotlib numpy petsc4py pybind11 pygmsh scipy meshio pybind11-stubgen setuptools wheel
+      gmsh mkl mpi4py matplotlib numpy petsc4py pybind11 pygmsh scipy meshio pybind11-stubgen setuptools wheel scikit_build_core
 
 Make sure you have recent versions, e.g. when using ``pip``, you could do 
 
 .. code:: bash
 
-      python -m pip install --upgrade gmsh mkl mpi4py matplotlib numpy petsc4py pybind11 pygmsh scipy meshio pybind11-stubgen setuptools wheel
+      python -m pip install --upgrade gmsh mkl mpi4py matplotlib numpy petsc4py pybind11 pygmsh scipy meshio pybind11-stubgen setuptools wheel scikit_build_core
 
 Afterwards, you first have to build the stripped and slightly modified version of oomph-lib which is shipped along with pyoomph. 
 

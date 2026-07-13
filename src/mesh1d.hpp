@@ -28,6 +28,8 @@ The main author may be contacted at c.diddens@utwente.nl
 namespace pyoomph
 {
 
+  // DynamicTree specialization for 1d (binary-tree-refined) elements, combining oomph-lib's
+  // BinaryTree geometry with pyoomph's dynamic (JIT-compiled) element support.
   class DynamicBinaryTree : public virtual oomph::BinaryTree, public virtual DynamicTree
   {
   protected:
@@ -40,6 +42,7 @@ namespace pyoomph
       Level = father_pt->level() + 1;
     }
 
+    // Factory used by oomph-lib's tree-refinement code to create a son tree of the correct dynamic type.
     oomph::Tree *construct_son(oomph::RefineableElement *const &object_pt,
                                Tree *const &father_pt, const int &son_type)
     {
@@ -48,6 +51,7 @@ namespace pyoomph
     }
   };
 
+  // Root of a DynamicBinaryTree, i.e. the tree node associated with a top-level (unrefined) 1d element.
   class DynamicBinaryTreeRoot : virtual public DynamicBinaryTree, public virtual DynamicTreeRoot
   {
 
@@ -57,6 +61,8 @@ namespace pyoomph
     }
   };
 
+  // 1d specialization of TemplatedMeshBase: builds/refines meshes of 1d (line) elements using a
+  // binary tree forest for h-refinement.
   class TemplatedMeshBase1d : public virtual TemplatedMeshBase
   {
 
@@ -77,6 +83,12 @@ namespace pyoomph
       oomph::BrokenCopy::broken_assign("TemplatedMeshBase1d");
     }
 
+    bool refinement_possible() override
+    {
+      // 1d elements are always tree-refineable (via a binary tree)
+      return true;
+    }
+
     /// Destructor:
     virtual ~TemplatedMeshBase1d() {}
 
@@ -85,6 +97,8 @@ namespace pyoomph
       setup_binary_tree_forest();
     }
 
+    // Build a fresh BinaryTreeForest from scratch, turning each current (leaf) element into the root
+    // of its own binary tree. Discards any pre-existing forest/refinement-history information.
     void setup_binary_tree_forest()
     {
       if (this->Forest_pt != 0)
@@ -103,6 +117,11 @@ namespace pyoomph
       //     for (auto & t : trees_pt) dynamic_cast<oomph::BinaryTree*>(t)->self_test();
     }
 
+    // Populate this mesh's elements, nodes and boundaries from a MeshTemplateElementCollection: for each
+    // template element, instantiate the corresponding JIT-compiled element (factory_element); for each
+    // template node with an already-created oomph node, add it to Node_pt and register it on whichever
+    // boundaries it belongs to (remapping template boundary indices to compact per-mesh indices via
+    // bound_map, since only boundaries actually touched by this collection are kept).
     void generate_from_template(MeshTemplateElementCollection *coll)
     {
 
@@ -154,7 +173,7 @@ namespace pyoomph
 
     void setup_boundary_element_info(std::ostream &outfile);
     void setup_boundary_element_info() override;
-	 void fill_internal_facet_buffers(std::vector<BulkElementBase*> & internal_elements, std::vector<int> & internal_face_dir,std::vector<BulkElementBase*> & opposite_elements,std::vector<int> & opposite_face_dir,std::vector<int> & opposite_already_at_index) override;    
+	 void fill_internal_facet_buffers(std::vector<BulkElementBase*> & internal_elements, std::vector<int> & internal_face_dir,std::vector<BulkElementBase*> & opposite_elements,std::vector<int> & opposite_face_dir,std::vector<int> & opposite_already_at_index) override;
   };
 
 }

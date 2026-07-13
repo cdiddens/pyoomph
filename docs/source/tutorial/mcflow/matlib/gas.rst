@@ -1,7 +1,7 @@
 Definition of a pure gaseous substance
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Let us start by defining the parameters of air, where we consider - despite of knowing better - that air is just a pure substance. This is acceptable, if we want to mix water vapor with air to solve e.g. a vapor diffusion problem. But of course, we can also mix nitrogen with oxygen and possibly argon and more pure species if we want to resolve the local composition of the air, but this will be rarely necessary. To define air as a pure gaseous substance, we do the following:
+Let us start by defining the parameters of air, where we consider - despite knowing better - that air is just a pure substance. This is acceptable, if we want to mix water vapor with air to solve e.g. a vapor diffusion problem. But of course, we can also mix nitrogen with oxygen and possibly argon and more pure species if we want to resolve the local composition of the air, but this will be rarely necessary. To define air as a pure gaseous substance, we do the following:
 
 .. code:: python
 
@@ -17,7 +17,7 @@ Let us start by defining the parameters of air, where we consider - despite of k
    		self.dynamic_viscosity=0.01813 *milli*pascal*second # dynamic viscosity (here a constant)
    		self.mass_density=1.225*kilogram/meter**3 # Mass density
 
-As you can see, we first have to import :py:mod:`pyoomph.materials` to get access to the material library and the base classes, as e.g. :py:class:`~pyoomph.materials.generic.PureGasProperties`. With the decorator :py:meth:`~pyoomph.materials.generic.MaterialProperties.register` of the generic :py:class:`~pyoomph.materials.generic.MaterialProperties` material class, pyoomph is instructed to register this material to the library. This registration is not persistent, i.e. you have to declare the class ``PureGasAir`` with the decorator in every code you want to use this material. However, you can put all your material definitions in a separate python file and ``import`` it. Some example materials are already defined in the file :py:mod:`pyoomph.materials.default_materials`.
+As you can see, we first have to import :py:mod:`pyoomph.materials` to get access to the material library and the base classes, as e.g. :py:class:`~pyoomph.materials.generic.PureGasProperties`. With the decorator :py:meth:`~pyoomph.materials.generic.MaterialProperties.register` of the generic :py:class:`~pyoomph.materials.generic.MaterialProperties` material class, pyoomph is instructed to register this material to the library. This registration is not persistent, i.e. you have to declare the class ``PureGasAir`` with the decorator in every piece of code you want to use this material. However, you can put all your material definitions in a separate python file and ``import`` it. Some example materials are already defined in the file :py:mod:`pyoomph.materials.default_materials`.
 
 We set the ``name`` of our substance to ``"air"``, which is used as identifier of this gas.
 
@@ -41,7 +41,7 @@ Once the gas is defined, we can access this as follows
    air2=get_pure_gas("air") # Loading another instance of air
    print("Mass densities",air.mass_density,air2.mass_density) # Compare the densities
 
-You can hence create an instance of the pure gas ``"air"`` by calling :py:func:`~pyoomph.materials.generic.get_pure_gas`. You can just access all the properties, but you can also change them. This can be useful to e.g. investigate the influence of some parameters. Note that in the above example, the second instance of the gas, i.e. ``air2``, will not be affected by this change, i.e. the mass density will still be ``1.225*kilogram/meter**3``. Thereby, you can e.g. modify the properties by hand only for one physical domain while keeping the other occurences of the very same substance untouched.
+You can hence create an instance of the pure gas ``"air"`` by calling :py:func:`~pyoomph.materials.generic.get_pure_gas`. You can just access all the properties, but you can also change them. This can be useful to e.g. investigate the influence of some parameters. Note that in the above example, the second instance of the gas, i.e. ``air2``, will not be affected by this change, i.e. the mass density will still be ``1.225*kilogram/meter**3``. Thereby, you can e.g. modify the properties by hand only for one physical domain while keeping the other occurrences of the very same substance untouched.
 
 
 .. only:: html

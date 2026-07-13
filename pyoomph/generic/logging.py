@@ -26,7 +26,7 @@
 # ========================================================================
 
 import sys
-import _pyoomph
+import pyoomph._pyoomph_core as _pyoomph
 
 class _LogWrapper(object):
     

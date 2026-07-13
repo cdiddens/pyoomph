@@ -36,7 +36,7 @@ Since we have a temporal problem, also a time scale has to be set
 
            self.set_scaling(temporal=self.sphere_radius/UStokes_ana)
 
-We then have to exchange the ``StokesEquations`` by the ``NavierStokesEquations`` to account for the inertia. However, when transforming into the co-moving frame of reference, we have to correct for the accelation of the co-moving system. This can be added via the ``bulkforce`` argument, which adds a contribution proportional to :math:`\rho_\text{l}\dot{U}\vec{e}_z` to the ``NavierStokesEquations``. This effectively changes the time derivative in the inertia to :math:`\rho_\text{l}(\partial_t \vec{u}-\dot{U} \vec{e}_z)` so that the acceleration of the coordinate system :math:`\dot{U}` cancels out:
+We then have to exchange the ``StokesEquations`` by the ``NavierStokesEquations`` to account for the inertia. However, when transforming into the co-moving frame of reference, we have to correct for the acceleration of the co-moving system. This can be added via the ``bulkforce`` argument, which adds a contribution proportional to :math:`\rho_\text{l}\dot{U}\vec{e}_z` to the ``NavierStokesEquations``. This effectively changes the time derivative in the inertia to :math:`\rho_\text{l}(\partial_t \vec{u}-\dot{U} \vec{e}_z)` so that the acceleration of the coordinate system :math:`\dot{U}` cancels out:
 
 .. code:: python
 
@@ -63,7 +63,7 @@ Finally, the run code must be transient now:
        with TransientNonlinearStokesLawProblem() as problem:
            problem.run(0.5*second,startstep=0.05*second,outstep=True)  # solve and output
 
-As seen in :numref:`figpdetransientstokeslaw`, the final velocity field is not symmetric anymore and we see a transient dynamics of :math:`U(t)` is plotted.
+As seen in :numref:`figpdetransientstokeslaw`, the final velocity field is not symmetric anymore and a transient dynamics of :math:`U(t)` is plotted.
 
 ..  figure:: transient_stokes.*
 	:name: figpdetransientstokeslaw

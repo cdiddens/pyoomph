@@ -3,7 +3,7 @@
 Stokes' law - Obtaining forces by traction integrals and using global Lagrange multipliers
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-*Stokes' law* describes the flow field around a spherical rigid object. Here, we consider a solid sphere sinking down due to buoyancy. Obviously, treating this in lab frame would require to solve for the motion of the object directly, which can be done with a moving mesh method as described later on in :numref:`secALE`. However, we can also transform into the coordinate system co-moving with the object. In this case, a fixed mesh can be used.
+*Stokes' law* describes the flow field around a spherical rigid object. Here, we consider a solid sphere sinking down due to buoyancy. Obviously, treating this in the lab frame would require to solve for the motion of the object directly, which can be done with a moving mesh method as described later on in :numref:`secALE`. However, we can also transform into the coordinate system co-moving with the object. In this case, a fixed mesh can be used.
 
 Stokes' law states that the terminal velocity will be given by
 
@@ -96,11 +96,11 @@ Next, we require a possibility to calculate the drag force :math:`F_\text{d}` an
    		ltest=testfunction(self.lagr_mult) # test function V of the Lagrange multiplier U
    		self.add_residual(weak(dot(traction,self.direction),ltest,dimensional_dx=True)) # Integrate dimensionally over the traction
 
-One important trick is here that we pass ``domain=self.get_parent_domain()`` when we bind the field ``"velocity"`` to ``"u"``. Thereby, we do not get the interfacial velocity, but the full velocity of the bulk. While the values of the bulk and interfacial velocity coincide on the interface, spatial derivatives do not! If we would bind ``u=var("velocity")`` without the ``domain`` argument, :math:`\nabla\vec{u}` would take the surface gradient :math:`\nabla_S \vec{u}`, not the bulk gradient :math:`\nabla \vec{u}`. Alternatively, we could have used ``u=var("velocity",domain="..")`` as shortcut to bind the bulk velocity.
+One important trick is here that we pass ``domain=self.get_parent_domain()`` when we bind the field ``"velocity"`` to ``"u"``. Thereby, we do not get the interfacial velocity, but the full velocity of the bulk. While the values of the bulk and interfacial velocity coincide on the interface, spatial derivatives do not! If we bound ``u=var("velocity")`` without the ``domain`` argument, :math:`\nabla\vec{u}` would take the surface gradient :math:`\nabla_S \vec{u}`, not the bulk gradient :math:`\nabla \vec{u}`. Alternatively, we could have used ``u=var("velocity",domain="..")`` as shortcut to bind the bulk velocity.
 
 Then we add the integral :math:numref:`eqspatialstokeslawtraction` to the test space of :math:`U`, i.e on ``testfunction(U)``, which is :math:`V`. However, since :py:func:`~pyoomph.expressions.generic.weak` by default calculates integrals to the non-dimensional differential, i.e. to :math:`\mathrm{d}\tilde{S}` instead of :math:`\mathrm{d}S`, we would not get the unit of a force. Therefore, we have to tell :py:func:`~pyoomph.expressions.generic.weak` by passing ``dimensional_dx=True`` that we want to integrate dimensionally.
 
-The :py:class:`~pyoomph.generic.problem.Problem` class uses physical dimensions and we set the default values in the constructor. Furthermore, we add a method that allows to calculate the analytical terminal velocity according to :math:numref:`eqspatialstokeslawuterm`:
+The :py:class:`~pyoomph.generic.problem.Problem` class uses physical dimensions and we set the default values in the constructor. Furthermore, we add a method that allows us to calculate the analytical terminal velocity according to :math:numref:`eqspatialstokeslawuterm`:
 
 .. code:: python
 
@@ -117,7 +117,7 @@ The :py:class:`~pyoomph.generic.problem.Problem` class uses physical dimensions 
    	def get_theoretical_velocity(self): # get the analytical terminal velocity
    		return 2 / 9 * (self.sphere_density - self.fluid_density) / self.fluid_viscosity * self.gravity * self.sphere_radius ** 2
 
-The problem definition will now use our mesh, set an axisymmetric coordinate system and introduces scalings, namely the object radius as spatial scale and the theoretical velocity as velocity scale. The pressure scale is set by the viscous pressure scale and we furthermore introduce a scale for any ``"force"``, which is initialized by the buoyancy force. This one will be used in a minute.
+The problem definition will now use our mesh, set an axisymmetric coordinate system and introduce scalings, namely the object radius as spatial scale and the theoretical velocity as velocity scale. The pressure scale is set by the viscous pressure scale and we furthermore introduce a scale for any ``"force"``, which is initialized by the buoyancy force. This one will be used in a minute.
 
 .. code:: python
 
@@ -146,7 +146,7 @@ The first part of the equations is trivial, just ``StokesEquations`` with output
    		eqs += DirichletBC(velocity_x=0) @ "axisymm_upper"  # No flow through the axis of symmetry
    		eqs+=DirichletBC(velocity_x=0,velocity_y=0)@"liquid_sphere" # and no-slip on the object
 
-Then, the Lagrange multiplier, i.e. the terminal velocity :math:`U`, is introduced. We use :py:class:`~pyoomph.generic.codegen.GlobalLagrangeMultiplier` for that, which will introduce a single global degree of freedom ``UStokes``. Furthermore, the constant offset of :math:`F_g` (``F_buo``) is subtracted, i.e. accounting for this term in :math:numref:`eqspatialstokeslawcontraint`. Both, the definition of ``UStokes`` and the offset term are simultaneously done by passing ``UStokes=-F_buo`` to the :py:class:`~pyoomph.generic.codegen.GlobalLagrangeMultiplier`. The Lagrange multiplier equation is then augmented by a :py:class:`~pyoomph.equations.generic.Scaling` and a :py:class:`~pyoomph.equations.generic.TestScaling`, which sets the scale of ``UStokes`` to the ``"velocity"`` scale and the scale of its test function, i.e. :math:`V`, to an inverse of the ``"force"`` scale. With the latter, :math:numref:`eqspatialstokeslawcontraint` will become nondimensional, i.e. the units of force will cancel out upon the internal replacement of the variables and test functions by its non-dimensional counterparts:
+Then, the Lagrange multiplier, i.e. the terminal velocity :math:`U`, is introduced. We use :py:class:`~pyoomph.generic.codegen.GlobalLagrangeMultiplier` for that, which will introduce a single global degree of freedom ``UStokes``. Furthermore, the constant offset of :math:`F_g` (``F_buo``) is subtracted, i.e. accounting for this term in :math:numref:`eqspatialstokeslawcontraint`. Both the definition of ``UStokes`` and the offset term are simultaneously done by passing ``UStokes=-F_buo`` to the :py:class:`~pyoomph.generic.codegen.GlobalLagrangeMultiplier`. The Lagrange multiplier equation is then augmented by a :py:class:`~pyoomph.equations.generic.Scaling` and a :py:class:`~pyoomph.equations.generic.TestScaling`, which sets the scale of ``UStokes`` to the ``"velocity"`` scale and the scale of its test function, i.e. :math:`V`, to an inverse of the ``"force"`` scale. With the latter, :math:numref:`eqspatialstokeslawcontraint` will become nondimensional, i.e. the units of force will cancel out upon the internal replacement of the variables and test functions by their non-dimensional counterparts:
 
 .. code:: python
 
@@ -199,7 +199,7 @@ Finally, the value of :math:`U` must be used as far field condition. To that end
 
    		self.add_equations(eqs@"liquid")
 
-The run code is again short, but we compare the analytical and numerical value, leading to an error of :math:`\sim 0.024\:\mathrm{\%}` for this mesh resolution:
+The run code is again short, but we compare the analytical and numerical values, leading to an error of :math:`\sim 0.024\:\mathrm{\%}` for this mesh resolution:
 
 .. code:: python
 
@@ -212,7 +212,7 @@ The run code is again short, but we compare the analytical and numerical value, 
    		U_ana=problem.get_theoretical_velocity()
    		print("NUMERICAL: ",U_num,"ANALYTICAL:",U_ana,"ERROR [%]:",abs(float((U_num-U_ana)/U_ana*100)))
 
-The result is plotted in :numref:`figspatialstokeslaw`. We can easily change the mesh to calculate the terminal velocity around differently shaped objects. The far field solution won't be exact, but for a sufficiently large exterior mesh, the made error becomes small due to the convergence of :math:numref:`eqspatialstokeslawfarfield` to :math:`(u_r,u_z)=(0,U)`.
+The result is plotted in :numref:`figspatialstokeslaw`. We can easily change the mesh to calculate the terminal velocity around differently shaped objects. The far field solution won't be exact, but for a sufficiently large exterior mesh, the resulting error becomes small due to the convergence of :math:numref:`eqspatialstokeslawfarfield` to :math:`(u_r,u_z)=(0,U)`.
 
 .. only:: html
 

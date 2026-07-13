@@ -9,11 +9,11 @@ The easiest method to get pyoomph installed on your system is using ``pip``, i.e
 
 This will install pyoomph on your system. However, please also read the system-specific steps below.
 
-If you get errors, let us know (c.diddens@utwente.nl), and we see whether we can provide a suitable wheel for your system.
+If you get errors, let us know (c.diddens@utwente.nl), and we will see whether we can provide a suitable wheel for your system.
 
 .. warning::
 
-   If you are using a recent Mac with the Apple silicon (arm64 architecture) processor, you must execute this command in a Rosetta terminal. At https://www.courier.com/blog/tips-and-tricks-to-setup-your-apple-m1-for-development/ you can find instructions how to create such a Rosetta terminal (**note**: recent systems must be handled differently, see e.g. here: https://developer.apple.com/forums/thread/718666). Also, please see below regarding the `mkl` module.
+   If you are using a recent Mac with the Apple silicon (arm64 architecture) processor, you must execute this command in a Rosetta terminal. At https://www.courier.com/blog/tips-and-tricks-to-setup-your-apple-m1-for-development/ you can find instructions on how to create such a Rosetta terminal (**note**: recent systems must be handled differently, see e.g. here: https://developer.apple.com/forums/thread/718666). Also, please see below regarding the `mkl` module.
    
    You can install pyoomph from source directly on arm64, but unfortunately without support for the fast MKL Pardiso solver. See :numref:`installonmac` for details. Also, you might have to use a less recent version of python. See https://github.com/pyoomph/pyoomph/blob/main/Mac_arm64_with_Pardiso.md for details.
 
@@ -36,7 +36,7 @@ pyoomph can use a minimal C compiler, namely the TinyC compiler (TCC), wrapped b
     
     Required packages to install from MS Build Tools
     
-If you do not want to install MS Build Tools for any reason, you always can use the internal TinyC compiler. To do so, call the method ``set_c_compiler("tcc")`` of the :py:class:`~pyoomph.generic.problem.Problem` class so select the internal compiler. This has to be done for each problem and before any calls of the methods :py:meth:`~pyoomph.generic.problem.Problem.initialise`, :py:meth:`~pyoomph.generic.problem.Problem.output`, :py:meth:`~pyoomph.generic.problem.Problem.solve` or :py:meth:`~pyoomph.generic.problem.Problem.run`. Alternatively, you can add the command line arguments *--tcc*, e.g. run a your simulation script ``my_simulation.py`` as follows:
+If you do not want to install MS Build Tools for any reason, you always can use the internal TinyC compiler. To do so, call the method ``set_c_compiler("tcc")`` of the :py:class:`~pyoomph.generic.problem.Problem` class to select the internal compiler. This has to be done for each problem and before any calls of the methods :py:meth:`~pyoomph.generic.problem.Problem.initialise`, :py:meth:`~pyoomph.generic.problem.Problem.output`, :py:meth:`~pyoomph.generic.problem.Problem.solve` or :py:meth:`~pyoomph.generic.problem.Problem.run`. Alternatively, you can add the command line arguments *--tcc*, e.g. run your simulation script ``my_simulation.py`` as follows:
 
 
 .. code:: bash

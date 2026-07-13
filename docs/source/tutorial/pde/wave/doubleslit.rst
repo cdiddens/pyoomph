@@ -50,7 +50,7 @@ We will now solve the wave equation on a setting that resembles the famous *doub
    		holes=self.create_lines(p_wl_bu,"wall_left",p_wl_ub,"wall",p_wr_ub,"wall",p_wr_bu,"wall",p_wl_bu)
    		self.plane_surface(*lines,name="domain",holes=[holes]) # create the domain
 
-A lot of parameters are directly accessed from the :py:class:`~pyoomph.generic.problem.Problem` class, which will be defined soon. Therefore, the constructor of the ``DoubleSlitMesh`` gets the :py:class:`~pyoomph.generic.problem.Problem` passed, which is then accessed in the ``define_mesh`` method to get the chosen settings as e.g. ``slit_width`` or ``slit_distance``. The corner points are created and a line loop is assembled with the :py:meth:`~pyoomph.meshes.gmsh.GmshTemplate.create_lines` method. It takes alternating arguments of points and interface names for the interfaces between. The interface ``"inlet"`` will be used to impose a planar incoming wave, ``"top"`` and ``"bottom"`` are at the top and bottom of the domain before the slit. ``"wall_left"`` is the left side of the wall containing the slits, i.e. the side facing towards the incoming wave. At this side, we have to make sure to complete remove any reflections of the incoming wave to prevent an undesired interference with the incoming wave. All other interfaces of the slits and the right side of the wall are marked as ``"wall"``. There, reflection is admitted. The ``"out_top"`` and ``"out_bottom"`` are the interfaces at the top and bottom after the two slits. Also here, reflection will be prevented. Finally, at the far right side of the mesh, the ``"screen"`` interface is set where the intensity will be measured.
+A lot of parameters are directly accessed from the :py:class:`~pyoomph.generic.problem.Problem` class, which will be defined soon. Therefore, the constructor of the ``DoubleSlitMesh`` gets the :py:class:`~pyoomph.generic.problem.Problem` passed, which is then accessed in the ``define_mesh`` method to get the chosen settings as e.g. ``slit_width`` or ``slit_distance``. The corner points are created and a line loop is assembled with the :py:meth:`~pyoomph.meshes.gmsh.GmshTemplate.create_lines` method. It takes alternating arguments of points and interface names for the interfaces between. The interface ``"inlet"`` will be used to impose a planar incoming wave, ``"top"`` and ``"bottom"`` are at the top and bottom of the domain before the slit. ``"wall_left"`` is the left side of the wall containing the slits, i.e. the side facing towards the incoming wave. At this side, we have to make sure to completely remove any reflections of the incoming wave to prevent an undesired interference with the incoming wave. All other interfaces of the slits and the right side of the wall are marked as ``"wall"``. There, reflection is admitted. The ``"out_top"`` and ``"out_bottom"`` are the interfaces at the top and bottom after the two slits. Also here, reflection will be prevented. Finally, at the far right side of the mesh, the ``"screen"`` interface is set where the intensity will be measured.
 
 To measure the intensity, a new :py:class:`~pyoomph.generic.codegen.InterfaceEquations` class is defined, which will be added to the interface ``"screen"``. On that interface, a new field :math:`I` will be added, which is calculated by the accumulation of the wave intensity over time, i.e.
 
@@ -71,13 +71,13 @@ or, in weak formulation, :math:`(\partial_t I-u^2,J)` with test function :math:`
    		I,J=var_and_test("I")
    		self.add_residual(weak(partial_t(I)-var("u")**2,J)) # I=integral of u^2 dt
 
-Before the :py:class:`~pyoomph.generic.problem.Problem` class will be described, let us consider how any reflection can be prevented as e.g. on the screen and the wall of the double-slit facing towards the incoming wave. In the example in :numref:`secpdewaveeqoned`, we have seen that imposing a ``DirichletBC(u=0)`` reflects the wave with a change in sign. Without imposing any boundary condition, which is equivalent to impose a zero Neumann flux, the wave gets reflected as well, but without any sign flip. So what is the correct boundary condition if we just want the wave to be absorbed without any reflection? In that case, we have to make sure that any incoming wave just passed through the interface as if the domain would just continue after the interface. To see a good solution, we factorize the differential operator in :math:numref:`eqpdewaveeq` and consider the normal direction:
+Before the :py:class:`~pyoomph.generic.problem.Problem` class will be described, let us consider how any reflection can be prevented as e.g. on the screen and the wall of the double-slit facing towards the incoming wave. In the example in :numref:`secpdewaveeqoned`, we have seen that imposing a ``DirichletBC(u=0)`` reflects the wave with a change in sign. Without imposing any boundary condition, which is equivalent to imposing a zero Neumann flux, the wave gets reflected as well, but without any sign flip. So what is the correct boundary condition if we just want the wave to be absorbed without any reflection? In that case, we have to make sure that any incoming wave just passes through the interface as if the domain would just continue after the interface. To see a good solution, we factorize the differential operator in :math:numref:`eqpdewaveeq` and consider the normal direction:
 
 .. math:: \left(\partial_t-c\vec{n}\cdot\nabla\right)\left(\partial_t+c\vec{n}\cdot\nabla\right)u=0\,.
 
 The equation is obviously fulfilled if :math:`\partial_t u\pm c\nabla u\cdot \vec{n}=0`, reflecting the fact that the wave equation allows for traveling solutions. As a Neumann flux, however, we can impose :math:`-c^2\nabla u\cdot \vec{n}` at interfaces. Hence, when imposing :math:`c\:\partial_t u` as Neumann flux, we will not influence the wave equation due to the presence of the boundary, however, only if the wave approaches in normal direction. More sophisticated solutions are e.g. *perfectly matched layers*, as discussed in :numref:`secspatialhelmholtz`.
 
-This finally brings us the specification of the :py:class:`~pyoomph.generic.problem.Problem` class:
+This finally brings us to the specification of the :py:class:`~pyoomph.generic.problem.Problem` class:
 
 .. code:: python
 
@@ -137,7 +137,7 @@ In the results (cf. :numref:`figpdewavedoubleslit`) we indeed see that the incom
 ..  figure:: waveeqdoubleslit.*
 	:name: figpdewavedoubleslit
 	:align: center
-	:alt: Wave trough a double-slit
+	:alt: Wave through a double-slit
 	:class: with-shadow
 	:width: 100%
 

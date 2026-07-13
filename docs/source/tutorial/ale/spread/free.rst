@@ -3,7 +3,7 @@ With free slip at the substrate
 
 Similarly as done with lubrication theory in :numref:`eqpdelubric_spread`, we now want to let a droplet spread until it reaches its equilibrium contact angle. This time, however, we want to solve the full bulk flow including inertia and considering the full interface curvature. Hence, we use again the free surface equations from the previous example.
 
-Key part to impose an equilibrium contact angle is the :math:`[\cdot,\cdot]` term in :math:numref:`eqaleweaksigmafs`. It has not been considered to far, but it will become relevant now. This term can be added to boundaries of the free surface, i.e. to contact lines. The surface tension is fully balanced if :math:`\vec{N}` is the outward pointing normal of the contact line, which is the outward pointing tangential continuation of the free interface at the boundaries. Let :math:`\theta` be the equilibrium contact angle, then :math:`\vec{N}` will read :math:`(\cos(\theta),-\sin(\theta))` if the droplet is at equilibrium contact angle. Let us define the corresponding equation class that has to be added to the contact line to enforce this contact angle:
+The key part to impose an equilibrium contact angle is the :math:`[\cdot,\cdot]` term in :math:numref:`eqaleweaksigmafs`. It has not been considered so far, but it will become relevant now. This term can be added to boundaries of the free surface, i.e. to contact lines. The surface tension is fully balanced if :math:`\vec{N}` is the outward pointing normal of the contact line, which is the outward pointing tangential continuation of the free interface at the boundaries. Let :math:`\theta` be the equilibrium contact angle, then :math:`\vec{N}` will read :math:`(\cos(\theta),-\sin(\theta))` if the droplet is at the equilibrium contact angle. Let us define the corresponding equation class that has to be added to the contact line to enforce this contact angle:
 
 .. code:: python
 
@@ -71,7 +71,7 @@ Important differences are the mesh, which is now the north-east (``"NE"``) quart
 	:class: with-shadow
 	:width: 70%
 
-	(left) Spreading with free slip at the substrate. (right) spreading with a tiny slip length.
+	(left) Spreading with free slip at the substrate. (right) Spreading with a tiny slip length.
 
 
 .. only:: html

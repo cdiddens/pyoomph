@@ -18,7 +18,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 The main author may be contacted at c.diddens@utwente.nl
 
 ================================================================================*/
-//Just in include the main oomph-lib part
+// Central include shim: pulls in the subset of oomph-lib headers pyoomph's core C++ code
+// needs (integration rules, nodes, elements, meshes, Q-elements, mesh refinement, and the
+// Problem class), so that other pyoomph source files can just #include "oomph_lib.hpp"
+// instead of depending on oomph-lib's own include layout/order directly.
 
 #include "integral.h"
 #include "nodes.h"

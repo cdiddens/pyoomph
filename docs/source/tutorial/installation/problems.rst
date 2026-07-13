@@ -1,7 +1,7 @@
 Typical problems with the installation
 --------------------------------------
 
-I the following, there are some typical errors listed, which may occur after installing and trying pyoomph:
+In the following, there are some typical errors listed, which may occur after installing and trying pyoomph:
 
 .. container:: tcolorbox
 	

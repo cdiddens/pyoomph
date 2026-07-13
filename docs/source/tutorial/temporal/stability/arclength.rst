@@ -65,7 +65,7 @@ Obviously, there is no stationary solution for :math:`r<0`, whereas we have a st
                
 Of course, this code will crash the moment we decrease :math:`r<0`, since there is no stationary solution and hence :py:meth:`~pyoomph.generic.problem.Problem.solve` will fail. Since we know that the fold bifurcation takes place at :math:`r=0`, one could try to increase the parameter again after reaching :math:`r=0`, but then - which branch of the solution will be taken? The stable one at :math:`x=\sqrt{r}` or the unstable one at :math:`x=-\sqrt{r}`.
 
-Obviously, in this situation, the parameter :math:`r` is not the best quantity to vary in order to obtain the entire solution curve as function of the parameter. One could prescribe a value of :math:`x_0` and determine :math:`r` so that this value of :math:`x_0(r)` is indeed a stationary solution. However, there is an even better way: The fundamental idea is to neither solve for solutions :math:`x_0` for varying :math:`r`, nor solve for the parameter :math:`r` for which a varying :math:`x_0` is the stationary solution, but instead vary both at the same time. However, what to choose as independent variable in that case? A good choice is obviously the arc length :math:`s` along the curve :math:`(x_0(r),r)`. This means that :math:`r` becomes part of the unknowns and we are solving the system
+Obviously, in this situation, the parameter :math:`r` is not the best quantity to vary in order to obtain the entire solution curve as a function of the parameter. One could prescribe a value of :math:`x_0` and determine :math:`r` so that this value of :math:`x_0(r)` is indeed a stationary solution. However, there is an even better way: The fundamental idea is to neither solve for solutions :math:`x_0` for varying :math:`r`, nor solve for the parameter :math:`r` for which a varying :math:`x_0` is the stationary solution, but instead vary both at the same time. However, what to choose as the independent variable in that case? A good choice is obviously the arc length :math:`s` along the curve :math:`(x_0(r),r)`. This means that :math:`r` becomes part of the unknowns and we are solving the system
 
 .. math:: :label: eqodearclengthcontr
 
@@ -74,7 +74,7 @@ Obviously, in this situation, the parameter :math:`r` is not the best quantity t
    (x-x^*) \partial_x F +(r-r^*)\partial_r F &=\Delta s
    \end{aligned}
 
-where :math:`(x^*,r^*)` is a starting point for which :math:`F(x^*,r^*)=0` holds. The second equation now prescribes a step :math:`\Delta s` in tangent direction, i.e. along the tangent :math:`(\partial_x F,\partial_r F)` along the curve :math:`F(x,r)=0`. In pyoomph, this can be done with the method :py:meth:`~pyoomph.generic.problem.Problem.arclength_continuation`:
+where :math:`(x^*,r^*)` is a starting point for which :math:`F(x^*,r^*)=0` holds. The second equation now prescribes a step :math:`\Delta s` in the tangent direction, i.e. along the tangent :math:`(\partial_x F,\partial_r F)` along the curve :math:`F(x,r)=0`. In pyoomph, this can be done with the method :py:meth:`~pyoomph.generic.problem.Problem.arclength_continuation`:
 
 .. code:: python
 
@@ -152,7 +152,7 @@ We can combine the :py:meth:`~pyoomph.generic.problem.Problem.arclength_continua
 		
 
 
-Here, we use the classes from :download:`bifurcation_fold_param_change.py` to continue along the branch and solve the for the eigenvalues. We write the eigenvalue with the largest real part (by default stored at index 0) to a file. A plot of this can be found in :numref:`figodebifurcs`, where we marked the stability of the branches.
+Here, we use the classes from :download:`bifurcation_fold_param_change.py` to continue along the branch and solve for the eigenvalues. We write the eigenvalue with the largest real part (by default stored at index 0) to a file. A plot of this can be found in :numref:`figodebifurcs`, where we marked the stability of the branches.
 
 
 ..  figure:: bifurcs.*
@@ -173,4 +173,4 @@ With the same approach, we can find the bifurcation diagram of the transcritical
 
 where a minus sign gives the supercritical and a plus sign the subcritical version of the pitchfork bifurcation. All bifurcations are plotted in :numref:`figodebifurcs`. The corresponding codes are not discussed here, since they all are similar to the code of the fold bifurcation above. However, they are shipped along with this tutorial and can be found in the files :download:`bifurcation_transcritital_arclength_eigen.py` and :download:`bifurcation_pitchfork_arclength_eigen.py`. For the pitchfork bifurcation, we had to set ``set_arc_length_parameter(scale_arc_length=False)`` to stay on the non-trivial branch. If ``scale_arc_length`` is ``True``, the taken arc length step :math:`\Delta s` will be scaled with the magnitudes of :math:`\partial_x F` and :math:`\partial_r F` in :math:numref:`eqodearclengthcontr`. However, at the pitchfork bifurcation, both will approach zero when approaching the bifurcation at :math:`r=0`.
 
-The approach presented here cannot only be applied on the simple normal forms but on arbitrary systems, also on discretized spatio-temporal partial differential equations, which will be done later in :numref:`secpdekse`. This provides an easy way to investigate the stability of complicated highly nonlinear systems.
+The approach presented here can not only be applied to the simple normal forms but to arbitrary systems, also on discretized spatio-temporal partial differential equations, which will be done later in :numref:`secpdekse`. This provides an easy way to investigate the stability of complicated highly nonlinear systems.

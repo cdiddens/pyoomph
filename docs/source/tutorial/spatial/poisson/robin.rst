@@ -60,7 +60,7 @@ and just add this term in the same manner as the Neumann condition, i.e. via :ma
 		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
 		    
 
-Of course, you can recover the Neumann condition as special case by setting :math:`\alpha=0`, but you cannot recover the Dirichlet condition, since :math:`\beta=0` will induce a division by zero.
+Of course, you can recover the Neumann condition as a special case by setting :math:`\alpha=0`, but you cannot recover the Dirichlet condition, since :math:`\beta=0` will induce a division by zero.
 
 
 
@@ -116,4 +116,4 @@ The outward unit normal is obtained by :py:meth:`~pyoomph.generic.codegen.BaseEq
 		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
 		    
 
-For the latter approach, there is also a generic class :py:class:`~pyoomph.meshes.bcs.EnforcedBC`, which allows to enforce arbitrary boundary conditions. To get the same result as with the custom implemented class ``PoissonRobinCondition("u",alpha,beta,g)``, the generic class requires to cast it into residual form, i.e. ``EnforcedBC(u=alpha*var("u")+beta*dot(grad(var("u",domain="..")),var("normal"))-g)``.
+For the latter approach, there is also a generic class :py:class:`~pyoomph.meshes.bcs.EnforcedBC`, which allows us to enforce arbitrary boundary conditions. To get the same result as with the custom implemented class ``PoissonRobinCondition("u",alpha,beta,g)``, the generic class requires to cast it into residual form, i.e. ``EnforcedBC(u=alpha*var("u")+beta*dot(grad(var("u",domain="..")),var("normal"))-g)``.

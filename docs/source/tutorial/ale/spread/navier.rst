@@ -5,7 +5,7 @@ As mentioned, the free slip, i.e. the unhindered :math:`x`-velocity, at the subs
 
 A solution to this dilemma is the consideration of a *slip length*, which essentially does what the precursor film has done in the corresponding lubrication theory example in :numref:`eqpdelubric_spread`: It allows for the motion of the contact line by introducing a small length scale.
 
-The *Navier-slip* boundary condition does not set the velocity to zero a the substrate but allows a damped tangential motion. This can be done by imposing a term proportional to the tangential velocity as tangential Neumann condition, i.e. as traction, we add
+The *Navier-slip* boundary condition does not set the velocity to zero at the substrate but allows a damped tangential motion. This can be done by imposing a term proportional to the tangential velocity as tangential Neumann condition, i.e. as traction, we add
 
 .. math::
 
@@ -64,7 +64,7 @@ To add the slip length to the problem, we use inheritance, i.e. our new problem 
 
 Note that we anticipate high stresses near the contact line. The droplet wants to spread due to the stress stemming from the equilibrium contact angle contribution, but it will be hampered due to the slip length near the substrate. Hence, we add mesh refinement to resolve this more accurately.
 
-A comparison of results without and with slip length can be seen in on the right side of :numref:`figaledropletspread` in the previous section. The case with slip length is definitely more realistic. The smaller the slip length, the slower the spreading will take place. The slip length can hence be used to match the spreading velocity with experiments.
+A comparison of results without and with slip length can be seen on the right side of :numref:`figaledropletspread` in the previous section. The case with slip length is definitely more realistic. The smaller the slip length, the slower the spreading will take place. The slip length can hence be used to match the spreading velocity with experiments.
 
 .. only:: html
 

@@ -74,9 +74,15 @@ namespace pyoomph
 		return calloc(num, size);
 	}
 
+	// my_alloc/my_free/my_alloc_or_free: recursive helpers to allocate (or free) a nested,
+	// variable-depth C array (used for the multi-dimensional shape-function buffers inside
+	// JITShapeInfo_t, whose depth depends on which derivatives/spaces the generated code needs).
+	// The scalar overload is the recursion base case (nothing to do for a non-pointer leaf type).
 	template <typename T>
 	void my_alloc(T dest) {}
 
+	// Allocates a firstdim-sized array of T, then recurses on each of its elements with the
+	// remaining "extra" dimensions (if any), building up a jagged/nested array of the requested depth.
 	template <typename T, typename... Extra>
 	void my_alloc(T * PYOOMPH_RESTRICT &  dest, size_t firstdim, const Extra &...extra)
 	{
@@ -99,6 +105,8 @@ namespace pyoomph
 	template <typename T>
 	void my_free(T dest) {}
 
+	// Mirror of my_alloc: recursively frees a nested array previously built by my_alloc, then frees
+	// the top-level pointer itself and nulls it out.
 	template <typename T, typename... Extra>
 	void my_free(T * PYOOMPH_RESTRICT &  dest, size_t firstdim, const Extra &...extra)
 	{
@@ -116,6 +124,8 @@ namespace pyoomph
 		dest = NULL;
 	}
 
+	// Convenience wrapper dispatching to my_alloc or my_free depending on "alloc", so call sites can
+	// toggle allocation/deallocation of a shape buffer with a single boolean flag.
 	template <typename T, typename... Extra>
 	void my_alloc_or_free(bool alloc, T * PYOOMPH_RESTRICT &  dest, size_t firstdim, const Extra &...extra)
 	{
@@ -125,6 +135,8 @@ namespace pyoomph
 			my_free(dest, firstdim, extra...);
 	}
 
+	// Selects the per-shape integration-scheme map (see IntegrationSchemeStorage's member maps)
+	// matching the requested (triangular/tetrahedral vs. quad/brick, spatial dimension, bubble-enriched) combination.
 	std::map<unsigned, oomph::Integral *> &IntegrationSchemeStorage::get_integral_order_map(bool tri, unsigned edim, bool bubble)
 	{
 		if (tri)
@@ -168,6 +180,7 @@ namespace pyoomph
 		throw_runtime_error("Invalid combination of tri/quad, edim and bubble");
 	}
 
+	// Deletes every oomph::Integral owned by "map" and clears it; called for each per-shape map from the destructor.
 	void IntegrationSchemeStorage::clean_up_map(std::map<unsigned, oomph::Integral *> &map)
 	{
 		for (auto m : map)
@@ -192,6 +205,9 @@ namespace pyoomph
 		clean_up_map(Pyramid3d);
 	}
 
+	// Pre-populates the integration-scheme maps with a fixed set of standard Gauss/TGauss/Wedge/Pyramid
+	// quadrature rules at a handful of common orders; get_integration_scheme() falls back to the
+	// closest available order above the requested one if an exact match isn't pre-built here.
 	IntegrationSchemeStorage::IntegrationSchemeStorage()
 	{
 		Q1d[2] = new oomph::Gauss<1, 2>();
@@ -232,6 +248,9 @@ namespace pyoomph
 		Pyramid3d[2]= new oomph::PyramidGaussC1();
 	}
 
+	// Returns the cached scheme for the exact requested order if available; otherwise picks the
+	// scheme with the closest order strictly greater than requested (never a lower order, so
+	// accuracy is not silently reduced), or the highest available order if none is greater.
 	oomph::Integral *IntegrationSchemeStorage::get_integration_scheme(bool tris, unsigned edim, unsigned order, bool bubble)
 	{
 		std::map<unsigned, oomph::Integral *> &map = this->get_integral_order_map(tris, edim, bubble);
@@ -270,6 +289,10 @@ namespace pyoomph
 	unsigned BulkElementBase::zeta_coordinate_type = 0; // 0 means Lagrangian, 1 Eulerian, on co-dimensional meshes it will be the boundary coordinate (if set)
 	bool BulkElementBase::use_eigen_error_estimators=false;
 
+	// Element shape-quality measure: ratio of the smallest Jacobian determinant encountered at any
+	// integration point to the element's mean Jacobian (i.e. mean element size). A value close to 1
+	// indicates a well-shaped, near-uniform element; values close to 0 indicate a nearly degenerate
+	// (collapsed/inverted) element.
 	double BulkElementBase::get_quality_factor()
 	{
 		double size = 0.0;
@@ -292,6 +315,12 @@ namespace pyoomph
 		return minJ / (size / weightsum);
 	}
 
+	// Links this element's refinement tree root to "other"'s along direction mydir/otherdir as a
+	// periodic neighbor, by dispatching to the appropriate oomph-lib tree type (QuadTree for 2d,
+	// BinaryTree for 1d, OcTree for 3d) and translating pyoomph's signed-integer direction
+	// convention (-1/1: W/E, -2/2: S/N, -3/3: D/U) into that tree type's named direction constants.
+	// This makes oomph-lib's h-refinement treat the two boundaries as topologically adjacent for
+	// hanging-node/neighbor-finding purposes, implementing periodic boundary conditions on refined meshes.
 	void BulkElementBase::connect_periodic_tree(BulkElementBase *other, const int &mydir, const int &otherdir)
 	{
 		oomph::QuadTree *my_qt = dynamic_cast<oomph::QuadTree *>(Tree_pt);
@@ -363,6 +392,12 @@ namespace pyoomph
 	}
 
 
+	// For every local node l, if it is a hanging node (its Lagrangian/Eulerian position is
+	// constrained by master nodes rather than free, as happens on non-conforming refined meshes),
+	// records its master nodes' weights and their local equation numbers for the *position* degrees
+	// of freedom into shape_info->hanginfo_Pos[l]. This lets the generated ALE/solid-mechanics code
+	// correctly distribute a hanging node's position-Jacobian contributions to its masters. Returns
+	// true if any node in the element is hanging.
 	bool BulkElementBase::fill_hang_info_with_equations_for_pos(JITShapeInfo_t *shape_info)
 	{
 		bool res = false;
@@ -395,6 +430,11 @@ namespace pyoomph
 		return res;
 	}
 
+	// Analogous to fill_hang_info_with_equations_for_pos, but for the ordinary field values ("base
+	// bulk" fields, i.e. not the interface-only additional fields) of each continuous interpolation
+	// space present on this element: for every node hanging in that space, records its masters'
+	// weights and local equation numbers (per field) into shape_info->hanginfo_Cont[space]. Used by
+	// the generated residual code to correctly assemble Jacobian contributions of hanging field dofs.
 	bool BulkElementBase::fill_hang_info_with_equations_basebulk(JITShapeInfo_t *shape_info)
 	{
 		bool res=false;
@@ -433,6 +473,13 @@ namespace pyoomph
 		return res;
 	}
 
+	// After hanging-node constraints/master nodes have been set up (or changed, e.g. post-refinement),
+	// pushes consistent values into the hanging nodes' own storage: (1) positions, via oomph-lib's
+	// position() which already accounts for hanging-node interpolation; (2) field values of every
+	// continuous space's base-bulk fields, interpolated from the master nodes; and (3) "dummy"
+	// values (e.g. a C1 field's value at a C2-only node, which has no direct equation of its own)
+	// by averaging the surrounding real nodes' values, since dummy nodes are never themselves
+	// hanging but must still hold sensible values for consistent interpolation/output.
 	void BulkElementBase::interpolate_hang_values()
 	{
 
@@ -500,6 +547,12 @@ namespace pyoomph
 
 	}
 	
+	// Looks up field "name" across all continuous interpolation spaces (both ordinary base-bulk
+	// fields and, for interface elements, the additional interface-only fields) present on this
+	// element, and returns the (Data*, component-index) pair for every node carrying that field.
+	// If use_elemental_indices is true, the result is a dense array of length nnode() indexed by
+	// local element node index (with (nullptr,-1) for nodes not carrying the field); otherwise it is
+	// a compact list over just the nodes of the field's own interpolation space.
 	std::vector<std::pair<oomph::Data*,int> > BulkElementBase::get_field_data_list(std::string name,bool use_elemental_indices)
 	{
 	 auto *ft=codeinst->get_func_table();
@@ -623,10 +676,21 @@ namespace pyoomph
 	 return result;
 	}
 
+	// Builds the complete hanging-node bookkeeping (positions, base-bulk continuous fields, and
+	// discontinuous fields which are never hanging) for this element, then - if eqn_remap is given -
+	// reinterprets/abuses that same hanging-info data structure to additionally carry local
+	// equation number *remapping*: this is used when this element's shapes are evaluated on behalf
+	// of another element (e.g. an interface element pulling in its attached bulk element's shapes as
+	// external data) whose local equation numbering differs from this element's own. For every
+	// local dof, if it is not actually hanging it is turned into a trivial "1 master, weight 1"
+	// hanging entry pointing at the remapped equation number (eqn_remap[old_local_eqn]); genuinely
+	// hanging dofs have each of their masters' equation numbers remapped the same way. A remapped
+	// value of -666 signals a missing external dependency and raises a descriptive error, since it
+	// means the generated code expects a dependency that was never registered as external data.
 	bool BulkElementBase::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
-	{		
+	{
 		bool res=this->fill_hang_info_with_equations_for_pos(shape_info); // Potentially only do if required
-		res=this->fill_hang_info_with_equations_basebulk(shape_info) || res; 
+		res=this->fill_hang_info_with_equations_basebulk(shape_info) || res;
 		for (unsigned int l = 0; l < eleminfo.nnode; l++)
 		{
 			shape_info->hanginfo_Discont[l].nummaster = 0;
@@ -634,7 +698,7 @@ namespace pyoomph
 
 		if (eqn_remap)
 		{
-		   // If we access e.g. a bulk element from an interface element, we have to remap the local equations, since the interface element has a different local equation numbering. 
+		   // If we access e.g. a bulk element from an interface element, we have to remap the local equations, since the interface element has a different local equation numbering.
 		   // This is done via the hanging information, which is abused here to store the remapped local equations.
 		   auto * ft=codeinst->get_func_table();
 			// If the mesh moves, we have to setup the mapping in the hanging scheme
@@ -911,20 +975,33 @@ namespace pyoomph
 		return res;
 	}
 
+	// Default (unimplemented) hook; concrete element types with higher-order interpolation on
+	// faces override this to return the boundary node at the given local face index/position.
 	oomph::Node *BulkElementBase::boundary_node_pt(const int &face_index, const unsigned int index)
 	{
 		throw_runtime_error("Implement");
 	}
 
+	// Rebuilds this element's external-data list from scratch based on the JIT code instance's
+	// linked external data (data shared/globally coupled across elements, e.g. global parameters).
 	void BulkElementBase::ensure_external_data()
-	{		
+	{
 		this->flush_external_data();
 		for (auto &e : codeinst->linked_external_data.get_required_external_data())
-		{	
+		{
 			this->add_external_data(e);
 		}
 	}
 
+	// Analytically differentiates the outer unit normal vector n=dx/ds x .../|...| (line tangent
+	// rotated by 90 degrees in 2d, or cross product of the two surface tangents in 3d) with respect
+	// to the nodal coordinates, and optionally its second derivative. This is a direct symbolic/
+	// algebraic differentiation of the normal formula (not a finite-difference approximation): each
+	// case below (1d line normal in 2d, 2d surface normal in 3d) computes d(tangent)/d(node
+	// coordinate) via the shape function derivatives, then applies the quotient/product rule for
+	// n = t/|t| (and its second derivative) directly in index notation. Used by generated code that
+	// differentiates normal-dependent boundary conditions (e.g. surface tension, moving contact
+	// lines) with respect to the ALE/solid mesh position.
 	void BulkElementBase::get_dnormal_dcoords_at_s(const oomph::Vector<double> &s, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dnormal_dcoord, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2normal_dcoord2) const
 	{
 
@@ -1134,6 +1211,11 @@ namespace pyoomph
 		}
 	}
 
+	// Computes the outer unit normal n directly from the local tangent(s) (rotated tangent in 2d, cross
+	// product of the two surface tangents in 3d), for the case where this element itself is
+	// dimensionally a face (e.g. called directly on an interface element, as opposed to going
+	// through oomph-lib's FaceElement::outer_unit_normal). Delegates the derivative computation to
+	// get_dnormal_dcoords_at_s if requested.
 	void BulkElementBase::get_normal_at_s(const oomph::Vector<double> &s, oomph::Vector<double> &n, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT* PYOOMPH_RESTRICT dnormal_dcoord, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2normal_dcoord2) const
 	{
 		unsigned nodal_dim = this->nodal_dimension();
@@ -1202,6 +1284,12 @@ namespace pyoomph
 		}
 	}
 
+	// --- The get_D0/DL/DG_nodal_data / get_D0/DL/DG_buffer_index / get_D0/DL/DG_local_equation
+	// family below are simple accessors translating between a discontinuous field's index (D0:
+	// element-constant, DL: discontinuous-Lagrange, DG: discontinuous on a given interpolation
+	// space) and the underlying oomph-lib Data object / generated-code buffer offset / local
+	// equation number, using the offsets recorded in the JIT function table (ft) for this element's
+	// generated code.
     oomph::Data *BulkElementBase::get_D0_nodal_data(const unsigned &fieldindex)
     {
 		auto * ft=this->get_code_instance()->get_func_table();
@@ -1262,6 +1350,10 @@ namespace pyoomph
 	}
 
     // TODO: Use the one defined in doi:10.1016/j.cma.2006.11.013
+	// Estimates the element's characteristic size (diameter) from its vertex node positions: the
+	// edge length for 1d elements, or an approximation based on the diagonal(s) between opposite
+	// vertices for 2d/3d elements. Used e.g. for mesh-quality diagnostics and as a length scale in
+	// stabilization terms.
 	double BulkElementBase::get_element_diam() const
 	{
 
@@ -1316,6 +1408,9 @@ namespace pyoomph
 		return h;
 	}
 
+	// Maps a local coordinate s of this element (assumed in [-1,1] per direction) into the local
+	// coordinate range of the underlying macro element (structured/domain macro-element mesh), or
+	// returns an empty vector if this element has no macro element associated (unstructured mesh).
 	std::vector<double> BulkElementBase::get_macro_element_coordinate_at_s(oomph::Vector<double> s)
 	{
 		if (!macro_elem_pt()) return {};
@@ -1330,6 +1425,11 @@ namespace pyoomph
 		return s_macro;
 	}
 
+	// For elements built on a macro-element (structured, e.g. curved-boundary) mesh, snaps every
+	// node's Eulerian position exactly onto the macro element's geometric mapping (evaluated at that
+	// node's local coordinate), so the initial mesh exactly represents the macro-element geometry
+	// (e.g. a curved domain boundary) rather than just the polynomial interpolation between corners.
+	// Currently only implemented for Q-family (quad/brick) elements; a no-op (TODO) for T-family elements.
 	void BulkElementBase::map_nodes_on_macro_element() // Does only work for bulk elems
 	{
 		if (!macro_elem_pt())
@@ -1365,6 +1465,14 @@ namespace pyoomph
 		}
 	}
 
+	// Factory that instantiates the concrete BulkElement* subclass matching a MeshTemplateElement's
+	// geometric type index (the same meshio-style codes as get_meshio_type_index()) and the current
+	// JIT code instance's "dominant space" (the highest interpolation order actually used by any
+	// field, C1/C1TB/C2/C2TB/...). Where the dominant space is lower order than the template
+	// element's own geometry (e.g. a template C2 triangle but the code only ever uses C1 fields), a
+	// lower-order element is created instead together with "nodemap": the subset (and reordering) of
+	// the template element's node indices that should be used to populate the new, lower-order
+	// element's nodes.
 	BulkElementBase *BulkElementBase::create_from_template(MeshTemplate *mt, MeshTemplateElement *el)
 	{
 		BulkElementBase *res = NULL;
@@ -1560,8 +1668,11 @@ namespace pyoomph
 		return res;
 	}
 
+	// Unpins every position and value dof on this element's nodes and internal data (positions,
+	// then nodal values, then internal data values), undoing the effect of pin_dummy_values(). Used
+	// e.g. before a full re-pinning pass so pinning state is rebuilt consistently from scratch.
 	void BulkElementBase::unpin_dummy_values() // C1 fields on C2 elements have dummy values on only C2 nodes, which needs to be pinned
-	{		
+	{
 		for (unsigned int l = 0; l < nnode(); l++)
 		{
 			for (unsigned int i = 0; i < this->nodal_dimension(); i++)
@@ -1589,11 +1700,18 @@ namespace pyoomph
 		}
 	}
 
+	// Pins nodal position dofs that must not be free equations (all positions if the mesh does not
+	// move at all; only the hanging ones, via constrain_positions(), if it does - since a hanging
+	// position is determined by its masters, not by its own equation), and pins every "dummy" field
+	// value (a lower-order field's value at a node that only exists for a higher-order geometric
+	// space, see get_dummy_value_interpolation_map) so it never gets its own equation; if a node
+	// carrying a real (non-dummy) value happens to be hanging in that space, its value is instead
+	// constrained (tied to its masters) rather than pinned.
 	void BulkElementBase::pin_dummy_values()
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
 
-		
+
 		if (!functable->moving_nodes)
 		{
 			for (unsigned int l = 0; l < nnode(); l++)
@@ -1644,6 +1762,13 @@ namespace pyoomph
 		}
 	}
 
+	// Scans every position and field dof on this element (mesh positions, continuous-space fields,
+	// DG/DL/D0 discontinuous fields) and, for every one that is currently pinned (a Dirichlet
+	// boundary condition), records it in "info" via add_dirichlet_dof so that a linear-algebra
+	// backend can later temporarily unpin and directly manipulate those rows/columns (e.g. to
+	// enforce the constraint by row replacement rather than by pinning). Despite the name, this
+	// function only *collects* the Dirichlet dofs here; the actual unpinning happens elsewhere using
+	// the recorded info.
 	void BulkElementBase::unpin_Dirichlet_dofs_for_matrix_manipulation(DirichletMatrixManipulationInfo & info)
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
@@ -1708,6 +1833,13 @@ namespace pyoomph
 	}
 
 
+	// Allocates (do_alloc=true) or frees (do_alloc=false) every array member of a single
+	// JITShapeInfo_t buffer used to hold shape-function values/derivatives for one element during
+	// residual assembly. Unless FIXED_SIZE_SHAPE_BUFFER is defined, every array is sized generously
+	// to fixed upper bounds (MAX_NODES/MAX_NODAL_DIM/MAX_TIME_WEIGHTS/MAX_HANG/MAX_FIELDS) covering
+	// the largest supported element type, so the same buffer can be reused across all element types
+	// without reallocation; with_analytical_hessian_moving_mesh additionally (de)allocates the
+	// second-derivative buffers only needed when computing analytic Hessians on a moving (ALE) mesh.
 	void alloc_dealloc_single_shape_buffer(bool do_alloc, JITShapeInfo_t * PYOOMPH_RESTRICT *buff, bool with_analytical_hessian_moving_mesh)
 	{
 		if (!(*buff))
@@ -1734,38 +1866,23 @@ namespace pyoomph
 		my_alloc_or_free(do_alloc, (*buff)->dt, MAX_TIME_WEIGHTS);
 		my_alloc_or_free(do_alloc, (*buff)->int_pt_weights_d_coords, MAX_NODAL_DIM, MAX_NODES);
 		my_alloc_or_free(do_alloc, (*buff)->elemsize_d_coords, MAX_NODAL_DIM, MAX_NODES);
-		my_alloc_or_free(do_alloc, (*buff)->elemsize_Cart_d_coords, MAX_NODAL_DIM, MAX_NODES);						
-		my_alloc_or_free(do_alloc, (*buff)->d_dx_shape_dcoord_C2TB, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
-		my_alloc_or_free(do_alloc, (*buff)->d_dx_shape_dcoord_C2, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
-		my_alloc_or_free(do_alloc, (*buff)->d_dx_shape_dcoord_C1TB, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
-		my_alloc_or_free(do_alloc, (*buff)->d_dx_shape_dcoord_C1, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
+		my_alloc_or_free(do_alloc, (*buff)->elemsize_Cart_d_coords, MAX_NODAL_DIM, MAX_NODES);
+		for (unsigned int i = 0; i < NUM_CONTINUOUS_SPACES; i++)
+		{
+			my_alloc_or_free(do_alloc, (*buff)->d_dx_shape_dcoord[i], MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);			
+		}
+				
 		my_alloc_or_free(do_alloc, (*buff)->d_dx_shape_dcoord_DL, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
 		my_alloc_or_free(do_alloc, (*buff)->d_dshape_dx_tensor, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM, MAX_NODAL_DIM);
 
-		my_alloc_or_free(do_alloc, (*buff)->shape_C2TB, MAX_NODES);
-		my_alloc_or_free(do_alloc, (*buff)->nodal_shape_C2TB, MAX_NODES, MAX_NODES);
-		my_alloc_or_free(do_alloc, (*buff)->dx_shape_C2TB, MAX_NODES, MAX_NODAL_DIM);
-		my_alloc_or_free(do_alloc, (*buff)->dX_shape_C2TB, MAX_NODES, MAX_NODAL_DIM);
-		my_alloc_or_free(do_alloc, (*buff)->dS_shape_C2TB, MAX_NODES, MAX_NODAL_DIM);
-
-		my_alloc_or_free(do_alloc, (*buff)->shape_C2, MAX_NODES);
-		my_alloc_or_free(do_alloc, (*buff)->nodal_shape_C2, MAX_NODES, MAX_NODES);
-		my_alloc_or_free(do_alloc, (*buff)->dx_shape_C2, MAX_NODES, MAX_NODAL_DIM);
-		my_alloc_or_free(do_alloc, (*buff)->dX_shape_C2, MAX_NODES, MAX_NODAL_DIM);
-		my_alloc_or_free(do_alloc, (*buff)->dS_shape_C2, MAX_NODES, MAX_NODAL_DIM);
-
-
-		my_alloc_or_free(do_alloc, (*buff)->shape_C1TB, MAX_NODES);
-		my_alloc_or_free(do_alloc, (*buff)->nodal_shape_C1TB, MAX_NODES, MAX_NODES);
-		my_alloc_or_free(do_alloc, (*buff)->dx_shape_C1TB, MAX_NODES, MAX_NODAL_DIM);
-		my_alloc_or_free(do_alloc, (*buff)->dX_shape_C1TB, MAX_NODES, MAX_NODAL_DIM);
-		my_alloc_or_free(do_alloc, (*buff)->dS_shape_C1TB, MAX_NODES, MAX_NODAL_DIM);
-
-		my_alloc_or_free(do_alloc, (*buff)->shape_C1, MAX_NODES);
-		my_alloc_or_free(do_alloc, (*buff)->nodal_shape_C1, MAX_NODES, MAX_NODES);
-		my_alloc_or_free(do_alloc, (*buff)->dx_shape_C1, MAX_NODES, MAX_NODAL_DIM);
-		my_alloc_or_free(do_alloc, (*buff)->dX_shape_C1, MAX_NODES, MAX_NODAL_DIM);
-		my_alloc_or_free(do_alloc, (*buff)->dS_shape_C1, MAX_NODES, MAX_NODAL_DIM);
+		for (unsigned int i = 0; i < NUM_CONTINUOUS_SPACES; i++)
+		{
+			my_alloc_or_free(do_alloc, (*buff)->shapes[i], MAX_NODES);
+			my_alloc_or_free(do_alloc, (*buff)->nodal_shapes[i], MAX_NODES, MAX_NODES);
+			my_alloc_or_free(do_alloc, (*buff)->dx_shapes[i], MAX_NODES, MAX_NODAL_DIM);
+			my_alloc_or_free(do_alloc, (*buff)->dX_shapes[i], MAX_NODES, MAX_NODAL_DIM);
+			my_alloc_or_free(do_alloc, (*buff)->dS_shapes[i], MAX_NODES, MAX_NODAL_DIM);
+		}
 
 		my_alloc_or_free(do_alloc, (*buff)->shape_DL, MAX_NODES);
 		my_alloc_or_free(do_alloc, (*buff)->nodal_shape_DL, MAX_NODES, MAX_NODES);
@@ -1792,11 +1909,11 @@ namespace pyoomph
 		{
 			my_alloc_or_free(do_alloc, (*buff)->int_pt_weights_d2_coords, MAX_NODAL_DIM, MAX_NODAL_DIM, MAX_NODES, MAX_NODES);
 			my_alloc_or_free(do_alloc, (*buff)->elemsize_d2_coords, MAX_NODAL_DIM, MAX_NODAL_DIM, MAX_NODES, MAX_NODES);
-			my_alloc_or_free(do_alloc, (*buff)->elemsize_Cart_d2_coords, MAX_NODAL_DIM, MAX_NODAL_DIM, MAX_NODES, MAX_NODES);									
-			my_alloc_or_free(do_alloc, (*buff)->d2_dx2_shape_dcoord_C2TB, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
-			my_alloc_or_free(do_alloc, (*buff)->d2_dx2_shape_dcoord_C2, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
-			my_alloc_or_free(do_alloc, (*buff)->d2_dx2_shape_dcoord_C1TB, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);						
-			my_alloc_or_free(do_alloc, (*buff)->d2_dx2_shape_dcoord_C1, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
+			my_alloc_or_free(do_alloc, (*buff)->elemsize_Cart_d2_coords, MAX_NODAL_DIM, MAX_NODAL_DIM, MAX_NODES, MAX_NODES);	
+			for (unsigned int i = 0; i < NUM_CONTINUOUS_SPACES; i++)
+			{
+				my_alloc_or_free(do_alloc, (*buff)->d2_dx2_shape_dcoord[i], MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
+			}			
 			my_alloc_or_free(do_alloc, (*buff)->d2_dx2_shape_dcoord_DL, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
 
 			my_alloc_or_free(do_alloc, (*buff)->d2_normal_d2coord, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
@@ -1806,10 +1923,10 @@ namespace pyoomph
 			(*buff)->int_pt_weights_d2_coords = NULL;
 			(*buff)->elemsize_d2_coords=NULL;
 			(*buff)->elemsize_Cart_d2_coords=NULL;
-			(*buff)->d2_dx2_shape_dcoord_C2TB = NULL;
-			(*buff)->d2_dx2_shape_dcoord_C2 = NULL;
-			(*buff)->d2_dx2_shape_dcoord_C1TB = NULL;			
-			(*buff)->d2_dx2_shape_dcoord_C1 = NULL;
+			for (unsigned int i = 0; i < NUM_CONTINUOUS_SPACES; i++)
+			{
+				(*buff)->d2_dx2_shape_dcoord[i] = NULL;
+			}
 			(*buff)->d2_dx2_shape_dcoord_DL = NULL;
 			(*buff)->d2_normal_d2coord = NULL;
 		}
@@ -1907,6 +2024,10 @@ namespace pyoomph
 		}
 	}
 
+	// Allocates (or frees) a full chain of shape buffers: the buffer itself, plus its
+	// bulk_shapeinfo and opposite_shapeinfo (used by FaceElements to access the bulk/opposite
+	// element's shape info), and one level further (bulk-of-opposite, bulk-of-bulk) since those
+	// are also dereferenced when assembling flux/interface contributions.
 	void alloc_dealloc_all_shape_buffers(bool do_alloc, JITShapeInfo_t **buff, bool with_analytical_hessian_moving_mesh)
 	{
 		if (do_alloc)
@@ -1926,6 +2047,10 @@ namespace pyoomph
 		}
 	}
 
+	// Constructs the element and lazily allocates the process-wide Default_shape_info_buffer
+	// (shared by all elements of the same "shape", since only one element is assembled at a time).
+	// If a previously allocated buffer lacks the second-derivative (Hessian) storage but the
+	// current code instance requires it, the buffer is reallocated with that storage included.
 	BulkElementBase::BulkElementBase()
 	{
 		memset(&eleminfo, 0, sizeof(eleminfo));
@@ -1958,6 +2083,8 @@ namespace pyoomph
 		this->ensure_external_data();
 	}
 
+	// Frees all buffers set up by fill_element_info() (nodal coordinate/data/local-eqn arrays).
+	// Safe to call multiple times; a no-op unless fill_element_info() actually allocated anything.
 	void BulkElementBase::free_element_info()
 	{
 		if (!eleminfo.alloced)
@@ -2022,6 +2149,9 @@ namespace pyoomph
 		free_element_info();
 	}
 
+	// Extra multiplicative factor for the integration measure in curvilinear coordinate systems
+	// (e.g. axisymmetric r-factor), evaluated by JIT-generated code if the code table provides it;
+	// 1.0 (Cartesian, no extra factor) otherwise.
 	double BulkElementBase::geometric_jacobian(const oomph::Vector<double> &x)
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
@@ -2033,6 +2163,12 @@ namespace pyoomph
 			return 1.0;
 	}
 
+	// Builds the eleminfo struct (JITElementInfo_t), the flat table of pointers to nodal
+	// coordinates/data/local-equation-numbers that JIT-compiled residual/Jacobian code reads
+	// directly, in a layout that mirrors the field ordering the code generator assumed
+	// (continuous spaces, then DG spaces, then DL, D0, and finally external ED0 fields).
+	// Called every time equation numbers or nodal data pointers may have changed (e.g. after
+	// mesh adaption or equation numbering) since it caches raw pointers, not indices.
 	void BulkElementBase::fill_element_info(bool without_equations)
 	{
 		free_element_info();
@@ -2084,7 +2220,10 @@ namespace pyoomph
 				eleminfo.nodal_coords[i][eleminfo.nodal_dim + j] = &(dynamic_cast<Node *>(node_pt(i))->xi(j));
 			for (unsigned int j = 0; j < this->dim(); j++)
 				eleminfo.nodal_coords[i][eleminfo.nodal_dim + functable->lagr_dim +j] = new double(snode[j]); // Local coordinate buffer
-				
+
+			// FaceElements additionally expose boundary (zeta) coordinates per node, appended after
+			// Eulerian/Lagrangian/local-coordinate slots; these are newly allocated doubles (owned
+			// here, freed in free_element_info) since Node does not store them contiguously.
 			if (dynamic_cast<oomph::FaceElement*>(this))
 			{
 				unsigned zeta_offset=eleminfo.nodal_dim + functable->lagr_dim+this->dim();
@@ -2288,6 +2427,8 @@ namespace pyoomph
 		*/
 	}
 
+	// Convenience overload that fills the element's own (default) shape_info buffer; see the
+	// shape_info-taking overload below for the actual work.
 	double BulkElementBase::fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds,unsigned history_index) const
 	{
 		return fill_shape_info_at_s(s, index, required, this->shape_info, JLagr, flag, dxds,history_index);
@@ -2562,6 +2703,10 @@ namespace pyoomph
 		}
 	}
 
+	// Determinant of the Lagrangian (reference/undeformed) metric tensor at local coordinate s,
+	// i.e. the analogue of the usual Eulerian Jacobian but built from the Lagrangian nodal
+	// positions xi() instead of the (possibly moving) Eulerian positions. Used to integrate over
+	// the reference configuration, e.g. for Lagrangian element-size or elasticity formulations.
 	double BulkElementBase::J_Lagrangian(const oomph::Vector<double> &s)
 	{
 		unsigned el_dim = this->dim();
@@ -2641,9 +2786,16 @@ namespace pyoomph
 	}
 	
 	
+	// Computes element-size related quantities requested via `required` (Eulerian/Lagrangian
+	// element size, in both the "physical" and Cartesian-only sense, i.e. without any extra
+	// geometric_jacobian/JacobianForElementSize weighting) by integrating over all knots, and,
+	// if the mesh moves (flag!=0), also their derivatives with respect to nodal coordinates
+	// (and, if flag indicates a Hessian is required, second derivatives). These are needed
+	// because element-size expressions in the generated code are not assembled point-wise like
+	// normal residuals but require a pre-integrated scalar (and its coordinate sensitivities).
 	void BulkElementBase::fill_shape_info_element_sizes(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info,unsigned flag) const
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();	
+		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
 		bool require_hessian = flag > 2;
 		bool require_dxdshape = (flag && functable->moving_nodes && (!functable->fd_position_jacobian)); //&& (required.dx_psi_C2 || required.dx_psi_C1 || required.dx_psi_DL)			
 		bool require_dx_elemsize=require_dxdshape && (required.elemsize_Eulerian ||  required.elemsize_Eulerian_cartesian);
@@ -2797,6 +2949,26 @@ namespace pyoomph
 	   }	   
 	}
 
+	// Central shape-function evaluator: at the given local coordinate s, fills the shape_info
+	// buffer with the values and physical (x/X) derivatives of every field space present in the
+	// element (C2TB, C2, C1TB, C1, DL, ...), plus (if the mesh moves) the sensitivities of those
+	// derivatives with respect to nodal coordinates, and (if a Hessian is requested) the second
+	// such sensitivities -- everything the JIT-generated residual/Jacobian/Hessian code needs at
+	// this integration/evaluation point. Returns the Eulerian Jacobian determinant det_Eulerian
+	// and, via the JLagr reference parameter, the Lagrangian one.
+	//
+	// Strategy: first build the (inverse) metric tensor from the tangent vectors, both in the
+	// Eulerian (interpolated_t) and Lagrangian (interpolated_T) configuration -- separately for
+	// el_dim 0/1/2/3, since the metric determinant/inverse formulas differ by dimension -- along
+	// with gab_gai[b][i] = g^{ab} g_{a,i}, the contraction used below to turn local-coordinate
+	// shape derivatives dpsi/ds into physical ones dpsi/dx. If the mesh can move, also computes
+	// DXdshape_il_jb = d(g^{ab} g_{a,j})/d(x_i^l) (and, for Hessians, D2X2_dshape) via
+	// fill_shape_info_at_s_dNodalPos_helper(), which are then reused for every field space below.
+	// Then, for each present field space, evaluates its local shape functions/derivatives
+	// (dshape_local_at_s_XXX) and combines them with gab_gai (and DXdshape_il_jb) to fill the
+	// corresponding shape_info->shape_XXX / dx_shape_XXX / dX_shape_XXX / dS_shape_XXX /
+	// d_dx_shape_dcoord_XXX / d2_dx2_shape_dcoord_XXX arrays -- but only if that space is
+	// actually required (per `required`) to avoid needless work.
 	double BulkElementBase::fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds,unsigned history_index) const
 	{
 		bool require_hessian = flag > 2;
@@ -2942,49 +3114,22 @@ namespace pyoomph
 		{
 			det_Eulerian = 1.0;
 			JLagr = 1.0;			
-			for (unsigned l = 0; l < eleminfo.nnode_of_space[SPACE_INDEX_C2TB]; l++)
+			for (unsigned int ispace=0;ispace<NUM_CONTINUOUS_SPACES;ispace++)
 			{
-				shape_info->shape_C2TB[l] = 1.0;
-				for (unsigned int i = 0; i < n_dim; i++)
-					shape_info->dx_shape_C2TB[l][i] = 0.0;
-				for (unsigned int i = 0; i < n_lagr; i++)
-					shape_info->dX_shape_C2TB[l][i] = 0.0;
-				for (unsigned int i = 0; i < el_dim; i++)
-					shape_info->dS_shape_C2TB[l][i] = 0.0;
-			}
-			for (unsigned l = 0; l < eleminfo.nnode_of_space[SPACE_INDEX_C2]; l++)
-			{
-				shape_info->shape_C2[l] = 1.0;
-				for (unsigned int i = 0; i < n_dim; i++)
-					shape_info->dx_shape_C2[l][i] = 0.0;
-				for (unsigned int i = 0; i < n_lagr; i++)
-					shape_info->dX_shape_C2[l][i] = 0.0;
-				for (unsigned int i = 0; i < el_dim; i++)
-					shape_info->dS_shape_C2[l][i] = 0.0;
-			}
-			for (unsigned l = 0; l < eleminfo.nnode_of_space[SPACE_INDEX_C1TB]; l++)
-			{
-				shape_info->shape_C1TB[l] = 1.0;
-				for (unsigned int i = 0; i < n_dim; i++)
-					shape_info->dx_shape_C1TB[l][i] = 0.0;
-				for (unsigned int i = 0; i < n_lagr; i++)
-					shape_info->dX_shape_C1TB[l][i] = 0.0;
-				for (unsigned int i = 0; i < el_dim; i++)
-					shape_info->dS_shape_C1TB[l][i] = 0.0;
-			}
-			for (unsigned l = 0; l < eleminfo.nnode_of_space[SPACE_INDEX_C1]; l++)
-			{
-				shape_info->shape_C1[l] = 1.0;
-				for (unsigned int i = 0; i < n_dim; i++)
-					shape_info->dx_shape_C1[l][i] = 0.0;
-				for (unsigned int i = 0; i < n_lagr; i++)
-					shape_info->dX_shape_C1[l][i] = 0.0;
-				for (unsigned int i = 0; i < el_dim; i++)
-					shape_info->dS_shape_C1[l][i] = 0.0;
-			}
+				for (unsigned l = 0; l < eleminfo.nnode_of_space[ispace]; l++)
+				{
+					shape_info->shapes[ispace][l] = 1.0;
+					for (unsigned int i = 0; i < n_dim; i++)					
+						shape_info->dx_shapes[ispace][l][i] = 0.0;
+					for (unsigned int i = 0; i < n_lagr; i++)
+						shape_info->dX_shapes[ispace][l][i] = 0.0;
+					for (unsigned int i = 0; i < el_dim; i++)
+						shape_info->dS_shapes[ispace][l][i] = 0.0;
+				}
+			}			
 			for (unsigned l = 0; l < eleminfo.nnode_DL; l++)
 			{
-				shape_info->shape_C2[l] = 1.0;
+				shape_info->shape_DL[l] = 1.0;
 				for (unsigned int i = 0; i < n_dim; i++)
 					shape_info->dx_shape_DL[l][i] = 0.0;
 				for (unsigned int i = 0; i < n_lagr; i++)
@@ -3081,313 +3226,91 @@ namespace pyoomph
 			throw_runtime_error("Implement for this dimension");
 		}
 
-		// Now to the parts for the spaces
-		// TODO: Optimize this
-		//  bool C2_required_since_C2TB_is_C2=false;
-		//  if (this->has_bubble())
-		//  {
-		bool required_C2TB = required.continuous_spaces[SPACE_INDEX_C2TB].dx_psi || required.continuous_spaces[SPACE_INDEX_C2TB].psi;
-		required_C2TB |= eleminfo.nnode_of_space[SPACE_INDEX_C2TB] && (required.Pos.psi || required.Pos.dx_psi || required.Pos.dX_psi || required.continuous_spaces[SPACE_INDEX_C2TB].dX_psi) && ((!strcmp(functable->dominant_space, "C2TB")) || (!strcmp(functable->dominant_space, "")));
-		if (required_C2TB)
-		{
-			oomph::Shape psi(eleminfo.nnode_of_space[SPACE_INDEX_C2TB]);
-			oomph::DShape dpsids(eleminfo.nnode_of_space[SPACE_INDEX_C2TB], std::max((unsigned int)1, el_dim));
-			this->dshape_local_at_s_C2TB(s, psi, dpsids);
-			for (unsigned l = 0; l < eleminfo.nnode_of_space[SPACE_INDEX_C2TB]; l++)
-			{
-				shape_info->shape_C2TB[l] = psi[l];
-				for (unsigned int i = 0; i < n_dim; i++)
-				{
-					shape_info->dx_shape_C2TB[l][i] = 0.0;
-					for (unsigned b = 0; b < el_dim; b++)
-					{
-						shape_info->dx_shape_C2TB[l][i] += gab_gai[b][i] * dpsids(l, b);						
-					}
-				}
-				
-				for (unsigned int i=0; i < this->dim();i++) shape_info->dS_shape_C2TB[l][i] =  dpsids(l, i);
+		// Now to the parts for the spaces				
+		// A space's shapes are needed either because fields living in that space were explicitly
+		// requested, or because it is the "dominant" (i.e. geometry-defining, Pos) space of this
+		// element and Pos-shapes were requested.		
 
-				for (unsigned int i = 0; i < n_lagr; i++)
+		for (unsigned int ispace=0;ispace<NUM_CONTINUOUS_SPACES;ispace++)
+		{
+			bool req = required.continuous_spaces[ispace].dx_psi || required.continuous_spaces[ispace].psi;
+			req |= eleminfo.nnode_of_space[ispace] && (required.Pos.psi || required.Pos.dx_psi || required.Pos.dX_psi || required.continuous_spaces[ispace].dX_psi) && ((!strcmp(functable->dominant_space, functable->continuous_spaces[ispace].space_name)) || ((!strcmp(functable->dominant_space, "")) && !eleminfo.nnode_of_space[ispace]));
+
+			if (req)
+			{
+				oomph::Shape psi(eleminfo.nnode_of_space[ispace]);
+				oomph::DShape dpsids(eleminfo.nnode_of_space[ispace], std::max((unsigned int)1, el_dim));
+				this->dshape_local_of_space(ispace, s, psi, dpsids);				
+				for (unsigned l = 0; l < eleminfo.nnode_of_space[ispace]; l++)
 				{
-					shape_info->dX_shape_C2TB[l][i] = 0.0;
-					for (unsigned b = 0; b < el_dim; b++)
-					{
-						shape_info->dX_shape_C2TB[l][i] += gab_gai_Lagr[b][i] * dpsids(l, b);
-					}
-				}
-				// TODO: Only if neccessary!
-				if (require_dxdshape)
-				{
+					shape_info->shapes[ispace][l] = psi[l];
 					for (unsigned int i = 0; i < n_dim; i++)
 					{
-						for (unsigned l2 = 0; l2 < eleminfo.nnode; l2++)
+						shape_info->dx_shapes[ispace][l][i] = 0.0;
+						for (unsigned b = 0; b < el_dim; b++)
 						{
-							for (unsigned int i2 = 0; i2 < n_dim; i2++)
+							shape_info->dx_shapes[ispace][l][i] += gab_gai[b][i] * dpsids(l, b);
+						}
+					}
+
+					for (unsigned int i=0; i < this->dim();i++) shape_info->dS_shapes[ispace][l][i] =  dpsids(l, i);
+
+					for (unsigned int i = 0; i < n_lagr; i++)
+					{
+						shape_info->dX_shapes[ispace][l][i] = 0.0;
+						for (unsigned b = 0; b < el_dim; b++)
+						{
+							shape_info->dX_shapes[ispace][l][i] += gab_gai_Lagr[b][i] * dpsids(l, b);
+						}
+					}
+					// TODO: Only if neccessary!
+					if (require_dxdshape)
+					{
+						for (unsigned int i = 0; i < n_dim; i++)
+						{
+							for (unsigned l2 = 0; l2 < eleminfo.nnode; l2++)
 							{
-								shape_info->d_dx_shape_dcoord_C2TB[l][i][l2][i2] = 0.0;
-								for (unsigned int b = 0; b < el_dim; b++)
+								for (unsigned int i2 = 0; i2 < n_dim; i2++)
 								{
-									shape_info->d_dx_shape_dcoord_C2TB[l][i][l2][i2] += DXdshape_il_jb(i2, l2, i, b) * dpsids(l, b); // TODO: Also for all other shapes (C1, DL)
+									shape_info->d_dx_shape_dcoord[ispace][l][i][l2][i2] = 0.0;
+									for (unsigned int b = 0; b < el_dim; b++)
+									{
+										shape_info->d_dx_shape_dcoord[ispace][l][i][l2][i2] += DXdshape_il_jb(i2, l2, i, b) * dpsids(l, b); // TODO: Also for all other shapes (C1, DL)
+									}
 								}
 							}
 						}
-					}
-					if (require_hessian)
-					{
-					  for (unsigned int i = 0; i < n_dim; i++)
+						if (require_hessian)
 						{
-							for (unsigned lel= 0; lel < eleminfo.nnode; lel++)
+						for (unsigned int i = 0; i < n_dim; i++)
 							{
-							 for (unsigned lel2= 0; lel2 < eleminfo.nnode; lel2++)
-							 {
-								for (unsigned int j = 0; j < n_dim; j++)
+								for (unsigned lel= 0; lel < eleminfo.nnode; lel++)
 								{
-								 for (unsigned int j2 = 0; j2 < n_dim; j2++)
-								 {
-									shape_info->d2_dx2_shape_dcoord_C2TB[l][i][lel][j][lel2][j2] = 0.0;
-									for (unsigned int b = 0; b < el_dim; b++)
+								for (unsigned lel2= 0; lel2 < eleminfo.nnode; lel2++)
+								{
+									for (unsigned int j = 0; j < n_dim; j++)
 									{
-										shape_info->d2_dx2_shape_dcoord_C2TB[l][i][lel][j][lel2][j2] += (*D2X2_dshape)(i,b,lel,lel2,j,j2) * dpsids(l, b);
+									for (unsigned int j2 = 0; j2 < n_dim; j2++)
+									{
+										shape_info->d2_dx2_shape_dcoord[ispace][l][i][lel][j][lel2][j2] = 0.0;
+										for (unsigned int b = 0; b < el_dim; b++)
+										{
+											shape_info->d2_dx2_shape_dcoord[ispace][l][i][lel][j][lel2][j2] += (*D2X2_dshape)(i,b,lel,lel2,j,j2) * dpsids(l, b);
+										}
 									}
-								 }
-								}
-							}
-						  }
-					  }
-					}
-				}
-			}
-		}
-		//}
-		//  else
-		//  {
-		//    if ((required.dx_psi_C2TB || required.psi_C2TB ) && (eleminfo.nnode_of_space[SPACE_INDEX_C2TB]) )
-		//    {
-		//      C2_required_since_C2TB_is_C2=true;
-		//    }
-		//  }
-		// C2_required_since_C2TB_is_C2 ||
-		bool required_C2 = required.continuous_spaces[SPACE_INDEX_C2].dx_psi || required.continuous_spaces[SPACE_INDEX_C2].psi;
-		required_C2 |= eleminfo.nnode_of_space[SPACE_INDEX_C2] && (required.Pos.psi || required.Pos.dx_psi || required.Pos.dX_psi || required.continuous_spaces[SPACE_INDEX_C2].dX_psi) && ((!strcmp(functable->dominant_space, "C2")) || ((!strcmp(functable->dominant_space, "")) && !eleminfo.nnode_of_space[SPACE_INDEX_C2TB]));
-
-		if (required_C2)
-		{
-			oomph::Shape psi(eleminfo.nnode_of_space[SPACE_INDEX_C2]);
-			oomph::DShape dpsids(eleminfo.nnode_of_space[SPACE_INDEX_C2], std::max((unsigned int)1, el_dim));
-			this->dshape_local_at_s_C2(s, psi, dpsids);
-			for (unsigned l = 0; l < eleminfo.nnode_of_space[SPACE_INDEX_C2]; l++)
-			{
-				shape_info->shape_C2[l] = psi[l];
-				for (unsigned int i = 0; i < n_dim; i++)
-				{
-					shape_info->dx_shape_C2[l][i] = 0.0;
-					for (unsigned b = 0; b < el_dim; b++)
-					{
-						shape_info->dx_shape_C2[l][i] += gab_gai[b][i] * dpsids(l, b);
-					}
-				}
-
-				for (unsigned int i=0; i < this->dim();i++) shape_info->dS_shape_C2[l][i] =  dpsids(l, i);
-
-				for (unsigned int i = 0; i < n_lagr; i++)
-				{
-					shape_info->dX_shape_C2[l][i] = 0.0;
-					for (unsigned b = 0; b < el_dim; b++)
-					{
-						shape_info->dX_shape_C2[l][i] += gab_gai_Lagr[b][i] * dpsids(l, b);
-					}
-				}
-				// TODO: Only if neccessary!
-				if (require_dxdshape)
-				{
-					for (unsigned int i = 0; i < n_dim; i++)
-					{
-						for (unsigned l2 = 0; l2 < eleminfo.nnode; l2++)
-						{
-							for (unsigned int i2 = 0; i2 < n_dim; i2++)
-							{
-								shape_info->d_dx_shape_dcoord_C2[l][i][l2][i2] = 0.0;
-								for (unsigned int b = 0; b < el_dim; b++)
-								{
-									shape_info->d_dx_shape_dcoord_C2[l][i][l2][i2] += DXdshape_il_jb(i2, l2, i, b) * dpsids(l, b); // TODO: Also for all other shapes (C1, DL)
+									}
 								}
 							}
 						}
-					}
-					if (require_hessian)
-					{
-					  for (unsigned int i = 0; i < n_dim; i++)
-						{
-							for (unsigned lel= 0; lel < eleminfo.nnode; lel++)
-							{
-							 for (unsigned lel2= 0; lel2 < eleminfo.nnode; lel2++)
-							 {
-								for (unsigned int j = 0; j < n_dim; j++)
-								{
-								 for (unsigned int j2 = 0; j2 < n_dim; j2++)
-								 {
-									shape_info->d2_dx2_shape_dcoord_C2[l][i][lel][j][lel2][j2] = 0.0;
-									for (unsigned int b = 0; b < el_dim; b++)
-									{
-										shape_info->d2_dx2_shape_dcoord_C2[l][i][lel][j][lel2][j2] += (*D2X2_dshape)(i,b,lel,lel2,j,j2) * dpsids(l, b);
-									}
-								 }
-								}
-							}
-						  }
-					  }
-					}
-				}
-			}
-		}
-
-		bool required_C1TB = required.continuous_spaces[SPACE_INDEX_C1TB].dx_psi || required.continuous_spaces[SPACE_INDEX_C1TB].psi;
-		required_C1TB |= eleminfo.nnode_of_space[SPACE_INDEX_C1TB] && (required.Pos.psi || required.Pos.dx_psi || required.Pos.dX_psi || required.continuous_spaces[SPACE_INDEX_C1TB].dX_psi) && ((!strcmp(functable->dominant_space, "C1TB")) || ((!strcmp(functable->dominant_space, "")) && !eleminfo.nnode_of_space[SPACE_INDEX_C2TB]));
-
-		if (required_C1TB)
-		{
-			oomph::Shape psi(eleminfo.nnode_of_space[SPACE_INDEX_C1TB]);
-//			std::cout << "NNODE C1TB : " << eleminfo.nnode_of_space[SPACE_INDEX_C1TB] << std::endl << std::flush;
-			oomph::DShape dpsids(eleminfo.nnode_of_space[SPACE_INDEX_C1TB], std::max((unsigned int)1, el_dim));
-			this->dshape_local_at_s_C1TB(s, psi, dpsids);
-			for (unsigned l = 0; l < eleminfo.nnode_of_space[SPACE_INDEX_C1TB]; l++)
-			{
-				shape_info->shape_C1TB[l] = psi[l];
-				for (unsigned int i = 0; i < n_dim; i++)
-				{
-					shape_info->dx_shape_C1TB[l][i] = 0.0;
-					for (unsigned b = 0; b < el_dim; b++)
-					{
-						shape_info->dx_shape_C1TB[l][i] += gab_gai[b][i] * dpsids(l, b);
-					}
-				}
-
-				for (unsigned int i=0; i < this->dim();i++) shape_info->dS_shape_C1TB[l][i] =  dpsids(l, i);
-
-				for (unsigned int i = 0; i < n_lagr; i++)
-				{
-					shape_info->dX_shape_C1TB[l][i] = 0.0;
-					for (unsigned b = 0; b < el_dim; b++)
-					{
-						shape_info->dX_shape_C1TB[l][i] += gab_gai_Lagr[b][i] * dpsids(l, b);
-					}
-				}
-				if (require_dxdshape)
-				{
-					for (unsigned int i = 0; i < n_dim; i++)
-					{
-						for (unsigned l2 = 0; l2 < eleminfo.nnode; l2++)
-						{
-							for (unsigned int i2 = 0; i2 < n_dim; i2++)
-							{
-								shape_info->d_dx_shape_dcoord_C1TB[l][i][l2][i2] = 0.0;
-								for (unsigned int b = 0; b < el_dim; b++)
-								{
-									shape_info->d_dx_shape_dcoord_C1TB[l][i][l2][i2] += DXdshape_il_jb(i2, l2, i, b) * dpsids(l, b);
-								}
-							}
 						}
-					}
-					if (require_hessian)
-					{
-					  for (unsigned int i = 0; i < n_dim; i++)
-						{
-							for (unsigned lel= 0; lel < eleminfo.nnode; lel++)
-							{
-							 for (unsigned lel2= 0; lel2 < eleminfo.nnode; lel2++)
-							 {
-								for (unsigned int j = 0; j < n_dim; j++)
-								{
-								 for (unsigned int j2 = 0; j2 < n_dim; j2++)
-								 {
-									shape_info->d2_dx2_shape_dcoord_C1TB[l][i][lel][j][lel2][j2] = 0.0;
-									for (unsigned int b = 0; b < el_dim; b++)
-									{
-										shape_info->d2_dx2_shape_dcoord_C1TB[l][i][lel][j][lel2][j2] += (*D2X2_dshape)(i,b,lel,lel2,j,j2) * dpsids(l, b);
-									}
-								 }
-								}
-							}
-						  }
-					  }
 					}
 				}
 			}
 		}
 		
 
-		bool required_C1 = required.continuous_spaces[SPACE_INDEX_C1].dx_psi || required.continuous_spaces[SPACE_INDEX_C1].psi;
-		required_C1 |= eleminfo.nnode_of_space[SPACE_INDEX_C1] && (required.Pos.psi || required.Pos.dx_psi || required.Pos.dX_psi || required.continuous_spaces[SPACE_INDEX_C1].dX_psi) && ((!strcmp(functable->dominant_space, "C1")) || ((!strcmp(functable->dominant_space, "")) && !eleminfo.nnode_of_space[SPACE_INDEX_C2]));
-
-		if (required_C1)
-		{
-			oomph::Shape psi(eleminfo.nnode_of_space[SPACE_INDEX_C1]);
-			oomph::DShape dpsids(eleminfo.nnode_of_space[SPACE_INDEX_C1], std::max((unsigned int)1, el_dim));
-			this->dshape_local_at_s_C1(s, psi, dpsids);
-			for (unsigned l = 0; l < eleminfo.nnode_of_space[SPACE_INDEX_C1]; l++)
-			{
-				shape_info->shape_C1[l] = psi[l];
-				for (unsigned int i = 0; i < n_dim; i++)
-				{
-					shape_info->dx_shape_C1[l][i] = 0.0;
-					for (unsigned b = 0; b < el_dim; b++)
-					{
-						shape_info->dx_shape_C1[l][i] += gab_gai[b][i] * dpsids(l, b);
-					}
-				}
-
-				for (unsigned int i=0; i < this->dim();i++) shape_info->dS_shape_C1[l][i] =  dpsids(l, i);
-
-				for (unsigned int i = 0; i < n_lagr; i++)
-				{
-					shape_info->dX_shape_C1[l][i] = 0.0;
-					for (unsigned b = 0; b < el_dim; b++)
-					{
-						shape_info->dX_shape_C1[l][i] += gab_gai_Lagr[b][i] * dpsids(l, b);
-					}
-				}
-				if (require_dxdshape)
-				{
-					for (unsigned int i = 0; i < n_dim; i++)
-					{
-						for (unsigned l2 = 0; l2 < eleminfo.nnode; l2++)
-						{
-							for (unsigned int i2 = 0; i2 < n_dim; i2++)
-							{
-								shape_info->d_dx_shape_dcoord_C1[l][i][l2][i2] = 0.0;
-								for (unsigned int b = 0; b < el_dim; b++)
-								{
-									shape_info->d_dx_shape_dcoord_C1[l][i][l2][i2] += DXdshape_il_jb(i2, l2, i, b) * dpsids(l, b);
-								}
-							}
-						}
-					}
-					if (require_hessian)
-					{
-					  for (unsigned int i = 0; i < n_dim; i++)
-						{
-							for (unsigned lel= 0; lel < eleminfo.nnode; lel++)
-							{
-							 for (unsigned lel2= 0; lel2 < eleminfo.nnode; lel2++)
-							 {
-								for (unsigned int j = 0; j < n_dim; j++)
-								{
-								 for (unsigned int j2 = 0; j2 < n_dim; j2++)
-								 {
-									shape_info->d2_dx2_shape_dcoord_C1[l][i][lel][j][lel2][j2] = 0.0;
-									for (unsigned int b = 0; b < el_dim; b++)
-									{
-										shape_info->d2_dx2_shape_dcoord_C1[l][i][lel][j][lel2][j2] += (*D2X2_dshape)(i,b,lel,lel2,j,j2) * dpsids(l, b);
-									}
-								 }
-								}
-							}
-						  }
-					  }
-					}
-				}
-			}
-		}
+		// Same pattern as above, for the discontinuous-Lagrange (DL) space (no "dominant space"
+		// fallback since DL fields are never used to represent the geometry).
 		if (required.DL.dx_psi || required.DL.psi)
 		{
 			oomph::Shape psi(eleminfo.nnode_DL);
@@ -3472,6 +3395,10 @@ namespace pyoomph
 	}
 
 
+	// Points the generic "Pos" shape pointers (shape_Pos, dx_shape_Pos, ...) to whichever concrete
+	// space (C2TB/C2/C1TB/C1) actually represents the element's geometry, so JIT code that reads
+	// shape_info->shape_Pos etc. does not need to know which space is dominant. Falls back down
+	// the priority chain C2TB -> C2 -> C1TB -> C1 depending on which nodes/spaces are present.
 	void BulkElementBase::set_remaining_shapes_appropriately(JITShapeInfo_t *shape_info, const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes)
 	{
 		bool required_C2TB = required_shapes.continuous_spaces[SPACE_INDEX_C2TB].dx_psi || required_shapes.continuous_spaces[SPACE_INDEX_C2TB].psi;
@@ -3482,43 +3409,47 @@ namespace pyoomph
 		
 		if (required_C2TB)
 		{
-			shape_info->shape_Pos = shape_info->shape_C2TB;
-			shape_info->dx_shape_Pos = shape_info->dx_shape_C2TB;
-			shape_info->dX_shape_Pos = shape_info->dX_shape_C2TB;
-			shape_info->dS_shape_Pos = shape_info->dS_shape_C2TB;
-			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord_C2TB;
-			shape_info->d2_dx2_shape_dcoord_Pos=shape_info->d2_dx2_shape_dcoord_C2TB;
+			shape_info->shape_Pos = shape_info->shapes[SPACE_INDEX_C2TB];
+			shape_info->dx_shape_Pos = shape_info->dx_shapes[SPACE_INDEX_C2TB];
+			shape_info->dX_shape_Pos = shape_info->dX_shapes[SPACE_INDEX_C2TB];
+			shape_info->dS_shape_Pos = shape_info->dS_shapes[SPACE_INDEX_C2TB];
+			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord[SPACE_INDEX_C2TB];
+			shape_info->d2_dx2_shape_dcoord_Pos=shape_info->d2_dx2_shape_dcoord[SPACE_INDEX_C2TB];
 		}
 		else if (this->eleminfo.nnode_of_space[SPACE_INDEX_C2])
 		{
-			shape_info->shape_Pos = shape_info->shape_C2;
-			shape_info->dx_shape_Pos = shape_info->dx_shape_C2;
-			shape_info->dX_shape_Pos = shape_info->dX_shape_C2;
-			shape_info->dS_shape_Pos = shape_info->dS_shape_C2;
-			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord_C2;
-			shape_info->d2_dx2_shape_dcoord_Pos=shape_info->d2_dx2_shape_dcoord_C2;
+			shape_info->shape_Pos = shape_info->shapes[SPACE_INDEX_C2];
+			shape_info->dx_shape_Pos = shape_info->dx_shapes[SPACE_INDEX_C2];
+			shape_info->dX_shape_Pos = shape_info->dX_shapes[SPACE_INDEX_C2];
+			shape_info->dS_shape_Pos = shape_info->dS_shapes[SPACE_INDEX_C2];
+			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord[SPACE_INDEX_C2];
+			shape_info->d2_dx2_shape_dcoord_Pos=shape_info->d2_dx2_shape_dcoord[SPACE_INDEX_C2];
 		}
 		else if (required_C1TB)
 		{
-			shape_info->shape_Pos = shape_info->shape_C1TB;
-			shape_info->dx_shape_Pos = shape_info->dx_shape_C1TB;
-			shape_info->dX_shape_Pos = shape_info->dX_shape_C1TB;
-			shape_info->dS_shape_Pos = shape_info->dS_shape_C1TB;
-			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord_C1TB;		
-			shape_info->d2_dx2_shape_dcoord_Pos=shape_info->d2_dx2_shape_dcoord_C1TB;
+			shape_info->shape_Pos = shape_info->shapes[SPACE_INDEX_C1TB];
+			shape_info->dx_shape_Pos = shape_info->dx_shapes[SPACE_INDEX_C1TB];
+			shape_info->dX_shape_Pos = shape_info->dX_shapes[SPACE_INDEX_C1TB];
+			shape_info->dS_shape_Pos = shape_info->dS_shapes[SPACE_INDEX_C1TB];
+			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord[SPACE_INDEX_C1TB];		
+			shape_info->d2_dx2_shape_dcoord_Pos=shape_info->d2_dx2_shape_dcoord[SPACE_INDEX_C1TB];
 		}		
 		else
 		{
 		  
-			shape_info->shape_Pos = shape_info->shape_C1;
-			shape_info->dx_shape_Pos = shape_info->dx_shape_C1;
-			shape_info->dX_shape_Pos = shape_info->dX_shape_C1;
-			shape_info->dS_shape_Pos = shape_info->dS_shape_C1;
-			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord_C1;
-			shape_info->d2_dx2_shape_dcoord_Pos=shape_info->d2_dx2_shape_dcoord_C1;
+			shape_info->shape_Pos = shape_info->shapes[SPACE_INDEX_C1];
+			shape_info->dx_shape_Pos = shape_info->dx_shapes[SPACE_INDEX_C1];
+			shape_info->dX_shape_Pos = shape_info->dX_shapes[SPACE_INDEX_C1];
+			shape_info->dS_shape_Pos = shape_info->dS_shapes[SPACE_INDEX_C1];
+			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord[SPACE_INDEX_C1];
+			shape_info->d2_dx2_shape_dcoord_Pos=shape_info->d2_dx2_shape_dcoord[SPACE_INDEX_C1];
 		}
 	}
 
+	// Fills shape_info for a single Gauss integration point ipt: evaluates fill_shape_info_at_s()
+	// at that point's local coordinate (and, if history-weighted time-integrals are required,
+	// also at the previous one or two history configurations, to get their Jacobians), and stores
+	// the combined integration weights (weight * Jacobian) used by JIT code to form dx/dX/etc.
 	void BulkElementBase::fill_shape_buffer_for_integration_point(unsigned ipt, const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag)
 	{
 		oomph::Vector<double> s(this->dim());
@@ -3552,6 +3483,12 @@ namespace pyoomph
 		
 	}
 
+	// One-time (per residual/Jacobian assembly, not per integration point) setup of shape_info:
+	// caches the number of integration points, the current time values/timesteps, and the
+	// per-history-value BDF1/BDF2/Newmark2 weights used by JIT code to form time derivatives
+	// (degrading to lower-order weights while too few unsteady steps have been taken yet), then
+	// resolves the "Pos" shape aliases and computes element-size related quantities. Must be
+	// called before fill_shape_buffer_for_integration_point() is used for the individual points.
 	void BulkElementBase::prepare_shape_buffer_for_integration(const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag)
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
@@ -3618,6 +3555,9 @@ namespace pyoomph
 		
 	}
 
+	// Evaluates a user-defined "integral expression" (an expression integrated over the element);
+	// the actual loop over integration points happens inside the JIT-generated
+	// EvalIntegralExpression, which reads the prepared shape_info buffer.
 	double BulkElementBase::eval_integral_expression(unsigned index)
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
@@ -3628,6 +3568,8 @@ namespace pyoomph
 		return functable->EvalIntegralExpression(&eleminfo, this->shape_info, index);
 	}
 
+	// Evaluates a user-defined "local expression" (a pointwise, non-integrated expression) at a
+	// given node's local coordinate.
 	double BulkElementBase::eval_local_expression_at_node(unsigned index, unsigned node_index)
 	{
 		oomph::Vector<double> s;
@@ -3635,6 +3577,7 @@ namespace pyoomph
 		return eval_local_expression_at_s(index, s);
 	}
 
+	// Evaluates a user-defined "local expression" at an arbitrary local coordinate s.
 	double BulkElementBase::eval_local_expression_at_s(unsigned index, const oomph::Vector<double> &s)
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
@@ -3652,6 +3595,8 @@ namespace pyoomph
 		return functable->EvalLocalExpression(&eleminfo, this->shape_info, index);
 	}
 
+	// Evaluates a user-defined "extremum expression" (used e.g. to track min/max of some field)
+	// at a given node's local coordinate.
 	double BulkElementBase::eval_extremum_expression_at_node(unsigned index, unsigned node_index)
 	{
 		oomph::Vector<double> s;
@@ -3659,6 +3604,7 @@ namespace pyoomph
 		return eval_extremum_expression_at_s(index, s);
 	}
 
+	// Evaluates a user-defined "extremum expression" at an arbitrary local coordinate s.
 	double BulkElementBase::eval_extremum_expression_at_s(unsigned index, const oomph::Vector<double> &s)
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
@@ -3674,6 +3620,10 @@ namespace pyoomph
 		return functable->EvalExtremumExpression(&eleminfo, this->shape_info, index);
 	}	
 
+	// Evaluates a user-defined tracer-advection velocity (given in physical/Eulerian coordinates
+	// by the JIT code) and converts it into a local-coordinate velocity svelo by inverting the
+	// Jacobian dx/ds, so that a tracer particle can be advected in local coordinate space (used
+	// e.g. to track material points through mesh motion without leaving the element frame).
 	bool BulkElementBase::eval_tracer_advection_in_s_space(unsigned index, double time_frac, const oomph::Vector<double> &s, oomph::Vector<double> &svelo)
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
@@ -3744,12 +3694,25 @@ namespace pyoomph
 		return true;
 	}
 
+	// Multi-assembly: performs several residual/Jacobian/mass-matrix/Hessian-vector-product/
+	// parameter-derivative contributions (described by `info`, one entry per "contribution",
+	// e.g. bulk + several attached interfaces) for this element in a single pass, sharing one
+	// shape_info fill per integration point instead of recomputing shapes from scratch for each
+	// contribution separately. First merges the RequiredShapes of all requested contributions
+	// (so the shape buffer is filled generously enough for all of them at once) and determines
+	// the maximum needed shapeflag (0=residuals,1=+Jacobian,2=+mass matrix,3=+Hessian). Then
+	// loops over integration points (or just once, if the code was compiled with a private,
+	// non-shared shape buffer per contribution) and, for each requested contribution, calls the
+	// appropriate JIT-generated residual/Jacobian/mass-matrix function, parameter-derivative
+	// function, and/or Hessian-vector-product function.
 	void BulkElementBase::get_multi_assembly(std::vector<SinglePassMultiAssembleInfo> &info)
 	{
 		JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
 		JITFuncSpec_RequiredShapes_FiniteElement_t *required_shapes = (JITFuncSpec_RequiredShapes_FiniteElement_t *)std::calloc(1, sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t));
 		int shapeflag = -1;
 		// std::cout << "MERGED ASSEMBLY " << std::endl;
+		// First pass: merge required shapes across all contributions and figure out the highest
+		// shapeflag (residuals/Jacobian/mass-matrix/Hessian) needed overall.
 		for (auto &inf : info)
 		{
 			if (inf.contribution < 0)
@@ -3830,18 +3793,20 @@ namespace pyoomph
       unsigned n_int_pt=(shared_multi_assemble ? this->shape_info->n_int_pt : 1);
       for (unsigned int i_int_pt=0;i_int_pt<n_int_pt;i_int_pt++)
       {
-      
+
 			for (auto &inf : info)
 			{
 				if (inf.contribution < 0)
 					continue;
-				// Fill the shape buffer once
+				// Fill the shape buffer once per integration point, shared across all contributions
+				// (only if the code table allows sharing; otherwise each contribution's function
+				// call internally handles filling the buffer for all points itself).
 				if (shared_multi_assemble)
 				{
 				  this->fill_shape_buffer_for_integration_point(i_int_pt,*required_shapes,shapeflag);
 				}
 
-				// Base contribution
+				// Base contribution: residuals / Jacobian / mass matrix
 				if (inf.residuals || inf.jacobian || inf.mass_matrix)
 				{
 					JITFuncSpec_ResidualAndJacobian_FiniteElement func;
@@ -4022,8 +3987,17 @@ namespace pyoomph
 		}
 	}
 
+	// The main JIT-driven residual/Jacobian/mass-matrix assembly entry point, called from
+	// oomph-lib's fill_in_contribution_to_* machinery (flag: 0=residuals only, 1=+Jacobian,
+	// >=2=+mass matrix). Two special redirections take priority over normal assembly: if
+	// __replace_RJM_by_param_deriv is set (used while computing derivatives w.r.t. a parameter
+	// via finite differences elsewhere), delegates to fill_in_generic_dresidual_contribution_jit
+	// instead; if enable_zeta_projection is set, assembles the (unrelated) zeta-projection
+	// residuals instead of the physical equations. Otherwise prepares the shape buffer, resolves
+	// hanging-node equation info, and calls the appropriate JIT-generated ResidualAndJacobian
+	// function (steady/unsteady, hanging/non-hanging variant).
 	void BulkElementBase::fill_in_generic_residual_contribution_jit(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian, oomph::DenseMatrix<double> &mass_matrix, unsigned flag)
-	{	
+	{
 		if (__replace_RJM_by_param_deriv)
 		{
 			fill_in_generic_dresidual_contribution_jit(__replace_RJM_by_param_deriv, residuals, jacobian, mass_matrix, flag);
@@ -4097,6 +4071,10 @@ namespace pyoomph
 		*/
 	}
 
+	// Debug helper: compares the analytical Hessian-vector product (Y,C) -> product against a
+	// finite-difference approximation obtained by perturbing each dof and re-assembling the
+	// Jacobian, to validate the JIT-generated analytical Hessian code. Not used in production
+	// assembly; intended to be called interactively/from Python when debugging.
 	void BulkElementBase::debug_hessian(std::vector<double> Y, std::vector<std::vector<double>> C, double epsilon)
 	{
 		if (Y.size() != this->ndof())
@@ -4211,12 +4189,19 @@ namespace pyoomph
 		}
 	}
 
+	// Assembles the full (dense, flattened as ndof x ndof*ndof) Hessian tensor d^2R/dU^2 by
+	// calling fill_in_generic_hessian with a dummy Y=0 vector (so no vector-product contraction
+	// happens) and flag=3 (request full Hessian assembly rather than a vector product).
 	void BulkElementBase::assemble_hessian_tensor(oomph::DenseMatrix<double> &hbuffer)
 	{
 		oomph::DenseMatrix<double> dummy(this->ndof(),this->ndof()*this->ndof(),0.0);// For the mass matrix
 		fill_in_generic_hessian(oomph::Vector<double>(this->ndof(),0.0), dummy, hbuffer, 3);
 	}
 
+	// Assembles both the residual Hessian (d^2R/dU^2) and the mass-matrix Hessian (d^2M/dU^2) as
+	// full rank-3 tensors directly via the JIT-generated HessianVectorProduct function (called
+	// with a NULL Y so it fills the full tensors instead of contracting with a vector). Requires
+	// the code to have been JIT-compiled with analytic Hessians enabled.
    void BulkElementBase::assemble_hessian_and_mass_hessian(oomph::RankThreeTensor<double> & hbuffer,oomph::RankThreeTensor<double> & mbuffer)
    {
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
@@ -4488,6 +4473,11 @@ namespace pyoomph
 	}
    
 
+	// Shared implementation behind fill_in_contribution_to_hessian_vector_products() and
+	// assemble_hessian_tensor()/assemble_hessian_and_mass_hessian(): calls the JIT-generated
+	// HessianVectorProduct function to contract the residual Hessian d^2R/dU^2 with the given
+	// eigenvector Y and a set of directions C (flag selects vector-product vs. full-tensor mode,
+	// see the JITFuncSpec_HessianVectorProduct_FiniteElement calling convention).
 	void BulkElementBase::fill_in_generic_hessian(oomph::Vector<double> const &Y, oomph::DenseMatrix<double> &C, oomph::DenseMatrix<double> &product, unsigned flag)
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
@@ -4518,12 +4508,20 @@ namespace pyoomph
 		func(&eleminfo, shape_info, &(Y[0]), &(C.entry(0, 0)), &(product.entry(0, 0)), n_vec, flag);
 	}
 
+	// oomph-lib hook: computes product = sum_dofs Hessian(Y) * C^T, i.e. the Hessian-vector
+	// products needed for e.g. bifurcation tracking / stability analysis. Delegates to
+	// fill_in_generic_hessian in plain (non-tensor) vector-product mode.
 	void BulkElementBase::fill_in_contribution_to_hessian_vector_products(oomph::Vector<double> const &Y, oomph::DenseMatrix<double> const &C, oomph::DenseMatrix<double> &product)
 	{
 		oomph::DenseMatrix<double> Ccopy = C;
 		this->fill_in_generic_hessian(Y, Ccopy, product, 0);
 	}
 
+	// Builds a human-readable name for each local dof/equation of this element, used for
+	// debugging (e.g. printing which equation a Jacobian row/column corresponds to). Walks
+	// through every field/space in the same order fill_element_info() uses (non-hanging Pos,
+	// hanging Pos via masters, then continuous spaces, DG, DL, D0, ED0, ...), so the produced
+	// names line up with the residual/Jacobian ordering.
 	std::vector<std::string> BulkElementBase::get_dof_names(bool not_a_root_call)
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
@@ -4705,6 +4703,8 @@ namespace pyoomph
 	}
 	
 
+	// Debug helper: assembles residuals/Jacobian for this element and returns them alongside
+	// human-readable dof names, for inspection from Python.
 	void BulkElementBase::get_debug_jacobian_info(oomph::Vector<double> &R, oomph::DenseMatrix<double> &J, std::vector<std::string> &dofnames)
 	{
 		dofnames = get_dof_names();
@@ -4713,6 +4713,11 @@ namespace pyoomph
 		this->fill_in_contribution_to_jacobian(R, J);
 	}
 
+	// Debug helper: recomputes the Jacobian via the (base oomph-lib) finite-difference path and
+	// compares it entry-by-entry to the already-assembled analytical (JIT) `jacobian`, printing
+	// every entry that differs by more than diff_eps (with dof names) to help track down bugs in
+	// generated residual/Jacobian code. Optionally aborts (stop_on_jacobian_difference) with a
+	// detailed dump of the element's dof/equation-number bookkeeping.
 	void BulkElementBase::debug_analytical_jacobian(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian, double diff_eps)
 	{
 		oomph::Vector<double> fd_residuals(residuals.size(), 0.0);
@@ -4866,6 +4871,15 @@ namespace pyoomph
 		}
 	}
 
+	// Fills in the Jacobian columns corresponding to nodal position (Lagrangian/geometric) dofs
+	// by finite-differencing the residuals with respect to each nodal coordinate in turn (used
+	// when the JIT-generated code cannot or does not provide the position-Jacobian analytically,
+	// e.g. moving-mesh problems with fd_position_jacobian set). Columns belonging to non-position
+	// ("Lagrangian") dofs are left untouched here (is_lagrangian_dof is currently unused/disabled
+	// via the commented-out block, so effectively every dof's row is updated for every perturbed
+	// position dof). Perturbs one nodal coordinate at a time (looping master nodes for hanging
+	// nodes), re-evaluates the residuals, and forms the FD column, restoring the coordinate
+	// afterwards.
 	void BulkElementBase::fill_in_jacobian_from_lagragian_by_fd(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian)
 	{
 		const unsigned n_node = this->nnode();
@@ -5016,6 +5030,13 @@ namespace pyoomph
 	 }
 	}
 
+	// oomph-lib hook for residual + Jacobian assembly. Normally delegates to the JIT-generated
+	// analytical assembly; if the code table requests position-Jacobian entries by finite
+	// differences (fd_position_jacobian, for moving-mesh problems), those columns are patched in
+	// afterwards via fill_in_jacobian_from_lagragian_by_fd(). If debug_jacobian_epsilon is set,
+	// cross-checks the analytical Jacobian against a full FD one. If fd_jacobian is set for the
+	// whole element (rather than just positions), falls back entirely to oomph-lib's generic FD
+	// Jacobian.
 	void BulkElementBase::fill_in_contribution_to_jacobian(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian)
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
@@ -5091,6 +5112,10 @@ namespace pyoomph
 			*/
 	}
 
+	// oomph-lib hook for residual + Jacobian + mass-matrix assembly (used e.g. for eigenproblems).
+	// FD mass matrices are not implemented (the fd_jacobian branch below is dead code, left in
+	// for reference, and would throw before reaching it); the normal path always calls the
+	// JIT-generated assembly with flag=2 (residuals + Jacobian + mass matrix).
 	void BulkElementBase::fill_in_contribution_to_jacobian_and_mass_matrix(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian, oomph::DenseMatrix<double> &mass_matrix)
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
@@ -5118,6 +5143,10 @@ namespace pyoomph
 	 this->RefineableSolidElement::assign_solid_local_eqn_numbers(store_local_dof_pt);
 	}
 	*/
+	// After oomph-lib has assigned local equation numbers (nodal, internal, external, position),
+	// rebuilds the JIT eleminfo buffer (which caches those numbers) and makes sure all internal
+	// data shares the nodes' timestepper, since internal data may be created before the element
+	// is fully connected to the mesh's timestepping.
 	void BulkElementBase::assign_additional_local_eqn_numbers()
 	{
 		this->RefineableSolidElement::assign_additional_local_eqn_numbers();
@@ -5133,12 +5162,18 @@ namespace pyoomph
 	   }
 	}
 
+	// Number of nodal values required at every node: same for all nodes of this element type
+	// (the total number of "base bulk" field values, i.e. all continuous-space fields the code
+	// generator laid out for this element, regardless of which node index n is asked about).
 	unsigned BulkElementBase::required_nvalue(const unsigned &n) const
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();		
-		return functable->total_num_fields_basebulk; 
+		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		return functable->total_num_fields_basebulk;
 	}
 
+	// oomph-lib node-construction hooks (plain / with explicit timestepper, interior / boundary):
+	// create a pyoomph::Node (or BoundaryNode) with the right Lagrangian/nodal dimensions and
+	// enough values to hold every base-bulk field.
 	oomph::Node *BulkElementBase::construct_node(const unsigned &n)
 	{
 		unsigned ntot = this->required_nvalue(n);
@@ -5171,6 +5206,8 @@ namespace pyoomph
 	}
 
 
+	// Number of continuously-interpolated nodal values per node (same quantity as
+	// required_nvalue(), exposed under the name oomph-lib's projection/interpolation code uses).
 	unsigned BulkElementBase::ncont_interpolated_values() const
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
@@ -5182,12 +5219,17 @@ namespace pyoomph
 		return oomph::Vector<double>(this->dim(), 0.5 * (this->s_min() + this->s_max()));
 	}
 
+	// Evaluates a "local expression" at the element's midpoint local coordinate.
 	double BulkElementBase::eval_local_expression_at_midpoint(unsigned index)
 	{
 		oomph::Vector<double> s = this->get_midpoint_s();
 		return eval_local_expression_at_s(index, s);
 	}
 
+	// Creates a brand-new (not connected to the mesh's node array) Node at local coordinate s,
+	// with its Lagrangian/Eulerian coordinates and history values obtained by interpolating this
+	// element's own fields there. Used e.g. to sample the solution at an arbitrary point without
+	// requiring an actual mesh node to exist there.
     pyoomph::Node *BulkElementBase::create_interpolated_node(const oomph::Vector<double> &s,bool as_boundary_node)
     {
 		if (this->nnode()==0) return 0;
@@ -5261,6 +5303,9 @@ namespace pyoomph
 		return res;
 	}
 
+	// Called by oomph-lib's tree-based mesh refinement before a son element is otherwise set up:
+	// makes sure the new (son) element has a code instance, inheriting it from its father since
+	// sons are constructed generically without going through the normal Python-driven creation.
 	void BulkElementBase::pre_build(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt)
 	{
 		if (!this->codeinst)
@@ -5275,6 +5320,16 @@ namespace pyoomph
 		}
 	}
 
+	// Called by oomph-lib's tree-based mesh refinement right after a son element has been created
+	// from a father (bisection/quadsection/octsection) and its nodes set up, to transfer this
+	// element type's own data down to the son: initial element size (halved/quartered/eighthed
+	// depending on binary/quad/octree), non-nodal coordinates for elements whose nodal dimension
+	// exceeds their local dimension, and every non-continuous field storage (DG, DL, D0) which
+	// oomph-lib's generic node-based interpolation cannot handle. DG and constant/D0 fields are
+	// just evaluated at the son's local coordinate mapped into the father; DL storage (assumed to
+	// hold a constant + linear-gradient representation, one value plus one gradient component per
+	// spatial direction) is transferred using the standard oomph-lib "restrict to child octant"
+	// formulas (value +/- 0.5*gradient per split direction, gradient halved).
 	void BulkElementBase::further_build()
 	{
 
@@ -5430,6 +5485,15 @@ namespace pyoomph
 		this->ensure_external_data();
 	}
 
+	// Called by oomph-lib's tree-based mesh refinement when four/two/eight son elements are
+	// merged back into their father during unrefinement: reconstructs the father's non-nodal
+	// field storage (DG, DL, D0) from the sons' data, since oomph-lib's generic node-based
+	// unrefinement cannot handle these. DG fields are averaged at coincident node locations
+	// (accumulated then divided by the number of contributing sons); DL fields are rebuilt as
+	// value + gradient (average of son values, and centered-difference slopes between sons on
+	// opposite sides) -- noted as non-conservative and ignoring axisymmetric weighting; D0
+	// fields are simple averages (optionally re-scaled by discontinuous_refinement_exponents for
+	// fields that should scale differently under mesh coarsening, e.g. densities vs. totals).
 	// TODO: Split this into the particular elements
 	void BulkElementBase::rebuild_from_sons(oomph::Mesh *&mesh_pt)
 	{
@@ -5647,11 +5711,15 @@ namespace pyoomph
 			throw_runtime_error("IMPLEMENT");
 	}
 
+	// Paraview output hooks inherited from oomph-lib are not used by pyoomph (output goes through
+	// its own VTU/plotting machinery instead); left unimplemented on purpose.
 	std::string BulkElementBase::scalar_name_paraview(const unsigned &i) const
 	{
 		throw_runtime_error("NOT IMPLEMENTED");
 	}
 
+	// Looks up the nodal value index of a base-bulk continuous field by its generated name.
+	// Returns -1 if no such field exists (e.g. it lives in a non-nodal/discontinuous space).
 	int BulkElementBase::get_nodal_index_by_name(oomph::Node *n, std::string fieldname)
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
@@ -5678,12 +5746,15 @@ namespace pyoomph
 
 
 
+	// Default fallback: elements without bubble enrichment treat the "TB" (bubble-enriched)
+	// spaces C1TB/C2TB as identical to the plain C1/C2 spaces; subclasses that actually have
+	// bubble functions override these.
 	void BulkElementBase::shape_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi) const
 	{
 		//  if (this->has_bubble()) throw_runtime_error("Implement for bubble-enriched elements");
 		this->shape_at_s_C1(s, psi);
 	}
-	
+
 	void BulkElementBase::shape_at_s_C2TB(const oomph::Vector<double> &s, oomph::Shape &psi) const
 	{
 		//  if (this->has_bubble()) throw_runtime_error("Implement for bubble-enriched elements");
@@ -5695,13 +5766,16 @@ namespace pyoomph
 		//  if (this->has_bubble()) throw_runtime_error("Implement for bubble-enriched elements");
 		this->dshape_local_at_s_C2(s, psi, dpsi);
 	}
-	
+
 	void BulkElementBase::dshape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const
 	{
 		//  if (this->has_bubble()) throw_runtime_error("Implement for bubble-enriched elements");
 		this->dshape_local_at_s_C1(s, psi, dpsi);
-	}	
+	}
 
+	// Interpolates the discontinuous-Lagrange (DL) fields at local coordinate s from their
+	// per-node internal-data storage (the DL internal data entries are stored contiguously right
+	// after the DG spaces' internal data, hence dg_offset).
 	void BulkElementBase::get_interpolated_fields_DL(const oomph::Vector<double> &s, std::vector<double> &res, const unsigned &t) const
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
@@ -5724,6 +5798,8 @@ namespace pyoomph
 		}
 	}
 
+	// Returns the (spatially constant) D0 field values; D0 storage is single-valued per element,
+	// so the local coordinate s is not actually needed for interpolation.
 	void BulkElementBase::get_interpolated_fields_D0(const oomph::Vector<double> &s, std::vector<double> &res, const unsigned &t) const
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
@@ -5740,6 +5816,8 @@ namespace pyoomph
 		}
 	}
 
+	// oomph-lib hook: interpolates all continuous (nodal, base-bulk) field values at local
+	// coordinate s and history index t, in the same field ordering used throughout eleminfo.
 	void BulkElementBase::get_interpolated_values(const unsigned &t, const oomph::Vector<double> &s, oomph::Vector<double> &values)
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
@@ -5763,6 +5841,8 @@ namespace pyoomph
 		}
 	}
 
+	// Interpolates all discontinuous fields (DL followed by D0) at once, concatenating the results
+	// of get_interpolated_fields_DL() and get_interpolated_fields_D0().
 	void BulkElementBase::get_interpolated_discontinuous_values(const unsigned &t, const oomph::Vector<double> &s, oomph::Vector<double> &values)
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
@@ -5783,17 +5863,25 @@ namespace pyoomph
 		}
 	}
 
+	// Plain-text oomph-lib output is not used by pyoomph (see scalar_name_paraview above).
 	void BulkElementBase::output(std::ostream &outfile, const unsigned &nplot)
 	{
 		throw_runtime_error("Not implemented");
 	}
 
+	// Number of flux components used by the Z2 error estimator (for adaptive refinement); a
+	// separate, typically smaller, set of fluxes is used when estimating errors for eigenvectors
+	// (use_eigen_error_estimators), since eigenmodes usually need different quantities than the
+	// primary solution to drive mesh refinement.
 	unsigned BulkElementBase::num_Z2_flux_terms()
 	{
 		if (BulkElementBase::use_eigen_error_estimators) return codeinst->get_func_table()->num_Z2_flux_terms_for_eigen;
 		else return codeinst->get_func_table()->num_Z2_flux_terms;
 	}
 
+	// Evaluates the Z2-error-estimator flux vector at local coordinate s via the JIT-generated
+	// GetZ2Fluxes (or GetZ2FluxesForEigen) function, used by oomph-lib's Z2 error estimator to
+	// drive adaptive mesh refinement.
 	void BulkElementBase::get_Z2_flux(const oomph::Vector<double> &s, oomph::Vector<double> &flux)
 	{
 		bool has_fluxes=(BulkElementBase::use_eigen_error_estimators ? codeinst->get_func_table()->GetZ2FluxesForEigen : codeinst->get_func_table()->GetZ2Fluxes );
@@ -5815,11 +5903,16 @@ namespace pyoomph
 		}
 	}
 
+	// Hook for subclasses to add element-type-specific hanging-node setup after the generic
+	// oomph-lib hanging node machinery has run; no-op by default.
 	void BulkElementBase::further_setup_hanging_nodes()
 	{
 		// std::cout << "FURTHER SETUP HANG" << std::endl;
 	}
 
+	// oomph-lib refinement hook: creates the son elements (via the type-specific
+	// create_son_instance()) and initializes their refinement level and initial size fraction;
+	// the sons are then filled in by pre_build()/further_build() as the mesh machinery proceeds.
 	void BulkElementBase::dynamic_split(oomph::Vector<BulkElementBase *> &son_pt) const
 	{
 		// std::cout << "DYN SPLIT " << std::endl;
@@ -5836,6 +5929,9 @@ namespace pyoomph
 		}
 	}
 
+   // Total number of DG (discontinuous-Galerkin, per-node-but-not-shared) fields across all
+   // present DG spaces; base_bulk_only restricts the count to fields defined in the bulk element
+   // itself, excluding additional fields only present on interfaces.
    unsigned BulkElementBase::num_DG_fields(bool base_bulk_only)
    {
     auto *ft=codeinst->get_func_table();
@@ -5859,6 +5955,9 @@ namespace pyoomph
     }
    }
    
+   // Interpolates all fields of one DG space at local coordinate s. Fields inherited from a
+   // parent/bulk element ("external", the first `nexternal` of them) are read from external
+   // data; genuinely new fields defined at this level are read from internal data.
    void BulkElementBase::get_DG_fields_at_s(unsigned int space_index, unsigned history_index,const oomph::Vector<double> &s, oomph::Vector<double> &result) const
    {
 	auto *ft=codeinst->get_func_table();
@@ -5884,6 +5983,11 @@ namespace pyoomph
      }
    }
 
+	// Allocates the oomph::Data objects backing this element's non-nodal field storage: one
+	// internal Data (sized to the number of nodes in that space) per newly-defined DG field, one
+	// per DL field (shared across all DL "nodes" of the element), and one single-value internal
+	// Data per D0 field (element-constant). Must be called once the eleminfo node counts per
+	// space are known, and before fill_element_info()/further_build() try to access this storage.
 	void BulkElementBase::allocate_discontinous_fields()
 	{
 	   // DG Fields.
@@ -5922,8 +6026,14 @@ namespace pyoomph
 
 	////////////////////////////////
 
+	// BulkElementODE0d represents a plain "ODE" element: no spatial mesh/nodes at all, only D0
+	// (element-constant) internal-data fields evolving in time -- used for globally-defined
+	// ODEs/scalar quantities that are not associated with any spatial field.
 	oomph::PointIntegral BulkElementODE0d::Default_integration_scheme;
 
+	// Sets up a single dummy "node" purely so the generic shape-buffer machinery has something to
+	// allocate against; the element has no actual continuous or DL spaces (nnode_of_space and
+	// nnode_DL are forced to 0), only D0 fields.
 	BulkElementODE0d::BulkElementODE0d(DynamicBulkElementInstance *code_inst, oomph::TimeStepper *tstepper) : timestepper(tstepper)
 	{
 		//std::cout << "CONSTRUCT BULK ODE 0D " << this << std::endl;
@@ -5947,6 +6057,7 @@ namespace pyoomph
 		//std::cout << "DESTRUCT BULK ODE 0D " << this << "  " << dynamic_cast<oomph::GeneralisedElement*>(this) << std::endl;
 	}
 
+	// Copies the current D0 field values into a flat buffer for export to numpy.
 	void BulkElementODE0d::to_numpy(double *dest)
 	{
 		unsigned nD0 = codeinst->get_func_table()->info_D0.numfields;
@@ -5954,6 +6065,7 @@ namespace pyoomph
 			dest[i] = this->internal_data_pt(i)->value(0); // TODO Scaling
 	}
 
+	// Trivial: a 0-d element has no spatial extent, so the Jacobian/JLagr are always 1.
 	double BulkElementODE0d::fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds,unsigned history_index) const
 	{
 		JLagr = 1.0;
@@ -5962,12 +6074,15 @@ namespace pyoomph
 
 	////////////////////////////////
 
+	// PointElement0d: a genuine single-node 0-d spatial element (as opposed to BulkElementODE0d),
+	// used e.g. as a point source/sink or a 0-d boundary of a 1-d mesh. All field spaces
+	// (C1/C1TB/C2/C2TB/DL) degenerate to a single shape function that is identically 1.
 	PointElement0d::PointElement0d()
 	{
 		eleminfo.elem_ptr = this;
 		eleminfo.nnode = 1;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 1;
-		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 1;		
+		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 1;
 		eleminfo.nnode_of_space[SPACE_INDEX_C2] = 1;
 		eleminfo.nnode_of_space[SPACE_INDEX_C2TB] = 1;
 		eleminfo.nnode_DL = 1;
@@ -5976,7 +6091,7 @@ namespace pyoomph
 		allocate_discontinous_fields();
 	}
 
-	
+
 
 	double PointElement0d::invert_jacobian_mapping(const oomph::DenseMatrix<double> &jacobian, oomph::DenseMatrix<double> &inverse_jacobian) const
 	{
@@ -6021,11 +6136,16 @@ namespace pyoomph
 		dpsi(0, 0) = 0;
 	}
 
+	// Writes the local node indices of sub-element `isubelem` (an element may be tesselated into
+	// several simple sub-elements/triangles for numpy/plotting export) into `indices`; for a
+	// single-node point element there is only one "sub-element" consisting of node 0.
 	void PointElement0d::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
 	{
 	  indices[0]=0;
 	}
 
+	// Returns the element's boundary polygon/outline coordinates (Eulerian, or Lagrangian if
+	// requested) for plotting; a point element's "outline" is just its single node's position.
 	std::vector<double> PointElement0d::get_outline(bool lagrangian)
 	{
 		std::vector<double> res(this->nodal_dimension());
@@ -6040,11 +6160,13 @@ namespace pyoomph
 
 	///////////////////////
 
+	// BulkElementLine1dC1: linear (2-node) 1-d line element; the C1/C1TB spaces coincide with the
+	// nodal (Q1) space, and DL uses the same linear shape functions on its own discontinuous copy.
 	BulkElementLine1dC1::BulkElementLine1dC1()
 	{
 		eleminfo.elem_ptr = this;
 		eleminfo.nnode = 2;
-		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 2;		
+		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 2;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 2;
 		eleminfo.nnode_DL = 2;
 		eleminfo.nodal_dim = codeinst->get_func_table()->nodal_dim;
@@ -6052,6 +6174,11 @@ namespace pyoomph
 		allocate_discontinous_fields();
 	}
 
+	// Given a point s and a direction ds inside the element, finds how far (in units of ds) one
+	// can move before leaving the local-coordinate range [-1,1], along with the outward normal
+	// snormal of the exited face and its distance sdistance from the origin. Used by line-search/
+	// tracing algorithms (e.g. Newton's method for locate_zeta, or particle tracing) that must
+	// stay within the valid local coordinate domain of the element.
 	double BulkElementLine1dC1::factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance)
 	{
 		if (abs(ds[0]) < 1e-20)
@@ -6115,6 +6242,10 @@ namespace pyoomph
 
 	
 	
+	// Maps node l's local coordinate within this (son) element to the corresponding local
+	// coordinate in the father element, based on which half [-1,0] ("L") or [0,1] ("R") of the
+	// father this son occupies during binary-tree refinement; used by further_build()/
+	// rebuild_from_sons() to sample the father's/sons' fields at coincident points.
 	void BulkElementLine1dC1::get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather)
 	{
 		using namespace oomph::BinaryTreeNames;
@@ -6152,16 +6283,19 @@ namespace pyoomph
 
 	////////////////////////////
 
-	
 
+
+	// BulkElementLine1dC2: quadratic (3-node) 1-d line element; C2/C2TB use all 3 nodes
+	// (quadratic Lagrange), while C1/C1TB only use the 2 end nodes (linear), and DL is a
+	// discontinuous linear copy living on its own 2 "nodes".
 	BulkElementLine1dC2::BulkElementLine1dC2()
 	{
 		eleminfo.elem_ptr = this;
 		eleminfo.nnode = 3;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 2;
-		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 2;		
+		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 2;
 		eleminfo.nnode_of_space[SPACE_INDEX_C2] = 3;
-		eleminfo.nnode_of_space[SPACE_INDEX_C2TB] = 3;		
+		eleminfo.nnode_of_space[SPACE_INDEX_C2TB] = 3;
 		eleminfo.nnode_DL = 2;
 		eleminfo.nodal_dim = codeinst->get_func_table()->nodal_dim;
 		this->set_nodal_dimension(eleminfo.nodal_dim);
@@ -6202,6 +6336,7 @@ namespace pyoomph
 		sfather[0] = s_lo[0] + (s_hi[0] - s_lo[0]) * s_fraction[0];
 	}
 	
+	// Same as BulkElementLine1dC1's version above, for the [-1,1]-parametrized quadratic line.
 	double BulkElementLine1dC2::factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance)
 	{
 		if (abs(ds[0]) < 1e-20)
@@ -6284,11 +6419,14 @@ namespace pyoomph
 
 	////////////////////////////
 
+	// BulkTElementLine1dC1: 1-d line element using the "T" (simplex-style) local coordinate
+	// convention s in [0,1] instead of [-1,1] -- these are used as the 1-d edges of triangular/
+	// tetrahedral elements. Otherwise the same linear (2-node) element as BulkElementLine1dC1.
 	BulkTElementLine1dC1::BulkTElementLine1dC1()
 	{
 		eleminfo.elem_ptr = this;
 		eleminfo.nnode = 2;
-		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 2;		
+		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 2;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 2;
 		eleminfo.nnode_DL = 2;
 		eleminfo.nodal_dim = codeinst->get_func_table()->nodal_dim;
@@ -6339,6 +6477,8 @@ namespace pyoomph
 
 	
 
+	// BulkTElementLine1dC2: quadratic version of BulkTElementLine1dC1, using the T (simplex, s in
+	// [0,1]) convention -- the 1-d edge element of quadratic triangular/tetrahedral meshes.
 	BulkTElementLine1dC2::BulkTElementLine1dC2()
 	{
 		eleminfo.elem_ptr = this;
@@ -6416,12 +6556,15 @@ namespace pyoomph
 
 	////////////////////////////
 
+	// BulkElementQuad2dC1: bilinear (4-node) quadrilateral element. C1/C1TB use all 4 corner
+	// nodes; DL is a 3-value (constant + 2 gradient components) discontinuous linear
+	// representation, not tied to any actual node.
 	BulkElementQuad2dC1::BulkElementQuad2dC1()
 	{
 		eleminfo.elem_ptr = this;
 		eleminfo.nnode = 4;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 4;
-		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 4;		
+		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 4;
 		eleminfo.nnode_DL = 3;
 		eleminfo.nodal_dim = codeinst->get_func_table()->nodal_dim;
 		this->set_nodal_dimension(eleminfo.nodal_dim);
@@ -6449,6 +6592,10 @@ namespace pyoomph
 		dpsi(2, 1) = 1.0;
 	}
 
+	// Called (by a finer neighbor, via inform_coarser_neighbors_for_tesselated_numpy) to register
+	// an extra hanging node `n` sitting on this (coarser) element's edge `edge`, so that when this
+	// element is tesselated for numpy/plotting export, it can insert extra triangles that connect
+	// to the finer neighbor's edge nodes instead of leaving a T-junction gap in the visualization.
 	void BulkElementQuad2dC1::add_node_from_finer_neighbor_for_tesselated_numpy(int edge, oomph::Node *n, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes)
 	{
 		using namespace oomph::QuadTreeNames;
@@ -6478,6 +6625,11 @@ namespace pyoomph
 		add_nodes[myindex][edgedir].insert(n);
 	}
 
+	// For every edge of this element, checks whether the neighboring element is on a coarser
+	// refinement level (i.e. this element's edge is a hanging/T-junction edge from the
+	// neighbor's point of view) and, if so, registers this element's edge nodes with that
+	// coarser neighbor via add_node_from_finer_neighbor_for_tesselated_numpy(), so the numpy
+	// tesselation of the coarser element can be split to avoid a visible crack at the junction.
 	void BulkElementQuad2dC1::inform_coarser_neighbors_for_tesselated_numpy(std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes)
 	{
 		using namespace oomph::QuadTreeNames;
@@ -6524,6 +6676,11 @@ namespace pyoomph
 		}
 	}
 
+	// Number of sub-elements (nsubdiv) this quad is tesselated into for numpy/plotting export, and
+	// the number of vertices per sub-element (returned value): if not tesselating into triangles,
+	// it is exported as a single quad (4 indices); if tesselating into triangles, the base case is
+	// 2 triangles, plus one extra triangle for every hanging node contributed by finer neighbors
+	// on this element's edges (see inform_coarser_neighbors_for_tesselated_numpy()).
 	int BulkElementQuad2dC1::get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
 	{
 		if (tesselate_tri)
@@ -6551,6 +6708,13 @@ namespace pyoomph
 		}
 	}
 
+	// Fills in the node indices of sub-element isubelem. Without triangle tesselation, exports the
+	// quad as-is (indices 0,1,2,3). With tesselation and no hanging edge nodes to worry about, uses
+	// a fixed 2-triangle split (0,1,2 and 2,1,3). If hanging nodes from finer neighbors were
+	// registered on this element's edges, instead builds a local coordinate for every added node
+	// (by linear interpolation along the edge it sits on) and re-triangulates the whole node set
+	// with a Delaunay triangulation, so the boundary triangles line up exactly with the finer
+	// neighbor's edge subdivisions (avoiding visible gaps/T-junctions in the exported mesh).
 	void BulkElementQuad2dC1::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
 	{
 		if (tesselate_tri)
@@ -6658,6 +6822,9 @@ namespace pyoomph
 		return res;
 	}
 
+	// Returns the i-th node on the given face of a 2-node-per-side (bilinear) quad; face_index
+	// follows oomph-lib's convention: -1/+1 = "west"/"east" side (varying second index), -2/+2 =
+	// "south"/"north" side (varying first index).
 	oomph::Node *BulkElementQuad2dC1::boundary_node_pt(const int &face_index, const unsigned int i)
 	{
 		const unsigned nn1d = 2;
@@ -6684,6 +6851,10 @@ namespace pyoomph
 		}
 	}
 
+	// Shared implementation of factor_when_local_coordinate_becomes_invalid() for all 2-d
+	// quadrilateral elements (parametrized on [-1,1]^2): finds which of the two local-coordinate
+	// directions is exited first when moving from s along ds, and returns the corresponding
+	// step factor and exit-face normal/distance.
 	double QUAD2d_factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance)
 	{
 		double f0, f1;
@@ -6728,6 +6899,9 @@ namespace pyoomph
 		return QUAD2d_factor_when_local_coordinate_becomes_invalid(s, ds, snormal, sdistance);
 	}
 
+	// Same idea as BulkElementLine1dC1::get_nodal_s_in_father() above, but for quadtree
+	// refinement: maps node l's local coordinate to the father's local coordinate based on which
+	// quadrant (SW/SE/NE/NW) this son occupies.
 	void BulkElementQuad2dC1::get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather)
 	{
 		using namespace oomph::QuadTreeNames;
@@ -6786,6 +6960,9 @@ namespace pyoomph
 	////////////////////////////
 	
 
+	// BulkElementQuad2dC2: biquadratic (9-node) quadrilateral. C2/C2TB use all 9 nodes; C1/C1TB
+	// use only the 4 corner nodes (the classic Q2/Q1 "Taylor-Hood" pairing, e.g. velocity/
+	// pressure); DL is again a 3-value discontinuous linear representation.
 	BulkElementQuad2dC2::BulkElementQuad2dC2()
 	{
 		eleminfo.elem_ptr = this;
@@ -6863,6 +7040,11 @@ namespace pyoomph
 
 	
 
+	// For a C2 (biquadratic, 9-node) node index n that is not itself a C1 corner node (i.e. an
+	// edge-midside node 1/3/5/7 or the center node 4), returns the C1 corner nodes that
+	// geometrically "support" it (the corners of the edge or the whole element it sits at the
+	// midpoint of); used to interpolate/constrain C1-only data at those positions. Corner nodes
+	// (0,2,6,8) are not "supported" by others and yield an empty vector.
 	void BulkElementQuad2dC2::get_supporting_C1_nodes_of_C2_node(const unsigned &n, std::vector<oomph::Node *> &support)
 	{
 		if (n == 4)
@@ -6879,22 +7061,30 @@ namespace pyoomph
 			support.clear();
 	}
 
+	// If C1/C1TB fields are present alongside C2/C2TB ones, their nodal values (stored at the
+	// same corner nodes, but at higher value indices, right after the C2/C2TB fields) need their
+	// own hanging-node constraints set up too, since a corner node may hang for the C1
+	// representation even where the C2 representation does not (or uses different masters).
 	void BulkElementQuad2dC2::further_setup_hanging_nodes()
 	{
 		BulkElementBase::further_setup_hanging_nodes();
 		if (codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk || codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk)
-		{			
+		{
 			unsigned int nC2=codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk+codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk;
 			for (unsigned int i = nC2; i < ncont_interpolated_values(); i++)
 			{
-				this->setup_hang_for_value(i);		
+				this->setup_hang_for_value(i);
 			}
-		}				
+		}
 	}
 
-	
 
 
+
+	// oomph-lib's generic "two co-located spaces" (here C2 vs C1) hook: for value indices
+	// belonging to the C1/C1TB fields, the interpolating node is one of the 4 corner nodes
+	// (mapped from the flattened index n via get_nodal_space_index_to_element_index_map); for
+	// C2/C2TB fields, node n itself is the interpolating node.
 	oomph::Node *BulkElementQuad2dC2::interpolating_node_pt(const unsigned &n, const int &value_id)
 	{
 		if (value_id >= static_cast<int>(codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk + codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk))
@@ -6907,6 +7097,9 @@ namespace pyoomph
 		}
 	}
 
+	// Companion to interpolating_node_pt(): the 1-d local-coordinate fraction (0 or 1) of the
+	// n1d-th interpolating node along direction i, for the C1 space (corner nodes only sit at the
+	// element edges); for the C2 space, delegates to the standard quadratic 1-d fraction.
 	double BulkElementQuad2dC2::local_one_d_fraction_of_interpolating_node(const unsigned &n1d, const unsigned &i, const int &value_id)
 	{
 		if (value_id >= static_cast<int>(codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk + codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk))
@@ -6920,6 +7113,10 @@ namespace pyoomph
 		}
 	}
 
+	// Companion to interpolating_node_pt(): finds the C1 corner node located exactly at local
+	// coordinate s (returns NULL if s does not coincide with a corner, within tolerance); for
+	// C2/C2TB fields, any of the 9 geometric nodes may coincide, so delegates to the generic
+	// get_node_at_local_coordinate().
 	oomph::Node *BulkElementQuad2dC2::get_interpolating_node_at_local_coordinate(const oomph::Vector<double> &s, const int &value_id)
 	{
 		if (value_id >= static_cast<int>(codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk + codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk))
@@ -7040,6 +7237,8 @@ namespace pyoomph
 		}
 	}
 
+	// Evaluates the shape functions of whichever space (C1 or C2/geometric) `value_id` belongs to,
+	// completing the "two co-located spaces" interpolation interface used by oomph-lib.
 	void BulkElementQuad2dC2::interpolating_basis(const oomph::Vector<double> &s, oomph::Shape &psi, const int &value_id) const
 	{
 		if (value_id >= static_cast<int>(codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk + codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk))
@@ -7052,6 +7251,8 @@ namespace pyoomph
 		}
 	}
 
+	// Same purpose as BulkElementQuad2dC1::add_node_from_finer_neighbor_for_tesselated_numpy()
+	// above.
 	void BulkElementQuad2dC2::add_node_from_finer_neighbor_for_tesselated_numpy(int edge, oomph::Node *n, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes)
 	{
 		using namespace oomph::QuadTreeNames;
@@ -7081,6 +7282,9 @@ namespace pyoomph
 		add_nodes[myindex][edgedir].insert(n);
 	}
 
+	// Same purpose as BulkElementQuad2dC1::inform_coarser_neighbors_for_tesselated_numpy() above,
+	// but registering the 3 edge nodes (2 corners + midside) of each of this 9-node element's
+	// sides.
 	void BulkElementQuad2dC2::inform_coarser_neighbors_for_tesselated_numpy(std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes)
 	{
 		using namespace oomph::QuadTreeNames;
@@ -7126,6 +7330,9 @@ namespace pyoomph
 		}
 	}
 
+	// Same purpose as BulkElementQuad2dC1::get_num_numpy_elemental_indices() above; the base
+	// (no-hanging-neighbor) triangle fan of a 9-node biquadratic quad needs 8 triangles (built
+	// around the center node) instead of 2.
 	int BulkElementQuad2dC2::get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
 	{
 		if (tesselate_tri)
@@ -7152,6 +7359,8 @@ namespace pyoomph
 			return 9;
 		}
 	}
+	// Same purpose as BulkElementQuad2dC1::fill_element_nodal_indices_for_numpy() above, adapted
+	// to the 9-node biquadratic quad (base case: 8 triangles fanned around the center node 4).
 	void BulkElementQuad2dC2::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
 	{
 		if (tesselate_tri)
@@ -7321,10 +7530,13 @@ namespace pyoomph
 
 	//////////////////////////////
 
+	// BulkElementTri2dC1: linear (3-node) triangle, optionally bubble-enriched with a 4th
+	// (centroid) node for the C1TB space (used e.g. for MINI-element-type stabilization); C1 and
+	// DL always use only the 3 corner nodes / a constant+linear representation.
 	BulkElementTri2dC1::BulkElementTri2dC1(bool has_bubble)
 	{
 		eleminfo.elem_ptr = this;
-		eleminfo.nnode = (has_bubble ? 4 : 3);		
+		eleminfo.nnode = (has_bubble ? 4 : 3);
 		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = (has_bubble ? 4 : 3);
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 3;
 		eleminfo.nnode_DL = 3;
@@ -7333,6 +7545,11 @@ namespace pyoomph
 		allocate_discontinous_fields();
 	}
 
+	// Shared implementation of factor_when_local_coordinate_becomes_invalid() for all 2-d
+	// triangular elements: the reference triangle has local coordinates s0,s1 in [0,1] with
+	// s0+s1<=1, so there are three possible exit edges (s0=0, s1=0, s0+s1=1); works out, from the
+	// signs/magnitudes of ds, which edge is hit first and returns the corresponding step factor
+	// and outward normal/distance.
 	double TRI2d_factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance)
 	{
 		snormal.resize(2);
@@ -7493,6 +7710,9 @@ namespace pyoomph
 
 	//////////////////////////////
 
+	// BulkElementTri2dC2: quadratic (6-node) triangle, optionally bubble-enriched with a 7th
+	// (centroid) node for C2TB. C2/C2TB use all 6 (or 7) nodes; C1/C1TB use only the 3 (or 4)
+	// corner/bubble nodes; DL is a constant+linear discontinuous representation.
 	BulkElementTri2dC2::BulkElementTri2dC2(bool with_bubble)
 	{
 		eleminfo.elem_ptr = this;
@@ -7507,6 +7727,8 @@ namespace pyoomph
 		allocate_discontinous_fields();
 	}
 
+    // Creates a son of the correct concrete type (bubble-enriched BulkElementTri2dC2TB, or plain
+    // BulkElementTri2dC2) matching this element, for dynamic_split()/mesh refinement.
     BulkElementBase * BulkElementTri2dC2::create_son_instance() const
 	    {
       BulkElementBase::__CurrentCodeInstance = codeinst;
@@ -7674,6 +7896,11 @@ namespace pyoomph
 
    //////////////////////////////
 	
+   // BulkElementTri2dC1TB: the actual bubble-enriched (MINI-element style) linear triangle, with
+   // node 3 the centroid "bubble" node. Its own geometry/shape() overrides the base Q1-per-corner
+   // shape functions with the cubic-bubble MINI-element basis (barycentric coordinate minus 9x
+   // the cubic bubble x*y*z for the corners, and 27x the bubble for the enrichment function),
+   // used e.g. for LBB-stable low-order Stokes discretizations.
    BulkElementTri2dC1TB::BulkElementTri2dC1TB()  : BulkElementTri2dC1(true)
    {
 		eleminfo.elem_ptr = this;   
@@ -7741,6 +7968,7 @@ namespace pyoomph
 		dpsi(2, 1) = -1.0;
    }
    
+   // Local coordinates of the 3 corners plus the centroid (node 3, the bubble node).
    void BulkElementTri2dC1TB::local_coordinate_of_node(const unsigned &j, oomph::Vector<double> &s) const
    {
 	s.resize(2);
@@ -7800,6 +8028,9 @@ namespace pyoomph
    }
 	///////////////////////////////
 
+	// BulkElementTri2dC2TB: quadratic triangle with an additional cubic-bubble enrichment of the
+	// C1TB space at the corners plus centroid (node 6) -- same MINI-style bubble as
+	// BulkElementTri2dC1TB above, layered on top of the quadratic C2 geometry/fields.
 	BulkElementTri2dC2TB::BulkElementTri2dC2TB() : BulkElementTri2dC2(true)
 	{
 		eleminfo.elem_ptr = this;
@@ -7888,6 +8119,8 @@ namespace pyoomph
 
 	//////////////////////////////
 
+	// BulkElementBrick3dC1: trilinear (8-node) hexahedral element, the 3-d analogue of
+	// BulkElementQuad2dC1. DL uses a 4-value (constant + 3 gradient components) representation.
 	BulkElementBrick3dC1::BulkElementBrick3dC1()
 	{
 		eleminfo.elem_ptr = this;
@@ -7901,6 +8134,8 @@ namespace pyoomph
 	}
 
 
+	// Octree analogue of BulkElementQuad2dC1::get_nodal_s_in_father(): maps node l's local
+	// coordinate into the father's, based on which octant this son occupies.
 	void BulkElementBrick3dC1::get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather)
 	{
 	   // TODO: Check whether this is correct
@@ -8429,6 +8664,7 @@ namespace pyoomph
 		dpsi(3, 2) = -1.0;
 	}    
 	
+    // Numpy/VTK export: 3d elements cannot yet be tesselated into triangles, so just pass the local node indices through unchanged.
     void BulkElementTetra3dC1TB::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
 	{
 		if (tesselate_tri)
@@ -8442,6 +8678,7 @@ namespace pyoomph
 		}
 	}
 
+	// Local coordinates of the 4 linear (corner) nodes plus the interior bubble node (index 4, at the centroid).
 	void BulkElementTetra3dC1TB::local_coordinate_of_node(const unsigned &j, oomph::Vector<double> &s) const
 	{
 		if (j==0)
@@ -8469,7 +8706,10 @@ namespace pyoomph
 
 
 	////////////////////////////////
-	
+	// 10-node quadratic (2nd order) tetrahedron. When constructed with has_bubble=true, this instance is
+	// used as the base of the 15-node bubble-enriched BulkElementTetra3dC2TB variant, which adds a further
+	// interior enrichment field on top (see below); the node counts of the C2TB/C1TB spaces are set up
+	// accordingly here even though the bubble node itself is only added by the TB subclass.
 
 	BulkElementTetra3dC2::BulkElementTetra3dC2(bool has_bubble)
 	{
@@ -8477,7 +8717,7 @@ namespace pyoomph
 		eleminfo.nnode = (has_bubble ? 15 : 10);
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 4;
 		eleminfo.nnode_of_space[SPACE_INDEX_C2TB] = (has_bubble ? 15 : 10);
-		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = (has_bubble ? 5 : 4);		
+		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = (has_bubble ? 5 : 4);
 		eleminfo.nnode_of_space[SPACE_INDEX_C2] = 10;
 		eleminfo.nnode_DL = 4;
 		eleminfo.nodal_dim = codeinst->get_func_table()->nodal_dim;
@@ -8485,7 +8725,9 @@ namespace pyoomph
 		allocate_discontinous_fields();
 	}
 
-   BulkElementBase *BulkElementTetra3dC2::create_son_instance() const	
+   // Refinement creates a plain (non-bubble) son by default unless this element is actually the TB variant,
+   // in which case the son must keep the bubble-enriched node layout too.
+   BulkElementBase *BulkElementTetra3dC2::create_son_instance() const
     {
       BulkElementBase::__CurrentCodeInstance = codeinst;
       auto res = new BulkElementTetra3dC2(dynamic_cast<const BulkElementTetra3dC2TB*>(this)!=nullptr);
@@ -8495,6 +8737,9 @@ namespace pyoomph
     }
 
 
+	// No extra hanging-node bookkeeping is required beyond the base class; the commented-out block is left
+	// as a reminder of how the embedded C1 sub-space would be hung off the C2 nodes if ever needed here
+	// (this is already done for the analogous 2d Quad/Tri elements).
 	void BulkElementTetra3dC2::further_setup_hanging_nodes()
 	{
 
@@ -8506,8 +8751,7 @@ namespace pyoomph
 		}*/
 	}
 
-	
-
+	// Discontinuous (elemental, non-nodal) linear shape functions {1, s0, s1, s2} for the DL space of this element.
 	void BulkElementTetra3dC2::shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const
 	{
 		psi[0] = 1.0;
@@ -8536,13 +8780,15 @@ namespace pyoomph
 		dpsi(3, 2) = 1.0;
 	}
 
+	// Linear (C1) shape functions in barycentric-like coordinates, for the C1 sub-space embedded in the
+	// corner nodes of this quadratic element (used when an additional linear field lives on the same tet).
 	void BulkElementTetra3dC2::shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const
 	{
 		psi[0] = s[0];
 		psi[1] = s[1];
 		psi[2] = s[2];
 		psi[3] = 1.0 - s[0] - s[1] - s[2];
-	}	
+	}
 
 	void BulkElementTetra3dC2::dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const
 	{
@@ -8569,6 +8815,8 @@ namespace pyoomph
 		dpsi(3, 2) = -1.0;
 	}
 
+	// C1TB (5-node, bubble-enriched linear) shape functions embedded in this C2TB element; identical formulas
+	// to BulkElementTetra3dC1TB::shape/dshape_local, duplicated here as the C1TB sub-space of the quadratic bubble element.
 	void BulkElementTetra3dC2TB::shape_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi) const
 	{
 		const double s4 = 1.0 - s[0] - s[1] - s[2];
@@ -8617,6 +8865,9 @@ namespace pyoomph
 		dpsi(4, 2) = db_ds3;
 	}
 
+	// Selects the shape functions to use for interpolating a given field: fields beyond the quadratic
+	// (C2/C2TB) base-bulk fields are interpolated with the embedded linear (C1) shape functions on the
+	// corner nodes, all others use the regular quadratic shape functions (mirrors BulkElementQuad2dC2::interpolating_basis).
 	void BulkElementTetra3dC2::interpolating_basis(const oomph::Vector<double> &s, oomph::Shape &psi, const int &value_id) const
 	{
 		if (value_id >= static_cast<int>(codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk + codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk))
@@ -8629,6 +8880,7 @@ namespace pyoomph
 		}
 	}
 
+	// Numpy/VTK export: 3d elements cannot yet be tesselated into triangles, so just pass the local node indices through unchanged.
 	void BulkElementTetra3dC2::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
 	{
 		if (tesselate_tri)
@@ -8642,6 +8894,7 @@ namespace pyoomph
 		}
 	}
 
+	// Not yet implemented: outlines (used for plotting the element boundary) are only supported for 2d elements.
 	std::vector<double> BulkElementTetra3dC2::get_outline(bool lagrangian)
 	{
 		std::vector<double> res(10 * this->nodal_dimension());
@@ -8650,6 +8903,8 @@ namespace pyoomph
 	}
 
 	///////////////////////////////
+	// 15-node bubble-enriched quadratic tetrahedron: adds a single interior bubble node (index 14) to the
+	// 10-node BulkElementTetra3dC2, using the enriched integration scheme below.
 
 	BulkElementTetra3dC2TB::BulkElementTetra3dC2TB() : BulkElementTetra3dC2(true)
 	{
@@ -8667,26 +8922,30 @@ namespace pyoomph
 	}
 
 
+	 // Beyond the standard 6 face nodes built by the base class, a bubble-enriched face element also needs
+	 // access to the face-centre node of the corresponding tet face (the node lying on the 2d bubble/enrichment
+	 // sub-space of that triangular face); Central_node_on_face maps each local face index to that bulk node.
 	 void BulkElementTetra3dC2TB::build_face_element(const int& face_index, oomph::FaceElement* face_element_pt)
-	{		
-		BulkElementTetra3dC2::build_face_element(face_index, face_element_pt);		
+	{
+		BulkElementTetra3dC2::build_face_element(face_index, face_element_pt);
 		face_element_pt->nbulk_value_resize(7);
 		face_element_pt->bulk_node_number_resize(7);
 		// So the faces are
 		// 0 : s_0 fixed
 		// 1 : s_1 fixed
 		// 2 : s_2 fixed
-		// 3 : sloping face		
+		// 3 : sloping face
 		std::vector<int> Central_node_on_face{13, 12, 10, 11};
 		unsigned bulk_number = Central_node_on_face[face_index];
 		face_element_pt->node_pt(6) = node_pt(bulk_number);
-		face_element_pt->bulk_node_number(6) = bulk_number;		
+		face_element_pt->bulk_node_number(6) = bulk_number;
 		face_element_pt->nbulk_value(6) =required_nvalue(bulk_number);
    }
 
 
     ///////////////////////////////
-    BulkElementWedge3dC1::BulkElementWedge3dC1() 
+    // 6-node linear wedge/triangular-prism element (2 triangular + 3 quadrilateral faces).
+    BulkElementWedge3dC1::BulkElementWedge3dC1()
 	{
 		eleminfo.elem_ptr = this;
 		eleminfo.nnode = 6;
@@ -8702,6 +8961,7 @@ namespace pyoomph
 	}
 
 
+    // Discontinuous (elemental, non-nodal) linear shape functions {1, s0, s1, s2} for the DL space of this element.
     void BulkElementWedge3dC1::shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const
 	{
 		psi[0] = 1.0;
@@ -8730,6 +8990,7 @@ namespace pyoomph
 		dpsi(3, 2) = 1.0;
 	}
 
+	// Numpy/VTK export: 3d elements cannot yet be tesselated into triangles, so just pass the local node indices through unchanged.
 	void BulkElementWedge3dC1::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
 	{
 		if (tesselate_tri)
@@ -8743,6 +9004,7 @@ namespace pyoomph
 		}
 	}
 
+	// Not yet implemented: outlines (used for plotting the element boundary) are only supported for 2d elements.
 	std::vector<double> BulkElementWedge3dC1::get_outline(bool lagrangian)
 	{
 		std::vector<double> res(0);
@@ -8751,9 +9013,9 @@ namespace pyoomph
 	}
 
 	////////////////////////////////
+	// 5-node linear pyramid element (1 quadrilateral base + 4 triangular faces).
 
-
-	BulkElementPyramid3dC1::BulkElementPyramid3dC1() 
+	BulkElementPyramid3dC1::BulkElementPyramid3dC1()
 	{
 		eleminfo.elem_ptr = this;
 		eleminfo.nnode = 5;
@@ -8769,6 +9031,7 @@ namespace pyoomph
 	}
 
 
+    // Discontinuous (elemental, non-nodal) linear shape functions {1, s0, s1, s2} for the DL space of this element.
     void BulkElementPyramid3dC1::shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const
 	{
 		psi[0] = 1.0;
@@ -8797,6 +9060,7 @@ namespace pyoomph
 		dpsi(3, 2) = 1.0;
 	}
 
+	// Numpy/VTK export: 3d elements cannot yet be tesselated into triangles, so just pass the local node indices through unchanged.
 	void BulkElementPyramid3dC1::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
 	{
 		if (tesselate_tri)
@@ -8810,6 +9074,7 @@ namespace pyoomph
 		}
 	}
 
+	// Not yet implemented: outlines (used for plotting the element boundary) are only supported for 2d elements.
 	std::vector<double> BulkElementPyramid3dC1::get_outline(bool lagrangian)
 	{
 		std::vector<double> res(0);
@@ -8818,8 +9083,9 @@ namespace pyoomph
 	}
 
 	///////////////////////////////
+	// 18-node quadratic wedge/prism element (the C2 counterpart of BulkElementWedge3dC1).
 
-    BulkElementWedge3dC2::BulkElementWedge3dC2() 
+    BulkElementWedge3dC2::BulkElementWedge3dC2()
 	{
 		eleminfo.elem_ptr = this;
 		eleminfo.nnode = 18;
@@ -8835,6 +9101,7 @@ namespace pyoomph
 	}
 
 
+    // Discontinuous (elemental, non-nodal) linear shape functions {1, s0, s1, s2} for the DL space of this element.
     void BulkElementWedge3dC2::shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const
 	{
 		psi[0] = 1.0;
@@ -8863,6 +9130,7 @@ namespace pyoomph
 		dpsi(3, 2) = 1.0;
 	}
 
+	// Numpy/VTK export: 3d elements cannot yet be tesselated into triangles, so just pass the local node indices through unchanged.
 	void BulkElementWedge3dC2::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
 	{
 		if (tesselate_tri)
@@ -8876,6 +9144,7 @@ namespace pyoomph
 		}
 	}
 
+	// Not yet implemented: outlines (used for plotting the element boundary) are only supported for 2d elements.
 	std::vector<double> BulkElementWedge3dC2::get_outline(bool lagrangian)
 	{
 		std::vector<double> res(0);
@@ -8886,6 +9155,10 @@ namespace pyoomph
 
 
 	///////////////////////////////
+	// RefineableSolidLineElement::build is oomph-lib's own pattern (mirrored here for the 1d solid/Lagrangian
+	// case, which isn't provided out of the box) for constructing a refined son element: it copies/interpolates
+	// the father element's nodal (Eulerian and Lagrangian) positions and history values onto the son's nodes,
+	// selecting the left or right half of the father's local coordinate range depending on son_type.
 
 	void RefineableSolidLineElement::build(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt,
 										   bool &was_already_built,
@@ -8973,10 +9246,17 @@ namespace pyoomph
 	}
 
 	//////////////////////////////
+	// InterfaceElementBase implements FaceElements attached to a bulk element (and optionally to an "opposite"
+	// interface element across an internal facet), which carry their own additional degrees of freedom
+	// (surface fields) while also needing access to the bulk (and opposite bulk/interface) element's degrees
+	// of freedom, e.g. to evaluate normal derivatives. See update_equation_remapping() below for how this
+	// access is implemented via a "fake hanging node" trick.
 
-
+	// Builds a map from source_elem's local equation numbers to this element's local equation numbers, by
+	// matching global equation numbers (used to let interface residuals/Jacobians reference bulk/opposite
+	// element dofs that are already present as external data of this element).
 	void InterfaceElementBase::update_equation_remapping_from_element(BulkElementBase *source_elem,const JITFuncSpec_RequiredShapes_FiniteElement_t *required_shapes,std::vector<int> &eqn_map,int bulk_indicator)
-	{		
+	{
 		////////////// SIMPLEST APPROACH //////////////////
 		eqn_map.clear();
 		eqn_map.resize(source_elem->ndof(), -666); // Magic for not used/found
@@ -9003,6 +9283,10 @@ namespace pyoomph
 		}
 	}
 
+	// For interface fields defined on hanging nodes, copies/interpolates the additional (interface-only) dof
+	// values from the master nodes onto the hanging node itself, and likewise patches "dummy" nodes (nodes
+	// whose interface value is not an independent dof but an average of other nodes, per
+	// get_dummy_value_interpolation_map()) so that both hold consistent interpolated values for output/restart.
 	void InterfaceElementBase::interpolate_hang_values_at_interface()
 	{
 		auto * ft=this->get_code_instance()->get_func_table();
@@ -9080,8 +9364,13 @@ namespace pyoomph
 	}
 
 
+	// For one continuous field space, assigns local equation numbers for the additional interface-only dofs
+	// living on hanging nodes of this element: each hanging node's interface dof is constrained to its
+	// hanging-node masters, so instead of a true local dof, this builds (per master node) a map from master
+	// node to either a new local equation number (registered as an external dof) or Data::Is_pinned. The
+	// resulting per-field maps are stored in add_interf_local_hang_eqs for the generated code's hang_buffer trick.
 	void InterfaceElementBase::assign_hanging_additional_interface_local_equations_for_space(const bool &store_local_dof_pt,unsigned addfields,unsigned basebulk_offset,unsigned nnode, int hangindex,  char * fieldnames[], unsigned (BulkElementBase::*node_index_to_element)(const unsigned &) const,  std::map<Node*, int> *& add_interf_local_hang_eqs)
-	{				
+	{
 		bool has_hanging_interface_dofs=false;
 		unsigned local_eqn_number = ndof();      
       	std::deque<unsigned long> global_eqn_number_queue;
@@ -9219,6 +9508,13 @@ namespace pyoomph
 
 
 
+	// The following four get_DG_* methods implement access to Discontinuous-Galerkin (DG) field data/dofs
+	// through an interface element: fields with fieldindex below numfields_basebulk/numfields_bulk live on
+	// the attached bulk element (accessed via external data / the bulk element's own DG indexing), while the
+	// remaining ("interface-only") DG fields are genuinely owned by this interface element as internal data.
+
+	// Index into the merged per-element JIT shape/value buffer for a DG field: base-bulk fields are placed at
+	// buffer_offset_basebulk, interface-only DG fields after them at buffer_offset_interf.
 	unsigned InterfaceElementBase::get_DG_buffer_index(const unsigned &space_index,const unsigned &fieldindex)
     {
 		auto * ft=this->get_code_instance()->get_func_table();
@@ -9234,7 +9530,10 @@ namespace pyoomph
 		}
     }
 
-	unsigned InterfaceElementBase::get_DG_node_index(const unsigned &space_index,const unsigned &fieldindex,const unsigned &nodeindex) const 
+	// Maps a local node index of this interface element to the corresponding DG node index: for base-bulk
+	// fields this resolves through the bulk element's own node numbering (since the field is really owned
+	// there); for interface-only DG fields the local node index is used directly.
+	unsigned InterfaceElementBase::get_DG_node_index(const unsigned &space_index,const unsigned &fieldindex,const unsigned &nodeindex) const
 	{
 		auto * ft=this->codeinst->get_func_table();
 		auto & space_info=ft->dg_spaces[space_index];
@@ -9249,6 +9548,9 @@ namespace pyoomph
 		}
 	}
 
+	// Returns the Data object holding a DG field's values: interface-only DG fields are internal data of this
+	// element, base-bulk DG fields are accessed as external data (the bulk element's own data, registered
+	// as external data of this interface element).
 	oomph::Data * InterfaceElementBase::get_DG_nodal_data(const unsigned & space_index,const unsigned & fieldindex )
 	{
 		auto * ft=this->codeinst->get_func_table();
@@ -9260,6 +9562,8 @@ namespace pyoomph
 		}
 	}
 
+	// Local equation number for a DG field's dof, mirroring get_DG_nodal_data: internal dof for interface-only
+	// DG fields, external dof (resolved through get_DG_node_index) for base-bulk DG fields.
 	int InterfaceElementBase::get_DG_local_equation(const unsigned &space_index,const unsigned &fieldindex,const unsigned & nodeindex)
 	{
 		auto * ft=this->codeinst->get_func_table();
@@ -9272,6 +9576,7 @@ namespace pyoomph
 	}
 
 
+   // Python/generated-code accessor for the equation-remapping vectors built by update_equation_remapping().
    std::vector<int> InterfaceElementBase::get_attached_element_equation_mapping(const std::string & which)
    {
     if (which=="bulk") return bulk_eqn_map;
@@ -9281,6 +9586,9 @@ namespace pyoomph
     else throw_runtime_error("Unknown map "+which);
    }
    
+	// Resolves a field name to a nodal value index, first trying the bulk field lookup, then falling back to
+	// searching this element's own (interface-only) continuous fields, returning the boundary-node value
+	// index assigned to that field by this face element.
 	int InterfaceElementBase::get_nodal_index_by_name(oomph::Node *n, std::string fieldname)
 	{
 		int bres = BulkElementBase::get_nodal_index_by_name(n, fieldname);
@@ -9305,6 +9613,11 @@ namespace pyoomph
 		return -1;
 	}
 
+	// Interface-specific counterpart to BulkElementBase::fill_element_info(): populates the eleminfo buffer
+	// (value pointers and local equation numbers, consumed by the JIT-generated residual/Jacobian code) for
+	// the additional interface-only continuous fields, DG interface fields, DL (elemental discontinuous) and
+	// D0 fields that live on this interface element itself, on top of what the base class already filled in
+	// for the shared/bulk fields.
 	void InterfaceElementBase::fill_element_info_interface_part(bool without_equations)
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
@@ -9384,6 +9697,10 @@ namespace pyoomph
 	}
 	
 	
+  // Finds the local coordinate s on this (surface) element whose interpolated position best matches the
+  // given global point x, by first prescreening over the integration knots for a good starting guess, then
+  // Newton-iterating (with finite-difference Jacobian) on the residual "tangential displacement dot direction",
+  // i.e. driving x(s) towards x. Currently only implemented for 1d elements (edim==1); higher-dim solve is a TODO.
   oomph::Vector<double> InterfaceElementBase::optimize_s_to_match_x(const oomph::Vector<double> & x)
   {
    unsigned edim=this->dim();
@@ -9471,6 +9788,10 @@ namespace pyoomph
    return current_s;
   }
 
+	// Allocates the "additional values" (interface-only dofs) on this element's boundary nodes for every
+	// interface field of every continuous space present, using oomph-lib's BoundaryNodeBase machinery so
+	// several interface elements sharing a node can share/independently own the corresponding slots. Newly
+	// allocated (not previously present) dofs are optionally seeded via interpolate_newly_constructed_additional_dof.
 	void InterfaceElementBase::add_interface_dofs()
 	{
 		if (false && std::string(this->codeinst->get_code()->get_func_table()->domain_name)!="_internal_facets_")
@@ -9516,9 +9837,12 @@ namespace pyoomph
 		
 	}
 
+	// Seeds the value of a freshly-allocated interface dof (on node lnode) by interpolating it from the
+	// corresponding field on the father bulk element (used e.g. when a mesh is refined/adapted and new
+	// interface nodes appear that need a sensible initial value rather than zero).
 	void InterfaceElementBase::interpolate_newly_constructed_additional_dof(const unsigned & lnode,const  unsigned & valindex,const std::string & space)
 	{
-	   //TODO: Co-dim >=2 interpolation!    
+	   //TODO: Co-dim >=2 interpolation!
 	   BulkElementBase *blk =dynamic_cast<BulkElementBase *>(this->Bulk_element_pt);
 	   BulkElementBase *father = dynamic_cast<BulkElementBase *>(blk->father_element_pt());
 	   if (father)
@@ -9647,11 +9971,16 @@ namespace pyoomph
 	   }	
    }
    
+	// Called by oomph-lib while finite-differencing an external datum (during Jacobian assembly): re-interpolates
+	// this element's hanging-node values so that perturbed external master values are propagated correctly.
 	void InterfaceElementBase::update_in_external_fd(const unsigned &i)
 	{
 		this->interpolate_hang_values();
 	}
 
+	// Registers 'data' as external data of this element unless it is already accessible some other way
+	// (as a node/its variable position, an already-added external datum, or - which should not normally
+	// happen - internal data); returns true if it was already present so callers can skip re-adding it.
 	bool InterfaceElementBase::add_required_ext_data(oomph::Data *data, bool is_geometric)
 	{
 		for (unsigned int k = 0; k < this->nnode(); k++)
@@ -9721,8 +10050,10 @@ namespace pyoomph
 		return false;
 	}
 
+	// Registers the bulk element's base-bulk DG field data as external data of this interface element, so
+	// the generated interface code can read (but not directly own) those DG values/fluxes.
 	void InterfaceElementBase::add_DG_external_data()
-	{	  
+	{
       auto *ft=this->codeinst->get_func_table();
 	  BulkElementBase * blk=dynamic_cast<BulkElementBase *>(this->bulk_element_pt());
 	  for (unsigned int si=0;si<ft->num_present_dg_spaces;si++)
@@ -9735,6 +10066,11 @@ namespace pyoomph
 	  }	  
 	}
 
+	// Registers, as external data of this interface element, everything from_elem (the bulk element, or the
+	// opposite element/its bulk element) that the generated interface code actually needs according to
+	// 'required': nodal positions (if the mesh moves, so their derivatives can be finite-differenced),
+	// nodal values for each continuous/DG space whose shape functions are required, and DL/D0 internal data.
+	// Hanging nodes are resolved to their master nodes so the true independent dofs are what gets added.
 	void InterfaceElementBase::add_required_external_data(JITFuncSpec_RequiredShapes_FiniteElement_t *required, BulkElementBase *from_elem)
 	{
 		external_data_is_geometric.resize(this->nexternal_data(), false); // Fill with the ED0 fields
@@ -10576,6 +10912,10 @@ namespace pyoomph
 
 
 
+	// After letting the base class finite-difference the Lagrangian (solid-mechanics) contributions from this
+	// element's own nodal positions, additionally finite-differences the Jacobian columns belonging to this
+	// element's *external* geometric data (e.g. bulk/opposite-element nodal positions registered via
+	// add_required_ext_data), since those degrees of freedom are not covered by the base class's own nodes.
 	void InterfaceElementBase::fill_in_jacobian_from_lagragian_by_fd(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian)
 	{
 		BulkElementBase::fill_in_jacobian_from_lagragian_by_fd(residuals, jacobian);
@@ -10620,6 +10960,16 @@ namespace pyoomph
 	}
 
 	
+	// The following methods (fill_shape_info_at_s, prepare_shape_buffer_for_integration,
+	// set_remaining_shapes_appropriately, fill_hang_info_with_equations) all follow the same recursive pattern:
+	// after doing this element's own part (via the BulkElementBase implementation), they additionally recurse
+	// into whichever of bulk_element_pt()/opposite_side (and their own bulk elements, one level deeper) are
+	// actually required by the generated code (required.bulk_shapes / required.opposite_shapes), filling the
+	// corresponding nested shape_info->bulk_shapeinfo / shape_info->opposite_shapeinfo sub-structures so the
+	// JIT code can evaluate shape functions/derivatives on those attached elements too.
+
+	// Evaluate this element's own shape functions/Jacobian at local coordinate s, then recurse into the
+	// required bulk/opposite (and their bulk) elements' shape info, evaluated at the corresponding local coordinates.
 	double InterfaceElementBase::fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds,unsigned history_index) const
 	{
 		double JEulerian=BulkElementBase::fill_shape_info_at_s(s, index, required, shape_info, JLagr, flag, dxds,history_index);
@@ -10662,6 +11012,8 @@ namespace pyoomph
 		return this->J_eulerian(s); // TODO: This likely can be just set to JEulerian from above
 	}
 
+	// Ensures hanging-node values on this element and (if required) the attached bulk/opposite elements are
+	// up to date before integration, then delegates the rest to the base class.
 	void InterfaceElementBase::prepare_shape_buffer_for_integration(const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag)
 	{
 		if (required_shapes.bulk_shapes)
@@ -10689,6 +11041,7 @@ namespace pyoomph
 		BulkElementBase::prepare_shape_buffer_for_integration(required_shapes, flag);
 	}
 
+	// See the comment above fill_shape_info_at_s for the general recursive bulk/opposite delegation pattern.
 	void InterfaceElementBase::set_remaining_shapes_appropriately(JITShapeInfo_t *shape_info, const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes)
 	{
 		BulkElementBase::set_remaining_shapes_appropriately(shape_info, required_shapes);
@@ -10710,6 +11063,10 @@ namespace pyoomph
 		}
 	}
 
+	// Builds the hanging-node equation info (used by the JIT-generated code to assemble residuals/Jacobians
+	// correctly across hanging nodes) for the required bulk/opposite/their-bulk elements, and additionally
+	// (when eqn_remap is not already provided from outside) fills in this element's own eqn-remapping arrays
+	// (bulk_eqn_map, bulk_bulk_eqn_map, opp_interf_eqn_map, opp_bulk_eqn_map) built by update_equation_remapping().
 	bool InterfaceElementBase::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
 	{
 		//	Bulk is setup elsewhere
@@ -10784,6 +11141,9 @@ namespace pyoomph
 		return ret_bulk;
 	}
 
+	// Currently a no-op override (the actual external-data setup happens via add_required_external_data /
+	// add_DG_external_data elsewhere); kept as an explicit override with the old approach commented out below
+	// for reference, since blindly calling the base class here would flush already-set-up external data.
 	void InterfaceElementBase::ensure_external_data()
 	{
 		/*   BulkElementBase::ensure_external_data(); //This would flush the storage...
@@ -10799,6 +11159,11 @@ namespace pyoomph
 			*/
 	}
 
+	// Debug helper: builds a human-readable name for every local equation of this element, starting from the
+	// base class's bulk-field names, then filling in interface-only field names, and finally (for equations
+	// still unresolved, i.e. dofs actually owned by the bulk/opposite/opposite-bulk element but shared via the
+	// equation-remapping mechanism) tagging them by matching global equation numbers against those elements'
+	// own get_dof_names(), so e.g. "@BULK:..." / "@OPPSIDE:..." / "@OPPBLK:..." names show where a dof really lives.
 	std::vector<std::string> InterfaceElementBase::get_dof_names(bool not_a_root_call)
 	{
 		// const JITFuncSpec_Table_FiniteElement_t * functable=codeinst->get_func_table();
@@ -10900,6 +11265,10 @@ namespace pyoomph
 
 	
 
+	// Interface-field counterpart to BulkElementBase::pin_dummy_values() (see the comment near line 478 for
+	// what a "dummy value" is): pins the interface-only dof at nodes where it is not an independent dof but
+	// interpolated/averaged from others (per get_dummy_value_interpolation_map()), and constrains it at
+	// hanging nodes so it follows the corresponding master nodes' interface dofs.
 	void InterfaceElementBase::pin_dummy_values()
 	{
 		BulkElementBase::pin_dummy_values();
@@ -10943,6 +11312,9 @@ namespace pyoomph
 
 	}
 
+	// Interface-field counterpart to the base class: additionally registers any pinned interface-only dofs
+	// as Dirichlet dofs in 'info' (used when temporarily unpinning Dirichlet dofs for direct matrix manipulation,
+	// e.g. eigenproblems, and later restoring them).
 	void InterfaceElementBase::unpin_Dirichlet_dofs_for_matrix_manipulation(DirichletMatrixManipulationInfo & info)
 	{
 		BulkElementBase::unpin_Dirichlet_dofs_for_matrix_manipulation(info);
@@ -10968,6 +11340,8 @@ namespace pyoomph
 
 
 	
+   // Evaluates an interface-only field (identified by its interface dof index ifindex) at local coordinate s,
+   // using the shape functions of the given nodal space ("C1"/"C1TB"/"C2"/"C2TB"), at history/time index t.
    double InterfaceElementBase::get_interpolated_interface_field(const oomph::Vector<double> &s,  const unsigned & ifindex,const std::string & space,const unsigned &t) const
    {
 		double res=0.0;		
@@ -11018,32 +11392,52 @@ namespace pyoomph
 		
    }
    
+	// If the opposite side is only a placeholder "dummy" element (used on internal facets where the true
+	// opposite element has no dofs of its own yet), makes sure its local equation numbers get assigned first,
+	// then lets the base classes assign this element's own additional (hanging/interface) equations.
 	void InterfaceElementBase::assign_additional_local_eqn_numbers()
-	{	
+	{
 		if (opposite_side && dynamic_cast<InterfaceElementBase *>(opposite_side)->is_internal_facet_opposite_dummy() && !(opposite_side->ndof()))
 		{
 
 		  dynamic_cast<InterfaceElementBase *>(opposite_side)->assign_local_eqn_numbers(true);
-		}	
+		}
 		BulkElementBase::assign_additional_local_eqn_numbers();
 		oomph::FaceElement::assign_additional_local_eqn_numbers();
 	}
 
+	// Global cache of pre-built oomph-lib integration schemes (Gauss rules etc.), shared across element instances.
 	IntegrationSchemeStorage integration_scheme_storage;
 
 	// const unsigned BulkElementTri2dC2TB::Central_node_on_face[3] = {4,5,3};
-	oomph::TBubbleEnrichedGauss<2, 3> BulkElementTri2dC1TB::Default_enriched_integration_scheme;	
+	oomph::TBubbleEnrichedGauss<2, 3> BulkElementTri2dC1TB::Default_enriched_integration_scheme;
 	oomph::TBubbleEnrichedGauss<2, 3> BulkElementTri2dC2TB::Default_enriched_integration_scheme;
 	oomph::TBubbleEnrichedGauss<3, 3> BulkElementTetra3dC2TB::Default_enriched_integration_scheme;
-	
+
 	bool InterfaceElementBase::interpolate_new_interface_dofs=true;
+
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////
+	// Static per-element-class lookup tables used throughout this file and by the JIT-generated code to
+	// translate between the different node numbering schemes:
+	//  - Dummy_Value_Interpolation_Map[space]: for each "dummy" node of that space (a node that isn't an
+	//    independent dof of the space, e.g. a C1 dummy node on a C2-only element), the list of node indices
+	//    {dummy_node, source_node_1, source_node_2, ...} whose average defines its (non-independent) value.
+	//  - Nodal_Space_Index_To_Element_Index_Map[space]: maps the local node index within a given field space
+	//    (C1/C1TB/C2/C2TB, i.e. "the n-th node that carries this space's dofs") to the local node index within
+	//    the full element node numbering.
+	//  - Element_Index_To_Nodal_Space_Index_Map[space]: the inverse mapping (element-local node index -> index
+	//    within that space's own node numbering, or -1 if that node does not carry dofs of that space).
+	//  - Possible_Face_Indices: the valid face_index values that can be passed to construct_face_element()/
+	//    boundary_node_pt() etc. for that element type (e.g. {-2,-1,1,2} for the 4 faces of a quad).
+	// These tables are all empty ({}) for spaces the given element type does not support.
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 	const std::vector<std::vector<std::vector<unsigned>>> BulkElementBase::Dummy_Value_Interpolation_Map=
 	{
-		{}, // C2TB 
+		{}, // C2TB
 		{}, // C2
 		{}, // C1TB
-		{}  // C1		
+		{}  // C1
 	};
 
 	const std::vector<std::vector<unsigned>> BulkElementLine1dC1::Nodal_Space_Index_To_Element_Index_Map={
@@ -11459,6 +11853,9 @@ namespace pyoomph
 	
 	const std::vector<int> BulkElementPyramid3dC1::Possible_Face_Indices={0,1,2,3,4};
 
+	// get_vertex_nodes_of_face() implementations below: for each element type and each valid face index
+	// (see that type's Possible_Face_Indices table above), return the element's *corner/vertex* nodes
+	// bounding that face, in a fixed order (used e.g. to build the face's outline or to identify it geometrically).
 	std::vector<pyoomph::Node*> BulkElementLine1dC1::get_vertex_nodes_of_face(const int &face) const
 	{
       if (face==-1) return {dynamic_cast<pyoomph::Node*>(this->node_pt(0))};
@@ -11487,6 +11884,9 @@ namespace pyoomph
 	  else throw_runtime_error("Invalid face index for line element");
 	}
 
+	// Developer-only utility (unused by the running code, invoked manually while adding a new element type):
+	// prints, to stdout, ready-to-paste C++ source for the "if (face==...) return {...};" body of a new
+	// get_vertex_nodes_of_face() override, by inspecting which of the element's face-local nodes are vertex nodes.
 	void help_me_with_the_facets(const BulkElementBase *elem,int face_index)
 	{
 
@@ -11641,6 +12041,10 @@ namespace pyoomph
 
 	//oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
 
+	// construct_face_element() implementations: create the appropriate InterfaceElement<...> FaceElement type
+	// for a given bulk element and face index (e.g. a quad's face is a line, a tet's face is a triangle);
+	// most bulk types have a single, fixed face-element type, but pyramids/wedges mix triangular and
+	// quadrilateral faces and therefore dispatch on face_index below.
 	oomph::FaceElement * BulkElementQuad2dC2::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) { return new InterfaceElementLine1dC2(jitcode, this, face_index); }
 	oomph::FaceElement * BulkElementQuad2dC1::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) { return new InterfaceElementLine1dC1(jitcode, this, face_index); }
     oomph::FaceElement * BulkElementTri2dC1::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) { return new InterfaceTElementLine1dC1(jitcode, this, face_index); }
@@ -11658,14 +12062,16 @@ namespace pyoomph
 	oomph::FaceElement * BulkElementTetra3dC2::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) { return new InterfaceElementTri2dC2(jitcode, this, face_index); }	
 	oomph::FaceElement * BulkElementTetra3dC2TB::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) { return new InterfaceElementTri2dC2TB(jitcode, this, face_index); }
 
+	// Faces 0 and 1 of the wedge are the two triangular end-caps, faces 2-4 are the three quadrilateral sides.
 	oomph::FaceElement * BulkElementWedge3dC1::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index)
-	{ 
+	{
 		if (face_index<2) return  new InterfaceElementTri2dC1(jitcode, this, face_index);
 		else return new InterfaceElementQuad2dC1(jitcode, this, face_index);
 	}
 
+	// Face 4 of the pyramid is the quadrilateral base, faces 0-3 are the four triangular sides.
 	oomph::FaceElement * BulkElementPyramid3dC1::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index)
-	{ 
+	{
 		if (face_index==4) return  new InterfaceElementQuad2dC1(jitcode, this, face_index);
 		else return new InterfaceElementTri2dC1(jitcode, this, face_index);
 		// throw_runtime_error("TODO: Constructing face elements for pyramid elements with C1 interpolation on the face. The different face types depend on the face index");

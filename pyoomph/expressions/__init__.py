@@ -29,7 +29,7 @@
 This module provides the core functionality to formulate mathematical expressions in the pyoomph library. 
 """
  
-import _pyoomph
+import  pyoomph._pyoomph_core as _pyoomph
 
 from .generic import *
 from .coordsys import *
@@ -578,9 +578,8 @@ def div(arg:ExpressionOrNum,lagrangian:bool=False,matrix:Optional[bool]=None,non
 
 def time_derivative_of_integral(expr:ExpressionOrNum,scheme:TimeSteppingScheme="BDF2_degr")->Expression:    
     """
-    Computes the time derivative of an integral expression using a given time stepping scheme. 
-    For moving meshes, this can be different, i.e.
-        weak(partial_t(u),v) != d_by_dt_of_integral(weak(u,v))
+    Computes the time derivative of an integral expression using a given time stepping scheme.
+    For moving meshes, this can be different, i.e. ``weak(partial_t(u),v) != d_by_dt_of_integral(weak(u,v))``.
     The latter is d/dt (Integral_Element(t) u(t)*v(t)*dx ), i.e. considers the change of the element size as well.
     
     Args:

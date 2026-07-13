@@ -5,7 +5,7 @@ Temporal adaptivity
 
 It is not always easy to find a good time step that is sufficiently accurate. Of course, you can make a guess and rerun the simulation with reduced time step to see whether the dynamics is affected by the time step. If not, you might have found a good time step. However, some systems have unpredictable dynamics, as e.g. chaotic systems, which might show very strongly fluctuating dynamics.
 
-pyoomph allows to flexibly adjust the time step during the simulation depending on an estimate of the error the current time step might have. To that end, the next time step is first predicted based on the previous steps, then a step is taken and the result is compared with the prediction. If the difference is too large, pyoomph will discard this step and retries with a smaller time step. At the same time, if the prediction and the computed solution match very well, pyoomph gradually tries to increase the time step.
+pyoomph allows one to flexibly adjust the time step during the simulation depending on an estimate of the error the current time step might have. To that end, the next time step is first predicted based on the previous steps, then a step is taken and the result is compared with the prediction. If the difference is too large, pyoomph will discard this step and retry with a smaller time step. At the same time, if the prediction and the computed solution match very well, pyoomph gradually tries to increase the time step.
 
 Here, we will use the chaotic Lorenz system, known for its chaotic *strange attractor*, to illustrate this feature. The Lorenz system consists of three coupled non-linear ODEs of first order
 
@@ -58,7 +58,7 @@ To add the feature of temporal adaptivity to the system, it is sufficient to com
 
 :py:class:`~pyoomph.equations.generic.TemporalErrorEstimator` takes keyword arguments of the form ``variable_name=error_weight``, i.e. we can set to each of the ODE variables a different weighting for the computation of the temporal error between prediction and actual solution. In the code here, all weights have been set to unity, i.e. all variables :math:`x`, :math:`y`, :math:`z` are weighted equally in the determination of the temporal error.
 
-Finally, the :py:meth:`~pyoomph.generic.problem.Problem.run` statement takes a keyword argument ``temporal_error``, which defined the error we are ready to accept. The smaller the temporal error, the finer the dynamics time steps, but the longer the computation takes.
+Finally, the :py:meth:`~pyoomph.generic.problem.Problem.run` statement takes a keyword argument ``temporal_error``, which defines the error we are ready to accept. The smaller the temporal error, the finer the dynamics time steps, but the longer the computation takes.
 
 .. code:: python
 
@@ -69,7 +69,7 @@ Finally, the :py:meth:`~pyoomph.generic.problem.Problem.run` statement takes a k
    		# temporal_error controls the maximum difference between prediction and actual result
    		problem.run(endtime=100,outstep=True,startstep=0.0001,temporal_error=0.005)
 
-Note the also ``outstep=True`` was passed instead of ``numouts``. It will just output each step. Of course, also a ``startstep`` should be set so that the problem has a good guess how to start. If the value of ``temporal_error`` is set too large, the system might not show the correct dynamics, see :numref:`figodelorenzdyndt`. The accepted time steps are displayed in :numref:`figodelorenzdyndt2`.
+Note that also ``outstep=True`` was passed instead of ``numouts``. It will just output each step. Of course, also a ``startstep`` should be set so that the problem has a good guess how to start. If the value of ``temporal_error`` is set too large, the system might not show the correct dynamics, see :numref:`figodelorenzdyndt`. The accepted time steps are displayed in :numref:`figodelorenzdyndt2`.
 
 
 ..  figure:: plot_lorenz.*

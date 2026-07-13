@@ -56,6 +56,9 @@ class PyramidGaussC1 : public Integral
  };
 
 
+// Linear (C1) shape functions for the 6-node wedge/prism element, expressed in the
+// local coordinates (s0,s1,s2) with s0+s1<=1 (triangular cross-section) and s2 in [0,1]
+// (the extrusion direction). Shared by WedgeElementC1 and used for macro-element geometry.
 class WedgeElementShapeC1
 {
  public:
@@ -119,6 +122,10 @@ class WedgeElementShapeC1
 
 
 
+// Linear (C1) shape functions for the 5-node pyramid element, expressed in local
+// coordinates (s0,s1,s2) where s2=1 is the (degenerate) apex node and s0,s1 range over
+// [0, 1-s2] at the base of the shrinking cross-section (hence the 1/(1-s2) singular-looking
+// but well-defined factors below, which vanish appropriately towards the apex).
 class PyramidElementShapeC1
 {
  public:
@@ -381,18 +388,27 @@ class WedgeElementShapeC2
 };
 
 
+// Common (non-refineable) interface shared by all wedge elements: facet/vertex
+// bookkeeping (3-node triangular end-caps, quadrilateral side faces) and the glue
+// required to build FaceElements on the element's facets.
 class WedgeElementBase :  public virtual FiniteElement
 {
   public:
+    // Build a FaceElement on the given facet: wires up nodal dimension, bulk
+    // element pointer, node pointers/values and the face-to-bulk coordinate
+    // mapping (see the .cpp for details and node-ordering consistency checks).
     void build_face_element(const int& face_index,FaceElement* face_element_pt) override;
+    // Function pointer that maps a facet's local coordinate to the bulk element's local coordinate
     CoordinateMappingFctPt face_to_bulk_coordinate_fct_pt(const int& face_index) const override;
+    // Function pointer returning the derivatives of the bulk coordinate wrt the facet coordinate (needed for the facet Jacobian)
     BulkCoordinateDerivativesFctPt bulk_coordinate_derivatives_fct_pt(const int& face_index) const override ;
+    // Sign of the outer unit normal on the given facet (needed since the facet parametrisation is not guaranteed to be outward-oriented)
     int face_outer_unit_normal_sign(const int&) const override;
     double s_min() const    { return 0.0; }
     double s_max() const    { return 1.0; }
     unsigned nvertex_node() const { return 6; }
     Node* vertex_node_pt(const unsigned& j) const override
-    {           
+    {
       if (j > 5)
       {
           std::ostringstream error_message;
@@ -401,10 +417,17 @@ class WedgeElementBase :  public virtual FiniteElement
       }
       return node_pt(j);
     }
+    // A wedge has both triangular (3-node) and quadrilateral (4/9-node) facets, so a single, facet-independent answer does not exist
     unsigned nnode_on_face() const override { throw_runtime_error("nnode_on_face cannot be implemented for a Wedge, damn."); }
+    // Number of nodes on the given facet: 3/4 for C1 (triangular/quad facets), overridden further for C2
     virtual unsigned nnode_on_face_by_index(const int& face_index) const  { return (face_index<2) ? 3 : 4; }
 };
 
+// Refineable wedge element: implements the RefineableElement/octree-refinement
+// interface expected by oomph-lib's mesh adaptation machinery. Wedge refinement
+// is not yet implemented -- all of the actual refinement logic in the .cpp
+// file just throws "Implement" (or "TODO"); these hooks exist so that the
+// class satisfies the RefineableElement interface and can be extended later.
 class RefineableWedgeElement : public virtual RefineableElement, public virtual WedgeElementBase
   {
 
@@ -424,82 +447,110 @@ class RefineableWedgeElement : public virtual RefineableElement, public virtual 
       BrokenCopy::broken_copy("RefineableWedgeElement");
     }
 
+    // Empty (non-broken) destructor
     virtual ~RefineableWedgeElement()
     {
     }
 
+    // Number of sons created upon refinement -- not yet implemented (wedge refinement is TODO)
     unsigned required_nsons() const
     {
-      throw_runtime_error("TODO");
+      throw_runtime_error("TODO"); // Here, nothing is do be done for now
       return 4;
     }
 
+    // Not yet implemented: see RefineableElement interface for semantics
     virtual Node *node_created_by_neighbour(const Vector<double> &s_fraction, bool &is_periodic);
 
+    // Not used/needed here: always report that no such node exists
     virtual Node *node_created_by_son_of_neighbour(const Vector<double> &s_fraction, bool &is_periodic)
     {
       return 0;
     }
 
+    // Not yet implemented: builds the element's nodes from its father during refinement (see RefineableElement interface)
     virtual void build(Mesh *&mesh_pt, Vector<Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file);
 
+    // Not yet implemented: checks inter-element continuity of nodal positions/values
     void check_integrity(double &max_error);
 
+    // Not yet implemented: debug output of the element's corner nodes
     void output_corners(std::ostream &outfile, const std::string &colour) const;
 
     OcTree *octree_pt() { return dynamic_cast<OcTree *>(Tree_pt); }
 
     OcTree *octree_pt() const { return dynamic_cast<OcTree *>(Tree_pt); }
 
+    // Not yet implemented: sets up the hanging-node scheme for all continuously-interpolated values
     void setup_hanging_nodes(Vector<std::ofstream *> &output_stream);
 
+    /// Pure virtual: element-specific hook for further hanging node setup, must be overloaded by derived elements
     virtual void further_setup_hanging_nodes() = 0;
 
   protected:
+    /// Static matrix encoding, for each refinement pattern, which son nodes coincide with which father boundaries
     static std::map<unsigned, DenseMatrix<int>> Father_bound;
 
+    // Not yet implemented: populates Father_bound
     void setup_father_bounds();
 
+    // Not yet implemented: boundary conditions along a given edge, least restrictive combination over all nodes on the edge
     void get_edge_bcs(const int &edge, Vector<int> &bound_cons) const;
 
   public:
+    // Not yet implemented: mesh-boundary numbers that the given edge/vertex lives on
     void get_boundaries(const int &edge, std::set<unsigned> &boundaries) const;
 
+    // Not yet implemented: boundary conditions at a vertex/edge (most restrictive combination at vertices)
     void get_bcs(int bound, Vector<int> &bound_cons) const;
+    // Not yet implemented: intrinsic boundary coordinate interpolated along an edge
     void interpolated_zeta_on_edge(const unsigned &boundary, const int &edge, const Vector<double> &s, Vector<double> &zeta);
 
   protected:
+    // Not yet implemented: sets up the hanging-node scheme for a single continuously-interpolated value
     void setup_hang_for_value(const int &value_id);
 
+    // Not yet implemented: sets up hanging nodes on a particular edge of the element
     virtual void quad_hang_helper(const int &value_id, const int &my_edge, std::ofstream &output_hangfile);
   };
 
 
+// Common (order-independent) geometric interface for pyramid elements: face construction,
+// vertex-node access and per-face node counts (3 for the 4 triangular side faces, 4+ for
+// the quadrilateral base, face index 4). Mirrors WedgeElementBase.
 class PyramidElementBase :  public virtual FiniteElement
 {
   public:
+    // Build a FaceElement on the given facet; see WedgeElementBase::build_face_element / the .cpp for details
     void build_face_element(const int& face_index,FaceElement* face_element_pt) override;
+    // Function pointer that maps a facet's local coordinate to the bulk element's local coordinate
     CoordinateMappingFctPt face_to_bulk_coordinate_fct_pt(const int& face_index) const override;
+    // Function pointer returning the derivatives of the bulk coordinate wrt the facet coordinate
     BulkCoordinateDerivativesFctPt bulk_coordinate_derivatives_fct_pt(const int& face_index) const override ;
+    // Sign of the outer unit normal on the given facet
     int face_outer_unit_normal_sign(const int&) const override;
     double s_min() const    { return 0.0; }
     double s_max() const    { return 1.0; }
     unsigned nvertex_node() const   { return 5; }
     Node* vertex_node_pt(const unsigned& j) const override
-    {       
+    {
       if (j > 4)
       {
           std::ostringstream error_message;
           error_message  << "Element only has five vertex nodes; called with node number " << j << std::endl;
           throw OomphLibError(error_message.str(),OOMPH_CURRENT_FUNCTION,OOMPH_EXCEPTION_LOCATION);
       }
-      return node_pt(j);    
+      return node_pt(j);
     }
+    // A pyramid has both triangular and quadrilateral facets, so a single, facet-independent answer does not exist
     unsigned nnode_on_face() const override { throw_runtime_error("nnode_on_face cannot be implemented for a Pyramid, damn."); }
-    virtual unsigned nnode_on_face_by_index(const int& face_index) const  { return (face_index==4) ? 4 : 3; } 
+    // Number of nodes on the given facet: quad base (facet 4) vs the four triangular side facets
+    virtual unsigned nnode_on_face_by_index(const int& face_index) const  { return (face_index==4) ? 4 : 3; }
 };
 
 
+// h-adaptivity glue for pyramid elements; see RefineableWedgeElement above (same
+// mostly-unimplemented state).
 class RefineablePyramidElement : public virtual RefineableElement, public virtual PyramidElementBase
   {
 
@@ -519,53 +570,70 @@ class RefineablePyramidElement : public virtual RefineableElement, public virtua
       BrokenCopy::broken_copy("RefineablePyramidElement");
     }
 
+    // Empty (non-broken) destructor
     virtual ~RefineablePyramidElement()
     {
     }
 
+    // Number of sons created upon refinement -- not yet implemented (pyramid refinement is TODO)
     unsigned required_nsons() const
     {
       throw_runtime_error("TODO"); // Here, nothing is do be done for now
       return 4;
     }
 
+    // Not yet implemented: see RefineableElement interface for semantics
     virtual Node *node_created_by_neighbour(const Vector<double> &s_fraction, bool &is_periodic);
 
+    // Not used/needed here: always report that no such node exists
     virtual Node *node_created_by_son_of_neighbour(const Vector<double> &s_fraction, bool &is_periodic)
     {
       return 0;
     }
 
+    // Not yet implemented: builds the element's nodes from its father during refinement
     virtual void build(Mesh *&mesh_pt, Vector<Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file);
 
+    // Not yet implemented: checks inter-element continuity of nodal positions/values
     void check_integrity(double &max_error);
 
+    // Not yet implemented: debug output of the element's corner nodes
     void output_corners(std::ostream &outfile, const std::string &colour) const;
 
     OcTree *octree_pt() { return dynamic_cast<OcTree *>(Tree_pt); }
 
     OcTree *octree_pt() const { return dynamic_cast<OcTree *>(Tree_pt); }
 
+    // Not yet implemented: sets up the hanging-node scheme for all continuously-interpolated values
     void setup_hanging_nodes(Vector<std::ofstream *> &output_stream);
 
+    /// Pure virtual: element-specific hook for further hanging node setup, must be overloaded by derived elements
     virtual void further_setup_hanging_nodes() = 0;
 
   protected:
+    /// Static matrix encoding, for each refinement pattern, which son nodes coincide with which father boundaries
     static std::map<unsigned, DenseMatrix<int>> Father_bound;
 
+    // Not yet implemented: populates Father_bound
     void setup_father_bounds();
 
+    // Not yet implemented: boundary conditions along a given edge, least restrictive combination over all nodes on the edge
     void get_edge_bcs(const int &edge, Vector<int> &bound_cons) const;
 
   public:
+    // Not yet implemented: mesh-boundary numbers that the given edge/vertex lives on
     void get_boundaries(const int &edge, std::set<unsigned> &boundaries) const;
 
+    // Not yet implemented: boundary conditions at a vertex/edge (most restrictive combination at vertices)
     void get_bcs(int bound, Vector<int> &bound_cons) const;
+    // Not yet implemented: intrinsic boundary coordinate interpolated along an edge
     void interpolated_zeta_on_edge(const unsigned &boundary, const int &edge, const Vector<double> &s, Vector<double> &zeta);
 
   protected:
+    // Not yet implemented: sets up the hanging-node scheme for a single continuously-interpolated value
     void setup_hang_for_value(const int &value_id);
 
+    // Not yet implemented: sets up hanging nodes on a particular edge of the element
     virtual void quad_hang_helper(const int &value_id, const int &my_edge, std::ofstream &output_hangfile);
   };
 

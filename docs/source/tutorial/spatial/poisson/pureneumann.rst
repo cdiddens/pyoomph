@@ -9,7 +9,7 @@ First of all, in order to have only Neumann conditions, the source term :math:`j
     
     \int_\Omega g \:\mathrm{d}^n x=-\int_{\Gamma}  j_\text{N} \:\mathrm{d}S \,.
 
-If this relation is not fulfilled, the equation in not well posed. If we would have a single Dirichlet condition, setting :math:`v=1` is not allowed, since test functions have to vanish on the Dirichlet boundaries and this requirement is not necessary any more.
+If this relation is not fulfilled, the equation is not well posed. If we had a single Dirichlet condition, setting :math:`v=1` is not allowed, since test functions have to vanish on the Dirichlet boundaries and this requirement is not necessary any more.
 
 There is another complication to obtain the solution, namely the fact that the solution :math:`u` is not unique: If :math:`u` is a solution, :math:`u+c` for any constant :math:`c` is a solution as well. Any Dirichlet condition would again specify a unique constant :math:`c` for which this Dirichlet condition is fulfilled, which renders the solution unique again, but in absence of any Dirichlet condition, there is an infinite number of solutions.
 
@@ -56,7 +56,7 @@ where :math:`\mu` is the test function corresponding to :math:`\lambda`. Therefo
            u,utest=var_and_test(self.name)
            self.add_residual(weak(u-self.average_value,ltest)+weak(l,utest))
 
-Obviously, we load the old class ``PoissonEquation`` and inherit from it. In the :py:meth:`~pyoomph.generic.codegen.BaseEquations.define_residuals`, we first use a ``super`` call to call :py:meth:`~pyoomph.generic.codegen.BaseEquations.define_residuals` of the non-augmented ``PoissonEquation`` to add the normal residuals to the weak form. Then, the missing terms are added. However, the Lagrange multiplier :math:`\lambda` is not defined yet and it cannot be defined in the ``PoissonEquationWithNullspaceRemoval`` class, since the latter will be restricted on the domain :math:`\Omega`. Any field definitions in the :py:meth:`~pyoomph.generic.codegen.BaseEquations.define_fields` method would hence add fields on :math:`\Omega`, but :math:`\lambda` is just a simple real number, not a field.
+Obviously, we load the old class ``PoissonEquation`` and inherit from it. In the :py:meth:`~pyoomph.generic.codegen.BaseEquations.define_residuals`, we first use a ``super`` call to call :py:meth:`~pyoomph.generic.codegen.BaseEquations.define_residuals` of the non-augmented ``PoissonEquation`` to add the normal residuals to the weak form. Then, the missing terms are added. However, the Lagrange multiplier :math:`\lambda` is not defined yet and it cannot be defined in the ``PoissonEquationWithNullspaceRemoval`` class, since the latter will be restricted to the domain :math:`\Omega`. Any field definitions in the :py:meth:`~pyoomph.generic.codegen.BaseEquations.define_fields` method would hence add fields on :math:`\Omega`, but :math:`\lambda` is just a simple real number, not a field.
 
 Therefore, :math:`\lambda` will be introduced by an own class. Since :math:`\lambda` has no spatial dependence, it can be best done by using the :py:class:`~pyoomph.generic.codegen.ODEEquations` class (see chapter :numref:`secode`), which allows the definition of real valued variables:
 

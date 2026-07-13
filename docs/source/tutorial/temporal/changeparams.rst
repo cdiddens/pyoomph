@@ -1,7 +1,7 @@
 Modifying simulation parameters
 -------------------------------
 
-Up to now, we always have used the predefined parameter values which where set in the constructor of the problem class. As an example, we have set values for ``mass``, ``spring_constant`` and ``initial_displacement`` in the problem class of the harmonic oscillator in the previous section. These were then passed to the equation class and used as initial condition, respectively. Each change of the problem parameters would naively require to edit these values in the constructor of this class. The idea of a complete problem class is, however, that only reasonable default parameters are set and all parameters can be modified easily. In fact for complicated problems, it is a good practice to even put the problem class in another Python file than the script actually used to start the simulation.
+Up to now, we always have used the predefined parameter values which were set in the constructor of the problem class. As an example, we have set values for ``mass``, ``spring_constant`` and ``initial_displacement`` in the problem class of the harmonic oscillator in the previous section. These were then passed to the equation class and used as initial condition, respectively. Each change of the problem parameters would naively require editing these values in the constructor of this class. The idea of a complete problem class is, however, that only reasonable default parameters are set and all parameters can be modified easily. In fact for complicated problems, it is a good practice to even put the problem class in another Python file than the script actually used to start the simulation.
 
 Inside Python
 ~~~~~~~~~~~~~
@@ -27,7 +27,7 @@ Since the default output directory will have the same name as the script name wi
 
 Note that after the first call of :py:meth:`~pyoomph.generic.problem.Problem.run` (or also several other methods like :py:meth:`~pyoomph.generic.problem.Problem.output` and so on), one cannot change the output directory or any parameters that easily. The reason is that all these settings are required for the code generation, e.g. for the nondimensionalization and so on. If it is really necessary, one can invoke a recompilation by :py:meth:`~pyoomph.generic.problem.Problem.redefine_problem`, but this is not discussed here. Therefore, it is important to set all parameters before the first :py:meth:`~pyoomph.generic.problem.Problem.run` statement.
 
-Sometimes, it is not beneficial to have an individual run script for each simulation indented to be performed. If you want to run e.g. hundreds or thousands of simulations to perform a parameter scan, it would require to write a lot of script file. Of course, you could loop through it in python, e.g.
+Sometimes, it is not beneficial to have an individual run script for each simulation intended to be performed. If you want to run e.g. hundreds or thousands of simulations to perform a parameter scan, it would require writing a lot of script files. Of course, you could loop through it in python, e.g.
 
 .. code:: python
 
@@ -53,7 +53,7 @@ However, this would run all simulations sequentially. For this simple problem, i
 Via the command line
 ~~~~~~~~~~~~~~~~~~~~
 
-You can always override simulation parameters from the command line. For this, you can add the command line arguments *--outdir* so change the output directory and *-P* to modify parameters, e.g.
+You can always override simulation parameters from the command line. For this, you can add the command line arguments *--outdir* to change the output directory and *-P* to modify parameters, e.g.
 
 .. code:: bash
 
@@ -61,12 +61,12 @@ You can always override simulation parameters from the command line. For this, y
 
 invokes the script :download:`dimensional_oscillator_with_units.py`, output will be written to the directory ``dim_osci_run_modified_params`` and we set the spring constant :math:`k=1.5 \:\mathrm{N}/\mathrm{m}` and the initial displacement to :math:`x_0=0.25\:\mathrm{m}`. Note that the parameters passed via the command line will be set after the parameters set in :download:`dimensional_oscillator_with_units.py` before the :py:meth:`~pyoomph.generic.problem.Problem.run` statement. Hence, the command line will override the parameters set in the script.
 
-This allows to use e.g. bash in Linux or batch script in Windows to call multiple simulations in a loop.
+This allows one to use e.g. bash in Linux or a batch script in Windows to call multiple simulations in a loop.
 
 Parameter scans via Python
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Finally, you can also scan through parameters in parallel in Python. Again, we want to run the script :download:`dimensional_oscillator_with_units.py` with multiple parameter settings. pyoomph comes with a class that can take care of looping over parameters and invoke a call of the simulation script with each particular parameter combination as follows:
+Finally, you can also scan through parameters in parallel in Python. Again, we want to run the script :download:`dimensional_oscillator_with_units.py` with multiple parameter settings. pyoomph comes with a class that can take care of looping over parameters and invoking a call of the simulation script with each particular parameter combination as follows:
 
 .. code:: python
 
@@ -93,7 +93,7 @@ Finally, you can also scan through parameters in parallel in Python. Again, we w
 
 First, a :py:class:`~pyoomph.utils.paramscan.ParallelParameterScan` object is created, passing the script that should be started in parallel and an optional argument of how many processes to be used. If the latter is omitted, it will default to the number of CPUs on the system. The script to run must be either in the same directory or the corresponding full or relative directory has to be passed. Then, for each parameter combination, we add a new simulation to the list using :py:meth:`~pyoomph.utils.paramscan.ParallelParameterScan.new_sim` with the output directory of this particular script. Note that these output directories will be sub-directories of the directory of the parameter scan, which defaults to ``dim_osci_para_run`` here, but can be set via the keyword argument ``output_dir`` in the constructor of the :py:class:`~pyoomph.utils.paramscan.ParallelParameterScan` object. We can then modify any parameter we like to adjust for the simulation by setting them to the object obtained by :py:meth:`~pyoomph.utils.paramscan.ParallelParameterScan.new_sim`.
 
-Finally, if all simulations to be started are added, we can invoke the :py:meth:`~pyoomph.utils.paramscan.ParallelParameterScan.run_all` method to start them in parallel. The moment one simulation finishes, the next one is started, but the maximum number of parallel processes is never exceeded. The optional argument ``skip_done`` let you control whether you want to rerun already completed simulations or not. If you make e.g. relevant changes in the script :download:`dimensional_oscillator_with_units.py`, it obviously has to be set to ``False``, since the finished results may differ. Otherwise, you can easily continue a previously interrupted scanning process by setting ``skip_done=True``, which will skip all simulations that were already completed previously.
+Finally, if all simulations to be started are added, we can invoke the :py:meth:`~pyoomph.utils.paramscan.ParallelParameterScan.run_all` method to start them in parallel. The moment one simulation finishes, the next one is started, but the maximum number of parallel processes is never exceeded. The optional argument ``skip_done`` lets you control whether you want to rerun already completed simulations or not. If you make e.g. relevant changes in the script :download:`dimensional_oscillator_with_units.py`, it obviously has to be set to ``False``, since the finished results may differ. Otherwise, you can easily continue a previously interrupted scanning process by setting ``skip_done=True``, which will skip all simulations that were already completed previously.
 
 .. only:: html
 	

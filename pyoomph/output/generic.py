@@ -35,7 +35,7 @@ from ..meshes.mesh import ODEStorageMesh
 
 from ..generic.codegen import BaseEquations
 import inspect
-import _pyoomph
+import pyoomph._pyoomph_core as _pyoomph
 
 from scipy.io import savemat,loadmat #type:ignore
 
@@ -179,7 +179,7 @@ class _TextOutput(_BaseNumpyOutput):
             Path(os.path.join(self.problem.get_output_directory(self._orbit_subdir)),self.fname_trunk).mkdir(parents=True, exist_ok=True) 
         
 
-    def output(self,step:int):
+    def output(self,step:int):        
         mesh = self.mesh
         if (not mesh.is_mesh_distributed()) and self._mpi_rank > 0:
             return

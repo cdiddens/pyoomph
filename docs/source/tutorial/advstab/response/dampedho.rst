@@ -17,7 +17,7 @@ Due to the damping, all transients will decay and after some time, the system wi
    y=A\cos(\omega t + \varphi)
    \end{aligned}
 
-Here :math:`A` is the reponse amplitude and :math:`\varphi` is the phase shift with respect to the driving. pyoomph can calculate this response automatically for arbitrary problems, i.e. also complex PDEs on moving meshes. To that end, any potential nonlinearities will be linearized around the stationary solution (here, :math:`y=0`). First, we define the harmonic oscillator with arbitrary driving and assemble it in a problem. The oscillator must be written as first order system in time, because eventually, an eigenproblem will be solved:
+Here :math:`A` is the response amplitude and :math:`\varphi` is the phase shift with respect to the driving. pyoomph can calculate this response automatically for arbitrary problems, i.e. also complex PDEs on moving meshes. To that end, any potential nonlinearities will be linearized around the stationary solution (here, :math:`y=0`). First, we define the harmonic oscillator with arbitrary driving and assemble it in a problem. The oscillator must be written as a first order system in time, because eventually, an eigenproblem will be solved:
 
 .. code:: python
 
@@ -60,7 +60,7 @@ Here :math:`A` is the reponse amplitude and :math:`\varphi` is the phase shift w
            eqs+=ODEFileOutput()
            self+=eqs@"oscillator"
 
-The trivial way of getting the response is to just integrate over sufficient long time and extract the response :math:`A` and the angle :math:`\varphi` from the output, i.e.
+The trivial way of getting the response is to just integrate over a sufficiently long time and extract the response :math:`A` and the angle :math:`\varphi` from the output, i.e.
 
 .. code:: python
 
@@ -105,7 +105,7 @@ However, with the periodic driving response tool, you can scan the linear respon
             # outpuf
             outfile.add_row(omega*second,A_num,phi[yindex],A_analytic,phi_analytic)
 
-Before the problem is initialized, we must create a :py:class:`~pyoomph.utils.periodic_driving_response.PeriodicDrivingResponse` object and attach it to the problem. This one will introduce a nondimensional, undamped harmonic oscillator with a variable angular frequency :math:`\omega`, i.e. :math:`\partial_t z+\omega^2 z=0` to the problem. The method :py:meth:`~pyoomph.utils.periodic_driving_response.PeriodicDrivingResponse.get_driving_mode` gives back :math:`z`, i.e. internally, we use this auxiliary harmonic oscillator to impose the driving to the harmonic oscillator equation for :math:`y`. To obtain the response, we first must find the equation number corresponding to :math:`y`, which can be done by describing the degrees of freedom of the problem with the :py:meth:`~pyoomph.generic.problem.Problem.get_dof_description` and finding the correct index in the degrees of freedom. By :py:meth:`~pyoomph.utils.periodic_driving_response.PeriodicDrivingResponse.iterate_over_driving_frequencies`, we can scan a full range of driving frequencies :math:`\omega` in a loop. The ``response`` is a complex eigenvector, but it can be split into amplitude and phase by :py:meth:`~pyoomph.utils.periodic_driving_response.PeriodicDrivingResponse.split_response_amplitude_and_phase`. By extracting the right component corresponding to :math:`y`, we get the amplitude and phase directly, correctly account for any physical dimensions and compare it with the analytical solution in the output. The result is plotted in :numref:`figstabilitypdrosci`.
+Before the problem is initialized, we must create a :py:class:`~pyoomph.utils.periodic_driving_response.PeriodicDrivingResponse` object and attach it to the problem. This one will introduce a nondimensional, undamped harmonic oscillator with a variable angular frequency :math:`\omega`, i.e. :math:`\partial_t z+\omega^2 z=0` to the problem. The method :py:meth:`~pyoomph.utils.periodic_driving_response.PeriodicDrivingResponse.get_driving_mode` gives back :math:`z`, i.e. internally, we use this auxiliary harmonic oscillator to impose the driving on the harmonic oscillator equation for :math:`y`. To obtain the response, we first must find the equation number corresponding to :math:`y`, which can be done by describing the degrees of freedom of the problem with the :py:meth:`~pyoomph.generic.problem.Problem.get_dof_description` and finding the correct index in the degrees of freedom. By :py:meth:`~pyoomph.utils.periodic_driving_response.PeriodicDrivingResponse.iterate_over_driving_frequencies`, we can scan a full range of driving frequencies :math:`\omega` in a loop. The ``response`` is a complex eigenvector, but it can be split into amplitude and phase by :py:meth:`~pyoomph.utils.periodic_driving_response.PeriodicDrivingResponse.split_response_amplitude_and_phase`. By extracting the right component corresponding to :math:`y`, we get the amplitude and phase directly, correctly account for any physical dimensions and compare it with the analytical solution in the output. The result is plotted in :numref:`figstabilitypdrosci`.
 
 ..  figure:: pdrosci.*
 	:name: figstabilitypdrosci

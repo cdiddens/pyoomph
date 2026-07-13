@@ -1,7 +1,7 @@
 Playing tennis in pyoomph - custom expression with dimensions
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The next problem will be a bit more comprehensive and it will involve several techniques we have learned so far, namely using physical dimensions, custom math expressions and temporal adaptivity. We want to simulate a simple tennis match. As in all physics exams, there is no air friction acting on the ball, the problem is one-dimensional and the tennis rackets behave as a Hookian spring, but only if the position of the ball exceeds the position of the racket. Mathematically, we solve
+The next problem will be a bit more comprehensive and it will involve several techniques we have learned so far, namely using physical dimensions, custom math expressions and temporal adaptivity. We want to simulate a simple tennis match. As in all physics exams, there is no air friction acting on the ball, the problem is one-dimensional and the tennis rackets behave as a Hookean spring, but only if the position of the ball exceeds the position of the racket. Mathematically, we solve
 
 .. math:: m\ddot{x}=F_1(x)+F_2(x)
 
@@ -76,7 +76,7 @@ The class for the equation for the ball position :math:`x` is again trivial:
            residual+=(partial_t(x)-xdot)*testfunction(xdot)
            self.add_residual(residual)
 
-Different as before, we define not only the test function scales in the :py:meth:`~pyoomph.generic.codegen.BaseEquations.define_fields` method, but also the scales itself by adding the argument ``scale`` to the :py:meth:`~pyoomph.generic.codegen.ODEEquations.define_ode_variable`. The position :math:`x` will be nondimensionalized by a scale ``"spatial"``, which will be set later. The velocity :math:`\dot x`, i.e. ``xdot``, is nondimensionalized by ``"spatial"``/``"temporal"``, which is a reasonable choice for a velocity. The test scales are again chosen that way that all physical units cancel out in the added residual. Both missing scales ``"spatial"`` and ``"temporal"`` are set at problem level using :py:meth:`~pyoomph.generic.problem.Problem.set_scaling`.
+Differently than before, we define not only the test function scales in the :py:meth:`~pyoomph.generic.codegen.BaseEquations.define_fields` method, but also the scales themselves by adding the argument ``scale`` to the :py:meth:`~pyoomph.generic.codegen.ODEEquations.define_ode_variable`. The position :math:`x` will be nondimensionalized by a scale ``"spatial"``, which will be set later. The velocity :math:`\dot x`, i.e. ``xdot``, is nondimensionalized by ``"spatial"``/``"temporal"``, which is a reasonable choice for a velocity. The test scales are again chosen in such a way that all physical units cancel out in the added residual. Both missing scales ``"spatial"`` and ``"temporal"`` are set at problem level using :py:meth:`~pyoomph.generic.problem.Problem.set_scaling`.
 
 .. code:: python
 
@@ -124,7 +124,7 @@ In the constructor, we initialize two rackets, one at the top and one at the bot
 
 Finally, we run the problem, again with an adjustable accepted ``temporal_error`` value for dynamic time stepping. The effect of the dynamic time stepping is visible in :numref:`figodetennis`, where clearly the steps are smaller whenever the ball is subject to the force of a racket.
 
-As a last note, we also can let the players move easily, since the positions of the rackets, stored in the problem class in the members ``top_position`` and ``bottom_position``, is passed to the custom expressions ``TennisRacket`` as second argument. Hence, a slight modification before running allows for motion of the players, see :numref:`figodetennismoving` This feature, i.e. changing the problem by modifying the expressions, is later on helpful, when e.g. modifying the mass density or dynamic viscosity of a liquid mixture.
+As a last note, we also can let the players move easily, since the positions of the rackets, stored in the problem class in the members ``top_position`` and ``bottom_position``, is passed to the custom expressions ``TennisRacket`` as the second argument. Hence, a slight modification before running allows for motion of the players, see :numref:`figodetennismoving`. This feature, i.e. changing the problem by modifying the expressions, is later on helpful, when e.g. modifying the mass density or dynamic viscosity of a liquid mixture.
 
 .. code:: python
 
@@ -149,7 +149,7 @@ As a last note, we also can let the players move easily, since the positions of 
 
 .. warning::
 
-   The usage of :py:class:`~pyoomph.expressions.cb.CustomMathExpression` should be considered as last resort, since the call of a python function is quite expensive compared to the execution on the generated ``C`` code. In particular, here one could have used ``heaviside((var("x")-self.top_position)/meter)`` to kick in the force of the racket instead. The division by ``meter`` is required in the argument of :py:func:`~pyoomph.expressions.heaviside`, since functions like :py:func:`~pyoomph.expressions.sin`, :py:func:`~pyoomph.expressions.cos`, but also :py:func:`~pyoomph.expressions.heaviside` require an argument without any dimension.
+   The usage of :py:class:`~pyoomph.expressions.cb.CustomMathExpression` should be considered as last resort, since the call of a Python function is quite expensive compared to the execution of the generated ``C`` code. In particular, here one could have used ``heaviside((var("x")-self.top_position)/meter)`` to kick in the force of the racket instead. The division by ``meter`` is required in the argument of :py:func:`~pyoomph.expressions.heaviside`, since functions like :py:func:`~pyoomph.expressions.sin`, :py:func:`~pyoomph.expressions.cos`, but also :py:func:`~pyoomph.expressions.heaviside` require an argument without any dimension.
    
 .. only:: html
     

@@ -58,6 +58,8 @@ parser.add_argument("cbrange_in", nargs='*',
                     help="Input directories to merge the colorbar ranges")
 arglist = parser.parse_args()
 
+is_mac_arm64 = (sys.platform == "darwin" and os.uname().machine in {"arm64", "aarch64"})
+
 
 def test_solver(solver):
    from . generic.problem import Problem
@@ -180,6 +182,11 @@ elif arglist.command=="check":
             checklist=[arglist.check_name]
          
          for check in checklist:
+            if check=="pardiso" and is_mac_arm64:
+               print("Checking "+check_type+" / "+check)
+               print("","skipping on macOS arm64")
+               continue
+            
             print("Checking "+check_type+" / "+check)         
             try:
                GenericLinearSystemSolver.factory_solver(check,p)
@@ -211,6 +218,10 @@ elif arglist.command=="check":
             checklist=[arglist.check_name]
          
          for check in checklist:
+            if check=="pardiso" and is_mac_arm64:
+               print("Checking "+check_type+" / "+check)
+               print("","skipping on macOS arm64")
+               continue
             print("Checking "+check_type+" / "+check)         
             try:
                GenericEigenSolver.factory_solver(check,p)
@@ -232,7 +243,8 @@ elif arglist.command=="check":
          else:
             checklist=[arglist.check_name]
          for to_check in checklist:
-            print("Checking "+check_type+" / "+to_check)     
+            print("Checking "+check_type+" / "+to_check)
+            cc=None
             try:
                cc=BaseCCompiler.factory_compiler(to_check)
                if cc.check_avail():
@@ -245,7 +257,25 @@ elif arglist.command=="check":
                else:
                   raise RuntimeError("Sanity check not working...")
             except Exception as e:
-               print("","does not work: "+str(e.with_traceback(None)))
+               # check_avail() above compiles+links a real temp file, which
+               # conflates "no compiler" with "can't write to the temp dir"
+               # (e.g. a locked-down Windows machine). If a lighter, no-file
+               # -write probe is available for this compiler (currently just
+               # MSVC, via toolchain_located()), use it to give a clearer
+               # diagnostic than the raw exception below.
+               located=None
+               if cc is not None:
+                  try:
+                     located=cc.toolchain_located()
+                  except Exception:
+                     pass
+               if located is False:
+                  print("","does not work: compiler toolchain not found (e.g. no Visual Studio/Build Tools installation located)")
+               elif located is True:
+                  print("","toolchain found, but the sanity check failed - this can happen e.g. if the "
+                            "temporary directory used for the test could not be written to: "+str(e.with_traceback(None)))
+               else:
+                  print("","does not work: "+str(e.with_traceback(None)))
       else:
          raise RuntimeError("TODO: ")
 else:

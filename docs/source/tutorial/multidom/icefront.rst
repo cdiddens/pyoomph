@@ -5,7 +5,7 @@ Propagation of an ice front
 
 The next problem is very related to the previous one. We will again solve two temperature conduction equations, but this time, condition :math:numref:`eqmultidomcontitqflux` will be slightly different. Furthermore, we will consider also the temporal behavior and use physical dimensions.
 
-In fact, we want to solve the propagation of an ice front, i.e. how ice is solidifying or melting in presence of a temperature gradient. Since this phase transition obviously leads to a growth of the ice domain and a corresponding shrinkage of the liquid domain or vice versa, an moving mesh/ALE method will be used.
+In fact, we want to solve the propagation of an ice front, i.e. how ice is solidifying or melting in the presence of a temperature gradient. Since this phase transition obviously leads to a growth of the ice domain and a corresponding shrinkage of the liquid domain or vice versa, a moving mesh/ALE method will be used.
 
 Mathematically, we have the transient heat conduction equations
 
@@ -15,7 +15,7 @@ Mathematically, we have the transient heat conduction equations
    \rho^\phi c_p^\phi \partial_t T^\phi =\nabla\cdot\left(k^\phi \nabla T\right)
    \end{aligned}
 
-where the phase superscript :math:`\phi` can be either ice or liquid, depending of whether we apply this equation on either the ``"ice"`` or the ``"liquid"`` domain. The equation can be easily cast into its weak form and implemented:
+where the phase superscript :math:`\phi` can be either ice or liquid, depending on whether we apply this equation on either the ``"ice"`` or the ``"liquid"`` domain. The equation can be easily cast into its weak form and implemented:
 
 .. code:: python
 
@@ -39,7 +39,7 @@ where the phase superscript :math:`\phi` can be either ice or liquid, depending 
            T,T_test=var_and_test("T")
            self.add_residual(weak(self.rho*self.c_p*partial_t(T),T_test)+weak(self.k*grad(T),grad(T_test)))
 
-Note that we bind the test scale of the temperature field ``"T"`` to ``1/scale_factor("thermal_equation")``. This means essentially, that :math:numref:`eqmultidomtempconduct` is multiplier by a factor :math:`1/S` during non-dimensionalization, i.e. that we actually solve
+Note that we bind the test scale of the temperature field ``"T"`` to ``1/scale_factor("thermal_equation")``. This means essentially, that :math:numref:`eqmultidomtempconduct` is multiplied by a factor :math:`1/S` during non-dimensionalization, i.e. that we actually solve
 
 .. math:: :label: eqmultidomtempconductnd
 
@@ -103,7 +103,7 @@ The implementation is rather straight-forward:
            self.add_residual(weak(dot(mesh_velocity(),n)-speed,ltest))
            self.add_residual(weak(l,dot(xtest,n)))
 
-with the :py:attr:`~pyoomph.generic.codegen.InterfaceEquations.required_parent_type` and :py:attr:`~pyoomph.generic.codegen.InterfaceEquations.required_opposite_parent_type`, we inform pyoomph that it is only allowed to attach this constraint to an interface that has as ``TemperatureConductionEquation`` on both the inside bulk and the outside bulk of this interface. Otherwise, an error will be thrown. Due to these statements, we also get automatically the inside and outside ``TemperatureConductionEquation`` of the bulk phases when calling :py:meth:`~pyoomph.generic.codegen.InterfaceEquations.get_parent_equations` and :py:meth:`~pyoomph.generic.codegen.InterfaceEquations.get_opposite_parent_equations`. This is used to obtain the required properties :math:`k^\phi` and :math:`\rho` in the :py:meth:`~pyoomph.generic.codegen.BaseEquations.define_residuals` method here. The interface property ``latent_heat``, however, has to be passed to the constructor and is stored internally.
+With the :py:attr:`~pyoomph.generic.codegen.InterfaceEquations.required_parent_type` and :py:attr:`~pyoomph.generic.codegen.InterfaceEquations.required_opposite_parent_type`, we inform pyoomph that it is only allowed to attach this constraint to an interface that has a ``TemperatureConductionEquation`` on both the inside bulk and the outside bulk of this interface. Otherwise, an error will be thrown. Due to these statements, we also get automatically the inside and outside ``TemperatureConductionEquation`` of the bulk phases when calling :py:meth:`~pyoomph.generic.codegen.InterfaceEquations.get_parent_equations` and :py:meth:`~pyoomph.generic.codegen.InterfaceEquations.get_opposite_parent_equations`. This is used to obtain the required properties :math:`k^\phi` and :math:`\rho` in the :py:meth:`~pyoomph.generic.codegen.BaseEquations.define_residuals` method here. The interface property ``latent_heat``, however, has to be passed to the constructor and is stored internally.
 
 The scaling has to fit, i.e. upon non-dimensionalization of :math:numref:`eqmultidomtempconductispeed`, all weak forms must yield non-dimensional results. Indeed, if we scale :math:`\lambda` with the inverse of the scaling of :math:`\chi` and nondimensionalize the test function :math:`\eta` as :math:`\eta=[T]/[X]\tilde\eta`, all units will cancel out in :math:numref:`eqmultidomtempconductispeed`.
 
@@ -111,7 +111,7 @@ There is another very relevant aspect to consider, namely:
 
 .. warning::
 
-   One fundamental aspect is that we want to take bulk gradient for the :math:`\nabla T` terms in :math:numref:`eqmultidomtempconductispeed`. Since we are on an interface, i.e. on a manifold with co-dimension 1, the simple statement ``grad(var("T"))`` would expand to the surface gradient :math:`\nabla_S T` of temperature field of the inside domain (cf. :numref:`secspatialhelicalmesh`), which will be always tangential to :math:`\vec{n}`. The bulk gradients are only obtained if the temperature fields of the bulk phases are passed to :py:func:`~pyoomph.expressions.generic.grad`. These can be obtained by adding :py:meth:`~pyoomph.generic.codegen.BaseEquations.get_parent_domain` and :py:meth:`~pyoomph.generic.codegen.Equations.get_opposite_parent_domain` (for the inside and outside bulk, respectively) as ``domain=`` keyword argument in the bindings via :py:func:`~pyoomph.expressions.generic.var`.
+   One fundamental aspect is that we want to take the bulk gradient for the :math:`\nabla T` terms in :math:numref:`eqmultidomtempconductispeed`. Since we are on an interface, i.e. on a manifold with co-dimension 1, the simple statement ``grad(var("T"))`` would expand to the surface gradient :math:`\nabla_S T` of the temperature field of the inside domain (cf. :numref:`secspatialhelicalmesh`), which will be always tangential to :math:`\vec{n}`. The bulk gradients are only obtained if the temperature fields of the bulk phases are passed to :py:func:`~pyoomph.expressions.generic.grad`. These can be obtained by adding :py:meth:`~pyoomph.generic.codegen.BaseEquations.get_parent_domain` and :py:meth:`~pyoomph.generic.codegen.Equations.get_opposite_parent_domain` (for the inside and outside bulk, respectively) as ``domain=`` keyword argument in the bindings via :py:func:`~pyoomph.expressions.generic.var`.
    Alternatively, you can also use ``domain=".."`` instead of ``domain=self.get_parent_domain()`` and ``domain="|.."`` instead of ``domain=self.get_opposite_parent_domain()``.
 
 In the constructor of the :py:class:`~pyoomph.generic.problem.Problem` class, nothing spectacular happens. We just initialize a few default parameters:
@@ -177,9 +177,9 @@ In the :py:meth:`~pyoomph.generic.problem.Problem.define_problem` method, we hav
            # We could also add it on "liquid/interface", but then we must use -self.latent_heat in the IceFrontSpeed
            self.add_equations(interf_eqs@"ice/interface")
 
-The interface equations consist of an instance of our just developed class ``IceFrontSpeed`` and the predefined class :py:class:`~pyoomph.equations.ALE.ConnectMeshAtInterface`. The latter will introduce Lagrange multipliers so that the nodes of the ``"liquid"`` and ``"ice"`` domain at the mutual ``"interface"`` will be enforced to coincide. Without this, only the ``"ice"`` mesh would move, whereas the ``"liquid"`` mesh would remain static. Alternatively to adding ``interf_eqs@"ice/interface"`` to the problem, we could also add ``interf_eqs`` to the ``"liquid"`` side of the ``"interface"``. In that case, however, we would have to negate the ``latent_heat``.
+The interface equations consist of an instance of our just developed class ``IceFrontSpeed`` and the predefined class :py:class:`~pyoomph.equations.ALE.ConnectMeshAtInterface`. The latter will introduce Lagrange multipliers so that the nodes of the ``"liquid"`` and ``"ice"`` domain at the mutual ``"interface"`` will be enforced to coincide. Without this, only the ``"ice"`` mesh would move, whereas the ``"liquid"`` mesh would remain static. As an alternative to adding ``interf_eqs@"ice/interface"`` to the problem, we could also add ``interf_eqs`` to the ``"liquid"`` side of the ``"interface"``. In that case, however, we would have to negate the ``latent_heat``.
 
-The code to run this problem is simple, but we use temporal and spatial adaptivity to well resolve the initial temperature discontinuity at the ``"interface"``:
+The code to run this problem is simple, but we use temporal and spatial adaptivity to properly resolve the initial temperature discontinuity at the ``"interface"``:
 
 .. code:: python
 

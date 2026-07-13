@@ -45,6 +45,13 @@ namespace pyoomph
 
   typedef double (*InitialConditionFctPt)(const double &t);
 
+  // Determine how many "elemental index" entries to_numpy will need to write per element (nelem is
+  // set to the total number of sub-elements across the mesh, e.g. after triangle tessellation of
+  // quads/hanging regions), and return the maximum number of local node indices any single
+  // (sub-)element needs. Also assigns each element a unique _numpy_index used later by to_numpy.
+  // If tesselate_tri is set and the mesh has hanging nodes (differing refinement levels), coarser
+  // elements must be informed about how their finer neighbours subdivide them for consistent plotting
+  // (inform_coarser_neighbors_for_tesselated_numpy) before the per-element sub-element counts are summed.
   int Mesh::get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nelem, bool discontinuous) // Gets the number of required elemental indices
   {
     unsigned nelement = this->nelement();
@@ -92,6 +99,8 @@ namespace pyoomph
     return res;
   }
 
+  // Lazily construct (at Lagrangian coordinates, history index 0) and cache the KD-tree used for
+  // nearest-node/element lookups; reused across calls until invalidate_lagrangian_kdtree() is called.
   MeshKDTree *Mesh::get_lagrangian_kdtree()
   {
     if (!lagrangian_kdtree)
@@ -114,6 +123,8 @@ namespace pyoomph
     lagrangian_kdtree = NULL;
   }
 
+  // Sanity-check the tree forest's neighbour information (if this is a tree-based refineable mesh);
+  // throws/reports via oomph-lib's own check_all_neighbours if something is inconsistent.
   void Mesh::check_integrity()
   {
     if (dynamic_cast<oomph::TreeBasedRefineableMeshBase *>(this) && dynamic_cast<oomph::TreeBasedRefineableMeshBase *>(this)->forest_pt())
@@ -126,6 +137,9 @@ namespace pyoomph
     
   }
 
+  // Number of nodes; if discontinuous is set, counts per-element node copies (sum of each element's
+  // own nnode()) rather than the mesh's shared/unique node count - used for DG-style (discontinuous)
+  // field output where every element has its own private copy of each node.
   unsigned Mesh::count_nnode(bool discontinuous)
   {
     if (!discontinuous)
@@ -138,6 +152,8 @@ namespace pyoomph
       return res;
     }
   }
+  // Copy over the (common-length prefix of the) dirichlet_active flags from an old mesh, e.g. when
+  // this mesh was just (re)created during remeshing and should keep which Dirichlet conditions were active.
   void Mesh::_setup_information_from_old_mesh(Mesh *old)
   {
     for (unsigned int i = 0; i < std::min(this->dirichlet_active.size(), old->dirichlet_active.size()); i++)
@@ -156,6 +172,9 @@ namespace pyoomph
     return boundary_index < Boundary_coordinate_exists.size() && Boundary_coordinate_exists[boundary_index];
   }
 
+  // Serialize the full nodal state (position/Lagrangian coordinates and field values, at all history
+  // time levels) of every node into a flat meshdata buffer, in the mesh's canonical old-ordering
+  // (get_node_reordering), so it can later be restored via _load_state (e.g. for checkpointing).
   void Mesh::_save_state(std::vector<double> &meshdata)
   {
     bool old_ordering = true;
@@ -205,6 +224,8 @@ namespace pyoomph
     }
   }
 
+  // Inverse of _save_state: restore nodal positions/Lagrangian coordinates/field values and elemental
+  // internal data from a flat meshdata buffer, reading it back in the exact same order it was written.
   void Mesh::_load_state(const std::vector<double> &meshdata)
   {
     size_t s = 0;
@@ -315,6 +336,14 @@ namespace pyoomph
     }
   }
 
+  // Under MPI, periodic boundary conditions are implemented via "copy" nodes (is_a_copy()) that alias
+  // a master node possibly owned by a different process. If an element on this process touches such a
+  // copy node, the element(s) owning the corresponding master node must be kept as halo elements on
+  // this process too (set_must_be_kept_as_halo), otherwise the master's data would not be available
+  // locally. This walks all boundary elements/nodes, finds copy nodes, locates the boundary element(s)
+  // that own the master node, and flags both sides as must-keep-halo. Nodal (as opposed to purely
+  // discontinuous/DG) degrees of freedom on copied nodes are not supported in this distributed
+  // periodic setup and trigger an error.
   void Mesh::ensure_halos_for_periodic_boundaries()
   {
 #ifdef OOMPH_HAS_MPI
@@ -365,6 +394,8 @@ namespace pyoomph
 #endif
   }
 
+  // List the names of the named integral expressions defined in this mesh's JIT-compiled element code
+  // (looked up via the first element, since all elements of a mesh share the same code instance).
   std::vector<std::string> Mesh::list_integral_functions()
   {
     unsigned nelement = this->nelement();
@@ -374,6 +405,8 @@ namespace pyoomph
     return cg->get_integral_expressions();
   }
 
+  // List the names of the local (per-point, non-integrated) expressions defined in this mesh's
+  // JIT-compiled element code.
   std::vector<std::string> Mesh::list_local_expressions()
   {
     unsigned nelement = this->nelement();
@@ -383,8 +416,13 @@ namespace pyoomph
     return cg->get_local_expressions();
   }
 
+  // Refine a local-coordinate guess s for the extremum of the local expression `index` within element
+  // be, by Newton iteration on the gradient of the (JIT-evaluated) expression: builds the gradient and
+  // Hessian by central finite differences and solves for the Newton step; falls back to leaving s
+  // unchanged for a step if the Hessian solve fails (e.g. singular/indefinite Hessian). Used to polish
+  // the coarse maximum/minimum found by evaluate_extremum's initial per-element/per-node scan.
   double improve_extremum_by_newton(BulkElementBase *be, unsigned index, oomph::Vector<double> &s)
-  {    
+  {
     double val=be->eval_extremum_expression_at_s(index,s); //Update value
     if (!be->dim()) return val; // Cannot optimize a point
     oomph::Vector<double> grad(be->dim());
@@ -453,6 +491,12 @@ namespace pyoomph
   }
   
 
+  // Find the extremum (sign=+1: maximum, sign=-1: minimum) of the named local expression over the
+  // whole mesh: coarse search by sampling every element at its integration points and its nodes,
+  // keeping the largest sign*value seen (extreme_element/extreme_local_coords track where), then
+  // polish the best candidate with a local Newton refinement (improve_extremum_by_newton) - keeping
+  // the improved value only if it is not worse than the coarse one. If flags bit 0 is set, the result
+  // is multiplied by the expression's declared physical unit/scale factor (dimensional output).
   GiNaC::ex Mesh::evaluate_extremum(std::string name,int sign,BulkElementBase *& extreme_element,oomph::Vector<double> &extreme_local_coords,unsigned flags)
   {
     unsigned nelement = this->nelement();
@@ -580,6 +624,18 @@ namespace pyoomph
     }
   }
 
+  // (Re)build the interface mesh imesh from this bulk mesh's boundary/internal facets, wrapping each
+  // relevant bulk element face in a FaceElement created from the JIT-compiled interface code jitcode.
+  // intername is either a real boundary name (interface attached to that boundary) or the sentinel
+  // "_internal_facets_" (interface elements attached to internal facets between bulk elements, e.g.
+  // for DG jump terms - obtained via fill_internal_facet_buffers). All old elements/nodes of imesh are
+  // discarded first. If the interface code defines a local expression called "__interface_constraint",
+  // it is evaluated at the element midpoint and elements are skipped unless the constraint is positive
+  // (used to build interfaces only where some user-defined condition holds, e.g. contact regions).
+  // For internal facets, a matching "opposite" FaceElement is generated on the far side of each facet
+  // (reusing already-built opposite elements shared by several smaller facets, via
+  // opposite_already_at_index) and linked via set_opposite_interface_element, so the interface element
+  // can access fields from both sides of the facet. Finally rebuild/boundary information on imesh is refreshed.
   void Mesh::generate_interface_elements(std::string intername, Mesh *imesh, DynamicBulkElementInstance *jitcode)
   {
     unsigned bind, nbe;
@@ -736,6 +792,13 @@ namespace pyoomph
     BulkElementBase::__CurrentCodeInstance = NULL;
   }
 
+  // Build a map from field name to its finite-element space (e.g. "C2", "C1", "DL", "D0"), by
+  // inspecting the JIT-compiled code's function table of this mesh's first element. Discontinuous
+  // (DL/D0) fields are always taken from this mesh directly; continuous/DG fields are collected by
+  // walking up through bulk meshes for InterfaceMesh objects (prefixing the resulting space name with
+  // "../" once per bulk-mesh level, since interface fields are actually defined on the bulk domain).
+  // If the code has moving nodes, also reports synthetic "mesh_x"/"mesh_y"/"mesh_z" pseudo-fields for
+  // the mesh deformation, in the dominant nodal space.
   std::map<std::string, std::string> Mesh::get_field_information() // first: names, second: list of spaces (C2,C1,DL,D0), but also (../C2 etc for elements defined on bulk domains)
   {
     if (!this->nelement())
@@ -822,6 +885,15 @@ namespace pyoomph
     return res;
   }
 
+  // Pin every dof of this mesh's fields (nodal position, continuous/DG/DL/D0 values), optionally
+  // restricted by name: mustpin(name) is true when (only_dofs is empty or name is in only_dofs) and
+  // name is not in ignore_dofs. First resolves the requested field names to concrete index sets per
+  // storage kind (posindices for nodal position/mesh-motion dofs, valindices for base-bulk continuous
+  // fields, add_indices for interface-only continuous fields via interface_dof_indices, DGindices per
+  // DG space, DLindices/D0indices for internal DL/D0 data), then loops over all elements/nodes and
+  // pins the corresponding Data. ignore_continuous_at_interfaces lists boundary indices at which
+  // continuous (valindices) dofs must be left unpinned even if otherwise selected - used to keep
+  // interface-coupling dofs free.
   void Mesh::pin_all_my_dofs(std::set<std::string> only_dofs, std::set<std::string> ignore_dofs, std::set<unsigned> ignore_continuous_at_interfaces)
   {
     // throw_runtime_error("Implement");
@@ -882,7 +954,7 @@ namespace pyoomph
 
 
     std::set<unsigned> DLindices;
-    for (unsigned int i = ft->info_DL.numfields; i < ft->info_DL.numfields; i++)
+    for (unsigned int i = 0; i < ft->info_DL.numfields; i++) // BUGFIX: loop previously started at numfields (i.e. never ran), so DL fields were never collected/pinned
     {
       if (mustpin(ft->info_DL.fieldnames[i]))
         DLindices.insert(i);
@@ -978,11 +1050,14 @@ namespace pyoomph
     }
   }
 
+  // Not yet implemented on the base Mesh class (always throws); presumably meant to classify each dof
+  // by type into typarr, analogous to describe_global_dofs.
   void Mesh::fill_dof_types(int *typarr)
   {
     throw_runtime_error("Implement");
   }
 
+  // Build a map from node pointer to its index in this mesh's Node_pt array.
   void Mesh::fill_node_map(std::map<oomph::Node *, unsigned> &nodemap)
   {
     for (unsigned int i = 0; i < this->nnode(); i++)
@@ -991,6 +1066,9 @@ namespace pyoomph
     }
   }
 
+  // Inverse of fill_node_map: returns nodes indexed in the same order fill_node_map would assign. If
+  // discontinuous is set, returns one entry per element-local node (with duplicates for shared nodes,
+  // matching count_nnode(true)'s per-element numbering) instead of the mesh's unique node list.
   std::vector<oomph::Node *> Mesh::fill_reversed_node_map(bool discontinuous)
   {
     std::vector<oomph::Node *> result;
@@ -1016,6 +1094,8 @@ namespace pyoomph
     return result;
   }
 
+  // Look up (or, if not yet present, create) the local index assigned to the named interface-only dof
+  // on this mesh; indices are assigned sequentially in first-seen order.
   unsigned Mesh::resolve_interface_dof_id(std::string n)
   {
     if (!interface_dof_ids.count(n))
@@ -1025,6 +1105,7 @@ namespace pyoomph
     return interface_dof_ids[n];
   }
 
+  // Like resolve_interface_dof_id, but purely a lookup: returns -1 if n has not been registered yet.
   int Mesh::has_interface_dof_id(std::string n)
   {
     if (!interface_dof_ids.count(n))
@@ -1034,6 +1115,9 @@ namespace pyoomph
     return interface_dof_ids[n];
   }
 
+  // Bind this mesh to its owning Problem and JIT-compiled element code. On first binding (when
+  // dirichlet_active is still empty), initializes the per-dof Dirichlet-active flags from the code's
+  // default Dirichlet_set (which fields are Dirichlet-constrained by default in the generated code).
   void Mesh::_set_problem(Problem *p, DynamicBulkElementInstance *code)
   {
     problem = p;
@@ -1056,6 +1140,10 @@ namespace pyoomph
     }
   }
 
+  // Currently unimplemented (always throws); the commented-out code below sketches the intended
+  // approach: locate each zeta coordinate in the mesh via oomph::MeshAsGeomObject::locate_zeta and
+  // evaluate/interpolate all fields there, optionally applying output_scales, marking entries whose
+  // zeta could not be located in masked_lines.
   std::vector<std::vector<double>> Mesh::get_values_at_zetas(const std::vector<std::vector<double>> &zetas, std::vector<bool> &masked_lines, bool with_scales)
   {
     throw_runtime_error("Implement");
@@ -1124,6 +1212,11 @@ namespace pyoomph
     */
   }
 
+  // Evaluate the local expression `index` at every node of the mesh. In continuous (non-discontinuous)
+  // mode, a node shared by several elements gets the average of the per-element evaluations at that
+  // node (accumulated in res/denom and divided at the end); in discontinuous mode, one value per
+  // element-local node occurrence is kept instead (no averaging), matching count_nnode(true)'s
+  // ordering. The result is scaled by output_scales[exprname] unless nondimensional is requested.
   std::vector<double> Mesh::evaluate_local_expression_at_nodes(unsigned index, bool nondimensional, bool discontinuous)
   {
     std::map<oomph::Node *, unsigned> nodemap;
@@ -1181,6 +1274,24 @@ namespace pyoomph
     return res;
   }
 
+  // Export the entire mesh into flat, pre-allocated buffers suitable for wrapping as numpy arrays
+  // (used by the Python output/plotting layer). All buffers must already be sized according to a
+  // prior call to get_num_numpy_elemental_indices()/count_nnode(discontinuous) etc.
+  //  - xbuffer: one row of length contstride per node (or, if discontinuous, per element-local node
+  //    occurrence, following fill_reversed_node_map's ordering), containing, in order: nodal Eulerian
+  //    position, Lagrangian position, base-bulk continuous field values, DG field values, additional
+  //    interface-only continuous field values, and (for meshes with a well-defined normal, e.g.
+  //    codim-1 interfaces) the unit normal - all at time-history index history_index and scaled by
+  //    output_scales unless nondimensional is set.
+  //  - eleminds/elemtypes: per-element (or, if tesselate_tri, per sub-triangle) connectivity into
+  //    xbuffer's rows and a type code describing the element's shape, for plotting libraries that need
+  //    an explicit topology (e.g. matplotlib/VTK-style triangulated meshes).
+  //  - D0_data/DL_data: separately, the internal (not nodal) D0/DL field values, one row per element.
+  // DG fields and interface normals are not stored per-node in the underlying data structures, so
+  // (unless discontinuous, which keeps one value per element already) they are accumulated by summing
+  // each element's contribution at a shared node and dividing by the number of contributing elements
+  // (dg_denom) - i.e. an arithmetic average across elements meeting at that node, purely for display
+  // purposes (this is not a variational/consistent nodal projection).
   void Mesh::to_numpy(double *xbuffer, int *eleminds, unsigned elemstride, int *elemtypes, bool tesselate_tri, bool nondimensional, double *D0_data, double *DL_data, unsigned history_index, bool discontinuous)
   {
     // unsigned nnode=this->count_nnode();
@@ -1571,6 +1682,13 @@ namespace pyoomph
     // Apply the scaling
   }
 
+  // Compute this mesh's contribution to the global temporal error norm used for adaptive time
+  // stepping: for every field with a nonzero temporal_error_scales entry (continuous nodal fields,
+  // then internal DL, then internal D0 fields), sum the squared per-dof temporal error estimate
+  // (time_stepper_pt()->temporal_error_in_value, weighted by the field's error scale) over all
+  // non-pinned dofs, and return the mean square error over all counted dofs (denom). Pinned nodal
+  // dofs are excluded since they don't have an independent time-stepping error. Returns 0 if the
+  // element code has no temporal estimators or no elements/contributing dofs exist.
   double Mesh::get_temporal_error_norm_contribution()
   {
     if (!this->nelement())
@@ -1640,6 +1758,9 @@ namespace pyoomph
     return res / denom;
   }
 
+  // Overwrite the Lagrangian coordinates (xi) of every node with its current Eulerian position (x),
+  // for all generalized position types - i.e. "freeze" the current deformed shape as the new stress-free
+  // reference configuration.
   void Mesh::set_lagrangian_nodal_coordinates()
   {
     std::cout << "Setting Lagrangian nodal coordinates for all nodes in mesh" << std::endl;
@@ -1659,13 +1780,13 @@ namespace pyoomph
     }
   }
 
-  // Activate debug to check if function is correct
-  void Mesh::activate_duarte_debug()
-  {
-    Mesh::duarte_debug = true;
-  };
 
-  //
+  // For every integration point of every element of this (new) mesh, locate the corresponding point in
+  // oldmesh (wrapped as a MeshAsGeomObject, i.e. via global zeta/Eulerian coordinates) and cache the
+  // resulting (old element, old local coordinate) pair in curr_el->coords_oldmesh. This precomputed
+  // mapping is later used (e.g. by nodal_interpolate_from/projection) to transfer field values from
+  // the old mesh to this mesh's integration points without repeating the (potentially expensive)
+  // point-location search for every quantity being transferred.
   void Mesh::prepare_zeta_interpolation(Mesh *oldmesh)
   {
 
@@ -1699,50 +1820,7 @@ namespace pyoomph
       // Fill the vector pair.
       curr_el->prepare_zeta_interpolation(&mesh_as_geom);
     }
-
-    // Debug purposes! Ignore and delete when everything is fixed.
-    if (this->duarte_debug)
-    {
-
-      // Loop through all elements.
-      for (unsigned el = 0; el < nelem; el++)
-      {
-
-        // Current element
-        BulkElementBase *curr_el = dynamic_cast<BulkElementBase *>(this->element_pt(el));
-
-        // Number of integration points.
-        unsigned int n_intpt = curr_el->integral_pt()->nweight();
-
-        // Dimension of element
-        const unsigned int dim = curr_el->dim();
-
-        // Loop through ipts
-        for (unsigned ipt = 0; ipt < n_intpt; ipt++)
-        {
-          // Get zeta-values of vector pair
-          BulkElementBase *old_elem = curr_el->coords_oldmesh[ipt].first;
-          oomph::Vector<double> s = curr_el->coords_oldmesh[ipt].second;
-          oomph::Vector<double> zeta(dim, 0.0);
-          old_elem->interpolated_zeta(s, zeta);
-
-          // Get zeta-values of old mesh
-          oomph::Vector<double> curr_zeta(dim, 0.0);
-          oomph::Vector<double> curr_s(dim, 0.0);
-          for (unsigned i = 0; i < dim; i++)
-          {
-            curr_s[i] = curr_el->integral_pt()->knot(ipt, i);
-          }
-          curr_el->interpolated_zeta(curr_s, curr_zeta);
-
-          // Compare the local coordinates of the old mesh on integration points with the ones given by the vector pair.
-          for (unsigned i = 0; i < dim; i++)
-          {
-            std::cout << "OLD MESH: " << curr_zeta[i] << "\t" << "NEW MESH: " << zeta[i] << "\t" << "DELTA: " << zeta[i] - curr_zeta[i] << "\n";
-          }
-        }
-      }
-    }
+    
   }
 
   // Update time level for each element.
@@ -1770,6 +1848,22 @@ namespace pyoomph
   }
 
   // This only works in max. 2d well
+  //
+  // Transfer nodal field values from an old mesh's boundary (old, boundary index oldbind) to this
+  // mesh's corresponding boundary (bind) - used e.g. after remeshing a boundary/interface region where
+  // a full-mesh nodal_interpolate_from would be inaccurate or too expensive right at the boundary.
+  // High-level algorithm:
+  //  1. Build a field_map from this mesh's continuous field indices to the old mesh's field indices by
+  //     matching field names (only needed if the two meshes use different JIT code instances, i.e.
+  //     potentially different field sets/ordering).
+  //  2. For every node on this mesh's boundary bind, find the nearest and second-nearest node (by
+  //     Euclidean distance in physical space) on the old mesh's boundary oldbind. If the nearest match
+  //     is farther away than boundary_max_dist (when positive), the node is skipped with a warning.
+  //  3. Linearly interpolate the field values between the nearest and second-nearest old node, weighted
+  //     inversely by their respective distances (lambda1, lambda2, normalized so lambda1+lambda2=1),
+  //     giving a cheap 1d ("along the boundary") linear interpolation without needing explicit
+  //     boundary-arclength bookkeeping. Interface-only additional dofs are transferred analogously via
+  //     imesh/oldimesh (the corresponding interface meshes), using inter_field_map.
   void Mesh::nodal_interpolate_along_boundary(Mesh *old, int bind, int oldbind, Mesh *imesh, Mesh *oldimesh, double boundary_max_dist)
   {
     //std::cout << "Nodal interpolation along boundary " << bind << std::endl;
@@ -2106,6 +2200,16 @@ namespace pyoomph
     }
   }
 
+  // Transfer nodal field values (and, if requested, Lagrangian coordinates) from mesh `from` to this
+  // mesh, over the whole mesh (boundary_index<0) or restricted to one boundary (boundary_index>=0).
+  // Unlike nodal_interpolate_along_boundary's nearest-node matching, this locates each of this mesh's
+  // nodes within the `from` mesh by global (Eulerian or, if
+  // interpolated_lagrangian_coordinates_at_remeshing, Lagrangian - via zeta_coordinate_type) position
+  // using oomph::MeshAsGeomObject::locate_zeta, and then evaluates/interpolates the `from` element's
+  // shape functions at that local coordinate to obtain exact interpolated values, rather than picking
+  // the value at a nearby existing node. As in the boundary variant, a field_map translates field
+  // indices between the two mesh's JIT-compiled code instances (identity if they are the same code),
+  // and DG/DL/D0 (discontinuous) fields are not supported (throws if present).
   void Mesh::nodal_interpolate_from(Mesh *from, int boundary_index)
   {
     this->interpolated_lagrangian_coordinates_at_remeshing=from->interpolated_lagrangian_coordinates_at_remeshing;
@@ -2483,6 +2587,14 @@ namespace pyoomph
 
   
 
+  // Create new, unattached nodes (not added to any element/mesh storage - just returned to the caller,
+  // e.g. for probing/sampling) at the given physical coordinates. For each requested coordinate, the
+  // containing element is located via MeshAsGeomObject::locate_zeta; if found, the new node's field
+  // values and Eulerian position are set at every time-history level by interpolating the source
+  // element's shape functions there. If no containing element is found (point outside the mesh), the
+  // node is still created (with only its position set) but left without interpolated values.
+  // all_as_boundary_nodes selects whether the new nodes are BoundaryNode (needed if they will later be
+  // added to a mesh boundary) or plain Node instances.
   std::vector<pyoomph::Node*> Mesh::add_interpolated_nodes_at(const std::vector<std::vector<double> > & coords,bool all_as_boundary_nodes)
   {
     std::vector<pyoomph::Node*> res;
@@ -2541,6 +2653,11 @@ namespace pyoomph
     return res;
   }
 
+  // Determine and store the numeric factor by which field fname's raw (nondimensional) values must be
+  // multiplied to convert to the physical scale s requested for output: computed as the field's
+  // intrinsic scaling (from the generated code) divided by s, with any symbolic placeholders/global
+  // parameters resolved to their current numeric values. Throws if the resulting expression is not a
+  // pure number (i.e. s has incompatible units/dimension with the field).
   void Mesh::set_output_scale(std::string fname, GiNaC::ex s, DynamicBulkElementInstance *_code)
   {
     if (!_code)
@@ -2567,6 +2684,14 @@ namespace pyoomph
     }
   }
 
+  // Fill doftype (indexed by the problem's global equation number) with a type index describing the
+  // kind/name of each global dof owned by this mesh, and typnames with the corresponding human-readable
+  // names (indexed by that type). Type names are, in order: the mesh's non-standard Dirichlet condition
+  // names (skipping the first three reserved slots), then (if the mesh has moving nodes) "mesh_x"/"y"/"z".
+  // The actual dof-to-type assignment then walks nodal (continuous-space and DG) dofs, internal DL/D0
+  // data, and nodal position dofs, mapping each dof's global equation number (eqn_number) to the field
+  // index it corresponds to in the generated code's field ordering (buffer_offset_basebulk/interf).
+  // Used for introspection/debugging of the assembled Jacobian's dof structure.
   void Mesh::describe_global_dofs(std::vector<int> &doftype, std::vector<std::string> &typnames)
   {
     typnames.clear();
@@ -2714,6 +2839,12 @@ namespace pyoomph
       return 1.0;
   }
 
+  // Register the symbolic initial-condition expression for fieldname. The expression is first
+  // rewritten in terms of nondimensional fields (ReplaceFieldsToNonDimFields) and divided by the
+  // field's scaling factor, then sanity-checked by substituting the first node's current
+  // coordinates/time and verifying the result evaluates to a plain number (catching ICs that
+  // reference undefined symbols or still carry physical units). Finally all base units are set to 1 in
+  // the stored expression, since it is meant to be evaluated purely numerically later.
   void Mesh::set_initial_condition(std::string fieldname, GiNaC::ex expression)
   {
     if ((!this->nnode()) || (!this->nelement()))
@@ -2771,6 +2902,13 @@ namespace pyoomph
               << initial_conditions[fieldname] << std::endl;
   }
 
+  // Helper used by Mesh::setup_initial_conditions to evaluate and assign one dof (nodal field value,
+  // internal DL/D0 value, or - if fieldindex<0 - a nodal position component) of a single Data object
+  // for every stored time-history level. use_identity requests just copying the dof's current value
+  // (an identity "IC" used e.g. to keep a value fixed / re-seed history after a restart) instead of
+  // evaluating the actual symbolic expression; when resetting_first_step is set, position dofs at the
+  // current time level (t==0) are instead re-seeded from the previous time level's value, so a fresh
+  // restart doesn't discard the last known velocity/history information.
   void Generic_SetInitialCondition(BulkElementBase *elempt, oomph::Data *data, DynamicBulkElementInstance *ci, int fieldindex, unsigned valindex, double *x_buffer, double *x_lagr, double *normal, bool use_identity, bool resetting_first_step, unsigned icindex)
   {
     auto *ts = data->time_stepper_pt();
@@ -2841,6 +2979,13 @@ namespace pyoomph
     }
   }
 
+  // Evaluate and assign the named initial-condition set ic_name to every dof of every element in this
+  // mesh, at every stored time-history level. If this mesh has a well-defined normal (codim-1, i.e.
+  // nodal_dim == element_dim+1), first precomputes an averaged unit nodal normal at every node
+  // (accumulated from all adjacent elements' get_normal_at_s and renormalized), so IC expressions can
+  // reference the local normal direction. Looks up ic_name in the code's registered IC set
+  // (ft->IC_names); if not found, silently does nothing (this mesh's code may simply not define that
+  // IC set). The actual per-dof evaluation/assignment is delegated to Generic_SetInitialCondition.
   void Mesh::setup_initial_conditions(bool resetting_first_step, std::string ic_name)
   {
     //  std::cout << "CALLED SET IC  "  << ic_name << std::endl;
@@ -3119,6 +3264,10 @@ namespace pyoomph
     }
   }
 
+  // Toggle whether the named Dirichlet condition is currently enforced. "mesh_x"/"y"/"z" are aliased
+  // to the generated code's "coordinate_x"/"y"/"z" Dirichlet names (mesh-motion boundary conditions).
+  // The name is resolved to an index into dirichlet_active via the code's Dirichlet_names table (using
+  // codeinst directly if this mesh has no elements yet, e.g. before the mesh is built).
   void Mesh::set_dirichlet_active(std::string name, bool active)
   {
     int index = -1;
@@ -3132,8 +3281,8 @@ namespace pyoomph
     if (!this->nelement())
     {
       if (!codeinst)
-        throw_runtime_error("Cannot toggle a Dirichlet active without elements or JIT code instance.")
-            ft = codeinst->get_func_table();
+        throw_runtime_error("Cannot toggle a Dirichlet active without elements or JIT code instance."); // Note: throw_runtime_error already expands to a statement ending in ';'
+      ft = codeinst->get_func_table();
     }
     else
     {
@@ -3155,6 +3304,8 @@ namespace pyoomph
     dirichlet_active[index] = active;
   }
 
+  // Query whether the named Dirichlet condition is currently active; see set_dirichlet_active for the
+  // name resolution/aliasing rules.
   bool Mesh::get_dirichlet_active(std::string name)
   {
     int index = -1;
@@ -3184,6 +3335,8 @@ namespace pyoomph
     return dirichlet_active[index];
   }
 
+  // Spatial (Eulerian) dimension of this mesh's nodes; falls back to asking the first element directly
+  // if the mesh has elements but no nodes yet (e.g. during construction), or 0 if entirely empty.
   unsigned Mesh::get_nodal_dimension()
   {
     if (!this->nnode())
@@ -3200,6 +3353,7 @@ namespace pyoomph
     return this->node_pt(0)->ndim();
   }
 
+  // Intrinsic (reference-element) dimension of this mesh's elements, or -1 if the mesh has no elements.
   int Mesh::get_element_dimension()
   {
     if (!this->nelement())
@@ -3207,6 +3361,9 @@ namespace pyoomph
     return dynamic_cast<BulkElementBase *>(this->element_pt(0))->dim();
   }
 
+  // Pin dofs that the assembled Jacobian has marked as having an entirely empty row (i.e. dofs that do
+  // not actually enter any residual equation), which would otherwise make the linear system singular.
+  // Only runs when the Problem has actually flagged such rows (has_empty_jacobian_rows_marked).
   void Mesh::pin_noncontributing_dofs()
   {
     if (!this->nelement()) return;
@@ -3300,9 +3457,16 @@ namespace pyoomph
     }
   }
 
+  // For every global dof (indexed by its equation number) owned by this mesh's elements/nodes, store
+  // in dofs_to_global_field_index[eqn_number] the corresponding global field index, as looked up via
+  // the generated code's dirichlet_field_index_to_global_field_index table (Doffset=3 accounts for
+  // that table's three reserved leading slots). Covers, in turn: nodal position ("moving mesh") dofs,
+  // base-bulk continuous field dofs, DG field dofs, interface-only continuous dofs (only for elements
+  // that are actually InterfaceElementBase), and internal DL/D0 dofs. Used to relate raw Newton/linear
+  // solver dof indices back to named physical fields (e.g. for Dirichlet-condition bookkeeping).
   void Mesh::fill_dof_to_global_field_index_buffer(std::vector<int> &dofs_to_global_field_index)
   {
-    if (!this->nelement()) return;    
+    if (!this->nelement()) return;
     auto *el0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
     auto *ft = el0->get_code_instance()->get_func_table();
     int Doffset = 3;
@@ -3387,6 +3551,15 @@ namespace pyoomph
     }    
   }
 
+  // Applies (or, if only_update_vals, re-evaluates) the Dirichlet conditions marked
+  // active in dirichlet_active for every kind of dof this mesh can carry: nodal
+  // positions, nodally-interpolated continuous fields, DG fields (owned per-element),
+  // interface-only fields living on BoundaryNodeBase value slots, and elemental
+  // (DL/D0) dofs. Doffset shifts the dirichlet_active index space so that the
+  // position dofs (encoded as negative valindex, -1-d) and the field dofs share one
+  // flat array. For meshes without their own nodes (e.g. interface meshes) the
+  // per-node loop is skipped and the equivalent work is done per-element instead,
+  // additionally evaluating the local normal (needed by some Dirichlet expressions).
   void Mesh::setup_Dirichlet_conditions(bool only_update_vals)
   {
     double x_buffer[3] = {0, 0, 0};
@@ -3398,6 +3571,7 @@ namespace pyoomph
     auto *ft = el->get_code_instance()->get_func_table();
     int Doffset = 3;
 
+    // Nodal position dofs (Dirichlet conditions on mesh coordinates, e.g. for ALE)
     for (unsigned int ni = 0; ni < this->nnode(); ni++)
     {
       pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(this->node_pt(ni));
@@ -3416,6 +3590,7 @@ namespace pyoomph
       }
     }
 
+    // Nodally-interpolated continuous field dofs (basebulk part only)
     for (unsigned int ni = 0; ni < this->nnode(); ni++)
     {
       pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(this->node_pt(ni));
@@ -3441,6 +3616,9 @@ namespace pyoomph
 
     const std::vector<std::vector<unsigned int>> space_to_elem_node_index = el->get_nodal_space_index_to_element_index_map();
 
+    // DG field dofs: unlike continuous fields these are owned per-element (each
+    // element has its own copy of the nodal data), so the loop is over elements
+    // rather than shared mesh nodes.
     for (unsigned si=0;si<ft->num_present_dg_spaces;si++)
     {
       auto * space_info=ft->present_dg_spaces[si];
@@ -3471,6 +3649,9 @@ namespace pyoomph
 
     if (!this->nnode()) // This happens for interface meshes. Here, we also can access the normal, since we do it on an elemental basis
     {
+      // Interface meshes have no nodes of their own (Node_pt is empty), so we
+      // instead iterate over the elements' nodes directly, which also lets us
+      // compute the outward normal at each node for use in Dirichlet expressions.
       for (unsigned int ei = 0; ei < this->nelement(); ei++)
       {
         auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ei));
@@ -3514,6 +3695,10 @@ namespace pyoomph
             }
           }
           
+          // Interface-only fields (the part of the space not present in the bulk):
+          // these live in extra value slots that FaceElements attach to boundary
+          // nodes, so their index must be looked up via index_of_first_value_assigned_by_face_element
+          // rather than being a fixed offset.
           for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
           {
             auto * space_info=ft->present_continuous_spaces[si];
@@ -3530,6 +3715,10 @@ namespace pyoomph
       }
     }
 
+    // Elemental (DL and D0) dofs, evaluated at the element midpoint. DL fields also
+    // carry a linear slope in each local direction j (stored at internal value index
+    // j+1), obtained here by finite-differencing the field value at s_min and s_max
+    // of that direction and dividing by the local coordinate range.
     for (unsigned int ei = 0; ei < this->nelement(); ei++)
     {
       auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ei));
@@ -3579,12 +3768,14 @@ namespace pyoomph
             for (unsigned t = 0; t < vmax.size(); t++)
               vmax[t] = this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex)->value(t, 0);
 
+            // Slope in direction j = (value at s_max - value at s_min) / range
             double denom = el->s_max() - el->s_min();
             for (unsigned t = 0; t < vmax.size(); t++)
               this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex)->set_value(t, j + 1, (vmax[t] - vmin[t]) / denom);
           }
           s[j] = old;
         }
+        // Finally reapply the Dirichlet condition at the midpoint itself (value slot 0)
         if (dirichlet_active[fieldindex + ft->info_DL.buffer_offset_basebulk + Doffset])
         {
           Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex), el->get_code_instance(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals);
@@ -3595,6 +3786,7 @@ namespace pyoomph
         x_buffer[i] = xcenter[i];
       for (unsigned int i = 0; i < xlagr.size(); i++)
         x_lagr[i] = xlagr[i];
+      // D0 fields are piecewise-constant, so a single midpoint evaluation suffices
       for (unsigned int fieldindex = 0; fieldindex < ft->info_D0.numfields; fieldindex++)
       {
         if (dirichlet_active[fieldindex + ft->info_D0.buffer_offset_basebulk + Doffset])
@@ -3606,6 +3798,8 @@ namespace pyoomph
   }
 
 
+  // ODEStorageMesh has no spatial structure, so it disables adaptation and uses a
+  // dummy error estimator only to satisfy PARANOID checks that require a non-NULL one.
   ODEStorageMesh::ODEStorageMesh() : Mesh()
 		{
 			this->disable_adaptation();
@@ -3619,15 +3813,21 @@ namespace pyoomph
 			this->Element_pt.clear(); // Keep the ODEs alive, they are killed by python
 		}
 
+  // Creates a new "0d" pseudo-element wrapping a single ODE, using the code
+  // instance's generated residual/Jacobian routines. __CurrentCodeInstance is a
+  // thread-local-like hook that BulkElementODE0d's constructor reads to know which
+  // generated code table it belongs to.
   oomph::GeneralisedElement *ODEStorageMesh::_create_ode_element(oomph::TimeStepper *ts)
   {
-    BulkElementBase::__CurrentCodeInstance = this->codeinst;            
+    BulkElementBase::__CurrentCodeInstance = this->codeinst;
     oomph::GeneralisedElement *ode = new BulkElementODE0d(this->codeinst, ts);
     BulkElementBase::__CurrentCodeInstance = NULL;
     this->add_element_pt(ode);
     return ode;
   }
 
+  // Applies a named initial condition to every stored ODE that defines one; ODEs
+  // without a matching IC name are silently skipped.
   void ODEStorageMesh::setup_initial_conditions(bool resetting_first_step, std::string ic_name)
   {
     double x_buffer[3] = {0, 0, 0};
@@ -3655,6 +3855,9 @@ namespace pyoomph
     }
   }
 
+  // ODE dofs have no spatial position, so x_buffer stays at the origin; a dof not
+  // (or no longer) marked Dirichlet-active is explicitly unpinned so that toggling
+  // dirichlet_active off actually frees the dof again.
   void ODEStorageMesh::setup_Dirichlet_conditions(bool only_update_vals)
   {
     double x_buffer[3] = {0, 0, 0};
@@ -3677,6 +3880,8 @@ namespace pyoomph
     }
   }
 
+  // Registers a new named ODE element; the name -> element index mapping allows
+  // later lookup via get_ODE. Throws if the name is already taken.
   unsigned ODEStorageMesh::add_ODE(std::string name, oomph::GeneralisedElement *ode)
   {
     unsigned res = this->nelement();
@@ -3694,6 +3899,9 @@ namespace pyoomph
     return this->element_pt(name_to_index[name]);
   }
 
+  // Root-mean-square temporal error estimate (used for adaptive timestepping)
+  // accumulated over all unpinned D0 dofs of all ODEs that opted into temporal
+  // error estimation, weighted by each dof's configured error scale.
   double ODEStorageMesh::get_temporal_error_norm_contribution()
   {
     if (!this->nelement())
@@ -3726,6 +3934,8 @@ namespace pyoomph
     return res / denom;
   }
 
+  // Interface meshes are built from FaceElements attached to a bulk mesh's boundary
+  // and never adapted independently (they follow the bulk mesh's adaptation).
   InterfaceMesh::InterfaceMesh() : Mesh(), code(NULL), bulkmesh(NULL)
   {
     this->disable_adaptation();
@@ -3739,6 +3949,9 @@ namespace pyoomph
     //	 if (this->spatial_error_estimator_pt()) delete this->spatial_error_estimator_pt();
   }
 
+  // Tells every interface (FaceElement-derived) element to recompute how its local
+  // equations map onto the bulk element's global equation numbers, e.g. after the
+  // bulk mesh's dof numbering has changed.
   void InterfaceMesh::update_equation_remapping()
   {
     for (unsigned int ie = 0; ie < this->nelement(); ie++)
@@ -3748,6 +3961,11 @@ namespace pyoomph
     }
   }
 
+  // Writes each node's boundary/zeta coordinate (as seen from the interface) back
+  // into the nodal-data buffer slot reserved for it, at the offset that follows the
+  // Eulerian, Lagrangian and local-coordinate slots. Needed so the generated code
+  // (which reads zeta straight out of that buffer) sees up-to-date values, e.g.
+  // after the interface mesh moved or was rebuilt.
   void InterfaceMesh::update_zeta_in_buffer()
   {
     for (unsigned int ie = 0; ie < this->nelement(); ie++)
@@ -3756,20 +3974,27 @@ namespace pyoomph
       DynamicBulkElementInstance *ci = be->get_code_instance();
       auto *functable = ci->get_func_table();
       auto &eleminfo = *be->get_eleminfo();
-      unsigned offset_zeta=eleminfo.nodal_dim + functable->lagr_dim +be->dim(); // This is the offset for the zeta coordinate in the nodal data ( first Eulerian, then Lagrangian, then local coords. Finally zeta coords)      
+      unsigned offset_zeta=eleminfo.nodal_dim + functable->lagr_dim +be->dim(); // This is the offset for the zeta coordinate in the nodal data ( first Eulerian, then Lagrangian, then local coords. Finally zeta coords)
       oomph::Vector<double> zeta(be->dim(), 0.0);
       oomph::Vector<double> sinter(be->dim(), 0.0);
       for (unsigned int in=0;in<be->nnode();in++)
-      {                        
+      {
         for (unsigned int iz=0;iz<be->dim();iz++)
         {
           //std::cout << "SETTING ZETA " << in << "  " << iz << " to ["<< offset_zeta+iz <<"]" << be->zeta_nodal(in,0,iz) << std::endl;
           *(be->get_eleminfo()->nodal_coords[in][offset_zeta+iz])=be->zeta_nodal(in,0,iz);
-        }        
+        }
       }
     }
   }
 
+  // For DG fields living on a 1d interface, builds the pairing between each element's
+  // "internal" face (touching a vertex it does not own uniquely) and the opposite
+  // element/face sharing that vertex, so DG jump terms can be assembled across the
+  // interface. Works by walking vertex nodes of every element and matching them up
+  // via nodemap: the first element to visit a (possibly copied) vertex node registers
+  // itself; the second visit records the pairing in both directions' output vectors.
+  // Currently restricted to 1d interfaces (embedded in 2d bulk meshes).
   void InterfaceMesh::fill_internal_facet_buffers(std::vector<BulkElementBase *> &internal_elements, std::vector<int> &internal_face_dir, std::vector<BulkElementBase *> &opposite_elements, std::vector<int> &opposite_face_dir, std::vector<int> &opposite_already_at_index)
   {
     internal_elements.clear();
@@ -3811,6 +4036,12 @@ namespace pyoomph
     }
   }
 
+  // Same purpose as Mesh::get_temporal_error_norm_contribution / ODEStorageMesh's
+  // variant, but for interface fields: nodal contributions are only counted once per
+  // node (tracked via handled_nodes_on_conti_spaces, since interface nodes are shared
+  // between elements), plus contributions from the interface-only part of continuous
+  // spaces (looked up via index_of_first_value_assigned_by_face_element) and from
+  // elemental DL/D0 dofs. DG spaces are not yet handled here (see TODO below).
   double InterfaceMesh::get_temporal_error_norm_contribution()
   {
     if (!this->nelement())
@@ -3903,6 +4134,9 @@ namespace pyoomph
     return res / denom;
   }
 
+  // Falls back from the generic Mesh implementation (which needs an actual node to
+  // inspect, and interface meshes may have none) to the code instance's declared
+  // nodal dimension, or finally to the bulk mesh's dimension if no code is set yet.
   unsigned InterfaceMesh::get_nodal_dimension()
   {
     unsigned np = Mesh::get_nodal_dimension();
@@ -3920,6 +4154,8 @@ namespace pyoomph
     return np;
   }
 
+  // An interface element's dimension is one lower than that of the bulk elements it
+  // is attached to (e.g. 1d line elements on a 2d bulk mesh).
   int InterfaceMesh::get_element_dimension()
   {
     int np = Mesh::get_element_dimension();
@@ -3935,6 +4171,9 @@ namespace pyoomph
     return np;
   }
 
+  // Assigns a contiguous index to every distinct node referenced by this mesh's
+  // elements (nodes are shared with the bulk mesh, so an interface mesh has no
+  // Node_pt of its own and must enumerate nodes via its elements instead).
   void InterfaceMesh::fill_node_map(std::map<oomph::Node *, unsigned> &nodemap)
   {
     unsigned cnt = 0;
@@ -3951,6 +4190,9 @@ namespace pyoomph
     }
   }
 
+  // Inverse of fill_node_map: returns nodes in enumeration order. In discontinuous
+  // mode every element's nodes are listed separately (duplicates included, matching
+  // per-element/discontinuous output layouts); otherwise each distinct node appears once.
   std::vector<oomph::Node *> InterfaceMesh::fill_reversed_node_map(bool discontinuous)
   {
     std::vector<oomph::Node *> result;
@@ -3971,6 +4213,10 @@ namespace pyoomph
     return result;
   }
 
+  // Counts nodes touched by this interface mesh's elements: unique nodes (shared
+  // between elements) when continuous, or the sum of each element's node count when
+  // discontinuous. See class comment on Mesh for why interface meshes need this
+  // element-based counting instead of using nnode() directly.
   unsigned InterfaceMesh::count_nnode(bool discontinuous)
   {
     if (!discontinuous)
@@ -3995,6 +4241,9 @@ namespace pyoomph
     }
   }
 
+  // Currently disabled/unused feature (kept for reference): would zero out selected
+  // bulk residual contributions at boundary nodes touched by this interface, for
+  // bulk equations that this interface's code instance flags for nullification.
   void InterfaceMesh::nullify_selected_bulk_dofs()
   {
     throw_runtime_error("Nullified dofs are deactivated for now... Never used so far");
@@ -4020,6 +4269,11 @@ namespace pyoomph
     */
   }
 
+  // Destroys all of this interface mesh's own elements (its nodes are shared with
+  // the bulk mesh and thus not owned/deleted here) prior to the bulk mesh being
+  // adapted; interface elements are always fully rebuilt afterwards rather than
+  // incrementally adapted. opposite_interior_facets may contain duplicate pointers
+  // (shared between adjacent elements), so a seen-set avoids double deletion.
   void InterfaceMesh::clear_before_adapt()
   {
     unsigned n_element = this->nelement();
@@ -4041,6 +4295,10 @@ namespace pyoomph
     this->invalidate_lagrangian_kdtree();
   }
 
+  // Populates Boundary_element_pt/Face_index_at_boundary for a 1d interface mesh
+  // (points as boundary "faces"): a vertex node of a line element that also lies on
+  // one of the parent's possible_bounds boundaries makes that element a boundary
+  // element there, with Face_index +/-1 marking the left/right end.
   void InterfaceMesh::setup_boundary_information1d(pyoomph::Mesh *parent, const std::set<unsigned> &possible_bounds)
   {
     // const unsigned n_bound = nboundary();
@@ -4087,6 +4345,11 @@ namespace pyoomph
     }
   }
 
+  // 2d counterpart of setup_boundary_information1d: for each candidate local face
+  // direction of a quad or triangle bulk element (quads: +/-1,+/-2 for the four
+  // edges; tris: 0,1,2), intersects the boundary sets of every node on that face
+  // with the running set of possible boundaries. What remains after visiting all of
+  // the face's nodes is the set of boundaries the whole face lies on.
   void InterfaceMesh::setup_boundary_information2d(pyoomph::Mesh *parent, const std::set<unsigned> &possible_bounds)
   {
     // const unsigned n_bound = nboundary();
@@ -4174,6 +4437,12 @@ namespace pyoomph
     }
   }
 
+  // Top-level driver that sets up this interface mesh's boundary lookup tables by
+  // inheriting the parent (bulk) mesh's boundary names/indices, but excluding the
+  // "pseudo-boundaries" introduced by this interface and any interface stacked on
+  // top of it (interfaces-on-interfaces), since those are not real geometric
+  // boundaries of the underlying domain. Dispatches to the 1d/2d helpers depending
+  // on element dimensionality.
   void InterfaceMesh::setup_boundary_information(pyoomph::Mesh *parent)
   {
     boundary_names = parent->get_boundary_names(); // Just make a copy of it. However, not all will be non-empty
@@ -4208,6 +4477,8 @@ namespace pyoomph
         }
       }
     }
+    // Collect every "real" boundary index (i.e. not one of the excluded interface
+    // pseudo-boundaries) touched by any node of this interface's elements.
     std::set<unsigned> possible_bounds;
     for (unsigned int el = 0; el < this->nelement(); el++)
     {
@@ -4257,6 +4528,10 @@ namespace pyoomph
     Lookup_for_elements_next_boundary_is_setup = true;
   }
 
+  // Rebuilds this interface mesh from scratch after the bulk mesh has been adapted
+  // (interface elements are never incrementally adapted, see clear_before_adapt).
+  // Adaptive meshes with discontinuous (DG) fields defined at the interface are not
+  // yet supported and are rejected with an explanatory error.
   void InterfaceMesh::rebuild_after_adapt()
   {
     if (code)
@@ -4294,6 +4569,10 @@ namespace pyoomph
     this->invalidate_lagrangian_kdtree();
   }
 
+  // Stores the information needed to (re)build this interface mesh's elements later
+  // (via rebuild_after_adapt/generate_interface_elements): which bulk mesh it is
+  // attached to, under which boundary/interface name, and which generated code
+  // instance defines its fields. Also pre-resolves the interface dof indices.
   void InterfaceMesh::set_rebuild_information(Mesh *_bulkmesh, std::string intername, DynamicBulkElementInstance *jitcode)
   {
     bulkmesh = _bulkmesh;
@@ -4306,6 +4585,11 @@ namespace pyoomph
     }*/
   }
 
+  // Pairs up each element of this interface mesh with the geometrically coincident
+  // element of `other` (e.g. the same physical interface seen from the two adjacent
+  // bulk domains), by matching sets of vertex-node positions via a KD-tree of
+  // `other`'s vertex coordinates. Used to set up "opposite" element pointers needed
+  // for two-sided interface coupling (e.g. two-phase flow contact conditions).
   void InterfaceMesh::connect_interface_elements_by_kdtree(InterfaceMesh *other)
   {
     if (!this->nelement() || !other->nelement())
@@ -4316,6 +4600,8 @@ namespace pyoomph
     unsigned ndimA = dynamic_cast<BulkElementBase *>(this->element_pt(0))->nodal_dimension();
     KDTree treeB(ndimB);
 
+    // Index every vertex position of `other`'s elements and remember, per element,
+    // the set of KD-tree point indices its vertices map to.
     for (unsigned int ieB = 0; ieB < other->nelement(); ieB++)
     {
       BulkElementBase *eB = dynamic_cast<BulkElementBase *>(other->element_pt(ieB));
@@ -4338,6 +4624,9 @@ namespace pyoomph
       nodes_to_elemB[indices] = eB;
     }
 
+    // For each of this mesh's elements, look up the same vertex positions in
+    // treeB (point_present, i.e. lookup-only, no insertion) and find the element
+    // of `other` with the matching index set, which must be the geometric opposite.
     for (unsigned int ieA = 0; ieA < this->nelement(); ieA++)
     {
       BulkElementBase *eA = dynamic_cast<BulkElementBase *>(this->element_pt(ieA));
@@ -4376,6 +4665,9 @@ namespace pyoomph
     }
   }
 
+  // Sets the offset vector used when comparing/relating this interface's geometry to
+  // its opposite side (e.g. across a periodic boundary); the reversed copy is the
+  // negated vector, used when looking the other way (opposite -> this).
   void InterfaceMesh::set_opposite_interface_offset_vector(const std::vector<double> & offset)
   {
     this->opposite_offset_vector=offset;
@@ -4393,6 +4685,9 @@ namespace pyoomph
   BulkNodeIterator::iterator BulkNodeIterator::end() { return {mesh,mesh->nnode(),true}; }
   */
 
+  // Leaf-visitor callback (see DynamicTree::dynamic_traverse_leaves in mesh.hpp):
+  // if this tree node's element has been flagged for refinement, splits it into its
+  // son elements and constructs the corresponding son tree nodes.
   void DynamicTree::dynamic_split_if_required()
   {
     if (Object_pt->to_be_refined())
@@ -4415,6 +4710,11 @@ namespace pyoomph
 
   ////////////////
 
+  // Registers a freshly created element in the mesh, wires up its node pointers,
+  // gives its internal data the same time stepper as the mesh's nodes, and records
+  // its initial (undeformed) size/quality as a reference for later quality/ALE
+  // computations. The per-element integration order override, if configured in the
+  // generated code's func table, is applied here too.
   unsigned TemplatedMeshBase::add_new_element(pyoomph::BulkElementBase *new_el, std::vector<pyoomph::Node *> nodes)
   {
     unsigned res = Element_pt.size();
@@ -4440,6 +4740,13 @@ namespace pyoomph
 
 #ifdef OOMPH_HAS_MPI
 
+  // MPI-only: reconciles hanging-node status of halo/haloed nodes across processor
+  // boundaries for elements with nonuniformly spaced nodes, and reconstructs any
+  // missing halo master nodes so that hanging-node constraints are consistent on
+  // every processor. This is a pyoomph-side adaptation of oomph-lib's own
+  // Missing_masters_functions machinery (see oomph-lib's synchronise_hanging_nodes);
+  // the implementation below closely follows that logic and retains its original
+  // inline comments/PARANOID diagnostics.
   void TemplatedMeshBase::additional_synchronise_hanging_nodes(const unsigned &ncont_interpolated_values)
   {
     // Check if additional synchronisation of hanging nodes is disabled
@@ -5069,6 +5376,16 @@ namespace pyoomph
 
 #endif
 
+  // Facet-based boundary element lookup: uses the `facets` map (built once from the
+  // mesh template by setup_facets_from_template) that records, for each set of
+  // vertex nodes forming a facet, which boundaries that facet belongs to. For every
+  // element face whose vertices are all boundary nodes, looks up the matching facet
+  // entry and verifies all its nodes are actually still tagged with each candidate
+  // boundary (nodes can end up on multiple boundaries at mixed corners/edges, hence
+  // the extra check) before registering the element/face as a boundary element. This
+  // is more robust than the purely node-based approach in mixed-corner situations,
+  // but is only valid for non-adaptive meshes since it relies on the original
+  // template's facet topology (see TemplatedMeshBase3d::setup_boundary_element_info).
   void  TemplatedMeshBase::setup_boundary_element_info(std::ostream &outfile)
   {
     if (!identication_of_boundary_elements_by_facets)
@@ -5089,7 +5406,7 @@ namespace pyoomph
       if (!el)
       {
         throw_runtime_error("This method should only be called for meshes with BulkElementBase elements");
-      }      
+      }
       for (int face_id : el->get_possible_face_indices())
       {
         std::vector<pyoomph::Node *> el_face_nodes=el->get_vertex_nodes_of_face(face_id);
@@ -5099,8 +5416,8 @@ namespace pyoomph
           if (!dynamic_cast<oomph::BoundaryNodeBase *>(el_face_nodes[i]))
           {
             //std::cout << "Element " << ie << " face " << face_id << " has node " << i << " which is not a boundary node" << std::endl;
-            may_skip=true; break;            
-          }          
+            may_skip=true; break;
+          }
         }
         if (may_skip) continue;
         std::set<pyoomph::Node *> facet_nodes(el_face_nodes.begin(), el_face_nodes.end());
@@ -5113,7 +5430,10 @@ namespace pyoomph
             std::cout << boundary_id << " ";
           }
           std::cout << std::endl;*/
-          
+
+          // Double-check that every node of this face is still tagged with the
+          // candidate boundary before accepting it (a facet's node set can be
+          // shared with facets on other boundaries after mesh operations).
           for (unsigned int boundary_id : facet_boundaries)
           {
             may_skip=false;
@@ -5142,6 +5462,14 @@ namespace pyoomph
 
 
 
+  // Builds the `facets` lookup (vertex-node-set -> boundary indices) used by the
+  // facet-based setup_boundary_element_info above, from the mesh template's own
+  // facet records. bound_map translates template-local boundary indices to this
+  // mesh's boundary indices (see TemplatedMeshBase3d::generate_from_template).
+  // A template facet is skipped if any of its nodes has no corresponding oomph node,
+  // is not a boundary node, or if the intersection of its recorded boundaries with
+  // the still-common boundary set (across all nodes visited so far) becomes empty --
+  // in that case the facet does not correspond to a real, single boundary anymore.
   void TemplatedMeshBase::setup_facets_from_template(MeshTemplate *templ,const std::vector<int> & bound_map)
   {
       facets.clear();
@@ -5259,6 +5587,14 @@ namespace pyoomph
 
   ////////////////
 
+  // Builds a KD-tree over all distinct nodes of `mesh`, indexed by their zeta
+  // coordinate (Lagrangian if use_lagrangian, else Eulerian) at the given history
+  // time index. zeta_time_history/zeta_coordinate_type are temporary global hooks
+  // read by BulkElementBase::zeta_nodal while building the tree, reset to their
+  // default (0) afterwards. Also records, per node, the set of elements touching it
+  // (nodes_to_elem, used later by find_element) and estimates a generous
+  // max_search_radius (10x the largest nearest-neighbour distance seen) used as the
+  // starting radius for the expanding-radius search in find_element.
   MeshKDTree::MeshKDTree(pyoomph::Mesh *mesh, bool use_lagrangian, unsigned time_index) : lagrangian(use_lagrangian), tindex(time_index), tree(NULL)
   {
     std::map<pyoomph::Node *, unsigned> nodeinds;
@@ -5311,6 +5647,8 @@ namespace pyoomph
     tree = new KDTree(coords, dim);
   }
 
+  // Returns the mesh node nearest to `coord` (in the tree's coordinate space); the
+  // squared/actual distance can optionally be returned via distreturn.
   pyoomph::Node *MeshKDTree::find_node(const oomph::Vector<double> &coord, double *distreturn)
   {
     int index = -1;
@@ -5327,6 +5665,12 @@ namespace pyoomph
     return nodes_by_index[index];
   }
 
+  // Locates the element containing the point `zeta` (in the tree's coordinate
+  // space) and the corresponding local coordinates, returned in sreturn. Strategy:
+  // first try all elements attached to the nearest node (cheap, succeeds in the
+  // common case); if that fails, fall back to an expanding-radius search over
+  // increasingly distant nodes (see below) until an element containing zeta is found
+  // or the search radius exceeds max_search_radius.
   pyoomph::BulkElementBase *MeshKDTree::find_element(oomph::Vector<double> zeta, oomph::Vector<double> &sreturn)
   {
     // std::cout << "ENTERINF FIND ELEMENT " << std::endl;

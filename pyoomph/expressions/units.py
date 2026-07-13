@@ -30,7 +30,7 @@
 Module containing physical units (meter, second, etc) and some constants for use in expressions.
 """
  
-import _pyoomph
+import pyoomph._pyoomph_core as _pyoomph
 
 import numpy 
 

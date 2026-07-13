@@ -44,7 +44,7 @@ class CapillaryEvaporationProblem(Problem):
         # Initial Liquid mixture composition (glycerol/water)
         self.mixture=Mixture(20*percent*get_pure_liquid("glycerol")+get_pure_liquid("water"))
         # Gas phase composition (air with 20% relative humidity)
-        self.gas=Mixture(get_pure_gas("air")+100*percent*get_pure_gas("water"),quantity="relative_humidity",temperature=20*celsius)
+        self.gas=Mixture(get_pure_gas("air")+50*percent*get_pure_gas("water"),quantity="relative_humidity",temperature=20*celsius)
         # Gravity and ambient pressure
         self.g=9.81*meter/second**2
         self.ambient_pressure=1*atm
@@ -97,13 +97,11 @@ class CapillaryEvaporationProblem(Problem):
         eqs+=MultiComponentNavierStokesInterface(interf_no_evap)@"right"
         
         # Get the total mass of glycerol
-        eqs+=IntegralObservables(M_glycerol=var("massfrac_glycerol")*self.mixture.mass_density)
+        eqs+=IntegralObservables(M_glycerol=var("massfrac_glycerol")*self.mixture.mass_density*pi*self.R**2)
         eqs+=IntegralObservableOutput("mass_evolution")
         # Get the filled height and it's velocity
         eqs+=IntegralObservables(y=self.L-var("mesh_x"),u=-mesh_velocity()[0])@"right"
         eqs+=IntegralObservableOutput("top_interface")@"right"
-        
-        
         
         # Refine the region near the evaporating interface to better resolve the gradients in the solution
         eqs+=RefineToLevel(4)@"left"

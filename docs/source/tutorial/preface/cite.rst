@@ -15,7 +15,7 @@ Please mention that `pyoomph` is based on `oomph-lib` and `GiNaC`, i.e. **also c
 
 **Citing of material properties and activity models**
 
-When using UNIFAC-like group contribution methods (cf. :numref:`secmcflowunifac`), you please cite the following:
+When using UNIFAC-like group contribution methods (cf. :numref:`secmcflowunifac`), please cite the following:
 
 * The published parameters of the original and modified (Dortmund) UNIFAC model were taken with kind permission from the *DDBST* website https://www.ddbst.com. Please cite the papers listed at https://www.ddbst.com/published-parameters-unifac.html for original UNIFAC and https://www.ddbst.com/PublishedParametersUNIFACDO.html for modified (Dortmund) UNIFAC.
 

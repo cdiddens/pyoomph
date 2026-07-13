@@ -29,19 +29,26 @@ The main author may be contacted at c.diddens@utwente.nl
 
 namespace pyoomph
 {
-    class runtime_error_with_line : public std::runtime_error
-    {
-    protected:
-        std::string msg;
+  // A std::runtime_error whose what() message is prefixed with "file:line: " of the throw
+  // site, so error messages surfacing in Python (via the pybind exception translation) are
+  // traceable back to the offending C++ location. Always construct via the
+  // throw_runtime_error(arg) macro below rather than directly, so file/line are filled in
+  // automatically.
+  class runtime_error_with_line : public std::runtime_error
+  {
+  protected:
+    std::string msg;
 
-    public:
-        runtime_error_with_line(const std::string &arg, const char *file, int line);
-        ~runtime_error_with_line() throw() {}
-        const char *what() const throw();
-        
-    };
+  public:
+    runtime_error_with_line(const std::string &arg, const char *file, int line);
+    ~runtime_error_with_line() throw() {}
+    const char *what() const throw();
 
-    extern int pyoomph_verbose;
+  };
+
+  extern int pyoomph_verbose; // Global verbosity level, checked by various parts of the code to decide whether to print diagnostic output
 
 }
+// Throw a runtime_error_with_line carrying the current file and line number; use this
+// instead of throwing runtime_error_with_line directly.
 #define throw_runtime_error(arg) throw pyoomph::runtime_error_with_line(arg, __FILE__, __LINE__);

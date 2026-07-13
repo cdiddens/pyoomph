@@ -25,26 +25,29 @@ The main author may be contacted at c.diddens@utwente.nl
 
 namespace pyoomph
 {
-    int pyoomph_verbose = 0;
+		int pyoomph_verbose = 0;
 
-    runtime_error_with_line::runtime_error_with_line(const std::string &arg, const char *file, int line) : std::runtime_error(arg)
-    {
-        std::ostringstream o;
-        o << file << ":" << line << ": " << arg;
-        msg = o.str();
+		// Build the "file:line: message" string once at construction time and cache it in
+		// msg, since what() must return a pointer valid for the exception's lifetime.
+		runtime_error_with_line::runtime_error_with_line(const std::string &arg, const char *file, int line) : std::runtime_error(arg)
+		{
+				std::ostringstream o;
+				o << file << ":" << line << ": " << arg;
+				msg = o.str();
 /*        if (get_logging_stream())
-        {
-            *get_logging_stream() << "RuntimeError: " << msg << std::endl << std::flush;
-            
-        }*/
-    }
-    
-    
-    const char *runtime_error_with_line::what() const throw()
-    {
-        
-        return msg.c_str();
-    }
-    
-    
+				{
+						*get_logging_stream() << "RuntimeError: " << msg << std::endl << std::flush;
+
+				}*/
+		}
+
+
+		// Return the cached "file:line: message" string built in the constructor.
+		const char *runtime_error_with_line::what() const throw()
+		{
+
+				return msg.c_str();
+		}
+
+
 }

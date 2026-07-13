@@ -26,69 +26,85 @@ The main author may be contacted at c.diddens@utwente.nl
 namespace pyoomph
 {
 
-	class Problem;
-	class NodeAccess;
-	class FieldDescriptor;
-	class Mesh;
-	class BulkElementBase;
-	class NodeWithFieldIndicesBase
-	{
-	protected:
-		friend class MeshTemplate;
-		friend class NodeAccess;
-		friend class BulkElementBase;
+  class Problem;
+  class NodeAccess;
+  class FieldDescriptor;
+  class Mesh;
+  class BulkElementBase;
+  // Empty tag/marker base class that lets pyoomph's node types (see NodeWithFieldIndices
+  // below) be identified/friended independently of the oomph-lib node template they wrap.
+  class NodeWithFieldIndicesBase
+  {
+  protected:
+    friend class MeshTemplate;
+    friend class NodeAccess;
+    friend class BulkElementBase;
 
-	public:
-		virtual ~NodeWithFieldIndicesBase() = default;
-	};
+  public:
+    virtual ~NodeWithFieldIndicesBase() = default;
+  };
 
-	template <class NODE_TYPE>
-	class NodeWithFieldIndices : public NODE_TYPE, public NodeWithFieldIndicesBase
-	{
-	public:
-		NodeWithFieldIndices();
+  // Mixin that adds pyoomph-specific bookkeeping on top of an oomph-lib node type
+  // (NODE_TYPE, e.g. oomph::SolidNode - see the Node typedef below). Currently this only
+  // adds additional_value_index(), which looks up the extra per-interface value index a
+  // FaceElement may have assigned to this node (via a BoundaryNodeBase), returning -1 if
+  // the node is not a boundary node or has no such assignment.
+  template <class NODE_TYPE>
+  class NodeWithFieldIndices : public NODE_TYPE, public NodeWithFieldIndicesBase
+  {
+  public:
+    NodeWithFieldIndices();
 
-		NodeWithFieldIndices(oomph::TimeStepper *const &time_stepper_pt, const unsigned &n_lagrangian, const unsigned &n_lagrangian_type, const unsigned &n_dim, const unsigned &Nposition_type, const unsigned &initial_n_value) : NODE_TYPE(time_stepper_pt, n_lagrangian, n_lagrangian_type, n_dim, Nposition_type, initial_n_value), NodeWithFieldIndicesBase() {}
+    NodeWithFieldIndices(oomph::TimeStepper *const &time_stepper_pt, const unsigned &n_lagrangian, const unsigned &n_lagrangian_type, const unsigned &n_dim, const unsigned &Nposition_type, const unsigned &initial_n_value) : NODE_TYPE(time_stepper_pt, n_lagrangian, n_lagrangian_type, n_dim, Nposition_type, initial_n_value), NodeWithFieldIndicesBase() {}
 
-		NodeWithFieldIndices(const unsigned &n_lagrangian, const unsigned &n_lagrangian_type, const unsigned &n_dim, const unsigned &Nposition_type, const unsigned &initial_n_value) : NODE_TYPE(n_lagrangian, n_lagrangian_type, n_dim, Nposition_type, initial_n_value), NodeWithFieldIndicesBase() {}
+    NodeWithFieldIndices(const unsigned &n_lagrangian, const unsigned &n_lagrangian_type, const unsigned &n_dim, const unsigned &Nposition_type, const unsigned &initial_n_value) : NODE_TYPE(n_lagrangian, n_lagrangian_type, n_dim, Nposition_type, initial_n_value), NodeWithFieldIndicesBase() {}
 
-		virtual void resize(const unsigned &n_value)
-		{
-			NODE_TYPE::resize(n_value);										
-		}
+    virtual void resize(const unsigned &n_value)
+    {
+      NODE_TYPE::resize(n_value);
+    }
 
-		virtual int additional_value_index(unsigned interf_id)
-		{
-			oomph::BoundaryNodeBase *bn = dynamic_cast<oomph::BoundaryNodeBase *>(this);
-			if (!bn)
-				return -1;
-			std::map<unsigned, unsigned> *&mp = bn->index_of_first_value_assigned_by_face_element_pt();
-			if (!mp)
-				return -1;
-			if (!(*mp).count(interf_id))
-				return -1;
-			return (*mp)[interf_id];
-		}
-	};
+    // Look up the index (within this node's value storage) of the first value that a
+    // FaceElement with interface id `interf_id` was assigned on this (boundary) node.
+    // Returns -1 if this node is not a boundary node, or has no such assignment.
+    virtual int additional_value_index(unsigned interf_id)
+    {
+      oomph::BoundaryNodeBase *bn = dynamic_cast<oomph::BoundaryNodeBase *>(this);
+      if (!bn)
+        return -1;
+      std::map<unsigned, unsigned> *&mp = bn->index_of_first_value_assigned_by_face_element_pt();
+      if (!mp)
+        return -1;
+      if (!(*mp).count(interf_id))
+        return -1;
+      return (*mp)[interf_id];
+    }
+  };
 
 
-	typedef NodeWithFieldIndices<oomph::SolidNode> Node;
-	class BoundaryNode : public oomph::BoundaryNode<pyoomph::Node>
-	{
-	public:
-		// std::map<void*,std::set<int>> nullified_dofs; //Nullify the dofs on element/element class indiced by the pointer, negative dofs are for positions
-		std::map<unsigned, unsigned> *get_additional_dof_map() { return Index_of_first_value_assigned_by_face_element_pt; }
-		bool has_additional_dof(const unsigned index)
-		{
-			//std::cout << "has_additional_dof  " << Index_of_first_value_assigned_by_face_element_pt << std::endl << std::flush;
-			if (!Index_of_first_value_assigned_by_face_element_pt)
-				return false;
-			return Index_of_first_value_assigned_by_face_element_pt->count(index);
-		}
+  // pyoomph's standard node type: an oomph::SolidNode (i.e. a node that carries both
+  // Eulerian and Lagrangian position, for use with moving/deforming meshes) extended with
+  // the field-index bookkeeping of NodeWithFieldIndices.
+  typedef NodeWithFieldIndices<oomph::SolidNode> Node;
+  // pyoomph's boundary node type, adding storage/lookup for extra ("additional") dof
+  // indices that FaceElements attached to this boundary node assign beyond the bulk node's
+  // own values (e.g. Lagrange multipliers or surface-only fields living on the boundary).
+  class BoundaryNode : public oomph::BoundaryNode<pyoomph::Node>
+  {
+  public:
+    // std::map<void*,std::set<int>> nullified_dofs; //Nullify the dofs on element/element class indiced by the pointer, negative dofs are for positions
+    std::map<unsigned, unsigned> *get_additional_dof_map() { return Index_of_first_value_assigned_by_face_element_pt; }
+    bool has_additional_dof(const unsigned index)
+    {
+      //std::cout << "has_additional_dof  " << Index_of_first_value_assigned_by_face_element_pt << std::endl << std::flush;
+      if (!Index_of_first_value_assigned_by_face_element_pt)
+        return false;
+      return Index_of_first_value_assigned_by_face_element_pt->count(index);
+    }
 
-		BoundaryNode(const unsigned &n_lagrangian, const unsigned &n_lagrangian_type, const unsigned &n_dim, const unsigned &Nposition_type, const unsigned &initial_n_value) : oomph::BoundaryNode<pyoomph::Node>(n_lagrangian, n_lagrangian_type, n_dim, Nposition_type, initial_n_value) {}
+    BoundaryNode(const unsigned &n_lagrangian, const unsigned &n_lagrangian_type, const unsigned &n_dim, const unsigned &Nposition_type, const unsigned &initial_n_value) : oomph::BoundaryNode<pyoomph::Node>(n_lagrangian, n_lagrangian_type, n_dim, Nposition_type, initial_n_value) {}
 
-		BoundaryNode(oomph::TimeStepper *const &time_stepper_pt, const unsigned &n_lagrangian, const unsigned &n_lagrangian_type, const unsigned &n_dim, const unsigned &Nposition_type, const unsigned &initial_n_value) : oomph::BoundaryNode<pyoomph::Node>(time_stepper_pt, n_lagrangian, n_lagrangian_type, n_dim, Nposition_type, initial_n_value) {}
-	};
+    BoundaryNode(oomph::TimeStepper *const &time_stepper_pt, const unsigned &n_lagrangian, const unsigned &n_lagrangian_type, const unsigned &n_dim, const unsigned &Nposition_type, const unsigned &initial_n_value) : oomph::BoundaryNode<pyoomph::Node>(time_stepper_pt, n_lagrangian, n_lagrangian_type, n_dim, Nposition_type, initial_n_value) {}
+  };
 
 };

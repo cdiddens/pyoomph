@@ -20,13 +20,17 @@ The main author may be contacted at c.diddens@utwente.nl
 ================================================================================*/
 
 
+// Simple logging facility that mirrors ("tees") pyoomph's/oomph-lib's console output into
+// an optional log file, without requiring callers to change how they write to
+// std::cout/std::cerr (see logging.cpp's TeeToLogFile for the actual mechanism).
+
 #pragma once
 #include <iostream>
 namespace pyoomph
 {
 
-  extern std::ostream * g_current_log_stream;
-  void set_logging_stream(std::ostream * logstream);
-  std::ostream * get_logging_stream();
-  void write_to_log_file(const std::string & message);
+  extern std::ostream * g_current_log_stream; // The active log file stream, or NULL if not logging to a file
+  void set_logging_stream(std::ostream * logstream); // Start (or stop, if NULL) mirroring console output into logstream
+  std::ostream * get_logging_stream(); // Return the currently active log file stream (or NULL)
+  void write_to_log_file(const std::string & message); // Write directly to the log file only, bypassing the console
 };

@@ -774,7 +774,7 @@ class IntegralObservables(Equations):
         else:
             dx=self.get_dx(coordsys=self._coordinate_system,lagrangian=self._lagrangian)
         for k,v in self.integral_observables.items():
-            #import _pyoomph
+            #import pyoomph._pyoomph_core as _pyoomph
             #_pyoomph.set_verbosity_flag(1)
             self.add_integral_function(k, v * dx)
             #_pyoomph.set_verbosity_flag(0)
@@ -804,7 +804,7 @@ class ExtremumObservables(Equations):
         
 
     def add_extremum_function(self,name,expr):
-        import _pyoomph
+        import pyoomph._pyoomph_core as _pyoomph
         master = self._get_combined_element()
         cg = master._assert_codegen()
         if not (isinstance(expr,int) or isinstance(expr,float) or isinstance(expr,_pyoomph.Expression)) and  callable(expr):

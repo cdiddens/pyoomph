@@ -33,7 +33,7 @@ from ..expressions.generic import is_zero #type:ignore
 
 #import pyoomph.generic
 from .mpi import *
-import _pyoomph
+import pyoomph._pyoomph_core as _pyoomph
 import math
 
 
@@ -353,7 +353,6 @@ class Problem(_pyoomph.Problem):
     Attributes:
         
         additional_equations (Union[Literal[0], EquationTree]): Additional equations for the problem.
-        always_take_one_newton_step (bool): Flag indicating whether to always take one Newton step.
         continuation_data_in_states (bool): Flag indicating whether to store continuation data in the states.
         default_1d_file_extension (Union[Literal["txt", "mat"], List[Literal["txt", "mat"]]]): Default file extension for 1D files.
         default_ccode_expression_mode (str): Default C code expression mode.
@@ -364,7 +363,6 @@ class Problem(_pyoomph.Problem):
         extra_compiler_flags (List[str]): Extra compiler flags for the problem.
         ignore_command_line (bool): Flag indicating whether to ignore command line arguments.
         latex_printer (Optional[LaTeXPrinter]): LaTeX printer for the problem.
-        max_residuals (float): Maximum residuals for the problem.
         plot_in_dedicated_process (bool): Flag indicating whether to plot in a dedicated process.
         remove_macro_elements_after_initial_adaption (Union[bool, Literal["auto"]]): Flag indicating whether to remove macro elements after initial adaption.
         scaling (Dict[str, Union[str, ExpressionOrNum]]): Dictionary of scaling factors.
@@ -1095,7 +1093,7 @@ class Problem(_pyoomph.Problem):
                 continue
             elif isinstance(v,_pyoomph.Expression):
                 def merge_units(expr):
-                    import _pyoomph
+                    import pyoomph._pyoomph_core as _pyoomph
                     numfactor,unit,rest,success=_pyoomph.GiNaC_collect_units(expr)
                     if not success:
                         return expr
@@ -1814,10 +1812,7 @@ class Problem(_pyoomph.Problem):
         from .ccompiler import get_ccompiler
         if isinstance(compiler_or_name,str):
             if compiler_or_name=="tcc":
-                if _pyoomph.has_tcc():
-                    compiler_or_name="_internal_"
-                else:
-                    compiler_or_name="tccbox"
+                compiler_or_name="tccbox"
             elif compiler_or_name=="distutils":
                 compiler_or_name="system"
             cc=get_ccompiler(compiler_or_name)
@@ -3316,8 +3311,7 @@ class Problem(_pyoomph.Problem):
                 suppress_compilation=True
         if self._suppress_code_writing or get_mpi_rank()>0:
             suppress_writing=True
-        mpi_barrier()
-        
+        mpi_barrier()        
         res=self.generate_and_compile_bulk_element_code(elementtype,trunk,suppress_writing,suppress_compilation,bulkmesh,self.is_quiet(),self.extra_compiler_flags)
         #print("REt")
         mpi_barrier()
@@ -3730,7 +3724,7 @@ class Problem(_pyoomph.Problem):
         
         if self.warn_about_unused_global_parameters and not self.is_global_parameter_used(parameter):
             if self.warn_about_unused_global_parameters=="error":
-                raise RuntimeError("Arclength continuation in the global parameter '" + parameter + "', which is used in the problem. This may lead to unexpected behaviour. Set <Problem>.warn_about_unused_global_parameters to False to suppress this error.")
+                raise RuntimeError("Arclength continuation in the global parameter '" + parameter + "', which is used in the problem. This may lead to unexpected behaviour. Have you defined it with define_global_parameter? Or have you overridden it by e.g. '" + parameter + "=<value>' instead of '" + parameter + ".value=<value>'? Have you defined it via define_global_parameter? Or have you overridden it by e.g. '" + parameter + "=<value>' instead of '" + parameter + ".value=<value>'?  Set <Problem>.warn_about_unused_global_parameters to False to suppress this error.")
             else:
                 print("WARNING: Arclength continuation in the global parameter '" + parameter + "', which is used in the problem. This may lead to unexpected behaviour. Set <Problem>.warn_about_unused_global_parameters to False to suppress this warning.")
                 
@@ -4702,7 +4696,7 @@ class Problem(_pyoomph.Problem):
         TODO; Add documentation
         """
         # Main ideas from here: https://arxiv.org/html/2407.18230v1#S2.E6
-        import _pyoomph
+        import pyoomph._pyoomph_core as _pyoomph
         import scipy
         if not isinstance(self.assembly_handler_pt(),_pyoomph.PeriodicOrbitHandler):
             raise RuntimeError("Periodic orbit handler not active. Call activate_periodic_orbit_handler first, then solve the orbit, then call this function")

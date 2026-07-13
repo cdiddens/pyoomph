@@ -34,6 +34,8 @@ The main author may be contacted at c.diddens@utwente.nl
 namespace pyoomph
 {
 
+  // Build a quadtree forest from a list of tree roots (one per top-level element) and set up the
+  // neighbour/rotation ("north equivalent") information needed for hanging-node and refinement logic.
   DynamicQuadTreeForest::DynamicQuadTreeForest(oomph::Vector<oomph::TreeRoot *> &trees_pt) : oomph::QuadTreeForest(trees_pt, true)
   {
 #ifdef LEAK_CHECK
@@ -56,6 +58,12 @@ namespace pyoomph
     construct_north_equivalents();
   }
 
+  // Determine, for every tree (top-level element) in the forest, which of its N/S/E/W neighbours are
+  // other trees in the same forest (as opposed to neighbours reached only via tree refinement).
+  // Two-pass algorithm: first, for each vertex node, collect the set of trees that share it
+  // (tree_assoc_with_vertex_node) to get a cheap superset of "potentially neighbouring" tree pairs;
+  // then, for each such candidate pair, check which of the four compass directions they actually share
+  // an edge (two vertex nodes) in, and record the corresponding neighbour pointer.
   void DynamicQuadTreeForest::find_neighbours()
   {
     using namespace oomph::QuadTreeNames;
@@ -187,6 +195,9 @@ namespace pyoomph
     }
   }
 
+  // True only if every element in the mesh is a quad (h-refinement via a QuadTreeForest is only
+  // implemented for pure-quad meshes). Also issues a one-off warning (per mesh) if adaptive
+  // refinement was requested but the mesh contains non-quad (e.g. triangular) elements.
   bool TemplatedMeshBase2d::refinement_possible()
     {
       bool allquads = true;
@@ -209,9 +220,11 @@ namespace pyoomph
       }
     }
 
+  // Build the tree forest if the mesh is refinable (pure quads); otherwise permanently disable
+  // adaptation for this mesh (mixed/tri meshes have no tree-based refinement implemented).
   void TemplatedMeshBase2d::setup_tree_forest()
     {
-      if (refinement_possible())  setup_quadtree_forest();      
+      if (refinement_possible())  setup_quadtree_forest();
       else {        
         if (issued_tri_refinement_warning==false && !this->problem->is_quiet())
         {
@@ -222,20 +235,28 @@ namespace pyoomph
       }
     }
 
+  // Overload used by the generic (oomph-lib) interface: discards the documentation output.
   void TemplatedMeshBase2d::setup_boundary_element_info()
   {
     std::ostringstream oss;
     setup_boundary_element_info(oss);
   }
 
+  // Create a new linear (C1) triangle from three existing corner nodes n1,n2,n3 and add it to the mesh.
+  // Used for local subdivision of triangular meshes (which cannot be tree-refined, see refinement_possible()).
   unsigned TemplatedMeshBase2d::add_tri_C1(Node* & n1, Node* & n2, Node* & n3)
   {
     BulkElementBase::__CurrentCodeInstance = codeinst;
     unsigned res=this->add_new_element(new BulkElementTri2dC1(),{n1,n2,n3});
-    BulkElementBase::__CurrentCodeInstance = NULL;    
+    BulkElementBase::__CurrentCodeInstance = NULL;
     return res;
   }
 
+  // Create a new C1TB (linear with edge/bubble node) triangle from corner nodes n1,n2,n3. If n4 (the
+  // extra bubble node) is not supplied (NULL), a new BoundaryNode is created at the triangle's
+  // centroid, with its position and field values set to the average of n1,n2,n3 at every time level,
+  // and n4 is returned to the caller via the reference parameter so it can be reused for neighbouring
+  // sub-triangles sharing this new node.
   unsigned TemplatedMeshBase2d::add_tri_C1TB(Node* & n1, Node* & n2, Node* & n3, Node* & n4)
   {
     BulkElementBase::__CurrentCodeInstance = codeinst;
@@ -249,19 +270,25 @@ namespace pyoomph
         for (unsigned ni=0;ni<n1->ndim();ni++)
         {
           n4->variable_position_pt()->set_value(t,ni,(n1->x(t,ni)+n2->x(t,ni)+n3->x(t,ni))/3.0);
-        }        
+        }
         for (unsigned ni=0;ni<ntot;ni++)
         {
           n4->set_value(t,ni,(n1->value(t,ni)+n2->value(t,ni)+n3->value(t,ni))/3.0);
-        }        
+        }
       }
       this->add_node_pt(n4);
     }
     unsigned res=this->add_new_element(new BulkElementTri2dC1TB(),{n1,n2,n3,n4});
-    BulkElementBase::__CurrentCodeInstance = NULL;    
+    BulkElementBase::__CurrentCodeInstance = NULL;
     return res;
-  }  
+  }
 
+  // Build Boundary_element_pt / Face_index_at_boundary for a (possibly mixed quad/tri) 2d mesh.
+  // For adaptive, pure-quad meshes, delegates to the generic facet-based TemplatedMeshBase
+  // implementation (identication_of_boundary_elements_by_facets), which is robust under refinement.
+  // Otherwise (non-adaptive or mixed meshes), uses the quad- and tri-specific helpers below and then
+  // does a cleanup pass that drops any recorded boundary element/face whose face nodes are not
+  // actually flagged as lying on that boundary (defensive check against mismatches at mixed corners).
   void TemplatedMeshBase2d::setup_boundary_element_info(std::ostream &outfile)
   {
     
@@ -327,6 +354,10 @@ namespace pyoomph
     Lookup_for_elements_next_boundary_is_setup = true;
   }
 
+  // Legacy (non-facet-based) boundary-element detection for the quad elements of the mesh: for every
+  // quad element, tabulate which of its nodes lie on which boundaries, then use that per-node boundary
+  // membership pattern (via boundary_identifier) to work out which local face(s) of the element
+  // coincide with a boundary. Skips non-quad elements (handled separately by the tri counterpart).
   void TemplatedMeshBase2d::setup_boundary_element_info_quads(std::ostream &outfile)
   {
     unsigned nbound = nboundary();
@@ -467,6 +498,11 @@ namespace pyoomph
     }
   }
 
+  // For triangular meshes, boundary bindex may run through the interior of the mesh (e.g. an internal
+  // interface added by hand rather than an outer domain edge). Since such interior boundaries are not
+  // picked up by the normal quad/tri boundary-element scans (which only look at true domain
+  // boundaries), explicitly scan all triangles and add any whose edge lies fully on boundary bindex
+  // (checked pairwise per edge: (0,1)->face 2, (0,2)->face 1, (1,2)->face 0).
   void TemplatedMeshBase2d::setup_interior_boundary_elements(unsigned bindex)
   {
     unsigned nel = nelement();
@@ -493,6 +529,9 @@ namespace pyoomph
     }
   }
 
+  // Legacy (non-facet-based) boundary-element detection for the triangular elements of the mesh;
+  // analogous to setup_boundary_element_info_quads but handling triangle-specific edge/face indexing
+  // (and, unlike quads, needing to distinguish which of a triangle's three edges lies on the boundary).
   void TemplatedMeshBase2d::setup_boundary_element_info_tris(std::ostream &outfile2)
   {
     std::ostream &outfile = std::cout;
@@ -928,6 +967,20 @@ namespace pyoomph
 
 
 
+  // Find all "internal facets" of a 2d mesh (element faces shared between two neighbouring bulk
+  // elements, as opposed to faces on an outer mesh boundary) and pair each element/face with its
+  // neighbour on the opposite side. Used e.g. to assemble DG-type interior-facet terms.
+  //
+  // Two different algorithms are used depending on whether the mesh currently has hanging nodes
+  // (milev < malev, i.e. elements at different refinement levels):
+  //  - If there ARE hanging nodes: walk the quadtree neighbour structure directly (gteq_edge_neighbour)
+  //    so that faces are only matched between elements at the same effective refinement level; a face
+  //    that has more refined neighbours on the other side is recorded once per constituent sub-face,
+  //    with opposite_already_at_index tracking already-created counterpart entries (diff_level != 0)
+  //    so the same opposite facet is not duplicated.
+  //  - Otherwise (uniform refinement / no hanging nodes): a simpler, purely node-based matching is used
+  //    below, keyed on the (sorted) pair of vertex nodes bounding a face (nodemap), analogous to the
+  //    1d/3d versions of this function.
   void TemplatedMeshBase2d::fill_internal_facet_buffers(std::vector<BulkElementBase*> & internal_elements, std::vector<int> & internal_face_dir,std::vector<BulkElementBase*> & opposite_elements,std::vector<int> & opposite_face_dir,std::vector<int> & opposite_already_at_index)
   {
     using namespace oomph::QuadTreeNames;

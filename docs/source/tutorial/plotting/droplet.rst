@@ -1,7 +1,7 @@
 Two-dimensional plotting example
 --------------------------------
 
-As an example case, let us take the evaporating droplet case from :numref:`secmultidomdropevap`, i.e. we refer to the script :download:`evaporating_water_droplet.py <../multidom/evaporating_water_droplet.py>`. To add plotting, first a specialization of the :py:class:`~pyoomph.output.plotting.MatplotlibPlotter` class must be implemented. The entire plot is defined in the method :py:meth:`~pyoomph.output.plotting.BasePlotter.define_plot`, in which the one first have to define the field of view, i.e. the area which should be covered by the plot. Since this area often depends on the problem settings, one can access the problem with the :py:meth:`~pyoomph.output.plotting.BasePlotter.get_problem` method. Here, the considered area depends on the radius of the droplet:
+As an example case, let us take the evaporating droplet case from :numref:`secmultidomdropevap`, i.e. we refer to the script :download:`evaporating_water_droplet.py <../multidom/evaporating_water_droplet.py>`. To add plotting, first a specialization of the :py:class:`~pyoomph.output.plotting.MatplotlibPlotter` class must be implemented. The entire plot is defined in the method :py:meth:`~pyoomph.output.plotting.BasePlotter.define_plot`, in which one first has to define the field of view, i.e. the area which should be covered by the plot. Since this area often depends on the problem settings, one can access the problem with the :py:meth:`~pyoomph.output.plotting.BasePlotter.get_problem` method. Here, the considered area depends on the radius of the droplet:
 
 .. code:: python
 
@@ -24,7 +24,7 @@ As an example case, let us take the evaporating droplet case from :numref:`secmu
 
 Also the :py:attr:`~pyoomph.output.plotting.MatplotlibPlotter.background_color` can be set, where either hex-codes for the color or predefined colors from the python package ``matplotlib`` can be used.
 
-Once the desired plot area is selected by the :py:meth:`~pyoomph.output.plotting.MatplotlibPlotter.set_view` method (arguments are minimum :math:`x`, minimum :math:`y`, maximum :math:`x` and maximum :math:`y`, in (potentially dimensional) spatial coordinates), we can start to add parts to the plot. Usually, one starts with color bars with :py:meth:`~pyoomph.output.plotting.MatplotlibPlotter.add_colorbar`, that can are used later on to plot the fields. This can read e.g. as follows:
+Once the desired plot area is selected by the :py:meth:`~pyoomph.output.plotting.MatplotlibPlotter.set_view` method (arguments are minimum :math:`x`, minimum :math:`y`, maximum :math:`x` and maximum :math:`y`, in (potentially dimensional) spatial coordinates), we can start to add parts to the plot. Usually, one starts with color bars with :py:meth:`~pyoomph.output.plotting.MatplotlibPlotter.add_colorbar`, that can be used later on to plot the fields. This can read e.g. as follows:
 
 .. code:: python
 
@@ -34,7 +34,7 @@ Once the desired plot area is selected by the :py:meth:`~pyoomph.output.plotting
             cb_vap=self.add_colorbar("water vapor [g/m^3]",cmap="Blues",position="top right",factor=1000)
 
 
-Each color bar gets first a title and can also contain LaTeXcode, usually by a ``r``-string, e.g. ``r"$\phi$"`` to obtain :math:`\phi`. ``cmap`` selects the color map, see the documentation of ``matplotlib`` for a reference. With ``position``, we can control the location of the color bar. This can either be a tuple of graph coordinates or a string indicating the position as shown in the example above. By default, all fields are plotted in the normal *SI* units without any prefixes. If a color bar should indicate the range e.g. in :math:`\:\mathrm{mm}/\mathrm{s}`, one must set the ``factor`` to :math:`1000` to compensate for the milli prefix.
+Each color bar gets first a title and can also contain LaTeX code, usually by a ``r``-string, e.g. ``r"$\phi$"`` to obtain :math:`\phi`. ``cmap`` selects the color map, see the documentation of ``matplotlib`` for a reference. With ``position``, we can control the location of the color bar. This can either be a tuple of graph coordinates or a string indicating the position as shown in the example above. By default, all fields are plotted in the normal *SI* units without any prefixes. If a color bar should indicate the range e.g. in :math:`\:\mathrm{mm}/\mathrm{s}`, one must set the ``factor`` to :math:`1000` to compensate for the milli prefix.
 
 Color bars have additional properties, which can be set, e.g. the :py:attr:`~pyoomph.output.plotting.MatplotLibColorbar.length`, :py:attr:`~pyoomph.output.plotting.MatplotLibColorbar.thickness`, :py:attr:`~pyoomph.output.plotting.MatplotLibOverlayBase.xshift` and :py:attr:`~pyoomph.output.plotting.MatplotLibOverlayBase.yshift`, :py:attr:`~pyoomph.output.plotting.MatplotLibOverlayBase.xmargin` and :py:attr:`~pyoomph.output.plotting.MatplotLibOverlayBase.ymargin` (all in graph coordinates). For a complete list of settings, read e.g. the output of ``print(dir(cb_v))`` or have a look at the :py:class:`~pyoomph.output.plotting.MatplotLibColorbar` class in the module :py:mod:`pyoomph.output.plotting`.
 
@@ -50,7 +50,7 @@ Once the color bars are set up, one can plot fields with those. Basically all pl
             
                                
 
-Each :py:meth:`~pyoomph.output.plotting.MatplotlibPlotter.add_plot` call requires to pass the data to plot as string, e.g. ``"droplet/velocity"``. When a color bar is supplied by the ``colorbar`` argument, it will be plotted as color map. Vectorial fields, as e.g. the velocity, will be plotted as magnitude. The color bars will automatically increase in range to comprise the visible data range of all plots with the same color bar.
+Each :py:meth:`~pyoomph.output.plotting.MatplotlibPlotter.add_plot` call requires you to pass the data to plot as a string, e.g. ``"droplet/velocity"``. When a color bar is supplied by the ``colorbar`` argument, it will be plotted as color map. Vectorial fields, as e.g. the velocity, will be plotted as magnitude. The color bars will automatically increase in range to comprise the visible data range of all plots with the same color bar.
 
 The argument ``transform`` (default ``None``) will apply a transform on the plot, which can e.g. by ``"mirror_x"`` to mirror the data (and the vector fields) along the :math:`x`-axis. You can also supply a list of transforms to plot all transformed data simultaneously. In that case, the return value of :py:meth:`~pyoomph.output.plotting.MatplotlibPlotter.add_plot` is also a ``list`` of the individual plots. Further strings indicating transforms are ``"rotate_cw"``, ``"rotate_ccw"`` and ``"rotate_ccw_mirror"`` for clock-wise, counter-clockwise and counter-clockwise rotation including mirroring, respectively. If a custom transform is required, you can overload the base class :py:class:`~pyoomph.output.plotting.PlotTransform` of :py:mod:`pyoomph.output.plotting` accordingly and pass an instance of your custom transform class as ``transform``.
 
@@ -73,9 +73,9 @@ To plot interface lines, just use :py:meth:`~pyoomph.output.plotting.MatplotlibP
             self.add_plot("gas/gas_substrate",transform=["mirror_x",None])
 
 
-You cannot plot an interface if there is no single equation defined on this interface. In that case, just add a dummy equation to this interface when defining the problem. A dummy equation instances can be just e.g. the base class :py:class:`~pyoomph.generic.codegen.Equations` (or :py:class:`~pyoomph.generic.codegen.InterfaceEquations`), which neither define any fields nor residuals nor doing anything else.
+You cannot plot an interface if there is no single equation defined on this interface. In that case, just add a dummy equation to this interface when defining the problem. A dummy equation instance can be just e.g. the base class :py:class:`~pyoomph.generic.codegen.Equations` (or :py:class:`~pyoomph.generic.codegen.InterfaceEquations`), which neither defines any fields nor residuals, nor does anything else.
 
-Finally, you can also plot interface fields. These can be either plotted as color maps (``mode="interfacecmap"``, which is selected automatically if you pass a ``colorbar`` to :py:meth:`~pyoomph.output.plotting.MatplotlibPlotter.add_plot`) or as ``"interfacearrows"``. The latter ``mode`` will be selected automatically, if you pass a ``arrowkey`` argument to :py:meth:`~pyoomph.output.plotting.MatplotlibPlotter.add_plot`. However, therefore, you first have to add the arrow key, similar as done with the color bars above by using :py:meth:`~pyoomph.output.plotting.MatplotlibPlotter.add_arrow_key`:
+Finally, you can also plot interface fields. These can be either plotted as color maps (``mode="interfacecmap"``, which is selected automatically if you pass a ``colorbar`` to :py:meth:`~pyoomph.output.plotting.MatplotlibPlotter.add_plot`) or as ``"interfacearrows"``. The latter ``mode`` will be selected automatically, if you pass an ``arrowkey`` argument to :py:meth:`~pyoomph.output.plotting.MatplotlibPlotter.add_plot`. However, therefore, you first have to add the arrow key, the same way as done with the color bars above by using :py:meth:`~pyoomph.output.plotting.MatplotlibPlotter.add_arrow_key`:
 
 .. code:: python
 

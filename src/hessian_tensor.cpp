@@ -25,11 +25,17 @@ The main author may be contacted at c.diddens@utwente.nl
 namespace pyoomph
 {
 
+  // Allocates 'size' empty per-row maps (one per first index i); the tensor starts
+  // completely empty and is filled up via accumulate().
   SparseRank3Tensor::SparseRank3Tensor(unsigned size, bool _symmetric) : symmetric(_symmetric), data(size), tens_size(-1)
   {
   }
 
   // Already calculate the indices for the CSR format to make a quick vector product
+  // Walks the per-row (j,k)->value maps (which are already sorted lexicographically by (j,k),
+  // see map_index_comp) and flattens them into a CSR-like structure of (i,j) "matrix" entries,
+  // where each entry stores the list of (k,value) pairs contributing to that (i,j) slot.
+  // This lets right_vector_mult() below avoid repeated map lookups on every call.
   std::tuple<std::vector<int>, std::vector<int>> SparseRank3Tensor::finalize_for_vector_product()
   {
     matrix_col_index.clear();
@@ -42,6 +48,8 @@ namespace pyoomph
       int last_col = -1;
       for (auto &entry : data[i]) // entry.first => j,k   and  entry.second=contrib
       {
+        // A new distinct j value starts a new (i,j) CSR entry; all k-contributions for the
+        // same (i,j) are collected in vector_prod_contribs.back() until j changes again.
         if (entry.first.first > last_col)
         {
           matrix_col_index.push_back(entry.first.first);
@@ -65,6 +73,8 @@ namespace pyoomph
   The arrays V and COL_INDEX are of length NNZ, and contain the non-zero values and the column indices of those values respectively.
   The array ROW_INDEX is of length m + 1 and encodes the index in V and COL_INDEX where the given row starts. This is equivalent to ROW_INDEX[j] encoding the total number of nonzeros above row j. The last element is NNZ , i.e., the fictitious index in V immediately after the last valid index NNZ - 1
   */
+  // Contracts the tensor with vector v over the last index, giving the entries (in the CSR
+  // layout produced by finalize_for_vector_product()) of the matrix M_ij = sum_k T_ijk v_k.
   std::vector<double> SparseRank3Tensor::right_vector_mult(const std::vector<double> &v) // Returns a CSR matrix
   {
     if (this->size() != v.size())
@@ -75,6 +85,8 @@ namespace pyoomph
 
     if (!symmetric)
     {
+      // General case: each flat CSR entry c (corresponding to one (i,j) pair) sums its
+      // stored (k,value) contributions against v[k].
       for (int c = 0; c < matrix_row_start.back(); c++)
       {
         for (auto contrib : vector_prod_contribs[c])
@@ -85,6 +97,10 @@ namespace pyoomph
     }
     else
     {
+      // Symmetric case: only the j<=k half of each row was accumulated (see accumulate()),
+      // so each stored (k,value) contribution is applied both to its own CSR entry and, via
+      // contrib.first used as the "mirrored" index, to the counterpart entry that was skipped
+      // during accumulation.
       for (int c = 0; c < matrix_row_start.back(); c++)
       {
         for (auto contrib : vector_prod_contribs[c])
@@ -98,6 +114,8 @@ namespace pyoomph
     return vals;
   }
 
+  // Dumps every stored nonzero entry as an explicit (i,j,k,value) tuple, e.g. for exporting
+  // the tensor to Python or for debugging; not intended for performance-critical use.
   std::vector<std::tuple<int, int, int, double>> SparseRank3Tensor::get_entries() const
   {
     std::vector<std::tuple<int, int, int, double>> res;

@@ -39,69 +39,113 @@ namespace pyoomph
 	class MeshKDTree;
 
 	class Mesh;
-	
 
-	
 
+
+
+	// Base class for all pyoomph meshes. Wraps an oomph-lib (Refineable)Mesh and adds
+	// everything pyoomph needs on top: named boundaries, per-field initial/Dirichlet
+	// conditions, output scaling, interface-dof bookkeeping, JIT-compiled element code
+	// binding (codeinst) and helpers for interpolation/projection between meshes.
 	class Mesh : public virtual oomph::RefineableMeshBase, public virtual oomph::Mesh
 	{
 	protected:
-		Problem *problem;
-		std::string domainname;
-		std::vector<std::string> boundary_names;
-		std::map<std::string, GiNaC::ex> initial_conditions;
-		std::map<std::string, double> output_scales;
-		std::map<std::string, unsigned> interface_dof_ids;
-		std::vector<bool> dirichlet_active;
-		std::map<pyoomph::Node *, pyoomph::Node *> copied_masters;
-		MeshKDTree *lagrangian_kdtree;
-		DynamicBulkElementInstance *codeinst = NULL;
+		Problem *problem; // Owning Problem (non-owning pointer)
+		std::string domainname; // Name of the domain this mesh represents, e.g. as used in the Python interface
+		std::vector<std::string> boundary_names; // Names of the boundaries, indexed like oomph-lib's boundary indices
+		std::map<std::string, GiNaC::ex> initial_conditions; // Symbolic initial condition expressions, keyed by field/IC name
+		std::map<std::string, double> output_scales; // Nondimensionalization output scales, keyed by field name
+		std::map<std::string, unsigned> interface_dof_ids; // Names of interface-only degrees of freedom mapped to their global index
+		std::vector<bool> dirichlet_active; // Whether each Dirichlet condition (by index) is currently active
+		std::map<pyoomph::Node *, pyoomph::Node *> copied_masters; // Maps a copied node to its master node (see resolve_copy_master)
+		MeshKDTree *lagrangian_kdtree; // Lazily-built KD-tree over Lagrangian node coordinates, used for spatial lookups
+		DynamicBulkElementInstance *codeinst = NULL; // JIT-compiled element code instance backing the elements of this mesh
 
 	public:
 		bool interpolated_lagrangian_coordinates_at_remeshing=false;
+		// Given a node that is a "copy" (e.g. periodic/interface copy) of another node, return its master.
+		// Follows copied_masters; typically returns cpy itself if it is not a copy.
 		virtual pyoomph::Node *resolve_copy_master(pyoomph::Node *cpy);
+		// Create new nodes at the given (Eulerian or Lagrangian, depending on caller) coordinates by
+		// interpolating from the elements they fall into; used e.g. for probes/interpolation meshes.
+		// If all_as_boundary_nodes is set, all created nodes are added as BoundaryNodes (needed if they may later be put on a boundary).
 		std::vector<pyoomph::Node*> add_interpolated_nodes_at(const std::vector<std::vector<double> > & coords,bool all_as_boundary_nodes);
+		// Register mst as the master node for the copy cpy (see copied_masters / resolve_copy_master).
 		virtual void store_copy_master(pyoomph::Node *cpy, pyoomph::Node *mst);
+		// Transfer mesh-level bookkeeping (boundary names, ICs, output scales, ...) from an old mesh,
+		// e.g. after remeshing/adaptation has created a fresh mesh object.
 		virtual void _setup_information_from_old_mesh(Mesh *old);
+		// Serialize all data required to restore this mesh's nodal state (positions, values, history) into meshdata.
 		virtual void _save_state(std::vector<double> &meshdata);
+		// Restore nodal state previously written by _save_state.
 		virtual void _load_state(const std::vector<double> &meshdata);
+		// Pin all dofs of this mesh's elements, optionally restricted to only_dofs / excluding ignore_dofs.
+		// ignore_continuous_at_interfaces lists dof indices that must stay unpinned where continuous across an interface.
 		virtual void pin_all_my_dofs(std::set<std::string> only_dofs, std::set<std::string> ignore_dofs, std::set<unsigned> ignore_continuous_at_interfaces);
+		// Fill doftype/typnames with a description of each global dof (used for debugging/introspection).
 		virtual void describe_global_dofs(std::vector<int> &doftype, std::vector<std::string> &typnames);
 		virtual void describe_my_dofs(std::ostream &os, const std::string &in) { this->describe_local_dofs(os, in); }
-		virtual void set_lagrangian_nodal_coordinates();
-		// Function to activate the debugging.
-		bool duarte_debug = false;
-		virtual void activate_duarte_debug();
+		// Copy the current nodal Eulerian coordinates into the Lagrangian coordinates of all nodes (i.e. "freeze" the current shape as reference configuration).
+		virtual void set_lagrangian_nodal_coordinates();		
+		// Fill a lookup buffer mapping each local dof to its global field index, used to assemble field-wise data.
 		virtual void fill_dof_to_global_field_index_buffer(std::vector<int> &dofs_to_global_field_index);
 		// From the old mesh, map each element with the local coordinates associated to each integration point of the new mesh.
 		virtual void prepare_zeta_interpolation(pyoomph::Mesh *oldmesh);
 		virtual void set_time_level_for_projection(unsigned time_level);
+		// Prepare internal caches (e.g. KD-tree) required before interpolation calls; must be called before nodal_interpolate_*.
 		virtual void prepare_interpolation();
+		// Interpolate nodal values of this mesh from the mesh "from". If boundary_index>=0, only nodes on that
+		// boundary are interpolated (used when remeshing only a boundary/interface region).
 		virtual void nodal_interpolate_from(Mesh *from, int boundary_index);
+		// Interpolate nodal values along a boundary from an old mesh, using the arclength-like boundary coordinate
+		// to find the closest correspondence; boundary_max_dist limits how far a match may be to still be accepted.
 		virtual void nodal_interpolate_along_boundary(Mesh *from, int bind, int oldbind, Mesh *imesh, Mesh *oldimesh, double boundary_max_dist);
+		// Bind this mesh to its owning Problem and the JIT-compiled element code instance used to create its elements.
 		virtual void _set_problem(Problem *p, DynamicBulkElementInstance *code);
+		// Evaluate all fields at a list of local coordinates ("zetas") per element; masked_lines flags entries to
+		// skip. with_scales selects whether output_scales are applied (dimensional vs. nondimensional output).
 		std::vector<std::vector<double>> get_values_at_zetas(const std::vector<std::vector<double>> &zetas, std::vector<bool> &masked_lines, bool with_scales);
 		virtual void fill_dof_types(int *typarr);
+		// Make sure the halo layer (MPI-distributed meshes) is wide enough to represent periodic boundary partners.
 		virtual void ensure_halos_for_periodic_boundaries();
+		// Evaluate a named user-defined integral (as set up in the JIT code) over this mesh.
 		virtual GiNaC::ex evaluate_integral_function(std::string name);
+		// Find the extremum (sign>0: max, sign<0: min) of a named local expression over the mesh; returns the
+		// value and, via out-params, the element and local coordinate where it is attained.
 		virtual GiNaC::ex evaluate_extremum(std::string name,int sign,BulkElementBase *& extreme_element,oomph::Vector<double> &extreme_local_coords,unsigned flags);
 		virtual std::vector<std::string> list_integral_functions();
 		virtual std::vector<std::string> list_local_expressions();
+		// Fill buffers describing internal facets (element faces shared between two bulk elements) and, for
+		// periodic/interface meshes, their opposite-side counterparts. Dimension-specific; base class throws.
 		virtual void fill_internal_facet_buffers(std::vector<BulkElementBase *> &internal_elements, std::vector<int> &internal_face_dir, std::vector<BulkElementBase *> &opposite_elements, std::vector<int> &opposite_face_dir, std::vector<int> &opposite_already_at_index) { throw_runtime_error("Please specify this function for each dimension"); }
+		// Build an InterfaceMesh of elements attached to the boundary/interface named intername, using the
+		// JIT-compiled interface element code jitcode; imesh is the interface mesh to populate.
 		virtual void generate_interface_elements(std::string intername, Mesh *imesh, DynamicBulkElementInstance *jitcode);
 		virtual void ensure_external_data();
 		virtual double get_temporal_error_norm_contribution();
+		// Store the output scale factor s (a symbolic expression, evaluated via _code) used to nondimensionalize field fname on output.
 		void set_output_scale(std::string fname, GiNaC::ex s, DynamicBulkElementInstance *_code);
 		double get_output_scale(std::string fname);
 		int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nelem, bool discontinuous); // Gets the number of required elemental indices
+		// Fill flat buffers with node coordinates and per-element connectivity/type info for numpy-based plotting/export.
+		// tesselate_tri splits quads/general elements into triangles; discontinuous keeps per-element (DG-style) node copies.
 		void to_numpy(double *xbuffer, int *eleminds, unsigned elemstride, int *elemtypes, bool tesselate_tri, bool nondimensional, double *D0_data, double *DL_data, unsigned history_index, bool discontinuous);
 		std::vector<double> evaluate_local_expression_at_nodes(unsigned index, bool nondimensional, bool discontinuous = false);
+		// Register a symbolic initial-condition expression for field fieldname (evaluated later in setup_initial_conditions).
 		void set_initial_condition(std::string fieldname, GiNaC::ex expression);
+		// Evaluate and assign the registered initial conditions to all nodes/elements of this mesh.
+		// resetting_first_step distinguishes a true (re)start from a mid-simulation IC re-application (e.g. after remeshing);
+		// ic_name selects a particular named IC set (multiple ICs can be registered under different names).
 		virtual void setup_initial_conditions(bool resetting_first_step, std::string ic_name);
+		// Pin dofs that do not actually contribute to any equation (e.g. because they were disabled by requirements),
+		// so the linear system doesn't end up singular.
 		virtual void pin_noncontributing_dofs();
+		// Evaluate and (re-)apply all Dirichlet conditions on this mesh. If only_update_vals is set, only the pinned
+		// values are refreshed (e.g. for time-dependent BCs), without changing which dofs are pinned.
 		virtual void setup_Dirichlet_conditions(bool only_update_vals);
 		virtual void set_dirichlet_active(std::string name, bool active);
 		virtual bool get_dirichlet_active(std::string name);
+		// Ensure the intrinsic boundary coordinate (arclength/zeta along boundary_index) has been set up on all its nodes.
 		virtual void boundary_coordinates_bool(unsigned boundary_index);
 		virtual bool is_boundary_coordinate_defined(unsigned boundary_index);
 		void set_spatial_error_estimator_pt(pyoomph::LagrZ2ErrorEstimator *errest) { this->spatial_error_estimator_pt() = errest; }
@@ -111,6 +155,8 @@ namespace pyoomph
 		//	NodalIteratorAccess  boundary_nodes(const std::vector<std::string> & bn );  //Iterate over boundaries
 		Problem *get_problem() { return problem; }
 		Mesh() : problem(NULL),  lagrangian_kdtree(NULL) {}
+		// Look up the oomph-lib boundary index for a named boundary; throws with a helpful message (listing
+		// all available boundary names) if n is not found.
 		unsigned get_boundary_index(const std::string &n)
 		{
 			for (unsigned int i = 0; i < boundary_names.size(); i++)
@@ -135,7 +181,9 @@ namespace pyoomph
 		virtual void enlarge_elemental_error_max_override_to_only_nodal_connected_elems(unsigned bind);
 		virtual unsigned get_nodal_dimension();
 		virtual int get_element_dimension();
+		// Discard the cached lagrangian_kdtree (e.g. because nodes moved); it will be rebuilt lazily on next use.
 		virtual void invalidate_lagrangian_kdtree();
+		// Lazily build (if necessary) and return the KD-tree over Lagrangian node coordinates.
 		virtual MeshKDTree *get_lagrangian_kdtree();
 		virtual std::map<std::string, std::string> get_field_information(); // first: names, second: list of spaces (C2,C1,DL,D0), but also (../C2 etc for elements defined on bulk domains)
 		virtual ~Mesh();
@@ -146,31 +194,46 @@ namespace pyoomph
 	{
 	};
 
+	// A mesh of interface/facet elements attached to a boundary of a bulk mesh (e.g. free surface,
+	// contact line, or coupling between two bulk domains). Has no nodes of its own beyond those it
+	// shares with the underlying bulk mesh(es); its elements wrap bulk element faces.
 	class InterfaceMesh : public Mesh
 	{
 	protected:
-		DynamicBulkElementInstance *code;
+		DynamicBulkElementInstance *code; // JIT-compiled code for the interface elements
 		std::string interfacename;
-		Mesh *bulkmesh;
+		Mesh *bulkmesh; // The bulk mesh this interface is attached to
+		// Build boundary information (which interface elements/nodes lie on which sub-boundary) for a 1d interface
+		// (i.e. attached to a 2d bulk mesh), restricted to boundary indices in possible_bounds.
 		virtual void setup_boundary_information1d(pyoomph::Mesh *parent, const std::set<unsigned> &possible_bounds);
+		// Same as setup_boundary_information1d but for a 2d interface (attached to a 3d bulk mesh).
 		virtual void setup_boundary_information2d(pyoomph::Mesh *parent, const std::set<unsigned> &possible_bounds);
-		std::vector<double> opposite_offset_vector,reversed_opposite_offset_vector;
+		std::vector<double> opposite_offset_vector,reversed_opposite_offset_vector; // Constant offset (e.g. for periodic/translated interfaces) to the opposite side and its reverse
 	public:
 		InterfaceMesh();
 		virtual ~InterfaceMesh();
 		virtual void update_zeta_in_buffer();
 		virtual void update_equation_remapping();
+		// Set the offset vector used to relate this interface's coordinates to the geometrically opposite interface
+		// (e.g. across a periodic domain); also updates the cached reversed_opposite_offset_vector.
 		virtual void set_opposite_interface_offset_vector(const std::vector<double> & offset);
 		virtual std::vector<double>  get_opposite_interface_offset_vector() {return opposite_offset_vector;}
 		virtual void fill_internal_facet_buffers(std::vector<BulkElementBase *> &internal_elements, std::vector<int> &internal_face_dir, std::vector<BulkElementBase *> &opposite_elements, std::vector<int> &opposite_face_dir, std::vector<int> &opposite_already_at_index);
-		std::vector<oomph::FiniteElement *> opposite_interior_facets;
+		std::vector<oomph::FiniteElement *> opposite_interior_facets; // Facets on the geometrically opposite side (e.g. periodic partner), matched to this mesh's facets by index
 		virtual double get_temporal_error_norm_contribution();
 		virtual void adapt(const oomph::Vector<double> &elemental_error) {}
 		virtual void refine_uniformly(oomph::DocInfo &doc_info) {}
 		virtual unsigned unrefine_uniformly() { return 0; }
+		// Undo prior interface-element rebuild state before the bulk mesh is adapted (interface elements are
+		// rebuilt afterwards from the new bulk mesh via rebuild_after_adapt).
 		virtual void clear_before_adapt();
+		// Regenerate this interface's elements from the (possibly refined/coarsened) bulk mesh after adaptation.
 		virtual void rebuild_after_adapt();
+		// Unpin/null out dofs on this interface that must not be treated as independent (e.g. because they are
+		// algebraically slaved to the bulk mesh across the interface).
 		virtual void nullify_selected_bulk_dofs();
+		// Store the information (bulk mesh, interface name, JIT code) needed to rebuild this interface mesh later,
+		// e.g. after adaptation via rebuild_after_adapt.
 		virtual void set_rebuild_information(Mesh *_bulkmesh, std::string intername, DynamicBulkElementInstance *jitcode);
 		virtual Mesh *get_bulk_mesh() { return bulkmesh; }
 		virtual unsigned count_nnode(bool discontinuous = false); // Interface meshes don't have their own nodes...
@@ -180,32 +243,41 @@ namespace pyoomph
 		virtual int has_interface_dof_id(std::string n) { return bulkmesh->has_interface_dof_id(n); }
 		virtual unsigned resolve_interface_dof_id(std::string n) { return bulkmesh->resolve_interface_dof_id(n); }
 		virtual void setup_boundary_information(pyoomph::Mesh *parent);
+		// Match this interface mesh's elements/nodes to those of another interface mesh (e.g. the opposite side of
+		// a periodic domain) by nearest-neighbor lookup via a KD-tree, populating opposite_interior_facets etc.
 		virtual void connect_interface_elements_by_kdtree(InterfaceMesh *other);
 		virtual unsigned get_nodal_dimension();
 		virtual int get_element_dimension();
 	};
 
+	// A "mesh" that does not discretize a spatial domain but instead stores ODE (0-dimensional)
+	// elements, i.e. degrees of freedom that are not associated with any node/geometry (global ODEs).
 	class ODEStorageMesh : public Mesh
 	{
 	protected:
-		std::map<std::string, unsigned> name_to_index;
+		std::map<std::string, unsigned> name_to_index; // Maps ODE name to its index in Element_pt
 
 	public:
 		ODEStorageMesh();
-		virtual ~ODEStorageMesh();		
+		virtual ~ODEStorageMesh();
 		virtual double get_temporal_error_norm_contribution();
 		virtual void adapt(const oomph::Vector<double> &elemental_error) {}
 		virtual void refine_uniformly(oomph::DocInfo &doc_info) {}
 		virtual unsigned unrefine_uniformly() { return 0; }
 		virtual void setup_initial_conditions(bool resetting_first_step, std::string ic_name);
 		virtual void setup_Dirichlet_conditions(bool only_update_vals);
+		// Register a new named ODE (GeneralisedElement) in this storage mesh; returns its index.
 		virtual unsigned add_ODE(std::string name, oomph::GeneralisedElement *ode);
+		// Look up a previously added ODE element by name.
 		virtual oomph::GeneralisedElement *get_ODE(std::string name);
 		virtual unsigned get_nodal_dimension() { return 0; }
 		virtual int get_element_dimension() { return 0; }
 		virtual oomph::GeneralisedElement *_create_ode_element(oomph::TimeStepper *ts);
 	};
 
+	// pyoomph's replacement for oomph-lib's Tree that supports "dynamic" (JIT-compiled) elements:
+	// tree traversal needs to go through pyoomph's element/mesh types rather than the statically
+	// templated oomph-lib element hierarchy.
 	class DynamicTree : public virtual oomph::Tree
 	{
 	protected:
@@ -215,8 +287,10 @@ namespace pyoomph
 
 		typedef void (DynamicTree::*DynamicVoidMemberFctPt)();
 
+		// Split (refine) this tree's associated element if oomph-lib's refinement flags request it.
 		void dynamic_split_if_required();
 
+		// Recursively call member_function on every leaf (element without sons) of the subtree rooted here.
 		void dynamic_traverse_leaves(DynamicTree::DynamicVoidMemberFctPt member_function)
 		{
 			unsigned numsons = Son_pt.size();
@@ -234,6 +308,7 @@ namespace pyoomph
 		}
 	};
 
+	// Root node of a DynamicTree (one per top-level element in the forest).
 	class DynamicTreeRoot : public virtual DynamicTree, public virtual oomph::TreeRoot
 	{
 	public:
@@ -261,6 +336,9 @@ namespace pyoomph
 	
 
 	// The basis class for all templated meshes // TODO Move elsewhere
+	// Common base for meshes that are generated from a MeshTemplate (i.e. all "real" spatial meshes,
+	// as opposed to InterfaceMesh/ODEStorageMesh). Adds the tree-based refinement machinery (via
+	// oomph::TreeBasedRefineableMeshBase) and facet bookkeeping used to (re)derive boundary information.
 	class TemplatedMeshBase : public virtual oomph::TreeBasedRefineableMeshBase, public virtual pyoomph::Mesh
 	{
 
@@ -268,8 +346,13 @@ namespace pyoomph
 		//  std::string domainname;
 		//  std::vector<std::string> boundary_names;
 		std::map<std::set<pyoomph::Node *> ,std::vector<unsigned>> facets; // Map from facets (vertex node sets) to boundary indices
+		// Create and register a new element of the same JIT-compiled type as new_el's prototype, built on the
+		// given node list; used when subdividing/regenerating elements (e.g. triangle refinement).
 		unsigned add_new_element(pyoomph::BulkElementBase *new_el, std::vector<pyoomph::Node *> nodes);
+		// (Re)build the facets map from the MeshTemplate's boundary information, using bound_map to translate
+		// template boundary indices to this mesh's boundary indices.
         virtual void setup_facets_from_template(MeshTemplate *templ,const std::vector<int> & bound_map);
+		// Traverse the tree forest and p/h-refine any leaf element that oomph-lib has flagged for splitting.
 		void split_elements_if_required()
 		{
 			// Find the number of trees in the forest
@@ -330,15 +413,29 @@ namespace pyoomph
 
 
 		virtual void setup_boundary_element_info(std::ostream &outfile) ;
+		// Populate this mesh's elements/nodes/boundaries from an already-built MeshTemplateElementCollection
+		// (the dimension-specific subclasses implement this: TemplatedMeshBase1d/2d/3d).
 		virtual void generate_from_template(MeshTemplateElementCollection *coll) = 0;
 
+		// Hook allowing Python code to post-process elemental error estimates before adapt() uses them
+		// to decide refinement/coarsening; identity by default.
 		virtual std::vector<double> update_elemental_errors(std::vector<double> &errors)
 		{
 			return errors;
 		}
 
+		// Can we refine the mesh? By defult, no: only the dimension-specific subclasses implement refinement.
+		virtual bool refinement_possible() {return false;} 
+
+		// Wraps oomph-lib's TreeBasedRefineableMeshBase::adapt: lets the Python-side
+		// update_elemental_errors hook post-process the per-element error estimates (e.g. to bias
+		// refinement) before handing them to the actual oomph-lib refinement/coarsening logic.
 		void adapt(const oomph::Vector<double> &elemental_error)
 		{
+			if (!this->refinement_possible())
+			{
+				return; // No-op if the mesh type does not support refinement
+			}
 			// For python, we need to convert it to a std::vector...
 			std::vector<double> errors(elemental_error.size());
 			for (unsigned int i = 0; i < elemental_error.size(); i++)
@@ -354,6 +451,9 @@ namespace pyoomph
 			TreeBasedRefineableMeshBase::adapt(updated_errors);
 		}
 
+		// Remove nodes flagged as obsolete (is_obsolete()) from Node_pt, deleting them. Unlike oomph-lib's
+		// usual node-pruning, this does not update boundary node lists, so it must only be used when the
+		// caller already knows no obsolete node is registered on any boundary.
 		void prune_dead_nodes_without_respecting_boundaries()
 		{
 			oomph::Vector<oomph::Node*> new_node_pt;
@@ -374,14 +474,18 @@ namespace pyoomph
 		}		
 	};
 
+	// Spatial index over a mesh's nodes, used for nearest-node and containing-element lookups
+	// (e.g. interpolation between meshes, connecting periodic/interface meshes). Can be built over
+	// either Eulerian or Lagrangian coordinates, at a given history/time index.
 	class MeshKDTree
 	{
 	protected:
-		bool lagrangian;
-		unsigned tindex;
-		std::vector<pyoomph::Node *> nodes_by_index;
-		std::map<pyoomph::Node *, std::set<pyoomph::BulkElementBase *>> nodes_to_elem;
+		bool lagrangian; // Whether the tree indexes Lagrangian (true) or Eulerian (false) coordinates
+		unsigned tindex; // Time-history index of the coordinates used to build the tree
+		std::vector<pyoomph::Node *> nodes_by_index; // Node pointers, indexed the same way as the underlying KDTree
+		std::map<pyoomph::Node *, std::set<pyoomph::BulkElementBase *>> nodes_to_elem; // Elements adjacent to each node, used to search from a node to a containing element
 		KDTree *tree;
+		// Return the index (into nodes_by_index/tree) of the node nearest to coord; optionally returns the distance.
 		unsigned find_index(const std::vector<double> &coord, double *distreturn = NULL);
 		double max_search_radius;
 
@@ -393,6 +497,8 @@ namespace pyoomph
 				delete tree;
 		}
 		pyoomph::Node *find_node(const oomph::Vector<double> &coord, double *distreturn = NULL);
+		// Locate the element containing the point zeta (in the same coordinate system the tree was built with),
+		// starting the search from the nearest node; sreturn receives the local coordinates within that element.
 		pyoomph::BulkElementBase *find_element(oomph::Vector<double> zeta, oomph::Vector<double> &sreturn);
 	};
 

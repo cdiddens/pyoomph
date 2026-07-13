@@ -26,7 +26,7 @@
 # ========================================================================
  
 
-import _pyoomph
+import pyoomph._pyoomph_core as _pyoomph
 import inspect
 
 from ..expressions.generic import Expression, ExpressionOrNum, FiniteElementSpaceEnum

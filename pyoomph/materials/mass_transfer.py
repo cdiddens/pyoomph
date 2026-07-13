@@ -190,6 +190,13 @@ class ProjectedMassTransferModelBase(MassTransferModelBase):
 
 
 class PrescribedMassTransfer(ProjectedMassTransferModelBase):
+    """
+    A mass transfer model with prescribed mass transfer rates.
+    Please set the ``projection_space`` attribute to define the FEM space for the mass transfer rates.
+    
+    Args:
+        rates: A dictionary mapping component names to their prescribed mass transfer rates. 
+    """    
     def __init__(self,**rates:ExpressionOrNum):
         super(PrescribedMassTransfer, self).__init__()
         self.rates=rates.copy()

@@ -64,7 +64,8 @@ Beyond that, pyoomph makes use of the following libraries at runtime. During ins
 - [`slepc`](https://slepc.upv.es/) and [`slepc4py`](https://gitlab.com/slepc/slepc), ([BSD 2-Clause license](https://slepc.upv.es/contact/copy.htm)).
 - [`vtk`](https://vtk.org/), ([BSD 3-clause license](https://vtk.org/about/)).
 - [`paraview`](https://www.paraview.org/), ([BSD 3-clause license](https://www.paraview.org/license/)). Only used for the included [`Paraview filter for visualizing azimuthal perturbations`](https://github.com/pyoomph/pyoomph/blob/main/pyoomph/paraview/pyoomph_eigen_extrusion_filter.py).
-- [`setuptools`](https://github.com/pypa/setuptools) ([MIT license](https://github.com/pypa/setuptools?tab=MIT-1-ov-file#readme)) is used for installation, wheel generation and to invoke the system's C compiler
+- [`setuptools`](https://github.com/pypa/setuptools) ([MIT license](https://github.com/pypa/setuptools?tab=MIT-1-ov-file#readme)) is used to invoke the system's C compiler
+- [`scikit-build-core`](https://github.com/scikit-build/scikit-build-core) ([Apache 2.0 license](https://github.com/scikit-build/scikit-build-core?tab=Apache-2.0-1-ov-file)) is used for installation and wheel generation
 - [`cibuildwheel`](https://cibuildwheel.pypa.io), ([BSD 2-Clause license](https://github.com/pypa/cibuildwheel?tab=License-1-ov-file#readme)) is used to compile the provided wheels
 - [`pybind11-stubgen`](https://github.com/sizmailov/pybind11-stubgen), ([BSD 3-Clause license](https://github.com/sizmailov/pybind11-stubgen?tab=License-1-ov-file#readme)) is used to generate python stubs from the C++ core
 - [`tccbox`](https://github.com/metab0t/tccbox) used as wrapper for the [`TinyC`](https://bellard.org/tcc/) compiler, ([LPGL 2 or later license](https://www.gnu.org/licenses/old-licenses/gpl-2.0.html))
