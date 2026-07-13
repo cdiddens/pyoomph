@@ -12346,8 +12346,8 @@ namespace pyoomph
 
 	oomph::FaceElement * BulkElementPyramid3dC2::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index)
 	{
-		if (face_index==4) return  new InterfaceElementQuad2dC1(jitcode, this, face_index);
-	    else return new InterfaceElementTri2dC1(jitcode, this, face_index);				
+		if (face_index==4) return  new InterfaceElementQuad2dC2(jitcode, this, face_index);
+	    else return new InterfaceElementTri2dC2(jitcode, this, face_index);
 	}
 
 }
