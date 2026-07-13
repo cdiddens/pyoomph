@@ -474,6 +474,44 @@ namespace pyoomph
 		return res;
 	}
 
+
+	bool InterfaceElementBase::fill_hang_info_with_equations_interface(JITShapeInfo_t *shape_info)
+	{
+		bool res=false;
+		auto * ft = codeinst->get_func_table();
+		for (unsigned int ispace=0;ispace<ft->num_present_continuous_spaces;ispace++)
+		{
+			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info = ft->present_continuous_spaces[ispace];
+			unsigned nnode_space=eleminfo.nnode_of_space[space_info->space_index];
+			const std::vector<unsigned> & space_node_to_elem_node=this->get_nodal_space_index_to_element_index_map()[space_info->space_index];
+			int hangindex=space_info->hangindex;
+			JITHangInfo_t * hangbuffer=shape_info->hanginfo_Cont[space_info->space_index];
+			for (unsigned int l = 0; l < nnode_space; l++)
+			{
+				const unsigned l_elem=space_node_to_elem_node[l];
+				if (node_pt(l_elem)->is_hanging(hangindex))
+				{
+					res = true;
+					auto hang_info_pt = node_pt(l_elem)->hanging_pt(hangindex);
+					hangbuffer[l].nummaster = hang_info_pt->nmaster();				
+					for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
+					{
+						hangbuffer[l].masters[m].weight = hang_info_pt->master_weight(m);					
+						for (unsigned int f = 0; f < space_info->numfields-space_info->numfields_basebulk; f++)
+						{
+							hangbuffer[l].masters[m].local_eqn[f+space_info->buffer_offset_interf] = this->local_interface_hang_eqn( space_info->interface_dof_indices[f] , hang_info_pt->master_node_pt(m));
+						}
+					}
+				}
+				else
+				{
+					hangbuffer[l].nummaster = 0;
+				}
+			}
+		}
+		return res;
+	}
+
 	// After hanging-node constraints/master nodes have been set up (or changed, e.g. post-refinement),
 	// pushes consistent values into the hanging nodes' own storage: (1) positions, via oomph-lib's
 	// position() which already accounts for hanging-node interpolation; (2) field values of every
@@ -677,6 +715,7 @@ namespace pyoomph
 	 return result;
 	}
 
+
 	// Builds the complete hanging-node bookkeeping (positions, base-bulk continuous fields, and
 	// discontinuous fields which are never hanging) for this element, then - if eqn_remap is given -
 	// reinterprets/abuses that same hanging-info data structure to additionally carry local
@@ -692,6 +731,7 @@ namespace pyoomph
 	{
 		bool res=this->fill_hang_info_with_equations_for_pos(shape_info); // Potentially only do if required
 		res=this->fill_hang_info_with_equations_basebulk(shape_info) || res;
+		res=this->fill_hang_info_with_equations_interface(shape_info) || res;
 		for (unsigned int l = 0; l < eleminfo.nnode; l++)
 		{
 			shape_info->hanginfo_Discont[l].nummaster = 0;
@@ -4730,6 +4770,177 @@ namespace pyoomph
 		this->fill_in_contribution_to_jacobian(R, J);
 	}
 
+
+	int InterfaceElementBase::local_interface_hang_eqn(unsigned int interface_dof_index, oomph::Node * master_node) const
+    {
+	  pyoomph::BoundaryNode *const master_bound_node = dynamic_cast<pyoomph::BoundaryNode *>(master_node);
+	  if (!master_bound_node)
+	  {
+		throw_runtime_error("InterfaceElementBase::local_interface_hang_eqn: master_node is not a pyoomph::BoundaryNode");
+	  }
+      auto it = Local_interface_hang_eqn.find(interface_dof_index);
+      if (it == Local_interface_hang_eqn.end())
+	  {
+        throw_runtime_error("InterfaceElementBase::local_interface_hang_eqn: interface_dof_index not found in Local_interface_hang_eqn");
+	  }
+      auto it2 = it->second.find(dynamic_cast<pyoomph::BoundaryNode *>(master_bound_node));
+      if (it2 == it->second.end())
+	  {
+		throw_runtime_error("InterfaceElementBase::local_interface_hang_eqn: master_node not found in Local_interface_hang_eqn for the given interface_dof_index");
+	  }
+      return it2->second;
+    }
+
+	void InterfaceElementBase::fill_in_jacobian_from_nodal_by_fd(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian) 
+	{
+		BulkElementBase::fill_in_jacobian_from_nodal_by_fd(residuals, jacobian);
+		const unsigned n_node = this->nnode();
+		if (n_node == 0) return;
+		this->update_before_nodal_fd();
+		auto *ft=codeinst->get_func_table();
+		const std::vector<std::vector<unsigned>> & space_node_to_elem_node_map=this->get_nodal_space_index_to_element_index_map();
+		oomph::Vector<double> newres(residuals.size());
+		for (unsigned int ispace=0;ispace<ft->num_present_continuous_spaces;ispace++)
+		{
+			auto *space_info=ft->present_continuous_spaces[ispace];
+			if (space_info->numfields-space_info->numfields_basebulk)
+			{
+				for (unsigned n = 0; n < eleminfo.nnode_of_space[space_info->space_index]; n++)
+				{
+					oomph::Node *const local_node_pt = this->node_pt(space_node_to_elem_node_map[space_info->space_index][n]);
+					pyoomph::BoundaryNode *const bound_node_pt = dynamic_cast<pyoomph::BoundaryNode *>(local_node_pt);
+					if (!bound_node_pt)
+					{
+						throw_runtime_error("InterfaceElementBase::fill_in_jacobian_from_nodal_by_fd: node is not a pyoomph::BoundaryNode");
+					}
+					for (unsigned i = 0; i < space_info->numfields-space_info->numfields_basebulk; i++)
+					{
+						unsigned interface_dof_id=space_info->interface_dof_indices[i];
+						if (local_node_pt->is_hanging(space_info->hangindex) == false)
+						{
+							unsigned val_index=bound_node_pt->index_of_first_value_assigned_by_face_element(interface_dof_id);
+							int local_unknown = this->nodal_local_eqn(space_node_to_elem_node_map[space_info->space_index][n], val_index);
+							if (local_unknown >= 0)
+							{
+								double *const value_pt = local_node_pt->value_pt(val_index);
+								const double old_var = *value_pt;
+								*value_pt += this->Default_fd_jacobian_step;
+								this->update_in_nodal_fd(val_index);
+								this->get_residuals(newres);
+								for (unsigned m = 0; m < this->ndof(); m++)
+								{
+									jacobian(m, local_unknown) = (newres[m] - residuals[m]) / this->Default_fd_jacobian_step;
+								}
+								*value_pt = old_var;
+								this->reset_in_nodal_fd(val_index);
+							}
+						}
+						else
+						{
+							oomph::HangInfo *hang_info_pt = local_node_pt->hanging_pt(space_info->hangindex);
+							const unsigned n_master = hang_info_pt->nmaster();
+							for (unsigned m = 0; m < n_master; m++)
+							{
+								oomph::Node *const master_node_pt = hang_info_pt->master_node_pt(m);	
+								pyoomph::BoundaryNode *const master_bound_node_pt = dynamic_cast<pyoomph::BoundaryNode *>(master_node_pt);								
+								int local_unknown =  this->local_interface_hang_eqn(interface_dof_id, master_bound_node_pt);				
+								unsigned val_index=master_bound_node_pt->index_of_first_value_assigned_by_face_element(interface_dof_id);
+								if (local_unknown >= 0)
+								{
+									double *const value_pt = master_node_pt->value_pt(val_index);
+									const double old_var = *value_pt;
+									*value_pt += this->Default_fd_jacobian_step;
+									this->update_in_nodal_fd(val_index);
+									this->get_residuals(newres);
+									for (unsigned mm = 0; mm < this->ndof(); mm++)
+									{	
+										jacobian(mm, local_unknown) = (newres[mm] - residuals[mm]) / this->Default_fd_jacobian_step;
+									}
+									*value_pt = old_var;
+									this->reset_in_nodal_fd(val_index);
+								}
+							}
+						}
+					}
+				}
+			}
+		}		
+	}
+
+	void BulkElementBase::fill_in_jacobian_from_nodal_by_fd(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian)
+	{
+		const unsigned n_node = this->nnode();
+		if (n_node == 0) return;
+
+		this->update_before_nodal_fd();
+
+		const unsigned n_dof = this->ndof();
+		oomph::Vector<double> newres(n_dof);
+		const double fd_step = this->Default_fd_jacobian_step;
+		const unsigned n_cont_values = this->ncont_interpolated_values();
+		int local_unknown = 0;
+
+		const std::vector<std::vector<unsigned>> & space_node_to_elem_node_map=this->get_nodal_space_index_to_element_index_map();
+		for (unsigned int ispace=0;ispace<codeinst->get_func_table()->num_present_continuous_spaces;ispace++)
+		{
+			auto *space_info=codeinst->get_func_table()->present_continuous_spaces[ispace];
+			if (space_info->numfields_basebulk)
+			{
+				for (unsigned n = 0; n < this->eleminfo.nnode_of_space[space_info->space_index]; n++)
+				{
+					oomph::Node *const local_node_pt = this->node_pt(space_node_to_elem_node_map[space_info->space_index][n]);
+					for (unsigned i = space_info->nodal_offset_basebulk; i < space_info->nodal_offset_basebulk+space_info->numfields_basebulk; i++)
+					{
+						if (local_node_pt->is_hanging(space_info->hangindex) == false)
+						{
+							local_unknown = this->nodal_local_eqn(space_node_to_elem_node_map[space_info->space_index][n], i);
+							if (local_unknown >= 0)
+							{
+								double *const value_pt = local_node_pt->value_pt(i);
+								const double old_var = *value_pt;
+								*value_pt += fd_step;
+								this->update_in_nodal_fd(i);
+								this->get_residuals(newres);
+								for (unsigned m = 0; m < n_dof; m++)
+								{
+									jacobian(m, local_unknown) = (newres[m] - residuals[m]) / fd_step;
+								}
+								*value_pt = old_var;
+								this->reset_in_nodal_fd(i);
+							}
+						}
+						else
+						{
+							oomph::HangInfo *hang_info_pt = local_node_pt->hanging_pt(space_info->hangindex);
+							const unsigned n_master = hang_info_pt->nmaster();
+							for (unsigned m = 0; m < n_master; m++)
+							{
+								oomph::Node *const master_node_pt = hang_info_pt->master_node_pt(m);					
+								local_unknown = this->local_hang_eqn(master_node_pt, i);						
+								if (local_unknown >= 0)
+								{
+									double *const value_pt = master_node_pt->value_pt(i);
+									const double old_var = *value_pt;
+									*value_pt += fd_step;
+									this->update_in_nodal_fd(i);
+									this->get_residuals(newres);
+									for (unsigned mm = 0; mm < n_dof; mm++)
+									{
+										jacobian(mm, local_unknown) = (newres[mm] - residuals[mm]) / fd_step;
+									}
+									*value_pt = old_var;
+									this->reset_in_nodal_fd(i);
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		this->reset_after_nodal_fd();
+	}
+
 	// Debug helper: recomputes the Jacobian via the (base oomph-lib) finite-difference path and
 	// compares it entry-by-entry to the already-assembled analytical (JIT) `jacobian`, printing
 	// every entry that differs by more than diff_eps (with dof names) to help track down bugs in
@@ -4759,7 +4970,7 @@ namespace pyoomph
 				{
 					if (!header_written)
 					{
-						std::cout << "DIFFERENCES IN JACOBIAN ndof=" << this->ndof() << std::endl;
+						std::cout << "DIFFERENCES IN JACOBIAN ndof=" << this->ndof() << " ELEM_DIM " << this->dim() << std::endl;
 						std::cout << "#I\tJ\tDOF_i\tDOF_j\tDIFF\tJana\tJfd\tRana_i\tRfd_i\tRana_j\tRfd_j" << std::endl;
 						header_written = true;
 					}
@@ -9532,7 +9743,6 @@ namespace pyoomph
 				pyoomph::Node * node=dynamic_cast<pyoomph::Node*>(this->node_pt(get_nodal_space_index_to_element_index[inode]));
 				if (node->is_hanging(hangindex))
 				{					
-					throw_runtime_error("Hanging node ");
 					pyoomph::BoundaryNode * dest_bn=dynamic_cast<pyoomph::BoundaryNode*>(node);
 					if (!dest_bn) throw_runtime_error("dest_bn is not a BoundaryNode");
 					oomph::HangInfo * hang_info=node->hanging_pt(hangindex);
@@ -9580,10 +9790,8 @@ namespace pyoomph
 							  unsigned master_index=boundnode->index_of_first_value_assigned_by_face_element(add_field_index);
 							  val+=master_node->value(t, master_index);
 						   }
-						   val/=(dummy_value_interpolation[idummy].size()-1.0);
-						   //if (t==0) std::cout << " Patching interface node "<<  dummy_value_interpolation[idummy][0] <<"  of space " << space_info->space_name << " field " << field_index << " " << space_info->fieldnames[field_index+space_info->numfields_basebulk] << " at time " << t << " with value " << val << std::endl;
-						   unsigned dest_index=dest_boundnode->index_of_first_value_assigned_by_face_element(add_field_index);
-						   //std::cout << " Patching interface node "<<  dummy_value_interpolation[idummy][0] <<"  of space " << space_info->space_name << " field " << field_index << " " << space_info->fieldnames[field_index+space_info->numfields_basebulk] << " at time " << t << " with value " << val << "field index" << add_field_index << "value index" << dest_index << " is pinned " << dummynode->is_pinned(dest_index) << std::endl;
+						   val/=(dummy_value_interpolation[idummy].size()-1.0);						   
+						   unsigned dest_index=dest_boundnode->index_of_first_value_assigned_by_face_element(add_field_index);						   
 						   dummynode->value_pt(dest_index)[t]=val;
 						}
 					}
@@ -9599,34 +9807,26 @@ namespace pyoomph
 	// hanging-node masters, so instead of a true local dof, this builds (per master node) a map from master
 	// node to either a new local equation number (registered as an external dof) or Data::Is_pinned. The
 	// resulting per-field maps are stored in add_interf_local_hang_eqs for the generated code's hang_buffer trick.
-	void InterfaceElementBase::assign_hanging_additional_interface_local_equations_for_space(const bool &store_local_dof_pt,unsigned addfields,unsigned basebulk_offset,unsigned nnode, int hangindex,  char * fieldnames[], unsigned (BulkElementBase::*node_index_to_element)(const unsigned &) const,  std::map<Node*, int> *& add_interf_local_hang_eqs)
+	void InterfaceElementBase::assign_hanging_additional_interface_local_equations_for_space(const bool &store_local_dof_pt, JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space)
 	{
 		bool has_hanging_interface_dofs=false;
 		unsigned local_eqn_number = ndof();      
       	std::deque<unsigned long> global_eqn_number_queue;
-
+		unsigned addfields=space->numfields-space->numfields_basebulk;
 		if (addfields)
 		{
-			std::vector<std::map<oomph::Node*, bool>> local_eqn_number_done(addfields, std::map<oomph::Node*, bool>());
-
-			if (add_interf_local_hang_eqs) delete[] add_interf_local_hang_eqs;
-			add_interf_local_hang_eqs=new std::map<Node*, int>[addfields];
-
-			std::vector<unsigned> add_field_indices(addfields, 0);
-			for (unsigned int ifield=0;ifield < addfields;ifield++)
+			const std::vector<unsigned> & space_node_to_elem_map=this->get_nodal_space_index_to_element_index_map()[space->space_index];
+			std::vector<std::map<oomph::Node*, bool>> local_eqn_number_done(addfields, std::map<oomph::Node*, bool>());									
+			for (unsigned int inode=0;inode<eleminfo.nnode_of_space[space->space_index];inode++)
 			{
-				add_field_indices[ifield]=this->codeinst->resolve_interface_dof_id(fieldnames[basebulk_offset+ifield]);
-			}
-			for (unsigned int inode=0;inode<nnode;inode++)
-			{
-				pyoomph::Node * node=dynamic_cast<pyoomph::Node*>(this->node_pt((this->*node_index_to_element)(inode)));
-				if (node->is_hanging(hangindex))
+				pyoomph::Node * node=dynamic_cast<pyoomph::Node*>(this->node_pt(space_node_to_elem_map[inode]));
+				if (node->is_hanging(space->hangindex))
 				{
-					oomph::HangInfo * hang_info=node->hanging_pt(hangindex);
+					oomph::HangInfo * hang_info=node->hanging_pt(space->hangindex);
 					for (unsigned int m=0;m<hang_info->nmaster();m++)
 					{
 						pyoomph::Node * master_node=dynamic_cast<pyoomph::Node*>(hang_info->master_node_pt(m));
-						BoundaryNode * boundnode=dynamic_cast<BoundaryNode*>(master_node);
+						pyoomph::BoundaryNode * boundnode=dynamic_cast<pyoomph::BoundaryNode*>(master_node);
 						if (!boundnode) throw_runtime_error("master_node is not a BoundaryNode");
 
 						unsigned local_node_index = this->nnode();                	
@@ -9642,8 +9842,9 @@ namespace pyoomph
                 		{             
 							for (unsigned int ifield=0;ifield<addfields;ifield++)
 							{
-								unsigned master_value_index=boundnode->index_of_first_value_assigned_by_face_element(add_field_indices[ifield]);     
-                  				add_interf_local_hang_eqs[ifield][master_node]  =nodal_local_eqn(local_node_index, master_value_index);
+								unsigned interface_id=space->interface_dof_indices[ifield];
+								unsigned master_value_index=boundnode->index_of_first_value_assigned_by_face_element(interface_id);     
+                  				Local_interface_hang_eqn[interface_id][boundnode]  =nodal_local_eqn(local_node_index, master_value_index);
 								has_hanging_interface_dofs=true;
                 			}
 						}
@@ -9651,13 +9852,14 @@ namespace pyoomph
 						{						
 							for (unsigned int ifield=0;ifield<addfields;ifield++)
 							{
-								unsigned master_value_index=boundnode->index_of_first_value_assigned_by_face_element(add_field_indices[ifield]);
+								unsigned interface_id=space->interface_dof_indices[ifield];
+								unsigned master_value_index=boundnode->index_of_first_value_assigned_by_face_element(interface_id);
 								long eqn_number = master_node->eqn_number(master_value_index);							
 								if (eqn_number >= 0)
 								{	
-									if (add_interf_local_hang_eqs[ifield].find(master_node) == add_interf_local_hang_eqs[ifield].end())
-									{										
-										add_interf_local_hang_eqs[ifield][master_node] = local_eqn_number;																		
+									if (Local_interface_hang_eqn[ifield].find(boundnode) == Local_interface_hang_eqn[ifield].end())
+									{																			
+										Local_interface_hang_eqn[interface_id][boundnode] = local_eqn_number;																		
 										global_eqn_number_queue.push_back(eqn_number);								
 										if (store_local_dof_pt)
 										{
@@ -9669,7 +9871,7 @@ namespace pyoomph
 								}
 								else
 								{
-									add_interf_local_hang_eqs[ifield][master_node] = oomph::Data::Is_pinned;
+									Local_interface_hang_eqn[interface_id][boundnode] = oomph::Data::Is_pinned;
 								}
 							}
 						}
@@ -9686,16 +9888,22 @@ namespace pyoomph
       		{
         		std::deque<double*>().swap(GeneralisedElement::Dof_pt_deque);
       		}
-		}
-      
-      	if (!has_hanging_interface_dofs)
-      	{
-        	delete[] add_interf_local_hang_eqs;
-        	add_interf_local_hang_eqs = 0;
-      	}
+		}            	
 	
 	}
 
+
+	void InterfaceElementBase::assign_hanging_additional_interface_local_equations(const bool &store_local_dof_pt)
+	{
+		Local_interface_hang_eqn.clear();
+		
+		auto * ft=this->get_code_instance()->get_func_table();
+		for (unsigned int ispace=0;ispace<ft->num_present_continuous_spaces;ispace++)
+		{
+			auto space_info=ft->present_continuous_spaces[ispace];
+			assign_hanging_additional_interface_local_equations_for_space(store_local_dof_pt,space_info);
+		}
+	}
 
 
 	void InterfaceElementBase::update_equation_remapping()

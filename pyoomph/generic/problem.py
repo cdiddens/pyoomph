@@ -2042,7 +2042,12 @@ class Problem(_pyoomph.Problem):
                 elif isinstance(obj,Problem) and splt_varname[-1] in obj.get_global_parameter_names():
                     current=obj.get_global_parameter(splt_varname[-1])
                 else:
-                    raise RuntimeError("Cannot set undefined property/parameter "+".".join(splt_varname)+". Currently at "+str(obj)+" and trying to access "+str(splt_varname[-1])+"\nFollowing properties are known:"+str(dir(obj)))
+                    import difflib
+                    closest_matches=difflib.get_close_matches(splt_varname[-1],dir(obj))
+                    if len(closest_matches)>0:
+                        raise RuntimeError("Cannot set undefined property/parameter "+".".join(splt_varname)+". Currently at "+str(obj)+" and trying to access "+str(splt_varname[-1])+"\nFollowing properties are known:"+str(dir(obj))+"\nClosest matches are: "+str(closest_matches))
+                    else:
+                        raise RuntimeError("Cannot set undefined property/parameter "+".".join(splt_varname)+". Currently at "+str(obj)+" and trying to access "+str(splt_varname[-1])+"\nFollowing properties are known:"+str(dir(obj)))
                 
                 if not self.is_quiet():
                     print("SETTING PARAMETER", varname,"FROM",current, "TO",val) #type:ignore

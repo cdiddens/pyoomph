@@ -273,6 +273,9 @@ namespace pyoomph
     // Sets up hanging-node local-equation-number bookkeeping for the "base bulk" fields (i.e. not
     // the additional interface-only fields added by InterfaceElementBase, which extends this).
     virtual bool fill_hang_info_with_equations_basebulk(JITShapeInfo_t *shape_info);
+    // Additional interface-only hanging-node bookkeeping, used by InterfaceElementBase to handle
+    // the extra fields that exist only on the interface element and not on the bulk element.
+    virtual bool fill_hang_info_with_equations_interface(JITShapeInfo_t *shape_info) {return false;}
     static const std::vector<std::vector<std::vector<unsigned>>> Dummy_Value_Interpolation_Map;
   public:
     // Maps a "dummy value" (a value slot that exists only to keep a lower-order field's nodal
@@ -424,6 +427,15 @@ namespace pyoomph
     // Compares the analytically assembled Jacobian (from fill_in_generic_residual_contribution_jit)
     // against a finite-difference approximation with step diff_eps, for debugging generated code.
     virtual void debug_analytical_jacobian(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian, double diff_eps);
+    // Overrides oomph-lib's RefineableElement::fill_in_jacobian_from_nodal_by_fd (used by
+    // debug_analytical_jacobian's generic-FD fallback). oomph-lib's version treats every nodal
+    // value with node_pt->is_hanging(i)==true as governed by RefineableElement::Local_hang_eqn,
+    // which is only ever sized/filled for i<ncont_interpolated_values() base-bulk fields. On
+    // interface elements, nodes additionally carry interface-only values at indices
+    // i>=ncont_interpolated_values(); those are geometrically hanging (the node's position is
+    // hanging) but have no corresponding Local_hang_eqn entry, so calling into it indexes out of
+    // bounds. This override treats all such added interface dofs as non-hanging nodal dofs instead.
+    void fill_in_jacobian_from_nodal_by_fd(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian) override;
     // The core residual/Jacobian/mass-matrix assembly routine: loops over integration points,
     // evaluates the required shape functions via fill_shape_buffer_for_integration_point, and calls
     // the JIT-generated residual code with the filled shape_info buffer, accumulating into
@@ -2160,6 +2172,10 @@ namespace pyoomph
     std::vector<int> bulk_eqn_map, opp_interf_eqn_map, opp_bulk_eqn_map, bulk_bulk_eqn_map;
     std::vector<bool> external_data_is_geometric;
 
+
+    // Mapping for the additional interface dof ID to a map of master node to local equation number for the hanging-node constraints of that dof
+    std::map<unsigned,std::map<pyoomph::BoundaryNode*, int>> Local_interface_hang_eqn;
+
     // Re-derives hanging-node values for the interface-only additional fields (in addition to what
     // BulkElementBase::interpolate_hang_values already does for the inherited bulk fields).
     virtual void interpolate_hang_values_at_interface();
@@ -2168,7 +2184,7 @@ namespace pyoomph
     // describe which fields and how many nodes are involved, node_index_to_element maps a node to
     // its element-local index for this space, and add_interf_local_hang_eqs caches already-assigned
     // hanging equation numbers per master node to avoid duplicating equations.
-    virtual void assign_hanging_additional_interface_local_equations_for_space(const bool &store_local_dof_pt,unsigned addfields,unsigned basebulk_offset,unsigned nnode, int hangindex,  char * fieldnames[], unsigned (BulkElementBase::*node_index_to_element)(const unsigned &) const,  std::map<Node*, int> *& add_interf_local_hang_eqs);
+    virtual void assign_hanging_additional_interface_local_equations_for_space(const bool &store_local_dof_pt,JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space);
     // Rebuilds the mapping from a source element's (bulk_indicator selects which "role": this
     // element's own bulk element, the opposite interface element, or the opposite's bulk element)
     // local equation numbers into this interface element's local equation numbers, as stored in
@@ -2187,6 +2203,9 @@ namespace pyoomph
     virtual void prepare_shape_buffer_for_integration(const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag);
     double fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds = NULL, unsigned history_index=0) const;
     virtual bool fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap);
+    // Additional interface-only hanging-node bookkeeping, used by InterfaceElementBase to handle
+    // the extra fields that exist only on the interface element and not on the bulk element.
+    bool fill_hang_info_with_equations_interface(JITShapeInfo_t *shape_info) override;
     virtual void ensure_external_data();
     virtual void assign_additional_local_eqn_numbers();
     virtual void fill_in_jacobian_from_lagragian_by_fd(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian);
@@ -2228,7 +2247,7 @@ namespace pyoomph
     virtual void interpolate_newly_constructed_additional_dof(const unsigned &lnode, const unsigned &valindex, const std::string &space);
 
 
-    virtual void assign_hanging_additional_interface_local_equations(const bool &store_local_dof_pt) {}
+    virtual void assign_hanging_additional_interface_local_equations(const bool &store_local_dof_pt);
     // After the base class assigns local equation numbers for the inherited bulk nodal data,
     // additionally assigns local equation numbers for the interface-only additional fields' hanging-node constraints.
     inline void assign_nodal_local_eqn_numbers(const bool &store_local_dof_pt)
@@ -2239,6 +2258,8 @@ namespace pyoomph
   public:
     InterfaceElementBase() : opposite_side(NULL), Is_internal_facet_opposite_dummy(false) {}
 
+    virtual int local_interface_hang_eqn(unsigned int interface_dof_index, oomph::Node * master_node) const;  
+    void fill_in_jacobian_from_nodal_by_fd(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian) override;
     static bool interpolate_new_interface_dofs;
     // Public entry point to refresh all the eqn_map bookkeeping (bulk_eqn_map,
     // opp_interf_eqn_map, opp_bulk_eqn_map, bulk_bulk_eqn_map) after equation numbers have changed
