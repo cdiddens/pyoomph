@@ -67,7 +67,7 @@ in your pyoomph directory.
 
 Install required and optional python modules via
 
-> python -m pip gmsh mkl mpi4py matplotlib numpy petsc4py pybind11 pygmsh scipy meshio pybind11-stubgen scikit-build-core
+> python -m pip gmsh mkl mpi4py matplotlib numpy pybind11 pygmsh scipy meshio pybind11-stubgen scikit-build-core
 
 If you want to install pyoomph **for development**, it is best to install it via 
 
@@ -89,7 +89,7 @@ Verify whether everything runs fine by
 
 Besides XCode, you must install a few third-party tools. This can be done by e.g. [Homebrew](https://brew.sh):
 
-> brew install openmpi ccache ginac
+> brew install openmpi ccache ginac pkg-config
 
 **Since the development of Intel MKL (containing the fast MKL Pardiso solver) was discontinued for Mac, using this solver might require installing a less recent version of python. See [`Mac_arm64_with_Pardiso.md`](https://github.com/pyoomph/pyoomph/blob/main/Mac_arm64_with_Pardiso.md) for more details.**
 

@@ -33,10 +33,10 @@ jobs:
             pybind11-dev libginac-dev libcln-dev libgmp-dev \
             libglu1-mesa libxcursor1 libopengl0
 
-      # See INSTALL.md "Compilation from source" (Mac): brew install openmpi ccache ginac
+      # See INSTALL.md "Compilation from source" (Mac)
       - name: Install system dependencies (Mac)
         if: startsWith(matrix.os, 'macos')
-        run: brew install openmpi ccache ginac
+        run: brew install openmpi ccache ginac pkg-config
 
       # Linux module list from INSTALL.md, minus petsc4py
       - name: Install Python build/test dependencies (Linux)

@@ -51,8 +51,17 @@ class BaseCCompiler(_pyoomph.SharedLibCCompiler):
         super(BaseCCompiler, self).__init__()
 
     @staticmethod
-    def check_avail()->bool: 
+    def check_avail()->bool:
         return True
+
+    def toolchain_located(self)->Optional[bool]:
+        """Lightweight, no-file-write check for whether the underlying compiler
+        toolchain can be located at all (e.g. cl.exe/link.exe for MSVC, via the
+        registry/vswhere - no compiling or temp files involved). Returns None
+        if no such check is implemented for this compiler, in which case
+        check_avail()'s full compile-and-link test is the only signal
+        available."""
+        return None
 
     @staticmethod
     def call_cmd( cmd:List[str], shell:bool=False, env:Optional[Dict[str,str]]=None,quiet:bool=False)->str:
@@ -201,9 +210,22 @@ int main (int argc, char **argv) {
     def check_avail()->bool:
         inst=SystemCCompiler()
         distutils.log.set_verbosity(0)
-        res:bool=inst.has_function("abort",includes=["stdlib.h"]) 
+        res:bool=inst.has_function("abort",includes=["stdlib.h"])
         distutils.log.set_verbosity(2)
         return res
+
+    def toolchain_located(self)->Optional[bool]:
+        if self.comp.compiler_type!="msvc": #type:ignore
+            return None
+        try:
+            # Locates cl.exe/link.exe (via vswhere/the registry) and sets up
+            # the MSVC environment - no compiling and no temp files involved,
+            # unlike has_function() above. Lets "does the toolchain exist"
+            # be distinguished from "can we write/compile in this environment".
+            self.comp.initialize() #type:ignore
+        except distutils.errors.DistutilsPlatformError:
+            return False
+        return True
 
     def compile(self, suppress_compilation:bool, suppress_code_writing:bool,quiet:bool,extra_flags:List[str]) -> bool:
         if suppress_compilation:

@@ -111,7 +111,11 @@ before-test = [
 
 [tool.cibuildwheel.macos]
 before-all = [
-"brew install automake",
+# pkg-config is needed by GiNaC's own ./configure to locate CLN (see
+# cmake/ThirdPartyGiNaC.cmake) whenever PYOOMPH_DOWNLOAD_GINAC=ON (the
+# default). GitHub's macOS runners happen to have it preinstalled, but
+# don't rely on that - it's not present on a fresh Homebrew bootstrap.
+"brew install automake pkg-config",
 # Guard against a Rosetta2-translated shell silently producing the wrong
 # architecture: if this is an x86_64 process running on arm64 hardware
 # (`sysctl.proc_translated`), CLN/GiNaC's autotools ExternalProject_Add
