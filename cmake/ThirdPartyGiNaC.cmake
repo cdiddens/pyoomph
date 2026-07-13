@@ -22,11 +22,32 @@
 include(ExternalProject)
 include(GNUInstallDirs)
 
-set(CLN_EXTRA_CONFIGURE_FLAGS   "CXXFLAGS=-MD -DNO_ASM -O2" CACHE STRING "Extra flags passed to CLN's ./configure")
+# CLN/GiNaC's own ./configure && make does not automatically pick up
+# CMAKE_OSX_ARCHITECTURES the way native CMake targets do - it's a plain
+# autotools build, invoked as its own separate process. So if
+# CMAKE_OSX_ARCHITECTURES is set to a single architecture (explicitly by the
+# caller, or auto-forced under Rosetta 2 translation - see the top-level
+# CMakeLists.txt), pass a matching -arch flag through explicitly here too.
+# Otherwise CLN/GiNaC can end up compiled for a different architecture than
+# the rest of the build, which under Rosetta 2 surfaces as clang being
+# invoked for both -arch x86_64 and -arch arm64 at once and failing with
+# "redefinition of '_OSSwapInt32'" (the two per-architecture branches of the
+# SDK's endian headers collide).
+set(_pyoomph_macos_arch_flag "")
+if(APPLE AND CMAKE_OSX_ARCHITECTURES)
+  list(LENGTH CMAKE_OSX_ARCHITECTURES _pyoomph_osx_arch_count)
+  if(_pyoomph_osx_arch_count EQUAL 1)
+    set(_pyoomph_macos_arch_flag " -arch ${CMAKE_OSX_ARCHITECTURES}")
+  endif()
+endif()
+
+set(CLN_EXTRA_CONFIGURE_FLAGS   "CXXFLAGS=-MD -DNO_ASM -O2${_pyoomph_macos_arch_flag}" CACHE STRING "Extra flags passed to CLN's ./configure")
 set(GINAC_EXTRA_CONFIGURE_FLAGS "" CACHE STRING "Extra flags passed to GiNaC's ./configure")
 
 set(_pyoomph_autotools_common_flags
-    "--enable-static" "--disable-shared" "--with-pic=yes" "CFLAGS=-fPIC" "CXXFLAGS=-fPIC -g0")
+    "--enable-static" "--disable-shared" "--with-pic=yes"
+    "CFLAGS=-fPIC${_pyoomph_macos_arch_flag}"
+    "CXXFLAGS=-fPIC -g0${_pyoomph_macos_arch_flag}")
 
 # ---------------------------------------------------------------- CLN -----
 if(PYOOMPH_DOWNLOAD_CLN)

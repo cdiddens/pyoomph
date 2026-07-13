@@ -14,6 +14,32 @@ endif()
 
 project(pyoomph LANGUAGES C CXX VERSION ${SKBUILD_PROJECT_VERSION})
 
+# On Apple Silicon, detect whether this CMake configure is itself running
+# under Rosetta 2 translation (an x86_64 process on arm64 hardware) - e.g.
+# when following the documented "Rosetta 2 terminal" route to get the MKL
+# Pardiso solver, which has no arm64 build. If so, default to a matching
+# single-arch x86_64 build rather than letting the compiler pick its native
+# default (arm64). Without this, CLN/GiNaC's autotools ExternalProject_Add
+# subbuilds (see cmake/ThirdPartyGiNaC.cmake, which reads
+# CMAKE_OSX_ARCHITECTURES back out to keep their -arch flags in sync) can
+# end up targeting a different architecture than the rest of the build,
+# which surfaces as clang being invoked for both -arch x86_64 and -arch
+# arm64 at once and failing with "redefinition of '_OSSwapInt32'" (the SDK's
+# per-architecture endian headers collide). Only takes effect if the caller
+# hasn't already set CMAKE_OSX_ARCHITECTURES explicitly.
+if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES)
+  execute_process(
+    COMMAND sysctl -n sysctl.proc_translated
+    OUTPUT_VARIABLE PYOOMPH_MACOS_PROC_TRANSLATED
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+  )
+  if(PYOOMPH_MACOS_PROC_TRANSLATED STREQUAL "1")
+    message(STATUS "pyoomph: detected Rosetta 2 translation - forcing a single-arch x86_64 build (pass -DCMAKE_OSX_ARCHITECTURES=... to override)")
+    set(CMAKE_OSX_ARCHITECTURES "x86_64" CACHE STRING "Build architecture(s) for macOS" FORCE)
+  endif()
+endif()
+
 # ----------------------------------------------------------------------------
 # Build options
 #
