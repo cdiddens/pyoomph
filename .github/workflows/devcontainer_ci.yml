@@ -1,0 +1,30 @@
+name: Devcontainer CI
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build_devcontainer:
+    name: Build devcontainer on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        # macos-13 is an intel runner, macos-14/-15 is apple silicon
+        os: [ubuntu-latest, macos-15-intel, macos-latest] #, windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Windows runners can't build/run this Linux devcontainer via Docker Desktop
+      # the way the other hosts do, so this leg is disabled for now.
+      # - name: Build and run devcontainer task (Windows)
+      #   if: startsWith(matrix.os, 'windows')
+      #   uses: devcontainers/ci@v0.3
+      #   with:
+      #     runCmd: python3 -m pyoomph check all
+
+      - name: Build and run devcontainer task
+        if: startsWith(matrix.os, 'windows') != true
+        uses: devcontainers/ci@v0.3
+        with:
+          runCmd: python3 -m pyoomph check all
