@@ -86,10 +86,7 @@ namespace pyoomph
 		virtual void describe_global_dofs(std::vector<int> &doftype, std::vector<std::string> &typnames);
 		virtual void describe_my_dofs(std::ostream &os, const std::string &in) { this->describe_local_dofs(os, in); }
 		// Copy the current nodal Eulerian coordinates into the Lagrangian coordinates of all nodes (i.e. "freeze" the current shape as reference configuration).
-		virtual void set_lagrangian_nodal_coordinates();
-		// Function to activate the debugging.
-		bool duarte_debug = false;
-		virtual void activate_duarte_debug();
+		virtual void set_lagrangian_nodal_coordinates();		
 		// Fill a lookup buffer mapping each local dof to its global field index, used to assemble field-wise data.
 		virtual void fill_dof_to_global_field_index_buffer(std::vector<int> &dofs_to_global_field_index);
 		// From the old mesh, map each element with the local coordinates associated to each integration point of the new mesh.

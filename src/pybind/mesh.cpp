@@ -888,7 +888,6 @@ void PyReg_Mesh(py::module &m)
 	// This is the class that Python-level mesh objects (bulk domains, interfaces, ODE storage, ...) ultimately derive from.
 	auto &decl_PyoomphMesh = (*py_decl_PyoomphMesh);
 	decl_PyoomphMesh
-		.def("activate_duarte_debug", &pyoomph::Mesh::activate_duarte_debug, "Activates a set of internal debugging checks/outputs (named after a contributor) for this mesh")
 		.def("check_integrity",&pyoomph::Mesh::check_integrity, "Runs internal consistency checks on this mesh, raising an error if a problem is found")
 		.def("prepare_zeta_interpolation", [](pyoomph::Mesh *self, pyoomph::Mesh *old_mesh){self->prepare_zeta_interpolation(old_mesh);}, py::arg("old_mesh"), "Prepares the internal data structures required to interpolate field values from an old mesh onto this (typically newly adapted) mesh")
 		.def("remove_boundary_nodes",[](pyoomph::Mesh *self) {self->remove_boundary_nodes();}, "Removes all nodes from all mesh boundaries (i.e. clears the boundary node lookup, without deleting the nodes themselves)")

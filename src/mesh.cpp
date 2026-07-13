@@ -1780,11 +1780,6 @@ namespace pyoomph
     }
   }
 
-  // Activate debug to check if function is correct
-  void Mesh::activate_duarte_debug()
-  {
-    Mesh::duarte_debug = true;
-  };
 
   // For every integration point of every element of this (new) mesh, locate the corresponding point in
   // oldmesh (wrapped as a MeshAsGeomObject, i.e. via global zeta/Eulerian coordinates) and cache the
@@ -1825,50 +1820,7 @@ namespace pyoomph
       // Fill the vector pair.
       curr_el->prepare_zeta_interpolation(&mesh_as_geom);
     }
-
-    // Debug purposes! Ignore and delete when everything is fixed.
-    if (this->duarte_debug)
-    {
-
-      // Loop through all elements.
-      for (unsigned el = 0; el < nelem; el++)
-      {
-
-        // Current element
-        BulkElementBase *curr_el = dynamic_cast<BulkElementBase *>(this->element_pt(el));
-
-        // Number of integration points.
-        unsigned int n_intpt = curr_el->integral_pt()->nweight();
-
-        // Dimension of element
-        const unsigned int dim = curr_el->dim();
-
-        // Loop through ipts
-        for (unsigned ipt = 0; ipt < n_intpt; ipt++)
-        {
-          // Get zeta-values of vector pair
-          BulkElementBase *old_elem = curr_el->coords_oldmesh[ipt].first;
-          oomph::Vector<double> s = curr_el->coords_oldmesh[ipt].second;
-          oomph::Vector<double> zeta(dim, 0.0);
-          old_elem->interpolated_zeta(s, zeta);
-
-          // Get zeta-values of old mesh
-          oomph::Vector<double> curr_zeta(dim, 0.0);
-          oomph::Vector<double> curr_s(dim, 0.0);
-          for (unsigned i = 0; i < dim; i++)
-          {
-            curr_s[i] = curr_el->integral_pt()->knot(ipt, i);
-          }
-          curr_el->interpolated_zeta(curr_s, curr_zeta);
-
-          // Compare the local coordinates of the old mesh on integration points with the ones given by the vector pair.
-          for (unsigned i = 0; i < dim; i++)
-          {
-            std::cout << "OLD MESH: " << curr_zeta[i] << "\t" << "NEW MESH: " << zeta[i] << "\t" << "DELTA: " << zeta[i] - curr_zeta[i] << "\n";
-          }
-        }
-      }
-    }
+    
   }
 
   // Update time level for each element.

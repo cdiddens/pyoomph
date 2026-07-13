@@ -3724,7 +3724,7 @@ class Problem(_pyoomph.Problem):
         
         if self.warn_about_unused_global_parameters and not self.is_global_parameter_used(parameter):
             if self.warn_about_unused_global_parameters=="error":
-                raise RuntimeError("Arclength continuation in the global parameter '" + parameter + "', which is used in the problem. This may lead to unexpected behaviour. Set <Problem>.warn_about_unused_global_parameters to False to suppress this error.")
+                raise RuntimeError("Arclength continuation in the global parameter '" + parameter + "', which is used in the problem. This may lead to unexpected behaviour. Have you defined it with define_global_parameter? Or have you overridden it by e.g. '" + parameter + "=<value>' instead of '" + parameter + ".value=<value>'? Have you defined it via define_global_parameter? Or have you overridden it by e.g. '" + parameter + "=<value>' instead of '" + parameter + ".value=<value>'?  Set <Problem>.warn_about_unused_global_parameters to False to suppress this error.")
             else:
                 print("WARNING: Arclength continuation in the global parameter '" + parameter + "', which is used in the problem. This may lead to unexpected behaviour. Set <Problem>.warn_about_unused_global_parameters to False to suppress this warning.")
                 
