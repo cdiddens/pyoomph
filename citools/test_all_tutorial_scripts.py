@@ -34,6 +34,7 @@ all_okay=True
 
 skips=sys.argv[1:]
 
+
 for d in glob.glob("./*/"):
   if d in skips or d.strip("/").strip("./") in skips:
     print("SKIPPING",d)
@@ -60,6 +61,7 @@ for d in glob.glob("./*/"):
       with open(logf,"wb") as lf:
         lf.write(stdout)
       folder_okay=False
+    
     shutil.rmtree(Path(f).stem,ignore_errors=True)
     
   if folder_okay:

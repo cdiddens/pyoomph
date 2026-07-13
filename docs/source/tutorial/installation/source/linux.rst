@@ -18,13 +18,13 @@ There are additional python packages required. You can either install these with
 
 .. code:: bash
 
-      gmsh mkl mpi4py matplotlib numpy petsc4py pybind11 pygmsh scipy meshio pybind11-stubgen setuptools wheel scikit_build_core
+      gmsh mkl mpi4py matplotlib numpy pybind11 pygmsh scipy meshio pybind11-stubgen setuptools wheel scikit_build_core
 
 Make sure you have recent versions, e.g. when using ``pip``, you could do 
 
 .. code:: bash
 
-      python -m pip install --upgrade gmsh mkl mpi4py matplotlib numpy petsc4py pybind11 pygmsh scipy meshio pybind11-stubgen setuptools wheel scikit_build_core
+      python -m pip install --upgrade gmsh mkl mpi4py matplotlib numpy pybind11 pygmsh scipy meshio pybind11-stubgen setuptools wheel scikit_build_core
 
 Afterwards, you first have to build the stripped and slightly modified version of oomph-lib which is shipped along with pyoomph. 
 

@@ -544,6 +544,8 @@ class Problem(_pyoomph.Problem):
         self._custom_assembler:Optional["CustomAssemblyBase"]=None
 
         self.default_ccode_expression_mode:str="" # Try to factor all expressions with "factor"
+        #: Debugging the Jacobian by finite differences with a given epsilon (None or <=0 means no debugging). 
+        self.debug_jacobian_by_fd_epsilon:Optional[float]=-1 
         self.extra_compiler_flags:List[str]=[]
         
         #: After analyzing the Jacobian, a field with an empty Jacobian row will be pinned automatically

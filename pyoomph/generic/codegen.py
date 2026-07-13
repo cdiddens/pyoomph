@@ -1779,6 +1779,8 @@ class EquationTree:
             if self._codegen is None:
                 self._codegen=FiniteElementCodeGenerator()                
                 self._codegen.ccode_expression_mode=problem.default_ccode_expression_mode
+                if problem.debug_jacobian_by_fd_epsilon is not None and problem.debug_jacobian_by_fd_epsilon>0.0:
+                    self._codegen.debug_jacobian_epsilon=problem.debug_jacobian_by_fd_epsilon
                 self._codegen._name=self.get_my_path_name()
                 self._codegen.set_latex_printer(problem.latex_printer)
                 self._codegen._set_problem(problem) 
