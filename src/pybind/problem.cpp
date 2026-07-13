@@ -169,7 +169,7 @@ void PyReg_Problem(py::module &m)
 	m.def(
 		"InitMPI", [](std::vector<std::string> &argv)
 		{
-			std::vector<char *> c_argv(argv.size(), NULL);
+			std::vector<char *> c_argv(argv.size() + 1, NULL); // +1 for the trailing NULL sentinel, as in a real argv
 			for (unsigned int i = 0; i < argv.size(); i++)
 			{
 				unsigned l = strlen(argv[i].c_str());
@@ -177,7 +177,12 @@ void PyReg_Problem(py::module &m)
 				strncpy(c_argv[i], argv[i].c_str(), l);
 				c_argv[i][l] = '\0';
 			}
-			oomph::MPI_Helpers::init(argv.size(), &(c_argv[0]));
+			int c_argc = argv.size();
+			oomph::MPI_Helpers::init(c_argc, &(c_argv[0]));
+			for (unsigned int i = 0; i < argv.size(); i++)
+			{
+				free(c_argv[i]);
+			}
 		},
 		py::arg("argv"),
 		"Initialize MPI. Must be called (if at all) before any other MPI-related functionality is used. "
