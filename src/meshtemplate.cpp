@@ -60,9 +60,6 @@ Type indices:
 15: MeshTemplateElementPyramidC1
 27: MeshTemplateElementPyramidC2
 
-@ Maxim: You can use any free index for your MeshTemplateElementPyramidC1 (later also for the MeshTemplateElementPyramidC2)
-Please add it  to the list above and use the same number in the constructor of the MeshTemplateElementPyramidC1 class
-
 
 MeshTemplateElementTriC1TB -> MeshTemplateElementTriC1
 MeshTemplateElementTriC2TB -> MeshTemplateElementTriC2
