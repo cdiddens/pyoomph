@@ -55,9 +55,9 @@ namespace pyoomph
   class MultiTimeStepper : public oomph::TimeStepper
   {
   protected:
-    static const unsigned NSTEPS = 2;
-    static const unsigned NWEIGHT = 2 + 3; // For non-adaptive case: Same as Newmark
-    static const unsigned MAXDERIV = 2;
+    static const unsigned NSTEPS;
+    static const unsigned NWEIGHT; // For non-adaptive case: Same as Newmark
+    static const unsigned MAXDERIV;
 
     double NewmarkBeta1;
     double NewmarkBeta2;

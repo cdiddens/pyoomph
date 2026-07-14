@@ -29,6 +29,10 @@ The main author may be contacted at c.diddens@utwente.nl
 namespace pyoomph
 {
 
+	const unsigned MultiTimeStepper::NSTEPS = 2;
+    const unsigned MultiTimeStepper::NWEIGHT = 2 + 3; // For non-adaptive case: Same as Newmark
+    const unsigned MultiTimeStepper::MAXDERIV = 2;
+
 	// (Re-)derive all weight matrices (BDF1, BDF2, Newmark2) from the current (dt) and
 	// previous (dtprev) timestep sizes. Row indices into the Weight-style matrices are the
 	// derivative order (0=value, 1=first derivative/velocity, 2=second derivative/accel),
