@@ -31,10 +31,15 @@ The main author may be contacted at c.diddens@utwente.nl
 #include <pybind11/functional.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 
 #include "../oomph_lib.hpp"
 
 #include "../exception.hpp"
+
+#ifdef __APPLE__
+#include "../mac_accelerate.hpp"
+#endif
 
 
 // TODO: This must agree with the setting in partitioning.h from modified oomph-lib
@@ -367,4 +372,43 @@ void PyReg_Solvers(py::module &m)
         py::arg("csr_rows"), py::arg("nnz"), py::arg("first_row") = 0,
         "Expand a compressed-sparse-row ``row_start`` array (``csr_rows``, length nrow+1) into a plain row-index array of "
         "length ``nnz`` in coordinate (COO) format, i.e. one entry per non-zero giving its (``first_row``-offset) row index.");
+
+#ifdef __APPLE__
+    // Exposes pyoomph::MacAccelerateSparseSolver (src/mac_accelerate.hpp), a thin wrapper around
+    // Apple's Accelerate "Sparse Solvers" framework, only built/registered on macOS.
+    py::class_<pyoomph::MacAccelerateSparseSolver>(m, "MacAccelerateSparseSolver",
+        "Factorize/solve interface for real sparse matrices on top of Apple Accelerate's Sparse "
+        "Solvers. Supports re-solving against new right-hand sides without re-factorizing, and "
+        "re-factorizing with a different method (e.g. switching from QR to Cholesky) without "
+        "resupplying the matrix.")
+        .def(py::init<>())
+        .def(
+            "factorize", [](pyoomph::MacAccelerateSparseSolver &self, int n_rows, int n_cols,
+                            const std::vector<long long> &indptr, const std::vector<long long> &indices,
+                            const std::vector<double> &data, const std::string &method)
+            { self.factorize(n_rows, n_cols, indptr, indices, data, pyoomph::mac_accelerate_method_from_string(method)); },
+            py::arg("n_rows"), py::arg("n_cols"), py::arg("indptr"), py::arg("indices"), py::arg("data"),
+            py::arg("method") = "qr",
+            "Factorize a CSR matrix using the given ``method`` (see ``available_methods()``); "
+            "symmetric methods only use the upper triangle (row <= col) of the given matrix.")
+        .def(
+            "refactorize", [](pyoomph::MacAccelerateSparseSolver &self, const std::string &method)
+            { self.refactorize(pyoomph::mac_accelerate_method_from_string(method)); },
+            py::arg("method"),
+            "Re-run the factorization of the last matrix passed to factorize(), using a "
+            "(possibly different) method, without resupplying the CSR arrays.")
+        .def("solve", &pyoomph::MacAccelerateSparseSolver::solve, py::arg("b"),
+             "Solve A x = b using the cached factorization")
+        .def("resolve", &pyoomph::MacAccelerateSparseSolver::solve, py::arg("b"),
+             "Re-solve A x = b against a new rhs, reusing the cached factorization "
+             "(equivalent to solve(), provided under a distinct name for API parity with other "
+             "factorize/solve/resolve-style sparse solvers)")
+        .def("is_factorized", &pyoomph::MacAccelerateSparseSolver::isFactorized)
+        .def_property_readonly("rows", &pyoomph::MacAccelerateSparseSolver::rows)
+        .def_property_readonly("cols", &pyoomph::MacAccelerateSparseSolver::cols)
+        .def_property_readonly("method", [](const pyoomph::MacAccelerateSparseSolver &self)
+                               { return pyoomph::mac_accelerate_method_to_string(self.method()); })
+        .def_static("available_methods", &pyoomph::mac_accelerate_available_methods,
+                    "List the factorization method names accepted by factorize()/refactorize().");
+#endif
 }

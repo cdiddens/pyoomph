@@ -58,7 +58,9 @@ parser.add_argument("cbrange_in", nargs='*',
                     help="Input directories to merge the colorbar ranges")
 arglist = parser.parse_args()
 
-is_mac_arm64 = (sys.platform == "darwin" and os.uname().machine in {"arm64", "aarch64"})
+mac_machine = os.uname().machine if sys.platform == "darwin" else ""
+is_mac_arm64 = (sys.platform == "darwin" and mac_machine in {"arm64", "aarch64"})
+is_mac_x86_64 = (sys.platform == "darwin" and mac_machine == "x86_64")
 
 
 def test_solver(solver):
@@ -173,7 +175,7 @@ elif arglist.command=="check":
          from .solvers.generic import GenericLinearSystemSolver
          p=Problem()
                
-         sublist={"pardiso","superlu"}
+         sublist={"pardiso","superlu","accelerate"}
          #if arglist.check_name not in sublist:
          #   raise RuntimeError("Can only check the following: "+str(sublist))
          if arglist.check_name=="all":
@@ -185,6 +187,10 @@ elif arglist.command=="check":
             if check=="pardiso" and is_mac_arm64:
                print("Checking "+check_type+" / "+check)
                print("","skipping on macOS arm64")
+               continue
+            if check=="accelerate" and not (is_mac_x86_64 or is_mac_arm64):
+               print("Checking "+check_type+" / "+check)
+               print("","skipping on non-macOS x86_64")
                continue
             
             print("Checking "+check_type+" / "+check)         
@@ -222,6 +228,7 @@ elif arglist.command=="check":
                print("Checking "+check_type+" / "+check)
                print("","skipping on macOS arm64")
                continue
+           
             print("Checking "+check_type+" / "+check)         
             try:
                GenericEigenSolver.factory_solver(check,p)

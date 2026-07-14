@@ -216,6 +216,14 @@ if(NOT WIN32)
   target_link_libraries(_pyoomph_core PRIVATE dl)
 endif()
 
+if(APPLE)
+  # Needed by src/mac_accelerate.cpp (Apple's Accelerate "Sparse Solvers" framework), which is
+  # part of pyoomph_core's sources but only compiles to non-empty code on macOS (see the
+  # __APPLE__ guard in src/mac_accelerate.hpp/.cpp).
+  find_library(PYOOMPH_ACCELERATE_FRAMEWORK Accelerate REQUIRED)
+  target_link_libraries(pyoomph_core PUBLIC "${PYOOMPH_ACCELERATE_FRAMEWORK}")
+endif()
+
 target_compile_definitions(_pyoomph_core PRIVATE
   $<$<BOOL:${PYOOMPH_USE_MPI}>:OOMPH_HAS_MPI>
   $<$<BOOL:${PYOOMPH_PARANOID}>:PARANOID>
