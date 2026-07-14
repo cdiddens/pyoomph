@@ -33,4 +33,39 @@ namespace pyoomph
 	// translation unit that uses pyoomph::Node.
 	template class NodeWithFieldIndices<oomph::SolidNode>;
 
+	NodeWithFieldIndicesBase::~NodeWithFieldIndicesBase()
+	{
+      AdditionalDofConstrainingInfo *current = additional_dof_constraints;
+      while (current != NULL) {
+        AdditionalDofConstrainingInfo *temp = current;
+        current = current->next;
+        delete temp;
+      }
+    }
+
+	void NodeWithFieldIndicesBase::add_additional_dof_constraint(unsigned index, AdditionalDofConstraintMode mode)
+    {
+		AdditionalDofConstrainingInfo *current = additional_dof_constraints;		
+		while (current != NULL) {
+			if (current->index == index && current->mode == mode) { // TODO: Make further checks on consistency
+				return;
+			}
+			current = current->next;
+		}		
+        AdditionalDofConstrainingInfo *new_info = new AdditionalDofConstrainingInfo(index, mode);
+        new_info->next = additional_dof_constraints;
+        additional_dof_constraints = new_info;
+    }
+
+	void NodeWithFieldIndicesBase::flush_additional_dof_constraints() 
+	{
+      AdditionalDofConstrainingInfo *current = additional_dof_constraints;
+      while (current != NULL) {
+        AdditionalDofConstrainingInfo *temp = current;
+        current = current->next;
+        delete temp;
+      }
+      additional_dof_constraints = NULL;
+    }
+
 }

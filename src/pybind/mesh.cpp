@@ -228,6 +228,8 @@ void PyReg_Mesh(py::module &m)
 		.def("set_value", (void(oomph::Data::*)(unsigned const &, double const &)) & oomph::Data::set_value, py::arg("value_index"), py::arg("value"), "Sets the current value at the given value index")
 		.def("set_value_at_t", (void(oomph::Data::*)(unsigned const &, unsigned const &, double const &)) & oomph::Data::set_value, py::arg("history_index"), py::arg("value_index"), py::arg("value"), "Sets the value at the given value index at a previous time level (history_index, with 0 being the current time)");
 
+	
+
 	py::class_<pyoomph::Node, oomph::Data>(m, "Node", "A mesh node, i.e. a point carrying an Eulerian (and possibly a Lagrangian) position plus the nodal values (degrees of freedom) living there")
 		.def("x", (const double &(pyoomph::Node::*)(const unsigned int &) const) & pyoomph::Node::x, py::arg("coordinate_index"), "Returns the current Eulerian coordinate at the given coordinate index")
 		.def("x_at_t", (const double &(pyoomph::Node::*)(const unsigned int &,const unsigned int &) const) & pyoomph::Node::x, py::arg("history_index"), py::arg("coordinate_index"), "Returns the Eulerian coordinate at the given coordinate index at a previous time level")
@@ -253,6 +255,15 @@ void PyReg_Mesh(py::module &m)
 		.def("get_boundary_indices", [](pyoomph::Node *n)
 			 {std::set<unsigned> *pt; n->get_boundaries_pt(pt); std::set<unsigned> res; if (pt) {for (auto i : *pt) res.insert(i);}  return res; }, "Returns the set of indices of all mesh boundaries this node is part of")
 		.def("additional_value_index", &pyoomph::Node::additional_value_index, py::arg("interface_id"), "Returns the value index of the additional (interface-only) values associated with the given interface id stored on this node, or -1 if not present")
+		.def("set_additional_dof_constraint", [](pyoomph::Node *n, unsigned mode, unsigned index)
+			 {
+				if (mode==0) n->add_additional_dof_constraint(index, pyoomph::AdditionalDofConstraintMode::CONTINUOUS_BASE_DOF_CONSTRAIN_TO_C1);
+				else if (mode==1) n->add_additional_dof_constraint(index, pyoomph::AdditionalDofConstraintMode::INTERFACE_DOF_CONSTRAIN_TO_C1);
+				else if (mode==2) n->add_additional_dof_constraint(index, pyoomph::AdditionalDofConstraintMode::POSITION_CONSTRAIN_TO_C1);
+				else throw_runtime_error("Unknown additional dof constraint mode");
+			 }, py::arg("mode"), py::arg("index"), "Adds an additional dof constraint to this node, e.g. to reduce a locally C2 dof to C1; mode=0: CONTINUOUS_BASE_DOF_CONSTRAIN_TO_C1, mode=1: INTERFACE_DOF_CONSTRAIN_TO_C1, mode=2: POSITION_CONSTRAIN_TO_C1")
+							
+		.def("flush_additional_dof_constraints", &pyoomph::Node::flush_additional_dof_constraints, "Removes all additional dof constraints previously added to this node")
 		.def("set_coordinates_on_boundary",[](pyoomph::Node *self,unsigned boundary_index, std::vector<double> &zeta) {
 			oomph::Vector<double> zeta_prime(zeta.size()); for(unsigned int i=0;i<zeta.size();i++){zeta_prime[i]=zeta[i];};
 			self->set_coordinates_on_boundary(boundary_index, zeta_prime);

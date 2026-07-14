@@ -232,6 +232,13 @@ namespace pyoomph
     JITElementInfo_t eleminfo;
     JITShapeInfo_t *shape_info;
 
+    // Set by pin_dummy_values (and its InterfaceElementBase override) whenever at least one node of
+    // this element carries an additional dof constraint (see
+    // NodeWithFieldIndicesBase::add_additional_dof_constraint), reset by unpin_dummy_values. Lets
+    // fill_additional_hang_buffer_data/interpolate_hang_values skip their (otherwise per-node)
+    // additional-dof-constraint loops entirely for the common case where none are present.
+    bool has_additional_dof_constraints = false;
+
     // Releases/resets the JITElementInfo_t buffers owned by this element (nodal/external/internal
     // data pointers etc. handed to the generated code).
     void free_element_info();
@@ -276,6 +283,12 @@ namespace pyoomph
     // Additional interface-only hanging-node bookkeeping, used by InterfaceElementBase to handle
     // the extra fields that exist only on the interface element and not on the bulk element.
     virtual bool fill_hang_info_with_equations_interface(JITShapeInfo_t *shape_info) {return false;}
+    // Sets up a synthetic hanging-node scheme (masters + weights + local equation numbers) for the
+    // base-bulk continuous-field dofs that were locally reduced to C1 via
+    // NodeWithFieldIndicesBase::add_additional_dof_constraint (mode CONTINUOUS_BASE_DOF_CONSTRAIN_TO_C1),
+    // so generated code redistributes their residual/Jacobian contributions to the C1 corner nodes.
+    // Overridden by InterfaceElementBase to additionally handle INTERFACE_DOF_CONSTRAIN_TO_C1.
+    virtual bool fill_additional_hang_buffer_data(JITShapeInfo_t *shape_info);
     static const std::vector<std::vector<std::vector<unsigned>>> Dummy_Value_Interpolation_Map;
   public:
     // Maps a "dummy value" (a value slot that exists only to keep a lower-order field's nodal
@@ -2206,6 +2219,9 @@ namespace pyoomph
     // Additional interface-only hanging-node bookkeeping, used by InterfaceElementBase to handle
     // the extra fields that exist only on the interface element and not on the bulk element.
     bool fill_hang_info_with_equations_interface(JITShapeInfo_t *shape_info) override;
+    // Additionally handles INTERFACE_DOF_CONSTRAIN_TO_C1 additional dof constraints (on top of the
+    // CONTINUOUS_BASE_DOF_CONSTRAIN_TO_C1 ones already handled by the base class implementation).
+    bool fill_additional_hang_buffer_data(JITShapeInfo_t *shape_info) override;
     virtual void ensure_external_data();
     virtual void assign_additional_local_eqn_numbers();
     virtual void fill_in_jacobian_from_lagragian_by_fd(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian);
