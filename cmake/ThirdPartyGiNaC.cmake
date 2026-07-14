@@ -58,9 +58,13 @@ if(PYOOMPH_DOWNLOAD_CLN)
     BUILD_IN_SOURCE 1
     CONFIGURE_COMMAND <SOURCE_DIR>/configure
                        --prefix=${PYOOMPH_THIRDPARTY_PREFIX}
-                       --without-gmp                                              
+                       --without-gmp
                        ${_pyoomph_autotools_common_flags}
-                       ${CLN_EXTRA_CONFIGURE_FLAGS}    
+                       ${CLN_EXTRA_CONFIGURE_FLAGS}
+    # As with GiNaC below, skip "make install" for the subdirs we don't need
+    # (tests, examples, doc, benchmarks) - just the static library ("src")
+    # plus the headers, which the top-level Makefile installs directly.
+    INSTALL_COMMAND make install SUBDIRS=src
     BUILD_BYPRODUCTS "${_cln_lib}"
   )
   set(PYOOMPH_CLN_INCLUDE_DIR_RESOLVED "${PYOOMPH_THIRDPARTY_PREFIX}/include")
@@ -114,9 +118,7 @@ if(PYOOMPH_DOWNLOAD_GINAC)
     # texinfo). We don't need the docs, and requiring texinfo just to build
     # pyoomph is an unnecessary dependency, so skip that subdir entirely by
     # overriding automake's SUBDIRS on the install command line.
-    INSTALL_COMMAND ${CMAKE_COMMAND} -E env
-                       "PKG_CONFIG_PATH=${_cln_pkgconfig_dir}"
-                       make install SUBDIRS=ginac
+    INSTALL_COMMAND make install SUBDIRS=ginac
     BUILD_BYPRODUCTS "${_ginac_lib}"
   )
   set(PYOOMPH_GINAC_INCLUDE_DIR_RESOLVED "${PYOOMPH_THIRDPARTY_PREFIX}/include")
