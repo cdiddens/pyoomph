@@ -677,7 +677,6 @@ namespace pyoomph
       BasisFunction *get_basis() { return Basis; }
       std::string get_name() const { return name; }
       virtual std::string get_shape_name() const { return name; } // Name used to look up the shape-function table in the generated code
-      virtual std::string get_hang_name() const { return name; } // Identifier used to select the hanging-node handling for this space in the generated code
       virtual bool can_have_hanging_nodes() { return false; }
       virtual bool need_interpolation_loop() { return true; } // False for spaces (e.g. D0) where a single value replaces the usual per-node interpolation loop
       FiniteElementCode *get_code() const { return code; }
@@ -688,7 +687,6 @@ namespace pyoomph
    {
    public:
       bool can_have_hanging_nodes() override;
-      std::string get_hang_name() const override { return "Cont[SPACE_INDEX_" + name + "]"; }
       ContinuousFiniteElementSpace(FiniteElementCode *_code, const std::string &_name) : FiniteElementSpace(_code, _name) {}
    };
 
@@ -700,7 +698,6 @@ namespace pyoomph
    public:
       virtual std::string get_num_nodes_str(FiniteElementCode *forcode) const;
       virtual std::string get_eqn_number_str(FiniteElementCode *forcode) const;
-      std::string get_hang_name() const override { return name; }
       PositionFiniteElementSpace(FiniteElementCode *_code, const std::string &_name) : ContinuousFiniteElementSpace(_code, _name) {}
       virtual void write_generic_RJM_jacobian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns,FiniteElementField * residual_field);
       virtual bool write_generic_Hessian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns);
@@ -716,7 +713,6 @@ namespace pyoomph
    public:
       FiniteElementSpace *get_corresponding_continuous_space() { return conti_space; }
       virtual std::string get_shape_name() const { return "C" + name.substr(1); }
-      virtual std::string get_hang_name() const { return "Discont"; }
       bool can_have_hanging_nodes() { return false; }
       DGFiniteElementSpace(FiniteElementCode *_code, const std::string &_name, FiniteElementSpace *_conti_space) : FiniteElementSpace(_code, _name), conti_space(_conti_space) {}
    };
@@ -727,7 +723,6 @@ namespace pyoomph
    {
    public:
       bool can_have_hanging_nodes() { return false; }
-      virtual std::string get_hang_name() const { return "Discont"; }
       DiscontinuousFiniteElementSpace(FiniteElementCode *_code, const std::string &_name) : FiniteElementSpace(_code, _name) {}
    };
 

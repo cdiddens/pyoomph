@@ -1182,8 +1182,16 @@ namespace pyoomph
 
 	std::string FiniteElementField::get_hanginfo_str(FiniteElementCode *forcode) const
 	{
-		// if (!space->can_have_hanging_nodes()) return "No_Hang_Possible";
-		return forcode->get_shape_info_str(space) + "->hanginfo_" + space->get_hang_name();
+		// The position space has its own dimension-indexed buffer; every other space (continuous,
+		// DG, DL, D0) shares one unified buffer indexed by this field's global nodal-data index.
+		if (dynamic_cast<PositionFiniteElementSpace *>(space))
+		{
+			return forcode->get_shape_info_str(space) + "->hanginfo_Pos[" + get_nodal_index_str(forcode) + "]";
+		}
+		else
+		{
+			return forcode->get_shape_info_str(space) + "->hanginfo[" + get_nodal_index_str(forcode) + "]";
+		}
 	}
 
 	std::string ShapeExpansion::get_num_nodes_str(FiniteElementCode *forcode) const
@@ -2131,11 +2139,9 @@ namespace pyoomph
 					__all_Hessian_testfuncs.insert(testfuncsM.begin(), testfuncsM.end());
 
 					std::string eqn_index2 = f2->get_equation_str(for_code, l_shape2);
-					std::string nodal_index2;
 					std::string hang_info2;
 					if (hang2)
 					{
-						nodal_index2 = f2->get_nodal_index_str(for_code);
 						hang_info2 = f2->get_hanginfo_str(for_code);
 					}
 
@@ -2158,7 +2164,7 @@ namespace pyoomph
 					{
 						if (hang)
 						{
-							os << indent << "  BEGIN_HESSIAN_SHAPE_LOOP1_CONTINUOUS_SPACE(" << eqn_index << "," << hang_info << "," << nodal_index << "," << l_shape << ")" << std::endl;
+							os << indent << "  BEGIN_HESSIAN_SHAPE_LOOP1_CONTINUOUS_SPACE(" << eqn_index << "," << hang_info << "," << l_shape << ")" << std::endl;
 						}
 						else
 						{
@@ -2189,7 +2195,7 @@ namespace pyoomph
 							os << "0";
 						else
 							print_simplest_form(diffpart2_se, os, csrc_opts);
-						os << "," << hang_info2 << "," << nodal_index2 << "," << l_shape2 << ")" << std::endl;
+						os << "," << hang_info2 << "," << l_shape2 << ")" << std::endl;
 					}
 					else
 					{
@@ -2398,7 +2404,6 @@ namespace pyoomph
 			residual_field->mark_jacobian_contribution_for_code(for_code,for_code->get_current_residual_index(),f);
 			if (hang)
 			{
-				std::string nodal_index = f->get_nodal_index_str(for_code);
 				std::string hang_info = f->get_hanginfo_str(for_code);
 				os << indent << "  BEGIN_JACOBIAN_HANG(" << eqn_index << ", ";
 				//if (for_code->get_derive_jacobian_by_expansion_mode())
@@ -2406,7 +2411,7 @@ namespace pyoomph
 				//	os << indent << " /* SYMBOLIC FORM  " << std::endl << diffpart << std::endl << " */ ";
 				//}
 				print_simplest_form(diffpart, os, csrc_opts);
-				os << "," << hang_info << "," << nodal_index << "," << l_shape << ")" << std::endl;
+				os << "," << hang_info << "," << l_shape << ")" << std::endl;
 			}
 			else
 			{
@@ -2529,7 +2534,6 @@ namespace pyoomph
 			FiniteElementField *field = var_mapper.get_field();
 			//if (hessian) std::cout << "HESSIAN TEST: " << test_name << std::endl;
 			std::string eqn_index = field->get_equation_str(for_code, l_test);
-			std::string nodal_index = field->get_nodal_index_str(for_code);
 			std::string hang_info = field->get_hanginfo_str(for_code);
 			bool hessian_loop1_written = false;
 			bool can_have_hanging = this->can_have_hanging_nodes() || for_code != this->code; // Always hang for external spaces
@@ -2559,7 +2563,7 @@ namespace pyoomph
 						std::map<std::string, std::string> latexinfo = {{"typ", "final_residual"}, {"test_name", test_name}};
 						for_code->latex_printer->print(latexinfo, var_part, csrc_opts);
 					}
-					oss << ", " << hang_info << "," << nodal_index << "," << l_test << ")" << std::endl;
+					oss << ", " << hang_info << "," << l_test << ")" << std::endl;
 					oss << indent << "      ADD_TO_RESIDUAL_CONTINUOUS_SPACE()" << std::endl;
 				}
 				else
@@ -2672,7 +2676,7 @@ namespace pyoomph
 							{
 								if (can_have_hanging)
 								{
-									oss << indent << "    BEGIN_HESSIAN_TEST_LOOP_CONTINUOUS_SPACE(" << eqn_index << ", " << hang_info << "," << nodal_index << "," << l_test << ")" << std::endl;
+									oss << indent << "    BEGIN_HESSIAN_TEST_LOOP_CONTINUOUS_SPACE(" << eqn_index << ", " << hang_info << "," << l_test << ")" << std::endl;
 								}
 								else
 								{

@@ -174,14 +174,13 @@ typedef struct JITElementInfo
 typedef struct JITHangInfoEntry
 {
   double weight;
-  int ARRAY_DECL_NFIELDS(local_eqn); // Field index
+  int local_eqn; // Replaced equation
   // double **master_coordinate; //Coordinate (x/y/z, time index)
 } JITHangInfoEntry_t;
 
 typedef struct JITHangInfo
 {
   int nummaster;
-  bool ARRAY_DECL_NFIELDS(has_contributions); // Is any of the hanging equations non-pinned?
   JITHangInfoEntry_t ARRAY_DECL_NHANG(masters); // 0..nummasters-1
 } JITHangInfo_t;
 
@@ -262,10 +261,9 @@ typedef struct JITShapeInfo
   double * PYOOMPH_RESTRICT timestepper_weights_dt_BDF2_degr;
   double * PYOOMPH_RESTRICT timestepper_weights_dt_Newmark2_degr;
 
-  JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_Pos);  // Not really hanging, but used for bulk elements etc to remap the eqs  
-  JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_Cont)[NUM_CONTINUOUS_SPACES]; // Hang info for each space (C2TB,C2,C1TB,C1)
-  
-  JITHangInfo_t ARRAY_DECL_NNODE(hanginfo_Discont);  // Not really hanging, but used for bulk elements etc to remap the eqs  
+  JITHangInfo_t ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(hanginfo_Pos));  
+  JITHangInfo_t ARRAY_DECL_NFIELDS(ARRAY_DECL_NNODE(hanginfo)); // Hang info for the nodal_data buffer 
+   
   
 
 
@@ -638,7 +636,7 @@ static double signum(double x)
     _H_contrib = CONTRIB;
 
 // Hanging macros
-#define BEGIN_RESIDUAL_CONTINUOUS_SPACE(EQN, CONTRIB, HANGINFO, NODALIND, LINDEX)                                   \
+#define BEGIN_RESIDUAL_CONTINUOUS_SPACE(EQN, CONTRIB, HANGINFO, LINDEX)                                             \
   if (HANGINFO[LINDEX].nummaster)                                                                                   \
   {                                                                                                                 \
     nummaster = HANGINFO[LINDEX].nummaster;                                                                         \
@@ -652,7 +650,7 @@ static double signum(double x)
   {                                                                                                                 \
     if (HANGINFO[LINDEX].nummaster)                                                                                 \
     {                                                                                                               \
-      local_eqn = HANGINFO[LINDEX].masters[m].local_eqn[NODALIND];                                                  \
+      local_eqn = HANGINFO[LINDEX].masters[m].local_eqn;                                                            \
       hang_weight = HANGINFO[LINDEX].masters[m].weight;                                                             \
     }                                                                                                               \
     else                                                                                                            \
@@ -671,7 +669,7 @@ static double signum(double x)
   }                                     \
   }
 
-#define BEGIN_JACOBIAN_HANG(EQN, CONTRIB, HANGINFO, NODALIND, LINDEX)   \
+#define BEGIN_JACOBIAN_HANG(EQN, CONTRIB, HANGINFO, LINDEX)             \
   if (HANGINFO[LINDEX].nummaster)                                       \
   {                                                                     \
     nummaster2 = HANGINFO[LINDEX].nummaster;                            \
@@ -685,7 +683,7 @@ static double signum(double x)
   {                                                                     \
     if (HANGINFO[LINDEX].nummaster)                                     \
     {                                                                   \
-      local_unknown = HANGINFO[LINDEX].masters[m2].local_eqn[NODALIND]; \
+      local_unknown = HANGINFO[LINDEX].masters[m2].local_eqn;           \
       hang_weight2 = HANGINFO[LINDEX].masters[m2].weight;               \
     }                                                                   \
     else                                                                \
@@ -721,7 +719,7 @@ static double signum(double x)
   }
 
 // Hanging macros (Hessian)
-#define BEGIN_HESSIAN_TEST_LOOP_CONTINUOUS_SPACE(EQN, HANGINFO, NODALIND, LINDEX)                                     \
+#define BEGIN_HESSIAN_TEST_LOOP_CONTINUOUS_SPACE(EQN, HANGINFO, LINDEX)                                                \
   if (HANGINFO[LINDEX].nummaster)                                                                                     \
   {                                                                                                                   \
     nummaster = HANGINFO[LINDEX].nummaster;                                                                           \
@@ -734,7 +732,7 @@ static double signum(double x)
   {                                                                                                                   \
     if (HANGINFO[LINDEX].nummaster)                                                                                   \
     {                                                                                                                 \
-      local_eqn = HANGINFO[LINDEX].masters[m].local_eqn[NODALIND];                                                    \
+      local_eqn = HANGINFO[LINDEX].masters[m].local_eqn;                                                              \
       hang_weight = HANGINFO[LINDEX].masters[m].weight;                                                               \
     }                                                                                                                 \
     else                                                                                                              \
@@ -749,7 +747,7 @@ static double signum(double x)
   }                                              \
   }
 
-#define BEGIN_HESSIAN_SHAPE_LOOP1_CONTINUOUS_SPACE(EQN, HANGINFO, NODALIND, LINDEX) \
+#define BEGIN_HESSIAN_SHAPE_LOOP1_CONTINUOUS_SPACE(EQN, HANGINFO, LINDEX)           \
   if (HANGINFO[LINDEX].nummaster)                                                   \
   {                                                                                 \
     nummaster2 = HANGINFO[LINDEX].nummaster;                                        \
@@ -762,7 +760,7 @@ static double signum(double x)
   {                                                                                 \
     if (HANGINFO[LINDEX].nummaster)                                                 \
     {                                                                               \
-      local_unknown = HANGINFO[LINDEX].masters[m2].local_eqn[NODALIND];             \
+      local_unknown = HANGINFO[LINDEX].masters[m2].local_eqn;                       \
       hang_weight2 = HANGINFO[LINDEX].masters[m2].weight;                           \
     }                                                                               \
     else                                                                            \
@@ -777,7 +775,7 @@ static double signum(double x)
   }                                                \
   }
 
-#define BEGIN_HESSIAN_SHAPE_LOOP2_CONTINUOUS_SPACE(EQN, CONTRIB, HANGINFO, NODALIND, LINDEX) \
+#define BEGIN_HESSIAN_SHAPE_LOOP2_CONTINUOUS_SPACE(EQN, CONTRIB, HANGINFO, LINDEX)           \
   if (HANGINFO[LINDEX].nummaster)                                                            \
   {                                                                                          \
     nummaster3 = HANGINFO[LINDEX].nummaster;                                                 \
@@ -791,7 +789,7 @@ static double signum(double x)
   {                                                                                          \
     if (HANGINFO[LINDEX].nummaster)                                                          \
     {                                                                                        \
-      local_deriv = HANGINFO[LINDEX].masters[m3].local_eqn[NODALIND];                        \
+      local_deriv = HANGINFO[LINDEX].masters[m3].local_eqn;                                  \
       hang_weight3 = HANGINFO[LINDEX].masters[m3].weight;                                    \
     }                                                                                        \
     else                                                                                     \

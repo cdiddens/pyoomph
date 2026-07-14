@@ -402,29 +402,26 @@ namespace pyoomph
 	bool BulkElementBase::fill_hang_info_with_equations_for_pos(JITShapeInfo_t *shape_info)
 	{
 		bool res = false;
-		for (unsigned int l = 0; l < eleminfo.nnode; l++)
+		for (unsigned int f = 0; f < this->nodal_dimension(); f++) 
 		{
-			if (node_pt(l)->is_hanging())
+			for (unsigned int l = 0; l < eleminfo.nnode; l++)
 			{
-				res = true;
-				auto hang_info_pt = node_pt(l)->hanging_pt();				
-				shape_info->hanginfo_Pos[l].nummaster = hang_info_pt->nmaster();
-				for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
-				{					
-					shape_info->hanginfo_Pos[l].masters[m].weight = hang_info_pt->master_weight(m);				
-					for (unsigned int f = 0; f < this->nodal_dimension(); f++)
+				if (node_pt(l)->is_hanging())
+				{			
+					res = true;
+					auto hang_info_pt = node_pt(l)->hanging_pt();	
+					shape_info->hanginfo_Pos[f][l].nummaster = hang_info_pt->nmaster();
+					for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
 					{						
-						oomph::DenseMatrix<int> position_local_eqn_at_node = this->local_position_hang_eqn(hang_info_pt->master_node_pt(m));
-						for (unsigned int f = 0; f < this->nodal_dimension(); f++) // TODO: More nnodal_position_type ?
-						{
-							shape_info->hanginfo_Pos[l].masters[m].local_eqn[f] = position_local_eqn_at_node(0, f);
-						}
-					}
+						shape_info->hanginfo_Pos[f][l].masters[m].weight = hang_info_pt->master_weight(m);							
+						oomph::DenseMatrix<int> position_local_eqn_at_node = this->local_position_hang_eqn(hang_info_pt->master_node_pt(m));						
+						shape_info->hanginfo_Pos[f][l].masters[m].local_eqn = position_local_eqn_at_node(0, f);						
+					}					
 				}
-			}
-			else
-			{				
-				shape_info->hanginfo_Pos[l].nummaster = 0;
+				else
+				{
+					shape_info->hanginfo_Pos[f][l].nummaster = 0;
+				}
 			}
 		}
 
@@ -434,7 +431,7 @@ namespace pyoomph
 	// Analogous to fill_hang_info_with_equations_for_pos, but for the ordinary field values ("base
 	// bulk" fields, i.e. not the interface-only additional fields) of each continuous interpolation
 	// space present on this element: for every node hanging in that space, records its masters'
-	// weights and local equation numbers (per field) into shape_info->hanginfo_Cont[space]. Used by
+	// weights and local equation numbers into shape_info->hanginfo[buffer_offset_basebulk+f]. Used by
 	// the generated residual code to correctly assemble Jacobian contributions of hanging field dofs.
 	bool BulkElementBase::fill_hang_info_with_equations_basebulk(JITShapeInfo_t *shape_info)
 	{
@@ -446,30 +443,29 @@ namespace pyoomph
 			unsigned nnode_space=eleminfo.nnode_of_space[space_info->space_index];
 			const std::vector<unsigned> & space_node_to_elem_node=this->get_nodal_space_index_to_element_index_map()[space_info->space_index];
 			int hangindex=space_info->hangindex;
-			JITHangInfo_t * hangbuffer=shape_info->hanginfo_Cont[space_info->space_index];
-			for (unsigned int l = 0; l < nnode_space; l++)
+			for (unsigned int f = 0; f < space_info->numfields_basebulk; f++)
 			{
-				const unsigned l_elem=space_node_to_elem_node[l];
-				if (node_pt(l_elem)->is_hanging(hangindex))
+				JITHangInfo_t * hangbuffer=shape_info->hanginfo[space_info->buffer_offset_basebulk+f];
+				for (unsigned int l = 0; l < nnode_space; l++)
 				{
-					res = true;
-					auto hang_info_pt = node_pt(l_elem)->hanging_pt(hangindex);
-					hangbuffer[l].nummaster = hang_info_pt->nmaster();				
-					for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
+					const unsigned l_elem=space_node_to_elem_node[l];
+					if (node_pt(l_elem)->is_hanging(hangindex))
 					{
-						hangbuffer[l].masters[m].weight = hang_info_pt->master_weight(m);					
-						for (unsigned int f = 0; f < space_info->numfields_basebulk; f++)
+						res = true;
+						auto hang_info_pt = node_pt(l_elem)->hanging_pt(hangindex);
+						hangbuffer[l].nummaster = hang_info_pt->nmaster();
+						for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
 						{
-							hangbuffer[l].masters[m].local_eqn[f+space_info->buffer_offset_basebulk] = this->local_hang_eqn(hang_info_pt->master_node_pt(m), f+space_info->nodal_offset_basebulk);
+							hangbuffer[l].masters[m].weight = hang_info_pt->master_weight(m);
+							hangbuffer[l].masters[m].local_eqn = this->local_hang_eqn(hang_info_pt->master_node_pt(m), f+space_info->nodal_offset_basebulk);
 						}
 					}
-				}
-				else
-				{
-					hangbuffer[l].nummaster = 0;
+					else
+					{
+						hangbuffer[l].nummaster = 0;
+					}
 				}
 			}
-
 		}
 		return res;
 	}
@@ -485,27 +481,27 @@ namespace pyoomph
 			unsigned nnode_space=eleminfo.nnode_of_space[space_info->space_index];
 			const std::vector<unsigned> & space_node_to_elem_node=this->get_nodal_space_index_to_element_index_map()[space_info->space_index];
 			int hangindex=space_info->hangindex;
-			JITHangInfo_t * hangbuffer=shape_info->hanginfo_Cont[space_info->space_index];
-			for (unsigned int l = 0; l < nnode_space; l++)
+			for (unsigned int f = 0; f < space_info->numfields-space_info->numfields_basebulk; f++)
 			{
-				const unsigned l_elem=space_node_to_elem_node[l];
-				if (node_pt(l_elem)->is_hanging(hangindex))
+				JITHangInfo_t * hangbuffer=shape_info->hanginfo[space_info->buffer_offset_interf+f];
+				for (unsigned int l = 0; l < nnode_space; l++)
 				{
-					res = true;
-					auto hang_info_pt = node_pt(l_elem)->hanging_pt(hangindex);
-					hangbuffer[l].nummaster = hang_info_pt->nmaster();				
-					for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
+					const unsigned l_elem=space_node_to_elem_node[l];
+					if (node_pt(l_elem)->is_hanging(hangindex))
 					{
-						hangbuffer[l].masters[m].weight = hang_info_pt->master_weight(m);					
-						for (unsigned int f = 0; f < space_info->numfields-space_info->numfields_basebulk; f++)
+						res = true;
+						auto hang_info_pt = node_pt(l_elem)->hanging_pt(hangindex);
+						hangbuffer[l].nummaster = hang_info_pt->nmaster();
+						for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
 						{
-							hangbuffer[l].masters[m].local_eqn[f+space_info->buffer_offset_interf] = this->local_interface_hang_eqn( space_info->interface_dof_indices[f] , hang_info_pt->master_node_pt(m));
+							hangbuffer[l].masters[m].weight = hang_info_pt->master_weight(m);
+							hangbuffer[l].masters[m].local_eqn = this->local_interface_hang_eqn( space_info->interface_dof_indices[f] , hang_info_pt->master_node_pt(m));
 						}
 					}
-				}
-				else
-				{
-					hangbuffer[l].nummaster = 0;
+					else
+					{
+						hangbuffer[l].nummaster = 0;
+					}
 				}
 			}
 		}
@@ -732,9 +728,42 @@ namespace pyoomph
 		bool res=this->fill_hang_info_with_equations_for_pos(shape_info); // Potentially only do if required
 		res=this->fill_hang_info_with_equations_basebulk(shape_info) || res;
 		res=this->fill_hang_info_with_equations_interface(shape_info) || res;
-		for (unsigned int l = 0; l < eleminfo.nnode; l++)
+		auto * ft=codeinst->get_func_table();
+		// DG spaces, DL and D0 fields can never actually be hanging; their hanginfo slots in the
+		// unified per-field buffer are only (ab)used below for the eqn_remap indirection, so start
+		// from a clean nummaster=0 state (mirrors what used to be a single flat hanginfo_Discont zero).
+		for (unsigned int ispace=0;ispace<ft->num_present_dg_spaces;ispace++)
 		{
-			shape_info->hanginfo_Discont[l].nummaster = 0;
+			auto * space_info = ft->present_dg_spaces[ispace];
+			unsigned nnode_space=eleminfo.nnode_of_space[space_info->space_index];
+			for (unsigned int f = 0; f < space_info->numfields_basebulk; f++)
+			{
+				JITHangInfo_t * hangbuffer=shape_info->hanginfo[space_info->buffer_offset_basebulk+f];
+				for (unsigned int l = 0; l < nnode_space; l++)
+				{
+					hangbuffer[l].nummaster=0;
+				}
+			}
+			for (unsigned int f = 0; f < space_info->numfields-space_info->numfields_basebulk; f++)
+			{
+				JITHangInfo_t * hangbuffer=shape_info->hanginfo[space_info->buffer_offset_interf+f];
+				for (unsigned int l = 0; l < nnode_space; l++)
+				{
+					hangbuffer[l].nummaster=0;
+				}
+			}
+		}
+		for (unsigned int f = 0; f < ft->info_DL.numfields; f++)
+		{
+			JITHangInfo_t * hangbuffer=shape_info->hanginfo[ft->info_DL.buffer_offset_basebulk+f];
+			for (unsigned int l = 0; l < eleminfo.nnode_DL; l++)
+			{
+				hangbuffer[l].nummaster=0;
+			}
+		}
+		for (unsigned int f = 0; f < ft->info_D0.numfields; f++)
+		{
+			shape_info->hanginfo[ft->info_D0.buffer_offset_basebulk+f][0].nummaster=0;
 		}
 
 		if (eqn_remap)
@@ -754,39 +783,36 @@ namespace pyoomph
 						break;
 					}
 				}
-				if (require_dx_terms ||   required.Pos.psi  || required.DL.dx_psi || required.normal || required.elemsize_Eulerian || required.elemsize_Eulerian_cartesian) 
+				if (require_dx_terms ||   required.Pos.psi  || required.DL.dx_psi || required.normal || required.elemsize_Eulerian || required.elemsize_Eulerian_cartesian)
 				{
-					
+
 					unsigned nfields = this->nodal_dimension();
 
-					for (unsigned int l = 0; l < eleminfo.nnode; l++)
-					{					    
-						if (!shape_info->hanginfo_Pos[l].nummaster)
+					for (unsigned int f = 0; f < nfields; f++)
+					{
+						for (unsigned int l = 0; l < eleminfo.nnode; l++)
 						{
-							// NON HANGING -> Set the hanging to 1 node, which is just the remapped equation
-							shape_info->hanginfo_Pos[l].nummaster = 1;
-							shape_info->hanginfo_Pos[l].masters[0].weight = 1.0;
-							for (unsigned int f = 0; f < nfields; f++)
+							if (!shape_info->hanginfo_Pos[f][l].nummaster)
 							{
+								// NON HANGING -> Set the hanging to 1 node, which is just the remapped equation
+								shape_info->hanginfo_Pos[f][l].nummaster = 1;
+								shape_info->hanginfo_Pos[f][l].masters[0].weight = 1.0;
 								if (eleminfo.pos_local_eqn[l][f] >= 0)
 								{
-									shape_info->hanginfo_Pos[l].masters[0].local_eqn[f] = eleminfo.pos_local_eqn[l][f];
+									shape_info->hanginfo_Pos[f][l].masters[0].local_eqn = eleminfo.pos_local_eqn[l][f];
 								}
 								else
 								{
-									shape_info->hanginfo_Pos[l].masters[0].local_eqn[f] = -1;
+									shape_info->hanginfo_Pos[f][l].masters[0].local_eqn = -1;
 								}
 							}
-						}
-						// Now remap the local equations to the interface element numbering
-						for (int m = 0; m < shape_info->hanginfo_Pos[l].nummaster; m++)
-						{
-							for (unsigned int f = 0; f < nfields; f++)
+							// Now remap the local equations to the interface element numbering
+							for (int m = 0; m < shape_info->hanginfo_Pos[f][l].nummaster; m++)
 							{
-								if (shape_info->hanginfo_Pos[l].masters[m].local_eqn[f] >= 0)
+								if (shape_info->hanginfo_Pos[f][l].masters[m].local_eqn >= 0)
 								{
-									shape_info->hanginfo_Pos[l].masters[m].local_eqn[f] = eqn_remap[shape_info->hanginfo_Pos[l].masters[m].local_eqn[f]];
-									if (shape_info->hanginfo_Pos[l].masters[m].local_eqn[f] == -666)
+									shape_info->hanginfo_Pos[f][l].masters[m].local_eqn = eqn_remap[shape_info->hanginfo_Pos[f][l].masters[m].local_eqn];
+									if (shape_info->hanginfo_Pos[f][l].masters[m].local_eqn == -666)
 									{
 										std::ostringstream oss;
 										oss << this;
@@ -810,56 +836,36 @@ namespace pyoomph
 				if ((required.continuous_spaces[space_info->space_index].psi || required.continuous_spaces[space_info->space_index].dx_psi || required.continuous_spaces[space_info->space_index].dX_psi) && space_info->numfields>0)
 				{
 					//std::cout << " IN SPACE " << i_space << " REQUIRES CONTINUOUS SHAPE FUNCTIONS" << std::endl;
-					
+
 					unsigned nnode_space=eleminfo.nnode_of_space[space_info->space_index];
-					JITHangInfo_t * hangbuffer=shape_info->hanginfo_Cont[space_info->space_index];
-					/*if (space_info.space_index==0) hangbuffer = shape_info->hanginfo_C2TB;
-					else if (space_info.space_index==1) hangbuffer = shape_info->hanginfo_C2;
-					else if (space_info.space_index==2) hangbuffer = shape_info->hanginfo_C1TB;
-					else if (space_info.space_index==3) hangbuffer = shape_info->hanginfo_C1;
-					else throw_runtime_error("Invalid space index");*/
 					//std::cout << " IN SPACE " << i_space << " REQUIRES CONTINUOUS SHAPE FUNCTIONS, NODES: " << nnode_space << std::endl;
-					for (unsigned int l = 0; l < nnode_space; l++)
+					for (unsigned int f = 0; f < space_info->numfields_basebulk; f++)
 					{
-						if (!hangbuffer[l].nummaster)
+						unsigned foffs=f+ space_info->buffer_offset_basebulk;
+						JITHangInfo_t * hangbuffer=shape_info->hanginfo[foffs];
+						for (unsigned int l = 0; l < nnode_space; l++)
 						{
-							// NON HANGING -> Set the hanging to 1 node, which is just the remapped equation
-							hangbuffer[l].nummaster = 1;
-							hangbuffer[l].masters[0].weight = 1.0;
-							for (unsigned int f = 0; f < space_info->numfields_basebulk; f++)
+							if (!hangbuffer[l].nummaster)
 							{
-								if (eleminfo.nodal_local_eqn[l][f + space_info->buffer_offset_basebulk] >= 0)
+								// NON HANGING -> Set the hanging to 1 node, which is just the remapped equation
+								hangbuffer[l].nummaster = 1;
+								hangbuffer[l].masters[0].weight = 1.0;
+								if (eleminfo.nodal_local_eqn[l][foffs] >= 0)
 								{
-									hangbuffer[l].masters[0].local_eqn[f + space_info->buffer_offset_basebulk] = eleminfo.nodal_local_eqn[l][f + space_info->buffer_offset_basebulk];
+									hangbuffer[l].masters[0].local_eqn = eleminfo.nodal_local_eqn[l][foffs];
 								}
 								else
 								{
-									hangbuffer[l].masters[0].local_eqn[f + space_info->buffer_offset_basebulk] = -1;
+									hangbuffer[l].masters[0].local_eqn = -1;
 								}
 							}
 
-							for (unsigned int f = 0; f < space_info->numfields-space_info->numfields_basebulk; f++)
+							for (int m = 0; m < hangbuffer[l].nummaster; m++)
 							{
-								if (eleminfo.nodal_local_eqn[l][f + space_info->buffer_offset_interf] >= 0)
+								if (hangbuffer[l].masters[m].local_eqn >= 0)
 								{
-									hangbuffer[l].masters[0].local_eqn[f+ space_info->buffer_offset_interf] = eleminfo.nodal_local_eqn[l][f + space_info->buffer_offset_interf];							
-								}
-								else
-								{
-									hangbuffer[l].masters[0].local_eqn[f+ space_info->buffer_offset_interf] = -1;
-								}
-							}
-						}	
-			
-						for (int m = 0; m < hangbuffer[l].nummaster; m++)
-						{
-							for (unsigned int f = 0; f < space_info->numfields_basebulk; f++)
-							{
-								unsigned foffs=f+ space_info->buffer_offset_basebulk;
-								if (hangbuffer[l].masters[m].local_eqn[foffs] >= 0)
-								{
-									hangbuffer[l].masters[m].local_eqn[foffs] = eqn_remap[hangbuffer[l].masters[m].local_eqn[foffs]];
-									if (hangbuffer[l].masters[m].local_eqn[foffs] == -666)
+									hangbuffer[l].masters[m].local_eqn = eqn_remap[hangbuffer[l].masters[m].local_eqn];
+									if (hangbuffer[l].masters[m].local_eqn == -666)
 									{
 										std::ostringstream oss;
 										oss << this;
@@ -868,13 +874,35 @@ namespace pyoomph
 									}
 								}
 							}
-							for (unsigned int f = 0; f < space_info->numfields-space_info->numfields_basebulk; f++)
+						}
+					}
+					for (unsigned int f = 0; f < space_info->numfields-space_info->numfields_basebulk; f++)
+					{
+						unsigned foffs=f+ space_info->buffer_offset_interf;
+						JITHangInfo_t * hangbuffer=shape_info->hanginfo[foffs];
+						for (unsigned int l = 0; l < nnode_space; l++)
+						{
+							if (!hangbuffer[l].nummaster)
 							{
-								unsigned foffs=f+ space_info->buffer_offset_interf;
-								if (hangbuffer[l].masters[m].local_eqn[foffs] >= 0)
+								// NON HANGING -> Set the hanging to 1 node, which is just the remapped equation
+								hangbuffer[l].nummaster = 1;
+								hangbuffer[l].masters[0].weight = 1.0;
+								if (eleminfo.nodal_local_eqn[l][foffs] >= 0)
 								{
-									hangbuffer[l].masters[m].local_eqn[foffs] = eqn_remap[hangbuffer[l].masters[m].local_eqn[foffs]];
-									if (hangbuffer[l].masters[m].local_eqn[foffs] == -666)
+									hangbuffer[l].masters[0].local_eqn = eleminfo.nodal_local_eqn[l][foffs];
+								}
+								else
+								{
+									hangbuffer[l].masters[0].local_eqn = -1;
+								}
+							}
+
+							for (int m = 0; m < hangbuffer[l].nummaster; m++)
+							{
+								if (hangbuffer[l].masters[m].local_eqn >= 0)
+								{
+									hangbuffer[l].masters[m].local_eqn = eqn_remap[hangbuffer[l].masters[m].local_eqn];
+									if (hangbuffer[l].masters[m].local_eqn == -666)
 									{
 										std::ostringstream oss;
 										oss << this;
@@ -895,18 +923,20 @@ namespace pyoomph
 				const JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info = ft->present_dg_spaces[i_space];
 				if (space_info->numfields && (required.continuous_spaces[space_info->space_index].psi || required.continuous_spaces[space_info->space_index].dx_psi || required.continuous_spaces[space_info->space_index].dX_psi) && space_info->numfields>0)
 				{
-					unsigned nnode_space=eleminfo.nnode_of_space[space_info->space_index];					
-					for (unsigned int l = 0; l < nnode_space; l++)
+					unsigned nnode_space=eleminfo.nnode_of_space[space_info->space_index];
+					for (unsigned int f = 0; f < space_info->numfields_basebulk; f++)
 					{
-						if (!shape_info->hanginfo_Discont[l].nummaster)
+						unsigned foffs=f + space_info->buffer_offset_basebulk;
+						JITHangInfo_t * hangbuffer=shape_info->hanginfo[foffs];
+						for (unsigned int l = 0; l < nnode_space; l++)
 						{
-							// NON HANGING -> HANGING WITH WEIGHT 1 for external element data
-							shape_info->hanginfo_Discont[l].nummaster = 1;
-							shape_info->hanginfo_Discont[l].masters[0].weight = 1.0;
-						}
-						for (unsigned int f = 0; f < space_info->numfields_basebulk; f++)
-						{
-							int eq=eleminfo.nodal_local_eqn[l][f + space_info->buffer_offset_basebulk];							
+							if (!hangbuffer[l].nummaster)
+							{
+								// NON HANGING -> HANGING WITH WEIGHT 1 for external element data
+								hangbuffer[l].nummaster = 1;
+								hangbuffer[l].masters[0].weight = 1.0;
+							}
+							int eq=eleminfo.nodal_local_eqn[l][foffs];
 							if (eq >= 0)
 							{
 								eq=eqn_remap[eq];
@@ -916,16 +946,27 @@ namespace pyoomph
 										oss << this;
 										throw_runtime_error("MISSING EXTERNAL "+std::string(space_info->space_name)+" DEPENDENCY ON ELEM PTR: " + oss.str());
 								}
-								shape_info->hanginfo_Discont[l].masters[0].local_eqn[f + space_info->buffer_offset_basebulk] = eq ;
+								hangbuffer[l].masters[0].local_eqn = eq ;
 							}
 							else
 							{
-								shape_info->hanginfo_Discont[l].masters[0].local_eqn[f + space_info->buffer_offset_basebulk] = -1;
+								hangbuffer[l].masters[0].local_eqn = -1;
 							}
 						}
-						for (unsigned int f = 0; f < space_info->numfields-space_info->numfields_basebulk; f++)
+					}
+					for (unsigned int f = 0; f < space_info->numfields-space_info->numfields_basebulk; f++)
+					{
+						unsigned foffs=f + space_info->buffer_offset_interf;
+						JITHangInfo_t * hangbuffer=shape_info->hanginfo[foffs];
+						for (unsigned int l = 0; l < nnode_space; l++)
 						{
-							int eq=eleminfo.nodal_local_eqn[l][f + space_info->buffer_offset_interf];					      
+							if (!hangbuffer[l].nummaster)
+							{
+								// NON HANGING -> HANGING WITH WEIGHT 1 for external element data
+								hangbuffer[l].nummaster = 1;
+								hangbuffer[l].masters[0].weight = 1.0;
+							}
+							int eq=eleminfo.nodal_local_eqn[l][foffs];
 							if (eq >= 0)
 							{
 								eq=eqn_remap[eq];
@@ -935,13 +976,13 @@ namespace pyoomph
 										oss << this;
 										throw_runtime_error("MISSING EXTERNAL " + std::string(space_info->space_name) + " DEPENDENCY ON ELEM PTR: " + oss.str());
 								}
-								shape_info->hanginfo_Discont[l].masters[0].local_eqn[f + space_info->buffer_offset_interf] = eq ;
+								hangbuffer[l].masters[0].local_eqn = eq ;
 							}
 							else
 							{
-								shape_info->hanginfo_Discont[l].masters[0].local_eqn[f + space_info->buffer_offset_interf] = -1;
+								hangbuffer[l].masters[0].local_eqn = -1;
 							}
-						}			
+						}
 					}
 				}
 			}
@@ -950,33 +991,34 @@ namespace pyoomph
 
 			if (codeinst->get_func_table()->info_DL.numfields && (required.DL.dx_psi || required.DL.psi || required.DL.dX_psi))
 			{
-				for (unsigned int l = 0; l < eleminfo.nnode_DL; l++)
+				for (unsigned int f = 0; f < codeinst->get_func_table()->info_DL.numfields; f++)
 				{
-					if (!shape_info->hanginfo_Discont[l].nummaster)
+					unsigned foffs = f + ft->info_DL.buffer_offset_basebulk;
+					JITHangInfo_t * hangbuffer=shape_info->hanginfo[foffs];
+					for (unsigned int l = 0; l < eleminfo.nnode_DL; l++)
 					{
-						// NON HANGING -> HANGING WITH WEIGHT 1 for external element data
-						shape_info->hanginfo_Discont[l].nummaster = 1;
-						shape_info->hanginfo_Discont[l].masters[0].weight = 1.0;
-					}
-					for (unsigned int f = 0; f < codeinst->get_func_table()->info_DL.numfields; f++)
-					{
-					      int eq=eleminfo.nodal_local_eqn[l][f + ft->info_DL.buffer_offset_basebulk];
-					      
-							if (eq >= 0)
-							{
-							   eq=eqn_remap[eq];
-							   if (eq==-666)
-							   {
-									std::ostringstream oss;
-									oss << this;
-									throw_runtime_error("MISSING EXTERNAL DL DEPENDENCY ON ELEM PTR: " + oss.str());
-							   }
-								shape_info->hanginfo_Discont[l].masters[0].local_eqn[f + ft->info_DL.buffer_offset_basebulk] = eq ;
-							}
-							else
-							{
-								shape_info->hanginfo_Discont[l].masters[0].local_eqn[f + ft->info_DL.buffer_offset_basebulk] = -1;
-							}
+						if (!hangbuffer[l].nummaster)
+						{
+							// NON HANGING -> HANGING WITH WEIGHT 1 for external element data
+							hangbuffer[l].nummaster = 1;
+							hangbuffer[l].masters[0].weight = 1.0;
+						}
+						int eq=eleminfo.nodal_local_eqn[l][foffs];
+						if (eq >= 0)
+						{
+						   eq=eqn_remap[eq];
+						   if (eq==-666)
+						   {
+								std::ostringstream oss;
+								oss << this;
+								throw_runtime_error("MISSING EXTERNAL DL DEPENDENCY ON ELEM PTR: " + oss.str());
+						   }
+							hangbuffer[l].masters[0].local_eqn = eq ;
+						}
+						else
+						{
+							hangbuffer[l].masters[0].local_eqn = -1;
+						}
 					}
 				}
 			}
@@ -984,33 +1026,33 @@ namespace pyoomph
 
 			if (codeinst->get_func_table()->info_D0.numfields && (required.D0.psi))
 			{
-				if (!shape_info->hanginfo_Discont[0].nummaster)
+				for (unsigned int f = 0; f < codeinst->get_func_table()->info_D0.numfields; f++)
+				{
+					unsigned foffs = f + ft->info_D0.buffer_offset_basebulk;
+					JITHangInfo_t * hangbuffer=shape_info->hanginfo[foffs];
+					if (!hangbuffer[0].nummaster)
 					{
 						// NON HANGING -> HANGING WITH WEIGHT 1 for external element data
-
-						shape_info->hanginfo_Discont[0].nummaster = 1;
-						shape_info->hanginfo_Discont[0].masters[0].weight = 1.0;
+						hangbuffer[0].nummaster = 1;
+						hangbuffer[0].masters[0].weight = 1.0;
 					}
-					for (unsigned int f = 0; f < codeinst->get_func_table()->info_D0.numfields; f++)
+					int eq=eleminfo.nodal_local_eqn[0][foffs];
+					if (eq >= 0)
 					{
-					      int eq=eleminfo.nodal_local_eqn[0][f + ft->info_D0.buffer_offset_basebulk];
-					      
-							if (eq >= 0)
-							{
-							   eq=eqn_remap[eq];
-							   if (eq==-666)
-							   {
-									std::ostringstream oss;
-									oss << this;
-									throw_runtime_error("MISSING EXTERNAL D0 DEPENDENCY ON ELEM PTR: " + oss.str());
-							   }
-								shape_info->hanginfo_Discont[0].masters[0].local_eqn[f + ft->info_D0.buffer_offset_basebulk] = eq;
-							}
-							else
-							{
-								shape_info->hanginfo_Discont[0].masters[0].local_eqn[f + ft->info_D0.buffer_offset_basebulk] = -1;
-							}
+					   eq=eqn_remap[eq];
+					   if (eq==-666)
+					   {
+							std::ostringstream oss;
+							oss << this;
+							throw_runtime_error("MISSING EXTERNAL D0 DEPENDENCY ON ELEM PTR: " + oss.str());
+					   }
+						hangbuffer[0].masters[0].local_eqn = eq;
 					}
+					else
+					{
+						hangbuffer[0].masters[0].local_eqn = -1;
+					}
+				}
 			}
 		}
 		return res;
@@ -1991,72 +2033,51 @@ namespace pyoomph
 #ifndef FIXED_SIZE_SHAPE_BUFFER
 		if (do_alloc)
 		{
-			my_alloc((*buff)->hanginfo_Pos, MAX_NODES);						
-
-			for (unsigned int si=0;si<NUM_CONTINUOUS_SPACES;si++)
+			// hanginfo_Pos is indexed [nodal coordinate direction][local node]; each field's
+			// per-master local_eqn is now a plain scalar, so no extra allocation is needed for it.
+			my_alloc((*buff)->hanginfo_Pos, MAX_NODAL_DIM);
+			for (unsigned int d = 0; d < MAX_NODAL_DIM; d++)
 			{
-				my_alloc((*buff)->hanginfo_Cont[si], MAX_NODES);
-			}
-			
-			for (unsigned int l = 0; l < MAX_NODES; l++)
-			{
-				for (unsigned int si=0;si<NUM_CONTINUOUS_SPACES;si++)
+				my_alloc((*buff)->hanginfo_Pos[d], MAX_NODES);
+				for (unsigned int l = 0; l < MAX_NODES; l++)
 				{
-					my_alloc((*buff)->hanginfo_Cont[si][l].masters, MAX_HANG);
-				}				
-				my_alloc((*buff)->hanginfo_Pos[l].masters, MAX_HANG);
-				for (unsigned int f = 0; f < MAX_HANG; f++)
-				{
-					for (unsigned int si=0;si<NUM_CONTINUOUS_SPACES;si++)					
-					{
-						my_alloc((*buff)->hanginfo_Cont[si][l].masters[f].local_eqn, MAX_FIELDS);	
-					}					
-					my_alloc((*buff)->hanginfo_Pos[l].masters[f].local_eqn, MAX_FIELDS);
+					my_alloc((*buff)->hanginfo_Pos[d][l].masters, MAX_HANG);
 				}
 			}
 
-			// Cannot hang, used only for local equation remapping
-			my_alloc((*buff)->hanginfo_Discont, MAX_NODES);
-			for (unsigned int l = 0; l < MAX_NODES; l++)
+			// hanginfo is the unified per-field buffer for the nodal_data buffer, indexed [global
+			// field index][local node]; this covers continuous, DG, DL and D0 fields alike.
+			my_alloc((*buff)->hanginfo, MAX_FIELDS);
+			for (unsigned int f = 0; f < MAX_FIELDS; f++)
 			{
-				my_alloc((*buff)->hanginfo_Discont[l].masters, 1);
-				my_alloc((*buff)->hanginfo_Discont[l].masters[0].local_eqn, MAX_FIELDS);
+				my_alloc((*buff)->hanginfo[f], MAX_NODES);
+				for (unsigned int l = 0; l < MAX_NODES; l++)
+				{
+					my_alloc((*buff)->hanginfo[f][l].masters, MAX_HANG);
+				}
 			}
 		}
 		else
 		{
-			for (unsigned int l = 0; l < MAX_NODES; l++)
+			for (unsigned int d = 0; d < MAX_NODAL_DIM; d++)
 			{
-				for (unsigned int f = 0; f < MAX_HANG; f++)
+				for (unsigned int l = 0; l < MAX_NODES; l++)
 				{
-					for (unsigned int si=0;si<NUM_CONTINUOUS_SPACES;si++)
-					{
-						my_free((*buff)->hanginfo_Cont[si][l].masters[f].local_eqn, MAX_FIELDS);
-					}					
-					my_free((*buff)->hanginfo_Pos[l].masters[f].local_eqn, MAX_FIELDS);
+					my_free((*buff)->hanginfo_Pos[d][l].masters, MAX_HANG);
 				}
-				
-				for (unsigned int si=0;si<NUM_CONTINUOUS_SPACES;si++)
+				my_free((*buff)->hanginfo_Pos[d], MAX_NODES);
+			}
+			my_free((*buff)->hanginfo_Pos, MAX_NODAL_DIM);
+
+			for (unsigned int f = 0; f < MAX_FIELDS; f++)
+			{
+				for (unsigned int l = 0; l < MAX_NODES; l++)
 				{
-					my_free((*buff)->hanginfo_Cont[si][l].masters, MAX_HANG);
-				}				
-				my_free((*buff)->hanginfo_Pos[l].masters, MAX_HANG);
-				
-
+					my_free((*buff)->hanginfo[f][l].masters, MAX_HANG);
+				}
+				my_free((*buff)->hanginfo[f], MAX_NODES);
 			}
-			for (unsigned int si=0;si<NUM_CONTINUOUS_SPACES;si++)
-			{
-				my_free((*buff)->hanginfo_Cont[si], MAX_NODES);
-			}			
-			my_free((*buff)->hanginfo_Pos, MAX_NODES);
-
-			for (unsigned int l = 0; l < MAX_NODES; l++)
-			{
-				my_free((*buff)->hanginfo_Discont[l].masters[0].local_eqn, MAX_FIELDS);
-				my_free((*buff)->hanginfo_Discont[l].masters, 1);
-			}
-			my_free((*buff)->hanginfo_Discont, MAX_NODES);
-
+			my_free((*buff)->hanginfo, MAX_FIELDS);
 		}
 #endif
 
@@ -5015,32 +5036,47 @@ namespace pyoomph
 			std::cout << "HANG INFO POS" << std::endl;
 			for (unsigned int l = 0; l < this->nnode(); l++)
 			{
-				std::cout << "\t" << l << " nmst: " << shape_info->hanginfo_Pos[l].nummaster;
-				for (int m = 0; m < shape_info->hanginfo_Pos[l].nummaster; m++)
+				std::cout << "\t" << l;
+				for (unsigned int j = 0; j < eleminfo.nodal_dim; j++)
 				{
-					std::cout << "\t\t weight:" << shape_info->hanginfo_Pos[l].masters[m].weight << "\t";
-					for (unsigned int j = 0; j < eleminfo.nodal_dim; j++)
-						std::cout << "\t" << shape_info->hanginfo_Pos[l].masters[m].local_eqn[j];
+					std::cout << "\t[dim " << j << "] nmst: " << shape_info->hanginfo_Pos[j][l].nummaster;
+					for (int m = 0; m < shape_info->hanginfo_Pos[j][l].nummaster; m++)
+					{
+						std::cout << " (weight:" << shape_info->hanginfo_Pos[j][l].masters[m].weight << " eq:" << shape_info->hanginfo_Pos[j][l].masters[m].local_eqn << ")";
+					}
 				}
 				std::cout << std::endl;
 			}
+
+			auto print_hanginfo_for_space = [](JITShapeInfo_t * si_shape_info, const JITFuncSpec_Table_FiniteElement_SpaceInfo_t & space_info, unsigned nnode_space)
+			{
+				std::cout << "HANG INFO " << space_info.space_name << std::endl;
+				for (unsigned int l = 0; l < nnode_space; l++)
+				{
+					std::cout << "\t" << l;
+					for (unsigned int f = 0; f < space_info.numfields_basebulk; f++)
+					{
+						JITHangInfo_t * hangbuffer = si_shape_info->hanginfo[f + space_info.buffer_offset_basebulk];
+						std::cout << "\t[f" << f << "] nmst: " << hangbuffer[l].nummaster;
+						for (int m = 0; m < hangbuffer[l].nummaster; m++)
+							std::cout << " (weight:" << hangbuffer[l].masters[m].weight << " eq:" << hangbuffer[l].masters[m].local_eqn << ")";
+					}
+					for (unsigned int f = 0; f < space_info.numfields-space_info.numfields_basebulk; f++)
+					{
+						JITHangInfo_t * hangbuffer = si_shape_info->hanginfo[f + space_info.buffer_offset_interf];
+						std::cout << "\t[if" << f << "] nmst: " << hangbuffer[l].nummaster;
+						for (int m = 0; m < hangbuffer[l].nummaster; m++)
+							std::cout << " (weight:" << hangbuffer[l].masters[m].weight << " eq:" << hangbuffer[l].masters[m].local_eqn << ")";
+					}
+					std::cout << std::endl;
+				}
+			};
 
 			for (unsigned int si=0;si<NUM_CONTINUOUS_SPACES;si++)
 			{
 				if (eleminfo.nnode_of_space[si])
 				{
-					std::cout << "HANG INFO " << functable->continuous_spaces[si].space_name << std::endl;
-					for (unsigned int l = 0; l < eleminfo.nnode_of_space[si]; l++)
-					{
-						std::cout << "\t" << l << " nmst: " << shape_info->hanginfo_Cont[si][l].nummaster;
-						for (int m = 0; m < shape_info->hanginfo_Cont[si][l].nummaster; m++)
-						{
-							std::cout << "\t\t weight:" << shape_info->hanginfo_Cont[si][l].masters[m].weight << "\t";
-							for (unsigned int j = 0; j < functable->continuous_spaces[si].numfields; j++)
-								std::cout << "\t" << shape_info->hanginfo_Cont[si][l].masters[m].local_eqn[j];
-						}
-						std::cout << std::endl;
-					}
+					print_hanginfo_for_space(shape_info, functable->continuous_spaces[si], eleminfo.nnode_of_space[si]);
 				}
 			}
 
@@ -5050,12 +5086,14 @@ namespace pyoomph
 				std::cout << "BULK HANG INFO POS" << std::endl;
 				for (unsigned int l = 0; l < bel->nnode(); l++)
 				{
-					std::cout << "\t" << l << " nmst: " << shape_info->bulk_shapeinfo->hanginfo_Pos[l].nummaster;
-					for (int m = 0; m < shape_info->bulk_shapeinfo->hanginfo_Pos[l].nummaster; m++)
+					std::cout << "\t" << l;
+					for (unsigned int j = 0; j < bel->eleminfo.nodal_dim; j++)
 					{
-						std::cout << "\t\t weight:" << shape_info->bulk_shapeinfo->hanginfo_Pos[l].masters[m].weight << "\t";
-						for (unsigned int j = 0; j < bel->eleminfo.nodal_dim; j++)
-							std::cout << "\t" << shape_info->bulk_shapeinfo->hanginfo_Pos[l].masters[m].local_eqn[j];
+						std::cout << "\t[dim " << j << "] nmst: " << shape_info->bulk_shapeinfo->hanginfo_Pos[j][l].nummaster;
+						for (int m = 0; m < shape_info->bulk_shapeinfo->hanginfo_Pos[j][l].nummaster; m++)
+						{
+							std::cout << " (weight:" << shape_info->bulk_shapeinfo->hanginfo_Pos[j][l].masters[m].weight << " eq:" << shape_info->bulk_shapeinfo->hanginfo_Pos[j][l].masters[m].local_eqn << ")";
+						}
 					}
 					std::cout << std::endl;
 				}
@@ -5064,18 +5102,8 @@ namespace pyoomph
 				{
 					if (bel->eleminfo.nnode_of_space[si])
 					{
-						std::cout << "BULK HANG INFO " << functable->continuous_spaces[si].space_name << std::endl;
-						for (unsigned int l = 0; l < bel->eleminfo.nnode_of_space[si]; l++)
-						{
-							std::cout << "\t" << l << " nmst: " << shape_info->bulk_shapeinfo->hanginfo_Cont[si][l].nummaster;
-							for (int m = 0; m < shape_info->bulk_shapeinfo->hanginfo_Cont[si][l].nummaster; m++)
-							{
-								std::cout << "\t\t weight:" << shape_info->bulk_shapeinfo->hanginfo_Cont[si][l].masters[m].weight << "\t";
-								for (unsigned int j = 0; j < functable->continuous_spaces[si].numfields; j++)
-									std::cout << "\t" << shape_info->bulk_shapeinfo->hanginfo_Cont[si][l].masters[m].local_eqn[j];
-							}
-							std::cout << std::endl;
-						}
+						std::cout << "BULK ";
+						print_hanginfo_for_space(shape_info->bulk_shapeinfo, functable->continuous_spaces[si], bel->eleminfo.nnode_of_space[si]);
 					}
 				}
 			}
