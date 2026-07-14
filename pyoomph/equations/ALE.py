@@ -649,3 +649,55 @@ class PrescribedMovingMesh(BaseMovingMeshEquations):
         
     def define_residuals(self):
         self.add_weak((mesh_velocity() - self.umesh)*scale_factor("temporal"), "mesh",lagrangian=self.lagrangian)
+        
+        
+class ConstrainPositionsToC1Space(Equations):
+    """Constrains the positions of the mesh to the C1 space. 
+    This is useful if you want to reduce the number of degrees of freedom of the mesh. 
+    Can be combined with UnconstrainPositionsFromC1Space at boundaries to still allow for curved boundaries.
+
+    Args:
+        where: Where to apply the constraint. If None, the constraint is applied to all nodes. If a callable, it should take a list of nondimensional coordinates and return True if the constraint should be applied to that node.
+    """
+    def __init__(self,where:Optional[Callable[[List[float]],bool]]=None):
+        super().__init__()
+        self.where=where
+    
+    def before_assigning_equations_preorder(self, mesh):
+        POSITION_CONSTRAIN_TO_C1 = 2                 
+        for e in mesh.elements():            
+            for ni in e.non_vertex_node_indices():
+                n=e.node_pt(ni)
+                if self.where is not None:
+                    x=[n.x(i) for i in range(n.ndim())]
+                    if not self.where(x):
+                        continue
+                for i in range(n.ndim()):                                            
+                    n.set_additional_dof_constraint(POSITION_CONSTRAIN_TO_C1,i)
+                    
+        return super().before_assigning_equations_preorder(mesh)
+    
+class UnconstrainPositionsFromC1Space(Equations):
+    """Unconstrains the positions of the mesh from the C1 space.     
+    Can be applied to a boundary on a domain with ConstrainPositionsToC1Space in the bulk to allow for curved boundaries.
+
+    Args:
+        where: Where to apply the constraint. If None, the constraint is applied to all nodes. If a callable, it should take a list of nondimensional coordinates and return True if the constraint should be applied to that node.
+    """
+    def __init__(self,where:Optional[Callable[[List[float]],bool]]=None):
+        super().__init__()
+        self.where=where
+    
+    def before_assigning_equations_preorder(self, mesh):
+        POSITION_CONSTRAIN_TO_C1 = 2                
+        for e in mesh.elements():            
+            for ni in e.non_vertex_node_indices():
+                n=e.node_pt(ni)
+                if self.where is not None:
+                    x=[n.x(i) for i in range(n.ndim())]
+                    if not self.where(x):
+                        continue
+                for i in range(n.ndim()):                        
+                    n.remove_additional_dof_constraint(POSITION_CONSTRAIN_TO_C1, i)
+                    
+        return super().before_assigning_equations_preorder(mesh)

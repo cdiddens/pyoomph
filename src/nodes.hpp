@@ -26,6 +26,22 @@ The main author may be contacted at c.diddens@utwente.nl
 namespace pyoomph
 {
 
+  enum AdditionalDofConstraintMode : unsigned
+  {
+    CONTINUOUS_BASE_DOF_CONSTRAIN_TO_C1,
+    INTERFACE_DOF_CONSTRAIN_TO_C1,
+    POSITION_CONSTRAIN_TO_C1
+  };
+
+
+  struct AdditionalDofConstrainingInfo
+  {
+    AdditionalDofConstraintMode mode; // Mode, e.g. what to do with this
+    unsigned index; // Index, if mode==CONTINUOUS_BASE_DOF_CONSTRAIN_TO_C1, it indicates a value index, if mode==INTERFACE_DOF_CONSTRAIN_TO_C1, it indicates an interface id, if mode==POSITION_CONSTRAIN_TO_C1, it indicates a coordinate index
+    AdditionalDofConstrainingInfo *next; // Next in linked list
+    AdditionalDofConstrainingInfo(unsigned index, AdditionalDofConstraintMode mode) : index(index), mode(mode), next(NULL) {}
+  };
+
   class Problem;
   class NodeAccess;
   class FieldDescriptor;
@@ -39,11 +55,15 @@ namespace pyoomph
     friend class MeshTemplate;
     friend class NodeAccess;
     friend class BulkElementBase;
-
+    AdditionalDofConstrainingInfo *additional_dof_constraints = NULL; // Linked list of additional dofs that constrain this node's, to e.g. reduce from C2 to C1 locally
   public:
-    virtual ~NodeWithFieldIndicesBase() = default;
+    virtual void add_additional_dof_constraint(unsigned index, AdditionalDofConstraintMode mode);
+    virtual void remove_additional_dof_constraint(unsigned index, AdditionalDofConstraintMode mode);
+    virtual const AdditionalDofConstrainingInfo *get_additional_dof_constraints() const { return additional_dof_constraints; }
+    virtual void flush_additional_dof_constraints();
+    virtual ~NodeWithFieldIndicesBase();
   };
-
+  
   // Mixin that adds pyoomph-specific bookkeeping on top of an oomph-lib node type
   // (NODE_TYPE, e.g. oomph::SolidNode - see the Node typedef below). Currently this only
   // adds additional_value_index(), which looks up the extra per-interface value index a

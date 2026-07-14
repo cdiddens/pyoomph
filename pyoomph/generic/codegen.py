@@ -3267,3 +3267,57 @@ class ForceZeroOnEigenSolve(BaseEquations):
         res=set([ fullpath+"/"+k for k in topin])
         return res
 
+
+
+class ConstrainFieldsToC1Space(Equations):
+    """Constrains a higher order field to the first order C1 space. Useful in combination with either the where parameter or (un)constrain a field e.g. a boundary
+
+    Args:
+        *args: The names of the fields to constrain to C1 space.
+        unconstrain_instead: If set to True, the specified fields will be unconstrained from C1 space instead of being constrained. Default is False.
+        where: An optional function to specify where the constraints should be applied. Nondimensional nodal positions are passed to this function, and it should return True for nodes where the constraint should be applied. If None, the constraint is applied to all nodes.
+    """
+    def __init__(self, *args:str,unconstrain_instead:bool=False,where:Optional[Callable[[List[float]],bool]]=None):
+        super().__init__()
+        self._constrained_fields = []
+        self._unconstrain_instead = unconstrain_instead
+        self._where = where
+        for field in args:
+            self._constrained_fields.append(field)
+            
+    def before_assigning_equations_preorder(self, mesh):
+        BULKFIELD_CONSTRAIN_TO_C1 = 0
+        INTERFACE_CONSTRAIN_TO_C1 = 1
+        POSITION_CONSTRAIN_TO_C1 = 2
+        coordmap={"mesh_x":0,"coordinate:x":0,"mesh_y":1,"coordinate_y":1,"mesh_z":2,"coordinate_z":2}
+        modes:Dict[str, Tuple[int, int]] = {}
+        for field in self._constrained_fields:
+            if field in coordmap.keys():
+                modes[field] = (POSITION_CONSTRAIN_TO_C1, coordmap[field])
+                continue
+            # Continuous bulk field
+            contifi=mesh.get_code_gen().get_code().get_nodal_field_index(field)
+            if contifi>=0:
+                modes[field] = (BULKFIELD_CONSTRAIN_TO_C1, contifi)
+            else:
+                # additional interface field?
+                contifi=mesh.get_code_gen().get_code().get_interface_field_index(field)
+                if contifi>=0:
+                    modes[field] = (INTERFACE_CONSTRAIN_TO_C1, contifi)
+                else:
+                    raise RuntimeError(f"Field {field} is not a bulk or interface field, cannot constrain to C1 space")
+                
+        for e in mesh.elements():
+            for nindex in e.non_vertex_node_indices():
+                n = e.node_pt(nindex)
+                if self._where is not None:
+                    x=[n.x(i) for i in range(n.ndim())]
+                    if not self._where(x):
+                        continue
+                for field,(mode,index) in modes.items():  
+                    if self._unconstrain_instead:
+                        n.remove_additional_dof_constraint(index, mode)
+                    else:                  
+                        n.set_additional_dof_constraint(index, mode)
+                    
+        return super().before_assigning_equations_preorder(mesh)

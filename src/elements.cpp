@@ -470,6 +470,129 @@ namespace pyoomph
 		return res;
 	}
 
+	// Sets up a synthetic hanging-node scheme for base-bulk continuous-field dofs that were locally
+	// reduced to C1 via NodeWithFieldIndicesBase::add_additional_dof_constraint (mode
+	// CONTINUOUS_BASE_DOF_CONSTRAIN_TO_C1): such a dof's node is already pinned (see
+	// BulkElementBase::pin_dummy_values), so here it instead gets masters = the surrounding C1 corner
+	// nodes of this element (found the same way as for ordinary dummy values, see
+	// Dummy_Value_Interpolation_Map[SPACE_INDEX_C1]) with equal weights, and their local equation
+	// numbers for the very same field, so the generated code redistributes residual/Jacobian
+	// contributions there exactly as it does for genuinely hanging nodes.
+	bool BulkElementBase::fill_additional_hang_buffer_data(JITShapeInfo_t *shape_info)
+	{
+		bool res=false;
+		if (!has_additional_dof_constraints)
+			return res;
+		auto * ft = codeinst->get_func_table();
+		const std::vector<std::vector<unsigned>> &c1_dummy_map = this->get_dummy_value_interpolation_map()[SPACE_INDEX_C1];
+		auto get_c1_masters = [&c1_dummy_map](unsigned l_elem) -> const std::vector<unsigned> *
+		{
+			for (const std::vector<unsigned> &entry : c1_dummy_map)
+			{
+				if (entry[0] == l_elem)
+					return &entry;
+			}
+			return NULL;
+		};
+
+		for (unsigned int ispace = 0; ispace < ft->num_present_continuous_spaces; ispace++)
+		{
+			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info = ft->present_continuous_spaces[ispace];
+			const std::vector<unsigned> & space_node_to_elem_node = this->get_nodal_space_index_to_element_index_map()[space_info->space_index];
+			const std::vector<int> & elem_node_to_space_node = this->get_element_index_to_nodal_space_index_map()[space_info->space_index];
+			unsigned nnode_space = eleminfo.nnode_of_space[space_info->space_index];
+			for (unsigned int l = 0; l < nnode_space; l++)
+			{
+				const unsigned l_elem = space_node_to_elem_node[l];
+				Node *n = dynamic_cast<Node *>(node_pt(l_elem));
+				for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info != NULL; info = info->next)
+				{
+					if (info->mode == CONTINUOUS_BASE_DOF_CONSTRAIN_TO_C1)
+					{
+						if (info->index < space_info->nodal_offset_basebulk || info->index >= space_info->nodal_offset_basebulk + space_info->numfields_basebulk)
+							continue; // not a value index of this space
+						unsigned f = info->index - space_info->nodal_offset_basebulk;
+						const std::vector<unsigned> *entry = get_c1_masters(l_elem);
+						if (!entry)
+						{
+							throw_runtime_error("A base dof constrained to C1 is only allowed on nodes which do not belong to the C1 space");
+						}
+						unsigned nmaster = entry->size() - 1;
+						JITHangInfo_t * hangbuffer = shape_info->hanginfo[space_info->buffer_offset_basebulk + f];
+						hangbuffer[l].nummaster = 0;						
+						for (unsigned m = 0; m < nmaster; m++)
+						{
+							unsigned l2=elem_node_to_space_node[(*entry)[m + 1]];
+							if (hangbuffer[l2].nummaster==0)
+							{
+								hangbuffer[l].masters[hangbuffer[l].nummaster].weight=1.0/(double)nmaster;
+								hangbuffer[l].masters[hangbuffer[l].nummaster].local_eqn=this->nodal_local_eqn((*entry)[m + 1], space_info->nodal_offset_basebulk + f);
+								hangbuffer[l].nummaster++;
+							}
+							else
+							{							
+								for (unsigned m2 = 0; m2 < hangbuffer[l2].nummaster; m2++)
+								{
+									hangbuffer[l].masters[hangbuffer[l].nummaster].weight=hangbuffer[l2].masters[m2].weight/(double)nmaster;
+									hangbuffer[l].masters[hangbuffer[l].nummaster].local_eqn=hangbuffer[l2].masters[m2].local_eqn;
+									hangbuffer[l].nummaster++;
+								}
+							}							
+						}
+						res = true;
+					}
+				}
+			}
+		}
+
+		// Positions locally reduced to C1 via POSITION_CONSTRAIN_TO_C1 (index = coordinate index); the
+		// position hanginfo (shape_info->hanginfo_Pos, already filled for genuinely hanging positions by
+		// fill_hang_info_with_equations_for_pos) is indexed by the full element node index directly, not
+		// by a per-space node index, so no elem_node_to_space_node lookup is needed here.
+		for (unsigned int l_elem = 0; l_elem < eleminfo.nnode; l_elem++)
+		{
+			Node *n = dynamic_cast<Node *>(node_pt(l_elem));
+			for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info != NULL; info = info->next)
+			{
+				if (info->mode != POSITION_CONSTRAIN_TO_C1)
+					continue;
+				if (info->index >= this->nodal_dimension())
+					continue; // not a valid coordinate index
+				unsigned f = info->index;
+				const std::vector<unsigned> *entry = get_c1_masters(l_elem);
+				if (!entry)
+				{
+					throw_runtime_error("A position dof constrained to C1 is only allowed on nodes which do not belong to the C1 space");
+				}
+				unsigned nmaster = entry->size() - 1;
+				JITHangInfo_t * hangbuffer_pos = shape_info->hanginfo_Pos[f];
+				hangbuffer_pos[l_elem].nummaster = 0;
+				for (unsigned m = 0; m < nmaster; m++)
+				{
+					unsigned l2 = (*entry)[m + 1];
+					if (hangbuffer_pos[l2].nummaster == 0)
+					{
+						hangbuffer_pos[l_elem].masters[hangbuffer_pos[l_elem].nummaster].weight = 1.0 / (double)nmaster;
+						hangbuffer_pos[l_elem].masters[hangbuffer_pos[l_elem].nummaster].local_eqn = eleminfo.pos_local_eqn[l2][f];
+						hangbuffer_pos[l_elem].nummaster++;
+					}
+					else
+					{
+						for (unsigned m2 = 0; m2 < hangbuffer_pos[l2].nummaster; m2++)
+						{
+							hangbuffer_pos[l_elem].masters[hangbuffer_pos[l_elem].nummaster].weight = hangbuffer_pos[l2].masters[m2].weight / (double)nmaster;
+							hangbuffer_pos[l_elem].masters[hangbuffer_pos[l_elem].nummaster].local_eqn = hangbuffer_pos[l2].masters[m2].local_eqn;
+							hangbuffer_pos[l_elem].nummaster++;
+						}
+					}
+				}
+				res = true;
+			}
+		}
+
+		return res;
+	}
+
 
 	bool InterfaceElementBase::fill_hang_info_with_equations_interface(JITShapeInfo_t *shape_info)
 	{
@@ -502,6 +625,97 @@ namespace pyoomph
 					{
 						hangbuffer[l].nummaster = 0;
 					}
+				}
+			}
+		}
+		return res;
+	}
+
+	// Interface-field counterpart to BulkElementBase::fill_additional_hang_buffer_data: additionally
+	// sets up the synthetic hanging scheme for interface-only dofs locally reduced to C1 via
+	// add_additional_dof_constraint (mode INTERFACE_DOF_CONSTRAIN_TO_C1); "index" there is the
+	// interface id, exactly as used by Node::additional_value_index and interface_dof_indices below.
+	// Mirrors the chaining done in the base-bulk version: if a C1 corner master is itself hanging (its
+	// own hangbuffer entry, already filled by fill_hang_info_with_equations_interface, has masters),
+	// we inline that master's own masters (scaled by our weight) instead of referencing the hanging
+	// node's own (non-existent) local equation directly; otherwise we use its direct nodal local eqn.
+	bool InterfaceElementBase::fill_additional_hang_buffer_data(JITShapeInfo_t *shape_info)
+	{
+		bool res = BulkElementBase::fill_additional_hang_buffer_data(shape_info);
+		if (!has_additional_dof_constraints)
+			return res;
+		auto * ft = codeinst->get_func_table();
+		const std::vector<std::vector<unsigned>> &c1_dummy_map = this->get_dummy_value_interpolation_map()[SPACE_INDEX_C1];
+		auto get_c1_masters = [&c1_dummy_map](unsigned l_elem) -> const std::vector<unsigned> *
+		{
+			for (const std::vector<unsigned> &entry : c1_dummy_map)
+			{
+				if (entry[0] == l_elem)
+					return &entry;
+			}
+			return NULL;
+		};
+
+		for (unsigned int ispace = 0; ispace < ft->num_present_continuous_spaces; ispace++)
+		{
+			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info = ft->present_continuous_spaces[ispace];
+			if (space_info->numfields == space_info->numfields_basebulk)
+				continue; // No interface fields for this space
+			const std::vector<unsigned> & space_node_to_elem_node = this->get_nodal_space_index_to_element_index_map()[space_info->space_index];
+			const std::vector<int> & elem_node_to_space_node = this->get_element_index_to_nodal_space_index_map()[space_info->space_index];
+			unsigned nnode_space = eleminfo.nnode_of_space[space_info->space_index];
+			for (unsigned int l = 0; l < nnode_space; l++)
+			{
+				const unsigned l_elem = space_node_to_elem_node[l];
+				Node *n = dynamic_cast<Node *>(node_pt(l_elem));
+				for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info != NULL; info = info->next)
+				{
+					if (info->mode != INTERFACE_DOF_CONSTRAIN_TO_C1)
+						continue;
+					int f = -1;
+					for (unsigned int j = space_info->numfields_basebulk; j < space_info->numfields; j++)
+					{
+						if (space_info->interface_dof_indices[j - space_info->numfields_basebulk] == info->index)
+						{
+							f = j - space_info->numfields_basebulk;
+							break;
+						}
+					}
+					if (f < 0)
+						continue; // this interface id is not assigned within this space
+
+					const std::vector<unsigned> *entry = get_c1_masters(l_elem);
+					if (!entry)
+					{
+						throw_runtime_error("An interface dof constrained to C1 is only allowed on nodes which do not belong to the C1 space");
+					}
+					unsigned nmaster = entry->size() - 1;
+					JITHangInfo_t * hangbuffer = shape_info->hanginfo[space_info->buffer_offset_interf + f];
+					hangbuffer[l].nummaster = 0;
+					for (unsigned m = 0; m < nmaster; m++)
+					{
+						unsigned l2 = elem_node_to_space_node[(*entry)[m + 1]];
+						if (hangbuffer[l2].nummaster == 0)
+						{
+							pyoomph::BoundaryNode *master_bn = dynamic_cast<pyoomph::BoundaryNode *>(node_pt((*entry)[m + 1]));
+							if (!master_bn)
+								throw_runtime_error("This should be a boundary node here");
+							unsigned master_value_index = master_bn->index_of_first_value_assigned_by_face_element(info->index);
+							hangbuffer[l].masters[hangbuffer[l].nummaster].weight = 1.0 / (double)nmaster;
+							hangbuffer[l].masters[hangbuffer[l].nummaster].local_eqn = this->nodal_local_eqn((*entry)[m + 1], master_value_index);
+							hangbuffer[l].nummaster++;
+						}
+						else
+						{
+							for (unsigned m2 = 0; m2 < hangbuffer[l2].nummaster; m2++)
+							{
+								hangbuffer[l].masters[hangbuffer[l].nummaster].weight = hangbuffer[l2].masters[m2].weight / (double)nmaster;
+								hangbuffer[l].masters[hangbuffer[l].nummaster].local_eqn = hangbuffer[l2].masters[m2].local_eqn;
+								hangbuffer[l].nummaster++;
+							}
+						}
+					}
+					res = true;
 				}
 			}
 		}
@@ -580,8 +794,69 @@ namespace pyoomph
 			}
 		}
 
+		// User-added additional dof constraints (see NodeWithFieldIndicesBase::add_additional_dof_constraint):
+		// these nodes are not genuinely hanging (they're plain pinned dofs, see pin_dummy_values), so the
+		// loops above never touch them; here we push the same C1-corner-averaged value that
+		// pin_dummy_values/fill_additional_hang_buffer_data already use as their equation-assembly target,
+		// so the raw storage stays consistent for output/restart and for further averaging on other nodes.
+		if (has_additional_dof_constraints)
+		{
+			const std::vector<std::vector<unsigned>> &c1_dummy_map = this->get_dummy_value_interpolation_map()[SPACE_INDEX_C1];
+			auto get_c1_masters = [&c1_dummy_map](unsigned l_elem) -> const std::vector<unsigned> *
+			{
+				for (const std::vector<unsigned> &entry : c1_dummy_map)
+				{
+					if (entry[0] == l_elem)
+						return &entry;
+				}
+				return NULL;
+			};
+
+			for (unsigned int l_elem = 0; l_elem < this->nnode(); l_elem++)
+			{
+				pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(node_pt(l_elem));
+				for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info != NULL; info = info->next)
+				{
+					if (info->mode == CONTINUOUS_BASE_DOF_CONSTRAIN_TO_C1)
+					{
+						const std::vector<unsigned> *entry = get_c1_masters(l_elem);
+						if (!entry)
+						{
+							throw_runtime_error("A base dof constrained to C1 is only allowed on nodes which do not belong to the C1 space");
+						}
+						unsigned nmaster = entry->size() - 1;
+						unsigned ntstorage = n->ntstorage();
+						for (unsigned t = 0; t < ntstorage; t++)
+						{
+							double val = 0.0;
+							for (unsigned m = 1; m < entry->size(); m++)
+							{
+								val += node_pt((*entry)[m])->value(t, info->index);
+							}
+							n->value_pt(info->index)[t] = val / (double)nmaster;
+						}
+					}
+					else if (info->mode == POSITION_CONSTRAIN_TO_C1)
+					{
+						const std::vector<unsigned> *entry = get_c1_masters(l_elem);
+						if (!entry)
+						{
+							throw_runtime_error("A position dof constrained to C1 is only allowed on nodes which do not belong to the C1 space");
+						}
+						unsigned nmaster = entry->size() - 1;
+						double val = 0.0;
+						for (unsigned m = 1; m < entry->size(); m++)
+						{
+							val += dynamic_cast<pyoomph::Node *>(node_pt((*entry)[m]))->x(info->index);
+						}
+						n->x(info->index) = val / (double)nmaster;
+					}
+				}
+			}
+		}
+
 	}
-	
+
 	// Looks up field "name" across all continuous interpolation spaces (both ordinary base-bulk
 	// fields and, for interface elements, the additional interface-only fields) present on this
 	// element, and returns the (Data*, component-index) pair for every node carrying that field.
@@ -765,6 +1040,9 @@ namespace pyoomph
 		{
 			shape_info->hanginfo[ft->info_D0.buffer_offset_basebulk+f][0].nummaster=0;
 		}
+
+		// Additionally set up hanging for dofs locally reduced to C1 via add_additional_dof_constraint
+		res=this->fill_additional_hang_buffer_data(shape_info) || res;
 
 		if (eqn_remap)
 		{
@@ -1797,6 +2075,8 @@ namespace pyoomph
 				this->internal_data_pt(d)->unpin(v);
 			}
 		}
+
+		has_additional_dof_constraints = false;
 	}
 
 	// Pins nodal position dofs that must not be free equations (all positions if the mesh does not
@@ -1855,6 +2135,50 @@ namespace pyoomph
 					for (unsigned int fi=0;fi<space_info->numfields_basebulk;fi++)
 					{
 						this->node_pt(ni)->constrain(space_info->nodal_offset_basebulk+fi);
+					}
+				}
+			}
+		}
+
+		// User-added additional dof constraints (see NodeWithFieldIndicesBase::add_additional_dof_constraint):		
+		{			
+			const std::vector<int> & elem_to_C1_map = this->get_element_index_to_nodal_space_index_map()[SPACE_INDEX_C1];			
+			for (unsigned int l = 0; l < nnode(); l++)
+			{
+				Node *n = dynamic_cast<Node *>(node_pt(l));
+				for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info != NULL; info = info->next)
+				{
+					if (info->mode == CONTINUOUS_BASE_DOF_CONSTRAIN_TO_C1)
+					{
+						if (elem_to_C1_map[l]>=0)
+						{
+							throw_runtime_error("Cannot enforce a degration to C1 on a C1 vertex node");
+						}
+						if (info->index >= this->ncont_interpolated_values())
+						{
+							throw_runtime_error("Cannot enforce a degration to C1 on a base dof index larger than the number of base dofs on this element: index="+std::to_string(info->index)+" vs. ncont_interpolated_values()="+std::to_string(this->ncont_interpolated_values()));
+						}
+						else
+						{
+							n->pin(info->index);
+							has_additional_dof_constraints = true;
+						}
+					}
+					else if (info->mode == POSITION_CONSTRAIN_TO_C1)
+					{
+						if (elem_to_C1_map[l]>=0)
+						{
+							throw_runtime_error("Cannot enforce a degration to C1 on a C1 vertex node");
+						}
+						if (info->index >= this->nodal_dimension())
+						{
+							throw_runtime_error("Cannot enforce a degration to C1 on a coordinate index larger than the nodal dimension of this element");
+						}
+						else
+						{
+							n->pin_position(info->index);
+							has_additional_dof_constraints = true;
+						}
 					}
 				}
 			}
@@ -2159,6 +2483,7 @@ namespace pyoomph
 
 		this->set_nlagrangian_and_ndim(this->codeinst->get_func_table()->lagr_dim, this->codeinst->get_func_table()->nodal_dim);
 		this->ensure_external_data();
+		
 	}
 
 	// Frees all buffers set up by fill_element_info() (nodal coordinate/data/local-eqn arrays).
@@ -9408,157 +9733,6 @@ namespace pyoomph
 		return res;
 	}
 
-
-	// Maxim: add Bulk element Pyramid3dC2 here, similar to BulkElementWedge3dC2, if needed
-	// int BulkElementPyramid3dC2::element_index_to_C1[14]={0,1,2,3,4,-1,-1,-1,-1,-1,-1,-1,-1,-1};
-	// bool BulkElementPyramid3dC2::node_only_C2[14] = {false, false, false, false,false,true,true,true,true,true,true,true,true,true};
-
-    // BulkElementPyramid3dC2::BulkElementPyramid3dC2() 
-	// {
-	// 	eleminfo.elem_ptr = this;
-	// 	eleminfo.nnode = 14;
-	// 	eleminfo.nnode_C1 = 5; // To be done
-	// 	eleminfo.nnode_C1TB = 0;		
-	// 	eleminfo.nnode_C2TB = 0;
-	// 	eleminfo.nnode_C2 = 14;
-	// 	eleminfo.nnode_DL = 4;
-	// 	eleminfo.nodal_dim = codeinst->get_func_table()->nodal_dim;
-	// 	this->set_n_node(eleminfo.nnode);
-	// 	this->set_nodal_dimension(eleminfo.nodal_dim);	
-	// 	allocate_discontinous_fields();	
-	// }
-
-	// bool BulkElementPyramid3dC2::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
-	// {
-	//    bool res= this->fill_hang_info_with_equations_for_pos(shape_info);
-	//    auto * ft = codeinst->get_func_table();	   	   
-	//    if (ft->numfields_C2) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C2, ft->hangindex_C2, shape_info->hanginfo_C2, ft->numfields_C2_basebulk,ft->buffer_offset_C2_basebulk,ft->nodal_offset_C2_basebulk,&BulkElementBase::get_node_index_C2_to_element) || res;
-	//    if (ft->numfields_C1) res = this->fill_hang_info_with_equations_for_space(required, eleminfo.nnode_C1, ft->hangindex_C1, shape_info->hanginfo_C1, ft->numfields_C1_basebulk,ft->buffer_offset_C1_basebulk,ft->nodal_offset_C1_basebulk,&BulkElementBase::get_node_index_C1_to_element) || res;
-    //    if (eqn_remap)
-	//    {
-	// 	return BulkElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap) || res;
-	//    }
-	//    else return res;
-	// }
-
-    // void BulkElementPyramid3dC2::shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const
-	// {
-	// 	psi[0] = 1.0;
-	// 	psi[1] = s[0];
-	// 	psi[2] = s[1];
-	// 	psi[3] = s[2];
-	// }
-
-	// void BulkElementPyramid3dC2::dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const
-	// {
-	// 	psi[0] = 1.0;
-	// 	psi[1] = s[0];
-	// 	psi[2] = s[1];
-	// 	psi[3] = s[2];
-	// 	dpsi(0, 0) = 0.0;
-	// 	dpsi(1, 0) = 1.0;
-	// 	dpsi(2, 0) = 0.0;
-	// 	dpsi(3, 0) = 0.0;
-	// 	dpsi(0, 1) = 0.0;
-	// 	dpsi(1, 1) = 0.0;
-	// 	dpsi(2, 1) = 1.0;
-	// 	dpsi(3, 1) = 0.0;
-	// 	dpsi(0, 2) = 0.0;
-	// 	dpsi(1, 2) = 0.0;
-	// 	dpsi(2, 2) = 0.0;
-	// 	dpsi(3, 2) = 1.0;
-	// }
-
-	// void BulkElementPyramid3dC2::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
-	// {
-	// 	if (tesselate_tri)
-	// 	{
-	// 		throw_runtime_error("Tesselation not implemented in 3d");
-	// 	}
-	// 	else
-	// 	{
-	// 		for (unsigned int i = 0; i < this->nnode(); i++)
-	// 			indices[i] = i;
-	// 	}
-	// }
-
-	// std::vector<double> BulkElementPyramid3dC2::get_outline(bool lagrangian)
-	// {
-	// 	std::vector<double> res(0);
-	// 	throw_runtime_error("Cannot get outline from 3d elements yet");
-	// 	return res;
-	// }
-
-	// void BulkElementPyramid3dC2::interpolate_hang_values()
-	// {
-	// 	BulkElementBase::interpolate_hang_values();
-	// 	for (unsigned int l = 0; l < eleminfo.nnode; l++)
-	// 	{
-	// 		if (node_pt(l)->is_hanging())
-	// 		{
-	// 			for (unsigned int i = 0; i < node_pt(l)->ndim(); i++)
-	// 			{
-	// 				for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-	// 				{
-	// 					dynamic_cast<Node *>(node_pt(l))->variable_position_pt()->set_value(t, i, node_pt(l)->position(t, i));
-	// 				}
-	// 			}
-	// 		}
-	// 	}
-	// 	auto * ft = codeinst->get_func_table();
-	// 	for (unsigned int l = 0; l < eleminfo.nnode_C2; l++)
-	// 	{
-	// 		if (node_pt(l)->is_hanging(ft->hangindex_C2))
-	// 		{
-	// 			for (unsigned int i = 0; i < codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C2TB_basebulk; i++)
-	// 			{
-	// 				for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-	// 				{
-	// 					node_pt(l)->value_pt(i)[t] = node_pt(l)->value(t, i);
-	// 				}
-	// 			}
-	// 		}
-	// 	}
-	// 	if (ft->numfields_C1_basebulk)
-	// 	{
-	// 		for (unsigned int l_C1 = 0; l_C1 < eleminfo.nnode_C1; l_C1++)
-	// 		{
-	// 			unsigned l = get_node_index_C1_to_element(l_C1);
-	// 			if (node_pt(l)->is_hanging(ft->hangindex_C1))
-	// 			{
-	// 				// std::cout << "C1 hang" << std::endl;
-	// 				for (unsigned int i = ft->nodal_offset_C1_basebulk; i < ft->nodal_offset_C1_basebulk + ft->numfields_C1_basebulk; i++)
-	// 				{
-	// 					for (unsigned t = 0; t < node_pt(l)->ntstorage(); t++)
-	// 					{
-	// 						node_pt(l)->value_pt(i)[t] = node_pt(l)->value(t, i); // Does this really work here?
-	// 					}
-	// 				}
-	// 			}
-	// 		}
-	// 		for (unsigned int i = ft->nodal_offset_C1_basebulk; i < ft->nodal_offset_C1_basebulk + ft->numfields_C1_basebulk; i++)
-	// 		{
-	// 			for (unsigned t = 0; t < node_pt(0)->ntstorage(); t++)
-	// 			{
-    //                 //Fill the midpoint nodes of the square base
-	// 				node_pt(5)->value_pt(i)[t] = 0.5 * (node_pt(0)->value(t, i) + node_pt(1)->value(t, i));
-	// 				node_pt(6)->value_pt(i)[t] = 0.5 * (node_pt(1)->value(t, i) + node_pt(2)->value(t, i));
-	// 				node_pt(7)->value_pt(i)[t] = 0.5 * (node_pt(2)->value(t, i) + node_pt(3)->value(t, i));
-	// 				node_pt(8)->value_pt(i)[t] = 0.5 * (node_pt(3)->value(t, i) + node_pt(0)->value(t, i));
-
-	// 				//Fill the midpoint nodes to apex
-	// 				node_pt(9)->value_pt(i)[t] = 0.5 * (node_pt(0)->value(t, i) + node_pt(4)->value(t, i));
-	// 				node_pt(10)->value_pt(i)[t] = 0.5 * (node_pt(1)->value(t, i) + node_pt(4)->value(t, i));
-	// 				node_pt(11)->value_pt(i)[t] = 0.5 * (node_pt(2)->value(t, i) + node_pt(4)->value(t, i));
-	// 				node_pt(12)->value_pt(i)[t] = 0.5 * (node_pt(3)->value(t, i) + node_pt(4)->value(t, i));
-
-	// 				//Fill the midpoint of square base
-	// 				node_pt(13)->value_pt(i)[t] = 0.5 * (node_pt(0)->value(t, i) + node_pt(2)->value(t, i));
-	// 			}
-	// 		}
-	// 	}
-	// }
-
     BulkElementPyramid3dC2::BulkElementPyramid3dC2() 
 	{
 		eleminfo.elem_ptr = this;
@@ -9823,7 +9997,63 @@ namespace pyoomph
 						   dummynode->value_pt(dest_index)[t]=val;
 						}
 					}
-					
+
+				}
+			}
+		}
+
+		// User-added additional interface dof constraints (INTERFACE_DOF_CONSTRAIN_TO_C1): mirrors
+		// BulkElementBase::interpolate_hang_values' handling of CONTINUOUS_BASE_DOF_CONSTRAIN_TO_C1 -
+		// these nodes are plain pinned dofs (see pin_dummy_values), not genuinely hanging, so push the
+		// same C1-corner-averaged value used as the equation-assembly target in
+		// fill_additional_hang_buffer_data into the raw storage for consistent output/restart.
+		if (has_additional_dof_constraints)
+		{
+			const std::vector<std::vector<unsigned>> &c1_dummy_map = this->get_dummy_value_interpolation_map()[SPACE_INDEX_C1];
+			auto get_c1_masters = [&c1_dummy_map](unsigned l_elem) -> const std::vector<unsigned> *
+			{
+				for (const std::vector<unsigned> &entry : c1_dummy_map)
+				{
+					if (entry[0] == l_elem)
+						return &entry;
+				}
+				return NULL;
+			};
+
+			for (unsigned int l_elem = 0; l_elem < this->nnode(); l_elem++)
+			{
+				pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(node_pt(l_elem));
+				pyoomph::BoundaryNode *dest_bn = dynamic_cast<pyoomph::BoundaryNode *>(n);
+				for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info != NULL; info = info->next)
+				{
+					if (info->mode != INTERFACE_DOF_CONSTRAIN_TO_C1)
+						continue;
+					if (!dest_bn)
+						throw_runtime_error("This should be a boundary node here");
+					int dest_index = dest_bn->index_of_first_value_assigned_by_face_element(info->index);
+					if (dest_index < 0)
+						continue; // this interface id is not assigned on this node
+
+					const std::vector<unsigned> *entry = get_c1_masters(l_elem);
+					if (!entry)
+					{
+						throw_runtime_error("An interface dof constrained to C1 is only allowed on nodes which do not belong to the C1 space");
+					}
+					unsigned nmaster = entry->size() - 1;
+					unsigned ntstorage = n->ntstorage();
+					for (unsigned t = 0; t < ntstorage; t++)
+					{
+						double val = 0.0;
+						for (unsigned m = 1; m < entry->size(); m++)
+						{
+							pyoomph::BoundaryNode *master_bn = dynamic_cast<pyoomph::BoundaryNode *>(node_pt((*entry)[m]));
+							if (!master_bn)
+								throw_runtime_error("This should be a boundary node here");
+							int master_index = master_bn->index_of_first_value_assigned_by_face_element(info->index);
+							val += master_bn->value(t, master_index);
+						}
+						n->value_pt((unsigned)dest_index)[t] = val / (double)nmaster;
+					}
 				}
 			}
 		}
@@ -11775,6 +12005,29 @@ namespace pyoomph
 			}
 		}
 
+		// User-added additional dof constraints (see NodeWithFieldIndicesBase::add_additional_dof_constraint):
+		// an INTERFACE_DOF_CONSTRAIN_TO_C1 entry pins the additional (interface-only) dof assigned by this
+		// interface's field with the given interface id, locally reducing it to C1. Just as for the base
+		// fields, this is only allowed on nodes that do not carry an independent C1 dof themselves.
+		{
+			const std::vector<int> &elem_to_C1 = this->get_element_index_to_nodal_space_index_map()[SPACE_INDEX_C1];			
+			for (unsigned int l = 0; l < nnode(); l++)
+			{
+				Node *n = dynamic_cast<Node *>(node_pt(l));
+				pyoomph::BoundaryNode *bn = dynamic_cast<pyoomph::BoundaryNode *>(n);
+				for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info != NULL; info = info->next)
+				{
+					if (info->mode == INTERFACE_DOF_CONSTRAIN_TO_C1)
+					{					
+						if (elem_to_C1[l] >= 0) throw_runtime_error("Cannot constrain interface dof to C1 on a node that already has an independent C1 dof");
+						int vindex = bn->index_of_first_value_assigned_by_face_element(info->index);
+						if (vindex<0) throw_runtime_error("Interface DOF index not found here");
+						n->pin((unsigned)vindex);
+						has_additional_dof_constraints = true;
+					}
+				}
+			}
+		}
 
 	}
 
@@ -11963,10 +12216,10 @@ namespace pyoomph
 	};
 
 	const std::vector<std::vector<std::vector<unsigned>>> BulkElementQuad2dC2::Dummy_Value_Interpolation_Map={
-		{}, // C2TB 
+		{}, // C2TB
 		{}, // C2
-		{{1, 0,2}, {3,0,6}, {5,2,8}, {7,6,8}, {4,1,3,5,7} }, // C1TB
-		{{1, 0,2}, {3,0,6}, {5,2,8}, {7,6,8}, {4,1,3,5,7} }  // C1
+		{{1, 0,2}, {3,0,6}, {5,2,8}, {7,6,8}, {4,0,2,6,8} }, // C1TB
+		{{1, 0,2}, {3,0,6}, {5,2,8}, {7,6,8}, {4,0,2,6,8} }  // C1
 	};
 
 	const std::vector<std::vector<unsigned>> BulkElementTri2dC1::Nodal_Space_Index_To_Element_Index_Map={
@@ -12116,7 +12369,7 @@ namespace pyoomph
 		{}, // C2TB 
 		{}, // C2
 		{}, // C1TB
-		{{3,0,1},{4,1,2},{5,0,2},{15,12,13},{16,12,14},{17,13,14},{6,0,12},{7,1,13},{8,2,14},{9,3,15},{10,4,16},{11,5,17}}  // C1		
+		{{3,0,1},{4,1,2},{5,0,2},{15,12,13},{16,12,14},{17,13,14},{6,0,12},{7,1,13},{8,2,14},{9,0,1,12,13},{10,0,2,12,14},{11,1,2,13,14}}  // C1
 	};
 
 	const std::vector<std::vector<unsigned>> BulkElementPyramid3dC1::Nodal_Space_Index_To_Element_Index_Map={
@@ -12211,21 +12464,21 @@ namespace pyoomph
 		{}, // C2TB
 		{}, // C2
 		{0,1,2,3}, // C1TB
-		{0,1,2}  // C1
+		{0,1,2,-1}  // C1
 	};
 
 	const std::vector<std::vector<int>> BulkElementTri2dC2::Element_Index_To_Nodal_Space_Index_Map={
 		{}, // C2TB
 		{0,1,2,3,4,5}, // C2
 		{}, // C1TB
-		{0,1,2}  // C1
+		{0,1,2,-1,-1,-1}  // C1
 	};
 
 	const std::vector<std::vector<int>> BulkElementTri2dC2TB::Element_Index_To_Nodal_Space_Index_Map={
 		{0,1,2,3,4,5,6}, // C2TB
-		{0,1,2,3,4,5}, // C2
+		{0,1,2,3,4,5,-1}, // C2
 		{0,1,2,-1,-1,-1,3}, // C1TB
-		{0,1,2}  // C1
+		{0,1,2,-1,-1,-1,-1}  // C1
 	};
 
 	const std::vector<std::vector<int>> BulkElementBrick3dC1::Element_Index_To_Nodal_Space_Index_Map={
@@ -12253,21 +12506,21 @@ namespace pyoomph
 		{}, // C2TB
 		{}, // C2
 		{0,1,2,3,4}, // C1TB
-		{0,1,2,3}  // C1
+		{0,1,2,3,-1}  // C1
 	};
 
 	const std::vector<std::vector<int>> BulkElementTetra3dC2::Element_Index_To_Nodal_Space_Index_Map={
 		{}, // C2TB
 		{0,1,2,3,4,5,6,7,8,9}, // C2
 		{}, // C1TB
-		{0,1,2,3}  // C1
+		{0,1,2,3,-1,-1,-1,-1,-1,-1}  // C1
 	};
 
 	const std::vector<std::vector<int>> BulkElementTetra3dC2TB::Element_Index_To_Nodal_Space_Index_Map={
 		{0,1,2,3,4,5,6,7,8,9,10,11,12,13,14}, // C2TB
-		{0,1,2,3,4,5,6,7,8,9}, // C2
+		{0,1,2,3,4,5,6,7,8,9,-1,-1,-1,-1,-1}, // C2
 		{0,1,2,3,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,4}, // C1TB
-		{0,1,2,3}  // C1
+		{0,1,2,3,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1}  // C1
 	};
 
 
@@ -12282,7 +12535,7 @@ namespace pyoomph
 		{}, // C2TB
 		{0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17}, // C2
 		{}, // C1TB
-		{0,1,2,-1,-1,-1,-1,-1,-1,-1,-1,-1,3,4,5}  // C1
+		{0,1,2,-1,-1,-1,-1,-1,-1,-1,-1,-1,3,4,5,-1,-1,-1}  // C1
 	};
 
 
@@ -12315,6 +12568,34 @@ namespace pyoomph
 		{0}  // C1
 	};
 
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////
+	// Non_Vertex_Node_Indices[class]: the element-local node indices i for which
+	// Element_Index_To_Nodal_Space_Index_Map[3][i] (the C1/vertex space entry) is -1, i.e. the nodes
+	// that do not carry a value of the linear (vertex) field space.
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	const std::vector<unsigned> BulkElementLine1dC1::Non_Vertex_Node_Indices={};
+	const std::vector<unsigned> BulkElementLine1dC2::Non_Vertex_Node_Indices={1};
+	const std::vector<unsigned> BulkTElementLine1dC1::Non_Vertex_Node_Indices={};
+	const std::vector<unsigned> BulkTElementLine1dC2::Non_Vertex_Node_Indices={1};
+	const std::vector<unsigned> BulkElementQuad2dC1::Non_Vertex_Node_Indices={};
+	const std::vector<unsigned> BulkElementQuad2dC2::Non_Vertex_Node_Indices={1,3,4,5,7};
+	const std::vector<unsigned> BulkElementTri2dC1::Non_Vertex_Node_Indices={};
+	const std::vector<unsigned> BulkElementTri2dC1TB::Non_Vertex_Node_Indices={3};
+	const std::vector<unsigned> BulkElementTri2dC2::Non_Vertex_Node_Indices={3,4,5};
+	const std::vector<unsigned> BulkElementTri2dC2TB::Non_Vertex_Node_Indices={3,4,5,6};
+	const std::vector<unsigned> BulkElementBrick3dC1::Non_Vertex_Node_Indices={};
+	const std::vector<unsigned> BulkElementBrick3dC2::Non_Vertex_Node_Indices={1,3,4,5,7,9,10,11,12,13,14,15,16,17,19,21,22,23,25};
+	const std::vector<unsigned> BulkElementTetra3dC1::Non_Vertex_Node_Indices={};
+	const std::vector<unsigned> BulkElementTetra3dC1TB::Non_Vertex_Node_Indices={4};
+	const std::vector<unsigned> BulkElementTetra3dC2::Non_Vertex_Node_Indices={4,5,6,7,8,9};
+	const std::vector<unsigned> BulkElementTetra3dC2TB::Non_Vertex_Node_Indices={4,5,6,7,8,9,10,11,12,13,14};
+	const std::vector<unsigned> BulkElementWedge3dC1::Non_Vertex_Node_Indices={};
+	const std::vector<unsigned> BulkElementWedge3dC2::Non_Vertex_Node_Indices={3,4,5,6,7,8,9,10,11,15,16,17}; 
+	const std::vector<unsigned> BulkElementPyramid3dC1::Non_Vertex_Node_Indices={};
+	const std::vector<unsigned> BulkElementPyramid3dC2::Non_Vertex_Node_Indices={5,6,7,8,9,10,11,12,13};
+	const std::vector<unsigned> BulkElementODE0d::Non_Vertex_Node_Indices={};
+	const std::vector<unsigned> PointElement0d::Non_Vertex_Node_Indices={};
 	const std::vector<int> BulkElementODE0d::Possible_Face_Indices={};
 	const std::vector<int> PointElement0d::Possible_Face_Indices={};
 	const std::vector<int> BulkElementLine1dC1::Possible_Face_Indices={-1,1};
