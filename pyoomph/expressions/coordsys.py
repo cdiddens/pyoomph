@@ -120,12 +120,9 @@ class BaseCoordinateSystem(_pyoomph.CustomCoordinateSystem):
                 return self.scalar_gradient(arg, ndim, edim, with_scales, lagrangian)
         elif flags & 6 == 4 or is_vector == 2:
             if ndim == edim:
-                return self.vector_gradient(arg.evalm(), ndim, edim, with_scales, lagrangian)
-            elif ndim == edim + 1:
-                return self.surface_vector_gradient(arg.evalm(), ndim, edim, with_scales, lagrangian)
+                return self.vector_gradient(arg.evalm(), ndim, edim, with_scales, lagrangian)            
             else:
-                raise RuntimeError("Trying to perform a vector gradient on an element with dimension " + str(
-                    edim) + " but with a nodal dimension of " + str(ndim))
+                return self.surface_vector_gradient(arg.evalm(), ndim, edim, with_scales, lagrangian)                
         else:
             raise RuntimeError("Strange flags in grad: ", flags, flags & 6)
 
