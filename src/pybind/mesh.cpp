@@ -262,6 +262,13 @@ void PyReg_Mesh(py::module &m)
 				else if (mode==2) n->add_additional_dof_constraint(index, pyoomph::AdditionalDofConstraintMode::POSITION_CONSTRAIN_TO_C1);
 				else throw_runtime_error("Unknown additional dof constraint mode");
 			 }, py::arg("mode"), py::arg("index"), "Adds an additional dof constraint to this node, e.g. to reduce a locally C2 dof to C1; mode=0: CONTINUOUS_BASE_DOF_CONSTRAIN_TO_C1, mode=1: INTERFACE_DOF_CONSTRAIN_TO_C1, mode=2: POSITION_CONSTRAIN_TO_C1")
+		.def("remove_additional_dof_constraint", [](pyoomph::Node *n, unsigned mode, unsigned index)
+			 {
+				if (mode==0) n->remove_additional_dof_constraint(index,pyoomph::AdditionalDofConstraintMode::CONTINUOUS_BASE_DOF_CONSTRAIN_TO_C1);
+				else if (mode==1) n->remove_additional_dof_constraint(index,pyoomph::AdditionalDofConstraintMode::INTERFACE_DOF_CONSTRAIN_TO_C1);
+				else if (mode==2) n->remove_additional_dof_constraint(index,pyoomph::AdditionalDofConstraintMode::POSITION_CONSTRAIN_TO_C1);
+				else throw_runtime_error("Unknown additional dof constraint mode");				
+			 }, py::arg("mode"),py::arg("index"), "Removes the additional dof constraint associated with the given value index from this node")
 							
 		.def("flush_additional_dof_constraints", &pyoomph::Node::flush_additional_dof_constraints, "Removes all additional dof constraints previously added to this node")
 		.def("set_coordinates_on_boundary",[](pyoomph::Node *self,unsigned boundary_index, std::vector<double> &zeta) {
@@ -541,6 +548,11 @@ void PyReg_Mesh(py::module &m)
 			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);
 			if (!be) return 0;
 			return be->nvertex_node(); }, "Returns the number of vertex (corner) nodes of this element")
+		.def("non_vertex_node_indices", [](oomph::GeneralisedElement *self) -> std::vector<unsigned>
+			 {
+			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);
+			if (!be) return {};
+			return be->non_vertex_node_indices(); }, "Returns the element-local node indices that do not carry a value of the linear (C1/vertex) field space")
 		.def_property(
 			"_elemental_error_max_override", [](oomph::GeneralisedElement *self)
 			{

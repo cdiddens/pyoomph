@@ -57,6 +57,30 @@ namespace pyoomph
         additional_dof_constraints = new_info;
     }
 
+  void NodeWithFieldIndicesBase::remove_additional_dof_constraint(unsigned index, AdditionalDofConstraintMode mode)
+  {
+    AdditionalDofConstrainingInfo *current = additional_dof_constraints;
+    AdditionalDofConstrainingInfo *previous = NULL;
+    while (current != NULL)
+    {
+      if (current->index == index && current->mode == mode)
+      {
+        if (previous == NULL)
+        {
+          additional_dof_constraints = current->next;
+        }
+        else
+        {
+          previous->next = current->next;
+        }
+        delete current;
+        return;
+      }
+      previous = current;
+      current = current->next;
+    }
+   }
+
 	void NodeWithFieldIndicesBase::flush_additional_dof_constraints() 
 	{
       AdditionalDofConstrainingInfo *current = additional_dof_constraints;

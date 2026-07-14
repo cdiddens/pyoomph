@@ -2156,7 +2156,7 @@ namespace pyoomph
 						}
 						if (info->index >= this->ncont_interpolated_values())
 						{
-							throw_runtime_error("Cannot enforce a degration to C1 on a base dof index larger than the number of base dofs on this element");
+							throw_runtime_error("Cannot enforce a degration to C1 on a base dof index larger than the number of base dofs on this element: index="+std::to_string(info->index)+" vs. ncont_interpolated_values()="+std::to_string(this->ncont_interpolated_values()));
 						}
 						else
 						{
@@ -2483,6 +2483,7 @@ namespace pyoomph
 
 		this->set_nlagrangian_and_ndim(this->codeinst->get_func_table()->lagr_dim, this->codeinst->get_func_table()->nodal_dim);
 		this->ensure_external_data();
+		
 	}
 
 	// Frees all buffers set up by fill_element_info() (nodal coordinate/data/local-eqn arrays).
@@ -12463,21 +12464,21 @@ namespace pyoomph
 		{}, // C2TB
 		{}, // C2
 		{0,1,2,3}, // C1TB
-		{0,1,2}  // C1
+		{0,1,2,-1}  // C1
 	};
 
 	const std::vector<std::vector<int>> BulkElementTri2dC2::Element_Index_To_Nodal_Space_Index_Map={
 		{}, // C2TB
 		{0,1,2,3,4,5}, // C2
 		{}, // C1TB
-		{0,1,2}  // C1
+		{0,1,2,-1,-1,-1}  // C1
 	};
 
 	const std::vector<std::vector<int>> BulkElementTri2dC2TB::Element_Index_To_Nodal_Space_Index_Map={
 		{0,1,2,3,4,5,6}, // C2TB
-		{0,1,2,3,4,5}, // C2
+		{0,1,2,3,4,5,-1}, // C2
 		{0,1,2,-1,-1,-1,3}, // C1TB
-		{0,1,2}  // C1
+		{0,1,2,-1,-1,-1,-1}  // C1
 	};
 
 	const std::vector<std::vector<int>> BulkElementBrick3dC1::Element_Index_To_Nodal_Space_Index_Map={
@@ -12505,21 +12506,21 @@ namespace pyoomph
 		{}, // C2TB
 		{}, // C2
 		{0,1,2,3,4}, // C1TB
-		{0,1,2,3}  // C1
+		{0,1,2,3,-1}  // C1
 	};
 
 	const std::vector<std::vector<int>> BulkElementTetra3dC2::Element_Index_To_Nodal_Space_Index_Map={
 		{}, // C2TB
 		{0,1,2,3,4,5,6,7,8,9}, // C2
 		{}, // C1TB
-		{0,1,2,3}  // C1
+		{0,1,2,3,-1,-1,-1,-1,-1,-1}  // C1
 	};
 
 	const std::vector<std::vector<int>> BulkElementTetra3dC2TB::Element_Index_To_Nodal_Space_Index_Map={
 		{0,1,2,3,4,5,6,7,8,9,10,11,12,13,14}, // C2TB
-		{0,1,2,3,4,5,6,7,8,9}, // C2
+		{0,1,2,3,4,5,6,7,8,9,-1,-1,-1,-1,-1}, // C2
 		{0,1,2,3,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,4}, // C1TB
-		{0,1,2,3}  // C1
+		{0,1,2,3,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1}  // C1
 	};
 
 
@@ -12534,7 +12535,7 @@ namespace pyoomph
 		{}, // C2TB
 		{0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17}, // C2
 		{}, // C1TB
-		{0,1,2,-1,-1,-1,-1,-1,-1,-1,-1,-1,3,4,5}  // C1
+		{0,1,2,-1,-1,-1,-1,-1,-1,-1,-1,-1,3,4,5,-1,-1,-1}  // C1
 	};
 
 
@@ -12567,6 +12568,34 @@ namespace pyoomph
 		{0}  // C1
 	};
 
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////
+	// Non_Vertex_Node_Indices[class]: the element-local node indices i for which
+	// Element_Index_To_Nodal_Space_Index_Map[3][i] (the C1/vertex space entry) is -1, i.e. the nodes
+	// that do not carry a value of the linear (vertex) field space.
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	const std::vector<unsigned> BulkElementLine1dC1::Non_Vertex_Node_Indices={};
+	const std::vector<unsigned> BulkElementLine1dC2::Non_Vertex_Node_Indices={1};
+	const std::vector<unsigned> BulkTElementLine1dC1::Non_Vertex_Node_Indices={};
+	const std::vector<unsigned> BulkTElementLine1dC2::Non_Vertex_Node_Indices={1};
+	const std::vector<unsigned> BulkElementQuad2dC1::Non_Vertex_Node_Indices={};
+	const std::vector<unsigned> BulkElementQuad2dC2::Non_Vertex_Node_Indices={1,3,4,5,7};
+	const std::vector<unsigned> BulkElementTri2dC1::Non_Vertex_Node_Indices={};
+	const std::vector<unsigned> BulkElementTri2dC1TB::Non_Vertex_Node_Indices={3};
+	const std::vector<unsigned> BulkElementTri2dC2::Non_Vertex_Node_Indices={3,4,5};
+	const std::vector<unsigned> BulkElementTri2dC2TB::Non_Vertex_Node_Indices={3,4,5,6};
+	const std::vector<unsigned> BulkElementBrick3dC1::Non_Vertex_Node_Indices={};
+	const std::vector<unsigned> BulkElementBrick3dC2::Non_Vertex_Node_Indices={1,3,4,5,7,9,10,11,12,13,14,15,16,17,19,21,22,23,25};
+	const std::vector<unsigned> BulkElementTetra3dC1::Non_Vertex_Node_Indices={};
+	const std::vector<unsigned> BulkElementTetra3dC1TB::Non_Vertex_Node_Indices={4};
+	const std::vector<unsigned> BulkElementTetra3dC2::Non_Vertex_Node_Indices={4,5,6,7,8,9};
+	const std::vector<unsigned> BulkElementTetra3dC2TB::Non_Vertex_Node_Indices={4,5,6,7,8,9,10,11,12,13,14};
+	const std::vector<unsigned> BulkElementWedge3dC1::Non_Vertex_Node_Indices={};
+	const std::vector<unsigned> BulkElementWedge3dC2::Non_Vertex_Node_Indices={3,4,5,6,7,8,9,10,11,15,16,17}; 
+	const std::vector<unsigned> BulkElementPyramid3dC1::Non_Vertex_Node_Indices={};
+	const std::vector<unsigned> BulkElementPyramid3dC2::Non_Vertex_Node_Indices={5,6,7,8,9,10,11,12,13};
+	const std::vector<unsigned> BulkElementODE0d::Non_Vertex_Node_Indices={};
+	const std::vector<unsigned> PointElement0d::Non_Vertex_Node_Indices={};
 	const std::vector<int> BulkElementODE0d::Possible_Face_Indices={};
 	const std::vector<int> PointElement0d::Possible_Face_Indices={};
 	const std::vector<int> BulkElementLine1dC1::Possible_Face_Indices={-1,1};

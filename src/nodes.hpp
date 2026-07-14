@@ -58,6 +58,7 @@ namespace pyoomph
     AdditionalDofConstrainingInfo *additional_dof_constraints = NULL; // Linked list of additional dofs that constrain this node's, to e.g. reduce from C2 to C1 locally
   public:
     virtual void add_additional_dof_constraint(unsigned index, AdditionalDofConstraintMode mode);
+    virtual void remove_additional_dof_constraint(unsigned index, AdditionalDofConstraintMode mode);
     virtual const AdditionalDofConstrainingInfo *get_additional_dof_constraints() const { return additional_dof_constraints; }
     virtual void flush_additional_dof_constraints();
     virtual ~NodeWithFieldIndicesBase();
