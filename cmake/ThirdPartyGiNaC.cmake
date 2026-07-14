@@ -106,9 +106,17 @@ if(PYOOMPH_DOWNLOAD_GINAC)
                        "CPPFLAGS=-I${PYOOMPH_CLN_INCLUDE_DIR_RESOLVED}"
                        "LDFLAGS=-L${PYOOMPH_THIRDPARTY_PREFIX}/${CMAKE_INSTALL_LIBDIR}"
                        <SOURCE_DIR>/configure
-                       --prefix=${PYOOMPH_THIRDPARTY_PREFIX} 
+                       --prefix=${PYOOMPH_THIRDPARTY_PREFIX}
                        ${_pyoomph_autotools_common_flags}
                        ${GINAC_EXTRA_CONFIGURE_FLAGS}
+    # GiNaC's own "make install" also descends into doc/ and tries to build
+    # the "ginac.info" Texinfo manual, which needs "makeinfo" (part of
+    # texinfo). We don't need the docs, and requiring texinfo just to build
+    # pyoomph is an unnecessary dependency, so skip that subdir entirely by
+    # overriding automake's SUBDIRS on the install command line.
+    INSTALL_COMMAND ${CMAKE_COMMAND} -E env
+                       "PKG_CONFIG_PATH=${_cln_pkgconfig_dir}"
+                       make install SUBDIRS=ginac
     BUILD_BYPRODUCTS "${_ginac_lib}"
   )
   set(PYOOMPH_GINAC_INCLUDE_DIR_RESOLVED "${PYOOMPH_THIRDPARTY_PREFIX}/include")
