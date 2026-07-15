@@ -96,7 +96,7 @@ namespace pyoomph
     }
 
     /// Broken copy constructor
-    TemplatedMeshBase3d(const TemplatedMeshBase3d &dummy) : pyoomph::Mesh(), TemplatedMeshBase()
+    TemplatedMeshBase3d(const TemplatedMeshBase3d &) : oomph::Mesh(), pyoomph::Mesh(), TemplatedMeshBase()
     {
       oomph::BrokenCopy::broken_copy("TemplatedMeshBase3d");
     }

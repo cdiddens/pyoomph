@@ -199,7 +199,7 @@ namespace pyoomph
 
 		// nanoflann's dynamic adaptor does not implement radius queries, so this always throws;
 		// use a static tree (built from a fixed coordinate array) for radius_search.
-		std::vector<std::pair<uint32_t, double>> radius_search(double radius, double x, double y, double z) override
+		std::vector<std::pair<uint32_t, double>> radius_search(double, double, double, double) override
 		{
 			throw_runtime_error("Cannot perform a radius_search on a dynamic KDTree");
 			return std::vector<std::pair<uint32_t, double>>();
@@ -217,8 +217,8 @@ namespace pyoomph
 
 	public:
 		StaticImplementedKDTreeNDIM<tree_t, DIM>(std::vector<double> coordarray) : ImplementedKDTree(coordarray, DIM), tree(DIM, cloud, {max_leaf}) {}
-		void addIndex(unsigned index) override { throw_runtime_error("Cannot add points to a static tree"); }
-		void addIndices(unsigned start, unsigned end) override { throw_runtime_error("Cannot add points to a static tree"); }
+		void addIndex(unsigned) override { throw_runtime_error("Cannot add points to a static tree"); }
+		void addIndices(unsigned, unsigned) override { throw_runtime_error("Cannot add points to a static tree"); }
 		int point_present(double x, double y, double z, double epsilon = 1e-8) override
 		{
 			if (cloud.pts.empty())

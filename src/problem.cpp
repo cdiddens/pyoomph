@@ -1589,7 +1589,7 @@ namespace pyoomph
 
 	// Installs the pitchfork-bifurcation tracking assembly handler with the given symmetry-breaking
 	// eigenvector (block-solve variant is not wired up here, only the plain handler)
-	void Problem::activate_my_pitchfork_tracking(double *const &parameter_pt, const oomph::DoubleVector &symmetry_vector, const bool &block_solve)
+	void Problem::activate_my_pitchfork_tracking(double *const &parameter_pt, const oomph::DoubleVector &symmetry_vector, const bool &)
 	{
 		//	this->activate_pitchfork_tracking(parameter_pt, symmetry_vector, block_solve);
 		reset_assembly_handler_to_default();

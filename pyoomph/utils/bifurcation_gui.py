@@ -297,7 +297,7 @@ class BifurcationGUI:
         state_file=self.problem.get_output_directory(os.path.join(self.data_subdir,"_states","state_{:06d}.dump".format(self._state_step))) 
         p=BifurcationGUISolutionPoint(self.get_bifurcation_parameter().value,self.evaluate_observables(),self.problem.get_last_eigenvalues()[0],state_file,self._state_step)                                 
         if p.eig_value_Re==0 and self.classify_bifurcations:
-            from pyoomph.generic.bifurcation_tools import NormalFormCalculator
+            from ..generic.bifurcation_tools import NormalFormCalculator
             p.bifurcation_info=NormalFormCalculator(self.problem).get_normal_form(self.get_bifurcation_parameter().get_name())            
         self.problem.save_state(state_file)
         self._state_step+=1

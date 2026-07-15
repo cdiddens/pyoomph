@@ -119,7 +119,7 @@ namespace GiNaC
     bool match(const ex &pattern, exmap &repl_lst) const override { return inherited::match(pattern, repl_lst); }
 
   protected:
-    bool match_same_type(const basic &other) const override { return true; }
+    bool match_same_type(const basic &) const override { return true; }
 
   public:
     // substitutions
@@ -153,14 +153,14 @@ namespace GiNaC
 
     // polynomial algorithms
     numeric integer_content() const override { return 1; }
-    ex smod(const numeric &xi) const override { return *this; }
+    ex smod(const numeric &) const override { return *this; }
     numeric max_coefficient() const override { return 1; }
 
     // indexed objects
     exvector get_free_indices() const override { return exvector(); }
     ex add_indexed(const ex &self, const ex &other) const override { return self + other; }
     ex scalar_mul_indexed(const ex &self, const numeric &other) const override { return self * ex(other); }
-    bool contract_with(exvector::iterator self, exvector::iterator other, exvector &v) const override { return false; }
+    bool contract_with(exvector::iterator , exvector::iterator , exvector &) const override { return false; }
 
     // noncommutativity
     unsigned return_type() const override { return return_types::commutative; }

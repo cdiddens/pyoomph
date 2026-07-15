@@ -128,7 +128,7 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 
 	// A 2d quad edge only has 2 nodes, hence only 2 possible orderings: return whichever
 	// ordering makes new_facet's first node coincide with for_orientation's first node.
-	std::vector<unsigned> MeshTemplateQMacroElement2::find_permutation(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation)
+	std::vector<unsigned> MeshTemplateQMacroElement2::find_permutation(const unsigned &, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation)
 	{
 		if (new_facet->nodeinds[0] == for_orientation->nodeinds[0])
 		{
@@ -176,7 +176,7 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 	}
 
 	// Same 2-node edge-orientation logic as MeshTemplateQMacroElement2::find_permutation, for the triangular macro element.
-	std::vector<unsigned> MeshTemplateTMacroElement2::find_permutation(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation)
+	std::vector<unsigned> MeshTemplateTMacroElement2::find_permutation(const unsigned &, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation)
 	{
 		if (new_facet->nodeinds[0] == for_orientation->nodeinds[0])
 		{
@@ -224,7 +224,7 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 	// A 3d brick face has 4 nodes and its node order relative to the element isn't fixed a
 	// priori, so brute-force search over all 4! permutations for the one under which
 	// for_orientation's nodes (reordered by perm) match new_facet's node order.
-	std::vector<unsigned> MeshTemplateQMacroElement3::find_permutation(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation)
+	std::vector<unsigned> MeshTemplateQMacroElement3::find_permutation(const unsigned &, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation)
 	{
 		std::vector<unsigned> perm(4);
 		for (unsigned int i = 0; i < 4; i++)
@@ -2568,7 +2568,7 @@ Index : Local coordinates (s0,s1,s2)
 
 	// TODO: not yet implemented -- intended to reconstruct curved entities from the string
 	// representation produced by get_information_string().
-	std::map<int, MeshTemplateCurvedEntity *> MeshTemplateCurvedEntity::load_from_strings(const std::vector<std::string> &s, size_t &currline)
+	std::map<int, MeshTemplateCurvedEntity *> MeshTemplateCurvedEntity::load_from_strings(const std::vector<std::string> &, size_t &)
 	{
 		throw_runtime_error("IMPLEM");
 		return std::map<int, MeshTemplateCurvedEntity *>();
@@ -2667,7 +2667,7 @@ Index : Local coordinates (s0,s1,s2)
 	}
 
 	// Trivial forward map: just evaluate the spline at parameter[0].
-	void CurvedEntityCatmullRomSpline::parametric_to_position(const unsigned &t, const std::vector<double> &parametric, std::vector<double> &position)
+	void CurvedEntityCatmullRomSpline::parametric_to_position(const unsigned &, const std::vector<double> &parametric, std::vector<double> &position)
 	{
 		interpolate(parametric[0], position);
 	}

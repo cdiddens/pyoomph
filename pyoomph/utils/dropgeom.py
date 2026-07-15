@@ -25,7 +25,7 @@
 #
 # ========================================================================
  
-from pyoomph._pyoomph_core import Expression
+from .._pyoomph_core import Expression
 import numpy
 from ..output.meshio import IntegralObservableOutput
 from ..typings import List

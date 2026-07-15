@@ -37,7 +37,7 @@ from ..expressions.units import degree
 
 
 if TYPE_CHECKING:
-    from pyoomph._pyoomph_core import Node
+    from .._pyoomph_core import Node
     from ..solvers.generic import GenericEigenSolver
     from ..generic.codegen import EquationTree
     from ..materials.generic import AnyFluidProperties,PureLiquidProperties,PureGasProperties,MixtureLiquidProperties,MixtureGasProperties

@@ -148,3 +148,25 @@ before-all = [
 # supply yourself, or skip Windows wheels for now and document a
 # from-source / WSL install path instead.
 config-settings = { "cmake.define.PYOOMPH_DOWNLOAD_CLN" = "OFF", "cmake.define.PYOOMPH_DOWNLOAD_GINAC" = "OFF", "cmake.define.PYOOMPH_USE_MPI" = "OFF", "cmake.define.PYOOMPH_PARANOID" = "OFF" }
+
+# Baseline config only (no strict/disallow_untyped_defs): the codebase
+# currently has a sizeable pre-existing type-error backlog, so this isn't
+# a CI gate yet, just a shared, reproducible way to invoke `mypy pyoomph`
+# / `pyright` from the repo root (needed so both tools resolve the
+# `_pyoomph-stubs` PEP 561 stub-only package for the compiled extension).
+[tool.mypy]
+python_version = "3.12"
+files = ["pyoomph"]
+ignore_missing_imports = true
+
+[tool.pyright]
+include = ["pyoomph"]
+exclude = ["**/__pycache__"]
+pythonVersion = "3.12"
+# pyoomph._pyoomph_core is a compiled pybind11 extension: the repo tree only
+# ships its .pyi stub (pyoomph/_pyoomph_core.pyi), while the matching .so
+# lives wherever pyoomph was actually built/installed (e.g. site-packages
+# for an editable install merged into pyoomph.__path__). pyright can't see
+# that second path entry, so it always reports the stub as sourceless here
+# even though the import resolves fine at runtime.
+reportMissingModuleSource = "none"

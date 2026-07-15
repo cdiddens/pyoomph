@@ -26,7 +26,7 @@
 # ========================================================================
  
 
-import pyoomph._pyoomph_core as _pyoomph
+from .. import _pyoomph_core as _pyoomph
 from .generic import *
 
 from ..typings import *
@@ -1085,7 +1085,7 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
                 res.append( diff(arg,self.phi) / dcoords[0])
             else:
                 res.append(0)
-        import pyoomph._pyoomph_core as _pyoomph
+        from .. import _pyoomph_core as _pyoomph
         if not lagrangian:
             mm=_pyoomph.GiNaC_EvalFlag("moving_mesh")
             x=dcoords[0]
@@ -1494,7 +1494,7 @@ class BaseDifferentialGeometryCoordinateSystem(BaseCoordinateSystem):
 	# The following functions usually do not need any overriding
  
     def substitute_values_for_additional_local_coordinates(self,expr:Expression)->Expression:
-        import pyoomph._pyoomph_core as _pyoomph
+        from .. import _pyoomph_core as _pyoomph
         for k,v in self._values_to_substitute.items():
             expr=_pyoomph.GiNaC_SymSubs(expr,k,v)
         return expr 
@@ -1503,7 +1503,7 @@ class BaseDifferentialGeometryCoordinateSystem(BaseCoordinateSystem):
         """Add a new local coordinate to the coordinate system. This can be e.g. phi in an axisymmetric coordinate system
 
         """
-        import pyoomph._pyoomph_core as _pyoomph
+        from .. import _pyoomph_core as _pyoomph
         res_symb=_pyoomph.GiNaC_new_symbol(name)
         self.additional_local_coordinates.append(res_symb)
         if value_to_substitute is not None:

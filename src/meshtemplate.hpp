@@ -113,13 +113,13 @@ namespace pyoomph
     static std::map<int, MeshTemplateCurvedEntity *> load_from_strings(const std::vector<std::string> &s, size_t &currline);
     virtual unsigned get_parametric_dimension() const { return dim; }
     // Map a parametric coordinate to the Eulerian position at time level t (t=0 is current).
-    virtual void parametric_to_position(const unsigned &t, const std::vector<double> &parametric, std::vector<double> &position) { throw_runtime_error("Empty parametric_to_position called"); }
+    virtual void parametric_to_position(const unsigned &, const std::vector<double> &, std::vector<double> &) { throw_runtime_error("Empty parametric_to_position called"); }
     // Inverse of parametric_to_position: find the parametric coordinate of a given Eulerian position.
-    virtual void position_to_parametric(const unsigned &t, const std::vector<double> &position, std::vector<double> &parametric) { throw_runtime_error("Empty position_to_parametric called"); };
+    virtual void position_to_parametric(const unsigned &, const std::vector<double> &, std::vector<double> &) { throw_runtime_error("Empty position_to_parametric called"); };
     // Given the parametric coordinates of two points that should be connected along the
     // curve, adjust them (in place) to resolve the periodic wrap-around ambiguity, e.g. for
     // an angle parametrization where +pi and -pi refer to the same point.
-    virtual void apply_periodicity(std::vector<std::vector<double>> &parametric){};
+    virtual void apply_periodicity(std::vector<std::vector<double>> &){};
     // Serialize the entity's defining geometric data to a string (used for caching/reloading meshes).
     virtual std::string get_information_string() { throw_runtime_error("Please implement get_information_string"); }
   };
@@ -140,13 +140,13 @@ namespace pyoomph
         radius += (startpt[i] - center[i]) * (startpt[i] - center[i]);
       radius = sqrt(radius);
     }
-    virtual void parametric_to_position(const unsigned &t, const std::vector<double> &parametric, std::vector<double> &position)
+    virtual void parametric_to_position(const unsigned &, const std::vector<double> &parametric, std::vector<double> &position)
     {
       position = center;
       position[0] += radius * cos(parametric[0]);
       position[1] += radius * sin(parametric[0]);
     }
-    virtual void position_to_parametric(const unsigned &t, const std::vector<double> &position, std::vector<double> &parametric)
+    virtual void position_to_parametric(const unsigned &, const std::vector<double> &position, std::vector<double> &parametric)
     {
       parametric[0] = atan2(position[1] - center[1], position[0] - center[0]);
     };
@@ -245,7 +245,7 @@ namespace pyoomph
          throw_runtime_error("Bllla");
       */
     }
-    virtual void parametric_to_position(const unsigned &t, const std::vector<double> &parametric, std::vector<double> &position)
+    virtual void parametric_to_position(const unsigned &, const std::vector<double> &parametric, std::vector<double> &position)
     {
       position = center;
       for (unsigned int i = 0; i < 3; i++)
@@ -254,7 +254,7 @@ namespace pyoomph
       }
       std::cout << " CYL PARAM TO POS " << parametric[0] << "  " << parametric[1] << "  leads to " << position[0] << "  " << position[1] << "  " << position[2] << std::endl;
     }
-    virtual void position_to_parametric(const unsigned &t, const std::vector<double> &position, std::vector<double> &parametric)
+    virtual void position_to_parametric(const unsigned &, const std::vector<double> &position, std::vector<double> &parametric)
     {
       parametric[1] = 0.0;
       double x = 0.0, y = 0.0;
@@ -334,7 +334,7 @@ namespace pyoomph
       for (unsigned int i = 0; i < 3; i++)
         std::cout << normal[i] << "  " << tangent[i] << "  " << cotangent[i] << std::endl;
     }
-    virtual void parametric_to_position(const unsigned &t, const std::vector<double> &parametric, std::vector<double> &position)
+    virtual void parametric_to_position(const unsigned &, const std::vector<double> &parametric, std::vector<double> &position)
     {
       position = center;
       double theta = parametric[0];
@@ -377,7 +377,7 @@ namespace pyoomph
         std::cout << "TEST FOR pos->par->pos " << i << "  " << position[i] << " vs " << testpos[i] << std::endl;
       }
     };
-    virtual void apply_periodicity(std::vector<std::vector<double>> &parametric){
+    virtual void apply_periodicity(std::vector<std::vector<double>> &){
         // TODO:; SHoukld not be required
     };
   };
@@ -536,12 +536,12 @@ namespace pyoomph
     virtual unsigned int get_nnode_C2TB() const {return 0;}
     virtual unsigned int get_node_index_C2TB(const unsigned int &i) const {return node_indices[i];}    
     virtual unsigned int nodal_dimension() const = 0;
-    virtual MeshTemplateElement *convert_for_C2_space(MeshTemplate *templ) { return NULL; }
-    virtual MeshTemplateElement *convert_for_C1TB_space(MeshTemplate *templ) { return NULL; }    
+    virtual MeshTemplateElement *convert_for_C2_space(MeshTemplate *) { return NULL; }
+    virtual MeshTemplateElement *convert_for_C1TB_space(MeshTemplate *) { return NULL; }    
     MeshTemplateElement(int geomtyp) : geometric_type(geomtyp) {}
     virtual ~MeshTemplateElement() = default;
     virtual unsigned nfacets() { return 0; }
-    virtual MeshTemplateFacet *construct_facet(unsigned i)
+    virtual MeshTemplateFacet *construct_facet(unsigned )
     {
       throw_runtime_error("Cannot costruct facets for this element");
       return NULL;
@@ -555,9 +555,9 @@ namespace pyoomph
   public:
     MeshTemplateElementPoint(const nodeindex_t &n1);
     unsigned int get_nnode_C1() const { return 1; }
-    unsigned int get_node_index_C1(const unsigned int &i) const { return 0; }
+    unsigned int get_node_index_C1(const unsigned int &) const { return 0; }
     unsigned int get_nnode_C2() const { return 1; }
-    unsigned int get_node_index_C2(const unsigned int &i) const { return 0; }
+    unsigned int get_node_index_C2(const unsigned int &) const { return 0; }
     unsigned int nodal_dimension() const { return 0; }
     virtual unsigned nfacets() { return 0; }
   };
@@ -571,7 +571,7 @@ namespace pyoomph
     unsigned int get_nnode_C1() const { return 2; }
     unsigned int get_node_index_C1(const unsigned int &i) const { return i; }
     unsigned int get_nnode_C2() const { return 0; }
-    unsigned int get_node_index_C2(const unsigned int &i) const { return -1; }
+    unsigned int get_node_index_C2(const unsigned int &) const { return -1; }
     unsigned int nodal_dimension() const { return 1; }
     virtual MeshTemplateElement *convert_for_C2_space(MeshTemplate *templ);
     virtual unsigned nfacets() { return 2; }
@@ -602,7 +602,7 @@ namespace pyoomph
     unsigned int get_nnode_C1() const { return 4; }
     unsigned int get_node_index_C1(const unsigned int &i) const { return node_indices[i]; }
     unsigned int get_nnode_C2() const { return 0; }
-    unsigned int get_node_index_C2(const unsigned int &i) const { return -1; }
+    unsigned int get_node_index_C2(const unsigned int &) const { return -1; }
     unsigned int nodal_dimension() const { return 2; }
     virtual MeshTemplateElement *convert_for_C2_space(MeshTemplate *templ);
     virtual unsigned nfacets() { return 4; }
@@ -634,7 +634,7 @@ namespace pyoomph
     unsigned int get_nnode_C1() const { return 3; }
     unsigned int get_node_index_C1(const unsigned int &i) const { return node_indices[i]; }
     unsigned int get_nnode_C2() const { return 0; }
-    unsigned int get_node_index_C2(const unsigned int &i) const { return -1; }
+    unsigned int get_node_index_C2(const unsigned int &) const { return -1; }
     unsigned int nodal_dimension() const { return 2; }
     virtual MeshTemplateElement *convert_for_C1TB_space(MeshTemplate *templ);    
     virtual MeshTemplateElement *convert_for_C2_space(MeshTemplate *templ);
@@ -694,7 +694,7 @@ namespace pyoomph
     unsigned int get_nnode_C1() const { return 8; }
     unsigned int get_node_index_C1(const unsigned int &i) const { return node_indices[i]; }
     unsigned int get_nnode_C2() const { return 0; }
-    unsigned int get_node_index_C2(const unsigned int &i) const { return -1; }
+    unsigned int get_node_index_C2(const unsigned int &) const { return -1; }
     unsigned int nodal_dimension() const { return 3; }
     virtual unsigned nfacets() { return 6; }
     virtual MeshTemplateElement *convert_for_C2_space(MeshTemplate *templ);
@@ -726,7 +726,7 @@ namespace pyoomph
     unsigned int get_nnode_C1() const { return 4; }
     unsigned int get_node_index_C1(const unsigned int &i) const { return node_indices[i]; }
     unsigned int get_nnode_C2() const { return 0; }
-    unsigned int get_node_index_C2(const unsigned int &i) const { return -1; }
+    unsigned int get_node_index_C2(const unsigned int &) const { return -1; }
     unsigned int nodal_dimension() const { return 3; }
     virtual unsigned nfacets() { return 4; }
     virtual MeshTemplateElement *convert_for_C2_space(MeshTemplate *templ);
@@ -783,7 +783,7 @@ namespace pyoomph
     unsigned int get_nnode_C1() const { return 6; } // It has 6 nodes in total
     unsigned int get_node_index_C1(const unsigned int &i) const { return i; } // First order nodes are the same as the 6 nodes of the C1 element
     unsigned int get_nnode_C2() const { return 0; } // No second order nodes for the C1 element
-    unsigned int get_node_index_C2(const unsigned int &i) const { return -1; } // No second order nodes for the C1 element, all indices map to -1
+    unsigned int get_node_index_C2(const unsigned int &) const { return -1; } // No second order nodes for the C1 element, all indices map to -1
     unsigned int nodal_dimension() const { return 3; } // Wedge is a 3D element
     virtual unsigned nfacets() { return 5; } // How many facets does a wedge have? 2 triangles and 3 quadrilaterals, so 5 in total
     virtual MeshTemplateFacet *construct_facet(unsigned i); // Construct the facet for the i-th facet of the wedge
@@ -797,7 +797,7 @@ namespace pyoomph
   public:
     MeshTemplateElementWedgeC2(std::vector<nodeindex_t> ninds);
     unsigned int get_nnode_C1() const { return 6; }
-    unsigned int get_node_index_C1(const unsigned int &i) const { throw_runtime_error("TODO"); return -1; }
+    unsigned int get_node_index_C1(const unsigned int &) const { throw_runtime_error("TODO"); return -1; }
     unsigned int get_nnode_C2() const { return 18; }
     unsigned int get_node_index_C2(const unsigned int &i) const { return i; }
     unsigned int nodal_dimension() const { return 3; }
@@ -815,7 +815,7 @@ namespace pyoomph
     unsigned int get_nnode_C1() const { return 5; } // It has 5 nodes in total
     unsigned int get_node_index_C1(const unsigned int &i) const { return i; } // First order nodes are the same as the 5 nodes of the C1 element
     unsigned int get_nnode_C2() const { return 0; } // No second order nodes for the C1 element
-    unsigned int get_node_index_C2(const unsigned int &i) const { return -1; } // No second order nodes for the C1 element, all indices map to -1
+    unsigned int get_node_index_C2(const unsigned int &) const { return -1; } // No second order nodes for the C1 element, all indices map to -1
     unsigned int nodal_dimension() const { return 3; } // Pyramid is a 3D element
     virtual unsigned nfacets() { return 5; } // How many facets does a pyramid have? 
     virtual MeshTemplateFacet *construct_facet(unsigned i); // Construct the facet for the i-th facet of the pyramid
@@ -828,7 +828,7 @@ namespace pyoomph
   public:    
     MeshTemplateElementPyramidC2(std::vector<nodeindex_t> ninds);
     unsigned int get_nnode_C1() const { return 5; }
-    unsigned int get_node_index_C1(const unsigned int &i) const { throw_runtime_error("TODO"); return -1; }
+    unsigned int get_node_index_C1(const unsigned int &) const { throw_runtime_error("TODO"); return -1; }
     unsigned int get_nnode_C2() const { return 14; } 
     unsigned int get_node_index_C2(const unsigned int &i) const { return i; }
     unsigned int nodal_dimension() const { return 3; }
@@ -1003,7 +1003,7 @@ namespace pyoomph
     int get_dimension() const { return dim; }
     Problem *get_problem() { return problem; }
 
-    virtual void _add_opposite_interface_connection(const std::string &sideA, const std::string &sideB) {} // Implemented in Python
+    virtual void _add_opposite_interface_connection(const std::string &, const std::string &) {} // Implemented in Python
   };
 
 }

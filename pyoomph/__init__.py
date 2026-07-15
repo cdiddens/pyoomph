@@ -50,7 +50,7 @@ from .meshes.meshdatacache import MeshDataEigenModes #type:ignore
 
 from .typings import *
 
-import pyoomph._pyoomph_core as _pyoomph
+from . import _pyoomph_core as _pyoomph
 
 _pyoomph.set_jit_include_dir(os.path.join(os.path.dirname(os.path.abspath(__file__)), "jitbridge"))
 

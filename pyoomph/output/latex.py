@@ -25,7 +25,7 @@
 #
 # ========================================================================
  
-import pyoomph._pyoomph_core as _pyoomph
+from .. import _pyoomph_core as _pyoomph
 
 class LaTeXEquationTreeNode:
     def __init__(self,parent,name):

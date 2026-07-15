@@ -33,7 +33,7 @@ from ..typings import *
 import numpy
 
 
-import pyoomph._pyoomph_core as _pyoomph
+from .. import _pyoomph_core as _pyoomph
 
 from .gmsh import GmshTemplate, Point, Line,Spline
 from .mesh import MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d,MeshTemplate
@@ -587,7 +587,7 @@ class RemeshableGmshTemplate2d(GmshTemplate):
         """
         if self.is_first_time():
             raise RuntimeError("Cannot get boundary coordinates before the first mesh is generated")
-        data=self.get_problem().get_cached_mesh_data(name,nondimensional=nondimensional)
+        data=self.get_problem().get_cached_mesh_data(name,nondimensional=True)
         pts=data.get_coordinates()
         segs,_=data.get_interface_line_segments()
         
@@ -609,6 +609,8 @@ class RemeshableGmshTemplate2d(GmshTemplate):
             segs=sorted(segs,key=lambda s: (pts[0,s[0]]-stp[0])**2+(pts[1,s[0]]-stp[1])**2 )
         
         res=[]
+        
+        SS=1 if nondimensional else self.get_problem().get_scaling("spatial")        
         for seg in segs:
-            res.append([(pts[0,i],pts[1,i]) for i in seg])
+            res.append([(pts[0,i]*SS,pts[1,i]*SS) for i in seg])
         return res

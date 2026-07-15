@@ -170,6 +170,10 @@ namespace oomph
     /// Copy constructor
     Vector(const Vector<_Tp>& __x) : std::vector<_Tp>(__x) {}
 
+    /// Copy assignment operator (declared explicitly alongside the copy constructor
+    /// above so the compiler doesn't have to fall back to a deprecated implicit one)
+    Vector& operator=(const Vector<_Tp>& __x) = default;
+
     // No explicit destructor is required because the base class destructor
     // handles all memory issues ~Vector() {}
 

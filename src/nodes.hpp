@@ -39,7 +39,7 @@ namespace pyoomph
     AdditionalDofConstraintMode mode; // Mode, e.g. what to do with this
     unsigned index; // Index, if mode==CONTINUOUS_BASE_DOF_CONSTRAIN_TO_C1, it indicates a value index, if mode==INTERFACE_DOF_CONSTRAIN_TO_C1, it indicates an interface id, if mode==POSITION_CONSTRAIN_TO_C1, it indicates a coordinate index
     AdditionalDofConstrainingInfo *next; // Next in linked list
-    AdditionalDofConstrainingInfo(unsigned index, AdditionalDofConstraintMode mode) : index(index), mode(mode), next(NULL) {}
+    AdditionalDofConstrainingInfo(unsigned index, AdditionalDofConstraintMode mode) : mode(mode), index(index), next(NULL) {}
   };
 
   class Problem;

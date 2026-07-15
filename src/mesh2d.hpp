@@ -40,7 +40,7 @@ namespace pyoomph
 
     DynamicQuadTreeForest(oomph::Vector<oomph::TreeRoot *> &trees_pt);
 
-    DynamicQuadTreeForest(const DynamicQuadTreeForest &dummy)
+    DynamicQuadTreeForest(const DynamicQuadTreeForest &) : oomph::QuadTreeForest()
     {
       oomph::BrokenCopy::broken_copy("DynamicQuadTreeForest");
     }
@@ -133,7 +133,7 @@ namespace pyoomph
     }
 
     /// Broken copy constructor
-    TemplatedMeshBase2d(const TemplatedMeshBase2d &dummy) : pyoomph::Mesh(), TemplatedMeshBase()
+    TemplatedMeshBase2d(const TemplatedMeshBase2d &) : oomph::Mesh(), pyoomph::Mesh(), TemplatedMeshBase()
     {
       oomph::BrokenCopy::broken_copy("TemplatedMeshBase2d");
     }

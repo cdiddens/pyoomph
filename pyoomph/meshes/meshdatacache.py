@@ -25,7 +25,7 @@
 #
 # ========================================================================
  
-import pyoomph._pyoomph_core as _pyoomph
+from .. import _pyoomph_core as _pyoomph
 from ..typings import *
 import numpy
 
@@ -948,14 +948,14 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
                             hexinds+=[mp(eis[0], offs+i), mp(eis[1], offs +i)] #type:ignore
                         new_elem_indices.append(hexinds) #type:ignore
                         new_elem_types.append(11) #type:ignore
-                elemental_phi_row=numpy.linspace(0,self.angle,upper_limit//phi_increm,endpoint=not closed)+self.start_angle  
+                elemental_phi_row=numpy.linspace(0,2*numpy.pi,upper_limit//phi_increm,endpoint=True)+self.phase  
                 elemental_phi_row+=elemental_phi_row[-1]/(2*len(elemental_phi_row))
             elif elemtype==3 or elemtype==66: # Tri3 -> Tetras
                 for offs in range(0, upper_limit, phi_increm):
                         # TODO: Special tetra at center
                         new_elem_indices.append([mp(eis[0], offs+1),mp(eis[1], offs+1),mp(eis[2], offs+1),mp(eis[0],offs),mp(eis[1],offs),mp(eis[2], offs)]) #type:ignore
                         new_elem_types+=[7] #type:ignore
-                elemental_phi_row=numpy.linspace(0,self.angle,upper_limit//phi_increm,endpoint=not closed)+self.start_angle  
+                elemental_phi_row=numpy.linspace(0,2*numpy.pi,upper_limit//phi_increm,endpoint=True)+self.phase  
                 elemental_phi_row+=elemental_phi_row[-1]/(2*len(elemental_phi_row))
             elif elemtype==9 or elemtype==99:
                 for offs in range(0, upper_limit, phi_increm):

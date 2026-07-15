@@ -398,7 +398,7 @@ namespace pyoomph
     int resolve_parameter_value_ptr(double *ptr); // Finds the global index of the parameter whose value() address equals ptr, or -1
 
     // const bool has_field(const std::string & name)  {return fields_by_name.count(name)>0;}
-    const bool has_global_parameter(const std::string &name) { return global_params_by_name.count(name) > 0; }
+    bool has_global_parameter(const std::string &name) { return global_params_by_name.count(name) > 0; }
     std::set<std::string> get_global_parameter_names()
     {
       std::set<std::string> res;
@@ -443,8 +443,8 @@ namespace pyoomph
     }
 
     // Expose these to be public
-    virtual void actions_after_change_in_global_parameter(const std::string &  paramname) {}
-    virtual void actions_after_parameter_increase(const  std::string &  paramname) {}
+    virtual void actions_after_change_in_global_parameter(const std::string &  ) {}
+    virtual void actions_after_parameter_increase(const  std::string &  ) {}
     virtual void actions_after_change_in_bifurcation_parameter() {}
     virtual void actions_before_newton_convergence_check() {}
 
@@ -499,7 +499,7 @@ namespace pyoomph
 
     // Must be overridden (in Python) whenever use_custom_residual_jacobian is set: fills info with
     // user-supplied residuals/Jacobian instead of relying on elemental assembly.
-    virtual void  get_custom_residuals_jacobian(CustomResJacInformation * info)
+    virtual void  get_custom_residuals_jacobian(CustomResJacInformation * )
     {
      throw_runtime_error("Must be implemented");
     }

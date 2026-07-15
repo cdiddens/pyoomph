@@ -62,14 +62,14 @@ namespace pyoomph
       diff_parent = parent;
       diff_index = index;
     }
-    virtual double _call(double *args, unsigned int nargs) { return 0.0; } // Numerically evaluate the callback (overridden by the Python binding to dispatch to the Python eval() method)
+    virtual double _call(double *, unsigned int ) { return 0.0; } // Numerically evaluate the callback (overridden by the Python binding to dispatch to the Python eval() method)
     int get_jit_index() { return jit_index; }
     unsigned get_unique_id() { return unique_id; }
-    virtual GiNaC::ex outer_derivative(const GiNaC::ex arglist, int index) { return 0; }         // Symbolic derivative of the function call w.r.t. its "index"-th argument, given the (already substituted) argument list
-    virtual GiNaC::ex real_part(GiNaC::ex invok, std::vector<GiNaC::ex> arglist) { return 0; }    // Symbolic real part of an invocation of this function (for complex-valued usage)
-    virtual GiNaC::ex imag_part(GiNaC::ex invok, std::vector<GiNaC::ex> arglist) { return 0; }    // Symbolic imaginary part of an invocation of this function
+    virtual GiNaC::ex outer_derivative(const GiNaC::ex , int ) { return 0; }         // Symbolic derivative of the function call w.r.t. its "index"-th argument, given the (already substituted) argument list
+    virtual GiNaC::ex real_part(GiNaC::ex , std::vector<GiNaC::ex> ) { return 0; }    // Symbolic real part of an invocation of this function (for complex-valued usage)
+    virtual GiNaC::ex imag_part(GiNaC::ex , std::vector<GiNaC::ex> ) { return 0; }    // Symbolic imaginary part of an invocation of this function
     virtual std::string get_id_name() { return "unknown cb"; }         // Human-readable identifier, used e.g. in generated code and error messages
-    virtual GiNaC::ex get_argument_unit(unsigned int i) { return 1; }  // Physical unit expected for the i-th argument (arguments are nondimensionalized by this before the callback is invoked)
+    virtual GiNaC::ex get_argument_unit(unsigned int ) { return 1; }  // Physical unit expected for the i-th argument (arguments are nondimensionalized by this before the callback is invoked)
     virtual GiNaC::ex get_result_unit() { return 1; }                  // Physical unit of the callback's return value (the numeric result is rescaled by this)
   };
 
@@ -99,8 +99,8 @@ namespace pyoomph
     CustomMultiReturnExpressionBase() : unique_id(unique_counter++), debug_c_code_epsilon(-1.0) {}
     virtual std::string get_id_name() { return "unknown multi-ret cb"; }
     virtual std::string _get_c_code() { return ""; } // Optionally return literal C code implementing this function directly (inlined at code generation instead of calling back into Python); empty means no C code present
-    virtual void _call(int flag, double *args, unsigned int nargs, double *res, unsigned int nres, double *derivs) { throw_runtime_error("Should not end up here"); } // Numerically evaluate; if flag is set, also fill the nres x nargs derivative matrix
-    virtual std::pair<bool, GiNaC::ex> _get_symbolic_derivative(const std::vector<GiNaC::ex> &arg_list, const int &i_res, const int &j_arg) { return std::make_pair(false, 0); } // Optionally provide an analytic symbolic derivative of result i_res w.r.t. argument j_arg (first=false means "not available", fall back to numerical differentiation)
+    virtual void _call(int , double *, unsigned int , double *, unsigned int , double *) { throw_runtime_error("Should not end up here"); } // Numerically evaluate; if flag is set, also fill the nres x nargs derivative matrix
+    virtual std::pair<bool, GiNaC::ex> _get_symbolic_derivative(const std::vector<GiNaC::ex> &, const int &, const int &) { return std::make_pair(false, 0); } // Optionally provide an analytic symbolic derivative of result i_res w.r.t. argument j_arg (first=false means "not available", fall back to numerical differentiation)
   };
 
   // Thin pointer wrapper so a CustomMultiReturnExpressionBase* can be embedded as a GiNaC leaf
@@ -177,23 +177,23 @@ namespace pyoomph
   public:
     CustomCoordinateSystem() {}
     virtual ~CustomCoordinateSystem() {}
-    virtual int vector_gradient_dimension(unsigned int basedim, bool lagrangian) { return basedim; } // Number of components of the gradient of a vector field in this coordinate system (may differ from basedim, e.g. when azimuthal derivatives add an extra component)
+    virtual int vector_gradient_dimension(unsigned int basedim, bool ) { return basedim; } // Number of components of the gradient of a vector field in this coordinate system (may differ from basedim, e.g. when azimuthal derivatives add an extra component)
     // f: expression to differentiate; dim: nodal/physical dimension (or -1 if not fixed); edim: element (local) dimension; flags: bitmask of expansion options (e.g. whether to attach dimensional prefactors)
-    virtual GiNaC::ex grad(const GiNaC::ex &f, int dim, int edim, int flags) { throw_runtime_error("grad not implemented for this coordinate system"); }
-    virtual GiNaC::ex directional_derivative(const GiNaC::ex &f, const GiNaC::ex &d, int dim, int edim, int flags) { throw_runtime_error("directional derivative not implemented for this coordinate system"); }
+    virtual GiNaC::ex grad(const GiNaC::ex &, int , int , int ) { throw_runtime_error("grad not implemented for this coordinate system"); }
+    virtual GiNaC::ex directional_derivative(const GiNaC::ex &, const GiNaC::ex &, int , int , int ) { throw_runtime_error("directional derivative not implemented for this coordinate system"); }
 
     // Generic hook for coordinate-system-specific weak-form contributions that cannot be expressed via grad/div alone
     // (e.g. extra curvature terms); funcname identifies which high-level operator requested the contribution
-    virtual GiNaC::ex general_weak_differential_contribution(std::string funcname, std::vector<GiNaC::ex> lhs, GiNaC::ex rhs, int dim, int edim, int flags)
+    virtual GiNaC::ex general_weak_differential_contribution(std::string , std::vector<GiNaC::ex> , GiNaC::ex , int , int , int )
     {
       throw_runtime_error("general_weak_differential_contribution not implemented for this coordinate system");
     }
-    virtual GiNaC::ex div(const GiNaC::ex &v, int dim, int edim, int flags) { throw_runtime_error("div not implemented for this coordinate system"); }
+    virtual GiNaC::ex div(const GiNaC::ex &, int , int , int ) { throw_runtime_error("div not implemented for this coordinate system"); }
     virtual GiNaC::ex geometric_jacobian() { return 1.0; }          // Extra metric-determinant factor (e.g. r in cylindrical coordinates) multiplying the integration measure
     virtual GiNaC::ex jacobian_for_element_size() { return 1.0; }   // Jacobian factor used specifically when computing an element's physical size (may differ from geometric_jacobian)
     virtual std::string get_id_name() { return "<unknown coordinate system>"; }
     // Hook allowing the coordinate system to modify how a field/test function is expanded for a given expansion mode (e.g. Fourier/azimuthal mode decomposition); expr is the yet-unexpanded expression, where gives the calling context
-    virtual GiNaC::ex get_mode_expansion_of_var_or_test(pyoomph::FiniteElementCode *mycode, std::string fieldname, bool is_field, bool is_dim, GiNaC::ex expr, std::string where, int expansion_mode) { return expr; }
+    virtual GiNaC::ex get_mode_expansion_of_var_or_test(pyoomph::FiniteElementCode *, std::string , bool , bool , GiNaC::ex expr, std::string , int ) { return expr; }
   };
 
   // Thin pointer wrapper so a CustomCoordinateSystem* can be embedded as a GiNaC leaf and passed as an argument to grad/div/...

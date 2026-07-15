@@ -32,7 +32,7 @@ import time
 
 if TYPE_CHECKING:
     from .problem import Problem
-    import pyoomph._pyoomph_core as _pyoomph
+    from .. import _pyoomph_core as _pyoomph
 
 class CustomAssemblyBase:    
     def __init__(self) -> None:

@@ -32,7 +32,7 @@ no_mpi_file=pathlib.Path(__file__).parent.parent.joinpath("NO_MPI").resolve()
 
 if no_mpi_file.exists():
 	import sys
-	import pyoomph._pyoomph_core as _pyoomph
+	from .. import _pyoomph_core as _pyoomph
 	_pyoomph.InitMPI(sys.argv)
 	
 	def has_mpi():
@@ -53,7 +53,7 @@ else:
 	from mpi4py import MPI #type:ignore
 	import sys
 
-	import pyoomph._pyoomph_core as _pyoomph
+	from .. import _pyoomph_core as _pyoomph
 
 	_pyoomph.InitMPI(sys.argv)
 

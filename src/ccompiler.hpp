@@ -93,7 +93,7 @@ namespace pyoomph
   protected:
   public:
     virtual bool compile_to_memory() { return false; }
-    virtual bool compile(bool suppress_compilation, bool suppress_code_writing, bool quiet, const std::vector<std::string> &extra_flags) { return false; }
+    virtual bool compile(bool , bool , bool , const std::vector<std::string> &) { return false; }
   };
 
 }

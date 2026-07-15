@@ -28,7 +28,7 @@
 from doctest import master
 from os import path
 import re
-import pyoomph._pyoomph_core as _pyoomph
+from .. import _pyoomph_core as _pyoomph
 from ..typings import Optional
 
 from ..meshes.mesh import assert_spatial_mesh,InterfaceMesh,ODEStorageMesh
@@ -1248,6 +1248,12 @@ class BaseEquations(_pyoomph.Equations):
         master = self._get_combined_element()
         cg = master._assert_codegen()
         return cg
+
+    @overload
+    def get_equation_of_type(self, typ:Type["BaseEquations"], *, exact_type:bool=False,always_as_list:Literal[True])->List["BaseEquations"]: ...
+
+    @overload
+    def get_equation_of_type(self, typ:Type["BaseEquations"], *, exact_type:bool=False,always_as_list:Literal[False]=False)->Optional["BaseEquations"]: ...
 
     def get_equation_of_type(self, typ:Type["BaseEquations"], *, exact_type:bool=False,always_as_list:bool=False)->Union[List["BaseEquations"],"BaseEquations",None]:
         if exact_type:
@@ -2657,11 +2663,17 @@ class CombinedEquations(Equations):
             e._set_final_element(self)
 
 
+    @overload
+    def get_equation_of_type(self, typ:Type[BaseEquations], *, exact_type:bool=False,always_as_list:Literal[True])->List["BaseEquations"]: ...
+
+    @overload
+    def get_equation_of_type(self, typ:Type[BaseEquations], *, exact_type:bool=False,always_as_list:Literal[False]=False)->Optional["BaseEquations"]: ...
+
     def get_equation_of_type(self, typ:Type[BaseEquations], *, exact_type:bool=False,always_as_list:bool=False)->Union[List["BaseEquations"],"BaseEquations",None]:
         res:Optional[List["BaseEquations"]] = None
         for e in self._subelements:
             if isinstance(e, BaseEquations): #type:ignore
-                localL = e.get_equation_of_type(typ, exact_type=exact_type,always_as_list=always_as_list)
+                localL = e.get_equation_of_type(typ, exact_type=exact_type,always_as_list=always_as_list) #type:ignore
                 if localL is not None:
                     if not isinstance(localL, list):
                         local = [localL]
@@ -2672,11 +2684,11 @@ class CombinedEquations(Equations):
                     elif isinstance(res, list): #type:ignore
                         res = res + local
                     else:
-                        res = [res] + local 
+                        res = [res] + local
         if isinstance(res, list) and len(res) == 1 and not always_as_list:
-            return res[0]  
+            return res[0]
         if res is None:
-            return []
+            return [] if always_as_list else None
         if always_as_list and not (isinstance(res,list)):  #type:ignore
             res=[res]
         return res

@@ -37,6 +37,7 @@ import sys
 import __main__
 
 import operator
+from typing import IO
 
 from ..typings import *
 
@@ -116,7 +117,7 @@ class SingleParallelParameterSimulation:
         self._INTERNAL_pararunner:Optional["ParallelParameterScan"]=None
         self._INTERNAL_script:Optional[str]=None
 
-    def _INTERNAL_assemble_args(self) -> Optional[List[str]]:
+    def _INTERNAL_assemble_args(self) -> List[str]:
         argnames:List[str]=[]
         for x in dir(self):
             if x[0]=="_":
@@ -187,7 +188,7 @@ class ParallelParameterScan:
         self._max_procs=max_procs   #0 means Nprocs of system
         self._single_threaded_childs=single_threaded_childs
         self._sims:List[SingleParallelParameterSimulation]=[]
-        self._donefile=None
+        self._donefile:Optional[IO[str]]=None
 
     def mark_as_done(self,sim:SingleParallelParameterSimulation,args:List[str])->None:
         if self._donefile is None:
@@ -264,8 +265,7 @@ class ParallelParameterScan:
             my_env["MKL_DOMAIN_NUM_THREADS"] = "MKL_BLAS=1, MKL_DOMAIN_PARDISO=1"
         with concurrent.futures.ThreadPoolExecutor(max_workers=self._max_procs) as executor:
             for s in self._sims:
-                args = s._INTERNAL_assemble_args()  # type: ignore
-                args: List[str] = [self._interpreter] + args
+                args = [self._interpreter] + s._INTERNAL_assemble_args()  # type: ignore
                 s._args = args  # type: ignore
                 if skip_done:
                     if self.already_done(args):

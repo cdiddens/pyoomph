@@ -519,11 +519,11 @@ class ProjectExpression(Equations):
                 raise ValueError("Unsupported field type "+self.field_type)
 
     def define_residuals(self):
-        import pyoomph.expressions.generic
+        from ..expressions.generic import weak
         for n,e in self.projs.items():
             f,ftest=var_and_test(n)
-            self.add_residual(pyoomph.expressions.generic.weak(f,testfunction(n,dimensional=False)/scale_factor(n),coordinate_system=self.coordinate_system))
-            self.add_residual(pyoomph.expressions.generic.weak(-e,testfunction(n,dimensional=False)/scale_factor(n),coordinate_system=self.coordinate_system))
+            self.add_residual(weak(f,testfunction(n,dimensional=False)/scale_factor(n),coordinate_system=self.coordinate_system))
+            self.add_residual(weak(-e,testfunction(n,dimensional=False)/scale_factor(n),coordinate_system=self.coordinate_system))
 
 class InitialCondition(BaseEquations):
     """
@@ -804,7 +804,7 @@ class ExtremumObservables(Equations):
         
 
     def add_extremum_function(self,name,expr):
-        import pyoomph._pyoomph_core as _pyoomph
+        from .. import _pyoomph_core as _pyoomph
         master = self._get_combined_element()
         cg = master._assert_codegen()
         if not (isinstance(expr,int) or isinstance(expr,float) or isinstance(expr,_pyoomph.Expression)) and  callable(expr):

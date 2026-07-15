@@ -79,7 +79,7 @@ namespace pyoomph
 	// JITShapeInfo_t, whose depth depends on which derivatives/spaces the generated code needs).
 	// The scalar overload is the recursion base case (nothing to do for a non-pointer leaf type).
 	template <typename T>
-	void my_alloc(T dest) {}
+	void my_alloc(T) {}
 
 	// Allocates a firstdim-sized array of T, then recurses on each of its elements with the
 	// remaining "extra" dimensions (if any), building up a jagged/nested array of the requested depth.
@@ -103,7 +103,7 @@ namespace pyoomph
 	}
 
 	template <typename T>
-	void my_free(T dest) {}
+	void my_free(T) {}
 
 	// Mirror of my_alloc: recursively frees a nested array previously built by my_alloc, then frees
 	// the top-level pointer itself and nulls it out.
@@ -530,8 +530,8 @@ namespace pyoomph
 								hangbuffer[l].nummaster++;
 							}
 							else
-							{							
-								for (unsigned m2 = 0; m2 < hangbuffer[l2].nummaster; m2++)
+							{
+								for (int m2 = 0; m2 < hangbuffer[l2].nummaster; m2++)
 								{
 									hangbuffer[l].masters[hangbuffer[l].nummaster].weight=hangbuffer[l2].masters[m2].weight/(double)nmaster;
 									hangbuffer[l].masters[hangbuffer[l].nummaster].local_eqn=hangbuffer[l2].masters[m2].local_eqn;
@@ -578,7 +578,7 @@ namespace pyoomph
 					}
 					else
 					{
-						for (unsigned m2 = 0; m2 < hangbuffer_pos[l2].nummaster; m2++)
+						for (int m2 = 0; m2 < hangbuffer_pos[l2].nummaster; m2++)
 						{
 							hangbuffer_pos[l_elem].masters[hangbuffer_pos[l_elem].nummaster].weight = hangbuffer_pos[l2].masters[m2].weight / (double)nmaster;
 							hangbuffer_pos[l_elem].masters[hangbuffer_pos[l_elem].nummaster].local_eqn = hangbuffer_pos[l2].masters[m2].local_eqn;
@@ -707,7 +707,7 @@ namespace pyoomph
 						}
 						else
 						{
-							for (unsigned m2 = 0; m2 < hangbuffer[l2].nummaster; m2++)
+							for (int m2 = 0; m2 < hangbuffer[l2].nummaster; m2++)
 							{
 								hangbuffer[l].masters[hangbuffer[l].nummaster].weight = hangbuffer[l2].masters[m2].weight / (double)nmaster;
 								hangbuffer[l].masters[hangbuffer[l].nummaster].local_eqn = hangbuffer[l2].masters[m2].local_eqn;
@@ -1338,7 +1338,7 @@ namespace pyoomph
 
 	// Default (unimplemented) hook; concrete element types with higher-order interpolation on
 	// faces override this to return the boundary node at the given local face index/position.
-	oomph::Node *BulkElementBase::boundary_node_pt(const int &face_index, const unsigned int index)
+	oomph::Node *BulkElementBase::boundary_node_pt(const int &, const unsigned int)
 	{
 		throw_runtime_error("Implement");
 	}
@@ -4925,7 +4925,7 @@ namespace pyoomph
 	// through every field/space in the same order fill_element_info() uses (non-hanging Pos,
 	// hanging Pos via masters, then continuous spaces, DG, DL, D0, ED0, ...), so the produced
 	// names line up with the residual/Jacobian ordering.
-	std::vector<std::string> BulkElementBase::get_dof_names(bool not_a_root_call)
+	std::vector<std::string> BulkElementBase::get_dof_names(bool)
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
 		std::vector<std::string> res(this->ndof(), "<unknown>");
@@ -5223,7 +5223,6 @@ namespace pyoomph
 		const unsigned n_dof = this->ndof();
 		oomph::Vector<double> newres(n_dof);
 		const double fd_step = this->Default_fd_jacobian_step;
-		const unsigned n_cont_values = this->ncont_interpolated_values();
 		int local_unknown = 0;
 
 		const std::vector<std::vector<unsigned>> & space_node_to_elem_node_map=this->get_nodal_space_index_to_element_index_map();
@@ -5601,7 +5600,7 @@ namespace pyoomph
 	}
 	
 	
-	void BulkElementBase::update_in_solid_position_fd(const unsigned &i) // For FD with element_sizes, we have to update the element size buffer
+	void BulkElementBase::update_in_solid_position_fd(const unsigned &) // For FD with element_sizes, we have to update the element size buffer
 	{
 	 const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
 	 if (functable->moving_nodes && (functable->shapes_required_ResJac[functable->current_res_jac].elemsize_Eulerian_cartesian || functable->shapes_required_ResJac[functable->current_res_jac].elemsize_Eulerian))
@@ -5746,7 +5745,7 @@ namespace pyoomph
 	// Number of nodal values required at every node: same for all nodes of this element type
 	// (the total number of "base bulk" field values, i.e. all continuous-space fields the code
 	// generator laid out for this element, regardless of which node index n is asked about).
-	unsigned BulkElementBase::required_nvalue(const unsigned &n) const
+	unsigned BulkElementBase::required_nvalue(const unsigned &) const
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
 		return functable->total_num_fields_basebulk;
@@ -5765,7 +5764,6 @@ namespace pyoomph
 
 	oomph::Node *BulkElementBase::construct_node(const unsigned &n, oomph::TimeStepper *const &time_stepper_pt)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
 		unsigned ntot = required_nvalue(n);
 		//		 		 std::cout << "NLAGR " <<  this->nlagrangian() << "  " << this->nnodal_lagrangian_type() << std::endl;
 		node_pt(n) = new Node(time_stepper_pt, this->nlagrangian(), this->nnodal_lagrangian_type(), this->nodal_dimension(), this->nnodal_position_type(), ntot);
@@ -5887,7 +5885,7 @@ namespace pyoomph
 	// Called by oomph-lib's tree-based mesh refinement before a son element is otherwise set up:
 	// makes sure the new (son) element has a code instance, inheriting it from its father since
 	// sons are constructed generically without going through the normal Python-driven creation.
-	void BulkElementBase::pre_build(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt)
+	void BulkElementBase::pre_build(oomph::Mesh *&, oomph::Vector<oomph::Node *> &)
 	{
 		if (!this->codeinst)
 		{
@@ -6076,7 +6074,7 @@ namespace pyoomph
 	// fields are simple averages (optionally re-scaled by discontinuous_refinement_exponents for
 	// fields that should scale differently under mesh coarsening, e.g. densities vs. totals).
 	// TODO: Split this into the particular elements
-	void BulkElementBase::rebuild_from_sons(oomph::Mesh *&mesh_pt)
+	void BulkElementBase::rebuild_from_sons(oomph::Mesh *&)
 	{
 
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
@@ -6089,8 +6087,7 @@ namespace pyoomph
 			this->set_integration_order(functable->integration_order);
 		}
 
-		// DG fields	
-		const std::vector<std::vector<unsigned>> &this_space_node_to_elem = this->get_nodal_space_index_to_element_index_map();	
+		// DG fields
 		const std::vector<std::vector<int>> & this_elem_to_space_nodal_index = this->get_element_index_to_nodal_space_index_map();
 
 		for (unsigned int i_space=0;i_space<functable->num_present_dg_spaces;i_space++)
@@ -6294,14 +6291,14 @@ namespace pyoomph
 
 	// Paraview output hooks inherited from oomph-lib are not used by pyoomph (output goes through
 	// its own VTU/plotting machinery instead); left unimplemented on purpose.
-	std::string BulkElementBase::scalar_name_paraview(const unsigned &i) const
+	std::string BulkElementBase::scalar_name_paraview(const unsigned &) const
 	{
 		throw_runtime_error("NOT IMPLEMENTED");
 	}
 
 	// Looks up the nodal value index of a base-bulk continuous field by its generated name.
 	// Returns -1 if no such field exists (e.g. it lives in a non-nodal/discontinuous space).
-	int BulkElementBase::get_nodal_index_by_name(oomph::Node *n, std::string fieldname)
+	int BulkElementBase::get_nodal_index_by_name(oomph::Node *, std::string fieldname)
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
 
@@ -6320,7 +6317,7 @@ namespace pyoomph
 		throw_runtime_error("NOT IMPLEMENTED");
 	}
 
-	void BulkElementBase::scalar_value_paraview(std::ofstream &file_out, const unsigned &i, const unsigned &nplot) const
+	void BulkElementBase::scalar_value_paraview(std::ofstream &, const unsigned &, const unsigned &) const
 	{
 		throw_runtime_error("NOT IMPLEMENTED");
 	}
@@ -6381,7 +6378,7 @@ namespace pyoomph
 
 	// Returns the (spatially constant) D0 field values; D0 storage is single-valued per element,
 	// so the local coordinate s is not actually needed for interpolation.
-	void BulkElementBase::get_interpolated_fields_D0(const oomph::Vector<double> &s, std::vector<double> &res, const unsigned &t) const
+	void BulkElementBase::get_interpolated_fields_D0(const oomph::Vector<double> &, std::vector<double> &res, const unsigned &t) const
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
 		res.resize(functable->info_D0.numfields);
@@ -6445,7 +6442,7 @@ namespace pyoomph
 	}
 
 	// Plain-text oomph-lib output is not used by pyoomph (see scalar_name_paraview above).
-	void BulkElementBase::output(std::ostream &outfile, const unsigned &nplot)
+	void BulkElementBase::output(std::ostream &, const unsigned &)
 	{
 		throw_runtime_error("Not implemented");
 	}
@@ -6647,7 +6644,7 @@ namespace pyoomph
 	}
 
 	// Trivial: a 0-d element has no spatial extent, so the Jacobian/JLagr are always 1.
-	double BulkElementODE0d::fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds,unsigned history_index) const
+	double BulkElementODE0d::fill_shape_info_at_s(const oomph::Vector<double> &, const unsigned int &, const JITFuncSpec_RequiredShapes_FiniteElement_t &, JITShapeInfo_t *, double &JLagr, unsigned int, oomph::DenseMatrix<double> *,unsigned) const
 	{
 		JLagr = 1.0;
 		return 1.0;
@@ -6674,44 +6671,44 @@ namespace pyoomph
 
 
 
-	double PointElement0d::invert_jacobian_mapping(const oomph::DenseMatrix<double> &jacobian, oomph::DenseMatrix<double> &inverse_jacobian) const
+	double PointElement0d::invert_jacobian_mapping(const oomph::DenseMatrix<double> &, oomph::DenseMatrix<double> &) const
 	{
 		return 1.0;
 	}
 
-	void PointElement0d::dshape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsids) const
+	void PointElement0d::dshape_local(const oomph::Vector<double> &, oomph::Shape &psi, oomph::DShape &dpsids) const
 	{
 		psi[0] = 1;
 		dpsids(0, 0) = 0;
 	}
 
-	void PointElement0d::shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const
+	void PointElement0d::shape_at_s_DL(const oomph::Vector<double> &, oomph::Shape &psi) const
 	{
 		psi[0] = 1.0;
 	}
 
-	void PointElement0d::dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const
+	void PointElement0d::dshape_local_at_s_DL(const oomph::Vector<double> &, oomph::Shape &psi, oomph::DShape &dpsi) const
 	{
 		psi[0] = 1.0;
 		dpsi(0, 0) = 0.0;
 	}
 
-	void PointElement0d::shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const
+	void PointElement0d::shape_at_s_C1(const oomph::Vector<double> &, oomph::Shape &psi) const
 	{
 		psi[0] = 1.0;
 	}
-	void PointElement0d::shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const
+	void PointElement0d::shape_at_s_C2(const oomph::Vector<double> &, oomph::Shape &psi) const
 	{
 		psi[0] = 1.0;
 	}
 
-	void PointElement0d::dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const
+	void PointElement0d::dshape_local_at_s_C1(const oomph::Vector<double> &, oomph::Shape &psi, oomph::DShape &dpsi) const
 	{
 		psi[0] = 1.0;
 		dpsi(0, 0) = 0;
 	}
 
-	void PointElement0d::dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const
+	void PointElement0d::dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &psi, oomph::DShape &dpsi) const
 	{
 		psi[0] = 1.0;
 		dpsi(0, 0) = 0;
@@ -6720,7 +6717,7 @@ namespace pyoomph
 	// Writes the local node indices of sub-element `isubelem` (an element may be tesselated into
 	// several simple sub-elements/triangles for numpy/plotting export) into `indices`; for a
 	// single-node point element there is only one "sub-element" consisting of node 0.
-	void PointElement0d::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+	void PointElement0d::fill_element_nodal_indices_for_numpy(int *indices, unsigned, bool, std::vector<std::vector<std::set<oomph::Node *>>> &) const
 	{
 	  indices[0]=0;
 	}
@@ -6794,7 +6791,7 @@ namespace pyoomph
 		dpsi(1, 0) = 1.0;
 	}
 
-	void BulkElementLine1dC1::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+	void BulkElementLine1dC1::fill_element_nodal_indices_for_numpy(int *indices, unsigned, bool, std::vector<std::vector<std::set<oomph::Node *>>> &) const
 	{
 		indices[0] = 0;
 		indices[1] = 1;
@@ -6966,7 +6963,7 @@ namespace pyoomph
 		dpsi(1, 0) = 1.0;
 	}
 
-	void BulkElementLine1dC2::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+	void BulkElementLine1dC2::fill_element_nodal_indices_for_numpy(int *indices, unsigned, bool, std::vector<std::vector<std::set<oomph::Node *>>> &) const
 	{
 		indices[0] = 0;
 		indices[1] = 1;
@@ -7029,7 +7026,7 @@ namespace pyoomph
 		dpsi(1, 0) = 2.0;
 	}
 
-	void BulkTElementLine1dC1::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+	void BulkTElementLine1dC1::fill_element_nodal_indices_for_numpy(int *indices, unsigned, bool, std::vector<std::vector<std::set<oomph::Node *>>> &) const
 	{
 		indices[0] = 0;
 		indices[1] = 1;
@@ -7102,7 +7099,7 @@ namespace pyoomph
 		dpsi(1, 0) = 2.0;	   // TODO: This good?
 	}
 
-	void BulkTElementLine1dC2::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+	void BulkTElementLine1dC2::fill_element_nodal_indices_for_numpy(int *indices, unsigned, bool, std::vector<std::vector<std::set<oomph::Node *>>> &) const
 	{
 		indices[0] = 0;
 		indices[1] = 1;
@@ -8257,7 +8254,7 @@ namespace pyoomph
 		dpsi(2, 1) = 1.0;
 	}
 
-	void BulkElementTri2dC1::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+	void BulkElementTri2dC1::fill_element_nodal_indices_for_numpy(int *indices, unsigned, bool, std::vector<std::vector<std::set<oomph::Node *>>> &) const
 	{
 		indices[0] = 0;
 		indices[1] = 1;
@@ -8406,7 +8403,7 @@ namespace pyoomph
 		dpsi(2, 1) = 1.0;
 	}
 
-	void BulkElementTri2dC2::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+	void BulkElementTri2dC2::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &) const
 	{
 		if (tesselate_tri)
 		{
@@ -8576,7 +8573,7 @@ namespace pyoomph
 	}
    }
    
-   void BulkElementTri2dC1TB::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+   void BulkElementTri2dC1TB::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &) const
    {
       if (tesselate_tri)
 		{
@@ -8663,7 +8660,7 @@ namespace pyoomph
     
 
 
-	void BulkElementTri2dC2TB::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+	void BulkElementTri2dC2TB::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &) const
 	{
 		if (tesselate_tri)
 		{
@@ -8785,7 +8782,7 @@ namespace pyoomph
 		dpsi(3, 2) = 1.0;
 	}
 
-	void BulkElementBrick3dC1::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+	void BulkElementBrick3dC1::fill_element_nodal_indices_for_numpy(int *indices, unsigned, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &) const
 	{
 		if (tesselate_tri)
 		{
@@ -8804,7 +8801,7 @@ namespace pyoomph
 		}
 	}
 
-	std::vector<double> BulkElementBrick3dC1::get_outline(bool lagrangian)
+	std::vector<double> BulkElementBrick3dC1::get_outline(bool)
 	{
 		std::vector<double> res(0);
 		throw_runtime_error("Cannot get outline from 3d elements yet");
@@ -9061,7 +9058,7 @@ namespace pyoomph
 		}
 	}
 
-	void BulkElementBrick3dC2::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+	void BulkElementBrick3dC2::fill_element_nodal_indices_for_numpy(int *indices, unsigned, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &) const
 	{
 		if (tesselate_tri)
 		{
@@ -9074,7 +9071,7 @@ namespace pyoomph
 		}
 	}
 
-	std::vector<double> BulkElementBrick3dC2::get_outline(bool lagrangian)
+	std::vector<double> BulkElementBrick3dC2::get_outline(bool)
 	{
 		std::vector<double> res(27 * this->nodal_dimension());
 		throw_runtime_error("Outline not implemented for 3d");
@@ -9124,7 +9121,7 @@ namespace pyoomph
 		dpsi(3, 2) = 1.0;
 	}
 
-	void BulkElementTetra3dC1::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+	void BulkElementTetra3dC1::fill_element_nodal_indices_for_numpy(int *indices, unsigned, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &) const
 	{
 		if (tesselate_tri)
 		{
@@ -9139,7 +9136,7 @@ namespace pyoomph
 		}
 	}
 
-	std::vector<double> BulkElementTetra3dC1::get_outline(bool lagrangian)
+	std::vector<double> BulkElementTetra3dC1::get_outline(bool)
 	{
 		std::vector<double> res(0);
 		throw_runtime_error("Cannot get outline from 3d elements yet");
@@ -9246,7 +9243,7 @@ namespace pyoomph
 	}    
 	
     // Numpy/VTK export: 3d elements cannot yet be tesselated into triangles, so just pass the local node indices through unchanged.
-    void BulkElementTetra3dC1TB::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+    void BulkElementTetra3dC1TB::fill_element_nodal_indices_for_numpy(int *indices, unsigned, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &) const
 	{
 		if (tesselate_tri)
 		{
@@ -9462,7 +9459,7 @@ namespace pyoomph
 	}
 
 	// Numpy/VTK export: 3d elements cannot yet be tesselated into triangles, so just pass the local node indices through unchanged.
-	void BulkElementTetra3dC2::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+	void BulkElementTetra3dC2::fill_element_nodal_indices_for_numpy(int *indices, unsigned, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &) const
 	{
 		if (tesselate_tri)
 		{
@@ -9476,7 +9473,7 @@ namespace pyoomph
 	}
 
 	// Not yet implemented: outlines (used for plotting the element boundary) are only supported for 2d elements.
-	std::vector<double> BulkElementTetra3dC2::get_outline(bool lagrangian)
+	std::vector<double> BulkElementTetra3dC2::get_outline(bool)
 	{
 		std::vector<double> res(10 * this->nodal_dimension());
 		throw_runtime_error("Outline not implemented for 3d");
@@ -9572,7 +9569,7 @@ namespace pyoomph
 	}
 
 	// Numpy/VTK export: 3d elements cannot yet be tesselated into triangles, so just pass the local node indices through unchanged.
-	void BulkElementWedge3dC1::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+	void BulkElementWedge3dC1::fill_element_nodal_indices_for_numpy(int *indices, unsigned, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &) const
 	{
 		if (tesselate_tri)
 		{
@@ -9586,7 +9583,7 @@ namespace pyoomph
 	}
 
 	// Not yet implemented: outlines (used for plotting the element boundary) are only supported for 2d elements.
-	std::vector<double> BulkElementWedge3dC1::get_outline(bool lagrangian)
+	std::vector<double> BulkElementWedge3dC1::get_outline(bool)
 	{
 		std::vector<double> res(0);
 		throw_runtime_error("Cannot get outline from 3d elements yet");
@@ -9642,7 +9639,7 @@ namespace pyoomph
 	}
 
 	// Numpy/VTK export: 3d elements cannot yet be tesselated into triangles, so just pass the local node indices through unchanged.
-	void BulkElementPyramid3dC1::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+	void BulkElementPyramid3dC1::fill_element_nodal_indices_for_numpy(int *indices, unsigned, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &) const
 	{
 		if (tesselate_tri)
 		{
@@ -9656,7 +9653,7 @@ namespace pyoomph
 	}
 
 	// Not yet implemented: outlines (used for plotting the element boundary) are only supported for 2d elements.
-	std::vector<double> BulkElementPyramid3dC1::get_outline(bool lagrangian)
+	std::vector<double> BulkElementPyramid3dC1::get_outline(bool)
 	{
 		std::vector<double> res(0);
 		throw_runtime_error("Cannot get outline from 3d elements yet");
@@ -9712,7 +9709,7 @@ namespace pyoomph
 	}
 
 	// Numpy/VTK export: 3d elements cannot yet be tesselated into triangles, so just pass the local node indices through unchanged.
-	void BulkElementWedge3dC2::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+	void BulkElementWedge3dC2::fill_element_nodal_indices_for_numpy(int *indices, unsigned, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &) const
 	{
 		if (tesselate_tri)
 		{
@@ -9726,7 +9723,7 @@ namespace pyoomph
 	}
 
 	// Not yet implemented: outlines (used for plotting the element boundary) are only supported for 2d elements.
-	std::vector<double> BulkElementWedge3dC2::get_outline(bool lagrangian)
+	std::vector<double> BulkElementWedge3dC2::get_outline(bool)
 	{
 		std::vector<double> res(0);
 		throw_runtime_error("Cannot get outline from 3d elements yet");
@@ -9777,7 +9774,7 @@ namespace pyoomph
 		dpsi(3, 2) = 1.0;
 	}
 
-	void BulkElementPyramid3dC2::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+	void BulkElementPyramid3dC2::fill_element_nodal_indices_for_numpy(int *indices, unsigned, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &) const
 	{
 		if (tesselate_tri)
 		{
@@ -9790,7 +9787,7 @@ namespace pyoomph
 		}
 	}
 
-	std::vector<double> BulkElementPyramid3dC2::get_outline(bool lagrangian)
+	std::vector<double> BulkElementPyramid3dC2::get_outline(bool)
 	{
 		std::vector<double> res(0);
 		throw_runtime_error("Cannot get outline from 3d elements yet");
@@ -9898,7 +9895,7 @@ namespace pyoomph
 	// Builds a map from source_elem's local equation numbers to this element's local equation numbers, by
 	// matching global equation numbers (used to let interface residuals/Jacobians reference bulk/opposite
 	// element dofs that are already present as external data of this element).
-	void InterfaceElementBase::update_equation_remapping_from_element(BulkElementBase *source_elem,const JITFuncSpec_RequiredShapes_FiniteElement_t *required_shapes,std::vector<int> &eqn_map,int bulk_indicator)
+	void InterfaceElementBase::update_equation_remapping_from_element(BulkElementBase *source_elem,const JITFuncSpec_RequiredShapes_FiniteElement_t *,std::vector<int> &eqn_map,int)
 	{
 		////////////// SIMPLEST APPROACH //////////////////
 		eqn_map.clear();
@@ -10067,8 +10064,7 @@ namespace pyoomph
 	// resulting per-field maps are stored in add_interf_local_hang_eqs for the generated code's hang_buffer trick.
 	void InterfaceElementBase::assign_hanging_additional_interface_local_equations_for_space(const bool &store_local_dof_pt, JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space)
 	{
-		bool has_hanging_interface_dofs=false;
-		unsigned local_eqn_number = ndof();      
+		unsigned local_eqn_number = ndof();
       	std::deque<unsigned long> global_eqn_number_queue;
 		unsigned addfields=space->numfields-space->numfields_basebulk;
 		if (addfields)
@@ -10103,7 +10099,6 @@ namespace pyoomph
 								unsigned interface_id=space->interface_dof_indices[ifield];
 								unsigned master_value_index=boundnode->index_of_first_value_assigned_by_face_element(interface_id);     
                   				Local_interface_hang_eqn[interface_id][boundnode]  =nodal_local_eqn(local_node_index, master_value_index);
-								has_hanging_interface_dofs=true;
                 			}
 						}
 						else
@@ -10124,7 +10119,6 @@ namespace pyoomph
 											GeneralisedElement::Dof_pt_deque.push_back(master_node->value_pt(master_value_index));
 										}									
 										local_eqn_number++;
-										has_hanging_interface_dofs=true;
 									}
 								}
 								else
@@ -10140,8 +10134,7 @@ namespace pyoomph
 
 		if (!global_eqn_number_queue.empty())
 		{
-			has_hanging_interface_dofs=true;
-	  		add_global_eqn_numbers(global_eqn_number_queue,GeneralisedElement::Dof_pt_deque);      
+	  		add_global_eqn_numbers(global_eqn_number_queue,GeneralisedElement::Dof_pt_deque);
       		if (store_local_dof_pt)
       		{
         		std::deque<double*>().swap(GeneralisedElement::Dof_pt_deque);
@@ -10543,8 +10536,7 @@ namespace pyoomph
 	   BulkElementBase *father = dynamic_cast<BulkElementBase *>(blk->father_element_pt());
 	   if (father)
 	   {
-		  	  unsigned myvalindex = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(lnode))->index_of_first_value_assigned_by_face_element(valindex);	   
-			const std::vector<std::vector<unsigned>> & father_space_to_elem_index = father->get_nodal_space_index_to_element_index_map();
+		  	  unsigned myvalindex = dynamic_cast<oomph::BoundaryNodeBase *>(this->node_pt(lnode))->index_of_first_value_assigned_by_face_element(valindex);
 	        oomph::Vector<double> my_s,s_bulk,sfather;
 	        oomph::Node * bulknode=NULL;
 	        oomph::Node * mynode=this->node_pt(lnode);
@@ -10669,7 +10661,7 @@ namespace pyoomph
    
 	// Called by oomph-lib while finite-differencing an external datum (during Jacobian assembly): re-interpolates
 	// this element's hanging-node values so that perturbed external master values are propagated correctly.
-	void InterfaceElementBase::update_in_external_fd(const unsigned &i)
+	void InterfaceElementBase::update_in_external_fd(const unsigned &)
 	{
 		this->interpolate_hang_values();
 	}

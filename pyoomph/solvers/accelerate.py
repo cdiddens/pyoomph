@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 if sys.platform!="darwin":
     raise RuntimeError("The Accelerate sparse solvers are only available on Macs")
 
-import pyoomph._pyoomph_core as _pyoomph
+from .. import _pyoomph_core as _pyoomph
 
 if not hasattr(_pyoomph,"MacAccelerateSparseSolver"):
     raise RuntimeError("This pyoomph build was not compiled with Apple Accelerate support (src/mac_accelerate.cpp)")

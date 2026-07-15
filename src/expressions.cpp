@@ -39,7 +39,7 @@ namespace GiNaC
 	// "<...>" placeholder describing the wrapped object, since the wrapped C++ object itself has no meaningful GiNaC form.
 
 	template <>
-	void GiNaCPlaceHolderResolveInfo::print(const print_context &c, unsigned level) const
+	void GiNaCPlaceHolderResolveInfo::print(const print_context &c, unsigned) const
 	{
 		const pyoomph::PlaceHolderResolveInfo &sp = get_struct();
 		c.s << "< code=" << sp.code << " , tags=";
@@ -49,21 +49,21 @@ namespace GiNaC
 	}
 
 	template <>
-	void GiNaCCustomMultiReturnExpressionWrapper::print(const print_context &c, unsigned level) const
+	void GiNaCCustomMultiReturnExpressionWrapper::print(const print_context &c, unsigned) const
 	{
 		const pyoomph::CustomMultiReturnExpressionWrapper &sp = get_struct();
 		c.s << "<" << sp.cme->get_id_name() << " @" << sp.cme << ">";
 	}
 
 	template <>
-	void GiNaCCustomMultiReturnExpressionResultSymbol::print(const print_context &c, unsigned level) const
+	void GiNaCCustomMultiReturnExpressionResultSymbol::print(const print_context &c, unsigned) const
 	{
 		const pyoomph::CustomMultiReturnExpressionResultSymbol &sp = get_struct();
 		c.s << "<CB_RESULT " << sp.index << " of " << sp.func->get_id_name() << " called with " << sp.arglist << ">";
 	}
 
 	template <>
-	void GiNaCCustomMathExpressionWrapper::print(const print_context &c, unsigned level) const
+	void GiNaCCustomMathExpressionWrapper::print(const print_context &c, unsigned) const
 	{
 		//        std::cout << "ENTERING CME "<<std::flush <<std::endl;
 		//        c.s << "CME" <<std::endl;
@@ -74,7 +74,7 @@ namespace GiNaC
 	}
 
 	template <>
-	void GiNaCCustomCoordinateSystemWrapper::print(const print_context &c, unsigned level) const
+	void GiNaCCustomCoordinateSystemWrapper::print(const print_context &c, unsigned) const
 	{
 		const pyoomph::CustomCoordinateSystemWrapper &sp = get_struct();
 		c.s << "<" << sp.cme->get_id_name() << " @" << sp.cme << ">";
@@ -84,7 +84,7 @@ namespace GiNaC
 	// current FiniteElementCode) in a per-code local index table, and the generated code accesses its *current* value
 	// indirectly through the function table pointer so that changing the parameter later does not require recompilation.
 	template <>
-	void GiNaCGlobalParameterWrapper::print(const print_context &c, unsigned level) const
+	void GiNaCGlobalParameterWrapper::print(const print_context &c, unsigned) const
 	{
 		const pyoomph::GlobalParameterWrapper &sp = get_struct();
 		if (dynamic_cast<const print_csrc *>(&c))
@@ -125,7 +125,7 @@ namespace GiNaC
 	}
 
 	template <>
-	void GiNaCDelayedPythonCallbackExpansion::print(const print_context &c, unsigned level) const
+	void GiNaCDelayedPythonCallbackExpansion::print(const print_context &c, unsigned) const
 	{
 		// const pyoomph::DelayedPythonCallbackExpansionWrapper &sp = get_struct();
 		if (dynamic_cast<const print_csrc *>(&c))
@@ -139,7 +139,7 @@ namespace GiNaC
 	}
 
 	template <>
-	void GiNaCTimeSymbol::print(const print_context &c, unsigned level) const
+	void GiNaCTimeSymbol::print(const print_context &c, unsigned) const
 	{
 		const pyoomph::TimeSymbol &sp = get_struct();
 		std::string indstring = std::to_string(sp.index);
@@ -177,7 +177,7 @@ namespace GiNaC
 	}
 
 	template <>
-	void GiNaCFakeExponentialMode::print(const print_context &c, unsigned level) const
+	void GiNaCFakeExponentialMode::print(const print_context &c, unsigned) const
 	{
 		const pyoomph::FakeExponentialMode &sp = get_struct();
 		if (dynamic_cast<const print_csrc *>(&c))
@@ -2039,7 +2039,7 @@ namespace pyoomph
 
 		// GiNaC's generic (implicit) derivative_func is disabled -- differentiating a subexpression() must always go through
 		// expl_derivative_func below (which recurses via wrapped.diff() and re-wraps the result), never via GiNaC's default chain-rule machinery
-		static ex subexpression_deriv(const ex &wrapped, unsigned deriv_arg)
+		static ex subexpression_deriv(const ex &, unsigned)
 		{
 			throw_runtime_error("Cannot derive a subexpression");
 		}
@@ -2096,7 +2096,7 @@ namespace pyoomph
 		}
 
 		// Implicit derivative disabled, same reasoning as subexpression_deriv above; use expl_derivative_func instead
-		static ex get_real_part_deriv(const ex &wrapped, unsigned deriv_arg)
+		static ex get_real_part_deriv(const ex &, unsigned)
 		{
 			throw_runtime_error("Cannot derive get_real_part");
 		}
@@ -2143,7 +2143,7 @@ namespace pyoomph
 			return get_imag_part_eval(wrapped).evalf();
 		}
 
-		static ex get_imag_part_deriv(const ex &wrapped, unsigned deriv_arg)
+		static ex get_imag_part_deriv(const ex &, unsigned)
 		{
 			throw_runtime_error("Cannot derive get_imag_part");
 		}
@@ -2229,7 +2229,7 @@ namespace pyoomph
 			}
 		}
 
-		static ex Diff_expl_deriv(const ex &arg, const ex &wrto, const symbol &deriv_arg)
+		static ex Diff_expl_deriv(const ex &arg, const ex &wrto, const symbol &)
 		{
 			return Diff(arg, wrto).hold(); // TODO always best way?
 		}
@@ -2772,7 +2772,7 @@ namespace pyoomph
 			return heaviside(arg).hold();
 		}
 
-		static ex heaviside_imag_part(const ex &arg)
+		static ex heaviside_imag_part(const ex &)
 		{
 			return 0;
 		}
@@ -2784,7 +2784,7 @@ namespace pyoomph
 			c.s << ")";
 		}
 
-		static ex heaviside_expl_derivative(const ex &arg, const symbol &deriv_arg)
+		static ex heaviside_expl_derivative(const ex &, const symbol &)
 		{
 			//	 return arg.diff(deriv_arg)*heaviside(arg);
 			return 0;
@@ -2859,7 +2859,7 @@ namespace pyoomph
 			c.s << ")";
 		}
 
-		static ex signum_expl_derivative(const ex &arg, const symbol &deriv_arg)
+		static ex signum_expl_derivative(const ex &, const symbol &)
 		{
 			return 0; // TODO: Singularity, but this does not really matter here
 		}
@@ -2905,7 +2905,7 @@ namespace pyoomph
 			return minimum(arg1,arg2).hold();
 		}
 
-		static ex minimum_imag_part(const ex &arg1,const ex &arg2)
+		static ex minimum_imag_part(const ex &,const ex &)
 		{
 			return 0;
 		}
@@ -2979,7 +2979,7 @@ namespace pyoomph
 			return maximum(arg1,arg2).hold();
 		}
 
-		static ex maximum_imag_part(const ex &arg1,const ex &arg2)
+		static ex maximum_imag_part(const ex &,const ex &)
 		{
 			return 0;
 		}

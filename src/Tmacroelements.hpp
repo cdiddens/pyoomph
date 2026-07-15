@@ -59,7 +59,7 @@ namespace oomph
       }
 
       /// Broken copy constructor
-      TMacroElement(const TMacroElement &dummy)
+      TMacroElement(const TMacroElement &) : MacroElement()
       {
          BrokenCopy::broken_copy("TMacroElement");
       }
@@ -74,31 +74,31 @@ namespace oomph
       virtual ~TMacroElement(){};
 
       // Stub: not needed for triangular macro elements, calling it is a bug
-      void output(const unsigned &t, std::ostream &outfile, const unsigned &nplot)
+      void output(const unsigned &, std::ostream &, const unsigned &)
       {
          throw_runtime_error("Not implemented");
       }
 
       // Stub: not needed for triangular macro elements, calling it is a bug
-      void output_macro_element_boundaries(std::ostream &outfile, const unsigned &nplot)
+      void output_macro_element_boundaries(std::ostream &, const unsigned &)
       {
          throw_runtime_error("Not implemented");
       }
 
       // Stub: mapping from macro-element to Eulerian coordinates is unused here
-      void macro_map(const unsigned &t, const Vector<double> &S, Vector<double> &r)
+      void macro_map(const unsigned &, const Vector<double> &, Vector<double> &)
       {
          throw_runtime_error("Not implemented");
       }
 
       // Stub: Jacobian of the macro-to-Eulerian map is unused here
-      virtual void assemble_macro_to_eulerian_jacobian(const unsigned &t, const Vector<double> &s, DenseMatrix<double> &jacobian)
+      virtual void assemble_macro_to_eulerian_jacobian(const unsigned &, const Vector<double> &, DenseMatrix<double> &)
       {
          throw_runtime_error("Not implemented");
       }
 
       // Stub: second derivative of the macro-to-Eulerian map is unused here
-      virtual void assemble_macro_to_eulerian_jacobian2(const unsigned &t, const Vector<double> &s, DenseMatrix<double> &jacobian2)
+      virtual void assemble_macro_to_eulerian_jacobian2(const unsigned &, const Vector<double> &, DenseMatrix<double> &)
       {
          throw_runtime_error("Not implemented");
       }

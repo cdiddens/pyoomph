@@ -22,26 +22,17 @@ Python code using the predefined harmonic oscillator equation class
 
 For the Python code, we first have to import pyoomph:
 
-.. code:: python
-
-   # Import pyoomph
-   from pyoomph import *
-   # Also import the predefined harmonic oscillator equation
-   from pyoomph.equations.harmonic_oscillator import HarmonicOscillator
+.. literalinclude:: predefined_harmonic_oscillator.py
+   :language: python
+   :start-at: # Import pyoomph
+   :end-at: from pyoomph.equations.harmonic_oscillator import HarmonicOscillator
 
 Every problem you want to solve in pyoomph has to be defined in a class inherited from the generic :py:class:`~pyoomph.generic.problem.Problem` class. In the constructor of this class, i.e. the method :py:meth:`~pyoomph.generic.problem.Problem.__init__`, one should set the default parameters, e.g. here :math:`\omega=1`. Later on, we can change this parameter before running the simulation, but some default value has to be set. However, before doing so, we first have to call the constructor of the generic problem class, which can be done by a ``super()`` call:
 
-.. code:: python
-
-
-   # Create a specific problem class to solve your problem. It is inherited from the generic problem class 'Problem'
-   class HarmonicOscillatorProblem(Problem):
-
-   	# In the constructor of the problem, we can set some default values. here omega
-   	def __init__(self):
-   		super(HarmonicOscillatorProblem,self).__init__() #we have to call the constructor of the parent class
-   		self.omega=1 #Set the default value of omega to 1
-   	
+.. literalinclude:: predefined_harmonic_oscillator.py
+   :language: python
+   :start-at: # Create a specific problem class to solve your problem.
+   :end-at: self.omega=1 #Set the default value of omega to 1
 
 The next important step is the definition of the problem. In our case, we have three ingredients:
 
@@ -53,16 +44,10 @@ The next important step is the definition of the problem. In our case, we have t
 
 pyoomph takes here the approach, that all these elements can be combined by the operator ``+``. We therefore overload the method :py:meth:`~pyoomph.generic.problem.Problem.define_problem` of the :py:class:`~pyoomph.generic.problem.Problem` class as follows:
 
-.. code:: python
-
-
-   	# The method define_problem will define the entire problem you want to solve. Here, it is quite simple...
-   	def define_problem(self):
-   		eqs=HarmonicOscillator(omega=self.omega,name="y") #Create the equation, passing omega
-   		eqs+=InitialCondition(y=1-var("time")) #We can set both initial conditions for y and y' simultaneously
-   		eqs+=ODEFileOutput() #Add an output of the ODE to a file
-   		self.add_equations(eqs@"harmonic_oscillator") #And finally, add this combined set to the problem with the name "harmonic_oscillator"
-   		
+.. literalinclude:: predefined_harmonic_oscillator.py
+   :language: python
+   :start-at: # The method define_problem will define the entire problem you want to solve.
+   :end-at: self.add_equations(eqs@"harmonic_oscillator")
 
 Let us go through these steps once more: The function :py:meth:`~pyoomph.generic.problem.Problem.define_problem` will be called, whenever we try to run the simulation with our problem class ``HarmonicOscillatorProblem``. Within this method, we first create an instance of the :py:class:`~pyoomph.equations.harmonic_oscillator.HarmonicOscillator` equations (which will be re-implemented by hand in the next section). There, we pass ``omega`` (:math:`=\omega`) from the problem to the equation class and inform the equation class that the unknown variable of the harmonic oscillator shall be called :math:`y`.
 
@@ -74,11 +59,10 @@ At this stage, the combined object of the harmonic oscillator ODE, the initial c
 
 The only step remaining at this stage is running the simulation:
 
-.. code:: python
-
-   if __name__=="__main__":
-   	with HarmonicOscillatorProblem() as problem:
-   		problem.run(endtime=100,numouts=1000)
+.. literalinclude:: predefined_harmonic_oscillator.py
+   :language: python
+   :start-at: if __name__=="__main__":
+   :end-at: problem.run(endtime=100,numouts=1000)
 
 Here, it is first checked whether the current script is the main script, a typical step in Python scripts to allow for the import of definitions in external scripts without invoking any code execution. In the next step, an instance of the problem is created and finally, the simulation is started and solved until :math:`t=100` using the method :py:meth:`~pyoomph.generic.problem.Problem.run`. The number of (here equidistant) output steps is set to 1000, i.e. an output interval of :math:`\Delta t_\text{out}=0.1`.
 

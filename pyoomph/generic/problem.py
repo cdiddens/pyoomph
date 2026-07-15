@@ -33,7 +33,7 @@ from ..expressions.generic import is_zero #type:ignore
 
 #import pyoomph.generic
 from .mpi import *
-import pyoomph._pyoomph_core as _pyoomph
+from .. import _pyoomph_core as _pyoomph
 import math
 
 
@@ -379,8 +379,8 @@ class Problem(_pyoomph.Problem):
         self._initialised:bool=False
         self._during_initialization:bool=False
 
-        import pyoomph
-        self.set_c_compiler(pyoomph.get_default_c_compiler())
+        from .. import get_default_c_compiler
+        self.set_c_compiler(get_default_c_compiler())
 
         if hasattr(__main__,"__file__"):
             scriptfile=os.path.splitext(__main__.__file__)[0]
@@ -1095,7 +1095,7 @@ class Problem(_pyoomph.Problem):
                 continue
             elif isinstance(v,_pyoomph.Expression):
                 def merge_units(expr):
-                    import pyoomph._pyoomph_core as _pyoomph
+                    from .. import _pyoomph_core as _pyoomph
                     numfactor,unit,rest,success=_pyoomph.GiNaC_collect_units(expr)
                     if not success:
                         return expr
@@ -1845,7 +1845,7 @@ class Problem(_pyoomph.Problem):
             if self._initialised:
                 other.actions_after_initialise()
         else:
-            from pyoomph.output.plotting import BasePlotter
+            from ..output.plotting import BasePlotter
             if isinstance(other,BasePlotter):
                 if self.plotter is None:
                     self.plotter=other
@@ -1938,11 +1938,11 @@ class Problem(_pyoomph.Problem):
                 raise RuntimeError("Cannot be used together: --arpack and --slepc/--slepc_mumps")
             self.set_eigensolver("scipy") # Not using the pardiso arpack then
         elif self.cmdlineargs.slepc or self.cmdlineargs.slepc_mumps:
-            import pyoomph.solvers.petsc
+            from ..solvers.petsc import SlepcEigenSolver
             self.set_eigensolver("slepc")
             if self.cmdlineargs.slepc_mumps:
                 eigsolv=self.get_eigen_solver()
-                assert isinstance(eigsolv,pyoomph.solvers.petsc.SlepcEigenSolver)
+                assert isinstance(eigsolv,SlepcEigenSolver)
                 eigsolv.use_mumps()
                 
 
@@ -4588,7 +4588,7 @@ class Problem(_pyoomph.Problem):
             PeriodicOrbit: The periodic orbit object
         """
         
-        from pyoomph.generic.bifurcation_tools import get_hopf_lyapunov_coefficient    
+        from .bifurcation_tools import get_hopf_lyapunov_coefficient    
         
         if self._bifurcation_tracking_parameter_name is None or self.get_bifurcation_tracking_mode()!="hopf" or len(self.get_last_eigenvalues())!=1:
             raise ValueError("Hopf bifurcation tracking not activated or solved. Please call activate_bifurcation_tracking first, then solve. Then call this routine.")        
@@ -4695,7 +4695,7 @@ class Problem(_pyoomph.Problem):
         TODO; Add documentation
         """
         # Main ideas from here: https://arxiv.org/html/2407.18230v1#S2.E6
-        import pyoomph._pyoomph_core as _pyoomph
+        from .. import _pyoomph_core as _pyoomph
         import scipy
         if not isinstance(self.assembly_handler_pt(),_pyoomph.PeriodicOrbitHandler):
             raise RuntimeError("Periodic orbit handler not active. Call activate_periodic_orbit_handler first, then solve the orbit, then call this function")
@@ -5414,7 +5414,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         if self.get_last_eigenvectors() is None or len(self.get_last_eigenvectors())<=eigenindex:            
             raise ValueError("No eigenvector at index "+str(eigenindex)+" available to perturb. Please solve the eigenproblem first.")
 
-        from pyoomph.generic.bifurcation_tools import DeflationAssemblyHandler        
+        from .bifurcation_tools import DeflationAssemblyHandler        
         old=self.get_custom_assembler()
         if not isinstance(old, DeflationAssemblyHandler):
             defl=DeflationAssemblyHandler(alpha=deflation_alpha, p=deflation_power)
@@ -5447,7 +5447,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             
         """        
             
-        from pyoomph.generic.bifurcation_tools import DeflationAssemblyHandler
+        from .bifurcation_tools import DeflationAssemblyHandler
         deflation=DeflationAssemblyHandler(alpha=deflation_alpha,p=deflation_p)
         if not self.is_initialised():
             self.initialise()
@@ -5531,7 +5531,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         Yields:
             A tuple of branch index (from 0 to ...), the current parameter value and the current degrees of freedom (dofs) for the solution.
         """ 
-        from pyoomph.generic.bifurcation_tools import DeflationAssemblyHandler
+        from .bifurcation_tools import DeflationAssemblyHandler
         param=None
         rang=None
         for k,v in param_range.items():

@@ -250,7 +250,7 @@ namespace pyoomph
 	// sets of its 3 corner nodes: if all three nodes share exactly one common boundary, that face is
 	// recorded as lying on that boundary (a face shared by more than one boundary triggers a warning,
 	// as it indicates a degenerate/too-coarse mesh).
-	void TemplatedMeshBase3d::setup_boundary_element_info_tris(std::ostream &outfile)
+	void TemplatedMeshBase3d::setup_boundary_element_info_tris(std::ostream &)
 	{
 		unsigned nel = nelement();
 		unsigned nbound = nboundary();

@@ -28,7 +28,7 @@
  
 import sympy #type:ignore
 from ..expressions import (cos,sin,log,exp,pi,var,nondim,ExpressionOrNum,Expression) 
-import pyoomph._pyoomph_core as _pyoomph
+from .. import _pyoomph_core as _pyoomph
 import math
 
 

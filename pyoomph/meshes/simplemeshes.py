@@ -30,7 +30,7 @@ import math
 from .mesh import MeshTemplate
 from .remesher import Remesher2d
 from ..expressions import ExpressionOrNum
-import pyoomph._pyoomph_core as _pyoomph
+from .. import _pyoomph_core as _pyoomph
 from ..typings import *
 import numpy
 
@@ -645,7 +645,7 @@ class SphericalOctantMesh(MeshTemplate):
 
         if False:
             # TODO: This does not work yet
-            import pyoomph._pyoomph_core as _pyoomph
+            from .. import _pyoomph_core as _pyoomph
             ce = _pyoomph.CurvedEntitySpherePart(self.get_node_position(n000), self.get_node_position(n00o),[1,0,0])
             self._ce=ce
             self.add_facet_to_curve_entity([n00o, n0dd,nd0d,nttt], ce)

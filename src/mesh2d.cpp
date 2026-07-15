@@ -358,7 +358,7 @@ namespace pyoomph
   // quad element, tabulate which of its nodes lie on which boundaries, then use that per-node boundary
   // membership pattern (via boundary_identifier) to work out which local face(s) of the element
   // coincide with a boundary. Skips non-quad elements (handled separately by the tri counterpart).
-  void TemplatedMeshBase2d::setup_boundary_element_info_quads(std::ostream &outfile)
+  void TemplatedMeshBase2d::setup_boundary_element_info_quads(std::ostream &)
   {
     unsigned nbound = nboundary();
 
@@ -532,7 +532,7 @@ namespace pyoomph
   // Legacy (non-facet-based) boundary-element detection for the triangular elements of the mesh;
   // analogous to setup_boundary_element_info_quads but handling triangle-specific edge/face indexing
   // (and, unlike quads, needing to distinguish which of a triangle's three edges lies on the boundary).
-  void TemplatedMeshBase2d::setup_boundary_element_info_tris(std::ostream &outfile2)
+  void TemplatedMeshBase2d::setup_boundary_element_info_tris(std::ostream &)
   {
     std::ostream &outfile = std::cout;
     bool doc = false;

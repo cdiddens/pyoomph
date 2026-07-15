@@ -220,7 +220,7 @@ const double PyramidGaussC2::Weight[27] =
   ///   - bound_cons[ival]=0 if value ival on this boundary is free
   ///   - bound_cons[ival]=1 if value ival on this boundary is pinned
   //==================================================================
-  void RefineableWedgeElement::get_bcs(int bound, Vector<int> &bound_cons) const
+  void RefineableWedgeElement::get_bcs(int , Vector<int> &) const
   {
     throw_runtime_error("Implement");
   }
@@ -234,7 +234,7 @@ const double PyramidGaussC2::Weight[27] =
   ///   - bound_cons[ival]=0 if value ival on this boundary is free
   ///   - bound_cons[ival]=1 if value ival on this boundary is pinned
   //==================================================================
-  void RefineableWedgeElement::get_edge_bcs(const int &edge, Vector<int> &bound_cons) const
+  void RefineableWedgeElement::get_edge_bcs(const int &, Vector<int> &) const
   {
     throw_runtime_error("Implement");
   }
@@ -248,8 +248,8 @@ const double PyramidGaussC2::Weight[27] =
   /// both vertex nodes). For vertex nodes, we just return their
   /// boundaries.
   //==================================================================
-  void RefineableWedgeElement::get_boundaries(const int &edge,
-                                             std::set<unsigned> &boundary) const
+  void RefineableWedgeElement::get_boundaries(const int &,
+                                             std::set<unsigned> &) const
   {
     throw_runtime_error("Implement");
   }
@@ -259,9 +259,9 @@ const double PyramidGaussC2::Weight[27] =
   /// along the edge (S/W/N/E)
   //===================================================================
   void RefineableWedgeElement::
-      interpolated_zeta_on_edge(const unsigned &boundary,
-                                const int &edge, const Vector<double> &s,
-                                Vector<double> &zeta)
+      interpolated_zeta_on_edge(const unsigned &,
+                                const int &, const Vector<double> &,
+                                Vector<double> &)
   {
     throw_runtime_error("Implement");
   }
@@ -274,8 +274,8 @@ const double PyramidGaussC2::Weight[27] =
   /// periodic the flag is_periodic will be true
   //===================================================================
   Node *RefineableWedgeElement::
-      node_created_by_neighbour(const Vector<double> &s_fraction,
-                                bool &is_periodic)
+      node_created_by_neighbour(const Vector<double> &,
+                                bool &)
   {
     throw_runtime_error("Implement");
     return 0;
@@ -309,10 +309,10 @@ const double PyramidGaussC2::Weight[27] =
   ///   pressure values in manner consistent with the pressure
   ///   distribution in the father element.
   //==================================================================
-  void RefineableWedgeElement::build(Mesh *&mesh_pt,
-                                    Vector<Node *> &new_node_pt,
-                                    bool &was_already_built,
-                                    std::ofstream &new_nodes_file)
+  void RefineableWedgeElement::build(Mesh *&,
+                                    Vector<Node *> &,
+                                    bool &,
+                                    std::ofstream &)
   {
     throw_runtime_error("Implement");
   }
@@ -320,8 +320,8 @@ const double PyramidGaussC2::Weight[27] =
   //====================================================================
   ///  Print corner nodes, use colour (default "BLACK")
   //====================================================================
-  void RefineableWedgeElement::output_corners(std::ostream &outfile,
-                                             const std::string &colour) const
+  void RefineableWedgeElement::output_corners(std::ostream &,
+                                             const std::string &) const
   {
     throw_runtime_error("Implement");
   }
@@ -331,7 +331,7 @@ const double PyramidGaussC2::Weight[27] =
   /// open the output files and pass the open files to the helper function
   //====================================================================
   void RefineableWedgeElement::setup_hanging_nodes(Vector<std::ofstream *>
-                                                      &output_stream)
+                                                      &)
   {
     throw_runtime_error("Implement");
   }
@@ -340,7 +340,7 @@ const double PyramidGaussC2::Weight[27] =
   /// Internal function that sets up the hanging node scheme for
   /// a particular continuously interpolated value
   //===============================================================
-  void RefineableWedgeElement::setup_hang_for_value(const int &value_id)
+  void RefineableWedgeElement::setup_hang_for_value(const int &)
   {
     throw_runtime_error("Implement");
   }
@@ -350,8 +350,8 @@ const double PyramidGaussC2::Weight[27] =
   /// edge of the element
   //=================================================================
   void RefineableWedgeElement::
-      quad_hang_helper(const int &value_id,
-                       const int &my_edge, std::ofstream &output_hangfile)
+      quad_hang_helper(const int &,
+                       const int &, std::ofstream &)
   {
     throw_runtime_error("Implement");
   }
@@ -362,7 +362,7 @@ const double PyramidGaussC2::Weight[27] =
   /// - (nodally) interpolated function values
   //====================================================================
   // template<unsigned NNODE_1D>
-  void RefineableWedgeElement::check_integrity(double &max_error)
+  void RefineableWedgeElement::check_integrity(double &)
   {
 
     throw_runtime_error("Implement");
@@ -400,7 +400,7 @@ const double PyramidGaussC2::Weight[27] =
   ///   - bound_cons[ival]=0 if value ival on this boundary is free
   ///   - bound_cons[ival]=1 if value ival on this boundary is pinned
   //==================================================================
-  void RefineablePyramidElement::get_bcs(int bound, Vector<int> &bound_cons) const
+  void RefineablePyramidElement::get_bcs(int , Vector<int> &) const
   {
     throw_runtime_error("Implement");
   }
@@ -414,7 +414,7 @@ const double PyramidGaussC2::Weight[27] =
   ///   - bound_cons[ival]=0 if value ival on this boundary is free
   ///   - bound_cons[ival]=1 if value ival on this boundary is pinned
   //==================================================================
-  void RefineablePyramidElement::get_edge_bcs(const int &edge, Vector<int> &bound_cons) const
+  void RefineablePyramidElement::get_edge_bcs(const int &, Vector<int> &) const
   {
     throw_runtime_error("Implement");
   }
@@ -428,8 +428,8 @@ const double PyramidGaussC2::Weight[27] =
   /// both vertex nodes). For vertex nodes, we just return their
   /// boundaries.
   //==================================================================
-  void RefineablePyramidElement::get_boundaries(const int &edge,
-                                             std::set<unsigned> &boundary) const
+  void RefineablePyramidElement::get_boundaries(const int &,
+                                             std::set<unsigned> &) const
   {
     throw_runtime_error("Implement");
   }
@@ -439,9 +439,9 @@ const double PyramidGaussC2::Weight[27] =
   /// along the edge (S/W/N/E)
   //===================================================================
   void RefineablePyramidElement::
-      interpolated_zeta_on_edge(const unsigned &boundary,
-                                const int &edge, const Vector<double> &s,
-                                Vector<double> &zeta)
+      interpolated_zeta_on_edge(const unsigned &,
+                                const int &, const Vector<double> &,
+                                Vector<double> &)
   {
     throw_runtime_error("Implement");
   }
@@ -454,8 +454,8 @@ const double PyramidGaussC2::Weight[27] =
   /// periodic the flag is_periodic will be true
   //===================================================================
   Node *RefineablePyramidElement::
-      node_created_by_neighbour(const Vector<double> &s_fraction,
-                                bool &is_periodic)
+      node_created_by_neighbour(const Vector<double> &,
+                                bool &)
   {
     throw_runtime_error("Implement");
     return 0;
@@ -489,10 +489,10 @@ const double PyramidGaussC2::Weight[27] =
   ///   pressure values in manner consistent with the pressure
   ///   distribution in the father element.
   //==================================================================
-  void RefineablePyramidElement::build(Mesh *&mesh_pt,
-                                    Vector<Node *> &new_node_pt,
-                                    bool &was_already_built,
-                                    std::ofstream &new_nodes_file)
+  void RefineablePyramidElement::build(Mesh *&,
+                                    Vector<Node *> &,
+                                    bool &,
+                                    std::ofstream &)
   {
     throw_runtime_error("Implement");
   }
@@ -500,8 +500,8 @@ const double PyramidGaussC2::Weight[27] =
   //====================================================================
   ///  Print corner nodes, use colour (default "BLACK")
   //====================================================================
-  void RefineablePyramidElement::output_corners(std::ostream &outfile,
-                                             const std::string &colour) const
+  void RefineablePyramidElement::output_corners(std::ostream &,
+                                             const std::string &) const
   {
     throw_runtime_error("Implement");
   }
@@ -511,7 +511,7 @@ const double PyramidGaussC2::Weight[27] =
   /// open the output files and pass the open files to the helper function
   //====================================================================
   void RefineablePyramidElement::setup_hanging_nodes(Vector<std::ofstream *>
-                                                      &output_stream)
+                                                      &)
   {
     throw_runtime_error("Implement");
   }
@@ -520,7 +520,7 @@ const double PyramidGaussC2::Weight[27] =
   /// Internal function that sets up the hanging node scheme for
   /// a particular continuously interpolated value
   //===============================================================
-  void RefineablePyramidElement::setup_hang_for_value(const int &value_id)
+  void RefineablePyramidElement::setup_hang_for_value(const int &)
   {
     throw_runtime_error("Implement");
   }
@@ -530,8 +530,8 @@ const double PyramidGaussC2::Weight[27] =
   /// edge of the element
   //=================================================================
   void RefineablePyramidElement::
-      quad_hang_helper(const int &value_id,
-                       const int &my_edge, std::ofstream &output_hangfile)
+      quad_hang_helper(const int &,
+                       const int &, std::ofstream &)
   {
     throw_runtime_error("Implement");
   }
@@ -542,7 +542,7 @@ const double PyramidGaussC2::Weight[27] =
   /// - (nodally) interpolated function values
   //====================================================================
   // template<unsigned NNODE_1D>
-  void RefineablePyramidElement::check_integrity(double &max_error)
+  void RefineablePyramidElement::check_integrity(double &)
   {
 
     throw_runtime_error("Implement");
@@ -953,27 +953,27 @@ PyramidGaussC2  PyramidElementC2::Default_integration_scheme;
   // function derivatives from a FaceElement. Not yet implemented for wedges.
   namespace WedgeElementBulkCoordinateDerivatives
   {
-    void faces0(const Vector<double>& s,DenseMatrix<double>& dsbulk_dsface,unsigned& interior_direction)
+    void faces0(const Vector<double>& ,DenseMatrix<double>& ,unsigned& )
     {
         throw_runtime_error("Implement");
     }
 
-    void faces1(const Vector<double>& s,DenseMatrix<double>& dsbulk_dsface,unsigned& interior_direction)
+    void faces1(const Vector<double>& ,DenseMatrix<double>& ,unsigned& )
     {
         throw_runtime_error("Implement");
     }
 
-    void faces2(const Vector<double>& s,DenseMatrix<double>& dsbulk_dsface,unsigned& interior_direction)
+    void faces2(const Vector<double>& ,DenseMatrix<double>& ,unsigned& )
     {
         throw_runtime_error("Implement");
     }
 
-    void faces3(const Vector<double>& s,DenseMatrix<double>& dsbulk_dsface,unsigned& interior_direction)
+    void faces3(const Vector<double>& ,DenseMatrix<double>& ,unsigned& )
     {
         throw_runtime_error("Implement");
     }
 
-    void faces4(const Vector<double>& s,DenseMatrix<double>& dsbulk_dsface,unsigned& interior_direction)
+    void faces4(const Vector<double>& ,DenseMatrix<double>& ,unsigned& )
     {
         throw_runtime_error("Implement");
     }
@@ -1047,7 +1047,7 @@ PyramidGaussC2  PyramidElementC2::Default_integration_scheme;
 
     // Sign to apply to the geometrically-computed face normal to make it point outward;
     // always +1 here (i.e. the face node orderings above are already chosen consistently).
-    int WedgeElementBase::face_outer_unit_normal_sign(const int& face_index) const
+    int WedgeElementBase::face_outer_unit_normal_sign(const int& ) const
     {
         return 1;
     }
@@ -1128,27 +1128,27 @@ PyramidGaussC2  PyramidElementC2::Default_integration_scheme;
   // Derivatives of the maps above; see WedgeElementBulkCoordinateDerivatives. Not yet implemented for pyramids.
   namespace PyramidElementBulkCoordinateDerivatives
   {
-    void faces0(const Vector<double>& s,DenseMatrix<double>& dsbulk_dsface,unsigned& interior_direction)
+    void faces0(const Vector<double>& ,DenseMatrix<double>& ,unsigned& )
     {
         throw_runtime_error("Implement");
     }
 
-    void faces1(const Vector<double>& s,DenseMatrix<double>& dsbulk_dsface,unsigned& interior_direction)
+    void faces1(const Vector<double>& ,DenseMatrix<double>& ,unsigned& )
     {
         throw_runtime_error("Implement");
     }
 
-    void faces2(const Vector<double>& s,DenseMatrix<double>& dsbulk_dsface,unsigned& interior_direction)
+    void faces2(const Vector<double>& ,DenseMatrix<double>& ,unsigned& )
     {
         throw_runtime_error("Implement");
     }
 
-    void faces3(const Vector<double>& s,DenseMatrix<double>& dsbulk_dsface,unsigned& interior_direction)
+    void faces3(const Vector<double>& ,DenseMatrix<double>& ,unsigned& )
     {
         throw_runtime_error("Implement");
     }
 
-    void faces4(const Vector<double>& s,DenseMatrix<double>& dsbulk_dsface,unsigned& interior_direction)
+    void faces4(const Vector<double>& ,DenseMatrix<double>& ,unsigned& )
     {
         throw_runtime_error("Implement");
     }
@@ -1218,7 +1218,7 @@ PyramidGaussC2  PyramidElementC2::Default_integration_scheme;
     }
 
     // See WedgeElementBase::face_outer_unit_normal_sign(): always +1, the face node orderings above are already outward-consistent.
-    int PyramidElementBase::face_outer_unit_normal_sign(const int& face_index) const
+    int PyramidElementBase::face_outer_unit_normal_sign(const int& ) const
     {
       return 1;
     }

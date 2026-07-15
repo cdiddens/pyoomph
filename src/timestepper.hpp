@@ -90,7 +90,7 @@ namespace pyoomph
       WeightNewmark2(0, 0) = 1.0;
     }
 
-    MultiTimeStepper(const MultiTimeStepper &)
+    MultiTimeStepper(const MultiTimeStepper &) : oomph::TimeStepper()
     {
       oomph::BrokenCopy::broken_copy("MultiTimeStepper");
     }

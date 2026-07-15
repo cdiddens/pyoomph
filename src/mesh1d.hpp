@@ -72,7 +72,7 @@ namespace pyoomph
       oomph::BinaryTree::setup_static_data();
     }
     /// Broken copy constructor
-    TemplatedMeshBase1d(const TemplatedMeshBase1d &dummy) : pyoomph::Mesh(), TemplatedMeshBase()
+    TemplatedMeshBase1d(const TemplatedMeshBase1d &) : oomph::Mesh(), pyoomph::Mesh(), TemplatedMeshBase()
     {
       oomph::BrokenCopy::broken_copy("TemplatedMeshBase1d");
     }

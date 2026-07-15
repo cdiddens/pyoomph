@@ -131,7 +131,7 @@ class EigenMatrixManipulatorBase:
 
 	def resolve_equations_by_name(self,name:str) -> Set[int]:
 		from ..generic.problem import Problem
-		import pyoomph._pyoomph_core as _pyoomph
+		from .. import _pyoomph_core as _pyoomph
 		splt=name.split("/")
 		root=self.problem
 		fieldname=None
@@ -269,7 +269,7 @@ class EigenMatrixSetDofsToZero(EigenMatrixManipulatorBase):
 
 	def apply_on_J_and_M(self,solver:"GenericEigenSolver",J:DefaultMatrixType,M:DefaultMatrixType) -> Tuple[DefaultMatrixType, DefaultMatrixType]:
 		self.zeromap:Set[int]=set()
-		import pyoomph._pyoomph_core as _pyoomph
+		from .. import _pyoomph_core as _pyoomph
 		for d in self.doflist:
 			if isinstance(d,str):
 				eqs=self.resolve_equations_by_name(d)
@@ -293,7 +293,7 @@ class EigenMatrixSetDofsToZero(EigenMatrixManipulatorBase):
 
 	def apply_on_J_and_M___OLD(self,solver:"GenericEigenSolver",J:DefaultMatrixType,M:DefaultMatrixType) -> Tuple[DefaultMatrixType, DefaultMatrixType]:
 		# TODO OLD VERSION: Slow, remove
-		import pyoomph._pyoomph_core as _pyoomph
+		from .. import _pyoomph_core as _pyoomph
 		self.zeromap:Set[int]=set()
 		for d in self.doflist:
 			if isinstance(d,str):

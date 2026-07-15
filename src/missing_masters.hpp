@@ -184,7 +184,7 @@ namespace oomph
   // -- and can simply be reused by pointer, avoiding duplicate node objects for the same physical node.
   template <class EXT_ELEMENT>
   void Missing_masters_functions::add_external_halo_master_node_helper(Node *&new_master_nod_pt, Node *&new_nod_pt, Mesh *const &mesh_pt,
-                                                                       unsigned &loc_p, int &ncont_inter_values,
+                                                                       unsigned &loc_p, int &,
                                                                        unsigned &counter_for_recv_unsigneds,
                                                                        Vector<unsigned> &recv_unsigneds,
                                                                        unsigned &counter_for_recv_doubles,

@@ -54,7 +54,7 @@ namespace oomph
     }
 
     /// Broken copy constructor
-    RefineableTElement(const RefineableTElement<1> &dummy)
+    RefineableTElement(const RefineableTElement<1> &)
     {
       BrokenCopy::broken_copy("RefineableTElement<1>");
     }
@@ -70,7 +70,7 @@ namespace oomph
     virtual Node *node_created_by_neighbour(const Vector<double> &s_fraction, bool &is_periodic);
 
     // As above, but checking sons of neighbours (not yet implemented; always returns 0 here).
-    virtual Node *node_created_by_son_of_neighbour(const Vector<double> &s_fraction, bool &is_periodic)
+    virtual Node *node_created_by_son_of_neighbour(const Vector<double> &, bool &)
     {
       return 0;
     }
@@ -139,7 +139,7 @@ namespace oomph
     }
 
     /// Broken copy constructor
-    RefineableTElement(const RefineableTElement<2> &dummy)
+    RefineableTElement(const RefineableTElement<2> &)
     {
       BrokenCopy::broken_copy("RefineableTElement<2>");
     }
@@ -155,7 +155,7 @@ namespace oomph
     virtual Node *node_created_by_neighbour(const Vector<double> &s_fraction, bool &is_periodic);
 
     // As above, but checking sons of neighbours (not yet implemented; always returns 0 here).
-    virtual Node *node_created_by_son_of_neighbour(const Vector<double> &s_fraction, bool &is_periodic)
+    virtual Node *node_created_by_son_of_neighbour(const Vector<double> &, bool &)
     {
       return 0;
     }
@@ -224,7 +224,7 @@ namespace oomph
     }
 
     /// Broken copy constructor
-    RefineableTElement(const RefineableTElement<3> &dummy)
+    RefineableTElement(const RefineableTElement<3> &)
     {
       BrokenCopy::broken_copy("RefineableTElement<3>");
     }
@@ -244,7 +244,7 @@ namespace oomph
     virtual Node *node_created_by_neighbour(const Vector<double> &s_fraction, bool &is_periodic);
 
     // As above, but checking sons of neighbours (not yet implemented; always returns 0 here).
-    virtual Node *node_created_by_son_of_neighbour(const Vector<double> &s_fraction, bool &is_periodic)
+    virtual Node *node_created_by_son_of_neighbour(const Vector<double> &, bool &)
     {
       return 0;
     }

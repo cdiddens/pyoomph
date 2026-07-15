@@ -1,6 +1,6 @@
-from pyoomph import *
-from pyoomph.expressions import *
-from pyoomph.equations.ALE import BaseMovingMeshEquations
+from .. import *
+from ..expressions import *
+from .ALE import BaseMovingMeshEquations
 
 class BaseSolidConstitutiveLaw:
     """
@@ -37,7 +37,7 @@ class BaseSolidConstitutiveLaw:
         # G^ij=(G^(-1))_ij
         Gij=self.get_Gij(dim)        
         if self.use_inverse_routine:
-            from pyoomph.expressions.tensor_funcs import InvertMatrix
+            from ..expressions.tensor_funcs import InvertMatrix
             #inv=InvertSymmetricMatrix(n=dim)        
             inv=InvertMatrix(n=dim,matrix_type="symmetric")            
             return self._subexpression(inv(Gij))
@@ -341,7 +341,7 @@ class FSIConnection(InterfaceEquations):
         self.define_vector_field("_velo_connection","C2",testscale=scale_factor("temporal")/scale_factor("spatial"),scale=scale_factor("pressure"))
         
     def define_residuals(self):
-        from pyoomph.equations.navier_stokes import StokesEquations
+        from .navier_stokes import StokesEquations
         floweqs=self.get_parent_domain().get_equations().get_equation_of_type(StokesEquations,always_as_list=True)
         solideqs=self.get_opposite_parent_domain().get_equations().get_equation_of_type(BaseDeformableSolidEquations,always_as_list=True)
         if len(floweqs) != 1 or len(solideqs) != 1:

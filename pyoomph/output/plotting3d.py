@@ -83,7 +83,7 @@ class PyVistaPlotter(BasePlotter):
         
         
     def _get_meshio_data(self,msh:Union[str,"AnySpatialMesh"],problem_name:str=""):
-        from pyoomph.output.meshio import _convert_mesh_to_meshio
+        from .meshio import _convert_mesh_to_meshio
         return _convert_mesh_to_meshio(self.get_problem(), self._get_mesh_data(msh,problem_name=problem_name))
 
 

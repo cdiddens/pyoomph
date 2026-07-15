@@ -35,7 +35,7 @@ from ..typings import *
 
 import numpy
 
-import pyoomph._pyoomph_core as _pyoomph
+from .. import _pyoomph_core as _pyoomph
 
 from ..expressions.generic import Expression, ExpressionOrNum, is_zero, NameStrSequence
 from ..generic.mpi import get_mpi_rank
@@ -530,10 +530,10 @@ class MeshTemplate(_pyoomph.MeshTemplate):
                 lambda: self.remesher._cnt, lambda s: s)  # type:ignore
         if found_mshfile != mshfile:
             # We need to load the remeshed version here
-            import pyoomph.meshes.gmsh
+            from . import gmsh
             statedir = os.path.dirname(state.fname)
             fffound_mshfile = os.path.join(statedir, found_mshfile)
-            newtempl = pyoomph.meshes.gmsh.GmshTemplate(fffound_mshfile)
+            newtempl = gmsh.GmshTemplate(fffound_mshfile)
             newtempl.remesher = self.remesher
             assert self._problem is not None
             newtempl._do_define_geometry(self._problem)
@@ -854,9 +854,9 @@ class MeshFromTemplateBase(BaseMesh):
         return self.get_code_gen().get_code().get_nodal_field_indices()
 
     def recreate_boundary_information(self):
-        import pyoomph
+        from .. import get_dev_option
 
-        if self.refinement_possible() or (pyoomph.get_dev_option("allow_tri_refine") and self.get_dimension() == 2):
+        if self.refinement_possible() or (get_dev_option("allow_tri_refine") and self.get_dimension() == 2):
             self.setup_tree_forest()
 
         self.setup_boundary_element_info()
@@ -889,9 +889,9 @@ class MeshFromTemplateBase(BaseMesh):
         self.generate_from_template(
             self._templatemesh.get_template().get_domain(self._name))
         # if self.refinement_possible():
-        import pyoomph
+        from .. import get_dev_option
 
-        if self.refinement_possible() or (pyoomph.get_dev_option("allow_tri_refine") and self.get_dimension() == 2):
+        if self.refinement_possible() or (get_dev_option("allow_tri_refine") and self.get_dimension() == 2):
             self.setup_tree_forest()
 
         self.setup_boundary_element_info()

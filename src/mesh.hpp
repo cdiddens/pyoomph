@@ -117,7 +117,7 @@ namespace pyoomph
 		virtual std::vector<std::string> list_local_expressions();
 		// Fill buffers describing internal facets (element faces shared between two bulk elements) and, for
 		// periodic/interface meshes, their opposite-side counterparts. Dimension-specific; base class throws.
-		virtual void fill_internal_facet_buffers(std::vector<BulkElementBase *> &internal_elements, std::vector<int> &internal_face_dir, std::vector<BulkElementBase *> &opposite_elements, std::vector<int> &opposite_face_dir, std::vector<int> &opposite_already_at_index) { throw_runtime_error("Please specify this function for each dimension"); }
+		virtual void fill_internal_facet_buffers(std::vector<BulkElementBase *> &, std::vector<int> &, std::vector<BulkElementBase *> &, std::vector<int> &, std::vector<int> &) { throw_runtime_error("Please specify this function for each dimension"); }
 		// Build an InterfaceMesh of elements attached to the boundary/interface named intername, using the
 		// JIT-compiled interface element code jitcode; imesh is the interface mesh to populate.
 		virtual void generate_interface_elements(std::string intername, Mesh *imesh, DynamicBulkElementInstance *jitcode);
@@ -221,8 +221,8 @@ namespace pyoomph
 		virtual void fill_internal_facet_buffers(std::vector<BulkElementBase *> &internal_elements, std::vector<int> &internal_face_dir, std::vector<BulkElementBase *> &opposite_elements, std::vector<int> &opposite_face_dir, std::vector<int> &opposite_already_at_index);
 		std::vector<oomph::FiniteElement *> opposite_interior_facets; // Facets on the geometrically opposite side (e.g. periodic partner), matched to this mesh's facets by index
 		virtual double get_temporal_error_norm_contribution();
-		virtual void adapt(const oomph::Vector<double> &elemental_error) {}
-		virtual void refine_uniformly(oomph::DocInfo &doc_info) {}
+		virtual void adapt(const oomph::Vector<double> &) {}
+		virtual void refine_uniformly(oomph::DocInfo &) {}
 		virtual unsigned unrefine_uniformly() { return 0; }
 		// Undo prior interface-element rebuild state before the bulk mesh is adapted (interface elements are
 		// rebuilt afterwards from the new bulk mesh via rebuild_after_adapt).
@@ -261,8 +261,8 @@ namespace pyoomph
 		ODEStorageMesh();
 		virtual ~ODEStorageMesh();
 		virtual double get_temporal_error_norm_contribution();
-		virtual void adapt(const oomph::Vector<double> &elemental_error) {}
-		virtual void refine_uniformly(oomph::DocInfo &doc_info) {}
+		virtual void adapt(const oomph::Vector<double> &) {}
+		virtual void refine_uniformly(oomph::DocInfo &) {}
 		virtual unsigned unrefine_uniformly() { return 0; }
 		virtual void setup_initial_conditions(bool resetting_first_step, std::string ic_name);
 		virtual void setup_Dirichlet_conditions(bool only_update_vals);
@@ -313,7 +313,7 @@ namespace pyoomph
 	{
 	public:
 		/// Broken copy constructor
-		DynamicTreeRoot(const DynamicTreeRoot &dummy) : DynamicTree(NULL), oomph::TreeRoot(NULL)
+		DynamicTreeRoot(const DynamicTreeRoot &) : oomph::Tree(), DynamicTree(NULL), oomph::TreeRoot(NULL)
 		{
 			oomph::BrokenCopy::broken_copy("DynamicTreeRoot");
 		}
@@ -398,12 +398,12 @@ namespace pyoomph
 		//	Problem * get_problem() {return problem;}
 
 		/// Broken copy constructor
-		TemplatedMeshBase(const TemplatedMeshBase &dummy) : pyoomph::Mesh()
+		TemplatedMeshBase(const TemplatedMeshBase &) : oomph::Mesh(), pyoomph::Mesh()
 		{
 			oomph::BrokenCopy::broken_copy("TemplatedMeshBase");
 		}
 
-		virtual void setup_interior_boundary_elements(unsigned bindex) {} // Tri meshes must add internal boundary elements by hand
+		virtual void setup_interior_boundary_elements(unsigned ) {} // Tri meshes must add internal boundary elements by hand
 
 		/// Broken assignment operator
 		void operator=(const TemplatedMeshBase &)

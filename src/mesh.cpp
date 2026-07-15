@@ -901,7 +901,6 @@ namespace pyoomph
       return;
     auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(0));
     auto *ft = el->get_code_instance()->get_func_table();
-    auto *ci = el->get_code_instance();
     auto mustpin = [&](std::string name)
     {
       if (only_dofs.empty())
@@ -1052,7 +1051,7 @@ namespace pyoomph
 
   // Not yet implemented on the base Mesh class (always throws); presumably meant to classify each dof
   // by type into typarr, analogous to describe_global_dofs.
-  void Mesh::fill_dof_types(int *typarr)
+  void Mesh::fill_dof_types(int *)
   {
     throw_runtime_error("Implement");
   }
@@ -1144,7 +1143,7 @@ namespace pyoomph
   // approach: locate each zeta coordinate in the mesh via oomph::MeshAsGeomObject::locate_zeta and
   // evaluate/interpolate all fields there, optionally applying output_scales, marking entries whose
   // zeta could not be located in masked_lines.
-  std::vector<std::vector<double>> Mesh::get_values_at_zetas(const std::vector<std::vector<double>> &zetas, std::vector<bool> &masked_lines, bool with_scales)
+  std::vector<std::vector<double>> Mesh::get_values_at_zetas(const std::vector<std::vector<double>> &, std::vector<bool> &, bool)
   {
     throw_runtime_error("Implement");
     /*
@@ -3828,7 +3827,7 @@ namespace pyoomph
 
   // Applies a named initial condition to every stored ODE that defines one; ODEs
   // without a matching IC name are silently skipped.
-  void ODEStorageMesh::setup_initial_conditions(bool resetting_first_step, std::string ic_name)
+  void ODEStorageMesh::setup_initial_conditions(bool, std::string ic_name)
   {
     double x_buffer[3] = {0, 0, 0};
     double normal[3] = {0, 0, 0};
@@ -4299,7 +4298,7 @@ namespace pyoomph
   // (points as boundary "faces"): a vertex node of a line element that also lies on
   // one of the parent's possible_bounds boundaries makes that element a boundary
   // element there, with Face_index +/-1 marking the left/right end.
-  void InterfaceMesh::setup_boundary_information1d(pyoomph::Mesh *parent, const std::set<unsigned> &possible_bounds)
+  void InterfaceMesh::setup_boundary_information1d(pyoomph::Mesh *, const std::set<unsigned> &possible_bounds)
   {
     // const unsigned n_bound = nboundary();
     oomph::MapMatrixMixed<unsigned, oomph::FiniteElement *, oomph::Vector<int> *> boundary_identifier;
@@ -4350,7 +4349,7 @@ namespace pyoomph
   // edges; tris: 0,1,2), intersects the boundary sets of every node on that face
   // with the running set of possible boundaries. What remains after visiting all of
   // the face's nodes is the set of boundaries the whole face lies on.
-  void InterfaceMesh::setup_boundary_information2d(pyoomph::Mesh *parent, const std::set<unsigned> &possible_bounds)
+  void InterfaceMesh::setup_boundary_information2d(pyoomph::Mesh *, const std::set<unsigned> &possible_bounds)
   {
     // const unsigned n_bound = nboundary();
     oomph::MapMatrixMixed<unsigned, oomph::FiniteElement *, oomph::Vector<int> *> boundary_identifier;
@@ -5386,7 +5385,7 @@ namespace pyoomph
   // is more robust than the purely node-based approach in mixed-corner situations,
   // but is only valid for non-adaptive meshes since it relies on the original
   // template's facet topology (see TemplatedMeshBase3d::setup_boundary_element_info).
-  void  TemplatedMeshBase::setup_boundary_element_info(std::ostream &outfile)
+  void  TemplatedMeshBase::setup_boundary_element_info(std::ostream &)
   {
     if (!identication_of_boundary_elements_by_facets)
     {

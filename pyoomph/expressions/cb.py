@@ -26,7 +26,7 @@
 # ========================================================================
  
  
-import pyoomph._pyoomph_core as _pyoomph
+from .. import _pyoomph_core as _pyoomph
 from abc import abstractmethod
 import numpy
 from ..typings import *

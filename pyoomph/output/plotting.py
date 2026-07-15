@@ -55,7 +55,7 @@ from scipy import interpolate #type:ignore
 from ..typings import *
 import numpy
 
-import pyoomph._pyoomph_core as _pyoomph
+from .. import _pyoomph_core as _pyoomph
 
 
 import matplotlib.image as mpimg

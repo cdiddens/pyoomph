@@ -63,8 +63,8 @@ namespace oomph
   {
     public:
       unsigned nweight() const override {return 1;}
-      double knot(const unsigned& i, const unsigned& j) const override {return -1;}
-      double weight(const unsigned& i) const override { return 1;}
+      double knot(const unsigned&, const unsigned&) const override {return -1;}
+      double weight(const unsigned&) const override { return 1;}
   };
 }
 
@@ -981,10 +981,10 @@ namespace pyoomph
   /// be required
   //========================================================================
   void MyHopfHandler::get_djacobian_dparameter(
-      GeneralisedElement *const &elem_pt,
-      double *const &parameter_pt,
-      Vector<double> &dres_dparam,
-      DenseMatrix<double> &djac_dparam)
+      GeneralisedElement *const &,
+      double *const &,
+      Vector<double> &,
+      DenseMatrix<double> &)
   {
     std::ostringstream error_stream;
     error_stream << "This function has not been implemented because it is not required\n";
@@ -1742,7 +1742,7 @@ namespace pyoomph
     }
   }
 
-  void MyFoldHandler::get_djacobian_dparameter(GeneralisedElement *const &elem_pt, double *const &parameter_pt, Vector<double> &dres_dparam, DenseMatrix<double> &djac_dparam)
+  void MyFoldHandler::get_djacobian_dparameter(GeneralisedElement *const &, double *const &, Vector<double> &, DenseMatrix<double> &)
   {
     std::ostringstream error_stream;
     error_stream << "This function has not been implemented because it is not required\n";
@@ -2281,7 +2281,7 @@ namespace pyoomph
       }
     }
   }
-  void MyPitchForkHandler::get_djacobian_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam, oomph::DenseMatrix<double> &djac_dparam)
+  void MyPitchForkHandler::get_djacobian_dparameter(oomph::GeneralisedElement *const &, double *const &, oomph::Vector<double> &, oomph::DenseMatrix<double> &)
   {
     throw_runtime_error("implement");
   }
@@ -3185,7 +3185,7 @@ namespace pyoomph
   }
 
   // Derivative of the augmented Jacobian with respect to the parameter
-  void AzimuthalSymmetryBreakingHandler::get_djacobian_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam, oomph::DenseMatrix<double> &djac_dparam)
+  void AzimuthalSymmetryBreakingHandler::get_djacobian_dparameter(oomph::GeneralisedElement *const &, double *const &, oomph::Vector<double> &, oomph::DenseMatrix<double> &)
   {
     throw_runtime_error("AzimuthalSymmetryBreakingHandler::get_djacobian_dparameter(oomph::GeneralisedElement* const &elem_pt,double* const &parameter_pt,oomph::Vector<double> &dres_dparam,oomph::DenseMatrix<double> &djac_dparam)");
     // TODO: Fill it
@@ -4087,7 +4087,6 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
           Uplus[i]=Tadd[ti][glob_eqs[i]];
         }
         double invds=this->FD_ds_weights[ti][0];
-        unsigned index0;         //,indexplus
         for (unsigned int i=0;i<raw_ndof;i++)
         {
             U[i]=0.5*(U0[i]+Uplus[i]);
@@ -5659,7 +5658,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
   }
 
 
-  void PeriodicOrbitHandler::get_djacobian_dparameter(GeneralisedElement *const &elem_pt,double *const &parameter_pt,Vector<double> &dres_dparam,DenseMatrix<double> &djac_dparam)
+  void PeriodicOrbitHandler::get_djacobian_dparameter(GeneralisedElement *const &,double *const &,Vector<double> &,DenseMatrix<double> &)
   {
     throw_runtime_error("Not implemented");
 
@@ -5710,7 +5709,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
           if (this->transposed_hessians) throw_runtime_error("Cannot assemble transposed and non-transposed Hessian vector products simultaneously");
           has_nontransposed=true;          
         }
-        if (hessian_vector_indices[i]>=hessian_vectors.size()) throw_runtime_error("Hessian vector index out of bounds");
+        if (static_cast<size_t>(hessian_vector_indices[i])>=hessian_vectors.size()) throw_runtime_error("Hessian vector index out of bounds");
         hvindex++;
       }      
     }
@@ -5837,12 +5836,12 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
     return elem_pt->eqn_number(ieqn_local);
   }
   
-  void CustomMultiAssembleHandler::get_residuals(oomph::GeneralisedElement* const& elem_pt,Vector<double>& residuals)
+  void CustomMultiAssembleHandler::get_residuals(oomph::GeneralisedElement* const&,Vector<double>&)
   {
     throw_runtime_error("Residual called");
   }
 
-  void CustomMultiAssembleHandler::get_jacobian(oomph::GeneralisedElement* const& elem_pt,oomph::Vector<double>& residuals,oomph::DenseMatrix<double>& jacobian)
+  void CustomMultiAssembleHandler::get_jacobian(oomph::GeneralisedElement* const&,oomph::Vector<double>&,oomph::DenseMatrix<double>&)
   {
     throw_runtime_error("Jacobian called");
   }

@@ -36,7 +36,7 @@ from ..expressions.generic import Expression, ExpressionNumOrNone, ExpressionOrN
 from .mesh import MeshTemplate
 
 # from .meshio import MeshioMesh2d
-import pyoomph._pyoomph_core as _pyoomph
+from .. import _pyoomph_core as _pyoomph
 import pygmsh #type:ignore
 from pygmsh.common.point import Point #type:ignore
 

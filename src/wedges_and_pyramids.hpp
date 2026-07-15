@@ -796,7 +796,7 @@ class RefineableWedgeElement : public virtual RefineableElement, public virtual 
     }
 
     /// Broken copy constructor
-    RefineableWedgeElement(const RefineableWedgeElement &dummy)
+    RefineableWedgeElement(const RefineableWedgeElement &)
     {
       BrokenCopy::broken_copy("RefineableWedgeElement");
     }
@@ -817,7 +817,7 @@ class RefineableWedgeElement : public virtual RefineableElement, public virtual 
     virtual Node *node_created_by_neighbour(const Vector<double> &s_fraction, bool &is_periodic);
 
     // Not used/needed here: always report that no such node exists
-    virtual Node *node_created_by_son_of_neighbour(const Vector<double> &s_fraction, bool &is_periodic)
+    virtual Node *node_created_by_son_of_neighbour(const Vector<double> &, bool &)
     {
       return 0;
     }
@@ -919,7 +919,7 @@ class RefineablePyramidElement : public virtual RefineableElement, public virtua
     }
 
     /// Broken copy constructor
-    RefineablePyramidElement(const RefineablePyramidElement &dummy)
+    RefineablePyramidElement(const RefineablePyramidElement &)
     {
       BrokenCopy::broken_copy("RefineablePyramidElement");
     }
@@ -940,7 +940,7 @@ class RefineablePyramidElement : public virtual RefineableElement, public virtua
     virtual Node *node_created_by_neighbour(const Vector<double> &s_fraction, bool &is_periodic);
 
     // Not used/needed here: always report that no such node exists
-    virtual Node *node_created_by_son_of_neighbour(const Vector<double> &s_fraction, bool &is_periodic)
+    virtual Node *node_created_by_son_of_neighbour(const Vector<double> &, bool &)
     {
       return 0;
     }

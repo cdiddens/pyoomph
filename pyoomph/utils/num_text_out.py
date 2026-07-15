@@ -26,7 +26,7 @@
 # ========================================================================
  
 from .. import Expression
-import pyoomph._pyoomph_core as _pyoomph 
+from .. import _pyoomph_core as _pyoomph 
 import numpy
 from ..typings import *
 
@@ -107,12 +107,18 @@ class LoadedTextDataFile:
                     
         
 
-    def get_column_index(self, index_or_name_start: Union[Sequence[Union[str, int]], str, int], exact_name: bool = False) -> NPFloatArray:
+    @overload
+    def get_column_index(self, index_or_name_start: Union[List[Union[str,int]],Tuple[Union[str,int],...]], exact_name: bool = False) -> NPIntArray: ...
+
+    @overload
+    def get_column_index(self, index_or_name_start: Union[str,int], exact_name: bool = False) -> int: ...
+
+    def get_column_index(self, index_or_name_start: Union[List[Union[str,int]],Tuple[Union[str,int],...], str, int], exact_name: bool = False) -> Union[int,NPIntArray]:
         if isinstance(index_or_name_start, (list, tuple)):
-            rs: List[NPFloatArray] = []
+            rs: List[int] = []
             for i in index_or_name_start:
-                rs.append(self.get_column(i, exact_name=exact_name))
-            return numpy.vstack(rs).transpose()  # type:ignore
+                rs.append(self.get_column_index(i, exact_name=exact_name))
+            return numpy.array(rs, dtype=numpy.int32)
 
         if isinstance(index_or_name_start, str):
             # Find a unique column
@@ -132,12 +138,15 @@ class LoadedTextDataFile:
             
         return index
 
-    def get_column_data(self, index_or_name_start: Union[Sequence[Union[str, int]], str, int], exact_name: bool = False) -> NPFloatArray:
+    def get_column_data(self, index_or_name_start: Union[List[Union[str,int]],Tuple[Union[str,int],...], str, int], exact_name: bool = False) -> NPFloatArray:
         index=self.get_column_index(index_or_name_start, exact_name=exact_name)
         return self.data[:, index]  # type:ignore
 
 
-    def _translate(self, key):        
+    # The key here mirrors numpy's own flexible __getitem__/__setitem__ key argument
+    # (int, str column name, slice, list/tuple of any of those, nested arbitrarily),
+    # so it is genuinely dynamically typed rather than a typing gap to close.
+    def _translate(self, key:Any) -> Any:
         if isinstance(key, str):
             return self.get_column_index(key)
 
@@ -152,9 +161,9 @@ class LoadedTextDataFile:
         if isinstance(key, tuple):
             return tuple(self._translate(k) for k in key)
 
-        return key    
-    
-    def __getitem__(self, key):       
+        return key
+
+    def __getitem__(self, key:Any) -> Any:
         if isinstance(key,str) and self.access_params_via_brackets and key in self.params:
             return self.params[key]
         if not isinstance(key, tuple):
@@ -162,7 +171,7 @@ class LoadedTextDataFile:
                 key = (slice(None), key)
         return self.data[self._translate(key)]
 
-    def __setitem__(self, key, value):
+    def __setitem__(self, key:Any, value:Any) -> None:
         if isinstance(key,str) and self.access_params_via_brackets and key in self.params:
             self.params[key]=value
             return
@@ -171,8 +180,8 @@ class LoadedTextDataFile:
                 key = (slice(None), key)
         self.data[self._translate(key)] = value
 
-    def __getattr__(self, name):
+    def __getattr__(self, name:str) -> Any:
         return getattr(self.data, name)
-    
-    def __array__(self, dtype=None):
+
+    def __array__(self, dtype:Any=None) -> NPFloatArray:
         return numpy.asarray(self.data, dtype=dtype)

@@ -84,7 +84,7 @@ namespace pyoomph
       // First derivative w.r.t. nodal coordinate "direction"
       SpatialIntegralSymbol(FiniteElementCode *_code, bool _lagrangian, int direction) : code(_code), lagrangian(_lagrangian), derived(true), derived2(false), derived_by_second_index(false), deriv_direction(direction), deriv_direction2(0) {}
       // First derivative, but taken w.r.t. the second shape-function loop index (used when assembling the Hessian)
-      SpatialIntegralSymbol(FiniteElementCode *_code, bool _lagrangian, int direction, std::string second_index_dummy) : code(_code), lagrangian(_lagrangian), derived(true), derived2(false), derived_by_second_index(true), deriv_direction(direction), deriv_direction2(0) {}
+      SpatialIntegralSymbol(FiniteElementCode *_code, bool _lagrangian, int direction, std::string ) : code(_code), lagrangian(_lagrangian), derived(true), derived2(false), derived_by_second_index(true), deriv_direction(direction), deriv_direction2(0) {}
       // Second (mixed) derivative w.r.t. nodal coordinates "direction" and "direction2"
       SpatialIntegralSymbol(FiniteElementCode *_code, bool _lagrangian, int direction, int direction2) : code(_code), lagrangian(_lagrangian), derived(true), derived2(true), derived_by_second_index(false), deriv_direction(direction), deriv_direction2(direction2) {}
    };
@@ -115,7 +115,7 @@ namespace pyoomph
       const FiniteElementCode *get_code() const { return code; }
       ElementSizeSymbol(FiniteElementCode *_code, bool _lagrangian, bool _consider_coordsys) : code(_code), lagrangian(_lagrangian), consider_coordsys(_consider_coordsys), derived(false), derived2(false), derived_by_second_index(false), deriv_direction(0), deriv_direction2(0) {}
       ElementSizeSymbol(FiniteElementCode *_code, bool _lagrangian, bool _consider_coordsys, int direction) : code(_code), lagrangian(_lagrangian), consider_coordsys(_consider_coordsys), derived(true), derived2(false), derived_by_second_index(false), deriv_direction(direction), deriv_direction2(0) {}
-      ElementSizeSymbol(FiniteElementCode *_code, bool _lagrangian, bool _consider_coordsys, int direction, std::string second_index_dummy) : code(_code), lagrangian(_lagrangian), consider_coordsys(_consider_coordsys), derived(true), derived2(false), derived_by_second_index(true), deriv_direction(direction), deriv_direction2(0) {}
+      ElementSizeSymbol(FiniteElementCode *_code, bool _lagrangian, bool _consider_coordsys, int direction, std::string ) : code(_code), lagrangian(_lagrangian), consider_coordsys(_consider_coordsys), derived(true), derived2(false), derived_by_second_index(true), deriv_direction(direction), deriv_direction2(0) {}
       ElementSizeSymbol(FiniteElementCode *_code, bool _lagrangian, bool _consider_coordsys, int direction, int direction2) : code(_code), lagrangian(_lagrangian), consider_coordsys(_consider_coordsys), derived(true), derived2(true), derived_by_second_index(false), deriv_direction(direction), deriv_direction2(direction2) {}
    };
 
@@ -448,7 +448,7 @@ namespace GiNaC
       public:
         std::string vname;
         SortedGiNaCSymbol(const std::string & vname) : SortedGiNaC(), vname(vname) {}
-        virtual std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override {return vname;}
+        virtual std::string to_string(std::ostream &, GiNaC::print_FEM_options &) override {return vname;}
         virtual int add_order() override {return 2;}
         virtual int mul_order() override {return 2;}
     };
@@ -484,8 +484,8 @@ namespace pyoomph
    class LaTeXPrinter
    {
    public:
-      virtual void _add_LaTeX_expression(std::map<std::string, std::string> info, std::string expr, FiniteElementCode *code) {}  // Will be implemented by python
-      virtual std::string _get_LaTeX_expression(std::map<std::string, std::string> info, FiniteElementCode *code) { return ""; } // Will be implemented by python
+      virtual void _add_LaTeX_expression(std::map<std::string, std::string> , std::string , FiniteElementCode *) {}  // Will be implemented by python
+      virtual std::string _get_LaTeX_expression(std::map<std::string, std::string> , FiniteElementCode *) { return ""; } // Will be implemented by python
       // Renders expression to LaTeX and forwards it (together with the free-form "info" tags) to the Python-side sink
       void print(std::map<std::string, std::string> info, const GiNaC::ex &expression, GiNaC::print_FEM_options &ops)
       {
@@ -661,7 +661,7 @@ namespace pyoomph
    public:
       virtual std::string get_eqn_number_str(FiniteElementCode *forcode) const;
       virtual bool is_external() { return false; } // True for spaces belonging to an externally coupled element (e.g. external data/ODE)
-      virtual bool is_basis_derivative_zero(BasisFunction *b, unsigned dir) { return false; } // True if the spatial derivative of b in direction dir is identically zero (e.g. piecewise-constant D0 spaces)
+      virtual bool is_basis_derivative_zero(BasisFunction *, unsigned ) { return false; } // True if the spatial derivative of b in direction dir is identically zero (e.g. piecewise-constant D0 spaces)
       virtual std::string get_num_nodes_str(FiniteElementCode *forcode) const;
       virtual void write_spatial_interpolation(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, std::set<ShapeExpansion> &required_shapeexps, bool including_nodal_diffs, bool for_hessian);
       virtual void write_nodal_time_interpolation(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, std::set<ShapeExpansion> &required_shapeexps);
@@ -731,8 +731,8 @@ namespace pyoomph
    class D0BasisFunction : public BasisFunction
    {
    public:
-      virtual std::string get_c_varname(FiniteElementCode *forcode, std::string test_index) { return "1"; }
-      virtual std::string get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const { return "1"; }
+      virtual std::string get_c_varname(FiniteElementCode *, std::string ) { return "1"; }
+      virtual std::string get_shape_string(FiniteElementCode *, std::string ) const { return "1"; }
       D0BasisFunction(FiniteElementSpace *_space) : BasisFunction(_space) {}
    };
 
@@ -740,7 +740,7 @@ namespace pyoomph
    {
    public:
       virtual std::string get_num_nodes_str(FiniteElementCode *forcode) const;
-      virtual bool is_basis_derivative_zero(BasisFunction *b, unsigned dir) { return true; } // All spatial derivatives are zero
+      virtual bool is_basis_derivative_zero(BasisFunction *, unsigned ) { return true; } // All spatial derivatives are zero
       D0FiniteElementSpace(FiniteElementCode *_code, const std::string &_name) : DiscontinuousFiniteElementSpace(_code, _name)
       {
          if (Basis)
@@ -994,14 +994,14 @@ namespace pyoomph
       virtual void set_opposite_interface_code(FiniteElementCode *_opposite_interface_code) { opposite_interface_code = _opposite_interface_code; }
       virtual FiniteElementCode *get_opposite_interface_code() { return opposite_interface_code; }
 
-      virtual FiniteElementCode *_resolve_based_on_domain_name(std::string name) { return NULL; } // Overloaded in Python to resolve a domain-name string to the corresponding FiniteElementCode
+      virtual FiniteElementCode *_resolve_based_on_domain_name(std::string ) { return NULL; } // Overloaded in Python to resolve a domain-name string to the corresponding FiniteElementCode
 
       virtual std::string get_shapes_required_string(std::string func_type, FiniteElementSpace *space, std::string dx_type);
       virtual void write_required_shapes(std::ostream &os, const std::string indent, std::string func_type); // Emits the "which shapes to fill" flags for func_type based on the required_shapes map
       virtual void mark_further_required_fields(GiNaC::ex expr, const std::string &for_what); // Scans expr for shape expansions/test functions and marks their shapes/spaces as required (and, for other codes, their contribution)
       virtual void mark_shapes_required(std::string func_type, FiniteElementSpace *space, std::string dx_type);
       virtual void mark_shapes_required(std::string func_type, FiniteElementSpace *space, BasisFunction *bf);
-      virtual GiNaC::ex get_scaling(std::string name, bool testscale = false) { return 1; } // Nondimensionalization scale factor for field/parameter "name"; overloaded in Python, default is unscaled (1)
+      virtual GiNaC::ex get_scaling(std::string , bool  = false) { return 1; } // Nondimensionalization scale factor for field/parameter "name"; overloaded in Python, default is unscaled (1)
 
       virtual void add_Z2_flux(GiNaC::ex flux,bool for_eigen); // Registers a flux expression for the Z2 error estimator (expands vector/matrix expressions into one entry per component)
       virtual int get_dimension() const { return element_dim; }
@@ -1058,8 +1058,8 @@ namespace pyoomph
       virtual void write_code(std::ostream &os); // Top-level driver: writes the full generated C++ source for this element (calls the write_code_*()/write_generic_*() methods for every residual)
       virtual GiNaC::ex get_dx(bool lagrangian,bool unity_only=false); // Returns the (cached) dx/dX integration-measure symbol wrapped as a GiNaC::ex
       virtual GiNaC::ex get_element_size_symbol(bool lagrangian, bool with_coordsys);
-      virtual GiNaC::ex get_integral_dx(bool use_scaling, bool lagrangian, CustomCoordinateSystem *coordsys) { return get_dx(lagrangian); }
-      virtual GiNaC::ex get_element_size(bool use_scaling, bool lagrangian, bool with_coordsys, CustomCoordinateSystem *coordsys) { return get_element_size_symbol(lagrangian, with_coordsys); }
+      virtual GiNaC::ex get_integral_dx(bool , bool lagrangian, CustomCoordinateSystem *) { return get_dx(lagrangian); }
+      virtual GiNaC::ex get_element_size(bool , bool lagrangian, bool with_coordsys, CustomCoordinateSystem *) { return get_element_size_symbol(lagrangian, with_coordsys); }
       virtual GiNaC::ex get_nodal_delta(); // Returns the (cached) nodal-delta symbol wrapped as a GiNaC::ex
       virtual GiNaC::ex get_normal_component(unsigned i); // Returns component i of the outward normal as a GiNaC::ex (NormalSymbol)
       //virtual GiNaC::ex get_normal_component_eigenexpansion(unsigned i); // Used for azimuthal eigenstab only. Gives dn_i/dX^{0l}_j * X^{ml}_j
@@ -1082,15 +1082,15 @@ namespace pyoomph
       virtual std::string get_nodal_data_string(const FiniteElementSpace *sp);
       virtual void finalise(); // Locks in the residual definitions and prepares the code for write_code() (space/field discovery, index assignment, etc.)
       virtual void _do_define_fields(int element_dimension);
-      virtual GiNaC::ex expand_additional_field(const std::string &name, const bool &dimensional, const GiNaC::ex &expr, FiniteElementCode *in_domain, bool no_jacobian, bool no_hessian, std::string where) { return expr; } // Overloaded in Python to expand domain-specific pseudo-fields (e.g. derived/auxiliary quantities) into real expressions
-      virtual GiNaC::ex expand_additional_testfunction(const std::string &name, const GiNaC::ex &expr, FiniteElementCode *in_domain) { return expr; } // Overloaded in Python, analogous to expand_additional_field() but for test functions
+      virtual GiNaC::ex expand_additional_field(const std::string &, const bool &, const GiNaC::ex &expr, FiniteElementCode *, bool , bool , std::string ) { return expr; } // Overloaded in Python to expand domain-specific pseudo-fields (e.g. derived/auxiliary quantities) into real expressions
+      virtual GiNaC::ex expand_additional_testfunction(const std::string &, const GiNaC::ex &expr, FiniteElementCode *) { return expr; } // Overloaded in Python, analogous to expand_additional_field() but for test functions
 
       virtual std::string get_default_timestepping_scheme(unsigned int dt_order) { return (dt_order == 1 ? "BDF2" : "Newmark2"); }
       virtual unsigned get_default_spatial_integration_order() { return 0; }
       virtual void set_initial_condition(const std::string &name, GiNaC::ex expr, std::string degraded_start, const std::string &ic_name);
       virtual void set_Dirichlet_bc(const std::string &name, GiNaC::ex expr, bool use_identity);
       virtual void _define_element(); // Forwards to equations->_define_element() (adds the residual contributions); overridden/called from Python
-      virtual void _register_external_ode_linkage(std::string my_fieldname, FiniteElementCode *odecode, std::string odefieldname) {} // Overloaded in Python to record that my_fieldname is coupled to odefieldname on an external ODE code
+      virtual void _register_external_ode_linkage(std::string , FiniteElementCode *, std::string ) {} // Overloaded in Python to record that my_fieldname is coupled to odefieldname on an external ODE code
 
       virtual GiNaC::ex derive_expression(const GiNaC::ex &what, const GiNaC::ex by); // Symbolically differentiates "what" w.r.t. "by", accounting for the pyoomph-specific symbol types (ShapeExpansion, TestFunction, etc.)
 

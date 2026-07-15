@@ -25,8 +25,8 @@
 #
 # ========================================================================
  
-from pyoomph.expressions import Expression
-from pyoomph.expressions.units import Expression
+from ..expressions import Expression
+from ..expressions.units import Expression
 
 from ..expressions import Union
 from ..expressions.units import Union

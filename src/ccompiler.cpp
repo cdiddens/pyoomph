@@ -66,7 +66,7 @@ namespace pyoomph
   // Actual compilation is delegated to a derived class (typically a Python-side compiler
   // implementation that shells out to a system C++ compiler); the C++ base class does not
   // implement compilation itself.
-  bool CCompiler::compile(bool suppress_compilation, bool suppress_code_writing, bool quiet, const std::vector<std::string> &extra_flags)
+  bool CCompiler::compile(bool, bool, bool, const std::vector<std::string> &)
   {
      throw_runtime_error("This method should be implemented in a derived class");
     return false;

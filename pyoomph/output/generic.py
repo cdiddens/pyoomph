@@ -35,7 +35,7 @@ from ..meshes.mesh import ODEStorageMesh
 
 from ..generic.codegen import BaseEquations
 import inspect
-import pyoomph._pyoomph_core as _pyoomph
+from .. import _pyoomph_core as _pyoomph
 
 from scipy.io import savemat,loadmat #type:ignore
 
@@ -1047,7 +1047,7 @@ class _IntegralObservableOutput(_BaseOutputter):
         
 
     def _eval_dependent_funcs(self,intres:Dict[str,Expression]) -> Dict[str, float]:
-        import pyoomph.equations.generic
+        from ..equations.generic import DependentIntegralObservable
         deps=self._mesh.get_code_gen()._dependent_integral_funcs #type:ignore
         args:Dict[str,Expression]={k:v for k,v in intres.items()}
         res:Dict[str,Expression] = {k: v for k, v in intres.items()}
@@ -1060,7 +1060,7 @@ class _IntegralObservableOutput(_BaseOutputter):
                 l=deps[r]
                 all_present=True
 
-                if isinstance(l,pyoomph.equations.generic.DependentIntegralObservable):
+                if isinstance(l,DependentIntegralObservable):
                     reqargs=l.argnames
                     func_to_call=l.func
                 else:
