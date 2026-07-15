@@ -6,31 +6,10 @@ Stability via bifurcation tracking
 
 We could now perform similar scans for different :math:`\delta`, but there is a simpler route, namely bifurcation tracking. We can instruct pyoomph to find the fold bifurcation and its corresponding value of :math:`\gamma\approx 0.2826` directly:
 
-.. code:: python
-
-   from kuramoto_sivanshinsky_arclength_eigen import * # Import the previous problem
-
-   if __name__ == "__main__":
-       with KSEBifurcationProblem() as problem:
-           # Output the zeroth eigenvector. Will only output if the eigenvalue/vector is calculated either by
-           # solve_eigenproblem or by bifurcation tracking
-           problem.additional_equations+=MeshFileOutput(eigenvector=0,eigenmode="real",filetrunk="eigen0_real")@"domain"
-
-           problem.initialise()
-           problem.param_gamma.value=0.24
-           problem.param_delta.value = 0.0
-           problem.set_initial_condition(ic_name="hexdots")
-           problem.solve(timestep=10) # One transient step to converge towards the stationary solution
-           problem.solve() # stationary solve
-
-           # from the previous example we know that the fold bifurcation happens close to 0.28
-           problem.param_gamma.value=0.28
-           problem.solve() # solve at gamma=0.28
-
-           # Activate bifurcation tracking
-           problem.activate_bifurcation_tracking(problem.param_gamma,"fold")
-           problem.solve()
-           print("FOLD BIFURCATION HAPPENS AT",problem.param_gamma.value)
+.. literalinclude:: kuramoto_sivanshinsky_bifurcation.py
+   :language: python
+   :start-at: from kuramoto_sivanshinsky_arclength_eigen import * # Import the previous example problem
+   :end-at: print("FOLD BIFURCATION HAPPENS AT",problem.param_gamma.value)
 
 To that end, we first move close to the bifurcation, i.e. to :math:`\gamma=0.28` and :py:meth:`~pyoomph.generic.problem.Problem.solve` to find a good guess. Then, we :py:meth:`~pyoomph.generic.problem.Problem.activate_bifurcation_tracking` for a ``"fold"`` bifurcation in :math:`\gamma`. Within the next :py:meth:`~pyoomph.generic.problem.Problem.solve` command, the value of :math:`\gamma` will be adjusted (i.e. :math:`\gamma` is in fact a degree of freedom) so that the system is directly at the fold bifurcation. We also output the eigenvector directly at the fold bifurcation. To that end, another :py:class:`~pyoomph.output.meshio.MeshFileOutput` is added, but with the arguments ``eigenvector=0`` (meaning the zeroth eigenvector) and ``eigenmode="real"`` (i.e. considering the real part, although this particular eigenvector is real anyhow). We furthermore must supply a ``filetrunk`` to prevent overwriting of the output files of the solution itself.
 
