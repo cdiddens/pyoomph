@@ -44,6 +44,8 @@ export CFLAGS="$(append_flag_if_missing "${CFLAGS}" "-fPIC")"
 export CXXFLAGS="$(append_flag_if_missing "${CXXFLAGS}" "-fPIC")"
 export CPPFLAGS="$(append_flag_if_missing "${CPPFLAGS}" "-fPIC")"
 
+CXX_COMPILER="${CXX:-g++}"
+
 download() {
   local url="$1"
   local out="$2"
@@ -110,8 +112,8 @@ extern "C" int ginac_shared_link_test() {
 }
 EOF
 
-g++ -fPIC -I"${PREFIX}/include" -c "${ROOT_DIR}/ginac_shared_link_test.cpp" -o "${ROOT_DIR}/ginac_shared_link_test.o"
-g++ -shared -o "${ROOT_DIR}/libginac_shared_link_test.${SHARED_EXT}" \
+"${CXX_COMPILER}" -std=c++17 -fPIC -I"${PREFIX}/include" -c "${ROOT_DIR}/ginac_shared_link_test.cpp" -o "${ROOT_DIR}/ginac_shared_link_test.o"
+"${CXX_COMPILER}" -std=c++17 -shared -o "${ROOT_DIR}/libginac_shared_link_test.${SHARED_EXT}" \
   "${ROOT_DIR}/ginac_shared_link_test.o" \
   "${PREFIX}/lib/libginac.a" "${PREFIX}/lib/libcln.a"
 
