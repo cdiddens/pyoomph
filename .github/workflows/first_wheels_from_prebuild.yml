@@ -1,0 +1,172 @@
+name: First wheels from prebuild
+
+on:
+  workflow_dispatch:
+    inputs:
+      prebuild_run_id:
+        description: Optional prebuild workflow run id to download CLN/GiNaC artifacts from
+        required: false
+        type: string
+  workflow_run:
+    workflows:
+      - Prebuild static CLN/GiNaC
+    types:
+      - completed
+
+jobs:
+  build_wheels:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64-cp312
+            runner: ubuntu-latest
+            platform: linux
+            prebuild_artifact: static-ginac-cln-linux-x86_64
+          - label: macos-intel-x86_64-cp312
+            runner: macos-15-intel
+            platform: macos
+            prebuild_artifact: static-ginac-cln-macos-intel-x86_64
+          - label: macos-arm64-cp312
+            runner: macos-14
+            platform: macos
+            prebuild_artifact: static-ginac-cln-macos-arm64
+          - label: windows-msys2-ucrt64-cp312
+            runner: windows-latest
+            platform: windows
+            prebuild_artifact: static-ginac-cln-windows-msys2-ucrt64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Resolve prebuild run id
+        id: prebuild
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+          MANUAL_RUN_ID: ${{ github.event.inputs.prebuild_run_id }}
+        shell: bash
+        run: |
+          if [[ "${EVENT_NAME}" == "workflow_run" ]]; then
+            RUN_ID="${WORKFLOW_RUN_ID}"
+          elif [[ -n "${MANUAL_RUN_ID}" ]]; then
+            RUN_ID="${MANUAL_RUN_ID}"
+          else
+            RUN_ID="$(gh run list \
+              --workflow prebuild_static_ginac_cln.yml \
+              --repo "${GITHUB_REPOSITORY}" \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+          fi
+
+          if [[ -z "${RUN_ID}" || "${RUN_ID}" == "null" ]]; then
+            echo "Could not resolve a successful prebuild run id" >&2
+            exit 1
+          fi
+
+          echo "run_id=${RUN_ID}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download matching static prebuild artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          rm -rf prebuilt
+          mkdir -p prebuilt
+          gh run download "${{ steps.prebuild.outputs.run_id }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --name "${{ matrix.prebuild_artifact }}" \
+            --dir prebuilt
+
+      - name: Show downloaded artifact layout
+        shell: bash
+        run: |
+          find prebuilt -maxdepth 5 -type d | sort
+          find prebuilt -maxdepth 5 -type f | sort | head -n 200
+
+      - name: Install build dependencies (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglu1-mesa-dev libxcursor-dev libopengl0
+
+      - name: Build wheel (Linux/macOS)
+        if: matrix.platform != 'windows'
+        env:
+          PYOOMPH_GINAC_INCLUDE_DIR: ${{ github.workspace }}/prebuilt/GiNaC_static/install/include
+          PYOOMPH_GINAC_LIB_DIR: ${{ github.workspace }}/prebuilt/GiNaC_static/install/lib
+          PYOOMPH_CLN_INCLUDE_DIR: ${{ github.workspace }}/prebuilt/GiNaC_static/install/include
+          PYOOMPH_CLN_LIB_DIR: ${{ github.workspace }}/prebuilt/GiNaC_static/install/lib
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade \
+            build cmake ninja wheel setuptools scikit-build-core pybind11 \
+            numpy scipy matplotlib meshio pygmsh more_itertools tccbox
+
+          mkdir -p wheelhouse
+          python -m pip wheel --no-build-isolation --no-deps --verbose . -w wheelhouse \
+            --config-settings=build-dir=build/wheel \
+            --config-settings=cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF \
+            --config-settings=cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF \
+            --config-settings=cmake.define.PYOOMPH_USE_MPI=OFF \
+            --config-settings=cmake.define.PYOOMPH_PARANOID=OFF
+
+      - name: Set up MSYS2
+        if: matrix.platform == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            make
+            patch
+            git
+            pkgconf
+            base-devel
+            mingw-w64-ucrt-x86_64-toolchain
+
+      - name: Build wheel (Windows/MSYS2)
+        if: matrix.platform == 'windows'
+        shell: msys2 {0}
+        env:
+          CC: gcc
+          CXX: g++
+        run: |
+          export PATH="$(cygpath -u "$pythonLocation"):$PATH"
+          export PYOOMPH_GINAC_INCLUDE_DIR="$PWD/prebuilt/GiNaC_static/install/include"
+          export PYOOMPH_GINAC_LIB_DIR="$PWD/prebuilt/GiNaC_static/install/lib"
+          export PYOOMPH_CLN_INCLUDE_DIR="$PWD/prebuilt/GiNaC_static/install/include"
+          export PYOOMPH_CLN_LIB_DIR="$PWD/prebuilt/GiNaC_static/install/lib"
+
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade \
+            build cmake ninja wheel setuptools scikit-build-core pybind11 \
+            numpy scipy matplotlib meshio pygmsh more_itertools tccbox
+
+          mkdir -p wheelhouse
+          python -m pip wheel --no-build-isolation --no-deps --verbose . -w wheelhouse \
+            --config-settings=build-dir=build/wheel \
+            --config-settings=cmake.args=-G"Unix Makefiles" \
+            --config-settings=cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF \
+            --config-settings=cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF \
+            --config-settings=cmake.define.PYOOMPH_USE_MPI=OFF \
+            --config-settings=cmake.define.PYOOMPH_PARANOID=OFF
+
+      - name: Upload built wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.label }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
