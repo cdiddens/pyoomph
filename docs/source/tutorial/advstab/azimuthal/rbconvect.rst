@@ -32,18 +32,40 @@ The boundary conditions are straightforward:
    :start-at: # Boundary conditions
    :end-at: self+=eqs@"domain"
 
-Note that the :py:class:`~pyoomph.equations.navier_stokes.NoSlipBC` will also set the :math:`\phi`-component of the velocity to zero automatically. Also, note the :py:class:`~pyoomph.meshes.bcs.AxisymmetryBC`, which will set the correct boundary conditions for the azimuthal stability analysis, as outlined before. Also normal output is added, before the equation system is added to the problem. One last thing which has to be done when running the problem is to activate the azimuthal stability analysis. This is done by passing ``azimuthal_stability=True`` to the :py:meth:`~pyoomph.generic.problem.Problem.setup_for_stability_analysis` call.
+Note that the :py:class:`~pyoomph.equations.navier_stokes.NoSlipBC` will also set the :math:`\phi`-component of the velocity to zero automatically. Also, note the :py:class:`~pyoomph.meshes.bcs.AxisymmetryBC`, which will set the correct boundary conditions for the azimuthal stability analysis, as outlined before. Also normal output is added, before the equation system is added to the problem. One last thing which has to be done when running the problem is to activate the azimuthal stability analysis. This is done by passing ``azimuthal_stability=True`` to the :py:meth:`~pyoomph.generic.problem.Problem.setup_for_stability_analysis` call. We also pass ``analytic_hessian=True``, since we will use bifurcation tracking later on, which requires the Hessian to locate the bifurcation accurately:
 
-.. code:: python
+.. literalinclude:: rayleigh_benard_azimuthal_stability.py
+   :language: python
+   :start-at: # Magic function: It will perform all necessary adjustments, i.e.
+   :end-at: problem.setup_for_stability_analysis(azimuthal_stability=True,analytic_hessian=True)
 
-           # Activating azimuthal stability: It will perform all necessary adjustments, i.e.
-           #   -expand fields and test functions with exp(i*m*phi)
-           #   -consider phi-components in vector fields, i.e. here velocity
-           #   -incorporate phi-derivatives in grad and div
-           #   -generate the base residual, Jacobian, mass matrix and Hessian, but also
-           #    the corresponding versions for the azimuthal mode m!=0
-           problem.setup_for_stability_analysis(azimuthal_stability=True)
+The stationary conductive base state (:math:`u=0`, linear temperature profile, hydrostatic pressure) does not depend on the velocity at all. Newton's method, however, cannot start from an all-zero guess for the velocity, since the quadratic inertia term in the Navier-Stokes equations would then produce an empty Jacobian row. We therefore restrict the very first solve to the pressure and temperature degrees of freedom only, using :py:meth:`~pyoomph.generic.problem.Problem.select_dofs` in a ``with`` block, analogous to the same trick used in :numref:`secspatialstokesinverse`:
 
+.. literalinclude:: rayleigh_benard_azimuthal_stability.py
+   :language: python
+   :start-at: # Solve once to get the right pressure and temperature field. Velocity can stay zero here
+   :end-at: problem.solve()
+
+With the base state at hand, we loop over the azimuthal modes :math:`m=0,1,2,3` we are interested in. For each mode, we start at a small aspect ratio :math:`\Gamma=0.5` and a guess :math:`\operatorname{Ra}=10`, which is certainly stable. Since the conductive base state does not depend on :math:`\operatorname{Ra}` at all, we do not have to solve the (unchanged) stationary problem again for each trial value of :math:`\operatorname{Ra}`; we only have to recompute the eigenvalues. This is exactly what :py:meth:`~pyoomph.generic.problem.Problem.find_bifurcation_via_eigenvalues` does: called as a generator with ``do_solve=False``, it bisects on :math:`\operatorname{Ra}` (with initial step ``initstep=200``) until the largest of the ``neigen`` requested eigenvalues (for the azimuthal mode ``azimuthal_m=m``) has a real part closer to zero than ``epsilon``, yielding the current parameter and eigenvalue at each step:
+
+.. literalinclude:: rayleigh_benard_azimuthal_stability.py
+   :language: python
+   :start-at: # Iterate over all desired modes m
+   :end-at: print("Currently at Ra=",currentRa,"with eigenvalue",currentEigen)
+
+Once we have a good guess for the critical Rayleigh number, we activate the bifurcation tracking via :py:meth:`~pyoomph.generic.problem.Problem.activate_bifurcation_tracking`, augmenting the system so that :math:`\operatorname{Ra}` itself becomes an unknown that is solved for together with the critical eigenvector. For the axisymmetric mode :math:`m=0`, the bifurcation is a genuine pitchfork (as the base state still has the full rotational symmetry); for :math:`m\neq 0`, real and imaginary parts of the perturbation are coupled, so all such bifurcations are treated uniformly as ``"azimuthal"``. We then solve the augmented system to land exactly on the bifurcation and write the first row, :math:`(\Gamma,\operatorname{Ra}_\text{c})`, to a text file dedicated to this mode:
+
+.. literalinclude:: rayleigh_benard_azimuthal_stability.py
+   :language: python
+   :start-at: # Activate the bifurcation tracking. For mode m=0, we can have fold, pitchfork, etc.
+   :end-at: txtout.add_row(problem.Gamma.value,problem.Ra.value)
+
+Finally, we trace out the critical curve :math:`\operatorname{Ra}_\text{c}(\Gamma)` up to :math:`\Gamma=3` by :py:meth:`~pyoomph.generic.problem.Problem.arclength_continuation` in the aspect ratio :math:`\Gamma`, writing a row to the output file at each step. Since the bifurcation-tracking augmented system is solved exactly at every step (i.e. the eigenvalue stays at zero by construction), the notion of "how much the solution has changed" that :py:meth:`~pyoomph.generic.problem.Problem.arclength_continuation` uses to propose the next step size is not meaningful here; we therefore call :py:meth:`~pyoomph.generic.problem.Problem.reset_arc_length_parameters` after each step, so that the full ``max_ds`` is always tried again. Once the sweep for the current mode is done, the bifurcation tracking is deactivated again before moving on to the next mode :math:`m`:
+
+.. literalinclude:: rayleigh_benard_azimuthal_stability.py
+   :language: python
+   :start-at: # Arclength continuation in the aspect ratio
+   :end-at: problem.deactivate_bifurcation_tracking()
 
 ..  figure:: rb_cyl.*
 	:name: figstabilityrbcyl

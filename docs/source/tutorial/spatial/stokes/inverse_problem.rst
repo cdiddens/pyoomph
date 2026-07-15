@@ -1,3 +1,5 @@
+.. _secspatialstokesinverse:
+
 Adjusting a parameter so that a specified condition is met
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
