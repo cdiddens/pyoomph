@@ -48,7 +48,7 @@ class CapillaryEvaporationProblem(Problem):
         # Gravity and ambient pressure
         self.g=9.81*meter/second**2
         self.ambient_pressure=1*atm
-        # Whether we use the GCL or not
+        # Whether we use the conservative form (better GCL agreement) or not
         self.use_GCL=True
         
     def define_problem(self):

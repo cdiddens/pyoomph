@@ -56,33 +56,10 @@ The multi-component flow equations can activate the conservative form by setting
 
 Let us now assess the conservation of the total mass of glycerol in the capillary tube. The code is just a quite simple 1d problem, i.e. the problem is initialized as follows:
 
-.. code:: python
-
-    from pyoomph import *
-    from pyoomph.equations.multi_component import *
-    from pyoomph.equations.ALE import *
-    from pyoomph.materials import *
-    from pyoomph.materials.mass_transfer import *
-    import pyoomph.materials.default_materials 
-
-    class CapillaryEvaporationProblem(Problem):
-        def __init__(self):
-            super().__init__()
-            # Filled height in the capillary
-            self.L=20*milli*meter
-            # Capillary radius
-            self.R=0.5*milli*meter        
-            # Temperature of the system
-            self.temperature=20*celsius
-            # Initial Liquid mixture composition (glycerol/water)
-            self.mixture=Mixture(20*percent*get_pure_liquid("glycerol")+get_pure_liquid("water"))
-            # Gas phase composition (air with 20% relative humidity)
-            self.gas=Mixture(get_pure_gas("air")+50*percent*get_pure_gas("water"),quantity="relative_humidity",temperature=20*celsius)
-            # Gravity and ambient pressure
-            self.g=9.81*meter/second**2
-            self.ambient_pressure=1*atm
-            # Whether we use the conservative form (better GCL agreement) or not
-            self.use_GCL=True    
+.. literalinclude:: gcl_glycerol_water_capillary.py
+   :language: python
+   :start-at: from pyoomph import *
+   :end-at: self.use_GCL=True
 
 
 For the :py:meth:`~pyoomph.generic.problem.Problem.define_problem` method
