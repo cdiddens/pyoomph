@@ -6033,6 +6033,17 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         
         
     def select_dofs(self) -> "_DofSelector":
+        """
+        Returns a :py:class:`~pyoomph.utils.dof_selector._DofSelector` object that allows to select degrees of freedom (DoFs) for further operations. For example, you can select all DoFs on a certain domain or with a certain equation type. The selected DoFs can then be used to e.g. get their values, set their values, or apply boundary conditions.
+        It should be wrapped in a `with` statement to ensure proper cleanup after use. For example:
+
+        .. code-block:: python
+
+            with problem.select_dofs() as dofs:
+                dofs.select("domain/velocity_x", "domain/velocity_y", "domain/pressure")
+                dofs.unselect("domain/temperature")
+                problem.solve()  # Only solve for the velocity/pressure fields, not for the temperature field
+        """
         return _DofSelector(self)
 
 
@@ -6164,6 +6175,10 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
 
 ############## DOF SELECTOR ###################
 class _DofSelector:
+    """
+    Should be only created via :py:meth:`~pyoomph.generic.problem.Problem.select_dofs`.
+    """
+    
     def __init__(self,problem:"Problem"):
         self._problem=problem
         self._all_unselected:Optional[bool]=None
@@ -6208,12 +6223,18 @@ class _DofSelector:
                 self._traverse(n[k],select,onlydof=onlydof)
 
     def unselect_all(self):
+        """
+        Unselects all degree of freedom from solving within the `with` block
+        """
         self._problem._dof_selector_used= "INVALID" 
         self._problem.invalidate_eigendata()        
         self._all_unselected=True
         self._traverse(self._tree,False)
 
     def select_all(self):
+        """
+        Selects all degree of freedom for solving within the `with` block
+        """
         self._problem._dof_selector_used= "INVALID" 
         self._problem.invalidate_eigendata()
         self._all_unselected=False
@@ -6237,6 +6258,10 @@ class _DofSelector:
 
     # Selects meshes (e.g. "droplet") or degrees (e.g. "droplet/velocity_x"), both including interface meshes
     def select(self,*args:str):
+        """
+        Selects the dofs passed as arguments, e.g. ``select("droplet/velocity_x","droplet/velocity_y")`` or similar.
+        If nothing has been selected/unselected before, everything else will be unselected.
+        """
         if self._all_unselected is None:
             self.unselect_all()
         self._problem._dof_selector_used = "INVALID" 
@@ -6245,6 +6270,10 @@ class _DofSelector:
             self._select_or_unselect(k,True)
 
     def unselect(self,*args:str):
+        """
+        Unselects the dofs passed as arguments, e.g. ``unselect("droplet/velocity_x","droplet/velocity_y")`` or similar.
+        If nothing has been selected/unselected before, everything else will be selected.
+        """
         if self._all_unselected is None:
             self.select_all()
         self._problem._dof_selector_used = "INVALID" 

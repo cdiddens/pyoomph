@@ -39,7 +39,7 @@ Note that the :py:class:`~pyoomph.equations.navier_stokes.NoSlipBC` will also se
    :start-at: # Magic function: It will perform all necessary adjustments, i.e.
    :end-at: problem.setup_for_stability_analysis(azimuthal_stability=True,analytic_hessian=True)
 
-The stationary conductive base state (:math:`u=0`, linear temperature profile, hydrostatic pressure) does not depend on the velocity at all. Newton's method, however, cannot start from an all-zero guess for the velocity, since the quadratic inertia term in the Navier-Stokes equations would then produce an empty Jacobian row. We therefore restrict the very first solve to the pressure and temperature degrees of freedom only, using :py:meth:`~pyoomph.generic.problem.Problem.select_dofs` in a ``with`` block, analogous to the same trick used in :numref:`secspatialstokesinverse`:
+The stationary conductive base state (:math:`u=0`, linear temperature profile, hydrostatic pressure) does not depend on the velocity at all. We therefore restrict the very first solve to the pressure and temperature degrees of freedom only, using :py:meth:`~pyoomph.generic.problem.Problem.select_dofs` in a ``with`` block:
 
 .. literalinclude:: rayleigh_benard_azimuthal_stability.py
    :language: python

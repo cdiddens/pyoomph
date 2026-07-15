@@ -66,6 +66,12 @@ class DropletSpreadingProblem(Problem):
 		N=vector(cos(self.contact_angle),-sin(self.contact_angle))
 		eqs+=(FreeSurface(sigma=1)+EquilibriumContactAngle(N)@"substrate")@"interface" 
 		eqs+=MeshFileOutput() # output	
+  
+		# Solve the bulk moving mesh only on first order
+  		# only at the interface, we allow for curved second order elements
+		# This does not affect the Taylor-Hood pairs, which is still second-order everywhere
+		eqs+=ConstrainPositionsToC1Space()
+		eqs+=UnconstrainPositionsFromC1Space()@"interface"
 		
 		self.add_equations(eqs@"domain") # adding it to the system
 
