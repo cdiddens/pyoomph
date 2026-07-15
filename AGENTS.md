@@ -14,6 +14,25 @@ it back into the running script. Users normally never touch C++ directly —
 everything is expressed through the Python API below. 
 All equations are solved together in a fully implicit, monolithic manner.
 
+## When helping users with pyoomph:
+
+1. Prefer existing equation classes over implementing weak forms manually.
+2. Only derive weak forms manually when no built-in equation exists.
+3. Keep custom Equations reusable and mesh-independent.
+4. Use symbolic expressions exclusively.
+5. Use dimensional quantities unless the user explicitly asks for nondimensional equations.
+6. Follow the conventions used throughout the tutorial.
+
+Avoid reimplementing:
+
+- Navier-Stokes
+- Stokes
+- Poisson
+- Advection-diffusion
+- ALE
+- Lubrication
+
+unless the user specifically requests a custom weak formulation.
 
 ## Mental model
 
@@ -31,31 +50,40 @@ A typical pyoomph script has exactly three kinds of classes, plus a boilerplate 
 ```python
 from pyoomph import *
 from pyoomph.expressions import *  # var, var_and_test, weak, grad, div, partial_t, dot, ...
+from pyoomph.expressions.units import * # units for dimensions
 
 class MyEquation(Equations):                 # or ODEEquations for 0D systems
-    def __init__(self, *, name="u", space="C2", source=0):
+    def __init__(self, *, name="T", space="C2", source=0, alpha=1*(milli*meter)**2/second):
         super().__init__()
         self.name, self.space, self.source = name, space, source
+        self.alpha = alpha
 
     def define_fields(self):
-        self.define_scalar_field(self.name, self.space)   # or define_vector_field/define_tensor_field
+        self.define_scalar_field(self.name, self.space, testscale=scale_factor("temporal")/scale_factor("T"))   # or define_vector_field/define_tensor_field
 
     def define_residuals(self):
-        u, v = var_and_test(self.name)
-        self.add_residual(weak(grad(u), grad(v)) - weak(self.source, v))
+        T, Ttest = var_and_test(self.name)
+        self.add_residual(weak(partial_t(T),Ttest)+weak(self.alpha*grad(T), grad(Ttest)) - weak(self.source, Ttest))
 
 class MyProblem(Problem):
+    def __init__(self):
+        super().__init__()
+        self.alpha=1*(milli*meter)**2/second
+        self.L=1*milli*meter
+        self.T0=20*celsius
+        
     def define_problem(self):
-        self.add_mesh(LineMesh(minimum=-1, size=2, N=100))   # domain "domain", boundaries "left"/"right"
-        eqs = MyEquation(source=1)
-        eqs += DirichletBC(u=0) @ "left"
-        eqs += DirichletBC(u=0) @ "right"
+        self.set_scaling(spatial=self.L,temporal=self.L**2/self.alpha,T=self.T0)
+        self.add_mesh(LineMesh(minimum=-self.L/2, size=self.L, N=100, name="domain"))   # boundaries "left"/"right"
+        eqs = MyEquation(source=1*kelvin/second*(var("coordinate_x")/self.L)**2)
+        eqs += InitialCondition(T=self.T0)
+        eqs += DirichletBC(T=self.T0) @ ["left","right"]        
         eqs += TextFileOutput()
         self.add_equations(eqs @ "domain")
 
 if __name__ == "__main__":
     with MyProblem() as problem:
-        problem.solve()      # stationary; use problem.run(endtime, outstep=...) for transient
+        problem.run(10*second,outstep=1*second)      # use problem.solve() for stationary
         problem.output()
 ```
 
@@ -67,6 +95,17 @@ Equations objects **compose with `+`** (e.g. physics `+` boundary conditions `+`
 initial conditions `+` outputs), and are **bound to a mesh domain or boundary name
 with `@`** (e.g. `eqs @ "domain"`, `DirichletBC(u=0) @ "left"`). The combined tree is
 passed to `Problem.add_equations(...)`.
+
+```python
+	def define_problem(self):
+		eqs = NavierStokesEquations(...)
+		eqs += LaplaceSmoothedMesh(...)
+		eqs += InitialCondition(...)
+		eqs += DirichletBC(...)
+		eqs += MeshFileOutput()
+
+		self.add_equations(eqs @ "fluid")
+```
 
 ## `Equations` / `ODEEquations` API (`pyoomph/generic/codegen.py`)
 
