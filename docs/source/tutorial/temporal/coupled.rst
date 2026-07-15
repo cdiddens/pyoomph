@@ -50,26 +50,10 @@ The previous method is straightforward, but would require rewriting a lot of cod
 
 where :math:`T` is a place holder for an arbitrary mathematical expression. The corresponding equation class looks like this:
 
-.. code:: python
-
-   from pyoomph import * # Import pyoomph 
-   from pyoomph.expressions import * # Import some additional things to express e.g. partial_t
-
-   class SingleHarmonicOscillator(ODEEquations):
-   	def __init__(self,name,terms): #Pass the name of the unknown and the terms T
-   		super(SingleHarmonicOscillator,self).__init__()
-   		self.name=name #Store the name of the unknown
-   		self.terms=terms #and the terms to consider
-   		
-   	def define_fields(self):
-   		self.define_ode_variable(self.name) 
-   		
-   	def define_residuals(self):
-   		y=var(self.name) #Bind the single variable
-   		# Calculate the residuals
-   		residual=partial_t(y,2)+self.terms #Just add the passed terms here
-   		self.add_residual(residual*testfunction(y))
-   		
+.. literalinclude:: coupled_oscillators_method_2.py
+   :language: python
+   :start-at: from pyoomph import * # Import pyoomph
+   :end-at: self.add_residual(residual*testfunction(y))
 
 In the definition of the problem, we can now combine two instances of the ``SingleHarmonicOscillator`` class and by passing the correct names and additional terms, we can recreate the system :math:numref:`eqcoupledoscis`. This is achieved by changing the method :py:meth:`~pyoomph.generic.problem.Problem.define_problem` of the ``TwoCoupledHarmonicOscillatorProblem`` as follows:
 
