@@ -25,86 +25,29 @@ To augment the advection-diffusion equations with the stabilization term, we can
 
 The implementation of the augmented form :math:numref:`eqpdeconvdiffuweakSUPG` reads:
 
-.. code:: python
-
-   from pyoomph import *
-   from pyoomph.equations.SUPG import * # To calculate the element size
-
-
-   class ConvectionDiffusionEquationWithSUPG(Equations):
-       def __init__(self, u, D,with_SUPG=True):
-           super(ConvectionDiffusionEquationWithSUPG, self).__init__()
-           self.u = u  # advection velocity
-           self.D = D  # diffusivity
-           self.scheme="TPZ" # Time scheme, trapezoidal rule
-           self.with_SUPG=with_SUPG # do we activate SUPG?
-
-       def define_fields(self):
-           self.define_scalar_field("c", "C1") # Take the coarse space C1
-
-       def get_supg_tau(self):
-           # We must find an equation of the type ElementSizeForSUPG, which calculates the element size
-           elsize_eqs = self.get_combined_equations().get_equation_of_type(ElementSizeForSUPG, always_as_list=True)
-           if len(elsize_eqs)!=1: # User must combine it with a single ElementSizeForSUPG instance
-               raise RuntimeError("SUPG only works if combined with a single ElementSizeForSUPG equation")
-           elsize_eqs=elsize_eqs[0] # get the ElementSizeForSUPG object, which is combined with this equation
-           h = elsize_eqs.get_element_h() + 1e-15 # element size, add a tiny offset to prevent errors
-           u_mag=square_root(dot(self.u,self.u))+1e-15 # velocity magnitude , add a tiny offset to prevent errors
-           Pe_h=u_mag*h/(2*self.D) # Mesh Peclet number
-           beta=1/tanh(Pe_h)-1/Pe_h # coefficient activating SUPG if Pe becomes large
-           tau = subexpression(beta*h/(2*u_mag)) # returning the tau coefficient
-           return tau
-
-       def define_residuals(self):
-           c, ctest = var_and_test("c")
-           # This term occurs multiple times, so wrap it into a subexpression for performance gain
-           radv = subexpression(time_scheme(self.scheme,partial_t(c) + dot(self.u, grad(c))))
-           self.add_residual(weak(radv, ctest))  # time derivative and advection
-           self.add_residual(time_scheme(self.scheme,weak(self.D * grad(c), grad(ctest))))  # diffusion
-           if self.with_SUPG: # SUPG stabilization
-               self.add_residual(time_scheme(self.scheme,weak(radv,self.get_supg_tau() * dot(self.u, grad(ctest)))))
+.. literalinclude:: convdiffu_SUPG.py
+   :language: python
+   :start-at: from pyoomph import *
+   :end-at: self.add_residual(time_scheme(self.scheme,weak(radv,self.get_supg_tau() * dot(self.u, grad(ctest)))))
 
 In the method ``get_supg_tau`` we check if the equation is combined with a single :py:class:`~pyoomph.equations.supg.ElementSizeForSUPG` object and bind the size :math:`h`. We calculate :math:`\operatorname{Pe}_h` and thereby :math:`\tau_h` according to the relations discussed above. Finally, this is used for the stabilization term, but only if ``with_SUPG`` is ``True``.
 
 As a test class, we advect again a bump, but this time in one dimension:
 
-.. code:: python
-
-   class OneDimAdvectionDiffusionProblem(Problem):
-       def __init__(self):
-           super(OneDimAdvectionDiffusionProblem, self).__init__()
-           self.u=vector(1,0)
-           self.D=0.0001
-           self.with_SUPG=True
-
-       def define_problem(self):
-           self.add_mesh(LineMesh(N=100,size=100,minimum=-20)) # coarse mesh from [-20:80]
-
-           eqs=TextFileOutput()
-           eqs+=ConvectionDiffusionEquationWithSUPG(u=self.u,D=self.D,with_SUPG=self.with_SUPG)
-           if self.with_SUPG:
-               eqs+=ElementSizeForSUPG() # We must add the element size
-
-           x=var("coordinate_x")
-           cinit=exp(-x**2*0.25)
-           eqs+=InitialCondition(c=cinit)
-
-           eqs+=DirichletBC(c=0)@"left"
-           eqs += DirichletBC(c=0) @ "right"
-
-           self.add_equations(eqs@"domain")
+.. literalinclude:: convdiffu_SUPG.py
+   :language: python
+   :start-at: class OneDimAdvectionDiffusionProblem(Problem):
+   :end-at: self.add_equations(eqs@"domain")
 
 It is necessary to add an :py:class:`~pyoomph.equations.SUPG.ElementSizeForSUPG` object to calculate the element size if SUPG is active. The rest is trivial, but note that we again use :py:class:`~pyoomph.meshes.bcs.DirichletBC` on both sides. Neumann conditions would have to be augmented by SUPG correction terms stemming from the consistent partial integration that leads to :math:numref:`eqpdeconvdiffuweakSUPG`.
 
 
 With a simple run code, we can compare the results with and without SUPG:
 
-.. code:: python
-
-   if __name__=="__main__":
-       with OneDimAdvectionDiffusionProblem() as problem:
-           problem.with_SUPG=True
-           problem.run(50,outstep=1,maxstep=0.1)
+.. literalinclude:: convdiffu_SUPG.py
+   :language: python
+   :start-at: if __name__=="__main__":
+   :end-at: problem.run(50,outstep=1,maxstep=0.1)
 
 Results are depicted in :numref:`figpdesupg`.
 

@@ -20,50 +20,24 @@ Obviously, when :math:`r` passes :math:`0`, the dynamics of the system changes. 
 
 In pyoomph, we again formulate the very simple equation class for this, passing some value (or expression) as parameter ``r``:
 
-.. code:: python
-
-   class TranscriticalNormalForm(ODEEquations):
-       def __init__(self,r):
-           super(TranscriticalNormalForm, self).__init__()
-           self.r=r
-
-       def define_fields(self):
-           self.define_ode_variable("x")
-
-       def define_residuals(self):
-           x,x_test=var_and_test("x") #Shortcut to get var("x") and testfunction("x")
-           self.add_residual((partial_t(x)-self.r*x+x**2)*x_test)
+.. literalinclude:: bifurcation_transient_transcritical.py
+   :language: python
+   :start-at: class TranscriticalNormalForm(ODEEquations):
+   :end-at: self.add_residual((partial_t(x)-self.r*x+x**2)*x_test)
 
 In the problem class, we use :py:meth:`~pyoomph.generic.problem.Problem.define_global_parameter` to define a global parameter object with an initial value. This parameter is defined on the problem level. When combined in an expression, automatically its symbolical (i.e. adjustable) value will be used. However, unlike :py:func:`~pyoomph.expressions.generic.var`, parameters are not considered to be unknowns of the system. To adjust the value of a parameter, we can access the current value by the property ``value``. If we apply ``float()`` to an expression containing a parameter, the current ``value`` will be substituted.
 
-.. code:: python
-
-   class TranscriticalProblem(Problem):
-       def __init__(self):
-           super(TranscriticalProblem, self).__init__()
-           # Bifuraction parameter with default value
-           self.r=self.define_global_parameter(r=1) 
-           self.x0=1
-
-       def define_problem(self):
-           eq=TranscriticalNormalForm(r=self.r) #Pass the symbolic 'r' here
-           eq+=InitialCondition(x=self.x0)
-           eq+=ODEFileOutput()
-           self.add_equations(eq@"transcritical")
+.. literalinclude:: bifurcation_transient_transcritical.py
+   :language: python
+   :start-at: class TranscriticalProblem(Problem):
+   :end-at: self.add_equations(eq@"transcritical")
 
 Let us first run the problem as before, namely by using the :py:meth:`~pyoomph.generic.problem.Problem.run` method of the :py:class:`~pyoomph.generic.problem.Problem` class:
 
-.. code:: python
-
-   if __name__=="__main__":
-       with TranscriticalProblem() as problem:
-
-           problem.r.value=1 # You can set the value here
-           problem.x0=0.001 # Start slightly above the unstable solution x=0
-           problem.run(endtime=20,numouts=100) # And let it evolve towards the stable branch x=r
-
-           problem.r.value=-1 # Change the parameter value, x=1 is now not a stationary solution anymore
-           problem.run(endtime=40, numouts=100)  # And let it evolve towards the now stable branch x=0
+.. literalinclude:: bifurcation_transient_transcritical.py
+   :language: python
+   :start-at: if __name__=="__main__":
+   :end-at: problem.run(endtime=40, numouts=100)  # And let it evolve towards the now stable branch x=0
 
 We first set :math:`r=1`, but start close to the unstable branch :math:`x=0`. In the output, we will see an initial exponential growth of :math:`x(t)`, followed by a convergence into the stable branch at :math:`x=r=1`. However, after :math:`t=20`, we change the parameter value. This feature, i.e. modifying a system parameter, is only possible with parameters as constructed here. Changes in other properties, e.g. the initial condition :math:`x_0` or the harmonic oscillator frequency :math:`\omega` in the first examples within this book have no effect after the problem has been initialized, since the code is generated based on the values at the beginning. However, global parameters are still variables within the generated code and they are re-evaluated every single time step. Therefore, it is possible to change the value of :math:`r` in between.
 

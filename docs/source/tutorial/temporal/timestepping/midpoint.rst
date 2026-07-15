@@ -39,34 +39,19 @@ This means that the trapezoidal rule :math:numref:`eqodetrapzrule` in residual f
 
 As an example, let us - once again - consider the harmonic oscillator, but this time integrated with the trapezoidal rule (``"TPZ"``). The code for the equation class now reads
 
-.. code:: python
-
-   class HarmonicOscillator(ODEEquations):
-   	def __init__(self,*,omega=1):
-   		super(HarmonicOscillator,self).__init__()
-   		self.omega=omega
-   		
-   	def define_fields(self):
-   		self.define_ode_variable("y")
-   		self.define_ode_variable("dot_y")
-   		
-   	def define_residuals(self):
-   		y=var("y") 
-   		dot_y=var("dot_y")
-   		residual=(partial_t(dot_y,scheme="BDF1")+evaluate_in_past(self.omega**2*y,0.5))*testfunction(dot_y)
-   		residual += (partial_t(y,scheme="BDF1")-evaluate_in_past(dot_y,0.5)) * testfunction(y)
-   		self.add_residual(residual)
+.. literalinclude:: oscillator_TPZ_scheme.py
+   :language: python
+   :start-at: class HarmonicOscillator(ODEEquations):
+   :end-at: self.add_residual(residual)
 
 It can be seen that indeed :math:numref:`eqodetrapzrule` is recovered by using ``scheme="BDF1"`` for the lhs and ``evaluate_in_past(...,0.5)`` for the rhs.
 
 When using the trapezoidal rule for advancing in time, one also has to be consistent with the definition of the total energy, i.e. the argument which is passed to the :py:class:`~pyoomph.equations.generic.ODEObservables` class (as in the previous section) now has to take the time derivative of :math:`y` in the kinetic energy via the ``"BDF1"`` scheme, whereas the value of :math:`y` in the potential energy has to be evaluated at the average between the time steps :math:`n` and :math:`n-1`, i.e. via ``evaluate_in_past(...,0.5)``:
 
-.. code:: python
-
-   		#Calculate the total energy. Important to also stick to the convention: BDF1 derivative and evaluate_in_past(...,0.5)
-   		y=var("y")
-   		total_energy=1/2*partial_t(y,scheme="BDF1")**2+1/2*evaluate_in_past(self.omega*y,0.5)**2
-   		eqs+=ODEObservables(Etot=total_energy) # Add the total energy as observable
+.. literalinclude:: oscillator_TPZ_scheme.py
+   :language: python
+   :start-at: #Calculate the total energy. Important to also stick to the convention: BDF1 derivative and evaluate_in_past(...,0.5)
+   :end-at: eqs+=ODEObservables(Etot=total_energy) # Add the total energy as observable
 
 Of course, this time stepping can be generalized, which is the so-called :math:`\theta`-*method*:
 

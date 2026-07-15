@@ -17,39 +17,10 @@ Close to the Hopf bifurcation, the normal form :math:numref:`hopfnflyapcoeff` an
 
 Additionally, we can calculate the amplitude of the orbit and thereby construct an initial guess for the orbit which can subsequently be solved and followed along the bifurcation parameter. The definition of the Lorenz system and the problem class is analogous to :numref:`sectemporalbiftrack`, so we just focus on the orbit tracking here. The code is actually really short:
 
-.. code:: python
+.. literalinclude:: hopf_switch.py
+   :language: python
+   :start-at: with LorenzProblem() as problem:
 
-	with LorenzProblem() as problem:
-		# To calculate c_1, we need the Hessian, so the symbolical code must be generated and compiled
-		problem.setup_for_stability_analysis(analytic_hessian=True)
-		# Add a non-trivial initial condition
-		problem+=InitialCondition(x=1,z=24)@"lorenz"
-		problem.rho.value=24 # Start close to the Hopf
-		
-		problem.solve() # Find a stationary solution (will be on one of the pitchfork branches)        
-		problem.solve_eigenproblem(n=1) # And get some eigenvalue for the Hopf tracker
-		
-		problem.activate_bifurcation_tracking("rho","hopf") # Activate the Hopf tracking
-		problem.solve() # Find the Hopf bifurcation by adjusting rho
-		
-		# Since we are on the Hopf bifurcation, we can switch to the orbit
-		# We chose NT=100 time points for the orbit
-		# The initial period T and the initial guess of the orbit will be calculated automatically
-		with problem.switch_to_hopf_orbit(NT=100) as orbit:
-		    print("Bifurcation is supercritical: "+str(orbit.starts_supercritically()))
-		    print("Period at rho=",problem.rho.value, " is ",orbit.get_T())
-		    # This function will write the output along the orbit to a subdirectory in the output directory
-		    orbit.output_orbit("orbit_at_rho_{:.4f}".format(problem.rho.value))
-		    # Perform continuation in rho
-		    # We do not know in which direction we have to go (depends on the nature of the Hopf)
-		    # But a good guess including direction can be obtained from the Lyapunov coefficient
-		    ds=orbit.get_init_ds() 
-		    while problem.rho.value>16:
-		        ds=problem.arclength_continuation("rho",ds)
-		        print("Period at rho=",problem.rho.value, " is ",orbit.get_T())
-		        orbit.output_orbit("orbit_at_rho_{:.4f}".format(problem.rho.value))              
-		        
-		        
 As a first step, we must invoke the code generator to derive the Hessian and generate C code to fill the Hessian. We need it later, when we want to calculate the first Lyapunov coefficient :math:`c_1`. As detailed in Ref. :cite:`Kuznetsov2023`, the calculation of :math:`c_1` requires directional derivatives of :math:`\vec{R}_0` of second and third order around the Hopf bifurcation point. With the Hessian, we can calculate the second order directional derivatives fully symbolically, whereas the third order directional derivative is calculated by first order finite differences of the symbolically calculated second order derivatives.
 
 We then find the Hopf bifurcation by first starting nontrivially near the Hopf and solving the problem. We will end up on one of the pitchfork branches. Then, solving the eigenproblem gives a good guess for the subsequently invoked Hopf bifurcation tracking. We will thereby locate the Hopf bifurcation and the critical parameter :math:`\rho`. 

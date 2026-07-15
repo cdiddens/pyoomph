@@ -14,55 +14,17 @@ The easiest method to switch between all implemented time stepping schemes is th
 
 So let us implement an equation class ``AnharmonicOscillator`` for this as follows
 
-.. code:: python
-
-   # Anharmonic oscillator by first order system with different time stepping schemes
-   class AnharmonicOscillator(ODEEquations):
-       def __init__(self, scheme):
-           super(AnharmonicOscillator, self).__init__()
-           self.scheme = scheme
-
-       def define_fields(self):
-           self.define_ode_variable("y")
-           self.define_ode_variable("dot_y")
-
-       def define_residuals(self):
-           y = var("y")
-           dot_y = var("dot_y")
-           residual = (partial_t(dot_y) + y ** 3) * testfunction(dot_y)
-           residual += (partial_t(y) - dot_y) * testfunction(y)
-           # Here, we evaluate the chosen scheme just by applying time_scheme(scheme,...)
-           self.add_residual(time_scheme(self.scheme, residual))
+.. literalinclude:: time_stepping_schemes.py
+   :language: python
+   :start-at: # Anharmonic oscillator by first order system with different time stepping schemes
+   :end-at: self.add_residual(time_scheme(self.scheme, residual))
 
 The constructor takes an argument ``scheme``, which is - as usual - stored in a member variable. At the end of :py:meth:`~pyoomph.generic.codegen.BaseEquations.define_residuals`, just before adding the residuals to the problem, :py:func:`~pyoomph.expressions.generic.time_scheme` with the passed ``scheme`` is applied to the residual. The problem class and the corresponding code to run all simulations in different output directories reads
 
-.. code:: python
-
-   class AnharmonicOscillatorProblem(Problem):
-       def __init__(self, scheme):  # Passing scheme here
-           super(AnharmonicOscillatorProblem, self).__init__()
-           self.scheme = scheme
-
-       def define_problem(self):
-           eqs = AnharmonicOscillator(scheme=self.scheme)
-
-           t = var("time")  # Time variable
-           eqs += InitialCondition(y=1,dot_y=0)
-
-           # Calculate the total energy. We also use time_scheme here, e.g. the energy is evaluated by the same scheme as the time stepping
-           y = var("y")
-           total_energy = time_scheme(self.scheme, 1/2 * partial_t(y) ** 2 + 1/4 * y ** 4)
-           eqs += ODEObservables(Etot=total_energy)  # Add the total energy as observable
-
-           eqs += ODEFileOutput()
-           self.add_equations(eqs @ "anharmonic_oscillator")
-
-
-   if __name__ == "__main__":
-       for scheme in {"BDF1", "BDF2", "Newmark2", "MPT", "TPZ", "Simpson", "Boole"}:
-           with AnharmonicOscillatorProblem(scheme) as problem:
-               problem.set_output_directory("osci_timestepping_scheme_" + scheme)
-               problem.run(endtime=100, numouts=200)
+.. literalinclude:: time_stepping_schemes.py
+   :language: python
+   :start-at: class AnharmonicOscillatorProblem(Problem):
+   :end-at: problem.run(endtime=100, numouts=200)
 
 Before comparing all time stepping schemes here, let us briefly discuss what the function :py:func:`~pyoomph.expressions.generic.time_scheme` actually does. Let us consider any generic expression :math:`G(\partial_t \vec{U},\vec{U},t)`, or in Python some expression ``G`` which may contain ``partial_t(var("U"))``, ``var("U")`` and ``var("time")``. To understand what the application of :py:func:`~pyoomph.expressions.generic.time_scheme` on ``G``, i.e. ``time_scheme(scheme,G)``, actually does, let us first introduce the shorthand notation
 

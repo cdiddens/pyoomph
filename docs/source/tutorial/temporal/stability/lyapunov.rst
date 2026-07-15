@@ -46,21 +46,10 @@ where :math:`T_0=T_\text{wait}+T_\text{relax}`.
 
 As an example, we will check the Lorenz system (with the default parameters :math:`\sigma=10`, :math:`\rho=28` and :math:`\beta=8/3`) from :numref:`secODEtemporaladapt` for chaos in the following. When modifying the run code of section :numref:`secODEtemporaladapt` to 
 	
-.. code:: python
-
-	# Import the LyapunovExponentCalculator from the utils module
-	from pyoomph.utils.lyapunov import LyapunovExponentCalculator
-
-	with LorenzProblem() as problem:
-	# We want to save memory, since we have a fine temporal discretization. 
-	# So we do not write state files for continue simulations
-	problem.write_states=False 
-	# Add the LyapunovExponentCalculator to the problem. 
-	# Calculating k=3 Lyapunov exponents. Starting after t=10, then relaxing perturbation vectors until t=10+5
-	# Then start the actual Lyapunov exponent calculation                
-	problem+=LyapunovExponentCalculator(k=3,waiting_time=10,prerelaxation_time=10,store_as_eigenvectors=False,use_crank_nicholson_integration=False)
-	# Run it with a rather fine time step 
-	problem.run(endtime=200,outstep=0.001)
+.. literalinclude:: lorenz_lyapunov.py
+   :language: python
+   :start-at: # Import the LyapunovExponentCalculator from the utils module
+   :end-at: problem.run(endtime=200,outstep=0.001)
 
 we get a file called ``lyapunov.txt`` in the output directory. The delay times are chosen to :math:`T_\text{wait}=T_\text{relax}=10`. The resulting plot is the following, where we also added the long-time limit literature values by dotted lines. The sum of all Lyapunov exponents corresponds to the phase space divergence, i.e. the trace of the Jacobian, which can be obtained analytically by :math:`\sum_{i=1}^3 \lambda_i=-\sigma-1-\beta\approx -13.666`. Finer time steps give even better agreement.
 

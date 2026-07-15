@@ -41,83 +41,19 @@ A good choice for the pressure test scale :math:`Q` in :math:numref:`eqspatialno
 
 Let us now see how to implement this in pyoomph. We have to modify our Stokes equations a bit to consider the process of nondimensionalization:
 
-.. code:: python
-
-   from pyoomph import *
-   from pyoomph.expressions import *
-   from pyoomph.expressions.units import * # Import units as e.g. meter, second, etc.
-
-
-   class StokesEquations(Equations):
-   	# Passing the viscosity 
-   	def __init__(self,mu):
-   		super(StokesEquations, self).__init__()
-   		self.mu=mu # Store viscosity
-   		
-   	def define_fields(self):
-   		
-   		X=scale_factor("spatial") # spatial scale (will be supplied by the Problem class)
-   		U=scale_factor("velocity")
-   		P=scale_factor("pressure")
-   		mu=self.mu
-   		
-   		#Taylor-Hood pair, with testscale we can set the definition of the test scales V and Q
-   		self.define_vector_field("velocity","C2",testscale=X**2/(mu*U)) 
-   		self.define_scalar_field("pressure","C1",testscale=X/U)
-   		
-   	def define_residuals(self):
-   		# Fields and test functions are dimensional here!
-   		u,v=var_and_test("velocity") 
-   		p,q=var_and_test("pressure")
-   		stress=-p*identity_matrix()+2*self.mu*sym(grad(u))
-   		self.add_residual(weak(stress,grad(v)) + weak(div(u),q)) 
+.. literalinclude:: stokes_dimensional.py
+   :language: python
+   :start-at: from pyoomph import *
+   :end-at: self.add_residual(weak(stress,grad(v)) + weak(div(u),q))
 
 Note that we have directly used the Taylor-Hood combination (``"C2"``,\ ``"C1"``). The only other difference is in the :py:meth:`~pyoomph.generic.codegen.BaseEquations.define_fields` method. Here, we pass ``testscale`` arguments, which depend on the :py:func:`~pyoomph.expressions.generic.scale_factor` of the space :math:`X`, the velocity :math:`U` and the pressure :math:`P`. These are not known at this moment and will be supplied by the :py:class:`~pyoomph.generic.problem.Problem` class. If they are not supplied by the problem, they will default to unity. Thereby, one still can use this implementation of the Stokes equation for nondimensional calculations, provided that the passed viscosity ``mu`` is nondimensional as well.
 
 The problem class will now use dimensional units:
 
-.. code:: python
-
-   class DimStokesProblem(Problem):
-   	def __init__(self):
-   		super(DimStokesProblem, self).__init__()
-   		# we are now using units for the viscosity
-   		self.mu=1*milli*pascal*second
-   		self.boxsize=1*milli*meter # the size of the box 
-   		self.imposed_traction=1*pascal # and the imposed traction on the left
-
-   		
-   	def define_problem(self):
-   		# setting the spatial scale X by the boxsize and the pressure scale P by the imposed traction
-   		self.set_scaling(spatial=self.boxsize,pressure=self.imposed_traction)
-   		# the velocity scale is now calculated based on these scales. scale_factor will expand to P and X, respectively
-   		self.set_scaling(velocity=scale_factor("pressure")*scale_factor("spatial")/self.mu)
-   		# alternatively, you can just set directly
-   		# self.set_scaling(velocity=self.imposed_traction*self.boxsize/self.mu)
-   		
-   		self.add_mesh(RectangularQuadMesh(size=self.boxsize)) # we have to tell the mesh that it has a dimensional size now
-   		eqs=StokesEquations(self.mu) # passing the dimensional viscosity to the Stokes equations
-   		eqs+=MeshFileOutput() 
-   		
-   		# A traction is just the Neumann term
-   		eqs+=NeumannBC(velocity_x=-self.imposed_traction)@"left"
-   		# zero y velocity at left and right
-   		eqs+=DirichletBC(velocity_y=0)@"left"
-   		eqs+=DirichletBC(velocity_y=0)@"right"
-   		# No slip conditions at top and bottom
-   		eqs+=DirichletBC(velocity_x=0,velocity_y=0)@"bottom"
-   		eqs+=DirichletBC(velocity_x=0,velocity_y=0)@"top"
-
-   		
-   		# Adding this to the default domain name "domain" of the RectangularQuadMesh above
-   		self.add_equations(eqs@"domain")
-   	
-   		
-   if __name__ == "__main__":		
-   	# Create a Stokes problem with viscosity 1, quadratic velocity basis functions and linear pressure basis functions
-   	with DimStokesProblem() as problem: 
-   		problem.solve() # solve and output
-   		problem.output()
+.. literalinclude:: stokes_dimensional.py
+   :language: python
+   :start-at: class DimStokesProblem(Problem):
+   :end-at: problem.output()
 
 We use :py:meth:`~pyoomph.generic.problem.Problem.set_scaling` to set the corresponding scales for :math:`X` (``spatial``), :math:`U` and :math:`P` (both identified by the name ``"velocity"`` and ``"pressure"`` we named the fields in the Stokes equation class). Furthermore, the :py:class:`~pyoomph.meshes.simplemeshes.RectangularQuadMesh` now gets a dimensional ``size`` passed, which will be canceled out internally by the spatial scale. The imposed traction is exactly the Neumann term in the Stokes equation for the momentum equation.
 

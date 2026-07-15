@@ -47,27 +47,10 @@ In the constructor, we take the parameters that are fixed during the simulation,
 
 The problem class looks like this, where we reuse the predefined :py:class:`~pyoomph.equations.harmonic_oscillator.HarmonicOscillator` equation class:
 
-.. code:: python
-
-
-   class TrapezoidallyDrivenOscillatorProblem(Problem):
-
-   	def define_problem(self):
-   		t = var("time")
-   		# Create a trapezoidal driving
-   		driving = TrapezoidalFunction(wait_time=10, high_time=20, flank_time=1)
-   		# Evaluate at t (which is the current time) and wrap it in a subexpression (optional, but recommended)
-   		driving = subexpression(driving(t))
-   		# pass the driving function evaluated at t here
-   		eqs=HarmonicOscillator(omega=1,damping=0.2,driving=driving,name="y")
-   		eqs+=InitialCondition(y=0.1)
-   		eqs+=ODEFileOutput()
-   		eqs+=ODEObservables(driving=driving) # Also output the driving to the file
-   		self.add_equations(eqs@"harmonic_oscillator") 
-
-   if __name__=="__main__":
-   	with TrapezoidallyDrivenOscillatorProblem() as problem:
-   		problem.run(endtime=100,numouts=1000)
+.. literalinclude:: custom_math_driven_oscillator.py
+   :language: python
+   :start-at: class TrapezoidallyDrivenOscillatorProblem(Problem):
+   :end-at: problem.run(endtime=100,numouts=1000)
 
 The result is depicted in :numref:`figodetrapezoidaldriving`.
 

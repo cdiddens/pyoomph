@@ -36,21 +36,9 @@ To that end, we first move close to the bifurcation, i.e. to :math:`\gamma=0.28`
 
 Once we are on the bifurcation, we can sweep over :math:`\delta` and follow the position of the fold bifurcation. As long as the bifurcation tracking is active :math:`\gamma` will be adjusted to stay on the fold bifurcation, i.e. we get a curve :math:`\gamma_\text{fold}(\delta)`, which is written to file:
 
-.. code:: python
-
-           hexfold_file = open(os.path.join(problem.get_output_directory(), "hexfold.txt"), "w")
-           def output_with_params():
-               h_rms = problem.get_mesh("domain").evaluate_observable("h_rms")  # get the root mean square
-               line = [problem.param_gamma.value, problem.param_delta.value,h_rms]  # line to write
-               hexfold_file.write("\t".join(map(str, line)) + "\n")  # write to file
-               hexfold_file.flush()
-               problem.output_at_increased_time()  # and write the output
-
-           output_with_params()
-           ds = 0.025
-           while problem.param_delta.value < 0.5:
-               ds = problem.arclength_continuation(problem.param_delta, ds, max_ds=0.025)
-               output_with_params()
+.. literalinclude:: kuramoto_sivanshinsky_bifurcation.py
+   :language: python
+   :start-at: hexfold_file = open(os.path.join(problem.get_output_directory(), "hexfold.txt"), "w")
 
 The result, i.e. the location of the fold bifurcation, is depicted in :numref:`figpdeksefold2`.
 

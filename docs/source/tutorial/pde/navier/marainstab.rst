@@ -5,57 +5,10 @@ Marangoni instability
 
 Another interesting instability that can arise in a system that combines the Navier-Stokes equation (velocity :math:`\vec{u}`, pressure :math:`p`) with an advection-diffusion equation (scalar field :math:`c`) is the *Marangoni instability*. This instability is driven by a combination of the non-linear advection term :math:`\vec{u}\cdot\nabla c` and a surface tension :math:`\sigma=\sigma(c)` that depends on :math:`c`. Obviously, we must impose a surface tension force, in particular a tangential traction due to potential surface tension gradient along the interface. As in the previous example, we use the predefined classes :py:class:`~pyoomph.equations.navier_stokes.NavierStokesEquations` and :py:class:`~pyoomph.equations.advection_diffusion.AdvectionDiffusionEquations`, where the velocity of the former is used to advect the field :math:`c` in the latter. The field :math:`c` just couples back via a tangential traction at the top interface. We will additionally use physical dimensions for this example:
 
-.. code:: python
-
-   from pyoomph import * 
-   # Use the pre-defined equations for Navier-Stokes and advection-diffusion
-   from pyoomph.equations.navier_stokes import * 
-   from pyoomph.equations.advection_diffusion import *
-
-   # Dimensional problem
-   from pyoomph.expressions.units import *
-
-   class MarangoniProblem(Problem):
-   	def __init__(self):
-   		super(MarangoniProblem,self).__init__()
-   		self.W,self.H=1*milli*meter, 0.25*milli*meter # Size of the box
-   		self.rho,self.mu=1000*kilogram/meter**3, 1*milli*pascal*second  # density and viscosity
-   		self.D=1e-9*meter**2/second # diffusivity
-   		self.Nx=10 # elmenents in x-direction
-   		self.max_refinement_level=3 # max. 4 times refining
-   		self.dsigma_dc=-0.1*milli*newton/meter
-   		
-   	def define_problem(self):
-   		self.set_scaling(spatial=self.W,temporal=0.1*second)
-   		self.set_scaling(velocity=scale_factor("spatial")/scale_factor("temporal"))
-   		self.set_scaling(pressure=1*pascal)						
-   		# add the mesh		
-   		self.add_mesh(RectangularQuadMesh(size=[self.W,self.H],N=[self.Nx,int(self.Nx*self.H/self.W)]))
-   		eqs=MeshFileOutput() # output
-
-   		eqs+=AdvectionDiffusionEquations(fieldnames="c",wind=var("velocity"),diffusivity=self.D,space="C1")
-   		eqs+=NavierStokesEquations(dynamic_viscosity=self.mu,mass_density=self.rho)
-   		# Initial condition
-   		xrel,yrel=var("coordinate_x")/self.W,var("coordinate_y")/self.H
-   		eqs+=InitialCondition(c=yrel*(1+0.01*cos(2*pi*xrel)+0.001*sin(4*pi*xrel)))
-   		# Refinements based on c and velocity
-   		eqs+=SpatialErrorEstimator(c=1,velocity=1)
-   		# Adding no-slip conditions
-   		for wall in ["left","right","bottom"]:
-   			eqs+=DirichletBC(velocity_x=0,velocity_y=0)@wall
-
-   		# "Free" surface: fixed y-velocity, Marangoni force
-   		sigma=self.dsigma_dc*var("c")		# Surface tension
-   		eqs+=(DirichletBC(velocity_y=0)+NeumannBC(velocity=-grad(sigma)))@"top" 
-   		# Fix one pressure degree
-   		eqs+=DirichletBC(pressure=0)@"bottom/left"
-   		self.add_equations(eqs@"domain")
-   		
-
-   if __name__=="__main__":
-   	with MarangoniProblem() as problem:
-   		# problem.dsigma_dc=0.1*milli*newton/meter
-   		problem.run(1*second,outstep=True,startstep=0.01*second,maxstep=0.1*second,spatial_adapt=1,temporal_error=1)
+.. literalinclude:: marangoni_instability.py
+   :language: python
+   :start-at: from pyoomph import *
+   :end-at: problem.run(1*second,outstep=True,startstep=0.01*second,maxstep=0.1*second,spatial_adapt=1,temporal_error=1)
 
 Since we have a dimensional problem now, all quantities as e.g. ``rho`` and ``mu`` and also the size of the box ``W``\ :math:`\times`\ ``H`` are dimensional. To nondimensionalize, we have to set the ``spatial`` and ``temporal`` scales, as well as the ``pressure`` and ``velocity`` scale. The scale of the field ``c`` is not set, since we use a non-dimensional field for :math:`c`. Thereby, the problem gets nondimensionalized internally. As initial condition for :math:`c`, we have a linear gradient in :math:`y` direction (lower :math:`c` in the bulk as compared to the ``"top"`` interface) with a tiny tangential perturbation. The ``"left"``, ``"right"`` and ``"bottom"`` sides are just no-slip boundary conditions.
 

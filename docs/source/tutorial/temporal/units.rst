@@ -32,60 +32,19 @@ It is important that the residual form may not have any dimensional quantities l
 
 In pyoomph, we can do the same steps as follows within the definition of our equation class:
 
-.. code:: python
-
-   from pyoomph import *
-   from pyoomph.expressions import * #Import the basic expressions
-   from pyoomph.expressions.units import * #Import units like meter and so on
-
-
-   class DimensionalOscillator(ODEEquations):
-   	def __init__(self,*,m=1,k=1): #Default values can be nondimensional
-   		super(DimensionalOscillator,self).__init__()
-   		self.m=m
-   		self.k=k
-   		
-   	def define_fields(self):
-   		# bind the scaling of time
-   		T=scale_factor("temporal")
-   		X=scale_factor("x") # and of the variable x
-   		self.define_ode_variable("x",testscale=T**2/X) #set the test function scale here
-   				
-   	def define_residuals(self):
-   		x=var("x") # dimensional x
-   		# write the equation as before with dimensions
-   		eq=partial_t(x,2)+self.k/self.m*x
-   		self.add_residual(eq*testfunction(x)) # testfunction(x) will expand to T**2/X * ~chi
+.. literalinclude:: dimensional_oscillator_with_units.py
+   :language: python
+   :start-at: from pyoomph import *
+   :end-at: self.add_residual(eq*testfunction(x)) # testfunction(x) will expand to T**2/X * ~chi
 
 We have implemented the equation as ``partial_t(x,2)+m/k*x``, i.e. it will have the units of ``x`` divided by the unit of the time squared. To get rid of these scales, we have passed the argument ``testscale`` to the :py:meth:`~pyoomph.generic.codegen.ODEEquations.define_ode_variable` method. Thereby, we set the scale factor :math:`C` of the test function to be :math:`T^2/X`, where :math:`T` and :math:`X` can be obtained by the function :py:func:`~pyoomph.expressions.generic.scale_factor`, i.e. by ``scale_factor("temporal")`` and ``scale_factor("x")``, respectively. pyoomph will automatically expand all parts that are added to the residuals into scales times the nondimensional equivalent, i.e. internally exactly the same steps are done from :math:numref:`eqodedimhostart` to :math:numref:`eqodedimhoend`.
 
 We have not yet specified the scales :math:`X` and :math:`T`. Both will be done at problem level:
 
-.. code:: python
-
-   class DimensionalOscillatorProblem(Problem):
-
-   	def __init__(self):
-   		super(DimensionalOscillatorProblem,self).__init__() 
-   		self.mass=100*kilogram  #Specifying dimensional parameters
-   		self.spring_constant=1000*newton/meter
-   		self.initial_displacement=2*centi*meter #and a dimensional initial condition	
-   	
-   	def define_problem(self):
-   		eqs=DimensionalOscillator(m=self.mass,k=self.spring_constant) #Setting dimensional parameters
-   		eqs+=InitialCondition(x=self.initial_displacement) #Setting a dimensional displacement
-   		eqs+=ODEFileOutput() 
-   		
-   		#Important step: Introduce a good scaling
-   		T=square_root(self.mass/self.spring_constant)
-   		self.set_scaling(temporal=T,x=self.initial_displacement) #and set it to the problem
-   		
-   		self.add_equations(eqs@"harmonic_oscillator") 
-   		
-
-   if __name__=="__main__":
-   	with DimensionalOscillatorProblem() as problem:
-   		problem.run(endtime=10*second,numouts=1000) #endime is now also in seconds!
+.. literalinclude:: dimensional_oscillator_with_units.py
+   :language: python
+   :start-at: class DimensionalOscillatorProblem(Problem):
+   :end-at: problem.run(endtime=10*second,numouts=1000) #endime is now also in seconds!
 
 In the constructor, we see how we can simply define dimensional units, i.e. just by multiplying or dividing with units like ``meter``, ``newton`` or whatever. In the :py:meth:`~pyoomph.generic.problem.Problem.define_problem` method, we pass these dimensional parameters to the equation and also the initial condition for ``x`` gets a dimensional value. However, in order to make this work, we have to introduce the typical scalings for the time and the displacement. The time scale can be set via the argument ``temporal`` in the method :py:meth:`~pyoomph.generic.problem.Problem.set_scaling`, whereas the scaling of any other variable, i.e. here ``x``, can also be set with this method. As discussed before, a good time scale is :math:`\sqrt{m/k}` and the initial displacement is used as scale for :math:`x`. The rest remains the same as before, except that we have to use a dimensional time for the ``endtime`` keyword argument in :py:meth:`~pyoomph.generic.problem.Problem.run`, since our time is now dimensional. Also, after running the simulation, the output file will have units in the header. This is beneficial, since it is not required to redimensionalize the output to compare it e.g. against experimental data. It is important to note that :py:func:`~pyoomph.expressions.generic.scale_factor` calls in the equation class gives unity if there is no scaling set in the problem class. This allows using the same equation class for dimensional and nondimensional calculations. For the latter case, of course, the variables ``mass``, ``spring_constant`` and ``initial_displacement`` may not contain units and also the :py:meth:`~pyoomph.generic.problem.Problem.run` statement needs a nondimensional numeric value for the ``endtime``. Unfortunately, one still has to set good values for the scaling by hand via the :py:meth:`~pyoomph.generic.problem.Problem.set_scaling` method. While for the harmonic oscillator, it would be possible to guess a good scaling just from the equation (as we have done with the time scale), it is in general, in particular for highly coupled systems with multiple driving mechanisms, not feasible.
 

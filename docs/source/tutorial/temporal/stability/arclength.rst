@@ -13,46 +13,10 @@ The simplest problem where arc length continuation becomes handy is the normal f
 
 Obviously, there is no stationary solution for :math:`r<0`, whereas we have a stable stationary solution at :math:`x_0=\sqrt{r}` and an unstable stationary solution at :math:`x_0=-\sqrt{r}` for :math:`r>0`. Let us implement this equation and gradually reduce from a positive :math:`r` and follow the stationary solution:
 
-.. code:: python
-
-   from pyoomph import *
-   from pyoomph.expressions import *
-
-   class FoldNormalForm(ODEEquations):
-       def __init__(self,r):
-           super(FoldNormalForm, self).__init__()
-           self.r=r
-
-       def define_fields(self):
-           self.define_ode_variable("x")
-
-       def define_residuals(self):
-           x,x_test=var_and_test("x") 
-           self.add_residual((partial_t(x)-self.r+x**2)*x_test)
-
-
-   class FoldProblem(Problem):
-       def __init__(self):
-           super(FoldProblem, self).__init__()
-           # bifurcation parameter
-           self.r=self.define_global_parameter(r=1) 
-           self.x0=1
-
-       def define_problem(self):
-           eq=FoldNormalForm(r=self.r) #Pass the paramter 'r' here
-           eq+=InitialCondition(x=self.x0)
-           # Instead of having a file with time as first column, we want to have the parameter value r
-           eq+=ODEFileOutput(first_column=self.r)
-           
-           self.add_equations(eq@"fold")
-
-   if __name__=="__main__":
-       with FoldProblem() as problem:
-           while True:
-               problem.solve()
-               problem.output_at_increased_time()
-               problem.r.value-=0.02
-
+.. literalinclude:: bifurcation_fold_param_change.py
+   :language: python
+   :start-at: from pyoomph import *
+   :end-at: problem.r.value-=0.02
 
 .. only:: html
 
@@ -76,26 +40,9 @@ Obviously, in this situation, the parameter :math:`r` is not the best quantity t
 
 where :math:`(x^*,r^*)` is a starting point for which :math:`F(x^*,r^*)=0` holds. The second equation now prescribes a step :math:`\Delta s` in the tangent direction, i.e. along the tangent :math:`(\partial_x F,\partial_r F)` along the curve :math:`F(x,r)=0`. In pyoomph, this can be done with the method :py:meth:`~pyoomph.generic.problem.Problem.arclength_continuation`:
 
-.. code:: python
-
-   from bifurcation_fold_param_change import *
-   if __name__=="__main__":   
-       with FoldProblem() as problem:
-
-           # Find start solution
-           problem.r.value=1
-           problem.get_ode("fold").set_value(x=1)
-           problem.solve()
-           problem.output()
-
-           # Initialize ds (the first step is in direction of the parameter r, i.e. we decrease r first)
-           ds=-0.02
-
-           # Scan as long as x>-1                
-           while problem.get_ode("fold").get_value("x",as_float=True)>-1:
-               # adjust r, solve for x along the tangent and return a good new ds
-               ds=problem.arclength_continuation(problem.r,ds,max_ds=0.025)
-               problem.output()
+.. literalinclude:: bifurcation_fold_arclength.py
+   :language: python
+   :start-at: from bifurcation_fold_param_change import *
 
 .. only:: html
 
@@ -110,37 +57,10 @@ First, reuse the classes from the beginning of this page, i.e. from :download:`b
 
 We can combine the :py:meth:`~pyoomph.generic.problem.Problem.arclength_continuation` with the calculation of eigenvalues to get a bifurcation diagram of the fold bifurcation:
 
-.. code:: python
-
-   from bifurcation_fold_param_change import *
-
-   if __name__=="__main__":
-       with FoldProblem() as problem:
-
-           # Find start solution
-           problem.r.value=1
-           problem.get_ode("fold").set_value(x=1)
-           problem.solve()
-           problem.output()
-
-           # Initialize ds (the first step is in direction of the parameter r, i.e. we decrease r first)
-           ds=-0.02
-
-           # File to write the parameter r, the value of x and the eigenvalue
-           fold_with_eigen_file=open(os.path.join(problem.get_output_directory(),"fold_with_eigen.txt"),"w")
-           # Function to write the current state into the file
-           def write_to_eigen_file():
-               eigenvals,eigenvects=problem.solve_eigenproblem(1)
-               line=[problem.r.value,problem.get_ode("fold").get_value("x",as_float=True),eigenvals[0].real,eigenvals[0].imag]
-               fold_with_eigen_file.write("\t".join(map(str,line))+"\n")
-               fold_with_eigen_file.flush()
-
-           write_to_eigen_file() # write the first state
-
-           while problem.get_ode("fold").get_value("x",as_float=True)>-1:
-               ds=problem.arclength_continuation(problem.r,ds,max_ds=0.005)
-               problem.output()
-               write_to_eigen_file() # write the updated state
+.. literalinclude:: bifurcation_fold_arclength_eigen.py
+   :language: python
+   :start-at: from bifurcation_fold_param_change import *
+   :end-at: write_to_eigen_file() # write the updated state
 
 .. only:: html
 

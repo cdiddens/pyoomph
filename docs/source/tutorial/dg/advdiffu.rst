@@ -111,31 +111,10 @@ As an auxiliary method, the function :py:func:`~pyoomph.expressions.generic.is_D
 
 The definition of the weak form now also tests whether we have an continuous space or must add additional facet terms:
 
-.. code:: python
-
-    def define_residuals(self):
-        c, ctest = var_and_test("c")        
-        # Conventional form, used for CG spaces
-        self.add_weak(partial_t(c), ctest)  
-        self.add_weak(self.D * grad(c) -self.u*c, grad(ctest)) 
-        
-        if is_DG_space(self.space):
-            # Additional facet terms for DG spaces            
-            h_avg=avg(var("cartesian_element_length_h")) # length of an element:
-            n=var("normal") # in facet terms, the normal vector is the facet normal. For the element normal, var("normal",domain="..") can be used.
-            # if used without any restriction, i.e. outside from jump or average, it will default to n^+
-
-            # Upwind scheme. See whether the velocity is in the direction of the normal vector, otherwise, it will be zero
-            un_upwind=(dot(self.u, n) + absolute(dot(self.u, n)))/2
-            
-            # Assemble the facet terms:
-            facet_terms=weak(self.D*(self.alpha_DG/h_avg)*jump(c),jump(ctest))
-            facet_terms=-weak(self.D*jump(c)*n,avg(grad(ctest)))
-            facet_terms=-weak(self.D*avg(grad(c)),jump(ctest)*n)
-            facet_terms+=weak( jump(un_upwind*c,at_facet=True) ,jump(ctest))
-
-            # And add them to the skeleton mesh of the facets
-            self.add_interior_facet_residual(facet_terms)
+.. literalinclude:: convection_diffusion.py
+   :language: python
+   :start-at: def define_residuals(self):
+   :end-at: self.add_interior_facet_residual(facet_terms)
 
 Again, we make use of :py:func:`~pyoomph.expressions.generic.is_DG_space` to check whether the space is discontinuous. If this is the case, we define the facet terms.
 For these terms, we first define the upwind convection, which is only giving a contribution if the velocity is advecting in the same direction as the facet normal, which can be bound by ``var("normal")``. The normal of the element itself, i.e. not the facet normal, can be obtained by ``var("normal",domain="..")``. This is a consequence from the expansions of the variables at the domain where you add the residual terms, which are here the facets. For the elements, you hence must go one level up in the domain hierarchy.
@@ -152,31 +131,10 @@ Finally, we add the facet terms to the skeleton mesh of the facets by the :py:me
 
 The problem code reads as before, but we use the keyword argument ``discontinuous=True`` to obtain a better output to include the discontinuities. Thereby, each element writes its nodes individually to the output, i.e. overlapping nodes are multiple times present in the output. The same also works for the :py:class:`~pyoomph.output.meshio.MeshFileOutput` class to write VTU files in higher dimensions. The default ``discontinuous=False`` will just take the average value at overlapping nodes for the output.
 
-.. code:: python
-
-   class OneDimAdvectionDiffusionProblem(Problem):
-      def __init__(self):
-         super(OneDimAdvectionDiffusionProblem, self).__init__()
-         self.u=vector(1,0)
-         self.D=0.0001
-         self.space="D1"
-
-      def define_problem(self):
-         self.add_mesh(LineMesh(N=100,size=100,minimum=-20)) # coarse mesh from [-20:80]
-
-         eqs=TextFileOutput(discontinuous=True)
-         eqs+=ConvectionDiffusionEquation(u=self.u,D=self.D,space=self.space)
-
-         x=var("coordinate_x")
-         cinit=exp(-x**2*0.25)
-         eqs+=InitialCondition(c=cinit)
-
-         self.add_equations(eqs@"domain")
-
-
-   if __name__=="__main__":
-      with OneDimAdvectionDiffusionProblem() as problem:
-         problem.run(50,outstep=1,maxstep=0.1)
+.. literalinclude:: convection_diffusion.py
+   :language: python
+   :start-at: class OneDimAdvectionDiffusionProblem(Problem):
+   :end-at: problem.run(50,outstep=1,maxstep=0.1)
 
 The discontinuous output is plotted in :numref:`figdgconvdiffu`.
 

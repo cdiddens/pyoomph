@@ -18,17 +18,10 @@ which obviously fulfill the required properties. The shift :math:`\alpha` preven
 
 pyoomph can apply the method of Ref. :cite:`Farrell2015` automatically and iterate over multiple found solutions at a given parameter value. As an example, we will calculate the solutions of a pitchfork bifurcation at a specific parameter, where three solutions exist. The considered pitchfork normal form is the same as in :math:numref:`eqodepitchforknf`, so we do not reiterate it here. Also, we do not define a problem class, but assemble our problem directly in the run script:
 
-.. code:: python
-
-	# Simple problems can be assembled without a specific class
-    	problem=Problem()
-	problem+=PitchForkNormalForm(r=1,sign=-1)@"pitchfork"
-	# Find the solutions by deflation    	
-    	solutions=[]
-    	for sol in problem.iterate_over_multiple_solutions_by_deflation(deflation_alpha=0.1,deflation_p=2,perturbation_amplitude=0.1,num_random_tries=2):
-        	solutions.append(sol)
-	print("Found solutions at r=1 are x = ",solutions)
-
+.. literalinclude:: deflated_solve.py
+   :language: python
+   :start-at: # Simple problems can be assembled without a specific class
+   :end-at: print("Found solutions at r=1 are x = ",solutions)
 
 When running, the method :py:meth:`~pyoomph.generic.problem.Problem.iterate_over_multiple_solutions_by_deflation` will first solve the problem normally, without any deflation. The ``for``-loop will receive the corresponding degrees of freedom. After that, the first solution is removed by the deflation operator specified above. Here, you can select the exponent :math:`p` and the shift :math:`\alpha` by the keyword arguments ``deflation_p`` and ``deflation_alpha``. However, we must perturb the first solution before trying to find the next one. Otherwise, we would divide by zero. This is done by a random perturbation of the solution with an amplitude given by ``perturbation_amplitude``. A single random try may not be enough, so we also allow specifying the number of attempted solves with different random perturbations of the previous solution, which can be selected by ``num_random_tries``. Optionally, you can also perform a perturbation by the dominant eigenvector when adding the argument ``use_eigenperturbation=True``. An attempted solve with the perturbation in eigendirection will then be done additionally to the random perturbation(s). Whenever a new solution is found, also this solution is considered in the deflation operator. Afterwards, all found solutions are perturbed again and new attempts are started to find even more solutions.
 
@@ -46,27 +39,10 @@ Depending on the generated random numbers, one either finds all three solutions 
 
 Deflation can furthermore be combined with parameter scanning, in a sort of continuation. Opposed to arclength continuation, we do not solve along the arclength of a single solution branch, but just scan over the parameter branch once. But at each scanned parameter value, we try to find new solutions by deflation and try to connect the solutions at the previous parameter value to the new solutions. This algorithm has been proposed in Ref. :cite:`Farrell2016`, which can be invoked using the method :py:meth:`~pyoomph.generic.problem.Problem.deflated_continuation`:
 
-.. code:: python
-
-	problem=Problem()
-	r=problem.define_global_parameter(r=-1)
-	problem+=PitchForkNormalForm(r=r,sign=-1)@"pitchfork"
-
-	# Storage for the output files: Branch index -> output file
-	output_files={}
-
-	# Scan r from -1 to 1, apply deflated continuation
-	for branch_index,rvalue,sol in problem.deflated_continuation(r=numpy.linspace(-1,1,50)):
-		# we get the branch_index (increasing), the value of the parameter and the degrees of freedom
-		if branch_index not in output_files:
-			# Create an output file for the new branch
-			output_files[branch_index]=problem.create_text_file_output("branch_{:02d}.txt".format(branch_index))
-		# We can e.g. solve eigenproblems, or output solutions here
-		problem.solve_eigenproblem(1)
-		Re_ev=numpy.real(problem.get_last_eigenvalues()[0])
-		# Write the output
-		output_files[branch_index].add_row(rvalue,sol[0],Re_ev)
-		
+.. literalinclude:: deflated_continuation.py
+   :language: python
+   :start-at: problem=Problem()
+   :end-at: output_files[branch_index].add_row(rvalue,sol[0],Re_ev)
 
 A call of :py:meth:`~pyoomph.generic.problem.Problem.deflated_continuation` expects a parameter sampling range and has similar additional optional arguments as :py:meth:`~pyoomph.generic.problem.Problem.iterate_over_multiple_solutions_by_deflation`. At each solution, the ``for``-loop receives an increasing branch index, the current parameter value and the degrees of freedom of the solution. Feel free to calculate e.g. eigenvalues or call e.g. :py:meth:`~pyoomph.generic.problem.Problem.output` inside the loop to process the current solution. You could also consider adding a :py:meth:`~pyoomph.generic.problem.Problem.write_state` whenever a new branch index starts. With another script, you can load these states via :py:meth:`~pyoomph.generic.problem.Problem.load_state` and e.g. finalize the bifurcation diagram by arclength continuation of all found solutions.
 

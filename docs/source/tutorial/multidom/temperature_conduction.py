@@ -37,7 +37,7 @@ class TwoDomainMesh1d(MeshTemplate):
 	def define_geometry(self):
 		xI=self.nondim_size(self.xI)
 		L=self.nondim_size(self.L)
-		NA=round(self.Ntot*xI/L) # number of elements on domainA calcuated from total number 
+		NA=round(self.Ntot*xI/L) # number of elements on domainA calculated from total number 
 		
 		domainA=self.new_domain(self.left_domain_name)
 		domainB=self.new_domain(self.right_domain_name)
@@ -54,7 +54,7 @@ class TwoDomainMesh1d(MeshTemplate):
 			
 		# marking boundaries
 		self.add_facet_to_boundary("left",[nodesA[0]])
-		self.add_facet_to_boundary("interface",[nodesB[0]]) # coordsB[0] is acutally = coordsA[-1]
+		self.add_facet_to_boundary("interface",[nodesB[0]]) # coordsB[0] is actually = coordsA[-1]
 		self.add_facet_to_boundary("right",[nodesB[-1]])
 		
 

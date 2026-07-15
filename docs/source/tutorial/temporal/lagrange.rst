@@ -13,44 +13,11 @@ The easiest way to solve this is of course, the conventional way: instead of exp
 
 If you have read this tutorial until here, implementing this equation should be a trivial task:
 
-.. code:: python
+.. literalinclude:: pendulum_generalized_coordinate.py
+   :language: python
+   :start-at: from pyoomph import * # Import pyoomph
+   :end-at: problem.run(endtime=100,numouts=1000)
 
-   from pyoomph import * # Import pyoomph 
-   from pyoomph.expressions import * # Import some additional things to express e.g. partial_t
-
-   class PendulumEquations(ODEEquations):
-   	def __init__(self,*,g=1,L=1): 
-   		super(PendulumEquations,self).__init__()
-   		self.g=g
-   		self.L=L
-   		
-   	def define_fields(self):
-   		self.define_ode_variable("phi") #Angle
-   		
-   	def define_residuals(self):
-   		phi=var("phi")
-   		residual=partial_t(phi,2)+self.g/self.L*sin(phi)
-   		self.add_residual(residual*testfunction(phi))
-   		
-
-
-   class PendulumProblem(Problem):
-
-   	def __init__(self):
-   		super(PendulumProblem,self).__init__() 
-   		self.g=1 #Gravity
-   		self.L=1 #Length
-   	
-   	def define_problem(self):
-   		eqs=PendulumEquations(g=self.g,L=self.L)
-   		eqs+=InitialCondition(phi=0.9*pi) #High initial position
-   		eqs+=ODEFileOutput() 
-   		self.add_equations(eqs@"pendulum") 		
-
-   if __name__=="__main__":
-   	with PendulumProblem() as problem:
-   		problem.run(endtime=100,numouts=1000)
-   		
 .. only:: html
 
 	.. container:: downloadbutton
@@ -94,51 +61,17 @@ As a third equation to determine the three unknowns :math:`x`, :math:`y` and :ma
 
 We solve these equations by splitting the system into the unconstrained motion in an equation class ``NewtonsLaw2d``:
 
-.. code:: python
-
-   class NewtonsLaw2d(ODEEquations):
-   	def __init__(self,*,mass=1,force_vector=vector([0,-1])):
-   		super(NewtonsLaw2d,self).__init__()
-   		self.force_vector=force_vector
-   		self.mass=mass
-
-   	# Here, we use BDF2 time stepping, i.e. we split the system into a 4d system of first order ODEs
-   	def define_fields(self):
-   		self.define_ode_variable("x") 
-   		self.define_ode_variable("y") 		
-   		self.define_ode_variable("xdot") #partial_t x
-   		self.define_ode_variable("ydot") #partial_t y
-   		
-   	def define_residuals(self):
-   		x,y=var(["x","y"])
-   		xdot,ydot=var(["xdot","ydot"])
-   		# Motion equations
-   		self.add_residual( (self.mass*partial_t(xdot)-self.force_vector[0])*testfunction(x))
-   		self.add_residual( (self.mass*partial_t(ydot)-self.force_vector[1])*testfunction(y))
-   		# Definition of xdot and ydot
-   		self.add_residual( (partial_t(x)-xdot)*testfunction(xdot))
-   		self.add_residual( (partial_t(y)-ydot)*testfunction(ydot))
+.. literalinclude:: pendulum_lagrange_multiplier.py
+   :language: python
+   :start-at: class NewtonsLaw2d(ODEEquations):
+   :end-at: self.add_residual( (partial_t(y)-ydot)*testfunction(ydot))
 
 and the constraint itself, which adds the additional terms stemming from the constraint to the equation of motion and solves for the unknown Lagrange multiplier :math:`\lambda` by solving the constraint equation :math:`g(x,y)=0`:
 
-.. code:: python
-
-   #Pendulum constraint: Enforcing sqrt(x**2+y**2)=L via a Lagrange multiplier
-   class PendulumConstraint(ODEEquations):
-   	def __init__(self,*,L=1):
-   		super(PendulumConstraint,self).__init__()
-   		self.L=L
-   		
-   	def define_fields(self):
-   		self.define_ode_variable("lambda_pendulum") #Lagrange multiplier
-   		
-   	def define_residuals(self):
-   		x,y,lambda_pendulum=var(["x","y","lambda_pendulum"])
-   		currentL=square_root(x**2+y**2) #Current length
-   		currentL=subexpression(currentL) #Wrap it into a subexpression, since it occurs multiple times in the equations
-   		self.add_residual(lambda_pendulum*x/currentL*testfunction(x)) #additional forces
-   		self.add_residual(lambda_pendulum*y/currentL*testfunction(y))	
-   		self.add_residual((currentL-self.L)*testfunction(lambda_pendulum)) #constraint equation to solve for the Lagrange multiplier
+.. literalinclude:: pendulum_lagrange_multiplier.py
+   :language: python
+   :start-at: #Pendulum constraint: Enforcing sqrt(x**2+y**2)=L via a Lagrange multiplier
+   :end-at: self.add_residual((currentL-self.L)*testfunction(lambda_pendulum)) #constraint equation to solve for the Lagrange multiplier
 
 In the :py:meth:`~pyoomph.generic.codegen.BaseEquations.define_fields`, we introduce the Lagrange multiplier :math:`\lambda` as ODE variable. In the function :py:meth:`~pyoomph.generic.codegen.BaseEquations.define_residuals`, we add the corresponding forces to the residual form of :math:numref:`eqaugmotionpendy`. Since the residual form requires putting all terms on one side, note that the sign of the additional terms proportional to :math:`\lambda` has changed. By using ``testfunction(x)`` and ``testfunction(y)``, it is ensured that this additional forcing is indeed added to the correct equation of motion. Finally, one still has the constraint equation :math:`g(x,y)=0` and the degree of freedom :math:`\lambda`. This is accounted for in the last line where the constraint equation is solved in the residual term for the Lagrange multiplier :math:`\lambda`.
 
@@ -146,30 +79,10 @@ Besides :py:func:`~pyoomph.expressions.square_root`, which is just the mathemati
 
 At a last step, the problem definition reads like this:
 
-.. code:: python
-
-
-   	def __init__(self):
-   		super(PendulumProblem,self).__init__() 
-   		self.gvector=vector([0,-1]) #Default gravity direction, g is assumed to be 1
-   		self.L=1 #pendulum length
-   		self.mass=1
-   	
-   	def define_problem(self):
-   		eqs=NewtonsLaw2d(force_vector=self.mass*self.gvector,mass=self.mass)
-   		eqs+=PendulumConstraint(L=self.L)
-   		phi0=0.9*pi #Initial phi
-   		x0=self.L*sin(phi0) #Initial position
-   		y0=-self.L*cos(phi0)		
-   		eqs+=InitialCondition(x=x0,y=y0)  #Set the initial position
-   		eqs+=ODEFileOutput()  #Output
-   		eqs+=ODEObservables(phi=atan2(var("x"),-var("y"))) #Calculate phi from x and y
-   		self.add_equations(eqs@"pendulum") 		
-
-   if __name__=="__main__":
-   	with PendulumProblem() as problem:
-   		# We need many outputs, i.e. a small dt for the time stepping scheme to be nearly energy-conserving
-   		problem.run(endtime=100,numouts=10000)
+.. literalinclude:: pendulum_lagrange_multiplier.py
+   :language: python
+   :start-at: def __init__(self):
+   :end-at: problem.run(endtime=100,numouts=10000)
 
 Here, both equations, ``NewtonsLaw2d`` and ``PendulumConstraint`` get combined. While ``NewtonsLaw2d`` can be solved without the constraint (which would just result in a free fall of the mass), ``PendulumConstraint`` is only valid when combined with an equation that defines the variables :math:`x` and :math:`y`, since these are required for the constraint.
 

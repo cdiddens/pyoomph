@@ -7,73 +7,24 @@ The last example illustrated how the continuity of the concentration field :math
 
 We consider a simple Poisson equation, again implemented for both continuous and discontinuous Galerkin spaces. The facet terms can be directly copied from the diffusion term of the advection-diffusion equation. The only modification we make is adding the keyword argument ``allow_DL_and_D0=True`` to the test for discontinuous spaces via the :py:func:`~pyoomph.expressions.generic.is_DG_space` function. Thereby, we can use the discontinuous spaces without degrees of freedom at the nodes, i.e. ``"DL"`` and ``"D0"``, as well.
 
-.. code:: python
-
-   class PoissonEquations(Equations):
-		def __init__(self,f,space,alpha_DG=4):
-		    super().__init__()
-		    self.f=f
-		    self.space=space
-		    self.requires_interior_facet_terms=is_DG_space(self.space, allow_DL_and_D0=True)
-		    self.alpha_DG=alpha_DG
-
-		def define_fields(self):
-		     self.define_scalar_field("u",self.space)
-
-		def define_residuals(self):
-		    u,v=var_and_test("u")
-		    # Both continuous and discontinuous spaces
-		    self.add_residual(weak(grad(u),grad(v))-weak(self.f,v))
-		    if is_DG_space(self.space, allow_DL_and_D0=True):
-		      # Discontinuous penalization         
-		      h_avg=avg(var("cartesian_element_length_h"))
-		      n=var("normal") # will default to n^+ if used without any restriction in facets
-
-		      facet_terms= weak(self.alpha_DG/h_avg*jump(u),jump(v)) 
-		      facet_terms-=weak(jump(u)*n,avg(grad(v)))
-		      facet_terms-=weak(avg(grad(u)),jump(v)*n)          
-		      self.add_interior_facet_residual(facet_terms)
+.. literalinclude:: poisson_weak_dirichlet.py
+   :language: python
+   :start-at: class PoissonEquations(Equations):
+   :end-at: self.add_interior_facet_residual(facet_terms)
 
 However, we now also add a special function which gives the correct weak terms for weakly imposed Dirichlet boundary conditions. This function must return the weak terms that are necessary to enforce some particular Dirichlet value. These are essentially the same as the facet terms, however, instead of :py:func:`~pyoomph.expressions.generic.jump`, we just take the current value on the boundary minus the prescribed value. The function :py:func:`~pyoomph.expressions.generic.avg` is just replaced by the evaluation of the variable on the boundary. In case we do not provide such a field or the field is continuous, we just return ``None``, advising the :py:class:`~pyoomph.meshes.bcs.DirichletBC` to impose the value strongly:
 
-.. code:: python
-
-   def get_weak_dirichlet_terms_for_DG(self, fieldname, value):
-      if fieldname!="u" or not is_DG_space(self.space, allow_DL_and_D0=True):
-         return None
-      else:
-         u,v=var_and_test("u",domain="..") # bind the bulk field to get bulk gradients
-         n=var("normal") # exterior normal
-         h=var("cartesian_element_length_h",domain="..") # element size of the bulk element
-         facet_terms=weak(self.alpha_DG/h*(u-value),v)
-         facet_terms-=weak((u-value)*n,grad(v))
-         facet_terms-=weak(grad(u),v*n)
-         return facet_terms
+.. literalinclude:: poisson_weak_dirichlet.py
+   :language: python
+   :start-at: def get_weak_dirichlet_terms_for_DG(self, fieldname, value):
+   :end-at: return facet_terms
 
 The problem is as usual, but we allow the user to select the space and whether we want to use the weak Dirichlet boundary conditions when possible:
 
-.. code:: python
-
-   class PoissonProblem(Problem):
-      def __init__(self):
-         super().__init__()
-         x=var("coordinate")        
-         self.f=500.0*exp(-((x[0] - 0.5)** 2 + (x[1] )**2)/ 0.02) 
-         self.space="D1"
-         self.prefer_weak_dirichlet=True
-         self.alpha_DG=4
-         self.N=8
-
-      def define_problem(self):
-         self+=RectangularQuadMesh(N=self.N) 
-         eqs=MeshFileOutput(discontinuous=True)
-         eqs+=PoissonEquations(self.f,self.space,self.alpha_DG)
-         eqs+=DirichletBC(u=0,prefer_weak_for_DG=self.prefer_weak_dirichlet)@["left","right","top","bottom"]
-         self+=eqs@"domain"
-
-   with PoissonProblem() as problem:
-      problem.solve()
-      problem.output()
+.. literalinclude:: poisson_weak_dirichlet.py
+   :language: python
+   :start-at: class PoissonProblem(Problem):
+   :end-at: problem.output()
 
 By default, :py:class:`~pyoomph.meshes.bcs.DirichletBC` will impose the conditions weakly whenever the equations in the bulk provide corresponding facet terms by the method :py:meth:`~pyoomph.generic.codegen.Equations.get_weak_dirichlet_terms_for_DG`. If this function returns ``None`` or if the keyword argument ``prefer_weak_for_DG`` in :py:class:`~pyoomph.meshes.bcs.DirichletBC` is set to ``False``, the conditions will be imposed strongly. The output is shown in :numref:`figpoissonweakdirichlet`.
 

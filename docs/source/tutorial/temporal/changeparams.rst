@@ -68,28 +68,10 @@ Parameter scans via Python
 
 Finally, you can also scan through parameters in parallel in Python. Again, we want to run the script :download:`dimensional_oscillator_with_units.py` with multiple parameter settings. pyoomph comes with a class that can take care of looping over parameters and invoking a call of the simulation script with each particular parameter combination as follows:
 
-.. code:: python
-
-   #Import the parallel parameter scanner
-   from pyoomph.utils.paramscan import *
-   from pyoomph.expressions.units import * #Import the units (meter etc)
-
-   if __name__=="__main__":
-
-   	#Create a parameter scanner, give the script to run and the max number of processes to run simultaneously
-   	scanner=ParallelParameterScan("dimensional_oscillator_with_units.py",max_procs=4) 
-   	
-   	for k_in_N_per_m in [0.1,0.2,0.5,1,2,5]: #Scan the spring constant
-   		sim=scanner.new_sim("dim_osci_seq_run_k_"+str(k_in_N_per_m))
-   				
-   		#Modify the parameters
-   		sim.initial_displacement=-10*centi*meter
-   		sim.mass=1*kilogram
-   		sim.spring_constant=k_in_N_per_m*newton/meter
-   			
-   			
-   	#Run all (and rerun also already finished sims)
-   	scanner.run_all(skip_done=False) 
+.. literalinclude:: parallel_running.py
+   :language: python
+   :start-at: #Import the parallel parameter scanner
+   :end-at: scanner.run_all(skip_done=False)
 
 First, a :py:class:`~pyoomph.utils.paramscan.ParallelParameterScan` object is created, passing the script that should be started in parallel and an optional argument of how many processes to be used. If the latter is omitted, it will default to the number of CPUs on the system. The script to run must be either in the same directory or the corresponding full or relative directory has to be passed. Then, for each parameter combination, we add a new simulation to the list using :py:meth:`~pyoomph.utils.paramscan.ParallelParameterScan.new_sim` with the output directory of this particular script. Note that these output directories will be sub-directories of the directory of the parameter scan, which defaults to ``dim_osci_para_run`` here, but can be set via the keyword argument ``output_dir`` in the constructor of the :py:class:`~pyoomph.utils.paramscan.ParallelParameterScan` object. We can then modify any parameter we like to adjust for the simulation by setting them to the object obtained by :py:meth:`~pyoomph.utils.paramscan.ParallelParameterScan.new_sim`.
 

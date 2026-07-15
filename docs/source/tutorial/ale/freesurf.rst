@@ -21,29 +21,10 @@ i.e. the mesh has to move with the normal fluid velocity :cite:`Cairncross2000`.
 
 The implementation of the kinematic boundary condition could read as follows
 
-.. code:: python
-
-   from pyoomph import *
-
-   # use the pre-defined Navier-Stokes ( it will use partial_t(...,ALE="auto") )
-   from pyoomph.equations.navier_stokes import * 
-   # and the pre-defined LaplaceSmoothedMesh
-   from pyoomph.equations.ALE import * 
-
-   class KinematicBC(InterfaceEquations):
-   	def define_fields(self):
-   		self.define_scalar_field("_kin_bc","C2") # second order field lambda
-   		
-   	def define_residuals(self):
-   		n,u=var(["normal","velocity"])
-   		l,eta=var_and_test("_kin_bc") # Lagrange multiplier
-   		x,chi=var_and_test("mesh") # unknown mesh coordinates
-   		# Let the normal mesh velocity follow the normal fluid velocity
-   		self.add_residual(weak(dot(n,u-mesh_velocity()),eta)-weak(l,dot(n,chi)))
-
-   	def before_assigning_equations_postorder(self, mesh):
-   		# pin the Lagrange multiplier, when the mesh is locally entirely pinned
-   		self.pin_redundant_lagrange_multipliers(mesh, "_kin_bc", "mesh") 
+.. literalinclude:: free_surface.py
+   :language: python
+   :start-at: from pyoomph import *
+   :end-at: self.pin_redundant_lagrange_multipliers(mesh, "_kin_bc", "mesh")
 
 Note that we use :py:func:`~pyoomph.expressions.generic.mesh_velocity` instead of :py:func:`~pyoomph.expressions.generic.partial_t` to calculate the mesh velocity. In fact, :py:func:`~pyoomph.expressions.generic.mesh_velocity` is just ``partial_t(var("mesh"),ALE=False)``. This is reasonable, since we want the mesh velocity co-moving with the interface, i.e. directly at the nodes.
 
@@ -107,26 +88,19 @@ So instead calculating the curvature, it is sufficient to add :math:`\langle \si
 
 But first, let us now implement the dynamic boundary condition which can be added to the free surface itself, i.e. the :math:`\langle \cdot , \cdot \rangle` contribution:
 
-.. code:: python
-
-   class DynamicBC(InterfaceEquations):
-   	def __init__(self,sigma):
-   		super(DynamicBC,self).__init__()
-   		self.sigma=sigma
-   		
-   	def define_residuals(self):
-   		v=testfunction("velocity")
-   		self.add_residual(weak(self.sigma,div(v)))
+.. literalinclude:: free_surface.py
+   :language: python
+   :start-at: class DynamicBC(InterfaceEquations):
+   :end-at: self.add_residual(weak(self.sigma,div(v)))
 
 One might wonder whether :py:func:`~pyoomph.expressions.div` is indeed the surface divergence operator :math:`\nabla_S`. But when this equation is added to an interface, it will indeed expand to this. There is no other reasonable way to calculate the divergence of a field defined on a manifold embedded in a higher order space. The same applies for :py:func:`~pyoomph.expressions.generic.grad`: In the bulk, i.e. on domains with zero *co-dimension*, it is indeed the conventional gradient, but on manifolds (surfaces) with nonzero co-dimension, it will be the corresponding surface gradient.
 
 Before defining the problem, we can combine both boundary conditions in a short-hand notation:
 
-.. code:: python
-
-   # Shortcut to create both conditions simultaneously
-   def FreeSurface(sigma):
-   	return KinematicBC()+DynamicBC(sigma)
+.. literalinclude:: free_surface.py
+   :language: python
+   :start-at: # Shortcut to create both conditions simultaneously
+   :end-at: return KinematicBC()+DynamicBC(sigma)
 
 Now, as example problem, let us do the same as before on the basis of lubrication theory in :numref:`eqpdelubric_relax`, but this time solving the exact flow and the exact free surface dynamics:
 
@@ -140,29 +114,10 @@ Now, as example problem, let us do the same as before on the basis of lubricatio
 	Free surface combined with Navier-Stokes and a Laplace-smoothed mesh.
 
 
-.. code:: python
-
-   class SurfaceRelaxationProblem(Problem):	
-   	def define_problem(self):
-   		# Shallow 2d mesh
-   		self.add_mesh(RectangularQuadMesh(N=[80,4],size=[1,0.05]))
-   		eqs=NavierStokesEquations(mass_density=0.01,dynamic_viscosity=1) # equations
-   		eqs+=LaplaceSmoothedMesh() # Laplace smoothed mesh
-   		eqs+=DirichletBC(mesh_x=True) # We can fix all x-coordinates, since the problem is rather shallow
-   		eqs+=MeshFileOutput() # output	
-   		eqs+=DirichletBC(velocity_x=0,velocity_y=0,mesh_y=0)@"bottom" # no slip at bottom and fix the mesh there
-   		eqs+=DirichletBC(velocity_x=0)@"left" # no in/outflow at the sides
-   		eqs+=DirichletBC(velocity_x=0)@"right"
-   		eqs+=FreeSurface(sigma=1)@"top" # free surface at the top
-   		# Deform the initial mesh
-   		X,Y=var(["lagrangian_x","lagrangian_y"])
-   		eqs+=InitialCondition(mesh_y=Y*(1+0.25*cos(2*pi*X)))  # small height with a modulation
-   		self.add_equations(eqs@"domain") # adding it to the system
-
-   		
-   if __name__=="__main__":
-   	with SurfaceRelaxationProblem() as problem:
-   		problem.run(50,outstep=True,startstep=0.25)	
+.. literalinclude:: free_surface.py
+   :language: python
+   :start-at: class SurfaceRelaxationProblem(Problem):
+   :end-at: problem.run(50,outstep=True,startstep=0.25)
 
 As opposed to the lubrication example in :numref:`eqpdelubric_relax`, we use a :py:class:`~pyoomph.meshes.simplemeshes.RectangularQuadMesh` to resolve the entire bulk flow. We add the predefined :py:class:`~pyoomph.equations.navier_stokes.NavierStokesEquations`, which also - opposed to lubrication theory - allows for inertia due to the finite mass density. In order to use the free surface equations we have just defined, we must allow the mesh nodes to move, since the ``KinematicBC`` requires adding weak contributions to the test function of the mesh coordinates. We therefore use the predefined :py:class:`~pyoomph.equations.ALE.LaplaceSmoothedMesh`. However, since this particular problem is shallow, it is sufficient to only consider motion in :math:`y`-direction. This can be achieved by just pinning all :math:`x`-positions to their initial values by the ``DirichletBC(mesh_x=True)``. We impose no slip and a zero :math:`y`-coordinate at the ``"bottom"`` interface and prevent any in- or outflow at the ``"left"`` and ``"right"`` interfaces. Finally, we deform the initial mesh by adding an :py:class:`~pyoomph.equations.generic.InitialCondition`, which sets the :math:`y`-position based on the ``"lagrangian"`` coordinate, which corresponds to the undeformed mesh by default.
 

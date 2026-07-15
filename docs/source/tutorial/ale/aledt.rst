@@ -5,20 +5,10 @@ Time derivatives of fields on moving meshes
 
 We will now move a mesh around and solve a diffusion equation on the moving mesh to see what happens. First of all, the mesh shall now move to the left and right by a sine oscillation, which can be realized as follows
 
-.. code:: python
-
-   from pyoomph import *
-   from pyoomph.expressions import *
-
-   class MovingMesh(Equations):
-   	def define_fields(self):
-   		self.activate_coordinates_as_dofs() 
-   		
-   	def define_residuals(self):
-   		x,xtest=var_and_test("mesh_x") 
-   		xi,t=var(["lagrangian_x","time"]) 
-   		desired_pos=xi+0.125*sin(2*pi*t)
-   		self.add_residual(weak(x-desired_pos,xtest,lagrangian=True) )
+.. literalinclude:: ALE_correction.py
+   :language: python
+   :start-at: from pyoomph import *
+   :end-at: self.add_residual(weak(x-desired_pos,xtest,lagrangian=True) )
 
 We have omitted the ``coordinate_space`` argument in :py:meth:`~pyoomph.generic.codegen.Equations.activate_coordinates_as_dofs`, so that the coordinate space is automatically adjusted by the space of the diffusion equation. The diffusion equation with diffusivity :math:`0.01` could be written as follows:
 
@@ -35,22 +25,10 @@ We have omitted the ``coordinate_space`` argument in :py:meth:`~pyoomph.generic.
 
 And the :py:class:`~pyoomph.generic.problem.Problem` class combining the equations reads
 
-.. code:: python
-
-   class ALEProblem(Problem):
-   	def define_problem(self):
-   		self.add_mesh(RectangularQuadMesh(N=32,lower_left=[-0.5,-0.5]))
-   		eqs=MovingMesh()
-   		eqs+=MeshFileOutput()
-   		eqs+=DiffusionEquation()
-   		eqs+=DirichletBC(mesh_y=True)
-   		x=var("coordinate")
-   		eqs+=InitialCondition(c=exp(-dot(x,x)*100))
-   		self.add_equations(eqs@"domain")
-   		
-   if __name__=="__main__":		
-   	with ALEProblem() as problem:
-   		problem.run(1,numouts=20)
+.. literalinclude:: ALE_correction.py
+   :language: python
+   :start-at: class ALEProblem(Problem):
+   :end-at: problem.run(1,numouts=20)
 
 Note how we pin the :math:`y`-coordinate by a :py:class:`~pyoomph.meshes.bcs.DirichletBC` applied on the entire ``"domain"``. There is no equation for the :math:`y`-coordinate, so we have to fix it. We furthermore set a Gaussian initial condition for the diffusion field.
 
@@ -87,9 +65,10 @@ Thereby, the field :math:`c` is moved against the mesh motion and hence stays in
 
 In conclusion, if one has a moving mesh, but wants to keep spatio-temporal fields independent of the mesh motion, one should augment all :py:func:`~pyoomph.expressions.generic.partial_t` calls with an ``ALE="auto"`` (or leave it out, since it is the default value). This has been done in the bottom row of :numref:`figaleale1`, where the weak formulation of the diffusion equation has been changed to
 
-.. code:: python
-
-   		self.add_residual(weak(partial_t(c,ALE="auto"),ctest)+weak(0.01*grad(c),grad(ctest)))
+.. literalinclude:: ALE_correction.py
+   :language: python
+   :start-at: self.add_residual(weak(partial_t(c,ALE="auto"),ctest)+weak(0.01*grad(c),grad(ctest)))
+   :end-at: self.add_residual(weak(partial_t(c,ALE="auto"),ctest)+weak(0.01*grad(c),grad(ctest)))
 
 The field :math:`c` is now not following the oscillatory motion of the mesh, but stays in place.
 

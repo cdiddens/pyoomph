@@ -12,65 +12,21 @@ In the absence of a substrate, i.e. for a cylindrically shaped liquid bridge, it
 
 We can easily find all the answers by expressing the shape of the base solution only in the :math:`x`-:math:`y`-plane and let pyoomph calculate the stability of such a solution with respect to perturbations in the third direction :math:`z`. We will use Stokes flow for the liquid and combine it with a moving mesh to allow for shape deformations. Moreover, we only consider the right half (i.e. :math:`x\geq 0`) and thereby only select modes which are symmetric with respect to :math:`x` in the following. Therefore, our mesh just creates half of the domain:
 
-.. code:: python
-
-	class RivuletMesh(GmshTemplate):
-	    def define_geometry(self):
-		self.default_resolution=0.1
-		self.mesh_mode="tris"
-		cl_factor=0.5 # Make it finer at the contact line
-		pr=cast(RivuletProblem,self.get_problem())
-		geom=DropletGeometry(volume=pi/2,rivulet_instead=True,contact_angle=pr.theta)
-		p00=self.point(0,0)
-		prl=self.point(-geom.base_radius,0,size=cl_factor*self.default_resolution) # Mirrored point for the circle_arc
-		prr=self.point(geom.base_radius,0,size=cl_factor*self.default_resolution) # contact line
-		p0h=self.point(0,geom.apex_height) # Top of the droplet
-
-		self.circle_arc(prr,p0h,through_point=prl,name="interface")        
-		self.line(prr,p00,name="substrate")
-		        
-		self.line(p00,p0h,name="axis")
-		self.plane_surface("interface","substrate","axis",name="liquid")
+.. literalinclude:: rivulet.py
+   :language: python
+   :start-at: class RivuletMesh(GmshTemplate):
+   :end-at: self.plane_surface("interface","substrate","axis",name="liquid")
 
 Note how we use :py:class:`~pyoomph.utils.dropgeom.DropletGeometry` with the kwarg ``rivulet_instead=True`` to convert the volume and the contact angle (which we obtain from the problem defined later on) to the base radius and apex height. Using ``rivulet_instead=True`` actually converts the value shipped by ``volume`` as surface area of the circle segment. In particular, using the volume of :math:`\pi/2`, it gives a radius of curvature of unity for a contact angle :math:`\theta=90^\circ`.
 
 For the problem class, we just define the two parameters (slip length and contact angle) and add all equations to the system.
 Since we will have an effectively three-dimensional problem, it is important again to pass the ``wall_tangent`` to the :py:class:`~pyoomph.equations.navier_stokes.NavierStokesContactAngle`. This is a vector pointing inward to the bulk domain tangentially along the substrate, i.e. orthogonal to the ``wall_normal`` which is just the axially upward pointing normal. In a pure axisymmetric or 2d Cartesian case ``wall_tangent=vector(-1,0)`` is fine, but it is not true once the free surface deforms in a third direction (cf. :numref:`threedimdroplet`). If again :math:`\vec{n}` is the normal of the free surface and :math:`\vec{n}_\mathrm{w}` is the wall normal, we can use the double cross product :math:`\vec{n}_\mathrm{w}\times(\vec{n}_\mathrm{w}\times \vec{n})` to obtain such a (non-normalized) vector. We can use the known bac-cab identity along with :math:`\|\vec{n}_\mathrm{w}\|=1` to calculate it via :math:`\vec{n}_\mathrm{w}(\vec{n}_\mathrm{w}\cdot\vec{n})-\vec{n}` and subsequently normalize the result, which is valid for all contact angles :math:`0<\theta<180^\circ`. 
 
-.. code:: python
+.. literalinclude:: rivulet.py
+   :language: python
+   :start-at: class RivuletProblem(Problem):
+   :end-at: self+=eqs@"liquid"
 
-	class RivuletProblem(Problem):        
-	    def __init__(self):
-		super().__init__()
-		# Contact angle and slip length
-		self.theta,self.sliplength=self.define_global_parameter(theta=90*degree,sliplength=1) 
-		
-	    def define_problem(self):        
-		self+=RivuletMesh() # Add a 2d mesh       
-		
-		# Assemble the equation system
-		eqs=HyperelasticSmoothedMesh() # Moving mesh, Hyperelastic mesh is quite robust, since we do not remesh in this particular tutorial
-		eqs+=NavierStokesEquations(dynamic_viscosity=1) # bulk flow
-		# Boundary conditions:
-		# Navier-slip and no penetration at the substrate
-		eqs+=( NavierStokesSlipLength(sliplength=self.sliplength) + DirichletBC(velocity_y=0,mesh_y=0) )@"substrate"        
-		# Free surface at the interface
-		eqs+=NavierStokesFreeSurface(surface_tension=1)@"interface"        
-		# Impose a contact angle at the contact line
-		wall_normal=vector(0,1,0) # The substrate has an upwards normal (to be read as 0*e_r+1*e_z+0*e_phi)
-		ninter=var("normal",domain="..") # The normal at the free surface (one domain up when evaluated at the contact line)
-		wall_tangent=wall_normal*dot(wall_normal,ninter)-ninter # double cross product bac-cab rule (with dot(wall_normal,wall_normal)=1)
-		wall_tangent=wall_tangent/square_root(dot(wall_tangent,wall_tangent)) # Normalize it                
-		eqs+=NavierStokesContactAngle(contact_angle=self.theta,wall_normal=wall_normal,wall_tangent=wall_tangent)@"interface/substrate" 
-		# Symmetry at the axis
-		eqs+=DirichletBC(mesh_x=0,velocity_x=0)@"axis" 
-		# Enforce the volume/area of the liquid by a pressure constraint
-		eqs+=EnforceVolumeByPressure(volume=pi/4)        
-		
-		eqs+=MeshFileOutput()              
-		 # Apply the equation system to the liquid domain
-		self+=eqs@"liquid"
-		
 This only sets up the two-dimensional problem. The eigenanalysis with the additional normal mode is activated in the driver code:
 
 .. code:: python

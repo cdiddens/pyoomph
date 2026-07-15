@@ -3,36 +3,17 @@ Soluble surfactants and surfactant isotherms
 
 Soluble surfactants are allowed to move from the liquid bulk phase to the interface and vice versa. Hence, in order for a surfactant to be soluble, we must have it in the liquid phase as well as surfactant concentration at the interface. In fact, the :py:class:`~pyoomph.materials.generic.SurfactantProperties` class we have used so far to define insoluble surfactants inherits from the :py:class:`~pyoomph.materials.generic.PureLiquidProperties` class, i.e. each surfactant is automatically also a pure liquid and can hence be mixed with other liquids. However, before doing so, we must at least set the :py:attr:`~pyoomph.materials.generic.MaterialProperties.molar_mass` so that the mole fractions in the liquid mixture can be calculated. This is e.g. relevant for Raoult's law for the evaporation (cf. :math:numref:`eqmcflowraoults`).
 
-.. code:: python
-
-   # Register an soluble surfactant
-   @MaterialProperties.register()
-   class MySolubleSurfactant(SurfactantProperties):  # It is automatically also a pure liquid
-       name = "my_soluble_surfactant"
-
-       def __init__(self):
-           super(MySolubleSurfactant, self).__init__()
-           self.molar_mass = 100 * gram / mol  # required so that we can mix it with other liquids
-           self.surface_diffusivity = 0.5e-9 * meter ** 2 / second  # default surface diffusivity
+.. literalinclude:: soluble_surfactants.py
+   :language: python
+   :start-at: # Register an soluble surfactant
+   :end-at: self.surface_diffusivity = 0.5e-9 * meter ** 2 / second  # default surface diffusivity
 
 Since the surfactant is now also in the liquid phase, we must define the properties of the bulk liquid mixture we want to use. In particular, the presence of the surfactant could influence the :py:attr:`~pyoomph.materials.generic.BaseLiquidProperties.dynamic_viscosity` or :py:attr:`~pyoomph.materials.generic.MaterialProperties.mass_density`. However, for low concentrations, it is reasonable to disregard this effect and just copy the values of e.g. pure water:
 
-.. code:: python
-
-   # Define how the liquid mixture should behave in the bulk
-   @MaterialProperties.register()
-   class MixLiquidWaterMySolubleSurfactant(MixtureLiquidProperties):
-       components = {"water", "my_soluble_surfactant"}
-
-       def __init__(self, pure_props):
-           super(MixLiquidWaterMySolubleSurfactant, self).__init__(pure_props)
-           # Copy the relevant properties from the water. We assume that the surfactant concentration is small
-           # so that all properties are close to these of water
-           self.mass_density = self.pure_properties["water"].mass_density
-           self.dynamic_viscosity = self.pure_properties["water"].dynamic_viscosity
-           self.default_surface_tension["gas"] = self.pure_properties["water"].default_surface_tension["gas"]
-           # However, we must set a diffusivity
-           self.set_diffusion_coefficient(1e-9 * meter ** 2 / second)
+.. literalinclude:: soluble_surfactants.py
+   :language: python
+   :start-at: # Define how the liquid mixture should behave in the bulk
+   :end-at: self.set_diffusion_coefficient(1e-9 * meter ** 2 / second)
 
 However, we must specify the diffusivity in the bulk. This may be different from the diffusivity at the interface.
 
@@ -69,40 +50,19 @@ The typical time scale of the surfactant equilibration is given by both :math:`k
 
 To use the isotherms on an interface, we just construct it and apply its method :py:meth:`~pyoomph.materials.surfactant_isotherms.SurfactantIsotherm.apply_on_interface`. This will set the :py:attr:`~pyoomph.materials.generic.BaseInterfaceProperties.surface_tension` of this liquid-gas interface to the passed ``pure_surface_tension`` minus the surface pressure :math:`\Pi`. Furthermore, it will set the transfer rate :math:`S_\Gamma` according to the particular isotherm. :math:`S_\Gamma` can alternatively be set by hand with the :py:attr:`~pyoomph.materials.generic.LiquidGasInterfaceProperties.surfactant_adsorption_rate` ``dict``:
 
-.. code:: python
-
-   @MaterialProperties.register()
-   class InterfaceWaterMySolubleSurfactantVSGas(DefaultLiquidGasInterface):
-       liquid_components = {"water", "my_soluble_surfactant"}  # Water and the surfactant are in the liquid phase
-       # gas_components = {"air","water"} # do not specify any particular gas phase here: Hold for all gas mixtures
-       surfactants = {"my_soluble_surfactant"}  # The soluble surfactant may also be on the interface
-
-       def __init__(self, phaseA, phaseB, surfactants):
-           super(InterfaceWaterMySolubleSurfactantVSGas, self).__init__(phaseA, phaseB, surfactants)
-           # Create a LangmuirIsotherm for my_soluble_surfactant
-           isotherm = LangmuirIsotherm("my_soluble_surfactant", k_ads=5e-6 * meter / second, k_des=9.5 / second,
-                                       GammaInfty=5 * micro * mol / meter ** 2)
-           # And apply it to this interface. This will modify self.surface_tension by substracting the surface pressure
-           # and furthermore it will set self.surfactant_adsorption_rate["my_soluble_surfactant"] to the total ad-/desorption flux
-           isotherm.apply_on_interface(self, pure_surface_tension=self.surface_tension,min_surface_tension=20*milli*newton/meter)
+.. literalinclude:: soluble_surfactants.py
+   :language: python
+   :start-after: from pyoomph.materials.surfactant_isotherms import *
+   :end-at: isotherm.apply_on_interface(self, pure_surface_tension=self.surface_tension,min_surface_tension=20*milli*newton/meter)
 
 Since some isotherms have an unbounded surface pressure, the surface tension might become negative once the surfactant concentration exceeds the validity range of the isotherm. Therefore, you can pass a ``min_surface_tension`` to the :py:meth:`~pyoomph.materials.surfactant_isotherms.SurfactantIsotherm.apply_on_interface` call to make sure the surface tension never becomes negative. This can help to prevent crashes of the simulation, when the surfactant leaves the valid bounds.
 
 As for the insoluble surfactants, the interface properties for an interface with soluble surfactants are obtained by :py:func:`~pyoomph.materials.generic.get_interface_properties`. However, in order for the surfactant to be indeed soluble, the surfactant must be present in both the liquid bulk properties and the interface ``surfactants``.
 
-.. code:: python
-
-       # For soluble surfactants, we also must have it in the bulk (potentially at zero concentration)
-       liquid = Mixture(get_pure_liquid("water")+0.001*get_pure_liquid("my_soluble_surfactant"))
-       gas = get_pure_gas("air")
-       # Dict stating the initial surface concentration
-       surfactants = {"my_soluble_surfactant": 1 * micro * mol / meter ** 2}
-
-       # Getting interface properties with surfactants.
-       # For a soluble surfactant, it must be present in both the liquid phase and in the surfactants dict
-       # Any of them may be present at zero concentration, but it must be specified to be present at all
-       interface = get_interface_properties(liquid, gas, surfactants=surfactants)
-
+.. literalinclude:: soluble_surfactants.py
+   :language: python
+   :start-at: # For soluble surfactants, we also must have it in the bulk (potentially at zero concentration)
+   :end-at: interface = get_interface_properties(liquid, gas, surfactants=surfactants)
 
 .. only:: html
 

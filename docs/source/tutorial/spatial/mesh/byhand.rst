@@ -7,48 +7,10 @@ Until now, only trivial meshes, e.g. the 1d :py:class:`~pyoomph.meshes.simplemes
 
 To do so, we write a mesh class that inherits from the :py:class:`~pyoomph.meshes.mesh.MeshTemplate` class. Let us create a mesh that resembles an :math:`L`-shape:
 
-.. code:: python
-
-   from pyoomph import *
-   from pyoomph.equations.poisson import * # use the pre-defined Poisson equation
-
-
-   class LShapedMesh(MeshTemplate):
-   	def __init__(self,Nx=10,Ny=5,H=1,W=1,domain_name="domain"):
-   		super(LShapedMesh,self).__init__()
-   		self.Nx=Nx
-   		self.Ny=Ny
-   		self.H=H
-   		self.W=W
-   		self.domain_name=domain_name
-
-   	def define_geometry(self):
-   		domain=self.new_domain(self.domain_name)
-   		# row of quads in x direction
-   		for ix in range(self.Nx):
-   			x_l,x_u=self.W*ix,self.W*(ix+1) # lower and upper x coordinate
-   			y_l, y_u = 0, self.H # lower and upper y coordinate
-   			# add the corner nodes. These will be unique, i.e. no additional node will be added if it is already present
-   			node_ll = self.add_node_unique(x_l,y_l)
-   			node_ul = self.add_node_unique(x_u, y_l)
-   			node_lu = self.add_node_unique(x_l, y_u)
-   			node_uu = self.add_node_unique(x_u, y_u)
-   			# add a quadrilateral element from (x_l,y_l) to (x_u,y_u)
-   			domain.add_quad_2d_C1(node_ll,node_ul,node_lu,node_uu)
-   			if ix==0: # Marking the left boundary:
-   				self.add_facet_to_boundary("left",[node_ll,node_lu])
-
-   		# row of quads in y direction
-   		for iy in range(1,self.Ny): # we must start from 1, since the element in the corner is already present
-   			x_l,x_u=self.W*(self.Nx-1),self.W*self.Nx # lower and upper x coordinate
-   			y_l, y_u = self.H*iy, self.H*(iy+1) # lower and upper y coordinate
-   			node_ll = self.add_node_unique(x_l,y_l)
-   			node_ul = self.add_node_unique(x_u, y_l)
-   			node_lu = self.add_node_unique(x_l, y_u)
-   			node_uu = self.add_node_unique(x_u, y_u)
-   			domain.add_quad_2d_C1(node_ll,node_ul,node_lu,node_uu)
-   			if iy == self.Ny-1: # Marking the top boundary:
-   				self.add_facet_to_boundary("top",[node_lu, node_uu])
+.. literalinclude:: mesh_Lshape_by_hand.py
+   :language: python
+   :start-at: from pyoomph import *
+   :end-at: self.add_facet_to_boundary("top",[node_lu, node_uu])
 
 Again, we pass arguments to the constructor, e.g. the number of elements ``Nx``\ :math:`\times`\ ``Ny`` in :math:`x` and :math:`y` direction. These are stored as properties of the class. The generation happens in the method :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.define_geometry`. A :py:class:`~pyoomph.meshes.mesh.MeshTemplate` consists of *nodes* and *elements*. Nodes are part of the :py:class:`~pyoomph.meshes.mesh.MeshTemplate` itself, whereas elements are stored in domains. This will allow us to create multiple domains in the very same :py:class:`~pyoomph.meshes.mesh.MeshTemplate`, which is relevant for multi-domain problems in :numref:`secmultidom` later on. Therefore, before adding elements, we must create a domain to store these. This is done with the :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.new_domain` method, which takes a name of this domain as argument. The name is arbitrary, but it is relevant to identify the domain. In particular, in the :py:class:`~pyoomph.generic.problem.Problem` class, we have to restrict the equations to the very same domain name, e.g. in the call ``add_equations(eqs@"domain")``.
 
@@ -70,23 +32,10 @@ Lastly, we also can add boundary markers. This is done with the :py:meth:`~pyoom
 
 As an example how to use this mesh, we solve again a Poisson equation on this mesh, however, this time using the predefined :py:class:`~pyoomph.equations.poisson.PoissonEquation` from the module ``pyoomph.equations.poisson``:
 
-.. code:: python
-
-   class MeshTestProblem(Problem):
-   	def define_problem(self):
-   		self.add_mesh(LShapedMesh(Nx=6,Ny=4))
-   		eqs=MeshFileOutput()
-   		eqs+=PoissonEquation(name="u",source=0)
-   		eqs+=DirichletBC(u=0)@"left"
-   		eqs += DirichletBC(u=1) @ "top"
-   		eqs+=SpatialErrorEstimator(u=1)
-   		self.add_equations(eqs@"domain")
-
-   if __name__=="__main__":
-   	with MeshTestProblem() as problem:
-   		problem.initial_adaption_steps=0
-   		problem.solve(spatial_adapt=4)
-   		problem.output_at_increased_time()
+.. literalinclude:: mesh_Lshape_by_hand.py
+   :language: python
+   :start-at: class MeshTestProblem(Problem):
+   :end-at: problem.output_at_increased_time()
 
 The predefined :py:class:`~pyoomph.equations.poisson.PoissonEquation` works as the one developed in :numref:`secspatialpoisson`. Note how we initially suppress the mesh adaption by setting :py:attr:`~pyoomph.generic.problem.Problem.initial_adaption_steps` to zero. Otherwise, we would get redundant adaption near the ``"top"`` boundary due to the non-zero :py:class:`~pyoomph.meshes.bcs.DirichletBC`. The custom mesh and the problem class in action can be seen in :numref:`figspatialmeshtemplate1`.
 

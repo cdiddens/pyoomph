@@ -7,21 +7,10 @@ Finally, when a bifurcation point is a function of multiple parameters, one can 
 
 First of all, let us find the pitchfork bifurcation at :math:`\rho=1` with pyoomph. To that end, the equations are loaded from the code from :numref:`secODEtemporaladapt` and a problem class is defined where all three parameters can be adjusted at run time, i.e. are bound by :py:meth:`~pyoomph.generic.problem.Problem.define_global_parameter` and can hence be changed after the C code generation and can be used for arc length continuation and bifurcation tracking. We reuse the code of the file :download:`adaptive_lorenz_attractor.py <../timestepping/adaptive_lorenz_attractor.py>` from :numref:`secODEtemporaladapt` here:
 
-.. code:: python
-
-   from adaptive_lorenz_attractor import * # import the Lorenz problem
-
-   # Simple Lorenz system where all parameters can be changed at runtime
-   class LorenzBifurcationProblem(Problem):
-       def __init__(self):
-           super(LorenzBifurcationProblem, self).__init__()
-           self.rho=self.define_global_parameter(rho=0)
-           self.sigma = self.define_global_parameter(sigma=0)
-           self.beta = self.define_global_parameter(beta=0)
-
-       def define_problem(self):
-           ode=LorenzSystem(sigma=self.sigma,beta=self.beta,rho=self.rho)
-           self.add_equations(ode@"lorenz")
+.. literalinclude:: bifurcation_hopf_tracking_lorenz.py
+   :language: python
+   :start-at: from adaptive_lorenz_attractor import * # import the Lorenz problem
+   :end-at: self.add_equations(ode@"lorenz")
 
 First, find the pitchfork bifurcation as described in the previous section, including the analytically derived Hessian terms using :py:meth:`~pyoomph.generic.problem.Problem.setup_for_stability_analysis`. We must be somewhat close to the pitchfork bifurcation, so we start at :math:`\rho=0.5`, solve for the stationary solution and find the critical eigenvector as guess for :math:`\vec{v}_\text{g}`:
 
@@ -42,22 +31,17 @@ First, find the pitchfork bifurcation as described in the previous section, incl
 
 Now we find the pitchfork and indeed confirm that it is at :math:`\rho=1`:
 
-.. code:: python
-
-           # Find the pitchfork in terms of rho
-           problem.activate_bifurcation_tracking(problem.rho,"pitchfork",eigenvector=problem.get_last_eigenvectors()[0])
-           problem.solve()
-           x,y,z=problem.get_ode("lorenz").get_value(["x","y","z"])
-           print(f"Pitchfork starts at rho={problem.rho.value}, x,y,z={x,y,z}")
+.. literalinclude:: bifurcation_hopf_tracking_lorenz.py
+   :language: python
+   :start-at: # Find the pitchfork in terms of rho
+   :end-at: print(f"Pitchfork starts at rho={problem.rho.value}, x,y,z={x,y,z}")
 
 At a pitchfork bifurcation, we cannot easily continue in :math:`\rho` since it is not clear which branch to take. Therefore, we obtain the critical eigenvector by :py:meth:`~pyoomph.generic.problem.Problem.get_last_eigenvectors`. As long as bifurcation tracking is active and it has been solved, it is not necessary (and not possible) to use :py:meth:`~pyoomph.generic.problem.Problem.solve_eigenproblem` for that. Instead, :py:meth:`~pyoomph.generic.problem.Problem.get_last_eigenvectors` gives the critical eigenvector at the bifurcation. We therefore first store this eigenvector and then deactivate the bifurcation tracking to be ready to solve the normal Lorenz system (i.e. without the augmentation for the bifurcation tracking):
 
-.. code:: python
-
-           # this will be now the critical eigenvector at the bifurcation
-           perturb=numpy.real(problem.get_last_eigenvectors()[0])
-           # deactivate bifurcation tracking: Solve again the normal Lorenz system
-           problem.deactivate_bifurcation_tracking()
+.. literalinclude:: bifurcation_hopf_tracking_lorenz.py
+   :language: python
+   :start-at: # this will be now the critical eigenvector at the bifurcation
+   :end-at: problem.deactivate_bifurcation_tracking()
 
 To jump on the stable branch of the pitchfork bifurcation, we can add this eigenvector to the degrees of freedom using the :py:meth:`~pyoomph.generic.problem.Problem.perturb_dofs` method, increase :math:`\rho` a bit beyond :math:`\rho>1` and perform a few transient solves to move towards the stable branch, before the stationary solve jumps on it:
 
@@ -96,25 +80,17 @@ Besides the complex eigenvector :math:`\vec{v}=\vec{\phi}+i\vec{\psi}`, which ca
 
 Now, this is utilized to find the critical :math:`\rho_\text{c}` where the Hopf bifurcation is located:
 
-.. code:: python
-
-           # Jump on the Hopf bifurcation
-           problem.activate_bifurcation_tracking(problem.rho,"hopf",eigenvector=problem.get_last_eigenvectors()[0],omega=numpy.imag(problem.get_last_eigenvalues()[0]))
-           problem.solve()
-           x, y, z = problem.get_ode("lorenz").get_value(["x", "y", "z"])
-           print(f"On Hopf branch rho={problem.rho.value}, x,y,z={x, y, z}, omega={numpy.imag(problem.get_last_eigenvalues()[0])}")
+.. literalinclude:: bifurcation_hopf_tracking_lorenz.py
+   :language: python
+   :start-at: # Jump on the Hopf bifurcation
+   :end-at: print(f"On Hopf branch rho={problem.rho.value}, x,y,z={x, y, z}, omega={numpy.imag(problem.get_last_eigenvalues()[0])}")
 
 Since we do not :py:meth:`~pyoomph.generic.problem.Problem.deactivate_bifurcation_tracking`, it is still active. We can now perform an arc length continuation in another parameter, e.g. in :math:`\sigma`, to obtain the curve :math:`\rho_\text{c}(\sigma)`:
 
-.. code:: python
-
-           # Go down with sigma but staying on the Hopf bifurcation (i.e. do not call deactivate_bifurcation_tracking)
-           ds=-0.001
-           while problem.sigma.value>2+problem.beta.value:
-               ds=problem.arclength_continuation(problem.sigma,ds,max_ds=0.1)
-               x, y, z = problem.get_ode("lorenz").get_value(["x", "y", "z"])
-               print(f"On Hopf branch rho,sigma={problem.rho.value,problem.sigma.value}, x,y,z={x, y, z}, omega={numpy.imag(problem.get_last_eigenvalues()[0])}")
-
+.. literalinclude:: bifurcation_hopf_tracking_lorenz.py
+   :language: python
+   :start-at: # Go down with sigma but staying on the Hopf bifurcation (i.e. do not call deactivate_bifurcation_tracking)
+   :end-at: print(f"On Hopf branch rho,sigma={problem.rho.value,problem.sigma.value}, x,y,z={x, y, z}, omega={numpy.imag(problem.get_last_eigenvalues()[0])}")
 
 ..  figure:: lorenzbifurc.*
 	:name: figodelorenzbifurc

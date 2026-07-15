@@ -5,38 +5,10 @@ Pure liquids
 
 The definition of pure liquids and liquid mixtures is very similar to the definition of gases, except that pure liquids must inherit from the :py:class:`~pyoomph.materials.generic.PureLiquidProperties` and mixtures from the :py:class:`~pyoomph.materials.generic.MixtureLiquidProperties` base classes. To define e.g. the pure liquid water, we proceed as follows:
 
-.. code:: python
-
-   from pyoomph.materials import *
-
-   # Define pure water
-   @MaterialProperties.register()
-   class PureLiquidWater(PureLiquidProperties):
-   	name="water"
-   	def __init__(self):
-   		super().__init__()
-   		self.molar_mass=18.01528*gram/mol # Molar mass 
-
-   		# Density and viscosity (assuming constants here)
-   		self.mass_density=998*kilogram/meter**3
-   		self.dynamic_viscosity=1*milli* pascal * second
-
-   		# Thermal properties (assuming constants here)
-   		self.specific_heat_capacity=4.187* kilo * joule / (kilogram * kelvin)
-   		self.thermal_conductivity=0.597* watt / (meter * kelvin)
-   		self.latent_heat_of_evaporation=2437.69081321*kilo*joule/kilogram # Liquids also have a latent heat of evaporation
-   		
-   		# Default surface tension against air as function of the temperature
-   		TKelvin=var("temperature")/kelvin
-   		self.default_surface_tension["gas"]=0.07275*(1.0-0.002*(TKelvin-291.0)) * newton/meter
-
-   		# Vapor pressure can be set by Antoine coefficients (in mmHg, C convention)
-   		# You can also add e.g. bar and kelvin as fourth and fifth argument to use the [bar,K] convention
-   		self.set_vapor_pressure_by_Antoine_coeffs(8.07131,1730.63 ,233.426)
-   		#Alternatively, you can set the vapor pressure by hand by setting self.vapor_pressure= ...
-
-   		#For UNIFAC calculations of activity coefficients in mixtures, we also need the UNIFAC groups
-   		self.set_unifac_groups({"H2O":1}) #Just one H2O group here
+.. literalinclude:: materials_liquids.py
+   :language: python
+   :start-at: from pyoomph.materials import *
+   :end-at: self.set_unifac_groups({"H2O":1}) #Just one H2O group here
 
 The :py:attr:`~pyoomph.materials.generic.BaseLiquidProperties.dynamic_viscosity` and :py:attr:`~pyoomph.materials.generic.MaterialProperties.mass_density` properties are the same as in the case of gases. Also the thermal properties :py:attr:`~pyoomph.materials.generic.MaterialProperties.specific_heat_capacity` and :py:attr:`~pyoomph.materials.generic.MaterialProperties.thermal_conductivity` must be set when thermal effects should be considered in the simulation.
 

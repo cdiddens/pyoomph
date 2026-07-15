@@ -20,31 +20,10 @@ whereas for the other methods, i.e. the ones which evaluate only first order tim
 
 i.e. where :math:`z=\partial_t y`. The code for the oscillator equation that allows one to select the time stepping scheme is the following:
 
-.. code:: python
-
-   class HarmonicOscillator(ODEEquations):
-   	def __init__(self,*,omega=1,scheme="Newmark2"): #Passing a time stepping scheme
-   		super(HarmonicOscillator,self).__init__()
-   		allowed_schemes={"Newmark2","BDF1","BDF2"} #Possible values
-   		if not (scheme in allowed_schemes): #Test for valid input
-   			raise ValueError("Unknown time stepping scheme: "+str(scheme)+". Allowed: "+str(allowed_schemes))
-   		self.scheme=scheme
-   		self.omega=omega
-   		
-   	def define_fields(self):
-   		self.define_ode_variable("y")
-   		if self.scheme!="Newmark2":
-   			self.define_ode_variable("dot_y") #Additional variable for first order ODE system
-   		
-   	def define_residuals(self):
-   		y=var("y") 
-   		if self.scheme=="Newmark2": #One second order ODE
-   			residual=(partial_t(y,2)+self.omega**2 *y)*testfunction(y)  
-   		else:	#Two first order ODEs
-   			dot_y=var("dot_y")
-   			residual=(partial_t(dot_y,scheme=self.scheme)+self.omega**2*y)*testfunction(dot_y)
-   			residual+=(partial_t(y,scheme=self.scheme)-dot_y)*testfunction(y)
-   		self.add_residual(residual)
+.. literalinclude:: oscillator_fully_implicit_schemes.py
+   :language: python
+   :start-at: class HarmonicOscillator(ODEEquations):
+   :end-at: self.add_residual(residual)
 
 A string ``scheme`` is passed to the constructor to select the time stepping scheme. First, the validity of the passed argument is checked. In the method :py:meth:`~pyoomph.generic.codegen.BaseEquations.define_fields`, we define the variable :math:`y` and, if necessary, i.e. if ``"BDF1"`` or ``"BDF2"`` are selected, the variable :math:`z`, which is called ``"dot_y"`` in the code.
 
@@ -54,32 +33,10 @@ Important is the keyword argument ``scheme`` in the :py:func:`~pyoomph.expressio
 
 In the problem class, also some modifications are necessary:
 
-.. code:: python
-
-   class HarmonicOscillatorProblem(Problem):
-   	def __init__(self,scheme="Newmark2"): # Passing scheme here
-   		super(HarmonicOscillatorProblem,self).__init__() 
-   		self.omega=1
-   		self.scheme=scheme
-
-   	def define_problem(self):
-   		eqs=HarmonicOscillator(omega=self.omega,scheme=self.scheme)
-   		
-   		t=var("time") # Time variable
-   		Ampl, phi=1, 0 #Amplitude and phase
-   		y0=Ampl*cos(self.omega*t+phi) #Initial condition with full time depencency
-   		dot_y0 = -self.omega*Ampl * sin(self.omega * t + phi) #derivative of it
-   		eqs+=InitialCondition(y=y0) #Set initial condition for y(t) at t=0
-   		if self.scheme!="Newmark2":
-   			eqs += InitialCondition(dot_y=dot_y0)  # And if required also for dot_y
-
-   		#Calculate the total energy
-   		y=var("y")
-   		total_energy=1/2*partial_t(y,scheme=self.scheme)**2+1/2*(self.omega*y)**2
-   		eqs+=ODEObservables(Etot=total_energy) # Add the total energy as observable
-
-   		eqs+=ODEFileOutput() 
-   		self.add_equations(eqs@"harmonic_oscillator") 
+.. literalinclude:: oscillator_fully_implicit_schemes.py
+   :language: python
+   :start-at: class HarmonicOscillatorProblem(Problem):
+   :end-at: self.add_equations(eqs@"harmonic_oscillator")
 
 First of all, we take an argument ``scheme`` already in the constructor of the problem class. This is stored as member of the problem and passed later on to the equation class, namely in the method :py:meth:`~pyoomph.generic.problem.Problem.define_problem`. We make sure that the initial condition is perfectly accurate, i.e. that the derivatives at the beginning are approximated correctly by passing the full time-dependent analytical solution :math:`y(t)=A\cos(\omega t+\phi)` as initial condition. This condition and its temporal derivatives will be evaluated at :math:`t=0` and the corresponding discretized history values are set appropriately. If ``"BDF1"`` or ``"BDF2"`` are selected, we also have to explicitly add an initial condition for :math:`z`, i.e. for ``dot_y``, here.
 
@@ -87,14 +44,10 @@ In a next step, we want to monitor the total energy :math:`E=1/2\:(\partial_t y)
 
 Finally, we let our script successively create a problem for each of the time stepping methods, set an individual output directory with :py:meth:`~pyoomph.generic.problem.Problem.set_output_directory` to prevent overwriting of the previous results and run the simulations:
 
-.. code:: python
-
-   if __name__=="__main__":
-   	for scheme in {"Newmark2","BDF1","BDF2"}:
-   		with HarmonicOscillatorProblem(scheme=scheme) as problem:
-   			problem.set_output_directory("osci_timestepping_"+scheme)
-   			problem.run(endtime=100,numouts=1000)
-   			
+.. literalinclude:: oscillator_fully_implicit_schemes.py
+   :language: python
+   :start-at: if __name__=="__main__":
+   :end-at: problem.run(endtime=100,numouts=1000)
 
 .. only:: html
 

@@ -3,56 +3,19 @@ Definition of gaseous mixtures
 
 If you want to solve e.g. the evaporation of a water droplet, you must account for water vapor (i.e. gaseous water) which can diffuse through the ambient gas, typically air. Before creating a gaseous mixture of these two substances, we first must ensure that both pure gaseous substances are defined. Therefore, we first load our old script, where we defined the air and subsequently define pure water in its gaseous phase:
 
-.. code:: python
-
-   from pyoomph.materials import * 
-
-
-   # Pure air: see before (we took the simple constant expressions here, but it also works for expressions depending on pressure and temperature)
-   @MaterialProperties.register()
-   class PureGasAir(PureGasProperties): 
-   	name="air"
-   	def __init__(self):
-   		super().__init__()
-   		self.molar_mass = 28.9645 * gram / mol
-   		self.dynamic_viscosity=0.01813 *milli*pascal*second 
-   		self.mass_density=1.225*kilogram/meter**3
-   	
-
-   # Create the pure gaseous water
-   @MaterialProperties.register()
-   class PureGasWater(PureGasProperties):
-   	name="water" # name it "water"
-   	def __init__(self):
-   		super().__init__()
-   		self.molar_mass = 18.01528*gram/mol # Molar mass is important to convert to e.g. mole fractions
-   		
-   		# If only used in mixtures, we do not require the mass density and dynamic viscosity of the pure substance here
+.. literalinclude:: materials_gas_mixture.py
+   :language: python
+   :start-at: from pyoomph.materials import *
+   :end-at: # If only used in mixtures, we do not require the mass density and dynamic viscosity of the pure substance here
 
 Note that we skipped the definition of the mass density and the dynamic viscosity (as well as the thermal properties) for the ``PureGasWater``. When we intend to only use it within a mixture, e.g. with air, the properties of the pure substance are not required. If we want to solve, however, a flow problem of pure gaseous water, i.e. above the boiling point where pure water can exist in the gas phase, we would require the mass density and dynamic viscosity of the pure substance for the Navier-Stokes equation. The molar mass, on the other hand, is always required - for each substance. It is important to convert mass into molar fractions and it is used for e.g. Raoult's law or the calculation of the mass density of mixtures by the ideal gas law.
 
 Next, we move on defining the properties of a mixture of air and water in the gas phase:
 
-.. code:: python
-
-   # Create mixture properties that will apply if you mix gaseous water with gaseous air
-   @MaterialProperties.register()
-   class MixtureGasWaterAir(MixtureGasProperties): # MixtureGasProperties is the base class for gas mixtures
-   	components={"water","air"} # This class applied when mixing "water" and "air"
-   	# We can specify a passive component: We have to solve n-1 advection diffusion equations for the mass fractions
-   	# The nth follows from 1 minus the others. We can select, which component is not explicitly solved for
-   	passive_field="air"  # we choose air here
-
-   	# The constructor gets the pure properties as a dict {"water":PureGasWater instance, "air":PureGasAir instance}
-   	def __init__(self,pure_properties): 
-   		super().__init__(pure_properties) # pass it to the parent constuctor
-   		
-   		self.set_mass_density_from_ideal_gas_law() # Density from ideal gas law also works for mixtures
-   		self.dynamic_viscosity=self.pure_properties["air"].dynamic_viscosity # Just take the dynamic viscosity from the air
-
-   		# In a binary mixture, it is sufficient to specify a single diffusion coefficent
-   		# This may of course also be a function fo the composition, temperature and pressure
-   		self.set_diffusion_coefficient(2.42e-5*meter**2/second)
+.. literalinclude:: materials_gas_mixture.py
+   :language: python
+   :start-at: # Create mixture properties that will apply if you mix gaseous water with gaseous air
+   :end-at: self.set_diffusion_coefficient(2.42e-5*meter**2/second)
 
 The registration to the library is done - as for pure substances - with the decorator ``@MaterialProperties.register()``. Gas mixtures must inherit from the base class :py:class:`~pyoomph.materials.generic.MixtureGasProperties` and it is important that the constructor accepts a single argument, namely a ``dict`` which contains the instances of the pure properties (i.e. instances of sub-classes of the :py:class:`~pyoomph.materials.generic.PureGasProperties` class), indexed by their name. This ``dict`` of pure properties must be passed to the ``super`` constructor. Then, it is important to specify the class property :py:attr:`~pyoomph.materials.generic.MaterialProperties.components`, which is a ``set`` of the component names within this mixture. This ``set`` is used to find the correct mixture property class, when e.g. mixing the pure substances ``"air"`` and ``"water"`` in a second.
 
@@ -66,20 +29,10 @@ The rest of the constructor follows the definition of the pure substances. You s
 
 Let us now see how to create a specific mixture:
 
-.. code:: python
-
-   # Get the pure properties
-   air=get_pure_gas("air")
-   water_vapor=get_pure_gas("water")
-
-   # Mix in terms of mass fraction. One quantifier (here 0.98 for air) can be omitted
-   mix_gas=Mixture(air+0.02*water_vapor)
-
-   # We can access the initial condition, which will result in {'massfrac_air': 0.98, 'massfrac_water': 0.02, 'temperature': None}
-   print(mix_gas.initial_condition)
-
-   # To evaluate e.g. the mass density at the initial condition, we can just pass the initial condition, but we also have to add information on the pressure and temperature to get a single value
-   print(mix_gas.evaluate_at_condition("mass_density",mix_gas.initial_condition,temperature=20*celsius,absolute_pressure=1*atm))
+.. literalinclude:: materials_gas_mixture.py
+   :language: python
+   :start-at: # Get the pure properties
+   :end-at: print(mix_gas.evaluate_at_condition("mass_density",mix_gas.initial_condition,temperature=20*celsius,absolute_pressure=1*atm))
 
 To mix in terms of mass fractions, we can just add multiple pure substances and wrap them into a :py:func:`~pyoomph.materials.generic.Mixture` call. We have to specify also the initial mass fractions, e.g. here :math:`2\:\mathrm{\%}` air in terms of mass fraction. Since the corresponding mass fraction of air, :math:`98\:\mathrm{\%}`, follows from the requirement that all mass fractions have to sum to unity, the quantification of one pure substance can be omitted.
 
@@ -87,38 +40,10 @@ The initial condition can be accessed by the :py:attr:`~pyoomph.materials.generi
 
 Let us now move on to a ternary gas mixture of water, ethanol and air. Again, first pure ethanol as a gaseous component is required, followed by a definition of the mixture properties:
 
-.. code:: python
-
-   # Create the pure gaseous ethanol (analogous to water)
-   @MaterialProperties.register()
-   class PureGasEthanol(PureGasProperties):
-   	name="ethanol" 
-   	def __init__(self):
-   		super().__init__()
-   		self.molar_mass = 0.4607E-01*kilogram/mol
-   		# Again we skip any further definitions
-
-
-
-   # Defining ternary mixture properties is similar to binary mixtures:
-   @MaterialProperties.register()
-   class MixtureGasWaterAirEthanol(MixtureGasProperties):
-   	components={"ethanol","water","air"} # Now three components
-   	passive_field="air"  # we choose again air as passive field
-
-   	def __init__(self,pure_properties): 
-   		super().__init__(pure_properties) # Pure properties now has three entries
-   		
-   		self.set_mass_density_from_ideal_gas_law() # Again assuming ideal gas law
-   		
-   		# However, we now want to (artificially) increase the viscosity slightly with the mass fraction of ethanol:
-   		mu_air=self.pure_properties["air"].dynamic_viscosity # Get the viscosity of pure air
-   		massfrac_ethanol=var("massfrac_ethanol")  # Get the variable ethanol mass fraction
-   		self.dynamic_viscosity=mu_air*(1+0.2*massfrac_ethanol) # With increasing ethanol, the gas gets more viscous
-
-   		# We now have three components, so effectively have a 2x2 diffusion matrix. We only assume diagonal terms:
-   		self.set_diffusion_coefficient("water",2.42e-5*meter**2/second)
-   		self.set_diffusion_coefficient("ethanol",1.35e-5* meter**2/second)
+.. literalinclude:: materials_gas_mixture.py
+   :language: python
+   :start-at: # Create the pure gaseous ethanol (analogous to water)
+   :end-at: self.set_diffusion_coefficient("ethanol",1.35e-5* meter**2/second)
 
 As apparent, things work exactly the same as for binary mixtures and also higher order mixtures are defined the same way. What we have done additionally here is explicitly defining the dynamic viscosity to be a function of the ethanol mass fraction. The used expression was chosen arbitrarily and not supported by any experimental data. The mass fraction of ethanol can be obtained by ``var("massfrac_ethanol")``, likewise ``var("massfrac_water")`` and ``var("massfrac_air")`` can be used. The latter, since air is the passive field, is implicitly replaced by ``1-var("massfrac_ethanol")-var("massfrac_water")`` when the C code is generated. Additionally, e.g. ``var("molefrac_ethanol")`` can be used for the molar fractions, but where possible, mass fractions are the better choice when e.g. fitting experimental data of some property. This is due to the fact that the composition is solved in terms of mass fractions and molar fractions must be calculated first from the former.
 

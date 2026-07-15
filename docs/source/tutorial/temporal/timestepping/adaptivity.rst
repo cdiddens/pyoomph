@@ -19,55 +19,26 @@ Here, we will use the chaotic Lorenz system, known for its chaotic *strange attr
 
 with three parameters :math:`(\sigma,\rho,\beta)`. Implementing this in pyoomph is trivial:
 
-.. code:: python
-
-   class LorenzSystem(ODEEquations):
-   	def __init__(self,*,sigma=10,rho=28,beta=8/3,scheme="BDF2"): # Default parameters used by Lorenz
-   		super(LorenzSystem,self).__init__()
-   		self.sigma=sigma
-   		self.rho=rho
-   		self.beta=beta
-   		self.scheme=scheme
-
-   	def define_fields(self):
-   		self.define_ode_variable("x","y","z") 
-   	
-   	def define_residuals(self):
-   		x,y,z=var(["x","y","z"])
-   		residual=(partial_t(x)-self.sigma*(y-x))*testfunction(x)
-   		residual+=(partial_t(y)-x*(self.rho-z)+y)*testfunction(y)
-   		residual+=(partial_t(z)-x*y+self.beta*z)*testfunction(z)
-   		self.add_residual(time_scheme(self.scheme,residual))
-
-
-   class LorenzProblem(Problem):
-   	
+.. literalinclude:: adaptive_lorenz_attractor.py
+   :language: python
+   :start-at: class LorenzSystem(ODEEquations):
+   :end-at: class LorenzProblem(Problem):
 
 To add the feature of temporal adaptivity to the system, it is sufficient to combine the equations with a :py:class:`~pyoomph.equations.generic.TemporalErrorEstimator`
 
-.. code:: python
-
-   class LorenzProblem(Problem):
-   	
-   	def define_problem(self):
-   		eqs=LorenzSystem(scheme="BDF2") # Temporal adaptivity works best with BDF2
-   		eqs+=InitialCondition(x=0.01)  # Some non-trivial initial position
-   		eqs+=TemporalErrorEstimator(x=1,y=1,z=1) # Weight all temporal error with unity
-   		eqs+=ODEFileOutput()  
-   		self.add_equations(eqs@"lorenz_attractor") 		
+.. literalinclude:: adaptive_lorenz_attractor.py
+   :language: python
+   :start-at: class LorenzProblem(Problem):
+   :end-at: self.add_equations(eqs@"lorenz_attractor")
 
 :py:class:`~pyoomph.equations.generic.TemporalErrorEstimator` takes keyword arguments of the form ``variable_name=error_weight``, i.e. we can set to each of the ODE variables a different weighting for the computation of the temporal error between prediction and actual solution. In the code here, all weights have been set to unity, i.e. all variables :math:`x`, :math:`y`, :math:`z` are weighted equally in the determination of the temporal error.
 
 Finally, the :py:meth:`~pyoomph.generic.problem.Problem.run` statement takes a keyword argument ``temporal_error``, which defines the error we are ready to accept. The smaller the temporal error, the finer the dynamics time steps, but the longer the computation takes.
 
-.. code:: python
-
-   if __name__=="__main__":
-   	with LorenzProblem() as problem:
-   		# outstep=True means output every step
-   		# startstep is the first time step
-   		# temporal_error controls the maximum difference between prediction and actual result
-   		problem.run(endtime=100,outstep=True,startstep=0.0001,temporal_error=0.005)
+.. literalinclude:: adaptive_lorenz_attractor.py
+   :language: python
+   :start-at: if __name__=="__main__":
+   :end-at: problem.run(endtime=100,outstep=True,startstep=0.0001,temporal_error=0.005)
 
 Note that also ``outstep=True`` was passed instead of ``numouts``. It will just output each step. Of course, also a ``startstep`` should be set so that the problem has a good guess how to start. If the value of ``temporal_error`` is set too large, the system might not show the correct dynamics, see :numref:`figodelorenzdyndt`. The accepted time steps are displayed in :numref:`figodelorenzdyndt2`.
 

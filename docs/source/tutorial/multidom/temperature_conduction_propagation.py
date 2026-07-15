@@ -33,7 +33,7 @@ from pyoomph.equations.ALE import * # moving mesh equations
 class ThermalConductionEquation(Equations):
     def __init__(self,k,rho,c_p):
         super(ThermalConductionEquation,self).__init__()
-        # store conducitiviy, mass density and spec. heat capacity
+        # store conductivity, mass density and spec. heat capacity
         self.k,self.rho,self.c_p=k,rho,c_p
 
     def define_fields(self):

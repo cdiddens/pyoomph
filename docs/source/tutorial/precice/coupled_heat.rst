@@ -20,112 +20,18 @@ Here, the config file :download:`precice-config.xml` of this example defines the
 
 As usual, we start by importing the required modules and defining the heat equation, i.e. besides importing pyoomph's preCICE adapter, nothing spectacular is happening here:
 
-.. code:: python
-
-	from pyoomph import *
-	from pyoomph.expressions import *
-
-	# Import the preCICE adapter of pyoomph
-	from pyoomph.solvers.precice_adapter import *
-
-	# Heat conduction equation with a source term
-	class HeatEquation(Equations):
-	    def __init__(self,f):
-		super().__init__()
-		self.f=f
-		
-	    def define_fields(self):
-		self.define_scalar_field("u","C2")
-		
-	    def define_residuals(self):
-		u,v=var_and_test("u")
-		self.add_weak(partial_t(u),v).add_weak(grad(u),grad(v)).add_weak(-self.f,v)
-
+.. literalinclude:: partitioned_heat_conduction.py
+   :language: python
+   :start-at: from pyoomph import *
+   :end-at: self.add_weak(partial_t(u),v).add_weak(grad(u),grad(v)).add_weak(-self.f,v)
 
 The magic happens in the definition of the problem, where we use several classes from the :py:mod:`~pyoomph.solvers.precice_adapter` module:
 
-.. code:: python
+.. literalinclude:: partitioned_heat_conduction.py
+   :language: python
+   :start-at: # Generic heat conduction problem. Can be run without preCICE on the full domain or as Dirichlet or Neumann participant
+   :end-at: self+=eqs@"domain"
 
-	# Generic heat conduction problem. Can be run without preCICE on the full domain or as Dirichlet or Neumann participant
-	class HeatConductionProblem(Problem):
-	    def __init__(self):
-		super().__init__()
-		self.alpha=3 # Parameters
-		self.beta=1.2    
-		# Config file
-		self.precice_config_file="precice-config.xml"   
-		
-	    def get_f(self):
-		# Source term
-		return self.beta-2-2*self.alpha
-	    
-	    def get_u_analyical(self):
-		# Analytical solution
-		return 1+var("coordinate_x")**2+self.alpha*var("coordinate_y")**2+self.beta*var("time")
-		
-	    def define_problem(self):
-		# Depending on the participant, set up the coupling equations
-		
-		# First of all, we must provide the mesh at the coupling interface to preCICE
-		# If we run without preCICE, this equation part is not used, so it will be just discarded
-		coupling_eqs=PreciceProvideMesh(self.precice_participant+"-Mesh")
-		if self.precice_participant=="Dirichlet":
-		    # Dirichlet participant: We take the left part and use the right boundary as coupling boundary
-		    x_offset,box_length=0,1
-		    coupling_boundary="right"
-		    # Here we write the heat flux and read the temperature
-		    # Note that we cannot use PreciceWriteData(Heat-Flux=partial_x(var("u",domain=".."))) 
-		    # because "Heat-Flux" is not a valid keyword argument. Therefore, we use the **{...} syntax
-		    # It will calculate the gradient of u in x-direction and write it to the preCICE data "Heat-Flux"
-		    coupling_eqs+=PreciceWriteData(**{"Heat-Flux":partial_x(var("u",domain=".."))})
-		    # It reads the preCICE field "Temperature" and stores it in the field "uD"
-		    coupling_eqs+=PreciceReadData(uD="Temperature")            
-		    # We cannot set a Dirichlet boundary condition depending on a variable, so we use an enforced boundary condition
-		    # We adjust u so that u-uD=0 at the coupling boundary. This is equivalent to setting u=uD
-		    coupling_eqs+=EnforcedBC(u=var("u")-var("uD"))
-		elif self.precice_participant=="Neumann":
-		    # The Neuamnn participant is on the right side and uses the left boundary as coupling boundary
-		    x_offset,box_length=1,1
-		    coupling_boundary="left"
-		    # It writes the preCICE field "Temperature" by evaluating the variable u
-		    coupling_eqs+=PreciceWriteData(Temperature=var("u"))
-		    # It reads the preCICE field "Heat-Flux" and stores it in the field "flux"
-		    coupling_eqs+=PreciceReadData(flux="Heat-Flux")            
-		    # This flux is used as Neumann boundary condition. 
-		    coupling_eqs+=NeumannBC(u=var("flux"))
-		elif self.precice_participant=="":
-		    # If we run without preCICE, we use the full domain and have no coupling boundary
-		    x_offset=0
-		    box_length=2
-		    coupling_boundary=None
-		else:
-		    raise Exception("Unknown participant. Choose 'Dirichlet', 'Neumann' or an empty string")
-		
-		# Create the corresponding mesh
-		N0=11
-		self+=RectangularQuadMesh(size=[box_length,1],N=[box_length*N0,N0],lower_left=[x_offset,0])
-		
-		# Assemble the base equations
-		eqs=MeshFileOutput()
-		eqs+=HeatEquation(self.get_f())
-		eqs+=InitialCondition(u=self.get_u_analyical())
-		
-		# Add the coupling equations and the Dirichlet boundary conditions
-		# All potential Dirichlet boundaries        
-		dirichlet_bounds=set(["bottom","top","left","right"])
-		if coupling_boundary:
-		    # Of course, the coupling boundary must not be set as Dirichlet boundary
-		    dirichlet_bounds.remove(coupling_boundary)        
-		    eqs+=coupling_eqs@coupling_boundary
-		eqs+=DirichletBC(u=self.get_u_analyical())@dirichlet_bounds            
-		
-		# Calculate the error
-		eqs+=IntegralObservables(error=(var("u")-self.get_u_analyical())**2)
-		eqs+=IntegralObservableOutput()
-		                    
-		self+=eqs@"domain"
-		
-		
 If we use preCICE, we only define half of the domain. The mesh of the ``"Neumann"`` participant is furthermore shifted to the right. Depending on the side we solve, the ``coupling_boundary`` is either the ``"left"`` or ``"right"`` boundary of the domain. When we set ``precice_participant=""`` (default value), we just solve the full problem and do not add any coupling. 
 
 If we select one of the participants, however, we have to set up the coupling. This happens in multiple steps. First of all, we must export the interface mesh at the coupling boundary to preCICE, which is done by the class :py:class:`~pyoomph.solvers.precice_adapter.PreciceProvideMesh`. You must supply a mesh name agreeing with the ``provide-mesh`` definition in the config file :download:`precice-config.xml`. This will tell preCICE where the nodes are located, so that it can be connected to the other participant. 
@@ -140,18 +46,10 @@ Eventually, we just have to attach all coupling equations to the corresponding b
 
 The coupling is complete, but for running a coupled simulation, preCICE must take the lead for the time stepping. Typical time steps and the maximum simulation time are given in the config file. Therefore, pyoomph's :py:meth:`~pyoomph.generic.problems.Problem.run` method cannot be used. Instead, the method :py:meth:`~pyoomph.generic.problems.Problem.precice_run` has to be used:
 
-.. code:: python
-
-	if __name__=="__main__":
-	    problem=HeatConductionProblem()
-	    problem.initialise() # After this, precice_participant could have been set via command line, e.g. by  -P precice_participant=Neumann
-	    if problem.precice_participant=="":
-		# Just run it manually without preCICE
-		problem.run(1,outstep=0.1)
-	    else:
-		# Run it with preCICE. Time stepping is taken from the config file
-		problem.precice_run()
-		
+.. literalinclude:: partitioned_heat_conduction.py
+   :language: python
+   :start-at: if __name__=="__main__":
+   :end-at: problem.precice_run()
 
 This completes the simulation. For running with preCICE, you have to run the script two times, passing the participant name as a command line parameter (see :numref:`secodecmdline`).
 
