@@ -3,31 +3,10 @@ A harmonic oscillator driven by a trapezoidal forcing
 
 Let us again consider a nondimensional harmonic oscillator, but now with a custom driving function, which resembles a trapezoidal pulse. This custom pulse function can be implemented in pyoomph via the :py:class:`~pyoomph.expressions.cb.CustomMathExpression` class from the :py:mod:`pyoomph.expressions.cb` module as follows:
 
-.. code:: python
-
-   from pyoomph.expressions.cb import * # Import custom math callback expressions
-
-   class TrapezoidalFunction(CustomMathExpression):
-   	def __init__(self,*,wait_time=5, flank_time=0.25,high_time=10,amplitude=1):
-   		super(TrapezoidalFunction, self).__init__()
-   		self.wait_time=wait_time # Pass some parameters to the function already in the constructor
-   		self.flank_time=flank_time
-   		self.high_time=high_time
-   		self.amplitude=amplitude
-
-   	# This method will be called whenever the function must be evaluated
-   	def eval(self,arg_array):
-   		t=arg_array[0] # Bind local t to the first passed argument
-   		if t<self.wait_time:
-   			return 0.0 # Before the pulse
-   		elif t<self.wait_time+self.flank_time:
-   			return self.amplitude*(t-self.wait_time)/self.flank_time # flank up
-   		elif t<self.wait_time+self.flank_time+self.high_time:
-   			return self.amplitude # at the plateau
-   		elif t<self.wait_time+2*self.flank_time+self.high_time:
-   			return self.amplitude*(1-(t-self.wait_time-self.flank_time-self.high_time)/self.flank_time) # flank down
-   		else:
-   			return 0.0 # after the plateau
+.. literalinclude:: custom_math_driven_oscillator.py
+   :language: python
+   :start-at: from pyoomph.expressions.cb import * # Custom math expressions
+   :end-at: return 0.0 # after the plateau
 
 In the constructor, we take the parameters that are fixed during the simulation, namely the quantities describing the shape of the pulse. Then, the method :py:meth:`~pyoomph.expressions.cb.CustomMathExpression.eval` has to be implemented, which takes a list object ``arg_array`` as parameters. In this list object, the current numerical values of the passed parameters (here, it will be the time :math:`t` later on) are stored. Based on this value, we return the current value of the pulse.
 
