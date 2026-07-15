@@ -43,6 +43,8 @@ PYOOMPH MODIFICATIONS
 #include "mpi.h"
 #endif
 
+#include <cstdint>
+
 // ooomph-lib includes
 #include "Vector.h"
 #include "problem.h"
