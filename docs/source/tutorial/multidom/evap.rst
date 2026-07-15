@@ -88,11 +88,9 @@ Finally, we also add some remeshing options which invoke a mesh reconstruction w
 
 The run script is trivial and the results are shown in :numref:`figmultidomdropevap`:
 
-.. code:: python
-
-   if __name__=="__main__":
-       with EvaporatingDroplet() as problem:
-           problem.run(500*second,startstep=10*second,outstep=True,temporal_error=1)
+.. literalinclude:: evaporating_water_droplet.py
+   :language: python
+   :start-at: if __name__=="__main__":
 
 
 

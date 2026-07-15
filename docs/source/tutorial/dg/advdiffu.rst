@@ -91,20 +91,10 @@ Here, :math:`\alpha` is a penalty parameter and :math:`h` is the average element
 
 For the implementation, the equation starts as usual. We can pass an arbitrary finite element space, continuous or discontinuous:
 
-.. code:: python
-
-   class ConvectionDiffusionEquation(Equations):
-      def __init__(self, u, D ,space="C2",alpha_DG=5):
-         super(ConvectionDiffusionEquation, self).__init__()
-         self.u = u  # advection velocity
-         self.D = D  # diffusivity
-         self.space=space
-         # Activate interior facet terms if the space is discontinuous
-         self.requires_interior_facet_terms=is_DG_space(self.space)
-         self.alpha_DG=alpha_DG # penalty parameter for DG
-
-      def define_fields(self):
-         self.define_scalar_field("c", self.space) 
+.. literalinclude:: convection_diffusion.py
+   :language: python
+   :start-at: class ConvectionDiffusionEquation(Equations):
+   :end-at: self.define_scalar_field("c", self.space)
 
 Whenever facet terms must be added, as here, we must set the property :py:attr:`~pyoomph.generic.codegen.BaseEquations.requires_interior_facet_terms` to ``True``. This will trigger the generation of an interior skeleton mesh which includes all interior facets of the mesh. Exterior boundaries are not part of this skeleton mesh. Each facet appears only once in the interior skeleton mesh, although each interior facet is shared by two elements.
 As an auxiliary method, the function :py:func:`~pyoomph.expressions.generic.is_DG_space` is used, which automatically detects if the space is discontinuous.

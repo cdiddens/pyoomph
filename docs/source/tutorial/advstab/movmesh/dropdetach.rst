@@ -51,21 +51,9 @@ Then bifurcation tracking is activated. But in order to work well, we must be ra
 
 Afterwards, we can continue in the volume :math:`V` to create the critical curve :math:`\operatorname{Bo}_c(V)`:
 
-.. code:: python
-
-           # Create an output file for the curve Bo_c(V)
-           critical_curve_out=NumericalTextOutputFile(problem.get_output_directory("critical_curve.txt"))
-           critical_curve_out.header("V","Bo_c") # header line
-           critical_curve_out.add_row(problem.V.value,problem.Bo.value) # V and Bo_c -> file
-           problem.output_at_increased_time() # also Paraview output
-
-           # Increase the volume, still tracking for the critical Bond number:
-           dV=0.1*problem.V.value
-           while problem.V.value<50:
-               dV=problem.arclength_continuation("V",dV,max_ds=0.1*problem.V.value) 
-               problem.remesh_handler_during_continuation()
-               critical_curve_out.add_row(problem.V.value,problem.Bo.value)
-               problem.output_at_increased_time()
+.. literalinclude:: hanging_droplet.py
+   :language: python
+   :start-at: # Create an output file for the curve Bo_c(V)
 
 We write a text output file containing :math:`V` and :math:`\operatorname{Bo}` in the output directory. Arclength continuation in :math:`V` is made in steps that may not exceed :math:`10\%` of the current volume. Since the bifurcation tracking is still active, :math:`\operatorname{Bo}` will be adjusted automatically. Since the droplet inflates quite a lot, remeshing is of course occasionally required - again with the :py:meth:`~pyoomph.generic.problem.Problem.remesh_handler_during_continuation`, which remeshes whenever necessary, but does not break the bifurcation tracking and the continuation in :math:`V`.
 

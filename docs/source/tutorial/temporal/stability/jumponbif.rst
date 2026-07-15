@@ -22,27 +22,9 @@ For the fold normal form :math:numref:`eqodefoldnf`, one gets the system
 
 which yields for all :math:`v_\text{g}\neq 0` the known solution :math:`r_\text{c}=0` and :math:`x_\text{c}=0`. For more complicated systems, however, this has to be solved numerically, which can be done in pyoomph by the :py:meth:`~pyoomph.generic.problem.Problem.activate_bifurcation_tracking` method (again after importing the problem and equation classes from :download:`bifurcation_fold_param_change.py`):
 
-.. code:: python
-
-   from bifurcation_fold_param_change import *
-
-   if __name__=="__main__":
-       with FoldProblem() as problem:
-
-           # Find any start solution, which must be close to the bifurcation
-           problem.r.value=1
-           problem.get_ode("fold").set_value(x=1)
-           problem.solve()
-
-           # Find a guess for the normalization constraint
-           problem.solve_eigenproblem(0)
-           vguess=problem.get_last_eigenvectors()[0] # use the eigenvector as guess
-
-           # Activate fold bifurcation tracking in parameter r and solve the augmented system
-           problem.activate_bifurcation_tracking(problem.r,"fold",eigenvector=vguess)
-           problem.solve()
-
-           print(f"Critical at r_c={problem.r.value} and x_c={problem.get_ode('fold').get_value('x')}")
+.. literalinclude:: bifurcation_fold_tracking.py
+   :language: python
+   :start-at: from bifurcation_fold_param_change import *
 
 
 .. only:: html

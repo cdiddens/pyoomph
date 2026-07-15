@@ -14,20 +14,10 @@ First of all, let us find the pitchfork bifurcation at :math:`\rho=1` with pyoom
 
 First, find the pitchfork bifurcation as described in the previous section, including the analytically derived Hessian terms using :py:meth:`~pyoomph.generic.problem.Problem.setup_for_stability_analysis`. We must be somewhat close to the pitchfork bifurcation, so we start at :math:`\rho=0.5`, solve for the stationary solution and find the critical eigenvector as guess for :math:`\vec{v}_\text{g}`:
 
-.. code:: python
-
-   if __name__=="__main__":
-       with LorenzBifurcationProblem() as problem:
-           problem.quiet() # shut up and use the symbolical Hessian terms
-           problem.setup_for_stability_analysis(analytic_hessian=True)
-           
-           # Start near the pitchfork at rho=1
-           problem.rho.value=0.5
-           problem.sigma.value=10
-           problem.beta.value=8/3
-           problem.solve(timestep=0.1) # Get the initial solution (trivial solution here)
-           problem.solve()
-           problem.solve_eigenproblem(1) # get an eigenvector as guess
+.. literalinclude:: bifurcation_hopf_tracking_lorenz.py
+   :language: python
+   :start-at: if __name__=="__main__":
+   :end-at: problem.solve_eigenproblem(0) # get an eigenvector as guess
 
 Now we find the pitchfork and indeed confirm that it is at :math:`\rho=1`:
 
@@ -45,24 +35,17 @@ At a pitchfork bifurcation, we cannot easily continue in :math:`\rho` since it i
 
 To jump on the stable branch of the pitchfork bifurcation, we can add this eigenvector to the degrees of freedom using the :py:meth:`~pyoomph.generic.problem.Problem.perturb_dofs` method, increase :math:`\rho` a bit beyond :math:`\rho>1` and perform a few transient solves to move towards the stable branch, before the stationary solve jumps on it:
 
-.. code:: python
-
-           problem.perturb_dofs(perturb) # Go in the direction of the critical eigenvector
-           problem.rho.value+=0.1 # and go a bit higher with the rho value
-           problem.solve(timestep=[0.1,1,2,None]) # do a few time steps and then a stationary solve (timestep=None)
-           eigvals, eigvects=problem.solve_eigenproblem(1) # get the initial eigenvalues
+.. literalinclude:: bifurcation_hopf_tracking_lorenz.py
+   :language: python
+   :start-at: problem.perturb_dofs(perturb) # Go in the direction of the critical eigenvector
+   :end-at: eigvals, eigvects=problem.solve_eigenproblem(0) # get the initial eigenvalues
 
 Then, we gradually increase :math:`\rho` by arc length continuation, solve for the eigenvalues and monitor whether the largest real part of the eigenvalues crosses zero:
 
-.. code:: python
-
-           # Scan rho to the Hopf bifurcation
-           ds=0.001
-           while eigvals[0].real<-0.001:
-               ds=problem.arclength_continuation(problem.rho,ds)
-               x, y, z = problem.get_ode("lorenz").get_value(["x", "y", "z"])
-               eigvals, eigvects = problem.solve_eigenproblem(1)
-               print(f"On pitchfork branch rho={problem.rho.value}, x,y,z={x, y, z}, eigenvalue={eigvals[0]}")
+.. literalinclude:: bifurcation_hopf_tracking_lorenz.py
+   :language: python
+   :start-at: # Scan rho to the Hopf bifurcation
+   :end-at: print(f"On pitchfork branch rho={problem.rho.value}, x,y,z={x, y, z}, eigenvalue={eigvals[0]}")
 
 The eigenvalue will have a non-zero imaginary value, which indicates a Hopf bifurcation. This means the critical eigenvalue will not be zero, but in fact a pair of imaginary values :math:`\pm i\omega`. For the same reason, the eigenvector :math:`\vec{v}` will be complex (and a complex conjugate counter-pair), i.e. :math:`\vec{v}=\vec{\phi}+i\vec{\psi}` with real valued :math:`\vec{\phi}` and :math:`\vec{\psi}`. The bifurcation tracking of a Hopf bifurcation with respect to the parameter :math:`r` (:math:`=\rho` here) is internally again handled by augmenting the system as follows:
 
