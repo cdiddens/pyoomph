@@ -304,9 +304,6 @@ them over hand-rolled weak forms when the physics matches. All live under
   acoustics/wave problems in frequency domain.
 - **`kuramoto_sivashinsky.py`**: `KuramotoSivashinskyEquations(...)` for thin-film
   interfacial pattern formation.
-- **`potential_flow.py`**: `PotentialFlow(potential_name="phi", ...)` for irrotational
-  flow (`Δφ=0`, `u=∇φ`), with `PotentialFlowFreeInterface(...)` for free-surface
-  potential flow (e.g. capillary waves, bubble oscillation).
 - **`stokes_stream_func.py`**: `StreamFunctionFromVelocity(...)` — post-processing
   stream function from a computed velocity field (2D/axisymmetric).
 - **`harmonic_oscillator.py`**: `HarmonicOscillator(omega=, damping=, driving=)`, an
@@ -347,6 +344,18 @@ activity-coefficient models in `pyoomph.materials.UNIFAC.*`/`activity.py`.
           problem.solve(); problem.output()          # stationary
           # or: problem.run(endtime, outstep=..., numouts=..., temporal_error=..., spatial_adapt=...)
   ```
+
+## Companion reference files
+
+- [`AGENTS_EXAMPLES.md`](AGENTS_EXAMPLES.md) — idiomatic recipes for common problem
+  shapes (multi-domain coupling, free surfaces, parameter continuation, custom gmsh
+  geometry, combined spatial/temporal adaptivity, save/resume).
+- [`AGENTS_MATERIALS.md`](AGENTS_MATERIALS.md) — the `pyoomph.materials` system:
+  looking up/defining fluids and solids, interfaces, surfactants, mass transfer,
+  UNIFAC activity coefficients.
+- [`AGENTS_ADVANCED.md`](AGENTS_ADVANCED.md) — bifurcation/stability analysis, custom
+  C code (`CustomMultiReturnExpression`), Discontinuous Galerkin methods, and
+  ALE/remeshing/PFEM internals.
 
 ## Where to look for more (in this repo)
 
