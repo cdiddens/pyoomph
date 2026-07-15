@@ -29,31 +29,10 @@ Since we will have an effectively three-dimensional problem, it is important aga
 
 This only sets up the two-dimensional problem. The eigenanalysis with the additional normal mode is activated in the driver code:
 
-.. code:: python
-
-	problem=RivuletProblem() # Create the problem
-	# Setup the problem for k-stability analysis, we do not need an analytic Hessian, since we don't do any bifurcation tracking
-	problem.setup_for_stability_analysis(additional_cartesian_mode=True,analytic_hessian=False) 
-	# Use the SLEPc eigensolver with MUMPS
-	problem.set_eigensolver("slepc").use_mumps()
-	problem.solve() # Solve the base state
-	problem.save_state("start.dump") # Save the start case at 90°
-
-
-	# Scan the contact angle
-	for theta_deg in [60,90,120]:
-	    problem.load_state("start.dump",ignore_outstep=True)
-	    problem.go_to_param(theta=theta_deg*degree)        
-	    # Scan the slip length (either essentially free slip or quite low slip length)
-	    for sl in [10000,0.01]:        
-		problem.go_to_param(sliplength=sl)    
-	    
-		outf=problem.create_text_file_output("for_"+str(round(float(problem.theta/degree)))+"_deg_SL_"+str(sl)+".txt",header=["k","Lambda"])
-
-		for k in numpy.linspace(0.01,1.5,50):
-		    problem.solve_eigenproblem(1,normal_mode_k=k) # Solve the k-dependent eigenproblem
-		    evs=problem.get_last_eigenvalues()    
-		    outf.add_row(k,numpy.real(evs[0]))
+.. literalinclude:: rivulet.py
+   :language: python
+   :start-at: problem=RivuletProblem() # Create the problem
+   :end-at: outf.add_row(k,numpy.real(evs[0]))
 
 
 Again, it just takes the call of :py:meth:`~pyoomph.generic.problem.Problem.setup_for_stability_analysis` with ``additional_cartesian_mode=True`` to activate this feature and shipping ``normal_mode_k=k`` to the call of :py:meth:`~pyoomph.generic.problem.Problem.solve_eigenproblem`.
