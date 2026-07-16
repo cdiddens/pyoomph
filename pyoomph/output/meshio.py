@@ -36,7 +36,12 @@ from pathlib import Path
 import meshio #type:ignore
 
 from ..meshes.meshdatacache import MeshDataEigenModes,MeshDataCacheOperatorBase,MeshDataCombineWithEigenfunction,MeshDataCartesianExtrusion,MeshDataRotationalExtrusion
-from mpi4py import MPI
+from ..generic.mpi import has_mpi
+
+if has_mpi():
+	from mpi4py import MPI
+else:
+	MPI = None
 
 # Hack, because the meshio version does not have a meshio._mesh.topological_dimension["wedge15"] set!
 class Wedge15Cellblock(meshio.CellBlock):

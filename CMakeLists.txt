@@ -270,3 +270,9 @@ endif()
 # importable as `pyoomph._core` rather than as a top-level module.
 # ----------------------------------------------------------------------------
 install(TARGETS _pyoomph_core LIBRARY DESTINATION pyoomph)
+
+# Ensure wheel installs carry the NO_MPI marker whenever MPI support is
+# intentionally disabled so runtime imports skip mpi4py.
+if(NOT PYOOMPH_USE_MPI)
+  install(FILES "${_pyoomph_no_mpi_marker}" DESTINATION pyoomph)
+endif()
