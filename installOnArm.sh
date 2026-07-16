@@ -282,7 +282,7 @@ install_python_deps() {
     export BLAS=$OPENBLAS
     
     # Install build tools first
-    pip install --upgrade setuptools wheel cython meson-python
+    pip install --upgrade setuptools cython meson-python
     
     # Install numpy (binary is fine for ARM64 now)
     pip install numpy
