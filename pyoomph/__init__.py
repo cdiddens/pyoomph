@@ -169,7 +169,7 @@ def _set_accelerate_solver() -> bool:
 	try:
 		from .solvers import accelerate as _accelerate #type:ignore
 		set_default_linear_solver("accelerate")
-		set_default_eigen_solver("scipy")
+		set_default_eigen_solver("accelerate")
 		return True
 	except:
 		return False

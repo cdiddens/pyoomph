@@ -39,7 +39,8 @@ A `copy of the license <https://github.com/pyoomph/pyoomph/blob/main/COPYING>`__
 
             Copyright 2008-2009  Marius Muja (mariusm@cs.ubc.ca). All rights reserved.
             Copyright 2008-2009  David G. Lowe (lowe@cs.ubc.ca). All rights reserved.
-            Copyright 2011 Jose L. Blanco (joseluisblancoc@gmail.com). All rights reserved.
+            Copyright 2011-2026  Jose Luis Blanco (joseluisblancoc@gmail.com).
+              All rights reserved.
 
             THE BSD LICENSE
 
@@ -110,9 +111,9 @@ A `copy of the license <https://github.com/pyoomph/pyoomph/blob/main/COPYING>`__
 
    -  `python3.8\ + <https://www.python.org/>`__, `[PSF license] <https://docs.python.org/3/license.html>`__, also dynamically linked in the distribution as python wheels
 
-   -  `pybind11 <https://github.com/pybind/pybind11>`__, `[BSD-style license] <https://github.com/sizmailov/pybind11-stubgen/blob/master/LICENSE>`__, also statically linked in the distribution as python wheels
+   -  `pybind11 <https://github.com/pybind/pybind11>`__, `[BSD-style license] <https://github.com/pybind/pybind11/blob/master/LICENSE>`__, also statically linked in the distribution as python wheels
 
-   -  `pybind11-stubgen <https://github.com/sizmailov/pybind11-stubgen>`__, `[BSD-style license] <https://github.com/sizmailov/pybind11-stubgen/blob/master/LICENSE>`__
+   -  `pybind11-stubgen <https://github.com/pybind/pybind11-stubgen>`__, `[BSD 3-Clause license] <https://github.com/pybind/pybind11-stubgen/blob/main/LICENSE>`__, used to generate python stubs from the C++ core
 
    -  `pip <https://github.com/pypa/pip>`__, `[MIT license] <https://github.com/pypa/pip/blob/main/LICENSE.txt>`__
 
@@ -128,7 +129,9 @@ A `copy of the license <https://github.com/pyoomph/pyoomph/blob/main/COPYING>`__
 
    -  `meshio <https://github.com/nschloe/meshio>`__, `[MIT license] <https://github.com/nschloe/meshio/blob/main/LICENSE.txt>`__
 
-   -  `mpi4py <https://github.com/mpi4py/mpi4py/>`__, `[BSD 2-Clause "Simplified" license] <https://github.com/erdc/mpi4py/blob/master/LICENSE.txt>`__
+   -  `mpi4py <https://github.com/mpi4py/mpi4py/>`__, `[BSD 3-Clause license] <https://github.com/mpi4py/mpi4py/blob/master/LICENSE.rst>`__
+
+   -  `more_itertools <https://github.com/more-itertools/more-itertools>`__, `[MIT license] <https://github.com/more-itertools/more-itertools/blob/master/LICENSE>`__
 
    -  `scipy <https://github.com/scipy/scipy>`__, `[BSD-3-Clause license] <https://github.com/scipy/scipy/blob/main/LICENSES_bundled.txt>`__
 
@@ -147,12 +150,10 @@ A `copy of the license <https://github.com/pyoomph/pyoomph/blob/main/COPYING>`__
    -  `setuptools <https://github.com/pypa/setuptools>`__, `[MIT license] <https://github.com/pypa/setuptools?tab=MIT-1-ov-file#readme>`__
       
    -  `scikit-build-core <https://github.com/scikit-build/scikit-build-core>`__, `[Apache 2.0 license] <https://github.com/scikit-build/scikit-build-core?tab=Apache-2.0-1-ov-file>`__ is used for installation and wheel generation
-   
-   -  `pybind11-stubgen <https://github.com/sizmailov/pybind11-stubgen>`__, `[BSD 3-Clause license] <https://github.com/sizmailov/pybind11-stubgen?tab=License-1-ov-file#readme>`__ is used to generate python stubs from the C++ core
-   
-   -  `cibuildwheel <https://cibuildwheel.pypa.io>`__, `[BSD 2-Clause license] <https://github.com/pypa/cibuildwheel?tab=License-1-ov-file#readme>`__ is used to compile the provided wheels   
-   
-   -  `tccbox <https://github.com/metab0t/tccbox>`__ used to invoke the `TinyC <https://bellard.org/tcc/>`__ compiler
+
+   -  `cibuildwheel <https://cibuildwheel.pypa.io>`__, `[BSD 2-Clause license] <https://github.com/pypa/cibuildwheel?tab=License-1-ov-file#readme>`__ is used to compile the provided wheels
+
+   -  `tccbox <https://github.com/metab0t/tccbox>`__ used to invoke the `TinyC <https://bellard.org/tcc/>`__ compiler, `[GPL v2 or later license] <https://www.gnu.org/licenses/old-licenses/gpl-2.0.html>`__
    
    
    

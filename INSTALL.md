@@ -6,11 +6,11 @@ When you have python 3.10 to 3.15 (CPython, 64-bit) installed,
 
 should install the basic framework. For the maximum performance and system-specific information, please refer to the sections below. 
 
-If you cannot manage to install it, refer to our [tutorial](https://pyoomph.readthedocs.io/). If this cannot help, you can ask for help c.diddens@utwente.nl
+If you cannot manage to install it, refer to our [tutorial](https://pyoomph.readthedocs.io/). If this cannot help, you can ask for help at c.diddens@utwente.nl
 
 ## On Windows
 
-For maximum performance, also install [Microsoft Build Tools](https://docs.microsoft.com/visualstudio/msbuild/msbuild), available for download [here](https://aka.ms/vs/16/release/vs_buildtools.exe). 
+For maximum performance, also install [Microsoft Build Tools](https://docs.microsoft.com/visualstudio/msbuild/msbuild), available for download [here](https://aka.ms/vs/17/release/vs_buildtools.exe). 
 
 Verify whether everything runs fine by 
 
@@ -33,7 +33,7 @@ Also, please downgrade `mkl` by
 
 > python3 -m pip install mkl==2021.4.0
 
-Make sure to have the `XCode` developer tools, e.g. by installing them via
+Make sure to have the `Xcode` developer tools, e.g. by installing them via
 
 > xcode-select --install
 
@@ -66,7 +66,7 @@ Otherwise, for a non-editable install you can use
 
 ### Mac
 
-Besides XCode, you must install a few third-party tools. This can be done by e.g. [Homebrew](https://brew.sh):
+Besides Xcode, you must install a few third-party tools. This can be done by e.g. [Homebrew](https://brew.sh):
 
 > brew install openmpi pkg-config wget bzip2 patch
 
