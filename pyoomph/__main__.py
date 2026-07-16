@@ -70,19 +70,22 @@ def test_solver(solver):
    from . expressions import var
    
    with tempfile.TemporaryDirectory(prefix="pyoomph_test_"+solver+"_") as tempdir:
-      p=Problem()
-      p.quiet()
-      
-      p.set_linear_solver(solver)
-      p.set_output_directory(tempdir)      
-      
-      p+=HarmonicOscillator(omega=1,name="y")@"globals"
-      p+=InitialCondition(y=1-var("time"))@"globals"
-      
-      p.run(endtime=1,timestep=0.1)            
-      ydest=-0.25942176379851877854
-      if abs(float(p.get_ode("globals").get_value("y"))-ydest)>1e-7:
-         raise RuntimeError("Solver did not compute the correct result, got {}, expected {}".format(float(p.get_ode("globals").get_value("y")),ydest))
+      # Use Problem as a context manager so its compiled DLL is unloaded (release()) before
+      # the TemporaryDirectory above tries to delete it - on Windows, deleting a directory
+      # that still contains a loaded DLL fails with WinError 32 ("used by another process").
+      with Problem() as p:
+         p.quiet()
+
+         p.set_linear_solver(solver)
+         p.set_output_directory(tempdir)
+
+         p+=HarmonicOscillator(omega=1,name="y")@"globals"
+         p+=InitialCondition(y=1-var("time"))@"globals"
+
+         p.run(endtime=1,timestep=0.1)
+         ydest=-0.25942176379851877854
+         if abs(float(p.get_ode("globals").get_value("y"))-ydest)>1e-7:
+            raise RuntimeError("Solver did not compute the correct result, got {}, expected {}".format(float(p.get_ode("globals").get_value("y")),ydest))
       
 def test_compiler(compiler):
    from . generic.problem import Problem
@@ -91,16 +94,18 @@ def test_compiler(compiler):
    from . expressions import var
    
    with tempfile.TemporaryDirectory(prefix="pyoomph_test_"+compiler+"_") as tempdir:
-      p=Problem()
-      p.quiet()
-      
-      p.set_c_compiler(compiler)
-      p.set_output_directory(tempdir)      
-      
-      p+=HarmonicOscillator(omega=1,name="y")@"globals"
-      p+=InitialCondition(y=1-var("time"))@"globals"
-      
-      p.initialise()
+      # See test_solver() above: release the compiled DLL before the TemporaryDirectory
+      # cleanup runs, or Windows refuses to delete the directory (WinError 32).
+      with Problem() as p:
+         p.quiet()
+
+         p.set_c_compiler(compiler)
+         p.set_output_directory(tempdir)
+
+         p+=HarmonicOscillator(omega=1,name="y")@"globals"
+         p+=InitialCondition(y=1-var("time"))@"globals"
+
+         p.initialise()
 
 def test_eigen(eigensolver):
    from . generic.problem import Problem
@@ -109,21 +114,23 @@ def test_eigen(eigensolver):
    from . expressions import var
    
    with tempfile.TemporaryDirectory(prefix="pyoomph_test_"+eigensolver+"_") as tempdir:
-      p=Problem()
-      p.quiet()
-      
-      p.set_eigensolver(eigensolver)
-      p.set_output_directory(tempdir)      
-      
-      p+=HarmonicOscillator(omega=1,damping=0.1,name="y",first_derivative_name="yprime")@"globals"      
-      
-      p.initialise()   
-      p.solve()
-      p.solve_eigenproblem(1)
-      dest_eigenvalue=-0.1+0.99498743710662j
-      calced_eigenvalue=p.get_last_eigenvalues()[0]
-      if abs(calced_eigenvalue-dest_eigenvalue)>1e-7 and abs(calced_eigenvalue-dest_eigenvalue.conjugate())>1e-7:
-         raise RuntimeError("Eigensolver did not compute the correct result, got {}, expected {}".format(calced_eigenvalue,dest_eigenvalue))
+      # See test_solver() above: release the compiled DLL before the TemporaryDirectory
+      # cleanup runs, or Windows refuses to delete the directory (WinError 32).
+      with Problem() as p:
+         p.quiet()
+
+         p.set_eigensolver(eigensolver)
+         p.set_output_directory(tempdir)
+
+         p+=HarmonicOscillator(omega=1,damping=0.1,name="y",first_derivative_name="yprime")@"globals"
+
+         p.initialise()
+         p.solve()
+         p.solve_eigenproblem(1)
+         dest_eigenvalue=-0.1+0.99498743710662j
+         calced_eigenvalue=p.get_last_eigenvalues()[0]
+         if abs(calced_eigenvalue-dest_eigenvalue)>1e-7 and abs(calced_eigenvalue-dest_eigenvalue.conjugate())>1e-7:
+            raise RuntimeError("Eigensolver did not compute the correct result, got {}, expected {}".format(calced_eigenvalue,dest_eigenvalue))
    
 
 if arglist.command == "cbrange":
