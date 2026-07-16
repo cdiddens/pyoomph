@@ -30,6 +30,8 @@ Pyoomph is a finite element framework based on oomph-lib and GiNaC. It is design
 """
 
 import os
+import platform
+import sys
 os.environ['OPENBLAS_NUM_THREADS'] = '4' 
 os.environ['MKL_NUM_THREADS'] = '4'
 # To Deactivate OpenMP parallelization
@@ -159,14 +161,46 @@ class GeneralSolverCallback(_pyoomph.GeneralSolverCallback):
 solver_cb=GeneralSolverCallback()
 _pyoomph.set_Solver_callback(solver_cb)
 
-#Set pardiso as default
+#Set best solver as default
 from .solvers.generic import set_default_linear_solver,set_default_eigen_solver
-#from .solvers.pardiso import PardisoSolver
-try:
-	from .solvers.pardiso import PardisoSolver #type:ignore
-	set_default_linear_solver("pardiso")
-	set_default_eigen_solver("pardiso")
-except:
+
+
+def _set_accelerate_solver() -> bool:
+	try:
+		from .solvers import accelerate as _accelerate #type:ignore
+		set_default_linear_solver("accelerate")
+		set_default_eigen_solver("scipy")
+		return True
+	except:
+		return False
+
+
+def _set_pardiso_solver() -> bool:
+	try:
+		from .solvers.pardiso import PardisoSolver #type:ignore
+		set_default_linear_solver("pardiso")
+		set_default_eigen_solver("pardiso")
+		return True
+	except:
+		return False
+
+
+def _set_superlu_fallback() -> None:
 	from .solvers.scipy import SuperLUSerial,ScipyEigenSolver #type:ignore
 	set_default_linear_solver("superlu")
 	set_default_eigen_solver("scipy")
+
+
+_is_macos = (sys.platform == "darwin")
+_machine = platform.machine().lower()
+_is_arm64 = _machine in ("arm64", "aarch64")
+
+if _is_macos and _is_arm64:
+	if not _set_accelerate_solver():
+		_set_superlu_fallback()
+elif _is_macos:
+	if not _set_pardiso_solver() and not _set_accelerate_solver():
+		_set_superlu_fallback()
+else:
+	if not _set_pardiso_solver():
+		_set_superlu_fallback()

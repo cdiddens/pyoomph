@@ -25,8 +25,9 @@
 #
 # ========================================================================
 
-from .generic import GenericLinearSystemSolver
+from .generic import GenericLinearSystemSolver, GenericEigenSolver
 import sys
+import numpy
 from scipy.sparse import csr_matrix
 
 from ..typings import *
@@ -91,3 +92,47 @@ class MacAccelerateLinearSolver(GenericLinearSystemSolver):
             raise NotImplementedError("Only transpose operation is supported")
 
         return 0
+
+
+from .scipy import ScipyEigenSolver,DefaultMatrixType
+
+class AccelerateInvOp(object):
+    def __init__(self, A:DefaultMatrixType, M:Optional[DefaultMatrixType]=None,sigma:Optional[Union[float,complex]]=None,method:MacAccelerateMethod="qr"):
+        if sigma is None:
+            self.mat=A
+        else:
+            self.mat=A-sigma*M #type:ignore
+        if self.mat.dtype==numpy.dtype("complex128"):
+            raise RuntimeError("The Accelerate sparse solvers only support real matrices, but a complex shifted matrix was passed. Use e.g. the pardiso or scipy eigensolver for complex eigenproblems instead")
+        self._solver=_pyoomph.MacAccelerateSparseSolver()
+        Acsr=csr_matrix(self.mat)
+        Acsr.sort_indices()
+        self._solver.factorize(Acsr.shape[0],Acsr.shape[1],Acsr.indptr.astype("int64"),Acsr.indices.astype("int64"),Acsr.data.astype("float64"),method)
+
+    def __call__(self, b): #type:ignore
+        return numpy.array(self._solver.solve(b)) #type:ignore
+
+    matvec = __call__ #type:ignore
+
+    @property
+    def shape(s): #type:ignore
+        return s.mat.shape #type:ignore
+
+    @property
+    def dtype(s): #type:ignore
+        return s.mat.dtype #type:ignore
+
+
+@GenericEigenSolver.register_solver()
+class AccelerateArpackEigenSolver(ScipyEigenSolver):
+    idname = "accelerate"
+    def __init__(self,problem:"Problem",method:MacAccelerateMethod="qr"):
+        super().__init__(problem)
+        self.method:MacAccelerateMethod=method
+
+    def get_OPInv(self,M:DefaultMatrixType,J:DefaultMatrixType,shift:Union[float,complex]):
+        if shift is None:
+            OPinv = None
+        else:
+            OPinv = AccelerateInvOp(J, M, sigma=shift,method=self.method)
+        return OPinv

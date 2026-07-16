@@ -38,8 +38,8 @@ DefaultMatrixType=scipy.sparse.csr_matrix
 _TypeGenericLASolver=TypeVar("_TypeGenericLASolver",bound=Type["GenericLinearSystemSolver"])
 _TypeGenericEigenSolver=TypeVar("_TypeGenericEigenSolver",bound=Type["GenericEigenSolver"])
 
-CoreLinearSolverEnum=Literal["superlu","umfpack","petsc","mumps","pardiso"]
-CoreEigenSolverEnum=Literal["scipy","pardiso","slepc"]
+CoreLinearSolverEnum=Literal["superlu","umfpack","petsc","mumps","pardiso","accelerate"]
+CoreEigenSolverEnum=Literal["scipy","pardiso","slepc","accelerate"]
 EigenSolverWhich=Literal["LM","SM","LR","SR","SI"]
 _default_la_solver:Optional[Union["GenericLinearSystemSolver",CoreLinearSolverEnum]]=None
 _default_eigen_solver:Optional[Union["GenericEigenSolver",CoreEigenSolverEnum]]=None
