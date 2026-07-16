@@ -44,6 +44,45 @@ endif()
 set(CLN_EXTRA_CONFIGURE_FLAGS   "CXXFLAGS=-MD -DNO_ASM -O2${_pyoomph_macos_arch_flag}" CACHE STRING "Extra flags passed to CLN's ./configure")
 set(GINAC_EXTRA_CONFIGURE_FLAGS "" CACHE STRING "Extra flags passed to GiNaC's ./configure")
 
+# ginac.de only ever hosts the *current* release tarball of CLN/GiNaC - a URL
+# pinned to an older version goes dead as soon as a new release replaces it.
+# So when PYOOMPH_CLN_VERSION / PYOOMPH_GINAC_VERSION are left at their
+# default (empty), scrape the actual filename linked from ginac.de's own
+# download pages at configure time instead of hardcoding a version. This
+# adds a (small, HTML-only) network fetch at configure time, on top of the
+# tarball fetch ExternalProject_Add already does at build time.
+function(pyoomph_resolve_ginac_de_version page_url filename_prefix human_name out_version_var)
+  set(_html "${CMAKE_BINARY_DIR}/thirdparty_download_pages/${filename_prefix}.html")
+  file(DOWNLOAD "${page_url}" "${_html}" STATUS _pyoomph_dl_status)
+  list(GET _pyoomph_dl_status 0 _pyoomph_dl_code)
+  if(NOT _pyoomph_dl_code EQUAL 0)
+    message(FATAL_ERROR
+      "Failed to fetch ${page_url} to auto-detect the current ${human_name} "
+      "version (${_pyoomph_dl_status}). Pass -DPYOOMPH_CLN_VERSION=... / "
+      "-DPYOOMPH_GINAC_VERSION=... to pin a version explicitly instead.")
+  endif()
+  file(READ "${_html}" _pyoomph_page_content)
+  string(REGEX MATCH "${filename_prefix}-[0-9]+\\.[0-9]+\\.[0-9]+\\.tar\\.bz2" _pyoomph_fname "${_pyoomph_page_content}")
+  if(NOT _pyoomph_fname)
+    message(FATAL_ERROR
+      "Could not find a ${human_name} download link on ${page_url} (site "
+      "layout may have changed). Pass -DPYOOMPH_CLN_VERSION=... / "
+      "-DPYOOMPH_GINAC_VERSION=... to pin a version explicitly instead.")
+  endif()
+  string(REGEX REPLACE "^${filename_prefix}-(.*)\\.tar\\.bz2$" "\\1" _pyoomph_version "${_pyoomph_fname}")
+  set(${out_version_var} "${_pyoomph_version}" PARENT_SCOPE)
+endfunction()
+
+if(PYOOMPH_DOWNLOAD_CLN AND NOT PYOOMPH_CLN_VERSION)
+  pyoomph_resolve_ginac_de_version("https://www.ginac.de/CLN/" "cln" "CLN" PYOOMPH_CLN_VERSION)
+  message(STATUS "pyoomph: auto-detected current CLN version from ginac.de: ${PYOOMPH_CLN_VERSION}")
+endif()
+
+if(PYOOMPH_DOWNLOAD_GINAC AND NOT PYOOMPH_GINAC_VERSION)
+  pyoomph_resolve_ginac_de_version("https://www.ginac.de/Download.html" "ginac" "GiNaC" PYOOMPH_GINAC_VERSION)
+  message(STATUS "pyoomph: auto-detected current GiNaC version from ginac.de: ${PYOOMPH_GINAC_VERSION}")
+endif()
+
 set(_pyoomph_autotools_common_flags
     "--enable-static" "--disable-shared" "--with-pic=yes"
     "CFLAGS=-fPIC${_pyoomph_macos_arch_flag}"

@@ -3,8 +3,7 @@
 
 # MUST BE CALLED FROM ROOT DIRECTORY
 
-CLN_VERSION=1.3.7
-GINAC_VERSION=1.8.10
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/resolve_ginac_cln_versions.sh"
 
 export PYOOMPH_PACKAGE_NAME=pyoomph ### TODO
 

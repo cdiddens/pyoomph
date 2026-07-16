@@ -54,8 +54,13 @@ option(PYOOMPH_DOWNLOAD_GINAC "Download and build GiNaC from source via its own 
 option(PYOOMPH_GENERATE_STUBS "Generate .pyi stubs for the _core extension via pybind11-stubgen (best effort, non-fatal)"  ON)
 option(PYOOMPH_COPY_STUBS_TO_SOURCE_TREE "Also mirror the generated .pyi stub into the source-tree pyoomph/ directory, so Pylance/Pyright/mypy can resolve pyoomph._core while editing without a full pip install" ON)
 
-set(PYOOMPH_CLN_VERSION "1.3.7" CACHE STRING "CLN version to download when PYOOMPH_DOWNLOAD_CLN=ON")
-set(PYOOMPH_GINAC_VERSION "1.8.10" CACHE STRING "GiNaC version to download when PYOOMPH_DOWNLOAD_GINAC=ON")
+# Left empty by default: ginac.de only ever hosts the *current* release
+# tarball, so a version pinned here goes dead as soon as a new release is
+# published. When empty, cmake/ThirdPartyGiNaC.cmake auto-detects the
+# current version by scraping ginac.de's own download pages at configure
+# time. Set explicitly to pin a specific (still-live) version instead.
+set(PYOOMPH_CLN_VERSION "" CACHE STRING "CLN version to download when PYOOMPH_DOWNLOAD_CLN=ON (auto-detected from ginac.de if empty)")
+set(PYOOMPH_GINAC_VERSION "" CACHE STRING "GiNaC version to download when PYOOMPH_DOWNLOAD_GINAC=ON (auto-detected from ginac.de if empty)")
 set(PYOOMPH_THIRDPARTY_PREFIX "${CMAKE_BINARY_DIR}/thirdparty-install" CACHE PATH
     "Install prefix used for a downloaded/built CLN and/or GiNaC")
 

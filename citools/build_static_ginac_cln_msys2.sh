@@ -4,8 +4,7 @@ set -euo pipefail
 
 # Dedicated static prebuild for CLN + GiNaC in MSYS2 (Windows)
 
-CLN_VERSION="${CLN_VERSION:-1.3.7}"
-GINAC_VERSION="${GINAC_VERSION:-1.8.10}"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/resolve_ginac_cln_versions.sh"
 PYOOMPH_STATIC_GINAC_DIR="${PYOOMPH_STATIC_GINAC_DIR:-GiNaC_static}"
 PYOOMPH_GINAC_CONFIGURE_OPTIONS="${PYOOMPH_GINAC_CONFIGURE_OPTIONS:-}"
 
