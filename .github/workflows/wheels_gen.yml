@@ -13,18 +13,20 @@ on:
     types:
       - completed
 
+env:
+  # Add/remove Python versions here to build wheels for them on every platform below.
+  # cibuildwheel builds every matching version within a single job.
+  PYTHON_VERSIONS: "3.14"
+
 jobs:
   build_wheels:
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
-    name: ${{ matrix.target.label }} (py${{ matrix.python_version }})
-    runs-on: ${{ matrix.target.runner }}
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        # Add/remove Python versions here to build wheels for them on every platform below.
-        python_version:
-          - '3.14'
-        target:
+        include:
           - label: linux-x86_64
             runner: ubuntu-latest
             platform: linux
@@ -50,12 +52,15 @@ jobs:
         with:
           python-version: '3.14'
 
-      - name: Compute cibuildwheel Python tag
-        id: pytag
+      - name: Compute cibuildwheel build selector
+        id: cibw
         shell: bash
-        run: echo "cp_tag=cp${PYVER//./}" >> "${GITHUB_OUTPUT}"
-        env:
-          PYVER: ${{ matrix.python_version }}
+        run: |
+          SELECTOR=""
+          for v in ${PYTHON_VERSIONS}; do
+            SELECTOR="${SELECTOR:+$SELECTOR }cp${v//./}-*"
+          done
+          echo "build_selector=${SELECTOR}" >> "${GITHUB_OUTPUT}"
 
       - name: Resolve prebuild run id
         id: prebuild
@@ -96,7 +101,7 @@ jobs:
           mkdir -p prebuilt
           gh run download "${{ steps.prebuild.outputs.run_id }}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --name "${{ matrix.target.prebuild_artifact }}" \
+            --name "${{ matrix.prebuild_artifact }}" \
             --dir prebuilt
 
       - name: Show downloaded artifact layout
@@ -106,15 +111,15 @@ jobs:
           find prebuilt -maxdepth 5 -type f | sort | head -n 200
 
       - name: Install build dependencies (Linux)
-        if: matrix.target.platform == 'linux'
+        if: matrix.platform == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libglu1-mesa-dev libxcursor-dev libopengl0
 
       - name: Build wheel with cibuildwheel (Linux/macOS)
-        if: matrix.target.platform != 'windows'
+        if: matrix.platform != 'windows'
         env:
-          CIBW_BUILD: ${{ steps.pytag.outputs.cp_tag }}-*
+          CIBW_BUILD: ${{ steps.cibw.outputs.build_selector }}
           CIBW_SKIP: "*-musllinux_*"
           CIBW_ARCHS: native
           CIBW_BUILD_FRONTEND: build
@@ -145,7 +150,7 @@ jobs:
           output-dir: wheelhouse
 
       - name: Set up MSYS2
-        if: matrix.target.platform == 'windows'
+        if: matrix.platform == 'windows'
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
@@ -159,12 +164,11 @@ jobs:
             mingw-w64-ucrt-x86_64-toolchain
 
       - name: Build wheel with cibuildwheel (Windows/MSYS2)
-        if: matrix.target.platform == 'windows'
+        if: matrix.platform == 'windows'
         shell: msys2 {0}
         env:
           CC: gcc
           CXX: g++
-          CP_TAG: ${{ steps.pytag.outputs.cp_tag }}
         run: |
           export PATH="$(cygpath -u "$pythonLocation"):$PATH"
           python -m pip install --upgrade pip
@@ -172,7 +176,12 @@ jobs:
 
           PREBUILT_WIN="$(cygpath -m "$PWD/prebuilt/GiNaC_static/install")"
 
-          export CIBW_BUILD="${CP_TAG}-win_amd64"
+          BUILD_SELECTOR=""
+          for v in ${PYTHON_VERSIONS}; do
+            BUILD_SELECTOR="${BUILD_SELECTOR:+$BUILD_SELECTOR }cp${v//./}-win_amd64"
+          done
+
+          export CIBW_BUILD="${BUILD_SELECTOR}"
           export CIBW_ARCHS="AMD64"
           export CIBW_BUILD_FRONTEND="build"
           export CIBW_ENVIRONMENT_WINDOWS="CC=gcc CXX=g++ CXXFLAGS='-static-libgcc -static-libstdc++' LDFLAGS='-static-libgcc -static-libstdc++' PYOOMPH_GINAC_INCLUDE_DIR=${PREBUILT_WIN}/include PYOOMPH_GINAC_LIB_DIR=${PREBUILT_WIN}/lib PYOOMPH_CLN_INCLUDE_DIR=${PREBUILT_WIN}/include PYOOMPH_CLN_LIB_DIR=${PREBUILT_WIN}/lib"
@@ -212,6 +221,6 @@ jobs:
       - name: Upload built wheel
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.target.label }}-py${{ matrix.python_version }}
+          name: wheels-${{ matrix.label }}
           path: wheelhouse/*.whl
           if-no-files-found: error
