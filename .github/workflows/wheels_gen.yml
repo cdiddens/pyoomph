@@ -1,4 +1,4 @@
-name: First wheels from prebuild
+name: Wheels
 
 on:
   workflow_dispatch:
@@ -42,10 +42,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python 3.12
+      - name: Set up Python 
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.14'
 
       - name: Resolve prebuild run id
         id: prebuild
@@ -104,7 +104,7 @@ jobs:
       - name: Build wheel with cibuildwheel (Linux/macOS)
         if: matrix.platform != 'windows'
         env:
-          CIBW_BUILD: cp312-*
+          CIBW_BUILD: cp314-*
           CIBW_SKIP: "*-musllinux_*"
           CIBW_ARCHS: native
           CIBW_BUILD_FRONTEND: build
@@ -161,7 +161,7 @@ jobs:
 
           PREBUILT_WIN="$(cygpath -m "$PWD/prebuilt/GiNaC_static/install")"
 
-          export CIBW_BUILD="cp312-win_amd64"
+          export CIBW_BUILD="cp314-win_amd64"
           export CIBW_ARCHS="AMD64"
           export CIBW_BUILD_FRONTEND="build"
           export CIBW_ENVIRONMENT_WINDOWS="CC=gcc CXX=g++ CXXFLAGS='-static-libgcc -static-libstdc++' LDFLAGS='-static-libgcc -static-libstdc++' PYOOMPH_GINAC_INCLUDE_DIR=${PREBUILT_WIN}/include PYOOMPH_GINAC_LIB_DIR=${PREBUILT_WIN}/lib PYOOMPH_CLN_INCLUDE_DIR=${PREBUILT_WIN}/include PYOOMPH_CLN_LIB_DIR=${PREBUILT_WIN}/lib"
