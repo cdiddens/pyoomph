@@ -34,9 +34,9 @@ class HalleySolver:
         dofs,_=self.problem.get_current_dofs()
         while True:
             Rorig=R.copy()
-            J=self.problem.assemble_jacobian(with_residual=False)            
-            self.problem.get_la_solver().solve_serial(1,J.shape[0],J.nnz,1,J.data,J.indices,J.indptr,R,0,0)
-            self.problem.get_la_solver().solve_serial(2,J.shape[0],J.nnz,1,J.data,J.indices,J.indptr,R,0,0)
+            J=self.problem.assemble_jacobian(with_residual=False,which_one="")
+            self.problem.get_la_solver().solve_serial(1,J.shape[0],J.nnz,1,J.data,J.indices,J.indptr,R,0,0) #type:ignore[attr-defined] # scipy.sparse.csr_matrix attrs unresolved without scipy-stubs (blocked on numpy<2 pin)
+            self.problem.get_la_solver().solve_serial(2,J.shape[0],J.nnz,1,J.data,J.indices,J.indptr,R,0,0) #type:ignore[attr-defined]
             
             _augdof_spec=self.problem._create_dof_augmentation()            
             self.problem._add_augmented_dofs(_augdof_spec)
@@ -45,11 +45,11 @@ class HalleySolver:
             dJdU,=request.assemble()
             self.problem._reset_augmented_dof_vector_to_nonaugmented()
             J=J-dJdU/2
-            self.problem.get_la_solver().solve_serial(1,J.shape[0],J.nnz,1,J.data,J.indices,J.indptr,Rorig,0,0)
-            self.problem.get_la_solver().solve_serial(2,J.shape[0],J.nnz,1,J.data,J.indices,J.indptr,Rorig,0,0)
+            self.problem.get_la_solver().solve_serial(1,J.shape[0],J.nnz,1,J.data,J.indices,J.indptr,Rorig,0,0) #type:ignore[attr-defined]
+            self.problem.get_la_solver().solve_serial(2,J.shape[0],J.nnz,1,J.data,J.indices,J.indptr,Rorig,0,0) #type:ignore[attr-defined]
                         
             dofs=dofs-Rorig
-            self.problem.set_current_dofs(dofs)
+            self.problem.set_current_dofs(dofs.tolist())
             self.problem.invalidate_cached_mesh_data()
             self.problem.actions_before_newton_convergence_check()
             R=numpy.array(self.problem.get_residuals())

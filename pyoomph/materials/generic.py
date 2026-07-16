@@ -127,7 +127,7 @@ class MaterialProperties:
     """
     #: Unique name of the material. Names should be unique within the same state of matter (e.g. liquid, gas, solid), and the same material name for the same material should be used for different states of matter.
     name:str
-    #: Whether the material is pure or mixed. If the material is mixed, the components of the mixture should be specified in the :py:attr:`components` attribute. This should be treated as read-only property.
+    #: Whether the material is pure or mixed. If the material is mixed, the components of the mixture should be specified in the :py:attr:`~pyoomph.materials.generic.MaterialProperties.components` attribute. This should be treated as read-only property.
     is_pure:Optional[bool]
     #: State of matter of the material. This should be treated as read-only property.
     state_of_matter:Optional[str]
@@ -1052,7 +1052,7 @@ class BaseMixedProperties:
         This will make the mixture static, i.e. all mass fraction fields will be replaced by their values from the given condition. This is useful for to remove advection-diffusion equations if the composition stays homogeneous.
 
         Args:
-            cond: Optional condition, otherwise the :py:attr:`initial_condition` is used.
+            cond: Optional condition, otherwise the :py:attr:`~pyoomph.materials.generic.MaterialProperties.initial_condition` is used.
             temperature: Optional temperature        
         """
         assert isinstance(self,MaterialProperties)     

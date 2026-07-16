@@ -792,7 +792,8 @@ class ExtremumObservables(Equations):
     Once registered, you can evaluate the extremum values by calling the ``evaluate_maximum`` or ``evaluate_minimum`` method of the corresponding mesh (available via ``problem.get_mesh(...)``)
 
     Args:
-        Either strings as positional arguments or expressions as keyword arguments.
+        *direct_vars: Names of variables to monitor, e.g. ``"u"``.
+        **named_extrema: Expressions to monitor, keyed by the name under which the extremum is reported, e.g. ``u_sqr=var("u")**2``.
     """
     def __init__(self,*direct_vars:str,**named_extrema):
         super().__init__()

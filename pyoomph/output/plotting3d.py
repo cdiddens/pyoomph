@@ -36,8 +36,8 @@ if TYPE_CHECKING:
     from ..output.meshio import AnySpatialMesh
 
 
-class _PyVistaPlotPartBase:        
-    def _add_to_plotter(self,plotter:"PyVistaPlotter"):
+class _PyVistaPlotPartBase:
+    def _add_to_plotter(self,plotter:"PyVistaPlotter",pl:pyvista.Plotter):
         pass
 
 class _PyVistaPlotPartMesh(_PyVistaPlotPartBase):    
@@ -57,7 +57,7 @@ class _PyVistaPlotPartMesh(_PyVistaPlotPartBase):
 
 class PyVistaPlotter(BasePlotter):
     def __init__(self, problem:Optional["Problem"]=None,filetrunk:str="plot_{:05d}",fileext:Union[str,List[str]]="svg",eigenvector:Optional[int]=None,eigenmode:"MeshDataEigenModes"="abs",):
-        super().__init__(problem=problem,eigenvector=eigenvector,eigenmode=eigenmode)
+        super().__init__(problem=problem,eigenvector=eigenvector,eigenmode=eigenmode) #type:ignore[arg-type] # problem may be attached later via "problem += plotter"
         self.filetrunk=filetrunk
         self.fileext=fileext
         self._parts:List[_PyVistaPlotPartBase]=[]

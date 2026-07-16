@@ -80,14 +80,13 @@ def sympy_to_pyoomph(expr:_SympyType,use_nondim:bool=False,var_map:Dict[str,Expr
         vn=str(expr)
         #print(vn,var_map)
         if vn in var_map.keys():
-            vn=var_map[vn]
-        if not isinstance(vn,str):
-            return vn
+            mapped=var_map[vn]
+            if not isinstance(mapped,str):
+                return mapped
+        if use_nondim:
+            return nondim(str(expr))
         else:
-            if use_nondim:
-                return nondim(str(expr))
-            else:
-                return var(str(expr))
+            return var(str(expr))
     else:
         print(repr(expr),expr.__class__)
         raise RuntimeError("Sympy expression "+str(expr)+" cannot be converted yet to pyoomph")

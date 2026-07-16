@@ -96,9 +96,7 @@ class PoissonEquation(Equations):
             order=get_order_of_space(self.space)
             stab=1 if order==0 else self.DG_alpha*(order+1)*order
             return -weak(self.coefficient*(u-value)*n,grad(u_test)) -weak(self.coefficient*grad(u),u_test*n)+ weak(self.coefficient*stab/h*(u-value),u_test)
-
-        
-        
+        return None
 
 
 class PoissonFlux(AutomaticNeumannCondition):

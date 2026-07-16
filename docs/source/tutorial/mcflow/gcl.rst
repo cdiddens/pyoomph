@@ -81,7 +81,13 @@ To run the simulation, we again use dynamic time stepping, which perfectly adapt
 
 The results in :numref:`figgclcapillary` show the concentration of glycerol in the capillary at different times, the velocity of the top interface, receding due to evaporation at the bottom, and the total mass of glycerol in the capillary. The total mass of glycerol is not perfectly conserved when using ALE with `GCL=False`, but is conserved nicely when using the GCL.
 
-
+.. warning:
+	
+	Activating GCL should be avoided when aiming for stability analysis, i.e. solving eigenproblems. 
+	At the moment, the mass matrix won't be setup correctly when using GCL. This will be changed in next releases. 
+	
+	Also, :py:func:`~pyoomph.expressions.time_derivative_of_integral` should not contain expressions involving spatial derivatives or normals, since they won't be evaluated correctly. Also this will be fixed in the upcoming releases.
+	
 
 
 ..  figure:: gcl_capillary.*

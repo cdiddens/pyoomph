@@ -122,8 +122,8 @@ class FixedMeshMaxQuadraticNonlinearAssembly(CustomAssemblyBase):
         self._HMat:csr_matrix
         self._HTens:_pyoomph.SparseRank3Tensor
         self._ndof:int=-1
-        self._history_dofs:Dict[float,NPFloatArray]={}        
-        self._last_current_dofs=None
+        self._history_dofs:Dict[float,NPFloatArray]={}
+        self._last_current_dofs:Optional[NPFloatArray]=None
         self._cache_at_fixed_parameters=cache_at_fixed_parameters
         self._param_values:Dict[str,float]={} # Parameter values at cache assembly 
         self._param_contribs:Dict[str,Tuple[NPFloatArray,csr_matrix,csr_matrix]] # Parameter contributions R,J,M
@@ -274,6 +274,12 @@ class FixedMeshMaxQuadraticNonlinearAssembly(CustomAssemblyBase):
                 del self._history_dofs[trem]                   
         return res
         
+
+    @overload
+    def get_residuals_and_jacobian(self,require_jacobian:Literal[False],dparameter:Optional[str]=None)->NPFloatArray: ...
+
+    @overload
+    def get_residuals_and_jacobian(self,require_jacobian:Literal[True],dparameter:Optional[str]=None)->Tuple[NPFloatArray,csr_matrix]: ...
 
     def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:Optional[str]=None)->Union[NPFloatArray,Tuple[NPFloatArray,csr_matrix]]:
         """Get the residual vector (and potentially the Jacobian) based on the current and history dofs using the cached tensors.

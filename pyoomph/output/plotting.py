@@ -2682,22 +2682,22 @@ class MatplotlibPlotter(BasePlotter):
         Otherwise, you have to set the mode, which can be e.g. "arrows" or "streamlines".
 
         Parameters:
-        - infield (str): The name of the field to plot, given by the domain and the final field name, e.g. "domain/velocity".
-        - mode (str, optional): The plotting mode. Defaults to None and then selects on the basis of the other arguments if possible. Otherwise, "streamlines" or "arrows" can be used.
-        - transform (Union[List[Union[PlotTransform, None]], List[Union[str, None]], Union[str, PlotTransform, None]], optional): The transformation to apply to the plot. Defaults to None, but can be e.g. a list of transforms, e.g. also ["mirror_x",None] to return two plots, one mirrored at the y-axis and one without mirroring.
-        - linecolor (str, optional): The color of the lines in the plot. Defaults to None.
-        - linewidths (float, optional): The width of the lines in the plot. Defaults to None.
-        - colorbar (MatplotLibColorbar, optional): The colorbar to consider for colormap plots. Defaults to None.
-        - arrowkey (MatplotLibArrowKey, optional): The arrow key to use for interface arrow plots. Defaults to None.
-        - arrowdensity (float, optional): The density of the arrows in the plot. Defaults to None.
-        - arrowstyle (str, optional): The style of the arrows (see matplotlib ArrowStyle). Defaults to None.
-        - arrowlength (float, optional): The length of the arrows in the plot. Defaults to None.
-        - levels (int, optional): The number of levels in the plot, e.g. for contour plots . Defaults to None.
-        - datamap (Any, optional): The data map to apply to the plot. Defaults to None.
-        - axes (MatplotLibAxes, optional): The axes to use for the plot. Defaults to None.
+            infield (str): The name of the field to plot, given by the domain and the final field name, e.g. "domain/velocity".
+            mode (str, optional): The plotting mode. Defaults to None and then selects on the basis of the other arguments if possible. Otherwise, "streamlines" or "arrows" can be used.
+            transform (Union[List[Union[PlotTransform, None]], List[Union[str, None]], Union[str, PlotTransform, None]], optional): The transformation to apply to the plot. Defaults to None, but can be e.g. a list of transforms, e.g. also ["mirror_x",None] to return two plots, one mirrored at the y-axis and one without mirroring.
+            linecolor (str, optional): The color of the lines in the plot. Defaults to None.
+            linewidths (float, optional): The width of the lines in the plot. Defaults to None.
+            colorbar (MatplotLibColorbar, optional): The colorbar to consider for colormap plots. Defaults to None.
+            arrowkey (MatplotLibArrowKey, optional): The arrow key to use for interface arrow plots. Defaults to None.
+            arrowdensity (float, optional): The density of the arrows in the plot. Defaults to None.
+            arrowstyle (str, optional): The style of the arrows (see matplotlib ArrowStyle). Defaults to None.
+            arrowlength (float, optional): The length of the arrows in the plot. Defaults to None.
+            levels (int, optional): The number of levels in the plot, e.g. for contour plots . Defaults to None.
+            datamap (Any, optional): The data map to apply to the plot. Defaults to None.
+            axes (MatplotLibAxes, optional): The axes to use for the plot. Defaults to None.
 
         Returns:
-        - Union[MatPlotLibAddPlotReturns, List[MatPlotLibAddPlotReturns]]: The added plot or a list of added plots if you use e.g. multiple transforms.
+            Union[MatPlotLibAddPlotReturns, List[MatPlotLibAddPlotReturns]]: The added plot or a list of added plots if you use e.g. multiple transforms.
         """
    
         

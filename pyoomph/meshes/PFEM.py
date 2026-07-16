@@ -69,7 +69,7 @@ class PFEMMeshUpdater:
             edges.add((i, j))
 
         innersimplices:List[List[int]]=[]
-        edges = set()
+        edges:Set[Tuple[int,int]] = set()
         # Loop over triangles:
         # ia, ib, ic = indices of corner points of the triangle
         for ia, ib, ic in tri.simplices:

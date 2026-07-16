@@ -464,7 +464,7 @@ class MeshTemplate(_pyoomph.MeshTemplate):
     """
     A class to construct meshes by defining nodes with the :py:meth:`add_node` or :py:meth:`add_node_unique` method. 
     Elements must be specified by first creating one or multiple domains with the :py:meth:`new_domain` method and adding elements on each domain.
-    Nodes can be also marked to be on particular boundaries with the :py:meth:`add_node_on_boundary` method.
+    Nodes can be also marked to be on particular boundaries with the :py:meth:`add_facet_to_boundary` method.
     """
     def __init__(self):
         super(MeshTemplate, self).__init__()
@@ -688,7 +688,7 @@ class MeshTemplate(_pyoomph.MeshTemplate):
             kwargs: Keyword arguments for the curved entity.
 
         Returns:
-            The created curved entity to be used in :py:meth:`add_facet_to_curve_entity`.
+            The created curved entity to be used in :py:meth:`add_facet_to_boundary`.
         """
         store_entity: bool = kwargs.get("store_entity", True)
         res = None

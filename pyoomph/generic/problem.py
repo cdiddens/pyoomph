@@ -4995,20 +4995,20 @@ class Problem(_pyoomph.Problem):
         Solves the problem stationary, unless a timestep is given. In that case, the time step is taken.
 
         Parameters:
-        - spatial_adapt (int): The level of spatial adaptation. Default is 0.
-        - timestep (Union[ExpressionNumOrNone, List[ExpressionNumOrNone]]): The time step(s) for the transient solve. Can be a single value or a list of values. Default is None, meaning stationary solve without advancing in time.
-        - shift_values (bool): Whether to shift the values during the solve, i.e. shifting the history value buffer. Default is True.
-        - temporal_error (Optional[float]): The temporal error for adaptive time stepping. Default is None.
-        - max_newton_iterations (Optional[int]): Override the maximum number of Newton iterations. Default is None.
-        - newton_relaxation_factor (Optional[float]): Override the relaxation factor for the Newton solver. Default is None.
-        - suppress_resolve_after_adapt (bool): Whether to suppress resolving after adaptation. Default is False.
-        - newton_solver_tolerance (Optional[float]): Override the tolerance for the Newton solver. Default is None.
-        - do_not_set_IC (bool): Whether to not set the initial condition in the first call. Default is False.
-        - globally_convergent_newton (bool): Whether to use globally convergent Newton solver. Default is False.
+            spatial_adapt (int): The level of spatial adaptation. Default is 0.
+            timestep (Union[ExpressionNumOrNone, List[ExpressionNumOrNone]]): The time step(s) for the transient solve. Can be a single value or a list of values. Default is None, meaning stationary solve without advancing in time.
+            shift_values (bool): Whether to shift the values during the solve, i.e. shifting the history value buffer. Default is True.
+            temporal_error (Optional[float]): The temporal error for adaptive time stepping. Default is None.
+            max_newton_iterations (Optional[int]): Override the maximum number of Newton iterations. Default is None.
+            newton_relaxation_factor (Optional[float]): Override the relaxation factor for the Newton solver. Default is None.
+            suppress_resolve_after_adapt (bool): Whether to suppress resolving after adaptation. Default is False.
+            newton_solver_tolerance (Optional[float]): Override the tolerance for the Newton solver. Default is None.
+            do_not_set_IC (bool): Whether to not set the initial condition in the first call. Default is False.
+            globally_convergent_newton (bool): Whether to use globally convergent Newton solver. Default is False.
 
         Returns:
-        - ExpressionOrNum: The current time after solving.
-        """  
+            ExpressionOrNum: The current time after solving.
+        """
                 
         self._bifurcation_reactivation_after_adaptation=None
         if isinstance(timestep,(list,tuple)):

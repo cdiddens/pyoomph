@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglu1-mesa \
     libxcursor1 \
     libopengl0 \
+    pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 USER vscode

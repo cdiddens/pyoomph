@@ -337,13 +337,14 @@ activity-coefficient models in `pyoomph.materials.UNIFAC.*`/`activity.py`.
 - Some tutorial variants (e.g. "adaptive", "axisymmetric" versions) are not
   standalone — they `from base_script import *` and only override a couple of
   settings. Don't assume every example file runs in isolation; check its imports.
-- End every script with:
-  ```python
-  if __name__ == "__main__":
-      with MyProblem() as problem:
-          problem.solve(); problem.output()          # stationary
-          # or: problem.run(endtime, outstep=..., numouts=..., temporal_error=..., spatial_adapt=...)
-  ```
+
+End every script with:
+```python
+if __name__ == "__main__":
+    with MyProblem() as problem:
+        problem.solve(); problem.output()          # stationary
+        # or: problem.run(endtime, outstep=..., numouts=..., temporal_error=..., spatial_adapt=...)
+```
 
 ## Companion reference files
 

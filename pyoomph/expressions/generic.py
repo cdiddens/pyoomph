@@ -1068,9 +1068,6 @@ def subexpression(what: ExpressionOrNum) -> Expression:
 
 	Returns:
 		Expression: A resulting expression where the expression is marked to be calculated in beforehand.
-
-	Raises:
-		None	
 	"""
 	if isinstance(what, _pyoomph.Expression):
 		return _pyoomph.GiNaC_subexpression(what)

@@ -351,6 +351,20 @@ class BaseEquations(_pyoomph.Equations):
         pass
     
     def add_weak(self,a:"ExpressionOrNum",b:Union[str,"ExpressionOrNum"],*,dimensional_dx:bool=False,lagrangian:bool=False,coordinate_system:"OptionalCoordinateSystem"=None,destination:Optional[str]=None):
+        """
+        Adds the weak contribution ``(a, b)`` (i.e. the integral of ``a`` times the test function ``b``) to the residuals.
+
+        Args:
+            a: Expression to be tested.
+            b: Test function, either passed directly or as the name of the field to test.
+            dimensional_dx: Whether to use the dimensional (as opposed to the nondimensional) integration measure.
+            lagrangian: Whether to integrate over the Lagrangian (undeformed) instead of the Eulerian domain.
+            coordinate_system: Optional coordinate system override for the integration.
+            destination: Optional residual destination for multiple residuals. Defaults to ``None``.
+
+        Returns:
+            self, to allow chaining further ``add_weak``/``add_residual`` calls.
+        """
         if isinstance(b,str):
             b=testfunction(b)
         self.add_residual(weak(a,b,dimensional_dx=dimensional_dx,coordinate_system=coordinate_system,lagrangian=lagrangian),destination=destination)

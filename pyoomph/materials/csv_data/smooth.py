@@ -1,5 +1,5 @@
 import numpy 
-from scipy.interpolate import *
+from scipy.interpolate import UnivariateSpline
 
 data=numpy.loadtxt("surftens_water_12hexanediol.csv")
 def ign(x):

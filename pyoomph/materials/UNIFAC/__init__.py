@@ -25,7 +25,8 @@
 #
 # ========================================================================
 
+from typing import List
 from .aiomfac import *
 from .dortmund import *
 from .original import *
-__all__=[]
+__all__:List[str]=[]
