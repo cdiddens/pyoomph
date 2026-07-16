@@ -87,17 +87,17 @@ if sys.platform == "linux":
     if "PYOOMPH_PARDISO_LIB" in os.environ.keys():
         MKLlib=CDLL(os.environ["PYOOMPH_PARDISO_LIB"])
     else:
-        MKLlib=_try_to_find_lib(["libmkl_rt.so",os.path.join(Path.home(), ".local/lib/libmkl_rt.so"),"mkl_rt",os.path.join(Path.home(), ".local/lib/libmkl_rt.so.2")])
+        MKLlib=_try_to_find_lib(["libmkl_rt.so",os.path.join(Path.home(), ".local/lib/libmkl_rt.so"),"mkl_rt",os.path.join(Path.home(), ".local/lib/libmkl_rt.so.2"),os.path.join(Path.home(), ".local/lib/libmkl_rt.so.3"),os.path.join(Path.home(), ".local/lib/libmkl_rt.so.4")])
 elif sys.platform == "win32":
     if "PYOOMPH_PARDISO_LIB" in os.environ.keys():
         MKLlib=CDLL(os.environ["PYOOMPH_PARDISO_LIB"])
     else:
-        MKLlib = _try_to_find_lib(["mkl_rt.dll", "mkl_rt.1.dll","mkl_rt.2.dll", "mkl_rt"])
+        MKLlib = _try_to_find_lib(["mkl_rt.dll", "mkl_rt.1.dll","mkl_rt.2.dll","mkl_rt.3.dll","mkl_rt.4.dll", "mkl_rt"])
 elif sys.platform=="darwin":
     if "PYOOMPH_PARDISO_LIB" in os.environ.keys():
         MKLlib=CDLL(os.environ["PYOOMPH_PARDISO_LIB"])
     else:
-        MKLlib = _try_to_find_lib(["libmkl_rt.dylib", "libmkl_rt.1.dylib", "libmkl_rt.2.dylib","mkl_rt"])
+        MKLlib = _try_to_find_lib(["libmkl_rt.dylib", "libmkl_rt.1.dylib", "libmkl_rt.2.dylib","libmkl_rt.3.dylib","libmkl_rt.4.dylib", "mkl_rt"])
 else:
     raise RuntimeError("Unknown platform: "+sys.platform)
 
