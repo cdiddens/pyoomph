@@ -12,11 +12,17 @@ on:
       - Prebuild static CLN/GiNaC
     types:
       - completed
+  release:
+    types:
+      - published
 
 env:
   # Add/remove Python versions here to build wheels for them on every platform below.
   # cibuildwheel builds every matching version within a single job.
-  PYTHON_VERSIONS: "3.14"
+  # 3.15 is not yet a stable release; CIBW_PRERELEASE_PYTHONS below lets cibuildwheel
+  # pick up its current pre-release build. Drop it from this list once 3.15 is stable
+  # if you don't also want to drop the prerelease flag.
+  PYTHON_VERSIONS: "3.10 3.11 3.12 3.13 3.14 3.15"
 
 jobs:
   build_wheels:
@@ -121,6 +127,7 @@ jobs:
         env:
           CIBW_BUILD: ${{ steps.cibw.outputs.build_selector }}
           CIBW_SKIP: "*-musllinux_*"
+          CIBW_PRERELEASE_PYTHONS: "True"
           CIBW_ARCHS: native
           CIBW_BUILD_FRONTEND: build
           CIBW_BEFORE_ALL_LINUX: >
@@ -182,6 +189,7 @@ jobs:
           done
 
           export CIBW_BUILD="${BUILD_SELECTOR}"
+          export CIBW_PRERELEASE_PYTHONS="True"
           export CIBW_ARCHS="AMD64"
           export CIBW_BUILD_FRONTEND="build"
           export CIBW_ENVIRONMENT_WINDOWS="CC=gcc CXX=g++ CXXFLAGS='-static-libgcc -static-libstdc++' LDFLAGS='-static-libgcc -static-libstdc++' PYOOMPH_GINAC_INCLUDE_DIR=${PREBUILT_WIN}/include PYOOMPH_GINAC_LIB_DIR=${PREBUILT_WIN}/lib PYOOMPH_CLN_INCLUDE_DIR=${PREBUILT_WIN}/include PYOOMPH_CLN_LIB_DIR=${PREBUILT_WIN}/lib"
@@ -224,3 +232,22 @@ jobs:
           name: wheels-${{ matrix.label }}
           path: wheelhouse/*.whl
           if-no-files-found: error
+
+  upload_pypi:
+    name: Upload to PyPI
+    needs: [build_wheels]
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-latest
+    environment: release
+
+    permissions:
+      id-token: write  # mandatory for trusted publishing
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
