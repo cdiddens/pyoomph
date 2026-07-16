@@ -191,13 +191,12 @@ elif arglist.command=="check":
             checklist=[arglist.check_name]
          
          for check in checklist:
-            if check=="pardiso" and is_mac_arm64:
-               print("Checking "+check_type+" / "+check)
+            print("Checking "+check_type+" / "+check)
+            if check=="pardiso" and is_mac_arm64:               
                print("","skipping on macOS arm64")
                continue
-            if check=="accelerate" and not (is_mac_x86_64 or is_mac_arm64):
-               print("Checking "+check_type+" / "+check)
-               print("","skipping on non-macOS x86_64")
+            if check=="accelerate" and not (is_mac_x86_64 or is_mac_arm64):               
+               print("","skipping on non-macOS")
                continue
             
             print("Checking "+check_type+" / "+check)         
@@ -222,7 +221,7 @@ elif arglist.command=="check":
          from .solvers.generic import GenericEigenSolver
          p=Problem()
                
-         sublist={"pardiso","scipy"}
+         sublist={"pardiso","scipy","accelerate"}
          #if arglist.check_name not in sublist:
          #   raise RuntimeError("Can only check the following: "+str(sublist))
          if arglist.check_name=="all":
@@ -231,12 +230,13 @@ elif arglist.command=="check":
             checklist=[arglist.check_name]
          
          for check in checklist:
-            if check=="pardiso" and is_mac_arm64:
-               print("Checking "+check_type+" / "+check)
+            print("Checking "+check_type+" / "+check)
+            if check=="pardiso" and is_mac_arm64:               
                print("","skipping on macOS arm64")
                continue
-           
-            print("Checking "+check_type+" / "+check)         
+            if check=="accelerate" and not (is_mac_x86_64 or is_mac_arm64):               
+               print("","skipping on non-macOS")
+               continue            
             try:
                GenericEigenSolver.factory_solver(check,p)
                print("","loading seems to work")
