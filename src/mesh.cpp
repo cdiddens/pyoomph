@@ -1770,6 +1770,16 @@ namespace pyoomph
     }
   }
 
+  void Mesh::apply_additional_dof_constraints()
+  {
+    unsigned long n_elem = nelement();
+    for (unsigned n = 0; n < n_elem; n++)
+    {
+      BulkElementBase *el = dynamic_cast<BulkElementBase *>(this->element_pt(n));
+      el->setup_additional_dof_constraints();
+    }
+  }
+
   void Mesh::set_lagrangian_nodal_coordinates()
   {
     std::cout << "Setting Lagrangian nodal coordinates for all nodes in mesh" << std::endl;

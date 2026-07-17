@@ -114,7 +114,11 @@ class IceConvectionProblem(IceFrontProblem):
         # Since we know that the mesh mainly moves in y-direction, we can speed up the calculation by removing the motion in y-direction
         ice_eqs += DirichletBC(mesh_y=True)
         liq_eqs += DirichletBC(mesh_y=True)
-
+        
+        # Reduce the bulk positions to be first-order, but allow the interface nodes to have a curvature per element
+        ice_eqs += ConstrainPositionsToC1Space()+UnconstrainPositionsFromC1Space()@"interface"
+        liq_eqs += ConstrainPositionsToC1Space()+UnconstrainPositionsFromC1Space()@"interface"
+            
         # Interface: Connect the mesh position and impose the front motion
         interf_eqs=ConnectMeshAtInterface()
         interf_eqs+=IceFrontSpeed(self.latent_heat)

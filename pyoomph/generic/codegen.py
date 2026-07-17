@@ -3347,3 +3347,14 @@ class ConstrainFieldsToC1Space(Equations):
                         n.set_additional_dof_constraint(index, mode)
                     
         return super().before_assigning_equations_preorder(mesh)
+
+
+class UnconstrainFieldsFromC1Space(ConstrainFieldsToC1Space):
+    """Unconstrains a higher order field from the first order C1 space. Useful in combination with either the where parameter or (un)constrain a field e.g. a boundary
+
+    Args:
+        *args: The names of the fields to constrain to C1 space.        
+        where: An optional function to specify where the constraints should be applied. Nondimensional nodal positions are passed to this function, and it should return True for nodes where the constraint should be applied. If None, the constraint is applied to all nodes.
+    """
+    def __init__(self, *args:str,where:Optional[Callable[[List[float]],bool]]=None):
+        super().__init__(*args,unconstrain_instead=True,where=where)

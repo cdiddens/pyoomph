@@ -68,9 +68,17 @@ Optionally, we can simplify the problem: Since the front will mainly move in rad
 .. literalinclude:: melting_ice_convection.py
    :language: python
    :start-at: # Since we know that the mesh mainly moves in y-direction, we can speed up the calculation by removing the motion in y-direction
-   :end-at: liq_eqs += DirichletBC(mesh_y=True)
+   :end-at: liq_eqs += ConstrainPositionsToC1Space()+UnconstrainPositionsFromC1Space()@"interface"
 
-Thereby, we have fewer degrees of freedom in our system and the computation will speed up.
+Thereby, we have fewer degrees of freedom in our system and the computation will speed up. 
+
+Also, note the additional feature we are using here, namely the classes :py:class:`~pyoomph.equations.ALE.ConstrainPositionsToC1Space` and :py:class:`~pyoomph.equations.ALE.UnconstrainPositionsFromC1Space`. The former enforces that the moving mesh is solved on first order elements everywhere inside both domains, i.e. while still having 9 nodes per second-order quadrilateral elements, the mesh dynamics is only solved on the 4 vertex nodes (``"C1"`` space). However, at the interface, we want to include the possibility of having a curved boundary. Therefore, it is unconstrained there, i.e. the free surface can still deform as second-order elements. 
+
+In principle, we could have done the same with the temperature field using the classes :py:class:`~pyoomph.generic.codegen.ConstrainFieldsToC1Space` and  :py:class:`~pyoomph.generic.codegen.UnconstrainFieldsFromC1Space`, respectively. However, since we pin the temperature at the interface, it would be equivalent to entirely degrade the temperature field to ``"C1"``, since the unconstraining would only act directly on the interface to resolve tangential gradients. Nevertheless, since the mesh motion usually does not matter for the physics, the reduction in the moving mesh order reduces the degrees of freedom and the computation time by about 25% without any notable downsides regarding the physics.
+
+.. warning:
+
+	This reduction of spatial resolution order does not work on non-uniformly refined meshes yet.
 
 Finally, the interface equations are added as in the previous example and all equations are added to the problem:
 

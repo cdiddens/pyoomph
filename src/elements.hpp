@@ -696,6 +696,9 @@ namespace pyoomph
     // assembly since they carry no independent physical meaning.
     virtual void unpin_dummy_values();
     virtual void pin_dummy_values();
+
+    	// User-added additional dof constraints (see NodeWithFieldIndicesBase::add_additional_dof_constraint):		
+    virtual void setup_additional_dof_constraints();
     // Temporarily unpins Dirichlet-constrained dofs so that a linear-algebra backend can directly
     // manipulate rows/columns for these dofs (e.g. when assembling with the constraint substituted
     // out); info records what needs to be restored afterwards.
@@ -2331,6 +2334,8 @@ namespace pyoomph
     virtual void update_equation_remapping();
     virtual void set_remaining_shapes_appropriately(JITShapeInfo_t *shape_info, const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes);
     void pin_dummy_values() override;
+    // User-added additional dof constraints (see NodeWithFieldIndicesBase::add_additional_dof_constraint):		
+    void setup_additional_dof_constraints() override;
     void unpin_Dirichlet_dofs_for_matrix_manipulation(DirichletMatrixManipulationInfo & info) override;
 
     void set_as_internal_facet_opposite_dummy() { Is_internal_facet_opposite_dummy = true; }

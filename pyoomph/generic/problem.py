@@ -2931,10 +2931,7 @@ class Problem(_pyoomph.Problem):
     def actions_before_adapt(self):
         for m in self._interfacemeshes:
             m.clear_before_adapt()
-            #print("CLEARED INTERFACE MESH",m.nelement())
-        for m in self._meshdict.values():            
-            if not isinstance(m,ODEStorageMesh):
-                m.clear_additional_dof_constraints()
+            #print("CLEARED INTERFACE MESH",m.nelement())        
         if len(self._interfacemeshes):
             if not self.is_quiet():
                 print("REBUILDING GLOBAL MESH")
@@ -3022,8 +3019,14 @@ class Problem(_pyoomph.Problem):
 
 
     def reapply_boundary_conditions(self):
+        for m in self._meshdict.values():            
+            if not isinstance(m,ODEStorageMesh):
+                m.clear_additional_dof_constraints()
         self.setup_pinning()
         self.before_assigning_equation_numbers(self._dof_selector)
+        for m in self._meshdict.values():            
+            if not isinstance(m,ODEStorageMesh):
+                m.apply_additional_dof_constraints()
         self._dof_selector_used=self._dof_selector
         neq=self.assign_eqn_numbers(True)
         if not self.is_quiet():

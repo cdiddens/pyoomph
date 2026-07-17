@@ -95,7 +95,8 @@ namespace pyoomph
 		// Prepare internal caches (e.g. KD-tree) required before interpolation calls; must be called before nodal_interpolate_*.
 		virtual void prepare_interpolation();
 
-		virtual void clear_additional_dof_constraints(); // Clear any additional dof constraints (e.g. from remeshing) that have been applied to this mesh's nodes
+		virtual void clear_additional_dof_constraints(); // Clear any additional dof constraints that have been applied to this mesh's nodes
+		virtual void apply_additional_dof_constraints(); // Apply any additional dof constraints that have been registered on this mesh's nodes
 		// Interpolate nodal values of this mesh from the mesh "from". If boundary_index>=0, only nodes on that
 		// boundary are interpolated (used when remeshing only a boundary/interface region).
 		virtual void nodal_interpolate_from(Mesh *from, int boundary_index);
