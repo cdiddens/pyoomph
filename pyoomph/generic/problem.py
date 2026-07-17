@@ -2932,6 +2932,9 @@ class Problem(_pyoomph.Problem):
         for m in self._interfacemeshes:
             m.clear_before_adapt()
             #print("CLEARED INTERFACE MESH",m.nelement())
+        for m in self._meshdict.values():            
+            if not isinstance(m,ODEStorageMesh):
+                m.clear_additional_dof_constraints()
         if len(self._interfacemeshes):
             if not self.is_quiet():
                 print("REBUILDING GLOBAL MESH")

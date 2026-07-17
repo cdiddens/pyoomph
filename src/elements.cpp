@@ -562,6 +562,9 @@ namespace pyoomph
 				const std::vector<unsigned> *entry = get_c1_masters(l_elem);
 				if (!entry)
 				{
+					std::cout << "Node " << l_elem << " is a C1 corner node, but has a position dof constrained to C1" << std::endl;
+					std::cout << "Hangs on C1 " << (node_pt(l_elem)->is_hanging(ft->continuous_spaces[SPACE_INDEX_C1].hangindex) ? "true" : "false") << std::endl;
+					std::cout << "hangs on C2 " << (node_pt(l_elem)->is_hanging(ft->continuous_spaces[SPACE_INDEX_C2].hangindex) ? "true" : "false") << std::endl;
 					throw_runtime_error("A position dof constrained to C1 is only allowed on nodes which do not belong to the C1 space");
 				}
 				unsigned nmaster = entry->size() - 1;
@@ -2065,7 +2068,7 @@ namespace pyoomph
 			for (unsigned int i = 0; i < node_pt(l)->nvalue(); i++)
 			{
 				node_pt(l)->unpin(i); 
-			}
+			}			
 		}
 
 		for (unsigned int d = 0; d < this->ninternal_data(); d++)
@@ -2108,7 +2111,7 @@ namespace pyoomph
 				if (this->node_pt(l)->is_hanging())
 				{
 					this->node_pt(l)->constrain_positions();
-				}
+				}				
 			}
 		}
 
@@ -2143,43 +2146,64 @@ namespace pyoomph
 		// User-added additional dof constraints (see NodeWithFieldIndicesBase::add_additional_dof_constraint):		
 		{			
 			const std::vector<int> & elem_to_C1_map = this->get_element_index_to_nodal_space_index_map()[SPACE_INDEX_C1];			
+			bool has_C1_fields=functable->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk>0 || functable->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk>0;
 			for (unsigned int l = 0; l < nnode(); l++)
 			{
 				Node *n = dynamic_cast<Node *>(node_pt(l));
-				for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info != NULL; info = info->next)
+				bool is_hanging_on_C1 = elem_to_C1_map[l]>=0 && has_C1_fields && n->is_hanging(functable->continuous_spaces[SPACE_INDEX_C1].hangindex) && this->refinement_level()>0;
+				for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info != NULL; )
 				{
+					// Capture "next" before the body runs: a removal below can delete "info" itself,
+					// so info->next must not be dereferenced afterwards (use-after-free).
+					const AdditionalDofConstrainingInfo *next = info->next;
 					if (info->mode == CONTINUOUS_BASE_DOF_CONSTRAIN_TO_C1)
 					{
-						if (elem_to_C1_map[l]>=0)
-						{
-							throw_runtime_error("Cannot enforce a degration to C1 on a C1 vertex node");
-						}
 						if (info->index >= this->ncont_interpolated_values())
 						{
 							throw_runtime_error("Cannot enforce a degration to C1 on a base dof index larger than the number of base dofs on this element: index="+std::to_string(info->index)+" vs. ncont_interpolated_values()="+std::to_string(this->ncont_interpolated_values()));
 						}
-						else
+						if (elem_to_C1_map[l]>=0 && !is_hanging_on_C1)
+						{
+							throw_runtime_error("Cannot enforce a degration to C1 on a C1 vertex node.\n\
+								 This can happen in adaptive problems without any C1 or C1TB fields present in the bulk mesh.\n\
+								 Add a ScalarField(\"_dummyC1\",space=\"C1\")+DirichletBC(_dummyC1=0) to the bulk domain to avoid this.");
+						}
+						else if (!is_hanging_on_C1)
 						{
 							n->pin(info->index);
 							has_additional_dof_constraints = true;
 						}
+						else
+						{
+							// Remove a C1 hanging node's additional dof constraint
+							n->remove_additional_dof_constraint(info->index,info->mode);
+						}
 					}
 					else if (info->mode == POSITION_CONSTRAIN_TO_C1)
 					{
-						if (elem_to_C1_map[l]>=0)
-						{
-							throw_runtime_error("Cannot enforce a degration to C1 on a C1 vertex node");
-						}
 						if (info->index >= this->nodal_dimension())
 						{
 							throw_runtime_error("Cannot enforce a degration to C1 on a coordinate index larger than the nodal dimension of this element");
 						}
-						else
+						if (elem_to_C1_map[l]>=0 &&!is_hanging_on_C1)
+						{
+							throw_runtime_error("Cannot enforce a degration to C1 on a C1 vertex node\n\
+								 This can happen in adaptive problems without any C1 or C1TB fields present in the bulk mesh.\n\
+								 Add a ScalarField(\"_dummyC1\",space=\"C1\")+DirichletBC(_dummyC1=0) to the bulk domain to avoid this.");
+						}
+						else if (!is_hanging_on_C1)
 						{
 							n->pin_position(info->index);
 							has_additional_dof_constraints = true;
 						}
+						else
+						{
+							// Remove a C1 hanging node's additional dof constraint
+							std::cout << "Removing a C1 hanging node's additional dof constraint for position index " << info->index << std::endl;
+							n->remove_additional_dof_constraint(info->index,info->mode);
+						}
 					}
+					info = next;
 				}
 			}
 		}
@@ -12003,20 +12027,36 @@ namespace pyoomph
 		// fields, this is only allowed on nodes that do not carry an independent C1 dof themselves.
 		{
 			const std::vector<int> &elem_to_C1 = this->get_element_index_to_nodal_space_index_map()[SPACE_INDEX_C1];			
+			bool has_C1_fields=functable->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk>0 || functable->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk>0 ;
 			for (unsigned int l = 0; l < nnode(); l++)
 			{
 				Node *n = dynamic_cast<Node *>(node_pt(l));
 				pyoomph::BoundaryNode *bn = dynamic_cast<pyoomph::BoundaryNode *>(n);
-				for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info != NULL; info = info->next)
+				bool hangs_on_C1=has_C1_fields && bn->is_hanging(functable->continuous_spaces[SPACE_INDEX_C1].hangindex) && this->refinement_level()>0	 ;
+				for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info != NULL; )
 				{
+					const AdditionalDofConstrainingInfo *next_info = info->next;
 					if (info->mode == INTERFACE_DOF_CONSTRAIN_TO_C1)
 					{					
-						if (elem_to_C1[l] >= 0) throw_runtime_error("Cannot constrain interface dof to C1 on a node that already has an independent C1 dof");
-						int vindex = bn->index_of_first_value_assigned_by_face_element(info->index);
-						if (vindex<0) throw_runtime_error("Interface DOF index not found here");
-						n->pin((unsigned)vindex);
-						has_additional_dof_constraints = true;
+						if (elem_to_C1[l] >= 0 && !hangs_on_C1)
+						{
+							 throw_runtime_error("Cannot constrain interface dof to C1 on a C1 node.\n\
+												  This can happen in adaptive problems without any C1 or C1TB fields in the bulk.\n\
+												  Add a ScalarField(\"_dummyC1\",space=\"C1\")+DirichletBC(_dummyC1=0) to the bulk domain to avoid this.");
+						}
+						if (!hangs_on_C1)
+						{
+							int vindex = bn->index_of_first_value_assigned_by_face_element(info->index);
+							if (vindex<0) throw_runtime_error("Interface DOF index not found here");
+							n->pin((unsigned)vindex);
+							has_additional_dof_constraints = true;
+						}
+						else
+						{
+							n->remove_additional_dof_constraint(info->index,info->mode); // Remove the constraint, since it is not allowed on hanging nodes
+						}
 					}
+					info=next_info; // Move to the next constraint in the list (since we might have removed the current one)
 				}
 			}
 		}

@@ -1760,6 +1760,16 @@ namespace pyoomph
   // Overwrite the Lagrangian coordinates (xi) of every node with its current Eulerian position (x),
   // for all generalized position types - i.e. "freeze" the current deformed shape as the new stress-free
   // reference configuration.
+  void Mesh::clear_additional_dof_constraints()
+  {
+    unsigned long n_node = nnode();
+    for (unsigned n = 0; n < n_node; n++)
+    {
+      Node *node_pt = static_cast<Node *>(Node_pt[n]);
+      node_pt->flush_additional_dof_constraints();
+    }
+  }
+
   void Mesh::set_lagrangian_nodal_coordinates()
   {
     std::cout << "Setting Lagrangian nodal coordinates for all nodes in mesh" << std::endl;

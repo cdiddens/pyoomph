@@ -664,16 +664,18 @@ class ConstrainPositionsToC1Space(Equations):
         self.where=where
     
     def before_assigning_equations_preorder(self, mesh):
+        #print("Constraining positions to C1 space")
         POSITION_CONSTRAIN_TO_C1 = 2                 
-        for e in mesh.elements():            
+        for e in mesh.elements():        
             for ni in e.non_vertex_node_indices():
                 n=e.node_pt(ni)
                 if self.where is not None:
                     x=[n.x(i) for i in range(n.ndim())]
                     if not self.where(x):
                         continue
-                for i in range(n.ndim()):                                            
-                    n.set_additional_dof_constraint(POSITION_CONSTRAIN_TO_C1,i)
+                for i in range(n.ndim()):     
+                    if not n.is_hanging():                                       
+                        n.set_additional_dof_constraint(POSITION_CONSTRAIN_TO_C1,i)
                     
         return super().before_assigning_equations_preorder(mesh)
     
