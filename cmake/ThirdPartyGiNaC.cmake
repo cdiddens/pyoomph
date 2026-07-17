@@ -51,36 +51,58 @@ set(GINAC_EXTRA_CONFIGURE_FLAGS "" CACHE STRING "Extra flags passed to GiNaC's .
 # download pages at configure time instead of hardcoding a version. This
 # adds a (small, HTML-only) network fetch at configure time, on top of the
 # tarball fetch ExternalProject_Add already does at build time.
-function(pyoomph_resolve_ginac_de_version page_url filename_prefix human_name out_version_var)
+#
+# If that fetch/scrape fails (offline build, firewalled CI runner, ginac.de
+# down, site layout changed, ...), fall back to the last known-good version
+# below rather than aborting the configure - it may not be the *current*
+# release, but it's a version known to build against this CMakeLists.txt.
+set(_pyoomph_cln_fallback_version   "1.3.7")
+set(_pyoomph_ginac_fallback_version "1.8.10")
+
+function(pyoomph_resolve_ginac_de_version page_url filename_prefix human_name fallback_version out_version_var)
   set(_html "${CMAKE_BINARY_DIR}/thirdparty_download_pages/${filename_prefix}.html")
   file(DOWNLOAD "${page_url}" "${_html}" STATUS _pyoomph_dl_status)
   list(GET _pyoomph_dl_status 0 _pyoomph_dl_code)
   if(NOT _pyoomph_dl_code EQUAL 0)
-    message(FATAL_ERROR
+    list(GET _pyoomph_dl_status 1 _pyoomph_dl_message)
+    message(WARNING
       "Failed to fetch ${page_url} to auto-detect the current ${human_name} "
-      "version (${_pyoomph_dl_status}). Pass -DPYOOMPH_CLN_VERSION=... / "
-      "-DPYOOMPH_GINAC_VERSION=... to pin a version explicitly instead.")
+      "version (${_pyoomph_dl_message}). Falling back to ${human_name} "
+      "${fallback_version}. Pass -DPYOOMPH_CLN_VERSION=... / "
+      "-DPYOOMPH_GINAC_VERSION=... to pin a different version explicitly.")
+    set(${out_version_var} "${fallback_version}" PARENT_SCOPE)
+    return()
   endif()
   file(READ "${_html}" _pyoomph_page_content)
   string(REGEX MATCH "${filename_prefix}-[0-9]+\\.[0-9]+\\.[0-9]+\\.tar\\.bz2" _pyoomph_fname "${_pyoomph_page_content}")
   if(NOT _pyoomph_fname)
-    message(FATAL_ERROR
+    message(WARNING
       "Could not find a ${human_name} download link on ${page_url} (site "
-      "layout may have changed). Pass -DPYOOMPH_CLN_VERSION=... / "
-      "-DPYOOMPH_GINAC_VERSION=... to pin a version explicitly instead.")
+      "layout may have changed). Falling back to ${human_name} "
+      "${fallback_version}. Pass -DPYOOMPH_CLN_VERSION=... / "
+      "-DPYOOMPH_GINAC_VERSION=... to pin a different version explicitly.")
+    set(${out_version_var} "${fallback_version}" PARENT_SCOPE)
+    return()
   endif()
   string(REGEX REPLACE "^${filename_prefix}-(.*)\\.tar\\.bz2$" "\\1" _pyoomph_version "${_pyoomph_fname}")
+  if(NOT _pyoomph_version STREQUAL fallback_version)
+    message(STATUS
+      "pyoomph: auto-detected ${human_name} ${_pyoomph_version} on ${page_url} "
+      "differs from the last known-good ${fallback_version} - the "
+      "./configure flags below were last verified against ${fallback_version}; "
+      "see the NOTE at the top of this file if the build fails.")
+  endif()
   set(${out_version_var} "${_pyoomph_version}" PARENT_SCOPE)
 endfunction()
 
 if(PYOOMPH_DOWNLOAD_CLN AND NOT PYOOMPH_CLN_VERSION)
-  pyoomph_resolve_ginac_de_version("https://www.ginac.de/CLN/" "cln" "CLN" PYOOMPH_CLN_VERSION)
-  message(STATUS "pyoomph: auto-detected current CLN version from ginac.de: ${PYOOMPH_CLN_VERSION}")
+  pyoomph_resolve_ginac_de_version("https://www.ginac.de/CLN/" "cln" "CLN" "${_pyoomph_cln_fallback_version}" PYOOMPH_CLN_VERSION)
+  message(STATUS "pyoomph: using CLN version ${PYOOMPH_CLN_VERSION}")
 endif()
 
 if(PYOOMPH_DOWNLOAD_GINAC AND NOT PYOOMPH_GINAC_VERSION)
-  pyoomph_resolve_ginac_de_version("https://www.ginac.de/Download.html" "ginac" "GiNaC" PYOOMPH_GINAC_VERSION)
-  message(STATUS "pyoomph: auto-detected current GiNaC version from ginac.de: ${PYOOMPH_GINAC_VERSION}")
+  pyoomph_resolve_ginac_de_version("https://www.ginac.de/Download.html" "ginac" "GiNaC" "${_pyoomph_ginac_fallback_version}" PYOOMPH_GINAC_VERSION)
+  message(STATUS "pyoomph: using GiNaC version ${PYOOMPH_GINAC_VERSION}")
 endif()
 
 set(_pyoomph_autotools_common_flags
