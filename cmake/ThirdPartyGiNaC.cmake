@@ -41,7 +41,18 @@ if(APPLE AND CMAKE_OSX_ARCHITECTURES)
   endif()
 endif()
 
-set(CLN_EXTRA_CONFIGURE_FLAGS   "CXXFLAGS=-MD -DNO_ASM -O2${_pyoomph_macos_arch_flag}" CACHE STRING "Extra flags passed to CLN's ./configure")
+# NOTE: deliberately does NOT bake ${_pyoomph_macos_arch_flag} into this
+# cached value. `set(... CACHE STRING ...)` without FORCE only takes effect
+# the *first* time a given build dir is configured - a later reconfigure
+# against the same (persistent, see build-dir in pyproject.toml) build tree
+# with a different CMAKE_OSX_ARCHITECTURES (e.g. switching in/out of a
+# Rosetta 2 terminal, see the top-level CMakeLists.txt) would otherwise keep
+# serving a stale arch flag here, silently overriding the freshly-correct one
+# in _pyoomph_autotools_common_flags below and reintroducing the exact
+# "-arch x86_64 vs -arch arm64 at once" crash this is meant to avoid. The
+# always-fresh arch-aware CXXFLAGS is appended separately, after this
+# variable, in the CONFIGURE_COMMAND below instead.
+set(CLN_EXTRA_CONFIGURE_FLAGS   "" CACHE STRING "Extra flags passed to CLN's ./configure")
 set(GINAC_EXTRA_CONFIGURE_FLAGS "" CACHE STRING "Extra flags passed to GiNaC's ./configure")
 
 # ginac.de only ever hosts the *current* release tarball of CLN/GiNaC - a URL
@@ -110,6 +121,14 @@ set(_pyoomph_autotools_common_flags
     "CFLAGS=-fPIC${_pyoomph_macos_arch_flag}"
     "CXXFLAGS=-fPIC -g0${_pyoomph_macos_arch_flag}")
 
+# CLN-specific CXXFLAGS, kept separate from CLN_EXTRA_CONFIGURE_FLAGS (see the
+# comment on that cache variable above) precisely so the arch flag can never
+# go stale: this is a plain (non-cached) variable, recomputed on every
+# configure, and is placed after ${CLN_EXTRA_CONFIGURE_FLAGS} in
+# CONFIGURE_COMMAND below so it always wins - autoconf just takes the last
+# CXXFLAGS=... occurrence on the command line.
+set(_pyoomph_cln_cxxflags "CXXFLAGS=-MD -DNO_ASM -O2${_pyoomph_macos_arch_flag}")
+
 # ---------------------------------------------------------------- CLN -----
 if(PYOOMPH_DOWNLOAD_CLN)
   set(_cln_lib "${PYOOMPH_THIRDPARTY_PREFIX}/${CMAKE_INSTALL_LIBDIR}/libcln.a")
@@ -122,6 +141,7 @@ if(PYOOMPH_DOWNLOAD_CLN)
                        --without-gmp
                        ${_pyoomph_autotools_common_flags}
                        ${CLN_EXTRA_CONFIGURE_FLAGS}
+                       ${_pyoomph_cln_cxxflags}
     # As with GiNaC below, skip "make install" for the subdirs we don't need
     # (tests, examples, doc, benchmarks) - just the static library ("src")
     # plus the headers, which the top-level Makefile installs directly.
