@@ -1,3 +1,5 @@
+.. _installonlinux:
+
 On Linux
 --------
 

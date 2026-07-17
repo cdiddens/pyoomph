@@ -18,6 +18,45 @@ Verify whether everything runs fine by
 
 If you encounter segmentation faults during solving, please try to downgrade your MKL package, e.g. via *python -m pip install mkl==2024.1.0*.
 
+### PETSc/SLEPc via WSL
+
+PETSc/SLEPc (used for a much more stable eigensolver, see the [tutorial](https://pyoomph.readthedocs.io/)) cannot be built natively on Windows. If you need it, install pyoomph inside the [Windows Subsystem for Linux (WSL)](https://learn.microsoft.com/windows/wsl/) instead, where it can be built exactly as on native Linux.
+
+From an elevated PowerShell:
+
+```powershell
+wsl --install -d Ubuntu
+```
+
+Reboot if prompted, open the "Ubuntu" app, then inside it install pyoomph as on Linux (see below), keeping the source trees on the Linux filesystem (e.g. `~/...`, not `/mnt/c/...`):
+
+```bash
+sudo apt update
+sudo apt install gcc libopenmpi-dev pybind11-dev flex bison
+python3 -m pip install --upgrade pyoomph
+```
+
+Then build PETSc/SLEPc as on Linux:
+
+```bash
+cd A_FOLDER_OF_YOUR_CHOICE
+git clone -b release https://gitlab.com/petsc/petsc.git petsc
+cd petsc
+export PETSC_DIR=$(pwd)
+export PETSC_ARCH=pyoomph_petsc_arch
+./configure --with-mpi --with-petsc4py --download-mumps=yes --download-hypre=yes --download-parmetis=yes --download-ptscotch=yes --download-slepc=yes --download-superlu=yes --download-superlu_dist=yes --download-suitesparse=yes --download-metis=yes --download-scalapack --with-scalar-type=complex
+```
+
+`configure` prints the exact `make` command to run next. Afterwards, add to `~/.bashrc`:
+
+```bash
+export PETSC_DIR=A_FOLDER_OF_YOUR_CHOICE/petsc
+export PETSC_ARCH=pyoomph_petsc_arch
+export PYTHONPATH=$PYTHONPATH:$PETSC_DIR/$PETSC_ARCH/lib
+```
+
+If `make` is killed for running out of memory, raise the memory available to WSL2 via `C:\Users\<you>\.wslconfig` (`[wsl2]` section, `memory=8GB`), then `wsl --shutdown` and reopen. If you use VS Code, install the "WSL" remote extension and open the project from within WSL so the editor picks up the environment variables above. Full details, including how to select the SLEPc/MUMPS eigensolver, are in the [tutorial](https://pyoomph.readthedocs.io/en/latest/tutorial/installation/wsl.html).
+
 ## On Linux
 
 If you have installed via pip (see above), just make sure that you have the `gcc` compiler installed and check via
