@@ -485,6 +485,9 @@ namespace pyoomph
 			return res;
 		auto * ft = codeinst->get_func_table();
 		const std::vector<std::vector<unsigned>> &c1_dummy_map = this->get_dummy_value_interpolation_map()[SPACE_INDEX_C1];
+
+		bool has_C1_hanging= ft->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk>0 || ft->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk>0; 
+
 		auto get_c1_masters = [&c1_dummy_map](unsigned l_elem) -> const std::vector<unsigned> *
 		{
 			for (const std::vector<unsigned> &entry : c1_dummy_map)
@@ -494,6 +497,12 @@ namespace pyoomph
 			}
 			return NULL;
 		};
+
+		std::map<unsigned , int > global_to_local_map;
+		for (unsigned int i=0;i<this->ndof();i++)
+		{
+			global_to_local_map[this->eqn_number(i)]=i;
+		}
 
 		for (unsigned int ispace = 0; ispace < ft->num_present_continuous_spaces; ispace++)
 		{
@@ -512,14 +521,27 @@ namespace pyoomph
 						if (info->index < space_info->nodal_offset_basebulk || info->index >= space_info->nodal_offset_basebulk + space_info->numfields_basebulk)
 							continue; // not a value index of this space
 						unsigned f = info->index - space_info->nodal_offset_basebulk;
+						JITHangInfo_t * hangbuffer = shape_info->hanginfo[space_info->buffer_offset_basebulk + f];
+						if (has_C1_hanging && n->is_hanging(ft->continuous_spaces[SPACE_INDEX_C1].hangindex))
+						{
+							// Genuinely hanging on the C1 space (e.g. on a hanging edge), not a C1-corner-averaged dummy node -> use the real hanging masters/weights instead of a plain average
+							oomph::HangInfo *hang_info_pt = n->hanging_pt(ft->continuous_spaces[SPACE_INDEX_C1].hangindex);
+							hangbuffer[l].nummaster = hang_info_pt->nmaster();
+							for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
+							{
+								hangbuffer[l].masters[m].weight = hang_info_pt->master_weight(m);
+								hangbuffer[l].masters[m].local_eqn = this->local_hang_eqn(hang_info_pt->master_node_pt(m), space_info->nodal_offset_basebulk + f);
+							}
+							res = true;
+							continue;
+						}
 						const std::vector<unsigned> *entry = get_c1_masters(l_elem);
 						if (!entry)
 						{
 							throw_runtime_error("A base dof constrained to C1 is only allowed on nodes which do not belong to the C1 space");
 						}
 						unsigned nmaster = entry->size() - 1;
-						JITHangInfo_t * hangbuffer = shape_info->hanginfo[space_info->buffer_offset_basebulk + f];
-						hangbuffer[l].nummaster = 0;						
+						hangbuffer[l].nummaster = 0;
 						for (unsigned m = 0; m < nmaster; m++)
 						{
 							unsigned l2=elem_node_to_space_node[(*entry)[m + 1]];
@@ -549,9 +571,16 @@ namespace pyoomph
 		// position hanginfo (shape_info->hanginfo_Pos, already filled for genuinely hanging positions by
 		// fill_hang_info_with_equations_for_pos) is indexed by the full element node index directly, not
 		// by a per-space node index, so no elem_node_to_space_node lookup is needed here.
+
 		for (unsigned int l_elem = 0; l_elem < eleminfo.nnode; l_elem++)
 		{
 			Node *n = dynamic_cast<Node *>(node_pt(l_elem));
+			bool hangs_on_C1= node_pt(l_elem)->is_hanging(ft->continuous_spaces[SPACE_INDEX_C1].hangindex);
+			bool hangs_on_C2= node_pt(l_elem)->is_hanging(ft->continuous_spaces[SPACE_INDEX_C2].hangindex);
+			//if (n->get_additional_dof_constraints())
+			//{
+			//	std::cout << "Node " << l_elem << "  hang status " << (hangs_on_C1 ? "true" : "false") << " and C2 : " << (hangs_on_C2 ? "true" : "false") << std::endl;
+			//}
 			for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info != NULL; info = info->next)
 			{
 				if (info->mode != POSITION_CONSTRAIN_TO_C1)
@@ -559,16 +588,52 @@ namespace pyoomph
 				if (info->index >= this->nodal_dimension())
 					continue; // not a valid coordinate index
 				unsigned f = info->index;
-				const std::vector<unsigned> *entry = get_c1_masters(l_elem);
+
+				JITHangInfo_t * hangbuffer_pos = shape_info->hanginfo_Pos[f];
+
+				if (hangs_on_C1 && !hangs_on_C2)
+				{
+					if (!has_C1_hanging)
+					{						
+						throw_runtime_error("When constraining the position space to C1, you need a C1 space in the element. Potentially just create one by adding ScalarField(\"_dummyC1\",space=\"C1\")+DirichletBC(_dummyC1=0) to the bulk equations.");
+					}
+					oomph::HangInfo *hang_info_pt = n->hanging_pt(ft->continuous_spaces[SPACE_INDEX_C1].hangindex);
+					hangbuffer_pos[l_elem].nummaster = hang_info_pt->nmaster();
+					std::cout << "HITTING nmaster " << hang_info_pt->nmaster() << std::endl;
+					for (unsigned int m=0;m<hang_info_pt->nmaster();m++)
+					{	
+						hangbuffer_pos[l_elem].masters[m].weight=hang_info_pt->master_weight(m);					
+						std::cout << " master node " << m << " is hanging on C1 " << (hang_info_pt->master_node_pt(m)->is_hanging(ft->continuous_spaces[SPACE_INDEX_C1].hangindex) ? "true" : "false") << std::endl;
+						std::cout << "    and on C2 " << (hang_info_pt->master_node_pt(m)->is_hanging(ft->continuous_spaces[SPACE_INDEX_C2].hangindex) ? "true" : "false") << std::endl;
+						long glob_eq=dynamic_cast<pyoomph::Node*>(hang_info_pt->master_node_pt(m))->variable_position_pt()->eqn_number(f);
+						if (glob_eq<0)
+						{
+						
+						hangbuffer_pos[l_elem].masters[m].local_eqn=0; // TODO local_eqns(0,f);	
+						}
+						else if (global_to_local_map.count(glob_eq)==0)
+						{
+							throw_runtime_error("The master node for a position dof constrained to C1 is not part of the element's equation set");
+						}
+						else
+						{
+							hangbuffer_pos[l_elem].masters[m].local_eqn=global_to_local_map[glob_eq];
+						}						
+					}
+					continue;
+				}
+				
+				const std::vector<unsigned> *entry = get_c1_masters(l_elem);				
 				if (!entry)
 				{
 					std::cout << "Node " << l_elem << " is a C1 corner node, but has a position dof constrained to C1" << std::endl;
-					std::cout << "Hangs on C1 " << (node_pt(l_elem)->is_hanging(ft->continuous_spaces[SPACE_INDEX_C1].hangindex) ? "true" : "false") << std::endl;
-					std::cout << "hangs on C2 " << (node_pt(l_elem)->is_hanging(ft->continuous_spaces[SPACE_INDEX_C2].hangindex) ? "true" : "false") << std::endl;
+					std::cout << "Hangs on C1 " << (hangs_on_C1 ? "true" : "false") << std::endl;
+					std::cout << "hangs on C2 " << (hangs_on_C2 ? "true" : "false") << std::endl;
+					std::cout << "has hang info C1 " << (has_C1_hanging ? "true" : "false") << std::endl;
 					throw_runtime_error("A position dof constrained to C1 is only allowed on nodes which do not belong to the C1 space");
 				}
 				unsigned nmaster = entry->size() - 1;
-				JITHangInfo_t * hangbuffer_pos = shape_info->hanginfo_Pos[f];
+				
 				hangbuffer_pos[l_elem].nummaster = 0;
 				for (unsigned m = 0; m < nmaster; m++)
 				{
@@ -658,6 +723,7 @@ namespace pyoomph
 			}
 			return NULL;
 		};
+		bool has_C1_hanging= ft->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk>0 || ft->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk>0;
 
 		for (unsigned int ispace = 0; ispace < ft->num_present_continuous_spaces; ispace++)
 		{
@@ -687,13 +753,27 @@ namespace pyoomph
 					if (f < 0)
 						continue; // this interface id is not assigned within this space
 
+					JITHangInfo_t * hangbuffer = shape_info->hanginfo[space_info->buffer_offset_interf + f];
+					if (has_C1_hanging && n->is_hanging(ft->continuous_spaces[SPACE_INDEX_C1].hangindex))
+					{
+						// Genuinely hanging on the C1 space, not a C1-corner-averaged dummy node -> use the real hanging masters/weights instead of a plain average
+						oomph::HangInfo *hang_info_pt = n->hanging_pt(ft->continuous_spaces[SPACE_INDEX_C1].hangindex);
+						hangbuffer[l].nummaster = hang_info_pt->nmaster();
+						for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
+						{
+							hangbuffer[l].masters[m].weight = hang_info_pt->master_weight(m);
+							hangbuffer[l].masters[m].local_eqn = this->local_interface_hang_eqn(info->index, hang_info_pt->master_node_pt(m));
+						}
+						res = true;
+						continue;
+					}
+
 					const std::vector<unsigned> *entry = get_c1_masters(l_elem);
 					if (!entry)
 					{
 						throw_runtime_error("An interface dof constrained to C1 is only allowed on nodes which do not belong to the C1 space");
 					}
 					unsigned nmaster = entry->size() - 1;
-					JITHangInfo_t * hangbuffer = shape_info->hanginfo[space_info->buffer_offset_interf + f];
 					hangbuffer[l].nummaster = 0;
 					for (unsigned m = 0; m < nmaster; m++)
 					{
@@ -814,21 +894,38 @@ namespace pyoomph
 				}
 				return NULL;
 			};
+			bool has_C1_hanging= ft->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk>0 || ft->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk>0;
 
 			for (unsigned int l_elem = 0; l_elem < this->nnode(); l_elem++)
 			{
 				pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(node_pt(l_elem));
+				bool hangs_on_C1 = has_C1_hanging && n->is_hanging(ft->continuous_spaces[SPACE_INDEX_C1].hangindex);
 				for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info != NULL; info = info->next)
 				{
 					if (info->mode == CONTINUOUS_BASE_DOF_CONSTRAIN_TO_C1)
 					{
+						unsigned ntstorage = n->ntstorage();
+						if (hangs_on_C1)
+						{
+							// Genuinely hanging on the C1 space, not a C1-corner-averaged dummy node -> use the real hanging masters/weights instead of a plain average
+							oomph::HangInfo *hang_info_pt = n->hanging_pt(ft->continuous_spaces[SPACE_INDEX_C1].hangindex);
+							for (unsigned t = 0; t < ntstorage; t++)
+							{
+								double val = 0.0;
+								for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
+								{
+									val += hang_info_pt->master_weight(m) * hang_info_pt->master_node_pt(m)->value(t, info->index);
+								}
+								n->value_pt(info->index)[t] = val;
+							}
+							continue;
+						}
 						const std::vector<unsigned> *entry = get_c1_masters(l_elem);
 						if (!entry)
 						{
 							throw_runtime_error("A base dof constrained to C1 is only allowed on nodes which do not belong to the C1 space");
 						}
 						unsigned nmaster = entry->size() - 1;
-						unsigned ntstorage = n->ntstorage();
 						for (unsigned t = 0; t < ntstorage; t++)
 						{
 							double val = 0.0;
@@ -841,6 +938,18 @@ namespace pyoomph
 					}
 					else if (info->mode == POSITION_CONSTRAIN_TO_C1)
 					{
+						if (hangs_on_C1)
+						{
+							// Genuinely hanging on the C1 space, not a C1-corner-averaged dummy node -> use the real hanging masters/weights instead of a plain average
+							oomph::HangInfo *hang_info_pt = n->hanging_pt(ft->continuous_spaces[SPACE_INDEX_C1].hangindex);
+							double val = 0.0;
+							for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
+							{
+								val += hang_info_pt->master_weight(m) * dynamic_cast<pyoomph::Node *>(hang_info_pt->master_node_pt(m))->x(info->index);
+							}
+							n->x(info->index) = val;
+							continue;
+						}
 						const std::vector<unsigned> *entry = get_c1_masters(l_elem);
 						if (!entry)
 						{
@@ -2168,16 +2277,9 @@ namespace pyoomph
 								 This can happen in adaptive problems without any C1 or C1TB fields present in the bulk mesh.\n\
 								 Add a ScalarField(\"_dummyC1\",space=\"C1\")+DirichletBC(_dummyC1=0) to the bulk domain to avoid this.");
 						}
-						else if (!is_hanging_on_C1)
-						{
-							n->pin(info->index);
-							has_additional_dof_constraints = true;
-						}
-						else
-						{
-							// Remove a C1 hanging node's additional dof constraint
-							n->remove_additional_dof_constraint(info->index,info->mode);
-						}
+
+						n->pin(info->index);
+						has_additional_dof_constraints = true;						
 					}
 					else if (info->mode == POSITION_CONSTRAIN_TO_C1)
 					{
@@ -2190,18 +2292,10 @@ namespace pyoomph
 							throw_runtime_error("Cannot enforce a degration to C1 on a C1 vertex node\n\
 								 This can happen in adaptive problems without any C1 or C1TB fields present in the bulk mesh.\n\
 								 Add a ScalarField(\"_dummyC1\",space=\"C1\")+DirichletBC(_dummyC1=0) to the bulk domain to avoid this.");
-						}
-						else if (!is_hanging_on_C1)
-						{
-							n->pin_position(info->index);
-							has_additional_dof_constraints = true;
-						}
-						else
-						{
-							// Remove a C1 hanging node's additional dof constraint
-							std::cout << "Removing a C1 hanging node's additional dof constraint for position index " << info->index << std::endl;
-							n->remove_additional_dof_constraint(info->index,info->mode);
-						}
+						}						
+						
+						n->pin_position(info->index);
+						has_additional_dof_constraints = true;						
 					}
 					info = next;
 				}
@@ -10040,11 +10134,13 @@ namespace pyoomph
 				}
 				return NULL;
 			};
+			bool has_C1_hanging= ft->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk>0 || ft->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk>0;
 
 			for (unsigned int l_elem = 0; l_elem < this->nnode(); l_elem++)
 			{
 				pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(node_pt(l_elem));
 				pyoomph::BoundaryNode *dest_bn = dynamic_cast<pyoomph::BoundaryNode *>(n);
+				bool hangs_on_C1 = has_C1_hanging && n->is_hanging(ft->continuous_spaces[SPACE_INDEX_C1].hangindex);
 				for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info != NULL; info = info->next)
 				{
 					if (info->mode != INTERFACE_DOF_CONSTRAIN_TO_C1)
@@ -10055,13 +10151,33 @@ namespace pyoomph
 					if (dest_index < 0)
 						continue; // this interface id is not assigned on this node
 
+					unsigned ntstorage = n->ntstorage();
+					if (hangs_on_C1)
+					{
+						// Genuinely hanging on the C1 space, not a C1-corner-averaged dummy node -> use the real hanging masters/weights instead of a plain average
+						oomph::HangInfo *hang_info_pt = n->hanging_pt(ft->continuous_spaces[SPACE_INDEX_C1].hangindex);
+						for (unsigned t = 0; t < ntstorage; t++)
+						{
+							double val = 0.0;
+							for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
+							{
+								pyoomph::BoundaryNode *master_bn = dynamic_cast<pyoomph::BoundaryNode *>(hang_info_pt->master_node_pt(m));
+								if (!master_bn)
+									throw_runtime_error("This should be a boundary node here");
+								int master_index = master_bn->index_of_first_value_assigned_by_face_element(info->index);
+								val += hang_info_pt->master_weight(m) * master_bn->value(t, master_index);
+							}
+							n->value_pt((unsigned)dest_index)[t] = val;
+						}
+						continue;
+					}
+
 					const std::vector<unsigned> *entry = get_c1_masters(l_elem);
 					if (!entry)
 					{
 						throw_runtime_error("An interface dof constrained to C1 is only allowed on nodes which do not belong to the C1 space");
 					}
 					unsigned nmaster = entry->size() - 1;
-					unsigned ntstorage = n->ntstorage();
 					for (unsigned t = 0; t < ntstorage; t++)
 					{
 						double val = 0.0;
@@ -12044,17 +12160,13 @@ namespace pyoomph
 												  This can happen in adaptive problems without any C1 or C1TB fields in the bulk.\n\
 												  Add a ScalarField(\"_dummyC1\",space=\"C1\")+DirichletBC(_dummyC1=0) to the bulk domain to avoid this.");
 						}
-						if (!hangs_on_C1)
-						{
-							int vindex = bn->index_of_first_value_assigned_by_face_element(info->index);
-							if (vindex<0) throw_runtime_error("Interface DOF index not found here");
-							n->pin((unsigned)vindex);
-							has_additional_dof_constraints = true;
-						}
-						else
-						{
-							n->remove_additional_dof_constraint(info->index,info->mode); // Remove the constraint, since it is not allowed on hanging nodes
-						}
+												
+						int vindex = bn->index_of_first_value_assigned_by_face_element(info->index);
+						if (vindex<0) throw_runtime_error("Interface DOF index not found here");
+						n->pin((unsigned)vindex);
+						has_additional_dof_constraints = true;
+						
+						
 					}
 					info=next_info; // Move to the next constraint in the list (since we might have removed the current one)
 				}

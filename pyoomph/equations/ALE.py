@@ -678,6 +678,8 @@ class ConstrainPositionsToC1Space(Equations):
                         n.set_additional_dof_constraint(POSITION_CONSTRAIN_TO_C1,i)
                     
         return super().before_assigning_equations_preorder(mesh)
+
+    
     
 class UnconstrainPositionsFromC1Space(Equations):
     """Unconstrains the positions of the mesh from the C1 space.     

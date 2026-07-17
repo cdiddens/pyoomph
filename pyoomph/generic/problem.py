@@ -3476,7 +3476,7 @@ class Problem(_pyoomph.Problem):
         # 
         return eigenvectors
 
-    def solve_eigenproblem(self, n:int, shift:Union[float,complex,None]=0, quiet:bool=False, azimuthal_m:Optional[Union[int,List[int]]]=None,normal_mode_k:Optional[Union[ExpressionOrNum,List[ExpressionOrNum]]]=None,normal_mode_L:Optional[Union[ExpressionOrNum,List[ExpressionOrNum]]]=None,report_accuracy:bool=False,sort:bool=True,which:"EigenSolverWhich"="LM",OPpart:Optional[Literal["r","i"]]=None,v0:Optional[Union[NPFloatArray,NPComplexArray]]=None,filter:Optional[Callable[[complex],bool]]=None,target:Optional[complex]=None)->Tuple[NPComplexArray,NPComplexArray]:
+    def solve_eigenproblem(self, n:int, shift:Union[float,complex,None]=0, quiet:bool=False, azimuthal_m:Optional[Union[int,List[int]]]=None,normal_mode_k:Optional[Union[ExpressionOrNum,List[ExpressionOrNum]]]=None,normal_mode_L:Optional[Union[ExpressionOrNum,List[ExpressionOrNum]]]=None,report_accuracy:bool=False,sort:bool=True,which:"EigenSolverWhich"="LM",OPpart:Optional[Literal["r","i"]]=None,v0:Optional[Union[NPFloatArray,NPComplexArray]]=None,filter:Optional[Callable[[complex],bool]]=None,target:Optional[complex]=None,ncv:Optional[int]=None)->Tuple[NPComplexArray,NPComplexArray]:
         """
         Solves the associated generalized eigenproblem for the given number of eigenvalues and eigenvectors.
 
@@ -3494,15 +3494,16 @@ class Problem(_pyoomph.Problem):
             v0 (Optional[Union[NPFloatArray, NPComplexArray]], optional): The initial guess for the eigenvectors. Defaults to None.
             filter (Optional[Callable[[complex], bool]], optional): A function to filter the computed eigenvalues. Only the eigenvalues for which the filter returns True will be kept. Defaults to None.
             target (Optional[complex], optional): The target eigenvalue. Defaults to None.
+            ncv (Optional[int], optional): The number of Krylov (Arnoldi/Lanczos) basis vectors used by the underlying eigensolver. Defaults to None, i.e. the eigensolver's own default. Set this to a larger value than the default if the eigensolver fails to converge or returns inaccurate eigenvalues, e.g. for clustered eigenvalues.
 
         Returns:
             Tuple[NPComplexArray, NPComplexArray]: A tuple containing the computed eigenvalues and eigenvectors.
         """
-        self._solve_eigenproblem_helper(n,shift,quiet,azimuthal_m,normal_mode_k,normal_mode_L,report_accuracy,sort,which,OPpart,v0,filter,target)
+        self._solve_eigenproblem_helper(n,shift,quiet,azimuthal_m,normal_mode_k,normal_mode_L,report_accuracy,sort,which,OPpart,v0,filter,target,ncv)
         self._last_eigenvectors=self.process_eigenvectors(self._last_eigenvectors)
         return self._last_eigenvalues,self._last_eigenvectors
-        
-    def _solve_eigenproblem_helper(self, n:int, shift:Union[float,complex,None]=0, quiet:bool=False, azimuthal_m:Optional[Union[int,List[int]]]=None,normal_mode_k:Optional[Union[ExpressionOrNum,List[ExpressionOrNum]]]=None,normal_mode_L:Optional[Union[ExpressionOrNum,List[ExpressionOrNum]]]=None,report_accuracy:bool=False,sort:bool=True,which:"EigenSolverWhich"="LM",OPpart:Optional[Literal["r","i"]]=None,v0:Optional[Union[NPFloatArray,NPComplexArray]]=None,filter:Optional[Callable[[complex],bool]]=None,target:Optional[complex]=None)->Tuple[NPComplexArray,NPComplexArray]:
+
+    def _solve_eigenproblem_helper(self, n:int, shift:Union[float,complex,None]=0, quiet:bool=False, azimuthal_m:Optional[Union[int,List[int]]]=None,normal_mode_k:Optional[Union[ExpressionOrNum,List[ExpressionOrNum]]]=None,normal_mode_L:Optional[Union[ExpressionOrNum,List[ExpressionOrNum]]]=None,report_accuracy:bool=False,sort:bool=True,which:"EigenSolverWhich"="LM",OPpart:Optional[Literal["r","i"]]=None,v0:Optional[Union[NPFloatArray,NPComplexArray]]=None,filter:Optional[Callable[[complex],bool]]=None,target:Optional[complex]=None,ncv:Optional[int]=None)->Tuple[NPComplexArray,NPComplexArray]:
         """
         Real eigensolving: Called from solve_eigenproblem()
         """
@@ -3528,13 +3529,13 @@ class Problem(_pyoomph.Problem):
                 raise ValueError("Cannot specify both azimuthal_m and normal_mode_k")
             if normal_mode_L is not None:
                 raise ValueError("Cannot specify both azimuthal_m and normal_mode_L")
-            return self._solve_normal_mode_eigenproblem(n, azimuthal_m=azimuthal_m, shift=shift, quiet=quiet,filter=filter,report_accuracy=report_accuracy,v0=v0,target=target,sort=sort)
+            return self._solve_normal_mode_eigenproblem(n, azimuthal_m=azimuthal_m, shift=shift, quiet=quiet,filter=filter,report_accuracy=report_accuracy,v0=v0,target=target,sort=sort,ncv=ncv)
         elif normal_mode_k is not None:
             if isinstance(normal_mode_k,(list,tuple)):
                 normal_mode_k=[float(k*self.get_scaling("spatial")) for k in normal_mode_k]
             else:
                 normal_mode_k=float(normal_mode_k*self.get_scaling("spatial"))
-            return self._solve_normal_mode_eigenproblem(n, cartesian_k=normal_mode_k, shift=shift, quiet=quiet,filter=filter,report_accuracy=report_accuracy,v0=v0,target=target,sort=sort)
+            return self._solve_normal_mode_eigenproblem(n, cartesian_k=normal_mode_k, shift=shift, quiet=quiet,filter=filter,report_accuracy=report_accuracy,v0=v0,target=target,sort=sort,ncv=ncv)
         if self._dof_selector_used is not self._dof_selector:
             self.reapply_boundary_conditions()
             self.reapply_boundary_conditions() # Must be done twice to correctly setup the equation remapping
@@ -3549,7 +3550,10 @@ class Problem(_pyoomph.Problem):
         self.actions_before_eigen_solve()
         self.invalidate_cached_mesh_data(only_eigens=True)
         self.setup_forced_zero_dof_list_for_eigenproblems()
-        self._last_eigenvalues,self._last_eigenvectors,J,M=self.get_eigen_solver().solve(n,shift=shift,sort=sort,which=which,OPpart=OPpart,v0=v0,target=target)
+        eigen_solver=self.get_eigen_solver()
+        if ncv is not None:
+            eigen_solver.ncv=ncv
+        self._last_eigenvalues,self._last_eigenvectors,J,M=eigen_solver.solve(n,shift=shift,sort=sort,which=which,OPpart=OPpart,v0=v0,target=target)
         self._last_eigenvalues, self._last_eigenvectors=self._last_eigenvalues.copy(),self._last_eigenvectors.copy()
         if filter is not None:
             filtered_indices=numpy.array([filter(ev) for ev in self._last_eigenvalues]).nonzero()
@@ -4873,7 +4877,7 @@ class Problem(_pyoomph.Problem):
         return to_zero_dofs
 
 
-    def _solve_normal_mode_eigenproblem(self, n:int, azimuthal_m:Optional[Union[List[int],Tuple[int],int]]=None, cartesian_k:Optional[Union[List[float],Tuple[float],float]]=None, shift:Optional[Union[float,complex]]=0,quiet:bool=False,filter:Optional[Callable[[complex],bool]]=None,report_accuracy:bool=False,target:Optional[complex]=None,v0:Optional[Union[NPFloatArray,NPComplexArray]]=None,sort:bool=True)->Tuple[NPComplexArray,NPComplexArray]:
+    def _solve_normal_mode_eigenproblem(self, n:int, azimuthal_m:Optional[Union[List[int],Tuple[int],int]]=None, cartesian_k:Optional[Union[List[float],Tuple[float],float]]=None, shift:Optional[Union[float,complex]]=0,quiet:bool=False,filter:Optional[Callable[[complex],bool]]=None,report_accuracy:bool=False,target:Optional[complex]=None,v0:Optional[Union[NPFloatArray,NPComplexArray]]=None,sort:bool=True,ncv:Optional[int]=None)->Tuple[NPComplexArray,NPComplexArray]:
         
         if azimuthal_m and (self._azimuthal_mode_param_m is None):
             raise RuntimeError("Must use setup_for_stability_analysis(azimuthal_stability=True) before initialialising the problem")
@@ -4899,7 +4903,7 @@ class Problem(_pyoomph.Problem):
             for ms in vlist:
                 param.value = ms
                 self.actions_before_eigen_solve()
-                self._solve_eigenproblem_helper(n, shift,quiet=True,filter=filter,report_accuracy=report_accuracy,target=target,v0=v0,sort=sort)
+                self._solve_eigenproblem_helper(n, shift,quiet=True,filter=filter,report_accuracy=report_accuracy,target=target,v0=v0,sort=sort,ncv=ncv)
                 if len(alleigenvals)==0:
                     alleigenvals=self.get_last_eigenvalues().copy()
                 else:
@@ -4935,7 +4939,7 @@ class Problem(_pyoomph.Problem):
         else:
             param.value = vlist
             self.actions_before_eigen_solve()
-            self._solve_eigenproblem_helper(n, shift,filter=filter,report_accuracy=report_accuracy,target=target,v0=v0,sort=sort)
+            self._solve_eigenproblem_helper(n, shift,filter=filter,report_accuracy=report_accuracy,target=target,v0=v0,sort=sort,ncv=ncv)
             param.value = 0
             if azimuthal_m is not None:
                 self._last_eigenvalues_m=numpy.array([vlist]*len(self.get_last_eigenvalues()),dtype=numpy.int32) #type:ignore

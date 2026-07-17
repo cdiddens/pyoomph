@@ -460,7 +460,7 @@ class SlepcEigenSolver(GenericEigenSolver):
             neval=1
         #E.setProblemType(SLEPc.EPS.ProblemType.PGNHEP)
         #ncv=max(2 * neval + 1, 5 + neval)
-        ncv=max(2 * neval + 1, 5 + neval)
+        ncv=self.ncv if self.ncv is not None else max(2 * neval + 1, 5 + neval)
         mdp=ncv #TODO: Can be smaller for higher
         
         E.setDimensions(neval,ncv,mdp) #type:ignore

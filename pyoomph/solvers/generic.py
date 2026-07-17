@@ -324,6 +324,7 @@ class GenericEigenSolver:
 		self.matrix_manipulators:List[EigenMatrixManipulatorBase]=[]
 		self.real_contribution:str=""
 		self.imag_contribution:Optional[str]=None
+		self.ncv:Optional[int]=None
 
 	def _before_assigning_equation_numbers(self)->None:		
 		pass
