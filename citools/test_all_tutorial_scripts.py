@@ -5,6 +5,7 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("--quick-test", help="Stops after the first successful Newton method. Useful for quick testing", action="store_true")
 parser.add_argument("--tcc", help="Used TCC", action="store_true")
+parser.add_argument("--no-petsc", help="Ignore PETSc check", action="store_true")
 args = parser.parse_args()
 
 os.chdir(Path(__file__).parent)
@@ -13,13 +14,14 @@ import zipfile,glob,subprocess
 import shutil
 
 
-try:
-  from  petsc4py import PETSc
-except ImportError:
-  raise ImportError("petsc4py not found, cannot run tests with eigenvalue solvers. Please install petsc4py and make sure it is in the PYTHONPATH")
+if not args.no_petsc:
+  try:
+    from  petsc4py import PETSc
+  except ImportError:
+    raise ImportError("petsc4py not found, cannot run tests with eigenvalue solvers. Please install petsc4py and make sure it is in the PYTHONPATH")
 
-import numpy
-assert PETSc.ScalarType is numpy.complex128, "PETSc does not support complex numbers, cannot run tests with eigenvalue solvers. Please install a version of PETSc with complex support and make sure petsc4py is using that version."
+  import numpy
+  assert PETSc.ScalarType is numpy.complex128, "PETSc does not support complex numbers, cannot run tests with eigenvalue solvers. Please install a version of PETSc with complex support and make sure petsc4py is using that version."
   
 
 if Path("pyoomph_tutorial_scripts").exists():
