@@ -75,13 +75,15 @@ class PETSCSolver(GenericLinearSystemSolver):
         return super()._before_assigning_equation_numbers()
     
     def use_mumps(self,mumps_param14:Optional[int]=None):
+        if not PETSc.Sys.hasExternalPackage("mumps"): #type:ignore
+            raise RuntimeError("Your PETSc installation was not compiled with MUMPS support (--download-mumps=yes). Please recompile PETSc with MUMPS or use a different linear solver.")
         _SetDefaultPetscOption("mat_mumps_icntl_6",5)
         _SetDefaultPetscOption("ksp_type","preonly")
         _SetDefaultPetscOption("pc_type","lu")
         _SetDefaultPetscOption("pc_factor_mat_solver_type","mumps")
         if mumps_param14 is not None:
             _SetDefaultPetscOption("mat_mumps_icntl_14",mumps_param14)
-        return self    
+        return self
 
     def set_options(self,**kwargs:Any):
         for a,b in kwargs.items():
@@ -98,7 +100,8 @@ class PETSCSolver(GenericLinearSystemSolver):
         return PETSc
     
     def setup_field_split(self):
-        print("Setting up field split for PETSc solver")
+        if not self.problem.is_quiet():
+            print("Setting up field split for PETSc solver")
         def process_indices(indices,name):
             if get_mpi_nproc()<2:
                 return indices
@@ -118,17 +121,19 @@ class PETSCSolver(GenericLinearSystemSolver):
         unique_fields=numpy.unique(mapping)
         unique_fields=unique_fields[unique_fields>=0] # Filter out any dofs that are not assigned to a field (e.g. due to field splits, where some dofs might be assigned to a new field index of -1 or similar)
         if self.problem.petsc_fieldsplit is None:
-            print("Using default PETSc DOF to field mapping:")
-            for uf in unique_fields:
-                print("  Field "+str(uf)+": "+names[uf])
+            if not self.problem.is_quiet():
+                print("Using default PETSc DOF to field mapping:")
+                for uf in unique_fields:
+                    print("  Field "+str(uf)+": "+names[uf])
             field_is={}
             for f in unique_fields:
                 indices = numpy.where(mapping == f)[0].astype(numpy.int32)
                 iset = PETSc.IS().createGeneral(process_indices(indices,names[f]),comm=PETSc.COMM_WORLD)
                 field_is[f] = iset
-            
+
         else:
-            print("Using user-defined PETSc DOF to field mapping:",self.problem.petsc_fieldsplit)
+            if not self.problem.is_quiet():
+                print("Using user-defined PETSc DOF to field mapping:",self.problem.petsc_fieldsplit)
             field_is={}
             is_collections={}
             handled_fields=set()
@@ -166,7 +171,8 @@ class PETSCSolver(GenericLinearSystemSolver):
                 #print("PROCESSES ON RANK",v,get_mpi_rank(),mapping[process_indices(indices,v)])                
                 iset = PETSc.IS().createGeneral(process_indices(indices,v),comm=PETSc.COMM_WORLD)
                 field_is[v] = iset
-                print("  Field "+str(v)+": "+str(fields))
+                if not self.problem.is_quiet():
+                    print("  Field "+str(v)+": "+str(fields))
                 #print("    mapping", mapping[indices])
                 #print("    IS size",iset.getSize(),len(indices))
                 #print()
@@ -251,7 +257,8 @@ class PETSCSolver(GenericLinearSystemSolver):
                 start_time = time.time()
                 self.ksp.solve(bv, self.x) #type:ignore
                 end_time = time.time()
-                print("PETSc KSP solve time:", end_time - start_time, "seconds")
+                if not self.problem.is_quiet():
+                    print("PETSc KSP solve time:", end_time - start_time, "seconds")
                 xv = self.x.getArray() #type:ignore
             b[:] = xv[:] #type:ignore
 
@@ -317,7 +324,8 @@ class PETSCSolver(GenericLinearSystemSolver):
                 start_time = time.time()
                 self.ksp.solve(bv, self.x) #type:ignore
                 end_time = time.time()
-                print("PETSc KSP solve time:", end_time - start_time, "seconds")
+                if not self.problem.is_quiet():
+                    print("PETSc KSP solve time:", end_time - start_time, "seconds")
                 xv = self.x.getArray() #type:ignore
             b[:] = xv[:] #type:ignore
 
@@ -343,6 +351,17 @@ class PETSCSolver(GenericLinearSystemSolver):
     def set_options(self,**kwargs:Any):
         for a,b in kwargs.items():
             PETSc.Options().setValue(a,b) #type:ignore
+
+@GenericLinearSystemSolver.register_solver()
+class PETSCMUMPSSolver(PETSCSolver):
+    # Pre-configured with MUMPS, unlike PETSCSolver: set_linear_solver("petsc").use_mumps() needs a live Problem to
+    # chain onto, which set_default_linear_solver(...) cannot provide since it is only given a plain idname string.
+    idname = "petsc_mumps"
+
+    def __init__(self, problem:"Problem"):
+        super().__init__(problem)
+        self.use_mumps()
+
 
 def _SetDefaultPetscOption(key:str, val:Any,force:bool=False):
     if force or (not PETSc.Options().hasName(key)): #type:ignore
@@ -375,7 +394,9 @@ class SlepcEigenSolver(GenericEigenSolver):
     def set_default_option(self,name:str,val:Any=None,force:bool=False)->None:
         _SetDefaultPetscOption(name,val, force)
     
-    def use_mumps(self,mumps_param14:Optional[int]=None):        
+    def use_mumps(self,mumps_param14:Optional[int]=None):
+        if not PETSc.Sys.hasExternalPackage("mumps"): #type:ignore
+            raise RuntimeError("Your PETSc installation was not compiled with MUMPS support (--download-mumps=yes). Please recompile PETSc with MUMPS or use a different eigensolver.")
         _SetDefaultPetscOption("st_ksp_type","preonly")
         _SetDefaultPetscOption("st_pc_type","lu")
         _SetDefaultPetscOption("st_pc_factor_mat_solver_type","mumps")
@@ -602,6 +623,16 @@ class SlepcEigenSolver(GenericEigenSolver):
         If defining derived classes that need access to SLEPc, get SLEPc from here, do not import slepc4py again
         """        
         return SLEPc
+
+@GenericEigenSolver.register_solver()
+class SlepcMUMPSEigenSolver(SlepcEigenSolver):
+    # See PETSCMUMPSSolver above for why this pre-configured variant exists.
+    idname = "slepc_mumps"
+
+    def __init__(self, problem:"Problem"):
+        super().__init__(problem)
+        self.use_mumps()
+
 
 class FieldSplitPETSCSolver(PETSCSolver):
     def __init__(self,problem:"Problem"):

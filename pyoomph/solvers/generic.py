@@ -32,20 +32,37 @@ import numpy
 
 
 import scipy.sparse #type:ignore
-import traceback
 
 DefaultMatrixType=scipy.sparse.csr_matrix
 _TypeGenericLASolver=TypeVar("_TypeGenericLASolver",bound=Type["GenericLinearSystemSolver"])
 _TypeGenericEigenSolver=TypeVar("_TypeGenericEigenSolver",bound=Type["GenericEigenSolver"])
 
-CoreLinearSolverEnum=Literal["superlu","umfpack","petsc","mumps","pardiso","accelerate"]
-CoreEigenSolverEnum=Literal["scipy","pardiso","slepc","accelerate"]
+CoreLinearSolverEnum=Literal["superlu","umfpack","petsc","mumps","pardiso","accelerate","petsc_mumps"]
+CoreEigenSolverEnum=Literal["scipy","pardiso","slepc","accelerate","slepc_mumps"]
 EigenSolverWhich=Literal["LM","SM","LR","SR","SI"]
 _default_la_solver:Optional[Union["GenericLinearSystemSolver",CoreLinearSolverEnum]]=None
 _default_eigen_solver:Optional[Union["GenericEigenSolver",CoreEigenSolverEnum]]=None
 
 if TYPE_CHECKING:
     from ..generic.problem import Problem
+
+_PETSCSLEPC_INSTALL_URL="https://pyoomph.readthedocs.io/en/latest/tutorial/installation/petscslepc.html"
+_PYPA_INSTALL_URL="https://pyoomph.readthedocs.io/en/latest/tutorial/installation/pypa.html"
+_SOLVER_INSTALL_HINTS:Dict[str,Tuple[str,str]]={
+	"petsc":("PETSc",_PETSCSLEPC_INSTALL_URL),
+	"petsc_mumps":("PETSc with MUMPS support",_PETSCSLEPC_INSTALL_URL),
+	"slepc":("SLEPc",_PETSCSLEPC_INSTALL_URL),
+	"slepc_mumps":("SLEPc with MUMPS support",_PETSCSLEPC_INSTALL_URL),
+	"pardiso":("Intel MKL (Pardiso)",_PYPA_INSTALL_URL),
+	"accelerate":("the macOS Accelerate framework",_PYPA_INSTALL_URL),
+}
+
+def _unavailable_solver_message(kind:str,name:str,available:List[str],e:Exception)->str:
+	msg=kind+" '"+name+"' is not available ("+type(e).__name__+": "+str(e)+"). Available: "+str(available)+"."
+	hint=_SOLVER_INSTALL_HINTS.get(name)
+	if hint is not None:
+		msg+=" See "+hint[1]+" for how to install "+hint[0]+"."
+	return msg
 
 def set_default_linear_solver(solv:Union["GenericLinearSystemSolver",CoreLinearSolverEnum]):
 	global _default_la_solver
@@ -103,18 +120,19 @@ class GenericLinearSystemSolver:
 		if name in GenericLinearSystemSolver._registered_solvers.keys():
 			return GenericLinearSystemSolver._registered_solvers[name](problem)
 		else:
+			libname=name
+			if libname=="petsc_mumps":
+				libname="petsc"
 			try:
 				import importlib
 				#__import__(name)
-				importlib.import_module("pyoomph.solvers."+name)
+				importlib.import_module("pyoomph.solvers."+libname)
 				if name in GenericLinearSystemSolver._registered_solvers.keys():
 					return GenericLinearSystemSolver._registered_solvers[name](problem)
 				else:
 					raise RuntimeError("Unknown Linear Algebra solver: '"+name+"'. Following are defined (and included): "+str(list(GenericLinearSystemSolver._registered_solvers.keys())))
 			except Exception as e:
-				add_msg_str="When trying to import pyoomph.solvers."+str(name)+", the following error was raised:\n"
-				add_msg_str+=''.join(traceback.format_exception(type(e), value=e, tb=e.__traceback__))
-				raise RuntimeError("Unknown Linear Algebra solver: '"+name+"'. Following are defined (and included): "+str(list(GenericLinearSystemSolver._registered_solvers.keys()))+"\n"+add_msg_str)
+				raise RuntimeError(_unavailable_solver_message("Linear Algebra solver",name,list(GenericLinearSystemSolver._registered_solvers.keys()),e)) from e
 
 
 	def set_num_threads(self,nthreads:Optional[int]) -> None:
@@ -359,7 +377,7 @@ class GenericEigenSolver:
 			return GenericEigenSolver._registered_solvers[name](problem)
 		else:
 			libname=name
-			if libname=="slepc":
+			if libname=="slepc" or libname=="slepc_mumps":
 				libname="petsc"
 			try:
 				import importlib
@@ -369,11 +387,7 @@ class GenericEigenSolver:
 				else:
 					raise RuntimeError("Unknown Eigen solver: '"+name+"'. Following are defined (and included): "+str(list(GenericEigenSolver._registered_solvers.keys())))
 			except Exception as e:
-				add_msg_str="When trying to import pyoomph.solvers."+str(name)+", the following error was raised:\n"
-				add_msg_str+=''.join(traceback.format_exception(type(e), value=e, tb=e.__traceback__))
-				if libname=="petsc":
-					add_msg_str+="\n\nNote: If you want to use SLEPc, you must install it separately. Please see the manual ( https://pyoomph.readthedocs.io/en/latest/tutorial/installation/petscslepc.html ) for more information."
-				raise RuntimeError("Unknown Eigen solver solver: '"+name+"'. Following are defined (and included): "+str(list(GenericEigenSolver._registered_solvers.keys()))+"\n"+add_msg_str)
+				raise RuntimeError(_unavailable_solver_message("Eigen solver",name,list(GenericEigenSolver._registered_solvers.keys()),e)) from e
 
 			#raise RuntimeError("Unknown Eigen solver: '"+name+"'. Following are defined (and included): "+str(list(GenericEigenSolver._registered_solvers.keys())))
 

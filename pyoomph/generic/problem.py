@@ -1878,11 +1878,15 @@ class Problem(_pyoomph.Problem):
         linear_solver_group.add_argument('--mumps', help="use MUMPS solver", action='store_true')
         linear_solver_group.add_argument('--petsc_mumps',help="use PETSc as linear solver with MUMPS as backend",action="store_true")
         linear_solver_group.add_argument('--accelerate',help="use Apple Accelerate sparse solver (macOS only)",action='store_true')
-        self.cmdlineparser.add_argument('--slepc',help="use SLEPc as eigensolver. Specify your own backend for the matrix inversion during eigensolve here",action="store_true")
-        self.cmdlineparser.add_argument('--slepc_mumps',help="use SLEPc as eigensolver with MUMPS as backend",action="store_true")
-        self.cmdlineparser.add_argument('--arpack',action="store_true")
-        self.cmdlineparser.add_argument('--tcc', help="use internal TCC compiler", action='store_true')
-        self.cmdlineparser.add_argument('--distutils', help="use system C compiler detected by distutils", action='store_true')
+        # Mutually exclusive for the same reason as linear_solver_group above.
+        eigen_solver_group = self.cmdlineparser.add_mutually_exclusive_group()
+        eigen_solver_group.add_argument('--slepc',help="use SLEPc as eigensolver. Specify your own backend for the matrix inversion during eigensolve here",action="store_true")
+        eigen_solver_group.add_argument('--slepc_mumps',help="use SLEPc as eigensolver with MUMPS as backend",action="store_true")
+        eigen_solver_group.add_argument('--arpack',action="store_true")
+        # Mutually exclusive for the same reason as linear_solver_group above.
+        ccompiler_group = self.cmdlineparser.add_mutually_exclusive_group()
+        ccompiler_group.add_argument('--tcc', help="use internal TCC compiler", action='store_true')
+        ccompiler_group.add_argument('--distutils', help="use system C compiler detected by distutils", action='store_true')
         self.cmdlineparser.add_argument('--fast-math', help="activate fast math compiler flags (only with distutils, not with tcc)", action='store_true')        
         self.cmdlineparser.add_argument('--distribute',help="Distribute mesh in parallel",action='store_true')
         self.cmdlineparser.add_argument('--outdir', help="output directory",type=str)
@@ -1916,13 +1920,11 @@ class Problem(_pyoomph.Problem):
         elif self.cmdlineargs.pastix:
             self.set_linear_solver("pastix")
         elif self.cmdlineargs.petsc_mumps:
-            self.set_linear_solver("petsc").use_mumps()
+            self.set_linear_solver("petsc_mumps")
         elif self.cmdlineargs.accelerate:
             self.set_linear_solver("accelerate")
 
         if self.cmdlineargs.tcc:
-            if self.cmdlineargs.distutils:
-                raise RuntimeError("Cannot set --tcc and --distutils together")
             self.set_c_compiler("tcc")
             if self.cmdlineargs.fast_math:
                 raise RuntimeError("Cannot use --fast-math with --tcc")
@@ -1934,17 +1936,12 @@ class Problem(_pyoomph.Problem):
             self.set_c_compiler("system").optimize_for_max_speed()
 
         if self.cmdlineargs.arpack:
-            if self.cmdlineargs.slepc or self.cmdlineargs.slepc_mumps:
-                raise RuntimeError("Cannot be used together: --arpack and --slepc/--slepc_mumps")
             self.set_eigensolver("scipy") # Not using the pardiso arpack then
-        elif self.cmdlineargs.slepc or self.cmdlineargs.slepc_mumps:
-            from ..solvers.petsc import SlepcEigenSolver
+        elif self.cmdlineargs.slepc_mumps:
+            self.set_eigensolver("slepc_mumps")
+        elif self.cmdlineargs.slepc:
             self.set_eigensolver("slepc")
-            if self.cmdlineargs.slepc_mumps:
-                eigsolv=self.get_eigen_solver()
-                assert isinstance(eigsolv,SlepcEigenSolver)
-                eigsolv.use_mumps()
-                
+
 
 
         if self.cmdlineargs.outdir:

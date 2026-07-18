@@ -58,7 +58,7 @@ Check that the installation works:
 Build PETSc/SLEPc inside WSL
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Since WSL is a genuine Linux environment, the normal PETSc/SLEPc build recipe from :numref:`petscslepc` applies without any changes:
+Since WSL is a genuine Linux environment, the normal PETSc/SLEPc build recipe from :numref:`petscslepc` applies without any changes -- including the option to build both a real and a complex arch side by side if you also need normal mode eigenvalue problems (cf. :numref:`azimuthalstabana` and :numref:`cartesiannormalstabana`):
 
 .. code:: bash
 
@@ -66,18 +66,25 @@ Since WSL is a genuine Linux environment, the normal PETSc/SLEPc build recipe fr
 	git clone -b release https://gitlab.com/petsc/petsc.git petsc
 	cd petsc
 	export PETSC_DIR=$(pwd)
-	export PETSC_ARCH=pyoomph_petsc_arch
+	export PETSC_ARCH=pyoomph_petsc_arch_real
 
-	./configure --with-mpi  --with-petsc4py --download-mumps=yes --download-hypre=yes --download-parmetis=yes --download-ptscotch=yes --download-slepc=yes --download-superlu=yes --download-superlu_dist=yes --download-suitesparse=yes --download-metis=yes --download-scalapack --with-scalar-type=complex
+	./configure --with-mpi  --with-petsc4py --with-slepc4py --download-mumps=yes --download-hypre=yes --download-parmetis=yes --download-ptscotch=yes --download-slepc=yes --download-superlu=yes --download-superlu_dist=yes --download-suitesparse=yes --download-metis=yes --download-scalapack --with-scalar-type=real
 
-At the end, ``configure`` prints the exact ``make`` command to run next; execute it.
+At the end, ``configure`` prints the exact ``make`` command to run next; execute it. If you also need normal mode eigenvalue problems, repeat with a complex arch:
 
-Afterwards, add the following to ``~/.bashrc`` inside WSL so the variables are set in every new terminal:
+.. code:: bash
+
+	export PETSC_ARCH=pyoomph_petsc_arch_complex
+	./configure --with-mpi  --with-petsc4py --with-slepc4py --download-mumps=yes --download-parmetis=yes --download-ptscotch=yes --download-slepc=yes --download-superlu=yes --download-superlu_dist=yes --download-suitesparse=yes --download-metis=yes --download-scalapack --with-scalar-type=complex
+
+and execute the ``make`` command it prints, as before. Note that ``--download-hypre`` is dropped for the complex arch, since HYPRE only supports real-valued matrices (see :numref:`petscslepc` for details); MUMPS remains the factorization backend used via ``use_mumps()`` either way.
+
+Afterwards, add the following to ``~/.bashrc`` inside WSL so the variables are set in every new terminal (use the ``pyoomph_petsc_arch_complex`` arch here instead if you mainly need normal mode eigenvalue problems; only one arch can be active per process, see :numref:`petscslepc` for how to switch between them):
 
 .. code:: bash
 
 	export PETSC_DIR=A_FOLDER_OF_YOUR_CHOICE/petsc
-	export PETSC_ARCH=pyoomph_petsc_arch
+	export PETSC_ARCH=pyoomph_petsc_arch_real
 	export PYTHONPATH=$PYTHONPATH:$PETSC_DIR/$PETSC_ARCH/lib
 
 You can then select SLEPc with MUMPS as eigensolver, either in your driver script

@@ -185,22 +185,58 @@ def _set_pardiso_solver() -> bool:
 		return False
 
 
+def _set_petsc_mumps_solver() -> bool:
+	try:
+		from .solvers.petsc import PETSc,PETSCMUMPSSolver,SlepcMUMPSEigenSolver #type:ignore
+		if not PETSc.Sys.hasExternalPackage("mumps"):
+			return False
+		set_default_linear_solver("petsc_mumps")
+		set_default_eigen_solver("slepc_mumps")
+		return True
+	except:
+		return False
+
+
 def _set_superlu_fallback() -> None:
 	from .solvers.scipy import SuperLUSerial,ScipyEigenSolver #type:ignore
 	set_default_linear_solver("superlu")
 	set_default_eigen_solver("scipy")
 
 
+
 _is_macos = (sys.platform == "darwin")
 _machine = platform.machine().lower()
 _is_arm64 = _machine in ("arm64", "aarch64")
 
+def _warn_suboptimal_solver(name:str) -> None:
+	import warnings
+	suggestion="PETSc/SLEPc compiled with MUMPS support" if (_is_macos and _is_arm64) else "pardiso (via Intel MKL)"
+	warnings.warn(
+		"pyoomph is falling back to the '"+name+"' solver, since no better solver was found. For better performance, consider "
+		"installing "+suggestion+" -- see https://pyoomph.readthedocs.io/en/latest/tutorial/installation/ for "
+		"instructions.",
+		RuntimeWarning,
+		stacklevel=2,
+	)
+
+
 if _is_macos and _is_arm64:
-	if not _set_accelerate_solver():
-		_set_superlu_fallback()
+	if not _set_petsc_mumps_solver():
+		if _set_accelerate_solver():
+			_warn_suboptimal_solver("accelerate")
+		else:
+			_set_superlu_fallback()
+			_warn_suboptimal_solver("superlu")
 elif _is_macos:
-	if not _set_pardiso_solver() and not _set_accelerate_solver():
-		_set_superlu_fallback()
+	if not _set_pardiso_solver():
+		if not _set_petsc_mumps_solver():
+			if _set_accelerate_solver():
+				_warn_suboptimal_solver("accelerate")
+			else:
+				_set_superlu_fallback()
+				_warn_suboptimal_solver("superlu")
 else:
 	if not _set_pardiso_solver():
-		_set_superlu_fallback()
+		if not _set_petsc_mumps_solver():
+			_set_superlu_fallback()
+			_warn_suboptimal_solver("superlu")

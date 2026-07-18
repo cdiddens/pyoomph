@@ -146,13 +146,13 @@ if arglist.command == "cbrange":
    if len(rest) < 2:
       raise RuntimeError(
          "Require at least two input plot directories to merge the cb_ranges")
-   merged:Dict[int,Dict[str,Tuple[float,float]]] = {}
+   merged:Dict[int,Dict[str,List[float]]] = {}
    for d in rest:
       gl = glob(os.path.join(d, "cb_ranges_*.txt"))
       gldict={}
       for entry in gl:
          num=int(entry.split("_")[-1].rstrip(".txt"))
-         data:Dict[str,Tuple[float,float]]=json.load(open(entry,"r"))
+         data:Dict[str,List[float]]=json.load(open(entry,"r"))
          if num in merged.keys():
             for d,v in data.items():
                if d in merged[num].keys():
@@ -182,7 +182,7 @@ elif arglist.command=="check":
          from .solvers.generic import GenericLinearSystemSolver
          p=Problem()
                
-         sublist={"pardiso","superlu","accelerate"}
+         sublist={"pardiso","superlu","accelerate","petsc","petsc_mumps"}
          #if arglist.check_name not in sublist:
          #   raise RuntimeError("Can only check the following: "+str(sublist))
          if arglist.check_name=="all":
@@ -198,16 +198,15 @@ elif arglist.command=="check":
             if check=="accelerate" and not (is_mac_x86_64 or is_mac_arm64):               
                print("","skipping on non-macOS")
                continue
-            
-            print("Checking "+check_type+" / "+check)         
+                        
             try:
                GenericLinearSystemSolver.factory_solver(check,p)
                print("","loading seems to work")
                try:
                   test_solver(check)
-                  print("","running seems to work")
+                  print("","","running seems to work")
                except Exception as e:
-                  print("","running does not work: "+str(e.with_traceback(None)))
+                  print("","","running does not work: "+str(e.with_traceback(None)))
                   if check=="pardiso":
                      print("Hint: Try downgrading MKL Pardiso via")
                      print("","pip install mkl==2021.4.0")
@@ -221,7 +220,7 @@ elif arglist.command=="check":
          from .solvers.generic import GenericEigenSolver
          p=Problem()
                
-         sublist={"pardiso","scipy","accelerate"}
+         sublist={"pardiso","scipy","accelerate","slepc","slepc_mumps"}
          #if arglist.check_name not in sublist:
          #   raise RuntimeError("Can only check the following: "+str(sublist))
          if arglist.check_name=="all":
@@ -242,9 +241,9 @@ elif arglist.command=="check":
                print("","loading seems to work")
                try:
                   test_eigen(check)
-                  print("","running seems to work")
+                  print("","","running seems to work")
                except Exception as e:
-                  print("","running does not work: "+str(e.with_traceback(None)))
+                  print("","","running does not work: "+str(e.with_traceback(None)))
                   
             except Exception as e:
                print("","does not work: "+str(e.with_traceback(None)))
@@ -265,9 +264,9 @@ elif arglist.command=="check":
                   print("","loading seems to work")
                   try:
                      test_compiler(to_check)
-                     print("","running seems to work")
+                     print("","","running seems to work")
                   except Exception as e:
-                     print("","C compilation seems to work: "+str(e.with_traceback(None)))
+                     print("","","C compilation seems to work: "+str(e.with_traceback(None)))
                else:
                   raise RuntimeError("Sanity check not working...")
             except Exception as e:
