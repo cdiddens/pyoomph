@@ -858,8 +858,14 @@ class Problem(_pyoomph.Problem):
         self._meshtemplate_list = []
         self._meshdict:Dict[str,"AnyMesh"] = {}
         self.invalidate_cached_mesh_data()
-        self.invalidate_eigendata()        
+        self.invalidate_eigendata()
         self.flush_sub_meshes()
+        # Close the log file (if any) now, rather than waiting for the C++ Problem
+        # object's destructor: on Windows, a still-open log file handle prevents the
+        # containing directory from being deleted (WinError 32), which bites e.g.
+        # test_solver()/test_compiler() in __main__.py, whose TemporaryDirectory
+        # cleanup runs before this Python wrapper object is garbage-collected.
+        self._open_log_file("",False)
         self._unload_all_dlls()
         gc.collect()
         gc.collect()
