@@ -72,10 +72,14 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          # --find-links + no-index lets pip pick the wheel matching this
-          # interpreter's own ABI tag out of the downloaded cp310..cp315 set,
-          # rather than us having to hand-construct the cpXYZ tag ourselves.
-          python -m pip install --no-index --find-links=wheelhouse pyoomph
+          # Pick the one wheel in wheelhouse matching this interpreter's own ABI
+          # tag out of the downloaded cp310..cp315 set, and install that exact
+          # file directly (rather than --no-index --find-links, which would also
+          # block pip from reaching PyPI for pyoomph's own dependencies).
+          PYTAG="cp$(python -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')"
+          WHEEL=$(ls wheelhouse/pyoomph-*-"${PYTAG}"-*win_amd64.whl)
+          echo "Installing ${WHEEL}"
+          python -m pip install "${WHEEL}"
 
       - name: Run pyoomph check all
         shell: bash
