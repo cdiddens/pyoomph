@@ -269,8 +269,7 @@ void PeriodicBSplineBasis::sanity_check() const
 		double L=knots.back()-knots.front();
 		if (std::abs(integral_sum-L)>1e-8) throw_runtime_error("Sanity check failed for the B-spline basis: N="+std::to_string(knots.size())+", k="+std::to_string(k)+", L="+std::to_string(L)+" != integral="+std::to_string(integral_sum));
 		if (std::abs(dintegral_sum)>1e-8) throw_runtime_error("Sanity check failed for the B-spline basis: N="+std::to_string(knots.size())+", k="+std::to_string(k)+", dintegral="+std::to_string(dintegral_sum));
-
-		std::cout << "SANITY CHECK PASSED" << integral_sum << " " << dintegral_sum << " THIS CAN BE REMOVED SOON" << std::endl;
+		
 }
 
 // Look up the precomputed Gauss-Legendre integration data for element i (0-based, in
