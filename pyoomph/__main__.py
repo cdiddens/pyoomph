@@ -251,6 +251,12 @@ elif arglist.command=="check":
       elif check_type=="compiler":
          from .generic.ccompiler import BaseCCompiler
          compilers={"system"}
+         if sys.platform == "win32":
+            install_doc_url="https://pyoomph.readthedocs.io/en/latest/tutorial/installation/pypa.html#windows"
+         elif sys.platform == "darwin":
+            install_doc_url="https://pyoomph.readthedocs.io/en/latest/tutorial/installation/pypa.html#mac"
+         else:
+            install_doc_url="https://pyoomph.readthedocs.io/en/latest/tutorial/installation/pypa.html#linux"
          if arglist.check_name=="all":
             checklist=list(compilers)
          else:
@@ -284,11 +290,13 @@ elif arglist.command=="check":
                      pass
                if located is False:
                   print("","does not work: compiler toolchain not found (e.g. no Visual Studio/Build Tools installation located)")
+                  print("","For instructions on how to install a compiler, see "+install_doc_url)
                elif located is True:
                   print("","toolchain found, but the sanity check failed - this can happen e.g. if the "
                             "temporary directory used for the test could not be written to: "+str(e.with_traceback(None)))
                else:
                   print("","does not work: "+str(e.with_traceback(None)))
+                  print("","For instructions on how to install a compiler, see "+install_doc_url)
       else:
          raise RuntimeError("TODO: ")
 else:
