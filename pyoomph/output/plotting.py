@@ -2377,8 +2377,8 @@ class MatplotlibPlotter(BasePlotter):
         if self.load_cb_ranges_dir!="":
             fn=os.path.join(self.load_cb_ranges_dir,"cb_ranges_{:05d}.txt".format(self._output_step))
             try:
-                f=open(fn,"r")
-                data=json.load(f)
+                with open(fn,"r") as f:
+                    data=json.load(f)
                 if key in data.keys():
                     print("Using colorbar ranges for '"+key+"' from '"+fn+"'")
                     return MatplotLibPersistentRange(data[key][0],data[key][1],"fixed")
@@ -2411,15 +2411,15 @@ class MatplotlibPlotter(BasePlotter):
                 plt.savefig(fn,dpi=self.dpi,facecolor=self.background_color) #type:ignore
         if self.write_cb_range_files and self.load_cb_ranges_dir=="":
             os.makedirs(os.path.join(pdir,"_cb_ranges"),exist_ok=True)
-            f=open(os.path.join(pdir,"_cb_ranges","cb_ranges_{:05d}.txt".format(self._output_step)),"w")
-            
+
             #f.write("cb_ranges={}\n")
             odict:Dict[str,Tuple[float,float]]={}
             for nam,rang in self._range_objects.items():
                 odict[nam]=(rang.vmin,rang.vmax)
-                #f.write('cb_ranges["'+nam+'"]=['+str(rang.vmin)+', '+str(rang.vmax)+']\n')                
+                #f.write('cb_ranges["'+nam+'"]=['+str(rang.vmin)+', '+str(rang.vmax)+']\n')
 
-            json.dump(odict,f)
+            with open(os.path.join(pdir,"_cb_ranges","cb_ranges_{:05d}.txt".format(self._output_step)),"w") as f:
+                json.dump(odict,f)
                 
 
 
