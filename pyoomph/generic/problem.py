@@ -2500,7 +2500,11 @@ class Problem(_pyoomph.Problem):
         _pyoomph._write_to_log_file("Python path: "+str(sys.path)+os.linesep)
         _pyoomph._write_to_log_file("Platform: "+str(sys.platform)+os.linesep)
         #modules={modul.__name__:getattr(modul,"__version__","UNKNOWN") for _,modul in sys.modules if isinstance(modul, types.ModuleType)}
-        modules= {m.__name__:m.__version__ for m in sorted(sys.modules.values(),key=lambda a : getattr(a,"__name__","")) if hasattr(m,"__name__") and hasattr(m,"__version__") and len(m.__name__.split("."))==1}
+        # Check the dotted-name length before hasattr(m,"__version__"): some
+        # submodules (e.g. numpy.core, kept only as a deprecated compat shim
+        # since numpy 2.0) raise a DeprecationWarning on any attribute access,
+        # so they must be filtered out by name first rather than probed.
+        modules= {m.__name__:m.__version__ for m in sorted(sys.modules.values(),key=lambda a : getattr(a,"__name__","")) if hasattr(m,"__name__") and len(m.__name__.split("."))==1 and hasattr(m,"__version__")}
         _pyoomph._write_to_log_file("Loaded module versions: "+str(modules)+os.linesep)                
         _pyoomph._write_to_log_file("Log file started: "+str(datetime.datetime.now())+os.linesep)
         _pyoomph._write_to_log_file("####################"+os.linesep)
