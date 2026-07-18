@@ -51,7 +51,6 @@ from ..solvers.generic import DefaultMatrixType, EigenSolverWhich, GenericLinear
 #from ..solvers.scipy import SuperLUSerial,ScipyEigenSolver
 from ..expressions.units import *
 from ..expressions import get_global_symbol,cartesian,axisymmetric,axisymmetric_flipped,radialsymmetric,BaseCoordinateSystem,nondim,testfunction,evaluate_in_past,weak,OptionalCoordinateSystem
-from ..solvers.load_solver_from_cmd_line import *
 from ..solvers.generic import get_default_linear_solver,get_default_eigen_solver
 from ..meshes.interpolator import _DefaultInterpolatorClass,ODEInterpolator 
 from ..output.states import DumpFile
