@@ -259,7 +259,16 @@ int main (int argc, char **argv) {
         if self.comp.compiler_type == "msvc": #type:ignore
             link_extra_postargs = ["/DLL"]            
 
-        src=os.path.relpath(self.get_code_filename())
+        try:
+            src=os.path.relpath(self.get_code_filename())
+        except ValueError:
+            # os.path.relpath() cannot express a path across drive letters on
+            # Windows (e.g. the output/temp directory on D: while the current
+            # working directory is on C: -- happens on GitHub's hosted Windows
+            # runners, and for any user keeping code and output on separate
+            # drives). relpath() here is purely cosmetic (shorter compiler
+            # command line); the absolute path compiles just as well.
+            src=self.get_code_filename()
         #print("Compiling "+src+" to shared library "+self.get_lib_filename()+" with compiler "+str(self.comp.compiler_type)+" i.e. "+self.comp.compiler_so[0]) #type:ignore
         obj=self.comp.compile([src],extra_preargs=preargs,extra_postargs=preargs,debug=os.environ.get('PYOOMPH_DEBUG') == "1")
         self.comp.link(self.comp.SHARED_LIBRARY, obj,self.get_lib_filename(),extra_postargs=link_extra_postargs) #type:ignore
