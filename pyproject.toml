@@ -92,10 +92,17 @@ manylinux-x86_64-image = "manylinux_2_28"
 skip = "*-musllinux_*"
 build-frontend = { name = "pip", args = ["--no-build-isolation", "--verbose", "--no-clean"] }
 
-    
+
 test-requires = "pytest"
 test-command = "pytest {package}/tests" # does not work, since the gmsh library has unresolvable requirements
 test-sources = ["tests"]
+# cp315 wheels build fine, but the test-install step pulls in scipy as a
+# runtime dependency, and scipy has no prebuilt wheel yet for cp315 (Python
+# 3.15 is still pre-release) on any platform. Pip then falls back to
+# building scipy from source, which fails (missing gfortran on macOS,
+# missing OpenBLAS on manylinux). Skip testing cp315 until scipy publishes
+# 3.15 wheels; the built pyoomph wheel itself is unaffected.
+test-skip = "cp315-*"
 # CMake now downloads+builds GiNaC/CLN itself (see cmake/ThirdPartyGiNaC.cmake)
 # instead of the old citools/download_and_build_static_ginac.sh script, so
 # wheel builds just need to turn that on. This is the default for all OSes

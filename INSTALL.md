@@ -1,6 +1,6 @@
 # Installation
 
-When you have python 3.10 to 3.15 (CPython, 64-bit) installed, 
+When you have python 3.10 to 3.14 (CPython, 64-bit) installed, 
 
 > python -m pip install pyoomph
 
