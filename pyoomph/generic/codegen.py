@@ -560,6 +560,14 @@ class BaseEquations(_pyoomph.Equations):
     def after_remeshing(self,eqtree:"EquationTree"):
         pass
 
+    def _release_output_files(self)->None:
+        # Overridden by GenericOutput (see output/generic.py) to close any open output
+        # file handles it holds, so Problem.release() can close them proactively instead
+        # of leaving them for eventual garbage collection -- on Windows, a still-open
+        # output file prevents deleting its containing directory (WinError 32), the same
+        # class of bug fixed for the problem log file and compiled DLLs.
+        pass
+
     def before_mesh_to_mesh_interpolation(self,eqtree:"EquationTree",interpolator:"BaseMeshToMeshInterpolator"):
         pass
 
@@ -2644,6 +2652,11 @@ class CombinedEquations(Equations):
             if isinstance(e, BaseEquations):  #type:ignore
                 e.after_remeshing(eqtree)
         self._rstr_final_elem(bck)
+
+    def _release_output_files(self)->None:
+        for e in self._subelements:
+            if isinstance(e, BaseEquations):  #type:ignore
+                e._release_output_files()
 
     def after_mapping_on_macro_elements(self):
         bck = self._bckup_final_elem()

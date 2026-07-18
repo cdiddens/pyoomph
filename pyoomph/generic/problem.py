@@ -837,21 +837,29 @@ class Problem(_pyoomph.Problem):
     def release(self):
         def release_spatial_mesh(m:AnySpatialMesh):
             cg=m.get_code_gen()
-            cg._code=None 
+            cg._code=None
             cg._problem=None
-            for im in m._interfacemeshes.values(): 
+            for im in m._interfacemeshes.values():
                 release_spatial_mesh(im)
-     
-            m._interfacemeshes.clear() 
-            m._eqtree._equations=None 
+
+            m._interfacemeshes.clear()
+            # Close any output file handles (e.g. ODEFileOutput/IntegralObservableOutput)
+            # held open by this mesh's equations before dropping the reference to them --
+            # see the log-file comment further below for why this must happen proactively
+            # rather than being left to eventual garbage collection.
+            if m._eqtree is not None and m._eqtree._equations is not None:
+                m._eqtree._equations._release_output_files()
+            m._eqtree._equations=None
             m._eqtree=None #type:ignore
 
         for m in self._meshdict.values():
             if not isinstance(m,ODEStorageMesh):
                 release_spatial_mesh(m)
             else:
-                m._eqtree=None 
-                m._element=None 
+                if m._eqtree is not None and m._eqtree._equations is not None:
+                    m._eqtree._equations._release_output_files()
+                m._eqtree=None
+                m._element=None
 
         self._lasolver:Optional[Union[str,GenericLinearSystemSolver]] = None
         self._eigensolver:Optional[Union[str,GenericEigenSolver]] = None

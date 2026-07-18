@@ -78,6 +78,14 @@ class _BaseOutputter:
     def clean_up(self)->None:
         pass
 
+    def close(self)->None:
+        # Close any open output file handle(s). Unlike clean_up() (called after every
+        # single output() step for transient per-step state), this is only called once,
+        # by Problem.release(), to release persistently-held file handles (e.g. a
+        # once-opened, append-mode file written to across the whole run) proactively
+        # instead of leaving them for eventual garbage collection.
+        pass
+
     def set_active_on_stages(self,stages:Optional[Union[str,Set[str]]]):
         if stages is not None:
             if isinstance(stages,str):
@@ -673,7 +681,12 @@ class _ODEFileOutput(_BaseODEOutput):
         self._eqtree=eqtree
         self.first_column=first_column
         self.continue_info=continue_info
-        
+
+    def close(self)->None:
+        if self.file is not None:
+            self.file.close()
+            self.file=None
+
     def change_output_directory(self,newdir:str,eqtree:"EquationTree"):
         oldname=self.fname
         self.fname = os.path.join(newdir, os.path.basename(self.fname))        
@@ -827,6 +840,10 @@ class GenericOutput(BaseEquations):
     def after_remeshing(self,eqtree:"EquationTree"):
         for _,out in self._outputter.items():
             out.after_remeshing(eqtree)
+
+    def _release_output_files(self)->None:
+        for out in self._outputter.values():
+            out.close()
 
     def _construct_outputter_for_eq_tree(self,eqtree:"EquationTree",continue_info:Optional[Dict[str,Any]],mpirank:int)->_BaseOutputter:
         raise NotImplementedError("Implement this")
@@ -1023,6 +1040,11 @@ class _IntegralObservableOutput(_BaseOutputter):
         self._files:Dict[str,Any]={}
         self._continue_info=continue_info
         self.first_column=first_column
+
+    def close(self)->None:
+        for f in self._files.values():
+            f.close()
+        self._files={}
 
     def after_remeshing(self,eqtree:"EquationTree"):
         self._mesh=eqtree.get_mesh()
