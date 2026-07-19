@@ -3,7 +3,7 @@ stubfile=sys.argv[1]
 
 with open(stubfile, 'r') as file :
 	filedata = file.read()
-    
+
 def patch_stub(sea:str,repl:str,ignore_if_not_found:bool=False):
 	global filedata
 	if (not ignore_if_not_found) and filedata.count(sea)==0:
@@ -12,44 +12,15 @@ def patch_stub(sea:str,repl:str,ignore_if_not_found:bool=False):
 	pass
 
 
-try:
-	patch_stub("GiNaC_field(id: str, code: FiniteElementCode, tags: list[str]) -> Expression","GiNaC_field(id: str, code: typing.Optional[FiniteElementCode], tags: list[str]) -> Expression")
-
-	patch_stub("GiNaC_nondimfield(id: str, code: FiniteElementCode, tags: list[str]) -> Expression","GiNaC_nondimfield(id: str, code: typing.Optional[FiniteElementCode], tags: list[str]) -> Expression")
-
-	patch_stub("GiNaC_scale(id: str, code: FiniteElementCode, tags: list[str]) -> Expression","GiNaC_scale(id: str, code: typing.Optional[FiniteElementCode], tags: list[str]) -> Expression")
-
-	patch_stub("GiNaC_testscale(id: str, code: FiniteElementCode, tags: list[str]) -> Expression","GiNaC_testscale(id: str, code: typing.Optional[FiniteElementCode], tags: list[str]) -> Expression")
-
-	patch_stub("GiNaC_dimtestfunction(arg0: str, arg1: FiniteElementCode, arg2: list[str]) -> Expression","GiNaC_dimtestfunction(arg0: str, arg1: typing.Optional[FiniteElementCode], arg2: list[str]) -> Expression")
-
-	patch_stub("GiNaC_testfunction(arg0: str, arg1: FiniteElementCode, arg2: list[str]) -> Expression","GiNaC_testfunction(arg0: str, arg1: typing.Optional[FiniteElementCode], arg2: list[str]) -> Expression")
-
-	patch_stub("GiNaC_eval_in_domain(expr: Expression, code: FiniteElementCode, tags: list[str]) -> Expression","GiNaC_eval_in_domain(expr: Expression, code: typing.Optional[FiniteElementCode], tags: list[str]) -> Expression")
-
-	patch_stub("set_macro_element(self, arg0: MacroElement, arg1: bool) -> None","set_macro_element(self, arg0: typing.Optional[MacroElement], arg1: bool) -> None")
-
-	patch_stub("_set_current_codegen(self, codegen: FiniteElementCode) -> None","_set_current_codegen(self, codegen: typing.Optional[FiniteElementCode]) -> None")
-
-	patch_stub("_resolve_based_on_domain_name(self, domainname: str) -> FiniteElementCode","_resolve_based_on_domain_name(self, domainname: str) -> typing.Optional[FiniteElementCode]")
-except:
-	pass
-
-patch_stub("set_latex_printer(self, printer: LaTeXPrinter) -> None","set_latex_printer(self, printer: typing.Optional[LaTeXPrinter]) -> None")
-
-patch_stub("_get_parent_domain(self) -> FiniteElementCode","_get_parent_domain(self) -> typing.Optional[FiniteElementCode]")
-patch_stub("_get_opposite_interface(self) -> FiniteElementCode","_get_opposite_interface(self) -> typing.Optional[FiniteElementCode]")
-
-patch_stub("_set_problem(self, problem: Problem, code_instance: DynamicBulkElementInstance) -> None","_set_problem(self, problem: Problem, code_instance: typing.Optional[DynamicBulkElementInstance]) -> None")
-
-
-patch_stub("import numpy","import numpy; import numpy.typing")
-patch_stub("numpy.ndarray[numpy.float64]","numpy.typing.NDArray[numpy.float64]",True)
-patch_stub("numpy.ndarray[numpy.int32]","numpy.typing.NDArray[numpy.int32]",True)
-patch_stub("numpy.ndarray[numpy.uint64]","numpy.typing.NDArray[numpy.uint64]",True)
-patch_stub("numpy.ndarray[numpy.uint32]","numpy.typing.NDArray[numpy.uint32]",True)
+# nanobind.stubgen (unlike the old pybind11-stubgen) already infers "| None" for
+# nullable-pointer parameters and already emits "numpy.typing.NDArray[...]" directly, so
+# most of the old patches for those are no longer needed. What it does NOT infer is
+# nullability of *return* values, since that isn't statically knowable from the binding -
+# these three methods can return None (documented as such), so patch their return type.
+patch_stub("def _get_parent_domain(self) -> FiniteElementCode:","def _get_parent_domain(self) -> FiniteElementCode | None:")
+patch_stub("def _get_opposite_interface(self) -> FiniteElementCode:","def _get_opposite_interface(self) -> FiniteElementCode | None:")
+patch_stub("def _resolve_based_on_domain_name(self, domainname: str) -> FiniteElementCode:","def _resolve_based_on_domain_name(self, domainname: str) -> FiniteElementCode | None:")
 
 # Write the file out again
 with open(stubfile, 'w') as file:
   file.write(filedata)
-

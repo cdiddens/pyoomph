@@ -79,8 +79,12 @@ def main() -> int:
     # nanobind.stubgen always writes a single flat "<module>.pyi" file (no
     # "<module>/__init__.pyi" package-directory form the way pybind11-stubgen
     # could produce for modules with submodules).
+    # -P/--include-private: pyoomph's Python layer calls a number of leading-underscore
+    # methods directly (e.g. _set_current_codegen, _resolve_based_on_domain_name), which
+    # nanobind.stubgen omits by default (unlike the old pybind11-stubgen, which always
+    # included them) - keep them in the stub so editors/type-checkers can resolve them.
     base_cmd = [args.python, "-m", "nanobind.stubgen",
-                "-m", args.module_name, "-O", str(stage_dir)]
+                "-m", args.module_name, "-O", str(stage_dir), "-P"]
 
     result = run(base_cmd, env=env)
     if result.returncode != 0:
