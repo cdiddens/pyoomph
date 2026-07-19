@@ -447,6 +447,17 @@ namespace pyoomph
     virtual void actions_after_parameter_increase(const  std::string &  ) {}
     void actions_after_change_in_bifurcation_parameter() override {}
     void actions_before_newton_convergence_check() override {}
+    // Also expose these oomph-lib hooks (protected there) as public: nanobind's trampoline
+    // dispatch (unlike pybind11's) requires a public base binding under the same name to detect
+    // whether a Python subclass has overridden the hook.
+    using oomph::Problem::actions_before_newton_solve;
+    using oomph::Problem::actions_after_newton_solve;
+    using oomph::Problem::actions_before_newton_step;
+    using oomph::Problem::actions_after_newton_step;
+    #ifdef OOMPH_HAS_MPI
+    using oomph::Problem::actions_before_distribute;
+    using oomph::Problem::actions_after_distribute;
+    #endif
 
     virtual void _build_mesh() { throw_runtime_error("You must implement the function _build_mesh for load_balancing"); } // Overridden in Python to (re)build the mesh; required for MPI load balancing
     #ifdef OOMPH_HAS_MPI

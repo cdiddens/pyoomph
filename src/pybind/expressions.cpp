@@ -30,6 +30,7 @@ The main author may be contacted at c.diddens@utwente.nl
 #include <nanobind/stl/map.h>
 #include <nanobind/stl/function.h>
 #include <nanobind/stl/complex.h>
+#include <nanobind/stl/set.h>
 
 #include "nb_array_utils.hpp"
 

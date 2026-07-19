@@ -30,9 +30,15 @@ The main author may be contacted at c.diddens@utwente.nl
 #include <nanobind/stl/set.h>
 #include <nanobind/stl/map.h>
 #include <nanobind/stl/tuple.h>
+#include <nanobind/stl/complex.h>
+#include <nanobind/stl/function.h>
 namespace nb = nanobind;
 
+#include <memory>
+#include <functional>
+
 #include "nb_array_utils.hpp"
+#include "mesh_handle.hpp"
 
 #include "../mesh.hpp"
 #include "../nodes.hpp"
@@ -169,24 +175,118 @@ namespace pyoomph
 		}
 	};
 
-	
+}
 
+// --- MeshHandle machinery ---------------------------------------------------------------
+// See mesh_handle.hpp for MeshHandleBase itself and why it exists (nanobind cannot safely cast
+// across pyoomph::Mesh's virtual inheritance chain). The concrete MeshHandle<T> wrappers and the
+// mesh_method/oomph_mesh_method/handle_method adapters below are only needed here.
+
+template <class T>
+class MeshHandle : public MeshHandleBase
+{
+public:
+	std::unique_ptr<T> obj;
+	MeshHandle() : obj(new T())
+	{
+		pyoomph_mesh_handle_registry()[mesh()] = this;
+	}
+	~MeshHandle() override
+	{
+		pyoomph_mesh_handle_registry().erase(mesh());
+	}
+	T *get() const { return obj.get(); }
+	pyoomph::Mesh *mesh() const override { return dynamic_cast<pyoomph::Mesh *>(obj.get()); }
+	oomph::Mesh *oomph_mesh() const override { return dynamic_cast<oomph::Mesh *>(obj.get()); }
+};
+
+using TemplatedMeshBase1dHandle = MeshHandle<pyoomph::TemplatedMeshBase1d>;
+using TemplatedMeshBase2dHandle = MeshHandle<pyoomph::TemplatedMeshBase2d>;
+using TemplatedMeshBase3dHandle = MeshHandle<pyoomph::TemplatedMeshBase3d>;
+using InterfaceMeshHandle = MeshHandle<pyoomph::InterfaceMesh>;
+using ODEStorageMeshHandle = MeshHandle<pyoomph::ODEStorageMesh>;
+
+// Adapts a callable or pointer-to-member-function expecting (T*, Args...) as its first parameter
+// into one usable directly as an nb::class_<MeshHandleBase (or MeshHandle<T>)> method, converting
+// the handle to the right T* via "Getter" (a pointer-to-member-function of Handle, e.g.
+// &MeshHandleBase::mesh, evaluated with a real dynamic_cast at call time; see mesh_handle.hpp for
+// why this is needed instead of just letting nanobind cast between the registered types directly).
+//
+// nanobind inspects the exact (non-template) signature of whatever is passed to .def(...), so
+// these cannot just be a single generic (auto&&...) lambda -- that has no fixed signature nanobind
+// could bind. Instead, each is a pair of overloads disambiguated by ordinary C++ overload
+// resolution: one directly matching "f is a pointer-to-member-function of T" (e.g.
+// &pyoomph::Mesh::nelement, where self is implicit), and a generic fallback for any other callable
+// (e.g. a lambda explicitly declaring T* as its first parameter), which peels off that first
+// parameter's type via decltype(&F::operator()) and replaces it with the handle.
+template <typename Handle, auto Getter, typename T, typename R, typename... Args>
+auto handle_method_for(R (T::*f)(Args...))
+{
+	return [f](Handle *h, Args... args) -> R
+	{ return (((h->*Getter)())->*f)(args...); };
+}
+template <typename Handle, auto Getter, typename T, typename R, typename... Args>
+auto handle_method_for(R (T::*f)(Args...) const)
+{
+	return [f](Handle *h, Args... args) -> R
+	{ return (((h->*Getter)())->*f)(args...); };
+}
+template <typename Handle, auto Getter, typename F, typename C, typename R, typename Self, typename... Args>
+auto handle_method_impl(F f, R (C::*)(Self, Args...) const)
+{
+	return [f](Handle *h, Args... args) -> R
+	{ return f((h->*Getter)(), args...); };
+}
+template <typename Handle, auto Getter, typename F, typename C, typename R, typename Self, typename... Args>
+auto handle_method_impl(F f, R (C::*)(Self, Args...))
+{
+	return [f](Handle *h, Args... args) mutable -> R
+	{ return f((h->*Getter)(), args...); };
+}
+template <typename Handle, auto Getter, typename F>
+auto handle_method_for(F f)
+{
+	return handle_method_impl<Handle, Getter>(f, &F::operator());
+}
+
+template <typename T, typename R, typename... Args>
+auto mesh_method(R (T::*f)(Args...)) { return handle_method_for<MeshHandleBase, &MeshHandleBase::mesh>(f); }
+template <typename T, typename R, typename... Args>
+auto mesh_method(R (T::*f)(Args...) const) { return handle_method_for<MeshHandleBase, &MeshHandleBase::mesh>(f); }
+template <typename F>
+auto mesh_method(F f) { return handle_method_for<MeshHandleBase, &MeshHandleBase::mesh>(f); }
+
+template <typename T, typename R, typename... Args>
+auto oomph_mesh_method(R (T::*f)(Args...)) { return handle_method_for<MeshHandleBase, &MeshHandleBase::oomph_mesh>(f); }
+template <typename T, typename R, typename... Args>
+auto oomph_mesh_method(R (T::*f)(Args...) const) { return handle_method_for<MeshHandleBase, &MeshHandleBase::oomph_mesh>(f); }
+template <typename F>
+auto oomph_mesh_method(F f) { return handle_method_for<MeshHandleBase, &MeshHandleBase::oomph_mesh>(f); }
+
+// Same idea as mesh_method/oomph_mesh_method above, but for methods specific to one concrete
+// mesh kind (e.g. TemplatedMeshBase1d::setup_tree_forest): adapts a callable/pointer-to-member
+// expecting (T*, Args...) into one usable directly on nb::class_<MeshHandle<T>>.
+template <typename Handle, typename F>
+auto handle_method(F f)
+{
+	return handle_method_for<Handle, &Handle::get>(f);
 }
 
 using namespace nanobind::literals;
 
 static nb::class_<oomph::Data> *py_decl_OomphData = NULL;
-static nb::class_<oomph::Mesh> *py_decl_OomphMesh = NULL;
-static nb::class_<pyoomph::Mesh, oomph::Mesh> *py_decl_PyoomphMesh = NULL;
+static nb::class_<MeshHandleBase> *py_decl_MeshHandleBase = NULL;
 static nb::class_<oomph::GeneralisedElement> * py_decl_GeneralisedElement =NULL;
 // Pre-declares the classes that are mutually referenced further down (e.g. Node derives from
-// OomphData, and several methods on OomphGeneralisedElement/OomphMesh return Node/Mesh pointers),
+// OomphData, and several methods on OomphGeneralisedElement/Mesh return Node/Mesh pointers),
 // so that these forward declarations can be filled in with their methods later in PyReg_Mesh.
+// Note: oomph::Mesh/pyoomph::Mesh are no longer separately exposed to Python -- MeshHandleBase
+// (registered under the historical name "Mesh") takes their place; see the MeshHandle machinery
+// above for why.
 void PyDecl_Mesh(nb::module_ &m)
 {
 	py_decl_OomphData = new nb::class_<oomph::Data>(m, "OomphData", "Base class of oomph-lib for a container of nodal/internal/external double values that can be pinned (Dirichlet-constrained) or free (unknowns of the linear system)");
-	py_decl_OomphMesh = new nb::class_<oomph::Mesh>(m, "OomphMesh", "Base class of oomph-lib for a mesh, i.e. a collection of elements and nodes");
-	py_decl_PyoomphMesh = new nb::class_<pyoomph::Mesh, oomph::Mesh>(m, "Mesh", "pyoomph's extended mesh class, adding e.g. boundary handling, error estimation control and (de)serialization on top of oomph-lib's OomphMesh");
+	py_decl_MeshHandleBase = new nb::class_<MeshHandleBase>(m, "Mesh", "pyoomph's extended mesh class, adding e.g. boundary handling, error estimation control and (de)serialization on top of oomph-lib's mesh class");
 	py_decl_GeneralisedElement=new nb::class_<oomph::GeneralisedElement>(m, "OomphGeneralisedElement", "Base class of oomph-lib for any element (bulk, interface, ODE, ...) that contributes degrees of freedom and residuals/Jacobians to a problem");
 }
 
@@ -294,8 +394,9 @@ void PyReg_Mesh(nb::module_ &m)
 		}, nb::arg("boundary_index"), "Returns the intrinsic boundary coordinate(s) zeta of this node on the given mesh boundary")
 		// Ties a slave node to a master node so they share the same degrees of freedom (used for periodic boundaries).
 		// Resolves any pre-existing copy-master relations first and raises an error if that leads to an inconsistency.
-		.def("_make_periodic", [](pyoomph::Node *slv, pyoomph::Node *mst, pyoomph::Mesh *mesh)
+		.def("_make_periodic", [](pyoomph::Node *slv, pyoomph::Node *mst, MeshHandleBase *mesh_h)
 			 {
+	    pyoomph::Mesh *mesh=mesh_h->mesh();
 	    pyoomph::Node * imst=mst;
 	    if (mst->is_a_copy())
 	    {
@@ -842,63 +943,63 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("external_data_pt", (oomph::Data * &(oomph::GeneralisedElement::*)(const unsigned &)) & oomph::GeneralisedElement::external_data_pt, nb::rv_policy::reference, nb::arg("external_data_index"), "Returns the external Data object (a dof owned by another element that this element also depends on) at the given index")
 		.def("internal_data_pt", (oomph::Data * &(oomph::GeneralisedElement::*)(const unsigned &)) & oomph::GeneralisedElement::internal_data_pt, nb::rv_policy::reference, nb::arg("internal_data_index"), "Returns the internal Data object (a dof not tied to a node) at the given index");
 
-	// oomph::Mesh is oomph-lib's base mesh class, exposed to Python mostly so that methods which are
-	// only defined there (and not overridden/extended by pyoomph::Mesh) remain accessible. Most
-	// pyoomph meshes are actually pyoomph::Mesh instances (see decl_PyoomphMesh below), which derives
-	// from this class.
-	auto &decl_OomphMesh = (*py_decl_OomphMesh);
-	decl_OomphMesh
+	// MeshHandleBase covers both what used to be oomph::Mesh-level and pyoomph::Mesh-level
+	// bindings, unified onto a single Python type (see the MeshHandle machinery above for why).
+	auto &decl_MeshHandleBase = (*py_decl_MeshHandleBase);
+	decl_MeshHandleBase
 		.def(
-			"as_pyoomph_mesh", [](oomph::Mesh *self)
-			{ return dynamic_cast<pyoomph::Mesh *>(self); },
+			// Every mesh handle already wraps a pyoomph::Mesh-derived object (there is no longer
+			// a plain, non-pyoomph oomph::Mesh exposed to Python), so this is just the identity.
+			"as_pyoomph_mesh",[](MeshHandleBase *h) -> MeshHandleBase *
+			{ return h; },
 			nb::rv_policy::reference, "Downcasts this mesh to a pyoomph Mesh, if it is one (returns None otherwise)")
-		.def("add_node_to_mesh",[](oomph::Mesh *self,pyoomph::Node *n)
+		.def("add_node_to_mesh",oomph_mesh_method([](oomph::Mesh *self,pyoomph::Node *n)
 			 {
 				self->add_node_pt(n);
-			 }, nb::arg("node"), "Adds an already-constructed node to this mesh's list of nodes")
-		.def("prune_dead_nodes",[](oomph::Mesh *self,bool with_bounds)
+			 }), nb::arg("node"), "Adds an already-constructed node to this mesh's list of nodes")
+		.def("prune_dead_nodes",oomph_mesh_method([](oomph::Mesh *self,bool with_bounds)
 			{
 				if (with_bounds) self->prune_dead_nodes();
 				else dynamic_cast<pyoomph::TemplatedMeshBase*>(self)->prune_dead_nodes_without_respecting_boundaries();
-			}, nb::arg("with_bounds"), "Removes nodes marked as obsolete (e.g. after adaptive unrefinement) from the mesh; if with_bounds is False, boundary membership bookkeeping is skipped")
-		.def("output_paraview", [](oomph::Mesh *self, const std::string &fname, const unsigned &order)
-			 { std::ofstream f(fname); self->output_paraview(f,order); }, nb::arg("filename"), nb::arg("order"), "Writes this mesh to a ParaView-compatible file at the given polynomial output order")
-		.def("nelement", &oomph::Mesh::nelement, "Returns the number of elements in this mesh")
+			}), nb::arg("with_bounds"), "Removes nodes marked as obsolete (e.g. after adaptive unrefinement) from the mesh; if with_bounds is False, boundary membership bookkeeping is skipped")
+		.def("output_paraview",oomph_mesh_method([](oomph::Mesh *self, const std::string &fname, const unsigned &order)
+			 { std::ofstream f(fname); self->output_paraview(f,order); }), nb::arg("filename"), nb::arg("order"), "Writes this mesh to a ParaView-compatible file at the given polynomial output order")
+		.def("nelement",oomph_mesh_method(&oomph::Mesh::nelement), "Returns the number of elements in this mesh")
 		.def(
-			"element_pt", [](oomph::Mesh &self, const unsigned &ei) -> oomph::GeneralisedElement *
-			{ if (ei>=self.nelement()) return (pyoomph::BulkElementBase *)(NULL); else return  dynamic_cast<pyoomph::BulkElementBase *>(self.element_pt(ei)); },
+			"element_pt",oomph_mesh_method([](oomph::Mesh *self, const unsigned &ei) -> oomph::GeneralisedElement *
+			{ if (ei>=self->nelement()) return (pyoomph::BulkElementBase *)(NULL); else return  dynamic_cast<pyoomph::BulkElementBase *>(self->element_pt(ei)); }),
 			nb::rv_policy::reference, nb::arg("element_index"), "Returns the element at the given index in this mesh")
 		.def(
-			"boundary_element_pt", [](oomph::Mesh &self, const unsigned &bi, const unsigned &ei) -> oomph::GeneralisedElement *
-			{ return dynamic_cast<pyoomph::BulkElementBase *>(self.boundary_element_pt(bi, ei)); },
+			"boundary_element_pt",oomph_mesh_method([](oomph::Mesh *self, const unsigned &bi, const unsigned &ei) -> oomph::GeneralisedElement *
+			{ return dynamic_cast<pyoomph::BulkElementBase *>(self->boundary_element_pt(bi, ei)); }),
 			nb::rv_policy::reference, nb::arg("boundary_index"), nb::arg("element_index"), "Returns the element at the given index among the elements adjacent to the given mesh boundary")
-		.def("face_index_at_boundary", [](oomph::Mesh &self, const unsigned &bi, const unsigned &ei)
-			 { return self.face_index_at_boundary(bi, ei); }, nb::arg("boundary_index"), nb::arg("element_index"), "Returns the local face/edge index at which the given boundary element touches the given mesh boundary")
-		.def("nboundary", &oomph::Mesh::nboundary, "Returns the number of boundaries of this mesh")
-		.def("nboundary_node", &oomph::Mesh::nboundary_node, nb::arg("boundary_index"), "Returns the number of nodes on the given mesh boundary")
-		.def("nboundary_element", &oomph::Mesh::nboundary_element, nb::arg("boundary_index"), "Returns the number of elements adjacent to the given mesh boundary")
-		.def("resolve_copy_master_node", [](oomph::Mesh *self, pyoomph::Node *n)->pyoomph::Node *
+		.def("face_index_at_boundary",oomph_mesh_method([](oomph::Mesh *self, const unsigned &bi, const unsigned &ei)
+			 { return self->face_index_at_boundary(bi, ei); }), nb::arg("boundary_index"), nb::arg("element_index"), "Returns the local face/edge index at which the given boundary element touches the given mesh boundary")
+		.def("nboundary",oomph_mesh_method(&oomph::Mesh::nboundary), "Returns the number of boundaries of this mesh")
+		.def("nboundary_node",oomph_mesh_method(&oomph::Mesh::nboundary_node), nb::arg("boundary_index"), "Returns the number of nodes on the given mesh boundary")
+		.def("nboundary_element",oomph_mesh_method(&oomph::Mesh::nboundary_element), nb::arg("boundary_index"), "Returns the number of elements adjacent to the given mesh boundary")
+		.def("resolve_copy_master_node",oomph_mesh_method([](oomph::Mesh *self, pyoomph::Node *n)->pyoomph::Node *
 			 {
 				if (!dynamic_cast<pyoomph::Mesh*>(self)) return NULL;
 				return dynamic_cast<pyoomph::Node *>(dynamic_cast<pyoomph::Mesh*>(self)->resolve_copy_master(n));
-			},nb::rv_policy::reference, nb::arg("node")
+			}),nb::rv_policy::reference, nb::arg("node")
 			, "If the given node is a copy (e.g. due to periodic boundaries), returns its master node; otherwise returns None"
 			)
-		.def("_disable_adaptation", [](oomph::Mesh *self)
+		.def("_disable_adaptation",oomph_mesh_method([](oomph::Mesh *self)
 			 {
     oomph::RefineableMeshBase* refmesh =dynamic_cast<oomph::RefineableMeshBase*>(self);
-    if (refmesh) refmesh->disable_adaptation(); }, "Disables adaptive mesh refinement/unrefinement for this mesh, if it is refineable")
-		.def("_enable_adaptation", [](oomph::Mesh *self)
+    if (refmesh) refmesh->disable_adaptation(); }), "Disables adaptive mesh refinement/unrefinement for this mesh, if it is refineable")
+		.def("_enable_adaptation",oomph_mesh_method([](oomph::Mesh *self)
 			 {
     oomph::RefineableMeshBase* refmesh =dynamic_cast<oomph::RefineableMeshBase*>(self);
-    if (refmesh) refmesh->enable_adaptation(); }, "Enables adaptive mesh refinement/unrefinement for this mesh, if it is refineable")
-		.def("nnode", &oomph::Mesh::nnode, "Returns the number of nodes in this mesh")
-		.def("_set_interpolate_lagrangian_on_remeshing", [](oomph::Mesh *self, bool lagr)
+    if (refmesh) refmesh->enable_adaptation(); }), "Enables adaptive mesh refinement/unrefinement for this mesh, if it is refineable")
+		.def("nnode",oomph_mesh_method(&oomph::Mesh::nnode), "Returns the number of nodes in this mesh")
+		.def("_set_interpolate_lagrangian_on_remeshing",oomph_mesh_method([](oomph::Mesh *self, bool lagr)
 			 {
 			pyoomph::Mesh* mesh =dynamic_cast<pyoomph::Mesh*>(self);
 			if (mesh) mesh->interpolated_lagrangian_coordinates_at_remeshing=lagr;
-			 }, nb::arg("interpolate"), "Controls whether the Lagrangian (undeformed) coordinates of new nodes are interpolated from the old mesh when remeshing")
-		.def("get_elemental_errors", [](oomph::Mesh *self)
+			 }), nb::arg("interpolate"), "Controls whether the Lagrangian (undeformed) coordinates of new nodes are interpolated from the old mesh when remeshing")
+		.def("get_elemental_errors",oomph_mesh_method([](oomph::Mesh *self)
 			 {
 			oomph::Vector<double> elerrs(self->nelement(),0.0);
 			oomph::RefineableMeshBase* refmesh =dynamic_cast<oomph::RefineableMeshBase*>(self);
@@ -915,55 +1016,51 @@ void PyReg_Mesh(nb::module_ &m)
 			}
 			std::vector<double> res(elerrs.size());
 			for (unsigned int i=0;i<elerrs.size();i++) res[i]=elerrs[i];
-			return res; }, "Returns the per-element spatial error estimate (as used by adaptive mesh refinement) for every element in this mesh; zero everywhere if adaptation is disabled")
+			return res; }), "Returns the per-element spatial error estimate (as used by adaptive mesh refinement) for every element in this mesh; zero everywhere if adaptation is disabled")
 		.def(
-			"node_pt", [](oomph::Mesh *self, unsigned int i) -> pyoomph::Node *
-			{ return dynamic_cast<pyoomph::Node *>(self->node_pt(i)); },
+			"node_pt",oomph_mesh_method([](oomph::Mesh *self, unsigned int i) -> pyoomph::Node *
+			{ return dynamic_cast<pyoomph::Node *>(self->node_pt(i)); }),
 			nb::rv_policy::reference, nb::arg("node_index"), "Returns the node at the given index in this mesh")
 		.def(
-			"boundary_node_pt", [](oomph::Mesh &self, const unsigned &b, const unsigned &n)
-			{ return dynamic_cast<pyoomph::Node *>(self.boundary_node_pt(b, n)); },
-			nb::rv_policy::reference, nb::arg("boundary_index"), nb::arg("node_index"), "Returns the node at the given index among the nodes on the given mesh boundary");
-
-	// pyoomph's own mesh class, adding boundary/interface handling, adaptive refinement control,
-	// (de)serialization of the mesh state and various evaluation helpers on top of oomph::Mesh.
-	// This is the class that Python-level mesh objects (bulk domains, interfaces, ODE storage, ...) ultimately derive from.
-	auto &decl_PyoomphMesh = (*py_decl_PyoomphMesh);
-	decl_PyoomphMesh
-		.def("check_integrity",&pyoomph::Mesh::check_integrity, "Runs internal consistency checks on this mesh, raising an error if a problem is found")
-		.def("prepare_zeta_interpolation", [](pyoomph::Mesh *self, pyoomph::Mesh *old_mesh){self->prepare_zeta_interpolation(old_mesh);}, nb::arg("old_mesh"), "Prepares the internal data structures required to interpolate field values from an old mesh onto this (typically newly adapted) mesh")
-		.def("remove_boundary_nodes",[](pyoomph::Mesh *self) {self->remove_boundary_nodes();}, "Removes all nodes from all mesh boundaries (i.e. clears the boundary node lookup, without deleting the nodes themselves)")
-		.def("remove_boundary_nodes_of_bound",[](pyoomph::Mesh *self,unsigned b) {self->remove_boundary_nodes(b);}, nb::arg("boundary_index"), "Removes all nodes from the given mesh boundary (without deleting the nodes themselves)")
-		.def("add_interpolated_nodes_at",&pyoomph::Mesh::add_interpolated_nodes_at,nb::rv_policy::reference, "Creates and adds new nodes interpolated at the given positions, used e.g. when refining or remeshing")
-		.def("add_boundary_node",[](pyoomph::Mesh *self,unsigned bind,pyoomph::Node *n) {self->add_boundary_node(bind,n);}, nb::arg("boundary_index"), nb::arg("node"), "Adds the given node to the given mesh boundary")
-		.def("flush_element_storage", [](pyoomph::Mesh *self){self->flush_element_storage();}, "Clears this mesh's list of elements without deleting them (ownership is assumed to be transferred elsewhere)")
-		.def("_set_time_level_for_projection", [](pyoomph::Mesh *self, unsigned time_level){self->set_time_level_for_projection(time_level);}, nb::arg("time_level"), "Sets the history/time level that is used as the source when projecting field values onto a new mesh")
-		.def("get_field_information", [](pyoomph::Mesh *self)
-			 { return self->get_field_information(); }, "Returns a description of all fields (nodal, discontinuous, elemental) available on this mesh")
-		.def("describe_my_dofs", [](pyoomph::Mesh *self, std::string in)
-			 {std::ostringstream oss;self->describe_my_dofs(oss,in);return oss.str(); }, nb::arg("indent")="", "Returns a human-readable description of all degrees of freedom of this mesh, useful for debugging")
-		.def("_pin_all_my_dofs", [](pyoomph::Mesh *self, std::set<std::string> only_dofs, std::set<std::string> ignore_dofs, std::set<unsigned> ignore_continuous_at_interfaces)
-			 { self->pin_all_my_dofs(only_dofs, ignore_dofs, ignore_continuous_at_interfaces); }, nb::arg("only_dofs"), nb::arg("ignore_dofs"), nb::arg("ignore_continuous_at_interfaces"), "Pins (Dirichlet-constrains) all degrees of freedom of this mesh, optionally restricted to only_dofs or excluding ignore_dofs/ignore_continuous_at_interfaces")
-		.def("generate_interface_elements", [](pyoomph::Mesh *m, const std::string &bn, pyoomph::Mesh *im, pyoomph::DynamicBulkElementInstance *jitcode)
-			 { m->generate_interface_elements(bn, im, jitcode); }, nb::arg("boundary_name"), nb::arg("interface_mesh"), nb::arg("code_instance"), "Creates interface elements attached to the given boundary of this (bulk) mesh, using the given compiled equation code, and adds them to the given interface mesh")
-		.def("is_mesh_distributed", [](pyoomph::Mesh *m)
-			 { return m->is_mesh_distributed(); }, "Returns whether this mesh is distributed across multiple MPI processes")
-		.def("_save_state", [](pyoomph::Mesh *m)
-			 {std::vector<double> data; m->_save_state(data); return data; }, "Serializes the current state of this mesh (nodal positions/values, refinement pattern, ...) into a flat list of doubles, for checkpointing")
-		.def("_setup_information_from_old_mesh", &pyoomph::Mesh::_setup_information_from_old_mesh, nb::arg("old_mesh"), "Prepares this (new) mesh to inherit information (e.g. for state restoration) from an old mesh")
-		.def("_load_state", &pyoomph::Mesh::_load_state, nb::arg("data"), "Restores the mesh state previously serialized by _save_state")
-		.def("_pin_noncontributing_dofs", &pyoomph::Mesh::pin_noncontributing_dofs, "Pins all degrees of freedom on this mesh that do not actually contribute to any residual (e.g. unused higher-order nodal values), to avoid singular Jacobians")
-		.def("has_interface_dof_id", &pyoomph::Mesh::has_interface_dof_id, nb::arg("name"), "Returns the index of the interface degree of freedom with the given name on this mesh, or -1 if not present")
-		.def("list_integral_functions", &pyoomph::Mesh::list_integral_functions, "Returns the names of all integral (domain-averaged/summed) observable functions defined on this mesh")
-		.def("list_local_expressions", &pyoomph::Mesh::list_local_expressions, "Returns the names of all local (per-element/per-node) observable expressions defined on this mesh")
-		.def("prepare_interpolation", &pyoomph::Mesh::prepare_interpolation, "Builds the internal spatial search structures (e.g. a kd-tree) required for interpolating field values on this mesh")
-		.def("clear_additional_dof_constraints", &pyoomph::Mesh::clear_additional_dof_constraints, "Clears any additional dof constraints (e.g. from remeshing) that have been applied to this mesh's nodes")
-		.def("apply_additional_dof_constraints", &pyoomph::Mesh::apply_additional_dof_constraints, "Applies any additional dof constraints that have been registered on this mesh's nodes")
-		.def("nodal_interpolate_from", &pyoomph::Mesh::nodal_interpolate_from, nb::arg("old_mesh"), nb::arg("boundary_index")=-1, "Interpolates all nodal field values of this mesh from the given old mesh (e.g. after adaptive remeshing), optionally restricted to a single boundary")
-		.def("nodal_interpolate_along_boundary", &pyoomph::Mesh::nodal_interpolate_along_boundary, nb::arg("old_mesh"), nb::arg("boundary_index"), nb::arg("old_boundary_index"), nb::arg("interface_mesh"), nb::arg("old_interface_mesh"), nb::arg("boundary_max_dist"), "Interpolates the nodal field values of the nodes on a boundary of this mesh from the corresponding boundary of an old mesh, using the interface meshes to also interpolate interface-only fields; boundary_max_dist limits how far a node may be from the boundary line/surface to still be considered")
-		.def("_evaluate_integral_function", [](pyoomph::Mesh *m, const std::string &n)
-			 { return m->evaluate_integral_function(n); }, nb::arg("name"), "Evaluates the integral observable function with the given name over this mesh")
-		.def("_evaluate_extremum", [](pyoomph::Mesh *m, const std::string &n,int sign,unsigned flags)
+			"boundary_node_pt",oomph_mesh_method([](oomph::Mesh *self, const unsigned &b, const unsigned &n)
+			{ return dynamic_cast<pyoomph::Node *>(self->boundary_node_pt(b, n)); }),
+			nb::rv_policy::reference, nb::arg("boundary_index"), nb::arg("node_index"), "Returns the node at the given index among the nodes on the given mesh boundary")
+		// pyoomph's own mesh-level functionality, adding boundary/interface handling, adaptive
+		// refinement control, (de)serialization of the mesh state and various evaluation helpers.
+		.def("check_integrity",mesh_method(&pyoomph::Mesh::check_integrity), "Runs internal consistency checks on this mesh, raising an error if a problem is found")
+		.def("prepare_zeta_interpolation",mesh_method([](pyoomph::Mesh *self, MeshHandleBase *old_mesh){self->prepare_zeta_interpolation(old_mesh->mesh());}), nb::arg("old_mesh"), "Prepares the internal data structures required to interpolate field values from an old mesh onto this (typically newly adapted) mesh")
+		.def("remove_boundary_nodes",mesh_method([](pyoomph::Mesh *self) {self->remove_boundary_nodes();}), "Removes all nodes from all mesh boundaries (i.e. clears the boundary node lookup, without deleting the nodes themselves)")
+		.def("remove_boundary_nodes_of_bound",mesh_method([](pyoomph::Mesh *self,unsigned b) {self->remove_boundary_nodes(b);}), nb::arg("boundary_index"), "Removes all nodes from the given mesh boundary (without deleting the nodes themselves)")
+		.def("add_interpolated_nodes_at",mesh_method(&pyoomph::Mesh::add_interpolated_nodes_at),nb::rv_policy::reference, "Creates and adds new nodes interpolated at the given positions, used e.g. when refining or remeshing")
+		.def("add_boundary_node",mesh_method([](pyoomph::Mesh *self,unsigned bind,pyoomph::Node *n) {self->add_boundary_node(bind,n);}), nb::arg("boundary_index"), nb::arg("node"), "Adds the given node to the given mesh boundary")
+		.def("flush_element_storage",mesh_method([](pyoomph::Mesh *self){self->flush_element_storage();}), "Clears this mesh's list of elements without deleting them (ownership is assumed to be transferred elsewhere)")
+		.def("_set_time_level_for_projection",mesh_method([](pyoomph::Mesh *self, unsigned time_level){self->set_time_level_for_projection(time_level);}), nb::arg("time_level"), "Sets the history/time level that is used as the source when projecting field values onto a new mesh")
+		.def("get_field_information",mesh_method([](pyoomph::Mesh *self)
+			 { return self->get_field_information(); }), "Returns a description of all fields (nodal, discontinuous, elemental) available on this mesh")
+		.def("describe_my_dofs",mesh_method([](pyoomph::Mesh *self, std::string in)
+			 {std::ostringstream oss;self->describe_my_dofs(oss,in);return oss.str(); }), nb::arg("indent")="", "Returns a human-readable description of all degrees of freedom of this mesh, useful for debugging")
+		.def("_pin_all_my_dofs",mesh_method([](pyoomph::Mesh *self, std::set<std::string> only_dofs, std::set<std::string> ignore_dofs, std::set<unsigned> ignore_continuous_at_interfaces)
+			 { self->pin_all_my_dofs(only_dofs, ignore_dofs, ignore_continuous_at_interfaces); }), nb::arg("only_dofs"), nb::arg("ignore_dofs"), nb::arg("ignore_continuous_at_interfaces"), "Pins (Dirichlet-constrains) all degrees of freedom of this mesh, optionally restricted to only_dofs or excluding ignore_dofs/ignore_continuous_at_interfaces")
+		.def("generate_interface_elements",mesh_method([](pyoomph::Mesh *m, const std::string &bn, MeshHandleBase *im, pyoomph::DynamicBulkElementInstance *jitcode)
+			 { m->generate_interface_elements(bn, im->mesh(), jitcode); }), nb::arg("boundary_name"), nb::arg("interface_mesh"), nb::arg("code_instance"), "Creates interface elements attached to the given boundary of this (bulk) mesh, using the given compiled equation code, and adds them to the given interface mesh")
+		.def("is_mesh_distributed",mesh_method([](pyoomph::Mesh *m)
+			 { return m->is_mesh_distributed(); }), "Returns whether this mesh is distributed across multiple MPI processes")
+		.def("_save_state",mesh_method([](pyoomph::Mesh *m)
+			 {std::vector<double> data; m->_save_state(data); return data; }), "Serializes the current state of this mesh (nodal positions/values, refinement pattern, ...) into a flat list of doubles, for checkpointing")
+		.def("_setup_information_from_old_mesh",mesh_method([](pyoomph::Mesh *self, MeshHandleBase *old_mesh){ self->_setup_information_from_old_mesh(old_mesh->mesh()); }), nb::arg("old_mesh"), "Prepares this (new) mesh to inherit information (e.g. for state restoration) from an old mesh")
+		.def("_load_state",mesh_method(&pyoomph::Mesh::_load_state), nb::arg("data"), "Restores the mesh state previously serialized by _save_state")
+		.def("_pin_noncontributing_dofs",mesh_method(&pyoomph::Mesh::pin_noncontributing_dofs), "Pins all degrees of freedom on this mesh that do not actually contribute to any residual (e.g. unused higher-order nodal values), to avoid singular Jacobians")
+		.def("has_interface_dof_id",mesh_method(&pyoomph::Mesh::has_interface_dof_id), nb::arg("name"), "Returns the index of the interface degree of freedom with the given name on this mesh, or -1 if not present")
+		.def("list_integral_functions",mesh_method(&pyoomph::Mesh::list_integral_functions), "Returns the names of all integral (domain-averaged/summed) observable functions defined on this mesh")
+		.def("list_local_expressions",mesh_method(&pyoomph::Mesh::list_local_expressions), "Returns the names of all local (per-element/per-node) observable expressions defined on this mesh")
+		.def("prepare_interpolation",mesh_method(&pyoomph::Mesh::prepare_interpolation), "Builds the internal spatial search structures (e.g. a kd-tree) required for interpolating field values on this mesh")
+		.def("clear_additional_dof_constraints",mesh_method(&pyoomph::Mesh::clear_additional_dof_constraints), "Clears any additional dof constraints (e.g. from remeshing) that have been applied to this mesh's nodes")
+		.def("apply_additional_dof_constraints",mesh_method(&pyoomph::Mesh::apply_additional_dof_constraints), "Applies any additional dof constraints that have been registered on this mesh's nodes")
+		.def("nodal_interpolate_from",mesh_method([](pyoomph::Mesh *self, MeshHandleBase *old_mesh, int boundary_index){ self->nodal_interpolate_from(old_mesh->mesh(), boundary_index); }), nb::arg("old_mesh"), nb::arg("boundary_index")=-1, "Interpolates all nodal field values of this mesh from the given old mesh (e.g. after adaptive remeshing), optionally restricted to a single boundary")
+		.def("nodal_interpolate_along_boundary",mesh_method([](pyoomph::Mesh *self, MeshHandleBase *old_mesh, int bind, int oldbind, MeshHandleBase *imesh, MeshHandleBase *oldimesh, double boundary_max_dist){ self->nodal_interpolate_along_boundary(old_mesh->mesh(), bind, oldbind, imesh->mesh(), oldimesh->mesh(), boundary_max_dist); }), nb::arg("old_mesh"), nb::arg("boundary_index"), nb::arg("old_boundary_index"), nb::arg("interface_mesh"), nb::arg("old_interface_mesh"), nb::arg("boundary_max_dist"), "Interpolates the nodal field values of the nodes on a boundary of this mesh from the corresponding boundary of an old mesh, using the interface meshes to also interpolate interface-only fields; boundary_max_dist limits how far a node may be from the boundary line/surface to still be considered")
+		.def("_evaluate_integral_function",mesh_method([](pyoomph::Mesh *m, const std::string &n)
+			 { return m->evaluate_integral_function(n); }), nb::arg("name"), "Evaluates the integral observable function with the given name over this mesh")
+		.def("_evaluate_extremum",mesh_method([](pyoomph::Mesh *m, const std::string &n,int sign,unsigned flags)
 			 {
 				pyoomph::BulkElementBase * extreme_element;
 			    oomph::Vector<double> extreme_local_coords;
@@ -973,69 +1070,64 @@ void PyReg_Mesh(nb::module_ &m)
 				//return std::make_tuple(resval,s,std::unique_ptr<oomph::GeneralisedElement,py::nodelete>(dynamic_cast<oomph::GeneralisedElement*>(extreme_element)));
 				return std::make_tuple(resval,s,dynamic_cast<oomph::GeneralisedElement*>(extreme_element));
 
-			 },nb::rv_policy::reference, nb::arg("name"), nb::arg("sign"), nb::arg("flags"), "Finds the extremum (minimum if sign<0, maximum if sign>0) of a local expression with the given name over this mesh; returns its value, the local coordinate and the element where it was found")
-		.def("ensure_external_data", [](pyoomph::Mesh *m)
-			 { m->ensure_external_data(); }, "Ensures that all external Data dependencies (dofs owned by other elements/meshes) required by this mesh's elements are properly registered")
-		.def("ensure_halos_for_periodic_boundaries", [](pyoomph::Mesh *m)
-			 { m->ensure_halos_for_periodic_boundaries(); }, "In parallel (MPI) runs, ensures that the required halo elements/nodes are present so periodic boundary conditions also work across processor boundaries")
-		.def("nroot_halo_element", [](pyoomph::Mesh *m)
+			 }),nb::rv_policy::reference, nb::arg("name"), nb::arg("sign"), nb::arg("flags"), "Finds the extremum (minimum if sign<0, maximum if sign>0) of a local expression with the given name over this mesh; returns its value, the local coordinate and the element where it was found")
+		.def("ensure_external_data",mesh_method([](pyoomph::Mesh *m)
+			 { m->ensure_external_data(); }), "Ensures that all external Data dependencies (dofs owned by other elements/meshes) required by this mesh's elements are properly registered")
+		.def("ensure_halos_for_periodic_boundaries",mesh_method([](pyoomph::Mesh *m)
+			 { m->ensure_halos_for_periodic_boundaries(); }), "In parallel (MPI) runs, ensures that the required halo elements/nodes are present so periodic boundary conditions also work across processor boundaries")
+		.def("nroot_halo_element",mesh_method([](pyoomph::Mesh *m)
 			 {
 				#ifdef OOMPH_HAS_MPI
 					return m->nroot_halo_element();
 				#else
 					return 0;
 				#endif
-			 }, "In parallel (MPI) runs, returns the number of root (non-refined) halo elements of this mesh"
+			 }), "In parallel (MPI) runs, returns the number of root (non-refined) halo elements of this mesh"
 			)
-		.def("nrefined", [](pyoomph::Mesh *m)
-			 { return m->nrefined(); }, "Returns the number of elements that were refined during the last adaptation step")
-		.def("nunrefined", [](pyoomph::Mesh *m)
-			 { return m->nunrefined(); }, "Returns the number of elements that were unrefined during the last adaptation step")
-		.def("invalidate_lagrangian_kdtree", [](pyoomph::Mesh *m)
-			 { m->invalidate_lagrangian_kdtree(); }, "Invalidates the cached kd-tree used for Lagrangian-coordinate spatial searches, forcing it to be rebuilt on next use")
+		.def("nrefined",mesh_method([](pyoomph::Mesh *m)
+			 { return m->nrefined(); }), "Returns the number of elements that were refined during the last adaptation step")
+		.def("nunrefined",mesh_method([](pyoomph::Mesh *m)
+			 { return m->nunrefined(); }), "Returns the number of elements that were unrefined during the last adaptation step")
+		.def("invalidate_lagrangian_kdtree",mesh_method([](pyoomph::Mesh *m)
+			 { m->invalidate_lagrangian_kdtree(); }), "Invalidates the cached kd-tree used for Lagrangian-coordinate spatial searches, forcing it to be rebuilt on next use")
 		.def_prop_rw(
-			"min_permitted_error", [](pyoomph::Mesh *m)
-			{ return m->min_permitted_error(); },
-			[](pyoomph::Mesh *m, double e)
-			{ m->min_permitted_error() = e; }, "Lower threshold of the per-element spatial error estimate below which elements are unrefined during adaptation")
+			"min_permitted_error",mesh_method([](pyoomph::Mesh *m)
+			{ return m->min_permitted_error(); }),mesh_method([](pyoomph::Mesh *m, double e)
+			{ m->min_permitted_error() = e; }), "Lower threshold of the per-element spatial error estimate below which elements are unrefined during adaptation")
 		.def_prop_rw(
-			"max_permitted_error", [](pyoomph::Mesh *m)
-			{ return m->max_permitted_error(); },
-			[](pyoomph::Mesh *m, double e)
-			{ m->max_permitted_error() = e; }, "Upper threshold of the per-element spatial error estimate above which elements are refined during adaptation")
+			"max_permitted_error",mesh_method([](pyoomph::Mesh *m)
+			{ return m->max_permitted_error(); }),mesh_method([](pyoomph::Mesh *m, double e)
+			{ m->max_permitted_error() = e; }), "Upper threshold of the per-element spatial error estimate above which elements are refined during adaptation")
 		.def_prop_rw(
-			"max_refinement_level", [](pyoomph::Mesh *m)
-			{ return dynamic_cast<oomph::TreeBasedRefineableMeshBase *>(m)->max_refinement_level(); },
-			[](pyoomph::Mesh *m, unsigned l)
-			{ dynamic_cast<oomph::TreeBasedRefineableMeshBase *>(m)->max_refinement_level() = l; }, "Maximum refinement level (tree depth) that adaptive mesh refinement is allowed to reach on this mesh")
+			"max_refinement_level",mesh_method([](pyoomph::Mesh *m)
+			{ return dynamic_cast<oomph::TreeBasedRefineableMeshBase *>(m)->max_refinement_level(); }),mesh_method([](pyoomph::Mesh *m, unsigned l)
+			{ dynamic_cast<oomph::TreeBasedRefineableMeshBase *>(m)->max_refinement_level() = l; }), "Maximum refinement level (tree depth) that adaptive mesh refinement is allowed to reach on this mesh")
 		.def_prop_rw(
-			"min_refinement_level", [](pyoomph::Mesh *m)
-			{ return dynamic_cast<oomph::TreeBasedRefineableMeshBase *>(m)->min_refinement_level(); },
-			[](pyoomph::Mesh *m, unsigned l)
-			{ dynamic_cast<oomph::TreeBasedRefineableMeshBase *>(m)->min_refinement_level() = l; }, "Minimum refinement level (tree depth) that adaptive mesh unrefinement is allowed to go below on this mesh")
+			"min_refinement_level",mesh_method([](pyoomph::Mesh *m)
+			{ return dynamic_cast<oomph::TreeBasedRefineableMeshBase *>(m)->min_refinement_level(); }),mesh_method([](pyoomph::Mesh *m, unsigned l)
+			{ dynamic_cast<oomph::TreeBasedRefineableMeshBase *>(m)->min_refinement_level() = l; }), "Minimum refinement level (tree depth) that adaptive mesh unrefinement is allowed to go below on this mesh")
 		.def_prop_rw(
-			"max_keep_unrefined", [](pyoomph::Mesh *m)
-			{ return dynamic_cast<oomph::TreeBasedRefineableMeshBase *>(m)->max_keep_unrefined(); },
-			[](pyoomph::Mesh *m, unsigned l)
-			{ dynamic_cast<oomph::TreeBasedRefineableMeshBase *>(m)->max_keep_unrefined() = l; }, "Number of adaptation cycles for which an element flagged for unrefinement is kept before it is actually unrefined")
-		.def("boundary_coordinate_bool", &pyoomph::Mesh::boundary_coordinates_bool, nb::arg("boundary_index"), "Returns whether an intrinsic boundary coordinate has been set up for the given mesh boundary")
-		.def("is_boundary_coordinate_defined", &pyoomph::Mesh::is_boundary_coordinate_defined, nb::arg("boundary_index"), "Returns whether an intrinsic boundary coordinate is defined and up to date for the given mesh boundary")
-		.def("fill_node_index_to_node_map",[](pyoomph::Mesh *self)
+			"max_keep_unrefined",mesh_method([](pyoomph::Mesh *m)
+			{ return dynamic_cast<oomph::TreeBasedRefineableMeshBase *>(m)->max_keep_unrefined(); }),mesh_method([](pyoomph::Mesh *m, unsigned l)
+			{ dynamic_cast<oomph::TreeBasedRefineableMeshBase *>(m)->max_keep_unrefined() = l; }), "Number of adaptation cycles for which an element flagged for unrefinement is kept before it is actually unrefined")
+		.def("boundary_coordinate_bool",mesh_method(&pyoomph::Mesh::boundary_coordinates_bool), nb::arg("boundary_index"), "Returns whether an intrinsic boundary coordinate has been set up for the given mesh boundary")
+		.def("is_boundary_coordinate_defined",mesh_method(&pyoomph::Mesh::is_boundary_coordinate_defined), nb::arg("boundary_index"), "Returns whether an intrinsic boundary coordinate is defined and up to date for the given mesh boundary")
+		.def("fill_node_index_to_node_map",mesh_method([](pyoomph::Mesh *self)
 			{std::map<oomph::Node *, unsigned> node2index;
 			self->fill_node_map(node2index);
 			std::vector<pyoomph::Node *> index2node(node2index.size(),NULL);;
 			for (auto & n2i : node2index){index2node[n2i.second]=dynamic_cast<pyoomph::Node*>(n2i.first);}
 			return index2node;
-			}, nb::rv_policy::reference, "Returns the list of all nodes of this mesh, ordered consistently with the internal node-to-index map")
-		.def("setup_interior_boundary_elements", [](pyoomph::Mesh *self, unsigned bindex)
+			}), nb::rv_policy::reference, "Returns the list of all nodes of this mesh, ordered consistently with the internal node-to-index map")
+		.def("setup_interior_boundary_elements",mesh_method([](pyoomph::Mesh *self, unsigned bindex)
 			 {
 	 pyoomph::TemplatedMeshBase * templmesh=dynamic_cast<pyoomph::TemplatedMeshBase*>(self);
 	 if (!templmesh) return;
-	 templmesh->setup_interior_boundary_elements(bindex); }, nb::arg("boundary_index"), "Sets up the boundary-element lookup for an interior (non-outer) boundary of a templated mesh")
-		.def("fill_dof_types", [](pyoomph::Mesh *self, nb::ndarray<nb::numpy, int> &desc)
-			 { self->fill_dof_types(desc.data()); }, nb::arg("dof_type_array"), "Fills the given numpy int array with a type tag for every degree of freedom of this mesh (used e.g. by block preconditioners)")
-		.def("set_lagrangian_nodal_coordinates", &pyoomph::Mesh::set_lagrangian_nodal_coordinates, "Sets the Lagrangian (undeformed/reference) coordinates of all nodes to their current Eulerian coordinates")
-		.def("get_refinement_pattern", [](pyoomph::Mesh *self)
+	 templmesh->setup_interior_boundary_elements(bindex); }), nb::arg("boundary_index"), "Sets up the boundary-element lookup for an interior (non-outer) boundary of a templated mesh")
+		.def("fill_dof_types",mesh_method([](pyoomph::Mesh *self, nb::ndarray<nb::numpy, int> &desc)
+			 { self->fill_dof_types(desc.data()); }), nb::arg("dof_type_array"), "Fills the given numpy int array with a type tag for every degree of freedom of this mesh (used e.g. by block preconditioners)")
+		.def("set_lagrangian_nodal_coordinates",mesh_method(&pyoomph::Mesh::set_lagrangian_nodal_coordinates), "Sets the Lagrangian (undeformed/reference) coordinates of all nodes to their current Eulerian coordinates")
+		.def("get_refinement_pattern",mesh_method([](pyoomph::Mesh *self)
 			 {
 	  oomph::TreeBasedRefineableMeshBase * tbself=dynamic_cast<oomph::TreeBasedRefineableMeshBase*>(self);
 	  if (!tbself)
@@ -1054,8 +1146,8 @@ void PyReg_Mesh(nb::module_ &m)
 	   std::vector<unsigned> refi(ref[i].begin(), ref[i].end());
 	   result[i]=vector_to_ndarray(refi);
 	  }
-	  return result; }, "Returns the refinement pattern of this (tree-based, refineable) mesh, i.e. for every refinement level the list of which base-mesh elements were split, allowing the pattern to be replayed via refine_base_mesh")
-		.def("refine_base_mesh", [](pyoomph::Mesh *self, const std::vector<std::vector<unsigned>> &refine)
+	  return result; }), "Returns the refinement pattern of this (tree-based, refineable) mesh, i.e. for every refinement level the list of which base-mesh elements were split, allowing the pattern to be replayed via refine_base_mesh")
+		.def("refine_base_mesh",mesh_method([](pyoomph::Mesh *self, const std::vector<std::vector<unsigned>> &refine)
 			 {
 	  oomph::TreeBasedRefineableMeshBase * tbself=dynamic_cast<oomph::TreeBasedRefineableMeshBase*>(self);
 	  if (!tbself)
@@ -1068,23 +1160,23 @@ void PyReg_Mesh(nb::module_ &m)
 	   ref[i].resize(refine[i].size());
 	   for (unsigned int j=0;j<ref[i].size();j++) ref[i][j]=refine[i][j];
 	  }
-	  tbself->refine_base_mesh(ref); }, nb::arg("refinement_pattern"), "Replays a refinement pattern (as returned by get_refinement_pattern) on the base mesh, e.g. to restore a checkpointed mesh")
-		.def("reorder_nodes", [](pyoomph::Mesh *self, bool old_ordering)
-			 { self->reorder_nodes(); }, nb::arg("old_ordering"), "Reorders the internal node storage of this mesh (e.g. to improve cache locality/bandwidth of the resulting linear system)")
+	  tbself->refine_base_mesh(ref); }), nb::arg("refinement_pattern"), "Replays a refinement pattern (as returned by get_refinement_pattern) on the base mesh, e.g. to restore a checkpointed mesh")
+		.def("reorder_nodes",mesh_method([](pyoomph::Mesh *self, bool old_ordering)
+			 { self->reorder_nodes(); }), nb::arg("old_ordering"), "Reorders the internal node storage of this mesh (e.g. to improve cache locality/bandwidth of the resulting linear system)")
 		.def(
-			"get_node_reordering", [](pyoomph::Mesh *self, bool old_ordering)
+			"get_node_reordering",mesh_method([](pyoomph::Mesh *self, bool old_ordering)
 			{
 	    oomph::Vector<oomph::Node*> nodes;
 	    self->get_node_reordering(nodes,old_ordering);
 	    std::vector<pyoomph::Node*> result(nodes.size());
 	    for (unsigned int i=0;i<result.size();i++) result[i]=dynamic_cast<pyoomph::Node*>(nodes[i]);
-	    return result; },
+	    return result; }),
 			nb::rv_policy::reference, nb::arg("old_ordering"), "Returns the nodes of this mesh in the (potential) reordering used by reorder_nodes, without actually reordering the internal storage")
-		.def("evaluate_local_expression_at_nodes", [](pyoomph::Mesh *self, unsigned index, bool nondimensional,bool discontinuous)
-			 { return self->evaluate_local_expression_at_nodes(index, nondimensional,discontinuous); }, nb::arg("expression_index"), nb::arg("nondimensional"), nb::arg("discontinuous"), "Evaluates a local (element-defined) expression, identified by its index, at every node of this mesh")
+		.def("evaluate_local_expression_at_nodes",mesh_method([](pyoomph::Mesh *self, unsigned index, bool nondimensional,bool discontinuous)
+			 { return self->evaluate_local_expression_at_nodes(index, nondimensional,discontinuous); }), nb::arg("expression_index"), nb::arg("nondimensional"), nb::arg("discontinuous"), "Evaluates a local (element-defined) expression, identified by its index, at every node of this mesh")
 		// Exports the entire mesh (nodal positions/fields, elemental connectivity, discontinuous and elemental
 		// fields) into a set of numpy arrays in one go, for efficient plotting/post-processing from Python.
-		.def("to_numpy", [](pyoomph::Mesh *self, bool tesselate_tri, bool nondimensional, unsigned history_index,bool discontinuous)
+		.def("to_numpy",mesh_method([](pyoomph::Mesh *self, bool tesselate_tri, bool nondimensional, unsigned history_index,bool discontinuous)
 			 {
 				/*std::cout << self << std::endl;
 				std::cout << self->communicator_pt() << std::endl;*/
@@ -1182,14 +1274,14 @@ void PyReg_Mesh(nb::module_ &m)
 			 {
 				elemental_field_desc[ef.first]=ef.second;
 			 }
-			 return std::make_tuple(nodal_data,elem_node_inds,elemtypes,nodal_field_desc,D0_data,DL_data,elemental_field_desc); },
+			 return std::make_tuple(nodal_data,elem_node_inds,elemtypes,nodal_field_desc,D0_data,DL_data,elemental_field_desc); }),
 			 	nb::arg("tesselate_tri"),nb::arg("nondimensional"),nb::arg("history_index")=0,nb::arg("discontinuous")=false,
 				"Exports this mesh's nodal positions/fields, element connectivity, discontinuous and elemental fields as numpy arrays, "
 				"together with dicts describing which array column corresponds to which field. tesselate_tri splits e.g. quads into "
 				"triangles for plotting, nondimensional selects dimensional or non-dimensional output, history_index the time level, "
 				"and discontinuous whether discontinuous fields are stored per-node (interpolated) or per-element")
 		// Interpolates field values at a given batch of intrinsic ("zeta") coordinates, e.g. for sampling along a line.
-		.def("get_values_at_zetas", [](pyoomph::Mesh *self, const nb::ndarray<nb::numpy, double> &coords, bool with_scales)
+		.def("get_values_at_zetas",mesh_method([](pyoomph::Mesh *self, const nb::ndarray<nb::numpy, double> &coords, bool with_scales)
 			 {
 			const double *ptr = coords.data();
 			size_t N = coords.shape(0);
@@ -1217,30 +1309,30 @@ void PyReg_Mesh(nb::module_ &m)
 				descs[ef.first]=offset+ef.second;
 			}
 
-			return std::make_tuple(values,masked_lines,descs); }, nb::arg("coords"), nb::arg("with_scales"), "Interpolates all field values of this mesh at the given (N, dim) numpy array of intrinsic coordinates; returns the values, a mask of coordinates that could not be located, and a dict describing which field corresponds to which value column")
-		.def("describe_global_dofs", [](pyoomph::Mesh *self)
+			return std::make_tuple(values,masked_lines,descs); }), nb::arg("coords"), nb::arg("with_scales"), "Interpolates all field values of this mesh at the given (N, dim) numpy array of intrinsic coordinates; returns the values, a mask of coordinates that could not be located, and a dict describing which field corresponds to which value column")
+		.def("describe_global_dofs",mesh_method([](pyoomph::Mesh *self)
 			 {
 	 std::vector<int> types;
 	 std::vector<std::string> names;
 	 self->describe_global_dofs(types,names);
-	 return std::make_tuple(types,names); }, "Returns, for every global degree of freedom associated with this mesh, its dof type and a human-readable name")
-		.def("set_output_scale", &pyoomph::Mesh::set_output_scale, nb::arg("name"), nb::arg("scale"), nb::arg("code_instance"), "Sets an output (dimensional rescaling) factor for the field of the given name, used e.g. when exporting to numpy/VTK")
-		.def("get_output_scale", &pyoomph::Mesh::get_output_scale, nb::arg("name"), "Returns the output (dimensional rescaling) factor previously set for the field of the given name")
-		.def("get_element_dimension", &pyoomph::Mesh::get_element_dimension, "Returns the spatial dimension of the elements of this mesh")
-		.def("set_initial_condition", &pyoomph::Mesh::set_initial_condition, nb::keep_alive<1, 3>(), nb::arg("fieldname"), nb::arg("expression"), "Sets the initial condition expression for the given field on this mesh")
-		.def("setup_Dirichlet_conditions", &pyoomph::Mesh::setup_Dirichlet_conditions, nb::arg("only_update_values"), "(Re-)applies all Dirichlet boundary conditions defined on this mesh; if only_update_values is True, the set of pinned dofs is left unchanged and only their prescribed values are updated")
-		.def("_set_dirichlet_active", &pyoomph::Mesh::set_dirichlet_active, nb::arg("name"), nb::arg("active"), "Enables or disables the named Dirichlet boundary condition on this mesh")
-		.def("_get_dirichlet_active", &pyoomph::Mesh::get_dirichlet_active, nb::arg("name"), "Returns whether the named Dirichlet boundary condition is currently active on this mesh")
-		.def("setup_initial_conditions", &pyoomph::Mesh::setup_initial_conditions, nb::arg("resetting_first_step"), nb::arg("ic_name"), "Applies the initial condition(s) with the given name to this mesh; resetting_first_step indicates whether this is done for the very first time step")
-		.def("get_boundary_index", &pyoomph::Mesh::get_boundary_index, nb::arg("boundary_name"), "Returns the numeric index of the mesh boundary with the given name")
-		.def("get_boundary_names", &pyoomph::Mesh::get_boundary_names, "Returns the names of all boundaries of this mesh, ordered by their numeric index")
-		.def("set_spatial_error_estimator_pt", &pyoomph::Mesh::set_spatial_error_estimator_pt, nb::keep_alive<1, 2>(), nb::arg("error_estimator"), "Assigns the Z2ErrorEstimator used to drive adaptive mesh refinement on this mesh")
-		.def("_enlarge_elemental_error_max_override_to_only_nodal_connected_elems", &pyoomph::Mesh::enlarge_elemental_error_max_override_to_only_nodal_connected_elems, nb::arg("boundary_index"), "Propagates the per-element maximum-error override of elements on the given boundary to all elements sharing a node with them")
-		.def("adapt_by_elemental_errors", [](pyoomph::Mesh *self, const std::vector<double> &errs)
+	 return std::make_tuple(types,names); }), "Returns, for every global degree of freedom associated with this mesh, its dof type and a human-readable name")
+		.def("set_output_scale",mesh_method(&pyoomph::Mesh::set_output_scale), nb::arg("name"), nb::arg("scale"), nb::arg("code_instance"), "Sets an output (dimensional rescaling) factor for the field of the given name, used e.g. when exporting to numpy/VTK")
+		.def("get_output_scale",mesh_method(&pyoomph::Mesh::get_output_scale), nb::arg("name"), "Returns the output (dimensional rescaling) factor previously set for the field of the given name")
+		.def("get_element_dimension",mesh_method(&pyoomph::Mesh::get_element_dimension), "Returns the spatial dimension of the elements of this mesh")
+		.def("set_initial_condition",mesh_method(&pyoomph::Mesh::set_initial_condition), nb::keep_alive<1, 3>(), nb::arg("fieldname"), nb::arg("expression"), "Sets the initial condition expression for the given field on this mesh")
+		.def("setup_Dirichlet_conditions",mesh_method(&pyoomph::Mesh::setup_Dirichlet_conditions), nb::arg("only_update_values"), "(Re-)applies all Dirichlet boundary conditions defined on this mesh; if only_update_values is True, the set of pinned dofs is left unchanged and only their prescribed values are updated")
+		.def("_set_dirichlet_active",mesh_method(&pyoomph::Mesh::set_dirichlet_active), nb::arg("name"), nb::arg("active"), "Enables or disables the named Dirichlet boundary condition on this mesh")
+		.def("_get_dirichlet_active",mesh_method(&pyoomph::Mesh::get_dirichlet_active), nb::arg("name"), "Returns whether the named Dirichlet boundary condition is currently active on this mesh")
+		.def("setup_initial_conditions",mesh_method(&pyoomph::Mesh::setup_initial_conditions), nb::arg("resetting_first_step"), nb::arg("ic_name"), "Applies the initial condition(s) with the given name to this mesh; resetting_first_step indicates whether this is done for the very first time step")
+		.def("get_boundary_index",mesh_method(&pyoomph::Mesh::get_boundary_index), nb::arg("boundary_name"), "Returns the numeric index of the mesh boundary with the given name")
+		.def("get_boundary_names",mesh_method(&pyoomph::Mesh::get_boundary_names), "Returns the names of all boundaries of this mesh, ordered by their numeric index")
+		.def("set_spatial_error_estimator_pt",mesh_method(&pyoomph::Mesh::set_spatial_error_estimator_pt), nb::keep_alive<1, 2>(), nb::arg("error_estimator"), "Assigns the Z2ErrorEstimator used to drive adaptive mesh refinement on this mesh")
+		.def("_enlarge_elemental_error_max_override_to_only_nodal_connected_elems",mesh_method(&pyoomph::Mesh::enlarge_elemental_error_max_override_to_only_nodal_connected_elems), nb::arg("boundary_index"), "Propagates the per-element maximum-error override of elements on the given boundary to all elements sharing a node with them")
+		.def("adapt_by_elemental_errors",mesh_method([](pyoomph::Mesh *self, const std::vector<double> &errs)
 			 {
  	   oomph::Vector<double> oerrs(errs.size());
  	   for (unsigned int i=0;i<errs.size();i++) oerrs[i]=errs[i];
- 	   self->adapt(oerrs); }, nb::arg("elemental_errors"), "Adapts (refines/unrefines) this mesh according to the given per-element spatial error estimate");
+ 	   self->adapt(oerrs); }), nb::arg("elemental_errors"), "Adapts (refines/unrefines) this mesh according to the given per-element spatial error estimate");
 
 	   /*
 	nb::class_<pyoomph::BulkElementODE0d, oomph::GeneralisedElement>(m, "BulkElementODE0d")
@@ -1276,12 +1368,12 @@ void PyReg_Mesh(nb::module_ &m)
 */
 	// A special mesh consisting of a single ODE (0-dimensional) element, used to store the degrees
 	// of freedom of ODE-based equations (e.g. global ODEs not tied to any spatial domain).
-	nb::class_<pyoomph::ODEStorageMesh, pyoomph::Mesh>(m, "ODEStorageMesh", "A mesh holding a single ODE element, used to store degrees of freedom that are not associated with a spatial mesh")
+	nb::class_<ODEStorageMeshHandle, MeshHandleBase>(m, "ODEStorageMesh", "A mesh holding a single ODE element, used to store degrees of freedom that are not associated with a spatial mesh")
 		.def(nb::init<>())
-		.def("_set_problem", [](pyoomph::ODEStorageMesh *self, pyoomph::Problem *p, pyoomph::DynamicBulkElementInstance *inst)
-			 { self->_set_problem(p, inst); }, nb::arg("problem"), nb::arg("code_instance").none())
-		.def("_create_ode_element", [](pyoomph::ODEStorageMesh *self, oomph::TimeStepper *ts)	->  oomph::GeneralisedElement *
-			 {   oomph::GeneralisedElement * res=self->_create_ode_element(ts);
+		.def("_set_problem", [](ODEStorageMeshHandle *self, pyoomph::Problem *p, pyoomph::DynamicBulkElementInstance *inst)
+			 { self->get()->_set_problem(p, inst); }, nb::arg("problem"), nb::arg("code_instance").none())
+		.def("_create_ode_element", [](ODEStorageMeshHandle *self, oomph::TimeStepper *ts)	->  oomph::GeneralisedElement *
+			 {   oomph::GeneralisedElement * res=self->get()->_create_ode_element(ts);
 				return dynamic_cast<pyoomph::BulkElementBase *>(res);
 			}, nb::rv_policy::reference, nb::arg("time_stepper"), "Creates (and stores) the single ODE element of this mesh, using the given time stepper"
 			)	;
@@ -1344,114 +1436,113 @@ void PyReg_Mesh(nb::module_ &m)
 
 	// A mesh built from a 1d part of a MeshTemplate (i.e. a chain of line elements), with the
 	// adaptive-refinement and boundary-setup machinery specific to one spatial dimension.
-	nb::class_<pyoomph::TemplatedMeshBase1d, pyoomph::Mesh>(m, "TemplatedMeshBase1d")
+	nb::class_<TemplatedMeshBase1dHandle, MeshHandleBase>(m, "TemplatedMeshBase1d")
 		.def(nb::init<>())
-		.def("_set_problem", [](pyoomph::TemplatedMeshBase1d *self, pyoomph::Problem *p, pyoomph::DynamicBulkElementInstance *inst)
-			 { self->_set_problem(p, inst); }, nb::arg("problem"), nb::arg("code_instance").none())
+		.def("_set_problem",handle_method<TemplatedMeshBase1dHandle>([](pyoomph::TemplatedMeshBase1d *self, pyoomph::Problem *p, pyoomph::DynamicBulkElementInstance *inst)
+			 { self->_set_problem(p, inst); }), nb::arg("problem"), nb::arg("code_instance").none())
 		.def(
-			"_get_problem", [](pyoomph::TemplatedMeshBase1d *self)
-			{ return self->get_problem(); },
+			"_get_problem",handle_method<TemplatedMeshBase1dHandle>([](pyoomph::TemplatedMeshBase1d *self)
+			{ return self->get_problem(); }),
 			nb::rv_policy::reference)
-		.def("refinement_possible", [](pyoomph::TemplatedMeshBase1d *self)
-			 { return true; }, "Returns whether adaptive refinement is possible for this mesh (always True for 1d meshes)")
+		.def("refinement_possible",handle_method<TemplatedMeshBase1dHandle>([](pyoomph::TemplatedMeshBase1d *self)
+			 { return true; }), "Returns whether adaptive refinement is possible for this mesh (always True for 1d meshes)")
 		.def(
-			"refine_uniformly", [](pyoomph::TemplatedMeshBase1d *self, unsigned int num)
-			{for (unsigned int i=0;i<num;i++) self->refine_uniformly(); },
+			"refine_uniformly",handle_method<TemplatedMeshBase1dHandle>([](pyoomph::TemplatedMeshBase1d *self, unsigned int num)
+			{for (unsigned int i=0;i<num;i++) self->refine_uniformly(); }),
 			"num"_a = 1, "Uniformly refines this mesh the given number of times")
 		.def(
-			"unrefine_uniformly", [](pyoomph::TemplatedMeshBase1d *self, unsigned int num)
-			{for (unsigned int i=0;i<num;i++) if (self->unrefine_uniformly()) return true; return false; },
+			"unrefine_uniformly",handle_method<TemplatedMeshBase1dHandle>([](pyoomph::TemplatedMeshBase1d *self, unsigned int num)
+			{for (unsigned int i=0;i<num;i++) if (self->unrefine_uniformly()) return true; return false; }),
 			"num"_a = 1, "Uniformly unrefines this mesh up to the given number of times; returns True if unrefinement was not fully possible (e.g. the coarsest level was reached)")
-		.def("generate_from_template", &pyoomph::TemplatedMeshBase1d::generate_from_template, nb::arg("template_collection"), "Builds this mesh's elements and nodes from the given 1d domain of a MeshTemplate")
-		.def("refine_selected_elements", [](pyoomph::TemplatedMeshBase1d *m, std::vector<unsigned int> inds)
-			 { oomph::Vector<unsigned> oomphvec(inds.size()); for (unsigned int i=0;i<inds.size();i++) oomphvec[i]=inds[i]; m->refine_selected_elements(oomphvec); }, nb::arg("element_indices"), "Refines only the elements at the given indices in this mesh")
-		.def("setup_boundary_element_info", [](pyoomph::TemplatedMeshBase1d *self)
-			 { std::ostringstream oss; self->setup_boundary_element_info(oss); }, "(Re-)builds the lookup of which elements are adjacent to which mesh boundary")
-		.def_prop_rw("identication_of_boundary_elements_by_facets", [](pyoomph::TemplatedMeshBase1d *self)
-			 { return self->identication_of_boundary_elements_by_facets; },
-			 [](pyoomph::TemplatedMeshBase1d *self, bool val) { self->identication_of_boundary_elements_by_facets=val; }, "Controls whether boundary elements are identified by matching facets (True) or by node membership (False)")
-		.def("setup_tree_forest", &pyoomph::TemplatedMeshBase1d::setup_tree_forest, "Builds the binary tree forest used for adaptive mesh refinement of this 1d mesh");
+		.def("generate_from_template",handle_method<TemplatedMeshBase1dHandle>(&pyoomph::TemplatedMeshBase1d::generate_from_template), nb::arg("template_collection"), "Builds this mesh's elements and nodes from the given 1d domain of a MeshTemplate")
+		.def("refine_selected_elements",handle_method<TemplatedMeshBase1dHandle>([](pyoomph::TemplatedMeshBase1d *m, std::vector<unsigned int> inds)
+			 { oomph::Vector<unsigned> oomphvec(inds.size()); for (unsigned int i=0;i<inds.size();i++) oomphvec[i]=inds[i]; m->refine_selected_elements(oomphvec); }), nb::arg("element_indices"), "Refines only the elements at the given indices in this mesh")
+		.def("setup_boundary_element_info",handle_method<TemplatedMeshBase1dHandle>([](pyoomph::TemplatedMeshBase1d *self)
+			 { std::ostringstream oss; self->setup_boundary_element_info(oss); }), "(Re-)builds the lookup of which elements are adjacent to which mesh boundary")
+		.def_prop_rw("identication_of_boundary_elements_by_facets",handle_method<TemplatedMeshBase1dHandle>([](pyoomph::TemplatedMeshBase1d *self)
+			 { return self->identication_of_boundary_elements_by_facets; }),handle_method<TemplatedMeshBase1dHandle>([](pyoomph::TemplatedMeshBase1d *self, bool val) { self->identication_of_boundary_elements_by_facets=val; }), "Controls whether boundary elements are identified by matching facets (True) or by node membership (False)")
+		.def("setup_tree_forest",handle_method<TemplatedMeshBase1dHandle>(&pyoomph::TemplatedMeshBase1d::setup_tree_forest), "Builds the binary tree forest used for adaptive mesh refinement of this 1d mesh");
 
 	// A mesh built from a 2d part of a MeshTemplate (triangles/quads), with the corresponding
 	// quadtree-based adaptive-refinement and boundary-setup machinery.
-	nb::class_<pyoomph::TemplatedMeshBase2d, pyoomph::Mesh>(m, "TemplatedMeshBase2d")
+	nb::class_<TemplatedMeshBase2dHandle, MeshHandleBase>(m, "TemplatedMeshBase2d")
 		.def(nb::init<>())
-		.def("_set_problem", [](pyoomph::TemplatedMeshBase2d *self, pyoomph::Problem *p, pyoomph::DynamicBulkElementInstance *inst)
-			 { self->_set_problem(p, inst); }, nb::arg("problem"), nb::arg("code_instance").none())
+		.def("_set_problem",handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *self, pyoomph::Problem *p, pyoomph::DynamicBulkElementInstance *inst)
+			 { self->_set_problem(p, inst); }), nb::arg("problem"), nb::arg("code_instance").none())
 		.def(
-			"_get_problem", [](pyoomph::TemplatedMeshBase2d *self)
-			{ return self->get_problem(); },
+			"_get_problem",handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *self)
+			{ return self->get_problem(); }),
 			nb::rv_policy::reference)
-		.def("set_max_neighbour_finding_tolerance", [](pyoomph::TemplatedMeshBase2d *self, double tol)
-			 {  oomph::Tree::max_neighbour_finding_tolerance() = tol; }, nb::arg("tolerance"), "Sets the geometric tolerance used by oomph-lib's quadtree neighbour-finding algorithm")
-		.def("generate_from_template", &pyoomph::TemplatedMeshBase2d::generate_from_template, nb::arg("template_collection"), "Builds this mesh's elements and nodes from the given 2d domain of a MeshTemplate")
-		.def("add_tri_C1",[](pyoomph::TemplatedMeshBase2d *self,pyoomph::Node *n1,pyoomph::Node *n2,pyoomph::Node *n3){self->add_tri_C1(n1,n2,n3);}, nb::arg("n1"), nb::arg("n2"), nb::arg("n3"), "Adds a linear (C1) triangular element with the given three nodes directly to this mesh")
-		.def("add_tri_C1TB",[](pyoomph::TemplatedMeshBase2d *self,pyoomph::Node *n1,pyoomph::Node *n2,pyoomph::Node *n3,pyoomph::Node *n4=NULL){self->add_tri_C1TB(n1,n2,n3,n4);}, nb::arg("n1"), nb::arg("n2"), nb::arg("n3"), nb::arg("n4")=nullptr, "Adds a linear triangular element with an additional (optional) bubble node with the given nodes directly to this mesh")
-		.def("refinement_possible", &pyoomph::TemplatedMeshBase2d::refinement_possible, "Returns whether adaptive refinement is possible for this mesh (e.g. False if it contains non-refineable elements)")
+		.def("set_max_neighbour_finding_tolerance",handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *self, double tol)
+			 {  oomph::Tree::max_neighbour_finding_tolerance() = tol; }), nb::arg("tolerance"), "Sets the geometric tolerance used by oomph-lib's quadtree neighbour-finding algorithm")
+		.def("generate_from_template",handle_method<TemplatedMeshBase2dHandle>(&pyoomph::TemplatedMeshBase2d::generate_from_template), nb::arg("template_collection"), "Builds this mesh's elements and nodes from the given 2d domain of a MeshTemplate")
+		.def("add_tri_C1",handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *self,pyoomph::Node *n1,pyoomph::Node *n2,pyoomph::Node *n3){self->add_tri_C1(n1,n2,n3);}), nb::arg("n1"), nb::arg("n2"), nb::arg("n3"), "Adds a linear (C1) triangular element with the given three nodes directly to this mesh")
+		.def("add_tri_C1TB",handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *self,pyoomph::Node *n1,pyoomph::Node *n2,pyoomph::Node *n3,pyoomph::Node *n4=NULL){self->add_tri_C1TB(n1,n2,n3,n4);}), nb::arg("n1"), nb::arg("n2"), nb::arg("n3"), nb::arg("n4")=nullptr, "Adds a linear triangular element with an additional (optional) bubble node with the given nodes directly to this mesh")
+		.def("refinement_possible",handle_method<TemplatedMeshBase2dHandle>(&pyoomph::TemplatedMeshBase2d::refinement_possible), "Returns whether adaptive refinement is possible for this mesh (e.g. False if it contains non-refineable elements)")
 		.def(
-			"refine_uniformly", [](pyoomph::TemplatedMeshBase2d *self, unsigned int num)
-			{for (unsigned int i=0;i<num;i++) self->refine_uniformly(); },
+			"refine_uniformly",handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *self, unsigned int num)
+			{for (unsigned int i=0;i<num;i++) self->refine_uniformly(); }),
 			"num"_a = 1, "Uniformly refines this mesh the given number of times")
 		.def(
-			"unrefine_uniformly", [](pyoomph::TemplatedMeshBase2d *self, unsigned int num)
-			{for (unsigned int i=0;i<num;i++) if (self->unrefine_uniformly()) return true; return false; },
+			"unrefine_uniformly",handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *self, unsigned int num)
+			{for (unsigned int i=0;i<num;i++) if (self->unrefine_uniformly()) return true; return false; }),
 			"num"_a = 1, "Uniformly unrefines this mesh up to the given number of times; returns True if unrefinement was not fully possible (e.g. the coarsest level was reached)")
-		.def("setup_tree_forest", &pyoomph::TemplatedMeshBase2d::setup_tree_forest, "Builds the quadtree forest used for adaptive mesh refinement of this 2d mesh")
-		.def("refine_selected_elements", [](pyoomph::TemplatedMeshBase2d *m, std::vector<unsigned int> inds)
-			 { oomph::Vector<unsigned> oomphvec(inds.size()); for (unsigned int i=0;i<inds.size();i++) oomphvec[i]=inds[i]; m->refine_selected_elements(oomphvec); }, nb::arg("element_indices"), "Refines only the elements at the given indices in this mesh")
-		 .def_prop_rw("identication_of_boundary_elements_by_facets", [](pyoomph::TemplatedMeshBase2d *self)
-			 { return self->identication_of_boundary_elements_by_facets; },
-			 [](pyoomph::TemplatedMeshBase2d *self, bool val) { self->identication_of_boundary_elements_by_facets=val; }, "Controls whether boundary elements are identified by matching facets (True) or by node membership (False)")
-		.def("setup_boundary_element_info", [](pyoomph::TemplatedMeshBase2d *self)
-			 { std::ostringstream oss; self->setup_boundary_element_info(oss); }, "(Re-)builds the lookup of which elements are adjacent to which mesh boundary");
+		.def("setup_tree_forest",handle_method<TemplatedMeshBase2dHandle>(&pyoomph::TemplatedMeshBase2d::setup_tree_forest), "Builds the quadtree forest used for adaptive mesh refinement of this 2d mesh")
+		.def("refine_selected_elements",handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *m, std::vector<unsigned int> inds)
+			 { oomph::Vector<unsigned> oomphvec(inds.size()); for (unsigned int i=0;i<inds.size();i++) oomphvec[i]=inds[i]; m->refine_selected_elements(oomphvec); }), nb::arg("element_indices"), "Refines only the elements at the given indices in this mesh")
+		 .def_prop_rw("identication_of_boundary_elements_by_facets",handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *self)
+			 { return self->identication_of_boundary_elements_by_facets; }),handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *self, bool val) { self->identication_of_boundary_elements_by_facets=val; }), "Controls whether boundary elements are identified by matching facets (True) or by node membership (False)")
+		.def("setup_boundary_element_info",handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *self)
+			 { std::ostringstream oss; self->setup_boundary_element_info(oss); }), "(Re-)builds the lookup of which elements are adjacent to which mesh boundary");
 
 	// A mesh built from a 3d part of a MeshTemplate (tets/bricks/...), with the corresponding
 	// octree-based adaptive-refinement and boundary-setup machinery.
-	nb::class_<pyoomph::TemplatedMeshBase3d, pyoomph::Mesh>(m, "TemplatedMeshBase3d")
+	nb::class_<TemplatedMeshBase3dHandle, MeshHandleBase>(m, "TemplatedMeshBase3d")
 		.def(nb::init<>())
-		.def("_set_problem", [](pyoomph::TemplatedMeshBase3d *self, pyoomph::Problem *p, pyoomph::DynamicBulkElementInstance *inst)
-			 { self->_set_problem(p, inst); }, nb::arg("problem"), nb::arg("code_instance").none())
+		.def("_set_problem",handle_method<TemplatedMeshBase3dHandle>([](pyoomph::TemplatedMeshBase3d *self, pyoomph::Problem *p, pyoomph::DynamicBulkElementInstance *inst)
+			 { self->_set_problem(p, inst); }), nb::arg("problem"), nb::arg("code_instance").none())
 		.def(
-			"_get_problem", [](pyoomph::TemplatedMeshBase3d *self)
-			{ return self->get_problem(); },
+			"_get_problem",handle_method<TemplatedMeshBase3dHandle>([](pyoomph::TemplatedMeshBase3d *self)
+			{ return self->get_problem(); }),
 			nb::rv_policy::reference)
-		.def("generate_from_template", &pyoomph::TemplatedMeshBase3d::generate_from_template, nb::arg("template_collection"), "Builds this mesh's elements and nodes from the given 3d domain of a MeshTemplate")
-		.def("refinement_possible", &pyoomph::TemplatedMeshBase3d::refinement_possible, "Returns whether adaptive refinement is possible for this mesh (e.g. False if it contains non-refineable elements)")
+		.def("generate_from_template",handle_method<TemplatedMeshBase3dHandle>(&pyoomph::TemplatedMeshBase3d::generate_from_template), nb::arg("template_collection"), "Builds this mesh's elements and nodes from the given 3d domain of a MeshTemplate")
+		.def("refinement_possible",handle_method<TemplatedMeshBase3dHandle>(&pyoomph::TemplatedMeshBase3d::refinement_possible), "Returns whether adaptive refinement is possible for this mesh (e.g. False if it contains non-refineable elements)")
 		.def(
-			"refine_uniformly", [](pyoomph::TemplatedMeshBase3d *self, unsigned int num)
-			{for (unsigned int i=0;i<num;i++) self->refine_uniformly(); },
+			"refine_uniformly",handle_method<TemplatedMeshBase3dHandle>([](pyoomph::TemplatedMeshBase3d *self, unsigned int num)
+			{for (unsigned int i=0;i<num;i++) self->refine_uniformly(); }),
 			"num"_a = 1, "Uniformly refines this mesh the given number of times")
 		.def(
-			"unrefine_uniformly", [](pyoomph::TemplatedMeshBase3d *self, unsigned int num)
-			{ for (unsigned int i=0;i<num;i++) if (self->unrefine_uniformly()) return true; return false; },
+			"unrefine_uniformly",handle_method<TemplatedMeshBase3dHandle>([](pyoomph::TemplatedMeshBase3d *self, unsigned int num)
+			{ for (unsigned int i=0;i<num;i++) if (self->unrefine_uniformly()) return true; return false; }),
 			"num"_a = 1, "Uniformly unrefines this mesh up to the given number of times; returns True if unrefinement was not fully possible (e.g. the coarsest level was reached)")
-		.def("setup_tree_forest", &pyoomph::TemplatedMeshBase3d::setup_tree_forest, "Builds the octree forest used for adaptive mesh refinement of this 3d mesh")
-		.def("refine_selected_elements", [](pyoomph::TemplatedMeshBase3d *m, std::vector<unsigned int> inds)
-			 { oomph::Vector<unsigned> oomphvec(inds.size()); for (unsigned int i=0;i<inds.size();i++) oomphvec[i]=inds[i]; m->refine_selected_elements(oomphvec); }, nb::arg("element_indices"), "Refines only the elements at the given indices in this mesh")
-		.def_prop_rw("identication_of_boundary_elements_by_facets", [](pyoomph::TemplatedMeshBase3d *self)
-			 { return self->identication_of_boundary_elements_by_facets; },
-			 [](pyoomph::TemplatedMeshBase3d *self, bool val) { self->identication_of_boundary_elements_by_facets=val; }, "Controls whether boundary elements are identified by matching facets (True) or by node membership (False)")
-		.def("setup_boundary_element_info", [](pyoomph::TemplatedMeshBase3d *self)
-			 { std::ostringstream oss; self->setup_boundary_element_info(oss); }, "(Re-)builds the lookup of which elements are adjacent to which mesh boundary");
+		.def("setup_tree_forest",handle_method<TemplatedMeshBase3dHandle>(&pyoomph::TemplatedMeshBase3d::setup_tree_forest), "Builds the octree forest used for adaptive mesh refinement of this 3d mesh")
+		.def("refine_selected_elements",handle_method<TemplatedMeshBase3dHandle>([](pyoomph::TemplatedMeshBase3d *m, std::vector<unsigned int> inds)
+			 { oomph::Vector<unsigned> oomphvec(inds.size()); for (unsigned int i=0;i<inds.size();i++) oomphvec[i]=inds[i]; m->refine_selected_elements(oomphvec); }), nb::arg("element_indices"), "Refines only the elements at the given indices in this mesh")
+		.def_prop_rw("identication_of_boundary_elements_by_facets",handle_method<TemplatedMeshBase3dHandle>([](pyoomph::TemplatedMeshBase3d *self)
+			 { return self->identication_of_boundary_elements_by_facets; }),handle_method<TemplatedMeshBase3dHandle>([](pyoomph::TemplatedMeshBase3d *self, bool val) { self->identication_of_boundary_elements_by_facets=val; }), "Controls whether boundary elements are identified by matching facets (True) or by node membership (False)")
+		.def("setup_boundary_element_info",handle_method<TemplatedMeshBase3dHandle>([](pyoomph::TemplatedMeshBase3d *self)
+			 { std::ostringstream oss; self->setup_boundary_element_info(oss); }), "(Re-)builds the lookup of which elements are adjacent to which mesh boundary");
 
 	// A mesh of interface elements attached to a boundary of a bulk mesh (e.g. for surface tension,
 	// contact lines, or coupling two bulk domains); see pyoomph::InterfaceMesh in mesh.hpp.
-	nb::class_<pyoomph::InterfaceMesh, pyoomph::Mesh>(m, "InterfaceMesh")
-		.def("clear_before_adapt", &pyoomph::InterfaceMesh::clear_before_adapt, "Removes this interface mesh's elements before the adjacent bulk mesh is adapted; they are regenerated afterwards by rebuild_after_adapt")
-		.def("nullify_selected_bulk_dofs", &pyoomph::InterfaceMesh::nullify_selected_bulk_dofs, "Nullifies the contribution of selected bulk degrees of freedom that are being superseded by this interface's own degrees of freedom")
-		.def("_connect_interface_elements_by_kdtree", &pyoomph::InterfaceMesh::connect_interface_elements_by_kdtree, nb::arg("other"), "Connects this interface mesh's elements to the spatially closest elements of another interface mesh using a kd-tree search, e.g. to set up two-sided interfaces")
-		.def("rebuild_after_adapt", &pyoomph::InterfaceMesh::rebuild_after_adapt, "Regenerates this interface mesh's elements after the adjacent bulk mesh has been adapted")
-		.def("set_opposite_interface_offset_vector",&pyoomph::InterfaceMesh::set_opposite_interface_offset_vector, nb::arg("offset"), "Sets a constant coordinate offset applied when matching this interface to its opposite side (e.g. for periodic geometries)")
-		.def("get_opposite_interface_offset_vector",&pyoomph::InterfaceMesh::get_opposite_interface_offset_vector, "Returns the coordinate offset applied when matching this interface to its opposite side")
-		.def("update_zeta_in_buffer",&pyoomph::InterfaceMesh::update_zeta_in_buffer, "Updates the buffered intrinsic (zeta) coordinates of the interface nodes, used for locating the opposite side of a two-sided interface")
-		.def("update_equation_remapping",&pyoomph::InterfaceMesh::update_equation_remapping, "Updates the mapping between this interface's local equation numbers and the global equation numbers after the dof numbering has changed")
-		.def("get_bulk_mesh", &pyoomph::InterfaceMesh::get_bulk_mesh, "Returns the bulk mesh this interface mesh is attached to")
+	nb::class_<InterfaceMeshHandle, MeshHandleBase>(m, "InterfaceMesh")
+		.def("clear_before_adapt",handle_method<InterfaceMeshHandle>(&pyoomph::InterfaceMesh::clear_before_adapt), "Removes this interface mesh's elements before the adjacent bulk mesh is adapted; they are regenerated afterwards by rebuild_after_adapt")
+		.def("nullify_selected_bulk_dofs",handle_method<InterfaceMeshHandle>(&pyoomph::InterfaceMesh::nullify_selected_bulk_dofs), "Nullifies the contribution of selected bulk degrees of freedom that are being superseded by this interface's own degrees of freedom")
+		.def("_connect_interface_elements_by_kdtree",handle_method<InterfaceMeshHandle>(&pyoomph::InterfaceMesh::connect_interface_elements_by_kdtree), nb::arg("other"), "Connects this interface mesh's elements to the spatially closest elements of another interface mesh using a kd-tree search, e.g. to set up two-sided interfaces")
+		.def("rebuild_after_adapt",handle_method<InterfaceMeshHandle>(&pyoomph::InterfaceMesh::rebuild_after_adapt), "Regenerates this interface mesh's elements after the adjacent bulk mesh has been adapted")
+		.def("set_opposite_interface_offset_vector",handle_method<InterfaceMeshHandle>(&pyoomph::InterfaceMesh::set_opposite_interface_offset_vector), nb::arg("offset"), "Sets a constant coordinate offset applied when matching this interface to its opposite side (e.g. for periodic geometries)")
+		.def("get_opposite_interface_offset_vector",handle_method<InterfaceMeshHandle>(&pyoomph::InterfaceMesh::get_opposite_interface_offset_vector), "Returns the coordinate offset applied when matching this interface to its opposite side")
+		.def("update_zeta_in_buffer",handle_method<InterfaceMeshHandle>(&pyoomph::InterfaceMesh::update_zeta_in_buffer), "Updates the buffered intrinsic (zeta) coordinates of the interface nodes, used for locating the opposite side of a two-sided interface")
+		.def("update_equation_remapping",handle_method<InterfaceMeshHandle>(&pyoomph::InterfaceMesh::update_equation_remapping), "Updates the mapping between this interface's local equation numbers and the global equation numbers after the dof numbering has changed")
+		// get_bulk_mesh is NOT bound: with the MeshHandle machinery there is no bare pyoomph::Mesh*
+		// nanobind type to return it as any more, and the Python InterfaceMesh wrapper already
+		// stores the parent mesh directly (self._parent), which get_bulk_mesh() just returns.
 		.def(
-			"_get_problem", [](pyoomph::InterfaceMesh *self)
-			{ return self->get_problem(); },
+			"_get_problem",handle_method<InterfaceMeshHandle>([](pyoomph::InterfaceMesh *self)
+			{ return self->get_problem(); }),
 			nb::rv_policy::reference)
-		.def("_set_problem", [](pyoomph::InterfaceMesh *self, pyoomph::Problem *p, pyoomph::DynamicBulkElementInstance *inst)
-			 { self->_set_problem(p, inst); }, nb::arg("problem"), nb::arg("code_instance").none())
+		.def("_set_problem",handle_method<InterfaceMeshHandle>([](pyoomph::InterfaceMesh *self, pyoomph::Problem *p, pyoomph::DynamicBulkElementInstance *inst)
+			 { self->_set_problem(p, inst); }), nb::arg("problem"), nb::arg("code_instance").none())
 		//  .def(nb::init<pyoomph::Problem*>());
 		.def(nb::init<>());
 
@@ -1464,7 +1555,8 @@ void PyReg_Mesh(nb::module_ &m)
 
 	nb::class_<pyoomph::TracerCollection>(m, "TracerCollection")
 		.def(nb::init<std::string>())
-		.def("_set_mesh", &pyoomph::TracerCollection::set_mesh)
+		.def("_set_mesh", [](pyoomph::TracerCollection *self, MeshHandleBase *mesh_h)
+			 { self->set_mesh(mesh_h->mesh()); })
 		.def("_advect_all", &pyoomph::TracerCollection::advect_all)
 		.def("_prepare_advection", &pyoomph::TracerCollection::prepare_advection)
 		.def("_locate_elements", &pyoomph::TracerCollection::locate_elements)
@@ -1494,7 +1586,6 @@ void PyReg_Mesh(nb::module_ &m)
 	 
 	 
 	 delete py_decl_OomphData;
-	 delete py_decl_OomphMesh;
-	 delete py_decl_PyoomphMesh;
+	 delete py_decl_MeshHandleBase;
 	 delete py_decl_GeneralisedElement;
 }

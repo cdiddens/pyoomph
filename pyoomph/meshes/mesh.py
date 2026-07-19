@@ -1371,6 +1371,13 @@ class InterfaceMesh(_pyoomph.InterfaceMesh):
     def get_dimension(self) -> int:
         return self._parent.get_dimension()-1
 
+    def get_bulk_mesh(self) -> "AnySpatialMesh":
+        # The nanobind C++ binding no longer exposes get_bulk_mesh() (see mesh.cpp): with the
+        # MeshHandle machinery there is no bare mesh pointer nanobind could wrap for a return
+        # value, and it would also not be the same Python object as self._parent anyway. This is
+        # already stored directly, so just return it.
+        return self._parent
+
     def setup_initial_conditions_with_interfaces(self, resetting_first_step: bool, ic_name: str):
         if self.ignore_initial_condition:
             return

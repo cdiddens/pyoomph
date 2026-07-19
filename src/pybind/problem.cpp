@@ -27,8 +27,11 @@ The main author may be contacted at c.diddens@utwente.nl
 #include <nanobind/stl/vector.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/map.h>
+#include <nanobind/stl/set.h>
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/tuple.h>
+#include <nanobind/stl/complex.h>
+#include <nanobind/stl/function.h>
 #include <fstream>
 #include <tuple>
 
@@ -42,6 +45,7 @@ namespace nb = nanobind;
 #include "../bifurcation.hpp"
 #include "../expressions.hpp"
 #include "../mesh.hpp"
+#include "mesh_handle.hpp"
 #include "../elements.hpp"
 #include "../codegen.hpp"
 #include "../ccompiler.hpp"
@@ -538,7 +542,8 @@ void PyReg_Problem(nb::module_ &m)
 		"A JIT-compiled and instantiated finite element code, attached to a particular mesh. Created via "
 		"Problem.generate_and_compile_bulk_element_code(); provides the low-level bookkeeping (field indices, "
 		"external data links, ...) required by the Python-level Equations/Mesh classes.")
-		.def("_exchange_mesh", &pyoomph::DynamicBulkElementInstance::set_bulk_mesh, nb::arg("mesh"),
+		.def("_exchange_mesh", [](pyoomph::DynamicBulkElementInstance *self, MeshHandleBase *mesh_h)
+			 { self->set_bulk_mesh(mesh_h->mesh()); }, nb::arg("mesh"),
 			 "Change the bulk mesh this element code instance is associated with.")
 		.def("link_external_data", &pyoomph::DynamicBulkElementInstance::link_external_data,
 			 nb::arg("name"), nb::arg("data"), nb::arg("index"), nb::arg("full_source_name"),
@@ -588,6 +593,33 @@ void PyReg_Problem(nb::module_ &m)
 			 "Hook, overridable in Python, to pin (fix) degrees of freedom before the equation numbers are assigned.")
 		.def("set_initial_condition", &pyoomph::Problem::set_initial_condition,
 			 "Hook, overridable in Python, to set the initial condition of the problem.")
+		// The following are hooks, overridable in Python, called at the corresponding point of a
+		// Newton solve/adaptation/distribution; all default to a no-op in the C++ core. Unlike
+		// pybind11, nanobind's virtual-override dispatch (see PyProblemTrampoline above) requires
+		// every overridable hook to also have a plain (non-overridden) binding under the same name
+		// here, used to detect whether a Python subclass has actually overridden it.
+		.def("actions_before_newton_solve", &pyoomph::Problem::actions_before_newton_solve,
+			 "Hook, overridable in Python, called right before a Newton solve.")
+		.def("actions_after_newton_solve", &pyoomph::Problem::actions_after_newton_solve,
+			 "Hook, overridable in Python, called right after a Newton solve.")
+		.def("actions_before_newton_convergence_check", &pyoomph::Problem::actions_before_newton_convergence_check,
+			 "Hook, overridable in Python, called before each Newton convergence check.")
+		.def("actions_after_change_in_global_parameter", (void (pyoomph::Problem::*)(const std::string &)) & pyoomph::Problem::actions_after_change_in_global_parameter, nb::arg("parameter_name"),
+			 "Hook, overridable in Python, called after the named global parameter has changed (e.g. during continuation).")
+		.def("actions_after_parameter_increase", (void (pyoomph::Problem::*)(const std::string &)) & pyoomph::Problem::actions_after_parameter_increase, nb::arg("parameter_name"),
+			 "Hook, overridable in Python, called after the named global parameter has been increased.")
+		.def("actions_after_newton_step", &pyoomph::Problem::actions_after_newton_step,
+			 "Hook, overridable in Python, called after each Newton step.")
+		.def("actions_before_newton_step", &pyoomph::Problem::actions_before_newton_step,
+			 "Hook, overridable in Python, called before each Newton step.")
+		.def("actions_before_adapt", &pyoomph::Problem::actions_before_adapt,
+			 "Hook, overridable in Python, called before spatial mesh adaptation.")
+		.def("actions_after_adapt", &pyoomph::Problem::actions_after_adapt,
+			 "Hook, overridable in Python, called after spatial mesh adaptation.")
+		.def("actions_before_distribute", &pyoomph::Problem::actions_before_distribute,
+			 "Hook, overridable in Python, called before the problem's meshes are distributed across MPI processes.")
+		.def("actions_after_distribute", &pyoomph::Problem::actions_after_distribute,
+			 "Hook, overridable in Python, called after the problem's meshes are distributed across MPI processes.")
 		.def("_get_jacobian_information_string", &pyoomph::Problem::get_jacobian_information_string,
 			 "Return a human-readable summary of the defined fields, residuals and their Jacobian coupling structure, "
 			 "together with a flag whether the structure looks consistent; used for diagnostics/debugging.")
@@ -945,8 +977,10 @@ void PyReg_Problem(nb::module_ &m)
 			 "Unload all dynamically loaded/compiled shared libraries (generated element codes) currently linked into this problem.")
 		.def("add_time_stepper_pt", &pyoomph::Problem::add_time_stepper_pt, nb::keep_alive<1, 2>(), nb::arg("time_stepper"),
 			 "Add a time stepper to the problem, automatically (re-)sizing the Time object to hold the required number of history levels.")
-		.def("set_mesh_pt", &pyoomph::Problem::set_mesh_pt, nb::keep_alive<1, 2>(), nb::arg("mesh"), "Set the (single) global mesh of the problem.")
-		.def("add_sub_mesh", &pyoomph::Problem::add_sub_mesh, nb::keep_alive<1, 2>(), nb::arg("mesh"),
+		.def("set_mesh_pt", [](pyoomph::Problem *self, MeshHandleBase *mesh_h)
+			 { self->set_mesh_pt(mesh_h->mesh()); }, nb::keep_alive<1, 2>(), nb::arg("mesh"), "Set the (single) global mesh of the problem.")
+		.def("add_sub_mesh", [](pyoomph::Problem *self, MeshHandleBase *mesh_h)
+			 { return self->add_sub_mesh(mesh_h->oomph_mesh()); }, nb::keep_alive<1, 2>(), nb::arg("mesh"),
 			 "Add ``mesh`` as a sub-mesh of the problem; combine all sub-meshes into the global mesh afterwards via build_global_mesh().")
 		.def("flush_sub_meshes", &pyoomph::Problem::flush_sub_meshes, "Remove all sub-meshes previously added via add_sub_mesh(), without deleting them.")
 		.def("_get_global_field_names", &pyoomph::Problem::get_global_field_names,
@@ -977,8 +1011,10 @@ void PyReg_Problem(nb::module_ &m)
 			 "Set the finite-difference step size used when Hessian-vector products are computed by finite differences (see set_analytic_hessian_products()).")
 		.def("build_global_mesh", &pyoomph::Problem::build_global_mesh, "Combine all sub-meshes added via add_sub_mesh() into the problem's global mesh.")
 		.def("rebuild_global_mesh", &pyoomph::Problem::rebuild_global_mesh, "Re-build the problem's global mesh from the current set of sub-meshes, e.g. after sub-meshes were modified.")
-		.def("mesh_pt", (oomph::Mesh * &(pyoomph::Problem::*)()) & pyoomph::Problem::mesh_pt, nb::rv_policy::reference, "Return the problem's global mesh.")
-		.def("mesh_pt", (oomph::Mesh * &(pyoomph::Problem::*)(unsigned const &)) & pyoomph::Problem::mesh_pt, nb::rv_policy::reference, nb::arg("i"), "Return the ``i``-th sub-mesh of the problem.")
+		.def("mesh_pt", [](pyoomph::Problem *self)
+			 { return pyoomph_find_mesh_handle(self->mesh_pt()); }, "Return the problem's global mesh.")
+		.def("mesh_pt", [](pyoomph::Problem *self, unsigned const &i)
+			 { return pyoomph_find_mesh_handle(self->mesh_pt(i)); }, nb::arg("i"), "Return the ``i``-th sub-mesh of the problem.")
 		.def("time_pt", (oomph::Time * &(pyoomph::Problem::*)()) & pyoomph::Problem::time_pt, nb::rv_policy::reference, "Return the problem's Time object, holding the current time and time step history.")
 		.def("time_stepper_pt", (oomph::TimeStepper * &(pyoomph::Problem::*)(const unsigned &)) & pyoomph::Problem::time_stepper_pt, nb::rv_policy::reference, nb::arg("i") = 0,
 			 "Return the ``i``-th time stepper added to the problem via add_time_stepper_pt() (default: the first/main one).")
@@ -1067,8 +1103,9 @@ void PyReg_Problem(nb::module_ &m)
 		.def("ensure_dummy_values_to_be_dummy", &pyoomph::Problem::ensure_dummy_values_to_be_dummy,
 			 "Sanity-check/reset helper that ensures dummy (unused, placeholder) degrees of freedom hold their expected dummy value.")
 		.def(
-			"generate_and_compile_bulk_element_code", [](pyoomph::Problem *problem, pyoomph::FiniteElementCode *my_element, std::string code_trunk, bool suppress_writing, bool suppress_compilation, pyoomph::Mesh *bulkmesh, bool quiet, const std::vector<std::string> &extra_flags)
+			"generate_and_compile_bulk_element_code", [](pyoomph::Problem *problem, pyoomph::FiniteElementCode *my_element, std::string code_trunk, bool suppress_writing, bool suppress_compilation, MeshHandleBase *bulkmesh_h, bool quiet, const std::vector<std::string> &extra_flags)
 			{
+				pyoomph::Mesh *bulkmesh = bulkmesh_h->mesh();
 				// Generate Hessian if desired
 				my_element->set_problem(problem);
 				my_element->generate_hessian = problem->are_hessian_products_calculated_analytically();
