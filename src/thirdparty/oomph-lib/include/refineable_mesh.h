@@ -95,7 +95,7 @@ namespace oomph
     void operator=(const RefineableMeshBase&) = delete;
 
     /// Empty Destructor:
-    virtual ~RefineableMeshBase() {}
+    ~RefineableMeshBase() override {}
 
     ///  Access fct for number of elements that were refined
     unsigned nrefined()
@@ -409,7 +409,7 @@ namespace oomph
     void operator=(const TreeBasedRefineableMeshBase&) = delete;
 
     /// Empty Destructor:
-    virtual ~TreeBasedRefineableMeshBase()
+    ~TreeBasedRefineableMeshBase() override
     {
       // Kill the forest if there is one
       if (Forest_pt != 0)
@@ -421,26 +421,26 @@ namespace oomph
 
     /// Adapt mesh: Refine elements whose error is lager than err_max
     /// and (try to) unrefine those whose error is smaller than err_min
-    void adapt(const Vector<double>& elemental_error);
+    void adapt(const Vector<double>& elemental_error) override;
 
     /// p-adapt mesh: Refine elements whose error is lager than err_max
     /// and (try to) unrefine those whose error is smaller than err_min
-    void p_adapt(const Vector<double>& elemental_error);
+    void p_adapt(const Vector<double>& elemental_error) override;
 
     /// Refine mesh uniformly and doc process
-    void refine_uniformly(DocInfo& doc_info);
+    void refine_uniformly(DocInfo& doc_info) override;
 
     /// Refine mesh uniformly
-    void refine_uniformly()
+    void refine_uniformly() override
     {
       RefineableMeshBase::refine_uniformly();
     }
 
     /// p-refine mesh uniformly and doc process
-    void p_refine_uniformly(DocInfo& doc_info);
+    void p_refine_uniformly(DocInfo& doc_info) override;
 
     /// p-refine mesh uniformly
-    void p_refine_uniformly()
+    void p_refine_uniformly() override
     {
       RefineableMeshBase::p_refine_uniformly();
     }
@@ -448,7 +448,7 @@ namespace oomph
     /// Unrefine mesh uniformly: Return 0 for success,
     /// 1 for failure (if unrefinement has reached the coarsest permitted
     /// level)
-    unsigned unrefine_uniformly();
+    unsigned unrefine_uniformly() override;
 
     /// p-unrefine mesh uniformly
     void p_unrefine_uniformly(DocInfo& doc_info);
@@ -464,7 +464,7 @@ namespace oomph
 
 
     /// Doc the targets for mesh adaptation
-    void doc_adaptivity_targets(std::ostream& outfile)
+    void doc_adaptivity_targets(std::ostream& outfile) override
     {
       outfile << std::endl;
       outfile << "Targets for mesh adaptation: " << std::endl;
@@ -633,7 +633,7 @@ namespace oomph
     /// version from Mesh base class. Calls that one first, then synchronises
     /// hanging nodes)
     void classify_halo_and_haloed_nodes(DocInfo& doc_info,
-                                        const bool& report_stats)
+                                        const bool& report_stats) override
     {
       // Call version in base class but don't bother to call
       // resize_halo_nodes() -- we'll do it ourselves below
@@ -696,7 +696,7 @@ namespace oomph
 
 
     /// Classify the halo and haloed nodes in the mesh.
-    void classify_halo_and_haloed_nodes(const bool& report_stats = false)
+    void classify_halo_and_haloed_nodes(const bool& report_stats = false) override
     {
       DocInfo doc_info;
       doc_info.disable_doc();
@@ -811,7 +811,7 @@ namespace oomph
     /// Split all the elements if required. Overload the template-free
     /// interface so that any new elements that are created
     /// will be of the correct type.
-    void split_elements_if_required()
+    void split_elements_if_required() override
     {
       // Find the number of trees in the forest
       unsigned n_tree = this->Forest_pt->ntree();
@@ -827,7 +827,7 @@ namespace oomph
     /// p-refine all the elements if required. Overload the template-free
     /// interface so that any temporary copies of the element that are created
     /// will be of the correct type.
-    void p_refine_elements_if_required()
+    void p_refine_elements_if_required() override
     {
       // BENFLAG: Make a non const pointer to the mesh so it can be passed
       // (HACK)
@@ -853,7 +853,7 @@ namespace oomph
     /// MacroElementNodeUpdateNodes which are added as external halo master
     /// nodes can be made fully functional
     void additional_synchronise_hanging_nodes(
-      const unsigned& ncont_interpolated_values);
+      const unsigned& ncont_interpolated_values) override;
 
 #endif
 
@@ -865,7 +865,7 @@ namespace oomph
     TreeBasedRefineableMesh(const TreeBasedRefineableMesh& dummy) = delete;
 
     /// Empty virtual destructor
-    virtual ~TreeBasedRefineableMesh() {}
+    ~TreeBasedRefineableMesh() override {}
   };
 
 
@@ -900,7 +900,7 @@ namespace oomph
 
 
     /// Doc the targets for mesh adaptation
-    void doc_adaptivity_targets(std::ostream& outfile)
+    void doc_adaptivity_targets(std::ostream& outfile) override
     {
       outfile << std::endl;
       outfile << "Targets for mesh adaptation: " << std::endl;

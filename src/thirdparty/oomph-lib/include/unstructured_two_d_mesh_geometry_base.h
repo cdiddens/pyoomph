@@ -690,7 +690,7 @@ namespace oomph
 
 
     /// Empty Destuctor
-    virtual ~TriangleMeshCurviLine() {}
+    ~TriangleMeshCurviLine() override {}
 
     /// Pointer to GeomObject that represents this part of the boundary
     GeomObject* geom_object_pt()
@@ -712,7 +712,7 @@ namespace oomph
 
     /// Number of (initially straight-line) segments that this part of
     /// the boundary is to be represented by
-    unsigned nsegment() const
+    unsigned nsegment() const override
     {
       return Nsegment;
     }
@@ -726,20 +726,20 @@ namespace oomph
     }
 
     /// Boundary ID
-    unsigned boundary_id() const
+    unsigned boundary_id() const override
     {
       return Boundary_id;
     }
 
     /// Boundary chunk (Used when a boundary is represented by more
     /// than one polyline
-    unsigned boundary_chunk() const
+    unsigned boundary_chunk() const override
     {
       return Boundary_chunk;
     }
 
     /// Output curvilinear boundary at n_sample (default: 50) points
-    void output(std::ostream& outfile, const unsigned& n_sample = 50)
+    void output(std::ostream& outfile, const unsigned& n_sample = 50) override
     {
       outfile << "ZONE T=\"Boundary " << Boundary_id << "\"\n";
       Vector<double> zeta(1);
@@ -762,13 +762,13 @@ namespace oomph
     }
 
     /// Number of vertices
-    unsigned nvertex() const
+    unsigned nvertex() const override
     {
       return 2;
     }
 
     /// Get first vertex coordinates
-    void initial_vertex_coordinate(Vector<double>& vertex)
+    void initial_vertex_coordinate(Vector<double>& vertex) override
     {
       Vector<double> z(1);
       z[0] = Zeta_start;
@@ -776,7 +776,7 @@ namespace oomph
     }
 
     /// Get last vertex coordinates
-    void final_vertex_coordinate(Vector<double>& vertex)
+    void final_vertex_coordinate(Vector<double>& vertex) override
     {
       Vector<double> z(1);
       z[0] = Zeta_end;
@@ -898,29 +898,29 @@ namespace oomph
     }
 
     /// Empty destructor
-    virtual ~TriangleMeshPolyLine() {}
+    ~TriangleMeshPolyLine() override {}
 
     /// Number of vertices
-    unsigned nvertex() const
+    unsigned nvertex() const override
     {
       return Vertex_coordinate.size();
     }
 
     /// Number of segments
-    unsigned nsegment() const
+    unsigned nsegment() const override
     {
       return Vertex_coordinate.size() - 1;
     }
 
     /// Boundary id
-    unsigned boundary_id() const
+    unsigned boundary_id() const override
     {
       return Boundary_id;
     }
 
     /// Boundary chunk (Used when a boundary is represented by more
     /// than one polyline
-    unsigned boundary_chunk() const
+    unsigned boundary_chunk() const override
     {
       return Boundary_chunk;
     }
@@ -938,19 +938,19 @@ namespace oomph
     }
 
     /// Get first vertex coordinates
-    void initial_vertex_coordinate(Vector<double>& vertex)
+    void initial_vertex_coordinate(Vector<double>& vertex) override
     {
       vertex = Vertex_coordinate[0];
     }
 
     /// Get last vertex coordinates
-    void final_vertex_coordinate(Vector<double>& vertex)
+    void final_vertex_coordinate(Vector<double>& vertex) override
     {
       vertex = Vertex_coordinate[nvertex() - 1];
     }
 
     /// Output the polyline -- n_sample is ignored
-    void output(std::ostream& outfile, const unsigned& n_sample = 50)
+    void output(std::ostream& outfile, const unsigned& n_sample = 50) override
     {
       outfile << "ZONE T=\"TriangleMeshPolyLine with boundary ID" << Boundary_id
               << "\"" << std::endl;
@@ -1345,10 +1345,10 @@ namespace oomph
       const bool& is_internal_point_fixed = false);
 
     /// Empty destructor
-    virtual ~TriangleMeshClosedCurve() {}
+    ~TriangleMeshClosedCurve() override {}
 
     /// Number of vertices
-    unsigned nvertices() const
+    unsigned nvertices() const override
     {
       unsigned n_curve_section = ncurve_section();
       unsigned n_vertices = 0;
@@ -1366,7 +1366,7 @@ namespace oomph
     }
 
     /// Total number of segments
-    unsigned nsegments() const
+    unsigned nsegments() const override
     {
       unsigned n_curve_section = ncurve_section();
       unsigned nseg = 0;
@@ -1384,7 +1384,7 @@ namespace oomph
     }
 
     /// Output each sub-boundary at n_sample (default: 50) points
-    void output(std::ostream& outfile, const unsigned& n_sample = 50)
+    void output(std::ostream& outfile, const unsigned& n_sample = 50) override
     {
       unsigned nb = Curve_section_pt.size();
       for (unsigned i = 0; i < nb; i++)
@@ -1470,10 +1470,10 @@ namespace oomph
       const bool& is_internal_point_fixed = false);
 
     /// Empty virtual destructor
-    virtual ~TriangleMeshPolygon() {}
+    ~TriangleMeshPolygon() override {}
 
     /// Number of constituent curves
-    unsigned ncurve_section() const
+    unsigned ncurve_section() const override
     {
       return npolyline();
     }
@@ -1646,10 +1646,10 @@ namespace oomph
       const Vector<TriangleMeshCurveSection*>& curve_section_pt);
 
     /// Empty destructor
-    virtual ~TriangleMeshOpenCurve() {}
+    ~TriangleMeshOpenCurve() override {}
 
     /// Number of vertices
-    unsigned nvertices() const
+    unsigned nvertices() const override
     {
       unsigned n_vertices = 0;
       unsigned n_curve_section = ncurve_section();
@@ -1664,7 +1664,7 @@ namespace oomph
     }
 
     /// Total number of segments
-    unsigned nsegments() const
+    unsigned nsegments() const override
     {
       unsigned n_curve_section = ncurve_section();
       unsigned nseg = 0;
@@ -1676,7 +1676,7 @@ namespace oomph
     }
 
     /// Output each sub-boundary at n_sample (default: 50) points
-    void output(std::ostream& outfile, const unsigned& n_sample = 50)
+    void output(std::ostream& outfile, const unsigned& n_sample = 50) override
     {
       unsigned nb = Curve_section_pt.size();
       for (unsigned i = 0; i < nb; i++)
@@ -1751,7 +1751,7 @@ namespace oomph
     void operator=(const UnstructuredTwoDMeshGeometryBase&) = delete;
 
     /// Empty destructor
-    ~UnstructuredTwoDMeshGeometryBase() {}
+    ~UnstructuredTwoDMeshGeometryBase() override {}
 
     /// Return the number of regions specified by attributes
     unsigned nregion()

@@ -78,23 +78,23 @@ namespace pyoomph
                   const double &omega, const oomph::DoubleVector &phi,
                   const oomph::DoubleVector &psi);
 
-    ~MyHopfHandler();
+    ~MyHopfHandler() override;
 
     void set_eigenweight(double ew);
     unsigned get_problem_ndof() { return Ndof; }
     // Number of dofs of the augmented element: original element dofs plus its contribution
     // to Phi, Psi and (for one designated element) Omega.
-    unsigned ndof(oomph::GeneralisedElement *const &elem_pt);
+    unsigned ndof(oomph::GeneralisedElement *const &elem_pt) override;
 
     // Maps a local dof index of the augmented element to its global equation number in the
     // augmented system, distinguishing between original-, Phi-, Psi- and Omega-dofs.
     unsigned long eqn_number(oomph::GeneralisedElement *const &elem_pt,
-                             const unsigned &ieqn_local);
+                             const unsigned &ieqn_local) override;
 
     // Assembles the augmented residual vector (original residuals plus the eigenvector and
     // normalization equations described in the class comment above) for one element.
     void get_residuals(oomph::GeneralisedElement *const &elem_pt,
-                       oomph::Vector<double> &residuals);
+                       oomph::Vector<double> &residuals) override;
 
     // Assembles the augmented Jacobian, i.e. the derivatives of all augmented residuals
     // (base + eigen-equations + normalization) with respect to all augmented dofs
@@ -102,35 +102,35 @@ namespace pyoomph
     // since J and M themselves depend on u.
     void get_jacobian(oomph::GeneralisedElement *const &elem_pt,
                       oomph::Vector<double> &residuals,
-                      oomph::DenseMatrix<double> &jacobian);
+                      oomph::DenseMatrix<double> &jacobian) override;
 
     // Derivative of the augmented residuals with respect to the bifurcation parameter,
     // needed for arclength continuation of the Hopf point.
     void get_dresiduals_dparameter(oomph::GeneralisedElement *const &elem_pt,
                                    double *const &parameter_pt,
-                                   oomph::Vector<double> &dres_dparam);
+                                   oomph::Vector<double> &dres_dparam) override;
 
     void get_djacobian_dparameter(oomph::GeneralisedElement *const &elem_pt,
                                   double *const &parameter_pt,
                                   oomph::Vector<double> &dres_dparam,
-                                  oomph::DenseMatrix<double> &djac_dparam);
+                                  oomph::DenseMatrix<double> &djac_dparam) override;
 
     void get_hessian_vector_products(oomph::GeneralisedElement *const &elem_pt,
                                      oomph::Vector<double> const &Y,
                                      oomph::DenseMatrix<double> const &C,
-                                     oomph::DenseMatrix<double> &product);
+                                     oomph::DenseMatrix<double> &product) override;
 
     // Compares the analytically assembled Jacobian entries against a finite-difference
     // approximation (step size eps) for the given element, printing mismatches; a debugging aid.
     void debug_analytical_filling(oomph::GeneralisedElement *elem_pt, double eps);
-    int bifurcation_type() const { return 3; }
+    int bifurcation_type() const override { return 3; }
 
-    double *bifurcation_parameter_pt() const
+    double *bifurcation_parameter_pt() const override
     {
       return Parameter_pt;
     }
 
-    void get_eigenfunction(oomph::Vector<oomph::DoubleVector> &eigenfunction);
+    void get_eigenfunction(oomph::Vector<oomph::DoubleVector> &eigenfunction) override;
 
     // Returns the complex eigenfunction Phi+i*Psi after rotating it in the complex plane
     // (multiplying by a unit-modulus phase) to a canonical, reproducible orientation, since
@@ -212,23 +212,23 @@ namespace pyoomph
     // Constructs the handler; symmetry_vector defines the fixed Psi used in the symmetry
     // constraint. The eigenvector Y and Sigma are initialized internally.
     MyPitchForkHandler(Problem *const &problem_pt, double *const &parameter_pt, const oomph::DoubleVector &symmetry_vector);
-    ~MyPitchForkHandler();
+    ~MyPitchForkHandler() override;
     void set_eigenweight(double ew);
     unsigned get_problem_ndof() { return Ndof; }
     // Number of dofs of the augmented element: original element dofs plus its contribution to Y and Sigma.
-    unsigned ndof(oomph::GeneralisedElement *const &elem_pt);
-    unsigned long eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local);
+    unsigned ndof(oomph::GeneralisedElement *const &elem_pt) override;
+    unsigned long eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local) override;
     // Assembles the augmented residual vector (original residuals plus the null-eigenvector,
     // normalization and symmetry-constraint equations) for one element.
-    void get_residuals(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals);
+    void get_residuals(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals) override;
     // Assembles the augmented Jacobian for all augmented dofs (u, Y, Sigma).
-    void get_jacobian(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian);
-    void get_dresiduals_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam);
-    void get_djacobian_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam, oomph::DenseMatrix<double> &djac_dparam);
-    void get_hessian_vector_products(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> const &Y, oomph::DenseMatrix<double> const &C, oomph::DenseMatrix<double> &product);
-    int bifurcation_type() const { return 2; }
-    double *bifurcation_parameter_pt() const { return Parameter_pt; }
-    void get_eigenfunction(oomph::Vector<oomph::DoubleVector> &eigenfunction);
+    void get_jacobian(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian) override;
+    void get_dresiduals_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam) override;
+    void get_djacobian_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam, oomph::DenseMatrix<double> &djac_dparam) override;
+    void get_hessian_vector_products(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> const &Y, oomph::DenseMatrix<double> const &C, oomph::DenseMatrix<double> &product) override;
+    int bifurcation_type() const override { return 2; }
+    double *bifurcation_parameter_pt() const override { return Parameter_pt; }
+    void get_eigenfunction(oomph::Vector<oomph::DoubleVector> &eigenfunction) override;
     // Switches back to assembling the full augmented system (see MyHopfHandler::solve_full_system for the analogous pattern).
     void solve_full_system();
   };
@@ -278,32 +278,32 @@ namespace pyoomph
     MyFoldHandler(Problem *const &problem_pt, double *const &parameter_pt, const oomph::DoubleVector &eigenvector);
     // Constructs the handler with an explicit eigenvector guess and normalization vector Phi.
     MyFoldHandler(Problem *const &problem_pt, double *const &parameter_pt, const oomph::DoubleVector &eigenvector, const oomph::DoubleVector &normalisation);
-    ~MyFoldHandler();
+    ~MyFoldHandler() override;
 
     void set_eigenweight(double ew);
 
     // Number of dofs of the augmented element: original element dofs plus its contribution to Y.
-    unsigned ndof(oomph::GeneralisedElement *const &elem_pt);
+    unsigned ndof(oomph::GeneralisedElement *const &elem_pt) override;
 
-    unsigned long eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local);
+    unsigned long eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local) override;
 
     // Assembles the augmented residual vector (original residuals plus the null-eigenvector
     // and normalization equations) for one element, depending on Solve_which_system.
-    void get_residuals(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals);
+    void get_residuals(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals) override;
 
     // Assembles the augmented Jacobian for the dofs selected by Solve_which_system.
-    void get_jacobian(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian);
+    void get_jacobian(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian) override;
 
-    void get_dresiduals_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam);
-    void get_djacobian_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam, oomph::DenseMatrix<double> &djac_dparam);
+    void get_dresiduals_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam) override;
+    void get_djacobian_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam, oomph::DenseMatrix<double> &djac_dparam) override;
 
-    void get_hessian_vector_products(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> const &Y, oomph::DenseMatrix<double> const &C, oomph::DenseMatrix<double> &product);
+    void get_hessian_vector_products(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> const &Y, oomph::DenseMatrix<double> const &C, oomph::DenseMatrix<double> &product) override;
 
-    int bifurcation_type() const { return 1; }
+    int bifurcation_type() const override { return 1; }
 
-    double *bifurcation_parameter_pt() const { return Parameter_pt; }
+    double *bifurcation_parameter_pt() const override { return Parameter_pt; }
 
-    void get_eigenfunction(oomph::Vector<oomph::DoubleVector> &eigenfunction);
+    void get_eigenfunction(oomph::Vector<oomph::DoubleVector> &eigenfunction) override;
 
     // Sets Solve_which_system = Block_augmented_J (eigenvector block + parameter equation only).
     void solve_augmented_block_system();
@@ -389,7 +389,7 @@ namespace pyoomph
     // Constructors. We must pass a problem, a parameter to optimize (i.e. to change in order to get Re(eigenvalue)=0) and a guess of the eigenvector and the imaginary part of the eigenvector
     AzimuthalSymmetryBreakingHandler(Problem *const &problem_pt, double *const &parameter_pt, const oomph::DoubleVector &real_eigen, const oomph::DoubleVector &imag_eigen, const double &Omega_guess,bool has_imag);
     // Destructor (used for cleaning up memory)
-    ~AzimuthalSymmetryBreakingHandler();
+    ~AzimuthalSymmetryBreakingHandler() override;
 
     // Pyoomph has different residual contributions. The original residual along with its
     // jacobian and the real and imag part of the azimuthal Jacobian and mass matrix.
@@ -400,31 +400,31 @@ namespace pyoomph
     // This will return the degrees of freedom of a single element of the augmented system
     // We will have to take the degrees of freedom of the original element and add a few more
     // for the eigenvector values (Re and Im)
-    unsigned ndof(oomph::GeneralisedElement *const &elem_pt);
+    unsigned ndof(oomph::GeneralisedElement *const &elem_pt) override;
 
     // This will cast the local equation number of an element to a global equation number.
     // Again, we have to consider the additional equations for the unknown eigenvector (Re and Im)
-    unsigned long eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local);
+    unsigned long eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local) override;
 
     // This will calculate the residual contribution of the original weak form by calling the function of the element
     // However, we will also have to add the contributions to the augmented residual form, i.e. the ones determining the eigenvector and critical parameter
-    void get_residuals(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals);
+    void get_residuals(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals) override;
 
     // Same for the Jacobian: We must add the contributions for the augmented system
-    void get_jacobian(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian);
+    void get_jacobian(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian) override;
 
     // Derivative of the augmented residuals with respect to the parameter
-    void get_dresiduals_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam);
+    void get_dresiduals_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam) override;
     // Derivative of the augmented Jacobian with respect to the parameter
-    void get_djacobian_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam, oomph::DenseMatrix<double> &djac_dparam);
+    void get_djacobian_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam, oomph::DenseMatrix<double> &djac_dparam) override;
 
-    int bifurcation_type() const { return 3; } // Internally used in oomph-lib. I assume it is best to return 3 (Hopf), since we have real and imag parts
+    int bifurcation_type() const override { return 3; } // Internally used in oomph-lib. I assume it is best to return 3 (Hopf), since we have real and imag parts
 
     // Function to access the bifurcation parameter
-    double *bifurcation_parameter_pt() const { return Parameter_pt; }
+    double *bifurcation_parameter_pt() const override { return Parameter_pt; }
 
     // Get the eigenfunction
-    void get_eigenfunction(oomph::Vector<oomph::DoubleVector> &eigenfunction);
+    void get_eigenfunction(oomph::Vector<oomph::DoubleVector> &eigenfunction) override;
     const double &omega() const { return Omega; } // and the value of the imaginary part of the eigenvalue
 
     void solve_full_system();
@@ -505,16 +505,16 @@ namespace pyoomph
     // T_constraint selects the phase-fixing constraint (0: plane, 1: period; see T_constraint_mode).
     PeriodicOrbitHandler(Problem *const &problem_pt, const double &period, const std::vector<std::vector<double>> &tadd, int bspline_order, int gl_order, std::vector<double> knots, unsigned T_constraint);
     // Destructor (used for cleaning up memory)
-    ~PeriodicOrbitHandler();
+    ~PeriodicOrbitHandler() override;
     unsigned n_tsteps() const { return 1 + Tadd.size(); }
-    unsigned long eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local);
-    unsigned ndof(oomph::GeneralisedElement *const &elem_pt);
+    unsigned long eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local) override;
+    unsigned ndof(oomph::GeneralisedElement *const &elem_pt) override;
     // Dispatches to the residual assembly routine matching the active discretization mode.
-    void get_residuals(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals);
+    void get_residuals(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals) override;
     // Dispatches to the Jacobian assembly routine matching the active discretization mode.
-    void get_jacobian(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian);
-    void get_dresiduals_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam);
-    void get_djacobian_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam, oomph::DenseMatrix<double> &djac_dparam);
+    void get_jacobian(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian) override;
+    void get_dresiduals_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam) override;
+    void get_djacobian_dparameter(oomph::GeneralisedElement *const &elem_pt, double *const &parameter_pt, oomph::Vector<double> &dres_dparam, oomph::DenseMatrix<double> &djac_dparam) override;
     // Saves/restores the augmented dof vector, e.g. around trial evaluations that must not
     // permanently perturb the current orbit (used together with set_dofs_to_interpolated_values()).
     void backup_dofs();
@@ -592,14 +592,14 @@ namespace pyoomph
     // filled with, for each entry of 'what', the resolved slot index into the output arrays
     // (or a derived negative encoding for Hessian-related requests; see the .cpp for details).
     CustomMultiAssembleHandler(Problem *const &problem_pt, std::vector<std::string> &_what, std::vector<std::string> &_contributions, std::vector<std::string> &_params, std::vector<std::vector<double>> &_hessian_vectors, std::vector<unsigned> &_hessian_vector_indices, std::vector<int> &return_indices);
-    ~CustomMultiAssembleHandler() {}
-    unsigned ndof(oomph::GeneralisedElement *const &elem_pt);
-    unsigned long eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local);
-    void get_residuals(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals);
-    void get_jacobian(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian);
+    ~CustomMultiAssembleHandler() override {}
+    unsigned ndof(oomph::GeneralisedElement *const &elem_pt) override;
+    unsigned long eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local) override;
+    void get_residuals(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals) override;
+    void get_jacobian(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian) override;
     // Assembles all requested vector- and matrix-valued quantities for one element in a single
     // pass, placing each into 'vec'/'matrix' at the slot index determined by the constructor.
-    void get_all_vectors_and_matrices(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<oomph::Vector<double>> &vec, oomph::Vector<oomph::DenseMatrix<double>> &matrix);
+    void get_all_vectors_and_matrices(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<oomph::Vector<double>> &vec, oomph::Vector<oomph::DenseMatrix<double>> &matrix) override;
     unsigned n_matrix() const { return nmatrix; }
     unsigned n_vector() const { return nvector; }
   };

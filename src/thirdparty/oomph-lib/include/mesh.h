@@ -2678,7 +2678,7 @@ namespace oomph
 
     /// Scale all nodal coordinates by given factor and re-assign the
     /// Lagrangian coordinates
-    void scale_mesh(const double& factor)
+    void scale_mesh(const double& factor) override
     {
       Mesh::scale_mesh(factor);
 

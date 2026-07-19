@@ -417,7 +417,7 @@ namespace pyoomph
     // The "boundary coordinate" zeta used e.g. for mesh-to-mesh projection, taken to be either the
     // Lagrangian (reference/undeformed) or Eulerian (current) nodal position depending on the
     // static zeta_coordinate_type flag.
-    double zeta_nodal(const unsigned &n, const unsigned &k, const unsigned &i) const
+    double zeta_nodal(const unsigned &n, const unsigned &k, const unsigned &i) const override
     {
       if (!zeta_coordinate_type)
         return lagrangian_position_gen(n, k, i);
@@ -474,24 +474,24 @@ namespace pyoomph
     // Thin wrappers around fill_in_generic_residual_contribution_jit/fill_in_generic_dresidual_contribution_jit
     // that adapt to oomph-lib's expected GeneralisedElement virtual function signatures (residuals
     // only / +Jacobian / +Jacobian and mass matrix, and the parameter-derivative equivalents).
-    void fill_in_contribution_to_residuals(oomph::Vector<double> &residuals)
+    void fill_in_contribution_to_residuals(oomph::Vector<double> &residuals) override
     {
       fill_in_generic_residual_contribution_jit(residuals, oomph::GeneralisedElement::Dummy_matrix, oomph::GeneralisedElement::Dummy_matrix, 0);
     }
-    void fill_in_contribution_to_jacobian(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian);
-    void fill_in_contribution_to_jacobian_and_mass_matrix(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian, oomph::DenseMatrix<double> &mass_matrix);
+    void fill_in_contribution_to_jacobian(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian) override;
+    void fill_in_contribution_to_jacobian_and_mass_matrix(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian, oomph::DenseMatrix<double> &mass_matrix) override;
 
-    void fill_in_contribution_to_dresiduals_dparameter(double *const &parameter_pt, oomph::Vector<double> &dres_dparam)
+    void fill_in_contribution_to_dresiduals_dparameter(double *const &parameter_pt, oomph::Vector<double> &dres_dparam) override
     {
       fill_in_generic_dresidual_contribution_jit(parameter_pt, dres_dparam, oomph::GeneralisedElement::Dummy_matrix, oomph::GeneralisedElement::Dummy_matrix, 0);
     }
 
-    void fill_in_contribution_to_djacobian_dparameter(double *const &parameter_pt, oomph::Vector<double> &dres_dparam, oomph::DenseMatrix<double> &djac_dparam)
+    void fill_in_contribution_to_djacobian_dparameter(double *const &parameter_pt, oomph::Vector<double> &dres_dparam, oomph::DenseMatrix<double> &djac_dparam) override
     {
       fill_in_generic_dresidual_contribution_jit(parameter_pt, dres_dparam, djac_dparam, oomph::GeneralisedElement::Dummy_matrix, 1);
     }
 
-    void fill_in_contribution_to_djacobian_and_dmass_matrix_dparameter(double *const &parameter_pt, oomph::Vector<double> &dres_dparam, oomph::DenseMatrix<double> &djac_dparam, oomph::DenseMatrix<double> &dmass_matrix_dparam)
+    void fill_in_contribution_to_djacobian_and_dmass_matrix_dparameter(double *const &parameter_pt, oomph::Vector<double> &dres_dparam, oomph::DenseMatrix<double> &djac_dparam, oomph::DenseMatrix<double> &dmass_matrix_dparam) override
     {
       fill_in_generic_dresidual_contribution_jit(parameter_pt, dres_dparam, djac_dparam, dmass_matrix_dparam, 2);
     }
@@ -499,7 +499,7 @@ namespace pyoomph
     // Computes the Hessian-vector product contribution C^T * H * Y (H being this element's
     // residual Hessian) directly, without ever forming the dense Hessian tensor - used by
     // eigenvalue/bifurcation solvers that only need the action of the Hessian.
-    void fill_in_contribution_to_hessian_vector_products(oomph::Vector<double> const &Y, oomph::DenseMatrix<double> const &C, oomph::DenseMatrix<double> &product);
+    void fill_in_contribution_to_hessian_vector_products(oomph::Vector<double> const &Y, oomph::DenseMatrix<double> const &C, oomph::DenseMatrix<double> &product) override;
     // Shared implementation behind fill_in_contribution_to_hessian_vector_products and the
     // multi-assembly Hessian requests: loops over integration points and accumulates the
     // contraction of the generated second-derivative code with Y/C into product.
@@ -531,17 +531,17 @@ namespace pyoomph
     // Assigns local equation numbers to the "additional" degrees of freedom introduced beyond
     // oomph-lib's standard nodal/internal/external data handling (e.g. interface-only dofs); called
     // as part of the element's local equation numbering pass.
-    void assign_additional_local_eqn_numbers();
+    void assign_additional_local_eqn_numbers() override;
     //  virtual void assign_all_generic_local_eqn_numbers(const bool &store_local_dof_pt);
 
-    virtual ~BulkElementBase();
+    ~BulkElementBase() override;
 
 
     // Creates a new, empty instance of the same concrete element type as `this` (same JIT code
     // instance), used when a mesh element is split into sons during h-refinement.
     virtual BulkElementBase *create_son_instance() const = 0;
-    unsigned ncont_interpolated_values() const;
-    virtual unsigned required_nvalue(const unsigned &n) const;
+    unsigned ncont_interpolated_values() const override;
+    unsigned required_nvalue(const unsigned &n) const override;
 
     // Evaluate the shape functions of the given interpolation space (C1: linear/bilinear, C2:
     // quadratic/biquadratic, DL: discontinuous-Lagrange, and below C1TB/C2TB: bubble-enriched
@@ -610,10 +610,10 @@ namespace pyoomph
     // Construct node n of pyoomph's own Node type (rather than plain oomph::Node), so that pyoomph's
     // additional per-node bookkeeping (e.g. discontinuous-field data) is available; the
     // TimeStepper-taking overloads additionally register a specific time-stepping scheme for that node.
-    virtual oomph::Node *construct_node(const unsigned &n);
-    virtual oomph::Node *construct_node(const unsigned &n, oomph::TimeStepper *const &time_stepper_pt);
-    virtual oomph::Node *construct_boundary_node(const unsigned &n);
-    virtual oomph::Node *construct_boundary_node(const unsigned &n, oomph::TimeStepper *const &time_stepper_pt);
+    oomph::Node *construct_node(const unsigned &n) override;
+    oomph::Node *construct_node(const unsigned &n, oomph::TimeStepper *const &time_stepper_pt) override;
+    oomph::Node *construct_boundary_node(const unsigned &n) override;
+    oomph::Node *construct_boundary_node(const unsigned &n, oomph::TimeStepper *const &time_stepper_pt) override;
     virtual oomph::Node *boundary_node_pt(const int &face_index, const unsigned int index);
 
 
@@ -631,26 +631,26 @@ namespace pyoomph
     oomph::Vector<double> get_Eulerian_midpoint_from_local_coordinate();   // Set s=[0.5*(smin+smax), ... ] and evaluate the position
     oomph::Vector<double> get_Lagrangian_midpoint_from_local_coordinate(); // Set s=[0.5*(smin+smax), ... ] and evaluate the position
 
-    void get_interpolated_values(const unsigned &t, const oomph::Vector<double> &s, oomph::Vector<double> &values);
-    void get_interpolated_values(const oomph::Vector<double> &s, oomph::Vector<double> &values) { get_interpolated_values(0, s, values); }
+    void get_interpolated_values(const unsigned &t, const oomph::Vector<double> &s, oomph::Vector<double> &values) override;
+    void get_interpolated_values(const oomph::Vector<double> &s, oomph::Vector<double> &values) override { get_interpolated_values(0, s, values); }
     void get_interpolated_discontinuous_values(const unsigned &t, const oomph::Vector<double> &s, oomph::Vector<double> &values);
     void get_interpolated_discontinuous_values(const oomph::Vector<double> &s, oomph::Vector<double> &values) { get_interpolated_discontinuous_values(0, s, values); }
-    void output(std::ostream &outfile, const unsigned &n_plot);
+    void output(std::ostream &outfile, const unsigned &n_plot) override;
 
     virtual std::vector<double> get_outline(bool ) { return std::vector<double>(0); }
     // Number of independent flux quantities used by oomph-lib's Z2 error estimator for this
     // element type (drives the size of get_Z2_flux's output).
-    unsigned num_Z2_flux_terms();
+    unsigned num_Z2_flux_terms() override;
     // Evaluates the Z2-recovery flux vector (typically the gradient of the dominant field) at local
     // coordinate s, used by the Z2 error estimator to drive adaptive mesh refinement.
-    void get_Z2_flux(const oomph::Vector<double> &s, oomph::Vector<double> &flux);
+    void get_Z2_flux(const oomph::Vector<double> &s, oomph::Vector<double> &flux) override;
     // After h-refinement has split this element into sons and then possibly un-refined again,
     // rebuilds this element's data from the (surviving) son elements' data.
-    void rebuild_from_sons(oomph::Mesh *&mesh_pt);
+    void rebuild_from_sons(oomph::Mesh *&mesh_pt) override;
     // Finishes constructing a newly created element (called after pre_build/nodes are set up):
     // allocates discontinuous field data and performs other setup that requires the full node set
     // to already be in place.
-    void further_build();
+    void further_build() override;
     // For a son element created during refinement, returns the local coordinate sfather of local
     // node l as seen in its father element (used to interpolate values from father to son node l).
     // Each concrete geometric element type must implement this according to its own son-numbering scheme.
@@ -658,16 +658,16 @@ namespace pyoomph
     // Sets up as much of a new element as possible before all of its nodes exist yet (used during
     // mesh refinement/construction, where nodes are shared with adjacent elements and must not be
     // duplicated); new_node_pt accumulates nodes that had to be freshly constructed.
-    void pre_build(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt);
+    void pre_build(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt) override;
 
-    unsigned nscalar_paraview() const;
-    void scalar_value_paraview(std::ofstream &file_out, const unsigned &i, const unsigned &nplot) const;
-    std::string scalar_name_paraview(const unsigned &i) const;
+    unsigned nscalar_paraview() const override;
+    void scalar_value_paraview(std::ofstream &file_out, const unsigned &i, const unsigned &nplot) const override;
+    std::string scalar_name_paraview(const unsigned &i) const override;
     // Additional hanging-node setup beyond oomph-lib's default (e.g. for non-isoparametric spaces
     // where hanging-node constraints differ from the geometric element's own); overridden by
     // concrete element types, many of which are pure isoparametric and can simply delegate to
     // oomph-lib's default via BulkElementBase::further_setup_hanging_nodes().
-    virtual void further_setup_hanging_nodes();
+    void further_setup_hanging_nodes() override;
 
     virtual int get_nodal_index_by_name(oomph::Node *n, std::string fieldname);
 
@@ -683,7 +683,7 @@ namespace pyoomph
 
     // After oomph-lib assigns local equation numbers for plain nodal data, additionally assigns
     // local equation numbers for hanging-node constraint equations (on refined/non-conforming meshes).
-    inline void assign_nodal_local_eqn_numbers(const bool &store_local_dof_pt)
+    inline void assign_nodal_local_eqn_numbers(const bool &store_local_dof_pt) override
     {
       FiniteElement::assign_nodal_local_eqn_numbers(store_local_dof_pt);
       assign_hanging_local_eqn_numbers(store_local_dof_pt);
@@ -763,9 +763,9 @@ namespace pyoomph
     ODEElementBase(const ODEElementBase&) = delete;
 
     /// Calculate the geometric shape functions at local coordinate s
-    void shape(const oomph::Vector<double>& , oomph::Shape& ) const {}
+    void shape(const oomph::Vector<double>& , oomph::Shape& ) const override {}
 
-    void local_coordinate_of_node(const unsigned& , oomph::Vector<double>& s) const
+    void local_coordinate_of_node(const unsigned& , oomph::Vector<double>& s) const override
     {
       s.resize(0);
     }
@@ -793,38 +793,38 @@ namespace pyoomph
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *, int ) override {throw_runtime_error("ODE Elements do not have faces"); return NULL;}
-    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & ) const override { return std::vector<pyoomph::Node*>(); }
-    int nedges() const { return 0; }
-    virtual double fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds = NULL, unsigned history_index=0) const;
-    virtual unsigned get_meshio_type_index() const { return 0; }
-    void dshape_local_at_s_C1(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const { throw_runtime_error("Makes no sense"); }
-    void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const { throw_runtime_error("Makes no sense"); }
-    void dshape_local_at_s_C2TB(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const { throw_runtime_error("Makes no sense"); }
-    void dshape_local_at_s_DL(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const { throw_runtime_error("Makes no sense"); }
+    int nedges() const override { return 0; }
+    double fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds = NULL, unsigned history_index=0) const override;
+    unsigned get_meshio_type_index() const override { return 0; }
+    void dshape_local_at_s_C1(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const override { throw_runtime_error("Makes no sense"); }
+    void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const override { throw_runtime_error("Makes no sense"); }
+    void dshape_local_at_s_C2TB(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const override { throw_runtime_error("Makes no sense"); }
+    void dshape_local_at_s_DL(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const override { throw_runtime_error("Makes no sense"); }
     
-    unsigned nrecovery_order() { return 0; }
-    unsigned nvertex_node() const { return 0; }
-    oomph::Node *vertex_node_pt(const unsigned &) const { return NULL; }
-    void further_setup_hanging_nodes() {};
+    unsigned nrecovery_order() override { return 0; }
+    unsigned nvertex_node() const override { return 0; }
+    oomph::Node *vertex_node_pt(const unsigned &) const override { return NULL; }
+    void further_setup_hanging_nodes() override {};
     void to_numpy(double *dest);
-    void shape(const oomph::Vector<double> &, oomph::Shape &) const {}
-    void build(oomph::Mesh *&, oomph::Vector<oomph::Node *> &, bool &, std::ofstream &) {}
-    void check_integrity(double &max_error) { max_error = 0; }
-    virtual BulkElementBase *create_son_instance() const { return NULL; }
-    void shape_at_s_C1(const oomph::Vector<double> &, oomph::Shape &) const {}
-    void shape_at_s_C2(const oomph::Vector<double> &, oomph::Shape &) const {}
-    void shape_at_s_C2TB(const oomph::Vector<double> &, oomph::Shape &) const {}
-    void shape_at_s_DL(const oomph::Vector<double> &, oomph::Shape &) const {}
-    int get_num_numpy_elemental_indices(bool , unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const
+    void shape(const oomph::Vector<double> &, oomph::Shape &) const override {}
+    void build(oomph::Mesh *&, oomph::Vector<oomph::Node *> &, bool &, std::ofstream &) override {}
+    void check_integrity(double &max_error) override { max_error = 0; }
+    BulkElementBase *create_son_instance() const override { return NULL; }
+    void shape_at_s_C1(const oomph::Vector<double> &, oomph::Shape &) const override {}
+    void shape_at_s_C2(const oomph::Vector<double> &, oomph::Shape &) const override {}
+    void shape_at_s_C2TB(const oomph::Vector<double> &, oomph::Shape &) const override {}
+    void shape_at_s_DL(const oomph::Vector<double> &, oomph::Shape &) const override {}
+    int get_num_numpy_elemental_indices(bool , unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
     {
       nsubdiv = 0;
       return 0;
     }
-    void fill_element_nodal_indices_for_numpy(int *, unsigned, bool, std::vector<std::vector<std::set<oomph::Node *>>> &) const {}
+    void fill_element_nodal_indices_for_numpy(int *, unsigned, bool, std::vector<std::vector<std::set<oomph::Node *>>> &) const override {}
 
     BulkElementODE0d(DynamicBulkElementInstance *code_inst, oomph::TimeStepper *tstepper);
-    virtual ~BulkElementODE0d();
+    ~BulkElementODE0d() override;
 
     // Factory that sets the __CurrentCodeInstance "side channel" (see BulkElementBase) around
     // construction so the new element picks up the right JIT code instance, then clears it again.
@@ -835,9 +835,9 @@ namespace pyoomph
       BulkElementBase::__CurrentCodeInstance = NULL;
       return res;
     }
-    virtual double get_quality_factor() { return 1.0; }
+    double get_quality_factor() override { return 1.0; }
 
-    virtual void set_integration_order(unsigned int ) {}
+    void set_integration_order(unsigned int ) override {}
   };
 
   // Oomph-libs RefineableSolidQElement<1> needs to be adjusted, since it is marked as broken in the constructor
@@ -857,26 +857,26 @@ namespace pyoomph
       oomph::BrokenCopy::broken_copy("RefineableSolidLineElement");
     }
 
-    virtual ~RefineableSolidLineElement() {}
+    ~RefineableSolidLineElement() override {}
 
-    void set_macro_elem_pt(oomph::MacroElement *macro_elem_pt)
+    void set_macro_elem_pt(oomph::MacroElement *macro_elem_pt) override
     {
       oomph::QSolidElementBase::set_macro_elem_pt(macro_elem_pt);
     }
 
-    void set_macro_elem_pt(oomph::MacroElement *macro_elem_pt, oomph::MacroElement *undeformed_macro_elem_pt)
+    void set_macro_elem_pt(oomph::MacroElement *macro_elem_pt, oomph::MacroElement *undeformed_macro_elem_pt) override
     {
       oomph::QSolidElementBase::set_macro_elem_pt(macro_elem_pt, undeformed_macro_elem_pt);
     }
 
-    void get_jacobian(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian)
+    void get_jacobian(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian) override
     {
       oomph::RefineableSolidElement::get_jacobian(residuals, jacobian);
     }
 
     void build(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt,
                bool &was_already_built,
-               std::ofstream &new_nodes_file);
+               std::ofstream &new_nodes_file) override;
   };
 
   // --- The following classes (BulkElement*, up to PointElement0d) are the concrete geometric bulk
@@ -916,33 +916,33 @@ namespace pyoomph
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
-    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
-    int nedges() const { return 2; }
+    int nedges() const override { return 2; }
     BulkElementLine1dC1();    
-    virtual unsigned get_meshio_type_index() const { return 1; }
-    void check_integrity(double &max_error) { max_error = 0; } // TODO throw_runtime_error("IMPLEMENT");
+    unsigned get_meshio_type_index() const override { return 1; }
+    void check_integrity(double &max_error) override { max_error = 0; } // TODO throw_runtime_error("IMPLEMENT");
 
     
 
-    void output(std::ostream &outfile, const unsigned &n_plot) { BulkElementBase::output(outfile, n_plot); }
-    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
-    void shape_at_s_C2(const oomph::Vector<double> &, oomph::Shape &) const { throw_runtime_error("Makes no sense"); }
-    void shape_at_s_C2TB(const oomph::Vector<double> &, oomph::Shape &) const { throw_runtime_error("Makes no sense"); }
-    void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const;
+    void output(std::ostream &outfile, const unsigned &n_plot) override { BulkElementBase::output(outfile, n_plot); }
+    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const override { this->shape(s, psi); }
+    void shape_at_s_C2(const oomph::Vector<double> &, oomph::Shape &) const override { throw_runtime_error("Makes no sense"); }
+    void shape_at_s_C2TB(const oomph::Vector<double> &, oomph::Shape &) const override { throw_runtime_error("Makes no sense"); }
+    void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
 
-    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
-    void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const { throw_runtime_error("Makes no sense"); }
-    void dshape_local_at_s_C2TB(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const { throw_runtime_error("Makes no sense"); }
-    void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
+    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
+    void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const override { throw_runtime_error("Makes no sense"); }
+    void dshape_local_at_s_C2TB(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const override { throw_runtime_error("Makes no sense"); }
+    void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
 
-    unsigned nrecovery_order() { return 1; }
-    unsigned nvertex_node() const { return oomph::QElement<1, 2>::nvertex_node(); }
-    oomph::Node *vertex_node_pt(const unsigned &j) const { return QElement<1, 2>::vertex_node_pt(j); }
+    unsigned nrecovery_order() override { return 1; }
+    unsigned nvertex_node() const override { return oomph::QElement<1, 2>::nvertex_node(); }
+    oomph::Node *vertex_node_pt(const unsigned &j) const override { return QElement<1, 2>::vertex_node_pt(j); }
     // void further_setup_hanging_nodes() {BulkElementBase::further_setup_hanging_nodes();};
-    void further_setup_hanging_nodes() {};
-    virtual std::vector<double> get_outline(bool lagrangian);
-    virtual BulkElementBase *create_son_instance() const
+    void further_setup_hanging_nodes() override {};
+    std::vector<double> get_outline(bool lagrangian) override;
+    BulkElementBase *create_son_instance() const override
     {
       BulkElementBase::__CurrentCodeInstance = codeinst;
       auto res = new BulkElementLine1dC1();
@@ -951,21 +951,21 @@ namespace pyoomph
       return res;
     }
 
-    void pre_build(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt)
+    void pre_build(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt) override
     {
       BulkElementBase::pre_build(mesh_pt, new_node_pt);
       oomph::RefineableQElement<1>::pre_build(mesh_pt, new_node_pt);
     }
 
-    int get_num_numpy_elemental_indices(bool , unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const
+    int get_num_numpy_elemental_indices(bool , unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
     {
       nsubdiv = 1;
       return 2;
     }
-    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
-    double factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance);
-    virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 1, order)); }
-    virtual void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather);
+    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
+    double factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance) override;
+    void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 1, order)); }
+    void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
   };
 
   // 1d line element, quadratic (C2) Lagrange interpolation (plus a C1 dummy sub-space), refineable + solid.
@@ -983,39 +983,39 @@ namespace pyoomph
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
-    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
-    int nedges() const { return 2; }
-    virtual unsigned get_meshio_type_index() const { return 2; }
+    int nedges() const override { return 2; }
+    unsigned get_meshio_type_index() const override { return 2; }
     BulkElementLine1dC2();    
-    void check_integrity(double &max_error) { max_error = 0; } // TODO
+    void check_integrity(double &max_error) override { max_error = 0; } // TODO
 
     
 
     
     
-    void output(std::ostream &outfile, const unsigned &n_plot) { BulkElementBase::output(outfile, n_plot); }
+    void output(std::ostream &outfile, const unsigned &n_plot) override { BulkElementBase::output(outfile, n_plot); }
 
-    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const;
-    void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
-    void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const;
+    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
+    void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const override { this->shape(s, psi); }
+    void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
 
-    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
-    void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
-    void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
-    int get_num_numpy_elemental_indices(bool , unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const
+    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
+    void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    int get_num_numpy_elemental_indices(bool , unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
     {
       nsubdiv = 1;
       return 3;
     }
-    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
-    virtual std::vector<double> get_outline(bool lagrangian);
-    unsigned nrecovery_order() { return 2; }
-    unsigned nvertex_node() const { return oomph::QElement<1, 3>::nvertex_node(); }
-    oomph::Node *vertex_node_pt(const unsigned &j) const { return QElement<1, 3>::vertex_node_pt(j); }
+    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
+    std::vector<double> get_outline(bool lagrangian) override;
+    unsigned nrecovery_order() override { return 2; }
+    unsigned nvertex_node() const override { return oomph::QElement<1, 3>::nvertex_node(); }
+    oomph::Node *vertex_node_pt(const unsigned &j) const override { return QElement<1, 3>::vertex_node_pt(j); }
     // void further_setup_hanging_nodes() {BulkElementBase::further_setup_hanging_nodes();};
-    void further_setup_hanging_nodes() {};
-    virtual BulkElementBase *create_son_instance() const
+    void further_setup_hanging_nodes() override {};
+    BulkElementBase *create_son_instance() const override
     {
       BulkElementBase::__CurrentCodeInstance = codeinst;
       auto res = new BulkElementLine1dC2();
@@ -1023,9 +1023,9 @@ namespace pyoomph
       BulkElementBase::__CurrentCodeInstance = NULL;
       return res;
     }
-    virtual double factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance);
-    virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 1, order)); }
-    virtual void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather);
+    double factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance) override;
+    void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 1, order)); }
+    void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
   };
 
   // TRIANGULAR LINE ELEMENTS
@@ -1044,30 +1044,30 @@ namespace pyoomph
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
-    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
-    int nedges() const { return 2; }
+    int nedges() const override { return 2; }
     BulkTElementLine1dC1();    
-    virtual unsigned get_meshio_type_index() const { return 1; }
-    void check_integrity(double &max_error) { max_error = 0; } // TODO throw_runtime_error("IMPLEMENT");
+    unsigned get_meshio_type_index() const override { return 1; }
+    void check_integrity(double &max_error) override { max_error = 0; } // TODO throw_runtime_error("IMPLEMENT");
 
     
-    void output(std::ostream &outfile, const unsigned &n_plot) { BulkElementBase::output(outfile, n_plot); }
-    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
-    void shape_at_s_C2(const oomph::Vector<double> &, oomph::Shape &) const { throw_runtime_error("Makes no sense"); }
-    void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const;
+    void output(std::ostream &outfile, const unsigned &n_plot) override { BulkElementBase::output(outfile, n_plot); }
+    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const override { this->shape(s, psi); }
+    void shape_at_s_C2(const oomph::Vector<double> &, oomph::Shape &) const override { throw_runtime_error("Makes no sense"); }
+    void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
 
-    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
-    void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const { throw_runtime_error("Makes no sense"); }
-    void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
+    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
+    void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const override { throw_runtime_error("Makes no sense"); }
+    void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
 
-    unsigned nrecovery_order() { return 1; }
-    unsigned nvertex_node() const { return oomph::TElement<1, 2>::nvertex_node(); }
-    oomph::Node *vertex_node_pt(const unsigned &j) const { return TElement<1, 2>::vertex_node_pt(j); }
+    unsigned nrecovery_order() override { return 1; }
+    unsigned nvertex_node() const override { return oomph::TElement<1, 2>::nvertex_node(); }
+    oomph::Node *vertex_node_pt(const unsigned &j) const override { return TElement<1, 2>::vertex_node_pt(j); }
     // void further_setup_hanging_nodes() {BulkElementBase::further_setup_hanging_nodes();};
-    void further_setup_hanging_nodes() {};
-    virtual std::vector<double> get_outline(bool lagrangian);
-    virtual BulkElementBase *create_son_instance() const
+    void further_setup_hanging_nodes() override {};
+    std::vector<double> get_outline(bool lagrangian) override;
+    BulkElementBase *create_son_instance() const override
     {
       BulkElementBase::__CurrentCodeInstance = codeinst;
       auto res = new BulkTElementLine1dC1();
@@ -1076,19 +1076,19 @@ namespace pyoomph
       return res;
     }
 
-    void pre_build(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt)
+    void pre_build(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt) override
     {
       BulkElementBase::pre_build(mesh_pt, new_node_pt);
       oomph::RefineableTElement<1>::pre_build(mesh_pt, new_node_pt);
     }
 
-    int get_num_numpy_elemental_indices(bool , unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const
+    int get_num_numpy_elemental_indices(bool , unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
     {
       nsubdiv = 1;
       return 2;
     }
-    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
-    virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 1, order)); }
+    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
+    void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 1, order)); }
   };
 
   // 1d simplex ("T") line element, quadratic (C2) interpolation.
@@ -1106,38 +1106,38 @@ namespace pyoomph
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
-    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
-    int nedges() const { return 2; }
-    virtual unsigned get_meshio_type_index() const { return 2; }
+    int nedges() const override { return 2; }
+    unsigned get_meshio_type_index() const override { return 2; }
     BulkTElementLine1dC2();    
-    void check_integrity(double &max_error) { max_error = 0; } // TODO
+    void check_integrity(double &max_error) override { max_error = 0; } // TODO
 
     
     
     
-    void output(std::ostream &outfile, const unsigned &n_plot) { BulkElementBase::output(outfile, n_plot); }
+    void output(std::ostream &outfile, const unsigned &n_plot) override { BulkElementBase::output(outfile, n_plot); }
 
-    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const;
-    void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
-    void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const;
+    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
+    void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const override { this->shape(s, psi); }
+    void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
 
-    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
-    void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
-    void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
-    int get_num_numpy_elemental_indices(bool , unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const
+    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
+    void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    int get_num_numpy_elemental_indices(bool , unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
     {
       nsubdiv = 1;
       return 3;
     }
-    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
-    virtual std::vector<double> get_outline(bool lagrangian);
-    unsigned nrecovery_order() { return 2; }
-    unsigned nvertex_node() const { return oomph::TElement<1, 3>::nvertex_node(); }
-    oomph::Node *vertex_node_pt(const unsigned &j) const { return TElement<1, 3>::vertex_node_pt(j); }
+    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
+    std::vector<double> get_outline(bool lagrangian) override;
+    unsigned nrecovery_order() override { return 2; }
+    unsigned nvertex_node() const override { return oomph::TElement<1, 3>::nvertex_node(); }
+    oomph::Node *vertex_node_pt(const unsigned &j) const override { return TElement<1, 3>::vertex_node_pt(j); }
     // void further_setup_hanging_nodes() {BulkElementBase::further_setup_hanging_nodes();};
-    void further_setup_hanging_nodes() {};
-    virtual BulkElementBase *create_son_instance() const
+    void further_setup_hanging_nodes() override {};
+    BulkElementBase *create_son_instance() const override
     {
       BulkElementBase::__CurrentCodeInstance = codeinst;
       auto res = new BulkTElementLine1dC2();
@@ -1145,7 +1145,7 @@ namespace pyoomph
       BulkElementBase::__CurrentCodeInstance = NULL;
       return res;
     }
-    virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 1, order)); }
+    void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 1, order)); }
   };
 
   // 2d quadrilateral element, bilinear (C1) interpolation, refineable + solid.
@@ -1161,36 +1161,36 @@ namespace pyoomph
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
-    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
-    int nedges() const { return 4; }
+    int nedges() const override { return 4; }
     BulkElementQuad2dC1();    
-    virtual unsigned get_meshio_type_index() const { return 6; }
+    unsigned get_meshio_type_index() const override { return 6; }
 
-    void check_integrity(double &max_error) { max_error = 0; } // TODO
+    void check_integrity(double &max_error) override { max_error = 0; } // TODO
 
     
 
-    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
-    void shape_at_s_C2(const oomph::Vector<double> &, oomph::Shape &) const { throw_runtime_error("Makes no sense"); }
-    void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const;
+    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const override { this->shape(s, psi); }
+    void shape_at_s_C2(const oomph::Vector<double> &, oomph::Shape &) const override { throw_runtime_error("Makes no sense"); }
+    void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
 
-    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
-    void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const { throw_runtime_error("Makes no sense"); }
-    void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
+    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
+    void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const override { throw_runtime_error("Makes no sense"); }
+    void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
 
-    void add_node_from_finer_neighbor_for_tesselated_numpy(int edge, oomph::Node *n, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes);
-    void inform_coarser_neighbors_for_tesselated_numpy(std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes);
-    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
-    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
-    virtual oomph::Node *boundary_node_pt(const int &face_index, const unsigned int index);
-    virtual std::vector<double> get_outline(bool lagrangian);
-    unsigned nrecovery_order() { return 1; }
-    void output(std::ostream &outfile, const unsigned &n_plot) { BulkElementBase::output(outfile, n_plot); }
-    unsigned nvertex_node() const { return oomph::QElement<2, 2>::nvertex_node(); }
-    oomph::Node *vertex_node_pt(const unsigned &j) const { return QElement<2, 2>::vertex_node_pt(j); }
-    void further_setup_hanging_nodes() { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
-    virtual BulkElementBase *create_son_instance() const
+    void add_node_from_finer_neighbor_for_tesselated_numpy(int edge, oomph::Node *n, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) override;
+    void inform_coarser_neighbors_for_tesselated_numpy(std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) override;
+    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
+    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
+    oomph::Node *boundary_node_pt(const int &face_index, const unsigned int index) override;
+    std::vector<double> get_outline(bool lagrangian) override;
+    unsigned nrecovery_order() override { return 1; }
+    void output(std::ostream &outfile, const unsigned &n_plot) override { BulkElementBase::output(outfile, n_plot); }
+    unsigned nvertex_node() const override { return oomph::QElement<2, 2>::nvertex_node(); }
+    oomph::Node *vertex_node_pt(const unsigned &j) const override { return QElement<2, 2>::vertex_node_pt(j); }
+    void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
+    BulkElementBase *create_son_instance() const override
     {
       BulkElementBase::__CurrentCodeInstance = codeinst;
       auto res = new BulkElementQuad2dC1();
@@ -1198,9 +1198,9 @@ namespace pyoomph
       BulkElementBase::__CurrentCodeInstance = NULL;
       return res;
     }
-    virtual void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather);
-    virtual double factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance);
-    virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 2, order)); }
+    void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
+    double factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance) override;
+    void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 2, order)); }
   };
 
   // 2d quadrilateral element, biquadratic (C2) interpolation (plus a C1 dummy sub-space); also
@@ -1220,48 +1220,48 @@ namespace pyoomph
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}  
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
-    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
-    virtual void get_supporting_C1_nodes_of_C2_node(const unsigned &n, std::vector<oomph::Node *> &support);
-    int nedges() const { return 4; }
+    void get_supporting_C1_nodes_of_C2_node(const unsigned &n, std::vector<oomph::Node *> &support) override;
+    int nedges() const override { return 4; }
     BulkElementQuad2dC2();
-    virtual unsigned get_meshio_type_index() const { return 8; }
+    unsigned get_meshio_type_index() const override { return 8; }
     
 
-    void check_integrity(double &max_error) { max_error = 0; } // TODO
-    virtual std::vector<double> get_outline(bool lagrangian);
-    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const;
-    void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
-    void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const;
+    void check_integrity(double &max_error) override { max_error = 0; } // TODO
+    std::vector<double> get_outline(bool lagrangian) override;
+    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
+    void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const override { this->shape(s, psi); }
+    void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
 
-    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
-    void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
-    void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
+    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
+    void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
 
-    virtual oomph::Node *boundary_node_pt(const int &face_index, const unsigned int index);
+    oomph::Node *boundary_node_pt(const int &face_index, const unsigned int index) override;
     
 
     
     
 
-    void add_node_from_finer_neighbor_for_tesselated_numpy(int edge, oomph::Node *n, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes);
-    void inform_coarser_neighbors_for_tesselated_numpy(std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes);
-    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
-    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
+    void add_node_from_finer_neighbor_for_tesselated_numpy(int edge, oomph::Node *n, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) override;
+    void inform_coarser_neighbors_for_tesselated_numpy(std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) override;
+    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
+    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
 
-    unsigned nrecovery_order() { return 2; }
-    void output(std::ostream &outfile, const unsigned &n_plot) { BulkElementBase::output(outfile, n_plot); }
-    unsigned nvertex_node() const { return oomph::QElement<2, 3>::nvertex_node(); }
-    oomph::Node *vertex_node_pt(const unsigned &j) const { return QElement<2, 3>::vertex_node_pt(j); }
+    unsigned nrecovery_order() override { return 2; }
+    void output(std::ostream &outfile, const unsigned &n_plot) override { BulkElementBase::output(outfile, n_plot); }
+    unsigned nvertex_node() const override { return oomph::QElement<2, 3>::nvertex_node(); }
+    oomph::Node *vertex_node_pt(const unsigned &j) const override { return QElement<2, 3>::vertex_node_pt(j); }
 
-    void further_setup_hanging_nodes();
-    oomph::Node *interpolating_node_pt(const unsigned &n, const int &value_id);
-    double local_one_d_fraction_of_interpolating_node(const unsigned &n1d, const unsigned &i, const int &value_id);
-    oomph::Node *get_interpolating_node_at_local_coordinate(const oomph::Vector<double> &s, const int &value_id);
-    unsigned ninterpolating_node_1d(const int &value_id);
-    unsigned ninterpolating_node(const int &value_id);
-    void interpolating_basis(const oomph::Vector<double> &s, oomph::Shape &psi, const int &value_id) const;
-    virtual BulkElementBase *create_son_instance() const
+    void further_setup_hanging_nodes() override;
+    oomph::Node *interpolating_node_pt(const unsigned &n, const int &value_id) override;
+    double local_one_d_fraction_of_interpolating_node(const unsigned &n1d, const unsigned &i, const int &value_id) override;
+    oomph::Node *get_interpolating_node_at_local_coordinate(const oomph::Vector<double> &s, const int &value_id) override;
+    unsigned ninterpolating_node_1d(const int &value_id) override;
+    unsigned ninterpolating_node(const int &value_id) override;
+    void interpolating_basis(const oomph::Vector<double> &s, oomph::Shape &psi, const int &value_id) const override;
+    BulkElementBase *create_son_instance() const override
     {
       BulkElementBase::__CurrentCodeInstance = codeinst;
       auto res = new BulkElementQuad2dC2();
@@ -1269,9 +1269,9 @@ namespace pyoomph
       BulkElementBase::__CurrentCodeInstance = NULL;
       return res;
     }
-    virtual void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather);
-    virtual double factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance);
-    virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 2, order)); }
+    void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
+    double factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance) override;
+    void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 2, order)); }
   };
 
   // 2d triangular element, linear (C1) interpolation.
@@ -1287,34 +1287,34 @@ namespace pyoomph
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
-    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
-    virtual oomph::Node *boundary_node_pt(const int &face_index, const unsigned int index);
-    int nedges() const { return 3; }
+    oomph::Node *boundary_node_pt(const int &face_index, const unsigned int index) override;
+    int nedges() const override { return 3; }
     unsigned nnode_on_face() const override { return 2; }
     BulkElementTri2dC1(bool has_bubble = false);    
-    virtual unsigned get_meshio_type_index() const { return 3; }
-    void check_integrity(double &max_error) { max_error = 0; } // TODO
+    unsigned get_meshio_type_index() const override { return 3; }
+    void check_integrity(double &max_error) override { max_error = 0; } // TODO
     
-    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
-    void shape_at_s_C2(const oomph::Vector<double> &, oomph::Shape &) const { throw_runtime_error("Makes no sense"); }
-    void shape_at_s_DL(const oomph::Vector<double> &, oomph::Shape &) const;
-    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
-    void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const { throw_runtime_error("Makes no sense"); }
-    void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
-    int get_num_numpy_elemental_indices(bool , unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const
+    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const override { this->shape(s, psi); }
+    void shape_at_s_C2(const oomph::Vector<double> &, oomph::Shape &) const override { throw_runtime_error("Makes no sense"); }
+    void shape_at_s_DL(const oomph::Vector<double> &, oomph::Shape &) const override;
+    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
+    void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const override { throw_runtime_error("Makes no sense"); }
+    void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    int get_num_numpy_elemental_indices(bool , unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
     {
       nsubdiv = 1;
       return 3;
     }
-    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
-    virtual std::vector<double> get_outline(bool lagrangian);
-    unsigned nrecovery_order() { return 1; }
-    void output(std::ostream &outfile, const unsigned &n_plot) { BulkElementBase::output(outfile, n_plot); }
-    unsigned nvertex_node() const { return oomph::TElement<2, 2>::nvertex_node(); }
-    oomph::Node *vertex_node_pt(const unsigned &j) const { return TElement<2, 2>::vertex_node_pt(j); }
-    void further_setup_hanging_nodes() { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
-    virtual BulkElementBase *create_son_instance() const
+    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
+    std::vector<double> get_outline(bool lagrangian) override;
+    unsigned nrecovery_order() override { return 1; }
+    void output(std::ostream &outfile, const unsigned &n_plot) override { BulkElementBase::output(outfile, n_plot); }
+    unsigned nvertex_node() const override { return oomph::TElement<2, 2>::nvertex_node(); }
+    oomph::Node *vertex_node_pt(const unsigned &j) const override { return TElement<2, 2>::vertex_node_pt(j); }
+    void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
+    BulkElementBase *create_son_instance() const override
     {
       BulkElementBase::__CurrentCodeInstance = codeinst;
       auto res = new BulkElementTri2dC1();
@@ -1322,8 +1322,8 @@ namespace pyoomph
       BulkElementBase::__CurrentCodeInstance = NULL;
       return res;
     }
-    virtual double factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance);
-    virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 2, order)); }
+    double factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance) override;
+    void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 2, order)); }
     oomph::Vector<double> get_midpoint_s() override { return oomph::Vector<double>(this->dim(), 1.0 / 3.0); }
   };
 
@@ -1346,20 +1346,20 @@ namespace pyoomph
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     BulkElementTri2dC1TB();
     
-    void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const;
-    void dshape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsids) const;
+    void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
+    void dshape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsids) const override;
 
     
-    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const;
-    void shape_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
-    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
-    void dshape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }    
-    inline void d2shape_local(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &, oomph::DShape &) const { throw_runtime_error("Implement"); }
+    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
+    void shape_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi) const override { this->shape(s, psi); }
+    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    void dshape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }    
+    inline void d2shape_local(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &, oomph::DShape &) const override { throw_runtime_error("Implement"); }
 
-    void local_coordinate_of_node(const unsigned &j, oomph::Vector<double> &s) const;
-    bool has_bubble() const { return true; }
-    virtual unsigned get_meshio_type_index() const { return 66; } // Just some otherwise unused value here
-    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const
+    void local_coordinate_of_node(const unsigned &j, oomph::Vector<double> &s) const override;
+    bool has_bubble() const override { return true; }
+    unsigned get_meshio_type_index() const override { return 66; } // Just some otherwise unused value here
+    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
     {
       if (tesselate_tri)
       {
@@ -1372,9 +1372,9 @@ namespace pyoomph
         return 4;
       }
     }
-    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
+    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
 
-    virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 2, order, true)); }
+    void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 2, order, true)); }
   };
 
   class BulkElementTri2dC2TB;
@@ -1395,25 +1395,25 @@ namespace pyoomph
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}  
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
-    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;    
-    virtual void get_supporting_C1_nodes_of_C2_node(const unsigned &n, std::vector<oomph::Node *> &support);
-    virtual oomph::Node *boundary_node_pt(const int &face_index, const unsigned int index);
-    int nedges() const { return 3; }
+    void get_supporting_C1_nodes_of_C2_node(const unsigned &n, std::vector<oomph::Node *> &support) override;
+    oomph::Node *boundary_node_pt(const int &face_index, const unsigned int index) override;
+    int nedges() const override { return 3; }
     unsigned nnode_on_face() const override { return 3; }
     BulkElementTri2dC2(bool with_bubble = false);    
-    virtual unsigned get_meshio_type_index() const { return 9; }
+    unsigned get_meshio_type_index() const override { return 9; }
     
-    void check_integrity(double &max_error) { max_error = 0; } // TODO
+    void check_integrity(double &max_error) override { max_error = 0; } // TODO
     
     
-    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const;
-    void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
-    void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const;
-    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
-    void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
-    void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
-    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const
+    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
+    void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const override { this->shape(s, psi); }
+    void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
+    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
+    void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
     {
       if (tesselate_tri)
       {
@@ -1426,16 +1426,16 @@ namespace pyoomph
         return 6;
       }
     }
-    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
-    virtual std::vector<double> get_outline(bool lagrangian);
-    unsigned nrecovery_order() { return 2; }
-    void output(std::ostream &outfile, const unsigned &n_plot) { BulkElementBase::output(outfile, n_plot); }
-    unsigned nvertex_node() const { return oomph::TElement<2, 3>::nvertex_node(); }
-    oomph::Node *vertex_node_pt(const unsigned &j) const { return TElement<2, 3>::vertex_node_pt(j); }
-    void further_setup_hanging_nodes() { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
-    virtual BulkElementBase *create_son_instance() const;
-    virtual double factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance);
-    virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 2, order)); }
+    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
+    std::vector<double> get_outline(bool lagrangian) override;
+    unsigned nrecovery_order() override { return 2; }
+    void output(std::ostream &outfile, const unsigned &n_plot) override { BulkElementBase::output(outfile, n_plot); }
+    unsigned nvertex_node() const override { return oomph::TElement<2, 3>::nvertex_node(); }
+    oomph::Node *vertex_node_pt(const unsigned &j) const override { return TElement<2, 3>::vertex_node_pt(j); }
+    void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
+    BulkElementBase *create_son_instance() const override;
+    double factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance) override;
+    void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 2, order)); }
     oomph::Vector<double> get_midpoint_s() override { return oomph::Vector<double>(this->dim(), 1.0 / 3.0); }
   };
 
@@ -1460,18 +1460,18 @@ namespace pyoomph
     
     void shape_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
     void dshape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
-    void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const { BulkElementTri2dC2::shape(s, psi); }
-    void shape_at_s_C2TB(const oomph::Vector<double> &s, oomph::Shape &psi) const { oomph::TBubbleEnrichedElementShape<2, 3>::shape(s, psi); }
-    void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { BulkElementTri2dC2::dshape_local(s, psi, dpsi); }
-    void dshape_local_at_s_C2TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { oomph::TBubbleEnrichedElementShape<2, 3>::dshape_local(s, psi, dpsi); }
+    void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const override { BulkElementTri2dC2::shape(s, psi); }
+    void shape_at_s_C2TB(const oomph::Vector<double> &s, oomph::Shape &psi) const override { oomph::TBubbleEnrichedElementShape<2, 3>::shape(s, psi); }
+    void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { BulkElementTri2dC2::dshape_local(s, psi, dpsi); }
+    void dshape_local_at_s_C2TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { oomph::TBubbleEnrichedElementShape<2, 3>::dshape_local(s, psi, dpsi); }
     
-    inline void d2shape_local(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &, oomph::DShape &) const { throw_runtime_error("Implement"); }
-    inline void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const { oomph::TBubbleEnrichedElementShape<2, 3>::shape(s, psi); }
-    inline void dshape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsids) const { oomph::TBubbleEnrichedElementShape<2, 3>::dshape_local(s, psi, dpsids); }
-    inline void local_coordinate_of_node(const unsigned &j, oomph::Vector<double> &s) const { oomph::TBubbleEnrichedElementShape<2, 3>::local_coordinate_of_node(j, s); }
-    bool has_bubble() const { return true; }
-    virtual unsigned get_meshio_type_index() const { return 99; } // Just some otherwise unused value here
-    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const
+    inline void d2shape_local(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &, oomph::DShape &) const override { throw_runtime_error("Implement"); }
+    inline void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const override { oomph::TBubbleEnrichedElementShape<2, 3>::shape(s, psi); }
+    inline void dshape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsids) const override { oomph::TBubbleEnrichedElementShape<2, 3>::dshape_local(s, psi, dpsids); }
+    inline void local_coordinate_of_node(const unsigned &j, oomph::Vector<double> &s) const override { oomph::TBubbleEnrichedElementShape<2, 3>::local_coordinate_of_node(j, s); }
+    bool has_bubble() const override { return true; }
+    unsigned get_meshio_type_index() const override { return 99; } // Just some otherwise unused value here
+    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
     {
       if (tesselate_tri)
       {
@@ -1484,9 +1484,9 @@ namespace pyoomph
         return 7;
       }
     }
-    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
+    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
 
-    virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 2, order, true)); }
+    void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 2, order, true)); }
   };
 
   // 3d brick (hexahedral) element, trilinear (C1) interpolation, refineable + solid.
@@ -1502,27 +1502,27 @@ namespace pyoomph
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
-    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
-    int nedges() const { return 8; }
+    int nedges() const override { return 8; }
     BulkElementBrick3dC1();    
-    virtual unsigned get_meshio_type_index() const { return 11; }
+    unsigned get_meshio_type_index() const override { return 11; }
 
 
-    void check_integrity(double &max_error) { max_error = 0; } // TODO
+    void check_integrity(double &max_error) override { max_error = 0; } // TODO
 
     
 
-    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
-    void shape_at_s_C2(const oomph::Vector<double> &, oomph::Shape &) const { throw_runtime_error("Makes no sense"); }
-    void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const;
+    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const override { this->shape(s, psi); }
+    void shape_at_s_C2(const oomph::Vector<double> &, oomph::Shape &) const override { throw_runtime_error("Makes no sense"); }
+    void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
 
-    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
-    void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const { throw_runtime_error("Makes no sense"); }
-    void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
+    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
+    void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const override { throw_runtime_error("Makes no sense"); }
+    void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
 
-    void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather);
-    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const
+    void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
+    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
     {
       if (tesselate_tri)
       {
@@ -1534,14 +1534,14 @@ namespace pyoomph
         return 8;
       }
     }
-    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
-    virtual std::vector<double> get_outline(bool lagrangian);
-    unsigned nrecovery_order() { return 1; }
-    void output(std::ostream &outfile, const unsigned &n_plot) { BulkElementBase::output(outfile, n_plot); }
-    unsigned nvertex_node() const { return oomph::QElement<3, 2>::nvertex_node(); }
-    oomph::Node *vertex_node_pt(const unsigned &j) const { return QElement<3, 2>::vertex_node_pt(j); }
-    void further_setup_hanging_nodes() { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
-    virtual BulkElementBase *create_son_instance() const
+    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
+    std::vector<double> get_outline(bool lagrangian) override;
+    unsigned nrecovery_order() override { return 1; }
+    void output(std::ostream &outfile, const unsigned &n_plot) override { BulkElementBase::output(outfile, n_plot); }
+    unsigned nvertex_node() const override { return oomph::QElement<3, 2>::nvertex_node(); }
+    oomph::Node *vertex_node_pt(const unsigned &j) const override { return QElement<3, 2>::vertex_node_pt(j); }
+    void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
+    BulkElementBase *create_son_instance() const override
     {
       BulkElementBase::__CurrentCodeInstance = codeinst;
       auto res = new BulkElementBrick3dC1();
@@ -1549,7 +1549,7 @@ namespace pyoomph
       BulkElementBase::__CurrentCodeInstance = NULL;
       return res;
     }
-    virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 3, order)); }
+    void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 3, order)); }
   };
 
   // 3d brick element, triquadratic (C2) interpolation (plus a C1 dummy sub-space).
@@ -1567,29 +1567,29 @@ namespace pyoomph
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}  
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
-    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
-    int nedges() const { return 8; }
+    int nedges() const override { return 8; }
     BulkElementBrick3dC2();
-    virtual unsigned get_meshio_type_index() const { return 14; }
+    unsigned get_meshio_type_index() const override { return 14; }
     
 
-    void check_integrity(double &max_error) { max_error = 0; } // TODO
-    virtual std::vector<double> get_outline(bool lagrangian);
-    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const;
-    void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
-    void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const;
+    void check_integrity(double &max_error) override { max_error = 0; } // TODO
+    std::vector<double> get_outline(bool lagrangian) override;
+    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
+    void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const override { this->shape(s, psi); }
+    void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
 
-    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
-    void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
-    void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
-
-    
+    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
+    void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
 
     
+
+    
     
 
-    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const
+    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
     {
       if (tesselate_tri)
       {
@@ -1601,22 +1601,22 @@ namespace pyoomph
         return 27;
       }
     }
-    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
+    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
 
-    unsigned nrecovery_order() { return 2; }
-    void output(std::ostream &outfile, const unsigned &n_plot) { BulkElementBase::output(outfile, n_plot); }
-    unsigned nvertex_node() const { return oomph::QElement<3, 3>::nvertex_node(); }
-    oomph::Node *vertex_node_pt(const unsigned &j) const { return QElement<3, 3>::vertex_node_pt(j); }
+    unsigned nrecovery_order() override { return 2; }
+    void output(std::ostream &outfile, const unsigned &n_plot) override { BulkElementBase::output(outfile, n_plot); }
+    unsigned nvertex_node() const override { return oomph::QElement<3, 3>::nvertex_node(); }
+    oomph::Node *vertex_node_pt(const unsigned &j) const override { return QElement<3, 3>::vertex_node_pt(j); }
 
-    void further_setup_hanging_nodes();
-    oomph::Node *interpolating_node_pt(const unsigned &n, const int &value_id);
-    double local_one_d_fraction_of_interpolating_node(const unsigned &n1d, const unsigned &i, const int &value_id);
-    oomph::Node *get_interpolating_node_at_local_coordinate(const oomph::Vector<double> &s, const int &value_id);
-    unsigned ninterpolating_node_1d(const int &value_id);
-    unsigned ninterpolating_node(const int &value_id);
-    void interpolating_basis(const oomph::Vector<double> &s, oomph::Shape &psi, const int &value_id) const;
-    void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather);
-    virtual BulkElementBase *create_son_instance() const
+    void further_setup_hanging_nodes() override;
+    oomph::Node *interpolating_node_pt(const unsigned &n, const int &value_id) override;
+    double local_one_d_fraction_of_interpolating_node(const unsigned &n1d, const unsigned &i, const int &value_id) override;
+    oomph::Node *get_interpolating_node_at_local_coordinate(const oomph::Vector<double> &s, const int &value_id) override;
+    unsigned ninterpolating_node_1d(const int &value_id) override;
+    unsigned ninterpolating_node(const int &value_id) override;
+    void interpolating_basis(const oomph::Vector<double> &s, oomph::Shape &psi, const int &value_id) const override;
+    void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
+    BulkElementBase *create_son_instance() const override
     {
       BulkElementBase::__CurrentCodeInstance = codeinst;
       auto res = new BulkElementBrick3dC2();
@@ -1624,7 +1624,7 @@ namespace pyoomph
       BulkElementBase::__CurrentCodeInstance = NULL;
       return res;
     }
-    virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 3, order)); }
+    void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 3, order)); }
   };
 
   // 3d tetrahedral element, linear (C1) interpolation.
@@ -1640,25 +1640,25 @@ namespace pyoomph
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
-    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
-    int nedges() const { return 6; }
+    int nedges() const override { return 6; }
     BulkElementTetra3dC1();    
-    virtual unsigned get_meshio_type_index() const { return 4; }
+    unsigned get_meshio_type_index() const override { return 4; }
 
-    void check_integrity(double &max_error) { max_error = 0; } // TODO
+    void check_integrity(double &max_error) override { max_error = 0; } // TODO
 
     
     
-    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
-    void shape_at_s_C2(const oomph::Vector<double> &, oomph::Shape &) const { throw_runtime_error("Makes no sense"); }
-    void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const;
+    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const override { this->shape(s, psi); }
+    void shape_at_s_C2(const oomph::Vector<double> &, oomph::Shape &) const override { throw_runtime_error("Makes no sense"); }
+    void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
 
-    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
-    void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const { throw_runtime_error("Makes no sense"); }
-    void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
+    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
+    void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const override { throw_runtime_error("Makes no sense"); }
+    void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
 
-    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const
+    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
     {
       if (tesselate_tri)
       {
@@ -1670,14 +1670,14 @@ namespace pyoomph
         return 4;
       }
     }
-    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
-    virtual std::vector<double> get_outline(bool lagrangian);
-    unsigned nrecovery_order() { return 1; }
-    void output(std::ostream &outfile, const unsigned &n_plot) { BulkElementBase::output(outfile, n_plot); }
-    unsigned nvertex_node() const { return oomph::TElement<3, 2>::nvertex_node(); }
-    oomph::Node *vertex_node_pt(const unsigned &j) const { return TElement<3, 2>::vertex_node_pt(j); }
-    void further_setup_hanging_nodes() { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
-    virtual BulkElementBase *create_son_instance() const
+    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
+    std::vector<double> get_outline(bool lagrangian) override;
+    unsigned nrecovery_order() override { return 1; }
+    void output(std::ostream &outfile, const unsigned &n_plot) override { BulkElementBase::output(outfile, n_plot); }
+    unsigned nvertex_node() const override { return oomph::TElement<3, 2>::nvertex_node(); }
+    oomph::Node *vertex_node_pt(const unsigned &j) const override { return TElement<3, 2>::vertex_node_pt(j); }
+    void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
+    BulkElementBase *create_son_instance() const override
     {
       BulkElementBase::__CurrentCodeInstance = codeinst;
       auto res = new BulkElementTetra3dC1();
@@ -1685,7 +1685,7 @@ namespace pyoomph
       BulkElementBase::__CurrentCodeInstance = NULL;
       return res;
     }
-    virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 3, order)); }
+    void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 3, order)); }
     oomph::Vector<double> get_midpoint_s() override { return oomph::Vector<double>(this->dim(), 1.0 / 3.0); }
   };
 
@@ -1702,16 +1702,16 @@ namespace pyoomph
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     BulkElementTetra3dC1TB();
-    virtual unsigned get_meshio_type_index() const { return 44; }
-    void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const;
-    void dshape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsids) const;
-    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const;
-    void shape_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
-    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
-    void dshape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
-    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
-    void local_coordinate_of_node(const unsigned &j, oomph::Vector<double> &s) const;
-    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const
+    unsigned get_meshio_type_index() const override { return 44; }
+    void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
+    void dshape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsids) const override;
+    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
+    void shape_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi) const override { this->shape(s, psi); }
+    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    void dshape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
+    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
+    void local_coordinate_of_node(const unsigned &j, oomph::Vector<double> &s) const override;
+    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
     {
       if (tesselate_tri)
       {
@@ -1723,7 +1723,7 @@ namespace pyoomph
         return 5;
       }
     }
-    virtual BulkElementBase *create_son_instance() const
+    BulkElementBase *create_son_instance() const override
     {
       BulkElementBase::__CurrentCodeInstance = codeinst;
       auto res = new BulkElementTetra3dC1TB();
@@ -1731,7 +1731,7 @@ namespace pyoomph
       BulkElementBase::__CurrentCodeInstance = NULL;
       return res;
     }
-    virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 3, order,true)); }
+    void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 3, order,true)); }
   };
 
   class BulkElementTetra3dC2TB;
@@ -1750,29 +1750,29 @@ namespace pyoomph
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}  
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
-    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
-    int nedges() const { return 6; }
+    int nedges() const override { return 6; }
     BulkElementTetra3dC2(bool has_bubble = false);
-    virtual unsigned get_meshio_type_index() const { return 10; }
+    unsigned get_meshio_type_index() const override { return 10; }
     
 
-    void check_integrity(double &max_error) { max_error = 0; } // TODO
-    virtual std::vector<double> get_outline(bool lagrangian);
-    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const;
-    void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
-    void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const;
+    void check_integrity(double &max_error) override { max_error = 0; } // TODO
+    std::vector<double> get_outline(bool lagrangian) override;
+    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
+    void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const override { this->shape(s, psi); }
+    void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
 
-    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
-    void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
-    void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
-
-    
+    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
+    void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
 
     
+
+    
     
 
-    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const
+    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
     {
       if (tesselate_tri)
       {
@@ -1784,23 +1784,23 @@ namespace pyoomph
         return 10;
       }
     }
-    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
+    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
 
-    unsigned nrecovery_order() { return 2; }
-    void output(std::ostream &outfile, const unsigned &n_plot) { BulkElementBase::output(outfile, n_plot); }
-    unsigned nvertex_node() const { return oomph::TElement<3, 3>::nvertex_node(); }
-    oomph::Node *vertex_node_pt(const unsigned &j) const { return TElement<3, 3>::vertex_node_pt(j); }
+    unsigned nrecovery_order() override { return 2; }
+    void output(std::ostream &outfile, const unsigned &n_plot) override { BulkElementBase::output(outfile, n_plot); }
+    unsigned nvertex_node() const override { return oomph::TElement<3, 3>::nvertex_node(); }
+    oomph::Node *vertex_node_pt(const unsigned &j) const override { return TElement<3, 3>::vertex_node_pt(j); }
 
-    void further_setup_hanging_nodes();
+    void further_setup_hanging_nodes() override;
     // TODO: For refinement!
     // oomph::Node* interpolating_node_pt(const unsigned &n,const int &value_id);
     // double local_one_d_fraction_of_interpolating_node(const unsigned &n1d,const unsigned &i,const int &value_id);
     // oomph::Node* get_interpolating_node_at_local_coordinate(const oomph::Vector<double> &s,const int &value_id); //TO be done
     // unsigned ninterpolating_node_1d(const int &value_id);
     // unsigned ninterpolating_node(const int &value_id);
-    void interpolating_basis(const oomph::Vector<double> &s, oomph::Shape &psi, const int &value_id) const;
-    virtual BulkElementBase *create_son_instance() const;
-    virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 3, order)); }
+    void interpolating_basis(const oomph::Vector<double> &s, oomph::Shape &psi, const int &value_id) const override;
+    BulkElementBase *create_son_instance() const override;
+    void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 3, order)); }
     oomph::Vector<double> get_midpoint_s() override { return oomph::Vector<double>(this->dim(), 1.0 / 3.0); }
   };
 
@@ -1821,9 +1821,9 @@ namespace pyoomph
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
     BulkElementTetra3dC2TB();    
-    virtual unsigned get_meshio_type_index() const { return 100; } // Just some otherwise unused value here
+    unsigned get_meshio_type_index() const override { return 100; } // Just some otherwise unused value here
     
-    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const
+    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
     {
       if (tesselate_tri)
       {
@@ -1840,18 +1840,18 @@ namespace pyoomph
     
     
     
-    void shape_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi) const;    
-    void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const { BulkElementTetra3dC2::shape(s, psi); }
-    void shape_at_s_C2TB(const oomph::Vector<double> &s, oomph::Shape &psi) const { oomph::TBubbleEnrichedElementShape<3, 3>::shape(s, psi); }
-    void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { BulkElementTetra3dC2::dshape_local(s, psi, dpsi); }
-    void dshape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
-    void dshape_local_at_s_C2TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { oomph::TBubbleEnrichedElementShape<3, 3>::dshape_local(s, psi, dpsi); }
-    inline void d2shape_local(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &, oomph::DShape &) const { throw_runtime_error("Implement"); }
-    inline void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const { oomph::TBubbleEnrichedElementShape<3, 3>::shape(s, psi); }
-    inline void dshape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsids) const { oomph::TBubbleEnrichedElementShape<3, 3>::dshape_local(s, psi, dpsids); }
-    inline void local_coordinate_of_node(const unsigned &j, oomph::Vector<double> &s) const { oomph::TBubbleEnrichedElementShape<3, 3>::local_coordinate_of_node(j, s); }
-    bool has_bubble() const { return true; }
-    virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 3, order, true)); }
+    void shape_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi) const override;    
+    void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const override { BulkElementTetra3dC2::shape(s, psi); }
+    void shape_at_s_C2TB(const oomph::Vector<double> &s, oomph::Shape &psi) const override { oomph::TBubbleEnrichedElementShape<3, 3>::shape(s, psi); }
+    void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { BulkElementTetra3dC2::dshape_local(s, psi, dpsi); }
+    void dshape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    void dshape_local_at_s_C2TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { oomph::TBubbleEnrichedElementShape<3, 3>::dshape_local(s, psi, dpsi); }
+    inline void d2shape_local(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &, oomph::DShape &) const override { throw_runtime_error("Implement"); }
+    inline void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const override { oomph::TBubbleEnrichedElementShape<3, 3>::shape(s, psi); }
+    inline void dshape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsids) const override { oomph::TBubbleEnrichedElementShape<3, 3>::dshape_local(s, psi, dpsids); }
+    inline void local_coordinate_of_node(const unsigned &j, oomph::Vector<double> &s) const override { oomph::TBubbleEnrichedElementShape<3, 3>::local_coordinate_of_node(j, s); }
+    bool has_bubble() const override { return true; }
+    void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 3, order, true)); }
     void build_face_element(const int& face_index, oomph::FaceElement* face_element_pt) override;
   };
 
@@ -1868,20 +1868,20 @@ namespace pyoomph
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
       const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
       oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
-      virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+      const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
       std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
       BulkElementWedge3dC1();
-      int nedges() const { throw_runtime_error("Not implemented"); }
-      virtual unsigned get_meshio_type_index() const { return 13; }      
-      void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const {oomph::WedgeElementC1::shape(s, psi); }
-      void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
-      void shape_at_s_C2(const oomph::Vector<double> &, oomph::Shape &) const { throw_runtime_error("Makes no sense"); }
-      void shape_at_s_DL(const oomph::Vector<double> &, oomph::Shape &) const;
-      void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
-      void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const { throw_runtime_error("Makes no sense"); }
-      void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
+      int nedges() const override { throw_runtime_error("Not implemented"); }
+      unsigned get_meshio_type_index() const override { return 13; }      
+      void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const override {oomph::WedgeElementC1::shape(s, psi); }
+      void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const override { this->shape(s, psi); }
+      void shape_at_s_C2(const oomph::Vector<double> &, oomph::Shape &) const override { throw_runtime_error("Makes no sense"); }
+      void shape_at_s_DL(const oomph::Vector<double> &, oomph::Shape &) const override;
+      void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
+      void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const override { throw_runtime_error("Makes no sense"); }
+      void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
       
-      int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const
+      int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
       {
           if (tesselate_tri)
           {
@@ -1893,14 +1893,14 @@ namespace pyoomph
             return 6;
           }
       }
-      void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
-      virtual std::vector<double> get_outline(bool lagrangian);
-      unsigned nrecovery_order() { return 1; }
-      void output(std::ostream &outfile, const unsigned &n_plot) { BulkElementBase::output(outfile, n_plot); }      
-      unsigned nvertex_node() const { return oomph::WedgeElementC1::nvertex_node(); }
-      oomph::Node *vertex_node_pt(const unsigned &j) const { return WedgeElementC1::vertex_node_pt(j); }      
-      void further_setup_hanging_nodes() { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
-      virtual BulkElementBase *create_son_instance() const
+      void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
+      std::vector<double> get_outline(bool lagrangian) override;
+      unsigned nrecovery_order() override { return 1; }
+      void output(std::ostream &outfile, const unsigned &n_plot) override { BulkElementBase::output(outfile, n_plot); }      
+      unsigned nvertex_node() const override { return oomph::WedgeElementC1::nvertex_node(); }
+      oomph::Node *vertex_node_pt(const unsigned &j) const override { return WedgeElementC1::vertex_node_pt(j); }      
+      void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
+      BulkElementBase *create_son_instance() const override
       {
           BulkElementBase::__CurrentCodeInstance = codeinst;
           auto res = new BulkElementWedge3dC1();
@@ -1908,7 +1908,7 @@ namespace pyoomph
           BulkElementBase::__CurrentCodeInstance = NULL;
           return res;
       }
-      virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 4, order)); }
+      void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 4, order)); }
       oomph::Vector<double> get_midpoint_s() override { oomph::Vector<double> res(this->dim(), 1.0 / 3.0); res[2]=0.5; return res; }
   };
 
@@ -1926,19 +1926,19 @@ namespace pyoomph
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
       const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
       oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
-      virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+      const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
       std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
       BulkElementPyramid3dC1();
-      int nedges() const { throw_runtime_error("Not implemented"); } // No need tom implement this now
-      virtual unsigned get_meshio_type_index() const { return 15; }      
-      void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const {oomph::PyramidElementC1::shape(s, psi); }
-      void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }
-      void shape_at_s_C2(const oomph::Vector<double> &, oomph::Shape &) const { throw_runtime_error("Makes no sense"); }
-      void shape_at_s_DL(const oomph::Vector<double> &, oomph::Shape &) const;
-      void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
-      void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const { throw_runtime_error("Makes no sense"); }
-      void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;      
-      int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const
+      int nedges() const override { throw_runtime_error("Not implemented"); } // No need tom implement this now
+      unsigned get_meshio_type_index() const override { return 15; }      
+      void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const override {oomph::PyramidElementC1::shape(s, psi); }
+      void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const override { this->shape(s, psi); }
+      void shape_at_s_C2(const oomph::Vector<double> &, oomph::Shape &) const override { throw_runtime_error("Makes no sense"); }
+      void shape_at_s_DL(const oomph::Vector<double> &, oomph::Shape &) const override;
+      void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
+      void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const override { throw_runtime_error("Makes no sense"); }
+      void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;      
+      int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
       {
           if (tesselate_tri)
           {
@@ -1950,14 +1950,14 @@ namespace pyoomph
             return 5;
           }
       }
-      void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
-      virtual std::vector<double> get_outline(bool lagrangian);
-      unsigned nrecovery_order() { return 1; }
-      void output(std::ostream &outfile, const unsigned &n_plot) { BulkElementBase::output(outfile, n_plot); }      
-      unsigned nvertex_node() const { return oomph::PyramidElementC1::nvertex_node(); }
-      oomph::Node *vertex_node_pt(const unsigned &j) const { return PyramidElementC1::vertex_node_pt(j); }      
-      void further_setup_hanging_nodes() { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
-      virtual BulkElementBase *create_son_instance() const
+      void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
+      std::vector<double> get_outline(bool lagrangian) override;
+      unsigned nrecovery_order() override { return 1; }
+      void output(std::ostream &outfile, const unsigned &n_plot) override { BulkElementBase::output(outfile, n_plot); }      
+      unsigned nvertex_node() const override { return oomph::PyramidElementC1::nvertex_node(); }
+      oomph::Node *vertex_node_pt(const unsigned &j) const override { return PyramidElementC1::vertex_node_pt(j); }      
+      void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
+      BulkElementBase *create_son_instance() const override
       {
           BulkElementBase::__CurrentCodeInstance = codeinst;
           auto res = new BulkElementPyramid3dC1();
@@ -1965,7 +1965,7 @@ namespace pyoomph
           BulkElementBase::__CurrentCodeInstance = NULL;
           return res;
       }
-      virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 5, order)); }
+      void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 5, order)); }
       oomph::Vector<double> get_midpoint_s() override { oomph::Vector<double> res(this->dim(), 0.375); res[2]=0.25; return res; }
   };
 
@@ -1985,20 +1985,20 @@ namespace pyoomph
       const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}    
       const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
       oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
-      virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+      const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
       std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
       BulkElementWedge3dC2();      
-      int nedges() const { throw_runtime_error("Not implemented"); }
-      virtual unsigned get_meshio_type_index() const { return 26; }      
-      void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const {oomph::WedgeElementC2::shape(s, psi); }
-      void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const { oomph::WedgeElementShapeC1::shape(s, psi); }
-      void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }      
-      void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const;
-      void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
-      void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { oomph::WedgeElementShapeC1::dshape_local(s, psi, dpsi); }
-      void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
+      int nedges() const override { throw_runtime_error("Not implemented"); }
+      unsigned get_meshio_type_index() const override { return 26; }      
+      void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const override {oomph::WedgeElementC2::shape(s, psi); }
+      void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const override { oomph::WedgeElementShapeC1::shape(s, psi); }
+      void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const override { this->shape(s, psi); }      
+      void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
+      void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
+      void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { oomph::WedgeElementShapeC1::dshape_local(s, psi, dpsi); }
+      void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
       
-      int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const
+      int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
       {
           if (tesselate_tri)
           {
@@ -2010,14 +2010,14 @@ namespace pyoomph
             return 18;
           }
       }
-      void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
-      virtual std::vector<double> get_outline(bool lagrangian);
-      unsigned nrecovery_order() { return 1; }
-      void output(std::ostream &outfile, const unsigned &n_plot) { BulkElementBase::output(outfile, n_plot); }      
-      unsigned nvertex_node() const { return oomph::WedgeElementC2::nvertex_node(); }
-      oomph::Node *vertex_node_pt(const unsigned &j) const { return WedgeElementC2::vertex_node_pt(j); }      
-      void further_setup_hanging_nodes() { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
-      virtual BulkElementBase *create_son_instance() const
+      void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
+      std::vector<double> get_outline(bool lagrangian) override;
+      unsigned nrecovery_order() override { return 1; }
+      void output(std::ostream &outfile, const unsigned &n_plot) override { BulkElementBase::output(outfile, n_plot); }      
+      unsigned nvertex_node() const override { return oomph::WedgeElementC2::nvertex_node(); }
+      oomph::Node *vertex_node_pt(const unsigned &j) const override { return WedgeElementC2::vertex_node_pt(j); }      
+      void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
+      BulkElementBase *create_son_instance() const override
       {
           BulkElementBase::__CurrentCodeInstance = codeinst;
           auto res = new BulkElementWedge3dC2();
@@ -2025,7 +2025,7 @@ namespace pyoomph
           BulkElementBase::__CurrentCodeInstance = NULL;
           return res;
       }
-      virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 4, order)); }
+      void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 4, order)); }
       oomph::Vector<double> get_midpoint_s() override { oomph::Vector<double> res(this->dim(), 1.0 / 3.0); res[2]=0.5; return res; }            
   };
 
@@ -2103,20 +2103,20 @@ namespace pyoomph
       const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}    
       const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
       oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
-      virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+      const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
       std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
       BulkElementPyramid3dC2();      
-      int nedges() const { throw_runtime_error("Not implemented"); }
-      virtual unsigned get_meshio_type_index() const { return 27; }      
-      void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const {oomph::PyramidElementC2::shape(s, psi); }
-      void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const { oomph::PyramidElementShapeC1::shape(s, psi); }
-      void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const { this->shape(s, psi); }      
-      void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const;
-      void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { this->dshape_local(s, psi, dpsi); }
-      void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const { oomph::PyramidElementShapeC1::dshape_local(s, psi, dpsi); }
-      void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
+      int nedges() const override { throw_runtime_error("Not implemented"); }
+      unsigned get_meshio_type_index() const override { return 27; }      
+      void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const override {oomph::PyramidElementC2::shape(s, psi); }
+      void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const override { oomph::PyramidElementShapeC1::shape(s, psi); }
+      void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const override { this->shape(s, psi); }      
+      void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
+      void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
+      void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { oomph::PyramidElementShapeC1::dshape_local(s, psi, dpsi); }
+      void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
       
-      int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const
+      int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
       {
           if (tesselate_tri)
           {
@@ -2128,14 +2128,14 @@ namespace pyoomph
             return 14;
           }
       }
-      void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
-      virtual std::vector<double> get_outline(bool lagrangian);
-      unsigned nrecovery_order() { return 1; }
-      void output(std::ostream &outfile, const unsigned &n_plot) { BulkElementBase::output(outfile, n_plot); }      
-      unsigned nvertex_node() const { return oomph::PyramidElementC2::nvertex_node(); }
-      oomph::Node *vertex_node_pt(const unsigned &j) const { return PyramidElementC2::vertex_node_pt(j); }      
-      void further_setup_hanging_nodes() { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
-      virtual BulkElementBase *create_son_instance() const
+      void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
+      std::vector<double> get_outline(bool lagrangian) override;
+      unsigned nrecovery_order() override { return 1; }
+      void output(std::ostream &outfile, const unsigned &n_plot) override { BulkElementBase::output(outfile, n_plot); }      
+      unsigned nvertex_node() const override { return oomph::PyramidElementC2::nvertex_node(); }
+      oomph::Node *vertex_node_pt(const unsigned &j) const override { return PyramidElementC2::vertex_node_pt(j); }      
+      void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
+      BulkElementBase *create_son_instance() const override
       {
           BulkElementBase::__CurrentCodeInstance = codeinst;
           auto res = new BulkElementPyramid3dC2();
@@ -2143,7 +2143,7 @@ namespace pyoomph
           BulkElementBase::__CurrentCodeInstance = NULL;
           return res;
       }
-      virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 5, order)); }
+      void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 5, order)); }
       oomph::Vector<double> get_midpoint_s() override { oomph::Vector<double> res(this->dim(), 0.375); res[2]=0.25; return res; }            
   };
 
@@ -2163,54 +2163,54 @@ namespace pyoomph
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *, int ) override {throw_runtime_error("A point element has no faces");}
-    virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
+    const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & ) const override {return std::vector<pyoomph::Node*>{}; }
-    int nedges() const { return 0; }
+    int nedges() const override { return 0; }
     PointElement0d();
-    virtual unsigned get_meshio_type_index() const { return 0; }
-    virtual void dshape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsids) const;
-    virtual double invert_jacobian_mapping(const oomph::DenseMatrix<double> &jacobian, oomph::DenseMatrix<double> &inverse_jacobian) const;
-    void build(oomph::Mesh *&, oomph::Vector<oomph::Node *> &, bool &, std::ofstream &) {}
-    void check_integrity(double &max_error) { max_error = 0; }
+    unsigned get_meshio_type_index() const override { return 0; }
+    void dshape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsids) const override;
+    double invert_jacobian_mapping(const oomph::DenseMatrix<double> &jacobian, oomph::DenseMatrix<double> &inverse_jacobian) const override;
+    void build(oomph::Mesh *&, oomph::Vector<oomph::Node *> &, bool &, std::ofstream &) override {}
+    void check_integrity(double &max_error) override { max_error = 0; }
     
-    void output(std::ostream &outfile, const unsigned &n_plot) { BulkElementBase::output(outfile, n_plot); }
-    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const;
-    void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const;
-    void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const;
-    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
-    void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
-    void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const;
-    unsigned nrecovery_order() { return 1; }
-    unsigned nvertex_node() const { return 1; }
-    oomph::Node *vertex_node_pt(const unsigned &j) const { return node_pt(j); }
-    void further_setup_hanging_nodes() {};
-    virtual BulkElementBase *create_son_instance() const
+    void output(std::ostream &outfile, const unsigned &n_plot) override { BulkElementBase::output(outfile, n_plot); }
+    void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
+    void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
+    void shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const override;
+    void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    unsigned nrecovery_order() override { return 1; }
+    unsigned nvertex_node() const override { return 1; }
+    oomph::Node *vertex_node_pt(const unsigned &j) const override { return node_pt(j); }
+    void further_setup_hanging_nodes() override {};
+    BulkElementBase *create_son_instance() const override
     {
       throw_runtime_error("Makes no sense");
       return NULL;
     }
-    void pre_build(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt)
+    void pre_build(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt) override
     {
       BulkElementBase::pre_build(mesh_pt, new_node_pt);
     }
-    int get_num_numpy_elemental_indices(bool , unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const
+    int get_num_numpy_elemental_indices(bool , unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
     {
       nsubdiv = 1;
       return 1;
     }
-    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const;
-    virtual std::vector<double> get_outline(bool lagrangian);   
-    virtual double get_quality_factor() { return 1.0; }
-    virtual double s_min() const
+    void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
+    std::vector<double> get_outline(bool lagrangian) override;   
+    double get_quality_factor() override { return 1.0; }
+    double s_min() const override
     {
       return 0.0;
     }
 
-    virtual double s_max() const
+    double s_max() const override
     {
       return 0.0;
     }
-    virtual void set_integration_order(unsigned int ) {}
+    void set_integration_order(unsigned int ) override {}
   };
 
   /////////////////////////////
@@ -2254,7 +2254,7 @@ namespace pyoomph
     // eqn_map; needed because generated code addresses external data uniformly regardless of which
     // element it actually lives on.
     virtual void update_equation_remapping_from_element(BulkElementBase *source_elem,const JITFuncSpec_RequiredShapes_FiniteElement_t *required_shapes,std::vector<int> &eqn_map,int bulk_indicator);
-    virtual void update_in_external_fd(const unsigned &i);
+    void update_in_external_fd(const unsigned &i) override;
     // Registers "data" (a Data object, e.g. from the bulk or opposite element) as required external
     // data of this element if not already present; is_geometric marks it as a solid/ALE position
     // dof (relevant for how its Jacobian contribution is computed). Returns true if newly added.
@@ -2263,18 +2263,18 @@ namespace pyoomph
     // (nodal/internal/external) of from_elem that this interface element's generated residual code
     // needs to access as external data.
     virtual void add_required_external_data(JITFuncSpec_RequiredShapes_FiniteElement_t *required, BulkElementBase *from_elem);
-    virtual void prepare_shape_buffer_for_integration(const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag);
-    double fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds = NULL, unsigned history_index=0) const;
-    virtual bool fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap);
+    void prepare_shape_buffer_for_integration(const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag) override;
+    double fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds = NULL, unsigned history_index=0) const override;
+    bool fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap) override;
     // Additional interface-only hanging-node bookkeeping, used by InterfaceElementBase to handle
     // the extra fields that exist only on the interface element and not on the bulk element.
     bool fill_hang_info_with_equations_interface(JITShapeInfo_t *shape_info) override;
     // Additionally handles INTERFACE_DOF_CONSTRAIN_TO_C1 additional dof constraints (on top of the
     // CONTINUOUS_BASE_DOF_CONSTRAIN_TO_C1 ones already handled by the base class implementation).
     bool fill_additional_hang_buffer_data(JITShapeInfo_t *shape_info) override;
-    virtual void ensure_external_data();
-    virtual void assign_additional_local_eqn_numbers();
-    virtual void fill_in_jacobian_from_lagragian_by_fd(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian);
+    void ensure_external_data() override;
+    void assign_additional_local_eqn_numbers() override;
+    void fill_in_jacobian_from_lagragian_by_fd(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian) override;
     // Allocates the additional (interface-only, beyond the inherited bulk) field dofs on this
     // element's nodes/internal data, based on the interface's own JIT function table.
     virtual void add_interface_dofs();
@@ -2282,8 +2282,8 @@ namespace pyoomph
     // bookkeeping for the additional interface fields and the bulk_eqn_map/opposite-side equation
     // maps, complementing BulkElementBase::fill_element_info for the inherited bulk part.
     virtual void fill_element_info_interface_part(bool without_equations=false);
-    virtual std::vector<std::string> get_dof_names(bool not_a_root_call = false);
-    virtual void get_dnormal_dcoords_at_s(const oomph::Vector<double> &s, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dnormal_dcoord, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2normal_dcoord2) const;
+    std::vector<std::string> get_dof_names(bool not_a_root_call = false) override;
+    void get_dnormal_dcoords_at_s(const oomph::Vector<double> &s, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dnormal_dcoord, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2normal_dcoord2) const override;
 
     // Maps a local coordinate s on this interface element to the corresponding local coordinate on
     // the opposite_side interface element, accounting for possibly different node/edge orientation
@@ -2316,7 +2316,7 @@ namespace pyoomph
     virtual void assign_hanging_additional_interface_local_equations(const bool &store_local_dof_pt);
     // After the base class assigns local equation numbers for the inherited bulk nodal data,
     // additionally assigns local equation numbers for the interface-only additional fields' hanging-node constraints.
-    inline void assign_nodal_local_eqn_numbers(const bool &store_local_dof_pt)
+    inline void assign_nodal_local_eqn_numbers(const bool &store_local_dof_pt) override
     {
       BulkElementBase::assign_nodal_local_eqn_numbers(store_local_dof_pt);
       assign_hanging_additional_interface_local_equations(store_local_dof_pt);
@@ -2332,7 +2332,7 @@ namespace pyoomph
     // (e.g. following mesh refinement or re-numbering), by calling
     // update_equation_remapping_from_element for each relevant source element.
     virtual void update_equation_remapping();
-    virtual void set_remaining_shapes_appropriately(JITShapeInfo_t *shape_info, const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes);
+    void set_remaining_shapes_appropriately(JITShapeInfo_t *shape_info, const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes) override;
     void pin_dummy_values() override;
     // User-added additional dof constraints (see NodeWithFieldIndicesBase::add_additional_dof_constraint):		
     void setup_additional_dof_constraints() override;
@@ -2374,7 +2374,7 @@ namespace pyoomph
       this->analyze_opposite_orientation(offs);
     }
 
-    double zeta_nodal(const unsigned &n, const unsigned &k, const unsigned &i) const
+    double zeta_nodal(const unsigned &n, const unsigned &k, const unsigned &i) const override
     {
       return oomph::FaceElement::zeta_nodal(n, k, i);
     }
@@ -2396,7 +2396,7 @@ namespace pyoomph
     InterfaceElementBase *get_opposite_side() { return opposite_side; }
     const InterfaceElementBase *get_opposite_side() const { return opposite_side; }
 
-    virtual int get_nodal_index_by_name(oomph::Node *n, std::string fieldname);
+    int get_nodal_index_by_name(oomph::Node *n, std::string fieldname) override;
     // Evaluates the interface-only field "ifindex" (in the given interpolation space) at local
     // coordinate s and history index t, by interpolating from the interface's additional dof data.
     virtual double get_interpolated_interface_field(const oomph::Vector<double> &s, const unsigned &ifindex, const std::string &space, const unsigned &t = 0) const;
@@ -2419,7 +2419,7 @@ namespace pyoomph
   class InterfaceElement : public virtual BASE, public virtual InterfaceElementBase
   {
   protected:
-    virtual bool fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
+    bool fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap) override
     {
       bool res1 = BASE::fill_hang_info_with_equations(required, shape_info, eqn_remap);
       bool res2 = InterfaceElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap);
@@ -2427,19 +2427,19 @@ namespace pyoomph
     }
 
 
-    virtual void interpolate_hang_values()
+    void interpolate_hang_values() override
     {
       BASE::interpolate_hang_values();
       this->interpolate_hang_values_at_interface();
     }
 
   public:
-    double zeta_nodal(const unsigned &n, const unsigned &k, const unsigned &i) const
+    double zeta_nodal(const unsigned &n, const unsigned &k, const unsigned &i) const override
     {
       return oomph::FaceElement::zeta_nodal(n, k, i);
     }
 
-    virtual void fill_element_info(bool without_equations=false)
+    void fill_element_info(bool without_equations=false) override
     {
       BASE::fill_element_info(without_equations);
       this->fill_element_info_interface_part(without_equations);
@@ -2500,7 +2500,7 @@ namespace pyoomph
       }
     }
 
-    virtual void get_normal_at_s(const oomph::Vector<double> &s, oomph::Vector<double> &n, double *  PYOOMPH_RESTRICT  *  PYOOMPH_RESTRICT *  PYOOMPH_RESTRICT  dnormal_dcoord, double *  PYOOMPH_RESTRICT  *  PYOOMPH_RESTRICT  *  PYOOMPH_RESTRICT  *  PYOOMPH_RESTRICT *  PYOOMPH_RESTRICT d2normal_dcoord2) const
+    void get_normal_at_s(const oomph::Vector<double> &s, oomph::Vector<double> &n, double *  PYOOMPH_RESTRICT  *  PYOOMPH_RESTRICT *  PYOOMPH_RESTRICT  dnormal_dcoord, double *  PYOOMPH_RESTRICT  *  PYOOMPH_RESTRICT  *  PYOOMPH_RESTRICT  *  PYOOMPH_RESTRICT *  PYOOMPH_RESTRICT d2normal_dcoord2) const override
     {
       this->outer_unit_normal(s, n);
       if (dnormal_dcoord)
@@ -2526,12 +2526,12 @@ namespace pyoomph
     InterfaceElementPoint0d(DynamicBulkElementInstance *jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<PointElement0d>(jitcode, bulk_el_pt, face_index)
     {
     }
-    oomph::Vector<double> local_coordinate_in_opposite_side(const oomph::Vector<double> &s) const
+    oomph::Vector<double> local_coordinate_in_opposite_side(const oomph::Vector<double> &s) const override
     {
       return s;
     }
     // A point has no orientation ambiguity; just checks the opposite side is also a point element.
-    void analyze_opposite_orientation(const std::vector<double> & )
+    void analyze_opposite_orientation(const std::vector<double> & ) override
     {
       if (!dynamic_cast<InterfaceElementPoint0d *>(opposite_side))
       {
@@ -2554,7 +2554,7 @@ namespace pyoomph
     {
     }
 
-    virtual pyoomph::Node *opposite_node_pt(unsigned int i)
+    pyoomph::Node *opposite_node_pt(unsigned int i) override
     {
       if (partial_opposite_internal_facet)
         throw_runtime_error("opposite_node_pt not allowed in internal facets with partial overlap with the opposite side");
@@ -2567,7 +2567,7 @@ namespace pyoomph
     // partially-overlapping "internal facet" pairing (only allowed if the opposite side has been
     // marked as such), where the two elements do not share coincident nodes and coordinates must
     // instead be mapped continuously via optimize_s_to_match_x at the endpoints.
-    void analyze_opposite_orientation(const std::vector<double> & offset)
+    void analyze_opposite_orientation(const std::vector<double> & offset) override
     {
       if (opposite_side->dim() != 1)
       {
@@ -2649,7 +2649,7 @@ namespace pyoomph
     // endpoint coordinates; (2) opposite side is a T-element (simplex local coordinate range
     // [0,1] rather than [-1,1]), rescaling and optionally flipping s accordingly; (3) opposite side
     // is the same Q-family type (range [-1,1]), where only a sign flip is needed for the swapped orientation.
-    oomph::Vector<double> local_coordinate_in_opposite_side(const oomph::Vector<double> &s) const
+    oomph::Vector<double> local_coordinate_in_opposite_side(const oomph::Vector<double> &s) const override
     {
       if (partial_opposite_internal_facet)
       {
@@ -2713,7 +2713,7 @@ namespace pyoomph
     //	 fill_element_info();
       }*/
 
-    virtual pyoomph::Node *opposite_node_pt(unsigned int i)
+    pyoomph::Node *opposite_node_pt(unsigned int i) override
     {
       if (partial_opposite_internal_facet)
         throw_runtime_error("opposite_node_pt not allowed in internal facets with partial overlap with the opposite side");
@@ -2721,7 +2721,7 @@ namespace pyoomph
     }
 
     //  void further_setup_hanging_nodes() {} //TODO: REM
-    void analyze_opposite_orientation(const std::vector<double> & offset)
+    void analyze_opposite_orientation(const std::vector<double> & offset) override
     {
       if (opposite_side->dim() != 1)
       {
@@ -2798,7 +2798,7 @@ namespace pyoomph
       //    std::cout << "DISTS ARE " << dist0 << "  " << dist1 << " OPP ORIENT " << opposite_orientation << std::endl;
     }
 
-    oomph::Vector<double> local_coordinate_in_opposite_side(const oomph::Vector<double> &s) const
+    oomph::Vector<double> local_coordinate_in_opposite_side(const oomph::Vector<double> &s) const override
     {
       if (partial_opposite_internal_facet)
       {
@@ -2849,7 +2849,7 @@ namespace pyoomph
     InterfaceTElementLine1dC1(DynamicBulkElementInstance *jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkTElementLine1dC1>(jitcode, bulk_el_pt, face_index)
     {
     }
-    void analyze_opposite_orientation(const std::vector<double> & offset)
+    void analyze_opposite_orientation(const std::vector<double> & offset) override
     {
       if (opposite_side->dim() != 1)
       {
@@ -2923,7 +2923,7 @@ namespace pyoomph
       }
     }
 
-    oomph::Vector<double> local_coordinate_in_opposite_side(const oomph::Vector<double> &s) const
+    oomph::Vector<double> local_coordinate_in_opposite_side(const oomph::Vector<double> &s) const override
     {
       if (dynamic_cast<BulkTElementLine1dC1 *>(opposite_side) || dynamic_cast<BulkTElementLine1dC2 *>(opposite_side))
       {
@@ -2985,7 +2985,7 @@ namespace pyoomph
       }*/
 
     //  void further_setup_hanging_nodes() {} //TODO: REM
-    void analyze_opposite_orientation(const std::vector<double> & offset)
+    void analyze_opposite_orientation(const std::vector<double> & offset) override
     {
       if (opposite_side->dim() != 1)
       {
@@ -3053,7 +3053,7 @@ namespace pyoomph
       //    std::cout << "DISTS ARE " << dist0 << "  " << dist1 << " OPP ORIENT " << opposite_orientation << std::endl;
     }
 
-    oomph::Vector<double> local_coordinate_in_opposite_side(const oomph::Vector<double> &s) const
+    oomph::Vector<double> local_coordinate_in_opposite_side(const oomph::Vector<double> &s) const override
     {
       if (dynamic_cast<BulkTElementLine1dC1 *>(opposite_side) || dynamic_cast<BulkTElementLine1dC2 *>(opposite_side))
       {
@@ -3155,7 +3155,7 @@ namespace pyoomph
     // Applies the vertex permutation "opposite_orientation" (chosen by analyze_opposite_orientation
     // below) to the barycentric-style local coordinate s to obtain the corresponding coordinate on
     // the opposite side.
-    oomph::Vector<double> local_coordinate_in_opposite_side(const oomph::Vector<double> &s) const
+    oomph::Vector<double> local_coordinate_in_opposite_side(const oomph::Vector<double> &s) const override
     {
       oomph::Vector<double> res = s;
       if (opposite_orientation == 0)
@@ -3194,7 +3194,7 @@ namespace pyoomph
     // Tries all 6 vertex permutations ("perms") of the opposite side's vertex nodes against this
     // element's own, computing the total squared coordinate distance for each (with the periodic
     // "offset" applied), and picks the permutation with the smallest distance as opposite_orientation.
-    void analyze_opposite_orientation(const std::vector<double> & offset)
+    void analyze_opposite_orientation(const std::vector<double> & offset) override
     {
       if (opposite_side->dim() != 2)
       {
@@ -3244,7 +3244,7 @@ namespace pyoomph
     {
     }
 
-    oomph::Vector<double> local_coordinate_in_opposite_side(const oomph::Vector<double> &s) const
+    oomph::Vector<double> local_coordinate_in_opposite_side(const oomph::Vector<double> &s) const override
     {
       oomph::Vector<double> res = s;
       if (opposite_orientation == 0)
@@ -3286,7 +3286,7 @@ namespace pyoomph
     // 3-5) from the chosen vertex permutation, based on oomph-lib's fixed edge-to-midnode numbering
     // convention for 6-node triangles (the explicit per-permutation cases below were determined by
     // matching that convention).
-    void analyze_opposite_orientation(const std::vector<double> & offset)
+    void analyze_opposite_orientation(const std::vector<double> & offset) override
     {
       if (opposite_side->dim() != 2)
       {
@@ -3368,7 +3368,7 @@ namespace pyoomph
     {
     }
 
-    oomph::Vector<double> local_coordinate_in_opposite_side(const oomph::Vector<double> &s) const
+    oomph::Vector<double> local_coordinate_in_opposite_side(const oomph::Vector<double> &s) const override
     {
       oomph::Vector<double> res = s;
       if (opposite_orientation == 0)
@@ -3405,7 +3405,7 @@ namespace pyoomph
      
     }
 
-    void analyze_opposite_orientation(const std::vector<double> & offset)
+    void analyze_opposite_orientation(const std::vector<double> & offset) override
     {
       if (opposite_side->dim() != 2)
       {

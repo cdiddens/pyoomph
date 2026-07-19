@@ -151,20 +151,20 @@ namespace oomph
 
     /// Return the actual order of the scheme. It's a steady
     /// scheme so it's zero, but that doesn't really make sense.
-    unsigned order() const
+    unsigned order() const override
     {
       return 0;
     }
 
     /// This is a steady scheme, so you can't do this
-    void undo_make_steady()
+    void undo_make_steady() override
     {
       Is_steady = true;
     }
 
     /// Broken initialisation the time-history for the Data values
     /// corresponding to an impulsive start.
-    void assign_initial_values_impulsive(Data* const& data_pt)
+    void assign_initial_values_impulsive(Data* const& data_pt) override
     {
       OomphLibWarning(
         "Cannot perform impulsive start for ContinuationStorageScheme",
@@ -174,7 +174,7 @@ namespace oomph
 
     /// Broken initialisation of
     /// the positions for the node corresponding to an impulsive start
-    void assign_initial_positions_impulsive(Node* const& node_pt)
+    void assign_initial_positions_impulsive(Node* const& node_pt) override
     {
       OomphLibWarning(
         "Cannot perform impulsive start for ContinuationStorageScheme",
@@ -183,7 +183,7 @@ namespace oomph
     }
 
     /// Broken shifting of time values
-    void shift_time_values(Data* const& data_pt)
+    void shift_time_values(Data* const& data_pt) override
     {
       throw OomphLibError(
         "Cannot shift time values forContinuationStorageScheme",
@@ -192,7 +192,7 @@ namespace oomph
     }
 
     /// Broken shifting of time positions
-    void shift_time_positions(Node* const& node_pt)
+    void shift_time_positions(Node* const& node_pt) override
     {
       throw OomphLibError(
         "Cannot shift time positions forContinuationStorageScheme",
@@ -201,16 +201,16 @@ namespace oomph
     }
 
     /// Set the weights (Do nothing)
-    void set_weights() {}
+    void set_weights() override {}
 
     /// Number of previous values available.
-    unsigned nprev_values() const
+    unsigned nprev_values() const override
     {
       return 0;
     }
 
     /// Number of timestep increments that need to be stored by the scheme
-    unsigned ndt() const
+    unsigned ndt() const override
     {
       return 0;
     }

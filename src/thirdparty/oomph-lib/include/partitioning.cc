@@ -283,13 +283,6 @@ namespace oomph
     // No edge weights
     idx_t* adjwgt = 0;
 
-    // Flag indicating that graph isn't weighted: 0; vertex weights only: 2
-    // Note that wgtflag==2 requires nodal weights to be stored in vwgt.
-    int wgtflag = 0;
-
-    // Use C-style numbering (first array entry is zero)
-    int numflag = 0;
-
     // Number of desired partitions
     idx_t nparts = ndomain;
 
@@ -339,8 +332,7 @@ namespace oomph
           oomph_info
             << "Biasing element distribution via spatial error estimate\n";
 
-          // Adjust flag and provide storage for weights
-          wgtflag = 2;
+          // Provide storage for weights
           vwgt = new idx_t[nelem];
 
           // Get error for all elements
@@ -397,8 +389,7 @@ namespace oomph
           oomph_info
             << "Biasing element distribution via spatial error estimate\n";
 
-          // Adjust flag and provide storage for weights
-          wgtflag = 2;
+          // Provide storage for weights
           vwgt = new idx_t[nelem];
 
           // Loop over submeshes
@@ -1084,13 +1075,6 @@ namespace oomph
       // No edge weights
       idx_t* adjwgt = 0;
 
-      // Flag indicating that graph isn't weighted: 0; vertex weights only: 2
-      // Note that wgtflag==2 requires nodal weights to be stored in vwgt.
-      int wgtflag = 0;
-
-      // Use C-style numbering (first array entry is zero)
-      int numflag = 0;
-
       // Number of desired partitions
       idx_t nparts = ndomain;
 
@@ -1130,8 +1114,7 @@ namespace oomph
       // Now bias distribution by giving each root element
       // a weight equal to the number of elements associated with it
 
-      // Adjust flag and provide storage for weights
-      wgtflag = 2;
+      // Provide storage for weights
       vwgt = new idx_t[total_number_of_root_elements];
 
 

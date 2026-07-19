@@ -44,7 +44,7 @@ namespace pyoomph
 
     // Factory used by oomph-lib's tree-refinement code to create a son tree of the correct dynamic type.
     Tree *construct_son(oomph::RefineableElement *const &object_pt,
-                        Tree *const &father_pt, const int &son_type)
+                        Tree *const &father_pt, const int &son_type) override
     {
       DynamicOcTree *temp_Oc_pt = new DynamicOcTree(object_pt, father_pt, son_type);
       return temp_Oc_pt;
@@ -108,9 +108,9 @@ namespace pyoomph
     }
 
     /// Destructor:
-    virtual ~TemplatedMeshBase3d() {}
+    ~TemplatedMeshBase3d() override {}
 
-    virtual void setup_tree_forest()
+    void setup_tree_forest() override
     {
       setup_octree_forest();
     }
@@ -278,7 +278,7 @@ namespace pyoomph
 
     // Populate this mesh's elements, nodes and boundaries from a MeshTemplateElementCollection; see
     // TemplatedMeshBase1d::generate_from_template for the (identical) algorithm description.
-    void generate_from_template(MeshTemplateElementCollection *coll)
+    void generate_from_template(MeshTemplateElementCollection *coll) override
     {
 
       MeshTemplate *templ = coll->get_template();
@@ -330,7 +330,7 @@ namespace pyoomph
 
     void setup_boundary_element_info_bricks(std::ostream &outfile);
     void setup_boundary_element_info_tris(std::ostream &outfile);
-    void setup_boundary_element_info(std::ostream &outfile);
+    void setup_boundary_element_info(std::ostream &outfile) override;
     void setup_boundary_element_info() override;
   };
 

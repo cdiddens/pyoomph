@@ -951,17 +951,17 @@ void PyReg_Problem(py::module &m)
 				if (name != oldresi)
 					self->_set_solved_residual(oldresi, true, true);
 
-				py::array_t<double> J_values_arr = py::array_t<double>({J_nzz});
+				py::array_t<double> J_values_arr = py::array_t<double>(J_nzz);
 				double *dest = (double *)J_values_arr.request().ptr;
 				for (unsigned int j = 0; j < J_nzz; j++)
 					dest[j] = J_values[j];
 
-				py::array_t<int> J_colindex_arr = py::array_t<int>({J_nzz});
+				py::array_t<int> J_colindex_arr = py::array_t<int>(J_nzz);
 				int *idest = (int *)J_colindex_arr.request().ptr;
 				for (unsigned int j = 0; j < J_nzz; j++)
 					idest[j] = J_colindex[j];
 
-				py::array_t<int> J_row_start_arr = py::array_t<int>({J_nrow_local + 1});
+				py::array_t<int> J_row_start_arr = py::array_t<int>(J_nrow_local + 1);
 				idest = (int *)J_row_start_arr.request().ptr;
 				for (unsigned int j = 0; j < J_nrow_local + 1; j++)
 					idest[j] = J_row_start[j];
@@ -1077,7 +1077,7 @@ void PyReg_Problem(py::module &m)
 					tmp[i] = in_ptr[i];
 				oomph::LinearAlgebraDistribution global_distribution(loc_distribution->communicator_pt(), ndof, false);
 				tmp.redistribute(&global_distribution);
-				auto res = py::array_t<double>({tmp.nrow()});
+				auto res = py::array_t<double>(tmp.nrow());
 				double *res_buff = (double *)res.request().ptr;
 				for (unsigned int i = 0; i < tmp.nrow(); i++)
 					res_buff[i] = tmp[i];
@@ -1098,7 +1098,7 @@ void PyReg_Problem(py::module &m)
 					tmp[i] = in_ptr[i];
 				tmp.redistribute(loc_distribution);
 				unsigned nloc = loc_distribution->nrow_local();
-				auto res = py::array_t<double>({nloc});
+				auto res = py::array_t<double>(nloc);
 				double *res_buff = (double *)res.request().ptr;
 				for (unsigned int i = 0; i < nloc; i++)
 					res_buff[i] = tmp[i];

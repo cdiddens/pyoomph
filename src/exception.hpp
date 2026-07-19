@@ -41,8 +41,8 @@ namespace pyoomph
 
   public:
     runtime_error_with_line(const std::string &arg, const char *file, int line);
-    ~runtime_error_with_line() throw() {}
-    const char *what() const throw();
+    ~runtime_error_with_line() throw() override {}
+    const char *what() const throw() override;
 
   };
 

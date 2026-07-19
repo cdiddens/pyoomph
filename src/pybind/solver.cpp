@@ -120,7 +120,7 @@ namespace pyoomph
                 op_flag, allow_permutations, n, nnz_local, nrow_local, first_row, values, col_index, row_start, b, nprow, npcol, doc, data, info); //,comm
         }
 
-        int metis_partgraph_kway(idx_t nvertex,idx_t nconnection, py::array_t<idx_t> &xadj_Py, py::array_t<idx_t> &adjacency_vector_Py, py::array_t<idx_t> &vwgt_Py, idx_t nparts, py::array_t<idx_t> &options_Py, py::array_t<idx_t> &edgecut_Py, py::array_t<idx_t> &part_Py)
+        int metis_partgraph_kway(idx_t nvertex,idx_t nconnection, py::array_t<idx_t> &xadj_Py, py::array_t<idx_t> &adjacency_vector_Py, py::array_t<idx_t> &vwgt_Py, idx_t nparts, py::array_t<idx_t> &options_Py, py::array_t<idx_t> &edgecut_Py, py::array_t<idx_t> &part_Py) override
         {
             PYBIND11_OVERLOAD(
                 int,                  /* Return type */
@@ -351,7 +351,7 @@ void PyReg_Solvers(py::module &m)
     m.def(
         "csr_rows_to_coo_rows", [](const py::array_t<int> &csr_rows, unsigned nzz, unsigned first_row)
         {
-            auto coo_rows = py::array_t<int>({nzz});
+            auto coo_rows = py::array_t<int>(nzz);
             int *in_buf = (int *)csr_rows.request().ptr;
             int *res_buff = (int *)coo_rows.request().ptr;
             unsigned i_row = 0;

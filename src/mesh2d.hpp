@@ -72,7 +72,7 @@ namespace pyoomph
 
     // Factory used by oomph-lib's tree-refinement code to create a son tree of the correct dynamic type.
     Tree *construct_son(oomph::RefineableElement *const &object_pt,
-                        Tree *const &father_pt, const int &son_type)
+                        Tree *const &father_pt, const int &son_type) override
     {
       DynamicQuadTree *temp_Quad_pt = new DynamicQuadTree(object_pt, father_pt, son_type);
       return temp_Quad_pt;
@@ -103,7 +103,7 @@ namespace pyoomph
     // Split a C1TB (linear + bubble/edge) triangle defined by n1..n4 analogously to add_tri_C1.
     virtual unsigned add_tri_C1TB( Node* & n1, Node* & n2, Node* & n3, Node* & n4);
 
-    virtual void setup_interior_boundary_elements(unsigned bindex);
+    void setup_interior_boundary_elements(unsigned bindex) override;
     // Whether this mesh's element type actually supports tree-based h-refinement (true for quads,
     // false for plain triangles, which cannot be refined via a QuadTree forest).
     bool refinement_possible() override;
@@ -145,9 +145,9 @@ namespace pyoomph
     }
 
     /// Destructor:
-    virtual ~TemplatedMeshBase2d() {}
+    ~TemplatedMeshBase2d() override {}
 
-    virtual void setup_tree_forest();
+    void setup_tree_forest() override;
 
 
     // (Re)build the QuadTreeForest. If a forest already exists, this "flattens" it down to the
@@ -264,7 +264,7 @@ namespace pyoomph
 
     // Populate this mesh's elements, nodes and boundaries from a MeshTemplateElementCollection; see
     // TemplatedMeshBase1d::generate_from_template for the (identical) algorithm description.
-    void generate_from_template(MeshTemplateElementCollection *coll)
+    void generate_from_template(MeshTemplateElementCollection *coll) override
     {
       //      std::cout << "GEN FROM TEMPLATE " << std::endl;
       MeshTemplate *templ = coll->get_template();
@@ -320,7 +320,7 @@ namespace pyoomph
 
     void setup_boundary_element_info_quads(std::ostream &outfile);
     void setup_boundary_element_info_tris(std::ostream &outfile);
-    void setup_boundary_element_info(std::ostream &outfile);
+    void setup_boundary_element_info(std::ostream &outfile) override;
     void setup_boundary_element_info() override;
 	 void fill_internal_facet_buffers(std::vector<BulkElementBase*> & internal_elements, std::vector<int> & internal_face_dir,std::vector<BulkElementBase*> & opposite_elements,std::vector<int> & opposite_face_dir,std::vector<int> & opposite_already_at_index) override;        
   };

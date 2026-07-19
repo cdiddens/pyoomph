@@ -2562,8 +2562,6 @@ namespace oomph
       // No halo with yourself
       if (d != my_rank)
       {
-        unsigned discrepancy_count = 0;
-        unsigned discrepancy_count_buff = 0;
 
         // Storage for hanging information that needs to be sent to the
         // relevant process if there is a discrepancy in the hanging status
@@ -2602,7 +2600,6 @@ namespace oomph
                 (haloed_hanging[d][count] != halo_hanging[d][count]))
             {
               discrepancy_buff = 1;
-              discrepancy_count_buff++;
 
               // Flag to check if all masters of this node have been found
               bool found_all_masters = true;
@@ -2961,7 +2958,6 @@ namespace oomph
               {
                 // All masters were found, so populate send data from buffer
                 discrepancy = discrepancy_buff;
-                discrepancy_count += discrepancy_count_buff;
                 for (unsigned i = 0; i < send_data_buff.size(); i++)
                 {
                   send_data.push_back(send_data_buff[i]);
@@ -2973,7 +2969,6 @@ namespace oomph
 
                 // Clear buffers and reset
                 discrepancy_buff = 0;
-                discrepancy_count_buff = 0;
                 send_data_buff.clear();
                 send_double_data_buff.clear();
               }
@@ -2986,7 +2981,6 @@ namespace oomph
 
                 // Clear buffers and reset
                 discrepancy_buff = 0;
-                discrepancy_count_buff = 0;
                 send_data_buff.clear();
                 send_double_data_buff.clear();
 
@@ -3001,7 +2995,6 @@ namespace oomph
                      (halo_hanging[d][count] > 0))
             {
               discrepancy = 1;
-              discrepancy_count++;
               send_data.push_back(-1);
             }
             // Both halo and haloed node have the same number of masters

@@ -78,7 +78,7 @@ namespace oomph
     }
 
     /// The destructor, clean up any allocated memory
-    virtual ~ElementWithExternalElement();
+    ~ElementWithExternalElement() override;
 
     /// Broken copy constructor
     ElementWithExternalElement(const ElementWithExternalElement&) = delete;
@@ -312,13 +312,13 @@ namespace oomph
     /// call hierarchy of this function when called from
     /// Problem::describe_dofs(...)
     void describe_local_dofs(std::ostream& out,
-                             const std::string& curr_string) const;
+                             const std::string& curr_string) const override;
 
   protected:
     /// Overload the assign internal and external local equation
     /// number scheme so that the interaction data is taken into account
     void assign_internal_and_external_local_eqn_numbers(
-      const bool& store_local_dof_pt)
+      const bool& store_local_dof_pt) override
     {
       // Call the external stuff first so that it is near the front of the
       // list for fast searches when using indexing by global dof for
@@ -425,7 +425,7 @@ namespace oomph
     /// and the residual vector: Done by finite differencing the
     /// residual vector w.r.t. all nodal, internal, external and load Data.
     void fill_in_contribution_to_jacobian(Vector<double>& residuals,
-                                          DenseMatrix<double>& jacobian)
+                                          DenseMatrix<double>& jacobian) override
     {
       // Add the contribution to the residuals
       fill_in_contribution_to_residuals(residuals);

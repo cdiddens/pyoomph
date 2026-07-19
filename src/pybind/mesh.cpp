@@ -62,7 +62,7 @@ namespace pyoomph
 		}
 		// Converts the std::vector<double> position used on the C++ side into a numpy array before
 		// delegating to the (potentially Python-overridden) parametric_to_pos.
-		void parametric_to_position(const unsigned &t, const std::vector<double> &parametric, std::vector<double> &position)
+		void parametric_to_position(const unsigned &t, const std::vector<double> &parametric, std::vector<double> &position) override
 		{
 			py::array_t<double> parr(position.size(), position.data());
 			parametric_to_pos(t, py::cast(parametric), parr);
@@ -74,7 +74,7 @@ namespace pyoomph
 		}
 		// Converts the std::vector<double> position used on the C++ side into a numpy array before
 		// delegating to the (potentially Python-overridden) pos_to_parametric.
-		void position_to_parametric(const unsigned &t, const std::vector<double> &position, std::vector<double> &parametric)
+		void position_to_parametric(const unsigned &t, const std::vector<double> &position, std::vector<double> &parametric) override
 		{
 			py::array_t<double> parr(parametric.size(), parametric.data());
 			pos_to_parametric(t, py::cast(position), parr);
@@ -93,7 +93,7 @@ namespace pyoomph
 
 		// Converts a batch of parametric coordinates into a 2d numpy array, calls the (potentially
 		// Python-overridden) ensure_periodicity, and writes the result back.
-		void apply_periodicity(std::vector<std::vector<double>> &parametric)
+		void apply_periodicity(std::vector<std::vector<double>> &parametric) override
 		{
 			if (parametric.empty())
 				return;
@@ -688,7 +688,7 @@ void PyReg_Mesh(py::module &m)
 			 pyoomph::BulkElementODE0d * ode=dynamic_cast<pyoomph::BulkElementODE0d *>(self);
 			 if (!ode) { throw_runtime_error("Not an ODE element"); }
 			 unsigned ndata=ode->get_code_instance()->get_func_table()->info_D0.numfields;
-			 auto data=py::array_t<double>({ndata});
+			 auto data=py::array_t<double>(ndata);
 			 ode->to_numpy((double*)data.request().ptr);
 			 std::map<std::string,unsigned> field_desc;
 			 auto  nfd=ode->get_code_instance()->get_elemental_field_indices();
@@ -1032,7 +1032,7 @@ void PyReg_Mesh(py::module &m)
 	  result.resize(ref.size());
 	  for (unsigned int i=0;i<ref.size();i++)
 	  {
-	   result[i]=py::array_t<unsigned>({static_cast<unsigned>(ref[i].size())});
+	   result[i]=py::array_t<unsigned>(static_cast<unsigned>(ref[i].size()));
 	   unsigned * dest=(unsigned*)result[i].request().ptr;
 	   for (unsigned int j=0;j<ref[i].size();j++) dest[j]=ref[i][j];
 	  }
@@ -1114,7 +1114,7 @@ void PyReg_Mesh(py::module &m)
 			 auto nodal_data=py::array_t<double>({nnode,nodal_dim+nlagrange+ncontfields+nDGfields+nadd_interf+nnormal});
 			 unsigned nelem;
 			 unsigned numelem_indices=self->get_num_numpy_elemental_indices(tesselate_tri,nelem,discontinuous);
-			 auto elemtypes=py::array_t<int>({nelem});
+			 auto elemtypes=py::array_t<int>(nelem);
 			 auto elem_node_inds=py::array_t<int>({nelem,numelem_indices});
 			 unsigned numD0=be->get_code_instance()->get_func_table()->info_D0.numfields;
 			 unsigned numDL=be->get_code_instance()->get_func_table()->info_DL.numfields;
@@ -1448,7 +1448,7 @@ void PyReg_Mesh(py::module &m)
 		.def("get_positions", [](pyoomph::TracerCollection *coll)
 			 {
     unsigned nd=coll->get_coordinate_dimension();
-    if (!nd) { return py::array_t<double>({0}); }
+    if (!nd) { return py::array_t<double>(0); }
     std::vector<double> pos=coll->get_positions();
     auto data=py::array_t<double>({(unsigned)(pos.size()/nd),nd});
 	 double * dest=(double*)data.request().ptr;

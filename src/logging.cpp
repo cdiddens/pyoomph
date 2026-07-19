@@ -41,14 +41,14 @@ namespace pyoomph
 		// forwarded to the original buffer and, if present, to the log-file buffer.
 		struct TeeBuffer : public std::streambuf
 		{
-			virtual int overflow(int c)
+			int overflow(int c) override
 			{
 				if (oldbuffer) oldbuffer->sputc(c);
 				if (filebuffer) filebuffer->sputc(c);
 				return c;
 			}
 
-			int sync()
+			int sync() override
 			{
 				if (filebuffer) return this->filebuffer->pubsync();
 				return this->oldbuffer->pubsync();
@@ -84,7 +84,7 @@ namespace pyoomph
 		{
 			buffer.set_file_stream(filestream);
 		}
-		~TeeToLogFile()
+		~TeeToLogFile() override
 		{
 			this->buffer.pubsync();
 			this->flush();

@@ -95,7 +95,7 @@ namespace oomph
     /*void operator=(const RefineableQElement<2>&) = delete;*/
 
     /// Destructor
-    virtual ~RefineableQElement()
+    ~RefineableQElement() override
     {
 #ifdef LEAK_CHECK
       LeakCheckNames::RefineableQElement<2> _build -= 1;
@@ -103,7 +103,7 @@ namespace oomph
     }
 
     /// A refineable quad element has four sons
-    unsigned required_nsons() const
+    unsigned required_nsons() const override
     {
       return 4;
     }
@@ -136,14 +136,14 @@ namespace oomph
     /// Pointers to any new nodes will be returned in new_node_pt. If
     /// it is open, the positions of the new
     /// nodes will be written to the file stream new_nodes_file
-    virtual void build(Mesh*& mesh_pt,
+    void build(Mesh*& mesh_pt,
                        Vector<Node*>& new_node_pt,
                        bool& was_already_built,
-                       std::ofstream& new_nodes_file);
+                       std::ofstream& new_nodes_file) override;
 
     /// Check the integrity of the element: ensure that the position and
     /// values are continuous across the element edges
-    void check_integrity(double& max_error);
+    void check_integrity(double& max_error) override;
 
     ///  Print corner nodes, use colour
     void output_corners(std::ostream& outfile, const std::string& colour) const;
@@ -163,12 +163,12 @@ namespace oomph
     /// Markup all hanging nodes & document the results in
     /// the output streams contained in the vector output_stream, if they
     /// are open.
-    void setup_hanging_nodes(Vector<std::ofstream*>& output_stream);
+    void setup_hanging_nodes(Vector<std::ofstream*>& output_stream) override;
 
     /// Perform additional hanging node procedures for variables
     /// that are not interpolated by all nodes (e.g. lower order interpolations
     /// as for the pressure in Taylor Hood).
-    virtual void further_setup_hanging_nodes() = 0;
+    void further_setup_hanging_nodes() override = 0;
 
   protected:
     /// Coincidence between son nodal points and father boundaries:
@@ -235,18 +235,18 @@ namespace oomph
     /*void operator=(const RefineableSolidQElement<2>&) = delete;*/
 
     /// Virtual Destructor
-    virtual ~RefineableSolidQElement() {}
+    ~RefineableSolidQElement() override {}
 
 
     /// Final over-ride: Use version in QSolidElementBase
-    void set_macro_elem_pt(MacroElement* macro_elem_pt)
+    void set_macro_elem_pt(MacroElement* macro_elem_pt) override
     {
       QSolidElementBase::set_macro_elem_pt(macro_elem_pt);
     }
 
     /// Final over-ride: Use version in QSolidElementBase
     void set_macro_elem_pt(MacroElement* macro_elem_pt,
-                           MacroElement* undeformed_macro_elem_pt)
+                           MacroElement* undeformed_macro_elem_pt) override
     {
       QSolidElementBase::set_macro_elem_pt(macro_elem_pt,
                                            undeformed_macro_elem_pt);
@@ -254,7 +254,7 @@ namespace oomph
 
     /// Use the generic finite difference routine defined in
     /// RefineableSolidElement to calculate the Jacobian matrix
-    void get_jacobian(Vector<double>& residuals, DenseMatrix<double>& jacobian)
+    void get_jacobian(Vector<double>& residuals, DenseMatrix<double>& jacobian) override
     {
       RefineableSolidElement::get_jacobian(residuals, jacobian);
     }
@@ -278,7 +278,7 @@ namespace oomph
     void build(Mesh*& mesh_pt,
                Vector<Node*>& new_node_pt,
                bool& was_already_built,
-               std::ofstream& new_nodes_file)
+               std::ofstream& new_nodes_file) override
     {
       using namespace QuadTreeNames;
 

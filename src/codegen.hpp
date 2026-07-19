@@ -43,6 +43,7 @@ namespace pyoomph
 
    public:
       Equations() : current_codegen(NULL) {}
+      virtual ~Equations() = default;
       virtual void _set_current_codegen(FiniteElementCode *cg) { current_codegen = cg; }
       virtual FiniteElementCode *_get_current_codegen() { return current_codegen; }
       virtual void _define_element() = 0;
@@ -390,9 +391,9 @@ namespace GiNaC
         GiNaC::numeric value;
 
         SortedGiNaCNumeric(GiNaC::numeric v) : SortedGiNaC(), value(v) {}
-        virtual std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;
-        virtual int add_order() override { return 0; }
-        virtual int mul_order() override { return 0; }
+        std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;
+        int add_order() override { return 0; }
+        int mul_order() override { return 0; }
         
     };
 
@@ -401,9 +402,9 @@ namespace GiNaC
     {
       public:
         SortedGiNaCAdd(const std::vector<SortedGiNaC*> & ops) : SortedGiNaC()  {op=ops;}
-        virtual std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;        
-        virtual int add_order() override;        
-        virtual int mul_order() override { return 5; }
+        std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;        
+        int add_order() override;        
+        int mul_order() override { return 5; }
             
     };
 
@@ -412,9 +413,9 @@ namespace GiNaC
     {
       public:
         SortedGiNaCMul(const std::vector<SortedGiNaC*> & ops) : SortedGiNaC(){op=ops;}
-        virtual std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;        
-        virtual int add_order() override { return 3; }
-        virtual int mul_order() override;        
+        std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;        
+        int add_order() override { return 3; }
+        int mul_order() override;        
     };
 
     // Node for a power base^exp (GiNaC::power); op[0] is the base, op[1] the exponent
@@ -426,9 +427,9 @@ namespace GiNaC
             op.push_back(base);
             op.push_back(exp);
         }
-        virtual std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;
-        virtual int add_order() override { return 4; }
-        virtual int mul_order() override { return 4; }
+        std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;
+        int add_order() override { return 4; }
+        int mul_order() override { return 4; }
     };
 
     // Node for a GiNaC function call (sin, cos, ...); "op" holds the (already sorted-tree) arguments
@@ -437,9 +438,9 @@ namespace GiNaC
       public:
         std::string fname;
         SortedGiNaCFunction(const std::string & fname, const std::vector<SortedGiNaC*> & ops) : SortedGiNaC(), fname(fname)     {            op=ops;        }
-        virtual std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;
-        virtual int add_order() override { return 1; }
-        virtual int mul_order() override { return 1; }
+        std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;
+        int add_order() override { return 1; }
+        int mul_order() override { return 1; }
     };
 
     // Leaf node for a plain GiNaC::symbol, printed verbatim as its already-resolved C++ variable name
@@ -448,9 +449,9 @@ namespace GiNaC
       public:
         std::string vname;
         SortedGiNaCSymbol(const std::string & vname) : SortedGiNaC(), vname(vname) {}
-        virtual std::string to_string(std::ostream &, GiNaC::print_FEM_options &) override {return vname;}
-        virtual int add_order() override {return 2;}
-        virtual int mul_order() override {return 2;}
+        std::string to_string(std::ostream &, GiNaC::print_FEM_options &) override {return vname;}
+        int add_order() override {return 2;}
+        int mul_order() override {return 2;}
     };
 
     // Catch-all leaf for any of the pyoomph GiNaCStruct-wrapped symbols (ShapeExpansion, TestFunction,
@@ -460,9 +461,9 @@ namespace GiNaC
       public:
         ex contents;
         SortedGiNaCStruct(GiNaC::ex _contents) : SortedGiNaC(), contents(_contents) {}
-        virtual std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;
-        virtual int add_order() override { return 6; }
-        virtual int mul_order() override;
+        std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;
+        int add_order() override { return 6; }
+        int mul_order() override;
     };
 
     // Entry point: builds a SortedGiNaC tree for e (via SortedGiNaC::factory) and writes its deterministically-sorted C++ form to os
@@ -505,7 +506,7 @@ namespace pyoomph
 
    public:
       DrawUnitsOutOfSubexpressions(FiniteElementCode *code_) : code(code_) {}
-      GiNaC::ex operator()(const GiNaC::ex &inp);
+      GiNaC::ex operator()(const GiNaC::ex &inp) override;
    };
 
    // GiNaC::map_function that strips expressions::subexpression(...) markers back out again (replacing
@@ -518,7 +519,7 @@ namespace pyoomph
 
    public:
       RemoveSubexpressionsByIndentity(FiniteElementCode *code_) : code(code_) {}
-      GiNaC::ex operator()(const GiNaC::ex &inp);
+      GiNaC::ex operator()(const GiNaC::ex &inp) override;
    };
 
    // GiNaC::map_function that resolves eval_in_domain(...)/field placeholders to the concrete,
@@ -534,7 +535,7 @@ namespace pyoomph
       unsigned repl_count;
       GiNaC::ex extra_test_scale;
       ReplaceFieldsToNonDimFields(FiniteElementCode *code_, std::string _where) : code(code_), where(_where), repl_count(0), extra_test_scale(1) {}
-      GiNaC::ex operator()(const GiNaC::ex &inp);
+      GiNaC::ex operator()(const GiNaC::ex &inp) override;
    };
 
    // GiNaC::map_function that replaces "derived" (bare, un-summed) ShapeExpansions by 1, optionally only
@@ -549,7 +550,7 @@ namespace pyoomph
      std::string ensure_dt_scheme;
    public:
       DerivedShapeExpansionsToUnity(BasisFunction * _ensure_basis=NULL,int _ensure_dt_order=-1,std::string _ensure_dt_scheme=""): ensure_basis(_ensure_basis), ensure_dt_order(_ensure_dt_order), ensure_dt_scheme(_ensure_dt_scheme) {}
-      GiNaC::ex operator()(const GiNaC::ex &inp)
+      GiNaC::ex operator()(const GiNaC::ex &inp) override
       {
          if (GiNaC::is_a<GiNaC::GiNaCShapeExpansion>(inp))
          {
@@ -614,13 +615,13 @@ namespace pyoomph
 
    public:
       D1XBasisFunction(FiniteElementSpace *_space, unsigned _direction) : BasisFunction(_space), direction(_direction) {}
-      virtual BasisFunction *get_diff_x(unsigned direction);
-      virtual BasisFunction *get_diff_X(unsigned direction);
-      virtual BasisFunction *get_diff_S(unsigned direction);
-      virtual std::string to_string();
-      virtual std::string get_dx_str() const { return "d1x" + std::to_string(direction); }
-      virtual std::string get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const;
-      virtual std::string get_c_varname(FiniteElementCode *forcode, std::string test_index);
+      BasisFunction *get_diff_x(unsigned direction) override;
+      BasisFunction *get_diff_X(unsigned direction) override;
+      BasisFunction *get_diff_S(unsigned direction) override;
+      std::string to_string() override;
+      std::string get_dx_str() const override { return "d1x" + std::to_string(direction); }
+      std::string get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const override;
+      std::string get_c_varname(FiniteElementCode *forcode, std::string test_index) override;
       virtual unsigned get_direction() const { return direction; }
    };
 
@@ -629,10 +630,10 @@ namespace pyoomph
    {
    public:
       D1XBasisFunctionLagr(FiniteElementSpace *_space, unsigned _direction) : D1XBasisFunction(_space, _direction) {}
-      virtual std::string to_string();
-      virtual std::string get_dx_str() const { return "d1X" + std::to_string(direction); }
-      virtual std::string get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const;
-      virtual std::string get_c_varname(FiniteElementCode *forcode, std::string test_index);
+      std::string to_string() override;
+      std::string get_dx_str() const override { return "d1X" + std::to_string(direction); }
+      std::string get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const override;
+      std::string get_c_varname(FiniteElementCode *forcode, std::string test_index) override;
    };
 
    // First local/reference-element-coordinate derivative of a basis function, d(phi)/dS_direction
@@ -640,10 +641,10 @@ namespace pyoomph
    {
    public:
       D1XBasisFunctionLocalCoord(FiniteElementSpace *_space, unsigned _direction) : D1XBasisFunctionLagr(_space, _direction) {}
-      virtual std::string to_string();
-      virtual std::string get_dx_str() const { return "d1S" + std::to_string(direction); }
-      virtual std::string get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const;
-      virtual std::string get_c_varname(FiniteElementCode *forcode, std::string test_index);
+      std::string to_string() override;
+      std::string get_dx_str() const override { return "d1S" + std::to_string(direction); }
+      std::string get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const override;
+      std::string get_c_varname(FiniteElementCode *forcode, std::string test_index) override;
    };
 
    class FiniteElementCode;
@@ -696,11 +697,11 @@ namespace pyoomph
    class PositionFiniteElementSpace : public ContinuousFiniteElementSpace
    {
    public:
-      virtual std::string get_num_nodes_str(FiniteElementCode *forcode) const;
-      virtual std::string get_eqn_number_str(FiniteElementCode *forcode) const;
+      std::string get_num_nodes_str(FiniteElementCode *forcode) const override;
+      std::string get_eqn_number_str(FiniteElementCode *forcode) const override;
       PositionFiniteElementSpace(FiniteElementCode *_code, const std::string &_name) : ContinuousFiniteElementSpace(_code, _name) {}
-      virtual void write_generic_RJM_jacobian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns,FiniteElementField * residual_field);
-      virtual bool write_generic_Hessian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns);
+      void write_generic_RJM_jacobian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns,FiniteElementField * residual_field) override;
+      bool write_generic_Hessian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns) override;
    };
 
    // Discontinuous-Galerkin space; keeps a pointer to its "shadow" continuous counterpart space of the
@@ -712,8 +713,8 @@ namespace pyoomph
 
    public:
       FiniteElementSpace *get_corresponding_continuous_space() { return conti_space; }
-      virtual std::string get_shape_name() const { return "C" + name.substr(1); }
-      bool can_have_hanging_nodes() { return false; }
+      std::string get_shape_name() const override { return "C" + name.substr(1); }
+      bool can_have_hanging_nodes() override { return false; }
       DGFiniteElementSpace(FiniteElementCode *_code, const std::string &_name, FiniteElementSpace *_conti_space) : FiniteElementSpace(_code, _name), conti_space(_conti_space) {}
    };
 
@@ -722,7 +723,7 @@ namespace pyoomph
    class DiscontinuousFiniteElementSpace : public FiniteElementSpace
    {
    public:
-      bool can_have_hanging_nodes() { return false; }
+      bool can_have_hanging_nodes() override { return false; }
       DiscontinuousFiniteElementSpace(FiniteElementCode *_code, const std::string &_name) : FiniteElementSpace(_code, _name) {}
    };
 
@@ -731,31 +732,31 @@ namespace pyoomph
    class D0BasisFunction : public BasisFunction
    {
    public:
-      virtual std::string get_c_varname(FiniteElementCode *, std::string ) { return "1"; }
-      virtual std::string get_shape_string(FiniteElementCode *, std::string ) const { return "1"; }
+      std::string get_c_varname(FiniteElementCode *, std::string ) override { return "1"; }
+      std::string get_shape_string(FiniteElementCode *, std::string ) const override { return "1"; }
       D0BasisFunction(FiniteElementSpace *_space) : BasisFunction(_space) {}
    };
 
    class D0FiniteElementSpace : public DiscontinuousFiniteElementSpace
    {
    public:
-      virtual std::string get_num_nodes_str(FiniteElementCode *forcode) const;
-      virtual bool is_basis_derivative_zero(BasisFunction *, unsigned ) { return true; } // All spatial derivatives are zero
+      std::string get_num_nodes_str(FiniteElementCode *forcode) const override;
+      bool is_basis_derivative_zero(BasisFunction *, unsigned ) override { return true; } // All spatial derivatives are zero
       D0FiniteElementSpace(FiniteElementCode *_code, const std::string &_name) : DiscontinuousFiniteElementSpace(_code, _name)
       {
          if (Basis)
             delete Basis;
          Basis = new D0BasisFunction(this);
       }
-      virtual bool need_interpolation_loop() { return false; }
-      virtual void write_spatial_interpolation(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, std::set<ShapeExpansion> &required_shapeexps, bool including_nodal_diffs, bool for_hessian);
+      bool need_interpolation_loop() override { return false; }
+      void write_spatial_interpolation(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, std::set<ShapeExpansion> &required_shapeexps, bool including_nodal_diffs, bool for_hessian) override;
    };
 
    // A D0 space whose single value lives on an externally coupled element rather than on this element itself
    class ExternalD0Space : public virtual D0FiniteElementSpace
    {
    public:
-      virtual bool is_external() { return true; }
+      bool is_external() override { return true; }
       ExternalD0Space(FiniteElementCode *_code, const std::string &_name) : D0FiniteElementSpace(_code, _name) {}
    };
 

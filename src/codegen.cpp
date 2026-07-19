@@ -151,7 +151,7 @@ namespace pyoomph
 	public:
 		std::vector<FiniteElementCodeSubExpression> subexpressions;
 		SubExpressionsToStructs(FiniteElementCode *code_) : code(code_) {}
-		GiNaC::ex operator()(const GiNaC::ex &inp)
+		GiNaC::ex operator()(const GiNaC::ex &inp) override
 		{
 			if (is_ex_the_function(inp, expressions::subexpression))
 			{
@@ -307,7 +307,7 @@ namespace pyoomph
 	public:
 		FiniteElementField *get_field() { return field; }
 		MapOnTestSpace(FiniteElementSpace *sp, std::string vn) : space(sp), varname(vn), field(NULL) {}
-		GiNaC::ex operator()(const GiNaC::ex &inp)
+		GiNaC::ex operator()(const GiNaC::ex &inp) override
 		{
 			if (GiNaC::is_a<GiNaC::GiNaCTestFunction>(inp))
 			{
@@ -366,7 +366,7 @@ namespace pyoomph
 
 	public:
 		MakeResidualSteady(FiniteElementCode *_code) : code(_code), extra_steady_routine(false) {}
-		GiNaC::ex operator()(const GiNaC::ex &inp)
+		GiNaC::ex operator()(const GiNaC::ex &inp) override
 		{
 			if (GiNaC::is_a<GiNaC::GiNaCShapeExpansion>(inp))
 			{
@@ -407,7 +407,7 @@ namespace pyoomph
 	class GlobalParamsToValues : public GiNaC::map_function
 	{
 	public:
-		GiNaC::ex operator()(const GiNaC::ex &inp)
+		GiNaC::ex operator()(const GiNaC::ex &inp) override
 		{
 			if (GiNaC::is_a<GiNaC::GiNaCGlobalParameterWrapper>(inp))
 			{
@@ -816,7 +816,7 @@ namespace pyoomph
 
 	public:
 		RemapFieldsInExpression(std::map<FiniteElementField *, FiniteElementField *> remap) : remapping(remap) {}
-		GiNaC::ex operator()(const GiNaC::ex &inp)
+		GiNaC::ex operator()(const GiNaC::ex &inp) override
 		{
 			if (GiNaC::is_a<GiNaC::GiNaCShapeExpansion>(inp))
 			{
@@ -3052,7 +3052,7 @@ namespace pyoomph
 
 	public:
 		MeshToCoordinateShapes(FiniteElementCode *code_) : code(code_) {}
-		GiNaC::ex operator()(const GiNaC::ex &inp)
+		GiNaC::ex operator()(const GiNaC::ex &inp) override
 		{
 			std::vector<std::string> dirs{"x", "y", "z"};
 			if (GiNaC::is_a<GiNaC::GiNaCShapeExpansion>(inp))
@@ -7356,8 +7356,6 @@ namespace pyoomph
 		unsigned int base_bulk_nodal_offset = 0;
 		unsigned int internal_data_offset = 0;
 		unsigned int DG_external_offset = 0;
-		unsigned int total_numfields=0;
-		unsigned int total_numfields_basebulk=0;
 //		unsigned int interf_buffer_offset = 0;
 		for (auto &space : spaces)
 		{
@@ -7399,7 +7397,6 @@ namespace pyoomph
 						coordinate_space_validated = true;
 				}
 				init << " functable->" << info_name << ".numfields=" << numfields << ";" << std::endl;
-				total_numfields += numfields;
 
 				if (dynamic_cast<ContinuousFiniteElementSpace *>(space) || dynamic_cast<DGFiniteElementSpace *>(space))
 				{
@@ -7411,8 +7408,7 @@ namespace pyoomph
 						init << " functable->" << info_name << ".numfields_bulk=" << numfields << ";" << std::endl;
 						init << " functable->" << info_name << ".numfields_basebulk=" << numfields << ";" << std::endl;
 						init << " functable->" << info_name << ".numfields_new=" << numfields << ";" << std::endl;
-						total_numfields_basebulk += numfields;
-						
+
 						if (space->get_name()=="C1TB" && numfields>0) has_C1TB_fields=true;
 						
 						if (dynamic_cast<ContinuousFiniteElementSpace *>(space))
@@ -7472,7 +7468,6 @@ namespace pyoomph
 						init << " functable->" << info_name << ".numfields_bulk=" << ncbulk << ";" << std::endl;
 						init << " functable->" << info_name << ".numfields_basebulk=" << ncbasebulk << ";" << std::endl;
 						init << " functable->" << info_name << ".numfields_new=" << numfields - ncbulk << ";" << std::endl;
-						total_numfields_basebulk += ncbasebulk;
 						if (dynamic_cast<ContinuousFiniteElementSpace *>(space))
 						{
 

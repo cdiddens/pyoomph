@@ -59,11 +59,11 @@ namespace oomph
       BrokenCopy::broken_copy("RefineableTElement<1>");
     }
 
-    virtual ~RefineableTElement()
+    ~RefineableTElement() override
     {
     }
 
-    unsigned required_nsons() const { return 2; }
+    unsigned required_nsons() const override { return 2; }
 
     // Return the node already created by a neighbouring element at fractional local
     // position s_fraction (if any), so it can be shared rather than duplicated; see .cpp.
@@ -77,10 +77,10 @@ namespace oomph
 
     // Build this (son) element from its father during refinement: establish node pointers,
     // creating shared/new nodes as needed, and set up boundary/periodicity info; see .cpp.
-    virtual void build(Mesh *&mesh_pt, Vector<Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file);
+    void build(Mesh *&mesh_pt, Vector<Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file) override;
 
     // Check inter-element continuity of nodal positions and interpolated values.
-    void check_integrity(double &max_error);
+    void check_integrity(double &max_error) override;
 
     // Debug output of the element's corner node positions.
     void output_corners(std::ostream &outfile, const std::string &colour) const;
@@ -90,10 +90,10 @@ namespace oomph
     BinaryTree *binarytree_pt() const { return dynamic_cast<BinaryTree *>(Tree_pt); }
 
     // Set up all hanging nodes of this element (opens/passes debug output streams if given).
-    void setup_hanging_nodes(Vector<std::ofstream *> &output_stream);
+    void setup_hanging_nodes(Vector<std::ofstream *> &output_stream) override;
 
     // Element-type-specific part of the hanging node setup; must be overridden by concrete elements.
-    virtual void further_setup_hanging_nodes() = 0;
+    void further_setup_hanging_nodes() override = 0;
 
   protected:
     // Static lookup table (keyed by nnode_1d) encoding, for each son type and local node,
@@ -144,11 +144,11 @@ namespace oomph
       BrokenCopy::broken_copy("RefineableTElement<2>");
     }
 
-    virtual ~RefineableTElement()
+    ~RefineableTElement() override
     {
     }
 
-    unsigned required_nsons() const { return 4; }
+    unsigned required_nsons() const override { return 4; }
 
     // Return the node already created by a neighbouring element at fractional local
     // position s_fraction (if any), so it can be shared rather than duplicated; see .cpp.
@@ -162,10 +162,10 @@ namespace oomph
 
     // Build this (son) element from its father during refinement: establish node pointers,
     // creating shared/new nodes as needed, and set up boundary/periodicity info; see .cpp.
-    virtual void build(Mesh *&mesh_pt, Vector<Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file);
+    void build(Mesh *&mesh_pt, Vector<Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file) override;
 
     // Check inter-element continuity of nodal positions and interpolated values.
-    void check_integrity(double &max_error);
+    void check_integrity(double &max_error) override;
 
     // Debug output of the element's corner node positions.
     void output_corners(std::ostream &outfile, const std::string &colour) const;
@@ -175,10 +175,10 @@ namespace oomph
     QuadTree *quadtree_pt() const { return dynamic_cast<QuadTree *>(Tree_pt); }
 
     // Set up all hanging nodes of this element (opens/passes debug output streams if given).
-    void setup_hanging_nodes(Vector<std::ofstream *> &output_stream);
+    void setup_hanging_nodes(Vector<std::ofstream *> &output_stream) override;
 
     // Element-type-specific part of the hanging node setup; must be overridden by concrete elements.
-    virtual void further_setup_hanging_nodes() = 0;
+    void further_setup_hanging_nodes() override = 0;
 
   protected:
     // Static lookup table (keyed by nnode_1d) encoding, for each son type and local node,
@@ -229,11 +229,11 @@ namespace oomph
       BrokenCopy::broken_copy("RefineableTElement<3>");
     }
 
-    virtual ~RefineableTElement()
+    ~RefineableTElement() override
     {
     }
 
-    unsigned required_nsons() const
+    unsigned required_nsons() const override
     {
       throw_runtime_error("TODO");
       return 4;
@@ -251,10 +251,10 @@ namespace oomph
 
     // Build this (son) element from its father during refinement: establish node pointers,
     // creating shared/new nodes as needed, and set up boundary/periodicity info; see .cpp.
-    virtual void build(Mesh *&mesh_pt, Vector<Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file);
+    void build(Mesh *&mesh_pt, Vector<Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file) override;
 
     // Check inter-element continuity of nodal positions and interpolated values.
-    void check_integrity(double &max_error);
+    void check_integrity(double &max_error) override;
 
     // Debug output of the element's corner node positions.
     void output_corners(std::ostream &outfile, const std::string &colour) const;
@@ -264,10 +264,10 @@ namespace oomph
     OcTree *octree_pt() const { return dynamic_cast<OcTree *>(Tree_pt); }
 
     // Set up all hanging nodes of this element (opens/passes debug output streams if given).
-    void setup_hanging_nodes(Vector<std::ofstream *> &output_stream);
+    void setup_hanging_nodes(Vector<std::ofstream *> &output_stream) override;
 
     // Element-type-specific part of the hanging node setup; must be overridden by concrete elements.
-    virtual void further_setup_hanging_nodes() = 0;
+    void further_setup_hanging_nodes() override = 0;
 
   protected:
     // Static lookup table (keyed by nnode_1d) encoding, for each son type and local node,

@@ -44,7 +44,7 @@ namespace pyoomph
 
     // Factory used by oomph-lib's tree-refinement code to create a son tree of the correct dynamic type.
     oomph::Tree *construct_son(oomph::RefineableElement *const &object_pt,
-                               Tree *const &father_pt, const int &son_type)
+                               Tree *const &father_pt, const int &son_type) override
     {
       DynamicBinaryTree *temp_binary_pt = new DynamicBinaryTree(object_pt, father_pt, son_type);
       return temp_binary_pt;
@@ -90,9 +90,9 @@ namespace pyoomph
     }
 
     /// Destructor:
-    virtual ~TemplatedMeshBase1d() {}
+    ~TemplatedMeshBase1d() override {}
 
-    virtual void setup_tree_forest()
+    void setup_tree_forest() override
     {
       setup_binary_tree_forest();
     }
@@ -122,7 +122,7 @@ namespace pyoomph
     // template node with an already-created oomph node, add it to Node_pt and register it on whichever
     // boundaries it belongs to (remapping template boundary indices to compact per-mesh indices via
     // bound_map, since only boundaries actually touched by this collection are kept).
-    void generate_from_template(MeshTemplateElementCollection *coll)
+    void generate_from_template(MeshTemplateElementCollection *coll) override
     {
 
       MeshTemplate *templ = coll->get_template();
@@ -171,7 +171,7 @@ namespace pyoomph
       setup_facets_from_template(templ,bound_map);
     }
 
-    void setup_boundary_element_info(std::ostream &outfile);
+    void setup_boundary_element_info(std::ostream &outfile) override;
     void setup_boundary_element_info() override;
 	 void fill_internal_facet_buffers(std::vector<BulkElementBase*> & internal_elements, std::vector<int> & internal_face_dir,std::vector<BulkElementBase*> & opposite_elements,std::vector<int> & opposite_face_dir,std::vector<int> & opposite_already_at_index) override;
   };

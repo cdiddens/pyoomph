@@ -785,7 +785,7 @@ namespace oomph
     }
 
     /// Precede the output by the processor ID but output everything
-    virtual bool operator()(std::ostream& stream);
+    bool operator()(std::ostream& stream) override;
 
     /// Switch to ensure output is only produced from a single
     /// processor (default: Master node, i.e. rank 0)
@@ -1191,7 +1191,7 @@ namespace oomph
       Derivative_fpt = derivative_fpt;
     }
 
-    virtual ~SolutionFunctor() {}
+    ~SolutionFunctor() override {}
 
     SolutionFunctor(const SolutionFunctor& that)
     {
@@ -1206,8 +1206,8 @@ namespace oomph
     }
 
     /// Call the function.
-    virtual Vector<double> operator()(const double& t,
-                                      const Vector<double>& x) const
+    Vector<double> operator()(const double& t,
+                                      const Vector<double>& x) const override
     {
 #ifdef PARANOID
       if (Solution_fpt == 0)
@@ -1221,9 +1221,9 @@ namespace oomph
     }
 
     /// Call the derivative function.
-    virtual Vector<double> derivative(const double& t,
+    Vector<double> derivative(const double& t,
                                       const Vector<double>& x,
-                                      const Vector<double>& u) const
+                                      const Vector<double>& u) const override
     {
 #ifdef PARANOID
       if (Derivative_fpt == 0)

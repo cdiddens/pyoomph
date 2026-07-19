@@ -103,10 +103,10 @@ namespace oomph
     /// call hierarchy of this function when called from
     /// Problem::describe_dofs(...)
     void describe_local_dofs(std::ostream& out,
-                             const std::string& current_string) const;
+                             const std::string& current_string) const override;
 
     /// Virtual destructor (clean up and allocated memory)
-    virtual ~ElementWithMovingNodes()
+    ~ElementWithMovingNodes() override
     {
       if (Geometric_data_local_eqn)
       {
@@ -172,7 +172,7 @@ namespace oomph
     /// by adding the element's geometric Data to the set that's passed in.
     /// (This functionality is required in FSI problems; set is used to
     /// avoid double counting).
-    void identify_geometric_data(std::set<Data*>& geometric_data_pt)
+    void identify_geometric_data(std::set<Data*>& geometric_data_pt) override
     {
       // Loop over the node update data and add to the set
       const unsigned n_geom_data = Geom_data_pt.size();
@@ -298,13 +298,13 @@ namespace oomph
       RankThreeTensor<double>& dnodal_coordinates_dgeom_dofs);
 
     /// Construct the vector of (unique) geometric data
-    void complete_setup_of_dependencies();
+    void complete_setup_of_dependencies() override;
 
     /// Assign local equation numbers for the geometric Data in the element
     /// If the boolean argument is true then the degrees of freedom are stored
     /// in Dof_pt
-    virtual void assign_all_generic_local_eqn_numbers(
-      const bool& store_local_dof_pt);
+    void assign_all_generic_local_eqn_numbers(
+      const bool& store_local_dof_pt) override;
 
     /// Calculate the contributions to the Jacobian matrix from the
     /// geometric data. This version
@@ -342,7 +342,7 @@ namespace oomph
   public:
     /// Return the number of geometric data upon which the shape
     /// of the element depends
-    unsigned ngeom_data() const
+    unsigned ngeom_data() const override
     {
       return Geom_data_pt.size();
     }
@@ -390,7 +390,7 @@ namespace oomph
     /// call hierarchy of this function when called from
     /// Problem::describe_dofs(...)
     void describe_local_dofs(std::ostream& out,
-                             const std::string& current_string) const
+                             const std::string& current_string) const override
     {
       ELEMENT::describe_local_dofs(out, current_string);
       ElementWithMovingNodes::describe_local_dofs(out, current_string);
@@ -407,7 +407,7 @@ namespace oomph
     }
 
     /// Empty Destructor,
-    ~ElementWithSpecificMovingNodes() {}
+    ~ElementWithSpecificMovingNodes() override {}
 
     /// Unique final overrider for describe_dofs
     void describe_local_dofs(std::ostream& out, std::string& curr_str)
@@ -419,7 +419,7 @@ namespace oomph
 
     /// Overload the node assignment routine to assign nodes of the
     /// appropriate type.
-    Node* construct_node(const unsigned& n)
+    Node* construct_node(const unsigned& n) override
     {
       // Assign a node to the local node pointer
       // The dimension and number of values are taken from internal element data
@@ -432,7 +432,7 @@ namespace oomph
     }
 
     /// Overloaded node allocation for unsteady problems
-    Node* construct_node(const unsigned& n, TimeStepper* const& time_stepper_pt)
+    Node* construct_node(const unsigned& n, TimeStepper* const& time_stepper_pt) override
     {
       // Assign a node to the local node pointer
       // The dimension and number of values are taken from internal element data
@@ -446,7 +446,7 @@ namespace oomph
     }
 
     /// Overload the node assignment routine to assign boundary nodes
-    Node* construct_boundary_node(const unsigned& n)
+    Node* construct_boundary_node(const unsigned& n) override
     {
       // Assign a node to the local node pointer
       // The dimension and number of values are taken from internal element data
@@ -461,7 +461,7 @@ namespace oomph
 
     /// Overloaded boundary node allocation for unsteady problems
     Node* construct_boundary_node(const unsigned& n,
-                                  TimeStepper* const& time_stepper_pt)
+                                  TimeStepper* const& time_stepper_pt) override
     {
       // Assign a node to the local node pointer
       // The dimension and number of values are taken from internal element data
@@ -482,7 +482,7 @@ namespace oomph
     /// This function is called (for all elements) at the very beginning of the
     /// equation numbering procedure to ensure that all dependencies
     /// are accounted for.
-    void complete_setup_of_dependencies()
+    void complete_setup_of_dependencies() override
     {
       // Call function of underlying element
       ELEMENT::complete_setup_of_dependencies();
@@ -494,7 +494,7 @@ namespace oomph
 
     /// Assign local equation numbers for the underlying element, then
     /// deal with the additional geometric dofs
-    void assign_all_generic_local_eqn_numbers(const bool& store_local_dof_pt)
+    void assign_all_generic_local_eqn_numbers(const bool& store_local_dof_pt) override
     {
       // Call the generic local equation numbering scheme of the ELEMENT
       ELEMENT::assign_all_generic_local_eqn_numbers(store_local_dof_pt);
@@ -503,7 +503,7 @@ namespace oomph
     }
 
     /// Compute the element's residuals vector and jacobian matrix
-    void get_jacobian(Vector<double>& residuals, DenseMatrix<double>& jacobian)
+    void get_jacobian(Vector<double>& residuals, DenseMatrix<double>& jacobian) override
     {
       /// Call the element's get jacobian function
       ELEMENT::get_jacobian(residuals, jacobian);
@@ -515,7 +515,7 @@ namespace oomph
     /// Compute the element's residuals vector and jacobian matrix
     void get_jacobian_and_mass_matrix(Vector<double>& residuals,
                                       DenseMatrix<double>& jacobian,
-                                      DenseMatrix<double>& mass_matrix)
+                                      DenseMatrix<double>& mass_matrix) override
     {
       /// Call the element's get jacobian function
       ELEMENT::get_jacobian_and_mass_matrix(residuals, jacobian, mass_matrix);

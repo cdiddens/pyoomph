@@ -79,7 +79,7 @@ namespace pyoomph
     }
 
     /// Empty virtual destructor
-    virtual ~LagrZ2ErrorEstimator() {}
+    ~LagrZ2ErrorEstimator() override {}
 
     /// \short Compute the elemental error measures for a given mesh
     /// and store them in a vector.
@@ -100,7 +100,7 @@ namespace pyoomph
     /// - flux_rec*.dat
     void get_element_errors(oomph::Mesh *&mesh_pt,
                             oomph::Vector<double> &elemental_error,
-                            oomph::DocInfo &doc_info);
+                            oomph::DocInfo &doc_info) override;
 
     /// Access function for order of recovery polynomials
     unsigned &recovery_order() { return Recovery_order; }

@@ -333,7 +333,7 @@ namespace oomph
     void operator=(const WarpedCubeDomain&) = delete;
 
     /// Destructor (empty; clean up handled in base class)
-    ~WarpedCubeDomain() {}
+    ~WarpedCubeDomain() override {}
 
 
     /// Warp the unit cube
@@ -348,7 +348,7 @@ namespace oomph
                                 const unsigned& i_macro,
                                 const unsigned& i_direct,
                                 const Vector<double>& s,
-                                Vector<double>& f);
+                                Vector<double>& f) override;
 
 
   private:

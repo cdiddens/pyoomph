@@ -129,7 +129,7 @@ namespace oomph
     /// Overload the standard version to use the hanging information for
     /// the Eulerian coordinates.
     void assemble_local_to_eulerian_jacobian(
-      const DShape& dpsids, DenseMatrix<double>& jacobian) const;
+      const DShape& dpsids, DenseMatrix<double>& jacobian) const override;
 
     /// Assemble the the "jacobian" matrix of second derivatives of the
     /// mapping from local to Eulerian coordinates, given
@@ -137,14 +137,14 @@ namespace oomph
     /// Overload the standard version to use the hanging information for
     /// the Eulerian coordinates.
     void assemble_local_to_eulerian_jacobian2(
-      const DShape& d2psids, DenseMatrix<double>& jacobian2) const;
+      const DShape& d2psids, DenseMatrix<double>& jacobian2) const override;
 
     /// Assemble the covariant Eulerian base vectors, assuming that
     /// the derivatives of the shape functions with respect to the local
     /// coordinates have already been constructed.
     /// Overload the standard version to account for hanging nodes.
     void assemble_eulerian_base_vectors(
-      const DShape& dpsids, DenseMatrix<double>& interpolated_G) const;
+      const DShape& dpsids, DenseMatrix<double>& interpolated_G) const override;
 
     /// Calculate the mapping from local to Eulerian coordinates given
     /// the derivatives of the shape functions w.r.t the local coordinates.
@@ -156,7 +156,7 @@ namespace oomph
     double local_to_eulerian_mapping_diagonal(
       const DShape& dpsids,
       DenseMatrix<double>& jacobian,
-      DenseMatrix<double>& inverse_jacobian) const;
+      DenseMatrix<double>& inverse_jacobian) const override;
 
   private:
     /// Storage for local equation numbers of hanging node variables
@@ -179,8 +179,8 @@ namespace oomph
     /// degrees of freedom using finite differences.
     /// This version is overloaded to take hanging node information into
     /// account
-    virtual void fill_in_jacobian_from_nodal_by_fd(
-      Vector<double>& residuals, DenseMatrix<double>& jacobian);
+    void fill_in_jacobian_from_nodal_by_fd(
+      Vector<double>& residuals, DenseMatrix<double>& jacobian) override;
 
   public:
     /// Constructor, calls the FiniteElement constructor and initialises
@@ -199,7 +199,7 @@ namespace oomph
 
     /// Destructor, delete the allocated storage for the hanging equations
     // (The body is now in the cc file to keep the xlC compiler happy under AIX)
-    virtual ~RefineableElement();
+    ~RefineableElement() override;
 
     /// Broken copy constructor
     RefineableElement(const RefineableElement&) = delete;
@@ -502,13 +502,13 @@ namespace oomph
     /// This must be overloaded to include data from any hanging nodes
     /// correctly
     void identify_field_data_for_interactions(
-      std::set<std::pair<Data*, unsigned>>& paired_field_data);
+      std::set<std::pair<Data*, unsigned>>& paired_field_data) override;
 
 
     /// Overload the function that assigns local equation numbers
     /// for the Data stored at the nodes so that hanging data is taken
     /// into account
-    inline void assign_nodal_local_eqn_numbers(const bool& store_local_dof_pt)
+    inline void assign_nodal_local_eqn_numbers(const bool& store_local_dof_pt) override
     {
       FiniteElement::assign_nodal_local_eqn_numbers(store_local_dof_pt);
       assign_hanging_local_eqn_numbers(store_local_dof_pt);
@@ -618,7 +618,7 @@ namespace oomph
     /// shape of the element (i.e. they are non-hanging or master nodes of
     /// hanging nodes in this element).
     void get_dresidual_dnodal_coordinates(
-      RankThreeTensor<double>& dresidual_dnodal_coordinates);
+      RankThreeTensor<double>& dresidual_dnodal_coordinates) override;
 
 
     /// Number of shape-controlling nodes = the number
@@ -675,7 +675,7 @@ namespace oomph
     }
 
     /// Destructor, empty
-    virtual ~PRefineableElement() {}
+    ~PRefineableElement() override {}
 
     /// Broken copy constructor
     PRefineableElement(const PRefineableElement&) = delete;
@@ -763,7 +763,7 @@ namespace oomph
                           GeneralisedElement* const& clone_pt) = 0;
 
     // Overload the nodes_built function to check every node
-    bool nodes_built()
+    bool nodes_built() override
     {
       // Must check that EVERY node exists
       unsigned n_node = this->nnode();
@@ -801,7 +801,7 @@ namespace oomph
     void build(Mesh*& mesh_pt,
                Vector<Node*>& new_node_pt,
                bool& was_already_built,
-               std::ofstream& new_nodes_file)
+               std::ofstream& new_nodes_file) override
     {
       std::ostringstream error_message;
       error_message << "This function is broken as it's only needed/used \n"
@@ -813,7 +813,7 @@ namespace oomph
 
     /// Broken function -- this shouldn't really be needed.
     void get_interpolated_values(const Vector<double>& s,
-                                 Vector<double>& values)
+                                 Vector<double>& values) override
     {
       std::ostringstream error_message;
       error_message << "This function is broken as it's only needed/used \n"
@@ -823,9 +823,9 @@ namespace oomph
     }
 
     /// Broken function -- this shouldn't really be needed.
-    virtual void get_interpolated_values(const unsigned& t,
+    void get_interpolated_values(const unsigned& t,
                                          const Vector<double>& s,
-                                         Vector<double>& values)
+                                         Vector<double>& values) override
     {
       std::ostringstream error_message;
       error_message << "This function is broken as it's only needed/used \n"
@@ -836,7 +836,7 @@ namespace oomph
 
 
     /// Broken function -- this shouldn't really be needed.
-    void check_integrity(double& max_error)
+    void check_integrity(double& max_error) override
     {
       std::ostringstream error_message;
       error_message << "This function is broken as it's only needed/used \n"
@@ -846,7 +846,7 @@ namespace oomph
     }
 
     /// Broken function -- this shouldn't really be needed.
-    void rebuild_from_sons(Mesh*& mesh_pt)
+    void rebuild_from_sons(Mesh*& mesh_pt) override
     {
       std::ostringstream error_message;
       error_message << "This function is broken as it's only needed/used \n"
@@ -903,14 +903,14 @@ namespace oomph
     /// Overload the standard version to use the hanging information for
     /// the lagrangian coordinates.
     void assemble_local_to_lagrangian_jacobian(
-      const DShape& dpsids, DenseMatrix<double>& jacobian) const;
+      const DShape& dpsids, DenseMatrix<double>& jacobian) const override;
 
     /// Assemble the the "jacobian" matrix of second derivatives, given
     /// the second derivatives of the shape functions w.r.t. local coordinates
     /// Overload the standard version to use the hanging information for
     /// the lagrangian coordinates.
     void assemble_local_to_lagrangian_jacobian2(
-      const DShape& d2psids, DenseMatrix<double>& jacobian2) const;
+      const DShape& d2psids, DenseMatrix<double>& jacobian2) const override;
 
     /// Calculate the mapping from local to Lagrangian coordinates given
     /// the derivatives of the shape functions w.r.t the local coorindates.
@@ -921,7 +921,7 @@ namespace oomph
     double local_to_lagrangian_mapping_diagonal(
       const DShape& dpsids,
       DenseMatrix<double>& jacobian,
-      DenseMatrix<double>& inverse_jacobian) const;
+      DenseMatrix<double>& inverse_jacobian) const override;
 
   public:
     /// Constructor
@@ -933,11 +933,11 @@ namespace oomph
     }
 
     /// Virtual Destructor, delete any allocated storage
-    virtual ~RefineableSolidElement() {}
+    ~RefineableSolidElement() override {}
 
     /// Overload the local equation numbers for Data stored as part
     /// of solid nodes to include hanging node data
-    void assign_solid_local_eqn_numbers(const bool& store_local_dof_pt)
+    void assign_solid_local_eqn_numbers(const bool& store_local_dof_pt) override
     {
       SolidFiniteElement::assign_solid_local_eqn_numbers(store_local_dof_pt);
       assign_solid_hanging_local_eqn_numbers(store_local_dof_pt);
@@ -947,24 +947,24 @@ namespace oomph
     /// RefineableSolidFiniteElement is the positional Data of all
     /// non-hanging nodes plus the geometric Data of all distinct
     /// master nodes. Recomputed on the fly.
-    unsigned ngeom_data() const;
+    unsigned ngeom_data() const override;
 
     /// Return pointer to the j-th Data item that the object's
     /// shape depends on: Positional data of non-hanging nodes and
     /// positional data of master nodes. Recomputed on the fly.
-    Data* geom_data_pt(const unsigned& j);
+    Data* geom_data_pt(const unsigned& j) override;
 
     /// Specify Data that affects the geometry of the element
     /// by adding the position Data to the set that's passed in.
     /// (This functionality is required in FSI problems; set is used to
     /// avoid double counting). Refineable version includes hanging nodes
-    void identify_geometric_data(std::set<Data*>& geometric_data_pt);
+    void identify_geometric_data(std::set<Data*>& geometric_data_pt) override;
 
     /// Compute element residual Vector and element Jacobian matrix
     /// corresponding to the solid positions. Overloaded version to take
     /// the hanging nodes into account
     void fill_in_jacobian_from_solid_position_by_fd(
-      Vector<double>& residuals, DenseMatrix<double>& jacobian);
+      Vector<double>& residuals, DenseMatrix<double>& jacobian) override;
 
     /// Return the flag deciding if the Lagrangian coordinates of
     /// newly-created interior SolidNodes are to be determined by the father
@@ -1011,7 +1011,7 @@ namespace oomph
     /// Use_undeformed_macro_element_for_new_lagrangian_coords
     /// flag down, then call the underlying RefineableElement's
     /// version.
-    virtual void further_build()
+    void further_build() override
     {
       Use_undeformed_macro_element_for_new_lagrangian_coords =
         dynamic_cast<RefineableSolidElement*>(father_element_pt())

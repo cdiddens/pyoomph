@@ -17,9 +17,9 @@ class WedgeGaussC1 : public Integral
     WedgeGaussC1(){};
     WedgeGaussC1(const WedgeGaussC1& dummy) = delete;
     void operator=(const WedgeGaussC1&) = delete;
-    unsigned nweight() const    {   return Npts;   }
-    double knot(const unsigned& i, const unsigned& j) const   {    return Knot[i][j];  }
-    double weight(const unsigned& i) const   {   return Weight[i];   }
+    unsigned nweight() const override    {   return Npts;   }
+    double knot(const unsigned& i, const unsigned& j) const override   {    return Knot[i][j];  }
+    double weight(const unsigned& i) const override   {   return Weight[i];   }
  };
 
  // Gauss-Legendre quadrature for the C2 wedge element, with 18 points (3 in each direction)
@@ -34,9 +34,9 @@ public:
     WedgeGaussC2(const WedgeGaussC2&) = delete;
     void operator=(const WedgeGaussC2&) = delete;
 
-    unsigned nweight() const { return Npts; }
-    double knot(const unsigned& i, const unsigned& j) const { return Knot[i][j]; }
-    double weight(const unsigned& i) const { return Weight[i]; }
+    unsigned nweight() const override { return Npts; }
+    double knot(const unsigned& i, const unsigned& j) const override { return Knot[i][j]; }
+    double weight(const unsigned& i) const override { return Weight[i]; }
 };
 
 // Gauss-Legendre quadrature for the C1 pyramid element, with 5 points (2 in each direction)
@@ -50,9 +50,9 @@ class PyramidGaussC1 : public Integral
     PyramidGaussC1(){};
     PyramidGaussC1(const PyramidGaussC1& dummy) = delete;
     void operator=(const PyramidGaussC1&) = delete;
-    unsigned nweight() const    {   return Npts;   }
-    double knot(const unsigned& i, const unsigned& j) const   {    return Knot[i][j];  }
-    double weight(const unsigned& i) const   {   return Weight[i];   }
+    unsigned nweight() const override    {   return Npts;   }
+    double knot(const unsigned& i, const unsigned& j) const override   {    return Knot[i][j];  }
+    double weight(const unsigned& i) const override   {   return Weight[i];   }
  };
 
   // Gauss-Legendre quadrature for the C2 pyramid element, with 14 points (3 in each direction)
@@ -67,9 +67,9 @@ public:
     PyramidGaussC2(const PyramidGaussC2&) = delete;
     void operator=(const PyramidGaussC2&) = delete;
 
-    unsigned nweight() const { return Npts; }
-    double knot(const unsigned& i, const unsigned& j) const { return Knot[i][j]; }
-    double weight(const unsigned& i) const { return Weight[i]; }
+    unsigned nweight() const override { return Npts; }
+    double knot(const unsigned& i, const unsigned& j) const override { return Knot[i][j]; }
+    double weight(const unsigned& i) const override { return Weight[i]; }
 };
 
 // Linear (C1) shape functions for the 6-node wedge/prism element, expressed in the
@@ -758,9 +758,9 @@ class WedgeElementBase :  public virtual FiniteElement
     BulkCoordinateDerivativesFctPt bulk_coordinate_derivatives_fct_pt(const int& face_index) const override ;
     // Sign of the outer unit normal on the given facet (needed since the facet parametrisation is not guaranteed to be outward-oriented)
     int face_outer_unit_normal_sign(const int&) const override;
-    double s_min() const    { return 0.0; }
-    double s_max() const    { return 1.0; }
-    unsigned nvertex_node() const { return 6; }
+    double s_min() const override    { return 0.0; }
+    double s_max() const override    { return 1.0; }
+    unsigned nvertex_node() const override { return 6; }
     Node* vertex_node_pt(const unsigned& j) const override
     {
       if (j > 5)
@@ -802,12 +802,12 @@ class RefineableWedgeElement : public virtual RefineableElement, public virtual 
     }
 
     // Empty (non-broken) destructor
-    virtual ~RefineableWedgeElement()
+    ~RefineableWedgeElement() override
     {
     }
 
     // Number of sons created upon refinement -- not yet implemented (wedge refinement is TODO)
-    unsigned required_nsons() const
+    unsigned required_nsons() const override
     {
       throw_runtime_error("TODO"); // Here, nothing is do be done for now
       return 4;
@@ -823,10 +823,10 @@ class RefineableWedgeElement : public virtual RefineableElement, public virtual 
     }
 
     // Not yet implemented: builds the element's nodes from its father during refinement (see RefineableElement interface)
-    virtual void build(Mesh *&mesh_pt, Vector<Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file);
+    void build(Mesh *&mesh_pt, Vector<Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file) override;
 
     // Not yet implemented: checks inter-element continuity of nodal positions/values
-    void check_integrity(double &max_error);
+    void check_integrity(double &max_error) override;
 
     // Not yet implemented: debug output of the element's corner nodes
     void output_corners(std::ostream &outfile, const std::string &colour) const;
@@ -836,10 +836,10 @@ class RefineableWedgeElement : public virtual RefineableElement, public virtual 
     OcTree *octree_pt() const { return dynamic_cast<OcTree *>(Tree_pt); }
 
     // Not yet implemented: sets up the hanging-node scheme for all continuously-interpolated values
-    void setup_hanging_nodes(Vector<std::ofstream *> &output_stream);
+    void setup_hanging_nodes(Vector<std::ofstream *> &output_stream) override;
 
     /// Pure virtual: element-specific hook for further hanging node setup, must be overloaded by derived elements
-    virtual void further_setup_hanging_nodes() = 0;
+    void further_setup_hanging_nodes() override = 0;
 
   protected:
     /// Static matrix encoding, for each refinement pattern, which son nodes coincide with which father boundaries
@@ -883,9 +883,9 @@ class PyramidElementBase :  public virtual FiniteElement
     BulkCoordinateDerivativesFctPt bulk_coordinate_derivatives_fct_pt(const int& face_index) const override ;
     // Sign of the outer unit normal on the given facet
     int face_outer_unit_normal_sign(const int&) const override;
-    double s_min() const    { return 0.0; }
-    double s_max() const    { return 1.0; }
-    unsigned nvertex_node() const   { return 5; }
+    double s_min() const override    { return 0.0; }
+    double s_max() const override    { return 1.0; }
+    unsigned nvertex_node() const override   { return 5; }
     Node* vertex_node_pt(const unsigned& j) const override
     {
       if (j > 4)
@@ -925,12 +925,12 @@ class RefineablePyramidElement : public virtual RefineableElement, public virtua
     }
 
     // Empty (non-broken) destructor
-    virtual ~RefineablePyramidElement()
+    ~RefineablePyramidElement() override
     {
     }
 
     // Number of sons created upon refinement -- not yet implemented (pyramid refinement is TODO)
-    unsigned required_nsons() const
+    unsigned required_nsons() const override
     {
       throw_runtime_error("TODO"); // Here, nothing is do be done for now
       return 4;
@@ -946,10 +946,10 @@ class RefineablePyramidElement : public virtual RefineableElement, public virtua
     }
 
     // Not yet implemented: builds the element's nodes from its father during refinement
-    virtual void build(Mesh *&mesh_pt, Vector<Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file);
+    void build(Mesh *&mesh_pt, Vector<Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file) override;
 
     // Not yet implemented: checks inter-element continuity of nodal positions/values
-    void check_integrity(double &max_error);
+    void check_integrity(double &max_error) override;
 
     // Not yet implemented: debug output of the element's corner nodes
     void output_corners(std::ostream &outfile, const std::string &colour) const;
@@ -959,10 +959,10 @@ class RefineablePyramidElement : public virtual RefineableElement, public virtua
     OcTree *octree_pt() const { return dynamic_cast<OcTree *>(Tree_pt); }
 
     // Not yet implemented: sets up the hanging-node scheme for all continuously-interpolated values
-    void setup_hanging_nodes(Vector<std::ofstream *> &output_stream);
+    void setup_hanging_nodes(Vector<std::ofstream *> &output_stream) override;
 
     /// Pure virtual: element-specific hook for further hanging node setup, must be overloaded by derived elements
-    virtual void further_setup_hanging_nodes() = 0;
+    void further_setup_hanging_nodes() override = 0;
 
   protected:
     /// Static matrix encoding, for each refinement pattern, which son nodes coincide with which father boundaries
@@ -1037,7 +1037,7 @@ class WedgeElementC1 :  public virtual RefineableWedgeElement
  private:
     static WedgeGaussC1 Default_integration_scheme;
  public:    
-    unsigned nnode_1d() const { return 2;}
+    unsigned nnode_1d() const override { return 2;}
 
     WedgeElementC1() : WedgeElementBase() 
     {
@@ -1046,7 +1046,7 @@ class WedgeElementC1 :  public virtual RefineableWedgeElement
         set_integration_scheme(&Default_integration_scheme);
     }
     WedgeElementC1(const WedgeElementC1&) = delete;
-    ~WedgeElementC1() {}
+    ~WedgeElementC1() override {}
 
     unsigned int get_bulk_node_number(const int & face_index, const unsigned int& i) const override;
         
@@ -1060,7 +1060,7 @@ class WedgeElementC1 :  public virtual RefineableWedgeElement
         WedgeElementShapeC1::dshape_local(s, psi, dpsids);
     }
 
-    inline void local_coordinate_of_node(const unsigned& j,Vector<double>& s) const
+    inline void local_coordinate_of_node(const unsigned& j,Vector<double>& s) const override
     {
       if (j==0) { s[0] = 0.0; s[1] = 0.0; s[2] = 0.0;}
       else if (j==1) { s[0] = 1.0; s[1] = 0.0; s[2] = 0.0;}
@@ -1119,7 +1119,7 @@ Index : Local coordinates (s0,s1,s2)
  private:
     static PyramidGaussC1 Default_integration_scheme; 
  public:    
-    unsigned nnode_1d() const { return 2;}
+    unsigned nnode_1d() const override { return 2;}
 
     PyramidElementC1() : PyramidElementBase() 
     {
@@ -1128,7 +1128,7 @@ Index : Local coordinates (s0,s1,s2)
         set_integration_scheme(&Default_integration_scheme);
     }
     PyramidElementC1(const PyramidElementC1&) = delete;
-    ~PyramidElementC1() {}
+    ~PyramidElementC1() override {}
 
     unsigned int get_bulk_node_number(const int & face_index, const unsigned int& i) const override;
         
@@ -1142,7 +1142,7 @@ Index : Local coordinates (s0,s1,s2)
         PyramidElementShapeC1::dshape_local(s, psi, dpsids);
     }
 
-    inline void local_coordinate_of_node(const unsigned& j,Vector<double>& s) const
+    inline void local_coordinate_of_node(const unsigned& j,Vector<double>& s) const override
     {
       if (j==0) { s[0] = 0.0; s[1] = 0.0; s[2] = 0.0;}
       else if (j==1) { s[0] = 1.0; s[1] = 0.0; s[2] = 0.0;}
@@ -1293,7 +1293,7 @@ class WedgeElementC2 : public virtual RefineableWedgeElement
     static WedgeGaussC2 Default_integration_scheme;
 
  public:
-    unsigned nnode_1d() const { return 3; }
+    unsigned nnode_1d() const override { return 3; }
 
     WedgeElementC2() : WedgeElementBase()
     {
@@ -1302,7 +1302,7 @@ class WedgeElementC2 : public virtual RefineableWedgeElement
         set_integration_scheme(&Default_integration_scheme);
     }
     WedgeElementC2(const WedgeElementC2&) = delete;
-    ~WedgeElementC2() {}
+    ~WedgeElementC2() override {}
 
     Node* vertex_node_pt(const unsigned& j) const override
     {           
@@ -1315,7 +1315,7 @@ class WedgeElementC2 : public virtual RefineableWedgeElement
       return node_pt((j<3 ? j : j+9)); // vertex nodes are the first 3, then a gap of 9 to skip the mid-edge nodes, then the last 3 vertex nodes at the end of the numbering
     }
     unsigned nnode_on_face() const override { throw_runtime_error("nnode_on_face cannot be implemented for a Wedge, damn."); }
-    virtual unsigned nnode_on_face_by_index(const int& face_index) const  { return (face_index<2) ? 6 : 9; }
+    unsigned nnode_on_face_by_index(const int& face_index) const override  { return (face_index<2) ? 6 : 9; }
 
     // ---------------------------------------------------------------
     // get_bulk_node_number
@@ -1333,7 +1333,7 @@ class WedgeElementC2 : public virtual RefineableWedgeElement
     //   face 1 (s2=1) uses forward  winding (12,13,14) with midpoints
     //                  (15,16,17).
     // ---------------------------------------------------------------
-    unsigned get_bulk_node_number(const int& face_index,const unsigned int& i) const;
+    unsigned get_bulk_node_number(const int& face_index,const unsigned int& i) const override;
 
     void shape(const Vector<double>& s, Shape& psi) const override
     {
@@ -1358,7 +1358,7 @@ class WedgeElementC2 : public virtual RefineableWedgeElement
     //     3 -> (0.5, 0  )   4 -> (0,   0.5)   5 -> (0.5, 0.5)
     // ---------------------------------------------------------------
     inline void local_coordinate_of_node(const unsigned& j,
-                                          Vector<double>& s) const
+                                          Vector<double>& s) const override
     {
         if (j >= 18)
         {
@@ -1486,7 +1486,7 @@ class PyramidElementC2 : public virtual RefineablePyramidElement
     static PyramidGaussC2 Default_integration_scheme;
 
  public:
-    unsigned nnode_1d() const { return 3; }
+    unsigned nnode_1d() const override { return 3; }
 
     PyramidElementC2() : PyramidElementBase()
     {
@@ -1495,7 +1495,7 @@ class PyramidElementC2 : public virtual RefineablePyramidElement
         set_integration_scheme(&Default_integration_scheme);
     }
     PyramidElementC2(const PyramidElementC2&) = delete;
-    ~PyramidElementC2() {}
+    ~PyramidElementC2() override {}
 
     Node* vertex_node_pt(const unsigned& j) const override
     {           
@@ -1508,7 +1508,7 @@ class PyramidElementC2 : public virtual RefineablePyramidElement
       return node_pt(j); // ordering same as in C1 pyramid
     }
     unsigned nnode_on_face() const override { throw_runtime_error("nnode_on_face cannot be implemented for a Pyramid, damn."); }
-    virtual unsigned nnode_on_face_by_index(const int& face_index) const  { return (face_index==4) ? 9 : 6; }
+    unsigned nnode_on_face_by_index(const int& face_index) const override  { return (face_index==4) ? 9 : 6; }
 
     // ---------------------------------------------------------------
     // get_bulk_node_number
@@ -1520,7 +1520,7 @@ class PyramidElementC2 : public virtual RefineablePyramidElement
     // Quadrilateral faces (5) : 9 nodes each,
     //   ordered as: 4 corners, 4 edge midpoints, 1 centre.
     // ---------------------------------------------------------------
-    unsigned get_bulk_node_number(const int& face_index,const unsigned int& i) const;
+    unsigned get_bulk_node_number(const int& face_index,const unsigned int& i) const override;
 
     void shape(const Vector<double>& s, Shape& psi) const override
     {
@@ -1538,7 +1538,7 @@ class PyramidElementC2 : public virtual RefineablePyramidElement
     // ---------------------------------------------------------------
     // Return the local coordinate s of node j.
     inline void local_coordinate_of_node(const unsigned& j,
-                                          Vector<double>& s) const
+                                          Vector<double>& s) const override
     {
         if (j >= 14)
         {

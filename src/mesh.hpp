@@ -189,7 +189,7 @@ namespace pyoomph
 		// Lazily build (if necessary) and return the KD-tree over Lagrangian node coordinates.
 		virtual MeshKDTree *get_lagrangian_kdtree();
 		virtual std::map<std::string, std::string> get_field_information(); // first: names, second: list of spaces (C2,C1,DL,D0), but also (../C2 etc for elements defined on bulk domains)
-		virtual ~Mesh();
+		~Mesh() override;
 		virtual void check_integrity();
 	};
 
@@ -214,19 +214,19 @@ namespace pyoomph
 		std::vector<double> opposite_offset_vector,reversed_opposite_offset_vector; // Constant offset (e.g. for periodic/translated interfaces) to the opposite side and its reverse
 	public:
 		InterfaceMesh();
-		virtual ~InterfaceMesh();
+		~InterfaceMesh() override;
 		virtual void update_zeta_in_buffer();
 		virtual void update_equation_remapping();
 		// Set the offset vector used to relate this interface's coordinates to the geometrically opposite interface
 		// (e.g. across a periodic domain); also updates the cached reversed_opposite_offset_vector.
 		virtual void set_opposite_interface_offset_vector(const std::vector<double> & offset);
 		virtual std::vector<double>  get_opposite_interface_offset_vector() {return opposite_offset_vector;}
-		virtual void fill_internal_facet_buffers(std::vector<BulkElementBase *> &internal_elements, std::vector<int> &internal_face_dir, std::vector<BulkElementBase *> &opposite_elements, std::vector<int> &opposite_face_dir, std::vector<int> &opposite_already_at_index);
+		void fill_internal_facet_buffers(std::vector<BulkElementBase *> &internal_elements, std::vector<int> &internal_face_dir, std::vector<BulkElementBase *> &opposite_elements, std::vector<int> &opposite_face_dir, std::vector<int> &opposite_already_at_index) override;
 		std::vector<oomph::FiniteElement *> opposite_interior_facets; // Facets on the geometrically opposite side (e.g. periodic partner), matched to this mesh's facets by index
-		virtual double get_temporal_error_norm_contribution();
-		virtual void adapt(const oomph::Vector<double> &) {}
-		virtual void refine_uniformly(oomph::DocInfo &) {}
-		virtual unsigned unrefine_uniformly() { return 0; }
+		double get_temporal_error_norm_contribution() override;
+		void adapt(const oomph::Vector<double> &) override {}
+		void refine_uniformly(oomph::DocInfo &) override {}
+		unsigned unrefine_uniformly() override { return 0; }
 		// Undo prior interface-element rebuild state before the bulk mesh is adapted (interface elements are
 		// rebuilt afterwards from the new bulk mesh via rebuild_after_adapt).
 		virtual void clear_before_adapt();
@@ -239,18 +239,18 @@ namespace pyoomph
 		// e.g. after adaptation via rebuild_after_adapt.
 		virtual void set_rebuild_information(Mesh *_bulkmesh, std::string intername, DynamicBulkElementInstance *jitcode);
 		virtual Mesh *get_bulk_mesh() { return bulkmesh; }
-		virtual unsigned count_nnode(bool discontinuous = false); // Interface meshes don't have their own nodes...
-		virtual Node *get_some_node() { return (this->nelement() ? dynamic_cast<Node *>(dynamic_cast<oomph::FiniteElement *>(this->element_pt(0))->node_pt(0)) : NULL); }
-		virtual void fill_node_map(std::map<oomph::Node *, unsigned> &nodemap);
-		virtual std::vector<oomph::Node *> fill_reversed_node_map(bool discontinuous = false);
-		virtual int has_interface_dof_id(std::string n) { return bulkmesh->has_interface_dof_id(n); }
-		virtual unsigned resolve_interface_dof_id(std::string n) { return bulkmesh->resolve_interface_dof_id(n); }
+		unsigned count_nnode(bool discontinuous = false) override; // Interface meshes don't have their own nodes...
+		Node *get_some_node() override { return (this->nelement() ? dynamic_cast<Node *>(dynamic_cast<oomph::FiniteElement *>(this->element_pt(0))->node_pt(0)) : NULL); }
+		void fill_node_map(std::map<oomph::Node *, unsigned> &nodemap) override;
+		std::vector<oomph::Node *> fill_reversed_node_map(bool discontinuous = false) override;
+		int has_interface_dof_id(std::string n) override { return bulkmesh->has_interface_dof_id(n); }
+		unsigned resolve_interface_dof_id(std::string n) override { return bulkmesh->resolve_interface_dof_id(n); }
 		virtual void setup_boundary_information(pyoomph::Mesh *parent);
 		// Match this interface mesh's elements/nodes to those of another interface mesh (e.g. the opposite side of
 		// a periodic domain) by nearest-neighbor lookup via a KD-tree, populating opposite_interior_facets etc.
 		virtual void connect_interface_elements_by_kdtree(InterfaceMesh *other);
-		virtual unsigned get_nodal_dimension();
-		virtual int get_element_dimension();
+		unsigned get_nodal_dimension() override;
+		int get_element_dimension() override;
 	};
 
 	// A "mesh" that does not discretize a spatial domain but instead stores ODE (0-dimensional)
@@ -262,19 +262,19 @@ namespace pyoomph
 
 	public:
 		ODEStorageMesh();
-		virtual ~ODEStorageMesh();
-		virtual double get_temporal_error_norm_contribution();
-		virtual void adapt(const oomph::Vector<double> &) {}
-		virtual void refine_uniformly(oomph::DocInfo &) {}
-		virtual unsigned unrefine_uniformly() { return 0; }
-		virtual void setup_initial_conditions(bool resetting_first_step, std::string ic_name);
-		virtual void setup_Dirichlet_conditions(bool only_update_vals);
+		~ODEStorageMesh() override;
+		double get_temporal_error_norm_contribution() override;
+		void adapt(const oomph::Vector<double> &) override {}
+		void refine_uniformly(oomph::DocInfo &) override {}
+		unsigned unrefine_uniformly() override { return 0; }
+		void setup_initial_conditions(bool resetting_first_step, std::string ic_name) override;
+		void setup_Dirichlet_conditions(bool only_update_vals) override;
 		// Register a new named ODE (GeneralisedElement) in this storage mesh; returns its index.
 		virtual unsigned add_ODE(std::string name, oomph::GeneralisedElement *ode);
 		// Look up a previously added ODE element by name.
 		virtual oomph::GeneralisedElement *get_ODE(std::string name);
-		virtual unsigned get_nodal_dimension() { return 0; }
-		virtual int get_element_dimension() { return 0; }
+		unsigned get_nodal_dimension() override { return 0; }
+		int get_element_dimension() override { return 0; }
 		virtual oomph::GeneralisedElement *_create_ode_element(oomph::TimeStepper *ts);
 	};
 
@@ -356,7 +356,7 @@ namespace pyoomph
 		// template boundary indices to this mesh's boundary indices.
         virtual void setup_facets_from_template(MeshTemplate *templ,const std::vector<int> & bound_map);
 		// Traverse the tree forest and p/h-refine any leaf element that oomph-lib has flagged for splitting.
-		void split_elements_if_required()
+		void split_elements_if_required() override
 		{
 			// Find the number of trees in the forest
 			if (!this->Forest_pt)
@@ -375,7 +375,7 @@ namespace pyoomph
 		/// \short p-refine all the elements if required. Overload the template-free
 		/// interface so that any temporary copies of the element that are created
 		/// will be of the correct type.
-		void p_refine_elements_if_required()
+		void p_refine_elements_if_required() override
 		{
 			std::cerr << "Cannot p refine" << std::endl;
 		}
@@ -390,7 +390,7 @@ namespace pyoomph
 		/// MacroElementNodeUpdateNodes which are added as external halo master nodes
 		/// can be made fully functional
 		void additional_synchronise_hanging_nodes(
-			const unsigned &ncont_interpolated_values);
+			const unsigned &ncont_interpolated_values) override;
 
 #endif
 
@@ -415,7 +415,7 @@ namespace pyoomph
 		}
 
 
-		virtual void setup_boundary_element_info(std::ostream &outfile) ;
+		void setup_boundary_element_info(std::ostream &outfile) override ;
 		// Populate this mesh's elements/nodes/boundaries from an already-built MeshTemplateElementCollection
 		// (the dimension-specific subclasses implement this: TemplatedMeshBase1d/2d/3d).
 		virtual void generate_from_template(MeshTemplateElementCollection *coll) = 0;
@@ -433,7 +433,7 @@ namespace pyoomph
 		// Wraps oomph-lib's TreeBasedRefineableMeshBase::adapt: lets the Python-side
 		// update_elemental_errors hook post-process the per-element error estimates (e.g. to bias
 		// refinement) before handing them to the actual oomph-lib refinement/coarsening logic.
-		void adapt(const oomph::Vector<double> &elemental_error)
+		void adapt(const oomph::Vector<double> &elemental_error) override
 		{
 			if (!this->refinement_possible())
 			{

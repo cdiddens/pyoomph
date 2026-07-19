@@ -1491,8 +1491,6 @@ namespace pyoomph
     // Initialise a vector of flux norms
     Vector<double> flux_norm(n_compound_flux, 0.0);
 
-    unsigned test_count = 0;
-
     // Storage for the elemental compound flux error
     DenseMatrix<double>
         elemental_compound_flux_error(nelem, n_compound_flux, 0.0);
@@ -1603,9 +1601,6 @@ namespace pyoomph
             flux_norm[i] += sum2[i] * W;
           }
         }
-        // Unscaled elemental RMS error:
-        test_count++; // counting elements visited
-
         // elemental_error[e]=sqrt(error);
         // Take the square-root of the appropriate flux error and
         // store the result

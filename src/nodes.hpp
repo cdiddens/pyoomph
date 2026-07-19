@@ -79,7 +79,7 @@ namespace pyoomph
 
     NodeWithFieldIndices(const unsigned &n_lagrangian, const unsigned &n_lagrangian_type, const unsigned &n_dim, const unsigned &Nposition_type, const unsigned &initial_n_value) : NODE_TYPE(n_lagrangian, n_lagrangian_type, n_dim, Nposition_type, initial_n_value), NodeWithFieldIndicesBase() {}
 
-    virtual void resize(const unsigned &n_value)
+    void resize(const unsigned &n_value) override
     {
       NODE_TYPE::resize(n_value);
     }

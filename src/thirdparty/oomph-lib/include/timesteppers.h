@@ -703,14 +703,14 @@ namespace oomph
 
     /// Return the actual order of the scheme. Returning zero here --
     /// doesn't make much sense, though
-    unsigned order() const
+    unsigned order() const override
     {
       return 0;
     }
 
     ///  Initialise the time-history for the Data values,
     /// corresponding to an impulsive start.
-    void assign_initial_values_impulsive(Data* const& data_pt)
+    void assign_initial_values_impulsive(Data* const& data_pt) override
     {
       // Find number of values stored
       unsigned n_value = data_pt->nvalue();
@@ -730,7 +730,7 @@ namespace oomph
 
     ///  Initialise the time-history for the nodal positions
     /// corresponding to an impulsive start.
-    void assign_initial_positions_impulsive(Node* const& node_pt)
+    void assign_initial_positions_impulsive(Node* const& node_pt) override
     {
       // Find the number of coordinates
       unsigned n_dim = node_pt->ndim();
@@ -788,7 +788,7 @@ namespace oomph
     /// This function updates the Data's time history so that
     /// we can advance to the next timestep. As for BDF schemes,
     /// we simply push the values backwards...
-    void shift_time_values(Data* const& data_pt)
+    void shift_time_values(Data* const& data_pt) override
     {
       // Find number of values stored
       unsigned n_value = data_pt->nvalue();
@@ -810,7 +810,7 @@ namespace oomph
 
     /// This function advances the time history of the positions
     /// at a node.
-    void shift_time_positions(Node* const& node_pt)
+    void shift_time_positions(Node* const& node_pt) override
     {
       // Find the number of coordinates
       unsigned n_dim = node_pt->ndim();
@@ -836,7 +836,7 @@ namespace oomph
     }
 
     /// Set weights
-    void set_weights()
+    void set_weights() override
     {
       // Loop over higher derivatives
       unsigned max_deriv = highest_derivative();
@@ -853,19 +853,19 @@ namespace oomph
     }
 
     /// Number of previous values available.
-    unsigned nprev_values() const
+    unsigned nprev_values() const override
     {
       return NSTEPS;
     }
 
     /// Number of timestep increments that need to be stored by the scheme
-    unsigned ndt() const
+    unsigned ndt() const override
     {
       return NSTEPS;
     }
 
     /// Dummy: Access function for j-th weight for the i-th derivative
-    double weight(const unsigned& i, const unsigned& j) const
+    double weight(const unsigned& i, const unsigned& j) const override
     {
       if ((i == 0) && (j == 0))
       {
@@ -888,6 +888,13 @@ namespace oomph
     static Time Dummy_time;
   };
 
+  // Explicitly instantiated in timesteppers.cc; suppress implicit
+  // instantiation of One/Zero/Dummy_time elsewhere.
+  extern template class Steady<0>;
+  extern template class Steady<1>;
+  extern template class Steady<2>;
+  extern template class Steady<3>;
+  extern template class Steady<4>;
 
   /// //////////////////////////////////////////////////////////////////////
   /// //////////////////////////////////////////////////////////////////////
@@ -931,7 +938,7 @@ namespace oomph
 
 
     /// The actual order (accuracy of the scheme)
-    unsigned order() const
+    unsigned order() const override
     {
       std::string error_message =
         "Can't remember the order of the Newmark scheme";
@@ -944,11 +951,11 @@ namespace oomph
 
     /// Initialise the time-history for the values,
     /// corresponding to an impulsive start.
-    void assign_initial_values_impulsive(Data* const& data_pt);
+    void assign_initial_values_impulsive(Data* const& data_pt) override;
 
     /// Initialise the time-history for the values,
     /// corresponding to an impulsive start.
-    void assign_initial_positions_impulsive(Node* const& node_pt);
+    void assign_initial_positions_impulsive(Node* const& node_pt) override;
 
     /// Typedef for function that returns the (scalar) initial
     /// value at a given value of the continuous time t.
@@ -1019,23 +1026,23 @@ namespace oomph
 
     /// This function updates the Data's time history so that
     /// we can advance to the next timestep.
-    void shift_time_values(Data* const& data_pt);
+    void shift_time_values(Data* const& data_pt) override;
 
     /// This function updates a nodal time history so that
     /// we can advance to the next timestep.
-    void shift_time_positions(Node* const& node_pt);
+    void shift_time_positions(Node* const& node_pt) override;
 
     /// Set weights
-    void set_weights();
+    void set_weights() override;
 
     /// Number of previous values available.
-    unsigned nprev_values() const
+    unsigned nprev_values() const override
     {
       return NSTEPS;
     }
 
     /// Number of timestep increments that need to be stored by the scheme
-    unsigned ndt() const
+    unsigned ndt() const override
     {
       return NSTEPS;
     }
@@ -1090,15 +1097,15 @@ namespace oomph
     void operator=(const NewmarkBDF&) = delete;
 
     /// Set weights
-    void set_weights();
+    void set_weights() override;
 
     /// This function updates the Data's time history so that
     /// we can advance to the next timestep.
-    void shift_time_values(Data* const& data_pt);
+    void shift_time_values(Data* const& data_pt) override;
 
     /// This function updates a nodal time history so that
     /// we can advance to the next timestep.
-    void shift_time_positions(Node* const& node_pt);
+    void shift_time_positions(Node* const& node_pt) override;
 
     /// Degrade scheme to first order BDF (for first derivs/veloc);
     /// usually for start-up.
@@ -1224,14 +1231,14 @@ namespace oomph
     void operator=(const BDF&) = delete;
 
     /// Return the actual order of the scheme
-    unsigned order() const
+    unsigned order() const override
     {
       return NSTEPS;
     }
 
     ///  Initialise the time-history for the Data values,
     /// corresponding to an impulsive start.
-    void assign_initial_values_impulsive(Data* const& data_pt)
+    void assign_initial_values_impulsive(Data* const& data_pt) override
     {
       // Find number of values stored
       unsigned n_value = data_pt->nvalue();
@@ -1260,7 +1267,7 @@ namespace oomph
 
     ///  Initialise the time-history for the nodal positions
     /// corresponding to an impulsive start.
-    void assign_initial_positions_impulsive(Node* const& node_pt)
+    void assign_initial_positions_impulsive(Node* const& node_pt) override
     {
       // Find the dimension of the node
       unsigned n_dim = node_pt->ndim();
@@ -1330,7 +1337,7 @@ namespace oomph
     /// This function updates the Data's time history so that
     /// we can advance to the next timestep. For BDF schemes,
     /// we simply push the values backwards...
-    void shift_time_values(Data* const& data_pt)
+    void shift_time_values(Data* const& data_pt) override
     {
       // Find number of values stored
       unsigned n_value = data_pt->nvalue();
@@ -1370,7 +1377,7 @@ namespace oomph
 
     /// This function advances the time history of the positions
     /// at a node.
-    void shift_time_positions(Node* const& node_pt)
+    void shift_time_positions(Node* const& node_pt) override
     {
       // Find the number of coordinates
       unsigned n_dim = node_pt->ndim();
@@ -1428,37 +1435,37 @@ namespace oomph
     }
 
     /// Set the weights
-    void set_weights();
+    void set_weights() override;
 
     /// Number of previous values available.
-    unsigned nprev_values() const
+    unsigned nprev_values() const override
     {
       return NSTEPS;
     }
 
     /// Number of timestep increments that need to be stored by the scheme
-    unsigned ndt() const
+    unsigned ndt() const override
     {
       return NSTEPS;
     }
 
     /// Function to set the predictor weights
-    void set_predictor_weights();
+    void set_predictor_weights() override;
 
     /// Function to calculate predicted positions at a node
-    void calculate_predicted_positions(Node* const& node_pt);
+    void calculate_predicted_positions(Node* const& node_pt) override;
 
     /// Function to calculate predicted data values in a Data object
-    void calculate_predicted_values(Data* const& data_pt);
+    void calculate_predicted_values(Data* const& data_pt) override;
 
     /// Function to set the error weights
-    void set_error_weights();
+    void set_error_weights() override;
 
     /// Compute the error in the position i at a node
-    double temporal_error_in_position(Node* const& node_pt, const unsigned& i);
+    double temporal_error_in_position(Node* const& node_pt, const unsigned& i) override;
 
     /// Compute the error in the value i in a Data structure
-    double temporal_error_in_value(Data* const& data_pt, const unsigned& i);
+    double temporal_error_in_value(Data* const& data_pt, const unsigned& i) override;
   };
 
 } // namespace oomph

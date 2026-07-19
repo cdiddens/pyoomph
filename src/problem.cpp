@@ -2947,7 +2947,7 @@ namespace pyoomph
 			}
 			else if (aug.types[ti]==2)
 			{
-				this->GetDofPtr().push_back(&this->get_global_parameter(aug.augmented_parameters[sindex])->value());
+				this->GetDofPtr().push_back(&this->get_global_parameter(aug.augmented_parameters[pindex])->value());
 				pindex++;
 			}
 		}

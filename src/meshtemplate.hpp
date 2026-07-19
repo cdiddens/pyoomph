@@ -140,17 +140,17 @@ namespace pyoomph
         radius += (startpt[i] - center[i]) * (startpt[i] - center[i]);
       radius = sqrt(radius);
     }
-    virtual void parametric_to_position(const unsigned &, const std::vector<double> &parametric, std::vector<double> &position)
+    void parametric_to_position(const unsigned &, const std::vector<double> &parametric, std::vector<double> &position) override
     {
       position = center;
       position[0] += radius * cos(parametric[0]);
       position[1] += radius * sin(parametric[0]);
     }
-    virtual void position_to_parametric(const unsigned &, const std::vector<double> &position, std::vector<double> &parametric)
+    void position_to_parametric(const unsigned &, const std::vector<double> &position, std::vector<double> &parametric) override
     {
       parametric[0] = atan2(position[1] - center[1], position[0] - center[0]);
     };
-    virtual void apply_periodicity(std::vector<std::vector<double>> &parametric)
+    void apply_periodicity(std::vector<std::vector<double>> &parametric) override
     {
       if (fabs(parametric[0][0] - parametric[1][0]) > M_PI)
       {
@@ -173,7 +173,7 @@ namespace pyoomph
         }
       }
     };
-    virtual std::string get_information_string()
+    std::string get_information_string() override
     {
       std::ostringstream oss;
       oss << radius << std::endl;
@@ -245,7 +245,7 @@ namespace pyoomph
          throw_runtime_error("Bllla");
       */
     }
-    virtual void parametric_to_position(const unsigned &, const std::vector<double> &parametric, std::vector<double> &position)
+    void parametric_to_position(const unsigned &, const std::vector<double> &parametric, std::vector<double> &position) override
     {
       position = center;
       for (unsigned int i = 0; i < 3; i++)
@@ -254,7 +254,7 @@ namespace pyoomph
       }
       std::cout << " CYL PARAM TO POS " << parametric[0] << "  " << parametric[1] << "  leads to " << position[0] << "  " << position[1] << "  " << position[2] << std::endl;
     }
-    virtual void position_to_parametric(const unsigned &, const std::vector<double> &position, std::vector<double> &parametric)
+    void position_to_parametric(const unsigned &, const std::vector<double> &position, std::vector<double> &parametric) override
     {
       parametric[1] = 0.0;
       double x = 0.0, y = 0.0;
@@ -268,7 +268,7 @@ namespace pyoomph
       parametric[0] = atan2(y, x);
       std::cout << " CYL POS TO PARAM " << position[0] << "  " << position[1] << "  " << position[2] << "  leads to x,y= " << x << " " << y << " parametric " << parametric[0] << " , " << parametric[1] << std::endl;
     };
-    virtual void apply_periodicity(std::vector<std::vector<double>> &parametric)
+    void apply_periodicity(std::vector<std::vector<double>> &parametric) override
     {
       if (fabs(parametric[0][0] - parametric[1][0]) > M_PI)
       {
@@ -334,7 +334,7 @@ namespace pyoomph
       for (unsigned int i = 0; i < 3; i++)
         std::cout << normal[i] << "  " << tangent[i] << "  " << cotangent[i] << std::endl;
     }
-    virtual void parametric_to_position(const unsigned &, const std::vector<double> &parametric, std::vector<double> &position)
+    void parametric_to_position(const unsigned &, const std::vector<double> &parametric, std::vector<double> &position) override
     {
       position = center;
       double theta = parametric[0];
@@ -347,7 +347,7 @@ namespace pyoomph
         position[i] += x * tangent[i] + y * cotangent[i] + z * normal[i];
       }
     }
-    virtual void position_to_parametric(const unsigned &t, const std::vector<double> &position, std::vector<double> &parametric)
+    void position_to_parametric(const unsigned &t, const std::vector<double> &position, std::vector<double> &parametric) override
     {
       std::vector<double> rel = position;
       for (unsigned int i = 0; i < 3; i++)
@@ -377,7 +377,7 @@ namespace pyoomph
         std::cout << "TEST FOR pos->par->pos " << i << "  " << position[i] << " vs " << testpos[i] << std::endl;
       }
     };
-    virtual void apply_periodicity(std::vector<std::vector<double>> &){
+    void apply_periodicity(std::vector<std::vector<double>> &) override{
         // TODO:; SHoukld not be required
     };
   };
@@ -405,9 +405,9 @@ namespace pyoomph
     // Evaluate the spline's tangent (derivative w.r.t. t) at parameter t.
     virtual void dinterpolate(double t, std::vector<double> &dpos);
     CurvedEntityCatmullRomSpline(const std::vector<std::vector<double>> &_pts);
-    virtual void parametric_to_position(const unsigned &t, const std::vector<double> &parametric, std::vector<double> &position);
-    virtual void position_to_parametric(const unsigned &t, const std::vector<double> &position, std::vector<double> &parametric);
-    virtual std::string get_information_string();
+    void parametric_to_position(const unsigned &t, const std::vector<double> &parametric, std::vector<double> &position) override;
+    void position_to_parametric(const unsigned &t, const std::vector<double> &position, std::vector<double> &parametric) override;
+    std::string get_information_string() override;
   };
 
   // A facet (edge in 2d, face in 3d) of the mesh template, i.e. the boundary
@@ -467,33 +467,33 @@ namespace pyoomph
   class MeshTemplateQMacroElement2 : public oomph::QMacroElement<2>, public MeshTemplateMacroElementBase
   {
   protected:
-    std::vector<unsigned> find_permutation(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation);
+    std::vector<unsigned> find_permutation(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation) override;
 
   public:
     MeshTemplateQMacroElement2(MeshTemplateDomain *domain, unsigned index, MeshTemplateElement *e, std::vector<MeshTemplateNode *> *nodes);
-    virtual void macro_element_boundary(const unsigned &t, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f);
+    void macro_element_boundary(const unsigned &t, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f) override;
   };
 
   // Macro element for 2d, triangular (T-type), second-order (6-node) elements.
   class MeshTemplateTMacroElement2 : public oomph::TMacroElement<2>, public MeshTemplateMacroElementBase
   {
   protected:
-    std::vector<unsigned> find_permutation(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation);
+    std::vector<unsigned> find_permutation(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation) override;
 
   public:
     MeshTemplateTMacroElement2(MeshTemplateDomain *domain, unsigned index, MeshTemplateElement *e, std::vector<MeshTemplateNode *> *nodes);
-    virtual void macro_element_boundary(const unsigned &t, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f);
+    void macro_element_boundary(const unsigned &t, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f) override;
   };
 
   // Macro element for 3d, brick (Q-type), second-order (27-node) elements.
   class MeshTemplateQMacroElement3 : public oomph::QMacroElement<3>, public MeshTemplateMacroElementBase
   {
   protected:
-    std::vector<unsigned> find_permutation(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation);
+    std::vector<unsigned> find_permutation(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation) override;
 
   public:
     MeshTemplateQMacroElement3(MeshTemplateDomain *domain, unsigned index, MeshTemplateElement *e, std::vector<MeshTemplateNode *> *nodes);
-    virtual void macro_element_boundary(const unsigned &t, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f);
+    void macro_element_boundary(const unsigned &t, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f) override;
   };
 
   // oomph-lib Domain implementation that simply forwards macro_element_boundary()
@@ -504,7 +504,7 @@ namespace pyoomph
   public:
     MeshTemplateDomain();
     void push_back_macro_element(oomph::MacroElement *macro) { Macro_element_pt.push_back(macro); }
-    void macro_element_boundary(const unsigned &t, const unsigned &i_macro, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f);
+    void macro_element_boundary(const unsigned &t, const unsigned &i_macro, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f) override;
   };
 
   // Abstract base class describing the geometry/topology of a single bulk
@@ -554,12 +554,12 @@ namespace pyoomph
   {
   public:
     MeshTemplateElementPoint(const nodeindex_t &n1);
-    unsigned int get_nnode_C1() const { return 1; }
-    unsigned int get_node_index_C1(const unsigned int &) const { return 0; }
-    unsigned int get_nnode_C2() const { return 1; }
-    unsigned int get_node_index_C2(const unsigned int &) const { return 0; }
-    unsigned int nodal_dimension() const { return 0; }
-    virtual unsigned nfacets() { return 0; }
+    unsigned int get_nnode_C1() const override { return 1; }
+    unsigned int get_node_index_C1(const unsigned int &) const override { return 0; }
+    unsigned int get_nnode_C2() const override { return 1; }
+    unsigned int get_node_index_C2(const unsigned int &) const override { return 0; }
+    unsigned int nodal_dimension() const override { return 0; }
+    unsigned nfacets() override { return 0; }
   };
 
 
@@ -568,14 +568,14 @@ namespace pyoomph
   {
   public:
     MeshTemplateElementLineC1(const nodeindex_t &n1, const nodeindex_t &n2);
-    unsigned int get_nnode_C1() const { return 2; }
-    unsigned int get_node_index_C1(const unsigned int &i) const { return i; }
-    unsigned int get_nnode_C2() const { return 0; }
-    unsigned int get_node_index_C2(const unsigned int &) const { return -1; }
-    unsigned int nodal_dimension() const { return 1; }
-    virtual MeshTemplateElement *convert_for_C2_space(MeshTemplate *templ);
-    virtual unsigned nfacets() { return 2; }
-    virtual MeshTemplateFacet *construct_facet(unsigned i);
+    unsigned int get_nnode_C1() const override { return 2; }
+    unsigned int get_node_index_C1(const unsigned int &i) const override { return i; }
+    unsigned int get_nnode_C2() const override { return 0; }
+    unsigned int get_node_index_C2(const unsigned int &) const override { return -1; }
+    unsigned int nodal_dimension() const override { return 1; }
+    MeshTemplateElement *convert_for_C2_space(MeshTemplate *templ) override;
+    unsigned nfacets() override { return 2; }
+    MeshTemplateFacet *construct_facet(unsigned i) override;
   };
 
   // 1d quadratic (3-node, with a mid-side node) line element.
@@ -583,13 +583,13 @@ namespace pyoomph
   {
   public:
     MeshTemplateElementLineC2(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3);
-    unsigned int get_nnode_C1() const { return 2; }
-    unsigned int get_node_index_C1(const unsigned int &i) const { return (i == 0 ? 0 : 2); }
-    unsigned int get_nnode_C2() const { return 3; }
-    unsigned int get_node_index_C2(const unsigned int &i) const { return i; }
-    unsigned int nodal_dimension() const { return 1; }
-    virtual unsigned nfacets() { return 2; }
-    virtual MeshTemplateFacet *construct_facet(unsigned i);
+    unsigned int get_nnode_C1() const override { return 2; }
+    unsigned int get_node_index_C1(const unsigned int &i) const override { return (i == 0 ? 0 : 2); }
+    unsigned int get_nnode_C2() const override { return 3; }
+    unsigned int get_node_index_C2(const unsigned int &i) const override { return i; }
+    unsigned int nodal_dimension() const override { return 1; }
+    unsigned nfacets() override { return 2; }
+    MeshTemplateFacet *construct_facet(unsigned i) override;
     //	virtual MeshTemplateElement * convert_for_C2_space(MeshTemplate *templ);
   };
 
@@ -599,14 +599,14 @@ namespace pyoomph
   protected:
   public:
     MeshTemplateElementQuadC1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4);
-    unsigned int get_nnode_C1() const { return 4; }
-    unsigned int get_node_index_C1(const unsigned int &i) const { return node_indices[i]; }
-    unsigned int get_nnode_C2() const { return 0; }
-    unsigned int get_node_index_C2(const unsigned int &) const { return -1; }
-    unsigned int nodal_dimension() const { return 2; }
-    virtual MeshTemplateElement *convert_for_C2_space(MeshTemplate *templ);
-    virtual unsigned nfacets() { return 4; }
-    virtual MeshTemplateFacet *construct_facet(unsigned i);
+    unsigned int get_nnode_C1() const override { return 4; }
+    unsigned int get_node_index_C1(const unsigned int &i) const override { return node_indices[i]; }
+    unsigned int get_nnode_C2() const override { return 0; }
+    unsigned int get_node_index_C2(const unsigned int &) const override { return -1; }
+    unsigned int nodal_dimension() const override { return 2; }
+    MeshTemplateElement *convert_for_C2_space(MeshTemplate *templ) override;
+    unsigned nfacets() override { return 4; }
+    MeshTemplateFacet *construct_facet(unsigned i) override;
   };
 
   // 2d biquadratic (9-node: 4 corners, 4 mid-sides, 1 center) quadrilateral element.
@@ -616,13 +616,13 @@ namespace pyoomph
   public:
     MeshTemplateElementQuadC2(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4,
                               const nodeindex_t &n5, const nodeindex_t &n6, const nodeindex_t &n7, const nodeindex_t &n8, const nodeindex_t &n9);
-    unsigned int get_nnode_C1() const { return 4; }
-    unsigned int get_node_index_C1(const unsigned int &i) const { return node_indices[i]; }
-    unsigned int get_nnode_C2() const { return 9; }
-    unsigned int get_node_index_C2(const unsigned int &i) const { return node_indices[i]; }
-    unsigned int nodal_dimension() const { return 2; }
-    virtual unsigned nfacets() { return 4; }
-    virtual MeshTemplateFacet *construct_facet(unsigned i);
+    unsigned int get_nnode_C1() const override { return 4; }
+    unsigned int get_node_index_C1(const unsigned int &i) const override { return node_indices[i]; }
+    unsigned int get_nnode_C2() const override { return 9; }
+    unsigned int get_node_index_C2(const unsigned int &i) const override { return node_indices[i]; }
+    unsigned int nodal_dimension() const override { return 2; }
+    unsigned nfacets() override { return 4; }
+    MeshTemplateFacet *construct_facet(unsigned i) override;
   };
 
   // 2d linear (3-node, corners only) triangular element.
@@ -631,15 +631,15 @@ namespace pyoomph
   protected:
   public:
     MeshTemplateElementTriC1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3);
-    unsigned int get_nnode_C1() const { return 3; }
-    unsigned int get_node_index_C1(const unsigned int &i) const { return node_indices[i]; }
-    unsigned int get_nnode_C2() const { return 0; }
-    unsigned int get_node_index_C2(const unsigned int &) const { return -1; }
-    unsigned int nodal_dimension() const { return 2; }
-    virtual MeshTemplateElement *convert_for_C1TB_space(MeshTemplate *templ);    
-    virtual MeshTemplateElement *convert_for_C2_space(MeshTemplate *templ);
-    virtual unsigned nfacets() { return 3; }
-    virtual MeshTemplateFacet *construct_facet(unsigned i);
+    unsigned int get_nnode_C1() const override { return 3; }
+    unsigned int get_node_index_C1(const unsigned int &i) const override { return node_indices[i]; }
+    unsigned int get_nnode_C2() const override { return 0; }
+    unsigned int get_node_index_C2(const unsigned int &) const override { return -1; }
+    unsigned int nodal_dimension() const override { return 2; }
+    MeshTemplateElement *convert_for_C1TB_space(MeshTemplate *templ) override;    
+    MeshTemplateElement *convert_for_C2_space(MeshTemplate *templ) override;
+    unsigned nfacets() override { return 3; }
+    MeshTemplateFacet *construct_facet(unsigned i) override;
   };
 
   // 2d quadratic (6-node: 3 corners + 3 mid-sides) triangular element.
@@ -648,14 +648,14 @@ namespace pyoomph
   protected:
   public:
     MeshTemplateElementTriC2(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5, const nodeindex_t &n6);
-    unsigned int get_nnode_C1() const { return 3; }
-    unsigned int get_node_index_C1(const unsigned int &i) const { return node_indices[i]; }
-    unsigned int get_nnode_C2() const { return 6; }
-    unsigned int get_node_index_C2(const unsigned int &i) const { return node_indices[i]; }
-    unsigned int nodal_dimension() const { return 2; }
-    virtual unsigned nfacets() { return 3; }
+    unsigned int get_nnode_C1() const override { return 3; }
+    unsigned int get_node_index_C1(const unsigned int &i) const override { return node_indices[i]; }
+    unsigned int get_nnode_C2() const override { return 6; }
+    unsigned int get_node_index_C2(const unsigned int &i) const override { return node_indices[i]; }
+    unsigned int nodal_dimension() const override { return 2; }
+    unsigned nfacets() override { return 3; }
     virtual MeshTemplateElement *convert_for_C2TB_space(MeshTemplate *templ);
-    virtual MeshTemplateFacet *construct_facet(unsigned i);
+    MeshTemplateFacet *construct_facet(unsigned i) override;
   };
 
   // Linear triangle enriched with a centroid "bubble" node (4 nodes total:
@@ -666,8 +666,8 @@ namespace pyoomph
   protected:
   public:
     MeshTemplateElementTriC1TB(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4);
-    unsigned int get_nnode_C1TB() const { return 4; }
-    unsigned int get_node_index_C1TB(const unsigned int &i) const { return node_indices[i]; }
+    unsigned int get_nnode_C1TB() const override { return 4; }
+    unsigned int get_node_index_C1TB(const unsigned int &i) const override { return node_indices[i]; }
   };
 
 
@@ -678,10 +678,10 @@ namespace pyoomph
   protected:
   public:
     MeshTemplateElementTriC2TB(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5, const nodeindex_t &n6, const nodeindex_t &n7);
-    unsigned int get_nnode_C2TB() const { return 7; }
-    unsigned int get_nnode_C1TB() const { return 4; }    
-    unsigned int get_node_index_C2TB(const unsigned int &i) const { return node_indices[i]; }
-    unsigned int get_node_index_C1TB(const unsigned int &i) const { return (i<3 ? node_indices[i] : node_indices[6]); }    
+    unsigned int get_nnode_C2TB() const override { return 7; }
+    unsigned int get_nnode_C1TB() const override { return 4; }    
+    unsigned int get_node_index_C2TB(const unsigned int &i) const override { return node_indices[i]; }
+    unsigned int get_node_index_C1TB(const unsigned int &i) const override { return (i<3 ? node_indices[i] : node_indices[6]); }    
   };
 
   // 3d trilinear (8-node, corners only) brick/hexahedron element.
@@ -691,14 +691,14 @@ namespace pyoomph
   public:
     MeshTemplateElementBrickC1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4,
                                const nodeindex_t &n5, const nodeindex_t &n6, const nodeindex_t &n7, const nodeindex_t &n8);
-    unsigned int get_nnode_C1() const { return 8; }
-    unsigned int get_node_index_C1(const unsigned int &i) const { return node_indices[i]; }
-    unsigned int get_nnode_C2() const { return 0; }
-    unsigned int get_node_index_C2(const unsigned int &) const { return -1; }
-    unsigned int nodal_dimension() const { return 3; }
-    virtual unsigned nfacets() { return 6; }
-    virtual MeshTemplateElement *convert_for_C2_space(MeshTemplate *templ);
-    virtual MeshTemplateFacet *construct_facet(unsigned i);
+    unsigned int get_nnode_C1() const override { return 8; }
+    unsigned int get_node_index_C1(const unsigned int &i) const override { return node_indices[i]; }
+    unsigned int get_nnode_C2() const override { return 0; }
+    unsigned int get_node_index_C2(const unsigned int &) const override { return -1; }
+    unsigned int nodal_dimension() const override { return 3; }
+    unsigned nfacets() override { return 6; }
+    MeshTemplateElement *convert_for_C2_space(MeshTemplate *templ) override;
+    MeshTemplateFacet *construct_facet(unsigned i) override;
   };
 
   // 3d triquadratic (27-node: 8 corners + 12 edge mid-points + 6 face
@@ -708,13 +708,13 @@ namespace pyoomph
   protected:
   public:
     MeshTemplateElementBrickC2(std::vector<nodeindex_t> ninds);
-    unsigned int get_nnode_C1() const { return 8; }
-    unsigned int get_node_index_C1(const unsigned int &i) const { return node_indices[i]; }
-    unsigned int get_nnode_C2() const { return 27; }
-    unsigned int get_node_index_C2(const unsigned int &i) const { return node_indices[i]; }
-    unsigned int nodal_dimension() const { return 3; }
-    virtual unsigned nfacets() { return 6; }
-    virtual MeshTemplateFacet *construct_facet(unsigned i);
+    unsigned int get_nnode_C1() const override { return 8; }
+    unsigned int get_node_index_C1(const unsigned int &i) const override { return node_indices[i]; }
+    unsigned int get_nnode_C2() const override { return 27; }
+    unsigned int get_node_index_C2(const unsigned int &i) const override { return node_indices[i]; }
+    unsigned int nodal_dimension() const override { return 3; }
+    unsigned nfacets() override { return 6; }
+    MeshTemplateFacet *construct_facet(unsigned i) override;
   };
 
   // 3d linear (4-node, corners only) tetrahedral element.
@@ -723,15 +723,15 @@ namespace pyoomph
   protected:
   public:
     MeshTemplateElementTetraC1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4);
-    unsigned int get_nnode_C1() const { return 4; }
-    unsigned int get_node_index_C1(const unsigned int &i) const { return node_indices[i]; }
-    unsigned int get_nnode_C2() const { return 0; }
-    unsigned int get_node_index_C2(const unsigned int &) const { return -1; }
-    unsigned int nodal_dimension() const { return 3; }
-    virtual unsigned nfacets() { return 4; }
-    virtual MeshTemplateElement *convert_for_C2_space(MeshTemplate *templ);
-    virtual MeshTemplateFacet *construct_facet(unsigned i);
-    virtual MeshTemplateElement *convert_for_C1TB_space(MeshTemplate *templ);
+    unsigned int get_nnode_C1() const override { return 4; }
+    unsigned int get_node_index_C1(const unsigned int &i) const override { return node_indices[i]; }
+    unsigned int get_nnode_C2() const override { return 0; }
+    unsigned int get_node_index_C2(const unsigned int &) const override { return -1; }
+    unsigned int nodal_dimension() const override { return 3; }
+    unsigned nfacets() override { return 4; }
+    MeshTemplateElement *convert_for_C2_space(MeshTemplate *templ) override;
+    MeshTemplateFacet *construct_facet(unsigned i) override;
+    MeshTemplateElement *convert_for_C1TB_space(MeshTemplate *templ) override;
   };
   
  
@@ -741,8 +741,8 @@ namespace pyoomph
   protected:
   public:
     MeshTemplateElementTetraC1TB(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5);
-    unsigned int get_nnode_C1TB() const { return 5; }
-    unsigned int get_node_index_C1TB(const unsigned int &i) const { return i; }
+    unsigned int get_nnode_C1TB() const override { return 5; }
+    unsigned int get_node_index_C1TB(const unsigned int &i) const override { return i; }
   };
 
 
@@ -752,13 +752,13 @@ namespace pyoomph
   protected:
   public:
     MeshTemplateElementTetraC2(std::vector<nodeindex_t> ninds);
-    unsigned int get_nnode_C1() const { return 4; }
-    unsigned int get_node_index_C1(const unsigned int &i) const { return node_indices[i]; }
-    unsigned int get_nnode_C2() const { return 10; }
-    unsigned int get_node_index_C2(const unsigned int &i) const { return node_indices[i]; }
-    unsigned int nodal_dimension() const { return 3; }
-    virtual unsigned nfacets() { return 4; }
-    virtual MeshTemplateFacet *construct_facet(unsigned i);
+    unsigned int get_nnode_C1() const override { return 4; }
+    unsigned int get_node_index_C1(const unsigned int &i) const override { return node_indices[i]; }
+    unsigned int get_nnode_C2() const override { return 10; }
+    unsigned int get_node_index_C2(const unsigned int &i) const override { return node_indices[i]; }
+    unsigned int nodal_dimension() const override { return 3; }
+    unsigned nfacets() override { return 4; }
+    MeshTemplateFacet *construct_facet(unsigned i) override;
     virtual MeshTemplateElement *convert_for_C2TB_space(MeshTemplate *templ);
   };
 
@@ -769,8 +769,8 @@ namespace pyoomph
   protected:
   public:
     MeshTemplateElementTetraC2TB(std::vector<nodeindex_t> ninds);
-    unsigned int get_nnode_C2TB() const { return 15; }
-    unsigned int get_node_index_C2TB(const unsigned int &i) const { return node_indices[i]; }
+    unsigned int get_nnode_C2TB() const override { return 15; }
+    unsigned int get_node_index_C2TB(const unsigned int &i) const override { return node_indices[i]; }
   };
 
   // 3d linear (6-node) wedge/prism element (triangular cross-section extruded
@@ -780,14 +780,14 @@ namespace pyoomph
   protected:
   public:    
     MeshTemplateElementWedgeC1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5, const nodeindex_t &n6);
-    unsigned int get_nnode_C1() const { return 6; } // It has 6 nodes in total
-    unsigned int get_node_index_C1(const unsigned int &i) const { return i; } // First order nodes are the same as the 6 nodes of the C1 element
-    unsigned int get_nnode_C2() const { return 0; } // No second order nodes for the C1 element
-    unsigned int get_node_index_C2(const unsigned int &) const { return -1; } // No second order nodes for the C1 element, all indices map to -1
-    unsigned int nodal_dimension() const { return 3; } // Wedge is a 3D element
-    virtual unsigned nfacets() { return 5; } // How many facets does a wedge have? 2 triangles and 3 quadrilaterals, so 5 in total
-    virtual MeshTemplateFacet *construct_facet(unsigned i); // Construct the facet for the i-th facet of the wedge
-    virtual MeshTemplateElement *convert_for_C2_space(MeshTemplate *templ); // Convert this C1 wedge element to a C2 wedge element
+    unsigned int get_nnode_C1() const override { return 6; } // It has 6 nodes in total
+    unsigned int get_node_index_C1(const unsigned int &i) const override { return i; } // First order nodes are the same as the 6 nodes of the C1 element
+    unsigned int get_nnode_C2() const override { return 0; } // No second order nodes for the C1 element
+    unsigned int get_node_index_C2(const unsigned int &) const override { return -1; } // No second order nodes for the C1 element, all indices map to -1
+    unsigned int nodal_dimension() const override { return 3; } // Wedge is a 3D element
+    unsigned nfacets() override { return 5; } // How many facets does a wedge have? 2 triangles and 3 quadrilaterals, so 5 in total
+    MeshTemplateFacet *construct_facet(unsigned i) override; // Construct the facet for the i-th facet of the wedge
+    MeshTemplateElement *convert_for_C2_space(MeshTemplate *templ) override; // Convert this C1 wedge element to a C2 wedge element
   };
 
   // 3d quadratic (18-node) wedge/prism element.
@@ -796,13 +796,13 @@ namespace pyoomph
   protected:
   public:
     MeshTemplateElementWedgeC2(std::vector<nodeindex_t> ninds);
-    unsigned int get_nnode_C1() const { return 6; }
-    unsigned int get_node_index_C1(const unsigned int &) const { throw_runtime_error("TODO"); return -1; }
-    unsigned int get_nnode_C2() const { return 18; }
-    unsigned int get_node_index_C2(const unsigned int &i) const { return i; }
-    unsigned int nodal_dimension() const { return 3; }
-    virtual unsigned nfacets() { return 5; }
-    virtual MeshTemplateFacet *construct_facet(unsigned i);
+    unsigned int get_nnode_C1() const override { return 6; }
+    unsigned int get_node_index_C1(const unsigned int &) const override { throw_runtime_error("TODO"); return -1; }
+    unsigned int get_nnode_C2() const override { return 18; }
+    unsigned int get_node_index_C2(const unsigned int &i) const override { return i; }
+    unsigned int nodal_dimension() const override { return 3; }
+    unsigned nfacets() override { return 5; }
+    MeshTemplateFacet *construct_facet(unsigned i) override;
   };
 
   // 3d linear (5-node) pyramid element (quadrilateral base + apex); see also
@@ -812,14 +812,14 @@ namespace pyoomph
   protected:
   public:    
     MeshTemplateElementPyramidC1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5);
-    unsigned int get_nnode_C1() const { return 5; } // It has 5 nodes in total
-    unsigned int get_node_index_C1(const unsigned int &i) const { return i; } // First order nodes are the same as the 5 nodes of the C1 element
-    unsigned int get_nnode_C2() const { return 0; } // No second order nodes for the C1 element
-    unsigned int get_node_index_C2(const unsigned int &) const { return -1; } // No second order nodes for the C1 element, all indices map to -1
-    unsigned int nodal_dimension() const { return 3; } // Pyramid is a 3D element
-    virtual unsigned nfacets() { return 5; } // How many facets does a pyramid have? 
-    virtual MeshTemplateFacet *construct_facet(unsigned i); // Construct the facet for the i-th facet of the pyramid
-    virtual MeshTemplateElement *convert_for_C2_space(MeshTemplate *templ); // Convert this C1 wedge element to a C2 wedge element. Leave it out for now
+    unsigned int get_nnode_C1() const override { return 5; } // It has 5 nodes in total
+    unsigned int get_node_index_C1(const unsigned int &i) const override { return i; } // First order nodes are the same as the 5 nodes of the C1 element
+    unsigned int get_nnode_C2() const override { return 0; } // No second order nodes for the C1 element
+    unsigned int get_node_index_C2(const unsigned int &) const override { return -1; } // No second order nodes for the C1 element, all indices map to -1
+    unsigned int nodal_dimension() const override { return 3; } // Pyramid is a 3D element
+    unsigned nfacets() override { return 5; } // How many facets does a pyramid have? 
+    MeshTemplateFacet *construct_facet(unsigned i) override; // Construct the facet for the i-th facet of the pyramid
+    MeshTemplateElement *convert_for_C2_space(MeshTemplate *templ) override; // Convert this C1 wedge element to a C2 wedge element. Leave it out for now
   };
 
   class MeshTemplateElementPyramidC2 : public MeshTemplateElement
@@ -827,13 +827,13 @@ namespace pyoomph
   protected:
   public:    
     MeshTemplateElementPyramidC2(std::vector<nodeindex_t> ninds);
-    unsigned int get_nnode_C1() const { return 5; }
-    unsigned int get_node_index_C1(const unsigned int &) const { throw_runtime_error("TODO"); return -1; }
-    unsigned int get_nnode_C2() const { return 14; } 
-    unsigned int get_node_index_C2(const unsigned int &i) const { return i; }
-    unsigned int nodal_dimension() const { return 3; }
-    virtual unsigned nfacets() { return 5; } 
-    virtual MeshTemplateFacet *construct_facet(unsigned i); 
+    unsigned int get_nnode_C1() const override { return 5; }
+    unsigned int get_node_index_C1(const unsigned int &) const override { throw_runtime_error("TODO"); return -1; }
+    unsigned int get_nnode_C2() const override { return 14; } 
+    unsigned int get_node_index_C2(const unsigned int &i) const override { return i; }
+    unsigned int nodal_dimension() const override { return 3; }
+    unsigned nfacets() override { return 5; } 
+    MeshTemplateFacet *construct_facet(unsigned i) override; 
   };
 
   // A named group ("domain") of MeshTemplateElement objects that all share

@@ -475,20 +475,20 @@ namespace oomph
                 const T& initial_val);
 
     /// Destructor, clean up the matrix data
-    virtual ~DenseMatrix()
+    ~DenseMatrix() override
     {
       delete[] Matrixdata;
       Matrixdata = 0;
     }
 
     /// Return the number of rows of the matrix
-    inline unsigned long nrow() const
+    inline unsigned long nrow() const override
     {
       return N;
     }
 
     /// Return the number of columns of the matrix
-    inline unsigned long ncol() const
+    inline unsigned long ncol() const override
     {
       return M;
     }
@@ -520,7 +520,7 @@ namespace oomph
     }
 
     /// Output function to print a matrix row-by-row to the stream outfile
-    void output(std::ostream& outfile) const;
+    void output(std::ostream& outfile) const override;
 
     /// Output function to print a matrix row-by-row to a file. Specify
     /// filename.
@@ -537,11 +537,11 @@ namespace oomph
     /// Output the "bottom right" entry regardless of it being
     /// zero or not (this allows automatic detection of matrix size in
     /// e.g. matlab, python).
-    void output_bottom_right_zero_helper(std::ostream& outfile) const;
+    void output_bottom_right_zero_helper(std::ostream& outfile) const override;
 
     /// Indexed output function to print a matrix to the
     /// stream outfile as i,j,a(i,j) for a(i,j)!=0 only.
-    void sparse_indexed_output_helper(std::ostream& outfile) const;
+    void sparse_indexed_output_helper(std::ostream& outfile) const override;
   };
 
 
@@ -606,7 +606,7 @@ namespace oomph
     void operator=(const SparseMatrix&) = delete;
 
     /// Destructor, delete the memory associated with the values
-    virtual ~SparseMatrix()
+    ~SparseMatrix() override
     {
       delete[] Value;
       Value = 0;
@@ -625,13 +625,13 @@ namespace oomph
     }
 
     /// Return the number of rows of the matrix
-    inline unsigned long nrow() const
+    inline unsigned long nrow() const override
     {
       return N;
     }
 
     /// Return the number of columns of the matrix
-    inline unsigned long ncol() const
+    inline unsigned long ncol() const override
     {
       return M;
     }
@@ -645,7 +645,7 @@ namespace oomph
     /// Output the "bottom right" entry regardless of it being
     /// zero or not (this allows automatic detection of matrix size in
     /// e.g. matlab, python).
-    virtual void output_bottom_right_zero_helper(std::ostream& outfile) const
+    void output_bottom_right_zero_helper(std::ostream& outfile) const override
     {
       std::string error_message = "SparseMatrix::output_bottom_right_zero_"
                                   "helper() is a virtual function.\n";
@@ -658,7 +658,7 @@ namespace oomph
 
     /// Indexed output function to print a matrix to the
     /// stream outfile as i,j,a(i,j) for a(i,j)!=0 only.
-    virtual void sparse_indexed_output_helper(std::ostream& outfile) const
+    void sparse_indexed_output_helper(std::ostream& outfile) const override
     {
       std::string error_message =
         "SparseMatrix::sparse_indexed_output_helper() is a virtual function.\n";
@@ -735,7 +735,7 @@ namespace oomph
     void operator=(const CRMatrix&) = delete;
 
     /// Destructor, delete any allocated memory
-    virtual ~CRMatrix()
+    ~CRMatrix() override
     {
       delete[] Column_index;
       Column_index = 0;
@@ -808,7 +808,7 @@ namespace oomph
     /// Output the "bottom right" entry regardless of it being
     /// zero or not (this allows automatic detection of matrix size in
     /// e.g. matlab, python).
-    void output_bottom_right_zero_helper(std::ostream& outfile) const
+    void output_bottom_right_zero_helper(std::ostream& outfile) const override
     {
       int last_row_local = this->N - 1;
       int last_col = this->M - 1;
@@ -825,7 +825,7 @@ namespace oomph
 
     /// Indexed output function to print a matrix to the
     /// stream outfile as i,j,a(i,j) for a(i,j)!=0 only.
-    void sparse_indexed_output_helper(std::ostream& outfile) const
+    void sparse_indexed_output_helper(std::ostream& outfile) const override
     {
       for (unsigned long i = 0; i < this->N; i++)
       {
@@ -909,7 +909,7 @@ namespace oomph
     void operator=(const CRDoubleMatrix&) = delete;
 
     /// Destructor
-    virtual ~CRDoubleMatrix();
+    ~CRDoubleMatrix() override;
 
     /// Access function: returns the vector Index_of_diagonal_entries.
     /// The i-th entry of the vector contains the index of the last entry
@@ -999,13 +999,13 @@ namespace oomph
     void clear();
 
     /// Return the number of rows of the matrix
-    inline unsigned long nrow() const
+    inline unsigned long nrow() const override
     {
       return DistributableLinearAlgebraObject::nrow();
     }
 
     /// Return the number of columns of the matrix
-    inline unsigned long ncol() const
+    inline unsigned long ncol() const override
     {
       return CR_matrix.ncol();
     }
@@ -1013,14 +1013,14 @@ namespace oomph
     /// Output the "bottom right" entry regardless of it being
     /// zero or not (this allows automatic detection of matrix size in
     /// e.g. matlab, python).
-    void output_bottom_right_zero_helper(std::ostream& outfile) const
+    void output_bottom_right_zero_helper(std::ostream& outfile) const override
     {
       CR_matrix.output_bottom_right_zero_helper(outfile);
     }
 
     /// Indexed output function to print a matrix to the
     /// stream outfile as i,j,a(i,j) for a(i,j)!=0 only.
-    void sparse_indexed_output_helper(std::ostream& outfile) const
+    void sparse_indexed_output_helper(std::ostream& outfile) const override
     {
       CR_matrix.sparse_indexed_output_helper(outfile);
     }
@@ -1051,7 +1051,7 @@ namespace oomph
     /// Overload the round-bracket access operator for read-only access. In a
     /// distributed matrix i refers to the local row index.
     inline double operator()(const unsigned long& i,
-                             const unsigned long& j) const
+                             const unsigned long& j) const override
     {
       return CR_matrix.get_entry(i, j);
     }
@@ -1106,10 +1106,10 @@ namespace oomph
     virtual void lubksub(DoubleVector& rhs);
 
     /// Multiply the matrix by the vector x: soln=Ax
-    void multiply(const DoubleVector& x, DoubleVector& soln) const;
+    void multiply(const DoubleVector& x, DoubleVector& soln) const override;
 
     /// Multiply the  transposed matrix by the vector x: soln=A^T x
-    void multiply_transpose(const DoubleVector& x, DoubleVector& soln) const;
+    void multiply_transpose(const DoubleVector& x, DoubleVector& soln) const override;
 
     /// Function to multiply this matrix by the CRDoubleMatrix matrix_in.
     /// In a serial matrix, there are 4 methods available:
@@ -1292,13 +1292,13 @@ namespace oomph
     void operator=(const DenseDoubleMatrix&) = delete;
 
     /// Return the number of rows of the matrix
-    inline unsigned long nrow() const
+    inline unsigned long nrow() const override
     {
       return DenseMatrix<double>::nrow();
     }
 
     /// Return the number of columns of the matrix
-    inline unsigned long ncol() const
+    inline unsigned long ncol() const override
     {
       return DenseMatrix<double>::ncol();
     }
@@ -1306,7 +1306,7 @@ namespace oomph
     /// Overload the const version of the round-bracket access operator
     /// for read-only access.
     inline double operator()(const unsigned long& i,
-                             const unsigned long& j) const
+                             const unsigned long& j) const override
     {
       return DenseMatrix<double>::get_entry(i, j);
     }
@@ -1319,7 +1319,7 @@ namespace oomph
     }
 
     /// Destructor
-    virtual ~DenseDoubleMatrix();
+    ~DenseDoubleMatrix() override;
 
     /// LU decomposition using DenseLU (default linea solver)
     virtual void ludecompose();
@@ -1339,10 +1339,10 @@ namespace oomph
                                DenseMatrix<double>& eigen_vect) const;
 
     /// Multiply the matrix by the vector x: soln=Ax
-    void multiply(const DoubleVector& x, DoubleVector& soln) const;
+    void multiply(const DoubleVector& x, DoubleVector& soln) const override;
 
     /// Multiply the  transposed matrix by the vector x: soln=A^T x
-    void multiply_transpose(const DoubleVector& x, DoubleVector& soln) const;
+    void multiply_transpose(const DoubleVector& x, DoubleVector& soln) const override;
 
     /// For every row, find the maximum absolute value of the
     /// entries in this row. Set all values that are less than alpha times
@@ -2641,7 +2641,7 @@ namespace oomph
 
 
     /// Destructor, delete any allocated memory
-    virtual ~CCMatrix()
+    ~CCMatrix() override
     {
       delete[] Row_index;
       Row_index = 0;
@@ -2715,7 +2715,7 @@ namespace oomph
     /// Output the "bottom right" entry regardless of it being
     /// zero or not (this allows automatic detection of matrix size in
     /// e.g. matlab, python).
-    void output_bottom_right_zero_helper(std::ostream& outfile) const
+    void output_bottom_right_zero_helper(std::ostream& outfile) const override
     {
       int last_row = this->N - 1;
       int last_col_local = this->M - 1;
@@ -2732,7 +2732,7 @@ namespace oomph
 
     /// Indexed output function to print a matrix to the
     /// stream outfile as i,j,a(i,j) for a(i,j)!=0 only.
-    void sparse_indexed_output_helper(std::ostream& outfile) const
+    void sparse_indexed_output_helper(std::ostream& outfile) const override
     {
       for (unsigned long j = 0; j < this->N; j++)
       {
@@ -2811,16 +2811,16 @@ namespace oomph
     void operator=(const CCDoubleMatrix&) = delete;
 
     /// Destructor: Kill the LU factors if they have been setup.
-    virtual ~CCDoubleMatrix();
+    ~CCDoubleMatrix() override;
 
     /// Return the number of rows of the matrix
-    inline unsigned long nrow() const
+    inline unsigned long nrow() const override
     {
       return CCMatrix<double>::nrow();
     }
 
     /// Return the number of columns of the matrix
-    inline unsigned long ncol() const
+    inline unsigned long ncol() const override
     {
       return CCMatrix<double>::ncol();
     }
@@ -2828,7 +2828,7 @@ namespace oomph
     /// Overload the round-bracket access operator to provide
     /// read-only (const) access to the data
     inline double operator()(const unsigned long& i,
-                             const unsigned long& j) const
+                             const unsigned long& j) const override
     {
       return CCMatrix<double>::get_entry(i, j);
     }
@@ -2840,10 +2840,10 @@ namespace oomph
     virtual void lubksub(DoubleVector& rhs);
 
     /// Multiply the matrix by the vector x: soln=Ax
-    void multiply(const DoubleVector& x, DoubleVector& soln) const;
+    void multiply(const DoubleVector& x, DoubleVector& soln) const override;
 
     /// Multiply the  transposed matrix by the vector x: soln=A^T x
-    void multiply_transpose(const DoubleVector& x, DoubleVector& soln) const;
+    void multiply_transpose(const DoubleVector& x, DoubleVector& soln) const override;
 
 
     /// Function to multiply this matrix by the CCDoubleMatrix matrix_in

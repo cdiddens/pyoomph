@@ -188,7 +188,7 @@ namespace oomph
     }
 
     /// Destructor
-    ~DoubleVectorWithHaloEntries() {}
+    ~DoubleVectorWithHaloEntries() override {}
 
 
     /// Copy constructor from any DoubleVector

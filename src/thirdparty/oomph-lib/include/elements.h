@@ -1733,7 +1733,7 @@ namespace oomph
     /// jacobian matrix have been initialised to zero. The default
     /// is to use finite differences to calculate the jacobian
     void fill_in_contribution_to_jacobian(Vector<double>& residuals,
-                                          DenseMatrix<double>& jacobian)
+                                          DenseMatrix<double>& jacobian) override
     {
       // Add the contribution to the residuals
       fill_in_contribution_to_residuals(residuals);
@@ -1796,7 +1796,7 @@ namespace oomph
     /// for shape function storage. Internal and external data get
     /// wiped by the GeneralisedElement destructor; nodes get
     /// killed in mesh destructor.
-    virtual ~FiniteElement();
+    ~FiniteElement() override;
 
     /// Broken copy constructor
     FiniteElement(const FiniteElement&) = delete;
@@ -2145,8 +2145,8 @@ namespace oomph
     /// written to the output stream by Data::describe_dofs(...); it is
     /// typically built up incrementally as we descend through the call
     /// hierarchy of this function when called from Problem::describe_dofs(...)
-    virtual void describe_local_dofs(std::ostream& out,
-                                     const std::string& current_string) const;
+    void describe_local_dofs(std::ostream& out,
+                                     const std::string& current_string) const override;
 
     /// Function to describe the local dofs of the element[s]. The
     /// ostream specifies the output stream to which the description is written;
@@ -2161,8 +2161,8 @@ namespace oomph
     /// numbers. If the boolean argument is true then pointers to the degrees
     /// of freedom associated with each equation number are stored locally
     /// in the array Dof_pt.
-    virtual inline void assign_all_generic_local_eqn_numbers(
-      const bool& store_local_dof_pt)
+    inline void assign_all_generic_local_eqn_numbers(
+      const bool& store_local_dof_pt) override
     {
       // GeneralisedElement's version assigns internal and external data
       GeneralisedElement::assign_all_generic_local_eqn_numbers(
@@ -2657,14 +2657,14 @@ namespace oomph
 
     /// A standard FiniteElement is fixed, so there are no geometric
     /// data when viewed in its GeomObject incarnation
-    inline unsigned ngeom_data() const
+    inline unsigned ngeom_data() const override
     {
       return 0;
     }
 
     /// A standard FiniteElement is fixed, so there are no geometric
     /// data when viewed in its GeomObject incarnation
-    inline Data* geom_data_pt(const unsigned& j)
+    inline Data* geom_data_pt(const unsigned& j) override
     {
       return 0;
     }
@@ -2673,7 +2673,7 @@ namespace oomph
     /// its incarnation as a GeomObject, r(zeta).
     /// The position is given by the Eulerian coordinate and the intrinsic
     /// coordinate (zeta) is the local coordinate of the element (s).
-    void position(const Vector<double>& zeta, Vector<double>& r) const
+    void position(const Vector<double>& zeta, Vector<double>& r) const override
     {
       this->interpolated_x(zeta, r);
     }
@@ -2688,7 +2688,7 @@ namespace oomph
     /// if genuine time-dependence is required.
     void position(const unsigned& t,
                   const Vector<double>& zeta,
-                  Vector<double>& r) const
+                  Vector<double>& r) const override
     {
       this->interpolated_x(t, zeta, r);
     }
@@ -2700,7 +2700,7 @@ namespace oomph
     /// Call the t-th time derivative of the FE-interpolated Eulerian coordinate
     void dposition_dt(const Vector<double>& zeta,
                       const unsigned& t,
-                      Vector<double>& drdt)
+                      Vector<double>& drdt) override
     {
       this->interpolated_dxdt(zeta, t, drdt);
     }
@@ -2739,7 +2739,7 @@ namespace oomph
     /// to be established between elements on different Meshes covering the same
     /// curvilinear domain in cases where one element is much coarser than the
     /// other.
-    void interpolated_zeta(const Vector<double>& s, Vector<double>& zeta) const;
+    void interpolated_zeta(const Vector<double>& s, Vector<double>& zeta) const override;
 
     /// For a given value of zeta, the "global" intrinsic coordinate of
     /// a mesh of FiniteElements represented as a compound geometric object,
@@ -2753,7 +2753,7 @@ namespace oomph
     void locate_zeta(const Vector<double>& zeta,
                      GeomObject*& geom_object_pt,
                      Vector<double>& s,
-                     const bool& use_coordinate_as_initial_guess = false);
+                     const bool& use_coordinate_as_initial_guess = false) override;
 
 
     /// Update the positions of all nodes in the element using
@@ -3364,7 +3364,7 @@ namespace oomph
 
     /// Self-test: Check inversion of element & do self-test for
     /// GeneralisedElement. Return 0 if OK.
-    virtual unsigned self_test();
+    unsigned self_test() override;
 
     /// Get the number of the ith node on face face_index (in the bulk node
     /// vector).
@@ -3456,10 +3456,10 @@ namespace oomph
     /*void operator=(const PointElement&) = delete;*/
 
     /// Calculate the geometric shape functions at local coordinate s
-    void shape(const Vector<double>& s, Shape& psi) const;
+    void shape(const Vector<double>& s, Shape& psi) const override;
 
     /// Get local coordinates of node j in the element; vector sets its own size
-    void local_coordinate_of_node(const unsigned& j, Vector<double>& s) const
+    void local_coordinate_of_node(const unsigned& j, Vector<double>& s) const override
     {
       s.resize(0);
     }
@@ -3595,7 +3595,7 @@ namespace oomph
     }
 
     /// Destructor to clean up any allocated memory
-    virtual ~SolidFiniteElement();
+    ~SolidFiniteElement() override;
 
     /// Broken copy constructor
     SolidFiniteElement(const SolidFiniteElement&) = delete;
@@ -3605,14 +3605,14 @@ namespace oomph
 
     /// The number of geometric data affecting a SolidFiniteElemnet is
     /// the same as the number of nodes (one variable position data per node)
-    inline unsigned ngeom_data() const
+    inline unsigned ngeom_data() const override
     {
       return nnode();
     }
 
     /// Return pointer to the j-th Data item that the object's
     /// shape depends on. (Redirects to the nodes' positional Data).
-    inline Data* geom_data_pt(const unsigned& j)
+    inline Data* geom_data_pt(const unsigned& j) override
     {
       return static_cast<SolidNode*>(node_pt(j))->variable_position_pt();
     }
@@ -3621,7 +3621,7 @@ namespace oomph
     /// by adding the position Data to the set that's passed in.
     /// (This functionality is required in FSI problems; set is used to
     /// avoid double counting).
-    void identify_geometric_data(std::set<Data*>& geometric_data_pt)
+    void identify_geometric_data(std::set<Data*>& geometric_data_pt) override
     {
       // Loop over the node update data and add to the set
       const unsigned n_node = this->nnode();
@@ -3641,7 +3641,7 @@ namespace oomph
     /// same shape functions as the eulerian coordinate.
     inline double zeta_nodal(const unsigned& n,
                              const unsigned& k,
-                             const unsigned& i) const
+                             const unsigned& i) const override
     {
       return lagrangian_position_gen(n, k, i);
     }
@@ -3677,7 +3677,7 @@ namespace oomph
     /// "current" Domain/MacroElement representation of it's boundary.
     /// Can be overloaded in derived classes to perform additional
     /// tasks
-    virtual void set_macro_elem_pt(MacroElement* macro_elem_pt)
+    void set_macro_elem_pt(MacroElement* macro_elem_pt) override
     {
       Macro_elem_pt = macro_elem_pt;
       Undeformed_macro_elem_pt = macro_elem_pt;
@@ -3788,7 +3788,7 @@ namespace oomph
     }
 
     /// Construct the local node n and return a pointer to it.
-    Node* construct_node(const unsigned& n)
+    Node* construct_node(const unsigned& n) override
     {
       // Construct a solid node and assign it to the local node pointer vector.
       // The dimension and number of values are taken from internal element data
@@ -3806,7 +3806,7 @@ namespace oomph
     /// Construct the local node n and return
     /// a pointer to it. Additionally, create storage for `history'
     /// values as required by timestepper
-    Node* construct_node(const unsigned& n, TimeStepper* const& time_stepper_pt)
+    Node* construct_node(const unsigned& n, TimeStepper* const& time_stepper_pt) override
     {
       // Construct a solid node and assign it to the local node pointer vector
       // The dimension and number of values are taken from internal element data
@@ -3824,7 +3824,7 @@ namespace oomph
     /// Construct the local node n and return a pointer to it.
     /// in the case when it is a boundary node; that is it MAY be
     /// located on a Mesh boundary
-    Node* construct_boundary_node(const unsigned& n)
+    Node* construct_boundary_node(const unsigned& n) override
     {
       // Construct a solid node and assign it to the local node pointer vector.
       // The dimension and number of values are taken from internal element data
@@ -3844,7 +3844,7 @@ namespace oomph
     /// on a boundary. Additionally, create storage for `history'
     /// values as required by timestepper
     Node* construct_boundary_node(const unsigned& n,
-                                  TimeStepper* const& time_stepper_pt)
+                                  TimeStepper* const& time_stepper_pt) override
     {
       // Construct a solid node and assign it to the local node pointer vector
       // The dimension and number of values are taken from internal element data
@@ -3864,8 +3864,8 @@ namespace oomph
     /// It remains virtual so that it can be overloaded
     /// by RefineableSolidElements. If the boolean argument is true
     /// then the degrees of freedom are stored in Dof_pt
-    virtual inline void assign_all_generic_local_eqn_numbers(
-      const bool& store_local_dof_pt)
+    inline void assign_all_generic_local_eqn_numbers(
+      const bool& store_local_dof_pt) override
     {
       // Call the standard finite element equation numbering
       //(internal, external and nodal data).
@@ -3883,7 +3883,7 @@ namespace oomph
     /// call hierarchy of this function when called from
     /// Problem::describe_dofs(...)
     void describe_local_dofs(std::ostream& out,
-                             const std::string& current_string) const;
+                             const std::string& current_string) const override;
 
     /// Return i-th Lagrangian coordinate at local node n without using
     /// the hanging representation
@@ -4048,7 +4048,7 @@ namespace oomph
 
     /// Calculate the L2 norm of the displacement u=R-r to overload the
     /// compute_norm function in the GeneralisedElement base class
-    void compute_norm(double& el_norm);
+    void compute_norm(double& el_norm) override;
 
   protected:
     /// Helper function to fill in the residuals and (if flag==1) the
@@ -4183,7 +4183,7 @@ namespace oomph
     /// use finite
     /// differences to calculate the solid residuals by default
     void fill_in_contribution_to_jacobian(Vector<double>& residuals,
-                                          DenseMatrix<double>& jacobian)
+                                          DenseMatrix<double>& jacobian) override
     {
       // Add the contribution to the residuals
       fill_in_contribution_to_residuals(residuals);
@@ -4462,7 +4462,7 @@ namespace oomph
     }
 
     /// Empty virtual destructor
-    virtual ~FaceElement() {}
+    ~FaceElement() override {}
 
 
     /// Broken copy constructor
@@ -4496,7 +4496,7 @@ namespace oomph
     /// been stored at the nodes.
     double zeta_nodal(const unsigned& n,
                       const unsigned& k,
-                      const unsigned& i) const
+                      const unsigned& i) const override
     {
       // Vector in which to hold the intrinsic coordinate
       Vector<double> zeta(this->dim());
@@ -4512,12 +4512,12 @@ namespace oomph
     /// Return the Jacobian of mapping from local to global
     /// coordinates at local position s.
     /// Overloaded from FiniteElement.
-    double J_eulerian(const Vector<double>& s) const;
+    double J_eulerian(const Vector<double>& s) const override;
 
     /// Return the Jacobian of the mapping from local to global
     /// coordinates at the ipt-th integration point
     /// Overloaded from FiniteElement.
-    double J_eulerian_at_knot(const unsigned& ipt) const;
+    double J_eulerian_at_knot(const unsigned& ipt) const override;
 
     /// Check that Jacobian of mapping between local and Eulerian
     /// coordinates at all integration points is positive.
@@ -4525,7 +4525,7 @@ namespace oomph
 
     /// Return FE interpolated coordinate x[i] at local coordinate s.
     /// Overloaded to get information from bulk.
-    double interpolated_x(const Vector<double>& s, const unsigned& i) const
+    double interpolated_x(const Vector<double>& s, const unsigned& i) const override
     {
       // Local coordinates in bulk element
       Vector<double> s_bulk(dim() + 1);
@@ -4540,7 +4540,7 @@ namespace oomph
     /// Overloaded to get information from bulk.
     double interpolated_x(const unsigned& t,
                           const Vector<double>& s,
-                          const unsigned& i) const
+                          const unsigned& i) const override
     {
       // Local coordinates in bulk element
       Vector<double> s_bulk(dim() + 1);
@@ -4552,7 +4552,7 @@ namespace oomph
 
     /// Return FE interpolated position x[] at local coordinate s as
     /// Vector Overloaded to get information from bulk.
-    void interpolated_x(const Vector<double>& s, Vector<double>& x) const
+    void interpolated_x(const Vector<double>& s, Vector<double>& x) const override
     {
       // Local coordinates in bulk element
       Vector<double> s_bulk(dim() + 1);
@@ -4567,7 +4567,7 @@ namespace oomph
     /// Overloaded to get information from bulk.
     void interpolated_x(const unsigned& t,
                         const Vector<double>& s,
-                        Vector<double>& x) const
+                        Vector<double>& x) const override
     {
       // Local coordinates in bulk element
       Vector<double> s_bulk(dim() + 1);
@@ -4582,7 +4582,7 @@ namespace oomph
     /// local coordinate s. Overloaded to get information from bulk.
     double interpolated_dxdt(const Vector<double>& s,
                              const unsigned& i,
-                             const unsigned& t)
+                             const unsigned& t) override
     {
       // Local coordinates in bulk element
       Vector<double> s_bulk(dim() + 1);
@@ -4597,7 +4597,7 @@ namespace oomph
     /// local coordinate s.  Overloaded to get information from bulk.
     void interpolated_dxdt(const Vector<double>& s,
                            const unsigned& t,
-                           Vector<double>& dxdt)
+                           Vector<double>& dxdt) override
     {
       // Local coordinates in bulk element
       Vector<double> s_bulk(dim() + 1);
@@ -4926,7 +4926,7 @@ namespace oomph
     /// and FaceElements overload zeta_nodal
     double zeta_nodal(const unsigned& n,
                       const unsigned& k,
-                      const unsigned& i) const
+                      const unsigned& i) const override
     {
       return FaceElement::zeta_nodal(n, k, i);
     }
@@ -4940,7 +4940,7 @@ namespace oomph
     /// in the FaceElement. This may confuse you if you (wrongly!) believe that
     /// in a 1D SolidElement there should only a single Lagrangian
     /// coordinate, namely xi_0!
-    double interpolated_xi(const Vector<double>& s, const unsigned& i) const
+    double interpolated_xi(const Vector<double>& s, const unsigned& i) const override
     {
       // Local coordinates in bulk element
       Vector<double> s_bulk(dim() + 1);
@@ -4960,7 +4960,7 @@ namespace oomph
     /// in the FaceElement. This may confuse you if you (wrongly!) believe that
     /// in a 1D SolidElement there should only a single Lagrangian
     /// coordinate, namely xi_0!
-    void interpolated_xi(const Vector<double>& s, Vector<double>& xi) const
+    void interpolated_xi(const Vector<double>& s, Vector<double>& xi) const override
     {
       // Local coordinates in bulk element
       Vector<double> s_bulk(dim() + 1);
@@ -5039,13 +5039,13 @@ namespace oomph
     /// the FaceElement representation, by default
     double zeta_nodal(const unsigned& n,
                       const unsigned& k,
-                      const unsigned& i) const
+                      const unsigned& i) const override
     {
       return FaceElement::zeta_nodal(n, k, i);
     }
 
     /// Output nodal coordinates
-    void output(std::ostream& outfile)
+    void output(std::ostream& outfile) override
     {
       outfile << "ZONE" << std::endl;
       unsigned nnod = nnode();
@@ -5062,19 +5062,19 @@ namespace oomph
     }
 
     /// Output at n_plot points
-    void output(std::ostream& outfile, const unsigned& n_plot)
+    void output(std::ostream& outfile, const unsigned& n_plot) override
     {
       FiniteElement::output(outfile, n_plot);
     }
 
     /// C-style output
-    void output(FILE* file_pt)
+    void output(FILE* file_pt) override
     {
       FiniteElement::output(file_pt);
     }
 
     /// C_style output at n_plot points
-    void output(FILE* file_pt, const unsigned& n_plot)
+    void output(FILE* file_pt, const unsigned& n_plot) override
     {
       FiniteElement::output(file_pt, n_plot);
     }

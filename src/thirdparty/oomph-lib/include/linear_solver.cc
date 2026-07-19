@@ -265,19 +265,15 @@ namespace oomph
     // Note that we need to use the mantissa, exponent formulation to
     // avoid underflow errors
     double determinant_mantissa = 1.0;
-    int determinant_exponent = 0, iexp;
+    int iexp;
     for (unsigned i = 0; i < n; i++)
     {
       // Multiply by the next diagonal entry's mantissa
       // and return the exponent
       determinant_mantissa *= frexp(LU_factors[n * i + i], &iexp);
 
-      // Add the new exponent to the current exponent
-      determinant_exponent += iexp;
-
       // normalise
       determinant_mantissa = frexp(determinant_mantissa, &iexp);
-      determinant_exponent += iexp;
     }
 
     // If paranoid issue a warning that the matrix is near singular

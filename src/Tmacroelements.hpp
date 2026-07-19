@@ -71,34 +71,34 @@ namespace oomph
       }
 
       /// Empty destructor
-      virtual ~TMacroElement(){};
+      ~TMacroElement() override{};
 
       // Stub: not needed for triangular macro elements, calling it is a bug
-      void output(const unsigned &, std::ostream &, const unsigned &)
+      void output(const unsigned &, std::ostream &, const unsigned &) override
       {
          throw_runtime_error("Not implemented");
       }
 
       // Stub: not needed for triangular macro elements, calling it is a bug
-      void output_macro_element_boundaries(std::ostream &, const unsigned &)
+      void output_macro_element_boundaries(std::ostream &, const unsigned &) override
       {
          throw_runtime_error("Not implemented");
       }
 
       // Stub: mapping from macro-element to Eulerian coordinates is unused here
-      void macro_map(const unsigned &, const Vector<double> &, Vector<double> &)
+      void macro_map(const unsigned &, const Vector<double> &, Vector<double> &) override
       {
          throw_runtime_error("Not implemented");
       }
 
       // Stub: Jacobian of the macro-to-Eulerian map is unused here
-      virtual void assemble_macro_to_eulerian_jacobian(const unsigned &, const Vector<double> &, DenseMatrix<double> &)
+      void assemble_macro_to_eulerian_jacobian(const unsigned &, const Vector<double> &, DenseMatrix<double> &) override
       {
          throw_runtime_error("Not implemented");
       }
 
       // Stub: second derivative of the macro-to-Eulerian map is unused here
-      virtual void assemble_macro_to_eulerian_jacobian2(const unsigned &, const Vector<double> &, DenseMatrix<double> &)
+      void assemble_macro_to_eulerian_jacobian2(const unsigned &, const Vector<double> &, DenseMatrix<double> &) override
       {
          throw_runtime_error("Not implemented");
       }

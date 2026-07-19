@@ -38,7 +38,7 @@ namespace pyoomph
 	class GeomObject : public oomph::GeomObject
 	{
 	public:
-		void position(const oomph::Vector<double> &zeta, oomph::Vector<double> &r) const
+		void position(const oomph::Vector<double> &zeta, oomph::Vector<double> &r) const override
 		{
 			throw_runtime_error("GeomObject::position not specialised");
 		}
@@ -51,7 +51,7 @@ namespace pyoomph
 	public:
 		using GeomObject::GeomObject;
 
-		void position(const oomph::Vector<double> &zeta, oomph::Vector<double> &r) const
+		void position(const oomph::Vector<double> &zeta, oomph::Vector<double> &r) const override
 		{
 			PYBIND11_OVERLOAD(void, GeomObject, position, zeta, r);
 		}
@@ -86,7 +86,7 @@ namespace pyoomph
 		// oomph-lib-facing overload: copies s/f between oomph::Vector<double> and the reusable
 		// numpy buffers PyS/PyF (resizing them only if the dimensionality changed), then calls
 		// the numpy-array-based overload above.
-		void macro_element_boundary(const unsigned &t, const unsigned &i_macro, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f)
+		void macro_element_boundary(const unsigned &t, const unsigned &i_macro, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f) override
 		{
 			if (PyS_buff.shape[0] != (int)s.size())
 			{
@@ -113,7 +113,7 @@ namespace pyoomph
 	{
 	public:
 		using Domain::Domain;
-		void macro_element_boundary(const unsigned &t, const unsigned &i_macro, const unsigned &i_direct, const py::array_t<double> &s, py::array_t<double> &f)
+		void macro_element_boundary(const unsigned &t, const unsigned &i_macro, const unsigned &i_direct, const py::array_t<double> &s, py::array_t<double> &f) override
 		{
 			PYBIND11_OVERLOAD(void, Domain, macro_element_boundary, t, i_macro, i_direct, s, f);
 		}

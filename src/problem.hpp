@@ -288,7 +288,7 @@ namespace pyoomph
     //   const FieldDescriptor * assert_field(const std::string & name,const FieldSpace & space );
 
     oomph::CRDoubleMatrix *eigen_JacobianMatrixPt, *eigen_MassMatrixPt; // Cached Jacobian/mass matrices from the last assemble_eigenproblem_matrices() call
-    double global_temporal_error_norm(); // Combines the per-mesh temporal error norm contributions into a single global error estimate used for adaptive timestepping
+    double global_temporal_error_norm() override; // Combines the per-mesh temporal error norm contributions into a single global error estimate used for adaptive timestepping
     std::string bifurcation_tracking_mode = ""; // "", "fold", "pitchfork", "hopf", "azimuthal", ... - empty means no bifurcation tracking is active
     std::string _solved_residual = ""; // Name of the currently active residual (multi-residual problems can switch which residual/Jacobian assign_eqn_numbers/get_jacobian operate on); "" means the default combined residual
     bool symmetric_hessian_assembly=true; // Whether the Hessian tensor assembly exploits the symmetry of the second derivative (faster, but requires the underlying form to actually be symmetric)
@@ -409,10 +409,10 @@ namespace pyoomph
 
     void ensure_dummy_values_to_be_dummy(); // Resets helper/dummy Data values (e.g. unused position dofs) back to their sentinel dummy values after a solve
     void unpin_Dirichlet_dofs_for_matrix_manipulation(); // Counterpart to the matrix-manipulation Dirichlet strategy: temporarily unpins the Dirichlet dofs so they are assembled as normal dofs
-    virtual void actions_after_adapt();
+    void actions_after_adapt() override;
     unsigned long assign_eqn_numbers(const bool& assign_local_eqn_numbers = true) override; // Also (re)builds the defined-field list and pins fields with empty Jacobian rows/columns
     virtual void setup_pinning() {} // Hook for problem-specific pinning of dofs, called during equation numbering; overridden in Python
-    virtual void set_initial_condition(); // Hook to set up initial conditions; overridden in Python (default calls the mesh-level setup_initial_conditions)
+    void set_initial_condition() override; // Hook to set up initial conditions; overridden in Python (default calls the mesh-level setup_initial_conditions)
     virtual std::tuple<std::vector<double>, std::vector<bool>> get_current_dofs(); // Current dof values and, for each, whether it is pinned
     virtual std::vector<double> get_history_dofs(unsigned t); // Dof values at history time level t
     virtual std::vector<double> get_current_pinned_values(bool with_pos); // Values of all pinned Data (optionally including nodal positions), used to save/restore state independent of the dof vector
@@ -445,8 +445,8 @@ namespace pyoomph
     // Expose these to be public
     virtual void actions_after_change_in_global_parameter(const std::string &  ) {}
     virtual void actions_after_parameter_increase(const  std::string &  ) {}
-    virtual void actions_after_change_in_bifurcation_parameter() {}
-    virtual void actions_before_newton_convergence_check() {}
+    void actions_after_change_in_bifurcation_parameter() override {}
+    void actions_before_newton_convergence_check() override {}
 
     virtual void _build_mesh() { throw_runtime_error("You must implement the function _build_mesh for load_balancing"); } // Overridden in Python to (re)build the mesh; required for MPI load balancing
     #ifdef OOMPH_HAS_MPI
@@ -492,7 +492,7 @@ namespace pyoomph
     Problem();
     virtual void unload_all_dlls(); // Closes all loaded DynamicBulkElementCode shared libraries (called on destruction / explicit cleanup, e.g. before recompiling equations)
     virtual unsigned get_max_dt_order() const; // Maximum time-derivative order required by any of the loaded element codes (determines how many history values the timestepper must keep)
-    virtual ~Problem();
+    ~Problem() override;
     virtual CCompiler *get_ccompiler() { return compiler; }
     virtual void set_ccompiler(CCompiler *comp) { compiler = comp; }
     virtual void assemble_eigenproblem_matrices(oomph::CRDoubleMatrix *&M, oomph::CRDoubleMatrix *&J, double sigma_r); // Assembles the mass matrix M and (shifted) Jacobian J for a generalized eigenvalue problem J*v = sigma*M*v around shift sigma_r
@@ -522,9 +522,9 @@ namespace pyoomph
     // Top-level entry points for residual/Jacobian/parameter-derivative assembly: dispatch between
     // normal elemental assembly and the custom-residual-Jacobian path (use_custom_residual_jacobian),
     // and additionally apply the matrix-manipulation Dirichlet enforcement when that strategy is active.
-    virtual void get_residuals(oomph::DoubleVector &residuals);
-    virtual void get_jacobian(oomph::DoubleVector &residuals,oomph::CRDoubleMatrix &jacobian);
-    virtual void get_derivative_wrt_global_parameter(double* const& parameter_pt,oomph::DoubleVector& result);
+    void get_residuals(oomph::DoubleVector &residuals) override;
+    void get_jacobian(oomph::DoubleVector &residuals,oomph::CRDoubleMatrix &jacobian) override;
+    void get_derivative_wrt_global_parameter(double* const& parameter_pt,oomph::DoubleVector& result) override;
     virtual void remove_dirichlets_by_matrix_manipulation(oomph::DoubleVector &residuals,oomph::CRDoubleMatrix *jacobian=NULL); // Zeroes out rows/columns of Dirichlet-pinned dofs and sets the residual to the constraint violation, in-place on residuals/jacobian
 
     virtual SparseRank3Tensor assemble_hessian_tensor(bool symmetric); // Assembles the full second-derivative (Hessian) tensor d^2(residual)/d(dof)^2, needed e.g. for bifurcation normal-form/branch-switching computations

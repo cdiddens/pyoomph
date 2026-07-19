@@ -100,7 +100,7 @@ namespace oomph
     /*void operator=(const QElementBase&) = delete;*/
 
     /// Destructor: Kill storage for macro element reference coords
-    virtual ~QElementBase()
+    ~QElementBase() override
     {
       // Can be deleted blindly as they were nulled initially
       delete S_macro_ll_pt;
@@ -110,7 +110,7 @@ namespace oomph
     }
 
     /// Check whether the local coordinate are valid or not
-    bool local_coord_is_valid(const Vector<double>& s)
+    bool local_coord_is_valid(const Vector<double>& s) override
     {
       unsigned ncoord = dim();
       for (unsigned i = 0; i < ncoord; i++)
@@ -126,7 +126,7 @@ namespace oomph
 
     /// Adjust local coordinates so that they're located inside
     /// the element
-    void move_local_coord_back_into_element(Vector<double>& s) const
+    void move_local_coord_back_into_element(Vector<double>& s) const override
     {
       unsigned ncoord = dim();
       for (unsigned i = 0; i < ncoord; i++)
@@ -140,7 +140,7 @@ namespace oomph
 
     /// Set pointer to macro element also sets up storage for the
     /// reference coordinates and initialises them
-    virtual void set_macro_elem_pt(MacroElement* macro_elem_pt)
+    void set_macro_elem_pt(MacroElement* macro_elem_pt) override
     {
       // Get the spatial dimension (= number of local and macro element coords)
       unsigned n_dim = dim();
@@ -247,7 +247,7 @@ namespace oomph
     /// Global coordinates as function of local coordinates.
     /// using the macro element representation
     void get_x_from_macro_element(const Vector<double>& s,
-                                  Vector<double>& x) const
+                                  Vector<double>& x) const override
     {
       // Check that there is a macro element
       if (Macro_elem_pt == 0)
@@ -273,7 +273,7 @@ namespace oomph
     /// using the macro element representation
     void get_x_from_macro_element(const unsigned& t,
                                   const Vector<double>& s,
-                                  Vector<double>& x)
+                                  Vector<double>& x) override
     {
       // Check that there is a macro element
       if (Macro_elem_pt == 0)
@@ -296,7 +296,7 @@ namespace oomph
 
     /// Return number of nodes on one face of the element. Always
     /// nnode_1d^(el_dim - 1).
-    unsigned nnode_on_face() const
+    unsigned nnode_on_face() const override
     {
       // c++ doesn't have pow(int, int) so we have to use all these casts...
       return static_cast<unsigned>(std::pow(static_cast<double>(nnode_1d()),
@@ -304,7 +304,7 @@ namespace oomph
     }
 
     /// It's a Q element!
-    ElementGeometry::ElementGeometry element_geometry() const
+    ElementGeometry::ElementGeometry element_geometry() const override
     {
       return ElementGeometry::Q;
     }
@@ -346,7 +346,7 @@ namespace oomph
     /// set_undeformed_macro_elem_pt(...) if the deformation of
     /// the solid body is driven by a deformation of the
     /// "current" Domain/MacroElement representation of it's boundary.
-    virtual void set_macro_elem_pt(MacroElement* macro_elem_pt)
+    void set_macro_elem_pt(MacroElement* macro_elem_pt) override
     {
       // Call the general Q version which sets up the storage
       // for the reference coordinates
@@ -357,8 +357,8 @@ namespace oomph
     }
 
     /// Set pointers to "current" and "undeformed" MacroElements.
-    virtual void set_macro_elem_pt(MacroElement* macro_elem_pt,
-                                   MacroElement* undeformed_macro_elem_pt)
+    void set_macro_elem_pt(MacroElement* macro_elem_pt,
+                                   MacroElement* undeformed_macro_elem_pt) override
     {
       // Call the general Q version which sets up the storage
       // for the reference coordinates
@@ -380,7 +380,7 @@ namespace oomph
                       Vector<double>& x_fe,
                       Vector<double>& x,
                       Vector<double>& xi_fe,
-                      Vector<double>& xi) const
+                      Vector<double>& xi) const override
     {
       // Lagrangian coordinate: Directly from
       // underlying FE representation
@@ -469,10 +469,10 @@ namespace oomph
     LineElementBase() {}
 
     /// Number of vertex nodes in the element
-    virtual unsigned nvertex_node() const = 0;
+    unsigned nvertex_node() const override = 0;
 
     /// Pointer to the j-th vertex node in the element
-    virtual Node* vertex_node_pt(const unsigned& j) const = 0;
+    Node* vertex_node_pt(const unsigned& j) const override = 0;
   };
 
   //=======================================================================
@@ -508,13 +508,13 @@ namespace oomph
     /*void operator=(const QElement&) = delete;*/
 
     /// Calculate the geometric shape functions at local coordinate s
-    void shape(const Vector<double>& s, Shape& psi) const;
+    void shape(const Vector<double>& s, Shape& psi) const override;
 
     /// Compute the  geometric shape functions and
     /// derivatives w.r.t. local coordinates at local coordinate s
     void dshape_local(const Vector<double>& s,
                       Shape& psi,
-                      DShape& dpsids) const;
+                      DShape& dpsids) const override;
 
     /// Compute the geometric shape functions, derivatives and
     /// second derivatives w.r.t. local coordinates at local coordinate s
@@ -522,37 +522,37 @@ namespace oomph
     void d2shape_local(const Vector<double>& s,
                        Shape& psi,
                        DShape& dpsids,
-                       DShape& d2psids) const;
+                       DShape& d2psids) const override;
 
     /// Overload the template-free interface for the calculation of
     /// inverse jacobian matrix. This is a one-dimensional element, so
     /// use the 1D version.
     double invert_jacobian_mapping(const DenseMatrix<double>& jacobian,
-                                   DenseMatrix<double>& inverse_jacobian) const
+                                   DenseMatrix<double>& inverse_jacobian) const override
     {
       return FiniteElement::invert_jacobian<1>(jacobian, inverse_jacobian);
     }
 
     /// Min. value of local coordinate
-    double s_min() const
+    double s_min() const override
     {
       return -1.0;
     }
 
     /// Max. value of local coordinate
-    double s_max() const
+    double s_max() const override
     {
       return 1.0;
     }
 
     /// Number of vertex nodes in the element
-    unsigned nvertex_node() const
+    unsigned nvertex_node() const override
     {
       return 2;
     }
 
     /// Pointer to the j-th vertex node in the element
-    Node* vertex_node_pt(const unsigned& j) const
+    Node* vertex_node_pt(const unsigned& j) const override
     {
       unsigned n_node_1d = nnode_1d();
       Node* nod_pt;
@@ -577,7 +577,7 @@ namespace oomph
     }
 
     /// Get local coordinates of node j in the element; vector sets its own size
-    void local_coordinate_of_node(const unsigned& j, Vector<double>& s) const
+    void local_coordinate_of_node(const unsigned& j, Vector<double>& s) const override
     {
       s.resize(1);
       s[0] = this->s_min() +
@@ -586,7 +586,7 @@ namespace oomph
 
 
     /// Get the local fraction of node j in the element
-    void local_fraction_of_node(const unsigned& j, Vector<double>& s_fraction)
+    void local_fraction_of_node(const unsigned& j, Vector<double>& s_fraction) override
     {
       s_fraction.resize(1);
       s_fraction[0] = double(j) / double(NNODE_1D - 1);
@@ -596,31 +596,31 @@ namespace oomph
     /// This function returns the local fraction of all nodes at the n-th
     /// position in a one dimensional expansion along the i-th local coordinate
     inline double local_one_d_fraction_of_node(const unsigned& n1d,
-                                               const unsigned& i)
+                                               const unsigned& i) override
     {
       // It's just the value of the node divided by the number of 1-D nodes
       return double(n1d) / double(NNODE_1D - 1);
     }
 
     /// Get the node at the specified local coordinate
-    Node* get_node_at_local_coordinate(const Vector<double>& s) const;
+    Node* get_node_at_local_coordinate(const Vector<double>& s) const override;
 
     /// Number of nodes along each element edge
-    unsigned nnode_1d() const
+    unsigned nnode_1d() const override
     {
       return NNODE_1D;
     }
 
     /// Return the number of actual plot points for paraview
     /// plot with parameter nplot.
-    unsigned nplot_points_paraview(const unsigned& nplot) const
+    unsigned nplot_points_paraview(const unsigned& nplot) const override
     {
       return nplot;
     }
 
     /// Return the number of local sub-elements for paraview plot with
     /// parameter nplot.
-    unsigned nsub_elements_paraview(const unsigned& nplot) const
+    unsigned nsub_elements_paraview(const unsigned& nplot) const override
     {
       return (nplot - 1);
     }
@@ -630,7 +630,7 @@ namespace oomph
     /// http://www.vtk.org/VTK/img/file-formats.pdf
     void write_paraview_output_offset_information(std::ofstream& file_out,
                                                   const unsigned& nplot,
-                                                  unsigned& counter) const
+                                                  unsigned& counter) const override
     {
       // Number of local elements we want to plot over
       unsigned plot = nsub_elements_paraview(nplot);
@@ -648,7 +648,7 @@ namespace oomph
     /// http://www.vtk.org/VTK/img/file-formats.pdf
     /// Use type "VTK_LINE" (== 3) for 2D quad elements
     void write_paraview_type(std::ofstream& file_out,
-                             const unsigned& nplot) const
+                             const unsigned& nplot) const override
     {
       unsigned local_loop = nsub_elements_paraview(nplot);
       for (unsigned i = 0; i < local_loop; i++)
@@ -662,7 +662,7 @@ namespace oomph
     /// http://www.vtk.org/VTK/img/file-formats.pdf
     void write_paraview_offsets(std::ofstream& file_out,
                                 const unsigned& nplot,
-                                unsigned& offset_sum) const
+                                unsigned& offset_sum) const override
     {
       // Loop over all local elements and add its offset to the overall
       // offset_sum
@@ -675,16 +675,16 @@ namespace oomph
     }
 
     /// Output
-    void output(std::ostream& outfile);
+    void output(std::ostream& outfile) override;
 
     /// Output at n_plot points
-    void output(std::ostream& outfile, const unsigned& n_plot);
+    void output(std::ostream& outfile, const unsigned& n_plot) override;
 
     /// C-style output
-    void output(FILE* file_pt);
+    void output(FILE* file_pt) override;
 
     /// C_style output at n_plot points
-    void output(FILE* file_pt, const unsigned& n_plot);
+    void output(FILE* file_pt, const unsigned& n_plot) override;
 
 
     ///  Get cector of local coordinates of plot point i (when plotting
@@ -693,7 +693,7 @@ namespace oomph
       const unsigned& i,
       const unsigned& nplot,
       Vector<double>& s,
-      const bool& use_equally_spaced_interior_sample_points = false) const
+      const bool& use_equally_spaced_interior_sample_points = false) const override
     {
       if (nplot > 1)
       {
@@ -714,7 +714,7 @@ namespace oomph
 
     /// Return string for tecplot zone header (when plotting
     /// nplot points in each "coordinate direction)
-    std::string tecplot_zone_string(const unsigned& nplot) const
+    std::string tecplot_zone_string(const unsigned& nplot) const override
     {
       std::ostringstream header;
       header << "ZONE I=" << nplot << "\n";
@@ -723,7 +723,7 @@ namespace oomph
 
     /// Return total number of plot points (when plotting
     /// nplot points in each "coordinate direction)
-    unsigned nplot_points(const unsigned& nplot) const
+    unsigned nplot_points(const unsigned& nplot) const override
     {
       unsigned DIM = 1;
       unsigned np = 1;
@@ -737,7 +737,7 @@ namespace oomph
     /// Get the number of the ith node on face face_index in the bulk node
     /// vector.
     unsigned get_bulk_node_number(const int& face_index,
-                                  const unsigned& i) const
+                                  const unsigned& i) const override
     {
       face_node_number_error_check(i);
 
@@ -758,7 +758,7 @@ namespace oomph
     }
 
     /// Get the sign of the outer unit normal on the face given by face_index.
-    int face_outer_unit_normal_sign(const int& face_index) const
+    int face_outer_unit_normal_sign(const int& face_index) const override
     {
 #ifdef PARANOID
       if (std::abs(face_index) != 1)
@@ -774,7 +774,7 @@ namespace oomph
     /// Get a pointer to the function mapping face coordinates to bulk
     /// coordinates
     CoordinateMappingFctPt face_to_bulk_coordinate_fct_pt(
-      const int& face_index) const
+      const int& face_index) const override
     {
       if (face_index == 1)
       {
@@ -795,7 +795,7 @@ namespace oomph
     /// Get a pointer to the derivative of the mapping from face to bulk
     /// coordinates.
     BulkCoordinateDerivativesFctPt bulk_coordinate_derivatives_fct_pt(
-      const int& face_index) const
+      const int& face_index) const override
     {
       if (face_index == 1)
       {
@@ -814,6 +814,12 @@ namespace oomph
     }
   };
 
+  // Explicitly instantiated in Qelements.cc; suppress implicit
+  // instantiation of Default_integration_scheme elsewhere.
+  extern template class QElement<1, 2>;
+  extern template class QElement<1, 3>;
+  extern template class QElement<1, 4>;
+
   //=======================================================================
   /// Base class for all quad elements
   //=======================================================================
@@ -824,10 +830,10 @@ namespace oomph
     QuadElementBase() {}
 
     /// Number of vertex nodes in the element
-    virtual unsigned nvertex_node() const = 0;
+    unsigned nvertex_node() const override = 0;
 
     /// Pointer to the j-th vertex node in the element
-    virtual Node* vertex_node_pt(const unsigned& j) const = 0;
+    Node* vertex_node_pt(const unsigned& j) const override = 0;
   };
 
   //=======================================================================
@@ -863,13 +869,13 @@ namespace oomph
     /*void operator=(const QElement&) = delete;*/
 
     /// Calculate the geometric shape functions at local coordinate s
-    void shape(const Vector<double>& s, Shape& psi) const;
+    void shape(const Vector<double>& s, Shape& psi) const override;
 
     /// Compute the  geometric shape functions and
     /// derivatives w.r.t. local coordinates at local coordinate s
     void dshape_local(const Vector<double>& s,
                       Shape& psi,
-                      DShape& dpsids) const;
+                      DShape& dpsids) const override;
 
     /// Compute the geometric shape functions, derivatives and
     /// second derivatives w.r.t. local coordinates at local coordinate s
@@ -879,38 +885,38 @@ namespace oomph
     void d2shape_local(const Vector<double>& s,
                        Shape& psi,
                        DShape& dpsids,
-                       DShape& d2psids) const;
+                       DShape& d2psids) const override;
 
     /// Overload the template-free interface for the calculation of
     /// inverse jacobian matrix. This is a two-dimensional element, so use
     /// the two-d version.
     double invert_jacobian_mapping(const DenseMatrix<double>& jacobian,
-                                   DenseMatrix<double>& inverse_jacobian) const
+                                   DenseMatrix<double>& inverse_jacobian) const override
     {
       return FiniteElement::invert_jacobian<2>(jacobian, inverse_jacobian);
     }
 
     /// Min. value of local coordinate
-    double s_min() const
+    double s_min() const override
     {
       return -1.0;
     }
 
     /// Max. value of local coordinate
-    double s_max() const
+    double s_max() const override
     {
       return 1.0;
     }
 
 
     /// Number of vertex nodes in the element
-    unsigned nvertex_node() const
+    unsigned nvertex_node() const override
     {
       return 4;
     }
 
     /// Pointer to the j-th vertex node in the element
-    Node* vertex_node_pt(const unsigned& j) const
+    Node* vertex_node_pt(const unsigned& j) const override
     {
       unsigned n_node_1d = nnode_1d();
       Node* nod_pt;
@@ -942,7 +948,7 @@ namespace oomph
 
 
     /// Get local coordinates of node j in the element; vector sets its own size
-    void local_coordinate_of_node(const unsigned& j, Vector<double>& s) const
+    void local_coordinate_of_node(const unsigned& j, Vector<double>& s) const override
     {
       s.resize(2);
       unsigned j0 = j % NNODE_1D;
@@ -954,7 +960,7 @@ namespace oomph
     }
 
     /// Get the local fraction of node j in the element
-    void local_fraction_of_node(const unsigned& j, Vector<double>& s_fraction)
+    void local_fraction_of_node(const unsigned& j, Vector<double>& s_fraction) override
     {
       s_fraction.resize(2);
       unsigned j0 = j % NNODE_1D;
@@ -966,31 +972,31 @@ namespace oomph
     /// This function returns the local fraction of ant nodes in the n-th
     /// positoin in a one dimensional expansion along the i-th local coordinate
     inline double local_one_d_fraction_of_node(const unsigned& n1d,
-                                               const unsigned& i)
+                                               const unsigned& i) override
     {
       // It's just the value of the node divided by the number of 1-D nodes
       return double(n1d) / double(NNODE_1D - 1);
     }
 
     /// Get the node at the specified local coordinate
-    Node* get_node_at_local_coordinate(const Vector<double>& s) const;
+    Node* get_node_at_local_coordinate(const Vector<double>& s) const override;
 
     /// Number of nodes along each element edge
-    unsigned nnode_1d() const
+    unsigned nnode_1d() const override
     {
       return NNODE_1D;
     }
 
     /// Return the number of actual plot points for paraview
     /// plot with parameter nplot.
-    unsigned nplot_points_paraview(const unsigned& nplot) const
+    unsigned nplot_points_paraview(const unsigned& nplot) const override
     {
       return nplot * nplot;
     }
 
     /// Return the number of local sub-elements for paraview plot with
     /// parameter nplot.
-    unsigned nsub_elements_paraview(const unsigned& nplot) const
+    unsigned nsub_elements_paraview(const unsigned& nplot) const override
     {
       return (nplot - 1) * (nplot - 1);
     }
@@ -1000,7 +1006,7 @@ namespace oomph
     /// http://www.vtk.org/VTK/img/file-formats.pdf
     void write_paraview_output_offset_information(std::ofstream& file_out,
                                                   const unsigned& nplot,
-                                                  unsigned& counter) const
+                                                  unsigned& counter) const override
     {
       // Number of local elements we want to plot over
       unsigned plot = nsub_elements_paraview(nplot);
@@ -1023,7 +1029,7 @@ namespace oomph
     /// http://www.vtk.org/VTK/img/file-formats.pdf
     /// Use type "VTK_QUAD" (== 9) for 2D quad elements
     void write_paraview_type(std::ofstream& file_out,
-                             const unsigned& nplot) const
+                             const unsigned& nplot) const override
     {
       unsigned local_loop = nsub_elements_paraview(nplot);
       for (unsigned i = 0; i < local_loop; i++)
@@ -1037,7 +1043,7 @@ namespace oomph
     /// http://www.vtk.org/VTK/img/file-formats.pdf
     void write_paraview_offsets(std::ofstream& file_out,
                                 const unsigned& nplot,
-                                unsigned& offset_sum) const
+                                unsigned& offset_sum) const override
     {
       // Loop over all local elements and add its offset to the overall
       // offset_sum
@@ -1050,16 +1056,16 @@ namespace oomph
     }
 
     /// Output
-    void output(std::ostream& outfile);
+    void output(std::ostream& outfile) override;
 
     /// Output at n_plot points
-    void output(std::ostream& outfile, const unsigned& n_plot);
+    void output(std::ostream& outfile, const unsigned& n_plot) override;
 
     /// C-style output
-    void output(FILE* file_pt);
+    void output(FILE* file_pt) override;
 
     /// C_style output at n_plot points
-    void output(FILE* file_pt, const unsigned& n_plot);
+    void output(FILE* file_pt, const unsigned& n_plot) override;
 
 
     ///  Get cector of local coordinates of plot point i (when plotting
@@ -1068,7 +1074,7 @@ namespace oomph
       const unsigned& i,
       const unsigned& nplot,
       Vector<double>& s,
-      const bool& use_equally_spaced_interior_sample_points = false) const
+      const bool& use_equally_spaced_interior_sample_points = false) const override
     {
       if (nplot > 1)
       {
@@ -1095,7 +1101,7 @@ namespace oomph
 
     /// Return string for tecplot zone header (when plotting
     /// nplot points in each "coordinate direction)
-    std::string tecplot_zone_string(const unsigned& nplot) const
+    std::string tecplot_zone_string(const unsigned& nplot) const override
     {
       std::ostringstream header;
       header << "ZONE I=" << nplot << ", J=" << nplot << "\n";
@@ -1104,7 +1110,7 @@ namespace oomph
 
     /// Return total number of plot points (when plotting
     /// nplot points in each "coordinate direction)
-    unsigned nplot_points(const unsigned& nplot) const
+    unsigned nplot_points(const unsigned& nplot) const override
     {
       unsigned DIM = 2;
       unsigned np = 1;
@@ -1118,7 +1124,7 @@ namespace oomph
     /// Get the number of the ith node on face face_index (in the bulk node
     /// vector).
     unsigned get_bulk_node_number(const int& face_index,
-                                  const unsigned& i) const
+                                  const unsigned& i) const override
     {
       face_node_number_error_check(i);
 
@@ -1149,7 +1155,7 @@ namespace oomph
     }
 
     /// Get the sign of the outer unit normal on the face given by face_index.
-    int face_outer_unit_normal_sign(const int& face_index) const
+    int face_outer_unit_normal_sign(const int& face_index) const override
     {
       if (face_index < 0)
       {
@@ -1170,7 +1176,7 @@ namespace oomph
     /// Get a pointer to the function mapping face coordinates to bulk
     /// coordinates
     CoordinateMappingFctPt face_to_bulk_coordinate_fct_pt(
-      const int& face_index) const
+      const int& face_index) const override
     {
       if (face_index == 1)
       {
@@ -1199,7 +1205,7 @@ namespace oomph
     /// Get a pointer to the derivative of the mapping from face to bulk
     /// coordinates.
     BulkCoordinateDerivativesFctPt bulk_coordinate_derivatives_fct_pt(
-      const int& face_index) const
+      const int& face_index) const override
     {
       if (face_index == 1)
       {
@@ -1226,6 +1232,12 @@ namespace oomph
     }
   };
 
+  // Explicitly instantiated in Qelements.cc; suppress implicit
+  // instantiation of Default_integration_scheme elsewhere.
+  extern template class QElement<2, 2>;
+  extern template class QElement<2, 3>;
+  extern template class QElement<2, 4>;
+
   //=======================================================================
   /// Base class for all brick elements
   //=======================================================================
@@ -1236,10 +1248,10 @@ namespace oomph
     BrickElementBase() {}
 
     /// Number of vertex nodes in the element
-    virtual unsigned nvertex_node() const = 0;
+    unsigned nvertex_node() const override = 0;
 
     /// Pointer to the j-th vertex node in the element
-    virtual Node* vertex_node_pt(const unsigned& j) const = 0;
+    Node* vertex_node_pt(const unsigned& j) const override = 0;
   };
 
   //=======================================================================
@@ -1276,13 +1288,13 @@ namespace oomph
     /*void operator=(const QElement&) = delete;*/
 
     /// Calculate the geometric shape functions at local coordinate s
-    void shape(const Vector<double>& s, Shape& psi) const;
+    void shape(const Vector<double>& s, Shape& psi) const override;
 
     /// Compute the  geometric shape functions and
     /// derivatives w.r.t. local coordinates at local coordinate s
     void dshape_local(const Vector<double>& s,
                       Shape& psi,
-                      DShape& dpsids) const;
+                      DShape& dpsids) const override;
 
     /// Compute the geometric shape functions, derivatives and
     /// second derivatives w.r.t. local coordinates at local coordinate s.
@@ -1295,38 +1307,38 @@ namespace oomph
     void d2shape_local(const Vector<double>& s,
                        Shape& psi,
                        DShape& dpsids,
-                       DShape& d2psids) const;
+                       DShape& d2psids) const override;
 
 
     /// Overload the template-free interface for the calculation of
     /// the inverse jacobian mapping. This is a three-dimensional element,
     /// so use the 3d version
     double invert_jacobian_mapping(const DenseMatrix<double>& jacobian,
-                                   DenseMatrix<double>& inverse_jacobian) const
+                                   DenseMatrix<double>& inverse_jacobian) const override
     {
       return FiniteElement::invert_jacobian<3>(jacobian, inverse_jacobian);
     }
 
     /// Min. value of local coordinate
-    double s_min() const
+    double s_min() const override
     {
       return -1.0;
     }
 
     /// Max. value of local coordinate
-    double s_max() const
+    double s_max() const override
     {
       return 1.0;
     }
 
     /// Number of vertex nodes in the element
-    unsigned nvertex_node() const
+    unsigned nvertex_node() const override
     {
       return 8;
     }
 
     /// Pointer to the j-th vertex node in the element
-    Node* vertex_node_pt(const unsigned& j) const
+    Node* vertex_node_pt(const unsigned& j) const override
     {
       unsigned N = nnode_1d();
       Node* nod_pt;
@@ -1369,7 +1381,7 @@ namespace oomph
     }
 
     /// Get local coordinates of node j in the element; vector sets its own size
-    void local_coordinate_of_node(const unsigned& j, Vector<double>& s) const
+    void local_coordinate_of_node(const unsigned& j, Vector<double>& s) const override
     {
       s.resize(3);
       unsigned j0 = j % NNODE_1D;
@@ -1384,7 +1396,7 @@ namespace oomph
     }
 
     /// Get the local fraction of node j in the element
-    void local_fraction_of_node(const unsigned& j, Vector<double>& s_fraction)
+    void local_fraction_of_node(const unsigned& j, Vector<double>& s_fraction) override
     {
       s_fraction.resize(3);
       unsigned j0 = j % NNODE_1D;
@@ -1398,31 +1410,31 @@ namespace oomph
     /// This function returns the local fraction of any nodes in the n-th
     /// positoin in a one dimensional expansion along the i-th local coordinate
     inline double local_one_d_fraction_of_node(const unsigned& n1d,
-                                               const unsigned& i)
+                                               const unsigned& i) override
     {
       // It's just the value of the node divided by the number of 1-D nodes
       return double(n1d) / double(NNODE_1D - 1);
     }
 
     /// Get the node at the specified local coordinate
-    Node* get_node_at_local_coordinate(const Vector<double>& s) const;
+    Node* get_node_at_local_coordinate(const Vector<double>& s) const override;
 
     /// Number of nodes along each element edge
-    unsigned nnode_1d() const
+    unsigned nnode_1d() const override
     {
       return NNODE_1D;
     }
 
     /// Return the number of actual plot points for paraview
     /// plot with parameter nplot.
-    unsigned nplot_points_paraview(const unsigned& nplot) const
+    unsigned nplot_points_paraview(const unsigned& nplot) const override
     {
       return nplot * nplot * nplot;
     }
 
     /// Return the number of local sub-elements for paraview plot with
     /// parameter nplot.
-    unsigned nsub_elements_paraview(const unsigned& nplot) const
+    unsigned nsub_elements_paraview(const unsigned& nplot) const override
     {
       return (nplot - 1) * (nplot - 1) * (nplot - 1);
     }
@@ -1432,7 +1444,7 @@ namespace oomph
     /// http://www.vtk.org/VTK/img/file-formats.pdf
     void write_paraview_output_offset_information(std::ofstream& file_out,
                                                   const unsigned& nplot,
-                                                  unsigned& counter) const
+                                                  unsigned& counter) const override
     {
       // Number of local elements we want to plot over
       unsigned plot = nsub_elements_paraview(nplot);
@@ -1485,7 +1497,7 @@ namespace oomph
     /// http://www.vtk.org/VTK/img/file-formats.pdf
     /// Use type "VTK_HEXAHEDRON" (== 12) for 2D quad elements
     void write_paraview_type(std::ofstream& file_out,
-                             const unsigned& nplot) const
+                             const unsigned& nplot) const override
     {
       unsigned local_loop = nsub_elements_paraview(nplot);
       for (unsigned i = 0; i < local_loop; i++)
@@ -1499,7 +1511,7 @@ namespace oomph
     /// http://www.vtk.org/VTK/img/file-formats.pdf
     void write_paraview_offsets(std::ofstream& file_out,
                                 const unsigned& nplot,
-                                unsigned& offset_sum) const
+                                unsigned& offset_sum) const override
     {
       unsigned local_loop = nsub_elements_paraview(nplot);
       for (unsigned i = 0; i < local_loop; i++)
@@ -1510,16 +1522,16 @@ namespace oomph
     }
 
     /// Output
-    void output(std::ostream& outfile);
+    void output(std::ostream& outfile) override;
 
     /// Output at n_plot points
-    void output(std::ostream& outfile, const unsigned& n_plot);
+    void output(std::ostream& outfile, const unsigned& n_plot) override;
 
     /// C-style output
-    void output(FILE* file_pt);
+    void output(FILE* file_pt) override;
 
     /// C_style output at n_plot points
-    void output(FILE* file_pt, const unsigned& n_plot);
+    void output(FILE* file_pt, const unsigned& n_plot) override;
 
     ///  Get cector of local coordinates of plot point i (when plotting
     /// nplot points in each "coordinate direction).
@@ -1527,7 +1539,7 @@ namespace oomph
       const unsigned& i,
       const unsigned& nplot,
       Vector<double>& s,
-      const bool& use_equally_spaced_interior_sample_points = false) const
+      const bool& use_equally_spaced_interior_sample_points = false) const override
     {
       if (nplot > 1)
       {
@@ -1559,7 +1571,7 @@ namespace oomph
 
     /// Return string for tecplot zone header (when plotting
     /// nplot points in each "coordinate direction)
-    std::string tecplot_zone_string(const unsigned& nplot) const
+    std::string tecplot_zone_string(const unsigned& nplot) const override
     {
       std::ostringstream header;
       header << "ZONE I=" << nplot << ", J=" << nplot << ", K=" << nplot
@@ -1569,7 +1581,7 @@ namespace oomph
 
     /// Return total number of plot points (when plotting
     /// nplot points in each "coordinate direction)
-    unsigned nplot_points(const unsigned& nplot) const
+    unsigned nplot_points(const unsigned& nplot) const override
     {
       unsigned DIM = 3;
       unsigned np = 1;
@@ -1583,7 +1595,7 @@ namespace oomph
     /// Get the number of the ith node on face face_index in the bulk node
     /// vector.
     unsigned get_bulk_node_number(const int& face_index,
-                                  const unsigned& i) const
+                                  const unsigned& i) const override
     {
       face_node_number_error_check(i);
 
@@ -1622,7 +1634,7 @@ namespace oomph
     }
 
     /// Get the sign of the outer unit normal on the face given by face_index.
-    int face_outer_unit_normal_sign(const int& face_index) const
+    int face_outer_unit_normal_sign(const int& face_index) const override
     {
       if (face_index == -3)
       {
@@ -1659,7 +1671,7 @@ namespace oomph
     /// Get a pointer to the function mapping face coordinates to bulk
     /// coordinates
     CoordinateMappingFctPt face_to_bulk_coordinate_fct_pt(
-      const int& face_index) const
+      const int& face_index) const override
     {
       if (face_index == 1)
       {
@@ -1696,7 +1708,7 @@ namespace oomph
     /// Get a pointer to the derivative of the mapping from face to bulk
     /// coordinates.
     BulkCoordinateDerivativesFctPt bulk_coordinate_derivatives_fct_pt(
-      const int& face_index) const
+      const int& face_index) const override
     {
       if (face_index == 1)
       {
@@ -1730,6 +1742,12 @@ namespace oomph
       }
     }
   };
+
+  // Explicitly instantiated in Qelements.cc; suppress implicit
+  // instantiation of Default_integration_scheme elsewhere.
+  extern template class QElement<3, 2>;
+  extern template class QElement<3, 3>;
+  extern template class QElement<3, 4>;
 
   //=======================================================================
   /// SolidQElement elements are quadrilateral elements whose
@@ -1765,22 +1783,22 @@ namespace oomph
     /*void operator=(const SolidQElement&) = delete;*/
 
     /// Overload the output function
-    void output(std::ostream& outfile)
+    void output(std::ostream& outfile) override
     {
       FiniteElement::output(outfile);
     }
 
     /// Output at n_plot points
-    inline void output(std::ostream& outfile, const unsigned& n_plot);
+    inline void output(std::ostream& outfile, const unsigned& n_plot) override;
 
     /// C-style output
-    void output(FILE* file_pt)
+    void output(FILE* file_pt) override
     {
       FiniteElement::output(file_pt);
     }
 
     /// C_style output at n_plot points
-    inline void output(FILE* file_pt, const unsigned& n_plot);
+    inline void output(FILE* file_pt, const unsigned& n_plot) override;
 
     /// Build the lower-dimensional FaceElement (an element of type
     /// SolidQElement<0,NNODE_1D>).
@@ -1789,7 +1807,7 @@ namespace oomph
     /// -1 (Left)  s[0] = -1.0
     /// +1 (Right) s[0] =  1.0
     inline void build_face_element(const int& face_index,
-                                   FaceElement* face_element_pt);
+                                   FaceElement* face_element_pt) override;
   };
 
   // For the dumb Intel 9.0 compiler, these need to live in here
@@ -1930,22 +1948,22 @@ namespace oomph
     /*void operator=(const SolidQElement&) = delete;*/
 
     /// Overload the output function
-    void output(std::ostream& outfile)
+    void output(std::ostream& outfile) override
     {
       FiniteElement::output(outfile);
     }
 
     /// Output at n_plot^2 points
-    inline void output(std::ostream& outfile, const unsigned& n_plot);
+    inline void output(std::ostream& outfile, const unsigned& n_plot) override;
 
     /// C-style output
-    void output(FILE* file_pt)
+    void output(FILE* file_pt) override
     {
       FiniteElement::output(file_pt);
     }
 
     /// C_style output at n_plot points
-    inline void output(FILE* file_pt, const unsigned& n_plot);
+    inline void output(FILE* file_pt, const unsigned& n_plot) override;
 
 
     /// Build the lower-dimensional FaceElement (an element of type
@@ -1956,7 +1974,7 @@ namespace oomph
     /// -2 (South) s[1] = -1.0
     /// +2 (North) s[1] =  1.0
     inline void build_face_element(const int& face_index,
-                                   FaceElement* face_element_pt);
+                                   FaceElement* face_element_pt) override;
   };
 
 
@@ -2096,22 +2114,22 @@ namespace oomph
     /*void operator=(const SolidQElement&) = delete;*/
 
     /// Overload the output function
-    void output(std::ostream& outfile)
+    void output(std::ostream& outfile) override
     {
       FiniteElement::output(outfile);
     }
 
     /// Output at n_plot^2 points
-    inline void output(std::ostream& outfile, const unsigned& n_plot);
+    inline void output(std::ostream& outfile, const unsigned& n_plot) override;
 
     /// C-style output
-    void output(FILE* file_pt)
+    void output(FILE* file_pt) override
     {
       FiniteElement::output(file_pt);
     }
 
     /// C_style output at n_plot points
-    inline void output(FILE* file_pt, const unsigned& n_plot);
+    inline void output(FILE* file_pt, const unsigned& n_plot) override;
 
 
     /// Build the lower-dimensional FaceElement (an element of type
@@ -2125,7 +2143,7 @@ namespace oomph
     /// -3 (Back)   s[2] = -1.0
     /// +3 (Front)  s[2] =  1.0
     inline void build_face_element(const int& face_index,
-                                   FaceElement* face_element_pt);
+                                   FaceElement* face_element_pt) override;
   };
 
 

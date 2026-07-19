@@ -92,8 +92,8 @@ namespace pyoomph
   {
   protected:
   public:
-    virtual bool compile_to_memory() { return false; }
-    virtual bool compile(bool , bool , bool , const std::vector<std::string> &) { return false; }
+    bool compile_to_memory() override { return false; }
+    bool compile(bool , bool , bool , const std::vector<std::string> &) override { return false; }
   };
 
 }

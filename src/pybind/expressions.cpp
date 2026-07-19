@@ -58,7 +58,7 @@ namespace pyoomph
 		}
 		virtual double eval(py::array_t<double> &args) { return 0; }
 
-		virtual double _call(double *args, unsigned int nargs)
+		double _call(double *args, unsigned int nargs) override
 		{
 			if (argbuff.shape[0] != nargs)
 			{
@@ -189,7 +189,7 @@ namespace pyoomph
 			}
 		}
 
-		virtual void _call(int flag, double *args, unsigned int nargs, double *res, unsigned int nres, double *derivs)
+		void _call(int flag, double *args, unsigned int nargs, double *res, unsigned int nres, double *derivs) override
 		{
 			if (flag & 128)
 			{
@@ -381,6 +381,13 @@ void PyReg_Expressions(py::module &m)
 		.def(double() / py::self)
 		.def(py::self / double())
 
+		// py::self <op>= py::self below is pybind11's operator-overload DSL for
+		// registering __iadd__/__isub__/etc.; it is not a real self-assignment,
+		// but clang's -Wself-assign-overloaded can't tell the difference.
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wself-assign-overloaded"
+#endif
 		.def(py::self += py::self)
 		.def(py::self -= py::self)
 		.def(py::self *= py::self)
@@ -389,6 +396,9 @@ void PyReg_Expressions(py::module &m)
 		.def(py::self /= py::self)
 		.def(py::self /= int())
 		.def(py::self /= double())
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 		
 

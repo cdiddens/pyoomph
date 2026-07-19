@@ -144,8 +144,8 @@ namespace GiNaC
   public:
     ex series(const relational &r, int order, unsigned options = 0) const override { return inherited::series(r, order, options); }
 
-    ex real_part() const { return *this; }
-    ex imag_part() const { return 0; }
+    ex real_part() const override { return *this; }
+    ex imag_part() const override { return 0; }
     // rational functions
     ex normal(exmap &repl, exmap &rev_lookup, lst &modifier) const override { return inherited::normal(repl, rev_lookup, modifier); }
     ex to_rational(exmap &repl) const override { return inherited::to_rational(repl); }

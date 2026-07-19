@@ -2165,7 +2165,7 @@ namespace pyoomph
 		class SubExpressionsToRealAndImag : public GiNaC::map_function
 		{
 		public:
-			GiNaC::ex operator()(const GiNaC::ex & inp)
+			GiNaC::ex operator()(const GiNaC::ex & inp) override
 			{
 				if (is_ex_the_function(inp, expressions::subexpression))
 				{
@@ -2302,7 +2302,7 @@ namespace pyoomph
 		class ReplaceGlobalParamsByCurrentValues : public GiNaC::map_function
 		{
 		public:
-			GiNaC::ex operator()(const GiNaC::ex &inp)
+			GiNaC::ex operator()(const GiNaC::ex &inp) override
 			{
 				if (GiNaC::is_a<GiNaC::GiNaCGlobalParameterWrapper>(inp))
 				{
@@ -2364,7 +2364,7 @@ namespace pyoomph
 					index++;
 				}
 			}
-			GiNaC::ex operator()(const GiNaC::ex &inp)
+			GiNaC::ex operator()(const GiNaC::ex &inp) override
 			{
 				if (GiNaC::is_a<GiNaC::GiNaCShapeExpansion>(inp))
 				{
@@ -2506,7 +2506,7 @@ namespace pyoomph
 
 		public:
 			EvaluateShapeExpansionsAtExpansionMode(int _index) : index(_index) {}
-			GiNaC::ex operator()(const GiNaC::ex &inp)
+			GiNaC::ex operator()(const GiNaC::ex &inp) override
 			{
 				if (GiNaC::is_a<GiNaC::GiNaCShapeExpansion>(inp))
 				{
@@ -2621,7 +2621,7 @@ namespace pyoomph
 
 		public:
 			DeactivateJacobianOfExpansionMode(int _index, int _flag) : index(_index), flag(_flag) {}
-			GiNaC::ex operator()(const GiNaC::ex &inp)
+			GiNaC::ex operator()(const GiNaC::ex &inp) override
 			{
 				if (GiNaC::is_a<GiNaC::GiNaCShapeExpansion>(inp))
 				{
@@ -3573,7 +3573,7 @@ namespace pyoomph
 
 		public:
 			ReplaceFieldsAndSubfields(const std::map<std::string, GiNaC::ex> &_fields, const std::map<std::string, GiNaC::ex> &_nondimfields, const std::map<std::string, GiNaC::ex> &_globalparams) : fields(_fields), nondimfields(_nondimfields), globalparams(_globalparams) {}
-			GiNaC::ex operator()(const GiNaC::ex &inp)
+			GiNaC::ex operator()(const GiNaC::ex &inp) override
 			{
 				if (is_ex_the_function(inp, field))
 				{
@@ -3623,7 +3623,7 @@ namespace pyoomph
 		{
 		protected:
 		public:
-			GiNaC::ex operator()(const GiNaC::ex &inp)
+			GiNaC::ex operator()(const GiNaC::ex &inp) override
 			{
 				if (is_a<GiNaCGlobalParameterWrapper>(inp))
 				{

@@ -1123,10 +1123,10 @@ namespace oomph
     virtual void actions_after_implicit_timestep_and_error_estimation() {}
 
     /// Actions that should be performed before each explicit time step.
-    virtual void actions_before_explicit_timestep() {}
+    void actions_before_explicit_timestep() override {}
 
     /// Actions that should be performed after each explicit time step.
-    virtual void actions_after_explicit_timestep() {}
+    void actions_after_explicit_timestep() override {}
 
     /// Actions that are to be performed before reading in
     /// restart data for problems involving unstructured bulk meshes.
@@ -1322,7 +1322,7 @@ namespace oomph
     void operator=(const Problem&) = delete;
 
     /// Virtual destructor to clean up memory
-    virtual ~Problem();
+    ~Problem() override;
 
     /// Return a pointer to the global mesh
     Mesh*& mesh_pt()
@@ -1555,13 +1555,13 @@ namespace oomph
     }
 
     /// Return a pointer to the global time object (const version).
-    Time* time_pt() const
+    Time* time_pt() const override
     {
       return Time_pt;
     }
 
     /// Return the current value of continuous time
-    double& time();
+    double& time() override;
 
     /// Return the current value of continuous time (const version)
     double time() const;
@@ -1793,15 +1793,15 @@ namespace oomph
     /// Return the vector of dofs, i.e. a vector containing the current
     /// values of all unknowns.
     // FOR_PYOOMPH: made virtual (this is required to patch the missing positional dofs)
-    void get_dofs(DoubleVector& dofs) const;
+    void get_dofs(DoubleVector& dofs) const override;
 
     /// Return vector of the t'th history value of all dofs.
     // FOR_PYOOMPH: made virtual (this is required to patch the missing positional dofs)
-    void get_dofs(const unsigned& t, DoubleVector& dofs) const;
+    void get_dofs(const unsigned& t, DoubleVector& dofs) const override;
 
     /// Set the values of the dofs
     // FOR_PYOOMPH: made virtual (this is required to patch the missing positional dofs)
-    virtual void set_dofs(const DoubleVector& dofs);
+    void set_dofs(const DoubleVector& dofs) override;
 
     /// Set the history values of the dofs
     // FOR_PYOOMPH: made virtual (this is required to patch the missing positional dofs)
@@ -1813,7 +1813,7 @@ namespace oomph
     virtual void set_dofs(const unsigned& t, Vector<double*>& dof_pt);
 
     /// Add lambda x incremenet_dofs[l] to the l-th dof
-    void add_to_dofs(const double& lambda, const DoubleVector& increment_dofs);
+    void add_to_dofs(const double& lambda, const DoubleVector& increment_dofs) override;
 
     /// Return a pointer to the dof, indexed by global equation number
     /// which may be haloed or stored locally. If it is haloed, a local copy
@@ -1902,7 +1902,7 @@ namespace oomph
     /// slighty hacky, beware if you have a residual which is non-linear or
     /// implicit in the derivative or if you have overloaded
     /// get_jacobian(...).
-    virtual void get_dvaluesdt(DoubleVector& f);
+    void get_dvaluesdt(DoubleVector& f) override;
 
     /// Return the fully-assembled residuals Vector for the problem:
     /// Virtual so it can be overloaded in for mpi problems

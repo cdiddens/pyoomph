@@ -981,6 +981,7 @@ namespace oomph
   template class TBubbleEnrichedElement<3, 3>;
   template class SolidTBubbleEnrichedElement<2, 3>;
   template class SolidTBubbleEnrichedElement<3, 3>;
-  template class TBubbleEnrichedGauss<2, 3>;
-  template class TBubbleEnrichedGauss<3, 3>;
+  // TBubbleEnrichedGauss<2, 3> and <3, 3> are full class-template
+  // specializations (see Telements.h); explicitly instantiating them
+  // here has no effect and triggers -Winstantiation-after-specialization.
 } // namespace oomph

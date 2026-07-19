@@ -100,7 +100,7 @@ namespace pyoomph
       oomph::BrokenCopy::broken_assign("MultiTimeStepper");
     }
 
-    unsigned order() const
+    unsigned order() const override
     {
       /*		std::string error_message =
            "Can't remember the order of the MultiTimeStepper scheme";
@@ -110,27 +110,27 @@ namespace pyoomph
       return 2;
     }
 
-    unsigned nprev_values() const { return NSTEPS; }
-    unsigned ndt() const { return NSTEPS; }
+    unsigned nprev_values() const override { return NSTEPS; }
+    unsigned ndt() const override { return NSTEPS; }
 
     virtual double weightBDF1(const unsigned &i, const unsigned &j) const { return WeightBDF1(i, j); }
     virtual double weightBDF2(const unsigned &i, const unsigned &j) const { return WeightBDF2(i, j); }
     virtual double weightNewmark2(const unsigned &i, const unsigned &j) const { return WeightNewmark2(i, j); }
     virtual void setNewmark2Coeffs(const double & p1,const double & p2) {NewmarkBeta1=p1;NewmarkBeta2=p2;}
 
-    void shift_time_values(oomph::Data *const &data_pt);    // Push data_pt's value history back by one step and store the new Newmark2 (and, if adaptive, BDF2) velocity/acceleration
-    void shift_time_positions(oomph::Node *const &node_pt); // Same as shift_time_values, but for a node's position history
-    void set_weights();                                     // (Re-)compute WeightBDF1/WeightBDF2/WeightNewmark2/Weight from the current and previous timestep sizes
+    void shift_time_values(oomph::Data *const &data_pt) override;    // Push data_pt's value history back by one step and store the new Newmark2 (and, if adaptive, BDF2) velocity/acceleration
+    void shift_time_positions(oomph::Node *const &node_pt) override; // Same as shift_time_values, but for a node's position history
+    void set_weights() override;                                     // (Re-)compute WeightBDF1/WeightBDF2/WeightNewmark2/Weight from the current and previous timestep sizes
 
-    void set_predictor_weights();                                         // Compute the AB2-like predictor weights used for adaptive-timestep error estimation
-    void calculate_predicted_positions(oomph::Node *const &node_pt);      // Store the predicted (uncorrected) position at Predictor_storage_index
-    void calculate_predicted_values(oomph::Data *const &data_pt);         // Store the predicted (uncorrected) value at Predictor_storage_index
-    void set_error_weights();                                             // Compute the scalar Error_weight used to scale predictor-vs-corrector differences into a timestep error estimate
-    double temporal_error_in_position(oomph::Node *const &node_pt, const unsigned &i);  // Estimated temporal error for position component i, based on the predictor/corrector difference
-    double temporal_error_in_value(oomph::Data *const &data_pt, const unsigned &i);      // Estimated temporal error for value i, based on the predictor/corrector difference
+    void set_predictor_weights() override;                                         // Compute the AB2-like predictor weights used for adaptive-timestep error estimation
+    void calculate_predicted_positions(oomph::Node *const &node_pt) override;      // Store the predicted (uncorrected) position at Predictor_storage_index
+    void calculate_predicted_values(oomph::Data *const &data_pt) override;         // Store the predicted (uncorrected) value at Predictor_storage_index
+    void set_error_weights() override;                                             // Compute the scalar Error_weight used to scale predictor-vs-corrector differences into a timestep error estimate
+    double temporal_error_in_position(oomph::Node *const &node_pt, const unsigned &i) override;  // Estimated temporal error for position component i, based on the predictor/corrector difference
+    double temporal_error_in_value(oomph::Data *const &data_pt, const unsigned &i) override;      // Estimated temporal error for value i, based on the predictor/corrector difference
 
-    void assign_initial_values_impulsive(oomph::Data *const &data_pt); // Fill data_pt's entire time history with its current value and zero velocity/acceleration (impulsive start)
-    void assign_initial_positions_impulsive(oomph::Node *const &node_pt); // Same as assign_initial_values_impulsive, but for a node's position history
+    void assign_initial_values_impulsive(oomph::Data *const &data_pt) override; // Fill data_pt's entire time history with its current value and zero velocity/acceleration (impulsive start)
+    void assign_initial_positions_impulsive(oomph::Node *const &node_pt) override; // Same as assign_initial_values_impulsive, but for a node's position history
 
     void set_num_unsteady_steps_done(unsigned n) { unsteady_steps_done_for_degrading = n; }
     void increment_num_unsteady_steps_done() { unsteady_steps_done_for_degrading++; }

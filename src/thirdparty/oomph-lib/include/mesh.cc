@@ -751,10 +751,11 @@ namespace oomph
     for (unsigned long i = 0; i < nel; i++)
     {
       std::stringstream conversion;
-      conversion << " in Element " << i << " [" << typeid(*Element_pt[i]).name()
+      GeneralisedElement* el_pt = Element_pt[i];
+      conversion << " in Element " << i << " [" << typeid(*el_pt).name()
                  << "] " << current_string;
       std::string in(conversion.str());
-      Element_pt[i]->describe_dofs(out, in);
+      el_pt->describe_dofs(out, in);
     }
   }
 
@@ -776,10 +777,11 @@ namespace oomph
     for (unsigned long i = 0; i < nel; i++)
     {
       std::stringstream conversion;
-      conversion << " in Element" << i << " [" << typeid(*Element_pt[i]).name()
+      GeneralisedElement* el_pt = Element_pt[i];
+      conversion << " in Element" << i << " [" << typeid(*el_pt).name()
                  << "] " << current_string;
       std::string in(conversion.str());
-      Element_pt[i]->describe_local_dofs(out, in);
+      el_pt->describe_local_dofs(out, in);
     }
   }
 
@@ -5186,7 +5188,6 @@ namespace oomph
 
     // Determine which elements are going to end up on which processor
     //----------------------------------------------------------------
-    unsigned number_of_retained_elements = 0;
 
     // Loop over all backed up elements
     nelem = backed_up_el_pt.size();
@@ -5202,7 +5203,6 @@ namespace oomph
       {
         // Add element to current processor
         element_retained[e] = true;
-        number_of_retained_elements++;
       }
       // Otherwise we may still need it if it's a halo element:
       else
@@ -5222,7 +5222,6 @@ namespace oomph
             {
               root_halo_element[el_domain].push_back(e);
               element_retained[e] = true;
-              number_of_retained_elements++;
             }
           }
         }
@@ -5262,7 +5261,6 @@ namespace oomph
                 {
                   root_halo_element[el_domain].push_back(e);
                   element_retained[e] = true;
-                  number_of_retained_elements++;
                 }
                 // Now break out of loop over nodes
                 break;
@@ -8452,7 +8450,6 @@ namespace oomph
             // Storage for hang information
             Vector<int> nodal_hangings;
 
-            unsigned count = 0;
             for (unsigned e = 0; e < nelem_halo; e++)
             {
               FiniteElement* finite_el_pt =
@@ -8469,7 +8466,6 @@ namespace oomph
                   for (unsigned i = 0; i < nod_dim; i++)
                   {
                     nodal_positions.push_back(nod_pt->position(i));
-                    count++;
                   }
 
                   unsigned nval = nod_pt->nvalue();

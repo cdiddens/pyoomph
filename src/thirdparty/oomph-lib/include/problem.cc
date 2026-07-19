@@ -81,7 +81,7 @@ namespace oomph
   public:
     EigenSolver() : Sigma_real(0.0) {}
     EigenSolver(const EigenSolver&) {}
-    virtual ~EigenSolver() {}
+    ~EigenSolver() override {}
 
     virtual void solve_eigenproblem_legacy(
       Problem* const& problem_pt,
@@ -143,13 +143,13 @@ namespace oomph
     LAPACK_QZ() : EigenSolver() {}
     LAPACK_QZ(const LAPACK_QZ&) = delete;
     void operator=(const LAPACK_QZ&) = delete;
-    virtual ~LAPACK_QZ() {}
+    ~LAPACK_QZ() override {}
 
     void solve_eigenproblem_legacy(Problem* const& problem_pt,
                                    const int& n_eval,
                                    Vector<std::complex<double>>& eigenvalue,
                                    Vector<DoubleVector>& eigenvector,
-                                   const bool& do_adjoint_problem = false)
+                                   const bool& do_adjoint_problem = false) override
     {
       throw OomphLibError("LAPACK_QZ is deactivated in pyoomph",
                           OOMPH_CURRENT_FUNCTION,
@@ -162,7 +162,7 @@ namespace oomph
                             Vector<double>& beta,
                             Vector<DoubleVector>& eigenvector_real,
                             Vector<DoubleVector>& eigenvector_imag,
-                            const bool& do_adjoint_problem = false)
+                            const bool& do_adjoint_problem = false) override
     {
       throw OomphLibError("LAPACK_QZ is deactivated in pyoomph",
                           OOMPH_CURRENT_FUNCTION,
@@ -194,10 +194,12 @@ namespace oomph
 #ifdef OOMPH_HAS_MPI
       Doc_imbalance_in_parallel_assembly(false),
       Use_default_partition_in_load_balance(false),
+#endif
       Must_recompute_load_balance_for_assembly(true),
+      Block_dof_arrangement_used(false),
+#ifdef OOMPH_HAS_MPI
       Halo_scheme_pt(0),
 #endif
-      Block_dof_arrangement_used(false),
       Relaxation_factor(1.0),
       Newton_solver_tolerance(1.0e-8),
       Max_newton_iterations(10),
@@ -7038,12 +7040,8 @@ namespace oomph
     {
       unsigned max = 0;
       unsigned min = INT_MAX;
-      unsigned sum = 0;
-      unsigned sum_total = 0;
       for (unsigned e = 0; e < my_n_eqn; e++)
       {
-        sum += ncoef[m][e];
-        sum_total += Sparse_assemble_with_arrays_previous_allocation[m][e];
         if (ncoef[m][e] > max) max = ncoef[m][e];
         if (ncoef[m][e] < min) min = ncoef[m][e];
 
@@ -12461,9 +12459,8 @@ namespace oomph
       }
     }
 #else
-    // Suppress comiler warnings about non-used variable
-    n_submesh_read++;
-    n_submesh_read--;
+    // Suppress compiler warnings about non-used variable
+    (void)n_submesh_read;
 #endif
 
 
@@ -12651,9 +12648,8 @@ namespace oomph
     }
 
 #else
-    // Suppress comiler warnings about non-used variable
-    tmp++;
-    tmp--;
+    // Suppress compiler warnings about non-used variable
+    (void)tmp;
 #endif
 
 
@@ -18923,8 +18919,6 @@ namespace oomph
                   MPI_DOUBLE,
                   this->communicator_pt()->mpi_comm());
 
-    unsigned el_count = 0;
-
     // Only do each node once
     Vector<std::map<Node*, bool>> node_done(n_proc);
 
@@ -19019,7 +19013,6 @@ namespace oomph
           for (unsigned e = 0; e < nel; e++)
           {
             GeneralisedElement* el_pt = batch_el_pt[e];
-            el_count++;
 
             // FE?
             FiniteElement* fe_pt = dynamic_cast<FiniteElement*>(el_pt);
