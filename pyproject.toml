@@ -49,7 +49,7 @@ tracker = "https://github.com/pyoomph/pyoomph/issues"
 
 
 [build-system]
-requires = ["scikit-build-core>=0.10", "pybind11>=2.5.0"]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.0.0"]
 build-backend = "scikit_build_core.build"
 
 [tool.scikit-build]
@@ -171,7 +171,7 @@ ignore_missing_imports = true
 include = ["pyoomph"]
 exclude = ["**/__pycache__"]
 pythonVersion = "3.12"
-# pyoomph._pyoomph_core is a compiled pybind11 extension: the repo tree only
+# pyoomph._pyoomph_core is a compiled nanobind extension: the repo tree only
 # ships its .pyi stub (pyoomph/_pyoomph_core.pyi), while the matching .so
 # lives wherever pyoomph was actually built/installed (e.g. site-packages
 # for an editable install merged into pyoomph.__path__). pyright can't see

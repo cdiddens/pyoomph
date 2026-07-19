@@ -51,7 +51,7 @@ option(PYOOMPH_USE_MPI       "Build with MPI support (defines OOMPH_HAS_MPI)"   
 option(PYOOMPH_PARANOID      "Build with extra runtime sanity checks (defines PARANOID)" OFF)
 option(PYOOMPH_DOWNLOAD_CLN  "Download and build CLN from source via its own autotools ./configure" ON)
 option(PYOOMPH_DOWNLOAD_GINAC "Download and build GiNaC from source via its own autotools ./configure" ON)
-option(PYOOMPH_GENERATE_STUBS "Generate .pyi stubs for the _core extension via pybind11-stubgen (best effort, non-fatal)"  ON)
+option(PYOOMPH_GENERATE_STUBS "Generate .pyi stubs for the _core extension via nanobind.stubgen (best effort, non-fatal)"  ON)
 option(PYOOMPH_COPY_STUBS_TO_SOURCE_TREE "Also mirror the generated .pyi stub into the source-tree pyoomph/ directory, so Pylance/Pyright/mypy can resolve pyoomph._core while editing without a full pip install" ON)
 
 # Left empty by default: ginac.de only ever hosts the *current* release
@@ -97,23 +97,23 @@ endif()
 include(cmake/ThirdPartyGiNaC.cmake)
 
 # ----------------------------------------------------------------------------
-# pybind11, via CMake.
+# nanobind, via CMake.
 #
-# NOTE: pybind11 itself (headers/CMake package) is looked up here, but is
+# NOTE: nanobind itself (headers/CMake package) is looked up here, but is
 # only actually *used* by the _pyoomph target further down, whose sources
 # are restricted to src/pybind/*.cpp. Everything else in this project
 # (libgeneric.a and the pyoomph_core static library) is fully Python-version
-# independent and never sees pybind11 or the Python headers/flags.
+# independent and never sees nanobind or the Python headers/flags.
 # ----------------------------------------------------------------------------
 find_package(Python 3.9 COMPONENTS Interpreter Development.Module REQUIRED)
 
 execute_process(
-  COMMAND "${Python_EXECUTABLE}" -c "import pybind11; print(pybind11.get_cmake_dir())"
+  COMMAND "${Python_EXECUTABLE}" -c "import nanobind; print(nanobind.cmake_dir())"
   OUTPUT_STRIP_TRAILING_WHITESPACE
-  OUTPUT_VARIABLE pybind11_ROOT
+  OUTPUT_VARIABLE nanobind_ROOT
   COMMAND_ERROR_IS_FATAL ANY)
 
-find_package(pybind11 CONFIG REQUIRED)
+find_package(nanobind CONFIG REQUIRED)
 
 # ----------------------------------------------------------------------------
 # libgeneric.a: all .cc files from oomph-lib's include/ directory. This must
@@ -155,7 +155,7 @@ target_compile_definitions(generic PUBLIC
 
 # ----------------------------------------------------------------------------
 # pyoomph_core: all of src/*.cpp EXCEPT src/pybind/*.cpp. This is the bulk of
-# pyoomph's own C++ code, and it does not depend on pybind11 or the Python
+# pyoomph's own C++ code, and it does not depend on nanobind or the Python
 # headers at all - it only needs to be recompiled when the sources
 # themselves change, not when switching Python versions.
 # ----------------------------------------------------------------------------
@@ -191,13 +191,13 @@ endif()
 
 # ----------------------------------------------------------------------------
 # The actual Python extension module: ONLY src/pybind/*.cpp. This is the
-# only target that pulls in pybind11/Python compile flags and include
+# only target that pulls in nanobind/Python compile flags and include
 # directories, and hence the only target that needs rebuilding when
 # iterating over multiple Python versions - pyoomph_core and generic above
 # are reused as-is.
 #
 # Built/installed as the "_core" submodule of the "pyoomph" package, i.e.
-# importable as `pyoomph._core` (see PYBIND11_MODULE(_core, ...) in
+# importable as `pyoomph._core` (see NB_MODULE(_core, ...) in
 # src/pybind - the module name there must match this target name).
 # ----------------------------------------------------------------------------
 file(GLOB PYOOMPH_PYBIND_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/pybind/*.cpp")
@@ -207,7 +207,7 @@ if(NOT PYOOMPH_PYBIND_SOURCES)
                        "cannot build the Python extension module.")
 endif()
 
-pybind11_add_module(_pyoomph_core
+nanobind_add_module(_pyoomph_core
   ${PYOOMPH_PYBIND_SOURCES}
 )
 

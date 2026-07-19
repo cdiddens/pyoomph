@@ -19,13 +19,14 @@ The main author may be contacted at c.diddens@utwente.nl
 
 ================================================================================*/
 
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
-#include <pybind11/numpy.h>
+#include <nanobind/nanobind.h>
+#include <nanobind/ndarray.h>
+#include <nanobind/trampoline.h>
 
-namespace py = pybind11;
+namespace nb = nanobind;
 
 #include <sstream>
+#include <vector>
 
 #include "../oomph_lib.hpp"
 #include "../exception.hpp"
@@ -44,16 +45,16 @@ namespace pyoomph
 		}
 	};
 
-	// pybind11 trampoline: forwards the virtual position() call to a Python override, so a
+	// nanobind trampoline: forwards the virtual position() call to a Python override, so a
 	// Python class deriving from GeomObject can implement the actual parametrization.
 	class PyGeomObject : public GeomObject
 	{
 	public:
-		using GeomObject::GeomObject;
+		NB_TRAMPOLINE(GeomObject, 1);
 
 		void position(const oomph::Vector<double> &zeta, oomph::Vector<double> &r) const override
 		{
-			PYBIND11_OVERLOAD(void, GeomObject, position, zeta, r);
+			NB_OVERRIDE(position, zeta, r);
 		}
 	};
 
@@ -62,87 +63,84 @@ namespace pyoomph
 	// oomph-lib's macro-element/Q-mapping to build curved meshes. Meant to be subclassed from
 	// Python (see PyDomain below); the numpy-array-based macro_element_boundary() overload is the
 	// one exposed to/overridden by Python, while the oomph::Vector-based overload (required by
-	// the oomph-lib base class interface) just marshals data into/out of small reusable numpy
-	// buffers (PyS, PyF) and forwards to it, to avoid reallocating on every call.
+	// the oomph-lib base class interface) just marshals data into/out of small reusable buffers
+	// (PyS, PyF), viewed as numpy arrays only for the duration of the Python call, and forwards
+	// to it, to avoid reallocating on every call.
 	class Domain : public oomph::Domain
 	{
 	protected:
-		py::array_t<double> PyS, PyF;
-		py::buffer_info PyS_buff, PyF_buff;
+		std::vector<double> PyS, PyF;
 
 	public:
 		Domain() : oomph::Domain(), PyS(1), PyF(1)
 		{
-			PyS_buff = PyS.request();
-			PyF_buff = PyF.request();
 		}
 		// Overridden (from Python, via PyDomain) to compute the global position f on the
 		// boundary i_direct of macro element i_macro, at local coordinate s and history time t.
-		virtual void macro_element_boundary(const unsigned &t, const unsigned &i_macro, const unsigned &i_direct, const py::array_t<double> &s, py::array_t<double> &f)
+		virtual void macro_element_boundary(const unsigned &t, const unsigned &i_macro, const unsigned &i_direct, const nb::ndarray<nb::numpy, double> &s, nb::ndarray<nb::numpy, double> &f)
 		{
 			throw_runtime_error("Domain::macro_element_boundary not specialised");
 		}
 		using oomph::Domain::macro_element_boundary;
 		// oomph-lib-facing overload: copies s/f between oomph::Vector<double> and the reusable
-		// numpy buffers PyS/PyF (resizing them only if the dimensionality changed), then calls
-		// the numpy-array-based overload above.
+		// buffers PyS/PyF (resizing them only if the dimensionality changed), wraps them as
+		// (non-owning) numpy array views for the duration of the call, then calls the
+		// numpy-array-based overload above.
 		void macro_element_boundary(const unsigned &t, const unsigned &i_macro, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f) override
 		{
-			if (PyS_buff.shape[0] != (int)s.size())
-			{
-				PyS.resize({s.size()});
-				PyS_buff = PyS.request();
-			}
+			if (PyS.size() != s.size())
+				PyS.resize(s.size());
 			for (unsigned int i = 0; i < s.size(); i++)
-				((double *)(PyS_buff.ptr))[i] = s[i];
+				PyS[i] = s[i];
 
-			if (PyF_buff.shape[0] != (int)f.size())
-			{
-				PyF.resize({f.size()});
-				PyF_buff = PyF.request();
-			}
-			macro_element_boundary(t, i_macro, i_direct, PyS, PyF);
+			if (PyF.size() != f.size())
+				PyF.resize(f.size());
+
+			nb::ndarray<nb::numpy, double> PyS_view(PyS.data(), {PyS.size()});
+			nb::ndarray<nb::numpy, double> PyF_view(PyF.data(), {PyF.size()});
+			macro_element_boundary(t, i_macro, i_direct, PyS_view, PyF_view);
 			for (unsigned int i = 0; i < f.size(); i++)
-				f[i] = ((double *)(PyF_buff.ptr))[i];
+				f[i] = PyF[i];
 		}
 	};
 
-	// pybind11 trampoline: forwards the virtual macro_element_boundary() call to a Python
+	// nanobind trampoline: forwards the virtual macro_element_boundary() call to a Python
 	// override.
 	class PyDomain : public Domain
 	{
 	public:
-		using Domain::Domain;
-		void macro_element_boundary(const unsigned &t, const unsigned &i_macro, const unsigned &i_direct, const py::array_t<double> &s, py::array_t<double> &f) override
+		NB_TRAMPOLINE(Domain, 1);
+
+		void macro_element_boundary(const unsigned &t, const unsigned &i_macro, const unsigned &i_direct, const nb::ndarray<nb::numpy, double> &s, nb::ndarray<nb::numpy, double> &f) override
 		{
-			PYBIND11_OVERLOAD(void, Domain, macro_element_boundary, t, i_macro, i_direct, s, f);
+			NB_OVERRIDE(macro_element_boundary, t, i_macro, i_direct, s, f);
 		}
 	};
 
 }
 
-void PyReg_GeomObjects(py::module &m)
+void PyReg_GeomObjects(nb::module_ &m)
 {
 
-	py::class_<pyoomph::GeomObject, pyoomph::PyGeomObject>(
+	nb::class_<pyoomph::GeomObject, pyoomph::PyGeomObject>(
 		m, "GeomObject",
 		"Base class for a parametric geometric object (a mapping from a local coordinate to a global "
 		"position), to be subclassed in Python and used e.g. to describe curved mesh boundaries via "
 		"an overridden position(zeta) method.")
-		.def(py::init<>());
+		.def(nb::init<>());
 
-	py::class_<oomph::Domain>(m, "OomphDomain",
+	nb::class_<oomph::Domain>(m, "OomphDomain",
 							   "Base class (from oomph-lib) for a macro-element domain.");
-	py::class_<pyoomph::Domain, pyoomph::PyDomain, oomph::Domain>(
+	nb::class_<pyoomph::Domain, pyoomph::PyDomain, oomph::Domain>(
 		m, "Domain",
 		"Base class for a macro-element domain, to be subclassed in Python and used to describe "
 		"curved meshes via an overridden macro_element_boundary(t, i_macro, i_direct, s, f) method.")
-		.def(py::init<>());
+		.def(nb::init<>());
 
-	py::class_<oomph::MacroElement>(m, "MacroElement",
+	nb::class_<oomph::MacroElement>(m, "MacroElement",
 									 "Base class (from oomph-lib) for a single macro element of a Domain.");
-	py::class_<oomph::QMacroElement<2>, oomph::MacroElement>(
+	nb::class_<oomph::QMacroElement<2>, oomph::MacroElement>(
 		m, "QMacroElement2",
 		"A 2d quadrilateral macro element belonging to a Domain, identified by its index therein.")
-		.def(py::init<oomph::Domain *, const unsigned &>(), py::arg("domain"), py::arg("macro_element_index"));
+		.def(nb::init<oomph::Domain *, const unsigned &>(), nb::arg("domain"), nb::arg("macro_element_index"));
 }
