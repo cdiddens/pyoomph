@@ -34,7 +34,7 @@ Open the Ubuntu terminal and treat it exactly like a normal Linux installation (
 .. code:: bash
 
 	sudo apt update
-	sudo apt install gcc libopenmpi-dev pybind11-dev flex bison
+	sudo apt install gcc libopenmpi-dev flex bison
 	python3 -m pip install --upgrade pyoomph
 
 Or, for an editable install from source:
