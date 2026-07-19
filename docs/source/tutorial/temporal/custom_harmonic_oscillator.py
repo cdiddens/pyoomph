@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
 
@@ -29,7 +30,7 @@ from pyoomph.expressions import * # Import some additional things to express e.g
 
 # We define a new class called HarmonicOscillator, which is inherited from the generic ODEEquations
 class HarmonicOscillator(ODEEquations):
-	# Constructor, allow to set some parameters like the name of the variable, omega, damping and driving
+	# Constructor, allows us to set some parameters like the name of the variable, omega, damping and driving
 	def __init__(self,*,name="y",omega=1,damping=0,driving=0):
 		super(HarmonicOscillator,self).__init__()
 		self.name=name #Store these as members of the equation object

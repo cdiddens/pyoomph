@@ -1,7 +1,7 @@
 Elementary functions
 --------------------
 
-The following elementary mathematical functions are implemented:and work on scalar expressions and numbers.
+The following elementary mathematical functions are implemented and work on scalar expressions and numbers.
 
 .. list-table:: Elementary mathematical functions
     :widths: 50 50

@@ -1,6 +1,6 @@
 /*================================================================================
 pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -15,7 +15,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 
-The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+The main author may be contacted at c.diddens@utwente.nl
 
 ================================================================================*/
 
@@ -29,11 +29,18 @@ The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
 namespace oomph
 {
 
+   // Generic (unimplemented) template: oomph-lib's MacroElement concept (used for curved/mapped
+   // domain boundaries via Domain objects) is only specialized for 2D (triangular) T-elements
+   // below; other dimensions get an empty, unusable class.
    template <int DIM>
    class TMacroElement : public MacroElement
    {
    };
 
+   // 2d specialization allowing MacroElements to be attached to T (triangular) elements. oomph-lib's
+   // own MacroElement machinery is written for quad/brick elements; this class exists purely so a
+   // MacroElement pointer can be associated with a TElement-based mesh without crashing, but none of
+   // the actual macro-mapping functionality is implemented (all overrides throw "Not implemented").
    template <>
    class TMacroElement<2> : public MacroElement
    {
@@ -52,7 +59,7 @@ namespace oomph
       }
 
       /// Broken copy constructor
-      TMacroElement(const TMacroElement &dummy)
+      TMacroElement(const TMacroElement &) : MacroElement()
       {
          BrokenCopy::broken_copy("TMacroElement");
       }
@@ -66,27 +73,32 @@ namespace oomph
       /// Empty destructor
       virtual ~TMacroElement(){};
 
-      void output(const unsigned &t, std::ostream &outfile, const unsigned &nplot)
+      // Stub: not needed for triangular macro elements, calling it is a bug
+      void output(const unsigned &, std::ostream &, const unsigned &)
       {
          throw_runtime_error("Not implemented");
       }
 
-      void output_macro_element_boundaries(std::ostream &outfile, const unsigned &nplot)
+      // Stub: not needed for triangular macro elements, calling it is a bug
+      void output_macro_element_boundaries(std::ostream &, const unsigned &)
       {
          throw_runtime_error("Not implemented");
       }
 
-      void macro_map(const unsigned &t, const Vector<double> &S, Vector<double> &r)
+      // Stub: mapping from macro-element to Eulerian coordinates is unused here
+      void macro_map(const unsigned &, const Vector<double> &, Vector<double> &)
       {
          throw_runtime_error("Not implemented");
       }
 
-      virtual void assemble_macro_to_eulerian_jacobian(const unsigned &t, const Vector<double> &s, DenseMatrix<double> &jacobian)
+      // Stub: Jacobian of the macro-to-Eulerian map is unused here
+      virtual void assemble_macro_to_eulerian_jacobian(const unsigned &, const Vector<double> &, DenseMatrix<double> &)
       {
          throw_runtime_error("Not implemented");
       }
 
-      virtual void assemble_macro_to_eulerian_jacobian2(const unsigned &t, const Vector<double> &s, DenseMatrix<double> &jacobian2)
+      // Stub: second derivative of the macro-to-Eulerian map is unused here
+      virtual void assemble_macro_to_eulerian_jacobian2(const unsigned &, const Vector<double> &, DenseMatrix<double> &)
       {
          throw_runtime_error("Not implemented");
       }

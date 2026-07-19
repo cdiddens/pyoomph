@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -36,10 +37,10 @@ from ..expressions.units import degree
 
 
 if TYPE_CHECKING:
-    from _pyoomph import Node
+    from .._pyoomph_core import Node
     from ..solvers.generic import GenericEigenSolver
     from ..generic.codegen import EquationTree
-    from ..materials.generic import AnyFluidProperties,PureLiquidProperties
+    from ..materials.generic import AnyFluidProperties,PureLiquidProperties,PureGasProperties,MixtureLiquidProperties,MixtureGasProperties
     from ..generic.problem import Problem
 
 
@@ -184,11 +185,12 @@ class StokesEquations(Equations):
         DG_alpha (ExpressionNumOrNone, optional): If using Discontinuous Galerkin discretisation, set penalty coefficient alpha for jump terms of the stress tensor. Defaults to None.
         symmetric_test_function (Union[Literal['auto'],bool], optional): Use symmetric test functions for the momentum equation. Defaults to 'auto'.
         pressure_test_scaling_factor (float, optional): Multiplicative scaling factor for the pressure test function. Defaults to 1.0.
+        hele_shaw_thickness (ExpressionOrNum, optional): Adds a Hele-Shaw drag term to the bulk force i.e -12*mu*u/delta**2, with the given thickness as parameter. Defaults to None.
+        GCL (bool, optional): If True, the Geometric Conservation Law is enforced in the ALE formulation of the (Navier-)Stokes equations. Defaults to False.
     """
     def __init__(self, *, dynamic_viscosity:ExpressionOrNum=1.0, mode:Literal["TH","CR","SV","C1","D2D1","D1D0","D2TBD1","mini","C2DL"]="TH", bulkforce:ExpressionNumOrNone=None, fluid_props:Optional["AnyFluidProperties"]=None, gravity:ExpressionNumOrNone=None, boussinesq:bool=False, mass_density:ExpressionNumOrNone=None,
-                 pressure_sign_flip:bool=False,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",wrong_strain:bool=False,pressure_factor:ExpressionOrNum=1, PFEM:Union[PFEMOptions,bool]=False, stress_tensor:ExpressionNumOrNone=None,velocity_name="velocity",pressure_name="pressure",DG_alpha:ExpressionNumOrNone=None,symmetric_test_function:Union[Literal['auto'],bool]='auto',pressure_test_scaling_factor:float=1):
+                 pressure_sign_flip:bool=False,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",wrong_strain:bool=False,pressure_factor:ExpressionOrNum=1, PFEM:Union[PFEMOptions,bool]=False, stress_tensor:ExpressionNumOrNone=None,velocity_name="velocity",pressure_name="pressure",DG_alpha:ExpressionNumOrNone=None,symmetric_test_function:Union[Literal['auto'],bool]='auto',pressure_test_scaling_factor:float=1, hele_shaw_thickness:ExpressionOrNum=None,GCL:bool=False ):
         super().__init__()
-        self.bulkforce = bulkforce  # Some arbitrary bulk-force vector
         self.gravity = gravity  # Some gravity direction, i.e. g*<unit vector of direction>
         if mode not in {"CR","TH","C1","C2","SV","D2TBD1","D2D1","D1D0","mini","C2DL"}:
             raise ValueError(
@@ -206,7 +208,7 @@ class StokesEquations(Equations):
             if symmetric_test_function=="auto":
                 symmetric_test_function=False
         self.symmetric_test_function:bool=symmetric_test_function
-        
+        self.GCL = GCL
         self.boussinesq = boussinesq  # If set, we only solve div(u)=0, else we solve div(u)=-1/rho*(partial_t(rho)+u*grad(rho))
         if fluid_props is not None:
             self.fluid_props = fluid_props
@@ -216,6 +218,12 @@ class StokesEquations(Equations):
             self.fluid_props = None
             self.dynamic_viscosity = dynamic_viscosity
             self.mass_density = mass_density
+
+        if hele_shaw_thickness is not None:
+            hsdamp = -12 * self.dynamic_viscosity * var("velocity") / hele_shaw_thickness ** 2
+            bulkforce = hsdamp if bulkforce is None else bulkforce+hsdamp
+        self.bulkforce = bulkforce  # Some arbitrary bulk-force vector
+        
         self.pressure_sign_flip=pressure_sign_flip
         self.momentum_scheme:TimeSteppingScheme=momentum_scheme        
         self.continuity_scheme:TimeSteppingScheme=continuity_scheme
@@ -234,6 +242,7 @@ class StokesEquations(Equations):
         self.stress_tensor=stress_tensor
         self.velocity_name=velocity_name
         self.pressure_name=pressure_name
+        
 
     def get_velocity_space_from_mode(self,for_interface=False):
         velospace={"C1":"C1","CR":"C2TB","TH":"C2","SV":"C2","D2D1":"D2","D1D0":"D1","D2TBD1":"D2TB","mini":"C1TB","C2DL":"C2","C2":"C2"}
@@ -337,7 +346,10 @@ class StokesEquations(Equations):
         self.add_residual(weak(time_scheme(self.continuity_scheme,div(u)), p_test))  # Incompressibility
         if not self.boussinesq and self.mass_density is not None:
             rho = self.mass_density
-            self.add_residual(weak(time_scheme(self.continuity_scheme,partial_t(rho, ALE=False) / rho + dot(u, grad(rho)) / rho), p_test))  # Incompressibility
+            if self.GCL:
+                self.add_dweak_dt(rho,p_test/scale_factor("mass_density"),scheme=self.continuity_scheme).add_weak((div(rho*(u-mesh_velocity(scheme=self.continuity_scheme)))),p_test/scale_factor("mass_density"))
+            else:
+                self.add_residual(weak(time_scheme(self.continuity_scheme,partial_t(rho, ALE=False) / rho + dot(u, grad(rho)) / rho), p_test))  # Incompressibility
 
         if self.bulkforce is not None:
             self.add_residual(-weak(time_scheme(self.momentum_scheme,self.bulkforce), u_test))  # bulk force
@@ -457,19 +469,25 @@ class NavierStokesEquations(StokesEquations):
         DG_alpha (ExpressionNumOrNone, optional): If using Discontinuous Galerkin discretisation, set coefficient alpha for stress tensor. Defaults to None.
         symmetric_test_function (Union[Literal['auto'],bool], optional): Use symmetric test functions for the momentum equation. Defaults to 'auto'.
         dt_factor (ExpressionOrNum, optional): Multiplicative factor to scale or deactivate the time derivative. Defaults to 1.
-        nonlinear_factor (ExpressionOrNum, optional): Multiplicative factor to scale or deactivate the nonlinearity, i.e. dot(u,grad(u))). Defaults to 1.
+        nonlinear_factor (ExpressionNumOrNone, optional): Multiplicative factor to scale or deactivate the nonlinearity, i.e. dot(u,grad(u))). Defaults to None.        
         wrap_params_in_subexpressions (bool, optional): Wrap parameters in subexpressions using GiNaC. Defaults to True.
+        GCL (bool, optional): If True, the Geometric Conservation Law is enforced in the ALE formulation of the (Navier-)Stokes equations. Defaults to False.
     """
                  
         
-    def __init__(self, *, dynamic_viscosity:ExpressionOrNum=1.0, mode:Literal["TH","CR","SV"]="TH", mass_density:ExpressionOrNum=1.0, bulkforce:ExpressionNumOrNone=None, fluid_props:Optional["AnyFluidProperties"]=None,
-                 dt_factor:ExpressionOrNum=1, nonlinear_factor:ExpressionOrNum=1, gravity:ExpressionNumOrNone=None, boussinesq:bool=False,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",wrong_strain:bool=False,pressure_factor:ExpressionOrNum=1,wrap_params_in_subexpressions:bool=True,PFEM:Union[PFEMOptions,bool]=False, stress_tensor:ExpressionNumOrNone=None,velocity_name="velocity",pressure_name="pressure",symmetric_test_function:Union[Literal['auto'],bool]='auto',pressure_test_scaling_factor:float=1):
+    def __init__(self, *, dynamic_viscosity:ExpressionOrNum=1.0, mode:Literal["TH","CR","SV","mini"]="TH", mass_density:ExpressionOrNum=1.0, bulkforce:ExpressionNumOrNone=None, fluid_props:Optional["AnyFluidProperties"]=None,
+                 dt_factor:ExpressionOrNum=1, nonlinear_factor:ExpressionNumOrNone=None, gravity:ExpressionNumOrNone=None, boussinesq:bool=False,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",wrong_strain:bool=False,pressure_factor:ExpressionOrNum=1,wrap_params_in_subexpressions:bool=True,PFEM:Union[PFEMOptions,bool]=False, stress_tensor:ExpressionNumOrNone=None,velocity_name="velocity",pressure_name="pressure",symmetric_test_function:Union[Literal['auto'],bool]='auto',pressure_test_scaling_factor:float=1, hele_shaw_thickness:ExpressionOrNum=None,GCL:bool=False):
         super().__init__(dynamic_viscosity=dynamic_viscosity, mode=mode, bulkforce=bulkforce, fluid_props=fluid_props,
-                         gravity=gravity, boussinesq=boussinesq,momentum_scheme=momentum_scheme,continuity_scheme=continuity_scheme,wrong_strain=wrong_strain,pressure_factor=pressure_factor,PFEM=PFEM, stress_tensor=stress_tensor,velocity_name=velocity_name,pressure_name=pressure_name,symmetric_test_function=symmetric_test_function,pressure_test_scaling_factor=pressure_test_scaling_factor)
+                         gravity=gravity, boussinesq=boussinesq,momentum_scheme=momentum_scheme,continuity_scheme=continuity_scheme,wrong_strain=wrong_strain,pressure_factor=pressure_factor,PFEM=PFEM, stress_tensor=stress_tensor,velocity_name=velocity_name,pressure_name=pressure_name,symmetric_test_function=symmetric_test_function,pressure_test_scaling_factor=pressure_test_scaling_factor, hele_shaw_thickness=hele_shaw_thickness,GCL=GCL)
         if self.fluid_props is not None:
             self.mass_density = self.fluid_props.mass_density
         else:
             self.mass_density = mass_density
+        if nonlinear_factor is None: # nonlinear_factor overrides Hele-Shaw
+            if hele_shaw_thickness is None:
+                nonlinear_factor = 1
+            else:
+                nonlinear_factor = 6 / 5
         self.dt_factor = dt_factor  # Factors to scale or deactivate the time derivative
         self.nonlinear_factor = nonlinear_factor  # and the nonlinearity
         self.wrap_params_in_subexpressions=wrap_params_in_subexpressions
@@ -496,13 +514,22 @@ class NavierStokesEquations(StokesEquations):
             #self.add_residual(weak(time_scheme(self.momentum_scheme,rho*partial_t(u,1,ALE=False)), u_test))
 #        elif self.PFEM_options and self.PFEM_options.active and self.PFEM_options.direct_position_update:
  #           raise RuntimeError("TODO")
-        else:
+        elif not self.GCL:
             self.add_residual(weak(time_scheme(self.momentum_scheme,rho*material_derivative(u,u,dt_factor=self.dt_factor,advection_factor=self.nonlinear_factor)), u_test))
+        else:
+            w=mesh_velocity(scheme=self.momentum_scheme)
+            self.add_dweak_dt(rho*u,u_test,scheme=self.momentum_scheme).add_weak(time_scheme(self.momentum_scheme, div(rho*dyadic(u,u-w))),u_test)
 
 
 
 
 class NavierStokesNormalTraction(InterfaceEquations):
+    """
+    Adds a normal traction (~ pressure) boundary condition to the (Navier-)Stokes equations:
+    
+    Args:
+        normal_traction: The normal traction (~ pressure) to be applied
+    """    
     required_parent_type = StokesEquations
 
     def __init__(self, normal_traction:ExpressionOrNum):

@@ -1,10 +1,11 @@
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -19,7 +20,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
 
@@ -51,7 +52,7 @@ class LShapedMesh(MeshTemplate):
 			# add a quadrilateral element from (x_l,y_l) to (x_u,y_u)
 			domain.add_quad_2d_C1(node_ll,node_ul,node_lu,node_uu)
 			if ix==0: # Marking the left boundary:
-				self.add_nodes_to_boundary("left",[node_ll,node_lu])
+				self.add_facet_to_boundary("left",[node_ll,node_lu])
 
 		# row of quads in y direction
 		for iy in range(1,self.Ny): # we must start from 1, since the element in the corner is already present
@@ -63,7 +64,7 @@ class LShapedMesh(MeshTemplate):
 			node_uu = self.add_node_unique(x_u, y_u)
 			domain.add_quad_2d_C1(node_ll,node_ul,node_lu,node_uu)
 			if iy == self.Ny-1: # Marking the top boundary:
-				self.add_nodes_to_boundary("top",[node_lu, node_uu])
+				self.add_facet_to_boundary("top",[node_lu, node_uu])
 
 
 class MeshTestProblem(Problem):

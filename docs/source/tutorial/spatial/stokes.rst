@@ -3,7 +3,7 @@
 The Stokes equations
 --------------------
 
-The Stokes equations generalizes the simple example of the Poisson equation on various levels. First of all, the Stokes equations are a system of two partial differential equations, one for the velocity field and one for the pressure field. Secondly, the Stokes equations involves the velocity as vectorial unknown. Additionally, particular care has to be taken on the choice of the used finite element spaces for the velocity-pressure discretization.
+The Stokes equations generalize the simple example of the Poisson equation on various levels. First of all, the Stokes equations are a system of two partial differential equations, one for the velocity field and one for the pressure field. Secondly, the Stokes equations involve the velocity as a vectorial unknown. Additionally, particular care has to be taken in the choice of the used finite element spaces for the velocity-pressure discretization.
 
 Therefore, the Stokes equations constitute a perfect example to progress from the simple Poisson equation to more complex problems. 
 
@@ -19,3 +19,4 @@ Therefore, the Stokes equations constitute a perfect example to progress from th
    stokes/nonormalflow.rst   
    stokes/stokeslaw.rst   
    stokes/cr.rst   
+   stokes/inverse_problem.rst

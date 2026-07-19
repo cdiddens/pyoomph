@@ -10,8 +10,8 @@ sys.path.insert(0, os.path.abspath('../../pyoomph'))
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = 'pyoomph'
-copyright = '2025, Christian Diddens & Duarte Rocha'
-author = 'Christian Diddens & Duarte Rocha'
+copyright = '2026, Christian Diddens, Duarte Rocha & Maxim de Wildt'
+author = 'Christian Diddens, Duarte Rocha & Maxim de Wildt'
 
 import re
 try:
@@ -42,6 +42,12 @@ extensions = [
     'sphinxcontrib.images'
     # 'sphinx.ext.imgmath',
     ]
+
+# Auto-generated section labels (from sphinx.ext.autosectionlabel) are just the section title
+# text by default, e.g. "Module contents" - and every sphinx-apidoc-generated page reuses those
+# same generic titles, so without this they collide across (almost) every pyoomph.*.rst page.
+# Prefixing with the document path makes them unique.
+autosectionlabel_prefix_document = True
 
 favicons = [
     {"href": "favicon.ico"},
@@ -75,6 +81,7 @@ autodoc_inherit_docstrings=False
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
 
 html_theme = 'sphinx_rtd_theme'
+
 html_static_path = ['_static']
 
 html_css_files = [

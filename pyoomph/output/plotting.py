@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -54,7 +55,7 @@ from scipy import interpolate #type:ignore
 from ..typings import *
 import numpy
 
-import _pyoomph
+from .. import _pyoomph_core as _pyoomph
 
 
 import matplotlib.image as mpimg
@@ -1789,7 +1790,9 @@ class MatplotLibScaleBar(MatplotLibOverlayBase):
     linewidths=3
     textsize = 14
     text_yoffset=0
+    text_xoffset=0
     orientation="horizontal"
+    capstyle="round"
     invisible=False
 
     def _fit_length(self,scale:float):
@@ -1824,16 +1827,16 @@ class MatplotLibScaleBar(MatplotLibOverlayBase):
         x,y,l=self.xpos,self.ypos,figlength
         plt.gca().annotate("", xytext=(map_x(x - (1.0 - shift) * l * nx), map_y(y - (1.0 - shift) * l * ny)), #type:ignore
                          xy=(map_x(x + shift * l * nx), map_y(y + shift * l * ny)),
-                         arrowprops=dict(color=self.textcolor, fc=self.textcolor,arrowstyle="-", lw=self.linewidths),zorder=self.zindex)
+                         arrowprops=dict(color=self.textcolor, fc=self.textcolor,arrowstyle="-", capstyle=self.capstyle, lw=self.linewidths),zorder=self.zindex)
         # Bars at the end
         if self.stoplength>0:
             bl = self.stoplength #/TODO: Scale by x/y
             plt.gca().annotate("", xytext=(map_x(x - (1.0 - shift) * l * nx + bl * ny), map_y(y - (1.0 - shift) * l * ny + bl * nx)), #type:ignore
                              xy=(map_x(x - (1.0 - shift) * l * nx - bl * ny), map_y(y - (1.0 - shift) * l * ny - bl * nx)),
-                             arrowprops=dict(color=self.textcolor, fc=self.textcolor,arrowstyle="-", lw=self.linewidths),zorder=self.zindex)
+                             arrowprops=dict(color=self.textcolor, fc=self.textcolor,arrowstyle="-", capstyle=self.capstyle, lw=self.linewidths),zorder=self.zindex)
             plt.gca().annotate("", xytext=(map_x(x + (shift) * l * nx + bl * ny), map_y(y + (shift) * l * ny + bl * nx)), #type:ignore
                              xy=(map_x(x + (shift) * l * nx - bl * ny), map_y(y + (shift) * l * ny - bl * nx)),
-                             arrowprops=dict(color=self.textcolor, fc=self.textcolor,arrowstyle="-", lw=self.linewidths),zorder=self.zindex)
+                             arrowprops=dict(color=self.textcolor, fc=self.textcolor,arrowstyle="-", capstyle=self.capstyle, lw=self.linewidths),zorder=self.zindex)
 
         lstr=str(reallength)
         ss=self.plotter.get_problem().get_scaling("spatial") #type:ignore
@@ -1848,7 +1851,7 @@ class MatplotLibScaleBar(MatplotLibOverlayBase):
                 lstr = "{:.8g} mm".format(reallength * 1000)
             elif reallength < 1e-1:
                 lstr = "{:.8g} cm".format(reallength * (100))
-        plt.gca().text(map_x(x), map_y(y+self.text_yoffset),lstr, fontsize=self.textsize,color=self.textcolor,va="bottom",ha="center",zorder=self.zindex) #type:ignore
+        plt.gca().text(map_x(x+self.text_xoffset), map_y(y+self.text_yoffset),lstr, fontsize=self.textsize,color=self.textcolor,va="bottom",ha="center",zorder=self.zindex) #type:ignore
 
 
 
@@ -2374,8 +2377,8 @@ class MatplotlibPlotter(BasePlotter):
         if self.load_cb_ranges_dir!="":
             fn=os.path.join(self.load_cb_ranges_dir,"cb_ranges_{:05d}.txt".format(self._output_step))
             try:
-                f=open(fn,"r")
-                data=json.load(f)
+                with open(fn,"r") as f:
+                    data=json.load(f)
                 if key in data.keys():
                     print("Using colorbar ranges for '"+key+"' from '"+fn+"'")
                     return MatplotLibPersistentRange(data[key][0],data[key][1],"fixed")
@@ -2408,15 +2411,15 @@ class MatplotlibPlotter(BasePlotter):
                 plt.savefig(fn,dpi=self.dpi,facecolor=self.background_color) #type:ignore
         if self.write_cb_range_files and self.load_cb_ranges_dir=="":
             os.makedirs(os.path.join(pdir,"_cb_ranges"),exist_ok=True)
-            f=open(os.path.join(pdir,"_cb_ranges","cb_ranges_{:05d}.txt".format(self._output_step)),"w")
-            
+
             #f.write("cb_ranges={}\n")
             odict:Dict[str,Tuple[float,float]]={}
             for nam,rang in self._range_objects.items():
                 odict[nam]=(rang.vmin,rang.vmax)
-                #f.write('cb_ranges["'+nam+'"]=['+str(rang.vmin)+', '+str(rang.vmax)+']\n')                
+                #f.write('cb_ranges["'+nam+'"]=['+str(rang.vmin)+', '+str(rang.vmax)+']\n')
 
-            json.dump(odict,f)
+            with open(os.path.join(pdir,"_cb_ranges","cb_ranges_{:05d}.txt".format(self._output_step)),"w") as f:
+                json.dump(odict,f)
                 
 
 
@@ -2679,22 +2682,22 @@ class MatplotlibPlotter(BasePlotter):
         Otherwise, you have to set the mode, which can be e.g. "arrows" or "streamlines".
 
         Parameters:
-        - infield (str): The name of the field to plot, given by the domain and the final field name, e.g. "domain/velocity".
-        - mode (str, optional): The plotting mode. Defaults to None and then selects on the basis of the other arguments if possible. Otherwise, "streamlines" or "arrows" can be used.
-        - transform (Union[List[Union[PlotTransform, None]], List[Union[str, None]], Union[str, PlotTransform, None]], optional): The transformation to apply to the plot. Defaults to None, but can be e.g. a list of transforms, e.g. also ["mirror_x",None] to return two plots, one mirrored at the y-axis and one without mirroring.
-        - linecolor (str, optional): The color of the lines in the plot. Defaults to None.
-        - linewidths (float, optional): The width of the lines in the plot. Defaults to None.
-        - colorbar (MatplotLibColorbar, optional): The colorbar to consider for colormap plots. Defaults to None.
-        - arrowkey (MatplotLibArrowKey, optional): The arrow key to use for interface arrow plots. Defaults to None.
-        - arrowdensity (float, optional): The density of the arrows in the plot. Defaults to None.
-        - arrowstyle (str, optional): The style of the arrows (see matplotlib ArrowStyle). Defaults to None.
-        - arrowlength (float, optional): The length of the arrows in the plot. Defaults to None.
-        - levels (int, optional): The number of levels in the plot, e.g. for contour plots . Defaults to None.
-        - datamap (Any, optional): The data map to apply to the plot. Defaults to None.
-        - axes (MatplotLibAxes, optional): The axes to use for the plot. Defaults to None.
+            infield (str): The name of the field to plot, given by the domain and the final field name, e.g. "domain/velocity".
+            mode (str, optional): The plotting mode. Defaults to None and then selects on the basis of the other arguments if possible. Otherwise, "streamlines" or "arrows" can be used.
+            transform (Union[List[Union[PlotTransform, None]], List[Union[str, None]], Union[str, PlotTransform, None]], optional): The transformation to apply to the plot. Defaults to None, but can be e.g. a list of transforms, e.g. also ["mirror_x",None] to return two plots, one mirrored at the y-axis and one without mirroring.
+            linecolor (str, optional): The color of the lines in the plot. Defaults to None.
+            linewidths (float, optional): The width of the lines in the plot. Defaults to None.
+            colorbar (MatplotLibColorbar, optional): The colorbar to consider for colormap plots. Defaults to None.
+            arrowkey (MatplotLibArrowKey, optional): The arrow key to use for interface arrow plots. Defaults to None.
+            arrowdensity (float, optional): The density of the arrows in the plot. Defaults to None.
+            arrowstyle (str, optional): The style of the arrows (see matplotlib ArrowStyle). Defaults to None.
+            arrowlength (float, optional): The length of the arrows in the plot. Defaults to None.
+            levels (int, optional): The number of levels in the plot, e.g. for contour plots . Defaults to None.
+            datamap (Any, optional): The data map to apply to the plot. Defaults to None.
+            axes (MatplotLibAxes, optional): The axes to use for the plot. Defaults to None.
 
         Returns:
-        - Union[MatPlotLibAddPlotReturns, List[MatPlotLibAddPlotReturns]]: The added plot or a list of added plots if you use e.g. multiple transforms.
+            Union[MatPlotLibAddPlotReturns, List[MatPlotLibAddPlotReturns]]: The added plot or a list of added plots if you use e.g. multiple transforms.
         """
    
         

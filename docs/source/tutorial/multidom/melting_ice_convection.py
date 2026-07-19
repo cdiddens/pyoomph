@@ -1,10 +1,11 @@
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -19,7 +20,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
 
@@ -113,7 +114,11 @@ class IceConvectionProblem(IceFrontProblem):
         # Since we know that the mesh mainly moves in y-direction, we can speed up the calculation by removing the motion in y-direction
         ice_eqs += DirichletBC(mesh_y=True)
         liq_eqs += DirichletBC(mesh_y=True)
-
+        
+        # Reduce the bulk positions to be first-order, but allow the interface nodes to have a curvature per element
+        ice_eqs += ConstrainPositionsToC1Space()+UnconstrainPositionsFromC1Space()@"interface"
+        liq_eqs += ConstrainPositionsToC1Space()+UnconstrainPositionsFromC1Space()@"interface"
+            
         # Interface: Connect the mesh position and impose the front motion
         interf_eqs=ConnectMeshAtInterface()
         interf_eqs+=IceFrontSpeed(self.latent_heat)

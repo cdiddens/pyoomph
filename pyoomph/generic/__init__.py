@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,13 +21,13 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
 from .problem import Problem,GenericProblemHooks
-from .codegen import Equations,CombinedEquations,ODEEquations,ScalingException,InterfaceEquations,GlobalLagrangeMultiplier,WeakContribution,ResidualContribution,ScalarField,VectorField,ForceZeroOnEigenSolve
+from .codegen import Equations,CombinedEquations,ODEEquations,ScalingException,InterfaceEquations,GlobalLagrangeMultiplier,WeakContribution,ResidualContribution,ScalarField,VectorField,ForceZeroOnEigenSolve,ConstrainFieldsToC1Space,UnconstrainFieldsFromC1Space
 
 __all__ = ["Problem", "GenericProblemHooks","Equations",
            "CombinedEquations", "ScalingException",
-           "ODEEquations","InterfaceEquations","GlobalLagrangeMultiplier","WeakContribution","ResidualContribution","ScalarField","VectorField","ForceZeroOnEigenSolve"]
+           "ODEEquations","InterfaceEquations","GlobalLagrangeMultiplier","WeakContribution","ResidualContribution","ScalarField","VectorField","ForceZeroOnEigenSolve","ConstrainFieldsToC1Space","UnconstrainFieldsFromC1Space"]

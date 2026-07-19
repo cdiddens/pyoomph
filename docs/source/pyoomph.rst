@@ -1,3 +1,5 @@
+:orphan:
+
 pyoomph package
 ===============
 
@@ -17,6 +19,14 @@ Subpackages
    pyoomph.solvers
    pyoomph.typings
    pyoomph.utils
+
+Submodules
+----------
+
+.. toctree::
+   :maxdepth: 4
+
+   pyoomph._pyoomph_core
 
 
 Module contents

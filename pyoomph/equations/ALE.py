@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -40,17 +41,13 @@ class BaseMovingMeshEquations(Equations):
         Defines the base class for moving mesh equations. This class should be inherited by all moving mesh equations.
             
         Args:
-            coordinate_space(Optional[str]): The coordinate space. Default is None.
-            constrain_bulk_to_C1(bool): If True, the bulk position space is constrained to C1, except on boundaries. Currently not working. Default is False.
+            coordinate_space(Optional[str]): The coordinate space. Default is None.            
             coordsys(Optional[BaseCoordinateSystem]): The coordinate system. Default is None.
     """
 
-    def __init__(self,coordinate_space:Optional[str]=None,constrain_bulk_to_C1:bool=False,coordsys:Optional[BaseCoordinateSystem]=None):
+    def __init__(self,coordinate_space:Optional[str]=None,coordsys:Optional[BaseCoordinateSystem]=None):
         super().__init__()
-        self.coordsys=coordsys
-        self.constrain_bulk_to_C1 = constrain_bulk_to_C1
-        if self.constrain_bulk_to_C1:
-            raise RuntimeError("constrain_bulk_to_C1 is not working at the moment")
+        self.coordsys=coordsys                
         self.coordinate_space=coordinate_space
         
         self.min_coordinate_space:Optional[str]=None
@@ -58,9 +55,7 @@ class BaseMovingMeshEquations(Equations):
             self.min_coordinate_space = self.coordinate_space
 
     def define_fields(self):
-        self.activate_coordinates_as_dofs(coordinate_space=self.min_coordinate_space)
-        if self.constrain_bulk_to_C1:
-            self.get_current_code_generator().bulk_position_space_to_C1=True
+        self.activate_coordinates_as_dofs(coordinate_space=self.min_coordinate_space)        
 
     def define_scaling(self):
         self.set_scaling(mesh= scale_factor("spatial"))
@@ -110,12 +105,11 @@ class PseudoElasticMesh(BaseMovingMeshEquations):
             E (ExpressionOrNum): The Young's modulus. Default is 1*scale_factor("spatial")**2.
             nu (ExpressionOrNum): The Poisson's ratio. Default is rational_num(3,10).
             spatial_error_factor (Optional[float]): The spatial error factor. Default is None.
-            coordinate_space (Optional[str]): The coordinate space. Default is None.
-            constrain_bulk_to_C1 (bool): If True, the bulk position space is constrained to C1. Default is False.
+            coordinate_space (Optional[str]): The coordinate space. Default is None.            
             coordsys (Optional[BaseCoordinateSystem]): The coordinate system. Default is cartesian.
     """
-    def __init__(self, E:ExpressionOrNum=1*scale_factor("spatial")**2, nu:ExpressionOrNum=rational_num(3,10), spatial_error_factor:Optional[float]=None,coordinate_space:Optional[str]=None,constrain_bulk_to_C1:bool=False,coordsys:Optional[BaseCoordinateSystem]=cartesian):
-        super(PseudoElasticMesh, self).__init__(coordinate_space=coordinate_space,constrain_bulk_to_C1=constrain_bulk_to_C1,coordsys=coordsys)
+    def __init__(self, E:ExpressionOrNum=1*scale_factor("spatial")**2, nu:ExpressionOrNum=rational_num(3,10), spatial_error_factor:Optional[float]=None,coordinate_space:Optional[str]=None,coordsys:Optional[BaseCoordinateSystem]=cartesian):
+        super(PseudoElasticMesh, self).__init__(coordinate_space=coordinate_space,coordsys=coordsys)
         self.E = E
         self.nu = nu
         self.ALE_factor = 1
@@ -157,11 +151,10 @@ class LaplaceSmoothedMesh(BaseMovingMeshEquations):
         This class is a subclass of BaseMovingMeshEquations and inherits all its arguments. 
 
         Args:
-            factor (ExpressionOrNum): The factor. Default is scale_factor("spatial")**2.
-            constrain_bulk_to_C1 (bool): If True, the bulk position space is constrained to C1. Default is False.
+            factor (ExpressionOrNum): The factor. Default is scale_factor("spatial")**2.            
     """
-    def __init__(self,factor:ExpressionOrNum=scale_factor("spatial")**2,constrain_bulk_to_C1:bool=False,coordinate_space:Optional[str]=None,coordsys:Optional[BaseCoordinateSystem]=cartesian,symmetrize:bool=False):
-        super(LaplaceSmoothedMesh, self).__init__(coordinate_space=coordinate_space,constrain_bulk_to_C1=constrain_bulk_to_C1,coordsys=coordsys)
+    def __init__(self,factor:ExpressionOrNum=scale_factor("spatial")**2,coordinate_space:Optional[str]=None,coordsys:Optional[BaseCoordinateSystem]=cartesian,symmetrize:bool=False):
+        super(LaplaceSmoothedMesh, self).__init__(coordinate_space=coordinate_space,coordsys=coordsys)
         self.factor=factor
         self.symmetrize=symmetrize
 
@@ -181,8 +174,8 @@ class LaplaceSmoothedMesh(BaseMovingMeshEquations):
 
 
 class SingleDirectionLaplaceSmoothedMesh(LaplaceSmoothedMesh):
-    def __init__(self, direction:Union[int,Literal["x","y","z"]], factor: ExpressionOrNum = scale_factor("spatial") ** 2, constrain_bulk_to_C1: bool = False, coordinate_space: Optional[str] = None, coordsys: OptionalCoordinateSystem = cartesian):
-        super().__init__(factor, constrain_bulk_to_C1, coordinate_space, coordsys, symmetrize=False)
+    def __init__(self, direction:Union[int,Literal["x","y","z"]], factor: ExpressionOrNum = scale_factor("spatial") ** 2,  coordinate_space: Optional[str] = None, coordsys: OptionalCoordinateSystem = cartesian):
+        super().__init__(factor, coordinate_space, coordsys, symmetrize=False)
         self.direction=direction
         if isinstance(direction,str):
             self.direction={"x":0,"y":1,"z":2}[direction]
@@ -213,11 +206,10 @@ class HyperelasticSmoothedMesh(BaseMovingMeshEquations):
         mu (float): The shear modulus. Default is 1.
         kappa (float): The bulk modulus. Default is 1.
         coordinate_space (Optional[str]): The coordinate space. Default is None.
-        constrain_bulk_to_C1 (bool): If True, the bulk position space is constrained to C1. Default is False.
         coordsys (Optional[BaseCoordinateSystem]): The coordinate system. Default is cartesian.
     """
-    def __init__(self,mu:float=1,kappa:float=1, coordinate_space: Optional[str] = None, constrain_bulk_to_C1: bool = False, coordsys: Optional[BaseCoordinateSystem] = cartesian,use_subexpressions:bool=False):
-        super().__init__(coordinate_space, constrain_bulk_to_C1, coordsys)
+    def __init__(self,mu:float=1,kappa:float=1, coordinate_space: Optional[str] = None,  coordsys: Optional[BaseCoordinateSystem] = cartesian,use_subexpressions:bool=False):
+        super().__init__(coordinate_space,  coordsys)
         self.use_subexpressions=use_subexpressions
         self.mu=mu
         self.kappa=kappa
@@ -248,13 +240,12 @@ class YeohSmoothedMesh(BaseMovingMeshEquations):
         C1 (float): The Yeoh constant C1. Default is 1.
         C2 (float): The Yeoh constant C2. Default is 10.
         C3 (float): The Yeoh constant C3. Default is 0.
-        coordinate_space (Optional[str]): The coordinate space. Default is None.
-        constrain_bulk_to_C1 (bool): If True, the bulk position space is constrained to C1. Default is False.
+        coordinate_space (Optional[str]): The coordinate space. Default is None.        
         coordsys (Optional[BaseCoordinateSystem]): The coordinate system. Default is cartesian
         
     """
-    def __init__(self,kappa:float=1, C1:float=1,C2:float=10,C3:float=0, coordinate_space: Optional[str] = None, constrain_bulk_to_C1: bool = False, coordsys: Optional[BaseCoordinateSystem] = cartesian,use_subexpressions:bool=False):
-        super().__init__(coordinate_space, constrain_bulk_to_C1, coordsys)
+    def __init__(self,kappa:float=1, C1:float=1,C2:float=10,C3:float=0, coordinate_space: Optional[str] = None,  coordsys: Optional[BaseCoordinateSystem] = cartesian,use_subexpressions:bool=False):
+        super().__init__(coordinate_space,  coordsys)
         self.use_subexpressions=use_subexpressions
         self.C1=C1
         self.C2=C2
@@ -271,7 +262,8 @@ class YeohSmoothedMesh(BaseMovingMeshEquations):
         I1=trace( matproduct(transpose(dxdX),dxdX) )*J**rational_num(-2,3)
         I1min=I1-self.get_nodal_dimension()
         F=(self.C1*I1min+self.C2*I1min**2+self.C3*I1min**3+self.kappa*(J-1)**2)/2                                
-        self.add_functional_minimization(scale_factor("spatial")*F,dxdX,dimensional_testfunctions=False,coordinate_system=self.coordsys,lagrangian=True)
+        #self.add_functional_minimization(scale_factor("spatial")*F,dxdX,dimensional_testfunctions=False,coordinate_system=self.coordsys,lagrangian=True)
+        self.add_functional_minimization(F,dimensional_testfunctions=False,coordinate_system=self.coordsys,lagrangian=True)
         
 
 
@@ -360,7 +352,7 @@ class ConnectMeshAtInterface(InterfaceEquations):
             outside, outside_test=var_and_test(f,domain=self.get_opposite_side_of_interface())
                             
             self.add_residual(weak(inside-outside,l_test))
-            if self._coordinates_as_dofs:
+            if self.get_combined_equations()._assert_codegen()._coordinates_as_dofs:
                 self.add_residual(weak(l,inside_test))
             if self.get_opposite_side_of_interface()._coordinates_as_dofs:
                 self.add_residual(-weak(l,outside_test))
@@ -518,10 +510,11 @@ class EnforcedInterfacialLaplaceSmoothing(InterfaceEquations):
     
     """
     required_parent_type=BaseMovingMeshEquations
-    def __init__(self,coordinate_system=cartesian):
+    def __init__(self,coordinate_system=cartesian,sorting=None):
         super().__init__()
         self.coordsys=coordinate_system
         self.verbose=True
+        self.sorting=sorting
         
     def define_fields(self):        
         # Get the coordinate space
@@ -572,12 +565,29 @@ class EnforcedInterfacialLaplaceSmoothing(InterfaceEquations):
         coords=data.get_coordinates()                
         nodes=mesh.fill_node_index_to_node_map()
         fixed_index=mesh.has_interface_dof_id("_s_fixed_"+iname)
-        dyn_index=mesh.has_interface_dof_id("_s_solved_"+iname)        
+        dyn_index=mesh.has_interface_dof_id("_s_solved_"+iname)                
         for seg in segs:
             al=0.0
             lastx=coords[0,seg[0]]
             lasty=coords[1,seg[0]]
+            
             for s in seg:
+                if self.sorting is not None:
+                    if self.sorting=="x+":
+                        if coords[0,seg[0]]>coords[0,seg[-1]]:
+                            seg=seg[::-1]
+                    elif self.sorting=="x-":
+                        if coords[0,seg[0]]<coords[0,seg[-1]]:
+                            seg=seg[::-1]
+                    elif self.sorting=="y+":
+                        if coords[1,seg[0]]>coords[1,seg[-1]]:
+                            seg=seg[::-1]
+                    elif self.sorting=="y-":
+                        if coords[1,seg[0]]<coords[1,seg[-1]]:
+                            seg=seg[::-1]
+                    else:
+                        raise RuntimeError("Unknown sorting option "+str(self.sorting))
+                            
                 x,y=coords[0,s],coords[1,s]
                 delta=numpy.sqrt((x-lastx)**2+(y-lasty)**2)
                 al+=delta
@@ -629,14 +639,69 @@ class PrescribedMovingMesh(BaseMovingMeshEquations):
         umesh: The prescribed mesh velocity.
         lagrangian: If True, the integration is performed in the Lagrangian frame. Default is False.
         coordinate_space: The coordinate space. Default is None.
-        constrain_bulk_to_C1: If True, the bulk position space is constrained to C1. Default is False.
         coordsys: The coordinate system. Default is cartesian.
     """
-    def __init__(self, umesh:ExpressionOrNum,lagrangian=False,coordinate_space = None, constrain_bulk_to_C1 = False, coordsys = None):
-        super().__init__(coordinate_space, constrain_bulk_to_C1, coordsys)
+    def __init__(self, umesh:ExpressionOrNum,lagrangian=False,coordinate_space = None, coordsys = None):
+        super().__init__(coordinate_space,  coordsys)
         self.umesh = umesh
         self.lagrangian = lagrangian
         
         
     def define_residuals(self):
         self.add_weak((mesh_velocity() - self.umesh)*scale_factor("temporal"), "mesh",lagrangian=self.lagrangian)
+        
+        
+class ConstrainPositionsToC1Space(Equations):
+    """Constrains the positions of the mesh to the C1 space. 
+    This is useful if you want to reduce the number of degrees of freedom of the mesh. 
+    Can be combined with UnconstrainPositionsFromC1Space at boundaries to still allow for curved boundaries.
+
+    Args:
+        where: Where to apply the constraint. If None, the constraint is applied to all nodes. If a callable, it should take a list of nondimensional coordinates and return True if the constraint should be applied to that node.
+    """
+    def __init__(self,where:Optional[Callable[[List[float]],bool]]=None):
+        super().__init__()
+        self.where=where
+    
+    def before_assigning_equations_preorder(self, mesh):
+        #print("Constraining positions to C1 space")
+        POSITION_CONSTRAIN_TO_C1 = 2                 
+        for e in mesh.elements():        
+            for ni in e.non_vertex_node_indices():
+                n=e.node_pt(ni)
+                if self.where is not None:
+                    x=[n.x(i) for i in range(n.ndim())]
+                    if not self.where(x):
+                        continue
+                for i in range(n.ndim()):     
+                    if not n.is_hanging():                                       
+                        n.set_additional_dof_constraint(POSITION_CONSTRAIN_TO_C1,i)
+                    
+        return super().before_assigning_equations_preorder(mesh)
+
+    
+    
+class UnconstrainPositionsFromC1Space(Equations):
+    """Unconstrains the positions of the mesh from the C1 space.     
+    Can be applied to a boundary on a domain with ConstrainPositionsToC1Space in the bulk to allow for curved boundaries.
+
+    Args:
+        where: Where to apply the constraint. If None, the constraint is applied to all nodes. If a callable, it should take a list of nondimensional coordinates and return True if the constraint should be applied to that node.
+    """
+    def __init__(self,where:Optional[Callable[[List[float]],bool]]=None):
+        super().__init__()
+        self.where=where
+    
+    def before_assigning_equations_preorder(self, mesh):
+        POSITION_CONSTRAIN_TO_C1 = 2                
+        for e in mesh.elements():            
+            for ni in e.non_vertex_node_indices():
+                n=e.node_pt(ni)
+                if self.where is not None:
+                    x=[n.x(i) for i in range(n.ndim())]
+                    if not self.where(x):
+                        continue
+                for i in range(n.ndim()):                        
+                    n.remove_additional_dof_constraint(POSITION_CONSTRAIN_TO_C1, i)
+                    
+        return super().before_assigning_equations_preorder(mesh)

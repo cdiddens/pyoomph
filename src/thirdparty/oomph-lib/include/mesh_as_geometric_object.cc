@@ -32,7 +32,6 @@
 // oomph-lib headers
 #include "mesh.h"
 #include "mesh_as_geometric_object.h"
-#include "multi_domain.h"
 
 #include <cstdio>
 namespace oomph

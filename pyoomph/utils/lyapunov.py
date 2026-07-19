@@ -10,6 +10,7 @@ import numpy
 from scipy.sparse import csr_matrix
 from ..expressions import ExpressionNumOrNone
 from ..typings import NPFloatArray,List,Optional
+from ..generic.mpi import get_mpi_rank
 
 class LyapunovExponentCalculator(GenericProblemHooks):
     """
@@ -49,6 +50,8 @@ class LyapunovExponentCalculator(GenericProblemHooks):
 
     def actions_after_initialise(self):
         problem=self.get_problem()
+        if problem.is_distributed():
+            raise RuntimeError("Lyapunov exponent calculation is not supported for distributed problems")
         T0=problem.get_current_time(as_float=True)
         TS=problem.get_scaling("temporal")
         if self.waiting_time is not None:
@@ -66,6 +69,7 @@ class LyapunovExponentCalculator(GenericProblemHooks):
             self._gram_schmidt_dt=0
         else:
             self._gram_schmidt_dt=float(self.gram_schmidt_dt/TS)
+        super().actions_after_initialise()
 
     def actions_after_newton_solve(self):
         problem = self.get_problem()
@@ -156,14 +160,15 @@ class LyapunovExponentCalculator(GenericProblemHooks):
             self._t_last_gram_schmidt=t
 
             # --- Output ---
-            if self._outputfile is None:
+            if self._outputfile is None and get_mpi_rank()==0:
                 fname = (problem.get_output_directory(self.filename)if self.relative_to_output else self.filename)
                 self._outputfile = open(fname, "w")
 
             if Tdiff > 0:
                 lyap_estimate=self.Lambdas/Tdiff
-                self._outputfile.write(f"{t}\t" + "\t".join(map(str, lyap_estimate)) + "\n")
-                self._outputfile.flush()
+                if get_mpi_rank()==0:
+                    self._outputfile.write(f"{t}\t" + "\t".join(map(str, lyap_estimate)) + "\n")
+                    self._outputfile.flush()
 
                 if self.store_as_eigenvectors:
                     problem._last_eigenvalues = lyap_estimate.copy()
@@ -232,7 +237,7 @@ class LyapunovExponentCalculatorBDF2(GenericProblemHooks):
                 self.renormalize(i) # and scale it to the length
         
         # Open the file if necessary
-        if self.outputfile is None:
+        if self.outputfile is None and get_mpi_rank()==0:
             if self.relative_to_output:                
                 self.outputfile=open(problem.get_output_directory(self.filename),"w")
             else:
@@ -304,8 +309,9 @@ class LyapunovExponentCalculatorBDF2(GenericProblemHooks):
             if self.average_time is not None:
                 while self.ringbuffer[0][0]<t-self.average_time and len(self.ringbuffer)>1:
                     self.ringbuffer.popleft()
-            self.outputfile.write(str(t)+"\t"+"\t".join(map(str,ljap_estimate))+"\n")
-            self.outputfile.flush()
+            if get_mpi_rank()==0:
+                self.outputfile.write(str(t)+"\t"+"\t".join(map(str,ljap_estimate))+"\n")
+                self.outputfile.flush()
 
             if self.store_as_eigenvectors:
                 problem._last_eigenvalues=numpy.array(ljap_estimate)
@@ -313,3 +319,10 @@ class LyapunovExponentCalculatorBDF2(GenericProblemHooks):
                 problem._last_eigenvectors=self.perturbation.copy()
                 for i,ev in enumerate(problem._last_eigenvectors):
                     problem._last_eigenvectors[i]=ev/numpy.linalg.norm(ev)
+
+    
+    def actions_after_initialise(self):
+        problem=self.get_problem()
+        if problem.is_distributed():
+            raise RuntimeError("Lyapunov exponent calculation is not supported for distributed problems")
+        super().actions_after_initialise()

@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -56,6 +57,9 @@ class DropletMesh3d(MeshTemplate):
         self.Np=Nphi
         self.tetra=False
         self._nodes=[]
+        self._tetra_nodes=[]
+        self._hex_nodes=[]
+        self._boundary_nodes={}
         #self._node_calls=0
         #self._node_max = 0
 
@@ -66,19 +70,29 @@ class DropletMesh3d(MeshTemplate):
         #print(self._node_calls,self._node_max)
         return res
 
+    def add_tetra_3d_C1(self,n1,n2,n3,n4):        
+        self._dom.add_tetra_3d_C1(n1,n2,n3,n4)
+        self._tetra_nodes.append(set([n1,n2,n3,n4]))
+        
 
     def add_brick(self,pf:Sequence[int]):
         domain=self._dom
         assert domain is not None
         if self.tetra:
-            domain.add_tetra_3d_C1(pf[0], pf[2], pf[1], pf[4])
-            domain.add_tetra_3d_C1(pf[1], pf[7], pf[2], pf[3])
-            domain.add_tetra_3d_C1(pf[4], pf[1], pf[5], pf[7])
-            domain.add_tetra_3d_C1(pf[1], pf[4], pf[7], pf[2])
-            domain.add_tetra_3d_C1(pf[2], pf[4], pf[6], pf[7])
+            self.add_tetra_3d_C1(pf[0], pf[2], pf[1], pf[4])
+            self.add_tetra_3d_C1(pf[1], pf[7], pf[2], pf[3])
+            self.add_tetra_3d_C1(pf[4], pf[1], pf[5], pf[7])
+            self.add_tetra_3d_C1(pf[1], pf[4], pf[7], pf[2])
+            self.add_tetra_3d_C1(pf[2], pf[4], pf[6], pf[7])
         else:
             domain.add_brick_3d_C1(*pf)
+            self._hex_nodes.append(set([*pf]))
 
+    def mark_boundary_nodes(self, iname:str, ni:List[int]):
+        if iname not in self._boundary_nodes.keys():
+            self._boundary_nodes[iname]=set()
+        self._boundary_nodes[iname].update(ni)
+        
     def add_brick_curved(self,sl:List[float],sh:List[float],end:bool=False):
         def n(s:List[float]) -> int:
             x=0.5*(self._lsouth(s)*(1-s[1])+self._lnorth(s)*s[1]+self._lwest(s)*(1-s[0])+self._least(s)*s[0])
@@ -87,9 +101,9 @@ class DropletMesh3d(MeshTemplate):
             x=self._rot_x(x)
             res=self._uniq_node(x)
             if s[2]*s[2]<1e-20:
-                self.add_nodes_to_boundary("droplet_substrate",[res])
+                self.mark_boundary_nodes("droplet_substrate",[res])
             elif (s[2]-1.0)**2<1e-20:
-                self.add_nodes_to_boundary("droplet_gas",[res])
+                self.mark_boundary_nodes("droplet_gas",[res])
             return res
 
         if end==False:
@@ -105,7 +119,7 @@ class DropletMesh3d(MeshTemplate):
             pts = [n([sl[0], sl[1], sh[2]]), n([sl[0], sh[1], sh[2]]), n([sl[0], sl[1], 1]),
                     n([sl[0], sh[1], 1])]
             pts += [n([sl[0], sl[1], sl[2]]), n([sl[0], sh[1], sl[2]]), nout1, nout2]
-            self.add_nodes_to_boundary("droplet_gas", [nout1,nout2])
+            self.mark_boundary_nodes("droplet_gas", [nout1,nout2])
             self.add_brick(pts)
             pass
 
@@ -192,4 +206,19 @@ class DropletMesh3d(MeshTemplate):
         # south east
         self._rot_x = lambda x: numpy.array([x[1], -x[0], x[2]]) #type:ignore
         self.add_quarter_section()
+        
+        for tetra in self._tetra_nodes:
+            intersect=tetra.intersection(self._boundary_nodes["droplet_substrate"])
+            if len(intersect)==3:
+                self.add_facet_to_boundary("droplet_substrate", list(intersect))
+            intersect=tetra.intersection(self._boundary_nodes["droplet_gas"])
+            if len(intersect)==3:
+                self.add_facet_to_boundary("droplet_gas", list(intersect))
+        for hex in self._hex_nodes:
+            intersect=hex.intersection(self._boundary_nodes["droplet_substrate"])
+            if len(intersect)==4:
+                self.add_facet_to_boundary("droplet_substrate", list(intersect))
+            intersect=hex.intersection(self._boundary_nodes["droplet_gas"])
+            if len(intersect)==4:
+                self.add_facet_to_boundary("droplet_gas", list(intersect))
 

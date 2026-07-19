@@ -30,7 +30,7 @@ The constitutive law is entirely wrapped in the second Piola-Kirchhoff stress te
 	\boldsymbol{g}&=\Gamma^{2/D}\left(\left(\nabla_\xi \vec{\xi}\right)^\mathrm{t}\left(\nabla_\xi \vec{\xi}\right)\right)
 	\end{aligned}
 
-Please kindly excuse the sloppy notation not respecting the co- and contravariances here correctly. This is done considerably better in `oomph-lib's documentation <https://oomph-lib.github.io/oomph-lib/doc/solid/solid_theory/html/index.html>`__. However, the way it is written here corresponds to the implementation in pyoomph, where we heavily use matrices and the vector gradients, since they automatically adjust correctly based on the considered coordinate system (e.g. :math:`\boldsymbol{g}` is the (scaled) identity matrix in Cartesian coordinates, but in axisymmetric coordinates, it is not). Entering parameters are Young's modulus :math:`E` and the Poisson ratio :math:`\nu`. For small deformations, it perfectly recovers Hook's law. :math:`D` is the dimension of the solid, which is e.g. 3 for a 2d mesh with axisymmetric coordinate system.
+Please kindly excuse the sloppy notation not respecting the co- and contravariances here correctly. This is done considerably better in `oomph-lib's documentation <https://oomph-lib.github.io/oomph-lib/doc/solid/solid_theory/html/index.html>`__. However, the way it is written here corresponds to the implementation in pyoomph, where we heavily use matrices and the vector gradients, since they automatically adjust correctly based on the considered coordinate system (e.g. :math:`\boldsymbol{g}` is the (scaled) identity matrix in Cartesian coordinates, but in axisymmetric coordinates, it is not). Entering parameters are Young's modulus :math:`E` and the Poisson ratio :math:`\nu`. For small deformations, it perfectly recovers Hooke's law. :math:`D` is the dimension of the solid, which is e.g. 3 for a 2d mesh with axisymmetric coordinate system.
 This constitutive law is implemented in the class :py:class:`~pyoomph.equations.solid.GeneralizedHookeanSolidConstitutiveLaw`.
 
 If :math:`\nu=1/2`, the solid is incompressible and the definition becomes singular. In that case, we have to use 
@@ -56,7 +56,7 @@ i.e. that the deformation locally conserves the volume. For this law, we have to
 
 .. warning::
 
-	The nonlinear elasticiy equations cannot be used in combination with azimuthal or Cartesian normal mode stability analysis as outline in section :numref:`azimuthalstabana` and :numref:`cartesiannormalstabana`. For this approach, we would have to expand the mesh coordinates also by an azimuthal or additional Cartesian mode, which is not implemented (yet).
+	The nonlinear elasticity equations cannot be used in combination with azimuthal or Cartesian normal mode stability analysis as outlined in section :numref:`azimuthalstabana` and :numref:`cartesiannormalstabana`. For this approach, we would have to expand the mesh coordinates also by an azimuthal or additional Cartesian mode, which is not implemented (yet).
 
 
 .. toctree::

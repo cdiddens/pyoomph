@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -36,6 +37,7 @@ import sys
 import __main__
 
 import operator
+from typing import IO
 
 from ..typings import *
 
@@ -115,7 +117,7 @@ class SingleParallelParameterSimulation:
         self._INTERNAL_pararunner:Optional["ParallelParameterScan"]=None
         self._INTERNAL_script:Optional[str]=None
 
-    def _INTERNAL_assemble_args(self) -> Optional[List[str]]:
+    def _INTERNAL_assemble_args(self) -> List[str]:
         argnames:List[str]=[]
         for x in dir(self):
             if x[0]=="_":
@@ -186,7 +188,7 @@ class ParallelParameterScan:
         self._max_procs=max_procs   #0 means Nprocs of system
         self._single_threaded_childs=single_threaded_childs
         self._sims:List[SingleParallelParameterSimulation]=[]
-        self._donefile=None
+        self._donefile:Optional[IO[str]]=None
 
     def mark_as_done(self,sim:SingleParallelParameterSimulation,args:List[str])->None:
         if self._donefile is None:
@@ -263,8 +265,7 @@ class ParallelParameterScan:
             my_env["MKL_DOMAIN_NUM_THREADS"] = "MKL_BLAS=1, MKL_DOMAIN_PARDISO=1"
         with concurrent.futures.ThreadPoolExecutor(max_workers=self._max_procs) as executor:
             for s in self._sims:
-                args = s._INTERNAL_assemble_args()  # type: ignore
-                args: List[str] = [self._interpreter] + args
+                args = [self._interpreter] + s._INTERNAL_assemble_args()  # type: ignore
                 s._args = args  # type: ignore
                 if skip_done:
                     if self.already_done(args):

@@ -1,7 +1,7 @@
 Weak formulation
 ~~~~~~~~~~~~~~~~
 
-The most basic example is usually the *Poisson equation*, which is usually taken as prime example for the *finite element method*. The Poisson equation for an unknown function :math:`u(\vec{x})` with a source function :math:`g(\vec{x})`, both defined on an :math:`n`-dimensional domain :math:`\Omega` with position vector :math:`\vec{x}` reads
+The most basic example is usually the *Poisson equation*, which is usually taken as a prime example of the *finite element method*. The Poisson equation for an unknown function :math:`u(\vec{x})` with a source function :math:`g(\vec{x})`, both defined on an :math:`n`-dimensional domain :math:`\Omega` with position vector :math:`\vec{x}` reads
 
 .. math:: :label: eqspatialpoissonstrong
 
@@ -52,6 +52,6 @@ and putting all in residual form, i.e. putting all terms on one side, we arrive 
    \left(\nabla u,\nabla v\right)-\left(g, v\right)-\left\langle j_\text{N}, v\right\rangle=0\,. 
    \end{aligned}
 
-It can be shown that the weak formulation :math:numref:`eqspatialpoissonweak` together with the Dirichlet conditions :math:`u|_{\Gamma_\text{D}}=u_\text{D}` is equivalent to the strong formulation :math:numref:`eqspatialpoissonstrong` together with both types of boundary conditions, as long as :math:`v` may be chosen arbitrary (with the requirement to have :math:`v=0` on :math:`\Gamma_D`).
+It can be shown that the weak formulation :math:numref:`eqspatialpoissonweak` together with the Dirichlet conditions :math:`u|_{\Gamma_\text{D}}=u_\text{D}` is equivalent to the strong formulation :math:numref:`eqspatialpoissonstrong` together with both types of boundary conditions, as long as :math:`v` may be chosen arbitrarily (with the requirement to have :math:`v=0` on :math:`\Gamma_D`).
 
 However, the weak formulation has several features that make it appealing: The order of the spatial derivatives has been reduced from second to first order and the implementation of the Neumann conditions is now just an interface integral. Of course, it also comes at the price that spatial integrals have to be carried out to obtain a solution and that the arbitrary test function :math:`v` is appearing in the weak formulation. However, the combination of integrals and test functions provides a neat way of solving the equations numerically on versatile geometries and in all kinds of dimensions.

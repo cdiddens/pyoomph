@@ -1,7 +1,7 @@
 Trapezoidal rule and the implicit midpoint rule
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-So far, we have used different time stepping method, but there are obviously more possibilities. Let us focus on systems of first order ODEs only, which can be written in general as
+So far, we have used different time stepping methods, but there are obviously more possibilities. Let us focus on systems of first order ODEs only, which can be written in general as
 
 .. math:: \partial_t \vec{U}=\vec{F}(\vec{U},t)
 
@@ -33,40 +33,25 @@ However, there are time integration methods, where also previous values of :math
 
 In pyoomph, the lhs can easily be obtained by writing ``partial_t(...,scheme="BDF1")``, but how to evaluate the right hand side appropriately? As mentioned before, :py:func:`~pyoomph.expressions.generic.var` statements are always evaluated at the current time step :math:`n` we are currently solving for, so how to access the values of :math:`\vec{U}` at previous time steps?
 
-The answer is the function :py:func:`~pyoomph.expressions.generic.evaluate_in_past`, which takes an expression as argument and evaluate it previous time steps. Without an argument, ``evaluate_in_past(expr)`` evaluates ``expr`` at the time step :math:`n-1`. A second optional argument gives the offset, e.g. ``evaluate_in_past(expr,2)`` evaluates the expression ``expr`` at the time step :math:`n-2` and, beyond that, e.g. ``evaluate_in_past(expr,0.5)`` is equal to ``0.5*expr+0.5*evaluate_in_past(expr,1)``, i.e. with fractional values as second argument, one can linearly interpolate between two time steps.
+The answer is the function :py:func:`~pyoomph.expressions.generic.evaluate_in_past`, which takes an expression as argument and evaluates it at previous time steps. Without an argument, ``evaluate_in_past(expr)`` evaluates ``expr`` at the time step :math:`n-1`. A second optional argument gives the offset, e.g. ``evaluate_in_past(expr,2)`` evaluates the expression ``expr`` at the time step :math:`n-2` and, beyond that, e.g. ``evaluate_in_past(expr,0.5)`` is equal to ``0.5*expr+0.5*evaluate_in_past(expr,1)``, i.e. with fractional values as second argument, one can linearly interpolate between two time steps.
 
 This means that the trapezoidal rule :math:numref:`eqodetrapzrule` in residual form in pyoomph can be written as ``partial_t(...,scheme="BDF1")-evaluate_in_past(...,0.5)``, where we have cast the equation already in residual form, i.e. all terms are on the lhs and the rhs is zero.
 
 As an example, let us - once again - consider the harmonic oscillator, but this time integrated with the trapezoidal rule (``"TPZ"``). The code for the equation class now reads
 
-.. code:: python
-
-   class HarmonicOscillator(ODEEquations):
-   	def __init__(self,*,omega=1):
-   		super(HarmonicOscillator,self).__init__()
-   		self.omega=omega
-   		
-   	def define_fields(self):
-   		self.define_ode_variable("y")
-   		self.define_ode_variable("dot_y")
-   		
-   	def define_residuals(self):
-   		y=var("y") 
-   		dot_y=var("dot_y")
-   		residual=(partial_t(dot_y,scheme="BDF1")+evaluate_in_past(self.omega**2*y,0.5))*testfunction(dot_y)
-   		residual += (partial_t(y,scheme="BDF1")-evaluate_in_past(dot_y,0.5)) * testfunction(y)
-   		self.add_residual(residual)
+.. literalinclude:: oscillator_TPZ_scheme.py
+   :language: python
+   :start-at: class HarmonicOscillator(ODEEquations):
+   :end-at: self.add_residual(residual)
 
 It can be seen that indeed :math:numref:`eqodetrapzrule` is recovered by using ``scheme="BDF1"`` for the lhs and ``evaluate_in_past(...,0.5)`` for the rhs.
 
 When using the trapezoidal rule for advancing in time, one also has to be consistent with the definition of the total energy, i.e. the argument which is passed to the :py:class:`~pyoomph.equations.generic.ODEObservables` class (as in the previous section) now has to take the time derivative of :math:`y` in the kinetic energy via the ``"BDF1"`` scheme, whereas the value of :math:`y` in the potential energy has to be evaluated at the average between the time steps :math:`n` and :math:`n-1`, i.e. via ``evaluate_in_past(...,0.5)``:
 
-.. code:: python
-
-   		#Calculate the total energy. Important to also stick to the convention: BDF1 derivative and evaluate_in_past(...,0.5)
-   		y=var("y")
-   		total_energy=1/2*partial_t(y,scheme="BDF1")**2+1/2*evaluate_in_past(self.omega*y,0.5)**2
-   		eqs+=ODEObservables(Etot=total_energy) # Add the total energy as observable
+.. literalinclude:: oscillator_TPZ_scheme.py
+   :language: python
+   :start-at: #Calculate the total energy. Important to also stick to the convention: BDF1 derivative and evaluate_in_past(...,0.5)
+   :end-at: eqs+=ODEObservables(Etot=total_energy) # Add the total energy as observable
 
 Of course, this time stepping can be generalized, which is the so-called :math:`\theta`-*method*:
 

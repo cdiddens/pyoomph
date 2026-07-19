@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,11 +21,11 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
-import _pyoomph
+from .. import _pyoomph_core as _pyoomph
 import os
 import subprocess
 import sys
@@ -50,8 +51,17 @@ class BaseCCompiler(_pyoomph.SharedLibCCompiler):
         super(BaseCCompiler, self).__init__()
 
     @staticmethod
-    def check_avail()->bool: 
+    def check_avail()->bool:
         return True
+
+    def toolchain_located(self)->Optional[bool]:
+        """Lightweight, no-file-write check for whether the underlying compiler
+        toolchain can be located at all (e.g. cl.exe/link.exe for MSVC, via the
+        registry/vswhere - no compiling or temp files involved). Returns None
+        if no such check is implemented for this compiler, in which case
+        check_avail()'s full compile-and-link test is the only signal
+        available."""
+        return None
 
     @staticmethod
     def call_cmd( cmd:List[str], shell:bool=False, env:Optional[Dict[str,str]]=None,quiet:bool=False)->str:
@@ -200,9 +210,22 @@ int main (int argc, char **argv) {
     def check_avail()->bool:
         inst=SystemCCompiler()
         distutils.log.set_verbosity(0)
-        res:bool=inst.has_function("abort",includes=["stdlib.h"]) 
+        res:bool=inst.has_function("abort",includes=["stdlib.h"])
         distutils.log.set_verbosity(2)
         return res
+
+    def toolchain_located(self)->Optional[bool]:
+        if self.comp.compiler_type!="msvc": #type:ignore
+            return None
+        try:
+            # Locates cl.exe/link.exe (via vswhere/the registry) and sets up
+            # the MSVC environment - no compiling and no temp files involved,
+            # unlike has_function() above. Lets "does the toolchain exist"
+            # be distinguished from "can we write/compile in this environment".
+            self.comp.initialize() #type:ignore
+        except distutils.errors.DistutilsPlatformError:
+            return False
+        return True
 
     def compile(self, suppress_compilation:bool, suppress_code_writing:bool,quiet:bool,extra_flags:List[str]) -> bool:
         if suppress_compilation:
@@ -236,7 +259,16 @@ int main (int argc, char **argv) {
         if self.comp.compiler_type == "msvc": #type:ignore
             link_extra_postargs = ["/DLL"]            
 
-        src=os.path.relpath(self.get_code_filename())
+        try:
+            src=os.path.relpath(self.get_code_filename())
+        except ValueError:
+            # os.path.relpath() cannot express a path across drive letters on
+            # Windows (e.g. the output/temp directory on D: while the current
+            # working directory is on C: -- happens on GitHub's hosted Windows
+            # runners, and for any user keeping code and output on separate
+            # drives). relpath() here is purely cosmetic (shorter compiler
+            # command line); the absolute path compiles just as well.
+            src=self.get_code_filename()
         #print("Compiling "+src+" to shared library "+self.get_lib_filename()+" with compiler "+str(self.comp.compiler_type)+" i.e. "+self.comp.compiler_so[0]) #type:ignore
         obj=self.comp.compile([src],extra_preargs=preargs,extra_postargs=preargs,debug=os.environ.get('PYOOMPH_DEBUG') == "1")
         self.comp.link(self.comp.SHARED_LIBRARY, obj,self.get_lib_filename(),extra_postargs=link_extra_postargs) #type:ignore

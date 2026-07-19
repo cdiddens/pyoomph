@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,20 +21,22 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
+from doctest import master
 from os import path
 import re
-import _pyoomph
+from .. import _pyoomph_core as _pyoomph
 from ..typings import Optional
 
 from ..meshes.mesh import assert_spatial_mesh,InterfaceMesh,ODEStorageMesh
-from ..expressions import AxisymmetryBreakingCoordinateSystem,AxisymmetricCoordinateSystem, find_dominant_element_space, scale_factor, vector,matrix,evaluate_in_domain,testfunction,weak,var,nondim,Expression,rational_num,minimize_functional_derivative
+from ..expressions import AxisymmetryBreakingCoordinateSystem,AxisymmetricCoordinateSystem, find_dominant_element_space, scale_factor, vector,matrix,evaluate_in_domain,testfunction,weak,var,nondim,Expression,rational_num,minimize_functional_derivative,time_derivative_of_integral
 
 # from ..expressions import var, get_global_symbol, nondim, vector, testfunction, scale_factor, cartesian, partial_t
 from ..expressions.coordsys import ODECoordinateSystem, BaseCoordinateSystem
+from ..expressions.units import assert_dimensional_value
 import numpy
 
 from ..typings import *
@@ -72,6 +75,8 @@ class FiniteElementCodeGenerator(_pyoomph.FiniteElementCode):
         self._dummy_codegen_for_internal_facets_bulk:Optional[FiniteElementCodeGenerator]=None
         self._dummy_codegen_for_internal_facets_bulk_bulk:Optional[FiniteElementCodeGenerator]=None
         self._dummy_codegen_for_internal_facets_bulk_opp:Optional[FiniteElementCodeGenerator]=None
+
+        self._fields_defined_on_my_domain:Dict[str,"FiniteElementSpaceEnum"]={}
 
         self._custom_domain_name:Optional[str]=None
 
@@ -281,6 +286,31 @@ class FiniteElementCodeGenerator(_pyoomph.FiniteElementCode):
             assert self._problem
             return self._problem.get_default_spatial_integration_order()
 
+
+    def _transfer_my_fields_to_dummy_codegen(self,dummy:"FiniteElementCodeGenerator"):  
+        raise NotImplementedError("This function is not implemented yet. It should transfer all fields defined on this codegen to the dummy codegen, so that the dummy codegen can be used for internal facets and still have access to all fields defined on the parent domain")  
+        print("Transfer called", self.get_parent_domain(), dummy)
+        if self.get_parent_domain() is not None:
+           pself=self.get_parent_domain()
+           if pself.get_parent_domain() is not None:
+               ppself=pself.get_parent_domain()
+               for fieldname,space in ppself._fields_defined_on_my_domain.items():
+                if fieldname not in dummy._fields_defined_on_my_domain.keys():
+                    dummy._fields_defined_on_my_domain[fieldname]=space
+                    print("Transferring parent parent field",fieldname,space,"to",dummy)
+
+
+           for fieldname,space in pself._fields_defined_on_my_domain.items():
+            if fieldname not in dummy._fields_defined_on_my_domain.keys():
+                dummy._fields_defined_on_my_domain[fieldname]=space
+                print("Transferring parent field",fieldname,space,"to",dummy)
+
+        for fieldname,space in self._fields_defined_on_my_domain.items():
+            if fieldname not in dummy._fields_defined_on_my_domain.keys():
+                dummy._fields_defined_on_my_domain[fieldname]=space
+                print("Transferring field",fieldname,space,"to",dummy)
+        exit()
+
 class ScalingException(Exception):
     def __init__(self, msg:str, obj:Optional["BaseEquations"]=None):
         fullmsg = msg
@@ -321,9 +351,29 @@ class BaseEquations(_pyoomph.Equations):
         pass
     
     def add_weak(self,a:"ExpressionOrNum",b:Union[str,"ExpressionOrNum"],*,dimensional_dx:bool=False,lagrangian:bool=False,coordinate_system:"OptionalCoordinateSystem"=None,destination:Optional[str]=None):
+        """
+        Adds the weak contribution ``(a, b)`` (i.e. the integral of ``a`` times the test function ``b``) to the residuals.
+
+        Args:
+            a: Expression to be tested.
+            b: Test function, either passed directly or as the name of the field to test.
+            dimensional_dx: Whether to use the dimensional (as opposed to the nondimensional) integration measure.
+            lagrangian: Whether to integrate over the Lagrangian (undeformed) instead of the Eulerian domain.
+            coordinate_system: Optional coordinate system override for the integration.
+            destination: Optional residual destination for multiple residuals. Defaults to ``None``.
+
+        Returns:
+            self, to allow chaining further ``add_weak``/``add_residual`` calls.
+        """
         if isinstance(b,str):
             b=testfunction(b)
         self.add_residual(weak(a,b,dimensional_dx=dimensional_dx,coordinate_system=coordinate_system,lagrangian=lagrangian),destination=destination)
+        return self
+    
+    def add_dweak_dt(self,a:"ExpressionOrNum",b:Union[str,"ExpressionOrNum"],*,dimensional_dx:bool=False,lagrangian:bool=False,coordinate_system:"OptionalCoordinateSystem"=None,destination:Optional[str]=None,scheme:"TimeSteppingScheme"="BDF1"):
+        if isinstance(b,str):
+            b=testfunction(b)
+        self.add_residual(time_derivative_of_integral(weak(a,b,dimensional_dx=dimensional_dx,coordinate_system=coordinate_system,lagrangian=lagrangian),scheme=scheme),destination=destination)
         return self
     
     def add_functional_minimization(self,F:"ExpressionOrNum",with_respect_to:Optional[Union[Expression,List[Expression]]]=None,*,dimensional_dx:bool=False,dimensional_testfunctions:bool=True,lagrangian:bool=False,coordinate_system:"OptionalCoordinateSystem"=None,destination:Optional[str]=None):
@@ -422,6 +472,8 @@ class BaseEquations(_pyoomph.Equations):
         self._code:Optional[_pyoomph.DynamicBulkElementInstance] = None
         self._scaling:Dict[str,Union["ExpressionOrNum",str]] = {}
         self._test_scaling:Dict[str,Union["ExpressionOrNum",str]]={}
+        self._scales_to_check_for_fields:Set[str] = set()
+        self._test_scales_to_check_for_fields:Set[str] = set()
         #self._external_data_links:Dict[str,Tuple["ODEEquations",str]] = {}
         self._dimension = None
         self.default_timestepping_scheme:Optional[Literal["BDF2","BDF1","Newmark2"]] = None
@@ -508,6 +560,14 @@ class BaseEquations(_pyoomph.Equations):
     def after_remeshing(self,eqtree:"EquationTree"):
         pass
 
+    def _release_output_files(self)->None:
+        # Overridden by GenericOutput (see output/generic.py) to close any open output
+        # file handles it holds, so Problem.release() can close them proactively instead
+        # of leaving them for eventual garbage collection -- on Windows, a still-open
+        # output file prevents deleting its containing directory (WinError 32), the same
+        # class of bug fixed for the problem log file and compiled DLLs.
+        pass
+
     def before_mesh_to_mesh_interpolation(self,eqtree:"EquationTree",interpolator:"BaseMeshToMeshInterpolator"):
         pass
 
@@ -575,7 +635,7 @@ class BaseEquations(_pyoomph.Equations):
         if also_on_interface:
             master._additional_testfuncs_also_on_interface[fieldname] = expr
 
-    def set_scaling(self, **args:Union["ExpressionOrNum",str]):
+    def set_scaling(self,*,allow_scales_with_fields=False, **args:Union["ExpressionOrNum",str]):
         mst = self._get_combined_element()
         for n, v in args.items():
             if not isinstance(v,str):
@@ -583,14 +643,25 @@ class BaseEquations(_pyoomph.Equations):
                     v=_pyoomph.Expression(v)
             self._scaling[n] = v
             mst._scaling[n] = v
+            if not allow_scales_with_fields:
+                mst._scales_to_check_for_fields.add(n)
+            else:
+                if n in mst._scales_to_check_for_fields:
+                    mst._scales_to_check_for_fields.remove(n)
 
-    def set_test_scaling(self, **args:Union["ExpressionOrNum",str]):
+    def set_test_scaling(self, *, allow_scales_with_fields=False, **args:Union["ExpressionOrNum",str]):
         mst = self._get_combined_element()
         for n, v in args.items():
             if not isinstance(v, (_pyoomph.Expression,str)):
                 v=_pyoomph.Expression(v)
             self._test_scaling[n] = v
             mst._test_scaling[n] = v
+            if not allow_scales_with_fields:
+                mst._test_scales_to_check_for_fields.add(n)
+                self._scales_to_check_for_fields.add(n)
+            else:
+                if n in mst._test_scales_to_check_for_fields:
+                    mst._test_scales_to_check_for_fields.remove(n)
 
     def get_element_dimension(self):
         """
@@ -789,7 +860,7 @@ class BaseEquations(_pyoomph.Equations):
             master._interior_facet_residuals[dn]=Expression(0)
         master._interior_facet_residuals[dn]+=expr
 
-    def add_residual(self, expr: "ExpressionOrNum", *, destination: Optional[str] = None) -> None:
+    def add_residual(self, expr: "ExpressionOrNum", *, destination: Optional[str] = None):
         """
         Adds a residual contribution to this equations.
 
@@ -833,6 +904,7 @@ class BaseEquations(_pyoomph.Equations):
                 self.add_exception_info(e)
             cg._activate_residual("")
         cg._activate_residual("")
+        return self
 
     def _setup_combined_element(self):
         self._set_final_element(None)
@@ -842,6 +914,28 @@ class BaseEquations(_pyoomph.Equations):
         master = self._get_combined_element()
 #        print("IN DEFINE FIELDS. Master is ",master,self._assert_codegen())
         master._perform_define_fields()
+
+
+    def _check_scalings(self):
+        # Check all scalings and test scalings
+        for n in self._scales_to_check_for_fields:
+            scal=self.get_scaling(n)
+            if scal is not None:
+                scal_expa=self.expand_expression_for_debugging(scal)
+                try:
+                    assert_dimensional_value(scal_expa)
+                except Exception as e:
+                    cg=self._assert_codegen()
+                    raise RuntimeError("The scale for '"+str(n)+"' on domain '"+self._assert_codegen().get_full_name()+"' is not a simple dimensional number, but:\n    "+str(scal)+"\n   expands to: "+str(scal_expa)+"\n.")
+        for n in self._test_scales_to_check_for_fields:
+            scal=self.get_scaling(n,testscale=True)
+            if scal is not None:
+                scal_expa=self.expand_expression_for_debugging(scal)
+                try:
+                    assert_dimensional_value(scal_expa)
+                except Exception as e:
+                    cg=self._assert_codegen()
+                    raise RuntimeError("The test function scale for '"+str(n)+"' on domain '"+cg.get_full_name()+"' is not a simple dimensional number, but:\n    "+str(scal)+"\n   it expands to: "+str(scal_expa)+"\n.") 
 
     def _define_element(self):
         
@@ -863,6 +957,8 @@ class BaseEquations(_pyoomph.Equations):
         master._perform_initial_and_Dirichlet_conditions()
         master.define_additional_functions()
         master._problem.before_compile_equations(master)
+        master._check_scalings()
+        
 
     def get_coordinate_system(self)->BaseCoordinateSystem:
         master = self._get_combined_element()
@@ -1174,6 +1270,12 @@ class BaseEquations(_pyoomph.Equations):
         master = self._get_combined_element()
         cg = master._assert_codegen()
         return cg
+
+    @overload
+    def get_equation_of_type(self, typ:Type["BaseEquations"], *, exact_type:bool=False,always_as_list:Literal[True])->List["BaseEquations"]: ...
+
+    @overload
+    def get_equation_of_type(self, typ:Type["BaseEquations"], *, exact_type:bool=False,always_as_list:Literal[False]=False)->Optional["BaseEquations"]: ...
 
     def get_equation_of_type(self, typ:Type["BaseEquations"], *, exact_type:bool=False,always_as_list:bool=False)->Union[List["BaseEquations"],"BaseEquations",None]:
         if exact_type:
@@ -1625,6 +1727,7 @@ class EquationTree:
             v._set_parent_to_equations(problem)
 
     def _create_dummy_domains_for_DG(self,problem:"Problem",elemdim=None):
+        
         if elemdim is None and self._codegen is not None:
             elemdim=self._codegen.get_element_dimension()
             if self.get_parent() and self.get_parent()._codegen is not None:
@@ -1635,8 +1738,8 @@ class EquationTree:
         #print("############")
         if self._equations is not None:
             if self._codegen._name=="_internal_facets_":
+                #print("Creating dummy domains for DG, current path:",self.get_full_path(),", elemdim:",elemdim)
                 def generate_dummy_domain(source:EquationTree):
-
                     dummy=FiniteElementCodeGenerator()
                     dummy._set_equations(source._equations)
                     dummy._set_problem(problem)
@@ -1661,7 +1764,7 @@ class EquationTree:
                 # TODO: This is a bit problematic
                 if self.get_parent():
                     if self.get_parent().get_parent() and self.get_parent().get_parent()._equations is not None:
-                        print(self.get_parent().get_parent(),self.get_parent().get_parent().get_equations())
+                        #print(self.get_parent().get_parent(),self.get_parent().get_parent().get_equations())
                         dummy_pp=generate_dummy_domain(self.get_parent().get_parent())
                         dummy_p._set_bulk_element(dummy_pp)
                         self._codegen._dummy_codegen_for_internal_facets_bulk_bulk=dummy_pp                        
@@ -1679,6 +1782,8 @@ class EquationTree:
 
                 self._codegen._dummy_codegen_for_internal_facets_bulk._find_all_accessible_spaces()
                 #print("Calling do define fields on ",self._codegen._dummy_codegen_for_internal_facets_bulk.get_full_name(),self._codegen._dummy_codegen_for_internal_facets_bulk.get_domain_name(),"with",elemdim+1)
+                #self._codegen._transfer_my_fields_to_dummy_codegen(self._codegen._dummy_codegen_for_internal_facets_bulk)
+                self._codegen._dummy_codegen_for_internal_facets_bulk._set_opposite_interface(self._codegen._get_opposite_interface())
                 self._codegen._dummy_codegen_for_internal_facets_bulk._do_define_fields(elemdim+1)
 
                 self._codegen._dummy_codegen_for_internal_facets._coordinates_as_dofs=self._codegen._dummy_codegen_for_internal_facets_bulk._coordinates_as_dofs
@@ -1702,6 +1807,8 @@ class EquationTree:
             if self._codegen is None:
                 self._codegen=FiniteElementCodeGenerator()                
                 self._codegen.ccode_expression_mode=problem.default_ccode_expression_mode
+                if problem.debug_jacobian_by_fd_epsilon is not None and problem.debug_jacobian_by_fd_epsilon>0.0:
+                    self._codegen.debug_jacobian_epsilon=problem.debug_jacobian_by_fd_epsilon
                 self._codegen._name=self.get_my_path_name()
                 self._codegen.set_latex_printer(problem.latex_printer)
                 self._codegen._set_problem(problem) 
@@ -1711,6 +1818,7 @@ class EquationTree:
                     self.setup_codegen_to_equations(reset_info=backup)
                     meshname=self.get_my_path_name()
                     #print(meshname)
+                    #print("Creating ODE storage mesh for ",meshname)
                     mesh=ODEStorageMesh(problem,self,meshname)
                     self.get_code_gen()._mesh=mesh 
                     problem._meshdict[meshname]=mesh
@@ -2021,8 +2129,25 @@ class Equations(BaseEquations):
             master._azimuthal_r0_info[1].add("mesh"+zcomponent)
             master._azimuthal_r0_info[2].add("mesh"+zcomponent)
     
-    def _internal_define_scalar_field(self,name:str, space:"FiniteElementSpaceEnum", scale:Optional[Union["ExpressionOrNum",str]]=None, testscale:Optional[Union["ExpressionOrNum",str]]=None, discontinuous_refinement_exponent:Optional[float]=None):
+    def _internal_define_scalar_field(self,name:str, space:"FiniteElementSpaceEnum", scale:Optional[Union["ExpressionOrNum",str]]=None, testscale:Optional[Union["ExpressionOrNum",str]]=None, discontinuous_refinement_exponent:Optional[float]=None,allow_scales_with_fields:bool=False):
         master = self._get_combined_element()
+        if master.get_parent_domain() is not None:
+            # Check a bit what is possible
+            pdom=master.get_parent_domain()
+            if space=="C2TB" or space=="D2TB":
+                if pdom._coordinate_space!="C2TB":
+                    raise self.add_exception_info(RuntimeError("You tried to define a "+str(space)+" field '"+str(name)+"' at an interface attached to a bulk domain with element space "+str(pdom._coordinate_space)+". This does not work"))
+            elif space=="C2" or space=="D2":
+                if pdom._coordinate_space not in {"C2TB","C2"}:
+                    raise self.add_exception_info(RuntimeError("You tried to define a "+str(space)+" field '"+str(name)+"' at an interface attached to a bulk domain with element space "+str(pdom._coordinate_space)+". This does not work"))
+            elif space=="C1TB" or space=="D1TB":    
+                if pdom._coordinate_space=="C1":
+                    raise self.add_exception_info(RuntimeError("You tried to define a "+str(space)+" field '"+str(name)+"' at an interface attached to a bulk domain with element space "+str(pdom._coordinate_space)+". This does not work"))
+                elif pdom._coordinate_space=="C2" or pdom._coordinate_space=="C1TB":
+                    if pdom.dimension==3:
+                        raise self.add_exception_info(RuntimeError("You tried to define a "+str(space)+" field '"+str(name)+"' at an interface attached to 3d bulk domain with element space "+str(pdom._coordinate_space)+". This does not work, since 3d tetrahedral elements of "+str(pdom._coordinate_space)+" do not provide the face bubble node for "+str(space)+" on 2d facets. Consider upgrading the 3d space to C2TB using an ElementSpace('C2TB') for the 3d domain or adjust the facet space to "+("C1" if space=="C1TB" else "D1")+"."))
+            
+            
         if _pyoomph.get_verbosity_flag() != 0:
             print("REGISTER", name, self, master, self == master, space)
         master._register_field(name, space)
@@ -2035,11 +2160,12 @@ class Equations(BaseEquations):
                     raise RuntimeError("Discontinuous refinement exponents only work for D0 at the moment")
                 cg._set_discontinuous_refinement_exponent(name,discontinuous_refinement_exponent)
         cg._coordinate_space=find_dominant_element_space(cg._coordinate_space,space)
+        cg._fields_defined_on_my_domain[name]=space
                 
         if scale is not None:
-            self.set_scaling(**{name: scale})
+            self.set_scaling(**{name: scale},allow_scales_with_fields=allow_scales_with_fields)
         if testscale is not None:
-            self.set_test_scaling(**{name:testscale})
+            self.set_test_scaling(**{name:testscale},allow_scales_with_fields=allow_scales_with_fields)
             
         # Scalar fields are pinned by default for |m|=1 and |m|>=2
         if space!="D0" and space!="DL":
@@ -2047,7 +2173,7 @@ class Equations(BaseEquations):
             master._azimuthal_r0_info[2].add(name)
 
 
-    def define_scalar_field(self, name:Union[str,List[str]], space:"FiniteElementSpaceEnum",scale:Optional[Union["ExpressionOrNum",str]]=None,testscale:Optional[Union["ExpressionOrNum",str]]=None,discontinuous_refinement_exponent:Optional[float]=None):
+    def define_scalar_field(self, name:Union[str,List[str]], space:"FiniteElementSpaceEnum",scale:Optional[Union["ExpressionOrNum",str]]=None,testscale:Optional[Union["ExpressionOrNum",str]]=None,discontinuous_refinement_exponent:Optional[float]=None,allow_scales_with_fields:bool=False):
         """
         Define a scalar field on this domain. Must be called within the specified implementation of the method :py:meth:`~BaseEquations.define_fields`.
 
@@ -2057,14 +2183,15 @@ class Equations(BaseEquations):
             scale (ExpressionNumOrNone): The scale for the vector field for nondimensionalization. Defaults to None.
             testscale (ExpressionNumOrNone): The scale for the test function of the vector field for nondimensionalization. Defaults to None.
             discontinuous_refinement_exponent (Optional[float]): The exponent for the discontinuous refinement. Defaults to None.
+            allow_scales_with_fields (bool): Whether to allow scales/testscales with fields included. Defaults to False.
         """
         if not isinstance(name, str):
             for n in name:
-                self.define_scalar_field(n, space, scale=scale, testscale=testscale,discontinuous_refinement_exponent=discontinuous_refinement_exponent)
+                self.define_scalar_field(n, space, scale=scale, testscale=testscale,discontinuous_refinement_exponent=discontinuous_refinement_exponent,allow_scales_with_fields=allow_scales_with_fields)
             return        
-        self.get_coordinate_system().define_scalar_field(name, space, self,scale,testscale,discontinuous_refinement_exponent)
+        self.get_coordinate_system().define_scalar_field(name, space, self,scale,testscale,discontinuous_refinement_exponent,allow_scales_with_fields=allow_scales_with_fields)
 
-    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", dim:Optional[int]=None,scale:"ExpressionNumOrNone"=None,testscale:"ExpressionNumOrNone"=None):
+    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", dim:Optional[int]=None,scale:"ExpressionNumOrNone"=None,testscale:"ExpressionNumOrNone"=None,allow_scales_with_fields:bool=False):
         """
         Define a vector field on this domain. Must be called within the specified implementation of the method :py:meth:`~BaseEquations.define_fields`.
 
@@ -2086,10 +2213,10 @@ class Equations(BaseEquations):
         self.define_testfunction_by_substitution(name, vector(*vtest),
                                                  also_on_interface=also_on_interface)
         if scale is not None:
-            self.set_scaling(**{name:scale})
+            self.set_scaling(**{name:scale}, allow_scales_with_fields=allow_scales_with_fields)
         if testscale is not None:
-            self.set_test_scaling(**{name:testscale})
-            
+            self.set_test_scaling(**{name:testscale}, allow_scales_with_fields=allow_scales_with_fields)
+
         # Vector fields are pinned by default for |m|=1 and |m|>=2
         if space!="D0":
             rcomponent="_x"
@@ -2116,7 +2243,7 @@ class Equations(BaseEquations):
                 
     
 
-    def define_tensor_field(self, name:str, space:"FiniteElementSpaceEnum", dim:Optional[int]=None,scale:"ExpressionNumOrNone"=None,testscale:"ExpressionNumOrNone"=None, symmetric:bool=False):
+    def define_tensor_field(self, name:str, space:"FiniteElementSpaceEnum", dim:Optional[int]=None,scale:"ExpressionNumOrNone"=None,testscale:"ExpressionNumOrNone"=None, symmetric:bool=False,allow_scales_with_fields:bool=False):
         dim = dim if dim is not None else self.get_nodal_dimension()  # TODO: Here, it should be nodal_dimension!
         t, ttest,comps = self.get_coordinate_system().define_tensor_field(name, space, dim, self, symmetric)
         also_on_interface:bool = space in { "C1","C2","C1TB","C2TB","D2TB","D2","D1","D1TB"}
@@ -2126,9 +2253,9 @@ class Equations(BaseEquations):
         self.define_field_by_substitution(name, matrix(t), also_on_interface=also_on_interface)
         self.define_testfunction_by_substitution(name, matrix(ttest),also_on_interface=also_on_interface)
         if scale is not None:
-            self.set_scaling(**{name:scale})
+            self.set_scaling(**{name:scale}, allow_scales_with_fields=allow_scales_with_fields)
         if testscale is not None:
-            self.set_test_scaling(**{name:testscale})
+            self.set_test_scaling(**{name:testscale}, allow_scales_with_fields=allow_scales_with_fields)
         # TODO: set the azimuthal r=0 info for tensor fields
 
 
@@ -2297,8 +2424,8 @@ class ODEEquations(BaseEquations):
         """
         from ..meshes.mesh import ODEStorageMesh
         assert isinstance(mesh, ODEStorageMesh)
-        e = mesh._get_ODE("ODE")
-        _, inds = e.to_numpy()
+        e = mesh.get_element()
+        _, inds = e._ode_elem_to_numpy()
         for k, v in self._pinned_dofs.items():
             if not (k in inds.keys()):
                 raise RuntimeError("Cannot pin the degree " + str(k) + " since it is not defined on this ODE: "
@@ -2326,6 +2453,8 @@ class CombinedEquations(Equations):
                     else:
                         res+=contrib
         return res
+
+        
     
     def setup_remeshing_size(self,remesher:"RemesherBase",preorder:bool):
         for e in self._subelements:
@@ -2524,6 +2653,11 @@ class CombinedEquations(Equations):
                 e.after_remeshing(eqtree)
         self._rstr_final_elem(bck)
 
+    def _release_output_files(self)->None:
+        for e in self._subelements:
+            if isinstance(e, BaseEquations):  #type:ignore
+                e._release_output_files()
+
     def after_mapping_on_macro_elements(self):
         bck = self._bckup_final_elem()
         self._setup_combined_element()
@@ -2556,11 +2690,17 @@ class CombinedEquations(Equations):
             e._set_final_element(self)
 
 
+    @overload
+    def get_equation_of_type(self, typ:Type[BaseEquations], *, exact_type:bool=False,always_as_list:Literal[True])->List["BaseEquations"]: ...
+
+    @overload
+    def get_equation_of_type(self, typ:Type[BaseEquations], *, exact_type:bool=False,always_as_list:Literal[False]=False)->Optional["BaseEquations"]: ...
+
     def get_equation_of_type(self, typ:Type[BaseEquations], *, exact_type:bool=False,always_as_list:bool=False)->Union[List["BaseEquations"],"BaseEquations",None]:
         res:Optional[List["BaseEquations"]] = None
         for e in self._subelements:
             if isinstance(e, BaseEquations): #type:ignore
-                localL = e.get_equation_of_type(typ, exact_type=exact_type,always_as_list=always_as_list)
+                localL = e.get_equation_of_type(typ, exact_type=exact_type,always_as_list=always_as_list) #type:ignore
                 if localL is not None:
                     if not isinstance(localL, list):
                         local = [localL]
@@ -2571,11 +2711,11 @@ class CombinedEquations(Equations):
                     elif isinstance(res, list): #type:ignore
                         res = res + local
                     else:
-                        res = [res] + local 
+                        res = [res] + local
         if isinstance(res, list) and len(res) == 1 and not always_as_list:
-            return res[0]  
+            return res[0]
         if res is None:
-            return []
+            return [] if always_as_list else None
         if always_as_list and not (isinstance(res,list)):  #type:ignore
             res=[res]
         return res
@@ -3166,3 +3306,68 @@ class ForceZeroOnEigenSolve(BaseEquations):
         res=set([ fullpath+"/"+k for k in topin])
         return res
 
+
+
+class ConstrainFieldsToC1Space(Equations):
+    """Constrains a higher order field to the first order C1 space. Useful in combination with either the where parameter or (un)constrain a field e.g. a boundary
+
+    Args:
+        *args: The names of the fields to constrain to C1 space.
+        unconstrain_instead: If set to True, the specified fields will be unconstrained from C1 space instead of being constrained. Default is False.
+        where: An optional function to specify where the constraints should be applied. Nondimensional nodal positions are passed to this function, and it should return True for nodes where the constraint should be applied. If None, the constraint is applied to all nodes.
+    """
+    def __init__(self, *args:str,unconstrain_instead:bool=False,where:Optional[Callable[[List[float]],bool]]=None):
+        super().__init__()
+        self._constrained_fields = []
+        self._unconstrain_instead = unconstrain_instead
+        self._where = where
+        for field in args:
+            self._constrained_fields.append(field)
+            
+    def before_assigning_equations_preorder(self, mesh):
+        BULKFIELD_CONSTRAIN_TO_C1 = 0
+        INTERFACE_CONSTRAIN_TO_C1 = 1
+        POSITION_CONSTRAIN_TO_C1 = 2
+        coordmap={"mesh_x":0,"coordinate:x":0,"mesh_y":1,"coordinate_y":1,"mesh_z":2,"coordinate_z":2}
+        modes:Dict[str, Tuple[int, int]] = {}
+        for field in self._constrained_fields:
+            if field in coordmap.keys():
+                modes[field] = (POSITION_CONSTRAIN_TO_C1, coordmap[field])
+                continue
+            # Continuous bulk field
+            contifi=mesh.get_code_gen().get_code().get_nodal_field_index(field)
+            if contifi>=0:
+                modes[field] = (BULKFIELD_CONSTRAIN_TO_C1, contifi)
+            else:
+                # additional interface field?
+                contifi=mesh.get_code_gen().get_code().get_interface_field_index(field)
+                if contifi>=0:
+                    modes[field] = (INTERFACE_CONSTRAIN_TO_C1, contifi)
+                else:
+                    raise RuntimeError(f"Field {field} is not a bulk or interface field, cannot constrain to C1 space")
+                
+        for e in mesh.elements():
+            for nindex in e.non_vertex_node_indices():
+                n = e.node_pt(nindex)
+                if self._where is not None:
+                    x=[n.x(i) for i in range(n.ndim())]
+                    if not self._where(x):
+                        continue
+                for field,(mode,index) in modes.items():  
+                    if self._unconstrain_instead:
+                        n.remove_additional_dof_constraint(index, mode)
+                    else:                  
+                        n.set_additional_dof_constraint(index, mode)
+                    
+        return super().before_assigning_equations_preorder(mesh)
+
+
+class UnconstrainFieldsFromC1Space(ConstrainFieldsToC1Space):
+    """Unconstrains a higher order field from the first order C1 space. Useful in combination with either the where parameter or (un)constrain a field e.g. a boundary
+
+    Args:
+        *args: The names of the fields to constrain to C1 space.        
+        where: An optional function to specify where the constraints should be applied. Nondimensional nodal positions are passed to this function, and it should return True for nodes where the constraint should be applied. If None, the constraint is applied to all nodes.
+    """
+    def __init__(self, *args:str,where:Optional[Callable[[List[float]],bool]]=None):
+        super().__init__(*args,unconstrain_instead=True,where=where)

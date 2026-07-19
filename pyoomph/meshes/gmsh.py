@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,11 +21,12 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
 from pathlib import Path
+
 from ..typings import *
 import numpy
 
@@ -34,7 +36,7 @@ from ..expressions.generic import Expression, ExpressionNumOrNone, ExpressionOrN
 from .mesh import MeshTemplate
 
 # from .meshio import MeshioMesh2d
-import _pyoomph
+from .. import _pyoomph_core as _pyoomph
 import pygmsh #type:ignore
 from pygmsh.common.point import Point #type:ignore
 
@@ -48,6 +50,7 @@ from pygmsh.common.surface import Surface #type:ignore
 
 from pygmsh.common.volume import Volume #type:ignore
 
+from ..generic.mpi import get_mpi_rank, mpi_barrier, get_mpi_nproc
 
 import gmsh #type:ignore
 import os
@@ -191,7 +194,9 @@ class GmshSizeCallback:
 
 
 def generate_mesh_to_file(geom:pygmsh.geo.Geometry, outdir:str, trunk:str, mesher:Optional["GmshTemplate"]=None,dim:int=2, order:Optional[int]=None, algorithm:Optional[int]=None, verbose:bool=False, recombine_algo:Optional[int]=None,
-                          postgen_cb:Optional[Callable[[],None]]=None, only_geo:bool=False,mesh_mode:Optional[str]=None,mesh_size_callback:Optional[Union[GmshSizeCallback,Callable[[int,int,float,float,float],float]]]=None):
+                          postgen_cb:Optional[Callable[[],None]]=None, only_geo:bool=False,mesh_mode:Optional[str]=None,mesh_size_callback:Optional[Union[GmshSizeCallback,Callable[[int,int,float,float,float],float]]]=None,quiet:bool=False):
+    if quiet:
+        gmsh.option.setNumber("General.Terminal", 0) #type:ignore
     geom.synchronize()
 
     for item in geom._AFTER_SYNC_QUEUE: #type:ignore
@@ -252,6 +257,7 @@ def generate_mesh_to_file(geom:pygmsh.geo.Geometry, outdir:str, trunk:str, meshe
         gmsh.option.setNumber("Mesh.ElementOrder", 2) #type:ignore
         gmsh.option.setNumber("Mesh.SecondOrderLinear", 0) #type:ignore
         gmsh.option.setNumber("Mesh.HighOrderOptimize", 1) #type:ignore
+        gmsh.option.setNumber("Mesh.SecondOrderIncomplete", 0) # This is important to not generate serendipity elements, e.g. Wedge15 instead of Wedge18 #type:ignore
 
 
     if mesh_mode in ["only_quads"]:
@@ -265,8 +271,11 @@ def generate_mesh_to_file(geom:pygmsh.geo.Geometry, outdir:str, trunk:str, meshe
                 continue
             #print("SETTING",n,v,"FOR",mesher,"IN",mesher.gmsh_options,"IN",mesher.gmsh_options.items())
             gmsh.option.setNumber(n,v) #type:ignore
-        
-    gmsh.write(os.path.join(outdir, trunk + ".geo_unrolled")) #type:ignore
+            
+    mpi_barrier()
+    if get_mpi_rank() == 0 or get_mpi_nproc()<=1:        
+        gmsh.write(os.path.join(outdir, trunk + ".geo_unrolled")) #type:ignore
+    mpi_barrier()
 
     
 
@@ -280,11 +289,16 @@ def generate_mesh_to_file(geom:pygmsh.geo.Geometry, outdir:str, trunk:str, meshe
             mesh_size_callback=mesh_size_callback._setup_for_mesh(mesher) #type:ignore
         gmsh.model.mesh.setSizeCallback(None) #type:ignore
         gmsh.model.mesh.setSizeCallback(mesh_size_callback) #type:ignore
+    if quiet:
+            gmsh.option.setNumber("General.Terminal",0)
     gmsh.model.mesh.generate(dim)
     if postgen_cb is not None:
         postgen_cb()
 
-    gmsh.write(os.path.join(outdir, trunk + ".msh")) #type:ignore
+    mpi_barrier()
+    if get_mpi_rank() == 0 or get_mpi_nproc()<=1:
+        gmsh.write(os.path.join(outdir, trunk + ".msh")) #type:ignore
+    mpi_barrier()
     gmsh.clear()
 
 
@@ -354,6 +368,20 @@ class GmshTemplate(MeshTemplate):
             self._load_mesh(self._loaded_from_mesh_file)
         pass
 
+    def _reset(self):
+        super()._reset()
+        self._geom = None
+        self._named_entities = {}
+        self._rev_names = {}
+        self._dim_tag_names = {}
+        self._entities2d = {}
+        self._entities1d = {}
+        self._entities0d = {}
+        self._pointhash = {}
+        self._point_size_hash = {}
+        self._onedims_attached_to_point={}        
+        self._mesh=None
+        self._maxdim=0
 
 
     def point(self, x:ExpressionOrNum, y:ExpressionOrNum=0.0, z:ExpressionOrNum=0.0, size:ExpressionNumOrNone=None, *,name:Optional[str]=None,consider_spatial_scale:Optional[bool]=None)->Point:
@@ -481,7 +509,7 @@ class GmshTemplate(MeshTemplate):
                 res.append(a)
         return res
 
-    def line(self, *args:Union[Sequence[ExpressionOrNum],Point], name:Optional[str]=None)->Optional[Line]:
+    def line(self, *args:Union[Sequence[ExpressionOrNum],Point], name:Optional[str]=None)->Optional[Union[Line,List[Line]]]:
         """
         Create a line (segment-wise) line for the mesh. When given a name, it can be used to identify the line later, e.g. for boundary conditions.
 
@@ -515,18 +543,33 @@ class GmshTemplate(MeshTemplate):
                 if len(other.points)==len(argsc) and ((other.points[0]==argsc[0] and other.points[1]==argsc[1]) or (other.points[0]==argsc[1] and other.points[1]==argsc[0])):
                     #TODO CHeck name
                     return other
-        
-        res = self._geom.add_line(*argsc) #type:ignore
-        self._store_name(name, res)
-        self._entities1d[res._id] = res #type:ignore
+
+
         self._maxdim = max(self._maxdim, 1)
+
+        if len(argsc)==2:
+            res = self._geom.add_line(*argsc) #type:ignore
+            self._store_name(name, res)
+            self._entities1d[res._id] = res #type:ignore
+            
+            for p in argsc:
+                if p not in self._onedims_attached_to_point:
+                    self._onedims_attached_to_point[p]=set()
+                self._onedims_attached_to_point[p].add(res)
+            return res
         
-        for p in argsc:
-            if p not in self._onedims_attached_to_point:
-                self._onedims_attached_to_point[p]=set()
-            self._onedims_attached_to_point[p].add(res)
-        
-        return res
+        elif len(argsc)<2:
+            raise ValueError("A line must have at least 2 points")
+        else:
+            resg:List[Line]=[]
+            for p1,p2 in zip(argsc[:-1],argsc[1:]):
+                if p1==p2:
+                    raise ValueError("Degenerate line with identical points")
+                ll=self.line(p1, p2, name=name)
+                if ll is not None:
+                    assert isinstance(ll,Line) 
+                    resg.append(ll)
+            return resg
 
     def make_lines_transfinite(self,*linesIn:Union[Line,str],numnodes:Union[Literal["auto"],int]="auto",mode:str="Progression",coeff:Optional[float]=None,dry_run:bool=False) -> List[Tuple[int, float]]:
         lines=self._resolve_name("lines", *linesIn)
@@ -608,7 +651,7 @@ class GmshTemplate(MeshTemplate):
 
 
     # Add lines as p1, <name>, p2, <name>, p3, <name>, p4...
-    def create_lines(self, *args:Union[Point,List[ExpressionOrNum],Tuple[ExpressionOrNum],str]) -> List[Line]:
+    def create_lines(self, *args:Union[Point,List[ExpressionOrNum],Tuple[ExpressionOrNum,...],str]) -> List[Line]:
         """
         Creates multiple lines with different names based on the given arguments. 
         For line loop around a box, you can e.g. do
@@ -797,6 +840,43 @@ class GmshTemplate(MeshTemplate):
         return res
 
 
+    def ellipse_arc(self,startpt:Union[Point,Sequence[ExpressionOrNum]],endpt:Union[Point,Sequence[ExpressionOrNum]],center:Union[Point,Sequence[ExpressionOrNum]],pt_on_major_axis:Optional[Union[Point,Sequence[ExpressionOrNum]]]=None,name:Optional[str]=None):
+        """
+        Adds an ellipse arc to the mesh geometry.
+
+        Parameters:
+            startpt: The starting point of the ellipse arc (must be on the major axis if ).
+            endpt: The ending point of the ellipse arc.
+            center: The center point of the ellipse arc. 
+            pt_on_major_axis: A point on the major axis of the ellipse. If not provided, startpt is assumed to be on the major axis.
+            name: The name of the circle arc to identify it later e.g. as boundary.    
+
+        Returns:
+            The created ellipse arc or a line if the ellipse arc is degenerate.
+        """
+                        
+        if self._geom is None:
+            raise RuntimeError("Can only add geometry inside the function 'define_geometry'")
+        if isinstance(startpt,(list,tuple)):
+                startpt=self.point(*startpt)
+        if isinstance(endpt,(list,tuple)):
+                endpt=self.point(*endpt)
+        if isinstance(center,(list,tuple)):
+                center=self.point(*center)                
+        if isinstance(pt_on_major_axis,(list,tuple)):
+                pt_on_major_axis=self.point(*pt_on_major_axis)        
+        res=self._geom.add_ellipse_arc(startpt,center,pt_on_major_axis if pt_on_major_axis is not None else startpt, endpt)    #type:ignore    
+        self._store_name(name, res)
+        self._entities1d[res._id] = res #type:ignore
+        # self._curved_entities1d[res._id] = CurvedEntityCircleArc(startpt,center, endpt)        
+        self._maxdim = max(self._maxdim, 1)
+        for p in [startpt, endpt]: 
+            assert isinstance(p,Point)
+            if p not in self._onedims_attached_to_point: 
+                self._onedims_attached_to_point[p]=set()
+            self._onedims_attached_to_point[p].add(res)
+        return res
+
 
     def _get_boundary_corner_size_map(self)->Dict[str,Dict[Tuple[float,...],float]]:
         entlist:Dict[Union[Line,Spline,BSpline,CircleArc],Set[Point]]=dict()
@@ -882,7 +962,7 @@ class GmshTemplate(MeshTemplate):
                 generate_mesh_to_file(self._geom, mshdir, mshtrunk, mesher=self,dim=self._maxdim, order=self.order,
                                       algorithm=self.gmsh_options.get("algorithm",None),
                                       recombine_algo=self.gmsh_options.get("recombine_algo",None),
-                                      postgen_cb=lambda: self.post_process(),mesh_mode=self.mesh_mode,mesh_size_callback=self._mesh_size_callback)
+                                      postgen_cb=lambda: self.post_process(),mesh_mode=self.mesh_mode,mesh_size_callback=self._mesh_size_callback, quiet=self._problem.is_quiet())
                 raise RuntimeError("Cannot close line loop" + (
                     "" if name is None else " for surface " + name) + ". Cannot find the next element in the loop.\nLoop so far: " + (
                                        "\n".join(debug_info)) + "\n\nLine list:\n" + "\n".join(llist))
@@ -895,7 +975,7 @@ class GmshTemplate(MeshTemplate):
             generate_mesh_to_file(self._geom, mshdir, mshtrunk, mesher=self, dim=self._maxdim, order=self.order,
                                   algorithm=self.gmsh_options.get("algorithm",None),
                                   recombine_algo=self.gmsh_options.get("recombine_algo",None),
-                                  postgen_cb=lambda: self.post_process(),mesh_mode=self.mesh_mode,mesh_size_callback=self._mesh_size_callback)
+                                  postgen_cb=lambda: self.post_process(),mesh_mode=self.mesh_mode,mesh_size_callback=self._mesh_size_callback, quiet=self._problem.is_quiet())
             raise RuntimeError("Could not close line loop" + (
                 "" if name is None else " for surface " + name) + ". Start and end not matching.\nLoop so far: " + (
                                    "\n".join(debug_info)) + "\n\nLine list:\n" + "\n".join(llist))
@@ -1127,7 +1207,8 @@ class GmshTemplate(MeshTemplate):
         exit()
     
     def _load_mesh(self,mshfilename:str):
-        print("Loading mesh file: "+mshfilename)
+        if not self._problem.is_quiet():
+            print("Loading mesh file: "+mshfilename)
         self._mesh = meshio.read(mshfilename, file_format="gmsh") #type:ignore
         curvedfile,_=os.path.splitext(mshfilename)
         curvedfile=curvedfile+".geo_unrolled"
@@ -1135,7 +1216,7 @@ class GmshTemplate(MeshTemplate):
         # Find the maximum element dimension. All domains of this dimension will be considered to be bulk domains, the rest are interfaces
         maxeldim = -1
         named_eldims = {"line": 1, "line3": 1, "quad": 2, "quad9": 2, "triangle": 2, "triangle6": 2, "hexahedron27": 3,
-                        "hexahedron": 3, "vertex": 0, "tetra10":3,"tetra":3}
+                        "hexahedron": 3, "vertex": 0, "tetra10":3,"tetra":3,"wedge":3,"wedge18":3}
         for name, entry in self._mesh.cell_sets.items(): #type:ignore
             if name == "gmsh:bounding_entities":
                 continue
@@ -1205,6 +1286,7 @@ class GmshTemplate(MeshTemplate):
 
     def _do_define_geometry(self, problem:"Problem", filename_trunk:Optional[str]=None):
         self._problem=problem
+        
         if not self._geometry_defined:
             mshdir = os.path.join(self._problem._outdir, "_gmsh") #type:ignore
             Path(mshdir).mkdir(parents=True, exist_ok=True)
@@ -1241,7 +1323,7 @@ class GmshTemplate(MeshTemplate):
                         generate_mesh_to_file(geom, mshdir, mshtrunk, mesher=self, dim=self._maxdim, order=self.order,
                                           algorithm=self.gmsh_options.get("algorithm",None),
                                           recombine_algo=self.gmsh_options.get("recombine_algo",None),
-                                          postgen_cb=lambda: self.post_process(),mesh_mode=self.mesh_mode,mesh_size_callback=self._mesh_size_callback)
+                                          postgen_cb=lambda: self.post_process(),mesh_mode=self.mesh_mode,mesh_size_callback=self._mesh_size_callback, quiet=self._problem.is_quiet())
 
                         #self.write_curved_entities(os.path.join(mshdir, mshtrunk + ".curved"))
             else:
@@ -1282,7 +1364,25 @@ class GmshTemplate(MeshTemplate):
                     perm=[1,9,2,8,24,10,0,11,3,17,21,18,22,26,23,16,20,19,5,13,6,12,25,14,4,15,7]
                     for q in mycells:
                         domain.add_brick_3d_C2(self._nodeinds[q[perm]]) #type:ignore
+                elif cells.type == "wedge":
+                    perm = [0, 1, 2, 3, 4, 5]
+                    for q in mycells:
+                        domain.add_wedge_3d_C1(*self._nodeinds[q[perm]]) #type:ignore
+                elif cells.type == "wedge18":
+                    # pyoomph = perm[meshio]
+                    # const unsigned perm[18] = {0, 1, 2, 12, 13, 14, 3, 4, 6, 5, 7, 8, 15, 16, 17, 9, 10, 11};
+                    # meshio = inv[pyoomph]
+                    # const unsigned inv[18]  = {0, 1, 2, 6, 7, 9, 8, 10, 11, 15, 16, 17, 3, 4, 5, 12, 13, 14};
+                    #perm=[0, 1, 2, 12, 13, 14, 3, 4, 6, 5, 7, 8, 15, 16, 17, 9, 10, 11]
+                    perm=[0, 1, 2, 6, 7, 9, 8, 10, 11, 15, 16, 17, 3, 4, 5, 12, 13, 14]
+                    for q in mycells:
+                        domain.add_wedge_3d_C2(self._nodeinds[q[perm]]) #type:ignore
                 else:
+                    print("Unsupported cell type in 3d domain:", cells.type)
+                    q0=mycells[0]
+                    print("Example cell:", q0)
+                    for inode,n in enumerate(q0):
+                        print("Node", inode, "position:", self.get_node_position(self._nodeinds[n]))
                     raise RuntimeError("Unsupported cell type: " + cells.type)
 
         domain.set_nodal_dimension(self._max_nodal_dim)
@@ -1301,18 +1401,24 @@ class GmshTemplate(MeshTemplate):
                         for li, l in enumerate(mycells): #type:ignore 
                             ninds:List[int] = self._nodeinds[l] #type:ignore 
                             if -1 in ninds:  # Do only consider lines full inside
-                                continue
+                                continue                            
                             if no_macro_elements:
-                                self.add_nodes_to_boundary(name, ninds)
+                                curved = None
                             else:
-                                curved = self._curved_entities2d.get(mygeoms[li])
+                                curved = self._curved_entities2d.get(mygeoms[li]) #type:ignore
                                 if curved:
                                     self._has_curved_entries = True
-                                #									print("MARKIN MACRO",ninds)
-                                self.add_nodes_to_boundary(name, ninds)
-                                if curved:
-                                    raise RuntimeError("CURVED 3d Bounds")
-                                    self.add_facet_to_curve_entity(ninds[[0, 1]], curved)
+                            if cells.type=="triangle":
+                                vertex_inds=ninds[[0, 1, 2]] #type:ignore
+                            elif cells.type=="triangle6":
+                                vertex_inds=ninds[[0, 1, 2]] # Let hope that this is correct
+                            elif cells.type=="quad":
+                                vertex_inds=ninds[[0, 1, 2, 3]] #type:ignore
+                            elif cells.type=="quad9":
+                                #raise RuntimeError("TODO: Implement curved facets for second order triangles")
+                                # This has to be checked, but I think this is correct
+                                vertex_inds=ninds[[0, 1, 2, 3]] #type:ignore                            
+                            self.add_facet_to_boundary(name, ninds,vertex_inds,curved)
 
 
 
@@ -1370,7 +1476,7 @@ class GmshTemplate(MeshTemplate):
         #exit()
 
         for name, cs in self._mesh.cell_sets.items():
-            if name == "gmsh:bounding_entities": continue
+            if name == "gmsh:bounding_entities": continue            
             for i, idx in enumerate(cs):
                 if len(idx) > 0:
                     cells = self._mesh.cells[i]
@@ -1382,16 +1488,26 @@ class GmshTemplate(MeshTemplate):
                             ninds = self._nodeinds[l] #type:ignore
                             if -1 in ninds:  #type:ignore # Do only consider lines full inside
                                 continue
+                            
                             if no_macro_elements:
-                                self.add_nodes_to_boundary(name, ninds) #type:ignore
+                                curved = None
                             else:
-                                curved = self._curved_entities1d.get(mygeoms[li])
+                                curved = self._curved_entities1d.get(mygeoms[li]) #type:ignore
                                 if curved:
                                     self._has_curved_entries = True
-                                #									print("MARKIN MACRO",ninds)
-                                self.add_nodes_to_boundary(name, ninds) #type:ignore
-                                if curved: 
-                                    self.add_facet_to_curve_entity(ninds[[0, 1]], curved) #type:ignore
+                            vertex_inds=ninds[[0, 1]] #type:ignore
+                            self.add_facet_to_boundary(name, ninds,vertex_inds,curved)
+                            
+                            #if no_macro_elements:
+                            #    self.add_nodes_to_boundary(name, ninds) #type:ignore
+                            #else:
+                            #    curved = self._curved_entities1d.get(mygeoms[li])
+                            #    if curved:
+                            #        self._has_curved_entries = True                             
+                            #    self.add_nodes_to_boundary(name, ninds) #type:ignore
+                            #    if curved: 
+                            #        self.add_facet_to_curve_entity(ninds[[0, 1]], curved) #type:ignore
+                            
                     #elif cells.type=="vertex":
                     #    mycells = cells.data[idx]
                     #    mygeoms = self._mesh.cell_data["gmsh:geometrical"][i][idx]
@@ -1400,6 +1516,7 @@ class GmshTemplate(MeshTemplate):
                     #        self.add_nodes_to_boundary(name, ninds)
                     #        print(name,ninds)
                     #        exit()
+                                        
 
 
     def _construct_template_domain_1d(self, name:str, entry:Any):
@@ -1438,16 +1555,15 @@ class GmshTemplate(MeshTemplate):
                             ninds = self._nodeinds[l] #type:ignore
                             if -1 in ninds:  #type:ignore # Do only consider lines full inside
                                 continue
+                            
                             if no_macro_elements:
-                                self.add_nodes_to_boundary(name, ninds)  #type:ignore
+                                curved = None
                             else:
-                                curved = self._curved_entities0d.get(mygeoms[li]) #type:ignore
+                                curved = self._curved_entities1d.get(mygeoms[li]) #type:ignore
                                 if curved:
-                                    self._has_curved_entries = True
-                                #									print("MARKIN MACRO",ninds)
-                                self.add_nodes_to_boundary(name, ninds) #type:ignore
-                                if curved:
-                                    self.add_facet_to_curve_entity(ninds, curved) #type:ignore
+                                    self._has_curved_entries = True                            
+                            self.add_facet_to_boundary(name, ninds,ninds,curved)
+                            
 
 
     def write_curved_entities(self,fname:str):
@@ -1537,15 +1653,19 @@ class GmshTemplate(MeshTemplate):
         def add_name(a):
             name_list.append(self._rev_names.get(a,None))
             if a in self._rev_names:
-                del self._named_entities[self._rev_names[a]]
+                #print("Removing name",self._rev_names[a],"from entity",a.dim_tag,self._named_entities[self._rev_names[a]])                                
+                if self._rev_names[a] in self._named_entities:
+                    del self._named_entities[self._rev_names[a]]
                 del self._rev_names[a]
                 self._store_name(start_name(name_list[-1]),a)
         for a in args:
-            if isinstance(a,list):
+            if isinstance(a,list):                
                 for aa in a:
                     dimtags.append(aa.dim_tag)
                     to_extrude.append(aa)
+                    #print("Before Rev name is ",self._rev_names,"a",aa.dim_tag,self._rev_names[aa])
                     add_name(aa)
+                    #print("After Rev name is ",self._rev_names,"a",aa.dim_tag,self._rev_names[aa])
             elif isinstance(a,str):
                 raise RuntimeError("Not implemented: Supporting strings as names here")
                 a=gmsh.model.getEntitiesForPhysicalGroup(2,self.get_physical_group(a))[0]
@@ -1561,6 +1681,8 @@ class GmshTemplate(MeshTemplate):
         newdim+=1 # The new dimension
         self._maxdim=max(self._maxdim,newdim)
         res=gmsh.model.geo.extrude(dimtags,shift[0],shift[1],shift[2],recombine=recombine,numElements=([layers]*len(dimtags) if layers is not None else None))        
+        
+        
         
         gmsh.model.geo.synchronize()
         bulk_name_index=0
@@ -1580,7 +1702,9 @@ class GmshTemplate(MeshTemplate):
         given_names={a._id for a in self._rev_names}
         start_index=-1
         
+        
         for entry in res:
+            print("Entry",entry,given_names)
             if entry[0]==newdim:
                 start_index+=1
                 sub_index=0
@@ -1588,12 +1712,23 @@ class GmshTemplate(MeshTemplate):
                 if entry[1] not in given_names:
                     original=to_extrude[start_index]                    
                     if isinstance(original,PlaneSurface):
+                        #print("Found missing entity, trying to find name for it. Original was",original,"with dim_tag",original.dim_tag,"subindex",sub_index)
                         orig_curv=original.curve_loop.curves[sub_index]
                         dim_tag=(orig_curv.dim_tag[0],abs(orig_curv.dim_tag[1]))
                         if self._dim_tag_names.get(dim_tag,None) is not None:
                             #print("Already exists",dim_tag,self._dim_tag_names.get(dim_tag,None))
                             del self._rev_names[self._dim_tag_names[dim_tag][1]]
-                            del self._named_entities[self._dim_tag_names[dim_tag][0]]                                                        
+                            #print("To remove from here",self._named_entities[self._dim_tag_names[dim_tag][0]],orig_curv)
+                            # Remove all list entries from self._named_entities[self._dim_tag_names[dim_tag][0]] which ar enot a GmshFakeEntry
+                            self._named_entities[self._dim_tag_names[dim_tag][0]] = [
+                                entry for entry in self._named_entities[self._dim_tag_names[dim_tag][0]] 
+                                if isinstance(entry, GmshTemplate.GmshFakeEntry)
+                            ]
+                            
+                            #self._named_entities[self._dim_tag_names[dim_tag][0]].remove((orig_curv.dim_tag[0],orig_curv.dim_tag[1]))
+                            if len(self._named_entities[self._dim_tag_names[dim_tag][0]])==0:
+                                del self._named_entities[self._dim_tag_names[dim_tag][0]]             
+                            #print("Storing name",self._dim_tag_names[dim_tag][0],"for entity",entry)                                           
                             self._store_name(self._dim_tag_names[dim_tag][0],GmshTemplate.GmshFakeEntry(entry[1],entry))
                             del self._dim_tag_names[dim_tag]
                     else:
@@ -1603,3 +1738,142 @@ class GmshTemplate(MeshTemplate):
         
 
         return res
+    
+    
+    def revolve(self,*args,angle:ExpressionOrNum=0,axis:List[ExpressionOrNum]=[0,0,1],center:List[ExpressionOrNum]=[0,0,0],start_name=lambda s: s+"_start",end_name=lambda s: s+"_end",layers:Optional[int]=None,recombine:bool=False):
+        """Rotates the given entities by the given angle around the given axis and center.
+        
+        Args:
+            *args: Variable length arguments representing the entities to rotate. Can be names or the entities themselves.
+            angle: The angle to rotate by. Can be an expression or a number.
+            axis: The axis to rotate around. Can be a list of expressions or numbers.
+            center: The center of rotation. Can be a list of expressions or numbers.        
+        """        
+        for i, c in enumerate(axis):            
+            if isinstance(c,Expression):
+                c=c.float_value()
+            axis[i] = c
+        for i, c in enumerate(center):
+            c = c / self._problem.get_scaling("spatial")
+            if isinstance(c,Expression):
+                c=c.float_value()
+            center[i] = c
+        if isinstance(angle,Expression):
+            angle=angle.float_value()
+        
+        
+        gmsh.model.geo.synchronize()
+        dimtags=[]
+        newdim=0
+        name_list=[]
+        to_extrude=[]
+        def add_name(a):
+            name_list.append(self._rev_names.get(a,None))
+            if a in self._rev_names:
+                #print("Removing name",self._rev_names[a],"from entity",a.dim_tag,self._named_entities[self._rev_names[a]])                
+                if self._rev_names[a] in self._named_entities:
+                    del self._named_entities[self._rev_names[a]]
+                del self._rev_names[a]
+                self._store_name(start_name(name_list[-1]),a)
+        for a in args:
+            if isinstance(a,list):                
+                for aa in a:
+                    dimtags.append(aa.dim_tag)
+                    to_extrude.append(aa)
+                    add_name(aa)
+            elif isinstance(a,str):
+                raise RuntimeError("Not implemented: Supporting strings as names here")
+                a=gmsh.model.getEntitiesForPhysicalGroup(2,self.get_physical_group(a))[0]
+                dimtags.append(a)
+                to_extrude.append(a)
+                
+            else:
+                dimtags.append(a.dim_tag)
+                to_extrude.append(a)
+                add_name(a)
+            newdim=max(newdim,dimtags[-1][0])
+
+        newdim+=1 # The new dimension
+        self._maxdim=max(self._maxdim,newdim)
+        
+        res=gmsh.model.geo.revolve(dimtags,center[0],center[1],center[2],axis[0],axis[1],axis[2],angle,recombine=recombine,numElements=([layers]*len(dimtags) if layers is not None else None)) 
+        
+        gmsh.model.geo.synchronize()
+        
+        bulk_name_index=0
+        for i,entry in enumerate(res):            
+            #print("ADD PHYSICAL GROUP",entry[0],[entry[1]])
+            if entry[0]==newdim:
+                name=name_list[bulk_name_index]
+                if name is not None:
+                    self._store_name(name,GmshTemplate.GmshFakeEntry(entry[1],(entry[0],entry[1])))
+                    assert i>=1
+                    self._store_name(end_name(name),GmshTemplate.GmshFakeEntry(res[i-1][1],(res[i-1][0],res[i-1][1])))                
+                bulk_name_index+=1
+            elif entry[0]==newdim-1:
+                pass
+
+        # Go over it once more, finding the missing entities
+        given_names={a._id for a in self._rev_names}
+        start_index=-1
+        
+        for entry in res:            
+            if entry[0]==newdim:
+                start_index+=1
+                sub_index=0
+            if entry[0]==newdim-1:
+                if entry[1] not in given_names:
+                    original=to_extrude[start_index]                    
+                    if isinstance(original,PlaneSurface):
+                        #print("Found missing entity, trying to find name for it. Original was",original,"with dim_tag",original.dim_tag,"subindex",sub_index)
+                        orig_curv=original.curve_loop.curves[sub_index]
+                        dim_tag=(orig_curv.dim_tag[0],abs(orig_curv.dim_tag[1]))
+                        if self._dim_tag_names.get(dim_tag,None) is not None:
+                            #print("Already exists",dim_tag,self._dim_tag_names.get(dim_tag,None))
+                            del self._rev_names[self._dim_tag_names[dim_tag][1]]
+                            #print("To remove from here",self._named_entities[self._dim_tag_names[dim_tag][0]],orig_curv)
+                            # Remove all list entries from self._named_entities[self._dim_tag_names[dim_tag][0]] which ar enot a GmshFakeEntry
+                            self._named_entities[self._dim_tag_names[dim_tag][0]] = [
+                                entry for entry in self._named_entities[self._dim_tag_names[dim_tag][0]] 
+                                if isinstance(entry, GmshTemplate.GmshFakeEntry)
+                            ]
+                            
+                            #self._named_entities[self._dim_tag_names[dim_tag][0]].remove((orig_curv.dim_tag[0],orig_curv.dim_tag[1]))
+                            if len(self._named_entities[self._dim_tag_names[dim_tag][0]])==0:
+                                del self._named_entities[self._dim_tag_names[dim_tag][0]]             
+                            #print("Storing name",self._dim_tag_names[dim_tag][0],"for entity",entry)                                           
+                            self._store_name(self._dim_tag_names[dim_tag][0],GmshTemplate.GmshFakeEntry(entry[1],entry))
+                            del self._dim_tag_names[dim_tag]
+                    else:
+                        raise RuntimeError("Not implemented:"+str(original  ))                        
+                    
+                    sub_index+=1                    
+        
+
+        return res
+    
+    
+     
+    def add_mesh_size_field(self,typ:Literal["AttractorAnisoCurve","AutomaticMeshSizeField","Ball","BoundaryLayer","Box","Constant","Curvature","Cylinder","Distance","Extend","ExternalProcess","Frustum","Gradient","IntersectAniso","Laplacian","LonLat","MathEval","MathEvalAniso","Max","MaxEigenHessian","Mean","Min","MinAniso","Octree","Param","PostView","Restrict","Structured","Threshold"],*,tag:int=-1, **kwargs):
+        """
+        Adds a mesh size field of the given type with the given parameters. Returns the field id.
+        See https://gmsh.info/doc/texinfo/#Gmsh-mesh-size-fields for more information on the available field types and their parameters.
+        """
+        field_id=gmsh.model.mesh.field.add(typ,tag)
+        for k,v in kwargs.items():
+            if isinstance(v,(list,tuple)):                
+                newv=[v_i._id if hasattr(v_i,"_id") else v_i for v_i in v]
+                gmsh.model.mesh.field.setNumbers(field_id,k,newv)                
+            elif isinstance(v,(int,float)):
+                gmsh.model.mesh.field.setNumber(field_id,k,v)
+            elif isinstance(v,str):
+                gmsh.model.mesh.field.setString(field_id,k,v)
+        return field_id
+    
+    def set_mesh_size_background_field(self,field_id:int):
+        """
+        Sets the given mesh size field as the background mesh size field.
+        See https://gmsh.info/doc/texinfo/#Gmsh-mesh-size-fields for more information on the available field types and their parameters.
+        """
+        gmsh.model.mesh.field.setAsBackgroundMesh(field_id)
+    

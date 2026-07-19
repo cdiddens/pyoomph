@@ -11,11 +11,11 @@ dependencies = [
 'tccbox>=2024.3.18',
 'setuptools>=69.5.1',
 'mkl>=2021.4.0; sys_platform != "darwin"',
-'mkl==2021.4.0; sys_platform == "darwin"'
+'mkl==2021.4.0; sys_platform == "darwin" and platform_machine != "arm64"'
 ]
 readme = "README.md"
 requires-python = ">=3.9"
-authors = [  { name="Christian Diddens", email="c.diddens@utwente.nl" },  { name="Duarte Rocha", email="d.rocha@utwente.nl" },  ]
+authors = [  { name="Christian Diddens", email="c.diddens@utwente.nl" },  { name="Duarte Rocha", email="d.rocha@utwente.nl" },  { name="Maxim de Wildt",email="m.dewildt@utwente.nl" },  ]
 license = { file = "COPYING" }
 classifiers=[
         'Development Status :: 3 - Alpha',
@@ -40,8 +40,6 @@ classifiers=[
     ]
 dynamic = ["version"]
 
-[tool.setuptools_scm]
-
 [project.urls]
 homepage = "https://pyoomph.github.io"
 documentation = "https://pyoomph.readthedocs.io/en/latest/index.html"
@@ -49,68 +47,134 @@ source = "https://github.com/pyoomph/pyoomph"
 download = "https://pypi.org/project/pyoomph/"
 tracker = "https://github.com/pyoomph/pyoomph/issues"
 
+
 [build-system]
-requires = ["setuptools>=68.0","pybind11>=2.5.0","setuptools-scm>=8"]
-build-backend = "setuptools.build_meta:__legacy__"
+requires = ["scikit-build-core>=0.10", "pybind11>=2.5.0"]
+build-backend = "scikit_build_core.build"
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+# Deliberately a static path (no {cache_tag}/{wheel_tag} - both of those
+# still bake in the Python ABI, e.g. cache_tag = sys.implementation.cache_tag
+# like "cpython-311"). A single shared build tree per (platform,
+# architecture) job lets the Python-independent `generic`/`pyoomph_core`
+# static libraries be reused, via normal CMake incremental rebuilds, across
+# every interpreter cibuildwheel loops over in that job. Only `_core`
+# (src/pybind/*.cpp) actually needs to recompile per Python version.
+# {state} just keeps wheel/editable/sdist builds from reconfiguring on top
+# of each other; it is not Python-version-specific.
+build-dir = "build/{state}"
+cmake.build-type = "Release"
+# The pure-Python package; the compiled extension is now installed as
+# `pyoomph/_core*.so` (importable as `pyoomph._core`) directly by
+# CMakeLists.txt's `install(TARGETS _core LIBRARY DESTINATION pyoomph)`, so
+# it lives inside the "pyoomph" package below and needs no separate entry
+# here.
+wheel.packages = ["pyoomph"]
+
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "pyoomph/_version.py"
+
+# Defaults for the CMake options declared in CMakeLists.txt. Override these
+# per-build via `pip install --config-settings=cmake.define.PYOOMPH_USE_MPI=ON`,
+# or more conveniently through the ./configure wrapper script's
+# --with-mpi / --with-debug / --paranoid / --download-cln / --download-ginac
+# flags, which translate to exactly this mechanism.
+#[tool.scikit-build.cmake.define]
+#PYOOMPH_USE_MPI = "OFF"
+#PYOOMPH_PARANOID = "OFF"
+#PYOOMPH_DOWNLOAD_CLN = "OFF"
+#PYOOMPH_DOWNLOAD_GINAC = "OFF"
 
 [tool.cibuildwheel]
-#manylinux-x86_64-image = "manylinux2014"
 manylinux-x86_64-image = "manylinux_2_28"
-build-frontend = { name = "pip", args = ["--no-build-isolation", "--verbose"] }
+skip = "*-musllinux_*"
+build-frontend = { name = "pip", args = ["--no-build-isolation", "--verbose", "--no-clean"] }
+
+
 test-requires = "pytest"
 test-command = "pytest {package}/tests" # does not work, since the gmsh library has unresolvable requirements
 test-sources = ["tests"]
+# cp315 wheels build fine, but the test-install step pulls in scipy as a
+# runtime dependency, and scipy has no prebuilt wheel yet for cp315 (Python
+# 3.15 is still pre-release) on any platform. Pip then falls back to
+# building scipy from source, which fails (missing gfortran on macOS,
+# missing OpenBLAS on manylinux). Skip testing cp315 until scipy publishes
+# 3.15 wheels; the built pyoomph wheel itself is unaffected.
+test-skip = "cp315-*"
+# CMake now downloads+builds GiNaC/CLN itself (see cmake/ThirdPartyGiNaC.cmake)
+# instead of the old citools/download_and_build_static_ginac.sh script, so
+# wheel builds just need to turn that on. This is the default for all OSes
+# except Windows, which overrides it below (see [tool.cibuildwheel.windows]).
+config-settings = { "cmake.define.PYOOMPH_DOWNLOAD_CLN" = "ON", "cmake.define.PYOOMPH_DOWNLOAD_GINAC" = "ON", "cmake.define.PYOOMPH_USE_MPI" = "OFF", "cmake.define.PYOOMPH_PARANOID" = "OFF" }
 
 [tool.cibuildwheel.linux]
-environment={PYOOMPH_CONFIG_FILE="/project/citools/pyoomph_config_linuxwheel.env"}
-
 before-all = [
-"export PYOOMPH_CONFIG_FILE=$(readlink -f ./citools/pyoomph_config_linuxwheel.env)",
-"source $PYOOMPH_CONFIG_FILE",
-"echo Loaded $PYOOMPH_CONFIG_FILE",
-"mkdir -p $PYOOMPH_GINAC_INCLUDE_DIR",
-"export PYOOMPH_CXXFLAGS_EXTRA=-I`readlink -f $PYOOMPH_GINAC_INCLUDE_DIR`",
-"echo set extra flags to $PYOOMPH_CXXFLAGS_EXTRA",
-"source {project}/citools/before_build_linux.sh {project}",
-"./clean.sh all",
-"dnf -y install wget",
-"bash citools/download_and_build_static_ginac.sh",
-"bash ./prebuild.sh",
-"make -C src clean",
-"make -C src -B"
-]
-before-build = [
-"export PYOOMPH_CONFIG_FILE={project}/citools/pyoomph_config_linuxwheel.env",
-"echo SOURCING $PYOOMPH_CONFIG_FILE",
-"source $PYOOMPH_CONFIG_FILE",
-"python -m pip install pybind11 setuptools",
-"rm -rf build/"
+"bash -lc 'if command -v dnf >/dev/null 2>&1; then dnf -y install wget bzip2 patch; elif command -v yum >/dev/null 2>&1; then yum -y install wget bzip2 patch; elif command -v apk >/dev/null 2>&1; then apk add --no-cache wget bzip2 patch; elif command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y wget bzip2 patch; else echo \"No supported package manager for before-all\" >&2; exit 1; fi'",
 ]
 before-test = [
-"dnf -y install mesa-libGLU libXcursor libglvnd-opengl libXinerama" # sudo apt install libglu1-mesa libxcursor1 libopengl0
+"bash -lc 'if command -v dnf >/dev/null 2>&1; then dnf -y install mesa-libGLU libXcursor libglvnd-opengl libXinerama; elif command -v yum >/dev/null 2>&1; then yum -y install mesa-libGLU libXcursor libglvnd-opengl libXinerama; elif command -v apk >/dev/null 2>&1; then apk add --no-cache glu libxcursor libxinerama || apk add --no-cache mesa libxcursor libxinerama || true; elif command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y libglu1-mesa libxcursor1 libopengl0 libxinerama1; else echo \"No supported package manager for before-test\" >&2; exit 1; fi'" # sudo apt install libglu1-mesa libxcursor1 libopengl0
 ]
 
 [tool.cibuildwheel.macos]
-environment={PYOOMPH_CONFIG_FILE="./citools/pyoomph_config_macwheel.env"}
-
 before-all = [
-"export PYOOMPH_CONFIG_FILE=$(readlink -f ./citools/pyoomph_config_macwheel.env)",
-"source $PYOOMPH_CONFIG_FILE",
-"echo Loaded $PYOOMPH_CONFIG_FILE",
-"mkdir -p $PYOOMPH_GINAC_INCLUDE_DIR",
-"export PYOOMPH_CXXFLAGS_EXTRA=-I`readlink -f $PYOOMPH_GINAC_INCLUDE_DIR`",
-"echo set extra flags to $PYOOMPH_CXXFLAGS_EXTRA",
-"./clean.sh all",
-"brew install automake",
-"bash citools/download_and_build_static_ginac.sh",
-"bash ./prebuild.sh",
-"make -C src clean",
-"make -C src -B"
+# pkg-config is needed by GiNaC's own ./configure to locate CLN (see
+# cmake/ThirdPartyGiNaC.cmake) whenever PYOOMPH_DOWNLOAD_GINAC=ON (the
+# default). GitHub's macOS runners happen to have it preinstalled, but
+# don't rely on that - it's not present on a fresh Homebrew bootstrap.
+"brew install automake pkg-config",
+# Guard against a Rosetta2-translated shell silently producing the wrong
+# architecture: if this is an x86_64 process running on arm64 hardware
+# (`sysctl.proc_translated`), CLN/GiNaC's autotools ExternalProject_Add
+# subbuilds may not pick up CMAKE_OSX_ARCHITECTURES the way the main CMake
+# targets do, and can end up built for the *host* arch instead of the
+# arch cibuildwheel is actually targeting for this job. Fail fast instead
+# of shipping a silently-mismatched wheel; run this job on a native
+# arm64 runner (e.g. GitHub's macos-14/macos-15) instead of cross-building
+# arm64 wheels under Rosetta on an x86_64 runner.
+#"if [ \"$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)\" = \"1\" ]; then echo 'error: running under Rosetta2 translation - use a native-arch runner instead' >&2; exit 1; fi",
+# NOTE: see the same caveat as the Linux before-all above, re:
+# citools/pyoomph_config_macwheel.env.
+#"bash ./prebuild.sh"
 ]
-before-build = [
-"export PYOOMPH_CONFIG_FILE=$(readlink -f ./citools/pyoomph_config_macwheel.env)",
-"echo SOURCING $PYOOMPH_CONFIG_FILE",
-"source $PYOOMPH_CONFIG_FILE",
-"python -m pip install pybind11 setuptools wheel",
-"rm -rf build/"
-]
+
+[tool.cibuildwheel.windows]
+# CLN's own manual states its core static-initialization-ordering trick is
+# "a feature which I could implement for GNU g++ only" - CLN (and hence
+# GiNaC, which requires it) has no first-class MSVC port: there's no
+# vcpkg or conda-forge package for either on win-64, and an upstream
+# vcpkg port request was closed unresolved. Mixing a MinGW/GCC-built
+# CLN/GiNaC into an MSVC-built _core extension is also not viable, since
+# MinGW's libstdc++ and MSVC's STL are not ABI-compatible.
+#
+# So PYOOMPH_DOWNLOAD_CLN/GINAC=ON (the Linux/macOS default above) is
+# turned OFF here. Until CLN/GiNaC are provided for Windows via a
+# consistent single toolchain (e.g. building everything - CLN, GiNaC,
+# and _core - with MSYS2/MinGW-w64 rather than MSVC), point
+# PYOOMPH_*_INCLUDE_DIR/PYOOMPH_*_LIB_DIR at a prebuilt CLN/GiNaC you
+# supply yourself, or skip Windows wheels for now and document a
+# from-source / WSL install path instead.
+config-settings = { "cmake.define.PYOOMPH_DOWNLOAD_CLN" = "OFF", "cmake.define.PYOOMPH_DOWNLOAD_GINAC" = "OFF", "cmake.define.PYOOMPH_USE_MPI" = "OFF", "cmake.define.PYOOMPH_PARANOID" = "OFF" }
+
+# Baseline config only (no strict/disallow_untyped_defs): the codebase
+# currently has a sizeable pre-existing type-error backlog, so this isn't
+# a CI gate yet, just a shared, reproducible way to invoke `mypy pyoomph`
+# / `pyright` from the repo root (needed so both tools resolve the
+# `_pyoomph-stubs` PEP 561 stub-only package for the compiled extension).
+[tool.mypy]
+python_version = "3.12"
+files = ["pyoomph"]
+ignore_missing_imports = true
+
+[tool.pyright]
+include = ["pyoomph"]
+exclude = ["**/__pycache__"]
+pythonVersion = "3.12"
+# pyoomph._pyoomph_core is a compiled pybind11 extension: the repo tree only
+# ships its .pyi stub (pyoomph/_pyoomph_core.pyi), while the matching .so
+# lives wherever pyoomph was actually built/installed (e.g. site-packages
+# for an editable install merged into pyoomph.__path__). pyright can't see
+# that second path entry, so it always reports the stub as sourceless here
+# even though the import resolves fine at runtime.
+reportMissingModuleSource = "none"

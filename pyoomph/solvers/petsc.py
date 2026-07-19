@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -53,22 +54,41 @@ class PETSCSolver(GenericLinearSystemSolver):
         super().__init__(problem)
         self._do_not_set_any_args:bool=False
         self.petsc_mat=None
+        self.petsc_rhs=None
         self.ksp=None
         self.x=None
+        
+        
+        
+        self._dofs_to_field_info=None
 
     #		opts=PETSc.Options().getAll()
     #		if "add_zero_diagonal" in opts.keys():
     #			problem.set_diagonal_zero_entries(True)
     
+    def _before_assigning_equation_numbers(self):
+        if self._dofs_to_field_info is not None:
+            if len(self._dofs_to_field_info)>2:
+                for IS in self._dofs_to_field_info[2].values():                    
+                    IS.destroy() #type:ignore
+        self._dofs_to_field_info=None # Reset the mapping, it will be re-created when needed. This is needed to properly handle changes in the dofs due to e.g. field splits or changes in the meshes
+        return super()._before_assigning_equation_numbers()
+    
     def use_mumps(self,mumps_param14:Optional[int]=None):
+        if not PETSc.Sys.hasExternalPackage("mumps"): #type:ignore
+            raise RuntimeError("Your PETSc installation was not compiled with MUMPS support (--download-mumps=yes). Please recompile PETSc with MUMPS or use a different linear solver.")
         _SetDefaultPetscOption("mat_mumps_icntl_6",5)
         _SetDefaultPetscOption("ksp_type","preonly")
         _SetDefaultPetscOption("pc_type","lu")
         _SetDefaultPetscOption("pc_factor_mat_solver_type","mumps")
         if mumps_param14 is not None:
             _SetDefaultPetscOption("mat_mumps_icntl_14",mumps_param14)
-        return self    
+        return self
 
+    def set_options(self,**kwargs:Any):
+        for a,b in kwargs.items():
+            PETSc.Options().setValue(a,b) #type:ignore
+            
     def set_default_petsc_option(self,name:str,val:Any=None,force:bool=False)->None:
         _SetDefaultPetscOption(name,val, force) #type:ignore
 
@@ -78,13 +98,100 @@ class PETSCSolver(GenericLinearSystemSolver):
         If defining derived classes that need access to PETSc, get PETSc from here, do not import petsc4py again
         """
         return PETSc
+    
+    def setup_field_split(self):
+        if not self.problem.is_quiet():
+            print("Setting up field split for PETSc solver")
+        def process_indices(indices,name):
+            if get_mpi_nproc()<2:
+                return indices
+            else:
+                ownership_range=self.petsc_mat.getOwnershipRange() #type:ignore                
+                #print("OWNERSHIP RANGE",name,get_mpi_rank(),ownership_range,"TOTAL INDICES",len(indices)) #type:ignore
+                #print("On rank",name,get_mpi_rank(), "ALL INDICES FOR FIELD SPLIT: ", indices) #type:ignore
+                #if ownership_range[0]>0 or ownership_range[1]<self.petsc_mat.getSize()[0]:
+                my_indices=indices[(indices < ownership_range[1]) & (indices >= ownership_range[0])]                    
+                #print("PROCESSED INDICES FOR FIELD SPLIT ON RANK",name, get_mpi_rank(),": ","LEN",len(my_indices),my_indices) #type:ignore                
+                return numpy.sort(my_indices)
+                
+        names=self.problem._get_global_field_names()
+        mapping=numpy.array(self.problem._get_dof_to_global_field_index_mapping())            
+        #print("Global field names:", names)
+        #print("DOF to field mapping:", get_mpi_rank(),mapping)
+        unique_fields=numpy.unique(mapping)
+        unique_fields=unique_fields[unique_fields>=0] # Filter out any dofs that are not assigned to a field (e.g. due to field splits, where some dofs might be assigned to a new field index of -1 or similar)
+        if self.problem.petsc_fieldsplit is None:
+            if not self.problem.is_quiet():
+                print("Using default PETSc DOF to field mapping:")
+                for uf in unique_fields:
+                    print("  Field "+str(uf)+": "+names[uf])
+            field_is={}
+            for f in unique_fields:
+                indices = numpy.where(mapping == f)[0].astype(numpy.int32)
+                iset = PETSc.IS().createGeneral(process_indices(indices,names[f]),comm=PETSc.COMM_WORLD)
+                field_is[f] = iset
 
-    def setup_solver(self):        
+        else:
+            if not self.problem.is_quiet():
+                print("Using user-defined PETSc DOF to field mapping:",self.problem.petsc_fieldsplit)
+            field_is={}
+            is_collections={}
+            handled_fields=set()
+            for k,v in self.problem.petsc_fieldsplit.items():
+                if not v in is_collections.keys():
+                    is_collections[v]=[]
+                if "*" in k:
+                    import fnmatch
+                    matches = fnmatch.filter(names, k)
+                    if len(matches)==0:
+                        raise RuntimeError("Cannot find any field matching "+k+" specified in petsc_fieldsplit")
+                    for m in matches:
+                        if m in handled_fields:
+                            raise RuntimeError("Field "+str(m)+" is already assigned to a field split. Cannot assign it again with "+k)
+                        is_collections[v].append(m)
+                        handled_fields.add(m)
+                else:                                        
+                    if k in handled_fields:
+                        raise RuntimeError("Field "+str(k)+" is already assigned to a field split. Cannot assign it again with "+k)
+                    if k not in names:
+                        raise RuntimeError("Cannot find the field "+k+" specified in petsc_fieldsplit")
+                    is_collections[v].append(k)
+                    handled_fields.add(k)
+                    
+            if len(handled_fields)<len(unique_fields):
+                raise RuntimeError("Not all fields are assigned to a field split.\nUnassigned fields: "+str(set(names)-handled_fields)+"\nHandled fields are: "+str(handled_fields))
+            
+            for v, fields in is_collections.items():
+                v=str(v)
+                mergedindices=set(names.index(f) for f in fields)
+                #indices = numpy.where(mapping in mergedindices)[0].astype(numpy.int32)                        
+                indices= numpy.where(numpy.isin(mapping, list(mergedindices)))[0].astype(numpy.int32)     
+                #print("ON",get_mpi_rank(), "INDICES FOR FIELD "+str(v)+": "+str(indices),"LEN",len(indices))
+                #print("CHECKING ON RANK",v,get_mpi_rank(),mapping[indices])                
+                #print("PROCESSES ON RANK",v,get_mpi_rank(),mapping[process_indices(indices,v)])                
+                iset = PETSc.IS().createGeneral(process_indices(indices,v),comm=PETSc.COMM_WORLD)
+                field_is[v] = iset
+                if not self.problem.is_quiet():
+                    print("  Field "+str(v)+": "+str(fields))
+                #print("    mapping", mapping[indices])
+                #print("    IS size",iset.getSize(),len(indices))
+                #print()
+        self._dofs_to_field_info=[names,mapping,field_is]
+        
+    def get_field_split_IS(self,splitname:str)->PETSc.IS:
+        if self._dofs_to_field_info is None:
+            raise RuntimeError("Field split IS requested but field split info is not set up yet. Please call this method only in setup_solver and with having set the petsc_fieldsplit attribute on the problem")
+        if splitname not in self._dofs_to_field_info[2].keys():
+            raise RuntimeError("Requested field split "+splitname+" not found. Available splits: "+str(self._dofs_to_field_info[2].keys()))
+        return self._dofs_to_field_info[2][splitname]
+
+    def setup_solver(self):                
+        #print("Setting up solver")
         opts = PETSc.Options().getAll() #type:ignore
-        if "add_zero_diagonal" in opts.keys(): #type:ignore
+        #if "add_zero_diagonal" in opts.keys(): #type:ignore
             #			print(dir(self.petsc_mat))
-            self.petsc_mat.setOption(19, 0) #type:ignore
-            self.petsc_mat.shift(0) #type:ignore
+        #    self.petsc_mat.setOption(19, 0) #type:ignore
+        #    self.petsc_mat.shift(0) #type:ignore
 
         self.ksp = PETSc.KSP().create() #type:ignore
         self.ksp.setOperators(self.petsc_mat) #type:ignore
@@ -98,7 +205,12 @@ class PETSCSolver(GenericLinearSystemSolver):
             if hasattr(pc, "setFactorSolverPackage"): #type:ignore
                 if not self._do_not_set_any_args: #type:ignore
                     pc.setFactorSolverPackage(opts["pc_factor_mat_solver_type"]) #type:ignore
+
         pc.setFromOptions() #type:ignore
+        if self._dofs_to_field_info is not None:
+            field_is=self._dofs_to_field_info[2]
+            splt=[(str(a),b) for a,b in field_is.items()]
+            pc.setFieldSplitIS(*splt) #type:ignore
         self.ksp.setFromOptions() #type:ignore
         #print('Solving with:', self.ksp.getType())  # ,dir(pc)
 
@@ -113,57 +225,143 @@ class PETSCSolver(GenericLinearSystemSolver):
             if self.x is not None:
                 self.x.destroy() #type:ignore
                 self.x=None
+            if self._dofs_to_field_info is not None:
+                for IS in self._dofs_to_field_info[2].values():
+                    IS.destroy() #type:ignore
+                self._dofs_to_field_info=None
                 
             #self.petsc_mat.destroy() #type:ignore
-            self.petsc_mat = PETSc.Mat().createAIJ(size=(n, n), csr=(colptr, rowind, values)) #type:ignore
+            self.petsc_mat = PETSc.Mat().createAIJ(size=(n, n), csr=(colptr.astype(numpy.int32), rowind.astype(numpy.int32), values.astype(numpy.float64)),comm=get_mpi_world_comm()) #type:ignore
+            
+            self.petsc_mat.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False)
+            # Force diagonal:
+            #diag = self.petsc_mat.getDiagonal()
+            #self.petsc_mat.setDiagonal(diag, addv=PETSc.InsertMode.INSERT_VALUES)
+            self.petsc_mat.shift(0.0)
+            
+            self.petsc_mat.assemble()
+            
             self.x = PETSc.Vec().createSeq(n) #type:ignore
         elif op_flag == 2:
-            self.setup_solver()
+            #print("Solving linear system with PETSc", op_flag, n, nnz, nrhs, transpose, "SPLIT INFO",self._dofs_to_field_info)
+            if self._dofs_to_field_info is None:
+                self.setup_field_split()
             bv = PETSc.Vec().createWithArray(b) #type:ignore
+            self.petsc_rhs=bv
+            self.setup_solver()
+            
             if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine():
                 raise RuntimeError("Cannot use custom solve routine with PETSc yet. Also, iterative solving might require different handling here")
             else:
+                import time
+                start_time = time.time()
                 self.ksp.solve(bv, self.x) #type:ignore
+                end_time = time.time()
+                if not self.problem.is_quiet():
+                    print("PETSc KSP solve time:", end_time - start_time, "seconds")
                 xv = self.x.getArray() #type:ignore
             b[:] = xv[:] #type:ignore
 
             #print('Converged in', self.ksp.getIterationNumber(), 'iterations.') #type:ignore
 
             
-            
+            self.petsc_rhs=None
             bv.destroy() #type:ignore
+            
         else:
             raise RuntimeError("Cannot handle Petsc mode " + str(op_flag) + " yet")
         return 0  # TODO: Return sign of Jacobian
 
     def solve_distributed(self, op_flag: int, allow_permutations: int, n: int, nnz_local: int, nrow_local: int, first_row: int, values: NPFloatArray, col_index: NPIntArray, row_start: NPIntArray, b: NPFloatArray, nprow: int, npcol: int, doc: int, data: NPUInt64Array, info: NPIntArray)->None:
-
+        #print("solve distributed with flag ",op_flag)
         if op_flag == 1:
+            if self.petsc_mat is not None:
+                self.petsc_mat.destroy()
+                self.petsc_mat=None
+            if self.ksp is not None:
+                self.ksp.destroy() #type:ignore
+                self.ksp=None
+            if self.x is not None:
+                self.x.destroy() #type:ignore
+                self.x=None
+            if self._dofs_to_field_info is not None:
+                for IS in self._dofs_to_field_info[2].values():
+                    IS.destroy() #type:ignore
+                self._dofs_to_field_info=None
             #print("PETSCINF",nrow_local,n)
+            #print("Creating petsc mat ")
             self.petsc_mat = PETSc.Mat().createAIJ(size=((nrow_local, n), (nrow_local, n),),csr=(row_start, col_index, values)) #type:ignore
+            
+            self.petsc_mat.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False)                        
+            # Force diagonal:
+            #diag = self.petsc_mat.getDiagonal()
+            #self.petsc_mat.setDiagonal(diag, addv=PETSc.InsertMode.INSERT_VALUES)
+            self.petsc_mat.shift(0.0)
+            
+            self.petsc_mat.assemble()
+            
+            #print("OWNERSHIP RANGE",self.petsc_mat.getOwnershipRange()) #type:ignore
         #			print("PROCESSOR Ns",get_mpi_rank(),nrow_local,n)
         #			print("PROCESSOR RS",get_mpi_rank(),row_start)
         #			print("PROCESSOR CI",get_mpi_rank(),col_index)
         #			print("FIRST ROW",get_mpi_rank(),first_row)
         # self.petsc_mat
+            
         elif op_flag == 2:
+            
+            if self._dofs_to_field_info is None:
+                self.setup_field_split()
+            bv = PETSc.Vec().createWithArray(b) #type:ignore
+            self.petsc_rhs=bv
+            self.x = self.petsc_rhs.duplicate()
+            
             self.setup_solver()
-            bv = PETSc.Vec().createWithArray(b, (len(b), n)) #type:ignore
-            xv = bv.duplicate() #type:ignore
-            self.ksp.solve(bv, xv) #type:ignore
-            res = xv.getArray() #type:ignore
-            b[:] = res[:] #type:ignore
+            
+            if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine():
+                raise RuntimeError("Cannot use custom solve routine with PETSc yet. Also, iterative solving might require different handling here")
+            else:
+                import time
+                start_time = time.time()
+                self.ksp.solve(bv, self.x) #type:ignore
+                end_time = time.time()
+                if not self.problem.is_quiet():
+                    print("PETSc KSP solve time:", end_time - start_time, "seconds")
+                xv = self.x.getArray() #type:ignore
+            b[:] = xv[:] #type:ignore
 
-            self.petsc_mat.destroy() #type:ignore
-            self.ksp.destroy() #type:ignore
-            xv.destroy() #type:ignore
+            #print('Converged in', self.ksp.getIterationNumber(), 'iterations.') #type:ignore
+
+            
+            self.petsc_rhs=None
             bv.destroy() #type:ignore
         else:
             raise RuntimeError("Cannot handle Petsc mode " + str(op_flag) + " yet")
 
+
+    def assemble_matrix(self,which_one:str):
+        res, n, _nzz, nrow_local, values, col_index, row_start=self.problem._assemble_residual_jacobian(which_one)                                
+        res=PETSc.Mat().createAIJ(size=((nrow_local, n), (n, n),),csr=(row_start.astype(numpy.int32), col_index.astype(numpy.int32), values.astype(numpy.float64)), comm=PETSc.COMM_WORLD) #type:ignore
+        res.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False)
+        res.shift(0.0)
+        res.assemble()
+        return res
+        
+
+
     def set_options(self,**kwargs:Any):
         for a,b in kwargs.items():
             PETSc.Options().setValue(a,b) #type:ignore
+
+@GenericLinearSystemSolver.register_solver()
+class PETSCMUMPSSolver(PETSCSolver):
+    # Pre-configured with MUMPS, unlike PETSCSolver: set_linear_solver("petsc").use_mumps() needs a live Problem to
+    # chain onto, which set_default_linear_solver(...) cannot provide since it is only given a plain idname string.
+    idname = "petsc_mumps"
+
+    def __init__(self, problem:"Problem"):
+        super().__init__(problem)
+        self.use_mumps()
+
 
 def _SetDefaultPetscOption(key:str, val:Any,force:bool=False):
     if force or (not PETSc.Options().hasName(key)): #type:ignore
@@ -196,7 +394,9 @@ class SlepcEigenSolver(GenericEigenSolver):
     def set_default_option(self,name:str,val:Any=None,force:bool=False)->None:
         _SetDefaultPetscOption(name,val, force)
     
-    def use_mumps(self,mumps_param14:Optional[int]=None):        
+    def use_mumps(self,mumps_param14:Optional[int]=None):
+        if not PETSc.Sys.hasExternalPackage("mumps"): #type:ignore
+            raise RuntimeError("Your PETSc installation was not compiled with MUMPS support (--download-mumps=yes). Please recompile PETSc with MUMPS or use a different eigensolver.")
         _SetDefaultPetscOption("st_ksp_type","preonly")
         _SetDefaultPetscOption("st_pc_type","lu")
         _SetDefaultPetscOption("st_pc_factor_mat_solver_type","mumps")
@@ -233,7 +433,7 @@ class SlepcEigenSolver(GenericEigenSolver):
             Jin,Min,n,complex_mat=self.get_J_M_n_and_type()
             upscale_to_complex=complex_mat and (PETSc.ScalarType in {numpy.float64,numpy.float128,numpy.float32})
             if upscale_to_complex:
-                raise RuntimeError("SLEPc cannot handle a complex matrix here...")
+                raise RuntimeError("Your PETSc/SLEPc installation cannot handle a complex eigenvalue problem. Please compile another PETSc/SLEPc version with complex number and adjust the PYTHONPATH accordingly so that the complex petsc4py / slepc4py is used.")
             M=PETSc.Mat().createAIJ(size=((n, n), (n, n),), csr=(Min.indptr, Min.indices, Min.data))
             J=PETSc.Mat().createAIJ(size=((n, n), (n, n),), csr=(Jin.indptr, Jin.indices, Jin.data))
             
@@ -281,7 +481,7 @@ class SlepcEigenSolver(GenericEigenSolver):
             neval=1
         #E.setProblemType(SLEPc.EPS.ProblemType.PGNHEP)
         #ncv=max(2 * neval + 1, 5 + neval)
-        ncv=max(2 * neval + 1, 5 + neval)
+        ncv=self.ncv if self.ncv is not None else max(2 * neval + 1, 5 + neval)
         mdp=ncv #TODO: Can be smaller for higher
         
         E.setDimensions(neval,ncv,mdp) #type:ignore
@@ -423,6 +623,16 @@ class SlepcEigenSolver(GenericEigenSolver):
         If defining derived classes that need access to SLEPc, get SLEPc from here, do not import slepc4py again
         """        
         return SLEPc
+
+@GenericEigenSolver.register_solver()
+class SlepcMUMPSEigenSolver(SlepcEigenSolver):
+    # See PETSCMUMPSSolver above for why this pre-configured variant exists.
+    idname = "slepc_mumps"
+
+    def __init__(self, problem:"Problem"):
+        super().__init__(problem)
+        self.use_mumps()
+
 
 class FieldSplitPETSCSolver(PETSCSolver):
     def __init__(self,problem:"Problem"):

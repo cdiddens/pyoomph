@@ -1,6 +1,6 @@
 /*================================================================================
 pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -15,7 +15,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 
-The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+The main author may be contacted at c.diddens@utwente.nl
 
 ================================================================================*/
 
@@ -25,26 +25,29 @@ The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
 
 namespace pyoomph
 {
-    int pyoomph_verbose = 0;
+		int pyoomph_verbose = 0;
 
-    runtime_error_with_line::runtime_error_with_line(const std::string &arg, const char *file, int line) : std::runtime_error(arg)
-    {
-        std::ostringstream o;
-        o << file << ":" << line << ": " << arg;
-        msg = o.str();
+		// Build the "file:line: message" string once at construction time and cache it in
+		// msg, since what() must return a pointer valid for the exception's lifetime.
+		runtime_error_with_line::runtime_error_with_line(const std::string &arg, const char *file, int line) : std::runtime_error(arg)
+		{
+				std::ostringstream o;
+				o << file << ":" << line << ": " << arg;
+				msg = o.str();
 /*        if (get_logging_stream())
-        {
-            *get_logging_stream() << "RuntimeError: " << msg << std::endl << std::flush;
-            
-        }*/
-    }
-    
-    
-    const char *runtime_error_with_line::what() const throw()
-    {
-        
-        return msg.c_str();
-    }
-    
-    
+				{
+						*get_logging_stream() << "RuntimeError: " << msg << std::endl << std::flush;
+
+				}*/
+		}
+
+
+		// Return the cached "file:line: message" string built in the constructor.
+		const char *runtime_error_with_line::what() const throw()
+		{
+
+				return msg.c_str();
+		}
+
+
 }

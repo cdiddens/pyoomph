@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -32,7 +33,7 @@ from ..expressions.generic import is_zero #type:ignore
 
 #import pyoomph.generic
 from .mpi import *
-import _pyoomph
+from .. import _pyoomph_core as _pyoomph
 import math
 
 
@@ -50,7 +51,6 @@ from ..solvers.generic import DefaultMatrixType, EigenSolverWhich, GenericLinear
 #from ..solvers.scipy import SuperLUSerial,ScipyEigenSolver
 from ..expressions.units import *
 from ..expressions import get_global_symbol,cartesian,axisymmetric,axisymmetric_flipped,radialsymmetric,BaseCoordinateSystem,nondim,testfunction,evaluate_in_past,weak,OptionalCoordinateSystem
-from ..solvers.load_solver_from_cmd_line import *
 from ..solvers.generic import get_default_linear_solver,get_default_eigen_solver
 from ..meshes.interpolator import _DefaultInterpolatorClass,ODEInterpolator 
 from ..output.states import DumpFile
@@ -283,7 +283,7 @@ class PeriodicOrbit:
         
         return self.emerging_info["lyap_coeff"]<0
     
-    def evalulate_observable_time_integral(self,*observables:str):
+    def evaluate_observable_time_integral(self,*observables:str):
         if len(observables)==0:
             raise ValueError("No observables given")
         accus={n:0 for n in observables}
@@ -352,7 +352,6 @@ class Problem(_pyoomph.Problem):
     Attributes:
         
         additional_equations (Union[Literal[0], EquationTree]): Additional equations for the problem.
-        always_take_one_newton_step (bool): Flag indicating whether to always take one Newton step.
         continuation_data_in_states (bool): Flag indicating whether to store continuation data in the states.
         default_1d_file_extension (Union[Literal["txt", "mat"], List[Literal["txt", "mat"]]]): Default file extension for 1D files.
         default_ccode_expression_mode (str): Default C code expression mode.
@@ -363,7 +362,6 @@ class Problem(_pyoomph.Problem):
         extra_compiler_flags (List[str]): Extra compiler flags for the problem.
         ignore_command_line (bool): Flag indicating whether to ignore command line arguments.
         latex_printer (Optional[LaTeXPrinter]): LaTeX printer for the problem.
-        max_residuals (float): Maximum residuals for the problem.
         plot_in_dedicated_process (bool): Flag indicating whether to plot in a dedicated process.
         remove_macro_elements_after_initial_adaption (Union[bool, Literal["auto"]]): Flag indicating whether to remove macro elements after initial adaption.
         scaling (Dict[str, Union[str, ExpressionOrNum]]): Dictionary of scaling factors.
@@ -380,8 +378,8 @@ class Problem(_pyoomph.Problem):
         self._initialised:bool=False
         self._during_initialization:bool=False
 
-        import pyoomph
-        self.set_c_compiler(pyoomph.get_default_c_compiler())
+        from .. import get_default_c_compiler
+        self.set_c_compiler(get_default_c_compiler())
 
         if hasattr(__main__,"__file__"):
             scriptfile=os.path.splitext(__main__.__file__)[0]
@@ -414,12 +412,14 @@ class Problem(_pyoomph.Problem):
         #: Spatial adaption steps for the initial condition. If set to ``None``, we refine initially up to :py:attr:`max_refinement_level`.
         self.initial_adaption_steps:Union[None,int]=None #Adapting in the first step
         self.remove_macro_elements_after_initial_adaption:Union[bool,Literal["auto"]]="auto" # "auto" means: Only if the coordinates are free
+        #: In distributed runs, we call load balance after each non-uniform adaptions
+        self.call_load_balance_in_initial_adaption=False
 
         #: Minimum error of all meshes for spatial adaptivity. If the error is below this threshold, we may unrefine locally.
         self.min_permitted_error:float=0.0001	#Some defaults for the meshes
         #: Maximum error of all meshes for spatial adaptivity. If the error is above this threshold, we must refine locally.
         self.max_permitted_error:float=0.001
-        #: Maximum number of refinements of all meshes. 
+        #: Maximum number of refinements of all meshes. After initialization, use set_max_refinement_level instead of this property.
         self.max_refinement_level:int=8
         #: Minimum refinement level of all meshes.       
         self.min_refinement_level:int=0
@@ -487,6 +487,7 @@ class Problem(_pyoomph.Problem):
         self._azimuthal_mode_param_m=None
         self._normal_mode_param_k=None
         self._azimuthal_stability=_AzimuthalStabilityInfo()
+        self._bifurcation_reactivation_after_adaptation=None
         self._cartesian_normal_mode_stability=_CartesianNormalModeStabilityInfo()
         self._bifurcation_tracking_parameter_name:Optional[str]=None
         self._improved_pitchfork_tracking_coordinate_system:"OptionalCoordinateSystem"=None
@@ -542,16 +543,29 @@ class Problem(_pyoomph.Problem):
         self._custom_assembler:Optional["CustomAssemblyBase"]=None
 
         self.default_ccode_expression_mode:str="" # Try to factor all expressions with "factor"
+        #: Debugging the Jacobian by finite differences with a given epsilon (None or <=0 means no debugging). 
+        self.debug_jacobian_by_fd_epsilon:Optional[float]=-1 
         self.extra_compiler_flags:List[str]=[]
         
         #: After analyzing the Jacobian, a field with an empty Jacobian row will be pinned automatically
         self.automatically_remove_dofs_without_equations:bool=True
+        #: When you have e.g. a field without any equations, it will stop the simulation and give a warning about the Jacobian structure. Setting this to False, it will just go through
+        self.stop_on_jacobian_structure_warning=True
 
         #: Must be set to the participant name when using preCICE. Default is an empty string, if you do not use preCICE.
         self.precice_participant:str=""
         #: Must be set to the config file when using preCICE
         self.precice_config_file:str=""
         self._precice_interface=None #type:ignore
+        
+        #: Set e.g. to {"domain/velocity_*":"u","domain/pressure":"p"} to automatically setup field split IS for PETSc with names "u" and "p". If None, the default split is set like the field indices in the Jacobian information file, i.e. using "0", "1", etc. as prefixes
+        self.petsc_fieldsplit=None
+        
+        #: When set to True, we apply Dirichlet boundary conditions by removing the corresponding dofs from the system. This yields a smaller matrix, but iterative solvers using strided block matrices will run into troubles. If False, all DirichletBCs are kept in the dof vector and the matrix is augmented accordingly.
+        self.apply_Dirichlet_BCs_by_dof_removing=True
+        
+        #: When set to True, we assign the initial conditions via projection, not on a nodal basis
+        self.project_initial_conditions=False
 
     # Use weak(u,psi) instead of vectorial U*Psi for the symmetry-breaking constraint
     def improve_pitchfork_tracking_on_unstructured_meshes(self,coord_sys:"OptionalCoordinateSystem"=None,pos_coord_sys:"OptionalCoordinateSystem"=None):
@@ -711,8 +725,8 @@ class Problem(_pyoomph.Problem):
     def assemble_jacobian(self,with_residual:Literal[False],which_one:str)->DefaultMatrixType: ...
     
     def assemble_jacobian(self,with_residual:bool=True,which_one:str="")->Union[DefaultMatrixType,Tuple[List[float],DefaultMatrixType]]:
-        res, n, _, _, J_values_arr, J_colindex_arr, J_row_start_arr=self._assemble_residual_jacobian(which_one)
-        J = scipy.sparse.csr_matrix((J_values_arr, J_colindex_arr, J_row_start_arr), shape=(n, n)) #type:ignore
+        res, n, _nzz, J_nrow_local, J_values_arr, J_colindex_arr, J_row_start_arr=self._assemble_residual_jacobian(which_one)        
+        J = scipy.sparse.csr_matrix((J_values_arr, J_colindex_arr, J_row_start_arr), shape=(n, n)) #type:ignore ## TODO: Not J_nrow_local ?
         if with_residual:
             return res,J #type:ignore
         else:
@@ -823,29 +837,43 @@ class Problem(_pyoomph.Problem):
     def release(self):
         def release_spatial_mesh(m:AnySpatialMesh):
             cg=m.get_code_gen()
-            cg._code=None 
+            cg._code=None
             cg._problem=None
-            for im in m._interfacemeshes.values(): 
+            for im in m._interfacemeshes.values():
                 release_spatial_mesh(im)
-     
-            m._interfacemeshes.clear() 
-            m._eqtree._equations=None 
+
+            m._interfacemeshes.clear()
+            # Close any output file handles (e.g. ODEFileOutput/IntegralObservableOutput)
+            # held open by this mesh's equations before dropping the reference to them --
+            # see the log-file comment further below for why this must happen proactively
+            # rather than being left to eventual garbage collection.
+            if m._eqtree is not None and m._eqtree._equations is not None:
+                m._eqtree._equations._release_output_files()
+            m._eqtree._equations=None
             m._eqtree=None #type:ignore
 
         for m in self._meshdict.values():
             if not isinstance(m,ODEStorageMesh):
                 release_spatial_mesh(m)
             else:
-                m._eqtree=None 
-                m._element=None 
+                if m._eqtree is not None and m._eqtree._equations is not None:
+                    m._eqtree._equations._release_output_files()
+                m._eqtree=None
+                m._element=None
 
         self._lasolver:Optional[Union[str,GenericLinearSystemSolver]] = None
         self._eigensolver:Optional[Union[str,GenericEigenSolver]] = None
         self._meshtemplate_list = []
         self._meshdict:Dict[str,"AnyMesh"] = {}
         self.invalidate_cached_mesh_data()
-        self.invalidate_eigendata()        
+        self.invalidate_eigendata()
         self.flush_sub_meshes()
+        # Close the log file (if any) now, rather than waiting for the C++ Problem
+        # object's destructor: on Windows, a still-open log file handle prevents the
+        # containing directory from being deleted (WinError 32), which bites e.g.
+        # test_solver()/test_compiler() in __main__.py, whose TemporaryDirectory
+        # cleanup runs before this Python wrapper object is garbage-collected.
+        self._open_log_file("",False)
         self._unload_all_dlls()
         gc.collect()
         gc.collect()
@@ -1080,7 +1108,7 @@ class Problem(_pyoomph.Problem):
                 continue
             elif isinstance(v,_pyoomph.Expression):
                 def merge_units(expr):
-                    import _pyoomph
+                    from .. import _pyoomph_core as _pyoomph
                     numfactor,unit,rest,success=_pyoomph.GiNaC_collect_units(expr)
                     if not success:
                         return expr
@@ -1425,9 +1453,29 @@ class Problem(_pyoomph.Problem):
                 submesh.ensure_external_data()
 
 
+    
+
     def _adapt_with_interfacial_errors(self) -> Tuple[int, int]:
-        
+        biftrack_active,biftrack_eigen=self._get_bifurcation_tracking_info()
+        biftrack_mode = self.get_bifurcation_tracking_mode()
+        biftrack_param = self._bifurcation_tracking_parameter_name
+        self._bifurcation_reactivation_after_adaptation=None # We will reactivate the bifurcation tracking after the adaptation, but not during the adaptation, to avoid that we adapt with changing eigenvalues during the adaptation. We will reactivate it at the end of the function if it was active at the beginning.
+        if biftrack_active:
+            print("ADAPT WITH INTERFACIAL ERRORS. BIF TRACKING PARAM: ",self._bifurcation_tracking_parameter_name,self.get_bifurcation_tracking_mode())
+            m=None
+            k=None
+            self._last_eigenvalues=numpy.array([biftrack_eigen])
+            self._last_eigenvectors=numpy.array([self._get_bifurcation_eigenvector()])            
+            if biftrack_mode=="azimuthal" or biftrack_mode=="cartesian_normal_mode":
+                print("Azimuthal:",self._azimuthal_mode_param_m,self._azimuthal_mode_param_m.value)
+                print("Cartesian normal mode:",self._cartesian_normal_mode_param_k,self._cartesian_normal_mode_param_k.value)
+                raise RuntimeError("Check on the bifurcation tracking, whether the values of m and k are still correct")
+            self._adapt_eigenindex=0 # We will adapt with the first eigenfunction, which is the one that is critical at the bifurcation point. We could also make this user-definable in the future
+            self.deactivate_bifurcation_tracking()            
+            self._bifurcation_reactivation_after_adaptation={"mode":biftrack_mode,"param":biftrack_param,"azimuthal_m":m,"cartesian_k":k}
         #Resetting the element error override
+        if self._custom_assembler is not None:
+            raise RuntimeError("Adaption with custom assembler not supported yet")
         def reset(mesh:AnySpatialMesh):
             mesh._reset_elemental_error_max_override() 
             for _n,imesh in mesh._interfacemeshes.items():
@@ -1529,10 +1577,13 @@ class Problem(_pyoomph.Problem):
                         for ie in imesh.elements():
                             be=ie.get_bulk_element()
                             obe=ie.get_opposite_bulk_element()
-                            if obe._elemental_error_max_override<opp_minerr and be._elemental_error_max_override>=my_minerr:
-                                obe._elemental_error_max_override=0.5*(opp_minerr+opp_maxerr)
-                            elif obe._elemental_error_max_override>=opp_minerr and be._elemental_error_max_override<my_minerr:
-                                be._elemental_error_max_override=0.5*(my_minerr+my_maxerr)
+                            if obe is None:                            
+                                raise RuntimeError("Interface mesh "+imesh.get_full_name()+" has an opposite interface mesh, but the opposite bulk element is None. This should not happen.")
+                            if obe is not None:                            
+                                if obe._elemental_error_max_override<opp_minerr and be._elemental_error_max_override>=my_minerr:
+                                    obe._elemental_error_max_override=0.5*(opp_minerr+opp_maxerr)
+                                elif obe._elemental_error_max_override>=opp_minerr and be._elemental_error_max_override<my_minerr:
+                                    be._elemental_error_max_override=0.5*(my_minerr+my_maxerr)
                         for i,e in enumerate(mesh.elements()):
                             errs[name][i]=max(errs[name][i],e._elemental_error_max_override)
                         for i,e in enumerate(obm.elements()):
@@ -1550,6 +1601,10 @@ class Problem(_pyoomph.Problem):
                 dof_current=self.get_arclength_dof_current_vector()
                 self.set_current_pinned_values(0*pinned_values,True,5)
                 self.set_current_pinned_values(0*pinned_values,True,6)
+                if len(dof_deriv)>len(_actual_dofs):
+                    # Strip the bifurcation tracker part... There is nothing you can do here
+                    dof_deriv=dof_deriv[:len(_actual_dofs)]
+                    dof_current=dof_current[:len(_actual_dofs)]                    
                 self.set_history_dofs(5,dof_deriv)
                 self.set_history_dofs(6,dof_current)
                 messed_around_in_history=True
@@ -1594,7 +1649,7 @@ class Problem(_pyoomph.Problem):
             
         if messed_around_in_history:
             self.assign_initial_values_impulsive() # We messed around. So me must reassign the initial values
-            
+        self._adapt_eigenindex=None
         return nref,nuref
 
     def _adapt(self) -> Tuple[int, int]:
@@ -1649,7 +1704,7 @@ class Problem(_pyoomph.Problem):
                             internal_eqs._additional_residuals[destination]=int_contrib
 
 
-        for tree_depth in range(2):
+        for tree_depth in range(3):
             for _,mesh in self._meshdict.items():
                 mesh._problem=self
                 mesh._eqtree._equations.get_combined_equations()._problem=self
@@ -1772,10 +1827,7 @@ class Problem(_pyoomph.Problem):
         from .ccompiler import get_ccompiler
         if isinstance(compiler_or_name,str):
             if compiler_or_name=="tcc":
-                if _pyoomph.has_tcc():
-                    compiler_or_name="_internal_"
-                else:
-                    compiler_or_name="tccbox"
+                compiler_or_name="tccbox"
             elif compiler_or_name=="distutils":
                 compiler_or_name="system"
             cc=get_ccompiler(compiler_or_name)
@@ -1786,8 +1838,10 @@ class Problem(_pyoomph.Problem):
 
 
     def __iadd__(self,other:Union[MeshTemplate,EquationTree,GenericProblemHooks,"MatplotlibPlotter"]):        
-        if self._initialised and not isinstance(other,(BasePlotter,GenericProblemHooks)):
-            raise RuntimeError("Cannot add anything to a problem once it is initialized!")
+        if self._initialised:
+            from ..output.plotting import BasePlotter
+            if not isinstance(other,(BasePlotter,GenericProblemHooks)):
+                raise RuntimeError("Cannot add anything to a problem once it is initialized!")
         if isinstance(other,MeshTemplate):
             self.add_mesh(other)
         elif isinstance(other,EquationTree):
@@ -1804,7 +1858,7 @@ class Problem(_pyoomph.Problem):
             if self._initialised:
                 other.actions_after_initialise()
         else:
-            from pyoomph.output.plotting import BasePlotter
+            from ..output.plotting import BasePlotter
             if isinstance(other,BasePlotter):
                 if self.plotter is None:
                     self.plotter=other
@@ -1824,19 +1878,28 @@ class Problem(_pyoomph.Problem):
         return "Generic Pyoomph Problem"
 
     def setup_cmd_line(self):              
-        self.cmdlineparser = argparse.ArgumentParser(description=self.cmdline_desc())        
-        self.cmdlineparser.add_argument('--petsc',help="use PETSc solver",action='store_true')
-        self.cmdlineparser.add_argument('--pastix',help="use PaSTiX solver",action='store_true')
-        self.cmdlineparser.add_argument('--superlu',help="use serial SuperLu solver",action='store_true')
-        self.cmdlineparser.add_argument('--umfpack', help="use UMFPACK solver", action='store_true')
-        self.cmdlineparser.add_argument('--pardiso', help="use Pardiso solver", action='store_true')
-        self.cmdlineparser.add_argument('--mumps', help="use MUMPS solver", action='store_true')
-        self.cmdlineparser.add_argument('--slepc',help="use SLEPc as eigensolver. Specify your own backend for the matrix inversion during eigensolve here",action="store_true")
-        self.cmdlineparser.add_argument('--slepc_mumps',help="use SLEPc as eigensolver with MUMPS as backend",action="store_true")        
-        self.cmdlineparser.add_argument('--petsc_mumps',help="use PETSc as linear solver with MUMPS as backend",action="store_true")                
-        self.cmdlineparser.add_argument('--arpack',action="store_true")
-        self.cmdlineparser.add_argument('--tcc', help="use internal TCC compiler", action='store_true')
-        self.cmdlineparser.add_argument('--distutils', help="use system C compiler detected by distutils", action='store_true')
+        self.cmdlineparser = argparse.ArgumentParser(description=self.cmdline_desc())
+        # Mutually exclusive: argparse itself rejects any combination of two of these (e.g.
+        # --superlu --pardiso) with a clear usage error, so the linear solver flags never need to
+        # be cross-checked by hand in parse_cmd_line() below.
+        linear_solver_group = self.cmdlineparser.add_mutually_exclusive_group()
+        linear_solver_group.add_argument('--petsc',help="use PETSc solver",action='store_true')
+        linear_solver_group.add_argument('--pastix',help="use PaSTiX solver",action='store_true')
+        linear_solver_group.add_argument('--superlu',help="use serial SuperLu solver",action='store_true')
+        linear_solver_group.add_argument('--umfpack', help="use UMFPACK solver", action='store_true')
+        linear_solver_group.add_argument('--pardiso', help="use Pardiso solver", action='store_true')
+        linear_solver_group.add_argument('--mumps', help="use MUMPS solver", action='store_true')
+        linear_solver_group.add_argument('--petsc_mumps',help="use PETSc as linear solver with MUMPS as backend",action="store_true")
+        linear_solver_group.add_argument('--accelerate',help="use Apple Accelerate sparse solver (macOS only)",action='store_true')
+        # Mutually exclusive for the same reason as linear_solver_group above.
+        eigen_solver_group = self.cmdlineparser.add_mutually_exclusive_group()
+        eigen_solver_group.add_argument('--slepc',help="use SLEPc as eigensolver. Specify your own backend for the matrix inversion during eigensolve here",action="store_true")
+        eigen_solver_group.add_argument('--slepc_mumps',help="use SLEPc as eigensolver with MUMPS as backend",action="store_true")
+        eigen_solver_group.add_argument('--arpack',action="store_true")
+        # Mutually exclusive for the same reason as linear_solver_group above.
+        ccompiler_group = self.cmdlineparser.add_mutually_exclusive_group()
+        ccompiler_group.add_argument('--tcc', help="use internal TCC compiler", action='store_true')
+        ccompiler_group.add_argument('--distutils', help="use system C compiler detected by distutils", action='store_true')
         self.cmdlineparser.add_argument('--fast-math', help="activate fast math compiler flags (only with distutils, not with tcc)", action='store_true')        
         self.cmdlineparser.add_argument('--distribute',help="Distribute mesh in parallel",action='store_true')
         self.cmdlineparser.add_argument('--outdir', help="output directory",type=str)
@@ -1849,6 +1912,7 @@ class Problem(_pyoomph.Problem):
         self.cmdlineparser.add_argument("--where",help="Python bool expression involving variables time or step. Only used in runmodes c and p",type=str,default="True")
         self.cmdlineparser.add_argument("--largest_residuals",help="Debug the largest residuals",type=int,default=self._debug_largest_residual)
         self.cmdlineparser.add_argument("--generate_precice_cfg",help="Generate some parts of a preCICE configuration file from the coupling equations",action="store_true")
+        self.cmdlineparser.add_argument("--quick-test",help="Stops after the first successful Newton method. Useful for quick testing",action="store_true")
 
     def parse_cmd_line(self):
         from ..materials.generic import MaterialProperties
@@ -1857,38 +1921,23 @@ class Problem(_pyoomph.Problem):
         else:
             self.cmdlineargs, self.further_cmdlineargs = self.cmdlineparser.parse_known_args()
         if self.cmdlineargs.superlu:
-            if self.cmdlineargs.petsc or self.cmdlineargs.pastix or self.cmdlineargs.umfpack or self.cmdlineargs.pardiso or self.cmdlineargs.mumps or self.cmdlineargs.petsc_mumps:
-                raise ValueError("Cannot set two solvers simultaneously")
             self.set_linear_solver("superlu")
         elif self.cmdlineargs.petsc:
-            if self.cmdlineargs.superlu or self.cmdlineargs.pastix or self.cmdlineargs.umfpack or self.cmdlineargs.pardiso or self.cmdlineargs.mumps or self.cmdlineargs.petsc_mumps:
-                raise ValueError("Cannot set two solvers simultaneously")
-                import pyoomph.solvers.petsc
             self.set_linear_solver("petsc")
         elif self.cmdlineargs.umfpack:
-            if self.cmdlineargs.petsc or self.cmdlineargs.pastix or self.cmdlineargs.superlu or self.cmdlineargs.pardiso or self.cmdlineargs.mumps or self.cmdlineargs.petsc_mumps:
-                raise ValueError("Cannot set two solvers simultaneously")
             self.set_linear_solver("umfpack")
         elif self.cmdlineargs.pardiso:
-            if self.cmdlineargs.petsc  or self.cmdlineargs.pastix or self.cmdlineargs.superlu or self.cmdlineargs.umfpack or self.cmdlineargs.mumps or self.cmdlineargs.petsc_mumps:
-                raise ValueError("Cannot set two solvers simultaneously")
             self.set_linear_solver("pardiso")
         elif self.cmdlineargs.mumps:
-            if self.cmdlineargs.petsc or self.cmdlineargs.pastix or self.cmdlineargs.superlu or self.cmdlineargs.umfpack or self.cmdlineargs.pardiso or self.cmdlineargs.petsc_mumps:
-                raise ValueError("Cannot set two solvers simultaneously")
             self.set_linear_solver("mumps")
         elif self.cmdlineargs.pastix:
-            if self.cmdlineargs.mumps or self.cmdlineargs.petsc or self.cmdlineargs.superlu or self.cmdlineargs.umfpack or self.cmdlineargs.pardiso or self.cmdlineargs.petsc_mumps:
-                raise ValueError("Cannot set two solvers simultaneously")
             self.set_linear_solver("pastix")
         elif self.cmdlineargs.petsc_mumps:
-            if self.cmdlineargs.mumps or self.cmdlineargs.petsc or self.cmdlineargs.superlu or self.cmdlineargs.umfpack or self.cmdlineargs.pardiso or self.cmdlineargs.pastix:
-                raise ValueError("Cannot set two solvers simultaneously")
-            self.set_linear_solver("petsc").use_mumps()
+            self.set_linear_solver("petsc_mumps")
+        elif self.cmdlineargs.accelerate:
+            self.set_linear_solver("accelerate")
 
         if self.cmdlineargs.tcc:
-            if self.cmdlineargs.distutils:
-                raise RuntimeError("Cannot set --tcc and --distutils together")
             self.set_c_compiler("tcc")
             if self.cmdlineargs.fast_math:
                 raise RuntimeError("Cannot use --fast-math with --tcc")
@@ -1900,17 +1949,12 @@ class Problem(_pyoomph.Problem):
             self.set_c_compiler("system").optimize_for_max_speed()
 
         if self.cmdlineargs.arpack:
-            if self.cmdlineargs.slepc or self.cmdlineargs.slepc_mumps:
-                raise RuntimeError("Cannot be used together: --arpack and --slepc/--slepc_mumps")
             self.set_eigensolver("scipy") # Not using the pardiso arpack then
-        elif self.cmdlineargs.slepc or self.cmdlineargs.slepc_mumps:
-            import pyoomph.solvers.petsc
+        elif self.cmdlineargs.slepc_mumps:
+            self.set_eigensolver("slepc_mumps")
+        elif self.cmdlineargs.slepc:
             self.set_eigensolver("slepc")
-            if self.cmdlineargs.slepc_mumps:
-                eigsolv=self.get_eigen_solver()
-                assert isinstance(eigsolv,pyoomph.solvers.petsc.SlepcEigenSolver)
-                eigsolv.use_mumps()
-                
+
 
 
         if self.cmdlineargs.outdir:
@@ -2000,7 +2044,12 @@ class Problem(_pyoomph.Problem):
                 elif isinstance(obj,Problem) and splt_varname[-1] in obj.get_global_parameter_names():
                     current=obj.get_global_parameter(splt_varname[-1])
                 else:
-                    raise RuntimeError("Cannot set undefined property/parameter "+".".join(splt_varname)+". Currently at "+str(obj)+" and trying to access "+str(splt_varname[-1])+"\nFollowing properties are known:"+str(dir(obj)))
+                    import difflib
+                    closest_matches=difflib.get_close_matches(splt_varname[-1],dir(obj))
+                    if len(closest_matches)>0:
+                        raise RuntimeError("Cannot set undefined property/parameter "+".".join(splt_varname)+". Currently at "+str(obj)+" and trying to access "+str(splt_varname[-1])+"\nFollowing properties are known:"+str(dir(obj))+"\nClosest matches are: "+str(closest_matches))
+                    else:
+                        raise RuntimeError("Cannot set undefined property/parameter "+".".join(splt_varname)+". Currently at "+str(obj)+" and trying to access "+str(splt_varname[-1])+"\nFollowing properties are known:"+str(dir(obj)))
                 
                 if not self.is_quiet():
                     print("SETTING PARAMETER", varname,"FROM",current, "TO",val) #type:ignore
@@ -2095,9 +2144,11 @@ class Problem(_pyoomph.Problem):
     def before_assigning_equation_numbers(self,dof_selector:Optional["_DofSelector"]):
         for hook in self._hooks:
             hook.before_assigning_equation_numbers(dof_selector,True)
-        self._equation_system._before_assigning_equations(dof_selector) 
+        self._equation_system._before_assigning_equations(dof_selector)         
         for hook in self._hooks:
             hook.before_assigning_equation_numbers(dof_selector,False)
+        self.get_la_solver()._before_assigning_equation_numbers()
+        self.get_eigen_solver()._before_assigning_equation_numbers()
 
 
     def actions_before_remeshing(self,active_remeshers:List["RemesherBase"]):
@@ -2159,6 +2210,15 @@ class Problem(_pyoomph.Problem):
             self._custom_assembler.actions_after_successful_newton_solve()
         for hook in self._hooks:
             hook.actions_after_newton_solve()
+        if self._bifurcation_reactivation_after_adaptation is not None:
+            self._reactivate_bifurcation_tracking_after_adaption()
+        self._bifurcation_reactivation_after_adaptation=None
+        
+        if self.cmdlineargs.quick_test:
+            print("QUICK TEST: STOPPING AFTER FIRST SUCCESSFUL NEWTON SOLVE, BUT DOING OUTPUT FIRST")
+            self.output()
+            print("QUICK TEST: STOPPING AFTER FIRST SUCCESSFUL NEWTON SOLVE")
+            sys.exit(0)
 
     def remeshing_necessary(self):        
         """
@@ -2364,6 +2424,14 @@ class Problem(_pyoomph.Problem):
         self.compile_meshes()
 
         self.rebuild_global_mesh_from_list(rebuild=True)
+        
+        must_uniform_refine=False
+        for mesh in self._meshdict.values():
+            if isinstance(mesh,MeshFromTemplateBase) and mesh._initial_interface_refinement>0:
+                must_uniform_refine=True  
+                break
+        if must_uniform_refine:
+            raise NotImplementedError("Not implemented yet: Uniform refinement of all meshes before redefining the problem...")
 
         self.relink_external_data()
         self._assemble_defined_field_list()
@@ -2373,6 +2441,7 @@ class Problem(_pyoomph.Problem):
         self.reapply_boundary_conditions()
 
         if self.cmdlineargs.distribute:
+            raise NotImplementedError("Not implemented yet: Redefining the problem with distribution...")
             self.distribute()
 
         self.init_output(redefined=True)
@@ -2431,7 +2500,11 @@ class Problem(_pyoomph.Problem):
         _pyoomph._write_to_log_file("Python path: "+str(sys.path)+os.linesep)
         _pyoomph._write_to_log_file("Platform: "+str(sys.platform)+os.linesep)
         #modules={modul.__name__:getattr(modul,"__version__","UNKNOWN") for _,modul in sys.modules if isinstance(modul, types.ModuleType)}
-        modules= {m.__name__:m.__version__ for m in sorted(sys.modules.values(),key=lambda a : getattr(a,"__name__","")) if hasattr(m,"__name__") and hasattr(m,"__version__") and len(m.__name__.split("."))==1}
+        # Check the dotted-name length before hasattr(m,"__version__"): some
+        # submodules (e.g. numpy.core, kept only as a deprecated compat shim
+        # since numpy 2.0) raise a DeprecationWarning on any attribute access,
+        # so they must be filtered out by name first rather than probed.
+        modules= {m.__name__:m.__version__ for m in sorted(sys.modules.values(),key=lambda a : getattr(a,"__name__","")) if hasattr(m,"__name__") and len(m.__name__.split("."))==1 and hasattr(m,"__version__")}
         _pyoomph._write_to_log_file("Loaded module versions: "+str(modules)+os.linesep)                
         _pyoomph._write_to_log_file("Log file started: "+str(datetime.datetime.now())+os.linesep)
         _pyoomph._write_to_log_file("####################"+os.linesep)
@@ -2468,7 +2541,7 @@ class Problem(_pyoomph.Problem):
             keyfile=None
             
         if self.logfile_name is not None:
-            if not self.only_write_logfile_on_proc0 and get_mpi_rank()>1:
+            if not self.only_write_logfile_on_proc0 and get_mpi_rank()>=1:
                 raise RuntimeError("Cannot write log file on all processors yet")
             self._open_log_file(os.path.join(self._outdir,self.logfile_name),True)
             from . logging import pyoomph_activate_logging_to_file
@@ -2484,10 +2557,12 @@ class Problem(_pyoomph.Problem):
             if len(dumps)==0 or keyfile is None or not os.path.isfile(keyfile):
                 print("Cannot continue, starting over")
                 self._runmode="overwrite"
-        elif self._runmode=="delete":
+        
+        elif self._runmode=="delete":            
+            mpi_barrier()
             if keyfile is not None and os.path.isfile(keyfile) and get_mpi_rank()<=0:
                 if not self.is_quiet():
-                    print("Removing contents of output dir")
+                    print("Removing contents of output dir",get_mpi_rank())
 
                     def rem_subdir(subdir:str,filter:Union[str,List[str],Tuple[str]],remglob:Optional[Iterable[str]]=None):
                         top=os.path.join(self._outdir,subdir)
@@ -2559,9 +2634,10 @@ class Problem(_pyoomph.Problem):
         self.compile_meshes()
         #print("MESH COMPILE DONE")
 
-        infofile = open(os.path.join(self.get_output_directory(), "_numerical_factors.txt"), "w")
-        infofile.write(self._equation_system.numerical_factors_to_string())
-        infofile.close()
+        if get_mpi_rank()==0:
+            infofile = open(os.path.join(self.get_output_directory(), "_numerical_factors.txt"), "w")
+            infofile.write(self._equation_system.numerical_factors_to_string())
+            infofile.close()
 
         if self.latex_printer is not None:
 #            raise RuntimeError("LATEX PRINTER")
@@ -2569,12 +2645,29 @@ class Problem(_pyoomph.Problem):
 
 
         self.rebuild_global_mesh_from_list(rebuild=False)
+        
+        must_uniform_refine=False
+        for mesh in self._meshdict.values():
+            if isinstance(mesh,MeshFromTemplateBase) and mesh._initial_uniform_refinement_level>0:
+                must_uniform_refine=True  
+                break
+        if must_uniform_refine:
+            self.actions_before_adapt()
+            for mesh in self._meshdict.values():
+                if isinstance(mesh,MeshFromTemplateBase) and mesh._initial_uniform_refinement_level>0:
+                    for _ in range(mesh._initial_uniform_refinement_level):
+                        mesh.refine_uniformly()
+            self.relink_external_data()
+            self.actions_after_adapt()
 
         self.relink_external_data()
         self._assemble_defined_field_list()
         
-        infofile=open(os.path.join(self.get_output_directory(),self._ccode_dir,"_jacobian_structure.txt"),"w")
-        infofile.write(str(self._get_jacobian_information_string()))
+        jinfo_string, info_good=self._get_jacobian_information_string()
+        if not info_good and self.stop_on_jacobian_structure_warning:
+            raise RuntimeError("\n\nJacobian structure information indicates potential problems.\nSet stop_on_jacobian_structure_warning=False to ignore this warning.\n\n"+jinfo_string+"\n\n"+"This could be a result of missing equations, or misspelling a method in your Equation class, as e.g. 'define_residual' or 'define_equations' instead of 'define_residuals'.\nSet stop_on_jacobian_structure_warning=False in the Problem class if you are sure what you are doing")
+        infofile=open(os.path.join(self.get_output_directory(),self._ccode_dir,"_jacobian_structure.txt"),"w")        
+        infofile.write(str(jinfo_string))
         infofile.close()
 
         self._set_solved_residual("",False,True)
@@ -2584,9 +2677,11 @@ class Problem(_pyoomph.Problem):
 
 
         if self.cmdlineargs.distribute:
-            self.actions_before_distribute()
+            print("DISTRIBUTING THE PROBLEM")
+            self.actions_before_distribute()            
             self.distribute()
             self.actions_after_distribute()
+            print("DISTRIBUTING DONE")
             
             
         if self.check_mesh_integrity:
@@ -2598,7 +2693,7 @@ class Problem(_pyoomph.Problem):
         if self._runmode!="continue" and self._runmode!="replot":
             if self.initial_adaption_steps is None:
                 self.initial_adaption_steps=self.max_refinement_level
-            if  (self.initial_adaption_steps>0):
+            if  (self.initial_adaption_steps>0 and not self.project_initial_conditions):
                 no_need_to_reassign=False
                 for s in range(self.initial_adaption_steps):
                     self.map_nodes_on_macro_elements()
@@ -2608,15 +2703,31 @@ class Problem(_pyoomph.Problem):
                     if not self.is_quiet():
                         print("Initial adaption:",s,"of",self.initial_adaption_steps)
                     nref,nunref=self._adapt()
-                    if nref==0 and nunref==0:
-                        no_need_to_reassign=True
-                        break
+                    if get_mpi_nproc()>1:
+                        # Make sure nref and nunref are all considered
+                        nref_sum = get_mpi_sum(nref)
+                        nunref_sum = get_mpi_sum(nunref)
+                        if nref_sum == 0 and nunref_sum == 0:
+                            no_need_to_reassign = True
+                            break
+                        pass
+                    else:
+                        if nref==0 and nunref==0:
+                            no_need_to_reassign=True
+                            break
+                    if self.is_distributed() and self.call_load_balance_in_initial_adaption:                        
+                        self.load_balance()
                 if self.initial_adaption_steps>0 and not (no_need_to_reassign):
                     self.map_nodes_on_macro_elements()
                     self.set_initial_condition()
             else:
-                self.map_nodes_on_macro_elements()
-                self.set_initial_condition()
+                self.map_nodes_on_macro_elements()                                
+                if not self.project_initial_conditions:
+                    self.set_initial_condition()
+            if self.project_initial_conditions:
+                self._initialised = True
+                self._during_initialization=False
+                self.set_initial_condition(numadapt=self.initial_adaption_steps)
         else:
             self._initialised=True
             self._during_initialization=False
@@ -2736,12 +2847,27 @@ class Problem(_pyoomph.Problem):
         if rebuild:
             self.flush_sub_meshes()
             self._interfacemeshes=[]
-        for _,m in self._meshdict.items():
-            assert m._codegen is not None
-            m._codegen._mesh=m 
-            self.add_sub_mesh(m)
+
+        # First odes
+        for _, m in self._meshdict.items():
+            if isinstance(m,ODEStorageMesh):
+                assert m._codegen is not None
+                m._codegen._mesh=m 
+                self.add_sub_mesh(m)
+        # Now bulks
+        for _, m in self._meshdict.items():            
+            if isinstance(m,(MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d)):
+                assert m._codegen is not None
+                m._codegen._mesh=m 
+                self.add_sub_mesh(m)
+
+        # And finally interfaces
+        for _, m in self._meshdict.items():
             if isinstance(m,(MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d)):
                 recu_add_imeshes(m)
+
+
+
         if rebuild:
             if not self.is_quiet():
                 print("REBUILDING GLOBAL MESH FROM LIST")
@@ -2766,11 +2892,13 @@ class Problem(_pyoomph.Problem):
                     submesh._pin_noncontributing_dofs()
                 assert submesh._codegen is not None 
                 submesh._codegen.on_apply_boundary_conditions(submesh) 
+        if not self.apply_Dirichlet_BCs_by_dof_removing:
+            self._unpin_Dirichlet_dofs_for_matrix_manipulation()
 
 
 
 
-    def set_initial_condition(self, ic_name: str = "", all_unset_dofs_to_zero: bool = False):
+    def set_initial_condition(self, ic_name: str = "", all_unset_dofs_to_zero: bool = False,numadapt:Optional[int]=0):
         """
         Set the initial condition for the problem.
 
@@ -2782,6 +2910,16 @@ class Problem(_pyoomph.Problem):
             self.set_current_dofs([0.0] * self.ndof())
         if not self.is_quiet():
             print("SETTING IC", ic_name)
+        
+        if self.project_initial_conditions:            
+            
+            self._set_solved_residual("_IC_"+ic_name, True, True)
+            self.reapply_boundary_conditions()
+            print("Projecting initial condition",ic_name,numadapt)
+            self.solve(spatial_adapt=numadapt)
+            self._set_solved_residual("", False, True)
+            self.reapply_boundary_conditions()
+            
         if self._runmode != "continue":
             for _, m in self._meshdict.items():
                 m.setup_initial_conditions_with_interfaces(self._resetting_first_step, ic_name)
@@ -2807,7 +2945,7 @@ class Problem(_pyoomph.Problem):
     def actions_before_adapt(self):
         for m in self._interfacemeshes:
             m.clear_before_adapt()
-            #print("CLEARED INTERFACE MESH",m.nelement())
+            #print("CLEARED INTERFACE MESH",m.nelement())        
         if len(self._interfacemeshes):
             if not self.is_quiet():
                 print("REBUILDING GLOBAL MESH")
@@ -2816,11 +2954,23 @@ class Problem(_pyoomph.Problem):
 
 
     def actions_before_distribute(self):
+        for im in self._interfacemeshes:
+            if im._opposite_interface_mesh is not None:
+                opp=im._opposite_interface_mesh
+                for e in opp.elements():
+                    e.get_bulk_element().set_must_be_kept_as_halo(True)
+        
+        # Halo all ODEs
+        for m in self._meshdict.values():            
+            if isinstance(m,ODEStorageMesh):                                
+                m.get_element().set_must_be_kept_as_halo(True)                
+            
         self.actions_before_adapt()
         for _, m in self._meshdict.items():
             if isinstance(m, ODEStorageMesh):
                 continue
             m.ensure_halos_for_periodic_boundaries()
+        
             
     def actions_after_distribute(self):
         self.actions_after_adapt()
@@ -2883,8 +3033,14 @@ class Problem(_pyoomph.Problem):
 
 
     def reapply_boundary_conditions(self):
+        for m in self._meshdict.values():            
+            if not isinstance(m,ODEStorageMesh):
+                m.clear_additional_dof_constraints()
         self.setup_pinning()
         self.before_assigning_equation_numbers(self._dof_selector)
+        for m in self._meshdict.values():            
+            if not isinstance(m,ODEStorageMesh):
+                m.apply_additional_dof_constraints()
         self._dof_selector_used=self._dof_selector
         neq=self.assign_eqn_numbers(True)
         if not self.is_quiet():
@@ -3124,9 +3280,10 @@ class Problem(_pyoomph.Problem):
 
     def actions_after_adapt(self):
         for m in self._interfacemeshes:
+            #print("REBUILDING INTERFACE MESH",m,m.get_name(), m.nelement())
             m.rebuild_after_adapt()
             m.ensure_external_data()
-            #print("REBUILD INTERFACE MESH",m,m.get_name(), m.nelement(),m.element_pt(0))
+            
         if not self.is_quiet():
             print("REBUILDING GLOBAL MESH")
         self.rebuild_global_mesh()
@@ -3145,6 +3302,17 @@ class Problem(_pyoomph.Problem):
             self.output()
         if self._custom_assembler:
             self._custom_assembler.actions_after_adapt()
+    
+    def _reactivate_bifurcation_tracking_after_adaption(self):
+        if self._bifurcation_reactivation_after_adaptation is not None:
+            info=self._bifurcation_reactivation_after_adaptation
+            self.deactivate_bifurcation_tracking()            
+            print("Reactivating bifurcation tracking after adaption with info",info,"eigenvalue",self._last_eigenvalues)
+            self.activate_bifurcation_tracking(info["param"],info["mode"],azimuthal_mode=info["azimuthal_m"],cartesian_wavenumber_k=info["cartesian_k"])
+            self._bifurcation_reactivation_after_adaptation=None
+            #self.reset_arc_length_parameters() # There is not much you can do here
+            
+            
 
 
     def compile_bulk_element_code(self,elementtype:FiniteElementCodeGenerator,bulkmesh:AnyMesh,subname:str) -> _pyoomph.DynamicBulkElementInstance:
@@ -3162,8 +3330,7 @@ class Problem(_pyoomph.Problem):
                 suppress_compilation=True
         if self._suppress_code_writing or get_mpi_rank()>0:
             suppress_writing=True
-        mpi_barrier()
-        
+        mpi_barrier()        
         res=self.generate_and_compile_bulk_element_code(elementtype,trunk,suppress_writing,suppress_compilation,bulkmesh,self.is_quiet(),self.extra_compiler_flags)
         #print("REt")
         mpi_barrier()
@@ -3326,7 +3493,7 @@ class Problem(_pyoomph.Problem):
         # 
         return eigenvectors
 
-    def solve_eigenproblem(self, n:int, shift:Union[float,complex,None]=0, quiet:bool=False, azimuthal_m:Optional[Union[int,List[int]]]=None,normal_mode_k:Optional[Union[ExpressionOrNum,List[ExpressionOrNum]]]=None,normal_mode_L:Optional[Union[ExpressionOrNum,List[ExpressionOrNum]]]=None,report_accuracy:bool=False,sort:bool=True,which:"EigenSolverWhich"="LM",OPpart:Optional[Literal["r","i"]]=None,v0:Optional[Union[NPFloatArray,NPComplexArray]]=None,filter:Optional[Callable[[complex],bool]]=None,target:Optional[complex]=None)->Tuple[NPComplexArray,NPComplexArray]:
+    def solve_eigenproblem(self, n:int, shift:Union[float,complex,None]=0, quiet:bool=False, azimuthal_m:Optional[Union[int,List[int]]]=None,normal_mode_k:Optional[Union[ExpressionOrNum,List[ExpressionOrNum]]]=None,normal_mode_L:Optional[Union[ExpressionOrNum,List[ExpressionOrNum]]]=None,report_accuracy:bool=False,sort:bool=True,which:"EigenSolverWhich"="LM",OPpart:Optional[Literal["r","i"]]=None,v0:Optional[Union[NPFloatArray,NPComplexArray]]=None,filter:Optional[Callable[[complex],bool]]=None,target:Optional[complex]=None,ncv:Optional[int]=None)->Tuple[NPComplexArray,NPComplexArray]:
         """
         Solves the associated generalized eigenproblem for the given number of eigenvalues and eigenvectors.
 
@@ -3344,15 +3511,16 @@ class Problem(_pyoomph.Problem):
             v0 (Optional[Union[NPFloatArray, NPComplexArray]], optional): The initial guess for the eigenvectors. Defaults to None.
             filter (Optional[Callable[[complex], bool]], optional): A function to filter the computed eigenvalues. Only the eigenvalues for which the filter returns True will be kept. Defaults to None.
             target (Optional[complex], optional): The target eigenvalue. Defaults to None.
+            ncv (Optional[int], optional): The number of Krylov (Arnoldi/Lanczos) basis vectors used by the underlying eigensolver. Defaults to None, i.e. the eigensolver's own default. Set this to a larger value than the default if the eigensolver fails to converge or returns inaccurate eigenvalues, e.g. for clustered eigenvalues.
 
         Returns:
             Tuple[NPComplexArray, NPComplexArray]: A tuple containing the computed eigenvalues and eigenvectors.
         """
-        self._solve_eigenproblem_helper(n,shift,quiet,azimuthal_m,normal_mode_k,normal_mode_L,report_accuracy,sort,which,OPpart,v0,filter,target)
+        self._solve_eigenproblem_helper(n,shift,quiet,azimuthal_m,normal_mode_k,normal_mode_L,report_accuracy,sort,which,OPpart,v0,filter,target,ncv)
         self._last_eigenvectors=self.process_eigenvectors(self._last_eigenvectors)
         return self._last_eigenvalues,self._last_eigenvectors
-        
-    def _solve_eigenproblem_helper(self, n:int, shift:Union[float,complex,None]=0, quiet:bool=False, azimuthal_m:Optional[Union[int,List[int]]]=None,normal_mode_k:Optional[Union[ExpressionOrNum,List[ExpressionOrNum]]]=None,normal_mode_L:Optional[Union[ExpressionOrNum,List[ExpressionOrNum]]]=None,report_accuracy:bool=False,sort:bool=True,which:"EigenSolverWhich"="LM",OPpart:Optional[Literal["r","i"]]=None,v0:Optional[Union[NPFloatArray,NPComplexArray]]=None,filter:Optional[Callable[[complex],bool]]=None,target:Optional[complex]=None)->Tuple[NPComplexArray,NPComplexArray]:
+
+    def _solve_eigenproblem_helper(self, n:int, shift:Union[float,complex,None]=0, quiet:bool=False, azimuthal_m:Optional[Union[int,List[int]]]=None,normal_mode_k:Optional[Union[ExpressionOrNum,List[ExpressionOrNum]]]=None,normal_mode_L:Optional[Union[ExpressionOrNum,List[ExpressionOrNum]]]=None,report_accuracy:bool=False,sort:bool=True,which:"EigenSolverWhich"="LM",OPpart:Optional[Literal["r","i"]]=None,v0:Optional[Union[NPFloatArray,NPComplexArray]]=None,filter:Optional[Callable[[complex],bool]]=None,target:Optional[complex]=None,ncv:Optional[int]=None)->Tuple[NPComplexArray,NPComplexArray]:
         """
         Real eigensolving: Called from solve_eigenproblem()
         """
@@ -3378,13 +3546,13 @@ class Problem(_pyoomph.Problem):
                 raise ValueError("Cannot specify both azimuthal_m and normal_mode_k")
             if normal_mode_L is not None:
                 raise ValueError("Cannot specify both azimuthal_m and normal_mode_L")
-            return self._solve_normal_mode_eigenproblem(n, azimuthal_m=azimuthal_m, shift=shift, quiet=quiet,filter=filter,report_accuracy=report_accuracy,v0=v0,target=target,sort=sort)
+            return self._solve_normal_mode_eigenproblem(n, azimuthal_m=azimuthal_m, shift=shift, quiet=quiet,filter=filter,report_accuracy=report_accuracy,v0=v0,target=target,sort=sort,ncv=ncv)
         elif normal_mode_k is not None:
             if isinstance(normal_mode_k,(list,tuple)):
                 normal_mode_k=[float(k*self.get_scaling("spatial")) for k in normal_mode_k]
             else:
                 normal_mode_k=float(normal_mode_k*self.get_scaling("spatial"))
-            return self._solve_normal_mode_eigenproblem(n, cartesian_k=normal_mode_k, shift=shift, quiet=quiet,filter=filter,report_accuracy=report_accuracy,v0=v0,target=target,sort=sort)
+            return self._solve_normal_mode_eigenproblem(n, cartesian_k=normal_mode_k, shift=shift, quiet=quiet,filter=filter,report_accuracy=report_accuracy,v0=v0,target=target,sort=sort,ncv=ncv)
         if self._dof_selector_used is not self._dof_selector:
             self.reapply_boundary_conditions()
             self.reapply_boundary_conditions() # Must be done twice to correctly setup the equation remapping
@@ -3399,7 +3567,10 @@ class Problem(_pyoomph.Problem):
         self.actions_before_eigen_solve()
         self.invalidate_cached_mesh_data(only_eigens=True)
         self.setup_forced_zero_dof_list_for_eigenproblems()
-        self._last_eigenvalues,self._last_eigenvectors,J,M=self.get_eigen_solver().solve(n,shift=shift,sort=sort,which=which,OPpart=OPpart,v0=v0,target=target)
+        eigen_solver=self.get_eigen_solver()
+        if ncv is not None:
+            eigen_solver.ncv=ncv
+        self._last_eigenvalues,self._last_eigenvectors,J,M=eigen_solver.solve(n,shift=shift,sort=sort,which=which,OPpart=OPpart,v0=v0,target=target)
         self._last_eigenvalues, self._last_eigenvectors=self._last_eigenvalues.copy(),self._last_eigenvectors.copy()
         if filter is not None:
             filtered_indices=numpy.array([filter(ev) for ev in self._last_eigenvalues]).nonzero()
@@ -3448,9 +3619,10 @@ class Problem(_pyoomph.Problem):
             raise ValueError("Eigenindex must be non-negative")
         elif eigenindex>=len(self.get_last_eigenvalues()):
             raise ValueError("Eigenindex must be smaller than the number of calculated eigenvalues")
-        self._adapt_eigenindex=eigenindex
         
+        self._adapt_eigenindex=eigenindex
         for i in range(numadapt):
+            
             with self.custom_adapt(True):
                 nref,nunref=self.adapt()
                 if nref==0 and nunref==0:                    
@@ -3551,7 +3723,9 @@ class Problem(_pyoomph.Problem):
         Returns:
             float: The new step size for the continuation.
         """
-        self._activate_solver_callback()
+        if spatial_adapt>0 and self.get_bifurcation_tracking_mode()!="":
+            raise RuntimeError("Cannot perform spatial adaptation during arclength continuation when bifurcation tracking is active. You can do the arclength step with spatial_adapt=0 followed by a solve(spatial_adapt="+str(spatial_adapt)+") to achieve a similar effect.")
+        self._activate_solver_callback()        
         self.invalidate_cached_mesh_data()
         if not self.is_initialised():
             self.initialise()
@@ -3573,7 +3747,7 @@ class Problem(_pyoomph.Problem):
         
         if self.warn_about_unused_global_parameters and not self.is_global_parameter_used(parameter):
             if self.warn_about_unused_global_parameters=="error":
-                raise RuntimeError("Arclength continuation in the global parameter '" + parameter + "', which is used in the problem. This may lead to unexpected behaviour. Set <Problem>.warn_about_unused_global_parameters to False to suppress this error.")
+                raise RuntimeError("Arclength continuation in the global parameter '" + parameter + "', which is used in the problem. This may lead to unexpected behaviour. Have you defined it with define_global_parameter? Or have you overridden it by e.g. '" + parameter + "=<value>' instead of '" + parameter + ".value=<value>'? Have you defined it via define_global_parameter? Or have you overridden it by e.g. '" + parameter + "=<value>' instead of '" + parameter + ".value=<value>'?  Set <Problem>.warn_about_unused_global_parameters to False to suppress this error.")
             else:
                 print("WARNING: Arclength continuation in the global parameter '" + parameter + "', which is used in the problem. This may lead to unexpected behaviour. Set <Problem>.warn_about_unused_global_parameters to False to suppress this warning.")
                 
@@ -3710,6 +3884,9 @@ class Problem(_pyoomph.Problem):
 
 
     def invalidate_eigendata(self):
+        if self._bifurcation_reactivation_after_adaptation is not None:
+            self._reactivate_bifurcation_tracking_after_adaption()
+            self._bifurcation_reactivation_after_adaptation=None
         self._last_eigenvectors:NPComplexArray=numpy.array([],dtype=numpy.complex128) #type:ignore
         self._last_eigenvalues:NPComplexArray=numpy.array([],dtype=numpy.complex128) #type:ignore
         self._last_eigenvalues_m=None
@@ -3858,11 +4035,12 @@ class Problem(_pyoomph.Problem):
             param0=param1
 
     def set_max_refinement_level(self,level:int,do_adapt:bool=True):
+        """After initialisation, the property max_refinement_level is not considered anymore. You can set the maximum refinement level of the meshes with this function"""
         if level<0:
             raise RuntimeError("Must be >=0")
         
         def set_level_for_mesh(mesh:AnySpatialMesh,level):            
-            assert isinstance(mesh,MeshFromTemplate2d)            
+            assert not isinstance(mesh,InterfaceMesh)            
             mesh._templatemesh.get_template()._max_refinement_level=level            
             maxref=0
             for e in mesh.elements():
@@ -4085,6 +4263,7 @@ class Problem(_pyoomph.Problem):
             azimuthal_mode (Optional[int]): The azimuthal mode for azimuthal bifurcation tracking. Defaults to None.
         """        
         
+        self.reset_arc_length_parameters()
 
         if parameter is None:
             # We track the current eigenbranch, i.e. Re(lambda) will be found and is not necessarily 0
@@ -4199,7 +4378,7 @@ class Problem(_pyoomph.Problem):
                 raise RuntimeError("Cannot use azimuthal_mode or cartesian_wavenumber_k for fold solving")
             if eigenvector is None:
                 eigenvector = next(iter(self.get_last_eigenvectors()), None)
-            if eigenvector is None or len(eigenvector)==0:
+            if eigenvector is None or len(eigenvector)==0:                
                 self._start_bifurcation_tracking(parameter,bifurcation_type,blocksolve,[],[],0.0,{})
             else:
                 self._start_bifurcation_tracking(parameter,bifurcation_type,blocksolve,numpy.real(eigenvector),[],0.0,{}) #type:ignore
@@ -4267,7 +4446,9 @@ class Problem(_pyoomph.Problem):
                     omega = 0
 
             # First, we get all equations which must be zero for the base state and on the eigenvector
+          
             must_reapply_bcs=self._equation_system._before_eigen_solve(self.get_eigen_solver(), azimuthal_mode)
+          
             if must_reapply_bcs:
                 self.reapply_boundary_conditions() # Equation numbering might have been changed. Update it here!
                 self.reapply_boundary_conditions()
@@ -4431,7 +4612,7 @@ class Problem(_pyoomph.Problem):
             PeriodicOrbit: The periodic orbit object
         """
         
-        from pyoomph.generic.bifurcation_tools import get_hopf_lyapunov_coefficient    
+        from .bifurcation_tools import get_hopf_lyapunov_coefficient    
         
         if self._bifurcation_tracking_parameter_name is None or self.get_bifurcation_tracking_mode()!="hopf" or len(self.get_last_eigenvalues())!=1:
             raise ValueError("Hopf bifurcation tracking not activated or solved. Please call activate_bifurcation_tracking first, then solve. Then call this routine.")        
@@ -4538,7 +4719,7 @@ class Problem(_pyoomph.Problem):
         TODO; Add documentation
         """
         # Main ideas from here: https://arxiv.org/html/2407.18230v1#S2.E6
-        import _pyoomph
+        from .. import _pyoomph_core as _pyoomph
         import scipy
         if not isinstance(self.assembly_handler_pt(),_pyoomph.PeriodicOrbitHandler):
             raise RuntimeError("Periodic orbit handler not active. Call activate_periodic_orbit_handler first, then solve the orbit, then call this function")
@@ -4713,7 +4894,7 @@ class Problem(_pyoomph.Problem):
         return to_zero_dofs
 
 
-    def _solve_normal_mode_eigenproblem(self, n:int, azimuthal_m:Optional[Union[List[int],Tuple[int],int]]=None, cartesian_k:Optional[Union[List[float],Tuple[float],float]]=None, shift:Optional[Union[float,complex]]=0,quiet:bool=False,filter:Optional[Callable[[complex],bool]]=None,report_accuracy:bool=False,target:Optional[complex]=None,v0:Optional[Union[NPFloatArray,NPComplexArray]]=None,sort:bool=True)->Tuple[NPComplexArray,NPComplexArray]:
+    def _solve_normal_mode_eigenproblem(self, n:int, azimuthal_m:Optional[Union[List[int],Tuple[int],int]]=None, cartesian_k:Optional[Union[List[float],Tuple[float],float]]=None, shift:Optional[Union[float,complex]]=0,quiet:bool=False,filter:Optional[Callable[[complex],bool]]=None,report_accuracy:bool=False,target:Optional[complex]=None,v0:Optional[Union[NPFloatArray,NPComplexArray]]=None,sort:bool=True,ncv:Optional[int]=None)->Tuple[NPComplexArray,NPComplexArray]:
         
         if azimuthal_m and (self._azimuthal_mode_param_m is None):
             raise RuntimeError("Must use setup_for_stability_analysis(azimuthal_stability=True) before initialialising the problem")
@@ -4739,7 +4920,7 @@ class Problem(_pyoomph.Problem):
             for ms in vlist:
                 param.value = ms
                 self.actions_before_eigen_solve()
-                self._solve_eigenproblem_helper(n, shift,quiet=True,filter=filter,report_accuracy=report_accuracy,target=target,v0=v0,sort=sort)
+                self._solve_eigenproblem_helper(n, shift,quiet=True,filter=filter,report_accuracy=report_accuracy,target=target,v0=v0,sort=sort,ncv=ncv)
                 if len(alleigenvals)==0:
                     alleigenvals=self.get_last_eigenvalues().copy()
                 else:
@@ -4775,7 +4956,7 @@ class Problem(_pyoomph.Problem):
         else:
             param.value = vlist
             self.actions_before_eigen_solve()
-            self._solve_eigenproblem_helper(n, shift,filter=filter,report_accuracy=report_accuracy,target=target,v0=v0,sort=sort)
+            self._solve_eigenproblem_helper(n, shift,filter=filter,report_accuracy=report_accuracy,target=target,v0=v0,sort=sort,ncv=ncv)
             param.value = 0
             if azimuthal_m is not None:
                 self._last_eigenvalues_m=numpy.array([vlist]*len(self.get_last_eigenvalues()),dtype=numpy.int32) #type:ignore
@@ -4838,22 +5019,22 @@ class Problem(_pyoomph.Problem):
         Solves the problem stationary, unless a timestep is given. In that case, the time step is taken.
 
         Parameters:
-        - spatial_adapt (int): The level of spatial adaptation. Default is 0.
-        - timestep (Union[ExpressionNumOrNone, List[ExpressionNumOrNone]]): The time step(s) for the transient solve. Can be a single value or a list of values. Default is None, meaning stationary solve without advancing in time.
-        - shift_values (bool): Whether to shift the values during the solve, i.e. shifting the history value buffer. Default is True.
-        - temporal_error (Optional[float]): The temporal error for adaptive time stepping. Default is None.
-        - max_newton_iterations (Optional[int]): Override the maximum number of Newton iterations. Default is None.
-        - newton_relaxation_factor (Optional[float]): Override the relaxation factor for the Newton solver. Default is None.
-        - suppress_resolve_after_adapt (bool): Whether to suppress resolving after adaptation. Default is False.
-        - newton_solver_tolerance (Optional[float]): Override the tolerance for the Newton solver. Default is None.
-        - do_not_set_IC (bool): Whether to not set the initial condition in the first call. Default is False.
-        - globally_convergent_newton (bool): Whether to use globally convergent Newton solver. Default is False.
+            spatial_adapt (int): The level of spatial adaptation. Default is 0.
+            timestep (Union[ExpressionNumOrNone, List[ExpressionNumOrNone]]): The time step(s) for the transient solve. Can be a single value or a list of values. Default is None, meaning stationary solve without advancing in time.
+            shift_values (bool): Whether to shift the values during the solve, i.e. shifting the history value buffer. Default is True.
+            temporal_error (Optional[float]): The temporal error for adaptive time stepping. Default is None.
+            max_newton_iterations (Optional[int]): Override the maximum number of Newton iterations. Default is None.
+            newton_relaxation_factor (Optional[float]): Override the relaxation factor for the Newton solver. Default is None.
+            suppress_resolve_after_adapt (bool): Whether to suppress resolving after adaptation. Default is False.
+            newton_solver_tolerance (Optional[float]): Override the tolerance for the Newton solver. Default is None.
+            do_not_set_IC (bool): Whether to not set the initial condition in the first call. Default is False.
+            globally_convergent_newton (bool): Whether to use globally convergent Newton solver. Default is False.
 
         Returns:
-        - ExpressionOrNum: The current time after solving.
-        """  
+            ExpressionOrNum: The current time after solving.
+        """
                 
-
+        self._bifurcation_reactivation_after_adaptation=None
         if isinstance(timestep,(list,tuple)):
             lastres=0
             for t in timestep: #type:ignore
@@ -5031,6 +5212,7 @@ class Problem(_pyoomph.Problem):
             spatial_adapt=self.max_refinement_level
         elif isinstance(spatial_adapt,bool) and spatial_adapt==True:
             spatial_adapt=self.max_refinement_level
+                    
 
         if temporal_error is not None and temporal_error <= 0:
             temporal_error = None
@@ -5086,7 +5268,7 @@ class Problem(_pyoomph.Problem):
                     self.initialise_dt(_ts)
                     if not do_not_set_IC:
                         self.set_initial_condition()
-                else:
+                else:                    
                     raise RuntimeError("TODO: Init with a suitable time step. Pass e.g. startstep as keyword arg")
                 if out_initially is None:
                         out_initially = outstep != False
@@ -5112,9 +5294,10 @@ class Problem(_pyoomph.Problem):
                 progress=(ct-self._nondim_time_after_last_run_statement)/(et-self._nondim_time_after_last_run_statement)
                 numouts=int(numouts*(1-progress))
             timestep = self.timestepper.time_pt().dt(0) * self.get_scaling("temporal")
+            self._first_step=False # TODO This would be better stored in the state file so that a solve from state_000000 will still have it true
 
         #TODO Further checking for the end time
-
+        single_step_desired=False
         if timestep is None:
             if not self.is_initialised():
                 self.initialise()
@@ -5124,6 +5307,7 @@ class Problem(_pyoomph.Problem):
             _tdiff,_tunit=assert_dimensional_value(starttime+timestep-endtime)
             if _tdiff>0:
                 timestep=endtime-starttime
+                single_step_desired=True
         if startstep is not None:
             timestep=startstep
 
@@ -5160,6 +5344,7 @@ class Problem(_pyoomph.Problem):
             currentdt = timestep
 
         nextdt_was_clamped_for_output:ExpressionNumOrNone=None # When clamping a time step to hit the next output dt, enlarge it afterwards
+        first_step=True
         while self.get_current_time(as_float=True, dimensional=False) < float(endtime / TS):
             if self._abort_current_run:
                 self._abort_current_run=False
@@ -5177,6 +5362,15 @@ class Problem(_pyoomph.Problem):
 
             self._in_transient_newton_solve=True
             nextdt = self.solve(timestep=currentdt, temporal_error=temporal_error,spatial_adapt=spatial_adapt,newton_solver_tolerance=newton_solver_tolerance,do_not_set_IC=do_not_set_IC,globally_convergent_newton=globally_convergent_newton,max_newton_iterations=max_newton_iterations,suppress_resolve_after_adapt=suppress_resolve_after_adapt)
+            if first_step and float(nextdt/currentdt)>=1.0-1e-14:
+                if single_step_desired:
+                    test=self.get_current_time(as_float=True, dimensional=False) - float(endtime / TS)
+                    if test>-1e-14:
+                        self.set_current_time(float(endtime/TS),dimensional=False) # Will stop the run loop for sure
+            else:
+                single_step_desired=False
+                
+            first_step=False
             self._in_transient_newton_solve=False
             if max_newton_to_increase_time_step is not None and float(nextdt/TS)>float(currentdt/TS*1.00001):
                 last_res=self.get_last_residual_convergence()
@@ -5244,7 +5438,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         if self.get_last_eigenvectors() is None or len(self.get_last_eigenvectors())<=eigenindex:            
             raise ValueError("No eigenvector at index "+str(eigenindex)+" available to perturb. Please solve the eigenproblem first.")
 
-        from pyoomph.generic.bifurcation_tools import DeflationAssemblyHandler        
+        from .bifurcation_tools import DeflationAssemblyHandler        
         old=self.get_custom_assembler()
         if not isinstance(old, DeflationAssemblyHandler):
             defl=DeflationAssemblyHandler(alpha=deflation_alpha, p=deflation_power)
@@ -5277,7 +5471,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             
         """        
             
-        from pyoomph.generic.bifurcation_tools import DeflationAssemblyHandler
+        from .bifurcation_tools import DeflationAssemblyHandler
         deflation=DeflationAssemblyHandler(alpha=deflation_alpha,p=deflation_p)
         if not self.is_initialised():
             self.initialise()
@@ -5361,7 +5555,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         Yields:
             A tuple of branch index (from 0 to ...), the current parameter value and the current degrees of freedom (dofs) for the solution.
         """ 
-        from pyoomph.generic.bifurcation_tools import DeflationAssemblyHandler
+        from .bifurcation_tools import DeflationAssemblyHandler
         param=None
         rang=None
         for k,v in param_range.items():
@@ -5512,6 +5706,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                     # Clean up
                     # for iname,imesh in mesh._interfacemeshes.items():
                     #    imesh.clear_before_adapt()
+                    print("Creating new mesh for ",name,r,r.get_new_template())
                     mesh = MeshFromTemplate(self, r.get_new_template(), name, r._old_meshes[name]._eqtree,previous_mesh=r._old_meshes[name]) 
                     new_meshes[name] = mesh
                     old_meshes[name] = r._old_meshes[name] 
@@ -5526,7 +5721,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             oldmesh._codegen._code._exchange_mesh(newmesh) 
             newmesh._construct_after_remesh() 
 
-            for tree_depth in range(2):
+            for tree_depth in range(3):
                 newmesh._generate_interface_elements(tree_depth)
 
             newmesh._tracers=oldmesh._tracers 
@@ -5662,7 +5857,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                 oldmesh._codegen._code._exchange_mesh(newmesh) 
 #                print("REPLACING MESH ",name,"from",oldmesh,"to",newmesh)
                 newmesh._construct_after_remesh() 
-                for tree_depth in range(2):
+                for tree_depth in range(3):
                     newmesh._generate_interface_elements(tree_depth) 
             # Rebuild
             if len(new_meshes)>=0:
@@ -5862,6 +6057,17 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         
         
     def select_dofs(self) -> "_DofSelector":
+        """
+        Returns a :py:class:`~pyoomph.utils.dof_selector._DofSelector` object that allows to select degrees of freedom (DoFs) for further operations. For example, you can select all DoFs on a certain domain or with a certain equation type. The selected DoFs can then be used to e.g. get their values, set their values, or apply boundary conditions.
+        It should be wrapped in a `with` statement to ensure proper cleanup after use. For example:
+
+        .. code-block:: python
+
+            with problem.select_dofs() as dofs:
+                dofs.select("domain/velocity_x", "domain/velocity_y", "domain/pressure")
+                dofs.unselect("domain/temperature")
+                problem.solve()  # Only solve for the velocity/pressure fields, not for the temperature field
+        """
         return _DofSelector(self)
 
 
@@ -5917,10 +6123,86 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         if relative_to_output_dir:
             filename=self.get_output_directory(filename)
         return NumericalTextOutputFile(filename,header=header)
+
+
+    # Called from load_balance
+    def _build_mesh(self):
+        print("Building mesh in Python","On enter, we have",self.nsub_mesh(),"submeshes, and the mesh dict keys are: "+str(self._meshdict.keys()))
+        for meshname,eqtree in self._equation_system.get_children().items(): 
+            #Find the mesh that generates the mesh we want to have
+            if eqtree._equations is None: 
+                raise RuntimeError("Empty bulk equations")
+            mesh=None
+            for m in self._meshtemplate_list:
+                if m.has_domain(meshname):
+                    mesh=MeshFromTemplate(self,m,meshname,eqtree,previous_mesh=self._meshdict.get(meshname,None))                    
+                    
+                    self._meshdict[meshname]=mesh
+                    assert eqtree._equations is not None
+                    eqtree._equations._mesh=mesh  #type:ignore
+                    eqtree.get_code_gen()._mesh=mesh
+                    mesh._finalise_creation()
+                    print("Mesh '"+meshname+"' generated from template '"+str(m)+"'","NELEMENTS: ",mesh.nelement())
+            if eqtree._equations._is_ode(): 
+                if mesh is not None:
+                    if not isinstance(mesh,ODEStorageMesh):
+                        raise RuntimeError("Cannot add an ODE to a spatial mesh yet")
+                mesh=ODEStorageMesh(self,eqtree,meshname)
+                eqtree.get_code_gen()._mesh=mesh 
+                eqtree.get_code_gen().set_latex_printer(self.latex_printer)
+                self._meshdict[meshname]=mesh
+                raise RuntimeError("ODE meshes are not fully implemented yet. Please check whether this works")
+            else:
+                if mesh is None:
+                    #print(str(self._equation_system))
+                    avdoms=set()
+                    for m in self._meshtemplate_list:
+                        avdoms.update(set(m._domains.keys()))
+                    raise RuntimeError("No mesh template with a domain named '"+meshname+'" was added, but there are equations defined on this domain. Available domains are '+str(avdoms))
+        print("Finished building mesh in Python")
+        print("Mesh dict keys: "+str(self._meshdict.keys()))
+        self._interfacemeshes=[]
+        print(self._interfacemeshes)
+        self.rebuild_global_mesh_from_list(rebuild=False)
+        #self.rebuild_global_mesh()
+        print("NSUBMESH",self.nsub_mesh())
+        import gc
+        gc.collect()
+        gc.collect()
+        gc.collect()
+        gc.collect()
+        self.rebuild_global_mesh()
         
+        self.invalidate_cached_mesh_data()
+        #eqs=self._equation_system.get_by_path("domain")
+        
+        #out=cast(CombinedEquations,eqs)
+        #out.
+        #print(eqs)
+        #exit()
+        
+    def load_balance(self):
+        if not self.is_distributed():
+            return
+        
+        super().load_balance()
+        
+        self.rebuild_global_mesh_from_list(rebuild=True)
+        self.actions_after_remeshing()
+        self.reapply_boundary_conditions()
+        print("After load balance, we have",self.nsub_mesh(),"submeshes, and the mesh dict keys are: "+str(self._meshdict.keys()))
+        print("ON PROC",get_mpi_rank(),self.ndof(),self.nsub_mesh(),self.mesh_pt(0).nelement())
+        
+        
+        
+                
 
 ############## DOF SELECTOR ###################
 class _DofSelector:
+    """
+    Should be only created via :py:meth:`~pyoomph.generic.problem.Problem.select_dofs`.
+    """
+    
     def __init__(self,problem:"Problem"):
         self._problem=problem
         self._all_unselected:Optional[bool]=None
@@ -5965,12 +6247,18 @@ class _DofSelector:
                 self._traverse(n[k],select,onlydof=onlydof)
 
     def unselect_all(self):
+        """
+        Unselects all degree of freedom from solving within the `with` block
+        """
         self._problem._dof_selector_used= "INVALID" 
         self._problem.invalidate_eigendata()        
         self._all_unselected=True
         self._traverse(self._tree,False)
 
     def select_all(self):
+        """
+        Selects all degree of freedom for solving within the `with` block
+        """
         self._problem._dof_selector_used= "INVALID" 
         self._problem.invalidate_eigendata()
         self._all_unselected=False
@@ -5994,6 +6282,10 @@ class _DofSelector:
 
     # Selects meshes (e.g. "droplet") or degrees (e.g. "droplet/velocity_x"), both including interface meshes
     def select(self,*args:str):
+        """
+        Selects the dofs passed as arguments, e.g. ``select("droplet/velocity_x","droplet/velocity_y")`` or similar.
+        If nothing has been selected/unselected before, everything else will be unselected.
+        """
         if self._all_unselected is None:
             self.unselect_all()
         self._problem._dof_selector_used = "INVALID" 
@@ -6002,6 +6294,10 @@ class _DofSelector:
             self._select_or_unselect(k,True)
 
     def unselect(self,*args:str):
+        """
+        Unselects the dofs passed as arguments, e.g. ``unselect("droplet/velocity_x","droplet/velocity_y")`` or similar.
+        If nothing has been selected/unselected before, everything else will be selected.
+        """
         if self._all_unselected is None:
             self.select_all()
         self._problem._dof_selector_used = "INVALID" 

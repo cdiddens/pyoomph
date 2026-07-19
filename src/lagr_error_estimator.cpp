@@ -1,6 +1,6 @@
 /*================================================================================
 pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -15,7 +15,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 
-The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+The main author may be contacted at c.diddens@utwente.nl
 
 ================================================================================*/
 
@@ -23,6 +23,20 @@ The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
 /************************
 This file strongly based on the file error_estimator.h from the oomph-lib library, see (thirdparty/oomph-lib/include/error_estimator.h)
 *************************/
+
+// Implements LagrZ2ErrorEstimator: a Zienkiewicz-Zhu (Z2) "recovery"-based a posteriori
+// error estimator. High-level algorithm (see get_element_errors() below for the full
+// driver): group elements into per-vertex-node "patches" (setup_patches()); for each patch,
+// least-squares-fit a smooth polynomial "recovered" flux field of order Recovery_order to
+// the (typically discontinuous, superconvergent-at-Gauss-points) raw finite-element flux
+// values sampled at the patch's integration points (get_recovered_flux_in_patch(),
+// shape_rec(), nrecovery_terms()); then, per element, compare the raw FE flux against the
+// recovered flux, integrated over the element, to obtain an elemental error estimate. The
+// only substantial deviation from the underlying oomph-lib implementation is the
+// `use_Lagrangian` flag, which lets the estimator operate on the Lagrangian (reference)
+// configuration instead of the current Eulerian one (relevant for problems with moving/
+// deforming meshes, where using the current mesh would make the error estimate itself
+// depend on the deformation).
 
 
 #ifdef OOMPH_HAS_MPI
@@ -729,14 +743,19 @@ namespace pyoomph
         double w = integ_pt->weight(ipt);
 
         // Jaocbian of mapping
+        // pyoomph extension vs. the original oomph-lib estimator: if use_Lagrangian is set,
+        // use the Jacobian/coordinate of the Lagrangian (reference) configuration instead of
+        // the current Eulerian one, so the error estimate doesn't depend on mesh deformation.
         double J = (use_Lagrangian ? dynamic_cast<BulkElementBase *>(el_pt)->J_Lagrangian(s) : el_pt->J_eulerian(s));
 
-        // Interpolate the global (Eulerian) coordinate
+        // Interpolate the global (Eulerian) coordinate, or, if this estimator
+        // is used in Lagrangian mode, the Lagrangian coordinate instead
         //     Vector<double> x((use_Lagrangian ?  el_pt->dim(): el_pt->nodal_dimension()));
         Vector<double> x(el_pt->nodal_dimension());
         if (use_Lagrangian)
         {
           dynamic_cast<SolidFiniteElement *>(el_pt)->interpolated_xi(s, x);
+          // TODO: Leftover debug output -- dumps the interpolated coordinate at every integration point
           std::cout << "IPT " << ipt << "  x ";
           for (unsigned i = 0; i < el_pt->nodal_dimension(); i++)
             std::cout << x[i] << " , ";
@@ -1894,6 +1913,7 @@ namespace pyoomph
           Vector<double> fe_flux(num_flux_terms);
           el_pt->get_Z2_flux(s, fe_flux);
 
+          // Write coordinate, recovered flux and elemental error to flux_rec*.dat
           for (unsigned i = 0; i < dim; i++)
           {
             some_file << x[i] << " ";
@@ -1905,6 +1925,7 @@ namespace pyoomph
           some_file << elemental_error[e] << " "
                     << std::endl;
 
+          // Write coordinate, raw FE flux and elemental error to flux_fe*.dat
           for (unsigned i = 0; i < dim; i++)
           {
             feflux_file << x[i] << " ";

@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -95,9 +96,7 @@ class PoissonEquation(Equations):
             order=get_order_of_space(self.space)
             stab=1 if order==0 else self.DG_alpha*(order+1)*order
             return -weak(self.coefficient*(u-value)*n,grad(u_test)) -weak(self.coefficient*grad(u),u_test*n)+ weak(self.coefficient*stab/h*(u-value),u_test)
-
-        
-        
+        return None
 
 
 class PoissonFlux(AutomaticNeumannCondition):
@@ -112,14 +111,14 @@ class PoissonFarFieldMonopoleCondition(InterfaceEquations):
     Represents a far-field condition for the Poisson equation in the form:
 
     .. math::
-        u + R \dfrac{\partial u}{\partial r} = u_{\infty}
+        u + R \\dfrac{\\partial u}{\\partial r} = u_{\\infty}
 
     where u is the dependent variable, far_value is the value at infinity, and R is the distance from the origin and r is the radial coordinate.    
     Hence, works only correctly in radialsymmetry, axisymmetric or 3D Cartesian. Also, it is only valid if the source vanishes sufficiently fast towards the far field.
     For 2D, we use:
 
     .. math::
-        u + R \dfrac{\partial u}{\partial r} / \log(R / L) = u_{\infty}
+        u + R \\dfrac{\\partial u}{\\partial r} / \\log(R / L) = u_{\\infty}
             
 
     Due to the logarithmic solution behavior in 2D, the farfield length L must be provided here.

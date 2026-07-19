@@ -4,6 +4,8 @@ MODIFICATIONS ARE INDICATED BY A COMMENT STARTING WITH //FOR PYOOMPH
 (Changed on 15th April 2024):    
 Removed elastic_problems.h to get rid of frontal_solver, HSL_MA42, etc
 Also removed SolidICProblem SolidMesh::Solid_IC_problem
+(Changed on 21th May 2026):
+Since meshes do not know whether they are TreeBased or not, we have to check whether tree_pt() is not null before calling flush_object() 
 *******************************************************************************/
 
 // LIC// ====================================================================
@@ -33,6 +35,8 @@ Also removed SolidICProblem SolidMesh::Solid_IC_problem
 // LIC//====================================================================
 // Non-inline member functions for general mesh classes
 
+
+
 #ifdef OOMPH_HAS_MPI
 #include "mpi.h"
 #endif
@@ -49,7 +53,6 @@ Also removed SolidICProblem SolidMesh::Solid_IC_problem
 //FOR PYOOMPH: Remove elastic_problems dependency, it again depends on e.g. HSL MA42
 //#include "elastic_problems.h"
 #include "refineable_mesh.h"
-#include "triangle_mesh.h"
 #include "shape.h"
 
 namespace oomph
@@ -683,7 +686,8 @@ namespace oomph
   //========================================================
   /// Assign (global) equation numbers to the nodes
   //========================================================
-  unsigned long Mesh::assign_global_eqn_numbers(Vector<double*>& Dof_pt)
+  // FOR PYOOMPH: Including the Block_dof_pt_start vector to store the offsets of each node or element's internal dof.
+  unsigned long Mesh::assign_global_eqn_numbers(Vector<double*>& Dof_pt, Vector<unsigned long>& Block_dof_pt_start)
   {
     // Find out the current number of equations
     unsigned long equation_number = Dof_pt.size();
@@ -693,14 +697,26 @@ namespace oomph
 
     for (unsigned long i = 0; i < nnod; i++)
     {
+      unsigned long old_equation_number = equation_number; // FOR PYOOMPH
       Node_pt[i]->assign_eqn_numbers(equation_number, Dof_pt);
+      if (equation_number!=old_equation_number) // FOR PYOOMPH
+      {
+        // If the node has added dofs, add the offset to the Block_dof_pt_start vector
+        Block_dof_pt_start.push_back(equation_number); // FOR PYOOMPH
+      }
     }
 
     // Loop over the elements and number their internals
     unsigned long nel = Element_pt.size();
     for (unsigned long i = 0; i < nel; i++)
     {
+      unsigned long old_equation_number = equation_number; // FOR PYOOMPH
       Element_pt[i]->assign_internal_eqn_numbers(equation_number, Dof_pt);
+      if (equation_number!=old_equation_number) // FOR PYOOMPH
+      {
+        // If the element has added dofs, add the offset to the Block_dof_pt_start vector
+        Block_dof_pt_start.push_back(equation_number); // FOR PYOOMPH
+      }
     }
 
     // Return the total number of equations
@@ -5142,52 +5158,9 @@ namespace oomph
     // up
     Vector<FiniteElement*> backed_up_f_el_pt(nelem);
 
-    // Only do this if the mesh is a TriangleMeshBase
-    TriangleMeshBase* triangle_mesh_pt = dynamic_cast<TriangleMeshBase*>(this);
+    // TriangleMeshBase support was removed from this build of pyoomph, so
+    // this mesh is never treated as an unstructured triangle/tet mesh here.
     bool is_a_triangle_mesh_base_mesh = false;
-    if (triangle_mesh_pt != 0)
-    {
-      // Set the flag to indicate we are working with a TriangleMeshBase
-      // mesh
-      is_a_triangle_mesh_base_mesh = true;
-
-      // Are there regions?
-      const unsigned n_regions = triangle_mesh_pt->nregion();
-
-      // Loop over the boundaries
-      for (unsigned ib = 0; ib < tmp_nboundary; ib++)
-      {
-        // Get the number of boundary elements
-        ntmp_boundary_elements[ib] = this->nboundary_element(ib);
-
-        // Resize the container
-        ntmp_boundary_elements_in_region[ib].resize(n_regions);
-
-        // Loop over the regions
-        for (unsigned rr = 0; rr < n_regions; rr++)
-        {
-          // Get the region id
-          const unsigned region_id =
-            static_cast<unsigned>(triangle_mesh_pt->region_attribute(rr));
-
-          // Store the number of element in the region (notice we are
-          // using the region index not the region id to refer to the
-          // region)
-          ntmp_boundary_elements_in_region[ib][rr] =
-            triangle_mesh_pt->nboundary_element_in_region(ib, region_id);
-
-        } // for (rr < n_regions)
-
-      } // for (ib < tmp_nboundary)
-
-      for (unsigned e = 0; e < nelem; e++)
-      {
-        // Get the finite element version of the elements and back them
-        // up
-        backed_up_f_el_pt[e] = this->finite_element_pt(e);
-      }
-
-    } // if (triangle_mesh_pt!=0)
 
     // Flush the mesh storage
     this->flush_element_storage();
@@ -5222,6 +5195,7 @@ namespace oomph
       // Get element and its domain
       GeneralisedElement* el_pt = backed_up_el_pt[e];
       unsigned el_domain = element_domain[e];
+      //std::cout << "Element " << e << " is not on current processor but may be a halo element:" << e << "  " << el_pt->ndof() << "  " << el_pt->must_be_kept_as_halo() << "  " << el_pt<< "  " << overrule_keep_as_halo_element_status << std::endl;
 
       // If element is located on current processor add it back to the mesh
       if (el_domain == unsigned(my_rank))
@@ -5233,6 +5207,7 @@ namespace oomph
       // Otherwise we may still need it if it's a halo element:
       else
       {
+        
         // If this current mesh has been told to keep all elements as halos,
         // OR the element itself knows that it must be kept then
         // keep it
@@ -5351,7 +5326,8 @@ namespace oomph
         RefineableElement* ref_el_pt = dynamic_cast<RefineableElement*>(el_pt);
         if (ref_el_pt != 0)
         {
-          ref_el_pt->tree_pt()->flush_object();
+          //FOR PYOOMPH: Since meshes do not know whether they are TreeBased or not, we have to check it
+          if (ref_el_pt->tree_pt() != 0)ref_el_pt->tree_pt()->flush_object();
         }
 
 

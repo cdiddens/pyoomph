@@ -1,6 +1,6 @@
 /*================================================================================
 pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -15,7 +15,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 
-The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+The main author may be contacted at c.diddens@utwente.nl
 
 ================================================================================*/
 
@@ -32,12 +32,14 @@ using namespace GiNaC;
 namespace GiNaC
 {
 
-	
-
 	/////////////////
+	// print()/derivative()/info() specializations for the pyginacstruct leaf types declared in expressions.hpp.
+	// For print_csrc (C code generation) contexts these usually emit the concrete C expression required to access the
+	// wrapped value in the generated code; for all other (pretty-printing) contexts they emit a short human-readable
+	// "<...>" placeholder describing the wrapped object, since the wrapped C++ object itself has no meaningful GiNaC form.
 
 	template <>
-	void GiNaCPlaceHolderResolveInfo::print(const print_context &c, unsigned level) const
+	void GiNaCPlaceHolderResolveInfo::print(const print_context &c, unsigned) const
 	{
 		const pyoomph::PlaceHolderResolveInfo &sp = get_struct();
 		c.s << "< code=" << sp.code << " , tags=";
@@ -47,21 +49,21 @@ namespace GiNaC
 	}
 
 	template <>
-	void GiNaCCustomMultiReturnExpressionWrapper::print(const print_context &c, unsigned level) const
+	void GiNaCCustomMultiReturnExpressionWrapper::print(const print_context &c, unsigned) const
 	{
 		const pyoomph::CustomMultiReturnExpressionWrapper &sp = get_struct();
 		c.s << "<" << sp.cme->get_id_name() << " @" << sp.cme << ">";
 	}
 
 	template <>
-	void GiNaCCustomMultiReturnExpressionResultSymbol::print(const print_context &c, unsigned level) const
+	void GiNaCCustomMultiReturnExpressionResultSymbol::print(const print_context &c, unsigned) const
 	{
 		const pyoomph::CustomMultiReturnExpressionResultSymbol &sp = get_struct();
 		c.s << "<CB_RESULT " << sp.index << " of " << sp.func->get_id_name() << " called with " << sp.arglist << ">";
 	}
 
 	template <>
-	void GiNaCCustomMathExpressionWrapper::print(const print_context &c, unsigned level) const
+	void GiNaCCustomMathExpressionWrapper::print(const print_context &c, unsigned) const
 	{
 		//        std::cout << "ENTERING CME "<<std::flush <<std::endl;
 		//        c.s << "CME" <<std::endl;
@@ -72,14 +74,17 @@ namespace GiNaC
 	}
 
 	template <>
-	void GiNaCCustomCoordinateSystemWrapper::print(const print_context &c, unsigned level) const
+	void GiNaCCustomCoordinateSystemWrapper::print(const print_context &c, unsigned) const
 	{
 		const pyoomph::CustomCoordinateSystemWrapper &sp = get_struct();
 		c.s << "<" << sp.cme->get_id_name() << " @" << sp.cme << ">";
 	}
 
+	// When generating C code, a global parameter is not inlined as a literal: it is registered (on first encounter for the
+	// current FiniteElementCode) in a per-code local index table, and the generated code accesses its *current* value
+	// indirectly through the function table pointer so that changing the parameter later does not require recompilation.
 	template <>
-	void GiNaCGlobalParameterWrapper::print(const print_context &c, unsigned level) const
+	void GiNaCGlobalParameterWrapper::print(const print_context &c, unsigned) const
 	{
 		const pyoomph::GlobalParameterWrapper &sp = get_struct();
 		if (dynamic_cast<const print_csrc *>(&c))
@@ -93,6 +98,7 @@ namespace GiNaC
 			}
 			else
 			{
+				// First time this global parameter is used in the current code: assign it the next free local slot
 				local_index = pyoomph::__current_code->global_parameter_to_local_indices.size();
 				pyoomph::__current_code->local_parameter_symbols.push_back(*this);
 				pyoomph::__current_code->global_parameter_to_local_indices.insert(std::pair<unsigned, unsigned>(sp.cme->get_global_index(), local_index));
@@ -105,9 +111,11 @@ namespace GiNaC
 		}
 	}
 
+	// Global parameters are always real-valued; positivity/nonnegativity is forwarded to the descriptor's own restriction flag
+	// (used by GiNaC's simplification routines, e.g. to justify sqrt(param^2)=param)
 	template <>
 	bool GiNaCGlobalParameterWrapper::info(unsigned inf) const
-	{		
+	{
 		if (inf == info_flags::real)
 			return true;
 		if (inf==info_flags::positive || inf==info_flags::nonnegative)
@@ -117,7 +125,7 @@ namespace GiNaC
 	}
 
 	template <>
-	void GiNaCDelayedPythonCallbackExpansion::print(const print_context &c, unsigned level) const
+	void GiNaCDelayedPythonCallbackExpansion::print(const print_context &c, unsigned) const
 	{
 		// const pyoomph::DelayedPythonCallbackExpansionWrapper &sp = get_struct();
 		if (dynamic_cast<const print_csrc *>(&c))
@@ -131,7 +139,7 @@ namespace GiNaC
 	}
 
 	template <>
-	void GiNaCTimeSymbol::print(const print_context &c, unsigned level) const
+	void GiNaCTimeSymbol::print(const print_context &c, unsigned) const
 	{
 		const pyoomph::TimeSymbol &sp = get_struct();
 		std::string indstring = std::to_string(sp.index);
@@ -146,6 +154,8 @@ namespace GiNaC
 		}
 	}
 
+	// d(time_history[index])/d(t or a timestep symbol): only the current time (index==0) is treated as depending directly
+	// on "t"/the timestep symbols with unit derivative; all past history values are treated as independent (derivative 0)
 	template <>
 	GiNaC::ex GiNaCTimeSymbol::derivative(const GiNaC::symbol &s) const
 	{
@@ -167,7 +177,7 @@ namespace GiNaC
 	}
 
 	template <>
-	void GiNaCFakeExponentialMode::print(const print_context &c, unsigned level) const
+	void GiNaCFakeExponentialMode::print(const print_context &c, unsigned) const
 	{
 		const pyoomph::FakeExponentialMode &sp = get_struct();
 		if (dynamic_cast<const print_csrc *>(&c))
@@ -180,6 +190,8 @@ namespace GiNaC
 		}
 	}
 
+	// Chain rule for exp(arg): derivative is arg'*exp(arg), i.e. arg'*(*this), even though the printed/generated-code value
+	// of exp(arg) itself is just 1 (see print() above)
 	template <>
 	GiNaC::ex GiNaCFakeExponentialMode::derivative(const GiNaC::symbol &s) const
 	{
@@ -196,6 +208,8 @@ namespace pyoomph
 
 	std::map<std::string, GiNaC::ex> __field_name_cache;
 
+	// Looks up (or lazily creates) the unique GiNaC symbol for the given name; ensures repeated calls with the same id
+	// return the identical symbol object rather than merely an equal one
 	GiNaC::ex _get_field_name_cache(const std::string &id)
 	{
 		if (!__field_name_cache.count(id))
@@ -203,6 +217,8 @@ namespace pyoomph
 		return __field_name_cache[id];
 	}
 
+	// Comparison operators for the various pyginacstruct wrapper types (see declarations in expressions.hpp): all compare
+	// purely by the wrapped pointer's identity/address, since the wrapped C++ objects are not otherwise orderable
 	bool operator==(const CustomMathExpressionWrapper &lhs, const CustomMathExpressionWrapper &rhs)
 	{
 		return lhs.cme == rhs.cme;
@@ -326,6 +342,10 @@ namespace pyoomph
 	namespace expressions
 	{
 
+		// Returns true if "arg" contains (anywhere in its subtree) an occurrence of one of pyoomph's own placeholder
+		// functions (field, test function, scale, grad, div, ...) that has not yet been resolved/expanded into a concrete
+		// expression. Used to decide whether an expression built on top of "arg" must call .hold() to prevent GiNaC from
+		// eagerly auto-evaluating/simplifying it before those placeholders are expanded during code generation.
 		bool need_to_hold(const ex &arg)
 		{
 			for (GiNaC::const_preorder_iterator i = arg.preorder_begin(); i != arg.preorder_end(); ++i)
@@ -355,8 +375,10 @@ namespace pyoomph
 			return false;
 		}
 
-		int el_dim = -1;
+		int el_dim = -1; // -1 means "not yet set" / element dimension unknown at this point
 
+		// Definitions of the global symbols declared in expressions.hpp. Names passed to the constructors match the
+		// identifiers used in generated C code / pretty-printed output.
 		potential_real_symbol x("x");
 		potential_real_symbol y("y");
 		potential_real_symbol z("z");
@@ -383,9 +405,15 @@ namespace pyoomph
 
 		potential_real_symbol *proj_on_test_function = NULL;
 
+		// Both loop indices range over [0, nnode); which one actually corresponds to the number of shape/test functions used
+		// in a given loop is determined by the code generator's context, not by this declared range
 		idx l_shape(symbol("l_shape"), nnode);
 		idx l_test(symbol("l_test"), nnode);
 
+		// Recursively decomposes "arg" into: a purely numeric, always-nonnegative "factor"; a product of base-unit symbols
+		// "units"; and a dimensionless (and, after factoring out "factor", "unit-normalized") remainder "rest", such that
+		// arg == factor*units*rest. Returns false (and leaves an error on stderr) if "arg" is not unit-consistent, e.g. if
+		// it adds/subtracts terms carrying different units.
 		// TODO: Not sure whether this is correct in all cases
 		bool collect_base_units(GiNaC::ex arg, GiNaC::ex &factor, GiNaC::ex &units, GiNaC::ex &rest)
 		{
@@ -402,8 +430,10 @@ namespace pyoomph
 			//  std::cout << "NOPS "  << cl.nops() <<  std::endl;
 			if (!GiNaC::is_exactly_a<GiNaC::mul>(cl))
 			{
+				// Single (non-product) term: dispatch on its GiNaC type
 				if (GiNaC::is_a<GiNaC::symbol>(cl))
 				{
+					// A bare symbol is itself a base unit iff it matches one of the registered base_units symbols
 					bool found = false;
 					for (auto &bu : base_units)
 					{
@@ -420,18 +450,20 @@ namespace pyoomph
 				}
 				else if (GiNaC::is_a<GiNaC::numeric>(cl) || GiNaC::is_a<GiNaC::constant>(cl))
 				{
+					// Numeric literal: goes entirely into "factor", but "factor" is kept nonnegative and any sign is pushed into "rest" instead
 					if (GiNaC::to_double(GiNaC::ex_to<GiNaC::numeric>(cl.evalf()))<0)
-					{						
+					{
 							factor *= -cl;
 							rest *=-1;
 					}
 					else
 					{
 						factor*=cl;
-					}					
+					}
 				}
 				else if (GiNaC::is_exactly_a<GiNaC::power>(cl))
 				{
+					// base^exponent: recurse into the base and raise its factor/units/rest to the (unit-less) exponent
 					GiNaC::ex srest = 1;
 					GiNaC::ex sfactor = 1;
 					GiNaC::ex sunits = 1;
@@ -449,6 +481,9 @@ namespace pyoomph
 				}
 				else if (GiNaC::is_a<GiNaC::add>(cl))
 				{
+					// Sum of terms: every term must carry the *same* units (otherwise the sum is not unit-consistent and we
+					// fail); the overall numeric factor is chosen as the largest-magnitude per-term factor ("dominant_factor")
+					// so that the remaining "rest" terms end up normalized against that common scale.
 					// Find some dominant numerical factor to pull out
 					std::vector<GiNaC::ex> terms(cl.nops(), 0);
 					std::vector<GiNaC::ex> factors(cl.nops(), 0);
@@ -492,6 +527,8 @@ namespace pyoomph
 				}
 				else if (is_ex_the_function(cl, subexpression))
 				{
+					// Look through a named subexpression() wrapper: extract units from its wrapped content, but keep the
+					// dimensionless remainder wrapped as a subexpression again so it stays factored out in generated code
 					GiNaC::ex srest = 1;
 					GiNaC::ex sfactor = 1;
 					GiNaC::ex sunits = 1;
@@ -507,6 +544,9 @@ namespace pyoomph
 				}
 				else if (is_ex_the_function(cl, expressions::maximum) || is_ex_the_function(cl, expressions::minimum) || is_ex_the_function(cl, expressions::absolute) || is_ex_the_function(cl, expressions::heaviside) || is_ex_the_function(cl, expressions::signum))
 				{
+					// These functions require all arguments to share the same units (min/max/abs are only meaningful when
+					// comparing/measuring quantities of the same dimension); heaviside/signum are dimensionless results, so
+					// their argument's factor/units are absorbed into "rest" rather than propagated to the outer factor/units
 					std::vector<GiNaC::ex> args(cl.nops());
 					for (unsigned int i = 0; i < cl.nops(); i++)
 					{
@@ -594,6 +634,10 @@ namespace pyoomph
 				}
 				else if (GiNaC::is_a<GiNaC::function>(cl))
 				{
+					// Generic (unrecognized) GiNaC function call: if none of its arguments involve a base unit, the whole
+					// call is dimensionless and goes straight into "rest"; otherwise each argument is unit-normalized
+					// in place (factor*units folded back into the argument) since we cannot know how the function combines
+					// its arguments dimensionally.
 					// Test if there are units left in the function args
 					bool units_left = false;
 					for (auto &bu : base_units)
@@ -647,6 +691,9 @@ namespace pyoomph
 			}
 			else
 			{
+				// cl is a product (GiNaC::mul): factor/unit/rest simply multiply across all factors of the product, so
+				// each operand is classified and accumulated independently (numeric literals, base-unit symbols, powers,
+				// and everything else via a plain recursive call)
 				for (unsigned int i = 0; i < cl.nops(); i++)
 				{
 					//  std::cout << "FI " << i << "  " << cl.op(i) << "  " << std::endl;
@@ -722,6 +769,8 @@ namespace pyoomph
 				}
 			}
 			// TODO Check the rest for missing units
+			// Sanity check: "rest" must end up truly dimensionless -- if any base unit symbol still occurs in it, something
+			// above failed to fully factor out the units, so report failure rather than return an inconsistent split
 			for (auto &bu : base_units)
 			{
 				//		if (bu.second==cl.op(i))  {units*=cl.op(i); found=true; break;}
@@ -755,6 +804,12 @@ namespace pyoomph
 			return true;
 		}
 
+		// Symbolic differentiation of "what" with respect to "wrto" that, unlike plain GiNaC::diff, also accepts a
+		// GiNaCShapeExpansion (a nodal/interpolated field value) as the differentiation variable: differentiating w.r.t.
+		// the x/y/z or Lagrangian/local-coordinate shape expansions is rerouted to differentiate w.r.t. the corresponding
+		// coordinate symbol, and w.r.t. an arbitrary field's shape expansion falls back to differentiating w.r.t. the
+		// field's own symbol (with any *derived* shape expansions collapsed to unity first). It also allows "wrto" to be a
+		// quantity carrying a unit prefactor (e.g. diff(f, 2*meter*x)), which is normalized out before differentiating.
 		GiNaC::ex diff(const GiNaC::ex &what, const GiNaC::ex &wrto)
 		{
 			if (pyoomph::pyoomph_verbose)
@@ -823,6 +878,7 @@ namespace pyoomph
 			}
 
 			// Otherwise, it may only be a value and unit symbols... Sep them from the normal variable
+			// (i.e. wrto = normvar * <product of base units>; find the single non-unit symbol/shape-expansion "normvar")
 			GiNaC::ex normvar = 0;
 			for (GiNaC::const_preorder_iterator it = wrto.preorder_begin(); it != wrto.preorder_end(); it++)
 			{
@@ -869,6 +925,7 @@ namespace pyoomph
 			throw_runtime_error("Can only take a diff(f,x) if x is symbol, not an expressions: " + oss.str()) return 0.0;
 		}
 
+		// Differentiate w.r.t. the i-th Eulerian coordinate (0=x, 1=y, 2=z); returns 0 for i>=3
 		GiNaC::ex diff_x(const GiNaC::ex &what, unsigned i)
 		{
 			if (i == 0)
@@ -883,6 +940,11 @@ namespace pyoomph
 
 		////////////////
 
+		// eval_func for the unitvect() GiNaC function: returns the "direction"-th Cartesian unit basis vector (as a
+		// the_vector_dim x 1 GiNaC::matrix). Like grad/div/directional_derivative below, it first has to resolve the
+		// coordinate-system argument (falling back to the currently-generated code's coordinate system if none was passed
+		// explicitly) and the requested dimension (nodal or Lagrangian, depending on the "flags" bitmask), and stays
+		// un-evaluated (.hold()) if that information is not yet available (e.g. outside of code generation).
 		static ex unitvect_eval(const ex &dir, const ex &basedim, const ex &coordsys, const ex &flags)
 		{
 			std::cout << "ENTERING UNITVECT EVAL A" << std::endl;
@@ -892,6 +954,7 @@ namespace pyoomph
 			std::cout << "ENTERING UNITVECT EVAL B" << std::endl;
 			if (sp.cme == &__no_coordinate_system)
 			{
+				// No explicit coordinate system was given: fall back to the one associated with the code currently being generated
 				if (__current_code)
 				{
 					sys = __current_code->get_coordinate_system();
@@ -915,6 +978,7 @@ namespace pyoomph
 			int ndim = GiNaC::ex_to<GiNaC::numeric>(basedim.evalf()).to_double();
 			if (ndim < 0)
 			{
+				// dim<0 means "use whatever the current code deems appropriate"; flag bit 8 selects Lagrangian over nodal (Eulerian) dimension
 				if (__current_code)
 				{
 					if (_flags & 8)
@@ -945,6 +1009,10 @@ namespace pyoomph
 
 		////////////////
 
+		// eval_func for grad(): resolves the coordinate system and dimensions exactly like unitvect_eval above, then
+		// delegates the actual differentiation to CustomCoordinateSystem::grad(). Stays un-evaluated (.hold()) whenever
+		// "f" still contains unresolved placeholders (need_to_hold), the argument is a wildcard (pattern matching), or the
+		// coordinate system/dimension cannot yet be resolved.
 		static ex grad_eval(const ex &f, const ex &nodal_dim, const ex &elem_dim, const ex &coordsys, const ex &flags)
 		{
 			if (f == wild())
@@ -1023,6 +1091,9 @@ namespace pyoomph
 
 		REGISTER_FUNCTION(grad, eval_func(grad_eval).set_return_type(GiNaC::return_types::noncommutative))
 
+		// eval_func for directional_derivative(): same coordinate-system/dimension resolution pattern as grad_eval, but
+		// delegates to CustomCoordinateSystem::directional_derivative() and additionally holds if "d" (the direction) also
+		// still contains unresolved placeholders
 		static ex directional_derivative_eval(const ex &f, const ex &d, const ex &nodal_dim, const ex &elem_dim, const ex &coordsys, const ex &flags)
 		{
 			if (f == wild())
@@ -1140,6 +1211,9 @@ namespace pyoomph
 
 		// General weak contribution of the form WEAKCONTRIB("name",{f,g,h,..},testfunc)
 		// The specific coordinate system will take care of the evaluation
+		// Same coordinate-system/dimension resolution pattern as grad_eval; "f" (a single expression or a list of them, via
+		// the lst-vs-single-expression branch below) is normalized into a std::vector<ex> "lhs" before being forwarded to
+		// CustomCoordinateSystem::general_weak_differential_contribution()
 		static ex general_weak_differential_contribution_eval(const ex &funcname, const ex &f, const ex &test, const ex &nodal_dim, const ex &elem_dim, const ex &coordsys, const ex &flags)
 		{
 			if (f == wild())
@@ -1231,6 +1305,8 @@ namespace pyoomph
 
 		////////////////
 
+		// eval_func for div(): same coordinate-system/dimension resolution pattern as grad_eval; the argument must
+		// evaluate (via evalm()) to an actual GiNaC::matrix (vector/tensor) or to zero, otherwise it's a usage error
 		static ex div_eval(const ex &v, const ex &nodal_dim, const ex &elem_dim, const ex &coordsys, const ex &flags)
 		{
 			if (v == wild())
@@ -1318,6 +1394,7 @@ namespace pyoomph
 
 		////////////////
 
+		// Matrix transpose; requires the (evalm()-resolved) argument to be an actual GiNaC::matrix
 		static ex transpose_eval(const ex &v)
 		{
 			if (need_to_hold(v))
@@ -1338,6 +1415,7 @@ namespace pyoomph
 
 		REGISTER_FUNCTION(transpose, eval_func(transpose_eval))
 
+		// Matrix trace; requires the argument to be an actual (square) GiNaC::matrix
 		static ex trace_eval(const ex &m)
 		{
 			if (need_to_hold(m))
@@ -1358,6 +1436,8 @@ namespace pyoomph
 
 		REGISTER_FUNCTION(trace, eval_func(trace_eval).set_return_type(GiNaC::return_types::commutative))
 
+		// Matrix-matrix (or matrix-vector) product via GiNaC's own matrix multiplication once both arguments are resolved
+		// to concrete matrices; either operand being zero (a scalar 0, e.g. an unset field) short-circuits to a zero result
 		static ex matproduct_eval(const ex &m1, const ex &m2)
 		{
 			if (pyoomph::pyoomph_verbose)
@@ -1395,6 +1475,9 @@ namespace pyoomph
 
 		////////////////
 
+		// Dot (inner) product of two column vectors (Nx1 matrices). If the two vectors have different lengths, the shorter
+		// one is implicitly zero-padded (but only if the "extra" trailing components of the longer vector are actually
+		// zero -- otherwise this is an error, since silently dropping nonzero components would be wrong).
 		static ex dot_eval(const ex &a, const ex &b)
 		{
 			if (pyoomph::pyoomph_verbose)
@@ -1404,6 +1487,7 @@ namespace pyoomph
 						  << std::endl;
 			if (need_to_hold(a) || need_to_hold(b))
 				return dot(a, b).hold();
+			// Also stay held if either operand still contains an unresolved grad(...) call, since evalm() cannot expand a gradient's tensor shape yet
 			if (a.has(grad(wild(), wild(), wild(), wild(), wild())))
 				return dot(a, b).hold();
 			if (b.has(grad(wild(), wild(), wild(), wild(), wild())))
@@ -1483,6 +1567,9 @@ namespace pyoomph
 
 		REGISTER_FUNCTION(dot, eval_func(dot_eval).set_return_type(GiNaC::return_types::commutative))
 
+		// Debugging aid: prints the argument (held or, once fully resolvable, fully expanded/evalm()'d) to stdout. Note this
+		// deliberately terminates the process via exit(0) once the expression is fully resolved, since debug_ex() is only
+		// meant to be dropped temporarily into an expression tree to inspect intermediate results, not for production use.
 		static ex debug_ex_eval(const ex &a)
 		{
 			if (need_to_hold(a))
@@ -1501,6 +1588,9 @@ namespace pyoomph
 
 		////////////////
 
+		// Double contraction (Frobenius inner product) sum_ij a_ij*b_ij of two matrices. If the matrices have mismatched
+		// shapes, only the overlapping (min rows x min cols) block is contracted rather than raising an error (see the
+		// commented-out strict version below) -- this tolerates e.g. contracting a 2D tensor with a padded 3D one.
 		static ex double_dot_eval(const ex &a, const ex &b)
 		{
 			if (pyoomph::pyoomph_verbose)
@@ -1555,6 +1645,10 @@ namespace pyoomph
 
 		////
 
+		// Generic index contraction, implementing the "@"/matmul operator for arbitrary vector/matrix combinations:
+		// vector.vector -> dot product; vector.matrix or matrix.vector -> matrix-vector product (returned as a column
+		// vector); matrix.matrix -> double_dot (full Frobenius contraction); scalar.scalar (or any non-matrix operand)
+		// -> plain multiplication.
 		static ex contract_eval(const ex &a, const ex &b)
 		{
 			if (pyoomph::pyoomph_verbose)
@@ -1629,6 +1723,9 @@ namespace pyoomph
 
 		////////////////
 
+		// Fallback implementation of Python's expr[i] indexing when the expression does not (yet) evaluate to a concrete
+		// matrix: on a column vector, returns the scalar component; on a general matrix, returns row i as a length-3 column
+		// vector (used for the __getitem__ single-index case in the pybind layer, see pybind/expressions.cpp)
 		static ex single_index_eval(const ex &v, const ex &i)
 		{
 			ex evmv = v.evalm();
@@ -1658,8 +1755,7 @@ namespace pyoomph
 
 		REGISTER_FUNCTION(single_index, eval_func(single_index_eval).set_return_type(GiNaC::return_types::commutative))
 
-		//
-
+		// Fallback implementation of Python's expr[i,j] indexing when the expression does not (yet) evaluate to a concrete matrix
 		static ex double_index_eval(const ex &v, const ex &i, const ex &j)
 		{
 			ex evmv = v.evalm();
@@ -1679,13 +1775,16 @@ namespace pyoomph
 
 		////////////////
 
+		// Finds the largest leading square block size for which the trailing row/column (at that size) still has a nonzero
+		// entry; used to detect the "true" dimension of a matrix that has been padded with zeros up to the_vector_dim (3)
+		// so that e.g. a 2D problem's Jacobian determinant is computed over its actual 2x2 block, not the padded 3x3 one
 		static int get_nontrivial_matrix_dimension(const matrix &ma)
 		{
 			int _n=std::min(ma.cols(),ma.rows());			
 			while (_n>0)
 			{
 				bool found_nonzero=false;
-				for (unsigned int i=0;i<_n;i++)
+				for (int i=0;i<_n;i++)
 				{							
 					if (!ma(i,_n-1).is_zero())
 					{
@@ -1704,6 +1803,9 @@ namespace pyoomph
 			return _n;
 		}
 
+		// Determinant of an nxn leading block of the matrix. n<0 means "use the whole matrix"; n==0 means "auto-detect the
+		// nontrivial block size" via get_nontrivial_matrix_dimension() (relevant since matrices are often zero-padded up to
+		// the_vector_dim); otherwise the given n is used directly, restricted to the top-left nxn block.
 		static ex determinant_eval(const ex &v,const ex &n)
 		{
 			ex evmv = v.evalm();
@@ -1717,18 +1819,18 @@ namespace pyoomph
 				//std::cout << "N IS " << _n << std::endl;
 				if (_n<0) return ma.determinant(); // Determinant of the whole matrix
 				else if (_n==0)
-				{					
-					_n=get_nontrivial_matrix_dimension(ma);										
+				{
+					_n=get_nontrivial_matrix_dimension(ma);
 					if (_n==0) return 0;
 				}
 								
 				// Extract the block
-				if (ma.cols() < _n) throw_runtime_error("Block size is larger than the matrix (colums)");
-				if (ma.rows() < _n) throw_runtime_error("Block size is larger than the matrix (rows)");
+				if ((int)ma.cols() < _n) throw_runtime_error("Block size is larger than the matrix (colums)");
+				if ((int)ma.rows() < _n) throw_runtime_error("Block size is larger than the matrix (rows)");
 				std::vector<GiNaC::ex> entries;
-				for (unsigned int i = 0; i < _n; i++)
+				for ( int i = 0; i < _n; i++)
 				{
-					for (unsigned int j = 0; j < _n; j++)
+					for ( int j = 0; j < _n; j++)
 					{
 						entries.push_back(ma(i, j));
 					}
@@ -1745,6 +1847,13 @@ namespace pyoomph
 		////////////////
 
 
+		// Inverse of an nxn block of the matrix (n<0: whole matrix; n==0: auto-detect nontrivial block size, as in
+		// determinant_eval above). "flags" bit 1 wraps the determinant in a subexpression() (to avoid duplicating it across
+		// every entry in generated code); bit 2 requests the result zero-padded back up to a full 3x3 matrix; bit 4 first
+		// strips out all identically-zero rows/columns (recursing on the reduced matrix) before inverting, then re-inserts
+		// them as zero rows/columns in the result -- used for degenerate/singular sub-blocks that should just stay zero.
+		// The 2x2 and 3x3 cases are inverted via their explicit closed-form cofactor formulas rather than a generic
+		// (symbolic, and thus far more expensive) Gauss-Jordan elimination.
 		static ex inverse_matrix_eval(const ex &v,const ex &n,const ex &flags)
 		{
 			ex evmv = v.evalm();
@@ -1828,8 +1937,8 @@ namespace pyoomph
 					if (_n==0) throw_runtime_error("Matrix is empty and cannot be inverted");
 				}
 												
-				if (ma.cols() < _n) throw_runtime_error("Block size is larger than the matrix (colums)");
-				if (ma.rows() < _n) throw_runtime_error("Block size is larger than the matrix (rows)");
+				if ((int)ma.cols() < _n) throw_runtime_error("Block size is larger than the matrix (colums)");
+				if ((int)ma.rows() < _n) throw_runtime_error("Block size is larger than the matrix (rows)");
 				std::vector<GiNaC::ex> entries;
 				if (_n==1) { entries.push_back(1/ma(0,0));}
 				else if (_n==2) {
@@ -1856,7 +1965,7 @@ namespace pyoomph
 					entries.push_back((ma(0,0)*ma(1,1)-ma(0,1)*ma(1,0))/det);					
 				}
 				
-				if (flag & 2==0)
+				if ((flag & 2)==0)
 				{
 				  GiNaC::lst entries_lst(GiNaC::lst(entries.begin(), entries.end()));
 				  return GiNaC::matrix(_n, _n, entries_lst);				
@@ -1865,9 +1974,9 @@ namespace pyoomph
 				{
 					//Return a 3x3 matrix with zero filling
 					std::vector<GiNaC::ex> entries3x3(9,0);
-					for (unsigned int i = 0; i < _n; i++)
+					for ( int i = 0; i < _n; i++)
 					{
-						for (unsigned int j = 0; j < _n; j++)
+						for ( int j = 0; j < _n; j++)
 						{
 						  entries3x3[3*i+j] = entries[_n*i+j];
 						}
@@ -1886,6 +1995,11 @@ namespace pyoomph
 		////////////////
 		
 
+		// eval_func for subexpression(): a subexpression() call marks its argument to be factored out and computed once as
+		// a named local variable in generated C code rather than being inlined at every use site. Trivial wrapped values
+		// (plain numbers, or an already-wrapped subexpression) are simplified away immediately; if the argument turns out
+		// to be a matrix, the wrapping is pushed down to apply per-entry instead (a matrix itself cannot be a single C
+		// subexpression).
 		static ex subexpression_eval(const ex &wrapped)
 		{
 			if (GiNaC::is_a<GiNaC::constant>(wrapped) || GiNaC::is_a<GiNaC::numeric>(wrapped))
@@ -1923,7 +2037,9 @@ namespace pyoomph
 				return subexpression(wrapped).hold();
 		}
 
-		static ex subexpression_deriv(const ex &wrapped, unsigned deriv_arg)
+		// GiNaC's generic (implicit) derivative_func is disabled -- differentiating a subexpression() must always go through
+		// expl_derivative_func below (which recurses via wrapped.diff() and re-wraps the result), never via GiNaC's default chain-rule machinery
+		static ex subexpression_deriv(const ex &, unsigned)
 		{
 			throw_runtime_error("Cannot derive a subexpression");
 		}
@@ -1937,6 +2053,12 @@ namespace pyoomph
 
 		////////////////
 
+		// eval_func for get_real_part(): numeric/constant arguments are evaluated directly via GiNaC::real_part; matrices are
+		// handled entrywise. While the argument still contains unresolved pyoomph placeholders (need_to_hold), GiNaC's own
+		// real_part() is applied instead, since it distributes automatically over +,-,*,/ and can be pushed arbitrarily deep
+		// into the still-unexpanded tree. Once the argument is a fully resolved, concrete expression, get_real_part() is
+		// deliberately kept held/unevaluated rather than calling GiNaC::real_part() on it, so that later stages (e.g. code
+		// generation, or a custom callback's real_part() hook) can handle it specially instead of GiNaC's generic behaviour.
 		static ex get_real_part_eval(const ex &wrapped)
 		{
 			if (GiNaC::is_a<GiNaC::constant>(wrapped) || GiNaC::is_a<GiNaC::numeric>(wrapped))
@@ -1973,7 +2095,8 @@ namespace pyoomph
 			return get_real_part_eval(wrapped).evalf();
 		}
 
-		static ex get_real_part_deriv(const ex &wrapped, unsigned deriv_arg)
+		// Implicit derivative disabled, same reasoning as subexpression_deriv above; use expl_derivative_func instead
+		static ex get_real_part_deriv(const ex &, unsigned)
 		{
 			throw_runtime_error("Cannot derive get_real_part");
 		}
@@ -1987,6 +2110,7 @@ namespace pyoomph
 
 		////////////////
 
+		// eval_func for get_imag_part(): mirrors get_real_part_eval above (same held-vs-eager rationale)
 		static ex get_imag_part_eval(const ex &wrapped)
 		{
 			if (GiNaC::is_a<GiNaC::constant>(wrapped) || GiNaC::is_a<GiNaC::numeric>(wrapped))
@@ -2019,7 +2143,7 @@ namespace pyoomph
 			return get_imag_part_eval(wrapped).evalf();
 		}
 
-		static ex get_imag_part_deriv(const ex &wrapped, unsigned deriv_arg)
+		static ex get_imag_part_deriv(const ex &, unsigned)
 		{
 			throw_runtime_error("Cannot derive get_imag_part");
 		}
@@ -2034,6 +2158,10 @@ namespace pyoomph
 
 		////////////////
 
+		// GiNaC map_function that walks an expression tree and, for every subexpression(x) leaf found, checks whether x has
+		// a nonzero imaginary part; if so, replaces that single subexpression() by a pair
+		// subexpression(real_part(x)) + I*subexpression(imag_part(x)), so that downstream real-only code generation can
+		// handle the real and imaginary contributions as two separate named subexpressions
 		class SubExpressionsToRealAndImag : public GiNaC::map_function
 		{
 		public:
@@ -2060,6 +2188,7 @@ namespace pyoomph
 		};
 
 
+		// eval_func for split_subexpressions_in_real_and_imaginary_parts(): applies SubExpressionsToRealAndImag once the argument no longer contains unresolved placeholders
 		static ex split_subexpressions_in_real_and_imaginary_parts_eval(const ex &wrapped)
 		{
 			if (need_to_hold(wrapped))
@@ -2077,6 +2206,10 @@ namespace pyoomph
 
 		////////////////
 
+		// eval_func for the deferred differentiation placeholder Diff(arg, wrto): stays held as long as either operand still
+		// contains unresolved placeholders (fields must not be differentiated before they are expanded, since e.g. a field's
+		// concrete shape-expansion form determines what its derivative actually looks like); once both are resolved, it
+		// dispatches to expressions::diff()
 		static ex Diff_eval(const ex &arg, const ex &wrto)
 		{
 			if (pyoomph::pyoomph_verbose)
@@ -2096,13 +2229,18 @@ namespace pyoomph
 			}
 		}
 
-		static ex Diff_expl_deriv(const ex &arg, const ex &wrto, const symbol &deriv_arg)
+		static ex Diff_expl_deriv(const ex &arg, const ex &wrto, const symbol &)
 		{
 			return Diff(arg, wrto).hold(); // TODO always best way?
 		}
 
 		REGISTER_FUNCTION(Diff, eval_func(Diff_eval).expl_derivative_func(Diff_expl_deriv).set_return_type(GiNaC::return_types::commutative))
 
+		// The following placeholder functions (testfunction, dimtestfunction, scale, test_scale, field, eval_flag,
+		// nondimfield, ...) are intentionally never evaluated here: their eval_func always just re-wraps the arguments and
+		// .hold()s, since resolving "name" (using the accompanying GiNaCPlaceHolderResolveInfo in "resolve") into a concrete
+		// expression requires the FiniteElementCode context and only happens in a later, explicit expansion pass (see
+		// codegen.cpp), not through GiNaC's ordinary automatic evaluation.
 		static ex testfunction_eval(const ex &name, const ex &resolve)
 		{
 			return testfunction(name, resolve).hold();
@@ -2160,6 +2298,7 @@ namespace pyoomph
 		REGISTER_FUNCTION(eval_in_domain, eval_func(eval_in_domain_eval).set_return_type(GiNaC::return_types::commutative))
 
 		//****
+		// GiNaC map_function replacing every GlobalParameterWrapper leaf by its current numeric value (recursively, via map())
 		class ReplaceGlobalParamsByCurrentValues : public GiNaC::map_function
 		{
 		public:
@@ -2184,6 +2323,13 @@ namespace pyoomph
 			return repl(in);
 		}
 
+		// GiNaC map_function implementing eval_in_past(): rewrites every nodal shape expansion, time symbol, and (if
+		// requested) ALE spatial-integral-measure symbol found in the expression to refer to an earlier point in the time
+		// history. The requested "past point" can be a plain integer history index (is_int==true) or a fractional one
+		// (e.g. 1.5), in which case the result is linearly interpolated between the two neighbouring integer history
+		// indices via (1-frac_part)*value[index] + frac_part*value[index+1]. If partial_t_action is set and the visited
+		// shape expansion carries a first-order time derivative (dt_order==1), the time-derivative is instead rewritten to
+		// use a specific (BDF1/BDF2/Newmark2) discretization scheme, without moving it into the past at all.
 		class EvaluateShapeExpansionsInPast : public GiNaC::map_function
 		{
 		protected:
@@ -2191,15 +2337,16 @@ namespace pyoomph
 			bool is_int;
 			double frac_part;
 			int partial_t_action; // 0: No change, 1: change all partial_t schemes of first order to BDF1
+			bool apply_on_integral_dx; // If true, also apply on the integral_dx symbols (for ALE)
 		public:
-			EvaluateShapeExpansionsInPast(int _index, int tstep_action) : index(_index), is_int(true), frac_part(0), partial_t_action(tstep_action)
+			EvaluateShapeExpansionsInPast(int _index, int tstep_action,bool _apply_on_integral_dx) : index(_index), is_int(true), frac_part(0), partial_t_action(tstep_action), apply_on_integral_dx(_apply_on_integral_dx)
 			{
 				if (index > 2)
 				{
 					throw_runtime_error("Cannot evaluate earlier in past than two steps");
 				}
 			}
-			EvaluateShapeExpansionsInPast(double frac, int tstep_action) : index(std::floor(frac)), is_int(false), frac_part(frac - std::floor(frac)), partial_t_action(tstep_action)
+			EvaluateShapeExpansionsInPast(double frac, int tstep_action,bool _apply_on_integral_dx) : index(std::floor(frac)), is_int(false), frac_part(frac - std::floor(frac)), partial_t_action(tstep_action), apply_on_integral_dx(_apply_on_integral_dx)
 			{
 				if (index > 2 || (index > 1 && frac > 0))
 				{
@@ -2278,6 +2425,24 @@ namespace pyoomph
 					}
 				}
 				// TODO: Also dx for ALE
+				else if (apply_on_integral_dx && GiNaC::is_a<GiNaC::GiNaCSpatialIntegralSymbol>(inp))
+				{
+					GiNaC::GiNaCSpatialIntegralSymbol se = GiNaC::ex_to<GiNaC::GiNaCSpatialIntegralSymbol>(inp);
+					auto &sp = se.get_struct();
+					SpatialIntegralSymbol sp_past = sp;
+					if (sp.is_lagrangian()) return  inp.map(*this);; // Do not apply on Lagrangian integrals
+					sp_past.history_step = index;
+					if (is_int)
+					{
+						return GiNaC::GiNaCSpatialIntegralSymbol(sp_past);
+					}
+					else
+					{
+						SpatialIntegralSymbol sp_past1 = sp;
+						sp_past1.history_step = index + 1;
+						return (1 - frac_part) * GiNaC::GiNaCSpatialIntegralSymbol(sp_past) + frac_part * GiNaC::GiNaCSpatialIntegralSymbol(sp_past1);
+					}
+				}
 				else
 				{
 					return inp.map(*this);
@@ -2285,33 +2450,41 @@ namespace pyoomph
 			}
 		};
 
-		static ex eval_in_past_eval(const ex &expr, const ex &index, const ex &tstep_action)
+		// eval_func for eval_in_past(): validates the (all-numeric) arguments and dispatches to EvaluateShapeExpansionsInPast;
+		// index==0 with tstep_action==0 is the identity (no-op) shortcut, a positive integer index uses the exact-history
+		// constructor, and any other nonnegative value uses the fractional (interpolating) constructor; a negative index is rejected
+		static ex eval_in_past_eval(const ex &expr, const ex &index, const ex &tstep_action, const ex &apply_on_integral_dx)
 		{
 			if (need_to_hold(expr))
-				return eval_in_past(expr, index, tstep_action).hold();
+				return eval_in_past(expr, index, tstep_action, apply_on_integral_dx).hold();
 
 			if (!GiNaC::is_a<GiNaC::numeric>(index))
 			{
-				throw_runtime_error("Cannot use evaluate_in_past(expression,timeoffset,timestepper_action) with a non-numeric timeoffset");
+				throw_runtime_error("Cannot use evaluate_in_past(expression,timeoffset,timestepper_action,apply_on_integral_dx) with a non-numeric timeoffset");
 			}
 			if (!GiNaC::is_a<GiNaC::numeric>(tstep_action))
 			{
-				throw_runtime_error("Cannot use evaluate_in_past(expression,timeoffset,timestepper_action) with a non-numeric timestepper_action (0: nothing, 1: convert all to BDF1)");
+				throw_runtime_error("Cannot use evaluate_in_past(expression,timeoffset,timestepper_action,apply_on_integral_dx) with a non-numeric timestepper_action (0: nothing, 1: convert all to BDF1)");
+			}
+			if (!GiNaC::is_a<GiNaC::numeric>(apply_on_integral_dx))
+			{
+				throw_runtime_error("Cannot use evaluate_in_past(expression,timeoffset,timestepper_action,apply_on_integral_dx) with a non-numeric apply_on_integral_dx value");
 			}
 			GiNaC::numeric index_n = GiNaC::ex_to<GiNaC::numeric>(index);
 			GiNaC::numeric index_ts = GiNaC::ex_to<GiNaC::numeric>(tstep_action);
+			bool apply_on_integral_dx_bool = !GiNaC::is_zero(apply_on_integral_dx);
 			if (index_n.is_zero() && index_ts.is_zero())
 			{
 				return expr;
 			}
 			else if (index_n.is_pos_integer())
 			{
-				EvaluateShapeExpansionsInPast in_past(index_n.to_int(), index_ts.to_int());
+				EvaluateShapeExpansionsInPast in_past(index_n.to_int(), index_ts.to_int(),apply_on_integral_dx_bool);
 				return in_past(expr);
 			}
 			else if (!index_n.is_negative())
 			{
-				EvaluateShapeExpansionsInPast in_past(index_n.to_double(), index_ts.to_int());
+				EvaluateShapeExpansionsInPast in_past(index_n.to_double(), index_ts.to_int(),apply_on_integral_dx_bool);
 				return in_past(expr);
 			}
 			else
@@ -2323,6 +2496,9 @@ namespace pyoomph
 		REGISTER_FUNCTION(eval_in_past, eval_func(eval_in_past_eval).set_return_type(GiNaC::return_types::commutative))
 		//****
 
+		// GiNaC map_function implementing eval_at_expansion_mode(): rewrites every shape expansion, normal-vector symbol, and
+		// spatial-integral-measure symbol in the expression to be evaluated at a specific expansion mode index (e.g. one
+		// particular Fourier/azimuthal mode number), leaving already-matching leaves untouched
 		class EvaluateShapeExpansionsAtExpansionMode : public GiNaC::map_function
 		{
 		protected:
@@ -2375,6 +2551,7 @@ namespace pyoomph
 			}
 		};
 
+		// eval_func for eval_at_expansion_mode(): index==0 is a no-op shortcut, otherwise dispatches to EvaluateShapeExpansionsAtExpansionMode
 		static ex eval_at_expansion_mode_eval(const ex &expr, const ex &index)
 		{
 			if (need_to_hold(expr))
@@ -2399,6 +2576,9 @@ namespace pyoomph
 		REGISTER_FUNCTION(eval_at_expansion_mode, eval_func(eval_at_expansion_mode_eval).set_return_type(GiNaC::return_types::commutative))
 		//****
 
+		// eval_func for symbol_subs(): substitutes "what"->"by_what" (or, if both are lists of equal length, each
+		// corresponding pair) within "expr" via GiNaC's own subs(); this is a deferred variant of plain .subs() usable
+		// while the surrounding expression may still contain unresolved placeholders
 		static ex symbol_subs_eval(const ex &expr, const ex &what, const ex &by_what)
 		{
 			if (need_to_hold(expr))
@@ -2429,6 +2609,11 @@ namespace pyoomph
 		}
 		REGISTER_FUNCTION(symbol_subs, eval_func(symbol_subs_eval).set_return_type(GiNaC::return_types::commutative))
 
+		// GiNaC map_function implementing remove_mode_from_jacobian_or_hessian(): for every shape expansion / normal /
+		// spatial-integral symbol belonging to the given expansion mode "index", marks it as excluded from the Jacobian
+		// and/or Hessian assembly (flag: 0=both, 1=Jacobian only, 2=Hessian only) by setting its no_jacobian/no_hessian
+		// flags; leaves belonging to other modes are left untouched. Used in mode-coupling analyses to prevent a given
+		// mode's contribution from linearizing against itself in ways that would be double-counted elsewhere.
 		class DeactivateJacobianOfExpansionMode : public GiNaC::map_function
 		{
 		protected:
@@ -2509,6 +2694,10 @@ namespace pyoomph
 
 		//****
 
+		// time_stepper_weight() is never resolved symbolically -- it always stays held; only its print_func (used for C code
+		// generation) actually produces a concrete value, by looking up the discretization scheme's precomputed weight
+		// array (shapeinfo->timestepper_weights_dt_<scheme>) at the given history index. Only first-order (order==1) time
+		// derivatives are currently supported.
 		static ex time_stepper_weight_eval(const ex &order, const ex &index, const ex &scheme)
 		{
 			return time_stepper_weight(order, index, scheme).hold();
@@ -2521,7 +2710,7 @@ namespace pyoomph
 			std::ostringstream oss;
 			oss << scheme;
 			std::string scheme_str = oss.str();
-			if (scheme_str != "BDF1")
+			if (scheme_str != "BDF1" && scheme_str != "BDF2" && scheme_str != "Newmark2" && scheme_str != "BDF2_degr" && scheme_str != "Newmark2_degr" )
 			{
 				throw_runtime_error("Strange time scheme");
 			}
@@ -2540,6 +2729,10 @@ namespace pyoomph
 												   .print_func<print_csrc_double>(time_stepper_weight_eval_csrc_float)
 												   .set_return_type(GiNaC::return_types::commutative))
 
+		// heaviside(): the Heaviside step function. Numeric arguments are evaluated directly (with heaviside(0)=1/2, the
+		// usual convention); non-numeric arguments stay held and get printed as a call to the C helper "step()".
+		// Differentiates to 0 everywhere (see heaviside_expl_derivative below): the delta-function contribution at the
+		// discontinuity is deliberately not produced, since it is not representable/useful in the generated residual code.
 		static ex heaviside_eval(const ex &arg)
 		{
 			if (GiNaC::is_a<GiNaC::numeric>(arg))
@@ -2579,7 +2772,7 @@ namespace pyoomph
 			return heaviside(arg).hold();
 		}
 
-		static ex heaviside_imag_part(const ex &arg)
+		static ex heaviside_imag_part(const ex &)
 		{
 			return 0;
 		}
@@ -2591,7 +2784,7 @@ namespace pyoomph
 			c.s << ")";
 		}
 
-		static ex heaviside_expl_derivative(const ex &arg, const symbol &deriv_arg)
+		static ex heaviside_expl_derivative(const ex &, const symbol &)
 		{
 			//	 return arg.diff(deriv_arg)*heaviside(arg);
 			return 0;
@@ -2605,6 +2798,8 @@ namespace pyoomph
 										 .real_part_func(heaviside_real_part)
 										 .imag_part_func(heaviside_imag_part))
 
+		// absolute(): |arg|, printed as C "fabs()"; differentiates via the standard |f|' = f'*signum(f) rule (see
+		// absolute_expl_derivative), unlike GiNaC's built-in abs which has no derivative
 		static ex absolute_eval(const ex &arg)
 		{
 			if (GiNaC::is_a<GiNaC::numeric>(arg))
@@ -2639,6 +2834,8 @@ namespace pyoomph
 										.expl_derivative_func(absolute_expl_derivative)
 										.set_return_type(GiNaC::return_types::commutative))
 
+		// signum(): sign of arg (returns 0 at exactly arg==0), printed as C "signum()"; deliberately differentiates to 0
+		// everywhere rather than modeling the delta-function singularity at 0 (see signum_expl_derivative)
 		static ex signum_eval(const ex &arg)
 		{
 			if (GiNaC::is_a<GiNaC::numeric>(arg))
@@ -2662,7 +2859,7 @@ namespace pyoomph
 			c.s << ")";
 		}
 
-		static ex signum_expl_derivative(const ex &arg, const symbol &deriv_arg)
+		static ex signum_expl_derivative(const ex &, const symbol &)
 		{
 			return 0; // TODO: Singularity, but this does not really matter here
 		}
@@ -2673,6 +2870,7 @@ namespace pyoomph
 									  .expl_derivative_func(signum_expl_derivative)
 									  .set_return_type(GiNaC::return_types::commutative))
 
+		// minimum()/maximum(): min/max of two arguments, evaluated directly when both are numeric, else held
 		static ex minimum_eval(const ex &a, const ex &b)
 		{
 			if (GiNaC::is_a<GiNaC::numeric>(a) && GiNaC::is_a<GiNaC::numeric>(b))
@@ -2707,7 +2905,7 @@ namespace pyoomph
 			return minimum(arg1,arg2).hold();
 		}
 
-		static ex minimum_imag_part(const ex &arg1,const ex &arg2)
+		static ex minimum_imag_part(const ex &,const ex &)
 		{
 			return 0;
 		}
@@ -2781,7 +2979,7 @@ namespace pyoomph
 			return maximum(arg1,arg2).hold();
 		}
 
-		static ex maximum_imag_part(const ex &arg1,const ex &arg2)
+		static ex maximum_imag_part(const ex &,const ex &)
 		{
 			return 0;
 		}
@@ -2794,6 +2992,11 @@ namespace pyoomph
 									   .evalf_func(maximum_evalf)
 									   .set_return_type(GiNaC::return_types::commutative))
 
+		// piecewise_geq0(cond,a,b): returns a if cond>=0, else b. Relational conditions (cond as a GiNaC::relational, e.g.
+		// from Python's <,<=,>,>= comparisons) are not supported here -- see the disabled block below explaining why
+		// (Python operator overloads would need extra work); only a numeric/constant condition is evaluated directly,
+		// otherwise the call stays held and is only resolved at code-generation time via a C ternary (see
+		// piecewise_geq0_csrc_float below).
 		static ex piecewise_geq0_eval(const ex &cond, const ex &a, const ex &b)
 		{
 			/*throw_runtime_error("PIECEWISE does not work right now: Reason: condition -> relational is problematic. It will require to overload all the ==, >=, ... operators in python");
@@ -2864,6 +3067,9 @@ namespace pyoomph
 
 		////////////////
 
+		// internal_function_with_element_arg(name,args): calls a named C-implemented internal function that additionally
+		// needs the current element pointer, by looking it up in the generated code's my_func_table and passing
+		// eleminfo->elem_ptr as the first argument, followed by "args"; always stays held except when actually printed as C code
 		static ex internal_function_with_element_arg_eval(const ex &n, const ex &args)
 		{
 			return internal_function_with_element_arg(n, args).hold();
@@ -2890,6 +3096,10 @@ namespace pyoomph
 
 		/////////////////
 
+		// eval_func for python_cb_function(func, arglst): flattens any vector/matrix-valued arguments in arglst into
+		// individual scalar arguments (since the underlying callback only ever sees a flat double* array), then re-wraps
+		// and holds -- the actual numeric invocation happens later, either through _call() during JIT/interpreted
+		// evaluation or through the print_func hooks during C code generation (see below).
 		static ex python_cb_function_eval(const ex &func, const ex &arglst)
 		{
 			lst l = ex_to<lst>(arglst);
@@ -2939,6 +3149,7 @@ namespace pyoomph
 			return python_cb_function(func, l2).hold();
 		}
 
+		// evalf_func: like python_cb_function_eval above, but always numerically evaluates the arguments first (arglst.evalf())
 		static ex python_cb_function_evalf(const ex &func, const ex &arglst)
 		{
 			GiNaCCustomMathExpressionWrapper w = ex_to<GiNaCCustomMathExpressionWrapper>(func);
@@ -2977,6 +3188,8 @@ namespace pyoomph
 			}
 		}
 
+		// print_func<print_python>: renders the call as "python_callback(<id_name>, <flattened args>)" for the Python
+		// pretty-printer (print_python), mirroring the vector/matrix-flattening done in python_cb_function_eval
 		static void python_cb_function_print_python(const ex &func, const ex &arglist, const print_context &c)
 		{
 			c.s << "python_callback(";
@@ -3009,6 +3222,9 @@ namespace pyoomph
 			c.s << ")";
 		}
 
+		// print_func<print_csrc_*>: emits a call to the generated code's runtime dispatcher "invoke_callback", identifying
+		// the callback by a per-code integer index (assigned lazily on first use, via CustomMathExpressionBase::code_map)
+		// rather than by pointer, and passing the flattened argument list as a C array literal
 		static void python_cb_function_csrc_float(const ex &func, const ex &arglst, const print_context &c)
 		{
 			c.s << "my_func_table->invoke_callback";
@@ -3055,6 +3271,8 @@ namespace pyoomph
 			c.s << "}, " << l2.nops() << " )";
 		}
 
+		// Chain rule: sum over arguments of (d(arg_i)/d(deriv_arg)) * (d(callback)/d(arg_i)), where the latter factor is
+		// obtained from the callback's own outer_derivative() (a fresh callback instance representing that partial derivative)
 		static ex python_cb_function_expl_deriv(const ex &func, const ex &arglst, const symbol &deriv_arg)
 		{
 			GiNaCCustomMathExpressionWrapper w = ex_to<GiNaCCustomMathExpressionWrapper>(func);
@@ -3082,6 +3300,8 @@ namespace pyoomph
 			return res;
 		}
 
+		// real_part_func/imag_part_func: forward to the callback object's own real_part()/imag_part() overrides (for
+		// callbacks that are used in complex-valued contexts)
 		static ex python_cb_function_real_part(const ex &func, const ex &arglst)
 		{
 			GiNaCCustomMathExpressionWrapper w = ex_to<GiNaCCustomMathExpressionWrapper>(func);
@@ -3106,6 +3326,9 @@ namespace pyoomph
 
 		REGISTER_FUNCTION(python_cb_function, eval_func(python_cb_function_eval).evalf_func(python_cb_function_evalf).print_func<print_csrc_float>(python_cb_function_csrc_float).print_func<print_csrc_double>(python_cb_function_csrc_float).expl_derivative_func(python_cb_function_expl_deriv).print_func<print_python>(python_cb_function_print_python).real_part_func(python_cb_function_real_part).imag_part_func(python_cb_function_imag_part))
 
+		// eval_func for python_multi_cb_function(func, arglst, numret): if all arguments are already numeric, immediately
+		// invokes the multi-return callback (see below) and packs the numret results into a GiNaC::lst; otherwise the call
+		// stays held (resolved later, e.g. during code generation or once the arguments become numeric)
 		static ex python_multi_cb_function_eval(const ex &func, const ex &arglst, const ex &numret)
 		{
 			std::vector<double> dv(arglst.nops());
@@ -3155,6 +3378,9 @@ namespace pyoomph
 																							 //            .print_func<print_python>(python_cb_function_print_python)
 		)
 
+		// eval_func for python_multi_cb_indexed_result(func, index): if "func" has already been resolved to a concrete
+		// GiNaC::lst of results (by python_multi_cb_function_eval above), simply extracts the requested component;
+		// otherwise stays held until "func" itself resolves
 		static ex python_multi_cb_indexed_result_eval(const ex &func, const ex &index)
 		{
 			if (GiNaC::is_a<GiNaC::lst>(func))
@@ -3169,6 +3395,8 @@ namespace pyoomph
 																										 //            .print_func<print_python>(python_cb_function_print_python)
 		)
 
+		// The following ginac_*() placeholders each stay held until "need_to_hold" is false (i.e. all pyoomph placeholders
+		// in the argument(s) have been resolved), and then simply forward to the corresponding plain GiNaC:: simplification routine
 		static ex ginac_expand_eval(const ex &v)
 		{
 			if (need_to_hold(v))
@@ -3214,6 +3442,9 @@ namespace pyoomph
 
 		REGISTER_FUNCTION(ginac_collect_common_factors, eval_func(ginac_collect_common_factors_eval))
 
+		// Taylor series expansion of expr around x=x0 up to the given order, immediately converted back into an ordinary
+		// polynomial expression (series_to_poly) rather than staying a GiNaC::pseries -- so it participates normally in
+		// further algebra/code generation
 		static ex ginac_series_eval(const ex &expr, const ex &x, const ex &x0, const ex &order)
 		{
 			if (need_to_hold(expr) || need_to_hold(x) || need_to_hold(x0) || need_to_hold(order))
@@ -3231,6 +3462,12 @@ namespace pyoomph
 
 		////////////////
 
+		// eval_func for weak(a, b, flags, coordsys): builds the weak-form (Galerkin) residual contribution
+		// integral( a . b ) dx of a paired with a test-function-carrying expression b, where "." is a dot/double_dot
+		// product (for vector/matrix-valued a,b) or plain multiplication (scalars), and dx is the appropriate integration
+		// measure fetched from the current code (get_integral_dx), depending on flag bit 1 (Lagrangian vs Eulerian
+		// integration) and bit 2 (whether to include the dimensional scaling factors). Either operand being (identically)
+		// zero short-circuits to a zero contribution. Requires an active code-generation context (__current_code).
 		static ex weak_eval(const ex &a, const ex &b, const ex &flags, const ex &coordsys)
 		{
 			if (pyoomph::pyoomph_verbose)
@@ -3325,6 +3562,10 @@ namespace pyoomph
 
 		/////////////////
 
+		// GiNaC map_function underlying subs_fields(): walks the expression and replaces every field()/nondimfield() call
+		// whose name matches an entry in the corresponding lookup map by its concrete replacement expression (used e.g. to
+		// numerically evaluate a symbolic expression by "calling" it with concrete field values from Python, see
+		// GiNaC::ex::__call__ in pybind/expressions.cpp); names not found in the map are left as unresolved placeholders (recursed into further)
 		class ReplaceFieldsAndSubfields : public GiNaC::map_function
 		{
 		protected:
@@ -3371,10 +3612,13 @@ namespace pyoomph
 		GiNaC::ex subs_fields(const GiNaC::ex &arg, const std::map<std::string, GiNaC::ex> &fields, const std::map<std::string, GiNaC::ex> &nondimfields, const std::map<std::string, GiNaC::ex> &globalparams)
 		{
 			ReplaceFieldsAndSubfields repl(fields, nondimfields, globalparams);
-			DrawUnitsOutOfSubexpressions uos(NULL);
+			DrawUnitsOutOfSubexpressions uos(NULL); // Re-normalizes any subexpression()-wrapped unit factors after substitution (defined in codegen.cpp)
 			return uos(repl(arg));
 		}
 
+		// GiNaC map_function replacing every GlobalParameterWrapper leaf by its current value as a plain double (as opposed
+		// to ReplaceGlobalParamsByCurrentValues above, which is functionally identical -- both exist for use in slightly
+		// different substitution pipelines, see eval_to_double/eval_to_complex below)
 		class GlobalParamsToDouble : public GiNaC::map_function
 		{
 		protected:
@@ -3391,6 +3635,11 @@ namespace pyoomph
 			}
 		};
 
+		// Forces "inp" (with all global parameters substituted by their current values) to a plain double. If straightforward
+		// evalf() does not yield a bare numeric (typically because the expression still carries left-over unit symbols that
+		// happen to cancel out only after being regrouped), falls back to explicitly collecting the base units via
+		// collect_base_units() and re-evaluating factor*unit*rest -- this succeeds whenever the units genuinely cancel,
+		// and only then is the value considered a valid dimensionless double.
 		double eval_to_double(const GiNaC::ex &inp)
 		{
 			GlobalParamsToDouble expand_params;
@@ -3404,7 +3653,7 @@ namespace pyoomph
 			else
 			{
 				// There might be units which have not been cancelled out
-				GiNaC::ex factor, unit, rest;			  
+				GiNaC::ex factor, unit, rest;
 			    if (expressions::collect_base_units(inp, factor, unit, rest))
 				{
 					GiNaC::ex inp2=factor * unit * expressions::subexpression(rest);
@@ -3421,6 +3670,8 @@ namespace pyoomph
 			}
 		}
 
+		// Like eval_to_double, but returns a complex<double> (real+imag from the resulting GiNaC::numeric); does not attempt
+		// the unit-collection fallback that eval_to_double does
 		std::complex<double> eval_to_complex(const GiNaC::ex &inp)
 		{
 			GlobalParamsToDouble expand_params;
@@ -3442,11 +3693,27 @@ namespace pyoomph
 
 		/////////////////
 
+		// eval_func for minimize_functional_derivative(F, only_wrto, flags, coordsys): implements weak-form assembly for
+		// energy-/functional-minimization formulations, i.e. automatically generates the weak residual contributions
+		// corresponding to dF/d(field) = 0 for every field the functional F depends on (or, if "only_wrto" is a nonempty
+		// list, restricted to just those given field/shape-expansion expressions).
+		//
+		// For each relevant nodal degree of freedom (found via get_all_shape_expansions_in), it:
+		//   1) computes the (Gateaux/functional) derivative of F w.r.t. that single shape expansion, using a dummy symbol
+		//      substitution trick (F_dummy = F with the shape expansion replaced by a fresh symbol, then differentiate
+		//      w.r.t. that symbol, then substitute back) so that GiNaC's ordinary differentiation machinery can be used
+		//      even though shape expansions are not plain symbols;
+		//   2) builds that field's associated test function (optionally multiplied by its dimensional test_scale, if flag
+		//      bit 64/dim_testfunc is set);
+		//   3) adds weak(dF, testfunction, flags, coordsys) to the accumulated residual.
+		// Several shape-expansion configurations are explicitly rejected as unsupported (time history, expansion mode,
+		// nodal-coordinate derivatives, derived/Hessian-excluded shape expansions, time derivatives) since minimizing
+		// w.r.t. those does not have a well-defined meaning here.
 		static ex minimize_functional_derivative_eval(const ex &F, const ex &only_wrto, const ex &flags, const ex &coordsys)
 		{
 			if (need_to_hold(F) || need_to_hold(only_wrto) || need_to_hold(flags) || need_to_hold(coordsys))
 				return minimize_functional_derivative(F, only_wrto, flags, coordsys).hold();
-			
+
 
 			int flag = GiNaC::ex_to<GiNaC::numeric>(flags).to_int();
 			bool dim_testfunc=flag & 64;

@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -34,10 +35,10 @@ from ..typings import *
 
 import numpy
 
-import _pyoomph
+from .. import _pyoomph_core as _pyoomph
 
 from ..expressions.generic import Expression, ExpressionOrNum, is_zero, NameStrSequence
-
+from ..generic.mpi import get_mpi_rank
 
 
 
@@ -222,7 +223,7 @@ class BaseMesh:
                 imsh._codegen._perform_external_ode_linkage()
                 imsh.ensure_external_data()
                 assert imsh._codegen._code is not None
-                imsh._codegen._code._exchange_mesh(imsh)
+                imsh._codegen._code._exchange_mesh(imsh)                                
                 imsh._setup_output_scales()
                 assert isinstance(self, _pyoomph.Mesh)
                 self.generate_interface_elements(n, imsh, imsh._codegen._code)
@@ -463,7 +464,7 @@ class MeshTemplate(_pyoomph.MeshTemplate):
     """
     A class to construct meshes by defining nodes with the :py:meth:`add_node` or :py:meth:`add_node_unique` method. 
     Elements must be specified by first creating one or multiple domains with the :py:meth:`new_domain` method and adding elements on each domain.
-    Nodes can be also marked to be on particular boundaries with the :py:meth:`add_node_on_boundary` method.
+    Nodes can be also marked to be on particular boundaries with the :py:meth:`add_facet_to_boundary` method.
     """
     def __init__(self):
         super(MeshTemplate, self).__init__()
@@ -489,6 +490,14 @@ class MeshTemplate(_pyoomph.MeshTemplate):
         self._macrobounds: List[_pyoomph.MeshTemplateCurvedEntityBase] = []
         self._fntrunk:Optional[str]=None # To be set for remeshing
         self.all_nodes_as_boundary_nodes:bool=False
+        
+    def _reset(self):
+        super(MeshTemplate, self)._reset()
+        self._domains = {}
+        self._geometry_defined = False
+        self._template_override = None
+        self._interior_boundaries = set()
+        self._macrobounds = []
 
     def get_problem(self) -> "Problem":
         return self._problem
@@ -521,10 +530,10 @@ class MeshTemplate(_pyoomph.MeshTemplate):
                 lambda: self.remesher._cnt, lambda s: s)  # type:ignore
         if found_mshfile != mshfile:
             # We need to load the remeshed version here
-            import pyoomph.meshes.gmsh
+            from . import gmsh
             statedir = os.path.dirname(state.fname)
             fffound_mshfile = os.path.join(statedir, found_mshfile)
-            newtempl = pyoomph.meshes.gmsh.GmshTemplate(fffound_mshfile)
+            newtempl = gmsh.GmshTemplate(fffound_mshfile)
             newtempl.remesher = self.remesher
             assert self._problem is not None
             newtempl._do_define_geometry(self._problem)
@@ -679,7 +688,7 @@ class MeshTemplate(_pyoomph.MeshTemplate):
             kwargs: Keyword arguments for the curved entity.
 
         Returns:
-            The created curved entity to be used in :py:meth:`add_facet_to_curve_entity`.
+            The created curved entity to be used in :py:meth:`add_facet_to_boundary`.
         """
         store_entity: bool = kwargs.get("store_entity", True)
         res = None
@@ -730,6 +739,7 @@ class MeshFromTemplateBase(BaseMesh):
         self._error_estimator: Z2ErrorEstimator  # =None
         self._solves_since_remesh = 0  # Counting the number of solves since last remesh
         self._periodic_corner_node_info: Dict[Node, Node] = {}
+        self._initial_uniform_refinement_level=0
 
         T = TypeVar("T")
 
@@ -844,9 +854,9 @@ class MeshFromTemplateBase(BaseMesh):
         return self.get_code_gen().get_code().get_nodal_field_indices()
 
     def recreate_boundary_information(self):
-        import pyoomph
+        from .. import get_dev_option
 
-        if self.refinement_possible() or (pyoomph.get_dev_option("allow_tri_refine") and self.get_dimension() == 2):
+        if self.refinement_possible() or (get_dev_option("allow_tri_refine") and self.get_dimension() == 2):
             self.setup_tree_forest()
 
         self.setup_boundary_element_info()
@@ -867,7 +877,10 @@ class MeshFromTemplateBase(BaseMesh):
         for k in itertools.chain(code.get_nodal_field_indices().keys(), code.get_elemental_field_indices().keys()):
             s = codegen.get_scaling(k)
             s = codegen.expand_placeholders(s, False)
-            _, unit, _, _ = _pyoomph.GiNaC_collect_units(s)
+            _factor, unit, _rest, _success = _pyoomph.GiNaC_collect_units(s)
+            if not (_rest-1).is_zero():
+                raise RuntimeError(
+                    "Cannot set output scale for field "+k+" to "+str(s)+" because it has a non-unit factor "+str(_factor)+" and a non-unit rest "+str(_rest))            
             self.set_output_scale(k, unit, code)
         
     def _finalise_creation(self):
@@ -876,9 +889,9 @@ class MeshFromTemplateBase(BaseMesh):
         self.generate_from_template(
             self._templatemesh.get_template().get_domain(self._name))
         # if self.refinement_possible():
-        import pyoomph
+        from .. import get_dev_option
 
-        if self.refinement_possible() or (pyoomph.get_dev_option("allow_tri_refine") and self.get_dimension() == 2):
+        if self.refinement_possible() or (get_dev_option("allow_tri_refine") and self.get_dimension() == 2):
             self.setup_tree_forest()
 
         self.setup_boundary_element_info()
@@ -1016,6 +1029,8 @@ class MeshFromTemplateBase(BaseMesh):
                 refinementL.append(list(state.numpy_data(
                     lambda: refinementL[n], lambda v: v)))  # type:ignore
             # print("REFINEMEHT",refinement,self.nelement())
+            while not self.unrefine_uniformly(): # Unrefine until we hit the rock bottom
+                pass
             self.refine_base_mesh(refinementL)
             self.reorder_nodes(old_ordering)
 
@@ -1100,9 +1115,33 @@ class MeshFromTemplateBase(BaseMesh):
             return val
                     
     def evaluate_maximum(self,name:Union[str,List[str]],dimensional:bool=True,as_float:bool=False,return_x:bool=False)->Union[ExpressionOrNum,List[ExpressionOrNum],Tuple[ExpressionOrNum,List[ExpressionOrNum]]]:
+        """Evaluate the maximum of a quantity defined by ExtremumObservables on the mesh.
+        
+        Args:
+            name: The name of the observable or a list of names
+            dimensional: If True, return the value(s) with units, otherwise return float(s)
+            as_float: If True, return the value(s) as float(s) (without units)
+            return_x: If True, also return the position(s) of the maximum(s)
+        
+        Returns:
+            If return_x is False, returns the maximum value(s) as ExpressionOrNum or list of ExpressionOrNum.
+            If return_x is True, returns a tuple of (maximum value(s), position(s)) where position(s) is a list of coordinates corresponding to the maximum value(s).
+        """
         return self._evaluate_extremum_wrapper(name,1,dimensional=dimensional,as_float=as_float,return_x=return_x)
            
     def evaluate_minimum(self,name:Union[str,List[str]],dimensional:bool=True,as_float:bool=False,return_x:bool=False)->Union[ExpressionOrNum,List[ExpressionOrNum],Tuple[ExpressionOrNum,List[ExpressionOrNum]]]:
+        """Evaluate the minimum of a quantity defined by ExtremumObservables on the mesh.
+        
+        Args:
+            name: The name of the observable or a list of names
+            dimensional: If True, return the value(s) with units, otherwise return float(s)
+            as_float: If True, return the value(s) as float(s) (without units)
+            return_x: If True, also return the position(s) of the minimum(s)
+        
+        Returns:
+            If return_x is False, returns the minimum value(s) as ExpressionOrNum or list of ExpressionOrNum.
+            If return_x is True, returns a tuple of (minimum value(s), position(s)) where position(s) is a list of coordinates corresponding to the minimum value(s).
+        """
         return self._evaluate_extremum_wrapper(name,-1,dimensional=dimensional,as_float=as_float,return_x=return_x)
 
 
@@ -1177,6 +1216,9 @@ def MeshFromTemplate(problem: "Problem", templatemesh: MeshTemplate, domainname:
 ######################################################
 
 class InterfaceMesh(_pyoomph.InterfaceMesh, BaseMesh):
+    """
+    A mesh that is added to the boundary to add Neumann terms or setting Dirichlet conditions or add new fields directly on the interface, like e.g. surfactants.    
+    """
     def __init__(self, problem: "Problem", parent: "AnySpatialMesh", intername: str, eqtree: "EquationTree", previous_mesh: Optional["InterfaceMesh"] = None):
         super(InterfaceMesh, self).__init__()
         BaseMesh.__init__(self)
@@ -1409,6 +1451,7 @@ class InterfaceMesh(_pyoomph.InterfaceMesh, BaseMesh):
         self._eqtree._equations._set_current_codegen(oldmy)  # type:ignore
 
         self._eqtree._equations.after_compilation(self._codegen)  # type:ignore
+                
         mpi_barrier()
 
     def nodes(self) -> Iterator[_pyoomph.Node]:
@@ -1483,9 +1526,33 @@ class InterfaceMesh(_pyoomph.InterfaceMesh, BaseMesh):
             return val
                     
     def evaluate_maximum(self,name:Union[str,List[str]],dimensional:bool=True,as_float:bool=False,return_x:bool=False)->Union[ExpressionOrNum,List[ExpressionOrNum],Tuple[ExpressionOrNum,List[ExpressionOrNum]]]:
+        """Evaluate the maximum of a quantity defined by ExtremumObservables on the mesh.
+        
+        Args:
+            name: The name of the observable or a list of names
+            dimensional: If True, return the value(s) with units, otherwise return float(s)
+            as_float: If True, return the value(s) as float(s) (without units)
+            return_x: If True, also return the position(s) of the maximum(s)
+        
+        Returns:
+            If return_x is False, returns the maximum value(s) as ExpressionOrNum or list of ExpressionOrNum.
+            If return_x is True, returns a tuple of (maximum value(s), position(s)) where position(s) is a list of coordinates corresponding to the maximum value(s).
+        """
         return self._evaluate_extremum_wrapper(name,1,dimensional=dimensional,as_float=as_float,return_x=return_x)
            
     def evaluate_minimum(self,name:Union[str,List[str]],dimensional:bool=True,as_float:bool=False,return_x:bool=False)->Union[ExpressionOrNum,List[ExpressionOrNum],Tuple[ExpressionOrNum,List[ExpressionOrNum]]]:
+        """Evaluate the minimum of a quantity defined by ExtremumObservables on the mesh.
+        
+        Args:
+            name: The name of the observable or a list of names
+            dimensional: If True, return the value(s) with units, otherwise return float(s)
+            as_float: If True, return the value(s) as float(s) (without units)
+            return_x: If True, also return the position(s) of the minimum(s)
+        
+        Returns:
+            If return_x is False, returns the minimum value(s) as ExpressionOrNum or list of ExpressionOrNum.
+            If return_x is True, returns a tuple of (minimum value(s), position(s)) where position(s) is a list of coordinates corresponding to the minimum value(s).
+        """
         return self._evaluate_extremum_wrapper(name,-1,dimensional=dimensional,as_float=as_float,return_x=return_x)
 
 
@@ -1495,6 +1562,7 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
     """
     def __init__(self, problem: "Problem", eqtree: "EquationTree", domainname: str):
         super().__init__()
+        #print("ODEStorageMesh: Creating ODE storage mesh for domain", domainname,get_mpi_rank())
         self._problem: "Problem" = problem
         self._eqtree: Optional["EquationTree"] = eqtree
         self._eqtree._mesh = self  # type:ignore
@@ -1523,7 +1591,7 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
     def _setup_output_scales(self):
         ocg = self._codegen.get_equations()._get_current_codegen()  
         self._codegen.get_equations()._set_current_codegen(self._codegen)  
-        _, indices = self._element.to_numpy()
+        _, indices = self._element._ode_elem_to_numpy()
         scales: List[ExpressionOrNum] = [1.0] * len(indices)
         for k, i in indices.items():
             s = self._eqtree.get_equations().get_scaling(k)
@@ -1550,10 +1618,12 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
 
         eqs.before_compilation(self._codegen)  
         self._codegen._code = self._problem.compile_bulk_element_code(self._codegen, self, self._name)  
-        self._element = _pyoomph.BulkElementODE0d.construct_new(self._codegen.get_code(), self._problem.timestepper)  
+        #self._element = _pyoomph.BulkElementODE0d.construct_new(self._codegen.get_code(), self._problem.timestepper)  
+        #self._element.set_must_be_kept_as_halo(True) # ODE Dofs are always halo dofs, so they can be accessed from everywhere
         self._set_problem(self._problem, self._codegen._code)  
+        self._element=self._create_ode_element(self._problem.timestepper)
         self._setup_output_scales()
-        self._add_ODE("ODE", self._element)
+#        self._add_ODE("ODE", self._element)
         # self._transfer_mesh_functions()
         self._codegen.get_equations()._set_current_codegen(ocg) 
         self._eqtree.get_equations().after_compilation(self._codegen)
@@ -1573,8 +1643,11 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
     def evaluate_all_observables(self) -> Dict[str, ExpressionOrNum]:
         return BaseMesh.evaluate_all_observables(self)  # type:ignore
 
-    def get_element(self) -> _pyoomph.BulkElementODE0d:
-        return self._get_ODE("ODE")
+    #def get_element(self) -> _pyoomph.BulkElementODE0d:
+    def get_element(self) -> Element:
+        #print("GET ELEMENT",self._element)
+        return self._element
+        #return self._get_ODE("ODE")
 
     @overload
     def get_value(self, name: str, *,dimensional: bool=..., as_float: Literal[False]=...) -> _pyoomph.Expression: ...
@@ -1604,8 +1677,8 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
             RuntimeError: If the ODE has no value with the given name(s).
         """
         assert self._eqtree is not None
-        ode = self._get_ODE("ODE")
-        vals, inds = ode.to_numpy()
+        ode = self.get_element()
+        vals, inds = ode._ode_elem_to_numpy()
         if isinstance(name, str):
             names = [name]
         else:
@@ -1649,8 +1722,8 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
             None
         """
         assert self._eqtree is not None
-        ode = self._get_ODE("ODE")
-        _, inds = ode.to_numpy()
+        ode = self.get_element()
+        _, inds = ode._ode_elem_to_numpy()
         for n, v in namvals.items():
             if not n in inds.keys():
                 raise RuntimeError("The ODE has no value "+str(n))
@@ -1668,8 +1741,8 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
             ode.internal_data_pt(inds[n]).set_value(0, val)
 
     def define_state_file(self, state: "DumpFile",additional_info={}):
-        ode = self._get_ODE("ODE")
-        _, inds = ode.to_numpy()
+        ode = self._element
+        _, inds = ode._ode_elem_to_numpy()
         inds_sorted = list(sorted(list(inds)))
         numinds = len(inds_sorted)
         numinds = state.int_data(

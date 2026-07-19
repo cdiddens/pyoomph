@@ -1,6 +1,6 @@
 /*================================================================================
 pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -15,7 +15,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 
-The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+The main author may be contacted at c.diddens@utwente.nl
 
 ================================================================================*/
 
@@ -32,7 +32,47 @@ The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
 namespace pyoomph
 {
 
-	MeshTemplateFacet::MeshTemplateFacet(std::vector<unsigned> &inds, MeshTemplateCurvedEntity *curved, std::vector<MeshTemplateNode *> *nodes) : nodeinds(inds), curved_entity(curved)
+// This file implements pyoomph's MeshTemplate machinery (declared in meshtemplate.hpp):
+// the geometric/topological description of a mesh (nodes, elements of various shapes and
+// orders, curved-boundary facets, named boundaries, periodicity) that is assembled from
+// Python (e.g. from a GMSH file) before it is turned into concrete oomph-lib Node/Element
+// objects. Key entry points are MeshTemplateElementCollection::set_element_code() (which
+// upgrades template elements to the nodal space required by the compiled element code) and
+// MeshTemplate::factory_element() (which actually builds the oomph-lib elements/nodes,
+// including any curved-geometry MacroElements).
+
+/*
+Type indices:
+
+0: MeshTemplateElementPoint
+1: MeshTemplateElementLineC1
+2: MeshTemplateElementLineC2 
+6: MeshTemplateElementQuadC1
+8: MeshTemplateElementQuadC2
+3: MeshTemplateElementTriC1
+9: MeshTemplateElementTriC2
+4: MeshTemplateElementTetraC1
+10: MeshTemplateElementTetraC2
+11: MeshTemplateElementBrickC1
+14: MeshTemplateElementBrickC2
+13: MeshTemplateElementWedgeC1
+26: MeshTemplateElementWedgeC2
+15: MeshTemplateElementPyramidC1
+27: MeshTemplateElementPyramidC2
+
+
+MeshTemplateElementTriC1TB -> MeshTemplateElementTriC1
+MeshTemplateElementTriC2TB -> MeshTemplateElementTriC2
+MeshTemplateElementTetraC1TB -> MeshTemplateElementTetraC1
+MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
+
+*/
+
+	// Build a facet from its (global) node indices. If `curved` is given, the facet is
+	// attached to that curved geometry: each node's position is converted to the entity's
+	// parametric coordinate (stored in `parametrics`, same order as `nodeinds`), and
+	// apply_periodicity() is used to resolve any periodic wrap-around ambiguity between them.
+	MeshTemplateFacet::MeshTemplateFacet(const std::vector<nodeindex_t> &inds, MeshTemplateCurvedEntity *curved, std::vector<MeshTemplateNode *> *nodes) : nodeinds(inds), curved_entity(curved)
 	{
 		sorted_inds = inds;
 		std::sort(sorted_inds.begin(), sorted_inds.end());
@@ -59,6 +99,9 @@ namespace pyoomph
 		}
 	}
 
+	// Precompute the element's "default" (straight-sided) facet node pointers, used as the
+	// fallback for facets that aren't attached to a curved entity, and initialise per-facet
+	// storage (facets/permutation) to be filled in later via set_facet().
 	MeshTemplateMacroElementBase::MeshTemplateMacroElementBase(MeshTemplateElement *e, std::vector<MeshTemplateNode *> *nodes) : facets(e->nfacets(), NULL), permutation(e->nfacets(), std::vector<unsigned>()), default_facet_nodes(e->nfacets())
 	{
 		for (unsigned int i = 0; i < e->nfacets(); i++)
@@ -70,6 +113,9 @@ namespace pyoomph
 		}
 	}
 
+	// Attach `new_facet` as local facet `ifacet` and compute the node permutation that maps
+	// the macro element's canonical facet-node order onto new_facet's own order, using
+	// `for_orientation` (the element's straight-sided version of the same facet) as reference.
 	void MeshTemplateMacroElementBase::set_facet(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation)
 	{
 		facets[ifacet] = new_facet;
@@ -80,7 +126,9 @@ namespace pyoomph
 	{
 	}
 
-	std::vector<unsigned> MeshTemplateQMacroElement2::find_permutation(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation)
+	// A 2d quad edge only has 2 nodes, hence only 2 possible orderings: return whichever
+	// ordering makes new_facet's first node coincide with for_orientation's first node.
+	std::vector<unsigned> MeshTemplateQMacroElement2::find_permutation(const unsigned &, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation)
 	{
 		if (new_facet->nodeinds[0] == for_orientation->nodeinds[0])
 		{
@@ -92,6 +140,10 @@ namespace pyoomph
 		}
 	}
 
+	// Evaluate the physical position on local facet (i_direct-4, one of the 4 edges of the
+	// reference square) at parametric position s. Without a curved entity, linearly blend
+	// between the two facet corner nodes; with one, blend the corners' curve parameters and
+	// map that through the curved entity's parametric_to_position().
 	void MeshTemplateQMacroElement2::macro_element_boundary(const unsigned &t, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f)
 	{
 		unsigned fi = i_direct - 4;
@@ -123,7 +175,8 @@ namespace pyoomph
 	{
 	}
 
-	std::vector<unsigned> MeshTemplateTMacroElement2::find_permutation(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation)
+	// Same 2-node edge-orientation logic as MeshTemplateQMacroElement2::find_permutation, for the triangular macro element.
+	std::vector<unsigned> MeshTemplateTMacroElement2::find_permutation(const unsigned &, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation)
 	{
 		if (new_facet->nodeinds[0] == for_orientation->nodeinds[0])
 		{
@@ -135,6 +188,8 @@ namespace pyoomph
 		}
 	}
 
+	// Triangle counterpart of MeshTemplateQMacroElement2::macro_element_boundary: linear
+	// (or curved-entity) blending along local edge (i_direct-4) of the reference triangle.
 	void MeshTemplateTMacroElement2::macro_element_boundary(const unsigned &t, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f)
 	{
 		unsigned fi = i_direct - 4;
@@ -166,7 +221,10 @@ namespace pyoomph
 	{
 	}
 
-	std::vector<unsigned> MeshTemplateQMacroElement3::find_permutation(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation)
+	// A 3d brick face has 4 nodes and its node order relative to the element isn't fixed a
+	// priori, so brute-force search over all 4! permutations for the one under which
+	// for_orientation's nodes (reordered by perm) match new_facet's node order.
+	std::vector<unsigned> MeshTemplateQMacroElement3::find_permutation(const unsigned &, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation)
 	{
 		std::vector<unsigned> perm(4);
 		for (unsigned int i = 0; i < 4; i++)
@@ -197,6 +255,12 @@ namespace pyoomph
 		}
 	}
 
+	// Evaluate the physical position on local face (i_direct-20, one of the 6 faces of the
+	// reference cube) at parametric position s, by bilinearly blending in the face's two
+	// local directions (lambda0, lambda1). Falls back to blending nodal positions directly
+	// if the face has no curved entity attached; otherwise blends the corner curve
+	// parameters (permuted via `permutation` into the facet's own node order) and maps
+	// through the curved entity. Note: contains left-over std::cout debug output.
 	void MeshTemplateQMacroElement3::macro_element_boundary(const unsigned &t, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f)
 	{
 
@@ -262,10 +326,14 @@ namespace pyoomph
 		}
 	}
 
+	// oomph-lib Domain used only to dispatch macro_element_boundary() calls; no state of its own.
 	MeshTemplateDomain::MeshTemplateDomain()
 	{
 	}
 
+	// Forward the boundary evaluation to the concrete MeshTemplateXMacroElementN stored at
+	// Macro_element_pt[i_macro] (identified via dynamic_cast, since oomph-lib's MacroElement
+	// base doesn't know about our curved-facet extension).
 	void MeshTemplateDomain::macro_element_boundary(const unsigned &t, const unsigned &i_macro, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f)
 	{
 		// TODO: Remove the if via virtual base
@@ -281,6 +349,9 @@ namespace pyoomph
 		}
 	}
 
+	// Register this element's nodes as belonging to collection `dom`, so that later
+	// add_intermediate_node_unique() calls can infer which domain(s) a newly created
+	// mid-side/center node belongs to (by intersecting its parent nodes' domain sets).
 	void MeshTemplateElement::link_nodes_with_domain(MeshTemplateElementCollection *dom)
 	{
 		auto *mt = dom->get_template();
@@ -292,11 +363,13 @@ namespace pyoomph
 	}
 
 
+	// Single-node point element.
 	MeshTemplateElementPoint::MeshTemplateElementPoint(const nodeindex_t &n1) : MeshTemplateElement(0)
   	{
 		node_indices.push_back(n1);
   	}
 	/////////////////
+	// Store the two corner node indices, in order.
 	MeshTemplateElementLineC1::MeshTemplateElementLineC1(const nodeindex_t &n1, const nodeindex_t &n2) : MeshTemplateElement(1)
 	{
 		node_indices.reserve(2);
@@ -304,12 +377,14 @@ namespace pyoomph
 		node_indices.push_back(n2);
 	}
 
+	// Upgrade to a quadratic line by inserting/reusing the mid-point node.
 	MeshTemplateElement *MeshTemplateElementLineC1::convert_for_C2_space(MeshTemplate *templ)
 	{
 		nodeindex_t n3 = templ->add_intermediate_node_unique(node_indices[0], node_indices[1]);
 		return new MeshTemplateElementLineC2(node_indices[0], n3, node_indices[1]);
 	}
 
+	// A line's "facets" are its two end points (i=0: first node, i=1: second node).
 	MeshTemplateFacet *MeshTemplateElementLineC1::construct_facet(unsigned i)
 	{
 		unsigned ni1;
@@ -324,12 +399,13 @@ namespace pyoomph
 		else
 			return NULL;
 		ni1 = node_indices[ni1];
-		std::vector<unsigned> inds = {ni1};
+		std::vector<nodeindex_t> inds = {ni1};
 		return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 
 	/////////////////
 
+	// Store the two corner nodes (n1,n2) plus the mid-side node (n3), in that order.
 	MeshTemplateElementLineC2::MeshTemplateElementLineC2(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3) : MeshTemplateElement(2)
 	{
 		node_indices.reserve(3);
@@ -338,6 +414,7 @@ namespace pyoomph
 		node_indices.push_back(n3);
 	}
 
+	// End points of the C2 line are local nodes 0 and 2 (index 1 is the mid-point).
 	MeshTemplateFacet *MeshTemplateElementLineC2::construct_facet(unsigned i)
 	{
 		unsigned ni1;
@@ -352,12 +429,13 @@ namespace pyoomph
 		else
 			return NULL;
 		ni1 = node_indices[ni1];
-		std::vector<unsigned> inds = {ni1};
+		std::vector<nodeindex_t> inds = {ni1};
 		return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 
 	/////////////////////////
 
+	// Store the four corner nodes in the element's local (row-major, s0 fastest) ordering.
 	MeshTemplateElementQuadC1::MeshTemplateElementQuadC1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4) : MeshTemplateElement(6)
 	{
 		node_indices.reserve(4);
@@ -367,6 +445,7 @@ namespace pyoomph
 		node_indices.push_back(n4);
 	}
 
+	// Return one of the 4 edges (N/E/S/W, in that fixed local order) as a 2-node facet.
 	MeshTemplateFacet *MeshTemplateElementQuadC1::construct_facet(unsigned i)
 	{
 		unsigned ni1, ni2;
@@ -394,10 +473,12 @@ namespace pyoomph
 			return NULL;
 		ni1 = node_indices[ni1];
 		ni2 = node_indices[ni2];
-		std::vector<unsigned> inds = {ni1, ni2};
+		std::vector<nodeindex_t> inds = {ni1, ni2};
 		return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 
+	// Upgrade to a biquadratic (9-node) quad: insert/reuse the 4 edge mid-points and the
+	// cell-center node, then reassemble in the QuadC2 node ordering.
 	MeshTemplateElement *MeshTemplateElementQuadC1::convert_for_C2_space(MeshTemplate *templ)
 	{
 		nodeindex_t n1 = templ->add_intermediate_node_unique(node_indices[0], node_indices[1]);
@@ -409,6 +490,7 @@ namespace pyoomph
 	}
 
 	/////////////////////////
+	// Store all 9 nodes (4 corners, 4 edge mid-points, 1 center) in local ordering.
 	MeshTemplateElementQuadC2::MeshTemplateElementQuadC2(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4,
 														 const nodeindex_t &n5, const nodeindex_t &n6, const nodeindex_t &n7, const nodeindex_t &n8, const nodeindex_t &n9) : MeshTemplateElement(8)
 	{
@@ -424,6 +506,8 @@ namespace pyoomph
 		node_indices.push_back(n9);
 	}
 
+	// Return one of the 4 edges (N/E/S/W) as a 2-node (corner-only) facet, using the
+	// corresponding corner node indices within the 9-node local numbering.
 	MeshTemplateFacet *MeshTemplateElementQuadC2::construct_facet(unsigned i)
 	{
 		unsigned ni1, ni2;
@@ -451,12 +535,13 @@ namespace pyoomph
 			return NULL;
 		ni1 = node_indices[ni1];
 		ni2 = node_indices[ni2];
-		std::vector<unsigned> inds = {ni1, ni2};
+		std::vector<nodeindex_t> inds = {ni1, ni2};
 		return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 
 	/////////////////////////////////
 
+	// Store the three corner nodes in local ordering.
 	MeshTemplateElementTriC1::MeshTemplateElementTriC1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3) : MeshTemplateElement(3)
 	{
 		node_indices.reserve(3);
@@ -465,6 +550,7 @@ namespace pyoomph
 		node_indices.push_back(n3);
 	}
 
+	// Return one of the 3 edges (0-1, 1-2, 2-0) as a 2-node facet.
 	MeshTemplateFacet *MeshTemplateElementTriC1::construct_facet(unsigned i)
 	{
       unsigned ni1, ni2;
@@ -487,10 +573,11 @@ namespace pyoomph
 			return NULL;
 		ni1 = node_indices[ni1];
 		ni2 = node_indices[ni2];
-		std::vector<unsigned> inds = {ni1, ni2};
+		std::vector<nodeindex_t> inds = {ni1, ni2};
 		return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 
+	// Upgrade to a quadratic (6-node) triangle: insert/reuse the 3 edge mid-points.
 	MeshTemplateElement *MeshTemplateElementTriC1::convert_for_C2_space(MeshTemplate *templ)
 	{
 		nodeindex_t n3 = templ->add_intermediate_node_unique(node_indices[0], node_indices[1]);
@@ -499,6 +586,8 @@ namespace pyoomph
 		return new MeshTemplateElementTriC2(node_indices[0], node_indices[1], node_indices[2], n3, n4, n5);
 	}
 	
+	// Upgrade to a linear triangle with an added centroid "bubble" node (not treated as a
+	// boundary node even if the corners are, hence boundary_possible=false).
 	MeshTemplateElement *MeshTemplateElementTriC1::convert_for_C1TB_space(MeshTemplate *templ)
 	{
 		nodeindex_t n3 = templ->add_intermediate_node_unique(node_indices[0], node_indices[1],node_indices[2],false);
@@ -507,6 +596,7 @@ namespace pyoomph
 
 	/////////////////////////////////
 
+	// Store the 3 corners followed by the 3 edge mid-points, in local ordering.
 	MeshTemplateElementTriC2::MeshTemplateElementTriC2(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5, const nodeindex_t &n6) : MeshTemplateElement(9)
 	{
 		node_indices.reserve(6);
@@ -518,6 +608,7 @@ namespace pyoomph
 		node_indices.push_back(n6);
 	}
 
+	// Return one of the 3 edges (as corner-only 2-node facets; same local corner ordering as TriC1).
 	MeshTemplateFacet *MeshTemplateElementTriC2::construct_facet(unsigned i)
 	{
 		unsigned ni1, ni2;
@@ -540,21 +631,24 @@ namespace pyoomph
 			return NULL;
 		ni1 = node_indices[ni1];
 		ni2 = node_indices[ni2];
-		std::vector<unsigned> inds = {ni1, ni2};
+		std::vector<nodeindex_t> inds = {ni1, ni2};
 		return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 
+	// Upgrade to a quadratic triangle with an added centroid "bubble" node.
 	MeshTemplateElement *MeshTemplateElementTriC2::convert_for_C2TB_space(MeshTemplate *templ)
 	{
 		nodeindex_t n7 = templ->add_intermediate_node_unique(node_indices[0], node_indices[1], node_indices[2], false);
 		return new MeshTemplateElementTriC2TB(node_indices[0], node_indices[1], node_indices[2], node_indices[3], node_indices[4], node_indices[5], n7);
 	}
 
+	// Corner nodes are inherited from TriC1; just append the centroid bubble node.
 	MeshTemplateElementTriC1TB::MeshTemplateElementTriC1TB(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4) : MeshTemplateElementTriC1(n1, n2, n3)
 	{
 		node_indices.push_back(n4);
 	}
 
+	// Corner + mid-side nodes are inherited from TriC2; just append the centroid bubble node.
 	MeshTemplateElementTriC2TB::MeshTemplateElementTriC2TB(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5, const nodeindex_t &n6, const nodeindex_t &n7) : MeshTemplateElementTriC2(n1, n2, n3, n4, n5, n6)
 	{
 		node_indices.push_back(n7);
@@ -562,6 +656,7 @@ namespace pyoomph
 
 	//////////////////////////////////
 
+	// Store the 8 corner nodes in local (row-major over s0,s1,s2) ordering.
 	MeshTemplateElementBrickC1::MeshTemplateElementBrickC1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4,
 														   const nodeindex_t &n5, const nodeindex_t &n6, const nodeindex_t &n7, const nodeindex_t &n8) : MeshTemplateElement(11)
 	{
@@ -576,6 +671,9 @@ namespace pyoomph
 		node_indices.push_back(n8);
 	}
 
+	// Upgrade to a triquadratic (27-node) brick by inserting/reusing all edge mid-points,
+	// face centers and the body center, laid out plate-by-plate (bottom z=0, middle, top
+	// z=1) to match the standard 27-node local node ordering.
 	MeshTemplateElement *MeshTemplateElementBrickC1::convert_for_C2_space(MeshTemplate *templ)
 	{
 		std::vector<nodeindex_t> ninds(27);
@@ -645,6 +743,7 @@ namespace pyoomph
 		return new MeshTemplateElementBrickC2(ninds);
 	}
 
+	// Return one of the 6 faces (LEFT/RIGHT/DOWN/UP/BACK/FRONT, fixed local order) as a 4-node facet.
 	MeshTemplateFacet *MeshTemplateElementBrickC1::construct_facet(unsigned i)
 	{
 		unsigned ni1, ni2, ni3, ni4;
@@ -696,13 +795,15 @@ namespace pyoomph
 		ni2 = node_indices[ni2];
 		ni3 = node_indices[ni3];
 		ni4 = node_indices[ni4];
-		std::vector<unsigned> inds = {ni1, ni2, ni3, ni4};
+		std::vector<nodeindex_t> inds = {ni1, ni2, ni3, ni4};
 		// std::sort(inds.begin(),inds.end());
 		return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 
 	/////////////////////////////////
 
+	// Return one of the 6 faces as a 4-node (corner-only) facet, using the corresponding
+	// corner indices within the 27-node local numbering.
 	MeshTemplateFacet *MeshTemplateElementBrickC2::construct_facet(unsigned i)
 	{
 		unsigned ni1, ni2, ni3, ni4;
@@ -754,11 +855,12 @@ namespace pyoomph
 		ni2 = node_indices[ni2];
 		ni3 = node_indices[ni3];
 		ni4 = node_indices[ni4];
-		std::vector<unsigned> inds = {ni1, ni2, ni3, ni4};
+		std::vector<nodeindex_t> inds = {ni1, ni2, ni3, ni4};
 		// std::sort(inds.begin(),inds.end());
 		return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 
+	// Store all 27 nodes (already in the standard local ordering) directly.
 	MeshTemplateElementBrickC2::MeshTemplateElementBrickC2(std::vector<nodeindex_t> ninds) : MeshTemplateElement(14)
 	{
 		if (ninds.size() != 27)
@@ -770,6 +872,7 @@ namespace pyoomph
 
 	/////////////////////////////////
 
+	// Store the 4 corner nodes in local ordering.
 	MeshTemplateElementTetraC1::MeshTemplateElementTetraC1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4) : MeshTemplateElement(4)
 	{
 		node_indices.resize(4);
@@ -779,6 +882,7 @@ namespace pyoomph
 		node_indices[3] = n4;
 	}
 
+	// Upgrade to a quadratic (10-node) tetrahedron: insert/reuse the 6 edge mid-points.
 	MeshTemplateElement *MeshTemplateElementTetraC1::convert_for_C2_space(MeshTemplate *templ)
 	{
 		std::vector<nodeindex_t> ninds(10);
@@ -797,6 +901,10 @@ namespace pyoomph
 		return new MeshTemplateElementTetraC2(ninds);
 	}
 
+	
+
+	// Return one of the 4 triangular faces, using oomph-lib's tet face-node convention
+	// {1,2,3},{0,2,3},{0,1,3},{1,2,0} (i.e. face i is opposite to corner i, in this fixed order).
 	MeshTemplateFacet *MeshTemplateElementTetraC1::construct_facet(unsigned i)
 	{
 //oomph ordering : {1, 2, 3}, {0, 2, 3}, {0, 1, 3}, {1, 2, 0}
@@ -822,13 +930,31 @@ namespace pyoomph
 		ni1 = node_indices[ni1];
 		ni2 = node_indices[ni2];
 		ni3 = node_indices[ni3];
-		std::vector<unsigned> inds = {ni1, ni2, ni3};
+		std::vector<nodeindex_t> inds = {ni1, ni2, ni3};
 		// std::sort(inds.begin(),inds.end());
 		return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 
+	// Upgrade to a linear tetrahedron with an added body-centroid "bubble" node.
+	MeshTemplateElement *MeshTemplateElementTetraC1::convert_for_C1TB_space(MeshTemplate *templ)
+	{
+
+		std::vector<nodeindex_t> nnodes = node_indices;		
+		nnodes.push_back(templ->add_intermediate_node_unique(node_indices[0], node_indices[1], node_indices[2], node_indices[3], false));
+
+		return new MeshTemplateElementTetraC1TB(nnodes[0], nnodes[1], nnodes[2], nnodes[3], nnodes[4]);
+	}
+
+
+	// Corner nodes inherited from TetraC1; just append the body-centroid bubble node.
+	MeshTemplateElementTetraC1TB::MeshTemplateElementTetraC1TB(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5) : MeshTemplateElementTetraC1(n1, n2, n3, n4)
+	{
+		node_indices.push_back(n5);
+	}
+
 	/////////////////////////////////
 
+	// Store all 10 nodes (4 corners + 6 edge mid-points, already in local ordering) directly.
 	MeshTemplateElementTetraC2::MeshTemplateElementTetraC2(std::vector<nodeindex_t> ninds) : MeshTemplateElement(10)
 	{
 		if (ninds.size() != 10)
@@ -836,6 +962,8 @@ namespace pyoomph
 		node_indices = ninds;
 	}
 
+	// Same face convention as MeshTemplateElementTetraC1::construct_facet, applied to the
+	// corner nodes within the 10-node local numbering.
 	MeshTemplateFacet *MeshTemplateElementTetraC2::construct_facet(unsigned i)
 	{
 //oomph ordering : {1, 2, 3}, {0, 2, 3}, {0, 1, 3}, {1, 2, 0}
@@ -861,11 +989,13 @@ namespace pyoomph
 		ni1 = node_indices[ni1];
 		ni2 = node_indices[ni2];
 		ni3 = node_indices[ni3];
-		std::vector<unsigned> inds = {ni1, ni2, ni3};
+		std::vector<nodeindex_t> inds = {ni1, ni2, ni3};
 		// std::sort(inds.begin(),inds.end());
 		return new MeshTemplateFacet(inds, NULL, NULL);
 	}
 
+	// Upgrade to a quadratic tetrahedron with 4 added face-centroid bubble nodes and 1 added
+	// body-centroid bubble node (15 nodes total).
 	MeshTemplateElement *MeshTemplateElementTetraC2::convert_for_C2TB_space(MeshTemplate *templ)
 	{
 
@@ -881,6 +1011,8 @@ namespace pyoomph
 
 	/////////////////////////////////
 
+	// First 10 nodes (corners + edge mid-points) are handled by the TetraC2 base class;
+	// append the remaining 5 (4 face-centroid + 1 body-centroid) bubble nodes here.
 	MeshTemplateElementTetraC2TB::MeshTemplateElementTetraC2TB(std::vector<nodeindex_t> ninds) : MeshTemplateElementTetraC2(std::vector<nodeindex_t>(ninds.begin(), ninds.begin() + 10))
 	{
 		if (ninds.size() != 15)
@@ -891,8 +1023,280 @@ namespace pyoomph
 		}
 	}
 
+
+    /////////////////////////////////
+
+	MeshTemplateElementWedgeC1::MeshTemplateElementWedgeC1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5, const nodeindex_t &n6) 
+	   	: MeshTemplateElement(13)
+	{
+		// Add the nodes to the vector and store them internally
+		node_indices.reserve(6);
+		node_indices.push_back(n1);
+		node_indices.push_back(n2);
+		node_indices.push_back(n3);
+		node_indices.push_back(n4);
+		node_indices.push_back(n5);
+		node_indices.push_back(n6);
+	}	
+
+	// Return one of the wedge's 5 facets (2 triangular end-caps + 3 quadrilateral side
+	// faces); see the local node/coordinate layout sketched in the comment below.
+	MeshTemplateFacet *MeshTemplateElementWedgeC1::construct_facet(unsigned i)
+	{
+		/*
+	          5 o
+               /\
+              /  \
+             /    \
+            /      \
+         3 o--------o 4
+           |        |
+           |  2 o   |
+           |   /\   |
+           |  /  \  |
+           | /    \ |
+           |/      \|
+         0 o--------o 1
+
+	facet 0: s[2] = 0, nodes 0,1,2
+    facet 1: s[2] = 1, nodes 3,4,5
+    facet 2: s[0] = 0, nodes 0,2,3,5
+    facet 3: s[1] = 0, nodes 0,1,3,4
+    facet 4: s[0]+s[1] = 1, nodes 1,2,4,5
+		 */
+	  std::vector<nodeindex_t> inds;
+	  switch (i)
+	  {
+	  case 0:
+		inds = {node_indices[0], node_indices[1], node_indices[2]};
+		break;
+	  case 1:
+		inds = {node_indices[3], node_indices[4], node_indices[5]};
+		break;
+	  case 2:
+		inds = {node_indices[0], node_indices[2], node_indices[3], node_indices[5]};
+		break;
+	  case 3:
+		inds = {node_indices[0], node_indices[1], node_indices[3], node_indices[4]};
+		break;
+	  case 4:
+		inds = {node_indices[1], node_indices[2], node_indices[4], node_indices[5]};
+		break;
+	  default:
+		throw_runtime_error("A wedge element only has 5 facets");
+	  }
+	  return new MeshTemplateFacet(inds, NULL, NULL);
+	}
+
+	// Upgrade to an 18-node quadratic wedge: nodes 0-2/12-14 are the bottom/top triangle
+	// corners (inherited), 3-5/15-17 their edge mid-points, and 6-11 the 6 "vertical" edge
+	// mid-points connecting corresponding bottom/top corners and mid-points.
+	MeshTemplateElement *MeshTemplateElementWedgeC1::convert_for_C2_space(MeshTemplate *templ)
+	{
+		std::vector<nodeindex_t> ninds(18);
+		ninds[0] = node_indices[0];
+		ninds[1] = node_indices[1];
+		ninds[2] = node_indices[2];
+
+		ninds[12] = node_indices[3];
+		ninds[13] = node_indices[4];
+		ninds[14] = node_indices[5];
+		
+
+		ninds[3] = templ->add_intermediate_node_unique(ninds[0], ninds[1]);
+		ninds[4] = templ->add_intermediate_node_unique(ninds[0], ninds[2]);
+		ninds[5] = templ->add_intermediate_node_unique(ninds[1], ninds[2]);
+
+		ninds[15] = templ->add_intermediate_node_unique(ninds[12], ninds[13]);
+		ninds[16] = templ->add_intermediate_node_unique(ninds[12], ninds[14]);
+		ninds[17] = templ->add_intermediate_node_unique(ninds[13], ninds[14]);
+
+		for (unsigned offs = 0; offs < 6; offs++)
+		{
+		  ninds[6 + offs] = templ->add_intermediate_node_unique(ninds[offs], ninds[offs + 12]);
+		}
+		
+		return new MeshTemplateElementWedgeC2(ninds);
+	}
+
+	/////////////////////////////////
+	// Store the 4 base corners followed by the apex node; see the local coordinate layout
+	// sketched in construct_facet() below.
+	MeshTemplateElementPyramidC1::MeshTemplateElementPyramidC1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5):
+	MeshTemplateElement(15)
+	{
+		// Add the nodes to the vector and store them internally
+		node_indices.reserve(5);
+		node_indices.push_back(n1);
+		node_indices.push_back(n2);
+		node_indices.push_back(n3);
+		node_indices.push_back(n4);
+		node_indices.push_back(n5);
+	}	
+
+	// Return one of the pyramid's 5 facets (4 triangular side faces meeting at the apex,
+	// plus the quadrilateral base); see the local coordinate sketch below.
+	MeshTemplateFacet *MeshTemplateElementPyramidC1::construct_facet(unsigned i)
+	{
+		/*
+Index : Local coordinates (s0,s1,s2)
+  0: (0,0,0)
+  1: (1,0,0)
+  2: (1,1,0)
+  3: (0,1,0)
+  4: (0,0,1)  <- apex (degenerate point, s2=1 collapses to a point at s0=s1=0)
+
+
+              4 o
+               /|\
+              / | \
+             /  |  \
+            / [2]|[3]\
+           /    |    \
+        3 o-----|-----o 2
+          |  [4]|     |
+  [1]     |     |     |   [0]
+          |   [4]     |
+        0 o-----------o 1
+
+  s[0] and s[1] run from 0 to 1-s[2], s[2] runs from 0 to 1
+
+  facets are numbered as follows:
+  facet 0: s[1] = 0,        nodes 0,1,4     (triangle)
+  facet 1: s[0] = 1-s[2],   nodes 1,2,4     (triangle)
+  facet 2: s[1] = 1-s[2],   nodes 2,3,4     (triangle)
+  facet 3: s[0] = 0,        nodes 0,3,4     (triangle)
+  facet 4: s[2] = 0,        nodes 0,1,2,3   (quad base)
+*/
+	  std::vector<nodeindex_t> inds;
+	  switch (i)
+	  {
+	  case 0:
+		inds = {node_indices[0], node_indices[1], node_indices[4]};
+		break;
+	  case 1:
+		inds = {node_indices[1], node_indices[2], node_indices[4]};
+		break;
+	  case 2:
+		inds = {node_indices[2], node_indices[3], node_indices[4]};
+		break;
+	  case 3:
+		inds = {node_indices[0], node_indices[4], node_indices[3]};
+		break;
+	  case 4:
+		inds = {node_indices[0], node_indices[3], node_indices[1], node_indices[2]};
+		break;
+	  default:
+		throw_runtime_error("A pyramid element only has 5 facets");
+	  }
+	  return new MeshTemplateFacet(inds, NULL, NULL);
+	}
+
+	MeshTemplateElement *MeshTemplateElementPyramidC1::convert_for_C2_space(MeshTemplate *templ)
+	{
+		std::vector<nodeindex_t> ninds(14);
+		ninds[0] = node_indices[0];
+		ninds[1] = node_indices[1];
+		ninds[2] = node_indices[2];
+		ninds[3] = node_indices[3];
+		
+		ninds[4] = node_indices[4];
+
+		ninds[5] = templ->add_intermediate_node_unique(ninds[0], ninds[1]);
+		ninds[6] = templ->add_intermediate_node_unique(ninds[1], ninds[2]);
+		ninds[7] = templ->add_intermediate_node_unique(ninds[2], ninds[3]);
+		ninds[8] = templ->add_intermediate_node_unique(ninds[3], ninds[0]);
+		ninds[9] = templ->add_intermediate_node_unique(ninds[0], ninds[4]);
+		ninds[10] = templ->add_intermediate_node_unique(ninds[1], ninds[4]);
+		ninds[11] = templ->add_intermediate_node_unique(ninds[2], ninds[4]);
+		ninds[12] = templ->add_intermediate_node_unique(ninds[3], ninds[4]);
+		ninds[13] = templ->add_intermediate_node_unique(ninds[0], ninds[2]);
+
+		return new MeshTemplateElementPyramidC2(ninds);
+	}
+
 	/////////////////////////////////
 
+	// Store all 18 nodes (already in local ordering, see WedgeC1::convert_for_C2_space) directly.
+	MeshTemplateElementWedgeC2::MeshTemplateElementWedgeC2(std::vector<nodeindex_t> ninds) : MeshTemplateElement(26)
+	{
+		if (ninds.size() != 18)
+			throw_runtime_error("Need exactly 18 nodes for a wedge element with C2 space");
+		node_indices = ninds;
+	}	
+
+	// Same 5-facet convention as MeshTemplateElementWedgeC1::construct_facet, using the
+	// corresponding corner nodes within the 18-node local numbering (see inline comments per case).
+	MeshTemplateFacet *MeshTemplateElementWedgeC2::construct_facet(unsigned i)
+{
+    std::vector<nodeindex_t> inds;
+    switch (i)
+    {
+    case 0:
+        // s2 = 0 : corners are our nodes 0,1,2  (same as C1)
+        inds = {node_indices[0], node_indices[1], node_indices[2]};
+        break;
+    case 1:
+        // s2 = 1 : corners are our nodes 12,13,14  (C1 used 3,4,5)
+        inds = {node_indices[12], node_indices[13], node_indices[14]};
+        break;
+    case 2:
+        // s0 = 0 : corners are our nodes 0,2,12,14  (C1 used 0,2,3,5)
+        inds = {node_indices[0], node_indices[2], node_indices[12], node_indices[14]};
+        break;
+    case 3:
+        // s1 = 0 : corners are our nodes 0,1,12,13  (C1 used 0,1,3,4)
+        inds = {node_indices[0], node_indices[1], node_indices[12], node_indices[13]};
+        break;
+    case 4:
+        // s0+s1 = 1 : corners are our nodes 1,2,13,14  (C1 used 1,2,4,5)
+        inds = {node_indices[1], node_indices[2], node_indices[13], node_indices[14]};
+        break;
+    default:
+        throw_runtime_error("A wedge element only has 5 facets");
+    }
+    return new MeshTemplateFacet(inds, NULL, NULL);
+   }
+
+	MeshTemplateElementPyramidC2::MeshTemplateElementPyramidC2(std::vector<nodeindex_t> ninds) : MeshTemplateElement(27)
+	{
+		if (ninds.size() != 14)
+			throw_runtime_error("Need exactly 14 nodes for a pyramid element with C2 space");
+		node_indices = ninds;
+	}	
+
+	MeshTemplateFacet *MeshTemplateElementPyramidC2::construct_facet(unsigned i)
+{
+    std::vector<nodeindex_t> inds;
+    switch (i)
+    {
+	case 0:
+		inds = {node_indices[0], node_indices[1], node_indices[4]};
+		break;
+	case 1:
+		inds = {node_indices[1], node_indices[2], node_indices[4]};
+		break;
+	case 2:
+		inds = {node_indices[2], node_indices[3], node_indices[4]};
+		break;
+	case 3:
+		inds = {node_indices[0], node_indices[4], node_indices[3]};
+		break;
+	case 4:
+		inds = {node_indices[0], node_indices[3], node_indices[1], node_indices[2]};
+		break;
+	default:
+        throw_runtime_error("A pyramid element only has 5 facets");
+    }
+    return new MeshTemplateFacet(inds, NULL, NULL);
+   }
+
+	/////////////////////////////////
+
+	// Find any node of this collection that lies on every boundary in `boundindices`, and
+	// return its position; used as a representative point for evaluating position-dependent
+	// initial conditions / Dirichlet BCs when no more specific point is available. Returns
+	// the origin if no such node exists.
 	std::vector<double> MeshTemplateElementCollection::get_reference_position_for_IC_and_DBC(std::set<unsigned int> boundindices)
 	{
 		const std::vector<MeshTemplateNode *> &nodes = mesh_template->get_nodes();
@@ -926,6 +1330,10 @@ namespace pyoomph
 		return res;
 	}
 
+	// Determine the set of mesh boundary names that this collection's elements touch: for
+	// each element with at least one boundary node, intersect the boundary sets of all nodes
+	// of each of its facets (so only boundaries shared by an entire facet count) and collect
+	// the resulting boundary indices.
 	std::vector<std::string> MeshTemplateElementCollection::get_adjacent_boundary_names()
 	{
 		std::set<unsigned int> binds;
@@ -974,6 +1382,8 @@ namespace pyoomph
 		return res;
 	}
 
+	// Lazily determine (and cache) the nodal dimension from the first element, unless
+	// explicitly overridden via set_nodal_dimension().
 	int MeshTemplateElementCollection::nodal_dimension()
 	{
 		if (Nodal_dimension < 0 && (!elements.empty()))
@@ -983,6 +1393,8 @@ namespace pyoomph
 		return Nodal_dimension;
 	}
 
+	// Lazily determine (and cache) the Lagrangian dimension from the first element, unless
+	// explicitly overridden via set_lagrangian_dimension().
 	int MeshTemplateElementCollection::lagrangian_dimension()
 	{
 		if (Lagr_dimension < 0 && (!elements.empty()))
@@ -992,7 +1404,9 @@ namespace pyoomph
 		return Lagr_dimension;
 	}
 
-	MeshTemplateElementPoint *MeshTemplateElementCollection::add_point_element(const nodeindex_t &n1)
+	// Add a 0d point element; all elements added to a collection must share the same
+	// geometric dimension, which is fixed by the first element added.
+	void MeshTemplateElementCollection::add_point_element(const nodeindex_t &n1)
 	{
 		if (dim == -1)
 		{
@@ -1003,10 +1417,9 @@ namespace pyoomph
 		MeshTemplateElementPoint *res = new MeshTemplateElementPoint(n1);
 		elements.push_back(res);
 		res->link_nodes_with_domain(this);
-		return res;
 	}
 
-	MeshTemplateElementLineC1 *MeshTemplateElementCollection::add_line_1d_C1(const nodeindex_t &n1, const nodeindex_t &n2)
+	void MeshTemplateElementCollection::add_line_1d_C1(const nodeindex_t &n1, const nodeindex_t &n2)
 	{
 		if (dim == -1)
 		{
@@ -1017,10 +1430,9 @@ namespace pyoomph
 		MeshTemplateElementLineC1 *res = new MeshTemplateElementLineC1(n1, n2);
 		elements.push_back(res);
 		res->link_nodes_with_domain(this);
-		return res;
 	}
 
-	MeshTemplateElementLineC2 *MeshTemplateElementCollection::add_line_1d_C2(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3)
+	void MeshTemplateElementCollection::add_line_1d_C2(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3)
 	{
 		if (dim == -1)
 		{
@@ -1030,11 +1442,10 @@ namespace pyoomph
 			throw_runtime_error("Tried to add a 1d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
 		MeshTemplateElementLineC2 *res = new MeshTemplateElementLineC2(n1, n2, n3);
 		elements.push_back(res);
-		res->link_nodes_with_domain(this);
-		return res;
+		res->link_nodes_with_domain(this);		
 	}
 
-	MeshTemplateElementQuadC1 *MeshTemplateElementCollection::add_quad_2d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4)
+	void MeshTemplateElementCollection::add_quad_2d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4)
 	{
 		if (dim == -1)
 		{
@@ -1044,11 +1455,10 @@ namespace pyoomph
 			throw_runtime_error("Tried to add a 2d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
 		MeshTemplateElementQuadC1 *res = new MeshTemplateElementQuadC1(n1, n2, n3, n4);
 		elements.push_back(res);
-		res->link_nodes_with_domain(this);
-		return res;
+		res->link_nodes_with_domain(this);		
 	}
 
-	MeshTemplateElementQuadC2 *MeshTemplateElementCollection::add_quad_2d_C2(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4,
+	void MeshTemplateElementCollection::add_quad_2d_C2(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4,
 																			 const nodeindex_t &n5, const nodeindex_t &n6, const nodeindex_t &n7, const nodeindex_t &n8, const nodeindex_t &n9)
 	{
 		if (dim == -1)
@@ -1060,10 +1470,9 @@ namespace pyoomph
 		MeshTemplateElementQuadC2 *res = new MeshTemplateElementQuadC2(n1, n2, n3, n4, n5, n6, n7, n8, n9);
 		elements.push_back(res);
 		res->link_nodes_with_domain(this);
-		return res;
 	}
 
-	MeshTemplateElementTriC1 *MeshTemplateElementCollection::add_tri_2d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3)
+	void MeshTemplateElementCollection::add_tri_2d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3)
 	{
 		if (dim == -1)
 		{
@@ -1073,12 +1482,14 @@ namespace pyoomph
 			throw_runtime_error("Tried to add a 2d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
 		MeshTemplateElementTriC1 *res = new MeshTemplateElementTriC1(n1, n2, n3);
 		elements.push_back(res);
-		res->link_nodes_with_domain(this);
-		return res;
+		res->link_nodes_with_domain(this);		
 	}
 
+   // Scott-Vogelius splitting: split a triangle (n1,n2,n3) into 3 sub-triangles that
+   // share a new node at the barycenter, which is required for the Scott-Vogelius
+   // finite-element pair (discontinuous pressure) to be stable/well defined.
    //Scott-Vogelius splitting
-	std::vector<MeshTemplateElementTriC1*> MeshTemplateElementCollection::add_SV_tri_2d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3)
+	void MeshTemplateElementCollection::add_SV_tri_2d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3)
 	{
 	 std::vector<double> p1=mesh_template->get_node_position(n1);	 
 	 std::vector<double> p2=mesh_template->get_node_position(n2);	 
@@ -1086,10 +1497,12 @@ namespace pyoomph
 	 std::vector<double> pbc(3,0.0);
 	 for (unsigned int i=0;i<p1.size();i++) pbc[i]=(p1[i]+p2[i]+p3[i])/3.0;
 	 nodeindex_t bc=mesh_template->add_node_unique(pbc[0],pbc[1],pbc[2]);
-    return {add_tri_2d_C1(n1,n2,bc),add_tri_2d_C1(n2,n3,bc),add_tri_2d_C1(n3,n1,bc)};
+    add_tri_2d_C1(n1,n2,bc);
+	add_tri_2d_C1(n2,n3,bc);
+	add_tri_2d_C1(n3,n1,bc);
 	}
 
-	MeshTemplateElementTriC2 *MeshTemplateElementCollection::add_tri_2d_C2(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5, const nodeindex_t &n6)
+	void MeshTemplateElementCollection::add_tri_2d_C2(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5, const nodeindex_t &n6)
 	{
 		if (dim == -1)
 		{
@@ -1099,11 +1512,10 @@ namespace pyoomph
 			throw_runtime_error("Tried to add a 2d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
 		MeshTemplateElementTriC2 *res = new MeshTemplateElementTriC2(n1, n2, n3, n4, n5, n6);
 		elements.push_back(res);
-		res->link_nodes_with_domain(this);
-		return res;
+		res->link_nodes_with_domain(this);		
 	}
 
-	MeshTemplateElementBrickC1 *MeshTemplateElementCollection::add_brick_3d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4,
+	void MeshTemplateElementCollection::add_brick_3d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4,
 																			   const nodeindex_t &n5, const nodeindex_t &n6, const nodeindex_t &n7, const nodeindex_t &n8)
 	{
 		if (dim == -1)
@@ -1115,10 +1527,9 @@ namespace pyoomph
 		MeshTemplateElementBrickC1 *res = new MeshTemplateElementBrickC1(n1, n2, n3, n4, n5, n6, n7, n8);
 		elements.push_back(res);
 		res->link_nodes_with_domain(this);
-		return res;
 	}
 
-	MeshTemplateElementBrickC2 *MeshTemplateElementCollection::add_brick_3d_C2(const std::vector<nodeindex_t> &inds)
+	void MeshTemplateElementCollection::add_brick_3d_C2(const std::vector<nodeindex_t> &inds)
 	{
 		if (dim == -1)
 		{
@@ -1129,10 +1540,9 @@ namespace pyoomph
 		MeshTemplateElementBrickC2 *res = new MeshTemplateElementBrickC2(inds);
 		elements.push_back(res);
 		res->link_nodes_with_domain(this);
-		return res;
 	}
 
-	MeshTemplateElementTetraC1 *MeshTemplateElementCollection::add_tetra_3d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4)
+	void MeshTemplateElementCollection::add_tetra_3d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4)
 	{
 		if (dim == -1)
 		{
@@ -1142,11 +1552,10 @@ namespace pyoomph
 			throw_runtime_error("Tried to add a 3d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
 		MeshTemplateElementTetraC1 *res = new MeshTemplateElementTetraC1(n1, n2, n3, n4);
 		elements.push_back(res);
-		res->link_nodes_with_domain(this);
-		return res;
+		res->link_nodes_with_domain(this);		
 	}
 
-	MeshTemplateElementTetraC2 *MeshTemplateElementCollection::add_tetra_3d_C2(const std::vector<nodeindex_t> &inds)
+	void MeshTemplateElementCollection::add_tetra_3d_C2(const std::vector<nodeindex_t> &inds)
 	{
 		if (dim == -1)
 		{
@@ -1157,10 +1566,68 @@ namespace pyoomph
 		MeshTemplateElementTetraC2 *res = new MeshTemplateElementTetraC2(inds);
 		elements.push_back(res);
 		res->link_nodes_with_domain(this);
-		return res;
 	}
 
+	void MeshTemplateElementCollection::add_wedge_3d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5, const nodeindex_t &n6)
+	{
+		if (dim == -1)
+		{
+			dim = 3;
+		}
+		else if (dim != 3)
+			throw_runtime_error("Tried to add a 3d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
+		MeshTemplateElementWedgeC1 *res = new MeshTemplateElementWedgeC1(n1, n2, n3, n4, n5, n6);
+		elements.push_back(res);
+		res->link_nodes_with_domain(this);
+	}
+
+	void MeshTemplateElementCollection::add_pyramid_3d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, const nodeindex_t &n5)
+	{
+		if (dim == -1)
+		{
+			dim = 3;
+		}
+		else if (dim != 3)
+			throw_runtime_error("Tried to add a 3d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
+		MeshTemplateElementPyramidC1 *res = new MeshTemplateElementPyramidC1(n1, n2, n3, n4, n5);
+		elements.push_back(res);
+		res->link_nodes_with_domain(this);
+	}
+
+	void MeshTemplateElementCollection::add_wedge_3d_C2(const std::vector<nodeindex_t> &inds)
+	{
+		if (dim == -1)
+		{
+			dim = 3;
+		}
+		else if (dim != 3)
+			throw_runtime_error("Tried to add a 3d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
+		MeshTemplateElementWedgeC2 *res = new MeshTemplateElementWedgeC2(inds);
+		elements.push_back(res);
+		res->link_nodes_with_domain(this);		
+	}
+
+	void MeshTemplateElementCollection::add_pyramid_3d_C2(const std::vector<nodeindex_t> &inds)
+	{
+		if (dim == -1)
+		{
+			dim = 3;
+		}
+		else if (dim != 3)
+			throw_runtime_error("Tried to add a 3d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
+		MeshTemplateElementPyramidC2 *res = new MeshTemplateElementPyramidC2(inds);
+		elements.push_back(res);
+		res->link_nodes_with_domain(this);		
+	}
 	
+	// Attach the compiled element code `code_inst` to this collection and, if the code's
+	// dominant nodal space requires more nodes than what the elements currently have
+	// (e.g. C1TB/C2/C2TB), convert every element in-place to that higher-order space (via
+	// convert_for_C*_space, which creates/reuses the required extra nodes). If any element
+	// was upgraded to C2, additionally re-derive periodicity for the newly created mid-side
+	// nodes: an intermediate node is periodic iff *all* of its parent corner nodes have a
+	// periodic master, in which case its master is the intermediate node between those
+	// masters (found by matching the sorted parent-id keys in inter_nodes_periodic).
 	void MeshTemplateElementCollection::set_element_code(DynamicBulkElementInstance *code_inst)
 	{
 		code_instance = code_inst;
@@ -1183,10 +1650,22 @@ namespace pyoomph
 						elements[ie] = dynamic_cast<MeshTemplateElementTriC2 *>(e)->convert_for_C2TB_space(mesh_template);
 						delete e;
 						e = elements[ie];				   
+				}
+				else if (dynamic_cast<MeshTemplateElementTetraC1 *>(e) && !dynamic_cast<MeshTemplateElementTetraC1TB *>(e) )
+				{
+						elements[ie] = dynamic_cast<MeshTemplateElementTetraC1 *>(e)->convert_for_C1TB_space(mesh_template);
+						delete e;
+						e = elements[ie];
+				}
+				else if (dynamic_cast<MeshTemplateElementTetraC2 *>(e) && !dynamic_cast<MeshTemplateElementTetraC2TB *>(e) )
+				{
+						elements[ie] = dynamic_cast<MeshTemplateElementTetraC2 *>(e)->convert_for_C2TB_space(mesh_template); // Must be upgraded here to contain the C1TB bubble
+						delete e;
+						e = elements[ie];
 				}				
 			}
 		}
-		else if (code_inst->get_func_table()->numfields_C2 || dom_space == "C2" || code_inst->get_func_table()->numfields_C2TB || dom_space == "C2TB") 
+		else if (code_inst->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields || dom_space == "C2" || code_inst->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields || dom_space == "C2TB") 
 		{
 			for (unsigned int ie = 0; ie < elements.size(); ie++)
 			{
@@ -1295,6 +1774,7 @@ namespace pyoomph
 		}
 	}
 
+	// Elements are owned by the collection; nodes/facets are owned by the MeshTemplate and outlive it.
 	MeshTemplateElementCollection::~MeshTemplateElementCollection()
 	{
 		// if (oomph_mesh) delete  oomph_mesh;
@@ -1304,6 +1784,10 @@ namespace pyoomph
 
 	/////////////////////////////////
 
+	// Strict weak ordering on facets by their sorted node-index list (first by length, then
+	// lexicographically); used as the comparator for MeshTemplate::facetmap so that two
+	// facets referencing the same set of nodes (regardless of the order they were built in)
+	// map to the same map key and are therefore correctly deduplicated.
 	bool facet_order_function(const MeshTemplateFacet *a, const MeshTemplateFacet *b)
 	{
 		if (a->sorted_inds.size() < b->sorted_inds.size())
@@ -1320,20 +1804,36 @@ namespace pyoomph
 		return false;
 	}
 
+	// facetmap uses facet_order_function as its comparator so that facets with the same node set collapse to one entry.
 	MeshTemplate::MeshTemplate() : problem(NULL), dim(-1),kdtree(1), facetmap(&facet_order_function), domain(NULL)
 	{
 	}
 
-	MeshTemplate::~MeshTemplate()
+	// Discard all nodes and element collections (freeing their heap memory) and reset every
+	// derived lookup structure (kdtree, facetmap, boundary/periodicity bookkeeping) so the
+	// template can be rebuilt from scratch.
+	void MeshTemplate::reset()
 	{
-		for (std::size_t i = 0; i < nodes.size(); i++)
-			if (nodes[i])
-				delete nodes[i];
-		for (std::size_t i = 0; i < bulk_element_collections.size(); i++)
-			if (bulk_element_collections[i])
-				delete bulk_element_collections[i];
+		for (std::size_t i = 0; i < nodes.size(); i++) if (nodes[i]) delete nodes[i];
+		for (std::size_t i = 0; i < bulk_element_collections.size(); i++) if (bulk_element_collections[i]) delete bulk_element_collections[i];
+		nodes.clear();
+		bulk_element_collections.clear();
+		boundary_names.clear();
+		facets.clear();
+		dim=-1;
+		facetmap.clear();
+		domain=NULL;
+		inter_nodes_periodic.clear();
+		kdtree.reset(1);
 	}
 
+	MeshTemplate::~MeshTemplate()
+	{
+		reset();
+	}
+
+	// Unconditionally append a new node and register its position in the KD-tree (used by
+	// add_node_unique() for fast coincident-point lookup).
 	nodeindex_t MeshTemplate::add_node(double x, double y, double z)
 	{
 		MeshTemplateNode *res = new MeshTemplateNode(x, y, z);
@@ -1346,6 +1846,8 @@ namespace pyoomph
 		return res->index;
 	}
 
+	// Declare n2 as periodic slave of master n1. Master chains are only resolved later, in
+	// link_periodic_nodes() (which follows periodic_master pointers to the ultimate root).
 	void MeshTemplate::add_periodic_node_pair(const nodeindex_t &n1, const nodeindex_t &n2)
 	{
 		nodes[n2]->periodic_master = n1; // Just put the link here
@@ -1375,6 +1877,8 @@ namespace pyoomph
 		*/
 	}
 
+	// Return the index of an existing node at (x,y,z) (found via the KD-tree, which uses a
+	// small coincidence tolerance) if one exists, otherwise create and register a new node.
 	nodeindex_t MeshTemplate::add_node_unique(double x, double y, double z)
 	{
 		int present = kdtree.point_present(x, y, z);
@@ -1397,6 +1901,12 @@ namespace pyoomph
 		return res->index;
 	}
 
+	// Get-or-create the node exactly half-way between n1 and n2 (e.g. an edge mid-side
+	// node). Its boundary set and domain membership are inherited as the intersection of
+	// its parents' (a mid-edge node is only on a boundary if *both* endpoints are). If this
+	// call actually created a new node (rather than finding an existing boundary one), and
+	// that node lies on a boundary, record it in inter_nodes_periodic so a matching
+	// intermediate node on the periodic partner side can later be linked up (see set_element_code).
 	nodeindex_t MeshTemplate::add_intermediate_node_unique(const nodeindex_t &n1, const nodeindex_t &n2)
 	{
 		nodeindex_t ni = add_node_unique(0.5 * (nodes[n1]->x + nodes[n2]->x), 0.5 * (nodes[n1]->y + nodes[n2]->y), 0.5 * (nodes[n1]->z + nodes[n2]->z));
@@ -1417,6 +1927,10 @@ namespace pyoomph
 		return ni;
 	}
 
+	// Get-or-create the node at the centroid of (n1,n2,n3) (e.g. a triangle-face bubble
+	// node). If `boundary_possible` is false the node is never considered a boundary node
+	// (used for interior "bubble" nodes that sit at a face/cell centroid and thus cannot
+	// truly lie on a domain boundary even if all three parents do).
 	nodeindex_t MeshTemplate::add_intermediate_node_unique(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, bool boundary_possible)
 	{
 		nodeindex_t ni = add_node_unique((nodes[n1]->x + nodes[n2]->x + nodes[n3]->x) / 3, (nodes[n1]->y + nodes[n2]->y + nodes[n3]->y) / 3, (nodes[n1]->z + nodes[n2]->z + nodes[n3]->z) / 3);
@@ -1452,6 +1966,8 @@ namespace pyoomph
 		return ni;
 	}
 
+	// Same as the 3-parent overload above, but for the centroid of 4 nodes (e.g. a
+	// quadrilateral face/cell-center node).
 	nodeindex_t MeshTemplate::add_intermediate_node_unique(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, bool boundary_possible)
 	{
 		nodeindex_t ni = add_node_unique(0.25 * (nodes[n1]->x + nodes[n2]->x + nodes[n3]->x + nodes[n4]->x), 0.25 * (nodes[n1]->y + nodes[n2]->y + nodes[n3]->y + nodes[n4]->y),
@@ -1494,6 +2010,8 @@ namespace pyoomph
 		return ni;
 	}
 
+	// Look up the numeric index of an already-registered boundary name; throws if unknown
+	// (unlike add_node_to_boundary, this does not create the boundary).
 	unsigned int MeshTemplate::get_boundary_index(const std::string &boundname) const
 	{
 		unsigned int bi = boundary_names.size();
@@ -1508,6 +2026,8 @@ namespace pyoomph
 		return bi;
 	}
 
+	// Mark node `ni` as lying on boundary `boundname`, registering the boundary name (and
+	// assigning it a new index) on first use.
 	void MeshTemplate::add_node_to_boundary(const std::string &boundname, const nodeindex_t &ni)
 	{
 		unsigned int bi = boundary_names.size();
@@ -1524,6 +2044,7 @@ namespace pyoomph
 		nodes[ni]->on_boundaries.insert(bi);
 	}
 
+	// Batch version of add_node_to_boundary() for a list of nodes.
 	void MeshTemplate::add_nodes_to_boundary(const std::string &boundname, const std::vector<nodeindex_t> &ni)
 	{
 		unsigned int bi = boundary_names.size();
@@ -1541,23 +2062,70 @@ namespace pyoomph
 			nodes[ni[i]]->on_boundaries.insert(bi);
 	}
 
-	void MeshTemplate::add_facet_to_curve_entity(std::vector<unsigned> &facetnodes, MeshTemplateCurvedEntity *curved)
+	// Get-or-create (deduplicated via facetmap) the facet spanned by `vertexindices` and
+	// attach curved geometry `curved` to it. If the facet already exists with a different
+	// curved entity already set, that's an error; otherwise the (possibly still unset)
+	// curved entity is (re-)assigned.
+	MeshTemplateFacet * MeshTemplate::add_facet_to_curve_entity(const std::vector<nodeindex_t> &vertexindices, MeshTemplateCurvedEntity *curved)
 	{
-		MeshTemplateFacet *nf = new MeshTemplateFacet(facetnodes, curved, &this->nodes);
+		MeshTemplateFacet *nf = new MeshTemplateFacet(vertexindices, curved, &this->nodes);
 
 		if (facetmap.count(nf))
 		{
 			MeshTemplateFacet *old = facets[facetmap[nf]];
 			if (old->curved_entity && old->curved_entity != nf->curved_entity)
 				throw_runtime_error("Cannot add a facet on two different curved entities");
-			delete nf;
-			return;
+			old->curved_entity=curved;
+			return old;
 		}
 
 		facetmap[nf] = facets.size();
 		facets.push_back(nf);
+		return facets.back();
 	}
 
+	// Mark all of `ni` as boundary nodes and register the facet they (or, if given, the
+	// subset `vertexindices`, which must be a subset of `ni`) span as living on boundary
+	// `boundname`, optionally attaching curved geometry `curved` to it.
+	void MeshTemplate::add_facet_to_boundary(const std::string &boundname, const std::vector<nodeindex_t> &ni,const std::vector<nodeindex_t> &vertexindices, MeshTemplateCurvedEntity *curved)
+	{
+		if (vertexindices.empty())
+		{
+			this->add_nodes_to_boundary(boundname, ni);				
+			MeshTemplateFacet * facet = this->add_facet_to_curve_entity(ni, curved); // This is not necessarily curved. Can be also just a facet			
+			facet->on_boundaries.insert(this->get_boundary_index(boundname));
+		}
+		else
+		{
+			if (vertexindices.size() > ni.size())
+			{
+				throw_runtime_error("Vertex indices must be empty (in which case they are set to the node indices) or a subset of the node indices");
+			}
+			for (unsigned int i = 0; i < vertexindices.size(); i++)
+			{
+				bool found = false;
+				for (unsigned int j = 0; j < ni.size(); j++)
+				{
+					if (vertexindices[i] == ni[j])
+					{
+						found = true;				
+						break;	
+					}
+				}
+				if (!found)
+				{
+					throw_runtime_error("Vertex indices must be empty (in which case they are set to the node indices) or a subset of the node indices");
+				}
+			}
+			this->add_nodes_to_boundary(boundname, ni);				
+			MeshTemplateFacet * facet=this->add_facet_to_curve_entity(vertexindices, curved); // This is not necessarily curved. Can be also just a facet
+			facet->on_boundaries.insert(this->get_boundary_index(boundname));
+		}
+
+		
+	}
+
+	// Create and register a new, initially empty element collection under `name`.
 	MeshTemplateElementCollection *MeshTemplate::new_bulk_element_collection(std::string name)
 	{
 		MeshTemplateElementCollection *res = new MeshTemplateElementCollection(this, name);
@@ -1565,6 +2133,7 @@ namespace pyoomph
 		return res;
 	}
 
+	// Look up an existing collection by name, or return NULL if none matches.
 	MeshTemplateElementCollection *MeshTemplate::get_collection(std::string name)
 	{
 		for (unsigned int i = 0; i < bulk_element_collections.size(); i++)
@@ -1573,6 +2142,10 @@ namespace pyoomph
 		return NULL;
 	}
 
+	// Turn the periodic_master index links (set up via add_periodic_node_pair /
+	// set_element_code) into actual oomph-lib node periodicity: for every node with both a
+	// periodic master and a built oomph_node, follow the master chain to its root (the node
+	// with no master of its own) and call make_periodic() against that root's oomph_node.
 	void MeshTemplate::link_periodic_nodes()
 	{
 		for (unsigned int i = 0; i < nodes.size(); i++)
@@ -1596,6 +2169,8 @@ namespace pyoomph
 		}
 	}
 
+	// Detach (without deleting) the oomph-lib Node pointers from all template nodes, e.g.
+	// before discarding an old mesh so the template's geometric description can be reused to build a new one.
 	void MeshTemplate::flush_oomph_nodes()
 	{
 		for (unsigned int i = 0; i < nodes.size(); i++)
@@ -1604,6 +2179,11 @@ namespace pyoomph
 		}
 	}
 
+	// For each mesh boundary, find the (at most 2) element collections whose elements
+	// actually touch it (by intersecting, node by node, the running set of "still
+	// possible" domains with each boundary node's part_of_domain set). If exactly two
+	// domains remain, that boundary is an internal interface between them, so register the
+	// pairing via _add_opposite_interface_connection (implemented on the Python side).
 	void MeshTemplate::_find_opposite_interface_connections()
 	{
 		for (unsigned int bi = 0; bi < boundary_names.size(); bi++)
@@ -1638,6 +2218,11 @@ namespace pyoomph
 		}
 	}
 
+	// Detect boundaries of interface/facet collections that intersect each other (e.g. a
+	// triple/contact line where two or more interfaces meet): for each collection, find
+	// nodes lying on 2 or more of its adjacent boundaries and record every ordered
+	// combination of those boundary names (as "<collection>/<bnd1>/<bnd2>/...") as an
+	// intersection name.
 	std::set<std::string> MeshTemplate::_find_interface_intersections()
 	{
 		std::set<std::string> all_intersects;
@@ -1680,16 +2265,30 @@ namespace pyoomph
 		return all_intersects;
 	}
 
+	// Build the concrete oomph-lib element for geometric element `el` in collection `coll`.
+	// Steps: (1) if the element code's dominant space is lower-order (e.g. C1) than the
+	// template element's own geometric order (e.g. a C2-type quad/tri/line/brick), reduce
+	// to just the corner node indices; (2) create any oomph-lib Node objects that don't yet
+	// exist for the needed nodes (as plain Node or BoundaryNode, depending on whether the
+	// node lies on a mesh boundary), copying position into both Eulerian and Lagrangian
+	// coordinates; (3) instantiate the element via BulkElementBase::create_from_template();
+	// (4) delete any newly-created oomph_node that the instantiated element ended up not
+	// using (happens when the template holds higher-order nodes than the element's actual
+	// nodal space needs); (5) if any of the element's nodes sit on a curved facet, wire up
+	// an oomph-lib MacroElement (Q/T, 2d/3d, chosen by the concrete BulkElement class of
+	// `res`) so that node positions during refinement follow the curved geometry rather than
+	// straight-sided interpolation: for each local facet, look up whether the corresponding
+	// mesh facet carries a curved entity and, if so, attach it via macro->set_facet().
 	BulkElementBase *MeshTemplate::factory_element(MeshTemplateElement *el, MeshTemplateElementCollection *coll)
 	{
 		// Generate all nodes if not present
 		const JITFuncSpec_Table_FiniteElement_t *functable = coll->code_instance->get_func_table();
-		BulkElementBase::__CurrentCodeInstance = coll->code_instance;
-		unsigned nC1 = functable->numfields_C1;
-		unsigned nC2 = functable->numfields_C2;
-		unsigned nC1TB = functable->numfields_C1TB;		
-		unsigned nC2TB = functable->numfields_C2TB;
-		unsigned ntot = nC1 +nC1TB+ nC2 + nC2TB;
+		BulkElementBase::__CurrentCodeInstance = coll->code_instance;		
+		unsigned ntot = 0;
+		for (unsigned int si=0;si<functable->num_present_continuous_spaces;si++)
+		{
+			ntot+=functable->present_continuous_spaces[si]->numfields_basebulk;
+		}
 
 		unsigned n_lagrangian_type = 1;
 
@@ -1708,7 +2307,7 @@ namespace pyoomph
 		{
 			// Reduce the element
 			nodeindices = {nodeindices[0], nodeindices[1], nodeindices[2]};
-		}
+		}		
 		else if (el->get_geometric_type_index() == 2 && (domspace == "C1" || domspace == "C1TB")) // LC2->LC1
 		{
 			// Reduce the element
@@ -1967,12 +2566,18 @@ namespace pyoomph
 		return res;
 	}
 
-	std::map<int, MeshTemplateCurvedEntity *> MeshTemplateCurvedEntity::load_from_strings(const std::vector<std::string> &s, size_t &currline)
+	// TODO: not yet implemented -- intended to reconstruct curved entities from the string
+	// representation produced by get_information_string().
+	std::map<int, MeshTemplateCurvedEntity *> MeshTemplateCurvedEntity::load_from_strings(const std::vector<std::string> &, size_t &)
 	{
 		throw_runtime_error("IMPLEM");
 		return std::map<int, MeshTemplateCurvedEntity *>();
 	}
 
+	// Extend the given control points with two "phantom" points obtained by linear
+	// extrapolation beyond the first/last point (vs = 2*p0 - p1, ve = 2*p_last - p_second_last),
+	// which Catmull-Rom splines need to define the tangent at the open ends. Then precompute
+	// a dense sample table (gen_samples) used to numerically invert the spline in position_to_parametric().
 	CurvedEntityCatmullRomSpline::CurvedEntityCatmullRomSpline(const std::vector<std::vector<double>> &_pts) : MeshTemplateCurvedEntity(1), pts(_pts)
 	{
 		N = pts.size();
@@ -1988,6 +2593,7 @@ namespace pyoomph
 		gen_samples(100);
 	}
 
+	// Serialize the (already phantom-point-extended) control point list.
 	std::string CurvedEntityCatmullRomSpline::get_information_string()
 	{
 		std::ostringstream oss;
@@ -1997,6 +2603,8 @@ namespace pyoomph
 		return oss.str();
 	}
 
+	// Evaluate the spline at `num` evenly spaced parameter values, used as a lookup table
+	// for the initial guess in position_to_parametric()'s Newton iteration.
 	void CurvedEntityCatmullRomSpline::gen_samples(unsigned num)
 	{
 		samples.resize(num);
@@ -2009,6 +2617,8 @@ namespace pyoomph
 		}
 	}
 
+	// Evaluate the Catmull-Rom spline position at global parameter t in [0, N-1], using the
+	// standard cubic Catmull-Rom basis functions (s0..s3) on the local segment [offs, offs+1].
 	void CurvedEntityCatmullRomSpline::interpolate(double t, std::vector<double> &pos)
 	{
 		t = std::min(std::max(t, 0.0), N - 1.0);
@@ -2032,6 +2642,7 @@ namespace pyoomph
 		}
 	}
 
+	// Derivative (tangent) of interpolate() w.r.t. t, using the derivative of the Catmull-Rom basis functions.
 	void CurvedEntityCatmullRomSpline::dinterpolate(double t, std::vector<double> &dpos)
 	{
 		t = std::min(std::max(t, 0.0), N - 1.0);
@@ -2055,10 +2666,16 @@ namespace pyoomph
 		}
 	}
 
-	void CurvedEntityCatmullRomSpline::parametric_to_position(const unsigned &t, const std::vector<double> &parametric, std::vector<double> &position)
+	// Trivial forward map: just evaluate the spline at parameter[0].
+	void CurvedEntityCatmullRomSpline::parametric_to_position(const unsigned &, const std::vector<double> &parametric, std::vector<double> &position)
 	{
 		interpolate(parametric[0], position);
 	}
+	// Numerically invert the spline (no closed form exists): first find the closest
+	// precomputed sample point to `position`, pick the coordinate direction with the
+	// largest tangent component there (to get a well-conditioned 1d root-finding problem),
+	// then Newton-iterate on that single coordinate to refine the parameter. If Newton
+	// doesn't converge to tolerance, refine the sample table (double its resolution) and retry recursively.
 	void CurvedEntityCatmullRomSpline::position_to_parametric(const unsigned &t, const std::vector<double> &position, std::vector<double> &parametric)
 	{
 		double mindist = 1.0e20;

@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,12 +21,12 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
 
-import _pyoomph
+from .. import _pyoomph_core as _pyoomph
 import inspect
 
 from ..expressions.generic import Expression, ExpressionOrNum, FiniteElementSpaceEnum
@@ -208,9 +209,11 @@ class EnforcedBC(InterfaceEquations):
         assert mesh._eqtree._parent is not None #type: ignore
         bulkmesh = mesh._eqtree._parent._mesh #type: ignore
         assert bulkmesh is not None
-        codeinst_inside = mesh.element_pt(0).get_code_instance()
+        codeinst_inside=mesh.get_code_gen().get_code()
+        #codeinst_inside = mesh.element_pt(0).get_code_instance()
         for k, _ in self.constraints.items():            
             index = [codeinst_inside.get_nodal_field_index(k)]  # TODO: Vectors
+            #print("Index is ",index," for field ",k)
             psindex = None
             nfi=None
             spaceDG=None

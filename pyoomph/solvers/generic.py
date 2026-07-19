@@ -2,11 +2,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -21,7 +22,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -31,20 +32,37 @@ import numpy
 
 
 import scipy.sparse #type:ignore
-import traceback
 
 DefaultMatrixType=scipy.sparse.csr_matrix
 _TypeGenericLASolver=TypeVar("_TypeGenericLASolver",bound=Type["GenericLinearSystemSolver"])
 _TypeGenericEigenSolver=TypeVar("_TypeGenericEigenSolver",bound=Type["GenericEigenSolver"])
 
-CoreLinearSolverEnum=Literal["superlu","umfpack","petsc","mumps","pardiso"]
-CoreEigenSolverEnum=Literal["scipy","pardiso","slepc"]
+CoreLinearSolverEnum=Literal["superlu","umfpack","petsc","mumps","pardiso","accelerate","petsc_mumps"]
+CoreEigenSolverEnum=Literal["scipy","pardiso","slepc","accelerate","slepc_mumps"]
 EigenSolverWhich=Literal["LM","SM","LR","SR","SI"]
 _default_la_solver:Optional[Union["GenericLinearSystemSolver",CoreLinearSolverEnum]]=None
 _default_eigen_solver:Optional[Union["GenericEigenSolver",CoreEigenSolverEnum]]=None
 
 if TYPE_CHECKING:
     from ..generic.problem import Problem
+
+_PETSCSLEPC_INSTALL_URL="https://pyoomph.readthedocs.io/en/latest/tutorial/installation/petscslepc.html"
+_PYPA_INSTALL_URL="https://pyoomph.readthedocs.io/en/latest/tutorial/installation/pypa.html"
+_SOLVER_INSTALL_HINTS:Dict[str,Tuple[str,str]]={
+	"petsc":("PETSc",_PETSCSLEPC_INSTALL_URL),
+	"petsc_mumps":("PETSc with MUMPS support",_PETSCSLEPC_INSTALL_URL),
+	"slepc":("SLEPc",_PETSCSLEPC_INSTALL_URL),
+	"slepc_mumps":("SLEPc with MUMPS support",_PETSCSLEPC_INSTALL_URL),
+	"pardiso":("Intel MKL (Pardiso)",_PYPA_INSTALL_URL),
+	"accelerate":("the macOS Accelerate framework",_PYPA_INSTALL_URL),
+}
+
+def _unavailable_solver_message(kind:str,name:str,available:List[str],e:Exception)->str:
+	msg=kind+" '"+name+"' is not available ("+type(e).__name__+": "+str(e)+"). Available: "+str(available)+"."
+	hint=_SOLVER_INSTALL_HINTS.get(name)
+	if hint is not None:
+		msg+=" See "+hint[1]+" for how to install "+hint[0]+"."
+	return msg
 
 def set_default_linear_solver(solv:Union["GenericLinearSystemSolver",CoreLinearSolverEnum]):
 	global _default_la_solver
@@ -64,6 +82,7 @@ def get_default_eigen_solver()->Optional[Union["GenericEigenSolver",CoreEigenSol
 class GenericLinearSystemSolver:
 	_registered_solvers:Dict[str,Type["GenericLinearSystemSolver"]]={}
 	idname:str
+	
 
 	def __init__(self,problem:"Problem"):
 		self.problem=problem
@@ -71,8 +90,12 @@ class GenericLinearSystemSolver:
 	def setup_solver(self)->None:
 		pass
 
+	def _before_assigning_equation_numbers(self)->None:		
+		pass
+
+
 	def solve_distributed(self, op_flag: int, allow_permutations: int, n: int, nnz_local: int, nrow_local: int, first_row: int, values: NPFloatArray, col_index: NPIntArray, row_start: NPIntArray, b: NPFloatArray, nprow: int, npcol: int, doc: int, data: NPUInt64Array, info: NPIntArray)->None:
-		raise RuntimeError("SuperLU solver cannot solve distributed")
+		raise RuntimeError("This solver cannot be used with multiple MPI processes.")
 
 	def solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPIntArray,colptr:NPIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
 		raise NotImplementedError("You need to specialise the function 'solve_serial'")
@@ -97,18 +120,19 @@ class GenericLinearSystemSolver:
 		if name in GenericLinearSystemSolver._registered_solvers.keys():
 			return GenericLinearSystemSolver._registered_solvers[name](problem)
 		else:
+			libname=name
+			if libname=="petsc_mumps":
+				libname="petsc"
 			try:
 				import importlib
 				#__import__(name)
-				importlib.import_module("pyoomph.solvers."+name)
+				importlib.import_module("pyoomph.solvers."+libname)
 				if name in GenericLinearSystemSolver._registered_solvers.keys():
 					return GenericLinearSystemSolver._registered_solvers[name](problem)
 				else:
 					raise RuntimeError("Unknown Linear Algebra solver: '"+name+"'. Following are defined (and included): "+str(list(GenericLinearSystemSolver._registered_solvers.keys())))
 			except Exception as e:
-				add_msg_str="When trying to import pyoomph.solvers."+str(name)+", the following error was raised:\n"
-				add_msg_str+=''.join(traceback.format_exception(type(e), value=e, tb=e.__traceback__))
-				raise RuntimeError("Unknown Linear Algebra solver: '"+name+"'. Following are defined (and included): "+str(list(GenericLinearSystemSolver._registered_solvers.keys()))+"\n"+add_msg_str)
+				raise RuntimeError(_unavailable_solver_message("Linear Algebra solver",name,list(GenericLinearSystemSolver._registered_solvers.keys()),e)) from e
 
 
 	def set_num_threads(self,nthreads:Optional[int]) -> None:
@@ -125,7 +149,7 @@ class EigenMatrixManipulatorBase:
 
 	def resolve_equations_by_name(self,name:str) -> Set[int]:
 		from ..generic.problem import Problem
-		import _pyoomph
+		from .. import _pyoomph_core as _pyoomph
 		splt=name.split("/")
 		root=self.problem
 		fieldname=None
@@ -160,8 +184,8 @@ class EigenMatrixManipulatorBase:
 			raise RuntimeError("Cannot find field "+str(fieldname)+" in mesh "+root.get_full_name())
 		res:Set[int]=set()
 		if  isinstance(root,ODEStorageMesh):
-			ode = root._get_ODE("ODE")
-			_, inds = ode.to_numpy()
+			ode = root.get_element()
+			_, inds = ode._ode_elem_to_numpy()
 			if not fieldname in inds.keys():
 				raise RuntimeError("Cannot get the field '"+fieldname+"' on ODE domain "+root.get_full_name())
 			eqn=ode.internal_data_pt(inds[fieldname]).eqn_number(0)
@@ -263,7 +287,7 @@ class EigenMatrixSetDofsToZero(EigenMatrixManipulatorBase):
 
 	def apply_on_J_and_M(self,solver:"GenericEigenSolver",J:DefaultMatrixType,M:DefaultMatrixType) -> Tuple[DefaultMatrixType, DefaultMatrixType]:
 		self.zeromap:Set[int]=set()
-		import _pyoomph
+		from .. import _pyoomph_core as _pyoomph
 		for d in self.doflist:
 			if isinstance(d,str):
 				eqs=self.resolve_equations_by_name(d)
@@ -287,7 +311,7 @@ class EigenMatrixSetDofsToZero(EigenMatrixManipulatorBase):
 
 	def apply_on_J_and_M___OLD(self,solver:"GenericEigenSolver",J:DefaultMatrixType,M:DefaultMatrixType) -> Tuple[DefaultMatrixType, DefaultMatrixType]:
 		# TODO OLD VERSION: Slow, remove
-		import _pyoomph
+		from .. import _pyoomph_core as _pyoomph
 		self.zeromap:Set[int]=set()
 		for d in self.doflist:
 			if isinstance(d,str):
@@ -318,6 +342,10 @@ class GenericEigenSolver:
 		self.matrix_manipulators:List[EigenMatrixManipulatorBase]=[]
 		self.real_contribution:str=""
 		self.imag_contribution:Optional[str]=None
+		self.ncv:Optional[int]=None
+
+	def _before_assigning_equation_numbers(self)->None:		
+		pass
 
 	def supports_target(self)->bool:
 		return False
@@ -349,7 +377,7 @@ class GenericEigenSolver:
 			return GenericEigenSolver._registered_solvers[name](problem)
 		else:
 			libname=name
-			if libname=="slepc":
+			if libname=="slepc" or libname=="slepc_mumps":
 				libname="petsc"
 			try:
 				import importlib
@@ -359,11 +387,7 @@ class GenericEigenSolver:
 				else:
 					raise RuntimeError("Unknown Eigen solver: '"+name+"'. Following are defined (and included): "+str(list(GenericEigenSolver._registered_solvers.keys())))
 			except Exception as e:
-				add_msg_str="When trying to import pyoomph.solvers."+str(name)+", the following error was raised:\n"
-				add_msg_str+=''.join(traceback.format_exception(type(e), value=e, tb=e.__traceback__))
-				if libname=="petsc":
-					add_msg_str+="\n\nNote: If you want to use SLEPc, you must install it separately. Please see the manual ( https://pyoomph.readthedocs.io/en/latest/tutorial/installation/petscslepc.html ) for more information."
-				raise RuntimeError("Unknown Eigen solver solver: '"+name+"'. Following are defined (and included): "+str(list(GenericEigenSolver._registered_solvers.keys()))+"\n"+add_msg_str)
+				raise RuntimeError(_unavailable_solver_message("Eigen solver",name,list(GenericEigenSolver._registered_solvers.keys()),e)) from e
 
 			#raise RuntimeError("Unknown Eigen solver: '"+name+"'. Following are defined (and included): "+str(list(GenericEigenSolver._registered_solvers.keys())))
 
@@ -378,7 +402,7 @@ class GenericEigenSolver:
 		from scipy.sparse import csr_matrix #type:ignore
 		if not self.problem._set_solved_residual(self.real_contribution,True,False):
 			raise RuntimeError("Cannot set the residual "+self.real_contribution+" for eigen calculation since it has no contribution at all")
-		n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = self.problem.assemble_eigenproblem_matrices(0) #type:ignore
+		n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = self.problem.assemble_eigenproblem_matrices(0) #type:ignore		
 		matM=csr_matrix((M_val, M_ci, M_rs), shape=(n, n))	#TODO: Is csr or csc?
 		matJ=csr_matrix((-J_val, J_ci, J_rs), shape=(n, n))
 		is_complex=False

@@ -1,11 +1,11 @@
 # Description
 
-pyoomph is a object-oriented multi-physics finite element framework.
+pyoomph is an object-oriented multi-physics finite element framework.
 It is mainly a custom high level python frontend for the main functionalities (but by far not all) of the powerful C++ library [`oomph-lib`](http://www.oomph-lib.org).
 
 For performance reasons, pyoomph uses [`GiNaC`](https://www.ginac.de/) and [`CLN`](https://www.ginac.de/CLN) to automatically generate C code for the equations you have entered in python. It automatically generates C code for symbolically derived Jacobian matrices, parameter derivatives and Hessians. These even include the complicated derivatives with respect to the moving mesh coordinates on a symbolical level. The generated code is compiled and linked back to the running python script, either with the [`TinyC`](https://bellard.org/tcc/) compiler (invoked by [`tccbox`](https://github.com/metab0t/tccbox)) or, when installed, with a more performant alternative like [`gcc`](https://gcc.gnu.org/), [`LLVM/clang`](https://clang.llvm.org/) or [`MSBuild`](https://docs.microsoft.com/visualstudio/msbuild/msbuild).
 
-If you want to use the full flexibility of oomph-lib, you are probably better suited using [`oomph-lib`](http://www.oomph-lib.org) directly. If your want to use python to solve equations on a single static mesh, you might want to check out [`FEniCS`](https://fenicsproject.org/) instead. Also, have a look at [`NGSolve`](https://ngsolve.org/) or [`nutils`](https://nutils.org/) which have similar and complementary features.
+If you want to use the full flexibility of oomph-lib, you are probably better suited using [`oomph-lib`](http://www.oomph-lib.org) directly. If you want to use python to solve equations on a single static mesh, you might want to check out [`FEniCS`](https://fenicsproject.org/) instead. Also, have a look at [`NGSolve`](https://ngsolve.org/) or [`nutils`](https://nutils.org/) which have similar and complementary features.
 If you are looking for a python framework for multi-physics problems formulated on (potentially multiple) moving meshes, including the possibility of (azimuthal) bifurcation tracking, pyoomph might be the right choice for you.
 
 **pyoomph is still in an early stage of development:** While most features work nicely, it is neither feature-complete, nor free of bugs.
@@ -20,7 +20,7 @@ Alternatively, follow the [instructions in our tutorial](https://pyoomph.readthe
 Documentation of the API and tons of examples can be found at [pyoomph.readthedocs.io](https://pyoomph.readthedocs.io/en/latest/tutorial.html). 
 A [PDF version](https://pyoomph.readthedocs.io/_/downloads/en/latest/pdf/) of the tutorial is also available.
 
-Some more examples can be found in our repository [pyoomph_examples](https://www.github.com/pyoomph/pyoomph_examples).
+Some more examples can be found in our repository [pyoomph_examples](https://github.com/pyoomph/pyoomph_examples).
 
 ## License
 
@@ -45,8 +45,8 @@ During compilation, pyoomph includes/links against or makes use of the following
 - [`CLN`](https://www.ginac.de/CLN) ([GPL v2 or later license](https://www.ginac.de/CLN/cln.git/?p=cln.git;a=blob_plain;f=COPYING;hb=HEAD)), CLN is statically included in the distribution as wheels.
 - `MPI`, depending on the system e.g. [`OpenMPI`](https://www.open-mpi.org) ([3-clause BSD license](https://www.open-mpi.org/community/license.php)), [`MPICH`](https://www.mpich.org/) ([MPICH license](https://github.com/pmodels/mpich/blob/main/COPYRIGHT)), [`Microsoft MPI`](https://github.com/Microsoft/Microsoft-MPI) ([MIT license](https://github.com/microsoft/Microsoft-MPI/blob/master/LICENSE.txt)), the wheels distributions are compiled without MPI support.
 - [`python3.8 or higher`](https://www.python.org/), ([PSF license](https://docs.python.org/3/license.html)).
-- [`pybind11`](https://github.com/pybind/pybind11), ([BSD-style license](https://github.com/sizmailov/pybind11-stubgen/blob/master/LICENSE)).
-- [`pybind11-stubgen`](https://github.com/sizmailov/pybind11-stubgen), ([BSD-style license](https://github.com/sizmailov/pybind11-stubgen/blob/master/LICENSE)).
+- [`pybind11`](https://github.com/pybind/pybind11), ([BSD-style license](https://github.com/pybind/pybind11/blob/master/LICENSE)).
+- [`pybind11-stubgen`](https://github.com/pybind/pybind11-stubgen), ([BSD 3-Clause license](https://github.com/pybind/pybind11-stubgen/blob/main/LICENSE)), used to generate python stubs from the C++ core.
 - [`pip`](https://github.com/pypa/pip), ([MIT license](https://github.com/pypa/pip/blob/main/LICENSE.txt)).
 
 Beyond that, pyoomph makes use of the following libraries at runtime. During installation with `pip`, many (but not all) of these libraries are automatically fetched as requirements.
@@ -56,7 +56,8 @@ Beyond that, pyoomph makes use of the following libraries at runtime. During ins
 - [`pygmsh`](https://github.com/nschloe/pygmsh), ([GPL v3 license](https://github.com/nschloe/pygmsh/blob/main/LICENSE.txt)).
 - [`gmsh`](https://gmsh.info/), ([GPL v2 or later license](https://gmsh.info/LICENSE.txt)).
 - [`meshio`](https://github.com/nschloe/meshio), ([MIT license](https://github.com/nschloe/meshio/blob/main/LICENSE.txt)).
-- [`mpi4py`](https://github.com/mpi4py/mpi4py/), ([BSD 2-Clause "Simplified" license](https://github.com/erdc/mpi4py/blob/master/LICENSE.txt)).
+- [`mpi4py`](https://github.com/mpi4py/mpi4py/), ([BSD 3-Clause license](https://github.com/mpi4py/mpi4py/blob/master/LICENSE.rst)).
+- [`more_itertools`](https://github.com/more-itertools/more-itertools), ([MIT license](https://github.com/more-itertools/more-itertools/blob/master/LICENSE)).
 - [`scipy`](https://github.com/scipy/scipy), ([BSD-3-Clause license](https://github.com/scipy/scipy/blob/main/LICENSES_bundled.txt)).
 - [`matplotlib`](https://github.com/matplotlib/matplotlib), ([PSF-based license](https://matplotlib.org/stable/users/project/license.html)).
 - [`mkl`](https://pypi.org/project/mkl/), ([Intel Simplified Software license](https://www.intel.com/content/dam/develop/external/us/en/documents/pdf/intel-simplified-software-license.pdf)).
@@ -64,24 +65,24 @@ Beyond that, pyoomph makes use of the following libraries at runtime. During ins
 - [`slepc`](https://slepc.upv.es/) and [`slepc4py`](https://gitlab.com/slepc/slepc), ([BSD 2-Clause license](https://slepc.upv.es/contact/copy.htm)).
 - [`vtk`](https://vtk.org/), ([BSD 3-clause license](https://vtk.org/about/)).
 - [`paraview`](https://www.paraview.org/), ([BSD 3-clause license](https://www.paraview.org/license/)). Only used for the included [`Paraview filter for visualizing azimuthal perturbations`](https://github.com/pyoomph/pyoomph/blob/main/pyoomph/paraview/pyoomph_eigen_extrusion_filter.py).
-- [`setuptools`](https://github.com/pypa/setuptools) ([MIT license](https://github.com/pypa/setuptools?tab=MIT-1-ov-file#readme)) is used for installation, wheel generation and to invoke the system's C compiler
+- [`setuptools`](https://github.com/pypa/setuptools) ([MIT license](https://github.com/pypa/setuptools?tab=MIT-1-ov-file#readme)) is used to invoke the system's C compiler
+- [`scikit-build-core`](https://github.com/scikit-build/scikit-build-core) ([Apache 2.0 license](https://github.com/scikit-build/scikit-build-core?tab=Apache-2.0-1-ov-file)) is used for installation and wheel generation
 - [`cibuildwheel`](https://cibuildwheel.pypa.io), ([BSD 2-Clause license](https://github.com/pypa/cibuildwheel?tab=License-1-ov-file#readme)) is used to compile the provided wheels
-- [`pybind11-stubgen`](https://github.com/sizmailov/pybind11-stubgen), ([BSD 3-Clause license](https://github.com/sizmailov/pybind11-stubgen?tab=License-1-ov-file#readme)) is used to generate python stubs from the C++ core
-- [`tccbox`](https://github.com/metab0t/tccbox) used as wrapper for the [`TinyC`](https://bellard.org/tcc/) compiler, ([LPGL 2 or later license](https://www.gnu.org/licenses/old-licenses/gpl-2.0.html))
+- [`tccbox`](https://github.com/metab0t/tccbox) used as wrapper for the [`TinyC`](https://bellard.org/tcc/) compiler, ([GPL v2 or later license](https://www.gnu.org/licenses/old-licenses/gpl-2.0.html))
 
 Be aware that some of these libraries can have further dependencies.
 
 ## Authors and acknowledgements
 
-pyoomph was founded in 2021 by [**Christian Diddens**](https://github.com/cdiddens). Later, [**Duarte Rocha**](https://github.com/duarterocha) joined the team.
-Additional contributors are [**Vatsal Sanjay**](https://github.com/VatsalSy), [**Maxim de Wildt**](https://github.com/maksimdw) and [**Jnandeep Talukdar**](https://github.com/spilltheT). Pyoomph is developed at the [**Physics of Fluids group**](https://pof.tnw.utwente.nl) of the [**University of Twente**](https://www.utwente.nl/).
+pyoomph was founded in 2021 by [**Christian Diddens**](https://github.com/cdiddens). Later, [**Duarte Rocha**](https://github.com/duarterocha) and [**Maxim de Wildt**](https://github.com/maksimdw) joined the team.
+Additional contributors are [**Vatsal Sanjay**](https://github.com/VatsalSy) and [**Jnandeep Talukdar**](https://github.com/spilltheT). Pyoomph is developed at the [**Physics of Fluids group**](https://pof.tnw.utwente.nl) of the [**University of Twente**](https://www.utwente.nl/).
 
 The authors gratefully acknowledge financial support by the Industrial Partnership Programme `Fundamental Fluid Dynamics Challenges in Inkjet Printing` of the Netherlands Organisation for Scientific Research (NWO) & High Tech Systems and Materials (HTSM), co-financed by Canon Production Printing Netherlands B.V., IamFluidics B.V., TNO Holst Centre, University of Twente, Eindhoven University of Technology and Utrecht University. This work was supported by an Industrial Partnership Programme, High Tech Systems and Materials (HTSM), of the Netherlands Organisation for Scientific Research (NWO); a funding for public-private partnerships (PPS) of the Netherlands Enterprise Agency (RVO) and the Ministry of Economic Affairs (EZ); Canon Production Printing Netherlands B.V.; and the University of Twente.
 
 ## Contributing
 
 If you want to contribute by e.g. adding new equations, meshes, problems, materials or additional features, get in contact with us or send us a pull request.
-If you encounter a bug, please also let us know at c.diddens@utwente.nl or d.rocha@utwente.nl.
+If you encounter a bug, please also let us know at c.diddens@utwente.nl.
 
 ## How to cite
 At the moment, just cite the following paper for pyoomph:

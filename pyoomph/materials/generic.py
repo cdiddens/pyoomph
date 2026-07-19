@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,11 +21,11 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
-import _pyoomph
+from .. import _pyoomph_core as _pyoomph
 import os
 import itertools
 from pathlib import Path
@@ -116,6 +117,7 @@ class BaseInterfaceProperties:
         Sets the mass transfer model.
         """
         self._mass_transfer_model=mdl
+        return mdl # For convenience, return the model so that it can be used in the same line as the function call.
 ######
 
 class MaterialProperties:
@@ -125,7 +127,7 @@ class MaterialProperties:
     """
     #: Unique name of the material. Names should be unique within the same state of matter (e.g. liquid, gas, solid), and the same material name for the same material should be used for different states of matter.
     name:str
-    #: Whether the material is pure or mixed. If the material is mixed, the components of the mixture should be specified in the :py:attr:`components` attribute. This should be treated as read-only property.
+    #: Whether the material is pure or mixed. If the material is mixed, the components of the mixture should be specified in the :py:attr:`~pyoomph.materials.generic.MaterialProperties.components` attribute. This should be treated as read-only property.
     is_pure:Optional[bool]
     #: State of matter of the material. This should be treated as read-only property.
     state_of_matter:Optional[str]
@@ -455,6 +457,7 @@ class MaterialProperties:
                 v=v(self)
                 if v is None:
                     continue
+            print("Sampling property "+k+" to text file...")
             self.sample_property_to_text_file(os.path.join(dirname,k+".txt"),v,_name=k,_sort=_sort,_newlines=_newlines,**kwargs)
 
 
@@ -1049,7 +1052,7 @@ class BaseMixedProperties:
         This will make the mixture static, i.e. all mass fraction fields will be replaced by their values from the given condition. This is useful for to remove advection-diffusion equations if the composition stays homogeneous.
 
         Args:
-            cond: Optional condition, otherwise the :py:attr:`initial_condition` is used.
+            cond: Optional condition, otherwise the :py:attr:`~pyoomph.materials.generic.MaterialProperties.initial_condition` is used.
             temperature: Optional temperature        
         """
         assert isinstance(self,MaterialProperties)     

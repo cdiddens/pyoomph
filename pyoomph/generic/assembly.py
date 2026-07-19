@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -31,7 +32,7 @@ import time
 
 if TYPE_CHECKING:
     from .problem import Problem
-    import _pyoomph
+    from .. import _pyoomph_core as _pyoomph
 
 class CustomAssemblyBase:    
     def __init__(self) -> None:
@@ -121,8 +122,8 @@ class FixedMeshMaxQuadraticNonlinearAssembly(CustomAssemblyBase):
         self._HMat:csr_matrix
         self._HTens:_pyoomph.SparseRank3Tensor
         self._ndof:int=-1
-        self._history_dofs:Dict[float,NPFloatArray]={}        
-        self._last_current_dofs=None
+        self._history_dofs:Dict[float,NPFloatArray]={}
+        self._last_current_dofs:Optional[NPFloatArray]=None
         self._cache_at_fixed_parameters=cache_at_fixed_parameters
         self._param_values:Dict[str,float]={} # Parameter values at cache assembly 
         self._param_contribs:Dict[str,Tuple[NPFloatArray,csr_matrix,csr_matrix]] # Parameter contributions R,J,M
@@ -273,6 +274,12 @@ class FixedMeshMaxQuadraticNonlinearAssembly(CustomAssemblyBase):
                 del self._history_dofs[trem]                   
         return res
         
+
+    @overload
+    def get_residuals_and_jacobian(self,require_jacobian:Literal[False],dparameter:Optional[str]=None)->NPFloatArray: ...
+
+    @overload
+    def get_residuals_and_jacobian(self,require_jacobian:Literal[True],dparameter:Optional[str]=None)->Tuple[NPFloatArray,csr_matrix]: ...
 
     def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:Optional[str]=None)->Union[NPFloatArray,Tuple[NPFloatArray,csr_matrix]]:
         """Get the residual vector (and potentially the Jacobian) based on the current and history dofs using the cached tensors.

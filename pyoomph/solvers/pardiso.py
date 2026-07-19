@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -86,17 +87,17 @@ if sys.platform == "linux":
     if "PYOOMPH_PARDISO_LIB" in os.environ.keys():
         MKLlib=CDLL(os.environ["PYOOMPH_PARDISO_LIB"])
     else:
-        MKLlib=_try_to_find_lib(["libmkl_rt.so",os.path.join(Path.home(), ".local/lib/libmkl_rt.so"),"mkl_rt",os.path.join(Path.home(), ".local/lib/libmkl_rt.so.2")])
+        MKLlib=_try_to_find_lib(["libmkl_rt.so",os.path.join(Path.home(), ".local/lib/libmkl_rt.so"),"mkl_rt",os.path.join(Path.home(), ".local/lib/libmkl_rt.so.2"),os.path.join(Path.home(), ".local/lib/libmkl_rt.so.3"),os.path.join(Path.home(), ".local/lib/libmkl_rt.so.4")])
 elif sys.platform == "win32":
     if "PYOOMPH_PARDISO_LIB" in os.environ.keys():
         MKLlib=CDLL(os.environ["PYOOMPH_PARDISO_LIB"])
     else:
-        MKLlib = _try_to_find_lib(["mkl_rt.dll", "mkl_rt.1.dll","mkl_rt.2.dll", "mkl_rt"])
+        MKLlib = _try_to_find_lib(["mkl_rt.dll", "mkl_rt.1.dll","mkl_rt.2.dll","mkl_rt.3.dll","mkl_rt.4.dll", "mkl_rt"])
 elif sys.platform=="darwin":
     if "PYOOMPH_PARDISO_LIB" in os.environ.keys():
         MKLlib=CDLL(os.environ["PYOOMPH_PARDISO_LIB"])
     else:
-        MKLlib = _try_to_find_lib(["libmkl_rt.dylib", "libmkl_rt.1.dylib", "libmkl_rt.2.dylib","mkl_rt"])
+        MKLlib = _try_to_find_lib(["libmkl_rt.dylib", "libmkl_rt.1.dylib", "libmkl_rt.2.dylib","libmkl_rt.3.dylib","libmkl_rt.4.dylib", "mkl_rt"])
 else:
     raise RuntimeError("Unknown platform: "+sys.platform)
 
@@ -481,68 +482,80 @@ class PardisoSolver(GenericLinearSystemSolver):
 
         return 0  # TODO: Return sign of Jacobian
 
-    def solve_distributed(self, op_flag: int, allow_permutations: int, n: int, nnz_local: int, nrow_local: int, first_row: int, values: NPFloatArray, col_index: NPIntArray, row_start: NPIntArray, b: NPFloatArray, nprow: int, npcol: int, doc: int, data: NPUInt64Array, info: NPIntArray)->None:
-        if self.problem.is_distributed():
-            raise RuntimeError("Not sure whether it works distributed here")
+    def solve_distributed(self, op_flag: int, allow_permutations: int, n: int, nnz_local: int, nrow_local: int, first_row: int, values: NPFloatArray, col_index: NPIntArray, row_start: NPIntArray, b: NPFloatArray, nprow: int, npcol: int, doc: int, data: NPUInt64Array, info: NPIntArray)->None:        
+        # NOTE: This does not solve the system via MPI Pardiso. Instead it solves it on the root process and scatters the solution. This is not optimal, but MKL Pardiso is not MPI parallel. MKL cluster_sparse_solver is, but this must be accessed via PETSc using mkl_cpardiso
+        from mpi4py import MPI
         rank=get_mpi_rank()
         nproc=get_mpi_nproc()
         if op_flag==1:
-            l_sendbuf = numpy.zeros(3, dtype='i')
-            l_sendbuf[0]=len(values)
-            l_sendbuf[1]=len(col_index)
-            l_sendbuf[2]=len(row_start)
-            l_recvbuf = numpy.empty([nproc, 3], dtype='i')
-            get_mpi_world_comm().Allgather(l_sendbuf, l_recvbuf)
-            d_buff_len=numpy.amax(l_recvbuf,axis=0)
-
-            vals_sendbuf=numpy.zeros(d_buff_len[0],dtype=values.dtype)
-            vals_sendbuf[:len(values)]=values
-            vals_recvbuf=numpy.zeros([nproc,d_buff_len[0]],dtype=values.dtype)
-            get_mpi_world_comm().Allgather(vals_sendbuf, vals_recvbuf)
-
-            cols_sendbuf=numpy.zeros(d_buff_len[1],dtype=col_index.dtype)
-            cols_sendbuf[:len(col_index)]=col_index
-            cols_recvbuf=numpy.zeros([nproc,d_buff_len[1]],dtype=col_index.dtype)
-            get_mpi_world_comm().Allgather(cols_sendbuf, cols_recvbuf)
-
-            rows_sendbuf=numpy.zeros(d_buff_len[2],dtype=row_start.dtype)
-            rows_sendbuf[:len(row_start)]=row_start
-            rows_recvbuf=numpy.zeros([nproc,d_buff_len[2]],dtype=row_start.dtype)
-            get_mpi_world_comm().Allgather(rows_sendbuf, rows_recvbuf)
-
-            gath_vals= numpy.concatenate([vals_recvbuf[i,:l_recvbuf[i,0]] for i in range(nproc)])
-            gath_cols= numpy.concatenate([cols_recvbuf[i,:l_recvbuf[i,1]] for i in range(nproc)]) 
-            #gath_rows= numpy.concatenate([rows_recvbuf[i,:l_recvbuf[i,2]-(1 if i>0 else 0)] for i in range(nproc)]) 
-            gath_rows= numpy.concatenate([rows_recvbuf[i,(1 if i>0 else 0):l_recvbuf[i,2]] for i in range(nproc)]) 
-
-            print(rank,"VALS",len(values),len(gath_vals),gath_vals.shape)
-            print(rank,"RWOS",len(row_start),len(gath_rows),gath_rows.shape)
-            print(rank,"cols",len(col_index),len(col_index),gath_cols.shape)
-            print(rank,"N",n)
-            print(rank,"recbuff",l_recvbuf)
-            print("ROWCLLAP",gath_rows,len(gath_rows))
-            print("II",gath_rows[l_recvbuf[0,2]-1],gath_rows[l_recvbuf[0,2]],gath_rows[l_recvbuf[0,2]+1],first_row)
-
-            mpi_barrier()
-            if True or rank==0:
-                A = self.get_jacobian_matrix(n,gath_vals, gath_cols,gath_rows)  # That is not optimal, of course  
+            global_col_index = col_index 
+            rows = numpy.empty(len(col_index), dtype=np.int64)
+            for i in range(nrow_local):
+                rows[row_start[i]:row_start[i + 1]] = first_row + i            
+            nnz_local = len(data)
+            cols = global_col_index            
+            data = values
+            comm=get_mpi_world_comm()
+            #all_nnz = comm.gather(nnz_local, root=0)
+            all_rows = comm.gather(rows, root=0)
+            all_cols = comm.gather(cols, root=0)
+            all_data = comm.gather(data, root=0)                           
+                        
+            if rank==0:            
+                global_rows = np.concatenate(all_rows)
+                global_cols = np.concatenate(all_cols)
+                global_data = np.concatenate(all_data)
                 #assert isinstance(A,csr_matrix)
+                A = csr_matrix((global_data, (global_rows,global_cols)),shape=(n, n))
                 A.eliminate_zeros()
-                A.sort_indices()  
-                print("CLEAR PA")
+                A.sort_indices()                  
                 if self._current_pardiso:
                     self._current_pardiso.clear()  # TODO: Only if matrix is entirely changed
-                mode = 11
-                print("NEW PA")
-                self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=False)
-                print(" PA FACT")
+                mode = 11                
+                self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=False)                
                 self._current_pardiso.factor()
 
-                print("PROC",get_mpi_rank(),nrow_local,first_row,len(values),col_index[0],row_start[0],col_index[-1],row_start[-1],l_recvbuf)
-            mpi_barrier()
-
+                
+            mpi_barrier()            
         elif op_flag==2:
-            pass
+            comm=get_mpi_world_comm()
+            counts = comm.gather(len(b), root=0)
+            if rank == 0:
+                counts = np.array(counts, dtype=np.int32)    
+                displs = np.zeros(len(counts), dtype=np.int32)
+                displs[1:] = np.cumsum(counts[:-1])
+#                x_global = sol.copy()
+                b_global = np.empty(n, dtype=b.dtype)
+            else:
+                displs = None
+                b_global = None
+            
+            comm.Gatherv(sendbuf=b,recvbuf=[b_global, counts, displs, MPI.DOUBLE],root=0)            
+            
+            if rank==0:
+                self.setup_solver()
+                assert self._current_pardiso is not None
+                if self.try_to_reuse_solver:
+                    raise NotImplementedError("try_to_reuse_solver not implemented yet when running with MPI")
+                if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine():
+                    sol=self.problem._custom_assembler.custom_solve_routine(lambda rhs : self._current_pardiso.solve(rhs), b)
+                else:
+                    sol = self._current_pardiso.solve(self.get_b(n,b_global))                
+                                
+            if rank == 0:
+                counts = np.array(counts, dtype=np.int32)    
+                displs = np.zeros(len(counts), dtype=np.int32)
+                displs[1:] = np.cumsum(counts[:-1])
+                x_global = sol.copy()
+            else:
+                displs = None
+                x_global = None
+            #print("GATHERV SOLUTION",displs,counts)
+            x_local = np.empty(len(b), dtype=np.float64)
+            
+            comm.Scatterv([x_global, counts, displs, MPI.DOUBLE],x_local,root=0)
+            b[:] = x_local[:]                
+            mpi_barrier()            
         else:
             raise RuntimeError("Not implemented")
 

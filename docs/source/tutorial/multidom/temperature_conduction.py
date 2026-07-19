@@ -1,10 +1,11 @@
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -19,7 +20,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
 
@@ -36,7 +37,7 @@ class TwoDomainMesh1d(MeshTemplate):
 	def define_geometry(self):
 		xI=self.nondim_size(self.xI)
 		L=self.nondim_size(self.L)
-		NA=round(self.Ntot*xI/L) # number of elements on domainA calcuated from total number 
+		NA=round(self.Ntot*xI/L) # number of elements on domainA calculated from total number 
 		
 		domainA=self.new_domain(self.left_domain_name)
 		domainB=self.new_domain(self.right_domain_name)
@@ -52,9 +53,9 @@ class TwoDomainMesh1d(MeshTemplate):
 			domainB.add_line_1d_C1(x0,x1)
 			
 		# marking boundaries
-		self.add_nodes_to_boundary("left",[nodesA[0]])
-		self.add_nodes_to_boundary("interface",[nodesB[0]]) # coordsB[0] is acutally = coordsA[-1]
-		self.add_nodes_to_boundary("right",[nodesB[-1]])
+		self.add_facet_to_boundary("left",[nodesA[0]])
+		self.add_facet_to_boundary("interface",[nodesB[0]]) # coordsB[0] is actually = coordsA[-1]
+		self.add_facet_to_boundary("right",[nodesB[-1]])
 		
 
 class ConnectTAtInterface(InterfaceEquations):		

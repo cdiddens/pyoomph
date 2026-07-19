@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -32,11 +33,14 @@ from ..typings import *
 import numpy
 
 
-import _pyoomph
+from .. import _pyoomph_core as _pyoomph
 
 from .gmsh import GmshTemplate, Point, Line,Spline
 from .mesh import MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d,MeshTemplate
 
+from ..typings import *
+if TYPE_CHECKING:
+    from ..expressions import ExpressionOrNum
 
 class RemesherPointEntry:
     def __init__(self,x:float,y:float,z:float,size:float):
@@ -488,6 +492,32 @@ class Remesher2d(RemesherBase):
 
 
 
+class RemesherViaRecreation(RemesherBase):
+    def __init__(self,template:MeshTemplate):
+        super().__init__(template)
+        self.base_trunk=None
+
+    def get_new_template(self):
+        return self.template
+        
+    def remesh(self):
+        if self.base_trunk is None:
+            self.base_trunk=self.template._fntrunk
+        fnformat:str=self.base_trunk+"_REMESH_{:06d}"
+        
+                
+        self._old_meshes={}        
+        for k,m in self.template._problem._meshdict.items():
+            if isinstance(m,(MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d)):
+                if self.template.has_domain(k):
+                    self._old_meshes[k]=m
+                    
+        self.template._reset()
+        self.template._do_define_geometry(self.template._problem,fnformat.format(self._cnt))                 
+        self._cnt+=1        
+        
+        
+
 
 # Can be used for a GmshTemplate, which depends only on problem parameters, e.g. a droplet mesh with a prescribed contact angle
 # It will be remeshed by using the same GmshTemplate, but with the current value of the parameter
@@ -522,3 +552,65 @@ class ParametricGmshMeshRemesher2d(Remesher2d):
         self.template._meshfile=self.gmsh._meshfile 
         self.template.get_template()._meshfile=self.gmsh._meshfile 
         self._cnt+=1
+
+
+
+class RemeshableGmshTemplate2d(GmshTemplate):
+    """
+    An upgrade GmshTemplate, which allows remeshing via recreation. In the define_geometry() method, you will define both the initial mesh (if is_first_time() is False) and your remeshed mesh (is_first_time() is False).
+    For the latter case, you can obtain the previous boundary coordinates by get_boundary_coordinates(), etc.
+    
+    """
+    def __init__(self,loaded_from_mesh_file:Optional[str]=None):
+        super().__init__(loaded_from_mesh_file=loaded_from_mesh_file)
+        self.remesher=RemesherViaRecreation(self)
+    
+    def is_first_time(self):
+        """Will return True, if the mesh is being generated for the first time. Otherwise, it will return False, which means that the mesh is being remeshed. You can use this to define different geometries for the initial mesh and the remeshed mesh.
+
+        Returns:
+            Whether it is the first time the mesh is generated or not. True means first time, False means remeshing.
+        """
+        return not self.get_problem().is_initialised()
+    
+    def get_boundary_coordinates(self,name:str,sort_along_axis:Optional[Literal["x+","x-","y+","y-"]]=None,start_near_point:Optional[Tuple["ExpressionOrNum","ExpressionOrNum"]]=None,nondimensional:bool=False)->List[List[Tuple[float,float]]]:        
+        """Returns a list of boundary segments, which are lists of (x,y) coordinates (dimensional or not can be controlled by the nondimensional argument). The segments are sorted and reversed based on the sort_along_axis or start_near_point arguments. If both are None, the order is arbitrary.
+
+        Args:
+            name: Name of the boundary, e.g. "domain1/boundary1"
+            sort_along_axis: Sort the segments along a given axis, e.g. "x+" means sort along x in increasing order, "y-" means sort along y in decreasing order. Defaults to None.
+            start_near_point: Start near point for sorting segments. Defaults to None.
+            nondimensional: Whether to return nondimensional coordinates. Defaults to False.
+        
+        Returns:
+            A list of boundary segments, which are each a list of (x,y) coordinates.
+        """
+        if self.is_first_time():
+            raise RuntimeError("Cannot get boundary coordinates before the first mesh is generated")
+        data=self.get_problem().get_cached_mesh_data(name,nondimensional=True)
+        pts=data.get_coordinates()
+        segs,_=data.get_interface_line_segments()
+        
+         # Sort and reverse the segments based on the settings
+        if sort_along_axis is not None:
+            index,sign=({"x+":(0,1),"x-":(0,-1),"y+":(1,1),"y-":(1,-1)})[sort_along_axis]
+            for i,seg in enumerate(segs):
+                diff=pts[index,seg[-1]]-pts[index,seg[0]]
+                if diff*sign<0:
+                    segs[i]=list(reversed(seg))
+            segs=sorted(segs,key=lambda s: sign*pts[index,s[0]])
+        elif start_near_point is not None:
+            stp=start_near_point
+            for i,seg in enumerate(segs):
+                d1=(pts[0,seg[0]]-stp[0])**2+(pts[1,seg[0]]-stp[1])**2
+                d2=(pts[0,seg[-1]]-stp[0])**2+(pts[1,seg[-1]]-stp[1])**2
+                if d2>d1:
+                    segs[i]=list(reversed(seg))
+            segs=sorted(segs,key=lambda s: (pts[0,s[0]]-stp[0])**2+(pts[1,s[0]]-stp[1])**2 )
+        
+        res=[]
+        
+        SS=1 if nondimensional else self.get_problem().get_scaling("spatial")        
+        for seg in segs:
+            res.append([(pts[0,i]*SS,pts[1,i]*SS) for i in seg])
+        return res

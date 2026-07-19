@@ -1,6 +1,6 @@
 /*================================================================================
 pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -15,10 +15,13 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 
-The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+The main author may be contacted at c.diddens@utwente.nl
 
 ================================================================================*/
-//Just in include the main oomph-lib part
+// Central include shim: pulls in the subset of oomph-lib headers pyoomph's core C++ code
+// needs (integration rules, nodes, elements, meshes, Q-elements, mesh refinement, and the
+// Problem class), so that other pyoomph source files can just #include "oomph_lib.hpp"
+// instead of depending on oomph-lib's own include layout/order directly.
 
 #include "integral.h"
 #include "nodes.h"

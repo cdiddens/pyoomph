@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -35,8 +36,8 @@ if TYPE_CHECKING:
     from ..output.meshio import AnySpatialMesh
 
 
-class _PyVistaPlotPartBase:        
-    def _add_to_plotter(self,plotter:"PyVistaPlotter"):
+class _PyVistaPlotPartBase:
+    def _add_to_plotter(self,plotter:"PyVistaPlotter",pl:pyvista.Plotter):
         pass
 
 class _PyVistaPlotPartMesh(_PyVistaPlotPartBase):    
@@ -56,7 +57,7 @@ class _PyVistaPlotPartMesh(_PyVistaPlotPartBase):
 
 class PyVistaPlotter(BasePlotter):
     def __init__(self, problem:Optional["Problem"]=None,filetrunk:str="plot_{:05d}",fileext:Union[str,List[str]]="svg",eigenvector:Optional[int]=None,eigenmode:"MeshDataEigenModes"="abs",):
-        super().__init__(problem=problem,eigenvector=eigenvector,eigenmode=eigenmode)
+        super().__init__(problem=problem,eigenvector=eigenvector,eigenmode=eigenmode) #type:ignore[arg-type] # problem may be attached later via "problem += plotter"
         self.filetrunk=filetrunk
         self.fileext=fileext
         self._parts:List[_PyVistaPlotPartBase]=[]
@@ -82,7 +83,7 @@ class PyVistaPlotter(BasePlotter):
         
         
     def _get_meshio_data(self,msh:Union[str,"AnySpatialMesh"],problem_name:str=""):
-        from pyoomph.output.meshio import _convert_mesh_to_meshio
+        from .meshio import _convert_mesh_to_meshio
         return _convert_mesh_to_meshio(self.get_problem(), self._get_mesh_data(msh,problem_name=problem_name))
 
 

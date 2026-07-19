@@ -151,7 +151,7 @@ namespace oomph
     /// Assign the global equation numbers in the Data stored at the
     /// nodes and also internal element Data. Also, build (via push_back) the
     /// Vector of pointers to the dofs (variables).
-    unsigned long assign_global_eqn_numbers(Vector<double*>& Dof_pt);
+    unsigned long assign_global_eqn_numbers(Vector<double*>& Dof_pt, Vector<unsigned long>& Block_dof_pt_start); // FOR PYOOMPH: Including the Block_dof_pt_start vector to store the offsets of each node or element's internal dof.
 
     /// Function to describe the dofs of the Mesh. The ostream
     /// specifies the output stream to which the description
@@ -1755,6 +1755,12 @@ namespace oomph
           // Vector of pointers to leaves in tree emanating from
           // current root halo element
           Vector<Tree*> leaf_pt;
+          // FOR PYOOMPH
+          if (!ref_el_pt->tree_pt())
+          {
+            vec_el_pt.push_back(el_pt);
+            continue;
+          }
           ref_el_pt->tree_pt()->stick_leaves_into_vector(leaf_pt);
 
           // Loop over leaves and add their objects (the finite elements)
@@ -1791,6 +1797,12 @@ namespace oomph
         RefineableElement* ref_el_pt = dynamic_cast<RefineableElement*>(el_pt);
         if (ref_el_pt != 0)
         {
+          // FOR PYOOMPH
+          if (!ref_el_pt->tree_pt())
+          {
+            vec_el_pt.push_back(el_pt);
+            continue;
+          }
           // Vector of pointers to leaves in tree emanating from
           // current root haloed element
           Vector<Tree*> leaf_pt;

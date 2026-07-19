@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -505,7 +506,7 @@ class PreciceWriteData(BaseEquations):
                     buffer=mesh.evaluate_local_expression_at_nodes(expr_index,True,False)                
                     buffer=numpy.array(buffer)                                                            
                     if self.get_combined_equations()._is_ode():
-                        expr=mesh.element_pt(0).evalulate_local_expression_at_midpoint(expr_index)
+                        expr=mesh.element_pt(0).evaluate_local_expression_at_midpoint(expr_index)
                         buffer=numpy.array([expr])
                         #print("WRITE DATA",write_name,mesh._precice_vertex_ids,buffer)
                         interface.write_data(provider.name, write_name, mesh._precice_vertex_ids, buffer)
@@ -558,8 +559,8 @@ class PreciceReadData(BaseEquations):
         # This is a bit dirty, but I cannot see how it can be done differently, except for providing different classes for ODEEquations and Equations
         return Equations.define_scalar_field(self,name,space,scale=scale)
     
-    def _internal_define_scalar_field(self,name:str,space:FiniteElementSpaceEnum,scale:Optional[ExpressionNumOrNone]=None,testscale:Optional[ExpressionNumOrNone]=None,discontinuous_refinement_exponent:Optional[int]=None):
-        return Equations._internal_define_scalar_field(self,name,space,scale=scale,testscale=testscale,discontinuous_refinement_exponent=discontinuous_refinement_exponent)
+    def _internal_define_scalar_field(self,name:str,space:FiniteElementSpaceEnum,scale:Optional[ExpressionNumOrNone]=None,testscale:Optional[ExpressionNumOrNone]=None,discontinuous_refinement_exponent:Optional[int]=None,allow_scales_with_fields:bool=False):
+        return Equations._internal_define_scalar_field(self,name,space,scale=scale,testscale=testscale,discontinuous_refinement_exponent=discontinuous_refinement_exponent,allow_scales_with_fields=allow_scales_with_fields)
 
     def define_fields(self):
         if self.get_combined_equations()._is_ode():

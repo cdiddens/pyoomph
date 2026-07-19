@@ -1,5 +1,12 @@
 from pathlib import Path
 import sys,os
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--quick-test", help="Stops after the first successful Newton method. Useful for quick testing", action="store_true")
+parser.add_argument("--tcc", help="Used TCC", action="store_true")
+parser.add_argument("--no-petsc", help="Ignore PETSc check", action="store_true")
+args = parser.parse_args()
 
 os.chdir(Path(__file__).parent)
 
@@ -7,6 +14,19 @@ import zipfile,glob,subprocess
 import shutil
 
 
+if not args.no_petsc:
+  try:
+    from  petsc4py import PETSc
+  except ImportError:
+    raise ImportError("petsc4py not found, cannot run tests with eigenvalue solvers. Please install petsc4py and make sure it is in the PYTHONPATH")
+
+  import numpy
+  assert PETSc.ScalarType is numpy.complex128, "PETSc does not support complex numbers, cannot run tests with eigenvalue solvers. Please install a version of PETSc with complex support and make sure petsc4py is using that version."
+  
+
+if Path("pyoomph_tutorial_scripts").exists():
+  print("Removing old pyoomph_tutorial_scripts folder")
+  shutil.rmtree("pyoomph_tutorial_scripts",ignore_errors=True)
 
 bundle= Path("../docs/source/tutorial/tutorial_example_scripts.zip")
 
@@ -20,6 +40,7 @@ all_okay=True
 
 skips=sys.argv[1:]
 
+
 for d in glob.glob("./*/"):
   if d in skips or d.strip("/").strip("./") in skips:
     print("SKIPPING",d)
@@ -32,7 +53,13 @@ for d in glob.glob("./*/"):
     if f=="bifurcation_fold_param_change.py":
       continue
     print("   Testing",f)  
-    proc = subprocess.Popen([sys.executable, '-u', f], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    cmd=[sys.executable, '-u', f]
+    if args.quick_test:
+      cmd.append("--quick-test")
+    if args.tcc:
+      cmd.append("--tcc")
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    #proc = subprocess.Popen([sys.executable, '-u', f], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     (stdout,_) = proc.communicate()
     if proc.returncode!=0:
       logf=Path(f).stem+".log"
@@ -40,6 +67,7 @@ for d in glob.glob("./*/"):
       with open(logf,"wb") as lf:
         lf.write(stdout)
       folder_okay=False
+    
     shutil.rmtree(Path(f).stem,ignore_errors=True)
     
   if folder_okay:

@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -1601,4 +1602,331 @@ class SymmetricMatrixExponential(CustomMultiReturnExpression):
         else:
             raise RuntimeError("TODO: Axisymmetric case here")
 
-    
+
+
+class InvertMatrix(CustomMultiReturnExpression):
+    """
+    Inverts a 2x2 or 3x3 matrix, exploiting symmetric/antisymmetric structure
+    if present, and returns the derivatives of the inverse entries w.r.t.
+    the independent matrix entries.
+
+    matrix_type: "general", "symmetric", or "antisymmetric"
+    """
+    def __init__(self, n, matrix_type="general"):
+        if n != 2 and n != 3:
+            raise ValueError("InvertMatrix only supports n=2 or n=3")
+        if matrix_type not in ("general", "symmetric", "antisymmetric"):
+            raise ValueError('matrix_type must be "general", "symmetric" or "antisymmetric"')
+        if matrix_type == "antisymmetric" and n == 3:
+            # Any odd-dimensional skew-symmetric matrix has det=0 (det(M)=det(M^T)=det(-M)=(-1)^n det(M)).
+            # So a 3x3 antisymmetric matrix is never invertible.
+            raise ValueError("A 3x3 antisymmetric matrix is always singular and cannot be inverted")
+        self.n = n
+        self.matrix_type = matrix_type
+        super().__init__()
+
+    # ---------- argument / result (de)packing ----------
+
+    def process_args_to_scalar_list(self, *args):
+        if len(args) != 1:
+            raise ValueError("InvertMatrix only supports one argument")
+        M = args[0]
+        n = self.n
+        if self.matrix_type == "general":
+            return [M[r, c] for r in range(n) for c in range(n)]
+        elif self.matrix_type == "symmetric":
+            if n == 2:
+                return [M[0, 0], M[0, 1], M[1, 1]]
+            else:
+                return [M[0, 0], M[0, 1], M[0, 2], M[1, 1], M[1, 2], M[2, 2]]
+        elif self.matrix_type == "antisymmetric":
+            # n==2 guaranteed here (n==3 rejected in __init__)
+            return [M[0, 1]]
+
+    def get_num_returned_scalars(self, nargs: int) -> int:
+        n = self.n
+        if self.matrix_type == "general":
+            return n * n
+        elif self.matrix_type == "symmetric":
+            return n * (n + 1) // 2
+        elif self.matrix_type == "antisymmetric":
+            return n * (n - 1) // 2
+
+    def process_result_list_to_results(self, result_list: List["Expression"]) -> Tuple["ExpressionOrNum", ...]:
+        n = self.n
+        if self.matrix_type == "general":
+            if n == 2:
+                return matrix([[result_list[0], result_list[1]],
+                                [result_list[2], result_list[3]]])
+            else:
+                return matrix([[result_list[0], result_list[1], result_list[2]],
+                                [result_list[3], result_list[4], result_list[5]],
+                                [result_list[6], result_list[7], result_list[8]]])
+        elif self.matrix_type == "symmetric":
+            if n == 2:
+                return matrix([[result_list[0], result_list[1]],
+                                [result_list[1], result_list[2]]])
+            else:
+                return matrix([[result_list[0], result_list[1], result_list[2]],
+                                [result_list[1], result_list[3], result_list[4]],
+                                [result_list[2], result_list[4], result_list[5]]])
+        elif self.matrix_type == "antisymmetric":
+            b_inv = result_list[0]
+            return matrix([[0, -b_inv], [b_inv, 0]])
+
+    # ---------- shared derivative loop ----------
+
+    @staticmethod
+    def _fill_derivatives(nres, nparam, Cs, dC, ddet, det, derivative_matrix):
+        # inv_i = Cs[i]/det  =>  d(inv_i)/dparam_j = dC[i][j]/det - Cs[i]*ddet[j]/det^2
+        for i in range(nres):
+            for j in range(nparam):
+                derivative_matrix[i, j] = dC[i][j] / det - Cs[i] * ddet[j] / (det * det)
+
+    @staticmethod
+    def _sparse_row(sparse, nparam):
+        row = [0] * nparam
+        for j, val in sparse.items():
+            row[j] = val
+        return row
+
+    # ---------- eval ----------
+
+    def eval(self, flag, arg_list, result_list, derivative_matrix):
+        n = self.n
+        mt = self.matrix_type
+
+        if mt == "general" and n == 2:
+            a, b, c, d = arg_list
+            det = a * d - b * c
+            Cs = [d, -b, -c, a]
+            for i in range(4):
+                result_list[i] = Cs[i] / det
+            if flag:
+                ddet = [d, -c, -b, a]  # d(det)/d(a,b,c,d)
+                dC = [
+                    self._sparse_row({3: 1}, 4),   # dC0/d(a,b,c,d), C0=d
+                    self._sparse_row({1: -1}, 4),  # C1=-b
+                    self._sparse_row({2: -1}, 4),  # C2=-c
+                    self._sparse_row({0: 1}, 4),   # C3=a
+                ]
+                self._fill_derivatives(4, 4, Cs, dC, ddet, det, derivative_matrix)
+
+        elif mt == "symmetric" and n == 2:
+            a, b, c = arg_list
+            det = a * c - b * b
+            Cs = [c, -b, a]
+            for i in range(3):
+                result_list[i] = Cs[i] / det
+            if flag:
+                ddet = [c, -2 * b, a]
+                dC = [
+                    self._sparse_row({2: 1}, 3),
+                    self._sparse_row({1: -1}, 3),
+                    self._sparse_row({0: 1}, 3),
+                ]
+                self._fill_derivatives(3, 3, Cs, dC, ddet, det, derivative_matrix)
+
+        elif mt == "antisymmetric" and n == 2:
+            b = arg_list[0]
+            det = b * b
+            Cs = [b]
+            result_list[0] = Cs[0] / det
+            if flag:
+                ddet = [2 * b]
+                dC = [self._sparse_row({0: 1}, 1)]
+                self._fill_derivatives(1, 1, Cs, dC, ddet, det, derivative_matrix)
+
+        elif mt == "general" and n == 3:
+            a, b, c, d, e, f, g, h, k = arg_list
+            N0 = e * k - f * h
+            N1 = c * h - b * k
+            N2 = b * f - c * e
+            N3 = f * g - d * k
+            N4 = a * k - c * g
+            N5 = c * d - a * f
+            N6 = d * h - e * g
+            N7 = b * g - a * h
+            N8 = a * e - b * d
+            det = a * e * k - a * f * h - b * d * k + b * f * g + c * d * h - c * e * g
+            Cs = [N0, N1, N2, N3, N4, N5, N6, N7, N8]
+            for i in range(9):
+                result_list[i] = Cs[i] / det
+            if flag:
+                # Jacobi's formula: d(det)/dM_rc = adj(M)_cr = N at the transposed slot.
+                # params are indexed a,b,c,d,e,f,g,h,k == M00,M01,M02,M10,M11,M12,M20,M21,M22
+                ddet = [N0, N3, N6, N1, N4, N7, N2, N5, N8]
+                dC = [
+                    self._sparse_row({4: k, 5: -h, 7: -f, 8: e}, 9),   # N0 = e*k - f*h
+                    self._sparse_row({1: -k, 2: h, 7: c, 8: -b}, 9),   # N1 = c*h - b*k
+                    self._sparse_row({1: f, 2: -e, 4: -c, 5: b}, 9),  # N2 = b*f - c*e
+                    self._sparse_row({3: -k, 5: g, 6: f, 8: -d}, 9),  # N3 = f*g - d*k
+                    self._sparse_row({0: k, 2: -g, 6: -c, 8: a}, 9),  # N4 = a*k - c*g
+                    self._sparse_row({0: -f, 2: d, 3: c, 5: -a}, 9),  # N5 = c*d - a*f
+                    self._sparse_row({3: h, 4: -g, 6: -e, 7: d}, 9),  # N6 = d*h - e*g
+                    self._sparse_row({0: -h, 1: g, 6: b, 7: -a}, 9),  # N7 = b*g - a*h
+                    self._sparse_row({0: e, 1: -d, 3: -b, 4: a}, 9),  # N8 = a*e - b*d
+                ]
+                self._fill_derivatives(9, 9, Cs, dC, ddet, det, derivative_matrix)
+
+        elif mt == "symmetric" and n == 3:
+            a, b, c, d, e, g = arg_list  # a,b,c,d,e,g = M00,M01,M02,M11,M12,M22
+            C00 = d * g - e * e
+            C01 = c * e - b * g
+            C02 = b * e - c * d
+            C11 = a * g - c * c
+            C12 = b * c - a * e
+            C22 = a * d - b * b
+            det = a * C00 + b * C01 + c * C02
+            Cs = [C00, C01, C02, C11, C12, C22]
+            for i in range(6):
+                result_list[i] = Cs[i] / det
+            if flag:
+                ddet = [C00, 2 * C01, 2 * C02, C11, 2 * C12, C22]
+                dC = [
+                    self._sparse_row({3: g, 4: -2 * e, 5: d}, 6),   # C00
+                    self._sparse_row({1: -g, 2: e, 3: c, 5: -b}, 6),  # C01
+                    self._sparse_row({1: e, 2: -d, 3: -c, 4: b}, 6),  # C02
+                    self._sparse_row({0: g, 2: -2 * c, 5: a}, 6),   # C11
+                    self._sparse_row({0: -e, 1: c, 2: b, 4: -a}, 6),  # C12
+                    self._sparse_row({0: d, 1: -2 * b, 3: a}, 6),   # C22
+                ]
+                self._fill_derivatives(6, 6, Cs, dC, ddet, det, derivative_matrix)
+        else:
+            raise NotImplementedError(f"InvertMatrix: n={n}, matrix_type={mt} not implemented")
+
+    # ---------- C code generation ----------
+
+    def generate_c_code(self) -> str:
+        n = self.n
+        mt = self.matrix_type
+        lines = []
+
+        def emit_loop(nres, nparam, Cs_name, dC_rows, ddet_vals):
+            lines.append(f"double ddet[{nparam}]={{{','.join(str(v) for v in ddet_vals)}}};")
+            lines.append(f"double dC[{nres}][{nparam}]={{")
+            for row in dC_rows:
+                lines.append("  {" + ",".join(str(v) for v in row) + "},")
+            lines.append("};")
+            lines.append(f"int nargs={nparam};")
+            lines.append(f"for (int i=0;i<{nres};i++) {{")
+            lines.append(f"  for (int j=0;j<{nparam};j++) {{")
+            lines.append(f"    derivative_matrix[i*nargs+j]={Cs_name}[i]/det - {Cs_name}[i]*ddet[j]/(det*det);")
+            lines.append("  }")
+            lines.append("}")
+
+        # NOTE: the derivative_matrix formula above intentionally reuses Cs_name for
+        # both the numerator-derivative-array (dC) and the prefactor (Cs); dC and Cs
+        # are DIFFERENT arrays. Fixed properly below per-branch (kept explicit, not
+        # via this shared helper, to avoid the name collision this sketch shows).
+
+        if mt == "general" and n == 2:
+            lines += [
+                "double a=arg_list[0];", "double b=arg_list[1];",
+                "double c=arg_list[2];", "double d=arg_list[3];",
+                "double det=a*d-b*c;",
+                "double Cs[4]={d,-b,-c,a};",
+                "result_list[0]=Cs[0]/det;", "result_list[1]=Cs[1]/det;",
+                "result_list[2]=Cs[2]/det;", "result_list[3]=Cs[3]/det;",
+                "if (flag) {",
+                "  double ddet[4]={d,-c,-b,a};",
+                "  double dC[4][4]={{0,0,0,1},{0,-1,0,0},{0,0,-1,0},{1,0,0,0}};",
+                "  int nargs=4;",
+                "  for (int i=0;i<4;i++) { for (int j=0;j<4;j++) {",
+                "    derivative_matrix[i*nargs+j]=dC[i][j]/det - Cs[i]*ddet[j]/(det*det);",
+                "  } }",
+                "}",
+            ]
+
+        elif mt == "symmetric" and n == 2:
+            lines += [
+                "double a=arg_list[0];", "double b=arg_list[1];", "double c=arg_list[2];",
+                "double det=a*c-b*b;",
+                "double Cs[3]={c,-b,a};",
+                "result_list[0]=Cs[0]/det;", "result_list[1]=Cs[1]/det;", "result_list[2]=Cs[2]/det;",
+                "if (flag) {",
+                "  double ddet[3]={c,-2*b,a};",
+                "  double dC[3][3]={{0,0,1},{0,-1,0},{1,0,0}};",
+                "  int nargs=3;",
+                "  for (int i=0;i<3;i++) { for (int j=0;j<3;j++) {",
+                "    derivative_matrix[i*nargs+j]=dC[i][j]/det - Cs[i]*ddet[j]/(det*det);",
+                "  } }",
+                "}",
+            ]
+
+        elif mt == "antisymmetric" and n == 2:
+            lines += [
+                "double b=arg_list[0];",
+                "double det=b*b;",
+                "double Cs[1]={b};",
+                "result_list[0]=Cs[0]/det;",
+                "if (flag) {",
+                "  double ddet[1]={2*b};",
+                "  double dC[1][1]={{1}};",
+                "  int nargs=1;",
+                "  for (int i=0;i<1;i++) { for (int j=0;j<1;j++) {",
+                "    derivative_matrix[i*nargs+j]=dC[i][j]/det - Cs[i]*ddet[j]/(det*det);",
+                "  } }",
+                "}",
+            ]
+
+        elif mt == "general" and n == 3:
+            lines += [
+                "double a=arg_list[0];", "double b=arg_list[1];", "double c=arg_list[2];",
+                "double d=arg_list[3];", "double e=arg_list[4];", "double f=arg_list[5];",
+                "double g=arg_list[6];", "double h=arg_list[7];", "double k=arg_list[8];",
+                "double N0=e*k-f*h;", "double N1=c*h-b*k;", "double N2=b*f-c*e;",
+                "double N3=f*g-d*k;", "double N4=a*k-c*g;", "double N5=c*d-a*f;",
+                "double N6=d*h-e*g;", "double N7=b*g-a*h;", "double N8=a*e-b*d;",
+                "double det=a*e*k-a*f*h-b*d*k+b*f*g+c*d*h-c*e*g;",
+                "double Cs[9]={N0,N1,N2,N3,N4,N5,N6,N7,N8};",
+                "for (int i=0;i<9;i++) result_list[i]=Cs[i]/det;",
+                "if (flag) {",
+                "  double ddet[9]={N0,N3,N6,N1,N4,N7,N2,N5,N8};",
+                "  double dC[9][9];",
+                "  for (int i=0;i<9;i++) for (int j=0;j<9;j++) dC[i][j]=0;",
+                "  dC[0][4]=k;  dC[0][5]=-h; dC[0][7]=-f; dC[0][8]=e;",
+                "  dC[1][1]=-k; dC[1][2]=h;  dC[1][7]=c;  dC[1][8]=-b;",
+                "  dC[2][1]=f;  dC[2][2]=-e; dC[2][4]=-c; dC[2][5]=b;",
+                "  dC[3][3]=-k; dC[3][5]=g;  dC[3][6]=f;  dC[3][8]=-d;",
+                "  dC[4][0]=k;  dC[4][2]=-g; dC[4][6]=-c; dC[4][8]=a;",
+                "  dC[5][0]=-f; dC[5][2]=d;  dC[5][3]=c;  dC[5][5]=-a;",
+                "  dC[6][3]=h;  dC[6][4]=-g; dC[6][6]=-e; dC[6][7]=d;",
+                "  dC[7][0]=-h; dC[7][1]=g;  dC[7][6]=b;  dC[7][7]=-a;",
+                "  dC[8][0]=e;  dC[8][1]=-d; dC[8][3]=-b; dC[8][4]=a;",
+                "  int nargs=9;",
+                "  for (int i=0;i<9;i++) { for (int j=0;j<9;j++) {",
+                "    derivative_matrix[i*nargs+j]=dC[i][j]/det - Cs[i]*ddet[j]/(det*det);",
+                "  } }",
+                "}",
+            ]
+
+        elif mt == "symmetric" and n == 3:
+            lines += [
+                "double a=arg_list[0];", "double b=arg_list[1];", "double c=arg_list[2];",
+                "double d=arg_list[3];", "double e=arg_list[4];", "double g=arg_list[5];",
+                "double C00=d*g-e*e;", "double C01=c*e-b*g;", "double C02=b*e-c*d;",
+                "double C11=a*g-c*c;", "double C12=b*c-a*e;", "double C22=a*d-b*b;",
+                "double det=a*C00+b*C01+c*C02;",
+                "double Cs[6]={C00,C01,C02,C11,C12,C22};",
+                "for (int i=0;i<6;i++) result_list[i]=Cs[i]/det;",
+                "if (flag) {",
+                "  double ddet[6]={C00,2*C01,2*C02,C11,2*C12,C22};",
+                "  double dC[6][6];",
+                "  for (int i=0;i<6;i++) for (int j=0;j<6;j++) dC[i][j]=0;",
+                "  dC[0][3]=g;    dC[0][4]=-2*e; dC[0][5]=d;",
+                "  dC[1][1]=-g;   dC[1][2]=e;    dC[1][3]=c;   dC[1][5]=-b;",
+                "  dC[2][1]=e;    dC[2][2]=-d;   dC[2][3]=-c;  dC[2][4]=b;",
+                "  dC[3][0]=g;    dC[3][2]=-2*c; dC[3][5]=a;",
+                "  dC[4][0]=-e;   dC[4][1]=c;    dC[4][2]=b;   dC[4][4]=-a;",
+                "  dC[5][0]=d;    dC[5][1]=-2*b; dC[5][3]=a;",
+                "  int nargs=6;",
+                "  for (int i=0;i<6;i++) { for (int j=0;j<6;j++) {",
+                "    derivative_matrix[i*nargs+j]=dC[i][j]/det - Cs[i]*ddet[j]/(det*det);",
+                "  } }",
+                "}",
+            ]
+        else:
+            raise NotImplementedError(f"InvertMatrix.generate_c_code: n={n}, matrix_type={mt} not implemented")
+
+        return "\n".join(lines)

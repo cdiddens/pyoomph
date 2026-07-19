@@ -1,7 +1,7 @@
 Continuous basis functions, spatial discretization and solution procedure
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Until now, we always have allocated the unknown function :math:`u` with ``define_scalar_field("u","C2")``. While the first argument is just the name, the second argument needs more elaboration. It defines the *finite element space* where the function is defined upon. In pyoomph, there are two kinds on continuous spaces, namely ``"C1"`` and ``"C2"``. Discontinuous spaces ``"D0"`` (constant per element) and ``"DL"`` (affine linear per element, cf. :numref:`secspatialcr`) are also available, but not discussed here. To understand these two continuous spaces, let us delve slightly into the basics of the *finite element method*. In fact, the unknown function :math:`u` is spatially discretized by so-called *shape functions* :math:`\psi_l(\vec{x})`.
+Until now, we always have allocated the unknown function :math:`u` with ``define_scalar_field("u","C2")``. While the first argument is just the name, the second argument needs more elaboration. It defines the *finite element space* on which the function is defined. In pyoomph, there are two kinds of continuous spaces, namely ``"C1"`` and ``"C2"``. Discontinuous spaces ``"D0"`` (constant per element) and ``"DL"`` (affine linear per element, cf. :numref:`secspatialcr`) are also available, but not discussed here. To understand these two continuous spaces, let us delve slightly into the basics of the *finite element method*. In fact, the unknown function :math:`u` is spatially discretized by so-called *shape functions* :math:`\psi_l(\vec{x})`.
 
 .. math:: :label: eqspatialbasisexpand
    
@@ -15,7 +15,7 @@ The simplest idea on a one-dimensional domain, discretized by positions at :math
 
 .. math:: \psi_l(x)=\left\{ \begin{array}{rcl} 0 & \text{ for } & x<x_{l-1}  \\ (x-x_{l-1})/(x_l-x_{l-1}) & \text{ for } & x_{l-1}\leq x < x_l \\ (x_{l+1}-x)/(x_{l+1}-x_l) & \text{ for } & x_{l}< x \leq x_{l+1} \\ 0 & \text{ for } & x\geq x_{l+1}  \end{array} \right.\, ,
 
-where the missing points :math:`x_{0}` and :math:`x_{n+1}` are not required if :math:`x` is confined to the range of the domain, i.e. between :math:`x_1` and :math:`x_l`. The basis functions are shown for a 1d mesh in figure :numref:`figspatialshapes1d`.
+where the missing points :math:`x_{0}` and :math:`x_{n+1}` are not required if :math:`x` is confined to the range of the domain, i.e. between :math:`x_1` and :math:`x_l`. The basis functions are shown for a 1d mesh in :numref:`figspatialshapes1d`.
 
 ..  figure:: shapes1d.*
 	:name: figspatialshapes1d
@@ -36,9 +36,9 @@ These functions are in fact used if the space ``"C1"`` is used. Let us see how t
    \left(\sum_l u_l \partial_x \psi_l,\partial_x v\right)-\left(g, v\right)-\left\langle j_\text{N}, v\right\rangle&=0
    \end{aligned}
 
-The derivative of :math:`u(x)` is not required, just the derivative of the shape functions :math:`\psi_l`, which can be calculated easily except on :math:`x_{l-1}`, :math:`x_l` and :math:`x_{l+1}`, where the derivative is not defined due to the piece-wise nature of the chosen basis functions. However, these points are are *null set* with respect to the spatial integration :math:`\left(.,\,.\right)` so that it is not required to consider these points within the integration.
+The derivative of :math:`u(x)` is not required, just the derivative of the shape functions :math:`\psi_l`, which can be calculated easily except on :math:`x_{l-1}`, :math:`x_l` and :math:`x_{l+1}`, where the derivative is not defined due to the piece-wise nature of the chosen basis functions. However, these points are a *null set* with respect to the spatial integration :math:`\left(.,\,.\right)` so that it is not required to consider these points within the integration.
 
-Finally, we have not yet addressed the test function :math:`v`. As mentioned before, the above weak form has to hold for all (quite arbitrary) choices of :math:`v`. In the discretization :math:numref:`eqspatialbasisexpand`, we have used :math:`n` unknows :math:`u_l` (for :math:`l=1,\ldots,n`). So to get a discretized system of equations, we should choose :math:`n` linear independent test functions :math:`v_k` (with :math:`k=1,\ldots,n`). Furthermore, we have to make sure that the *mass matrix* :math:`\mathbf{M}=(M_{lk})=(\phi_l,v_k)` has a full rank. If the :math:`l`-th row of this matrix is entirely zero, it means that we have selected our :math:`n` test functions :math:`v_k` in a manner that there is no support for the degree of freedom :math:`u_l`. Thereby, we would not obtain a discretized equation for this degree of freedom.
+Finally, we have not yet addressed the test function :math:`v`. As mentioned before, the above weak form has to hold for all (quite arbitrary) choices of :math:`v`. In the discretization :math:numref:`eqspatialbasisexpand`, we have used :math:`n` unknowns :math:`u_l` (for :math:`l=1,\ldots,n`). So to get a discretized system of equations, we should choose :math:`n` linearly independent test functions :math:`v_k` (with :math:`k=1,\ldots,n`). Furthermore, we have to make sure that the *mass matrix* :math:`\mathbf{M}=(M_{lk})=(\phi_l,v_k)` has a full rank. If the :math:`l`-th row of this matrix is entirely zero, it means that we have selected our :math:`n` test functions :math:`v_k` in a manner that there is no support for the degree of freedom :math:`u_l`. Thereby, we would not obtain a discretized equation for this degree of freedom.
 
 The trivial choice of the test functions is the *Galerkin method*, where we just take the same basis functions, i.e. :math:`v_k=\psi_k`. Thereby, both requirements on the test functions hold automatically. The Poisson equation hence reads
 

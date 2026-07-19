@@ -4750,8 +4750,14 @@ namespace oomph
 #pragma clang diagnostic ignored "-Woverloaded-virtual"
 #endif
 
+
+  // FOR_PYOOMPH - suppress some warnings
+    using FiniteElement::face_to_bulk_coordinate_fct_pt;
+    using FiniteElement::bulk_coordinate_derivatives_fct_pt;
+
     /// Return the pointer to the function that maps the face
     /// coordinate to the bulk coordinate
+    
     CoordinateMappingFctPt& face_to_bulk_coordinate_fct_pt()
     {
       return Face_to_bulk_coordinate_fct_pt;
@@ -4773,7 +4779,7 @@ namespace oomph
     }
 
     /// Return the pointer to the function that returns the derivatives
-    /// of the bulk coordinates wrt the face coordinates (const version)
+    /// of the bulk coordinates wrt the face coordinates (const version)    
     BulkCoordinateDerivativesFctPt bulk_coordinate_derivatives_fct_pt() const
     {
       return Bulk_coordinate_derivatives_fct_pt;

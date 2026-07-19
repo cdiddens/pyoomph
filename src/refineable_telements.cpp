@@ -1,6 +1,6 @@
 /*================================================================================
 pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -15,7 +15,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 
-The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+The main author may be contacted at c.diddens@utwente.nl
 
 ================================================================================*/
 
@@ -23,6 +23,14 @@ The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
 #include "exception.hpp"
 namespace oomph
 {
+
+  // This file implements RefineableTElement<DIM> (declared in refineable_telements.hpp),
+  // the glue between oomph-lib's simplex (T-type: line/triangle/tetrahedron) template
+  // elements and its RefineableElement/tree-based h-adaptivity machinery. Most of the
+  // logic below is carried over largely unmodified from oomph-lib's own refineable simplex
+  // element sources. The DIM=2 (triangle) specialisation is the one with working
+  // (non-stub) implementations of build()/setup_father_bounds() etc.; the DIM=1 and DIM=3
+  // specialisations mostly still throw_runtime_error("Implement") and are placeholders.
 
   //==================================================================
   /// Setup static matrix for coincidence between son nodal points and
@@ -57,7 +65,7 @@ namespace oomph
   ///   - bound_cons[ival]=0 if value ival on this boundary is free
   ///   - bound_cons[ival]=1 if value ival on this boundary is pinned
   //==================================================================
-  void RefineableTElement<1>::get_bcs(int bound, Vector<int> &bound_cons) const
+  void RefineableTElement<1>::get_bcs(int , Vector<int> &) const
   {
     throw_runtime_error("Implement");
   }
@@ -71,7 +79,7 @@ namespace oomph
   ///   - bound_cons[ival]=0 if value ival on this boundary is free
   ///   - bound_cons[ival]=1 if value ival on this boundary is pinned
   //==================================================================
-  void RefineableTElement<1>::get_edge_bcs(const int &edge, Vector<int> &bound_cons) const
+  void RefineableTElement<1>::get_edge_bcs(const int &, Vector<int> &) const
   {
     throw_runtime_error("Implement");
   }
@@ -85,8 +93,8 @@ namespace oomph
   /// both vertex nodes). For vertex nodes, we just return their
   /// boundaries.
   //==================================================================
-  void RefineableTElement<1>::get_boundaries(const int &edge,
-                                             std::set<unsigned> &boundary) const
+  void RefineableTElement<1>::get_boundaries(const int &,
+                                             std::set<unsigned> &) const
   {
     throw_runtime_error("Implement");
   }
@@ -96,9 +104,9 @@ namespace oomph
   /// along the edge (S/W/N/E)
   //===================================================================
   void RefineableTElement<1>::
-      interpolated_zeta_on_edge(const unsigned &boundary,
-                                const int &edge, const Vector<double> &s,
-                                Vector<double> &zeta)
+      interpolated_zeta_on_edge(const unsigned &,
+                                const int &, const Vector<double> &,
+                                Vector<double> &)
   {
     throw_runtime_error("Implement");
   }
@@ -111,8 +119,8 @@ namespace oomph
   /// periodic the flag is_periodic will be true
   //===================================================================
   Node *RefineableTElement<1>::
-      node_created_by_neighbour(const Vector<double> &s_fraction,
-                                bool &is_periodic)
+      node_created_by_neighbour(const Vector<double> &,
+                                bool &)
   {
     throw_runtime_error("Implement");
     return 0;
@@ -146,10 +154,10 @@ namespace oomph
   ///   pressure values in manner consistent with the pressure
   ///   distribution in the father element.
   //==================================================================
-  void RefineableTElement<1>::build(Mesh *&mesh_pt,
-                                    Vector<Node *> &new_node_pt,
-                                    bool &was_already_built,
-                                    std::ofstream &new_nodes_file)
+  void RefineableTElement<1>::build(Mesh *&,
+                                    Vector<Node *> &,
+                                    bool &,
+                                    std::ofstream &)
   {
     throw_runtime_error("Implement");
   }
@@ -157,8 +165,8 @@ namespace oomph
   //====================================================================
   ///  Print corner nodes, use colour (default "BLACK")
   //====================================================================
-  void RefineableTElement<1>::output_corners(std::ostream &outfile,
-                                             const std::string &colour) const
+  void RefineableTElement<1>::output_corners(std::ostream &,
+                                             const std::string &) const
   {
     throw_runtime_error("Implement");
   }
@@ -168,7 +176,7 @@ namespace oomph
   /// open the output files and pass the open files to the helper function
   //====================================================================
   void RefineableTElement<1>::setup_hanging_nodes(Vector<std::ofstream *>
-                                                      &output_stream)
+                                                      &)
   {
     throw_runtime_error("Implement");
   }
@@ -177,7 +185,7 @@ namespace oomph
   /// Internal function that sets up the hanging node scheme for
   /// a particular continuously interpolated value
   //===============================================================
-  void RefineableTElement<1>::setup_hang_for_value(const int &value_id)
+  void RefineableTElement<1>::setup_hang_for_value(const int &)
   {
     throw_runtime_error("Implement");
   }
@@ -187,8 +195,8 @@ namespace oomph
   /// edge of the element
   //=================================================================
   void RefineableTElement<1>::
-      quad_hang_helper(const int &value_id,
-                       const int &my_edge, std::ofstream &output_hangfile)
+      quad_hang_helper(const int &,
+                       const int &, std::ofstream &)
   {
     throw_runtime_error("Implement");
   }
@@ -199,7 +207,7 @@ namespace oomph
   /// - (nodally) interpolated function values
   //====================================================================
   // template<unsigned NNODE_1D>
-  void RefineableTElement<1>::check_integrity(double &max_error)
+  void RefineableTElement<1>::check_integrity(double &)
   {
 
     throw_runtime_error("Implement");
@@ -225,10 +233,12 @@ namespace oomph
   //==================================================================
   void RefineableTElement<2>::setup_father_bounds()
   {
+    // Brings SW/SE/NW/NE/S/E/N/W/OMEGA son-type/boundary enum names into scope
     using namespace QuadTreeNames;
 
     // Find the number of nodes along a 1D edge
     unsigned n_p = nnode_1d();
+    // Total number of nodes in the element (3 for linear, 6 for quadratic triangles)
     unsigned nnode = this->nnode();
     // Allocate space for the boundary information
     if (nnode == 3)
@@ -252,6 +262,11 @@ namespace oomph
         Father_bound[n_p](n, ison) = Tree::OMEGA;
       }
     }
+
+    // A triangle is refined into 4 son triangles (reusing the QuadTree SW/SE/NW/NE
+    // son-type names even though the underlying tree is a QuadTree of triangles).
+    // Nodes 0-2 are the corner vertices, nodes 3-5 (if present) are the mid-edge
+    // nodes of a quadratic (6-node) triangle, opposite to vertices 0,1,2 respectively.
 
     // Southwest son
     Father_bound[n_p](0, SW) = S;
@@ -309,7 +324,7 @@ namespace oomph
   ///   - bound_cons[ival]=0 if value ival on this boundary is free
   ///   - bound_cons[ival]=1 if value ival on this boundary is pinned
   //==================================================================
-  void RefineableTElement<2>::get_bcs(int bound, Vector<int> &bound_cons) const
+  void RefineableTElement<2>::get_bcs(int , Vector<int> &) const
   {
     throw_runtime_error("Implement");
   }
@@ -323,7 +338,7 @@ namespace oomph
   ///   - bound_cons[ival]=0 if value ival on this boundary is free
   ///   - bound_cons[ival]=1 if value ival on this boundary is pinned
   //==================================================================
-  void RefineableTElement<2>::get_edge_bcs(const int &edge, Vector<int> &bound_cons) const
+  void RefineableTElement<2>::get_edge_bcs(const int &, Vector<int> &) const
   {
     throw_runtime_error("Implement");
   }
@@ -337,8 +352,8 @@ namespace oomph
   /// both vertex nodes). For vertex nodes, we just return their
   /// boundaries.
   //==================================================================
-  void RefineableTElement<2>::get_boundaries(const int &edge,
-                                             std::set<unsigned> &boundary) const
+  void RefineableTElement<2>::get_boundaries(const int &,
+                                             std::set<unsigned> &) const
   {
     throw_runtime_error("Implement");
   }
@@ -348,9 +363,9 @@ namespace oomph
   /// along the edge (S/W/N/E)
   //===================================================================
   void RefineableTElement<2>::
-      interpolated_zeta_on_edge(const unsigned &boundary,
-                                const int &edge, const Vector<double> &s,
-                                Vector<double> &zeta)
+      interpolated_zeta_on_edge(const unsigned &,
+                                const int &, const Vector<double> &,
+                                Vector<double> &)
   {
     throw_runtime_error("Implement");
   }
@@ -363,8 +378,8 @@ namespace oomph
   /// periodic the flag is_periodic will be true
   //===================================================================
   Node *RefineableTElement<2>::
-      node_created_by_neighbour(const Vector<double> &s_fraction,
-                                bool &is_periodic)
+      node_created_by_neighbour(const Vector<double> &,
+                                bool &)
   {
     throw_runtime_error("Implement");
     return 0;
@@ -403,16 +418,21 @@ namespace oomph
                                     bool &was_already_built,
                                     std::ofstream &new_nodes_file)
   {
+    // Brings SW/SE/NW/NE/S/E/N/W/OMEGA son-type/boundary enum names into scope
     using namespace QuadTreeNames;
     unsigned n_p = nnode_1d();
     unsigned n_node = this->nnode();
 
+    // Lazily (re-)build the Father_bound lookup table for this node count if
+    // it hasn't been set up yet
     if (Father_bound[n_p].nrow() == 0)
     {
       setup_father_bounds();
     }
     QuadTree *father_pt = dynamic_cast<QuadTree *>(quadtree_pt()->father_pt());
+    // Which of the 4 sons (SW/SE/NW/NE) this element is, within its father
     int son_type = Tree_pt->son_type();
+    // If the nodes haven't been built yet, this element must be built from its father
     if (!nodes_built())
     {
 #ifdef PARANOID
@@ -442,6 +462,9 @@ namespace oomph
 
       //   Vector<double> s_lo(2);
       //   Vector<double> s_hi(2);
+      // Local coordinates of each of this element's nodes, expressed in the
+      // father's local coordinate system (s_in_parent) and in this (son)
+      // element's own local coordinate system (s_in_son)
       Vector<Vector<double>> s_in_parent(n_node, Vector<double>(2));
       Vector<Vector<double>> s_in_son(n_node, Vector<double>(2));
 
@@ -450,12 +473,14 @@ namespace oomph
         throw_runtime_error("Implement");
       }
 
+      // Corner vertices of the son element in its own local coordinates
       s_in_son[0][0] = 1.0;
       s_in_son[0][1] = 0.0;
       s_in_son[1][0] = 0.0;
       s_in_son[1][1] = 1.0;
       s_in_son[2][0] = 0.0;
       s_in_son[2][1] = 0.0;
+      // Mid-edge nodes of the son element (quadratic, 6-node triangle only)
       if (n_node > 3)
       {
         s_in_son[3][0] = 0.5;
@@ -471,7 +496,14 @@ namespace oomph
       }
 
       // Setup vertex coordinates in father element:
-      //--------------------------------------------
+      // --------------------------------------------
+      // For each of the 4 son types, the corner vertices of the son
+      // (indices 0-2) are placed at the corresponding vertex/mid-edge
+      // location within the father's local coordinates. Mid-edge nodes
+      // (3-5, commented out below) would be the midpoints of the son's
+      // edges in father coordinates, but are instead computed generically
+      // by averaging below since they coincide with the midpoint formula
+      // in all 4 cases.
       switch (son_type)
       {
       case SW:
@@ -542,6 +574,9 @@ namespace oomph
         break;
       }
 
+      // Mid-edge nodes (3-5) of the son, in father coordinates, are simply
+      // the midpoints of the son's corner vertices (which are themselves
+      // already expressed in father coordinates above)
       if (n_node > 3)
       {
         for (unsigned int i = 0; i < 2; i++)
@@ -556,6 +591,9 @@ namespace oomph
         }
       }
 
+      // If the father is defined via a macro element (curvilinear boundary
+      // representation), the son should inherit/derive its own macro-element
+      // sub-region -- not yet implemented for triangles
       if (father_el_pt->Macro_elem_pt != 0)
       {
         set_macro_elem_pt(father_el_pt->Macro_elem_pt);
@@ -577,6 +615,9 @@ namespace oomph
         Vector<double> x_small(2);
         Vector<double> x_large(2);
 
+        // Loop over all nodes of this (son) element, creating each one
+        // unless it can be re-used from the father, a neighbour, or a
+        // neighbour's son
         for (unsigned i = 0; i < n_node; i++)
         {
           {
@@ -1190,8 +1231,8 @@ namespace oomph
   //====================================================================
   ///  Print corner nodes, use colour (default "BLACK")
   //====================================================================
-  void RefineableTElement<2>::output_corners(std::ostream &outfile,
-                                             const std::string &colour) const
+  void RefineableTElement<2>::output_corners(std::ostream &,
+                                             const std::string &) const
   {
     throw_runtime_error("Implement");
   }
@@ -1201,7 +1242,7 @@ namespace oomph
   /// open the output files and pass the open files to the helper function
   //====================================================================
   void RefineableTElement<2>::setup_hanging_nodes(Vector<std::ofstream *>
-                                                      &output_stream)
+                                                      &)
   {
     throw_runtime_error("Implement");
   }
@@ -1210,7 +1251,7 @@ namespace oomph
   /// Internal function that sets up the hanging node scheme for
   /// a particular continuously interpolated value
   //===============================================================
-  void RefineableTElement<2>::setup_hang_for_value(const int &value_id)
+  void RefineableTElement<2>::setup_hang_for_value(const int &)
   {
     throw_runtime_error("Implement");
   }
@@ -1220,8 +1261,8 @@ namespace oomph
   /// edge of the element
   //=================================================================
   void RefineableTElement<2>::
-      quad_hang_helper(const int &value_id,
-                       const int &my_edge, std::ofstream &output_hangfile)
+      quad_hang_helper(const int &,
+                       const int &, std::ofstream &)
   {
     throw_runtime_error("Implement");
   }
@@ -1232,7 +1273,7 @@ namespace oomph
   /// - (nodally) interpolated function values
   //====================================================================
   // template<unsigned NNODE_1D>
-  void RefineableTElement<2>::check_integrity(double &max_error)
+  void RefineableTElement<2>::check_integrity(double &)
   {
 
     throw_runtime_error("Implement");
@@ -1278,7 +1319,7 @@ namespace oomph
   ///   - bound_cons[ival]=0 if value ival on this boundary is free
   ///   - bound_cons[ival]=1 if value ival on this boundary is pinned
   //==================================================================
-  void RefineableTElement<3>::get_bcs(int bound, Vector<int> &bound_cons) const
+  void RefineableTElement<3>::get_bcs(int , Vector<int> &) const
   {
     throw_runtime_error("Implement");
   }
@@ -1292,7 +1333,7 @@ namespace oomph
   ///   - bound_cons[ival]=0 if value ival on this boundary is free
   ///   - bound_cons[ival]=1 if value ival on this boundary is pinned
   //==================================================================
-  void RefineableTElement<3>::get_edge_bcs(const int &edge, Vector<int> &bound_cons) const
+  void RefineableTElement<3>::get_edge_bcs(const int &, Vector<int> &) const
   {
     throw_runtime_error("Implement");
   }
@@ -1306,8 +1347,8 @@ namespace oomph
   /// both vertex nodes). For vertex nodes, we just return their
   /// boundaries.
   //==================================================================
-  void RefineableTElement<3>::get_boundaries(const int &edge,
-                                             std::set<unsigned> &boundary) const
+  void RefineableTElement<3>::get_boundaries(const int &,
+                                             std::set<unsigned> &) const
   {
     throw_runtime_error("Implement");
   }
@@ -1317,9 +1358,9 @@ namespace oomph
   /// along the edge (S/W/N/E)
   //===================================================================
   void RefineableTElement<3>::
-      interpolated_zeta_on_edge(const unsigned &boundary,
-                                const int &edge, const Vector<double> &s,
-                                Vector<double> &zeta)
+      interpolated_zeta_on_edge(const unsigned &,
+                                const int &, const Vector<double> &,
+                                Vector<double> &)
   {
     throw_runtime_error("Implement");
   }
@@ -1332,8 +1373,8 @@ namespace oomph
   /// periodic the flag is_periodic will be true
   //===================================================================
   Node *RefineableTElement<3>::
-      node_created_by_neighbour(const Vector<double> &s_fraction,
-                                bool &is_periodic)
+      node_created_by_neighbour(const Vector<double> &,
+                                bool &)
   {
     throw_runtime_error("Implement");
     return 0;
@@ -1367,10 +1408,10 @@ namespace oomph
   ///   pressure values in manner consistent with the pressure
   ///   distribution in the father element.
   //==================================================================
-  void RefineableTElement<3>::build(Mesh *&mesh_pt,
-                                    Vector<Node *> &new_node_pt,
-                                    bool &was_already_built,
-                                    std::ofstream &new_nodes_file)
+  void RefineableTElement<3>::build(Mesh *&,
+                                    Vector<Node *> &,
+                                    bool &,
+                                    std::ofstream &)
   {
     throw_runtime_error("Implement");
   }
@@ -1378,8 +1419,8 @@ namespace oomph
   //====================================================================
   ///  Print corner nodes, use colour (default "BLACK")
   //====================================================================
-  void RefineableTElement<3>::output_corners(std::ostream &outfile,
-                                             const std::string &colour) const
+  void RefineableTElement<3>::output_corners(std::ostream &,
+                                             const std::string &) const
   {
     throw_runtime_error("Implement");
   }
@@ -1389,7 +1430,7 @@ namespace oomph
   /// open the output files and pass the open files to the helper function
   //====================================================================
   void RefineableTElement<3>::setup_hanging_nodes(Vector<std::ofstream *>
-                                                      &output_stream)
+                                                      &)
   {
     throw_runtime_error("Implement");
   }
@@ -1398,7 +1439,7 @@ namespace oomph
   /// Internal function that sets up the hanging node scheme for
   /// a particular continuously interpolated value
   //===============================================================
-  void RefineableTElement<3>::setup_hang_for_value(const int &value_id)
+  void RefineableTElement<3>::setup_hang_for_value(const int &)
   {
     throw_runtime_error("Implement");
   }
@@ -1408,8 +1449,8 @@ namespace oomph
   /// edge of the element
   //=================================================================
   void RefineableTElement<3>::
-      quad_hang_helper(const int &value_id,
-                       const int &my_edge, std::ofstream &output_hangfile)
+      quad_hang_helper(const int &,
+                       const int &, std::ofstream &)
   {
     throw_runtime_error("Implement");
   }
@@ -1420,7 +1461,7 @@ namespace oomph
   /// - (nodally) interpolated function values
   //====================================================================
   // template<unsigned NNODE_1D>
-  void RefineableTElement<3>::check_integrity(double &max_error)
+  void RefineableTElement<3>::check_integrity(double &)
   {
 
     throw_runtime_error("Implement");

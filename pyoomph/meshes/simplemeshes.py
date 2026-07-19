@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -29,7 +30,7 @@ import math
 from .mesh import MeshTemplate
 from .remesher import Remesher2d
 from ..expressions import ExpressionOrNum
-import _pyoomph
+from .. import _pyoomph_core as _pyoomph
 from ..typings import *
 import numpy
 
@@ -87,7 +88,8 @@ class LineMesh(MeshTemplate):
                     domain_table[local_domain] = self.new_domain(local_domain)
                 domain_table[local_domain].add_line_1d_C1(p0, p1)
                 if lastdom is not None and lastdom != local_domain:
-                    self.add_nodes_to_boundary(lastdom + "_" + local_domain, [p0])
+                    #self.add_nodes_to_boundary(lastdom + "_" + local_domain, [p0])
+                    self.add_facet_to_boundary(lastdom + "_" + local_domain, [p0])
                 lastdom = local_domain
             else:
                 domain.add_line_1d_C1(p0, p1)
@@ -99,8 +101,10 @@ class LineMesh(MeshTemplate):
                 pright = p1
         assert isinstance(pleft, int)  # type:ignore
         assert isinstance(pright, int)  # type:ignore
-        self.add_nodes_to_boundary(self.left_name, [pleft])
-        self.add_nodes_to_boundary(self.right_name, [pright])
+        #self.add_nodes_to_boundary(self.left_name, [pleft])
+        self.add_facet_to_boundary(self.left_name, [pleft])
+        #self.add_nodes_to_boundary(self.right_name, [pright])
+        self.add_facet_to_boundary(self.right_name, [pright])
         if self.periodic:
             self.add_periodic_node_pair(pleft, pright)
 
@@ -116,7 +120,7 @@ class RectangularQuadMesh(MeshTemplate):
         name: The name of the domain or a function that returns the name based on the center coordinates of each element. The interfaces   in between are automatically generated and named based on the domain names separated with an underscore.
         size: The size of the mesh, either by a single value (for both directions) or by two values (for x and y directions).            
         N: The number of elements in each dimension.. Can be a single value or a list of two values for x and y dimensions respectively.
-        lower_left: The coordinates of the lower-left corner of the mesh, i.e. the mesh ranges from ``lower_left[0]`` to ``lower_left[0] + size[0]`` in x-direction and ``lower_left[1]`` to ``lower_left[1] + size[1]]`` in y-direction.            
+        lower_left: The coordinates of the lower-left corner of the mesh, i.e. the mesh ranges from ``lower_left[0]`` to ``lower_left[0] + size[0]`` in x-direction and ``lower_left[1]`` to ``lower_left[1] + size[1]]`` in y-direction. Can be set to ``"centered"`` to automatically center the mesh around the origin.            
         periodic: Whether the mesh is periodic, either in both directions or in x and y directions separately.
         split_in_tris: Split the quadrilateral elements into triangles.
         split_scott_vogelius: Whether to use splitting into Scott-Vogelius elements.
@@ -124,7 +128,7 @@ class RectangularQuadMesh(MeshTemplate):
         nodal_dimension: The nodal dimension of the mesh, can be used to curve the mesh later on.
     """
     
-    def __init__(self, *, name:Union[str,Callable[[float,float],str]]="domain", size:Union[ExpressionOrNum,List[ExpressionOrNum]]=1.0, N:Union[int,List[int]]=10, lower_left:Union[ExpressionOrNum,List[ExpressionOrNum]]=[0, 0], periodic:Union[bool,List[bool]]=False, split_in_tris:Literal[False, "alternate_left", "alternate_right", "left", "right", "crossed"]=False,split_scott_vogelius:bool=False, boundary_names:Dict[str,Union[str,Callable[[float],str]]]={},nodal_dimension:Optional[int]=None):
+    def __init__(self, *, name:Union[str,Callable[[float,float],str]]="domain", size:Union[ExpressionOrNum,List[ExpressionOrNum]]=1.0, N:Union[int,List[int]]=10, lower_left:Union[ExpressionOrNum,List[ExpressionOrNum],Literal["centered"]]=[0, 0], periodic:Union[bool,List[bool]]=False, split_in_tris:Literal[False, "alternate_left", "alternate_right", "left", "right", "crossed"]=False,split_scott_vogelius:bool=False, boundary_names:Dict[str,Union[str,Callable[[float],str]]]={},nodal_dimension:Optional[int]=None):
         super().__init__()
         self.name:Union[str,Callable[[float,float],str]] = name
         self.size = size
@@ -192,7 +196,9 @@ class RectangularQuadMesh(MeshTemplate):
             raise ValueError("Mesh size must be a positive integer, but got " + str(nN))
 
         lower_left = self.lower_left
-        if isinstance(lower_left, list) or isinstance(lower_left, tuple) or isinstance(lower_left, numpy.ndarray):
+        if self.lower_left == "centered":
+            lower_left = [-size[0] / 2, -size[1] / 2]
+        elif isinstance(lower_left, list) or isinstance(lower_left, tuple) or isinstance(lower_left, numpy.ndarray):
             lower_left=list(lower_left)
             lower_left = [self.nondim_size(x) for x in lower_left]
         else:
@@ -214,7 +220,8 @@ class RectangularQuadMesh(MeshTemplate):
                 bn=bnn(centercoord)
             else:
                 bn=bnn
-            self.add_nodes_to_boundary(bn,nodes)
+            #self.add_nodes_to_boundary(bn,nodes)
+            self.add_facet_to_boundary(bn,nodes)
       
         if self.split_scott_vogelius:
             add_tri_C1=lambda n1,n2,n3: domain.add_SV_tri_2d_C1(n1,n2,n3) #type:ignore
@@ -404,16 +411,22 @@ class CircularMesh(MeshTemplate):
             domain.add_quad_2d_C1(norig, ni0, n0i, nii)
             domain.add_quad_2d_C1(n0i, nii, n0o, ndd)
             domain.add_quad_2d_C1(ni0, no0, nii, ndd)
-            self.add_nodes_to_boundary(self.outer_interface, [n0o, ndd])
-            self.add_nodes_to_boundary(self.outer_interface, [no0, ndd])
+            #self.add_facet_to_boundary(self.outer_interface, [no0, n0o,ndd],[])
+            #self.add_nodes_to_boundary(self.outer_interface, [n0o, ndd])
+            #self.add_nodes_to_boundary(self.outer_interface, [no0, ndd])
 
             if self.with_curved_entities:
                 ce=_pyoomph.CurvedEntityCircleArc(self.get_node_position(norig), self.get_node_position(n0o), self.get_node_position(ndd))
-                self.add_facet_to_curve_entity([n0o, ndd], ce)
+                #self.add_facet_to_curve_entity([n0o, ndd], ce)
+                self.add_facet_to_boundary(self.outer_interface, [n0o, ndd],[n0o, ndd], ce)
                 self._curved_entities.append(ce)
                 ce = _pyoomph.CurvedEntityCircleArc(self.get_node_position(norig), self.get_node_position(ndd),self.get_node_position(no0))
-                self.add_facet_to_curve_entity([no0, ndd], ce)
+                #self.add_facet_to_curve_entity([no0, ndd], ce)
+                self.add_facet_to_boundary(self.outer_interface, [no0, ndd], [no0, ndd], ce)
                 self._curved_entities.append(ce)
+            else:
+                self.add_facet_to_boundary(self.outer_interface, [no0, n0o], [no0, n0o])
+                self.add_facet_to_boundary(self.outer_interface, [n0o, ndd], [n0o, ndd])
 
             def get_straight_boundname(mode:int):
                 bn = nextboundname[mode]
@@ -433,20 +446,32 @@ class CircularMesh(MeshTemplate):
                 return bn
 
             if not segpresent[mode - 1]:
-                self.add_nodes_to_boundary(get_straight_boundname(mode-1), [norig, ni0, no0])
+                #self.add_nodes_to_boundary(get_straight_boundname(mode-1), [norig, ni0, no0])
+                self.add_facet_to_boundary(get_straight_boundname(mode-1), [norig, ni0])
+                self.add_facet_to_boundary(get_straight_boundname(mode-1), [ni0, no0])
             elif self.internal_straight_names is not None:
                 if isinstance(self.internal_straight_names,str):
-                    self.add_nodes_to_boundary(self.internal_straight_names, [norig, ni0, no0])
+                    #self.add_nodes_to_boundary(self.internal_straight_names, [norig, ni0, no0])
+                    self.add_facet_to_boundary(self.internal_straight_names, [norig, ni0])
+                    self.add_facet_to_boundary(self.internal_straight_names, [ni0, no0])
                 elif isinstance(self.internal_straight_names,dict) and nextboundname[(mode+3)%4] in self.internal_straight_names.keys(): #type:ignore
-                    self.add_nodes_to_boundary(self.internal_straight_names[nextboundname[(mode+3)%4]], [norig, ni0, no0])
+                    #self.add_nodes_to_boundary(self.internal_straight_names[nextboundname[(mode+3)%4]], [norig, ni0, no0])
+                    self.add_facet_to_boundary(self.internal_straight_names[nextboundname[(mode+3)%4]], [norig, ni0])
+                    self.add_facet_to_boundary(self.internal_straight_names[nextboundname[(mode+3)%4]], [ni0, no0])
 
             if not segpresent[(mode + 1) % 4]:
-                self.add_nodes_to_boundary(get_straight_boundname(mode), [norig, n0i, n0o])
+                #self.add_nodes_to_boundary(get_straight_boundname(mode), [norig, n0i, n0o])
+                self.add_facet_to_boundary(get_straight_boundname(mode), [norig, n0i])
+                self.add_facet_to_boundary(get_straight_boundname(mode), [n0i, n0o])
             elif self.internal_straight_names is not None:
                 if isinstance(self.internal_straight_names, str):
-                    self.add_nodes_to_boundary(self.internal_straight_names, [norig, n0i, n0o])
+                    #self.add_nodes_to_boundary(self.internal_straight_names, [norig, n0i, n0o])
+                    self.add_facet_to_boundary(self.internal_straight_names, [norig, n0i])
+                    self.add_facet_to_boundary(self.internal_straight_names, [n0i, n0o])
                 elif isinstance(self.internal_straight_names, dict) and nextboundname[mode ] in self.internal_straight_names.keys(): #type:ignore
-                    self.add_nodes_to_boundary(self.internal_straight_names[nextboundname[mode]], [norig, n0i, n0o])
+                    #self.add_nodes_to_boundary(self.internal_straight_names[nextboundname[mode]], [norig, n0i, n0o])
+                    self.add_facet_to_boundary(self.internal_straight_names[nextboundname[mode]], [norig, n0i])
+                    self.add_facet_to_boundary(self.internal_straight_names[nextboundname[mode]], [n0i, n0o])
 
         #exit()
 
@@ -530,14 +555,16 @@ class CuboidBrickMesh(MeshTemplate):
 
                     dom.add_brick_3d_C1(n000, n100, n010, n110, n001, n101, n011, n111)
 
-                    if ix == 0:  self.add_nodes_to_boundary("left", [n000, n010, n001, n011])
-                    if ix == N[0] - 1: self.add_nodes_to_boundary("right", [n100, n110, n101, n111])
+                    #if ix == 0:  self.add_nodes_to_boundary("left", [n000, n010, n001, n011])
+                    if ix == 0:  self.add_facet_to_boundary("left", [n000, n010, n001, n011])
+                    #if ix == N[0] - 1: self.add_nodes_to_boundary("right", [n100, n110, n101, n111])
+                    if ix == N[0] - 1: self.add_facet_to_boundary("right", [n100, n110, n101, n111])
 
-                    if iy == 0:  self.add_nodes_to_boundary("bottom", [n000, n100, n001, n101])
-                    if iy == N[1] - 1:  self.add_nodes_to_boundary("top", [n010, n110, n011, n111])
+                    if iy == 0:  self.add_facet_to_boundary("bottom", [n000, n100, n001, n101])
+                    if iy == N[1] - 1:  self.add_facet_to_boundary("top", [n010, n110, n011, n111])
 
-                    if iz == 0:  self.add_nodes_to_boundary("back", [n000, n100, n010, n110])
-                    if iz == N[2] - 1:  self.add_nodes_to_boundary("front", [n001, n101, n011, n111])
+                    if iz == 0:  self.add_facet_to_boundary("back", [n000, n100, n010, n110])
+                    if iz == N[2] - 1:  self.add_facet_to_boundary("front", [n001, n101, n011, n111])
 
 #############################################
 
@@ -586,27 +613,39 @@ class SphericalOctantMesh(MeshTemplate):
         ndd0 = un(rdiag, rdiag, 0)
         nttt = un(rtriag, rtriag, rtriag)
 
-        domain.add_brick_3d_C1(n000,ni00,n0i0,nii0,n00i,ni0i,n0ii,niii)
+        domain.add_brick_3d_C1(n000,ni00,n0i0,nii0,n00i,ni0i,n0ii,niii) # Inner block
         domain.add_brick_3d_C1(n00i, ni0i, n0ii, niii,n00o,nd0d,n0dd,nttt)
         domain.add_brick_3d_C1(n0i0,nii0,n0o0,ndd0,n0ii,niii,n0dd,nttt)
         domain.add_brick_3d_C1(ni00,no00,nii0,ndd0,ni0i,nd0d,niii,nttt)
 
         iname=self.interface_names.get("shell","shell")
-        if iname is not None:
-            self.add_nodes_to_boundary(iname,[no00,n0o0,n00o,nttt,ndd0,nd0d,n0dd])
+        if iname is not None:            
+            self.add_facet_to_boundary(iname, [nttt,nd0d,n00o,n0dd])
+            self.add_facet_to_boundary(iname, [nttt,ndd0,n0dd,n0o0])
+            self.add_facet_to_boundary(iname, [ndd0,nttt,nd0d,no00])
+
+
+            
+            
         iname = self.interface_names.get("plane_x0","plane_x0")
         if iname is not None:
-            self.add_nodes_to_boundary(iname, [n000,n00o,n0o0,n00i,n0i0,n0dd,n0ii])
+            self.add_facet_to_boundary(iname, [n000,n0i0,n0ii,n00i])
+            self.add_facet_to_boundary(iname, [n00i,n00o,n0ii,n0dd])
+            self.add_facet_to_boundary(iname, [n0i0,n0ii,n0dd,n0o0])
         iname = self.interface_names.get("plane_y0","plane_y0")
         if iname is not None:
-            self.add_nodes_to_boundary(iname, [n000, n00o, no00, n00i, ni00, nd0d, ni0i])
+            self.add_facet_to_boundary(iname, [n000,n00i,ni00,ni0i])
+            self.add_facet_to_boundary(iname, [n00i,nd0d,n00o,ni0i])
+            self.add_facet_to_boundary(iname, [ni00,nd0d,no00,ni0i])
         iname = self.interface_names.get("plane_z0", "plane_z0")
         if iname is not None:
-            self.add_nodes_to_boundary(iname, [n000, n0o0, no00, n0i0, ni00, ndd0, nii0])
+            self.add_facet_to_boundary(iname, [n000,nii0,n0i0,ni00])
+            self.add_facet_to_boundary(iname, [nii0,ndd0,n0i0,n0o0])
+            self.add_facet_to_boundary(iname, [ndd0,nii0,no00,ni00])
 
         if False:
             # TODO: This does not work yet
-            import _pyoomph
+            from .. import _pyoomph_core as _pyoomph
             ce = _pyoomph.CurvedEntitySpherePart(self.get_node_position(n000), self.get_node_position(n00o),[1,0,0])
             self._ce=ce
             self.add_facet_to_curve_entity([n00o, n0dd,nd0d,nttt], ce)
@@ -672,12 +711,20 @@ class CylinderMesh(MeshTemplate):
                 domain.add_brick_3d_C1(norigl, ni0l, n0il, niil, norigu, ni0u, n0iu, niiu)
                 domain.add_brick_3d_C1(n0il, niil, n0ol, nddl , n0iu, niiu, n0ou, nddu)
                 domain.add_brick_3d_C1(ni0l, no0l, niil, nddl , ni0u, no0u, niiu, nddu)
-                self.add_nodes_to_boundary(self.outer_interface, [n0ol, nddl,n0ou, nddu])
-                self.add_nodes_to_boundary(self.outer_interface, [no0l, nddl , no0u, nddu])
+                #self.add_nodes_to_boundary(self.outer_interface, [n0ol, nddl,n0ou, nddu])
+                #self.add_nodes_to_boundary(self.outer_interface, [no0l, nddl , no0u, nddu])
+                self.add_facet_to_boundary(self.outer_interface, [n0ol, nddl,n0ou, nddu])
+                self.add_facet_to_boundary(self.outer_interface, [no0l, nddl , no0u, nddu])
                 if ns==0:
-                    self.add_nodes_to_boundary(self.bottom_interface,[norigl,norigl, ni0l, n0il, niil,nddl,no0l])
+                    #bottom
+                    self.add_facet_to_boundary(self.bottom_interface, [niil,ni0l,norigl,n0il])
+                    self.add_facet_to_boundary(self.bottom_interface, [niil,ni0l,no0l,nddl])
+                    #self.add_nodes_to_boundary(self.bottom_interface,[norigl,norigl, ni0l, n0il, niil,nddl,no0l])
                 if ns==self.nsegments_h-1:
-                    self.add_nodes_to_boundary(self.top_interface,[norigu,norigu, ni0u, n0iu, niiu,nddu,no0u])
+                    #self.add_nodes_to_boundary(self.top_interface,[norigu,norigu, ni0u, n0iu, niiu,nddu,no0u])
+                    #top
+                    self.add_facet_to_boundary(self.top_interface, [niiu,n0iu,ni0u,norigu])
+                    self.add_facet_to_boundary(self.top_interface , [no0u,niiu,nddu,ni0u])
 
 
 class PointMesh(MeshTemplate):

@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,12 +21,12 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
 
-import _pyoomph
+from .. import _pyoomph_core as _pyoomph
 from .generic import *
 
 from ..typings import *
@@ -64,8 +65,8 @@ class BaseCoordinateSystem(_pyoomph.CustomCoordinateSystem):
             return _pyoomph.GiNaC_SymSubs(diff(_pyoomph.GiNaC_expand(input), self.expansion_eps), self.expansion_eps, Expression(0))*(self.expansion_eps if with_epsilon else 1)            
 
 
-    def define_scalar_field(self, name:str, space:"FiniteElementSpaceEnum", element:"Equations", scale:Optional[ExpressionOrNum]=None, testscale:Optional[ExpressionOrNum]=None, discontinuous_refinement_exponent:Optional[ExpressionOrNum]=None):
-        element._internal_define_scalar_field(name, space, scale=scale, testscale=testscale, discontinuous_refinement_exponent=discontinuous_refinement_exponent)
+    def define_scalar_field(self, name:str, space:"FiniteElementSpaceEnum", element:"Equations", scale:Optional[ExpressionOrNum]=None, testscale:Optional[ExpressionOrNum]=None, discontinuous_refinement_exponent:Optional[ExpressionOrNum]=None,allow_scales_with_fields:bool=False):
+        element._internal_define_scalar_field(name, space, scale=scale, testscale=testscale, discontinuous_refinement_exponent=discontinuous_refinement_exponent,allow_scales_with_fields=allow_scales_with_fields)
 
     def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations")->Tuple[List[Expression],List[Expression],List[str]]:
         raise RuntimeError("Implement the define_vector_field function for this coordinate system")
@@ -119,12 +120,9 @@ class BaseCoordinateSystem(_pyoomph.CustomCoordinateSystem):
                 return self.scalar_gradient(arg, ndim, edim, with_scales, lagrangian)
         elif flags & 6 == 4 or is_vector == 2:
             if ndim == edim:
-                return self.vector_gradient(arg.evalm(), ndim, edim, with_scales, lagrangian)
-            elif ndim == edim + 1:
-                return self.surface_vector_gradient(arg.evalm(), ndim, edim, with_scales, lagrangian)
+                return self.vector_gradient(arg.evalm(), ndim, edim, with_scales, lagrangian)            
             else:
-                raise RuntimeError("Trying to perform a vector gradient on an element with dimension " + str(
-                    edim) + " but with a nodal dimension of " + str(ndim))
+                return self.surface_vector_gradient(arg.evalm(), ndim, edim, with_scales, lagrangian)                
         else:
             raise RuntimeError("Strange flags in grad: ", flags, flags & 6)
 
@@ -438,7 +436,7 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
             if self.use_x_as_symmetry_axis:
                 raise RuntimeError("Cannot have use_x_as_symmetry_axis in an axisymmetric coordinate system in 1d")
             r, = self.get_coords(ndim, with_scales, lagrangian)
-            res:List[List[ExpressionOrNum]] = [[diff(arg[0], r), 0, 0], [0, 0, 0], [0, 0, arg[0] / r]]
+            res:List[List[ExpressionOrNum]] = [[diff(arg[0], r), 0, 0], [0, arg[0] / r, 0], [0, 0, 0]]
         else:
             if arg.nops() != 3:
                 raise RuntimeError(
@@ -492,7 +490,7 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
             taa = var(name + "_aa")
             element.set_scaling(**{name + "_xx": name,name+"_aa":name})
             element.set_test_scaling(**{name + "_xx": name, name + "_aa": name})
-            return [[txx / s, 0, 0], [0, 0, 0], [0, 0, taa/s]], [[testfunction(name + "_xx") / S, 0, 0], [0, 0, 0], [0, 0, testfunction(name + "_aa") / S]], [[name + "_xx", 0,0], [0,0, 0], [0, 0, name + "_aa"]] 
+            return [[txx / s, 0, 0], [0, taa/s, 0], [0, 0, 0]], [[testfunction(name + "_xx") / S, 0, 0], [0, testfunction(name + "_aa") / S, 0], [0, 0, 0]], [[name + "_xx", 0,0], [0,name + "_aa", 0], [0, 0, 0]] 
         elif ndim==2:
             txx = element.define_scalar_field(name + "_xx", space)
             txx = var(name + "_xx")
@@ -526,14 +524,14 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
                 div_y=diff(T[0,1],coords[0])+diff(T[1,1],coords[1])+(T[1,1]-T[2,2]) / coords[1]
                 div_theta=diff(T[0,2],coords[0])+diff(T[1,2],coords[1])+(T[1,2] - T[2,1]) / coords[1]
             return vector(div_x,div_y,div_theta)
-        else:
+        elif ndim==1:
             div_x=diff(T[0,0],coords[0])+(T[0,0] - T[2,2]) / coords[0]
-            div_y=diff(T[0,1],coords[0])+T[0,1] / coords[0]
-            div_theta=diff(T[0,2],coords[0])+(T[0,2] - T[2,0]) / coords[0]
-            if ndim==2:
-                div_x+=diff(T[1,0],coords[1])
-                div_y+= diff(T[1,1],coords[1])
-                div_theta+=diff(T[1,2],coords[1])
+            div_theta=diff(T[0,1],coords[0])+(2*T[0,1] - T[1,0]) / coords[0]            
+            return vector(div_x,  div_theta,0)
+        else:
+            div_x=diff(T[0,0],coords[0])+ diff(T[1,0],coords[1]) + (T[0,0] - T[2,2]) / coords[0]
+            div_y=diff(T[0,1],coords[0])+diff(T[1,1],coords[1])+(T[0,1] / coords[0])
+            div_theta=diff(T[0,2],coords[0])+(T[0,2] - T[2,0]) / coords[0]+diff(T[1,2],coords[1])                                    
             return vector(div_x, div_y, div_theta)
 
     def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int,with_scales:bool,)->Expression:        
@@ -543,9 +541,9 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
             res:List[List[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
             coords = self.get_coords(1, with_scales, lagrangian)
             res[0][0]=diff(T[0,0],coords[0])*direct[0]
-            res[0][2]=1/coords[0]*(T[0,0]-T[2,2])*direct[2]
-            res[2][0]=res[0][2]
-            res[2][2]=diff(T[2,2],coords[0])*direct[0]
+            res[0][1]=1/coords[0]*(T[0,0]-T[1,1])*direct[1]
+            res[1][0]=res[0][1]
+            res[1][1]=diff(T[1,1],coords[0])*direct[0]
 
             return matrix(res)
         elif ndim==2:
@@ -1087,7 +1085,7 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
                 res.append( diff(arg,self.phi) / dcoords[0])
             else:
                 res.append(0)
-        import _pyoomph
+        from .. import _pyoomph_core as _pyoomph
         if not lagrangian:
             mm=_pyoomph.GiNaC_EvalFlag("moving_mesh")
             x=dcoords[0]
@@ -1135,7 +1133,7 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
                 res[1][0]+=mm*(-diff(Xm, X0)*diff(arg[1], X0))
                 res[1][1]+=mm*(-I*m*Xm*diff(arg[1], X0)/X0 - Xm*arg[0]/X0**2 - Xm*diff(arg[1], phi)/X0**2)
             else:
-                res:List[List[ExpressionOrNum]] = [[diff(arg[0], r), 0, 0], [0, 0, 0], [0, 0, arg[0] / r]]
+                res:List[List[ExpressionOrNum]] = [[diff(arg[0], r), 0, 0], [0, arg[0] / r, 0], [0, 0, 0]]
         else:
             if arg.nops() != 3:
                 raise RuntimeError(
@@ -1496,7 +1494,7 @@ class BaseDifferentialGeometryCoordinateSystem(BaseCoordinateSystem):
 	# The following functions usually do not need any overriding
  
     def substitute_values_for_additional_local_coordinates(self,expr:Expression)->Expression:
-        import _pyoomph
+        from .. import _pyoomph_core as _pyoomph
         for k,v in self._values_to_substitute.items():
             expr=_pyoomph.GiNaC_SymSubs(expr,k,v)
         return expr 
@@ -1505,7 +1503,7 @@ class BaseDifferentialGeometryCoordinateSystem(BaseCoordinateSystem):
         """Add a new local coordinate to the coordinate system. This can be e.g. phi in an axisymmetric coordinate system
 
         """
-        import _pyoomph
+        from .. import _pyoomph_core as _pyoomph
         res_symb=_pyoomph.GiNaC_new_symbol(name)
         self.additional_local_coordinates.append(res_symb)
         if value_to_substitute is not None:

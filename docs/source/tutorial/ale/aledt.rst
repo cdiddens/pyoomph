@@ -3,22 +3,12 @@
 Time derivatives of fields on moving meshes
 -------------------------------------------
 
-We will now move a mesh around and solve a diffusion equation on the moving mesh to see what happens. First of all, the mesh shall now move to the left and right by a sinus oscillation, which can be realized as follows
+We will now move a mesh around and solve a diffusion equation on the moving mesh to see what happens. First of all, the mesh shall now move to the left and right by a sine oscillation, which can be realized as follows
 
-.. code:: python
-
-   from pyoomph import *
-   from pyoomph.expressions import *
-
-   class MovingMesh(Equations):
-   	def define_fields(self):
-   		self.activate_coordinates_as_dofs() 
-   		
-   	def define_residuals(self):
-   		x,xtest=var_and_test("mesh_x") 
-   		xi,t=var(["lagrangian_x","time"]) 
-   		desired_pos=xi+0.125*sin(2*pi*t)
-   		self.add_residual(weak(x-desired_pos,xtest,lagrangian=True) )
+.. literalinclude:: ALE_correction.py
+   :language: python
+   :start-at: from pyoomph import *
+   :end-at: self.add_residual(weak(x-desired_pos,xtest,lagrangian=True) )
 
 We have omitted the ``coordinate_space`` argument in :py:meth:`~pyoomph.generic.codegen.Equations.activate_coordinates_as_dofs`, so that the coordinate space is automatically adjusted by the space of the diffusion equation. The diffusion equation with diffusivity :math:`0.01` could be written as follows:
 
@@ -35,22 +25,10 @@ We have omitted the ``coordinate_space`` argument in :py:meth:`~pyoomph.generic.
 
 And the :py:class:`~pyoomph.generic.problem.Problem` class combining the equations reads
 
-.. code:: python
-
-   class ALEProblem(Problem):
-   	def define_problem(self):
-   		self.add_mesh(RectangularQuadMesh(N=32,lower_left=[-0.5,-0.5]))
-   		eqs=MovingMesh()
-   		eqs+=MeshFileOutput()
-   		eqs+=DiffusionEquation()
-   		eqs+=DirichletBC(mesh_y=True)
-   		x=var("coordinate")
-   		eqs+=InitialCondition(c=exp(-dot(x,x)*100))
-   		self.add_equations(eqs@"domain")
-   		
-   if __name__=="__main__":		
-   	with ALEProblem() as problem:
-   		problem.run(1,numouts=20)
+.. literalinclude:: ALE_correction.py
+   :language: python
+   :start-at: class ALEProblem(Problem):
+   :end-at: problem.run(1,numouts=20)
 
 Note how we pin the :math:`y`-coordinate by a :py:class:`~pyoomph.meshes.bcs.DirichletBC` applied on the entire ``"domain"``. There is no equation for the :math:`y`-coordinate, so we have to fix it. We furthermore set a Gaussian initial condition for the diffusion field.
 
@@ -61,7 +39,7 @@ Note how we pin the :math:`y`-coordinate by a :py:class:`~pyoomph.meshes.bcs.Dir
 	:class: with-shadow
 	:width: 100%
 
-	When the mesh is moving oscillatory to the left and right, all fields move along with it. The center of the Gaussian spot is always in the center of the mesh, not of the Eulerian coordinate system. When the keyword argument ``ALE`` of the function :py:func:`~pyoomph.expressions.generic.partial_t` is set to ``True`` or ``"auto"``, it is compensated for the mesh motion. Thereby, the maximum of the field stays in the center of the coordinates, not of the mesh. Since it gets into contact with the boundaries, the field is slightly deformed.
+	When the mesh is oscillating to the left and right, all fields move along with it. The center of the Gaussian spot is always in the center of the mesh, not of the Eulerian coordinate system. When the keyword argument ``ALE`` of the function :py:func:`~pyoomph.expressions.generic.partial_t` is set to ``True`` or ``"auto"``, it is compensated for the mesh motion. Thereby, the maximum of the field stays in the center of the coordinates, not of the mesh. Since it gets into contact with the boundaries, the field is slightly deformed.
 
 What happens is naively counter-intuitive, namely the diffusion field :math:`c` is moving along with the oscillating mesh, see :numref:`figaleale1`. One might expect, that the maximum of the field :math:`c` will be always at :math:`\vec{x}=0`, but it is not the case. Instead, it will be always in the center of the mesh, i.e. at :math:`\vec{\xi}=0`. This can be understood, when considering that fields are always approximated as functions of the nodal values :math:`c_l(t)`. Here, we have
 
@@ -79,20 +57,24 @@ Thereby, when the mesh moves, the entire field (including the time derivative) w
 
    \text{partial}\_\text{t}^{\text{ALE=True}}\text{(c)}=\text{partial}\_\text{t}^{\text{ALE=False}}\text{(c)}-\dot{\vec{x}}\cdot\nabla c
 
-Thereby, the field :math:`c` is moved against the mesh motion and hence stays in place when the mesh moves. Since ``ALE=True`` requires the evaluation of the mesh velocity :math:`\dot{\vec{x}}`, it is not required on static meshes. On a static mesh, :math:`\dot{\vec{x}}=0` holds, and hence the calculation is redundantly time-consuming during the assembly of the system. Pyoomph also allows to pass ``ALE="auto"`` (the default value) to set it to ``False`` if the mesh is static, i.e. no :py:class:`~pyoomph.generic.codegen.Equations` are added that call :py:meth:`~pyoomph.generic.codegen.Equations.activate_coordinates_as_dofs`. Thereby, the redundant computation of :math:`\dot{\vec{x}}` is not carried out. If the mesh is moving, i.e. an equation for the mesh coordinates is present, ``ALE="auto"`` will become ``ALE=True``, i.e. expanding according to :math:numref:`eqalepartialtwithale`.
+Thereby, the field :math:`c` is moved against the mesh motion and hence stays in place when the mesh moves. Since ``ALE=True`` requires the evaluation of the mesh velocity :math:`\dot{\vec{x}}`, it is not required on static meshes. On a static mesh, :math:`\dot{\vec{x}}=0` holds, and hence the calculation is redundantly time-consuming during the assembly of the system. Pyoomph also allows one to pass ``ALE="auto"`` (the default value) to set it to ``False`` if the mesh is static, i.e. no :py:class:`~pyoomph.generic.codegen.Equations` are added that call :py:meth:`~pyoomph.generic.codegen.Equations.activate_coordinates_as_dofs`. Thereby, the redundant computation of :math:`\dot{\vec{x}}` is not carried out. If the mesh is moving, i.e. an equation for the mesh coordinates is present, ``ALE="auto"`` will become ``ALE=True``, i.e. expanding according to :math:numref:`eqalepartialtwithale`.
 
 .. warning::
 
-   The predefined variables ``var("coordinate")`` and ``var("mesh")`` are in principle the same (and so there components ``var("coordinate_x")``, ``var("mesh_x")``, etc). However, there are two fundamental differences: ``var("mesh")`` can have test functions, when :py:meth:`~pyoomph.generic.codegen.Equations.activate_coordinates_as_dofs` has been called. Furthermore, ``partial_t(var("mesh"))`` may be non-zero on a moving mesh, i.e. yielding the mesh velocity :math:`\dot{\vec{x}}`, whereas ``partial_t(var("coordinate"))`` is always zero.
+   The predefined variables ``var("coordinate")`` and ``var("mesh")`` are in principle the same (and so their components ``var("coordinate_x")``, ``var("mesh_x")``, etc). However, there are two fundamental differences: ``var("mesh")`` can have test functions, when :py:meth:`~pyoomph.generic.codegen.Equations.activate_coordinates_as_dofs` has been called. Furthermore, ``partial_t(var("mesh"))`` may be non-zero on a moving mesh, i.e. yielding the mesh velocity :math:`\dot{\vec{x}}`, whereas ``partial_t(var("coordinate"))`` is always zero.
 
-In conclusion, if one has a moving mesh, but want to keep spatio-temporal fields independent of the mesh motion, one should augment all :py:func:`~pyoomph.expressions.generic.partial_t` calls with an ``ALE="auto"`` (or leave it out, since it is the default value). This has been done in the bottom row of :numref:`figaleale1`, where the weak formulation of the diffusion equation has been changed to
+In conclusion, if one has a moving mesh, but wants to keep spatio-temporal fields independent of the mesh motion, one should augment all :py:func:`~pyoomph.expressions.generic.partial_t` calls with an ``ALE="auto"`` (or leave it out, since it is the default value). This has been done in the bottom row of :numref:`figaleale1`, where the weak formulation of the diffusion equation has been changed to
 
-.. code:: python
-
-   		self.add_residual(weak(partial_t(c,ALE="auto"),ctest)+weak(0.01*grad(c),grad(ctest)))
+.. literalinclude:: ALE_correction.py
+   :language: python
+   :start-at: self.add_residual(weak(partial_t(c,ALE="auto"),ctest)+weak(0.01*grad(c),grad(ctest)))
+   :end-at: self.add_residual(weak(partial_t(c,ALE="auto"),ctest)+weak(0.01*grad(c),grad(ctest)))
 
 The field :math:`c` is now not following the oscillatory motion of the mesh, but stays in place.
 
+
+.. note::
+	When demanding conservation of quantities, this approach is often not sufficient. This is discussed in detail later in :numref:`secgcl`.
 
 .. only:: html
 

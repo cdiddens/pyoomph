@@ -1,10 +1,12 @@
 build/
+docs/build
 wheelhouse/
 tmp/
 GiNaC_static/
 .eggs/
 pyoomph.egg-info/
 _pyoomph-stubs/_pyoomph.pyi
+pyoomph/_pyoomph_core.pyi
 pytest/
 __pycache__
 *.pyc
@@ -15,6 +17,9 @@ __pycache__
 *.vtk
 *.pvd
 *.txt
+!CMakeLists.txt
+!docs/requirements.txt
+!pyoomph/jitbridge/NOTE_FOR_WINDOWS.txt
 *.c
 *.so
 *.o

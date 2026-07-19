@@ -1,10 +1,11 @@
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -19,7 +20,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
 
@@ -73,16 +74,12 @@ class StructuredBubbleMesh(MeshTemplate):
         # Also, mark the boundaries
         nthalf=self.create_curved_entity("circle_arc",pnorth,peast,center=(0,0))
         nbhalf=self.create_curved_entity("circle_arc",psouth,peast,center=(0,0))
-        self.add_nodes_to_boundary("interface",[pnorth,pne])
-        self.add_nodes_to_boundary("interface",[pne,peast])
-        self.add_nodes_to_boundary("interface",[peast,pse])
-        self.add_nodes_to_boundary("interface",[pse,psouth])
-        self.add_facet_to_curve_entity([pnorth,pne],nthalf)
-        self.add_facet_to_curve_entity([pne,peast],nthalf)
-        self.add_facet_to_curve_entity([peast,pse],nbhalf)
-        self.add_facet_to_curve_entity([pse,psouth],nbhalf)
-        self.add_nodes_to_boundary("axis",[pnorth,n0t])
-        self.add_nodes_to_boundary("axis",[psouth,n0b])                
+        self.add_facet_to_boundary("interface",[pnorth,pne],curved_entity=nthalf)
+        self.add_facet_to_boundary("interface",[pne,peast],curved_entity=nthalf)
+        self.add_facet_to_boundary("interface",[peast,pse],curved_entity=nbhalf)
+        self.add_facet_to_boundary("interface",[pse,psouth],curved_entity=nbhalf)
+        self.add_facet_to_boundary("axis",[pnorth,n0t])
+        self.add_facet_to_boundary("axis",[psouth,n0b])                
         
         # Fill the strip right of the bubble to the width of the domain
         for i in range(1,nw):
@@ -92,7 +89,7 @@ class StructuredBubbleMesh(MeshTemplate):
             n01=self.add_node_unique(i*dx,dyt)
             n11=self.add_node_unique((i+1)*dx,dyt)
             if i==nw-1:
-                self.add_nodes_to_boundary("side",[n10,n11])
+                self.add_facet_to_boundary("side",[n10,n11])
             dom.add_quad_2d_C1(n00,n10,n01,n11)
             # Bottom part of the strip
             n00=self.add_node_unique(i*dx,-dyb)
@@ -100,7 +97,7 @@ class StructuredBubbleMesh(MeshTemplate):
             n01=self.add_node_unique(i*dx,0)
             n11=self.add_node_unique((i+1)*dx,0)
             if i==nw-1:
-                self.add_nodes_to_boundary("side",[n10,n11])
+                self.add_facet_to_boundary("side",[n10,n11])
             dom.add_quad_2d_C1(n00,n10,n01,n11)
         # Make the top part
         for j in range(1,nt):
@@ -110,11 +107,11 @@ class StructuredBubbleMesh(MeshTemplate):
                 n01=self.add_node_unique(i*dx,(j+1)*dyt)
                 n11=self.add_node_unique((i+1)*dx,(j+1)*dyt)
                 if i==nw-1:
-                    self.add_nodes_to_boundary("side",[n10,n11])
+                    self.add_facet_to_boundary("side",[n10,n11])
                 if i==0:
-                    self.add_nodes_to_boundary("axis",[n00,n01])
+                    self.add_facet_to_boundary("axis",[n00,n01])
                 if j==nt-1:
-                    self.add_nodes_to_boundary("top",[n01,n11])
+                    self.add_facet_to_boundary("top",[n01,n11])
                 dom.add_quad_2d_C1(n00,n10,n01,n11)
         # Make the bottom part
         for j in range(1,nb):
@@ -124,11 +121,11 @@ class StructuredBubbleMesh(MeshTemplate):
                 n01=self.add_node_unique(i*dx,-j*dyb)
                 n11=self.add_node_unique((i+1)*dx,-j*dyb)
                 if i==nw-1:
-                    self.add_nodes_to_boundary("side",[n10,n11])
+                    self.add_facet_to_boundary("side",[n10,n11])
                 if i==0:
-                    self.add_nodes_to_boundary("axis",[n00,n01])
+                    self.add_facet_to_boundary("axis",[n00,n01])
                 if j==nb-1:
-                    self.add_nodes_to_boundary("bottom",[n00,n10])
+                    self.add_facet_to_boundary("bottom",[n00,n10])
                 dom.add_quad_2d_C1(n00,n10,n01,n11)
 
 
@@ -222,7 +219,7 @@ if __name__=="__main__":
         # Relax to the base state, then solve for the stationary solution
         problem.run(10,startstep=0.1,outstep=False,temporal_error=1)
         problem.solve(max_newton_iterations=20,spatial_adapt=4)
-        
+               
         # Now we can start the eigenanalysis        
         outfile=problem.create_text_file_output("m1_instability.txt",header=["Bo","ReLambda","ImLambda"])
             

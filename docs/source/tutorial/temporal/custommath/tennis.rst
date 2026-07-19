@@ -1,7 +1,7 @@
 Playing tennis in pyoomph - custom expression with dimensions
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The next problem will be a bit more comprehensive and it will involve several techniques we have learned so far, namely using physical dimensions, custom math expressions and temporal adaptivity. We want to simulate a simple tennis match. As in all physics exams, there is no air friction acting on the ball, the problem is one-dimensional and the tennis rackets behave as a Hookian spring, but only if the position of the ball exceeds the position of the racket. Mathematically, we solve
+The next problem will be a bit more comprehensive and it will involve several techniques we have learned so far, namely using physical dimensions, custom math expressions and temporal adaptivity. We want to simulate a simple tennis match. As in all physics exams, there is no air friction acting on the ball, the problem is one-dimensional and the tennis rackets behave as a Hookean spring, but only if the position of the ball exceeds the position of the racket. Mathematically, we solve
 
 .. math:: m\ddot{x}=F_1(x)+F_2(x)
 
@@ -11,72 +11,21 @@ where :math:`F_1` and :math:`F_2` are the forces of the rackets, which take acti
 
 For these forces, we write our :py:class:`~pyoomph.expressions.cb.CustomMathExpression` in python, however, now taking the positions in meters and resulting in a dimensional force with the unit :math:`\:\mathrm{N}`:
 
-.. code:: python
-
-   from pyoomph import *
-   from pyoomph.expressions import *
-   from pyoomph.expressions.units import *
-
-   # Force of a tennis racket as function of the ball position and the racket position
-   # This will create a function Force(ball_position,racket_position)
-   # Both positions must have the unit of meter
-   # And the result is a force measured in Newton
-   class TennisRacket(CustomMathExpression):
-       def __init__(self,*,direction=1,spring_constant=1000*newton/meter):
-           super(TennisRacket, self).__init__()
-           self.direction=direction # sign of the force
-           # Store a non-dimensional value of the spring constant
-           self.k_in_N_per_m=float(spring_constant/(newton/meter))
-
-       # Input arguments are converted to numerical values by treating the input as meter (for both arguments, ball and racket position)
-       def get_argument_unit(self,index:int):
-           return meter # return meter, no matter whether index==0 or index==1
-
-       # The result is obtained by multiplying the result of 'eval' by newton
-       def get_result_unit(self):
-           return newton
-
-       # This routine is now entirely nondimensional
-       def eval(self,arg_array):
-           # get the input values (numerical float values!)
-           ball_pos_in_m=arg_array[0] # measured int meter
-           racket_pos_in_m=arg_array[1] # measured int meter
-           # calculate the distance (also in meter)
-           distance_in_m=self.direction*(ball_pos_in_m-racket_pos_in_m)
-           if distance_in_m>=0: # in front of the racket
-               return 0.0 # numerical float value of the force [in newton]
-           else:
-               # Force of the racket on the ball
-               force_in_newton=-self.direction*self.k_in_N_per_m*distance_in_m
-               return force_in_newton # result is treated in newton
+.. literalinclude:: custom_math_dimensional_tennis.py
+   :language: python
+   :start-at: from pyoomph import *
+   :end-at: return force_in_newton # result is treated in newton
 
 To allow for arguments with physical units as input arguments, we must implement the function :py:meth:`~pyoomph.expressions.cb.CustomMathExpression.get_argument_unit`, which returns the unit used for non-dimensionalization of the input arguments. The argument ``index`` here can be used to identify which argument to the custom math function is meant. Furthermore, the result of our calculation, i.e. of the force :math:`F_1` and :math:`F_2` shall be measured in :math:`\:\mathrm{N}`, which we tell pyoomph by implementing the method :py:meth:`~pyoomph.expressions.cb.CustomMathExpression.get_result_unit`. Everything else, i.e. the entire calculation of the force will now be done by ``float`` numbers in Python. The values stored in ``arg_array`` are ``float`` numbers giving the position of the ball and the position of the racket in meters. The ``return`` value of eval must also be a ``float``, which is eventually multiplied by the result of :py:meth:`~pyoomph.expressions.cb.CustomMathExpression.get_result_unit`, i.e. by :math:`\:\mathrm{N}`, to give a dimensional force.
 
 The class for the equation for the ball position :math:`x` is again trivial:
 
-.. code:: python
+.. literalinclude:: custom_math_dimensional_tennis.py
+   :language: python
+   :start-at: class NewtonsLaw1d(ODEEquations):
+   :end-at: self.add_residual(residual)
 
-   class NewtonsLaw1d(ODEEquations):
-       def __init__(self,mass,force):
-           super(NewtonsLaw1d, self).__init__()
-           self.mass=mass
-           self.force=force
-
-       def define_fields(self):
-           # bind the scale factors (defined on problem level)
-           T=scale_factor("temporal")
-           X=scale_factor("spatial")        
-           # we set the scales as well as the test function scales here locally in the equation class
-           self.define_ode_variable("x",scale=X,testscale=T**2/X) # same test scale as in the dimensional harmonic oscillator before
-           self.define_ode_variable("xdot",scale=X/T,testscale=T/X) # velocity scales as X/T, test scale T/X will cancel this out
-
-       def define_residuals(self):
-           x,xdot=var(["x","xdot"])
-           residual=(partial_t(xdot)-self.force/self.mass)*testfunction(x)
-           residual+=(partial_t(x)-xdot)*testfunction(xdot)
-           self.add_residual(residual)
-
-Different as before, we define not only the test function scales in the :py:meth:`~pyoomph.generic.codegen.BaseEquations.define_fields` method, but also the scales itself by adding the argument ``scale`` to the :py:meth:`~pyoomph.generic.codegen.ODEEquations.define_ode_variable`. The position :math:`x` will be nondimensionalized by a scale ``"spatial"``, which will be set later. The velocity :math:`\dot x`, i.e. ``xdot``, is nondimensionalized by ``"spatial"``/``"temporal"``, which is a reasonable choice for a velocity. The test scales are again chosen that way that all physical units cancel out in the added residual. Both missing scales ``"spatial"`` and ``"temporal"`` are set at problem level using :py:meth:`~pyoomph.generic.problem.Problem.set_scaling`.
+Differently than before, we define not only the test function scales in the :py:meth:`~pyoomph.generic.codegen.BaseEquations.define_fields` method, but also the scales themselves by adding the argument ``scale`` to the :py:meth:`~pyoomph.generic.codegen.ODEEquations.define_ode_variable`. The position :math:`x` will be nondimensionalized by a scale ``"spatial"``, which will be set later. The velocity :math:`\dot x`, i.e. ``xdot``, is nondimensionalized by ``"spatial"``/``"temporal"``, which is a reasonable choice for a velocity. The test scales are again chosen in such a way that all physical units cancel out in the added residual. Both missing scales ``"spatial"`` and ``"temporal"`` are set at problem level using :py:meth:`~pyoomph.generic.problem.Problem.set_scaling`.
 
 .. code:: python
 
@@ -124,7 +73,7 @@ In the constructor, we initialize two rackets, one at the top and one at the bot
 
 Finally, we run the problem, again with an adjustable accepted ``temporal_error`` value for dynamic time stepping. The effect of the dynamic time stepping is visible in :numref:`figodetennis`, where clearly the steps are smaller whenever the ball is subject to the force of a racket.
 
-As a last note, we also can let the players move easily, since the positions of the rackets, stored in the problem class in the members ``top_position`` and ``bottom_position``, is passed to the custom expressions ``TennisRacket`` as second argument. Hence, a slight modification before running allows for motion of the players, see :numref:`figodetennismoving` This feature, i.e. changing the problem by modifying the expressions, is later on helpful, when e.g. modifying the mass density or dynamic viscosity of a liquid mixture.
+As a last note, we also can let the players move easily, since the positions of the rackets, stored in the problem class in the members ``top_position`` and ``bottom_position``, is passed to the custom expressions ``TennisRacket`` as the second argument. Hence, a slight modification before running allows for motion of the players, see :numref:`figodetennismoving`. This feature, i.e. changing the problem by modifying the expressions, is later on helpful, when e.g. modifying the mass density or dynamic viscosity of a liquid mixture.
 
 .. code:: python
 
@@ -149,7 +98,7 @@ As a last note, we also can let the players move easily, since the positions of 
 
 .. warning::
 
-   The usage of :py:class:`~pyoomph.expressions.cb.CustomMathExpression` should be considered as last resort, since the call of a python function is quite expensive compared to the execution on the generated ``C`` code. In particular, here one could have used ``heaviside((var("x")-self.top_position)/meter)`` to kick in the force of the racket instead. The division by ``meter`` is required in the argument of :py:func:`~pyoomph.expressions.heaviside`, since functions like :py:func:`~pyoomph.expressions.sin`, :py:func:`~pyoomph.expressions.cos`, but also :py:func:`~pyoomph.expressions.heaviside` require an argument without any dimension.
+   The usage of :py:class:`~pyoomph.expressions.cb.CustomMathExpression` should be considered as last resort, since the call of a Python function is quite expensive compared to the execution of the generated ``C`` code. In particular, here one could have used ``heaviside((var("x")-self.top_position)/meter)`` to kick in the force of the racket instead. The division by ``meter`` is required in the argument of :py:func:`~pyoomph.expressions.heaviside`, since functions like :py:func:`~pyoomph.expressions.sin`, :py:func:`~pyoomph.expressions.cos`, but also :py:func:`~pyoomph.expressions.heaviside` require an argument without any dimension.
    
 .. only:: html
     

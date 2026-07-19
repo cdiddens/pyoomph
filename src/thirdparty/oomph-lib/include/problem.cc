@@ -48,13 +48,9 @@ Output the current arclength step on rejection.
 #include "explicit_timesteppers.h"
 #include "generalised_timesteppers.h"
 #include "refineable_mesh.h"
-#include "triangle_mesh.h"
 #include "linear_solver.h"
-#include "eigen_solver.h"
 #include "assembly_handler.h"
-#include "dg_elements.h"
 #include "partitioning.h"
-#include "spines.h"
 
 // Include to fill in additional_setup_shared_node_scheme() function
 #include "refineable_mesh.template.cc"
@@ -65,6 +61,114 @@ namespace oomph
   /// ///////////////////////////////////////////////////////////////
   // Non-inline functions for the problem class
   /// ///////////////////////////////////////////////////////////////
+
+  //=================================================================
+  /// FOR PYOOMPH: eigen_solver.h/.cc and complex_matrices.h/.cc (ARPACK,
+  /// LAPACK_QZ and the ComplexMatrixBase machinery they relied on) were
+  /// removed from this build of pyoomph. Problem still needs a concrete
+  /// EigenSolver to default-construct (Default_eigen_solver_pt below), so
+  /// this is a minimal stand-in that always throws when actually asked to
+  /// solve -- matching the behaviour LAPACK_QZ already had in pyoomph,
+  /// where solve_eigenproblem_helper() was deactivated. Eigenvalue/Hopf
+  /// tracking in pyoomph goes through its own augmented-system approach
+  /// (see bifurcation.cc), not through this class.
+  //=================================================================
+  class EigenSolver : public DistributableLinearAlgebraObject
+  {
+  protected:
+    double Sigma_real;
+
+  public:
+    EigenSolver() : Sigma_real(0.0) {}
+    EigenSolver(const EigenSolver&) {}
+    virtual ~EigenSolver() {}
+
+    virtual void solve_eigenproblem_legacy(
+      Problem* const& problem_pt,
+      const int& n_eval,
+      Vector<std::complex<double>>& eigenvalue,
+      Vector<DoubleVector>& eigenvector,
+      const bool& do_adjoint_problem = false) = 0;
+
+    virtual void solve_eigenproblem(Problem* const& problem_pt,
+                                    const int& n_eval,
+                                    Vector<std::complex<double>>& eigenvalue,
+                                    Vector<DoubleVector>& eigenvector_real,
+                                    Vector<DoubleVector>& eigenvector_imag,
+                                    const bool& do_adjoint_problem = false)
+    {
+      Vector<std::complex<double>> alpha;
+      Vector<double> beta;
+      solve_eigenproblem(problem_pt,
+                         n_eval,
+                         alpha,
+                         beta,
+                         eigenvector_real,
+                         eigenvector_imag,
+                         do_adjoint_problem);
+      unsigned n = alpha.size();
+      eigenvalue.resize(n);
+      for (unsigned i = 0; i < n; i++)
+      {
+        eigenvalue[i] = alpha[i] / beta[i];
+      }
+    }
+
+    virtual void solve_eigenproblem(Problem* const& problem_pt,
+                                    const int& n_eval,
+                                    Vector<std::complex<double>>& alpha,
+                                    Vector<double>& beta,
+                                    Vector<DoubleVector>& eigenvector_real,
+                                    Vector<DoubleVector>& eigenvector_imag,
+                                    const bool& do_adjoint_problem = false) = 0;
+
+    void set_shift(const double& shift_value)
+    {
+      Sigma_real = shift_value;
+    }
+
+    const double& get_shift() const
+    {
+      return Sigma_real;
+    }
+  };
+
+  //=====================================================================
+  /// FOR PYOOMPH: stand-in for the deactivated LAPACK_QZ eigensolver --
+  /// see EigenSolver above for why this exists.
+  //=====================================================================
+  class LAPACK_QZ : public EigenSolver
+  {
+  public:
+    LAPACK_QZ() : EigenSolver() {}
+    LAPACK_QZ(const LAPACK_QZ&) = delete;
+    void operator=(const LAPACK_QZ&) = delete;
+    virtual ~LAPACK_QZ() {}
+
+    void solve_eigenproblem_legacy(Problem* const& problem_pt,
+                                   const int& n_eval,
+                                   Vector<std::complex<double>>& eigenvalue,
+                                   Vector<DoubleVector>& eigenvector,
+                                   const bool& do_adjoint_problem = false)
+    {
+      throw OomphLibError("LAPACK_QZ is deactivated in pyoomph",
+                          OOMPH_CURRENT_FUNCTION,
+                          OOMPH_EXCEPTION_LOCATION);
+    }
+
+    void solve_eigenproblem(Problem* const& problem_pt,
+                            const int& n_eval,
+                            Vector<std::complex<double>>& alpha,
+                            Vector<double>& beta,
+                            Vector<DoubleVector>& eigenvector_real,
+                            Vector<DoubleVector>& eigenvector_imag,
+                            const bool& do_adjoint_problem = false)
+    {
+      throw OomphLibError("LAPACK_QZ is deactivated in pyoomph",
+                          OOMPH_CURRENT_FUNCTION,
+                          OOMPH_EXCEPTION_LOCATION);
+    }
+  };
 
   //=================================================================
   /// The continuation timestepper object
@@ -93,6 +197,7 @@ namespace oomph
       Must_recompute_load_balance_for_assembly(true),
       Halo_scheme_pt(0),
 #endif
+      Block_dof_arrangement_used(false),
       Relaxation_factor(1.0),
       Newton_solver_tolerance(1.0e-8),
       Max_newton_iterations(10),
@@ -326,7 +431,7 @@ namespace oomph
     // a uniform distributed distribution
     else if (!Problem_has_been_distributed)
     {
-      dist_pt = new LinearAlgebraDistribution(Communicator_pt, nrow, true);
+      dist_pt = new LinearAlgebraDistribution(Communicator_pt, nrow,/*is_block_dof_arrangement_used() ? Block_dof_pt_start : Vector<unsigned long>(),*/ true);
     }
     // otherwise the problem is a distributed problem
     else
@@ -335,7 +440,7 @@ namespace oomph
       {
         case Uniform_matrix_distribution:
 
-          dist_pt = new LinearAlgebraDistribution(Communicator_pt, nrow, true);
+          dist_pt = new LinearAlgebraDistribution(Communicator_pt, nrow,/*is_block_dof_arrangement_used() ? Block_dof_pt_start : Vector<unsigned long>(),*/ true);
           break;
 
         case Problem_matrix_distribution:
@@ -749,15 +854,8 @@ namespace oomph
         // need to check here the type of mesh
         if (n_mesh == 0)
         {
-          // Check if the only one mesh is an structured mesh
-          bool structured_mesh = true;
-          TriangleMeshBase* tri_mesh_pt =
-            dynamic_cast<TriangleMeshBase*>(mesh_pt(0));
-          if (tri_mesh_pt != 0)
-          {
-            structured_mesh = false;
-          } // if (tri_mesh_pt != 0)
-          if (structured_mesh)
+          // TriangleMeshBase support was removed from this build of
+          // pyoomph, so the only mesh is always treated as structured.
           {
             const unsigned n_ele = global_mesh_pt->nelement();
             Base_mesh_element_pt.resize(n_ele);
@@ -780,20 +878,9 @@ namespace oomph
           std::vector<bool> is_structured_mesh(n_mesh);
           for (unsigned i_mesh = 0; i_mesh < n_mesh; i_mesh++)
           {
-            TriangleMeshBase* tri_mesh_pt =
-              dynamic_cast<TriangleMeshBase*>(mesh_pt(i_mesh));
-            if (tri_mesh_pt != 0)
-            {
-              // Set the flags to indicate this is not an structured
-              // mesh
-              is_structured_mesh[i_mesh] = false;
-            } // if (tri_mesh_pt != 0)
-            else
-            {
-              // Set the flags to indicate this is an structured
-              // mesh
-              is_structured_mesh[i_mesh] = true;
-            } // else if (tri_mesh_pt != 0)
+            // TriangleMeshBase support was removed from this build of
+            // pyoomph, so every submesh is always treated as structured.
+            is_structured_mesh[i_mesh] = true;
             // Check if mesh is an structured mesh
             if (is_structured_mesh[i_mesh])
             {
@@ -1312,20 +1399,10 @@ namespace oomph
         nel = 0;
         for (unsigned i_mesh = 0; i_mesh < n_meshes; i_mesh++)
         {
-          TriangleMeshBase* tri_mesh_pt =
-            dynamic_cast<TriangleMeshBase*>(mesh_pt(i_mesh));
-          if (!(tri_mesh_pt != 0))
-          {
-            // Mark the mesh as structured mesh
-            is_structured_mesh[i_mesh] = true;
-            // Add the number of elements
-            nel += mesh_pt(i_mesh)->nelement();
-          } // if (!(tri_mesh_pt!=0))
-          else
-          {
-            // Mark the mesh as nonstructured mesh
-            is_structured_mesh[i_mesh] = false;
-          } // else if (!(tri_mesh_pt!=0))
+          // TriangleMeshBase support was removed from this build of
+          // pyoomph, so every mesh is always treated as structured.
+          is_structured_mesh[i_mesh] = true;
+          nel += mesh_pt(i_mesh)->nelement();
         } // for (i_mesh < n_mesh)
 
         // Go for all the meshes (if there are submeshes)
@@ -2204,18 +2281,27 @@ namespace oomph
       // pushed back onto it -- if it's not reset here then we get into
       // trouble during mesh refinement when we reassign all dofs
       Dof_pt.resize(0);
-
+      
       // Reserve from previous allocation if we're going around again
       Dof_pt.reserve(n_dof);
+      Block_dof_pt_start.resize(0); //FOR PYOOMPH
+      Block_dof_pt_start.reserve(n_dof); //FOR PYOOMPH
 
       // Reset the equation number
       unsigned long equation_number = 0;
 
       // Now set equation numbers for the global Data
       unsigned Nglobal_data = nglobal_data();
+      
+      Block_dof_pt_start.push_back(0); //FOR PYOOMPH
       for (unsigned i = 0; i < Nglobal_data; i++)
       {
+        unsigned long old_equation_number = equation_number; //FOR PYOOMPH
         Global_data_pt[i]->assign_eqn_numbers(equation_number, Dof_pt);
+        if (old_equation_number != equation_number)
+        {
+          Block_dof_pt_start.push_back(equation_number); //FOR PYOOMPH
+        }
       }
 
       if (Global_timings::Doc_comprehensive_timings)
@@ -2224,30 +2310,10 @@ namespace oomph
       }
 
       // Call assign equation numbers on the global mesh
-      n_dof = Mesh_pt->assign_global_eqn_numbers(Dof_pt);
+      n_dof = Mesh_pt->assign_global_eqn_numbers(Dof_pt,Block_dof_pt_start);
 
-      // Deal with the spine meshes additional numbering
-      // If there is only one mesh
-      if (n_sub_mesh == 0)
-      {
-        if (SpineMesh* const spine_mesh_pt = dynamic_cast<SpineMesh*>(Mesh_pt))
-        {
-          n_dof = spine_mesh_pt->assign_global_spine_eqn_numbers(Dof_pt);
-        }
-      }
-      // Otherwise loop over the sub meshes
-      else
-      {
-        // Assign global equation numbers first
-        for (unsigned i = 0; i < n_sub_mesh; i++)
-        {
-          if (SpineMesh* const spine_mesh_pt =
-                dynamic_cast<SpineMesh*>(Sub_mesh_pt[i]))
-          {
-            n_dof = spine_mesh_pt->assign_global_spine_eqn_numbers(Dof_pt);
-          }
-        }
-      }
+      // SpineMesh support was removed from this build of pyoomph, so there
+      // is no additional spine equation numbering to deal with here.
 
       if (Global_timings::Doc_comprehensive_timings)
       {
@@ -2258,6 +2324,8 @@ namespace oomph
         t_start = TimingHelpers::timer();
       }
 
+
+      //Block_dof_pt_start.clear(); //FOR PYOOMPH - Deactivate this
 
 #ifdef OOMPH_HAS_MPI
 
@@ -2280,7 +2348,7 @@ namespace oomph
       else
 #endif
       {
-        Dof_distribution_pt->build(Communicator_pt, n_dof, false);
+        Dof_distribution_pt->build(Communicator_pt, n_dof, /*is_block_dof_arrangement_used() ? Block_dof_pt_start : Vector<unsigned long>(),*/ false);
       }
 
       if (Global_timings::Doc_comprehensive_timings)
@@ -2514,33 +2582,8 @@ namespace oomph
       Mesh_pt->describe_dofs(out, in);
     }
 
-    // Deal with the spine meshes additional numbering:
-    // If there is only one mesh:
-    if (n_sub_mesh == 0)
-    {
-      if (SpineMesh* const spine_mesh_pt = dynamic_cast<SpineMesh*>(Mesh_pt))
-      {
-        std::string in(" in Problem's Only SpineMesh.");
-        spine_mesh_pt->describe_spine_dofs(out, in);
-      }
-    }
-    // Otherwise loop over the sub meshes
-    else
-    {
-      // Assign global equation numbers first
-      for (unsigned i = 0; i < n_sub_mesh; i++)
-      {
-        if (SpineMesh* const spine_mesh_pt =
-              dynamic_cast<SpineMesh*>(Sub_mesh_pt[i]))
-        {
-          std::stringstream conversion;
-          conversion << " in Sub-SpineMesh " << i << ".";
-          std::string in(conversion.str());
-          spine_mesh_pt->describe_spine_dofs(out, in);
-        } // end if.
-      } // end for.
-    } // end else.
-
+    // SpineMesh support was removed from this build of pyoomph, so there
+    // is no additional spine equation numbering to describe here.
 
     out << std::string(80, '\\') << std::endl;
     out << std::string(80, '\\') << std::endl;
@@ -3697,32 +3740,17 @@ namespace oomph
     LinearAlgebraDistribution dist(this->communicator_pt(), n_dof, false);
     Mres.build(&dist, 0.0);
 
-    // If we have discontinuous formulation
-    // We can invert the mass matrix element by element
+    // Discontinuous Galerkin (DG) element formulation support was removed
+    // from this build of pyoomph, so the discontinuous fast path is gone;
+    // we always invert the full mass matrix via a global linear solve.
     if (Discontinuous_element_formulation)
     {
-      // Loop over the elements and get their residuals
-      const unsigned n_element = Problem::mesh_pt()->nelement();
-      Vector<double> element_Mres;
-      for (unsigned e = 0; e < n_element; e++)
-      {
-        // Cache the element
-        DGElement* const elem_pt =
-          dynamic_cast<DGElement*>(Problem::mesh_pt()->element_pt(e));
-
-        // Find the elemental inverse mass matrix times residuals
-        const unsigned n_el_dofs = elem_pt->ndof();
-        elem_pt->get_inverse_mass_matrix_times_residuals(element_Mres);
-
-        // Add contribution to global matrix
-        for (unsigned i = 0; i < n_el_dofs; i++)
-        {
-          Mres[elem_pt->eqn_number(i)] = element_Mres[i];
-        }
-      }
+      throw OomphLibError(
+        "Discontinuous Galerkin (DG) element formulation support was "
+        "removed from this build of pyoomph.",
+        OOMPH_CURRENT_FUNCTION,
+        OOMPH_EXCEPTION_LOCATION);
     }
-    // Otherwise it's continous and we must invert the full
-    // mass matrix via a global linear solve.
     else
     {
       // Now do the linear solve -- recycling Mass matrix if requested
@@ -6501,6 +6529,7 @@ namespace oomph
     // Index to keep track of the equations counted
     unsigned my_eqns_index = 0;
 
+
     // Loop over the selection of elements
     for (unsigned long e = el_lo; e <= el_hi; e++)
     {
@@ -6645,8 +6674,10 @@ namespace oomph
     Vector<unsigned> my_eqns;
     if (n_elements != 0)
     {
-      this->get_my_eqns(
-        assembly_handler_pt, el_lo, el_hi_plus_one - 1, my_eqns);
+      if (el_hi_plus_one>0) // TODO: Patch to avoid underflow when el_hi_plus_one is unsigned and el_hi is 0, which somehow happens if you only have one element
+      {
+        this->get_my_eqns(assembly_handler_pt, el_lo, el_hi_plus_one - 1, my_eqns);
+      }
     }
 
     // number of equations
@@ -10066,36 +10097,8 @@ namespace oomph
       return true;
     }
 
-    // Loop over the submeshes to handle the case of spine data
-    const unsigned n_sub_mesh = this->nsub_mesh();
-    // If there is only one mesh
-    if (n_sub_mesh == 0)
-    {
-      if (SpineMesh* const spine_mesh_pt = dynamic_cast<SpineMesh*>(Mesh_pt))
-      {
-        if (spine_mesh_pt->does_pointer_correspond_to_spine_data(parameter_pt))
-        {
-          return true;
-        }
-      }
-    }
-    // Otherwise loop over the sub meshes
-    else
-    {
-      // Assign global equation numbers first
-      for (unsigned i = 0; i < n_sub_mesh; i++)
-      {
-        if (SpineMesh* const spine_mesh_pt =
-              dynamic_cast<SpineMesh*>(Sub_mesh_pt[i]))
-        {
-          if (spine_mesh_pt->does_pointer_correspond_to_spine_data(
-                parameter_pt))
-          {
-            return true;
-          }
-        }
-      }
-    }
+    // SpineMesh support was removed from this build of pyoomph, so there
+    // is no spine data to check here.
 
     // If we have got here then the data is not stored in the problem, so return
     // false
@@ -10672,32 +10675,8 @@ namespace oomph
     Mesh_pt->set_consistent_pinned_values_for_continuation(
       &Continuation_time_stepper);
 
-    // Deal with the spine meshes additional numbering separately
-    const unsigned n_sub_mesh = this->nsub_mesh();
-    // If there is only one mesh
-    if (n_sub_mesh == 0)
-    {
-      if (SpineMesh* const spine_mesh_pt = dynamic_cast<SpineMesh*>(Mesh_pt))
-      {
-        spine_mesh_pt->set_consistent_pinned_spine_values_for_continuation(
-          &Continuation_time_stepper);
-      }
-      // If it's a triangle mesh the we need to set the
-    }
-    // Otherwise loop over the sub meshes
-    else
-    {
-      // Assign global equation numbers first
-      for (unsigned i = 0; i < n_sub_mesh; i++)
-      {
-        if (SpineMesh* const spine_mesh_pt =
-              dynamic_cast<SpineMesh*>(Sub_mesh_pt[i]))
-        {
-          spine_mesh_pt->set_consistent_pinned_spine_values_for_continuation(
-            &Continuation_time_stepper);
-        }
-      }
-    }
+    // SpineMesh support was removed from this build of pyoomph, so there
+    // is no additional spine numbering to deal with here.
 
     // Also set time stepper for global data
     const unsigned n_global = Global_data_pt.size();
@@ -12013,20 +11992,9 @@ namespace oomph
     Mass_matrix_reuse_is_enabled = true;
     Mass_matrix_has_been_computed = false;
 
-    // If we have a discontinuous formulation set the elements to reuse
-    // their own mass matrices
-    if (Discontinuous_element_formulation)
-    {
-      const unsigned n_element = Problem::mesh_pt()->nelement();
-      // Loop over the other elements
-      for (unsigned e = 0; e < n_element; e++)
-      {
-        // Cache the element
-        DGElement* const elem_pt =
-          dynamic_cast<DGElement*>(Problem::mesh_pt()->element_pt(e));
-        elem_pt->enable_mass_matrix_reuse();
-      }
-    }
+    // Discontinuous Galerkin (DG) element formulation support was removed
+    // from this build of pyoomph, so there is no element-level mass matrix
+    // reuse to enable here.
   }
 
   //======================================================================
@@ -12038,20 +12006,9 @@ namespace oomph
     Mass_matrix_reuse_is_enabled = false;
     Mass_matrix_has_been_computed = false;
 
-    // If we have a discontinuous formulation set the element-level
-    // function
-    if (Discontinuous_element_formulation)
-    {
-      const unsigned n_element = Problem::mesh_pt()->nelement();
-      // Loop over the other elements
-      for (unsigned e = 0; e < n_element; e++)
-      {
-        // Cache the element
-        DGElement* const elem_pt =
-          dynamic_cast<DGElement*>(Problem::mesh_pt()->element_pt(e));
-        elem_pt->disable_mass_matrix_reuse();
-      }
-    }
+    // Discontinuous Galerkin (DG) element formulation support was removed
+    // from this build of pyoomph, so there is no element-level mass matrix
+    // reuse to disable here.
   }
 
 
@@ -13956,58 +13913,10 @@ namespace oomph
                   << std::endl;
               }
             }
-            else if (TriangleMeshBase* tmesh_pt =
-                       dynamic_cast<TriangleMeshBase*>(
-                         Copy_of_problem_pt[c]->mesh_pt(0)))
-            {
-              if (TriangleMeshBase* original_mesh_pt =
-                    dynamic_cast<TriangleMeshBase*>(this->mesh_pt(0)))
-              {
-                if (dynamic_cast<SolidMesh*>(original_mesh_pt) != 0)
-                {
-                  oomph_info
-                    << "Info/Warning: Adaptive Continuation is broken in "
-                    << "SolidElement" << std::endl;
-                }
-
-                // Remesh using the triangulateIO of the base mesh
-                // Done via a file, so a bit hacky but this will be
-                // superseded very soon
-//FOR PYOOMPH: Only call if we would have Triangle              
-#ifdef OOMPH_HAS_TRIANGLE_LIB                
-                std::ofstream tri_dump("triangle_mesh.dmp");
-                original_mesh_pt->dump_triangulateio(tri_dump);
-                tri_dump.close();
-                std::ifstream tri_read("triangle_mesh.dmp");
-                tmesh_pt->remesh_from_triangulateio(tri_read);
-                tri_read.close();
-#endif               
-//
-
-                // Set the nodes to be at the same positions
-                // as the original just in case the
-                // triangulatio is out of sync with the real data
-                const unsigned n_node = original_mesh_pt->nnode();
-                for (unsigned n = 0; n < n_node; ++n)
-                {
-                  Node* const nod_pt = original_mesh_pt->node_pt(n);
-                  Node* const new_node_pt = tmesh_pt->node_pt(n);
-                  unsigned n_dim = nod_pt->ndim();
-                  for (unsigned i = 0; i < n_dim; ++i)
-                  {
-                    new_node_pt->x(i) = nod_pt->x(i);
-                  }
-                }
-              }
-              else
-              {
-                oomph_info
-                  << "Info/warning: Original Mesh is not TriangleBased\n"
-                  << "... but the copy is!" << std::endl;
-              }
-            }
             else
             {
+              // TriangleMeshBase support was removed from this build of
+              // pyoomph, so there is no unstructured-mesh path here.
               oomph_info << "Info/Warning: Mesh cannot be adapted in copy."
                          << std::endl;
             }
@@ -14054,56 +13963,10 @@ namespace oomph
                     << std::endl;
                 }
               }
-              else if (TriangleMeshBase* tmesh_pt =
-                         dynamic_cast<TriangleMeshBase*>(
-                           Copy_of_problem_pt[c]->mesh_pt(m)))
-              {
-                if (TriangleMeshBase* original_mesh_pt =
-                      dynamic_cast<TriangleMeshBase*>(this->mesh_pt(m)))
-                {
-                  if (dynamic_cast<SolidMesh*>(original_mesh_pt) != 0)
-                  {
-                    oomph_info
-                      << "Info/Warning: Adaptive Continuation is broken in "
-                      << "SolidElement" << std::endl;
-                  }
-
-                  // Remesh using the triangulateIO of the base mesh
-                  // Done via a file, so a bit hacky but this will be
-                  // superseded very soon
-//FOR PYOOMPH: Only call if we would have Triangle              
-#ifdef OOMPH_HAS_TRIANGLE_LIB                                  
-                  std::ofstream tri_dump("triangle_mesh.dmp");
-                  original_mesh_pt->dump_triangulateio(tri_dump);
-                  tri_dump.close();
-                  std::ifstream tri_read("triangle_mesh.dmp");
-                  tmesh_pt->remesh_from_triangulateio(tri_read);
-                  tri_read.close();
-#endif
-                  // Set the nodes to be at the same positions
-                  // as the original just in case the
-                  // triangulatio is out of sync with the real data
-                  const unsigned n_node = original_mesh_pt->nnode();
-                  for (unsigned n = 0; n < n_node; ++n)
-                  {
-                    Node* const nod_pt = original_mesh_pt->node_pt(n);
-                    Node* const new_node_pt = tmesh_pt->node_pt(n);
-                    unsigned n_dim = nod_pt->ndim();
-                    for (unsigned i = 0; i < n_dim; ++i)
-                    {
-                      new_node_pt->x(i) = nod_pt->x(i);
-                    }
-                  }
-                }
-                else
-                {
-                  oomph_info
-                    << "Info/warning: Original Mesh is not TriangleBased\n"
-                    << "... but the copy is!" << std::endl;
-                }
-              }
               else
               {
+                // TriangleMeshBase support was removed from this build of
+                // pyoomph, so there is no unstructured-mesh path here.
                 oomph_info << "Info/Warning: Mesh cannot be adapted in copy."
                            << std::endl;
               }
@@ -17648,67 +17511,9 @@ namespace oomph
       // The load balancing strategy acts in the structured meshes and
       // then acts in the unstructured meshes
 
-      // Vector to temporaly store pointers to unstructured meshes
-      // (TriangleMeshBase)
-      Vector<TriangleMeshBase*> unstructured_mesh_pt;
-      std::vector<bool> is_unstructured_mesh;
-
-      // Flag to indicate that there are unstructured meshes as part of
-      // the problem
-      bool are_there_unstructured_meshes = false;
-
-      // We have only one mesh
-      if (n_mesh == 0)
-      {
-        // Check if it is a TriangleMeshBase mesh
-        if (TriangleMeshBase* tri_mesh_pt =
-              dynamic_cast<TriangleMeshBase*>(old_mesh_pt[0]))
-        {
-          // Add the pointer to the unstructured meshes container
-          unstructured_mesh_pt.push_back(tri_mesh_pt);
-          // Indicate that it is an unstructured mesh
-          is_unstructured_mesh.push_back(true);
-          // Indicate that there are unstructured meshes as part of the
-          // problem
-          are_there_unstructured_meshes = true;
-        }
-        else
-        {
-          // Add the pointer to the unstructured meshes container (null
-          // pointer)
-          unstructured_mesh_pt.push_back(tri_mesh_pt);
-          // Indicate that it is not an unstructured mesh
-          is_unstructured_mesh.push_back(false);
-        }
-      } // if (n_mesh == 0)
-      else // We have sub-meshes
-      {
-        // Check which sub-meshes are unstructured meshes (work with the
-        // old sub-meshes number)
-        for (unsigned i_mesh = 0; i_mesh < n_mesh; i_mesh++)
-        {
-          // Is it a TriangleMeshBase mesh
-          if (TriangleMeshBase* tri_mesh_pt =
-                dynamic_cast<TriangleMeshBase*>(old_mesh_pt[i_mesh]))
-          {
-            // Add the pointer to the unstructured meshes container
-            unstructured_mesh_pt.push_back(tri_mesh_pt);
-            // Indicate that it is an unstructured mesh
-            is_unstructured_mesh.push_back(true);
-            // Indicate that there are unstructured meshes as part of the
-            // problem
-            are_there_unstructured_meshes = true;
-          }
-          else
-          {
-            // Add the pointer to the unstructured meshes container (null
-            // pointer)
-            unstructured_mesh_pt.push_back(tri_mesh_pt);
-            // Indicate that it is not an unstructured mesh
-            is_unstructured_mesh.push_back(false);
-          }
-        } // for (i_mesh < n_mesh)
-      } // else if (n_mesh == 0) // We have sub-meshes
+      // TriangleMeshBase support was removed from this build of pyoomph,
+      // so every mesh/submesh is always treated as structured here.
+      std::vector<bool> is_unstructured_mesh(std::max(n_mesh, 1u), false);
 
       // Extract data to be sent to various processors after the
       //--------------------------------------------------------
@@ -17832,8 +17637,8 @@ namespace oomph
         // Delete the mesh if it is not an unstructured mesh
         if (!is_unstructured_mesh[0])
         {
-          delete old_mesh_pt[0];
-          old_mesh_pt[0] = 0;
+          //delete old_mesh_pt[0]; // FOR PYOOMPH: Do not delete the mesh here since we require it in the python side
+          //old_mesh_pt[0] = 0;
         } // if (!is_unstructured_mesh[0])
       } // if (n_mesh==0)
       else
@@ -17858,8 +17663,8 @@ namespace oomph
           // Delete the mesh if it is not an unstructured mesh
           if (!is_unstructured_mesh[i_mesh])
           {
-            delete old_mesh_pt[i_mesh];
-            old_mesh_pt[i_mesh] = 0;
+            //delete old_mesh_pt[i_mesh]; // FOR PYOOMPH: Do not delete the mesh here since we require it in the python side
+            //old_mesh_pt[i_mesh] = 0;
           } // if (!is_unstructured_mesh[i_mesh])
 
         } // for (i_mesh<n_mesh)
@@ -18379,101 +18184,8 @@ namespace oomph
       send_data_to_be_sent_during_load_balancing(
         send_n, send_data, send_displacement);
 
-      // If there are unstructured meshes here we perform the load
-      // balancing of those meshes
-      if (are_there_unstructured_meshes)
-      {
-        // Delete any storage of external elements and nodes
-        this->delete_all_external_storage();
-
-        if (n_mesh == 0)
-        {
-          // Before doing the load balancing delete the mesh created at
-          // calling build_mesh(), and restore the pointer to the old
-          // mesh
-
-          // It MUST be an unstructured mesh, otherwise we should not be
-          // here
-          if (is_unstructured_mesh[0])
-          {
-            // Delete the new created mesh
-            delete mesh_pt();
-            // Re-assign the pointer to the old mesh
-            this->mesh_pt() = old_mesh_pt[0];
-          } // if (is_unstructured_mesh[0])
-#ifdef PARANOID
-          else
-          {
-            std::ostringstream error_stream;
-            error_stream << "The only one mesh in the problem is not an "
-                            "unstructured mesh,\n"
-                         << "but the flag 'are_there_unstructures_meshes' ("
-                         << are_there_unstructured_meshes
-                         << ") was turned on,\n"
-                         << "this is weird. Please check for any  condition "
-                            "that may have\n"
-                         << "turned on this flag!!!!\n\n";
-            throw OomphLibError(error_stream.str(),
-                                "Problem::load_balance()",
-                                OOMPH_EXCEPTION_LOCATION);
-          }
-#endif
-
-          unstructured_mesh_pt[0]->load_balance(
-            target_domain_for_local_non_halo_element);
-        } // if (n_mesh == 0)
-        else
-        {
-          // Before doing the load balancing delete the meshes created
-          // at calling build_mesh(), and restore the pointer to the
-          // old meshes
-          for (unsigned i_mesh = 0; i_mesh < n_mesh; i_mesh++)
-          {
-            if (is_unstructured_mesh[i_mesh])
-            {
-              // Delete the new created mesh
-              delete mesh_pt(i_mesh);
-              // Now point it to nothing
-              mesh_pt(i_mesh) = 0;
-              // ... and re-assign the pointer to the old mesh
-              this->mesh_pt(i_mesh) = old_mesh_pt[i_mesh];
-            } // if (is_unstructured_mesh[i_mesh])
-
-          } // for (i_mesh<n_mesh)
-
-          // Empty storage for sub-meshes
-          // flush_sub_meshes();
-
-          // Flush the storage for nodes and elements in compound mesh
-          // (they've already been deleted in the sub-meshes)
-          mesh_pt()->flush_element_and_node_storage();
-
-          // Now we can procede with the load balancing thing
-          for (unsigned i_mesh = 0; i_mesh < n_mesh; i_mesh++)
-          {
-            if (is_unstructured_mesh[i_mesh])
-            {
-              // Get the number of elements in the "i_mesh" (the old one)
-              const unsigned n_element = old_mesh_pt[i_mesh]->nelement();
-
-              // Perform the load balancing if there are elements in the
-              // mesh. We check for this case because the meshes created
-              // from face elements have been cleaned in
-              // "actions_before_distribute()"
-              if (n_element > 0 && is_unstructured_mesh[i_mesh])
-              {
-                unstructured_mesh_pt[i_mesh]->load_balance(
-                  target_domain_for_local_non_halo_element_submesh[i_mesh]);
-              } // if (n_element > 0)
-            } // if (is_unstructured_mesh[i_mesh)]
-          } // for (i_mesh < n_mesh)
-
-          // Rebuild the global mesh
-          rebuild_global_mesh();
-
-        } // else if (n_mesh == 0)
-
-      } // if (are_there_unstructured_meshes)
+      // TriangleMeshBase support was removed from this build of pyoomph,
+      // so there are never any unstructured meshes to load-balance here.
 
       if (report_stats)
       {
@@ -18575,10 +18287,8 @@ namespace oomph
         my_mesh_pt = mesh_pt(i_mesh);
       }
 
-      // Only work with structured meshes
-      TriangleMeshBase* sub_mesh_pt =
-        dynamic_cast<TriangleMeshBase*>(mesh_pt(i_mesh));
-      if (!(sub_mesh_pt != 0))
+      // TriangleMeshBase support was removed from this build of pyoomph,
+      // so every mesh here is always treated as structured.
       {
         // Loop over processors to find haloed elements -- need to
         // send their refinement patterns processors that hold their
@@ -18604,7 +18314,7 @@ namespace oomph
             halo_domains[e].push_back(p);
           }
         }
-      } // if (!(sub_mesh_pt!=0))
+      }
     } // for (i_mesh<max_mesh)
 
     // Accumulate relevant flat-packed refinement data to be sent to
@@ -19573,10 +19283,8 @@ namespace oomph
     // Go for the nonhalo elements only in the TreeBaseMeshes
     for (unsigned i_mesh = 0; i_mesh < n_mesh; i_mesh++)
     {
-      // Only work with structured meshes
-      TriangleMeshBase* sub_mesh_pt =
-        dynamic_cast<TriangleMeshBase*>(mesh_pt(i_mesh));
-      if (!(sub_mesh_pt != 0))
+      // TriangleMeshBase support was removed from this build of pyoomph,
+      // so every mesh here is always treated as structured.
       {
         const unsigned nele = mesh_pt(i_mesh)->nelement();
         if (nele > 0)
@@ -20061,10 +19769,8 @@ namespace oomph
     // Go for the nonhalo elements only in the TreeBaseMeshes
     for (unsigned i_mesh = 0; i_mesh < n_mesh; i_mesh++)
     {
-      // Only work with structured
-      TriangleMeshBase* sub_mesh_pt =
-        dynamic_cast<TriangleMeshBase*>(mesh_pt(i_mesh));
-      if (!(sub_mesh_pt != 0))
+      // TriangleMeshBase support was removed from this build of pyoomph,
+      // so every mesh here is always treated as structured.
       {
         const unsigned nele_submesh = mesh_pt(i_mesh)->nelement();
         for (unsigned e = 0; e < nele_submesh; e++)
@@ -20330,10 +20036,8 @@ namespace oomph
         my_mesh_pt = mesh_pt(i_mesh);
       }
 
-      // Only work with structured meshes
-      TriangleMeshBase* sub_mesh_pt =
-        dynamic_cast<TriangleMeshBase*>(my_mesh_pt);
-      if (!(sub_mesh_pt != 0))
+      // TriangleMeshBase support was removed from this build of pyoomph,
+      // so every mesh here is always treated as structured.
       {
         // Storage for number of data to be sent to each processor
         Vector<int> send_n(n_proc, 0);

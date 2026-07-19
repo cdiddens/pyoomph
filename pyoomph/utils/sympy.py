@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,14 +21,14 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
  
 import sympy #type:ignore
 from ..expressions import (cos,sin,log,exp,pi,var,nondim,ExpressionOrNum,Expression) 
-import _pyoomph
+from .. import _pyoomph_core as _pyoomph
 import math
 
 
@@ -79,14 +80,13 @@ def sympy_to_pyoomph(expr:_SympyType,use_nondim:bool=False,var_map:Dict[str,Expr
         vn=str(expr)
         #print(vn,var_map)
         if vn in var_map.keys():
-            vn=var_map[vn]
-        if not isinstance(vn,str):
-            return vn
+            mapped=var_map[vn]
+            if not isinstance(mapped,str):
+                return mapped
+        if use_nondim:
+            return nondim(str(expr))
         else:
-            if use_nondim:
-                return nondim(str(expr))
-            else:
-                return var(str(expr))
+            return var(str(expr))
     else:
         print(repr(expr),expr.__class__)
         raise RuntimeError("Sympy expression "+str(expr)+" cannot be converted yet to pyoomph")

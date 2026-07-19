@@ -1,0 +1,131 @@
+name: Prebuild static CLN/GiNaC
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  prebuild:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64
+            runner: ubuntu-latest
+            platform: linux
+            artifact: static-ginac-cln-linux-x86_64
+          - label: macos-intel-x86_64
+            runner: macos-15-intel
+            platform: macos
+            artifact: static-ginac-cln-macos-intel-x86_64
+          - label: macos-arm64
+            runner: macos-14
+            platform: macos
+            artifact: static-ginac-cln-macos-arm64
+          - label: windows-msys2-ucrt64
+            runner: windows-latest
+            platform: windows
+            artifact: static-ginac-cln-windows-msys2-ucrt64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf automake libtool pkg-config \
+            make g++ m4 bison flex texinfo \
+            curl wget tar xz-utils
+
+      - name: Install build dependencies (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          brew update
+          brew install autoconf automake libtool pkg-config texinfo wget
+
+      - name: Build static CLN/GiNaC (Linux/macOS)
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: |
+          chmod +x ./citools/build_static_ginac_cln.sh
+          ./citools/build_static_ginac_cln.sh
+
+      - name: Set up MSYS2 (Windows)
+        if: matrix.platform == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            autoconf
+            automake
+            libtool
+            make
+            pkgconf
+            m4
+            bison
+            flex
+            patch
+            git
+            base-devel
+            wget
+            tar
+            mingw-w64-ucrt-x86_64-toolchain
+
+      - name: Build static CLN/GiNaC (Windows/MSYS2)
+        if: matrix.platform == 'windows'
+        shell: msys2 {0}
+        run: |
+          chmod +x ./citools/build_static_ginac_cln_msys2.sh
+          ./citools/build_static_ginac_cln_msys2.sh
+
+      - name: Collect metadata (Linux/macOS)
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: |
+          mkdir -p build-metadata
+          {
+            echo "runner=${{ matrix.label }}"
+            echo "cln_version=1.3.7"
+            echo "ginac_version=1.8.10"
+            echo "utc_build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > build-metadata/info.txt
+
+          if command -v pkg-config >/dev/null 2>&1; then
+            PKG_CONFIG_PATH="$PWD/GiNaC_static/install/lib/pkgconfig:${PKG_CONFIG_PATH:-}" \
+              pkg-config --static --libs ginac > build-metadata/pkg_config_static_libs.txt || true
+          fi
+
+          find GiNaC_static/install -type f > build-metadata/install_tree.txt
+
+      - name: Collect metadata (Windows/MSYS2)
+        if: matrix.platform == 'windows'
+        shell: msys2 {0}
+        run: |
+          mkdir -p build-metadata
+          {
+            echo "runner=${{ matrix.label }}"
+            echo "cln_version=1.3.7"
+            echo "ginac_version=1.8.10"
+            echo "utc_build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > build-metadata/info.txt
+
+          if command -v pkg-config >/dev/null 2>&1; then
+            PKG_CONFIG_PATH="$PWD/GiNaC_static/install/lib/pkgconfig:${PKG_CONFIG_PATH:-}" \
+              pkg-config --static --libs ginac > build-metadata/pkg_config_static_libs.txt || true
+          fi
+
+          find GiNaC_static/install -type f > build-metadata/install_tree.txt
+
+      - name: Upload static prebuild artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            GiNaC_static/install
+            build-metadata
+          if-no-files-found: error

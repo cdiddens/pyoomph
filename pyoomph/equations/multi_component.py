@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -83,9 +84,9 @@ def CompositionDiffusionEquations(fluid_props:AnyFluidProperties, space:FiniteEl
     return res
 
 
-def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteElementSpaceEnum="C1", compo_dt_factor:ExpressionOrNum=1, ns_mode:Literal["TH","CR"]="TH", boussinesq:bool=False,
+def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteElementSpaceEnum="C1", compo_dt_factor:ExpressionOrNum=1, ns_mode:Literal["TH","CR","mini"]="TH", boussinesq:bool=False,
                              gravity:ExpressionNumOrNone=None, bulkforce:ExpressionNumOrNone=None, ns_dt_factor:ExpressionOrNum=1, ns_nl_factor:ExpressionNumOrNone=None, with_IC:bool=True,
-                             hele_shaw_thickness:ExpressionNumOrNone=None, spatial_errors:Optional[float]=None, useCompoSUPG:bool=False,isothermal:bool=True,initial_temperature:ExpressionNumOrNone=None,additional_advection:ExpressionOrNum=0,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",wrong_strain:bool=False,integrate_advection_by_parts:bool=False,PFEM:Union[PFEMOptions, bool]=False,wrap_params_in_subexpressions=True,thermal_dt_factor:ExpressionOrNum=1,thermal_adv_factor:ExpressionOrNum=1) -> Equations:
+                             hele_shaw_thickness:ExpressionNumOrNone=None, spatial_errors:Optional[float]=None, useCompoSUPG:bool=False,isothermal:bool=True,initial_temperature:ExpressionNumOrNone=None,additional_advection:ExpressionOrNum=0,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",compo_scheme:TimeSteppingScheme="BDF2",wrong_strain:bool=False,integrate_advection_by_parts:bool=False,PFEM:Union[PFEMOptions, bool]=False,wrap_params_in_subexpressions=True,thermal_dt_factor:ExpressionOrNum=1,thermal_adv_factor:ExpressionOrNum=1,GCL:bool=False) -> Equations:
     """
     Assembles a system for multi-component flow with advection-diffusion equations for mass fraction fields of the mixture composition and the Navier-Stokes equations. Potentially, also a temperature field is included.
 
@@ -93,7 +94,7 @@ def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteE
         fluid_props: The fluid properties.
         compo_space: Space for the mass fraction fields
         compo_dt_factor: Factor for the time derivative of the mass fraction fields
-        ns_mode: Which Navier-Stokes discretization to use, Taylor-Hood (``"TH"``) or Crouzeix-Raviart (``"CR"``).
+        ns_mode: Which Navier-Stokes discretization to use, Taylor-Hood (``"TH"``) or Crouzeix-Raviart (``"CR"``) or MINI Elements (``"mini"``).
         boussinesq: Use Boussinesq approximation
         gravity: Gravity vector [in m/s^2].
         bulkforce: Additional bulk force term.
@@ -108,31 +109,29 @@ def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteE
         additional_advection: Adds an additional advection term.
         momentum_scheme: Selects the time stepping scheme for the momentum equation.
         continuity_scheme: Selects the time stepping scheme for the continuity equation.
+        compo_scheme: Selects the time stepping scheme for the composition equations.
         wrong_strain: Simplifies the strain by a simple Laplacian. Do not use when you e.g. imposed tractions, e.g. Marangoni forces.
         integrate_advection_by_parts: Integrate the advection terms of the composition equations by parts.
         PFEM: Options for the experimental Particle-Finite-Element-Method approach.
         wrap_params_in_subexpressions: If True, all material properties in the equations are wrapped in subexpressions.
         thermal_dt_factor: Factor for the time derivative of the temperature field.
         thermal_adv_factor: Factor for the advection term of the temperature field.
+        GCL: If True, the Geometric Conservation Law is enforced in the ALE formulation of the Navier-Stokes equations and the composition equations.
 
     Returns:
         A coupled set of equations describing the multi-component flow of the mixture 
     """
-    if ns_nl_factor is None:
-        if hele_shaw_thickness is None:
-            ns_nl_factor = 1
-        else:
-            ns_nl_factor = 6 / 5
-    if hele_shaw_thickness is not None:
-        hsdamp = -12 * subexpression(fluid_props.dynamic_viscosity) * var("velocity") / subexpression(
-            hele_shaw_thickness) ** 2
-        bulkforce = hsdamp if bulkforce is None else bulkforce + hsdamp
-
+    
+    if GCL:
+        if not integrate_advection_by_parts:
+            integrate_advection_by_parts=True
+            print("WARNING: For GCL, the advection term of the composition equations is integrated by parts automatically.")
     ns = NavierStokesEquations(fluid_props=fluid_props, mode=ns_mode, boussinesq=boussinesq, gravity=gravity,
-                               bulkforce=bulkforce, dt_factor=ns_dt_factor, nonlinear_factor=ns_nl_factor,momentum_scheme=momentum_scheme,continuity_scheme=continuity_scheme,wrong_strain=wrong_strain,PFEM=PFEM,wrap_params_in_subexpressions=wrap_params_in_subexpressions)
+                               bulkforce=bulkforce, dt_factor=ns_dt_factor, nonlinear_factor=ns_nl_factor,momentum_scheme=momentum_scheme,continuity_scheme=continuity_scheme,wrong_strain=wrong_strain,PFEM=PFEM,wrap_params_in_subexpressions=wrap_params_in_subexpressions, hele_shaw_thickness=hele_shaw_thickness,GCL=GCL)
     wind=var("velocity")+additional_advection
+    
     cp = CompositionAdvectionDiffusionEquations(fluid_props=fluid_props, space=compo_space, dt_factor=compo_dt_factor,
-                                                boussinesq=boussinesq, useSUPG=useCompoSUPG,wind=wind,integrate_advection_by_parts=integrate_advection_by_parts,wrap_params_in_subexpressions=wrap_params_in_subexpressions)
+                                                boussinesq=boussinesq, useSUPG=useCompoSUPG,wind=wind,integrate_advection_by_parts=integrate_advection_by_parts,wrap_params_in_subexpressions=wrap_params_in_subexpressions,GCL=GCL,scheme=compo_scheme)
     res = ns + cp
     if not isothermal:
         res+=TemperatureAdvectionConductionEquation(fluid_props,space=compo_space,wind=wind,adv_factor=thermal_adv_factor,dt_factor=thermal_dt_factor)
@@ -170,9 +169,11 @@ class CompositionAdvectionDiffusionEquations(Equations):
         useSUPG(bool): Whether to use the SUPG method. Default is False.
         integrate_advection_by_parts(bool): Whether to integrate the advection term by parts. Default is False.
         wrap_params_in_subexpressions(bool): Whether to wrap the parameters in subexpressions using GiNaC. Default is True.
+        GCL(bool): Whether to consider the Generalized Continuity Equation. Default is False.
+        scheme(TimeSteppingScheme): The time stepping scheme. Default is "BDF2".
     """
         
-    def __init__(self, fluid_props:AnyFluidProperties, *, space:FiniteElementSpaceEnum="C2", wind:ExpressionOrNum=var("velocity"), dt_factor:ExpressionOrNum=1, boussinesq:bool=False, useSUPG:bool=False,integrate_advection_by_parts:bool=False,wrap_params_in_subexpressions:bool=True):
+    def __init__(self, fluid_props:AnyFluidProperties, *, space:FiniteElementSpaceEnum="C2", wind:ExpressionOrNum=var("velocity"), dt_factor:ExpressionOrNum=1, boussinesq:bool=False, useSUPG:bool=False,integrate_advection_by_parts:bool=False,wrap_params_in_subexpressions:bool=True, GCL:bool=False, scheme:TimeSteppingScheme="BDF2"):        
         super().__init__()
         self.dt_factor = dt_factor
         self.space:FiniteElementSpaceEnum = space
@@ -190,7 +191,9 @@ class CompositionAdvectionDiffusionEquations(Equations):
         self.requires_interior_facet_terms=is_DG_space(self.space)
         self.DG_alpha=1
         self.wrap_params_in_subexpressions=wrap_params_in_subexpressions
-
+        self.GCL=GCL
+        self.scheme=scheme
+        
     def optional_subexpression(self,expr):
         if self.wrap_params_in_subexpressions:
             return subexpression(expr)
@@ -284,6 +287,7 @@ class CompositionAdvectionDiffusionEquations(Equations):
     def define_residuals(self):
         rho_ref = scale_factor("mass_density")
         rho = self.fluid_props.mass_density
+        ts=lambda expr : time_scheme(self.scheme, expr)
         for fn in self.fieldnames:
             f, f_test = var_and_test(fn)
             Jdiff = self.get_diffusive_mass_flux_expression_for(self.component_names[fn])            
@@ -296,19 +300,29 @@ class CompositionAdvectionDiffusionEquations(Equations):
                 rho_factor = rho
             if self.integrate_advection_by_parts:
                 if self.useSUPG:
-                    raise RuntimeError("TODO")
-                res = rho_factor * (self.dt_factor * partial_t(f))
-                self.add_residual(-weak(rho_factor *self.wind*f,grad(f_test)))
+                    raise RuntimeError("TODO")      
+                if self.GCL:          
+                    self.add_dweak_dt(rho_factor * f, f_test, scheme=self.scheme)
+                    if self.useSUPG:
+                        raise RuntimeError("TODO")
+                    w=mesh_velocity(scheme=self.scheme)
+                    self.add_residual(-weak(ts(rho_factor *(self.wind-w)*f),grad(f_test)))
+                else:
+                    self.add_residual(weak(res, f_test))
+                    res = ts(rho_factor * (self.dt_factor * partial_t(f)))                
+                    self.add_residual(-weak(ts(rho_factor *self.wind*f),grad(f_test)))
+                
             else:
-                res = rho_factor * (self.dt_factor * partial_t(f) + dot(self.wind, grad(f)))
+                res = ts(rho_factor * (self.dt_factor * partial_t(f) + dot(self.wind, grad(f))))
+                self.add_residual(weak(res, f_test))
             if self.useSUPG:
                 res = subexpression(res)  # XXX Does not work here!
                 self.add_residual(weak(self.get_supg_tau(self.component_names[fn]) * self.wind * res, grad(f_test)))
-            self.add_residual(weak(res, f_test))
-            self.add_residual(-weak(Jdiff, grad(f_test)))
+            
+            self.add_residual(-weak(ts(Jdiff), grad(f_test)))  
             if isinstance(self.fluid_props,MixtureLiquidProperties):
                 reaction_rate=self.fluid_props.get_reaction_rate(self.component_names[fn])
-                self.add_residual(-weak(reaction_rate,f_test))
+                self.add_residual(-weak(ts(reaction_rate),f_test))
             if self.requires_interior_facet_terms:
                 raise RuntimeError("TODO: DG implementation")
 
@@ -353,6 +367,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         surface_tension_gradient_directly(bool): Whether to consider the surface tension gradient directly. Default is False.
         use_highest_space_for_velo_connection(bool): Whether to use the highest space for the velocity connection. Default is False.
         kinematic_bc_coordinate_sys(Optional[BaseCoordinateSystem]): The coordinate system for the kinematic boundary condition. Default is None.
+        kinematic_bc_space: The finite element space for the kinematic boundary condition. Default is None, means auto-select.
         additional_masstransfer_scale(ExpressionOrNum): Additional mass transfer scale. Default is 1.
         additional_kin_bc_test_scale(ExpressionOrNum): Additional kinematic boundary condition test scale. Default is 1.
         static_normal_interface_motion(ExpressionOrNum): If solved on a static mesh, we can mimic the interface motion by moving it in normal direction with this rate. Default is 0.
@@ -365,7 +380,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
     from ..materials.mass_transfer import MassTransferModelBase
     def __init__(self, interface_props:AnyFluidFluidInterface, *, kinbc_name:str="_kin_bc", velo_connect_prefix:str="_lagr_conn_",
                  masstransfer_model:Optional[Union[MassTransferModelBase,Literal[False]]]=None, static:Union[Literal["auto"],bool]="auto", surface_tension_theta:float=1, total_mass_loss_factor_inside:ExpressionOrNum=1,total_mass_loss_factor_outside:ExpressionOrNum=1,
-                 surface_tension_projection_space:Optional[FiniteElementSpaceEnum]=None,additional_normal_traction:ExpressionOrNum=0,surface_tension_gradient_directly:bool=False,use_highest_space_for_velo_connection:bool=False,kinematic_bc_coordinate_sys:Optional[BaseCoordinateSystem]=None,additional_masstransfer_scale=1,additional_kin_bc_test_scale=1,static_normal_interface_motion:ExpressionOrNum=0,static_interface_motion_testfunction:ExpressionNumOrNone=None,project_interface_flux:bool=False,surface_tension_factor:ExpressionOrNum=1):
+                 surface_tension_projection_space:Optional[FiniteElementSpaceEnum]=None,additional_normal_traction:ExpressionOrNum=0,surface_tension_gradient_directly:bool=False,use_highest_space_for_velo_connection:bool=False,kinematic_bc_coordinate_sys:Optional[BaseCoordinateSystem]=None,kinematic_bc_space:Optional[FiniteElementSpaceEnum]=None,additional_masstransfer_scale=1,additional_kin_bc_test_scale=1,static_normal_interface_motion:ExpressionOrNum=0,static_interface_motion_testfunction:ExpressionNumOrNone=None,project_interface_flux:bool=False,surface_tension_factor:ExpressionOrNum=1):
         super(MultiComponentNavierStokesInterface, self).__init__()
         self.interface_props = interface_props
         self.kinbc_name = kinbc_name
@@ -389,6 +404,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         self.surfactant_advect_velo_space:FiniteElementSpaceEnum="C2"
         self.use_highest_space_for_velo_connection=use_highest_space_for_velo_connection
         self.kinematic_bc_coordinate_sys=kinematic_bc_coordinate_sys
+        self.kinematic_bc_space=kinematic_bc_space
         self.additional_masstransfer_scale=additional_masstransfer_scale
         self.additional_kin_bc_test_scale=additional_kin_bc_test_scale
         self.static_normal_interface_motion=static_normal_interface_motion
@@ -401,22 +417,31 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         nseqs=self.get_parent_equations(of_type=NavierStokesEquations)
         assert isinstance(nseqs,NavierStokesEquations)
         inside_space=nseqs.get_velocity_space_from_mode(for_interface=True)
-        kinbc_space=inside_space
+        
 #        if nseqs.mode=="mini"        
         if not nseqs.PFEM_options or not nseqs.PFEM_options.active:            
-            static=self.static
+            kinbc_space=inside_space
+            static=self.static            
             if static=="auto":
                 static=not self.get_current_code_generator().get_parent_domain()._coordinates_as_dofs
 
             if not static in {"auto",False,True}:
                 raise RuntimeError("property static must be either 'auto', True or False")
-            if not static:
-                pos_space=self.get_current_code_generator().get_parent_domain()._coordinate_space
-                if pos_space=="":
-                    raise RuntimeError("Find out the coordinate space:"+str())
-                kinbc_space=pos_space
+            if self.kinematic_bc_space is None:
+                if not static:
+                    pos_space=self.get_current_code_generator().get_parent_domain()._coordinate_space
+                    if pos_space=="":
+                        raise RuntimeError("Find out the coordinate space:"+str())
+                    if pos_space=="C2TB":                    
+                        kinbc_space="C2"
+                    elif pos_space=="C1TB":
+                        kinbc_space="C1"                
+                    else:
+                        kinbc_space=pos_space
+            else:
+                kinbc_space=self.kinematic_bc_space
         
-            self.define_scalar_field(self.kinbc_name, inside_space )
+            self.define_scalar_field(self.kinbc_name, kinbc_space )
         # If other side has a NavierStokes equation, add also velocity connection
         self._has_opposite_flow = False
         if self.get_opposite_side_of_interface(raise_error_if_none=False):
@@ -439,6 +464,8 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
                             self.define_scalar_field(self.velo_connect_prefix + f, conn_space)  # TODO: Other velocity spaces?
                         self._has_opposite_flow = True
 
+        facet_space=nseqs.get_velocity_space_from_mode(for_interface=True)
+
         has_surfactants = False
         surfsI = self.interface_props.surfactants
         if surfsI is None:
@@ -448,7 +475,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         else:
             surfs=surfsI
         for s in surfs:
-            self.define_scalar_field("surfconc_" + s, "C2")
+            self.define_scalar_field("surfconc_" + s, facet_space)
             has_surfactants = True
         if has_surfactants:
             self.define_vector_field(self.surfactant_advect_velo_name, self.surfactant_advect_velo_space)
@@ -462,7 +489,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
             self.define_scalar_field("_surf_tension", self.surface_tension_projection_space)
             
         if self.project_interface_flux:
-            self.define_scalar_field("interface_flux", "C2",scale=scale_factor("velocity"),testscale=1/scale_factor("velocity"))
+            self.define_scalar_field("interface_flux", facet_space, scale=scale_factor("velocity"), testscale=1/scale_factor("velocity"))
 
         
         if self.get_opposite_side_of_interface(raise_error_if_none=False):
@@ -571,7 +598,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
             partial_mass_transfer_rates:Dict[str,Expression] = {}
 
         # Kinematic boundary condition
-        actual_total_transfer_by_rho_inner = dot(mesh_velocity()+self.static_normal_interface_motion*n - u, n)
+        actual_total_transfer_by_rho_inner = dot(mesh_velocity(scheme=ns_inner.momentum_scheme)+self.static_normal_interface_motion*n - u, n)
         kin_bc =  actual_total_transfer_by_rho_inner + self.total_mass_loss_factor_inside *total_mass_transfer_rate / rho_inner
         if self.project_interface_flux:
             iflux,ifluxtest=var_and_test("interface_flux")
@@ -618,7 +645,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
             if self.surface_tension_gradient_directly:
                 raise RuntimeError("Can only use surface_tension_gradient_directly if surface_tension_projection_space is set")
             else:
-                self.add_residual(weak(self.surface_tension_factor*surf_tens, div(u_test)))
+                self.add_residual(weak(time_scheme(ns_inner.momentum_scheme,self.surface_tension_factor*surf_tens), div(u_test)))
 
         
         self.add_residual(weak(self.additional_normal_traction,dot(n,u_test)))
@@ -626,7 +653,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
             self.masstransfer_model._setup_for_code(self.get_current_code_generator(),self.interface_props)
             vap_recoil=self.masstransfer_model.get_vapor_recoil_pressure()
             self.masstransfer_model._clean_up_for_code()
-            self.add_residual(weak(vap_recoil,dot(n,u_test)))
+            self.add_residual(weak(time_scheme(ns_inner.momentum_scheme, vap_recoil),dot(n,u_test)))
 
         #total_mass_flux = actual_total_transfer_by_rho_inner * rho_inner
         if self.masstransfer_model is not None:
@@ -639,11 +666,12 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
                 assert isinstance(advdiffu_inner,CompositionAdvectionDiffusionEquations)
                 assert partial_mass_transfer_rates is not None
                 if advdiffu_inner.integrate_advection_by_parts:
-                    flux = wi * rho_inner*dot(var("velocity")-0*partial_t(var("mesh")),var("normal"))  -wi * total_mass_transfer_rate + partial_mass_transfer_rates.get(name, 0)
+                    #flux = wi * rho_inner*dot(var("velocity")-0*partial_t(var("mesh")),var("normal"))  -wi * total_mass_transfer_rate + partial_mass_transfer_rates.get(name, 0)
+                    flux=partial_mass_transfer_rates.get(name, 0)
                 else:
                     flux = -wi * total_mass_transfer_rate + partial_mass_transfer_rates.get(name, 0)
                 # flux = wi * total_mass_flux + partial_mass_transfer_rates.get(name, 0)
-                self.add_residual(weak(flux, wi_test))
+                self.add_residual(weak(time_scheme(advdiffu_inner.scheme, flux), wi_test))
 
             # Component dynamics outside if necessary
             if self.get_opposite_side_of_interface(raise_error_if_none=False):
@@ -736,7 +764,8 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         if static == "auto":
             static = not self.get_current_code_generator()._coordinates_as_dofs
         assert isinstance(mesh,InterfaceMesh)
-        self.pin_redundant_lagrange_multipliers(mesh, self.kinbc_name, "velocity" if static else "mesh")
+        if self.kinematic_bc_space is None or self.kinematic_bc_space not in ["DL","D0"]:
+            self.pin_redundant_lagrange_multipliers(mesh, self.kinbc_name, "velocity" if static else "mesh")
 
         # Pin velo connection where necessary
         if self._has_opposite_flow:

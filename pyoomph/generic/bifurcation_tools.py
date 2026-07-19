@@ -3,14 +3,14 @@ import scipy.sparse.linalg
 from .problem import Problem
 from ..expressions import GlobalParameter,ExpressionNumOrNone
 from ..typings import *
-import _pyoomph
+from .. import _pyoomph_core as _pyoomph
 import numpy,scipy
 from .assembly import CustomAssemblyBase
 from ..solvers.generic import DefaultMatrixType,EigenMatrixManipulatorBase
 
 from scipy.sparse import csr_matrix      
 
-def get_hopf_lyapunov_coefficient(problem:Problem,param:Union[GlobalParameter,str],FD_delta:float=1e-5,FD_param_delta:float=1e-5,omega:Optional[float]=None,q:Optional[NPComplexArray]=None,mu0:float=0,omega_epsilon:float=1e-5):
+def get_hopf_lyapunov_coefficient(problem:Problem,param:Union[GlobalParameter,str],FD_delta:float=1e-5,FD_param_delta:float=1e-5,omega:Optional[float]=None,q:Optional[NPComplexArray]=None,mu0:float=0,omega_epsilon:float=1e-5,use_hopf_tracker_for_adjoint:bool=False):
     # Taken from § 10.2 of Yuri A. Kuznetsov, Elements of Applied Bifurcation Theory, Fourth Edition, Springer, 2004
     # Also implemented analogously in pde2path, file hogetnf.m 
     # XXX Here is the generalization of the code with mass matrix
@@ -121,7 +121,7 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:Union[GlobalParameter,st
         esolv_kwargs=eigensolve_kwargs.copy()
         if esolver.supports_target():
             esolv_kwargs["target"]=1j*omega0
-        eval,evects,_,_=problem.get_eigen_solver().solve(1,custom_J_and_M=(A,M),**esolv_kwargs,shift=(1j+omega_epsilon)*omega0,v0=numpy.array(q),sort=False,quiet=False)
+        eval,evects,_,_=problem.get_eigen_solver().solve(1,custom_J_and_M=(A,M),**esolv_kwargs,shift=(1j+omega_epsilon)*omega0,v0=None if q is None else numpy.array(q),sort=False,quiet=False)
         #for ev,evec in zip(eval,evects):
         #    print("EVAL",ev)
         #    #evec=numpy.conjugate(evec)
@@ -143,10 +143,17 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:Union[GlobalParameter,st
         #print(numpy.amax(numpy.abs(-omega0*M@qR+A@qI)))
         
     if numpy.abs(numpy.dot(qR,qI))>1e-7:
-        raise ValueError("qR and qI are not orthogonal. This is likely an issue with the eigenvalue solver. Please check the eigenvalue solver settings.")
+        # Try to rotate it
+        tmp=HopfTracker(problem,param,eigenvector=qR+1j*qI,omega=omega0)
+        q=tmp.eigenvector
+        qR=numpy.real(q)
+        qI=numpy.imag(q)
+        print("After rotation, dot product is",numpy.dot(qR,qI))
+        if numpy.abs(numpy.dot(qR,qI))>1e-7:
+            raise ValueError("qR and qI are not orthogonal, i.e. the dot product is not zero, but {}. This is likely an issue with the eigenvalue solver. Please check the eigenvalue solver settings.".format(numpy.dot(qR,qI)))
     
     esolv_kwargs=eigensolve_kwargs.copy()
-    if esolver.supports_target():
+    if esolver.supports_target() or use_hopf_tracker_for_adjoint:
         esolv_kwargs["target"]=-1j*omega0
         evalT,evectT,_,_=problem.get_eigen_solver().solve(1,custom_J_and_M=(AT,MT),**esolv_kwargs,shift=-(1j+omega_epsilon)*omega0,v0=numpy.conjugate(q),sort=False,quiet=False)   # TODO: Is MT right here?                 
     else:
@@ -613,7 +620,7 @@ class CustomBifurcationTracker(AugmentedAssemblyHandler):
         """
         if eigenvector is None:
             eigenvector=0
-        elif isinstance(eigenvector,int):
+        if isinstance(eigenvector,int):
             if eigenvector>=len(self.problem.get_last_eigenvalues()):
                 raise RuntimeError("Eigenvalue index out of range")
             eigenvector=numpy.real(self.problem.get_last_eigenvectors()[eigenvector])
@@ -634,7 +641,7 @@ class CustomBifurcationTracker(AugmentedAssemblyHandler):
         """
         if eigenvector is None:
             eigenvector=0
-        elif isinstance(eigenvector,int):
+        if isinstance(eigenvector,int):
             if eigenvector>=len(self.problem.get_last_eigenvalues()):
                 raise RuntimeError("Eigenvalue index out of range")
             eigenvector=self.problem.get_last_eigenvectors()[eigenvector]

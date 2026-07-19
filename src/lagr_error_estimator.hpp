@@ -1,6 +1,6 @@
 /*================================================================================
 pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -15,7 +15,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 
-The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+The main author may be contacted at c.diddens@utwente.nl
 
 ================================================================================*/
 
@@ -42,6 +42,9 @@ namespace pyoomph
   class LagrZ2ErrorEstimator : public virtual oomph::ErrorEstimator
   {
   public:
+    // If true, patches/recovery use the Lagrangian (reference) node position xi() instead
+    // of the current Eulerian position x(); this makes the estimated error track the
+    // (fixed) material configuration rather than a possibly moving/deforming mesh.
     bool use_Lagrangian;
 
     /// \short Function pointer to combined error estimator function

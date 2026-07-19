@@ -1,6 +1,6 @@
 /*================================================================================
 pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -15,7 +15,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 
-The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+The main author may be contacted at c.diddens@utwente.nl
 
 ================================================================================*/
 
@@ -43,12 +43,21 @@ namespace pyoomph
   //	t=5	:	BDF2 velocity
   //	t=6	:	Predictor
 
+  // A time stepper that computes and stores several sets of finite-difference weights
+  // (BDF1, BDF2, Newmark2) simultaneously on the same nodal/data time history, rather than
+  // committing to a single scheme. The scheme actually used to advance the solution is
+  // whichever weight matrix (`Weight`, inherited from oomph::TimeStepper) is filled by
+  // set_weights() - currently Newmark2 - while the other weight matrices (WeightBDF1,
+  // WeightBDF2) are kept around so e.g. a BDF2-based temporal error estimate can be formed
+  // without re-deriving history-dependent weights from scratch. In the adaptive case, an
+  // additional predictor step (AB2-like) and error weight are computed to support adaptive
+  // timestepping (see set_predictor_weights/set_error_weights/temporal_error_in_*).
   class MultiTimeStepper : public oomph::TimeStepper
   {
   protected:
-    static const unsigned NSTEPS = 2;
-    static const unsigned NWEIGHT = 2 + 3; // For non-adaptive case: Same as Newmark
-    static const unsigned MAXDERIV = 2;
+    static const unsigned NSTEPS;
+    static const unsigned NWEIGHT; // For non-adaptive case: Same as Newmark
+    static const unsigned MAXDERIV;
 
     double NewmarkBeta1;
     double NewmarkBeta2;
@@ -58,7 +67,7 @@ namespace pyoomph
 
     unsigned unsteady_steps_done_for_degrading; // How many unsteady steps have been done (required for degrading)
 
-    oomph::DenseMatrix<double> WeightBDF1, WeightBDF2, WeightNewmark2; //,WeightBDF12;
+    oomph::DenseMatrix<double> WeightBDF1, WeightBDF2, WeightNewmark2; // Weight matrices for each scheme, laid out like the inherited Weight matrix (,WeightBDF12;)
   public:
     MultiTimeStepper(const bool &adaptive = false) : oomph::TimeStepper(NWEIGHT, MAXDERIV), NewmarkBeta1(0.5), NewmarkBeta2(0.5), unsteady_steps_done_for_degrading(0)
     {
@@ -81,7 +90,7 @@ namespace pyoomph
       WeightNewmark2(0, 0) = 1.0;
     }
 
-    MultiTimeStepper(const MultiTimeStepper &)
+    MultiTimeStepper(const MultiTimeStepper &) : oomph::TimeStepper()
     {
       oomph::BrokenCopy::broken_copy("MultiTimeStepper");
     }
@@ -109,19 +118,19 @@ namespace pyoomph
     virtual double weightNewmark2(const unsigned &i, const unsigned &j) const { return WeightNewmark2(i, j); }
     virtual void setNewmark2Coeffs(const double & p1,const double & p2) {NewmarkBeta1=p1;NewmarkBeta2=p2;}
 
-    void shift_time_values(oomph::Data *const &data_pt);
-    void shift_time_positions(oomph::Node *const &node_pt);
-    void set_weights();
+    void shift_time_values(oomph::Data *const &data_pt);    // Push data_pt's value history back by one step and store the new Newmark2 (and, if adaptive, BDF2) velocity/acceleration
+    void shift_time_positions(oomph::Node *const &node_pt); // Same as shift_time_values, but for a node's position history
+    void set_weights();                                     // (Re-)compute WeightBDF1/WeightBDF2/WeightNewmark2/Weight from the current and previous timestep sizes
 
-    void set_predictor_weights();
-    void calculate_predicted_positions(oomph::Node *const &node_pt);
-    void calculate_predicted_values(oomph::Data *const &data_pt);
-    void set_error_weights();
-    double temporal_error_in_position(oomph::Node *const &node_pt, const unsigned &i);
-    double temporal_error_in_value(oomph::Data *const &data_pt, const unsigned &i);
+    void set_predictor_weights();                                         // Compute the AB2-like predictor weights used for adaptive-timestep error estimation
+    void calculate_predicted_positions(oomph::Node *const &node_pt);      // Store the predicted (uncorrected) position at Predictor_storage_index
+    void calculate_predicted_values(oomph::Data *const &data_pt);         // Store the predicted (uncorrected) value at Predictor_storage_index
+    void set_error_weights();                                             // Compute the scalar Error_weight used to scale predictor-vs-corrector differences into a timestep error estimate
+    double temporal_error_in_position(oomph::Node *const &node_pt, const unsigned &i);  // Estimated temporal error for position component i, based on the predictor/corrector difference
+    double temporal_error_in_value(oomph::Data *const &data_pt, const unsigned &i);      // Estimated temporal error for value i, based on the predictor/corrector difference
 
-    void assign_initial_values_impulsive(oomph::Data *const &data_pt); //{}
-    void assign_initial_positions_impulsive(oomph::Node *const &node_pt); //{}
+    void assign_initial_values_impulsive(oomph::Data *const &data_pt); // Fill data_pt's entire time history with its current value and zero velocity/acceleration (impulsive start)
+    void assign_initial_positions_impulsive(oomph::Node *const &node_pt); // Same as assign_initial_values_impulsive, but for a node's position history
 
     void set_num_unsteady_steps_done(unsigned n) { unsteady_steps_done_for_degrading = n; }
     void increment_num_unsteady_steps_done() { unsteady_steps_done_for_degrading++; }

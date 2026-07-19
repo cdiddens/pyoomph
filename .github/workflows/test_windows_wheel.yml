@@ -1,0 +1,101 @@
+name: Test Windows wheel
+
+# Manual, on-demand smoke test: installs the windows-msys2-ucrt64 wheel built by a
+# Wheels workflow run (see wheels.yml) on an actual windows-latest runner, then runs
+# `python -m pyoomph check all`. Meant to catch things that only show up on real
+# Windows (e.g. WinError 32 file-in-use errors from a still-open log/output/DLL
+# handle) without needing to boot into Windows manually.
+
+on:
+  workflow_dispatch:
+    inputs:
+      wheels_run_id:
+        description: Wheels workflow run id to pull the windows wheel artifact from (defaults to the latest successful run)
+        required: false
+        type: string
+      python_version:
+        description: Python version to test with (must match one of the built cp3XX wheels)
+        required: false
+        type: string
+        default: "3.12"
+
+jobs:
+  test_windows_wheel:
+    runs-on: windows-latest
+    steps:
+      - name: Resolve Wheels run id
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANUAL_RUN_ID: ${{ github.event.inputs.wheels_run_id }}
+        shell: bash
+        run: |
+          if [[ -n "${MANUAL_RUN_ID}" ]]; then
+            RUN_ID="${MANUAL_RUN_ID}"
+          else
+            RUN_ID="$(gh run list \
+              --workflow wheels.yml \
+              --repo "${GITHUB_REPOSITORY}" \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+          fi
+
+          if [[ -z "${RUN_ID}" || "${RUN_ID}" == "null" ]]; then
+            echo "Could not resolve a successful Wheels run id" >&2
+            exit 1
+          fi
+
+          echo "Using Wheels run id ${RUN_ID}"
+          echo "run_id=${RUN_ID}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download windows wheel artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          rm -rf wheelhouse
+          mkdir -p wheelhouse
+          gh run download "${{ steps.resolve.outputs.run_id }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --name wheels-windows-msys2-ucrt64 \
+            --dir wheelhouse
+          ls -la wheelhouse
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ github.event.inputs.python_version }}
+
+      - name: Install the built wheel
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          # Pick the one wheel in wheelhouse matching this interpreter's own ABI
+          # tag out of the downloaded cp310..cp315 set, and install that exact
+          # file directly (rather than --no-index --find-links, which would also
+          # block pip from reaching PyPI for pyoomph's own dependencies).
+          PYTAG="cp$(python -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')"
+          WHEEL=$(ls wheelhouse/pyoomph-*-"${PYTAG}"-*win_amd64.whl)
+          echo "Installing ${WHEEL}"
+          python -m pip install "${WHEEL}"
+
+      - name: Run pyoomph check all
+        shell: bash
+        run: |
+          python -m pyoomph check all 2>&1 | tee check_output.log
+          echo "----------------------------------------"
+          if grep -q "WinError 32" check_output.log; then
+            echo "::error::WinError 32 (file/DLL still in use) detected in 'pyoomph check all' output -- see check_output.log above"
+            exit 1
+          fi
+          echo "No WinError 32 detected."
+
+      - name: Upload check output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pyoomph-check-output-windows
+          path: check_output.log
+          if-no-files-found: warn

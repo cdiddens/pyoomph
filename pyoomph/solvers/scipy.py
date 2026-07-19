@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -74,6 +75,7 @@ class SuperLUSerial(GenericLinearSystemSolver):
 						print("Singular matrix detected!")
 						print("Doing nullspace investigation!")
 						nsp=scipy.linalg.null_space(A.todense()) #type:ignore
+						print("Nullspace has shape",nsp.shape)
 						for k in range(nsp.shape[1]): #type:ignore
 							nspv=nsp[:,k] #type:ignore
 							maxi=numpy.argsort(numpy.absolute(nspv)) #type:ignore
@@ -164,6 +166,12 @@ class ScipyEigenSolver(GenericEigenSolver):
 			n=J.shape[0]
 		else:
 			J,M,n,_=self.get_J_M_n_and_type()
+		
+		asym = abs(M - M.T)
+		rel_asym = abs(M - M.T).max()/abs(M).max()
+		if rel_asym>1e-7:
+			print("WARNING: Mass matrix is asymmetric! The scipy eigensolver does not support that! Eigenvalues/vectors will be wrong!\nConsider switching to SLEPc! Max asymmetry:", asym.max(), "vs max |M|:", abs(M).max())
+		
 
 		if neval <= 0:
 			neval=n
@@ -187,7 +195,19 @@ class ScipyEigenSolver(GenericEigenSolver):
 			return evals,evects,J,M
 		else:
 			OPInv=self.get_OPInv(M,J,shift)
-			evals,evects=scipy.sparse.linalg.eigs(J,M=M,sigma=shift,return_eigenvectors=True,k=neval,OPinv=OPInv,which=which,OPpart=OPpart,v0=v0,ncv=self.ncv,tol=self.tol) #type:ignore
+			ncv=self.ncv
+			max_retries=3
+			for attempt in range(max_retries+1):
+				try:
+					evals,evects=scipy.sparse.linalg.eigs(J,M=M,sigma=shift,return_eigenvectors=True,k=neval,OPinv=OPInv,which=which,OPpart=OPpart,v0=v0,ncv=ncv,tol=self.tol) #type:ignore
+					break
+				except scipy.sparse.linalg.ArpackError:
+					if attempt>=max_retries:
+						raise
+					ncv=max(2*neval+1,20,ncv*2 if ncv is not None else 0)
+					ncv=min(ncv,n)
+					if not quiet:
+						print("ARPACK failed to converge, retrying with ncv="+str(ncv)+" (attempt "+str(attempt+1)+"/"+str(max_retries)+")")
 			if sort:
 				if target:
 					srt = numpy.argsort(numpy.abs(evals-target))

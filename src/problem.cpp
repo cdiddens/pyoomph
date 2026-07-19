@@ -1,6 +1,6 @@
 /*================================================================================
 pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
-Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -15,7 +15,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+The main author may be contacted at c.diddens@utwente.nl
 
 ================================================================================*/
 
@@ -29,8 +29,13 @@ The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
 #include "ccompiler.hpp"
 #include "logging.hpp"
 
+
+
 extern "C"
 {
+	// Called from JIT-generated code right after loading a shared library: verifies that the ABI
+	// layout sizes baked into the compiled code (jitsize) match what this build of pyoomph expects
+	// (internal_size), catching stale/incompatible compiled equation code early instead of crashing.
 	void _pyoomph_check_compiler_size(unsigned long long jitsize, unsigned long long internal_size, char *name)
 	{
 		if (jitsize != internal_size)
@@ -47,34 +52,40 @@ extern "C"
 namespace pyoomph
 {
 
+	// Recursively merges the "required shapes" flags of src into dest (bitwise OR of all shape/derivative
+	// flags for every continuous space, DL/D0/position spaces, normals, element sizes, etc.), including
+	// the nested bulk_shapes/opposite_shapes sub-structures (allocating them in dest on demand). Used to
+	// accumulate, over all residual/Jacobian/Hessian/integral/etc. contributions of a code, the union of
+	// shape information that must be computed for a given element.
 	void RequiredShapes_merge(JITFuncSpec_RequiredShapes_FiniteElement_t *src, JITFuncSpec_RequiredShapes_FiniteElement_t *dest)
 	{
-		dest->psi_C1 |= src->psi_C1;
-		dest->psi_C2 |= src->psi_C2;
-		dest->psi_C2TB |= src->psi_C2TB;
-		dest->psi_C1TB |= src->psi_C1TB;
-		dest->psi_DL |= src->psi_DL;
-		dest->psi_D0 |= src->psi_D0;
-		dest->dx_psi_C1 |= src->dx_psi_C1;
-		dest->dx_psi_C2 |= src->dx_psi_C2;
-		dest->dx_psi_C2TB |= src->dx_psi_C2TB;
-		dest->dx_psi_C1TB |= src->dx_psi_C1TB;
-		dest->dx_psi_DL |= src->dx_psi_DL;
-		dest->dx_psi_D0 |= src->dx_psi_D0;
-		dest->dX_psi_C1 |= src->dX_psi_C1;
-		dest->dX_psi_C2 |= src->dX_psi_C2;
-		dest->dX_psi_C2TB |= src->dX_psi_C2TB;
-		dest->dX_psi_C1TB |= src->dX_psi_C1TB;
-		dest->dX_psi_DL |= src->dX_psi_DL;
-		dest->dX_psi_D0 |= src->dX_psi_D0;
-		dest->psi_Pos |= src->psi_Pos;
-		dest->dx_psi_Pos |= src->dx_psi_Pos;
-		dest->dX_psi_Pos |= src->dX_psi_Pos;
-		dest->normal_Pos |= src->normal_Pos;
-		dest->elemsize_Eulerian_Pos |= src->elemsize_Eulerian_Pos;
-		dest->elemsize_Lagrangian_Pos |= src->elemsize_Lagrangian_Pos;
-		dest->elemsize_Eulerian_cartesian_Pos |= src->elemsize_Eulerian_cartesian_Pos;
-		dest->elemsize_Lagrangian_cartesian_Pos |= src->elemsize_Lagrangian_cartesian_Pos;
+		for (unsigned int i = 0; i < NUM_CONTINUOUS_SPACES; i++)
+		{
+			dest->continuous_spaces[i].psi |= src->continuous_spaces[i].psi;
+			dest->continuous_spaces[i].dx_psi |= src->continuous_spaces[i].dx_psi;
+			dest->continuous_spaces[i].dX_psi |= src->continuous_spaces[i].dX_psi;
+		}		
+		dest->DL.psi |= src->DL.psi;
+		dest->D0.psi |= src->D0.psi;
+	
+		dest->DL.dx_psi |= src->DL.dx_psi;
+		dest->D0.dx_psi |= src->D0.dx_psi;
+		dest->DL.dX_psi |= src->DL.dX_psi;
+		dest->D0.dX_psi |= src->D0.dX_psi;
+		dest->Pos.psi |= src->Pos.psi;
+		dest->Pos.dx_psi |= src->Pos.dx_psi;
+		dest->Pos.dX_psi |= src->Pos.dX_psi;
+		
+
+		dest->normal |= src->normal;
+		dest->elemsize_Eulerian |= src->elemsize_Eulerian;
+		dest->elemsize_Lagrangian |= src->elemsize_Lagrangian;
+		dest->elemsize_Eulerian_cartesian |= src->elemsize_Eulerian_cartesian;
+		dest->elemsize_Lagrangian_cartesian |= src->elemsize_Lagrangian_cartesian;		
+
+		dest->history_integral_dx1 |= src->history_integral_dx1;
+		dest->history_integral_dx2 |= src->history_integral_dx2;
+
 		if (src->bulk_shapes)
 		{
 			if (!dest->bulk_shapes)
@@ -89,15 +100,24 @@ namespace pyoomph
 		}
 	}
 
+	// Recursively frees a JITFuncSpec_RequiredShapes_FiniteElement_t allocated via calloc (including the
+	// nested bulk_shapes/opposite_shapes sub-structures created on demand by RequiredShapes_merge).
 	void RequiredShapes_free(JITFuncSpec_RequiredShapes_FiniteElement_t *p)
 	{
 		if (p->bulk_shapes)
 			RequiredShapes_free(p->bulk_shapes);
 		if (p->opposite_shapes)
 			RequiredShapes_free(p->opposite_shapes);
+
 		std::free(p);
 	}
 
+	// Loads and initializes the function table exported by a freshly dlopen'ed JIT-compiled equation
+	// shared library: takes ownership of the handle from the compiler, populates the function table via
+	// the library's init entry point, then post-processes it (assigns space indices, collects only the
+	// continuous/DG spaces that are actually present, determines the dominant space used for the element's
+	// nodal positions, and merges the "required shapes" flags of all residual/Jacobian/Hessian/integral/
+	// extremum/Z2-flux/tracer-advection contributions into a single merged_required_shapes).
 	DynamicBulkElementCode::DynamicBulkElementCode(Problem *prob, CCompiler *ccompiler, std::string fnam, FiniteElementCode *elem) : problem(prob), compiler(ccompiler), filename(fnam), functable(NULL), element_class(elem), so_handle(NULL)
 	{
 		JIT_ELEMENT_init_SPEC initfunc = ccompiler->get_init_func();
@@ -112,6 +132,60 @@ namespace pyoomph
 
 		functable->check_compiler_size = _pyoomph_check_compiler_size;
 		initfunc(functable);
+
+		functable->info_Pos.space_index=0;
+
+
+		for (unsigned int i=0;i<NUM_CONTINUOUS_SPACES;i++)
+		{
+			functable->continuous_spaces[i].space_index=i;
+			functable->dg_spaces[i].space_index=i;
+		}
+
+		functable->total_num_fields=0;
+		functable->total_num_fields_basebulk=0;
+
+	// Only add the spaces which are really present to the present continuous_spaces array, in order of dominance
+		functable->num_present_continuous_spaces=0;
+		for (unsigned int i=0;i<NUM_CONTINUOUS_SPACES;i++)
+		{
+			if (functable->continuous_spaces[i].numfields>0)
+			{
+				functable->present_continuous_spaces[functable->num_present_continuous_spaces]=&functable->continuous_spaces[i];
+				functable->total_num_fields+=functable->continuous_spaces[i].numfields;
+				functable->total_num_fields_basebulk+=functable->continuous_spaces[i].numfields_basebulk;
+				functable->num_present_continuous_spaces++;
+			}
+			if (functable->dg_spaces[i].numfields>0)
+			{
+				functable->present_dg_spaces[functable->num_present_dg_spaces]=&functable->dg_spaces[i];
+				functable->total_num_fields+=functable->dg_spaces[i].numfields;
+				functable->num_present_dg_spaces++;
+			}
+		}
+		functable->total_num_fields+=functable->info_D0.numfields+functable->info_DL.numfields;
+		// Find the continuous space matching the code's declared "dominant" space (the one whose nodes
+		// carry the element's Eulerian/Lagrangian position) and remember its index for info_Pos.
+		std::string dominant_space=functable->dominant_space;
+		bool found_dominant=false;
+		for (unsigned int i=0;i<NUM_CONTINUOUS_SPACES;i++)
+		{
+			if (std::string(functable->continuous_spaces[i].space_name)==dominant_space)
+			{
+				found_dominant=true;
+				functable->info_Pos.space_index=i;
+				break;
+			}
+		}
+
+		if(!found_dominant)
+		{
+			std::ostringstream errmsg;
+			errmsg << "Unknown dominant space " << dominant_space << " in JIT code " << filename;
+			throw_runtime_error(errmsg.str());
+		}
+
+
 
 		// Merge the required shapes to add all external data
 		JITFuncSpec_RequiredShapes_FiniteElement *merged = &(functable->merged_required_shapes);
@@ -141,6 +215,8 @@ namespace pyoomph
 			extremum_function_map[functable->extremum_expressions_names[i]] = i;
 	}
 
+	// Cleans up the function table (invoking the code's own clean_up callback first, if any) and closes
+	// the dlopen handle of the compiled shared library.
 	DynamicBulkElementCode::~DynamicBulkElementCode()
 	{
 		// std::cout << "UNLOADING ELEMENT CODE " << filename << " FUNCTABLE " << functable << " SO HANDLE " << so_handle  << std::endl << std::flush;
@@ -183,6 +259,9 @@ namespace pyoomph
 		return extremum_function_map[n];
 	}
 
+	// Looks up the residual/Jacobian contribution named "name" in this code and, if found and non-NULL,
+	// makes it the active one (functable->current_res_jac) for subsequent assembly calls into this code.
+	// Returns 1 on success, 0 if no matching (non-NULL) contribution exists.
 	unsigned DynamicBulkElementCode::_set_solved_residual(std::string name)
 	{
 		int res_jac_index = -1;
@@ -209,6 +288,9 @@ namespace pyoomph
 
 	//////////////////////////////////////////
 
+	// Rebuilds the deduplicated elemental_data list from the (name-indexed) link entries: for each link,
+	// finds or inserts its Data pointer in elemental_data and records the resulting position as the
+	// link's elemental_index (the index the compiled element code uses to address this external data).
 	void ExternalDataLinkVector::reindex_elemental_data()
 	{
 		elemental_data.clear();
@@ -234,10 +316,12 @@ namespace pyoomph
 
 	///////////////////////////////////////////
 
+	// Constructs a new instance of code d bound to mesh bm; allocates the (initially empty) external-data
+	// link slots sized to the code's declared ED0 (external-data-field) count.
 	DynamicBulkElementInstance::DynamicBulkElementInstance(DynamicBulkElementCode *d, pyoomph::Mesh *bm) : dyn(d), // local_field_to_global_field_index_C1(d->functable->numfields_C1,-1),
 																												   //		local_field_to_global_field_index_C2(d->functable->numfields_C2,-1),
 																												   //		local_global_parameter_to_global_index(d->functable->numglobal_params,-1),
-																										   linked_external_data(d->functable->numfields_ED0),
+																										   linked_external_data(d->functable->info_ED0.numfields),
 																										   bulkmesh(bm)
 	{
 		/*
@@ -258,12 +342,16 @@ namespace pyoomph
 		 */
 	}
 
+	// Binds the external field named "name" (as declared by the compiled code's ED0 space) to a specific
+	// (Data, index) pair, and patches the code's contribution name for that field (used in diagnostic
+	// output such as get_jacobian_information_string()) to full_source_name so it reflects where the
+	// linked value actually comes from. Throws if "name" is not among the code's required external fields.
 	void DynamicBulkElementInstance::link_external_data(std::string name, oomph::Data *data, int index,std::string full_source_name)
 	{
 		int found = -1;
-		for (unsigned int i = 0; i < dyn->functable->numfields_ED0; i++)
+		for (unsigned int i = 0; i < dyn->functable->info_ED0.numfields; i++)
 		{
-			if (name == std::string(dyn->functable->fieldnames_ED0[i]))
+			if (name == std::string(dyn->functable->info_ED0.fieldnames[i]))
 			{
 				found = i;
 				break;
@@ -287,195 +375,195 @@ namespace pyoomph
 		linked_external_data.reindex_elemental_data();
 	}
 
+	// Maps every nodal field name to its index into the node's value array, in the order in which the
+	// element code lays out nodal fields: first the "base bulk" fields of all present continuous spaces,
+	// then the base-bulk fields of all present DG spaces, then the remaining (non-base-bulk, i.e.
+	// interface-only) fields of the continuous spaces, then the remaining fields of the DG spaces.
 	std::map<std::string, unsigned> DynamicBulkElementInstance::get_nodal_field_indices()
 	{
 		std::map<std::string, unsigned> res;
 		unsigned offs = 0;
-		for (unsigned int i = 0; i < dyn->functable->numfields_C2TB_basebulk; i++)
+		for (unsigned int si=0;si<dyn->functable->num_present_continuous_spaces;si++)
 		{
-			res[dyn->functable->fieldnames_C2TB[i]] = offs + i;
-		}
-		offs += dyn->functable->numfields_C2TB_basebulk;
-		for (unsigned int i = 0; i < dyn->functable->numfields_C2_basebulk; i++)
-		{
-			res[dyn->functable->fieldnames_C2[i]] = offs + i;
-		}
-		offs += dyn->functable->numfields_C2_basebulk;
-		for (unsigned int i = 0; i < dyn->functable->numfields_C1TB_basebulk; i++)
-		{
-			res[dyn->functable->fieldnames_C1TB[i]] = offs + i;
-		}
-		offs += dyn->functable->numfields_C1TB_basebulk;
-		for (unsigned int i = 0; i < dyn->functable->numfields_C1_basebulk; i++)
-		{
-			res[dyn->functable->fieldnames_C1[i]] = offs + i;
-		}
-		offs += dyn->functable->numfields_C1_basebulk;
+			auto *space = dyn->functable->present_continuous_spaces[si];
+			for (unsigned int i = 0; i < space->numfields_basebulk; i++)
+			{
+				res[space->fieldnames[i]] = offs + i;
+			}
+			offs += space->numfields_basebulk;
+		}		
 
-		for (unsigned int i = 0; i < dyn->functable->numfields_D2TB_basebulk; i++)
+
+		for (unsigned int si=0;si<dyn->functable->num_present_dg_spaces;si++)
 		{
-			res[dyn->functable->fieldnames_D2TB[i]] = offs + i;
+			auto *space = dyn->functable->present_dg_spaces[si];
+			for (unsigned int i = 0; i < space->numfields_basebulk; i++)
+			{
+				res[space->fieldnames[i]] = offs + i;
+			}
+			offs += space->numfields_basebulk;
 		}
-		offs += dyn->functable->numfields_D2TB_basebulk;
-		for (unsigned int i = 0; i < dyn->functable->numfields_D2_basebulk; i++)
-		{
-			res[dyn->functable->fieldnames_D2[i]] = offs + i;
-		}
-		offs += dyn->functable->numfields_D2_basebulk;
-		for (unsigned int i = 0; i < dyn->functable->numfields_D1TB_basebulk; i++)
-		{
-			res[dyn->functable->fieldnames_D1TB[i]] = offs + i;
-		}
-		offs += dyn->functable->numfields_D1TB_basebulk;
-		for (unsigned int i = 0; i < dyn->functable->numfields_D1_basebulk; i++)
-		{
-			res[dyn->functable->fieldnames_D1[i]] = offs + i;
-		}
-		offs += dyn->functable->numfields_D1_basebulk;
+
 
 		// Now the additional ones
-		for (unsigned int i = 0; i < dyn->functable->numfields_C2TB - dyn->functable->numfields_C2TB_basebulk; i++)
+		for (unsigned int si=0;si<dyn->functable->num_present_continuous_spaces;si++)
 		{
-			res[dyn->functable->fieldnames_C2TB[i + dyn->functable->numfields_C2TB_basebulk]] = offs + i;
+			auto *space = dyn->functable->present_continuous_spaces[si];
+			for (unsigned int i = 0; i < space->numfields - space->numfields_basebulk; i++)
+			{
+				res[space->fieldnames[i + space->numfields_basebulk]] = offs + i;
+			}
+			offs += space->numfields - space->numfields_basebulk;
 		}
-		offs += dyn->functable->numfields_C2TB - dyn->functable->numfields_C2TB_basebulk;
-		for (unsigned int i = 0; i < dyn->functable->numfields_C2 - dyn->functable->numfields_C2_basebulk; i++)
-		{
-			res[dyn->functable->fieldnames_C2[i + dyn->functable->numfields_C2_basebulk]] = offs + i;
-		}
-		offs += dyn->functable->numfields_C2 - dyn->functable->numfields_C2_basebulk;
-		for (unsigned int i = 0; i < dyn->functable->numfields_C1TB - dyn->functable->numfields_C1TB_basebulk; i++)
-		{
-			res[dyn->functable->fieldnames_C1TB[i + dyn->functable->numfields_C1TB_basebulk]] = offs + i;
-		}
-		offs += dyn->functable->numfields_C1TB - dyn->functable->numfields_C1TB_basebulk;
-		for (unsigned int i = 0; i < dyn->functable->numfields_C1 - dyn->functable->numfields_C1_basebulk; i++)
-		{
-			res[dyn->functable->fieldnames_C1[i + dyn->functable->numfields_C1_basebulk]] = offs + i;
-		}
-		offs += dyn->functable->numfields_C1 - dyn->functable->numfields_C1_basebulk;
 
-		// Now the additional ones
-		for (unsigned int i = 0; i < dyn->functable->numfields_D2TB - dyn->functable->numfields_D2TB_basebulk; i++)
+		for (unsigned int si=0;si<dyn->functable->num_present_dg_spaces;si++)
 		{
-			res[dyn->functable->fieldnames_D2TB[i + dyn->functable->numfields_D2TB_basebulk]] = offs + i;
+			auto *space = dyn->functable->present_dg_spaces[si];
+			for (unsigned int i = 0; i < space->numfields - space->numfields_basebulk; i++)
+			{
+				res[space->fieldnames[i + space->numfields_basebulk]] = offs + i;
+			}
+			offs += space->numfields - space->numfields_basebulk;
 		}
-		offs += dyn->functable->numfields_D2TB - dyn->functable->numfields_D2TB_basebulk;
-		for (unsigned int i = 0; i < dyn->functable->numfields_D2 - dyn->functable->numfields_D2_basebulk; i++)
-		{
-			res[dyn->functable->fieldnames_D2[i + dyn->functable->numfields_D2_basebulk]] = offs + i;
-		}
-		offs += dyn->functable->numfields_D2 - dyn->functable->numfields_D2_basebulk;
-		for (unsigned int i = 0; i < dyn->functable->numfields_D1TB - dyn->functable->numfields_D1TB_basebulk; i++)
-		{
-			res[dyn->functable->fieldnames_D1TB[i + dyn->functable->numfields_D1TB_basebulk]] = offs + i;
-		}
-		offs += dyn->functable->numfields_D1TB - dyn->functable->numfields_D1TB_basebulk;
-		for (unsigned int i = 0; i < dyn->functable->numfields_D1 - dyn->functable->numfields_D1_basebulk; i++)
-		{
-			res[dyn->functable->fieldnames_D1[i + dyn->functable->numfields_D1_basebulk]] = offs + i;
-		}
+		
 
 		return res;
 	}
 
+	// Maps every elemental (internal, non-nodal) field name to its index among the element's internal
+	// Data values: DL (discontinuous Lagrange, one value per element node) fields first, then D0
+	// (piecewise-constant) fields, offset after the DL ones.
 	std::map<std::string, unsigned> DynamicBulkElementInstance::get_elemental_field_indices()
 	{
 		std::map<std::string, unsigned> res;
-		for (unsigned int i = 0; i < dyn->functable->numfields_DL; i++)
+		for (unsigned int i = 0; i < dyn->functable->info_DL.numfields; i++)
 		{
-			res[dyn->functable->fieldnames_DL[i]] = i;
+			res[dyn->functable->info_DL.fieldnames[i]] = i;
 		}
-		for (unsigned int i = 0; i < dyn->functable->numfields_D0; i++)
+		for (unsigned int i = 0; i < dyn->functable->info_D0.numfields; i++)
 		{
-			res[dyn->functable->fieldnames_D0[i]] = i + dyn->functable->numfields_DL;
+			res[dyn->functable->info_D0.fieldnames[i]] = i + dyn->functable->info_DL.numfields;
 		}
 		return res;
 	}
 
+	// Index of a DL or D0 (discontinuous/elemental) field by name, offset by internal_offset_new so it
+	// directly indexes into the element's internal Data array; -1 if not a discontinuous field.
 	int DynamicBulkElementInstance::get_discontinuous_field_index(std::string name)
 	{
-		for (unsigned int i = 0; i < dyn->functable->numfields_DL; i++)
+		for (unsigned int i = 0; i < dyn->functable->info_DL.numfields; i++)
 		{
-			if (!strcmp(name.c_str(), dyn->functable->fieldnames_DL[i]))
+			if (!strcmp(name.c_str(), dyn->functable->info_DL.fieldnames[i]))
 			{
-				return i + dyn->functable->internal_offset_DL;
+				return i + dyn->functable->info_DL.internal_offset_new;
 			}
 		}
-		for (unsigned int i = 0; i < dyn->functable->numfields_D0; i++)
+		for (unsigned int i = 0; i < dyn->functable->info_D0.numfields; i++)
 		{
-			if (!strcmp(name.c_str(), dyn->functable->fieldnames_D0[i]))
+			if (!strcmp(name.c_str(), dyn->functable->info_D0.fieldnames[i]))
 			{
-				return i + dyn->functable->internal_offset_D0;
+				return i + dyn->functable->info_D0.internal_offset_new;
 			}
 		}
 		return -1;
 	}
 
+	// Index of a base-bulk nodal field by name (offset by the space's nodal_offset_basebulk into the
+	// node's value array); -1 if "name" is not a base-bulk field of any present continuous space.
 	int DynamicBulkElementInstance::get_nodal_field_index(std::string name)
 	{
-		for (unsigned int i = 0; i < dyn->functable->numfields_C2TB_basebulk; i++)
+		for (unsigned int si=0;si<dyn->functable->num_present_continuous_spaces;si++)
 		{
-			if (!strcmp(name.c_str(), dyn->functable->fieldnames_C2TB[i]))
+			auto *space = dyn->functable->present_continuous_spaces[si];
+			for (unsigned int i = 0; i < space->numfields_basebulk; i++)
 			{
-				return i;
-			}
-		}
-		for (unsigned int i = 0; i < dyn->functable->numfields_C2_basebulk; i++)
-		{
-			if (!strcmp(name.c_str(), dyn->functable->fieldnames_C2[i]))
-			{
-				return i+ dyn->functable->numfields_C2TB_basebulk;
-			}
-		}
-		for (unsigned int i = 0; i < dyn->functable->numfields_C1_basebulk; i++)
-		{
-			if (!strcmp(name.c_str(), dyn->functable->fieldnames_C1[i]))
-			{
-				return i + dyn->functable->numfields_C2_basebulk+ dyn->functable->numfields_C2TB_basebulk;
+				if (!strcmp(name.c_str(), space->fieldnames[i]))
+				{
+					return i + space->nodal_offset_basebulk;
+				}
 			}
 		}
 		return -1;
 	}
 
+	// Forwards to the bulk mesh's interface-dof-id registry, adding a new id for field n if not present yet
 	unsigned DynamicBulkElementInstance::resolve_interface_dof_id(std::string n)
 	{
+		//std::cout << "->Resolving interface dof for field " << n << " on mesh " <<  this->get_bulk_mesh() << std::endl;
 		return this->get_bulk_mesh()->resolve_interface_dof_id(n);
 	}
 
+	// For every present continuous space's interface-only fields (the fields beyond numfields_basebulk,
+	// i.e. those that only live on interface nodes of a C2TB-C1-type space), resolves and stores their
+	// interface dof id in the function table's interface_dof_indices array so that interface elements can
+	// find the additional dof slot on shared nodes. Required whenever this instance participates in an
+	// interface coupling. Returns the resolved field-name -> dof-id map for convenience.
+	std::map<std::string, unsigned> DynamicBulkElementInstance::setup_interface_dof_indices()
+	{
+		std::map<std::string, unsigned> res;		
+
+		for (unsigned int i = 0; i < dyn->functable->num_present_continuous_spaces; i++	)
+		{
+			JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info= dyn->functable->present_continuous_spaces[i];
+
+			if (space_info->interface_dof_indices) {
+				free(space_info->interface_dof_indices);
+				space_info->interface_dof_indices=NULL;
+			}
+			if (space_info->numfields-space_info->numfields_basebulk>0)
+			{
+				space_info->interface_dof_indices=(unsigned int*)std::calloc(space_info->numfields-space_info->numfields_basebulk,sizeof(unsigned int));
+				for (unsigned int i=0;i<space_info->numfields-space_info->numfields_basebulk;i++)
+				{
+					std::string field_name=space_info->fieldnames[i+space_info->numfields_basebulk];
+					unsigned dof_index=this->resolve_interface_dof_id(field_name);					
+					space_info->interface_dof_indices[i]=dof_index;
+					res[field_name]=dof_index;
+				}
+			}			
+		}
+
+		return res;
+
+	}
+
+	// Returns the name of the function space ("C2","C1",...,"DL","D0") a field belongs to, or "" if unknown
 	std::string DynamicBulkElementInstance::get_space_of_field(std::string name)
 	{
-		for (unsigned int i = 0; i < dyn->functable->numfields_C2TB_basebulk; i++)
+		for (unsigned int si=0;si<dyn->functable->num_present_continuous_spaces;si++)
 		{
-			if (!strcmp(name.c_str(), dyn->functable->fieldnames_C2TB[i]))
+			auto *space = dyn->functable->present_continuous_spaces[si];
+			for (unsigned int i = 0; i < space->numfields_basebulk; i++)
 			{
-				return "C2TB";
+				if (!strcmp(name.c_str(), space->fieldnames[i]))
+				{
+					return space->space_name;
+				}
 			}
 		}
-		for (unsigned int i = 0; i < dyn->functable->numfields_C2_basebulk; i++)
+
+		for (unsigned int si=0;si<dyn->functable->num_present_dg_spaces;si++)
 		{
-			if (!strcmp(name.c_str(), dyn->functable->fieldnames_C2[i]))
+			auto *space = dyn->functable->present_dg_spaces[si];
+			for (unsigned int i = 0; i < space->numfields_basebulk; i++)
 			{
-				return "C2";
+				if (!strcmp(name.c_str(), space->fieldnames[i]))
+				{
+					return space->space_name;
+				}
 			}
 		}
-		for (unsigned int i = 0; i < dyn->functable->numfields_C1_basebulk; i++)
+		
+		for (unsigned int i = 0; i < dyn->functable->info_DL.numfields; i++)
 		{
-			if (!strcmp(name.c_str(), dyn->functable->fieldnames_C1[i]))
-			{
-				return "C1";
-			}
-		}
-		for (unsigned int i = 0; i < dyn->functable->numfields_DL; i++)
-		{
-			if (!strcmp(name.c_str(), dyn->functable->fieldnames_DL[i]))
+			if (!strcmp(name.c_str(), dyn->functable->info_DL.fieldnames[i]))
 			{
 				return "DL";
 			}
 		}
-		for (unsigned int i = 0; i < dyn->functable->numfields_D0; i++)
+		for (unsigned int i = 0; i < dyn->functable->info_D0.numfields; i++)
 		{
-			if (!strcmp(name.c_str(), dyn->functable->fieldnames_D0[i]))
+			if (!strcmp(name.c_str(), dyn->functable->info_D0.fieldnames[i]))
 			{
 				return "D0";
 			}
@@ -483,6 +571,8 @@ namespace pyoomph
 		return "";
 	}
 
+	// Placeholder for consistency checks of the instance's field/parameter binding; currently a no-op,
+	// the binding checks it used to perform are now handled elsewhere (kept here, commented out, for reference)
 	void DynamicBulkElementInstance::sanity_check()
 	{
 		/*
@@ -503,6 +593,8 @@ namespace pyoomph
 		*/
 	}
 
+    // Whether this instance's compiled code has any residual/Jacobian contribution that depends on the
+    // named global parameter (i.e. the parameter is among the code's registered global params).
     bool DynamicBulkElementInstance::has_parameter_contribution(const std::string &param)
 	{
 		if (!this->get_problem()->has_global_parameter(param))
@@ -516,6 +608,79 @@ namespace pyoomph
 		return false;
 	}
 
+///////////////////////////////////
+
+	void DirichletMatrixManipulationInfo::clear()
+	{
+		data_to_dirichlet_dof_indices.clear();
+		//throw_runtime_error("DirichletMatrixManipulationInfo::clear() is not implemented yet. This should be implemented if you want to use the Dirichlet matrix manipulation feature");
+	}
+
+	// Registers (d, dof_index) as Dirichlet-constrained and immediately unpins it, since under the
+	// matrix-manipulation strategy Dirichlet dofs are kept as real (unpinned) dofs in the dof vector and
+	// the constraint is instead enforced afterwards by zeroing rows/columns in the Jacobian/residual.
+	void DirichletMatrixManipulationInfo::add_dirichlet_dof(oomph::Data *d, unsigned dof_index)
+	{
+		data_to_dirichlet_dof_indices[d].insert(dof_index);
+		d->unpin(dof_index);
+	}
+
+	// (Re)computes global_pinned_dof_set, the set of global equation numbers corresponding to all
+	// registered Dirichlet (Data, dof_index) pairs, using the problem's current equation numbering.
+	// Must be called after equation numbers are (re)assigned. In a distributed run, each process only
+	// knows the equation numbers of its own Data, so the sets are all-gathered and merged across ranks.
+	void DirichletMatrixManipulationInfo::build_global_pinned_equation_set(Problem *prob)
+	{
+		global_pinned_dof_set.clear();
+		//std::cout << "REMOVE DIRICHLET ENTRIES: " << data_to_dirichlet_dof_indices.size() << std::endl;
+		for (const auto &pair : data_to_dirichlet_dof_indices)
+		{
+			for (unsigned dof_index : pair.second)
+			{
+				unsigned long global_eqn=pair.first->eqn_number(dof_index);
+				//std::cout << "Mapping equation " << global_eqn << " to value pointer for data " << pair.first << " dof index " << dof_index << std::endl;
+				//eqn_number_to_value_ptr[global_eqn] = pair.first->value_pt(dof_index);
+				global_pinned_dof_set.insert(global_eqn);
+			}
+		}
+
+		// If distributed, we have to merge the map from all processes and make sure that the global equation numbers are consistent across processes.
+#ifdef OOMPH_HAS_MPI
+		if (prob->distributed())
+		{
+			
+			int size=prob->communicator_pt()->nproc();			
+			std::vector<unsigned long> local_vec(global_pinned_dof_set.begin(), global_pinned_dof_set.end());
+			int local_count = static_cast<int>(local_vec.size());
+			std::vector<int> recvcounts(size);
+			MPI_Allgather(&local_count, 1, MPI_INT,recvcounts.data(), 1, MPI_INT,prob->communicator_pt()->mpi_comm());
+
+			std::vector<int> displs(size, 0);
+			int total_count = recvcounts[0];
+			for (int i = 1; i < size; ++i)
+			{
+				displs[i] = displs[i - 1] + recvcounts[i - 1];
+				total_count += recvcounts[i];
+			}
+			
+			std::vector<unsigned long> global_vec(total_count);
+
+			MPI_Allgatherv(local_vec.data(),local_count,MPI_UNSIGNED_LONG,global_vec.data(),recvcounts.data(),displs.data(),MPI_UNSIGNED_LONG,prob->communicator_pt()->mpi_comm());
+
+			global_pinned_dof_set=std::unordered_set<unsigned long>(global_vec.begin(),global_vec.end());
+
+		}
+#endif
+	}
+
+
+
+///////////////////////////////////
+
+
+
+    // Stores a user-supplied Jacobian in CSR form (values/column indices/row starts), copied into the
+    // oomph::Vector members used by the rest of the custom-residual/Jacobian assembly path.
     void CustomResJacInformation::set_custom_jacobian(const std::vector<double> &Jv, const std::vector<int> &col_index, const std::vector<int> &row_start)
 	{
 		Jvals.resize(Jv.size());
@@ -529,6 +694,7 @@ namespace pyoomph
 			Jrow_start[i] = row_start[i];
 	}
 
+	// Maximum time-derivative order required by any currently loaded equation code
 	unsigned Problem::get_max_dt_order() const
 	{
 		unsigned max_order = 0;
@@ -539,6 +705,9 @@ namespace pyoomph
 		return max_order;
 	}
 
+	// Deletes all loaded DynamicBulkElementCode objects (closing their shared libraries) and all global
+	// parameter descriptors, and releases the cached eigenproblem matrices. Used both from the destructor
+	// and explicitly (e.g. before recompiling/reloading equation code).
 	void Problem::unload_all_dlls()
 	{
 		if (pyoomph_verbose)
@@ -570,6 +739,7 @@ namespace pyoomph
 			delete eigen_JacobianMatrixPt;
 	}
 
+	// Unloads all equation code and closes the log file (if any and if it is still the active logging stream)
 	Problem::~Problem()
 	{
 		// if (meshtemplate) delete meshtemplate; meshtemplate=NULL;
@@ -589,6 +759,10 @@ namespace pyoomph
 	{
 	}
 
+	// Loads (or returns the already-loaded) DynamicBulkElementCode for the shared library dynamic_lib,
+	// associates it with element_class (which fills in the callback function pointers of the function
+	// table), and binds each of the code's declared global parameters to the corresponding
+	// GlobalParameterDescriptor's value in this problem (creating parameters as needed).
 	DynamicBulkElementCode *Problem::load_dynamic_bulk_element_code(std::string dynamic_lib, FiniteElementCode *element_class)
 	{
 		for (unsigned int i = 0; i < bulk_element_codes.size(); i++)
@@ -630,12 +804,18 @@ namespace pyoomph
 
 	*/
 
+	// Activates the residual/Jacobian contribution named "name" in every loaded code (multi-residual
+	// problems can define several independently solvable residuals). If remove_dofs_without_jacobian_row
+	// is set, also updates removed_fields_due_to_missing_jacobian_row_or_col from the precomputed
+	// pin_due_to_empty_jacobian_row_or_col table for this residual, so fields with no Jacobian row/column
+	// under the newly active residual get pinned. Returns whether the residual was found in at least one
+	// code; if not and raise_error is set, throws.
 	bool Problem::_set_solved_residual(std::string name,bool raise_error,bool remove_dofs_without_jacobian_row)
 	{
 		unsigned numfound = 0;
 		if (this->_solved_residual != name) 
 		{
-			for (unsigned int i=0;i<removed_fields_due_to_missing_jacobian_row.size();i++) removed_fields_due_to_missing_jacobian_row[i]=false;
+			for (unsigned int i=0;i<removed_fields_due_to_missing_jacobian_row_or_col.size();i++) removed_fields_due_to_missing_jacobian_row_or_col[i]=false;
 		}
 		for (unsigned int i = 0; i < bulk_element_codes.size(); i++)
 		{
@@ -647,13 +827,13 @@ namespace pyoomph
 		}
 		this->_solved_residual = name;
 		unsigned resind=std::find(residual_names.begin(),residual_names.end(),name)-residual_names.begin();				
-		std::set<unsigned> fields_with_missing_jacobian_row;
+		std::set<unsigned> fields_with_missing_jacobian_row_or_col;
 		if (remove_dofs_without_jacobian_row)
 		{
-			for (unsigned int i=0;i<removed_fields_due_to_missing_jacobian_row.size();i++) 
+			for (unsigned int i=0;i<removed_fields_due_to_missing_jacobian_row_or_col.size();i++) 
 			{
-				removed_fields_due_to_missing_jacobian_row[i]=pin_due_to_empty_jacobian_row[resind][i];
-				if (removed_fields_due_to_missing_jacobian_row[i]) fields_with_missing_jacobian_row.insert(i);
+				removed_fields_due_to_missing_jacobian_row_or_col[i]=pin_due_to_empty_jacobian_row_or_col[resind][i];
+				if (removed_fields_due_to_missing_jacobian_row_or_col[i]) fields_with_missing_jacobian_row_or_col.insert(i);
 			}
 		}
 		/*if (!fields_with_missing_jacobian_row.empty())
@@ -669,7 +849,7 @@ namespace pyoomph
 
 	bool Problem::has_empty_jacobian_rows_marked() const
 	{
-		for (unsigned int i=0;i<removed_fields_due_to_missing_jacobian_row.size();i++) if (removed_fields_due_to_missing_jacobian_row[i]) return true;
+		for (unsigned int i=0;i<removed_fields_due_to_missing_jacobian_row_or_col.size();i++) if (removed_fields_due_to_missing_jacobian_row_or_col[i]) return true;
 		return false;
 	}
 
@@ -680,6 +860,8 @@ namespace pyoomph
 		return res->value();
 	}
 
+	// Returns the descriptor for global parameter "name", creating a new one (value 0, analytic
+	// derivative enabled by default) if it does not exist yet.
 	GlobalParameterDescriptor *Problem::assert_global_parameter(const std::string &name)
 	{
 		if (!this->has_global_parameter(name))
@@ -698,6 +880,8 @@ namespace pyoomph
 		}
 	}
 
+	// Combines the per-submesh temporal error norm contributions (sum of squares) into a single global
+	// RMS-like error estimate used by adaptive timestepping to decide whether/how to change dt.
 	double Problem::global_temporal_error_norm()
 	{
 		double global_error = 0.0;
@@ -710,6 +894,29 @@ namespace pyoomph
 		return sqrt(global_error);
 	}
 
+	// For every dof, the index into get_global_field_names() of the field it belongs to (-1 if it cannot
+	// be attributed to a single global field, e.g. augmentation dofs); delegates to each submesh.
+	std::vector<int> Problem::get_dof_to_global_field_index_mapping()
+	{
+		std::vector<int> res(this->ndof(), -1);
+		for (unsigned int ism = 0; ism < this->nsub_mesh(); ism++)
+		{
+			pyoomph::Mesh *m = dynamic_cast<pyoomph::Mesh *>(this->mesh_pt(ism));
+			m->fill_dof_to_global_field_index_buffer(res);
+		}
+		return res;
+	}
+
+	std::vector<std::string> Problem::get_global_field_names()
+	{
+		return defined_fields;
+	}
+
+	// Two-pass reset of "dummy" values (unused position/field dofs kept only to satisfy oomph-lib's
+	// element interface, e.g. unused position dofs of non-moving-mesh problems): first unpin all of them
+	// (across every element on every submesh) so any stale pinning state is cleared, then re-pin them all
+	// so they are guaranteed to actually be dummy (not real dofs) afterwards. Two passes are needed because
+	// dummy-ness is a per-Data-object property that may be shared between elements.
 	void Problem::ensure_dummy_values_to_be_dummy()
 	{
 		for (unsigned nmi = 0; nmi < this->nsub_mesh(); nmi++)
@@ -735,6 +942,58 @@ namespace pyoomph
 		}
 	}
 
+
+	// Clears and rebuilds the Dirichlet bookkeeping used for the matrix-manipulation strategy: unpins the
+	// dofs of all Dirichlet conditions on every element (registering them in dirichlet_info instead so
+	// they remain assembled and are handled by remove_dirichlets_by_matrix_manipulation() later).
+	void Problem::unpin_Dirichlet_dofs_for_matrix_manipulation()
+	{
+		dirichlet_info.clear();
+		for (unsigned nmi = 0; nmi < this->nsub_mesh(); nmi++)
+		{
+			unsigned nelem = mesh_pt(nmi)->nelement();
+			//		std::cout << "ENSURE PINNING NEL " << nelem << std::endl;
+			for (unsigned n = 0; n < nelem; n++)
+			{
+				auto el = dynamic_cast<BulkElementBase *>(mesh_pt(nmi)->element_pt(n));
+				if (el) el->unpin_Dirichlet_dofs_for_matrix_manipulation(dirichlet_info);
+			}
+		}
+		/////
+		for (unsigned int f=0; f<defined_fields.size();f++)
+		{
+			if (is_field_removed_from_dofs_due_to_missing_jacobian_row(f))
+			{
+				throw_runtime_error("This must be implemented. The dofs of removed fields should not be unpinned. Likely has to be done on an elemental level");
+			}
+		}
+		/////		
+	}
+
+	// Performs the standard oomph-lib equation numbering, then lets every InterfaceMesh update its
+	// equation remapping (interface dofs referencing bulk equation numbers that may have just changed),
+	// and finally, when Dirichlet conditions are enforced by matrix manipulation rather than dof removal,
+	// rebuilds the set of globally pinned equation numbers (which depends on the numbering just assigned).
+	unsigned long Problem::assign_eqn_numbers(const bool& assign_local_eqn_numbers)
+	{
+      unsigned long res=oomph::Problem::assign_eqn_numbers(assign_local_eqn_numbers);
+	  for (unsigned nmi = 0; nmi < this->nsub_mesh(); nmi++)
+	  {
+		if (dynamic_cast<InterfaceMesh *>(this->mesh_pt(nmi)))
+		{
+			dynamic_cast<InterfaceMesh *>(this->mesh_pt(nmi))->update_equation_remapping();
+		}
+	  }
+	  if (!this->dirichlets_by_removing_from_dof_vector)
+	  {
+		//dirichlet_info.build_equation_to_value_map();
+		dirichlet_info.build_global_pinned_equation_set(this);
+	  }
+	  return res;
+	}
+
+	// After mesh adaptation: invalidates any cached Lagrangian KD-trees (node positions may have changed),
+	// re-establishes the dummy-value pinning invariant, and re-runs problem-specific pinning setup.
 	void Problem::actions_after_adapt()
 	{
 		for (unsigned nmi = 0; nmi < this->nsub_mesh(); nmi++)
@@ -748,11 +1007,16 @@ namespace pyoomph
 		setup_pinning();
 	}
 
+	// Default implementation just forwards to oomph-lib; Python subclasses typically override this
+	// (via the trampoline) to set up problem-specific initial conditions.
 	void Problem::set_initial_condition()
 	{
 		oomph::Problem::set_initial_condition();
 	}
 
+	// Assembles (or reuses/reallocates the cached eigen_MassMatrixPt/eigen_JacobianMatrixPt) the mass
+	// matrix M and Jacobian J for the generalized eigenproblem J*v = sigma*M*v around the shift sigma_r.
+	// Note: Dirichlet-by-matrix-manipulation is not yet supported here (see thrown error below).
 	void Problem::assemble_eigenproblem_matrices(oomph::CRDoubleMatrix *&M, oomph::CRDoubleMatrix *&J, double sigma_r)
 	{
 		if (!M)
@@ -774,8 +1038,13 @@ namespace pyoomph
 			J = eigen_JacobianMatrixPt;
 		}
 		this->get_eigenproblem_matrices(*M, *J, sigma_r);
+		if (!this->dirichlets_by_removing_from_dof_vector)
+		{
+			throw_runtime_error("This must be implemented. The rows and columns of the eigenproblem matrices corresponding to Dirichlet dofs should be removed. Likely has to be done on an elemental level");
+		}
 	}
 
+	// Dof values at history time level t (t=0 is the current time), as a plain std::vector<double>
 	std::vector<double> Problem::get_history_dofs(unsigned t)
 	{
 		std::vector<double> res(this->ndof(), 0.0);
@@ -789,6 +1058,9 @@ namespace pyoomph
 		return res;
 	}
 
+	// Current dof values, together with a per-dof flag marking whether the dof is a nodal position dof
+	// (i.e. belongs to a node's variable_position_pt(), as opposed to a "physical" field dof); the flag
+	// is determined by scanning all nodes of all submeshes for equation numbers coming from their position data.
 	std::tuple<std::vector<double>, std::vector<bool>> Problem::get_current_dofs()
 	{
 		std::vector<double> res(this->ndof(), 0.0);
@@ -828,8 +1100,10 @@ namespace pyoomph
 	}
 
 
+    // oomph-lib's get_dofs(t,...) does not account for the variable_position_pt() dofs of moving nodes
+    // (see the analogous comment in set_dofs below) - this override fixes that up afterwards.
     void Problem::get_dofs(const unsigned& t, oomph::DoubleVector& dofs) const
-	{	
+	{
       oomph::Problem::get_dofs(t,dofs);
 	  //std::cout << "GET HISTORY DOFS " << t << std::endl;
 	  for (unsigned i = 0, ni = mesh_pt()->nnode(); i < ni; i++)
@@ -847,7 +1121,9 @@ namespace pyoomph
       }	
 	}
 
-	void Problem::set_dofs(const unsigned& t, oomph::DoubleVector& dof_pt) 
+	// oomph-lib's set_dofs(t,...) does not update the variable_position_pt() dofs of moving nodes; this
+	// override does the base-class assignment and then additionally writes back the position dofs.
+	void Problem::set_dofs(const unsigned& t, oomph::DoubleVector& dof_pt)
 	{
 	 oomph::Problem::set_dofs(t,dof_pt);
 	 //std::cout << "SET HISTORY DOFS " << t << std::endl;
@@ -867,7 +1143,8 @@ namespace pyoomph
      }		 	
 	}
 
-    void Problem::set_dofs(const unsigned& t, oomph::Vector<double*>& dof_pt) 
+    // Same fix-up as the DoubleVector overload above, for the raw-pointer-array variant of set_dofs
+    void Problem::set_dofs(const unsigned& t, oomph::Vector<double*>& dof_pt)
 	{
      oomph::Problem::set_dofs(t,dof_pt);
 	 //std::cout << "SET HISTORY DOFS " << t << std::endl;
@@ -887,12 +1164,17 @@ namespace pyoomph
      }
 	}
 
+	// Sets the dof values at history time level t from a plain std::vector, validating both the vector
+	// length (must match ndof()) and that t is within the timestepper's available history storage.
 	void Problem::set_history_dofs(unsigned t, const std::vector<double> &inp)
 	{
 		oomph::DoubleVector dofs;
 		dofs.build(this->dof_distribution_pt(), 0.0);
 		if (inp.size() != this->ndof())
-			throw_runtime_error("Mismatch in dof vector size");
+		{
+			std::ostringstream oss; oss << "Try to set dofs of length " << inp.size() << " while problem has " << this->ndof() << " dofs";
+			throw_runtime_error("Mismatch in dof vector size. " + oss.str());
+		}
 		if (t>=this->time_stepper_pt()->ntstorage()) 
 		        throw_runtime_error("Wrong history offset");
 		for (unsigned int i = 0; i < this->ndof(); i++)
@@ -900,6 +1182,10 @@ namespace pyoomph
 		this->set_dofs(t, dofs);
 	}
 
+	// Collects the current values of all pinned Data across every submesh: nodal values, optionally
+	// (with_pos) pinned nodal position dofs, and pinned internal (elemental) Data values. This is
+	// independent of the (unpinned) dof vector and is used to save/restore state that is not part of
+	// get_current_dofs()/set_current_dofs() (e.g. across mesh adaptation or continuation branch switches).
 	std::vector<double> Problem::get_current_pinned_values(bool with_pos)
 	{
 		std::vector<double> res;
@@ -940,11 +1226,74 @@ namespace pyoomph
 		return res;
 	}
 
+	// Enforces Dirichlet conditions in-place on an already-assembled (residuals, jacobian) pair for the
+	// matrix-manipulation strategy: for every globally Dirichlet-pinned equation number, the residual
+	// entry is set to 0 (dof is not part of the nonlinear system to solve for) and, if a Jacobian is
+	// given, its row is replaced by the identity row (1 on the diagonal, 0 elsewhere) while any column
+	// entries in *other* rows referring to a pinned dof are zeroed out (since that dof's value does not
+	// change during the solve, so its contribution to other residuals' derivatives must not appear).
+	// Operates directly on the local (possibly MPI-distributed) chunk of the matrix/vector.
+	void Problem::remove_dirichlets_by_matrix_manipulation(oomph::DoubleVector &residuals,oomph::CRDoubleMatrix *jacobian)
+	{
+		const std::unordered_set<unsigned long> dof_set=dirichlet_info.get_global_pinned_equation_set();
+
+
+		if (!dof_set.empty())
+		{
+			for (const auto &eqn_number : dof_set)
+			{
+				int eqn_number_local=static_cast<int>(eqn_number)-residuals.first_row();
+				if (eqn_number_local>=0 && eqn_number_local<(int)residuals.nrow_local())
+				{
+					residuals[eqn_number_local] = 0.0;
+				}
+			}
+			if (jacobian)
+			{
+
+				//const int num_rows = jacobian->nrow();
+				//const int num_cols = jacobian->ncol();
+				const int first_row=jacobian->distribution_pt()->first_row();
+				const int num_local_rows=jacobian->nrow_local();
+				//std::cout << "Jacobian size: " << num_rows << " x " << num_cols << std::endl << "LOCAL START " << first_row << " LOCAL ROWS " << num_local_rows << std::endl << std::flush;
+
+				double * values=jacobian->value();
+				const int * col_index=jacobian->column_index();
+				const int * row_start=jacobian->row_start();
+
+				for (int row = 0; row < num_local_rows; ++row) {
+					bool is_constrained_row = dof_set.count(row+first_row);
+
+					for (int i = row_start[row]; i < row_start[row + 1]; ++i) {
+						int col = col_index[i];
+
+						if (is_constrained_row)
+						{
+							values[i] = (col == row+first_row) ? 1.0 : 0.0;
+						} else if (dof_set.count(col))
+						{
+							values[i] = 0.0;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Top-level residual assembly entry point: either the normal elemental assembly (with, if the
+	// matrix-manipulation Dirichlet strategy is active, a subsequent zeroing of the Dirichlet rows via
+	// remove_dirichlets_by_matrix_manipulation), or the user-supplied custom residual when
+	// use_custom_residual_jacobian is set.
 	void Problem::get_residuals(oomph::DoubleVector &residuals)
 	{
 		if (!use_custom_residual_jacobian)
 		{
 			get_residuals_by_elemental_assembly(residuals);
+			if (!this->dirichlets_by_removing_from_dof_vector)
+			{
+				if (this->bifurcation_tracking_mode!="") throw_runtime_error("TODO: Cannot remove dirichlet dofs from the residual vector by matrix manipulation when bifurcation tracking is active, since the user-provided residual vector would still contain contributions from the dirichlet dofs, which would be wrong");
+				this->remove_dirichlets_by_matrix_manipulation(residuals);
+			}
 		}
 		else
 		{
@@ -955,16 +1304,31 @@ namespace pyoomph
 				oomph::LinearAlgebraDistribution dist(this->communicator_pt(), info.residuals.size(), false);
 				residuals.build(&dist, 0.0);
 			}
+			if (!this->dirichlets_by_removing_from_dof_vector)
+			{
+				throw_runtime_error("TODO: Cannot use custom residuals when dirichlet conditions are not removed from the dof vector, since the user-provided residual vector would still contain contributions from the dirichlet dofs, which would be wrong");
+			}
+
 			for (unsigned int i = 0; i < info.residuals.size(); i++)
 				residuals[i] = info.residuals[i];
 		}
 	}
 
+	// d(residuals)/d(parameter) entry point; same dispatch as get_residuals()/get_jacobian() between
+	// normal elemental assembly and the custom-residual-Jacobian path (there identified by parameter name).
 	void Problem::get_derivative_wrt_global_parameter(double* const& parameter_pt,oomph::DoubleVector& result)
 	{
 		if (!use_custom_residual_jacobian)
 		{
 			get_derivative_wrt_global_parameter_elemental_assembly(parameter_pt,result);
+			if (!this->dirichlets_by_removing_from_dof_vector)
+			{
+				 //throw_runtime_error("TODO: Cannot remove dirichlet dofs from the derivative by a global parameter by matrix manipulation yet.");
+
+				 //This is of course problematic if the DirichletBC depends on the parameter, but it is also problematic in the case of removing Dirichlets from the dofs
+				 //TODO: However, here, it could be patched by providing a corresponding function to calculate dDirichlet/dparam 
+				 this->remove_dirichlets_by_matrix_manipulation(result);
+			}
 		}
 		else
 		{
@@ -977,16 +1341,27 @@ namespace pyoomph
 				oomph::LinearAlgebraDistribution dist(this->communicator_pt(), info.residuals.size(), false);
 				result.build(&dist, 0.0);
 			}
+			if (!this->dirichlets_by_removing_from_dof_vector)
+			{
+				 throw_runtime_error("TODO: Cannot remove dirichlet dofs from the derivative by a global parameter by matrix manipulation yet.");
+			}
+
 			for (unsigned int i = 0; i < info.residuals.size(); i++)
 				result[i] = info.residuals[i];
 		}
 
 	}
+	// Top-level Jacobian assembly entry point; same dispatch/Dirichlet-handling pattern as get_residuals()
 	void Problem::get_jacobian(oomph::DoubleVector &residuals, oomph::CRDoubleMatrix &jacobian)
 	{
 		if (!use_custom_residual_jacobian)
 		{
 			get_jacobian_by_elemental_assembly(residuals, jacobian);
+			if (!this->dirichlets_by_removing_from_dof_vector)
+			{
+				if (this->bifurcation_tracking_mode!="") throw_runtime_error("TODO: Cannot remove dirichlet dofs from the jacobian matrix by matrix manipulation when bifurcation tracking is active, since the user-provided jacobian matrix would still contain contributions from the dirichlet dofs, which would be wrong");
+				this->remove_dirichlets_by_matrix_manipulation(residuals,&jacobian);
+			}
 		}
 		else
 		{
@@ -1005,9 +1380,15 @@ namespace pyoomph
 			//       std::cout << "BUILD J  "<< info.residuals.size() << "  " << info.Jcolumn_index.size() << "  " << info.Jrow_start.size() << std::endl;
 			jacobian.build(info.residuals.size(), info.Jvals, info.Jcolumn_index, info.Jrow_start);
 			//       std::cout << "DONE BUILD J" << std::endl;
+			if (!this->dirichlets_by_removing_from_dof_vector)
+			{
+				throw_runtime_error("TODO: Cannot remove dirichlet dofs from the jacobian matrix by matrix manipulation when using custom jacobian, since the user-provided jacobian matrix would still contain contributions from the dirichlet dofs, which would be wrong");
+			}
 		}
 	}
 
+	// Finds the global parameter index whose value() address is exactly ptr; throws if not found (e.g. if
+	// ptr does not belong to any registered global parameter of this problem)
 	int Problem::resolve_parameter_value_ptr(double *ptr)
 	{
 		for (const auto &a : global_params_by_name)
@@ -1019,6 +1400,9 @@ namespace pyoomph
 		return -1;
 	}
 
+	// Sets one of oomph-lib's named arclength-continuation control parameters (exposed by name since
+	// they are protected data members of oomph::Problem without individual setters); boolean-valued ones
+	// are encoded as val>0.5. Throws on an unrecognized name.
 	void Problem::set_arclength_parameter(std::string nam, double val)
 	{
 		if (nam == "Desired_proportion_of_arc_length")
@@ -1035,6 +1419,10 @@ namespace pyoomph
 			throw_runtime_error("Unknown param to set " + nam);
 	}
 
+	// Toggles the internal __replace_RJM_by_param_deriv pointer, which, when non-NULL, makes subsequent
+	// residual/Jacobian/mass-matrix assembly calls return the derivative w.r.t. the named global
+	// parameter instead of the normal residual/Jacobian/mass matrix (used internally e.g. for parameter
+	// derivative computations that must reuse the same elemental assembly loop machinery).
 	void Problem::_replace_RJM_by_param_deriv(std::string name, bool active)
 	{
 		if (!active)
@@ -1048,6 +1436,8 @@ namespace pyoomph
 		}
 	}
 
+	// Performs one pseudo-arclength continuation step in the named global parameter, forwarding to
+	// oomph-lib's arc_length_step_solve with the parameter's value() as the tracked parameter pointer.
 	double Problem::arc_length_step(const std::string param, const double &ds, unsigned max_adapt)
 	{
 		if (!global_params_by_name.count(param))
@@ -1058,6 +1448,7 @@ namespace pyoomph
 		return this->arc_length_step_solve(valptr, ds, max_adapt);
 	}
 
+	// d(dof)/ds (arclength derivative) as a plain std::vector, exposing oomph-lib's internal Dof_derivative
 	std::vector<double> Problem::get_arclength_dof_derivative_vector()
 	{
 		std::vector<double> res(Dof_derivative.size());
@@ -1066,6 +1457,7 @@ namespace pyoomph
 		return res;
 	}
 
+	// Dof values at the last continuation step (oomph-lib's internal Dof_current), as a std::vector
 	std::vector<double> Problem::get_arclength_dof_current_vector()
 	{
 		std::vector<double> res(Dof_current.size());
@@ -1074,6 +1466,9 @@ namespace pyoomph
 		return res;
 	}
 
+    // Writes ddof/curr (locally distributed dof-derivative and current-dof vectors) into oomph-lib's
+    // internal Dof_derivative/Dof_current, resizing them first if necessary; used to seed/restore the
+    // arclength continuation state (e.g. from Python-side branch switching).
     void Problem::update_dof_vectors_for_continuation(const std::vector<double> &ddof, const std::vector<double> &curr)
     {
 		if (ddof.size() != curr.size()) throw_runtime_error("Mismatch in size of ddof and curr");
@@ -1097,17 +1492,22 @@ namespace pyoomph
 		}
     }
 
+	// Seeds oomph-lib's internal continuation state (current parameter value, direction, step-size
+	// derivative magnitude) so that a subsequent arclength step continues smoothly from (p0, dp).
 	void Problem::update_param_info_for_continuation(double dp,double p0)
 	{
 		Parameter_current=p0;
-		if (dp>0) Continuation_direction=1; else  if (dp<0) Continuation_direction=-1; 
+		if (dp>0) Continuation_direction=1; else  if (dp<0) Continuation_direction=-1;
 		Parameter_derivative=abs(dp);
-		
+
 		Arc_length_step_taken=true;
 	}
 
-	
 
+
+    // Installs oomph-lib's MyFoldHandler (fold/limit-point bifurcation tracking assembly handler) with a
+    // given starting null-eigenvector guess; if block_solve, additionally switches to the augmented block
+    // linear solver that exploits the bordered system's block structure instead of a full dense solve.
     void Problem::activate_my_fold_tracking(double *const &parameter_pt, const oomph::DoubleVector &eigenvector, const bool &block_solve)
 	{
 		reset_assembly_handler_to_default();
@@ -1118,6 +1518,7 @@ namespace pyoomph
 		}
 	}
 
+	// Same as above, but lets MyFoldHandler determine the initial null-eigenvector itself
 	void Problem::activate_my_fold_tracking(double *const &parameter_pt, const bool &block_solve)
 	{
 		reset_assembly_handler_to_default();
@@ -1128,6 +1529,8 @@ namespace pyoomph
 		}
 	}
 
+	// Installs the Hopf-bifurcation tracking assembly handler (bordered system with complex null vector
+	// null_real+i*null_imag and angular frequency omega); optionally with the block Hopf linear solver.
 	void Problem::activate_my_hopf_tracking(double *const &parameter_pt, const double &omega, const oomph::DoubleVector &null_real, const oomph::DoubleVector &null_imag, const bool &block_solve)
 	{
 		reset_assembly_handler_to_default();
@@ -1138,6 +1541,8 @@ namespace pyoomph
 		}
 	}
 
+	// oomph-lib hook (raw parameter_pt) resolved to the parameter's name and forwarded to the
+	// string-named virtual so Python subclasses can react to global-parameter changes by name.
 	void Problem::actions_after_change_in_global_parameter(double *const &parameter_pt)
 	{
 		for (auto &p : this->global_params_by_index)
@@ -1149,6 +1554,7 @@ namespace pyoomph
 		}
 	}
 
+	// Same name-resolution dispatch as actions_after_change_in_global_parameter above, but for parameter increases
 	void Problem::actions_after_parameter_increase(double *const &parameter_pt)
 	{
 		for (auto &p : this->global_params_by_index)
@@ -1160,6 +1566,9 @@ namespace pyoomph
 		}
 	}
 
+	// Installs the azimuthal-symmetry-breaking bifurcation tracking assembly handler, which requires two
+	// named special residual forms ("azimuthal_real_eigen" and, unless "<NONE>", "azimuthal_imag_eigen")
+	// describing the linearized real/imaginary azimuthal-mode residual contributions.
 	void Problem::activate_my_azimuthal_tracking(double *const &parameter_pt, const double &omega, const oomph::DoubleVector &null_real, const oomph::DoubleVector &null_imag, std::map<std::string, std::string> special_residual_forms)
 	{
 		reset_assembly_handler_to_default();
@@ -1178,13 +1587,16 @@ namespace pyoomph
 		this->assembly_handler_pt() = azi;
 	}
 
-	void Problem::activate_my_pitchfork_tracking(double *const &parameter_pt, const oomph::DoubleVector &symmetry_vector, const bool &block_solve)
+	// Installs the pitchfork-bifurcation tracking assembly handler with the given symmetry-breaking
+	// eigenvector (block-solve variant is not wired up here, only the plain handler)
+	void Problem::activate_my_pitchfork_tracking(double *const &parameter_pt, const oomph::DoubleVector &symmetry_vector, const bool &)
 	{
 		//	this->activate_pitchfork_tracking(parameter_pt, symmetry_vector, block_solve);
 		reset_assembly_handler_to_default();
 		this->assembly_handler_pt() = new MyPitchForkHandler(this, parameter_pt, symmetry_vector);
 	}
 
+	// d(residuals)/d(param), by name, as a plain std::vector (thin convenience wrapper around get_derivative_wrt_global_parameter)
 	std::vector<double> Problem::get_parameter_derivative(const std::string param)
 	{
 		if (!global_params_by_name.count(param))
@@ -1201,6 +1613,8 @@ namespace pyoomph
 		return res;
 	}
 
+	// Post-continuation-step hook: for fold tracking, re-aligns the handler's constraint vector C with
+	// the current null-eigenvector estimate to keep the bordering well-conditioned along the branch.
 	void Problem::after_bifurcation_tracking_step()
 	{
 		if (dynamic_cast<MyFoldHandler *>(this->assembly_handler_pt()))
@@ -1209,6 +1623,9 @@ namespace pyoomph
 		}
 	}
 
+	// Directly sets oomph-lib's dof_derivative (d(dof)/ds) to a prescribed direction ddir and marks
+	// Arc_length_step_taken, effectively priming the arclength continuation tangent by hand (e.g. for
+	// branch switching) instead of computing it from a previous step.
 	void Problem::set_dof_direction_arclength(std::vector<double> ddir)
 	{
 		this->reset_arc_length_parameters();
@@ -1227,6 +1644,8 @@ namespace pyoomph
 			dof_derivative(i) = ddir[i];
 	}
 
+	// Angular frequency omega of the currently tracked bifurcation, if it is a Hopf or azimuthal
+	// (which are the two oscillatory/complex bifurcation types); 0 otherwise.
 	double Problem::get_bifurcation_omega()
 	{
 		if (bifurcation_tracking_mode == "hopf" && (dynamic_cast<MyHopfHandler *>(this->assembly_handler_pt())))
@@ -1243,6 +1662,39 @@ namespace pyoomph
 		}
 	}
 
+	// Whether a bifurcation is currently being tracked and, if so, the complex eigenvalue lambda =
+	// Re(lambda) + i*omega associated with it (Re(lambda) is only meaningful/nonzero when tracking via
+	// the lambda_tracking_real helper parameter, e.g. for eigenbranch tracking; otherwise 0).
+	std::tuple<bool,std::complex<double>> Problem::get_bifurcation_tracking_info()
+	{
+		bool active=false;
+		std::complex<double> lambda(0.0,0.0);
+		if (bifurcation_tracking_mode == "hopf" && (dynamic_cast<MyHopfHandler *>(this->assembly_handler_pt())))
+		{
+			auto *h = dynamic_cast<MyHopfHandler *>(this->assembly_handler_pt());
+			active=true; lambda=std::complex<double>((h->bifurcation_parameter_pt()==&this->lambda_tracking_real ? this->lambda_tracking_real :0.0),h->omega());			
+		}
+		else if (bifurcation_tracking_mode == "azimuthal" && (dynamic_cast<AzimuthalSymmetryBreakingHandler *>(this->assembly_handler_pt())))
+		{
+			auto *h = dynamic_cast<AzimuthalSymmetryBreakingHandler *>(this->assembly_handler_pt());
+			active=true; lambda=std::complex<double>((h->bifurcation_parameter_pt()==&this->lambda_tracking_real ? this->lambda_tracking_real :0.0),h->omega()); 
+		}
+		else if (bifurcation_tracking_mode == "fold" && (dynamic_cast<MyFoldHandler *>(this->assembly_handler_pt())))
+		{
+			auto *h = dynamic_cast<MyFoldHandler *>(this->assembly_handler_pt());
+			active=true; lambda=std::complex<double>((h->bifurcation_parameter_pt()==&this->lambda_tracking_real ? this->lambda_tracking_real : 0.0),0.0);
+		}
+		else if (bifurcation_tracking_mode == "pitchfork" && (dynamic_cast<MyPitchForkHandler *>(this->assembly_handler_pt())))
+		{
+			auto *h = dynamic_cast<MyPitchForkHandler *>(this->assembly_handler_pt());
+			active=true; lambda=std::complex<double>((h->bifurcation_parameter_pt()==&this->lambda_tracking_real ? this->lambda_tracking_real : 0.0),0.0);
+		}
+		return std::make_tuple(active,lambda);
+	}
+
+    // Selects one of oomph-lib's built-in sparse assembly implementations by name (they differ in the
+    // container used to accumulate (row,col)->value triplets before compressing to CSR: vectors of
+    // pairs, two parallel vectors, maps, lists, or two plain arrays - a performance/memory trade-off).
     void Problem::set_sparse_assembly_method(const std::string &method)
     {
 		/*Perform_assembly_using_vectors_of_pairs,
@@ -1296,6 +1748,42 @@ namespace pyoomph
 		}
 	}
 
+	// Selects how the distributed Jacobian matrix is partitioned across MPI ranks ("default" defers to
+	// oomph-lib's own default, "problem" mirrors the problem's dof distribution, "uniform" splits rows
+	// evenly regardless of dof distribution); no-op when built without MPI.
+	void Problem::set_dist_problem_matrix_distribution(const std::string & mode)
+	{
+		#ifdef OOMPH_HAS_MPI
+		if (mode =="default") {this->distributed_problem_matrix_distribution()=oomph::Problem::Default_matrix_distribution;}
+		else if (mode=="problem") {this->distributed_problem_matrix_distribution()=oomph::Problem::Problem_matrix_distribution;}
+		else if (mode=="uniform") {this->distributed_problem_matrix_distribution()=oomph::Problem::Uniform_matrix_distribution;}
+		else
+		{
+			throw_runtime_error("Unknown distributed problem matrix distribution mode: " + mode);
+		}
+		#endif
+	}
+    std::string Problem::get_dist_problem_matrix_distribution() 
+	{
+		#ifdef OOMPH_HAS_MPI
+		switch (this->distributed_problem_matrix_distribution())
+		{
+		case oomph::Problem::Default_matrix_distribution:
+			return "default";
+		case oomph::Problem::Problem_matrix_distribution:
+			return "problem";
+		case oomph::Problem::Uniform_matrix_distribution:
+			return "uniform";
+		default:
+			return "unknown";
+		}
+		#else
+		return "nompi";
+		#endif
+	}
+
+    // The (real, or complex for Hopf/azimuthal) eigenvector of the currently tracked bifurcation; empty
+    // if no bifurcation is being tracked.
     std::vector<std::complex<double>> Problem::get_bifurcation_eigenvector()
     {
 		if (bifurcation_tracking_mode == "")
@@ -1316,13 +1804,19 @@ namespace pyoomph
 		return res;
 	}
 
+	// Installs the periodic-orbit tracking assembly handler, representing the orbit as a B-spline of the
+	// given order through the initial guessed history (time series of dof snapshots) with period T; knots
+	// gives the (possibly non-uniform) B-spline knot vector and T_constraint_mode selects how the period
+	// is constrained (e.g. fixed phase condition) in the augmented system.
 	void Problem::start_orbit_tracking(const std::vector<std::vector<double>> &history, const double &T,int bspline_order,int gl_order,std::vector<double> knots,unsigned T_constraint_mode)
-	
+
 	{
 		reset_assembly_handler_to_default();
 		this->assembly_handler_pt() = new PeriodicOrbitHandler(this, T,history,bspline_order,gl_order,knots,T_constraint_mode);
 	}
 
+	// Restores the default (non-augmented) assembly handler; also clears bifurcation_tracking_mode
+	// implicitly via the callers (this function itself only deals with the oomph-lib assembly handler).
 	void Problem::reset_assembly_handler_to_default()
 	{
 		/*if (dynamic_cast<pyoomph::PythonAssemblyHandler *>(assembly_handler_pt()))
@@ -1337,12 +1831,16 @@ namespace pyoomph
 		//}
 	}
 
+	// Truncates the dof vector/distribution back down to n_unaugmented_dofs entries, discarding any
+	// augmentation dofs (bifurcation tracking, arclength, custom DofAugmentations) appended on top of the
+	// physical dofs, and resets the sparse-assembly scratch buffers (whose size depended on the dof count).
+	// No-op if no augmentation is currently active (n_unaugmented_dofs==0 is used as the "not augmented" sentinel).
 	void Problem::reset_augmented_dof_vector_to_nonaugmented()
 	{
 		if (n_unaugmented_dofs == 0)
-			return;		
+			return;
 		this->GetDofPtr().resize(n_unaugmented_dofs);
-    	this->GetDofDistributionPt()->build(this->communicator_pt(),n_unaugmented_dofs, false);    
+    	this->GetDofDistributionPt()->build(this->communicator_pt(),n_unaugmented_dofs, false);
     	this->GetSparcseAssembleWithArraysPA().resize(0);
 		n_unaugmented_dofs=0;
 	}
@@ -1364,6 +1862,12 @@ namespace pyoomph
 	}*/
 
 
+	// High-level entry point for (de)activating bifurcation tracking, dispatching to the appropriate
+	// activate_my_*_tracking() based on typus ("fold","pitchfork","hopf","azimuthal"). param selects the
+	// tracked parameter by name, or the special sentinel "<LAMBDA_TRACKING>" to track the (helper)
+	// lambda_tracking_real parameter instead (used for eigenbranch tracking not tied to an actual problem
+	// parameter). eigenv1/eigenv2 seed the real/imaginary parts of the initial null-eigenvector guess
+	// (truncated/zero-padded to ndof()). Passing param=="" (or typus=="" / "none") deactivates tracking.
 	void Problem::start_bifurcation_tracking(const std::string param, const std::string typus, const bool &blocksolve, const std::vector<double> &eigenv1, const std::vector<double> &eigenv2, const double &omega, std::map<std::string, std::string> special_residual_forms)
 	{
 		if (param == "" || typus == "" || typus == "none")
@@ -1430,6 +1934,9 @@ namespace pyoomph
 			throw_runtime_error("Cannot track unknown bifurcation type: " + typus);
 	}
 
+	// Inverse of get_current_pinned_values(): writes inp (in the same nodal-value / [position] / internal
+	// order) back into the pinned Data entries at history time level t. Throws if inp is shorter than the
+	// number of pinned entries encountered (a size mismatch is only detected once too many values would be consumed).
 	void Problem::set_current_pinned_values(const std::vector<double> &inp, bool with_pos,unsigned t)
 	{
 		unsigned int pos = 0;
@@ -1479,6 +1986,10 @@ namespace pyoomph
 	}
 	
 	
+	// Opens fname as the problem's log file, closing/replacing any previously open one; if activate_logging
+	// is true, immediately makes it the active global logging stream (pyoomph::set_logging_stream), else
+	// it is only prepared and can be attached to logging later. fname=="" closes the current log file
+	// (deactivating logging), independent of any other state.
 	void Problem::open_log_file(const std::string &fname,const bool & activate_logging)
 	{
 
@@ -1504,6 +2015,8 @@ namespace pyoomph
 		if (activate_logging) pyoomph::set_logging_stream(logfile);
 	}
 
+	// Suppresses (or restores) oomph-lib's own console output (Newton solve messages, linear solver
+	// timing) and redirects oomph::oomph_info to a null stream when quiet.
 	void Problem::quiet(bool _quiet)
 	{
 		_is_quiet = _quiet;
@@ -1520,10 +2033,16 @@ namespace pyoomph
 		}
 	}
 
+	// Computes the directional second derivative H[dir,dir] of the residuals (i.e. the Hessian tensor
+	// contracted twice with the same direction dir), element by element, without ever forming the full
+	// sparse Hessian tensor (unlike assemble_hessian_tensor below). Used e.g. for second-order Newton
+	// corrector steps / normal-form coefficients along a single direction, where only this contraction
+	// is needed. The commented-out block below is an earlier alternative implementation via
+	// get_hessian_vector_products() (kept for reference).
 	std::vector<double> Problem::get_second_order_directional_derivative(std::vector<double> dir)
 	{
 		if (dof_distribution_pt()->nrow_local()!=dir.size()) throw_runtime_error("Mismatch in size of dir vector and the number of DoFs");
-		
+
 		/*
 		oomph::DoubleVectorWithHaloEntries d1;
 		oomph::Vector<oomph::DoubleVectorWithHaloEntries> d2(1);
@@ -1568,6 +2087,12 @@ namespace pyoomph
 		return result;
 	}
 
+	// Assembles the full sparse rank-3 Hessian tensor d^2(residual_i)/d(dof_j)d(dof_k), element by
+	// element: each element contributes a dense nvar x nvar x nvar block (flattened to nvar x nvar*nvar
+	// by elem_pt->assemble_hessian_tensor), which is then scattered into the global sparse tensor using
+	// the assembly handler's local-to-global equation numbering. Entries below Numerical_zero_for_sparse_assembly
+	// in magnitude are dropped to keep the tensor sparse. If symmetric is set, result exploits (and the
+	// caller must ensure) symmetry under exchange of the last two indices (j,k) to roughly halve the work.
 	SparseRank3Tensor Problem::assemble_hessian_tensor(bool symmetric)
 	{
 		SparseRank3Tensor result(this->ndof(), symmetric);
@@ -1600,8 +2125,16 @@ namespace pyoomph
 	}
 
 
-//#define PYOOMPH_PERIODIC_ORBIT_BAND_MATRIX  
-#ifdef PYOOMPH_PERIODIC_ORBIT_BAND_MATRIX  
+// Experimental (currently disabled, since the macro below is commented out) specialized dense-matrix
+// representations for the periodic-orbit elemental Jacobian, which is a large NT x NT block matrix (NT
+// = number of time slices of the orbit discretization) with (in general) only a banded subset of blocks
+// actually populated. Storing it as a plain oomph::DenseMatrix would waste O(NT^2) memory/time; these
+// classes instead only store per-block (or per-band) dense sub-blocks. Not used unless
+// PYOOMPH_PERIODIC_ORBIT_BAND_MATRIX is defined; kept here for future optimization work.
+//#define PYOOMPH_PERIODIC_ORBIT_BAND_MATRIX
+#ifdef PYOOMPH_PERIODIC_ORBIT_BAND_MATRIX
+	// Sparse-by-block dense matrix: only allocates a base_ndof x base_ndof dense sub-block for a given
+	// (block-row, block-col) pair the first time it is written to; missing blocks read as all-zero.
 	class PeriodicOrbitAssemblyBlockDenseMatrix : public oomph::DenseMatrix<double>
 	{
 		private:
@@ -1729,9 +2262,12 @@ namespace pyoomph
 
 
 
+	// Periodic band-block matrix: only the bandwidth-b diagonal band of NTxNT blocks is stored (plus one
+	// extra row/column for the period constraint), further reducing memory/time compared to
+	// PeriodicOrbitAssemblyBlockDenseMatrix above when the true coupling between time slices is local.
 	class PeriodicOrbitAssemblyBlockBandMatrix : public oomph::DenseMatrix<double>
 	{
-		/* 
+		/*
 			A periodic band matrix (consisting of NTxNT blocks) with bandwidth b
 			Also, an additional row and column is added at the end (for the period constraint)
 		*/
@@ -1837,10 +2373,17 @@ namespace pyoomph
 
 #endif
 
- 	void Problem::sparse_assemble_row_or_column_compressed_for_periodic_orbit(oomph::Vector<int*>& column_or_row_index,oomph::Vector<int*>& row_or_column_start,oomph::Vector<double*>& value,oomph::Vector<unsigned>& nnz,oomph::Vector<double*>& residuals,bool compressed_row_flag)
-  	{    
+ 	// Specialized sparse assembly for the periodic-orbit augmented system (adapted from oomph-lib's
+ 	// generic sparse_assemble_row_or_column_compressed, see the base-problem variant below). Periodic
+ 	// orbit elements have very large elemental Jacobians (they couple all NT time-slice copies of the
+ 	// underlying dofs), so instead of using one of the configurable Sparse_assembly_method strategies,
+ 	// this always accumulates entries in per-row/column std::map<unsigned,double> buffers (matrix_data_map)
+ 	// before compressing to CSR. Only supports a single residual vector and a single matrix at a time
+ 	// (n_vector==1, n_matrix==1) and requires a PeriodicOrbitHandler to be the active assembly handler.
+	void Problem::sparse_assemble_row_or_column_compressed_for_periodic_orbit(oomph::Vector<int*>& column_or_row_index,oomph::Vector<int*>& row_or_column_start,oomph::Vector<double*>& value,oomph::Vector<unsigned>& nnz,oomph::Vector<double*>& residuals,bool compressed_row_flag)
+  	{
 		// Periodic orbits would have very huge elemental Jacobians, so we must assemble them with block jacobians
-		
+
     	const unsigned long n_elements = mesh_pt()->nelement();
     	unsigned long el_lo = 0;
     	unsigned long el_hi = n_elements - 1;
@@ -2079,6 +2622,9 @@ namespace pyoomph
 		}
   	}
 
+    // Overrides oomph-lib's sparse assembly dispatcher: routes to the periodic-orbit-specific
+    // implementation when a PeriodicOrbitHandler is active, otherwise falls back to the normal
+    // oomph-lib assembly (which itself uses whichever Sparse_assembly_method is configured).
     void Problem::sparse_assemble_row_or_column_compressed(oomph::Vector<int*>& column_or_row_index,oomph::Vector<int*>& row_or_column_start,oomph::Vector<double*>& value,oomph::Vector<unsigned>& nnz,oomph::Vector<double*>& residual,bool compressed_row_flag)
 	{
 		if (dynamic_cast<PeriodicOrbitHandler*>(this->assembly_handler_pt()))
@@ -2093,9 +2639,52 @@ namespace pyoomph
 	}
 
 
+	// NOTE: currently unimplemented (unconditionally throws below) - intended to precompute, for every
+	// global equation, the set of Jacobian entries (global_eqs_to_jacobian_buffer_index) it contributes
+	// to, so a later assembly pass could write directly into a preallocated buffer instead of building
+	// the sparsity pattern from scratch each time. Left in place (with the working code commented out)
+	// as a starting point for a future performance optimization.
+	void Problem::update_jacobian_csr_structure()
+	{
+		//unsigned ndof = this->get_n_unaugmented_dofs();
+		if (this->get_n_unaugmented_dofs()!=0) throw_runtime_error("This does not work if you have augmented dofs");
+		global_eqs_to_jacobian_buffer_index.resize(this->ndof());
+		for (unsigned i = 0; i < this->ndof(); i++)
+		{
+			global_eqs_to_jacobian_buffer_index[i].clear();
+		}
+		throw_runtime_error("Implement and check performance");
+		for (unsigned int ie=0;ie<mesh_pt()->nelement();ie++)
+		{
+			/*
+			oomph::GeneralisedElement* elem_pt = mesh_pt()->element_pt(ie);
+			const unsigned nvar = assembly_handler_pt()->ndof(elem_pt);
+			for (unsigned i = 0; i < nvar; i++)
+			{
+				unsigned eqn_number = assembly_handler_pt()->eqn_number(elem_pt, i);
+				for (unsigned j = 0; j < nvar; j++)
+				{
+					double value = el_jacobian(i, j);
+					if (std::fabs(value) > Numerical_zero_for_sparse_assembly)
+					{
+						unsigned unknown = assembly_handler_pt()->eqn_number(elem_pt, j);	
+						global_eqs_to_jacobian_buffer_index[eqn_number].insert(unknown);
+					}
+				}
+			}
+				*/
+		}
+	}
 
- 	void Problem::sparse_assemble_row_or_column_compressed_base_problem(oomph::Vector<int*>& column_or_row_index,oomph::Vector<int*>& row_or_column_start,oomph::Vector<double*>& value,oomph::Vector<unsigned>& nnz,oomph::Vector<double*>& residuals,bool compressed_row_flag)
-  	{    				
+ 	// Sparse assembly of only the "base" (unaugmented) part of the problem, i.e. restricted to the first
+ 	// get_n_unaugmented_dofs() equations/dofs - used while an augmented system (bifurcation tracking,
+ 	// arclength, custom DofAugmentations) is active and the base-problem contribution to the bordered
+ 	// system's residual/Jacobian block must be assembled separately from the augmentation rows/columns.
+ 	// Structurally mirrors sparse_assemble_row_or_column_compressed_for_periodic_orbit / oomph-lib's own
+ 	// generic sparse assembly (map-based per-row/column accumulation, then compression to CSR); only
+ 	// supports the non-distributed, non-MPI-parallel case for now (see the throws below).
+	void Problem::sparse_assemble_row_or_column_compressed_base_problem(oomph::Vector<int*>& column_or_row_index,oomph::Vector<int*>& row_or_column_start,oomph::Vector<double*>& value,oomph::Vector<unsigned>& nnz,oomph::Vector<double*>& residuals,bool compressed_row_flag)
+  	{
     	const unsigned long n_elements = mesh_pt()->nelement();
     	unsigned long el_lo = 0;
     	unsigned long el_hi = n_elements - 1;
@@ -2327,6 +2916,11 @@ namespace pyoomph
 
 
 
+	// Appends the vectors/scalars/parameters registered in aug to the problem's dof pointer array (as raw
+	// pointers to the augmentation's own storage, or to a global parameter's value()), remembers the
+	// original (unaugmented) dof count in n_unaugmented_dofs, finalizes aug's split_offsets so aug.split()
+	// can later decompose the augmented dof vector, and rebuilds the dof distribution to the new size.
+	// Only one augmentation may be active at a time (see reset_augmented_dof_vector_to_nonaugmented()).
 	void Problem::add_augmented_dofs(DofAugmentations &aug)
 	{
 		if (this->n_unaugmented_dofs!=0)
@@ -2364,6 +2958,14 @@ namespace pyoomph
 	}
 
 
+	// Assembles several requested quantities ("what", paired with "contributions" restricting which
+	// residual contribution each applies to, and "params" naming any parameters needed for parameter
+	// derivatives/Hessian-vector products) in a single elemental assembly pass: temporarily installs a
+	// CustomMultiAssembleHandler as the active assembly handler (which knows how to pack all requested
+	// residual vectors/Jacobian-like matrices as the "vectors"/"matrices" of a generic sparse assembly),
+	// runs sparse_assemble_row_or_column_compressed_base_problem(), then unpacks the resulting raw
+	// buffers into plain std::vectors (data/csrdata) for return to the caller (e.g. the Python binding),
+	// freeing the raw buffers as it goes. Always operates on the unaugmented dof count.
 	void Problem::assemble_multiassembly(std::vector<std::string> what,std::vector<std::string> contributions,std::vector<std::string> params,std::vector<std::vector<double>> & hessian_vectors,std::vector<unsigned> & hessian_vector_indices,std::vector<std::vector<double>> & data,std::vector<std::vector<int>> &csrdata,unsigned & ndof,std::vector<int> & return_indices)
 	{
 		if (what.size()!=contributions.size()) throw_runtime_error("Number of what and contributions must match");
@@ -2407,13 +3009,24 @@ namespace pyoomph
 			delete [] column_or_row_index[i];
 		}
 
-		//TODO: Fill the data
 	}
 
 
+	// Rebuilds the global bookkeeping of "defined fields" (all field names known across every loaded
+	// bulk/interface code) and, for every named residual/Jacobian combination, which fields contribute to
+	// its residual and which (field,field) pairs contribute to its Jacobian - both as booleans
+	// (residual_contributing_fields/jacobian_contributing_fields) and as the actual set of codes
+	// responsible (residual_contributing_codes/jacobian_contributing_codes), the latter mainly used for
+	// diagnostics (see get_jacobian_information_string()). Finally, for each residual, marks fields that
+	// have no Jacobian contribution in either their row or their column
+	// (pin_due_to_empty_jacobian_row_or_col) - such fields would make the Jacobian singular and must be
+	// pinned when that residual is active (see _set_solved_residual()). Must be called whenever the set
+	// of loaded codes changes (loading new equations) and before equation numbering can rely on the
+	// pinning information being up to date.
 	void Problem::assemble_defined_field_list()
 	{
 		defined_fields.clear();
+		defined_fields_to_domain.clear();
 		residual_names.clear();
 		std::set<std::string> field_set;
 		std::set<std::string> res_jac_combis;
@@ -2431,6 +3044,7 @@ namespace pyoomph
 					field_set.insert(fn);
 					field_name_to_index[fn]=defined_fields.size();	
 					defined_fields.push_back(fn);	
+					defined_fields_to_domain.push_back(dc);
 				}
 			}
 			for (unsigned i=0;i<ft->num_res_jacs;i++)
@@ -2467,7 +3081,11 @@ namespace pyoomph
 						break;
 					}
 				}
-				if (my_i==-1) continue; // This code does not contribute to this residual at all
+				if (my_i==-1) 
+				{
+					//std::cout << "Warning: Could not find a contribution entry for residual/jacobian combination " << residual_names[i] << " in code of " << dc->get_file_name() << ". This code will not contribute to this residual/jacobian combination." << std::endl;
+					continue; // This code does not contribute to this residual at all
+				}
 				for (unsigned j=0;j<ft->contribution_entries_size;j++)
 				{
 					std::string fn=ft->contribution_names[j];
@@ -2476,9 +3094,9 @@ namespace pyoomph
 						throw_runtime_error("Undefined field " + fn + " in contribution entry for residual/jacobian combination " + residual_names[i]);
 					}
 					unsigned row_index=field_name_to_index[fn];
-					residual_contributing_fields[i][row_index]=residual_contributing_fields[i][row_index]| ft->contributes_to_residual[i][j];
+					residual_contributing_fields[i][row_index]=residual_contributing_fields[i][row_index]| ft->contributes_to_residual[my_i][j];
 
-					if (ft->contributes_to_residual[i][j])
+					if (ft->contributes_to_residual[my_i][j])
 					{
 						residual_contributing_codes[i][row_index].insert(dc);
 					}
@@ -2491,8 +3109,9 @@ namespace pyoomph
 							throw_runtime_error("Undefined field " + fn2 + " in contribution entry for residual/jacobian combination " + residual_names[i]);
 						}
 						unsigned col_index=field_name_to_index[fn2];
-						jacobian_contributing_fields[i][row_index][col_index]=jacobian_contributing_fields[i][row_index][col_index] | ft->contributes_to_jacobian[i][j][k];
-						if (ft->contributes_to_jacobian[i][j][k])
+						//std::cout << "in code " << dc->get_file_name() << ": Checking jacobian contribution for residual/jacobian combination " << residual_names[i] << " for row field " << fn << " and column field " << fn2 << " indices " << row_index << "," << col_index << "  my_i " << my_i << " j,k "<< j << "," << k << " VALUE " << ft->contributes_to_jacobian[my_i][j][k] << std::endl;
+						jacobian_contributing_fields[i][row_index][col_index]=jacobian_contributing_fields[i][row_index][col_index] | ft->contributes_to_jacobian[my_i][j][k];
+						if (ft->contributes_to_jacobian[my_i][j][k])
 						{
 							jacobian_contributing_codes[i][row_index][col_index].insert(dc);
 						}
@@ -2501,23 +3120,34 @@ namespace pyoomph
 				
 			}
 		}
-		pin_due_to_empty_jacobian_row.resize(residual_names.size(),std::vector<bool>(defined_fields.size(),false));
+		// A field must be pinned for a given residual if it has no Jacobian contribution as a row
+		// (nothing derives w.r.t. it, i.e. no equation actually constrains it) or as a column (its own
+		// equation - if any - does not depend on any field, which cannot happen if it has a row contribution,
+		// but is checked independently since row and column may come from different res/jac entries).
+		pin_due_to_empty_jacobian_row_or_col.resize(residual_names.size(),std::vector<bool>(defined_fields.size(),false));
 		for (unsigned i=0;i<residual_names.size();i++)
 		{
 			for (unsigned j=0;j<defined_fields.size();j++)
 			{
-				bool has_contribs=false;
+				bool has_row_contribs=false;
+				bool has_col_contribs=false;
 				for (unsigned k=0;k<defined_fields.size();k++)
 				{
 					if (jacobian_contributing_fields[i][j][k])
 					{
-						has_contribs=true;
-						break;
+						has_row_contribs=true;		
+						if (has_col_contribs) break;				
+					}
+					if (jacobian_contributing_fields[i][k][j])
+					{
+						has_col_contribs=true;
+						if (has_row_contribs) break;						
 					}
 				}
-				if (!has_contribs)
+				if (!has_row_contribs || !has_col_contribs)
 				{
-					pin_due_to_empty_jacobian_row[i][j]=true;
+					//std::cout << "Pinning field " << defined_fields[j] << " for residual/jacobian combination " << residual_names[i] << " because it has no jacobian contributions in row or column direction" << std::endl;
+					pin_due_to_empty_jacobian_row_or_col[i][j]=true;
 				}
 			}
 		}
@@ -2556,28 +3186,43 @@ namespace pyoomph
 			}
 		}
 		
-		removed_fields_due_to_missing_jacobian_row.resize(defined_fields.size(),false);
+		removed_fields_due_to_missing_jacobian_row_or_col.resize(defined_fields.size(),false);
 		
 	}
 
 
+	// Whether the field with the given global field index has actually been removed from the dofs
+	// because it had no Jacobian row/column contribution under the currently active residual (see
+	// _set_solved_residual()); negative indices (fields that cannot be attributed to a single global
+	// field, e.g. augmentation dofs) are always reported as not removed.
 	bool Problem::is_field_removed_from_dofs_due_to_missing_jacobian_row(int global_field_index)
 	{
 		if (global_field_index<0) return false;
-		else return removed_fields_due_to_missing_jacobian_row[global_field_index];
+		else return removed_fields_due_to_missing_jacobian_row_or_col[global_field_index];
 	}
-	std::string Problem::get_jacobian_information_string()
+
+	// Builds a human-readable report of the Jacobian sparsity structure computed by
+	// assemble_defined_field_list() - for every named residual/Jacobian combination, which fields are
+	// defined, which contribute to the residual, and (as an ASCII matrix, for small enough problems) the
+	// Jacobian contribution pattern between fields, flagging fields that had to be pinned due to a
+	// missing row/column. Returns the report string together with a bool that is false if any problem
+	// (e.g. a field with an empty Jacobian row/column) was found, intended to help users debug singular
+	// Jacobians / incompletely specified equation systems.
+	std::tuple<std::string,bool> Problem::get_jacobian_information_string()
 	{
 		std::ostringstream ss;
+		bool all_good=true;
 		ss << "Defined fields: " << std::endl;
 		for (unsigned int i=0;i<defined_fields.size();i++)
 		{
 			ss << "\t" << i << "\t" << defined_fields[i] << std::endl;
 		}
 		ss << std::endl;
+		std::vector<bool> has_any_contributions(defined_fields.size(),false);
 		for (unsigned int ri=0;ri<residual_names.size();ri++)
 		{
 			std::string combi=residual_names[ri];
+			bool ignored_residuals=true; // Happens e.g. for azimuthal contributions
 			if (combi=="") ss << "Jacobian Structure -- Default Residuals" << std::endl;
 			else ss << "Jacobian Structure -- Custom Residuals \"" << combi << "\"" << std::endl;
 			if (defined_fields.size()>999)
@@ -2589,15 +3234,16 @@ namespace pyoomph
 				ss << "\t    | ";
 				for (unsigned int i=0;i<defined_fields.size();i++)				
 				{
-					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
 					else if (i/100) ss << i/100 << " ";
 					else ss << "  ";
+					has_any_contributions[i]=true;
 				}
 				ss << "|" << std::endl;
 				ss << "\t    | ";
 				for (unsigned int i=0;i<defined_fields.size();i++)				
 				{
-					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
 					else if ((i%100)/10) ss << (i%100)/10 << " ";
 					else ss << "  ";
 				}
@@ -2605,14 +3251,14 @@ namespace pyoomph
 				ss << "\t    | ";
 				for (unsigned int i=0;i<defined_fields.size();i++)				
 				{
-					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
 					else ss << i%10 << " ";
 				}
 				ss << "|" << std::endl;
 				ss << "\t----|";
 				for (unsigned int i=0;i<defined_fields.size();i++)				
 				{
-					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
 					else ss  << "--";
 				}
 				ss <<"-|" << std::endl;
@@ -2622,22 +3268,23 @@ namespace pyoomph
 				ss << "\t    | ";
 				for (unsigned int i=0;i<defined_fields.size();i++)				
 				{
-					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
 					else if (i/10) ss << i/10 << " ";
 					else ss << "  ";
+					has_any_contributions[i]=true;
 				}
 				ss << "|" << std::endl;
 				ss << "\t    | ";
 				for (unsigned int i=0;i<defined_fields.size();i++)				
 				{
-					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
 					else ss << i%10 << " ";
 				}
 				ss << "|" << std::endl;
 				ss << "\t----|";
 				for (unsigned int i=0;i<defined_fields.size();i++)				
 				{
-					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
 					else ss  << "--";
 				}
 				ss << "-|" <<std::endl;
@@ -2647,14 +3294,15 @@ namespace pyoomph
 				ss << "\t    | ";
 				for (unsigned int i=0;i<defined_fields.size();i++)				
 				{
-					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
 					else ss << i << " ";
+					has_any_contributions[i]=true;
 				}
 				ss <<"|"<< std::endl;
 				ss << "\t----|";
 				for (unsigned int i=0;i<defined_fields.size();i++)				
 				{
-					if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
 					else ss  << "--";
 				}
 				ss << "-|" << std::endl;
@@ -2663,12 +3311,12 @@ namespace pyoomph
 			std::vector<std::set<DynamicBulkElementCode*>> listed_domain_contributions;
 			for (unsigned int i=0;i<defined_fields.size();i++)
 			{				
-				if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+				if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
 				else ss << "  ";
 				ss<<"\t" << std::setfill(' ') << std::setw(3) << i << " | ";		
 				for (unsigned int j=0;j<defined_fields.size();j++)
 				{
-					if (pin_due_to_empty_jacobian_row[ri][j]) continue;
+					if (pin_due_to_empty_jacobian_row_or_col[ri][j]) continue;
 					if (jacobian_contributing_fields[ri][i][j]) 
 					{
 						unsigned found=listed_domain_contributions.size();
@@ -2684,9 +3332,11 @@ namespace pyoomph
 						{
 							listed_domain_contributions.push_back(jacobian_contributing_codes[ri][i][j]);
 						}
+						// Each distinct set of contributing codes gets its own letter (A, B, C, ...), printed
+						// in the matrix cell and resolved to the actual domain name(s) below the matrix.
 						std::string symbol=" ";
 						symbol[0]=(char)('A' + found + (found>25 ? 6 : 0));
-						
+
 						ss << symbol << " ";
 					}
 					else ss << "  ";
@@ -2697,17 +3347,17 @@ namespace pyoomph
 			ss << "\t----|";
 			for (unsigned int i=0;i<defined_fields.size();i++)
 			{
-				if (pin_due_to_empty_jacobian_row[ri][i]) continue;
+				if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
 				ss << "--";
 			}
 			ss << "-|" << std::endl;
 			ss<< "\tRes | " ;
-			std::set<unsigned> residual_contributions_with_zero_jacobian_row;
+			std::set<unsigned> residual_contributions_with_zero_jacobian_row_or_col;
 			for (unsigned int i=0;i<defined_fields.size();i++)
 			{
-				if (pin_due_to_empty_jacobian_row[ri][i]) 
+				if (pin_due_to_empty_jacobian_row_or_col[ri][i]) 
 				{
-					if (residual_contributing_fields[ri][i]) residual_contributions_with_zero_jacobian_row.insert(i);
+					if (residual_contributing_fields[ri][i]) residual_contributions_with_zero_jacobian_row_or_col.insert(i);
 					continue;
 				}
 				if (residual_contributing_fields[ri][i]) 
@@ -2726,6 +3376,7 @@ namespace pyoomph
 							listed_domain_contributions.push_back(residual_contributing_codes[ri][i]);
 						}
 						std::string symbol=" ";
+						for  (auto * dc : listed_domain_contributions[found]) if (!dc->get_code()->is_residual_assembly_ignored(residual_names[ri])) ignored_residuals=false;
 						symbol[0]=(char)('A' + found + (found>25 ? 6 : 0));						
 						ss << symbol << " ";
 					}
@@ -2746,20 +3397,48 @@ namespace pyoomph
 			}
 			ss << std::endl;
 
-			if (residual_contributions_with_zero_jacobian_row.size()>0)
+			if (residual_contributions_with_zero_jacobian_row_or_col.size()>0 && !ignored_residuals)
 			{
-				ss << "\t|WARNING|: Following fields have residual contributions, but a zero Jacobian row: ";
-				unsigned int count=residual_contributions_with_zero_jacobian_row.size();
-				for (auto i : residual_contributions_with_zero_jacobian_row)
+				ss << "\t|WARNING|: Following fields have residual contributions, but a zero Jacobian row/column: ";
+				unsigned int count=residual_contributions_with_zero_jacobian_row_or_col.size();
+				for (auto i : residual_contributions_with_zero_jacobian_row_or_col)
 				{
-					ss << i << (--count ? ", " : "");
+					ss << i << +" ("+defined_fields[i]+")"+ (--count ? ", " : "");
 				}
 				ss << std::endl;
 				ss << std::endl;
+				all_good=false;
 			}
 			
 		}
-		return ss.str();
+
+		for (unsigned int i=0;i<defined_fields.size();i++)
+		{
+			if (!has_any_contributions[i])
+			{
+				// Check if it is pinned, then it is fine
+				DynamicBulkElementCode * dc=defined_fields_to_domain[i];
+				auto *ft=dc->get_func_table();
+				bool pinned=false;
+				for (unsigned int j=0;j<ft->Dirichlet_set_size;j++)
+				{
+					if (ft->dirichlet_field_index_to_global_field_index[j]==(int)i)
+					{						
+						if (ft->Dirichlet_set[j])
+						{
+							//std::cout << "IT IS PINNED " << i << "  " << j << std::endl;
+							pinned=true;
+							break;
+						}
+					}
+				}
+				if (pinned) continue;
+				ss << "\t|WARNING|: Field " << i << " \"" << defined_fields[i] << "\" has an empty row or column in all Jacobians." << std::endl;
+				all_good=false;
+			}
+		}
+
+		return std::make_tuple(ss.str(), all_good);
 		
 	}
 
@@ -2828,8 +3507,9 @@ namespace pyoomph
 		if (dofptr.size()!=split_offsets.back()) throw_runtime_error("Invalid number of dofs. Likely, the dofs has changed meanwhile");
 		std::vector<std::vector<double>> res;
 		if (endindex<0) endindex=split_offsets.size()+(endindex);		
-		if (endindex>=split_offsets.size())  throw_runtime_error("Invalid end index");
-		for (unsigned int i=startindex;i<endindex;i++)
+		if (endindex<0) return res;
+		if (endindex>=(int)split_offsets.size())  throw_runtime_error("Invalid end index");
+		for (int i=(int)startindex;i<endindex;i++)
 		{
 			unsigned length=split_offsets[i+1]-split_offsets[i];
 			//std::cout << "SPlIT INDEX "<< i << " " << length << " FROM " << split_offsets[i] << " TO " << split_offsets[i+1] <<std::endl;

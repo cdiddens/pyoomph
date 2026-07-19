@@ -1,10 +1,11 @@
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -19,7 +20,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
 
@@ -54,9 +55,9 @@ class HelicalLineMesh(MeshTemplate):
             n2 = node_at_parameter((i + 1) / self.N)
             domain.add_line_1d_C2(n0, n1, n2)  # add a second order line element
             if i == 0:  # Marking the start boundary:
-                self.add_nodes_to_boundary("start", [n0])
+                self.add_facet_to_boundary("start", [n0])
             elif i == self.N - 1:  # Marking the end boundary:
-                self.add_nodes_to_boundary("end", [n2])
+                self.add_facet_to_boundary("end", [n2])
 
 
 class MeshTestProblem(Problem):

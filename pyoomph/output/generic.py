@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -34,11 +35,12 @@ from ..meshes.mesh import ODEStorageMesh
 
 from ..generic.codegen import BaseEquations
 import inspect
-import _pyoomph
+from .. import _pyoomph_core as _pyoomph
 
 from scipy.io import savemat,loadmat #type:ignore
 
 from ..typings import *
+from ..generic.mpi import get_mpi_rank
 import numpy
 
 if TYPE_CHECKING:
@@ -74,6 +76,14 @@ class _BaseOutputter:
         return self.problem.get_current_time(dimensional=not nondimensional,as_float=True)
 
     def clean_up(self)->None:
+        pass
+
+    def close(self)->None:
+        # Close any open output file handle(s). Unlike clean_up() (called after every
+        # single output() step for transient per-step state), this is only called once,
+        # by Problem.release(), to release persistently-held file handles (e.g. a
+        # once-opened, append-mode file written to across the whole run) proactively
+        # instead of leaving them for eventual garbage collection.
         pass
 
     def set_active_on_stages(self,stages:Optional[Union[str,Set[str]]]):
@@ -177,7 +187,7 @@ class _TextOutput(_BaseNumpyOutput):
             Path(os.path.join(self.problem.get_output_directory(self._orbit_subdir)),self.fname_trunk).mkdir(parents=True, exist_ok=True) 
         
 
-    def output(self,step:int):
+    def output(self,step:int):        
         mesh = self.mesh
         if (not mesh.is_mesh_distributed()) and self._mpi_rank > 0:
             return
@@ -642,12 +652,11 @@ class _BaseODEOutput(_BaseOutputter):
 
     def init(self,eqtree:"EquationTree",continue_info:Optional[Dict[str,Any]]=None,rank:int=0):
         self._eqtree=eqtree
-        self._mpi_rank=rank
-        self._element=self._odemesh._get_ODE("ODE")
+        self._mpi_rank=rank        
         pass
 
     def get_ODE_values(self)->Tuple[NPFloatArray,Dict[str,int]]:
-        values,fieldinds=self._element.to_numpy()
+        values,fieldinds=self._eqtree._mesh._element._ode_elem_to_numpy()
         return values,fieldinds
 
     def output(self,step:int)->None:
@@ -668,12 +677,16 @@ class _ODEFileOutput(_BaseODEOutput):
         self.hide_underscore=hide_underscore
         if self.hide_underscore:
             raise RecursionError("TODO: Hiding underscore")
-        self.file:Any=None
-        self._element=self._odemesh._get_ODE("ODE")
+        self.file:Any=None        
         self._eqtree=eqtree
         self.first_column=first_column
         self.continue_info=continue_info
-        
+
+    def close(self)->None:
+        if self.file is not None:
+            self.file.close()
+            self.file=None
+
     def change_output_directory(self,newdir:str,eqtree:"EquationTree"):
         oldname=self.fname
         self.fname = os.path.join(newdir, os.path.basename(self.fname))        
@@ -687,10 +700,11 @@ class _ODEFileOutput(_BaseODEOutput):
     def init(self,eqtree:"EquationTree",continue_info:Optional[Dict[str,Any]]=None,rank:int=0):
         super().init(eqtree,continue_info,rank)
         assert self.fname is not None
-        if continue_info is None:
-            self.file = open(self.fname, "w")
-        else:            
-            self.file=open(self.fname,"a")
+        if get_mpi_rank()==0:
+            if continue_info is None:
+                self.file = open(self.fname, "w")
+            else:            
+                self.file=open(self.fname,"a")
 
         values, fieldinds = self.get_ODE_values()
         obs=self._eqtree.get_mesh().evaluate_all_observables()
@@ -704,7 +718,7 @@ class _ODEFileOutput(_BaseODEOutput):
         #for i,n in enumerate(locs,start=len(values)+len(obs)):
          #   descs[i]=n
         
-        _, indices = self._element.to_numpy()
+        _, indices = self._odemesh._element._ode_elem_to_numpy()
         scales:List[ExpressionOrNum] = [1.0] * (len(indices)+len(obs)) #+len(locs)
         for k, i in indices.items():            
             s = self._eqtree.get_equations().get_scaling(k)
@@ -766,15 +780,17 @@ class _ODEFileOutput(_BaseODEOutput):
             else:
                 raise RuntimeError(repr(fc))
 
-        if continue_info is None:
-            self.file.write("#"+"\t".join(firstcols+descs)+"\n")
+        if get_mpi_rank()==0:
+            if continue_info is None:
+                self.file.write("#"+"\t".join(firstcols+descs)+"\n")
         self.firsttime=True
 
     def output(self,step:int):
+        
         values,_=self.get_ODE_values()
         obs=self._eqtree.get_mesh().evaluate_all_observables()
         
-        _, indices = self._element.to_numpy()
+        _, indices = self._odemesh._element._ode_elem_to_numpy()
         self._scales:List[ExpressionOrNum] = [1.0] * (len(indices)+len(obs))
         for k, i in indices.items():
             s = self._eqtree.get_equations().get_scaling(k)
@@ -810,9 +826,10 @@ class _ODEFileOutput(_BaseODEOutput):
                 firstcols.append(str(fc.value))
             else:
                 raise RuntimeError(repr(fc))
-
-        self.file.write("\t".join(firstcols+list(map(str,values)))+addstr+"\n")
-        self.file.flush()
+        
+        if get_mpi_rank()==0:
+            self.file.write("\t".join(firstcols+list(map(str,values)))+addstr+"\n")
+            self.file.flush()
 ######################
 
 class GenericOutput(BaseEquations):
@@ -823,6 +840,10 @@ class GenericOutput(BaseEquations):
     def after_remeshing(self,eqtree:"EquationTree"):
         for _,out in self._outputter.items():
             out.after_remeshing(eqtree)
+
+    def _release_output_files(self)->None:
+        for out in self._outputter.values():
+            out.close()
 
     def _construct_outputter_for_eq_tree(self,eqtree:"EquationTree",continue_info:Optional[Dict[str,Any]],mpirank:int)->_BaseOutputter:
         raise NotImplementedError("Implement this")
@@ -1020,6 +1041,11 @@ class _IntegralObservableOutput(_BaseOutputter):
         self._continue_info=continue_info
         self.first_column=first_column
 
+    def close(self)->None:
+        for f in self._files.values():
+            f.close()
+        self._files={}
+
     def after_remeshing(self,eqtree:"EquationTree"):
         self._mesh=eqtree.get_mesh()
 
@@ -1043,7 +1069,7 @@ class _IntegralObservableOutput(_BaseOutputter):
         
 
     def _eval_dependent_funcs(self,intres:Dict[str,Expression]) -> Dict[str, float]:
-        import pyoomph.equations.generic
+        from ..equations.generic import DependentIntegralObservable
         deps=self._mesh.get_code_gen()._dependent_integral_funcs #type:ignore
         args:Dict[str,Expression]={k:v for k,v in intres.items()}
         res:Dict[str,Expression] = {k: v for k, v in intres.items()}
@@ -1056,7 +1082,7 @@ class _IntegralObservableOutput(_BaseOutputter):
                 l=deps[r]
                 all_present=True
 
-                if isinstance(l,pyoomph.equations.generic.DependentIntegralObservable):
+                if isinstance(l,DependentIntegralObservable):
                     reqargs=l.argnames
                     func_to_call=l.func
                 else:
@@ -1185,18 +1211,20 @@ class _IntegralObservableOutput(_BaseOutputter):
         assert fexts is not None
         if not isinstance(fexts,list):
             fexts=[fexts]
-        for ext in fexts:
-            if ext in ["mat","MAT"]:
-                continue
-            if ext not in self._files.keys():
-                _filename=self._filetrunk+"."+ext
-                if self._continue_info is None:
-                    self._files[ext]=open(_filename,"wt")
-                else:
-                    self._files[ext] = open(_filename, "at")
-                    #TODO: Trim here the output
-                    #print(self._continue_info)
-                    #raise RuntimeError("TODO")
+        
+        if get_mpi_rank()==0:
+            for ext in fexts:
+                if ext in ["mat","MAT"]:
+                    continue
+                if ext not in self._files.keys():
+                    _filename=self._filetrunk+"."+ext
+                    if self._continue_info is None:
+                        self._files[ext]=open(_filename,"wt")
+                    else:
+                        self._files[ext] = open(_filename, "at")
+                        #TODO: Trim here the output
+                        #print(self._continue_info)
+                        #raise RuntimeError("TODO")        
         firsttime=False
         if self._iexprs is None:
             firsttime=True
@@ -1249,6 +1277,7 @@ class _IntegralObservableOutput(_BaseOutputter):
                 raise RuntimeError(repr(fc))
 
         #line=[self.get_time()]
+        
         for n, v in sorted(all.items()):
             if n[0] != "_":
                 line.append(str(v))

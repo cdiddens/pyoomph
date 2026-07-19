@@ -1,10 +1,11 @@
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -19,7 +20,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
 
@@ -45,7 +46,7 @@ class RectangularQuadMeshWithInterface(RectangularQuadMesh):
 			nl = self.add_node_unique(ix * self.size[0] / self.N[0] + self.lower_left[0], y)
 			nr = self.add_node_unique((ix+1) * self.size[0] / self.N[0] + self.lower_left[0], y)
    			# And add them to the internal interface boundary
-			self.add_nodes_to_boundary(self.interface_name, [nl, nr]) 
+			self.add_facet_to_boundary(self.interface_name, [nl, nr]) 
 		# Also mark it as an internal boundary
 		self.set_boundary_as_interior(self.interface_name)
   

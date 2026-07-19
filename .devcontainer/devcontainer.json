@@ -1,0 +1,16 @@
+{
+	"name": "pyoomph",
+	"build": {
+		"dockerfile": "Dockerfile"
+	},
+	"features": {
+		"ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {}
+	},
+	"mounts": [
+		"source=claude-code-config,target=/home/vscode/.claude,type=volume",
+		"source=pyoomph-cmake_build,target=${containerWorkspaceFolder}/cmake_build,type=volume",
+		"source=pyoomph-build,target=${containerWorkspaceFolder}/build,type=volume"
+	],
+	"remoteUser": "vscode",
+	"postCreateCommand": "git config --global --add safe.directory ${containerWorkspaceFolder} && sudo chown vscode:vscode ${containerWorkspaceFolder}/cmake_build ${containerWorkspaceFolder}/build && bash ./build_for_develop.sh"
+}

@@ -9,7 +9,7 @@ First of all, in order to have only Neumann conditions, the source term :math:`j
     
     \int_\Omega g \:\mathrm{d}^n x=-\int_{\Gamma}  j_\text{N} \:\mathrm{d}S \,.
 
-If this relation is not fulfilled, the equation in not well posed. If we would have a single Dirichlet condition, setting :math:`v=1` is not allowed, since test functions have to vanish on the Dirichlet boundaries and this requirement is not necessary any more.
+If this relation is not fulfilled, the equation is not well posed. If we had a single Dirichlet condition, setting :math:`v=1` is not allowed, since test functions have to vanish on the Dirichlet boundaries and this requirement is not necessary any more.
 
 There is another complication to obtain the solution, namely the fact that the solution :math:`u` is not unique: If :math:`u` is a solution, :math:`u+c` for any constant :math:`c` is a solution as well. Any Dirichlet condition would again specify a unique constant :math:`c` for which this Dirichlet condition is fulfilled, which renders the solution unique again, but in absence of any Dirichlet condition, there is an infinite number of solutions.
 
@@ -31,76 +31,28 @@ with respect to :math:`u` and :math:`\lambda`, which gives by variation the addi
 
 where :math:`\mu` is the test function corresponding to :math:`\lambda`. Therefore, we need to augment our Poisson equation from :download:`poisson_neumann.py` by adding these terms to the residual as well:
 
-.. code:: python
+.. literalinclude:: poisson_pure_neumann_nullspace.py
+   :language: python
+   :start-at: from pyoomph import *
+   :end-at: self.add_residual(weak(u-self.average_value,ltest)+weak(l,utest))
 
-   from pyoomph import *
-   from pyoomph.expressions import *
-   # Load the Poisson equation for the previous class
-   from poisson_neumann import PoissonEquation,PoissonNeumannCondition
-
-   # Create a new Poisson equation that fixes the average with a Lagrange multiplier
-   class PoissonEquationWithNullspaceRemoval(PoissonEquation):
-       def __init__(self,lagrange_multiplier,average_value,*,name="u",space="C2",source=0):
-           # Initialize as before
-           super(PoissonEquationWithNullspaceRemoval, self).__init__(name=name,source=source,space=space)
-           # And store the lagrange multiplier reference
-           self.lagrange_multiplier=lagrange_multiplier
-           self.average_value=average_value # and the desired average value
-           
-       def define_residuals(self):
-           # Add the normal Poisson residuals
-           super(PoissonEquationWithNullspaceRemoval, self).define_residuals()
-
-           # Add the contributions from the Lagrange multiplier
-           l,ltest=self.lagrange_multiplier,testfunction(self.lagrange_multiplier)
-           u,utest=var_and_test(self.name)
-           self.add_residual(weak(u-self.average_value,ltest)+weak(l,utest))
-
-Obviously, we load the old class ``PoissonEquation`` and inherit from it. In the :py:meth:`~pyoomph.generic.codegen.BaseEquations.define_residuals`, we first use a ``super`` call to call :py:meth:`~pyoomph.generic.codegen.BaseEquations.define_residuals` of the non-augmented ``PoissonEquation`` to add the normal residuals to the weak form. Then, the missing terms are added. However, the Lagrange multiplier :math:`\lambda` is not defined yet and it cannot be defined in the ``PoissonEquationWithNullspaceRemoval`` class, since the latter will be restricted on the domain :math:`\Omega`. Any field definitions in the :py:meth:`~pyoomph.generic.codegen.BaseEquations.define_fields` method would hence add fields on :math:`\Omega`, but :math:`\lambda` is just a simple real number, not a field.
+Obviously, we load the old class ``PoissonEquation`` and inherit from it. In the :py:meth:`~pyoomph.generic.codegen.BaseEquations.define_residuals`, we first use a ``super`` call to call :py:meth:`~pyoomph.generic.codegen.BaseEquations.define_residuals` of the non-augmented ``PoissonEquation`` to add the normal residuals to the weak form. Then, the missing terms are added. However, the Lagrange multiplier :math:`\lambda` is not defined yet and it cannot be defined in the ``PoissonEquationWithNullspaceRemoval`` class, since the latter will be restricted to the domain :math:`\Omega`. Any field definitions in the :py:meth:`~pyoomph.generic.codegen.BaseEquations.define_fields` method would hence add fields on :math:`\Omega`, but :math:`\lambda` is just a simple real number, not a field.
 
 Therefore, :math:`\lambda` will be introduced by an own class. Since :math:`\lambda` has no spatial dependence, it can be best done by using the :py:class:`~pyoomph.generic.codegen.ODEEquations` class (see chapter :numref:`secode`), which allows the definition of real valued variables:
 
-.. code:: python
-
-   # A single "ODE", which is used as storage for the Lagrange multiplier value
-   class LagrangeMultiplierForPoisson(ODEEquations):
-       def __init__(self,name):
-           super(LagrangeMultiplierForPoisson, self).__init__()
-           self.name=name
-
-       def define_fields(self):
-           self.define_ode_variable(self.name)
+.. literalinclude:: poisson_pure_neumann_nullspace.py
+   :language: python
+   :start-at: # A single "ODE", which is used as storage for the Lagrange multiplier value
+   :end-at: self.define_ode_variable(self.name)
 
 Note that we do not add any residuals for :math:`\lambda` inside this class. The single purpose of this class is to provide the storage of a real-valued variable :math:`\lambda`, whereas the contributions to the residuals are entirely done in the weak form of the augmented Poisson equation.
 
 Finally, we need to couple both parts in the definition of the problem:
 
-.. code:: python
-
-   class PureNeumannPoissonProblem(Problem):
-       def define_problem(self):
-           mesh = LineMesh(minimum=-1, size=2, N=100)
-           self.add_mesh(mesh)
-
-           # Create the Lagrange multiplier (just a single value)
-           lagrange = LagrangeMultiplierForPoisson("lambda")
-           lagrange += ODEFileOutput() # Output it to file as well
-           self.add_equations(lagrange@"lambda_space") # And add it to a space called "lambda_space"
-
-           l=var("lambda",domain="lambda_space") # Bind it. Important to pass the domain name here!
-           # and pass it to the augmented Poisson equation
-           equations = PoissonEquationWithNullspaceRemoval(l,10,source=0)
-           equations += TextFileOutput() # output
-           # And the Neumann conditions
-           equations += PoissonNeumannCondition("u",-1) @ "left"
-           equations += PoissonNeumannCondition("u",1) @ "right"
-           self.add_equations(equations@"domain")
-
-
-   if __name__ == "__main__":
-       with PureNeumannPoissonProblem() as problem:
-           problem.solve()  # Solve the problem
-           problem.output()  # Write output
+.. literalinclude:: poisson_pure_neumann_nullspace.py
+   :language: python
+   :start-at: class PureNeumannPoissonProblem(Problem):
+   :end-at: problem.output()  # Write output
 
 In the :py:meth:`~pyoomph.generic.problem.Problem.define_problem` method, it is noteworthy that the ``LagrangeMultiplierForPoisson`` object is stored in another domain (named ``"lambda_space"``) than the Poisson equation. This is necessary, since the domain ``"domain"`` is already bound to the interval :math:`\Omega=[-1,1]` of the line mesh. By the :py:func:`~pyoomph.expressions.generic.var` statement, we bind the just allocated variable :math:`\lambda` to the local variable ``l`` and pass it together with the desired average value :math:`u_\text{avg}=10` to the ``PoissonEquationWithNullspaceRemoval`` object. Thereby, both parts, the augmented Poisson equation on :math:`\Omega` and the separately defined Lagrange multiplier :math:`\lambda` are coupled. The remainder is as before, but now two ``PoissonNeumannCondition`` objects are created.
 

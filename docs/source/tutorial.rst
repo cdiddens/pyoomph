@@ -2,8 +2,8 @@
 Pyoomph Tutorial
 ================
 
-:Author: Christian Diddens & Duarte Rocha
-:Date: 2025-01-13
+:Author: Christian Diddens, Duarte Rocha & Maxim de Wildt
+:Date: 2026-07-16
 
 
 .. toctree::

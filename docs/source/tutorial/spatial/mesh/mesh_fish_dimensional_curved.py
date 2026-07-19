@@ -1,10 +1,11 @@
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -19,7 +20,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
 
@@ -65,14 +66,17 @@ class FishMesh(MeshTemplate):
         # Curved entities
         upper_body_curve=self.create_curved_entity("circle_arc",n_upper_jaw,n_upper_body_fin,center=[0,0])
         lower_body_curve = self.create_curved_entity("circle_arc", n_lower_jaw, n_lower_body_fin, center=[0, 0])
-        self.add_facet_to_curve_entity([n_upper_jaw,n_upper_body_fin],upper_body_curve) # top body curve
-        self.add_facet_to_curve_entity([n_lower_body_fin, n_lower_jaw], lower_body_curve) # bottom body curve
+        self.add_facet_to_boundary("curved",[n_upper_jaw,n_upper_body_fin],curved_entity= upper_body_curve) # top body curve
+        self.add_facet_to_boundary("curved",[n_lower_body_fin, n_lower_jaw], curved_entity=lower_body_curve) # bottom body curve
 
         # Add nodes to boundaries
-        self.add_nodes_to_boundary("curved",[n_upper_body_fin, n_lower_body_fin,n_lower_jaw,n_upper_jaw]) # nodes on curved body parts
-        self.add_nodes_to_boundary("mouth", [ n_lower_jaw,n_upper_jaw,n_mouth_center])  # nodes of the mouth
-        self.add_nodes_to_boundary("fin",[n_upper_body_fin,n_lower_body_fin,n_center_fin_end,n_upper_fin_corner,n_lower_fin_corner]) # fin
-
+        self.add_facet_to_boundary("mouth", [ n_lower_jaw,n_mouth_center])  # nodes of the mouth
+        self.add_facet_to_boundary("mouth", [ n_upper_jaw,n_mouth_center])  # nodes of the mouth
+        self.add_facet_to_boundary("fin",[n_upper_body_fin,n_upper_fin_corner])
+        self.add_facet_to_boundary("fin",[n_upper_fin_corner,n_center_fin_end])
+        self.add_facet_to_boundary("fin",[n_lower_body_fin,n_lower_fin_corner])
+        self.add_facet_to_boundary("fin",[n_lower_fin_corner,n_center_fin_end])
+        
 
 class MeshTestProblem(Problem):
     def __init__(self):

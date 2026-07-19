@@ -8,7 +8,7 @@ For pyoomph, the conditions of the `GNU General Public License 3 <https://www.gn
    .. code-block:: text
 
       pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-      Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+      Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
       This program is free software: you can redistribute it and/or modify
       it under the terms of the GNU General Public License as published by
@@ -23,7 +23,7 @@ For pyoomph, the conditions of the `GNU General Public License 3 <https://www.gn
       You should have received a copy of the GNU General Public License
       along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-A `copy of the license <https://github.com/pyoomph/pyoomph/blob/main/COPYING>`__ can be found in distribution. Mind also the following licenses
+A `copy of the license <https://github.com/pyoomph/pyoomph/blob/main/COPYING>`__ can be found in the distribution. Mind also the following licenses:
 
 #. pyoomph contains code taken from other authors/projects:
 
@@ -39,7 +39,8 @@ A `copy of the license <https://github.com/pyoomph/pyoomph/blob/main/COPYING>`__
 
             Copyright 2008-2009  Marius Muja (mariusm@cs.ubc.ca). All rights reserved.
             Copyright 2008-2009  David G. Lowe (lowe@cs.ubc.ca). All rights reserved.
-            Copyright 2011 Jose L. Blanco (joseluisblancoc@gmail.com). All rights reserved.
+            Copyright 2011-2026  Jose Luis Blanco (joseluisblancoc@gmail.com).
+              All rights reserved.
 
             THE BSD LICENSE
 
@@ -94,7 +95,7 @@ A `copy of the license <https://github.com/pyoomph/pyoomph/blob/main/COPYING>`__
 
    -  The file `src/pyginacstruct.hpp <https://github.com/pyoomph/pyoomph/blob/main/src/pyginacstruct.hpp>`__ is strongly based on the file `structure.h <https://www.ginac.de/ginac.git/?p=ginac.git;a=blob_plain;f=ginac/structure.h;hb=HEAD>`__ of `GiNaC <https://www.ginac.de/>`__, `[GPL v2 or later license] <https://www.ginac.de/ginac.git/?p=ginac.git;a=blob_plain;f=COPYING;hb=HEAD>`__.
 
-   -  A copy of the library `Project Nayuki/smallest enslosing circle <https://www.nayuki.io/page/smallest-enclosing-circle>`__, `[LGPL v3 or later license] <https://github.com/nayuki/Nayuki-web-published-code/blob/master/smallest-enclosing-circle/COPYING.LESSER.txt>`__ is added (after adding type specifications) to `pyoomph/utils/smallest_circle.py <https://github.com/pyoomph/pyoomph/blob/main/pyoomph/utils/smallest_circle.py>`__.
+   -  A copy of the library `Project Nayuki/smallest enclosing circle <https://www.nayuki.io/page/smallest-enclosing-circle>`__, `[LGPL v3 or later license] <https://github.com/nayuki/Nayuki-web-published-code/blob/master/smallest-enclosing-circle/COPYING.LESSER.txt>`__ is added (after adding type specifications) to `pyoomph/utils/smallest_circle.py <https://github.com/pyoomph/pyoomph/blob/main/pyoomph/utils/smallest_circle.py>`__.
 
    -  Also, when using materials or the thermodynamic activity models AIOMFAC, original UNIFAC or modified UNIFAC (Dortmund), :ref:`please cite the relevant publications <secboxunifacinfo>`.
 
@@ -110,9 +111,9 @@ A `copy of the license <https://github.com/pyoomph/pyoomph/blob/main/COPYING>`__
 
    -  `python3.8\ + <https://www.python.org/>`__, `[PSF license] <https://docs.python.org/3/license.html>`__, also dynamically linked in the distribution as python wheels
 
-   -  `pybind11 <https://github.com/pybind/pybind11>`__, `[BSD-style license] <https://github.com/sizmailov/pybind11-stubgen/blob/master/LICENSE>`__, also statically linked in the distribution as python wheels
+   -  `pybind11 <https://github.com/pybind/pybind11>`__, `[BSD-style license] <https://github.com/pybind/pybind11/blob/master/LICENSE>`__, also statically linked in the distribution as python wheels
 
-   -  `pybind11-stubgen <https://github.com/sizmailov/pybind11-stubgen>`__, `[BSD-style license] <https://github.com/sizmailov/pybind11-stubgen/blob/master/LICENSE>`__
+   -  `pybind11-stubgen <https://github.com/pybind/pybind11-stubgen>`__, `[BSD 3-Clause license] <https://github.com/pybind/pybind11-stubgen/blob/main/LICENSE>`__, used to generate python stubs from the C++ core
 
    -  `pip <https://github.com/pypa/pip>`__, `[MIT license] <https://github.com/pypa/pip/blob/main/LICENSE.txt>`__
 
@@ -128,7 +129,9 @@ A `copy of the license <https://github.com/pyoomph/pyoomph/blob/main/COPYING>`__
 
    -  `meshio <https://github.com/nschloe/meshio>`__, `[MIT license] <https://github.com/nschloe/meshio/blob/main/LICENSE.txt>`__
 
-   -  `mpi4py <https://github.com/mpi4py/mpi4py/>`__, `[BSD 2-Clause "Simplified" license] <https://github.com/erdc/mpi4py/blob/master/LICENSE.txt>`__
+   -  `mpi4py <https://github.com/mpi4py/mpi4py/>`__, `[BSD 3-Clause license] <https://github.com/mpi4py/mpi4py/blob/master/LICENSE.rst>`__
+
+   -  `more_itertools <https://github.com/more-itertools/more-itertools>`__, `[MIT license] <https://github.com/more-itertools/more-itertools/blob/master/LICENSE>`__
 
    -  `scipy <https://github.com/scipy/scipy>`__, `[BSD-3-Clause license] <https://github.com/scipy/scipy/blob/main/LICENSES_bundled.txt>`__
 
@@ -145,12 +148,12 @@ A `copy of the license <https://github.com/pyoomph/pyoomph/blob/main/COPYING>`__
    -  `paraview <https://www.paraview.org/>`__, `[BSD 3-clause license] <https://www.paraview.org/license/>`__
    
    -  `setuptools <https://github.com/pypa/setuptools>`__, `[MIT license] <https://github.com/pypa/setuptools?tab=MIT-1-ov-file#readme>`__
-   
-   -  `pybind11-stubgen <https://github.com/sizmailov/pybind11-stubgen>`__, `[BSD 3-Clause license] <https://github.com/sizmailov/pybind11-stubgen?tab=License-1-ov-file#readme>`__ is used to generate python stubs from the C++ core
-   
-   -  `cibuildwheel <https://cibuildwheel.pypa.io>`__, `[BSD 2-Clause license] <https://github.com/pypa/cibuildwheel?tab=License-1-ov-file#readme>`__ is used to compile the provided wheels   
-   
-   -  `tccbox <https://github.com/metab0t/tccbox>`__ used to invoke the `TinyC <https://bellard.org/tcc/>`__ compiler
+      
+   -  `scikit-build-core <https://github.com/scikit-build/scikit-build-core>`__, `[Apache 2.0 license] <https://github.com/scikit-build/scikit-build-core?tab=Apache-2.0-1-ov-file>`__ is used for installation and wheel generation
+
+   -  `cibuildwheel <https://cibuildwheel.pypa.io>`__, `[BSD 2-Clause license] <https://github.com/pypa/cibuildwheel?tab=License-1-ov-file#readme>`__ is used to compile the provided wheels
+
+   -  `tccbox <https://github.com/metab0t/tccbox>`__ used to invoke the `TinyC <https://bellard.org/tcc/>`__ compiler, `[GPL v2 or later license] <https://www.gnu.org/licenses/old-licenses/gpl-2.0.html>`__
    
    
    

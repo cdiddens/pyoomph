@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -33,7 +34,7 @@ from ..expressions.generic import ExpressionOrNum,ExpressionNumOrNone,FiniteElem
 #Connects one or multiple fields at both sides of the interfaces via Lagrange multipliers
 #i.e. it ensures the same Neumann flux on both sides, whereas the magnitude of this flux is given by the Lagrange multiplier
 #which is automatically chosen that way that the condition <inner>=<outer> is satisfied.
-from ..meshes.mesh import MeshFromTemplateBase,Element
+from ..meshes.mesh import MeshFromTemplateBase,Element,InterfaceMesh
 
 from ..typings import *
 if TYPE_CHECKING:
@@ -42,6 +43,7 @@ if TYPE_CHECKING:
     from ..meshes import AnyMesh
     from ..generic.problem import Problem,EquationTree
     
+import warnings
 
 
 # TODO Check this
@@ -72,11 +74,13 @@ class ConnectFieldsAtInterface(InterfaceEquations):
         fields: Either a single field name or a list of field names when the fields have the same name on both sides. Alternatively, a dict mapping each inner to each outer name if the fields have different names.
         lagr_mult_prefix: Prefix for the Lagrange multipliers. Defaults to "_lagr_conn_".
         use_highest_space: Flag indicating whether to use the highest space for the Lagrange multipliers. If the fields have different spatial discretizations on both sides, we have to decide which space to use for the Lagrange multipliers. If this flag is set to True, the highest space will be used. Defaults to False.
+        check_consistent_scaling: Flag indicating whether to check for consistent scaling of the fields on both sides. Defaults to True.
     """
-    def __init__(self,fields:Union[str,Dict[str,str],List[str]],*,lagr_mult_prefix:str="_lagr_conn_",use_highest_space:bool=False):
+    def __init__(self,fields:Union[str,Dict[str,str],List[str]],*,lagr_mult_prefix:str="_lagr_conn_",use_highest_space:bool=False,check_consistent_scaling:bool=True):
         super(ConnectFieldsAtInterface, self).__init__()
         self.lagr_mult_prefix=lagr_mult_prefix
         self.use_highest_space=use_highest_space
+        self.check_consistent_scaling=check_consistent_scaling
         if not isinstance(fields,dict):
             if isinstance(fields,list):
                 self.fields={x:x for x in fields}
@@ -111,6 +115,22 @@ class ConnectFieldsAtInterface(InterfaceEquations):
     def define_residuals(self):
         dx = self.get_dx(use_scaling=False)
         for finner,fouter in self.fields.items():
+            if self.check_consistent_scaling:
+                testdiff=test_scale_factor(finner)-test_scale_factor(fouter,domain=self.get_opposite_side_of_interface())
+                testdiff=self.expand_expression_for_debugging(testdiff,raise_error=False,unit_error=False)
+                if not testdiff.is_zero():
+                    testscale_inside=self.expand_expression_for_debugging(test_scale_factor(finner))
+                    testscale_outside=self.expand_expression_for_debugging(test_scale_factor(fouter,domain=self.get_opposite_side_of_interface()))
+                    
+                    raise self.add_exception_info(RuntimeError("When connecting fields "+str(finner)+" and "+str(fouter)+" at the interface, the test function scaling is inconsistent.\nPlease either set check_consistent_scaling=False or ensure that the test function scaling is consistent.\n   test_scale("+str(finner)+")_inside = "+str(testscale_inside)+"\n   test_scale("+str(fouter)+")_outside = "+str(testscale_outside)))
+                testdiff=scale_factor(finner)-scale_factor(fouter,domain=self.get_opposite_side_of_interface())
+                testdiff=self.expand_expression_for_debugging(testdiff,raise_error=False,unit_error=False)
+                if not testdiff.is_zero():
+                    scale_inside=self.expand_expression_for_debugging(scale_factor(finner))
+                    scale_outside=self.expand_expression_for_debugging(scale_factor(fouter,domain=self.get_opposite_side_of_interface()))
+                    raise self.add_exception_info(RuntimeError("When connecting fields "+str(finner)+" and "+str(fouter)+" at the interface, the scaling is inconsistent.\nPlease either set check_consistent_scaling=False or ensure that the scaling is consistent.\n   scale("+str(finner)+")_inside = "+str(scale_inside)+"\n   scale("+str(fouter)+")_outside = "+str(scale_outside)))
+
+
             l, l_test=var_and_test(self.lagr_mult_prefix+finner+"_"+fouter)
             inside, inside_test=var_and_test(finner)
             outside, outside_test=var_and_test(fouter,domain=self.get_opposite_side_of_interface())
@@ -118,7 +138,7 @@ class ConnectFieldsAtInterface(InterfaceEquations):
             self.add_residual((inside-outside)/scal*l_test*dx) #TODO: Possibly nodal connection?
             self.add_residual(l*inside_test*dx)
             self.add_residual(-l*outside_test*dx)
-
+           
     def before_assigning_equations_postorder(self, mesh: "AnyMesh") -> None:
         for finner,fouter in self.fields.items():
             lname=self.lagr_mult_prefix+finner+"_"+fouter
@@ -245,9 +265,23 @@ class RefineToLevel(Equations):
                     e._elemental_error_max_override = max(e._elemental_error_max_override,may_not_unrefine)
                     continue
             e._elemental_error_max_override=must_refine
+            
+    def after_compilation(self,codegen):
+        mesh=codegen._mesh
+        assert mesh is not None
+        if not isinstance(mesh,InterfaceMesh):
+            mesh._initial_uniform_refinement_level=max(mesh._initial_uniform_refinement_level,self.level if self.level!="max" else (mesh._problem.initial_adaption_steps if mesh._problem.initial_adaption_steps is not None else mesh._problem.max_refinement_level) )
+        
 
+class  RefineToMaxLevel(RefineToLevel):
+    """
+    Deprecated: Use RefineToLevel() instead.
+    """
+    def __init__(self, level:Union[Literal["max"],int]="max"):
+        warnings.warn("RefineToMaxLevel is deprecated, use RefineToLevel() instead.", DeprecationWarning, stacklevel=2)
+        super(RefineToMaxLevel, self).__init__(level="max")
+    
 
-RefineToMaxLevel=RefineToLevel
 
 # An "equation" that will refine elements whenever they are larger than a non-dimensional element size threshold
 class RefineMaxElementSize(Equations):
@@ -465,7 +499,7 @@ class RemeshMeshSize(BaseEquations):
 
 
 class ProjectExpression(Equations):
-    def __init__(self,scale:Union[ExpressionOrNum,str]=1,space:FiniteElementSpaceEnum="C2",field_type:Literal["scalar","vector"]="scalar",**projs:ExpressionOrNum):
+    def __init__(self,scale:Union[ExpressionOrNum,str]=1,space:FiniteElementSpaceEnum="C2",field_type:Literal["scalar","vector"]="scalar",coordinate_system:Optional["BaseCoordinateSystem"]=None, **projs:ExpressionOrNum):
         super(ProjectExpression, self).__init__()
         self.space:FiniteElementSpaceEnum=space
         self.scale=scale
@@ -473,6 +507,7 @@ class ProjectExpression(Equations):
             self.scale=scale_factor(scale)
         self.field_type=field_type
         self.projs=projs.copy()
+        self.coordinate_system=coordinate_system
 
     def define_fields(self):
         for n,_ in self.projs.items():
@@ -484,11 +519,11 @@ class ProjectExpression(Equations):
                 raise ValueError("Unsupported field type "+self.field_type)
 
     def define_residuals(self):
-        import pyoomph.expressions.generic
+        from ..expressions.generic import weak
         for n,e in self.projs.items():
             f,ftest=var_and_test(n)
-            self.add_residual(pyoomph.expressions.generic.weak(f,testfunction(n,dimensional=False)/scale_factor(n)))
-            self.add_residual(pyoomph.expressions.generic.weak(-e,testfunction(n,dimensional=False)/scale_factor(n)))
+            self.add_residual(weak(f,testfunction(n,dimensional=False)/scale_factor(n),coordinate_system=self.coordinate_system))
+            self.add_residual(weak(-e,testfunction(n,dimensional=False)/scale_factor(n),coordinate_system=self.coordinate_system))
 
 class InitialCondition(BaseEquations):
     """
@@ -513,6 +548,8 @@ class InitialCondition(BaseEquations):
         for n, val in self._ics.items():
             assert isinstance(self._degraded_start, bool) or self._degraded_start == "auto"
             self.set_initial_condition(n, val, degraded_start=self._degraded_start, IC_name=self._ic_name)
+            if self.get_problem().project_initial_conditions:
+                self.add_weak(var(n)-val,testfunction(n,dimensional=False)/scale_factor(n),destination="_IC_"+self._ic_name) 
 
 
 class TemporalErrorEstimator(BaseEquations):
@@ -725,8 +762,9 @@ class IntegralObservables(Equations):
     """
     def __init__(self,_coordinate_system:Optional["BaseCoordinateSystem"]=None,_lagrangian:bool=False, **integral_observables:Union[ExpressionOrNum,Callable[...,ExpressionOrNum]]):
         super(IntegralObservables, self).__init__()
-        self.integral_observables = {k:v for k,v in integral_observables.items() if not callable(v)}
-        self.dependent_funcs={k:v for k,v in integral_observables.items() if callable(v)}
+        is_dependent_func=lambda v: callable(v) and not isinstance(v,Expression)
+        self.integral_observables = {k:v for k,v in integral_observables.items() if not is_dependent_func(v)}
+        self.dependent_funcs={k:v for k,v in integral_observables.items() if is_dependent_func(v)}
         self._coordinate_system=_coordinate_system
         self._lagrangian=_lagrangian
 
@@ -736,7 +774,7 @@ class IntegralObservables(Equations):
         else:
             dx=self.get_dx(coordsys=self._coordinate_system,lagrangian=self._lagrangian)
         for k,v in self.integral_observables.items():
-            #import _pyoomph
+            #import pyoomph._pyoomph_core as _pyoomph
             #_pyoomph.set_verbosity_flag(1)
             self.add_integral_function(k, v * dx)
             #_pyoomph.set_verbosity_flag(0)
@@ -754,7 +792,8 @@ class ExtremumObservables(Equations):
     Once registered, you can evaluate the extremum values by calling the ``evaluate_maximum`` or ``evaluate_minimum`` method of the corresponding mesh (available via ``problem.get_mesh(...)``)
 
     Args:
-        Either strings as positional arguments or expressions as keyword arguments.
+        *direct_vars: Names of variables to monitor, e.g. ``"u"``.
+        **named_extrema: Expressions to monitor, keyed by the name under which the extremum is reported, e.g. ``u_sqr=var("u")**2``.
     """
     def __init__(self,*direct_vars:str,**named_extrema):
         super().__init__()
@@ -766,7 +805,7 @@ class ExtremumObservables(Equations):
         
 
     def add_extremum_function(self,name,expr):
-        import _pyoomph
+        from .. import _pyoomph_core as _pyoomph
         master = self._get_combined_element()
         cg = master._assert_codegen()
         if not (isinstance(expr,int) or isinstance(expr,float) or isinstance(expr,_pyoomph.Expression)) and  callable(expr):
@@ -792,8 +831,9 @@ class ODEObservables(ODEEquations):
 
     def __init__(self, **ode_observables:ExpressionOrNum):
         super(ODEObservables, self).__init__()
-        self.ode_observables = {k:v for k,v in ode_observables.items() if not callable(v)}
-        self.dependent_funcs={k:v for k,v in ode_observables.items() if callable(v)}
+        is_callable=lambda v: callable(v) and not isinstance(v,Expression)
+        self.ode_observables = {k:v for k,v in ode_observables.items() if not is_callable(v)}
+        self.dependent_funcs={k:v for k,v in ode_observables.items() if is_callable(v)}
 
     def define_additional_functions(self):
         dx = nondim("dx")
@@ -881,6 +921,7 @@ class _AverageOrIntegralConstraintBase(Equations):
         
     def after_fill_dummy_equations(self, problem: "Problem", eqtree: "EquationTree",pathname:str,elem_dim:Optional[int]=None):
         from ..generic.codegen import GlobalLagrangeMultiplier
+
         if len(self.constraints)==0:
             return super().after_fill_dummy_equations(problem,eqtree,pathname,elem_dim)        
         odestorage=self.get_global_dof_storage_name(pathname=pathname)  

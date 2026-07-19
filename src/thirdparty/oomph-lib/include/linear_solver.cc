@@ -860,10 +860,20 @@ namespace oomph
       // number of dofs
       unsigned n_dof = problem_pt->ndof();
 
-      // set the distribution
       LinearAlgebraDistribution dist(
         problem_pt->communicator_pt(), n_dof, !Dist_use_global_solver);
       this->build_distribution(dist);
+      // FOR PYOOMPH: We need to handle the distribution differently in pyoomph: Solving is always distributed, however, we must pay attention to the dof blocks when running without --distribute
+      /*if (problem_pt->distributed())
+      {
+        LinearAlgebraDistribution dist(*problem_pt->dof_distribution_pt());
+        this->build_distribution(dist);
+      }
+      else
+      {
+        LinearAlgebraDistribution dist(problem_pt->communicator_pt(), n_dof, problem_pt->is_block_dof_arrangement_used() ? problem_pt->block_dof_pt_start() : Vector<unsigned long>(), !Dist_use_global_solver); 
+        this->build_distribution(dist);
+      }*/
 
       // Take a copy of Delete_matrix_data
       bool copy_of_Delete_matrix_data = Dist_delete_matrix_data;
@@ -923,7 +933,7 @@ namespace oomph
         // Storage for the residuals vector
         // A non-distriubted residuals vector
         LinearAlgebraDistribution dist(
-          problem_pt->communicator_pt(), problem_pt->ndof(), false);
+          problem_pt->communicator_pt(), problem_pt->ndof(), /*problem_pt->is_block_dof_arrangement_used() ? problem_pt->block_dof_pt_start() : Vector<unsigned long>(),*/ false);
         DoubleVector residuals(&dist, 0.0);
         CRDoubleMatrix jacobian(&dist);
 
@@ -973,7 +983,7 @@ namespace oomph
     {
       // set the solver distribution
       LinearAlgebraDistribution dist(
-        problem_pt->communicator_pt(), problem_pt->ndof(), false);
+        problem_pt->communicator_pt(), problem_pt->ndof(), /*problem_pt->is_block_dof_arrangement_used() ? problem_pt->block_dof_pt_start() : Vector<unsigned long>(),*/ false);
       this->build_distribution(dist);
 
       // Allocate storage for the residuals vector

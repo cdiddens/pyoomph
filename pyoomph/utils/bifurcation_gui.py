@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -248,7 +249,7 @@ class BifurcationGUI:
             return self.problem.get_global_parameter(self._paramname)
     
     # By default, we allow to access all integral observables (not beginning with _) and all ODE dofs
-    def evalulate_observables(self)->Dict[str,float]:
+    def evaluate_observables(self)->Dict[str,float]:
         if self._observable_funcs is None:
             obs={}
             def recursive_add_spatial_domains(eqtree:EquationTree):
@@ -294,9 +295,9 @@ class BifurcationGUI:
             self.selected_branch=self.current_branch
             self.branches.append(self.current_branch)
         state_file=self.problem.get_output_directory(os.path.join(self.data_subdir,"_states","state_{:06d}.dump".format(self._state_step))) 
-        p=BifurcationGUISolutionPoint(self.get_bifurcation_parameter().value,self.evalulate_observables(),self.problem.get_last_eigenvalues()[0],state_file,self._state_step)                                 
+        p=BifurcationGUISolutionPoint(self.get_bifurcation_parameter().value,self.evaluate_observables(),self.problem.get_last_eigenvalues()[0],state_file,self._state_step)                                 
         if p.eig_value_Re==0 and self.classify_bifurcations:
-            from pyoomph.generic.bifurcation_tools import NormalFormCalculator
+            from ..generic.bifurcation_tools import NormalFormCalculator
             p.bifurcation_info=NormalFormCalculator(self.problem).get_normal_form(self.get_bifurcation_parameter().get_name())            
         self.problem.save_state(state_file)
         self._state_step+=1
@@ -771,7 +772,7 @@ class BifurcationGUI:
         ddof=numpy.array(self.problem.get_arclength_dof_derivative_vector())
         if len(ddof)>0:
             self.problem.set_current_dofs(backup+FD_eps*ddof)
-            po=self.evalulate_observables()
+            po=self.evaluate_observables()
         else:
             po=self.current_point.obs_values.copy()
 
@@ -788,7 +789,7 @@ class BifurcationGUI:
                 for dptr in [-dp,dp]:
                     ddof=numpy.array(bi["perturbation_predictor"](dptr))                    
                     self.problem.set_current_dofs(backup+FD_eps*ddof)
-                    po=self.evalulate_observables()
+                    po=self.evaluate_observables()
                     btangtangs={}
                     for k in self._avail_observables:
                         do=(po[k]-self.current_point.obs_values[k])/FD_eps
@@ -1036,7 +1037,7 @@ class BifurcationGUI:
         except:
             raise RuntimeError("Make sure the problem starts where it has a stationary solution")
         self.problem.solve_eigenproblem(self.neigen,self.shift)
-        self._avail_observables=[k for k in self.evalulate_observables().keys()]
+        self._avail_observables=[k for k in self.evaluate_observables().keys()]
         self._current_observable=self._avail_observables[0]
         self._add_current_state()
 

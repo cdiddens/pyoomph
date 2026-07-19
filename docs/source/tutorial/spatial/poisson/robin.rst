@@ -11,36 +11,10 @@ for some nonzero coefficients :math:`\alpha` and :math:`\beta`. The easiest way 
 
 and just add this term in the same manner as the Neumann condition, i.e. via :math:`\langle j,v\rangle`:
 
-.. code:: python
-
-   from pyoomph import *
-   from poisson_neumann import PoissonEquation, PoissonNeumannCondition
-
-
-   # The Robin condition is just inherited from the Neumann condition
-   class PoissonRobinCondition(PoissonNeumannCondition):
-       def __init__(self,name,alpha,beta,g):
-           u=var(name) # Get the variable itself
-           flux=1/beta*(g-alpha*u) # Calculate the Neumann flux term to impose
-           super(PoissonRobinCondition, self).__init__(name,flux) # and pass it to the Neumann class
-
-
-   class RobinPoissonProblem(Problem):
-       def define_problem(self):
-           mesh = LineMesh(minimum=-1, size=2, N=100)
-           self.add_mesh(mesh)
-           equations = PoissonEquation(source=1)
-           equations+=TextFileOutput()
-           equations += PoissonRobinCondition("u",1,0.5,1) @ "left"
-           equations += PoissonRobinCondition("u",-1,2,-1) @ "right"
-           self.add_equations(equations@ "domain")
-
-
-   if __name__ == "__main__":
-       with RobinPoissonProblem() as problem:
-           problem.solve()  # Solve the problem
-           problem.output()  # Write output
-
+.. literalinclude:: poisson_robin_via_neumann.py
+   :language: python
+   :start-at: from pyoomph import *
+   :end-at: problem.output()  # Write output
 
 ..  figure:: robin_poisson1.*
 	:name: figspatialrobinpoisson1
@@ -60,7 +34,7 @@ and just add this term in the same manner as the Neumann condition, i.e. via :ma
 		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
 		    
 
-Of course, you can recover the Neumann condition as special case by setting :math:`\alpha=0`, but you cannot recover the Dirichlet condition, since :math:`\beta=0` will induce a division by zero.
+Of course, you can recover the Neumann condition as a special case by setting :math:`\alpha=0`, but you cannot recover the Dirichlet condition, since :math:`\beta=0` will induce a division by zero.
 
 
 
@@ -71,30 +45,10 @@ To overcome this, one can enforce this particular boundary condition with arbitr
 
 The same idea also works for other kinds of generalized boundary conditions, also non-linear ones. One just has to exchange the definition of the ``PoissonRobinCondition`` as follows:
 
-.. code:: python
-
-   # Inherit from the normal InterfaceEquations
-   class PoissonRobinCondition(InterfaceEquations):
-       def __init__(self,name,alpha,beta,g):
-           super(PoissonRobinCondition, self).__init__()
-           self.name=name # Store all passed values
-           self.alpha=alpha
-           self.beta=beta
-           self.g=g
-
-       def define_fields(self):
-           # Define a Lagrange multiplier (field) at the interface with some unique name
-           self.define_scalar_field("_lagr_robin_"+self.name,"C2")
-
-       def define_residuals(self):
-           l,ltest=var_and_test("_lagr_robin_"+self.name) # get the Lagrange multiplier
-           u,utest=var_and_test(self.name) # the value of u on the interface
-           # For the gradient grad(u), we need the function u inside the domain as well to calculate the gradient there
-           # This is done by changing the domain to the parent domain, i.e. the domain where this InterfaceEquation is attached to
-           ubulk,ubulk_test=var_and_test(self.name,domain=self.get_parent_domain())
-           n=self.get_normal() # Normal to calculate dot(grad(u),n)
-           condition=self.alpha*u+self.beta*dot(grad(ubulk),n)-self.g # The condition to enforce
-           self.add_residual(weak(condition,ltest)+weak(l,utest)) # Lagrange multiplier pair to enforce it
+.. literalinclude:: poisson_robin_via_lagrange.py
+   :language: python
+   :start-at: # Inherit from the normal InterfaceEquations
+   :end-at: self.add_residual(weak(condition,ltest)+weak(l,utest)) # Lagrange multiplier pair to enforce it
 
 The main idea is to create a Lagrange multiplier :math:`\lambda` with test function :math:`\mu` on the interface and add the weak contributions
 
@@ -116,4 +70,4 @@ The outward unit normal is obtained by :py:meth:`~pyoomph.generic.codegen.BaseEq
 		:download:`Download all examples <../../tutorial_example_scripts.zip>`   	
 		    
 
-For the latter approach, there is also a generic class :py:class:`~pyoomph.meshes.bcs.EnforcedBC`, which allows to enforce arbitrary boundary conditions. To get the same result as with the custom implemented class ``PoissonRobinCondition("u",alpha,beta,g)``, the generic class requires to cast it into residual form, i.e. ``EnforcedBC(u=alpha*var("u")+beta*dot(grad(var("u",domain="..")),var("normal"))-g)``.
+For the latter approach, there is also a generic class :py:class:`~pyoomph.meshes.bcs.EnforcedBC`, which allows us to enforce arbitrary boundary conditions. To get the same result as with the custom implemented class ``PoissonRobinCondition("u",alpha,beta,g)``, the generic class requires to cast it into residual form, i.e. ``EnforcedBC(u=alpha*var("u")+beta*dot(grad(var("u",domain="..")),var("normal"))-g)``.

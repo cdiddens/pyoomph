@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -29,6 +30,8 @@ Pyoomph is a finite element framework based on oomph-lib and GiNaC. It is design
 """
 
 import os
+import platform
+import sys
 os.environ['OPENBLAS_NUM_THREADS'] = '4' 
 os.environ['MKL_NUM_THREADS'] = '4'
 # To Deactivate OpenMP parallelization
@@ -49,7 +52,7 @@ from .meshes.meshdatacache import MeshDataEigenModes #type:ignore
 
 from .typings import *
 
-import _pyoomph
+from . import _pyoomph_core as _pyoomph
 
 _pyoomph.set_jit_include_dir(os.path.join(os.path.dirname(os.path.abspath(__file__)), "jitbridge"))
 
@@ -118,25 +121,122 @@ class GeneralSolverCallback(_pyoomph.GeneralSolverCallback):
 			raise RuntimeError("The problem has not been set yet")
 		return self._current_problem.get_la_solver().solve_distributed(op_flag,allow_permutations,n,nnz_local,nrow_local,first_row,values,col_index,row_start,b,nprow,npcol,doc,data,info) #,comm
 
-	def metis_partgraph_kway(self, nvertex:int,xadj:NPIntArray,adjacency_vector:NPIntArray,vwgt:NPIntArray,adjwgt:NPIntArray,wgtflag:int, numflag:int,nparts:int,options:NPIntArray,edgecut:NPIntArray,part:NPIntArray):
-		print("TODO: METIS")
-		part[:]=numpy.arange(len(part))[:]/len(part)*nparts #type:ignore
-		print("USING DEFAULT DISTRI on",nparts,"procs:",part)
-#		print("IN PYMET", nvertex,xadj,adjacency_vector,vwgt,adjwgt,wgtflag, numflag,nparts,options,edgecut,part_Py)
-
+	def metis_partgraph_kway(self, nvertex,nconnection, xadj, adjacency_vector, vwgt, nparts, options, edgecut, part):
+		#print("IN PYMETIS")
+		#print("nvertex",nvertex)
+		#print("nconnection",nconnection)
+		#print("xadj",xadj)
+		#print("adjacency_vector",adjacency_vector)
+		#print("vwgt",vwgt)
+		#print("nparts",nparts)
+		#print("options",options)
+		#print("edgecut",edgecut)
+		#print("part",part)
 		
+		try:
+			import pymetis #type:ignore			
+		except:
+			raise ImportError("PyMetis is not installed, cannot perform graph partitioning for distributed meshes. Please install PyMetis via e.g. 'pip install pymetis'")
+		adj=pymetis.CSRAdjacency(xadj, adjacency_vector) #type:ignore
+		if len(vwgt)==0:
+			vwgt=None
+		opts=pymetis.Options()
+		opts.set_defaults()
+		if options[0]==0:
+			opts.objtype=pymetis.ObjType.CUT
+		elif options[0]==1:
+			opts.objtype=pymetis.ObjType.VOL
+		else:
+			raise RuntimeError("ERROR: Unknown METIS option for OBJTYPE: " + str(options[0]))
+		for i in range(1,len(options)):
+			if options[i]!=0:
+				raise RuntimeError("ERROR: METIS option " + str(i) + " is not supported")				
+		print("Calling PyMetis with nparts=",nparts,"and objtype=",opts.objtype,"and vwgt=",vwgt)
+		res=pymetis.part_graph(nparts,adjacency=adj,vweights=vwgt)
+		part[:]=res[1] #type:ignore		
+		edgecut[0]=res[0] #type:ignore
+		#part[:]=numpy.arange(len(part))[:]/len(part)*nparts #type:ignore		
+		return 0
 
 solver_cb=GeneralSolverCallback()
 _pyoomph.set_Solver_callback(solver_cb)
 
-#Set pardiso as default
+#Set best solver as default
 from .solvers.generic import set_default_linear_solver,set_default_eigen_solver
-#from .solvers.pardiso import PardisoSolver
-try:
-	from .solvers.pardiso import PardisoSolver #type:ignore
-	set_default_linear_solver("pardiso")
-	set_default_eigen_solver("pardiso")
-except:
+
+
+def _set_accelerate_solver() -> bool:
+	try:
+		from .solvers import accelerate as _accelerate #type:ignore
+		set_default_linear_solver("accelerate")
+		set_default_eigen_solver("accelerate")
+		return True
+	except:
+		return False
+
+
+def _set_pardiso_solver() -> bool:
+	try:
+		from .solvers.pardiso import PardisoSolver #type:ignore
+		set_default_linear_solver("pardiso")
+		set_default_eigen_solver("pardiso")
+		return True
+	except:
+		return False
+
+
+def _set_petsc_mumps_solver() -> bool:
+	try:
+		from .solvers.petsc import PETSc,PETSCMUMPSSolver,SlepcMUMPSEigenSolver #type:ignore
+		if not PETSc.Sys.hasExternalPackage("mumps"):
+			return False
+		set_default_linear_solver("petsc_mumps")
+		set_default_eigen_solver("slepc_mumps")
+		return True
+	except:
+		return False
+
+
+def _set_superlu_fallback() -> None:
 	from .solvers.scipy import SuperLUSerial,ScipyEigenSolver #type:ignore
 	set_default_linear_solver("superlu")
 	set_default_eigen_solver("scipy")
+
+
+
+_is_macos = (sys.platform == "darwin")
+_machine = platform.machine().lower()
+_is_arm64 = _machine in ("arm64", "aarch64")
+
+def _warn_suboptimal_solver(name:str) -> None:
+	import warnings
+	suggestion="PETSc/SLEPc compiled with MUMPS support" if (_is_macos and _is_arm64) else "pardiso (via Intel MKL)"
+	warnings.warn(
+		"pyoomph is falling back to the '"+name+"' solver, since no better solver was found. For better performance, consider "
+		"installing "+suggestion+" -- see https://pyoomph.readthedocs.io/en/latest/tutorial/installation/ for "
+		"instructions.",
+		RuntimeWarning,
+		stacklevel=2,
+	)
+
+
+if _is_macos and _is_arm64:
+	if not _set_petsc_mumps_solver():
+		if _set_accelerate_solver():
+			_warn_suboptimal_solver("accelerate")
+		else:
+			_set_superlu_fallback()
+			_warn_suboptimal_solver("superlu")
+elif _is_macos:
+	if not _set_pardiso_solver():
+		if not _set_petsc_mumps_solver():
+			if _set_accelerate_solver():
+				_warn_suboptimal_solver("accelerate")
+			else:
+				_set_superlu_fallback()
+				_warn_suboptimal_solver("superlu")
+else:
+	if not _set_pardiso_solver():
+		if not _set_petsc_mumps_solver():
+			_set_superlu_fallback()
+			_warn_suboptimal_solver("superlu")

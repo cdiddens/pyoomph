@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,7 +21,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
@@ -57,6 +58,10 @@ parser.add_argument("cbrange_in", nargs='*',
                     help="Input directories to merge the colorbar ranges")
 arglist = parser.parse_args()
 
+mac_machine = os.uname().machine if sys.platform == "darwin" else ""
+is_mac_arm64 = (sys.platform == "darwin" and mac_machine in {"arm64", "aarch64"})
+is_mac_x86_64 = (sys.platform == "darwin" and mac_machine == "x86_64")
+
 
 def test_solver(solver):
    from . generic.problem import Problem
@@ -65,19 +70,22 @@ def test_solver(solver):
    from . expressions import var
    
    with tempfile.TemporaryDirectory(prefix="pyoomph_test_"+solver+"_") as tempdir:
-      p=Problem()
-      p.quiet()
-      
-      p.set_linear_solver(solver)
-      p.set_output_directory(tempdir)      
-      
-      p+=HarmonicOscillator(omega=1,name="y")@"globals"
-      p+=InitialCondition(y=1-var("time"))@"globals"
-      
-      p.run(endtime=1,timestep=0.1)            
-      ydest=-0.25942176379851877854
-      if abs(float(p.get_ode("globals").get_value("y"))-ydest)>1e-7:
-         raise RuntimeError("Solver did not compute the correct result, got {}, expected {}".format(float(p.get_ode("globals").get_value("y")),ydest))
+      # Use Problem as a context manager so its compiled DLL is unloaded (release()) before
+      # the TemporaryDirectory above tries to delete it - on Windows, deleting a directory
+      # that still contains a loaded DLL fails with WinError 32 ("used by another process").
+      with Problem() as p:
+         p.quiet()
+
+         p.set_linear_solver(solver)
+         p.set_output_directory(tempdir)
+
+         p+=HarmonicOscillator(omega=1,name="y")@"globals"
+         p+=InitialCondition(y=1-var("time"))@"globals"
+
+         p.run(endtime=1,timestep=0.1)
+         ydest=-0.25942176379851877854
+         if abs(float(p.get_ode("globals").get_value("y"))-ydest)>1e-7:
+            raise RuntimeError("Solver did not compute the correct result, got {}, expected {}".format(float(p.get_ode("globals").get_value("y")),ydest))
       
 def test_compiler(compiler):
    from . generic.problem import Problem
@@ -86,16 +94,18 @@ def test_compiler(compiler):
    from . expressions import var
    
    with tempfile.TemporaryDirectory(prefix="pyoomph_test_"+compiler+"_") as tempdir:
-      p=Problem()
-      p.quiet()
-      
-      p.set_c_compiler(compiler)
-      p.set_output_directory(tempdir)      
-      
-      p+=HarmonicOscillator(omega=1,name="y")@"globals"
-      p+=InitialCondition(y=1-var("time"))@"globals"
-      
-      p.initialise()
+      # See test_solver() above: release the compiled DLL before the TemporaryDirectory
+      # cleanup runs, or Windows refuses to delete the directory (WinError 32).
+      with Problem() as p:
+         p.quiet()
+
+         p.set_c_compiler(compiler)
+         p.set_output_directory(tempdir)
+
+         p+=HarmonicOscillator(omega=1,name="y")@"globals"
+         p+=InitialCondition(y=1-var("time"))@"globals"
+
+         p.initialise()
 
 def test_eigen(eigensolver):
    from . generic.problem import Problem
@@ -104,21 +114,23 @@ def test_eigen(eigensolver):
    from . expressions import var
    
    with tempfile.TemporaryDirectory(prefix="pyoomph_test_"+eigensolver+"_") as tempdir:
-      p=Problem()
-      p.quiet()
-      
-      p.set_eigensolver(eigensolver)
-      p.set_output_directory(tempdir)      
-      
-      p+=HarmonicOscillator(omega=1,damping=0.1,name="y",first_derivative_name="yprime")@"globals"      
-      
-      p.initialise()   
-      p.solve()
-      p.solve_eigenproblem(1)
-      dest_eigenvalue=-0.1+0.99498743710662j
-      calced_eigenvalue=p.get_last_eigenvalues()[0]
-      if abs(calced_eigenvalue-dest_eigenvalue)>1e-7 and abs(calced_eigenvalue-dest_eigenvalue.conjugate())>1e-7:
-         raise RuntimeError("Eigensolver did not compute the correct result, got {}, expected {}".format(calced_eigenvalue,dest_eigenvalue))
+      # See test_solver() above: release the compiled DLL before the TemporaryDirectory
+      # cleanup runs, or Windows refuses to delete the directory (WinError 32).
+      with Problem() as p:
+         p.quiet()
+
+         p.set_eigensolver(eigensolver)
+         p.set_output_directory(tempdir)
+
+         p+=HarmonicOscillator(omega=1,damping=0.1,name="y",first_derivative_name="yprime")@"globals"
+
+         p.initialise()
+         p.solve()
+         p.solve_eigenproblem(1)
+         dest_eigenvalue=-0.1+0.99498743710662j
+         calced_eigenvalue=p.get_last_eigenvalues()[0]
+         if abs(calced_eigenvalue-dest_eigenvalue)>1e-7 and abs(calced_eigenvalue-dest_eigenvalue.conjugate())>1e-7:
+            raise RuntimeError("Eigensolver did not compute the correct result, got {}, expected {}".format(calced_eigenvalue,dest_eigenvalue))
    
 
 if arglist.command == "cbrange":
@@ -134,13 +146,13 @@ if arglist.command == "cbrange":
    if len(rest) < 2:
       raise RuntimeError(
          "Require at least two input plot directories to merge the cb_ranges")
-   merged:Dict[int,Dict[str,Tuple[float,float]]] = {}
+   merged:Dict[int,Dict[str,List[float]]] = {}
    for d in rest:
       gl = glob(os.path.join(d, "cb_ranges_*.txt"))
       gldict={}
       for entry in gl:
          num=int(entry.split("_")[-1].rstrip(".txt"))
-         data:Dict[str,Tuple[float,float]]=json.load(open(entry,"r"))
+         data:Dict[str,List[float]]=json.load(open(entry,"r"))
          if num in merged.keys():
             for d,v in data.items():
                if d in merged[num].keys():
@@ -170,7 +182,7 @@ elif arglist.command=="check":
          from .solvers.generic import GenericLinearSystemSolver
          p=Problem()
                
-         sublist={"pardiso","superlu"}
+         sublist={"pardiso","superlu","accelerate","petsc","petsc_mumps"}
          #if arglist.check_name not in sublist:
          #   raise RuntimeError("Can only check the following: "+str(sublist))
          if arglist.check_name=="all":
@@ -179,15 +191,22 @@ elif arglist.command=="check":
             checklist=[arglist.check_name]
          
          for check in checklist:
-            print("Checking "+check_type+" / "+check)         
+            print("Checking "+check_type+" / "+check)
+            if check=="pardiso" and is_mac_arm64:               
+               print("","skipping on macOS arm64")
+               continue
+            if check=="accelerate" and not (is_mac_x86_64 or is_mac_arm64):               
+               print("","skipping on non-macOS")
+               continue
+                        
             try:
                GenericLinearSystemSolver.factory_solver(check,p)
                print("","loading seems to work")
                try:
                   test_solver(check)
-                  print("","running seems to work")
+                  print("","","running seems to work")
                except Exception as e:
-                  print("","running does not work: "+str(e.with_traceback(None)))
+                  print("","","running does not work: "+str(e.with_traceback(None)))
                   if check=="pardiso":
                      print("Hint: Try downgrading MKL Pardiso via")
                      print("","pip install mkl==2021.4.0")
@@ -201,7 +220,7 @@ elif arglist.command=="check":
          from .solvers.generic import GenericEigenSolver
          p=Problem()
                
-         sublist={"pardiso","scipy"}
+         sublist={"pardiso","scipy","accelerate","slepc","slepc_mumps"}
          #if arglist.check_name not in sublist:
          #   raise RuntimeError("Can only check the following: "+str(sublist))
          if arglist.check_name=="all":
@@ -210,15 +229,21 @@ elif arglist.command=="check":
             checklist=[arglist.check_name]
          
          for check in checklist:
-            print("Checking "+check_type+" / "+check)         
+            print("Checking "+check_type+" / "+check)
+            if check=="pardiso" and is_mac_arm64:               
+               print("","skipping on macOS arm64")
+               continue
+            if check=="accelerate" and not (is_mac_x86_64 or is_mac_arm64):               
+               print("","skipping on non-macOS")
+               continue            
             try:
                GenericEigenSolver.factory_solver(check,p)
                print("","loading seems to work")
                try:
                   test_eigen(check)
-                  print("","running seems to work")
+                  print("","","running seems to work")
                except Exception as e:
-                  print("","running does not work: "+str(e.with_traceback(None)))
+                  print("","","running does not work: "+str(e.with_traceback(None)))
                   
             except Exception as e:
                print("","does not work: "+str(e.with_traceback(None)))
@@ -226,25 +251,52 @@ elif arglist.command=="check":
       elif check_type=="compiler":
          from .generic.ccompiler import BaseCCompiler
          compilers={"system"}
+         if sys.platform == "win32":
+            install_doc_url="https://pyoomph.readthedocs.io/en/latest/tutorial/installation/pypa.html#windows"
+         elif sys.platform == "darwin":
+            install_doc_url="https://pyoomph.readthedocs.io/en/latest/tutorial/installation/pypa.html#mac"
+         else:
+            install_doc_url="https://pyoomph.readthedocs.io/en/latest/tutorial/installation/pypa.html#linux"
          if arglist.check_name=="all":
             checklist=list(compilers)
          else:
             checklist=[arglist.check_name]
          for to_check in checklist:
-            print("Checking "+check_type+" / "+to_check)     
+            print("Checking "+check_type+" / "+to_check)
+            cc=None
             try:
                cc=BaseCCompiler.factory_compiler(to_check)
                if cc.check_avail():
                   print("","loading seems to work")
                   try:
                      test_compiler(to_check)
-                     print("","running seems to work")
+                     print("","","running seems to work")
                   except Exception as e:
-                     print("","C compilation seems to work: "+str(e.with_traceback(None)))
+                     print("","","C compilation seems to work: "+str(e.with_traceback(None)))
                else:
                   raise RuntimeError("Sanity check not working...")
             except Exception as e:
-               print("","does not work: "+str(e.with_traceback(None)))
+               # check_avail() above compiles+links a real temp file, which
+               # conflates "no compiler" with "can't write to the temp dir"
+               # (e.g. a locked-down Windows machine). If a lighter, no-file
+               # -write probe is available for this compiler (currently just
+               # MSVC, via toolchain_located()), use it to give a clearer
+               # diagnostic than the raw exception below.
+               located=None
+               if cc is not None:
+                  try:
+                     located=cc.toolchain_located()
+                  except Exception:
+                     pass
+               if located is False:
+                  print("","does not work: compiler toolchain not found (e.g. no Visual Studio/Build Tools installation located)")
+                  print("","For instructions on how to install a compiler, see "+install_doc_url)
+               elif located is True:
+                  print("","toolchain found, but the sanity check failed - this can happen e.g. if the "
+                            "temporary directory used for the test could not be written to: "+str(e.with_traceback(None)))
+               else:
+                  print("","does not work: "+str(e.with_traceback(None)))
+                  print("","For instructions on how to install a compiler, see "+install_doc_url)
       else:
          raise RuntimeError("TODO: ")
 else:

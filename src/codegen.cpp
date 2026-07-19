@@ -1,6 +1,6 @@
 /*================================================================================
 pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -15,7 +15,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 
-The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+The main author may be contacted at c.diddens@utwente.nl
 
 ================================================================================*/
 
@@ -68,11 +68,16 @@ namespace pyoomph
 		};
 		*/
 
+	// Prints a GiNaC expression as C source code, after applying an optional simplification
+	// strategy selected at runtime via FiniteElementCode::ccode_expression_mode (e.g. "factor",
+	// "normal", "expand", "collect_common_factors" - mostly useful for debugging/benchmarking
+	// how different GiNaC simplifications affect the generated code). The expression is also
+	// archived (csrc_opts.for_code->archive) so that it can be inspected/replayed later.
 	void print_simplest_form(GiNaC::ex expr, std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
 	{
 		GiNaC::ex towrite;
 		std::string mode = csrc_opts.for_code->ccode_expression_mode;
-		csrc_opts.for_code->archive.archive_ex(expr, ("expression_",std::to_string(csrc_opts.for_code->archive.num_expressions())).c_str());
+		csrc_opts.for_code->archive.archive_ex(expr, ("expression_"+std::to_string(csrc_opts.for_code->archive.num_expressions())).c_str());
 		if (mode == "deterministic")
 		{
 			//GiNaC::print_sorted_GiNaC(GiNaC::expand(GiNaC::expand(expr)),os,csrc_opts);
@@ -105,17 +110,24 @@ namespace pyoomph
 
 	//////////////
 
-	FiniteElementCode *__current_code;
-	const ShapeExpansion *__deriv_subexpression_wrto = NULL;
-	bool __derive_shapes_by_second_index = false;
-	bool __in_pitchfork_symmetry_constraint = false;
-	int * __derive_only_by_expansion_mode = NULL;
-	bool __ignore_dpsi_coord_diffs_in_jacobian = false;
-	std::set<ShapeExpansion> __all_Hessian_shapeexps;
-	std::set<TestFunction> __all_Hessian_testfuncs;
-	std::set<FiniteElementField *> __all_Hessian_indices_required;
-	bool __in_hessian = false;
+	// Global code-generation state. These globals are set/restored around the symbolic
+	// differentiation and code-emission passes below and are read by the custom GiNaC
+	// structure classes (ShapeExpansion, SpatialIntegralSymbol, ...) whose derivative()/print()
+	// implementations otherwise have no direct access to "which pass are we currently in".
+	FiniteElementCode *__current_code;                                // Code object currently being processed (residual/Jacobian/Hessian assembly)
+	const ShapeExpansion *__deriv_subexpression_wrto = NULL;          // Set while differentiating a subexpression w.r.t. a specific field/direction
+	bool __derive_shapes_by_second_index = false;                     // True while building the "second" (l_shape2) index of a Hessian double-loop
+	bool __in_pitchfork_symmetry_constraint = false;                  // True while generating the extra pitchfork-symmetry-breaking constraint equations
+	int * __derive_only_by_expansion_mode = NULL;                     // If set, only derivatives w.r.t. this azimuthal/Fourier expansion mode are kept
+	bool __ignore_dpsi_coord_diffs_in_jacobian = false;                // Suppresses dpsi/dX (moving-mesh) contributions in the Jacobian for the current residual
+	std::set<ShapeExpansion> __all_Hessian_shapeexps;                 // Accumulates all shape expansions encountered while building a Hessian contribution
+	std::set<TestFunction> __all_Hessian_testfuncs;                   // Accumulates all test functions encountered while building a Hessian contribution
+	std::set<FiniteElementField *> __all_Hessian_indices_required;    // Fields that need a Hessian index (i.e. contribute to the outer derivative direction)
+	bool __in_hessian = false;                                        // True while performing second-order (Hessian) differentiation
 
+	// Pitchfork/symmetry-breaking constraint equations must not additionally pick up the usual
+	// Jacobian contribution from moving nodal positions (they are handled separately), unless we
+	// are currently building the second index of a Hessian double loop.
 	bool ignore_nodal_position_derivatives_for_pitchfork_symmetry()
 	{
 		return __in_pitchfork_symmetry_constraint && !pyoomph::__derive_shapes_by_second_index;
@@ -124,6 +136,13 @@ namespace pyoomph
 	
 
 
+	// GiNaC tree-mapper that replaces every explicit expressions::subexpression(...) marker in an
+	// expression by a GiNaCSubExpression structure, collecting the underlying (mapped) expressions
+	// into `subexpressions` and de-duplicating identical ones (so the same subexpression is only
+	// emitted/evaluated once in the generated C code). While doing so it also resolves nested
+	// multi-return callback invocations, and - if the element uses moving-mesh coordinates as
+	// degrees of freedom - strips out shape expansions of the nodal position field that must be
+	// ignored for pitchfork-symmetry-breaking constraint equations.
 	class SubExpressionsToStructs : public GiNaC::map_function
 	{
 	protected:
@@ -272,6 +291,12 @@ namespace pyoomph
 
 	SubExpressionsToStructs *__SE_to_struct_hessian = NULL;
 
+	// GiNaC tree-mapper used to isolate the part of a residual expression that belongs to a single
+	// test-function space (and, if `varname` is given, to a single field's test function): any
+	// GiNaCTestFunction on a different space is replaced by 0, so that mapping this over the full
+	// residual yields exactly the terms that must be assembled into that field's residual/Jacobian
+	// row. Also validates that global parameters referenced in the expression belong to the same
+	// Problem as the space being processed (parameter indices are only meaningful within one problem).
 	class MapOnTestSpace : public GiNaC::map_function
 	{
 	protected:
@@ -327,7 +352,12 @@ namespace pyoomph
 		}
 	};
 
-	// This will map all history DoFs to the current
+	// GiNaC tree-mapper that rewrites a residual to its "steady" form: any shape expansion or
+	// spatial-integral symbol that explicitly references a past time-history slot (time_history_index
+	// / history_step > 0) but has no actual time derivative is redirected to the current-time value.
+	// This is needed for time-stepping schemes with explicit dependence on previous-step DoFs (e.g.
+	// MPT, TPZ), which therefore require a separate "extra steady" residual routine for steady solves;
+	// require_extra_steady_routine() reports whether such a rewrite actually occurred.
 	class MakeResidualSteady : public GiNaC::map_function
 	{
 	protected:
@@ -350,6 +380,21 @@ namespace pyoomph
 				}
 				return inp;
 			}
+			else if (GiNaC::is_a<GiNaC::GiNaCSpatialIntegralSymbol>(inp))
+			{
+				auto &si = (GiNaC::ex_to<GiNaC::GiNaCSpatialIntegralSymbol>(inp)).get_struct();
+				if (si.history_step > 0)
+				{
+					SpatialIntegralSymbol repl = si;
+					repl.history_step = 0; // Evaluate at current time
+					extra_steady_routine = true; // We require an extra steady routine in that case
+					return GiNaC::GiNaCSpatialIntegralSymbol(repl);
+				}
+				else
+				{
+					return inp.map(*this);
+				}
+			}
 			else
 				return inp.map(*this);
 		}
@@ -357,6 +402,8 @@ namespace pyoomph
 		bool require_extra_steady_routine() const { return extra_steady_routine; }
 	};
 
+	// GiNaC tree-mapper that replaces every global-parameter wrapper by its current numerical value,
+	// used where a fully numeric evaluation (rather than a symbolic parameter dependency) is required.
 	class GlobalParamsToValues : public GiNaC::map_function
 	{
 	public:
@@ -372,6 +419,12 @@ namespace pyoomph
 		}
 	};
 
+	// For every expressions::subexpression(...) or expressions::Diff(...) node, factors the argument
+	// into a pure number, a dimensional unit, and a dimensionless "rest", then rebuilds the node so
+	// that only the dimensionless rest stays wrapped in the subexpression - the numeric factor and
+	// the unit are pulled out and multiplied back in unwrapped. This keeps subexpression C variables
+	// (and their common-subexpression caching) purely numeric, while units are still tracked and
+	// cancelled symbolically by GiNaC outside of the subexpression boundary.
 	GiNaC::ex DrawUnitsOutOfSubexpressions::operator()(const GiNaC::ex &inp)
 	{
 		//	std::cout << "INP " <<inp << std::endl;
@@ -380,7 +433,9 @@ namespace pyoomph
 			if (pyoomph_verbose)
 				std::cout << "INP SE:  " << inp << std::endl;
 			GiNaC::ex factor, unit, rest;
-			GiNaC::ex arg = inp.map(*this).op(0); // Descent recursively through nested subexpressions
+			GiNaC::ex arg = inp.map(*this);
+			if (GiNaC::is_a<GiNaC::numeric>(arg) ) return arg; // No units here
+			arg=arg.op(0); // Descent recursively through nested subexpressions
 			if (pyoomph_verbose)
 				std::cout << "PROCESSING " << inp << std::endl
 						  << "YIELDS " << arg << std::endl
@@ -431,6 +486,9 @@ namespace pyoomph
 		return inp.map(*this);
 	}
 
+	// GiNaC tree-mapper that undoes subexpression wrapping, i.e. unwraps every
+	// expressions::subexpression(...) marker back to its plain argument. Used where the
+	// subexpression-CSE optimization is not desired/applicable and the raw expression is needed instead.
 	GiNaC::ex RemoveSubexpressionsByIndentity::operator()(const GiNaC::ex &inp)
 	{
 		if (is_ex_the_function(inp, expressions::subexpression))
@@ -454,6 +512,17 @@ namespace pyoomph
 			return inp.map(*this);
 	}
 
+	// Core placeholder-expansion pass: walks a user-supplied symbolic expression and replaces every
+	// high-level placeholder function (field(...), nondimfield(...), testfunction(...),
+	// dimtestfunction(...), scale(...), test_scale(...), eval_flag(...), eval_in_domain(...),
+	// python_multi_cb_function(...), delayed-callback expansions, ...) by the concrete GiNaC
+	// expression it stands for: a dimensional/nondimensional ShapeExpansion or TestFunction,
+	// possibly multiplied by its scaling factor, resolved in the correct FiniteElementCode/domain
+	// (`code->resolve_corresponding_code`, respecting eval_in_domain(...) to jump to bulk/interface
+	// codes). Recurses into itself (via a freshly constructed instance bound to the resolved domain)
+	// so cross-domain expressions are expanded fully. `where` records the code-generation context
+	// (residual/Jacobian/...) which affects some scaling factors; `repl_count` is incremented on every
+	// substitution so callers can detect when no further expansion is possible.
 	GiNaC::ex ReplaceFieldsToNonDimFields::operator()(const GiNaC::ex &inp)
 	{
 		std::string fieldname;
@@ -733,6 +802,13 @@ namespace pyoomph
 		return inp.map(*this);
 	}
 
+	// GiNaC tree-mapper that substitutes one FiniteElementField for another wherever it appears as a
+	// ShapeExpansion or TestFunction, keeping all other properties (time-derivative order, basis,
+	// nodal-coordinate-derivative direction, jacobian/hessian flags, expansion mode) unchanged. Used
+	// e.g. to re-target an expression originally written for one field onto an equivalent field
+	// defined on a different (but structurally identical) domain. Only un-spatially-derived basis
+	// functions are supported; remapping a spatially derived ShapeExpansion/TestFunction is not
+	// implemented and raises an error.
 	class RemapFieldsInExpression : public GiNaC::map_function
 	{
 	protected:
@@ -800,6 +876,13 @@ namespace pyoomph
 
 	//////////////
 
+	// The following operator==/operator< overloads implement value equality and a strict weak
+	// ordering (lexicographic over all data members, most significant first) for the small "tag"
+	// structs used as GiNaC custom structures (SpatialIntegralSymbol, ElementSizeSymbol,
+	// NodalDeltaSymbol, NormalSymbol, SubExpression, MultiRetCallback, ShapeExpansion, TestFunction).
+	// GiNaC needs these so that the structures can be stored/deduplicated in std::set/std::map (e.g.
+	// the sets of "required shape expansions" collected while emitting code) and so that structurally
+	// identical symbols compare equal regardless of where in the expression tree they were created.
 	bool operator==(const SpatialIntegralSymbol &lhs, const SpatialIntegralSymbol &rhs)
 	{
 		return lhs.get_code() == rhs.get_code() && 
@@ -909,6 +992,13 @@ namespace pyoomph
 		return lhs.field < rhs.field || (lhs.field == rhs.field && lhs.basis < rhs.basis) || (lhs.field == rhs.field && lhs.basis == rhs.basis && lhs.nodal_coord_dir < rhs.nodal_coord_dir) || (lhs.field == rhs.field && lhs.basis == rhs.basis && lhs.nodal_coord_dir == rhs.nodal_coord_dir && lhs.is_derived_other_index < rhs.is_derived_other_index) || (lhs.field == rhs.field && lhs.basis == rhs.basis && lhs.nodal_coord_dir == rhs.nodal_coord_dir && lhs.is_derived_other_index == rhs.is_derived_other_index && lhs.nodal_coord_dir2 < rhs.nodal_coord_dir2);
 	}
 
+	// Checks whether the GiNaC symbol `s` is the raw position-coordinate symbol of the nodal
+	// position field on some accessible domain (this element itself, its bulk element(s), or the
+	// opposite-interface element and its bulk), so that differentiating w.r.t. `s` can be
+	// interpreted as a derivative w.r.t. the moving mesh coordinates. If `domain_to_check` is NULL,
+	// recursively probes __current_code and its related domains (bulk / bulk-of-bulk / opposite
+	// interface / opposite interface's bulk); otherwise checks only the given domain. Returns the
+	// FiniteElementCode on which `s` was found as a position symbol, or NULL if it is not one.
 	FiniteElementCode *ShapeExpansion::can_be_a_positional_derivative_symbol(const GiNaC::symbol &s, FiniteElementCode *domain_to_check) const
 	{
 		if (!domain_to_check)
@@ -966,6 +1056,13 @@ namespace pyoomph
 		return NULL;
 	}
 
+	// The following ShapeExpansion::get_*_name/str methods construct the C variable/array names used
+	// in the generated code for a given shape expansion: e.g. get_dt_values_name names the array
+	// holding the time-derivative-weighted nodal values, get_spatial_interpolation_name names the
+	// (possibly nodal-coordinate-derivative-tagged) interpolated field value at the integration
+	// point, and get_shape_string/get_nodal_data_string/get_num_nodes_str/get_nodal_index_str
+	// delegate to the basis function / field / space to build the corresponding shape-function or
+	// nodal-data array access expression as a string of C code.
 	std::string ShapeExpansion::get_dt_values_name(FiniteElementCode *forcode) const
 	{
 		std::string code_type = forcode->get_owner_prefix(this->basis->get_space());
@@ -975,7 +1072,7 @@ namespace pyoomph
 		return code_type + dtstring + "_" + this->field->get_name();
 	}
 
-	std::string ShapeExpansion::get_timedisc_scheme(FiniteElementCode *forcode) const
+	std::string ShapeExpansion::get_timedisc_scheme(FiniteElementCode *) const
 	{
 		return this->dt_scheme;
 	}
@@ -996,6 +1093,9 @@ namespace pyoomph
 		}
 		else
 		{
+			// Second nodal-coordinate derivative: sort the two directions so that the same C array name
+			// is used irrespective of the order the derivatives were taken in (mixed partials commute),
+			// and remember whether we swapped so the l_shape/l_shape2 loop indices are swapped to match.
 			int ind1 = this->nodal_coord_dir;
 			int ind2 = this->nodal_coord_dir2;
 			// TODO: Symmetrize?
@@ -1015,6 +1115,10 @@ namespace pyoomph
 		return field->get_nodal_index_str(forcode);
 	}
 
+	// Bookkeeping of which (code, residual_index[, other field]) combinations a field actually
+	// contributes to. This is filled in while residuals are added/derived (mark_*) and later queried
+	// (has_*) to skip generating code for residual/Jacobian entries that are structurally zero,
+	// avoiding wasted symbolic differentiation and C code for terms that can never be nonzero.
 	bool FiniteElementField::has_residual_contribution_for_code(FiniteElementCode *code,unsigned residual_index)
 	{
 		return this->residual_contribution_for_code.count(code) > 0 && this->residual_contribution_for_code[code].count(residual_index) > 0;
@@ -1046,6 +1150,8 @@ namespace pyoomph
 
 	}
 
+	// If a field is already defined on a bulk domain and merely re-exposed on an interface/corner
+	// domain, returns the top-level (bulk) field it is equivalent to; otherwise returns itself.
 	FiniteElementField * FiniteElementField::get_defined_on_domain_equivalent_field()
 	{
 		if (defined_on_domain_equivalent)
@@ -1053,6 +1159,8 @@ namespace pyoomph
 		else
 			return this;
 	}
+	// Records that this field is just the interface/corner-level view of `equiv_field`, which is
+	// defined on a bulk domain (see get_defined_on_domain_equivalent_field()).
     void FiniteElementField::set_defined_on_domain_equivalent_field(FiniteElementField *equiv_field)
 	{
 		this->defined_on_domain_equivalent = equiv_field;
@@ -1074,8 +1182,16 @@ namespace pyoomph
 
 	std::string FiniteElementField::get_hanginfo_str(FiniteElementCode *forcode) const
 	{
-		// if (!space->can_have_hanging_nodes()) return "No_Hang_Possible";
-		return forcode->get_shape_info_str(space) + "->hanginfo_" + space->get_hang_name();
+		// The position space has its own dimension-indexed buffer; every other space (continuous,
+		// DG, DL, D0) shares one unified buffer indexed by this field's global nodal-data index.
+		if (dynamic_cast<PositionFiniteElementSpace *>(space))
+		{
+			return forcode->get_shape_info_str(space) + "->hanginfo_Pos[" + get_nodal_index_str(forcode) + "]";
+		}
+		else
+		{
+			return forcode->get_shape_info_str(space) + "->hanginfo[" + get_nodal_index_str(forcode) + "]";
+		}
 	}
 
 	std::string ShapeExpansion::get_num_nodes_str(FiniteElementCode *forcode) const
@@ -1100,7 +1216,13 @@ namespace pyoomph
 		return forcode->get_elem_info_str(this->basis->get_space()) + "->" + nds + "[" + indexstr + "][" + get_nodal_index_str(forcode) + "][" + std::to_string(time_history_index) + "]";
 	}
 
-	std::string BasisFunction::get_c_varname(FiniteElementCode *forcode, std::string test_index)
+	// BasisFunction represents an (undifferentiated or spatially differentiated) shape function of a
+	// FiniteElementSpace. get_diff_x/X/S lazily create and cache, per Cartesian/Lagrangian/local
+	// direction, the BasisFunction object representing its derivative w.r.t. Eulerian coordinate x,
+	// Lagrangian coordinate X, or local element coordinate S respectively; the caches are owned by
+	// this object and freed in the destructor. Subclasses (D1XBasisFunction and its Lagrangian/local
+	// coordinate variants below) implement the actual differentiated shape function's C code names.
+	std::string BasisFunction::get_c_varname(FiniteElementCode *, std::string test_index)
 	{
 		return "testfunction[" + test_index + "]";
 	}
@@ -1138,9 +1260,16 @@ namespace pyoomph
 		return local_coord_deriv_x[direction];
 	}
 
-	std::string BasisFunction::get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const
+	std::string BasisFunction::get_shape_string(FiniteElementCode *, std::string nodal_index) const
 	{
-		return "shape_" + space->get_shape_name() + "[" + nodal_index + "]";
+		if (space->get_shape_name()=="C2TB" || space->get_shape_name()=="C2" || space->get_shape_name()=="C1TB" || space->get_shape_name()=="C1")
+		{
+			return "shapes[SPACE_INDEX_" + space->get_shape_name() + "][" + nodal_index + "]";
+		}
+		else
+		{
+			return "shape_" + space->get_shape_name() + "[" + nodal_index + "]";
+		}
 	}
 
 	BasisFunction::~BasisFunction()
@@ -1157,22 +1286,24 @@ namespace pyoomph
 		return "BASIS of " + space->get_name();
 	}
 
-	BasisFunction *D1XBasisFunction::get_diff_x(unsigned direction)
+	// Second spatial derivatives of basis functions (i.e. differentiating an already-once-differentiated
+	// D1XBasisFunction again) are not supported by the code generator.
+	BasisFunction *D1XBasisFunction::get_diff_x(unsigned)
 	{
 		throw_runtime_error("Cannot handle second order derivatives of basis functions yet");
 	}
 
-	BasisFunction *D1XBasisFunction::get_diff_X(unsigned direction)
+	BasisFunction *D1XBasisFunction::get_diff_X(unsigned)
 	{
 		throw_runtime_error("Cannot handle second order derivatives of basis functions yet");
 	}
 
-	BasisFunction *D1XBasisFunction::get_diff_S(unsigned direction)
+	BasisFunction *D1XBasisFunction::get_diff_S(unsigned)
 	{
 		throw_runtime_error("Cannot handle second order derivatives of basis functions yet");
 	}
 
-	std::string D1XBasisFunction::get_c_varname(FiniteElementCode *forcode, std::string test_index)
+	std::string D1XBasisFunction::get_c_varname(FiniteElementCode *, std::string test_index)
 	{
 		return "dx_testfunction[" + test_index + "][" + std::to_string(direction) + "]";
 	}
@@ -1188,12 +1319,19 @@ namespace pyoomph
 		return dx + "of BASIS of " + space->get_name();
 	}
 
-	std::string D1XBasisFunction::get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const
+	std::string D1XBasisFunction::get_shape_string(FiniteElementCode *, std::string nodal_index) const
 	{
-		return "dx_shape_" + space->get_shape_name() + "[" + nodal_index + "][" + std::to_string(direction) + "]";
+		if (space->get_shape_name()=="C2TB" || space->get_shape_name()=="C2" || space->get_shape_name()=="C1TB" || space->get_shape_name()=="C1")
+		{
+			return "dx_shapes[SPACE_INDEX_" + space->get_shape_name() + "][" + nodal_index + "][" + std::to_string(direction) + "]";
+		}
+		else
+		{
+			return "dx_shape_" + space->get_shape_name() + "[" + nodal_index + "][" + std::to_string(direction) + "]";
+		}
 	}
 
-	std::string D1XBasisFunctionLagr::get_c_varname(FiniteElementCode *forcode, std::string test_index)
+	std::string D1XBasisFunctionLagr::get_c_varname(FiniteElementCode *, std::string test_index)
 	{
 		return "dX_testfunction[" + test_index + "][" + std::to_string(direction) + "]";
 	}
@@ -1209,14 +1347,21 @@ namespace pyoomph
 		return dx + "of BASIS of " + space->get_name();
 	}
 
-	std::string D1XBasisFunctionLagr::get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const
+	std::string D1XBasisFunctionLagr::get_shape_string(FiniteElementCode *, std::string nodal_index) const
 	{
-		return "dX_shape_" + space->get_shape_name() + "[" + nodal_index + "][" + std::to_string(direction) + "]";
+		if (space->get_shape_name()=="C2TB" || space->get_shape_name()=="C2" || space->get_shape_name()=="C1TB" || space->get_shape_name()=="C1")
+		{
+			return "dX_shapes[SPACE_INDEX_" + space->get_shape_name() + "][" + nodal_index + "][" + std::to_string(direction) + "]";
+		}
+		else
+		{
+			return "dX_shape_" + space->get_shape_name() + "[" + nodal_index + "][" + std::to_string(direction) + "]";
+		}
 	}
 
 
 
-	std::string D1XBasisFunctionLocalCoord::get_c_varname(FiniteElementCode *forcode, std::string test_index)
+	std::string D1XBasisFunctionLocalCoord::get_c_varname(FiniteElementCode *, std::string test_index)
 	{
 		return "dS_testfunction[" + test_index + "][" + std::to_string(direction) + "]";
 	}
@@ -1232,13 +1377,26 @@ namespace pyoomph
 		return dx + "of BASIS of " + space->get_name();
 	}
 
-	std::string D1XBasisFunctionLocalCoord::get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const
+	std::string D1XBasisFunctionLocalCoord::get_shape_string(FiniteElementCode *, std::string nodal_index) const
 	{
-		return "dS_shape_" + space->get_shape_name() + "[" + nodal_index + "][" + std::to_string(direction) + "]";
+		if (space->get_shape_name()=="C2TB" || space->get_shape_name()=="C2" || space->get_shape_name()=="C1TB" || space->get_shape_name()=="C1")
+		{
+			return "dS_shapes[SPACE_INDEX_" + space->get_shape_name() + "][" + nodal_index + "][" + std::to_string(direction) + "]";
+		}
+		else
+		{
+			return "dS_shape_" + space->get_shape_name() + "[" + nodal_index + "][" + std::to_string(direction) + "]";
+		}
 	}
 
 
 
+	// The following get_eqn_number_str/get_num_nodes_str overrides build the C expression used to
+	// access, respectively, the local equation-number lookup array and the node count for a given
+	// FiniteElementSpace within the generated element code: ordinary nodal spaces use the shared
+	// "nodal_local_eqn"/"nnode_of_space[...]" oomph-lib element members, while the position space
+	// (PositionFiniteElementSpace) uses the dedicated "pos_local_eqn"/"nnode", and the discontinuous
+	// D0 space (one DoF per element, not per node) always reports a single "node".
 	std::string FiniteElementSpace::get_eqn_number_str(FiniteElementCode *forcode) const
 	{
 		std::string eleminfo = forcode->get_elem_info_str(this);
@@ -1248,10 +1406,14 @@ namespace pyoomph
 	std::string FiniteElementSpace::get_num_nodes_str(FiniteElementCode *forcode) const
 	{
 		std::string eleminfo = forcode->get_elem_info_str(this);
-		return eleminfo + "->" + "nnode_" + this->get_shape_name();
+		if (this->get_shape_name()=="DL") //TODO: Make this in another way
+		{
+			return eleminfo + "->" + "nnode_DL";
+		}
+		else return eleminfo + "->" + "nnode_of_space[SPACE_INDEX_" + this->get_shape_name() + "]";
 	}
 
-	std::string D0FiniteElementSpace::get_num_nodes_str(FiniteElementCode *forcode) const
+	std::string D0FiniteElementSpace::get_num_nodes_str(FiniteElementCode *) const
 	{
 		return "1";
 	}
@@ -1268,6 +1430,15 @@ namespace pyoomph
 		return eleminfo + "->pos_local_eqn";
 	}
 
+	// Emits C code that pre-computes, for every distinct time-derivative shape expansion in
+	// `required_shapeexps` that lives on this space, an array of per-node time-derivative values
+	// (weighted sum over the timestepper's history storage using the timestepper's finite-difference
+	// weights for the requested order/scheme, with an optional "degraded start" scheme override for
+	// the first BDF2 step). Declarations are emitted first (PYOOMPH_AQUIRE_ARRAY macro), then a
+	// loop over nodes zero-initializes the arrays, followed by a loop over time-history storage that
+	// accumulates weight*nodal_value into them. Lines are collected into vectors and sorted before
+	// being written so the generated code (and thus its diff / compiled hash) is deterministic
+	// regardless of the (unordered) traversal order of `required_shapeexps`.
 	void FiniteElementSpace::write_nodal_time_interpolation(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, std::set<ShapeExpansion> &required_shapeexps)
 	{
 		bool hascontrib = false;
@@ -1382,6 +1553,20 @@ namespace pyoomph
 		os << indent << "}" << std::endl;
 	}
 
+	// Emits C code that interpolates every required shape expansion on this space at the current
+	// integration point: sum_l nodal_value[l] * shape[l] over a loop on l_shape. This is the
+	// workhorse that turns symbolic ShapeExpansion nodes into actual C loops/arrays.
+	//
+	// If `including_nodal_diffs` is set, this additionally emits the "coordinate-diff" arrays
+	// needed for analytical Jacobian/Hessian contributions of moving-mesh (ALE) problems: for every
+	// spatially-once-differentiated (D1XBasisFunction, Eulerian only - not Lagrangian) shape
+	// expansion, it computes d(dpsi_l/dx_dir)/dX_j^m, i.e. how the *derivative* of the shape function
+	// itself changes as nodal position m in direction j is perturbed (this is a genuinely nontrivial
+	// geometric quantity, since the mapping from local to global coordinates depends on nodal
+	// positions). If `for_hessian` is additionally set, the second nodal-coordinate derivative
+	// d^2(dpsi_l/dx_dir)/dX_j^m dX_j2^m2 is also emitted (needed for exact Hessian-vector products),
+	// looping symmetrically over m2>=m nodal-coordinate-derivative pairs. All emitted lines are again
+	// collected and sorted before being written to keep the generated code deterministic.
 	void FiniteElementSpace::write_spatial_interpolation(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, std::set<ShapeExpansion> &required_shapeexps, bool including_nodal_diffs, bool for_hessian)
 	{
 		bool hascontrib = false;
@@ -1514,7 +1699,16 @@ namespace pyoomph
 					std::string code_type = for_code->get_owner_prefix(s.basis->get_space());
 					std::string coorddiffname = code_type + "intrp_" + dtstring + "_" + s.basis->get_dx_str() + "_COORDDIFF_" + std::to_string(i) + "_" + s.field->get_name();
 					std::string nodal_data = s.get_nodal_data_string(for_code, "l_shape");
-					std::string shapestr = for_code->get_shape_info_str(s.basis->get_space()) + "->d_dx_shape_dcoord_" + s.basis->get_space()->get_shape_name() + "[l_shape][" + std::to_string(dynamic_cast<D1XBasisFunction *>(s.basis)->get_direction()) + "][m][" + std::to_string(i) + "]";
+					std::string shapename=s.basis->get_space()->get_shape_name();
+					if (shapename=="C2TB" || shapename=="C2" || shapename=="C1TB" || shapename=="C1")
+					{
+						shapename="d_dx_shape_dcoord[SPACE_INDEX_"+shapename+"]";
+					}
+					else
+					{
+						shapename="d_dx_shape_dcoord_" + s.basis->get_space()->get_shape_name();
+					}
+					std::string shapestr = for_code->get_shape_info_str(s.basis->get_space()) + "->" + shapename + "[l_shape][" + std::to_string(dynamic_cast<D1XBasisFunction *>(s.basis)->get_direction()) + "][m][" + std::to_string(i) + "]";
 					//os << indent << "       " << coorddiffname << "[m]+=" << nodal_data << " * " << shapestr << ";" << std::endl;
 					calc_lines.push_back(indent + "       " + coorddiffname + "[m]+=" + nodal_data + " * " + shapestr + ";");
 				}
@@ -1570,7 +1764,16 @@ namespace pyoomph
 							std::string code_type = for_code->get_owner_prefix(s.basis->get_space());
 							std::string coorddiffname = code_type + "intrp_" + dtstring + "_" + s.basis->get_dx_str() + "_2ndCOORDDIFF_" + std::to_string(i) + "_" + std::to_string(j) + "_" + s.field->get_name();
 							std::string nodal_data = s.get_nodal_data_string(for_code, "l_shape");
-							std::string shapestr = for_code->get_shape_info_str(s.basis->get_space()) + "->d2_dx2_shape_dcoord_" + s.basis->get_space()->get_shape_name() + "[l_shape][" + std::to_string(dynamic_cast<D1XBasisFunction *>(s.basis)->get_direction()) + "][m][" + std::to_string(i) + "][m2][" + std::to_string(j) + "]";
+							std::string shapename=s.basis->get_space()->get_shape_name();
+							if (shapename=="C2TB" || shapename=="C2" || shapename=="C1TB" || shapename=="C1")
+							{
+								shapename="d2_dx2_shape_dcoord[SPACE_INDEX_"+shapename+"]";
+							}
+							else
+							{
+								shapename="d2_dx2_shape_dcoord_" + s.basis->get_space()->get_shape_name();
+							}
+							std::string shapestr = for_code->get_shape_info_str(s.basis->get_space()) + "->" + shapename + "[l_shape][" + std::to_string(dynamic_cast<D1XBasisFunction *>(s.basis)->get_direction()) + "][m][" + std::to_string(i) + "][m2][" + std::to_string(j) + "]";
 							//os << indent << "             " << coorddiffname << "[m][m2]+=" << nodal_data << " * " << shapestr << ";" << std::endl;
 							hess_lines.push_back(indent + "             " + coorddiffname + "[m][m2]+=" + nodal_data + " * " + shapestr + ";");
 						}
@@ -1594,7 +1797,10 @@ namespace pyoomph
 		}
 	}
 
-	void D0FiniteElementSpace::write_spatial_interpolation(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, std::set<ShapeExpansion> &required_shapeexps, bool including_nodal_diffs, bool for_hessian)
+	// D0 spaces have a single (element-local, not nodal) DoF per field, so "interpolation" is trivial:
+	// no loop is required, the value is simply the field's (only) nodal data entry. This overrides
+	// the generic FiniteElementSpace::write_spatial_interpolation loop-based implementation.
+	void D0FiniteElementSpace::write_spatial_interpolation(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, std::set<ShapeExpansion> &required_shapeexps, bool, bool)
 	{
 		bool hascontrib = false;
 		std::string range = "";
@@ -1628,6 +1834,10 @@ namespace pyoomph
 		}
 	}
 
+	// The nodal position space only carries real degrees of freedom (and thus needs
+	// Jacobian/Hessian rows/columns of its own) when the mesh coordinates are themselves unknowns
+	// being solved for (moving-mesh/ALE problems with coordinates_as_dofs); otherwise positions are
+	// prescribed data and there is nothing to differentiate w.r.t. them.
 	bool PositionFiniteElementSpace::write_generic_Hessian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns)
 	{
 		// Only do it if the coordinates are Dofs
@@ -1644,6 +1854,31 @@ namespace pyoomph
 			FiniteElementSpace::write_generic_RJM_jacobian_contribution(for_code, os, indent, for_what, hanging_eqns,residual_field);
 	}
 
+	// Emits the C code for the Hessian (second-derivative) contribution of `for_what` (typically a
+	// residual expression, already differentiated once w.r.t. the "outer" field of this space) with
+	// respect to every field defined on every other relevant FiniteElementSpace ("inner" fields).
+	// Algorithm, per outer field f on this space:
+	//   1. Symbolically differentiate for_what w.r.t. f's raw GiNaC symbol to get diffpart = dR/df.
+	//      Also isolate its mass-matrix part (derivative w.r.t. the special "partial_t" marker) since
+	//      the mass-matrix Hessian is *not* symmetric and must be tracked separately.
+	//   2. Determine the set of FiniteElementSpaces that actually occur (as shape expansions) in
+	//      diffpart - these are the spaces that can contribute a nonzero second derivative. Moving
+	//      mesh coordinate fields are added explicitly here (and further above, for the outer field)
+	//      because they enter through the geometric Jacobian/shape-function derivatives rather than
+	//      directly as GiNaC symbols, so they would otherwise be missed by a naive symbol scan.
+	//   3. For every inner field f2 on every such space: differentiate diffpart (and masspart) again
+	//      w.r.t. f2 to get the true second derivative diffpart2. If for_code->assemble_hessian_by_symmetry
+	//      is enabled and the symmetric (f2,f) combination has already been emitted, the almost-symmetric
+	//      Hessian entry is skipped entirely (mass part only, since that part is not symmetric).
+	//   4. Convert all remaining subexpression(...) markers to structs (via __SE_to_struct_hessian) and
+	//      emit nested loops over the outer node index l_shape and inner node index l_shape2 (using the
+	//      BEGIN_HESSIAN_SHAPE_LOOP1[_CONTINUOUS_SPACE] macros for hanging-node-aware assembly), writing
+	//      the C statement that adds the Hessian entry into the sparse Hessian tensor.
+	// Global state (__derive_shapes_by_second_index, __all_Hessian_shapeexps/testfuncs/indices_required,
+	// __derive_only_by_expansion_mode) is toggled around the differentiation calls so that the custom
+	// GiNaC structures' derivative() implementations know which index of the double loop is being
+	// derived, and so the caller can later learn which shape expansions/spaces/fields must have their
+	// interpolation code emitted to support this Hessian.
 	bool FiniteElementSpace::write_generic_Hessian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns)
 	{
 		GiNaC::print_FEM_options csrc_opts;
@@ -1904,11 +2139,9 @@ namespace pyoomph
 					__all_Hessian_testfuncs.insert(testfuncsM.begin(), testfuncsM.end());
 
 					std::string eqn_index2 = f2->get_equation_str(for_code, l_shape2);
-					std::string nodal_index2;
 					std::string hang_info2;
 					if (hang2)
 					{
-						nodal_index2 = f2->get_nodal_index_str(for_code);
 						hang_info2 = f2->get_hanginfo_str(for_code);
 					}
 
@@ -1931,7 +2164,7 @@ namespace pyoomph
 					{
 						if (hang)
 						{
-							os << indent << "  BEGIN_HESSIAN_SHAPE_LOOP1_CONTINUOUS_SPACE(" << eqn_index << "," << hang_info << "," << nodal_index << "," << l_shape << ")" << std::endl;
+							os << indent << "  BEGIN_HESSIAN_SHAPE_LOOP1_CONTINUOUS_SPACE(" << eqn_index << "," << hang_info << "," << l_shape << ")" << std::endl;
 						}
 						else
 						{
@@ -1962,7 +2195,7 @@ namespace pyoomph
 							os << "0";
 						else
 							print_simplest_form(diffpart2_se, os, csrc_opts);
-						os << "," << hang_info2 << "," << nodal_index2 << "," << l_shape2 << ")" << std::endl;
+						os << "," << hang_info2 << "," << l_shape2 << ")" << std::endl;
 					}
 					else
 					{
@@ -2046,6 +2279,19 @@ namespace pyoomph
 		return has_contribs;
 	}
 
+	// Emits the C code for the (first-order) Jacobian and mass-matrix contribution of residual
+	// expression `for_what` w.r.t. every field defined on this space ("residual/Jacobian/Mass
+	// matrix" = RJM). For each candidate field f found among the shape expansions occurring in
+	// for_what (plus, for moving-mesh problems, the nodal position fields, which enter implicitly
+	// through geometric/shape-function factors and must be added explicitly), symbolically
+	// differentiates for_what w.r.t. f's GiNaC symbol; the coefficient of the special
+	// __partial_t_mass_matrix marker within that derivative is the mass-matrix entry, the rest is
+	// the (stiffness) Jacobian entry. Loops over the node index l_shape (or "0" for D0/single-DoF
+	// spaces) and, for hanging-node-capable spaces, uses the BEGIN/END_JACOBIAN_HANG macros so the
+	// hanging-node constraint is distributed correctly; otherwise the simpler _NOHANG variants are
+	// used. `residual_field` is recorded (mark_jacobian_contribution_for_code) so later passes know
+	// which field pairs actually contribute and can skip generating dead code for structurally-zero
+	// combinations.
 	void FiniteElementSpace::write_generic_RJM_jacobian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns,FiniteElementField * residual_field)
 	{
 		GiNaC::print_FEM_options csrc_opts;
@@ -2086,12 +2332,14 @@ namespace pyoomph
 				}
 			}
 		}
-
+		
 		auto cmp = [&for_code](FiniteElementField * a, FiniteElementField * b) 
 		{ 			
 			return a->get_nodal_index_str(for_code) < b->get_nodal_index_str(for_code); 
 		};
 		std::set<FiniteElementField *,decltype(cmp)> jacobian_fields(cmp);
+		//std::set<FiniteElementField *> jacobian_fields;
+		
 		for (auto &s : jacobian_shapes)
 		{
 			if (s.field->get_space() == this)
@@ -2102,9 +2350,20 @@ namespace pyoomph
 				}
 			}
 		}
+		/*
+		std::cout << " IN RJM JACOBIAN CONTRIB, NUMBER OF SHAPES: " << jacobian_shapes.size() << std::endl;
+		for (auto &s : jacobian_shapes)
+		{
+			std::cout << "  SHAPE: " << s.get_nodal_data_string(for_code,"INDEX") << " " << s.get_shape_string(for_code,"INDEX") << "  " << s.get_nodal_index_str(for_code) << std::endl;
+		}
+		std::cout << " IN RJM JACOBIAN CONTRIB, NUMBER OF FIELDS: " << jacobian_fields.size() << std::endl;
+		for (auto &f : jacobian_fields)
+		{
+			std::cout << "  FIELD: " << f->get_name() << "   NODAL INDEX: " << f->get_nodal_index_str(for_code) << std::endl;
+		}		
+		*/
 		if (jacobian_fields.empty())
 			return;
-
 		std::string numnodes_str = this->get_num_nodes_str(for_code);
 		std::string l_shape;
 		if (numnodes_str == "1")
@@ -2145,7 +2404,6 @@ namespace pyoomph
 			residual_field->mark_jacobian_contribution_for_code(for_code,for_code->get_current_residual_index(),f);
 			if (hang)
 			{
-				std::string nodal_index = f->get_nodal_index_str(for_code);
 				std::string hang_info = f->get_hanginfo_str(for_code);
 				os << indent << "  BEGIN_JACOBIAN_HANG(" << eqn_index << ", ";
 				//if (for_code->get_derive_jacobian_by_expansion_mode())
@@ -2153,7 +2411,7 @@ namespace pyoomph
 				//	os << indent << " /* SYMBOLIC FORM  " << std::endl << diffpart << std::endl << " */ ";
 				//}
 				print_simplest_form(diffpart, os, csrc_opts);
-				os << "," << hang_info << "," << nodal_index << "," << l_shape << ")" << std::endl;
+				os << "," << hang_info << "," << l_shape << ")" << std::endl;
 			}
 			else
 			{
@@ -2191,6 +2449,19 @@ namespace pyoomph
 		}
 	}
 
+	// Top-level driver that emits the full residual + Jacobian (+ optionally Hessian, if `hessian`)
+	// code for the part of `for_what` that is tested against test functions living on this space.
+	// Uses MapOnTestSpace to isolate, per field with a test function on this space, exactly the
+	// terms of the residual belonging to that field's equation; loops over the local test-node index
+	// l_test (emitting the required shape/dx/dX/dS-shape pointers first), and for every present test
+	// field: emits the residual contribution (BEGIN_RESIDUAL[_CONTINUOUS_SPACE]/ADD_TO_RESIDUAL...,
+	// skipped if `hessian` is true since the Hessian pass only needs Jacobian/mass matrix code, or if
+	// the residual assembly for the currently active residual name has been explicitly disabled via
+	// set_ignore_residual_assembly), then delegates to write_generic_RJM_jacobian_contribution (or,
+	// for `hessian`, to write_generic_Hessian_contribution) on every FiniteElementSpace that
+	// contributes shape expansions to that field's residual term, to produce the first (or second)
+	// derivative code. Returns whether any nonzero contribution was written at all, which callers use
+	// to decide whether to skip emitting entire (empty) code blocks/functions.
 	bool FiniteElementSpace::write_generic_RJM_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hessian)
 	{
 		bool has_contribs = false;
@@ -2230,10 +2501,20 @@ namespace pyoomph
 		if (numnodes_str != "1")
 		{
 
-			oss << indent << "  double const * testfunction = " << shapeinfo << "->shape_" << this->get_shape_name() << ";" << std::endl;
-			oss << indent << "  DX_SHAPE_FUNCTION_DECL(dx_testfunction) = " << shapeinfo << "->dx_shape_" << this->get_shape_name() << ";" << std::endl;
-			oss << indent << "  DX_SHAPE_FUNCTION_DECL(dX_testfunction) = " << shapeinfo << "->dX_shape_" << this->get_shape_name() << ";" << std::endl;
-			oss << indent << "  DX_SHAPE_FUNCTION_DECL(dS_testfunction) = " << shapeinfo << "->dS_shape_" << this->get_shape_name() << ";" << std::endl;
+			if (this->get_shape_name()=="C2TB" || this->get_shape_name()=="C2" || this->get_shape_name()=="C1TB" || this->get_shape_name()=="C1")
+			{
+				oss << indent << "  double const * testfunction = " << shapeinfo << "->shapes[SPACE_INDEX_" << this->get_shape_name() << "];" << std::endl;
+				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dx_testfunction) = " << shapeinfo << "->dx_shapes[SPACE_INDEX_" << this->get_shape_name() << "];" << std::endl;
+				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dX_testfunction) = " << shapeinfo << "->dX_shapes[SPACE_INDEX_" << this->get_shape_name() << "];" << std::endl;
+				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dS_testfunction) = " << shapeinfo << "->dS_shapes[SPACE_INDEX_" << this->get_shape_name() << "];" << std::endl;
+			}
+			else
+			{
+				oss << indent << "  double const * testfunction = " << shapeinfo << "->shape_" << this->get_shape_name() << ";" << std::endl;
+				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dx_testfunction) = " << shapeinfo << "->dx_shape_" << this->get_shape_name() << ";" << std::endl;
+				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dX_testfunction) = " << shapeinfo << "->dX_shape_" << this->get_shape_name() << ";" << std::endl;
+				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dS_testfunction) = " << shapeinfo << "->dS_shape_" << this->get_shape_name() << ";" << std::endl;
+			}
 
 			oss << indent << "  for (unsigned int l_test=0;l_test<" << numnodes_str << ";l_test++)" << std::endl;
 			oss << indent << "  {" << std::endl;
@@ -2253,7 +2534,6 @@ namespace pyoomph
 			FiniteElementField *field = var_mapper.get_field();
 			//if (hessian) std::cout << "HESSIAN TEST: " << test_name << std::endl;
 			std::string eqn_index = field->get_equation_str(for_code, l_test);
-			std::string nodal_index = field->get_nodal_index_str(for_code);
 			std::string hang_info = field->get_hanginfo_str(for_code);
 			bool hessian_loop1_written = false;
 			bool can_have_hanging = this->can_have_hanging_nodes() || for_code != this->code; // Always hang for external spaces
@@ -2283,7 +2563,7 @@ namespace pyoomph
 						std::map<std::string, std::string> latexinfo = {{"typ", "final_residual"}, {"test_name", test_name}};
 						for_code->latex_printer->print(latexinfo, var_part, csrc_opts);
 					}
-					oss << ", " << hang_info << "," << nodal_index << "," << l_test << ")" << std::endl;
+					oss << ", " << hang_info << "," << l_test << ")" << std::endl;
 					oss << indent << "      ADD_TO_RESIDUAL_CONTINUOUS_SPACE()" << std::endl;
 				}
 				else
@@ -2349,21 +2629,31 @@ namespace pyoomph
 			{
 				if (!hessian)
 					oss << indent << "      BEGIN_JACOBIAN()" << std::endl;
+				
 				auto cmp=[&for_code](FiniteElementField * a, FiniteElementField * b) 
 				{ 			
 					return a->get_nodal_index_str(for_code) < b->get_nodal_index_str(for_code); 
 				};
 				std::set<FiniteElementField *, decltype(cmp)> jacobian_fields(cmp);
+				//std::set<FiniteElementField *> jacobian_fields;
 				for (auto &s : jacobian_shapes)
 				{					
 					//std::cout << "Test function " << test_name << " Jacobian Field " << s.field->get_name() << " Space " << s.field->get_space()->get_name() << " on " << s.field->get_space()->get_code()->get_full_domain_name() << std::endl;
 					jacobian_fields.insert(s.field);
 				}
+				// This might be problematic for DG methods... HDG e.g. accesses both sides, but they are somehow the same
+				
 				auto cmp_spaces=[&for_code](FiniteElementSpace * a, FiniteElementSpace * b) 
 				{ 			
-					return a->get_name()<b->get_name() || (a->get_name()==b->get_name() &&  a->get_code()->get_full_domain_name() < b->get_code()->get_full_domain_name() || (a->get_name()==b->get_name() &&  a->get_code()->get_full_domain_name() == b->get_code()->get_full_domain_name() && a->get_num_nodes_str(for_code)<b->get_num_nodes_str(for_code))); 
+					return (a->get_name()<b->get_name()) || 
+						   ((a->get_name()==b->get_name()) &&  (a->get_code()->get_full_domain_name() < b->get_code()->get_full_domain_name())) || 
+						   ((a->get_name()==b->get_name()) &&  (a->get_code()->get_full_domain_name() == b->get_code()->get_full_domain_name()) && (a->get_num_nodes_str(for_code)<b->get_num_nodes_str(for_code))) || 
+						   ((a->get_name()==b->get_name()) &&  (a->get_code()->get_full_domain_name() == b->get_code()->get_full_domain_name()) && (a->get_num_nodes_str(for_code)==b->get_num_nodes_str(for_code)) && (for_code->get_elem_info_str(a)<for_code->get_elem_info_str(b)));
 				};
 				std::set<FiniteElementSpace *, decltype(cmp_spaces)> jacobian_spaces(cmp_spaces);
+				
+				//std::set<FiniteElementSpace *> jacobian_spaces;
+				
 				for (auto *s : jacobian_fields)
 					jacobian_spaces.insert(s->get_space());
 				if (pyoomph_verbose)
@@ -2386,7 +2676,7 @@ namespace pyoomph
 							{
 								if (can_have_hanging)
 								{
-									oss << indent << "    BEGIN_HESSIAN_TEST_LOOP_CONTINUOUS_SPACE(" << eqn_index << ", " << hang_info << "," << nodal_index << "," << l_test << ")" << std::endl;
+									oss << indent << "    BEGIN_HESSIAN_TEST_LOOP_CONTINUOUS_SPACE(" << eqn_index << ", " << hang_info << "," << l_test << ")" << std::endl;
 								}
 								else
 								{
@@ -2437,6 +2727,8 @@ namespace pyoomph
 		return has_contribs;
 	}
 
+	// Finds the (unique) PositionFiniteElementSpace owned by this code (as opposed to inherited
+	// from a bulk/external element); raises an error if somehow more than one is registered.
 	PositionFiniteElementSpace *FiniteElementCode::get_my_position_space()
 	{
 		PositionFiniteElementSpace *res = NULL;
@@ -2469,6 +2761,13 @@ namespace pyoomph
 		return res;
 	}
 
+	// The next two overloads flag, for a given generated-function category (`func_type`, e.g.
+	// "residual" or "jacobian"), that shape functions of a particular kind (plain "psi",
+	// Eulerian-derivative "dx_psi", or Lagrangian-derivative "dX_psi") must be computed/provided for
+	// `space` when writing that function - this drives write_required_shapes()/mark_further_required_fields()
+	// so that only the shape data actually used by the generated code is computed at runtime.
+	// DG spaces are recorded under their underlying continuous space, since the shape functions are
+	// identical; external D0 spaces never need shape data (their DoF is not spatially interpolated).
 	void FiniteElementCode::mark_shapes_required(std::string func_type, FiniteElementSpace *space, BasisFunction *bf)
 	{
 		std::string dx_type = "psi";
@@ -2498,6 +2797,9 @@ namespace pyoomph
 		required_shapes[func_type][space][dx_type] = true;
 	}
 
+	// Returns the C literal "true"/"false" indicating whether mark_shapes_required() was previously
+	// called for this (func_type, space, dx_type) combination - used to conditionally emit shape
+	// data computation only where actually needed.
 	std::string FiniteElementCode::get_shapes_required_string(std::string func_type, FiniteElementSpace *space, std::string dx_type)
 	{
 		if (required_shapes.count(func_type))
@@ -2521,6 +2823,8 @@ namespace pyoomph
 			return "false";
 	}
 
+	// Looks up one of this code's registered FiniteElementSpace objects (Pos, C2, C1, D0, ...) by its
+	// short name; raises a descriptive error listing the available spaces if not found.
 	FiniteElementSpace *FiniteElementCode::name_to_space(std::string name)
 	{
 		for (unsigned int i = 0; i < spaces.size(); i++)
@@ -2536,6 +2840,10 @@ namespace pyoomph
 		return NULL;
 	}
 
+	// Registers a new field `name` on the space named `spacename` (creating a FiniteElementField), or
+	// returns the existing one if already registered on the same space (raises an error if the same
+	// name is registered on two different spaces). Fields may only be added before stage 1, i.e.
+	// before any residual has been added - the element's field set is fixed after that point.
 	FiniteElementField *FiniteElementCode::register_field(std::string name, std::string spacename)
 	{
 
@@ -2561,9 +2869,17 @@ namespace pyoomph
 		return code->with_adaptivity;
 	}
 
-	FiniteElementCode::FiniteElementCode() : residual_index(0), residual_names({""}), equations(NULL), bulk_code(NULL), opposite_interface_code(NULL), residual(std::vector<GiNaC::ex>{0}), dx(this, false), dX(this, true),dx_unity(this, false), elemsize_Eulerian(this, false, true), elemsize_Lagrangian(this, true, true), elemsize_Eulerian_Cart(this, false, false), elemsize_Lagrangian_Cart(this, true, false), nodal_delta(this), stage(0), nodal_dim(0), lagr_dim(0), coordinate_sys(&__no_coordinate_system), _x(GiNaC::indexed(GiNaC::potential_real_symbol("interpolated_x"), GiNaC::idx(0, 3))),
-											 _y(GiNaC::indexed(GiNaC::potential_real_symbol("interpolated_x"), GiNaC::idx(1, 3))), _z(GiNaC::indexed(GiNaC::potential_real_symbol("interpolated_x"))), integration_order(0), IC_names({""}), element_dim(-1), analytical_jacobian(true), analytical_position_jacobian(true), debug_jacobian_epsilon(0.0), with_adaptivity(true),
-											 coordinates_as_dofs(false), generate_hessian(false), assemble_hessian_by_symmetry(true), coordinate_space(""), stop_on_jacobian_difference(false), latex_printer(NULL), has_constant_mass_matrix_for_sure(std::vector<bool>{false})
+	// Constructs the built-in FiniteElementSpace hierarchy shared by every element (Pos, the
+	// continuous C2TB/C2/C1TB/C1 spaces, their discontinuous-Galerkin D2TB/D2/D1TB/D1 counterparts,
+	// the fully discontinuous DL/D0 spaces, and the external ED0 space), plus the symbolic
+	// "derived" dx/element-size symbol families (dx_derived[i], dx_derived2[i][j], elemsize_derived,
+	// elemsize_Cart_derived, ... and their Hessian "second index" variants) used to represent
+	// spatial derivatives of the integration measure w.r.t. moving nodal coordinates - these are
+	// pre-built for all 3 spatial directions upfront so that GiNaC::diff() on dx/element-size
+	// symbols can return the correctly-tagged symbol without having to construct new ones on the fly.
+	FiniteElementCode::FiniteElementCode() : residual_index(0), residual_names({""}), equations(NULL), bulk_code(NULL), opposite_interface_code(NULL), residual(std::vector<GiNaC::ex>{0}), dx(this, false), dX(this, true), dx_unity(this, false), elemsize_Eulerian(this, false, true), elemsize_Lagrangian(this, true, true), elemsize_Eulerian_Cart(this, false, false), elemsize_Lagrangian_Cart(this, true, false), nodal_delta(this), stage(0), nodal_dim(0), lagr_dim(0), coordinate_sys(&__no_coordinate_system), _x(GiNaC::indexed(GiNaC::potential_real_symbol("interpolated_x"), GiNaC::idx(0, 3))),
+											 _y(GiNaC::indexed(GiNaC::potential_real_symbol("interpolated_x"), GiNaC::idx(1, 3))), _z(GiNaC::indexed(GiNaC::potential_real_symbol("interpolated_x"))), integration_order(0), IC_names({""}), has_constant_mass_matrix_for_sure(std::vector<bool>{false}), element_dim(-1), analytical_jacobian(true), analytical_position_jacobian(true), debug_jacobian_epsilon(0.0), with_adaptivity(true),
+											 coordinates_as_dofs(false), generate_hessian(false), assemble_hessian_by_symmetry(true), coordinate_space(""), stop_on_jacobian_difference(false), latex_printer(NULL)
 	{
 		dx_unity.simple_unity_integral=true;
 		spaces.push_back(new PositionFiniteElementSpace(this, "Pos"));
@@ -2606,6 +2922,9 @@ namespace pyoomph
 		}
 	}
 
+	// Switches the "current residual" context to the named residual, creating a new (empty, zero)
+	// residual slot for it if it doesn't exist yet. All subsequent add_residual() calls accumulate
+	// into residual[residual_index] until the next _activate_residual() call.
 	void FiniteElementCode::_activate_residual(std::string name)
 	{
 		for (unsigned int i = 0; i < residual_names.size(); i++)
@@ -2629,6 +2948,13 @@ namespace pyoomph
 				delete s;
 	}
 
+	// Collects every distinct ShapeExpansion appearing anywhere in expression `inp`, recursing into
+	// subexpression(...) wrappers and multi-return callback invocation arguments (since those are
+	// opaque to a plain preorder traversal otherwise). If any of the merge_* flags are set, entries
+	// that are identical except for the no_jacobian/no_hessian/expansion_mode "tag" flags are merged
+	// into a single canonical entry (flags cleared) - i.e. once *any* variant of a shape expansion is
+	// found, the plain untagged variant is guaranteed to be requested, which is what the shape/data
+	// interpolation code generator (which only understands the untagged shapes) needs to see.
 	std::set<ShapeExpansion> FiniteElementCode::get_all_shape_expansions_in(GiNaC::ex inp, bool merge_no_jacobian, bool merge_expansion_modes, bool merge_no_hessian)
 	{
 		std::set<ShapeExpansion> res;
@@ -2693,6 +3019,10 @@ namespace pyoomph
 		return res;
 	}
 
+	// Collects every distinct TestFunction structure appearing anywhere in expression `inp` (simple
+	// preorder scan; unlike get_all_shape_expansions_in, test functions are not expected inside
+	// subexpression(...) wrappers since subexpressions may not depend on test functions - see
+	// SubExpressionsToStructs above).
 	std::set<TestFunction> FiniteElementCode::get_all_test_functions_in(GiNaC::ex inp)
 	{
 		std::set<TestFunction> res;
@@ -2710,6 +3040,11 @@ namespace pyoomph
 	}
 
 	
+	// GiNaC tree-mapper that replaces occurrences of the auxiliary "mesh_x"/"mesh_y"/"mesh_z" fields
+	// (used only so that partial_t(mesh_x) can be nonzero while partial_t(coordinate_x) is defined
+	// to be identically zero, allowing mesh-velocity terms to be expressed) by the corresponding real
+	// "coordinate_x"/"coordinate_y"/"coordinate_z" position field, once the mesh-velocity-specific
+	// differentiation is no longer needed.
 	class MeshToCoordinateShapes : public GiNaC::map_function
 	{
 	protected:
@@ -2751,6 +3086,16 @@ namespace pyoomph
 		}
 	};
 
+	// Repeatedly applies ReplaceFieldsToNonDimFields until the expression stops changing (a single
+	// pass may not fully expand nested field(...)/eval_in_domain(...) placeholders, since expanding
+	// one placeholder can reveal further placeholders inside the code it expands to). If a pass
+	// reports substitutions were made (repl_count>0) but the expression is unchanged, expansion is
+	// stuck (e.g. a self-referential definition) and either raises an error or silently gives up,
+	// depending on `raise_error`. Finally rewrites any remaining "mesh_*" pseudo-fields back to the
+	// real "coordinate_*" position fields (see MeshToCoordinateShapes above) - this substitution is
+	// deliberately done only once, at the very end, since keeping "mesh_*" distinct from
+	// "coordinate_*" during expansion is what allows a nonzero mesh velocity partial_t(mesh_x) while
+	// partial_t(coordinate_x) stays zero.
 	GiNaC::ex FiniteElementCode::expand_placeholders(GiNaC::ex inp, std::string where, bool raise_error)
 	{
 		this->expanded_scales.clear();
@@ -2785,6 +3130,26 @@ namespace pyoomph
 		return msh2x(repl);
 	}
 
+	// Assigns each field's global DoF-slot `index` (used to lay out nodal/internal data and equation
+	// numbers consistently between a bulk element and its interfaces/attached elements). Must run
+	// exactly once per code (guarded by `stage`); recurses into the bulk code first, since interface
+	// element fields must reuse the *same* index as the corresponding bulk field so hanging-node and
+	// DoF bookkeeping between bulk and interface elements stays consistent. Roughly:
+	//   1. If there is a bulk element: recursively index it first, inherit its coordinate_space and
+	//      coordinates_as_dofs flag, then copy over (register, without re-indexing) every position-space
+	//      field from the bulk (skipping zeta/local coordinates beyond this element's dimension), and
+	//      separately index any zeta-coordinate fields that only exist on this (lower-dimensional) code.
+	//   2. Walk from the outermost ("deepest") bulk code down to this one, registering every
+	//      continuous/DG field (except position fields) that is not yet present here, inheriting the
+	//      index from the deepest bulk if it already has one there, else marking it "-2" (to be indexed
+	//      before genuinely interface-local fields) or "-1" (ordinary interface-local field).
+	//   3. Assign fresh consecutive indices to all remaining fields per space, "-2"-tagged bulk-inherited
+	//      fields first, then interface-local ("-1"-tagged) fields.
+	//   4. Position-space fields get their own separate index sequence, with mesh_x/mesh_y/mesh_z always
+	//      pinned to indices 0/1/2 respectively (mirroring the fixed nodal coordinate ordering).
+	// Finally marks stage=1 (fields now fixed) and, if this code has an "opposite side" interface code
+	// that hasn't been indexed yet, recursively indexes it too (the stage-1 guard above prevents infinite
+	// SideA<->SideB recursion).
 	void FiniteElementCode::index_fields()
 	{
 		if (pyoomph_verbose)
@@ -3051,6 +3416,10 @@ namespace pyoomph
 		}
 	}
 
+	// Registers a Z2-error-estimator flux expression (used by oomph-lib's Z2 error estimator to drive
+	// mesh adaptation). The (possibly matrix/vector-valued, after evalm()) expression is expanded and
+	// every non-constant scalar component is stored, either in the normal flux list or, if `for_eigen`,
+	// in the separate list used for eigenproblem/azimuthal error estimation.
 	void FiniteElementCode::add_Z2_flux(GiNaC::ex flux,bool for_eigen)
 	{
 		if (stage > 1)
@@ -3092,6 +3461,15 @@ namespace pyoomph
 		}
 	}
 
+	// Expands all placeholders in `what` (see expand_placeholders) and then checks that the result is
+	// dimensionally consistent: every base unit occurring in it must cancel out exactly (to power 1,
+	// via the `sublist` substitution built from `base_units`), i.e. the final expression must be
+	// nondimensional. If `collected_units_and_factor` is given, units are instead factored out and
+	// returned there rather than required to fully cancel (used for expressions - such as scales or
+	// individual vector/matrix components - that are allowed to carry a consistent overall unit); for
+	// matrix-valued input, every component's units are cross-checked for consistency against the
+	// first component's unit. Raises a detailed error (showing the offending term and units) if the
+	// units cannot be separated or do not cancel/match as required.
 	GiNaC::ex FiniteElementCode::expand_all_and_ensure_nondimensional(GiNaC::ex what, std::string where, GiNaC::ex *collected_units_and_factor)
 	{
 		GiNaC::ex expanded = this->expand_placeholders(what, where);
@@ -3225,6 +3603,10 @@ namespace pyoomph
 		return finalres;
 	}
 
+	// NOTE: this looks like unfinished/debugging code - it unconditionally prints diagnostic output
+	// and calls exit(0), so it currently terminates the whole process rather than returning a usable
+	// symbolic derivative to the caller. Left untouched (out of scope for a comments-only pass), but
+	// flagged here since it is surprising behavior for a public API method.
 	GiNaC::ex FiniteElementCode::derive_expression(const GiNaC::ex &what, const GiNaC::ex by)
 	{
 		if (stage == 0)
@@ -3245,7 +3627,19 @@ namespace pyoomph
 				GiNaC::ex expa=repl.expand().normal();*/
 	}
 
-	void FiniteElementCode::add_residual(GiNaC::ex add, bool allow_contributions_without_dx)
+	// Adds a user-supplied weak-form contribution `add` to the currently active residual
+	// (residual[residual_index]). Expands all placeholders, and - for ODE elements only - multiplies
+	// by the (unity) integration measure if none is present yet, so ODE residuals integrate
+	// correctly alongside PDE ones. Pulls dimensional units out of subexpressions and verifies that,
+	// after cancellation, the residual is fully nondimensional (every base unit's substituted test
+	// value must leave the expression unchanged) - raising a detailed error otherwise, since a
+	// dimensionally-inconsistent residual signals a modeling error in the user's equations. Also
+	// rejects matrix/vector-valued residual terms (they must be fully contracted to scalars by the
+	// user) and, if `warn_on_large_numerical_factor` is set, warns/errors when any numerical
+	// coefficient in the expanded residual exceeds that threshold (a common sign of an accidental
+	// unit-scaling mistake). The lengthy commented-out block below is leftover exploratory code for a
+	// (currently disabled) stricter check of Eulerian/Lagrangian dx-degree consistency.
+	void FiniteElementCode::add_residual(GiNaC::ex add, bool)
 	{
 		if (stage > 1)
 			throw_runtime_error("Cannot add residuals any more");
@@ -3409,6 +3803,12 @@ namespace pyoomph
 		residual[residual_index] += final_contrib;
 	}
 
+	// Emits the opening of the standard integration-point loop ("for(ipt=0;...)"), filling the shape
+	// buffer for the current point (fill_shape_buffer_for_point), and declaring the local dx/dX/
+	// dx_unity integration-weight variables actually needed (dx only if `eulerian_part` is present,
+	// dX only if `lagrangian_part` is present). write_generic_spatial_integration_footer closes the
+	// loop opened here. When use_shared_shape_buffer_during_multi_assemble is enabled, the shape
+	// buffer is only re-filled if not already shared from an enclosing multi-assemble call.
 	void FiniteElementCode::write_generic_spatial_integration_header(std::ostream &os, std::string indent, GiNaC::ex eulerian_part, GiNaC::ex lagrangian_part, std::string required_table_and_flag)
 	{
 		if (this->use_shared_shape_buffer_during_multi_assemble)
@@ -3433,7 +3833,7 @@ namespace pyoomph
 		}
 		if (!eulerian_part.is_zero())
 		{
-			os << indent << "  const double dx = shapeinfo->int_pt_weight;" << std::endl;
+			os << indent << "  const double dx = shapeinfo->int_pt_weight[0];" << std::endl;
 		}
 		if (!lagrangian_part.is_zero())
 		{
@@ -3446,6 +3846,10 @@ namespace pyoomph
 		os << indent << "}" << std::endl;
 	}
 
+	// Emits a loop over all element nodes for residual contributions expressed via a Kronecker-delta
+	// "nodal_delta" (point contributions at nodes, as opposed to spatial dx/dX integrals); the code
+	// comment acknowledges this is not the most efficient approach (delta_ij is zero off-diagonal)
+	// but is kept simple. write_generic_nodal_delta_footer closes the loop opened here.
 	void FiniteElementCode::write_generic_nodal_delta_header(std::ostream &os, std::string indent)
 	{
 		os << indent << "//This is not the best approach... But it is okay to loop over all nodes, although delta_ij=0 for all i!=j" << std::endl;
@@ -3457,6 +3861,15 @@ namespace pyoomph
 		os << indent << "}" << std::endl;
 	}
 
+	// Emits the C call that invokes a registered multi-return Python/C callback (multi_return_calls[i]),
+	// storing its `nret` return values and `nret*nargs` derivatives into freshly acquired arrays
+	// (multi_ret_i / dmulti_ret_i). If this call's arguments themselves reference other multi-return
+	// calls (nested calls), those are recursively emitted first via `multi_return_calls_written` (a
+	// set of already-written call indices shared across the whole subexpression pass, to avoid
+	// emitting the same call twice). Prefers a directly generated C implementation
+	// (multi_ret_ccode_<index>, from multi_return_ccodes) over the generic Python callback dispatch
+	// (my_func_table->invoke_multi_ret) when available; if the callback additionally requests
+	// C-vs-Python cross-checking (debug_c_code_epsilon>0), both are emitted.
 	void FiniteElementCode::write_code_multi_ret_call(std::ostream &os, std::string indent, GiNaC::ex for_what, unsigned i, std::set<int> *multi_return_calls_written, GiNaC::ex *invok)
 	{
 		if (multi_return_calls_written && invok)
@@ -3544,7 +3957,26 @@ namespace pyoomph
 		}
 	}
 
-	GiNaC::ex FiniteElementCode::write_code_subexpressions(std::ostream &os, std::string indent, GiNaC::ex for_what, const std::set<ShapeExpansion> &required_shapeexps, bool hessian)
+	// Common-subexpression-elimination (CSE) code emitter: extracts every expressions::subexpression(...)
+	// marker from `for_what` into `this->subexpressions` (via SubExpressionsToStructs, unless `hessian`
+	// is set - Hessian passes reuse the subexpression list already built for the first-order pass) and
+	// returns `for_what` with those markers replaced by GiNaCSubExpression references. For each
+	// collected subexpression it then emits:
+	//   1. a "double <cvar> = <expr>;" declaration computing its value once, and
+	//   2. inside "if (flag) { ... }" (Jacobian/Hessian assembly only runs when flag requests
+	//      derivatives), a "double d_<cvar>_d_<field>" declaration plus assignment for every field
+	//      the subexpression actually depends on (subexpressions[j].req_fields), computed via
+	//      pyoomph::expressions::diff and then DerivedShapeExpansionsToUnity to turn the "which shape
+	//      basis was it derived w.r.t." bookkeeping into a plain 0/1 factor. These pre-computed
+	//      per-subexpression derivatives are what let the outer Jacobian/Hessian code reuse a
+	//      subexpression's value and derivative without re-differentiating the (potentially large)
+	//      subexpression body at every Jacobian entry - this is the key common-subexpression
+	//      elimination performed by the code generator to keep generated code size and cost manageable.
+	// Any multi-return callback invocations referenced by a subexpression are emitted (recursively,
+	// respecting dependency order) via write_code_multi_ret_call before the subexpression that needs
+	// them. Nested-coordinate (position-space) dependencies are skipped unless coordinates_as_dofs is
+	// set, and only the current-time history slot (time_history_index==0) is differentiated here.
+	GiNaC::ex FiniteElementCode::write_code_subexpressions(std::ostream &os, std::string indent, GiNaC::ex for_what, const std::set<ShapeExpansion> &, bool hessian)
 	{
 		GiNaC::ex res;
 		os << " //Subexpressions // TODO: Check whether it is constant to take it out of the loop" << std::endl;
@@ -3735,6 +4167,14 @@ namespace pyoomph
 		return res;
 	}
 
+	// Scans `expr` for occurrences of NormalSymbol, SpatialIntegralSymbol, and ElementSizeSymbol
+	// nodes (i.e. dependence on the outward normal, the dx/dX integration measure's history, or the
+	// element size) and marks the corresponding shape data (normal vectors, position-space psi shapes,
+	// element-size arrays, ...) as required for the `for_what` code-generation pass via
+	// mark_shapes_required(), resolving which domain (this code / its bulk / the opposite interface
+	// code / that interface's bulk) actually owns the position space each symbol refers to. This
+	// ensures the shape/interpolation code emitted elsewhere actually computes the data these symbols
+	// will be substituted by when the expression is printed as C code.
 	void FiniteElementCode::mark_further_required_fields(GiNaC::ex expr, const std::string &for_what)
 	{
 		// Mark other requirements
@@ -3746,21 +4186,53 @@ namespace pyoomph
 				if (sp.get_code() == this || sp.get_code() == NULL)
 				{
 					this->mark_shapes_required(for_what, this->get_my_position_space(), "normal");
+					if (this->bulk_code)
+					{
+						this->mark_shapes_required(for_what, this->bulk_code->get_my_position_space(), "psi");
+					}
+					else
+					{
+						this->mark_shapes_required(for_what, this->get_my_position_space(), "psi");
+					}
 				}
 				else if (this->bulk_code && sp.get_code() == this->bulk_code)
 				{
 					this->mark_shapes_required(for_what, this->bulk_code->get_my_position_space(), "normal");
+					if (this->bulk_code->bulk_code)
+					{
+						this->mark_shapes_required(for_what, this->bulk_code->bulk_code->get_my_position_space(), "psi");
+					}
+					else
+					{
+						this->mark_shapes_required(for_what, this->bulk_code->get_my_position_space(), "psi");
+					}
 				}
 				else if (this->opposite_interface_code && sp.get_code() == this->opposite_interface_code)
 				{
 					this->mark_shapes_required(for_what, this->opposite_interface_code->get_my_position_space(), "normal");
+					if (this->opposite_interface_code->bulk_code)
+					{
+						this->mark_shapes_required(for_what, this->opposite_interface_code->bulk_code->get_my_position_space(), "psi");
+					}
+					else
+					{
+						this->mark_shapes_required(for_what, this->opposite_interface_code->get_my_position_space(), "psi");
+					}
 				}
 				else
 				{
 					throw_runtime_error("Normal of this domain not accessible");
 				}
 			}
-			if (GiNaC::is_a<GiNaC::GiNaCElementSizeSymbol>(*i))
+			else if (GiNaC::is_a<GiNaC::GiNaCSpatialIntegralSymbol>(*i))
+			{				
+				auto &sp = GiNaC::ex_to<GiNaC::GiNaCSpatialIntegralSymbol>(*i).get_struct();				
+				if (!sp.is_lagrangian())
+				{
+					  if (sp.history_step!=0) this->mark_shapes_required(for_what, this->get_my_position_space(), "history_integral_dx"+std::to_string(sp.history_step));
+				}									
+			}
+			else if (GiNaC::is_a<GiNaC::GiNaCElementSizeSymbol>(*i))
 			{
 				const pyoomph::ElementSizeSymbol &sp = GiNaC::ex_to<GiNaC::GiNaCElementSizeSymbol>(*i).get_struct();
 				std::string es_name = (sp.is_lagrangian() ? "elemsize_Lagrangian" : "elemsize_Eulerian");
@@ -3805,6 +4277,13 @@ namespace pyoomph
 		}
 	}
 
+	// Extracts the part of residual expression `inp` that is multiplied by an Eulerian dx (if
+	// `eulerian`) and/or a Lagrangian dX (if `lagrangian`) spatial-integral symbol, i.e. the part
+	// that must be assembled inside the integration-point loop. Different SpatialIntegralSymbol
+	// instances (e.g. tagged with different history_step or expansion_mode) are treated as distinct
+	// "variables" whose linear coefficient is collected and re-multiplied back in, so multiple
+	// differently-tagged dx/dX contributions present in the same residual are all picked up rather
+	// than just the plain untagged one.
 	GiNaC::ex FiniteElementCode::extract_spatial_integral_part(const GiNaC::ex &inp, bool eulerian, bool lagrangian)
 	{
 		//std::set<GiNaC::GiNaCSpatialIntegralSymbol> dx_symbs;
@@ -3827,6 +4306,10 @@ namespace pyoomph
 					{
 						std::cout << " ADDING IT TO THE SET " << (*i) << " which has currently " << dx_symbs.size() << " elements " << std::endl;
 					}
+					/*if (eulerian)
+					{
+					  if (sp.history_step!=0) this->integral_dx_history_required.insert(sp.history_step);
+					}*/
 					dx_symbs.insert(0+GiNaC::ex_to<GiNaC::GiNaCSpatialIntegralSymbol>(*i));
 					if (pyoomph_verbose)
 					{
@@ -3848,7 +4331,29 @@ namespace pyoomph
 		return res;
 	}
 
-	bool FiniteElementCode::write_generic_Hessian(std::ostream &os, std::string funcname, GiNaC::ex resi, bool with_hang)
+	// Top-level generator for the exact (analytical) Hessian-vector-product C function `funcname` of
+	// residual `resi`. High-level structure:
+	//   1. Split off the Eulerian/Lagrangian spatially-integrated part of the residual (nodal-delta
+	//      Hessian contributions are not supported and raise an error if present), strip any leftover
+	//      subexpression(...) markers back to plain form, then re-wrap them via a fresh
+	//      SubExpressionsToStructs instance (__SE_to_struct_hessian) dedicated to this Hessian pass.
+	//   2. Call write_generic_RJM_contribution(..., hessian=true) on every FiniteElementSpace, which
+	//      (via write_generic_Hessian_contribution, see above) performs the actual double symbolic
+	//      differentiation and accumulates, as a side effect, the global __all_Hessian_shapeexps/
+	//      testfuncs/indices_required sets describing everything the emitted code needs at runtime.
+	//   3. Emit the function header/signature and the boilerplate that allocates the dense
+	//      n_dof^3 Hessian (and, if needed, mass-Hessian) scratch buffers, based on the `flag`
+	//      parameter selecting between building the full third-order tensor, a directional
+	//      Hessian-vector product, or its transpose (see the ASSEMBLE_*/SET_DIRECTIONAL_* macros used
+	//      at the end).
+	//   4. Emit per-field nodal-index constants, time-history interpolation, and (for D0-like spaces)
+	//      pre-loop spatial interpolation, then - if there is a nonzero spatially-integrated part -
+	//      the full integration-point loop with per-point interpolation and the CSE subexpression code
+	//      (write_code_subexpressions), followed by the actual Hessian-assembly code collected into
+	//      `osm` in step 2 above.
+	// `__in_hessian` is set for the duration of this function so that GiNaC derivative()
+	// implementations elsewhere know a Hessian derivative is in progress.
+	bool FiniteElementCode::write_generic_Hessian(std::ostream &os, std::string funcname, GiNaC::ex resi, bool)
 	{
 		__in_hessian = true;
 		bool has_contribs = false;
@@ -4127,10 +4632,18 @@ namespace pyoomph
 		return has_contribs;
 	}
 
-	void FiniteElementCode::write_generic_RJM(std::ostream &os, std::string funcname, GiNaC::ex resi, bool with_hang)
+	// Top-level generator for the combined Residual/Jacobian/Mass-matrix C function `funcname` of
+	// residual `resi` (the first-order analytical-differentiation counterpart of write_generic_Hessian
+	// above). Emits the function signature and boilerplate declarations, then - analogous to
+	// write_generic_Hessian's structure - collects all shape expansions/test functions/required field
+	// indices occurring in `resi`, emits nodal-index constants and time/spatial interpolation code,
+	// the CSE subexpression code, and finally delegates the actual residual/Jacobian/mass-matrix
+	// emission to write_generic_RJM_contribution() on every FiniteElementSpace inside the
+	// integration-point loop.
+	void FiniteElementCode::write_generic_RJM(std::ostream &os, std::string funcname, GiNaC::ex resi, bool)
 	{
 		__in_hessian = false;
-		os << "static void " << funcname << "(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo,double * residuals, double *jacobian, double *mass_matrix,unsigned flag)" << std::endl;
+		os << "static void " << funcname << "(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo,double * PYOOMPH_RESTRICT residuals, double * PYOOMPH_RESTRICT jacobian, double * PYOOMPH_RESTRICT mass_matrix,unsigned flag)" << std::endl;
 		os << "{" << std::endl;
 		os << "  int local_eqn, local_unknown;" << std::endl;
 		os << "  bool _has_residual_contribution,_has_jacobian_contribution;" << std::endl;
@@ -4170,13 +4683,7 @@ namespace pyoomph
 
 		// Mark other requirements
 		mark_further_required_fields(resi, "ResJac[" + std::to_string(residual_index) + "]");
-		/*for (GiNaC::const_preorder_iterator i = resi.preorder_begin(); i != resi.preorder_end(); ++i)
-		{
-		 if (GiNaC::is_a<GiNaC::GiNaCNormalSymbol>(*i))
-		 {
-			   this->mark_shapes_required("ResJac",NULL,"normal");
-		 }
-		}*/
+
 
 		if (this->coordinates_as_dofs)
 		{
@@ -4339,6 +4846,10 @@ namespace pyoomph
 		   << std::endl;
 	}
 
+	// Emits the top-of-file preprocessor boilerplate for the generated element's C source: the
+	// shared-library marker, an optional flag enabling Hessian-by-symmetry assembly, and the
+	// jitbridge header that declares the runtime data structures (JITElementInfo_t, JITShapeInfo_t,
+	// hanging-node macros, ...) used throughout the rest of the generated code.
 	void FiniteElementCode::write_code_header(std::ostream &os)
 	{
 		os << "#define JIT_ELEMENT_SHARED_LIB" << std::endl;
@@ -4348,11 +4859,21 @@ namespace pyoomph
 		}
 		os << "#include \"jitbridge.h\"" << std::endl
 		   << std::endl;
-		os << "static JITFuncSpec_Table_FiniteElement_t * my_func_table;" << std::endl;
-		os << "#include \"jitbridge_hang.h\"" << std::endl
+		os << "static JITFuncSpec_Table_FiniteElement_t * my_func_table;" << std::endl
 		   << std::endl;
 	}
 
+	// Shared implementation for user-registered "integral expressions" (global quantities integrated
+	// over the element, `integrate=true`) and "local expressions" (pointwise quantities evaluated at
+	// the first integration point only, `integrate=false`): emits a single dispatcher function
+	// `funcname(eleminfo, shapeinfo, index)` that, given the numeric `index` of the requested
+	// expression (in `exprs`, keyed by name), computes and returns its value. All expressions are
+	// gathered into one combined expression (each multiplied by a distinct GiNaC::wild() placeholder,
+	// so structurally-identical terms across different expressions are not accidentally cancelled/
+	// merged by GiNaC's simplification) purely to determine the union of required shape data once;
+	// the actual per-expression C code is then emitted individually inside a "switch(index)" block. For
+	// local expressions, also guards against a name collision with an already-registered field of the
+	// same name (which would make the two indistinguishable to users of the generated evaluation API).
 	void FiniteElementCode::write_code_integral_or_local_expressions(std::ostream &os, std::map<std::string, GiNaC::ex> &exprs, std::map<std::string, GiNaC::ex> &units, std::string funcname, std::string reqname, bool integrate)
 	{
 		os << "static double " << funcname << "(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo, unsigned index)" << std::endl;
@@ -4461,7 +4982,7 @@ namespace pyoomph
 			}
 		}
 
-		os << "    const double dx = shapeinfo->int_pt_weight;" << std::endl;
+		os << "    const double dx = shapeinfo->int_pt_weight[0];" << std::endl;
 		os << "    const double dX = shapeinfo->int_pt_weight_Lagrangian;" << std::endl;
 		os << "    const double dx_unity = shapeinfo->int_pt_weight_unity;" << std::endl;
 		os << "    switch (index)" << std::endl;
@@ -4469,6 +4990,13 @@ namespace pyoomph
 		unsigned index = 0;
 		for (auto &e : sexprs)
 		{
+			if (!integrate)
+			{
+				// Check whether there is a field with the same name accessible
+				FiniteElementField * f=this->get_field_by_name(e.first);					
+				if (f) throw_runtime_error("The name '" + e.first + "' cannot be used for a local expression on '"+this->get_full_domain_name()+"', because it is already used for a here accessible field defined on the domain '"+f->get_defined_on_domain_equivalent_field()->get_space()->get_code()->get_full_domain_name()+"'");
+			}
+
 			os << "      case " << index << " :  res" << (integrate ? "+" : "") << "= ";
 
 			// flux.evalf().print(GiNaC::print_csrc_FEM(os,&csrc_opts));
@@ -4486,6 +5014,11 @@ namespace pyoomph
 		os << "}" << std::endl;
 	}
 
+	// Emits the EvalTracerAdvection function that evaluates the registered tracer-advection velocity
+	// field(s) (used to advect passive tracer particles through the flow field) at the first
+	// integration point, blended over a time fraction `timefrac_tracer` for sub-stepping between two
+	// stored time levels. Structurally similar to write_code_integral_or_local_expressions but
+	// specialized for the tracer velocity's vector output (`result_velo`) and time-fraction blending.
 	void FiniteElementCode::write_code_tracer_advection(std::ostream &os)
 	{
 		os << "static void EvalTracerAdvection(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo, unsigned index, double timefrac_tracer, double * result_velo)" << std::endl;
@@ -4547,7 +5080,7 @@ namespace pyoomph
 		GiNaC::print_FEM_options csrc_opts;
 		csrc_opts.for_code = this;
 
-		os << "    const double dx = shapeinfo->int_pt_weight;" << std::endl; // TODO: Lagrangian part
+		os << "    const double dx = shapeinfo->int_pt_weight[0];" << std::endl; // TODO: Lagrangian part
 		os << "    switch (index)" << std::endl;
 		os << "    {" << std::endl;
 		unsigned index = 0;
@@ -4584,6 +5117,10 @@ namespace pyoomph
 		os << "}" << std::endl;
 	}
 
+	// The following three thin wrappers instantiate write_code_integral_or_local_expressions() for
+	// the three kinds of user-registered scalar expressions: pointwise "local" expressions,
+	// pointwise "extremum" expressions (evaluated the same way as local ones, just semantically used
+	// to track a max/min elsewhere), and element-integrated "integral" expressions.
 	void FiniteElementCode::write_code_local_expressions(std::ostream &os)
 	{
 		this->write_code_integral_or_local_expressions(os, local_expressions, local_expression_units, "EvalLocalExpression", "LocalExprs", false);
@@ -4681,6 +5218,10 @@ namespace pyoomph
 			 */
 	}
 
+	// Emits GetZ2Fluxes[ForEigen](...), evaluating every registered Z2-error-estimator flux
+	// expression at the first integration point (used by oomph-lib's Z2 error estimator to drive
+	// mesh adaptivity); `for_eigen` selects the separate flux list used for eigenproblem/azimuthal
+	// error estimation instead of the regular one.
 	void FiniteElementCode::write_code_get_z2_flux(std::ostream &os,bool for_eigen)
 	{
 		os << "static void GetZ2Fluxes"<<(for_eigen ? "ForEigen" : "")<<"(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo, double * Z2Flux)" << std::endl;
@@ -4754,6 +5295,17 @@ namespace pyoomph
 		os << "}" << std::endl;
 	}
 
+	// Detects fields/test functions referenced in this code's residuals/integral/local expressions
+	// that live on a domain not directly reachable from here (i.e. not this code itself, its bulk
+	// element(s), or the opposite-interface element and its bulk) - the only way such a reference can
+	// be legitimate is if the owning domain is a coupled ODE domain (external, 0-dimensional
+	// "ED0"-space data, e.g. a lumped-parameter ODE coupled to this PDE). For every such field/test
+	// function found, registers a proxy external-ODE field ("__EXT_ODE_<n>" on the ED0 space) linked
+	// to the real field via _register_external_ode_linkage, and finally rewrites every residual/
+	// integral/local expression (via RemapFieldsInExpression) to reference the proxy field instead of
+	// the original one - since the original one is not something this element's generated code can
+	// otherwise access. Fields/test functions are processed in a name-sorted (not pointer/insertion)
+	// order so that the assigned proxy indices are deterministic and reproducible.
 	void FiniteElementCode::check_for_external_ode_dependencies()
 	{
 		std::map<FiniteElementField *, FiniteElementField *> remapping;
@@ -4885,6 +5437,10 @@ namespace pyoomph
 		stage = oldstage;
 	}
 
+	// Rebuilds `allspaces`: the flat list of every FiniteElementSpace reachable from this code,
+	// i.e. its own spaces plus (if present) those of the bulk element, the bulk's bulk element, the
+	// opposite-interface element, and that interface's bulk element. This is the set of spaces that
+	// interpolation/Jacobian/Hessian code generation iterates over.
 	void FiniteElementCode::find_all_accessible_spaces()
 	{
 		allspaces.clear();
@@ -4911,7 +5467,20 @@ namespace pyoomph
 			}
 		}
 	}
+	
+	
 
+	// Top-level entry point that generates the *entire* C source file for this element: resolves
+	// external-ODE dependencies, then for every registered residual, emits the analytical Residual/
+	// Jacobian/Mass-matrix function (write_generic_RJM); if the timestepping scheme requires it
+	// (detected via MakeResidualSteady), also a dedicated "steady" variant; if Hessian generation is
+	// enabled, the Hessian-vector-product function (write_generic_Hessian); and, for every global
+	// parameter the steady residual actually depends on, a dedicated parameter-derivative RJM
+	// function (needed for parameter continuation/bifurcation tracking). Afterwards emits
+	// initial-condition, Dirichlet-condition, geometric-Jacobian, Z2-flux, integral/local/extremum-
+	// expression, tracer-advection, and finally the master write_code_info() dispatch-table function
+	// that ties all the above together into the runtime-loadable JIT function table. `stage` is
+	// advanced to 2 (fully finalized) once done.
 	void FiniteElementCode::write_code(std::ostream &os)
 	{
 		__current_code = this;
@@ -5087,6 +5656,12 @@ namespace pyoomph
 		return -666;
 	}
 
+	// The following get_owner_prefix/get_shape_info_str/get_nodal_data_string/get_elem_info_str all
+	// use classify_space_type() to translate "which domain does this space belong to" into the
+	// matching C variable-name prefix / pointer-chase expression used in the generated code: the
+	// current element's own data (this_/shapeinfo/eleminfo/nodal_data), its bulk element's data
+	// (blk_/shapeinfo->bulk_shapeinfo/...), the opposite interface element's data (opp_/...), or
+	// combinations thereof (oppblk_, blkblk_) for bulk-of-bulk / bulk-of-opposite-interface access.
 	std::string FiniteElementCode::get_owner_prefix(const FiniteElementSpace *sp)
 	{
 		int typ = classify_space_type(sp);
@@ -5208,6 +5783,10 @@ namespace pyoomph
 			throw_runtime_error("TODO: add bulk and external spaces");
 	}
 
+	// The following get_dx/get_element_size_symbol/get_nodal_delta/get_normal_component factory
+	// methods wrap this code's pre-built SpatialIntegralSymbol/ElementSizeSymbol/NodalDeltaSymbol/
+	// NormalSymbol members as GiNaC expressions, so user-facing weak-form code can multiply residual
+	// terms by "dx"/"dX"/element size/nodal delta/normal-vector components symbolically.
 	GiNaC::ex FiniteElementCode::get_dx(bool lagrangian, bool unity_only)
 	{
 		if (unity_only) return 0+GiNaC::GiNaCSpatialIntegralSymbol(dx_unity);
@@ -5244,6 +5823,13 @@ namespace pyoomph
 	}
 
 
+	// Emits the ElementalInitialConditions<ic_index> function that evaluates the user-supplied
+	// initial-condition expression for the initial-condition set named `ic_name`, for whichever field
+	// `field_index` the runtime asks for. Substitutes the raw position/Lagrangian-coordinate C
+	// arguments (_x[i]/_xlagr[i]) for the corresponding coordinate/lagrangian ShapeExpansion symbols
+	// (since initial conditions are evaluated directly from given spatial coordinates, not via the
+	// usual shape-function interpolation) before printing each field's expression in an if/else-if
+	// chain keyed by field_index.
 	void FiniteElementCode::write_code_initial_condition(std::ostream &os, unsigned int ic_index, std::string ic_name)
 	{
 		os << "// INITIAL CONDITION " << ic_name << std::endl;
@@ -5348,6 +5934,10 @@ namespace pyoomph
 		os << "}" << std::endl;
 	}
 
+	// Emits the ElementalDirichletConditions function, structurally analogous to
+	// write_code_initial_condition() above but for user-set Dirichlet boundary values: for each field
+	// with a Dirichlet condition set, either returns the default (pin-only, value left to the caller)
+	// or evaluates and returns the prescribed value expression at the given position.
 	void FiniteElementCode::write_code_Dirichlet_condition(std::ostream &os)
 	{
 
@@ -5450,6 +6040,18 @@ namespace pyoomph
 		return NULL;
 	}
 
+	// Resolves the placeholder call `func` (a field(...)/nondimfield(...)/testfunction(...)/
+	// eval_in_domain(...)/... expression) to the FiniteElementCode that actually owns it, based on
+	// the domain tags attached to its GiNaCPlaceHolderResolveInfo argument. If given, extracts the
+	// referenced field's plain name into `*fname`, and pulls the recognized "flag:*" tags
+	// (no_jacobian/no_hessian/only_base_mode/only_perturbation_mode) out into `*taginfo`, leaving
+	// only the remaining ("domain:*") tags to resolve. If the resolve-info already carries a
+	// concrete code pointer, it is used directly (after checking it is actually reachable from here).
+	// Otherwise, walks the domain tags to interpret shorthand relative-domain syntax: "." (self),
+	// ".."/"..." (bulk / bulk-of-bulk), "|."/"|.." (opposite interface / its bulk), and the internal-
+	// facet-only "+"/"-"/"+|"/"|-" tags used to access the two sides of a DG/HDG internal-facet
+	// element; unrecognized domain names fall back to the element-type-specific
+	// _resolve_based_on_domain_name() hook. If no domain tag is present at all, defaults to `this`.
 	FiniteElementCode *FiniteElementCode::resolve_corresponding_code(GiNaC::ex func, std::string *fname, FiniteElementFieldTagInfo *taginfo)
 	{
 
@@ -5680,6 +6282,8 @@ namespace pyoomph
 		}
 	}
 
+	// Sets the weighting factor used to include field `f` in the adaptive-timestepping temporal error
+	// estimate (0 excludes it).
 	void FiniteElementCode::set_temporal_error(std::string f, double factor)
 	{
 		auto *field = this->get_field_by_name(f);
@@ -5690,6 +6294,17 @@ namespace pyoomph
 		field->temporal_error_factor = factor;
 	}
 
+	// Expands and validates an initial-condition or Dirichlet-condition expression for `fieldname`:
+	// after placeholder expansion, checks the expression is dimensionally consistent (units cancel to
+	// 1), then performs a "dry run" evaluation, substituting the free spatial/Lagrangian/normal/time
+	// symbols by the fixed reference point/time configured via set_reference_point_for_IC_and_DBC(),
+	// all fields' own shape expansions by generic symbols, and global parameters by their current
+	// numeric value - the resulting expression must reduce to a plain number. This "can this be
+	// evaluated numerically at all" check catches, at element-generation time rather than at runtime,
+	// initial/Dirichlet conditions that accidentally reference undefined variables or have leftover
+	// (non-cancelling) units, which would otherwise silently propagate NaNs. Returns the expanded
+	// (not evaluated at the reference point) expression for actual use by write_code_initial_condition/
+	// write_code_Dirichlet_condition.
 	GiNaC::ex FiniteElementCode::expand_initial_or_Dirichlet(const std::string &fieldname, GiNaC::ex expression)
 	{
 
@@ -5804,6 +6419,10 @@ namespace pyoomph
 		return sub_to_id(subst.subs(sublist));
 	}
 
+	// Registers an initial condition expression for `fieldname` under the named IC set `ic_name`
+	// (adding it to IC_names if new). `degraded_start` controls whether the first timestep uses a
+	// lower-order (degraded) start scheme; "auto" picks it based on whether the IC actually depends
+	// on time (if it doesn't, a normal/non-degraded start is safe).
 	void FiniteElementCode::set_initial_condition(const std::string &fieldname, GiNaC::ex expression, std::string degraded_start, const std::string &ic_name)
 	{
 		FiniteElementField *field = this->get_field_by_name(fieldname);
@@ -5840,6 +6459,13 @@ namespace pyoomph
 			std::cout << "INIT COND SET: " << field->initial_condition[ic_name] << std::endl;
 	}
 
+	// get_dx_derived/get_elemsize_derived return the pre-built symbolic tag representing "the
+	// derivative of the (Eulerian) integration measure / element size w.r.t. nodal coordinate
+	// direction `dir`", picking the "second index" (l_shape2) variant instead when
+	// __derive_shapes_by_second_index is currently set (i.e. while building the inner/second
+	// derivative of a Hessian double loop) - this is what lets the same differentiation code path be
+	// reused for both first derivatives (Jacobian) and the two independent index slots of second
+	// derivatives (Hessian).
 	const SpatialIntegralSymbol &FiniteElementCode::get_dx_derived(int dir)
 	{
 		if (__derive_shapes_by_second_index)
@@ -5864,6 +6490,10 @@ namespace pyoomph
 		}
 	}
 
+	// Registers a Dirichlet boundary condition expression for `fieldname`. If `use_identity` is set,
+	// the field is merely pinned to whatever value it already has (an "identity" Dirichlet condition,
+	// e.g. for freezing a DoF without prescribing a specific value) rather than being set to the
+	// evaluated expression.
 	void FiniteElementCode::set_Dirichlet_bc(const std::string &fieldname, GiNaC::ex expression, bool use_identity)
 	{
 		FiniteElementField *field = this->get_field_by_name(fieldname);
@@ -5882,6 +6512,9 @@ namespace pyoomph
 			std::cout << "DIRICHLET COND SET: " << field->Dirichlet_condition << std::endl;
 	}
 
+	// Delegates to the user-supplied Equations object's _define_fields()/_define_element() hooks
+	// (the Python-side equation definitions), temporarily binding `this` as their "current codegen"
+	// target so field registration / residual calls issued from Python land on this code object.
 	void FiniteElementCode::_define_fields()
 	{
 		if (!equations)
@@ -5900,6 +6533,12 @@ namespace pyoomph
 		equations->_set_current_codegen(NULL);
 	}
 
+	// Called once per code object to register the built-in position-related fields alongside the
+	// user's own fields (_define_fields()): the nodal (Eulerian) coordinate_x/y/z fields, the fixed
+	// Lagrangian reference coordinates, the element-local coordinates, (on codimension-1 interfaces
+	// only) the surface parametrization zeta_coordinate_*, and the "mesh_*" pseudo-fields used purely
+	// to let mesh-velocity terms have a nonzero time derivative while true position fields don't (see
+	// MeshToCoordinateShapes above). Fixes `element_dim` for this code object; may only run once.
 	void FiniteElementCode::_do_define_fields(int element_dimension)
 	{
 		if (this->element_dim != -1)
@@ -5919,7 +6558,7 @@ namespace pyoomph
 			this->register_field("lagrangian_" + dir[i], "Pos")->no_jacobian_at_all = true; // Lagrangian coordinates never have Jacobian entries, since they are fixed
 		}
 
-		for (unsigned int i = 0; i < this->element_dim; i++)
+		for (unsigned int i = 0; i < static_cast<unsigned int>(this->element_dim); i++)
 		{
 			std::vector<std::string> dir{"1", "2", "3"};
 			this->register_field("local_coordinate_" + dir[i], "Pos")->no_jacobian_at_all = true; // Lagrangian coordinates never have Jacobian entries, since they are fixed
@@ -5928,7 +6567,7 @@ namespace pyoomph
 		if (this->bulk_code && !this->bulk_code->bulk_code) 
 		{
 			// Only do this on co-dim 1 interfaces for now, then zetas are unique
-			for (unsigned int i = 0; i < this->element_dim; i++)
+			for (unsigned int i = 0; i < static_cast<unsigned int>(this->element_dim); i++)
 			{
 				std::vector<std::string> dir{"1", "2", "3"};
 				this->register_field("zeta_coordinate_" + dir[i], "Pos")->no_jacobian_at_all = true; // Lagrangian coordinates never have Jacobian entries, since they are fixed
@@ -5942,6 +6581,10 @@ namespace pyoomph
 		}
 	}
 
+	// Resets the residual accumulator(s) and invokes the user's _define_element() (weak-form
+	// definition) hook, with expressions::el_dim temporarily set to this element's dimension so that
+	// dimension-dependent symbolic constructs (e.g. spatial vectors of the right size) resolve
+	// correctly during that call.
 	void FiniteElementCode::finalise()
 	{
 		// residual[0]=0;
@@ -5960,6 +6603,15 @@ namespace pyoomph
 	void FiniteElementCode::set_problem(Problem * p) {problem=p;}
 	Problem * FiniteElementCode::get_problem() {return problem;}
 
+	// Emits GeometricJacobian() (the coordinate-system Jacobian factor used by the Z2 error
+	// estimator) and JacobianForElementSize() (the analogous factor used for element-size
+	// computations, e.g. 2*pi*r terms in axisymmetric coordinates), both evaluated directly from the
+	// raw position array `_x` rather than via shape-function interpolation. Additionally
+	// differentiates JacobianForElementSize symbolically w.r.t. every spatial direction (and, if
+	// nonzero, a second time) to emit JacobianForElementSizeSpatialDerivatives/
+	// ...SecondSpatialDerivatives, but only if those derivatives are not identically zero
+	// (geometric_jac_for_elemsize_has_[second_]spatial_deriv flags this so callers can skip invoking
+	// functions that were not emitted at all).
 	void FiniteElementCode::write_code_geometric_jacobian(std::ostream &os)
 	{
 		os << "// Used for Z2 error estimators" << std::endl;
@@ -6057,6 +6709,13 @@ namespace pyoomph
 		}
 	}
 
+	// Emits the C statements that set the "shapes_required_<func_type>" runtime flags describing
+	// exactly which shape data must be computed before invoking the `func_type` generated function
+	// (e.g. "ResJac[0]" or "Hessian[2]") - populated earlier via mark_shapes_required(). First
+	// determines *which* of this/bulk/bulk-of-bulk/opposite-interface/opposite-interface's-bulk
+	// domains actually own any of the required spaces (raising an error if a required space cannot
+	// be found in any reachable domain - a sign of an internal consistency bug in the generator),
+	// then delegates the actual per-domain flag emission to write_required_shapes_for_code().
 	void FiniteElementCode::write_required_shapes(std::ostream &os, const std::string indent, std::string func_type)
 	{
 		auto &entry = this->required_shapes[func_type];
@@ -6064,25 +6723,12 @@ namespace pyoomph
 		bool require_bulk_bulk = false;
 		bool require_opposite_interface = false;
 		bool require_opposite_bulk = false;
-		std::vector<std::string> lines;
 		for (auto &fieldentry : entry)
 		{
-
 			if (fieldentry.first == NULL)
 			{
-				// Write the stuff like normal and so on
-				for (auto &subentry : fieldentry.second)
-				{
-					if (subentry.second)
-					{
-						lines.push_back(indent + "functable->shapes_required_" + func_type + "." + subentry.first + " = true;");
-					}
-				}
-				continue;
+				continue; // No space attached
 			}
-
-			if (pyoomph_verbose)
-				std::cout << "REQUIRED FIELDS FOR " << func_type << "  " << fieldentry.first->get_name() << "  code " << fieldentry.first->get_code() << " [this " << this << "]" << std::endl;
 			bool is_in_my_space = false;
 			for (auto &s : spaces)
 			{
@@ -6092,285 +6738,175 @@ namespace pyoomph
 					break;
 				}
 			}
-			if (!is_in_my_space)
+			if (is_in_my_space) continue;			
+			bool found_elsewhere = false;
+			if (bulk_code)
 			{
-				bool found_elsewhere = false;
-				if (bulk_code)
-				{
-					for (auto &s : bulk_code->spaces)
-					{
-						if (s == fieldentry.first)
-						{
-							require_bulk = true;
-							found_elsewhere = true;
-							break;
-						}
-					}
-					if (pyoomph_verbose)
-						std::cout << "IIIII Test if func in bulk space " << fieldentry.first << " returns in: " << require_bulk << std::endl;
-					if (!found_elsewhere && bulk_code->bulk_code)
-					{
-						for (auto &s : bulk_code->bulk_code->spaces)
-						{
-							if (s == fieldentry.first)
-							{
-								require_bulk = true;
-								require_bulk_bulk = true;
-								found_elsewhere = true;
-								break;
-							}
-						}
-						if (pyoomph_verbose)
-							std::cout << "IIIII Test if func in bulk->bulk space " << fieldentry.first << " returns in: " << require_bulk_bulk << std::endl;
-					}
-				}
-				if (!found_elsewhere && opposite_interface_code)
-				{
-					for (auto &s : opposite_interface_code->spaces)
-					{
-						if (s == fieldentry.first)
-						{
-							require_opposite_interface = true;
-							found_elsewhere = true;
-							break;
-						}
-					}
-					if (pyoomph_verbose)
-						std::cout << "IIIII Test if func in opposite interface space " << fieldentry.first << " returns in: " << require_opposite_interface << std::endl;
-				}
-				if (!found_elsewhere && opposite_interface_code && opposite_interface_code->bulk_code)
-				{
-					for (auto &s : opposite_interface_code->bulk_code->spaces)
-					{
-						if (s == fieldentry.first)
-						{
-							require_opposite_bulk = true;
-							found_elsewhere = true;
-							break;
-						}
-					}
-					if (pyoomph_verbose)
-						std::cout << "IIIII Test if func in opposite interface space " << fieldentry.first << " returns in: " << require_opposite_bulk << std::endl;
-				}
-				if (!found_elsewhere)
-				{
-					std::ostringstream oss;
-					oss << "Cannot find a required space " << fieldentry.first;
-					throw_runtime_error(oss.str());
-				}
-				continue;
-			}
-			for (auto &psientry : fieldentry.second)
-			{
-				if (psientry.second)
-				{
-					//os << indent << "functable->shapes_required_" << func_type << "." << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
-					lines.push_back(indent + "functable->shapes_required_" + func_type + "." + psientry.first + "_" + fieldentry.first->get_name() + " = true;");
-					
-				}
-			}
-		}
-
-		// Check if we need the bulk for the normal
-		bool just_the_normal = false;
-		if (!require_bulk && bulk_code)
-		{
-			if (this->required_shapes[func_type].count(get_my_position_space()) && this->required_shapes[func_type][get_my_position_space()].count("normal"))
-			{
-				just_the_normal = true;
-				require_bulk = true;
-			}
-		}
-
-		bool just_the_parent_normal = false;
-		if (!require_bulk_bulk && bulk_code && bulk_code->bulk_code)
-		{
-			if (this->required_shapes[func_type].count(bulk_code->get_my_position_space()) && this->required_shapes[func_type][bulk_code->get_my_position_space()].count("normal"))
-			{
-				just_the_parent_normal = true;
-				require_bulk = true;
-				require_bulk_bulk = true;
-			}
-		}
-
-		// Check if we need the bulk for the normal
-		bool just_the_opposite_normal = false;
-		if (!require_opposite_interface && opposite_interface_code)
-		{
-			if (this->required_shapes[func_type].count(opposite_interface_code->get_my_position_space()) && this->required_shapes[func_type][opposite_interface_code->get_my_position_space()].count("normal"))
-			{
-				just_the_opposite_normal = true;
-				require_opposite_interface = true;
-			}
-		}
-
-		if (require_bulk)
-		{
-			os << " functable->shapes_required_" << func_type << ".bulk_shapes=(JITFuncSpec_RequiredShapes_FiniteElement_t*)calloc(sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t),1);" << std::endl;
-			for (auto &fieldentry : entry)
-			{
-				bool is_in_my_space = false;
 				for (auto &s : bulk_code->spaces)
 				{
 					if (s == fieldentry.first)
 					{
-						is_in_my_space = true;
+						require_bulk = true;
+						found_elsewhere = true;
 						break;
 					}
 				}
-				if (!is_in_my_space)
+				if (!found_elsewhere && bulk_code->bulk_code)
 				{
-					continue;
-				}
-				for (auto &psientry : fieldentry.second)
-				{
-					if (psientry.second)
-					{
-						//os << indent << "functable->shapes_required_" << func_type << ".bulk_shapes->" << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
-						lines.push_back(indent + "functable->shapes_required_" + func_type + ".bulk_shapes->" + psientry.first + "_" + fieldentry.first->get_name() + " = true;");
-					}
-				}
-			}
-
-			if (just_the_normal)
-			{
-				//os << indent << "functable->shapes_required_" << func_type << ".bulk_shapes->psi_Pos = true;" << std::endl;
-				lines.push_back(indent + "functable->shapes_required_" + func_type + ".bulk_shapes->psi_Pos = true;");
-			}
-
-			if (require_bulk_bulk)
-			{
-
-				os << " functable->shapes_required_" << func_type << ".bulk_shapes->bulk_shapes=(JITFuncSpec_RequiredShapes_FiniteElement_t*)calloc(sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t),1);" << std::endl;
-				for (auto &fieldentry : entry)
-				{
-					bool is_in_my_space = false;
 					for (auto &s : bulk_code->bulk_code->spaces)
 					{
 						if (s == fieldentry.first)
 						{
-							is_in_my_space = true;
+							require_bulk = true;
+							require_bulk_bulk = true;
+							found_elsewhere = true;
 							break;
 						}
 					}
-					if (!is_in_my_space)
-					{
-						continue;
-					}
-					for (auto &psientry : fieldentry.second)
-					{
-						if (psientry.second)
-						{
-							//os << indent << "functable->shapes_required_" << func_type << ".bulk_shapes->bulk_shapes->" << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
-							lines.push_back(indent + "functable->shapes_required_" + func_type + ".bulk_shapes->bulk_shapes->" + psientry.first + "_" + fieldentry.first->get_name() + " = true;");
-						}
-					}
-				}
-				if (just_the_parent_normal)
-				{
-					//os << indent << "functable->shapes_required_" << func_type << ".bulk_shapes->bulk_shapes->psi_Pos = true;" << std::endl;
-					lines.push_back(indent + "functable->shapes_required_" + func_type + ".bulk_shapes->bulk_shapes->psi_Pos = true;");
 				}
 			}
-		}
-
-		/* //Opposite side of the interface
-		just_the_normal=false;
-		if (!require_opposite_interface && opposite_interface_code) //TODO: THis required here?
-		{
-		 if (this->required_shapes[func_type].count(NULL) && this->required_shapes[func_type][NULL].count("normal"))
-		 {
-		  just_the_normal=true;
-		  require_bulk=true;
-		 }
-		}*/
-
-		if (require_opposite_interface || require_opposite_bulk)
-		{
-			os << " functable->shapes_required_" << func_type << ".opposite_shapes=(JITFuncSpec_RequiredShapes_FiniteElement_t*)calloc(sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t),1);" << std::endl;
-
-			for (auto &fieldentry : entry)
+			if (!found_elsewhere && opposite_interface_code)
 			{
-				bool is_in_my_space = false;
 				for (auto &s : opposite_interface_code->spaces)
 				{
 					if (s == fieldentry.first)
 					{
-						is_in_my_space = true;
+						require_opposite_interface = true;
+						found_elsewhere = true;
 						break;
 					}
 				}
-				if (!is_in_my_space)
-				{
-					continue;
-				}
-				for (auto &psientry : fieldentry.second)
-				{
-					if (psientry.second)
-					{
-						//os << indent << "functable->shapes_required_" << func_type << ".opposite_shapes->" << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
-						lines.push_back(indent + "functable->shapes_required_" + func_type + ".opposite_shapes->" + psientry.first + "_" + fieldentry.first->get_name() + " = true;");
-					}
-				}
 			}
-
-			if (just_the_opposite_normal)
+			if (!found_elsewhere && opposite_interface_code && opposite_interface_code->bulk_code)
 			{
-				//os << indent << "functable->shapes_required_" << func_type << ".opposite_shapes->psi_Pos = true;" << std::endl;
-				lines.push_back(indent + "functable->shapes_required_" + func_type + ".opposite_shapes->psi_Pos = true;");
-			}
-			/*
-			if (just_the_normal) //TODO: THis required here?
-			{
-			  os << indent << "functable->shapes_required_"  << func_type << ".bulk_shapes->psi_Pos = true;" << std::endl;
-			}
-			*/
-		}
-
-		if (require_opposite_bulk)
-		{
-
-			os << " functable->shapes_required_" << func_type << ".opposite_shapes->bulk_shapes=(JITFuncSpec_RequiredShapes_FiniteElement_t*)calloc(sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t),1);" << std::endl;
-
-			for (auto &fieldentry : entry)
-			{
-				bool is_in_my_space = false;
 				for (auto &s : opposite_interface_code->bulk_code->spaces)
 				{
 					if (s == fieldentry.first)
 					{
-						is_in_my_space = true;
+						require_opposite_interface = true;
+						require_opposite_bulk = true;
+						found_elsewhere = true;
 						break;
 					}
 				}
-				if (!is_in_my_space)
+			}
+			if (!found_elsewhere)
+			{
+				std::ostringstream oss;
+				oss << "Cannot find a required space " << fieldentry.first;
+				throw_runtime_error(oss.str());
+			}						
+		}
+
+		write_required_shapes_for_code(os,func_type,indent,this,0);
+		if (require_bulk)
+		{
+			write_required_shapes_for_code(os,func_type,indent,this->bulk_code,1);
+			if (require_bulk_bulk)
+			{
+				write_required_shapes_for_code(os,func_type,indent,this->bulk_code->bulk_code,2);
+			}
+		}
+		
+		if (require_opposite_interface)
+		{
+			write_required_shapes_for_code(os,func_type,indent,this->opposite_interface_code,-1);
+			if (require_opposite_bulk)
+			{
+				write_required_shapes_for_code(os,func_type,indent,this->opposite_interface_code->bulk_code,-2);
+			}
+		}
+		
+	}
+
+
+	// Emits the "functable->shapes_required_<func_type>[...].<flag> = true;" assignments for the
+	// subset of required-shape entries whose FiniteElementSpace belongs to `for_code`. `type`
+	// selects (and, for the nested bulk_shapes/opposite_shapes pointers, first calloc's) the correct
+	// pointer-chased sub-struct to write into: 0 = this code itself (no prefix needed), 1/2 = the
+	// bulk element / bulk-of-bulk element, -1/-2 = the opposite interface element / its bulk. The
+	// continuous C1/C1TB/C2/C2TB spaces are addressed through a shared `continuous_spaces[SPACE_INDEX_*]`
+	// array rather than individually named struct members, since they share the same shape layout.
+	void FiniteElementCode::write_required_shapes_for_code(std::ostream & os, std::string func_type, std::string indent, FiniteElementCode *for_code, int type)
+	{
+		auto &entry = this->required_shapes[func_type];
+		std::string prefix=indent+"functable->shapes_required_" + func_type+".";
+		if (type==1)
+		{
+			os << " functable->shapes_required_" << func_type << ".bulk_shapes=(JITFuncSpec_RequiredShapes_FiniteElement_t*)calloc(sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t),1);" << std::endl;
+			prefix+= "bulk_shapes->";
+		}
+		else if (type==2)
+		{
+			os << " functable->shapes_required_" << func_type << ".bulk_shapes->bulk_shapes=(JITFuncSpec_RequiredShapes_FiniteElement_t*)calloc(sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t),1);" << std::endl;
+			prefix+= "bulk_shapes->bulk_shapes->";
+		}
+		else if (type==-1)
+		{
+			os << " functable->shapes_required_" << func_type << ".opposite_shapes=(JITFuncSpec_RequiredShapes_FiniteElement_t*)calloc(sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t),1);" << std::endl;
+			prefix+= "opposite_shapes->";
+		}
+		else if (type==-2)
+		{
+			os << " functable->shapes_required_" << func_type << ".opposite_shapes->bulk_shapes=(JITFuncSpec_RequiredShapes_FiniteElement_t*)calloc(sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t),1);" << std::endl;
+			prefix+= "opposite_shapes->bulk_shapes->";
+		}
+			
+		for (auto &fieldentry : entry)
+		{
+			bool is_in_my_space = false;
+			for (auto &s : for_code->spaces)
+			{
+				if (s == fieldentry.first)
 				{
-					continue;
+					is_in_my_space = true;
+					break;
 				}
-				for (auto &psientry : fieldentry.second)
+			}
+			if  (!is_in_my_space) continue;
+
+			if (fieldentry.first == NULL)
+			{
+				// Write the stuff without a space
+				for (auto &subentry : fieldentry.second)
 				{
-					if (psientry.second)
+					if (subentry.second)
 					{
-						//os << indent << "functable->shapes_required_" << func_type << ".opposite_shapes->bulk_shapes->" << psientry.first << "_" << fieldentry.first->get_name() << " = true;" << std::endl;
-						lines.push_back(indent + "functable->shapes_required_" + func_type + ".opposite_shapes->bulk_shapes->" + psientry.first + "_" + fieldentry.first->get_name() + " = true;");
+						os << prefix  << subentry.first << " = true; THESE SHOULD NOT APPEAR" << std::endl;
+					}
+				}
+				continue;
+			}
+
+			for (auto &psientry : fieldentry.second)
+			{
+				if (psientry.second)
+				{
+					if (psientry.first=="psi" || psientry.first=="dx_psi" || psientry.first=="dX_psi")
+					{
+						if (fieldentry.first->get_name()=="C1" || fieldentry.first->get_name()=="C1TB"||  fieldentry.first->get_name()=="C2" || fieldentry.first->get_name()=="C2TB")
+						{
+							os << prefix  << "continuous_spaces[SPACE_INDEX_"+fieldentry.first->get_name()+"]" << "." << psientry.first << " = true;" << std::endl;
+						}						
+						else
+						{
+							os << prefix  << fieldentry.first->get_name() << "." << psientry.first << " = true;" << std::endl;
+						}												
+					}
+					else
+					{
+						os << prefix  << psientry.first  << " = true;" << std::endl;
 					}
 				}
 			}
-			/*
-			if (just_the_normal) //TODO: THis required here?
-			{
-			  os << indent << "functable->shapes_required_"  << func_type << ".bulk_shapes->psi_Pos = true;" << std::endl;
-			}
-			*/
-		}
-
-		std::sort(lines.begin(), lines.end());
-		for (auto &l : lines)
-		{
-			os << l << std::endl;
 		}
 	}
 
+	
+
+	// Resolves a named runtime "flag" symbol (eval_flag(...) placeholder) to its GiNaC expression:
+	// "moving_mesh" becomes the constant 0/1 depending on coordinates_as_dofs, "timefrac_tracer"
+	// becomes the special time-fraction symbol used for tracer-advection sub-stepping.
 	GiNaC::ex FiniteElementCode::eval_flag(std::string flagname)
 	{
 		if (flagname == "moving_mesh")
@@ -6385,6 +6921,11 @@ namespace pyoomph
 			throw_runtime_error("Unknown flag name: " + flagname);
 	}
 
+	// The following resolve_subexpression/resolve_multi_return_call perform a linear search
+	// (structural GiNaC equality) over the already-collected subexpressions/multi-return-call
+	// invocations for one matching `e`/`invok`, returning a pointer / index, or NULL / -1 if not
+	// found yet (a bit expensive for very large expressions, but these lists are typically small and
+	// simplicity/correctness of the CSE bookkeeping is preferred here).
 	FiniteElementCodeSubExpression *FiniteElementCode::resolve_subexpression(const GiNaC::ex &e)
 	{
 		if (pyoomph_verbose)
@@ -6409,6 +6950,10 @@ namespace pyoomph
 		return -1;
 	}
 
+	// Intended to suppress a bulk element's residual contribution for a given DoF on an interface
+	// (e.g. to avoid double-counting), but currently unconditionally disabled (unimplemented feature,
+	// per the leading throw_runtime_error) - the remaining validation logic below is dead code kept
+	// for a possible future re-enablement.
 	void FiniteElementCode::nullify_bulk_residual(std::string dofname)
 	{
 		throw_runtime_error("Nullified dofs are deactivated for now... Never used so far");
@@ -6435,6 +6980,13 @@ namespace pyoomph
 		nullified_bulk_residuals.push_back(dofname);
 	}
 
+	// Registers a user-defined "integral expression" named `name`. Scalar expressions are stored
+	// directly; matrix/vector-valued expressions are decomposed component-wise into separately named
+	// integral expressions (name_x/name_y/name_z for vectors, name_xx/name_xy/... for matrices up to
+	// 3x3), skipping structurally-zero components (recorded as "" placeholders in the returned name
+	// list so callers can still map component index to name/absence). Returns the list of actually
+	// registered component names (empty vector for a plain scalar expression, which is stored under
+	// `name` itself).
 	std::vector<std::string> FiniteElementCode::register_integral_function(std::string name, GiNaC::ex expr)
 	{
 		RemoveSubexpressionsByIndentity sub_to_id(this);
@@ -6447,26 +6999,55 @@ namespace pyoomph
 		}
 		else
 		{
+			GiNaC::matrix expam = GiNaC::ex_to<GiNaC::matrix>(expanded);
 			std::vector<std::string> dirindex = {"x", "y", "z"};
 			std::vector<std::string> res;
-			for (unsigned int cd = 0; cd < std::max(expanded.nops(), (size_t)(3)); cd++)
+			if (expam.rows()>1 || expam.cols()>1)
 			{
-				std::string nam = name + "_" + dirindex[cd];
-				if (!GiNaC::is_zero(expanded[cd]))
+				
+				for (unsigned int row = 0; row < std::min(expam.rows(), (unsigned int)3); row++)
 				{
-					this->integral_expressions[nam] = expanded[cd];
-					this->integral_expression_units[nam] = this->integral_expression_units[name];
-					res.push_back(nam);
+					for (unsigned int col = 0; col < std::min(expam.cols(), (unsigned int)3); col++)
+					{
+						std::string nam = name + "_" + dirindex[row] + dirindex[col];
+						if (!GiNaC::is_zero(expam(row, col)))
+						{
+							this->integral_expressions[nam] = expam(row, col);
+							this->integral_expression_units[nam] = this->integral_expression_units[name];
+							res.push_back(nam);
+						}
+						else
+						{
+							res.push_back("");
+						}
+					}
 				}
-				else
+			}
+			else
+			{						
+				for (unsigned int cd = 0; cd < std::max(expanded.nops(), (size_t)(3)); cd++)
 				{
-					res.push_back("");
+					std::string nam = name + "_" + dirindex[cd];
+					if (!GiNaC::is_zero(expanded[cd]))
+					{
+						this->integral_expressions[nam] = expanded[cd];
+						this->integral_expression_units[nam] = this->integral_expression_units[name];
+						res.push_back(nam);
+					}
+					else
+					{
+						res.push_back("");
+					}
 				}
+				
 			}
 			return res;
 		}
 	}
 
+	// Registers the advection velocity field used to move passive tracer particles named `name`.
+	// After nondimensionalizing, the unit factor must reduce to exactly [spatial]/[temporal] (a
+	// velocity) - any other combination of units is a user error and raises a descriptive exception.
 	void FiniteElementCode::set_tracer_advection_velocity(std::string name, GiNaC::ex expr)
 	{
 		RemoveSubexpressionsByIndentity sub_to_id(this);
@@ -6487,6 +7068,13 @@ namespace pyoomph
 		}
 	}
 
+	// Registers a scalar "extremum expression" (tracked for max/min over the mesh, e.g. for
+	// diagnostics) named `name`. Unlike register_integral_function, the dimensional unit is not
+	// required to be an integer power that cancels neatly - instead, the purely numeric/rational part
+	// of the unit factor is folded back into the expression itself (so the stored expression is in
+	// "as dimensional as needed, scaled by any leftover numeric factor" form) while the remaining
+	// (purely symbolic) unit is kept in extremum_expression_units for later reporting. Only scalar
+	// expressions are supported; vector/matrix-valued input raises an error.
 	void FiniteElementCode::register_extremum_expression(std::string name, GiNaC::ex expr)
 	{
 		RemoveSubexpressionsByIndentity sub_to_id(this);
@@ -6506,6 +7094,14 @@ namespace pyoomph
 		}
 	}
 
+	// Registers a "local expression" named `name`, analogous to register_integral_function but for
+	// pointwise (non-integrated) expressions, with additional support for symmetric-matrix
+	// components: for a matrix-valued expression, off-diagonal entries that are symbolically equal to
+	// their transpose counterpart are not stored twice - the second name is simply aliased to the
+	// first (via res containing the first name at the second position) so callers can still look them
+	// up by either index. Returns the component name list together with a "shape code" second value:
+	// -1 for a scalar, 0 for a vector, or the number of columns for a matrix (so callers can
+	// distinguish vector vs. matrix layout from a single int).
 	std::pair<std::vector<std::string>, int> FiniteElementCode::register_local_expression(std::string name, GiNaC::ex expr)
 	{
 		//			std::cout << "EXPR " << expr << std::endl;
@@ -6584,6 +7180,9 @@ namespace pyoomph
 		}
 	}
 
+	// The following get_*_expression_unit_factor / get_*_expressions accessors expose the units and
+	// registered names of integral/extremum/local expressions to callers (e.g. the Python binding
+	// layer), defaulting to a unit factor of 1 for unknown names.
 	GiNaC::ex FiniteElementCode::get_integral_expression_unit_factor(std::string name)
 	{
 		if (this->integral_expression_units.count(name))
@@ -6646,6 +7245,25 @@ namespace pyoomph
 		return res;		
 	}
 
+	// The master "glue" function: emits JIT_ELEMENT_init()/JIT_ELEMENT_finalize(), the two functions
+	// that populate/tear down the runtime JITFuncSpec_Table_FiniteElement_t struct describing this
+	// generated element to the rest of pyoomph (see jitbridge.h/elements.cpp). This is by far the
+	// largest single function in the file; at a high level it emits code that:
+	//   - runs ABI/struct-layout sanity checks (functable->check_compiler_size(...)) comparing the
+	//     sizes the C compiler that will *load* this shared library sees against the sizes recorded
+	//     when *this* generator was compiled, catching struct-layout mismatches between the JIT
+	//     compiler and the host process early instead of via memory corruption;
+	//   - records per-space field counts/names/index offsets (nodal Pos/DL/D0 spaces, the shared
+	//     continuous C1/C1TB/C2/C2TB spaces, and the DG D1/D1TB/D2/D2TB spaces), validating that all
+	//     fields sharing this element agree on which space is used as "the" coordinate space;
+	//   - wires up function pointers for every previously emitted Residual/Jacobian/Hessian/steady/
+	//     parameter-derivative routine, the required-shapes flags (via write_required_shapes), initial/
+	//     Dirichlet condition callbacks, Z2 flux / integral / local / extremum / tracer-advection
+	//     dispatchers, and the callback/multi-return function tables (fill_callback_info);
+	//   - emits the mirrored JIT_ELEMENT_finalize() that frees everything allocated in _init().
+	// Given its size and the fact that it is almost entirely straight-line "os << ... ;" statements
+	// mirroring the JITFuncSpec_Table_FiniteElement_t struct layout field-by-field, only the
+	// noteworthy/non-obvious steps are commented individually below rather than every assignment.
 	void FiniteElementCode::write_code_info(std::ostream &os)
 	{
 	   std::ostringstream init,cleanup;
@@ -6681,6 +7299,20 @@ namespace pyoomph
 		init << " functable->debug_jacobian_epsilon = " << debug_jacobian_epsilon << ";" << std::endl;
 		init << " functable->stop_on_jacobian_difference = " << (stop_on_jacobian_difference ? "true" : "false") << ";" << std::endl;
 
+		
+		for (std::string my_sp : std::vector<std::string>{"Pos","DL","D0"})
+		{
+			init << " strcpy(functable->info_" << my_sp << ".space_name, \"" << my_sp << "\");" << std::endl;
+		}
+		for (std::string my_sp : std::vector<std::string>{"C2TB","C2","C1TB","C1"})
+		{
+			init << " strcpy(functable->continuous_spaces[SPACE_INDEX_" << my_sp << "].space_name, \"" << my_sp << "\");" << std::endl;
+		}		
+		for (std::string my_sp : std::vector<std::string>{"D2TB","D2","D1TB","D1"})
+		{
+			init << " strcpy(functable->dg_spaces[SPACE_INDEX_" << my_sp << "].space_name, \"" << my_sp << "\");" << std::endl;
+		}
+
 		int index_offset = 0;
 
 		for (auto &space : spaces)
@@ -6698,27 +7330,34 @@ namespace pyoomph
 			}
 			if (numfields)
 			{
-				init << " functable->numfields_" << space->get_name() << "=" << numfields << ";" << std::endl;
-				init << " functable->fieldnames_" << space->get_name() << "=(char **)malloc(sizeof(char*)*functable->numfields_" << space->get_name() << ");" << std::endl;
+								
+				init << " functable->info_" << space->get_name() << ".numfields=" << numfields << ";" << std::endl;
+				init << " functable->info_" << space->get_name() << ".fieldnames=(char **)malloc(sizeof(char*)*functable->info_" << space->get_name() << ".numfields);" << std::endl;				
 				for (auto &f : myfields)
 				{
 					if (f->get_space() != space)
 						continue;
 					if (f->get_name() == "mesh_x" || f->get_name() == "mesh_y" || f->get_name() == "mesh_z")
 						continue;
-					init << " SET_INTERNAL_FIELD_NAME(functable->fieldnames_" << space->get_name() << "," << (f->index - index_offset) << ", \"" << f->get_name() << "\" );" << std::endl;
-					cleanup << " pyoomph_tested_free(functable->fieldnames_" << space->get_name() << "[ " << (f->index - index_offset) <<"]); functable->fieldnames_" << space->get_name()<< "[" <<(f->index - index_offset) << "]=PYOOMPH_NULL; " << std::endl;
+					
+					
+					init << " SET_INTERNAL_FIELD_NAME(functable->info_" << space->get_name() << ".fieldnames," << (f->index - index_offset) << ", \"" << f->get_name() << "\" );" << std::endl;										
+					cleanup << " pyoomph_tested_free(functable->info_" << space->get_name() << ".fieldnames[" << (f->index - index_offset) << "]); functable->info_" << space->get_name() << ".fieldnames[" << (f->index - index_offset) << "]=PYOOMPH_NULL; " << std::endl;
 				}
-				cleanup << " pyoomph_tested_free(functable->fieldnames_" << space->get_name() << "); functable->fieldnames_" << space->get_name() << "=PYOOMPH_NULL; " << std::endl;
+								
+				cleanup << " pyoomph_tested_free(functable->info_" << space->get_name() << ".fieldnames); functable->info_" << space->get_name() << ".fieldnames=PYOOMPH_NULL; " << std::endl;
 				index_offset += numfields;
 			}
 		}
 
 		bool coordinate_space_validated = false;
+		bool has_C1TB_fields=false;
 		index_offset = 0;
 		unsigned int base_bulk_nodal_offset = 0;
 		unsigned int internal_data_offset = 0;
 		unsigned int DG_external_offset = 0;
+		unsigned int total_numfields=0;
+		unsigned int total_numfields_basebulk=0;
 //		unsigned int interf_buffer_offset = 0;
 		for (auto &space : spaces)
 		{
@@ -6732,6 +7371,15 @@ namespace pyoomph
 				if (f->get_space() == space)
 					numfields++;
 			}
+			std::string info_name = "info_" + space->get_name();
+			if (space->get_name() == "C1" || space->get_name() == "C1TB" || space->get_name() == "C2" || space->get_name() == "C2TB")
+			{
+				info_name = "continuous_spaces[SPACE_INDEX_" + space->get_name() + "]";
+			}
+			else if (space->get_name() == "D2TB" || space->get_name() == "D2" || space->get_name() == "D1TB" || space->get_name() == "D1" )
+			{
+				info_name = "dg_spaces[SPACE_INDEX_" + space->get_name() + "]";
+			}			
 			//		std::cout << "NUMFIELDS " << numfields << std::endl;
 			if (numfields)
 			{
@@ -6745,12 +7393,13 @@ namespace pyoomph
 				{
 					if (coordinate_space != space->get_name())
 					{
-						throw_runtime_error("Cannot use a coordinate space on " + coordinate_space + ", which is inferior to the required nodal field space " + space->get_name());
+						throw_runtime_error("Cannot use a coordinate space of " + coordinate_space + ", which is inferior to the required nodal field space " + space->get_name());
 					}
 					else
 						coordinate_space_validated = true;
 				}
-				init << " functable->numfields_" << space->get_name() << "=" << numfields << ";" << std::endl;
+				init << " functable->" << info_name << ".numfields=" << numfields << ";" << std::endl;
+				total_numfields += numfields;
 
 				if (dynamic_cast<ContinuousFiniteElementSpace *>(space) || dynamic_cast<DGFiniteElementSpace *>(space))
 				{
@@ -6758,19 +7407,24 @@ namespace pyoomph
 					// Other fields stem from the interface
 					if (!bulk_code)
 					{
-						init << " functable->numfields_" << space->get_name() << "_bulk=" << numfields << ";" << std::endl;
-						init << " functable->numfields_" << space->get_name() << "_basebulk=" << numfields << ";" << std::endl;
-						init << " functable->numfields_" << space->get_name() << "_new=" << numfields << ";" << std::endl;
+						
+						init << " functable->" << info_name << ".numfields_bulk=" << numfields << ";" << std::endl;
+						init << " functable->" << info_name << ".numfields_basebulk=" << numfields << ";" << std::endl;
+						init << " functable->" << info_name << ".numfields_new=" << numfields << ";" << std::endl;
+						total_numfields_basebulk += numfields;
+						
+						if (space->get_name()=="C1TB" && numfields>0) has_C1TB_fields=true;
+						
 						if (dynamic_cast<ContinuousFiniteElementSpace *>(space))
 						{
-							init << " functable->nodal_offset_" << space->get_name() << "_basebulk =" << base_bulk_nodal_offset << ";" << std::endl;
+							init << " functable->" << info_name << ".nodal_offset_basebulk =" << base_bulk_nodal_offset << ";" << std::endl;
 						}
 						else if (dynamic_cast<DGFiniteElementSpace *>(space))
 						{
-							init << " functable->internal_offset_" << space->get_name() << "_new =" << internal_data_offset << ";" << std::endl;
+							init << " functable->" << info_name << ".internal_offset_new =" << internal_data_offset << ";" << std::endl;
 							internal_data_offset += numfields;
 						}
-						init << " functable->buffer_offset_" << space->get_name() << "_basebulk =" << base_bulk_nodal_offset << ";" << std::endl;
+						init << " functable->" << info_name << ".buffer_offset_basebulk =" << base_bulk_nodal_offset << ";" << std::endl;
 						base_bulk_nodal_offset += numfields;
 					}
 					else
@@ -6815,40 +7469,43 @@ namespace pyoomph
 							}
 						}
 
-						init << " functable->numfields_" << space->get_name() << "_bulk=" << ncbulk << ";" << std::endl;
-						init << " functable->numfields_" << space->get_name() << "_basebulk=" << ncbasebulk << ";" << std::endl;
-						init << " functable->numfields_" << space->get_name() << "_new=" << numfields - ncbulk << ";" << std::endl;
+						init << " functable->" << info_name << ".numfields_bulk=" << ncbulk << ";" << std::endl;
+						init << " functable->" << info_name << ".numfields_basebulk=" << ncbasebulk << ";" << std::endl;
+						init << " functable->" << info_name << ".numfields_new=" << numfields - ncbulk << ";" << std::endl;
+						total_numfields_basebulk += ncbasebulk;
 						if (dynamic_cast<ContinuousFiniteElementSpace *>(space))
 						{
-							init << " functable->nodal_offset_" << space->get_name() << "_basebulk =" << base_bulk_nodal_offset << ";" << std::endl;
+
+							init << " functable->" << info_name << ".nodal_offset_basebulk =" << base_bulk_nodal_offset << ";" << std::endl;
 						}
 						else if (dynamic_cast<DGFiniteElementSpace *>(space))
 						{
-							init << " functable->internal_offset_" << space->get_name() << "_new =" << internal_data_offset << ";" << std::endl;
+							init << " functable->" << info_name << ".internal_offset_new =" << internal_data_offset << ";" << std::endl;							
+							init << " functable->" << info_name << ".external_offset_bulk = " << DG_external_offset << ";" << std::endl;
 							internal_data_offset += (numfields - ncbulk);
-							init << " functable->external_offset_" << space->get_name() << "_bulk = " << DG_external_offset << ";" << std::endl;
 							DG_external_offset += ncbulk;
 						}
-						init << " functable->buffer_offset_" << space->get_name() << "_basebulk =" << base_bulk_nodal_offset << ";" << std::endl;
+
+						
+						init << " functable->" << info_name << ".buffer_offset_basebulk =" << base_bulk_nodal_offset << ";" << std::endl;
 						base_bulk_nodal_offset += ncbasebulk;
 					}
 				}
 				else if (dynamic_cast<DiscontinuousFiniteElementSpace *>(space))
-				{
-					init << " functable->buffer_offset_" << space->get_name() << " =" << index_offset << ";" << std::endl;
+				{					
+					init << " functable->" << info_name << ".buffer_offset_basebulk =" << index_offset << "; // Using _basebulk here" << std::endl;
 					if (!dynamic_cast<ExternalD0Space *>(space))
-					{
-						init << " functable->internal_offset_" << space->get_name() << " =" << internal_data_offset << ";" << std::endl;
+					{						
+						init << " functable->" << info_name << ".internal_offset_new =" << internal_data_offset << "; // using _new here" << std::endl;
 						internal_data_offset += numfields;
 					}
 					else
-					{
-						init << " functable->external_offset_" << space->get_name() << " = " << DG_external_offset << ";" << std::endl;
+					{						
+						init << " functable->" << info_name << ".external_offset_bulk = " << DG_external_offset << "; // using _bulk here" << std::endl;
 						DG_external_offset += numfields;
 					}
 				}
-
-				init << " functable->fieldnames_" << space->get_name() << "=(char **)malloc(sizeof(char*)*functable->numfields_" << space->get_name() << ");" << std::endl;
+				init << " functable->" << info_name << ".fieldnames=(char **)malloc(sizeof(char*)*functable->" << info_name << ".numfields);" << std::endl;
 				std::map<unsigned, FiniteElementField *> reindex;
 				for (auto &f : myfields)
 				{
@@ -6867,10 +7524,10 @@ namespace pyoomph
 					if (f->get_space() != space)
 						continue;
 					unsigned contiindex = reindex2[f->index];
-					init << " SET_INTERNAL_FIELD_NAME(functable->fieldnames_" << space->get_name() << "," << contiindex << ", \"" << f->get_name() << "\" );" << std::endl;
-					cleanup << " pyoomph_tested_free(functable->fieldnames_" << space->get_name() << "[ " << (contiindex) <<"]); functable->fieldnames_" << space->get_name()<<    "[" <<(contiindex) << "]=PYOOMPH_NULL; " << std::endl;
+					init << " SET_INTERNAL_FIELD_NAME(functable->" << info_name << ".fieldnames," << contiindex << ", \"" << f->get_name() << "\" );" << std::endl;					
+					cleanup << " pyoomph_tested_free(functable->" << info_name << ".fieldnames[" << (contiindex) <<"]); functable->" << info_name << ".fieldnames[" <<(contiindex) << "]=PYOOMPH_NULL; " << std::endl;
 				}
-				cleanup << " pyoomph_tested_free(functable->fieldnames_" << space->get_name() << "); functable->fieldnames_" << space->get_name() << "=PYOOMPH_NULL; " << std::endl;								
+				cleanup << " pyoomph_tested_free(functable->" << info_name << ".fieldnames); functable->" << info_name << ".fieldnames=PYOOMPH_NULL; " << std::endl;
 				index_offset += numfields;
 			}
 			else if (!coordinate_space_validated && coordinate_space != "")
@@ -6884,19 +7541,20 @@ namespace pyoomph
 
 		if (bulk_code)
 		{
-			init << " functable->buffer_offset_C2TB_interf=functable->numfields_C2TB_basebulk+functable->numfields_C2_basebulk+functable->numfields_C1TB_basebulk+functable->numfields_C1_basebulk" << std::endl;
-			init << "                                     +functable->numfields_D2TB_basebulk+functable->numfields_D2_basebulk+functable->numfields_D1TB_basebulk+functable->numfields_D1_basebulk;" << std::endl;
-			init << " functable->buffer_offset_C2_interf=functable->buffer_offset_C2TB_interf+(functable->numfields_C2TB-functable->numfields_C2TB_basebulk);" << std::endl;
-			init << " functable->buffer_offset_C1TB_interf=functable->buffer_offset_C2_interf+(functable->numfields_C2-functable->numfields_C2_basebulk);" << std::endl;
-			init << " functable->buffer_offset_C1_interf=functable->buffer_offset_C1TB_interf+(functable->numfields_C1TB-functable->numfields_C1TB_basebulk);" << std::endl;
-			init << " functable->buffer_offset_D2TB_interf=functable->buffer_offset_C1_interf+(functable->numfields_C1-functable->numfields_C1_basebulk);" << std::endl;
-			init << " functable->buffer_offset_D2_interf=functable->buffer_offset_D2TB_interf+(functable->numfields_D2TB-functable->numfields_D2TB_basebulk);" << std::endl;
-			init << " functable->buffer_offset_D1TB_interf=functable->buffer_offset_D2_interf+(functable->numfields_D2-functable->numfields_D2_basebulk);" << std::endl;
-			init << " functable->buffer_offset_D1_interf=functable->buffer_offset_D1TB_interf+(functable->numfields_D1TB-functable->numfields_D1TB_basebulk);" << std::endl;
+					
+			init << " functable->continuous_spaces[SPACE_INDEX_C2TB].buffer_offset_interf=functable->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk+functable->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk+functable->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk+functable->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk" << std::endl;
+			init << "                                     +functable->dg_spaces[SPACE_INDEX_D2TB].numfields_basebulk+functable->dg_spaces[SPACE_INDEX_D2].numfields_basebulk+functable->dg_spaces[SPACE_INDEX_D1TB].numfields_basebulk+functable->dg_spaces[SPACE_INDEX_D1].numfields_basebulk;" << std::endl;
+			init << " functable->continuous_spaces[SPACE_INDEX_C2].buffer_offset_interf=functable->continuous_spaces[SPACE_INDEX_C2TB].buffer_offset_interf+(functable->continuous_spaces[SPACE_INDEX_C2TB].numfields-functable->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk);" << std::endl;
+			init << " functable->continuous_spaces[SPACE_INDEX_C1TB].buffer_offset_interf=functable->continuous_spaces[SPACE_INDEX_C2].buffer_offset_interf+(functable->continuous_spaces[SPACE_INDEX_C2].numfields-functable->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk);" << std::endl;
+			init << " functable->continuous_spaces[SPACE_INDEX_C1].buffer_offset_interf=functable->continuous_spaces[SPACE_INDEX_C1TB].buffer_offset_interf+(functable->continuous_spaces[SPACE_INDEX_C1TB].numfields-functable->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk);" << std::endl;
+			init << " functable->dg_spaces[SPACE_INDEX_D2TB].buffer_offset_interf=functable->continuous_spaces[SPACE_INDEX_C1].buffer_offset_interf+(functable->continuous_spaces[SPACE_INDEX_C1].numfields-functable->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk);" << std::endl;
+			init << " functable->dg_spaces[SPACE_INDEX_D2].buffer_offset_interf=functable->dg_spaces[SPACE_INDEX_D2TB].buffer_offset_interf+(functable->dg_spaces[SPACE_INDEX_D2TB].numfields-functable->dg_spaces[SPACE_INDEX_D2TB].numfields_basebulk);" << std::endl;
+			init << " functable->dg_spaces[SPACE_INDEX_D1TB].buffer_offset_interf=functable->dg_spaces[SPACE_INDEX_D2].buffer_offset_interf+(functable->dg_spaces[SPACE_INDEX_D2].numfields-functable->dg_spaces[SPACE_INDEX_D2].numfields_basebulk);" << std::endl;
+			init << " functable->dg_spaces[SPACE_INDEX_D1].buffer_offset_interf=functable->dg_spaces[SPACE_INDEX_D1TB].buffer_offset_interf+(functable->dg_spaces[SPACE_INDEX_D1TB].numfields-functable->dg_spaces[SPACE_INDEX_D1TB].numfields_basebulk);" << std::endl;
 			init << "#ifndef PYOOMPH_TCC_TO_MEMORY" << std::endl;
-			init << " if (functable->buffer_offset_D1_interf+(functable->numfields_D1-functable->numfields_D1_basebulk)+functable->numfields_DL+functable->numfields_D0+functable->numfields_ED0!=" << index_offset << ")" << std::endl;
+			init << " if (functable->dg_spaces[SPACE_INDEX_D1].buffer_offset_interf+(functable->dg_spaces[SPACE_INDEX_D1].numfields-functable->dg_spaces[SPACE_INDEX_D1].numfields_basebulk)+functable->info_DL.numfields+functable->info_D0.numfields+functable->info_ED0.numfields!=" << index_offset << ")" << std::endl;
 			init << " {" << std::endl;
-			init << "   printf(\"Error in the buffer offsets. Please report with the script you have used to create this error!\\nbuffer_offset_C2TB_interf=%d\\nbuffer_offset_C2_interf=%d\\nbuffer_offset_C1TB_interf=%d\\nbuffer_offset_C1_interf=%d\\nbuffer_offset_D2TB_interf=%d\\nbuffer_offset_D2_interf=%d\\nbuffer_offset_D1TB_interf=%d\\nbuffer_offset_D1_interf=%d\\n\",functable->buffer_offset_C2TB_interf,functable->buffer_offset_C2_interf,functable->buffer_offset_C1TB_interf,functable->buffer_offset_C1_interf,functable->buffer_offset_D2TB_interf,functable->buffer_offset_D2_interf,functable->buffer_offset_D1TB_interf,functable->buffer_offset_D1_interf);" << std::endl;
+			init << "   printf(\"Error in the buffer offsets. Please report with the script you have used to create this error!\\nbuffer_offset_C2TB_interf=%d\\nbuffer_offset_C2_interf=%d\\nbuffer_offset_C1TB_interf=%d\\nbuffer_offset_C1_interf=%d\\nbuffer_offset_D2TB_interf=%d\\nbuffer_offset_D2_interf=%d\\nbuffer_offset_D1TB_interf=%d\\nbuffer_offset_D1_interf=%d\\n\",functable->continuous_spaces[SPACE_INDEX_C2TB].buffer_offset_interf,functable->continuous_spaces[SPACE_INDEX_C2].buffer_offset_interf,functable->continuous_spaces[SPACE_INDEX_C1TB].buffer_offset_interf,functable->continuous_spaces[SPACE_INDEX_C1].buffer_offset_interf,functable->dg_spaces[SPACE_INDEX_D2TB].buffer_offset_interf,functable->dg_spaces[SPACE_INDEX_D2].buffer_offset_interf,functable->dg_spaces[SPACE_INDEX_D1TB].buffer_offset_interf,functable->dg_spaces[SPACE_INDEX_D1].buffer_offset_interf);" << std::endl;
 			init << "   exit(1);" << std::endl;
 			init << " }" << std::endl;
 			init << "#endif" << std::endl;
@@ -6909,25 +7567,26 @@ namespace pyoomph
 			coordinate_space = "C1TB";
 		else if (coordinate_space == "D2TB")
 			coordinate_space = "C2TB";
+		if (coordinate_space=="C2" && has_C1TB_fields ) coordinate_space="C2TB"; // Only here, we have the bubble
 		if (coordinate_space == "" || coordinate_space=="ED0")
 			throw_runtime_error("Cannot deduce the coordinate space of domain " + this->get_domain_name() + ". Please specify it explicitly by adding an ElementSpace().");
 		//   if (coordinate_space=="C2TB" && this->bulk_code) coordinate_space="C2";
 		init << " functable->dominant_space=strdup(\"" << coordinate_space << "\");" << std::endl;
 
-		init << " functable->hangindex_Pos=-1; //Position always hangs on the max space" << std::endl;
+		init << " functable->info_Pos.hangindex=-1; //Position always hangs on the max space" << std::endl;
 		if (coordinate_space == "C1" || coordinate_space == "C1TB")
-		{
-			init << " functable->hangindex_C2TB=-1;" << std::endl;
-			init << " functable->hangindex_C2=-1;" << std::endl;
-			init << " functable->hangindex_C1TB=-1;" << std::endl;
-			init << " functable->hangindex_C1=-1;" << std::endl;
+		{			
+			init << " functable->continuous_spaces[SPACE_INDEX_C2TB].hangindex=-1;" << std::endl;
+			init << " functable->continuous_spaces[SPACE_INDEX_C2].hangindex=-1;" << std::endl;
+			init << " functable->continuous_spaces[SPACE_INDEX_C1TB].hangindex=-1;" << std::endl;
+			init << " functable->continuous_spaces[SPACE_INDEX_C1].hangindex=-1;" << std::endl;
 		}
 		else
-		{
-			init << " functable->hangindex_C2TB=-1;" << std::endl;
-			init << " functable->hangindex_C2=-1;" << std::endl;
-			init << " functable->hangindex_C1TB=functable->numfields_C2TB_basebulk+functable->numfields_C2_basebulk;" << std::endl;
-			init << " functable->hangindex_C1=functable->numfields_C2TB_basebulk+functable->numfields_C2_basebulk;" << std::endl;
+		{			
+			init << " functable->continuous_spaces[SPACE_INDEX_C2TB].hangindex=-1;" << std::endl;
+			init << " functable->continuous_spaces[SPACE_INDEX_C2].hangindex=-1;" << std::endl;
+			init << " functable->continuous_spaces[SPACE_INDEX_C1TB].hangindex=functable->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk+functable->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk;" << std::endl;
+			init << " functable->continuous_spaces[SPACE_INDEX_C1].hangindex=functable->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk+functable->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk;" << std::endl;
 		}
 
 		init << " functable->max_dt_order=" << this->max_dt_order << ";" << std::endl;
@@ -6996,7 +7655,7 @@ namespace pyoomph
 		init << " functable->res_jac_names=(char**)calloc(functable->num_res_jacs,sizeof(char*));" << std::endl;
 		init << " functable->missing_residual_assembly=(bool*)calloc(functable->num_res_jacs,sizeof(bool));" << std::endl;
 		cleanup << " pyoomph_tested_free(functable->missing_residual_assembly); functable->missing_residual_assembly=PYOOMPH_NULL; " << std::endl;
-		init << " functable->has_constant_mass_matrix_for_sure=(bool*)calloc(functable->num_res_jacs,sizeof(bool));" << std::endl;
+		init << " functable->has_constant_mass_matrix_for_sure=(bool*)calloc(functable->num_res_jacs,sizeof(bool));" << std::endl;		
 		cleanup << " pyoomph_tested_free(functable->has_constant_mass_matrix_for_sure); functable->has_constant_mass_matrix_for_sure=PYOOMPH_NULL; " << std::endl;
 
 		
@@ -7164,7 +7823,11 @@ namespace pyoomph
 	  {
 		FiniteElementField *wheredef = f->get_defined_on_domain_equivalent_field();
 		to_where_it_was_defined[f] = wheredef;
-		std::string n=wheredef->get_space()->get_code()->get_full_domain_name()+"/"+wheredef->get_name();
+		std::string nn=wheredef->get_name();
+		if (nn=="mesh_x") nn="coordinate_x";
+		else if (nn=="mesh_y") nn="coordinate_y";
+		else if (nn=="mesh_z") nn="coordinate_z";
+		std::string n=wheredef->get_space()->get_code()->get_full_domain_name()+"/"+nn;
 		//std::cout << "CONTRIBUTING FIELD " << f->get_space()->get_code()->get_full_domain_name() << "/" << f->get_name() << " defined on " << n << std::endl;
 		//std::cout << "  name already in there " << n << " ? " << (contribution_name_to_index.count(n) ? "YES" : "NO") << std::endl;
 		if (contribution_name_to_index.count(n)==0)
@@ -7457,10 +8120,7 @@ namespace pyoomph
 				init << " functable->JacobianForElementSizeSecondSpatialDerivative=&JacobianForElementSizeSecondSpatialDerivatives;" << std::endl;
 			}
 		}
-		if (this->bulk_position_space_to_C1)
-		{
-			init << "   functable->bulk_position_space_to_C1=true;" << std::endl;
-		}
+		
 		init << " SET_INTERNAL_NAME(functable->domain_name,\"" << this->get_domain_name() << "\");" << std::endl;
 		cleanup << " pyoomph_tested_free(functable->domain_name); functable->domain_name=PYOOMPH_NULL; " << std::endl;
 		init << " functable->clean_up=&clean_up;" << std::endl;
@@ -7477,12 +8137,21 @@ namespace pyoomph
 		os << init.str();
 	}
 
+	// Sets the exponent used to scale a discontinuous (DG) field's value across mesh refinement
+	// levels - used to keep DG jump terms well-scaled as elements are refined/coarsened.
 	void FiniteElementCode::set_discontinuous_refinement_exponent(std::string field, double exponent)
 	{
 		auto *f = this->get_field_by_name(field);
 		f->discontinuous_refinement_exponent = exponent;
 	}
 
+	// Developer/debugging helper (exposed to Python for interactive use) that expands `inp`,
+	// symbolically differentiates it once w.r.t. `dx1` and, if given, a second time w.r.t. `dx2`
+	// (using __derive_shapes_by_second_index for the second derivative, exactly as the real Hessian
+	// code generator does), printing the symbolic result and its generated C code to stdout after each
+	// step. `dx1`/`dx2` accept either a field name or one of the special coordinate/time tokens
+	// "__x__"/"__y__"/"__z__"/"__X__"/"__Y__"/"__Z__"/"__t__". Used to manually inspect/verify
+	// individual Hessian derivative terms without generating a full element.
 	void FiniteElementCode::debug_second_order_Hessian_deriv(GiNaC::ex inp, std::string dx1, std::string dx2)
 	{
 		auto *old = pyoomph::__current_code;
@@ -7571,7 +8240,17 @@ namespace GiNaC
 
 
 	/// SORTED PRINTS
-	SortedGiNaC::~SortedGiNaC() 
+	// SortedGiNaC and its subclasses (declared in codegen.hpp) implement a small parallel expression
+	// tree, mirrored from a GiNaC::ex, whose sole purpose is to print C code with a *deterministic*
+	// term/factor ordering: plain GiNaC printing order can vary depending on internal hashing/pointer
+	// values, which would make generated code (and hence compiled-library caching/diffing) spuriously
+	// change between runs on otherwise-identical input. Each node type (Numeric/Add/Mul/Pow/Function/
+	// Symbol/Struct) defines an add_order()/mul_order() "sort class" priority plus a to_string(); the
+	// add_sort_compare()/mul_sort_compare() helpers first order by that priority and break ties by
+	// comparing the already-stringified sub-terms lexicographically, so the final printed C expression
+	// is fully reproducible. See print_sorted_GiNaC() below for the entry point that (via
+	// SortedGiNaC::factory) builds this tree from a plain GiNaC::ex and prints it.
+	SortedGiNaC::~SortedGiNaC()
 	{
 		for (auto ptr : op) {                
 			delete ptr;
@@ -7603,7 +8282,7 @@ namespace GiNaC
 	}
 
 
-	std::string SortedGiNaCNumeric::to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
+	std::string SortedGiNaCNumeric::to_string(std::ostream &, GiNaC::print_FEM_options &csrc_opts)
 	{
 		std::ostringstream ss;
 		GiNaC::print_csrc_FEM p(ss, &csrc_opts);
@@ -7662,7 +8341,7 @@ namespace GiNaC
 		return res;
 	}
 
-	std::string SortedGiNaCStruct::to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) 
+	std::string SortedGiNaCStruct::to_string(std::ostream &, GiNaC::print_FEM_options &csrc_opts) 
 	{
 		std::ostringstream ss;
 		GiNaC::print_csrc_FEM p(ss, &csrc_opts);
@@ -7674,6 +8353,14 @@ namespace GiNaC
 		return 6; 
 	}
 
+	// Builds a SortedGiNaC tree from GiNaC expression `e` (after expand()): numbers/constants become
+	// SortedGiNaCNumeric, sums/products become SortedGiNaCAdd/Mul with their operands recursively
+	// built and then *sorted* (via add_sort_compare/mul_sort_compare) so the operand order is
+	// deterministic, powers/functions/symbols map to their respective node types, and any of this
+	// codebase's custom GiNaC structures (test functions, shape expansions, subexpressions, spatial-
+	// integral/normal symbols, fake-exponential-mode markers, global-parameter wrappers) are treated
+	// as opaque leaves (SortedGiNaCStruct) printed via the normal (non-sorted) print_csrc_FEM path,
+	// since their internal structure is not a plain algebraic sum/product to be reordered.
 	SortedGiNaC * SortedGiNaC::factory(const ex & e,std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
     {
 		ex expa=e.expand();
@@ -7741,6 +8428,9 @@ namespace GiNaC
 		}
     }
 
+	// Entry point for the deterministic ("sorted") C-code printing mode (ccode_expression_mode ==
+	// "deterministic"): builds the SortedGiNaC tree for `e` and writes its canonically-ordered string
+	// form to `os`.
 	std::ostream &  print_sorted_GiNaC(ex  e,std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
     {
         SortedGiNaC * root=SortedGiNaC::factory(e, os, csrc_opts);
@@ -7749,6 +8439,11 @@ namespace GiNaC
         return os; 
     }
 
+	// print_csrc_FEM/print_latex_FEM are GiNaC print_context subclasses that carry a pointer to
+	// print_FEM_options (`FEM_opts`), which in turn carries the FiniteElementCode currently being
+	// printed for; this is how the custom structures' print()/derivative() implementations below know
+	// which code's subexpression list/resolve_multi_return_call/etc. to use, since GiNaC's print
+	// machinery itself has no notion of "current element being generated".
 	print_csrc_FEM::print_csrc_FEM() : GiNaC::print_csrc_double(std::cout)
 	{
 	}
@@ -7764,8 +8459,14 @@ namespace GiNaC
 	{
 	}
 
+	// Prints a GiNaCSubExpression: in C-code printing mode, resolves it back to the FiniteElementCode's
+	// registered subexpression list and prints the corresponding pre-computed C variable name
+	// (subexpr_N) instead of re-expanding the (potentially large) underlying expression - this is the
+	// actual mechanism by which the CSE optimization performed in write_code_subexpressions() takes
+	// effect at print time. In any other (e.g. debug/plain) print mode, falls back to printing the
+	// raw wrapped expression.
 	template <>
-	void GiNaCSubExpression::print(const print_context &c, unsigned level) const
+	void GiNaCSubExpression::print(const print_context &c, unsigned) const
 	{
 		if (GiNaC::is_a<print_csrc_FEM>(c))
 		{
@@ -7786,6 +8487,25 @@ namespace GiNaC
 			c.s << "<SUBEXPRESSION: " << get_struct().expr << ">";
 	}
 
+	// Implements GiNaC's chain rule for a GiNaCSubExpression node w.r.t. raw symbol `s` (normally a
+	// field's underlying GiNaC::symbol). This is the counterpart to the CSE derivative pre-computation
+	// done in write_code_subexpressions(): rather than re-differentiating the (potentially large)
+	// subexpression body every time it appears, it looks up which of the subexpression's required
+	// fields (`se->req_fields`) actually correspond to `s`, and returns (symbolically) the *product
+	// rule term* d(subexpr)/d(field) * d(field)/d(s) where the first factor is represented either by
+	// re-differentiating on the spot into a fresh nested subexpression (only during the very first,
+	// "outer", index of a Hessian double-differentiation, __in_hessian && !__derive_shapes_by_second_index)
+	// or, in the common (non-Hessian, or Hessian-inner-index) case, by a symbolic placeholder symbol
+	// named "d_<cvar>_d_<field>" that refers to the C variable already emitted by
+	// write_code_subexpressions() - i.e. the actual numeric derivative value is computed once in C,
+	// not re-derived symbolically at every use site. The second factor is represented by a "derived"
+	// ShapeExpansion of that field (GiNaCShapeExpansion's own derivative() then reduces this to 0 or 1
+	// depending on which basis function was differentiated - see DerivedShapeExpansionsToUnity).
+	// Additionally, if this code has moving-mesh coordinates as DoFs and `s` happens to be one of the
+	// (Eulerian/bulk/opposite-interface) position symbols, the subexpression must also be
+	// differentiated directly (bypassing the cached-C-derivative mechanism above) since geometric
+	// quantities such as d(dpsi/dx * u)/dX^l_j genuinely depend on the per-node/per-direction loop
+	// index and cannot be captured by a single precomputed scalar derivative variable.
 	template <>
 	GiNaC::ex GiNaCSubExpression::derivative(const GiNaC::symbol &s) const
 	{
@@ -7904,8 +8624,13 @@ namespace GiNaC
 		return res;
 	}
 
+	// Prints a GiNaCMultiRetCallback: resolves it to its slot in the enclosing FiniteElementCode's
+	// multi_return_calls list and prints either "multi_ret_<index>[<retindex>]" (the callback's
+	// plain return value) or, if this node represents a derivative w.r.t. one of the callback's
+	// arguments (derived_by_arg>=0), "dmulti_ret_<index>[nargs*retindex+derived_by_arg]" - matching
+	// the flattened derivative-matrix layout filled in by write_code_multi_ret_call().
 	template <>
-	void GiNaCMultiRetCallback::print(const print_context &c, unsigned level) const
+	void GiNaCMultiRetCallback::print(const print_context &c, unsigned) const
 	{
 		const auto &sp = get_struct();
 
@@ -7957,6 +8682,14 @@ namespace GiNaC
 		}
 	}
 
+	// Chain rule for a multi-return callback's return value: only first derivatives are supported
+	// (differentiating an already-derived node, derived_by_arg>=0, raises an error - except w.r.t.
+	// the mass-matrix marker, which is trivially zero). For a plain (non-derived) node, differentiates
+	// every argument expression w.r.t. `s` and, for each nonzero argument derivative, asks the
+	// underlying callback whether it can supply a closed-form symbolic derivative
+	// (_get_symbolic_derivative); if not, falls back to a "derived by argument i" GiNaCMultiRetCallback
+	// node (whose value is the numerically-computed Jacobian entry dmulti_ret_.../nargs*retindex+i,
+	// filled in at runtime by the invoked C/Python callback itself) multiplied by the chain-rule factor.
 	template <>
 	GiNaC::ex GiNaCMultiRetCallback::derivative(const GiNaC::symbol &s) const
 	{
@@ -8003,6 +8736,10 @@ namespace GiNaC
 		}
 	}
 
+	// Custom substitution: applies `m` to the callback's invocation arguments; if that substitution
+	// causes GiNaC to fully evaluate the invocation down to a concrete list of numeric results (`lst`,
+	// e.g. all arguments became numbers), directly returns the requested return-value component
+	// instead of rebuilding another (now meaningless) GiNaCMultiRetCallback wrapper.
 	template <>
 	GiNaC::ex GiNaCMultiRetCallback::subs(const GiNaC::exmap &m, unsigned options) const
 	{
@@ -8025,8 +8762,11 @@ namespace GiNaC
 		}
 	}
 
+	// NodalDeltaSymbol has no configurable state (it always represents the same Kronecker-delta
+	// nodal-contribution marker), so print() just emits the fixed C identifier "nodal_delta_sym", and
+	// derivative() is always 0 (it does not depend on any field/coordinate symbol).
 	template <>
-	void GiNaCNodalDeltaSymbol::print(const print_context &c, unsigned level) const
+	void GiNaCNodalDeltaSymbol::print(const print_context &c, unsigned) const
 	{
 		if (GiNaC::is_a<print_csrc_FEM>(c))
 		{
@@ -8043,13 +8783,22 @@ namespace GiNaC
 	}
 
 	template <>
-	GiNaC::ex GiNaCNodalDeltaSymbol::derivative(const GiNaC::symbol &s) const
+	GiNaC::ex GiNaCNodalDeltaSymbol::derivative(const GiNaC::symbol &) const
 	{
 		return 0;
 	}
 
+	// Prints a SpatialIntegralSymbol (dx/dX and its derivatives-w.r.t.-nodal-coordinates variants) as
+	// the matching runtime C expression: the plain "dx_unity"/"dX"/"dx" local variables declared by
+	// write_generic_spatial_integration_header() for the untagged cases, or, for a symbol tagged as
+	// "derived" (i.e. representing d(dx)/dX^dir at the current l_shape[2] index), the corresponding
+	// precomputed shapeinfo->int_pt_weights_d_coords[...]/..._d2_coords[...] array entry. A nonzero
+	// history_step instead selects the corresponding stored-history integration weight. In LaTeX
+	// printing mode, delegates to the (Python-implemented) LaTeXPrinter via a descriptive info-map
+	// instead. Falls back to a human-readable "<DX ...>" placeholder in any other print mode (e.g.
+	// plain debug printing).
 	template <>
-	void GiNaCSpatialIntegralSymbol::print(const print_context &c, unsigned level) const
+	void GiNaCSpatialIntegralSymbol::print(const print_context &c, unsigned) const
 	{
 		if (GiNaC::is_a<print_csrc_FEM>(c))
 		{
@@ -8064,7 +8813,10 @@ namespace GiNaC
 				else if (get_struct().is_lagrangian())
 					c.s << "dX";
 				else if (!get_struct().is_derived())
-					c.s << "dx";
+				{
+					if (get_struct().history_step==0) c.s << "dx";				
+					else c.s << "shapeinfo->int_pt_weight[" << get_struct().history_step << "]";
+				}
 				else if (!get_struct().is_derived2())
 				{
 					c.s << "shapeinfo->int_pt_weights_d_coords[" << get_struct().get_derived_direction() << "][" << (get_struct().is_derived_by_lshape2() ? "l_shape2" : "l_shape") << "]"; // TODO: Other spaces, e.g. bulk
@@ -8087,6 +8839,8 @@ namespace GiNaC
 				texinfo["derived_in_direction"] = get_struct().is_derived() ? std::to_string(get_struct().get_derived_direction()) : "none";
 				texinfo["derived_in_direction2"] = get_struct().is_derived2() ? std::to_string(get_struct().get_derived_direction2()) : "none";
 				texinfo["derived_to_lshape2"] = get_struct().is_derived_by_lshape2() ? "true" : "false";
+				texinfo["simple_unity_integral"] = get_struct().simple_unity_integral ? "true" : "false";
+				texinfo["history_step"] = std::to_string(get_struct().history_step);
 				c.s << femprint.FEM_opts->for_code->latex_printer->_get_LaTeX_expression(texinfo, femprint.FEM_opts->for_code);
 				return;
 			}
@@ -8122,14 +8876,28 @@ namespace GiNaC
 			}
 			else
 			{
+				if (get_struct().history_step > 0)
+				{
+					c.s << "<DX"+modestr<< "|History step " << get_struct().history_step << "|" << modestr <<">";
+				}
+				else
 				c.s << "<DX"+modestr+">";
 			}
 		}
 	}
+	// Implements d(dx)/ds for the Eulerian integration-measure symbol: the Lagrangian dX, the plain
+	// "unity" measure, and history-tagged (history_step>0) variants never depend on the moving mesh
+	// (their derivative is 0 by construction/convention). Otherwise, if the mesh coordinates are
+	// active DoFs and `s` is one of this domain's raw coordinate_{x,y,z} symbols, returns the matching
+	// pre-built "derived" (or, if already once-derived, "twice-derived") SpatialIntegralSymbol from
+	// FiniteElementCode::get_dx_derived[2](), preserving the expansion_mode tag; any other symbol -
+	// or a request filtered out by __derive_only_by_expansion_mode / the no_jacobian/no_hessian tags
+	// (checked against which Hessian index is currently being derived, __derive_shapes_by_second_index)
+	// - yields 0, since dx genuinely only depends on the moving nodal positions.
 	template <>
 	GiNaC::ex GiNaCSpatialIntegralSymbol::derivative(const GiNaC::symbol &s) const
 	{
-		if (get_struct().is_lagrangian() || get_struct().simple_unity_integral)
+		if (get_struct().is_lagrangian() || get_struct().simple_unity_integral || get_struct().history_step>0)
 			return 0;
 		
 		if (pyoomph::__derive_only_by_expansion_mode &&  get_struct().expansion_mode!=*pyoomph::__derive_only_by_expansion_mode)
@@ -8195,8 +8963,12 @@ namespace GiNaC
 		return 0;
 	}
 
+	// Prints an ElementSizeSymbol analogously to GiNaCSpatialIntegralSymbol::print above, selecting
+	// between the plain elemsize_Eulerian/elemsize_Lagrangian[_cartesian] runtime fields and, for
+	// "derived" variants, the corresponding elemsize[_Cart]_d[2]_coords[...] array entries that hold
+	// the (first or second) derivative of the element size w.r.t. nodal coordinates.
 	template <>
-	void GiNaCElementSizeSymbol::print(const print_context &c, unsigned level) const
+	void GiNaCElementSizeSymbol::print(const print_context &c, unsigned) const
 	{
 		if (GiNaC::is_a<print_csrc_FEM>(c))
 		{
@@ -8282,6 +9054,10 @@ namespace GiNaC
 			}
 		}
 	}
+	// Mirrors GiNaCSpatialIntegralSymbol::derivative above for element-size symbols: Lagrangian
+	// element size never depends on the moving mesh; otherwise, differentiating w.r.t. one of this
+	// domain's coordinate_{x,y,z} symbols (when coordinates_as_dofs) yields the matching pre-built
+	// "derived" (or twice-derived) ElementSizeSymbol; any other symbol yields 0.
 	template <>
 	GiNaC::ex GiNaCElementSizeSymbol::derivative(const GiNaC::symbol &s) const
 	{
@@ -8333,7 +9109,7 @@ namespace GiNaC
 	}
 
 	template <>
-	void GiNaCNormalSymbol::print(const print_context &c, unsigned level) const
+	void GiNaCNormalSymbol::print(const print_context &c, unsigned) const
 	{
 		const pyoomph::NormalSymbol &sp = get_struct();
 		if (GiNaC::is_a<print_csrc_FEM>(c))
@@ -8658,7 +9434,7 @@ namespace GiNaC
 	}
 
 	template <>
-	void GiNaCShapeExpansion::print(const print_context &c, unsigned level) const
+	void GiNaCShapeExpansion::print(const print_context &c, unsigned) const
 	{
 		const pyoomph::ShapeExpansion &sp = get_struct();
 		std::string dt = "";
@@ -8707,16 +9483,27 @@ namespace GiNaC
 						if (sp.is_derived && (sp.nodal_coord_dir >= 0 || sp.nodal_coord_dir2 >= 0))
 						{
 							if (sp.nodal_coord_dir >= 0 && sp.nodal_coord_dir2 >= 0)
-								throw_runtime_error("DD");
+							{
+								throw_runtime_error("DD")
+							}
+							std::string shapename=sp.basis->get_space()->get_shape_name();
+							if (shapename=="C2TB" || shapename=="C2" || shapename=="C1TB" || shapename=="C1")
+							{
+								shapename="d_dx_shape_dcoord[SPACE_INDEX_" + sp.basis->get_space()->get_shape_name() + "]";
+							}						
+							else
+							{
+								shapename="d_dx_shape_dcoord_" + sp.basis->get_space()->get_shape_name();
+							}
 							if (sp.nodal_coord_dir >= 0)
 							{
-								std::string shapestr = femprint.FEM_opts->for_code->get_shape_info_str(sp.basis->get_space()) + "->d_dx_shape_dcoord_" + sp.basis->get_space()->get_shape_name();
+								std::string shapestr = femprint.FEM_opts->for_code->get_shape_info_str(sp.basis->get_space()) + "->" + shapename;
 								shapestr += "[l_shape2][" + std::to_string(dynamic_cast<pyoomph::D1XBasisFunction *>(sp.basis)->get_direction()) + "][l_shape][" + std::to_string(sp.nodal_coord_dir) + "]";
 								c.s << shapestr;
 							}
 							else
 							{
-								std::string shapestr = femprint.FEM_opts->for_code->get_shape_info_str(sp.basis->get_space()) + "->d_dx_shape_dcoord_" + sp.basis->get_space()->get_shape_name();
+								std::string shapestr = femprint.FEM_opts->for_code->get_shape_info_str(sp.basis->get_space()) + "->" + shapename;
 								shapestr += "[l_shape][" + std::to_string(dynamic_cast<pyoomph::D1XBasisFunction *>(sp.basis)->get_direction()) + "][" + "l_shape2" + "][" + std::to_string(sp.nodal_coord_dir2) + "]";
 								c.s << shapestr;
 							}
@@ -9156,7 +9943,7 @@ namespace GiNaC
 	}
 
 	template <>
-	void GiNaCTestFunction::print(const print_context &c, unsigned level) const
+	void GiNaCTestFunction::print(const print_context &c, unsigned) const
 	{
 		const pyoomph::TestFunction &sp = get_struct();
 		if (GiNaC::is_a<print_csrc_FEM>(c))
@@ -9164,19 +9951,31 @@ namespace GiNaC
 			const auto &femprint = dynamic_cast<const print_csrc_FEM &>(c);
 			if (femprint.FEM_opts->for_code)
 			{
+				std::string shapename = sp.basis->get_space()->get_shape_name();
+				std::string shapename2;
+				if (shapename == "C2TB" || shapename == "C2" || shapename == "C1TB" || shapename == "C1")
+				{
+					shapename = "d_dx_shape_dcoord[SPACE_INDEX_" + sp.basis->get_space()->get_shape_name() + "]";
+					shapename2="d2_dx2_shape_dcoord[SPACE_INDEX_" + sp.basis->get_space()->get_shape_name() + "]";
+				}
+				else
+				{
+					shapename = "d_dx_shape_dcoord_" + sp.basis->get_space()->get_shape_name();
+					shapename2 = "d2_dx2_shape_dcoord_" + sp.basis->get_space()->get_shape_name();
+				}
 				if (sp.nodal_coord_dir == -1)
 				{
 					c.s << sp.basis->get_c_varname(femprint.FEM_opts->for_code, "l_test");
 				}
 				else if (sp.nodal_coord_dir2 == -1)
 				{
-					std::string shapestr = femprint.FEM_opts->for_code->get_shape_info_str(sp.basis->get_space()) + "->d_dx_shape_dcoord_" + sp.basis->get_space()->get_shape_name();
+					std::string shapestr = femprint.FEM_opts->for_code->get_shape_info_str(sp.basis->get_space()) + "->"+ shapename;
 					shapestr += "[l_test][" + std::to_string(dynamic_cast<pyoomph::D1XBasisFunction *>(sp.basis)->get_direction()) + "][" + (sp.is_derived_other_index ? "l_shape2" : "l_shape") + "][" + std::to_string(sp.nodal_coord_dir) + "]";
 					c.s << shapestr;
 				}
 				else
 				{
-					std::string shapestr = femprint.FEM_opts->for_code->get_shape_info_str(sp.basis->get_space()) + "->d2_dx2_shape_dcoord_" + sp.basis->get_space()->get_shape_name();
+					std::string shapestr = femprint.FEM_opts->for_code->get_shape_info_str(sp.basis->get_space()) + "->"+ shapename2;
 					shapestr += "[l_test][" + std::to_string(dynamic_cast<pyoomph::D1XBasisFunction *>(sp.basis)->get_direction()) + "][l_shape][" + std::to_string(sp.nodal_coord_dir) + "][l_shape2][" + std::to_string(sp.nodal_coord_dir2) + "]";
 					c.s << shapestr;
 				}

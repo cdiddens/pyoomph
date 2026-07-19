@@ -1,6 +1,6 @@
 /*================================================================================
 pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -15,7 +15,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 
-The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+The main author may be contacted at c.diddens@utwente.nl
 
 ================================================================================*/
 
@@ -28,6 +28,7 @@ The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
 namespace pyoomph
 {
 
+  // DynamicTree specialization for 3d brick-refined (OcTree) elements.
   class DynamicOcTree : public virtual oomph::OcTree, public virtual DynamicTree
   {
   protected:
@@ -41,6 +42,7 @@ namespace pyoomph
       this->Root_pt = father_pt->root_pt();
     }
 
+    // Factory used by oomph-lib's tree-refinement code to create a son tree of the correct dynamic type.
     Tree *construct_son(oomph::RefineableElement *const &object_pt,
                         Tree *const &father_pt, const int &son_type)
     {
@@ -49,6 +51,7 @@ namespace pyoomph
     }
   };
 
+  // Root of a DynamicOcTree, i.e. the tree node associated with a top-level (unrefined) brick element.
   class DynamicOcTreeRoot : virtual public DynamicOcTree, public virtual DynamicTreeRoot, public virtual oomph::OcTreeRoot
   {
 
@@ -58,31 +61,17 @@ namespace pyoomph
     }
   };
 
+  // 3d specialization of TemplatedMeshBase: builds/refines meshes of brick (hex) or tetrahedral
+  // elements. Bricks use an octree forest for h-refinement; tets are not tree-refineable (see
+  // refinement_possible()).
   class TemplatedMeshBase3d : public virtual TemplatedMeshBase
   {
-
+  private:
+    bool issued_tri_refinement_warning = false; // Guards against spamming the "cannot refine tets" warning repeatedly
   public:
-    bool refinement_possible()
-    {
-      bool allQ = true;
-      for (unsigned int i = 0; i < this->nelement(); i++)
-      {
-        allQ = allQ && (dynamic_cast<oomph::BrickElementBase *>(this->element_pt(i)) != NULL);
-      }
-      if (allQ)
-      {
-        return true;
-      }
-      else
-      {
-        if (this->max_refinement_level())
-        {
-          std::cerr << "WARNING: Found a tri or something in the mesh -> cannot be adaptive right now. Requires to implement a good tree for mixed meshes" << std::endl;
-        }
-        return false;
-      }
-    }
-
+    // Whether this mesh's element type actually supports tree-based h-refinement (true for bricks,
+    // false for plain tetrahedra).
+    bool refinement_possible() override; 
     /*
     TemplatedMeshBase3d(MeshTemplate * templ) : pyoomph::Mesh(),TemplatedMeshBase()
     {
@@ -107,7 +96,7 @@ namespace pyoomph
     }
 
     /// Broken copy constructor
-    TemplatedMeshBase3d(const TemplatedMeshBase3d &dummy) : pyoomph::Mesh(), TemplatedMeshBase()
+    TemplatedMeshBase3d(const TemplatedMeshBase3d &) : oomph::Mesh(), pyoomph::Mesh(), TemplatedMeshBase()
     {
       oomph::BrokenCopy::broken_copy("TemplatedMeshBase3d");
     }
@@ -126,6 +115,10 @@ namespace pyoomph
       setup_octree_forest();
     }
 
+    // (Re)build the OcTreeForest. If a forest already exists, this "flattens" it down to the coarsest
+    // common refinement level present (min_ref, reduced across MPI ranks if applicable) by promoting
+    // each tree node at that level to a new tree root and discarding levels below it; if no forest
+    // exists yet, one is created from scratch with one tree root per current element.
     void setup_octree_forest()
     {
       if (this->Forest_pt != 0)
@@ -283,6 +276,8 @@ namespace pyoomph
       }
     }
 
+    // Populate this mesh's elements, nodes and boundaries from a MeshTemplateElementCollection; see
+    // TemplatedMeshBase1d::generate_from_template for the (identical) algorithm description.
     void generate_from_template(MeshTemplateElementCollection *coll)
     {
 
@@ -329,6 +324,8 @@ namespace pyoomph
         }
       }
       templ->link_periodic_nodes();
+
+      setup_facets_from_template(templ,bound_map);
     }
 
     void setup_boundary_element_info_bricks(std::ostream &outfile);

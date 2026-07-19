@@ -1,11 +1,12 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #  
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -20,10 +21,13 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#  The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
+#  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
+from ..expressions import Expression
+from ..expressions.units import Expression
+
 from ..expressions import Union
 from ..expressions.units import Union
 from .generic import MixtureGasProperties, MixtureLiquidProperties, PureGasProperties, PureLiquidProperties
@@ -115,8 +119,15 @@ class ProjectedMassTransferModelBase(MassTransferModelBase):
 
     def get_mass_transfer_space(self,name:str,ieqs:InterfaceEquations) -> FiniteElementSpaceEnum:
         if self.projection_space is None:
-            opp_pdom=ieqs.get_opposite_side_of_interface().get_parent_domain()
             pdom=ieqs.get_parent_domain()
+            opp_interface=ieqs.get_opposite_side_of_interface(raise_error_if_none=False)
+            if opp_interface is None:
+                # Try to infer it from the inside
+                space=pdom.get_space_of_field("massfrac_"+name)
+                if space=="":
+                    raise RuntimeError("Cannot find a space for the field "+name+". Please set the projection_space attribute of the mass transfer model.")
+
+            opp_pdom=ieqs.get_opposite_side_of_interface().get_parent_domain()
             assert opp_pdom is not None
             space=opp_pdom.get_space_of_field("massfrac_"+name)
             if space=="":
@@ -179,9 +190,17 @@ class ProjectedMassTransferModelBase(MassTransferModelBase):
 
 
 class PrescribedMassTransfer(ProjectedMassTransferModelBase):
+    """
+    A mass transfer model with prescribed mass transfer rates.
+    Please set the ``projection_space`` attribute to define the FEM space for the mass transfer rates.
+    
+    Args:
+        rates: A dictionary mapping component names to their prescribed mass transfer rates. 
+    """    
     def __init__(self,**rates:ExpressionOrNum):
         super(PrescribedMassTransfer, self).__init__()
         self.rates=rates.copy()
+        self.latent_heats:Dict[str,ExpressionOrNum]={}
 
     def identify_transfer_components(self) -> Set[str]:
         return set(self.rates.keys())
@@ -195,6 +214,15 @@ class PrescribedMassTransfer(ProjectedMassTransferModelBase):
                 return Expression(rate)
         else:
             return Expression(0)
+        
+    def get_latent_heat_flux(self) -> Expression:
+        total=Expression(0)
+        for name,rate in self.rates.items():
+            if name not in self.latent_heats.keys():
+                raise RuntimeError("Must set the latent heat of "+str(name)+" to get the latent heat flux for a prescribed mass transfer model. You can set it in the latent_heats dict attribute of the model")
+            latent_heat = self.latent_heats.get(name, 0)
+            total += latent_heat * rate
+        return total
 
 
 class FluidPropMassTransferModel(ProjectedMassTransferModelBase):
