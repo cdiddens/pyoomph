@@ -947,8 +947,9 @@ class Problem(_pyoomph.Problem):
                 m._destroy_now()
 
         # GenericLinearSystemSolver/GenericEigenSolver instances hold a "problem" back-reference
-        # (set in their own __init__) - break it before dropping this Problem's own reference to
-        # them, for the same reason as _custom_assembler above.
+        # (set in their own __init__), stored as a weakref precisely so it cannot keep this
+        # Problem alive - clear it explicitly anyway so a stray later use of the solver fails
+        # fast instead of silently resolving a dead weakref.
         if not isinstance(self._lasolver,(str,type(None))):
             self._lasolver.problem=None #type:ignore
         if not isinstance(self._eigensolver,(str,type(None))):

@@ -29,6 +29,7 @@
 from ..meshes.mesh import ODEStorageMesh
 from ..typings import *
 import numpy
+import weakref
 
 
 import scipy.sparse #type:ignore
@@ -86,6 +87,19 @@ class GenericLinearSystemSolver:
 
 	def __init__(self,problem:"Problem"):
 		self.problem=problem
+
+	@property
+	def problem(self)->"Problem":
+		# Stored as a weakref: a strong reference here would form a Problem<->solver
+		# cycle that keeps the Problem alive as long as any mesh (itself pinned by the
+		# Problem's own nb::keep_alive) transitively references this solver.
+		p=self._problem_wr()
+		assert p is not None, "The Problem this solver belonged to has already been destroyed"
+		return p
+
+	@problem.setter
+	def problem(self,p:Optional["Problem"]):
+		self._problem_wr=weakref.ref(p) if p is not None else (lambda:None)
 
 	def setup_solver(self)->None:
 		pass
@@ -344,7 +358,19 @@ class GenericEigenSolver:
 		self.imag_contribution:Optional[str]=None
 		self.ncv:Optional[int]=None
 
-	def _before_assigning_equation_numbers(self)->None:		
+	@property
+	def problem(self)->"Problem":
+		# See GenericLinearSystemSolver.problem: kept as a weakref so this solver does not
+		# form an uncollectible Problem<->solver reference cycle.
+		p=self._problem_wr()
+		assert p is not None, "The Problem this solver belonged to has already been destroyed"
+		return p
+
+	@problem.setter
+	def problem(self,p:Optional["Problem"]):
+		self._problem_wr=weakref.ref(p) if p is not None else (lambda:None)
+
+	def _before_assigning_equation_numbers(self)->None:
 		pass
 
 	def supports_target(self)->bool:
