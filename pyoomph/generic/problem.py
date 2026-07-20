@@ -404,6 +404,31 @@ def _teardown_spatial_mesh(m:"AnySpatialMesh") -> None:
     m._destroy_now()
 
 
+def _destroy_superseded_mesh(m:"AnySpatialMesh") -> None:
+    # Counterpart to _teardown_spatial_mesh(), used for a mesh that has been superseded by
+    # remeshing (see Problem.force_remesh()) rather than one whose owning Problem is being
+    # released entirely. Unlike release(), a superseded mesh's _eqtree/_codegen must NOT be
+    # touched here: for both the top-level (bulk) mesh and each of its interface meshes, that
+    # same eqtree/codegen tree is explicitly shared with (part of) its replacement mesh (the
+    # bulk mesh's via _exchange_mesh(), each interface mesh's because MeshFromTemplateBase's own
+    # interface-mesh construction reuses the *same* child eqtree from self._eqtree.get_children()
+    # for the new interface mesh at that position) - clearing them crashed/broke the next
+    # mesh-construction or remesh call. Only _problem/_parent/_opposite_interface_mesh are safe
+    # to clear, plus forcing immediate destruction of the underlying C++ object (freeing the
+    # bulk of the memory - nodes, elements, matrices - even though the lightweight Python
+    # wrapper itself remains pinned alive by nb::keep_alive until the owning Problem is; see
+    # _teardown_spatial_mesh() for that mechanism).
+    for im in m._interfacemeshes.values():
+        _destroy_superseded_mesh(im)
+    m._interfacemeshes.clear()
+    m._problem=None #type:ignore
+    if hasattr(m,"_parent"):
+        m._parent=None #type:ignore
+    if hasattr(m,"_opposite_interface_mesh"):
+        m._opposite_interface_mesh=None #type:ignore
+    m._destroy_now()
+
+
 #Problem with some automatic behaviour
 class Problem(_pyoomph.Problem):
     """A class representing a problem in the pyoomph library.
@@ -5831,15 +5856,10 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             newmesh._tracers=oldmesh._tracers
             for _,tracercoll in newmesh._tracers.items():
                 tracercoll._set_mesh(newmesh)
-            # NOTE: oldmesh's underlying C++ mesh is still needed after this point (at least by
-            # InternalInterpolator during the "Rebuild" step below) - do NOT force-destroy it
-            # here. An earlier attempt at doing so (freeing it right here) caused a segfault in
-            # InternalInterpolator.__init__ later on. oldmesh (and, via nb::keep_alive on the
-            # C++ side, its elements/nodes) therefore remains alive - and unreclaimed - for the
-            # rest of this Problem's lifetime; that's a real, currently-unresolved leak for
-            # scripts using remeshing (see e.g. Advanced_Linear_Dynamics/hanging_droplet.py),
-            # left as a follow-up rather than risking a repeat of that crash.
-
+            # oldmesh's underlying C++ mesh is still needed further below (read by
+            # InternalInterpolator across possibly several adaptive interpolation rounds) - do
+            # NOT force-destroy it here; it is torn down at the very end of this method instead,
+            # once nothing needs it any more.
 
         # Rebuild
         self.rebuild_global_mesh_from_list(rebuild=True)
@@ -5904,6 +5924,19 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         for r in remeshers:
             r.actions_after_remeshing()
         self.invalidate_cached_mesh_data()
+
+        # Now, and only now, is every old (superseded) mesh truly no longer needed - the
+        # adaptive interpolation loop above may read from it (via InternalInterpolator) across
+        # multiple rounds, so destroying it any earlier (e.g. right after its _codegen/_eqtree
+        # were transferred to the new mesh, above) crashes. Without this, oldmesh's underlying
+        # C++ object (and its elements/nodes) would remain permanently pinned alive by
+        # nb::keep_alive on the C++ side for the rest of this Problem's lifetime, once per
+        # remesh event, since dropping it from self._meshdict earlier does not revoke that.
+        # See _destroy_superseded_mesh() for why oldmesh's _templatemesh/_eqtree/_codegen (and,
+        # recursively, the same for its interface meshes) must NOT be touched here, unlike
+        # Problem.release()'s teardown.
+        for name, oldmesh in old_meshes.items():
+            _destroy_superseded_mesh(oldmesh)
         
         
 
