@@ -430,7 +430,7 @@ class Remesher2d(RemesherBase):
 
 
     def remesh(self):
-        self.problem=self.template._problem 
+        self.problem=self.template.get_problem()
         assert self.problem is not None
         self._identify_domains()
         self._boundary_nodes={}
@@ -506,14 +506,14 @@ class RemesherViaRecreation(RemesherBase):
         fnformat:str=self.base_trunk+"_REMESH_{:06d}"
         
                 
-        self._old_meshes={}        
-        for k,m in self.template._problem._meshdict.items():
+        self._old_meshes={}
+        for k,m in self.template.get_problem()._meshdict.items():
             if isinstance(m,(MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d)):
                 if self.template.has_domain(k):
                     self._old_meshes[k]=m
-                    
+
         self.template._reset()
-        self.template._do_define_geometry(self.template._problem,fnformat.format(self._cnt))                 
+        self.template._do_define_geometry(self.template.get_problem(),fnformat.format(self._cnt))
         self._cnt+=1        
         
         
@@ -529,7 +529,7 @@ class ParametricGmshMeshRemesher2d(Remesher2d):
         
     def remesh(self):
         
-        self.problem=self.template._problem 
+        self.problem=self.template.get_problem()
         assert self.problem is not None
         self.gmsh._meshfile=None 
         self.gmsh._loaded_from_mesh_file = None 

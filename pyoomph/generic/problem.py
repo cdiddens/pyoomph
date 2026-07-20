@@ -385,10 +385,12 @@ def _teardown_spatial_mesh(m:"AnySpatialMesh") -> None:
     m._eqtree=None #type:ignore
     # Break the remaining back-references specific to the mesh's own class:
     # MeshFromTemplate1d/2d/3d hold a reference to their originating MeshTemplate (which
-    # itself has its own "_problem" back-reference), while InterfaceMesh holds references to
-    # its parent (bulk) mesh and, for two-sided interfaces, to the opposite InterfaceMesh.
+    # itself has its own "_problem" back-reference, resolved via a non-owning C++-side
+    # lookup just like the mesh/codegen classes - see MeshTemplate.get_problem()), while
+    # InterfaceMesh holds references to its parent (bulk) mesh and, for two-sided
+    # interfaces, to the opposite InterfaceMesh.
     if hasattr(m,"_templatemesh"):
-        m._templatemesh._problem=None #type:ignore
+        m._templatemesh._set_problem(None) #type:ignore
         m._templatemesh=None #type:ignore
     if hasattr(m,"_parent"):
         m._parent=None #type:ignore

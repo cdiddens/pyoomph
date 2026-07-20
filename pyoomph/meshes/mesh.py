@@ -28,6 +28,7 @@
 import abc
 import inspect
 import os.path
+import weakref
 
 from ..generic.mpi import mpi_barrier
 
@@ -306,7 +307,7 @@ class BaseMesh(abc.ABC):
         for l in lst:
             res[l] = self._evaluate_integral_function(l)
         args: Dict[str, ExpressionOrNum] = {k: v for k, v in res.items()}
-        args["time"] = self._problem.get_current_time()
+        args["time"] = self.get_problem().get_current_time()
         remaining: Set[str] = set(deps.keys())
         while len(remaining) > 0:
             torem: Set[str] = set()
@@ -383,7 +384,11 @@ class MeshTemplateOppositeInterfaceConnection:
     def __init__(self, sideA: str, sideB: str, problem:"Problem", matchfunc: Optional[Callable[[Sequence[float], Sequence[float]], float]] = None):
         self._sideA = sideA
         self._sideB = sideB
-        self._problem=problem
+        # Stored as a weakref, not a strong reference: this connection is owned (via
+        # MeshTemplate._opposite_interface_connections) by a MeshTemplate that is itself
+        # kept alive by the Problem's nb::keep_alive of its meshes - a strong back-reference
+        # here would form the same kind of uncollectible cycle fixed for meshes/codegens.
+        self._problem_wr=weakref.ref(problem)
         if matchfunc:
             self._match_pos_func = matchfunc
             self._use_kdtree = False
@@ -393,6 +398,12 @@ class MeshTemplateOppositeInterfaceConnection:
 
     def __str__(self) -> str:
         return "MeshTemplateOppositeInterfaceConnection("+str(self._sideA)+","+str(self._sideB)+")"
+
+    @property
+    def _problem(self)->"Problem":
+        p=self._problem_wr()
+        assert p is not None, "The Problem this connection belonged to has already been destroyed"
+        return p
 
     def _connect_opposite_interfaces(self, eqtree_root: "EquationTree"):
         sideA = eqtree_root.get_by_path(self._sideA)
@@ -506,7 +517,6 @@ class MeshTemplate(_pyoomph.MeshTemplate):
     def __init__(self):
         super(MeshTemplate, self).__init__()
         self._domains: Dict[str, _pyoomph.MeshTemplateElementCollection] = {}
-        self._problem = None
         self._geometry_defined = False
         #: The minimum permitted error for the spatial error estimator. If ``None``, we use the value from the :py:class:`~pyoomph.generic.problem.Problem` object.
         self.min_permitted_error = None
@@ -537,8 +547,8 @@ class MeshTemplate(_pyoomph.MeshTemplate):
         self._macrobounds = []
 
     def get_problem(self) -> "Problem":
-        return self._problem
-    
+        return self._get_problem() #type:ignore
+
     def set_boundary_as_interior(self, *args: str):
         for name in args:
             self._interior_boundaries.add(name)
@@ -572,8 +582,7 @@ class MeshTemplate(_pyoomph.MeshTemplate):
             fffound_mshfile = os.path.join(statedir, found_mshfile)
             newtempl = gmsh.GmshTemplate(fffound_mshfile)
             newtempl.remesher = self.remesher
-            assert self._problem is not None
-            newtempl._do_define_geometry(self._problem)
+            newtempl._do_define_geometry(self.get_problem())
             self._template_override = newtempl
             newtempl.get_template()._meshfile = fffound_mshfile
             # self._meshfile=found_mshfile
@@ -595,7 +604,7 @@ class MeshTemplate(_pyoomph.MeshTemplate):
 
     def add_opposite_interface_connection(self, sideA: str, sideB: str, matchfunc: Optional[Callable[[Sequence[float], Sequence[float]], float]] = None):
         self._opposite_interface_connections.append(
-            MeshTemplateOppositeInterfaceConnection(sideA, sideB, self._problem, matchfunc))
+            MeshTemplateOppositeInterfaceConnection(sideA, sideB, self.get_problem(), matchfunc))
 
     def _connect_opposite_interfaces(self, eqtree_root: "EquationTree"):
         for conn in self._opposite_interface_connections:
@@ -651,7 +660,6 @@ class MeshTemplate(_pyoomph.MeshTemplate):
     def _do_define_geometry(self, problem: "Problem"):
         if not self._geometry_defined:
             self._geometry_defined = True
-            self._problem = problem
             self._set_problem(problem)
             self.define_geometry()
             if self.auto_find_opposite_interface_connections:
@@ -695,11 +703,9 @@ class MeshTemplate(_pyoomph.MeshTemplate):
             return resL
         res: float
         if isinstance(a, float) or isinstance(a, int) or isinstance(a,_pyoomph.GiNaC_GlobalParam) or isinstance(a,numpy.floating) or isinstance(a,numpy.integer):
-            assert self._problem is not None
-            res = (float(a / self._problem.get_scaling("spatial")))
+            res = (float(a / self.get_problem().get_scaling("spatial")))
         elif isinstance(a, _pyoomph.Expression):  # type:ignore
-            assert self._problem is not None
-            res = ((a / self._problem.get_scaling("spatial")).float_value())        
+            res = ((a / self.get_problem().get_scaling("spatial")).float_value())
         else:
             raise ValueError("Strange spatial argument for a mesh:"+str(a)+" of type "+str(type(a)))
         return res
