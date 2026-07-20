@@ -53,7 +53,7 @@ namespace pyoomph
   public:
     static std::map<CustomMathExpressionBase *, int> code_map; // Maps each instance to its index in the generated JIT code (assigned during code generation)
     CustomMathExpressionBase() : unique_id(unique_counter++), jit_index(-1), diff_parent(NULL), diff_index(-1) {}
-    virtual ~CustomMathExpressionBase() { std::cout << "FREEING Expr " << unique_id << std::endl; }
+    virtual ~CustomMathExpressionBase() {}
     virtual CustomMathExpressionBase *get_diff_parent() const { return diff_parent; }
     virtual int get_diff_index() const { return diff_index; }
     // Marks this instance as being the derivative of "parent" with respect to its "index"-th argument (used to relate auto-generated derivative callbacks back to the original function)
@@ -71,15 +71,38 @@ namespace pyoomph
     virtual std::string get_id_name() { return "unknown cb"; }         // Human-readable identifier, used e.g. in generated code and error messages
     virtual GiNaC::ex get_argument_unit(unsigned int ) { return 1; }  // Physical unit expected for the i-th argument (arguments are nondimensionalized by this before the callback is invoked)
     virtual GiNaC::ex get_result_unit() { return 1; }                  // Physical unit of the callback's return value (the numeric result is rescaled by this)
+
+    // Hooks used by CustomMathExpressionWrapper (below) to pin this instance's Python wrapper
+    // alive for exactly as long as any copy of the GiNaC leaf embedding it survives, instead of an
+    // nb::keep_alive tied to one specific return-value object (which can die too early if e.g. the
+    // expression is rewrapped by subexpression()/subs()/etc. - see the pybind override of these two
+    // methods and the "Bad hack" comment previously on GiNaC_python_cb_function()). No-op by
+    // default; only meaningful once a nanobind wrapper actually exists for this instance.
+    virtual void acquire_leaf_reference() {}
+    virtual void release_leaf_reference() {}
   };
 
-  // Thin pointer wrapper so a CustomMathExpressionBase* can be embedded as a leaf inside a GiNaC expression tree via PYGINACSTRUCT
+  // Thin pointer wrapper so a CustomMathExpressionBase* can be embedded as a leaf inside a GiNaC expression tree via PYGINACSTRUCT.
+  // Acquires/releases a pinning reference on the wrapped object's Python wrapper (see acquire_leaf_reference() above) for
+  // as long as this particular copy of the wrapper exists, so the Python object cannot be freed while any GiNaC leaf still
+  // embeds its raw pointer, without keeping it alive forever the way a naive nb::keep_alive on the invocation site would.
   class CustomMathExpressionWrapper
   {
   public:
     CustomMathExpressionBase *cme;
-    CustomMathExpressionWrapper(CustomMathExpressionBase *c) : cme(c) {}
-    CustomMathExpressionWrapper(const CustomMathExpressionWrapper &c) : cme(c.cme) {}
+    CustomMathExpressionWrapper(CustomMathExpressionBase *c) : cme(c) { if (cme) cme->acquire_leaf_reference(); }
+    CustomMathExpressionWrapper(const CustomMathExpressionWrapper &c) : cme(c.cme) { if (cme) cme->acquire_leaf_reference(); }
+    CustomMathExpressionWrapper &operator=(const CustomMathExpressionWrapper &c)
+    {
+      if (this != &c)
+      {
+        if (cme) cme->release_leaf_reference();
+        cme = c.cme;
+        if (cme) cme->acquire_leaf_reference();
+      }
+      return *this;
+    }
+    ~CustomMathExpressionWrapper() { if (cme) cme->release_leaf_reference(); }
   };
 
   // Comparison operators required by the pyginacstruct comparison policy (compares by wrapped pointer, i.e. by identity)
@@ -101,15 +124,31 @@ namespace pyoomph
     virtual std::string _get_c_code() { return ""; } // Optionally return literal C code implementing this function directly (inlined at code generation instead of calling back into Python); empty means no C code present
     virtual void _call(int , double *, unsigned int , double *, unsigned int , double *) { throw_runtime_error("Should not end up here"); } // Numerically evaluate; if flag is set, also fill the nres x nargs derivative matrix
     virtual std::pair<bool, GiNaC::ex> _get_symbolic_derivative(const std::vector<GiNaC::ex> &, const int &, const int &) { return std::make_pair(false, 0); } // Optionally provide an analytic symbolic derivative of result i_res w.r.t. argument j_arg (first=false means "not available", fall back to numerical differentiation)
+
+    // See CustomMathExpressionBase::acquire_leaf_reference()/release_leaf_reference() - same purpose, for CustomMultiReturnExpressionWrapper below.
+    virtual void acquire_leaf_reference() {}
+    virtual void release_leaf_reference() {}
   };
 
-  // Thin pointer wrapper so a CustomMultiReturnExpressionBase* can be embedded as a GiNaC leaf
+  // Thin pointer wrapper so a CustomMultiReturnExpressionBase* can be embedded as a GiNaC leaf.
+  // See CustomMathExpressionWrapper above for why the acquire/release calls are needed.
   class CustomMultiReturnExpressionWrapper
   {
   public:
     CustomMultiReturnExpressionBase *cme;
-    CustomMultiReturnExpressionWrapper(CustomMultiReturnExpressionBase *c) : cme(c) {}
-    CustomMultiReturnExpressionWrapper(const CustomMultiReturnExpressionWrapper &c) : cme(c.cme) {}
+    CustomMultiReturnExpressionWrapper(CustomMultiReturnExpressionBase *c) : cme(c) { if (cme) cme->acquire_leaf_reference(); }
+    CustomMultiReturnExpressionWrapper(const CustomMultiReturnExpressionWrapper &c) : cme(c.cme) { if (cme) cme->acquire_leaf_reference(); }
+    CustomMultiReturnExpressionWrapper &operator=(const CustomMultiReturnExpressionWrapper &c)
+    {
+      if (this != &c)
+      {
+        if (cme) cme->release_leaf_reference();
+        cme = c.cme;
+        if (cme) cme->acquire_leaf_reference();
+      }
+      return *this;
+    }
+    ~CustomMultiReturnExpressionWrapper() { if (cme) cme->release_leaf_reference(); }
   };
   bool operator==(const CustomMultiReturnExpressionWrapper &lhs, const CustomMultiReturnExpressionWrapper &rhs);
   bool operator<(const CustomMultiReturnExpressionWrapper &lhs, const CustomMultiReturnExpressionWrapper &rhs);
@@ -194,15 +233,31 @@ namespace pyoomph
     virtual std::string get_id_name() { return "<unknown coordinate system>"; }
     // Hook allowing the coordinate system to modify how a field/test function is expanded for a given expansion mode (e.g. Fourier/azimuthal mode decomposition); expr is the yet-unexpanded expression, where gives the calling context
     virtual GiNaC::ex get_mode_expansion_of_var_or_test(pyoomph::FiniteElementCode *, std::string , bool , bool , GiNaC::ex expr, std::string , int ) { return expr; }
+
+    // See CustomMathExpressionBase::acquire_leaf_reference()/release_leaf_reference() - same purpose, for CustomCoordinateSystemWrapper below.
+    virtual void acquire_leaf_reference() {}
+    virtual void release_leaf_reference() {}
   };
 
   // Thin pointer wrapper so a CustomCoordinateSystem* can be embedded as a GiNaC leaf and passed as an argument to grad/div/...
+  // See CustomMathExpressionWrapper above for why the acquire/release calls are needed.
   class CustomCoordinateSystemWrapper
   {
   public:
     CustomCoordinateSystem *cme;
-    CustomCoordinateSystemWrapper(CustomCoordinateSystem *c) : cme(c) {}
-    CustomCoordinateSystemWrapper(const CustomCoordinateSystemWrapper &c) : cme(c.cme) {}
+    CustomCoordinateSystemWrapper(CustomCoordinateSystem *c) : cme(c) { if (cme) cme->acquire_leaf_reference(); }
+    CustomCoordinateSystemWrapper(const CustomCoordinateSystemWrapper &c) : cme(c.cme) { if (cme) cme->acquire_leaf_reference(); }
+    CustomCoordinateSystemWrapper &operator=(const CustomCoordinateSystemWrapper &c)
+    {
+      if (this != &c)
+      {
+        if (cme) cme->release_leaf_reference();
+        cme = c.cme;
+        if (cme) cme->acquire_leaf_reference();
+      }
+      return *this;
+    }
+    ~CustomCoordinateSystemWrapper() { if (cme) cme->release_leaf_reference(); }
   };
 
   bool operator==(const CustomCoordinateSystemWrapper &lhs, const CustomCoordinateSystemWrapper &rhs);

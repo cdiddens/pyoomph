@@ -149,11 +149,19 @@ class CustomMathExpression(_pyoomph.CustomMathExpression):
                 if dp._symbolic_derivative.get(index, None) is None:
                     dp._symbolic_derivative[index] = dp.derivative(index)
                     dp._symbolic_derivative[index].set_as_derivative(dp, index)
+                    # set_as_derivative() no longer keeps "dp" alive on the C++ side (that used an
+                    # nb::keep_alive edge invisible to Python's cyclic GC, which combined with the
+                    # ordinary self<->parent cycle these derivative helpers form made the whole thing
+                    # permanently uncollectible). Every built-in derivative helper already stores this
+                    # via a plain "parent" attribute, but a custom derivative() override might not -
+                    # guard unconditionally here so correctness never depends on that convention.
+                    dp._symbolic_derivative[index]._diff_parent_guard=dp
                 return dp._symbolic_derivative[index].outer_derivative(x, i)
 
         if self._symbolic_derivative.get(index, None) is None:
             self._symbolic_derivative[index] = self.derivative(index)
             self._symbolic_derivative[index].set_as_derivative(self, index)
+            self._symbolic_derivative[index]._diff_parent_guard=self
         xn = [x.op(i) for i in range(x.nops())]
         return self._symbolic_derivative[index](*xn)
 

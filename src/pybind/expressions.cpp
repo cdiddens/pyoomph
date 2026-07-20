@@ -73,6 +73,25 @@ namespace pyoomph
 			nb::ndarray<nb::numpy, double> argview(argbuffer.data(), {argbuffer.size()});
 			return this->eval(argview);
 		}
+
+		// See CustomMathExpressionBase::acquire_leaf_reference()/release_leaf_reference(): pin/unpin
+		// this instance's own Python wrapper via nanobind's instance registry (nb::find(), rv_policy::none
+		// - looks up the existing wrapper without creating a new one) rather than nanobind's keep_alive,
+		// which was tied to a single specific return-value object instead of to every surviving copy of
+		// the GiNaC leaf. The extra nb::object temporary's own destructor exactly cancels the reference
+		// nb::find() itself hands back, leaving only the +1/-1 from the explicit inc_ref()/dec_ref() below.
+		void acquire_leaf_reference() override
+		{
+			nb::object o = nb::find(this);
+			if (o.is_valid())
+				o.inc_ref();
+		}
+		void release_leaf_reference() override
+		{
+			nb::object o = nb::find(this);
+			if (o.is_valid())
+				o.dec_ref();
+		}
 	};
 
 	// nanobind trampoline: forwards CustomMathExpression's virtual hooks (the actual evaluation,
@@ -219,6 +238,20 @@ namespace pyoomph
 						derivs[i * nargs + j] = derivbuffer[i * nargs + j];
 			}
 		}
+
+		// See CustomMathExpression::acquire_leaf_reference()/release_leaf_reference() above.
+		void acquire_leaf_reference() override
+		{
+			nb::object o = nb::find(this);
+			if (o.is_valid())
+				o.inc_ref();
+		}
+		void release_leaf_reference() override
+		{
+			nb::object o = nb::find(this);
+			if (o.is_valid())
+				o.dec_ref();
+		}
 	};
 
 	// nanobind trampoline: forwards CustomMultiReturnExpression's virtual hooks (eval(), and
@@ -296,6 +329,22 @@ namespace pyoomph
 		GiNaC::ex get_mode_expansion_of_var_or_test(pyoomph::FiniteElementCode *mycode, std::string fieldname, bool is_field, bool is_dim, GiNaC::ex expr, std::string where, int expansion_mode) override
 		{
 			NB_OVERRIDE(get_mode_expansion_of_var_or_test, mycode, fieldname, is_field, is_dim, expr, where, expansion_mode);
+		}
+
+		// See CustomMathExpression::acquire_leaf_reference()/release_leaf_reference() above. Not
+		// itself a Python-overridable hook (hence no NB_OVERRIDE), just the concrete implementation
+		// for whichever concrete CustomCoordinateSystem-derived Python object this trampoline backs.
+		void acquire_leaf_reference() override
+		{
+			nb::object o = nb::find(static_cast<CustomCoordinateSystem *>(this));
+			if (o.is_valid())
+				o.inc_ref();
+		}
+		void release_leaf_reference() override
+		{
+			nb::object o = nb::find(static_cast<CustomCoordinateSystem *>(this));
+			if (o.is_valid())
+				o.dec_ref();
 		}
 	};
 
@@ -721,7 +770,15 @@ void PyReg_Expressions(nb::module_ &m)
 		.def(
 			"set_as_derivative", [](pyoomph::CustomMathExpression *self, pyoomph::CustomMathExpression *p, int index)
 			{ self->set_as_derivative(p, index); },
-			nb::keep_alive<1, 2>(), nb::arg("parent"), nb::arg("index"),
+			nb::arg("parent"), nb::arg("index"),
+			// No keep_alive here: it used to be nb::keep_alive<1,2>() (parent kept alive as long as
+			// self/derivative-object is alive), but that is an edge invisible to Python's cyclic GC -
+			// combined with the ordinary (GC-visible) self<->parent reference cycle that the Python-side
+			// derivative helpers already form (e.g. FiniteDifferenceDerivative.parent, set in cb.py), the
+			// invisible edge alone was enough to make the whole cycle permanently uncollectible, exactly
+			// like the mutual keep_alive fixed on GiNaC_python_cb_function() etc. above. Every built-in
+			// derivative helper in pyoomph/expressions/cb.py already stores "parent" as a plain Python
+			// attribute, which is sufficient and GC-visible on its own.
 			"Mark this function as the derivative of ``parent`` with respect to its ``index``-th argument.")
 		.def("get_argument_unit", &pyoomph::CustomMathExpression::get_argument_unit, nb::arg("index"),
 			 "Return the expected physical unit of the ``index``-th argument.")
@@ -731,10 +788,6 @@ void PyReg_Expressions(nb::module_ &m)
 			 "Return the symbolic real part of this function evaluated at complex arguments ``arglst``.")
 		.def("imag_part", &pyoomph::CustomMathExpression::imag_part, nb::arg("invokation"), nb::arg("arglst"),
 			 "Return the symbolic imaginary part of this function evaluated at complex arguments ``arglst``.")
-		.def(
-			"set_as_derivative", [](pyoomph::CustomMathExpression *self, pyoomph::CustomMathExpression *p, int index)
-			{ self->set_as_derivative(p, index); },
-			nb::keep_alive<1, 2>(), nb::arg("parent"), nb::arg("index"))
 		.def("eval", &pyoomph::CustomMathExpression::eval, nb::arg("arg_array"),
 			 "Evaluate this function at the given numpy array of argument values; must be overridden in Python.");
 
@@ -876,8 +929,15 @@ void PyReg_Expressions(nb::module_ &m)
 	m.def(
 		"GiNaC_wrap_coordinate_system", [](pyoomph::CustomCoordinateSystem &sys) -> GiNaC::ex
 		{ return 0 + GiNaC::GiNaCCustomCoordinateSystemWrapper(pyoomph::CustomCoordinateSystemWrapper(&sys)); },
-		nb::keep_alive<0, 1>(), nb::keep_alive<1, 0>(), nb::arg("coordinate_system"),
-		"Wrap a Python CustomCoordinateSystem as a plain GiNaC expression, so it can be passed around/stored inside symbolic expressions."); // TODO: Bad hack. Mutual Keep alive will force them to live for ever
+		nb::arg("coordinate_system"),
+		// No keep_alive needed: CustomCoordinateSystemWrapper itself pins sys's Python wrapper alive
+		// (via acquire_leaf_reference()/release_leaf_reference()) for exactly as long as any copy of
+		// this GiNaC leaf survives - see CustomCoordinateSystemWrapper in expressions.hpp. Previously
+		// this used a mutual nb::keep_alive<0,1>()+keep_alive<1,0>(), which - being tied to this one
+        // specific return-value object rather than to the (possibly further-copied) GiNaC leaf -
+        // could leave a dangling pointer if that particular wrapper died first, and, whenever "sys"
+        // had any other external Python reference, kept both objects alive forever.
+		"Wrap a Python CustomCoordinateSystem as a plain GiNaC expression, so it can be passed around/stored inside symbolic expressions.");
 
 	m.def(
 		"GiNaC_python_cb_function", [](pyoomph::CustomMathExpression *pfunc, const std::vector<GiNaC::ex> &args)
@@ -888,20 +948,28 @@ void PyReg_Expressions(nb::module_ &m)
                 ndargs[i] = args[i] / (pfunc->get_argument_unit(i));
             }
 			return 0 + pfunc->get_result_unit() * pyoomph::expressions::python_cb_function(GiNaC::GiNaCCustomMathExpressionWrapper(pyoomph::CustomMathExpressionWrapper(pfunc)), GiNaC::lst(ndargs.begin(), ndargs.end())); },
-		nb::keep_alive<0, 1>(), nb::keep_alive<1, 0>(), nb::arg("function"), nb::arg("args"),
-		"Symbolically invoke the CustomMathExpression ``function`` on ``args`` (nondimensionalized by its argument units, and the result redimensionalized by its result unit)."); // TODO: Bad hack. Mutual Keep alive will force them to live for ever
+		nb::arg("function"), nb::arg("args"),
+		// See GiNaC_wrap_coordinate_system() above: CustomMathExpressionWrapper pins pfunc's Python
+		// wrapper alive for as long as any copy of this GiNaC leaf survives; no keep_alive needed.
+		"Symbolically invoke the CustomMathExpression ``function`` on ``args`` (nondimensionalized by its argument units, and the result redimensionalized by its result unit).");
 
 	m.def(
 		"GiNaC_python_multi_cb_function", [](pyoomph::CustomMultiReturnExpressionBase *pfunc, const std::vector<GiNaC::ex> &args, const int &numret)
 		{ return 0 + pyoomph::expressions::python_multi_cb_function(GiNaC::GiNaCCustomMultiReturnExpressionWrapper(pyoomph::CustomMultiReturnExpressionWrapper(pfunc)), GiNaC::lst(args.begin(), args.end()), GiNaC::ex(numret)); },
-		nb::keep_alive<0, 1>(), nb::keep_alive<1, 0>(), nb::arg("function"), nb::arg("args"), nb::arg("numret"),
-		"Symbolically invoke the CustomMultiReturnExpression ``function`` on ``args``, requesting ``numret`` return values; use GiNaC_python_multi_cb_indexed_result() to extract individual results."); // TODO: Bad hack. Mutual Keep alive will force them to live for ever
+		nb::arg("function"), nb::arg("args"), nb::arg("numret"),
+		// See GiNaC_wrap_coordinate_system() above: CustomMultiReturnExpressionWrapper pins pfunc's
+		// Python wrapper alive for as long as any copy of this GiNaC leaf survives; no keep_alive needed.
+		"Symbolically invoke the CustomMultiReturnExpression ``function`` on ``args``, requesting ``numret`` return values; use GiNaC_python_multi_cb_indexed_result() to extract individual results.");
 
 	m.def(
 		"GiNaC_python_multi_cb_indexed_result", [](const GiNaC::ex &pfunc, const int &index)
 		{ return 0 + pyoomph::expressions::python_multi_cb_indexed_result(pfunc, GiNaC::ex(index)); },
-		nb::keep_alive<0, 1>(), nb::keep_alive<1, 0>(), nb::arg("multi_result"), nb::arg("index"),
-		"Extract the ``index``-th return value from a symbolic multi-return-function invocation created by GiNaC_python_multi_cb_function()."); // TODO: Bad hack. Mutual Keep alive will force them to live for ever
+		nb::arg("multi_result"), nb::arg("index"),
+		// pfunc's underlying CustomMultiReturnExpressionWrapper leaf is already embedded as a genuine
+		// sub-operand of the returned expression via GiNaC's own (ordinary, tp_traverse-visible-once-
+		// on-the-Python-Expression-side) structural sharing, so no separate keep_alive is needed here
+		// either - the leaf's own acquire/release pinning (see above) already covers it.
+		"Extract the ``index``-th return value from a symbolic multi-return-function invocation created by GiNaC_python_multi_cb_function().");
 
 	m.def(
 		"GiNaC_collect_units", [](const GiNaC::ex &arg)
