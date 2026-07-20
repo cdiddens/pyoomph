@@ -198,6 +198,14 @@ public:
 	T *get() const { return obj.get(); }
 	pyoomph::Mesh *mesh() const override { return dynamic_cast<pyoomph::Mesh *>(obj.get()); }
 	oomph::Mesh *oomph_mesh() const override { return dynamic_cast<oomph::Mesh *>(obj.get()); }
+	void _destroy_now() override
+	{
+		if (obj)
+		{
+			pyoomph_mesh_handle_registry().erase(mesh());
+			obj.reset();
+		}
+	}
 };
 
 using TemplatedMeshBase1dHandle = MeshHandle<pyoomph::TemplatedMeshBase1d>;
@@ -953,6 +961,11 @@ void PyReg_Mesh(nb::module_ &m)
 			"as_pyoomph_mesh",[](MeshHandleBase *h) -> MeshHandleBase *
 			{ return h; },
 			nb::rv_policy::reference, "Downcasts this mesh to a pyoomph Mesh, if it is one (returns None otherwise)")
+		.def("_destroy_now", &MeshHandleBase::_destroy_now,
+			 "Forces immediate destruction of the underlying C++ mesh (and, via its normal destructor, "
+			 "all of its elements and nodes), instead of waiting for this Python object to eventually be "
+			 "garbage collected. Used by Problem.release() to guarantee this happens before the compiled "
+			 "equation code's shared library is unloaded. Do not call/use this mesh afterwards.")
 		.def("add_node_to_mesh",oomph_mesh_method([](oomph::Mesh *self,pyoomph::Node *n)
 			 {
 				self->add_node_pt(n);

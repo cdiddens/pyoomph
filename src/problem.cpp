@@ -733,10 +733,19 @@ namespace pyoomph
 
 		global_params_by_name.clear();
 
+		// unload_all_dlls() can run twice (once explicitly, e.g. from Problem.release(), then
+		// again from ~Problem()) - nulling these after delete makes that safe; the two blocks
+		// above are already idempotent (delete-and-clear a possibly-already-empty container).
 		if (eigen_MassMatrixPt)
+		{
 			delete eigen_MassMatrixPt;
+			eigen_MassMatrixPt = NULL;
+		}
 		if (eigen_JacobianMatrixPt)
+		{
 			delete eigen_JacobianMatrixPt;
+			eigen_JacobianMatrixPt = NULL;
+		}
 	}
 
 	// Unloads all equation code and closes the log file (if any and if it is still the active logging stream)

@@ -46,6 +46,17 @@ public:
 	virtual ~MeshHandleBase() = default;
 	virtual pyoomph::Mesh *mesh() const = 0;
 	virtual oomph::Mesh *oomph_mesh() const = 0;
+	// Forces immediate (synchronous) destruction of the owned oomph-lib mesh - and, via its
+	// normal destructor, all of its elements and nodes - right now, rather than whenever this
+	// handle's Python wrapper object eventually gets garbage collected. Used by
+	// Problem.release() (see problem.py) to guarantee every element referencing a
+	// DynamicBulkElementCode's compiled residual/Jacobian function table has actually been
+	// destructed *before* that code's shared library is dlclose()'d - otherwise, if the mesh
+	// happened to outlive release() (e.g. because a user script still holds a reference to it,
+	// which is common and not itself a bug), its elements' destructors would run later against
+	// an already-unloaded function table and crash. After this call, mesh()/oomph_mesh() return
+	// nullptr; the handle must not be used for anything else afterwards.
+	virtual void _destroy_now() = 0;
 };
 
 // A handful of oomph-lib/pyoomph APIs (e.g. Problem::mesh_pt()) hand back a raw, previously

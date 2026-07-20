@@ -835,10 +835,23 @@ class Problem(_pyoomph.Problem):
         return self
 
     def release(self):
+        # Under nanobind (unlike pybind11), a mesh kept alive on the C++ side by
+        # nb::keep_alive<>() (set_mesh_pt/add_sub_mesh in problem.cpp) is invisible to
+        # Python's cyclic garbage collector: as long as this Problem's C++ instance is
+        # alive, the mesh Python object cannot be freed, no matter what gc.collect() does.
+        # If that mesh in turn still holds a Python-visible "_problem" back-reference to
+        # this Problem, the two keep each other alive forever (Problem->Mesh is invisible,
+        # Mesh->Problem is visible, and gc cannot break a cycle through an invisible edge).
+        # Explicitly nulling every such back-reference here breaks the visible side, so
+        # this Problem's own refcount can drop to zero via ordinary refcounting as soon as
+        # nothing external references it any more - at which point its C++ destructor runs
+        # and releases the keep_alive-held mesh references too, unwinding everything
+        # deterministically without depending on cyclic gc for this particular edge.
         def release_spatial_mesh(m:AnySpatialMesh):
             cg=m.get_code_gen()
             cg._code=None
             cg._problem=None
+            cg._mesh=None #type:ignore
             for im in m._interfacemeshes.values():
                 release_spatial_mesh(im)
 
@@ -851,20 +864,58 @@ class Problem(_pyoomph.Problem):
                 m._eqtree._equations._release_output_files()
             m._eqtree._equations=None
             m._eqtree=None #type:ignore
+            m._problem=None #type:ignore
+            # Break the remaining back-references specific to the mesh's own class:
+            # MeshFromTemplate1d/2d/3d hold a reference to their originating MeshTemplate
+            # (which itself has its own "_problem" back-reference), while InterfaceMesh
+            # holds references to its parent (bulk) mesh and, for two-sided interfaces, to
+            # the opposite InterfaceMesh. Left in place, any of these keeps this Problem -
+            # and, transitively, everything nb::keep_alive holds alive for it on the C++
+            # side - alive indefinitely.
+            if hasattr(m,"_templatemesh"):
+                m._templatemesh._problem=None #type:ignore
+                m._templatemesh=None #type:ignore
+            if hasattr(m,"_parent"):
+                m._parent=None #type:ignore
+            if hasattr(m,"_opposite_interface_mesh"):
+                m._opposite_interface_mesh=None #type:ignore
+            # Force the underlying C++ mesh (and, via its normal destructor, all of its
+            # elements/nodes) to be destructed right now, synchronously - rather than whenever
+            # this Python wrapper object eventually gets garbage collected, which could be much
+            # later (e.g. a user script may still hold its own reference to this mesh, entirely
+            # legitimately) or never (if some as-yet-undiscovered reference cycle remains). This
+            # must happen before _unload_all_dlls() below: an element destructed afterwards would
+            # dereference its DynamicBulkElementCode's function table in an already-unloaded
+            # shared library and crash.
+            m._destroy_now()
 
         for m in self._meshdict.values():
             if not isinstance(m,ODEStorageMesh):
                 release_spatial_mesh(m)
             else:
+                cg=m.get_code_gen()
+                cg._code=None
+                cg._problem=None
                 if m._eqtree is not None and m._eqtree._equations is not None:
                     m._eqtree._equations._release_output_files()
                 m._eqtree=None
                 m._element=None
+                m._problem=None #type:ignore
+                m._destroy_now()
 
         self._lasolver:Optional[Union[str,GenericLinearSystemSolver]] = None
         self._eigensolver:Optional[Union[str,GenericEigenSolver]] = None
         self._meshtemplate_list = []
         self._meshdict:Dict[str,"AnyMesh"] = {}
+        self._equation_system = None #type:ignore
+        # The process-wide solver callback singleton (pyoomph._pyoomph.get_Solver_callback(),
+        # see pyoomph/__init__.py's solver_cb) remembers whichever Problem last called solve(),
+        # via set_Solver_callback()/set_problem() - a genuine external reference (not a cycle),
+        # so it keeps this Problem (and, transitively, everything nb::keep_alive holds for it
+        # on the C++ side, e.g. all of its meshes) alive indefinitely unless cleared here.
+        solver_cb = _pyoomph.get_Solver_callback()
+        if solver_cb is not None and getattr(solver_cb, "_current_problem", None) is self:
+            solver_cb._current_problem = None
         self.invalidate_cached_mesh_data()
         self.invalidate_eigendata()
         self.flush_sub_meshes()
@@ -874,10 +925,15 @@ class Problem(_pyoomph.Problem):
         # test_solver()/test_compiler() in __main__.py, whose TemporaryDirectory
         # cleanup runs before this Python wrapper object is garbage-collected.
         self._open_log_file("",False)
+        # Run gc.collect() BEFORE unloading the compiled-equation-code DLLs, not after: any
+        # mesh/element C++ object destructed after the DLLs are unloaded would dereference a
+        # dangling codeinst/function-table pointer into already-dlclose()'d memory and crash.
+        # This ordering only starts to matter once the cycle-breaking above actually lets
+        # gc.collect() free such objects here instead of leaving that to interpreter exit.
+        gc.collect()
+        gc.collect()
+        gc.collect()
         self._unload_all_dlls()
-        gc.collect()
-        gc.collect()
-        gc.collect()
 
 
     def __exit__(self, type, value, traceback): #type:ignore
