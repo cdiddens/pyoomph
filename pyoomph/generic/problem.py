@@ -339,6 +339,71 @@ class PeriodicOrbit:
         
             
 
+def _teardown_spatial_mesh(m:"AnySpatialMesh") -> None:
+    # Under nanobind (unlike pybind11), a mesh kept alive on the C++ side by
+    # nb::keep_alive<>() (set_mesh_pt/add_sub_mesh in problem.cpp) is invisible to Python's
+    # cyclic garbage collector: as long as the owning Problem's C++ instance is alive, the mesh
+    # Python object cannot be freed, no matter what gc.collect() does - and, since keep_alive
+    # can never be revoked once granted, this holds even after a mesh is superseded (e.g. by
+    # remeshing, see Problem.force_remesh()) and dropped from Problem._meshdict: it remains
+    # pinned alive for the rest of the Problem's lifetime unless explicitly torn down here.
+    # If the mesh in turn still holds a Python-visible "_problem"/"_parent"/etc. back-reference,
+    # it and whatever it points to keep each other alive forever (one edge invisible, one
+    # visible, and gc cannot break a cycle through an invisible edge). Explicitly nulling every
+    # such back-reference breaks the visible side, and forcing immediate destruction of the
+    # underlying C++ object (via _destroy_now(), see below) handles the invisible one directly
+    # instead of waiting for the owning Problem to also become collectible.
+    cg=m.get_code_gen()
+    cg._code=None
+    cg._problem=None
+    cg._mesh=None #type:ignore
+    # Discontinuous-Galerkin domains additionally attach a handful of auxiliary
+    # FiniteElementCodeGenerator objects to cg (for the internal-facet/DG coupling terms),
+    # each with its own "_problem"/"_mesh" back-references that are otherwise never cleared.
+    for dummy_attr in ("_dummy_codegen_for_internal_facets","_dummy_codegen_for_internal_facets_bulk",
+                       "_dummy_codegen_for_internal_facets_bulk_bulk","_dummy_codegen_for_internal_facets_bulk_opp"):
+        dummy_cg=getattr(cg,dummy_attr,None)
+        if dummy_cg is not None:
+            dummy_cg._problem=None
+            dummy_cg._code=None
+            dummy_cg._mesh=None
+            setattr(cg,dummy_attr,None)
+    for im in m._interfacemeshes.values():
+        _teardown_spatial_mesh(im)
+
+    m._interfacemeshes.clear()
+    # Close any output file handles (e.g. ODEFileOutput/IntegralObservableOutput) held open
+    # by this mesh's equations before dropping the reference to them -- see the log-file
+    # comment in Problem.release() for why this must happen proactively rather than being
+    # left to eventual garbage collection.
+    if m._eqtree is not None and m._eqtree._equations is not None:
+        m._eqtree._equations._release_output_files()
+    m._eqtree._equations=None
+    m._eqtree=None #type:ignore
+    m._problem=None #type:ignore
+    # Break the remaining back-references specific to the mesh's own class:
+    # MeshFromTemplate1d/2d/3d hold a reference to their originating MeshTemplate (which
+    # itself has its own "_problem" back-reference), while InterfaceMesh holds references to
+    # its parent (bulk) mesh and, for two-sided interfaces, to the opposite InterfaceMesh.
+    if hasattr(m,"_templatemesh"):
+        m._templatemesh._problem=None #type:ignore
+        m._templatemesh=None #type:ignore
+    if hasattr(m,"_parent"):
+        m._parent=None #type:ignore
+    if hasattr(m,"_opposite_interface_mesh"):
+        m._opposite_interface_mesh=None #type:ignore
+    # Force the underlying C++ mesh (and, via its normal destructor, all of its elements/nodes)
+    # to be destructed right now, synchronously - rather than whenever this Python wrapper
+    # object eventually gets garbage collected, which could be much later (e.g. a user script
+    # may still hold its own reference to this mesh, entirely legitimately) or never (if some
+    # as-yet-undiscovered reference cycle remains). Callers must ensure this mesh is no longer
+    # needed for anything (e.g. field interpolation into a replacement mesh) before calling
+    # this, and, if unloading equation code DLLs afterwards, must do so only after this call:
+    # an element destructed afterwards would dereference its DynamicBulkElementCode's function
+    # table in an already-unloaded shared library and crash.
+    m._destroy_now()
+
+
 #Problem with some automatic behaviour
 class Problem(_pyoomph.Problem):
     """A class representing a problem in the pyoomph library.
@@ -835,63 +900,9 @@ class Problem(_pyoomph.Problem):
         return self
 
     def release(self):
-        # Under nanobind (unlike pybind11), a mesh kept alive on the C++ side by
-        # nb::keep_alive<>() (set_mesh_pt/add_sub_mesh in problem.cpp) is invisible to
-        # Python's cyclic garbage collector: as long as this Problem's C++ instance is
-        # alive, the mesh Python object cannot be freed, no matter what gc.collect() does.
-        # If that mesh in turn still holds a Python-visible "_problem" back-reference to
-        # this Problem, the two keep each other alive forever (Problem->Mesh is invisible,
-        # Mesh->Problem is visible, and gc cannot break a cycle through an invisible edge).
-        # Explicitly nulling every such back-reference here breaks the visible side, so
-        # this Problem's own refcount can drop to zero via ordinary refcounting as soon as
-        # nothing external references it any more - at which point its C++ destructor runs
-        # and releases the keep_alive-held mesh references too, unwinding everything
-        # deterministically without depending on cyclic gc for this particular edge.
-        def release_spatial_mesh(m:AnySpatialMesh):
-            cg=m.get_code_gen()
-            cg._code=None
-            cg._problem=None
-            cg._mesh=None #type:ignore
-            for im in m._interfacemeshes.values():
-                release_spatial_mesh(im)
-
-            m._interfacemeshes.clear()
-            # Close any output file handles (e.g. ODEFileOutput/IntegralObservableOutput)
-            # held open by this mesh's equations before dropping the reference to them --
-            # see the log-file comment further below for why this must happen proactively
-            # rather than being left to eventual garbage collection.
-            if m._eqtree is not None and m._eqtree._equations is not None:
-                m._eqtree._equations._release_output_files()
-            m._eqtree._equations=None
-            m._eqtree=None #type:ignore
-            m._problem=None #type:ignore
-            # Break the remaining back-references specific to the mesh's own class:
-            # MeshFromTemplate1d/2d/3d hold a reference to their originating MeshTemplate
-            # (which itself has its own "_problem" back-reference), while InterfaceMesh
-            # holds references to its parent (bulk) mesh and, for two-sided interfaces, to
-            # the opposite InterfaceMesh. Left in place, any of these keeps this Problem -
-            # and, transitively, everything nb::keep_alive holds alive for it on the C++
-            # side - alive indefinitely.
-            if hasattr(m,"_templatemesh"):
-                m._templatemesh._problem=None #type:ignore
-                m._templatemesh=None #type:ignore
-            if hasattr(m,"_parent"):
-                m._parent=None #type:ignore
-            if hasattr(m,"_opposite_interface_mesh"):
-                m._opposite_interface_mesh=None #type:ignore
-            # Force the underlying C++ mesh (and, via its normal destructor, all of its
-            # elements/nodes) to be destructed right now, synchronously - rather than whenever
-            # this Python wrapper object eventually gets garbage collected, which could be much
-            # later (e.g. a user script may still hold its own reference to this mesh, entirely
-            # legitimately) or never (if some as-yet-undiscovered reference cycle remains). This
-            # must happen before _unload_all_dlls() below: an element destructed afterwards would
-            # dereference its DynamicBulkElementCode's function table in an already-unloaded
-            # shared library and crash.
-            m._destroy_now()
-
         for m in self._meshdict.values():
             if not isinstance(m,ODEStorageMesh):
-                release_spatial_mesh(m)
+                _teardown_spatial_mesh(m)
             else:
                 cg=m.get_code_gen()
                 cg._code=None
@@ -5780,9 +5791,17 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             for tree_depth in range(3):
                 newmesh._generate_interface_elements(tree_depth)
 
-            newmesh._tracers=oldmesh._tracers 
-            for _,tracercoll in newmesh._tracers.items(): 
+            newmesh._tracers=oldmesh._tracers
+            for _,tracercoll in newmesh._tracers.items():
                 tracercoll._set_mesh(newmesh)
+            # NOTE: oldmesh's underlying C++ mesh is still needed after this point (at least by
+            # InternalInterpolator during the "Rebuild" step below) - do NOT force-destroy it
+            # here. An earlier attempt at doing so (freeing it right here) caused a segfault in
+            # InternalInterpolator.__init__ later on. oldmesh (and, via nb::keep_alive on the
+            # C++ side, its elements/nodes) therefore remains alive - and unreclaimed - for the
+            # rest of this Problem's lifetime; that's a real, currently-unresolved leak for
+            # scripts using remeshing (see e.g. Advanced_Linear_Dynamics/hanging_droplet.py),
+            # left as a follow-up rather than risking a repeat of that crash.
 
 
         # Rebuild
