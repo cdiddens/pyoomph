@@ -442,6 +442,7 @@ class Problem(_pyoomph.Problem):
         super(Problem, self).__init__()
         self._initialised:bool=False
         self._during_initialization:bool=False
+        self._released:bool=False
 
         from .. import get_default_c_compiler
         self.set_c_compiler(get_default_c_compiler())
@@ -900,6 +901,9 @@ class Problem(_pyoomph.Problem):
         return self
 
     def release(self):
+        if self._released:
+            return
+        self._released=True
         for m in self._meshdict.values():
             if not isinstance(m,ODEStorageMesh):
                 _teardown_spatial_mesh(m)
@@ -914,19 +918,36 @@ class Problem(_pyoomph.Problem):
                 m._problem=None #type:ignore
                 m._destroy_now()
 
+        # GenericLinearSystemSolver/GenericEigenSolver instances hold a "problem" back-reference
+        # (set in their own __init__) - break it before dropping this Problem's own reference to
+        # them, for the same reason as _custom_assembler above.
+        if not isinstance(self._lasolver,(str,type(None))):
+            self._lasolver.problem=None #type:ignore
+        if not isinstance(self._eigensolver,(str,type(None))):
+            self._eigensolver.problem=None #type:ignore
         self._lasolver:Optional[Union[str,GenericLinearSystemSolver]] = None
         self._eigensolver:Optional[Union[str,GenericEigenSolver]] = None
         self._meshtemplate_list = []
         self._meshdict:Dict[str,"AnyMesh"] = {}
         self._equation_system = None #type:ignore
         # The process-wide solver callback singleton (pyoomph._pyoomph.get_Solver_callback(),
-        # see pyoomph/__init__.py's solver_cb) remembers whichever Problem last called solve(),
-        # via set_Solver_callback()/set_problem() - a genuine external reference (not a cycle),
-        # so it keeps this Problem (and, transitively, everything nb::keep_alive holds for it
-        # on the C++ side, e.g. all of its meshes) alive indefinitely unless cleared here.
+        # see pyoomph/__init__.py's solver_cb) remembers whichever Problem last called solve()
+        # via set_Solver_callback()/set_problem(), as a weakref precisely so it cannot keep this
+        # Problem alive - but clear it explicitly here too, so release() has an immediate effect
+        # rather than waiting for the weakref to next resolve to None on its own.
         solver_cb = _pyoomph.get_Solver_callback()
-        if solver_cb is not None and getattr(solver_cb, "_current_problem", None) is self:
-            solver_cb._current_problem = None
+        if solver_cb is not None:
+            ref=getattr(solver_cb, "_current_problem_ref", None)
+            if ref is not None and ref() is self:
+                solver_cb._current_problem_ref = None
+        # set_custom_assembler() (used e.g. for deflation/bifurcation tracking, see
+        # bifurcation_tools.py) creates a plain Python-level mutual reference: this Problem's
+        # own _custom_assembler points to the assembler, and the assembler's own "problem"
+        # attribute points back here. Break it explicitly rather than relying on cyclic gc
+        # picking it up eventually.
+        if self._custom_assembler is not None:
+            self._custom_assembler.problem=None #type:ignore
+            self._custom_assembler=None
         self.invalidate_cached_mesh_data()
         self.invalidate_eigendata()
         self.flush_sub_meshes()
@@ -952,6 +973,22 @@ class Problem(_pyoomph.Problem):
             raise type
         else:
             self.release()
+
+    def __del__(self):
+        # Fallback for scripts that never use "with SomeProblem() as problem:" (or call
+        # .release() explicitly) at all: without this, nothing ever breaks the reference
+        # cycles/keep_alive-pinning described in release()'s own comments, and this Problem's
+        # meshes/elements would remain leaked for the rest of the process. release() is
+        # idempotent (guarded by self._released) so this is harmless if release() already ran.
+        # Swallow all exceptions: __del__ can run at arbitrary/uncontrolled times (including
+        # near interpreter shutdown, with other modules' globals already torn down), and an
+        # exception escaping __del__ is merely printed as "Exception ignored in..." by Python,
+        # never propagated - so there is nothing to gain from letting one through, and every
+        # reason to avoid it (e.g. self._meshdict may not exist yet if __init__ failed early).
+        try:
+            self.release()
+        except Exception:
+            pass
 
 
     @overload

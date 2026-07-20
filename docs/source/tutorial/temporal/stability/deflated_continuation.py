@@ -44,22 +44,22 @@ class PitchForkNormalForm(ODEEquations):
         self.add_residual((partial_t(x)-(self.r*x+self.sign*x**3))*x_test)
 
 if __name__=="__main__":
-    problem=Problem()
-    r=problem.define_global_parameter(r=-1)
-    problem+=PitchForkNormalForm(r=r,sign=-1)@"pitchfork"
-    
-    # Storage for the output files: Branch index -> output file
-    output_files={}
-    
-    # Scan r from -1 to 1, apply deflated continuation
-    for branch_index,rvalue,sol in problem.deflated_continuation(r=numpy.linspace(-1,1,50)):
-        # we get the branch_index (increasing), the value of the parameter and the degrees of freedom
-        if branch_index not in output_files:
-            # Create an output file for the new branch
-            output_files[branch_index]=problem.create_text_file_output("branch_{:02d}.txt".format(branch_index))
-        # We can e.g. solve eigenproblems, or output solutions here
-        problem.solve_eigenproblem(1)
-        Re_ev=numpy.real(problem.get_last_eigenvalues()[0])
-        # Write the output
-        output_files[branch_index].add_row(rvalue,sol[0],Re_ev)
+    with Problem() as problem:
+        r=problem.define_global_parameter(r=-1)
+        problem+=PitchForkNormalForm(r=r,sign=-1)@"pitchfork"
+
+        # Storage for the output files: Branch index -> output file
+        output_files={}
+
+        # Scan r from -1 to 1, apply deflated continuation
+        for branch_index,rvalue,sol in problem.deflated_continuation(r=numpy.linspace(-1,1,50)):
+            # we get the branch_index (increasing), the value of the parameter and the degrees of freedom
+            if branch_index not in output_files:
+                # Create an output file for the new branch
+                output_files[branch_index]=problem.create_text_file_output("branch_{:02d}.txt".format(branch_index))
+            # We can e.g. solve eigenproblems, or output solutions here
+            problem.solve_eigenproblem(1)
+            Re_ev=numpy.real(problem.get_last_eigenvalues()[0])
+            # Write the output
+            output_files[branch_index].add_row(rvalue,sol[0],Re_ev)
         
