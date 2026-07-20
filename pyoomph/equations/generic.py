@@ -270,7 +270,8 @@ class RefineToLevel(Equations):
         mesh=codegen._mesh
         assert mesh is not None
         if not isinstance(mesh,InterfaceMesh):
-            mesh._initial_uniform_refinement_level=max(mesh._initial_uniform_refinement_level,self.level if self.level!="max" else (mesh._problem.initial_adaption_steps if mesh._problem.initial_adaption_steps is not None else mesh._problem.max_refinement_level) )
+            problem=mesh.get_problem()
+            mesh._initial_uniform_refinement_level=max(mesh._initial_uniform_refinement_level,self.level if self.level!="max" else (problem.initial_adaption_steps if problem.initial_adaption_steps is not None else problem.max_refinement_level) )
         
 
 class  RefineToMaxLevel(RefineToLevel):

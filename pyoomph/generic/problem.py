@@ -347,12 +347,15 @@ def _teardown_spatial_mesh(m:"AnySpatialMesh") -> None:
     # can never be revoked once granted, this holds even after a mesh is superseded (e.g. by
     # remeshing, see Problem.force_remesh()) and dropped from Problem._meshdict: it remains
     # pinned alive for the rest of the Problem's lifetime unless explicitly torn down here.
-    # If the mesh in turn still holds a Python-visible "_problem"/"_parent"/etc. back-reference,
-    # it and whatever it points to keep each other alive forever (one edge invisible, one
-    # visible, and gc cannot break a cycle through an invisible edge). Explicitly nulling every
-    # such back-reference breaks the visible side, and forcing immediate destruction of the
+    # If the mesh in turn still holds a Python-visible "_parent"/etc. back-reference, it and
+    # whatever it points to keep each other alive forever (one edge invisible, one visible, and
+    # gc cannot break a cycle through an invisible edge). Explicitly nulling every such
+    # back-reference breaks the visible side, and forcing immediate destruction of the
     # underlying C++ object (via _destroy_now(), see below) handles the invisible one directly
-    # instead of waiting for the owning Problem to also become collectible.
+    # instead of waiting for the owning Problem to also become collectible. (Mesh<->Problem
+    # itself no longer needs breaking here: MeshFromTemplate1d/2d/3d/InterfaceMesh don't store a
+    # Python-level "_problem" attribute at all any more - get_problem() resolves it live via a
+    # non-owning C++-side lookup, see mesh.py.)
     cg=m.get_code_gen()
     cg._code=None
     cg._problem=None
@@ -380,7 +383,6 @@ def _teardown_spatial_mesh(m:"AnySpatialMesh") -> None:
         m._eqtree._equations._release_output_files()
     m._eqtree._equations=None
     m._eqtree=None #type:ignore
-    m._problem=None #type:ignore
     # Break the remaining back-references specific to the mesh's own class:
     # MeshFromTemplate1d/2d/3d hold a reference to their originating MeshTemplate (which
     # itself has its own "_problem" back-reference), while InterfaceMesh holds references to
@@ -413,15 +415,16 @@ def _destroy_superseded_mesh(m:"AnySpatialMesh") -> None:
     # bulk mesh's via _exchange_mesh(), each interface mesh's because MeshFromTemplateBase's own
     # interface-mesh construction reuses the *same* child eqtree from self._eqtree.get_children()
     # for the new interface mesh at that position) - clearing them crashed/broke the next
-    # mesh-construction or remesh call. Only _problem/_parent/_opposite_interface_mesh are safe
-    # to clear, plus forcing immediate destruction of the underlying C++ object (freeing the
-    # bulk of the memory - nodes, elements, matrices - even though the lightweight Python
-    # wrapper itself remains pinned alive by nb::keep_alive until the owning Problem is; see
-    # _teardown_spatial_mesh() for that mechanism).
+    # mesh-construction or remesh call. Only _parent/_opposite_interface_mesh are safe to clear
+    # (there is no Python-level "_problem" attribute left to clear at all - get_problem()
+    # resolves it live via a non-owning C++-side lookup, see mesh.py), plus forcing immediate
+    # destruction of the underlying C++ object (freeing the bulk of the memory - nodes,
+    # elements, matrices - even though the lightweight Python wrapper itself remains pinned
+    # alive by nb::keep_alive until the owning Problem is; see _teardown_spatial_mesh() for that
+    # mechanism).
     for im in m._interfacemeshes.values():
         _destroy_superseded_mesh(im)
     m._interfacemeshes.clear()
-    m._problem=None #type:ignore
     if hasattr(m,"_parent"):
         m._parent=None #type:ignore
     if hasattr(m,"_opposite_interface_mesh"):
@@ -1835,10 +1838,14 @@ class Problem(_pyoomph.Problem):
 
         for tree_depth in range(3):
             for _,mesh in self._meshdict.items():
-                mesh._problem=self
+                # MeshFromTemplate1d/2d/3d/InterfaceMesh no longer store a Python-level
+                # "_problem" attribute (get_problem() resolves it live via the C++ side, see
+                # mesh.py) - only ODEStorageMesh still does and needs this write.
+                if isinstance(mesh,ODEStorageMesh):
+                    mesh._problem=self
                 mesh._eqtree._equations.get_combined_equations()._problem=self
                 if isinstance(mesh,ODEStorageMesh): continue
-                mesh._pre_compile_interface_equations(tree_depth) 
+                mesh._pre_compile_interface_equations(tree_depth)
 
             for _,mesh in self._meshdict.items():
                 if isinstance(mesh,ODEStorageMesh): continue

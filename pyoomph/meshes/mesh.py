@@ -119,7 +119,6 @@ class BaseMesh(abc.ABC):
         # Tracer particles -> name to tracer instance
         self._tracers: Dict[str, _pyoomph.TracerCollection] = {}
         self._codegen: Optional["FiniteElementCodeGenerator"]
-        self._problem: "Problem"
         self._eqtree: "EquationTree"
 
     def get_code_gen(self) -> "FiniteElementCodeGenerator":
@@ -767,7 +766,6 @@ class MeshFromTemplateBase(BaseMesh):
         assert isinstance(
             self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
 
-        self._problem = problem
         self._templatemesh: MeshTemplate = templatemesh
         self._name = domainname
         self._eqtree: "EquationTree" = eqtree
@@ -791,13 +789,13 @@ class MeshFromTemplateBase(BaseMesh):
 
         if previous_mesh is None:
             self.min_permitted_error = a_or_b(
-                templatemesh.min_permitted_error, self._problem.min_permitted_error)
+                templatemesh.min_permitted_error, problem.min_permitted_error)
             self.max_permitted_error = a_or_b(
-                templatemesh.max_permitted_error, self._problem.max_permitted_error)
+                templatemesh.max_permitted_error, problem.max_permitted_error)
             self.max_refinement_level = a_or_b(
-                templatemesh.max_refinement_level, self._problem.max_refinement_level)
+                templatemesh.max_refinement_level, problem.max_refinement_level)
             self.min_refinement_level = a_or_b(
-                templatemesh.min_refinement_level, self._problem.min_refinement_level)
+                templatemesh.min_refinement_level, problem.min_refinement_level)
         else:
             self.min_permitted_error = previous_mesh.min_permitted_error
             self.max_permitted_error = previous_mesh.max_permitted_error
@@ -829,11 +827,10 @@ class MeshFromTemplateBase(BaseMesh):
                 pinter = previous_mesh.get_mesh(n)
                 assert isinstance(pinter, InterfaceMesh)
             self._interfacemeshes[n] = InterfaceMesh(
-                self._problem, self, n, eqtree, previous_mesh=pinter)
+                problem, self, n, eqtree, previous_mesh=pinter)
 
     def get_problem(self) -> "Problem":
-        assert self._problem is not None
-        return self._problem
+        return self._get_problem() #type:ignore
 
     def get_bulk_mesh(self):
         return None
@@ -968,7 +965,7 @@ class MeshFromTemplateBase(BaseMesh):
                     raise RuntimeError(
                         "Cannot add one interface element instance to different bulk equations. Create a new interface element instance instead")
             else:
-                icg._set_problem(self._problem)
+                icg._set_problem(self.get_problem())
                 assert self._codegen
                 icg._set_nodal_dimension(self._codegen.get_nodal_dimension())
                 icg._set_lagrangian_dimension(
@@ -998,7 +995,7 @@ class MeshFromTemplateBase(BaseMesh):
                             "Cannot add one interface element instance to different bulk equations. Create a new interface element instance instead. Boundary "+b)
                 else:
                     assert self._codegen is not None
-                    icg._set_problem(self._problem)
+                    icg._set_problem(self.get_problem())
                     icg._set_nodal_dimension(
                         self._codegen.get_nodal_dimension())
                     icg._set_lagrangian_dimension(
@@ -1007,10 +1004,11 @@ class MeshFromTemplateBase(BaseMesh):
                     icg._do_define_fields(self._codegen.dimension - 2)
 
     def _compile_bulk_equations(self) -> _pyoomph.DynamicBulkElementInstance:
-        assert self._problem is not None
+        problem = self.get_problem()
+        assert problem is not None
         assert self._codegen is not None
         eqs = self._eqtree.get_equations()
-        self._codegen._set_problem(self._problem)
+        self._codegen._set_problem(problem)
         mesh = self._eqtree._mesh
         if mesh is not None:
             # isinstance against the ABC (rather than the 3 concrete classes) so mypy still
@@ -1024,15 +1022,15 @@ class MeshFromTemplateBase(BaseMesh):
                 dom = templ.get_domain(self._name)
                 refpos = dom._get_reference_position_for_IC_and_DBC(set())
                 refnorm=[0.1,0.1,0.1] # TODO: Get a right reference normal
-                t = self._problem.time_pt().time()
+                t = problem.time_pt().time()
                 self._codegen._set_reference_point_for_IC_and_DBC(
                     refpos[0], refpos[1], refpos[2], t,refnorm[0],refnorm[1],refnorm[2])
         self._eqtree._equations._set_current_codegen(self._eqtree._codegen)
-        #self._problem.before_compile_equations(self._eqtree._equations)
+        #problem.before_compile_equations(self._eqtree._equations)
         eqs.before_finalization(self._codegen)
         self._codegen._finalise()
-        eqs.before_compilation(self._codegen)        
-        self._codegen._code = self._problem.compile_bulk_element_code(
+        eqs.before_compilation(self._codegen)
+        self._codegen._code = problem.compile_bulk_element_code(
             self._codegen, assert_spatial_mesh(self), self._name)
         self._templatemesh.get_domain(
             self._name).set_element_code(self._codegen.get_code())
@@ -1333,7 +1331,6 @@ class InterfaceMesh(_pyoomph.InterfaceMesh):
         BaseMesh.__init__(self)  # type: ignore[arg-type]
         # _pyoomph.InterfaceMesh.__init__(self,problem)
         # super().__init__(problem)
-        self._problem = problem
         self._set_problem(problem, eqtree.get_code_gen()._code)
         self._parent: "AnySpatialMesh" = parent
         self._opposite_interface_mesh: Optional["InterfaceMesh"] = None
@@ -1354,7 +1351,7 @@ class InterfaceMesh(_pyoomph.InterfaceMesh):
                 pinter = previous_mesh.get_mesh(n)
                 assert isinstance(pinter, InterfaceMesh)
             self._interfacemeshes[n] = InterfaceMesh(
-                self._problem, self, n, eqtree, previous_mesh=pinter)
+                problem, self, n, eqtree, previous_mesh=pinter)
 
     def get_problem(self) -> "Problem":
         from ..generic.problem import Problem
@@ -1509,7 +1506,7 @@ class InterfaceMesh(_pyoomph.InterfaceMesh):
                 bind_set = {bnames.index(n) for n in boundname_set}
             refpos = dom._get_reference_position_for_IC_and_DBC(bind_set)
             refnorm=[0.1,0.1,0.1] # TODO: Get a right reference norm
-            t = self._problem.time_pt().time()
+            t = self.get_problem().time_pt().time()
             self.get_code_gen()._set_reference_point_for_IC_and_DBC(
                 refpos[0], refpos[1], refpos[2], t,refnorm[0],refnorm[1],refnorm[2])
 
