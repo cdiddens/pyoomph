@@ -26,6 +26,7 @@
 # ========================================================================
  
 import glob
+import sys
 
 import scipy.sparse
 
@@ -945,7 +946,7 @@ class Problem(_pyoomph.Problem):
                     m._eqtree._equations._release_output_files()
                 m._eqtree=None
                 m._element=None
-                m._problem=None #type:ignore
+                m._set_problem(None,None) #type:ignore
                 m._destroy_now()
 
         # GenericLinearSystemSolver/GenericEigenSolver instances hold a "problem" back-reference
@@ -1011,11 +1012,27 @@ class Problem(_pyoomph.Problem):
         # cycles/keep_alive-pinning described in release()'s own comments, and this Problem's
         # meshes/elements would remain leaked for the rest of the process. release() is
         # idempotent (guarded by self._released) so this is harmless if release() already ran.
-        # Swallow all exceptions: __del__ can run at arbitrary/uncontrolled times (including
-        # near interpreter shutdown, with other modules' globals already torn down), and an
+        #
+        # Skip entirely once the interpreter itself is shutting down (sys.is_finalizing()):
+        # verified empirically (via a debug build of this method) that relying on __del__ to
+        # release a Problem that late is fundamentally unsafe, not just risky - Python does not
+        # reliably call __del__ at all for objects still referenced only by a module-level
+        # global once that module's dict is cleared during interpreter shutdown, and on the
+        # rare occasion it is called, even elementary operations inside it (a plain `import`)
+        # can fail with "TypeError: 'NoneType' object is not callable" because interpreter
+        # teardown has already cleared parts of the import machinery out from under us. There
+        # is no reliable amount of internal defensiveness that fixes this from inside __del__
+        # itself - the only real fix is for a script to call .release() (or use "with") before
+        # the interpreter starts shutting down, while everything __del__/release() depends on
+        # is still guaranteed to work. Skipping here just leaves this Problem's memory to the
+        # OS, exactly as it already was before this Problem became collectible at all - not a
+        # regression, since such scripts never freed this memory during the run anyway.
+        # Swallow all exceptions: __del__ can run at arbitrary/uncontrolled times, and an
         # exception escaping __del__ is merely printed as "Exception ignored in..." by Python,
         # never propagated - so there is nothing to gain from letting one through, and every
         # reason to avoid it (e.g. self._meshdict may not exist yet if __init__ failed early).
+        if sys.is_finalizing():
+            return
         try:
             self.release()
         except Exception:
@@ -1841,11 +1858,13 @@ class Problem(_pyoomph.Problem):
 
         for tree_depth in range(3):
             for _,mesh in self._meshdict.items():
-                # MeshFromTemplate1d/2d/3d/InterfaceMesh no longer store a Python-level
-                # "_problem" attribute (get_problem() resolves it live via the C++ side, see
-                # mesh.py) - only ODEStorageMesh still does and needs this write.
+                # No mesh class stores a Python-level "_problem" attribute any more -
+                # get_problem() resolves it live via the C++ side (see mesh.py). ODEStorageMesh
+                # instances can be reused across a redefine_problem() cycle with a new owning
+                # Problem, so still need re-stamping here - preserving the existing compiled
+                # code instance (if any), since _set_problem() would otherwise reset it to None.
                 if isinstance(mesh,ODEStorageMesh):
-                    mesh._problem=self
+                    mesh._set_problem(self,mesh.get_code_gen()._code)
                 mesh._eqtree._equations.get_combined_equations()._problem=self
                 if isinstance(mesh,ODEStorageMesh): continue
                 mesh._pre_compile_interface_equations(tree_depth)

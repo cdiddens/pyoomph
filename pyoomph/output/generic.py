@@ -26,6 +26,7 @@
 # ========================================================================
  
 import os
+import weakref
 from pathlib import Path,PurePath
 from ..expressions.generic import Expression,  ExpressionOrNum, GlobalParameter
 from ..expressions.units import unit_to_string
@@ -55,8 +56,22 @@ class _BaseOutputter:
         self._stages:Optional[Set[str]]=None
         self._eqtree:"EquationTree"
         self._mpi_rank:int
-        self.problem:"Problem"
         pass
+
+    @property
+    def problem(self)->"Problem":
+        # Stored as a weakref, not a strong reference: this outputter is owned (via
+        # GenericOutput._outputter) by an Equations object that survives as long as the
+        # Problem's meshes do (themselves pinned alive by the Problem's own nb::keep_alive) -
+        # a strong back-reference here would form the same kind of uncollectible cycle fixed
+        # for meshes/codegens/solvers elsewhere in this codebase.
+        p=self._problem_wr()
+        assert p is not None, "The Problem this outputter belonged to has already been destroyed"
+        return p
+
+    @problem.setter
+    def problem(self,p:Optional["Problem"]):
+        self._problem_wr=weakref.ref(p) if p is not None else (lambda:None)
 
     def after_remeshing(self,eqtree:"EquationTree"):
         pass

@@ -1685,7 +1685,7 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
     def __init__(self, problem: "Problem", eqtree: "EquationTree", domainname: str):
         super().__init__()
         #print("ODEStorageMesh: Creating ODE storage mesh for domain", domainname,get_mpi_rank())
-        self._problem: "Problem" = problem
+        self._set_problem(problem, None)
         self._eqtree: Optional["EquationTree"] = eqtree
         self._eqtree._mesh = self  # type:ignore
         self._codegen = eqtree._codegen  # type:ignore
@@ -1705,7 +1705,7 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
         return self._codegen
 
     def get_problem(self) -> "Problem":
-        return self._problem
+        return self._get_problem() #type:ignore
 
     def get_bulk_mesh(self):
         return None
@@ -1726,24 +1726,25 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
     def _compile_bulk_equations(self) -> _pyoomph.DynamicBulkElementInstance:
         assert self._eqtree is not None
         assert self._codegen is not None
-        self._codegen._set_problem(self._problem)  
+        problem=self.get_problem()
+        self._codegen._set_problem(problem)
 
-        ocg = self._codegen.get_equations()._get_current_codegen()  
-        self._codegen.get_equations()._set_current_codegen(self._codegen)  
+        ocg = self._codegen.get_equations()._get_current_codegen()
+        self._codegen.get_equations()._set_current_codegen(self._codegen)
 
         eqs=self._eqtree.get_equations()
-        #self._problem.before_compile_equations(self._eqtree)
-        eqs.before_finalization(self._codegen)  
-        eqs._problem=self._problem
-        self._codegen._finalise()  
-        self._codegen.get_equations()._set_current_codegen(self._codegen)  
+        #problem.before_compile_equations(self._eqtree)
+        eqs.before_finalization(self._codegen)
+        eqs._problem=problem
+        self._codegen._finalise()
+        self._codegen.get_equations()._set_current_codegen(self._codegen)
 
-        eqs.before_compilation(self._codegen)  
-        self._codegen._code = self._problem.compile_bulk_element_code(self._codegen, self, self._name)  
-        #self._element = _pyoomph.BulkElementODE0d.construct_new(self._codegen.get_code(), self._problem.timestepper)  
+        eqs.before_compilation(self._codegen)
+        self._codegen._code = problem.compile_bulk_element_code(self._codegen, self, self._name)
+        #self._element = _pyoomph.BulkElementODE0d.construct_new(self._codegen.get_code(), problem.timestepper)
         #self._element.set_must_be_kept_as_halo(True) # ODE Dofs are always halo dofs, so they can be accessed from everywhere
-        self._set_problem(self._problem, self._codegen._code)  
-        self._element=self._create_ode_element(self._problem.timestepper)
+        self._set_problem(problem, self._codegen._code)
+        self._element=self._create_ode_element(problem.timestepper)
         self._setup_output_scales()
 #        self._add_ODE("ODE", self._element)
         # self._transfer_mesh_functions()

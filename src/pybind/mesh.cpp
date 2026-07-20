@@ -1384,7 +1384,11 @@ void PyReg_Mesh(nb::module_ &m)
 	nb::class_<ODEStorageMeshHandle, MeshHandleBase>(m, "ODEStorageMesh", "A mesh holding a single ODE element, used to store degrees of freedom that are not associated with a spatial mesh")
 		.def(nb::init<>())
 		.def("_set_problem", [](ODEStorageMeshHandle *self, pyoomph::Problem *p, pyoomph::DynamicBulkElementInstance *inst)
-			 { self->get()->_set_problem(p, inst); }, nb::arg("problem"), nb::arg("code_instance").none())
+			 { self->get()->_set_problem(p, inst); }, nb::arg("problem").none(), nb::arg("code_instance").none())
+		.def(
+			"_get_problem", [](ODEStorageMeshHandle *self)
+			{ return self->get()->get_problem(); },
+			nb::rv_policy::reference, "Return the Problem this mesh is associated with (or None if not yet set)")
 		.def("_create_ode_element", [](ODEStorageMeshHandle *self, oomph::TimeStepper *ts)	->  oomph::GeneralisedElement *
 			 {   oomph::GeneralisedElement * res=self->get()->_create_ode_element(ts);
 				return dynamic_cast<pyoomph::BulkElementBase *>(res);
