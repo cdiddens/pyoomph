@@ -28,6 +28,7 @@
 from doctest import master
 from os import path
 import re
+import weakref
 from .. import _pyoomph_core as _pyoomph
 from ..typings import Optional
 
@@ -422,6 +423,18 @@ class BaseEquations(_pyoomph.Equations):
         else:
             cg=mst._assert_codegen()
             return cg.get_problem()
+
+    @property
+    def _problem(self)->Optional["Problem"]:
+        # Stored as a weakref, not a strong reference: a pure-Python Equations object has
+        # no C++-side get_problem() to fall back on (unlike meshes/codegens/MeshTemplate),
+        # and is never explicitly cleared during Problem.release() - a strong reference
+        # here would keep the Problem alive forever via e.g. EquationTree._equations._problem.
+        return self._problem_wr() if self._problem_wr is not None else None
+
+    @_problem.setter
+    def _problem(self,p:Optional["Problem"]):
+        self._problem_wr=weakref.ref(p) if p is not None else None
 
     def get_creation_info(self)->Optional[str]:
         return self._created_at #type:ignore
