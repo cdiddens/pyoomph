@@ -358,7 +358,7 @@ def _teardown_spatial_mesh(m:"AnySpatialMesh") -> None:
     # non-owning C++-side lookup, see mesh.py.)
     cg=m.get_code_gen()
     cg._code=None
-    cg._problem=None
+    cg._set_problem(None) #type:ignore
     cg._mesh=None #type:ignore
     # Discontinuous-Galerkin domains additionally attach a handful of auxiliary
     # FiniteElementCodeGenerator objects to cg (for the internal-facet/DG coupling terms),
@@ -367,7 +367,7 @@ def _teardown_spatial_mesh(m:"AnySpatialMesh") -> None:
                        "_dummy_codegen_for_internal_facets_bulk_bulk","_dummy_codegen_for_internal_facets_bulk_opp"):
         dummy_cg=getattr(cg,dummy_attr,None)
         if dummy_cg is not None:
-            dummy_cg._problem=None
+            dummy_cg._set_problem(None) #type:ignore
             dummy_cg._code=None
             dummy_cg._mesh=None
             setattr(cg,dummy_attr,None)
@@ -938,7 +938,7 @@ class Problem(_pyoomph.Problem):
             else:
                 cg=m.get_code_gen()
                 cg._code=None
-                cg._problem=None
+                cg._set_problem(None) #type:ignore
                 if m._eqtree is not None and m._eqtree._equations is not None:
                     m._eqtree._equations._release_output_files()
                 m._eqtree=None

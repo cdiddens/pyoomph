@@ -276,8 +276,10 @@ void PyReg_CodeGen(nb::module_ &m)
              "Set the quadrature (Gauss integration) order used to numerically integrate this code's residuals.")
         .def("_get_integration_order", &pyoomph::FiniteElementCode::get_integration_order,
              "Return the quadrature (Gauss integration) order used to numerically integrate this code's residuals, or a negative value if not explicitly set.")
-        .def("_set_problem", &pyoomph::FiniteElementCode::set_problem, nb::arg("problem"),
-             "Associate this code with the given Problem.")
+        .def("_set_problem", &pyoomph::FiniteElementCode::set_problem, nb::arg("problem").none(),
+             "Associate this code with the given Problem (or None to clear it).")
+        .def("_get_problem", &pyoomph::FiniteElementCode::get_problem, nb::rv_policy::reference,
+             "Return the Problem this code is associated with (or None if not yet set).")
         .def("expand_additional_field", &pyoomph::FiniteElementCode::expand_additional_field, nb::arg("name"), nb::arg("dimensional"), nb::arg("expression"), nb::arg("in_domain"), nb::arg("no_jacobian"), nb::arg("no_hessian"), nb::arg("where"),
              "Hook, overridable in Python, allowing an unknown field ``name`` referenced in ``expression`` to be expanded/substituted by a custom symbolic definition instead of raising an error.")
         .def("_register_external_ode_linkage", &pyoomph::FiniteElementCode::_register_external_ode_linkage, nb::arg("myfieldname"), nb::arg("odecodegen"), nb::arg("odefieldname"),

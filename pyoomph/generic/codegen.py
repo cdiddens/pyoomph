@@ -63,7 +63,6 @@ def _check_for_valid_var_name(name:str,for_domain:bool):
 class FiniteElementCodeGenerator(_pyoomph.FiniteElementCode):
     def __init__(self):
         super(FiniteElementCodeGenerator, self).__init__()
-        self._problem:Optional["Problem"]=None
         self._code:Optional[_pyoomph.DynamicBulkElementInstance]=None
         self._name:Optional[str]=None
         self._mesh:Optional["AnyMesh"]=None
@@ -88,8 +87,7 @@ class FiniteElementCodeGenerator(_pyoomph.FiniteElementCode):
         return self._code
 
     def get_problem(self)->"Problem":
-        assert self._problem is not None
-        return self._problem
+        return self._get_problem() #type:ignore
 
     def get_equations(self)->"BaseEquations":
         res=super().get_equations()
@@ -164,15 +162,14 @@ class FiniteElementCodeGenerator(_pyoomph.FiniteElementCode):
             self._dependent_integral_funcs_is_vector_helper[name]=True
 
     def _resolve_based_on_domain_name(self,domainname:str)->Optional[_pyoomph.FiniteElementCode]:
-        assert self._problem is not None
-        res=self._problem._equation_system.get_by_path(domainname) 
+        res=self.get_problem()._equation_system.get_by_path(domainname)
         if not res:
             return None
-        return res._codegen 
+        return res._codegen
 
 
     def _set_problem(self,p:"Problem"):
-        self._problem=p
+        super()._set_problem(p) #type:ignore
 
     def get_element_dimension(self) -> int:
         return self.dimension
@@ -238,8 +235,7 @@ class FiniteElementCodeGenerator(_pyoomph.FiniteElementCode):
         if eqs._coordinate_system is not None:  
             return eqs._coordinate_system  
         else:
-            assert self._problem is not None
-            return self._problem.get_coordinate_system()
+            return self.get_problem().get_coordinate_system()
 
     def expand_additional_field(self, name:str, dimensional:bool, expression:_pyoomph.Expression,in_domain:_pyoomph.FiniteElementCode,no_jacobian:bool,no_hessian:bool,where:str)->"Expression":
         
@@ -283,8 +279,7 @@ class FiniteElementCodeGenerator(_pyoomph.FiniteElementCode):
         if pdom is not None:
             return pdom.get_default_spatial_integration_order()
         else:
-            assert self._problem
-            return self._problem.get_default_spatial_integration_order()
+            return self.get_problem().get_default_spatial_integration_order()
 
 
     def _transfer_my_fields_to_dummy_codegen(self,dummy:"FiniteElementCodeGenerator"):  
@@ -877,9 +872,8 @@ class BaseEquations(_pyoomph.Equations):
         master._residuals_for_tex[dn].append(expr)
         cg = master._assert_codegen()
         contributions = {dn: expr}
-        assert cg._problem is not None
         all_mappings: List[Callable[[str, Expression], Union[Expression, Dict[str, Expression]]]] = (
-            cg._problem._residual_mapping_functions + master._residual_mapping_functions  # type:ignore
+            cg.get_problem()._residual_mapping_functions + master._residual_mapping_functions  # type:ignore
         )
         for mapping in all_mappings:
             newcontribs: Dict[str, _pyoomph.Expression] = {}
@@ -1010,7 +1004,7 @@ class BaseEquations(_pyoomph.Equations):
                 elif 'flag:only_perturbation_mode' in tags:
                     only_perturbation_mode=True            
 
-        assert cg._problem is not None 
+        assert cg.get_problem() is not None
 
         def vr(name:str,domain:Optional["FiniteElementCodeGenerator"]=None)->"Expression":
             if dimensional:
@@ -1124,8 +1118,8 @@ class BaseEquations(_pyoomph.Equations):
             return _pyoomph.Expression(0.0)
         elif name == "mesh_z" and self.get_nodal_dimension() < 3:
             return _pyoomph.Expression(0.0)
-        elif cg._problem.has_named_var(name): 
-            named_res=cg._problem.get_named_var(name) 
+        elif cg.get_problem().has_named_var(name):
+            named_res=cg.get_problem().get_named_var(name)
             assert named_res is not None
             if not isinstance(named_res,_pyoomph.Expression):
                 named_res=_pyoomph.Expression(named_res)
