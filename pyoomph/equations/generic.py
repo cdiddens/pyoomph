@@ -858,7 +858,7 @@ class Scaling(BaseEquations):
         self.scales=kwargs.copy()
     def define_scaling(self):
         super(Scaling, self).define_scaling()
-        self.set_scaling(**self.scales)
+        self.set_scaling(self.scales)
 
 class TestScaling(BaseEquations):    
     """
@@ -874,7 +874,7 @@ class TestScaling(BaseEquations):
 
     def define_scaling(self):
         super(TestScaling, self).define_scaling()
-        self.set_test_scaling(**self.scales)
+        self.set_test_scaling(self.scales)
 
 
 

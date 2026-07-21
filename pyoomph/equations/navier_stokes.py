@@ -277,7 +277,7 @@ class StokesEquations(Equations):
         U = self.get_scaling(self.velocity_name)
         X = self.get_scaling("spatial")
         P = self.get_scaling(self.pressure_name)
-        self.set_test_scaling(**{self.velocity_name:X / P})
+        self.set_test_scaling({self.velocity_name:X / P})
         if self.PFEM_options and self.PFEM_options.active:
             if self.PFEM_options.first_order_system:
                 self.set_test_scaling(mesh_x=scale_factor("temporal")/scale_factor(self.velocity_name))
@@ -623,11 +623,11 @@ class NavierStokesFreeSurface(InterfaceEquations):
                 raise RuntimeError("property static_interface must be either 'auto', True or False")
 
             if static:
-                self.set_scaling(**{self.kinbc_name:1/test_scale_factor(flow_eqs.velocity_name)})
-                self.set_test_scaling(**{self.kinbc_name: 1 / scale_factor(flow_eqs.velocity_name)})
+                self.set_scaling({self.kinbc_name:1/test_scale_factor(flow_eqs.velocity_name)})
+                self.set_test_scaling({self.kinbc_name: 1 / scale_factor(flow_eqs.velocity_name)})
             else:
-                self.set_scaling(**{self.kinbc_name: 1 /test_scale_factor("mesh")})
-                self.set_test_scaling(**{self.kinbc_name: 1 / scale_factor(flow_eqs.velocity_name)})
+                self.set_scaling({self.kinbc_name: 1 /test_scale_factor("mesh")})
+                self.set_test_scaling({self.kinbc_name: 1 / scale_factor(flow_eqs.velocity_name)})
 
 
     def define_residuals(self):
@@ -776,8 +776,8 @@ class ConnectVelocityAtInterface(InterfaceEquations):
         flow_eqs=self.get_parent_equations(StokesEquations)
         assert isinstance(flow_eqs,StokesEquations)
         for f in fields:
-            self.set_test_scaling(**{self.lagr_mult_prefix + f:1/scale_factor(flow_eqs.velocity_name)})
-            self.set_scaling(**{self.lagr_mult_prefix + f: 1 / test_scale_factor(flow_eqs.velocity_name)})
+            self.set_test_scaling({self.lagr_mult_prefix + f:1/scale_factor(flow_eqs.velocity_name)})
+            self.set_scaling({self.lagr_mult_prefix + f: 1 / test_scale_factor(flow_eqs.velocity_name)})
 
 
     def define_residuals(self):

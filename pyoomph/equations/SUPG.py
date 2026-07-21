@@ -51,8 +51,8 @@ class ElementSizeForSUPG(Equations):
         self.define_scalar_field(self.varname, "D0", discontinuous_refinement_exponent=1)
 
     def define_scaling(self):
-        self.set_scaling(**{self.varname:self.get_scaling("spatial")**self.get_element_dimension()})
-        self.set_test_scaling(**{self.varname:1/scale_factor(self.varname)})
+        self.set_scaling({self.varname:self.get_scaling("spatial")**self.get_element_dimension()})
+        self.set_test_scaling({self.varname:1/scale_factor(self.varname)})
 
     def define_residuals(self):
         elemsize,elemsize_test=var_and_test(self.varname)        

@@ -53,20 +53,28 @@ class BaseCoordinateSystem(_pyoomph.CustomCoordinateSystem):
         self.y_rel_scale=1
         self.z_rel_scale=1
 
-    def map_to_zero_epsilon(self,input):
+    @overload
+    def map_to_zero_epsilon(self,input:Expression)->Expression: ...
+    @overload
+    def map_to_zero_epsilon(self,input:list[Expression])->list[Expression]: ...
+    def map_to_zero_epsilon(self,input:Expression | list[Expression])->Expression | list[Expression]:
         if isinstance(input,list):
             return [self.map_to_zero_epsilon(i) for i in input]
         else:
             return  _pyoomph.GiNaC_SymSubs(input,self.expansion_eps,Expression(0))
-        
-    def map_to_first_order_epsilon(self,input,with_epsilon:bool=True):
+
+    @overload
+    def map_to_first_order_epsilon(self,input:Expression,with_epsilon:bool=True)->Expression: ...
+    @overload
+    def map_to_first_order_epsilon(self,input:list[Expression],with_epsilon:bool=True)->list[Expression]: ...
+    def map_to_first_order_epsilon(self,input:Expression | list[Expression],with_epsilon:bool=True)->Expression | list[Expression]:
         if isinstance(input,list):
             return [self.map_to_first_order_epsilon(i,with_epsilon) for i in input]
         else:
             return _pyoomph.GiNaC_SymSubs(diff(_pyoomph.GiNaC_expand(input), self.expansion_eps), self.expansion_eps, Expression(0))*(self.expansion_eps if with_epsilon else 1)            
 
 
-    def define_scalar_field(self, name:str, space:"FiniteElementSpaceEnum", element:"Equations", scale:ExpressionOrNum | None=None, testscale:ExpressionOrNum | None=None, discontinuous_refinement_exponent:ExpressionOrNum | None=None,allow_scales_with_fields:bool=False):
+    def define_scalar_field(self, name:str, space:"FiniteElementSpaceEnum", element:"Equations", scale:ExpressionOrNum | None=None, testscale:ExpressionOrNum | None=None, discontinuous_refinement_exponent:float | None=None,allow_scales_with_fields:bool=False):
         element._internal_define_scalar_field(name, space, scale=scale, testscale=testscale, discontinuous_refinement_exponent=discontinuous_refinement_exponent,allow_scales_with_fields=allow_scales_with_fields)
 
     def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations")->tuple[list[Expression],list[Expression],list[str]]:
@@ -140,7 +148,7 @@ class BaseCoordinateSystem(_pyoomph.CustomCoordinateSystem):
         
         
 
-    def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int)->Expression:
+    def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int,with_scales:bool)->Expression:
         raise RuntimeError("Implement the directional tensor derivative for this coordinate system")
 
 
@@ -275,11 +283,11 @@ class CartesianCoordinateSystem(BaseCoordinateSystem):
         S = test_scale_factor(name)
         for i, f in enumerate(namelist):
             if i >= ndim: break
-            element.set_scaling(**{f: name})
+            element.set_scaling({f: name})
             vc = element.define_scalar_field(f, space)
             vc = var(f)
             v.append(vc / s)
-            element.set_test_scaling(**{f: name})
+            element.set_test_scaling({f: name})
             vtest.append(testfunction(f) / S)
         return v, vtest, namelist
 
@@ -309,11 +317,11 @@ class CartesianCoordinateSystem(BaseCoordinateSystem):
                     vl.append(v[j][i])
                     vtl.append(vtest[j][i])
                 else:
-                    element.set_scaling(**{f: name})
+                    element.set_scaling({f: name})
                     vc = element.define_scalar_field(f, space)
                     vc = var(f)
                     vl.append(vc / s)
-                    element.set_test_scaling(**{f: name})
+                    element.set_test_scaling({f: name})
                     vtl.append(testfunction(f) / S)
             v.append(vl)
             vtest.append(vtl)
@@ -362,7 +370,7 @@ class CartesianCoordinateSystem(BaseCoordinateSystem):
         res:list[Expression] = []
         coords = self.get_coords(arg.nops(), with_scales, lagrangian)
         for i in range(3):
-            div_line = 0 
+            div_line:Expression = Expression(0)
             for j,coord in enumerate(coords):
                 entry=arg[j,i]
                 div_line+=diff(entry, coord)
@@ -459,14 +467,14 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
             vy = element.define_scalar_field(name + "_y", space)
             vx = var(name + "_x")
             vy = var(name + "_y")
-            element.set_scaling(**{name + "_x": name, name + "_y": name})
-            element.set_test_scaling(**{name + "_x": name, name + "_y": name})          
+            element.set_scaling({name + "_x": name, name + "_y": name})
+            element.set_test_scaling({name + "_x": name, name + "_y": name})          
             return [vx / s, vy / s, zero], [testfunction(name + "_x") / S,testfunction(name + "_y") / S, zero], [name + "_x",name + "_y"]
         elif ndim == 1:
             vx = element.define_scalar_field(name + "_x", space)
             vx = var(name + "_x")
-            element.set_scaling(**{name + "_x": name})
-            element.set_test_scaling(**{name + "_x": name})
+            element.set_scaling({name + "_x": name})
+            element.set_test_scaling({name + "_x": name})
             return [vx / s, zero], [testfunction(name + "_x") / S], [name + "_x"]
         else:
             raise RuntimeError("Axisymmetric vector fields do not work for dimension " + str(ndim))
@@ -489,9 +497,10 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
             txx = var(name + "_xx")
             taa = element.define_scalar_field(name + "_aa", space)
             taa = var(name + "_aa")
-            element.set_scaling(**{name + "_xx": name,name+"_aa":name})
-            element.set_test_scaling(**{name + "_xx": name, name + "_aa": name})
-            return [[txx / s, 0, 0], [0, taa/s, 0], [0, 0, 0]], [[testfunction(name + "_xx") / S, 0, 0], [0, testfunction(name + "_aa") / S, 0], [0, 0, 0]], [[name + "_xx", 0,0], [0,name + "_aa", 0], [0, 0, 0]] 
+            element.set_scaling({name + "_xx": name,name+"_aa":name})
+            element.set_test_scaling({name + "_xx": name, name + "_aa": name})
+            zero=Expression(0)
+            return [[txx / s, zero, zero], [zero, taa/s, zero], [zero, zero, zero]], [[testfunction(name + "_xx") / S, zero, zero], [zero, testfunction(name + "_aa") / S, zero], [zero, zero, zero]], [[name + "_xx", "",""], ["",name + "_aa", ""], ["", "", ""]]
         elif ndim==2:
             txx = element.define_scalar_field(name + "_xx", space)
             txx = var(name + "_xx")
@@ -499,12 +508,12 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
             tyy = var(name + "_yy")
             txy = element.define_scalar_field(name + "_xy", space)
             txy = var(name + "_xy")
-            element.set_scaling(**{name + "_xx": name, name + "_yy": name, name + "_xy": name})
-            element.set_test_scaling(**{name + "_xx": name, name + "_yy": name, name + "_aa": name, name + "_xy": name})
+            element.set_scaling({name + "_xx": name, name + "_yy": name, name + "_xy": name})
+            element.set_test_scaling({name + "_xx": name, name + "_yy": name, name + "_aa": name, name + "_xy": name})
             taa = element.define_scalar_field(name + "_aa", space)
             taa = var(name + "_aa")
-            element.set_scaling(**{name + "_aa": name})
-            element.set_test_scaling(**{name + "_aa": name})
+            element.set_scaling({name + "_aa": name})
+            element.set_test_scaling({name + "_aa": name})
         else:
             # Axisymmetric coordinates only have two in-plane dimensions (r,z) plus the
             # always-present azimuthal component (folded into "_aa" above) - there is no
@@ -515,14 +524,17 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
         if not symmetric:
             tyx = element.define_scalar_field(name + "_yx", space)
             tyx = var(name + "_yx")
-            element.set_scaling(**{name + "_yx": name})
-            element.set_test_scaling(**{name + "_yx": name})
-            return [[txx / s, txy / s, 0], [tyx / s, tyy / s, 0], [0, 0, taa / s]], [[testfunction(name + "_xx") / S, testfunction(name + "_xy") / S, 0], [testfunction(name + "_yx") / S, testfunction(name + "_yy") / S, 0], [0, 0, testfunction(name + "_aa") / S]], [[name + "_xx", name + "_xy", 0], [name + "_yx", name + "_yy", 0], [0, 0, name + "_aa"]] 
+            element.set_scaling({name + "_yx": name})
+            element.set_test_scaling({name + "_yx": name})
+            zero=Expression(0)
+            return [[txx / s, txy / s, zero], [tyx / s, tyy / s, zero], [zero, zero, taa / s]], [[testfunction(name + "_xx") / S, testfunction(name + "_xy") / S, zero], [testfunction(name + "_yx") / S, testfunction(name + "_yy") / S, zero], [zero, zero, testfunction(name + "_aa") / S]], [[name + "_xx", name + "_xy", ""], [name + "_yx", name + "_yy", ""], ["", "", name + "_aa"]]
         else:
-            return [[txx / s, txy / s, 0], [txy / s, tyy / s, 0], [0, 0, taa / s]], [[testfunction(name + "_xx") / S, testfunction(name + "_xy") / S, 0], [testfunction(name + "_xy") / S, testfunction(name + "_yy") / S, 0], [0, 0, testfunction(name + "_aa") / S]], [[name + "_xx", name + "_xy", 0], [name + "_xy", name + "_yy", 0], [0, 0, name + "_aa"]] 
+            zero=Expression(0)
+            return [[txx / s, txy / s, zero], [txy / s, tyy / s, zero], [zero, zero, taa / s]], [[testfunction(name + "_xx") / S, testfunction(name + "_xy") / S, zero], [testfunction(name + "_xy") / S, testfunction(name + "_yy") / S, zero], [zero, zero, testfunction(name + "_aa") / S]], [[name + "_xx", name + "_xy", ""], [name + "_xy", name + "_yy", ""], ["", "", name + "_aa"]] 
 
 
-    def tensor_divergence(self, T:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
+    def tensor_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
+        T=arg
         coords = self.get_coords(T.nops(), with_scales, lagrangian)
         if self.use_x_as_symmetry_axis:
             if ndim==1:
@@ -763,11 +775,7 @@ class CartesianCoordinateSystemWithAdditionalNormalMode(CartesianCoordinateSyste
                 return spatial_scale ** (edim) * (nondim("dx") + mm*dx_eps )
             else:
                 return nondim("dx")+ mm*dx_eps
-    
-    
-    def tensor_divergence(self, arg: _pyoomph.Expression, ndim: int, edim: int, with_scales: bool, lagrangian: bool) -> _pyoomph.Expression:
-        raise RuntimeError("Not implemented")
-    
+
     def vector_gradient(self, arg: _pyoomph.Expression, ndim: int, edim: int, with_scales: bool, lagrangian: bool) -> _pyoomph.Expression:
         res:list[list[ExpressionOrNum]] = []
         # TODO MOVING COORDINATES
@@ -836,7 +844,7 @@ class CartesianCoordinateSystemWithAdditionalNormalMode(CartesianCoordinateSyste
     def tensor_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
         raise RuntimeError("Implement the tensor_divergence for this coordinate system. Occured upon taking the div of " + str(arg))
 
-    def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int)->Expression:
+    def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int,with_scales:bool)->Expression:
         raise RuntimeError("Implement the directional tensor derivative for this coordinate system")
 
     def expand_coordinate_or_mesh_vector(self,cg:"FiniteElementCodeGenerator", name:str,dimensional:bool,no_jacobian:bool,no_hessian:bool):        
@@ -886,11 +894,11 @@ class CartesianCoordinateSystemWithAdditionalNormalMode(CartesianCoordinateSyste
         S = test_scale_factor(name)
         for i, f in enumerate(namelist):
             if i >= ndim+1: break
-            element.set_scaling(**{f: name})
+            element.set_scaling({f: name})
             vc = element.define_scalar_field(f, space)
             vc = var(f)
             v.append(vc / s)
-            element.set_test_scaling(**{f: name})
+            element.set_test_scaling({f: name})
             vtest.append(testfunction(f) / S)
         return v, vtest, namelist
     
@@ -1229,16 +1237,16 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
             vx = var(name + "_x")
             vy = var(name + "_y")
             vt = var(name + "_phi")
-            element.set_scaling(**{name + "_x": name, name + "_y": name, name + "_phi": name})
-            element.set_test_scaling(**{name + "_x": name, name + "_y": name,name + "_phi": name})            
+            element.set_scaling({name + "_x": name, name + "_y": name, name + "_phi": name})
+            element.set_test_scaling({name + "_x": name, name + "_y": name,name + "_phi": name})            
             return [vx / s, vy / s, vt/s], [testfunction(name + "_x") / S,testfunction(name + "_y") / S, testfunction(name + "_phi") / S], [name + "_x",name + "_y",name+"_phi"]
         elif ndim == 1:
             vx = element.define_scalar_field(name + "_x", space)
             vt = element.define_scalar_field(name + "_phi", space)
             vx = var(name + "_x")
             vt = var(name + "_phi")
-            element.set_scaling(**{name + "_x": name,name+"_phi":name})
-            element.set_test_scaling(**{name + "_x": name,name+"_phi":name})
+            element.set_scaling({name + "_x": name,name+"_phi":name})
+            element.set_test_scaling({name + "_x": name,name+"_phi":name})
             return [vx / s, vt/s], [testfunction(name + "_x") / S,testfunction(name + "_phi") / S], [name + "_x",name + "_phi"]
         else:
             raise RuntimeError("Axisymmetric vector fields do not work for dimension " + str(ndim))
@@ -1356,7 +1364,7 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
     def tensor_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
         raise RuntimeError("Implement the tensor_divergence for this coordinate system. Occured upon taking the div of " + str(arg))
 
-    def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int)->Expression:
+    def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int,with_scales:bool)->Expression:
         raise RuntimeError("Implement the directional tensor derivative for this coordinate system")
 
 
@@ -1379,8 +1387,8 @@ class RadialSymmetricCoordinateSystem(BaseCoordinateSystem):
         if ndim == 1:
             vx = element.define_scalar_field(name + "_x", space)
             vx = var(name + "_x")
-            element.set_scaling(**{name + "_x": name})
-            element.set_test_scaling(**{name + "_x": name})
+            element.set_scaling({name + "_x": name})
+            element.set_test_scaling({name + "_x": name})
             s = scale_factor(name)
             S = test_scale_factor(name)
             return [vx / s], [testfunction(name + "_x") / S], [name + "_x"]
@@ -1449,7 +1457,7 @@ class RadialSymmetricCoordinateSystem(BaseCoordinateSystem):
     def tensor_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
         raise RuntimeError("Implement the tensor_divergence for this coordinate system. Occured upon taking the div of " + str(arg))
 
-    def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int)->Expression:
+    def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int,with_scales:bool)->Expression:
         raise RuntimeError("Implement the directional tensor derivative for this coordinate system")
 
 
@@ -1470,17 +1478,17 @@ class BaseDifferentialGeometryCoordinateSystem(BaseCoordinateSystem):
         #: Select suffixes of the vector components
         self.vector_component_suffixes = ["x", "y", "z"]
         #: Additional vector components (used for e.g. additional normal mode)
-        self.additional_vector_component_suffixes = []
+        self.additional_vector_component_suffixes:list[str] = []
         #: Additional local coordinates (used for e.g. additional normal mode)
-        self.additional_local_coordinates=[]        
+        self.additional_local_coordinates:list[Expression]=[]
         #: Use subexpressions for the transformations
         self.use_subexpressions = True	
         
         self._values_to_substitute = {} # Values to subsitute at the end of an expansion
         
         self._dx_integration_factor=1
-        # Cache for the covariant basis vectors, map from (bool[lagrangian],bool[dimensional],ndim,edim) to a list of basis vectors        
-        self._cached_basis_vectors = {}
+        # Cache for the covariant basis vectors, map from (bool[lagrangian],bool[dimensional],ndim,edim) to a list of basis vectors
+        self._cached_basis_vectors:dict[tuple[bool,bool,int,int],list[Expression]] = {}
         # Cache for the covariant metric tensors, map from (bool[lagrangian],bool[dimensional],ndim,edim) to a g_ab
         self._cached_covariant_metrics = {}
         # Cache for the contravariant metric tensors, map from (bool[lagrangian],bool[dimensional],ndim,edim) to a g^ab
@@ -1547,7 +1555,7 @@ class BaseDifferentialGeometryCoordinateSystem(BaseCoordinateSystem):
         # Just alwas 3
         return 3
     
-    def get_local_coordinate(self, i:int, ndim: int, edim: int,lagrangian:bool,dimensional:bool) -> list[Expression]:
+    def get_local_coordinate(self, i:int, ndim: int, edim: int,lagrangian:bool,dimensional:bool) -> Expression:
         if i<edim:            
             return nondim("local_coordinate_"+str(i+1))
         elif i<edim+len(self.additional_local_coordinates):
@@ -1609,8 +1617,8 @@ class BaseDifferentialGeometryCoordinateSystem(BaseCoordinateSystem):
                 "Cannot use a this coordinate system in "+str(ndim)+"D")
         for i in range(ndim):
             namelist.append(name + "_" + self.vector_component_suffixes[i])
-        for v in self.additional_vector_component_suffixes:
-            namelist.append(name + "_" + v)  # TODO: Axisymmetric?
+        for suffix in self.additional_vector_component_suffixes:
+            namelist.append(name + "_" + suffix)  # TODO: Axisymmetric?
 
         v: list[Expression] = []
         vtest: list[Expression] = []
@@ -1619,11 +1627,11 @@ class BaseDifferentialGeometryCoordinateSystem(BaseCoordinateSystem):
         for i, f in enumerate(namelist):
             if i >= ndim+1:
                 break
-            element.set_scaling(**{f: name})
+            element.set_scaling({f: name})
             vc = element.define_scalar_field(f, space)
             vc = var(f)
             v.append(vc / s)
-            element.set_test_scaling(**{f: name})
+            element.set_test_scaling({f: name})
             vtest.append(testfunction(f) / S)
         return v, vtest, namelist
 
@@ -1633,21 +1641,21 @@ class BaseDifferentialGeometryCoordinateSystem(BaseCoordinateSystem):
         eaug=self.get_augmented_edim(ndim,edim)
         s=self.get_all_local_coordinates(ndim,edim,lagrangian,with_scales)
         # TODO: This is likely not right!
-        return self.substitute_values_for_additional_local_coordinates(sum([g_contra[a,b]*t[a]*diff(arg,s[b]) for a in range(eaug) for b in range(eaug)]))
+        return self.substitute_values_for_additional_local_coordinates(Expression(sum([g_contra[a,b]*t[a]*diff(arg,s[b]) for a in range(eaug) for b in range(eaug)])))
     
-    def vector_gradient(self, arg: list[Expression], ndim: int, edim: int, with_scales: bool, lagrangian: bool) -> list[Expression]:
+    def vector_gradient(self, arg: Expression, ndim: int, edim: int, with_scales: bool, lagrangian: bool) -> Expression:
         g_contra=self.get_contravariant_metric_tensor(ndim,edim,lagrangian,with_scales)
         t=self.get_covariant_basis_vectors(ndim,edim,lagrangian,with_scales)
         eaug=self.get_augmented_edim(ndim,edim)
         s=self.get_all_local_coordinates(ndim,edim,lagrangian,with_scales)
         # TODO: This is likely not right!
-        return self.substitute_values_for_additional_local_coordinates(sum([g_contra[a,b]*dyadic(t[a],diff(arg,s[b])) for a in range(eaug) for b in range(eaug)]))
+        return self.substitute_values_for_additional_local_coordinates(Expression(sum([g_contra[a,b]*dyadic(t[a],diff(arg,s[b])) for a in range(eaug) for b in range(eaug)])))
     
     def vector_divergence(self, arg: Expression, ndim: int, edim: int, with_scales: bool, lagrangian: bool) -> Expression:
         g_contra=self.get_contravariant_metric_tensor(ndim,edim,lagrangian,with_scales)
         t=self.get_covariant_basis_vectors(ndim,edim,lagrangian,with_scales)
         eaug=self.get_augmented_edim(ndim,edim)
         s=self.get_all_local_coordinates(ndim,edim,lagrangian,with_scales)
-        return self.substitute_values_for_additional_local_coordinates(sum([g_contra[a,b]*dot(t[a].evalm(),diff(arg,s[b]).evalm()) for a in range(eaug) for b in range(eaug)]))
+        return self.substitute_values_for_additional_local_coordinates(Expression(sum([g_contra[a,b]*dot(t[a].evalm(),diff(arg,s[b]).evalm()) for a in range(eaug) for b in range(eaug)])))
     
 

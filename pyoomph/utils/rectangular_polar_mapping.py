@@ -144,8 +144,8 @@ class RectangularToPolarMappingCoordinateSystem(BaseCoordinateSystem):
         vy = element.define_scalar_field(name + "_y", space)
         vx = var(name + "_x")
         vy = var(name + "_y")
-        element.set_scaling(**{name + "_x": name, name + "_y": name})
-        element.set_test_scaling(**{name + "_x": name, name + "_y": name})          
+        element.set_scaling({name + "_x": name, name + "_y": name})
+        element.set_test_scaling({name + "_x": name, name + "_y": name})          
         return [vx / s, vy / s, zero], [testfunction(name + "_x") / S,testfunction(name + "_y") / S, zero], [name + "_x",name + "_y"]
         
 

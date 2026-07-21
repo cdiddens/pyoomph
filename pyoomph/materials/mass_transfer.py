@@ -181,8 +181,8 @@ class ProjectedMassTransferModelBase(MassTransferModelBase):
                 kwargs[self.get_mass_transfer_name(ec)] = "mass_transfer_rate"
                 if self.test_scale is not None:
                     tkwargs[self.get_mass_transfer_name(ec)] = self.test_scale
-            ieqs.set_scaling(**kwargs)
-            ieqs.set_test_scaling(**tkwargs)
+            ieqs.set_scaling(kwargs)
+            ieqs.set_test_scaling(tkwargs)
 
 
 

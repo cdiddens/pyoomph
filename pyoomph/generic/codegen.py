@@ -640,9 +640,12 @@ class BaseEquations(_pyoomph.Equations):
         if also_on_interface:
             master._additional_testfuncs_also_on_interface[fieldname] = expr
 
-    def set_scaling(self,*,allow_scales_with_fields=False, **args:"ExpressionOrNum | str"):
+    def set_scaling(self,_field_scalings:"dict[str,ExpressionOrNum | str] | None"=None,*,allow_scales_with_fields:bool=False, **args:"ExpressionOrNum | str"):
         mst = self._get_combined_element()
-        for n, v in args.items():
+        all_args:"dict[str,ExpressionOrNum | str]"=dict(args)
+        if _field_scalings is not None:
+            all_args.update(_field_scalings)
+        for n, v in all_args.items():
             if not isinstance(v,str):
                 if not isinstance(v,_pyoomph.Expression):
                     v=_pyoomph.Expression(v)
@@ -654,9 +657,12 @@ class BaseEquations(_pyoomph.Equations):
                 if n in mst._scales_to_check_for_fields:
                     mst._scales_to_check_for_fields.remove(n)
 
-    def set_test_scaling(self, *, allow_scales_with_fields=False, **args:"ExpressionOrNum | str"):
+    def set_test_scaling(self,_field_scalings:"dict[str,ExpressionOrNum | str] | None"=None, *, allow_scales_with_fields:bool=False, **args:"ExpressionOrNum | str"):
         mst = self._get_combined_element()
-        for n, v in args.items():
+        all_args:"dict[str,ExpressionOrNum | str]"=dict(args)
+        if _field_scalings is not None:
+            all_args.update(_field_scalings)
+        for n, v in all_args.items():
             if not isinstance(v, (_pyoomph.Expression,str)):
                 v=_pyoomph.Expression(v)
             self._test_scaling[n] = v
@@ -2167,9 +2173,9 @@ class Equations(BaseEquations):
         cg._fields_defined_on_my_domain[name]=space
                 
         if scale is not None:
-            self.set_scaling(**{name: scale},allow_scales_with_fields=allow_scales_with_fields)
+            self.set_scaling({name: scale},allow_scales_with_fields=allow_scales_with_fields)
         if testscale is not None:
-            self.set_test_scaling(**{name:testscale},allow_scales_with_fields=allow_scales_with_fields)
+            self.set_test_scaling({name:testscale},allow_scales_with_fields=allow_scales_with_fields)
             
         # Scalar fields are pinned by default for |m|=1 and |m|>=2
         if space!="D0" and space!="DL":
@@ -2217,9 +2223,9 @@ class Equations(BaseEquations):
         self.define_testfunction_by_substitution(name, vector(*vtest),
                                                  also_on_interface=also_on_interface)
         if scale is not None:
-            self.set_scaling(**{name:scale}, allow_scales_with_fields=allow_scales_with_fields)
+            self.set_scaling({name:scale}, allow_scales_with_fields=allow_scales_with_fields)
         if testscale is not None:
-            self.set_test_scaling(**{name:testscale}, allow_scales_with_fields=allow_scales_with_fields)
+            self.set_test_scaling({name:testscale}, allow_scales_with_fields=allow_scales_with_fields)
 
         # Vector fields are pinned by default for |m|=1 and |m|>=2
         if space!="D0":
@@ -2257,9 +2263,9 @@ class Equations(BaseEquations):
         self.define_field_by_substitution(name, matrix(t), also_on_interface=also_on_interface)
         self.define_testfunction_by_substitution(name, matrix(ttest),also_on_interface=also_on_interface)
         if scale is not None:
-            self.set_scaling(**{name:scale}, allow_scales_with_fields=allow_scales_with_fields)
+            self.set_scaling({name:scale}, allow_scales_with_fields=allow_scales_with_fields)
         if testscale is not None:
-            self.set_test_scaling(**{name:testscale}, allow_scales_with_fields=allow_scales_with_fields)
+            self.set_test_scaling({name:testscale}, allow_scales_with_fields=allow_scales_with_fields)
         # TODO: set the azimuthal r=0 info for tensor fields
 
 
@@ -2372,9 +2378,9 @@ class ODEEquations(BaseEquations):
             master._fields_defined_on_my_domain[name] = "D0"
             self._fields_defined_on_my_domain[name] = "D0"
         if scale is not None:
-            self.set_scaling(**{n: scale for n in names})
+            self.set_scaling({n: scale for n in names})
         if testscale is not None:
-            self.set_test_scaling(**{n: testscale for n in names})
+            self.set_test_scaling({n: testscale for n in names})
         # cg = master._assert_codegen()
 
     def expand_additional_field(self, name: str, dimensional: bool, expression: _pyoomph.Expression,

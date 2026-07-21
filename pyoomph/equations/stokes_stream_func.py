@@ -86,11 +86,11 @@ class StreamFunctionFromVelocity(Equations):
         axisymm,_=self.get_axisymmetry_flag_and_dir()
         X,U=scale_factor("spatial"),scale_factor("velocity")
         scals={self.name:X**(2 if axisymm else 1)*U}
-        self.set_scaling(**scals)
+        self.set_scaling(scals)
         tscals={self.name:1/U}
         #if axisymm and not self.old_formulation:
         tscals[self.name]*=X
-        self.set_test_scaling(**tscals)
+        self.set_test_scaling(tscals)
 
     def define_residuals(self):
         phi,phi_test=var_and_test(self.name)

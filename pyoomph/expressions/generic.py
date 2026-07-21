@@ -933,7 +933,7 @@ def avg(f:ExpressionOrNum,at_facet:bool=False):
 	else:
 		return (evaluate_in_domain(f,'+')+evaluate_in_domain(f,'-'))/2
 
-def vector(*args:ExpressionOrNum | list[ExpressionOrNum])->Expression:
+def vector(*args:ExpressionOrNum | Sequence[ExpressionOrNum])->Expression:
 	"""
 	Create a vector expression from the given components.
 

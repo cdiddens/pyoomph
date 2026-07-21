@@ -343,8 +343,8 @@ class ConnectMeshAtInterface(InterfaceEquations):
     def define_scaling(self):
         super(ConnectMeshAtInterface, self).define_scaling()
         for f in self.get_required_fields():
-            self.set_scaling(**{self.lagr_mult_prefix+f:1/test_scale_factor(f)})
-            self.set_test_scaling(**{self.lagr_mult_prefix + f: 1 / scale_factor(f)})
+            self.set_scaling({self.lagr_mult_prefix+f:1/test_scale_factor(f)})
+            self.set_test_scaling({self.lagr_mult_prefix + f: 1 / scale_factor(f)})
 
     def define_residuals(self):
         for f in self.get_required_fields():

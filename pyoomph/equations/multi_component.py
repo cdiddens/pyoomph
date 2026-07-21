@@ -256,11 +256,11 @@ class CompositionAdvectionDiffusionEquations(Equations):
 
     def define_scaling(self):
         for fn in self.fieldnames:
-            self.set_test_scaling(**{fn: scale_factor("temporal") / scale_factor("mass_density")})
+            self.set_test_scaling({fn: scale_factor("temporal") / scale_factor("mass_density")})
         if not self.fluid_props.is_pure:
             assert isinstance(self.fluid_props,(MixtureLiquidProperties,MixtureGasProperties))
             assert self.fluid_props.passive_field is not None
-            self.set_test_scaling(**{"massfrac_"+self.fluid_props.passive_field:scale_factor("temporal") / scale_factor("mass_density")})
+            self.set_test_scaling({"massfrac_"+self.fluid_props.passive_field:scale_factor("temporal") / scale_factor("mass_density")})
 
 
     def get_supg_tau(self, field:str) -> Expression:
@@ -523,9 +523,9 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
             scals[self.surfactant_advect_velo_name] = "velocity"
             tscals = {"surfconc_" + s.name: scale_factor("temporal") / scale_factor("surfconc_" + s.name) for s in
                       self.interface_props._surfactants.keys()} 
-            self.set_test_scaling(**tscals)
+            self.set_test_scaling(tscals)
         scals["mass_transfer_rate"] = scale_factor("velocity") * scale_factor("mass_density")*self.additional_masstransfer_scale
-        self.set_scaling(**scals)
+        self.set_scaling(scals)
         self.add_named_numerical_factor(surface_tension_term=test_scale_factor("velocity")/scale_factor("spatial"))
 
         if self.masstransfer_model is not None:
@@ -541,11 +541,11 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
             raise RuntimeError("property static must be either 'auto', True or False")
 
         if static:
-            self.set_scaling(**{self.kinbc_name: 1 / test_scale_factor("velocity")})
-            self.set_test_scaling(**{self.kinbc_name: self.additional_kin_bc_test_scale / scale_factor("velocity")})
+            self.set_scaling({self.kinbc_name: 1 / test_scale_factor("velocity")})
+            self.set_test_scaling({self.kinbc_name: self.additional_kin_bc_test_scale / scale_factor("velocity")})
         else:
-            self.set_scaling(**{self.kinbc_name: 1 / test_scale_factor("mesh")})
-            self.set_test_scaling(**{self.kinbc_name: 1 / scale_factor("velocity")})
+            self.set_scaling({self.kinbc_name: 1 / test_scale_factor("mesh")})
+            self.set_test_scaling({self.kinbc_name: 1 / scale_factor("velocity")})
 
         has_surfactants = False
         surfscales = {self.surfactant_advect_velo_name: "velocity"}
@@ -556,8 +556,8 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
                 tsurfscales["surfconc_" + s] = scale_factor("temporal") / scale_factor("surface_concentration")
                 has_surfactants = True
         if has_surfactants:
-            self.set_scaling(**surfscales)
-            self.set_test_scaling(**tsurfscales)
+            self.set_scaling(surfscales)
+            self.set_test_scaling(tsurfscales)
 
         if self._has_opposite_flow:
             fields = ["velocity_x", "velocity_y", "velocity_z"]
@@ -569,8 +569,8 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
             for f in fields:
                 vcscales[self.velo_connect_prefix + f] = 1 / test_scale_factor("velocity")
                 vctscales[self.velo_connect_prefix + f] = 1 / scale_factor("velocity")
-            self.set_scaling(**vcscales)
-            self.set_test_scaling(**vctscales)
+            self.set_scaling(vcscales)
+            self.set_test_scaling(vctscales)
 
         if self.surface_tension_projection_space:
             self.set_scaling(_surf_tension=scale_factor("spatial") / test_scale_factor("velocity"))
