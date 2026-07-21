@@ -980,6 +980,12 @@ class Problem(_pyoomph.Problem):
         if self._custom_assembler is not None:
             self._custom_assembler.problem=None #type:ignore
             self._custom_assembler=None
+        # define_problem_for_additional_cartesian_stability_investigation()/
+        # define_problem_for_axial_symmetry_breaking_investigation() (normal-mode/azimuthal
+        # stability setup) install a lambda here that closes over "self" - a plain Python
+        # self-referential cycle (self -> _residual_mapping_functions -> lambda -> self).
+        # Break it explicitly instead of relying on cyclic gc, same rationale as above.
+        self._residual_mapping_functions = []
         self.invalidate_cached_mesh_data()
         self.invalidate_eigendata()
         self.flush_sub_meshes()
@@ -2376,6 +2382,7 @@ class Problem(_pyoomph.Problem):
             print("QUICK TEST: STOPPING AFTER FIRST SUCCESSFUL NEWTON SOLVE, BUT DOING OUTPUT FIRST")
             self.output()
             print("QUICK TEST: STOPPING AFTER FIRST SUCCESSFUL NEWTON SOLVE")
+            self.release()
             sys.exit(0)
 
     def remeshing_necessary(self):        
