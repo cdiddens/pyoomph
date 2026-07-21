@@ -900,7 +900,7 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
             old_num_elems=len(new_elem_types)       
             if elemtype==1: # LineC1                         
                 raise RuntimeError("Cartesian extrusion does not work with LineC1 elements")
-            elif elemtype == 2:  # LineC2                
+            elif elemtype == 2:  # LineC2
                     for offs in range(0,upper_limit,2):
                         new_elem_indices.append([mp(eis[0], offs), mp(eis[1], offs), mp(eis[1], offs + 1)]) #type:ignore
                         new_elem_indices.append([mp(eis[0], offs+1), mp(eis[0], offs), mp(eis[1], offs + 1)]) #type:ignore
@@ -914,8 +914,8 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
                         #print(new_elem_indices[-1],mod_length)
                     #raise RuntimeError("This causes troubles ")
                         new_elem_types += [3,3,3,3,3,3,3,3] #type:ignore
-                        elemental_phi_row=numpy.linspace(0,2*numpy.pi,upper_limit//2,endpoint=True)+self.phase  
-                        elemental_phi_row+=elemental_phi_row[-1]/(2*len(elemental_phi_row))
+                    elemental_phi_row=numpy.linspace(0,2*numpy.pi,upper_limit//2,endpoint=True)+self.phase
+                    elemental_phi_row+=elemental_phi_row[-1]/(2*len(elemental_phi_row))
             elif elemtype==0: # Point -> Line
                 for offs in range(0, upper_limit, phi_increm):
                     if phi_increm==2: # second order
@@ -924,8 +924,8 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
                     else:
                         new_elem_indices.append([mp(eis[0], offs), mp(eis[0], offs + 1)]) #type:ignore
                         new_elem_types.append(1) #type:ignore
-                    elemental_phi_row=numpy.linspace(0,2*numpy.pi,upper_limit//phi_increm,endpoint=True)+self.phase  
-                    elemental_phi_row+=elemental_phi_row[-1]/(2*len(elemental_phi_row))
+                elemental_phi_row=numpy.linspace(0,2*numpy.pi,upper_limit//phi_increm,endpoint=True)+self.phase
+                elemental_phi_row+=elemental_phi_row[-1]/(2*len(elemental_phi_row))
             elif elemtype==8: # Quad9 -> Tris at the center and hex27 in bulk
                 for offs in range(0, upper_limit, phi_increm):
                     #if zero_radial_index in eis:
@@ -1388,8 +1388,8 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
                         else:
                             new_elem_indices.append([mp(eis[0], offs), mp(eis[0], offs + 1)]) #type:ignore
                             new_elem_types.append(1) #type:ignore
-                    elemental_phi_row=numpy.linspace(0,self.angle,upper_limit//phi_increm,endpoint=not closed)+self.start_angle  
-                    elemental_phi_row+=elemental_phi_row[-1]/(2*len(elemental_phi_row))
+                elemental_phi_row=numpy.linspace(0,self.angle,upper_limit//phi_increm,endpoint=not closed)+self.start_angle
+                elemental_phi_row+=elemental_phi_row[-1]/(2*len(elemental_phi_row))
             elif elemtype==8: # Quad9 -> Tris at the center and hex27 in bulk
                 for offs in range(0, upper_limit, phi_increm):
                     #if zero_radial_index in eis:

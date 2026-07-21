@@ -309,8 +309,8 @@ class CompositionAdvectionDiffusionEquations(Equations):
                     w=mesh_velocity(scheme=self.scheme)
                     self.add_residual(-weak(ts(rho_factor *(self.wind-w)*f),grad(f_test)))
                 else:
+                    res = ts(rho_factor * (self.dt_factor * partial_t(f)))
                     self.add_residual(weak(res, f_test))
-                    res = ts(rho_factor * (self.dt_factor * partial_t(f)))                
                     self.add_residual(-weak(ts(rho_factor *self.wind*f),grad(f_test)))
                 
             else:
@@ -852,7 +852,9 @@ class CompositionDiffusionInfinityEquations(InterfaceEquations):
                 elif real_dim==2:
                     if self.farfield_length is None:
                         raise RuntimeError("For 2D far-field monopole conditions, a farfield_length must be provided")
-                    coordsys_dim_factor = -1/log(R/self.farfield_length)        
+                    coordsys_dim_factor = -1/log(R/self.farfield_length)
+                else:
+                    raise RuntimeError("Far-field monopole conditions are only implemented for real_dim in {1,2,3}, not "+str(real_dim))
                 self.add_residual(weak(rho*D * coordsys_dim_factor * (y - val) * dot(n, d) / (dot(d, d)) , y_test) )
 
 

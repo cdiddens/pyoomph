@@ -1177,6 +1177,8 @@ class GmshTemplate(MeshTemplate):
                     zs=numpy.linspace(0,dist,layers+1,endpoint=True)
                 elif self.order==2:
                     zs=numpy.linspace(0,dist,layers*2+1,endpoint=True)
+                else:
+                    raise RuntimeError("Mesh extrusion is only implemented for order 1 or 2, not order "+str(self.order))
                 numpoints=len(points)
                 points=numpy.transpose(numpy.tile(numpy.transpose(points),len(zs)))
                 zcoords=numpy.repeat(zs,numpoints)

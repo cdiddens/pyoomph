@@ -2399,8 +2399,8 @@ class MatplotlibPlotter(BasePlotter):
     def save(self,fname:str | list[str] | None=None):
         if self._has_invalid_triangulation:
             return
+        pdir=os.path.join(self._problem.get_output_directory(),self._output_dir)
         if fname is None:
-            pdir=os.path.join(self._problem.get_output_directory(),self._output_dir)
             os.makedirs(pdir,exist_ok=True)
             file_exts=self.file_ext
             if not isinstance(file_exts,(list,tuple,set)):

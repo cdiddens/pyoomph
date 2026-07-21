@@ -674,6 +674,11 @@ class NavierStokesFreeSurface(InterfaceEquations):
                 self.add_residual(-dt_weight*weak(l, dot(n,  R_test),coordinate_system=self.kinematic_bc_coordinate_sys))
         else:
             x, u_test = var_and_test("mesh")
+            static=self.static_interface
+            if static=="auto":
+                static=not self.get_current_code_generator()._coordinates_as_dofs
+            if not static in {"auto",False,True}:
+                raise RuntimeError("property static_interface must be either 'auto', True or False")
 
         if self.impose_marangoni_directly:
             if not static:
