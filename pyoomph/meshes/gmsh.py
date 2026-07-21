@@ -1703,8 +1703,8 @@ class GmshTemplate(MeshTemplate):
         # Go over it once more, finding the missing entities
         given_names={a._id for a in self._rev_names}
         start_index=-1
-        
-        
+        sub_index:int | None=None
+
         for entry in res:
             print("Entry",entry,given_names)
             if entry[0]==newdim:
@@ -1712,7 +1712,8 @@ class GmshTemplate(MeshTemplate):
                 sub_index=0
             if entry[0]==newdim-1:
                 if entry[1] not in given_names:
-                    original=to_extrude[start_index]                    
+                    assert sub_index is not None, "Expected an entry of dimension "+str(newdim)+" in res before any entry of dimension "+str(newdim-1)
+                    original=to_extrude[start_index]
                     if isinstance(original,PlaneSurface):
                         #print("Found missing entity, trying to find name for it. Original was",original,"with dim_tag",original.dim_tag,"subindex",sub_index)
                         orig_curv=original.curve_loop.curves[sub_index]
@@ -1818,14 +1819,16 @@ class GmshTemplate(MeshTemplate):
         # Go over it once more, finding the missing entities
         given_names={a._id for a in self._rev_names}
         start_index=-1
-        
-        for entry in res:            
+        sub_index:int | None=None
+
+        for entry in res:
             if entry[0]==newdim:
                 start_index+=1
                 sub_index=0
             if entry[0]==newdim-1:
                 if entry[1] not in given_names:
-                    original=to_extrude[start_index]                    
+                    assert sub_index is not None, "Expected an entry of dimension "+str(newdim)+" in res before any entry of dimension "+str(newdim-1)
+                    original=to_extrude[start_index]
                     if isinstance(original,PlaneSurface):
                         #print("Found missing entity, trying to find name for it. Original was",original,"with dim_tag",original.dim_tag,"subindex",sub_index)
                         orig_curv=original.curve_loop.curves[sub_index]
