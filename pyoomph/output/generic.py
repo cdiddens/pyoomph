@@ -71,7 +71,7 @@ class _BaseOutputter:
         return p
 
     @problem.setter
-    def problem(self,p:"Problem" | None):
+    def problem(self,p:"Problem | None"):
         self._problem_wr=weakref.ref(p) if p is not None else (lambda:None)
 
     def after_remeshing(self,eqtree:"EquationTree"):
@@ -131,7 +131,7 @@ class _BaseNumpyOutput(_BaseOutputter):
         assert not isinstance(m,ODEStorageMesh)
         self.mesh=m
 
-    def get_cached_mesh_data(self,mesh:"AnySpatialMesh",nondimensional:bool=False,tesselate_tri:bool=False,eigenvector:int | Sequence[int] | None=None,eigenmode:"MeshDataEigenModes"="abs",history_index:int=0,with_halos:bool=False,operator:"MeshDataCacheOperatorBase" | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True)->"MeshDataCacheEntry":
+    def get_cached_mesh_data(self,mesh:"AnySpatialMesh",nondimensional:bool=False,tesselate_tri:bool=False,eigenvector:int | Sequence[int] | None=None,eigenmode:"MeshDataEigenModes"="abs",history_index:int=0,with_halos:bool=False,operator:"MeshDataCacheOperatorBase | None"=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True)->"MeshDataCacheEntry":
         pr = self.mesh.get_problem()
         cache = pr.get_cached_mesh_data(mesh, tesselate_tri=tesselate_tri, nondimensional=nondimensional,eigenvector=eigenvector,eigenmode=eigenmode,history_index=history_index,with_halos=with_halos,operator=operator,discontinuous=discontinuous,add_eigen_to_mesh_positions=add_eigen_to_mesh_positions)
         return cache
@@ -143,7 +143,7 @@ class _BaseNumpyOutput(_BaseOutputter):
 
 
 class _TextOutput(_BaseNumpyOutput):
-    def __init__(self,mesh:"AnySpatialMesh",*fields:str,ftrunk:str="txtout",in_subdir:bool=True,file_ext:str | list[str] | None=None,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs",nondimensional:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True,reverse_segment_if:Callable[[list[int], NPFloatArray], bool] | None=None,sort_segments_by:Callable[[list[int], NPFloatArray], float] | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True,operator:"MeshDataCacheOperatorBase" | None=None,tesselate_tri:bool=True):
+    def __init__(self,mesh:"AnySpatialMesh",*fields:str,ftrunk:str="txtout",in_subdir:bool=True,file_ext:str | list[str] | None=None,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs",nondimensional:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True,reverse_segment_if:Callable[[list[int], NPFloatArray], bool] | None=None,sort_segments_by:Callable[[list[int], NPFloatArray], float] | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True,operator:"MeshDataCacheOperatorBase | None"=None,tesselate_tri:bool=True):
         super().__init__(mesh)
         self.fname_trunk=ftrunk
         self._orbit_subdir=None
@@ -330,7 +330,7 @@ def save_by_extension(fname:str,data:NPFloatArray,header:list[str],timeinfo:floa
 
 
 class _OutputTxtAlongLine(_BaseOutputter):
-    def __init__(self,*fields:str,coords:NPFloatArray | list[Sequence[ExpressionOrNum]] | None=None,start:list[ExpressionOrNum] | None=None,end:list[ExpressionOrNum] | None=None,N:int | None=None,isovalue:tuple[str, ExpressionOrNum] | None=None,mesh:"AnySpatialMesh" | None=None,ftrunk:str="along_line",in_subdir:bool=True,file_ext:str | list[str] | None=None,hide_lagrangian:bool=True,hide_underscore:bool=True,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs",NaN_outside:bool=False):
+    def __init__(self,*fields:str,coords:NPFloatArray | list[Sequence[ExpressionOrNum]] | None=None,start:list[ExpressionOrNum] | None=None,end:list[ExpressionOrNum] | None=None,N:int | None=None,isovalue:tuple[str, ExpressionOrNum] | None=None,mesh:"AnySpatialMesh | None"=None,ftrunk:str="along_line",in_subdir:bool=True,file_ext:str | list[str] | None=None,hide_lagrangian:bool=True,hide_underscore:bool=True,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs",NaN_outside:bool=False):
         super().__init__()
         if mesh is None:
             raise ValueError("Need to supply at least a mesh")
@@ -502,7 +502,7 @@ class _OutputTxtAlongLine(_BaseOutputter):
 
 
 class _GridFileOutput(_BaseOutputter):
-    def __init__(self,*fields:str,lower:list[Sequence[ExpressionOrNum]],upper:list[ExpressionOrNum],N:list[int] | None=None,dx:list[ExpressionOrNum] | None,mesh:"AnySpatialMesh" | None=None,ftrunk:str="grid_out",in_subdir:bool=True,file_ext:str | list[str] | None=None,hide_lagrangian:bool=True,hide_underscore:bool=True,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs"):
+    def __init__(self,*fields:str,lower:list[Sequence[ExpressionOrNum]],upper:list[ExpressionOrNum],N:list[int] | None=None,dx:list[ExpressionOrNum] | None,mesh:"AnySpatialMesh | None"=None,ftrunk:str="grid_out",in_subdir:bool=True,file_ext:str | list[str] | None=None,hide_lagrangian:bool=True,hide_underscore:bool=True,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs"):
         super().__init__()
         if mesh is None:
             raise ValueError("Need to supply at least a mesh")
@@ -949,7 +949,7 @@ class TextFileOutput(GenericOutput):
 
 
 
-    def __init__(self,filetrunk:str | None=None,filename:str | None=None, nondimensional:bool=False,hide_underscore:bool=True,hide_lagrangian:bool=True,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs",reverse_segment_if:Callable[[list[int], NPFloatArray], bool] | None=None,sort_segments_by:Callable[[list[int], NPFloatArray], float] | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True,operator:"MeshDataCacheOperatorBase" | None=None,tesselate_tri:bool=True):
+    def __init__(self,filetrunk:str | None=None,filename:str | None=None, nondimensional:bool=False,hide_underscore:bool=True,hide_lagrangian:bool=True,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs",reverse_segment_if:Callable[[list[int], NPFloatArray], bool] | None=None,sort_segments_by:Callable[[list[int], NPFloatArray], float] | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True,operator:"MeshDataCacheOperatorBase | None"=None,tesselate_tri:bool=True):
         super(TextFileOutput, self).__init__()
         if filetrunk is not None and filename is not None:
             raise RuntimeError("Please set either filename or filetrunk - both are the same, just for backwards compatibility")

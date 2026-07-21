@@ -164,7 +164,7 @@ class BaseAxisymmetricPinchoffAndCoalescence(InterfaceEquations):
 
 
     # Obtain the name of the interface (e.g "interface"), the name of the axis (e.g. "axis") of symmetry
-    def get_interface_and_axisymm_name(self,remesher:Remesher2d,cg:"FiniteElementCodeGenerator" | None=None)->tuple[str,str]:
+    def get_interface_and_axisymm_name(self,remesher:Remesher2d,cg:"FiniteElementCodeGenerator | None"=None)->tuple[str,str]:
         if cg is None:
             cg=self.get_current_code_generator()
         my_name=cg.get_full_name()

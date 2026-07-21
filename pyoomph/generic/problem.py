@@ -28,6 +28,7 @@ from __future__ import annotations
  
 import glob
 import sys
+import warnings
 
 import scipy.sparse
 
@@ -50,7 +51,6 @@ import numpy
 from ..meshes.mesh import  AnyMesh,AnySpatialMesh, MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d, ODEStorageMesh, InterfaceMesh,MeshFromTemplate,MeshFromTemplateBase,MeshTemplate
 from .codegen import EquationTree,BaseEquations, FiniteElementCodeGenerator,CombinedEquations,DummyEquations, InterfaceEquations #ODEEquations
 from ..solvers.generic import DefaultMatrixType, EigenSolverWhich, GenericLinearSystemSolver,GenericEigenSolver
-#from ..solvers.scipy import SuperLUSerial,ScipyEigenSolver
 from ..expressions.units import *
 from ..expressions import get_global_symbol,cartesian,axisymmetric,axisymmetric_flipped,radialsymmetric,BaseCoordinateSystem,nondim,testfunction,weak,OptionalCoordinateSystem
 from ..solvers.generic import get_default_linear_solver,get_default_eigen_solver
@@ -117,7 +117,7 @@ class GenericProblemHooks:
     A class that can be attached to a problem to call additional functions after e.g. newton solves, etc.
     """
     def __init__(self):
-        self._problem:"Problem" | None=None
+        self._problem:Problem | None = None
         
     def get_problem(self)->"Problem":
         if self._problem is None:
@@ -142,7 +142,7 @@ class GenericProblemHooks:
     def actions_after_newton_step(self):
         pass
     
-    def before_assigning_equation_numbers(self,dof_selector:"_DofSelector" | None,before_equation_system:bool):
+    def before_assigning_equation_numbers(self,dof_selector:_DofSelector | None,before_equation_system:bool):
         pass
     
     def actions_after_parameter_increase(self,param:str):
@@ -161,11 +161,11 @@ class PeriodicOrbit:
     """ 
     A class representing a periodic orbit.
     """
-    def __init__(self,problem:"Problem",mode,lyap_coeff,param,omega,pvalue,pdvalue,al,order,GL_order,T_constraint):
+    def __init__(self,problem:"Problem",mode:Literal["collocation","central","bspline","BDF2"],lyap_coeff,param,omega,pvalue,pdvalue,al,order:int,GL_order:int,T_constraint:Literal["plane", "phase"]):
          self.problem=problem
-         self.mode=mode
+         self.mode:Literal["collocation","central","bspline","BDF2"]=mode
          self.order,self.GL_order=order,GL_order
-         self.T_constraint=T_constraint
+         self.T_constraint:Literal["plane", "phase"]=T_constraint
          self.emerging_info={"lyap_coeff":lyap_coeff,"param":param,"omega":omega,"pvalue":pvalue,"dpvalue":pdvalue,"al":al}
          
     def __enter__(self):
@@ -208,7 +208,12 @@ class PeriodicOrbit:
             raise ValueError("Periodic orbit handler not activated (anymore)")
         return handler
     
-    def get_T(self,dimensional=True):
+    @overload
+    def get_T(self, dimensional: Literal[True]=True) -> ExpressionOrNum: ...
+    @overload
+    def get_T(self, dimensional: Literal[False]) -> float: ...
+    
+    def get_T(self, dimensional: bool = True) -> Union[ExpressionOrNum, float]:
         """
         Returns the period time of the orbit
         """
@@ -288,7 +293,7 @@ class PeriodicOrbit:
     def evaluate_observable_time_integral(self,*observables:str):
         if len(observables)==0:
             raise ValueError("No observables given")
-        accus={n:0 for n in observables}
+        accus:dict[str,Expression]={n:Expression(0) for n in observables}
         obs_info:dict[str,tuple[AnySpatialMesh,str]]={}
         for o in observables:
             splt=o.split("/")
@@ -313,7 +318,7 @@ class PeriodicOrbit:
             return accus[observables[0]]*T
         
     
-    def change_sampling(self,*,mode:Literal["collocation","central","bspline","BDF2"]=None,NT:int | None=None, order:int | None=None,GL_order:int | None=None,T_constraint:Literal["plane", "phase"] | None=None,do_solve:bool=True):
+    def change_sampling(self,*,mode:Literal["collocation","central","bspline","BDF2"] | None =None,NT:int | None=None, order:int | None=None,GL_order:int | None=None,T_constraint:Literal["plane", "phase"] | None=None,do_solve:bool=True):
         if mode is None:
             mode=self.mode
         if order is None:
@@ -619,7 +624,7 @@ class Problem(_pyoomph.Problem):
         self.add_time_stepper_pt(self.timestepper)
 
         #: Set this to a (list of ) plotter(s) to automatically plot on :py:meth:`output` calls. If set to ``None``, no plotting will be done.
-        self.plotter:list["MatplotlibPlotter"] | "MatplotlibPlotter" | None=None
+        self.plotter:list[MatplotlibPlotter] | MatplotlibPlotter | None=None
         self.plot_in_dedicated_process:bool=False
         self._plotting_process:subprocess.Popen | None=None
         self.latex_printer:_pyoomph.LaTeXPrinter | None=None
@@ -628,7 +633,7 @@ class Problem(_pyoomph.Problem):
         self.states_compression_level:int | None=6
         self.eigen_data_in_states:int | bool=False # Either True (all calced eigenvalues/vectors or a number to limit the number of stored eigendata)
         self.continuation_data_in_states:bool=False
-        self.additional_equations:Literal[0] | "EquationTree"=0
+        self.additional_equations:Literal[0] | EquationTree=0
 
         self.default_1d_file_extension:Literal["txt", "mat"] | list[Literal["txt", "mat"]]="txt"
 
@@ -638,7 +643,7 @@ class Problem(_pyoomph.Problem):
         self.eigenvector_position_scale:float=1 # if eigenmode="real" or "imag", we shift the positions multiplied with this factor (for "abs" or "angle") is is not done
         self._abort_current_run=False
 
-        self._custom_assembler:"CustomAssemblyBase" | None=None
+        self._custom_assembler:CustomAssemblyBase | None=None
 
         self.default_ccode_expression_mode:str="" # Try to factor all expressions with "factor"
         #: Debugging the Jacobian by finite differences with a given epsilon (None or <=0 means no debugging). 
@@ -729,7 +734,7 @@ class Problem(_pyoomph.Problem):
         if testscaling is not None:
             neweqs+=TestScaling(**{name:testscaling})
         if initial_condition is not None:
-            neweqs+=InitialCondition(**{name:initial_condition})
+            neweqs+=InitialCondition(degraded_start="auto",IC_name="", **{name:initial_condition})
         self+=neweqs@domain
         return var(name,domain=domain),testfunction(name,domain=domain)
 
@@ -833,8 +838,10 @@ class Problem(_pyoomph.Problem):
     def remove_equations(self, path:str, of_type:type[BaseEquations] | None=None, only_if:Callable[[BaseEquations],bool]=lambda eqn: True,fail_if_not_exist:bool=False):
         if hasattr(self,"_equation_system"):
             eqtree = self._equation_system.get_by_path(path)
-        else:
+        elif self.additional_equations is not None and self.additional_equations!=0:
             eqtree=self.additional_equations.get_by_path(path)
+        else:
+            eqtree=None
         if eqtree is None:
             if fail_if_not_exist:
                 raise RuntimeError("No equations found at the path "+str(path))
@@ -972,7 +979,7 @@ class Problem(_pyoomph.Problem):
         if solver_cb is not None:
             ref=getattr(solver_cb, "_current_problem_ref", None)
             if ref is not None and ref() is self:
-                solver_cb._current_problem_ref = None
+                solver_cb._current_problem_ref = None # type:ignore
         # set_custom_assembler() (used e.g. for deflation/bifurcation tracking, see
         # bifurcation_tools.py) creates a plain Python-level mutual reference: this Problem's
         # own _custom_assembler points to the assembler, and the assembler's own "problem"
@@ -1209,17 +1216,20 @@ class Problem(_pyoomph.Problem):
             raise RuntimeError("Cannot set the problem coordinate system to None")
         if isinstance(csys,str):
             if csys=="axisymmetric":
-                csys=axisymmetric
+                csysd=axisymmetric
             elif csys=="axisymmetric_flipped":
-                csys=axisymmetric_flipped
+                csysd=axisymmetric_flipped
             elif csys=="cartesian":
-                csys=cartesian
+                csysd=cartesian
             elif csys=="radialsymmetric":
-                csys=radialsymmetric
+                csysd=radialsymmetric
             else:
                 raise RuntimeError("Unknown coordinate system: "+csys)
-
-        self._coordinate_system=csys
+        elif not isinstance(csys,BaseCoordinateSystem):
+            raise RuntimeError("Unknown coordinate system: "+str(csys))
+        else:
+            csysd=csys
+        self._coordinate_system=csysd
 
 
     @overload
@@ -1461,10 +1471,11 @@ class Problem(_pyoomph.Problem):
                 amplitude=max_amplitude            
         else:
             amplitude=1        
-        if self.get_last_eigenmodes_m() is not None and self.get_last_eigenmodes_m()[eigenvector]!=0:
-            additional_factor_right=numpy.exp(1j*self.get_last_eigenmodes_m()[eigenvector]*phi0)
-            additional_factor_left=numpy.exp(1j*self.get_last_eigenmodes_m()[eigenvector]*(phi0+numpy.pi))
-            plotter._eigenanimation_m=self.get_last_eigenmodes_m()[eigenvector]
+        eigenmodes_m=self.get_last_eigenmodes_m()
+        if eigenmodes_m is not None and eigenmodes_m[eigenvector]!=0:
+            additional_factor_right=numpy.exp(1j*eigenmodes_m[eigenvector]*phi0)
+            additional_factor_left=numpy.exp(1j*eigenmodes_m[eigenvector]*(phi0+numpy.pi))
+            plotter._eigenanimation_m=eigenmodes_m[eigenvector]
             
         plotter._eigenvector_for_animation=eigenfunction
         from pathlib import Path
@@ -1528,6 +1539,7 @@ class Problem(_pyoomph.Problem):
             hook.actions_on_output(self._output_step)
         self._equation_system._do_output(self._output_step, stage)
 
+        statefname: str | None = None
         if self.write_states:
             statedir = os.path.join(self.get_output_directory(), "_states")
             Path(statedir).mkdir(parents=True, exist_ok=True)
@@ -1542,7 +1554,11 @@ class Problem(_pyoomph.Problem):
         if self._plotting_process is not None:
             if self._plotting_process.poll() is not None:
                 raise RuntimeError("Plotting process failed. Have a look at " + self.get_output_directory("_dedicated_plotter_log.txt"))
+            if not self.write_states:
+                raise RuntimeError("Plotting process is active, but write_states is False. Please set write_states to True to use the plotting process")
             print("State file written, invoking plotting process")
+            assert self._plotting_process.stdin is not None
+            assert statefname is not None
             self._plotting_process.stdin.write((statefname + "\n").encode("utf-8"))
             self._plotting_process.stdin.flush()
 
@@ -1626,8 +1642,8 @@ class Problem(_pyoomph.Problem):
             self._last_eigenvalues=numpy.array([biftrack_eigen])
             self._last_eigenvectors=numpy.array([self._get_bifurcation_eigenvector()])            
             if biftrack_mode=="azimuthal" or biftrack_mode=="cartesian_normal_mode":
-                print("Azimuthal:",self._azimuthal_mode_param_m,self._azimuthal_mode_param_m.value)
-                print("Cartesian normal mode:",self._cartesian_normal_mode_param_k,self._cartesian_normal_mode_param_k.value)
+                print("Azimuthal:",self._azimuthal_mode_param_m,self._azimuthal_mode_param_m.value) #type:ignore
+                print("Cartesian normal mode:",self._cartesian_normal_mode_param_k,self._cartesian_normal_mode_param_k.value) # type:ignore
                 raise RuntimeError("Check on the bifurcation tracking, whether the values of m and k are still correct")
             self._adapt_eigenindex=0 # We will adapt with the first eigenfunction, which is the one that is critical at the bifurcation point. We could also make this user-definable in the future
             self.deactivate_bifurcation_tracking()            
@@ -1642,9 +1658,9 @@ class Problem(_pyoomph.Problem):
         for name,mesh in self._meshdict.items():
             if isinstance(mesh,ODEStorageMesh): continue
             reset(mesh)
-            errs = mesh.get_elemental_errors()
+            mesh_errs = mesh.get_elemental_errors()
             for i,b in enumerate(mesh.elements()):
-                b._elemental_error_max_override=errs[i]
+                b._elemental_error_max_override=mesh_errs[i]
                 
         if self._adapt_eigenindex is not None and self._last_eigenvectors is not None and len(self._last_eigenvectors)>self._adapt_eigenindex:
             _pyoomph.set_use_eigen_Z2_error_estimators(True)
@@ -1655,18 +1671,18 @@ class Problem(_pyoomph.Problem):
             for name,mesh in self._meshdict.items():
                 if isinstance(mesh,ODEStorageMesh): continue            
                 #print("EVEM ",name)
-                errs = mesh.get_elemental_errors()
+                mesh_errs = mesh.get_elemental_errors()
                 for i,b in enumerate(mesh.elements()):
-                    b._elemental_error_max_override=max(errs[i],b._elemental_error_max_override)
+                    b._elemental_error_max_override=max(mesh_errs[i],b._elemental_error_max_override)
             #print("DONE")
             if has_imag:
                 #print("HAS IMAG",numpy.amax(numpy.absolute(numpy.imag(evect))),numpy.amax(numpy.absolute(numpy.real(evect))))
                 self.set_eigenfunction_as_dofs(self._adapt_eigenindex,mode="imag")
                 for name,mesh in self._meshdict.items():
                     if isinstance(mesh,ODEStorageMesh): continue            
-                    errs = mesh.get_elemental_errors()
+                    mesh_errs = mesh.get_elemental_errors()
                     for i,b in enumerate(mesh.elements()):
-                        b._elemental_error_max_override=max(errs[i],b._elemental_error_max_override)
+                        b._elemental_error_max_override=max(mesh_errs[i],b._elemental_error_max_override)
             #print("DONE IMAG")
             #print(backup)
             #print(backup_pinned)
@@ -1934,7 +1950,7 @@ class Problem(_pyoomph.Problem):
             #eqs.get_current_code_generator().set_remove_underived_modes(self._cartesian_normal_mode_stability.real_contribution_name,set([1]))
             #eqs.get_current_code_generator().set_remove_underived_modes(self._cartesian_normal_mode_stability.imag_contribution_name,set([1]))
 
-    def set_custom_assembler(self,assm:"CustomAssemblyBase" | None) -> None:
+    def set_custom_assembler(self,assm:"CustomAssemblyBase | None") -> None:
         if self._custom_assembler:
             self._custom_assembler.finalize()
             
@@ -1946,7 +1962,7 @@ class Problem(_pyoomph.Problem):
         else:
             self.use_custom_residual_jacobian=False
 
-    def get_custom_assembler(self) -> "CustomAssemblyBase" | None:
+    def get_custom_assembler(self) -> "CustomAssemblyBase | None":
         return self._custom_assembler
     
 
@@ -2002,7 +2018,7 @@ class Problem(_pyoomph.Problem):
         return self.get_ccompiler()
 
 
-    def __iadd__(self,other:MeshTemplate | EquationTree | GenericProblemHooks | "MatplotlibPlotter"):        
+    def __iadd__(self,other:"MeshTemplate | EquationTree | GenericProblemHooks | MatplotlibPlotter"):        
         if self._initialised:
             from ..output.plotting import BasePlotter
             if not isinstance(other,(BasePlotter,GenericProblemHooks)):
@@ -2305,7 +2321,7 @@ class Problem(_pyoomph.Problem):
                 if not self.is_quiet():
                     print("PARAMETER ", varname, "SET TO",newvalue)
 
-    def before_assigning_equation_numbers(self,dof_selector:"_DofSelector" | None):
+    def before_assigning_equation_numbers(self,dof_selector:"_DofSelector | None"):
         for hook in self._hooks:
             hook.before_assigning_equation_numbers(dof_selector,True)
         self._equation_system._before_assigning_equations(dof_selector)         
@@ -3543,18 +3559,33 @@ class Problem(_pyoomph.Problem):
             tp.set_time(t)
     
 
-    def define_global_parameter(self, **params: float) -> _pyoomph.GiNaC_GlobalParam | tuple[_pyoomph.GiNaC_GlobalParam, ...]:
+    def define_global_parameter(self, **params: float) -> _pyoomph.GiNaC_GlobalParam:
         """
-        Define one or more global parameters for the problem.
+        Define a single global parameter for the problem.
 
         Args:
-            **params: A dictionary of parameter names and their corresponding initial values.
+            **params: Exactly one keyword argument giving the parameter name and its initial value.
 
         Returns:
-            Union[_pyoomph.GiNaC_GlobalParam, Tuple[_pyoomph.GiNaC_GlobalParam, ...]]: 
-            The defined global parameter(s), which can be used in expressions.
+            _pyoomph.GiNaC_GlobalParam: The defined global parameter, which can be used in expressions.
 
+        .. deprecated::
+            Passing more than one keyword argument at once (to define several parameters in a
+            single call, returning a tuple) still works, but is deprecated and emits a
+            DeprecationWarning - call this once per parameter instead. Python's type system
+            cannot express a return type that depends on the runtime length of **params, so the
+            declared return type here only reflects the single-parameter form; the multi-parameter
+            form's actual tuple return is not statically visible.
         """
+        if len(params) > 1:
+            warnings.warn(
+                "define_global_parameter(...) called with more than one keyword argument at once - "
+                "this legacy form (returning a tuple of parameters) is deprecated. Call "
+                "define_global_parameter once per parameter instead, e.g. "
+                "p1=self.define_global_parameter(p1=...) and p2=self.define_global_parameter(p2=...).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         res = []
         for p, v in params.items():
             res.append(self.get_global_parameter(p))
@@ -3562,7 +3593,7 @@ class Problem(_pyoomph.Problem):
         if len(res) == 1:
             return res[0]
         else:
-            return tuple([*res])
+            return tuple([*res]) #type:ignore
         
     def setup_for_stability_analysis(self,analytic_hessian:bool=True,use_hessian_symmetry:bool=True,improve_pitchfork_on_unstructured_mesh:bool=False,improve_pitchfork_coordsys:"OptionalCoordinateSystem"=None,improve_pitchfork_position_coordsys:"OptionalCoordinateSystem"=None,shared_shapes_for_multi_assemble:bool | None=None,azimuthal_stability:bool | None=None,additional_cartesian_mode:bool | None=None):
         """
@@ -4257,8 +4288,10 @@ class Problem(_pyoomph.Problem):
         
         TS=self.get_scaling("temporal")
         if dt is None:
-            dt=1.0/max(abs(eigenvals[eigenmode].real),abs(eigenvals[eigenmode].imag))*TS/time_steps_per_growth
-        self.initialise_dt(float(dt/TS))
+            dtfixed=1.0/max(abs(eigenvals[eigenmode].real),abs(eigenvals[eigenmode].imag))*TS/time_steps_per_growth
+        else:
+            dtfixed=dt
+        self.initialise_dt(float(dtfixed/TS))
         dofs,_=self.get_current_dofs()
         dofs=numpy.array(dofs)
         evect=self.get_last_eigenvectors()[eigenmode]
@@ -4266,7 +4299,7 @@ class Problem(_pyoomph.Problem):
         self._taken_already_an_unsteady_step=True
         self.time_stepper_pt().set_num_unsteady_steps_done(2)
         self.time_stepper_pt().undo_make_steady()
-        self.initialise_dt(float(dt/TS))
+        self.initialise_dt(float(dtfixed/TS))
         self.time_stepper_pt().set_weights()
         
         
@@ -4718,27 +4751,32 @@ class Problem(_pyoomph.Problem):
         if len(history_dofs)==0:
             raise ValueError("No history dofs provided")
         knots=[]
+        # T_constraint_mode is the integer code _start_orbit_tracking expects; T_constraint itself
+        # (the "plane"/"phase" string) must stay unmodified below - it is also passed straight
+        # through to PeriodicOrbit(...), whose own T_constraint attribute is declared (and used
+        # elsewhere, e.g. PeriodicOrbit.change_sampling()) as that same Literal["plane","phase"]
+        # string, not this integer code.
         if T_constraint=="plane":
-            T_constraint=0
+            T_constraint_mode=0
         elif T_constraint=="phase":
-            T_constraint=1
+            T_constraint_mode=1
         else:
             raise ValueError("Invalid T_constraint: "+str(T_constraint))
         T_nd=float(T/self.get_scaling("temporal"))
         if mode=="floquet":
-            self._start_orbit_tracking(history_dofs,T_nd,0,-1,knots,T_constraint)
+            self._start_orbit_tracking(history_dofs,T_nd,0,-1,knots,T_constraint_mode)
         elif mode=="bspline":
             if order<1:
                 raise ValueError("Invalid bspline order: "+str(order))
-            self._start_orbit_tracking(history_dofs,T_nd,order,GL_order,knots,T_constraint)
+            self._start_orbit_tracking(history_dofs,T_nd,order,GL_order,knots,T_constraint_mode)
         elif mode=="central":
-            self._start_orbit_tracking(history_dofs,T_nd,-1,-1,knots,T_constraint)
+            self._start_orbit_tracking(history_dofs,T_nd,-1,-1,knots,T_constraint_mode)
         elif mode=="BDF2":
-            self._start_orbit_tracking(history_dofs,T_nd,-2,-1,knots,T_constraint)
+            self._start_orbit_tracking(history_dofs,T_nd,-2,-1,knots,T_constraint_mode)
         elif mode=="collocation":
             if order<1:
                 raise ValueError("Invalid collocation order: "+str(order))
-            self._start_orbit_tracking(history_dofs,T_nd,-2-order,GL_order,knots,T_constraint)
+            self._start_orbit_tracking(history_dofs,T_nd,-2-order,GL_order,knots,T_constraint_mode)
         else:
             raise ValueError("Invalid mode: "+str(mode))
         res=PeriodicOrbit(self,mode,0,None,0,None,None,0,order,GL_order,T_constraint)

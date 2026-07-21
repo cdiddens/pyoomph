@@ -58,7 +58,7 @@ from . import _pyoomph_core as _pyoomph
 
 _pyoomph.set_jit_include_dir(os.path.join(os.path.dirname(os.path.abspath(__file__)), "jitbridge"))
 
-_default_c_compiler="system"
+_default_c_compiler:Literal["tcc","system"]="system"
 
 
 def get_default_c_compiler():
@@ -155,7 +155,7 @@ class GeneralSolverCallback(_pyoomph.GeneralSolverCallback):
 		if len(vwgt)==0:
 			vwgt=None
 		opts=pymetis.Options()
-		opts.set_defaults()
+		opts.set_defaults() #type:ignore
 		if options[0]==0:
 			opts.objtype=pymetis.ObjType.CUT
 		elif options[0]==1:
@@ -202,7 +202,7 @@ def _set_pardiso_solver() -> bool:
 def _set_petsc_mumps_solver() -> bool:
 	try:
 		from .solvers.petsc import PETSc,PETSCMUMPSSolver,SlepcMUMPSEigenSolver #type:ignore
-		if not PETSc.Sys.hasExternalPackage("mumps"):
+		if not PETSc.Sys.hasExternalPackage("mumps"): #type:ignore
 			return False
 		set_default_linear_solver("petsc_mumps")
 		set_default_eigen_solver("slepc_mumps")

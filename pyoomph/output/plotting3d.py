@@ -57,7 +57,7 @@ class _PyVistaPlotPartMesh(_PyVistaPlotPartBase):
         
 
 class PyVistaPlotter(BasePlotter):
-    def __init__(self, problem:"Problem" | None=None,filetrunk:str="plot_{:05d}",fileext:str | list[str]="svg",eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs",):
+    def __init__(self, problem:"Problem | None"=None,filetrunk:str="plot_{:05d}",fileext:str | list[str]="svg",eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs",):
         super().__init__(problem=problem,eigenvector=eigenvector,eigenmode=eigenmode) #type:ignore[arg-type] # problem may be attached later via "problem += plotter"
         self.filetrunk=filetrunk
         self.fileext=fileext
@@ -65,7 +65,7 @@ class PyVistaPlotter(BasePlotter):
         self.add_eigen_to_mesh_positions=False
         self._output_dir="_plots"
 
-    def _get_mesh_data(self,msh:str | "AnySpatialMesh",problem_name:str=""):        
+    def _get_mesh_data(self,msh:"str | AnySpatialMesh",problem_name:str=""):        
         return self.get_problem(problem_name=problem_name).get_cached_mesh_data(msh,nondimensional=False,tesselate_tri=False,eigenvector=self.eigenvector,eigenmode=self.eigenmode,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions)
         
                 
@@ -83,7 +83,7 @@ class PyVistaPlotter(BasePlotter):
         
         
         
-    def _get_meshio_data(self,msh:str | "AnySpatialMesh",problem_name:str=""):
+    def _get_meshio_data(self,msh:"str | AnySpatialMesh",problem_name:str=""):
         from .meshio import _convert_mesh_to_meshio
         return _convert_mesh_to_meshio(self.get_problem(), self._get_mesh_data(msh,problem_name=problem_name))
 

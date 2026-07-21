@@ -229,7 +229,7 @@ def pretty_xml(element:ET.Element, indent:str, newline:str, level:int=0):
 
 
 class _MeshFileOutput(_BaseNumpyOutput):
-	def __init__(self,mesh:"AnySpatialMesh",ftrunk:str="output",in_subdir:bool=True,file_ext:str="vtu",tesselate_tri:bool=False,write_pvd:bool | None=None,eigenvector:int | list[int] | None=None,eigenmode:"MeshDataEigenModes"="abs",nondimensional:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True,history_index:int=0,operator:"MeshDataCacheOperatorBase" | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True):
+	def __init__(self,mesh:"AnySpatialMesh",ftrunk:str="output",in_subdir:bool=True,file_ext:str="vtu",tesselate_tri:bool=False,write_pvd:bool | None=None,eigenvector:int | list[int] | None=None,eigenmode:"MeshDataEigenModes"="abs",nondimensional:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True,history_index:int=0,operator:"MeshDataCacheOperatorBase | None"=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True):
 		super().__init__(mesh)
 		self.fname_trunk=ftrunk
 		self.file_ext=file_ext
@@ -587,7 +587,7 @@ class MeshFileOutput(GenericOutput):
 	OpCartesianExtrusion=MeshDataCartesianExtrusion
 	OpRotationalExtrusion=MeshDataRotationalExtrusion
 
-	def __init__(self,filetrunk:str | None=None,tesselate_tri:bool=False,file_ext:str="vtu",eigenvector:int | list[int] | None=None,eigenmode:"MeshDataEigenModes"="abs",nondimensional:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True,history_index:int=0,operator:"MeshDataCacheOperatorBase" | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True):
+	def __init__(self,filetrunk:str | None=None,tesselate_tri:bool=False,file_ext:str="vtu",eigenvector:int | list[int] | None=None,eigenmode:"MeshDataEigenModes"="abs",nondimensional:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True,history_index:int=0,operator:"MeshDataCacheOperatorBase | None"=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True):
 		super(MeshFileOutput, self).__init__()
 		self.filetrunk=filetrunk
 		self.tesselate_tri=tesselate_tri

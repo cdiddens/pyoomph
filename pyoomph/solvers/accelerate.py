@@ -49,7 +49,7 @@ if not hasattr(_pyoomph,"MacAccelerateSparseSolver"):
 # "qr" (default; general, also handles unsymmetric square systems), "cholesky"/"ldlt"/
 # "ldlt_unpivoted"/"ldlt_sbk"/"ldlt_tpp" (symmetric, square matrices only - only the upper
 # triangle of the given matrix is used), "cholesky_at_a" (least-squares via A^T A).
-MacAccelerateMethod = Literal["qr", "cholesky", "ldlt", "ldlt_unpivoted", "ldlt_sbk", "ldlt_tpp", "cholesky_at_a"]
+MacAccelerateMethod:TypeAlias = Literal["qr", "cholesky", "ldlt", "ldlt_unpivoted", "ldlt_sbk", "ldlt_tpp", "cholesky_at_a"]
 
 
 @GenericLinearSystemSolver.register_solver()

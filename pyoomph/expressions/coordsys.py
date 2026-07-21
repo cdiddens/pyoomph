@@ -505,6 +505,13 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
             taa = var(name + "_aa")
             element.set_scaling(**{name + "_aa": name})
             element.set_test_scaling(**{name + "_aa": name})
+        else:
+            # Axisymmetric coordinates only have two in-plane dimensions (r,z) plus the
+            # always-present azimuthal component (folded into "_aa" above) - there is no
+            # meaningful ndim=3 (or higher) case here, unlike the generic Cartesian
+            # implementation. Without this check, falling through with txx/tyy/txy/taa
+            # never assigned would raise a confusing NameError below instead.
+            raise RuntimeError("define_tensor_field: ndim="+str(ndim)+" is not supported for AxisymmetricCoordinateSystem (only ndim=1 or ndim=2)")
         if not symmetric:
             tyx = element.define_scalar_field(name + "_yx", space)
             tyx = var(name + "_yx")

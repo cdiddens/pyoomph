@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
 class CustomAssemblyBase:    
     def __init__(self) -> None:
-        self.problem:"Problem" | None=None            
+        self.problem:"Problem | None"=None            
 
     def _set_problem(self,problem:"Problem"):
         self.problem=problem

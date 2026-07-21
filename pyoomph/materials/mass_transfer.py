@@ -330,7 +330,7 @@ class LagrangeMultiplierMassTransferModel(FluidPropMassTransferModel):
         return var("masstrans_"+name)
 
 class LagrangeMultiplierMassTransferModelLiquidGas(LagrangeMultiplierMassTransferModel):
-    def __init__(self,props_inside:"PureLiquidProperties" | "MixtureLiquidProperties",props_outside:"PureGasProperties" | "MixtureGasProperties"):
+    def __init__(self,props_inside:"PureLiquidProperties | MixtureLiquidProperties",props_outside:"PureGasProperties | MixtureGasProperties"):
         super(LagrangeMultiplierMassTransferModelLiquidGas, self).__init__(props_inside,props_outside)        
         if props_inside.state_of_matter!="liquid":
             raise RuntimeError("This mass transfer model only works for liquids as inner phase")
@@ -393,7 +393,7 @@ class DifferenceDrivenMassTransferModelLiquidGas(DifferenceDrivenMassTransferMod
         props_inside: The properties of the liquid phase
         props_outside: The properties of the gas phase        
     """
-    def __init__(self,props_inside:"PureLiquidProperties" | "MixtureLiquidProperties",props_outside:"PureGasProperties" | "MixtureGasProperties"):
+    def __init__(self,props_inside:"PureLiquidProperties | MixtureLiquidProperties",props_outside:"PureGasProperties | MixtureGasProperties"):
         super(DifferenceDrivenMassTransferModelLiquidGas, self).__init__(props_inside,props_outside)
         if props_inside.state_of_matter!="liquid":
             raise RuntimeError("This mass transfer model only works for liquids as inner phase")

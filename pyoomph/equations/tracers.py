@@ -57,7 +57,7 @@ class TracerParticles(Equations):
         super(TracerParticles, self).__init__()
         self.advection_expression=advection
         self.tracer_name=tracer_name
-        self._mesh:"AnySpatialMesh" | None=None
+        self._mesh:"AnySpatialMesh | None"=None
         self.distance=distance
 
 

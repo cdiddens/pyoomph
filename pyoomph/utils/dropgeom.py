@@ -29,7 +29,7 @@ from __future__ import annotations
 from .._pyoomph_core import Expression
 import numpy
 from ..output.meshio import IntegralObservableOutput
-from ..expressions import square_root,pi,asin,sin,cos,absolute,rational_num,weak,dot,testfunction,scale_factor,div,grad,vector,acos,ExpressionNumOrNone,ExpressionOrNum,cartesian,Expression,CustomMathExpression,subexpression,log,is_zero,atan2
+from ..expressions import square_root,pi,asin,sin,cos,absolute,rational_num,weak,dot,testfunction,scale_factor,div,grad,vector,acos,ExpressionNumOrNone,ExpressionOrNum,cartesian,CustomMathExpression,subexpression,log,is_zero,atan2
 from ..expressions.interpol import InterpolateSpline1d
 from ..expressions.units import meter,milli,newton,kilogram,second,degree
 from .. import Equations,Problem,var,var_and_test,GlobalLagrangeMultiplier,WeakContribution,LineMesh,InitialCondition,TestScaling,Scaling,DirichletBC,IntegralObservables,TextFileOutput
@@ -37,8 +37,8 @@ from ..typings import *
 from scipy import integrate
 
 
-YoungLaplaceFixationEnum=Literal["contact_angle","volume","base_radius","apex_height"]
-YoungLaplaceFixationsType=set[YoungLaplaceFixationEnum]|dict[YoungLaplaceFixationEnum,ExpressionOrNum]
+YoungLaplaceFixationEnum:TypeAlias=Literal["contact_angle","volume","base_radius","apex_height"]
+YoungLaplaceFixationsType:TypeAlias=set[YoungLaplaceFixationEnum]|dict[YoungLaplaceFixationEnum,ExpressionOrNum]
 
 class DropletGeometry:
     """

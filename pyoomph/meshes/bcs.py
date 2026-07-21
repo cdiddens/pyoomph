@@ -51,7 +51,7 @@ class BoundaryCondition(Equations):
         super(BoundaryCondition, self).__init__()
         self.mesh = None
         self.active = True
-        self.mesh:"AnySpatialMesh" | None=None
+        self.mesh:"AnySpatialMesh | None"=None
 
     def setup(self):
         pass

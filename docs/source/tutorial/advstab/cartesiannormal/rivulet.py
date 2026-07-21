@@ -26,7 +26,8 @@ class RivuletProblem(Problem):
     def __init__(self):
         super().__init__()
         # Contact angle and slip length
-        self.theta,self.sliplength=self.define_global_parameter(theta=90*degree,sliplength=1) 
+        self.theta=self.define_global_parameter(theta=90*degree)
+        self.sliplength=self.define_global_parameter(sliplength=1)
         
     def define_problem(self):        
         self+=RivuletMesh() # Add a 2d mesh       

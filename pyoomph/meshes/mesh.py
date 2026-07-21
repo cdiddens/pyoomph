@@ -66,7 +66,7 @@ AnyMesh:TypeAlias = "AnySpatialMesh | ODEStorageMesh"
 BulkTemplateMesh:TypeAlias = "MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d"
 
 
-def assert_spatial_mesh(mesh: AnyMesh | "MeshFromTemplateBase" | None) -> AnySpatialMesh:
+def assert_spatial_mesh(mesh: "AnyMesh | MeshFromTemplateBase | None") -> AnySpatialMesh:
     if mesh is None:
         raise RuntimeError("Mesh is None")
     elif isinstance(mesh, ODEStorageMesh):
@@ -118,7 +118,7 @@ class BaseMesh(abc.ABC):
         self._initial_interface_refinement = {}
         # Tracer particles -> name to tracer instance
         self._tracers: dict[str, _pyoomph.TracerCollection] = {}
-        self._codegen: "FiniteElementCodeGenerator" | None
+        self._codegen: "FiniteElementCodeGenerator | None"
         self._eqtree: "EquationTree"
 
     def get_code_gen(self) -> "FiniteElementCodeGenerator":
@@ -201,12 +201,12 @@ class BaseMesh(abc.ABC):
             yield self.boundary_node_pt(bn, i)
 
     @overload
-    def get_mesh(self, name: str, return_None_if_not_found: Literal[False] = ...) -> "MeshFromTemplate1d" | "MeshFromTemplate2d" | "MeshFromTemplate3d" | "InterfaceMesh": ...
+    def get_mesh(self, name: str, return_None_if_not_found: Literal[False] = ...) -> "MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d | InterfaceMesh": ...
 
     @overload
-    def get_mesh(self, name: str, return_None_if_not_found: Literal[True]) -> "MeshFromTemplate1d" | "MeshFromTemplate2d" | "MeshFromTemplate3d" | "InterfaceMesh" | None: ...
+    def get_mesh(self, name: str, return_None_if_not_found: Literal[True]) -> "MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d | InterfaceMesh | None": ...
 
-    def get_mesh(self, name: str, return_None_if_not_found: bool = False) -> "MeshFromTemplate1d" | "MeshFromTemplate2d" | "MeshFromTemplate3d" | "InterfaceMesh" | None:
+    def get_mesh(self, name: str, return_None_if_not_found: bool = False) -> "MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d | InterfaceMesh | None":
         splt = name.split("/")
         if len(splt) == 1:
             if not (name in self._interfacemeshes.keys()):
@@ -527,7 +527,7 @@ class MeshTemplate(_pyoomph.MeshTemplate):
         ]
         self._meshfile = None
         #: Must be set to allow for remeshing.
-        self.remesher: "RemesherBase" | None = None
+        self.remesher: "RemesherBase | None" = None
         self.auto_find_opposite_interface_connections = True
         self._template_override = None
         self._interior_boundaries: set[str] = set()
@@ -760,7 +760,7 @@ class MeshTemplate(_pyoomph.MeshTemplate):
 
 
 class MeshFromTemplateBase(BaseMesh):
-    def __init__(self, problem: "Problem", templatemesh: MeshTemplate, domainname: str, eqtree: "EquationTree", previous_mesh: "BulkTemplateMesh" | None = None):
+    def __init__(self, problem: "Problem", templatemesh: MeshTemplate, domainname: str, eqtree: "EquationTree", previous_mesh: "BulkTemplateMesh | None" = None):
         # Not super().__init__(): self is a MeshFromTemplate1d/2d/3d instance, which (due to the
         # nanobind single-inheritance restriction, see _install_mixin) is not a real subclass of
         # MeshFromTemplateBase/BaseMesh, so super(MeshFromTemplateBase, self) would fail its MRO check.
@@ -1189,11 +1189,29 @@ class MeshFromTemplateBase(BaseMesh):
         return self._evaluate_extremum_wrapper(name,-1,dimensional=dimensional,as_float=as_float,return_x=return_x)
 
 
-class MeshFromTemplate1d(_pyoomph.TemplatedMeshBase1d):
+if TYPE_CHECKING:
+    # _install_mixin() (see its docstring above) copies MeshFromTemplateBase's members onto
+    # MeshFromTemplate1d/2d/3d at runtime without adding it to __bases__, since nanobind does
+    # not support combining a bound C++ base with an additional Python base in the same class.
+    # A static type checker has no such restriction - here (TYPE_CHECKING only, never executed)
+    # each concrete class instead really inherits from both, so every MeshFromTemplateBase/
+    # BaseMesh member (get_code_gen, _interfacemeshes, _eqtree, get_full_name, ...) is visible
+    # automatically, without having to hand-declare each one as they get used (as happened
+    # before for get_code_gen). Only members the *C++* base also defines under the same name
+    # (e.g. boundary_elements, whose auto-generated binding is less precise than the overloads
+    # below) still need restating directly on the concrete class: Python's MRO would otherwise
+    # let the C++ base's version - first in this bases tuple - win over MeshFromTemplateBase's.
+    class _MeshFromTemplate1dTypingBase(_pyoomph.TemplatedMeshBase1d, MeshFromTemplateBase): pass
+    class _MeshFromTemplate2dTypingBase(_pyoomph.TemplatedMeshBase2d, MeshFromTemplateBase): pass
+    class _MeshFromTemplate3dTypingBase(_pyoomph.TemplatedMeshBase3d, MeshFromTemplateBase): pass
+else:
+    _MeshFromTemplate1dTypingBase = _pyoomph.TemplatedMeshBase1d
+    _MeshFromTemplate2dTypingBase = _pyoomph.TemplatedMeshBase2d
+    _MeshFromTemplate3dTypingBase = _pyoomph.TemplatedMeshBase3d
+
+
+class MeshFromTemplate1d(_MeshFromTemplate1dTypingBase):
     if TYPE_CHECKING:
-        # See the identical block on InterfaceMesh: declarations only, supplied at runtime by
-        # _install_mixin(MeshFromTemplate1d, MeshFromTemplateBase) below.
-        def get_full_name(self) -> str: ...
         @overload
         def boundary_elements(self, b: str, with_directions: Literal[False] = ...) -> Iterator[_pyoomph.OomphGeneralisedElement]: ...
         @overload
@@ -1221,11 +1239,8 @@ class MeshFromTemplate1d(_pyoomph.TemplatedMeshBase1d):
 _install_mixin(MeshFromTemplate1d, MeshFromTemplateBase)
 
 
-class MeshFromTemplate2d(_pyoomph.TemplatedMeshBase2d):
+class MeshFromTemplate2d(_MeshFromTemplate2dTypingBase):
     if TYPE_CHECKING:
-        # See the identical block on InterfaceMesh: declarations only, supplied at runtime by
-        # _install_mixin(MeshFromTemplate2d, MeshFromTemplateBase) below.
-        def get_full_name(self) -> str: ...
         @overload
         def boundary_elements(self, b: str, with_directions: Literal[False] = ...) -> Iterator[_pyoomph.OomphGeneralisedElement]: ...
         @overload
@@ -1250,11 +1265,8 @@ class MeshFromTemplate2d(_pyoomph.TemplatedMeshBase2d):
 _install_mixin(MeshFromTemplate2d, MeshFromTemplateBase)
 
 
-class MeshFromTemplate3d(_pyoomph.TemplatedMeshBase3d):
+class MeshFromTemplate3d(_MeshFromTemplate3dTypingBase):
     if TYPE_CHECKING:
-        # See the identical block on InterfaceMesh: declarations only, supplied at runtime by
-        # _install_mixin(MeshFromTemplate3d, MeshFromTemplateBase) below.
-        def get_full_name(self) -> str: ...
         @overload
         def boundary_elements(self, b: str, with_directions: Literal[False] = ...) -> Iterator[_pyoomph.OomphGeneralisedElement]: ...
         @overload
@@ -1301,33 +1313,36 @@ def MeshFromTemplate(problem: "Problem", templatemesh: MeshTemplate, domainname:
 
 ######################################################
 
-class InterfaceMesh(_pyoomph.InterfaceMesh):
+if TYPE_CHECKING:
+    # See the identical block above MeshFromTemplate1d for the general rationale. BaseMesh's
+    # members (_interfacemeshes, get_code_gen, elements, ...) are now visible automatically
+    # via this typing-only base; only boundary_elements/get_mesh (also defined by the *C++*
+    # base, less precisely) still need restating directly on InterfaceMesh below.
+    class _InterfaceMeshTypingBase(_pyoomph.InterfaceMesh, BaseMesh): pass
+else:
+    _InterfaceMeshTypingBase = _pyoomph.InterfaceMesh
+
+
+class InterfaceMesh(_InterfaceMeshTypingBase):
     """
     A mesh that is added to the boundary to add Neumann terms or setting Dirichlet conditions or add new fields directly on the interface, like e.g. surfactants.
     """
     if TYPE_CHECKING:
-        # Declarations only, never executed (TYPE_CHECKING is False at runtime): the real
-        # implementations are supplied by _install_mixin(InterfaceMesh, BaseMesh) below. These
-        # exist purely so a static type checker knows InterfaceMesh has BaseMesh's members too,
-        # since it is no longer a nominal (real) subclass of BaseMesh -- see _install_mixin.
-        _interfacemeshes: dict[str, "InterfaceMesh"]
-        def get_code_gen(self) -> "FiniteElementCodeGenerator": ...
-        def elements(self) -> Iterator[_pyoomph.OomphGeneralisedElement]: ...
         @overload
         def boundary_elements(self, b: str, with_directions: Literal[False] = ...) -> Iterator[_pyoomph.OomphGeneralisedElement]: ...
         @overload
         def boundary_elements(self, b: str, with_directions: Literal[True]) -> Iterator[tuple[_pyoomph.OomphGeneralisedElement, int]]: ...
         def boundary_elements(self, b: str, with_directions: bool = ...) -> Iterator[_pyoomph.OomphGeneralisedElement] | Iterator[tuple[_pyoomph.OomphGeneralisedElement, int]]: ...
         @overload
-        def get_mesh(self, name: str, return_None_if_not_found: Literal[False] = ...) -> "MeshFromTemplate1d" | "MeshFromTemplate2d" | "MeshFromTemplate3d" | "InterfaceMesh": ...
+        def get_mesh(self, name: str, return_None_if_not_found: Literal[False] = ...) -> "MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d | InterfaceMesh": ...
         @overload
-        def get_mesh(self, name: str, return_None_if_not_found: Literal[True]) -> "MeshFromTemplate1d" | "MeshFromTemplate2d" | "MeshFromTemplate3d" | "InterfaceMesh" | None: ...
-        def get_mesh(self, name: str, return_None_if_not_found: bool = ...) -> "MeshFromTemplate1d" | "MeshFromTemplate2d" | "MeshFromTemplate3d" | "InterfaceMesh" | None: ...
+        def get_mesh(self, name: str, return_None_if_not_found: Literal[True]) -> "MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d | InterfaceMesh | None": ...
+        def get_mesh(self, name: str, return_None_if_not_found: bool = ...) -> "MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d | InterfaceMesh | None": ...
         def _pre_compile_interface_equations(self, tree_depth: int) -> None: ...
         def _compile_interface_equations(self, tree_depth: int) -> None: ...
         def _generate_interface_elements(self, tree_depth: int) -> None: ...
 
-    def __init__(self, problem: "Problem", parent: "AnySpatialMesh", intername: str, eqtree: "EquationTree", previous_mesh: "InterfaceMesh" | None = None):
+    def __init__(self, problem: "Problem", parent: "AnySpatialMesh", intername: str, eqtree: "EquationTree", previous_mesh: "InterfaceMesh | None" = None):
         super(InterfaceMesh, self).__init__()
         # self is not nominally a BaseMesh (see _install_mixin); the explicit unbound call
         # still works fine at runtime since BaseMesh.__init__ only duck-types on self's attributes.
@@ -1336,7 +1351,7 @@ class InterfaceMesh(_pyoomph.InterfaceMesh):
         # super().__init__(problem)
         self._set_problem(problem, eqtree.get_code_gen()._code)
         self._parent: "AnySpatialMesh" = parent
-        self._opposite_interface_mesh: "InterfaceMesh" | None = None
+        self._opposite_interface_mesh: "InterfaceMesh | None" = None
         self._interface_name: str = intername
         self._codegen = eqtree.get_code_gen()
         self._eqtree: "EquationTree" = eqtree
@@ -1683,7 +1698,7 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
         super().__init__()
         #print("ODEStorageMesh: Creating ODE storage mesh for domain", domainname,get_mpi_rank())
         self._set_problem(problem, None)
-        self._eqtree: "EquationTree" | None = eqtree
+        self._eqtree: "EquationTree | None" = eqtree
         self._eqtree._mesh = self  # type:ignore
         self._codegen = eqtree._codegen  # type:ignore
         self._name = domainname
@@ -1700,6 +1715,10 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
     def get_code_gen(self) -> "FiniteElementCodeGenerator":
         assert self._codegen is not None
         return self._codegen
+
+    def get_eqtree(self) -> "EquationTree":
+        assert self._eqtree is not None
+        return self._eqtree
 
     def get_problem(self) -> "Problem":
         return self._get_problem() #type:ignore

@@ -39,11 +39,11 @@ DefaultMatrixType=scipy.sparse.csr_matrix
 _TypeGenericLASolver=TypeVar("_TypeGenericLASolver",bound=type["GenericLinearSystemSolver"])
 _TypeGenericEigenSolver=TypeVar("_TypeGenericEigenSolver",bound=type["GenericEigenSolver"])
 
-CoreLinearSolverEnum=Literal["superlu","umfpack","petsc","mumps","pardiso","accelerate","petsc_mumps"]
-CoreEigenSolverEnum=Literal["scipy","pardiso","slepc","accelerate","slepc_mumps"]
-EigenSolverWhich=Literal["LM","SM","LR","SR","SI"]
-_default_la_solver:"GenericLinearSystemSolver" | CoreLinearSolverEnum | None=None
-_default_eigen_solver:"GenericEigenSolver" | CoreEigenSolverEnum | None=None
+CoreLinearSolverEnum:TypeAlias=Literal["superlu","umfpack","petsc","mumps","pardiso","accelerate","petsc_mumps"]
+CoreEigenSolverEnum:TypeAlias=Literal["scipy","pardiso","slepc","accelerate","slepc_mumps"]
+EigenSolverWhich:TypeAlias=Literal["LM","SM","LR","SR","SI"]
+_default_la_solver:"GenericLinearSystemSolver | CoreLinearSolverEnum | None"=None
+_default_eigen_solver:"GenericEigenSolver | CoreEigenSolverEnum | None"=None
 
 if TYPE_CHECKING:
     from ..generic.problem import Problem
@@ -66,19 +66,19 @@ def _unavailable_solver_message(kind:str,name:str,available:list[str],e:Exceptio
 		msg+=" See "+hint[1]+" for how to install "+hint[0]+"."
 	return msg
 
-def set_default_linear_solver(solv:"GenericLinearSystemSolver" | CoreLinearSolverEnum):
+def set_default_linear_solver(solv:"GenericLinearSystemSolver | CoreLinearSolverEnum"):
 	global _default_la_solver
 	_default_la_solver=solv
 
-def get_default_linear_solver()->"GenericLinearSystemSolver" | CoreLinearSolverEnum | None:
+def get_default_linear_solver()->"GenericLinearSystemSolver | CoreLinearSolverEnum | None":
 	return _default_la_solver
 
 
-def set_default_eigen_solver(solv:"GenericEigenSolver" | CoreEigenSolverEnum):
+def set_default_eigen_solver(solv:"GenericEigenSolver | CoreEigenSolverEnum"):
 	global _default_eigen_solver
 	_default_eigen_solver=solv
 
-def get_default_eigen_solver()->"GenericEigenSolver" | CoreEigenSolverEnum | None:
+def get_default_eigen_solver()->"GenericEigenSolver | CoreEigenSolverEnum | None":
 	return _default_eigen_solver
 
 class GenericLinearSystemSolver:
@@ -99,7 +99,7 @@ class GenericLinearSystemSolver:
 		return p
 
 	@problem.setter
-	def problem(self,p:"Problem" | None):
+	def problem(self,p:"Problem | None"):
 		self._problem_wr=weakref.ref(p) if p is not None else (lambda:None)
 
 	def setup_solver(self)->None:
@@ -368,7 +368,7 @@ class GenericEigenSolver:
 		return p
 
 	@problem.setter
-	def problem(self,p:"Problem" | None):
+	def problem(self,p:"Problem | None"):
 		self._problem_wr=weakref.ref(p) if p is not None else (lambda:None)
 
 	def _before_assigning_equation_numbers(self)->None:

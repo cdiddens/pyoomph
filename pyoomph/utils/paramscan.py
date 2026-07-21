@@ -115,7 +115,7 @@ class SingleParallelParameterSimulation:
     def __init__(self,subdir:str | None,additional_args:list[str]):
         self._INTERNAL_subdir=subdir
         self._INTERNAL_additional_args=additional_args
-        self._INTERNAL_pararunner:"ParallelParameterScan" | None=None
+        self._INTERNAL_pararunner:"ParallelParameterScan | None"=None
         self._INTERNAL_script:str | None=None
 
     def _INTERNAL_assemble_args(self) -> list[str]:

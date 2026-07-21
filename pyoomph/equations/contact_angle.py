@@ -45,11 +45,11 @@ class GenericContactLineModel:
         It contains the basic methods that are common to all contact line models.
     """
     def __init__(self):
-        self._dyn_cl_equation:"DynamicContactLineEquations" | "SimplePopovContactLineEquations" | None=None
+        self._dyn_cl_equation:"DynamicContactLineEquations | SimplePopovContactLineEquations | None"=None
         self._starts_pinned:bool=False
         self._ic_for_dyncl:dict[str,ExpressionOrNum]={}
 
-    def _setup_for_equation(self,dyn_cl_eq:"DynamicContactLineEquations" | "SimplePopovContactLineEquations"):
+    def _setup_for_equation(self,dyn_cl_eq:"DynamicContactLineEquations | SimplePopovContactLineEquations"):
         if (self._dyn_cl_equation is not None) and self._dyn_cl_equation!=dyn_cl_eq:
             raise RuntimeError("Contact line model used for different equations")
         self._dyn_cl_equation=dyn_cl_eq
@@ -151,7 +151,7 @@ class UnpinnedContactLine(GenericContactLineModel):
         self.cl_speed_scale=cl_speed_scale
         self.cl_speed_exponent=1 # set to 3 for Cox-Voinov
 
-    def get_unpinned_motion_velocity_expression(self,dyncl:"DynamicContactLineEquations" | None,theta_act_for_popov:ExpressionNumOrNone=None) -> Expression:
+    def get_unpinned_motion_velocity_expression(self,dyncl:"DynamicContactLineEquations | None",theta_act_for_popov:ExpressionNumOrNone=None) -> Expression:
         """
         Get the velocity with which the contact line moves towards the equilibrium contact angle. In this method, we just return a Cox-Voinov-like expression:
         The velocity of the contact line is proportional to the difference between the equilibrium contact angle and the actual contact angle, possibly raised to a power given by ``cl_speed_exponent``.
@@ -175,10 +175,10 @@ class UnpinnedContactLine(GenericContactLineModel):
         else:
             return self.cl_speed_scale*(theta_eq**self.cl_speed_exponent-theta_act**self.cl_speed_exponent)
 
-    def get_unpinned_indicator(self,dyncl:"DynamicContactLineEquations" | None,simple_popov_unpinned_indicator_name:str | None=None)->Expression:
+    def get_unpinned_indicator(self,dyncl:"DynamicContactLineEquations | None",simple_popov_unpinned_indicator_name:str | None=None)->Expression:
         return Expression(1) # Always unpinned
 
-    def get_equilibrium_contact_angle_expression(self,dyncl:"DynamicContactLineEquations" | None) -> Expression:
+    def get_equilibrium_contact_angle_expression(self,dyncl:"DynamicContactLineEquations | None") -> Expression:
         if self.theta_eq is None:
             raise RuntimeError("Unpinned contact line has no equilibrium contact angle set. Set it in the constructor or use the set_missing_information to pass the initial contact angle as default value in the Problem.define_problem method")
         return subexpression(self.theta_eq)
@@ -364,14 +364,14 @@ class StickSlipContactLine(UnpinnedContactLine):
         return eqs
 
 
-    def get_unpinned_indicator(self,dyncl:"DynamicContactLineEquations" | None,simple_popov_unpinned_indicator_name:str | None=None):
+    def get_unpinned_indicator(self,dyncl:"DynamicContactLineEquations | None",simple_popov_unpinned_indicator_name:str | None=None):
         if dyncl is not None:
             return var(dyncl.unpinned_indicator_name)
         else:
             assert simple_popov_unpinned_indicator_name is not None
             return var(simple_popov_unpinned_indicator_name)
 
-    def define_stick_slip_dynamics_residuals(self,dyncl:"DynamicContactLineEquations" | None,simple_popov_theta_act_name:str | None=None)->BaseEquations | None:
+    def define_stick_slip_dynamics_residuals(self,dyncl:"DynamicContactLineEquations | None",simple_popov_theta_act_name:str | None=None)->BaseEquations | None:
         if dyncl is not None:
             up, up_test = var_and_test(dyncl.unpinned_indicator_name)
             oc = var(dyncl.override_dynamics_name)
@@ -549,7 +549,7 @@ class YoungDupreContactLine(StickSlipContactLine):
         self._delta_sigma:ExpressionNumOrNone=None
         self.line_tension=line_tension
 
-    def get_equilibrium_contact_angle_expression(self,dyncl:"DynamicContactLineEquations" | None):
+    def get_equilibrium_contact_angle_expression(self,dyncl:"DynamicContactLineEquations | None"):
         assert self._delta_sigma is not None
         assert dyncl is not None
         if self.line_tension is None:
@@ -588,7 +588,7 @@ class KwokNeumannContactLine(StickSlipContactLine):
         self.beta=beta
         self.sigma_sg_0:ExpressionNumOrNone=sigma_sg_0
 
-    def get_equilibrium_contact_angle_expression(self,dyncl:"DynamicContactLineEquations" | None):
+    def get_equilibrium_contact_angle_expression(self,dyncl:"DynamicContactLineEquations | None"):
         assert dyncl is not None
         sigma = dyncl.get_surface_tension_at_cl_expression()
         assert self.sigma_sg_0 is not None
@@ -625,7 +625,7 @@ class WenzelContactLine(YoungDupreContactLine):
         super(WenzelContactLine, self).__init__(sigma_sg=sigma_sg,sigma_sl=sigma_sl,cl_speed_scale=cl_speed_scale,cl_speed_exponent=cl_speed_exponent)
         self.roughness=roughness
 
-    def get_equilibrium_contact_angle_expression(self, dyncl:"DynamicContactLineEquations" | None):
+    def get_equilibrium_contact_angle_expression(self, dyncl:"DynamicContactLineEquations | None"):
         assert self._delta_sigma is not None
         assert dyncl is not None
         return acos(maximum(-1, self.roughness*self._delta_sigma / dyncl.get_surface_tension_at_cl_expression()))
@@ -651,7 +651,7 @@ class CassieBaxterContactLine(YoungDupreContactLine):
         super(CassieBaxterContactLine, self).__init__(sigma_sg=sigma_sg, sigma_sl=sigma_sl,cl_speed_scale=cl_speed_scale,cl_speed_exponent=cl_speed_exponent)
         self.pillar_fraction = pillar_fraction # between 0 (all air) and 1 (all solid)
 
-    def get_equilibrium_contact_angle_expression(self,dyncl:"DynamicContactLineEquations" | None):
+    def get_equilibrium_contact_angle_expression(self,dyncl:"DynamicContactLineEquations | None"):
         assert dyncl is not None
         sigma_cl=dyncl.get_surface_tension_at_cl_expression()        
         assert self._delta_sigma is not None

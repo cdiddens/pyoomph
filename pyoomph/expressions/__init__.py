@@ -452,7 +452,7 @@ def inverse_matrix(M:Expression,n:int=0,use_subexpression_for_det:bool=True,fill
 	return _pyoomph.GiNaC_inverse_matrix(M,Expression(n),Expression(flags))
 
 
-def var_and_test(n: str, tag: list[str] = [], domain: None | str | "FiniteElementCodeGenerator" = None) -> tuple[Expression, Expression]:
+def var_and_test(n: str, tag: list[str] = [], domain: "None | str | FiniteElementCodeGenerator" = None) -> tuple[Expression, Expression]:
 	"""
 	Bind a variable of an unknown field the corresponding test function for a given name.
 
@@ -547,7 +547,7 @@ def partial_z(f:ExpressionOrNum,order:int=1)->Expression:
 
 
 
-def div(arg:ExpressionOrNum,lagrangian:bool=False,matrix:bool | None=None,nondim:bool=False,coordsys:"BaseCoordinateSystem" | None=None) -> Expression:
+def div(arg:ExpressionOrNum,lagrangian:bool=False,matrix:bool | None=None,nondim:bool=False,coordsys:"BaseCoordinateSystem | None"=None) -> Expression:
 	"""
 	Compute the divergence of the given argument. On surfaces, i.e. with a co-dimension, it is the surface divergence.	
 

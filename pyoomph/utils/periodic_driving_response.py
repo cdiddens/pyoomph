@@ -73,7 +73,8 @@ class PeriodicDrivingResponse():
         self.problem=problem
         if self.problem.is_initialised():
             raise RuntimeError("Create PeriodicDrivingResponse(...) before the problem is initialized")
-        self.omega_param,self.hopf_param=self.problem.define_global_parameter(**{self.omega_param_name:1,self.hopf_param_name:0})
+        self.omega_param=self.problem.define_global_parameter(**{self.omega_param_name:1})
+        self.hopf_param=self.problem.define_global_parameter(**{self.hopf_param_name:0})
         problem+=_DrivingForResponse(self.omega_param,self.hopf_param)@self.driving_domain_name
         self._omega_val_before_init:ExpressionNumOrNone=None
         self.problem.setup_for_stability_analysis(analytic_hessian=True,improve_pitchfork_on_unstructured_mesh=False,azimuthal_stability=False)

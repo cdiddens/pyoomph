@@ -45,7 +45,7 @@ class ActivityModel:
     A generic class to predict activity coefficients of mixtures. 
     """
     registered_models:dict[str,type["ActivityModel"]]={}
-    model_instances:dict[str,"ActivityModel" | None]={}
+    model_instances:dict[str,"ActivityModel | None"]={}
     name:str
     @classmethod
     def register_activity_model(cls, *, override:bool=False):

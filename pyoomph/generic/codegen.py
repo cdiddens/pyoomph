@@ -63,7 +63,7 @@ class FiniteElementCodeGenerator(_pyoomph.FiniteElementCode):
         super(FiniteElementCodeGenerator, self).__init__()
         self._code:_pyoomph.DynamicBulkElementInstance | None=None
         self._name:str | None=None
-        self._mesh:"AnyMesh" | None=None
+        self._mesh:"AnyMesh | None"=None
         self._dependent_integral_funcs:dict[str,Callable[...,ExpressionOrNum]]={}
         self._dependent_integral_funcs_is_vector_helper:dict[str,bool] = {}
         self._external_ode_fields:dict[str,tuple["FiniteElementCodeGenerator",str]]={}
@@ -187,9 +187,9 @@ class FiniteElementCodeGenerator(_pyoomph.FiniteElementCode):
     def get_scaling(self, n:str,testscale:Literal[True])->"Expression": ...
 
     @overload
-    def get_scaling(self, n:str,testscale:Literal["from_parent"])->"Expression" | None: ...
+    def get_scaling(self, n:str,testscale:Literal["from_parent"])->"Expression | None": ...
 
-    def get_scaling(self, n:str,testscale:bool | Literal["from_parent"]=False)->"Expression" | None: #type:ignore
+    def get_scaling(self, n:str,testscale:bool | Literal["from_parent"]=False)->"Expression | None": #type:ignore
 
         #print("OVERRIDE GET SCALING")
         eqs=self.get_equations()
@@ -260,7 +260,7 @@ class FiniteElementCodeGenerator(_pyoomph.FiniteElementCode):
         eqs._set_current_codegen(oldcg)
         return res
 
-    def get_parent_domain(self)->"FiniteElementCodeGenerator" | None:
+    def get_parent_domain(self)->"FiniteElementCodeGenerator | None":
         pd=self._get_parent_domain()
         if pd is None:
             return None
@@ -305,7 +305,7 @@ class FiniteElementCodeGenerator(_pyoomph.FiniteElementCode):
         exit()
 
 class ScalingException(Exception):
-    def __init__(self, msg:str, obj:"BaseEquations" | None=None):
+    def __init__(self, msg:str, obj:"BaseEquations | None"=None):
         fullmsg = msg
         if obj is not None:
             fullmsg = fullmsg + "\nDefined Scales (on object " + str(obj) + "):\n"
@@ -343,7 +343,7 @@ class BaseEquations(_pyoomph.Equations):
     def change_output_directory(self,newdir:str,eqtree:"EquationTree"):
         pass
     
-    def add_weak(self,a:"ExpressionOrNum",b:str | "ExpressionOrNum",*,dimensional_dx:bool=False,lagrangian:bool=False,coordinate_system:"OptionalCoordinateSystem"=None,destination:str | None=None):
+    def add_weak(self,a:"ExpressionOrNum",b:"str | ExpressionOrNum",*,dimensional_dx:bool=False,lagrangian:bool=False,coordinate_system:"OptionalCoordinateSystem"=None,destination:str | None=None):
         """
         Adds the weak contribution ``(a, b)`` (i.e. the integral of ``a`` times the test function ``b``) to the residuals.
 
@@ -363,7 +363,7 @@ class BaseEquations(_pyoomph.Equations):
         self.add_residual(weak(a,b,dimensional_dx=dimensional_dx,coordinate_system=coordinate_system,lagrangian=lagrangian),destination=destination)
         return self
     
-    def add_dweak_dt(self,a:"ExpressionOrNum",b:str | "ExpressionOrNum",*,dimensional_dx:bool=False,lagrangian:bool=False,coordinate_system:"OptionalCoordinateSystem"=None,destination:str | None=None,scheme:"TimeSteppingScheme"="BDF1"):
+    def add_dweak_dt(self,a:"ExpressionOrNum",b:"str | ExpressionOrNum",*,dimensional_dx:bool=False,lagrangian:bool=False,coordinate_system:"OptionalCoordinateSystem"=None,destination:str | None=None,scheme:"TimeSteppingScheme"="BDF1"):
         if isinstance(b,str):
             b=testfunction(b)
         self.add_residual(time_derivative_of_integral(weak(a,b,dimensional_dx=dimensional_dx,coordinate_system=coordinate_system,lagrangian=lagrangian),scheme=scheme),destination=destination)
@@ -422,7 +422,7 @@ class BaseEquations(_pyoomph.Equations):
             return cg.get_problem()
 
     @property
-    def _problem(self)->"Problem" | None:
+    def _problem(self)->"Problem | None":
         # Stored as a weakref, not a strong reference: a pure-Python Equations object has
         # no C++-side get_problem() to fall back on (unlike meshes/codegens/MeshTemplate),
         # and is never explicitly cleared during Problem.release() - a strong reference
@@ -430,7 +430,7 @@ class BaseEquations(_pyoomph.Equations):
         return self._problem_wr() if self._problem_wr is not None else None
 
     @_problem.setter
-    def _problem(self,p:"Problem" | None):
+    def _problem(self,p:"Problem | None"):
         self._problem_wr=weakref.ref(p) if p is not None else None
 
     def get_creation_info(self)->str | None:
@@ -467,7 +467,7 @@ class BaseEquations(_pyoomph.Equations):
         super().__init__()
         self._created_at:str | None
         self._final_element:BaseEquations | None = None
-        self._coordinate_system:"BaseCoordinateSystem" | None = None
+        self._coordinate_system:"BaseCoordinateSystem | None" = None
         self._additional_fields:dict[str,ExpressionOrNum] = {}
         self._additional_fields_also_on_interface:dict[str,ExpressionOrNum] = {}
         self._additional_testfuncs:dict[str,ExpressionOrNum] = {}
@@ -475,14 +475,14 @@ class BaseEquations(_pyoomph.Equations):
         self._initial_conditions:dict[str,dict[str,tuple[ExpressionOrNum,str,"BaseEquations"]]] = {}
         self._Dirichlet_conditions:dict[str,tuple[ExpressionOrNum,"BaseEquations"]] = {}
         self._code:_pyoomph.DynamicBulkElementInstance | None = None
-        self._scaling:dict[str,"ExpressionOrNum" | str] = {}
-        self._test_scaling:dict[str,"ExpressionOrNum" | str]={}
+        self._scaling:dict[str,"ExpressionOrNum | str"] = {}
+        self._test_scaling:dict[str,"ExpressionOrNum | str"]={}
         self._scales_to_check_for_fields:set[str] = set()
         self._test_scales_to_check_for_fields:set[str] = set()
         #self._external_data_links:Dict[str,Tuple["ODEEquations",str]] = {}
         self._dimension = None
         self.default_timestepping_scheme:Literal["BDF2", "BDF1", "Newmark2"] | None = None
-        self._problem:"Problem" | None=None
+        self._problem:"Problem | None"=None
         self._residuals_for_tex:dict[str,list["Expression"]]={}
         # A list of mapping functions (lambda destination,residual_expression -> dict({destination:new_residual_expression}))
         self._residual_mapping_functions:list[Callable[[str,Expression],Expression | dict[str, Expression]]]=[]
@@ -625,7 +625,7 @@ class BaseEquations(_pyoomph.Equations):
         assert isinstance(cg,FiniteElementCodeGenerator)
         return cg
 
-    def _set_final_element(self, final:"BaseEquations" | None):
+    def _set_final_element(self, final:"BaseEquations | None"):
         self._final_element = final
 
     def define_field_by_substitution(self, fieldname:str, expr:"ExpressionOrNum", also_on_interface:bool=False):
@@ -640,7 +640,7 @@ class BaseEquations(_pyoomph.Equations):
         if also_on_interface:
             master._additional_testfuncs_also_on_interface[fieldname] = expr
 
-    def set_scaling(self,*,allow_scales_with_fields=False, **args:"ExpressionOrNum" | str):
+    def set_scaling(self,*,allow_scales_with_fields=False, **args:"ExpressionOrNum | str"):
         mst = self._get_combined_element()
         for n, v in args.items():
             if not isinstance(v,str):
@@ -654,7 +654,7 @@ class BaseEquations(_pyoomph.Equations):
                 if n in mst._scales_to_check_for_fields:
                     mst._scales_to_check_for_fields.remove(n)
 
-    def set_test_scaling(self, *, allow_scales_with_fields=False, **args:"ExpressionOrNum" | str):
+    def set_test_scaling(self, *, allow_scales_with_fields=False, **args:"ExpressionOrNum | str"):
         mst = self._get_combined_element()
         for n, v in args.items():
             if not isinstance(v, (_pyoomph.Expression,str)):
@@ -744,9 +744,9 @@ class BaseEquations(_pyoomph.Equations):
     def get_scaling(self, n:str,testscale:Literal[False]=...)->"ExpressionOrNum": ...
 
     @overload
-    def get_scaling(self, n:str,testscale:Literal["from_parent"])->"ExpressionOrNum" | None: ...
+    def get_scaling(self, n:str,testscale:Literal["from_parent"])->"ExpressionOrNum | None": ...
 
-    def get_scaling(self, n:str,testscale:bool | Literal["from_parent"]=False)->"ExpressionOrNum" | None:
+    def get_scaling(self, n:str,testscale:bool | Literal["from_parent"]=False)->"ExpressionOrNum | None":
         master = self._get_combined_element()
         cg=master._assert_codegen()
         #print("GETTING SCALE", n, self, master, self._scaling.get(n, None), self._scaling, self._is_ode(),hasattr(self, "get_parent_domain"), cg.get_parent_domain())
@@ -1016,7 +1016,7 @@ class BaseEquations(_pyoomph.Equations):
 
         assert cg.get_problem() is not None
 
-        def vr(name:str,domain:"FiniteElementCodeGenerator" | None=None)->"Expression":
+        def vr(name:str,domain:"FiniteElementCodeGenerator | None"=None)->"Expression":
             if dimensional:
                 return var(name,domain=domain,no_jacobian=no_jacobian,no_hessian=no_hessian)
             else:
@@ -1279,9 +1279,9 @@ class BaseEquations(_pyoomph.Equations):
     def get_equation_of_type(self, typ:type["BaseEquations"], *, exact_type:bool=False,always_as_list:Literal[True])->list["BaseEquations"]: ...
 
     @overload
-    def get_equation_of_type(self, typ:type["BaseEquations"], *, exact_type:bool=False,always_as_list:Literal[False]=False)->"BaseEquations" | None: ...
+    def get_equation_of_type(self, typ:type["BaseEquations"], *, exact_type:bool=False,always_as_list:Literal[False]=False)->"BaseEquations | None": ...
 
-    def get_equation_of_type(self, typ:type["BaseEquations"], *, exact_type:bool=False,always_as_list:bool=False)->list["BaseEquations"] | "BaseEquations" | None:
+    def get_equation_of_type(self, typ:type["BaseEquations"], *, exact_type:bool=False,always_as_list:bool=False)->'list["BaseEquations"] | BaseEquations | None':
         if exact_type:
             if type(self) is typ:
                 if always_as_list:
@@ -1311,7 +1311,7 @@ class BaseEquations(_pyoomph.Equations):
     @overload
     def __add__(self, other:"EquationTree")->"EquationTree": ...
 
-    def __add__(self, other:Literal[0] | "BaseEquations" | "EquationTree")->"CombinedEquations" | "EquationTree" | "BaseEquations":
+    def __add__(self, other:"Literal[0] | BaseEquations | EquationTree")->"CombinedEquations | EquationTree | BaseEquations":
         if other==0:
             return self
         if isinstance(other, BaseEquations):
@@ -1331,7 +1331,7 @@ class BaseEquations(_pyoomph.Equations):
             raise RuntimeError("Cannot add (+) Equation and " + other.__class__.__name__)
 
 
-    def add_local_function(self,name:str,expr:"ExpressionOrNum" | Callable[[], "ExpressionOrNum"])->tuple[list[str],int]:
+    def add_local_function(self,name:str,expr:'ExpressionOrNum | Callable[[], "ExpressionOrNum"]')->tuple[list[str],int]:
         """
         Adds a local function for the output. This are not degrees of freedom but only calculated node-wise on output.
         The same can be achieved by using LocalExpressions(...) instead.
@@ -1416,13 +1416,13 @@ class BaseEquations(_pyoomph.Equations):
 
 
 class EquationTree:
-    def __init__(self, eqs:BaseEquations | None=None, parent:"EquationTree" | None=None):
+    def __init__(self, eqs:BaseEquations | None=None, parent:"EquationTree | None"=None):
         super(EquationTree, self).__init__()
         self._name:str
         self._equations = eqs
         self._parent = parent
-        self._codegen:"FiniteElementCodeGenerator" | None=None
-        self._mesh:"AnyMesh" | None=None
+        self._codegen:"FiniteElementCodeGenerator | None"=None
+        self._mesh:"AnyMesh | None"=None
         self._children:dict[str,"EquationTree"] = {}
 
     def get_mesh(self)->"AnyMesh":
@@ -1511,7 +1511,7 @@ class EquationTree:
         for _,c in self._children.items():
             c._change_output_directory(newdir)
 
-    def _before_assigning_equations(self,dof_selector:"_DofSelector" | None):                
+    def _before_assigning_equations(self,dof_selector:"_DofSelector | None"):                
         if (self._mesh is not None) and (self._equations is not None):            
             assert self._codegen is not None
             oldcg = self._equations._get_current_codegen()
@@ -1834,10 +1834,10 @@ class EquationTree:
             v._finalize_equations(problem,second_loop=second_loop)
 
 
-    def get_parent(self) -> "EquationTree" | None:
+    def get_parent(self) -> "EquationTree | None":
         return self._parent
 
-    def get_full_path(self,for_child:"EquationTree" | None=None,sep:str="/")->str:
+    def get_full_path(self,for_child:"EquationTree | None"=None,sep:str="/")->str:
         if self._parent is not None:
             trunk=self._parent.get_full_path(self,sep=sep)
         else:
@@ -1861,7 +1861,7 @@ class EquationTree:
                     return k
         raise RuntimeError("Error in equation tree")
 
-    def get_by_path(self,path:str)->"EquationTree" | None:
+    def get_by_path(self,path:str)->"EquationTree | None":
         if path=="":
             return self
         pth=path.split("/")
@@ -1916,7 +1916,7 @@ class EquationTree:
         else:
             raise RuntimeError("Cannot add "+str(other)+" and "+str(self))
 
-    def __add__(self, other:"EquationTree" | BaseEquations | Literal[0])->"EquationTree":
+    def __add__(self, other:"EquationTree | BaseEquations | Literal[0]")->"EquationTree":
         if other==0:
             return self
         if isinstance(other,EquationTree):
@@ -2133,7 +2133,7 @@ class Equations(BaseEquations):
             master._azimuthal_r0_info[1].add("mesh"+zcomponent)
             master._azimuthal_r0_info[2].add("mesh"+zcomponent)
     
-    def _internal_define_scalar_field(self,name:str, space:"FiniteElementSpaceEnum", scale:"ExpressionOrNum" | str | None=None, testscale:"ExpressionOrNum" | str | None=None, discontinuous_refinement_exponent:float | None=None,allow_scales_with_fields:bool=False):
+    def _internal_define_scalar_field(self,name:str, space:"FiniteElementSpaceEnum", scale:"ExpressionOrNum | str | None"=None, testscale:"ExpressionOrNum | str | None"=None, discontinuous_refinement_exponent:float | None=None,allow_scales_with_fields:bool=False):
         master = self._get_combined_element()
         if master.get_parent_domain() is not None:
             # Check a bit what is possible
@@ -2177,7 +2177,7 @@ class Equations(BaseEquations):
             master._azimuthal_r0_info[2].add(name)
 
 
-    def define_scalar_field(self, name:str | list[str], space:"FiniteElementSpaceEnum",scale:"ExpressionOrNum" | str | None=None,testscale:"ExpressionOrNum" | str | None=None,discontinuous_refinement_exponent:float | None=None,allow_scales_with_fields:bool=False):
+    def define_scalar_field(self, name:str | list[str], space:"FiniteElementSpaceEnum",scale:"ExpressionOrNum | str | None"=None,testscale:"ExpressionOrNum | str | None"=None,discontinuous_refinement_exponent:float | None=None,allow_scales_with_fields:bool=False):
         """
         Define a scalar field on this domain. Must be called within the specified implementation of the method :py:meth:`~BaseEquations.define_fields`.
 
@@ -2354,8 +2354,8 @@ class ODEEquations(BaseEquations):
         """
         return _ode_coordinate_system
 
-    def define_ode_variable(self, *names: str, scale: "ExpressionOrNum" | None = None,
-                            testscale: "ExpressionOrNum" | None = None) -> None:
+    def define_ode_variable(self, *names: str, scale: "ExpressionOrNum | None" = None,
+                            testscale: "ExpressionOrNum | None" = None) -> None:
         """
         Defines the ODE variables.
 
@@ -2698,9 +2698,9 @@ class CombinedEquations(Equations):
     def get_equation_of_type(self, typ:type[BaseEquations], *, exact_type:bool=False,always_as_list:Literal[True])->list["BaseEquations"]: ...
 
     @overload
-    def get_equation_of_type(self, typ:type[BaseEquations], *, exact_type:bool=False,always_as_list:Literal[False]=False)->"BaseEquations" | None: ...
+    def get_equation_of_type(self, typ:type[BaseEquations], *, exact_type:bool=False,always_as_list:Literal[False]=False)->"BaseEquations | None": ...
 
-    def get_equation_of_type(self, typ:type[BaseEquations], *, exact_type:bool=False,always_as_list:bool=False)->list["BaseEquations"] | "BaseEquations" | None:
+    def get_equation_of_type(self, typ:type[BaseEquations], *, exact_type:bool=False,always_as_list:bool=False)->'list["BaseEquations"] | BaseEquations | None':
         res:list["BaseEquations"] | None = None
         for e in self._subelements:
             if isinstance(e, BaseEquations): #type:ignore
@@ -2916,7 +2916,7 @@ class InterfaceEquations(Equations):
                     elif dv == "mesh_x" or dv=="mesh_y" or dv=="mesh_z":
                         depvars_expanded.append(dv)
                     else:
-                        current:"AnySpatialMesh" | None = msh
+                        current:"AnySpatialMesh | None" = msh
                         while current is not None:
                             assert current._codegen is not None
                             ceqs=cast(Equations,current._codegen.get_equations()) 
@@ -3073,7 +3073,7 @@ class InterfaceEquations(Equations):
 
 
 class SpatialErrorEstimator(Equations):
-    def __init__(self, estimator_expression:"ExpressionOrNum" | list["ExpressionOrNum"]):
+    def __init__(self, estimator_expression:'ExpressionOrNum | list["ExpressionOrNum"]'):
         super(SpatialErrorEstimator, self).__init__()
         self.estimator_expression = estimator_expression
 
@@ -3189,7 +3189,7 @@ class ScalarField(Equations):
         testscale: Optional scaling of the test function (default is 1)
         residual: Optional residual to be added. Formulate it in terms of the scalar field and the test function.
     """
-    def __init__(self,name:str,space:"FiniteElementSpaceEnum",scale:"ExpressionOrNum" | None=None,testscale:"ExpressionOrNum" | None=None,residual:"ExpressionOrNum" | None=None):
+    def __init__(self,name:str,space:"FiniteElementSpaceEnum",scale:"ExpressionOrNum | None"=None,testscale:"ExpressionOrNum | None"=None,residual:"ExpressionOrNum | None"=None):
         super(ScalarField, self).__init__()
         self.name=name
         self.space:"FiniteElementSpaceEnum"=space
@@ -3216,7 +3216,7 @@ class VectorField(Equations):
         residual: Optional residual to be added. Formulate it in terms of the scalar field and the test function.
         dim: Vector dimension. If not set, it will be taken by the dimension of the mesh coordinates, i.e. the nodal dimension
     """
-    def __init__(self,name:str,space:"FiniteElementSpaceEnum",scale:"ExpressionOrNum" | None=None,testscale:"ExpressionOrNum" | None=None,residual:"ExpressionOrNum" | None=None,dim:int | None=None):
+    def __init__(self,name:str,space:"FiniteElementSpaceEnum",scale:"ExpressionOrNum | None"=None,testscale:"ExpressionOrNum | None"=None,residual:"ExpressionOrNum | None"=None,dim:int | None=None):
         super(VectorField, self).__init__()
         self.name=name
         self.space:"FiniteElementSpaceEnum"=space
@@ -3245,7 +3245,7 @@ class WeakContribution(BaseEquations):
         coordinate_system: The coordinate system in which the weak contribution is defined. If not set, the coordinate system of the equations or the problem is used.
         destination: The residual destination of the weak contribution. Can be used to define multiple residuals.
     """
-    def __init__(self,a:"ExpressionOrNum" | str,b:"Expression" | str,dimensional_dx:bool=False,lagrangian:bool=False,coordinate_system:BaseCoordinateSystem | None=None,destination:str | None=None):
+    def __init__(self,a:"ExpressionOrNum | str",b:"Expression | str",dimensional_dx:bool=False,lagrangian:bool=False,coordinate_system:BaseCoordinateSystem | None=None,destination:str | None=None):
         super(WeakContribution, self).__init__()
         self.dimensional_dx=dimensional_dx
         self.coordinate_system=coordinate_system
@@ -3272,7 +3272,7 @@ class ResidualContribution(BaseEquations):
         r: The residual to add (can be e.g. a :py:func:`~pyoomph.expressions.generic.weak` contribution).        
         destination: The residual destination of the weak contribution. Can be used to define multiple residuals.
     """
-    def __init__(self,r:"ExpressionOrNum" | str,destination:str | None=None):
+    def __init__(self,r:"ExpressionOrNum | str",destination:str | None=None):
         super(ResidualContribution, self).__init__()        
         self.destination=destination
         self.r=r

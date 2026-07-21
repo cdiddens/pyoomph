@@ -193,7 +193,7 @@ class GmshSizeCallback:
 
 
 
-def generate_mesh_to_file(geom:pygmsh.geo.Geometry, outdir:str, trunk:str, mesher:"GmshTemplate" | None=None,dim:int=2, order:int | None=None, algorithm:int | None=None, verbose:bool=False, recombine_algo:int | None=None,
+def generate_mesh_to_file(geom:pygmsh.geo.Geometry, outdir:str, trunk:str, mesher:"GmshTemplate | None"=None,dim:int=2, order:int | None=None, algorithm:int | None=None, verbose:bool=False, recombine_algo:int | None=None,
                           postgen_cb:Callable[[], None] | None=None, only_geo:bool=False,mesh_mode:str | None=None,mesh_size_callback:GmshSizeCallback | Callable[[int, int, float, float, float], float] | None=None,quiet:bool=False):
     if quiet:
         gmsh.option.setNumber("General.Terminal", 0) #type:ignore

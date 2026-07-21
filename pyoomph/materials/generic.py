@@ -46,11 +46,11 @@ if TYPE_CHECKING:
 
 import math
 
-MixQuantityDefinition=Literal["mass_fraction","wt","mole_fraction","volume_fraction","relative_humidity","RH"]
+MixQuantityDefinition:TypeAlias=Literal["mass_fraction","wt","mole_fraction","volume_fraction","relative_humidity","RH"]
 AnyMaterialProperties:TypeAlias="MaterialProperties | BaseLiquidProperties | BaseGasProperties | BaseSolidProperties | PureSolidProperties | PureLiquidProperties | PureGasProperties | MixtureLiquidProperties | MixtureGasProperties"
 OutputPropertiesType=dict[str,Callable[["MaterialProperties"], ExpressionNumOrNone] | None]
 DefaultSurfaceTensionType=dict[Literal["gas","solid","liquid"],ExpressionNumOrNone]
-PropertySampleRangeType=ExpressionOrNum|ArrayWithUnits|list[ExpressionOrNum]
+PropertySampleRangeType:TypeAlias=ExpressionOrNum|ArrayWithUnits|list[ExpressionOrNum]
 
 AnyFluidProperties:TypeAlias="PureLiquidProperties | PureGasProperties | MixtureLiquidProperties | MixtureGasProperties"
 AnyLiquidProperties:TypeAlias="PureLiquidProperties | MixtureLiquidProperties"
@@ -90,7 +90,7 @@ class BaseInterfaceProperties:
     """
     def _sort_phases(self,sideA:AnyMaterialProperties,sideB:AnyMaterialProperties)->tuple[AnyMaterialProperties,AnyMaterialProperties]:
         return sideA,sideB
-    def __init__(self,sideA:AnyMaterialProperties | "MixtureDefinitionComponents",sideB:AnyMaterialProperties | "MixtureDefinitionComponents"):
+    def __init__(self,sideA:"AnyMaterialProperties | MixtureDefinitionComponents",sideB:"AnyMaterialProperties | MixtureDefinitionComponents"):
         if isinstance(sideA,MixtureDefinitionComponents):
             sideA=Mixture(sideA)
         if isinstance(sideB,MixtureDefinitionComponents):
@@ -112,7 +112,7 @@ class BaseInterfaceProperties:
             raise RuntimeError("No latent heat set for "+name)
         return res
 
-    def set_mass_transfer_model(self,mdl:"MassTransferModelBase" | None) -> None:
+    def set_mass_transfer_model(self,mdl:"MassTransferModelBase | None") -> None:
         """
         Sets the mass transfer model.
         """
@@ -364,7 +364,7 @@ class MaterialProperties:
     def __rmul__(self,other:float | int | Expression)->"MixtureDefinitionComponent":
         return MixtureDefinitionComponent(self,other)
 
-    def __or__(self,other:AnyMaterialProperties)->BaseInterfaceProperties | 'LiquidLiquidInterfaceProperties' | 'LiquidGasInterfaceProperties' | 'LiquidSolidInterfaceProperties':
+    def __or__(self,other:AnyMaterialProperties)->"BaseInterfaceProperties | LiquidLiquidInterfaceProperties | LiquidGasInterfaceProperties | LiquidSolidInterfaceProperties":
         if isinstance(other,MaterialProperties): #type:ignore
             return get_interface_properties(self,other)
         elif isinstance(other,MixtureDefinitionComponents) or isinstance(other,MixtureDefinitionComponent):
@@ -538,7 +538,7 @@ class LiquidMixtureDefinitionComponent(MixtureDefinitionComponent):
     def __init__(self, compo: MaterialProperties, quant: ExpressionNumOrNone):
         super().__init__(compo, quant)
 
-    def __radd__(self,other:"MixtureDefinitionComponent" | MaterialProperties)->"LiquidMixtureDefinitionComponents":
+    def __radd__(self,other:"MixtureDefinitionComponent | MaterialProperties")->"LiquidMixtureDefinitionComponents":
         if other==0:
             return self # This allows to use e.g. sum(massfrac[c]*component[c] for c in ...)
         elif isinstance(other,LiquidMixtureDefinitionComponent):
@@ -548,7 +548,7 @@ class LiquidMixtureDefinitionComponent(MixtureDefinitionComponent):
         else:
             raise RuntimeError("Tried to mix a liquid with something else:"+str(self)+" and "+str(other))
 
-    def __add__(self,other:"MixtureDefinitionComponent" | MaterialProperties)->"LiquidMixtureDefinitionComponents":
+    def __add__(self,other:"MixtureDefinitionComponent | MaterialProperties")->"LiquidMixtureDefinitionComponents":
         return self.__radd__(other)
 
     def get_compo(self)->"PureLiquidProperties":
@@ -559,7 +559,7 @@ class GasMixtureDefinitionComponent(MixtureDefinitionComponent):
     def __init__(self, compo: MaterialProperties, quant: ExpressionNumOrNone):
         super().__init__(compo, quant)
 
-    def __radd__(self,other:"MixtureDefinitionComponent" | MaterialProperties)->"GasMixtureDefinitionComponents":
+    def __radd__(self,other:"MixtureDefinitionComponent | MaterialProperties")->"GasMixtureDefinitionComponents":
         if isinstance(other,GasMixtureDefinitionComponent):
             return GasMixtureDefinitionComponents([self,other])
         elif isinstance(other,PureGasProperties): 
@@ -567,7 +567,7 @@ class GasMixtureDefinitionComponent(MixtureDefinitionComponent):
         else:
             raise RuntimeError("Tried to mix a gas with something else:"+str(self)+" and "+str(other))
 
-    def __add__(self,other:"MixtureDefinitionComponent" | MaterialProperties)->"GasMixtureDefinitionComponents":
+    def __add__(self,other:"MixtureDefinitionComponent | MaterialProperties")->"GasMixtureDefinitionComponents":
         return self.__radd__(other)
 
     def get_compo(self)->"PureGasProperties":
@@ -578,7 +578,7 @@ class MixtureDefinitionComponents():
     def __init__(self,lst:list[MixtureDefinitionComponent]):
         self.lst=lst
 
-    def __add__(self,other:"MixtureDefinitionComponents" | MixtureDefinitionComponent | MaterialProperties)->"MixtureDefinitionComponents":
+    def __add__(self,other:"MixtureDefinitionComponents | MixtureDefinitionComponent | MaterialProperties")->"MixtureDefinitionComponents":
         if isinstance(other,MixtureDefinitionComponents):
             return MixtureDefinitionComponents(self.lst+other.lst)
         elif isinstance(other,MixtureDefinitionComponent):
@@ -701,7 +701,7 @@ class LiquidMixtureDefinitionComponents(MixtureDefinitionComponents):
             if not isinstance(a,LiquidMixtureDefinitionComponent):
                 RuntimeError("You tried to mix a gas with something else: "+str(self)+" contains "+str(a))
 
-    def __add__(self,other:"MixtureDefinitionComponents" | MixtureDefinitionComponent | MaterialProperties)->"LiquidMixtureDefinitionComponents":
+    def __add__(self,other:"MixtureDefinitionComponents | MixtureDefinitionComponent | MaterialProperties")->"LiquidMixtureDefinitionComponents":
         if isinstance(other,LiquidMixtureDefinitionComponents):
             return LiquidMixtureDefinitionComponents(self.lst+other.lst)
         elif isinstance(other,LiquidMixtureDefinitionComponent):
@@ -718,7 +718,7 @@ class GasMixtureDefinitionComponents(MixtureDefinitionComponents):
             if not isinstance(a,GasMixtureDefinitionComponent):
                 RuntimeError("You tried to mix a gas with something else: "+str(self)+" contains "+str(a))
 
-    def __add__(self,other:"MixtureDefinitionComponents" | MixtureDefinitionComponent | MaterialProperties)->"GasMixtureDefinitionComponents":
+    def __add__(self,other:"MixtureDefinitionComponents | MixtureDefinitionComponent | MaterialProperties")->"GasMixtureDefinitionComponents":
         if isinstance(other,GasMixtureDefinitionComponents):
             return GasMixtureDefinitionComponents(self.lst+other.lst)
         elif isinstance(other,GasMixtureDefinitionComponent):
@@ -1650,7 +1650,7 @@ class LiquidGasInterfaceProperties(BaseInterfaceProperties):
         fields["velocity_z"] = _pyoomph.Expression(0)
         return _pyoomph.GiNaC_subsfields(expr, fields, nondims, {})
 
-    def get_mass_transfer_model(self) -> "MassTransferModelBase" | None:
+    def get_mass_transfer_model(self) -> "MassTransferModelBase | None":
         """
         Returns the mass transfer model.
         """
@@ -1780,7 +1780,7 @@ class LiquidLiquidInterfaceProperties(BaseInterfaceProperties):
         self.surfactant_adsorption_rate={}
         self._mass_transfer_model=None
 
-    def get_mass_transfer_model(self) -> "MassTransferModelBase" | None:
+    def get_mass_transfer_model(self) -> "MassTransferModelBase | None":
         return self._mass_transfer_model
 
     def evaluate_at_initial_surfactant_concentrations(self,expr:ExpressionOrNum) -> ExpressionOrNum:

@@ -40,19 +40,23 @@ import numpy
 
 
 Expression=_pyoomph.Expression
-ExpressionOrNum=Expression|int|float
-ExpressionNumOrNone=Expression|int|float|None
+# :TypeAlias is required on every one of these (unlike their old Union[...]/Optional[...] form):
+# a bare `NAME = A | B` assignment is not recognized by static type checkers as a type alias on
+# its own, since `|` is an ordinary operator that could just as well be a runtime computation -
+# only `Union[...]`/`Optional[...]` were unambiguous enough for "implicit" alias detection.
+ExpressionOrNum:TypeAlias=Expression|int|float
+ExpressionNumOrNone:TypeAlias=Expression|int|float|None
 #NameStrSequence = Union[Tuple[str], List[str]]
 #ExprStrSequence = Union[Tuple[Expression], List[Expression]]
-NameStrSequence = tuple[str]|list[str]
-ExprStrSequence = tuple[Expression]|list[Expression]
+NameStrSequence:TypeAlias = tuple[str]|list[str]
+ExprStrSequence:TypeAlias = tuple[Expression]|list[Expression]
 GlobalParameter=_pyoomph.GiNaC_GlobalParam
-SingleOrMultipleExpressions=Expression|tuple[Expression,...]
-OptionalCoordinateSystem=_pyoomph.CustomCoordinateSystem|None
-TimeSteppingScheme=Literal["BDF1","BDF2","Newmark2","TPZ","MPT","Simpson","Boole","trapezoidal","Kepler","Milne","midpoint"]
-OptionalTimeSteppingScheme=TimeSteppingScheme|None
+SingleOrMultipleExpressions:TypeAlias=Expression|tuple[Expression,...]
+OptionalCoordinateSystem:TypeAlias=_pyoomph.CustomCoordinateSystem|None
+TimeSteppingScheme:TypeAlias=Literal["BDF1","BDF2","Newmark2","TPZ","MPT","Simpson","Boole","trapezoidal","Kepler","Milne","midpoint"]
+OptionalTimeSteppingScheme:TypeAlias=TimeSteppingScheme|None
 
-FiniteElementSpaceEnum=Literal["C1","C1TB","C2","C2TB","D1","D1TB","D2","D2TB","DL","D0"]
+FiniteElementSpaceEnum:TypeAlias=Literal["C1","C1TB","C2","C2TB","D1","D1TB","D2","D2TB","DL","D0"]
 def assert_valid_finite_element_space(inp:str)->FiniteElementSpaceEnum:
 	spaces={"C1","C1TB","C2","C2TB","DL","D0","D1","D1TB","D2","D2TB"}
 	if inp in spaces:
@@ -131,12 +135,12 @@ def substitute_in_expression(expr:ExpressionOrNum,field_subst:dict[str,Expressio
 	return _pyoomph.GiNaC_subsfields(expr,fs,nf,gp)
 
 @overload
-def var(arg:str,*,tag:list[str]=[],domain:str | "FiniteElementCodeGenerator" | None=None,no_jacobian:bool=False,no_hessian:bool=False,only_base_mode:bool=False,only_perturbation_mode:bool=False)->Expression: ...
+def var(arg:str,*,tag:list[str]=[],domain:"str | FiniteElementCodeGenerator | None"=None,no_jacobian:bool=False,no_hessian:bool=False,only_base_mode:bool=False,only_perturbation_mode:bool=False)->Expression: ...
 
 @overload
-def var(arg:NameStrSequence,*,tag:list[str]=[],domain:str | "FiniteElementCodeGenerator" | None=None,no_jacobian:bool=False,no_hessian:bool=False,only_base_mode:bool=False,only_perturbation_mode:bool=False)->tuple[Expression,...]: ...
+def var(arg:NameStrSequence,*,tag:list[str]=[],domain:"str | FiniteElementCodeGenerator | None"=None,no_jacobian:bool=False,no_hessian:bool=False,only_base_mode:bool=False,only_perturbation_mode:bool=False)->tuple[Expression,...]: ...
 
-def var(arg:str | NameStrSequence,*,tag:list[str]=[],domain:str | "FiniteElementCodeGenerator" | None=None,no_jacobian:bool=False,no_hessian:bool=False,only_base_mode:bool=False,only_perturbation_mode:bool=False)->SingleOrMultipleExpressions:
+def var(arg:str | NameStrSequence,*,tag:list[str]=[],domain:"str | FiniteElementCodeGenerator | None"=None,no_jacobian:bool=False,no_hessian:bool=False,only_base_mode:bool=False,only_perturbation_mode:bool=False)->SingleOrMultipleExpressions:
 	r"""
 	Binds a variable or a list of variables for usage in an expression by supplying the name(s)
 
@@ -208,12 +212,12 @@ def var(arg:str | NameStrSequence,*,tag:list[str]=[],domain:str | "FiniteElement
 		return tuple(res)
 
 @overload
-def nondim(arg:str,tag:list[str]=[],domain:str | "FiniteElementCodeGenerator" | None=None,no_jacobian:bool=False,no_hessian:bool=False,only_base_mode:bool=False,only_perturbation_mode:bool=False)->Expression: ...
+def nondim(arg:str,tag:list[str]=[],domain:"str | FiniteElementCodeGenerator | None"=None,no_jacobian:bool=False,no_hessian:bool=False,only_base_mode:bool=False,only_perturbation_mode:bool=False)->Expression: ...
 
 @overload
-def nondim(arg:NameStrSequence,tag:list[str]=[],domain:str | "FiniteElementCodeGenerator" | None=None,no_jacobian:bool=False,no_hessian:bool=False,only_base_mode:bool=False,only_perturbation_mode:bool=False)->tuple[Expression,...]: ...
+def nondim(arg:NameStrSequence,tag:list[str]=[],domain:"str | FiniteElementCodeGenerator | None"=None,no_jacobian:bool=False,no_hessian:bool=False,only_base_mode:bool=False,only_perturbation_mode:bool=False)->tuple[Expression,...]: ...
 
-def nondim(arg:str | NameStrSequence,tag:list[str]=[],domain:str | "FiniteElementCodeGenerator" | None=None,no_jacobian:bool=False,no_hessian:bool=False,only_base_mode:bool=False,only_perturbation_mode:bool=False)->SingleOrMultipleExpressions:
+def nondim(arg:str | NameStrSequence,tag:list[str]=[],domain:"str | FiniteElementCodeGenerator | None"=None,no_jacobian:bool=False,no_hessian:bool=False,only_base_mode:bool=False,only_perturbation_mode:bool=False)->SingleOrMultipleExpressions:
 	"""
 	This returns the nondimensional equivalent of a field, i.e. it is the same as var(...)/scale_factor(...).
 	
@@ -254,12 +258,12 @@ def num(arg:float | int | str, order10: int | None = None,*,rational:bool=False)
 	return res
 
 @overload
-def scale_factor(arg:str,tag:list[str]=[],domain:str | "FiniteElementCodeGenerator" | None=None)->Expression: ...
+def scale_factor(arg:str,tag:list[str]=[],domain:"str | FiniteElementCodeGenerator | None"=None)->Expression: ...
 
 @overload
-def scale_factor(arg:NameStrSequence,tag:list[str]=[],domain:str | "FiniteElementCodeGenerator" | None=None)->tuple[Expression,...]: ...
+def scale_factor(arg:NameStrSequence,tag:list[str]=[],domain:"str | FiniteElementCodeGenerator | None"=None)->tuple[Expression,...]: ...
 
-def scale_factor(arg: str | NameStrSequence, tag: list[str] = [], domain: str | "FiniteElementCodeGenerator" | None = None) -> SingleOrMultipleExpressions:
+def scale_factor(arg: str | NameStrSequence, tag: list[str] = [], domain: "str | FiniteElementCodeGenerator | None" = None) -> SingleOrMultipleExpressions:
 	"""
 	Returns the scale factor of an unknown used for nondimensionalization. Will be expanded during code generation.
 	If you pass scale=... as keyword argument to Equations.define_scalar_field, .define_vector_field or .define_ode_variable, this determines the scale factor.
@@ -287,12 +291,12 @@ def scale_factor(arg: str | NameStrSequence, tag: list[str] = [], domain: str | 
 
 
 @overload
-def test_scale_factor(arg:str,tag:list[str]=[],domain:str | "FiniteElementCodeGenerator" | None=None)->Expression: ...
+def test_scale_factor(arg:str,tag:list[str]=[],domain:"str | FiniteElementCodeGenerator | None"=None)->Expression: ...
 
 @overload
-def test_scale_factor(arg:NameStrSequence,tag:list[str]=[],domain:str | "FiniteElementCodeGenerator" | None=None)->tuple[Expression,...]: ...
+def test_scale_factor(arg:NameStrSequence,tag:list[str]=[],domain:"str | FiniteElementCodeGenerator | None"=None)->tuple[Expression,...]: ...
 
-def test_scale_factor(arg:str | NameStrSequence,tag:list[str]=[],domain:str | "FiniteElementCodeGenerator" | None=None)->SingleOrMultipleExpressions:
+def test_scale_factor(arg:str | NameStrSequence,tag:list[str]=[],domain:"str | FiniteElementCodeGenerator | None"=None)->SingleOrMultipleExpressions:
 	"""
 	Returns the scale factor of a test function or multiple test functions used for nondimensionalization. Will be expanded during code generation.
 	If you pass testscale=... as keyword argument to Equations.define_scalar_field, .define_vector_field or .define_ode_variable, this determines the test scale factor.

@@ -35,10 +35,10 @@ from .mesh import AnySpatialMesh, InterfaceMesh, MeshFromTemplate1d,MeshFromTemp
 from ..expressions import ExpressionOrNum,Expression
 from ..expressions.units import unit_to_string
 
-MeshDataEigenModes=Literal["abs","real","imag","merge","angle"]
+MeshDataEigenModes:TypeAlias=Literal["abs","real","imag","merge","angle"]
 
 class MeshDataCacheEntry:
-    def __init__(self,msh:AnySpatialMesh,tesselate_tri:bool=True,nondimensional:bool=False,eigenvector:int | Sequence[int] | None=None,eigenmode:MeshDataEigenModes="abs",history_index:int=0,with_halos:bool=False,operator:"MeshDataCacheOperatorBase" | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True):
+    def __init__(self,msh:AnySpatialMesh,tesselate_tri:bool=True,nondimensional:bool=False,eigenvector:int | Sequence[int] | None=None,eigenmode:MeshDataEigenModes="abs",history_index:int=0,with_halos:bool=False,operator:"MeshDataCacheOperatorBase | None"=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True):
         assert isinstance(msh,(MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d,InterfaceMesh))
         
         self.mesh=msh
@@ -396,7 +396,7 @@ class MeshDataCacheEntry:
         
 
 class MeshDataCache:
-    def __init__(self,tesselate_tri:bool=True,nondimensional:bool=False,eigenvector:int | Sequence[int] | None=None,eigenmode:MeshDataEigenModes="abs",history_index:int=0,with_halos:bool=False,operator:"MeshDataCacheOperatorBase" | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True):
+    def __init__(self,tesselate_tri:bool=True,nondimensional:bool=False,eigenvector:int | Sequence[int] | None=None,eigenmode:MeshDataEigenModes="abs",history_index:int=0,with_halos:bool=False,operator:"MeshDataCacheOperatorBase | None"=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True):
         self._cache=dict()
         self.tesselate_tri=tesselate_tri
         self.nondimensional=nondimensional
@@ -446,7 +446,7 @@ class MeshDataCacheStorage:
             self._storage={}
         #print("STORAGE AFTER CLEAR",self._storage)
 
-    def get_data(self,msh:AnySpatialMesh,nondimensional:bool,tesselate_tri:bool,eigenvector:int | Sequence[int] | None=None,eigenmode:MeshDataEigenModes="abs",history_index:int=0,with_halos:bool=False,operator:"MeshDataCacheOperatorBase" | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True) -> MeshDataCacheEntry:
+    def get_data(self,msh:AnySpatialMesh,nondimensional:bool,tesselate_tri:bool,eigenvector:int | Sequence[int] | None=None,eigenmode:MeshDataEigenModes="abs",history_index:int=0,with_halos:bool=False,operator:"MeshDataCacheOperatorBase | None"=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True) -> MeshDataCacheEntry:
         if isinstance(eigenvector,list):
             eigenvector=tuple(set(eigenvector))
         key:tuple[Any, ...] = (nondimensional, tesselate_tri,eigenvector,eigenmode,history_index,with_halos,operator,discontinuous,add_eigen_to_mesh_positions)

@@ -623,7 +623,7 @@ class MatplotLibTricontourf(MatplotlibTriangulationBased):
 
     def __init__(self,plotter:"MatplotlibPlotter"):
         super().__init__(plotter=plotter)
-        self.colorbar:"MatplotLibColorbar" | None=None
+        self.colorbar:"MatplotLibColorbar | None"=None
         self.scaled_data:NPFloatArray | None=None
 
     def pre_process(self):
@@ -853,7 +853,7 @@ class MatplotlibVectorFieldStreams(MatplotlibTriangulationBased):
     boundoffsy=0.5
     density=10
     zindex = 1
-    colorbar:"MatplotLibColorbar" | None = None
+    colorbar:"MatplotLibColorbar | None" = None
     dataoffset=0
     colorfield=None
 
@@ -1575,7 +1575,7 @@ class MatplotLibColorbar(MatplotLibOverlayBase):
         self._clamp_max:float | None=None
         self.cb=None
         self.title="Colorbar"
-        self.range:"MatplotLibBaseRange" | None=None
+        self.range:"MatplotLibBaseRange | None"=None
         #: If True, the colorbar will not be plotted
         self.invisible=False
 
@@ -2321,7 +2321,7 @@ class MatplotlibPlotter(BasePlotter):
         eigenscale: If eigenvector is set, we can scale the eigenvector by this factor (this includes also the mesh positions)
         
     """
-    def __init__(self,problem:"Problem" | None=None,filetrunk:str="plot_{:05d}",fileext:str | list[str]="png",eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs",add_eigen_to_mesh_positions:bool=True,position_eigen_scale:float=1,eigenscale:float=1):
+    def __init__(self,problem:"Problem | None"=None,filetrunk:str="plot_{:05d}",fileext:str | list[str]="png",eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs",add_eigen_to_mesh_positions:bool=True,position_eigen_scale:float=1,eigenscale:float=1):
         super(MatplotlibPlotter, self).__init__(problem,eigenvector=eigenvector,eigenmode=eigenmode)
         self.xmin:float | None=None
         self.xmax:float | None=None
@@ -2392,6 +2392,9 @@ class MatplotlibPlotter(BasePlotter):
         else:
             self._range_objects[key]=MatplotLibPersistentRange(None,None,mode)
             return self._range_objects[key]
+        
+    def _change_output_directory(self,odir:str):
+        raise RuntimeError("Cannot change output directory for MatplotlibPlotter yet")
 
     def save(self,fname:str | list[str] | None=None):
         if self._has_invalid_triangulation:

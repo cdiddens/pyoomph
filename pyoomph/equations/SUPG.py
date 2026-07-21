@@ -61,7 +61,7 @@ class ElementSizeForSUPG(Equations):
         self.add_residual(eval_flag("moving_mesh")*(elemsize * elemsize_test * self.get_nodal_delta() - weak(1, elemsize_test, coordinate_system=cartesian,dimensional_dx=True)))
 
     # Size for SUPG
-    def get_element_h(self,domain:str | "FiniteElementCodeGenerator" | None=None) -> Expression:
+    def get_element_h(self,domain:"str | FiniteElementCodeGenerator | None"=None) -> Expression:
         """
         Returns the characteristic element length scale by taking the d-th root of the element size (length/area/volume), where d is the dimension of the element.
 

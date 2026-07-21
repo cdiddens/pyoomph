@@ -501,7 +501,7 @@ class RemeshMeshSize(BaseEquations):
 
 
 class ProjectExpression(Equations):
-    def __init__(self,scale:ExpressionOrNum | str=1,space:FiniteElementSpaceEnum="C2",field_type:Literal["scalar","vector"]="scalar",coordinate_system:"BaseCoordinateSystem" | None=None, **projs:ExpressionOrNum):
+    def __init__(self,scale:ExpressionOrNum | str=1,space:FiniteElementSpaceEnum="C2",field_type:Literal["scalar","vector"]="scalar",coordinate_system:"BaseCoordinateSystem | None"=None, **projs:ExpressionOrNum):
         super(ProjectExpression, self).__init__()
         self.space:FiniteElementSpaceEnum=space
         self.scale=scale
@@ -657,7 +657,7 @@ class SetCoordinateSystem(Equations):
 
 
 class ApplyMappingOnAddedResidual(BaseEquations):    #
-    def __init__(self,mapping:Callable[[str,"Expression"],"Expression" | dict[str, "Expression"]]=lambda destination,expr:{destination:expr}):
+    def __init__(self,mapping:Callable[[str,"Expression"],'Expression | dict[str, "Expression"]']=lambda destination,expr:{destination:expr}):
         super(ApplyMappingOnAddedResidual, self).__init__()
         self.mapping=mapping
 
@@ -762,7 +762,7 @@ class IntegralObservables(Equations):
         _coordinate_system (Optional[BaseCoordinateSystem]): The coordinate system to use. Defaults to None, i.e. the one of the equations or the problem.
         **integral_observables (Union[ExpressionOrNum, Callable[..., ExpressionOrNum]]): Integral observables to be added.
     """
-    def __init__(self,_coordinate_system:"BaseCoordinateSystem" | None=None,_lagrangian:bool=False, **integral_observables:ExpressionOrNum | Callable[..., ExpressionOrNum]):
+    def __init__(self,_coordinate_system:"BaseCoordinateSystem | None"=None,_lagrangian:bool=False, **integral_observables:ExpressionOrNum | Callable[..., ExpressionOrNum]):
         super(IntegralObservables, self).__init__()
         is_dependent_func=lambda v: callable(v) and not isinstance(v,Expression)
         self.integral_observables = {k:v for k,v in integral_observables.items() if not is_dependent_func(v)}
