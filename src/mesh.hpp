@@ -408,6 +408,23 @@ namespace pyoomph
 
 		virtual void setup_interior_boundary_elements(unsigned ) {} // Tri meshes must add internal boundary elements by hand
 
+		// Explicitly destroys the tree forest (if any) right now, instead of waiting for this mesh's own
+		// destructor to do so. Tree::~Tree() deletes the "father" (non-leaf, already-refined-away) elements
+		// it still owns - these are not reachable via the mesh's own element_pt() array any more (they were
+		// removed from it when they got refined into their sons), so a generic "delete every element_pt(j)"
+		// pass (e.g. Problem::unload_all_dlls()) never sees them. Calling this first, while the compiled
+		// element code (and its DLL) is still loaded, lets those father elements' destructors run safely;
+		// leaf elements (nsons==0) are explicitly left untouched by Tree::~Tree(), so this cannot conflict
+		// with a subsequent explicit deletion of this mesh's own (leaf) element_pt()/node_pt() arrays.
+		void _kill_tree_forest_now()
+		{
+			if (this->Forest_pt)
+			{
+				delete this->Forest_pt;
+				this->Forest_pt = 0;
+			}
+		}
+
 		/// Broken assignment operator
 		void operator=(const TemplatedMeshBase &)
 		{

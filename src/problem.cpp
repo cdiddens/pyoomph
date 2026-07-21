@@ -708,8 +708,47 @@ namespace pyoomph
 	// Deletes all loaded DynamicBulkElementCode objects (closing their shared libraries) and all global
 	// parameter descriptors, and releases the cached eigenproblem matrices. Used both from the destructor
 	// and explicitly (e.g. before recompiling/reloading equation code).
-	void Problem::unload_all_dlls()
-	{
+	void Problem::unload_all_dlls(bool clear_all)
+	{		
+		for (unsigned int i=0;i< this->nsub_mesh();i++)
+		{
+			Mesh *m=dynamic_cast<Mesh *>(this->mesh_pt(i));
+			for (unsigned int j=0;j<m->nelement();j++)
+			{
+				BulkElementBase *e=dynamic_cast<BulkElementBase *>(m->element_pt(j));
+				DynamicBulkElementInstance *dyninst=dynamic_cast<DynamicBulkElementInstance *>(e);
+				if (dyninst)
+				{
+					dyninst->linked_external_data.clear();
+				}
+			}
+		}
+		if (clear_all)
+		{
+			for (unsigned int i=0;i< this->nsub_mesh();i++)
+			{
+				Mesh *m=dynamic_cast<Mesh *>(this->mesh_pt(i));
+				// Kill the tree forest (if any) first, while the compiled element code is still
+				// loaded: Tree::~Tree() destroys the "father" (non-leaf, already-refined-away)
+				// elements it still owns, which are no longer reachable via element_pt() below -
+				// see TemplatedMeshBase::_kill_tree_forest_now() for why this is safe to do before
+				// the node/element deletion loops (leaf elements are explicitly left untouched).
+				TemplatedMeshBase *tbm=dynamic_cast<TemplatedMeshBase *>(m);
+				if (tbm) tbm->_kill_tree_forest_now();
+				for (unsigned int j=m->nnode();j>0;j--)
+				{
+					delete m->node_pt(j-1);
+					m->node_pt(j-1)=NULL;
+				}
+				for (unsigned int j=m->nelement();j>0;j--)
+				{
+					BulkElementBase *e=dynamic_cast<BulkElementBase *>(m->element_pt(j-1));
+					delete e;
+					m->element_pt(j-1)=NULL;
+				}
+				m->flush_element_and_node_storage();
+			}
+		}
 		if (pyoomph_verbose)
 			std::cout << "Unloading all DLLs" << std::endl
 					  << std::flush;

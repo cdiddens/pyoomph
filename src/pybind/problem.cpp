@@ -973,8 +973,8 @@ void PyReg_Problem(nb::module_ &m)
 			 "Assemble and return the Hessian (second derivative of the residuals with respect to the degrees of freedom) as a SparseRank3Tensor. "
 			 "If ``symmetric`` is True, the tensor is assumed/exploited to be symmetric in its last two indices, halving the assembly cost.")
 		.def("is_quiet", &pyoomph::Problem::is_quiet, "Return whether output messages from the oomph-lib and pyoomph C++ core are currently suppressed.")
-		.def("_unload_all_dlls", &pyoomph::Problem::unload_all_dlls,
-			 "Unload all dynamically loaded/compiled shared libraries (generated element codes) currently linked into this problem.")
+		.def("_unload_all_dlls", &pyoomph::Problem::unload_all_dlls,nb::arg("clear_all") = true,
+			 "Unload all dynamically loaded/compiled shared libraries (generated element codes) currently linked into this problem. With clear_all, also remove all meshes, elements, nodes")
 		.def("add_time_stepper_pt", &pyoomph::Problem::add_time_stepper_pt, nb::keep_alive<1, 2>(), nb::arg("time_stepper"),
 			 "Add a time stepper to the problem, automatically (re-)sizing the Time object to hold the required number of history levels.")
 		.def("set_mesh_pt", [](pyoomph::Problem *self, MeshHandleBase *mesh_h)

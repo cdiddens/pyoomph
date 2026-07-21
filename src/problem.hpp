@@ -501,7 +501,7 @@ namespace pyoomph
     virtual bool is_quiet() const { return _is_quiet; }
     // void set_diagonal_zero_entries(bool yesno) {KeepZeroDiagonal=yesno;} //Requires a patched oomph-lib problem class
     Problem();
-    virtual void unload_all_dlls(); // Closes all loaded DynamicBulkElementCode shared libraries (called on destruction / explicit cleanup, e.g. before recompiling equations)
+    virtual void unload_all_dlls(bool clear_all=true); // Closes all loaded DynamicBulkElementCode shared libraries (called on destruction / explicit cleanup, e.g. before recompiling equations)
     virtual unsigned get_max_dt_order() const; // Maximum time-derivative order required by any of the loaded element codes (determines how many history values the timestepper must keep)
     ~Problem() override;
     virtual CCompiler *get_ccompiler() { return compiler; }
