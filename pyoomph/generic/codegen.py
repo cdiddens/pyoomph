@@ -457,10 +457,10 @@ class BaseEquations(_pyoomph.Equations):
     def before_precice_initialise(self,eqtree:"EquationTree"):
         pass
 
-    def before_precice_solve(self,eqtree:"EquationTree",precise_dt:float):
+    def before_precice_solve(self,eqtree:"EquationTree",precice_dt:float):
         pass
 
-    def after_precice_solve(self,eqtree:"EquationTree",precise_dt:float):
+    def after_precice_solve(self,eqtree:"EquationTree",precice_dt:float):
         pass
 
     def __init__(self):
@@ -2483,13 +2483,13 @@ class CombinedEquations(Equations):
             e.before_precice_initialise(eqtree)
 
 
-    def before_precice_solve(self,eqtree:"EquationTree",precise_dt:float):
+    def before_precice_solve(self,eqtree:"EquationTree",precice_dt:float):
         for e in self._subelements:
-            e.before_precice_solve(eqtree,precise_dt)
+            e.before_precice_solve(eqtree,precice_dt)
 
-    def after_precice_solve(self,eqtree:"EquationTree",precise_dt:float):
+    def after_precice_solve(self,eqtree:"EquationTree",precice_dt:float):
         for e in self._subelements:
-            e.after_precice_solve(eqtree,precise_dt)
+            e.after_precice_solve(eqtree,precice_dt)
 
 
     def calculate_error_overrides(self):

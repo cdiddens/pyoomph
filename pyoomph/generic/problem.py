@@ -72,6 +72,7 @@ if TYPE_CHECKING:
     from .assembly import CustomAssemblyBase
     from ..utils.num_text_out import NumericalTextOutputFile
     from ..output.latex import LaTeXPrinter
+    import precice
 
 Z2ErrorEstimator=_pyoomph.Z2ErrorEstimator
 
@@ -666,7 +667,7 @@ class Problem(_pyoomph.Problem):
         self.precice_participant:str=""
         #: Must be set to the config file when using preCICE
         self.precice_config_file:str=""
-        self._precice_interface=None #type:ignore
+        self._precice_interface:"precice.Participant | None"=None
         
         #: Set e.g. to {"domain/velocity_*":"u","domain/pressure":"p"} to automatically setup field split IS for PETSc with names "u" and "p". If None, the default split is set like the field indices in the Jacobian information file, i.e. using "0", "1", etc. as prefixes
         self.petsc_fieldsplit=None
