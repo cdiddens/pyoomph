@@ -1,3 +1,4 @@
+from __future__ import annotations
 import scipy.sparse
 import scipy.sparse.linalg
 from .problem import Problem
@@ -6,11 +7,11 @@ from ..typings import *
 from .. import _pyoomph_core as _pyoomph
 import numpy,scipy
 from .assembly import CustomAssemblyBase
-from ..solvers.generic import DefaultMatrixType,EigenMatrixManipulatorBase
+from ..solvers.generic import DefaultMatrixType
 
 from scipy.sparse import csr_matrix      
 
-def get_hopf_lyapunov_coefficient(problem:Problem,param:Union[GlobalParameter,str],FD_delta:float=1e-5,FD_param_delta:float=1e-5,omega:Optional[float]=None,q:Optional[NPComplexArray]=None,mu0:float=0,omega_epsilon:float=1e-5,use_hopf_tracker_for_adjoint:bool=False):
+def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD_delta:float=1e-5,FD_param_delta:float=1e-5,omega:float | None=None,q:NPComplexArray | None=None,mu0:float=0,omega_epsilon:float=1e-5,use_hopf_tracker_for_adjoint:bool=False):
     # Taken from § 10.2 of Yuri A. Kuznetsov, Elements of Applied Bifurcation Theory, Fourth Edition, Springer, 2004
     # Also implemented analogously in pde2path, file hogetnf.m 
     # XXX Here is the generalization of the code with mass matrix
@@ -484,19 +485,19 @@ class MultiAssembleRequest:
         self._contributions.append(contribution)
         return self
         
-    def dRdp(self,parameter:Union[str,GlobalParameter],contribution=""):
+    def dRdp(self,parameter:str | GlobalParameter,contribution=""):
         self._what.append("dresiduals_dparameter")
         self._contributions.append(contribution)
         self._parameters.append(parameter)
         return self
     
-    def dJdp(self,parameter:Union[str,GlobalParameter],contribution=""):
+    def dJdp(self,parameter:str | GlobalParameter,contribution=""):
         self._what.append("djacobian_dparameter")
         self._contributions.append(contribution)
         self._parameters.append(parameter)
         return self
         
-    def dMdp(self,parameter:Union[str,GlobalParameter],contribution=""):
+    def dMdp(self,parameter:str | GlobalParameter,contribution=""):
         self._what.append("dmass_matrix_dparameter")
         self._contributions.append(contribution)
         self._parameters.append(parameter)
@@ -567,17 +568,17 @@ class AugmentedAssemblyHandler(CustomAssemblyBase):
     def define_augmented_residuals_and_jacobian(self,dofs:DofAugmentationSpecifications):
         raise NotImplementedError("define_augmented_residuals_and_jacobian not implemented")
     
-    def get_base_residuals_and_jacobian(self)->Tuple[NPFloatArray,DefaultMatrixType]:
+    def get_base_residuals_and_jacobian(self)->tuple[NPFloatArray,DefaultMatrixType]:
         old=self.problem.use_custom_residual_jacobian
         self.problem.use_custom_residual_jacobian=False
         R,J=self.problem.assemble_jacobian(with_residual=True)
         self.problem.use_custom_residual_jacobian=old
         return R,J
     
-    def get_base_dresiduals_dparameter(self,parameter:Union[str,GlobalParameter])->NPFloatArray:
+    def get_base_dresiduals_dparameter(self,parameter:str | GlobalParameter)->NPFloatArray:
         raise NotImplementedError("get_base_dresiduals_dparameter not implemented")
     
-    def get_base_dresiduals_and_djacobian_dparameter(self,parameter:Union[str,GlobalParameter])->Tuple[NPFloatArray,DefaultMatrixType]:
+    def get_base_dresiduals_and_djacobian_dparameter(self,parameter:str | GlobalParameter)->tuple[NPFloatArray,DefaultMatrixType]:
         raise NotImplementedError("get_base_dresiduals_and_djacobian_dparameter not implemented")
     
     def get_base_hessian_vector_product(self,vector:NPFloatArray)->NPFloatArray:
@@ -596,7 +597,7 @@ class AugmentedAssemblyHandler(CustomAssemblyBase):
             arr=numpy.array(arr)
         return scipy.sparse.csr_matrix(arr.reshape(1,-1))
     
-    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:Optional[str]=None)->Union[NPFloatArray,Tuple[NPFloatArray,DefaultMatrixType]]:               
+    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]:               
         raise NotImplementedError("get_residuals_and_jacobian not implemented")
 
 class CustomBifurcationTracker(AugmentedAssemblyHandler):
@@ -607,7 +608,7 @@ class CustomBifurcationTracker(AugmentedAssemblyHandler):
         super().__init__()
         self.problem=problem
         
-    def get_real_eigenvector_guess(self,eigenvector:Union[NPAnyArray,int]=0,normalize:bool=True)->NPAnyArray:
+    def get_real_eigenvector_guess(self,eigenvector:NPAnyArray | int=0,normalize:bool=True)->NPAnyArray:
         """
         Get a real eigenvector guess. This can be either an index to the previously solved eigenvalues or an eigenvector.        
 
@@ -628,7 +629,7 @@ class CustomBifurcationTracker(AugmentedAssemblyHandler):
             eigenvector/=numpy.linalg.norm(eigenvector)
         return eigenvector
 
-    def get_complex_eigenvector_guess(self,eigenvector:Union[NPAnyArray,int],normalize:bool=True)->NPAnyArray:
+    def get_complex_eigenvector_guess(self,eigenvector:NPAnyArray | int,normalize:bool=True)->NPAnyArray:
         """
         Get a complex eigenvector guess. This can be either an index to the previously solved eigenvalues or an eigenvector.        
 
@@ -698,7 +699,7 @@ class CustomBifurcationTracker(AugmentedAssemblyHandler):
             #exit()
         return eigenvector
 
-    def store_eigenvector(self,eigenvects:Dict[Union[float,complex],NPAnyArray]):
+    def store_eigenvector(self,eigenvects:dict[float | complex,NPAnyArray]):
         self.problem._last_eigenvalues=numpy.array(list(eigenvects.keys()))
         self.problem._last_eigenvectors=numpy.array([numpy.array(v) for v in eigenvects.values()])   
         self.problem._last_eigenvalues_m=None
@@ -718,7 +719,7 @@ class FoldTracker(CustomBifurcationTracker):
         eigenscale: The scale of the eigenvector internally considered. Internally, the eigenvalue will have the magnitude |V|=eigenscale, in the output, the eigenvector will be normalized to |V|=1
         nonlinear_length_constraint: If False, we demand <V,V0>=eigenscale, if True, we demand <V,V>=eigenscale^2. Nonlinear length constraints can require a more sophisticated initial guess, but can be better for arclength continuation along a long branch, where <V,V0>=0 could in principle occur.
     """
-    def __init__(self,problem:Problem,parameter,eigenvector:Union[NPAnyArray,int]=0,eigenscale:float=1,nonlinear_length_constraint:bool=False):
+    def __init__(self,problem:Problem,parameter,eigenvector:NPAnyArray | int=0,eigenscale:float=1,nonlinear_length_constraint:bool=False):
         super().__init__(problem)
         self.parameter=parameter
         self.V0=self.get_real_eigenvector_guess(eigenvector,normalize=True)
@@ -733,7 +734,7 @@ class FoldTracker(CustomBifurcationTracker):
         dofs.add_vector(self.V0*self.eigenscale)
         dofs.add_parameter(self.parameter)
 
-    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:Optional[str]=None)->Union[NPFloatArray,Tuple[NPFloatArray,DefaultMatrixType]]:               
+    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]:               
         V,=self.get_augmented_dofs().split(startindex=1,endindex=2) # Get the eigenvector solution
         # Request the residuals and Jacobian of the non-augmented system
         assembly=self.start_multiassembly()                                            
@@ -801,7 +802,7 @@ class PitchForkTracker(CustomBifurcationTracker):
         dofs.add_parameter(self.parameter)
         dofs.add_scalar(0) # slack variable
         
-    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:Optional[str]=None)->Union[NPFloatArray,Tuple[NPFloatArray,DefaultMatrixType]]:               
+    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]:               
         U,V,p,eps=self.get_augmented_dofs().split(startindex=0) # Get the eigenvector solution and the slack variable
         eps=eps[0] # Get the scalar value of the slack variable (split dofs are all vectors)
         # Request the residuals and Jacobian of the non-augmented system
@@ -873,7 +874,7 @@ class HopfTracker(CustomBifurcationTracker):
         dofs.add_parameter(self.parameter)
         dofs.add_scalar(self.omega)
         
-    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:Optional[str]=None)->Union[NPFloatArray,Tuple[NPFloatArray,DefaultMatrixType]]:               
+    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]:               
         Vr,Vi,p,omega=self.get_augmented_dofs().split(startindex=1) # Get all the augmented dofs
         omega=omega[0] # Get the scalar value of the frequency variable (split dofs are all vectors)        
         assembly=self.start_multiassembly()        
@@ -928,7 +929,7 @@ class HopfTracker(CustomBifurcationTracker):
         
 
 class _NormalModeBifurcationTrackerBase(CustomBifurcationTracker):
-    def __init__(self, problem:Problem,eigenvector:int=0,azimuthal_m:Optional[int]=None,cartesian_k:ExpressionNumOrNone=None,eigenscale:float=1,nonlinear_length_constraint:bool=False):    
+    def __init__(self, problem:Problem,eigenvector:int=0,azimuthal_m:int | None=None,cartesian_k:ExpressionNumOrNone=None,eigenscale:float=1,nonlinear_length_constraint:bool=False):    
         super().__init__(problem)
         self.eigenscale=eigenscale
         self.nonlinear_length_constraint=nonlinear_length_constraint
@@ -983,7 +984,7 @@ class _NormalModeBifurcationTrackerBase(CustomBifurcationTracker):
             
         self.base_zero_dofs,self.eigen_zero_dofs=self.get_forced_to_zero_dofs()
 
-    def patch_residuals(self,eigen:bool,R:Union[List[NPFloatArray],NPFloatArray]):
+    def patch_residuals(self,eigen:bool,R:list[NPFloatArray] | NPFloatArray):
         if not isinstance(R,list):
             R=[R]
         res=[]
@@ -993,7 +994,7 @@ class _NormalModeBifurcationTrackerBase(CustomBifurcationTracker):
             res.append(r)
         return res
     
-    def patch_matrices(self,eigen:bool,J:Union[DefaultMatrixType,List[DefaultMatrixType]],M:Union[DefaultMatrixType,List[DefaultMatrixType]]=[])->Tuple[DefaultMatrixType,...]:
+    def patch_matrices(self,eigen:bool,J:DefaultMatrixType | list[DefaultMatrixType],M:DefaultMatrixType | list[DefaultMatrixType]=[])->tuple[DefaultMatrixType,...]:
         if not isinstance(J,list):
             J=[J]
         if not isinstance(M,list):
@@ -1045,13 +1046,13 @@ class _NormalModeBifurcationTrackerBase(CustomBifurcationTracker):
             
             
 class NormalModeBifurcationTracker(_NormalModeBifurcationTrackerBase):
-    def __init__(self, problem:Problem,parameter:str,eigenvector:int=0,azimuthal_m:Optional[int]=None,cartesian_k:ExpressionNumOrNone=None,eigenscale:float=1,nonlinear_length_constraint:bool=False):
+    def __init__(self, problem:Problem,parameter:str,eigenvector:int=0,azimuthal_m:int | None=None,cartesian_k:ExpressionNumOrNone=None,eigenscale:float=1,nonlinear_length_constraint:bool=False):
         super().__init__(problem,eigenvector,azimuthal_m,cartesian_k,eigenscale,nonlinear_length_constraint)
         self.parameter=parameter
         
 
                 
-    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:Optional[str]=None)->Union[NPFloatArray,Tuple[NPFloatArray,DefaultMatrixType]]:
+    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]:
         nl=self.nonlinear_length_constraint
         if not self.has_imag:
             Vr,p=self.get_augmented_dofs().split(startindex=1)
@@ -1157,7 +1158,7 @@ class RealEigenbranchTracker(CustomBifurcationTracker):
         dofs.add_vector(self.eigenvector*self.eigenscale)
         dofs.add_scalar(self.lambda_Re0)
         
-    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:Optional[str]=None)->Union[NPFloatArray,Tuple[NPFloatArray,DefaultMatrixType]]:               
+    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]:               
         V,lam=self.get_augmented_dofs().split(startindex=1)
         lam=lam[0]
         assembly=self.start_multiassembly()
@@ -1209,7 +1210,7 @@ class ComplexEigenbranchTracker(CustomBifurcationTracker):
         dofs.add_scalar(self.lambda_Re0)
         dofs.add_scalar(self.omega0)
         
-    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:Optional[str]=None)->Union[NPFloatArray,Tuple[NPFloatArray,DefaultMatrixType]]:               
+    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]:               
         Vr,Vi,lam,omega=self.get_augmented_dofs().split(startindex=1)
         lam,omega=lam[0],omega[0]
         assembly=self.start_multiassembly()
@@ -1245,11 +1246,11 @@ class ComplexEigenbranchTracker(CustomBifurcationTracker):
 
 
 class NormalModeEigenbranchTracker(_NormalModeBifurcationTrackerBase):
-    def __init__(self, problem,eigenvector:int,azimuthal_m:Optional[int]=None,cartesian_k:ExpressionNumOrNone=None,eigenscale:float=1,nonlinear_length_constraint:bool=False):
+    def __init__(self, problem,eigenvector:int,azimuthal_m:int | None=None,cartesian_k:ExpressionNumOrNone=None,eigenscale:float=1,nonlinear_length_constraint:bool=False):
         super().__init__(problem,eigenvector,azimuthal_m,cartesian_k,eigenscale,nonlinear_length_constraint)
         self.parameter=None # No parameter means essentially take the real part as adjustable parameter
                 
-    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:Optional[str]=None)->Union[NPFloatArray,Tuple[NPFloatArray,DefaultMatrixType]]:
+    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]:
         nl=self.nonlinear_length_constraint
         if not self.has_imag:
             Vr,lamb=self.get_augmented_dofs().split(startindex=1)
@@ -1365,7 +1366,7 @@ class ResidualJacobianParameterDerivativeHandler(AugmentedAssemblyHandler):
     def define_augmented_dofs(self, dofs):
         pass
     
-    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:Optional[str]=None)->Union[NPFloatArray,Tuple[NPFloatArray,DefaultMatrixType]]:               
+    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]:               
         if dparameter is None:
             raise ValueError("No parameter specified")
         assm=self.start_multiassembly()
@@ -1393,7 +1394,7 @@ class PerformCustomMultiAssembly(AugmentedAssemblyHandler):
     def define_augmented_dofs(self, dofs):
         pass
     
-    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:Optional[str]=None)->Union[NPFloatArray,Tuple[NPFloatArray,DefaultMatrixType]]:                       
+    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]:                       
         assm=self.start_multiassembly()
         self.request(assm)
         res=assm.assemble()        
@@ -1576,7 +1577,7 @@ class NormalFormCalculator:
             closest=numpy.argmin(numpy.abs(evals-lamb))
             return evects[closest],evals[closest]
       
-      def get_normal_form(self,param:Optional[str]=None,eigenindex:int=0):
+      def get_normal_form(self,param:str | None=None,eigenindex:int=0):
         if param is None:
             if self.problem._bifurcation_tracking_parameter_name is not None and self.problem._bifurcation_tracking_parameter_name!="":
                 param=self.problem._bifurcation_tracking_parameter_name
@@ -1590,7 +1591,7 @@ class NormalFormCalculator:
         else:
             return self.get_normal_form1d(param=param,eigenindex=eigenindex)
         
-      def get_normal_form_hopf(self,param:Optional[str]=None,eigenindex:int=0):
+      def get_normal_form_hopf(self,param:str | None=None,eigenindex:int=0):
             # Translated from Julia language code BifurcationKitDocs.jl (https://bifurcationkit.github.io/BifurcationKitDocs.jl)
             #raise RuntimeError("Hopf calculation does not really work without considering the mass matrix")
             # Generalized by a mass matrix
@@ -1703,7 +1704,7 @@ class NormalFormCalculator:
             
             
             
-      def get_normal_form1d(self,param:Optional[str]=None,eigenindex:int=0):
+      def get_normal_form1d(self,param:str | None=None,eigenindex:int=0):
             # Compute a normal form based on Golubitsky, Martin, David G Schaeffer, and Ian Stewart. Singularities and Groups in Bifurcation Theory. New York: Springer-Verlag, 1985, VI.1.d page 295.
             # Translated from Julia language code BifurcationKitDocs.jl (https://bifurcationkit.github.io/BifurcationKitDocs.jl)
             if param is None:

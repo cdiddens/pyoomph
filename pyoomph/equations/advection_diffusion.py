@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -69,14 +70,14 @@ class AdvectionDiffusionEquations(Equations):
          velocity_name_for_scaling(str): The name of the velocity for scaling. Default is "velocity".
    """
 
-   def __init__(self,fieldnames:Union[str,List[str]]="advdiffu",*,diffusivity:ExpressionOrNum=1,space:"FiniteElementSpaceEnum"="C2",consider_scaling:bool=True,fluid_props:Optional[Union[MixtureLiquidProperties,MixtureGasProperties]]=None,wind:ExpressionOrNum=var("velocity"),dt_factor:ExpressionOrNum=1,time_scheme:Optional[TimeSteppingScheme]=None,source:Union[ExpressionOrNum,Dict[str,ExpressionOrNum]]={},advection_by_parts:Union[bool,Literal["skew"]]=False,velocity_name_for_scaling="velocity"):
+   def __init__(self,fieldnames:str | list[str]="advdiffu",*,diffusivity:ExpressionOrNum=1,space:"FiniteElementSpaceEnum"="C2",consider_scaling:bool=True,fluid_props:MixtureLiquidProperties | MixtureGasProperties | None=None,wind:ExpressionOrNum=var("velocity"),dt_factor:ExpressionOrNum=1,time_scheme:TimeSteppingScheme | None=None,source:ExpressionOrNum | dict[str, ExpressionOrNum]={},advection_by_parts:bool | Literal["skew"]=False,velocity_name_for_scaling="velocity"):
       super().__init__()
       self.dt_factor=dt_factor
       self.diffusivity=diffusivity      
       self.space:"FiniteElementSpaceEnum"=space
       self.wind=wind      
       self.velocity_name_for_scaling=velocity_name_for_scaling
-      self.time_scheme:Optional[TimeSteppingScheme]=time_scheme
+      self.time_scheme:TimeSteppingScheme | None=time_scheme
       self.advection_by_parts=advection_by_parts
       if isinstance(fieldnames,str):
          self.fieldnames=[fieldnames]
@@ -88,9 +89,9 @@ class AdvectionDiffusionEquations(Equations):
          self.source=source
       self.consider_scaling=consider_scaling
       self.fluid_props=fluid_props
-      self.component_names:Dict[str,str]={}
+      self.component_names:dict[str,str]={}
       if self.fluid_props is not None:
-         self.fieldnames:List[str]=[]         
+         self.fieldnames:list[str]=[]         
          for n in self.fluid_props.required_adv_diff_fields:
             self.component_names["massfrac_"+n]=n
             self.fieldnames.append("massfrac_"+n)
@@ -103,7 +104,7 @@ class AdvectionDiffusionEquations(Equations):
 
    def define_fields(self):
       remaining:Expression=Expression(1)
-      remaining_test:Optional[Expression]=None
+      remaining_test:Expression | None=None
       mydom=self.get_my_domain()
       for f in self.fieldnames:
          ts=scale_factor("spatial")/scale_factor(self.velocity_name_for_scaling)/scale_factor(f) if self.consider_scaling else 1
@@ -125,7 +126,7 @@ class AdvectionDiffusionEquations(Equations):
          sum_massfrac_by_molar_mass=subexpression(sum_massfrac_by_molar_mass)
          self.define_field_by_substitution("_sum_massfrac_by_molar_mass",sum_massfrac_by_molar_mass,also_on_interface=True)
 
-   def get_diffusion_coefficient(self,f1:str,f2:Optional[str]=None) -> ExpressionNumOrNone:
+   def get_diffusion_coefficient(self,f1:str,f2:str | None=None) -> ExpressionNumOrNone:
       if f2 is None:
          f2=f1
       if self.fluid_props is not None:
@@ -171,7 +172,7 @@ class AdvectionDiffusionEquations(Equations):
 
 
    # Use this to either fix the average or the total integral of the field, i.e. add eqs+=AdvectionDiffusionEquations(...).with_integral_constraint(...)
-   def with_integral_constraint(self,problem:"Problem",*,average:Optional[Union[Dict[str,ExpressionOrNum],ExpressionOrNum]]=None,integral:Optional[Union[Dict[str,ExpressionOrNum],ExpressionOrNum]]=None,ode_domain_name:str="globals",lagrange_prefix:Union[str,Dict[str,str]]="lagr_intconstr_",set_zero_on_normal_mode_eigensolve:bool=True) -> Equations:
+   def with_integral_constraint(self,problem:"Problem",*,average:dict[str, ExpressionOrNum] | ExpressionOrNum | None=None,integral:dict[str, ExpressionOrNum] | ExpressionOrNum | None=None,ode_domain_name:str="globals",lagrange_prefix:str | dict[str, str]="lagr_intconstr_",set_zero_on_normal_mode_eigensolve:bool=True) -> Equations:
       eq_additions=self
       if average is None and integral is None:
          raise ValueError("Please either specify average= or integral=")
@@ -192,8 +193,8 @@ class AdvectionDiffusionEquations(Equations):
          integral = {self.fieldnames[0]: integral}
 
       possible_fields=self.fieldnames
-      lagr_mults:Dict[str,ExpressionOrNum]={}
-      lagr_names:Dict[str,str]={}
+      lagr_mults:dict[str,ExpressionOrNum]={}
+      lagr_names:dict[str,str]={}
       for k in possible_fields:
          if k in average.keys() and k in integral.keys():
             raise ValueError("Cannot set simultaneously average and integral for the field "+str(k))

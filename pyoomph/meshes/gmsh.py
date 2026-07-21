@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -58,7 +59,6 @@ import os
 import meshio #type:ignore
 import scipy.optimize #type:ignore
 import re
-from scipy import interpolate #type:ignore
 
 
 import scipy.spatial #type:ignore
@@ -71,7 +71,7 @@ class GmshSizeCallback:
     def __init__(self,default_resolution:float=1.0):
         self.gmsh:"GmshTemplate"
         self.default_resolution=default_resolution
-        self._registered_handlers:List[Dict[int,Callable[[float,float,float],float]]] = [{},{},{},{}]
+        self._registered_handlers:list[dict[int,Callable[[float,float,float],float]]] = [{},{},{},{}]
 
 
     def initialize(self):
@@ -91,13 +91,13 @@ class GmshSizeCallback:
                         for entity in entities:
                             self._registered_handlers[2][entity._id]=getattr(self,m) #type:ignore
 
-    def get_points_at_line(self,name:str,merge_connected:bool=True,sort:Optional[Literal["x","y","z","rev_x","rev_y","rev_z"]]=None,circle_arc_samples:int=25):
+    def get_points_at_line(self,name:str,merge_connected:bool=True,sort:Literal["x", "y", "z", "rev_x", "rev_y", "rev_z"] | None=None,circle_arc_samples:int=25):
         entities = self.gmsh._named_entities.get(name, None) #type:ignore
         if entities is None:
             raise RuntimeError("No named entity with name "+name)
-        allpts:List[NPFloatArray]=[]
+        allpts:list[NPFloatArray]=[]
         for entity in entities:
-            pts:List[List[float]]=[]
+            pts:list[list[float]]=[]
             if isinstance(entity,(pygmsh.geo.geometry.common.geometry.Line,pygmsh.geo.geometry.common.geometry.Spline,pygmsh.geo.geometry.common.geometry.BSpline)):
                 for pt in entity.points: #type:ignore
                     pts.append(pt.x) #type:ignore
@@ -193,8 +193,8 @@ class GmshSizeCallback:
 
 
 
-def generate_mesh_to_file(geom:pygmsh.geo.Geometry, outdir:str, trunk:str, mesher:Optional["GmshTemplate"]=None,dim:int=2, order:Optional[int]=None, algorithm:Optional[int]=None, verbose:bool=False, recombine_algo:Optional[int]=None,
-                          postgen_cb:Optional[Callable[[],None]]=None, only_geo:bool=False,mesh_mode:Optional[str]=None,mesh_size_callback:Optional[Union[GmshSizeCallback,Callable[[int,int,float,float,float],float]]]=None,quiet:bool=False):
+def generate_mesh_to_file(geom:pygmsh.geo.Geometry, outdir:str, trunk:str, mesher:"GmshTemplate" | None=None,dim:int=2, order:int | None=None, algorithm:int | None=None, verbose:bool=False, recombine_algo:int | None=None,
+                          postgen_cb:Callable[[], None] | None=None, only_geo:bool=False,mesh_mode:str | None=None,mesh_size_callback:GmshSizeCallback | Callable[[int, int, float, float, float], float] | None=None,quiet:bool=False):
     if quiet:
         gmsh.option.setNumber("General.Terminal", 0) #type:ignore
     geom.synchronize()
@@ -309,43 +309,43 @@ class GmshTemplate(MeshTemplate):
     """
     A template for creating a mesh using Gmsh as backend. Specify the geometry in an overridden :py:meth:`define_geometry` method, using the :py:meth:`point`, :py:meth:`line`, :py:meth:`spline`, :py:meth:`circle_arc`, :py:meth:`plane_surface` and other methods.
     """
-    def __init__(self,loaded_from_mesh_file:Optional[str]=None):
+    def __init__(self,loaded_from_mesh_file:str | None=None):
         super(GmshTemplate, self).__init__()
-        self._meshfile:Optional[str]
+        self._meshfile:str | None
         self._loaded_from_mesh_file=loaded_from_mesh_file
         
         #: If True, macro elements will be used for the mesh, i.e. curved elements will be considered
         self.use_macro_elements:bool=True
-        self._geom:Optional[pygmsh.geo.Geometry] = None
-        self._named_entities:Dict[str,List[object]] = {}
-        self._rev_names:Dict[object,str] = {}
-        self._dim_tag_names:Dict[Tuple[int,int],Tuple(str,object)] = {}
+        self._geom:pygmsh.geo.Geometry | None = None
+        self._named_entities:dict[str,list[object]] = {}
+        self._rev_names:dict[object,str] = {}
+        self._dim_tag_names:dict[tuple[int,int],tuple(str,object)] = {}
         
         #: If set, the input mesh will be mirrored and copied along the given axis or axes. Useful to generate symmetric meshes for e.g. pitchfork tracking
-        self.mirror_mesh:Optional[Union[Literal["mirror_x","mirror_y"],List[Literal["mirror_x","mirror_y"]]]]=None
+        self.mirror_mesh:Literal["mirror_x", "mirror_y"] | list[Literal["mirror_x", "mirror_y"]] | None=None
         #: If set, the entire mesh will be extruded in the next dimension. The first entry in the tuple is the dimensional distance, the second the number of layers. 
-        self.extrude_generated_mesh:Optional[Tuple[ExpressionOrNum,int]]=None 
-        self.gmsh_options:Dict[str,int] = {}
+        self.extrude_generated_mesh:tuple[ExpressionOrNum, int] | None=None 
+        self.gmsh_options:dict[str,int] = {}
         #self.gmsh_options["algorithm"] = 8
         #self.gmsh_options["recombine_algo"] = 2
         #self.gmsh_options["recombine_algo"] = None
-        self._entities2d:Dict[int,Union[PlaneSurface,Surface]] = {}
-        self._entities1d:Dict[int,Union[Line,Spline,BSpline,CircleArc]] = {}
-        self._entities0d:Dict[int,Point] = {}
-        self._pointhash:Dict[Tuple[float,float,float],Point] = {}
-        self._point_size_hash:Dict[Point,float] = {}
-        self._onedims_attached_to_point:Dict[Point,Set[Union[Line,Spline,BSpline,CircleArc]]]={}
+        self._entities2d:dict[int,PlaneSurface | Surface] = {}
+        self._entities1d:dict[int,Line | Spline | BSpline | CircleArc] = {}
+        self._entities0d:dict[int,Point] = {}
+        self._pointhash:dict[tuple[float,float,float],Point] = {}
+        self._point_size_hash:dict[Point,float] = {}
+        self._onedims_attached_to_point:dict[Point,set[Line | Spline | BSpline | CircleArc]]={}
         
 
         self._mesh_size_callback=None
 
         self._curved_entities0d = {}  # TODO Does this make sense at all?
-        self._curved_entities1d:Dict[int,_pyoomph.MeshTemplateCurvedEntityBase] = {} 
-        self._curved_entities2d:Dict[int,_pyoomph.MeshTemplateCurvedEntityBase] = {}  # TODO: Set those
+        self._curved_entities1d:dict[int,_pyoomph.MeshTemplateCurvedEntityBase] = {} 
+        self._curved_entities2d:dict[int,_pyoomph.MeshTemplateCurvedEntityBase] = {}  # TODO: Set those
 
         self._mesh:Any = None
         #: The default resolution for the mesh as a nondimensional typical element length scale
-        self.default_resolution:Optional[float] = None
+        self.default_resolution:float | None = None
         
         #: This factor is used to scale all size arguments (including the default resolution) by the given factor. Useful to e.g. increase the mesh resolution by a factor.
         self.mesh_size_factor:float=1
@@ -384,7 +384,7 @@ class GmshTemplate(MeshTemplate):
         self._maxdim=0
 
 
-    def point(self, x:ExpressionOrNum, y:ExpressionOrNum=0.0, z:ExpressionOrNum=0.0, size:ExpressionNumOrNone=None, *,name:Optional[str]=None,consider_spatial_scale:Optional[bool]=None)->Point:
+    def point(self, x:ExpressionOrNum, y:ExpressionOrNum=0.0, z:ExpressionOrNum=0.0, size:ExpressionNumOrNone=None, *,name:str | None=None,consider_spatial_scale:bool | None=None)->Point:
         """
         Add a point to the geometry. Coordinates must be given in the spatial unit, e.g. in meter if the problem has a metric set_scaling(spatial=...) set.
         The size controls the mesh size and will default to self.default_resolution if not given.
@@ -417,7 +417,7 @@ class GmshTemplate(MeshTemplate):
                 if isinstance(c,Expression):
                     c=c.float_value()
                 coord[i] = c
-        x, y, z = cast(List[float],coord)
+        x, y, z = cast(list[float],coord)
         if self._pointhash.get(tuple([x, y, z])) is not None:
             return self._pointhash[tuple([x, y, z])]
         if size is None:
@@ -446,8 +446,8 @@ class GmshTemplate(MeshTemplate):
         self._maxdim = max(self._maxdim, 0)
         return res
 
-    def points(self,*coords:List[ExpressionOrNum],size:Optional[Union[float,Sequence[float]]]=None) -> List[Point]:
-        res:List[Point]=[]
+    def points(self,*coords:list[ExpressionOrNum],size:float | Sequence[float] | None=None) -> list[Point]:
+        res:list[Point]=[]
         if size:
             if isinstance(size,float):
                 sizeC=[size]*len(coords)
@@ -472,7 +472,7 @@ class GmshTemplate(MeshTemplate):
             res.append(self.point(x,y,z,size=s))
         return res
 
-    def _store_name(self, name:Optional[str], obj:object):
+    def _store_name(self, name:str | None, obj:object):
         if name is None:
             return
         if isinstance(obj, list):
@@ -485,8 +485,8 @@ class GmshTemplate(MeshTemplate):
         self._rev_names[obj] = name
         self._dim_tag_names[obj.dim_tag] = (name,obj)
 
-    def _resolve_name(self, typ:str, *args:Union[str,object])->List[object]:
-        res:List[object] = []
+    def _resolve_name(self, typ:str, *args:str | object)->list[object]:
+        res:list[object] = []
         for a in args:
             if a is None:
                 continue
@@ -509,7 +509,7 @@ class GmshTemplate(MeshTemplate):
                 res.append(a)
         return res
 
-    def line(self, *args:Union[Sequence[ExpressionOrNum],Point], name:Optional[str]=None)->Optional[Union[Line,List[Line]]]:
+    def line(self, *args:Sequence[ExpressionOrNum] | Point, name:str | None=None)->Line | list[Line] | None:
         """
         Create a line (segment-wise) line for the mesh. When given a name, it can be used to identify the line later, e.g. for boundary conditions.
 
@@ -526,7 +526,7 @@ class GmshTemplate(MeshTemplate):
         if self._geom is None:
             raise RuntimeError("Can only add geometry inside the function 'define_geometry'")
         
-        argsc:List[Point]=[]
+        argsc:list[Point]=[]
         for _,a in enumerate(list(args)):
             if isinstance(a,(list,tuple)):
                 assert len(a)<=3 or isinstance(a[3],float)
@@ -561,7 +561,7 @@ class GmshTemplate(MeshTemplate):
         elif len(argsc)<2:
             raise ValueError("A line must have at least 2 points")
         else:
-            resg:List[Line]=[]
+            resg:list[Line]=[]
             for p1,p2 in zip(argsc[:-1],argsc[1:]):
                 if p1==p2:
                     raise ValueError("Degenerate line with identical points")
@@ -571,9 +571,9 @@ class GmshTemplate(MeshTemplate):
                     resg.append(ll)
             return resg
 
-    def make_lines_transfinite(self,*linesIn:Union[Line,str],numnodes:Union[Literal["auto"],int]="auto",mode:str="Progression",coeff:Optional[float]=None,dry_run:bool=False) -> List[Tuple[int, float]]:
+    def make_lines_transfinite(self,*linesIn:Line | str,numnodes:Literal["auto"] | int="auto",mode:str="Progression",coeff:float | None=None,dry_run:bool=False) -> list[tuple[int, float]]:
         lines=self._resolve_name("lines", *linesIn)
-        res_info:List[Tuple[int,float]]=[]
+        res_info:list[tuple[int,float]]=[]
         for line in lines:
             if numnodes == "auto":
                 if isinstance(line,(pygmsh.geo.geometry.common.geometry.Line, pygmsh.geo.geometry.common.geometry.Spline,pygmsh.geo.geometry.common.geometry.BSpline)):
@@ -625,7 +625,7 @@ class GmshTemplate(MeshTemplate):
                 self._geom.set_transfinite_curve(line,numnodes,mesh_type=mode,coeff=coeff) #type:ignore
         return res_info
 
-    def make_surface_transfinite(self,*surfsIn:Union[str,PlaneSurface],corners:List[Point]=[],arrangement:str=""):
+    def make_surface_transfinite(self,*surfsIn:str | PlaneSurface,corners:list[Point]=[],arrangement:str=""):
         surfs=self._resolve_name("surfaces", *surfsIn)
         for surf in surfs:
             for s in surf: #type:ignore
@@ -651,7 +651,7 @@ class GmshTemplate(MeshTemplate):
 
 
     # Add lines as p1, <name>, p2, <name>, p3, <name>, p4...
-    def create_lines(self, *args:Union[Point,List[ExpressionOrNum],Tuple[ExpressionOrNum,...],str]) -> List[Line]:
+    def create_lines(self, *args:Point | list[ExpressionOrNum] | tuple[ExpressionOrNum, ...] | str) -> list[Line]:
         """
         Creates multiple lines with different names based on the given arguments. 
         For line loop around a box, you can e.g. do
@@ -675,7 +675,7 @@ class GmshTemplate(MeshTemplate):
             closed_loop=True
             #raise ValueError("create line needs arguments like p1, <name>, p2, <name>, p3, <name>, p4 ,...")
         NL = len(args) // 2
-        res:List[Line] = []
+        res:list[Line] = []
         for i in range(NL):
             pstart = args[2 * i]
             name = args[2 * i + 1]
@@ -696,7 +696,7 @@ class GmshTemplate(MeshTemplate):
                 res.append(lin)
         return res
 
-    def bspline(self, ptlist:Sequence[Point], *, name:Optional[str]=None)->BSpline:
+    def bspline(self, ptlist:Sequence[Point], *, name:str | None=None)->BSpline:
         if self._geom is None:
             raise RuntimeError("Can only add geometry inside the function 'define_geometry'")
         res = self._geom.add_bspline(ptlist) #type:ignore
@@ -709,7 +709,7 @@ class GmshTemplate(MeshTemplate):
             self._onedims_attached_to_point[p].add(res)
         return res
 
-    def spline(self, ptlistIn:Sequence[Union[Point,Sequence[ExpressionOrNum]]], *, name:Optional[str]=None,with_macro_element:bool=True)->Spline:
+    def spline(self, ptlistIn:Sequence[Point | Sequence[ExpressionOrNum]], *, name:str | None=None,with_macro_element:bool=True)->Spline:
         """
         Create a spline curve given by a list of points. If a name is supplied, it can be used for e.g. boundary conditions.
 
@@ -727,7 +727,7 @@ class GmshTemplate(MeshTemplate):
         for i,p in enumerate(ptlist):
             if isinstance(p,(list,tuple)):
                 ptlist[i]=self.point(*p) #type:ignore
-        ptlist=cast(List[Point],ptlist)
+        ptlist=cast(list[Point],ptlist)
         for _,other in self._entities1d.items():
             if isinstance(other,pygmsh.geo.geometry.common.geometry.Spline):
                 if len(other.points)==len(ptlist):
@@ -758,21 +758,21 @@ class GmshTemplate(MeshTemplate):
             self._onedims_attached_to_point[p].add(res)
         return res
 
-    def create_circle_lines(self,centre:Union[Tuple[ExpressionOrNum,...],Point],radius:ExpressionOrNum,*,mesh_size:Optional[float]=None,line_name:Optional[str]=None)->List[Line]:
+    def create_circle_lines(self,centre:tuple[ExpressionOrNum, ...] | Point,radius:ExpressionOrNum,*,mesh_size:float | None=None,line_name:str | None=None)->list[Line]:
         if not isinstance(centre,Point):
             centre=self.point(*centre)
-        corners:List[Point]=[]
+        corners:list[Point]=[]
         SS=self.get_problem().get_scaling("spatial")
         for signs in [[1,0],[0,1],[-1,0],[0,-1]]:
             corners.append(self.point(centre.x[0]*SS +signs[0]*radius,centre.x[1]*SS+signs[1]*radius,size=mesh_size))
         corners.append(corners[0])
-        lines:List[CircleArc]=[]
+        lines:list[CircleArc]=[]
         for i in range(4):
             lines.append(self.circle_arc(corners[i],corners[i+1],center=centre,name=line_name))
         return lines
             
 
-    def circle_arc(self, startpt:Union[Point,Sequence[ExpressionOrNum]], endpt:Union[Point,Sequence[ExpressionOrNum]], *, center:Optional[Union[Point,Sequence[ExpressionOrNum]]]=None, through_point:Optional[Union[Point,Sequence[ExpressionOrNum]]]=None, name:Optional[str]=None, with_macro_element:bool=True)->Optional[Union[Line,CircleArc]]:
+    def circle_arc(self, startpt:Point | Sequence[ExpressionOrNum], endpt:Point | Sequence[ExpressionOrNum], *, center:Point | Sequence[ExpressionOrNum] | None=None, through_point:Point | Sequence[ExpressionOrNum] | None=None, name:str | None=None, with_macro_element:bool=True)->Line | CircleArc | None:
         """
         Adds a circlular arc to the mesh geometry.
 
@@ -840,7 +840,7 @@ class GmshTemplate(MeshTemplate):
         return res
 
 
-    def ellipse_arc(self,startpt:Union[Point,Sequence[ExpressionOrNum]],endpt:Union[Point,Sequence[ExpressionOrNum]],center:Union[Point,Sequence[ExpressionOrNum]],pt_on_major_axis:Optional[Union[Point,Sequence[ExpressionOrNum]]]=None,name:Optional[str]=None):
+    def ellipse_arc(self,startpt:Point | Sequence[ExpressionOrNum],endpt:Point | Sequence[ExpressionOrNum],center:Point | Sequence[ExpressionOrNum],pt_on_major_axis:Point | Sequence[ExpressionOrNum] | None=None,name:str | None=None):
         """
         Adds an ellipse arc to the mesh geometry.
 
@@ -878,14 +878,14 @@ class GmshTemplate(MeshTemplate):
         return res
 
 
-    def _get_boundary_corner_size_map(self)->Dict[str,Dict[Tuple[float,...],float]]:
-        entlist:Dict[Union[Line,Spline,BSpline,CircleArc],Set[Point]]=dict()
+    def _get_boundary_corner_size_map(self)->dict[str,dict[tuple[float,...],float]]:
+        entlist:dict[Line | Spline | BSpline | CircleArc,set[Point]]=dict()
         for pt,ptinfo in self._onedims_attached_to_point.items():
             for l in ptinfo:
                 if l not in entlist:
                     entlist[l]=set()
                 entlist[l].add(pt)
-        res:Dict[str,Dict[Tuple[float],float]] = {}
+        res:dict[str,dict[tuple[float],float]] = {}
         for l,pts in entlist.items():
             name=self._rev_names.get(l)
             if name is None:
@@ -905,7 +905,7 @@ class GmshTemplate(MeshTemplate):
                     res[name][tuple(p.x)]=self._point_size_hash[p] #type:ignore
         return res
 
-    def sphere(self, origin:Point, radius:float=1, surface_name:Optional[str]=None, mesh_size:Optional[float]=None)->Any:
+    def sphere(self, origin:Point, radius:float=1, surface_name:str | None=None, mesh_size:float | None=None)->Any:
         if self._geom is None:
             raise RuntimeError("Can only add geometry inside the function 'define_geometry'")
         ball = self._geom.add_ball([x for x in origin.x], radius, mesh_size=mesh_size) #type:ignore
@@ -916,13 +916,13 @@ class GmshTemplate(MeshTemplate):
         self._maxdim = max(self._maxdim, 2)  ##TODO 2 or 1
         return ball
 
-    def _sort_line_loop(self, lst:Sequence[Union[Line,Spline,BSpline,CircleArc]], name:Optional[str]=None) -> List[List[Union[Line , Spline , BSpline , CircleArc]]]:
+    def _sort_line_loop(self, lst:Sequence[Line | Spline | BSpline | CircleArc], name:str | None=None) -> list[list[Line | Spline | BSpline | CircleArc]]:
         tocheck = [a for a in lst]
         currentelem = tocheck.pop(0)
         startpoint = currentelem.points[0] #type:ignore
         currentendpoint = currentelem.points[-1] #type:ignore
         gmshres = [currentelem]
-        totalres:List[List[Union[Line,Spline,BSpline,CircleArc]]]=[]
+        totalres:list[list[Line | Spline | BSpline | CircleArc]]=[]
         debug_info = [self._rev_names.get(currentelem, "<unnamed>")]
         while len(tocheck) > 0:
             found = False
@@ -983,11 +983,11 @@ class GmshTemplate(MeshTemplate):
         totalres.append(gmshres)
         return totalres
 
-    def set_gmsh_parameter(self, n:str, v:Union[float,int]):
+    def set_gmsh_parameter(self, n:str, v:float | int):
         gmsh.option.setNumber(n, v) #type:ignore
 
 
-    def plane_surface(self, *args:Union[str,Line,Spline,BSpline,CircleArc,None], name:Optional[str]=None,holes:Optional[List[Sequence[Union[str,Line,Spline,BSpline,CircleArc]]]]=None,reversed_order:bool=False) -> List[PlaneSurface]:
+    def plane_surface(self, *args:str | Line | Spline | BSpline | CircleArc | None, name:str | None=None,holes:list[Sequence[str | Line | Spline | BSpline | CircleArc]] | None=None,reversed_order:bool=False) -> list[PlaneSurface]:
         """
         Creates a planar surface in the mesh. You must supply the enclosing boundaries (either by name or the line/circle_arc/spline/bspline objects) as arguments.
         If you give it a name, it can be used to add equations to the domain.
@@ -1003,15 +1003,15 @@ class GmshTemplate(MeshTemplate):
         """
         holesO = []
         if holes is not None:
-            holes_names:List[List[str]]=[]
-            revnamemap:Dict[object,str]={}
+            holes_names:list[list[str]]=[]
+            revnamemap:dict[object,str]={}
             for k,v in self._named_entities.items():
                 for vv in v:
                     revnamemap[vv]=k
             for hole in holes:
                 resolved = self._resolve_name("lines", *hole)                
                 srted = self._sort_line_loop(resolved) #type:ignore                
-                hole_names:List[str]=[]
+                hole_names:list[str]=[]
                 for s in srted:
                     ll = self._geom.add_curve_loop(s) #type:ignore
                     holesO.append(ll) #type:ignore
@@ -1031,7 +1031,7 @@ class GmshTemplate(MeshTemplate):
         resolved = [l for l in resolved if l is not None]
         
         srted = self._sort_line_loop(resolved, name=name)  #type:ignore
-        allres:List[PlaneSurface]=[]
+        allres:list[PlaneSurface]=[]
         for s in srted:
             if reversed_order:
                 s = list(reversed([-x for x in s]))
@@ -1060,10 +1060,10 @@ class GmshTemplate(MeshTemplate):
         
         return allres
 
-    def ruled_surface(self, *args:Union[str,Line,Spline,BSpline,CircleArc], name:Optional[str]=None,reversed_order:bool=False) -> List[Surface]:
+    def ruled_surface(self, *args:str | Line | Spline | BSpline | CircleArc, name:str | None=None,reversed_order:bool=False) -> list[Surface]:
         resolved = self._resolve_name("lines", *args)
         srted = self._sort_line_loop(resolved, name=name) #type:ignore
-        allres:List[Surface] = []
+        allres:list[Surface] = []
         for s in srted:
             if reversed_order:
                 s = list(reversed([-x for x in s]))
@@ -1078,7 +1078,7 @@ class GmshTemplate(MeshTemplate):
             allres.append(res)
         return allres
 
-    def volume(self, *args:Union[str,Surface,PlaneSurface], name:Optional[str]=None,reversed_order:bool=False) -> List[Volume]:
+    def volume(self, *args:str | Surface | PlaneSurface, name:str | None=None,reversed_order:bool=False) -> list[Volume]:
         resolved = self._resolve_name("surfaces", *args) #type:ignore
         #print(resolved)
         srted=resolved # TODO: Sort?
@@ -1086,7 +1086,7 @@ class GmshTemplate(MeshTemplate):
         #srted=
         #print(srted)
         #exit()
-        allres:List[Volume]=[]
+        allres:list[Volume]=[]
         #srted = self._sort_line_loop(resolved, name=kwargs.get("name"))
         #if kwargs.get("reversed", False) == True:
         #    srted = list(reversed([-x for x in srted]))
@@ -1112,7 +1112,7 @@ class GmshTemplate(MeshTemplate):
         #exit()
         return allres
 
-    def set_recombined_surfaces(self, surfs:Union[List[Union[PlaneSurface,Surface,str]],str,PlaneSurface,Surface]):
+    def set_recombined_surfaces(self, surfs:list[PlaneSurface | Surface | str] | str | PlaneSurface | Surface):
         if isinstance(surfs, list):
             for e in surfs:
                 self.set_recombined_surfaces(e)
@@ -1237,7 +1237,7 @@ class GmshTemplate(MeshTemplate):
         self._max_elem_dim = maxeldim
 
         # Create the points
-        self._nodeinds:List[int] = []
+        self._nodeinds:list[int] = []
         _nodal_dim = 1
         mesh_points=self._mesh.points
         mesh_points,unique_adding=self.process_points_for_optional_mirroring(mesh_points)        
@@ -1284,7 +1284,7 @@ class GmshTemplate(MeshTemplate):
             self._find_opposite_interface_connections()
 
 
-    def _do_define_geometry(self, problem:"Problem", filename_trunk:Optional[str]=None):
+    def _do_define_geometry(self, problem:"Problem", filename_trunk:str | None=None):
         self._set_problem(problem)
 
         if not self._geometry_defined:
@@ -1292,7 +1292,7 @@ class GmshTemplate(MeshTemplate):
             Path(mshdir).mkdir(parents=True, exist_ok=True)
             # Find a unique name:
             if filename_trunk is None:
-                cnt:Optional[int] = None
+                cnt:int | None = None
                 mshtrunk = self.__class__.__name__
                 for mt in problem._meshtemplate_list: #type:ignore
                     if isinstance(mt, GmshTemplate):
@@ -1399,7 +1399,7 @@ class GmshTemplate(MeshTemplate):
                         mycells = cells.data[idx]
                         mygeoms = self._mesh.cell_data["gmsh:geometrical"][i][idx]
                         for li, l in enumerate(mycells): #type:ignore 
-                            ninds:List[int] = self._nodeinds[l] #type:ignore 
+                            ninds:list[int] = self._nodeinds[l] #type:ignore 
                             if -1 in ninds:  # Do only consider lines full inside
                                 continue                            
                             if no_macro_elements:
@@ -1628,7 +1628,7 @@ class GmshTemplate(MeshTemplate):
             self.dim=dim_tag[0]
                 
             
-    def extrude(self,*args,shift:List[ExpressionOrNum]=[0,0,1],recombine:bool=False,start_name=lambda s: s+"_start",end_name=lambda s: s+"_end",layers:Optional[int]=None):
+    def extrude(self,*args,shift:list[ExpressionOrNum]=[0,0,1],recombine:bool=False,start_name=lambda s: s+"_start",end_name=lambda s: s+"_end",layers:int | None=None):
         """Extrudes the given entities by the given shift. The bulk surface name will become a volume and the line surfaces will become 2d surfaces.
         Additionally, the start and end surfaces of the extrusion will be named according to the given functions.
         
@@ -1740,7 +1740,7 @@ class GmshTemplate(MeshTemplate):
         return res
     
     
-    def revolve(self,*args,angle:ExpressionOrNum=0,axis:List[ExpressionOrNum]=[0,0,1],center:List[ExpressionOrNum]=[0,0,0],start_name=lambda s: s+"_start",end_name=lambda s: s+"_end",layers:Optional[int]=None,recombine:bool=False):
+    def revolve(self,*args,angle:ExpressionOrNum=0,axis:list[ExpressionOrNum]=[0,0,1],center:list[ExpressionOrNum]=[0,0,0],start_name=lambda s: s+"_start",end_name=lambda s: s+"_end",layers:int | None=None,recombine:bool=False):
         """Rotates the given entities by the given angle around the given axis and center.
         
         Args:

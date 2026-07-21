@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -63,7 +64,7 @@ class AssignZetaCoordinatesByEulerianCoordinate(AssignZetaCoordinatesBase):
     Args:
         direction: The direction along which the zeta coordinate is assigned. Can be an integer (0,1,2) or a string ("x","y","z")
     """
-    def __init__(self,direction:Union[int,Literal["x","y","z"]]):
+    def __init__(self,direction:int | Literal["x", "y", "z"]):
         super().__init__()
         if isinstance(direction,str):
             if direction=="x":
@@ -111,7 +112,7 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
         segment_jump_offset: This offset is added to the arclength when changing to a new segment of the boundary in case of disconnected curves.
         individual_segments: Mainly concerns normalization. If True, each segment is normalized individually, otherwise all segments are normalized together. 
     """
-    def __init__(self,start_near_point:Optional[Tuple[ExpressionOrNum,ExpressionOrNum]]=None,sort_along_axis:Optional[Literal["x+","x-","y+","y-"]]=None,normalized:bool=True,segment_jump_offset:float=1.0,individual_segments:bool=True):
+    def __init__(self,start_near_point:tuple[ExpressionOrNum, ExpressionOrNum] | None=None,sort_along_axis:Literal["x+", "x-", "y+", "y-"] | None=None,normalized:bool=True,segment_jump_offset:float=1.0,individual_segments:bool=True):
         super().__init__()
         self.start_near_point=start_near_point
         self.sort_along_axis=sort_along_axis
@@ -159,8 +160,8 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
             raise RuntimeError("NODEMAP AND SEGMENT LENGTH MISMATCH")
 
 
-        alengths:List[float]=[]
-        ptinds:List[int]=[]
+        alengths:list[float]=[]
+        ptinds:list[int]=[]
         aleng=0.0
 
         if not self.individual_segments:
@@ -178,9 +179,9 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
             if self.normalized:
                 alengths=numpy.array(alengths)/alengths[-1]
         else:   
-            aleng_segs:List[NPFloatArray]=[]
+            aleng_segs:list[NPFloatArray]=[]
             for seg in segs:
-                alength_seg:List[float]=[]
+                alength_seg:list[float]=[]
                 aleng=0.0
                 oldx,oldy=pts[0,seg[0]],pts[1,seg[0]]
                 for ptind in seg:

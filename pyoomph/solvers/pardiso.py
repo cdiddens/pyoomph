@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -46,7 +47,7 @@ from importlib import metadata
 if TYPE_CHECKING:
     from ..generic.problem import Problem
 
-def _try_to_find_lib(nam:Union[str,List[str]])->Optional[CDLL]:
+def _try_to_find_lib(nam:str | list[str])->CDLL | None:
     # First try to find the library via the packages
     try:
         mkl_rt=[p for p in metadata.files('mkl') if 'mkl_rt' in str(p)]
@@ -210,7 +211,7 @@ def mkl_set_num_threads(num_threads:int):
 
 class pardisoSolver(object):
     
-    def __init__(self, matA:Any, mtype:int=11, verbose:bool=False,iparm_override:Dict[int,int]={}):
+    def __init__(self, matA:Any, mtype:int=11, verbose:bool=False,iparm_override:dict[int,int]={}):
             #mode  11 : real, nonsymmetric
             #mode  13 : complex,  nonsymmetric
 
@@ -280,7 +281,7 @@ class pardisoSolver(object):
         for k,v in iparm_override.items():
             self.iparm[k-1]=v
 
-        self.last_mem_used_in_kb:Optional[int]=None
+        self.last_mem_used_in_kb:int | None=None
 
     def update_matrix_values(self, matA:Any,mtype:int=11):
         if self.n != matA.shape[0]:
@@ -320,12 +321,12 @@ class pardisoSolver(object):
     def refactor(self):
         out = self.run_pardiso(phase=23) #type:ignore
 
-    def solve(self, rhs:Union[NPFloatArray,NPComplexArray])->Union[NPFloatArray,NPComplexArray]:
+    def solve(self, rhs:NPFloatArray | NPComplexArray)->NPFloatArray | NPComplexArray:
         #print("PARDISO SOLVE")
         x = self.run_pardiso(phase=33, rhs=rhs)
         return x
 
-    def run_pardiso(self, phase:int, rhs:Optional[Union[NPFloatArray,NPComplexArray]]=None)->Union[NPFloatArray,NPComplexArray]:
+    def run_pardiso(self, phase:int, rhs:NPFloatArray | NPComplexArray | None=None)->NPFloatArray | NPComplexArray:
         
         if rhs is None:
             nrhs = 0
@@ -388,9 +389,9 @@ class PardisoSolver(GenericLinearSystemSolver):
         self._current_pardiso = None
         self.try_to_reuse_solver=False
         self.verbose=verbose
-        self.iparm_override:Dict[int,int]={}
+        self.iparm_override:dict[int,int]={}
 
-    def set_num_threads(self,nthreads:Optional[int]):
+    def set_num_threads(self,nthreads:int | None):
         if nthreads is None or nthreads==0:
             mkl_set_num_threads(mkl_get_max_threads())
         else:
@@ -562,7 +563,7 @@ class PardisoSolver(GenericLinearSystemSolver):
 from .scipy import ScipyEigenSolver,DefaultMatrixType
 
 class PardisoInvOp(object):
-    def __init__(self, A:DefaultMatrixType, M:Optional[DefaultMatrixType]=None,sigma:Optional[Union[float,complex]]=None,mode:int=11):
+    def __init__(self, A:DefaultMatrixType, M:DefaultMatrixType | None=None,sigma:float | complex | None=None,mode:int=11):
         if sigma is None:
             self.mat=A
         else:
@@ -590,7 +591,7 @@ class PardisoInvOp(object):
 class PardisoArpackEigenSolver(ScipyEigenSolver):
     idname = "pardiso"
 
-    def get_OPInv(self,M:DefaultMatrixType,J:DefaultMatrixType,shift:Union[float,complex]):
+    def get_OPInv(self,M:DefaultMatrixType,J:DefaultMatrixType,shift:float | complex):
         if shift is None:
             OPinv = None
         else:

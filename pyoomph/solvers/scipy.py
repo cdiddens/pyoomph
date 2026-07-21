@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -116,7 +117,7 @@ class UMFPACKSerial(SuperLUSerial):
 
 
 class PardisoInvOp(object):
-		def __init__(self,A:DefaultMatrixType,M:Optional[DefaultMatrixType]=None):
+		def __init__(self,A:DefaultMatrixType,M:DefaultMatrixType | None=None):
 			self.A = A
 			self.M = M
 
@@ -144,14 +145,14 @@ class ScipyEigenSolver(GenericEigenSolver):
 	def __init__(self,problem:"Problem"):
 		super().__init__(problem)
 		self.shift=1
-		self.ncv:Optional[int]=None
+		self.ncv:int | None=None
 		self.tol=0
 
-	def get_OPInv(self,M:DefaultMatrixType,J:DefaultMatrixType,shift:Union[float,complex])->Optional[object]:
+	def get_OPInv(self,M:DefaultMatrixType,J:DefaultMatrixType,shift:float | complex)->object | None:
 		return None
 
 
-	def solve(self,neval:int,shift:Optional[Union[float,complex]]=None,sort:bool=True,which:EigenSolverWhich="LM",OPpart:Optional[Literal["r","i"]]=None,v0:Optional[Union[NPComplexArray,NPFloatArray]]=None,target:Optional[complex]=None,custom_J_and_M:Optional[Tuple[DefaultMatrixType]]=None,with_left_eigenvectors:bool=False,quiet:bool=True)->Tuple[NPComplexArray,NPComplexArray,DefaultMatrixType,DefaultMatrixType]:
+	def solve(self,neval:int,shift:float | complex | None=None,sort:bool=True,which:EigenSolverWhich="LM",OPpart:Literal["r", "i"] | None=None,v0:NPComplexArray | NPFloatArray | None=None,target:complex | None=None,custom_J_and_M:tuple[DefaultMatrixType] | None=None,with_left_eigenvectors:bool=False,quiet:bool=True)->tuple[NPComplexArray,NPComplexArray,DefaultMatrixType,DefaultMatrixType]:
 		if shift is None:
 			shift=self.shift
 		if target is not None:

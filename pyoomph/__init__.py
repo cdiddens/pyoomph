@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -65,7 +66,7 @@ def get_default_c_compiler():
 
 
 ###DEVELOPMENT FLAGS, REMOVE AFTER SUCCESSFUL IMPLEMENTATION
-_dev_opts:Dict[str,Any]= {}
+_dev_opts:dict[str,Any]= {}
 _dev_opts["allow_tri_refine"]=False
 
 def set_dev_option(name:str,val:Any):
@@ -111,12 +112,12 @@ class GeneralSolverCallback(_pyoomph.GeneralSolverCallback):
 		# actual solve, the caller still holds a strong reference to its Problem, so the weakref
 		# resolves fine; once nothing else does, it simply (and correctly) starts resolving to
 		# None instead of pinning the Problem alive.
-		self._current_problem_ref:"Optional[weakref.ReferenceType[Problem]]"=None
+		self._current_problem_ref:"weakref.ReferenceType[Problem] | None"=None
 
 	def set_problem(self,problem:Problem):
 		self._current_problem_ref=weakref.ref(problem)
 
-	def _get_current_problem(self)->Optional[Problem]:
+	def _get_current_problem(self)->Problem | None:
 		return self._current_problem_ref() if self._current_problem_ref is not None else None
 
 	def solve_la_system_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPIntArray,colptr:NPIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:

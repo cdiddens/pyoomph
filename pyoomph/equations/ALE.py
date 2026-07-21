@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -45,12 +46,12 @@ class BaseMovingMeshEquations(Equations):
             coordsys(Optional[BaseCoordinateSystem]): The coordinate system. Default is None.
     """
 
-    def __init__(self,coordinate_space:Optional[str]=None,coordsys:Optional[BaseCoordinateSystem]=None):
+    def __init__(self,coordinate_space:str | None=None,coordsys:BaseCoordinateSystem | None=None):
         super().__init__()
         self.coordsys=coordsys                
         self.coordinate_space=coordinate_space
         
-        self.min_coordinate_space:Optional[str]=None
+        self.min_coordinate_space:str | None=None
         if self.coordinate_space is not None:
             self.min_coordinate_space = self.coordinate_space
 
@@ -67,7 +68,7 @@ class BaseMovingMeshEquations(Equations):
 
     def with_average_position_constraint(self, problem:"Problem", *, act_on:str="mesh",ode_domain_name:str="globals",lagrange_prefix:str="lagr_intconstr_mesh_", set_zero_on_normal_mode_eigensolve:bool=True, **avg_pos:ExpressionOrNum)->Equations:
 
-        lagrs:Dict[str,ExpressionOrNum]={}
+        lagrs:dict[str,ExpressionOrNum]={}
         for c,v in avg_pos.items():
             if c not in {"x","y","z"}:
                 raise RuntimeError("can only set average positions of x,y,z, but not "+str(c))
@@ -108,7 +109,7 @@ class PseudoElasticMesh(BaseMovingMeshEquations):
             coordinate_space (Optional[str]): The coordinate space. Default is None.            
             coordsys (Optional[BaseCoordinateSystem]): The coordinate system. Default is cartesian.
     """
-    def __init__(self, E:ExpressionOrNum=1*scale_factor("spatial")**2, nu:ExpressionOrNum=rational_num(3,10), spatial_error_factor:Optional[float]=None,coordinate_space:Optional[str]=None,coordsys:Optional[BaseCoordinateSystem]=cartesian):
+    def __init__(self, E:ExpressionOrNum=1*scale_factor("spatial")**2, nu:ExpressionOrNum=rational_num(3,10), spatial_error_factor:float | None=None,coordinate_space:str | None=None,coordsys:BaseCoordinateSystem | None=cartesian):
         super(PseudoElasticMesh, self).__init__(coordinate_space=coordinate_space,coordsys=coordsys)
         self.E = E
         self.nu = nu
@@ -153,7 +154,7 @@ class LaplaceSmoothedMesh(BaseMovingMeshEquations):
         Args:
             factor (ExpressionOrNum): The factor. Default is scale_factor("spatial")**2.            
     """
-    def __init__(self,factor:ExpressionOrNum=scale_factor("spatial")**2,coordinate_space:Optional[str]=None,coordsys:Optional[BaseCoordinateSystem]=cartesian,symmetrize:bool=False):
+    def __init__(self,factor:ExpressionOrNum=scale_factor("spatial")**2,coordinate_space:str | None=None,coordsys:BaseCoordinateSystem | None=cartesian,symmetrize:bool=False):
         super(LaplaceSmoothedMesh, self).__init__(coordinate_space=coordinate_space,coordsys=coordsys)
         self.factor=factor
         self.symmetrize=symmetrize
@@ -174,7 +175,7 @@ class LaplaceSmoothedMesh(BaseMovingMeshEquations):
 
 
 class SingleDirectionLaplaceSmoothedMesh(LaplaceSmoothedMesh):
-    def __init__(self, direction:Union[int,Literal["x","y","z"]], factor: ExpressionOrNum = scale_factor("spatial") ** 2,  coordinate_space: Optional[str] = None, coordsys: OptionalCoordinateSystem = cartesian):
+    def __init__(self, direction:int | Literal["x", "y", "z"], factor: ExpressionOrNum = scale_factor("spatial") ** 2,  coordinate_space: str | None = None, coordsys: OptionalCoordinateSystem = cartesian):
         super().__init__(factor, coordinate_space, coordsys, symmetrize=False)
         self.direction=direction
         if isinstance(direction,str):
@@ -208,7 +209,7 @@ class HyperelasticSmoothedMesh(BaseMovingMeshEquations):
         coordinate_space (Optional[str]): The coordinate space. Default is None.
         coordsys (Optional[BaseCoordinateSystem]): The coordinate system. Default is cartesian.
     """
-    def __init__(self,mu:float=1,kappa:float=1, coordinate_space: Optional[str] = None,  coordsys: Optional[BaseCoordinateSystem] = cartesian,use_subexpressions:bool=False):
+    def __init__(self,mu:float=1,kappa:float=1, coordinate_space: str | None = None,  coordsys: BaseCoordinateSystem | None = cartesian,use_subexpressions:bool=False):
         super().__init__(coordinate_space,  coordsys)
         self.use_subexpressions=use_subexpressions
         self.mu=mu
@@ -244,7 +245,7 @@ class YeohSmoothedMesh(BaseMovingMeshEquations):
         coordsys (Optional[BaseCoordinateSystem]): The coordinate system. Default is cartesian
         
     """
-    def __init__(self,kappa:float=1, C1:float=1,C2:float=10,C3:float=0, coordinate_space: Optional[str] = None,  coordsys: Optional[BaseCoordinateSystem] = cartesian,use_subexpressions:bool=False):
+    def __init__(self,kappa:float=1, C1:float=1,C2:float=10,C3:float=0, coordinate_space: str | None = None,  coordsys: BaseCoordinateSystem | None = cartesian,use_subexpressions:bool=False):
         super().__init__(coordinate_space,  coordsys)
         self.use_subexpressions=use_subexpressions
         self.C1=C1
@@ -269,7 +270,7 @@ class YeohSmoothedMesh(BaseMovingMeshEquations):
 
 
 class PinMeshCoordinates(Equations):
-    def __init__(self,*directions:Union[int,Literal["x","y","z"]]):
+    def __init__(self,*directions:int | Literal["x", "y", "z"]):
         super(PinMeshCoordinates, self).__init__()
         if len(directions)>0:
             self.directions=set()        
@@ -317,7 +318,7 @@ class ConnectMeshAtInterface(InterfaceEquations):
         self.lagr_mult_prefix=lagr_mult_prefix
         self.use_highest_space=use_highest_space
 
-    def get_required_fields(self) -> List[str]:
+    def get_required_fields(self) -> list[str]:
         dim = self.get_nodal_dimension()
         fields = ["mesh_x", "mesh_y", "mesh_z"]
         return fields[0:dim]
@@ -425,7 +426,7 @@ class VolumeEnforceStorage(ODEEquations):
             volume(ExpressionOrNum): The volume that should be enforced.
             scale(Union[Literal["auto"],ExpressionOrNum]): The scale factor. Default is "auto".
     """
-    def __init__(self,volume:ExpressionOrNum,scale:Union[Literal["auto"],ExpressionOrNum]="auto"):
+    def __init__(self,volume:ExpressionOrNum,scale:Literal["auto"] | ExpressionOrNum="auto"):
         super(VolumeEnforceStorage, self).__init__()
         self.volume=volume
         self.scale=scale
@@ -475,7 +476,7 @@ class EnforceVolumeByPressure(IntegralConstraint):
     Args:
         volume: The desired volume to be enforced. This can be a constant or any expression, e.g. a global parameter or a function of time.
     """
-    def __init__(self,volume:ExpressionOrNum,*,ode_storage_domain: Optional[str] = None, only_for_stationary_solve: bool = False, set_zero_on_normal_mode_eigensolve: bool = True, scaling_factor:Union[str,ExpressionNumOrNone]=None):
+    def __init__(self,volume:ExpressionOrNum,*,ode_storage_domain: str | None = None, only_for_stationary_solve: bool = False, set_zero_on_normal_mode_eigensolve: bool = True, scaling_factor:str | ExpressionNumOrNone=None):
         if scaling_factor is None:
             scaling_factor=1
         super().__init__(dimensional_dx=True,ode_storage_domain=ode_storage_domain, only_for_stationary_solve = only_for_stationary_solve, set_zero_on_normal_mode_eigensolve= set_zero_on_normal_mode_eigensolve, scaling_factor=scaling_factor,pressure=volume)        
@@ -659,7 +660,7 @@ class ConstrainPositionsToC1Space(Equations):
     Args:
         where: Where to apply the constraint. If None, the constraint is applied to all nodes. If a callable, it should take a list of nondimensional coordinates and return True if the constraint should be applied to that node.
     """
-    def __init__(self,where:Optional[Callable[[List[float]],bool]]=None):
+    def __init__(self,where:Callable[[list[float]], bool] | None=None):
         super().__init__()
         self.where=where
     
@@ -688,7 +689,7 @@ class UnconstrainPositionsFromC1Space(Equations):
     Args:
         where: Where to apply the constraint. If None, the constraint is applied to all nodes. If a callable, it should take a list of nondimensional coordinates and return True if the constraint should be applied to that node.
     """
-    def __init__(self,where:Optional[Callable[[List[float]],bool]]=None):
+    def __init__(self,where:Callable[[list[float]], bool] | None=None):
         super().__init__()
         self.where=where
     

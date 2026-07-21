@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -51,7 +52,7 @@ from .codegen import EquationTree,BaseEquations, FiniteElementCodeGenerator,Comb
 from ..solvers.generic import DefaultMatrixType, EigenSolverWhich, GenericLinearSystemSolver,GenericEigenSolver
 #from ..solvers.scipy import SuperLUSerial,ScipyEigenSolver
 from ..expressions.units import *
-from ..expressions import get_global_symbol,cartesian,axisymmetric,axisymmetric_flipped,radialsymmetric,BaseCoordinateSystem,nondim,testfunction,evaluate_in_past,weak,OptionalCoordinateSystem
+from ..expressions import get_global_symbol,cartesian,axisymmetric,axisymmetric_flipped,radialsymmetric,BaseCoordinateSystem,nondim,testfunction,weak,OptionalCoordinateSystem
 from ..solvers.generic import get_default_linear_solver,get_default_eigen_solver
 from ..meshes.interpolator import _DefaultInterpolatorClass,ODEInterpolator 
 from ..output.states import DumpFile
@@ -88,7 +89,7 @@ class _CustomAdaptWithHelper:
         if not self._skip_init_call and  not self._problem.is_initialised():
             self._problem.initialise()
         self._problem.actions_before_adapt()
-    def __exit__(self,exc_type: Optional[Type[BaseException]], exc: Optional[BaseException], traceback: Optional[types.TracebackType]):
+    def __exit__(self,exc_type: type[BaseException] | None, exc: BaseException | None, traceback: types.TracebackType | None):
         self._problem.actions_after_adapt()
         self._problem.before_assigning_equation_numbers(self._problem._dof_selector) #type: ignore
         num=self._problem.assign_eqn_numbers(True)
@@ -116,7 +117,7 @@ class GenericProblemHooks:
     A class that can be attached to a problem to call additional functions after e.g. newton solves, etc.
     """
     def __init__(self):
-        self._problem:Optional["Problem"]=None
+        self._problem:"Problem" | None=None
         
     def get_problem(self)->"Problem":
         if self._problem is None:
@@ -129,7 +130,7 @@ class GenericProblemHooks:
     def actions_after_change_in_global_parameter(self,param:str):
         pass
     
-    def actions_before_remeshing(self,active_remeshers:List["RemesherBase"]):
+    def actions_before_remeshing(self,active_remeshers:list["RemesherBase"]):
         pass
 
     def actions_after_newton_solve(self):
@@ -141,7 +142,7 @@ class GenericProblemHooks:
     def actions_after_newton_step(self):
         pass
     
-    def before_assigning_equation_numbers(self,dof_selector:Optional["_DofSelector"],before_equation_system:bool):
+    def before_assigning_equation_numbers(self,dof_selector:"_DofSelector" | None,before_equation_system:bool):
         pass
     
     def actions_after_parameter_increase(self,param:str):
@@ -170,7 +171,7 @@ class PeriodicOrbit:
     def __enter__(self):
         return self
     
-    def __exit__(self,exc_type: Optional[Type[BaseException]], exc: Optional[BaseException], traceback: Optional[types.TracebackType]):
+    def __exit__(self,exc_type: type[BaseException] | None, exc: BaseException | None, traceback: types.TracebackType | None):
         #  Setup the history dofs for a transient continuation
         N=self.get_num_time_steps()
         T=self.get_T(dimensional=False)
@@ -233,7 +234,7 @@ class PeriodicOrbit:
         """
         self._get_handler().update_phase_constraint_information()
     
-    def output_orbit(self,subdir:str,Tstart:Optional[float]=None,Tend:Optional[float]=None,N:Optional[int]=None,set_current_time:bool=True,endpoint:bool=True):
+    def output_orbit(self,subdir:str,Tstart:float | None=None,Tend:float | None=None,N:int | None=None,set_current_time:bool=True,endpoint:bool=True):
         olddir=self.problem.get_output_directory()
         write_states=self.problem.write_states
         outstep=self.problem._output_step
@@ -245,7 +246,7 @@ class PeriodicOrbit:
         self.problem.write_states=write_states
         self.problem._output_step=outstep
     
-    def iterate_over_samples(self,Tstart:Optional[float]=None,Tend:Optional[float]=None,N:Optional[int]=None,set_current_time:bool=True,endpoint:bool=True):
+    def iterate_over_samples(self,Tstart:float | None=None,Tend:float | None=None,N:int | None=None,set_current_time:bool=True,endpoint:bool=True):
         tbackup=self.problem.get_current_time(dimensional=False,as_float=True)
         TS=self.problem.get_scaling("temporal")
         T=self.get_T(dimensional=False)
@@ -274,7 +275,7 @@ class PeriodicOrbit:
         self._get_handler().restore_dofs()
         self.problem.set_current_time(tbackup,dimensional=False,as_float=True)
         
-    def get_floquet_multipliers(self,n:Optional[int]=None,valid_threshold:Optional[float]=10000,shift:Optional[Union[float]]=None,ignore_periodic_unity:Union[bool,float]=False,quiet:bool=True):
+    def get_floquet_multipliers(self,n:int | None=None,valid_threshold:float | None=10000,shift:float | None=None,ignore_periodic_unity:bool | float=False,quiet:bool=True):
         return self.problem.get_floquet_multipliers(n=n,valid_threshold=valid_threshold,shift=shift,ignore_periodic_unity=ignore_periodic_unity,quiet=quiet)
     
     def starts_supercritically(self):
@@ -288,7 +289,7 @@ class PeriodicOrbit:
         if len(observables)==0:
             raise ValueError("No observables given")
         accus={n:0 for n in observables}
-        obs_info:Dict[str,Tuple[AnySpatialMesh,str]]={}
+        obs_info:dict[str,tuple[AnySpatialMesh,str]]={}
         for o in observables:
             splt=o.split("/")
             if len(splt)<=1:
@@ -312,7 +313,7 @@ class PeriodicOrbit:
             return accus[observables[0]]*T
         
     
-    def change_sampling(self,*,mode:Literal["collocation","central","bspline","BDF2"]=None,NT:Optional[int]=None, order:Optional[int]=None,GL_order:Optional[int]=None,T_constraint:Optional[Literal["plane","phase"]]=None,do_solve:bool=True):
+    def change_sampling(self,*,mode:Literal["collocation","central","bspline","BDF2"]=None,NT:int | None=None, order:int | None=None,GL_order:int | None=None,T_constraint:Literal["plane", "phase"] | None=None,do_solve:bool=True):
         if mode is None:
             mode=self.mode
         if order is None:
@@ -494,12 +495,12 @@ class Problem(_pyoomph.Problem):
         self.ignore_command_line:bool=False
 
         self._ccode_dir:str="_ccode"
-        self._dof_selector:Union[_DofSelector,None]=None # The desired selected dofs
-        self._dof_selector_used:Union[_DofSelector,None,Literal["INVALID"]]=None
+        self._dof_selector:_DofSelector | None=None # The desired selected dofs
+        self._dof_selector_used:_DofSelector | None | Literal["INVALID"]=None
 
 
         self._use_first_order_timestepper:bool=False
-        self._domains_to_remesh:Set[MeshTemplate]=set()
+        self._domains_to_remesh:set[MeshTemplate]=set()
 
         self.max_residuals=1e10
         self.max_newton_iterations=10
@@ -507,8 +508,8 @@ class Problem(_pyoomph.Problem):
         self._call_output_after_adapt:bool=False
 
         #: Spatial adaption steps for the initial condition. If set to ``None``, we refine initially up to :py:attr:`max_refinement_level`.
-        self.initial_adaption_steps:Union[None,int]=None #Adapting in the first step
-        self.remove_macro_elements_after_initial_adaption:Union[bool,Literal["auto"]]="auto" # "auto" means: Only if the coordinates are free
+        self.initial_adaption_steps:None | int=None #Adapting in the first step
+        self.remove_macro_elements_after_initial_adaption:bool | Literal["auto"]="auto" # "auto" means: Only if the coordinates are free
         #: In distributed runs, we call load balance after each non-uniform adaptions
         self.call_load_balance_in_initial_adaption=False
 
@@ -523,24 +524,24 @@ class Problem(_pyoomph.Problem):
         #: Add a .gitignore with content "*" to output folders
         self.gitignore_output:bool=True
         #: Name of the logfile (or None for no logfile), relative to the output directory
-        self.logfile_name:Optional[str]="_pyoomph_logfile.txt"
+        self.logfile_name:str | None="_pyoomph_logfile.txt"
         #: When set to True, we warn about unused global parameters for arclength continuation or bifurcation tracking. If set to "error", we raise an error.
-        self.warn_about_unused_global_parameters:Union[bool,Literal["error"]]="error"
+        self.warn_about_unused_global_parameters:bool | Literal["error"]="error"
         #:  There are different methods implemented in oomph-lib to fill the sparse matrices (Jacobian, mass matrix, etc.). Depending on the problem, one or the other method may be faster or more memory efficient. The default method is "vectors_of_pairs", which is the most general one.                
         self.sparse_assembly_method:Literal["vectors_of_pairs","two_vectors","lists","maps","two_arrays"]="vectors_of_pairs"
         self.only_write_logfile_on_proc0:bool=True
         #: Checks whether the elements in the meshes are nicely oriented (facing) so that refinement works as it should. Can be only done once initially or at each refinement step
-        self.check_mesh_integrity:Union[bool,Literal["initially"]]="initially"
+        self.check_mesh_integrity:bool | Literal["initially"]="initially"
 
-        self._meshtemplate_list:List[MeshTemplate]=[]
+        self._meshtemplate_list:list[MeshTemplate]=[]
         self._meshdict={}
-        self._residual_mapping_functions:List[Callable[[str,Expression],Union[Expression,Dict[str,Expression]]]]=[]
+        self._residual_mapping_functions:list[Callable[[str,Expression],Expression | dict[str, Expression]]]=[]
 
-        self._named_vars:Dict[str,ExpressionOrNum]={}
+        self._named_vars:dict[str,ExpressionOrNum]={}
 
         self._coordinate_system=cartesian
 
-        self.scaling:Dict[str,Union[str,ExpressionOrNum]]={} #Add scales here, i.e. spatial=1*centi*meter, temporal=...
+        self.scaling:dict[str,str | ExpressionOrNum]={} #Add scales here, i.e. spatial=1*centi*meter, temporal=...
         self.scaling["time"]="temporal"
         self.scaling["coordinate"]="spatial" #Link the default fields to the main scales
         self.scaling["coordinate_x"]="spatial"
@@ -560,7 +561,7 @@ class Problem(_pyoomph.Problem):
 
         self._lasolver=get_default_linear_solver()
 
-        self._num_threads:Optional[int]=None # Default
+        self._num_threads:int | None=None # Default
         self._eigensolver=get_default_eigen_solver()
 
         self._runmode="delete"
@@ -576,25 +577,25 @@ class Problem(_pyoomph.Problem):
         self._continue_section_step_loaded:int=0
         self._nondim_time_after_last_run_statement=0 # Required for continue
 
-        self._interfacemeshes:List[InterfaceMesh]=[]
+        self._interfacemeshes:list[InterfaceMesh]=[]
         self._last_eigenvalues:NPComplexArray=numpy.array([],dtype=numpy.complex128) #type:ignore
         self._last_eigenvectors:NPComplexArray=numpy.array([],dtype=numpy.complex128) #type:ignore
-        self._last_eigenvalues_m:Optional[NPIntArray]=None
-        self._last_eigenvalues_k:Optional[NPFloatArray]=None
+        self._last_eigenvalues_m:NPIntArray | None=None
+        self._last_eigenvalues_k:NPFloatArray | None=None
         self._azimuthal_mode_param_m=None
         self._normal_mode_param_k=None
         self._azimuthal_stability=_AzimuthalStabilityInfo()
         self._bifurcation_reactivation_after_adaptation=None
         self._cartesian_normal_mode_stability=_CartesianNormalModeStabilityInfo()
-        self._bifurcation_tracking_parameter_name:Optional[str]=None
+        self._bifurcation_tracking_parameter_name:str | None=None
         self._improved_pitchfork_tracking_coordinate_system:"OptionalCoordinateSystem"=None
         self._improved_pitchfork_tracking_position_coordinate_system:"OptionalCoordinateSystem"=None
         self._shared_shapes_for_multi_assemble=False
         self._setup_azimuthal_stability_code=False
         self._setup_additional_cartesian_stability_code=False
         self._solve_in_arclength_conti=None
-        self._adapt_eigenindex:Optional[int]=None # Which eigenvector to use during adaptation
-        self._adapted_eigeninfo:Optional[List[Any]]=None # Store the eigenfunction, eigenvalue and m and k after adaptation
+        self._adapt_eigenindex:int | None=None # Which eigenvector to use during adaptation
+        self._adapted_eigeninfo:list[Any] | None=None # Store the eigenfunction, eigenvalue and m and k after adaptation
         self._last_arclength_parameter=None
         self._taken_already_an_unsteady_step=False
         self._last_step_was_stationary=None
@@ -602,34 +603,34 @@ class Problem(_pyoomph.Problem):
         self._resetting_first_step=False
         self._in_transient_newton_solve=False
         
-        self._hooks:List[GenericProblemHooks]=[]
+        self._hooks:list[GenericProblemHooks]=[]
         
         #: Flag indicating whether to call remeshing when necessary. Can be set to ``False`` to disable remeshing, e.g. when tracking bifurcations, it is better to check it manually invoking the remeshing method :py:meth:`remesh_handler_during_continuation` after each solve.
         self.do_call_remeshing_when_necessary:bool=True
 
         self.default_timestepping_scheme:Literal["BDF2","BDF1","Newmark2"]="BDF2"
 
-        self.default_spatial_integration_order:Union[int,None] = None
+        self.default_spatial_integration_order:int | None = None
 
         self._equation_system:EquationTree
-        self._interinter_connections:Set[str]=set() # Interface/interface intersections, i.e. codimension 2+ intersections
+        self._interinter_connections:set[str]=set() # Interface/interface intersections, i.e. codimension 2+ intersections
 
         self.timestepper = _pyoomph.MultiTimeStepper(True)
         self.add_time_stepper_pt(self.timestepper)
 
         #: Set this to a (list of ) plotter(s) to automatically plot on :py:meth:`output` calls. If set to ``None``, no plotting will be done.
-        self.plotter:Optional[Union[List["MatplotlibPlotter"],"MatplotlibPlotter"]]=None
+        self.plotter:list["MatplotlibPlotter"] | "MatplotlibPlotter" | None=None
         self.plot_in_dedicated_process:bool=False
-        self._plotting_process:Optional[subprocess.Popen]=None
-        self.latex_printer:Optional[_pyoomph.LaTeXPrinter]=None
+        self._plotting_process:subprocess.Popen | None=None
+        self.latex_printer:_pyoomph.LaTeXPrinter | None=None
 
         self.write_states:bool=True
-        self.states_compression_level:Union[int,None]=6
-        self.eigen_data_in_states:Union[int,bool]=False # Either True (all calced eigenvalues/vectors or a number to limit the number of stored eigendata)
+        self.states_compression_level:int | None=6
+        self.eigen_data_in_states:int | bool=False # Either True (all calced eigenvalues/vectors or a number to limit the number of stored eigendata)
         self.continuation_data_in_states:bool=False
-        self.additional_equations:Union[Literal[0],"EquationTree"]=0
+        self.additional_equations:Literal[0] | "EquationTree"=0
 
-        self.default_1d_file_extension:Union[Literal["txt","mat"],List[Literal["txt","mat"]]]="txt"
+        self.default_1d_file_extension:Literal["txt", "mat"] | list[Literal["txt", "mat"]]="txt"
 
         self.always_take_one_newton_step=True
 
@@ -637,12 +638,12 @@ class Problem(_pyoomph.Problem):
         self.eigenvector_position_scale:float=1 # if eigenmode="real" or "imag", we shift the positions multiplied with this factor (for "abs" or "angle") is is not done
         self._abort_current_run=False
 
-        self._custom_assembler:Optional["CustomAssemblyBase"]=None
+        self._custom_assembler:"CustomAssemblyBase" | None=None
 
         self.default_ccode_expression_mode:str="" # Try to factor all expressions with "factor"
         #: Debugging the Jacobian by finite differences with a given epsilon (None or <=0 means no debugging). 
-        self.debug_jacobian_by_fd_epsilon:Optional[float]=-1 
-        self.extra_compiler_flags:List[str]=[]
+        self.debug_jacobian_by_fd_epsilon:float | None=-1 
+        self.extra_compiler_flags:list[str]=[]
         
         #: After analyzing the Jacobian, a field with an empty Jacobian row will be pinned automatically
         self.automatically_remove_dofs_without_equations:bool=True
@@ -676,7 +677,7 @@ class Problem(_pyoomph.Problem):
         """
         self._abort_current_run=True
 
-    def can_continue_section(self, id:Optional[str]=None) -> bool:
+    def can_continue_section(self, id:str | None=None) -> bool:
         if id is not None:
             raise RuntimeError("TODO: id for continue sections")
         if not self._initialised:
@@ -733,7 +734,7 @@ class Problem(_pyoomph.Problem):
         return var(name,domain=domain),testfunction(name,domain=domain)
 
 
-    def get_cached_mesh_data(self,msh:Union[str,AnySpatialMesh],nondimensional:bool=False,tesselate_tri:bool=True,eigenvector:Optional[Union[int,Sequence[int]]]=None,eigenmode:MeshDataEigenModes="abs",history_index:int=0,with_halos:bool=False,operator:Optional[MeshDataCacheOperatorBase]=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True) -> "MeshDataCacheEntry":
+    def get_cached_mesh_data(self,msh:str | AnySpatialMesh,nondimensional:bool=False,tesselate_tri:bool=True,eigenvector:int | Sequence[int] | None=None,eigenmode:MeshDataEigenModes="abs",history_index:int=0,with_halos:bool=False,operator:MeshDataCacheOperatorBase | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True) -> "MeshDataCacheEntry":
         """Return the current data (i.e. values) of a mesh. These are cached in case they are required multiple times, e.g. for plotting and output. 
         The cache is invalidated whenever we solve the problem or set some initial condition.  
 
@@ -791,7 +792,7 @@ class Problem(_pyoomph.Problem):
         else:
             self._equation_system+=eqs
 
-    def get_equations(self,path:str,error_if_not_found:bool=True)->Optional[BaseEquations]:
+    def get_equations(self,path:str,error_if_not_found:bool=True)->BaseEquations | None:
         """Return the equations added at the specified path.
 
         Args:
@@ -816,12 +817,12 @@ class Problem(_pyoomph.Problem):
 
 
     @overload
-    def assemble_jacobian(self,with_residual:Literal[True]=...,which_one:str=...)->Tuple[List[float],DefaultMatrixType]: ...
+    def assemble_jacobian(self,with_residual:Literal[True]=...,which_one:str=...)->tuple[list[float],DefaultMatrixType]: ...
 
     @overload
     def assemble_jacobian(self,with_residual:Literal[False],which_one:str)->DefaultMatrixType: ...
     
-    def assemble_jacobian(self,with_residual:bool=True,which_one:str="")->Union[DefaultMatrixType,Tuple[List[float],DefaultMatrixType]]:
+    def assemble_jacobian(self,with_residual:bool=True,which_one:str="")->DefaultMatrixType | tuple[list[float], DefaultMatrixType]:
         res, n, _nzz, J_nrow_local, J_values_arr, J_colindex_arr, J_row_start_arr=self._assemble_residual_jacobian(which_one)        
         J = scipy.sparse.csr_matrix((J_values_arr, J_colindex_arr, J_row_start_arr), shape=(n, n)) #type:ignore ## TODO: Not J_nrow_local ?
         if with_residual:
@@ -829,7 +830,7 @@ class Problem(_pyoomph.Problem):
         else:
             return J
 
-    def remove_equations(self, path:str, of_type:Optional[Type[BaseEquations]]=None, only_if:Callable[[BaseEquations],bool]=lambda eqn: True,fail_if_not_exist:bool=False):
+    def remove_equations(self, path:str, of_type:type[BaseEquations] | None=None, only_if:Callable[[BaseEquations],bool]=lambda eqn: True,fail_if_not_exist:bool=False):
         if hasattr(self,"_equation_system"):
             eqtree = self._equation_system.get_by_path(path)
         else:
@@ -889,7 +890,7 @@ class Problem(_pyoomph.Problem):
             self.plotter._change_output_directory(newdir)
         
 
-    def get_output_directory(self,relative_path:Optional[str]=None)->str:
+    def get_output_directory(self,relative_path:str | None=None)->str:
         """Return the output directory of the problem. Set it with set_output_directory(). Otherwise, it will default to the name of the invoked script minus the extension .py.
         Optionally, you can add a relative path to assemble e.g. a file name within the output directory.
 
@@ -915,7 +916,7 @@ class Problem(_pyoomph.Problem):
     def has_named_var(self, name:str)->bool:
         return name in self._named_vars.keys()
 
-    def get_named_var(self, name:str, default:Optional[ExpressionOrNum]=None)->ExpressionNumOrNone:
+    def get_named_var(self, name:str, default:ExpressionOrNum | None=None)->ExpressionNumOrNone:
         return self._named_vars.get(name, default)
 
     def define_named_var(self, **kwargs:ExpressionOrNum):
@@ -957,10 +958,10 @@ class Problem(_pyoomph.Problem):
             self._lasolver.problem=None #type:ignore
         if not isinstance(self._eigensolver,(str,type(None))):
             self._eigensolver.problem=None #type:ignore
-        self._lasolver:Optional[Union[str,GenericLinearSystemSolver]] = None
-        self._eigensolver:Optional[Union[str,GenericEigenSolver]] = None
+        self._lasolver:str | GenericLinearSystemSolver | None = None
+        self._eigensolver:str | GenericEigenSolver | None = None
         self._meshtemplate_list = []
-        self._meshdict:Dict[str,"AnyMesh"] = {}
+        self._meshdict:dict[str,"AnyMesh"] = {}
         self._equation_system = None #type:ignore
         # The process-wide solver callback singleton (pyoomph._pyoomph.get_Solver_callback(),
         # see pyoomph/__init__.py's solver_cb) remembers whichever Problem last called solve()
@@ -1049,9 +1050,9 @@ class Problem(_pyoomph.Problem):
     def get_mesh(self, name:str,return_None_if_not_found:Literal[False]=...)->AnySpatialMesh: ...
 
     @overload
-    def get_mesh(self, name:str,return_None_if_not_found:Literal[True])->Optional[AnySpatialMesh]: ...
+    def get_mesh(self, name:str,return_None_if_not_found:Literal[True])->AnySpatialMesh | None: ...
 
-    def get_mesh(self, name:str,return_None_if_not_found:bool=False)->Optional[AnySpatialMesh]:
+    def get_mesh(self, name:str,return_None_if_not_found:bool=False)->AnySpatialMesh | None:
         """Get the mesh at the desired domain path. Invokes initialization if the problem is not initialised!
 
         Args:
@@ -1120,12 +1121,12 @@ class Problem(_pyoomph.Problem):
             raise RuntimeError("You tried to get an ODE with name "+str(name)+", but apparently, this is not an ODE!")
         return res
 
-    def get_all_values_at_current_time(self,with_pos:bool)->Tuple[NPFloatArray,List[bool],NPFloatArray]:
+    def get_all_values_at_current_time(self,with_pos:bool)->tuple[NPFloatArray,list[bool],NPFloatArray]:
         dofs,positional_dof=self.get_current_dofs()
         pinned=self.get_current_pinned_values(with_pos)
         return numpy.array(dofs),positional_dof,numpy.array(pinned) #type:ignore
 
-    def set_all_values_at_current_time(self,dofs:Union[NPFloatArray, List[float]],pinned:Union[NPFloatArray, List[float]],with_pos:bool):
+    def set_all_values_at_current_time(self,dofs:NPFloatArray | list[float],pinned:NPFloatArray | list[float],with_pos:bool):
         self.set_current_dofs(dofs) #type:ignore
         self.set_current_pinned_values(pinned,with_pos) #type:ignore
 
@@ -1134,12 +1135,12 @@ class Problem(_pyoomph.Problem):
         return 0.0*pv #type:ignore	 # Default: All pinned values are zero
 
     @overload
-    def set_eigenfunction_as_dofs(self,n:int,*,mode:"MeshDataEigenModes"="abs",additive_mesh_positions:bool=True,perturb_amplitude:Literal[None]=...)->Tuple[NPFloatArray,NPFloatArray]: ...
+    def set_eigenfunction_as_dofs(self,n:int,*,mode:"MeshDataEigenModes"="abs",additive_mesh_positions:bool=True,perturb_amplitude:Literal[None]=...)->tuple[NPFloatArray,NPFloatArray]: ...
     
     @overload
-    def set_eigenfunction_as_dofs(self,n:int,*,mode:"MeshDataEigenModes"="abs",additive_mesh_positions:bool=True,perturb_amplitude:float)->Tuple[NPFloatArray,NPFloatArray,float]: ...
+    def set_eigenfunction_as_dofs(self,n:int,*,mode:"MeshDataEigenModes"="abs",additive_mesh_positions:bool=True,perturb_amplitude:float)->tuple[NPFloatArray,NPFloatArray,float]: ...
 
-    def set_eigenfunction_as_dofs(self,n:int,*,mode:"MeshDataEigenModes"="abs",additive_mesh_positions:bool=True,eigenvector_position_scale:Optional[float]=None,perturb_amplitude:Optional[float]=None)->Union[Tuple[NPFloatArray,NPFloatArray,float],Tuple[NPFloatArray,NPFloatArray]]:
+    def set_eigenfunction_as_dofs(self,n:int,*,mode:"MeshDataEigenModes"="abs",additive_mesh_positions:bool=True,eigenvector_position_scale:float | None=None,perturb_amplitude:float | None=None)->tuple[NPFloatArray, NPFloatArray, float] | tuple[NPFloatArray, NPFloatArray]:
         if n>=len(self._last_eigenvectors):
             raise RuntimeError("Cannot set eigenfunction "+str(n)+" as dofs, since we have calculated only "+str(len(self._last_eigenvectors))+" eigenfunctions")
         with_pos=not additive_mesh_positions
@@ -1194,7 +1195,7 @@ class Problem(_pyoomph.Problem):
         """
         return self._coordinate_system
 
-    def set_coordinate_system(self,csys:Union[Literal["axisymmetric","axisymmetric_flipped","cartesian","radialsymmetric"],BaseCoordinateSystem]):                
+    def set_coordinate_system(self,csys:Literal["axisymmetric", "axisymmetric_flipped", "cartesian", "radialsymmetric"] | BaseCoordinateSystem):                
         """Set the default coordinate system at problem level. 
         You can specify coordinate systems also at equation level, but if you don't do, the coordinate system will default to this one.
 
@@ -1246,7 +1247,7 @@ class Problem(_pyoomph.Problem):
             scale=_pyoomph.Expression(scale)
         return scale
 
-    def set_scaling(self,**kwargs:Union[ExpressionOrNum,str])->None:
+    def set_scaling(self,**kwargs:ExpressionOrNum | str)->None:
         """
         Set the scaling factors for the problem variables for nondimensionalization.
         You can provide also scaling at equation level, but if not set there, it will ultimately default to the problem level scaling.
@@ -1284,7 +1285,7 @@ class Problem(_pyoomph.Problem):
             self.scaling[k]=v
 
 
-    def set_eigensolver(self,solv:Union[str,GenericEigenSolver]):
+    def set_eigensolver(self,solv:str | GenericEigenSolver):
         """
         Set the eigensolver backend. "scipy", "pardiso", "slepc" are available (the latter two only if the packages MKL and/or petsc4py/slepc4py are installed)
 
@@ -1298,7 +1299,7 @@ class Problem(_pyoomph.Problem):
             print("EIGEN SOLVER WAS SET TO: "+self._eigensolver.idname)
         return self._eigensolver
 
-    def set_linear_solver(self,solv:Union[str,GenericLinearSystemSolver]):
+    def set_linear_solver(self,solv:str | GenericLinearSystemSolver):
         
         """
         Set the linear solver backend. "scipy", "umfpack", "pardiso", "petsc" are available (the latter two only if the packages MKL and/or petsc4py are installed)
@@ -1316,7 +1317,7 @@ class Problem(_pyoomph.Problem):
             print("LINEAR SOLVER WAS SET TO: "+self._lasolver.idname)
         return self._lasolver
 
-    def set_num_threads(self,nthread:Optional[int]):
+    def set_num_threads(self,nthread:int | None):
         self._num_threads=nthread
         if self._lasolver is not None:
             if isinstance(self._lasolver,str):
@@ -1367,7 +1368,7 @@ class Problem(_pyoomph.Problem):
         """
         return self._initialised
 
-    def output_at_increased_time(self,dt:Optional[ExpressionOrNum]=None)->None:
+    def output_at_increased_time(self,dt:ExpressionOrNum | None=None)->None:
         """
         Increases the current time by the specified time step (dt, default scale_factor("temporal")) and calls the output method.
         Useful for Paraview PVD output of multiple stationary solutions, which otherwise overlays multiple outputs at the same time step.
@@ -1404,7 +1405,7 @@ class Problem(_pyoomph.Problem):
                 self.plotter.plot()
                 
                 
-    def create_eigendynamics_animation(self,outdir:str,plotter:"MatplotlibPlotter",eigenvector:int=0,init_amplitude:Optional[float]=None,max_amplitude:Optional[float]=None,numperiods:float=1,numouts:int=25,phi0:float=0):
+    def create_eigendynamics_animation(self,outdir:str,plotter:"MatplotlibPlotter",eigenvector:int=0,init_amplitude:float | None=None,max_amplitude:float | None=None,numperiods:float=1,numouts:int=25,phi0:float=0):
         """
         Creates an animation of the eigenfunction dynamics. The eigenfunction is animated by varying the time and the amplitude of the eigenfunction, which is added to the degrees of freedom at each time.
         All images are saved in the specified output directory (relative to the output directory of the problem). The plotter is used to create the images. 
@@ -1497,7 +1498,7 @@ class Problem(_pyoomph.Problem):
                 recu_interf(m)
 
 
-    def output(self, stage: str = "", quiet: Optional[bool] = None) -> None:
+    def output(self, stage: str = "", quiet: bool | None = None) -> None:
         """
         Invoke an output of the current solution at the current time by calling all Output objects.
 
@@ -1613,7 +1614,7 @@ class Problem(_pyoomph.Problem):
 
     
 
-    def _adapt_with_interfacial_errors(self) -> Tuple[int, int]:
+    def _adapt_with_interfacial_errors(self) -> tuple[int, int]:
         biftrack_active,biftrack_eigen=self._get_bifurcation_tracking_info()
         biftrack_mode = self.get_bifurcation_tracking_mode()
         biftrack_param = self._bifurcation_tracking_parameter_name
@@ -1708,7 +1709,7 @@ class Problem(_pyoomph.Problem):
                     override(mesh,depth)
 
 
-            errs:Dict[str,List[float]]={}
+            errs:dict[str,list[float]]={}
             for name,mesh in self._meshdict.items():
                 if isinstance(mesh,ODEStorageMesh): continue
                 assert not isinstance(mesh,InterfaceMesh)
@@ -1810,7 +1811,7 @@ class Problem(_pyoomph.Problem):
         self._adapt_eigenindex=None
         return nref,nuref
 
-    def _adapt(self) -> Tuple[int, int]:
+    def _adapt(self) -> tuple[int, int]:
         nref,nunref=self._adapt_with_interfacial_errors()
         return nref,nunref
 
@@ -1933,7 +1934,7 @@ class Problem(_pyoomph.Problem):
             #eqs.get_current_code_generator().set_remove_underived_modes(self._cartesian_normal_mode_stability.real_contribution_name,set([1]))
             #eqs.get_current_code_generator().set_remove_underived_modes(self._cartesian_normal_mode_stability.imag_contribution_name,set([1]))
 
-    def set_custom_assembler(self,assm:Optional["CustomAssemblyBase"]) -> None:
+    def set_custom_assembler(self,assm:"CustomAssemblyBase" | None) -> None:
         if self._custom_assembler:
             self._custom_assembler.finalize()
             
@@ -1945,7 +1946,7 @@ class Problem(_pyoomph.Problem):
         else:
             self.use_custom_residual_jacobian=False
 
-    def get_custom_assembler(self) -> Optional["CustomAssemblyBase"]:
+    def get_custom_assembler(self) -> "CustomAssemblyBase" | None:
         return self._custom_assembler
     
 
@@ -1974,7 +1975,7 @@ class Problem(_pyoomph.Problem):
     @overload
     def set_c_compiler(self,compiler_or_name:Literal["system"])->"SystemCCompiler": ...
 
-    def set_c_compiler(self,compiler_or_name:Union[str,BaseCCompiler])->Union[_pyoomph.CCompiler,BaseCCompiler]:
+    def set_c_compiler(self,compiler_or_name:str | BaseCCompiler)->_pyoomph.CCompiler | BaseCCompiler:
         """
         Selects the C compiler for the problem. 
         "tcc" is fast in compilation, but slower in execution. Good for setting up a problem class.
@@ -2001,7 +2002,7 @@ class Problem(_pyoomph.Problem):
         return self.get_ccompiler()
 
 
-    def __iadd__(self,other:Union[MeshTemplate,EquationTree,GenericProblemHooks,"MatplotlibPlotter"]):        
+    def __iadd__(self,other:MeshTemplate | EquationTree | GenericProblemHooks | "MatplotlibPlotter"):        
         if self._initialised:
             from ..output.plotting import BasePlotter
             if not isinstance(other,(BasePlotter,GenericProblemHooks)):
@@ -2264,7 +2265,6 @@ class Problem(_pyoomph.Problem):
                         current.value -= newvalue
                     continue
                 elif isinstance(current,MaterialProperties):
-                    from ..materials.generic import Mixture,get_pure_material,get_pure_liquid,get_pure_gas,get_surfactant,get_interface_properties,get_pure_solid #type:ignore
                     try:
                         newvalue = eval(val)
                     except Exception as e:
@@ -2305,7 +2305,7 @@ class Problem(_pyoomph.Problem):
                 if not self.is_quiet():
                     print("PARAMETER ", varname, "SET TO",newvalue)
 
-    def before_assigning_equation_numbers(self,dof_selector:Optional["_DofSelector"]):
+    def before_assigning_equation_numbers(self,dof_selector:"_DofSelector" | None):
         for hook in self._hooks:
             hook.before_assigning_equation_numbers(dof_selector,True)
         self._equation_system._before_assigning_equations(dof_selector)         
@@ -2315,7 +2315,7 @@ class Problem(_pyoomph.Problem):
         self.get_eigen_solver()._before_assigning_equation_numbers()
 
 
-    def actions_before_remeshing(self,active_remeshers:List["RemesherBase"]):
+    def actions_before_remeshing(self,active_remeshers:list["RemesherBase"]):
         for hook in self._hooks:
             hook.actions_before_remeshing(active_remeshers)
 
@@ -2411,7 +2411,7 @@ class Problem(_pyoomph.Problem):
     
 
     # Can be used for go_to_param or 
-    def remesh_handler_during_continuation(self, force: bool = False, resolve: bool = True, resolve_before_eigen: bool = False, reactivate_biftrack_neigen: int = 4, reactivate_biftrack_shift:float=0,resolve_max_newton_steps : Optional[int]=None,num_adapt:Optional[int]=None,resolve_globally_convergent_newton:bool=False):
+    def remesh_handler_during_continuation(self, force: bool = False, resolve: bool = True, resolve_before_eigen: bool = False, reactivate_biftrack_neigen: int = 4, reactivate_biftrack_shift:float=0,resolve_max_newton_steps : int | None=None,num_adapt:int | None=None,resolve_globally_convergent_newton:bool=False):
         """
         Handle remeshing during continuation. We might have to calculate e.g. a new eigenvector when doing bifurcation tracking.
         In that case, set Problem.do_remeshing_when_necessary to False to prevent any automatic remeshing.
@@ -2475,7 +2475,7 @@ class Problem(_pyoomph.Problem):
 
     def _link_geometry_and_equations(self):
         #Go through the templates and create them
-        domset:Set[str]=set()
+        domset:set[str]=set()
         for m in self._meshtemplate_list:
             m._do_define_geometry(self) 
             mydoms=set(m.available_domains())
@@ -2548,10 +2548,10 @@ class Problem(_pyoomph.Problem):
             infofile.write(str(self._equation_system))
             infofile.close()
 
-    def before_defining_problem(self,redefine:bool=False,old_meshes:Optional[Dict[str,AnyMesh]]=None,old_mesh_templates:Optional[List[MeshTemplate]]=None):
+    def before_defining_problem(self,redefine:bool=False,old_meshes:dict[str, AnyMesh] | None=None,old_mesh_templates:list[MeshTemplate] | None=None):
         pass
 
-    def redefine_problem(self, code_dir:str,interpolator:Type["BaseMeshToMeshInterpolator"]=_DefaultInterpolatorClass,num_adapt:Optional[int]=None):
+    def redefine_problem(self, code_dir:str,interpolator:type["BaseMeshToMeshInterpolator"]=_DefaultInterpolatorClass,num_adapt:int | None=None):
         """
         Redefines the problem by recompiling equations. 
         This can in principle be used if problem parameters have changed, but it is not recommended to change the problem structure.
@@ -2616,7 +2616,7 @@ class Problem(_pyoomph.Problem):
 
         num_adapt = self.max_refinement_level if num_adapt is None else num_adapt
 
-        interpolators:Dict[str,"BaseMeshToMeshInterpolator"]={}
+        interpolators:dict[str,"BaseMeshToMeshInterpolator"]={}
 
         def perform_interpolation():
             for _, interp in interpolators.items():
@@ -2729,13 +2729,13 @@ class Problem(_pyoomph.Problem):
                 if not self.is_quiet():
                     print("Removing contents of output dir",get_mpi_rank())
 
-                    def rem_subdir(subdir:str,filter:Union[str,List[str],Tuple[str]],remglob:Optional[Iterable[str]]=None):
+                    def rem_subdir(subdir:str,filter:str | list[str] | tuple[str],remglob:Iterable[str] | None=None):
                         top=os.path.join(self._outdir,subdir)
                         if not os.path.exists(top) or not os.path.isdir(top):
                             return
                         if not isinstance(filter,(list,tuple)):
                             filter=[filter]
-                        lst:List[str]=[]
+                        lst:list[str]=[]
                         for g in filter:
                             glb=glob.glob(os.path.join(top,g))
                             if remglob:
@@ -2756,7 +2756,7 @@ class Problem(_pyoomph.Problem):
 
                     #rem_subdir(".", ["*.txt","*.pvd","*.mat"])
                     subdirs=[f.parts[-1] for f in Path(self._outdir).iterdir() if f.is_dir()]
-                    remglob:Optional[List[str]]=None
+                    remglob:list[str] | None=None
                     if self._suppress_code_writing:
                         remglob=["*.c"]
                     if self._suppress_compilation:
@@ -2998,7 +2998,7 @@ class Problem(_pyoomph.Problem):
 
 
     def rebuild_global_mesh_from_list(self,rebuild:bool=True):
-        def recu_add_imeshes(sm:Union[MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d,InterfaceMesh]):
+        def recu_add_imeshes(sm:MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d | InterfaceMesh):
             for _k, im in sm._interfacemeshes.items():   # Interface meshes
                 assert im._codegen is not None
                 im._codegen._mesh = im 
@@ -3063,7 +3063,7 @@ class Problem(_pyoomph.Problem):
 
 
 
-    def set_initial_condition(self, ic_name: str = "", all_unset_dofs_to_zero: bool = False,numadapt:Optional[int]=0):
+    def set_initial_condition(self, ic_name: str = "", all_unset_dofs_to_zero: bool = False,numadapt:int | None=0):
         """
         Set the initial condition for the problem.
 
@@ -3153,7 +3153,7 @@ class Problem(_pyoomph.Problem):
         self._equation_system._after_mapping_on_macro_elements() 
 
 
-    def remove_macro_elements(self,mode:Union[bool,Literal["auto"]]="auto"):        
+    def remove_macro_elements(self,mode:bool | Literal["auto"]="auto"):        
         for _,m in self._meshdict.items():
             if isinstance(m,ODEStorageMesh):
                 continue
@@ -3226,7 +3226,7 @@ class Problem(_pyoomph.Problem):
             A pair of arrays containing the dof-type indices and the type names to classify the degrees of freedom.
         """
         doflist:NPIntArray=numpy.array([],dtype=numpy.int32) #type:ignore
-        dofnames:List[str] = []
+        dofnames:list[str] = []
 
         def process(m:AnyMesh):
             nonlocal doflist,dofnames
@@ -3310,7 +3310,7 @@ class Problem(_pyoomph.Problem):
                     if n.is_on_boundary():
                         typ = "boundary node"
                         bn = mesh.get_boundary_names()
-                        onbounds:List[str] = []
+                        onbounds:list[str] = []
                         for i in range(len(bn)):
                             if n.is_on_boundary(i):
                                 onbounds.append(bn[i])
@@ -3350,7 +3350,7 @@ class Problem(_pyoomph.Problem):
         #print(descr)
         res_vect:NPFloatArray = numpy.array(self.get_residuals()) #type:ignore
         highdofsI:NPIntArray = numpy.argsort(numpy.absolute(res_vect)) #type:ignore
-        highdofs:List[int] = list(reversed(highdofsI[-1 - nres+1:])) #type:ignore
+        highdofs:list[int] = list(reversed(highdofsI[-1 - nres+1:])) #type:ignore
         print("========MAX. RESIDUALS========")
         for idof, dofindex in enumerate(highdofs):
             print("Highest residual", idof + 1, " with a value of", res_vect[dofindex], "Eqn number:", dofindex)
@@ -3543,7 +3543,7 @@ class Problem(_pyoomph.Problem):
             tp.set_time(t)
     
 
-    def define_global_parameter(self, **params: float) -> Union[_pyoomph.GiNaC_GlobalParam, Tuple[_pyoomph.GiNaC_GlobalParam, ...]]:
+    def define_global_parameter(self, **params: float) -> _pyoomph.GiNaC_GlobalParam | tuple[_pyoomph.GiNaC_GlobalParam, ...]:
         """
         Define one or more global parameters for the problem.
 
@@ -3564,7 +3564,7 @@ class Problem(_pyoomph.Problem):
         else:
             return tuple([*res])
         
-    def setup_for_stability_analysis(self,analytic_hessian:bool=True,use_hessian_symmetry:bool=True,improve_pitchfork_on_unstructured_mesh:bool=False,improve_pitchfork_coordsys:"OptionalCoordinateSystem"=None,improve_pitchfork_position_coordsys:"OptionalCoordinateSystem"=None,shared_shapes_for_multi_assemble:Optional[bool]=None,azimuthal_stability:Optional[bool]=None,additional_cartesian_mode:Optional[bool]=None):
+    def setup_for_stability_analysis(self,analytic_hessian:bool=True,use_hessian_symmetry:bool=True,improve_pitchfork_on_unstructured_mesh:bool=False,improve_pitchfork_coordsys:"OptionalCoordinateSystem"=None,improve_pitchfork_position_coordsys:"OptionalCoordinateSystem"=None,shared_shapes_for_multi_assemble:bool | None=None,azimuthal_stability:bool | None=None,additional_cartesian_mode:bool | None=None):
         """
         Sets up the problem for stability analysis, e.g. for improved pitchfork tracking on unsymmetric meshes, azimuthal stability, etc.
         Arguments which are None are not changed.
@@ -3596,7 +3596,7 @@ class Problem(_pyoomph.Problem):
         if additional_cartesian_mode:
             self._setup_additional_cartesian_stability_code=additional_cartesian_mode
         
-    def is_normal_mode_stability_set_up(self)->Union[Literal["azimuthal","cartesian"],Literal[False]]:
+    def is_normal_mode_stability_set_up(self)->Literal["azimuthal", "cartesian"] | Literal[False]:
         """
         Returns True when :py:meth:`~pyoomph.generic.problem.Problem.setup_for_stability_analysis` has been called with ``azimuthal_stability=True`` or ``additional_cartesian_mode=True``.
         Can be used to e.g. set additional BCs for velocity_phi or similar.
@@ -3658,7 +3658,7 @@ class Problem(_pyoomph.Problem):
         # 
         return eigenvectors
 
-    def solve_eigenproblem(self, n:int, shift:Union[float,complex,None]=0, quiet:bool=False, azimuthal_m:Optional[Union[int,List[int]]]=None,normal_mode_k:Optional[Union[ExpressionOrNum,List[ExpressionOrNum]]]=None,normal_mode_L:Optional[Union[ExpressionOrNum,List[ExpressionOrNum]]]=None,report_accuracy:bool=False,sort:bool=True,which:"EigenSolverWhich"="LM",OPpart:Optional[Literal["r","i"]]=None,v0:Optional[Union[NPFloatArray,NPComplexArray]]=None,filter:Optional[Callable[[complex],bool]]=None,target:Optional[complex]=None,ncv:Optional[int]=None)->Tuple[NPComplexArray,NPComplexArray]:
+    def solve_eigenproblem(self, n:int, shift:float | complex | None=0, quiet:bool=False, azimuthal_m:int | list[int] | None=None,normal_mode_k:ExpressionOrNum | list[ExpressionOrNum] | None=None,normal_mode_L:ExpressionOrNum | list[ExpressionOrNum] | None=None,report_accuracy:bool=False,sort:bool=True,which:"EigenSolverWhich"="LM",OPpart:Literal["r", "i"] | None=None,v0:NPFloatArray | NPComplexArray | None=None,filter:Callable[[complex], bool] | None=None,target:complex | None=None,ncv:int | None=None)->tuple[NPComplexArray,NPComplexArray]:
         """
         Solves the associated generalized eigenproblem for the given number of eigenvalues and eigenvectors.
 
@@ -3685,7 +3685,7 @@ class Problem(_pyoomph.Problem):
         self._last_eigenvectors=self.process_eigenvectors(self._last_eigenvectors)
         return self._last_eigenvalues,self._last_eigenvectors
 
-    def _solve_eigenproblem_helper(self, n:int, shift:Union[float,complex,None]=0, quiet:bool=False, azimuthal_m:Optional[Union[int,List[int]]]=None,normal_mode_k:Optional[Union[ExpressionOrNum,List[ExpressionOrNum]]]=None,normal_mode_L:Optional[Union[ExpressionOrNum,List[ExpressionOrNum]]]=None,report_accuracy:bool=False,sort:bool=True,which:"EigenSolverWhich"="LM",OPpart:Optional[Literal["r","i"]]=None,v0:Optional[Union[NPFloatArray,NPComplexArray]]=None,filter:Optional[Callable[[complex],bool]]=None,target:Optional[complex]=None,ncv:Optional[int]=None)->Tuple[NPComplexArray,NPComplexArray]:
+    def _solve_eigenproblem_helper(self, n:int, shift:float | complex | None=0, quiet:bool=False, azimuthal_m:int | list[int] | None=None,normal_mode_k:ExpressionOrNum | list[ExpressionOrNum] | None=None,normal_mode_L:ExpressionOrNum | list[ExpressionOrNum] | None=None,report_accuracy:bool=False,sort:bool=True,which:"EigenSolverWhich"="LM",OPpart:Literal["r", "i"] | None=None,v0:NPFloatArray | NPComplexArray | None=None,filter:Callable[[complex], bool] | None=None,target:complex | None=None,ncv:int | None=None)->tuple[NPComplexArray,NPComplexArray]:
         """
         Real eigensolving: Called from solve_eigenproblem()
         """
@@ -3811,8 +3811,8 @@ class Problem(_pyoomph.Problem):
             
 
 
-    def _override_for_this_solve(self,*,max_newton_iterations:Optional[int]=None,newton_relaxation_factor:Optional[float]=None,newton_solver_tolerance:Optional[float]=None,globally_convergent_newton:Optional[bool]=None):
-        old:Dict[str,Union[int,bool,float]]={}
+    def _override_for_this_solve(self,*,max_newton_iterations:int | None=None,newton_relaxation_factor:float | None=None,newton_solver_tolerance:float | None=None,globally_convergent_newton:bool | None=None):
+        old:dict[str,int | bool | float]={}
         if max_newton_iterations is not None:
             old["max_newton_iterations"]=self.max_newton_iterations
             self.max_newton_iterations=max_newton_iterations
@@ -3827,7 +3827,7 @@ class Problem(_pyoomph.Problem):
             self._set_globally_convergent_newton_method(globally_convergent_newton)
         return old
     
-    def is_global_parameter_used(self,param:Union[str,_pyoomph.GiNaC_GlobalParam])->bool:
+    def is_global_parameter_used(self,param:str | _pyoomph.GiNaC_GlobalParam)->bool:
         if isinstance(param,str):
             if param not in self.get_global_parameter_names():
                 return False
@@ -3851,7 +3851,7 @@ class Problem(_pyoomph.Problem):
                 
         return False
 
-    def set_arc_length_parameter(self,desired_proportion_of_arc_length:Optional[float]=None,scale_arc_length:Optional[bool]=None,use_FD:Optional[bool]=None,use_continuation_timestepper:Optional[bool]=None,Desired_newton_iterations_ds:Optional[int]=None):
+    def set_arc_length_parameter(self,desired_proportion_of_arc_length:float | None=None,scale_arc_length:bool | None=None,use_FD:bool | None=None,use_continuation_timestepper:bool | None=None,Desired_newton_iterations_ds:int | None=None):
         if desired_proportion_of_arc_length is not None:
             self._set_arclength_parameter("Desired_proportion_of_arc_length",desired_proportion_of_arc_length)
         if scale_arc_length is not None:
@@ -3863,13 +3863,13 @@ class Problem(_pyoomph.Problem):
         if Desired_newton_iterations_ds is not None:
             self._set_arclength_parameter("Desired_newton_iterations_ds",Desired_newton_iterations_ds)
 
-    def arclength_continuation(self, parameter: Union[str, _pyoomph.GiNaC_GlobalParam], step: float, *,
-                              spatial_adapt: int = 0, max_ds: Optional[float] = None,
-                              max_newton_iterations: Optional[int] = None,
-                              newton_relaxation_factor: Optional[float] = None,
-                              newton_solver_tolerance: Optional[float] = None,
-                              min_ds: Optional[float] = None, dof_direction: Optional[List[float]] = None,
-                              globally_convergent_newton: Optional[bool] = False) -> float:
+    def arclength_continuation(self, parameter: str | _pyoomph.GiNaC_GlobalParam, step: float, *,
+                              spatial_adapt: int = 0, max_ds: float | None = None,
+                              max_newton_iterations: int | None = None,
+                              newton_relaxation_factor: float | None = None,
+                              newton_solver_tolerance: float | None = None,
+                              min_ds: float | None = None, dof_direction: list[float] | None = None,
+                              globally_convergent_newton: bool | None = False) -> float:
         """
         Perform arclength continuation on the basis of a given parameter.
 
@@ -3976,7 +3976,7 @@ class Problem(_pyoomph.Problem):
             self.minimum_arclength_ds = old_min_ds  # type:ignore
         return newds
 
-    def go_to_param(self, *, reset_pars:bool=True, startstep:Optional[float]=None, call_after_step:Optional[Callable[[float],None]]=None,final_adaptive_solve:Union[bool,int]=False,max_newton_iterations:Optional[int]=None, epsilon:float=1e-6, max_step:Optional[float]=None,**kwargs:float)->None:
+    def go_to_param(self, *, reset_pars:bool=True, startstep:float | None=None, call_after_step:Callable[[float], None] | None=None,final_adaptive_solve:bool | int=False,max_newton_iterations:int | None=None, epsilon:float=1e-6, max_step:float | None=None,**kwargs:float)->None:
         """
         Perform arclength continuation in a parameter until we reach the desired value.
 
@@ -4058,7 +4058,7 @@ class Problem(_pyoomph.Problem):
         self._last_eigenvalues_k=None
 
     # Warning: This must be used with "for parameter, eigenvalue in find_bifurcation_via_eigenvalues(...):"
-    def find_bifurcation_via_eigenvalues(self, parameter:Union[str,_pyoomph.GiNaC_GlobalParam], initstep:float, shift:Union[None,float,complex]=0, neigen:int=6, spatial_adapt:int=0, epsilon:float=1e-8, reset_arclength:bool=False, max_ds:Optional[Union[float,Callable[[float],float]]]=None, stay_stable_file:Optional[str]=None, before_eigensolving:Optional[Callable[[float],None]]=None, do_solve:bool=True, azimuthal_m:Optional[Union[int,List[int]]]=None, normal_mode_k:ExpressionNumOrNone=None, eigenindex:int=0):
+    def find_bifurcation_via_eigenvalues(self, parameter:str | _pyoomph.GiNaC_GlobalParam, initstep:float, shift:None | float | complex=0, neigen:int=6, spatial_adapt:int=0, epsilon:float=1e-8, reset_arclength:bool=False, max_ds:float | Callable[[float], float] | None=None, stay_stable_file:str | None=None, before_eigensolving:Callable[[float], None] | None=None, do_solve:bool=True, azimuthal_m:int | list[int] | None=None, normal_mode_k:ExpressionNumOrNone=None, eigenindex:int=0):
         """
         Approximates a bifurcation point by bisecting on the basis of the eigenvalues.
         Must be called as a generator, e.g.
@@ -4237,7 +4237,7 @@ class Problem(_pyoomph.Problem):
         self.set_current_dofs(numpy.array(dofs)+dofpert) #type:ignore
         
         
-    def perturb_by_eigenfunction(self,*,dt:Optional[ExpressionNumOrNone]=None, eigenmode:int=0,time_steps_per_growth:float=20,desired_initial_residuals:Optional[float]=1e-1)->ExpressionNumOrNone:
+    def perturb_by_eigenfunction(self,*,dt:ExpressionNumOrNone | None=None, eigenmode:int=0,time_steps_per_growth:float=20,desired_initial_residuals:float | None=1e-1)->ExpressionNumOrNone:
         """
         Perturb the current solution by an eigenfunction corresponding to the specified eigenmode index.
         The if the  time step dt is not set, it is chosen so that there are time_steps_per_growth time steps per growth time of the eigenmode.
@@ -4381,7 +4381,7 @@ class Problem(_pyoomph.Problem):
 
 
     
-    def dof_strings_to_global_equations(self,string_dof_set:Union[str,Set[str],List[str]]):
+    def dof_strings_to_global_equations(self,string_dof_set:str | set[str] | list[str]):
         """Takes strings like ``"domain/velocity_x"`` and returns a set of global equations
 
         Args:
@@ -4396,7 +4396,7 @@ class Problem(_pyoomph.Problem):
         elif isinstance(string_dof_set,list):
             string_dof_set=set(string_dof_set)
         resolver=EigenMatrixSetDofsToZero(self,*string_dof_set)
-        zeromap:Set[int]=set()
+        zeromap:set[int]=set()
         for d in resolver.doflist:
             eqs=resolver.resolve_equations_by_name(d)
             #print("DOF",d,"EQS",eqs)
@@ -4404,7 +4404,7 @@ class Problem(_pyoomph.Problem):
         return zeromap
             
 
-    def activate_eigenbranch_tracking(self,branch_type:Optional[Literal["real","complex","normal_mode"]]=None,eigenvector:Optional[int]=None,eigenvalue:Optional[complex]=None):
+    def activate_eigenbranch_tracking(self,branch_type:Literal["real", "complex", "normal_mode"] | None=None,eigenvector:int | None=None,eigenvalue:complex | None=None):
         """Activates eigenbranch tracking for the specified eigenbranch type. Subsequent calls of solve(...) and arclength_continuation(...) will then track the eigenbranch.
         This is similar to bifurcation tracking, but it does not adjust a parameter to find a bifurcation, i.e. where Re(lambda)=0. Instead, it starts with a eigenvalue/eigenvector pair. Once activated, you can follow the eigenbranch by calling arclength_continuation(...).        
         At each step, the eigenvalue/eigenvector pair will be updated and is available via get_last_eigenvalues()[0] and get_last_eigenvectors()[0].
@@ -4415,7 +4415,7 @@ class Problem(_pyoomph.Problem):
         """
         self.activate_bifurcation_tracking(None,bifurcation_type=branch_type,eigenvector=eigenvector,eigenvalue_for_branch_tracking=eigenvalue)
 
-    def activate_bifurcation_tracking(self,parameter:Optional[Union[str,_pyoomph.GiNaC_GlobalParam]],bifurcation_type:Optional[Literal["hopf","fold","pitchfork","azimuthal","cartesian_normal_mode"]]=None,blocksolve:bool=False,eigenvector:Optional[Union[NPFloatArray,NPComplexArray,int]]=None,omega:Optional[float]=None,azimuthal_mode:Optional[int]=None,cartesian_wavenumber_k:Optional[ExpressionOrNum]=None,eigenvalue_for_branch_tracking:Optional[complex]=None):
+    def activate_bifurcation_tracking(self,parameter:str | _pyoomph.GiNaC_GlobalParam | None,bifurcation_type:Literal["hopf", "fold", "pitchfork", "azimuthal", "cartesian_normal_mode"] | None=None,blocksolve:bool=False,eigenvector:NPFloatArray | NPComplexArray | int | None=None,omega:float | None=None,azimuthal_mode:int | None=None,cartesian_wavenumber_k:ExpressionOrNum | None=None,eigenvalue_for_branch_tracking:complex | None=None):
         """
         Activates bifurcation tracking for the specified parameter and bifurcation type. Subsequent calls of solve(...) and arclength_continuation(...) will then track the bifurcation.
 
@@ -4744,7 +4744,7 @@ class Problem(_pyoomph.Problem):
         res=PeriodicOrbit(self,mode,0,None,0,None,None,0,order,GL_order,T_constraint)
         return res
 
-    def switch_to_hopf_orbit(self,eps:float=0.01,dparam:Optional[float]=None,NT:int=30,mode:Literal["collocation","floquet","central","BDF2","bspline"]="collocation",order:int=3,GL_order:int=-1,T_constraint:Literal["phase","plane"]="phase",amplitude_factor:float=1,FD_delta:float=1e-5,FD_param_delta=1e-3,do_solve:bool=True,solve_kwargs:Dict[str,Any]={},check_collapse_to_stationary:bool=True,orbit_amplitude:Optional[float]=None,patch_number_of_nodes:bool=True)->PeriodicOrbit:
+    def switch_to_hopf_orbit(self,eps:float=0.01,dparam:float | None=None,NT:int=30,mode:Literal["collocation","floquet","central","BDF2","bspline"]="collocation",order:int=3,GL_order:int=-1,T_constraint:Literal["phase","plane"]="phase",amplitude_factor:float=1,FD_delta:float=1e-5,FD_param_delta=1e-3,do_solve:bool=True,solve_kwargs:dict[str,Any]={},check_collapse_to_stationary:bool=True,orbit_amplitude:float | None=None,patch_number_of_nodes:bool=True)->PeriodicOrbit:
         """After solving for a Hopf bifurcation by bifurcation tracking, this method will calculate the first Lyapunov exponent and initializes a good guess for the tracking of the periodic orbits originating at this Hopf bifurcation.
         
         It is best to call it like:
@@ -4879,7 +4879,7 @@ class Problem(_pyoomph.Problem):
                     #print("DOT",numpy.sqrt(numpy.dot(numpy.array(history_dofs[i])-numpy.array(u0),numpy.array(dofs)-numpy.array(u0))))
         return res
         
-    def get_floquet_multipliers(self,n:Optional[int]=None,valid_threshold:Optional[float]=10000,shift:Optional[Union[float]]=None,ignore_periodic_unity:Union[bool,float]=False,quiet:bool=True)->NPComplexArray:
+    def get_floquet_multipliers(self,n:int | None=None,valid_threshold:float | None=10000,shift:float | None=None,ignore_periodic_unity:bool | float=False,quiet:bool=True)->NPComplexArray:
         """
         TODO; Add documentation
         """
@@ -4951,7 +4951,7 @@ class Problem(_pyoomph.Problem):
         """
         return self._last_eigenvectors
 
-    def get_last_eigenmodes_m(self) -> Optional[NPIntArray]:
+    def get_last_eigenmodes_m(self) -> NPIntArray | None:
         """Get the azimuthal mode numbers for the last computed eigenvalues.
 
         Returns:
@@ -4959,7 +4959,7 @@ class Problem(_pyoomph.Problem):
         """
         return self._last_eigenvalues_m
     
-    def get_last_eigenmodes_k(self)->Optional[NPFloatArray]:
+    def get_last_eigenmodes_k(self)->NPFloatArray | None:
         """Get the cartesian normal mode numbers for the last computed eigenvalues.
 
         Returns:
@@ -4968,7 +4968,7 @@ class Problem(_pyoomph.Problem):
         return self._last_eigenvalues_k
 
 
-    def rotate_eigenvectors(self,eigenvectors,dofs_to_real:Union[str,List[str],Set[str]],normalize_dofs:bool=False,normalize_amplitude:Union[float,complex]=1,normalize_max:bool=True):
+    def rotate_eigenvectors(self,eigenvectors,dofs_to_real:str | list[str] | set[str],normalize_dofs:bool=False,normalize_amplitude:float | complex=1,normalize_max:bool=True):
         """
         Should be called within the method :py:meth:`process_eigenvectors` to rotate the eigenvectors to e.g. a common phase. 
         This is optional, but avoids phase jumps in the eigenvectors when following an eigenbranch.
@@ -5059,7 +5059,7 @@ class Problem(_pyoomph.Problem):
         return to_zero_dofs
 
 
-    def _solve_normal_mode_eigenproblem(self, n:int, azimuthal_m:Optional[Union[List[int],Tuple[int],int]]=None, cartesian_k:Optional[Union[List[float],Tuple[float],float]]=None, shift:Optional[Union[float,complex]]=0,quiet:bool=False,filter:Optional[Callable[[complex],bool]]=None,report_accuracy:bool=False,target:Optional[complex]=None,v0:Optional[Union[NPFloatArray,NPComplexArray]]=None,sort:bool=True,ncv:Optional[int]=None)->Tuple[NPComplexArray,NPComplexArray]:
+    def _solve_normal_mode_eigenproblem(self, n:int, azimuthal_m:list[int] | tuple[int] | int | None=None, cartesian_k:list[float] | tuple[float] | float | None=None, shift:float | complex | None=0,quiet:bool=False,filter:Callable[[complex], bool] | None=None,report_accuracy:bool=False,target:complex | None=None,v0:NPFloatArray | NPComplexArray | None=None,sort:bool=True,ncv:int | None=None)->tuple[NPComplexArray,NPComplexArray]:
         
         if azimuthal_m and (self._azimuthal_mode_param_m is None):
             raise RuntimeError("Must use setup_for_stability_analysis(azimuthal_stability=True) before initialialising the problem")
@@ -5081,7 +5081,7 @@ class Problem(_pyoomph.Problem):
                 raise RuntimeError("report_accuracy=True for normal mode eigenproblems only works if you select a single mode, not a list like "+str(vlist))
             alleigenvals:NPComplexArray=numpy.array([],dtype=numpy.complex128) #type:ignore
             alleigenvects:NPComplexArray=numpy.array([],dtype=numpy.complex128) #type:ignore
-            minfoL:List[int]=[]
+            minfoL:list[int]=[]
             for ms in vlist:
                 param.value = ms
                 self.actions_before_eigen_solve()
@@ -5179,7 +5179,7 @@ class Problem(_pyoomph.Problem):
         else:
             self.get_eigen_solver().setup_matrix_contributions("",None)
 
-    def solve(self,*,spatial_adapt:int=0,timestep:Union[ExpressionNumOrNone,List[ExpressionNumOrNone]]=None,shift_values:bool=True,temporal_error:Optional[float]=None,max_newton_iterations:Optional[int]=None,newton_relaxation_factor:Optional[float]=None,suppress_resolve_after_adapt:bool=False,newton_solver_tolerance:Optional[float]=None,do_not_set_IC:bool=False,globally_convergent_newton:bool=False)->ExpressionOrNum: #,continuation=None)
+    def solve(self,*,spatial_adapt:int=0,timestep:ExpressionNumOrNone | list[ExpressionNumOrNone]=None,shift_values:bool=True,temporal_error:float | None=None,max_newton_iterations:int | None=None,newton_relaxation_factor:float | None=None,suppress_resolve_after_adapt:bool=False,newton_solver_tolerance:float | None=None,do_not_set_IC:bool=False,globally_convergent_newton:bool=False)->ExpressionOrNum: #,continuation=None)
         """
         Solves the problem stationary, unless a timestep is given. In that case, the time step is taken.
 
@@ -5331,8 +5331,8 @@ class Problem(_pyoomph.Problem):
                 return desired_dt*TSCALE
 
 
-    def run(self, endtime:ExpressionOrNum, timestep:ExpressionNumOrNone=None,*, outstep:Union[ExpressionNumOrNone,bool]=None, numouts:Optional[int]=None, out_initially:Union[bool,None]=None,
-            temporal_error:Union[None,float]=None, outstep_relative_to_zero:bool=True,spatial_adapt:int=0,startstep:ExpressionNumOrNone=None,maxstep:ExpressionNumOrNone=None,newton_solver_tolerance:Union[None,float]=None,do_not_set_IC:Union[bool,Literal["auto"]]="auto",globally_convergent_newton:bool=False,max_newton_iterations:Union[None,int]=None,starttime:ExpressionNumOrNone=None,suppress_resolve_after_adapt=False,max_newton_to_increase_time_step:Optional[int]=None)->ExpressionOrNum:
+    def run(self, endtime:ExpressionOrNum, timestep:ExpressionNumOrNone=None,*, outstep:ExpressionNumOrNone | bool=None, numouts:int | None=None, out_initially:bool | None=None,
+            temporal_error:None | float=None, outstep_relative_to_zero:bool=True,spatial_adapt:int=0,startstep:ExpressionNumOrNone=None,maxstep:ExpressionNumOrNone=None,newton_solver_tolerance:None | float=None,do_not_set_IC:bool | Literal["auto"]="auto",globally_convergent_newton:bool=False,max_newton_iterations:None | int=None,starttime:ExpressionNumOrNone=None,suppress_resolve_after_adapt=False,max_newton_to_increase_time_step:int | None=None)->ExpressionOrNum:
         """
         Run the problem for a specified duration, potential with output calls and temporal and/or spatial adaptivity.
         All time quantities must be given in dimensional units, e.g. ``second``, if you use e.g. :py:meth:`~Problem.set_scaling` with e.g. ``temporal=1*second`` for a dimensional problem.
@@ -5480,7 +5480,7 @@ class Problem(_pyoomph.Problem):
         if outstep is None:
             outstep = timestep
         TS = self.get_scaling("temporal")
-        ndouttimes:Optional[NPFloatArray] = None 
+        ndouttimes:NPFloatArray | None = None 
         if not isinstance(outstep, bool):
             currentdt = min(float(timestep / TS), float(outstep / TS)) * TS
             if maxstep is not None:
@@ -5586,7 +5586,7 @@ class Problem(_pyoomph.Problem):
         return currentdt
     
 
-    def deflated_solve_by_eigenperturbation(self, eigenindex:int=0, keep_deflation_active:bool=False, perturbation_factor:float=1,deflation_alpha:float=0.1,deflation_power:int=2,*, max_newton_iterations:Optional[int]=None, newton_relaxation_factor:Optional[float]=None, newton_solver_tolerance:Optional[float]=None, globally_convergent_newton:bool=False):        
+    def deflated_solve_by_eigenperturbation(self, eigenindex:int=0, keep_deflation_active:bool=False, perturbation_factor:float=1,deflation_alpha:float=0.1,deflation_power:int=2,*, max_newton_iterations:int | None=None, newton_relaxation_factor:float | None=None, newton_solver_tolerance:float | None=None, globally_convergent_newton:bool=False):        
         """Tries to find another stationary solution by deflation. The procedure is implemented according to 'Deflation techniques for finding distinct solutions of nonlinear partial differential equations' by
 Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/1410.5620.pdf .
 
@@ -5620,7 +5620,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             defl.add_known_solution(self.get_current_dofs()[0])
             
 
-    def iterate_over_multiple_solutions_by_deflation(self,deflation_alpha:float=0.1,deflation_p:int=2,perturbation_amplitude:float=0.5,max_newton_iterations:Optional[int]=None,newton_relaxation_factor:Optional[float]=None,use_eigenperturbation:bool=False,skip_initial_solution:bool=False,num_random_tries:int=1,keep_deflation_operator_active:bool=False)-> Generator[NPFloatArray,None,None]:
+    def iterate_over_multiple_solutions_by_deflation(self,deflation_alpha:float=0.1,deflation_p:int=2,perturbation_amplitude:float=0.5,max_newton_iterations:int | None=None,newton_relaxation_factor:float | None=None,use_eigenperturbation:bool=False,skip_initial_solution:bool=False,num_random_tries:int=1,keep_deflation_operator_active:bool=False)-> Generator[NPFloatArray,None,None]:
         """Tries to find multiple stationary solutions by deflation. The procedure is implemented according to 'Deflation techniques for finding distinct solutions of nonlinear partial differential equations' by
 Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/1410.5620.pdf .
 
@@ -5701,7 +5701,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                 found_sols+=new_sols
                 
 
-    def deflated_continuation(self,deflation_alpha:float=0.1,deflation_p:int=2,perturbation_amplitude:float=0.5,max_newton_iterations:Optional[int]=None,newton_relaxation_factor:Optional[float]=None,use_eigenperturbation:bool=False,skip_initial_solution:bool=False,num_random_tries:int=1,max_branches:Optional[int]=None,branch_continue_iterations:int=10,**param_range):
+    def deflated_continuation(self,deflation_alpha:float=0.1,deflation_p:int=2,perturbation_amplitude:float=0.5,max_newton_iterations:int | None=None,newton_relaxation_factor:float | None=None,use_eigenperturbation:bool=False,skip_initial_solution:bool=False,num_random_tries:int=1,max_branches:int | None=None,branch_continue_iterations:int=10,**param_range):
         """Scan over a parameter range and try to find multiple solutions for each parameter step by deflation
         This is an implemetation according to: The computation of disconnected bifurcation diagrams by Patrick E. Farrell, Casper H. L. Beentjes, Ásgeir Birkisson
         https://arxiv.org/pdf/1603.00809.pdf
@@ -5822,8 +5822,8 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         self.set_custom_assembler(None)
         return
 
-    def force_remesh(self, only_domains:Optional[Set[MeshTemplate]]=None, num_adapt:Optional[int]=None,interpolator:Type["BaseMeshToMeshInterpolator"]=_DefaultInterpolatorClass):
-        remeshers:List["RemesherBase"] = []
+    def force_remesh(self, only_domains:set[MeshTemplate] | None=None, num_adapt:int | None=None,interpolator:type["BaseMeshToMeshInterpolator"]=_DefaultInterpolatorClass):
+        remeshers:list["RemesherBase"] = []
         if only_domains is not None:
             for t in only_domains:
                 if t.remesher is not None:
@@ -5860,8 +5860,8 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
 
         
 
-        new_meshes:Dict[str,Union[MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d]] = {}
-        old_meshes:Dict[str,Union[MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d]] = {}
+        new_meshes:dict[str,MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d] = {}
+        old_meshes:dict[str,MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d] = {}
 
         # Now remove all interfaces and so on from the previous meshes
         for name, mesh in self._meshdict.items():
@@ -5913,7 +5913,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         self.rebuild_global_mesh_from_list(rebuild=True)
         self.reapply_boundary_conditions()
 
-        interpolators:Dict[str,"BaseMeshToMeshInterpolator"]={}
+        interpolators:dict[str,"BaseMeshToMeshInterpolator"]={}
         # Apply the interpolation on each mesh: First on the boundaries and then down to the bulk mesh
         def perform_interpolation():
             for _, interp in interpolators.items(): 
@@ -6013,8 +6013,8 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         # Mesh templates
         state.int_data(lambda : len(self._meshtemplate_list),lambda n : state.assert_equal(n,len(self._meshtemplate_list)))
 
-        new_meshes:Dict[str,Union[MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d]] = {}
-        old_meshes:Dict[str,Union[MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d]]= {}
+        new_meshes:dict[str,MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d] = {}
+        old_meshes:dict[str,MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d]= {}
         for _i,templ in enumerate(self._meshtemplate_list):
             old=templ.get_template()
             new=templ.define_state_file(state,additional_info=additional_info)
@@ -6170,7 +6170,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         dump.close()
 
 
-    def load_state(self, fname:str,ignore_outstep:bool=False,relative_to_output:bool=False,ignore_eigendata:bool=False,ignore_continuation_data:bool=False,additional_info:Dict[Any,Any]={}):
+    def load_state(self, fname:str,ignore_outstep:bool=False,relative_to_output:bool=False,ignore_eigendata:bool=False,ignore_continuation_data:bool=False,additional_info:dict[Any,Any]={}):
         if not self.is_initialised():
             self.initialise()
         if self.is_distributed():
@@ -6275,7 +6275,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
      
         
         
-    def precice_run(self,maxstep:Optional[float]=None,temporal_error:Optional[float]=None,output_initially:bool=True,fast_dof_backup:bool=False):
+    def precice_run(self,maxstep:float | None=None,temporal_error:float | None=None,output_initially:bool=True,fast_dof_backup:bool=False):
         """
         Runs a simulation with the precice adapter. To that end, you must set precice_participant and precice_config_file in the Problem class.
         There is less control compared to the normal py:meth:`pyoomph.generic.problem.Problem.run` (i.e. without preCICE), but a lot of settings can be adjusted in the preCICE configuration file.
@@ -6292,7 +6292,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         get_pyoomph_precice_adapter().coupled_run(self,maxstep=maxstep,temporal_error=temporal_error,output_initially=output_initially,fast_dof_backup=fast_dof_backup)
 
 
-    def create_text_file_output(self,filename:str,header:Optional[List[str]]=None,relative_to_output_dir:bool=True)->"NumericalTextOutputFile":
+    def create_text_file_output(self,filename:str,header:list[str] | None=None,relative_to_output_dir:bool=True)->"NumericalTextOutputFile":
         """Creates a :py:class:`~pyoomph.utils.num_text_out.NumericalTextOutputFile`. By default, in the output directory.
 
         Args:
@@ -6386,8 +6386,8 @@ class _DofSelector:
     
     def __init__(self,problem:"Problem"):
         self._problem=problem
-        self._all_unselected:Optional[bool]=None
-        self._tree:Dict[str,Any]={}
+        self._all_unselected:bool | None=None
+        self._tree:dict[str,Any]={}
 
     def __enter__(self):
         if not self._problem.is_initialised():
@@ -6415,7 +6415,7 @@ class _DofSelector:
         self._problem._dof_selector=self._previous_dof_selector 
 
 
-    def _traverse(self,n:Dict[str,Any],select:bool,onlydof:Optional[str]=None):
+    def _traverse(self,n:dict[str,Any],select:bool,onlydof:str | None=None):
         for k,v in n.items():
             if k=="__parent__":
                 continue
@@ -6487,7 +6487,7 @@ class _DofSelector:
             self._select_or_unselect(k,False)
 
 
-    def _apply_on_domain(self,mesh:Optional[AnyMesh])->None:
+    def _apply_on_domain(self,mesh:AnyMesh | None)->None:
         #print("APPLY ON DOMAIN",mesh)
         if mesh is None:
             return
@@ -6498,9 +6498,9 @@ class _DofSelector:
         for k in splt:
             node=node[k]
 #        print(fn,"###########")
-        selected:Set[str]=set()
-        unselected:Set[str]=set()
-        boundinds:Set[int]=set()
+        selected:set[str]=set()
+        unselected:set[str]=set()
+        boundinds:set[int]=set()
         for k,d in node.items():
             if isinstance(d,list):
                 if d[1]:

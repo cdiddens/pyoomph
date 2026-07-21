@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -47,7 +48,7 @@ class PlotTransformPolarToCartesian(PlotTransform):
     def __init__(self):
         super(PlotTransformPolarToCartesian, self).__init__()
 
-    def apply(self, coordinates:NPFloatArray,values:Optional[NPFloatArray])->Tuple[NPFloatArray,NPFloatArray]:
+    def apply(self, coordinates:NPFloatArray,values:NPFloatArray | None)->tuple[NPFloatArray,NPFloatArray]:
         cs=coordinates.copy()
         if values is not None and len(values.shape)>1:
             vecdim=values.shape[0]
@@ -109,7 +110,7 @@ class RectangularToPolarMappingCoordinateSystem(BaseCoordinateSystem):
         if ndim!=2:
             raise RuntimeError("Rectangular to polar mapping only works for 2D")
         r,phi=self.get_r_and_phi(with_scales,lagrangian)
-        res:List[ExpressionOrNum] = [diff(arg,r),1/r*diff(arg,phi)]            
+        res:list[ExpressionOrNum] = [diff(arg,r),1/r*diff(arg,phi)]            
         return vector(res)            
     
     
@@ -129,11 +130,11 @@ class RectangularToPolarMappingCoordinateSystem(BaseCoordinateSystem):
         r,phi = self.get_r_and_phi(with_scales,lagrangian)        
         Ar=arg[0]
         Aphi=arg[1]
-        res:List[List[ExpressionOrNum]] = [[diff(Ar, r), 1/r*diff(Ar, phi)-Aphi/r, 0],
+        res:list[list[ExpressionOrNum]] = [[diff(Ar, r), 1/r*diff(Ar, phi)-Aphi/r, 0],
                    [diff(Aphi, r), diff(Aphi, phi)/r+Ar/r, 0], [0, 0, 0]]
         return matrix(res)    
     
-    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations")->Tuple[List[Expression],List[Expression],List[str]]:
+    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations")->tuple[list[Expression],list[Expression],list[str]]:
         if ndim!=2:
             raise RuntimeError("Rectangular to polar mapping only works for 2D")        
         zero=Expression(0)
@@ -156,7 +157,7 @@ class RectangularToPolarMappingCoordinateSystem(BaseCoordinateSystem):
         res = diff(r*arg[0], r)/r + 1/r*diff(arg[1], phi)
         return res
     
-    def define_tensor_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations", symmetric:bool)->Tuple[List[List[Expression]],List[List[Expression]],List[List[str]]]:
+    def define_tensor_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations", symmetric:bool)->tuple[list[list[Expression]],list[list[Expression]],list[list[str]]]:
         raise RuntimeError("Rectangular to polar mapping does not support tensors yet")
     
     def tensor_divergence(self, T:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:

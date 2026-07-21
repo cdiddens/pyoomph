@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -32,7 +33,6 @@ import sys
 import shlex
 
 
-import setuptools 
 import distutils
 import distutils.ccompiler
 import distutils.log
@@ -41,7 +41,7 @@ import distutils.errors
 
 from ..typings import *
 
-_TypeVarCompiler=TypeVar("_TypeVarCompiler",bound=Type["BaseCCompiler"])
+_TypeVarCompiler=TypeVar("_TypeVarCompiler",bound=type["BaseCCompiler"])
 
 
 class BaseCCompiler(_pyoomph.SharedLibCCompiler):
@@ -54,7 +54,7 @@ class BaseCCompiler(_pyoomph.SharedLibCCompiler):
     def check_avail()->bool:
         return True
 
-    def toolchain_located(self)->Optional[bool]:
+    def toolchain_located(self)->bool | None:
         """Lightweight, no-file-write check for whether the underlying compiler
         toolchain can be located at all (e.g. cl.exe/link.exe for MSVC, via the
         registry/vswhere - no compiling or temp files involved). Returns None
@@ -64,7 +64,7 @@ class BaseCCompiler(_pyoomph.SharedLibCCompiler):
         return None
 
     @staticmethod
-    def call_cmd( cmd:List[str], shell:bool=False, env:Optional[Dict[str,str]]=None,quiet:bool=False)->str:
+    def call_cmd( cmd:list[str], shell:bool=False, env:dict[str, str] | None=None,quiet:bool=False)->str:
         if quiet==False:
             print(shlex.join(cmd))
         if env is None:
@@ -101,8 +101,8 @@ class BaseCCompiler(_pyoomph.SharedLibCCompiler):
         return decorator
 
     @classmethod
-    def available_compilers(cls) -> Dict[str, int]:
-        compiler_dict:Dict[str,int]={}
+    def available_compilers(cls) -> dict[str, int]:
+        compiler_dict:dict[str,int]={}
         for n,compclass in cls._registered_compilers.items():
             quality=0
             if n!="_internal_":
@@ -129,12 +129,12 @@ class TCCBoxCompiler(BaseCCompiler):
     @staticmethod
     def check_avail() -> bool:    
         try:
-            import tccbox
+            pass
         except:
             return False
         return True
     
-    def compile(self, suppress_compilation: bool, suppress_code_writing: bool, quiet: bool, extra_flags: List[str]) -> bool:
+    def compile(self, suppress_compilation: bool, suppress_code_writing: bool, quiet: bool, extra_flags: list[str]) -> bool:
         if suppress_compilation:
             return True
         if not quiet:
@@ -156,7 +156,7 @@ class TCCBoxCompiler(BaseCCompiler):
 class SystemCCompiler(BaseCCompiler):
     compiler_id = "system"
     compiler_quality=5
-    def __init__(self,compile_args:Optional[List[str]]=None):
+    def __init__(self,compile_args:list[str] | None=None):
         super(SystemCCompiler, self).__init__()
         self.comp=distutils.ccompiler.new_compiler(verbose=1)
         self.comp.add_include_dir(self.get_jit_include_dir())
@@ -167,8 +167,8 @@ class SystemCCompiler(BaseCCompiler):
     def optimize_for_max_speed(self):
         self._optimize_full_speed=True
 
-    def has_function(self, funcname:str, includes:Optional[List[str]]=None, include_dirs:Optional[List[str]]=None,
-                     libraries:Optional[List[str]]=None, library_dirs:Optional[List[str]]=None) -> bool:
+    def has_function(self, funcname:str, includes:list[str] | None=None, include_dirs:list[str] | None=None,
+                     libraries:list[str] | None=None, library_dirs:list[str] | None=None) -> bool:
         import tempfile
         if includes is None:
             includes = []
@@ -214,7 +214,7 @@ int main (int argc, char **argv) {
         distutils.log.set_verbosity(2)
         return res
 
-    def toolchain_located(self)->Optional[bool]:
+    def toolchain_located(self)->bool | None:
         if self.comp.compiler_type!="msvc": #type:ignore
             return None
         try:
@@ -227,7 +227,7 @@ int main (int argc, char **argv) {
             return False
         return True
 
-    def compile(self, suppress_compilation:bool, suppress_code_writing:bool,quiet:bool,extra_flags:List[str]) -> bool:
+    def compile(self, suppress_compilation:bool, suppress_code_writing:bool,quiet:bool,extra_flags:list[str]) -> bool:
         if suppress_compilation:
             return True
         distutils.log.set_verbosity(2 if not quiet else 0)
@@ -276,9 +276,9 @@ int main (int argc, char **argv) {
 
 
 
-_global_compilers:Dict[str,_pyoomph.CCompiler]={}
+_global_compilers:dict[str,_pyoomph.CCompiler]={}
 
-def get_ccompiler(comp:Optional[str]=None)->_pyoomph.CCompiler:   #If None, we set the best one
+def get_ccompiler(comp:str | None=None)->_pyoomph.CCompiler:   #If None, we set the best one
 #    print("GET CCOMPILER ",comp)
     if comp is None:
         avail=BaseCCompiler.available_compilers()

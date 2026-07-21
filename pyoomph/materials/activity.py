@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -26,26 +27,25 @@
 # ========================================================================
  
 from abc import abstractmethod
-from token import OP
 
 from ..typings import *
-from ..expressions.cb import CustomMultiReturnExpression,Expression
+from ..expressions.cb import CustomMultiReturnExpression
 from ..expressions.units import kelvin
 from ..expressions import ExpressionNumOrNone,ExpressionOrNum, var
 
 import numpy
 
 if TYPE_CHECKING:
-    from .generic import MixtureLiquidProperties,PureLiquidProperties
+    from .generic import MixtureLiquidProperties
 
-_TypeActivityModel=TypeVar("_TypeActivityModel",bound=Type["ActivityModel"])
+_TypeActivityModel=TypeVar("_TypeActivityModel",bound=type["ActivityModel"])
 
 class ActivityModel:
     """
     A generic class to predict activity coefficients of mixtures. 
     """
-    registered_models:Dict[str,Type["ActivityModel"]]={}
-    model_instances:Dict[str,Optional["ActivityModel"]]={}
+    registered_models:dict[str,type["ActivityModel"]]={}
+    model_instances:dict[str,"ActivityModel" | None]={}
     name:str
     @classmethod
     def register_activity_model(cls, *, override:bool=False):
@@ -74,13 +74,13 @@ class ActivityModel:
         pass
 
 class UNIFACMainGroup:
-    def __init__(self,name:str,index:Optional[int]=None):
+    def __init__(self,name:str,index:int | None=None):
         self.name=name
         self.index=index
-        self.subgroups:Dict[str,"UNIFACSubGroup"]={}
+        self.subgroups:dict[str,"UNIFACSubGroup"]={}
 
 class UNIFACSubGroup:
-    def __init__(self,name:str,maingroup:UNIFACMainGroup,R:float,Q:float,index:Optional[int]=None):
+    def __init__(self,name:str,maingroup:UNIFACMainGroup,R:float,Q:float,index:int | None=None):
         self.name=name
         self.maingroup=maingroup
         self.R=R
@@ -92,9 +92,9 @@ class UNIFACMolecule:
     def __init__(self,name:str,server:ActivityModel):
         self.name=name
         self.server=server
-        self.groups:Dict[str,int]={}
+        self.groups:dict[str,int]={}
 
-    def add_subgroup(self,name_or_index:Union[str,int],count:int=1):
+    def add_subgroup(self,name_or_index:str | int,count:int=1):
         assert isinstance(self.server,UNIFACLikeActivityModel)
         if isinstance(name_or_index,int):
             name_or_index=self.server.subgroup_by_index[name_or_index].name
@@ -175,18 +175,18 @@ class UNIFACMixture:
         else:
             self._VOtherExponent=self._V #type:ignore
 
-        self._allgroups:Dict[str,int]={}
+        self._allgroups:dict[str,int]={}
         for c in self.components:
             for sg,sgcount in c.groups.items():
                 self._allgroups[sg]=self._allgroups.get(sg,0)+sgcount #Total number of each subgroup
-        self._nu:Dict[str,Dict[str,int]]={}
+        self._nu:dict[str,dict[str,int]]={}
         for c in self.components:
             entry= {n:0 for n in self._allgroups.keys()}
             for sg,sgcount in c.groups.items():
                 entry[sg]=sgcount
             self._nu[c.name]=entry
-        self._group_Qs:Dict[str,float]={n: self.server.subgroups[n].Q for n in self._allgroups.keys()}
-        self._sub_to_main:Dict[str,str]={}
+        self._group_Qs:dict[str,float]={n: self.server.subgroups[n].Q for n in self._allgroups.keys()}
+        self._sub_to_main:dict[str,str]={}
         for sg in self._allgroups.keys():
             self._sub_to_main[sg]=self.server.subgroups[sg].maingroup.name
         self._As = {n: {m: self.server.interaction_table.get(self._sub_to_main[n], {}).get(self._sub_to_main[m], {}).get("A",0) for m in self._allgroups.keys()} for n in self._allgroups.keys()} 
@@ -290,7 +290,7 @@ class UNIFACMixture:
         else:
             raise RuntimeError("Component " + compo + " not in the mixture")
 
-    def get_activity_coefficient_expression(self,compo:Union[str,UNIFACMolecule]): #type:ignore
+    def get_activity_coefficient_expression(self,compo:str | UNIFACMolecule): #type:ignore
         if self._generator is None:
             raise RuntimeError("Set an expression generator first")
         if isinstance(compo,str):
@@ -309,17 +309,17 @@ class UNIFACLikeActivityModel(ActivityModel):
     """
     def __init__(self):
         super(UNIFACLikeActivityModel, self).__init__()
-        self.maingroups:Dict[str,UNIFACMainGroup]={}
-        self.maingroup_by_index:Dict[int,UNIFACMainGroup]={}
-        self.subgroups:Dict[str,UNIFACSubGroup]={}
-        self.subgroup_by_index:Dict[int,UNIFACSubGroup]={}
+        self.maingroups:dict[str,UNIFACMainGroup]={}
+        self.maingroup_by_index:dict[int,UNIFACMainGroup]={}
+        self.subgroups:dict[str,UNIFACSubGroup]={}
+        self.subgroup_by_index:dict[int,UNIFACSubGroup]={}
         self._current_subgroup_definer:Any=None
-        self.interaction_table:Dict[str,Dict[str,Dict[str,float]]]={}
+        self.interaction_table:dict[str,dict[str,dict[str,float]]]={}
 
         self.modified_volume_fraction_exponent=1
         self.coordination_number=10
 
-    def define_main_group(self,name:str,index:Optional[int]=None):
+    def define_main_group(self,name:str,index:int | None=None):
         server=self
         class _MainGroupDefiner:
             def __init__(self,maingrp:UNIFACMainGroup):
@@ -332,7 +332,7 @@ class UNIFACLikeActivityModel(ActivityModel):
                 server._current_subgroup_definer=None
                 return
 
-            def sub_group(self,name:str,R:float,Q:float,index:Optional[int]=None,molar_mass:Optional[float]=None):
+            def sub_group(self,name:str,R:float,Q:float,index:int | None=None,molar_mass:float | None=None):
                 if name in server.subgroups.keys():
                     raise RuntimeError("Subgroup "+name+" already defined in another main group "+server.subgroups[name].maingroup.name)
                 res=UNIFACSubGroup(name,self.maingrp,R,Q,index)
@@ -347,12 +347,12 @@ class UNIFACLikeActivityModel(ActivityModel):
         return _MainGroupDefiner(grp)
 
 
-    def define_sub_group(self,name:str,R:float,Q:float,index:int,molar_mass:Optional[float]=None):
+    def define_sub_group(self,name:str,R:float,Q:float,index:int,molar_mass:float | None=None):
         if self._current_subgroup_definer is None:
             raise RuntimeError("Can only do it in 'with self.define_main_group():' statements")
         self._current_subgroup_definer.sub_group(name,R,Q,index,molar_mass=molar_mass)
 
-    def set_interaction(self,mainI:Union[int,str],mainJ:Union[int,str],*,Aij:Optional[float]=None,Aji:Optional[float]=None,Bij:Optional[float]=None,Bji:Optional[float]=None,Cij:Optional[float]=None,Cji:Optional[float]=None):
+    def set_interaction(self,mainI:int | str,mainJ:int | str,*,Aij:float | None=None,Aji:float | None=None,Bij:float | None=None,Bji:float | None=None,Cij:float | None=None,Cji:float | None=None):
         def ensure_table(first:str,second:str):
             if not (first in self.interaction_table.keys()):
                 self.interaction_table[first]={}
@@ -402,7 +402,7 @@ class UNIFACMultiReturnExpression(CustomMultiReturnExpression):
         
         
         self.server=ActivityModel.get_activity_model_by_name(modelname)
-        unifac_components:Dict[str,UNIFACMolecule]={cn:UNIFACMolecule(cn,self.server) for cn in mix.components}
+        unifac_components:dict[str,UNIFACMolecule]={cn:UNIFACMolecule(cn,self.server) for cn in mix.components}
         for cn in mix.components:
             comp=mix.pure_properties[cn]
             assert isinstance(comp,PureLiquidProperties)
@@ -416,18 +416,18 @@ class UNIFACMultiReturnExpression(CustomMultiReturnExpression):
         self.component_name_to_arg_index={n:self.argument_order_with_passive.index(n) for n in self.argument_order_with_passive}
                
 
-        self._allgroups:Dict[str,int]={}
+        self._allgroups:dict[str,int]={}
         for c in self.unifac_mix.components:
             for sg,sgcount in c.groups.items():
                 self._allgroups[sg]=self._allgroups.get(sg,0)+sgcount #Total number of each subgroup
-        self._nu:Dict[str,Dict[str,int]]={}
+        self._nu:dict[str,dict[str,int]]={}
         for c in self.unifac_mix.components:
             entry= {n:0 for n in self._allgroups.keys()}
             for sg,sgcount in c.groups.items():
                 entry[sg]=sgcount
             self._nu[c.name]=entry
-        self._group_Qs:Dict[str,float]={n: self.server.subgroups[n].Q for n in self._allgroups.keys()}
-        self._sub_to_main:Dict[str,str]={}
+        self._group_Qs:dict[str,float]={n: self.server.subgroups[n].Q for n in self._allgroups.keys()}
+        self._sub_to_main:dict[str,str]={}
         for sg in self._allgroups.keys():
             self._sub_to_main[sg]=self.server.subgroups[sg].maingroup.name
         self._As = {n: {m: self.server.interaction_table.get(self._sub_to_main[n], {}).get(self._sub_to_main[m], {}).get("A",0) for m in self._allgroups.keys()} for n in self._allgroups.keys()} 
@@ -675,13 +675,13 @@ class UNIFACMultiReturnExpression(CustomMultiReturnExpression):
             self.fill_python_derivatives_by_FD(arg_list,result_list,derivative_matrix,fd_epsilion=self.FD_epsilon)
         
     
-    def process_args_to_scalar_list(self, *args: ExpressionOrNum) -> List[ExpressionOrNum]:
+    def process_args_to_scalar_list(self, *args: ExpressionOrNum) -> list[ExpressionOrNum]:
         res=[a for a in args]
         res[-1]=res[-1]/kelvin
         return res
     
 
-    def get_activity_coefficient(self,component:str,domain:Optional[str]=None):
+    def get_activity_coefficient(self,component:str,domain:str | None=None):
         call_args=[var("molefrac_"+c,domain=domain) for c in self.argument_order]
         if self._constant_temperature_in_K is None:
             call_args.append(var("temperature",domain=domain))

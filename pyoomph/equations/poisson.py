@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -136,7 +137,7 @@ class PoissonFarFieldMonopoleCondition(InterfaceEquations):
     """
     required_parent_type = PoissonEquation
 
-    def __init__(self,far_value:ExpressionOrNum=0,name:Optional[str]=None,coefficient:ExpressionNumOrNone=None,origin:ExpressionOrNum=vector([0]),farfield_length:ExpressionNumOrNone=None):
+    def __init__(self,far_value:ExpressionOrNum=0,name:str | None=None,coefficient:ExpressionNumOrNone=None,origin:ExpressionOrNum=vector([0]),farfield_length:ExpressionNumOrNone=None):
         super(PoissonFarFieldMonopoleCondition, self).__init__()
         self.far_value=far_value
         self.name=name

@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -48,7 +49,7 @@ class HarmonicOscillator(ODEEquations):
 		name: The name of the dependent variable. Default is "y".
 		first_derivative_name: The name of the first derivative of the dependent variable. Default is None, meaning that the equation is a second-order ODE.
 	"""
-	def __init__(self,*,omega:ExpressionOrNum=1,damping:ExpressionOrNum=0,driving:ExpressionOrNum=0,name:str="y",first_derivative_name:Optional[str]=None):
+	def __init__(self,*,omega:ExpressionOrNum=1,damping:ExpressionOrNum=0,driving:ExpressionOrNum=0,name:str="y",first_derivative_name:str | None=None):
 		super(HarmonicOscillator,self).__init__()
 		self.omega=omega
 		self.damping=damping

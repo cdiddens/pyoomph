@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -49,8 +50,8 @@ class LineMesh(MeshTemplate):
         periodic: Whether the mesh is periodic.
     """
 
-    def __init__(self, N: int = 10, size: ExpressionOrNum = 1.0, minimum: ExpressionOrNum = 0.0, name: Union[str, Callable[[float], str]] = "domain", left_name: str = "left", right_name: str = "right",
-                 nodal_dimension: Optional[int] = None, periodic: bool = False):
+    def __init__(self, N: int = 10, size: ExpressionOrNum = 1.0, minimum: ExpressionOrNum = 0.0, name: str | Callable[[float], str] = "domain", left_name: str = "left", right_name: str = "right",
+                 nodal_dimension: int | None = None, periodic: bool = False):
         super(LineMesh, self).__init__()
         self.N = N
         self.size = size
@@ -67,7 +68,7 @@ class LineMesh(MeshTemplate):
         """
         if self.N <= 0:
             raise RuntimeError("LineMesh.N must be positive")
-        domain_table: Dict[str, _pyoomph.MeshTemplateElementCollection] = {}  # If self.name is callable
+        domain_table: dict[str, _pyoomph.MeshTemplateElementCollection] = {}  # If self.name is callable
         lastdom = None
         if isinstance(self.name, str):
             domain = self.new_domain(self.name, nodal_dimension=self.nodal_dimension)
@@ -128,9 +129,9 @@ class RectangularQuadMesh(MeshTemplate):
         nodal_dimension: The nodal dimension of the mesh, can be used to curve the mesh later on.
     """
     
-    def __init__(self, *, name:Union[str,Callable[[float,float],str]]="domain", size:Union[ExpressionOrNum,List[ExpressionOrNum]]=1.0, N:Union[int,List[int]]=10, lower_left:Union[ExpressionOrNum,List[ExpressionOrNum],Literal["centered"]]=[0, 0], periodic:Union[bool,List[bool]]=False, split_in_tris:Literal[False, "alternate_left", "alternate_right", "left", "right", "crossed"]=False,split_scott_vogelius:bool=False, boundary_names:Dict[str,Union[str,Callable[[float],str]]]={},nodal_dimension:Optional[int]=None):
+    def __init__(self, *, name:str | Callable[[float, float], str]="domain", size:ExpressionOrNum | list[ExpressionOrNum]=1.0, N:int | list[int]=10, lower_left:ExpressionOrNum | list[ExpressionOrNum] | Literal["centered"]=[0, 0], periodic:bool | list[bool]=False, split_in_tris:Literal[False, "alternate_left", "alternate_right", "left", "right", "crossed"]=False,split_scott_vogelius:bool=False, boundary_names:dict[str,str | Callable[[float], str]]={},nodal_dimension:int | None=None):
         super().__init__()
-        self.name:Union[str,Callable[[float,float],str]] = name
+        self.name:str | Callable[[float, float], str] = name
         self.size = size
         self.N = N
         self.lower_left = lower_left
@@ -153,7 +154,7 @@ class RectangularQuadMesh(MeshTemplate):
                 raise RuntimeError("nodal_dimension must be at most 3")
 
     def define_geometry(self):
-        dynamic_names:Dict[str,_pyoomph.MeshTemplateElementCollection]={}
+        dynamic_names:dict[str,_pyoomph.MeshTemplateElementCollection]={}
         if not callable(self.name):            
             domain = self.new_domain(self.name)
             if self.nodal_dimension is not None:
@@ -173,7 +174,7 @@ class RectangularQuadMesh(MeshTemplate):
         if not (isinstance(size[1], int) or isinstance(size[1], float)):  #type:ignore
             raise ValueError("Argument size[1] must be a number, but got size=" + str(size))
 
-        size=cast(List[float],size)
+        size=cast(list[float],size)
         assert len(size)==2
         nN = self.N
         if isinstance(nN, int) or isinstance(nN, float):
@@ -212,7 +213,7 @@ class RectangularQuadMesh(MeshTemplate):
                     "kwarg split_in_tris can only be False,'left', 'right', 'alternate_left', 'alternate_right' or 'crossed'")
 
 
-        def add_to_bound(bn:str,nodes:List[int],centercoord:Optional[float]):
+        def add_to_bound(bn:str,nodes:list[int],centercoord:float | None):
             bnn=self.boundary_names.get(bn,bn)
             if callable(bnn):
                 if centercoord is None:
@@ -353,7 +354,7 @@ class CircularMesh(MeshTemplate):
         with_curved_entities: Whether to create curved entities.
         internal_straight_names: The name of the internal straight interfaces, i.e. interior interfaces from the four directions to the center. Can be a string or a dictionary mapping the default names to new names.
     """
-    def __init__(self, radius:ExpressionOrNum=1, inner_factor:float=0.4, segments:Union[Literal["all"],List[Literal["NW","NE","SW","SE"]]]="all", domain_name:str="domain", outer_interface:str="circumference",straight_interface_name:Optional[Union[str,Dict[str,str],Callable[[str],str]]]=None,with_curved_entities:bool=True,internal_straight_names:Optional[Union[str,Dict[str,str]]]=None):
+    def __init__(self, radius:ExpressionOrNum=1, inner_factor:float=0.4, segments:Literal["all"] | list[Literal["NW", "NE", "SW", "SE"]]="all", domain_name:str="domain", outer_interface:str="circumference",straight_interface_name:str | dict[str, str] | Callable[[str], str] | None=None,with_curved_entities:bool=True,internal_straight_names:str | dict[str, str] | None=None):
         super(CircularMesh, self).__init__()
         self.radius = radius
         self.inner_factor = inner_factor
@@ -362,7 +363,7 @@ class CircularMesh(MeshTemplate):
         self.outer_interface=outer_interface
         self.straight_interface_name=straight_interface_name
         self.internal_straight_names=internal_straight_names
-        self._curved_entities:List[_pyoomph.MeshTemplateCurvedEntityBase]=[]
+        self._curved_entities:list[_pyoomph.MeshTemplateCurvedEntityBase]=[]
         self.with_curved_entities=with_curved_entities
 
     def define_geometry(self):
@@ -379,7 +380,7 @@ class CircularMesh(MeshTemplate):
         elif not isinstance(self.segments,(list,set)):
             raise ValueError("Segements needs to be a list")
         else:
-            segments:List[str]=[]
+            segments:list[str]=[]
             for a in self.segments:
                 if not (a in allsegs):
                     raise ValueError("Segements need to be a subset of " + str(allsegs))
@@ -479,7 +480,7 @@ class CircularMesh(MeshTemplate):
 
 
 class CuboidBrickMesh(MeshTemplate):
-    def __init__(self,*, size:Union[ExpressionOrNum,List[ExpressionOrNum]]=1.0, N:Union[int,List[int]]=10, lower_left:Union[ExpressionOrNum,List[ExpressionOrNum]]=[0, 0, 0],domain_name:str="domain"):
+    def __init__(self,*, size:ExpressionOrNum | list[ExpressionOrNum]=1.0, N:int | list[int]=10, lower_left:ExpressionOrNum | list[ExpressionOrNum]=[0, 0, 0],domain_name:str="domain"):
         super().__init__()
         self.size=size
         self.N=N
@@ -580,7 +581,7 @@ class SphericalOctantMesh(MeshTemplate):
         domain_name: The name of the domain.
         interface_names: A dictionary mapping the interface names to their corresponding names.
     """
-    def __init__(self, radius:ExpressionOrNum=1, inner_factor:float=0.4,domain_name:str="domain",interface_names:Dict[str,str]={"shell":"shell","plane_x0":"plane_x0","plane_y0":"plane_y0"}):
+    def __init__(self, radius:ExpressionOrNum=1, inner_factor:float=0.4,domain_name:str="domain",interface_names:dict[str,str]={"shell":"shell","plane_x0":"plane_x0","plane_y0":"plane_y0"}):
         super(SphericalOctantMesh, self).__init__()
         self.radius=radius
         self.inner_factor=inner_factor

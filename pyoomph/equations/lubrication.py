@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -60,7 +61,7 @@ class LubricationEquations(Equations):
       pfactor (ExpressionOrNum): Multiplicative factor for pressure. Default is 1.
       use_subexpressions (bool): Use subexpressions to speed up. Might be incompatible with some features. Default is True.
    """
-   def __init__(self, *, space:FiniteElementSpaceEnum="C2", mu:ExpressionOrNum=1.0, disjoining_pressure:Union[ExpressionNumOrNone,Dict[str,ExpressionOrNum]]=None, sigma:ExpressionOrNum=1, fluid_props:Optional[AnyLiquidProperties]=None,use_exact_pressure:bool=False,height_source:ExpressionOrNum=0,dt_h_factor:ExpressionOrNum=1,mu0:ExpressionNumOrNone=None,sigma0:ExpressionNumOrNone=None,swap_test_functions:bool=False,scheme:TimeSteppingScheme="BDF2", pfactor:ExpressionOrNum=1,use_subexpressions:bool=True):
+   def __init__(self, *, space:FiniteElementSpaceEnum="C2", mu:ExpressionOrNum=1.0, disjoining_pressure:ExpressionNumOrNone | dict[str, ExpressionOrNum]=None, sigma:ExpressionOrNum=1, fluid_props:AnyLiquidProperties | None=None,use_exact_pressure:bool=False,height_source:ExpressionOrNum=0,dt_h_factor:ExpressionOrNum=1,mu0:ExpressionNumOrNone=None,sigma0:ExpressionNumOrNone=None,swap_test_functions:bool=False,scheme:TimeSteppingScheme="BDF2", pfactor:ExpressionOrNum=1,use_subexpressions:bool=True):
       super().__init__()
       self.space:FiniteElementSpaceEnum = space
       self.mu = mu
@@ -94,7 +95,7 @@ class LubricationEquations(Equations):
 
    def __define_scaling(self):
       super().define_scaling()
-      scaling:Dict[str,ExpressionOrNum]={}
+      scaling:dict[str,ExpressionOrNum]={}
       if self.sigma0 is not None:
          scaling["surface_tension"] = self.sigma0
       elif self.fluid_props is not None:
@@ -167,7 +168,7 @@ class LubricationBoundary(InterfaceEquations):
    """
 
    required_parent_type = LubricationEquations
-   def __init__(self,*,sigma:ExpressionNumOrNone=None,use_exact_pressure:Optional[bool]=None):
+   def __init__(self,*,sigma:ExpressionNumOrNone=None,use_exact_pressure:bool | None=None):
       super().__init__()
       self.sigma=sigma
       self._use_exact_pressure=use_exact_pressure
@@ -254,7 +255,7 @@ class LubricationVelocityAtH(Equations):
          name (str): Name of the velocity field. Default is "velocity".
    """
       
-   def __init__(self,at_height=var("height"),space:Optional[FiniteElementSpaceEnum]="C2",name="velocity"):
+   def __init__(self,at_height=var("height"),space:FiniteElementSpaceEnum | None="C2",name="velocity"):
       super().__init__()
       self.at_height=at_height
       self.name=name

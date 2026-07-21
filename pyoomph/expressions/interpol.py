@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -42,7 +43,7 @@ import numpy
 
 
 class Interpolate1d(CustomMathExpression):
-	def __init__(self,arr_or_fname:Union[str,NPFloatArray],kind:str='linear',axis:int=-1,bounds_error:bool=True,fill_value:Optional[float]=None):
+	def __init__(self,arr_or_fname:str | NPFloatArray,kind:str='linear',axis:int=-1,bounds_error:bool=True,fill_value:float | None=None):
 		super().__init__()
 		if isinstance(arr_or_fname,str):	
 			arr_or_fname=numpy.loadtxt(arr_or_fname) #type:ignore
@@ -57,7 +58,7 @@ class Interpolate1d(CustomMathExpression):
 
 
 class InterpolateSpline1d(CustomMathExpression):
-	def __init__(self,arr_or_fname:Union[str,NPFloatArray],k:int=3,w:Any=None,xaxis:int=0,yaxis:int=-1,ext:int=0,check_finite:bool=False):
+	def __init__(self,arr_or_fname:str | NPFloatArray,k:int=3,w:Any=None,xaxis:int=0,yaxis:int=-1,ext:int=0,check_finite:bool=False):
 		super().__init__()
 		if isinstance(arr_or_fname,str):	
 			arr_or_fname=numpy.loadtxt(arr_or_fname) #type:ignore
@@ -87,7 +88,7 @@ class InterpolateSpline1dDerivative(CustomMathExpression):
 
 
 class InterpolateSmoothBivariateSpline2d(CustomMathExpression):
-	def __init__(self,arr_or_fname:Union[str,NPFloatArray],kind:str='linear',xaxis:int=0,yaxis:int=1,zaxis:int=-1,w:Any=None,bbox:List[Optional[float]]=[None,None,None,None],kx:int=3,ky:int=3,s:Any=None,eps:float=1e-16):
+	def __init__(self,arr_or_fname:str | NPFloatArray,kind:str='linear',xaxis:int=0,yaxis:int=1,zaxis:int=-1,w:Any=None,bbox:list[float | None]=[None,None,None,None],kx:int=3,ky:int=3,s:Any=None,eps:float=1e-16):
 		super().__init__()
 		if isinstance(arr_or_fname,str):	
 			arr_or_fname=numpy.loadtxt(arr_or_fname) #type:ignore
@@ -106,7 +107,7 @@ class InterpolateSmoothBivariateSpline2d(CustomMathExpression):
 		return InterpolateSmoothBivariateSpline2dDerivative(self,tuple(dx))
 
 class InterpolateSmoothBivariateSpline2dDerivative(CustomMathExpression):
-	def __init__(self,parent:InterpolateSmoothBivariateSpline2d,dx:Tuple[int,int]):
+	def __init__(self,parent:InterpolateSmoothBivariateSpline2d,dx:tuple[int,int]):
 		super().__init__()
 		self.parent=parent
 		self.interp=self.parent.interp
@@ -127,7 +128,7 @@ class InterpolateSmoothBivariateSpline2dDerivative(CustomMathExpression):
 
 
 class InterpolateRectBivariateSpline2d(CustomMathExpression):
-	def __init__(self,x:NPFloatArray,y:NPFloatArray,z:NPFloatArray,bbox:List[Optional[float]]=[None,None,None,None],kx:int=3,ky:int=3,s:Any=None):
+	def __init__(self,x:NPFloatArray,y:NPFloatArray,z:NPFloatArray,bbox:list[float | None]=[None,None,None,None],kx:int=3,ky:int=3,s:Any=None):
 		super().__init__()
 		self.interp=RectBivariateSpline(x,y,z,s=s,kx=kx,ky=ky,bbox=bbox)
 
@@ -186,7 +187,7 @@ class MeshFileInterpolation2d(CustomMathExpression):
 
 
 class CSplineInterpolator(CustomMultiReturnExpression):
-    def __init__(self,arr_or_fname:Union[NPFloatArray,str],xcol:int=0,ycol:int=1,k:int=3) -> None:
+    def __init__(self,arr_or_fname:NPFloatArray | str,xcol:int=0,ycol:int=1,k:int=3) -> None:
         super().__init__()
         if isinstance(arr_or_fname,str):
             data=numpy.loadtxt(arr_or_fname,ndmin=2)

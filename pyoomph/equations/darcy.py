@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -164,7 +165,7 @@ class PorousFront(InterfaceEquations):
 ## The ones to use for multi-component flow
 
 # Darcy + Advection diffusion
-def CompositionDarcyEquations(fluid_props:AnyFluidProperties,compo_space:FiniteElementSpaceEnum="C2",permeability:ExpressionOrNum=1e-15*meter**2,porosity:ExpressionOrNum=0.3,with_IC:bool=True,spatial_errors:Optional[float]=None,isothermal:bool=True,initial_temperature:Optional[ExpressionOrNum]=None,thermal_overrides:Optional[Dict[str,ExpressionOrNum]]=None) -> CombinedEquations:
+def CompositionDarcyEquations(fluid_props:AnyFluidProperties,compo_space:FiniteElementSpaceEnum="C2",permeability:ExpressionOrNum=1e-15*meter**2,porosity:ExpressionOrNum=0.3,with_IC:bool=True,spatial_errors:float | None=None,isothermal:bool=True,initial_temperature:ExpressionOrNum | None=None,thermal_overrides:dict[str, ExpressionOrNum] | None=None) -> CombinedEquations:
     from .multi_component import CompositionAdvectionDiffusionEquations,TemperatureAdvectionConductionEquation
     dc=DarcyEquation(fluid_props,permeability=permeability,porosity=porosity,solve_also_velocity=True)
 

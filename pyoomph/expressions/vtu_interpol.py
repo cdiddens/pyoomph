@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -63,7 +64,7 @@ class _VTUInterpolatorBase:
         else:
             return fieldname,0
     
-    def get_field(self,fieldname:str,component_index:Union[int,Literal["auto"]]="auto",scale:ExpressionOrNum=1)->CustomMathExpression:
+    def get_field(self,fieldname:str,component_index:int | Literal["auto"]="auto",scale:ExpressionOrNum=1)->CustomMathExpression:
         raise RuntimeError("Please override")
         
 
@@ -132,7 +133,7 @@ class VTUInterpolatorByVTK(_VTUInterpolatorBase):
     
     # use_cache: If you interpolate for multiple fields, it is sometimes better to interpolate each point only once and store the results of all fields in a cache
     # This can be quite memory intensive, though
-    def __init__(self, vtufile: str,spatial_scale:ExpressionOrNum=1,resize_internally:bool=True,use_cache:Union[bool,Literal["auto"]]="auto"):
+    def __init__(self, vtufile: str,spatial_scale:ExpressionOrNum=1,resize_internally:bool=True,use_cache:bool | Literal["auto"]="auto"):
         super().__init__(vtufile,spatial_scale=0+spatial_scale,resize_internally=resize_internally)
         self.use_cache=use_cache
         self._use_cache=True if self.use_cache is True else False
@@ -191,7 +192,7 @@ class VTUInterpolatorByVTK(_VTUInterpolatorBase):
         self.interpolator.SetInputData(self.probe_pt.GetOutput())
         self.interpolator.SetSourceData(self.vtu.GetOutput())         
 
-    def get_field(self, fieldname: str,component_index:Union[int,Literal["auto"]]="auto",scale:ExpressionOrNum=1) -> CustomMathExpression:
+    def get_field(self, fieldname: str,component_index:int | Literal["auto"]="auto",scale:ExpressionOrNum=1) -> CustomMathExpression:
         if component_index=="auto":
             fieldname,component_index=self._auto_strip_component(fieldname)
         self._num_interpolators+=1

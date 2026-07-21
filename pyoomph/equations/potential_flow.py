@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -32,7 +33,7 @@ from ..meshes.mesh import AnyMesh
 from ..typings import *
 
 class PotentialFlow(Equations):
-    def __init__(self,potential_name:str="phi",space:FiniteElementSpaceEnum="C2",scale=scale_factor("velocity")*scale_factor("spatial"),velo_projection:Union[bool,FiniteElementSpaceEnum]=True,velocity_name:str="velocity",mass_density:ExpressionNumOrNone=None,dynamic_viscosity:ExpressionNumOrNone=None,pressure_projection:Union[bool,FiniteElementSpaceEnum]=True,pressure_name="pressure",bulk_force_potential:ExpressionOrNum=0):
+    def __init__(self,potential_name:str="phi",space:FiniteElementSpaceEnum="C2",scale=scale_factor("velocity")*scale_factor("spatial"),velo_projection:bool | FiniteElementSpaceEnum=True,velocity_name:str="velocity",mass_density:ExpressionNumOrNone=None,dynamic_viscosity:ExpressionNumOrNone=None,pressure_projection:bool | FiniteElementSpaceEnum=True,pressure_name="pressure",bulk_force_potential:ExpressionOrNum=0):
         super().__init__()
         self.potential_name=potential_name
         self.velocity_name=velocity_name
@@ -157,7 +158,7 @@ class PotentialFlowFarField(_PotentialFlowInterfaceEquations):
         
 
 class _PotentialFlowFreeInterfaceBase(_PotentialFlowInterfaceEquations):
-    def __init__(self,*,additional_pressure:ExpressionOrNum=0,surface_tension:ExpressionNumOrNone=None,curvature_sign:int=-1,total_mass_transfer_rate:Optional[ExpressionOrNum]=None):
+    def __init__(self,*,additional_pressure:ExpressionOrNum=0,surface_tension:ExpressionNumOrNone=None,curvature_sign:int=-1,total_mass_transfer_rate:ExpressionOrNum | None=None):
         super().__init__()
         self.additional_pressure=additional_pressure
         self.sigma=surface_tension
@@ -250,7 +251,7 @@ class _PotentialFlowFreeInterfaceBase(_PotentialFlowInterfaceEquations):
 #Imposing the dyn BC by shifting the mesh so that the dynBC is fulfilled
 #Imposing the kin BC by setting a NeumannBC for phi to set the velocity to partial_t(x)*n
 class PotentialFlowFreeInterface1(_PotentialFlowFreeInterfaceBase):
-    def __init__(self, *, additional_pressure: ExpressionOrNum = 0, surface_tension: ExpressionNumOrNone = None, curvature_sign: int = -1,total_mass_transfer_rate:Optional[ExpressionOrNum]=None):
+    def __init__(self, *, additional_pressure: ExpressionOrNum = 0, surface_tension: ExpressionNumOrNone = None, curvature_sign: int = -1,total_mass_transfer_rate:ExpressionOrNum | None=None):
         super().__init__(additional_pressure=additional_pressure, surface_tension=surface_tension, curvature_sign=curvature_sign,total_mass_transfer_rate=total_mass_transfer_rate)
     def define_fields(self):
         potflow=self.get_potential_flow()
@@ -279,7 +280,7 @@ class PotentialFlowFreeInterface1(_PotentialFlowFreeInterfaceBase):
 #Imposing the kin BC by moving the mesh in normal direction
 #Imposing the dyn BC by adjusting phi
 class PotentialFlowFreeInterface2(_PotentialFlowFreeInterfaceBase):
-    def __init__(self, *, additional_pressure: ExpressionOrNum = 0, surface_tension: ExpressionNumOrNone = None, curvature_sign: int = -1,total_mass_transfer_rate:Optional[ExpressionOrNum]=None):
+    def __init__(self, *, additional_pressure: ExpressionOrNum = 0, surface_tension: ExpressionNumOrNone = None, curvature_sign: int = -1,total_mass_transfer_rate:ExpressionOrNum | None=None):
         super().__init__(additional_pressure=additional_pressure, surface_tension=surface_tension, curvature_sign=curvature_sign,total_mass_transfer_rate=total_mass_transfer_rate)
 
     def define_fields(self):
@@ -319,7 +320,7 @@ class PotentialFlowFreeInterface2(_PotentialFlowFreeInterfaceBase):
 #Imposing the kin BC by moving the mesh with the flow, normally and tangetially
 #Imposing the dyn BC by adjusting phi
 class PotentialFlowFreeInterface3(_PotentialFlowFreeInterfaceBase):
-    def __init__(self, *, additional_pressure: ExpressionOrNum = 0, surface_tension: ExpressionNumOrNone = None, curvature_sign: int = -1,total_mass_transfer_rate:Optional[ExpressionOrNum]=None):
+    def __init__(self, *, additional_pressure: ExpressionOrNum = 0, surface_tension: ExpressionNumOrNone = None, curvature_sign: int = -1,total_mass_transfer_rate:ExpressionOrNum | None=None):
         super().__init__(additional_pressure=additional_pressure, surface_tension=surface_tension, curvature_sign=curvature_sign,total_mass_transfer_rate=total_mass_transfer_rate)
 
     def define_fields(self):
@@ -358,7 +359,7 @@ class PotentialFlowFreeInterface3(_PotentialFlowFreeInterfaceBase):
 
 
 class PotentialFlowFreeInterface(_PotentialFlowInterfaceEquations):
-    def __init__(self,*,additional_pressure:ExpressionOrNum=0,surface_tension:ExpressionNumOrNone=None,total_mass_transfer_rate:Optional[ExpressionOrNum]=None):
+    def __init__(self,*,additional_pressure:ExpressionOrNum=0,surface_tension:ExpressionNumOrNone=None,total_mass_transfer_rate:ExpressionOrNum | None=None):
         super().__init__()
         self.additional_pressure=additional_pressure
         self.sigma=surface_tension

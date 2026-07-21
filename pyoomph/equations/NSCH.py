@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -29,10 +30,10 @@
 from ..typings import NPFloatArray
 from ..equations.generic import SpatialErrorEstimator
 from ..expressions import CustomMultiReturnExpression, square_root, symbolic_diff, var_and_test,var,grad,dot,maximum,minimum,subexpression
-from ..expressions.generic import ExpressionNumOrNone, ExpressionOrNum, FiniteElementSpaceEnum, dyadic, evaluate_in_past, identity_matrix, material_derivative, partial_t, scale_factor, testfunction,weak
+from ..expressions.generic import ExpressionNumOrNone, ExpressionOrNum, FiniteElementSpaceEnum, dyadic, identity_matrix, partial_t, scale_factor, weak
 from ..generic import *
-from .navier_stokes import NavierStokesEquations , NavierStokesSlipLength, NoSlipBC #type:ignore
-from ..materials.generic import AnyFluidProperties, AnyFluidFluidInterface, AnyMaterialProperties, LiquidGasInterfaceProperties, MixtureGasProperties, MixtureLiquidProperties,LiquidSolidInterfaceProperties,SurfactantProperties
+from .navier_stokes import NavierStokesEquations #type:ignore
+from ..materials.generic import AnyFluidProperties, AnyFluidFluidInterface
 from ..meshes.mesh import AnySpatialMesh,AnyMesh,MeshFromTemplate2d,Element,Node
 from ..typings import *
 
@@ -180,7 +181,7 @@ class CompositionNSCHPhaseField(Equations):
         self.add_residual(weak(xi,grad(u_test)))
 
 
-def CompositionNSCHEquations(positive_props:AnyFluidProperties,negative_props:AnyFluidProperties,epsilon:ExpressionOrNum,mobility:ExpressionOrNum,interface_props:Optional[AnyFluidFluidInterface]=None,phase_field_name:str="phi",partial_integrate_advection:bool=False,swap_test_functions:bool=True,velocity_error_factor:float=100,skew_symmetric_advection:bool=False,piecewise_potential:bool=False,mobility_for_scale:ExpressionNumOrNone=None,potential_func:ExpressionNumOrNone=None):
+def CompositionNSCHEquations(positive_props:AnyFluidProperties,negative_props:AnyFluidProperties,epsilon:ExpressionOrNum,mobility:ExpressionOrNum,interface_props:AnyFluidFluidInterface | None=None,phase_field_name:str="phi",partial_integrate_advection:bool=False,swap_test_functions:bool=True,velocity_error_factor:float=100,skew_symmetric_advection:bool=False,piecewise_potential:bool=False,mobility_for_scale:ExpressionNumOrNone=None,potential_func:ExpressionNumOrNone=None):
     phi_clamp=subexpression(minimum(1,maximum(-1,var(phase_field_name))))
     mu=subexpression(positive_props.dynamic_viscosity*(1+phi_clamp)/2+negative_props.dynamic_viscosity*(1-phi_clamp)/2)
     #rho=subexpression(positive_props.mass_density*(1+var(phase_field_name))/2+negative_props.mass_density*(1-var(phase_field_name)))
@@ -205,7 +206,7 @@ def CompositionNSCHEquations(positive_props:AnyFluidProperties,negative_props:An
 
 
 class RefinePhaseFieldGradients(Equations):
-    def __init__(self, level:Union[Literal["max"],int]="max",bound=0.8):
+    def __init__(self, level:Literal["max"] | int="max",bound=0.8):
         super(RefinePhaseFieldGradients, self).__init__()
         self.level = level
         self.bound=bound
@@ -280,9 +281,9 @@ class DisjunctDomainMarkerNSCH(Equations):
             return
         marker_index=mesh.element_pt(0).get_code_instance().get_discontinuous_field_index(self.name)
         # Reset all markers
-        unhandled_nodes:Set[Node]=set()
-        unhandled_elems:Set[Element]=set()
-        nodes2elem:Dict[Node,List[Element]]={}
+        unhandled_nodes:set[Node]=set()
+        unhandled_elems:set[Element]=set()
+        nodes2elem:dict[Node,list[Element]]={}
         # Create the look-up tables for unhandles nodes and node->elements map
         for e in mesh.elements():
             e.internal_data_pt(marker_index).set_value(0,-1)
@@ -310,7 +311,7 @@ class DisjunctDomainMarkerNSCH(Equations):
                 break
 
             # Flood-fill like algorithm
-            checknodes:Set[Node]=set([startnode]) # seed the start node
+            checknodes:set[Node]=set([startnode]) # seed the start node
             while len(checknodes)>0:
                 nn=checknodes.pop() # get one node out of the bucket
                 if nn in unhandled_nodes: # only check further if the node was not handled before

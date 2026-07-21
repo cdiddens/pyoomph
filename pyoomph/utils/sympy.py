@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -36,7 +37,7 @@ import math
 from ..typings import *
 _SympyType=Any
 
-__func_conversion_table:List[Tuple[str,_SympyType,Callable[...,Expression]]]=[
+__func_conversion_table:list[tuple[str,_SympyType,Callable[...,Expression]]]=[
     ("cos",sympy.cos,cos),
     ("sin",sympy.sin,sin),
     ("exp",sympy.exp,exp),
@@ -46,7 +47,7 @@ __func_conversion_table:List[Tuple[str,_SympyType,Callable[...,Expression]]]=[
 __func_conversion_sympy2pyoomph={entry[1]:entry[2] for entry in __func_conversion_table}
 __func_conversion_pyoomph2sympy={entry[0]:entry[1] for entry in __func_conversion_table}
 
-def sympy_to_pyoomph(expr:_SympyType,use_nondim:bool=False,var_map:Dict[str,ExpressionOrNum]={})->ExpressionOrNum:
+def sympy_to_pyoomph(expr:_SympyType,use_nondim:bool=False,var_map:dict[str,ExpressionOrNum]={})->ExpressionOrNum:
     if isinstance(expr,sympy.Mul):
         return math.prod(map(lambda x : sympy_to_pyoomph(x,use_nondim,var_map), expr.args)) #type:ignore
     elif isinstance(expr,sympy.Add):

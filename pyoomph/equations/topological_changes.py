@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -61,16 +62,16 @@ class BaseAxisymmetricPinchoffAndCoalescence(InterfaceEquations):
 
     # This function must be overridden to identify any pinch-off events. It is called after each sucessfull solve
     # If we find a pinch-off, we must return True, else False
-    def check_for_pinch_offs(self,segments:List[List[int]],coords:NPFloatArray,interface_data:MeshDataCacheEntry)->bool:
+    def check_for_pinch_offs(self,segments:list[list[int]],coords:NPFloatArray,interface_data:MeshDataCacheEntry)->bool:
         return False
 
     # This function must be overridden to identify any coalescence events. It is called after each sucessfull solve
     # If we find a coalescence, we must return True, else False
-    def check_for_coalescence(self,segments:List[List[int]],coords:NPFloatArray,interface_data:MeshDataCacheEntry,distfactor:float=1.0)->bool:
+    def check_for_coalescence(self,segments:list[list[int]],coords:NPFloatArray,interface_data:MeshDataCacheEntry,distfactor:float=1.0)->bool:
         return False        
 
 
-    def get_segments_and_coords(self,mesh:InterfaceMesh,datacache:Optional[MeshDataCache]=None)->Tuple[List[List[int]],NPFloatArray,MeshDataCacheEntry]:        
+    def get_segments_and_coords(self,mesh:InterfaceMesh,datacache:MeshDataCache | None=None)->tuple[list[list[int]],NPFloatArray,MeshDataCacheEntry]:        
         if datacache is None:
             datacache=self._datacache
         data=datacache.get_data(mesh)
@@ -148,7 +149,7 @@ class BaseAxisymmetricPinchoffAndCoalescence(InterfaceEquations):
 
     # Return the boundary segments (i.e. separated lines)
     # These can be sorted, i.e. segments [index 0] and the orientation of the segment (i.e. the points  [index 1]) by ascending y
-    def get_boundary_line_segments(self,remesher:Remesher2d,name:str,sort_segments_by_y:bool=True,sort_orientation_by_y:bool=True) -> List[List[RemesherPointEntry]]:
+    def get_boundary_line_segments(self,remesher:Remesher2d,name:str,sort_segments_by_y:bool=True,sort_orientation_by_y:bool=True) -> list[list[RemesherPointEntry]]:
         my_name=self.get_current_code_generator().get_full_name() # full name (e.g. "liquid/interface")
         full_name=my_name.split("/")[0]+"/"+name
         lns=remesher._get_points_by_phys_name(full_name)
@@ -163,14 +164,14 @@ class BaseAxisymmetricPinchoffAndCoalescence(InterfaceEquations):
 
 
     # Obtain the name of the interface (e.g "interface"), the name of the axis (e.g. "axis") of symmetry
-    def get_interface_and_axisymm_name(self,remesher:Remesher2d,cg:Optional["FiniteElementCodeGenerator"]=None)->Tuple[str,str]:
+    def get_interface_and_axisymm_name(self,remesher:Remesher2d,cg:"FiniteElementCodeGenerator" | None=None)->tuple[str,str]:
         if cg is None:
             cg=self.get_current_code_generator()
         my_name=cg.get_full_name()
         splt=my_name.split("/")
         other_interfaces = set([le.bname for le in remesher._line_entries if le.bname != splt[1]])
 
-        cornerpts:Dict[str,List[List[RemesherPointEntry]]]={} # find all corners, i.e. points where we meet other interfaces
+        cornerpts:dict[str,list[list[RemesherPointEntry]]]={} # find all corners, i.e. points where we meet other interfaces
         for on in other_interfaces:        
             cornerpts[on] = remesher._get_points_by_phys_name("/".join(splt) + "/" + on)
         
@@ -201,16 +202,16 @@ class BaseAxisymmetricPinchoffAndCoalescence(InterfaceEquations):
 
 
 
-    def remove_boundary_segment(self,remesher:Remesher2d,name:str,segment:List[RemesherPointEntry]) -> None:
+    def remove_boundary_segment(self,remesher:Remesher2d,name:str,segment:list[RemesherPointEntry]) -> None:
         remesher._line_entries=list(filter(lambda le : le.bname!=name or not ((le.ptlist[0]==segment[0] and le.ptlist[-1]==segment[-1]) or (le.ptlist[0]==segment[-1] and le.ptlist[-1]==segment[0])) ,remesher._line_entries))
 
-    def add_boundary_segment(self,remesher:Remesher2d,name:str,segment:List[RemesherPointEntry]):
+    def add_boundary_segment(self,remesher:Remesher2d,name:str,segment:list[RemesherPointEntry]):
         remesher.add_line_entry(segment,"spline" if len(segment)>3 else "line",name)
 
     def get_arclength_along_curve(self,lx:NPFloatArray,ly:NPFloatArray)->NPFloatArray:
             # reparametrize by the arclength
             arclength:float=0.0
-            arclengths:List[float]=[]
+            arclengths:list[float]=[]
             lastx:float=lx[0]
             lasty:float=ly[0]
             for x,y in zip(lx,ly):
@@ -259,9 +260,9 @@ class DisjunctDomainMarker(Equations):
             return
         marker_index=mesh.element_pt(0).get_code_instance().get_discontinuous_field_index(self.name)
         # Reset all markers
-        unhandled_nodes:Set[Node]=set()
-        unhandled_elems:Set[Element]=set()
-        nodes2elem:Dict[Node,List[Element]]={}
+        unhandled_nodes:set[Node]=set()
+        unhandled_elems:set[Element]=set()
+        nodes2elem:dict[Node,list[Element]]={}
         # Create the look-up tables for unhandles nodes and node->elements map
         for e in mesh.elements():
             e.internal_data_pt(marker_index).set_value(0,-1)
@@ -288,7 +289,7 @@ class DisjunctDomainMarker(Equations):
                 break
 
             # Flood-fill like algorithm
-            checknodes:Set[Node]=set([startnode]) # seed the start node
+            checknodes:set[Node]=set([startnode]) # seed the start node
             while len(checknodes)>0:
                 nn=checknodes.pop() # get one node out of the bucket
                 if nn in unhandled_nodes: # only check further if the node was not handled before
@@ -316,7 +317,7 @@ class DisjunctDomainMarker(Equations):
         
 # This is the specific class
 class AxisymmetricPinchoffAndCoalescence(BaseAxisymmetricPinchoffAndCoalescence):
-    def __init__(self,rmin:ExpressionNumOrNone,distmin:ExpressionNumOrNone,arclength_pinchoff_separation_factor:float=4,coalescence_distance_factor:float=1.5,coalescence_overlap_factor:Optional[float]=0.2,check_mesh_motion_direction:bool=True,assign_zeta_coordinates:bool=True) -> None:
+    def __init__(self,rmin:ExpressionNumOrNone,distmin:ExpressionNumOrNone,arclength_pinchoff_separation_factor:float=4,coalescence_distance_factor:float=1.5,coalescence_overlap_factor:float | None=0.2,check_mesh_motion_direction:bool=True,assign_zeta_coordinates:bool=True) -> None:
         super().__init__()
         self.rmin=rmin # minimum radial distance (dimensional) for pinch-off
         self._rmin_nd=None # nondimensional radial distance for pinch-off
@@ -338,8 +339,8 @@ class AxisymmetricPinchoffAndCoalescence(BaseAxisymmetricPinchoffAndCoalescence)
         self.check_mesh_motion_direction=check_mesh_motion_direction
         
         # identified pinch-off points in (normalized arclength coordinate,y coordinate) per interface segment (sorted by ascending y-start)
-        self._pinch_off_points:List[List[Tuple[float,float]]]=[]
-        self._coalsecence_points:List[Tuple[float,float]]=[] # List of identified coalescence points (coordinate_y(lower_segment),coordinate_y(higher_segment))
+        self._pinch_off_points:list[list[tuple[float,float]]]=[]
+        self._coalsecence_points:list[tuple[float,float]]=[] # List of identified coalescence points (coordinate_y(lower_segment),coordinate_y(higher_segment))
 
 
 
@@ -368,7 +369,7 @@ class AxisymmetricPinchoffAndCoalescence(BaseAxisymmetricPinchoffAndCoalescence)
 
 
     # Find pinch-off points for all interface segments
-    def check_for_pinch_offs(self,segments:List[List[int]],coords:NPFloatArray,interface_data:MeshDataCacheEntry)->bool:
+    def check_for_pinch_offs(self,segments:list[list[int]],coords:NPFloatArray,interface_data:MeshDataCacheEntry)->bool:
 
         # Clear the pinch-offs
         self._pinch_off_points=[[] for _i in range(len(segments))]
@@ -438,7 +439,7 @@ class AxisymmetricPinchoffAndCoalescence(BaseAxisymmetricPinchoffAndCoalescence)
         return super().before_newton_convergence_check(eqtree)
 
     # Check if we have coalescence
-    def check_for_coalescence(self, segments: List[List[int]], coords: NPFloatArray, interface_data: MeshDataCacheEntry,distfactor:float=1.0) -> bool:
+    def check_for_coalescence(self, segments: list[list[int]], coords: NPFloatArray, interface_data: MeshDataCacheEntry,distfactor:float=1.0) -> bool:
         self._coalsecence_points=[]
         if self._distmin_nd is None:
             return False
@@ -525,13 +526,13 @@ class AxisymmetricPinchoffAndCoalescence(BaseAxisymmetricPinchoffAndCoalescence)
             raise RuntimeError("NODEMAP AND SEGMENT LENGTH MISMATCH")
 
 
-        alengths:List[float]=[]
-        ptinds:List[int]=[]
+        alengths:list[float]=[]
+        ptinds:list[int]=[]
         aleng=0.0
 
-        aleng_segs:List[NPFloatArray]=[]
+        aleng_segs:list[NPFloatArray]=[]
         for seg in segs:
-            alength_seg:List[float]=[]
+            alength_seg:list[float]=[]
             aleng=0.0
             oldx,oldy=pts[0,seg[0]],pts[1,seg[0]]
             for ptind in seg:
@@ -549,7 +550,7 @@ class AxisymmetricPinchoffAndCoalescence(BaseAxisymmetricPinchoffAndCoalescence)
             offs=aleng_segs[i][-1]+1 # Here the pinch-off and coalescence dynamics has to go
         alengths=numpy.concatenate(aleng_segs)
 
-        res:List[Tuple[float,float,float]]=[]
+        res:list[tuple[float,float,float]]=[]
         for al,pti in zip(alengths,ptinds):
             n=nodemap[pti]
             n.set_coordinates_on_boundary(bind,[al])
@@ -589,8 +590,8 @@ class AxisymmetricPinchoffAndCoalescence(BaseAxisymmetricPinchoffAndCoalescence)
             raise RuntimeError("Strange: Mismatch in axisymmetric line segments and interface line segments: "+str(len(axisymm_lines))+" vs. "+str(len(interface_segments)))
 
         # Freshly pinched-off points should never coalesce in the same step
-        ignore_coalescence_at_points:Set[RemesherPointEntry]=set()
-        axi_points:List[RemesherPointEntry]=[]
+        ignore_coalescence_at_points:set[RemesherPointEntry]=set()
+        axi_points:list[RemesherPointEntry]=[]
 
         # Do the pinch-off
         if self._has_pinch_off:
@@ -624,7 +625,7 @@ class AxisymmetricPinchoffAndCoalescence(BaseAxisymmetricPinchoffAndCoalescence)
                 distf_al=(distf1+2*self._rmin_nd)/arclength
 
                 # New interface segments to create
-                new_interface_segments:List[List[RemesherPointEntry]] = [[] for _i in range(len(pinch_off_arclengths)+1)]
+                new_interface_segments:list[list[RemesherPointEntry]] = [[] for _i in range(len(pinch_off_arclengths)+1)]
                 
                 currind=0 # Current index to the handled pinch-off position
                 # Iterate over all points
@@ -682,7 +683,7 @@ class AxisymmetricPinchoffAndCoalescence(BaseAxisymmetricPinchoffAndCoalescence)
         # Handle coalescence
         if self._has_coalescence and self._distmin_nd is not None:
 
-            def update_segments() -> tuple[List[List[RemesherPointEntry]], List[List[RemesherPointEntry]]]:
+            def update_segments() -> tuple[list[list[RemesherPointEntry]], list[list[RemesherPointEntry]]]:
                 axisymm_lines=self.get_boundary_line_segments(remesher,axisymm_name)
                 interface_segments=self.get_boundary_line_segments(remesher,interface_name)
                 if len(axisymm_lines)!=len(interface_segments):
@@ -756,7 +757,7 @@ class AxisymmetricPinchoffAndCoalescence(BaseAxisymmetricPinchoffAndCoalescence)
                             lastind_i2+=1
 
                     #print("LASTINDS VS LENG",lastind_i1,len(s1),lastind_i2,len(s2))
-                    new_seg:List[RemesherPointEntry]=[]
+                    new_seg:list[RemesherPointEntry]=[]
                     for i in range(lastind_i1+1):
                         new_seg.append(s1[i])
                     for i in range(min(max(1,lastind_i2-1),len(s2)-1),len(s2)):

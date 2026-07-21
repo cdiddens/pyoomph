@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -36,7 +37,7 @@ from ..expressions import testfunction, weak, var_and_test, test_scale_factor, s
 from ..utils.smallest_circle import make_circle
 import scipy.spatial #type:ignore
 import numpy
-from ..expressions.coordsys import AxisymmetryBreakingCoordinateSystem,AxisymmetricCoordinateSystem,BaseCoordinateSystem
+from ..expressions.coordsys import BaseCoordinateSystem
 
 
 from ..typings import *
@@ -50,7 +51,7 @@ class BoundaryCondition(Equations):
         super(BoundaryCondition, self).__init__()
         self.mesh = None
         self.active = True
-        self.mesh:Optional["AnySpatialMesh"]=None
+        self.mesh:"AnySpatialMesh" | None=None
 
     def setup(self):
         pass
@@ -97,7 +98,7 @@ class NeumannBC(InterfaceEquations):
 class AutomaticNeumannCondition(InterfaceEquations):
     neumann_sign = 1
 
-    def __init__(self, flux:Optional[ExpressionOrNum]=None, **named_fluxes:ExpressionOrNum):
+    def __init__(self, flux:ExpressionOrNum | None=None, **named_fluxes:ExpressionOrNum):
         super(AutomaticNeumannCondition, self).__init__()
         self.flux = flux
         self.named_fluxes = named_fluxes.copy()
@@ -142,7 +143,7 @@ class EnforcedBC(InterfaceEquations):
         **constraints (Expression): Keyword arguments representing the enforced boundary conditions as pair of variable name to adjust and constraint expression to fulfill in residual form.
     """
  
-    def __init__(self,*, only_for_stationary_solve:bool=False, set_zero_on_normal_mode_eigensolve=False,domain:Optional[str]=None,space:Optional[FiniteElementSpaceEnum]=None,coordinate_system:Optional[BaseCoordinateSystem]=None,**constraints:Expression):
+    def __init__(self,*, only_for_stationary_solve:bool=False, set_zero_on_normal_mode_eigensolve=False,domain:str | None=None,space:FiniteElementSpaceEnum | None=None,coordinate_system:BaseCoordinateSystem | None=None,**constraints:Expression):
         super(EnforcedBC, self).__init__()
         self.constraints = constraints.copy()
         self.lagrangian:bool = False
@@ -294,9 +295,9 @@ class EnforcedBC(InterfaceEquations):
                     must_reapply=True
         return must_reapply
     
-    def _get_forced_zero_dofs_for_eigenproblem(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver", angular_mode:Optional[int],normal_k:Optional[float])->Set[Union[str,int]]:
+    def _get_forced_zero_dofs_for_eigenproblem(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver", angular_mode:int | None,normal_k:float | None)->set[str | int]:
         if (not self.set_zero_on_normal_mode_eigensolve) or (angular_mode is None and normal_k is None):
-            return cast(Set[str],set())
+            return cast(set[str],set())
         else:
             if angular_mode is not None and normal_k is not None:
                 raise RuntimeError("Cannot have both angular and normal mode set")
@@ -306,11 +307,11 @@ class EnforcedBC(InterfaceEquations):
                 mode=normal_k
             fullpath = eqtree.get_full_path().lstrip("/")
             if mode == 0:
-                return cast(Set[str],set())
+                return cast(set[str],set())
             else:
                 for_my_m = [self.get_lagrange_multiplier_name(k) for k in self.constraints.keys()]
             lst=[fullpath + "/" + k for k in for_my_m]
-            res:Set[str] = set(lst) 
+            res:set[str] = set(lst) 
             return res    
 
 class DirichletBC(BaseEquations):
@@ -325,7 +326,7 @@ class DirichletBC(BaseEquations):
 
     def __init__(self, *, prefer_weak_for_DG: bool = True, **kwargs: ExpressionOrNum):
         super(DirichletBC, self).__init__()
-        self._dcs: Dict[str, ExpressionOrNum] = {}
+        self._dcs: dict[str, ExpressionOrNum] = {}
         self._dcs.update(kwargs)
         self.prefer_weak_for_DG = prefer_weak_for_DG
 
@@ -365,7 +366,7 @@ class EnforcedDirichlet(EnforcedBC):
         **constraints (Expression): Keyword arguments representing the enforced boundary conditions as pair of variable name to adjust and constraint expression to fulfill in residual form.
     """
     
-    def __init__(self,*, only_for_stationary_solve:bool=False, set_zero_on_normal_mode_eigensolve=False,domain:Optional[str]=None,space:Optional[FiniteElementSpaceEnum]=None,coordinate_system:Optional[BaseCoordinateSystem]=None, **constraints:Expression):
+    def __init__(self,*, only_for_stationary_solve:bool=False, set_zero_on_normal_mode_eigensolve=False,domain:str | None=None,space:FiniteElementSpaceEnum | None=None,coordinate_system:BaseCoordinateSystem | None=None, **constraints:Expression):
         from ..expressions import var        
         new_kwargs={k:var(k,domain=domain)-v for k,v in constraints.items()}
         super(EnforcedDirichlet, self).__init__(only_for_stationary_solve=only_for_stationary_solve, set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve,coordinate_system=coordinate_system ,**new_kwargs.copy(),domain=domain,space=space)
@@ -385,7 +386,7 @@ class InactiveDirichletBC(DirichletBC):
     """
     def __init__(self, **kwargs: ExpressionOrNum):
         super().__init__(**kwargs)
-        self._init_setup_for_mesh:Set[AnyMesh]=set()
+        self._init_setup_for_mesh:set[AnyMesh]=set()
     
     def before_assigning_equations_preorder(self, mesh: "AnyMesh"):
         if mesh in self._init_setup_for_mesh: # Only init it once during problem init. Someone might have switched it later on
@@ -504,7 +505,7 @@ class AxisymmetryBC(InterfaceEquations):
         return must_reapply
     
            
-    def _before_eigen_solve(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver",angular_m:Optional[float]=None,normal_k:Optional[float]=None) -> bool:
+    def _before_eigen_solve(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver",angular_m:float | None=None,normal_k:float | None=None) -> bool:
         if angular_m is None or angular_m==0:
             return False
         must_reapply = False        
@@ -549,7 +550,7 @@ class AxisymmetryBCForScalarD0Field(InterfaceEquations):
         super().__init__()
         self.fields=[f for f in fields]
 
-    def _get_forced_zero_dofs_for_eigenproblem(self, eqtree: "EquationTree", eigensolver: "GenericEigenSolver", angular_mode: Union[int,None],normal_k:Optional[float]) -> Set[Union[str,int]]:
+    def _get_forced_zero_dofs_for_eigenproblem(self, eqtree: "EquationTree", eigensolver: "GenericEigenSolver", angular_mode: int | None,normal_k:float | None) -> set[str | int]:
         eqs=set()
         if angular_mode!=0:
             for ie in eqtree._mesh.elements():
@@ -573,7 +574,7 @@ class PeriodicBC(InterfaceEquations):
 
     """
 
-    def __init__(self, other_interface: str, offset: Optional[List[ExpressionOrNum]] = None):
+    def __init__(self, other_interface: str, offset: list[ExpressionOrNum] | None = None):
         super(PeriodicBC, self).__init__()
         self.other_interface = other_interface        
         if offset is None:
@@ -600,13 +601,13 @@ class PeriodicBC(InterfaceEquations):
             raise RuntimeError("Cannot find boundary '" + my_name + "' in bulk mesh")
         if self.other_interface not in bnames:
             raise RuntimeError("Cannot find boundary '" + self.other_interface + "' in bulk mesh")
-        my_nodes_by_pos: Dict[Tuple[float, ...], _pyoomph.Node] = {}
+        my_nodes_by_pos: dict[tuple[float, ...], _pyoomph.Node] = {}
         for n in pmesh.boundary_nodes(my_name):
             ps = [n.x(i) + offs[i] for i in range(n.ndim())]
             my_nodes_by_pos[tuple(ps)] = n
 
-        dataG: List[List[float]] = []
-        master_nodes: List[_pyoomph.Node] = []
+        dataG: list[list[float]] = []
+        master_nodes: list[_pyoomph.Node] = []
         for n in pmesh.boundary_nodes(self.other_interface):
             ps = [n.x(i) for i in range(n.ndim())]
             dataG.append(ps)
@@ -616,8 +617,8 @@ class PeriodicBC(InterfaceEquations):
             raise RuntimeError("Mismatch in number of nodes for a periodic boundary")
         kdtree = scipy.spatial.KDTree(data)  # type:ignore
 
-        slave_to_master:Dict[_pyoomph.Node,_pyoomph.Node]=dict()
-        master_to_slave:Dict[_pyoomph.Node,_pyoomph.Node]=dict()
+        slave_to_master:dict[_pyoomph.Node,_pyoomph.Node]=dict()
+        master_to_slave:dict[_pyoomph.Node,_pyoomph.Node]=dict()
         for ps, nslave in my_nodes_by_pos.items():
             qres = kdtree.query(ps)  # type:ignore
             if qres[0] > 1e-6:  # type:ignore
@@ -642,7 +643,7 @@ class PeriodicBC(InterfaceEquations):
         if pmesh.refinement_possible():
             myind=bnames.index(my_name)
             oppind=bnames.index(self.other_interface)
-            oppnodes_to_oppelem:Dict[_pyoomph.Node,_pyoomph.Element]=dict()
+            oppnodes_to_oppelem:dict[_pyoomph.Node,_pyoomph.Element]=dict()
             for oppelem,direct in pmesh.boundary_elements(self.other_interface,with_directions=True):
                 oppnodes_to_oppelem[tuple(oppelem.boundary_nodes(oppind))]=(oppelem,direct)
             
@@ -657,7 +658,7 @@ class PeriodicBC(InterfaceEquations):
 
 
 class PythonDirichletBC(BoundaryCondition):
-    def __init__(self, **kwargs:Union[ExpressionOrNum,Literal[True],Tuple[Callable[...,ExpressionOrNum],List[int],Expression]]):
+    def __init__(self, **kwargs:ExpressionOrNum | Literal[True] | tuple[Callable[..., ExpressionOrNum], list[int], Expression]):
         super(PythonDirichletBC, self).__init__()
         self.vals = kwargs.copy()
         self.unpin_instead:bool = False
@@ -670,16 +671,16 @@ class PythonDirichletBC(BoundaryCondition):
 
     def setup(self):
         assert self.mesh is not None
-        self.indexvals:Dict[int,Union[float,Literal[True],Tuple[Callable[...,ExpressionOrNum],List[int],Expression]]] = {}
+        self.indexvals:dict[int,float | Literal[True] | tuple[Callable[..., ExpressionOrNum], list[int], Expression]] = {}
         self.indexval_arginds = {}
-        self.additional_vals:Dict[int,Union[float,Literal[True],Tuple[Callable[...,ExpressionOrNum],List[int],Expression]]] = {}
-        self.pinnedpositions:Dict[int,Union[float,Literal[True],Tuple[Callable[...,ExpressionOrNum],List[int],Expression]]] = {}
-        self.internal_vals:Dict[int,Union[float,Literal[True],Tuple[Callable[...,ExpressionOrNum],List[int],Expression]]] = {}
+        self.additional_vals:dict[int,float | Literal[True] | tuple[Callable[..., ExpressionOrNum], list[int], Expression]] = {}
+        self.pinnedpositions:dict[int,float | Literal[True] | tuple[Callable[..., ExpressionOrNum], list[int], Expression]] = {}
+        self.internal_vals:dict[int,float | Literal[True] | tuple[Callable[..., ExpressionOrNum], list[int], Expression]] = {}
         codeinst = self.mesh.element_pt(0).get_code_instance()
 
         currcodegen = self.get_current_code_generator()
 
-        vals:Dict[str,Union[ExpressionOrNum,Literal[True],Tuple[Callable[...,ExpressionOrNum],List[int],Expression]]] = {}
+        vals:dict[str,ExpressionOrNum | Literal[True] | tuple[Callable[..., ExpressionOrNum], list[int], Expression]] = {}
 
         for k, val in self.vals.items():
             if k == "mesh_x" or k == "mesh_y" or k == "mesh_z":
@@ -757,13 +758,13 @@ class PythonDirichletBC(BoundaryCondition):
                     continue
             nodalfield = codeinst.get_nodal_field_index(k)
             scal = self.mesh._codegen.get_scaling(k)  
-            fval:Union[float,bool,Tuple[Callable[...,ExpressionOrNum],List[int],Expression]]
+            fval:float | bool | tuple[Callable[..., ExpressionOrNum], list[int], Expression]
             if not isinstance(val, bool) or val != True:
                 try:
                     fval = float(val / scal) #type:ignore ##TODO Functions here
                 except:
                     if callable(val):
-                        arg_inds:List[int] = []
+                        arg_inds:list[int] = []
                         for a in inspect.signature(val).parameters:
                             if a == "mesh_x" or a == "coordinate_x":
                                 arg_inds.append(-1)
@@ -853,7 +854,7 @@ class PythonDirichletBC(BoundaryCondition):
 
 
 class PinWhere(PythonDirichletBC):
-    def __init__(self, where:Callable[...,bool], **kwargs:Union[ExpressionOrNum,Literal[True]]):
+    def __init__(self, where:Callable[...,bool], **kwargs:ExpressionOrNum | Literal[True]):
         super(PinWhere, self).__init__(**kwargs)
         self.where = where
 
@@ -866,7 +867,7 @@ class PinWhere(PythonDirichletBC):
         
         for n in self.mesh.nodes():
             # Check the where condition
-            xv:List[float] = []
+            xv:list[float] = []
             for xi in range(n.ndim()):
                 xv.append(n.x(xi))
             if self.where(*xv) == False:
@@ -894,7 +895,7 @@ class PinWhere(PythonDirichletBC):
 # and take this as reference. However, it will not co-move (we always have to do a setup_pinning to refresh)
 # Further modes (e.g. "pointwise" may follow)
 class PinMeshAtDistanceToInterface(PinWhere):
-    def __init__(self, interface_names:Union[str,Set[str]], distance:ExpressionOrNum, mode:str="smallest_circle"):
+    def __init__(self, interface_names:str | set[str], distance:ExpressionOrNum, mode:str="smallest_circle"):
         super(PinMeshAtDistanceToInterface, self).__init__(where=lambda : False, mesh_x=True, mesh_y=True)
         if isinstance(interface_names, str):
             self.interface_names = {interface_names}
@@ -907,7 +908,7 @@ class PinMeshAtDistanceToInterface(PinWhere):
 
     def _build_where_func(self):
         assert self.mesh is not None
-        pts:List[Tuple[float,float]] = []
+        pts:list[tuple[float,float]] = []
         for inter in self.interface_names:
             for n in self.mesh.boundary_nodes(inter):
                 pts.append((n.x(0), n.x(1),))

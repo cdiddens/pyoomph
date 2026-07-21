@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -57,8 +58,7 @@ import xml.etree.ElementTree as ET
 
 
 
-def _convert_mesh_to_meshio(problem:"Problem",cache,eigenvector:Optional[Union[int,List[int]]]=None,eigenmode:MeshDataEigenModes="abs",tesselate_tri:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True):
-	from .. import get_mpi_nproc #type:ignore
+def _convert_mesh_to_meshio(problem:"Problem",cache,eigenvector:int | list[int] | None=None,eigenmode:MeshDataEigenModes="abs",tesselate_tri:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True):
 
 
 
@@ -90,13 +90,13 @@ def _convert_mesh_to_meshio(problem:"Problem",cache,eigenvector:Optional[Union[i
 	outfields=cache.get_default_output_fields(rem_lagrangian=hide_lagrangian,rem_underscore=hide_underscore)
 
 	group_vector_fields=True
-	rev_vector_fields:Dict[str,str]={}
+	rev_vector_fields:dict[str,str]={}
 	if group_vector_fields:
 		vector_fields = cache.vector_fields			
 		for a,_ in vector_fields.items():
 			for c in ["_x","_y","_z"]:
 				rev_vector_fields[a+c]=a
-	vector_fields_written:Set[str]=set()
+	vector_fields_written:set[str]=set()
 
 	for n in outfields:
 		if n!="coordinate_x" and n!="coordinate_y" and n!="coordinate_z":
@@ -104,7 +104,7 @@ def _convert_mesh_to_meshio(problem:"Problem",cache,eigenvector:Optional[Union[i
 				vector_name=rev_vector_fields[n]
 				if vector_name in vector_fields_written:
 					continue
-				data:List[NPFloatArray]=[]
+				data:list[NPFloatArray]=[]
 				for k in "_x","_y","_z":
 					if vector_name+k in outfields:
 						#print("GETTING DATA",vector_name,k,cache.get_data(vector_name+k))
@@ -133,7 +133,7 @@ def _convert_mesh_to_meshio(problem:"Problem",cache,eigenvector:Optional[Union[i
 
 	points=numpy.transpose(numpy.array([x,y,z])) #type:ignore
 	cells = []
-	cell_data:Dict[str,List[NPFloatArray]] = {}
+	cell_data:dict[str,list[NPFloatArray]] = {}
 
 
 	present_elem_types,inds = numpy.unique(elemtypes,return_inverse=True) #type:ignore
@@ -229,7 +229,7 @@ def pretty_xml(element:ET.Element, indent:str, newline:str, level:int=0):
 
 
 class _MeshFileOutput(_BaseNumpyOutput):
-	def __init__(self,mesh:"AnySpatialMesh",ftrunk:str="output",in_subdir:bool=True,file_ext:str="vtu",tesselate_tri:bool=False,write_pvd:Optional[bool]=None,eigenvector:Optional[Union[int,List[int]]]=None,eigenmode:"MeshDataEigenModes"="abs",nondimensional:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True,history_index:int=0,operator:Optional["MeshDataCacheOperatorBase"]=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True):
+	def __init__(self,mesh:"AnySpatialMesh",ftrunk:str="output",in_subdir:bool=True,file_ext:str="vtu",tesselate_tri:bool=False,write_pvd:bool | None=None,eigenvector:int | list[int] | None=None,eigenmode:"MeshDataEigenModes"="abs",nondimensional:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True,history_index:int=0,operator:"MeshDataCacheOperatorBase" | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True):
 		super().__init__(mesh)
 		self.fname_trunk=ftrunk
 		self.file_ext=file_ext
@@ -241,7 +241,7 @@ class _MeshFileOutput(_BaseNumpyOutput):
 		if write_pvd is None:
 			write_pvd= file_ext=="vtu"
 		if write_pvd==True:
-			self.write_pvd_file:Optional[str]=os.path.join(self.mesh.get_problem().get_output_directory(),self.fname_trunk+".pvd")
+			self.write_pvd_file:str | None=os.path.join(self.mesh.get_problem().get_output_directory(),self.fname_trunk+".pvd")
 		else:
 			self.write_pvd_file=None
 		self.eigenvector =eigenvector
@@ -254,7 +254,7 @@ class _MeshFileOutput(_BaseNumpyOutput):
 		self.add_eigen_to_mesh_positions=add_eigen_to_mesh_positions
 
 
-	def init(self,eqtree:"EquationTree",continue_info:Optional[Dict[str,Any]]=None,rank:int=0):
+	def init(self,eqtree:"EquationTree",continue_info:dict[str, Any] | None=None,rank:int=0):
 		super().init(eqtree,continue_info,rank)
 		self.mpi_rank=rank
 		if isinstance(self.mesh,str):
@@ -276,7 +276,7 @@ class _MeshFileOutput(_BaseNumpyOutput):
 				self.pvdcollection=cll
 
 
-	def write_pvd(self,new_filename:str,all_files:Optional[List[str]]=None):
+	def write_pvd(self,new_filename:str,all_files:list[str] | None=None):
 		assert self.write_pvd_file is not None
 		if all_files is None:
 			all_files=[new_filename]
@@ -316,7 +316,7 @@ class _MeshFileOutput(_BaseNumpyOutput):
 		
    
 
-		additional_eigenvectors:List[int]=[]
+		additional_eigenvectors:list[int]=[]
 		evarg_for_cache=self.eigenvector
 		if isinstance(self.eigenvector,(list,set,tuple)):
 			for e in self.eigenvector:
@@ -365,13 +365,13 @@ class _MeshFileOutput(_BaseNumpyOutput):
 			outfields=cache.get_default_output_fields(rem_lagrangian=self.hide_lagrangian,rem_underscore=self.hide_underscore)
 
 			group_vector_fields=True
-			rev_vector_fields:Dict[str,str]={}
+			rev_vector_fields:dict[str,str]={}
 			if group_vector_fields:
 				vector_fields = cache.vector_fields			
 				for a,_ in vector_fields.items():
 					for c in ["_x","_y","_z"]:
 						rev_vector_fields[a+c]=a
-			vector_fields_written:Set[str]=set()
+			vector_fields_written:set[str]=set()
 
 			for n in outfields:
 				if n!="coordinate_x" and n!="coordinate_y" and n!="coordinate_z":
@@ -379,7 +379,7 @@ class _MeshFileOutput(_BaseNumpyOutput):
 						vector_name=rev_vector_fields[n]
 						if vector_name in vector_fields_written:
 							continue
-						data:List[NPFloatArray]=[]
+						data:list[NPFloatArray]=[]
 						for k in "_x","_y","_z":
 							if vector_name+k in outfields:
 								#print("GETTING DATA",vector_name,k,cache.get_data(vector_name+k))
@@ -413,7 +413,7 @@ class _MeshFileOutput(_BaseNumpyOutput):
 
 			points=numpy.transpose(numpy.array([x,y,z])) #type:ignore
 			cells = []
-			cell_data:Dict[str,List[NPFloatArray]] = {}
+			cell_data:dict[str,list[NPFloatArray]] = {}
 
 			if self.tesselate_tri and self.mesh.get_dimension()>1:
 				if self.mesh.get_dimension()==3:
@@ -587,7 +587,7 @@ class MeshFileOutput(GenericOutput):
 	OpCartesianExtrusion=MeshDataCartesianExtrusion
 	OpRotationalExtrusion=MeshDataRotationalExtrusion
 
-	def __init__(self,filetrunk:Optional[str]=None,tesselate_tri:bool=False,file_ext:str="vtu",eigenvector:Optional[Union[int,List[int]]]=None,eigenmode:"MeshDataEigenModes"="abs",nondimensional:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True,history_index:int=0,operator:Optional["MeshDataCacheOperatorBase"]=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True):
+	def __init__(self,filetrunk:str | None=None,tesselate_tri:bool=False,file_ext:str="vtu",eigenvector:int | list[int] | None=None,eigenmode:"MeshDataEigenModes"="abs",nondimensional:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True,history_index:int=0,operator:"MeshDataCacheOperatorBase" | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True):
 		super(MeshFileOutput, self).__init__()
 		self.filetrunk=filetrunk
 		self.tesselate_tri=tesselate_tri
@@ -599,13 +599,13 @@ class MeshFileOutput(GenericOutput):
 		self.hide_underscore=hide_underscore
 		self.history_index=history_index
 		self.active=True
-		self._my_outputter:List[_MeshFileOutput]=[]		
+		self._my_outputter:list[_MeshFileOutput]=[]		
 		self.operator=operator
 		self.discontinuous=discontinuous
 		self.add_eigen_to_mesh_positions=add_eigen_to_mesh_positions
 
 
-	def _construct_outputter_for_eq_tree(self,eqtree:"EquationTree",continue_info:Optional[Dict[str,Any]],mpirank:int) -> _MeshFileOutput:
+	def _construct_outputter_for_eq_tree(self,eqtree:"EquationTree",continue_info:dict[str, Any] | None,mpirank:int) -> _MeshFileOutput:
 		fn=self._expand_filename(eqtree,self.filetrunk,"",add_problem_outdir=False)
 		mesh=eqtree.get_mesh()
 		assert not isinstance(mesh,ODEStorageMesh)
@@ -621,7 +621,7 @@ class MeshFileOutput(GenericOutput):
 
 
 
-	def _is_ode(self) -> Optional[bool]:
+	def _is_ode(self) -> bool | None:
 		return False
 
 	

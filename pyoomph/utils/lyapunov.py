@@ -1,15 +1,16 @@
+from __future__ import annotations
 from ..generic.problem import GenericProblemHooks
 import numpy
 from scipy.sparse import csr_matrix
 from ..expressions import ExpressionNumOrNone, ExpressionOrNum
-from ..typings import NPFloatArray,List,Optional
+from ..typings import NPFloatArray
 from collections import deque
 
 from ..generic.problem import GenericProblemHooks
 import numpy
 from scipy.sparse import csr_matrix
 from ..expressions import ExpressionNumOrNone
-from ..typings import NPFloatArray,List,Optional
+from ..typings import NPFloatArray
 from ..generic.mpi import get_mpi_rank
 
 class LyapunovExponentCalculator(GenericProblemHooks):
@@ -202,8 +203,8 @@ class LyapunovExponentCalculatorBDF2(GenericProblemHooks):
         self.relative_to_output=relative_to_output
         self.store_as_eigenvectors=store_as_eigenvectors
         
-        self.perturbation:List[NPFloatArray]=[] # Storing the last perturbation
-        self.old_perturbation:Optional[List[NPFloatArray]]=None # Storing the perturbation one step before
+        self.perturbation:list[NPFloatArray]=[] # Storing the last perturbation
+        self.old_perturbation:list[NPFloatArray] | None=None # Storing the perturbation one step before
         self.outputfile=None # Output file
         self.average_time=average_time
         self.ringbuffer=deque()

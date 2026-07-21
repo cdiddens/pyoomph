@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -37,7 +38,7 @@ class DynamicODEEquations(ODEEquations):
 	"""
 	def __init__(self,**eqs:ExpressionOrNum):
 		super().__init__() #Really important, otherwise it will crash
-		self._eqs:Dict[str,ExpressionOrNum]=eqs.copy()
+		self._eqs:dict[str,ExpressionOrNum]=eqs.copy()
 
 	
 

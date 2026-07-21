@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -28,7 +29,7 @@
  
 from .. import _pyoomph_core as _pyoomph
 
-from ..expressions import eval_flag,evaluate_in_past,partial_t,scale_factor,mesh_velocity
+from ..expressions import eval_flag,evaluate_in_past,scale_factor,mesh_velocity
 from ..expressions.generic import Expression,ExpressionOrNum
 from ..generic.codegen import Equations,var,InterfaceEquations
 
@@ -56,7 +57,7 @@ class TracerParticles(Equations):
         super(TracerParticles, self).__init__()
         self.advection_expression=advection
         self.tracer_name=tracer_name
-        self._mesh:Optional["AnySpatialMesh"]=None
+        self._mesh:"AnySpatialMesh" | None=None
         self.distance=distance
 
 
@@ -68,7 +69,7 @@ class TracerParticles(Equations):
         self._mesh._tracers[self.tracer_name] = _pyoomph.TracerCollection(self.tracer_name) #type:ignore
         self._mesh._tracers[self.tracer_name]._set_mesh(self._mesh) #type:ignore
 
-    def get_collection(self) -> Optional[_pyoomph.TracerCollection]:
+    def get_collection(self) -> _pyoomph.TracerCollection | None:
         if (self._mesh is None) or (self.tracer_name not in self._mesh._tracers.keys()): #type:ignore
             return None
         return self._mesh._tracers[self.tracer_name] #type:ignore
@@ -77,7 +78,7 @@ class TracerParticles(Equations):
         if self._mesh is None:
             self._update_mesh(assert_spatial_mesh(mesh))
 
-    def _init_output(self,eqtree:"EquationTree",continue_info:Optional[Dict[str,Any]],rank:int):
+    def _init_output(self,eqtree:"EquationTree",continue_info:dict[str, Any] | None,rank:int):
         mesh=assert_spatial_mesh(eqtree._mesh)        
         self._update_mesh(mesh)
         assert self._mesh is not None

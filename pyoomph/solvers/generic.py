@@ -1,3 +1,4 @@
+from __future__ import annotations
 
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
@@ -35,21 +36,21 @@ import weakref
 import scipy.sparse #type:ignore
 
 DefaultMatrixType=scipy.sparse.csr_matrix
-_TypeGenericLASolver=TypeVar("_TypeGenericLASolver",bound=Type["GenericLinearSystemSolver"])
-_TypeGenericEigenSolver=TypeVar("_TypeGenericEigenSolver",bound=Type["GenericEigenSolver"])
+_TypeGenericLASolver=TypeVar("_TypeGenericLASolver",bound=type["GenericLinearSystemSolver"])
+_TypeGenericEigenSolver=TypeVar("_TypeGenericEigenSolver",bound=type["GenericEigenSolver"])
 
 CoreLinearSolverEnum=Literal["superlu","umfpack","petsc","mumps","pardiso","accelerate","petsc_mumps"]
 CoreEigenSolverEnum=Literal["scipy","pardiso","slepc","accelerate","slepc_mumps"]
 EigenSolverWhich=Literal["LM","SM","LR","SR","SI"]
-_default_la_solver:Optional[Union["GenericLinearSystemSolver",CoreLinearSolverEnum]]=None
-_default_eigen_solver:Optional[Union["GenericEigenSolver",CoreEigenSolverEnum]]=None
+_default_la_solver:"GenericLinearSystemSolver" | CoreLinearSolverEnum | None=None
+_default_eigen_solver:"GenericEigenSolver" | CoreEigenSolverEnum | None=None
 
 if TYPE_CHECKING:
     from ..generic.problem import Problem
 
 _PETSCSLEPC_INSTALL_URL="https://pyoomph.readthedocs.io/en/latest/tutorial/installation/petscslepc.html"
 _PYPA_INSTALL_URL="https://pyoomph.readthedocs.io/en/latest/tutorial/installation/pypa.html"
-_SOLVER_INSTALL_HINTS:Dict[str,Tuple[str,str]]={
+_SOLVER_INSTALL_HINTS:dict[str,tuple[str,str]]={
 	"petsc":("PETSc",_PETSCSLEPC_INSTALL_URL),
 	"petsc_mumps":("PETSc with MUMPS support",_PETSCSLEPC_INSTALL_URL),
 	"slepc":("SLEPc",_PETSCSLEPC_INSTALL_URL),
@@ -58,30 +59,30 @@ _SOLVER_INSTALL_HINTS:Dict[str,Tuple[str,str]]={
 	"accelerate":("the macOS Accelerate framework",_PYPA_INSTALL_URL),
 }
 
-def _unavailable_solver_message(kind:str,name:str,available:List[str],e:Exception)->str:
+def _unavailable_solver_message(kind:str,name:str,available:list[str],e:Exception)->str:
 	msg=kind+" '"+name+"' is not available ("+type(e).__name__+": "+str(e)+"). Available: "+str(available)+"."
 	hint=_SOLVER_INSTALL_HINTS.get(name)
 	if hint is not None:
 		msg+=" See "+hint[1]+" for how to install "+hint[0]+"."
 	return msg
 
-def set_default_linear_solver(solv:Union["GenericLinearSystemSolver",CoreLinearSolverEnum]):
+def set_default_linear_solver(solv:"GenericLinearSystemSolver" | CoreLinearSolverEnum):
 	global _default_la_solver
 	_default_la_solver=solv
 
-def get_default_linear_solver()->Optional[Union["GenericLinearSystemSolver",CoreLinearSolverEnum]]:
+def get_default_linear_solver()->"GenericLinearSystemSolver" | CoreLinearSolverEnum | None:
 	return _default_la_solver
 
 
-def set_default_eigen_solver(solv:Union["GenericEigenSolver",CoreEigenSolverEnum]):
+def set_default_eigen_solver(solv:"GenericEigenSolver" | CoreEigenSolverEnum):
 	global _default_eigen_solver
 	_default_eigen_solver=solv
 
-def get_default_eigen_solver()->Optional[Union["GenericEigenSolver",CoreEigenSolverEnum]]:
+def get_default_eigen_solver()->"GenericEigenSolver" | CoreEigenSolverEnum | None:
 	return _default_eigen_solver
 
 class GenericLinearSystemSolver:
-	_registered_solvers:Dict[str,Type["GenericLinearSystemSolver"]]={}
+	_registered_solvers:dict[str,type["GenericLinearSystemSolver"]]={}
 	idname:str
 	
 
@@ -98,7 +99,7 @@ class GenericLinearSystemSolver:
 		return p
 
 	@problem.setter
-	def problem(self,p:Optional["Problem"]):
+	def problem(self,p:"Problem" | None):
 		self._problem_wr=weakref.ref(p) if p is not None else (lambda:None)
 
 	def setup_solver(self)->None:
@@ -149,7 +150,7 @@ class GenericLinearSystemSolver:
 				raise RuntimeError(_unavailable_solver_message("Linear Algebra solver",name,list(GenericLinearSystemSolver._registered_solvers.keys()),e)) from e
 
 
-	def set_num_threads(self,nthreads:Optional[int]) -> None:
+	def set_num_threads(self,nthreads:int | None) -> None:
 		pass
 
 ##########
@@ -161,7 +162,7 @@ class EigenMatrixManipulatorBase:
 		super(EigenMatrixManipulatorBase, self).__init__()
 		self.problem=problem
 
-	def resolve_equations_by_name(self,name:str) -> Set[int]:
+	def resolve_equations_by_name(self,name:str) -> set[int]:
 		from ..generic.problem import Problem
 		from .. import _pyoomph_core as _pyoomph
 		splt=name.split("/")
@@ -196,7 +197,7 @@ class EigenMatrixManipulatorBase:
 		fi = root.get_field_information()
 		if fieldname not in fi.keys():
 			raise RuntimeError("Cannot find field "+str(fieldname)+" in mesh "+root.get_full_name())
-		res:Set[int]=set()
+		res:set[int]=set()
 		if  isinstance(root,ODEStorageMesh):
 			ode = root.get_element()
 			_, inds = ode._ode_elem_to_numpy()
@@ -242,7 +243,7 @@ class EigenMatrixManipulatorBase:
 						raise RuntimeError("DISCONT FIELDS HERE")
 		return res
 
-	def apply_on_J_and_M(self,solver:"GenericEigenSolver",J:DefaultMatrixType,M:DefaultMatrixType)->Tuple[DefaultMatrixType,DefaultMatrixType]:
+	def apply_on_J_and_M(self,solver:"GenericEigenSolver",J:DefaultMatrixType,M:DefaultMatrixType)->tuple[DefaultMatrixType,DefaultMatrixType]:
 		return J,M
 
 
@@ -250,7 +251,7 @@ class EigenMatrixSetDofsToZero(EigenMatrixManipulatorBase):
 	def __init__(self,problem:"Problem",*doflist:str):
 		super(EigenMatrixSetDofsToZero, self).__init__(problem)
 		self.doflist=set(doflist)
-		self.zeromap:Set[int]=set()
+		self.zeromap:set[int]=set()
 
 
 	def setcsrrow2id(self,amat:DefaultMatrixType, rowind:int):
@@ -299,8 +300,8 @@ class EigenMatrixSetDofsToZero(EigenMatrixManipulatorBase):
 
 		return A
 
-	def apply_on_J_and_M(self,solver:"GenericEigenSolver",J:DefaultMatrixType,M:DefaultMatrixType) -> Tuple[DefaultMatrixType, DefaultMatrixType]:
-		self.zeromap:Set[int]=set()
+	def apply_on_J_and_M(self,solver:"GenericEigenSolver",J:DefaultMatrixType,M:DefaultMatrixType) -> tuple[DefaultMatrixType, DefaultMatrixType]:
+		self.zeromap:set[int]=set()
 		from .. import _pyoomph_core as _pyoomph
 		for d in self.doflist:
 			if isinstance(d,str):
@@ -323,10 +324,10 @@ class EigenMatrixSetDofsToZero(EigenMatrixManipulatorBase):
 		
 
 
-	def apply_on_J_and_M___OLD(self,solver:"GenericEigenSolver",J:DefaultMatrixType,M:DefaultMatrixType) -> Tuple[DefaultMatrixType, DefaultMatrixType]:
+	def apply_on_J_and_M___OLD(self,solver:"GenericEigenSolver",J:DefaultMatrixType,M:DefaultMatrixType) -> tuple[DefaultMatrixType, DefaultMatrixType]:
 		# TODO OLD VERSION: Slow, remove
 		from .. import _pyoomph_core as _pyoomph
-		self.zeromap:Set[int]=set()
+		self.zeromap:set[int]=set()
 		for d in self.doflist:
 			if isinstance(d,str):
 				eqs=self.resolve_equations_by_name(d)
@@ -349,14 +350,14 @@ class EigenMatrixSetDofsToZero(EigenMatrixManipulatorBase):
 
 
 class GenericEigenSolver:
-	_registered_solvers:Dict[str,Type["GenericEigenSolver"]]={}
+	_registered_solvers:dict[str,type["GenericEigenSolver"]]={}
 	idname:str
 	def __init__(self,problem:"Problem"):
 		self.problem=problem
-		self.matrix_manipulators:List[EigenMatrixManipulatorBase]=[]
+		self.matrix_manipulators:list[EigenMatrixManipulatorBase]=[]
 		self.real_contribution:str=""
-		self.imag_contribution:Optional[str]=None
-		self.ncv:Optional[int]=None
+		self.imag_contribution:str | None=None
+		self.ncv:int | None=None
 
 	@property
 	def problem(self)->"Problem":
@@ -367,7 +368,7 @@ class GenericEigenSolver:
 		return p
 
 	@problem.setter
-	def problem(self,p:Optional["Problem"]):
+	def problem(self,p:"Problem" | None):
 		self._problem_wr=weakref.ref(p) if p is not None else (lambda:None)
 
 	def _before_assigning_equation_numbers(self)->None:
@@ -376,7 +377,7 @@ class GenericEigenSolver:
 	def supports_target(self)->bool:
 		return False
 
-	def setup_matrix_contributions(self,real_contribution:str,imag_contribution:Optional[str]=None):
+	def setup_matrix_contributions(self,real_contribution:str,imag_contribution:str | None=None):
 		self.real_contribution=real_contribution
 		self.imag_contribution=imag_contribution
 	
@@ -394,7 +395,7 @@ class GenericEigenSolver:
 			return subclass
 		return decorator
 
-	def solve(self,neval:int,shift:Optional[Union[float,complex]]=None,sort:bool=True,which:EigenSolverWhich="LM",OPpart:Optional[Literal["r","i"]]=None,v0:Optional[Union[NPComplexArray,NPFloatArray]]=None,target:Optional[complex]=None,custom_J_and_M:Optional[Tuple[DefaultMatrixType]]=None,with_left_eigenvectors:bool=False,quiet:bool=True)->Tuple[NPComplexArray,NPComplexArray,DefaultMatrixType,DefaultMatrixType]:
+	def solve(self,neval:int,shift:float | complex | None=None,sort:bool=True,which:EigenSolverWhich="LM",OPpart:Literal["r", "i"] | None=None,v0:NPComplexArray | NPFloatArray | None=None,target:complex | None=None,custom_J_and_M:tuple[DefaultMatrixType] | None=None,with_left_eigenvectors:bool=False,quiet:bool=True)->tuple[NPComplexArray,NPComplexArray,DefaultMatrixType,DefaultMatrixType]:
 		raise RuntimeError("Here")
 	
 	@staticmethod
@@ -424,7 +425,7 @@ class GenericEigenSolver:
 		self.matrix_manipulators.clear()
 
 
-	def get_J_M_n_and_type(self)->Tuple[DefaultMatrixType,DefaultMatrixType,int,bool]:
+	def get_J_M_n_and_type(self)->tuple[DefaultMatrixType,DefaultMatrixType,int,bool]:
 		from scipy.sparse import csr_matrix #type:ignore
 		if not self.problem._set_solved_residual(self.real_contribution,True,False):
 			raise RuntimeError("Cannot set the residual "+self.real_contribution+" for eigen calculation since it has no contribution at all")

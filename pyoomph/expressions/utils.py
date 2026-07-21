@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -46,7 +47,7 @@ class DeterministicRandomField(CustomMathExpression):
     Nresolution: Number of points in each dimension of the random cloud.
     interpolation: Interpolation method. Default is "linear".    
   """
-  def __init__(self ,min_x:Union[float,List[float]]=[0] ,max_x:Union[float,List[float]]=[1] ,amplitude:float=1.0 ,Nresolution:int=100,interpolation:str="linear"):
+  def __init__(self ,min_x:float | list[float]=[0] ,max_x:float | list[float]=[1] ,amplitude:float=1.0 ,Nresolution:int=100,interpolation:str="linear"):
     super(DeterministicRandomField, self).__init__()
     self.min_x = min_x
     self.max_x= max_x
@@ -84,7 +85,7 @@ class DeterministicRandomField(CustomMathExpression):
 # Otherwise, it will return C[:]
 # For dimensional problems, please define Ascale(=Cscale) and Bscale. epsilon will be always nondimensional!
 class MultiSafeDivide(CustomMultiReturnExpression):
-    def __init__(self,Ascale:Union[str,ExpressionOrNum]=1,Bscale:Union[str,ExpressionOrNum]=1) -> None:
+    def __init__(self,Ascale:str | ExpressionOrNum=1,Bscale:str | ExpressionOrNum=1) -> None:
           super().__init__()
           if isinstance(Ascale,str):
                 Ascale=scale_factor(Ascale)
@@ -100,7 +101,7 @@ class MultiSafeDivide(CustomMultiReturnExpression):
             raise RuntimeError("Unsupported number of arguments, expected: A[n],B,epsilon,C[n] to calculate A[:]/B if |B|>=epsilon, otherwise return C[:]")          
 
     # Before calling eval, we can decompose our arguments. E.g. tensors split into scalars. The returning list may not have any phyiscal dimensions
-    def process_args_to_scalar_list(self, *args: "ExpressionOrNum") -> List["ExpressionOrNum"]:
+    def process_args_to_scalar_list(self, *args: "ExpressionOrNum") -> list["ExpressionOrNum"]:
         nargs=len(args)
         nret=self.get_num_returned_scalars(nargs)
         res=[]
@@ -116,7 +117,7 @@ class MultiSafeDivide(CustomMultiReturnExpression):
         return res
 
     # Before returning, we can assemble things back to e.g. tensors or multiple returnals
-    def process_result_list_to_results(self, result_list: List["Expression"]) -> Tuple["ExpressionOrNum", ...]:
+    def process_result_list_to_results(self, result_list: list["Expression"]) -> tuple["ExpressionOrNum", ...]:
         fact=self.Ascale/self.Bscale
         return tuple(r*fact for r in result_list)          
         

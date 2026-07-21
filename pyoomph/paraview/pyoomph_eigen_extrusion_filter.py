@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -109,7 +110,7 @@ class PyoomphAzimuthalExtrusion(VTKPythonAlgorithmBase):
         extr=extrusion.GetOutput()
         assert isinstance(extr,vtk.vtkPolyData)
         pd=extr.GetPointData()
-        arr_to_index:typing.Dict[typing.AnyStr,int]={}
+        arr_to_index:dict[typing.AnyStr,int]={}
         for i in range(pd.GetNumberOfArrays()):
             arr_to_index[pd.GetArrayName(i)]=i
 

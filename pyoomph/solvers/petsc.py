@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -74,7 +75,7 @@ class PETSCSolver(GenericLinearSystemSolver):
         self._dofs_to_field_info=None # Reset the mapping, it will be re-created when needed. This is needed to properly handle changes in the dofs due to e.g. field splits or changes in the meshes
         return super()._before_assigning_equation_numbers()
     
-    def use_mumps(self,mumps_param14:Optional[int]=None):
+    def use_mumps(self,mumps_param14:int | None=None):
         if not PETSc.Sys.hasExternalPackage("mumps"): #type:ignore
             raise RuntimeError("Your PETSc installation was not compiled with MUMPS support (--download-mumps=yes). Please recompile PETSc with MUMPS or use a different linear solver.")
         _SetDefaultPetscOption("mat_mumps_icntl_6",5)
@@ -378,14 +379,14 @@ class SlepcEigenSolver(GenericEigenSolver):
 
     def __init__(self, problem:"Problem"):
         super().__init__(problem)
-        self.spectral_transformation:Optional[str]="sinvert"
+        self.spectral_transformation:str | None="sinvert"
         self.store_basis:bool=False
-        self._last_basis:Optional[Union[NPComplexArray,NPFloatArray]]=None
+        self._last_basis:NPComplexArray | NPFloatArray | None=None
         
     def supports_target(self):
         return True
         
-    def get_last_basis(self)->Optional[Union[NPComplexArray,NPFloatArray]]:
+    def get_last_basis(self)->NPComplexArray | NPFloatArray | None:
         return self._last_basis
 
     def further_setup(self,E): #type:ignore
@@ -394,7 +395,7 @@ class SlepcEigenSolver(GenericEigenSolver):
     def set_default_option(self,name:str,val:Any=None,force:bool=False)->None:
         _SetDefaultPetscOption(name,val, force)
     
-    def use_mumps(self,mumps_param14:Optional[int]=None):
+    def use_mumps(self,mumps_param14:int | None=None):
         if not PETSc.Sys.hasExternalPackage("mumps"): #type:ignore
             raise RuntimeError("Your PETSc installation was not compiled with MUMPS support (--download-mumps=yes). Please recompile PETSc with MUMPS or use a different eigensolver.")
         _SetDefaultPetscOption("st_ksp_type","preonly")
@@ -405,7 +406,7 @@ class SlepcEigenSolver(GenericEigenSolver):
             _SetDefaultPetscOption("st_mat_mumps_icntl_14",mumps_param14)
         return self
 
-    def solve(self, neval:int, shift:Union[float,None,complex]=None,sort:bool=True,which:EigenSolverWhich="LM",OPpart:Optional[Literal["r","i"]]=None,v0:Optional[Union[NPComplexArray,NPFloatArray]]=None,target:Optional[complex]=None,custom_J_and_M:Optional[Tuple["DefaultMatrixType"]]=None,with_left_eigenvectors:bool=False,quiet:bool=True)->Tuple[NPComplexArray,NPComplexArray,"DefaultMatrixType","DefaultMatrixType"]:
+    def solve(self, neval:int, shift:float | None | complex=None,sort:bool=True,which:EigenSolverWhich="LM",OPpart:Literal["r", "i"] | None=None,v0:NPComplexArray | NPFloatArray | None=None,target:complex | None=None,custom_J_and_M:tuple["DefaultMatrixType"] | None=None,with_left_eigenvectors:bool=False,quiet:bool=True)->tuple[NPComplexArray,NPComplexArray,"DefaultMatrixType","DefaultMatrixType"]:
         if which!="LM":
             raise RuntimeError("Implement which="+str(which))
         if OPpart is not None:
@@ -637,10 +638,10 @@ class SlepcMUMPSEigenSolver(SlepcEigenSolver):
 class FieldSplitPETSCSolver(PETSCSolver):
     def __init__(self,problem:"Problem"):
         super(FieldSplitPETSCSolver, self).__init__(problem)
-        self._fieldsplit_map:Optional[NPIntArray]=None
-        self._fieldsplit:Optional[List[Tuple[str,Any]]]=None
-        self.default_field_split:Optional[int]=None
-        self._fieldsplit_names:Dict[int,str]={}
+        self._fieldsplit_map:NPIntArray | None=None
+        self._fieldsplit:list[tuple[str, Any]] | None=None
+        self.default_field_split:int | None=None
+        self._fieldsplit_names:dict[int,str]={}
         self.preconditioner_matrix_name=None
         self._nullspaces=[]
         
@@ -660,7 +661,7 @@ class FieldSplitPETSCSolver(PETSCSolver):
         pass
 
     def split_fields(self,**kwargs:int):
-        meshblocks:OrderedDict[str,Dict[str,int]]=OrderedDict()
+        meshblocks:OrderedDict[str,dict[str,int]]=OrderedDict()
         wholemesh:OrderedDict[str,int]=OrderedDict()
         allkeys:OrderedDict[str,bool]=OrderedDict()
         for n,b in kwargs.items():
@@ -771,7 +772,7 @@ class FieldSplitPETSCSolver(PETSCSolver):
         pc.setFieldSplitIS(*fields) #type:ignore
         self._fieldsplit=fields
 
-    def assemble_preconditioner(self,name:str,restrict_on_field_split:Optional[int]=None)->Any:               
+    def assemble_preconditioner(self,name:str,restrict_on_field_split:int | None=None)->Any:               
         _res, n, _M_nzz, nrow_local, M_values_arr, M_colindex_arr, M_row_start_arr=self.problem._assemble_residual_jacobian(name)
         P=PETSc.Mat().createAIJ(size=((nrow_local, n), (nrow_local, n),), csr=( M_row_start_arr,M_colindex_arr, M_values_arr)) # TODO: Must be destroyed!
         if restrict_on_field_split is not None:

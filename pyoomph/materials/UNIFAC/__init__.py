@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -25,8 +26,7 @@
 #
 # ========================================================================
 
-from typing import List
 from .aiomfac import *
 from .dortmund import *
 from .original import *
-__all__:List[str]=[]
+__all__:list[str]=[]

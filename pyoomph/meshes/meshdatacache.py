@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -31,13 +32,13 @@ import numpy
 
 
 from .mesh import AnySpatialMesh, InterfaceMesh, MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d, MeshFromTemplateBase 
-from ..expressions import ExpressionOrNum,Expression, num
+from ..expressions import ExpressionOrNum,Expression
 from ..expressions.units import unit_to_string
 
 MeshDataEigenModes=Literal["abs","real","imag","merge","angle"]
 
 class MeshDataCacheEntry:
-    def __init__(self,msh:AnySpatialMesh,tesselate_tri:bool=True,nondimensional:bool=False,eigenvector:Optional[Union[int,Sequence[int]]]=None,eigenmode:MeshDataEigenModes="abs",history_index:int=0,with_halos:bool=False,operator:Optional["MeshDataCacheOperatorBase"]=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True):
+    def __init__(self,msh:AnySpatialMesh,tesselate_tri:bool=True,nondimensional:bool=False,eigenvector:int | Sequence[int] | None=None,eigenmode:MeshDataEigenModes="abs",history_index:int=0,with_halos:bool=False,operator:"MeshDataCacheOperatorBase" | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True):
         assert isinstance(msh,(MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d,InterfaceMesh))
         
         self.mesh=msh
@@ -45,7 +46,7 @@ class MeshDataCacheEntry:
         self.eigenmode = eigenmode
         self.history_index=history_index
         self.with_halos=with_halos
-        self.merged_eigendata:Dict[int,Dict[str,Any]]={}
+        self.merged_eigendata:dict[int,dict[str,Any]]={}
         self.discontinuous=discontinuous
         self.add_eigen_to_mesh_positions=add_eigen_to_mesh_positions
         if self.eigenmode not in {"abs","real","imag","merge","angle"}:
@@ -61,9 +62,9 @@ class MeshDataCacheEntry:
                 raise RuntimeError("Multiple eigenvectors in MeshDataCache only works if eigenmode is set to 'merge'")
 
         if eigenmode=="merge" and eigenvector!=None:
-            backup_dofs:Optional[NPFloatArray]=None
-            backup_pinned:Optional[NPFloatArray]=None
-            for ev in cast(List[int],self.eigenvector):
+            backup_dofs:NPFloatArray | None=None
+            backup_pinned:NPFloatArray | None=None
+            for ev in cast(list[int],self.eigenvector):
                 backup = self.mesh.get_problem().set_eigenfunction_as_dofs(ev,mode="real",additive_mesh_positions=self.add_eigen_to_mesh_positions)
                 if backup_dofs is None:
                     backup_dofs, backup_pinned=backup
@@ -79,8 +80,8 @@ class MeshDataCacheEntry:
         self.nodal_values, self.elem_indices, self.elem_types, self.nodal_field_inds, self.D0_data, self.DL_data, self.elemental_field_inds = msh.to_numpy(tesselate_tri,nondimensional,history_index,discontinuous)
         
         if (not self.with_halos) and msh.is_mesh_distributed():
-            newei:List[List[int]]=[]
-            newet:List[int]=[]
+            newei:list[list[int]]=[]
+            newet:list[int]=[]
             for i,(ei,et) in enumerate(zip(self.elem_indices,self.elem_types)):
                 #print("Element",i,"has proc ID",i,ei,et)
                 if msh.element_pt(i).non_halo_proc_ID()<0:
@@ -94,19 +95,19 @@ class MeshDataCacheEntry:
             self.mesh.get_problem().set_all_values_at_current_time(backup_dofs, backup_pinned, not self.add_eigen_to_mesh_positions) #type:ignore
 
         self.nondimensional=nondimensional
-        self.interface_lines_segs:Optional[List[List[int]]]=None
-        self.interface_lines_segs_ninter:Optional[int]=None
+        self.interface_lines_segs:list[list[int]] | None=None
+        self.interface_lines_segs_ninter:int | None=None
 
-        self.nodal_local_exprs:Dict[str,NPFloatArray]={}
-        self.local_expr_indices:Dict[str,int]={n:i for i,n in enumerate(self.mesh.list_local_expressions())}
+        self.nodal_local_exprs:dict[str,NPFloatArray]={}
+        self.local_expr_indices:dict[str,int]={n:i for i,n in enumerate(self.mesh.list_local_expressions())}
 
         self.operator=operator
         self.tesselate_tri=tesselate_tri
 
         vector_fields = msh.get_eqtree().get_equations().get_list_of_vector_fields(self.mesh.get_eqtree().get_code_gen())
-        self.vector_fields:Dict[str,List[str]] = {k: v for a in vector_fields for k, v in a.items()}
+        self.vector_fields:dict[str,list[str]] = {k: v for a in vector_fields for k, v in a.items()}
 
-        self._additional_eigendata:Dict[int,Tuple[str,str,str]]={} # Index to pair of Re,Im
+        self._additional_eigendata:dict[int,tuple[str,str,str]]={} # Index to pair of Re,Im
         if self.operator is not None:
             self.operator.apply(self)
 
@@ -126,7 +127,7 @@ class MeshDataCacheEntry:
                 coordinates.append(self.nodal_values[:, self.nodal_field_inds["coordinate_z"]])
             return numpy.array(coordinates,dtype=numpy.float64) #type:ignore
 
-    def get_default_output_fields(self,rem_underscore:bool=True,rem_lagrangian:bool=True) -> List[str]:
+    def get_default_output_fields(self,rem_underscore:bool=True,rem_lagrangian:bool=True) -> list[str]:
         maxind=max(self.nodal_field_inds.values())
         maxindconti=maxind+1
         if len(self.elemental_field_inds)>0:
@@ -158,15 +159,15 @@ class MeshDataCacheEntry:
     def get_unit(self,field:str,as_string:Literal[False]=...,with_brackets:bool=...)->ExpressionOrNum: ...
 
     @overload
-    def get_unit(self,field:List[str],as_string:Literal[False]=...,with_brackets:bool=...)->List[ExpressionOrNum]: ...
+    def get_unit(self,field:list[str],as_string:Literal[False]=...,with_brackets:bool=...)->list[ExpressionOrNum]: ...
 
     @overload
     def get_unit(self,field:str,as_string:Literal[True]=...,with_brackets:bool=...)->str: ...
 
     @overload
-    def get_unit(self,field:List[str],as_string:Literal[True]=...,with_brackets:bool=...)->List[str]: ...
+    def get_unit(self,field:list[str],as_string:Literal[True]=...,with_brackets:bool=...)->list[str]: ...
 
-    def get_unit(self,field:Union[str,List[str]],as_string:bool=False,with_brackets:bool=True)->Union[ExpressionOrNum,List[ExpressionOrNum],str,List[str]]:
+    def get_unit(self,field:str | list[str],as_string:bool=False,with_brackets:bool=True)->ExpressionOrNum | list[ExpressionOrNum] | str | list[str]:
         if isinstance(field,list):
             if as_string:
                 return [self.get_unit(f,as_string=True,with_brackets=with_brackets) for f in field]
@@ -204,14 +205,14 @@ class MeshDataCacheEntry:
 
 
 
-    def get_data(self,name:Union[str,List[str],List[List[str]]],additional_eigenvector:Optional[int]=None,eigen_real_imag:Optional[int]=None)->Optional[NPFloatArray]:
+    def get_data(self,name:str | list[str] | list[list[str]],additional_eigenvector:int | None=None,eigen_real_imag:int | None=None)->NPFloatArray | None:
         assert isinstance(self.mesh,(InterfaceMesh,MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d))
         if isinstance(name, list):
             if isinstance(name[0], list): #tensor data
-                mdata:List[List[NPFloatArray]]=[]
+                mdata:list[list[NPFloatArray]]=[]
                 nonzero_length=-1
                 for row in name:
-                    rowdata:List[NPFloatArray]=[]
+                    rowdata:list[NPFloatArray]=[]
                     for entry in row:
                         d=self.get_data(entry,additional_eigenvector,eigen_real_imag)
                         if d is None:
@@ -232,7 +233,7 @@ class MeshDataCacheEntry:
                             mdata[i][j]=zer
                 return numpy.array(mdata) #type:ignore
             else:
-                mdata:List[NPFloatArray]=[]
+                mdata:list[NPFloatArray]=[]
                 nonzero_length=-1
                 for n in name:
                     d=self.get_data(n,additional_eigenvector,eigen_real_imag)
@@ -310,18 +311,18 @@ class MeshDataCacheEntry:
         return numpy.array(data) #type:ignore
 
 
-    def get_interface_line_segments(self) -> Tuple[List[List[int]], int]:
+    def get_interface_line_segments(self) -> tuple[list[list[int]], int]:
         if self.discontinuous:
             raise RuntimeError("get_interface_line_segments does not work for discontinuous caches")
         if self.interface_lines_segs is not None:
             assert self.interface_lines_segs_ninter is not None
             return self.interface_lines_segs,self.interface_lines_segs_ninter
-        lines:List[List[int]] = []
+        lines:list[list[int]] = []
 
         # Merge connected lines
         elms = [tuple([i for i in e]) for e in self.elem_indices]
-        elms_at_points:Dict[int,List[int]] = {}
-        inbetween_pts:Dict[Tuple[int,int],List[int]] = {}
+        elms_at_points:dict[int,list[int]] = {}
+        inbetween_pts:dict[tuple[int,int],list[int]] = {}
         ninter=None
         for e in elms:
             elms_at_points.setdefault(e[0], []).append(e[-1])  #type:ignore
@@ -334,7 +335,7 @@ class MeshDataCacheEntry:
                 if ninter!=len(e[1:-1]):
                     raise RuntimeError("Strange intermediate points...")
         assert ninter is not None
-        starnode_history:List[int]=[]
+        starnode_history:list[int]=[]
         while len(elms_at_points) > 0:
             for n, neighs in elms_at_points.items():
                 if len(neighs) == 1:
@@ -346,7 +347,7 @@ class MeshDataCacheEntry:
                 #print(elms_at_points)
                 startnode = list(elms_at_points.keys())[0]  # Just any node. Seems to be looped
 
-            currentcurve:List[int] = []
+            currentcurve:list[int] = []
             currentnode = startnode
 
             while len(elms_at_points) > 0:
@@ -395,7 +396,7 @@ class MeshDataCacheEntry:
         
 
 class MeshDataCache:
-    def __init__(self,tesselate_tri:bool=True,nondimensional:bool=False,eigenvector:Optional[Union[int,Sequence[int]]]=None,eigenmode:MeshDataEigenModes="abs",history_index:int=0,with_halos:bool=False,operator:Optional["MeshDataCacheOperatorBase"]=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True):
+    def __init__(self,tesselate_tri:bool=True,nondimensional:bool=False,eigenvector:int | Sequence[int] | None=None,eigenmode:MeshDataEigenModes="abs",history_index:int=0,with_halos:bool=False,operator:"MeshDataCacheOperatorBase" | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True):
         self._cache=dict()
         self.tesselate_tri=tesselate_tri
         self.nondimensional=nondimensional
@@ -408,7 +409,7 @@ class MeshDataCache:
         self.add_eigen_to_mesh_positions=add_eigen_to_mesh_positions
 
     def clear(self):
-        self._cache:Dict[AnySpatialMesh,MeshDataCacheEntry]=dict()
+        self._cache:dict[AnySpatialMesh,MeshDataCacheEntry]=dict()
 
     def get_data(self,msh:AnySpatialMesh) -> MeshDataCacheEntry:
         
@@ -426,11 +427,11 @@ class MeshDataCache:
 
 class MeshDataCacheStorage:
     def __init__(self):
-        self._storage:Dict[Tuple[Any,...],MeshDataCache]={}
+        self._storage:dict[tuple[Any,...],MeshDataCache]={}
 
 
     def clear(self,only_eigens:bool=False):
-        remkeys:List[str]=[]
+        remkeys:list[str]=[]
         for k,v in self._storage.items():
             if only_eigens:
                 if k[2] is not None or (k[6] is not None and k[6].depends_on_eigen()):
@@ -445,10 +446,10 @@ class MeshDataCacheStorage:
             self._storage={}
         #print("STORAGE AFTER CLEAR",self._storage)
 
-    def get_data(self,msh:AnySpatialMesh,nondimensional:bool,tesselate_tri:bool,eigenvector:Optional[Union[int,Sequence[int]]]=None,eigenmode:MeshDataEigenModes="abs",history_index:int=0,with_halos:bool=False,operator:Optional["MeshDataCacheOperatorBase"]=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True) -> MeshDataCacheEntry:
+    def get_data(self,msh:AnySpatialMesh,nondimensional:bool,tesselate_tri:bool,eigenvector:int | Sequence[int] | None=None,eigenmode:MeshDataEigenModes="abs",history_index:int=0,with_halos:bool=False,operator:"MeshDataCacheOperatorBase" | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True) -> MeshDataCacheEntry:
         if isinstance(eigenvector,list):
             eigenvector=tuple(set(eigenvector))
-        key:Tuple[Any, ...] = (nondimensional, tesselate_tri,eigenvector,eigenmode,history_index,with_halos,operator,discontinuous,add_eigen_to_mesh_positions)
+        key:tuple[Any, ...] = (nondimensional, tesselate_tri,eigenvector,eigenmode,history_index,with_halos,operator,discontinuous,add_eigen_to_mesh_positions)
         if not key in self._storage.keys():                        
             #print("CREATING",key)
             msh._setup_output_scales()
@@ -529,7 +530,7 @@ class MeshDataCombineWithEigenfunction(MeshDataCacheOperatorBase):
         eigen_prefix_merged: Prefix for the merged eigenfunction data.
         add_eigen_to_mesh_positions: If True, the eigenfunction data will be added to the mesh positions. 
     """
-    def __init__(self,eigenindex:Union[int,Sequence[int]],eigen_prefix_real:str="EigenRe_",eigen_prefix_imag:str="EigenIm_",eigen_prefix_merged:str="Eigen_",add_eigen_to_mesh_positions=False):
+    def __init__(self,eigenindex:int | Sequence[int],eigen_prefix_real:str="EigenRe_",eigen_prefix_imag:str="EigenIm_",eigen_prefix_merged:str="Eigen_",add_eigen_to_mesh_positions=False):
         super(MeshDataCombineWithEigenfunction, self).__init__()
         
         if isinstance(eigenindex,int):

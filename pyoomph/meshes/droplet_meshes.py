@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -45,10 +46,10 @@ class DropletMesh3d(MeshTemplate):
         self._x100:NPFloatArray
         self._x010:NPFloatArray
         self._x110:NPFloatArray
-        self._lsouth:Callable[[List[float]],NPFloatArray]=lambda s : (1-s[0])*self._x000+s[0]*self._x100
-        self._lnorth:Callable[[List[float]],NPFloatArray] = lambda s: (1 - s[0]) * self._x010 + s[0] * self._x110
-        self._lwest:Callable[[List[float]],NPFloatArray] = lambda s: (1 - s[1]) * self._x000 + s[1] * self._x010
-        self._least:Callable[[List[float]],NPFloatArray]= lambda s: (1 - s[1]) * self._x100 + s[1] * self._x110
+        self._lsouth:Callable[[list[float]],NPFloatArray]=lambda s : (1-s[0])*self._x000+s[0]*self._x100
+        self._lnorth:Callable[[list[float]],NPFloatArray] = lambda s: (1 - s[0]) * self._x010 + s[0] * self._x110
+        self._lwest:Callable[[list[float]],NPFloatArray] = lambda s: (1 - s[1]) * self._x000 + s[1] * self._x010
+        self._least:Callable[[list[float]],NPFloatArray]= lambda s: (1 - s[1]) * self._x100 + s[1] * self._x110
         self._hf:Callable[[float],float]=lambda x: x # Will be changed later
         self.spherical_cap=spherical_cap
         self._rot_x:Callable[[Sequence[float]],Sequence[float]]=lambda x:x
@@ -88,13 +89,13 @@ class DropletMesh3d(MeshTemplate):
             domain.add_brick_3d_C1(*pf)
             self._hex_nodes.append(set([*pf]))
 
-    def mark_boundary_nodes(self, iname:str, ni:List[int]):
+    def mark_boundary_nodes(self, iname:str, ni:list[int]):
         if iname not in self._boundary_nodes.keys():
             self._boundary_nodes[iname]=set()
         self._boundary_nodes[iname].update(ni)
         
-    def add_brick_curved(self,sl:List[float],sh:List[float],end:bool=False):
-        def n(s:List[float]) -> int:
+    def add_brick_curved(self,sl:list[float],sh:list[float],end:bool=False):
+        def n(s:list[float]) -> int:
             x=0.5*(self._lsouth(s)*(1-s[1])+self._lnorth(s)*s[1]+self._lwest(s)*(1-s[0])+self._least(s)*s[0])
             x*=1-(s[2]*(1-s[2])*self._inward_slant)*numpy.sqrt(s[0]**2)
             x[2]=self._hf(x)*s[2]

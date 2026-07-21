@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -60,7 +61,7 @@ class BifurcationGUISolutionPoint:
         self._tangs={}
         self._branch_switch_tangs=[]
         self.tag=-1
-        self.bifurcation_info:Optional[Dict]=None
+        self.bifurcation_info:dict | None=None
 
     @staticmethod
     def from_dict(res):
@@ -200,7 +201,7 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
         return res,stabs
 
 class BifurcationGUI:
-    def __init__(self,problem:Problem,parameter:Optional[str]=None) -> None:
+    def __init__(self,problem:Problem,parameter:str | None=None) -> None:
         self.problem=problem
         self.problem._runmode="overwrite"
         self.problem.write_states=True
@@ -208,7 +209,7 @@ class BifurcationGUI:
         self.data_subdir="_bifurcation_gui_data"
         self.neigen=10
         self.shift=0
-        self.branches:List[BifurcationGUISolutionBranch]=[]
+        self.branches:list[BifurcationGUISolutionBranch]=[]
         self.current_branch=None
         self.current_point=None
         self.selected_point=None
@@ -232,7 +233,7 @@ class BifurcationGUI:
         self._escape_pressed=False
         #: Write all observable values to the output files
         self.output_all_observables=False
-        self.custom_key_functions:Dict[str,Callable[[BifurcationGUI],None]]={}
+        self.custom_key_functions:dict[str,Callable[[BifurcationGUI],None]]={}
         self._initial_view=None
         self.classify_bifurcations=False
         
@@ -249,14 +250,14 @@ class BifurcationGUI:
             return self.problem.get_global_parameter(self._paramname)
     
     # By default, we allow to access all integral observables (not beginning with _) and all ODE dofs
-    def evaluate_observables(self)->Dict[str,float]:
+    def evaluate_observables(self)->dict[str,float]:
         if self._observable_funcs is None:
             obs={}
             def recursive_add_spatial_domains(eqtree:EquationTree):
                 if eqtree._equations is not None and eqtree.get_equations()._is_ode()==False:
                     ifuncs=eqtree.get_mesh().list_integral_functions()                    
                     deps = eqtree._codegen._dependent_integral_funcs
-                    ifuncs: Set[str] = set(ifuncs)                    
+                    ifuncs: set[str] = set(ifuncs)                    
                     ifuncs.update(deps.keys())
                     bn=eqtree.get_full_path().lstrip("/")
                     for valn in ifuncs:
@@ -606,7 +607,7 @@ class BifurcationGUI:
         cid_butt = self._fig.canvas.mpl_connect('button_press_event', lambda event : self.on_press(event))
 
 
-    def update_plot(self,infotext:Optional[str]=None):     
+    def update_plot(self,infotext:str | None=None):     
         #global matplotlib
         #matplotlib = reload(matplotlib)
         #matplotlib.use('GTK3Agg', force=True)

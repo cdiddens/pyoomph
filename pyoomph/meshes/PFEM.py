@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -43,7 +44,7 @@ class PFEMMeshUpdater:
         assert isinstance(mesh,MeshFromTemplate2d)
         return mesh
 
-    def alpha_shape(self,tri, alpha:Optional[float]=None, only_outer=True, do_not_prune_at_x0_eps:Optional[float]=None):
+    def alpha_shape(self,tri, alpha:float | None=None, only_outer=True, do_not_prune_at_x0_eps:float | None=None):
         """
         Compute the alpha shape (concave hull) of a set of points.
         :param points: np.array of shape (n,2) points.
@@ -68,8 +69,8 @@ class PFEMMeshUpdater:
                 return
             edges.add((i, j))
 
-        innersimplices:List[List[int]]=[]
-        edges:Set[Tuple[int,int]] = set()
+        innersimplices:list[list[int]]=[]
+        edges:set[tuple[int,int]] = set()
         # Loop over triangles:
         # ia, ib, ic = indices of corner points of the triangle
         for ia, ib, ic in tri.simplices:
@@ -100,7 +101,7 @@ class PFEMMeshUpdater:
                 innersimplices.append([ia,ib,ic])
         return edges,innersimplices
     
-    def delaunay_with_alpha_shape(self,coords:List[Tuple[float,float]],alpha:Optional[float]=None, do_not_prune_at_x0_eps:Optional[float]=None):
+    def delaunay_with_alpha_shape(self,coords:list[tuple[float,float]],alpha:float | None=None, do_not_prune_at_x0_eps:float | None=None):
         tri=Delaunay(coords)
         edges,innersimplices=self.alpha_shape(tri,alpha,do_not_prune_at_x0_eps=do_not_prune_at_x0_eps)        
         dom=self.get_mesh()
@@ -112,7 +113,7 @@ class PFEMMeshUpdater:
             dom.add_tri_C1(n1,n2,n3)        
         return edges
 
-    def define_new_mesh(self,coords:List[Tuple[float,float]]):
+    def define_new_mesh(self,coords:list[tuple[float,float]]):
         raise RuntimeError("Implement this here by overriding this method")
     
     def get_local_alpha(self,x,y):
