@@ -105,7 +105,13 @@ include(cmake/ThirdPartyGiNaC.cmake)
 # (libgeneric.a and the pyoomph_core static library) is fully Python-version
 # independent and never sees nanobind or the Python headers/flags.
 # ----------------------------------------------------------------------------
-find_package(Python 3.9 COMPONENTS Interpreter Development.Module REQUIRED)
+# Development.SABIModule is optional (only exists from 3.12 onwards, where
+# nanobind's STABLE_ABI build below actually activates - see the comment
+# there); listing it as an OPTIONAL_COMPONENTS means configuring under an
+# older interpreter (3.9-3.11) just silently doesn't find it instead of
+# failing CMake configuration.
+find_package(Python 3.9 COMPONENTS Interpreter Development.Module REQUIRED
+                        OPTIONAL_COMPONENTS Development.SABIModule)
 
 execute_process(
   COMMAND "${Python_EXECUTABLE}" -c "import nanobind; print(nanobind.cmake_dir())"
@@ -207,7 +213,18 @@ if(NOT PYOOMPH_NANOBIND_SOURCES)
                        "cannot build the Python extension module.")
 endif()
 
+# STABLE_ABI: build against Python's Limited API (Py_LIMITED_API=0x030C0000,
+# i.e. the 3.12 baseline - see nanobind-config.cmake's nanobind_add_module())
+# so the resulting extension is ABI-compatible with every CPython >= 3.12,
+# not just the one it was compiled against - one wheel instead of one per
+# minor version (see .github/workflows/wheels.yml's PYTHON_STABLE_ABI_BASE /
+# pyproject.toml's [[tool.cibuildwheel.overrides]] wheel.py-api=cp312).
+# nanobind itself silently disables this (falls back to a classic,
+# version-specific build) when configuring under CPython < 3.12 or when
+# Python::SABIModule isn't available, so this flag is safe to pass
+# unconditionally - no separate toggle is needed for the 3.10/3.11 builds.
 nanobind_add_module(_pyoomph_core
+  STABLE_ABI
   ${PYOOMPH_NANOBIND_SOURCES}
 )
 

@@ -96,18 +96,30 @@ build-frontend = { name = "pip", args = ["--no-build-isolation", "--verbose", "-
 test-requires = "pytest"
 test-command = "pytest {package}/tests" # does not work, since the gmsh library has unresolvable requirements
 test-sources = ["tests"]
-# cp315 wheels build fine, but the test-install step pulls in scipy as a
-# runtime dependency, and scipy has no prebuilt wheel yet for cp315 (Python
-# 3.15 is still pre-release) on any platform. Pip then falls back to
-# building scipy from source, which fails (missing gfortran on macOS,
-# missing OpenBLAS on manylinux). Skip testing cp315 until scipy publishes
-# 3.15 wheels; the built pyoomph wheel itself is unaffected.
-test-skip = "cp315-*"
 # CMake now downloads+builds GiNaC/CLN itself (see cmake/ThirdPartyGiNaC.cmake)
 # instead of the old citools/download_and_build_static_ginac.sh script, so
 # wheel builds just need to turn that on. This is the default for all OSes
 # except Windows, which overrides it below (see [tool.cibuildwheel.windows]).
 config-settings = { "cmake.define.PYOOMPH_DOWNLOAD_CLN" = "ON", "cmake.define.PYOOMPH_DOWNLOAD_GINAC" = "ON", "cmake.define.PYOOMPH_USE_MPI" = "OFF", "cmake.define.PYOOMPH_PARANOID" = "OFF" }
+
+# Tag the cp312 build's wheel as cp312-abi3 instead of cp312-cp312: paired
+# with CMakeLists.txt's nanobind_add_module(_pyoomph_core STABLE_ABI ...),
+# which compiles that build against Python's Limited API
+# (Py_LIMITED_API=0x030C0000), the resulting wheel is then installable on
+# every CPython >= 3.12 (3.12, 3.13, 3.14, ... - no rebuild needed), so
+# .github/workflows/wheels.yml only needs to actually build cp312 once
+# (PYTHON_STABLE_ABI_BASE) instead of once per minor version. This override
+# only targets cp312 because that's the only identifier nanobind's
+# STABLE_ABI applies to here; CPython 3.10/3.11 (PYTHON_VERSIONS_LEGACY in
+# the workflow) don't support the Limited API tag nanobind targets, so they
+# keep building their own classic, version-specific wheels as before -
+# nanobind itself silently falls back to a non-abi3 build for them (see the
+# CMakeLists.txt comment), so no matching config-settings override is
+# needed on their side.
+[[tool.cibuildwheel.overrides]]
+select = "cp312-*"
+inherit.config-settings = "append"
+config-settings = { "wheel.py-api" = "cp312" }
 
 [tool.cibuildwheel.linux]
 before-all = [
