@@ -35,7 +35,7 @@ namespace pyoomph
 
    // Base class for the Python-side "Equations" objects (weak forms) that fill a FiniteElementCode.
    // _define_fields() registers the fields/spaces, _define_element() adds the residuals; both are
-   // pure virtual and implemented in Python via pybind11 overrides.
+   // pure virtual and implemented in Python via nanobind overrides.
    class Equations
    {
    protected:

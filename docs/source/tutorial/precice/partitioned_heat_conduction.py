@@ -127,11 +127,11 @@ class HeatConductionProblem(Problem):
         
         
 if __name__=="__main__":
-    problem=HeatConductionProblem()
-    problem.initialise() # After this, precice_participant could have been set via command line, e.g. by  -P precice_participant=Neumann
-    if problem.precice_participant=="":
-        # Just run it manually without preCICE
-        problem.run(1,outstep=0.1)
-    else:
-        # Run it with preCICE. Time stepping is taken from the config file
-        problem.precice_run()
+    with HeatConductionProblem() as problem:
+        problem.initialise() # After this, precice_participant could have been set via command line, e.g. by  -P precice_participant=Neumann
+        if problem.precice_participant=="":
+            # Just run it manually without preCICE
+            problem.run(1,outstep=0.1)
+        else:
+            # Run it with preCICE. Time stepping is taken from the config file
+            problem.precice_run()

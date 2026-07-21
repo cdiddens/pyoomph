@@ -109,11 +109,9 @@ A `copy of the license <https://github.com/pyoomph/pyoomph/blob/main/COPYING>`__
 
    -  MPI, depending on the system e.g. `OpenMPI <https://www.open-mpi.org>`__ `[3-clause BSD license] <https://www.open-mpi.org/community/license.php>`__, `MPICH <https://www.mpich.org/>`__ `[MPICH license] <https://github.com/pmodels/mpich/blob/main/COPYRIGHT>`__, `Microsoft MPI <https://github.com/Microsoft/Microsoft-MPI>`__ `[MIT license] <https://github.com/microsoft/Microsoft-MPI/blob/master/LICENSE.txt>`__, note that MPI support is experimental and deactivated in the python wheels
 
-   -  `python3.8\ + <https://www.python.org/>`__, `[PSF license] <https://docs.python.org/3/license.html>`__, also dynamically linked in the distribution as python wheels
+   -  `python3.10\ + <https://www.python.org/>`__, `[PSF license] <https://docs.python.org/3/license.html>`__, also dynamically linked in the distribution as python wheels
 
-   -  `pybind11 <https://github.com/pybind/pybind11>`__, `[BSD-style license] <https://github.com/pybind/pybind11/blob/master/LICENSE>`__, also statically linked in the distribution as python wheels
-
-   -  `pybind11-stubgen <https://github.com/pybind/pybind11-stubgen>`__, `[BSD 3-Clause license] <https://github.com/pybind/pybind11-stubgen/blob/main/LICENSE>`__, used to generate python stubs from the C++ core
+   -  `nanobind <https://github.com/wjakob/nanobind>`__, `[BSD-style license] <https://github.com/wjakob/nanobind/blob/master/LICENSE>`__, also statically linked in the distribution as python wheels; its bundled ``nanobind.stubgen`` is used to generate python stubs from the C++ core
 
    -  `pip <https://github.com/pypa/pip>`__, `[MIT license] <https://github.com/pypa/pip/blob/main/LICENSE.txt>`__
 

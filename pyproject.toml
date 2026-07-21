@@ -14,7 +14,7 @@ dependencies = [
 'mkl==2021.4.0; sys_platform == "darwin" and platform_machine != "arm64"'
 ]
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [  { name="Christian Diddens", email="c.diddens@utwente.nl" },  { name="Duarte Rocha", email="d.rocha@utwente.nl" },  { name="Maxim de Wildt",email="m.dewildt@utwente.nl" },  ]
 license = { file = "COPYING" }
 classifiers=[
@@ -29,7 +29,6 @@ classifiers=[
         'Operating System :: Microsoft :: Windows :: Windows 11',
         'Programming Language :: Python',
         'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.9',
         'Programming Language :: Python :: 3.10',
         'Programming Language :: Python :: 3.11',
         'Programming Language :: Python :: 3.12',
@@ -49,7 +48,7 @@ tracker = "https://github.com/pyoomph/pyoomph/issues"
 
 
 [build-system]
-requires = ["scikit-build-core>=0.10", "pybind11>=2.5.0"]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.0.0"]
 build-backend = "scikit_build_core.build"
 
 [tool.scikit-build]
@@ -60,7 +59,7 @@ minimum-version = "build-system.requires"
 # architecture) job lets the Python-independent `generic`/`pyoomph_core`
 # static libraries be reused, via normal CMake incremental rebuilds, across
 # every interpreter cibuildwheel loops over in that job. Only `_core`
-# (src/pybind/*.cpp) actually needs to recompile per Python version.
+# (src/nanobind/*.cpp) actually needs to recompile per Python version.
 # {state} just keeps wheel/editable/sdist builds from reconfiguring on top
 # of each other; it is not Python-version-specific.
 build-dir = "build/{state}"
@@ -96,18 +95,30 @@ build-frontend = { name = "pip", args = ["--no-build-isolation", "--verbose", "-
 test-requires = "pytest"
 test-command = "pytest {package}/tests" # does not work, since the gmsh library has unresolvable requirements
 test-sources = ["tests"]
-# cp315 wheels build fine, but the test-install step pulls in scipy as a
-# runtime dependency, and scipy has no prebuilt wheel yet for cp315 (Python
-# 3.15 is still pre-release) on any platform. Pip then falls back to
-# building scipy from source, which fails (missing gfortran on macOS,
-# missing OpenBLAS on manylinux). Skip testing cp315 until scipy publishes
-# 3.15 wheels; the built pyoomph wheel itself is unaffected.
-test-skip = "cp315-*"
 # CMake now downloads+builds GiNaC/CLN itself (see cmake/ThirdPartyGiNaC.cmake)
 # instead of the old citools/download_and_build_static_ginac.sh script, so
 # wheel builds just need to turn that on. This is the default for all OSes
 # except Windows, which overrides it below (see [tool.cibuildwheel.windows]).
 config-settings = { "cmake.define.PYOOMPH_DOWNLOAD_CLN" = "ON", "cmake.define.PYOOMPH_DOWNLOAD_GINAC" = "ON", "cmake.define.PYOOMPH_USE_MPI" = "OFF", "cmake.define.PYOOMPH_PARANOID" = "OFF" }
+
+# Tag the cp312 build's wheel as cp312-abi3 instead of cp312-cp312: paired
+# with CMakeLists.txt's nanobind_add_module(_pyoomph_core STABLE_ABI ...),
+# which compiles that build against Python's Limited API
+# (Py_LIMITED_API=0x030C0000), the resulting wheel is then installable on
+# every CPython >= 3.12 (3.12, 3.13, 3.14, ... - no rebuild needed), so
+# .github/workflows/wheels.yml only needs to actually build cp312 once
+# (PYTHON_STABLE_ABI_BASE) instead of once per minor version. This override
+# only targets cp312 because that's the only identifier nanobind's
+# STABLE_ABI applies to here; CPython 3.10/3.11 (PYTHON_VERSIONS_LEGACY in
+# the workflow) don't support the Limited API tag nanobind targets, so they
+# keep building their own classic, version-specific wheels as before -
+# nanobind itself silently falls back to a non-abi3 build for them (see the
+# CMakeLists.txt comment), so no matching config-settings override is
+# needed on their side.
+[[tool.cibuildwheel.overrides]]
+select = "cp312-*"
+inherit.config-settings = "append"
+config-settings = { "wheel.py-api" = "cp312" }
 
 [tool.cibuildwheel.linux]
 before-all = [
@@ -118,6 +129,14 @@ before-test = [
 ]
 
 [tool.cibuildwheel.macos]
+# nanobind's own sources (nb_type.cpp) use C++17 aligned operator delete
+# (std::align_val_t), whose deallocation function only exists in the SDK
+# from macOS 10.13 onwards; cibuildwheel's x86_64 default of 10.9 is too
+# old and fails with "aligned deallocation function ... is only available
+# on macOS 10.13 or newer". arm64 wheels are unaffected (cibuildwheel's
+# arm64 default is already 11.0), but set this for both architectures for
+# consistency/future-proofing.
+environment = { MACOSX_DEPLOYMENT_TARGET = "10.13" }
 before-all = [
 # pkg-config is needed by GiNaC's own ./configure to locate CLN (see
 # cmake/ThirdPartyGiNaC.cmake) whenever PYOOMPH_DOWNLOAD_GINAC=ON (the
@@ -171,7 +190,7 @@ ignore_missing_imports = true
 include = ["pyoomph"]
 exclude = ["**/__pycache__"]
 pythonVersion = "3.12"
-# pyoomph._pyoomph_core is a compiled pybind11 extension: the repo tree only
+# pyoomph._pyoomph_core is a compiled nanobind extension: the repo tree only
 # ships its .pyi stub (pyoomph/_pyoomph_core.pyi), while the matching .so
 # lives wherever pyoomph was actually built/installed (e.g. site-packages
 # for an editable install merged into pyoomph.__path__). pyright can't see

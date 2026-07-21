@@ -41,7 +41,7 @@ Deflation can furthermore be combined with parameter scanning, in a sort of cont
 
 .. literalinclude:: deflated_continuation.py
    :language: python
-   :start-at: problem=Problem()
+   :start-at: with Problem() as problem:
    :end-at: output_files[branch_index].add_row(rvalue,sol[0],Re_ev)
 
 A call of :py:meth:`~pyoomph.generic.problem.Problem.deflated_continuation` expects a parameter sampling range and has similar additional optional arguments as :py:meth:`~pyoomph.generic.problem.Problem.iterate_over_multiple_solutions_by_deflation`. At each solution, the ``for``-loop receives an increasing branch index, the current parameter value and the degrees of freedom of the solution. Feel free to calculate e.g. eigenvalues or call e.g. :py:meth:`~pyoomph.generic.problem.Problem.output` inside the loop to process the current solution. You could also consider adding a :py:meth:`~pyoomph.generic.problem.Problem.write_state` whenever a new branch index starts. With another script, you can load these states via :py:meth:`~pyoomph.generic.problem.Problem.load_state` and e.g. finalize the bifurcation diagram by arclength continuation of all found solutions.

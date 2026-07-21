@@ -26,6 +26,7 @@
 # ========================================================================
  
 import glob
+import sys
 
 import scipy.sparse
 
@@ -339,6 +340,101 @@ class PeriodicOrbit:
         
             
 
+def _teardown_spatial_mesh(m:"AnySpatialMesh") -> None:
+    # Under nanobind (unlike pybind11), a mesh kept alive on the C++ side by
+    # nb::keep_alive<>() (set_mesh_pt/add_sub_mesh in problem.cpp) is invisible to Python's
+    # cyclic garbage collector: as long as the owning Problem's C++ instance is alive, the mesh
+    # Python object cannot be freed, no matter what gc.collect() does - and, since keep_alive
+    # can never be revoked once granted, this holds even after a mesh is superseded (e.g. by
+    # remeshing, see Problem.force_remesh()) and dropped from Problem._meshdict: it remains
+    # pinned alive for the rest of the Problem's lifetime unless explicitly torn down here.
+    # If the mesh in turn still holds a Python-visible "_parent"/etc. back-reference, it and
+    # whatever it points to keep each other alive forever (one edge invisible, one visible, and
+    # gc cannot break a cycle through an invisible edge). Explicitly nulling every such
+    # back-reference breaks the visible side, and forcing immediate destruction of the
+    # underlying C++ object (via _destroy_now(), see below) handles the invisible one directly
+    # instead of waiting for the owning Problem to also become collectible. (Mesh<->Problem
+    # itself no longer needs breaking here: MeshFromTemplate1d/2d/3d/InterfaceMesh don't store a
+    # Python-level "_problem" attribute at all any more - get_problem() resolves it live via a
+    # non-owning C++-side lookup, see mesh.py.)
+    cg=m.get_code_gen()
+    cg._code=None
+    cg._set_problem(None) #type:ignore
+    cg._mesh=None #type:ignore
+    # Discontinuous-Galerkin domains additionally attach a handful of auxiliary
+    # FiniteElementCodeGenerator objects to cg (for the internal-facet/DG coupling terms),
+    # each with its own "_problem"/"_mesh" back-references that are otherwise never cleared.
+    for dummy_attr in ("_dummy_codegen_for_internal_facets","_dummy_codegen_for_internal_facets_bulk",
+                       "_dummy_codegen_for_internal_facets_bulk_bulk","_dummy_codegen_for_internal_facets_bulk_opp"):
+        dummy_cg=getattr(cg,dummy_attr,None)
+        if dummy_cg is not None:
+            dummy_cg._set_problem(None) #type:ignore
+            dummy_cg._code=None
+            dummy_cg._mesh=None
+            setattr(cg,dummy_attr,None)
+    for im in m._interfacemeshes.values():
+        _teardown_spatial_mesh(im)
+
+    m._interfacemeshes.clear()
+    # Close any output file handles (e.g. ODEFileOutput/IntegralObservableOutput) held open
+    # by this mesh's equations before dropping the reference to them -- see the log-file
+    # comment in Problem.release() for why this must happen proactively rather than being
+    # left to eventual garbage collection.
+    if m._eqtree is not None and m._eqtree._equations is not None:
+        m._eqtree._equations._release_output_files()
+    m._eqtree._equations=None
+    m._eqtree=None #type:ignore
+    # Break the remaining back-references specific to the mesh's own class:
+    # MeshFromTemplate1d/2d/3d hold a reference to their originating MeshTemplate (which
+    # itself has its own "_problem" back-reference, resolved via a non-owning C++-side
+    # lookup just like the mesh/codegen classes - see MeshTemplate.get_problem()), while
+    # InterfaceMesh holds references to its parent (bulk) mesh and, for two-sided
+    # interfaces, to the opposite InterfaceMesh.
+    if hasattr(m,"_templatemesh"):
+        m._templatemesh._set_problem(None) #type:ignore
+        m._templatemesh=None #type:ignore
+    if hasattr(m,"_parent"):
+        m._parent=None #type:ignore
+    if hasattr(m,"_opposite_interface_mesh"):
+        m._opposite_interface_mesh=None #type:ignore
+    # Force the underlying C++ mesh (and, via its normal destructor, all of its elements/nodes)
+    # to be destructed right now, synchronously - rather than whenever this Python wrapper
+    # object eventually gets garbage collected, which could be much later (e.g. a user script
+    # may still hold its own reference to this mesh, entirely legitimately) or never (if some
+    # as-yet-undiscovered reference cycle remains). Callers must ensure this mesh is no longer
+    # needed for anything (e.g. field interpolation into a replacement mesh) before calling
+    # this, and, if unloading equation code DLLs afterwards, must do so only after this call:
+    # an element destructed afterwards would dereference its DynamicBulkElementCode's function
+    # table in an already-unloaded shared library and crash.
+    m._destroy_now()
+
+
+def _destroy_superseded_mesh(m:"AnySpatialMesh") -> None:
+    # Counterpart to _teardown_spatial_mesh(), used for a mesh that has been superseded by
+    # remeshing (see Problem.force_remesh()) rather than one whose owning Problem is being
+    # released entirely. Unlike release(), a superseded mesh's _eqtree/_codegen must NOT be
+    # touched here: for both the top-level (bulk) mesh and each of its interface meshes, that
+    # same eqtree/codegen tree is explicitly shared with (part of) its replacement mesh (the
+    # bulk mesh's via _exchange_mesh(), each interface mesh's because MeshFromTemplateBase's own
+    # interface-mesh construction reuses the *same* child eqtree from self._eqtree.get_children()
+    # for the new interface mesh at that position) - clearing them crashed/broke the next
+    # mesh-construction or remesh call. Only _parent/_opposite_interface_mesh are safe to clear
+    # (there is no Python-level "_problem" attribute left to clear at all - get_problem()
+    # resolves it live via a non-owning C++-side lookup, see mesh.py), plus forcing immediate
+    # destruction of the underlying C++ object (freeing the bulk of the memory - nodes,
+    # elements, matrices - even though the lightweight Python wrapper itself remains pinned
+    # alive by nb::keep_alive until the owning Problem is; see _teardown_spatial_mesh() for that
+    # mechanism).
+    for im in m._interfacemeshes.values():
+        _destroy_superseded_mesh(im)
+    m._interfacemeshes.clear()
+    if hasattr(m,"_parent"):
+        m._parent=None #type:ignore
+    if hasattr(m,"_opposite_interface_mesh"):
+        m._opposite_interface_mesh=None #type:ignore
+    m._destroy_now()
+
+
 #Problem with some automatic behaviour
 class Problem(_pyoomph.Problem):
     """A class representing a problem in the pyoomph library.
@@ -377,6 +473,7 @@ class Problem(_pyoomph.Problem):
         super(Problem, self).__init__()
         self._initialised:bool=False
         self._during_initialization:bool=False
+        self._released:bool=False
 
         from .. import get_default_c_compiler
         self.set_c_compiler(get_default_c_compiler())
@@ -835,36 +932,60 @@ class Problem(_pyoomph.Problem):
         return self
 
     def release(self):
-        def release_spatial_mesh(m:AnySpatialMesh):
-            cg=m.get_code_gen()
-            cg._code=None
-            cg._problem=None
-            for im in m._interfacemeshes.values():
-                release_spatial_mesh(im)
-
-            m._interfacemeshes.clear()
-            # Close any output file handles (e.g. ODEFileOutput/IntegralObservableOutput)
-            # held open by this mesh's equations before dropping the reference to them --
-            # see the log-file comment further below for why this must happen proactively
-            # rather than being left to eventual garbage collection.
-            if m._eqtree is not None and m._eqtree._equations is not None:
-                m._eqtree._equations._release_output_files()
-            m._eqtree._equations=None
-            m._eqtree=None #type:ignore
-
+        if self._released:
+            return
+        self._released=True
         for m in self._meshdict.values():
             if not isinstance(m,ODEStorageMesh):
-                release_spatial_mesh(m)
+                _teardown_spatial_mesh(m)
             else:
+                cg=m.get_code_gen()
+                cg._code=None
+                cg._set_problem(None) #type:ignore
                 if m._eqtree is not None and m._eqtree._equations is not None:
                     m._eqtree._equations._release_output_files()
                 m._eqtree=None
                 m._element=None
+                m._set_problem(None,None) #type:ignore
+                m._destroy_now()
 
+        # GenericLinearSystemSolver/GenericEigenSolver instances hold a "problem" back-reference
+        # (set in their own __init__), stored as a weakref precisely so it cannot keep this
+        # Problem alive - clear it explicitly anyway so a stray later use of the solver fails
+        # fast instead of silently resolving a dead weakref.
+        if not isinstance(self._lasolver,(str,type(None))):
+            self._lasolver.problem=None #type:ignore
+        if not isinstance(self._eigensolver,(str,type(None))):
+            self._eigensolver.problem=None #type:ignore
         self._lasolver:Optional[Union[str,GenericLinearSystemSolver]] = None
         self._eigensolver:Optional[Union[str,GenericEigenSolver]] = None
         self._meshtemplate_list = []
         self._meshdict:Dict[str,"AnyMesh"] = {}
+        self._equation_system = None #type:ignore
+        # The process-wide solver callback singleton (pyoomph._pyoomph.get_Solver_callback(),
+        # see pyoomph/__init__.py's solver_cb) remembers whichever Problem last called solve()
+        # via set_Solver_callback()/set_problem(), as a weakref precisely so it cannot keep this
+        # Problem alive - but clear it explicitly here too, so release() has an immediate effect
+        # rather than waiting for the weakref to next resolve to None on its own.
+        solver_cb = _pyoomph.get_Solver_callback()
+        if solver_cb is not None:
+            ref=getattr(solver_cb, "_current_problem_ref", None)
+            if ref is not None and ref() is self:
+                solver_cb._current_problem_ref = None
+        # set_custom_assembler() (used e.g. for deflation/bifurcation tracking, see
+        # bifurcation_tools.py) creates a plain Python-level mutual reference: this Problem's
+        # own _custom_assembler points to the assembler, and the assembler's own "problem"
+        # attribute points back here. Break it explicitly rather than relying on cyclic gc
+        # picking it up eventually.
+        if self._custom_assembler is not None:
+            self._custom_assembler.problem=None #type:ignore
+            self._custom_assembler=None
+        # define_problem_for_additional_cartesian_stability_investigation()/
+        # define_problem_for_axial_symmetry_breaking_investigation() (normal-mode/azimuthal
+        # stability setup) install a lambda here that closes over "self" - a plain Python
+        # self-referential cycle (self -> _residual_mapping_functions -> lambda -> self).
+        # Break it explicitly instead of relying on cyclic gc, same rationale as above.
+        self._residual_mapping_functions = []
         self.invalidate_cached_mesh_data()
         self.invalidate_eigendata()
         self.flush_sub_meshes()
@@ -874,10 +995,15 @@ class Problem(_pyoomph.Problem):
         # test_solver()/test_compiler() in __main__.py, whose TemporaryDirectory
         # cleanup runs before this Python wrapper object is garbage-collected.
         self._open_log_file("",False)
+        # Run gc.collect() BEFORE unloading the compiled-equation-code DLLs, not after: any
+        # mesh/element C++ object destructed after the DLLs are unloaded would dereference a
+        # dangling codeinst/function-table pointer into already-dlclose()'d memory and crash.
+        # This ordering only starts to matter once the cycle-breaking above actually lets
+        # gc.collect() free such objects here instead of leaving that to interpreter exit.
+        gc.collect()
+        gc.collect()
+        gc.collect()
         self._unload_all_dlls()
-        gc.collect()
-        gc.collect()
-        gc.collect()
 
 
     def __exit__(self, type, value, traceback): #type:ignore
@@ -885,6 +1011,38 @@ class Problem(_pyoomph.Problem):
             raise type
         else:
             self.release()
+
+    def __del__(self):
+        # Fallback for scripts that never use "with SomeProblem() as problem:" (or call
+        # .release() explicitly) at all: without this, nothing ever breaks the reference
+        # cycles/keep_alive-pinning described in release()'s own comments, and this Problem's
+        # meshes/elements would remain leaked for the rest of the process. release() is
+        # idempotent (guarded by self._released) so this is harmless if release() already ran.
+        #
+        # Skip entirely once the interpreter itself is shutting down (sys.is_finalizing()):
+        # verified empirically (via a debug build of this method) that relying on __del__ to
+        # release a Problem that late is fundamentally unsafe, not just risky - Python does not
+        # reliably call __del__ at all for objects still referenced only by a module-level
+        # global once that module's dict is cleared during interpreter shutdown, and on the
+        # rare occasion it is called, even elementary operations inside it (a plain `import`)
+        # can fail with "TypeError: 'NoneType' object is not callable" because interpreter
+        # teardown has already cleared parts of the import machinery out from under us. There
+        # is no reliable amount of internal defensiveness that fixes this from inside __del__
+        # itself - the only real fix is for a script to call .release() (or use "with") before
+        # the interpreter starts shutting down, while everything __del__/release() depends on
+        # is still guaranteed to work. Skipping here just leaves this Problem's memory to the
+        # OS, exactly as it already was before this Problem became collectible at all - not a
+        # regression, since such scripts never freed this memory during the run anyway.
+        # Swallow all exceptions: __del__ can run at arbitrary/uncontrolled times, and an
+        # exception escaping __del__ is merely printed as "Exception ignored in..." by Python,
+        # never propagated - so there is nothing to gain from letting one through, and every
+        # reason to avoid it (e.g. self._meshdict may not exist yet if __init__ failed early).
+        if sys.is_finalizing():
+            return
+        try:
+            self.release()
+        except Exception:
+            pass
 
 
     @overload
@@ -1706,10 +1864,16 @@ class Problem(_pyoomph.Problem):
 
         for tree_depth in range(3):
             for _,mesh in self._meshdict.items():
-                mesh._problem=self
+                # No mesh class stores a Python-level "_problem" attribute any more -
+                # get_problem() resolves it live via the C++ side (see mesh.py). ODEStorageMesh
+                # instances can be reused across a redefine_problem() cycle with a new owning
+                # Problem, so still need re-stamping here - preserving the existing compiled
+                # code instance (if any), since _set_problem() would otherwise reset it to None.
+                if isinstance(mesh,ODEStorageMesh):
+                    mesh._set_problem(self,mesh.get_code_gen()._code)
                 mesh._eqtree._equations.get_combined_equations()._problem=self
                 if isinstance(mesh,ODEStorageMesh): continue
-                mesh._pre_compile_interface_equations(tree_depth) 
+                mesh._pre_compile_interface_equations(tree_depth)
 
             for _,mesh in self._meshdict.items():
                 if isinstance(mesh,ODEStorageMesh): continue
@@ -2218,6 +2382,7 @@ class Problem(_pyoomph.Problem):
             print("QUICK TEST: STOPPING AFTER FIRST SUCCESSFUL NEWTON SOLVE, BUT DOING OUTPUT FIRST")
             self.output()
             print("QUICK TEST: STOPPING AFTER FIRST SUCCESSFUL NEWTON SOLVE")
+            self.release()
             sys.exit(0)
 
     def remeshing_necessary(self):        
@@ -5724,10 +5889,13 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             for tree_depth in range(3):
                 newmesh._generate_interface_elements(tree_depth)
 
-            newmesh._tracers=oldmesh._tracers 
-            for _,tracercoll in newmesh._tracers.items(): 
+            newmesh._tracers=oldmesh._tracers
+            for _,tracercoll in newmesh._tracers.items():
                 tracercoll._set_mesh(newmesh)
-
+            # oldmesh's underlying C++ mesh is still needed further below (read by
+            # InternalInterpolator across possibly several adaptive interpolation rounds) - do
+            # NOT force-destroy it here; it is torn down at the very end of this method instead,
+            # once nothing needs it any more.
 
         # Rebuild
         self.rebuild_global_mesh_from_list(rebuild=True)
@@ -5792,6 +5960,19 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         for r in remeshers:
             r.actions_after_remeshing()
         self.invalidate_cached_mesh_data()
+
+        # Now, and only now, is every old (superseded) mesh truly no longer needed - the
+        # adaptive interpolation loop above may read from it (via InternalInterpolator) across
+        # multiple rounds, so destroying it any earlier (e.g. right after its _codegen/_eqtree
+        # were transferred to the new mesh, above) crashes. Without this, oldmesh's underlying
+        # C++ object (and its elements/nodes) would remain permanently pinned alive by
+        # nb::keep_alive on the C++ side for the rest of this Problem's lifetime, once per
+        # remesh event, since dropping it from self._meshdict earlier does not revoke that.
+        # See _destroy_superseded_mesh() for why oldmesh's _templatemesh/_eqtree/_codegen (and,
+        # recursively, the same for its interface meshes) must NOT be touched here, unlike
+        # Problem.release()'s teardown.
+        for name, oldmesh in old_meshes.items():
+            _destroy_superseded_mesh(oldmesh)
         
         
 

@@ -104,8 +104,7 @@ class LubricationEquations(Equations):
       elif self.fluid_props is not None:
          scaling["dynamic_viscosity"] = self.fluid_props.evaluate_at_condition(self.mu,self.fluid_props.initial_condition)
       scaling["pressure"] = self.get_scaling("surface_tension") * self.get_scaling("height") / self.get_scaling("spatial") ** 2  # Laplace pressure scale
-      problem=self.get_current_code_generator()._problem 
-      assert problem is not None
+      problem=self.get_current_code_generator().get_problem()
       if not ("temporal" in problem.scaling.keys()):
          problem.scaling["temporal"] = 3 * self.get_scaling("dynamic_viscosity") * self.get_scaling("spatial") ** 4 / (self.get_scaling("surface_tension") * self.get_scaling("height") ** 3)
 

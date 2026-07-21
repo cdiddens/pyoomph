@@ -32,6 +32,7 @@ Pyoomph is a finite element framework based on oomph-lib and GiNaC. It is design
 import os
 import platform
 import sys
+import weakref
 os.environ['OPENBLAS_NUM_THREADS'] = '4' 
 os.environ['MKL_NUM_THREADS'] = '4'
 # To Deactivate OpenMP parallelization
@@ -100,26 +101,38 @@ import numpy
 class GeneralSolverCallback(_pyoomph.GeneralSolverCallback):
 	def __init__(self):
 		super().__init__()
-		self._current_problem=None
+		# A weakref, not a strong reference: this singleton lives for the whole process, so a
+		# strong reference here would keep whichever Problem last called solve() (and,
+		# transitively, everything nb::keep_alive holds alive for it on the C++ side) alive
+		# forever for any script that only ever creates a single Problem - Problem.release()
+		# cannot break this cycle itself, since it isn't one: solver_cb is a perfectly reachable,
+		# legitimate object, so nothing (no gc, no Problem.__del__) will ever consider the
+		# Problem it points to as garbage. A weakref sidesteps the issue entirely: during an
+		# actual solve, the caller still holds a strong reference to its Problem, so the weakref
+		# resolves fine; once nothing else does, it simply (and correctly) starts resolving to
+		# None instead of pinning the Problem alive.
+		self._current_problem_ref:"Optional[weakref.ReferenceType[Problem]]"=None
 
 	def set_problem(self,problem:Problem):
-#		if self._current_problem is not None:
-#			if self._current_problem!=problem:
-#				raise RuntimeError("Multiple problems probably not supported yet") #Make sure before each callback, the problem is updated accordingly
-		self._current_problem=problem
+		self._current_problem_ref=weakref.ref(problem)
+
+	def _get_current_problem(self)->Optional[Problem]:
+		return self._current_problem_ref() if self._current_problem_ref is not None else None
 
 	def solve_la_system_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPIntArray,colptr:NPIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
-		if self._current_problem is None:
+		problem=self._get_current_problem()
+		if problem is None:
 			raise RuntimeError("The problem has not been set yet")
-		solv=self._current_problem.get_la_solver()
+		solv=problem.get_la_solver()
 		assert solv is not None
 		return solv.solve_serial(op_flag,n,nnz,nrhs,values,rowind,colptr,b,ldb,transpose)
 
 
 	def solve_la_system_distributed(self, op_flag: int, allow_permutations: int, n: int, nnz_local: int, nrow_local: int, first_row: int, values: NPFloatArray, col_index: NPIntArray, row_start: NPIntArray, b: NPFloatArray, nprow: int, npcol: int, doc: int, data: NPUInt64Array, info: NPIntArray) -> None:
-		if self._current_problem is None:
+		problem=self._get_current_problem()
+		if problem is None:
 			raise RuntimeError("The problem has not been set yet")
-		return self._current_problem.get_la_solver().solve_distributed(op_flag,allow_permutations,n,nnz_local,nrow_local,first_row,values,col_index,row_start,b,nprow,npcol,doc,data,info) #,comm
+		return problem.get_la_solver().solve_distributed(op_flag,allow_permutations,n,nnz_local,nrow_local,first_row,values,col_index,row_start,b,nprow,npcol,doc,data,info) #,comm
 
 	def metis_partgraph_kway(self, nvertex,nconnection, xadj, adjacency_vector, vwgt, nparts, options, edgecut, part):
 		#print("IN PYMETIS")

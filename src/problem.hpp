@@ -271,7 +271,7 @@ namespace pyoomph
   //  - Hessian assembly for second-order (bifurcation/optimization) computations
   //  - custom sparse assembly, Dirichlet handling (either by dof removal or by matrix manipulation), logging
   // Most of the heavy lifting is implemented in problem.cpp; this header is the primary interface used both
-  // from C++ (e.g. by generated element code, bifurcation.cpp) and from Python via src/pybind/problem.cpp.
+  // from C++ (e.g. by generated element code, bifurcation.cpp) and from Python via src/nanobind/problem.cpp.
   class Problem : public oomph::Problem
   {
   protected:
@@ -447,6 +447,17 @@ namespace pyoomph
     virtual void actions_after_parameter_increase(const  std::string &  ) {}
     void actions_after_change_in_bifurcation_parameter() override {}
     void actions_before_newton_convergence_check() override {}
+    // Also expose these oomph-lib hooks (protected there) as public: nanobind's trampoline
+    // dispatch (unlike pybind11's) requires a public base binding under the same name to detect
+    // whether a Python subclass has overridden the hook.
+    using oomph::Problem::actions_before_newton_solve;
+    using oomph::Problem::actions_after_newton_solve;
+    using oomph::Problem::actions_before_newton_step;
+    using oomph::Problem::actions_after_newton_step;
+    #ifdef OOMPH_HAS_MPI
+    using oomph::Problem::actions_before_distribute;
+    using oomph::Problem::actions_after_distribute;
+    #endif
 
     virtual void _build_mesh() { throw_runtime_error("You must implement the function _build_mesh for load_balancing"); } // Overridden in Python to (re)build the mesh; required for MPI load balancing
     #ifdef OOMPH_HAS_MPI
@@ -490,7 +501,7 @@ namespace pyoomph
     virtual bool is_quiet() const { return _is_quiet; }
     // void set_diagonal_zero_entries(bool yesno) {KeepZeroDiagonal=yesno;} //Requires a patched oomph-lib problem class
     Problem();
-    virtual void unload_all_dlls(); // Closes all loaded DynamicBulkElementCode shared libraries (called on destruction / explicit cleanup, e.g. before recompiling equations)
+    virtual void unload_all_dlls(bool clear_all=true); // Closes all loaded DynamicBulkElementCode shared libraries (called on destruction / explicit cleanup, e.g. before recompiling equations)
     virtual unsigned get_max_dt_order() const; // Maximum time-derivative order required by any of the loaded element codes (determines how many history values the timestepper must keep)
     ~Problem() override;
     virtual CCompiler *get_ccompiler() { return compiler; }

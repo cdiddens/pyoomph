@@ -362,8 +362,8 @@ class GmshTemplate(MeshTemplate):
 
         if False and  self._loaded_from_mesh_file:
             self._geometry_defined = True
-            super(GmshTemplate, self)._do_define_geometry(self._problem)
-            self._set_problem(self._problem)
+            super(GmshTemplate, self)._do_define_geometry(self.get_problem())
+            self._set_problem(self.get_problem())
             print("Loading mesh from: "+self._loaded_from_mesh_file)
             self._load_mesh(self._loaded_from_mesh_file)
         pass
@@ -413,7 +413,7 @@ class GmshTemplate(MeshTemplate):
             consider_spatial_scale=self.consider_spatial_scale
         for i, c in enumerate(coord):
             if consider_spatial_scale:
-                c = c / self._problem.get_scaling("spatial")
+                c = c / self.get_problem().get_scaling("spatial")
                 if isinstance(c,Expression):
                     c=c.float_value()
                 coord[i] = c
@@ -429,7 +429,7 @@ class GmshTemplate(MeshTemplate):
                 except:
                     raise RuntimeError("mesh resolution (i.e. size argument) is expected to be nondimensional, i.e. must be a float, not "+str(size))
     #            if isinstance(size, _pyoomph.Expression):
-    #                size = size / self._problem.get_scaling("spatial")
+    #                size = size / self.get_problem().get_scaling("spatial")
     #                size = size.float_value()
         size=cast(float,size)
         if size is not None:
@@ -955,27 +955,27 @@ class GmshTemplate(MeshTemplate):
                     break
             if not found:
                 llist = map(lambda e: self._rev_names.get(e, "<unnamed>"), lst)
-                mshdir = os.path.join(self._problem._outdir, "_gmsh") #type:ignore
+                mshdir = os.path.join(self.get_problem()._outdir, "_gmsh") #type:ignore
                 Path(mshdir).mkdir(parents=True, exist_ok=True)
                 mshtrunk = "DEBUG"
                 assert self._geom is not None
                 generate_mesh_to_file(self._geom, mshdir, mshtrunk, mesher=self,dim=self._maxdim, order=self.order,
                                       algorithm=self.gmsh_options.get("algorithm",None),
                                       recombine_algo=self.gmsh_options.get("recombine_algo",None),
-                                      postgen_cb=lambda: self.post_process(),mesh_mode=self.mesh_mode,mesh_size_callback=self._mesh_size_callback, quiet=self._problem.is_quiet())
+                                      postgen_cb=lambda: self.post_process(),mesh_mode=self.mesh_mode,mesh_size_callback=self._mesh_size_callback, quiet=self.get_problem().is_quiet())
                 raise RuntimeError("Cannot close line loop" + (
                     "" if name is None else " for surface " + name) + ". Cannot find the next element in the loop.\nLoop so far: " + (
                                        "\n".join(debug_info)) + "\n\nLine list:\n" + "\n".join(llist))
         if currentendpoint != startpoint:
             llist = map(lambda e: self._rev_names.get(e, "<unnamed>"), lst)
-            mshdir = os.path.join(self._problem._outdir, "_gmsh") #type:ignore
+            mshdir = os.path.join(self.get_problem()._outdir, "_gmsh") #type:ignore
             Path(mshdir).mkdir(parents=True, exist_ok=True)
             mshtrunk = "DEBUG"
             assert self._geom is not None
             generate_mesh_to_file(self._geom, mshdir, mshtrunk, mesher=self, dim=self._maxdim, order=self.order,
                                   algorithm=self.gmsh_options.get("algorithm",None),
                                   recombine_algo=self.gmsh_options.get("recombine_algo",None),
-                                  postgen_cb=lambda: self.post_process(),mesh_mode=self.mesh_mode,mesh_size_callback=self._mesh_size_callback, quiet=self._problem.is_quiet())
+                                  postgen_cb=lambda: self.post_process(),mesh_mode=self.mesh_mode,mesh_size_callback=self._mesh_size_callback, quiet=self.get_problem().is_quiet())
             raise RuntimeError("Could not close line loop" + (
                 "" if name is None else " for surface " + name) + ". Start and end not matching.\nLoop so far: " + (
                                    "\n".join(debug_info)) + "\n\nLine list:\n" + "\n".join(llist))
@@ -1207,7 +1207,7 @@ class GmshTemplate(MeshTemplate):
         exit()
     
     def _load_mesh(self,mshfilename:str):
-        if not self._problem.is_quiet():
+        if not self.get_problem().is_quiet():
             print("Loading mesh file: "+mshfilename)
         self._mesh = meshio.read(mshfilename, file_format="gmsh") #type:ignore
         curvedfile,_=os.path.splitext(mshfilename)
@@ -1285,10 +1285,10 @@ class GmshTemplate(MeshTemplate):
 
 
     def _do_define_geometry(self, problem:"Problem", filename_trunk:Optional[str]=None):
-        self._problem=problem
-        
+        self._set_problem(problem)
+
         if not self._geometry_defined:
-            mshdir = os.path.join(self._problem._outdir, "_gmsh") #type:ignore
+            mshdir = os.path.join(self.get_problem()._outdir, "_gmsh") #type:ignore
             Path(mshdir).mkdir(parents=True, exist_ok=True)
             # Find a unique name:
             if filename_trunk is None:
@@ -1319,11 +1319,11 @@ class GmshTemplate(MeshTemplate):
                         geom.add_physical(objlist, label=name) #type:ignore
 
                     self._meshfile=os.path.join(mshdir, mshtrunk + ".msh")
-                    if ((self._problem._runmode!="continue" or self._problem._continue_initialized) and self._problem._runmode!="replot") or not os.path.exists(self._meshfile): #type:ignore
+                    if ((self.get_problem()._runmode!="continue" or self.get_problem()._continue_initialized) and self.get_problem()._runmode!="replot") or not os.path.exists(self._meshfile): #type:ignore
                         generate_mesh_to_file(geom, mshdir, mshtrunk, mesher=self, dim=self._maxdim, order=self.order,
                                           algorithm=self.gmsh_options.get("algorithm",None),
                                           recombine_algo=self.gmsh_options.get("recombine_algo",None),
-                                          postgen_cb=lambda: self.post_process(),mesh_mode=self.mesh_mode,mesh_size_callback=self._mesh_size_callback, quiet=self._problem.is_quiet())
+                                          postgen_cb=lambda: self.post_process(),mesh_mode=self.mesh_mode,mesh_size_callback=self._mesh_size_callback, quiet=self.get_problem().is_quiet())
 
                         #self.write_curved_entities(os.path.join(mshdir, mshtrunk + ".curved"))
             else:
@@ -1641,7 +1641,7 @@ class GmshTemplate(MeshTemplate):
             layers: Number of layers to extrude. If None, the extrusion will be determined by the mesh size.        
         """
         for i, c in enumerate(shift):
-            c = c / self._problem.get_scaling("spatial")
+            c = c / self.get_problem().get_scaling("spatial")
             if isinstance(c,Expression):
                 c=c.float_value()
             shift[i] = c
@@ -1754,7 +1754,7 @@ class GmshTemplate(MeshTemplate):
                 c=c.float_value()
             axis[i] = c
         for i, c in enumerate(center):
-            c = c / self._problem.get_scaling("spatial")
+            c = c / self.get_problem().get_scaling("spatial")
             if isinstance(c,Expression):
                 c=c.float_value()
             center[i] = c

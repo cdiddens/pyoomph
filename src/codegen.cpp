@@ -2946,6 +2946,9 @@ namespace pyoomph
 		for (auto *s : spaces)
 			if (s)
 				delete s;
+		for (auto *f : myfields)
+			if (f)
+				delete f;
 	}
 
 	// Collects every distinct ShapeExpansion appearing anywhere in expression `inp`, recursing into

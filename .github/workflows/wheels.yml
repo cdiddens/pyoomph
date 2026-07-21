@@ -17,13 +17,24 @@ on:
       - published
 
 env:
-  # Add/remove Python versions here to build wheels for them on every platform below.
-  # cibuildwheel builds every matching version within a single job.
-  # 3.15 is not yet a stable release; CIBW_ENABLE=cpython-prerelease below lets
-  # cibuildwheel pick up its current pre-release build (requires cibuildwheel >= 4.0,
-  # which is when cp315 build identifiers were added). Drop 3.15 from this list once
-  # it's stable if you don't also want to drop the enable flag.
-  PYTHON_VERSIONS: "3.10 3.11 3.12 3.13 3.14 3.15"
+  # Wheels for these versions are built individually, each its own classic
+  # (version-specific ABI) wheel: nanobind's STABLE_ABI support (see
+  # CMakeLists.txt) requires CPython >= 3.12, so 3.10/3.11 can't use it and
+  # need a separate build each. Add/remove versions here as support windows
+  # change; cibuildwheel builds every matching version within a single job.
+  PYTHON_VERSIONS_LEGACY: "3.10 3.11"
+  # The lowest CPython version nanobind's Stable ABI targets
+  # (Py_LIMITED_API=0x030C0000). Only ONE wheel is built for this version -
+  # tagged cp312-abi3-<platform> via pyproject.toml's
+  # [[tool.cibuildwheel.overrides]] wheel.py-api=cp312 setting - and, being
+  # ABI-stable, it is then installable on every later CPython release too
+  # (3.13, 3.14, 3.15, ...) without a rebuild, which is the whole point of
+  # building against the stable ABI. Do NOT add 3.13/3.14/3.15 etc. as their
+  # own build identifiers below - that would just rebuild the same thing
+  # redundantly. If nanobind ever raises its own Limited API baseline above
+  # 3.12, bump this (and CMakeLists.txt's STABLE_ABI comment / pyproject.toml's
+  # wheel.py-api value) together.
+  PYTHON_STABLE_ABI_BASE: "3.12"
 
 jobs:
   build_wheels:
@@ -59,15 +70,16 @@ jobs:
         with:
           python-version: '3.14'
 
-      - name: Compute cibuildwheel build selector
+      - name: Compute cibuildwheel build selectors
         id: cibw
         shell: bash
         run: |
-          SELECTOR=""
-          for v in ${PYTHON_VERSIONS}; do
-            SELECTOR="${SELECTOR:+$SELECTOR }cp${v//./}-*"
+          LEGACY_SELECTOR=""
+          for v in ${PYTHON_VERSIONS_LEGACY}; do
+            LEGACY_SELECTOR="${LEGACY_SELECTOR:+$LEGACY_SELECTOR }cp${v//./}-*"
           done
-          echo "build_selector=${SELECTOR}" >> "${GITHUB_OUTPUT}"
+          echo "legacy_selector=${LEGACY_SELECTOR}" >> "${GITHUB_OUTPUT}"
+          echo "stable_abi_selector=cp${PYTHON_STABLE_ABI_BASE//./}-*" >> "${GITHUB_OUTPUT}"
 
       - name: Resolve prebuild run id
         id: prebuild
@@ -123,12 +135,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libglu1-mesa-dev libxcursor-dev libopengl0
 
-      - name: Build wheel with cibuildwheel (Linux/macOS)
+      # Split into two cibuildwheel invocations (both appending into the same
+      # wheelhouse/ dir) rather than one combined CIBW_BUILD selector: cibuildwheel
+      # env vars *always* win over pyproject.toml, including its
+      # [[tool.cibuildwheel.overrides]] entries (see cibuildwheel's docs,
+      # "Configuration overrides" - "environment variables will completely
+      # override any TOML configuration"), so a single shared CIBW_CONFIG_SETTINGS
+      # env var covering both tiers could never let the cp312-only
+      # wheel.py-api=cp312 setting take effect. Each step below sets its own
+      # CIBW_CONFIG_SETTINGS instead.
+      - name: Build legacy (classic ABI) wheels with cibuildwheel (Linux/macOS)
         if: matrix.platform != 'windows'
         env:
-          CIBW_BUILD: ${{ steps.cibw.outputs.build_selector }}
+          CIBW_BUILD: ${{ steps.cibw.outputs.legacy_selector }}
           CIBW_SKIP: "*-musllinux_*"
-          CIBW_ENABLE: "cpython-prerelease"
           CIBW_ARCHS: native
           CIBW_BUILD_FRONTEND: build
           CIBW_BEFORE_ALL_LINUX: >
@@ -148,11 +168,54 @@ jobs:
             PYOOMPH_GINAC_LIB_DIR=$PWD/prebuilt/GiNaC_static/install/lib
             PYOOMPH_CLN_INCLUDE_DIR=$PWD/prebuilt/GiNaC_static/install/include
             PYOOMPH_CLN_LIB_DIR=$PWD/prebuilt/GiNaC_static/install/lib
+            MACOSX_DEPLOYMENT_TARGET=10.13
           CIBW_CONFIG_SETTINGS: >
             cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF
             cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF
             cmake.define.PYOOMPH_USE_MPI=OFF
             cmake.define.PYOOMPH_PARANOID=OFF
+        uses: pypa/cibuildwheel@v4.1.0
+        with:
+          output-dir: wheelhouse
+
+      - name: Build Stable ABI wheel with cibuildwheel (Linux/macOS)
+        if: matrix.platform != 'windows'
+        env:
+          CIBW_BUILD: ${{ steps.cibw.outputs.stable_abi_selector }}
+          CIBW_SKIP: "*-musllinux_*"
+          CIBW_ARCHS: native
+          CIBW_BUILD_FRONTEND: build
+          CIBW_BEFORE_ALL_LINUX: >
+            bash -lc 'if command -v dnf >/dev/null 2>&1; then dnf -y install wget bzip2 patch;
+            elif command -v yum >/dev/null 2>&1; then yum -y install wget bzip2 patch;
+            elif command -v apk >/dev/null 2>&1; then apk add --no-cache wget bzip2 patch;
+            elif command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y wget bzip2 patch;
+            else echo "No supported package manager for before-all" >&2; exit 1; fi'
+          CIBW_BEFORE_TEST_LINUX: >
+            bash -lc 'if command -v dnf >/dev/null 2>&1; then dnf -y install mesa-libGLU libXcursor libglvnd-opengl libXinerama;
+            elif command -v yum >/dev/null 2>&1; then yum -y install mesa-libGLU libXcursor libglvnd-opengl libXinerama;
+            elif command -v apk >/dev/null 2>&1; then apk add --no-cache glu libxcursor libxinerama || apk add --no-cache mesa libxcursor libxinerama || true;
+            elif command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y libglu1-mesa libxcursor1 libopengl0 libxinerama1;
+            else echo "No supported package manager for before-test" >&2; exit 1; fi'
+          CIBW_ENVIRONMENT: >
+            PYOOMPH_GINAC_INCLUDE_DIR=$PWD/prebuilt/GiNaC_static/install/include
+            PYOOMPH_GINAC_LIB_DIR=$PWD/prebuilt/GiNaC_static/install/lib
+            PYOOMPH_CLN_INCLUDE_DIR=$PWD/prebuilt/GiNaC_static/install/include
+            PYOOMPH_CLN_LIB_DIR=$PWD/prebuilt/GiNaC_static/install/lib
+            MACOSX_DEPLOYMENT_TARGET=10.13
+          # wheel.py-api=cp312 tags the wheel cp312-abi3 instead of cp312-cp312,
+          # matching CMakeLists.txt's nanobind_add_module(... STABLE_ABI ...)
+          # (which compiles this build against Py_LIMITED_API=0x030C0000). Must
+          # only be set here, never for the legacy-tier step above: applying it
+          # to a non-STABLE_ABI (< 3.12) build would tag a classic, version-
+          # specific extension as if it were forward-ABI-compatible, which it
+          # is not, and would break at import time on any other interpreter.
+          CIBW_CONFIG_SETTINGS: >
+            cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF
+            cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF
+            cmake.define.PYOOMPH_USE_MPI=OFF
+            cmake.define.PYOOMPH_PARANOID=OFF
+            wheel.py-api=cp312
         uses: pypa/cibuildwheel@v4.1.0
         with:
           output-dir: wheelhouse
@@ -184,20 +247,30 @@ jobs:
 
           PREBUILT_WIN="$(cygpath -m "$PWD/prebuilt/GiNaC_static/install")"
 
-          BUILD_SELECTOR=""
-          for v in ${PYTHON_VERSIONS}; do
-            BUILD_SELECTOR="${BUILD_SELECTOR:+$BUILD_SELECTOR }cp${v//./}-win_amd64"
-          done
-
-          export CIBW_BUILD="${BUILD_SELECTOR}"
-          export CIBW_ENABLE="cpython-prerelease"
           export CIBW_ARCHS="AMD64"
           export CIBW_BUILD_FRONTEND="build"
           export CIBW_ENVIRONMENT_WINDOWS="CC=gcc CXX=g++ CXXFLAGS='-static-libgcc -static-libstdc++' LDFLAGS='-static-libgcc -static-libstdc++' PYOOMPH_GINAC_INCLUDE_DIR=${PREBUILT_WIN}/include PYOOMPH_GINAC_LIB_DIR=${PREBUILT_WIN}/lib PYOOMPH_CLN_INCLUDE_DIR=${PREBUILT_WIN}/include PYOOMPH_CLN_LIB_DIR=${PREBUILT_WIN}/lib"
           export CIBW_REPAIR_WHEEL_COMMAND_WINDOWS="delvewheel repair --add-path C:/msys64/ucrt64/bin -w {dest_dir} {wheel}"
-          export CIBW_CONFIG_SETTINGS="cmake.args=-GUnix\ Makefiles cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF cmake.define.PYOOMPH_USE_MPI=OFF cmake.define.PYOOMPH_PARANOID=OFF"
 
           mkdir -p wheelhouse
+
+          # Two separate cibuildwheel invocations, not one combined CIBW_BUILD
+          # selector - as in the Linux/macOS steps above, CIBW_CONFIG_SETTINGS
+          # (an env var) always wins over pyproject.toml's
+          # [[tool.cibuildwheel.overrides]], so the cp312-only
+          # wheel.py-api=cp312 setting needs its own env var scope, set only
+          # for the Stable ABI build below - never for the legacy one.
+
+          LEGACY_SELECTOR=""
+          for v in ${PYTHON_VERSIONS_LEGACY}; do
+            LEGACY_SELECTOR="${LEGACY_SELECTOR:+$LEGACY_SELECTOR }cp${v//./}-win_amd64"
+          done
+          export CIBW_BUILD="${LEGACY_SELECTOR}"
+          export CIBW_CONFIG_SETTINGS="cmake.args=-GUnix\ Makefiles cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF cmake.define.PYOOMPH_USE_MPI=OFF cmake.define.PYOOMPH_PARANOID=OFF"
+          python -m cibuildwheel --output-dir wheelhouse
+
+          export CIBW_BUILD="cp${PYTHON_STABLE_ABI_BASE//./}-win_amd64"
+          export CIBW_CONFIG_SETTINGS="cmake.args=-GUnix\ Makefiles cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF cmake.define.PYOOMPH_USE_MPI=OFF cmake.define.PYOOMPH_PARANOID=OFF wheel.py-api=cp312"
           python -m cibuildwheel --output-dir wheelhouse
 
       - name: Verify NO_MPI marker in wheel
@@ -225,6 +298,27 @@ jobs:
               sys.exit(1)
 
           print("NO_MPI marker verified in", len(wheels), "wheel(s)")
+
+          # Sanity-check the Stable ABI tagging (see CMakeLists.txt's
+          # nanobind_add_module(... STABLE_ABI ...) and pyproject.toml's
+          # wheel.py-api=cp312 config-setting, applied only to the cp312
+          # build): the cp312 wheel must be tagged "abi3", and no other
+          # (legacy, non-STABLE_ABI) wheel may claim that tag - it would be
+          # lying about being forward-ABI-compatible.
+          bad_tags = []
+          for wheel in wheels:
+              python_tag, abi_tag = wheel.stem.split("-")[-3:-1]
+              if python_tag == "cp312":
+                  if abi_tag != "abi3":
+                      bad_tags.append(f"{wheel.name}: expected abi3 tag, got {abi_tag!r}")
+              elif abi_tag == "abi3":
+                  bad_tags.append(f"{wheel.name}: unexpected abi3 tag on a non-cp312 wheel")
+
+          if bad_tags:
+              print("Stable ABI tagging looks wrong:", "; ".join(bad_tags), file=sys.stderr)
+              sys.exit(1)
+
+          print("Stable ABI tagging verified for", len(wheels), "wheel(s)")
           PY
 
       - name: Upload built wheel

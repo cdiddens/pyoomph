@@ -207,10 +207,11 @@ namespace pyoomph
             else if (level == min_ref)
             {
               unsigned n_sons = tree_pt->nsons();
-              oomph::Vector<oomph::Tree *> backed_up_sons(n_sons);
+              oomph::Vector<oomph::Tree *> backed_up_sons;
+              backed_up_sons.reserve(n_sons);
               for (unsigned i_son = 0; i_son < n_sons; i_son++)
               {
-                backed_up_sons[i_son] = tree_pt->son_pt(i_son);
+                backed_up_sons.push_back(tree_pt->son_pt(i_son));
               }
               DynamicQuadTreeRoot *tree_root_pt = new DynamicQuadTreeRoot(el_pt);
 

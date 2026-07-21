@@ -32,7 +32,7 @@ Reboot if prompted, open the "Ubuntu" app, then inside it install pyoomph as on 
 
 ```bash
 sudo apt update
-sudo apt install gcc libopenmpi-dev pybind11-dev flex bison
+sudo apt install gcc libopenmpi-dev flex bison
 python3 -m pip install --upgrade pyoomph
 ```
 
@@ -92,7 +92,7 @@ First, you have to make sure to have installed all dependencies, including some 
 > sudo apt-get install libopenmpi-dev build-essential cmake python3-dev pkg-config wget bzip2 patch
 
 On other Linux distributions, other package manager like `yum` or `pacman` can be used to install the same libraries and headers.
-Also install `scikit_build_core`, `pybind11` and `pybind11-stubgen`, either via the system's package manager or via `pip`
+Also install `scikit_build_core` and `nanobind`, either via the system's package manager or via `pip`
 
 To obtain an editable build with MPI, do
 
@@ -112,7 +112,7 @@ Besides Xcode, you must install a few third-party tools. This can be done by e.g
 If you run in Rosetta (see above), restart your (Rosatta) terminal afterwards.
 Install required python modules via
 
-> python3 -m pip install pybind11 pybind11-stubgen scikit_build_core
+> python3 -m pip install nanobind scikit_build_core
 
 To obtain an editable build with MPI, do
 

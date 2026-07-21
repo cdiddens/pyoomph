@@ -2,17 +2,18 @@
 """Generate .pyi type stubs for the pyoomph._core extension module.
 
 This reproduces what the old top-level build script did with
-`pybind11-stubgen` + `src/pybind/patch_stubs.py`, but is invoked as a
+`pybind11-stubgen` + `src/nanobind/patch_stubs.py`, but is invoked as a
 POST_BUILD step on the `_core` CMake target so it happens automatically as
 part of `./configure && make` / `pip install .` via scikit-build-core.
+Since the switch to nanobind, stub generation uses nanobind's own bundled
+`python -m nanobind.stubgen` (always available - nanobind is a hard build
+dependency, unlike the old optional `pybind11-stubgen`).
 
 Design goals, matching the old script's spirit:
   - Purely a developer convenience (IDE completion) - never required to
     actually build/install/import pyoomph.
-  - Missing `pybind11-stubgen`, or any failure while generating/patching
-    stubs, is reported to stderr but always exits 0 so it can never break
-    an actual wheel build (e.g. in a minimal manylinux/cibuildwheel image
-    that doesn't have pybind11-stubgen installed).
+  - Any failure while generating/patching stubs is reported to stderr but
+    always exits 0 so it can never break an actual wheel build.
 
 Usage (called from CMakeLists.txt):
     generate_stubs.py --module-dir DIR --module-name _core \
@@ -63,11 +64,10 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        import pybind11_stubgen  # noqa: F401
+        import nanobind.stubgen  # noqa: F401
     except ImportError:
-        print("pybind11-stubgen not installed - skipping .pyi stub generation "
-              "for pyoomph._core (pip install pybind11-stubgen to enable "
-              "IDE completion stubs)", file=sys.stderr)
+        print("nanobind.stubgen not importable - skipping .pyi stub generation "
+              "for pyoomph._core", file=sys.stderr)
         return 0
 
     stage_dir = Path(args.stage_dir)
@@ -76,34 +76,26 @@ def main() -> int:
     env = dict(os.environ)
     env["PYTHONPATH"] = args.module_dir + os.pathsep + env.get("PYTHONPATH", "")
 
-    # pybind11-stubgen's CLI has changed across versions - some accept
-    # --no-setup-py, others reject it. Try with it first (stderr suppressed,
-    # like the old `2>/dev/null`), and fall back to without it, matching the
-    # old bash script's two-attempt logic.
-    base_cmd = [args.python, "-m", "pybind11_stubgen", "-o", str(stage_dir), args.module_name]
+    # nanobind.stubgen always writes a single flat "<module>.pyi" file (no
+    # "<module>/__init__.pyi" package-directory form the way pybind11-stubgen
+    # could produce for modules with submodules).
+    # -P/--include-private: pyoomph's Python layer calls a number of leading-underscore
+    # methods directly (e.g. _set_current_codegen, _resolve_based_on_domain_name), which
+    # nanobind.stubgen omits by default (unlike the old pybind11-stubgen, which always
+    # included them) - keep them in the stub so editors/type-checkers can resolve them.
+    base_cmd = [args.python, "-m", "nanobind.stubgen",
+                "-m", args.module_name, "-O", str(stage_dir), "-P"]
 
-    result = run(base_cmd + ["--no-setup-py"], env=env,
-                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    result = run(base_cmd, env=env)
     if result.returncode != 0:
-        result = run(base_cmd, env=env)
-        if result.returncode != 0:
-            print("Error in stub generation", file=sys.stderr)
-            return 0
-
-    # A fallback run without --no-setup-py may drop a setup.py we don't want
-    # installed into the wheel.
-    stray_setup_py = stage_dir / "setup.py"
-    if stray_setup_py.exists():
-        stray_setup_py.unlink()
+        print("Error in stub generation", file=sys.stderr)
+        return 0
 
     flat_stub = stage_dir / f"{args.module_name}.pyi"
-    pkg_init = stage_dir / args.module_name / "__init__.pyi"
-    if pkg_init.exists():
-        target = pkg_init
-    elif flat_stub.exists():
+    if flat_stub.exists():
         target = flat_stub
     else:
-        print(f"pybind11-stubgen did not produce a stub for "
+        print(f"nanobind.stubgen did not produce a stub for "
               f"{args.module_name!r} - skipping", file=sys.stderr)
         return 0
 

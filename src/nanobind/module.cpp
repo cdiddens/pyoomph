@@ -20,36 +20,36 @@ The main author may be contacted at c.diddens@utwente.nl
 ================================================================================*/
 
 
-#include <pybind11/pybind11.h>
+#include <nanobind/nanobind.h>
 
-namespace py = pybind11;
+namespace nb = nanobind;
 
-// "PyDecl_*" functions (implemented in the correspondingly named files under src/pybind/) only
-// call py::class_<...>(m, "Name") to register a class's Python *name*, without yet adding any of
+// "PyDecl_*" functions (implemented in the correspondingly named files under src/nanobind/) only
+// call nb::class_<...>(m, "Name") to register a class's Python *name*, without yet adding any of
 // its methods/properties. This lets classes from different translation units refer to each
 // other's Python types (e.g. as a function argument or return type) regardless of registration
 // order, as long as the referenced class has at least been declared before it is first used.
-void PyDecl_Mesh(py::module &m);
-void PyDecl_CodeGen(py::module &m);
-void PyDecl_Problem(py::module &m);
+void PyDecl_Mesh(nb::module_ &m);
+void PyDecl_CodeGen(nb::module_ &m);
+void PyDecl_Problem(nb::module_ &m);
 
 // "PyReg_*" functions do the actual binding work: adding methods, properties, operators and
 // free functions to the module (and to the classes declared above via PyDecl_*).
-void PyReg_Problem(py::module &m);
-void PyReg_TimeStepper(py::module &m);
-void PyReg_CodeGen(py::module &m);
-void PyReg_Expressions(py::module &m);
-void PyReg_Mesh(py::module &m);
-void PyReg_Solvers(py::module &m);
-void PyReg_GeomObjects(py::module &m);
-void PyReg_Vector(py::module &m);
+void PyReg_Problem(nb::module_ &m);
+void PyReg_TimeStepper(nb::module_ &m);
+void PyReg_CodeGen(nb::module_ &m);
+void PyReg_Expressions(nb::module_ &m);
+void PyReg_Mesh(nb::module_ &m);
+void PyReg_Solvers(nb::module_ &m);
+void PyReg_GeomObjects(nb::module_ &m);
+void PyReg_Vector(nb::module_ &m);
 
 // Compiled and installed as pyoomph/_pyoomph_core*.so, i.e. importable as pyoomph._pyoomph_core.
 #define PYOOMPH_MODULE_NAME _pyoomph_core
 
-PYBIND11_MODULE(PYOOMPH_MODULE_NAME, m)
+NB_MODULE(PYOOMPH_MODULE_NAME, m)
 {
-    m.doc() = "This module exposes the compiled C++ core of pyoomph via pybind11 to python. Here, the relevant C++ base classes and further low-level functions can be found. Usually, it is not necessary for a user to use these functions directly.";
+    m.doc() = "This module exposes the compiled C++ core of pyoomph via nanobind to python. Here, the relevant C++ base classes and further low-level functions can be found. Usually, it is not necessary for a user to use these functions directly.";
 
     // Declaration phase: register the bare Python types first, before any of them are used as
     // parameter/return types by the PyReg_* calls below.

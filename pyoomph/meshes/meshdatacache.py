@@ -675,12 +675,12 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
 
         # Getting the length
         L=self.default_length
-        if base.mesh._problem.get_last_eigenmodes_k() is not None:
+        if base.mesh.get_problem().get_last_eigenmodes_k() is not None:
             if self.use_k_for_length:                
                 kcommon=None
                 for eigenindex,prefixPair in base._additional_eigendata.items(): #type:ignore
-                    if eigenindex<len(base.mesh._problem.get_last_eigenmodes_k()):
-                        k=base.mesh._problem.get_last_eigenmodes_k()[eigenindex] #type:ignore
+                    if eigenindex<len(base.mesh.get_problem().get_last_eigenmodes_k()):
+                        k=base.mesh.get_problem().get_last_eigenmodes_k()[eigenindex] #type:ignore
                         if kcommon is None:
                             kcommon=k
                         elif kcommon!=k:
@@ -741,7 +741,7 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
 
 
         completed_eigen_vector_fields=set() #type:ignore
-        if self.apply_k_mode_expansion and base.mesh._problem.get_last_eigenmodes_k() is not None: #type:ignore
+        if self.apply_k_mode_expansion and base.mesh.get_problem().get_last_eigenmodes_k() is not None: #type:ignore
             for eigenindex,prefixPair in base._additional_eigendata.items(): #type:ignore
                 prefixRe=prefixPair[0]
                 prefixIm = prefixPair[1]
@@ -758,7 +758,7 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
                             new_nodal_field_inds[name] = newindex
                             newindex += 1
                         new_nodal_field_inds[fnRes]=max(new_nodal_field_inds.values()) + 1
-                        k=base.mesh._problem.get_last_eigenmodes_k()[eigenindex] #type:ignore
+                        k=base.mesh.get_problem().get_last_eigenmodes_k()[eigenindex] #type:ignore
                         phis=numpy.linspace(0,2*numpy.pi*self.numperiods/k,n_segments+1,endpoint=True)
                         
                         
@@ -793,7 +793,7 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
                             elif componame.endswith("_normal"):
                                 phi_index=cindex
 
-                        k=base.mesh._problem.get_last_eigenmodes_k()[eigenindex] #type:ignore
+                        k=base.mesh.get_problem().get_last_eigenmodes_k()[eigenindex] #type:ignore
                         if r_index is not None and phi_index is not None:
                             #print("RINDEX",r_index,phi_index)
                             #print("K",eigenindex,k)
@@ -1027,7 +1027,7 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
             assert base.D0_data.shape[0]==len(elemental_phis)
 
         # Rotate DL and D0 with m if necessary:        
-        if self.apply_k_mode_expansion and base.mesh._problem.get_last_eigenmodes_k() is not None: #type:ignore
+        if self.apply_k_mode_expansion and base.mesh.get_problem().get_last_eigenmodes_k() is not None: #type:ignore
             remove_indices=[]
             remove_indices_DL=[]
             remove_indices_D0=[]
@@ -1036,7 +1036,7 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
                 prefixRe=prefixPair[0]
                 prefixIm = prefixPair[1]
                 prefixRes = prefixPair[2]
-                k=base.mesh._problem.get_last_eigenmodes_k()[eigenindex] #type:ignore
+                k=base.mesh.get_problem().get_last_eigenmodes_k()[eigenindex] #type:ignore
                 cs=numpy.cos(k*elemental_phis)
                 sn=numpy.sin(k*elemental_phis)
                 for dgfieldname,dgfieldind in base.elemental_field_inds.items():
@@ -1148,7 +1148,7 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
                 rev_vector_fields[c] = a
 
         completed_eigen_vector_fields=set() #type:ignore
-        if self.rotate_eigendata_with_mode_m and base.mesh._problem.get_last_eigenmodes_m() is not None: #type:ignore
+        if self.rotate_eigendata_with_mode_m and base.mesh.get_problem().get_last_eigenmodes_m() is not None: #type:ignore
             for eigenindex,prefixPair in base._additional_eigendata.items(): #type:ignore
                 prefixRe=prefixPair[0]
                 prefixIm = prefixPair[1]
@@ -1165,7 +1165,7 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
                             new_nodal_field_inds[name] = newindex
                             newindex += 1
                         new_nodal_field_inds[fnRes]=max(new_nodal_field_inds.values()) + 1
-                        m=base.mesh._problem.get_last_eigenmodes_m()[eigenindex] #type:ignore
+                        m=base.mesh.get_problem().get_last_eigenmodes_m()[eigenindex] #type:ignore
                         field_operators[fnRes] = [lambda RealPart,ImagPart : numpy.outer(numpy.cos(m*phis), RealPart).flatten() + numpy.outer(numpy.sin(m*phis), ImagPart).flatten(), fnRe,fnIm] #type:ignore
 
                         if fnRe in rev_vector_fields:
@@ -1491,7 +1491,7 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
             assert base.D0_data.shape[0]==len(elemental_phis)
 
         # Rotate DL and D0 with m if necessary:        
-        if self.rotate_eigendata_with_mode_m and base.mesh._problem.get_last_eigenmodes_m() is not None: #type:ignore
+        if self.rotate_eigendata_with_mode_m and base.mesh.get_problem().get_last_eigenmodes_m() is not None: #type:ignore
             remove_indices=[]
             remove_indices_DL=[]
             remove_indices_D0=[]
@@ -1500,7 +1500,7 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
                 prefixRe=prefixPair[0]
                 prefixIm = prefixPair[1]
                 prefixRes = prefixPair[2]
-                m=base.mesh._problem.get_last_eigenmodes_m()[eigenindex] #type:ignore
+                m=base.mesh.get_problem().get_last_eigenmodes_m()[eigenindex] #type:ignore
                 cs=numpy.cos(m*elemental_phis)
                 sn=numpy.sin(m*elemental_phis)
                 for dgfieldname,dgfieldind in base.elemental_field_inds.items():

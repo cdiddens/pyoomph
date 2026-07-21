@@ -25,8 +25,10 @@
 #
 # ========================================================================
  
+import abc
 import inspect
 import os.path
+import weakref
 
 from ..generic.mpi import mpi_barrier
 
@@ -57,6 +59,12 @@ Element=_pyoomph.OomphGeneralisedElement
 AnySpatialMesh = Union["InterfaceMesh", "MeshFromTemplate1d",
                        "MeshFromTemplate2d", "MeshFromTemplate3d"]
 AnyMesh = Union[AnySpatialMesh, "ODEStorageMesh"]
+# Union of the concrete "mesh built from a MeshTemplate" classes. Used in type annotations
+# in place of MeshFromTemplateBase: nanobind does not support combining a bound C++ base
+# (e.g. _pyoomph.TemplatedMeshBase1d) with an additional Python base in the same class, so
+# MeshFromTemplateBase is no longer a real (nominal) base of MeshFromTemplate1d/2d/3d -- see
+# the _install_mixin() docstring below for how shared behavior and isinstance() still work.
+BulkTemplateMesh = Union["MeshFromTemplate1d", "MeshFromTemplate2d", "MeshFromTemplate3d"]
 
 
 def assert_spatial_mesh(mesh: Optional[Union[AnyMesh, "MeshFromTemplateBase"]]) -> AnySpatialMesh:
@@ -70,9 +78,40 @@ def assert_spatial_mesh(mesh: Optional[Union[AnyMesh, "MeshFromTemplateBase"]]) 
         raise RuntimeError("Should not end up here")
 
 
-class BaseMesh:
+def _install_mixin(target_cls: type, mixin_cls: type) -> type:
+    """
+    Copies every method/attribute defined anywhere in mixin_cls's MRO onto target_cls
+    (without overriding anything target_cls already defines itself), and registers
+    target_cls as a virtual subclass of every ABC found in mixin_cls's MRO.
+
+    This replaces plain Python multiple inheritance (e.g. ``class MeshFromTemplate1d(
+    _pyoomph.TemplatedMeshBase1d, MeshFromTemplateBase)``) for classes that also derive
+    from a nanobind-bound C++ type: nanobind only supports a single linear chain of C++
+    bases and does not support combining a bound base with an additional Python base in
+    the same class. Copying the mixin's methods directly into target_cls's __dict__
+    gives every instance the same attribute lookup result as real inheritance would,
+    without adding mixin_cls to target_cls.__bases__. The ABC registration keeps
+    isinstance(x, mixin_cls) (used throughout the codebase, e.g. to recognize any
+    MeshFromTemplate1d/2d/3d instance as a MeshFromTemplateBase) working, even though
+    mixin_cls is no longer a real ancestor. Static type checkers do not see this virtual
+    relationship, so use a Union type alias (e.g. BulkTemplateMesh) instead of mixin_cls
+    itself in type annotations for values that are actually instances of target_cls.
+    """
+    for base in reversed(mixin_cls.__mro__):
+        if base in (object, abc.ABC):
+            continue
+        for name, value in vars(base).items():
+            if name in ("__dict__", "__weakref__", "__module__", "__doc__"):
+                continue
+            if name not in target_cls.__dict__:
+                setattr(target_cls, name, value)
+        if isinstance(base, abc.ABCMeta):
+            base.register(target_cls)
+    return target_cls
+
+
+class BaseMesh(abc.ABC):
     def __init__(self):
-        super(BaseMesh, self).__init__()
         # self._interfacial_elements=dict()
         self._interfacemeshes: Dict[str, "InterfaceMesh"] = dict()
         self._outputscales = {}
@@ -81,7 +120,6 @@ class BaseMesh:
         # Tracer particles -> name to tracer instance
         self._tracers: Dict[str, _pyoomph.TracerCollection] = {}
         self._codegen: Optional["FiniteElementCodeGenerator"]
-        self._problem: "Problem"
         self._eqtree: "EquationTree"
 
     def get_code_gen(self) -> "FiniteElementCodeGenerator":
@@ -269,7 +307,7 @@ class BaseMesh:
         for l in lst:
             res[l] = self._evaluate_integral_function(l)
         args: Dict[str, ExpressionOrNum] = {k: v for k, v in res.items()}
-        args["time"] = self._problem.get_current_time()
+        args["time"] = self.get_problem().get_current_time()
         remaining: Set[str] = set(deps.keys())
         while len(remaining) > 0:
             torem: Set[str] = set()
@@ -346,7 +384,11 @@ class MeshTemplateOppositeInterfaceConnection:
     def __init__(self, sideA: str, sideB: str, problem:"Problem", matchfunc: Optional[Callable[[Sequence[float], Sequence[float]], float]] = None):
         self._sideA = sideA
         self._sideB = sideB
-        self._problem=problem
+        # Stored as a weakref, not a strong reference: this connection is owned (via
+        # MeshTemplate._opposite_interface_connections) by a MeshTemplate that is itself
+        # kept alive by the Problem's nb::keep_alive of its meshes - a strong back-reference
+        # here would form the same kind of uncollectible cycle fixed for meshes/codegens.
+        self._problem_wr=weakref.ref(problem)
         if matchfunc:
             self._match_pos_func = matchfunc
             self._use_kdtree = False
@@ -356,6 +398,12 @@ class MeshTemplateOppositeInterfaceConnection:
 
     def __str__(self) -> str:
         return "MeshTemplateOppositeInterfaceConnection("+str(self._sideA)+","+str(self._sideB)+")"
+
+    @property
+    def _problem(self)->"Problem":
+        p=self._problem_wr()
+        assert p is not None, "The Problem this connection belonged to has already been destroyed"
+        return p
 
     def _connect_opposite_interfaces(self, eqtree_root: "EquationTree"):
         sideA = eqtree_root.get_by_path(self._sideA)
@@ -469,7 +517,6 @@ class MeshTemplate(_pyoomph.MeshTemplate):
     def __init__(self):
         super(MeshTemplate, self).__init__()
         self._domains: Dict[str, _pyoomph.MeshTemplateElementCollection] = {}
-        self._problem = None
         self._geometry_defined = False
         #: The minimum permitted error for the spatial error estimator. If ``None``, we use the value from the :py:class:`~pyoomph.generic.problem.Problem` object.
         self.min_permitted_error = None
@@ -500,8 +547,8 @@ class MeshTemplate(_pyoomph.MeshTemplate):
         self._macrobounds = []
 
     def get_problem(self) -> "Problem":
-        return self._problem
-    
+        return self._get_problem() #type:ignore
+
     def set_boundary_as_interior(self, *args: str):
         for name in args:
             self._interior_boundaries.add(name)
@@ -535,8 +582,7 @@ class MeshTemplate(_pyoomph.MeshTemplate):
             fffound_mshfile = os.path.join(statedir, found_mshfile)
             newtempl = gmsh.GmshTemplate(fffound_mshfile)
             newtempl.remesher = self.remesher
-            assert self._problem is not None
-            newtempl._do_define_geometry(self._problem)
+            newtempl._do_define_geometry(self.get_problem())
             self._template_override = newtempl
             newtempl.get_template()._meshfile = fffound_mshfile
             # self._meshfile=found_mshfile
@@ -558,7 +604,7 @@ class MeshTemplate(_pyoomph.MeshTemplate):
 
     def add_opposite_interface_connection(self, sideA: str, sideB: str, matchfunc: Optional[Callable[[Sequence[float], Sequence[float]], float]] = None):
         self._opposite_interface_connections.append(
-            MeshTemplateOppositeInterfaceConnection(sideA, sideB, self._problem, matchfunc))
+            MeshTemplateOppositeInterfaceConnection(sideA, sideB, self.get_problem(), matchfunc))
 
     def _connect_opposite_interfaces(self, eqtree_root: "EquationTree"):
         for conn in self._opposite_interface_connections:
@@ -614,7 +660,6 @@ class MeshTemplate(_pyoomph.MeshTemplate):
     def _do_define_geometry(self, problem: "Problem"):
         if not self._geometry_defined:
             self._geometry_defined = True
-            self._problem = problem
             self._set_problem(problem)
             self.define_geometry()
             if self.auto_find_opposite_interface_connections:
@@ -658,11 +703,9 @@ class MeshTemplate(_pyoomph.MeshTemplate):
             return resL
         res: float
         if isinstance(a, float) or isinstance(a, int) or isinstance(a,_pyoomph.GiNaC_GlobalParam) or isinstance(a,numpy.floating) or isinstance(a,numpy.integer):
-            assert self._problem is not None
-            res = (float(a / self._problem.get_scaling("spatial")))
+            res = (float(a / self.get_problem().get_scaling("spatial")))
         elif isinstance(a, _pyoomph.Expression):  # type:ignore
-            assert self._problem is not None
-            res = ((a / self._problem.get_scaling("spatial")).float_value())        
+            res = ((a / self.get_problem().get_scaling("spatial")).float_value())
         else:
             raise ValueError("Strange spatial argument for a mesh:"+str(a)+" of type "+str(type(a)))
         return res
@@ -720,13 +763,15 @@ class MeshTemplate(_pyoomph.MeshTemplate):
 
 
 class MeshFromTemplateBase(BaseMesh):
-    def __init__(self, problem: "Problem", templatemesh: MeshTemplate, domainname: str, eqtree: "EquationTree", previous_mesh: Optional["MeshFromTemplateBase"] = None):
-        super(MeshFromTemplateBase, self).__init__()
+    def __init__(self, problem: "Problem", templatemesh: MeshTemplate, domainname: str, eqtree: "EquationTree", previous_mesh: Optional["BulkTemplateMesh"] = None):
+        # Not super().__init__(): self is a MeshFromTemplate1d/2d/3d instance, which (due to the
+        # nanobind single-inheritance restriction, see _install_mixin) is not a real subclass of
+        # MeshFromTemplateBase/BaseMesh, so super(MeshFromTemplateBase, self) would fail its MRO check.
+        BaseMesh.__init__(self)
 
         assert isinstance(
             self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
 
-        self._problem = problem
         self._templatemesh: MeshTemplate = templatemesh
         self._name = domainname
         self._eqtree: "EquationTree" = eqtree
@@ -750,13 +795,13 @@ class MeshFromTemplateBase(BaseMesh):
 
         if previous_mesh is None:
             self.min_permitted_error = a_or_b(
-                templatemesh.min_permitted_error, self._problem.min_permitted_error)
+                templatemesh.min_permitted_error, problem.min_permitted_error)
             self.max_permitted_error = a_or_b(
-                templatemesh.max_permitted_error, self._problem.max_permitted_error)
+                templatemesh.max_permitted_error, problem.max_permitted_error)
             self.max_refinement_level = a_or_b(
-                templatemesh.max_refinement_level, self._problem.max_refinement_level)
+                templatemesh.max_refinement_level, problem.max_refinement_level)
             self.min_refinement_level = a_or_b(
-                templatemesh.min_refinement_level, self._problem.min_refinement_level)
+                templatemesh.min_refinement_level, problem.min_refinement_level)
         else:
             self.min_permitted_error = previous_mesh.min_permitted_error
             self.max_permitted_error = previous_mesh.max_permitted_error
@@ -788,11 +833,10 @@ class MeshFromTemplateBase(BaseMesh):
                 pinter = previous_mesh.get_mesh(n)
                 assert isinstance(pinter, InterfaceMesh)
             self._interfacemeshes[n] = InterfaceMesh(
-                self._problem, self, n, eqtree, previous_mesh=pinter)
+                problem, self, n, eqtree, previous_mesh=pinter)
 
     def get_problem(self) -> "Problem":
-        assert self._problem is not None
-        return self._problem
+        return self._get_problem() #type:ignore
 
     def get_bulk_mesh(self):
         return None
@@ -927,7 +971,7 @@ class MeshFromTemplateBase(BaseMesh):
                     raise RuntimeError(
                         "Cannot add one interface element instance to different bulk equations. Create a new interface element instance instead")
             else:
-                icg._set_problem(self._problem)
+                icg._set_problem(self.get_problem())
                 assert self._codegen
                 icg._set_nodal_dimension(self._codegen.get_nodal_dimension())
                 icg._set_lagrangian_dimension(
@@ -957,7 +1001,7 @@ class MeshFromTemplateBase(BaseMesh):
                             "Cannot add one interface element instance to different bulk equations. Create a new interface element instance instead. Boundary "+b)
                 else:
                     assert self._codegen is not None
-                    icg._set_problem(self._problem)
+                    icg._set_problem(self.get_problem())
                     icg._set_nodal_dimension(
                         self._codegen.get_nodal_dimension())
                     icg._set_lagrangian_dimension(
@@ -966,14 +1010,17 @@ class MeshFromTemplateBase(BaseMesh):
                     icg._do_define_fields(self._codegen.dimension - 2)
 
     def _compile_bulk_equations(self) -> _pyoomph.DynamicBulkElementInstance:
-        assert self._problem is not None
+        problem = self.get_problem()
+        assert problem is not None
         assert self._codegen is not None
         eqs = self._eqtree.get_equations()
-        self._codegen._set_problem(self._problem)
+        self._codegen._set_problem(problem)
         mesh = self._eqtree._mesh
         if mesh is not None:
-            assert isinstance(
-                mesh, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
+            # isinstance against the ABC (rather than the 3 concrete classes) so mypy still
+            # knows about MeshFromTemplateBase's members (see _install_mixin); equivalent at
+            # runtime since only MeshFromTemplate1d/2d/3d are registered against it.
+            assert isinstance(mesh, MeshFromTemplateBase)
             templ = mesh._templatemesh
             # Get point to evaluate the IC and DBC to check whether it is a numeric value (Can prevent problems if somethink like 1/x is used)
             if templ is not None:
@@ -981,15 +1028,15 @@ class MeshFromTemplateBase(BaseMesh):
                 dom = templ.get_domain(self._name)
                 refpos = dom._get_reference_position_for_IC_and_DBC(set())
                 refnorm=[0.1,0.1,0.1] # TODO: Get a right reference normal
-                t = self._problem.time_pt().time()
+                t = problem.time_pt().time()
                 self._codegen._set_reference_point_for_IC_and_DBC(
                     refpos[0], refpos[1], refpos[2], t,refnorm[0],refnorm[1],refnorm[2])
         self._eqtree._equations._set_current_codegen(self._eqtree._codegen)
-        #self._problem.before_compile_equations(self._eqtree._equations)
+        #problem.before_compile_equations(self._eqtree._equations)
         eqs.before_finalization(self._codegen)
         self._codegen._finalise()
-        eqs.before_compilation(self._codegen)        
-        self._codegen._code = self._problem.compile_bulk_element_code(
+        eqs.before_compilation(self._codegen)
+        self._codegen._code = problem.compile_bulk_element_code(
             self._codegen, assert_spatial_mesh(self), self._name)
         self._templatemesh.get_domain(
             self._name).set_element_code(self._codegen.get_code())
@@ -1145,11 +1192,24 @@ class MeshFromTemplateBase(BaseMesh):
         return self._evaluate_extremum_wrapper(name,-1,dimensional=dimensional,as_float=as_float,return_x=return_x)
 
 
-class MeshFromTemplate1d(_pyoomph.TemplatedMeshBase1d, MeshFromTemplateBase):
-    def __init__(self, problem: "Problem", templatemesh: MeshTemplate, domainname: str, elementtype: "EquationTree", previous_mesh: Optional[MeshFromTemplateBase] = None):
+class MeshFromTemplate1d(_pyoomph.TemplatedMeshBase1d):
+    if TYPE_CHECKING:
+        # See the identical block on InterfaceMesh: declarations only, supplied at runtime by
+        # _install_mixin(MeshFromTemplate1d, MeshFromTemplateBase) below.
+        def get_full_name(self) -> str: ...
+        @overload
+        def boundary_elements(self, b: str, with_directions: Literal[False] = ...) -> Iterator[_pyoomph.OomphGeneralisedElement]: ...
+        @overload
+        def boundary_elements(self, b: str, with_directions: Literal[True]) -> Iterator[Tuple[_pyoomph.OomphGeneralisedElement, int]]: ...
+        def boundary_elements(self, b: str, with_directions: bool = ...) -> Union[Iterator[_pyoomph.OomphGeneralisedElement], Iterator[Tuple[_pyoomph.OomphGeneralisedElement, int]]]: ...
+
+    def __init__(self, problem: "Problem", templatemesh: MeshTemplate, domainname: str, elementtype: "EquationTree", previous_mesh: Optional[BulkTemplateMesh] = None):
         super(MeshFromTemplate1d, self).__init__()
+        # self is not nominally a MeshFromTemplateBase (see _install_mixin); the explicit
+        # unbound call still works fine at runtime since MeshFromTemplateBase.__init__ only
+        # duck-types on self's attributes.
         MeshFromTemplateBase.__init__(
-            self, problem, templatemesh, domainname, elementtype, previous_mesh=previous_mesh)
+            self, problem, templatemesh, domainname, elementtype, previous_mesh=previous_mesh)  # type: ignore[arg-type]
 
     def get_dimension(self) -> int:
         return 1
@@ -1161,11 +1221,24 @@ class MeshFromTemplate1d(_pyoomph.TemplatedMeshBase1d, MeshFromTemplateBase):
         return pr
 
 
-class MeshFromTemplate2d(_pyoomph.TemplatedMeshBase2d, MeshFromTemplateBase):
-    def __init__(self, problem: "Problem", templatemesh: MeshTemplate, domainname: str, elementtype: "EquationTree", previous_mesh: Optional[MeshFromTemplateBase] = None):
+_install_mixin(MeshFromTemplate1d, MeshFromTemplateBase)
+
+
+class MeshFromTemplate2d(_pyoomph.TemplatedMeshBase2d):
+    if TYPE_CHECKING:
+        # See the identical block on InterfaceMesh: declarations only, supplied at runtime by
+        # _install_mixin(MeshFromTemplate2d, MeshFromTemplateBase) below.
+        def get_full_name(self) -> str: ...
+        @overload
+        def boundary_elements(self, b: str, with_directions: Literal[False] = ...) -> Iterator[_pyoomph.OomphGeneralisedElement]: ...
+        @overload
+        def boundary_elements(self, b: str, with_directions: Literal[True]) -> Iterator[Tuple[_pyoomph.OomphGeneralisedElement, int]]: ...
+        def boundary_elements(self, b: str, with_directions: bool = ...) -> Union[Iterator[_pyoomph.OomphGeneralisedElement], Iterator[Tuple[_pyoomph.OomphGeneralisedElement, int]]]: ...
+
+    def __init__(self, problem: "Problem", templatemesh: MeshTemplate, domainname: str, elementtype: "EquationTree", previous_mesh: Optional[BulkTemplateMesh] = None):
         super(MeshFromTemplate2d, self).__init__()
         MeshFromTemplateBase.__init__(
-            self, problem, templatemesh, domainname, elementtype, previous_mesh=previous_mesh)
+            self, problem, templatemesh, domainname, elementtype, previous_mesh=previous_mesh)  # type: ignore[arg-type]
 
     def get_dimension(self)->int:
         return 2
@@ -1177,11 +1250,24 @@ class MeshFromTemplate2d(_pyoomph.TemplatedMeshBase2d, MeshFromTemplateBase):
         return pr
 
 
-class MeshFromTemplate3d(_pyoomph.TemplatedMeshBase3d, MeshFromTemplateBase):
-    def __init__(self, problem: "Problem", templatemesh: MeshTemplate, domainname: str, elementtype: "EquationTree", previous_mesh: Optional[MeshFromTemplateBase] = None):
+_install_mixin(MeshFromTemplate2d, MeshFromTemplateBase)
+
+
+class MeshFromTemplate3d(_pyoomph.TemplatedMeshBase3d):
+    if TYPE_CHECKING:
+        # See the identical block on InterfaceMesh: declarations only, supplied at runtime by
+        # _install_mixin(MeshFromTemplate3d, MeshFromTemplateBase) below.
+        def get_full_name(self) -> str: ...
+        @overload
+        def boundary_elements(self, b: str, with_directions: Literal[False] = ...) -> Iterator[_pyoomph.OomphGeneralisedElement]: ...
+        @overload
+        def boundary_elements(self, b: str, with_directions: Literal[True]) -> Iterator[Tuple[_pyoomph.OomphGeneralisedElement, int]]: ...
+        def boundary_elements(self, b: str, with_directions: bool = ...) -> Union[Iterator[_pyoomph.OomphGeneralisedElement], Iterator[Tuple[_pyoomph.OomphGeneralisedElement, int]]]: ...
+
+    def __init__(self, problem: "Problem", templatemesh: MeshTemplate, domainname: str, elementtype: "EquationTree", previous_mesh: Optional[BulkTemplateMesh] = None):
         super(MeshFromTemplate3d, self).__init__()
         MeshFromTemplateBase.__init__(
-            self, problem, templatemesh, domainname, elementtype, previous_mesh=previous_mesh)
+            self, problem, templatemesh, domainname, elementtype, previous_mesh=previous_mesh)  # type: ignore[arg-type]
 
     def get_dimension(self)->int:
         return 3
@@ -1193,7 +1279,10 @@ class MeshFromTemplate3d(_pyoomph.TemplatedMeshBase3d, MeshFromTemplateBase):
         return pr
 
 
-def MeshFromTemplate(problem: "Problem", templatemesh: MeshTemplate, domainname: str, eqtree: "EquationTree", previous_mesh: Optional[MeshFromTemplateBase] = None) -> Union[MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d]:
+_install_mixin(MeshFromTemplate3d, MeshFromTemplateBase)
+
+
+def MeshFromTemplate(problem: "Problem", templatemesh: MeshTemplate, domainname: str, eqtree: "EquationTree", previous_mesh: Optional[BulkTemplateMesh] = None) -> Union[MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d]:
     if not templatemesh.has_domain(domainname):
         raise RuntimeError("There is no domain '" +
                            domainname + "' defined in this mesh")
@@ -1215,16 +1304,39 @@ def MeshFromTemplate(problem: "Problem", templatemesh: MeshTemplate, domainname:
 
 ######################################################
 
-class InterfaceMesh(_pyoomph.InterfaceMesh, BaseMesh):
+class InterfaceMesh(_pyoomph.InterfaceMesh):
     """
-    A mesh that is added to the boundary to add Neumann terms or setting Dirichlet conditions or add new fields directly on the interface, like e.g. surfactants.    
+    A mesh that is added to the boundary to add Neumann terms or setting Dirichlet conditions or add new fields directly on the interface, like e.g. surfactants.
     """
+    if TYPE_CHECKING:
+        # Declarations only, never executed (TYPE_CHECKING is False at runtime): the real
+        # implementations are supplied by _install_mixin(InterfaceMesh, BaseMesh) below. These
+        # exist purely so a static type checker knows InterfaceMesh has BaseMesh's members too,
+        # since it is no longer a nominal (real) subclass of BaseMesh -- see _install_mixin.
+        _interfacemeshes: Dict[str, "InterfaceMesh"]
+        def get_code_gen(self) -> "FiniteElementCodeGenerator": ...
+        def elements(self) -> Iterator[_pyoomph.OomphGeneralisedElement]: ...
+        @overload
+        def boundary_elements(self, b: str, with_directions: Literal[False] = ...) -> Iterator[_pyoomph.OomphGeneralisedElement]: ...
+        @overload
+        def boundary_elements(self, b: str, with_directions: Literal[True]) -> Iterator[Tuple[_pyoomph.OomphGeneralisedElement, int]]: ...
+        def boundary_elements(self, b: str, with_directions: bool = ...) -> Union[Iterator[_pyoomph.OomphGeneralisedElement], Iterator[Tuple[_pyoomph.OomphGeneralisedElement, int]]]: ...
+        @overload
+        def get_mesh(self, name: str, return_None_if_not_found: Literal[False] = ...) -> Union["MeshFromTemplate1d", "MeshFromTemplate2d", "MeshFromTemplate3d", "InterfaceMesh"]: ...
+        @overload
+        def get_mesh(self, name: str, return_None_if_not_found: Literal[True]) -> Union["MeshFromTemplate1d", "MeshFromTemplate2d", "MeshFromTemplate3d", "InterfaceMesh", None]: ...
+        def get_mesh(self, name: str, return_None_if_not_found: bool = ...) -> Union["MeshFromTemplate1d", "MeshFromTemplate2d", "MeshFromTemplate3d", "InterfaceMesh", None]: ...
+        def _pre_compile_interface_equations(self, tree_depth: int) -> None: ...
+        def _compile_interface_equations(self, tree_depth: int) -> None: ...
+        def _generate_interface_elements(self, tree_depth: int) -> None: ...
+
     def __init__(self, problem: "Problem", parent: "AnySpatialMesh", intername: str, eqtree: "EquationTree", previous_mesh: Optional["InterfaceMesh"] = None):
         super(InterfaceMesh, self).__init__()
-        BaseMesh.__init__(self)
+        # self is not nominally a BaseMesh (see _install_mixin); the explicit unbound call
+        # still works fine at runtime since BaseMesh.__init__ only duck-types on self's attributes.
+        BaseMesh.__init__(self)  # type: ignore[arg-type]
         # _pyoomph.InterfaceMesh.__init__(self,problem)
         # super().__init__(problem)
-        self._problem = problem
         self._set_problem(problem, eqtree.get_code_gen()._code)
         self._parent: "AnySpatialMesh" = parent
         self._opposite_interface_mesh: Optional["InterfaceMesh"] = None
@@ -1245,7 +1357,7 @@ class InterfaceMesh(_pyoomph.InterfaceMesh, BaseMesh):
                 pinter = previous_mesh.get_mesh(n)
                 assert isinstance(pinter, InterfaceMesh)
             self._interfacemeshes[n] = InterfaceMesh(
-                self._problem, self, n, eqtree, previous_mesh=pinter)
+                problem, self, n, eqtree, previous_mesh=pinter)
 
     def get_problem(self) -> "Problem":
         from ..generic.problem import Problem
@@ -1261,6 +1373,13 @@ class InterfaceMesh(_pyoomph.InterfaceMesh, BaseMesh):
 
     def get_dimension(self) -> int:
         return self._parent.get_dimension()-1
+
+    def get_bulk_mesh(self) -> "AnySpatialMesh":
+        # The nanobind C++ binding no longer exposes get_bulk_mesh() (see mesh.cpp): with the
+        # MeshHandle machinery there is no bare mesh pointer nanobind could wrap for a return
+        # value, and it would also not be the same Python object as self._parent anyway. This is
+        # already stored directly, so just return it.
+        return self._parent
 
     def setup_initial_conditions_with_interfaces(self, resetting_first_step: bool, ic_name: str):
         if self.ignore_initial_condition:
@@ -1393,7 +1512,7 @@ class InterfaceMesh(_pyoomph.InterfaceMesh, BaseMesh):
                 bind_set = {bnames.index(n) for n in boundname_set}
             refpos = dom._get_reference_position_for_IC_and_DBC(bind_set)
             refnorm=[0.1,0.1,0.1] # TODO: Get a right reference norm
-            t = self._problem.time_pt().time()
+            t = self.get_problem().time_pt().time()
             self.get_code_gen()._set_reference_point_for_IC_and_DBC(
                 refpos[0], refpos[1], refpos[2], t,refnorm[0],refnorm[1],refnorm[2])
 
@@ -1556,6 +1675,9 @@ class InterfaceMesh(_pyoomph.InterfaceMesh, BaseMesh):
         return self._evaluate_extremum_wrapper(name,-1,dimensional=dimensional,as_float=as_float,return_x=return_x)
 
 
+_install_mixin(InterfaceMesh, BaseMesh)
+
+
 class ODEStorageMesh(_pyoomph.ODEStorageMesh):
     """
     A sort of a mesh storing ODE values. This is not a real mesh, but a container for ODE values.
@@ -1563,7 +1685,7 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
     def __init__(self, problem: "Problem", eqtree: "EquationTree", domainname: str):
         super().__init__()
         #print("ODEStorageMesh: Creating ODE storage mesh for domain", domainname,get_mpi_rank())
-        self._problem: "Problem" = problem
+        self._set_problem(problem, None)
         self._eqtree: Optional["EquationTree"] = eqtree
         self._eqtree._mesh = self  # type:ignore
         self._codegen = eqtree._codegen  # type:ignore
@@ -1583,7 +1705,7 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
         return self._codegen
 
     def get_problem(self) -> "Problem":
-        return self._problem
+        return self._get_problem() #type:ignore
 
     def get_bulk_mesh(self):
         return None
@@ -1604,24 +1726,25 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
     def _compile_bulk_equations(self) -> _pyoomph.DynamicBulkElementInstance:
         assert self._eqtree is not None
         assert self._codegen is not None
-        self._codegen._set_problem(self._problem)  
+        problem=self.get_problem()
+        self._codegen._set_problem(problem)
 
-        ocg = self._codegen.get_equations()._get_current_codegen()  
-        self._codegen.get_equations()._set_current_codegen(self._codegen)  
+        ocg = self._codegen.get_equations()._get_current_codegen()
+        self._codegen.get_equations()._set_current_codegen(self._codegen)
 
         eqs=self._eqtree.get_equations()
-        #self._problem.before_compile_equations(self._eqtree)
-        eqs.before_finalization(self._codegen)  
-        eqs._problem=self._problem
-        self._codegen._finalise()  
-        self._codegen.get_equations()._set_current_codegen(self._codegen)  
+        #problem.before_compile_equations(self._eqtree)
+        eqs.before_finalization(self._codegen)
+        eqs._problem=problem
+        self._codegen._finalise()
+        self._codegen.get_equations()._set_current_codegen(self._codegen)
 
-        eqs.before_compilation(self._codegen)  
-        self._codegen._code = self._problem.compile_bulk_element_code(self._codegen, self, self._name)  
-        #self._element = _pyoomph.BulkElementODE0d.construct_new(self._codegen.get_code(), self._problem.timestepper)  
+        eqs.before_compilation(self._codegen)
+        self._codegen._code = problem.compile_bulk_element_code(self._codegen, self, self._name)
+        #self._element = _pyoomph.BulkElementODE0d.construct_new(self._codegen.get_code(), problem.timestepper)
         #self._element.set_must_be_kept_as_halo(True) # ODE Dofs are always halo dofs, so they can be accessed from everywhere
-        self._set_problem(self._problem, self._codegen._code)  
-        self._element=self._create_ode_element(self._problem.timestepper)
+        self._set_problem(problem, self._codegen._code)
+        self._element=self._create_ode_element(problem.timestepper)
         self._setup_output_scales()
 #        self._add_ODE("ODE", self._element)
         # self._transfer_mesh_functions()

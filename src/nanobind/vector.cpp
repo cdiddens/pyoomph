@@ -20,20 +20,18 @@ The main author may be contacted at c.diddens@utwente.nl
 ================================================================================*/
 
 
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
-#include <pybind11/numpy.h>
+#include <nanobind/nanobind.h>
 #include <vector>
-namespace py = pybind11;
+namespace nb = nanobind;
 
 #include <sstream>
 
 #include "../oomph_lib.hpp"
 
-void PyReg_Vector(py::module &m)
+void PyReg_Vector(nb::module_ &m)
 {
 
-	py::class_<oomph::Vector<double>>(
+	nb::class_<oomph::Vector<double>>(
 		m, "VectorDouble",
 		"Thin Python wrapper around oomph-lib's oomph::Vector<double>, a std::vector<double> subclass with "
 		"optional range checking. Used to expose plain C++ double vectors (e.g. eigenvectors, arclength "
@@ -41,10 +39,10 @@ void PyReg_Vector(py::module &m)
 		.def(
 			"__getitem__", [](const oomph::Vector<double> *self, const int &i)
 			{ return (*self)[i]; },
-			py::arg("i"), "Return the entry at index ``i``.")
+			nb::arg("i"), "Return the entry at index ``i``.")
 		.def(
 			"__setitem__", [](oomph::Vector<double> *self, const int &i, const double &v)
 			{ (*self)[i] = v; },
-			py::arg("i"), py::arg("value"), "Set the entry at index ``i`` to ``value``.")
+			nb::arg("i"), nb::arg("value"), "Set the entry at index ``i`` to ``value``.")
 		.def("size", &oomph::Vector<double>::size, "Return the number of entries in the vector.");
 }

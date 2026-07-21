@@ -45,11 +45,11 @@ class PitchForkNormalForm(ODEEquations):
 
 if __name__=="__main__":
     # Simple problems can be assembled without a specific class
-    problem=Problem()
-    problem+=PitchForkNormalForm(r=1,sign=-1)@"pitchfork"
-    # Find the solutions by deflation
-    solutions=[]
-    for sol in problem.iterate_over_multiple_solutions_by_deflation(deflation_alpha=0.1,deflation_p=2,perturbation_amplitude=0.1,num_random_tries=2):
-        solutions.append(sol)
-    print("Found solutions at r=1 are x = ",solutions)
+    with Problem() as problem:
+        problem+=PitchForkNormalForm(r=1,sign=-1)@"pitchfork"
+        # Find the solutions by deflation
+        solutions=[]
+        for sol in problem.iterate_over_multiple_solutions_by_deflation(deflation_alpha=0.1,deflation_p=2,perturbation_amplitude=0.1,num_random_tries=2):
+            solutions.append(sol)
+        print("Found solutions at r=1 are x = ",solutions)
         

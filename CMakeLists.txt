@@ -51,7 +51,7 @@ option(PYOOMPH_USE_MPI       "Build with MPI support (defines OOMPH_HAS_MPI)"   
 option(PYOOMPH_PARANOID      "Build with extra runtime sanity checks (defines PARANOID)" OFF)
 option(PYOOMPH_DOWNLOAD_CLN  "Download and build CLN from source via its own autotools ./configure" ON)
 option(PYOOMPH_DOWNLOAD_GINAC "Download and build GiNaC from source via its own autotools ./configure" ON)
-option(PYOOMPH_GENERATE_STUBS "Generate .pyi stubs for the _core extension via pybind11-stubgen (best effort, non-fatal)"  ON)
+option(PYOOMPH_GENERATE_STUBS "Generate .pyi stubs for the _core extension via nanobind.stubgen (best effort, non-fatal)"  ON)
 option(PYOOMPH_COPY_STUBS_TO_SOURCE_TREE "Also mirror the generated .pyi stub into the source-tree pyoomph/ directory, so Pylance/Pyright/mypy can resolve pyoomph._core while editing without a full pip install" ON)
 
 # Left empty by default: ginac.de only ever hosts the *current* release
@@ -97,23 +97,29 @@ endif()
 include(cmake/ThirdPartyGiNaC.cmake)
 
 # ----------------------------------------------------------------------------
-# pybind11, via CMake.
+# nanobind, via CMake.
 #
-# NOTE: pybind11 itself (headers/CMake package) is looked up here, but is
+# NOTE: nanobind itself (headers/CMake package) is looked up here, but is
 # only actually *used* by the _pyoomph target further down, whose sources
-# are restricted to src/pybind/*.cpp. Everything else in this project
+# are restricted to src/nanobind/*.cpp. Everything else in this project
 # (libgeneric.a and the pyoomph_core static library) is fully Python-version
-# independent and never sees pybind11 or the Python headers/flags.
+# independent and never sees nanobind or the Python headers/flags.
 # ----------------------------------------------------------------------------
-find_package(Python 3.9 COMPONENTS Interpreter Development.Module REQUIRED)
+# Development.SABIModule is optional (only exists from 3.12 onwards, where
+# nanobind's STABLE_ABI build below actually activates - see the comment
+# there); listing it as an OPTIONAL_COMPONENTS means configuring under an
+# older interpreter (3.10-3.11) just silently doesn't find it instead of
+# failing CMake configuration.
+find_package(Python 3.10 COMPONENTS Interpreter Development.Module REQUIRED
+                        OPTIONAL_COMPONENTS Development.SABIModule)
 
 execute_process(
-  COMMAND "${Python_EXECUTABLE}" -c "import pybind11; print(pybind11.get_cmake_dir())"
+  COMMAND "${Python_EXECUTABLE}" -c "import nanobind; print(nanobind.cmake_dir())"
   OUTPUT_STRIP_TRAILING_WHITESPACE
-  OUTPUT_VARIABLE pybind11_ROOT
+  OUTPUT_VARIABLE nanobind_ROOT
   COMMAND_ERROR_IS_FATAL ANY)
 
-find_package(pybind11 CONFIG REQUIRED)
+find_package(nanobind CONFIG REQUIRED)
 
 # ----------------------------------------------------------------------------
 # libgeneric.a: all .cc files from oomph-lib's include/ directory. This must
@@ -154,8 +160,8 @@ target_compile_definitions(generic PUBLIC
 )
 
 # ----------------------------------------------------------------------------
-# pyoomph_core: all of src/*.cpp EXCEPT src/pybind/*.cpp. This is the bulk of
-# pyoomph's own C++ code, and it does not depend on pybind11 or the Python
+# pyoomph_core: all of src/*.cpp EXCEPT src/nanobind/*.cpp. This is the bulk of
+# pyoomph's own C++ code, and it does not depend on nanobind or the Python
 # headers at all - it only needs to be recompiled when the sources
 # themselves change, not when switching Python versions.
 # ----------------------------------------------------------------------------
@@ -190,25 +196,46 @@ if(PYOOMPH_USE_MPI)
 endif()
 
 # ----------------------------------------------------------------------------
-# The actual Python extension module: ONLY src/pybind/*.cpp. This is the
-# only target that pulls in pybind11/Python compile flags and include
+# The actual Python extension module: ONLY src/nanobind/*.cpp. This is the
+# only target that pulls in nanobind/Python compile flags and include
 # directories, and hence the only target that needs rebuilding when
 # iterating over multiple Python versions - pyoomph_core and generic above
 # are reused as-is.
 #
 # Built/installed as the "_core" submodule of the "pyoomph" package, i.e.
-# importable as `pyoomph._core` (see PYBIND11_MODULE(_core, ...) in
-# src/pybind - the module name there must match this target name).
+# importable as `pyoomph._core` (see NB_MODULE(_core, ...) in
+# src/nanobind - the module name there must match this target name).
 # ----------------------------------------------------------------------------
-file(GLOB PYOOMPH_PYBIND_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/pybind/*.cpp")
+file(GLOB PYOOMPH_NANOBIND_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/nanobind/*.cpp")
 
-if(NOT PYOOMPH_PYBIND_SOURCES)
-  message(FATAL_ERROR "No .cpp sources found under src/pybind - "
+if(NOT PYOOMPH_NANOBIND_SOURCES)
+  message(FATAL_ERROR "No .cpp sources found under src/nanobind - "
                        "cannot build the Python extension module.")
 endif()
 
-pybind11_add_module(_pyoomph_core
-  ${PYOOMPH_PYBIND_SOURCES}
+# STABLE_ABI: build against Python's Limited API (Py_LIMITED_API=0x030C0000,
+# i.e. the 3.12 baseline - see nanobind-config.cmake's nanobind_add_module())
+# so the resulting extension is ABI-compatible with every CPython >= 3.12,
+# not just the one it was compiled against - one wheel instead of one per
+# minor version (see .github/workflows/wheels.yml's PYTHON_STABLE_ABI_BASE /
+# pyproject.toml's [[tool.cibuildwheel.overrides]] wheel.py-api=cp312).
+# nanobind itself silently disables this (falls back to a classic,
+# version-specific build) when configuring under CPython < 3.12 or when
+# Python::SABIModule isn't available, so this flag is safe to pass
+# unconditionally - no separate toggle is needed for the 3.10/3.11 builds.
+#
+# NB_DOMAIN pyoomph: nanobind shares its internal type/function registry
+# across every nanobind extension loaded into the same domain (the default
+# domain, if unspecified) - intentionally, so a binding project split across
+# several compiled modules can still interoperate. _pyoomph_core is the only
+# nanobind extension in this project, so it doesn't need or want that
+# sharing; scoping it to its own domain instead means it can never collide
+# ("type 'X' was already registered!") with some unrelated nanobind-based
+# package a user happens to have installed alongside pyoomph.
+nanobind_add_module(_pyoomph_core
+  NB_DOMAIN pyoomph
+  STABLE_ABI
+  ${PYOOMPH_NANOBIND_SOURCES}
 )
 
 target_link_libraries(_pyoomph_core PRIVATE
@@ -254,7 +281,7 @@ if(PYOOMPH_GENERATE_STUBS)
             --module-dir "$<TARGET_FILE_DIR:_pyoomph_core>"
             --module-name "_pyoomph_core"
             --stage-dir "${PYOOMPH_STUB_STAGE_DIR}"
-            --patch-script "${CMAKE_SOURCE_DIR}/src/pybind/patch_stubs.py"
+            --patch-script "${CMAKE_SOURCE_DIR}/src/nanobind/patch_stubs.py"
             --python "${Python_EXECUTABLE}"
             ${PYOOMPH_STUB_EXTRA_COPY_ARGS}
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
