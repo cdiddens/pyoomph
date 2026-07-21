@@ -223,7 +223,17 @@ endif()
 # version-specific build) when configuring under CPython < 3.12 or when
 # Python::SABIModule isn't available, so this flag is safe to pass
 # unconditionally - no separate toggle is needed for the 3.10/3.11 builds.
+#
+# NB_DOMAIN pyoomph: nanobind shares its internal type/function registry
+# across every nanobind extension loaded into the same domain (the default
+# domain, if unspecified) - intentionally, so a binding project split across
+# several compiled modules can still interoperate. _pyoomph_core is the only
+# nanobind extension in this project, so it doesn't need or want that
+# sharing; scoping it to its own domain instead means it can never collide
+# ("type 'X' was already registered!") with some unrelated nanobind-based
+# package a user happens to have installed alongside pyoomph.
 nanobind_add_module(_pyoomph_core
+  NB_DOMAIN pyoomph
   STABLE_ABI
   ${PYOOMPH_NANOBIND_SOURCES}
 )
