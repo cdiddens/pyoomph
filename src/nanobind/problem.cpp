@@ -154,7 +154,7 @@ static nb::class_<GiNaC::GiNaCGlobalParameterWrapper> *py_decl_GlobalParam = NUL
 void PyDecl_Problem(nb::module_ &m)
 {
 	// Forward-declared here (before PyReg_Problem runs) since other translation units may need
-	// to refer to the "GiNaC_GlobalParam" Python type before all pybind11 classes are registered.
+	// to refer to the "GiNaC_GlobalParam" Python type before all nanobind classes are registered.
 	py_decl_GlobalParam = new nb::class_<GiNaC::GiNaCGlobalParameterWrapper>(
 		m, "GiNaC_GlobalParam",
 		"A global (scalar) parameter of a Problem, wrapped so that it can be used directly inside "

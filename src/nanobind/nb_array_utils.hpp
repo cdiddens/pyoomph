@@ -20,7 +20,7 @@ The main author may be contacted at c.diddens@utwente.nl
 ================================================================================*/
 
 // Small helpers bridging std::vector<T> and nb::ndarray<nb::numpy, T>, used throughout
-// src/pybind/*.cpp. nanobind's ndarray is a non-owning view type (unlike pybind11's array_t,
+// src/nanobind/*.cpp. nanobind's ndarray is a non-owning view type (unlike pybind11's array_t,
 // which could itself allocate/own a numpy-managed buffer), so returning a freshly computed
 // C++ std::vector<T> as a new (Python-owned) numpy array requires explicitly moving its data
 // onto the heap and attaching a capsule that frees it when the array is garbage-collected.

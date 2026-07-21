@@ -278,7 +278,7 @@ namespace pyoomph
 		}
 	};
 
-	// pybind11 trampoline: forwards CustomCoordinateSystem's virtual hooks (grad/div/directional
+	// nanobind trampoline: forwards CustomCoordinateSystem's virtual hooks (grad/div/directional
 	// derivative and related differential operators, expressed in this coordinate system) to
 	// Python, so a custom (e.g. curvilinear) coordinate system can be implemented outside C++.
 	class PyCustomCoordinateSystem : public CustomCoordinateSystem
@@ -429,9 +429,9 @@ void PyReg_Expressions(nb::module_ &m)
 		.def(double() / nb::self)
 		.def(nb::self / double())
 
-		// nb::self <op>= nb::self below is pybind11's operator-overload DSL for
-		// registering __iadd__/__isub__/etc.; it is not a real self-assignment,
-		// but clang's -Wself-assign-overloaded can't tell the difference.
+		// nb::self <op>= nb::self below is nanobind's operator-overload DSL (adopted from
+		// pybind11's py::self) for registering __iadd__/__isub__/etc.; it is not a real
+		// self-assignment, but clang's -Wself-assign-overloaded can't tell the difference.
 #if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wself-assign-overloaded"

@@ -24,7 +24,7 @@ The main author may be contacted at c.diddens@utwente.nl
 
 namespace nb = nanobind;
 
-// "PyDecl_*" functions (implemented in the correspondingly named files under src/pybind/) only
+// "PyDecl_*" functions (implemented in the correspondingly named files under src/nanobind/) only
 // call nb::class_<...>(m, "Name") to register a class's Python *name*, without yet adding any of
 // its methods/properties. This lets classes from different translation units refer to each
 // other's Python types (e.g. as a function argument or return type) regardless of registration
