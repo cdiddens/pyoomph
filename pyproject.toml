@@ -60,7 +60,7 @@ minimum-version = "build-system.requires"
 # architecture) job lets the Python-independent `generic`/`pyoomph_core`
 # static libraries be reused, via normal CMake incremental rebuilds, across
 # every interpreter cibuildwheel loops over in that job. Only `_core`
-# (src/pybind/*.cpp) actually needs to recompile per Python version.
+# (src/nanobind/*.cpp) actually needs to recompile per Python version.
 # {state} just keeps wheel/editable/sdist builds from reconfiguring on top
 # of each other; it is not Python-version-specific.
 build-dir = "build/{state}"

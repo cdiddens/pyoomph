@@ -2,7 +2,7 @@
 """Generate .pyi type stubs for the pyoomph._core extension module.
 
 This reproduces what the old top-level build script did with
-`pybind11-stubgen` + `src/pybind/patch_stubs.py`, but is invoked as a
+`pybind11-stubgen` + `src/nanobind/patch_stubs.py`, but is invoked as a
 POST_BUILD step on the `_core` CMake target so it happens automatically as
 part of `./configure && make` / `pip install .` via scikit-build-core.
 Since the switch to nanobind, stub generation uses nanobind's own bundled

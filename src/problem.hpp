@@ -271,7 +271,7 @@ namespace pyoomph
   //  - Hessian assembly for second-order (bifurcation/optimization) computations
   //  - custom sparse assembly, Dirichlet handling (either by dof removal or by matrix manipulation), logging
   // Most of the heavy lifting is implemented in problem.cpp; this header is the primary interface used both
-  // from C++ (e.g. by generated element code, bifurcation.cpp) and from Python via src/pybind/problem.cpp.
+  // from C++ (e.g. by generated element code, bifurcation.cpp) and from Python via src/nanobind/problem.cpp.
   class Problem : public oomph::Problem
   {
   protected:

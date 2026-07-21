@@ -101,7 +101,7 @@ include(cmake/ThirdPartyGiNaC.cmake)
 #
 # NOTE: nanobind itself (headers/CMake package) is looked up here, but is
 # only actually *used* by the _pyoomph target further down, whose sources
-# are restricted to src/pybind/*.cpp. Everything else in this project
+# are restricted to src/nanobind/*.cpp. Everything else in this project
 # (libgeneric.a and the pyoomph_core static library) is fully Python-version
 # independent and never sees nanobind or the Python headers/flags.
 # ----------------------------------------------------------------------------
@@ -154,7 +154,7 @@ target_compile_definitions(generic PUBLIC
 )
 
 # ----------------------------------------------------------------------------
-# pyoomph_core: all of src/*.cpp EXCEPT src/pybind/*.cpp. This is the bulk of
+# pyoomph_core: all of src/*.cpp EXCEPT src/nanobind/*.cpp. This is the bulk of
 # pyoomph's own C++ code, and it does not depend on nanobind or the Python
 # headers at all - it only needs to be recompiled when the sources
 # themselves change, not when switching Python versions.
@@ -190,7 +190,7 @@ if(PYOOMPH_USE_MPI)
 endif()
 
 # ----------------------------------------------------------------------------
-# The actual Python extension module: ONLY src/pybind/*.cpp. This is the
+# The actual Python extension module: ONLY src/nanobind/*.cpp. This is the
 # only target that pulls in nanobind/Python compile flags and include
 # directories, and hence the only target that needs rebuilding when
 # iterating over multiple Python versions - pyoomph_core and generic above
@@ -198,17 +198,17 @@ endif()
 #
 # Built/installed as the "_core" submodule of the "pyoomph" package, i.e.
 # importable as `pyoomph._core` (see NB_MODULE(_core, ...) in
-# src/pybind - the module name there must match this target name).
+# src/nanobind - the module name there must match this target name).
 # ----------------------------------------------------------------------------
-file(GLOB PYOOMPH_PYBIND_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/pybind/*.cpp")
+file(GLOB PYOOMPH_NANOBIND_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/nanobind/*.cpp")
 
-if(NOT PYOOMPH_PYBIND_SOURCES)
-  message(FATAL_ERROR "No .cpp sources found under src/pybind - "
+if(NOT PYOOMPH_NANOBIND_SOURCES)
+  message(FATAL_ERROR "No .cpp sources found under src/nanobind - "
                        "cannot build the Python extension module.")
 endif()
 
 nanobind_add_module(_pyoomph_core
-  ${PYOOMPH_PYBIND_SOURCES}
+  ${PYOOMPH_NANOBIND_SOURCES}
 )
 
 target_link_libraries(_pyoomph_core PRIVATE
@@ -254,7 +254,7 @@ if(PYOOMPH_GENERATE_STUBS)
             --module-dir "$<TARGET_FILE_DIR:_pyoomph_core>"
             --module-name "_pyoomph_core"
             --stage-dir "${PYOOMPH_STUB_STAGE_DIR}"
-            --patch-script "${CMAKE_SOURCE_DIR}/src/pybind/patch_stubs.py"
+            --patch-script "${CMAKE_SOURCE_DIR}/src/nanobind/patch_stubs.py"
             --python "${Python_EXECUTABLE}"
             ${PYOOMPH_STUB_EXTRA_COPY_ARGS}
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"

@@ -14,7 +14,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gfortran \
     libblas-dev \
     liblapack-dev \
-    pybind11-dev \
     libginac-dev \
     libcln-dev \
     libgmp-dev \
@@ -30,5 +29,5 @@ RUN python3 -m venv /home/vscode/venv
 ENV PATH="/home/vscode/venv/bin:${PATH}"
 
 RUN pip install --no-cache-dir \
-    gmsh mkl mpi4py matplotlib numpy petsc4py pybind11 pygmsh scipy meshio \
-    pybind11-stubgen scikit-build-core pytest
+    gmsh mkl mpi4py matplotlib numpy petsc4py nanobind pygmsh scipy meshio \
+    scikit-build-core pytest

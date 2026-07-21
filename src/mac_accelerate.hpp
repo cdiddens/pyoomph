@@ -39,7 +39,7 @@ namespace pyoomph
     // Subset of Accelerate's SparseFactorization_t that is meaningful for the matrices pyoomph
     // hands over (real, either general or symmetric, sparse matrices). Kept as pyoomph's own type
     // rather than exposing SparseFactorization_t directly so that callers (in particular the
-    // pybind11 bindings) do not need to include Accelerate/Accelerate.h themselves.
+    // nanobind bindings) do not need to include Accelerate/Accelerate.h themselves.
     enum class MacAccelerateMethod
     {
         QR,             // General (unsymmetric, possibly rectangular) sparse QR. Always applicable.
