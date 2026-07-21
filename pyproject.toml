@@ -14,7 +14,7 @@ dependencies = [
 'mkl==2021.4.0; sys_platform == "darwin" and platform_machine != "arm64"'
 ]
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [  { name="Christian Diddens", email="c.diddens@utwente.nl" },  { name="Duarte Rocha", email="d.rocha@utwente.nl" },  { name="Maxim de Wildt",email="m.dewildt@utwente.nl" },  ]
 license = { file = "COPYING" }
 classifiers=[
@@ -29,7 +29,6 @@ classifiers=[
         'Operating System :: Microsoft :: Windows :: Windows 11',
         'Programming Language :: Python',
         'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.9',
         'Programming Language :: Python :: 3.10',
         'Programming Language :: Python :: 3.11',
         'Programming Language :: Python :: 3.12',

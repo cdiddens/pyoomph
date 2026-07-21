@@ -108,9 +108,9 @@ include(cmake/ThirdPartyGiNaC.cmake)
 # Development.SABIModule is optional (only exists from 3.12 onwards, where
 # nanobind's STABLE_ABI build below actually activates - see the comment
 # there); listing it as an OPTIONAL_COMPONENTS means configuring under an
-# older interpreter (3.9-3.11) just silently doesn't find it instead of
+# older interpreter (3.10-3.11) just silently doesn't find it instead of
 # failing CMake configuration.
-find_package(Python 3.9 COMPONENTS Interpreter Development.Module REQUIRED
+find_package(Python 3.10 COMPONENTS Interpreter Development.Module REQUIRED
                         OPTIONAL_COMPONENTS Development.SABIModule)
 
 execute_process(

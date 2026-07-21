@@ -107,7 +107,7 @@ wget https://dist.nuget.org/win-x86-commandline/latest/nuget.exe -O build/nuget
 
 # TODO: Loop
 # see https://github.com/pypa/cibuildwheel/blob/main/cibuildwheel/resources/build-platforms.toml
-for pyversion in "3.9.13" "3.10.11" "3.11.9" "3.12.10" "3.13.11" "3.14.2"; do
+for pyversion in "3.10.11" "3.11.9" "3.12.10" "3.13.11" "3.14.2"; do
 export PYOOMPH_PYVERSION=$pyversion
 
 export PYOOMPH_SHORTPYVERSION=$(echo $PYOOMPH_PYVERSION | cut -d . -f 1,2 | tr -d . )
