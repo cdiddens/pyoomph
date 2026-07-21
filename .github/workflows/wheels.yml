@@ -148,6 +148,7 @@ jobs:
             PYOOMPH_GINAC_LIB_DIR=$PWD/prebuilt/GiNaC_static/install/lib
             PYOOMPH_CLN_INCLUDE_DIR=$PWD/prebuilt/GiNaC_static/install/include
             PYOOMPH_CLN_LIB_DIR=$PWD/prebuilt/GiNaC_static/install/lib
+            MACOSX_DEPLOYMENT_TARGET=10.13
           CIBW_CONFIG_SETTINGS: >
             cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF
             cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF

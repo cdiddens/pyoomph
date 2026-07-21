@@ -118,6 +118,14 @@ before-test = [
 ]
 
 [tool.cibuildwheel.macos]
+# nanobind's own sources (nb_type.cpp) use C++17 aligned operator delete
+# (std::align_val_t), whose deallocation function only exists in the SDK
+# from macOS 10.13 onwards; cibuildwheel's x86_64 default of 10.9 is too
+# old and fails with "aligned deallocation function ... is only available
+# on macOS 10.13 or newer". arm64 wheels are unaffected (cibuildwheel's
+# arm64 default is already 11.0), but set this for both architectures for
+# consistency/future-proofing.
+environment = { MACOSX_DEPLOYMENT_TARGET = "10.13" }
 before-all = [
 # pkg-config is needed by GiNaC's own ./configure to locate CLN (see
 # cmake/ThirdPartyGiNaC.cmake) whenever PYOOMPH_DOWNLOAD_GINAC=ON (the
