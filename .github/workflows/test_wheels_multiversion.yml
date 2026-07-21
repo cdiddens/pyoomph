@@ -95,6 +95,15 @@ jobs:
         with:
           python-version: ${{ matrix.python_version }}
 
+      # Bare ubuntu-latest runners don't have these; pygmsh/gmsh (a runtime
+      # dependency, pulled in by installing the wheel below) needs them at
+      # import time. Matches wheels.yml's own CIBW_BEFORE_TEST_LINUX step.
+      - name: Install runtime dependencies (Linux)
+        if: matrix.os_entry.label == 'linux-x86_64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglu1-mesa libxcursor1 libopengl0 libxinerama1
+
       - name: Install the built wheel
         shell: bash
         run: |
