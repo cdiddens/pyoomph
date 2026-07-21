@@ -171,7 +171,13 @@ namespace pyoomph
 		}
 		void reset() override
 		{
-			NB_OVERRIDE(reset);
+			// The Python-facing binding for this hook is named "_reset", not "reset" (see
+			// .def("_reset", &pyoomph::MeshTemplate::reset, ...) below) - plain NB_OVERRIDE(reset)
+			// would look up a Python attribute literally named "reset", which is never bound
+			// anywhere, so it always failed with "get_trampoline(...): lookup failed!" for any
+			// Python subclass, even ones that correctly override _reset(). Must use
+			// NB_OVERRIDE_NAME to look up the actual bound name instead.
+			NB_OVERRIDE_NAME("_reset", reset);
 		}
 	};
 

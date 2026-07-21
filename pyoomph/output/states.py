@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -35,7 +36,7 @@ import zlib
 import io
 
 class DumpFile:
-    def __init__(self,fname:str,save:bool,compression_level:Optional[int]=None):
+    def __init__(self,fname:str,save:bool,compression_level:int | None=None):
         self.save=save
         self.file=open(fname,"wb" if save else "rb")
         self.fname=fname
@@ -128,7 +129,7 @@ class DumpFile:
             s=setter(s)
             return s
 
-    def float_data(self,getter:Callable[[],float],setter:Union[Callable[[float],float],Callable[[float],None]]) -> float:
+    def float_data(self,getter:Callable[[],float],setter:Callable[[float], float] | Callable[[float], None]) -> float:
         if self.save:
             s=getter()
             self.write_float_data(s)
@@ -141,7 +142,7 @@ class DumpFile:
             else:
                 return s
 
-    def int_data(self,getter:Callable[[],int],setter:Union[Callable[[int],int],Callable[[int],None]]) -> int:
+    def int_data(self,getter:Callable[[],int],setter:Callable[[int], int] | Callable[[int], None]) -> int:
         if self.save:
             s=getter()
             self.write_int_data(s)

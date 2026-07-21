@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -39,17 +40,17 @@ import numpy
 
 
 Expression=_pyoomph.Expression
-ExpressionOrNum=Union[Expression,int,float]
-ExpressionNumOrNone=Union[Expression,int,float,None]
+ExpressionOrNum=Expression|int|float
+ExpressionNumOrNone=Expression|int|float|None
 #NameStrSequence = Union[Tuple[str], List[str]]
 #ExprStrSequence = Union[Tuple[Expression], List[Expression]]
-NameStrSequence = Union[Tuple[str], List[str]]
-ExprStrSequence = Union[Tuple[Expression], List[Expression]]
+NameStrSequence = tuple[str]|list[str]
+ExprStrSequence = tuple[Expression]|list[Expression]
 GlobalParameter=_pyoomph.GiNaC_GlobalParam
-SingleOrMultipleExpressions=Union[Expression,Tuple[Expression,...]]
-OptionalCoordinateSystem=Union[None,_pyoomph.CustomCoordinateSystem]
+SingleOrMultipleExpressions=Expression|tuple[Expression,...]
+OptionalCoordinateSystem=_pyoomph.CustomCoordinateSystem|None
 TimeSteppingScheme=Literal["BDF1","BDF2","Newmark2","TPZ","MPT","Simpson","Boole","trapezoidal","Kepler","Milne","midpoint"]
-OptionalTimeSteppingScheme=Union[None,TimeSteppingScheme]
+OptionalTimeSteppingScheme=TimeSteppingScheme|None
 
 FiniteElementSpaceEnum=Literal["C1","C1TB","C2","C2TB","D1","D1TB","D2","D2TB","DL","D0"]
 def assert_valid_finite_element_space(inp:str)->FiniteElementSpaceEnum:
@@ -117,7 +118,7 @@ def find_dominant_element_space(*spaces:FiniteElementSpaceEnum):
 if TYPE_CHECKING:
 	from ..generic.codegen import FiniteElementCodeGenerator
 
-def substitute_in_expression(expr:ExpressionOrNum,field_subst:Dict[str,ExpressionOrNum],nondim_subst:Dict[str,ExpressionOrNum]={},global_param_subst:Dict[str,ExpressionOrNum]={})->Expression:
+def substitute_in_expression(expr:ExpressionOrNum,field_subst:dict[str,ExpressionOrNum],nondim_subst:dict[str,ExpressionOrNum]={},global_param_subst:dict[str,ExpressionOrNum]={})->Expression:
 	fs,nf,gp={},{},{}
 	if not isinstance(expr,Expression):
 		expr=Expression(expr)
@@ -130,12 +131,12 @@ def substitute_in_expression(expr:ExpressionOrNum,field_subst:Dict[str,Expressio
 	return _pyoomph.GiNaC_subsfields(expr,fs,nf,gp)
 
 @overload
-def var(arg:str,*,tag:List[str]=[],domain:Union[str,"FiniteElementCodeGenerator",None]=None,no_jacobian:bool=False,no_hessian:bool=False,only_base_mode:bool=False,only_perturbation_mode:bool=False)->Expression: ...
+def var(arg:str,*,tag:list[str]=[],domain:str | "FiniteElementCodeGenerator" | None=None,no_jacobian:bool=False,no_hessian:bool=False,only_base_mode:bool=False,only_perturbation_mode:bool=False)->Expression: ...
 
 @overload
-def var(arg:NameStrSequence,*,tag:List[str]=[],domain:Union[str,"FiniteElementCodeGenerator",None]=None,no_jacobian:bool=False,no_hessian:bool=False,only_base_mode:bool=False,only_perturbation_mode:bool=False)->Tuple[Expression,...]: ...
+def var(arg:NameStrSequence,*,tag:list[str]=[],domain:str | "FiniteElementCodeGenerator" | None=None,no_jacobian:bool=False,no_hessian:bool=False,only_base_mode:bool=False,only_perturbation_mode:bool=False)->tuple[Expression,...]: ...
 
-def var(arg:Union[str,NameStrSequence],*,tag:List[str]=[],domain:Union[str,"FiniteElementCodeGenerator",None]=None,no_jacobian:bool=False,no_hessian:bool=False,only_base_mode:bool=False,only_perturbation_mode:bool=False)->SingleOrMultipleExpressions:
+def var(arg:str | NameStrSequence,*,tag:list[str]=[],domain:str | "FiniteElementCodeGenerator" | None=None,no_jacobian:bool=False,no_hessian:bool=False,only_base_mode:bool=False,only_perturbation_mode:bool=False)->SingleOrMultipleExpressions:
 	r"""
 	Binds a variable or a list of variables for usage in an expression by supplying the name(s)
 
@@ -180,7 +181,7 @@ def var(arg:Union[str,NameStrSequence],*,tag:List[str]=[],domain:Union[str,"Fini
 			* ``"cartesian_element_length_h"`` : Typical length scale of the element, but calculated in a Cartesian coordinate system   
 	"""
 	
-	res:List[Expression]=[]
+	res:list[Expression]=[]
 	tag=tag.copy()
 	if isinstance(tag,str):
 		tag+=[tag]
@@ -207,19 +208,19 @@ def var(arg:Union[str,NameStrSequence],*,tag:List[str]=[],domain:Union[str,"Fini
 		return tuple(res)
 
 @overload
-def nondim(arg:str,tag:List[str]=[],domain:Union[str,"FiniteElementCodeGenerator",None]=None,no_jacobian:bool=False,no_hessian:bool=False,only_base_mode:bool=False,only_perturbation_mode:bool=False)->Expression: ...
+def nondim(arg:str,tag:list[str]=[],domain:str | "FiniteElementCodeGenerator" | None=None,no_jacobian:bool=False,no_hessian:bool=False,only_base_mode:bool=False,only_perturbation_mode:bool=False)->Expression: ...
 
 @overload
-def nondim(arg:NameStrSequence,tag:List[str]=[],domain:Union[str,"FiniteElementCodeGenerator",None]=None,no_jacobian:bool=False,no_hessian:bool=False,only_base_mode:bool=False,only_perturbation_mode:bool=False)->Tuple[Expression,...]: ...
+def nondim(arg:NameStrSequence,tag:list[str]=[],domain:str | "FiniteElementCodeGenerator" | None=None,no_jacobian:bool=False,no_hessian:bool=False,only_base_mode:bool=False,only_perturbation_mode:bool=False)->tuple[Expression,...]: ...
 
-def nondim(arg:Union[str,NameStrSequence],tag:List[str]=[],domain:Union[str,"FiniteElementCodeGenerator",None]=None,no_jacobian:bool=False,no_hessian:bool=False,only_base_mode:bool=False,only_perturbation_mode:bool=False)->SingleOrMultipleExpressions:
+def nondim(arg:str | NameStrSequence,tag:list[str]=[],domain:str | "FiniteElementCodeGenerator" | None=None,no_jacobian:bool=False,no_hessian:bool=False,only_base_mode:bool=False,only_perturbation_mode:bool=False)->SingleOrMultipleExpressions:
 	"""
 	This returns the nondimensional equivalent of a field, i.e. it is the same as var(...)/scale_factor(...).
 	
  	See var for further details.
 	"""
 	
-	res:List[Expression]=[]
+	res:list[Expression]=[]
 	if isinstance(domain,str):
 		tag=["domain:"+domain]
 		domain=None
@@ -243,7 +244,7 @@ def nondim(arg:Union[str,NameStrSequence],tag:List[str]=[],domain:Union[str,"Fin
 import fractions
 
 #Arg can be string (eg "1/2"), int or double. Best is always use rationals etc
-def num(arg:Union[float,int,str], order10: Union[int,None] = None,*,rational:bool=False)->Expression:
+def num(arg:float | int | str, order10: int | None = None,*,rational:bool=False)->Expression:
 	if rational: #Try to convert it to rational
 		f=fractions.Fraction(arg)
 		return _pyoomph.Expression(str(f.numerator)+"/"+str(f.denominator))
@@ -253,12 +254,12 @@ def num(arg:Union[float,int,str], order10: Union[int,None] = None,*,rational:boo
 	return res
 
 @overload
-def scale_factor(arg:str,tag:List[str]=[],domain:Union[str,"FiniteElementCodeGenerator",None]=None)->Expression: ...
+def scale_factor(arg:str,tag:list[str]=[],domain:str | "FiniteElementCodeGenerator" | None=None)->Expression: ...
 
 @overload
-def scale_factor(arg:NameStrSequence,tag:List[str]=[],domain:Union[str,"FiniteElementCodeGenerator",None]=None)->Tuple[Expression,...]: ...
+def scale_factor(arg:NameStrSequence,tag:list[str]=[],domain:str | "FiniteElementCodeGenerator" | None=None)->tuple[Expression,...]: ...
 
-def scale_factor(arg: Union[str, NameStrSequence], tag: List[str] = [], domain: Union[str, "FiniteElementCodeGenerator", None] = None) -> SingleOrMultipleExpressions:
+def scale_factor(arg: str | NameStrSequence, tag: list[str] = [], domain: str | "FiniteElementCodeGenerator" | None = None) -> SingleOrMultipleExpressions:
 	"""
 	Returns the scale factor of an unknown used for nondimensionalization. Will be expanded during code generation.
 	If you pass scale=... as keyword argument to Equations.define_scalar_field, .define_vector_field or .define_ode_variable, this determines the scale factor.
@@ -273,7 +274,7 @@ def scale_factor(arg: Union[str, NameStrSequence], tag: List[str] = [], domain: 
 	Returns:
 		SingleOrMultipleExpressions: The scale factor(s), will be expanded only during code generation.
 	"""
-	res: List[Expression] = []
+	res: list[Expression] = []
 	if isinstance(domain, str):
 		tag = ["domain:" + domain]
 		domain = None
@@ -286,12 +287,12 @@ def scale_factor(arg: Union[str, NameStrSequence], tag: List[str] = [], domain: 
 
 
 @overload
-def test_scale_factor(arg:str,tag:List[str]=[],domain:Union[str,"FiniteElementCodeGenerator", None]=None)->Expression: ...
+def test_scale_factor(arg:str,tag:list[str]=[],domain:str | "FiniteElementCodeGenerator" | None=None)->Expression: ...
 
 @overload
-def test_scale_factor(arg:NameStrSequence,tag:List[str]=[],domain:Union[str,"FiniteElementCodeGenerator",None]=None)->Tuple[Expression,...]: ...
+def test_scale_factor(arg:NameStrSequence,tag:list[str]=[],domain:str | "FiniteElementCodeGenerator" | None=None)->tuple[Expression,...]: ...
 
-def test_scale_factor(arg:Union[str,NameStrSequence],tag:List[str]=[],domain:Union[str,"FiniteElementCodeGenerator",None]=None)->SingleOrMultipleExpressions:
+def test_scale_factor(arg:str | NameStrSequence,tag:list[str]=[],domain:str | "FiniteElementCodeGenerator" | None=None)->SingleOrMultipleExpressions:
 	"""
 	Returns the scale factor of a test function or multiple test functions used for nondimensionalization. Will be expanded during code generation.
 	If you pass testscale=... as keyword argument to Equations.define_scalar_field, .define_vector_field or .define_ode_variable, this determines the test scale factor.
@@ -306,7 +307,7 @@ def test_scale_factor(arg:Union[str,NameStrSequence],tag:List[str]=[],domain:Uni
 	Returns:
 		SingleOrMultipleExpressions: The test scale factor(s), will be expanded only during code generation.
 	"""
-	res:List[Expression]=[]
+	res:list[Expression]=[]
 	if isinstance(domain,str):
 		tag=["domain:"+domain]
 		domain=None
@@ -353,7 +354,7 @@ def is_zero(arg:ExpressionOrNum,parameters_to_float:bool=False)->bool:
 #	the keyword nondim
 # a coordinate system
 
-def grad(arg:ExpressionOrNum,lagrangian:bool=False,nondim:bool=False,coordsys:OptionalCoordinateSystem=None,vector:Union[None,bool]=None)->Expression:
+def grad(arg:ExpressionOrNum,lagrangian:bool=False,nondim:bool=False,coordsys:OptionalCoordinateSystem=None,vector:None | bool=None)->Expression:
 	"""
 	Compute the gradient of the given argument. On surfaces, i.e. with a co-dimension, it is the surface gradient.
 
@@ -435,7 +436,7 @@ def Weak(a:ExpressionOrNum,b:ExpressionOrNum,*,dimensional_dx:bool=False,coordin
 
 
 
-def minimize_functional_derivative(F:ExpressionOrNum,only_with_respect_to:Optional[Union[Expression,set[Expression],List[Expression],Tuple[Expression,...]]]=None,*,coordinate_system:OptionalCoordinateSystem=None,lagrangian:bool=False,dimensional_dx:bool=False,dimensional_testfunctions:bool=True)->Expression:
+def minimize_functional_derivative(F:ExpressionOrNum,only_with_respect_to:Expression | set[Expression] | list[Expression] | tuple[Expression, ...] | None=None,*,coordinate_system:OptionalCoordinateSystem=None,lagrangian:bool=False,dimensional_dx:bool=False,dimensional_testfunctions:bool=True)->Expression:
     if only_with_respect_to is None:
         only_with_respect_to=[]
     elif isinstance(only_with_respect_to,(set,tuple,list)):
@@ -507,7 +508,7 @@ def mesh_velocity(scheme:OptionalTimeSteppingScheme=None,nondim:bool=False)->Exp
 	return partial_t(nondim("mesh") if nondim else var("mesh"),ALE=False,scheme=scheme,nondim=nondim)
 
 
-def partial_t(f:Union[ExpressionOrNum,str],order:int=1,ALE:Union[Literal["auto"],bool]="auto",scheme:OptionalTimeSteppingScheme=None,nondim:bool=False)->Expression:
+def partial_t(f:ExpressionOrNum | str,order:int=1,ALE:Literal["auto"] | bool="auto",scheme:OptionalTimeSteppingScheme=None,nondim:bool=False)->Expression:
 	"""
 	Compute the partial derivative of a function with respect to time, i.e. .. :math:`\\partial_t^n f`. 
 	With `ALE=False`, this is evaluated at the nodal values directly, i.e. co-moving with a moving mesh. To correct for it by the mesh velocity :math:`\\dot{\\vec{X}}`, use the `ALE=True` or `ALE="auto"`. 
@@ -564,7 +565,7 @@ def partial_t(f:Union[ExpressionOrNum,str],order:int=1,ALE:Union[Literal["auto"]
 		v=[t]*order
 		return diff(f,*v)
 
-def material_derivative(f:Union[ExpressionOrNum,str],velocity:Union[ExpressionOrNum,str],ALE:Union[Literal["auto"],bool]="auto",dt_scheme:OptionalTimeSteppingScheme=None,nondim:bool=False,lagrangian:bool=False,dt_factor:ExpressionOrNum=1,advection_factor:ExpressionOrNum=1,coordsys:OptionalCoordinateSystem=None)->Expression:
+def material_derivative(f:ExpressionOrNum | str,velocity:ExpressionOrNum | str,ALE:Literal["auto"] | bool="auto",dt_scheme:OptionalTimeSteppingScheme=None,nondim:bool=False,lagrangian:bool=False,dt_factor:ExpressionOrNum=1,advection_factor:ExpressionOrNum=1,coordsys:OptionalCoordinateSystem=None)->Expression:
 	"""
 	Compute the material derivative of a function with respect to time, i.e. :math:`\\partial_t f + \\nabla f \\cdot \\vec{u}`. Note that for tensorial quantities, one usually uses the :py:func:`upper_convected_derivative` instead.
 
@@ -593,14 +594,14 @@ def material_derivative(f:Union[ExpressionOrNum,str],velocity:Union[ExpressionOr
 	adv_term=directional_derivative(f,velocity,nondim=nondim,lagrangian=lagrangian,coordsys=coordsys)
 	return dt_factor * partial_t(f, ALE=ALE, scheme=dt_scheme, nondim=nondim) + advection_factor * adv_term
 
-def convected_derivative(A:ExpressionOrNum,velocity:ExpressionOrNum,alpha:ExpressionOrNum=0,ALE:Union[Literal["auto"],bool]=False,dt_scheme:OptionalTimeSteppingScheme=None,nondim:bool=False,lagrangian:bool=False,dt_factor:ExpressionOrNum=1,advection_factor:ExpressionOrNum=1,coordsys:OptionalCoordinateSystem=None)->Expression:
+def convected_derivative(A:ExpressionOrNum,velocity:ExpressionOrNum,alpha:ExpressionOrNum=0,ALE:Literal["auto"] | bool=False,dt_scheme:OptionalTimeSteppingScheme=None,nondim:bool=False,lagrangian:bool=False,dt_factor:ExpressionOrNum=1,advection_factor:ExpressionOrNum=1,coordsys:OptionalCoordinateSystem=None)->Expression:
 	res=material_derivative(A,velocity,ALE,dt_scheme,nondim,lagrangian,dt_factor,advection_factor,coordsys)
 	gradv=grad(velocity,lagrangian=lagrangian,nondim=nondim) # Due to different conventions, this might be transposed in other references!
 	g_alpha=0.5*((1+alpha)*gradv-(1-alpha)*transpose(gradv))
 	res-=advection_factor*(matproduct(A,transpose(g_alpha))+matproduct(g_alpha,A))
 	return res
 
-def upper_convected_derivative(A:ExpressionOrNum,velocity:ExpressionOrNum,ALE:Union[Literal["auto"],bool]="auto",dt_scheme:OptionalTimeSteppingScheme=None,nondim:bool=False,lagrangian:bool=False,dt_factor:ExpressionOrNum=1,advection_factor:ExpressionOrNum=1,coordsys:OptionalCoordinateSystem=None)->Expression:
+def upper_convected_derivative(A:ExpressionOrNum,velocity:ExpressionOrNum,ALE:Literal["auto"] | bool="auto",dt_scheme:OptionalTimeSteppingScheme=None,nondim:bool=False,lagrangian:bool=False,dt_factor:ExpressionOrNum=1,advection_factor:ExpressionOrNum=1,coordsys:OptionalCoordinateSystem=None)->Expression:
 	"""
  	Returns the upper-convected derivative of a tensor field :math:`\\mathbf{A}`, i.e. :math:`\\partial_t \\mathbf{A} + \\vec{u}\\cdot\\nabla\\mathbf{A}-(\\nabla \\vec{u})^\\mathrm{T}\\cdot \\mathbf{A} - \\mathbf{A}\\cdot\\nabla\\vec{u}`.
 
@@ -636,18 +637,18 @@ def directional_derivative(f:ExpressionOrNum,direction:ExpressionOrNum,nondim:bo
 	return _pyoomph.GiNaC_directional_derivative(f,direction,_pyoomph.Expression(-1),_pyoomph.Expression(-1),coordsysEx,_pyoomph.Expression(flag))
 
 @overload
-def testfunction(arg:str,tag:List[str]=[],domain:Union[None,_pyoomph.FiniteElementCode,str]=None,dimensional:bool=True)->Expression: ...
+def testfunction(arg:str,tag:list[str]=[],domain:None | _pyoomph.FiniteElementCode | str=None,dimensional:bool=True)->Expression: ...
 
 @overload
-def testfunction(arg:Expression,tag:List[str]=[],domain:Union[None,_pyoomph.FiniteElementCode,str]=None,dimensional:bool=True)->Expression: ...
+def testfunction(arg:Expression,tag:list[str]=[],domain:None | _pyoomph.FiniteElementCode | str=None,dimensional:bool=True)->Expression: ...
 
 @overload
-def testfunction(arg:NameStrSequence,tag:List[str]=[],domain:Union[None,_pyoomph.FiniteElementCode,str]=None,dimensional:bool=True)->Tuple[Expression,...]: ...
+def testfunction(arg:NameStrSequence,tag:list[str]=[],domain:None | _pyoomph.FiniteElementCode | str=None,dimensional:bool=True)->tuple[Expression,...]: ...
 
 @overload
-def testfunction(arg:ExprStrSequence,tag:List[str]=[],domain:Union[None,_pyoomph.FiniteElementCode,str]=None,dimensional:bool=True)->Tuple[Expression,...]: ...
+def testfunction(arg:ExprStrSequence,tag:list[str]=[],domain:None | _pyoomph.FiniteElementCode | str=None,dimensional:bool=True)->tuple[Expression,...]: ...
 
-def testfunction(arg:Union[str,Expression,NameStrSequence,ExprStrSequence],tag:List[str]=[],domain:Union[None,_pyoomph.FiniteElementCode,str]=None,dimensional:bool=True)->SingleOrMultipleExpressions:
+def testfunction(arg:str | Expression | NameStrSequence | ExprStrSequence,tag:list[str]=[],domain:None | _pyoomph.FiniteElementCode | str=None,dimensional:bool=True)->SingleOrMultipleExpressions:
 	"""
 	Return the testfunction corresponding to the field(s) 
 
@@ -682,7 +683,7 @@ def testfunction(arg:Union[str,Expression,NameStrSequence,ExprStrSequence],tag:L
 			else:
 				return _pyoomph.GiNaC_testfunction(str(arg.op(0)), domain, tag)
 	else:
-		res:List[Expression]=[]
+		res:list[Expression]=[]
 		for n in arg:
 			res.append(testfunction(n,tag=tag,domain=domain,dimensional=dimensional))		
 		return tuple(res)
@@ -713,7 +714,7 @@ def diff(f:ExpressionOrNum,*arg:Expression)->Expression:
 
 
    
-def symbolic_diff(expr:ExpressionOrNum,x:Union[Expression,str],hold_until_codegen:bool=True):
+def symbolic_diff(expr:ExpressionOrNum,x:Expression | str,hold_until_codegen:bool=True):
 	"""
 	Compute the symbolic differentiation of an expression with respect to a variable. It will be held, i.e. not applied, until code generation by default.
 
@@ -782,7 +783,7 @@ def symbolic_diff(expr:ExpressionOrNum,x:Union[Expression,str],hold_until_codege
 symbolic_diff.counter=0
         
 
-def matrix(mlist:List[List[ExpressionOrNum]],fill_to_max_vector_dim:bool=True,fill_identity:bool=False)->Expression:
+def matrix(mlist:list[list[ExpressionOrNum]],fill_to_max_vector_dim:bool=True,fill_identity:bool=False)->Expression:
 	"""
 	Create a GiNaC matrix from a list of lists.
 
@@ -801,7 +802,7 @@ def matrix(mlist:List[List[ExpressionOrNum]],fill_to_max_vector_dim:bool=True,fi
 	"""
 	nrow=len(mlist)
 	ncol=len(mlist[0])
-	res:List[Expression]=[]
+	res:list[Expression]=[]
 	vd=_pyoomph.GiNaC_vector_dim()
 	if nrow>vd:
 		raise ValueError("too many matrix rows: " + str(mlist))
@@ -859,7 +860,7 @@ def dyadic(a: Expression, b: Expression) -> Expression:
     return matrix([[a[i] * b[j] for j in range(3)] for i in range(3)])
 
 
-def unit_vector(dir: Union[int, Literal["x", "y", "z"]]) -> Expression:
+def unit_vector(dir: int | Literal["x", "y", "z"]) -> Expression:
 	"""
 	Returns a unit vector in the specified direction.
 
@@ -928,7 +929,7 @@ def avg(f:ExpressionOrNum,at_facet:bool=False):
 	else:
 		return (evaluate_in_domain(f,'+')+evaluate_in_domain(f,'-'))/2
 
-def vector(*args:Union[ExpressionOrNum,List[ExpressionOrNum]])->Expression:
+def vector(*args:ExpressionOrNum | list[ExpressionOrNum])->Expression:
 	"""
 	Create a vector expression from the given components.
 
@@ -951,14 +952,14 @@ def vector(*args:Union[ExpressionOrNum,List[ExpressionOrNum]])->Expression:
 		if len(args)!=1:
 			raise RuntimeError("Either call vector(compo1,compo2,...) or vector([compo1,compo2,...])")
 	else:
-		vlist:List[ExpressionOrNum]=[]
+		vlist:list[ExpressionOrNum]=[]
 		for a in args:
 			a=0+a
 			if not isinstance(a,(_pyoomph.Expression,float,int)):
 				raise RuntimeError("Strange vector component "+str(a))
 			vlist.append(a)	
 	
-	exlist:List[Expression]=[]
+	exlist:list[Expression]=[]
 	for a in vlist:
 		if isinstance(a,_pyoomph.Expression):
 			exlist.append(a)
@@ -974,7 +975,7 @@ def vector(*args:Union[ExpressionOrNum,List[ExpressionOrNum]])->Expression:
 	return _pyoomph.GiNaC_Vect(exlist)
 
 
-def convert_to_expression(a:Union[ExpressionOrNum,NPAnyArray])->Expression:
+def convert_to_expression(a:ExpressionOrNum | NPAnyArray)->Expression:
 	if isinstance(a,_pyoomph.Expression):
 		return a
 	if isinstance(a,numpy.ndarray): 
@@ -982,7 +983,7 @@ def convert_to_expression(a:Union[ExpressionOrNum,NPAnyArray])->Expression:
 	else:
 		return _pyoomph.Expression(a)
 
-def dot(a:Union[ExpressionOrNum,str],b:Union[ExpressionOrNum,str])->Expression:    
+def dot(a:ExpressionOrNum | str,b:ExpressionOrNum | str)->Expression:    
 	"""
 	Compute the dot product between two vectors.
 
@@ -1101,7 +1102,7 @@ def delayed_lambda_expansion(func:Callable[[],Expression])->Expression:
 	return 0+_pyoomph.GiNaC_delayed_expansion(wrapped)
 
 
-def evaluate_in_domain(expr:ExpressionOrNum,domain:Union[str,_pyoomph.FiniteElementCode,None]):
+def evaluate_in_domain(expr:ExpressionOrNum,domain:str | _pyoomph.FiniteElementCode | None):
 	"""
 	Evaluates the given expression within the specified domain. Each var inside the expression will be evaluated in the given domain. Useful to e.g. evaluate the expression in the bulk (domain="``..``") when at an boundary element, or at the opposite side of the interface (domain="``|.``")
 
@@ -1122,7 +1123,7 @@ def evaluate_in_domain(expr:ExpressionOrNum,domain:Union[str,_pyoomph.FiniteElem
 	return _pyoomph.GiNaC_eval_in_domain(expr,domain,tags)
 
 
-def evaluate_in_past(expr:ExpressionOrNum,timestep_offset:Union[int,float]=1,apply_on_integral_dx:bool=False)->Expression:
+def evaluate_in_past(expr:ExpressionOrNum,timestep_offset:int | float=1,apply_on_integral_dx:bool=False)->Expression:
 	"""
 	Evaluate the given expression in the past at a specified time offset.
 
@@ -1167,7 +1168,7 @@ def evaluate_in_past(expr:ExpressionOrNum,timestep_offset:Union[int,float]=1,app
 		raise RuntimeError("cannot yet evaluate at a variable step. But you can use e.g. (1-theta)*evaluate_at_past(expr,1)+theta*expr for some variable theta to blend between current and previous time step")
 
 
-def evaluate_at_midpoint(expr:ExpressionOrNum, midpt:Union[float,int]=0.5,apply_on_integral_dx:bool=False)->Expression:
+def evaluate_at_midpoint(expr:ExpressionOrNum, midpt:float | int=0.5,apply_on_integral_dx:bool=False)->Expression:
 	"""
 	Evaluates the given expression by replacing each var by a blending between the history values.
 
@@ -1250,7 +1251,7 @@ get_global_symbol=_pyoomph.GiNaC_get_global_symbol
 
 
 
-def rational_num(numer_or_float_str: Union[int, str], denom: int = 1) -> Expression:
+def rational_num(numer_or_float_str: int | str, denom: int = 1) -> Expression:
 	"""
 	Create a rational number expression at full accuracy. Opposed to floats, this will not introduce any rounding errors.
 

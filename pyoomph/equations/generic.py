@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -47,7 +48,7 @@ import warnings
 
 
 # TODO Check this
-def get_interface_field_connection_space(inside_space:Union[FiniteElementSpaceEnum,Literal[""]],outside_space:Union[FiniteElementSpaceEnum,Literal[""]],use_highest_space:bool=False)->Union[FiniteElementSpaceEnum,Literal[""]]:
+def get_interface_field_connection_space(inside_space:FiniteElementSpaceEnum | Literal[""],outside_space:FiniteElementSpaceEnum | Literal[""],use_highest_space:bool=False)->FiniteElementSpaceEnum | Literal[""]:
     if outside_space == "":
         return inside_space
     elif inside_space == "":
@@ -76,7 +77,7 @@ class ConnectFieldsAtInterface(InterfaceEquations):
         use_highest_space: Flag indicating whether to use the highest space for the Lagrange multipliers. If the fields have different spatial discretizations on both sides, we have to decide which space to use for the Lagrange multipliers. If this flag is set to True, the highest space will be used. Defaults to False.
         check_consistent_scaling: Flag indicating whether to check for consistent scaling of the fields on both sides. Defaults to True.
     """
-    def __init__(self,fields:Union[str,Dict[str,str],List[str]],*,lagr_mult_prefix:str="_lagr_conn_",use_highest_space:bool=False,check_consistent_scaling:bool=True):
+    def __init__(self,fields:str | dict[str, str] | list[str],*,lagr_mult_prefix:str="_lagr_conn_",use_highest_space:bool=False,check_consistent_scaling:bool=True):
         super(ConnectFieldsAtInterface, self).__init__()
         self.lagr_mult_prefix=lagr_mult_prefix
         self.use_highest_space=use_highest_space
@@ -152,7 +153,7 @@ class ConnectFieldsAtInterface(InterfaceEquations):
 
 class ConnectFieldsAtInterfaceRemoveOverconstraining(InterfaceEquations):
     required_parent_type = ConnectFieldsAtInterface
-    def __init__(self,fields:Union[str,Dict[str,str],List[str]]):
+    def __init__(self,fields:str | dict[str, str] | list[str]):
         super(ConnectFieldsAtInterfaceRemoveOverconstraining, self).__init__()
         self.lagr_mult_prefix = "_lagr_conn_"
         if not isinstance(fields,dict):
@@ -188,9 +189,9 @@ class SpatialErrorEstimator(Equations):
     for_which controls whether these error estimators are used for the base solution, potential eigenfunctions or both.
     """
 
-    def __init__(self,*fluxes:Union[str,Expression],for_which:Literal["both","base","eigen"]="both",**kwargs:ExpressionOrNum):
+    def __init__(self,*fluxes:str | Expression,for_which:Literal["both","base","eigen"]="both",**kwargs:ExpressionOrNum):
         super(SpatialErrorEstimator, self).__init__()
-        self.fluxes:Dict[Union[str,Expression],ExpressionOrNum]={x:1.0 for x in fluxes}
+        self.fluxes:dict[str | Expression,ExpressionOrNum]={x:1.0 for x in fluxes}
         for lhs,rhs in kwargs.items():
             self.fluxes[lhs]=rhs
         if for_which=="both":
@@ -244,7 +245,7 @@ class RefineToLevel(Equations):
     """
     Refine elements to a certain level. If the level is set to "max", the elements will be refined to the maximum level set by e.g. :py:attr:`~pyoomph.generic.problem.Problem.max_refinement_level`.
     """
-    def __init__(self, level:Union[Literal["max"],int]="max"):
+    def __init__(self, level:Literal["max"] | int="max"):
         super(RefineToLevel, self).__init__()
         self.level = level
 
@@ -278,7 +279,7 @@ class  RefineToMaxLevel(RefineToLevel):
     """
     Deprecated: Use RefineToLevel() instead.
     """
-    def __init__(self, level:Union[Literal["max"],int]="max"):
+    def __init__(self, level:Literal["max"] | int="max"):
         warnings.warn("RefineToMaxLevel is deprecated, use RefineToLevel() instead.", DeprecationWarning, stacklevel=2)
         super(RefineToMaxLevel, self).__init__(level="max")
     
@@ -355,7 +356,7 @@ class RemeshingOptions:
         self.on_invalid_triangulation=on_invalid_triangulation
         self.active=active
 
-    def keys(self) -> List[str]:
+    def keys(self) -> list[str]:
         return ['max_expansion', 'min_expansion','min_solves_before_remesh','reinit_initial_size_after_one_step','active','min_quality_decrease']
 
     def __getitem__(self, key:str)->Any:
@@ -376,7 +377,7 @@ class RemeshWhen(Equations):
         min_quality_decrease: Minimum quality decrease of an element before remeshing is invoked.
         on_invalid_triangulation: Flag indicating whether to remesh if the triangulation is invalid.
     """
-    def __init__(self,remeshing_opts:Optional[RemeshingOptions]=None,*,max_expansion:Optional[float]=None,min_expansion:Optional[float]=None,min_solves_before_remesh:Optional[int]=0,reinit_initial_size_after_one_step:Optional[bool]=False,active:bool=True,min_quality_decrease:Optional[float]=None,on_invalid_triangulation:bool=False):
+    def __init__(self,remeshing_opts:RemeshingOptions | None=None,*,max_expansion:float | None=None,min_expansion:float | None=None,min_solves_before_remesh:int | None=0,reinit_initial_size_after_one_step:bool | None=False,active:bool=True,min_quality_decrease:float | None=None,on_invalid_triangulation:bool=False):
 
         super(RemeshWhen, self).__init__()
         if isinstance(remeshing_opts,RemeshingOptions):
@@ -477,7 +478,7 @@ class RemeshMeshSize(BaseEquations):
     Args:
         size: The local size, i.e. the typical nondimensional length of an element here. Can be a constant or a function of the point.
     """
-    def __init__(self,size:Optional[Union[float,Callable[["RemesherPointEntry"],float]]]=None):
+    def __init__(self,size:float | Callable[["RemesherPointEntry"], float] | None=None):
         super(RemeshMeshSize, self).__init__()
         self.size=size
 
@@ -500,7 +501,7 @@ class RemeshMeshSize(BaseEquations):
 
 
 class ProjectExpression(Equations):
-    def __init__(self,scale:Union[ExpressionOrNum,str]=1,space:FiniteElementSpaceEnum="C2",field_type:Literal["scalar","vector"]="scalar",coordinate_system:Optional["BaseCoordinateSystem"]=None, **projs:ExpressionOrNum):
+    def __init__(self,scale:ExpressionOrNum | str=1,space:FiniteElementSpaceEnum="C2",field_type:Literal["scalar","vector"]="scalar",coordinate_system:"BaseCoordinateSystem" | None=None, **projs:ExpressionOrNum):
         super(ProjectExpression, self).__init__()
         self.space:FiniteElementSpaceEnum=space
         self.scale=scale
@@ -536,7 +537,7 @@ class InitialCondition(BaseEquations):
         **kwargs: Keyword arguments representing the initial conditions for each variable.
     """
 
-    def __init__(self, *, degraded_start: Union[bool, Literal["auto"]] = "auto", IC_name: str = "", **kwargs: ExpressionOrNum):
+    def __init__(self, *, degraded_start: bool | Literal["auto"] = "auto", IC_name: str = "", **kwargs: ExpressionOrNum):
         super(InitialCondition, self).__init__()
         self._ics = {n: 0 + v for n, v in kwargs.items()}
         self._ic_name = IC_name
@@ -607,7 +608,7 @@ class EquationCompilationFlags(BaseEquations):
         ccode_expression_mode (Optional[str]): Mode for C-code expression, e.g. "expand", "normal", "collect_common_factors", "factor".
         with_adaptivity (Optional[bool]): Flag indicating whether you allow for spatial adaptivity.
     """    
-    def __init__(self,analytical_position_jacobian:Optional[bool]=None,analytical_jacobian:Optional[bool]=None,warn_on_large_numerical_factor:Optional[bool]=None,debug_jacobian_epsilon:Optional[float]=None,ccode_expression_mode:Optional[str]=None,with_adaptivity:Optional[bool]=None):
+    def __init__(self,analytical_position_jacobian:bool | None=None,analytical_jacobian:bool | None=None,warn_on_large_numerical_factor:bool | None=None,debug_jacobian_epsilon:float | None=None,ccode_expression_mode:str | None=None,with_adaptivity:bool | None=None):
         super(EquationCompilationFlags, self).__init__()
         self.analytical_position_jacobian=analytical_position_jacobian
         self.analytical_jacobian=analytical_jacobian
@@ -656,7 +657,7 @@ class SetCoordinateSystem(Equations):
 
 
 class ApplyMappingOnAddedResidual(BaseEquations):    #
-    def __init__(self,mapping:Callable[[str,"Expression"],Union["Expression",Dict[str,"Expression"]]]=lambda destination,expr:{destination:expr}):
+    def __init__(self,mapping:Callable[[str,"Expression"],"Expression" | dict[str, "Expression"]]=lambda destination,expr:{destination:expr}):
         super(ApplyMappingOnAddedResidual, self).__init__()
         self.mapping=mapping
 
@@ -761,7 +762,7 @@ class IntegralObservables(Equations):
         _coordinate_system (Optional[BaseCoordinateSystem]): The coordinate system to use. Defaults to None, i.e. the one of the equations or the problem.
         **integral_observables (Union[ExpressionOrNum, Callable[..., ExpressionOrNum]]): Integral observables to be added.
     """
-    def __init__(self,_coordinate_system:Optional["BaseCoordinateSystem"]=None,_lagrangian:bool=False, **integral_observables:Union[ExpressionOrNum,Callable[...,ExpressionOrNum]]):
+    def __init__(self,_coordinate_system:"BaseCoordinateSystem" | None=None,_lagrangian:bool=False, **integral_observables:ExpressionOrNum | Callable[..., ExpressionOrNum]):
         super(IntegralObservables, self).__init__()
         is_dependent_func=lambda v: callable(v) and not isinstance(v,Expression)
         self.integral_observables = {k:v for k,v in integral_observables.items() if not is_dependent_func(v)}
@@ -852,7 +853,7 @@ class Scaling(BaseEquations):
     Args:
         **scales (ExpressionOrNum): Used scales for nondimensionalization.
     """
-    def __init__(self,**kwargs:Union[ExpressionOrNum,str]):
+    def __init__(self,**kwargs:ExpressionOrNum | str):
         super(Scaling, self).__init__()
         self.scales=kwargs.copy()
     def define_scaling(self):
@@ -867,7 +868,7 @@ class TestScaling(BaseEquations):
         **testscales (ExpressionOrNum): Used scales for nondimensionalization of the test functions.
     """    
     __test__ = False
-    def __init__(self,**kwargs:Union[ExpressionOrNum,str]):
+    def __init__(self,**kwargs:ExpressionOrNum | str):
         super(TestScaling, self).__init__()
         self.scales=kwargs.copy()
 
@@ -903,7 +904,7 @@ class ElementSpace(Equations):
 # Used for Average and Integral constraints
 # If physical dimensions are set, it only works if the these are set on problem level by problem.set_scaling(...=...), not if set in the equations
 class _AverageOrIntegralConstraintBase(Equations):
-    def __init__(self,*,ode_storage_domain:Optional[str]=None,only_for_stationary_solve:bool=False,set_zero_on_normal_mode_eigensolve:bool=True,scaling_factor:Union[str,ExpressionNumOrNone]=None, **kwargs:"ExpressionOrNum"):
+    def __init__(self,*,ode_storage_domain:str | None=None,only_for_stationary_solve:bool=False,set_zero_on_normal_mode_eigensolve:bool=True,scaling_factor:str | ExpressionNumOrNone=None, **kwargs:"ExpressionOrNum"):
         super().__init__()
         self.ode_storage_domain=ode_storage_domain        
         self.constraints=kwargs.copy()
@@ -914,13 +915,13 @@ class _AverageOrIntegralConstraintBase(Equations):
         if isinstance(self.scaling_factor,str):
             self.scaling_factor=scale_factor(self.scaling_factor)
 
-    def get_global_dof_storage_name(self, pathname: Optional[str] = None):
+    def get_global_dof_storage_name(self, pathname: str | None = None):
         if self.ode_storage_domain is None:
             return super().get_global_dof_storage_name(pathname)
         else:
             return self.ode_storage_domain
         
-    def after_fill_dummy_equations(self, problem: "Problem", eqtree: "EquationTree",pathname:str,elem_dim:Optional[int]=None):
+    def after_fill_dummy_equations(self, problem: "Problem", eqtree: "EquationTree",pathname:str,elem_dim:int | None=None):
         from ..generic.codegen import GlobalLagrangeMultiplier
 
         if len(self.constraints)==0:
@@ -981,7 +982,7 @@ class IntegralConstraint(_AverageOrIntegralConstraintBase):
         scaling_factor (Union[str, ExpressionNumOrNone]): The scaling factor for the constraint.
         **kwargs (ExpressionOrNum): Constraints as name=value pairs.
     """       
-    def __init__(self, *, dimensional_dx:bool=True,ode_storage_domain: Optional[str] = None, only_for_stationary_solve: bool = False, set_zero_on_normal_mode_eigensolve: bool = True, scaling_factor:Union[str,ExpressionNumOrNone]=None, **kwargs: ExpressionOrNum):
+    def __init__(self, *, dimensional_dx:bool=True,ode_storage_domain: str | None = None, only_for_stationary_solve: bool = False, set_zero_on_normal_mode_eigensolve: bool = True, scaling_factor:str | ExpressionNumOrNone=None, **kwargs: ExpressionOrNum):
         super().__init__(ode_storage_domain=ode_storage_domain, only_for_stationary_solve=only_for_stationary_solve, set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve, scaling_factor=scaling_factor, **kwargs)
         self.dimensional_dx=dimensional_dx
     

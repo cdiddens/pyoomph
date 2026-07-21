@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -46,17 +47,17 @@ if TYPE_CHECKING:
 import math
 
 MixQuantityDefinition=Literal["mass_fraction","wt","mole_fraction","volume_fraction","relative_humidity","RH"]
-AnyMaterialProperties=Union["MaterialProperties", "BaseLiquidProperties", "BaseGasProperties", "BaseSolidProperties", "PureSolidProperties", "PureLiquidProperties", "PureGasProperties", "MixtureLiquidProperties","MixtureGasProperties"]
-OutputPropertiesType=Dict[str,Optional[Callable[["MaterialProperties"],ExpressionNumOrNone]]]
-DefaultSurfaceTensionType=Dict[Literal["gas","solid","liquid"],ExpressionNumOrNone]
-PropertySampleRangeType=Union[ExpressionOrNum,ArrayWithUnits,List[ExpressionOrNum]]
+AnyMaterialProperties:TypeAlias="MaterialProperties | BaseLiquidProperties | BaseGasProperties | BaseSolidProperties | PureSolidProperties | PureLiquidProperties | PureGasProperties | MixtureLiquidProperties | MixtureGasProperties"
+OutputPropertiesType=dict[str,Callable[["MaterialProperties"], ExpressionNumOrNone] | None]
+DefaultSurfaceTensionType=dict[Literal["gas","solid","liquid"],ExpressionNumOrNone]
+PropertySampleRangeType=ExpressionOrNum|ArrayWithUnits|list[ExpressionOrNum]
 
-AnyFluidProperties=Union["PureLiquidProperties", "PureGasProperties", "MixtureLiquidProperties","MixtureGasProperties"]
-AnyLiquidProperties=Union["PureLiquidProperties", "MixtureLiquidProperties"]
-AnyGasProperties=Union["PureGasProperties", "MixtureGasProperties"]
-AnyFluidFluidInterface=Union["LiquidGasInterfaceProperties","LiquidLiquidInterfaceProperties"]
+AnyFluidProperties:TypeAlias="PureLiquidProperties | PureGasProperties | MixtureLiquidProperties | MixtureGasProperties"
+AnyLiquidProperties:TypeAlias="PureLiquidProperties | MixtureLiquidProperties"
+AnyGasProperties:TypeAlias="PureGasProperties | MixtureGasProperties"
+AnyFluidFluidInterface:TypeAlias="LiquidGasInterfaceProperties | LiquidLiquidInterfaceProperties"
 
-_TypeMaterialProperties=TypeVar("_TypeMaterialProperties",bound=Union[Type["MaterialProperties"],Type["BaseInterfaceProperties"]])
+_TypeMaterialProperties=TypeVar("_TypeMaterialProperties",bound="type[MaterialProperties] | type[BaseInterfaceProperties]")
 
 
 def assert_liquid_properties(props:"MaterialProperties")->AnyLiquidProperties:
@@ -87,10 +88,9 @@ class BaseInterfaceProperties:
     """
     Base class for interface properties. 
     """
-    def _sort_phases(self,sideA:AnyMaterialProperties,sideB:AnyMaterialProperties)->Tuple[AnyMaterialProperties,AnyMaterialProperties]:
+    def _sort_phases(self,sideA:AnyMaterialProperties,sideB:AnyMaterialProperties)->tuple[AnyMaterialProperties,AnyMaterialProperties]:
         return sideA,sideB
-    def __init__(self,sideA:Union[AnyMaterialProperties,"MixtureDefinitionComponents"],sideB:Union[AnyMaterialProperties,"MixtureDefinitionComponents"]):
-        from .mass_transfer import MassTransferModelBase
+    def __init__(self,sideA:AnyMaterialProperties | "MixtureDefinitionComponents",sideB:AnyMaterialProperties | "MixtureDefinitionComponents"):
         if isinstance(sideA,MixtureDefinitionComponents):
             sideA=Mixture(sideA)
         if isinstance(sideB,MixtureDefinitionComponents):
@@ -99,9 +99,9 @@ class BaseInterfaceProperties:
         #: The surface tension of this interface
         self.surface_tension:ExpressionOrNum
         #: The mass transfer model to use for this interface
-        self._mass_transfer_model:Optional[MassTransferModelBase]=None
+        self._mass_transfer_model:MassTransferModelBase | None=None
         self._surfactant_table={}
-        self._latent_heats:Dict[str,ExpressionOrNum]={}
+        self._latent_heats:dict[str,ExpressionOrNum]={}
 
     def set_latent_heat_of(self,name:str,lat_heat:ExpressionOrNum):
         self._latent_heats[name]=lat_heat
@@ -112,7 +112,7 @@ class BaseInterfaceProperties:
             raise RuntimeError("No latent heat set for "+name)
         return res
 
-    def set_mass_transfer_model(self,mdl:Optional["MassTransferModelBase"]) -> None:
+    def set_mass_transfer_model(self,mdl:"MassTransferModelBase" | None) -> None:
         """
         Sets the mass transfer model.
         """
@@ -128,13 +128,13 @@ class MaterialProperties:
     #: Unique name of the material. Names should be unique within the same state of matter (e.g. liquid, gas, solid), and the same material name for the same material should be used for different states of matter.
     name:str
     #: Whether the material is pure or mixed. If the material is mixed, the components of the mixture should be specified in the :py:attr:`~pyoomph.materials.generic.MaterialProperties.components` attribute. This should be treated as read-only property.
-    is_pure:Optional[bool]
+    is_pure:bool | None
     #: State of matter of the material. This should be treated as read-only property.
-    state_of_matter:Optional[str]
+    state_of_matter:str | None
     #: In case of a mixture, the components of the mixture. Should be set as class-variable in the subclass.
-    components:Set[str]=set()
+    components:set[str]=set()
     
-    library:Dict[str,Dict[str,Any]]={"gas":{"pure":{},"mixed":{}},"solid":{"pure":{},"mixed":{}},"liquid":{"pure":{},"mixed":{}},"interfaces":{"liquid_gas":{},"liquid_solid":{},"_defaults":{},"liquid_liquid":{}}}
+    library:dict[str,dict[str,Any]]={"gas":{"pure":{},"mixed":{}},"solid":{"pure":{},"mixed":{}},"liquid":{"pure":{},"mixed":{}},"interfaces":{"liquid_gas":{},"liquid_solid":{},"_defaults":{},"liquid_liquid":{}}}
     _output_properties:OutputPropertiesType={}
     
     
@@ -156,13 +156,13 @@ class MaterialProperties:
                         liq_compos=frozenset(liq_compos)
                     gas_compos=subclass.gas_components
                     if gas_compos is None:
-                        gas_compos=cast(Set[str],set())
+                        gas_compos=cast(set[str],set())
                     elif isinstance(gas_compos,str):
                         gas_compos={gas_compos}
                     gas_compos=frozenset(gas_compos)
                     surfacts=subclass.surfactants
                     if surfacts is None:
-                        surfacts=cast(Set[str],set())
+                        surfacts=cast(set[str],set())
                     elif isinstance(surfacts,str):
                         surfacts = {surfacts}
                     surfacts=frozenset(surfacts)
@@ -181,13 +181,13 @@ class MaterialProperties:
                         liq_compos = frozenset(liq_compos)
                     solid_compos = subclass.solid_components
                     if solid_compos is None:
-                        solid_compos = cast(Set[str],set())
+                        solid_compos = cast(set[str],set())
                     elif isinstance(solid_compos,str):
                         solid_compos={solid_compos}
                     solid_compos = frozenset(solid_compos)
                     surfacts = subclass.surfactants
                     if surfacts is None:
-                        surfacts=cast(Set[str],set())
+                        surfacts=cast(set[str],set())
                     elif isinstance(surfacts,str):
                         surfacts = {surfacts}
                     surfacts=frozenset(surfacts)
@@ -208,7 +208,7 @@ class MaterialProperties:
                         compsB = frozenset(compsB)
                     surfacts = subclass.surfactants
                     if surfacts is None:
-                        surfacts = cast(Set[str],set())
+                        surfacts = cast(set[str],set())
                     surfacts = frozenset(surfacts)
                     entry = (frozenset({compsA, compsB}), surfacts)
 
@@ -248,9 +248,9 @@ class MaterialProperties:
         return decorator
 
 
-    def generate_field_substs(self,cond:Dict[str,ExpressionOrNum])->Tuple[Dict[str,Expression],Dict[str,Expression]]:
-        fields:Dict[str,Expression]={}
-        defined_massfracs:Dict[str,ExpressionOrNum]={}
+    def generate_field_substs(self,cond:dict[str,ExpressionOrNum])->tuple[dict[str,Expression],dict[str,Expression]]:
+        fields:dict[str,Expression]={}
+        defined_massfracs:dict[str,ExpressionOrNum]={}
         for lhs,rhs in cond.items():
             if rhs is None:
                 continue
@@ -286,7 +286,7 @@ class MaterialProperties:
         #print(fields)
         return fields,{}
     
-    def evaluate_at_condition(self,expr:Union[ExpressionOrNum,str],cond:Union[Dict[str,ExpressionOrNum],Literal["initial","IC","initial_condition"]]={},*,temperature:ExpressionNumOrNone=None,**kwargs:ExpressionNumOrNone) -> Expression:
+    def evaluate_at_condition(self,expr:ExpressionOrNum | str,cond:dict[str, ExpressionOrNum] | Literal["initial", "IC", "initial_condition"]={},*,temperature:ExpressionNumOrNone=None,**kwargs:ExpressionNumOrNone) -> Expression:
         """
         Evaluates a property at the given condition (temperature, mass fractions, etc.). The mass fractions should be given as ``massfrac_<component_name>``, where ``<component_name>`` is the name of the component. The mole fractions should be given as ``molefrac_<component_name>``. Other typical conditions are ``temperature`` and ``absolute_pressure``.
 
@@ -314,7 +314,7 @@ class MaterialProperties:
         if temperature is not None:
             mycond["temperature"]=temperature
         fields,nondims=self.generate_field_substs(mycond)
-        remkeys:Set[str]=set()
+        remkeys:set[str]=set()
         for n,f in fields.items():
             if f is None:
                 remkeys.add(n)
@@ -336,7 +336,7 @@ class MaterialProperties:
         #print("SUBS FIELDS", expr, "FIELDS", fields, "NONDIM", nondims, "COND", cond)
         #print("RET ",_pyoomph.GiNaC_subsfields(expr,fields,nondims,{})) #TODO Global params
 #		ext()
-        return _pyoomph.GiNaC_subsfields(expr,cast(Dict[str,_pyoomph.Expression],fields),cast(Dict[str,_pyoomph.Expression],nondims),{}) #type:ignore #TODO Global params
+        return _pyoomph.GiNaC_subsfields(expr,cast(dict[str,_pyoomph.Expression],fields),cast(dict[str,_pyoomph.Expression],nondims),{}) #type:ignore #TODO Global params
 
     def simplify_property_expressions(self,*property_names:str,**variables:ExpressionOrNum):
         for name in property_names:
@@ -347,7 +347,7 @@ class MaterialProperties:
 
     def __init__(self):
         #: The initial condition of the material. Will be set automatically when using e.g. the :py:func:`Mixture` function to assemble a mixture of pure components.
-        self.initial_condition:Dict[str,ExpressionOrNum]={}
+        self.initial_condition:dict[str,ExpressionOrNum]={}
         #: The mass density of the material. 
         self.mass_density:ExpressionOrNum#=None
         #: The specific heat capacity of the material.
@@ -358,30 +358,30 @@ class MaterialProperties:
         self.molar_mass:ExpressionOrNum#=None
 
 
-    def __mul__(self,other:Union[float,int,Expression])->"MixtureDefinitionComponent":
+    def __mul__(self,other:float | int | Expression)->"MixtureDefinitionComponent":
         return MixtureDefinitionComponent(self,other)
 
-    def __rmul__(self,other:Union[float,int,Expression])->"MixtureDefinitionComponent":
+    def __rmul__(self,other:float | int | Expression)->"MixtureDefinitionComponent":
         return MixtureDefinitionComponent(self,other)
 
-    def __or__(self,other:AnyMaterialProperties)->Union[BaseInterfaceProperties,'LiquidLiquidInterfaceProperties','LiquidGasInterfaceProperties','LiquidSolidInterfaceProperties']:
+    def __or__(self,other:AnyMaterialProperties)->BaseInterfaceProperties | 'LiquidLiquidInterfaceProperties' | 'LiquidGasInterfaceProperties' | 'LiquidSolidInterfaceProperties':
         if isinstance(other,MaterialProperties): #type:ignore
             return get_interface_properties(self,other)
         elif isinstance(other,MixtureDefinitionComponents) or isinstance(other,MixtureDefinitionComponent):
             raise RuntimeError("Please finalize a mixture of pure components with a Mixture(...) call: "+str(other))
 
-    def evaluate_at_multiple_params(self,expr:Union[ExpressionOrNum,str],_sort:str="len",**kwargs:PropertySampleRangeType)->Tuple[List[ExpressionOrNum],ExpressionOrNum,OrderedDict[str,ArrayWithUnits],Dict[str,ExpressionOrNum]]:
+    def evaluate_at_multiple_params(self,expr:ExpressionOrNum | str,_sort:str="len",**kwargs:PropertySampleRangeType)->tuple[list[ExpressionOrNum],ExpressionOrNum,OrderedDict[str,ArrayWithUnits],dict[str,ExpressionOrNum]]:
         if isinstance(expr,str):
             if hasattr(self,expr):
                 expr=getattr(self,expr)
             else:
                 raise RuntimeError("Cannot find the property "+str(expr)+" in "+str(self))
         expr=cast(ExpressionOrNum,expr)
-        vari_ranges:List[ArrayWithUnits]=[]
-        vari_names:List[str]=[]
-        first_cond:Dict[str,ExpressionOrNum]={}
-        second_cond:Dict[str,ExpressionOrNum]={}
-        consts:Dict[str,ExpressionOrNum]={}
+        vari_ranges:list[ArrayWithUnits]=[]
+        vari_names:list[str]=[]
+        first_cond:dict[str,ExpressionOrNum]={}
+        second_cond:dict[str,ExpressionOrNum]={}
+        consts:dict[str,ExpressionOrNum]={}
         for k,v in kwargs.items():
             if isinstance(v,ArrayWithUnits):
                 if len(v)==0:
@@ -410,13 +410,13 @@ class MaterialProperties:
             sorti=[n for n in vari_names]
         else:
             raise ValueError("_sort may only have the values len, len_rev, name, name_rev")
-        inds:List[int]=[i for i,_ in sorted(enumerate(sorti), key = lambda x: x[1])] 
+        inds:list[int]=[i for i,_ in sorted(enumerate(sorti), key = lambda x: x[1])] 
         if _sort=="len_rev" or _sort=="name_rev":
             inds=list(reversed(inds))
         vari_names=[vari_names[i] for i in inds]
         vari_ranges=[vari_ranges[i] for i in inds]
 
-        result:List[ExpressionOrNum]=[]
+        result:list[ExpressionOrNum]=[]
         #Simplify the condition
         first_res=self.evaluate_at_condition(expr, cond=first_cond)
 
@@ -430,11 +430,11 @@ class MaterialProperties:
         dimless_expr:ExpressionOrNum=expr/unit
 
         for vrs in itertools.product(*vari_ranges): #type:ignore
-            cond:Dict[str,ExpressionOrNum]={vari_names[i]:vrs[i] for i in range(len(vari_names))} #type:ignore
+            cond:dict[str,ExpressionOrNum]={vari_names[i]:vrs[i] for i in range(len(vari_names))} #type:ignore
             cond.update(consts) 
             result.append(float(self.evaluate_at_condition(dimless_expr, cond=cond)))
 
-        rangs:Dict[str,ArrayWithUnits]=OrderDict()
+        rangs:dict[str,ArrayWithUnits]=OrderDict()
         for n,rang in zip(vari_names,vari_ranges):
             rangs[n]=rang
         return result,unit,rangs,consts
@@ -461,7 +461,7 @@ class MaterialProperties:
             self.sample_property_to_text_file(os.path.join(dirname,k+".txt"),v,_name=k,_sort=_sort,_newlines=_newlines,**kwargs)
 
 
-    def sample_property_to_text_file(self,fname:str,expr:Union[str,ExpressionOrNum],_name:Optional[str]=None,_sort:str="len",_newlines:bool=True,**kwargs:PropertySampleRangeType):
+    def sample_property_to_text_file(self,fname:str,expr:str | ExpressionOrNum,_name:str | None=None,_sort:str="len",_newlines:bool=True,**kwargs:PropertySampleRangeType):
         """
         This function will sample a single property of this material to a text file. You can either pass single values, e.g. ``massfrac_water=0.5,temperature=300*kelvin``, or ranges, e.g. ``massfrac_water=numpy.linspace(0,1,100),temperature=[300*kelvin,400*kelvin]``. It will sample the property at these conditions and write them to a text file.
 
@@ -538,7 +538,7 @@ class LiquidMixtureDefinitionComponent(MixtureDefinitionComponent):
     def __init__(self, compo: MaterialProperties, quant: ExpressionNumOrNone):
         super().__init__(compo, quant)
 
-    def __radd__(self,other:Union["MixtureDefinitionComponent",MaterialProperties])->"LiquidMixtureDefinitionComponents":
+    def __radd__(self,other:"MixtureDefinitionComponent" | MaterialProperties)->"LiquidMixtureDefinitionComponents":
         if other==0:
             return self # This allows to use e.g. sum(massfrac[c]*component[c] for c in ...)
         elif isinstance(other,LiquidMixtureDefinitionComponent):
@@ -548,7 +548,7 @@ class LiquidMixtureDefinitionComponent(MixtureDefinitionComponent):
         else:
             raise RuntimeError("Tried to mix a liquid with something else:"+str(self)+" and "+str(other))
 
-    def __add__(self,other:Union["MixtureDefinitionComponent",MaterialProperties])->"LiquidMixtureDefinitionComponents":
+    def __add__(self,other:"MixtureDefinitionComponent" | MaterialProperties)->"LiquidMixtureDefinitionComponents":
         return self.__radd__(other)
 
     def get_compo(self)->"PureLiquidProperties":
@@ -559,7 +559,7 @@ class GasMixtureDefinitionComponent(MixtureDefinitionComponent):
     def __init__(self, compo: MaterialProperties, quant: ExpressionNumOrNone):
         super().__init__(compo, quant)
 
-    def __radd__(self,other:Union["MixtureDefinitionComponent",MaterialProperties])->"GasMixtureDefinitionComponents":
+    def __radd__(self,other:"MixtureDefinitionComponent" | MaterialProperties)->"GasMixtureDefinitionComponents":
         if isinstance(other,GasMixtureDefinitionComponent):
             return GasMixtureDefinitionComponents([self,other])
         elif isinstance(other,PureGasProperties): 
@@ -567,7 +567,7 @@ class GasMixtureDefinitionComponent(MixtureDefinitionComponent):
         else:
             raise RuntimeError("Tried to mix a gas with something else:"+str(self)+" and "+str(other))
 
-    def __add__(self,other:Union["MixtureDefinitionComponent",MaterialProperties])->"GasMixtureDefinitionComponents":
+    def __add__(self,other:"MixtureDefinitionComponent" | MaterialProperties)->"GasMixtureDefinitionComponents":
         return self.__radd__(other)
 
     def get_compo(self)->"PureGasProperties":
@@ -575,10 +575,10 @@ class GasMixtureDefinitionComponent(MixtureDefinitionComponent):
         return self.compo
 
 class MixtureDefinitionComponents():
-    def __init__(self,lst:List[MixtureDefinitionComponent]):
+    def __init__(self,lst:list[MixtureDefinitionComponent]):
         self.lst=lst
 
-    def __add__(self,other:Union["MixtureDefinitionComponents",MixtureDefinitionComponent,MaterialProperties])->"MixtureDefinitionComponents":
+    def __add__(self,other:"MixtureDefinitionComponents" | MixtureDefinitionComponent | MaterialProperties)->"MixtureDefinitionComponents":
         if isinstance(other,MixtureDefinitionComponents):
             return MixtureDefinitionComponents(self.lst+other.lst)
         elif isinstance(other,MixtureDefinitionComponent):
@@ -589,7 +589,7 @@ class MixtureDefinitionComponents():
     def __repr__(self) -> str:
         return "%s(%r)" % (self.__class__, self.lst)
 
-    def finalise(self,quantity:MixQuantityDefinition="mass_fraction",temperature:ExpressionNumOrNone=None,pressure:ExpressionNumOrNone=1*atm) -> Tuple[Set[MaterialProperties], Dict[str, ExpressionOrNum]]:
+    def finalise(self,quantity:MixQuantityDefinition="mass_fraction",temperature:ExpressionNumOrNone=None,pressure:ExpressionNumOrNone=1*atm) -> tuple[set[MaterialProperties], dict[str, ExpressionOrNum]]:
         #if len(self.lst)==1:
         #    return {self.lst[0].compo},1
         if quantity=="RH":
@@ -657,7 +657,7 @@ class MixtureDefinitionComponents():
         elif must_sum_to_unity and total<1-eps:
             raise ValueError("The total fractions of the mixture are less than unity")
 
-        init:Dict[str,ExpressionOrNum]
+        init:dict[str,ExpressionOrNum]
         if quantity=="mass_fraction":
             init = {c.name: 0.0 for c in comps}
             for e in self.lst:
@@ -695,13 +695,13 @@ class MixtureDefinitionComponents():
 
 
 class LiquidMixtureDefinitionComponents(MixtureDefinitionComponents):
-    def __init__(self, lst: List[MixtureDefinitionComponent]):
+    def __init__(self, lst: list[MixtureDefinitionComponent]):
         super().__init__(lst)
         for a in lst:
             if not isinstance(a,LiquidMixtureDefinitionComponent):
                 RuntimeError("You tried to mix a gas with something else: "+str(self)+" contains "+str(a))
 
-    def __add__(self,other:Union["MixtureDefinitionComponents",MixtureDefinitionComponent,MaterialProperties])->"LiquidMixtureDefinitionComponents":
+    def __add__(self,other:"MixtureDefinitionComponents" | MixtureDefinitionComponent | MaterialProperties)->"LiquidMixtureDefinitionComponents":
         if isinstance(other,LiquidMixtureDefinitionComponents):
             return LiquidMixtureDefinitionComponents(self.lst+other.lst)
         elif isinstance(other,LiquidMixtureDefinitionComponent):
@@ -712,13 +712,13 @@ class LiquidMixtureDefinitionComponents(MixtureDefinitionComponents):
             raise RuntimeError("You tried to mix a liquid with something else: "+str(self)+" and "+str(other))
 
 class GasMixtureDefinitionComponents(MixtureDefinitionComponents):
-    def __init__(self, lst: List[MixtureDefinitionComponent]):
+    def __init__(self, lst: list[MixtureDefinitionComponent]):
         super().__init__(lst)        
         for a in lst:
             if not isinstance(a,GasMixtureDefinitionComponent):
                 RuntimeError("You tried to mix a gas with something else: "+str(self)+" contains "+str(a))
 
-    def __add__(self,other:Union["MixtureDefinitionComponents",MixtureDefinitionComponent,MaterialProperties])->"GasMixtureDefinitionComponents":
+    def __add__(self,other:"MixtureDefinitionComponents" | MixtureDefinitionComponent | MaterialProperties)->"GasMixtureDefinitionComponents":
         if isinstance(other,GasMixtureDefinitionComponents):
             return GasMixtureDefinitionComponents(self.lst+other.lst)
         elif isinstance(other,GasMixtureDefinitionComponent):
@@ -735,8 +735,8 @@ class BaseLiquidProperties(MaterialProperties):
     """
     state_of_matter="liquid"
     passive_field=None
-    required_adv_diff_fields:Set[str]=set()
-    possible_properties:Set[str]={"mass_density","dynamic_viscosity","default_surface_tension"}
+    required_adv_diff_fields:set[str]=set()
+    possible_properties:set[str]={"mass_density","dynamic_viscosity","default_surface_tension"}
     _output_properties:OutputPropertiesType={"mass_density":None,"dynamic_viscosity":None,"default_surface_tension_gas":lambda self : cast(DefaultSurfaceTensionType,self.default_surface_tension).get("gas")} #type:ignore
     def __init__(self):
         super(BaseLiquidProperties, self).__init__()
@@ -745,20 +745,20 @@ class BaseLiquidProperties(MaterialProperties):
         #: The dynamic viscosity of the liquid.
         self.dynamic_viscosity:ExpressionOrNum#=None
 
-    def get_reference_dynamic_viscosity(self,temperature:Optional[ExpressionOrNum]=None) -> Expression:
+    def get_reference_dynamic_viscosity(self,temperature:ExpressionOrNum | None=None) -> Expression:
         ics=self.initial_condition.copy()
         if temperature is not None:
             ics["temperature"]=temperature
         return self.evaluate_at_condition(self.dynamic_viscosity,ics)
 
-    def get_reference_mass_density(self,temperature:Optional[ExpressionOrNum]=None) -> Expression:
+    def get_reference_mass_density(self,temperature:ExpressionOrNum | None=None) -> Expression:
         ics=self.initial_condition.copy()
         if temperature is not None:
             ics["temperature"]=temperature
         return self.evaluate_at_condition(self.mass_density,ics)
 
 
-    def set_reference_scaling_to_problem(self, problem: "Problem", temperature: Optional[ExpressionOrNum] = None, **kwargs: ExpressionOrNum):
+    def set_reference_scaling_to_problem(self, problem: "Problem", temperature: ExpressionOrNum | None = None, **kwargs: ExpressionOrNum):
             """
             Set the reference scaling to nondimensionalize a dimensional problem. 
 
@@ -812,7 +812,7 @@ class BaseLiquidProperties(MaterialProperties):
                 problem.set_scaling(thermal_conductivity=lambda0)
                 problem.set_scaling(rho_cp=rho0 * cp0)
 
-    def get_vapor_mass_concentration(self,component:str,relative_humidity_for_far_field:ExpressionNumOrNone=None,temperature:ExpressionNumOrNone=None,at_mixture_composition:Union[bool,Dict[str,ExpressionOrNum]]=True):
+    def get_vapor_mass_concentration(self,component:str,relative_humidity_for_far_field:ExpressionNumOrNone=None,temperature:ExpressionNumOrNone=None,at_mixture_composition:bool | dict[str, ExpressionOrNum]=True):
         """
         Calculates the saturation vapor concentration :math:`c_{sat}` for the given component in [kg/m^3].
         If relative_humidity_for_far_field is set, it does not apply Raoult's law, but uses the relative humidity to calculate the vapor concentration in the far field
@@ -850,8 +850,8 @@ class BaseGasProperties(MaterialProperties):
     """    
     state_of_matter="gas"
     passive_field=None
-    required_adv_diff_fields:Set[str]=set()
-    possible_properties:Set[str]={"mass_density","dynamic_viscosity"}
+    required_adv_diff_fields:set[str]=set()
+    possible_properties:set[str]={"mass_density","dynamic_viscosity"}
     _output_properties = {"mass_density": None, "dynamic_viscosity": None}
     def __init__(self):
         super(BaseGasProperties, self).__init__()
@@ -865,8 +865,8 @@ class BaseSolidProperties(MaterialProperties):
     """
     state_of_matter="solid"
     passive_field=None
-    required_adv_diff_fields:Set[str]=set()
-    possible_properties:Set[str]={"mass_density"}
+    required_adv_diff_fields:set[str]=set()
+    possible_properties:set[str]={"mass_density"}
     _output_properties = {"mass_density": None}
 
 
@@ -875,14 +875,14 @@ class BaseMixedProperties:
     A base class used for defining mixtures of pure components.
     """
     name:str
-    components:Set[str] = set()
-    def __init__(self,pure_props:Dict[str,MaterialProperties]):
+    components:set[str] = set()
+    def __init__(self,pure_props:dict[str,MaterialProperties]):
 
         self.pure_properties=pure_props
         self.is_static=False #You can make a mixture static, i.e. remove all mass fractions fields from it
         assert hasattr(self,"passive_field")
         #: The passive field of the mixture. This is the field for which a advective-diffusive equation is not solved, since we can calculate it from the mass fractions of the other components.
-        self.passive_field:Optional[str]=getattr(self,"passive_field")
+        self.passive_field:str | None=getattr(self,"passive_field")
         if self.passive_field is None:	#Select one passive field
             for a in reversed(sorted(self.components)):
                 self.passive_field=a
@@ -902,7 +902,7 @@ class BaseMixedProperties:
         self.required_adv_diff_fields=self.components-{self.passive_field}
         if self.components!=set(self.pure_properties.keys()):
             raise ValueError("Cannot create a mixture with the components "+str(self.components)+" by passing the wrong pure component properties: "+str(self.pure_properties))
-        self._diffusion_table:Dict[Tuple[str,str],ExpressionOrNum]={}
+        self._diffusion_table:dict[tuple[str,str],ExpressionOrNum]={}
 
 
     def set_passive_field(self,passive_component:str):
@@ -910,11 +910,11 @@ class BaseMixedProperties:
         self.required_adv_diff_fields=self.components-{self.passive_field}
     
     @overload
-    def get_pure_component(self,name:str,raise_error:Literal[False]=...)->Optional[MaterialProperties]: ...
+    def get_pure_component(self,name:str,raise_error:Literal[False]=...)->MaterialProperties | None: ...
     @overload
     def get_pure_component(self,name:str,raise_error:Literal[True]=...)->MaterialProperties: ...
 
-    def get_pure_component(self,name:str,raise_error:bool=False)->Optional[MaterialProperties]:
+    def get_pure_component(self,name:str,raise_error:bool=False)->MaterialProperties | None:
         """
         Returns the pure component properties for the specified component.
 
@@ -940,7 +940,7 @@ class BaseMixedProperties:
     @overload
     def set_diffusion_coefficient(self,arg1:str,arg2:str,arg3:ExpressionOrNum)->None: ...
 
-    def set_diffusion_coefficient(self, arg1: Union[ExpressionOrNum, str], arg2: Union[ExpressionNumOrNone, str] = None, arg3: ExpressionNumOrNone = None):
+    def set_diffusion_coefficient(self, arg1: ExpressionOrNum | str, arg2: ExpressionNumOrNone | str = None, arg3: ExpressionNumOrNone = None):
         """
         Set the diffusion coefficient for the specified component in the mixture.
 
@@ -978,7 +978,7 @@ class BaseMixedProperties:
         
         self._diffusion_table[fs] = coeff
 
-    def get_diffusion_coefficient(self,n1:str,n2:Optional[str]=None,default:Optional[ExpressionNumOrNone]=None)->ExpressionNumOrNone:
+    def get_diffusion_coefficient(self,n1:str,n2:str | None=None,default:ExpressionNumOrNone | None=None)->ExpressionNumOrNone:
         """
         Returns the diffusion coefficient between two components. If only one component is given, the diagonal element is returned.
 
@@ -996,7 +996,7 @@ class BaseMixedProperties:
         return self._diffusion_table.get(fs,default)
 
     # Sets factor D_T in front of J=-J_massdiff - rho D_T grad(T)
-    def set_thermophoresis_coefficient(self,for_component:Union[str,Iterable[str]],coeff:ExpressionOrNum):        
+    def set_thermophoresis_coefficient(self,for_component:str | Iterable[str],coeff:ExpressionOrNum):        
         if isinstance(for_component, (list, tuple,set)): #Usually not so meaningful...
             for a in for_component:
                 self.set_thermophoresis_coefficient(a,coeff)
@@ -1047,7 +1047,7 @@ class BaseMixedProperties:
         return var("molefrac_"+name,**kwargs)
 
 
-    def make_static(self,cond:Optional[Dict[str,ExpressionOrNum]]=None,temperature:ExpressionNumOrNone=None):	#TODO Make a copy!
+    def make_static(self,cond:dict[str, ExpressionOrNum] | None=None,temperature:ExpressionNumOrNone=None):	#TODO Make a copy!
         """
         This will make the mixture static, i.e. all mass fraction fields will be replaced by their values from the given condition. This is useful for to remove advection-diffusion equations if the composition stays homogeneous.
 
@@ -1063,7 +1063,7 @@ class BaseMixedProperties:
         fields,nondims=self.generate_field_substs(cond)
         for p in self.possible_properties:
             if hasattr(self,p):
-                dct:Union[ExpressionOrNum,Dict[str,ExpressionOrNum]] = getattr(self, p)
+                dct:ExpressionOrNum | dict[str, ExpressionOrNum] = getattr(self, p)
                 if isinstance(dct,dict):
                     for nn,pp in dct.items():
                         if not isinstance(pp,Expression):
@@ -1076,7 +1076,7 @@ class BaseMixedProperties:
         return self
 
 
-    def set_by_weighted_average(self,what:Optional[str]=None,fraction_type:str="mass_fraction"):
+    def set_by_weighted_average(self,what:str | None=None,fraction_type:str="mass_fraction"):
         """
         Calculate a property by just taking the weighted average of the properties of all pure components.
         Args:
@@ -1142,7 +1142,7 @@ class PureLiquidProperties(BaseLiquidProperties):
         self.passive_field=self.name
         #: The components are used for mixtures. Here it is just the set with only the name of the liquid as only element.
         self.components = set({self.name})
-        self._UNIFAC_groups:Dict[str,Dict[str,int]]={}
+        self._UNIFAC_groups:dict[str,dict[str,int]]={}
         #: Latent heat of evaporation of the pure liquid
         self.latent_heat_of_evaporation:ExpressionNumOrNone=None
         self._output_properties=self._output_properties.copy()
@@ -1150,7 +1150,7 @@ class PureLiquidProperties(BaseLiquidProperties):
 
 
     
-    def set_unifac_groups(self,grps:Dict[str,int],only_for:Optional[Union[Set[str],str]]=None):
+    def set_unifac_groups(self,grps:dict[str,int],only_for:set[str] | str | None=None):
         """
         Sets the UNIFAC groups for the pure liquid, which are relevant for the activity coefficients in mixtures.
 
@@ -1168,7 +1168,7 @@ class PureLiquidProperties(BaseLiquidProperties):
             for grp,amount in grps.items():
                 self._UNIFAC_groups[g][grp]=amount
 
-    def set_vapor_pressure_by_Antoine_coeffs(self,A:float,B:float,C:float,convention_P:Expression=mmHg,convention_T:Union[Expression,CelsiusClass]=celsius):
+    def set_vapor_pressure_by_Antoine_coeffs(self,A:float,B:float,C:float,convention_P:Expression=mmHg,convention_T:Expression | CelsiusClass=celsius):
         """
         Sets the vapor pressure by the Antoine equation.
 
@@ -1218,10 +1218,10 @@ class PureLiquidProperties(BaseLiquidProperties):
         else:
             return None
 
-    def __mul__(self,other:Union[float,int,Expression])->"LiquidMixtureDefinitionComponent":
+    def __mul__(self,other:float | int | Expression)->"LiquidMixtureDefinitionComponent":
         return LiquidMixtureDefinitionComponent(self,other)
 
-    def __rmul__(self,other:Union[float,int,Expression])->"LiquidMixtureDefinitionComponent":
+    def __rmul__(self,other:float | int | Expression)->"LiquidMixtureDefinitionComponent":
         return LiquidMixtureDefinitionComponent(self,other)
 
 
@@ -1281,10 +1281,10 @@ class PureGasProperties(BaseGasProperties):
         else:
             return None
 
-    def __mul__(self,other:Union[float,int,Expression])->"GasMixtureDefinitionComponent":
+    def __mul__(self,other:float | int | Expression)->"GasMixtureDefinitionComponent":
         return GasMixtureDefinitionComponent(self,other)
 
-    def __rmul__(self,other:Union[float,int,Expression])->"GasMixtureDefinitionComponent":
+    def __rmul__(self,other:float | int | Expression)->"GasMixtureDefinitionComponent":
         return GasMixtureDefinitionComponent(self,other)
 
 class PureSolidProperties(BaseSolidProperties):
@@ -1327,17 +1327,17 @@ class MixtureLiquidProperties(BaseLiquidProperties,BaseMixedProperties):
         pure_props: Pure component properties, will be passed when mixing the gaseous mixture with the :py:func:`Mixture` function.
     """
     is_pure:bool=False
-    def __init__(self,pure_props:Dict[str,MaterialProperties]):
+    def __init__(self,pure_props:dict[str,MaterialProperties]):
         BaseLiquidProperties.__init__(self)
         BaseMixedProperties.__init__(self,pure_props=pure_props)
-        self.pure_properties=cast(Dict[str,PureLiquidProperties],self.pure_properties)
+        self.pure_properties=cast(dict[str,PureLiquidProperties],self.pure_properties)
         
         #: A dict holding the vapor pressures given by the name of each pure component. By default, it will be set to ideal Raoult's law.
-        self.vapor_pressure_for:Dict[str,ExpressionOrNum]={}
+        self.vapor_pressure_for:dict[str,ExpressionOrNum]={}
         #: A dict holding the activity coefficients given by the name of each pure component.
-        self.activity_coefficients:Dict[str,ExpressionOrNum]={}
+        self.activity_coefficients:dict[str,ExpressionOrNum]={}
         self.set_vapor_pressure_by_raoults_law()
-        self._latent_heat_of_evaporation:Dict[str,ExpressionOrNum]={}
+        self._latent_heat_of_evaporation:dict[str,ExpressionOrNum]={}
 
         self._output_properties=self._output_properties.copy()
         def make_lambda_for_vapor_pressure(k:str)->Callable[[MaterialProperties],ExpressionNumOrNone]:
@@ -1349,10 +1349,10 @@ class MixtureLiquidProperties(BaseLiquidProperties,BaseMixedProperties):
         for k in self.components:
             self._output_properties["activity_coefficient_" + k] = make_lambda_for_activity_coeff(k)
 
-        self._reaction_rates:Dict[str,ExpressionOrNum]={}
+        self._reaction_rates:dict[str,ExpressionOrNum]={}
 
-        self._unifac_multi_return:Optional[UNIFACMultiReturnExpression]=None
-        self._unifac_model:Optional[str]=None # Used UNIFAC parameter table
+        self._unifac_multi_return:UNIFACMultiReturnExpression | None=None
+        self._unifac_model:str | None=None # Used UNIFAC parameter table
 
     def add_reaction_rate(self,dest:str,rate:ExpressionOrNum,**source_factors:float):
         if not dest in self.components:
@@ -1422,7 +1422,7 @@ class MixtureLiquidProperties(BaseLiquidProperties,BaseMixedProperties):
     # use_multi_return uses multi-return expression instead of subexpressions
     # if it is and int, it will use multi-return for mixtures with #components>=use_multi_return
     # multi-return expressions are considerably faster in generating C code. However, they use finite differences for the Jacobain
-    def set_activity_coefficients_by_unifac(self,model:str,set_vapor_pressures:bool=True,use_multi_return:Union[bool,int]=3):
+    def set_activity_coefficients_by_unifac(self,model:str,set_vapor_pressures:bool=True,use_multi_return:bool | int=3):
         """
         Sets the activity coefficients by a UNIFAC model.
 
@@ -1443,7 +1443,7 @@ class MixtureLiquidProperties(BaseLiquidProperties,BaseMixedProperties):
         else:
             server=ActivityModel.get_activity_model_by_name(modelname)
 
-            unifac_components:Dict[str,UNIFACMolecule]={cn:UNIFACMolecule(cn,server) for cn in self.components}
+            unifac_components:dict[str,UNIFACMolecule]={cn:UNIFACMolecule(cn,server) for cn in self.components}
             for cn in self.components:
                 comp=self.pure_properties[cn]
                 assert isinstance(comp,PureLiquidProperties)
@@ -1481,10 +1481,10 @@ class MixtureGasProperties(BaseGasProperties,BaseMixedProperties):
         pure_props: Pure component properties, will be passed when mixing the gaseous mixture with the :py:func:`Mixture` function.
     """
     is_pure:bool=False
-    def __init__(self,pure_props:Dict[str,MaterialProperties]):
+    def __init__(self,pure_props:dict[str,MaterialProperties]):
         BaseGasProperties.__init__(self)
         BaseMixedProperties.__init__(self,pure_props=pure_props)
-        self.pure_properties=cast(Dict[str,PureGasProperties],self.pure_properties)
+        self.pure_properties=cast(dict[str,PureGasProperties],self.pure_properties)
 
     def mass_density_from_ideal_gas_law(self,pressure:ExpressionOrNum=var("absolute_pressure"),temperature:ExpressionOrNum=var("temperature")):
         """
@@ -1510,7 +1510,7 @@ class MixtureGasProperties(BaseGasProperties,BaseMixedProperties):
 
 
     
-    def set_diffusion_coefficient_by_Fuller_eq(self, for_dilute_gas:str, dominant_gas:Optional[str]=None):
+    def set_diffusion_coefficient_by_Fuller_eq(self, for_dilute_gas:str, dominant_gas:str | None=None):
         """
         Sets the diffusion coefficient by the Fuller equation. This is a simple approximation for the Fickian diffusion in gas mixtures. The equation is based on the diffusion volumes of the gases. See:
         
@@ -1568,12 +1568,12 @@ class LiquidGasInterfaceProperties(BaseInterfaceProperties):
     """
     typus="liquid_gas"
     #: The components of the liquid phase
-    liquid_components:Union[str,Set[str],None] = None
+    liquid_components:str | set[str] | None = None
     #: The components of the gas phase
-    gas_components:Union[str,Set[str],None] = None
+    gas_components:str | set[str] | None = None
     #: The surfactants at the interface
-    surfactants:Union[Set[str],str,None] = None
-    def _sort_phases(self,sideA:AnyMaterialProperties,sideB:AnyMaterialProperties)->Tuple[AnyMaterialProperties,AnyMaterialProperties]:
+    surfactants:set[str] | str | None = None
+    def _sort_phases(self,sideA:AnyMaterialProperties,sideB:AnyMaterialProperties)->tuple[AnyMaterialProperties,AnyMaterialProperties]:
         if sideA.state_of_matter=="liquid" and sideB.state_of_matter=="gas":
             return sideA,sideB
         elif sideA.state_of_matter=="gas" and sideB.state_of_matter=="liquid":
@@ -1581,13 +1581,13 @@ class LiquidGasInterfaceProperties(BaseInterfaceProperties):
         else:
             raise RuntimeError("This liquid-gas interface does not have a liquid and a gas side")
 
-    def __init__(self,phaseA:AnyMaterialProperties,phaseB:AnyMaterialProperties,surfactant_dict:Dict[SurfactantProperties,ExpressionOrNum]):
+    def __init__(self,phaseA:AnyMaterialProperties,phaseB:AnyMaterialProperties,surfactant_dict:dict[SurfactantProperties,ExpressionOrNum]):
         from .mass_transfer import StandardMassTransferModelLiquidGas
         super(LiquidGasInterfaceProperties, self).__init__(phaseA,phaseB)
         assert isinstance(self._phaseA,(PureLiquidProperties,MixtureLiquidProperties))
         assert isinstance(self._phaseB,(PureGasProperties,MixtureGasProperties))
-        self._liquid_phase:Union[PureLiquidProperties,MixtureLiquidProperties]=self._phaseA        
-        self._gas_phase:Union[PureGasProperties,MixtureGasProperties] = self._phaseB
+        self._liquid_phase:PureLiquidProperties | MixtureLiquidProperties=self._phaseA        
+        self._gas_phase:PureGasProperties | MixtureGasProperties = self._phaseB
         self._surfactants=surfactant_dict.copy() if surfactant_dict is not None else {}
         if "gas" in self._liquid_phase.default_surface_tension.keys():
             sigm=self._liquid_phase.default_surface_tension.get("gas")
@@ -1595,8 +1595,8 @@ class LiquidGasInterfaceProperties(BaseInterfaceProperties):
                 self.surface_tension=sigm
         self._mass_transfer_model=StandardMassTransferModelLiquidGas(self._liquid_phase,self._gas_phase)
         #: The rate of surfactant adsorption and desorption, merged in a single expression per surfactant
-        self.surfactant_adsorption_rate:Dict[str,ExpressionOrNum]={}
-        self._surface_diffusivity:Dict[str,ExpressionOrNum]={}
+        self.surfactant_adsorption_rate:dict[str,ExpressionOrNum]={}
+        self._surface_diffusivity:dict[str,ExpressionOrNum]={}
 
     def get_surface_diffusivity(self,surfactant_name:str) -> ExpressionNumOrNone:
         """
@@ -1650,7 +1650,7 @@ class LiquidGasInterfaceProperties(BaseInterfaceProperties):
         fields["velocity_z"] = _pyoomph.Expression(0)
         return _pyoomph.GiNaC_subsfields(expr, fields, nondims, {})
 
-    def get_mass_transfer_model(self) -> Optional["MassTransferModelBase"]:
+    def get_mass_transfer_model(self) -> "MassTransferModelBase" | None:
         """
         Returns the mass transfer model.
         """
@@ -1676,7 +1676,7 @@ class DefaultLiquidGasInterface(LiquidGasInterfaceProperties):
         phaseB: The gas phase properties.
         surfactant_dict: A dictionary of surfactants and their initial concentrations.
     """
-    def __init__(self,phaseA:AnyMaterialProperties,phaseB:AnyMaterialProperties,surfactant_dict:Dict[SurfactantProperties,ExpressionOrNum]):
+    def __init__(self,phaseA:AnyMaterialProperties,phaseB:AnyMaterialProperties,surfactant_dict:dict[SurfactantProperties,ExpressionOrNum]):
         super(DefaultLiquidGasInterface, self).__init__(phaseA,phaseB,surfactant_dict=surfactant_dict)
         if self._liquid_phase.default_surface_tension.get("gas") is None:
             raise RuntimeError("Either specify the interface properties of the liquid-gas interface of liquid:"+str(self._liquid_phase)+" vs. gas:"+str(self._gas_phase)+" or at least set the default surface tension against gas in the liquid properties")
@@ -1689,10 +1689,10 @@ MaterialProperties.library["interfaces"]["_defaults"]["liquid_gas"]=DefaultLiqui
 
 class LiquidSolidInterfaceProperties(BaseInterfaceProperties):
     typus="liquid_solid"
-    liquid_components:Union[str,Set[str],None] = None
-    solid_components:Union[str,Set[str],None] = None
-    surfactants:Union[Set[str],str,None] = None
-    def _sort_phases(self,sideA:AnyMaterialProperties,sideB:AnyMaterialProperties)->Tuple[AnyMaterialProperties,AnyMaterialProperties]:
+    liquid_components:str | set[str] | None = None
+    solid_components:str | set[str] | None = None
+    surfactants:set[str] | str | None = None
+    def _sort_phases(self,sideA:AnyMaterialProperties,sideB:AnyMaterialProperties)->tuple[AnyMaterialProperties,AnyMaterialProperties]:
         if sideA.state_of_matter=="liquid" and sideB.state_of_matter=="solid":
             return sideA,sideB
         elif sideA.state_of_matter=="solid" and sideB.state_of_matter=="liquid":
@@ -1700,24 +1700,24 @@ class LiquidSolidInterfaceProperties(BaseInterfaceProperties):
         else:
             raise RuntimeError("The liquid-solid interface does not have a liquid and a solid bulk side")
 
-    def get_liquid_properties(self) -> Union[PureLiquidProperties, MixtureLiquidProperties]:
+    def get_liquid_properties(self) -> PureLiquidProperties | MixtureLiquidProperties:
         return self._liquid_phase
 
     def get_solid_properties(self) -> PureSolidProperties:
         return self._solid_phase
 
-    def __init__(self,phaseA:AnyMaterialProperties,phaseB:AnyMaterialProperties,surfactant_dict:Dict[SurfactantProperties,ExpressionOrNum]):
+    def __init__(self,phaseA:AnyMaterialProperties,phaseB:AnyMaterialProperties,surfactant_dict:dict[SurfactantProperties,ExpressionOrNum]):
         super(LiquidSolidInterfaceProperties, self).__init__(phaseA,phaseB)
         assert isinstance(self._phaseA,(PureLiquidProperties,MixtureLiquidProperties))
         assert isinstance(self._phaseB,PureSolidProperties)
-        self._liquid_phase:Union[PureLiquidProperties,MixtureLiquidProperties]=self._phaseA        
+        self._liquid_phase:PureLiquidProperties | MixtureLiquidProperties=self._phaseA        
         self._solid_phase:PureSolidProperties = self._phaseB        
         self._surfactants=surfactant_dict.copy() if surfactant_dict is not None else {}
         self.surfactant_adsorption_rate={}
         self.equilibrium_temperature=None
         self.latent_heat_of_fusion=None
-        self.surfactant_adsorption_rate:Dict[str,ExpressionOrNum]={}
-        self._surface_diffusivity:Dict[str,ExpressionOrNum]={}
+        self.surfactant_adsorption_rate:dict[str,ExpressionOrNum]={}
+        self._surface_diffusivity:dict[str,ExpressionOrNum]={}
 
     def get_surface_diffusivity(self,surfactant_name:str) -> ExpressionNumOrNone:
         if surfactant_name in self._surface_diffusivity:
@@ -1750,11 +1750,11 @@ class LiquidSolidInterfaceProperties(BaseInterfaceProperties):
 
 class LiquidLiquidInterfaceProperties(BaseInterfaceProperties):
     typus="liquid_liquid"
-    surfactants:Union[Set[str],str,None] = None
-    componentsA:Union[Set[str],str,None] = set()
-    componentsB:Union[Set[str],str,None] = set()
+    surfactants:set[str] | str | None = None
+    componentsA:set[str] | str | None = set()
+    componentsB:set[str] | str | None = set()
 
-    def get_fraction_in_rich_phase(self,varname:str,rich_component:Optional[str]=None,in_bulk:bool=False):
+    def get_fraction_in_rich_phase(self,varname:str,rich_component:str | None=None,in_bulk:bool=False):
         if rich_component is None:
             rich_component=varname
         if self._phaseA.initial_condition[rich_component]>self._phaseB.initial_condition[rich_component]:
@@ -1764,7 +1764,7 @@ class LiquidLiquidInterfaceProperties(BaseInterfaceProperties):
         else:
             raise RuntimeError("Cannot distinguish phases")
         
-    def get_fraction_in_poor_phase(self,varname:str,poor_component:Optional[str]=None,in_bulk:bool=False):
+    def get_fraction_in_poor_phase(self,varname:str,poor_component:str | None=None,in_bulk:bool=False):
         if poor_component is None:
             poor_component=varname
         if self._phaseA.initial_condition[poor_component]<self._phaseB.initial_condition[poor_component]:
@@ -1774,13 +1774,13 @@ class LiquidLiquidInterfaceProperties(BaseInterfaceProperties):
         else:
             raise RuntimeError("Cannot distinguish phases")
 
-    def __init__(self,phaseA:AnyMaterialProperties,phaseB:AnyMaterialProperties,surfactant_dict:Dict[SurfactantProperties,ExpressionOrNum]):
+    def __init__(self,phaseA:AnyMaterialProperties,phaseB:AnyMaterialProperties,surfactant_dict:dict[SurfactantProperties,ExpressionOrNum]):
         super(LiquidLiquidInterfaceProperties, self).__init__(phaseA,phaseB)
         self._surfactants=surfactant_dict.copy() if surfactant_dict is not None else {}
         self.surfactant_adsorption_rate={}
         self._mass_transfer_model=None
 
-    def get_mass_transfer_model(self) -> Optional["MassTransferModelBase"]:
+    def get_mass_transfer_model(self) -> "MassTransferModelBase" | None:
         return self._mass_transfer_model
 
     def evaluate_at_initial_surfactant_concentrations(self,expr:ExpressionOrNum) -> ExpressionOrNum:
@@ -1804,18 +1804,18 @@ class LiquidLiquidInterfaceProperties(BaseInterfaceProperties):
 def get_pure_material(state_of_matter:str,name:str,return_class:Literal[False]=...)->MaterialProperties: ...
 
 @overload
-def get_pure_material(state_of_matter:str,name:str,return_class:Literal[True])->Type[MaterialProperties]: ...
+def get_pure_material(state_of_matter:str,name:str,return_class:Literal[True])->type[MaterialProperties]: ...
 
 @overload
-def get_pure_material(state_of_matter:str,name:List[str],return_class:Literal[False]=...)->Tuple[MaterialProperties,...]: ...
+def get_pure_material(state_of_matter:str,name:list[str],return_class:Literal[False]=...)->tuple[MaterialProperties,...]: ...
 
 @overload
-def get_pure_material(state_of_matter:str,name:List[str],return_class:Literal[True])->Tuple[Type[MaterialProperties],...]: ...
+def get_pure_material(state_of_matter:str,name:list[str],return_class:Literal[True])->tuple[type[MaterialProperties],...]: ...
 
 
-def get_pure_material(state_of_matter:str,name:Union[str,List[str]],return_class:bool=False)->Union[MaterialProperties,Type[MaterialProperties],Tuple[MaterialProperties,...],Tuple[Type[MaterialProperties],...]]:
+def get_pure_material(state_of_matter:str,name:str | list[str],return_class:bool=False)->MaterialProperties | type[MaterialProperties] | tuple[MaterialProperties, ...] | tuple[type[MaterialProperties], ...]:
     if isinstance(name,(list,tuple)):
-        res:List[MaterialProperties]=[]
+        res:list[MaterialProperties]=[]
         for n in name:
             res.append(cast(MaterialProperties,get_pure_material(state_of_matter,n,return_class))) #type:ignore
         return tuple(res)
@@ -1836,15 +1836,15 @@ def get_pure_material(state_of_matter:str,name:Union[str,List[str]],return_class
 def get_pure_liquid(name:str,return_class:Literal[False]=...)->PureLiquidProperties: ...
 
 @overload
-def get_pure_liquid(name:str,return_class:Literal[True])->Type[PureLiquidProperties]: ...
+def get_pure_liquid(name:str,return_class:Literal[True])->type[PureLiquidProperties]: ...
 
 @overload
-def get_pure_liquid(name:List[str],return_class:Literal[False]=...)->Tuple[PureLiquidProperties,...]: ...
+def get_pure_liquid(name:list[str],return_class:Literal[False]=...)->tuple[PureLiquidProperties,...]: ...
 
 @overload
-def get_pure_liquid(name:List[str],return_class:Literal[True])->Tuple[Type[PureLiquidProperties],...]: ...
+def get_pure_liquid(name:list[str],return_class:Literal[True])->tuple[type[PureLiquidProperties],...]: ...
 
-def get_pure_liquid(name:Union[str,List[str]],return_class:bool=False)->Union[PureLiquidProperties,Type[PureLiquidProperties],Tuple[PureLiquidProperties,...],Tuple[Type[PureLiquidProperties],...]]:
+def get_pure_liquid(name:str | list[str],return_class:bool=False)->PureLiquidProperties | type[PureLiquidProperties] | tuple[PureLiquidProperties, ...] | tuple[type[PureLiquidProperties], ...]:
     """
     Returns the pure liquid properties for the given name(s) from the material library. Property classes must be decorated with the decorator :py:meth:`MaterialProperties.register` before this works.
 
@@ -1862,15 +1862,15 @@ def get_pure_liquid(name:Union[str,List[str]],return_class:bool=False)->Union[Pu
 def get_surfactant(name:str,return_class:Literal[False]=...)->SurfactantProperties: ...
 
 @overload
-def get_surfactant(name:str,return_class:Literal[True])->Type[SurfactantProperties]: ...
+def get_surfactant(name:str,return_class:Literal[True])->type[SurfactantProperties]: ...
 
 @overload
-def get_surfactant(name:List[str],return_class:Literal[False]=...)->Tuple[SurfactantProperties,...]: ...
+def get_surfactant(name:list[str],return_class:Literal[False]=...)->tuple[SurfactantProperties,...]: ...
 
 @overload
-def get_surfactant(name:List[str],return_class:Literal[True])->Tuple[Type[SurfactantProperties],...]: ...
+def get_surfactant(name:list[str],return_class:Literal[True])->tuple[type[SurfactantProperties],...]: ...
 
-def get_surfactant(name:Union[str,List[str]],return_class:bool=False)->Union[SurfactantProperties,Type[SurfactantProperties],Tuple[SurfactantProperties,...],Tuple[Type[SurfactantProperties],...]]:
+def get_surfactant(name:str | list[str],return_class:bool=False)->SurfactantProperties | type[SurfactantProperties] | tuple[SurfactantProperties, ...] | tuple[type[SurfactantProperties], ...]:
     """
     Returns the surfactant properties for the given name(s) from the material library. Property classes must be decorated with the decorator :py:meth:`MaterialProperties.register` before this works.
 
@@ -1896,15 +1896,15 @@ def get_surfactant(name:Union[str,List[str]],return_class:bool=False)->Union[Sur
 def get_pure_gas(name:str,return_class:Literal[False]=...)->PureGasProperties: ...
 
 @overload
-def get_pure_gas(name:str,return_class:Literal[True])->Type[PureGasProperties]: ...
+def get_pure_gas(name:str,return_class:Literal[True])->type[PureGasProperties]: ...
 
 @overload
-def get_pure_gas(name:List[str],return_class:Literal[False]=...)->Tuple[PureGasProperties,...]: ...
+def get_pure_gas(name:list[str],return_class:Literal[False]=...)->tuple[PureGasProperties,...]: ...
 
 @overload
-def get_pure_gas(name:List[str],return_class:Literal[True])->Tuple[Type[PureGasProperties],...]: ...
+def get_pure_gas(name:list[str],return_class:Literal[True])->tuple[type[PureGasProperties],...]: ...
 
-def get_pure_gas(name:Union[str,List[str]],return_class:bool=False)->Union[PureGasProperties,Type[PureGasProperties],Tuple[PureGasProperties,...],Tuple[Type[PureGasProperties],...]]:
+def get_pure_gas(name:str | list[str],return_class:bool=False)->PureGasProperties | type[PureGasProperties] | tuple[PureGasProperties, ...] | tuple[type[PureGasProperties], ...]:
     """
     Returns the pure gas properties for the given name(s) from the material library. Property classes must be decorated with the decorator :py:meth:`MaterialProperties.register` before this works.
 
@@ -1922,15 +1922,15 @@ def get_pure_gas(name:Union[str,List[str]],return_class:bool=False)->Union[PureG
 def get_pure_solid(name:str,return_class:Literal[False]=...)->PureSolidProperties: ...
 
 @overload
-def get_pure_solid(name:str,return_class:Literal[True])->Type[PureSolidProperties]: ...
+def get_pure_solid(name:str,return_class:Literal[True])->type[PureSolidProperties]: ...
 
 @overload
-def get_pure_solid(name:List[str],return_class:Literal[False]=...)->Tuple[PureSolidProperties,...]: ...
+def get_pure_solid(name:list[str],return_class:Literal[False]=...)->tuple[PureSolidProperties,...]: ...
 
 @overload
-def get_pure_solid(name:List[str],return_class:Literal[True])->Tuple[Type[PureSolidProperties],...]: ...
+def get_pure_solid(name:list[str],return_class:Literal[True])->tuple[type[PureSolidProperties],...]: ...
 
-def get_pure_solid(name:Union[str,List[str]],return_class:bool=False)->Union[PureSolidProperties,Type[PureSolidProperties],Tuple[PureSolidProperties,...],Tuple[Type[PureSolidProperties],...]]:
+def get_pure_solid(name:str | list[str],return_class:bool=False)->PureSolidProperties | type[PureSolidProperties] | tuple[PureSolidProperties, ...] | tuple[type[PureSolidProperties], ...]:
     """
     Returns the pure solid properties for the given name(s) from the material library. Property classes must be decorated with the decorator :py:meth:`MaterialProperties.register` before this works.
 
@@ -1945,11 +1945,11 @@ def get_pure_solid(name:Union[str,List[str]],return_class:bool=False)->Union[Pur
 
 
 #Takes a list of components
-def get_mixture_properties(*purecompos:MaterialProperties,**kwargs:Any)->Union[MaterialProperties,MixtureGasProperties,MixtureLiquidProperties]:
+def get_mixture_properties(*purecompos:MaterialProperties,**kwargs:Any)->MaterialProperties | MixtureGasProperties | MixtureLiquidProperties:
     if len(purecompos)==1:
         return purecompos[0]	#Pure material
     som=None
-    comps:Set[str]=set()
+    comps:set[str]=set()
     pureprops={}
     for c in purecompos:
         if som is None:
@@ -1975,12 +1975,12 @@ def get_mixture_properties(*purecompos:MaterialProperties,**kwargs:Any)->Union[M
 
 
 @overload
-def get_interface_properties(phaseA:Union[PureLiquidProperties,MixtureLiquidProperties],phaseB:Union[PureGasProperties,MixtureGasProperties],surfactants:Optional[Union[str,SurfactantProperties,Dict[str,ExpressionOrNum],Dict[SurfactantProperties,ExpressionOrNum]]]=None)->LiquidGasInterfaceProperties: ...
+def get_interface_properties(phaseA:PureLiquidProperties | MixtureLiquidProperties,phaseB:PureGasProperties | MixtureGasProperties,surfactants:str | SurfactantProperties | dict[str, ExpressionOrNum] | dict[SurfactantProperties, ExpressionOrNum] | None=None)->LiquidGasInterfaceProperties: ...
 
 @overload
-def get_interface_properties(phaseA:Union[PureLiquidProperties,MixtureLiquidProperties],phaseB:PureSolidProperties,surfactants:Optional[Union[str,SurfactantProperties,Dict[str,ExpressionOrNum],Dict[SurfactantProperties,ExpressionOrNum]]]=None)->LiquidSolidInterfaceProperties: ...
+def get_interface_properties(phaseA:PureLiquidProperties | MixtureLiquidProperties,phaseB:PureSolidProperties,surfactants:str | SurfactantProperties | dict[str, ExpressionOrNum] | dict[SurfactantProperties, ExpressionOrNum] | None=None)->LiquidSolidInterfaceProperties: ...
 
-def get_interface_properties(phaseA:Union[MaterialProperties,MixtureDefinitionComponents],phaseB:Union[MaterialProperties,MixtureDefinitionComponents],surfactants:Optional[Union[str,SurfactantProperties,Dict[str,ExpressionOrNum],Dict[SurfactantProperties,ExpressionOrNum]]]=None)->Union[BaseInterfaceProperties,LiquidGasInterfaceProperties]:
+def get_interface_properties(phaseA:MaterialProperties | MixtureDefinitionComponents,phaseB:MaterialProperties | MixtureDefinitionComponents,surfactants:str | SurfactantProperties | dict[str, ExpressionOrNum] | dict[SurfactantProperties, ExpressionOrNum] | None=None)->BaseInterfaceProperties | LiquidGasInterfaceProperties:
     """
     Returns the interface properties for the two given phases (and potentially surfactants at the interface) from the material library. Property classes must be decorated with the decorator :py:meth:`MaterialProperties.register` before this works.
 
@@ -1993,7 +1993,7 @@ def get_interface_properties(phaseA:Union[MaterialProperties,MixtureDefinitionCo
         The interface properties from the material library.
     """
     typus=None
-    surfactantsN:Dict[SurfactantProperties,ExpressionOrNum]={}
+    surfactantsN:dict[SurfactantProperties,ExpressionOrNum]={}
     if surfactants is None:
         #TODO: Auto extract the surfactants from the liquid!
         pass
@@ -2048,7 +2048,7 @@ def get_interface_properties(phaseA:Union[MaterialProperties,MixtureDefinitionCo
         key=(lcomps,gcomps,scomps,)
         if key  in MaterialProperties.library["interfaces"][typus].keys():
             return MaterialProperties.library["interfaces"][typus][key](liquid,gas,surfactantsN)
-        key = (lcomps, frozenset(cast(Set[str],set())), frozenset(scomps))
+        key = (lcomps, frozenset(cast(set[str],set())), frozenset(scomps))
         if key in MaterialProperties.library["interfaces"][typus].keys():
             return MaterialProperties.library["interfaces"][typus][key](liquid, gas, surfactantsN)
         if len(scomps)>0:
@@ -2068,10 +2068,10 @@ def get_interface_properties(phaseA:Union[MaterialProperties,MixtureDefinitionCo
         #print(key,"IN",MaterialProperties.library["interfaces"][typus].keys())
         if key in MaterialProperties.library["interfaces"][typus].keys():
             return MaterialProperties.library["interfaces"][typus][key](liquid, solid, surfactantsN)
-        key = (lcomps, frozenset(cast(Set[str],set())), frozenset(solcomps))
+        key = (lcomps, frozenset(cast(set[str],set())), frozenset(solcomps))
         if key in MaterialProperties.library["interfaces"][typus].keys():
             return MaterialProperties.library["interfaces"][typus][key](liquid, solid, surfactantsN)
-        key = (lcomps, frozenset(cast(Set[str],set())), frozenset(cast(Set[str],set())))
+        key = (lcomps, frozenset(cast(set[str],set())), frozenset(cast(set[str],set())))
         if key in MaterialProperties.library["interfaces"][typus].keys():
             return MaterialProperties.library["interfaces"][typus][key](liquid, solid, surfactantsN)
     elif typus=="liquid_liquid":
@@ -2101,15 +2101,15 @@ def get_interface_properties(phaseA:Union[MaterialProperties,MixtureDefinitionCo
             raise RuntimeError("Cannot find an interface of type "+typus+" for "+n1+" | "+n2+" and the surfactants "+str({s.name for s in surfactantsN}))
 
 @overload
-def Mixture(mdef:Union[LiquidMixtureDefinitionComponents,LiquidMixtureDefinitionComponent,PureLiquidProperties],temperature:ExpressionNumOrNone=...,quantity:MixQuantityDefinition=...,pressure:ExpressionOrNum=...)->AnyLiquidProperties: ...
+def Mixture(mdef:LiquidMixtureDefinitionComponents | LiquidMixtureDefinitionComponent | PureLiquidProperties,temperature:ExpressionNumOrNone=...,quantity:MixQuantityDefinition=...,pressure:ExpressionOrNum=...)->AnyLiquidProperties: ...
 
 @overload
-def Mixture(mdef:Union[GasMixtureDefinitionComponents,GasMixtureDefinitionComponent,PureGasProperties],temperature:ExpressionNumOrNone=...,quantity:MixQuantityDefinition=...,pressure:ExpressionOrNum=...)->AnyGasProperties: ...
+def Mixture(mdef:GasMixtureDefinitionComponents | GasMixtureDefinitionComponent | PureGasProperties,temperature:ExpressionNumOrNone=...,quantity:MixQuantityDefinition=...,pressure:ExpressionOrNum=...)->AnyGasProperties: ...
 
 @overload
-def Mixture(mdef:Union[MixtureDefinitionComponents,MixtureDefinitionComponent,AnyMaterialProperties],temperature:ExpressionNumOrNone=...,quantity:MixQuantityDefinition=...,pressure:ExpressionOrNum=...)->MaterialProperties: ...
+def Mixture(mdef:MixtureDefinitionComponents | MixtureDefinitionComponent | AnyMaterialProperties,temperature:ExpressionNumOrNone=...,quantity:MixQuantityDefinition=...,pressure:ExpressionOrNum=...)->MaterialProperties: ...
 
-def Mixture(mdef:Union[MixtureDefinitionComponents,MixtureDefinitionComponent,AnyMaterialProperties],temperature:ExpressionNumOrNone=None,quantity:MixQuantityDefinition="mass_fraction",pressure:ExpressionOrNum=1*atm)->AnyMaterialProperties:
+def Mixture(mdef:MixtureDefinitionComponents | MixtureDefinitionComponent | AnyMaterialProperties,temperature:ExpressionNumOrNone=None,quantity:MixQuantityDefinition="mass_fraction",pressure:ExpressionOrNum=1*atm)->AnyMaterialProperties:
     """
     Returns a gas or liquid mixture from the given mixture definition components or a single material properties object.
 

@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -45,9 +46,9 @@ if TYPE_CHECKING:
 class RemesherPointEntry:
     def __init__(self,x:float,y:float,z:float,size:float):
         self.x,self.y,self.z,self.size=x,y,z,size
-        self.set_sizes:List[float]=[] # Sizes can be modified
+        self.set_sizes:list[float]=[] # Sizes can be modified
         #self.on_bounds=set()
-        self.gmsh_point:Optional[Point]=None
+        self.gmsh_point:Point | None=None
 
     def get_size(self) -> float:
         if len(self.set_sizes)==0:
@@ -58,10 +59,10 @@ class RemesherPointEntry:
 
 
 class RemesherLineEntry:
-    def __init__(self,ptlist:List[RemesherPointEntry],mode:str,bname:str):
+    def __init__(self,ptlist:list[RemesherPointEntry],mode:str,bname:str):
         self.ptlist=ptlist
         self.mode=mode
-        self.gmsh_line:Optional[Union[Line,Spline]]=None
+        self.gmsh_line:Line | Spline | None=None
         self.bname=bname
 
 
@@ -71,9 +72,9 @@ class RemesherBase:
         self.template=template
         self._cnt:int=0        
         #self._point_entries = {}
-        self._line_entries:List[RemesherLineEntry] = []
-        self._unique_pts:List[RemesherPointEntry]=[]
-        self._old_meshes:Dict[str,Union[MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d]]={}
+        self._line_entries:list[RemesherLineEntry] = []
+        self._unique_pts:list[RemesherPointEntry]=[]
+        self._old_meshes:dict[str,MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d]={}
         #self._domain_points={} # access the points via domain names
 
     def add_point_entry(self,x:float,y:float,z:float,size:float) -> RemesherPointEntry:
@@ -85,10 +86,10 @@ class RemesherBase:
             self._unique_pts.append(res)
             return res
 
-    def add_line_entry(self,ptlist:List[RemesherPointEntry],mode:str,bname:str):
+    def add_line_entry(self,ptlist:list[RemesherPointEntry],mode:str,bname:str):
         self._line_entries.append(RemesherLineEntry(ptlist,mode,bname))
 
-    def _get_points_by_phys_name(self,name:str)->List[List[RemesherPointEntry]]:
+    def _get_points_by_phys_name(self,name:str)->list[list[RemesherPointEntry]]:
         raise RuntimeError("Implement")
 
     def actions_after_remeshing(self):
@@ -122,20 +123,20 @@ class GmshRemesher2d(GmshTemplate):
         self.remesher._define_geometry() 
 
 class Remesher2dBoundaryLineCollection:
-    def __init__(self,boundname:str,remesher:"Remesher2d",point_size_func:Optional[Callable[[float,float],float]]=None):
+    def __init__(self,boundname:str,remesher:"Remesher2d",point_size_func:Callable[[float, float], float] | None=None):
         super(Remesher2dBoundaryLineCollection, self).__init__()
         self.name=boundname
         self.parts=[]
-        self.oldnodes:Dict[Tuple[_pyoomph.Node,_pyoomph.Node],List[_pyoomph.Node]]= {} #Dict mapping from a pair of vertex nodes to the non-vertex nodes in between
-        self.curves:List[List[_pyoomph.Node]]=[]
-        self._node_to_bound_elems:Dict[_pyoomph.Node,Set[_pyoomph.OomphGeneralisedElement]] = {}
+        self.oldnodes:dict[tuple[_pyoomph.Node,_pyoomph.Node],list[_pyoomph.Node]]= {} #Dict mapping from a pair of vertex nodes to the non-vertex nodes in between
+        self.curves:list[list[_pyoomph.Node]]=[]
+        self._node_to_bound_elems:dict[_pyoomph.Node,set[_pyoomph.OomphGeneralisedElement]] = {}
         self.point_size_func=point_size_func
         self.remesher=remesher
 
 
     def split_into_curves(self): #A boundary may contain more than one subcurve
         self.curves = []
-        neighb_connects:Dict[_pyoomph.Node,List[_pyoomph.Node]]={} # A dict mapping to a list of node neighbors
+        neighb_connects:dict[_pyoomph.Node,list[_pyoomph.Node]]={} # A dict mapping to a list of node neighbors
         #print("OLDNODES",self.oldnodes)
         for n1,n2 in self.oldnodes.keys():
             neighb_connects.setdefault(n1, []).append(n2)
@@ -149,7 +150,7 @@ class Remesher2dBoundaryLineCollection:
             else:
                 startnode:_pyoomph.Node=next(iter(neighb_connects.keys())) #type:ignore #Just any node. Seems to be looped
 
-            currentcurve:List[_pyoomph.Node]=[]
+            currentcurve:list[_pyoomph.Node]=[]
             currentnode=startnode
 
             while len(neighb_connects)>0:
@@ -297,18 +298,18 @@ class Remesher2d(RemesherBase):
     def __init__(self,template:MeshTemplate):
         super(Remesher2d, self).__init__(template)
         self._old_meshes={}
-        self._boundary_nodes:Dict[str,Remesher2dBoundaryLineCollection]={}
+        self._boundary_nodes:dict[str,Remesher2dBoundaryLineCollection]={}
         self.problem=None
         self.gmsh=GmshRemesher2d(self)
         self._meshbounds={}
-        self._ptsizes:Dict[_pyoomph.Node,float]={}
-        self._boundary_point_size_funcs:Dict[str,Callable[[float,float],float]]={}
+        self._ptsizes:dict[_pyoomph.Node,float]={}
+        self._boundary_point_size_funcs:dict[str,Callable[[float,float],float]]={}
         self.use_corner_sizes=True
         self._corner_size_map=None
         self._mesh_size_callback=None
-        self._holes_info:Dict[str,List[List[str]]]={}
+        self._holes_info:dict[str,list[list[str]]]={}
 
-    def set_holes(self,domain:str,holes:List[List[str]]):
+    def set_holes(self,domain:str,holes:list[list[str]]):
         self._holes_info[domain]=holes
 
     def set_boundary_point_size(self,**kwargs:Callable[[float,float],float]):
@@ -320,7 +321,7 @@ class Remesher2d(RemesherBase):
         super(Remesher2d, self).actions_after_remeshing()
         self.gmsh = GmshRemesher2d(self) #Recreate the intenral gmsh remesher
         self._old_meshes={}
-        self._meshbounds:Dict[str,List[str]]={}
+        self._meshbounds:dict[str,list[str]]={}
         self._unique_pts = []
 
     def get_new_template(self)->MeshTemplate:
@@ -405,7 +406,7 @@ class Remesher2d(RemesherBase):
                 assert p0 is not None and p1 is not None
                 l.gmsh_line=mesh.line(p0,p1,name=l.bname)
             elif l.mode=="spline":
-                pts:List[Point] = []
+                pts:list[Point] = []
                 for p in l.ptlist:
                     assert p.gmsh_point  is not None
                     pts.append(p.gmsh_point)
@@ -456,7 +457,7 @@ class Remesher2d(RemesherBase):
         self._cnt+=1
 
 
-    def _get_points_by_phys_name(self,name:str) -> List[List[RemesherPointEntry]]:
+    def _get_points_by_phys_name(self,name:str) -> list[list[RemesherPointEntry]]:
         splt=name.split("/")
         if len(splt)<2:
             raise RuntimeError("Cannot identify remeshed mesh points by a 2d domain")
@@ -465,7 +466,7 @@ class Remesher2d(RemesherBase):
             raise RuntimeError("Cannot find an interface named "+splt[1]+" to remesh on domain "+splt[0]+"\n"+"Available interfaces: "+str(self._meshbounds[dn]))
         #boundline=self._boundary_nodes[splt[1]]
         if len(splt)==2:
-            respts:List[List[RemesherPointEntry]]=[]
+            respts:list[list[RemesherPointEntry]]=[]
             for l in self._line_entries:
                 if l.bname==splt[1]:
                     respts.append(l.ptlist)
@@ -473,8 +474,8 @@ class Remesher2d(RemesherBase):
         elif len(splt)==3:
             if splt[1]==splt[2]:
                 raise RuntimeError("Cannot find intersections between the same lines")
-            pset1:Set[RemesherPointEntry]=set()
-            pset2:Set[RemesherPointEntry]=set()
+            pset1:set[RemesherPointEntry]=set()
+            pset2:set[RemesherPointEntry]=set()
             for l in self._line_entries:
                 if l.bname == splt[1]:
                     for p in l.ptlist:
@@ -561,7 +562,7 @@ class RemeshableGmshTemplate2d(GmshTemplate):
     For the latter case, you can obtain the previous boundary coordinates by get_boundary_coordinates(), etc.
     
     """
-    def __init__(self,loaded_from_mesh_file:Optional[str]=None):
+    def __init__(self,loaded_from_mesh_file:str | None=None):
         super().__init__(loaded_from_mesh_file=loaded_from_mesh_file)
         self.remesher=RemesherViaRecreation(self)
     
@@ -573,7 +574,7 @@ class RemeshableGmshTemplate2d(GmshTemplate):
         """
         return not self.get_problem().is_initialised()
     
-    def get_boundary_coordinates(self,name:str,sort_along_axis:Optional[Literal["x+","x-","y+","y-"]]=None,start_near_point:Optional[Tuple["ExpressionOrNum","ExpressionOrNum"]]=None,nondimensional:bool=False)->List[List[Tuple[float,float]]]:        
+    def get_boundary_coordinates(self,name:str,sort_along_axis:Literal["x+", "x-", "y+", "y-"] | None=None,start_near_point:tuple["ExpressionOrNum", "ExpressionOrNum"] | None=None,nondimensional:bool=False)->list[list[tuple[float,float]]]:        
         """Returns a list of boundary segments, which are lists of (x,y) coordinates (dimensional or not can be controlled by the nondimensional argument). The segments are sorted and reversed based on the sort_along_axis or start_near_point arguments. If both are None, the order is arbitrary.
 
         Args:

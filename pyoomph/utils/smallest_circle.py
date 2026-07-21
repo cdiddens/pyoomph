@@ -1,3 +1,4 @@
+from __future__ import annotations
 # 
 # Smallest enclosing circle - Library (Python)
 # 
@@ -26,9 +27,9 @@
 import math, random
 from ..typings import *
 
-_Point2d=Tuple[float,float]
-_CircleDef2d=Tuple[float,float,float]
-_Point2dList=List[_Point2d]
+_Point2d=tuple[float,float]
+_CircleDef2d=tuple[float,float,float]
+_Point2dList=list[_Point2d]
 
 
 # Data conventions: A point is a pair of floats (x, y). A circle is a triple of floats (center x, center y, radius).
@@ -107,7 +108,7 @@ def make_diameter(a:_Point2d, b:_Point2d)->_CircleDef2d:
 	return (cx, cy, max(r0, r1))
 
 
-def make_circumcircle(a:_Point2d, b:_Point2d, c:_Point2d)->Optional[_CircleDef2d]:
+def make_circumcircle(a:_Point2d, b:_Point2d, c:_Point2d)->_CircleDef2d | None:
 	# Mathematical algorithm from Wikipedia: Circumscribed circle
 	ox = (min(a[0], b[0], c[0]) + max(a[0], b[0], c[0])) / 2
 	oy = (min(a[1], b[1], c[1]) + max(a[1], b[1], c[1])) / 2
@@ -127,7 +128,7 @@ def make_circumcircle(a:_Point2d, b:_Point2d, c:_Point2d)->Optional[_CircleDef2d
 
 _MULTIPLICATIVE_EPSILON = 1 + 1e-14
 
-def is_in_circle(c:Optional[_CircleDef2d], p:_Point2d)->bool:
+def is_in_circle(c:_CircleDef2d | None, p:_Point2d)->bool:
 	return c is not None and math.hypot(p[0] - c[0], p[1] - c[1]) <= c[2] * _MULTIPLICATIVE_EPSILON
 
 

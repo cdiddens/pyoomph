@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -50,7 +51,7 @@ class KuramotoSivashinskyEquations(Equations):
 			swap_test_functions: Swap the test functions of height and curvature.
 	"""
 		
-	def __init__(self,*,a1:ExpressionOrNum=-1,a2:ExpressionOrNum=-1,a3:ExpressionOrNum=1,b:ExpressionOrNum=0,c:ExpressionOrNum=0,space:FiniteElementSpaceEnum="C2",curvspace:Optional[FiniteElementSpaceEnum]=None,swap_test_functions:bool=False,fieldname:str="height",curvfieldname:str="curvature"):
+	def __init__(self,*,a1:ExpressionOrNum=-1,a2:ExpressionOrNum=-1,a3:ExpressionOrNum=1,b:ExpressionOrNum=0,c:ExpressionOrNum=0,space:FiniteElementSpaceEnum="C2",curvspace:FiniteElementSpaceEnum | None=None,swap_test_functions:bool=False,fieldname:str="height",curvfieldname:str="curvature"):
 		super().__init__() #Really important, otherwise it will crash
 		self.a1=a1
 		self.a2=a2

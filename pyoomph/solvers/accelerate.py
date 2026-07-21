@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -65,7 +66,7 @@ class MacAccelerateLinearSolver(GenericLinearSystemSolver):
         waiting for the next step, call refactorize() instead."""
         self.method=method
 
-    def refactorize(self,method:Optional[MacAccelerateMethod]=None)->None:
+    def refactorize(self,method:MacAccelerateMethod | None=None)->None:
         """Re-run the factorization of the last-assembled Jacobian, optionally switching to a
         different method (e.g. from "qr" to "cholesky")."""
         if method is not None:
@@ -97,7 +98,7 @@ class MacAccelerateLinearSolver(GenericLinearSystemSolver):
 from .scipy import ScipyEigenSolver,DefaultMatrixType
 
 class AccelerateInvOp(object):
-    def __init__(self, A:DefaultMatrixType, M:Optional[DefaultMatrixType]=None,sigma:Optional[Union[float,complex]]=None,method:MacAccelerateMethod="qr"):
+    def __init__(self, A:DefaultMatrixType, M:DefaultMatrixType | None=None,sigma:float | complex | None=None,method:MacAccelerateMethod="qr"):
         if sigma is None:
             self.mat=A
         else:
@@ -130,7 +131,7 @@ class AccelerateArpackEigenSolver(ScipyEigenSolver):
         super().__init__(problem)
         self.method:MacAccelerateMethod=method
 
-    def get_OPInv(self,M:DefaultMatrixType,J:DefaultMatrixType,shift:Union[float,complex]):
+    def get_OPInv(self,M:DefaultMatrixType,J:DefaultMatrixType,shift:float | complex):
         if shift is None:
             OPinv = None
         else:

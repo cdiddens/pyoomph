@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -129,16 +130,16 @@ class CelsiusClass:
 
 celsius = CelsiusClass()
 
-__simplified_units:Dict[str,Dict[str,Tuple[int,int]]] = {}
+__simplified_units:dict[str,dict[str,tuple[int,int]]] = {}
 
 @overload
-def unit_to_string(inp:ExpressionOrNum,estimate_prefix:Literal[True]=...)->Tuple[str,float,float]: ...
+def unit_to_string(inp:ExpressionOrNum,estimate_prefix:Literal[True]=...)->tuple[str,float,float]: ...
 
 @overload
 def unit_to_string(inp:ExpressionOrNum,estimate_prefix:Literal[False])->str: ...
 
-def unit_to_string(inp:ExpressionOrNum,estimate_prefix:bool=True) -> Union[str, Tuple[str, float, float]]:
-    __prefixes:Dict[float,str]={1e-9:"n",1e-6:"u",1e-3:"m",1:"",1e3:"k",1e6:"M",1e9:"G"}
+def unit_to_string(inp:ExpressionOrNum,estimate_prefix:bool=True) -> str | tuple[str, float, float]:
+    __prefixes:dict[float,str]={1e-9:"n",1e-6:"u",1e-3:"m",1:"",1e3:"k",1e6:"M",1e9:"G"}
     __shorts = {"meter": "m", "second": "s", "kilogram": "kg", "kelvin": "K", "mol": "mol", "ampere": "A"}
     __sort_numer=["kilogram","mol","kelvin","second","ampere","meter"] # meter must be at the end!
     __sort_denom = ["kilogram", "mol", "meter","kelvin", "second", "ampere" ]
@@ -214,7 +215,7 @@ def unit_to_string(inp:ExpressionOrNum,estimate_prefix:bool=True) -> Union[str, 
     if denom!="":
         if numer=="":
             numer="1"
-            __invprefix:Dict[str,str]={"":"", "n":"G","u":"M","m":"k","k":"m","M":"u","G":"p"}
+            __invprefix:dict[str,str]={"":"", "n":"G","u":"M","m":"k","k":"m","M":"u","G":"p"}
             resstr=numer+"/"+__invprefix[prefix]+denom
         else:
             resstr=prefix+numer+"/"+denom
@@ -241,7 +242,7 @@ __simplified_units["Nm"] = _pyoomph.GiNaC_sep_base_units(newton*meter)
 
 
 class ArrayWithUnits:
-    def __init__(self,array:Union[Sequence[ExpressionOrNum],NPFloatArray],unit:Optional[ExpressionOrNum]=None):
+    def __init__(self,array:Sequence[ExpressionOrNum] | NPFloatArray,unit:ExpressionOrNum | None=None):
         super(ArrayWithUnits, self).__init__()
         if unit is None:
             if isinstance(array,ArrayWithUnits):
@@ -255,7 +256,7 @@ class ArrayWithUnits:
                         break
                 else:
                     unit=1
-                ndarr:List[float]=[]
+                ndarr:list[float]=[]
                 for k in array:
                     try:
                         ndarr.append(float(k/unit))
@@ -288,7 +289,7 @@ class ArrayWithUnits:
 
 
 # Will check for a value like 1.44*meter/second, but not anything like 400*x*y*meter
-def assert_dimensional_value(dim_val:ExpressionOrNum,required_unit:Optional[ExpressionOrNum]=None):
+def assert_dimensional_value(dim_val:ExpressionOrNum,required_unit:ExpressionOrNum | None=None):
     if isinstance(dim_val,(float,int)):
         return dim_val,1
     factor, unit, rest, success = _pyoomph.GiNaC_collect_units(dim_val)

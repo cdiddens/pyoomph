@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -45,7 +46,7 @@ class StreamFunctionFromVelocity(Equations):
             axisymmetric (Union[Literal["auto"],bool]): If True, the equations are defined in axisymmetric coordinates. If "auto", the equations are defined in axisymmetric coordinates if the coordinate system is axisymmetric. Default is "auto".
             DG_alpha (ExpressionOrNum): The penalty parameter for the DG formulation of the stream function. If the stream function is defined in a DG space, this parameter is used to penalize jumps in the stream function across element boundaries. Default is 10.
     """
-    def __init__(self,*,name:str="streamfunc",space:FiniteElementSpaceEnum="C2",velocity:Expression=var("velocity"),with_error_estimator:bool=True,axisymmetric:Union[Literal["auto"],bool]="auto",DG_alpha:ExpressionOrNum=10):
+    def __init__(self,*,name:str="streamfunc",space:FiniteElementSpaceEnum="C2",velocity:Expression=var("velocity"),with_error_estimator:bool=True,axisymmetric:Literal["auto"] | bool="auto",DG_alpha:ExpressionOrNum=10):
         super(StreamFunctionFromVelocity, self).__init__()
         self.space:FiniteElementSpaceEnum=space
         self.name=name

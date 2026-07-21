@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -32,7 +33,7 @@ from ..typings import *
 
 
 class NumericalTextOutputFile:
-    def __init__(self, filename: str, open_mode: str = "w",header:Optional[List[str]]=None):
+    def __init__(self, filename: str, open_mode: str = "w",header:list[str] | None=None):
         f = open(filename, open_mode)
         if f is None:
             raise RuntimeError("Could not open file "+str(filename))
@@ -40,7 +41,7 @@ class NumericalTextOutputFile:
         if header:
             self.header(*header)
 
-    def add_row(self, *args: Union[float, Any]):
+    def add_row(self, *args: float | Any):
         if self.file is None:
             raise RuntimeError("File was closed before")
         def params_to_float(p):
@@ -56,7 +57,7 @@ class NumericalTextOutputFile:
         self.file.write(line)
         self.file.flush()
 
-    def header(self, *args: Union[float, str, Any]):
+    def header(self, *args: float | str | Any):
         if self.file is None:
             raise RuntimeError("File was closed before")
         line = "#"+("\t".join(map(str, [*args]))) + "\n"
@@ -108,14 +109,14 @@ class LoadedTextDataFile:
         
 
     @overload
-    def get_column_index(self, index_or_name_start: Union[List[Union[str,int]],Tuple[Union[str,int],...]], exact_name: bool = False) -> NPIntArray: ...
+    def get_column_index(self, index_or_name_start: list[str | int] | tuple[str | int, ...], exact_name: bool = False) -> NPIntArray: ...
 
     @overload
-    def get_column_index(self, index_or_name_start: Union[str,int], exact_name: bool = False) -> int: ...
+    def get_column_index(self, index_or_name_start: str | int, exact_name: bool = False) -> int: ...
 
-    def get_column_index(self, index_or_name_start: Union[List[Union[str,int]],Tuple[Union[str,int],...], str, int], exact_name: bool = False) -> Union[int,NPIntArray]:
+    def get_column_index(self, index_or_name_start: list[str | int] | tuple[str | int, ...] | str | int, exact_name: bool = False) -> int | NPIntArray:
         if isinstance(index_or_name_start, (list, tuple)):
-            rs: List[int] = []
+            rs: list[int] = []
             for i in index_or_name_start:
                 rs.append(self.get_column_index(i, exact_name=exact_name))
             return numpy.array(rs, dtype=numpy.int32)
@@ -138,7 +139,7 @@ class LoadedTextDataFile:
             
         return index
 
-    def get_column_data(self, index_or_name_start: Union[List[Union[str,int]],Tuple[Union[str,int],...], str, int], exact_name: bool = False) -> NPFloatArray:
+    def get_column_data(self, index_or_name_start: list[str | int] | tuple[str | int, ...] | str | int, exact_name: bool = False) -> NPFloatArray:
         index=self.get_column_index(index_or_name_start, exact_name=exact_name)
         return self.data[:, index]  # type:ignore
 

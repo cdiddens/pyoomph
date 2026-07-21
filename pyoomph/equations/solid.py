@@ -1,3 +1,4 @@
+from __future__ import annotations
 from .. import *
 from ..expressions import *
 from .ALE import BaseMovingMeshEquations
@@ -60,7 +61,7 @@ class BaseSolidConstitutiveLaw:
         """
         return self._subexpression((self.get_Gij(dim)-self.get_gij(dim,isotropic_growth_factor))/2)
     
-    def get_sigma(self,dim:int,isotropic_growth_factor:ExpressionNumOrNone=1,pressure_var:Optional[Expression]=None):
+    def get_sigma(self,dim:int,isotropic_growth_factor:ExpressionNumOrNone=1,pressure_var:Expression | None=None):
         """
         Returns the second Piola-Kirchhoff stress tensor. The method must be implemented in derived classes.
 
@@ -101,7 +102,7 @@ class GeneralizedHookeanSolidConstitutiveLaw(BaseSolidConstitutiveLaw):
         
         
 
-    def get_sigma(self,dim:int,isotropic_growth_factor:ExpressionOrNum=1,pressure_var:Optional[Expression]=None):
+    def get_sigma(self,dim:int,isotropic_growth_factor:ExpressionOrNum=1,pressure_var:Expression | None=None):
         se=lambda x : self._subexpression(x)
         Gup=self.get_G_up_ij(dim)
         gammakl=self.get_gammaij(dim,isotropic_growth_factor)
@@ -125,7 +126,7 @@ class IncompressibleHookeanSolidConstitutiveLaw(IncompressibleSolidConstitutiveL
         super().__init__(use_subexpressions=use_subexpressions,use_inverse_routine=use_inverse_routine)
         self.E=E
 
-    def get_sigma(self,dim:int,isotropic_growth_factor:ExpressionNumOrNone=1,pressure_var:Optional[Expression]=None):
+    def get_sigma(self,dim:int,isotropic_growth_factor:ExpressionNumOrNone=1,pressure_var:Expression | None=None):
         se=lambda x : self._subexpression(x)
         Gup=self.get_G_up_ij()
         gammakl=self.get_gammaij(dim,isotropic_growth_factor)

@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -28,14 +29,14 @@
 from .generic import GenericLinearSystemSolver
 import ctypes
 import ctypes.util
-from ctypes import POINTER, byref, c_longlong, c_int, Structure, c_char_p,c_double,c_bool, c_long, c_void_p
+from ctypes import POINTER, byref, c_longlong, c_int, c_bool, c_void_p
 from ctypes import CDLL
 import numpy,sys,os
 from pathlib import Path
 from numpy import ctypeslib
 from ..typings import *
 
-def _try_to_find_lib(nam:Union[str,List[str]])->Optional[CDLL]:
+def _try_to_find_lib(nam:str | list[str])->CDLL | None:
     # First try to find the library via the packages
     if isinstance(nam,list):
         for l in nam:

@@ -1,3 +1,4 @@
+from __future__ import annotations
 from ..generic.problem import Problem
 from ..typings import *
 from ..generic.bifurcation_tools import MultiAssembleRequest
@@ -9,7 +10,7 @@ class HalleySolver:
         self.problem=problem
              
                 
-    def solve(self,*,max_iterations:Optional[int]=None,accuracy:Optional[float]=None):
+    def solve(self,*,max_iterations:int | None=None,accuracy:float | None=None):
         
         # Currently, only stationary solves supported
         if not self.problem.is_initialised():

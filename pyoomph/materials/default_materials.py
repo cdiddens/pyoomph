@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -206,7 +207,7 @@ class MixtureLiquidGlycerolWater(MixtureLiquidProperties):
     components = {"water", "glycerol"}
     passive_field = "water"
 
-    def __init__(self, pure_properties: Dict[str, MaterialProperties]):
+    def __init__(self, pure_properties: dict[str, MaterialProperties]):
         super().__init__(pure_properties)
 
         # Just assumptions, for mass density reasonable according to the data from https://doi.org/10.1016/j.petrol.2012.09.003
@@ -285,7 +286,7 @@ class MixtureLiquidEthanolWater(MixtureLiquidProperties):
     components = {"water", "ethanol"}
     passive_field = "water"
 
-    def __init__(self, pure_properties: Dict[str, MaterialProperties]):
+    def __init__(self, pure_properties: dict[str, MaterialProperties]):
         super().__init__(pure_properties)
         TKelvin = var("temperature") / kelvin
         yE = self.get_mass_fraction_field("ethanol")
@@ -360,7 +361,7 @@ class MixtureLiquid12HexanediolWater(MixtureLiquidProperties):
     components = {"12hexanediol", "water"}
     passive_field = "water"
 
-    def __init__(self, pure_properties: Dict[str, MaterialProperties]):
+    def __init__(self, pure_properties: dict[str, MaterialProperties]):
         super().__init__(pure_properties)
         yH = self.get_mass_fraction_field("12hexanediol")
 
@@ -487,7 +488,7 @@ class MixtureGasAirWater(MixtureGasProperties):
     components = {"water", "air"}
     passive_field = "air"
 
-    def __init__(self, pure_properties: Dict[str, MaterialProperties]):
+    def __init__(self, pure_properties: dict[str, MaterialProperties]):
         super().__init__(pure_properties)
         TKelvin = var("temperature") / kelvin
 
@@ -529,7 +530,7 @@ class MixtureGasAirEthanolWater(MixtureGasProperties):
     components = {"ethanol", "water", "air"}
     passive_field = "air"
 
-    def __init__(self, pure_properties: Dict[str, MaterialProperties]):
+    def __init__(self, pure_properties: dict[str, MaterialProperties]):
         super().__init__(pure_properties)
         TKelvin = var("temperature") / kelvin
         pAtm = var("absolute_pressure") / atm
@@ -558,7 +559,7 @@ class MixtureGasAirEthanol(MixtureGasProperties):
     components = {"ethanol", "air"}
     passive_field = "air"
 
-    def __init__(self, pure_properties: Dict[str, MaterialProperties]):
+    def __init__(self, pure_properties: dict[str, MaterialProperties]):
         super().__init__(pure_properties)        
 
         # TODO: Improve: This is the one for air only

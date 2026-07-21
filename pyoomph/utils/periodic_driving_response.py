@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -120,7 +121,7 @@ class PeriodicDrivingResponse():
         """
         self.set_driving_omega(2*pi*freq)
 
-    def iterate_over_driving_frequencies(self,*,omegas:Optional[List[ExpressionOrNum]]=None,freqs:Optional[List[ExpressionOrNum]]=None,unit:ExpressionOrNum=1,signum:int=1):
+    def iterate_over_driving_frequencies(self,*,omegas:list[ExpressionOrNum] | None=None,freqs:list[ExpressionOrNum] | None=None,unit:ExpressionOrNum=1,signum:int=1):
         """
         Iterator to iterate over the response of the system to different driving frequencies.
 

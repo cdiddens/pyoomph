@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -65,17 +66,17 @@ if TYPE_CHECKING:
     from ..meshes.meshdatacache import MeshDataEigenModes
 
 
-_MatPlotLibPartTypeVar=TypeVar("_MatPlotLibPartTypeVar",bound=Type["MatplotLibPart"])
-MatPlotLibAddPlotReturns=Union["MatplotLibPart","MatplotLibOverlayBase","MatplotlibVectorFieldArrows"]
+_MatPlotLibPartTypeVar=TypeVar("_MatPlotLibPartTypeVar",bound=type["MatplotLibPart"])
+MatPlotLibAddPlotReturns:TypeAlias="MatplotLibPart | MatplotLibOverlayBase | MatplotlibVectorFieldArrows"
 
 class BasePlotter:
     """
     A generic class for plotting of problems. This class is not meant to be used directly, but to be inherited by a specific plotter class.
     """
-    def __init__(self,problem:"Problem",eigenvector:Optional[int]=None,eigenmode:"MeshDataEigenModes"="abs"):
+    def __init__(self,problem:"Problem",eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs"):
         self._problem:"Problem"=problem
         # You can have more than one problem to plot, e.g. for comparison
-        self._named_problems:Dict[str,"Problem"]={"":self._problem}
+        self._named_problems:dict[str,"Problem"]={"":self._problem}
         self._initialised=False
         self._output_step=0 # Will be set by the problem
         self.active=True
@@ -84,10 +85,10 @@ class BasePlotter:
         #: The mode to plot eigenvectors, e.g. ``"abs"`` for the absolute value, ``"real"`` for the real part, etc.
         self.eigenmode:"MeshDataEigenModes"=eigenmode
         
-        self._eigenanimation_m:Optional[int]=None
-        self._eigenanimation_lambda:Optional[complex]=None
+        self._eigenanimation_m:int | None=None
+        self._eigenanimation_lambda:complex | None=None
         
-    def add_additional_problem(self,problem:"Problem",problem_name:str,output_dir:Optional[str]=None):
+    def add_additional_problem(self,problem:"Problem",problem_name:str,output_dir:str | None=None):
         self._named_problems[problem_name]=problem        
         if not problem.is_initialised():
             if output_dir is None:
@@ -98,7 +99,7 @@ class BasePlotter:
             problem.ignore_command_line=True
             problem.initialise()
 
-    def get_eigenvalue(self,problem_name:str="")->Optional[complex]:
+    def get_eigenvalue(self,problem_name:str="")->complex | None:
         """
         When plotting eigenfunctions, it will return the eigenvalue of the current eigenvector. When plotting normal solutions, it is ``None``.
         """
@@ -109,7 +110,7 @@ class BasePlotter:
         else:
             return self.get_problem(problem_name)._last_eigenvalues[self.eigenvector] #type:ignore
         
-    def get_azimuthal_eigenmode(self,problem_name:str="")->Optional[int]:
+    def get_azimuthal_eigenmode(self,problem_name:str="")->int | None:
         if self._eigenanimation_m is not None:
             return self._eigenanimation_m
         if self.eigenvector is None:
@@ -162,7 +163,7 @@ class PlotTransform:
     def __init__(self):
         pass
 
-    def apply(self,coordinates:NPFloatArray,values:Optional[NPFloatArray])->Tuple[NPFloatArray,NPFloatArray]:
+    def apply(self,coordinates:NPFloatArray,values:NPFloatArray | None)->tuple[NPFloatArray,NPFloatArray]:
         return numpy.array(coordinates),numpy.array(values) #type:ignore
 
     def get_mirror(self):
@@ -173,12 +174,12 @@ class PlotTransformShift(PlotTransform):
         super(PlotTransform,self).__init__()
         self.offset:NPFloatArray=numpy.array([offset_x,offset_y]) #type:ignore
 
-    def apply(self,coordinates:NPFloatArray,values:Optional[NPFloatArray])->Tuple[NPFloatArray,NPFloatArray]:
+    def apply(self,coordinates:NPFloatArray,values:NPFloatArray | None)->tuple[NPFloatArray,NPFloatArray]:
         return numpy.transpose(numpy.transpose(numpy.array(coordinates))+self.offset),numpy.array(values) #type:ignore
 
 
 class PlotTransformMirror(PlotTransform):
-    def __init__(self,x:bool=False,y:bool=False,z:bool=False,tensor_transform:Optional[Callable[[NPFloatArray],NPFloatArray]]=None,offset_x:Optional[float]=None,offset_y:Optional[float]=None):
+    def __init__(self,x:bool=False,y:bool=False,z:bool=False,tensor_transform:Callable[[NPFloatArray], NPFloatArray] | None=None,offset_x:float | None=None,offset_y:float | None=None):
         super(PlotTransformMirror, self).__init__()
         self.mirror_x=x
         self.mirror_y = y
@@ -189,7 +190,7 @@ class PlotTransformMirror(PlotTransform):
     def get_mirror(self):
         return [self.mirror_x,self.mirror_y,self.mirror_z]
 
-    def apply(self,coordinates:NPFloatArray,values:Optional[NPFloatArray])->Tuple[NPFloatArray,NPFloatArray]:
+    def apply(self,coordinates:NPFloatArray,values:NPFloatArray | None)->tuple[NPFloatArray,NPFloatArray]:
         cs=coordinates.copy()
         if values is not None and len(values.shape)>1:
             vecdim=values.shape[0]
@@ -238,7 +239,7 @@ class PlotTransformRotate90(PlotTransform):
         return [self.mirror_x, self.mirror_y, self.mirror_z]
 
 
-    def apply(self,coordinates:NPFloatArray,values:Optional[NPFloatArray])->Tuple[NPFloatArray,NPFloatArray]:
+    def apply(self,coordinates:NPFloatArray,values:NPFloatArray | None)->tuple[NPFloatArray,NPFloatArray]:
         cs=coordinates.copy()
         if values is not None and len(values.shape)>1:
             vecdim=values.shape[0]
@@ -283,7 +284,7 @@ class MatplotLibPart:
     mode=None
     zindex=0
     preprocess_order=0
-    mode_to_class:Dict[str,Type["MatplotLibPart"]]={}
+    mode_to_class:dict[str,type["MatplotLibPart"]]={}
     def __init__(self,plotter:"MatplotlibPlotter"):
         self.plotter=plotter
         pass
@@ -297,7 +298,7 @@ class MatplotLibPart:
     def post_process(self):
         pass
 
-    def set_kwargs(self,kwargs:Dict[str,Any]):
+    def set_kwargs(self,kwargs:dict[str,Any]):
         for k,v in kwargs.items():
             if v is not None:
                 setattr(self,k,v)
@@ -323,10 +324,10 @@ class MatplotLibPartWithMeshData(MatplotLibPart):
     def __init__(self,plotter:"MatplotlibPlotter"):
         super(MatplotLibPartWithMeshData, self).__init__(plotter)
         self.mshcache:MeshDataCacheEntry
-        self.transform:Optional[PlotTransform]=None
-        self.field:Union[str,List[str]]
+        self.transform:PlotTransform | None=None
+        self.field:str | list[str]
 
-    def set_mesh_data(self,mshdata:MeshDataCacheEntry,field:Union[str,List[str]],transform:Optional[PlotTransform]):
+    def set_mesh_data(self,mshdata:MeshDataCacheEntry,field:str | list[str],transform:PlotTransform | None):
         self.mshcache=mshdata
         self.field=field
         self.transform=transform
@@ -341,10 +342,10 @@ class MatplotlibTriangulationBased(MatplotLibPartWithMeshData):
         super(MatplotlibTriangulationBased, self).__init__(plotter)
         self.triang:Any = None
         self.data:NPFloatArray
-        self.ptsinside:Optional[NPIntArray]=None
-        self.interpdata:Optional[List[Tuple[int,int,float]]]=None
-        self.bounding_box:Optional[List[float]]=None
-        self.range_mask_func:Optional[Callable[[Union[float,NPFloatArray],Union[float,NPFloatArray]],bool]]=None # set to lambda x,y : Bool
+        self.ptsinside:NPIntArray | None=None
+        self.interpdata:list[tuple[int, int, float]] | None=None
+        self.bounding_box:list[float] | None=None
+        self.range_mask_func:Callable[[float | NPFloatArray, float | NPFloatArray], bool] | None=None # set to lambda x,y : Bool
 
 
 
@@ -575,7 +576,7 @@ class MatplotlibTriangulationBased(MatplotLibPartWithMeshData):
 
 
 
-    def get_visible_data_range(self,data:Optional[NPFloatArray]=None)->Tuple[Optional[float],Optional[float]]:
+    def get_visible_data_range(self,data:NPFloatArray | None=None)->tuple[float | None,float | None]:
         if data is None:
             data=self.data
         if self.range_mask_func is not None:
@@ -622,8 +623,8 @@ class MatplotLibTricontourf(MatplotlibTriangulationBased):
 
     def __init__(self,plotter:"MatplotlibPlotter"):
         super().__init__(plotter=plotter)
-        self.colorbar:Optional["MatplotLibColorbar"]=None
-        self.scaled_data:Optional[NPFloatArray]=None
+        self.colorbar:"MatplotLibColorbar" | None=None
+        self.scaled_data:NPFloatArray | None=None
 
     def pre_process(self):
         if self.colorbar is None:
@@ -852,7 +853,7 @@ class MatplotlibVectorFieldStreams(MatplotlibTriangulationBased):
     boundoffsy=0.5
     density=10
     zindex = 1
-    colorbar:Optional["MatplotLibColorbar"] = None
+    colorbar:"MatplotLibColorbar" | None = None
     dataoffset=0
     colorfield=None
 
@@ -1124,14 +1125,14 @@ class MatplotLibInterfaceCmap(MatplotLibInterfaceLine):
     def __init__(self,plotter:"MatplotlibPlotter"):
         super().__init__(plotter)
         self.field=""
-        self.colorbar:Optional[MatplotLibColorbar]=None
+        self.colorbar:MatplotLibColorbar | None=None
         self._coordinates=None
-        self._data:Optional[NPFloatArray]=None
-        self._lsegs:Optional[List[List[int]]]=None
+        self._data:NPFloatArray | None=None
+        self._lsegs:list[list[int]] | None=None
         self._ninter=None
         self.scaled_data=None
 
-    def get_visible_data_range(self)->Tuple[float,float]:
+    def get_visible_data_range(self)->tuple[float,float]:
         assert self._data is not None
         return numpy.amin(self._data),numpy.amax(self._data) #type:ignore #TODO: Crop outside
 
@@ -1191,7 +1192,7 @@ class MatplotlibInterfaceArrows(MatplotLibPartWithMeshData):
     linecolor=None
     arrowdensity=100.0
     lengthfactor=1.0
-    attached_with_head:Union[bool,Literal["positive","negative"]]=False
+    attached_with_head:bool | Literal["positive", "negative"]=False
     start_index=None
     end_index=None
     skip_index=None
@@ -1203,9 +1204,9 @@ class MatplotlibInterfaceArrows(MatplotLibPartWithMeshData):
 
     def __init__(self,plotter:"MatplotlibPlotter"):
         super().__init__(plotter)
-        self._arrows:List[Tuple[float,float,float,float,float]]=[]
-        self._coordinates:Optional[NPFloatArray]=None
-        self.arrowkey:Optional[MatplotLibArrowKey] = None
+        self._arrows:list[tuple[float,float,float,float,float]]=[]
+        self._coordinates:NPFloatArray | None=None
+        self.arrowkey:MatplotLibArrowKey | None = None
 
     def pre_process(self):
         super().pre_process()
@@ -1252,14 +1253,14 @@ class MatplotlibInterfaceArrows(MatplotLibPartWithMeshData):
 
         
         for lentry in lines:
-            x:List[float] = [coordinates[0, lentry[i]] for i in range(len(lentry))]
-            y:List[float] = [coordinates[1, lentry[i]] for i in range(len(lentry))]
-            dxx:List[float]=[dx[lentry[i]]*asp for i in range(len(lentry))]
-            dyy:List[float] = [dy[lentry[i]] for i in range(len(lentry))]
+            x:list[float] = [coordinates[0, lentry[i]] for i in range(len(lentry))]
+            y:list[float] = [coordinates[1, lentry[i]] for i in range(len(lentry))]
+            dxx:list[float]=[dx[lentry[i]]*asp for i in range(len(lentry))]
+            dyy:list[float] = [dy[lentry[i]] for i in range(len(lentry))]
             if not vectorfield:
-                datasegs:List[float]=[self._data[lentry[i]] for i in range(len(lentry))]
+                datasegs:list[float]=[self._data[lentry[i]] for i in range(len(lentry))]
             else:
-                datasegs:List[float]=[self._data[0,lentry[i]]*nx[lentry[i]]+self._data[1,lentry[i]]*ny[lentry[i]] for i in range(len(lentry))]                
+                datasegs:list[float]=[self._data[0,lentry[i]]*nx[lentry[i]]+self._data[1,lentry[i]]*ny[lentry[i]] for i in range(len(lentry))]                
                 
 
             if self.arrowdensity is not None:
@@ -1270,7 +1271,7 @@ class MatplotlibInterfaceArrows(MatplotLibPartWithMeshData):
                     spacing=max(spacing, (self.plotter.ymax - self.plotter.ymin) / self.arrowdensity)  #type:ignore
                 if spacing==0:
                     raise RuntimeError("Cannot determine interface arrow distance without set_view first")
-                interflengthsL:List[float] = []
+                interflengthsL:list[float] = []
                 interflength:float = 0.0
                 for i in range(len(x)):
                     if i > 0:
@@ -1363,7 +1364,7 @@ class MatplotLibElementOutlines(MatplotLibPartWithMeshData):
         super().__init__(plotter=plotter)
 
     def add_to_plot(self):
-        allines:List[List[Tuple[float]]] = []
+        allines:list[list[tuple[float]]] = []
         tr=self.transform
         mesh=self.mshcache.mesh
         if isinstance(self.plotter.eigenvector,int):
@@ -1396,7 +1397,7 @@ class MatplotLibOverlayBase(MatplotLibPart):
     #: Order when to preprocess the overlay. The higher the number, the later it will be processed.
     preprocess_order = 10.0
     #: Position of the overlay. Can be a tuple/list of floats as coordinates, or a string like ``"top left"``, ``"bottom right"``, ``"center"``, etc.
-    position:Optional[Union[Tuple[float,float],List[float],str]] = None
+    position:tuple[float, float] | list[float] | str | None = None
     #: Margin in x direction
     xmargin = 0.025
     #: Margin in y direction
@@ -1421,8 +1422,8 @@ class MatplotLibOverlayBase(MatplotLibPart):
 
     def __init__(self,plotter:"MatplotlibPlotter"):
         super().__init__(plotter)
-        self.xpos:Optional[float] = None
-        self.ypos:Optional[float] = None
+        self.xpos:float | None = None
+        self.ypos:float | None = None
 
     def get_overlay_size(self):
         return [0.0,0.0]
@@ -1478,8 +1479,8 @@ class MatplotLibOverlayBase(MatplotLibPart):
 
 class MatplotLibBaseRange:
     def __init__(self) -> None:
-        self.vmin:Optional[float]
-        self.vmax:Optional[float]
+        self.vmin:float | None
+        self.vmax:float | None
 
     def consider_range(self,vmin:float,vmax:float):
         pass
@@ -1489,7 +1490,7 @@ class MatplotLibBaseRange:
 
 #An object which allows you to store the range of e.g. colorbars over multiple timesteps
 class MatplotLibPersistentRange(MatplotLibBaseRange):
-    def __init__(self,vmin:Optional[float],vmax:Optional[float],mode:Union[str,Union[Tuple[float,float],List[float]]]="current"):
+    def __init__(self,vmin:float | None,vmax:float | None,mode:str | tuple[float, float] | list[float]="current"):
         super(MatplotLibPersistentRange, self).__init__()        
         self.vmin=vmin
         self.vmax=vmax
@@ -1527,8 +1528,8 @@ class MatplotLibColorbar(MatplotLibOverlayBase):
     """
     mode="colorbar"
     #: Number of discrete colors to use. If None, use a continuous color map.
-    Ndisc:Optional[int] = 20
-    cmap:Union[str,matplotlib.colors.Colormap] = "coolwarm"
+    Ndisc:int | None = 20
+    cmap:str | matplotlib.colors.Colormap = "coolwarm"
     #: A norm (matplotlib.norm) to use
     norm = None
     #: Length of the colorbar in nondimensional figure coordinates
@@ -1540,7 +1541,7 @@ class MatplotLibColorbar(MatplotLibOverlayBase):
     ticsize=10
     labelpad=4
     #: Hide each second tick
-    hide_some_ticks:Optional[Union[bool,Sequence[int]]]=True
+    hide_some_ticks:bool | Sequence[int] | None=True
     #: Hide all ticks
     hide_all_ticks:bool=False
     #: Orientation of the colorbar
@@ -1568,17 +1569,17 @@ class MatplotLibColorbar(MatplotLibOverlayBase):
 
     def __init__(self,plotter:"MatplotlibPlotter"):
         super().__init__(plotter)
-        self._vmin:Optional[float]=None
-        self._vmax:Optional[float]=None
-        self._clamp_min:Optional[float]=None
-        self._clamp_max:Optional[float]=None
+        self._vmin:float | None=None
+        self._vmax:float | None=None
+        self._clamp_min:float | None=None
+        self._clamp_max:float | None=None
         self.cb=None
         self.title="Colorbar"
-        self.range:Optional["MatplotLibBaseRange"]=None
+        self.range:"MatplotLibBaseRange" | None=None
         #: If True, the colorbar will not be plotted
         self.invisible=False
 
-    def consider_range(self,vmin:Optional[float]=None,vmax:Optional[float]=None):
+    def consider_range(self,vmin:float | None=None,vmax:float | None=None):
         if vmin is not None:
             if self._vmin is not None:
                 self._vmin=min(self._vmin,vmin)
@@ -1608,7 +1609,7 @@ class MatplotLibColorbar(MatplotLibOverlayBase):
             if self._vmax is not None:
                 self._vmax=min(self._vmax,self._clamp_max)
 
-    def discrete_cmap(self, N:Union[int,Sequence[float]], base_cmap:Optional[str]=None)->matplotlib.colors.LinearSegmentedColormap:
+    def discrete_cmap(self, N:int | Sequence[float], base_cmap:str | None=None)->matplotlib.colors.LinearSegmentedColormap:
         base = matplotlib.pyplot.get_cmap(base_cmap) #type:ignore
         if isinstance(N,int):
             N=numpy.linspace(0, 1, N) #type:ignore
@@ -1619,7 +1620,7 @@ class MatplotLibColorbar(MatplotLibOverlayBase):
 
         return matplotlib.colors.LinearSegmentedColormap.from_list(cmap_name, color_list, len(N)) #type:ignore
 
-    def set_kwargs(self,kwargs:Dict[str,Any]):
+    def set_kwargs(self,kwargs:dict[str,Any]):
         super(MatplotLibColorbar, self).set_kwargs(kwargs)
         if self.unit is not None:
             ustr,_num,factor=unit_to_string(self.unit,estimate_prefix=True)
@@ -1651,7 +1652,7 @@ class MatplotLibColorbar(MatplotLibOverlayBase):
         scalarMap = cm.ScalarMappable(norm=self.get_norm(), cmap=self.cmap)
         
         scalarMap.set_array([self.range.vmin, self.range.vmax]) #type:ignore
-        kw:Dict[str,str]={}
+        kw:dict[str,str]={}
         if self.orientation=="horizontal":
             kw["orientation"]="horizontal"
         elif self.orientation=="vertical":
@@ -1884,15 +1885,15 @@ class MatplotLibArrowKey(MatplotLibOverlayBase):
 
     def __init__(self,plotter:"MatplotlibPlotter"):
         super(MatplotLibArrowKey, self).__init__(plotter)
-        self.figlength:Optional[float]=None
-        self.reallength:Optional[float]=None
-        self.title:Optional[Union[str,Dict[str,str]]]=None
-        self.range:Optional[MatplotLibBaseRange]=None
+        self.figlength:float | None=None
+        self.reallength:float | None=None
+        self.title:str | dict[str, str] | None=None
+        self.range:MatplotLibBaseRange | None=None
         self._vmax:float=0
         self.spatial_scale:float=0
         self.arrow_length_scale:float=0.0
 
-    def set_kwargs(self, kwargs:Dict[str,Any]):
+    def set_kwargs(self, kwargs:dict[str,Any]):
         super(MatplotLibArrowKey, self).set_kwargs(kwargs)
         if self.unit is not None:
             ustr, _num, factor = unit_to_string(self.unit, estimate_prefix=True)
@@ -2005,10 +2006,10 @@ class MatplotLibAxes(MatplotLibOverlayBase):
     Ndisc = 20
     width = 0.4
     height = 0.3
-    title:Optional[str] = None
-    xlabel:Optional[str] = None
-    ylabel:Optional[str] = None
-    y2label:Optional[str] = None
+    title:str | None = None
+    xlabel:str | None = None
+    ylabel:str | None = None
+    y2label:str | None = None
     ylabel_color:str="black"
     y2label_color:str="black"
     xmin=None
@@ -2022,10 +2023,10 @@ class MatplotLibAxes(MatplotLibOverlayBase):
     rangemode_y2 = "auto"
     alpha=1
     ticksize=None    
-    legend_position:Optional[str]=None
+    legend_position:str | None=None
     hide_y_ticks=False
 
-    def consider_range(self,xmin:Optional[float]=None,xmax:Optional[float]=None,ymin:Optional[float]=None,ymax:Optional[float]=None,use_y2=False):
+    def consider_range(self,xmin:float | None=None,xmax:float | None=None,ymin:float | None=None,ymax:float | None=None,use_y2=False):
         if self.rangemode_x=="auto":
             if self.xmin is None:
                 self.xmin=xmin
@@ -2121,21 +2122,21 @@ class MatplotLibLinePlot(MatplotLibPartWithMeshData):
     yfactor:float=1
     linewidth:float=1
     linestyle:str="-"
-    color:Optional[str]=None
+    color:str | None=None
     use_y2=False
-    label:Optional[str]=None
-    markersize:Optional[float]=None
-    markerstyle:Optional[str]=None
+    label:str | None=None
+    markersize:float | None=None
+    markerstyle:str | None=None
     sort_by_x=True
 
     def __init__(self, plotter:"MatplotlibPlotter"):
         super(MatplotLibLinePlot, self).__init__(plotter)
-        self.axes:Optional[MatplotLibAxes] = None
+        self.axes:MatplotLibAxes | None = None
         self._coordinates=None
         self._data=None
         self._plotdata=None
-        self._external_xdata:Optional[NPFloatArray]=None
-        self._external_ydata:Optional[NPFloatArray]=None
+        self._external_xdata:NPFloatArray | None=None
+        self._external_ydata:NPFloatArray | None=None
 
     def set_external_data(self,x:NPFloatArray,y:NPFloatArray):
         self._external_xdata=x
@@ -2215,7 +2216,7 @@ class MatplotLibTracers(MatplotLibPart):
     mode="tracers"
     marker="o"
     size=4
-    color:Optional[str]=None
+    color:str | None=None
     edgecolor="face"
     zindex=5
     invisible=False
@@ -2223,11 +2224,11 @@ class MatplotLibTracers(MatplotLibPart):
 
     def __init__(self,plotter:"MatplotlibPlotter"):
         super(MatplotLibTracers, self).__init__(plotter)
-        self.tracer_name:Optional[str] = None
-        self.transform:Optional[PlotTransform]=None
+        self.tracer_name:str | None = None
+        self.transform:PlotTransform | None=None
         self.mesh=None
 
-    def set_tracer_data(self,name:str,mesh:AnySpatialMesh,transform:Optional[PlotTransform]):
+    def set_tracer_data(self,name:str,mesh:AnySpatialMesh,transform:PlotTransform | None):
         self.tracer_name=name
         self.mesh=mesh
         self.transform=transform
@@ -2266,7 +2267,7 @@ class MatplotLibTracers(MatplotLibPart):
 @MatplotLibPart.register()
 class MatplotLibImage(MatplotLibOverlayBase):
     mode="image"
-    image:Optional[str]=None
+    image:str | None=None
     pixel_per_spatial_unit=None
     cmap='gray'
     verticalalign="center"
@@ -2320,12 +2321,12 @@ class MatplotlibPlotter(BasePlotter):
         eigenscale: If eigenvector is set, we can scale the eigenvector by this factor (this includes also the mesh positions)
         
     """
-    def __init__(self,problem:Optional["Problem"]=None,filetrunk:str="plot_{:05d}",fileext:Union[str,List[str]]="png",eigenvector:Optional[int]=None,eigenmode:"MeshDataEigenModes"="abs",add_eigen_to_mesh_positions:bool=True,position_eigen_scale:float=1,eigenscale:float=1):
+    def __init__(self,problem:"Problem" | None=None,filetrunk:str="plot_{:05d}",fileext:str | list[str]="png",eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs",add_eigen_to_mesh_positions:bool=True,position_eigen_scale:float=1,eigenscale:float=1):
         super(MatplotlibPlotter, self).__init__(problem,eigenvector=eigenvector,eigenmode=eigenmode)
-        self.xmin:Optional[float]=None
-        self.xmax:Optional[float]=None
-        self.ymin:Optional[float]=None
-        self.ymax:Optional[float]=None
+        self.xmin:float | None=None
+        self.xmax:float | None=None
+        self.ymin:float | None=None
+        self.ymax:float | None=None
         self.aspect_ratio=True
         self.fullscreen=True
         #: A format string to save the plot to. The output step will be inserted into the format string
@@ -2336,17 +2337,17 @@ class MatplotlibPlotter(BasePlotter):
         self.image_size=[1280,720]
         #: DPI of the plot
         self.dpi:float=100
-        self._added_parts:List[MatplotLibPart]=[]
+        self._added_parts:list[MatplotLibPart]=[]
         self._mode_to_class=MatplotLibPart.mode_to_class.copy()
         #: Set to change the background color of the plot
-        self.background_color:Optional[str]=None
-        self._range_objects:Dict[str,MatplotLibBaseRange]={}
+        self.background_color:str | None=None
+        self._range_objects:dict[str,MatplotLibBaseRange]={}
         self.write_cb_range_files:bool=True
         self.load_cb_ranges_dir:str=""
         #: Stop the execution if an invalid triangulation is detected. Otherwise, the plot will be just skipped
         self.crash_on_invalid_triangulation:bool=True
-        self.min_triangle_circle_ratio:Optional[float]=None
-        self.min_triangle_area:Optional[float]=None
+        self.min_triangle_circle_ratio:float | None=None
+        self.min_triangle_area:float | None=None
         #: Merge points that are multiple times in the mesh. Note that it does not average the data on these points
         self.merge_duplicate_points:bool=False
         self._has_invalid_triangulation:bool=False
@@ -2366,11 +2367,11 @@ class MatplotlibPlotter(BasePlotter):
             "text.latex.preamble": r"\usepackage{amsmath} \usepackage{txfonts} \usepackage{color}",  # for the align enivironment
             "font.sans-serif": ["Helvetica"]})
 
-    def get_range_object(self,plotobject:Any,mode:Union[str,Union[Tuple[float,float],List[float]]]="current")->MatplotLibBaseRange:
+    def get_range_object(self,plotobject:Any,mode:str | tuple[float, float] | list[float]="current")->MatplotLibBaseRange:
         if isinstance(plotobject,str):
             key=plotobject
         else:
-            key=cast(Union[str,Dict[str,str]],plotobject.title) #type:ignore
+            key=cast(str|dict[str,str],plotobject.title) #type:ignore
         if isinstance(key,dict):
             key=list(key.keys())[0]
 
@@ -2392,7 +2393,7 @@ class MatplotlibPlotter(BasePlotter):
             self._range_objects[key]=MatplotLibPersistentRange(None,None,mode)
             return self._range_objects[key]
 
-    def save(self,fname:Optional[Union[str,List[str]]]=None):
+    def save(self,fname:str | list[str] | None=None):
         if self._has_invalid_triangulation:
             return
         if fname is None:
@@ -2413,7 +2414,7 @@ class MatplotlibPlotter(BasePlotter):
             os.makedirs(os.path.join(pdir,"_cb_ranges"),exist_ok=True)
 
             #f.write("cb_ranges={}\n")
-            odict:Dict[str,Tuple[float,float]]={}
+            odict:dict[str,tuple[float,float]]={}
             for nam,rang in self._range_objects.items():
                 odict[nam]=(rang.vmin,rang.vmax)
                 #f.write('cb_ranges["'+nam+'"]=['+str(rang.vmin)+', '+str(rang.vmax)+']\n')
@@ -2424,7 +2425,7 @@ class MatplotlibPlotter(BasePlotter):
 
 
 
-    def _get_mesh_data(self,msh:Union[str,AnySpatialMesh],problem_name:str="",ignore_eigenfactors:bool=False,mirror_x:bool=False):
+    def _get_mesh_data(self,msh:str | AnySpatialMesh,problem_name:str="",ignore_eigenfactors:bool=False,mirror_x:bool=False):
         
         if ignore_eigenfactors or (self._eigenfactor_right is None or self._eigenfactor_left is None or self._eigenvector_for_animation is None):            
             return self.get_problem(problem_name=problem_name).get_cached_mesh_data(msh,nondimensional=False,tesselate_tri=True,eigenvector=self.eigenvector,eigenmode=self.eigenmode,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions)
@@ -2438,7 +2439,7 @@ class MatplotlibPlotter(BasePlotter):
             return res
 
 
-    def _gen_transform(self,transform:Optional[Union[str,PlotTransform]]=None):
+    def _gen_transform(self,transform:str | PlotTransform | None=None):
         if transform is None:
             return None
         elif transform == "mirror_x":
@@ -2459,15 +2460,15 @@ class MatplotlibPlotter(BasePlotter):
             return transform
 
     @overload
-    def defaults(self,what:Literal["arrows"])->Type[MatplotlibVectorFieldArrows]: ...
+    def defaults(self,what:Literal["arrows"])->type[MatplotlibVectorFieldArrows]: ...
 
     @overload
-    def defaults(self,what:Literal["tracers"])->Type[MatplotLibTracers]: ...
+    def defaults(self,what:Literal["tracers"])->type[MatplotLibTracers]: ...
 
     @overload
-    def defaults(self,what:Literal["colorbar"])->Type[MatplotLibColorbar]: ...
+    def defaults(self,what:Literal["colorbar"])->type[MatplotLibColorbar]: ...
 
-    def defaults(self,what:str)->Union[Type[MatplotLibPart],Type[MatplotLibColorbar],Type[MatplotLibTricontourf],Type[MatplotLibTricontour],Type[MatplotLibInterfaceLine],Type[MatplotLibElementOutlines]]:
+    def defaults(self,what:str)->type[MatplotLibPart] | type[MatplotLibColorbar] | type[MatplotLibTricontourf] | type[MatplotLibTricontour] | type[MatplotLibInterfaceLine] | type[MatplotLibElementOutlines]:
         if not what in self._mode_to_class.keys():
             raise RuntimeError("Can only access defaults for "+str(self._mode_to_class.keys()))
         return self._mode_to_class[what]
@@ -2487,7 +2488,7 @@ class MatplotlibPlotter(BasePlotter):
         return float(factor)
 
     def transform_position(self,xreal:ExpressionNumOrNone=None,yreal:ExpressionNumOrNone=None):
-        res:List[float]=[]
+        res:list[float]=[]
         if xreal is not None: # real position to graph position (0,1)
             ss=self.get_problem().get_scaling("spatial")
             if not isinstance(ss,Expression):
@@ -2512,7 +2513,7 @@ class MatplotlibPlotter(BasePlotter):
             return res
 
 
-    def add_colorbar(self,title:Optional[str]=None,cmap:Optional[str]=None,xpos:Optional[float]=None,ypos:Optional[float]=None,position:Optional[Union[str,Tuple[float,float]]]=None,orientation:Optional[str]=None,factor:Optional[float]=1.0,unit:Union[ExpressionNumOrNone,str]=None,offset:Optional[float]=0.0,length:Optional[float]=None,thickness:Optional[float]=None,norm:Optional[Any]=None,vmin:Optional[float]=None,vmax:Optional[float]=None)->MatplotLibColorbar:
+    def add_colorbar(self,title:str | None=None,cmap:str | None=None,xpos:float | None=None,ypos:float | None=None,position:str | tuple[float, float] | None=None,orientation:str | None=None,factor:float | None=1.0,unit:ExpressionNumOrNone | str=None,offset:float | None=0.0,length:float | None=None,thickness:float | None=None,norm:Any | None=None,vmin:float | None=None,vmax:float | None=None)->MatplotLibColorbar:
         """
         Adds a colorbar to the plot with a given title, colormap, position either by coordinates or by positional string and a lot of other options.        
 
@@ -2540,13 +2541,13 @@ class MatplotlibPlotter(BasePlotter):
         assert isinstance(res,MatplotLibColorbar)
         return res
 
-    def add_axes(self,title:Optional[str]=None,xpos:Optional[float]=None,ypos:Optional[float]=None,position:Optional[Union[str,Tuple[float,float]]]=None,width:Optional[float]=None,height:Optional[float]=None,xlabel:Optional[str]=None,xfactor:Optional[float]=None,ylabel:Optional[str]=None,yfactor:Optional[float]=None)->MatplotLibAxes:
+    def add_axes(self,title:str | None=None,xpos:float | None=None,ypos:float | None=None,position:str | tuple[float, float] | None=None,width:float | None=None,height:float | None=None,xlabel:str | None=None,xfactor:float | None=None,ylabel:str | None=None,yfactor:float | None=None)->MatplotLibAxes:
         allkwargs = {"title": title,"xpos":xpos,"ypos":ypos,"position":position,"width":width,"height":height,"xlabel":xlabel,"xfactor":xfactor,"ylabel":ylabel,"yfactor":yfactor}
         res=self._add_part("axes",**allkwargs)
         assert isinstance(res,MatplotLibAxes)
         return res
 
-    def add_text(self,text:str,position:Optional[Union[str,Tuple[float,float]]]=None,textsize:Optional[float]=None,verticalalign:Optional[str]=None,horizontalalign:Optional[str]=None,bbox:Optional[Any]=None,zindex:Optional[float]=None,color:Optional[str]=None)->MatplotlibText:
+    def add_text(self,text:str,position:str | tuple[float, float] | None=None,textsize:float | None=None,verticalalign:str | None=None,horizontalalign:str | None=None,bbox:Any | None=None,zindex:float | None=None,color:str | None=None)->MatplotlibText:
         """
         Adds text to the plot.
 
@@ -2568,7 +2569,7 @@ class MatplotlibPlotter(BasePlotter):
         assert isinstance(res,MatplotlibText)
         return res
 
-    def add_scale_bar(self,position:Optional[Union[str,Tuple[float,float]]]=None)->MatplotLibScaleBar:
+    def add_scale_bar(self,position:str | tuple[float, float] | None=None)->MatplotLibScaleBar:
         """
         Adds a scale bar to the plot.
 
@@ -2583,7 +2584,7 @@ class MatplotlibPlotter(BasePlotter):
         assert isinstance(res,MatplotLibScaleBar)
         return res
 
-    def add_arrow_key(self,position:Optional[Union[str,Tuple[float,float]]]=None,title:Optional[str]=None,factor:Optional[float]=None,format:Optional[str]=None,unit:ExpressionNumOrNone=None,linewidths:Optional[float]=None)->MatplotLibArrowKey:
+    def add_arrow_key(self,position:str | tuple[float, float] | None=None,title:str | None=None,factor:float | None=None,format:str | None=None,unit:ExpressionNumOrNone=None,linewidths:float | None=None)->MatplotLibArrowKey:
         """
         Creates an arrow key to indicate a scale of arrows added at an interface, e.g. for mass transfer.
 
@@ -2603,7 +2604,7 @@ class MatplotlibPlotter(BasePlotter):
         assert isinstance(res,MatplotLibArrowKey)
         return res
 
-    def add_time_label(self,position:Optional[Union[str,Tuple[float,float]]]=None)->MatplotlibTimeLabel:
+    def add_time_label(self,position:str | tuple[float, float] | None=None)->MatplotlibTimeLabel:
         """
         Adds a label to show the current time.
 
@@ -2618,7 +2619,7 @@ class MatplotlibPlotter(BasePlotter):
         assert isinstance(res,MatplotlibTimeLabel)
         return res
 
-    def add_polygon(self,pointlist:List[Union[Tuple[float,float],List[float]]],edgecolor:Optional[Any]=None,facecolor:Optional[Any]=None,linewidth:Optional[float]=None,zindex:Optional[float]=None,fill:bool=True,alpha:Optional[float]=None)->MatplotLibPolygon:
+    def add_polygon(self,pointlist:list[tuple[float, float] | list[float]],edgecolor:Any | None=None,facecolor:Any | None=None,linewidth:float | None=None,zindex:float | None=None,fill:bool=True,alpha:float | None=None)->MatplotLibPolygon:
         allkwargs={"points":pointlist,"edgecolor":edgecolor,"facecolor":facecolor,"linewidth":linewidth,"zindex":zindex,"fill":fill,"alpha":alpha}
         res=self._add_part("polygon",**allkwargs)
         assert isinstance(res,MatplotLibPolygon)
@@ -2673,7 +2674,7 @@ class MatplotlibPlotter(BasePlotter):
 
 
 
-    def add_plot(self,infield:str,mode:Optional[str]=None,transform:Union[List[Union[PlotTransform,None]],List[Union[str,None]],Union[str,PlotTransform,None]]=None,*,linecolor:Optional[str]=None,linewidths:Optional[float]=None,colorbar:Optional[MatplotLibColorbar]=None,arrowkey:Optional[MatplotLibArrowKey]=None,arrowdensity:Optional[float]=None,arrowstyle:Optional[str]=None,arrowlength:Optional[float]=None,levels:Optional[int]=None,datamap:Optional[Any]=None,axes:Optional[MatplotLibAxes]=None,problem_name:str="")->Union[MatPlotLibAddPlotReturns,List[MatPlotLibAddPlotReturns]]:
+    def add_plot(self,infield:str,mode:str | None=None,transform:list[PlotTransform | None] | list[str | None] | str | PlotTransform | None=None,*,linecolor:str | None=None,linewidths:float | None=None,colorbar:MatplotLibColorbar | None=None,arrowkey:MatplotLibArrowKey | None=None,arrowdensity:float | None=None,arrowstyle:str | None=None,arrowlength:float | None=None,levels:int | None=None,datamap:Any | None=None,axes:MatplotLibAxes | None=None,problem_name:str="")->MatPlotLibAddPlotReturns | list[MatPlotLibAddPlotReturns]:
         """
         Adds a plot of the field infield (e.g. "domain/velocity") to the current figure.
         If you pass a colorbar, you will get a color plot of the field (potentially along the interface).
@@ -2703,7 +2704,7 @@ class MatplotlibPlotter(BasePlotter):
         
         allkwargs={"linecolor":linecolor,"linewidths":linewidths,"colorbar":colorbar,"arrowkey":arrowkey,"arrowdensity":arrowdensity,"arrowstyle":arrowstyle,"levels":levels,"datamap":datamap,"arrowlength":arrowlength,"axes":axes,"problem_name":problem_name}
         if isinstance(transform,list) :
-            res:List[MatPlotLibAddPlotReturns]=[]
+            res:list[MatPlotLibAddPlotReturns]=[]
             for t in transform:
                 entry=self.add_plot(infield,transform=t,mode=mode,**allkwargs)
                 assert not isinstance(entry,list)
@@ -2860,7 +2861,7 @@ class MatplotlibPlotter(BasePlotter):
         else:
             return float(x)
 
-    def set_view(self,xmin:ExpressionNumOrNone=None,ymin:ExpressionNumOrNone=None,xmax:ExpressionNumOrNone=None,ymax:ExpressionNumOrNone=None,center:Optional[List[ExpressionOrNum]]=None,size:Optional[List[ExpressionOrNum]]=None):
+    def set_view(self,xmin:ExpressionNumOrNone=None,ymin:ExpressionNumOrNone=None,xmax:ExpressionNumOrNone=None,ymax:ExpressionNumOrNone=None,center:list[ExpressionOrNum] | None=None,size:list[ExpressionOrNum] | None=None):
         """
         Set the view range of the plot. Either by setting the min and max values of x and y or by setting the center and size of the view range.
 

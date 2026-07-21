@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -25,7 +26,7 @@
 #
 # ========================================================================
  
-from ..expressions.generic import is_zero,subexpression
+from ..expressions.generic import subexpression
 import math
 from .cb import *
 from .coordsys import BaseCoordinateSystem,AxisymmetricCoordinateSystem,CartesianCoordinateSystem,AxisymmetryBreakingCoordinateSystem
@@ -39,7 +40,7 @@ from .generic import matrix,ExpressionOrNum,Expression, scale_factor
 # If you use dimensions, you must set the scale of the tensor entries as 'scale' argument.
 # This scale will be in D, whereas R does not have any physical dimensions
 class DiagonalizeSymmetricTensor(CustomMultiReturnExpression):
-    def __init__(self,coordinate_system:BaseCoordinateSystem,dim:int,scale:Union[ExpressionOrNum,str]=1,fill_to_max_vector_dim:bool=True,use_FD:Union[bool,float]=False) -> None:
+    def __init__(self,coordinate_system:BaseCoordinateSystem,dim:int,scale:ExpressionOrNum | str=1,fill_to_max_vector_dim:bool=True,use_FD:bool | float=False) -> None:
         super().__init__()
         if isinstance(coordinate_system,AxisymmetricCoordinateSystem):
             if isinstance(coordinate_system,AxisymmetryBreakingCoordinateSystem):
@@ -63,7 +64,7 @@ class DiagonalizeSymmetricTensor(CustomMultiReturnExpression):
             self.FD_epsilon=self.use_FD
 
     # Input arguments, i.e. the tensor, to scalar list
-    def process_args_to_scalar_list(self,*args: ExpressionOrNum)->List[ExpressionOrNum]:
+    def process_args_to_scalar_list(self,*args: ExpressionOrNum)->list[ExpressionOrNum]:
         assert len(args)==1
         M=args[0]
         assert isinstance(M,Expression)
@@ -110,7 +111,7 @@ class DiagonalizeSymmetricTensor(CustomMultiReturnExpression):
             return self.generate_c_code_axisymmetric()
 
     # Convert the scalar result list back to matrices
-    def process_result_list_to_results(self, result_list: List[Expression]) -> Tuple[ExpressionOrNum,...]:
+    def process_result_list_to_results(self, result_list: list[Expression]) -> tuple[ExpressionOrNum,...]:
         if not self.axisymmetric:
             if self.dim==2:
                 # Rebuild matrices, also apply the scale again on the diagonal matrix
@@ -498,7 +499,7 @@ class LogConfTensorDecompositionCartesian2d(CustomMultiReturnExpression):
         self.use_subexpression=use_subexpression
     
     # Take the args R, grad(u) and ev and assemple it to a list
-    def process_args_to_scalar_list(self, *args: "ExpressionOrNum") -> List["ExpressionOrNum"]:
+    def process_args_to_scalar_list(self, *args: "ExpressionOrNum") -> list["ExpressionOrNum"]:
         R=args[0]
         gradu=args[1]
         ev=args[2]
@@ -868,7 +869,7 @@ result_list[5]=Omega10;
         return 6
 
     # Assemble back to a list
-    def process_result_list_to_results(self, result_list: List["Expression"]) -> Tuple["ExpressionOrNum", ...]:
+    def process_result_list_to_results(self, result_list: list["Expression"]) -> tuple["ExpressionOrNum", ...]:
         se= (lambda x:subexpression(x)) if self.use_subexpression else (lambda x:x)
         B=se(matrix([[result_list[0],result_list[1]],[result_list[2],result_list[3]]]))
         Omega=se(matrix([[0,result_list[4]],[result_list[5],0]]))
@@ -883,7 +884,7 @@ result_list[5]=Omega10;
 # if the eigenvalues are degenerate, return B=1/2*sym(grad(u)), Omega=0
 # Else perform the transformation of the paper
 class LogConfTensorDecompositionAxisymmetric(CustomMultiReturnExpression):
-    def __init__(self,epsilon=1e-7,use_FD:Union[bool,float]=False,use_subexpression:bool=True) -> None:
+    def __init__(self,epsilon=1e-7,use_FD:bool | float=False,use_subexpression:bool=True) -> None:
         super().__init__()
         self.epsilon=epsilon
         self.use_FD=use_FD
@@ -893,7 +894,7 @@ class LogConfTensorDecompositionAxisymmetric(CustomMultiReturnExpression):
         self.use_subexpression=use_subexpression
     
     # Take the args R, grad(u) and ev and assemple it to a list
-    def process_args_to_scalar_list(self, *args: "ExpressionOrNum") -> List["ExpressionOrNum"]:
+    def process_args_to_scalar_list(self, *args: "ExpressionOrNum") -> list["ExpressionOrNum"]:
         R=args[0]
         gradu=args[1]
         ev=args[2]
@@ -1294,7 +1295,7 @@ FILL_MULTI_RET_JACOBIAN_BY_FD(1.0e-8)
         return 7
 
     # Assemble back to a list
-    def process_result_list_to_results(self, result_list: List["Expression"]) -> Tuple["ExpressionOrNum", ...]:
+    def process_result_list_to_results(self, result_list: list["Expression"]) -> tuple["ExpressionOrNum", ...]:
         se= (lambda x:subexpression(x)) if self.use_subexpression else (lambda x:x)
         B=se(matrix([[result_list[0],result_list[1],0],[result_list[2],result_list[3],0],[0,0,result_list[4]]]))
         Omega=se(matrix([[0,result_list[5],0],[result_list[6],0,0],[0,0,0]]))
@@ -1304,7 +1305,7 @@ FILL_MULTI_RET_JACOBIAN_BY_FD(1.0e-8)
 
 
 class SymmetricMatrixExponential(CustomMultiReturnExpression):    
-    def __init__(self,coordinate_system:BaseCoordinateSystem,dim:int,scale:Union[ExpressionOrNum,str]=1,fill_to_max_vector_dim:bool=True,use_FD:Union[bool,float]=False,use_subexpression:bool=True) -> None:
+    def __init__(self,coordinate_system:BaseCoordinateSystem,dim:int,scale:ExpressionOrNum | str=1,fill_to_max_vector_dim:bool=True,use_FD:bool | float=False,use_subexpression:bool=True) -> None:
         super().__init__()
         if isinstance(coordinate_system,AxisymmetricCoordinateSystem):
             if isinstance(coordinate_system,AxisymmetryBreakingCoordinateSystem):
@@ -1329,7 +1330,7 @@ class SymmetricMatrixExponential(CustomMultiReturnExpression):
         self.use_subexpression=use_subexpression
 
     # Input arguments, i.e. the tensor, to scalar list
-    def process_args_to_scalar_list(self,*args: ExpressionOrNum)->List[ExpressionOrNum]:
+    def process_args_to_scalar_list(self,*args: ExpressionOrNum)->list[ExpressionOrNum]:
         assert len(args)==1
         M=args[0]
         assert isinstance(M,Expression)
@@ -1592,7 +1593,7 @@ class SymmetricMatrixExponential(CustomMultiReturnExpression):
         return 3
 
     # Assemble back to a list
-    def process_result_list_to_results(self, result_list: List["Expression"]) -> Tuple["ExpressionOrNum", ...]:
+    def process_result_list_to_results(self, result_list: list["Expression"]) -> tuple["ExpressionOrNum", ...]:
         se= (lambda x:subexpression(x)) if self.use_subexpression else (lambda x:x)
         if not self.axisymmetric:
             if self.dim==2:
@@ -1652,7 +1653,7 @@ class InvertMatrix(CustomMultiReturnExpression):
         elif self.matrix_type == "antisymmetric":
             return n * (n - 1) // 2
 
-    def process_result_list_to_results(self, result_list: List["Expression"]) -> Tuple["ExpressionOrNum", ...]:
+    def process_result_list_to_results(self, result_list: list["Expression"]) -> tuple["ExpressionOrNum", ...]:
         n = self.n
         if self.matrix_type == "general":
             if n == 2:

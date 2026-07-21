@@ -6,6 +6,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--quick-test", help="Stops after the first successful Newton method. Useful for quick testing", action="store_true")
 parser.add_argument("--tcc", help="Used TCC", action="store_true")
 parser.add_argument("--no-petsc", help="Ignore PETSc check", action="store_true")
+parser.add_argument("--keep-logs", help="Keep log files also of successful tests", action="store_true")
 args = parser.parse_args()
 
 os.chdir(Path(__file__).parent)
@@ -67,6 +68,10 @@ for d in glob.glob("./*/"):
       with open(logf,"wb") as lf:
         lf.write(stdout)
       folder_okay=False
+    elif args.keep_logs:
+      logf=Path(f).stem+".log"
+      with open(logf,"wb") as lf:
+        lf.write(stdout)
     
     shutil.rmtree(Path(f).stem,ignore_errors=True)
     

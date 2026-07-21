@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -28,7 +29,6 @@
 from .._pyoomph_core import Expression
 import numpy
 from ..output.meshio import IntegralObservableOutput
-from ..typings import List
 from ..expressions import square_root,pi,asin,sin,cos,absolute,rational_num,weak,dot,testfunction,scale_factor,div,grad,vector,acos,ExpressionNumOrNone,ExpressionOrNum,cartesian,Expression,CustomMathExpression,subexpression,log,is_zero,atan2
 from ..expressions.interpol import InterpolateSpline1d
 from ..expressions.units import meter,milli,newton,kilogram,second,degree
@@ -38,7 +38,7 @@ from scipy import integrate
 
 
 YoungLaplaceFixationEnum=Literal["contact_angle","volume","base_radius","apex_height"]
-YoungLaplaceFixationsType=Union[Set[YoungLaplaceFixationEnum],Dict[YoungLaplaceFixationEnum,ExpressionOrNum]]
+YoungLaplaceFixationsType=set[YoungLaplaceFixationEnum]|dict[YoungLaplaceFixationEnum,ExpressionOrNum]
 
 class DropletGeometry:
     """
@@ -54,7 +54,7 @@ class DropletGeometry:
         evalf: If True, the result will be evaluated to a float. If False, the result will be kept as an expression
         rivulet_instead: If True, the droplet is assumed to be a rivulet, i.e. it is just a 2d cross section of a 3d droplet. The volume is then the area of this cross section.
     """
-    def __init__(self,*,volume:ExpressionNumOrNone=None,base_radius:ExpressionNumOrNone=None,contact_angle:ExpressionNumOrNone=None,apex_height:ExpressionNumOrNone=None,curv_radius:ExpressionNumOrNone=None,ambiguous_low_contact_angle:Optional[bool]=None,evalf:bool=True,rivulet_instead:bool=False):
+    def __init__(self,*,volume:ExpressionNumOrNone=None,base_radius:ExpressionNumOrNone=None,contact_angle:ExpressionNumOrNone=None,apex_height:ExpressionNumOrNone=None,curv_radius:ExpressionNumOrNone=None,ambiguous_low_contact_angle:bool | None=None,evalf:bool=True,rivulet_instead:bool=False):
         #: The contact angle of the droplet
         self.contact_angle:ExpressionNumOrNone=None #type:ignore
         #: The volume of the droplet
@@ -66,8 +66,8 @@ class DropletGeometry:
         #: The curvature radius of the droplet
         self.curv_radius:ExpressionNumOrNone=None #type:ignore
         numgiven=0
-        settings:Dict[str,ExpressionNumOrNone]= {}
-        self._sampled_gravity_shape:Optional[Tuple[NPFloatArray,ExpressionOrNum]]=None
+        settings:dict[str,ExpressionNumOrNone]= {}
+        self._sampled_gravity_shape:tuple[NPFloatArray, ExpressionOrNum] | None=None
         self._sampled_gravity_shape_reference_pressure:ExpressionOrNum=None
         
         self.rivulet_instead=rivulet_instead
@@ -205,12 +205,12 @@ class DropletGeometry:
         self.surface_area:ExpressionOrNum=2*pi*self.curv_radius*self.apex_height
 
     @overload
-    def get_point_at_interface_by_slerp(self,rel_apex_dist:float)-> List[ExpressionOrNum]: ...
+    def get_point_at_interface_by_slerp(self,rel_apex_dist:float)-> list[ExpressionOrNum]: ...
 
     @overload
-    def get_point_at_interface_by_slerp(self,rel_apex_dist:NPFloatArray)-> List[List[ExpressionOrNum]]: ...
+    def get_point_at_interface_by_slerp(self,rel_apex_dist:NPFloatArray)-> list[list[ExpressionOrNum]]: ...
 
-    def get_point_at_interface_by_slerp(self,rel_apex_dist:Union[float,NPFloatArray])-> Union[List[List[ExpressionOrNum]],List[ExpressionOrNum]]:
+    def get_point_at_interface_by_slerp(self,rel_apex_dist:float | NPFloatArray)-> list[list[ExpressionOrNum]] | list[ExpressionOrNum]:
         import scipy.spatial 
         start=numpy.array([0,float(self.apex_height/self.curv_radius)]) #type:ignore
         end = numpy.array([float(self.base_radius/self.curv_radius),0]) #type:ignore
@@ -233,7 +233,7 @@ class DropletGeometry:
 
     # Relaxes the shape by gravity
     # returns an array of r and z positions and a scale factor to multiply the results with to get the right scaling
-    def sample_gravity_shape(self,surface_tension:ExpressionOrNum,delta_rho_times_g:ExpressionOrNum,output_dir:str,fixations:Optional[YoungLaplaceFixationsType]=None,update_params:bool=True,N:int=200,output_text:bool=True,compiler:Any=None,ignore_command_line:bool=False,globally_convergent_newton:bool=False)->Tuple[NPFloatArray,ExpressionOrNum]:
+    def sample_gravity_shape(self,surface_tension:ExpressionOrNum,delta_rho_times_g:ExpressionOrNum,output_dir:str,fixations:YoungLaplaceFixationsType | None=None,update_params:bool=True,N:int=200,output_text:bool=True,compiler:Any=None,ignore_command_line:bool=False,globally_convergent_newton:bool=False)->tuple[NPFloatArray,ExpressionOrNum]:
         if self.rivulet_instead:
             raise RuntimeError("Not yet implemented")
         if isinstance((0+surface_tension),(Expression)):
@@ -248,8 +248,8 @@ class DropletGeometry:
                 problem.set_c_compiler(compiler)
             problem.relax_by_gravity(output_text=True,globally_convergent_newton=globally_convergent_newton)
             dom=problem.get_mesh("domain")
-            rs:List[float]=[]
-            zs:List[float]=[]
+            rs:list[float]=[]
+            zs:list[float]=[]
             for n in dom.nodes():
                 rs.append(n.x(0))
                 zs.append(n.x(1))
@@ -265,7 +265,7 @@ class DropletGeometry:
             self._sampled_gravity_shape_reference_pressure=problem.get_ode("globals").get_value("p0")
 
         # Store it. You might require it some day...
-        self._sampled_gravity_shape=cast(Tuple[NPFloatArray,ExpressionOrNum],(numpy.transpose(numpy.array([rs, zs])), spatscal)) # type:ignore
+        self._sampled_gravity_shape=cast(tuple[NPFloatArray,ExpressionOrNum],(numpy.transpose(numpy.array([rs, zs])), spatscal)) # type:ignore
         
         return self._sampled_gravity_shape
 
@@ -292,7 +292,7 @@ class DropletEvaporationHelper:
             return res
 
         thetas:NPFloatArray=numpy.linspace(0,numpy.pi,numsamples,endpoint=False) #type:ignore
-        f_thetas:List[List[float]]=[]
+        f_thetas:list[list[float]]=[]
         for theta in thetas:
             add_term=numpy.sin(theta)/(1+numpy.cos(theta))
             integral = integrate.quad(lambda tau : integrant(tau,theta), 0, 30) #type:ignore
@@ -354,7 +354,7 @@ class YoungLaplaceEquations(Equations):
 
 # Problem to solve the equilibrium droplet shape with gravity
 class YoungLaplaceDropletShape(Problem):
-    def __init__(self,drop_geom:DropletGeometry,*,sigma:ExpressionOrNum=72 * milli * newton / meter,rho_g_ez:ExpressionOrNum=-9.81 * meter / second ** 2 * 1000 * kilogram / meter ** 3,fixations:Optional[YoungLaplaceFixationsType]=None,N:int=200):
+    def __init__(self,drop_geom:DropletGeometry,*,sigma:ExpressionOrNum=72 * milli * newton / meter,rho_g_ez:ExpressionOrNum=-9.81 * meter / second ** 2 * 1000 * kilogram / meter ** 3,fixations:YoungLaplaceFixationsType | None=None,N:int=200):
         super(YoungLaplaceDropletShape, self).__init__()
         self.N=N
         self.drop_geom=drop_geom
@@ -641,7 +641,7 @@ def _get_j_lebedev(contact_angle,base_radius,with_subexpressions:bool=True,preca
 # Works only for a constant numerical contact angle
 # For 90°, 135° and 150°, there are other expressions without using torodial integrations. These were developed by Peter Lebedev-Stepanov and Olga Savenko
 # These cases can be activated by passing prefer_lebedev=True
-def get_analytical_popov_evaporation_rate(contact_angle:ExpressionOrNum,base_radius:ExpressionOrNum,c_sat:ExpressionOrNum=1,c_far:ExpressionOrNum=0,Dvap:ExpressionOrNum=1, precached:bool=True,precache_points:int=1000,precache_max_tau:int=100,axisymmetric:bool=True,with_subexpressions:bool=True,prefer_lebedev:Union[bool,Literal["only_special"]]=False)->Expression:
+def get_analytical_popov_evaporation_rate(contact_angle:ExpressionOrNum,base_radius:ExpressionOrNum,c_sat:ExpressionOrNum=1,c_far:ExpressionOrNum=0,Dvap:ExpressionOrNum=1, precached:bool=True,precache_points:int=1000,precache_max_tau:int=100,axisymmetric:bool=True,with_subexpressions:bool=True,prefer_lebedev:bool | Literal["only_special"]=False)->Expression:
     if not axisymmetric:
         raise RuntimeError("Can only do axisymmetric right now")
     lebedev_factor=None

@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -29,7 +30,7 @@
 from ..meshes.mesh import AnyMesh
 from ..generic import Equations
 from ..expressions import *  # Import grad et al
-from ..equations.navier_stokes import StokesEquations,NavierStokesEquations
+from ..equations.navier_stokes import StokesEquations
 from ..typings import *
 if TYPE_CHECKING:
     from ..generic.codegen import FiniteElementCodeGenerator
@@ -60,7 +61,7 @@ class ElementSizeForSUPG(Equations):
         self.add_residual(eval_flag("moving_mesh")*(elemsize * elemsize_test * self.get_nodal_delta() - weak(1, elemsize_test, coordinate_system=cartesian,dimensional_dx=True)))
 
     # Size for SUPG
-    def get_element_h(self,domain:Optional[Union[str,"FiniteElementCodeGenerator"]]=None) -> Expression:
+    def get_element_h(self,domain:str | "FiniteElementCodeGenerator" | None=None) -> Expression:
         """
         Returns the characteristic element length scale by taking the d-th root of the element size (length/area/volume), where d is the dimension of the element.
 
@@ -145,7 +146,7 @@ class GenericStabilizationMethod(Equations):
 
 
 class PSPG(GenericStabilizationMethod):
-    def __init__(self,tau_name:Optional[str]="_tau_PSPG",U_name:Optional[str]=None,velocity_offset=1e-5):
+    def __init__(self,tau_name:str | None="_tau_PSPG",U_name:str | None=None,velocity_offset=1e-5):
         super().__init__()
         self.tau_name=tau_name
         self.U_name=U_name        

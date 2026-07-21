@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -32,8 +33,6 @@ import json
 import argparse
 import tempfile
 
-import subprocess
-from typing import Dict, Tuple, Set, List
 
 class _BaseMainEntry:
    def show(self):
@@ -110,8 +109,6 @@ def test_compiler(compiler):
 def test_eigen(eigensolver):
    from . generic.problem import Problem
    from . equations.harmonic_oscillator import HarmonicOscillator
-   from . equations.generic import InitialCondition
-   from . expressions import var
    
    with tempfile.TemporaryDirectory(prefix="pyoomph_test_"+eigensolver+"_") as tempdir:
       # See test_solver() above: release the compiled DLL before the TemporaryDirectory
@@ -146,13 +143,13 @@ if arglist.command == "cbrange":
    if len(rest) < 2:
       raise RuntimeError(
          "Require at least two input plot directories to merge the cb_ranges")
-   merged:Dict[int,Dict[str,List[float]]] = {}
+   merged:dict[int,dict[str,list[float]]] = {}
    for d in rest:
       gl = glob(os.path.join(d, "cb_ranges_*.txt"))
       gldict={}
       for entry in gl:
          num=int(entry.split("_")[-1].rstrip(".txt"))
-         data:Dict[str,List[float]]=json.load(open(entry,"r"))
+         data:dict[str,list[float]]=json.load(open(entry,"r"))
          if num in merged.keys():
             for d,v in data.items():
                if d in merged[num].keys():

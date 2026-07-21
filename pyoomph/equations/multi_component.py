@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -30,7 +31,7 @@ from ..meshes.mesh import AnyMesh, InterfaceMesh
 from ..generic import Equations, InterfaceEquations
 from ..equations.generic import InitialCondition, SpatialErrorEstimator, FiniteElementSpaceEnum
 from ..expressions import *  # Import grad et al
-from .navier_stokes import NavierStokesEquations , NavierStokesSlipLength, NoSlipBC, PFEMOptions #type:ignore
+from .navier_stokes import NavierStokesEquations , PFEMOptions #type:ignore
 from ..materials.generic import *
 from .SUPG import ElementSizeForSUPG
 from .generic import get_interface_field_connection_space
@@ -54,7 +55,7 @@ def CompositionInitialCondition(fluid_props:AnyFluidProperties,isothermal:bool,i
     return InitialCondition(**icsettings)
 
 
-def CompositionDiffusionEquations(fluid_props:AnyFluidProperties, space:FiniteElementSpaceEnum="C2", dt_factor:ExpressionOrNum=1, with_IC:bool=True, spatial_errors:Optional[float]=None,isothermal:bool=True,initial_temperature:ExpressionNumOrNone=None) -> Equations:
+def CompositionDiffusionEquations(fluid_props:AnyFluidProperties, space:FiniteElementSpaceEnum="C2", dt_factor:ExpressionOrNum=1, with_IC:bool=True, spatial_errors:float | None=None,isothermal:bool=True,initial_temperature:ExpressionNumOrNone=None) -> Equations:
     """
     Adds diffusion equations for the mass fractions of the components in a multi-component system, but without any Navier-Stokes equations. Can be used e.g. for diffusion-limited species transport in a gas phase.
 
@@ -86,7 +87,7 @@ def CompositionDiffusionEquations(fluid_props:AnyFluidProperties, space:FiniteEl
 
 def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteElementSpaceEnum="C1", compo_dt_factor:ExpressionOrNum=1, ns_mode:Literal["TH","CR","mini"]="TH", boussinesq:bool=False,
                              gravity:ExpressionNumOrNone=None, bulkforce:ExpressionNumOrNone=None, ns_dt_factor:ExpressionOrNum=1, ns_nl_factor:ExpressionNumOrNone=None, with_IC:bool=True,
-                             hele_shaw_thickness:ExpressionNumOrNone=None, spatial_errors:Optional[float]=None, useCompoSUPG:bool=False,isothermal:bool=True,initial_temperature:ExpressionNumOrNone=None,additional_advection:ExpressionOrNum=0,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",compo_scheme:TimeSteppingScheme="BDF2",wrong_strain:bool=False,integrate_advection_by_parts:bool=False,PFEM:Union[PFEMOptions, bool]=False,wrap_params_in_subexpressions=True,thermal_dt_factor:ExpressionOrNum=1,thermal_adv_factor:ExpressionOrNum=1,GCL:bool=False) -> Equations:
+                             hele_shaw_thickness:ExpressionNumOrNone=None, spatial_errors:float | None=None, useCompoSUPG:bool=False,isothermal:bool=True,initial_temperature:ExpressionNumOrNone=None,additional_advection:ExpressionOrNum=0,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",compo_scheme:TimeSteppingScheme="BDF2",wrong_strain:bool=False,integrate_advection_by_parts:bool=False,PFEM:PFEMOptions | bool=False,wrap_params_in_subexpressions=True,thermal_dt_factor:ExpressionOrNum=1,thermal_adv_factor:ExpressionOrNum=1,GCL:bool=False) -> Equations:
     """
     Assembles a system for multi-component flow with advection-diffusion equations for mass fraction fields of the mixture composition and the Navier-Stokes equations. Potentially, also a temperature field is included.
 
@@ -179,8 +180,8 @@ class CompositionAdvectionDiffusionEquations(Equations):
         self.space:FiniteElementSpaceEnum = space
         self.wind = wind
         self.fluid_props = fluid_props
-        self.fieldnames:List[str] = []
-        self.component_names:Dict[str,str] = {}
+        self.fieldnames:list[str] = []
+        self.component_names:dict[str,str] = {}
         self.stop_on_zero_diffusive_flux = True
         self.boussinesq = boussinesq
         self.integrate_advection_by_parts=integrate_advection_by_parts
@@ -243,7 +244,7 @@ class CompositionAdvectionDiffusionEquations(Equations):
             self.define_field_by_substitution("_sum_massfrac_by_molar_mass", sum_massfrac_by_molar_mass,
                                               also_on_interface=True)
 
-    def get_diffusion_coefficient(self, f1:str, f2:Optional[str]=None) -> ExpressionNumOrNone:
+    def get_diffusion_coefficient(self, f1:str, f2:str | None=None) -> ExpressionNumOrNone:
         assert isinstance(self.fluid_props,(MixtureLiquidProperties,MixtureGasProperties))
         if f2 is None:
             f2 = f1
@@ -379,8 +380,8 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         
     from ..materials.mass_transfer import MassTransferModelBase
     def __init__(self, interface_props:AnyFluidFluidInterface, *, kinbc_name:str="_kin_bc", velo_connect_prefix:str="_lagr_conn_",
-                 masstransfer_model:Optional[Union[MassTransferModelBase,Literal[False]]]=None, static:Union[Literal["auto"],bool]="auto", surface_tension_theta:float=1, total_mass_loss_factor_inside:ExpressionOrNum=1,total_mass_loss_factor_outside:ExpressionOrNum=1,
-                 surface_tension_projection_space:Optional[FiniteElementSpaceEnum]=None,additional_normal_traction:ExpressionOrNum=0,surface_tension_gradient_directly:bool=False,use_highest_space_for_velo_connection:bool=False,kinematic_bc_coordinate_sys:Optional[BaseCoordinateSystem]=None,kinematic_bc_space:Optional[FiniteElementSpaceEnum]=None,additional_masstransfer_scale=1,additional_kin_bc_test_scale=1,static_normal_interface_motion:ExpressionOrNum=0,static_interface_motion_testfunction:ExpressionNumOrNone=None,project_interface_flux:bool=False,surface_tension_factor:ExpressionOrNum=1):
+                 masstransfer_model:MassTransferModelBase | Literal[False] | None=None, static:Literal["auto"] | bool="auto", surface_tension_theta:float=1, total_mass_loss_factor_inside:ExpressionOrNum=1,total_mass_loss_factor_outside:ExpressionOrNum=1,
+                 surface_tension_projection_space:FiniteElementSpaceEnum | None=None,additional_normal_traction:ExpressionOrNum=0,surface_tension_gradient_directly:bool=False,use_highest_space_for_velo_connection:bool=False,kinematic_bc_coordinate_sys:BaseCoordinateSystem | None=None,kinematic_bc_space:FiniteElementSpaceEnum | None=None,additional_masstransfer_scale=1,additional_kin_bc_test_scale=1,static_normal_interface_motion:ExpressionOrNum=0,static_interface_motion_testfunction:ExpressionNumOrNone=None,project_interface_flux:bool=False,surface_tension_factor:ExpressionOrNum=1):
         super(MultiComponentNavierStokesInterface, self).__init__()
         self.interface_props = interface_props
         self.kinbc_name = kinbc_name
@@ -397,7 +398,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         self.static = static
         self.total_mass_loss_factor_inside = total_mass_loss_factor_inside
         self.total_mass_loss_factor_outside=total_mass_loss_factor_outside
-        self.surface_tension_projection_space:Optional[FiniteElementSpaceEnum] = surface_tension_projection_space
+        self.surface_tension_projection_space:FiniteElementSpaceEnum | None = surface_tension_projection_space
         self.surface_tension_gradient_directly=surface_tension_gradient_directly
         self.additional_normal_traction=additional_normal_traction
         self.surfactant_advect_velo_name="_uinterf_proj"
@@ -469,7 +470,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         has_surfactants = False
         surfsI = self.interface_props.surfactants
         if surfsI is None:
-            surfs:Set[str]=set()
+            surfs:set[str]=set()
         elif isinstance(surfsI, str):
             surfs = {surfsI}
         else:
@@ -517,7 +518,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
 
     def define_scaling(self):
         super(MultiComponentNavierStokesInterface, self).define_scaling()
-        scals:Dict[str,Union[str,ExpressionOrNum]] = {"surfconc_" + s.name: "surface_concentration" for s in self.interface_props._surfactants.keys()} 
+        scals:dict[str,str | ExpressionOrNum] = {"surfconc_" + s.name: "surface_concentration" for s in self.interface_props._surfactants.keys()} 
         if len(scals) > 0:
             scals[self.surfactant_advect_velo_name] = "velocity"
             tscals = {"surfconc_" + s.name: scale_factor("temporal") / scale_factor("surfconc_" + s.name) for s in
@@ -595,7 +596,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
             self.masstransfer_model._clean_up_for_code() 
         else:
             total_mass_transfer_rate = 0
-            partial_mass_transfer_rates:Dict[str,Expression] = {}
+            partial_mass_transfer_rates:dict[str,Expression] = {}
 
         # Kinematic boundary condition
         actual_total_transfer_by_rho_inner = dot(mesh_velocity(scheme=ns_inner.momentum_scheme)+self.static_normal_interface_motion*n - u, n)
@@ -992,7 +993,7 @@ class ThinLayerThermalConductionEquation(InterfaceEquations):
         outside_temperature(ExpressionNumOrNone): The temperature at the outside of the layer. Default is None.
     """
         
-    def __init__(self,material:AnyMaterialProperties,thickness:ExpressionOrNum,*,ALE:Union[Literal["auto"],bool]="auto",outside_temperature:ExpressionNumOrNone=None):
+    def __init__(self,material:AnyMaterialProperties,thickness:ExpressionOrNum,*,ALE:Literal["auto"] | bool="auto",outside_temperature:ExpressionNumOrNone=None):
         super().__init__()
         self.material=material
         self.thickness=thickness
@@ -1088,10 +1089,10 @@ class SurfactantsAtSolidInterface(InterfaceEquations):
         self.ls_properties=ls_properties
         self.out_surface_tension=out_surface_tension # Do we output the surface tension (as local expression)
 
-    def identify_surfactants_in_bulk(self) -> List[str]:
+    def identify_surfactants_in_bulk(self) -> list[str]:
         parent=self.get_parent_equations(of_type=CompositionAdvectionDiffusionEquations)
         assert isinstance(parent,CompositionAdvectionDiffusionEquations)
-        res:List[str]=[]
+        res:list[str]=[]
         for cname in parent.fluid_props.components:
             c=parent.fluid_props.get_pure_component(cname)
             if isinstance(c,SurfactantProperties) and cname in self.ls_properties.get_liquid_properties().components:

@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
 
 
 class BasiliskCodeFile:
-    def __init__(self,filename:Optional[str]) -> None:
+    def __init__(self,filename:str | None) -> None:
         self.filename=filename
 
     def get_contents(self) -> str:
@@ -47,11 +48,11 @@ class BasiliskCodeFile:
     
 
 class BasiliskCodeGeneratorBase:
-    def __init__(self,problem:"Problem",codedir:Optional[str]=None) -> None:
+    def __init__(self,problem:"Problem",codedir:str | None=None) -> None:
         super().__init__()
         self._problem:"Problem"=problem
         self._codedir=codedir
-        self._includes:List[BasiliskCodeFile]=[]
+        self._includes:list[BasiliskCodeFile]=[]
         pass
 
     def get_code_directory(self) -> str:

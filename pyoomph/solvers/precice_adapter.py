@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -32,7 +33,6 @@ from ..expressions import *
 from ..generic.codegen import EquationTree, ODEStorageMesh, BaseEquations, Equations, ODEEquations
 from ..generic.problem import Problem
 
-from scipy import spatial
 import gc
 
 # This is just a helper class which collects a few methods
@@ -46,7 +46,7 @@ class _PyoomphPreciceAdapater:
         problem._precice_interface.initialize()
         self._initialized=True
 
-    def coupled_run(self,problem:Problem,maxstep:Optional[float]=None,temporal_error:Optional[float]=None,output_initially:bool=True,fast_dof_backup:bool=False):
+    def coupled_run(self,problem:Problem,maxstep:float | None=None,temporal_error:float | None=None,output_initially:bool=True,fast_dof_backup:bool=False):
         problem._activate_solver_callback()
         
         if output_initially:
@@ -394,7 +394,7 @@ class PreciceWriteData(BaseEquations):
         vector_dim: The dimension of the vector field. If None, a scalar field is assumed.
         kwargs: The data to be written. The keys are the names of the data in preCICE, the values are the expressions.
     """
-    def __init__(self,scaling:ExpressionNumOrNone=None,by_projection:bool=False,projection_space:Optional[FiniteElementSpaceEnum]=None,vector_dim:Optional[int]=None,**kwargs:ExpressionOrNum):
+    def __init__(self,scaling:ExpressionNumOrNone=None,by_projection:bool=False,projection_space:FiniteElementSpaceEnum | None=None,vector_dim:int | None=None,**kwargs:ExpressionOrNum):
         super().__init__()
         self.entries=kwargs.copy()
         self.by_projection=by_projection
@@ -405,7 +405,7 @@ class PreciceWriteData(BaseEquations):
     def _sanitize_name(self,name:str):
         return "_precice_write_proj_"+name.replace(" ","_").replace("-","_").replace("/","_")
 
-    def define_scalar_field(self,name:str,space:FiniteElementSpaceEnum,scale:Optional[ExpressionNumOrNone]=None,testscale:Optional[ExpressionNumOrNone]=None):
+    def define_scalar_field(self,name:str,space:FiniteElementSpaceEnum,scale:ExpressionNumOrNone | None=None,testscale:ExpressionNumOrNone | None=None):
         # This is a bit dirty, but I cannot see how it can be done differently, except for providing different classes for ODEEquations and Equations
         return Equations.define_scalar_field(self,name,space,scale=scale,testscale=testscale)
 
@@ -546,7 +546,7 @@ class PreciceReadData(BaseEquations):
         vector_dim: The dimension of the vector field. If None, a scalar field is assumed.
         kwargs: The data to be read. The keys are the names of the data in pyoomph, the values are the names of the fields in preCICE.
     """
-    def __init__(self,*,scaling:ExpressionNumOrNone=None,vector_dim:Optional[int]=None,**kwargs:str):
+    def __init__(self,*,scaling:ExpressionNumOrNone=None,vector_dim:int | None=None,**kwargs:str):
         super().__init__()
         self.entries=kwargs.copy()
         for n,e in self.entries.items():
@@ -555,11 +555,11 @@ class PreciceReadData(BaseEquations):
         self.scaling=scaling
         self.vector_dim=vector_dim
 
-    def define_scalar_field(self,name:str,space:FiniteElementSpaceEnum,scale:Optional[ExpressionNumOrNone]=None):
+    def define_scalar_field(self,name:str,space:FiniteElementSpaceEnum,scale:ExpressionNumOrNone | None=None):
         # This is a bit dirty, but I cannot see how it can be done differently, except for providing different classes for ODEEquations and Equations
         return Equations.define_scalar_field(self,name,space,scale=scale)
     
-    def _internal_define_scalar_field(self,name:str,space:FiniteElementSpaceEnum,scale:Optional[ExpressionNumOrNone]=None,testscale:Optional[ExpressionNumOrNone]=None,discontinuous_refinement_exponent:Optional[int]=None,allow_scales_with_fields:bool=False):
+    def _internal_define_scalar_field(self,name:str,space:FiniteElementSpaceEnum,scale:ExpressionNumOrNone | None=None,testscale:ExpressionNumOrNone | None=None,discontinuous_refinement_exponent:int | None=None,allow_scales_with_fields:bool=False):
         return Equations._internal_define_scalar_field(self,name,space,scale=scale,testscale=testscale,discontinuous_refinement_exponent=discontinuous_refinement_exponent,allow_scales_with_fields=allow_scales_with_fields)
 
     def define_fields(self):

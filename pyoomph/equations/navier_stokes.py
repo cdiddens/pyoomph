@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -40,7 +41,7 @@ if TYPE_CHECKING:
     from .._pyoomph_core import Node
     from ..solvers.generic import GenericEigenSolver
     from ..generic.codegen import EquationTree
-    from ..materials.generic import AnyFluidProperties,PureLiquidProperties,PureGasProperties,MixtureLiquidProperties,MixtureGasProperties
+    from ..materials.generic import AnyFluidProperties
     from ..generic.problem import Problem
 
 
@@ -54,10 +55,10 @@ if TYPE_CHECKING:
 # The corresponding BC can be created via StokesElement.create_pressure_fixation()
 
 class PressureFixationTaylorHood(BoundaryCondition):
-    def __init__(self, pname,value:Optional[float]):
+    def __init__(self, pname,value:float | None):
         super().__init__()
-        self.value:Optional[float] = value
-        self.node:Optional["Node"] = None
+        self.value:float | None = value
+        self.node:"Node" | None = None
         self.pname=pname
         
 
@@ -81,7 +82,7 @@ class PressureFixationTaylorHood(BoundaryCondition):
             self.node.set_value(self.pindex, self.value)
         print("PINNING some pressure with value",self.value)
 
-    def _before_eigen_solve(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver",angular_m:Optional[int]) -> bool:
+    def _before_eigen_solve(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver",angular_m:int | None) -> bool:
         if angular_m is not None:
             raise RuntimeError("Do not use pressure_fixation with angular eigensolving. Use [Navier]StokesEquation(...).with_pressure_integral_constraint(problem) instead...")
         return False
@@ -89,7 +90,7 @@ class PressureFixationTaylorHood(BoundaryCondition):
 
 
 class PressureFixationScottVogelius(BoundaryCondition):
-    def __init__(self, pname,value:Optional[float]):
+    def __init__(self, pname,value:float | None):
         super().__init__()
         self.value = value
         self.pname= pname
@@ -105,13 +106,13 @@ class PressureFixationScottVogelius(BoundaryCondition):
         if self.value is not None:
             fl[0].set_value(fl[1], self.value)
 
-    def _before_eigen_solve(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver",angular_m:Optional[float]) -> bool:
+    def _before_eigen_solve(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver",angular_m:float | None) -> bool:
         if angular_m is not None:
             raise RuntimeError("Do not use pressure_fixation with angular eigensolving. Use [Navier]StokesEquation(...).with_pressure_integral_constraint(problem) instead...")
         return False
 
 class PressureFixationCrouzeixRaviart(BoundaryCondition):
-    def __init__(self, pname, value:Optional[float]):
+    def __init__(self, pname, value:float | None):
         super().__init__()
         self.value = value
         self.pname=pname
@@ -130,7 +131,7 @@ class PressureFixationCrouzeixRaviart(BoundaryCondition):
         if self.value is not None:
             self.mesh.element_pt(0).internal_data_pt(self.pindex).set_value(0, self.value)
 
-    def _before_eigen_solve(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver",angular_m:Optional[float]) -> bool:
+    def _before_eigen_solve(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver",angular_m:float | None) -> bool:
         if angular_m is not None:
             raise RuntimeError("Do not use pressure_fixation with angular eigensolving. Use [Navier]StokesEquation(...).with_pressure_integral_constraint(problem) instead...")
         return False
@@ -188,8 +189,8 @@ class StokesEquations(Equations):
         hele_shaw_thickness (ExpressionOrNum, optional): Adds a Hele-Shaw drag term to the bulk force i.e -12*mu*u/delta**2, with the given thickness as parameter. Defaults to None.
         GCL (bool, optional): If True, the Geometric Conservation Law is enforced in the ALE formulation of the (Navier-)Stokes equations. Defaults to False.
     """
-    def __init__(self, *, dynamic_viscosity:ExpressionOrNum=1.0, mode:Literal["TH","CR","SV","C1","D2D1","D1D0","D2TBD1","mini","C2DL"]="TH", bulkforce:ExpressionNumOrNone=None, fluid_props:Optional["AnyFluidProperties"]=None, gravity:ExpressionNumOrNone=None, boussinesq:bool=False, mass_density:ExpressionNumOrNone=None,
-                 pressure_sign_flip:bool=False,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",wrong_strain:bool=False,pressure_factor:ExpressionOrNum=1, PFEM:Union[PFEMOptions,bool]=False, stress_tensor:ExpressionNumOrNone=None,velocity_name="velocity",pressure_name="pressure",DG_alpha:ExpressionNumOrNone=None,symmetric_test_function:Union[Literal['auto'],bool]='auto',pressure_test_scaling_factor:float=1, hele_shaw_thickness:ExpressionOrNum=None,GCL:bool=False ):
+    def __init__(self, *, dynamic_viscosity:ExpressionOrNum=1.0, mode:Literal["TH","CR","SV","C1","D2D1","D1D0","D2TBD1","mini","C2DL"]="TH", bulkforce:ExpressionNumOrNone=None, fluid_props:"AnyFluidProperties" | None=None, gravity:ExpressionNumOrNone=None, boussinesq:bool=False, mass_density:ExpressionNumOrNone=None,
+                 pressure_sign_flip:bool=False,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",wrong_strain:bool=False,pressure_factor:ExpressionOrNum=1, PFEM:PFEMOptions | bool=False, stress_tensor:ExpressionNumOrNone=None,velocity_name="velocity",pressure_name="pressure",DG_alpha:ExpressionNumOrNone=None,symmetric_test_function:Literal['auto'] | bool='auto',pressure_test_scaling_factor:float=1, hele_shaw_thickness:ExpressionOrNum=None,GCL:bool=False ):
         super().__init__()
         self.gravity = gravity  # Some gravity direction, i.e. g*<unit vector of direction>
         if mode not in {"CR","TH","C1","C2","SV","D2TBD1","D2D1","D1D0","mini","C2DL"}:
@@ -314,7 +315,7 @@ class StokesEquations(Equations):
             if not self.PFEM_options.first_order_system:
                 x, u_test = var_and_test("mesh")
                 u=mesh_velocity(scheme=self.momentum_scheme)
-                vectcomps:List[str]=[]
+                vectcomps:list[str]=[]
                 for i,direct in enumerate((["x","y","z"])[:self.get_nodal_dimension()]):
                     vectcomps.append("velocity_"+direct)
                     self.define_field_by_substitution("velocity_"+direct,mesh_velocity(scheme=self.momentum_scheme)[i],also_on_interface=True)
@@ -373,7 +374,7 @@ class StokesEquations(Equations):
 
     # In case of complete Dirichlet velocity conditions, we need to fix a single dof of pressure
     # A single node is selected in case of Taylor hood, otherwise a single element is selected
-    def create_pressure_fixation(self, *, value:Optional[float]=None)->Union[PressureFixationTaylorHood,PressureFixationCrouzeixRaviart,PressureFixationScottVogelius]:
+    def create_pressure_fixation(self, *, value:float | None=None)->PressureFixationTaylorHood | PressureFixationCrouzeixRaviart | PressureFixationScottVogelius:
         if self.mode in {"TH","C1","mini"}:
             return PressureFixationTaylorHood(self.pressure_name,value)
         elif self.mode == "CR":
@@ -384,7 +385,7 @@ class StokesEquations(Equations):
             raise RuntimeError("Cannot add a pressure fixation for this mode")
 
     # To be used a StokesEquation(...).with_pressure_fixation()
-    def with_pressure_fixation(self,*,nondim_p_value:Optional[float]=None) -> Equations:
+    def with_pressure_fixation(self,*,nondim_p_value:float | None=None) -> Equations:
         """
         Instead of adding ``StokesEquation``, add ``StokesEquation.with_pressure_fixation(...)`` to remove the pressure nullspace in case of pure Dirichlet boundary conditions for the normal flow.
         With this method, a single pressure dof is pinned to remove the nullspace.
@@ -475,8 +476,8 @@ class NavierStokesEquations(StokesEquations):
     """
                  
         
-    def __init__(self, *, dynamic_viscosity:ExpressionOrNum=1.0, mode:Literal["TH","CR","SV","mini"]="TH", mass_density:ExpressionOrNum=1.0, bulkforce:ExpressionNumOrNone=None, fluid_props:Optional["AnyFluidProperties"]=None,
-                 dt_factor:ExpressionOrNum=1, nonlinear_factor:ExpressionNumOrNone=None, gravity:ExpressionNumOrNone=None, boussinesq:bool=False,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",wrong_strain:bool=False,pressure_factor:ExpressionOrNum=1,wrap_params_in_subexpressions:bool=True,PFEM:Union[PFEMOptions,bool]=False, stress_tensor:ExpressionNumOrNone=None,velocity_name="velocity",pressure_name="pressure",symmetric_test_function:Union[Literal['auto'],bool]='auto',pressure_test_scaling_factor:float=1, hele_shaw_thickness:ExpressionOrNum=None,GCL:bool=False):
+    def __init__(self, *, dynamic_viscosity:ExpressionOrNum=1.0, mode:Literal["TH","CR","SV","mini"]="TH", mass_density:ExpressionOrNum=1.0, bulkforce:ExpressionNumOrNone=None, fluid_props:"AnyFluidProperties" | None=None,
+                 dt_factor:ExpressionOrNum=1, nonlinear_factor:ExpressionNumOrNone=None, gravity:ExpressionNumOrNone=None, boussinesq:bool=False,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",wrong_strain:bool=False,pressure_factor:ExpressionOrNum=1,wrap_params_in_subexpressions:bool=True,PFEM:PFEMOptions | bool=False, stress_tensor:ExpressionNumOrNone=None,velocity_name="velocity",pressure_name="pressure",symmetric_test_function:Literal['auto'] | bool='auto',pressure_test_scaling_factor:float=1, hele_shaw_thickness:ExpressionOrNum=None,GCL:bool=False):
         super().__init__(dynamic_viscosity=dynamic_viscosity, mode=mode, bulkforce=bulkforce, fluid_props=fluid_props,
                          gravity=gravity, boussinesq=boussinesq,momentum_scheme=momentum_scheme,continuity_scheme=continuity_scheme,wrong_strain=wrong_strain,pressure_factor=pressure_factor,PFEM=PFEM, stress_tensor=stress_tensor,velocity_name=velocity_name,pressure_name=pressure_name,symmetric_test_function=symmetric_test_function,pressure_test_scaling_factor=pressure_test_scaling_factor, hele_shaw_thickness=hele_shaw_thickness,GCL=GCL)
         if self.fluid_props is not None:
@@ -575,8 +576,8 @@ class NavierStokesFreeSurface(InterfaceEquations):
 
     required_parent_type = StokesEquations
 
-    def __init__(self, *, surface_tension:ExpressionOrNum=1, kinbc_name:str="_kin_bc", static_interface:Union[Literal["auto"],bool]="auto", additional_normal_traction:ExpressionOrNum=0,
-                 mass_transfer_rate:ExpressionOrNum=0,impose_marangoni_directly:bool=False,kinematic_bc_coordinate_sys:Optional[BaseCoordinateSystem]=None,remove_redundant_kinematic_bcs=True):
+    def __init__(self, *, surface_tension:ExpressionOrNum=1, kinbc_name:str="_kin_bc", static_interface:Literal["auto"] | bool="auto", additional_normal_traction:ExpressionOrNum=0,
+                 mass_transfer_rate:ExpressionOrNum=0,impose_marangoni_directly:bool=False,kinematic_bc_coordinate_sys:BaseCoordinateSystem | None=None,remove_redundant_kinematic_bcs=True):
         super(NavierStokesFreeSurface, self).__init__()
         self.kinbc_name = kinbc_name
         self.static_interface = static_interface
@@ -724,7 +725,7 @@ class ConnectVelocityAtInterface(InterfaceEquations):
         self.use_highest_space=use_highest_space
         self.normal_velocity_jump=normal_velocity_jump
 
-    def get_required_fields(self) -> List[str]:
+    def get_required_fields(self) -> list[str]:
         flow_eqs=self.get_parent_equations(StokesEquations)
         assert isinstance(flow_eqs,StokesEquations)
         fields = [flow_eqs.velocity_name+ "_x", flow_eqs.velocity_name+"_y", flow_eqs.velocity_name+"_z"]
@@ -740,13 +741,13 @@ class ConnectVelocityAtInterface(InterfaceEquations):
         for f in fields:
             if self.get_opposite_side_of_interface(raise_error_if_none=False) is None:
                 raise RuntimeError("Cannot connect any fields at the interface if no opposite side is present")
-            inside_space = cast(Union[FiniteElementSpaceEnum,Literal[""]], self.get_parent_domain().get_space_of_field(f))
+            inside_space = cast(FiniteElementSpaceEnum|Literal[""], self.get_parent_domain().get_space_of_field(f))
             if inside_space == "":
                 raise RuntimeError(
                     "Cannot connect field " + f + " at the interface, since it cannot find in the inner domain")            
             opp_parent=self.get_opposite_side_of_interface().get_parent_domain()
             assert opp_parent is not None
-            outside_space = cast(Union[FiniteElementSpaceEnum,Literal[""]], opp_parent.get_space_of_field(f))
+            outside_space = cast(FiniteElementSpaceEnum|Literal[""], opp_parent.get_space_of_field(f))
             if outside_space == "":
                 raise RuntimeError(
                     "Cannot connect field " + f + " at the interface, since it cannot find in the outer domain")

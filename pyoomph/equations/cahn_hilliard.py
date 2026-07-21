@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -31,7 +32,7 @@ from ..expressions import *  # Import grad et al
 from ..typings import *
 
 if TYPE_CHECKING:
-    from ..materials.generic import PureLiquidProperties,PureGasProperties,MixtureLiquidProperties,MixtureGasProperties
+    pass
 
 
 class CahnHilliardEquation(Equations):
@@ -128,7 +129,7 @@ class CahnHilliardWettingInterface(InterfaceEquations):
     """
     required_parent_type=CahnHilliardEquation
 
-    def __init__(self,sigma_fs_plus:Optional[ExpressionOrNum]=None,sigma_fs_minus:Optional[ExpressionOrNum]=None,contact_angle_plus:Optional[ExpressionOrNum]=None,contact_angle_minus:Optional[ExpressionOrNum]=None):
+    def __init__(self,sigma_fs_plus:ExpressionOrNum | None=None,sigma_fs_minus:ExpressionOrNum | None=None,contact_angle_plus:ExpressionOrNum | None=None,contact_angle_minus:ExpressionOrNum | None=None):
         super(CahnHilliardWettingInterface, self).__init__()
         self.sigma_fs_plus=sigma_fs_plus
         self.sigma_fs_minus=sigma_fs_minus
@@ -266,6 +267,6 @@ class SimpleNSCHWettingInterface(CahnHilliardWettingInterface):
     """
     required_parent_type=SimpleNSCH
 
-    def __init__(self,sigma_fs_plus:Optional[ExpressionOrNum]=None,sigma_fs_minus:Optional[ExpressionOrNum]=None,contact_angle_plus:Optional[ExpressionOrNum]=None,contact_angle_minus:Optional[ExpressionOrNum]=None):
+    def __init__(self,sigma_fs_plus:ExpressionOrNum | None=None,sigma_fs_minus:ExpressionOrNum | None=None,contact_angle_plus:ExpressionOrNum | None=None,contact_angle_minus:ExpressionOrNum | None=None):
         super(SimpleNSCHWettingInterface, self).__init__(sigma_fs_plus, sigma_fs_minus, contact_angle_plus, contact_angle_minus)
 

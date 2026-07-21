@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -65,13 +66,13 @@ class BaseCoordinateSystem(_pyoomph.CustomCoordinateSystem):
             return _pyoomph.GiNaC_SymSubs(diff(_pyoomph.GiNaC_expand(input), self.expansion_eps), self.expansion_eps, Expression(0))*(self.expansion_eps if with_epsilon else 1)            
 
 
-    def define_scalar_field(self, name:str, space:"FiniteElementSpaceEnum", element:"Equations", scale:Optional[ExpressionOrNum]=None, testscale:Optional[ExpressionOrNum]=None, discontinuous_refinement_exponent:Optional[ExpressionOrNum]=None,allow_scales_with_fields:bool=False):
+    def define_scalar_field(self, name:str, space:"FiniteElementSpaceEnum", element:"Equations", scale:ExpressionOrNum | None=None, testscale:ExpressionOrNum | None=None, discontinuous_refinement_exponent:ExpressionOrNum | None=None,allow_scales_with_fields:bool=False):
         element._internal_define_scalar_field(name, space, scale=scale, testscale=testscale, discontinuous_refinement_exponent=discontinuous_refinement_exponent,allow_scales_with_fields=allow_scales_with_fields)
 
-    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations")->Tuple[List[Expression],List[Expression],List[str]]:
+    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations")->tuple[list[Expression],list[Expression],list[str]]:
         raise RuntimeError("Implement the define_vector_field function for this coordinate system")
 
-    def define_tensor_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations",symmetric:bool)->Tuple[List[List[Expression]],List[List[Expression]],List[List[str]]]:
+    def define_tensor_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations",symmetric:bool)->tuple[list[list[Expression]],list[list[Expression]],list[list[str]]]:
         raise RuntimeError("Implement the define_tensor_field function for this coordinate system")
 
 
@@ -128,7 +129,7 @@ class BaseCoordinateSystem(_pyoomph.CustomCoordinateSystem):
 
 
 
-    def get_normal_vector_or_component(self,cg:"FiniteElementCodeGenerator",component:Optional[int]=None,only_base_mode:bool=False,only_perturbation_mode:bool=False,where:str="Residual"):
+    def get_normal_vector_or_component(self,cg:"FiniteElementCodeGenerator",component:int | None=None,only_base_mode:bool=False,only_perturbation_mode:bool=False,where:str="Residual"):
         dim = cg.get_nodal_dimension()
         if component is None:
             posscompos=[nondim("normal_"+d,domain=cg,only_base_mode=only_base_mode,only_perturbation_mode=only_perturbation_mode) for d in ["x","y","z"]]
@@ -188,7 +189,7 @@ class BaseCoordinateSystem(_pyoomph.CustomCoordinateSystem):
             else:
                 return nondim("dx")
 
-    def get_coords(self, ndim:int, with_scales:bool, lagrangian:bool,mesh_coords:bool=False,only_base_mode:bool=False) -> List[Expression]:
+    def get_coords(self, ndim:int, with_scales:bool, lagrangian:bool,mesh_coords:bool=False,only_base_mode:bool=False) -> list[Expression]:
         rel_scales = [self.x_rel_scale, self.y_rel_scale, self.z_rel_scale]
         if lagrangian:
             if with_scales:
@@ -263,13 +264,13 @@ class CartesianCoordinateSystem(BaseCoordinateSystem):
         self.y_rel_scale:ExpressionOrNum=y_rel_scale
         self.z_rel_scale:ExpressionOrNum=z_rel_scale
 
-    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations")->Tuple[List[Expression],List[Expression],List[str]]:
+    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations")->tuple[list[Expression],list[Expression],list[str]]:
         inds = ["x", "y", "z"]
-        namelist:List[str] = []
+        namelist:list[str] = []
         for i in range(ndim):
             namelist.append(name + "_" + inds[i])
-        v:List[Expression] = []
-        vtest:List[Expression] = []
+        v:list[Expression] = []
+        vtest:list[Expression] = []
         s = scale_factor(name)
         S = test_scale_factor(name)
         for i, f in enumerate(namelist):
@@ -283,25 +284,25 @@ class CartesianCoordinateSystem(BaseCoordinateSystem):
         return v, vtest, namelist
 
 
-    def define_tensor_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations", symmetric:bool)->Tuple[List[List[Expression]],List[List[Expression]],List[List[str]]]:
+    def define_tensor_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations", symmetric:bool)->tuple[list[list[Expression]],list[list[Expression]],list[list[str]]]:
         inds = ["x", "y", "z"]
-        namelist:List[List[str]] = []
+        namelist:list[list[str]] = []
         for i in range(ndim):
-            nlst:List[str]=[]
+            nlst:list[str]=[]
             for j in range(ndim):
                 if symmetric and j<i:
                     nlst.append(name + "_" + inds[j]+ inds[i])
                 else:
                     nlst.append(name + "_" + inds[i]+ inds[j])
             namelist.append(nlst)
-        v:List[List[Expression]] = []
-        vtest:List[List[Expression]] = []
+        v:list[list[Expression]] = []
+        vtest:list[list[Expression]] = []
         s = scale_factor(name)
         S = test_scale_factor(name)
         for i, fl in enumerate(namelist):
             if i >= ndim: break
-            vl:List[Expression]=[]
-            vtl:List[Expression]=[]
+            vl:list[Expression]=[]
+            vtl:list[Expression]=[]
             for j, f in enumerate(fl):
                 if j >= ndim: break
                 if symmetric and j<i:
@@ -333,7 +334,7 @@ class CartesianCoordinateSystem(BaseCoordinateSystem):
         return "Cartesian"
 
     def scalar_gradient(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
-        res:List[ExpressionOrNum] = []
+        res:list[ExpressionOrNum] = []
         for a in self.get_coords(ndim, with_scales, lagrangian):
             res.append(diff(arg, a))
         if len(res) == 0:
@@ -348,9 +349,9 @@ class CartesianCoordinateSystem(BaseCoordinateSystem):
         return res
     
     def vector_gradient(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:        
-        res:List[List[ExpressionOrNum]] = []
+        res:list[list[ExpressionOrNum]] = []
         for b in range(arg.nops()):
-            line:List[ExpressionOrNum] = []
+            line:list[ExpressionOrNum] = []
             entry = arg[b]
             for a in self.get_coords(ndim, with_scales, lagrangian):
                 line.append(diff(entry, a))
@@ -358,7 +359,7 @@ class CartesianCoordinateSystem(BaseCoordinateSystem):
         return matrix(res)
     
     def tensor_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
-        res:List[Expression] = []
+        res:list[Expression] = []
         coords = self.get_coords(arg.nops(), with_scales, lagrangian)
         for i in range(3):
             div_line = 0 
@@ -369,7 +370,7 @@ class CartesianCoordinateSystem(BaseCoordinateSystem):
         return vector(res)
 
     def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int,with_scales:bool)->Expression:
-        res:List[List[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
+        res:list[list[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
         coords=self.get_coords(ndim, with_scales, lagrangian)
         for i in range(3):
             for j in range(3):
@@ -414,7 +415,7 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
                 return 2 * pi * nondim("coordinate_y" if self.use_x_as_symmetry_axis else "coordinate_x") * nondim("dx")
 
     def scalar_gradient(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
-        res:List[ExpressionOrNum] = []
+        res:list[ExpressionOrNum] = []
         for i, a in enumerate(self.get_coords(3, with_scales, lagrangian)):
             res.append(diff(arg, a) if i < ndim else 0)
         return vector(res)
@@ -436,7 +437,7 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
             if self.use_x_as_symmetry_axis:
                 raise RuntimeError("Cannot have use_x_as_symmetry_axis in an axisymmetric coordinate system in 1d")
             r, = self.get_coords(ndim, with_scales, lagrangian)
-            res:List[List[ExpressionOrNum]] = [[diff(arg[0], r), 0, 0], [0, arg[0] / r, 0], [0, 0, 0]]
+            res:list[list[ExpressionOrNum]] = [[diff(arg[0], r), 0, 0], [0, arg[0] / r, 0], [0, 0, 0]]
         else:
             if arg.nops() != 3:
                 raise RuntimeError(
@@ -444,12 +445,12 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
             x, y = self.get_coords(ndim, with_scales, lagrangian)
             r= y if self.use_x_as_symmetry_axis else x
             ri = 1 if self.use_x_as_symmetry_axis else 0
-            res:List[List[ExpressionOrNum]] = [[diff(arg[0], x), diff(arg[0], y), 0],
+            res:list[list[ExpressionOrNum]] = [[diff(arg[0], x), diff(arg[0], y), 0],
                    [diff(arg[1], x), diff(arg[1], y), 0], [0, 0, arg[ri] / r]]
         return matrix(res)
     
 
-    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations")->Tuple[List[Expression],List[Expression],List[str]]:
+    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations")->tuple[list[Expression],list[Expression],list[str]]:
         zero=Expression(0)
         s = scale_factor(name)
         S = test_scale_factor(name)          
@@ -480,7 +481,7 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
             res += diff(arg[1], coords[1])
         return res
     
-    def define_tensor_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations", symmetric:bool)->Tuple[List[List[Expression]],List[List[Expression]],List[List[str]]]:
+    def define_tensor_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations", symmetric:bool)->tuple[list[list[Expression]],list[list[Expression]],list[list[str]]]:
         s = scale_factor(name)
         S = test_scale_factor(name)
         if ndim==1:
@@ -538,7 +539,7 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
         if ndim==1:
             if self.use_x_as_symmetry_axis:
                 raise RuntimeError("Cannot have use_x_as_symmetry_axis in an axisymmetric coordinate system in 1d")
-            res:List[List[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
+            res:list[list[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
             coords = self.get_coords(1, with_scales, lagrangian)
             res[0][0]=diff(T[0,0],coords[0])*direct[0]
             res[0][1]=1/coords[0]*(T[0,0]-T[1,1])*direct[1]
@@ -549,7 +550,7 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
         elif ndim==2:
             if self.use_x_as_symmetry_axis:
                 #raise RuntimeError("TODO")
-                res:List[List[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
+                res:list[list[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
                 coords = self.get_coords(T.nops(), with_scales, lagrangian)
                 #diff_tensor_theta=[[-T[2,0]-T[0,2], T[2,1], T[0,0]-T[2,2]], [-T[1,2], 0, T[1,0]], [T[0,0]-T[2,2], T[0,1], T[0,2]+T[2,0]]]
                 diff_tensor_theta=[[0, -T[0,2], T[1,0]], [-T[2,0], -T[2,1]-T[1,2], T[1,1]-T[2,2]], [T[1,0], T[1,1]-T[2,2], T[1,2]+T[2,1]]]
@@ -558,7 +559,7 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
                         res[i][j]=direct[0]*diff(T[i,j],coords[0])+direct[1]*diff(T[i,j],coords[1])+direct[2]/coords[1]*diff_tensor_theta[i][j]
                 return matrix(res)
             else:
-                res:List[List[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
+                res:list[list[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
                 coords = self.get_coords(T.nops(), with_scales, lagrangian)
                 diff_tensor_theta=[[-T[2,0]-T[0,2], T[2,1], T[0,0]-T[2,2]], [-T[1,2], 0, T[1,0]], [T[0,0]-T[2,2], T[0,1], T[0,2]+T[2,0]]]
                 for i in range(3):
@@ -656,7 +657,7 @@ class CartesianCoordinateSystemWithAdditionalNormalMode(CartesianCoordinateSyste
         return "Cartesian"    
 
     def scalar_gradient(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
-        res:List[ExpressionOrNum] = []
+        res:list[ExpressionOrNum] = []
         dcoords=self.map_to_zero_epsilon(self.get_coords(3, with_scales, lagrangian))
         pcoords=self.map_to_first_order_epsilon(self.get_coords(3, with_scales, lagrangian,mesh_coords=True))
         xadd=self.get_additional_coordinate(with_scales)
@@ -744,7 +745,6 @@ class CartesianCoordinateSystemWithAdditionalNormalMode(CartesianCoordinateSyste
             else:
                 return nondim("dX")
         else:
-            from ..expressions import square_root
             mm=_pyoomph.GiNaC_EvalFlag("moving_mesh")
             
             dcoords=self.map_to_zero_epsilon(self.get_coords(nodal_dim, with_scale, lagrangian))
@@ -762,14 +762,14 @@ class CartesianCoordinateSystemWithAdditionalNormalMode(CartesianCoordinateSyste
         raise RuntimeError("Not implemented")
     
     def vector_gradient(self, arg: _pyoomph.Expression, ndim: int, edim: int, with_scales: bool, lagrangian: bool) -> _pyoomph.Expression:
-        res:List[List[ExpressionOrNum]] = []
+        res:list[list[ExpressionOrNum]] = []
         # TODO MOVING COORDINATES
         dcoords=self.map_to_zero_epsilon(self.get_coords(ndim, with_scales, lagrangian))
         pcoords=self.map_to_first_order_epsilon(self.get_coords(ndim, with_scales, lagrangian,mesh_coords=True))
         k=self.get_wavenumber_k(dimensional=with_scales)
         xadd=self.get_additional_coordinate(with_scales)
         for b in range(ndim):
-            line:List[ExpressionOrNum] = []
+            line:list[ExpressionOrNum] = []
             entry = arg[b]
             for a in range(ndim):
                 line.append(diff(entry, dcoords[a]))                
@@ -778,7 +778,7 @@ class CartesianCoordinateSystemWithAdditionalNormalMode(CartesianCoordinateSyste
             else:
                 line.append(0)
             res.append(line)
-        line:List[ExpressionOrNum] = []
+        line:list[ExpressionOrNum] = []
         if not lagrangian:
             for a in range(ndim):
                 line.append(diff(arg[ndim], dcoords[a]))
@@ -864,17 +864,17 @@ class CartesianCoordinateSystemWithAdditionalNormalMode(CartesianCoordinateSyste
                 elif dim == 3:
                     raise RuntimeError("Cannot use normal mode expansion coordinate system in 3d")
         
-    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations") -> Tuple[List[Expression], List[Expression], List[str]]:
+    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations") -> tuple[list[Expression], list[Expression], list[str]]:
         inds = ["x", "y", "z"]
-        namelist:List[str] = []
+        namelist:list[str] = []
         if ndim==3:
             raise RuntimeError("Cannot use a normal mode in 3D")
         for i in range(ndim):
             namelist.append(name + "_" + inds[i])
         namelist.append(name + "_normal")
         
-        v:List[Expression] = []
-        vtest:List[Expression] = []
+        v:list[Expression] = []
+        vtest:list[Expression] = []
         s = scale_factor(name)
         S = test_scale_factor(name)
         for i, f in enumerate(namelist):
@@ -887,7 +887,7 @@ class CartesianCoordinateSystemWithAdditionalNormalMode(CartesianCoordinateSyste
             vtest.append(testfunction(f) / S)
         return v, vtest, namelist
     
-    def get_normal_vector_or_component(self,cg:"FiniteElementCodeGenerator",component:Optional[int]=None,only_base_mode:bool=False,only_perturbation_mode:bool=False,where:str="Residual"):
+    def get_normal_vector_or_component(self,cg:"FiniteElementCodeGenerator",component:int | None=None,only_base_mode:bool=False,only_perturbation_mode:bool=False,where:str="Residual"):
         dim = cg.get_nodal_dimension()
         edim=cg.get_element_dimension()
         if not cg._coordinates_as_dofs or (where!="Residual" and (not self.expand_with_modes_for_python_debugging or where!="Python")):
@@ -1074,7 +1074,7 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
             return 2*pi*(dcoords[0]*nondim("dx")+ mm*dx_eps)
             
     def scalar_gradient(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
-        res:List[ExpressionOrNum] = []
+        res:list[ExpressionOrNum] = []
         coords = self.get_coords(3, with_scales, lagrangian)
         dcoords=self.map_to_zero_epsilon(coords)
         pcoords=self.map_to_first_order_epsilon(coords)
@@ -1126,14 +1126,14 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
             X0=self.map_to_zero_epsilon(r)
             Xm=self.map_to_first_order_epsilon(r)
             if not lagrangian:
-                res:List[List[ExpressionOrNum]] = [[diff(arg[0], X0), diff(arg[0],self.phi) / X0 - arg[1] / X0,zero],
+                res:list[list[ExpressionOrNum]] = [[diff(arg[0], X0), diff(arg[0],self.phi) / X0 - arg[1] / X0,zero],
                    [diff(arg[1], X0), diff(arg[1],self.phi) / X0 + arg[0] / X0,zero],[zero,zero,zero]]                
                 res[0][0]+=mm*(-diff(Xm, X0)*diff(arg[0], X0))
                 res[0][1]+=mm*(-I*m*Xm*diff(arg[0], X0)/X0 + Xm*arg[1]/X0**2 - Xm*diff(arg[0], phi)/X0**2)
                 res[1][0]+=mm*(-diff(Xm, X0)*diff(arg[1], X0))
                 res[1][1]+=mm*(-I*m*Xm*diff(arg[1], X0)/X0 - Xm*arg[0]/X0**2 - Xm*diff(arg[1], phi)/X0**2)
             else:
-                res:List[List[ExpressionOrNum]] = [[diff(arg[0], r), 0, 0], [0, arg[0] / r, 0], [0, 0, 0]]
+                res:list[list[ExpressionOrNum]] = [[diff(arg[0], r), 0, 0], [0, arg[0] / r, 0], [0, 0, 0]]
         else:
             if arg.nops() != 3:
                 raise RuntimeError(
@@ -1147,7 +1147,7 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
             #res:List[List[ExpressionOrNum]]=[[ diff(arg[0],dr),diff(arg[0],dz),diff(arg[0],self.phi)/dr-arg[2]/dr],
              #    [diff(arg[1],dr),diff(arg[1],dz),diff(arg[1],self.phi)/dr],
              #    [diff(arg[2],dr) ,diff(arg[2],dz),diff(arg[2],self.phi)/dr+arg[0]/dr]]
-            res:List[List[ExpressionOrNum]]= [[diff(arg[0], x), diff(arg[0], y), -arg[2]/x + diff(arg[0], phi)/x], 
+            res:list[list[ExpressionOrNum]]= [[diff(arg[0], x), diff(arg[0], y), -arg[2]/x + diff(arg[0], phi)/x], 
                                               [diff(arg[1], x), diff(arg[1], y), diff(arg[1], phi)/x], 
                                               [diff(arg[2], x), diff(arg[2], y), arg[0]/x + diff(arg[2], phi)/x]]
             res[0][0]+=mm*(-diff(Xp, x)*diff(arg[0], x) - diff(Yp, x)*diff(arg[0], y))
@@ -1212,7 +1212,7 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
         
 
 
-    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations") -> Tuple[List[Expression], List[Expression], List[str]]:
+    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations") -> tuple[list[Expression], list[Expression], list[str]]:
         s = scale_factor(name)
         S = test_scale_factor(name)        
         if ndim == 2:
@@ -1263,7 +1263,7 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
 
 
 
-    def get_normal_vector_or_component(self,cg:"FiniteElementCodeGenerator",component:Optional[int]=None,only_base_mode:bool=False,only_perturbation_mode:bool=False,where:str="Residual"):
+    def get_normal_vector_or_component(self,cg:"FiniteElementCodeGenerator",component:int | None=None,only_base_mode:bool=False,only_perturbation_mode:bool=False,where:str="Residual"):
         dim = cg.get_nodal_dimension()        
         edim=cg.get_element_dimension()
         if not cg._coordinates_as_dofs or (where!="Residual" and (not self.expand_with_modes_for_python_debugging or where!="Python")):
@@ -1368,7 +1368,7 @@ class RadialSymmetricCoordinateSystem(BaseCoordinateSystem):
     def get_id_name(self)->str:
         return "RadialSymmetric"
 
-    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations") -> Tuple[List[Expression], List[Expression], List[str]]:
+    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations") -> tuple[list[Expression], list[Expression], list[str]]:
         if ndim == 1:
             vx = element.define_scalar_field(name + "_x", space)
             vx = var(name + "_x")
@@ -1417,7 +1417,7 @@ class RadialSymmetricCoordinateSystem(BaseCoordinateSystem):
                 r = r - self.Rcenter
             else:
                 r = r - self.Rcenter / scale_factor("spatial")
-            res:List[List[ExpressionOrNum]] = [[diff(arg[0], r), 0, 0], [0, arg[0] / r, 0], [0, 0, arg[0] / r]]
+            res:list[list[ExpressionOrNum]] = [[diff(arg[0], r), 0, 0], [0, arg[0] / r, 0], [0, 0, arg[0] / r]]
         return matrix(res)
 
     def vector_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
@@ -1433,7 +1433,7 @@ class RadialSymmetricCoordinateSystem(BaseCoordinateSystem):
         return res
 
     def scalar_gradient(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
-        res:List[ExpressionOrNum] = []
+        res:list[ExpressionOrNum] = []
         for i, a in enumerate(self.get_coords(3, with_scales, lagrangian)):
             res.append(diff(arg, a) if i < ndim else 0)
         return vector(res)
@@ -1499,7 +1499,7 @@ class BaseDifferentialGeometryCoordinateSystem(BaseCoordinateSystem):
             expr=_pyoomph.GiNaC_SymSubs(expr,k,v)
         return expr 
 
-    def add_additional_parametric_variable(self, name: str,value_to_substitute:Optional[ExpressionOrNum]=0,dx_integration_factor:Optional[ExpressionOrNum]=None) -> Expression:
+    def add_additional_parametric_variable(self, name: str,value_to_substitute:ExpressionOrNum | None=0,dx_integration_factor:ExpressionOrNum | None=None) -> Expression:
         """Add a new local coordinate to the coordinate system. This can be e.g. phi in an axisymmetric coordinate system
 
         """
@@ -1540,7 +1540,7 @@ class BaseDifferentialGeometryCoordinateSystem(BaseCoordinateSystem):
         # Just alwas 3
         return 3
     
-    def get_local_coordinate(self, i:int, ndim: int, edim: int,lagrangian:bool,dimensional:bool) -> List[Expression]:
+    def get_local_coordinate(self, i:int, ndim: int, edim: int,lagrangian:bool,dimensional:bool) -> list[Expression]:
         if i<edim:            
             return nondim("local_coordinate_"+str(i+1))
         elif i<edim+len(self.additional_local_coordinates):
@@ -1548,14 +1548,14 @@ class BaseDifferentialGeometryCoordinateSystem(BaseCoordinateSystem):
         else:
             raise RuntimeError("The local coordinate index is out of bounds.")
         
-    def get_all_local_coordinates(self, ndim: int, edim: int,lagrangian:bool,dimensional:bool) -> List[Expression]:
+    def get_all_local_coordinates(self, ndim: int, edim: int,lagrangian:bool,dimensional:bool) -> list[Expression]:
         eaug=self.get_augmented_edim(ndim,edim)
         return [self.get_local_coordinate(i,ndim,edim,lagrangian,dimensional) for i in range(eaug)]
     
-    def get_augmented_edim(self, ndim:Optional[int],edim: int) -> int:
+    def get_augmented_edim(self, ndim:int | None,edim: int) -> int:
         return edim+len(self.additional_local_coordinates)
 
-    def get_covariant_basis_vectors(self, ndim: int, edim: int,lagrangian:bool,dimensional:bool) -> List[Expression]:
+    def get_covariant_basis_vectors(self, ndim: int, edim: int,lagrangian:bool,dimensional:bool) -> list[Expression]:
         if (lagrangian,dimensional,ndim, edim) in self._cached_basis_vectors:
             return self._cached_basis_vectors[(lagrangian,dimensional,ndim, edim)]
         s = var("local_coordinate")  # Local coordinate
@@ -1595,8 +1595,8 @@ class BaseDifferentialGeometryCoordinateSystem(BaseCoordinateSystem):
         return g_contra
         
 
-    def define_vector_field(self, name: str, space: "FiniteElementSpaceEnum", ndim: int, element: "Equations") -> Tuple[List[Expression], List[Expression], List[str]]:
-        namelist: List[str] = []
+    def define_vector_field(self, name: str, space: "FiniteElementSpaceEnum", ndim: int, element: "Equations") -> tuple[list[Expression], list[Expression], list[str]]:
+        namelist: list[str] = []
         if ndim > self.max_nodal_dimension:
             raise RuntimeError(
                 "Cannot use a this coordinate system in "+str(ndim)+"D")
@@ -1605,8 +1605,8 @@ class BaseDifferentialGeometryCoordinateSystem(BaseCoordinateSystem):
         for v in self.additional_vector_component_suffixes:
             namelist.append(name + "_" + v)  # TODO: Axisymmetric?
 
-        v: List[Expression] = []
-        vtest: List[Expression] = []
+        v: list[Expression] = []
+        vtest: list[Expression] = []
         s = scale_factor(name)
         S = test_scale_factor(name)
         for i, f in enumerate(namelist):
@@ -1628,7 +1628,7 @@ class BaseDifferentialGeometryCoordinateSystem(BaseCoordinateSystem):
         # TODO: This is likely not right!
         return self.substitute_values_for_additional_local_coordinates(sum([g_contra[a,b]*t[a]*diff(arg,s[b]) for a in range(eaug) for b in range(eaug)]))
     
-    def vector_gradient(self, arg: List[Expression], ndim: int, edim: int, with_scales: bool, lagrangian: bool) -> List[Expression]:
+    def vector_gradient(self, arg: list[Expression], ndim: int, edim: int, with_scales: bool, lagrangian: bool) -> list[Expression]:
         g_contra=self.get_contravariant_metric_tensor(ndim,edim,lagrangian,with_scales)
         t=self.get_covariant_basis_vectors(ndim,edim,lagrangian,with_scales)
         eaug=self.get_augmented_edim(ndim,edim)

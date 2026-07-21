@@ -1,3 +1,4 @@
+from __future__ import annotations
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
@@ -31,7 +32,6 @@ import numpy
 
 from ..generic.problem import *
 from ..meshes.mesh import ODEStorageMesh
-from ..meshes.meshdatacache import MeshDataCacheStorage
 
 
 if TYPE_CHECKING:
@@ -74,7 +74,7 @@ class InternalInterpolator(BaseMeshToMeshInterpolator):
         super(InternalInterpolator, self).__init__(old, new)
         self.old:AnySpatialMesh=old
         self.new:AnySpatialMesh=new
-        self.boundary_max_distances:Dict[str,float]={}
+        self.boundary_max_distances:dict[str,float]={}
         self.try_to_use_zeta_on_boundary:bool=True
         old.prepare_interpolation()
         # Remove the macro elements, since they are really troublesome for the locate_zeta
