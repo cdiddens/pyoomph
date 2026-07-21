@@ -248,9 +248,9 @@ class EigenMatrixManipulatorBase:
 
 
 class EigenMatrixSetDofsToZero(EigenMatrixManipulatorBase):
-	def __init__(self,problem:"Problem",*doflist:str):
+	def __init__(self,problem:"Problem",*doflist:str | int):
 		super(EigenMatrixSetDofsToZero, self).__init__(problem)
-		self.doflist=set(doflist)
+		self.doflist:set[str | int]=set(doflist)
 		self.zeromap:set[int]=set()
 
 
@@ -395,7 +395,7 @@ class GenericEigenSolver:
 			return subclass
 		return decorator
 
-	def solve(self,neval:int,shift:float | complex | None=None,sort:bool=True,which:EigenSolverWhich="LM",OPpart:Literal["r", "i"] | None=None,v0:NPComplexArray | NPFloatArray | None=None,target:complex | None=None,custom_J_and_M:tuple[DefaultMatrixType] | None=None,with_left_eigenvectors:bool=False,quiet:bool=True)->tuple[NPComplexArray,NPComplexArray,DefaultMatrixType,DefaultMatrixType]:
+	def solve(self,neval:int,shift:float | complex | None=None,sort:bool=True,which:EigenSolverWhich="LM",OPpart:Literal["r", "i"] | None=None,v0:NPComplexArray | NPFloatArray | None=None,target:complex | None=None,custom_J_and_M:tuple[DefaultMatrixType,DefaultMatrixType] | None=None,with_left_eigenvectors:bool=False,quiet:bool=True)->tuple[NPComplexArray,NPComplexArray,DefaultMatrixType,DefaultMatrixType]:
 		raise RuntimeError("Here")
 	
 	@staticmethod

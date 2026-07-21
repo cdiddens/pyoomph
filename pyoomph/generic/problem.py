@@ -71,8 +71,15 @@ if TYPE_CHECKING:
     from ..meshes.interpolator import BaseMeshToMeshInterpolator
     from .assembly import CustomAssemblyBase
     from ..utils.num_text_out import NumericalTextOutputFile
+    from ..output.latex import LaTeXPrinter
 
 Z2ErrorEstimator=_pyoomph.Z2ErrorEstimator
+
+class _NewtonSolveOverrideSettings(TypedDict,total=False):
+    max_newton_iterations:int
+    newton_relaxation_factor:float
+    newton_solver_tolerance:float
+    globally_convergent_newton:bool
 
 import subprocess
 
@@ -161,9 +168,9 @@ class PeriodicOrbit:
     """ 
     A class representing a periodic orbit.
     """
-    def __init__(self,problem:"Problem",mode:Literal["collocation","central","bspline","BDF2"],lyap_coeff,param,omega,pvalue,pdvalue,al,order:int,GL_order:int,T_constraint:Literal["plane", "phase"]):
+    def __init__(self,problem:"Problem",mode:Literal["collocation","central","bspline","BDF2","floquet"],lyap_coeff,param,omega,pvalue,pdvalue,al,order:int,GL_order:int,T_constraint:Literal["plane", "phase"]):
          self.problem=problem
-         self.mode:Literal["collocation","central","bspline","BDF2"]=mode
+         self.mode:Literal["collocation","central","bspline","BDF2","floquet"]=mode
          self.order,self.GL_order=order,GL_order
          self.T_constraint:Literal["plane", "phase"]=T_constraint
          self.emerging_info={"lyap_coeff":lyap_coeff,"param":param,"omega":omega,"pvalue":pvalue,"dpvalue":pdvalue,"al":al}
@@ -318,7 +325,7 @@ class PeriodicOrbit:
             return accus[observables[0]]*T
         
     
-    def change_sampling(self,*,mode:Literal["collocation","central","bspline","BDF2"] | None =None,NT:int | None=None, order:int | None=None,GL_order:int | None=None,T_constraint:Literal["plane", "phase"] | None=None,do_solve:bool=True):
+    def change_sampling(self,*,mode:Literal["collocation","central","bspline","BDF2","floquet"] | None =None,NT:int | None=None, order:int | None=None,GL_order:int | None=None,T_constraint:Literal["plane", "phase"] | None=None,do_solve:bool=True):
         if mode is None:
             mode=self.mode
         if order is None:
@@ -627,7 +634,7 @@ class Problem(_pyoomph.Problem):
         self.plotter:list[MatplotlibPlotter] | MatplotlibPlotter | None=None
         self.plot_in_dedicated_process:bool=False
         self._plotting_process:subprocess.Popen | None=None
-        self.latex_printer:_pyoomph.LaTeXPrinter | None=None
+        self.latex_printer:"LaTeXPrinter | None"=None
 
         self.write_states:bool=True
         self.states_compression_level:int | None=6
@@ -825,7 +832,7 @@ class Problem(_pyoomph.Problem):
     def assemble_jacobian(self,with_residual:Literal[True]=...,which_one:str=...)->tuple[list[float],DefaultMatrixType]: ...
 
     @overload
-    def assemble_jacobian(self,with_residual:Literal[False],which_one:str)->DefaultMatrixType: ...
+    def assemble_jacobian(self,with_residual:Literal[False],which_one:str=...)->DefaultMatrixType: ...
     
     def assemble_jacobian(self,with_residual:bool=True,which_one:str="")->DefaultMatrixType | tuple[list[float], DefaultMatrixType]:
         res, n, _nzz, J_nrow_local, J_values_arr, J_colindex_arr, J_row_start_arr=self._assemble_residual_jacobian(which_one)        
@@ -1811,14 +1818,14 @@ class Problem(_pyoomph.Problem):
             
         if self._adapt_eigenindex is not None:
             eigfunc=self.get_history_dofs(3)+1j*self.get_history_dofs(4)
-            self._last_eigenvectors=[eigfunc]
-            self._last_eigenvalues=[self._last_eigenvalues[self._adapt_eigenindex]]
+            self._last_eigenvectors=numpy.array([eigfunc]) #type:ignore
+            self._last_eigenvalues=numpy.array([self._last_eigenvalues[self._adapt_eigenindex]]) #type:ignore
             lastm,lastk=None,None
             if self._last_eigenvalues_m is not None:
-                self._last_eigenvalues_m=[self._last_eigenvalues_m[self._adapt_eigenindex]]
+                self._last_eigenvalues_m=numpy.array([self._last_eigenvalues_m[self._adapt_eigenindex]]) #type:ignore
                 lastm=self._last_eigenvalues_m[0]
             if self._last_eigenvalues_k is not None:
-                self._last_eigenvalues_k=[self._last_eigenvalues_k[self._adapt_eigenindex]]
+                self._last_eigenvalues_k=numpy.array([self._last_eigenvalues_k[self._adapt_eigenindex]]) #type:ignore
                 lastk=self._last_eigenvalues_k[0]
             self._adapted_eigeninfo=[eigfunc,self._last_eigenvalues[0],lastm,lastk]
             
@@ -1888,6 +1895,8 @@ class Problem(_pyoomph.Problem):
                 # code instance (if any), since _set_problem() would otherwise reset it to None.
                 if isinstance(mesh,ODEStorageMesh):
                     mesh._set_problem(self,mesh.get_code_gen()._code)
+                assert mesh._eqtree is not None
+                assert mesh._eqtree._equations is not None
                 mesh._eqtree._equations.get_combined_equations()._problem=self
                 if isinstance(mesh,ODEStorageMesh): continue
                 mesh._pre_compile_interface_equations(tree_depth)
@@ -2337,13 +2346,13 @@ class Problem(_pyoomph.Problem):
 
 
 
-    def actions_after_change_in_global_parameter(self,param:str):
+    def actions_after_change_in_global_parameter(self,parameter_name:str):
         for hook in self._hooks:
-            hook.actions_after_change_in_global_parameter(param)
+            hook.actions_after_change_in_global_parameter(parameter_name)
 
-    def actions_after_parameter_increase(self,param:str):
+    def actions_after_parameter_increase(self,parameter_name:str):
         for hook in self._hooks:
-            hook.actions_after_parameter_increase(param)
+            hook.actions_after_parameter_increase(parameter_name)
 
     def actions_after_remeshing(self):
         self._equation_system._after_remeshing() 
@@ -2451,6 +2460,7 @@ class Problem(_pyoomph.Problem):
         biftrack = self.get_bifurcation_tracking_mode()
         biftrack_param = self._bifurcation_tracking_parameter_name
         if biftrack == "azimuthal":
+            assert self._azimuthal_mode_param_m is not None
             m=self._azimuthal_mode_param_m.value
             k=None
         elif biftrack == "cartesian_normal_mode":
@@ -2482,8 +2492,8 @@ class Problem(_pyoomph.Problem):
                 self.actions_before_stationary_solve(force_reassign_eqs=True)
                 self.solve(max_newton_iterations=resolve_max_newton_steps)
             print("RESOLVING EIGENPROBLEM AT ",k,m)
-            self.solve_eigenproblem(reactivate_biftrack_neigen,azimuthal_m=m,normal_mode_k=k,shift=reactivate_biftrack_shift)
-            self.activate_bifurcation_tracking(biftrack_param, biftrack)
+            self.solve_eigenproblem(reactivate_biftrack_neigen,azimuthal_m=(int(m) if m is not None else None),normal_mode_k=k,shift=reactivate_biftrack_shift)
+            self.activate_bifurcation_tracking(biftrack_param, cast(Literal["hopf", "fold", "pitchfork", "azimuthal", "cartesian_normal_mode"],biftrack))
             if resolve:
                 self.solve(max_newton_iterations=resolve_max_newton_steps,globally_convergent_newton=resolve_globally_convergent_newton)
         elif resolve:
@@ -2608,7 +2618,7 @@ class Problem(_pyoomph.Problem):
         
         must_uniform_refine=False
         for mesh in self._meshdict.values():
-            if isinstance(mesh,MeshFromTemplateBase) and mesh._initial_interface_refinement>0:
+            if isinstance(mesh,MeshFromTemplateBase) and len(mesh._initial_interface_refinement)>0:
                 must_uniform_refine=True  
                 break
         if must_uniform_refine:
@@ -3087,13 +3097,15 @@ class Problem(_pyoomph.Problem):
             ic_name (str, optional): Name of the initial condition. Multiple initial conditions can be defined in the problem definition by using the optional argument InitialConditions. Defaults to "".
             all_unset_dofs_to_zero (bool, optional): Flag indicating whether to set all unset degrees of freedom, i.e. without any InitialCondition with this ic_name, to zero. Defaults to False.
         """
+        if numadapt is None:
+            numadapt=0
         if all_unset_dofs_to_zero:
             self.set_current_dofs([0.0] * self.ndof())
         if not self.is_quiet():
             print("SETTING IC", ic_name)
-        
-        if self.project_initial_conditions:            
-            
+
+        if self.project_initial_conditions:
+
             self._set_solved_residual("_IC_"+ic_name, True, True)
             self.reapply_boundary_conditions()
             print("Projecting initial condition",ic_name,numadapt)
@@ -3645,7 +3657,7 @@ class Problem(_pyoomph.Problem):
     def get_current_time(self,dimensional:bool=...,as_float:Literal[False]=...)->Expression: ...
 
     @overload
-    def get_current_time(self,dimensional:bool=...,as_float:Literal[True]=...)->float: ...
+    def get_current_time(self,dimensional:bool,as_float:Literal[True])->float: ...
 
     def get_current_time(self, dimensional: bool = True, as_float: bool = False) -> ExpressionOrNum:
         """
@@ -3677,16 +3689,16 @@ class Problem(_pyoomph.Problem):
             t = float(t / second)
         return t
 
-    def process_eigenvectors(self,eigenvectors:NPFloatArray):
+    def process_eigenvectors(self,eigenvectors:NPComplexArray)->NPComplexArray:
         """Here, you can optionally scale or negate the eigenvectors, e.g. normalize them, by overriding this method
 
         Args:
-            eigenvectors (NPFloatArray): 2d array of eigenvectors
+            eigenvectors (NPComplexArray): 2d array of eigenvectors
 
         Returns:
-            NPFloatArray: Processed array of eigenvectors
+            NPComplexArray: Processed array of eigenvectors
         """
-        # 
+        #
         return eigenvectors
 
     def solve_eigenproblem(self, n:int, shift:float | complex | None=0, quiet:bool=False, azimuthal_m:int | list[int] | None=None,normal_mode_k:ExpressionOrNum | list[ExpressionOrNum] | None=None,normal_mode_L:ExpressionOrNum | list[ExpressionOrNum] | None=None,report_accuracy:bool=False,sort:bool=True,which:"EigenSolverWhich"="LM",OPpart:Literal["r", "i"] | None=None,v0:NPFloatArray | NPComplexArray | None=None,filter:Callable[[complex], bool] | None=None,target:complex | None=None,ncv:int | None=None)->tuple[NPComplexArray,NPComplexArray]:
@@ -3744,11 +3756,12 @@ class Problem(_pyoomph.Problem):
                 raise ValueError("Cannot specify both azimuthal_m and normal_mode_L")
             return self._solve_normal_mode_eigenproblem(n, azimuthal_m=azimuthal_m, shift=shift, quiet=quiet,filter=filter,report_accuracy=report_accuracy,v0=v0,target=target,sort=sort,ncv=ncv)
         elif normal_mode_k is not None:
+            normal_mode_k_nd:list[float] | float
             if isinstance(normal_mode_k,(list,tuple)):
-                normal_mode_k=[float(k*self.get_scaling("spatial")) for k in normal_mode_k]
+                normal_mode_k_nd=[float(k*self.get_scaling("spatial")) for k in normal_mode_k]
             else:
-                normal_mode_k=float(normal_mode_k*self.get_scaling("spatial"))
-            return self._solve_normal_mode_eigenproblem(n, cartesian_k=normal_mode_k, shift=shift, quiet=quiet,filter=filter,report_accuracy=report_accuracy,v0=v0,target=target,sort=sort,ncv=ncv)
+                normal_mode_k_nd=float(normal_mode_k*self.get_scaling("spatial"))
+            return self._solve_normal_mode_eigenproblem(n, cartesian_k=normal_mode_k_nd, shift=shift, quiet=quiet,filter=filter,report_accuracy=report_accuracy,v0=v0,target=target,sort=sort,ncv=ncv)
         if self._dof_selector_used is not self._dof_selector:
             self.reapply_boundary_conditions()
             self.reapply_boundary_conditions() # Must be done twice to correctly setup the equation remapping
@@ -3828,6 +3841,7 @@ class Problem(_pyoomph.Problem):
             self._adapt_eigenindex=0
             #print("V0",self._adapted_eigeninfo[0])
             #print("V0AMPL",numpy.linalg.norm(self._adapted_eigeninfo[0]))
+            assert self._adapted_eigeninfo is not None, "adapt() should have populated _adapted_eigeninfo since _adapt_eigenindex was set"
             if use_startvector:
                 startvector=self._adapted_eigeninfo[0].copy()
             else:
@@ -3842,8 +3856,8 @@ class Problem(_pyoomph.Problem):
             
 
 
-    def _override_for_this_solve(self,*,max_newton_iterations:int | None=None,newton_relaxation_factor:float | None=None,newton_solver_tolerance:float | None=None,globally_convergent_newton:bool | None=None):
-        old:dict[str,int | bool | float]={}
+    def _override_for_this_solve(self,*,max_newton_iterations:int | None=None,newton_relaxation_factor:float | None=None,newton_solver_tolerance:float | None=None,globally_convergent_newton:bool | None=None)->"_NewtonSolveOverrideSettings":
+        old:_NewtonSolveOverrideSettings={}
         if max_newton_iterations is not None:
             old["max_newton_iterations"]=self.max_newton_iterations
             self.max_newton_iterations=max_newton_iterations
@@ -4142,11 +4156,15 @@ class Problem(_pyoomph.Problem):
         # Get the initial eigenvalues
         if azimuthal_m is not None and  normal_mode_k is not None:                    
             raise ValueError("Cannot specify both azimuthal_m and normal_mode_k")
-        if normal_mode_k is not None and not is_zero(normal_mode_k):        
+        if normal_mode_k is not None and not is_zero(normal_mode_k):
+            oldk:float | None=None
             if param_is_normal_mode_k:
+                assert self._normal_mode_param_k is not None
                 oldk=self._normal_mode_param_k.value
-            evals0, _ = self._solve_normal_mode_eigenproblem(neigen, cartesian_k=normal_mode_k, shift=shift)            
+            evals0, _ = self._solve_normal_mode_eigenproblem(neigen, cartesian_k=normal_mode_k, shift=shift) #type:ignore
             if param_is_normal_mode_k:
+                assert self._normal_mode_param_k is not None
+                assert oldk is not None
                 self._normal_mode_param_k.value=oldk
         else:
             if azimuthal_m is None or azimuthal_m==0 and normal_mode_k is None:
@@ -4174,6 +4192,7 @@ class Problem(_pyoomph.Problem):
                     max_ds=max_ds_func(parameter.value)
                     max_ds=abs(max_ds)
                     print("MAX DS SET TO",max_ds)
+                assert not callable(max_ds)
                 ds = self.arclength_continuation(parameter, ds,max_ds=max_ds)
                 self.invalidate_cached_mesh_data()
             else:
@@ -4183,16 +4202,21 @@ class Problem(_pyoomph.Problem):
                         max_ds=max_ds_func(parameter.value)
                         max_ds=abs(max_ds)
                         print("MAX DS SET TO",max_ds)
+                    assert not callable(max_ds)
                     ds=min(abs(1.5*ds),max_ds)*(1 if ds>0 else -1)
             if reset_arclength:
                 self.reset_arc_length_parameters()
             if before_eigensolving is not None:
                 before_eigensolving(param0)
             if normal_mode_k is not None and not is_zero(normal_mode_k):
+                oldk:float | None=None
                 if param_is_normal_mode_k:
+                    assert self._normal_mode_param_k is not None
                     oldk=self._normal_mode_param_k.value
                 evals1, _ = self.solve_eigenproblem(neigen, normal_mode_k=normal_mode_k, shift=shift)
                 if param_is_normal_mode_k:
+                    assert self._normal_mode_param_k is not None
+                    assert oldk is not None
                     self._normal_mode_param_k.value=oldk
             else:
                 if azimuthal_m is None:
@@ -4235,9 +4259,8 @@ class Problem(_pyoomph.Problem):
         if level<0:
             raise RuntimeError("Must be >=0")
         
-        def set_level_for_mesh(mesh:AnySpatialMesh,level):            
-            assert not isinstance(mesh,InterfaceMesh)            
-            mesh._templatemesh.get_template()._max_refinement_level=level            
+        def set_level_for_mesh(mesh:AnySpatialMesh,level):
+            assert not isinstance(mesh,InterfaceMesh)
             maxref=0
             for e in mesh.elements():
                 maxref=max(maxref,e.refinement_level())
@@ -4297,7 +4320,7 @@ class Problem(_pyoomph.Problem):
         evect=self.get_last_eigenvectors()[eigenmode]
         
         self._taken_already_an_unsteady_step=True
-        self.time_stepper_pt().set_num_unsteady_steps_done(2)
+        self.timestepper.set_num_unsteady_steps_done(2)
         self.time_stepper_pt().undo_make_steady()
         self.initialise_dt(float(dtfixed/TS))
         self.time_stepper_pt().set_weights()
@@ -4315,16 +4338,17 @@ class Problem(_pyoomph.Problem):
         self.set_history_dofs(6,0*dofs) # Predictor
         def set_ic(scale):
             self.set_current_dofs(get_dofs(scale,0.0))
-            self.set_history_dofs(1,get_dofs(scale,-dt))
-            self.set_history_dofs(2,get_dofs(scale,-2*dt))
-            self.set_history_dofs(3,get_dofs(scale,-3*dt))
+            self.set_history_dofs(1,get_dofs(scale,-dtfixed))
+            self.set_history_dofs(2,get_dofs(scale,-2*dtfixed))
+            self.set_history_dofs(3,get_dofs(scale,-3*dtfixed))
             maxres=numpy.amax(numpy.absolute(self.get_residuals()))
             #print("Max residual after perturbation with scale {}: {}".format(scale,maxres))
             return maxres
     
-        if desired_initial_residuals is not None:        
+        if desired_initial_residuals is not None:
             scale0=1
             res0=set_ic(scale0)
+            scale1=scale0 # In case res0 already exactly equals desired_initial_residuals, neither while loop below runs
             if res0>desired_initial_residuals:
                 while res0>desired_initial_residuals:
                     scale1=scale0/2
@@ -4348,6 +4372,7 @@ class Problem(_pyoomph.Problem):
             if scale0>scale1:
                 scale0,scale1=scale1,scale0
             # Now do a bisection between scale0 and scale1
+            scale=scale0
             for _ in range(20):
                 scale=(scale0+scale1)/2
                 res=set_ic(scale)
@@ -4361,7 +4386,7 @@ class Problem(_pyoomph.Problem):
             #print("Final scale: {}, residual: {}".format(scale,res))
         self.invalidate_cached_mesh_data()
         self.invalidate_eigendata()
-        return dt
+        return dtfixed
 
     def deactivate_bifurcation_tracking(self):
         
@@ -4377,6 +4402,7 @@ class Problem(_pyoomph.Problem):
             self.reapply_boundary_conditions()
             self.reapply_boundary_conditions()
             self._last_bc_setting="normal"
+            assert self._azimuthal_mode_param_m is not None
             self._azimuthal_mode_param_m.value=0
 
     # Assuming that Re(lambda)=0 is also stable, which is not exactly true
@@ -4390,7 +4416,7 @@ class Problem(_pyoomph.Problem):
             raise RuntimeError("Cannot find out whether a solution is stable when bifurcation tracking is active")
         return numpy.real(self._last_eigenvalues[0])<=0 #type:ignore
 
-    def guess_nearest_bifurcation_type(self,eigenvector:int=0)->Literal["hopf","fold","pitchfork","azimuthal"]:
+    def guess_nearest_bifurcation_type(self,eigenvector:int=0)->Literal["hopf","fold","pitchfork","azimuthal","cartesian_normal_mode"]:
         """
         Guesses the nearest bifurcation type based on the last computed eigenvalues. This is only possible after calling solve_eigenproblem(...).
         It cannot guess e.g. pitchfork or transcritical bifurcations, only "hopf" or "fold" - or "azimuthal" if the last eigenvalues correspond to azimuthal modes m!=0.
@@ -4414,8 +4440,10 @@ class Problem(_pyoomph.Problem):
 
 
     
-    def dof_strings_to_global_equations(self,string_dof_set:str | set[str] | list[str]):
-        """Takes strings like ``"domain/velocity_x"`` and returns a set of global equations
+    def dof_strings_to_global_equations(self,string_dof_set:str | Iterable[str | int]):
+        """Takes strings like ``"domain/velocity_x"`` and returns a set of global equations.
+        Entries that are already an int (a global equation number, as returned e.g. by some
+        InterfaceEquations._get_forced_zero_dofs_for_eigenproblem implementations) are passed through as-is.
 
         Args:
             string_dof_set: Degrees of freedom you want to resolve to equation numbers
@@ -4428,9 +4456,11 @@ class Problem(_pyoomph.Problem):
             string_dof_set=set([string_dof_set])
         elif isinstance(string_dof_set,list):
             string_dof_set=set(string_dof_set)
-        resolver=EigenMatrixSetDofsToZero(self,*string_dof_set)
-        zeromap:set[int]=set()
+        string_names={d for d in string_dof_set if isinstance(d,str)}
+        zeromap:set[int]={d for d in string_dof_set if isinstance(d,int)}
+        resolver=EigenMatrixSetDofsToZero(self,*string_names)
         for d in resolver.doflist:
+            assert isinstance(d,str) # only strings were passed to the resolver above
             eqs=resolver.resolve_equations_by_name(d)
             #print("DOF",d,"EQS",eqs)
             zeromap=zeromap.union(eqs)
@@ -4448,7 +4478,7 @@ class Problem(_pyoomph.Problem):
         """
         self.activate_bifurcation_tracking(None,bifurcation_type=branch_type,eigenvector=eigenvector,eigenvalue_for_branch_tracking=eigenvalue)
 
-    def activate_bifurcation_tracking(self,parameter:str | _pyoomph.GiNaC_GlobalParam | None,bifurcation_type:Literal["hopf", "fold", "pitchfork", "azimuthal", "cartesian_normal_mode"] | None=None,blocksolve:bool=False,eigenvector:NPFloatArray | NPComplexArray | int | None=None,omega:float | None=None,azimuthal_mode:int | None=None,cartesian_wavenumber_k:ExpressionOrNum | None=None,eigenvalue_for_branch_tracking:complex | None=None):
+    def activate_bifurcation_tracking(self,parameter:str | _pyoomph.GiNaC_GlobalParam | None,bifurcation_type:Literal["hopf", "fold", "pitchfork", "azimuthal", "cartesian_normal_mode", "real", "complex", "normal_mode"] | None=None,blocksolve:bool=False,eigenvector:NPFloatArray | NPComplexArray | int | None=None,omega:float | None=None,azimuthal_mode:int | None=None,cartesian_wavenumber_k:ExpressionOrNum | None=None,eigenvalue_for_branch_tracking:complex | None=None):
         """
         Activates bifurcation tracking for the specified parameter and bifurcation type. Subsequent calls of solve(...) and arclength_continuation(...) will then track the bifurcation.
 
@@ -4472,8 +4502,10 @@ class Problem(_pyoomph.Problem):
             if isinstance(eigenvector,int):
                 if eigenvector>=len(self.get_last_eigenvectors()):
                     raise RuntimeError("Eigenvector "+str(eigenvector)+" not calculated")
-                self._set_lambda_tracking_real(numpy.real(self.get_last_eigenvalues()[eigenvector]))    
+                self._set_lambda_tracking_real(numpy.real(self.get_last_eigenvalues()[eigenvector]))
                 eigenvector_v=self.get_last_eigenvectors()[eigenvector]
+                if bifurcation_type is None:
+                    bifurcation_type=self.guess_nearest_bifurcation_type(eigenvector)
             else:
                 #raise RuntimeError("Can only track eigenbranches, not custom vectors. Please set eigenvector to and integer (for the index of the calculate eigenvector or None, meaning index 0) ")
                 eigenvector_v=eigenvector
@@ -4481,11 +4513,8 @@ class Problem(_pyoomph.Problem):
                     raise RuntimeError("Please set eigenvalue_for_branch_tracking if you track a custom eigenvector")
                 self._set_lambda_tracking_real(numpy.real(eigenvalue_for_branch_tracking))
                 omega=numpy.imag(eigenvalue_for_branch_tracking)
-                #if bifurcation_type is None:
-                #    if numpy.abs(numpy.imag(eigenvalue_for_branch_tracking))>1e-6:
-                #        bifurcation_type="hopf"
-            if bifurcation_type is None:
-                bifurcation_type=self.guess_nearest_bifurcation_type(eigenvector)
+                if bifurcation_type is None:
+                    bifurcation_type="hopf" if numpy.abs(numpy.imag(eigenvalue_for_branch_tracking))>1e-6 else "fold"
             
             if bifurcation_type=="fold" or bifurcation_type=="real":
                 if omega is not None and omega!=0:
@@ -4503,16 +4532,22 @@ class Problem(_pyoomph.Problem):
                     raise RuntimeError("Cannot track eigenbranch for a complex branch with a non-zero additional cartesian wavenumber. Use normal_mode instead")
                 bifurcation_type="hopf"
                 if omega is None:
+                    # omega is only unset here if eigenvector is an int index (the custom-vector
+                    # branch above always sets omega from eigenvalue_for_branch_tracking)
+                    assert isinstance(eigenvector,int)
                     omega=numpy.imag(self.get_last_eigenvalues()[eigenvector])
+                assert omega is not None
                 print("Activating eigenbranch tracking for a complex branch with with starting eigenvalue",str(complex(self._get_lambda_tracking_real(),omega)))
             elif bifurcation_type=="azimuthal" or bifurcation_type=="cartesian_normal_mode" or bifurcation_type=="normal_mode":
-                if azimuthal_mode is None and cartesian_wavenumber_k is None:
-                    if self.get_last_eigenmodes_k() is not None and len(self.get_last_eigenmodes_k())>eigenvector and not is_zero(self.get_last_eigenmodes_k()[eigenvector]):                        
-                        bifurcation_type="cartesian_normal_mode"                        
-                        cartesian_wavenumber_k=self.get_last_eigenmodes_k()[eigenvector]
-                    elif self.get_last_eigenmodes_m() is not None and len(self.get_last_eigenmodes_m()>eigenvector):
+                if azimuthal_mode is None and cartesian_wavenumber_k is None and isinstance(eigenvector,int):
+                    last_modes_k=self.get_last_eigenmodes_k()
+                    last_modes_m=self.get_last_eigenmodes_m()
+                    if last_modes_k is not None and len(last_modes_k)>eigenvector and not is_zero(last_modes_k[eigenvector]):
+                        bifurcation_type="cartesian_normal_mode"
+                        cartesian_wavenumber_k=last_modes_k[eigenvector]
+                    elif last_modes_m is not None and len(last_modes_m)>eigenvector:
                         bifurcation_type="azimuthal"
-                        azimuthal_mode=self.get_last_eigenmodes_m()[eigenvector]
+                        azimuthal_mode=int(last_modes_m[eigenvector])
                 elif azimuthal_mode is not None and cartesian_wavenumber_k is not None:
                     raise RuntimeError("Cannot track eigenbranch for both azimuthal and cartesian normal mode")
                 elif azimuthal_mode is not None:
@@ -4520,7 +4555,9 @@ class Problem(_pyoomph.Problem):
                 else:
                     bifurcation_type="cartesian_normal_mode"
                 if omega is None:
+                    assert isinstance(eigenvector,int)
                     omega=numpy.imag(self.get_last_eigenvalues()[eigenvector])
+                assert omega is not None
                 if azimuthal_mode is not None:
                     print("Activating eigenbranch tracking for a azimuthal branch with m="+str(azimuthal_mode)+" with with starting eigenvalue",str(complex(self._get_lambda_tracking_real(),omega)))
                 else:
@@ -4541,9 +4578,13 @@ class Problem(_pyoomph.Problem):
                 if omega is None and bifurcation_type in {"hopf","azimuthal","cartesian_normal_mode"}:
                     omega=numpy.imag(self.get_last_eigenvalues()[eigenvector])
                 if bifurcation_type=="azimuthal" and azimuthal_mode is None:
-                    azimuthal_mode=self.get_last_eigenmodes_m()[eigenvector]
+                    last_modes_m=self.get_last_eigenmodes_m()
+                    assert last_modes_m is not None, "No azimuthal modes available. Did you use setup_for_stability_analysis(azimuthal_stability=True)?"
+                    azimuthal_mode=int(last_modes_m[eigenvector])
                 elif bifurcation_type=="cartesian_normal_mode" and cartesian_wavenumber_k is None:
-                    cartesian_wavenumber_k=self.get_last_eigenmodes_k()[eigenvector]
+                    last_modes_k=self.get_last_eigenmodes_k()
+                    assert last_modes_k is not None, "No cartesian normal modes available. Did you use setup_for_stability_analysis(additional_cartesian_mode=True)?"
+                    cartesian_wavenumber_k=last_modes_k[eigenvector]
                 eigenvector=self.get_last_eigenvectors()[eigenvector]
                 
             if bifurcation_type is None:
@@ -4574,16 +4615,21 @@ class Problem(_pyoomph.Problem):
 #                self._last_bc_setting="eigen"
             if azimuthal_mode is not None or cartesian_wavenumber_k is not None:
                 raise RuntimeError("Cannot use azimuthal_mode or cartesian_wavenumber_k for fold solving")
-            if eigenvector is None:
+            if isinstance(eigenvector,int):
+                eigenvector=self.get_last_eigenvectors()[eigenvector]
+            elif eigenvector is None:
                 eigenvector = next(iter(self.get_last_eigenvectors()), None)
-            if eigenvector is None or len(eigenvector)==0:                
+            assert not isinstance(eigenvector,int)
+            if eigenvector is None or len(eigenvector)==0:
                 self._start_bifurcation_tracking(parameter,bifurcation_type,blocksolve,[],[],0.0,{})
             else:
                 self._start_bifurcation_tracking(parameter,bifurcation_type,blocksolve,numpy.real(eigenvector),[],0.0,{}) #type:ignore
         elif bifurcation_type=="hopf":
             if azimuthal_mode is not None or cartesian_wavenumber_k is not None:
                 raise RuntimeError("Cannot use azimuthal_mode or cartesian_wavenumber_k for Hopf solving")
-            if eigenvector is None:
+            if isinstance(eigenvector,int):
+                eigenvector=self.get_last_eigenvectors()[eigenvector]
+            elif eigenvector is None:
                 eigenvector=next(iter(self.get_last_eigenvectors()),None)
             if omega is None:
                 omega=next(iter(self.get_last_eigenvalues()),None)
@@ -4608,7 +4654,9 @@ class Problem(_pyoomph.Problem):
         elif bifurcation_type=="pitchfork":
             if azimuthal_mode is not None or cartesian_wavenumber_k is not None:
                 raise RuntimeError("Cannot use azimuthal_mode or cartesian_wavenumber_k for pitchfork solving")
-            if eigenvector is None:
+            if isinstance(eigenvector,int):
+                eigenvector=self.get_last_eigenvectors()[eigenvector]
+            elif eigenvector is None:
                 eigenvector=next(iter(self.get_last_eigenvectors()),None)
             if eigenvector is None:
                 raise RuntimeError("Pitchfork tracking requires at least a symmetry vector passed via the eigenvector kwarg")
@@ -4679,7 +4727,7 @@ class Problem(_pyoomph.Problem):
                     raise RuntimeError("Must specify cartesian_wavenumber_k or solve an normal mode eigenproblem before")
                 cartesian_wavenumber_k=self._last_eigenvalues_k[0]
                 assert cartesian_wavenumber_k is not None
-            self._normal_mode_param_k.value=cartesian_wavenumber_k
+            self._normal_mode_param_k.value=cartesian_wavenumber_k #type:ignore
             if eigenvector is None:
                 if self._last_eigenvalues_k is None or len(self._last_eigenvalues_k) == 0:
                     raise RuntimeError("Cannot find a good eigenvector guess since you have not calculated any one for wave number "+str(cartesian_wavenumber_k))
@@ -4700,13 +4748,13 @@ class Problem(_pyoomph.Problem):
                     omega = 0
 
             # First, we get all equations which must be zero for the base state and on the eigenvector
-            must_reapply_bcs=self._equation_system._before_eigen_solve(self.get_eigen_solver(), normal_k=cartesian_wavenumber_k)
+            must_reapply_bcs=self._equation_system._before_eigen_solve(self.get_eigen_solver(), normal_k=cartesian_wavenumber_k) #type:ignore
             if must_reapply_bcs:
                 self.reapply_boundary_conditions() # Equation numbering might have been changed. Update it here!
                 self.reapply_boundary_conditions()
                 self._last_bc_setting="eigen"
-            base_zero_dofs=self._equation_system._get_forced_zero_dofs_for_eigenproblem(self.get_eigen_solver(),None,None) 
-            eigen_zero_dofs=self._equation_system._get_forced_zero_dofs_for_eigenproblem(self.get_eigen_solver(),None,cartesian_wavenumber_k) 
+            base_zero_dofs=self._equation_system._get_forced_zero_dofs_for_eigenproblem(self.get_eigen_solver(),None,None)
+            eigen_zero_dofs=self._equation_system._get_forced_zero_dofs_for_eigenproblem(self.get_eigen_solver(),None,cartesian_wavenumber_k) #type:ignore 
 
             
 
@@ -4824,10 +4872,10 @@ class Problem(_pyoomph.Problem):
         #q=self.get_last_eigenvectors()[0]
         
         
-        q=self.assembly_handler_pt().get_nicely_rotated_eigenfunction()
+        q:NPComplexArray=numpy.array(cast(_pyoomph.HopfHandler,self.assembly_handler_pt()).get_nicely_rotated_eigenfunction()) #type:ignore
         if omega<0:
             omega=-omega
-            q=numpy.conj(q)
+            q=numpy.conj(q) #type:ignore
         
         param=self._bifurcation_tracking_parameter_name
         parameter=self.get_global_parameter(param)
@@ -4870,23 +4918,28 @@ class Problem(_pyoomph.Problem):
         self.activate_periodic_orbit_handler(T,history_dofs[1:],mode,order=order,GL_order=GL_order,T_constraint=T_constraint)
         history_dofs.append(history_dofs[0])
         res=PeriodicOrbit(self,mode,lyap_coeff,param,omega,pvalue,parameter.value,al,order,GL_order,T_constraint)
+        orbit_base_ndof=cast(_pyoomph.PeriodicOrbitHandler,self.assembly_handler_pt()).get_base_ndof()
+        ncnt:int | None=None
+        avg_dists0:float | None=None
         if check_collapse_to_stationary:
             avg_dists0=0
-            ncnt=0            
+            ncnt=0
             for T in res.iterate_over_samples():
-                dofs=self.get_current_dofs()[0][:self.assembly_handler_pt().get_base_ndof()]
+                dofs=self.get_current_dofs()[0][:orbit_base_ndof]
                 avg_dists0+=(numpy.dot(numpy.array(history_dofs[ncnt])-numpy.array(u0),numpy.array(dofs)-numpy.array(u0)))
                 ncnt+=1
+            assert avg_dists0 is not None and ncnt is not None
             avg_dists0/=ncnt
-                
-            
+
+
         if do_solve:
             self.solve(**solve_kwargs)
             if check_collapse_to_stationary:
+                assert ncnt is not None and avg_dists0 is not None
                 avg_dists=0
                 i=0
                 for T in res.iterate_over_samples():
-                    dofs=self.get_current_dofs()[0][:self.assembly_handler_pt().get_base_ndof()]
+                    dofs=self.get_current_dofs()[0][:orbit_base_ndof]
                     add=numpy.dot(numpy.array(history_dofs[i])-numpy.array(u0),numpy.array(dofs)-numpy.array(u0))
                     #print("adding",add,numpy.amax(numpy.absolute(numpy.array(history_dofs[i])-numpy.array(u0))))
                     avg_dists+=add
@@ -4896,7 +4949,7 @@ class Problem(_pyoomph.Problem):
                 print("Average 'radius'^2 of the solved guess orbit:",avg_dists)
                 if avg_dists<1e-10*avg_dists0:
                     raise RuntimeError("The solved orbit is likely collapsed")
-                
+
                 start=None
                 nontrivial=False
                 i=0
@@ -4905,9 +4958,9 @@ class Problem(_pyoomph.Problem):
                     if skip:
                         continue
                     if i==0:
-                        start=self.get_current_dofs()[0][:self.assembly_handler_pt().get_base_ndof()]
+                        start=self.get_current_dofs()[0][:orbit_base_ndof]
                     else:
-                        dist=numpy.linalg.norm(numpy.array(start)-numpy.array(self.get_current_dofs()[0][:self.assembly_handler_pt().get_base_ndof()]))
+                        dist=numpy.linalg.norm(numpy.array(start)-numpy.array(self.get_current_dofs()[0][:orbit_base_ndof]))
                         if dist>1e-5*avg_dists0:
                             nontrivial=True
                             skip=True
@@ -4924,11 +4977,12 @@ class Problem(_pyoomph.Problem):
         # Main ideas from here: https://arxiv.org/html/2407.18230v1#S2.E6
         from .. import _pyoomph_core as _pyoomph
         import scipy
-        if not isinstance(self.assembly_handler_pt(),_pyoomph.PeriodicOrbitHandler):
+        orbit_handler=self.assembly_handler_pt()
+        if not isinstance(orbit_handler,_pyoomph.PeriodicOrbitHandler):
             raise RuntimeError("Periodic orbit handler not active. Call activate_periodic_orbit_handler first, then solve the orbit, then call this function")
-        if not self.assembly_handler_pt().is_floquet_mode():
+        if not orbit_handler.is_floquet_mode():
             raise RuntimeError("Floquet mode not active. Call activate_periodic_orbit_handler with mode='floquet' first, then solve the orbit, then call this function")
-        nbase=self.assembly_handler_pt().get_base_ndof()
+        nbase=orbit_handler.get_base_ndof()
         if n is None:
             n=nbase
         if n<=0:
@@ -4946,7 +5000,7 @@ class Problem(_pyoomph.Problem):
             valid_inds=numpy.argwhere(numpy.abs(valid_eigs)<valid_threshold).flatten()            
             eigv=eigv[valid_inds,:]
             valid_eigs=valid_eigs[valid_inds]        
-        gamms=1/(1-valid_eigs)
+        gamms:NPComplexArray=1/(1-valid_eigs) #type:ignore
         
         if ignore_periodic_unity is True:
             ignore_periodic_unity=1e-5
@@ -4974,11 +5028,8 @@ class Problem(_pyoomph.Problem):
             NPComplexArray: Eigenvalues as array.
         """                
         if dimensional:
-            if self._last_eigenvalues is None:
-                return None
-            else:
-                imaginary_i=_pyoomph.GiNaC_imaginary_i()
-                return [numpy.real(x)/self.get_scaling("temporal")+imaginary_i*numpy.imag(x)/self.get_scaling("temporal") for x in self._last_eigenvalues]                
+            imaginary_i=_pyoomph.GiNaC_imaginary_i()
+            return numpy.array([numpy.real(x)/self.get_scaling("temporal")+imaginary_i*numpy.imag(x)/self.get_scaling("temporal") for x in self._last_eigenvalues]) #type:ignore
         return self._last_eigenvalues
 
     def get_last_eigenvectors(self)->NPComplexArray:
@@ -5099,11 +5150,11 @@ class Problem(_pyoomph.Problem):
 
     def _solve_normal_mode_eigenproblem(self, n:int, azimuthal_m:list[int] | tuple[int] | int | None=None, cartesian_k:list[float] | tuple[float] | float | None=None, shift:float | complex | None=0,quiet:bool=False,filter:Callable[[complex], bool] | None=None,report_accuracy:bool=False,target:complex | None=None,v0:NPFloatArray | NPComplexArray | None=None,sort:bool=True,ncv:int | None=None)->tuple[NPComplexArray,NPComplexArray]:
         
-        if azimuthal_m and (self._azimuthal_mode_param_m is None):
+        if azimuthal_m is not None and (self._azimuthal_mode_param_m is None):
             raise RuntimeError("Must use setup_for_stability_analysis(azimuthal_stability=True) before initialialising the problem")
-        if cartesian_k and (self._normal_mode_param_k is None):
+        if cartesian_k is not None and (self._normal_mode_param_k is None):
             raise RuntimeError("Must use setup_for_stability_analysis(additional_cartesian_mode=True) before initialialising the problem")
-        
+
         if cartesian_k is not None and azimuthal_m is not None:
             raise RuntimeError("TODO: Both simultaneously")
         elif cartesian_k is not None:
@@ -5112,14 +5163,17 @@ class Problem(_pyoomph.Problem):
         elif azimuthal_m is not None:
             param=self._azimuthal_mode_param_m
             vlist=azimuthal_m
-            
+        else:
+            raise RuntimeError("Must specify either azimuthal_m or cartesian_k")
+        assert param is not None
+
         
         if isinstance(vlist,(list,tuple)):
             if report_accuracy:
                 raise RuntimeError("report_accuracy=True for normal mode eigenproblems only works if you select a single mode, not a list like "+str(vlist))
             alleigenvals:NPComplexArray=numpy.array([],dtype=numpy.complex128) #type:ignore
             alleigenvects:NPComplexArray=numpy.array([],dtype=numpy.complex128) #type:ignore
-            minfoL:list[int]=[]
+            minfoL:list[int | float]=[]
             for ms in vlist:
                 param.value = ms
                 self.actions_before_eigen_solve()
@@ -5141,16 +5195,16 @@ class Problem(_pyoomph.Problem):
                     srt = numpy.argsort(-alleigenvals) #type:ignore
                 alleigenvals:NPComplexArray=alleigenvals[srt] #type:ignore
                 alleigenvects:NPComplexArray = alleigenvects[srt,:] #type:ignore
-                minfo:NPIntArray=numpy.array(minfoL)[srt] #type:ignore
+                minfo:NPAnyArray=numpy.array(minfoL)[srt] #type:ignore
             else:
-                minfo:NPIntArray=numpy.array(minfoL)
+                minfo:NPAnyArray=numpy.array(minfoL)
 
             self._last_eigenvalues, self._last_eigenvectors = alleigenvals,alleigenvects
-            if self.azimuthal_m is not None:
-                self._last_eigenvalues_m=minfo
+            if azimuthal_m is not None:
+                self._last_eigenvalues_m=minfo #type:ignore
             else:
-                self._last_eigenvalues_k=minfo
-            
+                self._last_eigenvalues_k=minfo #type:ignore
+
             if (not self.is_quiet()) and (not quiet):
                 for i, l in enumerate(self._last_eigenvalues):
                     m=minfo[i]
@@ -5259,6 +5313,7 @@ class Problem(_pyoomph.Problem):
         if not self.is_initialised():
             self.initialise()
             TSCALE=self.scaling.get("temporal",1)
+            assert not isinstance(TSCALE,str)
             self._activate_solver_callback()
             if (timestep is not None):
                 timestep=timestep/TSCALE
@@ -5434,12 +5489,9 @@ class Problem(_pyoomph.Problem):
 
         if starttime is not None:
             self.set_current_time(starttime)
+        if do_not_set_IC=="auto":
+            do_not_set_IC=self.is_initialised()
         if (not self.is_initialised()) or self._taken_already_an_unsteady_step==False:
-            if do_not_set_IC=="auto":
-                if self.is_initialised():
-                    do_not_set_IC=True
-                else:
-                    do_not_set_IC=False
             #We need to calculate the initial time step already now to initialize appropriately!
             _tstart=self.get_current_time() #This might call initialise!
             if self._runmode!="continue":
@@ -5769,6 +5821,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                 raise RuntimeError("Please specify only one parameter range")
         if param is None:
             raise RuntimeError("Please specify a parameter range like e.g. parameter_name=linspace(0,1,10)")
+        assert rang is not None # rang is always set together with param in the loop above
         if param not in self.get_global_parameter_names():
             raise RuntimeError("Please specify a parameter that is defined in the problem")
         param_obj=self.get_global_parameter(param)
@@ -6172,7 +6225,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             dofderiv=[]
         has_contidata=state.int_data(lambda : write_conti,lambda n : n)
         if has_contidata:
-            dofderiv=state.numpy_data(lambda  : dofderiv,lambda e:e)
+            dofderiv=state.numpy_data(lambda  : numpy.array(dofderiv),lambda e:e)
             paramderiv=state.float_data(lambda  : self.get_arc_length_parameter_derivative(),lambda e:e)
             thetasqr=state.float_data(lambda  : self.get_arc_length_theta_sqr(),lambda e:e)
             if not state.save and not ignore_continuation_data:            
@@ -6243,9 +6296,10 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         self.actions_after_remeshing() # Must call this to inform e.g. the outputters, that the mesh has changed!
         
         self.invalidate_cached_mesh_data()                
-        if self._last_bc_setting=="eigen":          
-            if self._azimuthal_mode_param_m is not None and len(self.get_last_eigenmodes_m()):
-                self._azimuthal_mode_param_m.value=self.get_last_eigenmodes_m()[0]                
+        if self._last_bc_setting=="eigen":
+            last_eigenmodes_m=self.get_last_eigenmodes_m()
+            if self._azimuthal_mode_param_m is not None and last_eigenmodes_m is not None and len(last_eigenmodes_m):
+                self._azimuthal_mode_param_m.value=int(last_eigenmodes_m[0])
             self.actions_before_eigen_solve()
             if self._azimuthal_mode_param_m is not None:
                 self._azimuthal_mode_param_m.value=0
@@ -6354,8 +6408,10 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             mesh=None
             for m in self._meshtemplate_list:
                 if m.has_domain(meshname):
-                    mesh=MeshFromTemplate(self,m,meshname,eqtree,previous_mesh=self._meshdict.get(meshname,None))                    
-                    
+                    previous_mesh=self._meshdict.get(meshname,None)
+                    assert previous_mesh is None or isinstance(previous_mesh,(MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d))
+                    mesh=MeshFromTemplate(self,m,meshname,eqtree,previous_mesh=previous_mesh)
+
                     self._meshdict[meshname]=mesh
                     assert eqtree._equations is not None
                     eqtree._equations._mesh=mesh  #type:ignore
@@ -6410,7 +6466,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         self.actions_after_remeshing()
         self.reapply_boundary_conditions()
         print("After load balance, we have",self.nsub_mesh(),"submeshes, and the mesh dict keys are: "+str(self._meshdict.keys()))
-        print("ON PROC",get_mpi_rank(),self.ndof(),self.nsub_mesh(),self.mesh_pt(0).nelement())
+        print("ON PROC",get_mpi_rank(),self.ndof(),self.nsub_mesh(),self.mesh_pt(0).nelement()) #type:ignore
         
         
         

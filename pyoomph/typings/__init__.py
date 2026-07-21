@@ -26,7 +26,7 @@ from __future__ import annotations
 #
 # ========================================================================
  
-from typing import Union,Any,Optional,TYPE_CHECKING,Type,Set,Literal,List,Dict,overload,Tuple,cast,TypeVar,SupportsFloat,TypeAlias
+from typing import Union,Any,Optional,TYPE_CHECKING,Type,Set,Literal,List,Dict,overload,Tuple,cast,TypeVar,SupportsFloat,TypeAlias,TypedDict
 from collections import OrderedDict
 from collections.abc import Sequence, Iterable, Callable, Iterator, Generator
 
@@ -47,6 +47,6 @@ def assert_type(obj:Any,typ:_AnyPyoomphType)->_AnyPyoomphType:
     else:
         return cast(type[typ],obj) # type: ignore
     
-__all__ = ["Union","Any","Sequence","Iterable","Callable","Iterator","Optional","TYPE_CHECKING","NPFloatArray","NPIntArray","NPComplexArray","NPUInt64Array","NPInt32Array","Type","Set","Literal","List","Dict","overload","Tuple","cast","NPAnyArray","TypeVar","Generator","OrderedDict","SupportsFloat","TypeAlias","assert_type"]
+__all__ = ["Union","Any","Sequence","Iterable","Callable","Iterator","Optional","TYPE_CHECKING","NPFloatArray","NPIntArray","NPComplexArray","NPUInt64Array","NPInt32Array","Type","Set","Literal","List","Dict","overload","Tuple","cast","NPAnyArray","TypeVar","Generator","OrderedDict","SupportsFloat","TypeAlias","assert_type","TypedDict"]
 
 

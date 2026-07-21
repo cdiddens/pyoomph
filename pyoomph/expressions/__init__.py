@@ -34,6 +34,7 @@ import  pyoomph._pyoomph_core as _pyoomph
 
 from .generic import *
 from .coordsys import *
+from .coordsys import BaseCoordinateSystem
 from .cb import *
 
 from ..typings import *

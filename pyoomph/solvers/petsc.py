@@ -406,7 +406,7 @@ class SlepcEigenSolver(GenericEigenSolver):
             _SetDefaultPetscOption("st_mat_mumps_icntl_14",mumps_param14)
         return self
 
-    def solve(self, neval:int, shift:float | None | complex=None,sort:bool=True,which:EigenSolverWhich="LM",OPpart:Literal["r", "i"] | None=None,v0:NPComplexArray | NPFloatArray | None=None,target:complex | None=None,custom_J_and_M:tuple["DefaultMatrixType"] | None=None,with_left_eigenvectors:bool=False,quiet:bool=True)->tuple[NPComplexArray,NPComplexArray,"DefaultMatrixType","DefaultMatrixType"]:
+    def solve(self, neval:int, shift:float | None | complex=None,sort:bool=True,which:EigenSolverWhich="LM",OPpart:Literal["r", "i"] | None=None,v0:NPComplexArray | NPFloatArray | None=None,target:complex | None=None,custom_J_and_M:tuple["DefaultMatrixType","DefaultMatrixType"] | None=None,with_left_eigenvectors:bool=False,quiet:bool=True)->tuple[NPComplexArray,NPComplexArray,"DefaultMatrixType","DefaultMatrixType"]:
         if which!="LM":
             raise RuntimeError("Implement which="+str(which))
         if OPpart is not None:
