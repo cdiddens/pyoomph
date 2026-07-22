@@ -29,7 +29,7 @@ from __future__ import annotations
  
 from .. import *
 from ..expressions import *
-from ..meshes.mesh import AnyMesh
+from ..meshes.mesh import AnyMesh, InterfaceMesh, assert_spatial_mesh
 from ..typings import *
 
 class PotentialFlow(Equations):
@@ -38,18 +38,18 @@ class PotentialFlow(Equations):
         self.potential_name=potential_name
         self.velocity_name=velocity_name
         self.pressure_name=pressure_name
-        self.space=space
+        self.space:FiniteElementSpaceEnum=space
         self.scale=scale
         self.rho=mass_density
 
         # If viscosity is set, we calculate the velocity at free interfaces, even if we do not project the velocity 
         # we need it, since we cannot calculate the gradient of u, which is second order derivative of phi
         self.dynamic_viscosity=dynamic_viscosity
-        self.velo_at_free_interface_space="D2" # D1 should be sufficient. But must be DG
+        self.velo_at_free_interface_space:FiniteElementSpaceEnum="D2" # D1 should be sufficient. But must be DG
         self.velo_at_free_interface_name="dgvelo"
         
-        self.velo_projection=velo_projection # False: No output/calculate, True: LocalExpression, FiniteElementSpace: Projection
-        self.pressure_projection=pressure_projection # same as above, but only calculated if mass_density is set (can't be done without rho)
+        self.velo_projection:bool | FiniteElementSpaceEnum=velo_projection # False: No output/calculate, True: LocalExpression, FiniteElementSpace: Projection
+        self.pressure_projection:bool | FiniteElementSpaceEnum=pressure_projection # same as above, but only calculated if mass_density is set (can't be done without rho)
         # Only used to get the pressure. We set it to a potential V that fulfills that the bulk force is f=-grad(V), requires of course that rot(f)=0
         self.bulk_force_potential=bulk_force_potential
 
@@ -99,6 +99,7 @@ class PotentialFlow(Equations):
     def before_assigning_equations_postorder(self, mesh: AnyMesh):
         if self.dynamic_viscosity is None or not isinstance(self.velo_projection,bool):
             return super().before_assigning_equations_postorder(mesh)
+        mesh=assert_spatial_mesh(mesh)
         # Pin all degrees in the bulk that are not part of an element connected to one of the desired interfaces
         dirs=["x","y","z"]
         vcomps=[self.velo_at_free_interface_name+"_"+dirs[i] for i in range(self.get_nodal_dimension())]
@@ -144,9 +145,9 @@ class PotentialFlowNormalVelocity(_PotentialFlowInterfaceEquations):
         self.add_weak(-self.unorm,phi_test)
 
 class PotentialFlowFarField(_PotentialFlowInterfaceEquations):
-    def __init__(self,phi:ExpressionNumOrNone=0,origin:ExpressionOrNum=vector(0)):
+    def __init__(self,phi:ExpressionOrNum=0,origin:ExpressionOrNum=vector(0)):
         super().__init__()
-        self.far_phi_value=phi        
+        self.far_phi_value=phi
         self.origin=origin
 
     def define_residuals(self):        
@@ -165,13 +166,18 @@ class _PotentialFlowFreeInterfaceBase(_PotentialFlowInterfaceEquations):
         self.curvature_sign=curvature_sign
         self.total_mass_transfer_rate=total_mass_transfer_rate
 
-    def get_potential_flow_on_opposite_side(self):
+    def get_potential_flow_on_opposite_side(self)->PotentialFlow | None:
         if self.get_opposite_parent_domain(raise_error_if_none=False) is not None:
-            oppot=self.get_opposite_parent_equations(PotentialFlow).get_equation_of_type(PotentialFlow,always_as_list=True)
+            oppot_eqs=self.get_opposite_parent_equations(PotentialFlow)
+            if oppot_eqs is None:
+                return None
+            oppot=oppot_eqs.get_equation_of_type(PotentialFlow,always_as_list=True)
             if len(oppot)>0:
                 if len(oppot)>1:
                     raise RuntimeError("Multiple PotentialFlow equations found in the opposite domain")
-                return oppot[0]
+                result=oppot[0]
+                assert isinstance(result,PotentialFlow)
+                return result
         else:
             return None
 
@@ -200,6 +206,8 @@ class _PotentialFlowFreeInterfaceBase(_PotentialFlowInterfaceEquations):
             self.add_weak(dot(n,grad(phiI)-grad(phiO)),ltest)
             if self.total_mass_transfer_rate:
                 pf=self.get_potential_flow()
+                if pf.rho is None or opposite.rho is None:
+                    raise RuntimeError("Requires mass_density to be set in both PotentialFlow domains for mass transfer")
                 self.add_weak(-self.total_mass_transfer_rate*(1/pf.rho-1/opposite.rho),ltest)
             self.add_weak(l,phiItest)
             self.add_weak(-l,phiOtest)
@@ -214,36 +222,44 @@ class _PotentialFlowFreeInterfaceBase(_PotentialFlowInterfaceEquations):
         n=var("normal")
         x=var("mesh")
         potflow=self.get_potential_flow()
+        if potflow.rho is None:
+            raise RuntimeError("Requires mass_density to be set in the PotentialFlow")
         u=grad(var(potflow.potential_name,domain=".."))
         j=self.total_mass_transfer_rate if self.total_mass_transfer_rate is not None else 0
         if vectorial:
             return mesh_velocity()-u+j/potflow.rho*n # (xdot-u)=0
         else:
             return dot(n,mesh_velocity()-u)+j/potflow.rho # n*(xdot-u)=0
-    
+
     def get_dynamic_boundary_condition(self):
         potflow=self.get_potential_flow()
+        if potflow.rho is None:
+            raise RuntimeError("Requires mass_density to be set in the PotentialFlow")
         phi=var(potflow.potential_name)
-        phiB=var(potflow.potential_name,domain="..")        
+        phiB=var(potflow.potential_name,domain="..")
         x=var("mesh")
         # Custom ALE here. Must be advected with bulk gradient
         #dtphi_moving=partial_t(phi,ALE=False)-dot(partial_t(x),grad(phiB))
         #inertia=dtphi_moving+1/2*dot(grad(phiB),grad(phiB)) # In total, it gives partial_t(phi,ALE=False)-dot(grad(phiB),grad(phiB))...
         inertia=partial_t(phi,ALE=False)-1/2*dot(grad(phiB),grad(phiB))
-        pL=self.get_laplace_pressure()    
+        pL=self.get_laplace_pressure()
         # TODO: Viscosity
         traction=-(-pL+self.additional_pressure)
         if potflow.dynamic_viscosity is not None:
             n=var("normal")
-            u=potflow.get_interface_velocity_for_viscous_at_interfaces(domain="..")            
-            traction-=2*potflow.dynamic_viscosity*dot(n,matproduct(sym(grad(u)),n))                    
+            u=potflow.get_interface_velocity_for_viscous_at_interfaces(domain="..")
+            assert u is not None
+            traction-=2*potflow.dynamic_viscosity*dot(n,matproduct(sym(grad(u)),n))
         opposite=self.get_potential_flow_on_opposite_side()
         if opposite:
+            if opposite.rho is None:
+                raise RuntimeError("Requires mass_density to be set in the opposite side's PotentialFlow")
             phiO=var(opposite.potential_name,domain="|..")
             inertia-=(partial_t(phiO,ALE=False)-1/2*dot(grad(phiO),grad(phiO)))*opposite.rho/potflow.rho
             if opposite.dynamic_viscosity is not None:
                 n=var("normal")
-                u=opposite.get_interface_velocity_for_viscous_at_interfaces(domain="|..")            
+                u=opposite.get_interface_velocity_for_viscous_at_interfaces(domain="|..")
+                assert u is not None
                 traction+=2*opposite.dynamic_viscosity*dot(n,matproduct(sym(grad(u)),n))*(opposite.rho/potflow.rho)
         return inertia-traction/potflow.rho
 
@@ -272,7 +288,8 @@ class PotentialFlowFreeInterface1(_PotentialFlowFreeInterfaceBase):
         self.add_weak(-dot(mesh_velocity(),n),phitest)
         return super().define_residuals()           
 
-    def before_assigning_equations_postorder(self, mesh: AnyMesh):        
+    def before_assigning_equations_postorder(self, mesh: AnyMesh):
+        assert isinstance(mesh,InterfaceMesh)
         self.pin_redundant_lagrange_multipliers(mesh,"_lagr_dynbc","mesh")
 
 
@@ -308,7 +325,8 @@ class PotentialFlowFreeInterface2(_PotentialFlowFreeInterfaceBase):
         return super().define_residuals()        
 
 
-    def before_assigning_equations_postorder(self, mesh: AnyMesh):        
+    def before_assigning_equations_postorder(self, mesh: AnyMesh):
+        assert isinstance(mesh,InterfaceMesh)
         potflow=self.get_potential_flow()
         self.pin_redundant_lagrange_multipliers(mesh,"_lagr_dynbc",potflow.potential_name)
         self.pin_redundant_lagrange_multipliers(mesh,"_lagr_kinbc","mesh")
@@ -348,7 +366,8 @@ class PotentialFlowFreeInterface3(_PotentialFlowFreeInterfaceBase):
         return super().define_residuals()        
 
 
-    def before_assigning_equations_postorder(self, mesh: AnyMesh):        
+    def before_assigning_equations_postorder(self, mesh: AnyMesh):
+        assert isinstance(mesh,InterfaceMesh)
         potflow=self.get_potential_flow()
         ndim=self.get_nodal_dimension()
         dirs=["x","y","z"]
@@ -401,7 +420,7 @@ class PotentialFlowFreeInterface(_PotentialFlowInterfaceEquations):
 
             if potflow.dynamic_viscosity is not None:
                 u=potflow.get_interface_velocity_for_viscous_at_interfaces(domain="..")
-                
+                assert u is not None
                 #print(self.expand_expression_for_debugging(grad(u),collect_units=False))
                 #exit()
                 #self.add_local_function("strain1",-2*potflow.dynamic_viscosity*dot(n,matproduct(sym(grad(u)),n)))
@@ -439,6 +458,7 @@ class PotentialFlowFreeInterface(_PotentialFlowInterfaceEquations):
 
             if potflow.dynamic_viscosity is not None:
                 u=potflow.get_interface_velocity_for_viscous_at_interfaces(domain="..")
+                assert u is not None
                 strain=-2*potflow.dynamic_viscosity*dot(n,matproduct(sym(grad(u)),n))
                 dyn_bc+=strain/potflow.rho
 
@@ -450,7 +470,7 @@ class PotentialFlowFreeInterface(_PotentialFlowInterfaceEquations):
         
 
     def before_assigning_equations_postorder(self, mesh: AnyMesh):
-        
+        assert isinstance(mesh,InterfaceMesh)
         potflow=self.get_potential_flow()
         if self.new_version:
             self.pin_redundant_lagrange_multipliers(mesh,"_lagr_kinbc",potflow.potential_name)

@@ -297,22 +297,24 @@ class EnforcedBC(InterfaceEquations):
     
     def _get_forced_zero_dofs_for_eigenproblem(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver", angular_mode:int | None,normal_k:float | None)->set[str | int]:
         if (not self.set_zero_on_normal_mode_eigensolve) or (angular_mode is None and normal_k is None):
-            return cast(set[str],set())
+            return cast("set[str | int]",set())
         else:
             if angular_mode is not None and normal_k is not None:
                 raise RuntimeError("Cannot have both angular and normal mode set")
             if angular_mode is not None:
-                mode=int(angular_mode)
+                mode:int | float=int(angular_mode)
             elif normal_k is not None:
                 mode=normal_k
+            else:
+                raise RuntimeError("Neither angular_mode nor normal_k is set")
             fullpath = eqtree.get_full_path().lstrip("/")
             if mode == 0:
-                return cast(set[str],set())
+                return cast("set[str | int]",set())
             else:
                 for_my_m = [self.get_lagrange_multiplier_name(k) for k in self.constraints.keys()]
             lst=[fullpath + "/" + k for k in for_my_m]
-            res:set[str] = set(lst) 
-            return res    
+            res:set[str | int] = set(lst)
+            return res
 
 class DirichletBC(BaseEquations):
     """
@@ -384,8 +386,8 @@ class InactiveDirichletBC(DirichletBC):
         problem.solve() # solve with active DirichletBC
     
     """
-    def __init__(self, **kwargs: ExpressionOrNum):
-        super().__init__(**kwargs)
+    def __init__(self, *, prefer_weak_for_DG: bool = True, **kwargs: ExpressionOrNum):
+        super().__init__(prefer_weak_for_DG=prefer_weak_for_DG, **kwargs)
         self._init_setup_for_mesh:set[AnyMesh]=set()
     
     def before_assigning_equations_preorder(self, mesh: "AnyMesh"):
@@ -437,7 +439,9 @@ class AxisymmetryBC(InterfaceEquations):
             from ..generic.codegen import EquationTree
             # Now find the reversed connections. We get e.g. domain/axis/interface, but we must add it to domain/interface/axis
             revconns=list()
-            trunk=eqtree.get_parent().get_full_path().lstrip("/")
+            eqtree_parent=eqtree.get_parent()
+            assert eqtree_parent is not None
+            trunk=eqtree_parent.get_full_path().lstrip("/")
             myname=eqtree.get_my_path_name()
             for conn in interinter:
                 rest=conn[len(eqtree.get_full_path().lstrip("/")):].lstrip("/")
@@ -445,8 +449,11 @@ class AxisymmetryBC(InterfaceEquations):
                 revconns.append(path)
             revconns.sort(key=lambda x: x.count("/")) # Sort by number of slashes to get it in good order
             root=eqtree
-            while root.get_parent() is not None:
-                root=root.get_parent()
+            while True:
+                root_parent=root.get_parent()
+                if root_parent is None:
+                    break
+                root=root_parent
             for rc in revconns:
                 splt=rc.split("/")
                 dom=root
@@ -458,20 +465,24 @@ class AxisymmetryBC(InterfaceEquations):
                         is_present=False
                         break
                 if not is_present:
-                    continue # Nothing to be done. There is no interface added            
+                    continue # Nothing to be done. There is no interface added
                 if splt[-1] in dom._children:
                     iface=dom.get_child(splt[-1])
-                    if iface.get_equations() is not None:                    
+                    if iface.get_equations() is not None:
                         axieq_list=iface.get_equations().get_equation_of_type(AxisymmetryBC,always_as_list=True)
                         if len(axieq_list)>0:
                             continue # Already added
-                        else:            
-                            oldeqs=dom._children[splt[-1]]._equations
-                            dom._children[splt[-1]]._equations+=AxisymmetryBC(verbose=self.verbose,recurse=self.recurse)
-                            dom._children[splt[-1]]._equations._problem=oldeqs._problem
+                        else:
+                            assert iface._equations is not None
+                            oldeqs=iface._equations
+                            iface._equations=iface._equations+AxisymmetryBC(verbose=self.verbose,recurse=self.recurse)
+                            iface._equations._problem=oldeqs._problem
                 else:
-                    dom._children[splt[-1]]=EquationTree(AxisymmetryBC(verbose=self.verbose,recurse=self.recurse),dom)
-                    dom._children[splt[-1]]._equations._problem=dom._equations._problem
+                    new_child=EquationTree(AxisymmetryBC(verbose=self.verbose,recurse=self.recurse),dom)
+                    dom._children[splt[-1]]=new_child
+                    assert new_child._equations is not None
+                    assert dom._equations is not None
+                    new_child._equations._problem=dom._equations._problem
                     
             
         return super()._fill_interinter_connections(eqtree, interinter)
@@ -520,24 +531,22 @@ class AxisymmetryBC(InterfaceEquations):
             print("AxisymmetryBC: Deactivating strong zero DirichletBCs at",self.get_current_code_generator().get_full_name(),"for",deactivated_bcs)
         return must_reapply    
                         
-    def _get_forced_zero_dofs_for_eigenproblem(self, eqtree, eigensolver, angular_mode, normal_k):
+    def _get_forced_zero_dofs_for_eigenproblem(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver", angular_mode:int | None,normal_k:float | None)->set[str | int]:
         if angular_mode is None:
             return set()
-        
+
         angular_mode=int(angular_mode)
-            
-        info=None
+
+        # Note: angular_mode==0, abs(angular_mode)==1 and abs(angular_mode)>1 are exhaustive for any int,
+        # so info is always assigned below (written as if/elif/else so that this is also clear to the type checker).
         if angular_mode==0:
-            info=self.get_azimuthal_r0_info()[0]            
+            info=self.get_azimuthal_r0_info()[0]
         elif abs(angular_mode)==1:
             info=self.get_azimuthal_r0_info()[1]
-        elif abs(angular_mode)>1:
-            info=self.get_azimuthal_r0_info()[2]
-        if info is None:
-            res=set() 
         else:
-            res=set([eqtree.get_full_path().lstrip("/")+"/"+m for m in info])
-        if len(info)>0 and self.verbose:            
+            info=self.get_azimuthal_r0_info()[2]
+        res:set[str | int]=set([eqtree.get_full_path().lstrip("/")+"/"+m for m in info])
+        if len(info)>0 and self.verbose:
             print("AxisymmetryBC (mode m="+str(angular_mode)+"): Imposed zero by matrix manipulation at",self.get_current_code_generator().get_full_name(),"for",info)
         return res
             
@@ -551,8 +560,9 @@ class AxisymmetryBCForScalarD0Field(InterfaceEquations):
         self.fields=[f for f in fields]
 
     def _get_forced_zero_dofs_for_eigenproblem(self, eqtree: "EquationTree", eigensolver: "GenericEigenSolver", angular_mode: int | None,normal_k:float | None) -> set[str | int]:
-        eqs=set()
+        eqs:set[str | int]=set()
         if angular_mode!=0:
+            assert eqtree._mesh is not None
             for ie in eqtree._mesh.elements():
                 be=ie.get_bulk_element()
                 for f in self.fields:
@@ -643,7 +653,7 @@ class PeriodicBC(InterfaceEquations):
         if pmesh.refinement_possible():
             myind=bnames.index(my_name)
             oppind=bnames.index(self.other_interface)
-            oppnodes_to_oppelem:dict[_pyoomph.Node,_pyoomph.Element]=dict()
+            oppnodes_to_oppelem:dict[tuple[_pyoomph.Node,...],tuple[_pyoomph.OomphGeneralisedElement,int]]=dict()
             for oppelem,direct in pmesh.boundary_elements(self.other_interface,with_directions=True):
                 oppnodes_to_oppelem[tuple(oppelem.boundary_nodes(oppind))]=(oppelem,direct)
             

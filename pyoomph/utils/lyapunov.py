@@ -2,15 +2,9 @@ from __future__ import annotations
 from ..generic.problem import GenericProblemHooks
 import numpy
 from scipy.sparse import csr_matrix
-from ..expressions import ExpressionNumOrNone, ExpressionOrNum
-from ..typings import NPFloatArray
-from collections import deque
-
-from ..generic.problem import GenericProblemHooks
-import numpy
-from scipy.sparse import csr_matrix
 from ..expressions import ExpressionNumOrNone
 from ..typings import NPFloatArray
+from collections import deque
 from ..generic.mpi import get_mpi_rank
 
 class LyapunovExponentCalculator(GenericProblemHooks):
@@ -28,7 +22,7 @@ class LyapunovExponentCalculator(GenericProblemHooks):
         relative_to_output: Whether to save the output file relative to the problem's output directory. Defaults to True.
         store_as_eigenvectors: Whether to store the perturbation vectors as eigenvectors. Defaults to False.
     """
-    def __init__(self,k: int = 1,waiting_time:ExpressionOrNum=None, prerelaxation_time:ExpressionOrNum=None,use_crank_nicholson_integration:bool=False, filename="lyapunov.txt",relative_to_output=True,store_as_eigenvectors:bool=False,gram_schmidt_dt:ExpressionNumOrNone=None):
+    def __init__(self,k: int = 1,waiting_time:ExpressionNumOrNone=None, prerelaxation_time:ExpressionNumOrNone=None,use_crank_nicholson_integration:bool=False, filename="lyapunov.txt",relative_to_output=True,store_as_eigenvectors:bool=False,gram_schmidt_dt:ExpressionNumOrNone=None):
         super().__init__()
         self.k = k
         if self.k <= 0:
@@ -53,7 +47,7 @@ class LyapunovExponentCalculator(GenericProblemHooks):
         problem=self.get_problem()
         if problem.is_distributed():
             raise RuntimeError("Lyapunov exponent calculation is not supported for distributed problems")
-        T0=problem.get_current_time(as_float=True)
+        T0=problem.get_current_time(dimensional=True,as_float=True)
         TS=problem.get_scaling("temporal")
         if self.waiting_time is not None:
             TW=float(self.waiting_time/TS)
@@ -74,7 +68,7 @@ class LyapunovExponentCalculator(GenericProblemHooks):
 
     def actions_after_newton_solve(self):
         problem = self.get_problem()
-        t = problem.get_current_time(as_float=True)
+        t = problem.get_current_time(dimensional=True,as_float=True)
 
         # Not started yet
         if t < self._Tstart1:
@@ -168,15 +162,21 @@ class LyapunovExponentCalculator(GenericProblemHooks):
             if Tdiff > 0:
                 lyap_estimate=self.Lambdas/Tdiff
                 if get_mpi_rank()==0:
+                    # self._outputfile is guaranteed to be opened above (on rank 0) either now or in a previous call
+                    assert self._outputfile is not None
                     self._outputfile.write(f"{t}\t" + "\t".join(map(str, lyap_estimate)) + "\n")
                     self._outputfile.flush()
 
                 if self.store_as_eigenvectors:
-                    problem._last_eigenvalues = lyap_estimate.copy()
+                    problem._last_eigenvalues = numpy.array(lyap_estimate, dtype=numpy.complex128)
                     problem._last_eigenvalues_m = numpy.zeros(len(lyap_estimate), dtype="int")
-                    problem._last_eigenvectors = [self.B[:, i].copy() for i in range(self.k)]
-                    for i, ev in enumerate(problem._last_eigenvectors):
-                        problem._last_eigenvectors[i] = ev / numpy.linalg.norm(ev)
+                    # Problem._last_eigenvectors is declared as a 2d complex ndarray (rows=eigenvectors), not a list:
+                    # other code (e.g. Problem.calculate_eigenvalues, periodic_driving_response.py) indexes it as
+                    # _last_eigenvectors[i,:] or _last_eigenvectors[0,dofidx], which fails with a TypeError on a plain list.
+                    eigenvecs = numpy.array([self.B[:, i].copy() for i in range(self.k)], dtype=numpy.complex128)
+                    for i in range(eigenvecs.shape[0]):
+                        eigenvecs[i] = eigenvecs[i] / numpy.linalg.norm(eigenvecs[i])
+                    problem._last_eigenvectors = eigenvecs
                     problem.invalidate_cached_mesh_data(only_eigens=True)
                     
                     
@@ -204,7 +204,7 @@ class LyapunovExponentCalculatorBDF2(GenericProblemHooks):
         self.store_as_eigenvectors=store_as_eigenvectors
         
         self.perturbation:list[NPFloatArray]=[] # Storing the last perturbation
-        self.old_perturbation:list[NPFloatArray] | None=None # Storing the perturbation one step before
+        self.old_perturbation:list[NPFloatArray | None] | None=None # Storing the perturbation one step before (per-index None until it has been computed once)
         self.outputfile=None # Output file
         self.average_time=average_time
         self.ringbuffer=deque()
@@ -214,11 +214,12 @@ class LyapunovExponentCalculatorBDF2(GenericProblemHooks):
         
     def renormalize(self,i:int):
         if self.old_perturbation is None:
-            self.old_perturbation=[None]*self.N
+            self.old_perturbation=[None for _ in range(self.N)]
+        old_pert=self.old_perturbation
         nrm=numpy.linalg.norm(self.perturbation[i])
-        if self.old_perturbation[i] is not None:
+        if old_pert[i] is not None:
             # Scale the old perturbation. Note: We divide by the norm of self.perturbation to keep the ratio between both
-            self.old_perturbation[i]=self.old_perturbation[i]/nrm
+            old_pert[i]=old_pert[i]/nrm #type:ignore # narrowed by the enclosing "is not None" check; pyright can't track subscripts by a loop variable
         # And renormalize the current perturbation to start_perturbation_norm
         self.perturbation[i]=self.perturbation[i]/nrm
     
@@ -228,12 +229,13 @@ class LyapunovExponentCalculatorBDF2(GenericProblemHooks):
         if len(self.perturbation)!=self.N:
             if self.N>problem.ndof():
                 raise ValueError("number of Lyapunov exponents N must be less or equal to the number of degrees of freedom in the problem")
-            self.perturbation=[[] for i in range(self.N)]
+            # Placeholder vectors of size 0 (mismatching problem.ndof()) so the size check below triggers proper (re-)initialization
+            self.perturbation=[numpy.zeros(0) for i in range(self.N)]
         if len(self.perturbation[0])!=problem.ndof():
             for i in range(self.N):
                 self.perturbation[i]=(numpy.random.rand(problem.ndof())*2-1)
                 if self.old_perturbation is None:
-                    self.old_perturbation=[None]*self.N
+                    self.old_perturbation=[None for _ in range(self.N)]
                 self.old_perturbation[i]=None
                 self.renormalize(i) # and scale it to the length
         
@@ -244,7 +246,7 @@ class LyapunovExponentCalculatorBDF2(GenericProblemHooks):
             else:
                 self.outputfile=open(self.filename,"w")
         
-        t=problem.get_current_time(as_float=True)
+        t=problem.get_current_time(dimensional=True,as_float=True)
         # History time stepping weights
         if problem.timestepper.get_num_unsteady_steps_done()==0: # The first step is degraded to BDF1 by default
             w1=problem.timestepper.weightBDF1(1,1)
@@ -271,21 +273,26 @@ class LyapunovExponentCalculatorBDF2(GenericProblemHooks):
         else:
             n, J_nzz, J_val, J_rs, J_ci = problem.ndof(), len(matJ.data), matJ.data, matJ.indptr, matJ.indices
         
+        # self.old_perturbation is guaranteed to be set by the initialization block above, either just now or in a previous call
+        assert self.old_perturbation is not None
+        old_pert=self.old_perturbation
         growths=[]
         for i in range(self.N):
             pert1=self.perturbation[i].copy() # First history perturbation
-            pert2=(self.old_perturbation[i] if (self.old_perturbation[i] is not None) else self.perturbation[i]).copy()
+            pert2=(old_pert[i] if (old_pert[i] is not None) else self.perturbation[i]).copy() #type:ignore # pyright cannot narrow subscripts by a loop variable
             # Assemble the RHS
             rhs=-matM@(w1*pert1+w2*pert2)
             # And (re)solve the linear system for the new perturbation
-            problem.get_la_solver().solve_serial(2,n,J_nzz,1,J_val,J_rs,J_ci,rhs,0,1)
+            problem.get_la_solver().solve_serial(2,n,J_nzz,1,J_val,J_rs,J_ci,rhs,0,1) #type:ignore
             # Update the perturbation (rhs stores the solution after solving)
-            self.old_perturbation[i]=self.perturbation[i]
+            old_pert[i]=self.perturbation[i]
             self.perturbation[i]=rhs.copy()
             # Check whether we have to renormalize
 
             # Calculate the growth, update the ring buffer and write the current estimate to the file
-            growths.append(numpy.log(numpy.linalg.norm(self.perturbation[i])/numpy.linalg.norm(self.old_perturbation[i])))
+            # old_pert[i] was just set to self.perturbation[i] (a NPFloatArray) above; pyright cannot narrow
+            # subscript expressions indexed by a loop variable, hence the non-None guarantee is asserted here
+            growths.append(numpy.log(numpy.linalg.norm(self.perturbation[i])/numpy.linalg.norm(old_pert[i]))) #type:ignore
 
 
             ss=numpy.linalg.norm(self.perturbation[i])
@@ -311,15 +318,21 @@ class LyapunovExponentCalculatorBDF2(GenericProblemHooks):
                 while self.ringbuffer[0][0]<t-self.average_time and len(self.ringbuffer)>1:
                     self.ringbuffer.popleft()
             if get_mpi_rank()==0:
+                # self.outputfile is guaranteed to be opened above (on rank 0) either now or in a previous call
+                assert self.outputfile is not None
                 self.outputfile.write(str(t)+"\t"+"\t".join(map(str,ljap_estimate))+"\n")
                 self.outputfile.flush()
 
             if self.store_as_eigenvectors:
-                problem._last_eigenvalues=numpy.array(ljap_estimate)
+                problem._last_eigenvalues=numpy.array(ljap_estimate,dtype=numpy.complex128)
                 problem._last_eigenvalues_m=numpy.zeros(len(ljap_estimate),dtype="int")
-                problem._last_eigenvectors=self.perturbation.copy()
-                for i,ev in enumerate(problem._last_eigenvectors):
-                    problem._last_eigenvectors[i]=ev/numpy.linalg.norm(ev)
+                # Problem._last_eigenvectors is declared as a 2d complex ndarray (rows=eigenvectors), not a list:
+                # other code (e.g. Problem.calculate_eigenvalues, periodic_driving_response.py) indexes it as
+                # _last_eigenvectors[i,:] or _last_eigenvectors[0,dofidx], which fails with a TypeError on a plain list.
+                eigenvecs=numpy.array([p.copy() for p in self.perturbation],dtype=numpy.complex128)
+                for i in range(eigenvecs.shape[0]):
+                    eigenvecs[i]=eigenvecs[i]/numpy.linalg.norm(eigenvecs[i])
+                problem._last_eigenvectors=eigenvecs
 
     
     def actions_after_initialise(self):

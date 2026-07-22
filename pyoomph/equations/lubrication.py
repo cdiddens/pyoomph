@@ -69,7 +69,7 @@ class LubricationEquations(Equations):
       self._use_exact_pressure=use_exact_pressure
       self.height_source=height_source
       self.dt_h_factor=dt_h_factor
-      self.scheme=scheme
+      self.scheme:TimeSteppingScheme=scheme
       self.pfactor=pfactor
       self.use_subexpressions=use_subexpressions
 
@@ -85,7 +85,7 @@ class LubricationEquations(Equations):
 
       
       if isinstance(disjoining_pressure, dict):
-         self.disjoining_pressure = self.build_disjoining_pressure(**disjoining_pressure)
+         self.disjoining_pressure = self.build_disjoining_pressure(**disjoining_pressure) #type:ignore
       else:
          self.disjoining_pressure = disjoining_pressure
 
@@ -198,6 +198,7 @@ class LubricationBoundaryByLagrange(InterfaceEquations):
    required_parent_type = LubricationEquations
    def define_fields(self):
       lubric=self.get_parent_domain().get_equations().get_equation_of_type(LubricationEquations)
+      assert isinstance(lubric,LubricationEquations)
       if lubric.swap_test_functions:
          scal=1/(test_scale_factor("height")*scale_factor("spatial"))
       else:
@@ -206,6 +207,7 @@ class LubricationBoundaryByLagrange(InterfaceEquations):
 
    def define_residuals(self):
       lubric=self.get_parent_domain().get_equations().get_equation_of_type(LubricationEquations)
+      assert isinstance(lubric,LubricationEquations)
       p,ptest=var_and_test("pressure",domain="..")
       h,htest=var_and_test("height",domain="..")
       if lubric.swap_test_functions:
@@ -259,7 +261,7 @@ class LubricationVelocityAtH(Equations):
       super().__init__()
       self.at_height=at_height
       self.name=name
-      self.space=space
+      self.space:FiniteElementSpaceEnum | None=space
 
    def define_fields(self):
       if self.space is not None:
@@ -267,6 +269,7 @@ class LubricationVelocityAtH(Equations):
 
    def define_residuals(self):
       lubric=self.get_combined_equations().get_equation_of_type(LubricationEquations)
+      assert isinstance(lubric,LubricationEquations)
       mu=lubric.mu
       h,p=var(["height","pressure"])
       sigma=lubric.sigma
@@ -303,7 +306,7 @@ class LubricationBulkField(Equations):
       self.diffusion=diffusion
       self.sigma=sigma
       self.height_multiplied=height_multiplied
-      self.scheme=scheme
+      self.scheme:TimeSteppingScheme=scheme
 
    def define_fields(self):
       if self.height_multiplied:

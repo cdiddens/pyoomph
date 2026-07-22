@@ -34,14 +34,14 @@ from __future__ import annotations
 import vtk
 import typing
 import numpy
-from vtk.util.numpy_support import vtk_to_numpy,numpy_to_vtk
+from vtk.util.numpy_support import vtk_to_numpy,numpy_to_vtk #type:ignore
 
 from vtkmodules.vtkCommonDataModel import vtkDataSet
 from vtkmodules.util.vtkAlgorithm import VTKPythonAlgorithmBase
 from vtkmodules.numpy_interface import dataset_adapter as dsa
 
 # new module for ParaView-specific decorators.
-from paraview.util.vtkAlgorithm import smproxy, smproperty, smdomain
+from paraview.util.vtkAlgorithm import smproxy, smproperty, smdomain #type:ignore
 
 
 @smproxy.filter(label="Pyoomph Azimuthal Extrusion")
@@ -94,8 +94,9 @@ class PyoomphAzimuthalExtrusion(VTKPythonAlgorithmBase):
 
     def RequestData(self, request, inInfo, outInfo):
         input0 = dsa.WrapDataObject(vtkDataSet.GetData(inInfo[0]))
+        assert input0 is not None
 
-        to_poly=vtk.vtkDataSetSurfaceFilter()        
+        to_poly=vtk.vtkDataSetSurfaceFilter()
         to_poly.SetInputDataObject(0,input0.VTKObject)
         to_poly.Update()
 
@@ -110,7 +111,7 @@ class PyoomphAzimuthalExtrusion(VTKPythonAlgorithmBase):
         extr=extrusion.GetOutput()
         assert isinstance(extr,vtk.vtkPolyData)
         pd=extr.GetPointData()
-        arr_to_index:dict[typing.AnyStr,int]={}
+        arr_to_index:dict[str,int]={}
         for i in range(pd.GetNumberOfArrays()):
             arr_to_index[pd.GetArrayName(i)]=i
 

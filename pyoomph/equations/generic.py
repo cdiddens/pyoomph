@@ -35,13 +35,13 @@ from ..expressions.generic import ExpressionOrNum,ExpressionNumOrNone,FiniteElem
 #Connects one or multiple fields at both sides of the interfaces via Lagrange multipliers
 #i.e. it ensures the same Neumann flux on both sides, whereas the magnitude of this flux is given by the Lagrange multiplier
 #which is automatically chosen that way that the condition <inner>=<outer> is satisfied.
-from ..meshes.mesh import MeshFromTemplateBase,Element,InterfaceMesh
+from ..meshes.mesh import MeshFromTemplateBase,Element,InterfaceMesh,MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d
 
 from ..typings import *
 if TYPE_CHECKING:
     from ..meshes.remesher import RemesherBase,RemesherPointEntry
     from ..expressions.coordsys import BaseCoordinateSystem
-    from ..meshes import AnyMesh
+    from ..meshes import AnyMesh,AnySpatialMesh
     from ..generic.problem import Problem,EquationTree
     
 import warnings
@@ -55,7 +55,7 @@ def get_interface_field_connection_space(inside_space:FiniteElementSpaceEnum | L
         return outside_space    
     if outside_space[0]!=inside_space[0]:
         raise RuntimeError("TODO: Think about what space is lower/higher ") #TODO: Is e.g. D2 lower or higher than C2TB? hard to tell
-    space_order=["D2TB","C2TB","D2","C2","D1TB","C1TB","D1","C1"]
+    space_order:list[FiniteElementSpaceEnum]=["D2TB","C2TB","D2","C2","D1TB","C1TB","D1","C1"]
     for sp in space_order:
         if inside_space==sp:
             if outside_space==sp or use_highest_space:
@@ -141,14 +141,19 @@ class ConnectFieldsAtInterface(InterfaceEquations):
             self.add_residual(-l*outside_test*dx)
            
     def before_assigning_equations_postorder(self, mesh: "AnyMesh") -> None:
+        # ConnectFieldsAtInterface is an InterfaceEquations, so whenever this is invoked
+        # (i.e. the equations were actually assigned to some mesh), that mesh is the
+        # corresponding InterfaceMesh. Statically, before_assigning_equations_postorder is
+        # declared generically on AnyMesh since it is shared by domain and interface equations.
+        assert isinstance(mesh,InterfaceMesh)
         for finner,fouter in self.fields.items():
             lname=self.lagr_mult_prefix+finner+"_"+fouter
             self.pin_redundant_lagrange_multipliers(mesh,lname,finner,fouter)
 
         super().before_assigning_equations_postorder(mesh)
-        
+
     def with_removed_overconstraining(self,*corners:str):
-        return self+sum([ConnectFieldsAtInterfaceRemoveOverconstraining(self.fields)@corner for corner in corners])
+        return self+sum([ConnectFieldsAtInterfaceRemoveOverconstraining(self.fields)@corner for corner in corners]) #type:ignore
 
 
 class ConnectFieldsAtInterfaceRemoveOverconstraining(InterfaceEquations):
@@ -247,7 +252,7 @@ class RefineToLevel(Equations):
     """
     def __init__(self, level:Literal["max"] | int="max"):
         super(RefineToLevel, self).__init__()
-        self.level = level
+        self.level:Literal["max"] | int = level
 
     def calculate_error_overrides(self):
         mesh=self.get_current_code_generator()._mesh 
@@ -270,7 +275,11 @@ class RefineToLevel(Equations):
     def after_compilation(self,codegen):
         mesh=codegen._mesh
         assert mesh is not None
-        if not isinstance(mesh,InterfaceMesh):
+        # Only MeshFromTemplate1d/2d/3d actually carry _initial_uniform_refinement_level.
+        # The previous "not isinstance(mesh,InterfaceMesh)" check also let ODEStorageMesh
+        # through, which does not have this attribute at all and would raise an
+        # AttributeError at runtime if RefineToLevel were ever attached to an ODE domain.
+        if isinstance(mesh,MeshFromTemplateBase):
             problem=mesh.get_problem()
             mesh._initial_uniform_refinement_level=max(mesh._initial_uniform_refinement_level,self.level if self.level!="max" else (problem.initial_adaption_steps if problem.initial_adaption_steps is not None else problem.max_refinement_level) )
         
@@ -453,12 +462,16 @@ class RemeshWhen(Equations):
                             need_remesh = True
                             break
 
-        if self.on_invalid_triangulation and not need_remesh:
+        # get_cached_mesh_data only accepts a "real" spatial mesh (not an ODEStorageMesh).
+        # If mesh isn't a MeshFromTemplateBase (i.e. RemeshWhen ended up on a domain that
+        # cannot be remeshed at all), skip straight to the check below, which raises a
+        # clear RuntimeError instead of failing deep inside get_cached_mesh_data.
+        if self.on_invalid_triangulation and not need_remesh and isinstance(mesh,MeshFromTemplateBase):
             from matplotlib import tri
             mshcache=mesh.get_problem().get_cached_mesh_data(mesh,nondimensional=False,tesselate_tri=True)
             coordinates=mshcache.get_coordinates()
             try:
-                triang = tri.Triangulation(coordinates[0], coordinates[1], mshcache.elem_indices)            
+                triang = tri.Triangulation(coordinates[0], coordinates[1], mshcache.elem_indices)
                 tf=triang.get_trifinder()
             except:
                 need_remesh=True
@@ -504,9 +517,7 @@ class ProjectExpression(Equations):
     def __init__(self,scale:ExpressionOrNum | str=1,space:FiniteElementSpaceEnum="C2",field_type:Literal["scalar","vector"]="scalar",coordinate_system:"BaseCoordinateSystem | None"=None, **projs:ExpressionOrNum):
         super(ProjectExpression, self).__init__()
         self.space:FiniteElementSpaceEnum=space
-        self.scale=scale
-        if isinstance(scale,str):
-            self.scale=scale_factor(scale)
+        self.scale:ExpressionOrNum=scale_factor(scale) if isinstance(scale,str) else scale
         self.field_type=field_type
         self.projs=projs.copy()
         self.coordinate_system=coordinate_system
@@ -694,7 +705,7 @@ class BackupHistoryExpressions(Equations):
     def __init__(self,*,space:FiniteElementSpaceEnum="C2",local_expression_format="_history_expr_{name}",**exprs:Expression):
         super().__init__()
         self.history_fields=exprs
-        self.space=space
+        self.space:FiniteElementSpaceEnum=space
         self.update=True
         self.local_expression_format=local_expression_format
         
@@ -778,9 +789,17 @@ class IntegralObservables(Equations):
         for k,v in self.integral_observables.items():
             #import pyoomph._pyoomph_core as _pyoomph
             #_pyoomph.set_verbosity_flag(1)
+            # self.integral_observables was filtered (in __init__) to only contain the
+            # non-callable entries of integral_observables, but pyright cannot track that
+            # invariant through the dict comprehension, so it still sees the full
+            # ExpressionOrNum | Callable[...,ExpressionOrNum] union here.
+            assert isinstance(v,(int,float,Expression))
             self.add_integral_function(k, v * dx)
             #_pyoomph.set_verbosity_flag(0)
         for k,v in self.dependent_funcs.items():
+            # Symmetric to the above: self.dependent_funcs was filtered to only the callable
+            # entries.
+            assert callable(v)
             self.add_dependent_integral_function(k,v)
 
     def _is_ode(self):
@@ -797,24 +816,28 @@ class ExtremumObservables(Equations):
         *direct_vars: Names of variables to monitor, e.g. ``"u"``.
         **named_extrema: Expressions to monitor, keyed by the name under which the extremum is reported, e.g. ``u_sqr=var("u")**2``.
     """
-    def __init__(self,*direct_vars:str,**named_extrema):
+    def __init__(self,*direct_vars:str,**named_extrema:ExpressionOrNum):
         super().__init__()
         self.named_extrema=named_extrema.copy()
         for varname in direct_vars:
             if not isinstance(varname,str):
                 raise ValueError("ExtremumObservables must be either constructed with strings as positional args or expressions as keyword args, i.e. e.g. ExtremumObservables('u') to monitor the extrema of var('u') or ExtremumObservables(u_sqr=var('u')**2) to monitor the extrema of u**2")
             self.named_extrema[varname]=var(varname)
-        
 
-    def add_extremum_function(self,name,expr):
+
+    def add_extremum_function(self,name:str,expr:"ExpressionOrNum | Callable[[], ExpressionOrNum]"):
         from .. import _pyoomph_core as _pyoomph
         master = self._get_combined_element()
         cg = master._assert_codegen()
-        if not (isinstance(expr,int) or isinstance(expr,float) or isinstance(expr,_pyoomph.Expression)) and  callable(expr):
+        # Equivalent to the original "not(isinstance(expr,int) or isinstance(expr,float) or
+        # isinstance(expr,Expression)) and callable(expr)": int/float instances are never
+        # callable, so the int/float isinstance checks were redundant once callable(expr) is
+        # required. Written this way (callable-check first), pyright can narrow expr's type.
+        if callable(expr) and not isinstance(expr,_pyoomph.Expression):
             expr=expr()
         if isinstance(expr,(int,float)): # Does not really make sense here
             expr=_pyoomph.Expression(expr)
-        cg._register_extremum_function(name, expr)        
+        cg._register_extremum_function(name, expr)
         
     def define_residuals(self):
         for name,expr in self.named_extrema.items():
@@ -828,10 +851,11 @@ class ODEObservables(ODEEquations):
         ``HarmonicOscillator(...)+ODEObservables(Etot=1/2*partial_t(y)**2+1/2*omega**2*y**2)``
         
     Args:
-        **ode_observables: Observables to be added, identified by the name.
+        **ode_observables: Observables to be added, identified by the name. Can also be a callable
+            taking no arguments and returning an ExpressionOrNum, evaluated lazily as a dependent observable.
     """
 
-    def __init__(self, **ode_observables:ExpressionOrNum):
+    def __init__(self, **ode_observables:ExpressionOrNum | Callable[..., ExpressionOrNum]):
         super(ODEObservables, self).__init__()
         is_callable=lambda v: callable(v) and not isinstance(v,Expression)
         self.ode_observables = {k:v for k,v in ode_observables.items() if not is_callable(v)}
@@ -840,8 +864,12 @@ class ODEObservables(ODEEquations):
     def define_additional_functions(self):
         dx = nondim("dx")
         for k,v in self.ode_observables.items():
+            # self.ode_observables was filtered (above) to only the non-callable entries,
+            # but pyright cannot track that invariant through the dict comprehension.
+            assert isinstance(v,(int,float,Expression))
             self.add_integral_function(k, v * dx)
         for k,v in self.dependent_funcs.items():
+            assert callable(v)
             self.add_dependent_integral_function(k,v)
 
 
@@ -887,13 +915,16 @@ class ElementSpace(Equations):
     """
     def __init__(self,space:FiniteElementSpaceEnum):
         super(ElementSpace, self).__init__()
-        self.space=space
+        self.space:FiniteElementSpaceEnum=space
 
-    def define_fields(self):        
+    def define_fields(self):
         cg=self.get_current_code_generator()
         if self.space not in {"C2TB","C2","C1TB","C1"}:
             raise ValueError("Can only set the coordinate space to either C2TB, C2, C1TB or C1")
-        cg._coordinate_space = find_dominant_element_space(cg._coordinate_space,self.space)
+        # cg._coordinate_space (a plain str C++ property) can legitimately be "" (not yet
+        # set) here; find_dominant_element_space() explicitly handles that empty-string
+        # sentinel. See the identical cast in generic/codegen.py's _internal_define_scalar_field.
+        cg._coordinate_space = find_dominant_element_space(cast("FiniteElementSpaceEnum",cg._coordinate_space),self.space)
 
 
 
@@ -911,9 +942,7 @@ class _AverageOrIntegralConstraintBase(Equations):
         self.dimensional_dx=False
         self.only_for_stationary_solve=only_for_stationary_solve
         self.set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve
-        self.scaling_factor=scaling_factor
-        if isinstance(self.scaling_factor,str):
-            self.scaling_factor=scale_factor(self.scaling_factor)
+        self.scaling_factor:ExpressionNumOrNone=scale_factor(scaling_factor) if isinstance(scaling_factor,str) else scaling_factor
 
     def get_global_dof_storage_name(self, pathname: str | None = None):
         if self.ode_storage_domain is None:
@@ -935,14 +964,19 @@ class _AverageOrIntegralConstraintBase(Equations):
                 if elem_dim is None:
                     elem_dim=self.get_element_dimension()
                 
-                coordsys=eqtree._codegen.get_coordinate_system()
-                #coordsys=self.get_combined_equations().get_coordinate_system()                
+                codegen=eqtree._codegen
+                assert codegen is not None
+                coordsys=codegen.get_coordinate_system()
+                #coordsys=self.get_combined_equations().get_coordinate_system()
                 testscale/=(0+coordsys.volumetric_scaling(problem.get_scaling("spatial"),elem_dim))
-                        
-            
+
+
             new_eq=GlobalLagrangeMultiplier(only_for_stationary_solve=self.only_for_stationary_solve,set_zero_on_normal_mode_eigensolve=self.set_zero_on_normal_mode_eigensolve, **{field:self.get_global_residual_contribution(field)/scale_correction})+Scaling(**{field:1})+TestScaling(**{field:testscale})
             add_eqs=new_eq if add_eqs is None else add_eqs+new_eq
-            
+
+        # self.constraints is non-empty here (checked above), so the loop ran at least
+        # once and add_eqs was assigned.
+        assert add_eqs is not None
         problem._equation_system+=add_eqs@odestorage
         return super().after_fill_dummy_equations(problem,eqtree,pathname,elem_dim)        
 

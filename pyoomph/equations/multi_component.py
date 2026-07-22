@@ -52,7 +52,7 @@ def CompositionInitialCondition(fluid_props:AnyFluidProperties,isothermal:bool,i
                 icT0 = initial_temperature
         icsettings["temperature"] = icT0
 
-    return InitialCondition(**icsettings)
+    return InitialCondition(degraded_start="auto", IC_name="", **icsettings)
 
 
 def CompositionDiffusionEquations(fluid_props:AnyFluidProperties, space:FiniteElementSpaceEnum="C2", dt_factor:ExpressionOrNum=1, with_IC:bool=True, spatial_errors:float | None=None,isothermal:bool=True,initial_temperature:ExpressionNumOrNone=None) -> Equations:
@@ -79,7 +79,7 @@ def CompositionDiffusionEquations(fluid_props:AnyFluidProperties, space:FiniteEl
     if spatial_errors is not None:
         if spatial_errors is True:
             compo_fields = {"massfrac_" + n: 1.0 for n in fluid_props.required_adv_diff_fields}
-            res += SpatialErrorEstimator(**compo_fields)
+            res += SpatialErrorEstimator(for_which="both", **compo_fields)
         elif spatial_errors is not False:
             raise RuntimeError("TODO")
     return res
@@ -143,7 +143,7 @@ def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteE
     if spatial_errors is not None:
         if spatial_errors is True:
             compo_fields = {"massfrac_" + n: 1.0 for n in fluid_props.required_adv_diff_fields}
-            res += SpatialErrorEstimator(velocity=1, **compo_fields)
+            res += SpatialErrorEstimator(for_which="both", velocity=1, **compo_fields)
         elif isinstance(spatial_errors,dict):
             res += SpatialErrorEstimator(**spatial_errors)
         elif spatial_errors is not False:
@@ -193,7 +193,7 @@ class CompositionAdvectionDiffusionEquations(Equations):
         self.DG_alpha=1
         self.wrap_params_in_subexpressions=wrap_params_in_subexpressions
         self.GCL=GCL
-        self.scheme=scheme
+        self.scheme:TimeSteppingScheme=scheme
         
     def optional_subexpression(self,expr):
         if self.wrap_params_in_subexpressions:
@@ -290,8 +290,9 @@ class CompositionAdvectionDiffusionEquations(Equations):
         rho = self.fluid_props.mass_density
         ts=lambda expr : time_scheme(self.scheme, expr)
         for fn in self.fieldnames:
+            res:Expression | None = None
             f, f_test = var_and_test(fn)
-            Jdiff = self.get_diffusive_mass_flux_expression_for(self.component_names[fn])            
+            Jdiff = self.get_diffusive_mass_flux_expression_for(self.component_names[fn])
             if self.stop_on_zero_diffusive_flux and is_zero(Jdiff):
                 raise RuntimeError("component " + self.component_names[fn] + " has no diffusion terms!")
             # TODO: This is not correct yet
@@ -317,6 +318,9 @@ class CompositionAdvectionDiffusionEquations(Equations):
                 res = ts(rho_factor * (self.dt_factor * partial_t(f) + dot(self.wind, grad(f))))
                 self.add_residual(weak(res, f_test))
             if self.useSUPG:
+                # useSUPG=True together with integrate_advection_by_parts=True already raises above (line ~304),
+                # so at this point res was necessarily assigned via the non-"integrate_advection_by_parts" branch.
+                assert res is not None
                 res = subexpression(res)  # XXX Does not work here!
                 self.add_residual(weak(self.get_supg_tau(self.component_names[fn]) * self.wind * res, grad(f_test)))
             
@@ -405,7 +409,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         self.surfactant_advect_velo_space:FiniteElementSpaceEnum="C2"
         self.use_highest_space_for_velo_connection=use_highest_space_for_velo_connection
         self.kinematic_bc_coordinate_sys=kinematic_bc_coordinate_sys
-        self.kinematic_bc_space=kinematic_bc_space
+        self.kinematic_bc_space:FiniteElementSpaceEnum | None=kinematic_bc_space
         self.additional_masstransfer_scale=additional_masstransfer_scale
         self.additional_kin_bc_test_scale=additional_kin_bc_test_scale
         self.static_normal_interface_motion=static_normal_interface_motion
@@ -424,13 +428,17 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
             kinbc_space=inside_space
             static=self.static            
             if static=="auto":
-                static=not self.get_current_code_generator().get_parent_domain()._coordinates_as_dofs
+                pdom=self.get_current_code_generator().get_parent_domain()
+                assert pdom is not None # An interface always has a parent (bulk) domain
+                static=not pdom._coordinates_as_dofs
 
             if not static in {"auto",False,True}:
                 raise RuntimeError("property static must be either 'auto', True or False")
             if self.kinematic_bc_space is None:
                 if not static:
-                    pos_space=self.get_current_code_generator().get_parent_domain()._coordinate_space
+                    pdom=self.get_current_code_generator().get_parent_domain()
+                    assert pdom is not None # An interface always has a parent (bulk) domain
+                    pos_space=pdom._coordinate_space
                     if pos_space=="":
                         raise RuntimeError("Find out the coordinate space:"+str())
                     if pos_space=="C2TB":                    
@@ -438,7 +446,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
                     elif pos_space=="C1TB":
                         kinbc_space="C1"                
                     else:
-                        kinbc_space=pos_space
+                        kinbc_space=cast("FiniteElementSpaceEnum",pos_space)
             else:
                 kinbc_space=self.kinematic_bc_space
         
@@ -521,8 +529,8 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         scals:dict[str,str | ExpressionOrNum] = {"surfconc_" + s.name: "surface_concentration" for s in self.interface_props._surfactants.keys()} 
         if len(scals) > 0:
             scals[self.surfactant_advect_velo_name] = "velocity"
-            tscals = {"surfconc_" + s.name: scale_factor("temporal") / scale_factor("surfconc_" + s.name) for s in
-                      self.interface_props._surfactants.keys()} 
+            tscals:dict[str,ExpressionOrNum | str] = {"surfconc_" + s.name: scale_factor("temporal") / scale_factor("surfconc_" + s.name) for s in
+                      self.interface_props._surfactants.keys()}
             self.set_test_scaling(tscals)
         scals["mass_transfer_rate"] = scale_factor("velocity") * scale_factor("mass_density")*self.additional_masstransfer_scale
         self.set_scaling(scals)
@@ -548,8 +556,8 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
             self.set_test_scaling({self.kinbc_name: 1 / scale_factor("velocity")})
 
         has_surfactants = False
-        surfscales = {self.surfactant_advect_velo_name: "velocity"}
-        tsurfscales = {self.surfactant_advect_velo_name: 1 / scale_factor("velocity")}
+        surfscales:dict[str,ExpressionOrNum | str] = {self.surfactant_advect_velo_name: "velocity"}
+        tsurfscales:dict[str,ExpressionOrNum | str] = {self.surfactant_advect_velo_name: 1 / scale_factor("velocity")}
         if self.interface_props.surfactants is not None:
             for s in self.interface_props.surfactants:
                 surfscales["surfconc_" + s] = "surface_concentration"
@@ -695,7 +703,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
                                 flux += -wi * total_mass_transfer_rate
                                 # flux += wi * total_mass_flux
                             self.add_residual(-weak(flux, wi_test))
-                        if outadvdiffu.fluid_props.passive_field in partial_mass_transfer_rates.keys() and not self._has_opposite_flow:
+                        if outadvdiffu.fluid_props.passive_field is not None and outadvdiffu.fluid_props.passive_field in partial_mass_transfer_rates.keys() and not self._has_opposite_flow:
                             raise RuntimeError("The exterior phase only solves component diffusion and the component '"+outadvdiffu.fluid_props.passive_field+"' is passive (not solved for explicitly). Yet, we have a mass transfer of this component. This is problematic. Please set passive_field in the exterior phase to some non-volatile component (usually, it is e.g. air, must be the dominant part of the exterior mixture) or solve the flow in the exterior phase by using CompositionFlowEquations instead of CompositionDiffusionEquations")
 
             # Thermal effects
@@ -1006,6 +1014,7 @@ class ThinLayerThermalConductionEquation(InterfaceEquations):
         
     def define_residuals(self):
         Tin,Tin_test=var_and_test("temperature")
+        Tout_test:Expression | None=None
         if self.outside_temperature is None:
             Tout,Tout_test=var_and_test("temperature",domain="|.")
         else:
@@ -1034,10 +1043,13 @@ class ThinLayerThermalConductionEquation(InterfaceEquations):
         # TODO: If rho or cp are functions of the temperature, they will be evaluated at Tin here. We could blend it
         self.add_weak(rho*cp*(PsiIPsiI*partial_t(Tin,ALE=self.ALE)+PsiOPsiI*partial_t(Tout,ALE=self.ALE)),Tin_test)
         if self.outside_temperature is None:
-            self.add_weak(rho*cp*(PsiIPsiO*partial_t(Tin,ALE=self.ALE)+PsiOPsiO*partial_t(Tout,ALE=self.ALE)),Tout_test)        
+            # Tout_test was necessarily assigned above, since self.outside_temperature is still None here
+            assert Tout_test is not None
+            self.add_weak(rho*cp*(PsiIPsiO*partial_t(Tin,ALE=self.ALE)+PsiOPsiO*partial_t(Tout,ALE=self.ALE)),Tout_test)
         # TODO: If lambda is a functions of the temperature, it well be evaluated at Tin here. We could blend it
         self.add_weak(k*(dzPsiIdzPsiI*Tin+dzPsiOdzPsiI*Tout),Tin_test)
         if self.outside_temperature is None:
+            assert Tout_test is not None
             self.add_weak(k*(dzPsiIdzPsiO*Tin+dzPsiOdzPsiO*Tout),Tout_test)
         
         

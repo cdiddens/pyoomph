@@ -112,7 +112,7 @@ class BaseInterfaceProperties:
             raise RuntimeError("No latent heat set for "+name)
         return res
 
-    def set_mass_transfer_model(self,mdl:"MassTransferModelBase | None") -> None:
+    def set_mass_transfer_model(self,mdl:"MassTransferModelBase | None") -> "MassTransferModelBase | None":
         """
         Sets the mass transfer model.
         """
@@ -219,29 +219,32 @@ class MaterialProperties:
                 else:
                     raise RuntimeError("TODO: Register other interfaces Interface")
                 return subclass
-            if not hasattr(subclass, 'state_of_matter') or subclass.state_of_matter is None:
+            # From here on, subclass is guaranteed to be a MaterialProperties subclass (interfaces are handled and returned above).
+            # A local, explicitly typed alias is used since pyright cannot narrow the _TypeMaterialProperties TypeVar itself here.
+            mat_subclass=cast("type[MaterialProperties]",subclass)
+            if not hasattr(mat_subclass, 'state_of_matter') or mat_subclass.state_of_matter is None:
                 raise RuntimeError("Cannot register material '"+subclass.__name__+"', since it does not have a state_of_matter. Please define "+subclass.__name__+".state_of_matter=...")
-            if not hasattr(subclass,"is_pure") or subclass.is_pure is None:
+            if not hasattr(mat_subclass,"is_pure") or mat_subclass.is_pure is None:
                 raise RuntimeError("Bulk material properites must have is_pure set to True or False")
-            if subclass.is_pure:
-                if not hasattr(subclass, 'name'):
-                    raise RuntimeError("Cannot register pure "+str(subclass.state_of_matter)+" material '"+subclass.__name__+"', since it does not have a name. Please define "+subclass.__name__+".name=\"...\"")
+            if mat_subclass.is_pure:
+                if not hasattr(mat_subclass, 'name'):
+                    raise RuntimeError("Cannot register pure "+str(mat_subclass.state_of_matter)+" material '"+subclass.__name__+"', since it does not have a name. Please define "+subclass.__name__+".name=\"...\"")
 
-                if subclass.name in cls.library[subclass.state_of_matter]["pure"].keys():
+                if mat_subclass.name in cls.library[mat_subclass.state_of_matter]["pure"].keys():
                     if not override:
-                        raise RuntimeError("You tried to register the pure "+subclass.state_of_matter+" material named '"+subclass.name+"', but there is already one defined. Please either use another name or add override=True to the arguments of @MaterialProperties.register(override=True)")
-                cls.library[subclass.state_of_matter]["pure"][subclass.name]=subclass
+                        raise RuntimeError("You tried to register the pure "+mat_subclass.state_of_matter+" material named '"+mat_subclass.name+"', but there is already one defined. Please either use another name or add override=True to the arguments of @MaterialProperties.register(override=True)")
+                cls.library[mat_subclass.state_of_matter]["pure"][mat_subclass.name]=subclass
             else:
-                if not hasattr(subclass, 'components'):
-                    raise RuntimeError("Cannot register mixed "+subclass.state_of_matter+" material '"+subclass.__name__+"', since it does not have a list of pure components. Please define "+subclass.__name__+".components={...}")
-                if type(subclass.components)!=set:
-                    raise RuntimeError("Cannot register mixed "+subclass.state_of_matter+" material '"+subclass.__name__+"', since the list of pure components needs to be a set. Please define "+subclass.__name__+".components={...}")
+                if not hasattr(mat_subclass, 'components'):
+                    raise RuntimeError("Cannot register mixed "+str(mat_subclass.state_of_matter)+" material '"+subclass.__name__+"', since it does not have a list of pure components. Please define "+subclass.__name__+".components={...}")
+                if type(mat_subclass.components)!=set:
+                    raise RuntimeError("Cannot register mixed "+str(mat_subclass.state_of_matter)+" material '"+subclass.__name__+"', since the list of pure components needs to be a set. Please define "+subclass.__name__+".components={...}")
 
-                frz=frozenset(subclass.components)
-                if frz in cls.library[subclass.state_of_matter]["mixed"].keys():
+                frz=frozenset(mat_subclass.components)
+                if frz in cls.library[mat_subclass.state_of_matter]["mixed"].keys():
                     if not override:
-                        raise RuntimeError("You tried to register the mixed "+subclass.state_of_matter+" material with components '"+str(subclass.components)+"', but there is already one defined. Please add override=True to the arguments of @MaterialProperties.register(override=True)")
-                cls.library[subclass.state_of_matter]["mixed"][frz]=subclass
+                        raise RuntimeError("You tried to register the mixed "+str(mat_subclass.state_of_matter)+" material with components '"+str(mat_subclass.components)+"', but there is already one defined. Please add override=True to the arguments of @MaterialProperties.register(override=True)")
+                cls.library[mat_subclass.state_of_matter]["mixed"][frz]=subclass
 
     #      cls.subclasses[message_type] = subclass
             return subclass
@@ -305,9 +308,11 @@ class MaterialProperties:
                 raise ValueError("No property "+expr+" defined")
         if not isinstance(expr,_pyoomph.Expression):
             expr=_pyoomph.Expression(expr)
-        if cond in ["initial","IC","initial_condition"]:
-            cond=self.initial_condition
-        mycond=cond.copy()
+        if isinstance(cond,str):
+            actual_cond=self.initial_condition
+        else:
+            actual_cond=cond
+        mycond=actual_cond.copy()
         for i,j in kwargs.items():
             if j is not None:
                 mycond[i]=j
@@ -538,17 +543,17 @@ class LiquidMixtureDefinitionComponent(MixtureDefinitionComponent):
     def __init__(self, compo: MaterialProperties, quant: ExpressionNumOrNone):
         super().__init__(compo, quant)
 
-    def __radd__(self,other:"MixtureDefinitionComponent | MaterialProperties")->"LiquidMixtureDefinitionComponents":
+    def __radd__(self,other:"MixtureDefinitionComponent | MaterialProperties")->"LiquidMixtureDefinitionComponents | LiquidMixtureDefinitionComponent":
         if other==0:
             return self # This allows to use e.g. sum(massfrac[c]*component[c] for c in ...)
         elif isinstance(other,LiquidMixtureDefinitionComponent):
             return LiquidMixtureDefinitionComponents([self,other])
-        elif isinstance(other,PureLiquidProperties): 
+        elif isinstance(other,PureLiquidProperties):
             return self+LiquidMixtureDefinitionComponent(other,None)
         else:
             raise RuntimeError("Tried to mix a liquid with something else:"+str(self)+" and "+str(other))
 
-    def __add__(self,other:"MixtureDefinitionComponent | MaterialProperties")->"LiquidMixtureDefinitionComponents":
+    def __add__(self,other:"MixtureDefinitionComponent | MaterialProperties")->"LiquidMixtureDefinitionComponents | LiquidMixtureDefinitionComponent":
         return self.__radd__(other)
 
     def get_compo(self)->"PureLiquidProperties":
@@ -823,15 +828,26 @@ class BaseLiquidProperties(MaterialProperties):
             temperature: Temperature at which to calculate the vapor concentration. If not set, the temperature from the initial condition is used.
             at_mixture_composition: If set to ``True``, the vapor concentration is calculated at the mixture initial composition. If set to a dictionary, the vapor concentration is calculated at the given composition.
         """
+        # get_pure_component/get_vapor_pressure_for are only implemented by the concrete subclasses of
+        # BaseLiquidProperties (PureLiquidProperties and MixtureLiquidProperties), not by this base class itself.
+        assert isinstance(self,(PureLiquidProperties,MixtureLiquidProperties))
         gas_constant=8.3144598*joule/(mol*kelvin)
-        M=self.get_pure_component(component).molar_mass
+        pure_component=self.get_pure_component(component)
+        if pure_component is None:
+            raise RuntimeError("Component '"+component+"' is not present in "+str(self))
+        M=pure_component.molar_mass
         temperature_set=temperature
         if temperature is None:
             temperature=var("temperature")
         if relative_humidity_for_far_field is not None:
-            psat=relative_humidity_for_far_field*self.get_vapor_pressure_for(component,pure=True)
+            pvap_pure=self.get_vapor_pressure_for(component,pure=True)
+            if pvap_pure is None:
+                raise RuntimeError("No vapor pressure set for the pure component '"+component+"', cannot calculate the vapor concentration from the relative humidity")
+            psat=relative_humidity_for_far_field*pvap_pure
         else:
             psat=self.get_vapor_pressure_for(component)
+            if psat is None:
+                raise RuntimeError("No vapor pressure set for component '"+component+"' in "+str(self))
 
         csat=psat/(temperature * gas_constant)*M
         if temperature_set is not None:
@@ -912,7 +928,7 @@ class BaseMixedProperties:
     @overload
     def get_pure_component(self,name:str,raise_error:Literal[False]=...)->MaterialProperties | None: ...
     @overload
-    def get_pure_component(self,name:str,raise_error:Literal[True]=...)->MaterialProperties: ...
+    def get_pure_component(self,name:str,raise_error:Literal[True])->MaterialProperties: ...
 
     def get_pure_component(self,name:str,raise_error:bool=False)->MaterialProperties | None:
         """
@@ -1129,7 +1145,7 @@ class PureLiquidProperties(BaseLiquidProperties):
     """
     Properties of a pure liquid.
     """
-    is_pure:bool=True
+    is_pure:bool | None=True
 
     def make_static(self,*args:Any,**kwargs:Any):
         return self
@@ -1240,7 +1256,7 @@ class PureGasProperties(BaseGasProperties):
     """
     Provides properties of a pure gas.    
     """
-    is_pure:bool=True
+    is_pure:bool | None=True
     def make_static(self,*args:Any,**kwargs:Any):
         return self
     def __init__(self):
@@ -1291,7 +1307,7 @@ class PureSolidProperties(BaseSolidProperties):
     """
     Defines properties of a pure solid.    
     """
-    is_pure:bool=True
+    is_pure:bool | None=True
     def __init__(self):
         super().__init__()
         self.initial_condition["massfrac_"+self.name]=1.0
@@ -1326,7 +1342,7 @@ class MixtureLiquidProperties(BaseLiquidProperties,BaseMixedProperties):
     Args:
         pure_props: Pure component properties, will be passed when mixing the gaseous mixture with the :py:func:`Mixture` function.
     """
-    is_pure:bool=False
+    is_pure:bool | None=False
     def __init__(self,pure_props:dict[str,MaterialProperties]):
         BaseLiquidProperties.__init__(self)
         BaseMixedProperties.__init__(self,pure_props=pure_props)
@@ -1480,7 +1496,7 @@ class MixtureGasProperties(BaseGasProperties,BaseMixedProperties):
     Args:
         pure_props: Pure component properties, will be passed when mixing the gaseous mixture with the :py:func:`Mixture` function.
     """
-    is_pure:bool=False
+    is_pure:bool | None=False
     def __init__(self,pure_props:dict[str,MaterialProperties]):
         BaseGasProperties.__init__(self)
         BaseMixedProperties.__init__(self,pure_props=pure_props)
@@ -1757,9 +1773,9 @@ class LiquidLiquidInterfaceProperties(BaseInterfaceProperties):
     def get_fraction_in_rich_phase(self,varname:str,rich_component:str | None=None,in_bulk:bool=False):
         if rich_component is None:
             rich_component=varname
-        if self._phaseA.initial_condition[rich_component]>self._phaseB.initial_condition[rich_component]:
+        if self._phaseA.initial_condition[rich_component]>self._phaseB.initial_condition[rich_component]: #type:ignore
             return var(varname,domain=".." if in_bulk else ".")
-        elif self._phaseA.initial_condition[rich_component]<self._phaseB.initial_condition[rich_component]:
+        elif self._phaseA.initial_condition[rich_component]<self._phaseB.initial_condition[rich_component]: #type:ignore
             return var(varname,domain="|.." if in_bulk else "|.")
         else:
             raise RuntimeError("Cannot distinguish phases")
@@ -1767,9 +1783,9 @@ class LiquidLiquidInterfaceProperties(BaseInterfaceProperties):
     def get_fraction_in_poor_phase(self,varname:str,poor_component:str | None=None,in_bulk:bool=False):
         if poor_component is None:
             poor_component=varname
-        if self._phaseA.initial_condition[poor_component]<self._phaseB.initial_condition[poor_component]:
+        if self._phaseA.initial_condition[poor_component]<self._phaseB.initial_condition[poor_component]: #type:ignore
             return var(varname,domain=".." if in_bulk else ".")
-        elif self._phaseA.initial_condition[poor_component]>self._phaseB.initial_condition[poor_component]:
+        elif self._phaseA.initial_condition[poor_component]>self._phaseB.initial_condition[poor_component]: #type:ignore
             return var(varname,domain="|.." if in_bulk else "|.")
         else:
             raise RuntimeError("Cannot distinguish phases")
@@ -1979,6 +1995,9 @@ def get_interface_properties(phaseA:PureLiquidProperties | MixtureLiquidProperti
 
 @overload
 def get_interface_properties(phaseA:PureLiquidProperties | MixtureLiquidProperties,phaseB:PureSolidProperties,surfactants:str | SurfactantProperties | dict[str, ExpressionOrNum] | dict[SurfactantProperties, ExpressionOrNum] | None=None)->LiquidSolidInterfaceProperties: ...
+
+@overload
+def get_interface_properties(phaseA:MaterialProperties | MixtureDefinitionComponents,phaseB:MaterialProperties | MixtureDefinitionComponents,surfactants:str | SurfactantProperties | dict[str, ExpressionOrNum] | dict[SurfactantProperties, ExpressionOrNum] | None=None)->BaseInterfaceProperties: ...
 
 def get_interface_properties(phaseA:MaterialProperties | MixtureDefinitionComponents,phaseB:MaterialProperties | MixtureDefinitionComponents,surfactants:str | SurfactantProperties | dict[str, ExpressionOrNum] | dict[SurfactantProperties, ExpressionOrNum] | None=None)->BaseInterfaceProperties | LiquidGasInterfaceProperties:
     """

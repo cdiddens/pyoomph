@@ -128,6 +128,13 @@ class BaseMesh(abc.ABC):
     def get_eqtree(self) -> "EquationTree":
         return self._eqtree
 
+    def get_problem(self) -> "Problem":
+        # Overridden by every concrete mesh class (MeshFromTemplateBase, InterfaceMesh,
+        # ODEStorageMesh); declared here only so that BaseMesh methods (like
+        # evaluate_all_observables below) can call self.get_problem() without a static
+        # type checker complaining that BaseMesh itself has no such attribute.
+        raise NotImplementedError("Please specify")
+
     def get_tracers(self, name: str = "tracers", error_on_missing: bool = True) -> _pyoomph.TracerCollection | None:
         if name not in self._tracers.keys():
             if error_on_missing:
@@ -347,7 +354,7 @@ class BaseMesh(abc.ABC):
     def get_maximum_value_of_field(self,fieldname:str,minimum_instead:bool=False,dimensional:Literal[True]=...)->ExpressionOrNum: ...
 
     @overload
-    def get_maximum_value_of_field(self,fieldname:str,minimum_instead:bool=False,dimensional:Literal[False]=...)->float: ...
+    def get_maximum_value_of_field(self,fieldname:str,minimum_instead:bool=False,*,dimensional:Literal[False])->float: ...
 
     def get_maximum_value_of_field(self,fieldname:str,minimum_instead:bool=False,dimensional:bool=True) ->ExpressionOrNum:
         assert self._codegen is not None
@@ -880,7 +887,7 @@ class MeshFromTemplateBase(BaseMesh):
         for e in self.elements():
             e._elemental_error_max_override = 0.0
 
-    def _merge_my_error_with_elemental_max_override(self) -> list[float]:
+    def _merge_my_error_with_elemental_max_override(self) -> NPFloatArray:
         assert isinstance(
             self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
         res = self.get_elemental_errors()
@@ -895,6 +902,8 @@ class MeshFromTemplateBase(BaseMesh):
         return self.get_code_gen().get_code().get_nodal_field_indices()
 
     def recreate_boundary_information(self):
+        assert isinstance(
+            self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
         from .. import get_dev_option
 
         if self.refinement_possible() or (get_dev_option("allow_tri_refine") and self.get_dimension() == 2):
@@ -910,6 +919,8 @@ class MeshFromTemplateBase(BaseMesh):
                 pass
 
     def _setup_output_scales(self):
+        assert isinstance(
+            self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
         codegen = self.get_code_gen()
         code = codegen.get_code()
         _, unit, _, _ = _pyoomph.GiNaC_collect_units(
@@ -921,7 +932,7 @@ class MeshFromTemplateBase(BaseMesh):
             _factor, unit, _rest, _success = _pyoomph.GiNaC_collect_units(s)
             if not (_rest-1).is_zero():
                 raise RuntimeError(
-                    "Cannot set output scale for field "+k+" to "+str(s)+" because it has a non-unit factor "+str(_factor)+" and a non-unit rest "+str(_rest))            
+                    "Cannot set output scale for field "+k+" to "+str(s)+" because it has a non-unit factor "+str(_factor)+" and a non-unit rest "+str(_rest))
             self.set_output_scale(k, unit, code)
         
     def _finalise_creation(self):
@@ -1028,7 +1039,7 @@ class MeshFromTemplateBase(BaseMesh):
                 t = problem.time_pt().time()
                 self._codegen._set_reference_point_for_IC_and_DBC(
                     refpos[0], refpos[1], refpos[2], t,refnorm[0],refnorm[1],refnorm[2])
-        self._eqtree._equations._set_current_codegen(self._eqtree._codegen)
+        eqs._set_current_codegen(self._eqtree._codegen)
         #problem.before_compile_equations(self._eqtree._equations)
         eqs.before_finalization(self._codegen)
         self._codegen._finalise()
@@ -1126,20 +1137,24 @@ class MeshFromTemplateBase(BaseMesh):
     
     
     def _evaluate_extremum_wrapper(self,name:str | list[str],sign:int,dimensional:bool=True,as_float:bool=False,return_x:bool=True):
+        assert isinstance(
+            self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
         if not isinstance(name,str):
             if return_x:
                 raise RuntimeError("Please set return_x=False for multiple extremum evaluations (or call them one by one)")
-            return [self._evaluate_extremum_wrapper(n,sign,dimensional=dimensional,as_float=as_float,return_x=False) for n in name]
+            return [cast(ExpressionOrNum, self._evaluate_extremum_wrapper(n,sign,dimensional=dimensional,as_float=as_float,return_x=False)) for n in name]
         flags=0
         if dimensional:
             flags|=1
-        val,s,elem=self._evaluate_extremum(name,sign,flags)        
+        val,s,elem=self._evaluate_extremum(name,sign,flags)
         #print(val,s,elem)
+        x = None
         if return_x:
             x=elem.get_interpolated_position_at_s(0,s,False)
             #print("X",x)
             if dimensional:
                 SS=self.get_problem().get_scaling("spatial")
+                assert isinstance(SS, Expression)
                 x=[xc*SS for xc in x]
         if not dimensional:
             val=float(val)
@@ -1148,17 +1163,20 @@ class MeshFromTemplateBase(BaseMesh):
                 factor, _, _, _ = _pyoomph.GiNaC_collect_units(val)
                 val = float(factor)
                 if return_x:
+                    assert x is not None
                     xn=[]
                     for xc in x:
+                        assert isinstance(xc, Expression)
                         factor, _, _, _ = _pyoomph.GiNaC_collect_units(xc)
                         xn.append(float(factor))
-                    x=xn                
+                    x=xn
         if return_x:
+            assert x is not None
             return val,x
         else:
             return val
                     
-    def evaluate_maximum(self,name:str | list[str],dimensional:bool=True,as_float:bool=False,return_x:bool=False)->ExpressionOrNum | list[ExpressionOrNum] | tuple[ExpressionOrNum, list[ExpressionOrNum]]:
+    def evaluate_maximum(self,name:str | list[str],dimensional:bool=True,as_float:bool=False,return_x:bool=False)->ExpressionOrNum | Sequence[ExpressionOrNum] | tuple[ExpressionOrNum, Sequence[ExpressionOrNum]]:
         """Evaluate the maximum of a quantity defined by ExtremumObservables on the mesh.
         
         Args:
@@ -1173,7 +1191,7 @@ class MeshFromTemplateBase(BaseMesh):
         """
         return self._evaluate_extremum_wrapper(name,1,dimensional=dimensional,as_float=as_float,return_x=return_x)
            
-    def evaluate_minimum(self,name:str | list[str],dimensional:bool=True,as_float:bool=False,return_x:bool=False)->ExpressionOrNum | list[ExpressionOrNum] | tuple[ExpressionOrNum, list[ExpressionOrNum]]:
+    def evaluate_minimum(self,name:str | list[str],dimensional:bool=True,as_float:bool=False,return_x:bool=False)->ExpressionOrNum | Sequence[ExpressionOrNum] | tuple[ExpressionOrNum, Sequence[ExpressionOrNum]]:
         """Evaluate the minimum of a quantity defined by ExtremumObservables on the mesh.
         
         Args:
@@ -1627,17 +1645,19 @@ class InterfaceMesh(_InterfaceMeshTypingBase):
         if not isinstance(name,str):
             if return_x:
                 raise RuntimeError("Please set return_x=False for multiple extremum evaluations (or call them one by one)")
-            return [self._evaluate_extremum_wrapper(n,sign,dimensional=dimensional,as_float=as_float,return_x=False) for n in name]
+            return [cast(ExpressionOrNum, self._evaluate_extremum_wrapper(n,sign,dimensional=dimensional,as_float=as_float,return_x=False)) for n in name]
         flags=0
         if dimensional:
             flags|=1
-        val,s,elem=self._evaluate_extremum(name,sign,flags)        
+        val,s,elem=self._evaluate_extremum(name,sign,flags)
         #print(val,s,elem)
+        x = None
         if return_x:
             x=elem.get_interpolated_position_at_s(0,s,False)
             #print("X",x)
             if dimensional:
                 SS=self.get_problem().get_scaling("spatial")
+                assert isinstance(SS, Expression)
                 x=[xc*SS for xc in x]
         if not dimensional:
             val=float(val)
@@ -1646,17 +1666,20 @@ class InterfaceMesh(_InterfaceMeshTypingBase):
                 factor, _, _, _ = _pyoomph.GiNaC_collect_units(val)
                 val = float(factor)
                 if return_x:
+                    assert x is not None
                     xn=[]
                     for xc in x:
+                        assert isinstance(xc, Expression)
                         factor, _, _, _ = _pyoomph.GiNaC_collect_units(xc)
                         xn.append(float(factor))
-                    x=xn                
+                    x=xn
         if return_x:
+            assert x is not None
             return val,x
         else:
             return val
                     
-    def evaluate_maximum(self,name:str | list[str],dimensional:bool=True,as_float:bool=False,return_x:bool=False)->ExpressionOrNum | list[ExpressionOrNum] | tuple[ExpressionOrNum, list[ExpressionOrNum]]:
+    def evaluate_maximum(self,name:str | list[str],dimensional:bool=True,as_float:bool=False,return_x:bool=False)->ExpressionOrNum | Sequence[ExpressionOrNum] | tuple[ExpressionOrNum, Sequence[ExpressionOrNum]]:
         """Evaluate the maximum of a quantity defined by ExtremumObservables on the mesh.
         
         Args:
@@ -1671,7 +1694,7 @@ class InterfaceMesh(_InterfaceMeshTypingBase):
         """
         return self._evaluate_extremum_wrapper(name,1,dimensional=dimensional,as_float=as_float,return_x=return_x)
            
-    def evaluate_minimum(self,name:str | list[str],dimensional:bool=True,as_float:bool=False,return_x:bool=False)->ExpressionOrNum | list[ExpressionOrNum] | tuple[ExpressionOrNum, list[ExpressionOrNum]]:
+    def evaluate_minimum(self,name:str | list[str],dimensional:bool=True,as_float:bool=False,return_x:bool=False)->ExpressionOrNum | Sequence[ExpressionOrNum] | tuple[ExpressionOrNum, Sequence[ExpressionOrNum]]:
         """Evaluate the minimum of a quantity defined by ExtremumObservables on the mesh.
         
         Args:
@@ -1727,17 +1750,19 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
         return None
     
     def _setup_output_scales(self):
-        ocg = self._codegen.get_equations()._get_current_codegen()  
-        self._codegen.get_equations()._set_current_codegen(self._codegen)  
-        _, indices = self._element._ode_elem_to_numpy()
+        codegen = self.get_code_gen()
+        eqtree = self.get_eqtree()
+        ocg = codegen.get_equations()._get_current_codegen()
+        codegen.get_equations()._set_current_codegen(codegen)
+        _, indices = self.get_element()._ode_elem_to_numpy()
         scales: list[ExpressionOrNum] = [1.0] * len(indices)
         for k, i in indices.items():
-            s = self._eqtree.get_equations().get_scaling(k)
+            s = eqtree.get_equations().get_scaling(k)
             if isinstance(s, Expression):
-                factor, _, _, _ = _pyoomph.GiNaC_collect_units(s)  
+                factor, _, _, _ = _pyoomph.GiNaC_collect_units(s)
                 s = float(factor)
             scales[i]=s
-        self._codegen.get_equations()._set_current_codegen(ocg) 
+        codegen.get_equations()._set_current_codegen(ocg)
 
     def _compile_bulk_equations(self) -> _pyoomph.DynamicBulkElementInstance:
         assert self._eqtree is not None
@@ -1785,6 +1810,7 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
     #def get_element(self) -> _pyoomph.BulkElementODE0d:
     def get_element(self) -> Element:
         #print("GET ELEMENT",self._element)
+        assert self._element is not None
         return self._element
         #return self._get_ODE("ODE")
 
@@ -1880,7 +1906,7 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
             ode.internal_data_pt(inds[n]).set_value(0, val)
 
     def define_state_file(self, state: "DumpFile",additional_info={}):
-        ode = self._element
+        ode = self.get_element()
         _, inds = ode._ode_elem_to_numpy()
         inds_sorted = list(sorted(list(inds)))
         numinds = len(inds_sorted)

@@ -121,7 +121,12 @@ class PETSCSolver(GenericLinearSystemSolver):
         #print("DOF to field mapping:", get_mpi_rank(),mapping)
         unique_fields=numpy.unique(mapping)
         unique_fields=unique_fields[unique_fields>=0] # Filter out any dofs that are not assigned to a field (e.g. due to field splits, where some dofs might be assigned to a new field index of -1 or similar)
-        if self.problem.petsc_fieldsplit is None:
+        # self.problem.petsc_fieldsplit is only ever assigned None in Problem.__init__ (its declared
+        # type there is therefore just "None"), but user code may set it to a dict at runtime (see the
+        # docstring on that attribute). Capture it into a locally, correctly-typed variable here instead
+        # of widening the type in problem.py (out of scope for this file).
+        petsc_fieldsplit:dict[str,Any] | None = self.problem.petsc_fieldsplit
+        if petsc_fieldsplit is None:
             if not self.problem.is_quiet():
                 print("Using default PETSc DOF to field mapping:")
                 for uf in unique_fields:
@@ -129,16 +134,16 @@ class PETSCSolver(GenericLinearSystemSolver):
             field_is={}
             for f in unique_fields:
                 indices = numpy.where(mapping == f)[0].astype(numpy.int32)
-                iset = PETSc.IS().createGeneral(process_indices(indices,names[f]),comm=PETSc.COMM_WORLD)
+                iset = PETSc.IS().createGeneral(process_indices(indices,names[f]),comm=PETSc.COMM_WORLD) #type:ignore
                 field_is[f] = iset
 
         else:
             if not self.problem.is_quiet():
-                print("Using user-defined PETSc DOF to field mapping:",self.problem.petsc_fieldsplit)
+                print("Using user-defined PETSc DOF to field mapping:",petsc_fieldsplit)
             field_is={}
             is_collections={}
             handled_fields=set()
-            for k,v in self.problem.petsc_fieldsplit.items():
+            for k,v in petsc_fieldsplit.items():
                 if not v in is_collections.keys():
                     is_collections[v]=[]
                 if "*" in k:
@@ -170,7 +175,7 @@ class PETSCSolver(GenericLinearSystemSolver):
                 #print("ON",get_mpi_rank(), "INDICES FOR FIELD "+str(v)+": "+str(indices),"LEN",len(indices))
                 #print("CHECKING ON RANK",v,get_mpi_rank(),mapping[indices])                
                 #print("PROCESSES ON RANK",v,get_mpi_rank(),mapping[process_indices(indices,v)])                
-                iset = PETSc.IS().createGeneral(process_indices(indices,v),comm=PETSc.COMM_WORLD)
+                iset = PETSc.IS().createGeneral(process_indices(indices,v),comm=PETSc.COMM_WORLD) #type:ignore
                 field_is[v] = iset
                 if not self.problem.is_quiet():
                     print("  Field "+str(v)+": "+str(fields))
@@ -179,7 +184,7 @@ class PETSCSolver(GenericLinearSystemSolver):
                 #print()
         self._dofs_to_field_info=[names,mapping,field_is]
         
-    def get_field_split_IS(self,splitname:str)->PETSc.IS:
+    def get_field_split_IS(self,splitname:str)->PETSc.IS: #type:ignore
         if self._dofs_to_field_info is None:
             raise RuntimeError("Field split IS requested but field split info is not set up yet. Please call this method only in setup_solver and with having set the petsc_fieldsplit attribute on the problem")
         if splitname not in self._dofs_to_field_info[2].keys():
@@ -234,7 +239,7 @@ class PETSCSolver(GenericLinearSystemSolver):
             #self.petsc_mat.destroy() #type:ignore
             self.petsc_mat = PETSc.Mat().createAIJ(size=(n, n), csr=(colptr.astype(numpy.int32), rowind.astype(numpy.int32), values.astype(numpy.float64)),comm=get_mpi_world_comm()) #type:ignore
             
-            self.petsc_mat.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False)
+            self.petsc_mat.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False) #type:ignore
             # Force diagonal:
             #diag = self.petsc_mat.getDiagonal()
             #self.petsc_mat.setDiagonal(diag, addv=PETSc.InsertMode.INSERT_VALUES)
@@ -293,7 +298,7 @@ class PETSCSolver(GenericLinearSystemSolver):
             #print("Creating petsc mat ")
             self.petsc_mat = PETSc.Mat().createAIJ(size=((nrow_local, n), (nrow_local, n),),csr=(row_start, col_index, values)) #type:ignore
             
-            self.petsc_mat.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False)                        
+            self.petsc_mat.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False) #type:ignore
             # Force diagonal:
             #diag = self.petsc_mat.getDiagonal()
             #self.petsc_mat.setDiagonal(diag, addv=PETSc.InsertMode.INSERT_VALUES)
@@ -342,16 +347,11 @@ class PETSCSolver(GenericLinearSystemSolver):
     def assemble_matrix(self,which_one:str):
         res, n, _nzz, nrow_local, values, col_index, row_start=self.problem._assemble_residual_jacobian(which_one)                                
         res=PETSc.Mat().createAIJ(size=((nrow_local, n), (n, n),),csr=(row_start.astype(numpy.int32), col_index.astype(numpy.int32), values.astype(numpy.float64)), comm=PETSc.COMM_WORLD) #type:ignore
-        res.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False)
+        res.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False) #type:ignore
         res.shift(0.0)
         res.assemble()
         return res
-        
 
-
-    def set_options(self,**kwargs:Any):
-        for a,b in kwargs.items():
-            PETSc.Options().setValue(a,b) #type:ignore
 
 @GenericLinearSystemSolver.register_solver()
 class PETSCMUMPSSolver(PETSCSolver):
@@ -427,16 +427,16 @@ class SlepcEigenSolver(GenericEigenSolver):
                 Min=Min.tocsr()
                 assert isinstance(Min,DefaultMatrixType)
                 
-            M=PETSc.Mat().createAIJ(size=((n, n), (n, n),), csr=(Min.indptr, Min.indices, Min.data))
-            J=PETSc.Mat().createAIJ(size=((n, n), (n, n),), csr=(Jin.indptr, Jin.indices, Jin.data))
-            
+            M=PETSc.Mat().createAIJ(size=((n, n), (n, n),), csr=(Min.indptr, Min.indices, Min.data)) #type:ignore
+            J=PETSc.Mat().createAIJ(size=((n, n), (n, n),), csr=(Jin.indptr, Jin.indices, Jin.data)) #type:ignore
+
         else:
             Jin,Min,n,complex_mat=self.get_J_M_n_and_type()
-            upscale_to_complex=complex_mat and (PETSc.ScalarType in {numpy.float64,numpy.float128,numpy.float32})
+            upscale_to_complex=complex_mat and (PETSc.ScalarType in {numpy.float64,numpy.float128,numpy.float32}) #type:ignore
             if upscale_to_complex:
                 raise RuntimeError("Your PETSc/SLEPc installation cannot handle a complex eigenvalue problem. Please compile another PETSc/SLEPc version with complex number and adjust the PYTHONPATH accordingly so that the complex petsc4py / slepc4py is used.")
-            M=PETSc.Mat().createAIJ(size=((n, n), (n, n),), csr=(Min.indptr, Min.indices, Min.data))
-            J=PETSc.Mat().createAIJ(size=((n, n), (n, n),), csr=(Jin.indptr, Jin.indices, Jin.data))
+            M=PETSc.Mat().createAIJ(size=((n, n), (n, n),), csr=(Min.indptr, Min.indices, Min.data)) #type:ignore
+            J=PETSc.Mat().createAIJ(size=((n, n), (n, n),), csr=(Jin.indptr, Jin.indices, Jin.data)) #type:ignore
             
         #if self.imag_contribution is not None:
         #    raise RuntimeError("Cannot have imaginary matrix contributions yet here")
@@ -489,13 +489,13 @@ class SlepcEigenSolver(GenericEigenSolver):
         
         if v0 is not None:
             if len(v0.shape)==1:
-                _v0=PETSc.Vec().createWithArray(v0)
+                _v0=PETSc.Vec().createWithArray(v0) #type:ignore
                 E.setInitialSpace(_v0)
                 _v0.destroy()
             else:
                 ispace=[]
                 for i in range(min(v0.shape[0],ncv)):
-                    ispace.append(PETSc.Vec().createWithArray(v0[i,:]))
+                    ispace.append(PETSc.Vec().createWithArray(v0[i,:])) #type:ignore
                 E.setInitialSpace(ispace)
                 for _v0 in ispace:
                     _v0.destroy()
@@ -581,6 +581,10 @@ class SlepcEigenSolver(GenericEigenSolver):
         if sort:
             if sort==True:
                 if target_set:
+                    # target_set is only True if the "target" parameter was non-None on entry, and the
+                    # "if target is None: target=shift" block above never touches target in that case,
+                    # so target is still guaranteed non-None here.
+                    assert target is not None
                     srt = numpy.argsort(numpy.abs(evals-complex(target)))[0:min(neval, len(evals))]
                 else:
                     srt = numpy.argsort(-evals)[0:min(neval, len(evals))] #type:ignore
@@ -593,15 +597,15 @@ class SlepcEigenSolver(GenericEigenSolver):
             evects = numpy.array(evects) #type:ignore
             
         if self.store_basis:
-            self._last_basis=[]
+            last_basis_list:list[Any]=[]
             basis=E.getBV()
-            nbasis=basis.getSizes()[1]        
+            nbasis=basis.getSizes()[1]
             for i in range(nbasis):
                 bv=basis.createVec()
                 basis.copyVec(i,bv)
-                self._last_basis.append(bv.getArray())
+                last_basis_list.append(bv.getArray())
                 bv.destroy()
-            self._last_basis=numpy.array(self._last_basis)
+            self._last_basis=numpy.array(last_basis_list)
         else:
             self._last_basis=None
         
@@ -675,7 +679,7 @@ class FieldSplitPETSCSolver(PETSCSolver):
                     if len(sp)==2 and self.problem._meshdict.get(sp[0], None) is not None:
                         ode=self.problem.get_ode(sp[0])
                         #ode_elem = ode._get_ODE("ODE")                        
-                        inds=ode.get_code_gen()._code.get_elemental_field_indices()
+                        inds=ode.get_code_gen().get_code().get_elemental_field_indices()
                         if sp[-1] in inds.keys():
                             if not sn in meshblocks.keys():
                                 meshblocks[sn]={}
@@ -739,7 +743,7 @@ class FieldSplitPETSCSolver(PETSCSolver):
                 else:
                     raise RuntimeError("Unknown nullspace type "+ns[0])
                 
-            petscvects=[PETSc.Vec().createWithArray(v) for v in nsvects]
+            petscvects=[PETSc.Vec().createWithArray(v) for v in nsvects] #type:ignore
             ns=self.get_PETSc().NullSpace().create(constant=False,vectors=petscvects)
             self.petsc_mat.setNullSpace(ns) #type:ignore
             
@@ -754,8 +758,13 @@ class FieldSplitPETSCSolver(PETSCSolver):
 
         numfields:int=numpy.amax(self._fieldsplit_map)+1 #type:ignore
         fields = []
-        ownerrange=self.petsc_mat.getOwnershipRange()        
-        globsize=self.petsc_mat.getSize()[0]
+        # By the time _perform_field_split runs (called from setup_solver, after the matrix has
+        # been assembled in solve_serial/solve_distributed), self.petsc_mat is always a real PETSc
+        # Mat, never None. Capture it locally so pyright can see a single non-None type throughout.
+        petsc_mat=self.petsc_mat
+        assert petsc_mat is not None
+        ownerrange=petsc_mat.getOwnershipRange() #type:ignore
+        globsize=petsc_mat.getSize()[0] #type:ignore
         
         for i in range(numfields):
             IS = PETSc.IS() #type:ignore
@@ -774,7 +783,7 @@ class FieldSplitPETSCSolver(PETSCSolver):
 
     def assemble_preconditioner(self,name:str,restrict_on_field_split:int | None=None)->Any:               
         _res, n, _M_nzz, nrow_local, M_values_arr, M_colindex_arr, M_row_start_arr=self.problem._assemble_residual_jacobian(name)
-        P=PETSc.Mat().createAIJ(size=((nrow_local, n), (nrow_local, n),), csr=( M_row_start_arr,M_colindex_arr, M_values_arr)) # TODO: Must be destroyed!
+        P=PETSc.Mat().createAIJ(size=((nrow_local, n), (nrow_local, n),), csr=( M_row_start_arr,M_colindex_arr, M_values_arr)) #type:ignore # TODO: Must be destroyed!
         if restrict_on_field_split is not None:
             assert self._fieldsplit is not None
             ps = self._fieldsplit[restrict_on_field_split][1] #type:ignore
@@ -784,7 +793,11 @@ class FieldSplitPETSCSolver(PETSCSolver):
     def define_preconditioner(self):
         if self.preconditioner_matrix_name is not None:
             P=self.assemble_preconditioner(self.preconditioner_matrix_name)
-            self.ksp.setOperators(self.petsc_mat,P)
+            # setup_solver() (the only caller of define_preconditioner) always creates self.ksp
+            # beforehand via the base class's setup_solver(), so it is never None here.
+            ksp=self.ksp
+            assert ksp is not None
+            ksp.setOperators(self.petsc_mat,P) #type:ignore
 
     def setup_solver(self):
         
