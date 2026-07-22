@@ -398,10 +398,13 @@ class UNIFACMultiReturnExpression(CustomMultiReturnExpression):
         self.argument_order=list(self.mix.required_adv_diff_fields)        
         self.argument_order.sort()        
         self.argument_order_with_passive=self.argument_order.copy()
+        assert self.mix.passive_field is not None, "The mixture "+str(self.mix)+" has no passive field set (it must have at least one component)"
         self.argument_order_with_passive.append(self.mix.passive_field)
-        
-        
-        self.server=ActivityModel.get_activity_model_by_name(modelname)
+
+
+        server=ActivityModel.get_activity_model_by_name(modelname)
+        assert isinstance(server,UNIFACLikeActivityModel), "UNIFACMultiReturnExpression requires a UNIFAC-like activity model, got "+str(type(server))+" for model name "+modelname
+        self.server:UNIFACLikeActivityModel=server
         unifac_components:dict[str,UNIFACMolecule]={cn:UNIFACMolecule(cn,self.server) for cn in mix.components}
         for cn in mix.components:
             comp=mix.pure_properties[cn]
@@ -437,8 +440,8 @@ class UNIFACMultiReturnExpression(CustomMultiReturnExpression):
         self.unifac_mix._nu=self._nu
         self.unifac_mix._group_Qs=self._group_Qs
 
-        self.rs=[0]*len(self.argument_order_with_passive)
-        self.qs=[0]*len(self.argument_order_with_passive)
+        self.rs:list[float]=[0]*len(self.argument_order_with_passive)
+        self.qs:list[float]=[0]*len(self.argument_order_with_passive)
         self.thetas_pure={}
         for c in self.unifac_mix.components:
             i=self.component_name_to_arg_index[c.name]
@@ -502,18 +505,19 @@ class UNIFACMultiReturnExpression(CustomMultiReturnExpression):
             """
 
         # First get the Thetas at this composition
-        counts_matrix = {n:[] for n in self._allgroups.keys()}
+        counts_matrix:dict[str,list[int]] = {n:[] for n in self._allgroups.keys()}
         for j, c in enumerate(self.argument_order_with_passive):
             for sgn in self._allgroups.keys():
                 counts_matrix[sgn].append(self._nu[c][sgn])
+        counts_matrix_np:dict[str,NPAnyArray] = {}
         for sgn in self._allgroups.keys():
-            counts_matrix[sgn]=numpy.array(counts_matrix[sgn])
-            counts_matrix[sgn][:-1]-=counts_matrix[sgn][-1]
+            counts_matrix_np[sgn]=numpy.array(counts_matrix[sgn])
+            counts_matrix_np[sgn][:-1]-=counts_matrix_np[sgn][-1]
         for sgi,sgn in enumerate(self._allgroups.keys()):
             res+="double Theta_sg_"+str(sgi)+ " = "
-            if counts_matrix[sgn][-1]!=0:
-                res+=str(counts_matrix[sgn][-1])+" + "
-            res+=("+".join(["("+str(counts_matrix[sgn][i])+")"+"*molefracs["+str(i)+"]" for i in range(T_index) if counts_matrix[sgn][i]!=0]))+""";
+            if counts_matrix_np[sgn][-1]!=0:
+                res+=str(counts_matrix_np[sgn][-1])+" + "
+            res+=("+".join(["("+str(counts_matrix_np[sgn][i])+")"+"*molefracs["+str(i)+"]" for i in range(T_index) if counts_matrix_np[sgn][i]!=0]))+""";
             """
         res+="double Theta_denom = "+ ("+".join("Theta_sg_"+str(sgi) for sgi in range(len(self._allgroups))))+""";
             """

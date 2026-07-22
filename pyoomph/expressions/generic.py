@@ -322,7 +322,7 @@ def test_scale_factor(arg:str | NameStrSequence,tag:list[str]=[],domain:"str | F
 			res.append(_pyoomph.GiNaC_testscale(a,domain,tag))	
 		return tuple(res)
 
-test_scale_factor.__test__=False
+test_scale_factor.__test__=False #type:ignore
 
 
 def is_zero(arg:ExpressionOrNum,parameters_to_float:bool=False)->bool:
@@ -345,10 +345,10 @@ def is_zero(arg:ExpressionOrNum,parameters_to_float:bool=False)->bool:
 	elif isinstance(arg,Expression): # type: ignore
 		return arg.is_zero()
 	elif isinstance(arg,_pyoomph.GiNaC_GlobalParam):
-	    if parameters_to_float:
-	        return arg.value==0
-	    else:
-	        return False
+		if parameters_to_float:
+			return arg.value==0
+		else:
+			return False
 	else:
 		raise ValueError("Cannot test for zero: "+repr(arg))
 
@@ -450,9 +450,9 @@ def minimize_functional_derivative(F:ExpressionOrNum,only_with_respect_to:Expres
         
     flags=0
     if coordinate_system is None:
-        coordinate_system=_pyoomph.Expression(0)
+        coordsys_expr=_pyoomph.Expression(0)
     else:
-        coordinate_system = 0 + _pyoomph.GiNaC_wrap_coordinate_system(coordinate_system)
+        coordsys_expr = 0 + _pyoomph.GiNaC_wrap_coordinate_system(coordinate_system)
     # Must agree with weak(a,b) flags
     if dimensional_dx:
         flags+=2
@@ -464,8 +464,8 @@ def minimize_functional_derivative(F:ExpressionOrNum,only_with_respect_to:Expres
     flags=Expression(flags)
     if not isinstance(F,_pyoomph.Expression):
         F=_pyoomph.Expression(F)
-          
-    return _pyoomph.GiNaC_minimize_functional_derivative(F,only_with_respect_to,flags,coordinate_system)
+
+    return _pyoomph.GiNaC_minimize_functional_derivative(F,only_with_respect_to,flags,coordsys_expr)
 
 
 def timestepper_weight(order:int,index:int,scheme:TimeSteppingScheme="BDF1")->Expression:
@@ -500,16 +500,18 @@ def eval_flag(which:str)->Expression:
 	return _pyoomph.GiNaC_EvalFlag(which)
 
 
+_nondim_field=nondim # capture a reference to the module-level nondim() function, since the "nondim" parameter of mesh_velocity() below shadows it within that function's scope
+
 def mesh_velocity(scheme:OptionalTimeSteppingScheme=None,nondim:bool=False)->Expression:
 	"""
 	Get the mesh velocity, i.e. the time derivative of the mesh coordinates without ALE correction.
- 
+
 	Returns:
 		Expression: Just a shorthand for `partial_t(var("mesh"),ALE=False)`.
 	"""
 	if scheme in ["TPZ","MPT","Simpson","Boole","trapezoidal","Kepler","Milne","midpoint"]:
 		scheme="BDF1"
-	return partial_t(nondim("mesh") if nondim else var("mesh"),ALE=False,scheme=scheme,nondim=nondim)
+	return partial_t(_nondim_field("mesh") if nondim else var("mesh"),ALE=False,scheme=scheme,nondim=nondim)
 
 
 def partial_t(f:ExpressionOrNum | str,order:int=1,ALE:Literal["auto"] | bool="auto",scheme:OptionalTimeSteppingScheme=None,nondim:bool=False)->Expression:
@@ -692,7 +694,7 @@ def testfunction(arg:str | Expression | NameStrSequence | ExprStrSequence,tag:li
 			res.append(testfunction(n,tag=tag,domain=domain,dimensional=dimensional))		
 		return tuple(res)
 
-testfunction.__test__=False
+testfunction.__test__=False #type:ignore
 
 
 def diff(f:ExpressionOrNum,*arg:Expression)->Expression:
@@ -733,7 +735,7 @@ def symbolic_diff(expr:ExpressionOrNum,x:Expression | str,hold_until_codegen:boo
 	Raises:
 		RuntimeError: If the differentiation cannot be performed.
 	"""
-	dummy=_pyoomph.GiNaC_new_symbol("__symdiff_dx_"+str(symbolic_diff.counter))
+	dummy=_pyoomph.GiNaC_new_symbol("__symdiff_dx_"+str(symbolic_diff.counter)) #type:ignore
 	varis={}
 	nondims={}
 	params={}
@@ -766,7 +768,7 @@ def symbolic_diff(expr:ExpressionOrNum,x:Expression | str,hold_until_codegen:boo
 			xn=str(x.op(0))
 			varis[xn]=dummy*scale_factor(xn)
 			nondims[xn]=dummy
-			iplace_subs[var(x)]=dummy
+			iplace_subs[var(xn)]=dummy
 			iplace_subs[x]=dummy/scale_factor(xn)
 			revsubs=x   
 		else:
@@ -784,7 +786,7 @@ def symbolic_diff(expr:ExpressionOrNum,x:Expression | str,hold_until_codegen:boo
 	else:
 		res=_pyoomph.GiNaC_subs(dbydummy,dummy,revsubs)
 	return res
-symbolic_diff.counter=0
+symbolic_diff.counter=0 #type:ignore
         
 
 def matrix(mlist:list[list[ExpressionOrNum]],fill_to_max_vector_dim:bool=True,fill_identity:bool=False)->Expression:
@@ -958,10 +960,12 @@ def vector(*args:ExpressionOrNum | Sequence[ExpressionOrNum])->Expression:
 	else:
 		vlist:list[ExpressionOrNum]=[]
 		for a in args:
+			if isinstance(a,Sequence):
+				raise RuntimeError("Either call vector(compo1,compo2,...) or vector([compo1,compo2,...])")
 			a=0+a
 			if not isinstance(a,(_pyoomph.Expression,float,int)):
 				raise RuntimeError("Strange vector component "+str(a))
-			vlist.append(a)	
+			vlist.append(a)
 	
 	exlist:list[Expression]=[]
 	for a in vlist:

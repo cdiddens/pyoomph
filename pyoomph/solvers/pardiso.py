@@ -50,7 +50,8 @@ if TYPE_CHECKING:
 def _try_to_find_lib(nam:str | list[str])->CDLL | None:
     # First try to find the library via the packages
     try:
-        mkl_rt=[p for p in metadata.files('mkl') if 'mkl_rt' in str(p)]
+        mkl_files=metadata.files('mkl')
+        mkl_rt=[p for p in (mkl_files or []) if 'mkl_rt' in str(p)]
         if len(mkl_rt)==1:
             mkl_rt=first(mkl_rt)
             res=CDLL(mkl_rt.locate())
@@ -330,8 +331,6 @@ class pardisoSolver(object):
         
         if rhs is None:
             nrhs = 0
-            if np is None and phase==-1:
-                return
             x = np.zeros(1) #type:ignore
             rhs = np.zeros(1) #type:ignore
         else:
@@ -471,7 +470,8 @@ class PardisoSolver(GenericLinearSystemSolver):
                 b[:]=sol[:]
             else:
                 if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine():
-                    sol=self.problem._custom_assembler.custom_solve_routine(lambda rhs : self._current_pardiso.solve(rhs), b)
+                    pd = self._current_pardiso
+                    sol=self.problem._custom_assembler.custom_solve_routine(lambda rhs : pd.solve(rhs), b) #type:ignore
                 else:
                     sol = self._current_pardiso.solve(self.get_b(n,b))
             if self.verbose:
@@ -494,15 +494,16 @@ class PardisoSolver(GenericLinearSystemSolver):
             for i in range(nrow_local):
                 rows[row_start[i]:row_start[i + 1]] = first_row + i            
             nnz_local = len(data)
-            cols = global_col_index            
-            data = values
+            cols = global_col_index
+            data_values = values
             comm=get_mpi_world_comm()
             #all_nnz = comm.gather(nnz_local, root=0)
             all_rows = comm.gather(rows, root=0)
             all_cols = comm.gather(cols, root=0)
-            all_data = comm.gather(data, root=0)                           
-                        
-            if rank==0:            
+            all_data = comm.gather(data_values, root=0)
+
+            if rank==0:
+                assert all_rows is not None and all_cols is not None and all_data is not None
                 global_rows = np.concatenate(all_rows)
                 global_cols = np.concatenate(all_cols)
                 global_data = np.concatenate(all_data)
@@ -531,20 +532,24 @@ class PardisoSolver(GenericLinearSystemSolver):
                 displs = None
                 b_global = None
             
-            comm.Gatherv(sendbuf=b,recvbuf=[b_global, counts, displs, MPI.DOUBLE],root=0)            
-            
+            comm.Gatherv(sendbuf=b,recvbuf=[b_global, counts, displs, MPI.DOUBLE],root=0)
+
+            sol:NPFloatArray | NPComplexArray | None = None
             if rank==0:
                 self.setup_solver()
                 assert self._current_pardiso is not None
+                assert b_global is not None
+                pd = self._current_pardiso
                 if self.try_to_reuse_solver:
                     raise NotImplementedError("try_to_reuse_solver not implemented yet when running with MPI")
                 if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine():
-                    sol=self.problem._custom_assembler.custom_solve_routine(lambda rhs : self._current_pardiso.solve(rhs), b)
+                    sol=self.problem._custom_assembler.custom_solve_routine(lambda rhs : pd.solve(rhs), b) #type:ignore
                 else:
-                    sol = self._current_pardiso.solve(self.get_b(n,b_global))                
-                                
+                    sol = self._current_pardiso.solve(self.get_b(n,b_global))
+
             if rank == 0:
-                counts = np.array(counts, dtype=np.int32)    
+                assert sol is not None
+                counts = np.array(counts, dtype=np.int32)
                 displs = np.zeros(len(counts), dtype=np.int32)
                 displs[1:] = np.cumsum(counts[:-1])
                 x_global = sol.copy()

@@ -51,6 +51,9 @@ class CustomMathExpression(_pyoomph.CustomMathExpression):
         super().__init__()
         self._symbolic_derivative: dict[int, CustomMathExpression] = {}
         self.fd_epsilon = 1e-8
+        # Guard reference used in outer_derivative() to keep the parent CustomMathExpression
+        # alive on the Python side (see comment there for why this is required).
+        self._diff_parent_guard: Optional["CustomMathExpression"] = None
 
     def get_id_name(self) -> str:
         """
@@ -166,11 +169,11 @@ class CustomMathExpression(_pyoomph.CustomMathExpression):
         xn = [x.op(i) for i in range(x.nops())]
         return self._symbolic_derivative[index](*xn)
 
-    def real_part(self,invokation:_pyoomph.Expression, arglst:list[_pyoomph.Expression]):          
+    def real_part(self,invokation:_pyoomph.Expression, arglst:Sequence[_pyoomph.Expression]):
         # Just assume everything is real here, i.e. replicate myself
-        return self(*arglst) 
-    
-    def imag_part(self,invokation:_pyoomph.Expression, arglst:list[_pyoomph.Expression]):
+        return self(*arglst)
+
+    def imag_part(self,invokation:_pyoomph.Expression, arglst:Sequence[_pyoomph.Expression]):
         # Just assume everything is real here, i.e. return 0
         return Expression(0)
 
@@ -298,10 +301,10 @@ class CustomMultiReturnExpression(_pyoomph.CustomMultiReturnExpression):
 
     # Sometimes, we know that some derivative is e.g. a constant or even zero. In that case, we can return it here. It will be substituted in the derived expression
     # If it is e.g. 0, this simplifies the Jacobian term and requires less computation
-    def use_symbolic_derivative(self,arg_list: list[Expression],i_res:int,j_arg:int)->ExpressionOrNum | None:
+    def use_symbolic_derivative(self,arg_list: Sequence[Expression],i_res:int,j_arg:int)->ExpressionOrNum | None:
         return None # By default, always do the numerical ones
 
-    def _get_symbolic_derivative(self,arg_list:list[Expression],i_res:int,j_arg:int)->tuple[bool,Expression]:
+    def _get_symbolic_derivative(self,arg_list:Sequence[Expression],i_res:int,j_arg:int)->tuple[bool,Expression]:
         res=self.use_symbolic_derivative(arg_list,i_res,j_arg)
         zero=Expression(0)
         if res is None:
@@ -426,16 +429,16 @@ class CustomMultiReturnExpression(_pyoomph.CustomMultiReturnExpression):
         diffmat=[[r.diff(a) for a in arg_symbs] for r in res]
         listed=[]
         for r in diffmat:
-	        for e in r:
-		        listed.append(e)
-        sub_exprs, simplified_exprs = sympy.cse(tuple(listed))
+            for e in r:
+                listed.append(e)
+        sub_exprs, simplified_exprs = cast("Tuple[List[Any], List[Any]]", sympy.cse(tuple(listed)))
         for s in sub_exprs:
-	        print(s[0],"=",s[1])
+            print(s[0],"=",s[1])
         print("#Jacobian entries:")
         if fill_zero_before:
             print("derivative_matrix.fill(0.0)")
         diffmat=[]
-        for i in range(len(res)):	    
+        for i in range(len(res)):
             for j in range(len(arg_symbs)):
                 if fill_zero_before:
                     if simplified_exprs[i*len(arg_symbs)+j].is_number:

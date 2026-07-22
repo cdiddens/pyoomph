@@ -28,7 +28,7 @@ from __future__ import annotations
  
 from scipy import optimize
 from ..expressions.generic import ExpressionNumOrNone,var,partial_t
-from ..generic.codegen import InterfaceEquations,Equations
+from ..generic.codegen import InterfaceEquations,Equations,FiniteElementCodeGenerator
 from ..meshes.mesh import AnySpatialMesh, InterfaceMesh, MeshFromTemplate2d,MeshFromTemplateBase,Node,Element,AnyMesh
 from ..meshes.meshdatacache import MeshDataCache, MeshDataCacheEntry
 from ..meshes.remesher import Remesher2d,RemesherBase, RemesherPointEntry
@@ -39,7 +39,7 @@ from ..typings import *
 
 if TYPE_CHECKING:
     from ..generic.problem import Problem
-    from ..generic.codegen import EquationTree,FiniteElementCodeGenerator
+    from ..generic.codegen import EquationTree
 
 
 # Basic class to handle pinch-off and coalescence. Can be customized
@@ -198,6 +198,7 @@ class BaseAxisymmetricPinchoffAndCoalescence(InterfaceEquations):
         if self.get_current_code_generator()._get_opposite_interface() is None:
             return None,None
         opp=self.get_current_code_generator()._get_opposite_interface()
+        assert isinstance(opp,FiniteElementCodeGenerator)
         return self.get_interface_and_axisymm_name(remesher,opp)
 
 
@@ -403,12 +404,17 @@ class AxisymmetricPinchoffAndCoalescence(BaseAxisymmetricPinchoffAndCoalescence)
             for ndarclength in sorted(roots):
                 # if r<pinch_off distance and positive curvature (i.e. r(arclength) has a minimum)
                 # and we are sufficiently away from the ends of the segment
-                if intr(ndarclength)<self._rmin_nd and ddinter(ndarclength)>0 and ndarclength>distf and ndarclength<1-distf:
+                if intr(ndarclength)<self._rmin_nd and ddinter(ndarclength)>0 and ndarclength>distf and ndarclength<1-distf: #type:ignore
                     # Check if we are close to a previous point
                     if len(self._pinch_off_points[linenum])==0 or ndarclength-self._pinch_off_points[linenum][-1][0]>distf:
-                        if not self.check_mesh_motion_direction or int_mesh_velo_r(ndarclength)<0: # checking radial mesh velocity if desired
+                        # checking radial mesh velocity if desired
+                        mesh_velo_ok=True
+                        if self.check_mesh_motion_direction:
+                            assert int_mesh_velo_r is not None
+                            mesh_velo_ok=int_mesh_velo_r(ndarclength)<0 #type:ignore
+                        if mesh_velo_ok:
                             # Found a pinch-off. Add it to the list
-                            self._pinch_off_points[linenum].append((ndarclength,float(inty(ndarclength))))
+                            self._pinch_off_points[linenum].append((ndarclength,float(inty(ndarclength)))) #type:ignore
                             has_pinch_off=True 
         if has_pinch_off:
             print("Must remesh due to pinch-off at non-dimensional (arclength,y) values ",self._pinch_off_points)
@@ -445,6 +451,7 @@ class AxisymmetricPinchoffAndCoalescence(BaseAxisymmetricPinchoffAndCoalescence)
             return False
        
         
+        mesh_velo_z:NPFloatArray | None=None
         if self.check_mesh_motion_direction:
             mesh_velo_z=interface_data.get_data("_topo_mesh_v_r")
             assert mesh_velo_z is not None
@@ -455,6 +462,7 @@ class AxisymmetricPinchoffAndCoalescence(BaseAxisymmetricPinchoffAndCoalescence)
             s2=coords[1,l2[0]]
             dy=s2-e1 # distance of the end of the lower segment and the start of the upper segment
             if self.check_mesh_motion_direction:
+                assert mesh_velo_z is not None
                 uz_e1=mesh_velo_z[l1[-1]] # mesh z-velocity of the upper point of the lower segment
                 uz_s2=mesh_velo_z[l2[0]] # mesh z-velocity of the lower point of the upper segment
                 if uz_s2-uz_e1>0:
@@ -469,21 +477,29 @@ class AxisymmetricPinchoffAndCoalescence(BaseAxisymmetricPinchoffAndCoalescence)
 
 
     def before_mesh_to_mesh_interpolation(self, eqtree: "EquationTree", interpolator: "BaseMeshToMeshInterpolator"):
-        self.ensure_nondimensional_distance_parameters(eqtree.get_mesh().get_problem())
+        mesh=eqtree.get_mesh()
+        assert isinstance(mesh,InterfaceMesh)
+        self.ensure_nondimensional_distance_parameters(mesh.get_problem())
         assert isinstance(interpolator,InternalInterpolator)
-        remesher=eqtree.get_mesh().get_bulk_mesh()._templatemesh.remesher
+        bulk_mesh=mesh.get_bulk_mesh()
+        assert isinstance(bulk_mesh,MeshFromTemplateBase)
+        remesher=bulk_mesh._templatemesh.remesher
         assert isinstance(remesher,Remesher2d)
         interface_name,axisymm_name=self.get_interface_and_axisymm_name(remesher)
         # Tell the remesher to ignore points at the intersection of the axis of symmetry and the free interface from interpolation
         # if there is no point on the old intersection of these interfaces within the range. Will happen at pinch-offs
         # In that case, we just take the values from the closes point on the old interface or axis itself, not on the mutual point
-        interpolator.boundary_max_distances[interface_name+'/'+axisymm_name]=self._rmin_nd*2
-        interpolator.boundary_max_distances[axisymm_name+'/'+interface_name]=self._rmin_nd*2
+        # (only meaningful if pinch-off checking is actually enabled; self._rmin_nd stays None otherwise)
+        rmin_nd=self._rmin_nd
+        if rmin_nd is not None:
+            interpolator.boundary_max_distances[interface_name+'/'+axisymm_name]=rmin_nd*2
+            interpolator.boundary_max_distances[axisymm_name+'/'+interface_name]=rmin_nd*2
     #    print("IMDIST_EE",interpolator.boundary_max_distances)
         if self.assign_zeta_coordinates:
             new_mesh=self.get_mesh()
             old_mesh=interpolator.old.get_mesh(new_mesh.get_name())
-            old_data=self.assign_zetas(old_mesh)            
+            assert isinstance(old_mesh,InterfaceMesh)
+            old_data=self.assign_zetas(old_mesh)
             if self._has_pinch_off or self._has_coalescence:
                 #for d in old_data:
                 #    print(d)
@@ -526,7 +542,6 @@ class AxisymmetricPinchoffAndCoalescence(BaseAxisymmetricPinchoffAndCoalescence)
             raise RuntimeError("NODEMAP AND SEGMENT LENGTH MISMATCH")
 
 
-        alengths:list[float]=[]
         ptinds:list[int]=[]
         aleng=0.0
 
@@ -541,14 +556,14 @@ class AxisymmetricPinchoffAndCoalescence(BaseAxisymmetricPinchoffAndCoalescence)
                 aleng+=dl
                 alength_seg.append(aleng)
                 ptinds.append(ptind)
-                oldx,oldy=x,y                                               
-            alength_seg=numpy.array(alength_seg)/alength_seg[-1]            
-            aleng_segs.append(alength_seg)
+                oldx,oldy=x,y
+            alength_seg_arr=numpy.array(alength_seg)/alength_seg[-1]
+            aleng_segs.append(alength_seg_arr)
         offs=0.0
         for i in range(len(aleng_segs)):
             aleng_segs[i]+=offs
             offs=aleng_segs[i][-1]+1 # Here the pinch-off and coalescence dynamics has to go
-        alengths=numpy.concatenate(aleng_segs)
+        alengths:NPFloatArray=numpy.concatenate(aleng_segs)
 
         res:list[tuple[float,float,float]]=[]
         for al,pti in zip(alengths,ptinds):
@@ -738,7 +753,7 @@ class AxisymmetricPinchoffAndCoalescence(BaseAxisymmetricPinchoffAndCoalescence)
                     int_s2_y=InterpolatedUnivariateSpline(als2,s2y,k=min(3,len(als2)))
                     numsampls=1000
                     alsampls=numpy.linspace(0,maxal,numsampls)
-                    dists=numpy.sqrt((int_s1_x(alsampls)-int_s2_x(alsampls))**2+(int_s1_y(alsampls)-int_s2_y(alsampls))**2)                    
+                    dists=numpy.sqrt((int_s1_x(alsampls)-int_s2_x(alsampls))**2+(int_s1_y(alsampls)-int_s2_y(alsampls))**2) #type:ignore
                     # Find the last index that is sufficiently away
                     maxind=len(dists)-1
                     while dists[maxind-1]>remdist_r and maxind>1:

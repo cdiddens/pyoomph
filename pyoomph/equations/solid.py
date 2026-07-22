@@ -21,7 +21,7 @@ class BaseSolidConstitutiveLaw:
         else:
             return expr
         
-    def is_incompressible(self):
+    def is_incompressible(self)->bool:
         """
         If this returns True, the constitutive law is incompressible. This means that the determinant of the deformation gradient is equal to the determinant of the undeformed configuration. The solid equations will then introduce a pressure variable that is used to enforce this condition.
         """
@@ -61,15 +61,15 @@ class BaseSolidConstitutiveLaw:
         """
         return self._subexpression((self.get_Gij(dim)-self.get_gij(dim,isotropic_growth_factor))/2)
     
-    def get_sigma(self,dim:int,isotropic_growth_factor:ExpressionNumOrNone=1,pressure_var:Expression | None=None):
+    def get_sigma(self,dim:int,isotropic_growth_factor:ExpressionNumOrNone=1,pressure_var:Expression | None=None)->Expression:
         """
         Returns the second Piola-Kirchhoff stress tensor. The method must be implemented in derived classes.
 
         Args:
-            dim: Element dimension. 
+            dim: Element dimension.
             isotropic_growth_factor: Expression or numerical value representing the isotropic growth factor. Defaults to 1.
             pressure_var (Optional[Expression], optional): Pressure variable for incompressible cases. Defaults to None.
-        
+
         """
         raise RuntimeError("get_sigma must be implemented in the derived class")
     
@@ -77,7 +77,7 @@ class IncompressibleSolidConstitutiveLaw(BaseSolidConstitutiveLaw):
     """
     Base class for incompressible solid constitutive laws. The method get_sigma must be implemented in derived classes.     
     """
-    def is_incompressible(self):
+    def is_incompressible(self)->bool:
         """
         Returns True, indicating that this is an incompressible solid constitutive law.
         """
@@ -102,13 +102,14 @@ class GeneralizedHookeanSolidConstitutiveLaw(BaseSolidConstitutiveLaw):
         
         
 
-    def get_sigma(self,dim:int,isotropic_growth_factor:ExpressionOrNum=1,pressure_var:Expression | None=None):
+    def get_sigma(self,dim:int,isotropic_growth_factor:ExpressionNumOrNone=1,pressure_var:Expression | None=None):
         se=lambda x : self._subexpression(x)
         Gup=self.get_G_up_ij(dim)
-        gammakl=self.get_gammaij(dim,isotropic_growth_factor)
+        igf=isotropic_growth_factor if isotropic_growth_factor is not None else 1
+        gammakl=self.get_gammaij(dim,igf)
         if dim is None:
             raise RuntimeError("dim must be specified")
-        
+
         E=lambda i,j,k,l : se(self.E/(1+self.nu))*(se(self.nu/(1-2*self.nu))*Gup[i,j]*Gup[k,l]+(Gup[i,k]*Gup[j,l]+Gup[i,l]*Gup[j,k])/2)
         sigma_up_ij=lambda i,j : sum(E(i,j,k,l)*gammakl[k,l] for k in range(3) for l in range(3))
         sigma=matrix([[sigma_up_ij(i,j) for j in range(3)] for i in range(3)])
@@ -128,8 +129,9 @@ class IncompressibleHookeanSolidConstitutiveLaw(IncompressibleSolidConstitutiveL
 
     def get_sigma(self,dim:int,isotropic_growth_factor:ExpressionNumOrNone=1,pressure_var:Expression | None=None):
         se=lambda x : self._subexpression(x)
-        Gup=self.get_G_up_ij()
-        gammakl=self.get_gammaij(dim,isotropic_growth_factor)
+        Gup=self.get_G_up_ij(dim)
+        igf=isotropic_growth_factor if isotropic_growth_factor is not None else 1
+        gammakl=self.get_gammaij(dim,igf)
         if dim is None:
             raise RuntimeError("dim must be specified")
         bar_sigma_up_ij=lambda i,j : se(sum((Gup[i,k]*Gup[j,l]+Gup[i,l]*Gup[j,k])*gammakl[k,l] for k in range(3) for l in range(3)))
@@ -139,7 +141,7 @@ class IncompressibleHookeanSolidConstitutiveLaw(IncompressibleSolidConstitutiveL
     
 
 class BaseDeformableSolidEquations(BaseMovingMeshEquations):
-    def __init__(self, mass_density:ExpressionOrNum=0,bulkforce:ExpressionOrNum=0,coordinate_space = None,first_order_time_derivative=False,scale_for_FSI:bool=False,modulus_for_scaling:ExpressionOrNum=None,isotropic_growth_factor:ExpressionOrNum=1,pressure_space:FiniteElementSpaceEnum="DL",with_error_estimator=False,overdamped:bool=False):        
+    def __init__(self, mass_density:ExpressionOrNum=0,bulkforce:ExpressionOrNum=0,coordinate_space = None,first_order_time_derivative=False,scale_for_FSI:bool=False,modulus_for_scaling:ExpressionNumOrNone=None,isotropic_growth_factor:ExpressionOrNum=1,pressure_space:FiniteElementSpaceEnum="DL",with_error_estimator=False,overdamped:bool=False):
         super().__init__(coordinate_space,  None)
         self.scale_for_FSI=scale_for_FSI
         self.mass_density=mass_density
@@ -147,25 +149,26 @@ class BaseDeformableSolidEquations(BaseMovingMeshEquations):
         self.bulkforce=bulkforce
         self.first_order_time_derivative=first_order_time_derivative
         self.isotropic_growth_factor=isotropic_growth_factor
-        self.pressure_space=pressure_space
-        self.pressure_name="pressure" 
+        self.pressure_space:FiniteElementSpaceEnum=pressure_space
+        self.pressure_name="pressure"
         self.with_error_estimator=with_error_estimator
         self.overdamped=overdamped
-        
-    def is_incompressible(self):
+
+    def is_incompressible(self)->bool:
         return False
-        
-        
+
+
     def define_fields(self):
-        super().define_fields()                
+        super().define_fields()
         if self.is_incompressible():
             self.define_scalar_field(self.pressure_name,self.pressure_space)
         if self.first_order_time_derivative:
-            if self.coordinate_space is None:
+            coordinate_space=self.coordinate_space
+            if coordinate_space is None:
                 raise RuntimeError("coordinate_space must be specified for first order time derivative")
             if self.overdamped:
                 raise RuntimeError("overdamped=True is not compatible with first_order_time_derivative=True, since overdamped already reduces the time derivative order to one.")
-            self.define_vector_field("dt_mesh",self.coordinate_space,scale=scale_factor("spatial")/scale_factor("temporal"),testscale=scale_factor("temporal")/scale_factor("spatial"))
+            self.define_vector_field("dt_mesh",assert_valid_finite_element_space(coordinate_space),scale=scale_factor("spatial")/scale_factor("temporal"),testscale=scale_factor("temporal")/scale_factor("spatial"))
                     
     def define_scaling(self):        
         self.set_scaling(mesh= scale_factor("spatial"))
@@ -200,7 +203,7 @@ class LinearElasticitySolidEquations(BaseDeformableSolidEquations):
         super().__init__(mass_density, bulkforce, coordinate_space, first_order_time_derivative, scale_for_FSI, modulus_for_scaling,isotropic_growth_factor=isotropic_growth_factor,pressure_space=pressure_space,with_error_estimator=with_error_estimator)
         self.E,self.nu=E,nu
         
-    def is_incompressible(self):
+    def is_incompressible(self)->bool:
         return self.nu is None or is_zero(self.nu-0.5) or is_zero(self.nu-rational_num(1,2))
         
     def define_residuals(self):
@@ -213,9 +216,14 @@ class LinearElasticitySolidEquations(BaseDeformableSolidEquations):
         eps=sym(grad(u,lagrangian=True))
         
         if self.is_incompressible():
-            tau=self.E/(1+self.nu)*(eps)-var(self.pressure_name)*identity_matrix()  # Pressure is introduced as a Lagrange multiplier
+            # self.nu may be None here (used as a shorthand for "incompressible, nu unspecified"), in which
+            # case the incompressible limit nu->1/2 is used for the (non-singular) shear part of the stress.
+            nu_eff=self.nu if self.nu is not None else rational_num(1,2)
+            tau=self.E/(1+nu_eff)*(eps)-var(self.pressure_name)*identity_matrix()  # Pressure is introduced as a Lagrange multiplier
             self.add_weak(div(u,lagrangian=True),testfunction(self.pressure_name),lagrangian=True)
         else:
+            # is_incompressible() being False here guarantees self.nu is not None (see is_incompressible above)
+            assert self.nu is not None
             tau=self.E/(1+self.nu)*(self.nu/(1-2*self.nu)*trace(eps)*identity_matrix()+eps)
         
         super().define_residuals()  # Call the base class method to define the residuals for the inertia and bulk force terms
@@ -249,11 +257,11 @@ class DeformableSolidEquations(BaseDeformableSolidEquations):
             scale_for_FSI: If set, the scaling of the test function agrees with the scaling of the velocity test function ([X]/[P]). This is important to balance the tractions correctly
     """
     # TODO: Bulk force density in Lagrangian or Eulerian coordinates? Make two or a flag?
-    def __init__(self, constitutive_law:BaseSolidConstitutiveLaw, mass_density:ExpressionOrNum=0,bulkforce:ExpressionOrNum=0,coordinate_space = None,first_order_time_derivative=False,pressure_space:FiniteElementSpaceEnum="DL",with_error_estimator=False,isotropic_growth_factor:ExpressionOrNum=1,modulus_for_scaling:ExpressionOrNum=None,scale_for_FSI:bool=False,overdamped:bool=False):        
+    def __init__(self, constitutive_law:BaseSolidConstitutiveLaw, mass_density:ExpressionOrNum=0,bulkforce:ExpressionOrNum=0,coordinate_space = None,first_order_time_derivative=False,pressure_space:FiniteElementSpaceEnum="DL",with_error_estimator=False,isotropic_growth_factor:ExpressionOrNum=1,modulus_for_scaling:ExpressionNumOrNone=None,scale_for_FSI:bool=False,overdamped:bool=False):
         super().__init__(mass_density=mass_density,bulkforce=bulkforce,coordinate_space=coordinate_space, first_order_time_derivative=first_order_time_derivative,scale_for_FSI=scale_for_FSI,modulus_for_scaling=modulus_for_scaling,isotropic_growth_factor=isotropic_growth_factor,pressure_space=pressure_space,with_error_estimator=with_error_estimator,overdamped=overdamped)
-        self.constitutive_law=constitutive_law        
-                
-    def is_incompressible(self):
+        self.constitutive_law=constitutive_law
+
+    def is_incompressible(self)->bool:
         return self.constitutive_law.is_incompressible()
         
     def define_fields(self):
@@ -361,8 +369,9 @@ class FSIConnection(InterfaceEquations):
         self.add_weak(lu,utest)
         self.add_weak(-lu,xsoltest)
         
-    def before_assigning_equations_postorder(self, mesh):
-        comps=[ x[-1] for x in self.get_combined_equations()._vectorfields["_mesh_connection"] ]
+    def before_assigning_equations_postorder(self, mesh:"AnyMesh"):
+        comps=[ x[-1] for x in cast(Equations,self.get_combined_equations())._vectorfields["_mesh_connection"] ]
+        assert isinstance(mesh,InterfaceMesh)  # FSIConnection is an InterfaceEquations, so the mesh is always an InterfaceMesh here
         for direct in comps:
             self.pin_redundant_lagrange_multipliers(mesh,"_mesh_connection_"+direct,["mesh_"+direct])
             self.pin_redundant_lagrange_multipliers(mesh,"_velo_connection_"+direct,["velocity_"+direct])

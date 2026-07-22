@@ -44,7 +44,8 @@ from pygmsh.common.point import Point #type:ignore
 from pygmsh.common.line import Line #type:ignore
 from pygmsh.common.spline import Spline #type:ignore
 from pygmsh.common.bspline import BSpline #type:ignore
-from pygmsh.common.circle_arc import CircleArc #type:ignore 
+from pygmsh.common.circle_arc import CircleArc #type:ignore
+from pygmsh.common.ellipse_arc import EllipseArc #type:ignore
 
 from pygmsh.common.plane_surface import PlaneSurface #type:ignore
 from pygmsh.common.surface import Surface #type:ignore
@@ -319,7 +320,7 @@ class GmshTemplate(MeshTemplate):
         self._geom:pygmsh.geo.Geometry | None = None
         self._named_entities:dict[str,list[object]] = {}
         self._rev_names:dict[object,str] = {}
-        self._dim_tag_names:dict[tuple[int,int],tuple(str,object)] = {}
+        self._dim_tag_names:dict[tuple[int,int],tuple[str,object]] = {}
         
         #: If set, the input mesh will be mirrored and copied along the given axis or axes. Useful to generate symmetric meshes for e.g. pitchfork tracking
         self.mirror_mesh:Literal["mirror_x", "mirror_y"] | list[Literal["mirror_x", "mirror_y"]] | None=None
@@ -330,11 +331,11 @@ class GmshTemplate(MeshTemplate):
         #self.gmsh_options["recombine_algo"] = 2
         #self.gmsh_options["recombine_algo"] = None
         self._entities2d:dict[int,PlaneSurface | Surface] = {}
-        self._entities1d:dict[int,Line | Spline | BSpline | CircleArc] = {}
+        self._entities1d:dict[int,Line | Spline | BSpline | CircleArc | EllipseArc] = {}
         self._entities0d:dict[int,Point] = {}
         self._pointhash:dict[tuple[float,float,float],Point] = {}
         self._point_size_hash:dict[Point,float] = {}
-        self._onedims_attached_to_point:dict[Point,set[Line | Spline | BSpline | CircleArc]]={}
+        self._onedims_attached_to_point:dict[Point,set[Line | Spline | BSpline | CircleArc | EllipseArc]]={}
         
 
         self._mesh_size_callback=None
@@ -418,8 +419,8 @@ class GmshTemplate(MeshTemplate):
                     c=c.float_value()
                 coord[i] = c
         x, y, z = cast(list[float],coord)
-        if self._pointhash.get(tuple([x, y, z])) is not None:
-            return self._pointhash[tuple([x, y, z])]
+        if self._pointhash.get((x, y, z)) is not None:
+            return self._pointhash[(x, y, z)]
         if size is None:
             size = self.default_resolution
         if size is not None:
@@ -434,12 +435,14 @@ class GmshTemplate(MeshTemplate):
         size=cast(float,size)
         if size is not None:
             if size<0:
+                if self.default_resolution is None:
+                    raise RuntimeError("A negative mesh resolution (i.e. size argument) is given relative to self.default_resolution, but self.default_resolution is not set")
                 size=-size*self.default_resolution
             size*=self.mesh_size_factor
         if size is not None and self.mesh_mode=="only_quads":
             size*=2
         res = self._geom.add_point([x, y, z], size) #type:ignore
-        self._pointhash[tuple([x, y, z])] = res
+        self._pointhash[(x, y, z)] = res
         self._point_size_hash[res]=size
         self._store_name(name, res)
         self._entities0d[res._id] = res #type:ignore
@@ -449,7 +452,7 @@ class GmshTemplate(MeshTemplate):
     def points(self,*coords:list[ExpressionOrNum],size:float | Sequence[float] | None=None) -> list[Point]:
         res:list[Point]=[]
         if size:
-            if isinstance(size,float):
+            if isinstance(size,(int,float)):
                 sizeC=[size]*len(coords)
             else:
                 sizeC=size
@@ -483,7 +486,7 @@ class GmshTemplate(MeshTemplate):
             self._named_entities[name] = []
         self._named_entities[name].append(obj)
         self._rev_names[obj] = name
-        self._dim_tag_names[obj.dim_tag] = (name,obj)
+        self._dim_tag_names[obj.dim_tag] = (name,obj) #type:ignore
 
     def _resolve_name(self, typ:str, *args:str | object)->list[object]:
         res:list[object] = []
@@ -693,6 +696,7 @@ class GmshTemplate(MeshTemplate):
                 name=None
             lin=self.line(pstart, pend, name=name)
             if lin is not None:
+                assert not isinstance(lin,list) # line() only returns a list when called with more than 2 points
                 res.append(lin)
         return res
 
@@ -758,7 +762,7 @@ class GmshTemplate(MeshTemplate):
             self._onedims_attached_to_point[p].add(res)
         return res
 
-    def create_circle_lines(self,centre:tuple[ExpressionOrNum, ...] | Point,radius:ExpressionOrNum,*,mesh_size:float | None=None,line_name:str | None=None)->list[Line]:
+    def create_circle_lines(self,centre:tuple[ExpressionOrNum, ...] | Point,radius:ExpressionOrNum,*,mesh_size:float | None=None,line_name:str | None=None)->list[CircleArc]:
         if not isinstance(centre,Point):
             centre=self.point(*centre)
         corners:list[Point]=[]
@@ -768,7 +772,9 @@ class GmshTemplate(MeshTemplate):
         corners.append(corners[0])
         lines:list[CircleArc]=[]
         for i in range(4):
-            lines.append(self.circle_arc(corners[i],corners[i+1],center=centre,name=line_name))
+            arc=self.circle_arc(corners[i],corners[i+1],center=centre,name=line_name)
+            assert isinstance(arc,CircleArc) # circle_arc() only returns a plain Line when called with through_point instead of center
+            lines.append(arc)
         return lines
             
 
@@ -809,6 +815,7 @@ class GmshTemplate(MeshTemplate):
             c = (x1 * x1 + y1 * y1) * (x2 - x3) + (x2 * x2 + y2 * y2) * (x3 - x1) + (x3 * x3 + y3 * y3) * (x1 - x2); #type:ignore
             if abs(a) < 1e-10: #type:ignore
                 res = self.line(startpt, endpt)
+                assert not isinstance(res,list) # line() only returns a list when called with more than 2 points
                 if res is not None:
                     self._store_name(name, res)
                     self._entities1d[res._id] = res #type:ignore
@@ -879,7 +886,7 @@ class GmshTemplate(MeshTemplate):
 
 
     def _get_boundary_corner_size_map(self)->dict[str,dict[tuple[float,...],float]]:
-        entlist:dict[Line | Spline | BSpline | CircleArc,set[Point]]=dict()
+        entlist:dict[Line | Spline | BSpline | CircleArc | EllipseArc,set[Point]]=dict()
         for pt,ptinfo in self._onedims_attached_to_point.items():
             for l in ptinfo:
                 if l not in entlist:
@@ -1024,7 +1031,10 @@ class GmshTemplate(MeshTemplate):
                 if len(hole_names)>0:
                     holes_names.append(hole_names)
             if len(holes_names)>0 and self.remesher is not None and name is not None:
-                self.remesher.set_holes(name,holes_names)
+                # set_holes is only defined on Remesher2d, not on the RemesherBase base class (e.g. RemesherViaRecreation
+                # lacks it). Guard with hasattr so other remesher types don't crash with an AttributeError here.
+                if hasattr(self.remesher,"set_holes"):
+                    self.remesher.set_holes(name,holes_names) #type:ignore
 
 
         resolved = self._resolve_name("lines", *args)
@@ -1410,16 +1420,19 @@ class GmshTemplate(MeshTemplate):
                                 curved = self._curved_entities2d.get(mygeoms[li]) #type:ignore
                                 if curved:
                                     self._has_curved_entries = True
+                            vertex_inds:list[int] | None = None
                             if cells.type=="triangle":
                                 vertex_inds=ninds[[0, 1, 2]] #type:ignore
                             elif cells.type=="triangle6":
-                                vertex_inds=ninds[[0, 1, 2]] # Let hope that this is correct
+                                vertex_inds=ninds[[0, 1, 2]] #type:ignore # Let hope that this is correct
                             elif cells.type=="quad":
                                 vertex_inds=ninds[[0, 1, 2, 3]] #type:ignore
                             elif cells.type=="quad9":
                                 #raise RuntimeError("TODO: Implement curved facets for second order triangles")
                                 # This has to be checked, but I think this is correct
-                                vertex_inds=ninds[[0, 1, 2, 3]] #type:ignore                            
+                                vertex_inds=ninds[[0, 1, 2, 3]] #type:ignore
+                            # cells.type was already checked to be one of the four handled above (see enclosing if at the top of this loop)
+                            assert vertex_inds is not None
                             self.add_facet_to_boundary(name, ninds,vertex_inds,curved)
 
 
@@ -1701,7 +1714,7 @@ class GmshTemplate(MeshTemplate):
                 pass
 
         # Go over it once more, finding the missing entities
-        given_names={a._id for a in self._rev_names}
+        given_names={a._id for a in self._rev_names} #type:ignore
         start_index=-1
         sub_index:int | None=None
 
@@ -1817,7 +1830,7 @@ class GmshTemplate(MeshTemplate):
                 pass
 
         # Go over it once more, finding the missing entities
-        given_names={a._id for a in self._rev_names}
+        given_names={a._id for a in self._rev_names} #type:ignore
         start_index=-1
         sub_index:int | None=None
 

@@ -36,6 +36,7 @@ from ..typings import *
 if TYPE_CHECKING:
     from ..generic.problem import Problem
     from ..generic.codegen import EquationTree
+    from ..solvers.generic import GenericEigenSolver
 
 class BaseMovingMeshEquations(Equations):
     """
@@ -74,7 +75,7 @@ class BaseMovingMeshEquations(Equations):
                 raise RuntimeError("can only set average positions of x,y,z, but not "+str(c))
             lagrs[c]=v
 
-        ode_additions = GlobalLagrangeMultiplier(**{lagrange_prefix+c:0 for c,_ in lagrs.items()},set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve)
+        ode_additions = GlobalLagrangeMultiplier(**{lagrange_prefix+c:0 for c,_ in lagrs.items()},set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve) #type:ignore
         #ode_additions +=TestScaling(**{lagrange_name:1/scale_factor("pressure")})
         #ode_additions += Scaling(**{lagrange_name: 1 / test_scale_factor("pressure")})
 
@@ -175,18 +176,20 @@ class LaplaceSmoothedMesh(BaseMovingMeshEquations):
 
 
 class SingleDirectionLaplaceSmoothedMesh(LaplaceSmoothedMesh):
-    def __init__(self, direction:int | Literal["x", "y", "z"], factor: ExpressionOrNum = scale_factor("spatial") ** 2,  coordinate_space: str | None = None, coordsys: OptionalCoordinateSystem = cartesian):
+    def __init__(self, direction:int | Literal["x", "y", "z"], factor: ExpressionOrNum = scale_factor("spatial") ** 2,  coordinate_space: str | None = None, coordsys: BaseCoordinateSystem | None = cartesian):
         super().__init__(factor, coordinate_space, coordsys, symmetrize=False)
-        self.direction=direction
+        self.direction:int
         if isinstance(direction,str):
             self.direction={"x":0,"y":1,"z":2}[direction]
-    
+        else:
+            self.direction=direction
+
     def define_residuals(self):
         dirn=["x","y","z"][self.direction]
         x,x_test = var_and_test("mesh_"+dirn)
         X = var("lagrangian_"+dirn)
         displ = x - X
-        coordsys=self.coordsys        
+        coordsys=self.coordsys
         tens=grad(displ,coordsys=coordsys,lagrangian=True)[self.direction]
         self.add_residual(self.factor*Weak(tens, grad(x_test,coordsys=coordsys, lagrangian=True)[self.direction],coordinate_system=coordsys) )
         ndim=self.get_mesh().get_code_gen().get_nodal_dimension()
@@ -481,8 +484,8 @@ class EnforceVolumeByPressure(IntegralConstraint):
             scaling_factor=1
         super().__init__(dimensional_dx=True,ode_storage_domain=ode_storage_domain, only_for_stationary_solve = only_for_stationary_solve, set_zero_on_normal_mode_eigensolve= set_zero_on_normal_mode_eigensolve, scaling_factor=scaling_factor,pressure=volume)        
         
-    def get_constraint(self,field:str,u:Expression):
-        return 1
+    def get_constraint(self,field:str,u:Expression)->Expression:
+        return Expression(1)
     
     def define_residuals(self):
         static=not self.get_current_code_generator()._coordinates_as_dofs
@@ -517,9 +520,9 @@ class EnforcedInterfacialLaplaceSmoothing(InterfaceEquations):
         self.verbose=True
         self.sorting=sorting
         
-    def define_fields(self):        
+    def define_fields(self):
         # Get the coordinate space
-        space=self._get_combined_element()._assert_codegen()._coordinate_space
+        space=cast(FiniteElementSpaceEnum,self._get_combined_element()._assert_codegen()._coordinate_space)
         # each interface will need a unique name, so that we have individual fields for each interface
         # This won't be necessary in the general case, since usually, you have corners between two boundaries
         fn=self._get_combined_element()._assert_codegen().get_full_name()
@@ -557,8 +560,9 @@ class EnforcedInterfacialLaplaceSmoothing(InterfaceEquations):
         # Fix the reference configuration
         self.set_Dirichlet_condition("_s_fixed_"+iname,True)
         
-    def before_assigning_equations_postorder(self, mesh):
+    def before_assigning_equations_postorder(self, mesh:"AnyMesh"):
         # Just make sure to initialize the arclengths of the interface nodes
+        assert isinstance(mesh,InterfaceMesh)
         fn=self._get_combined_element()._assert_codegen().get_full_name()
         iname="__".join(fn.split("/")[1:])
         data=mesh.get_problem().get_cached_mesh_data(mesh)
@@ -605,18 +609,18 @@ class EnforcedInterfacialLaplaceSmoothing(InterfaceEquations):
         return res
     
            
-    def _get_forced_zero_dofs_for_eigenproblem(self, eqtree, eigensolver, angular_mode, normal_k):
+    def _get_forced_zero_dofs_for_eigenproblem(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver", angular_mode:int | None, normal_k:float | None)->set[str | int]:
         if angular_mode is None:
             return set()
-        
+
         angular_mode=int(angular_mode)
         fn=self._get_combined_element()._assert_codegen().get_full_name()
-        iname="__".join(fn.split("/")[1:])        
-        
+        iname="__".join(fn.split("/")[1:])
+
         if angular_mode==0:
             return set()
-        else:            
-            info={fn+"/_s_fixed_"+iname,fn+"/_s_solved_"+iname,fn+"/_tang_shift_"+iname}
+        else:
+            info:set[str | int]={fn+"/_s_fixed_"+iname,fn+"/_s_solved_"+iname,fn+"/_tang_shift_"+iname}
             print("EnforcedInterfacialLaplaceSmoothing (mode m="+str(angular_mode)+"): Imposed zero tangential shift correction",self.get_current_code_generator().get_full_name(),"for",info)
             return info
         

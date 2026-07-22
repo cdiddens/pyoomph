@@ -31,6 +31,7 @@ import os,json
 
 import matplotlib
 import matplotlib.pyplot
+import matplotlib.colors
 from ..generic.codegen import Equations
 
 from ..meshes.mesh import AnySpatialMesh
@@ -73,10 +74,12 @@ class BasePlotter:
     """
     A generic class for plotting of problems. This class is not meant to be used directly, but to be inherited by a specific plotter class.
     """
-    def __init__(self,problem:"Problem",eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs"):
-        self._problem:"Problem"=problem
+    def __init__(self,problem:"Problem | None",eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs"):
+        # problem may be None here: some plotters are constructed without a problem and
+        # get self._problem assigned later by the Problem itself (see Problem.plot/output_step)
+        self._problem:"Problem | None"=problem
         # You can have more than one problem to plot, e.g. for comparison
-        self._named_problems:dict[str,"Problem"]={"":self._problem}
+        self._named_problems:dict[str,"Problem | None"]={"":self._problem}
         self._initialised=False
         self._output_step=0 # Will be set by the problem
         self.active=True
@@ -115,16 +118,19 @@ class BasePlotter:
             return self._eigenanimation_m
         if self.eigenvector is None:
             return None
-        elif self.get_problem(problem_name)._last_eigenvalues_m is None or self.eigenvector>=len(self.get_problem(problem_name)._last_eigenvalues_m):
+        last_eigenvalues_m=self.get_problem(problem_name)._last_eigenvalues_m
+        if last_eigenvalues_m is None or self.eigenvector>=len(last_eigenvalues_m):
             return 0
         else:
-            return self.get_problem(problem_name)._last_eigenvalues_m[self.eigenvector]
+            return last_eigenvalues_m[self.eigenvector]
 
-    def get_problem(self,problem_name:str=""):
+    def get_problem(self,problem_name:str="")->"Problem":
         """
         Returns the problem on which we want to plot. Useful to access the properties of the problem, e.g. sizes.
         """
-        return self._named_problems[problem_name]
+        p=self._named_problems[problem_name]
+        assert p is not None, "The plotter has not yet been assigned a problem named '"+problem_name+"'"
+        return p
 
     def initialise(self):
         pass
@@ -196,7 +202,7 @@ class PlotTransformMirror(PlotTransform):
             vecdim=values.shape[0]
         else:
             vecdim=None
-        if vecdim is not None and len(values.shape)>2:
+        if vecdim is not None and values is not None and len(values.shape)>2:
             tensdim=values.shape[1]
         else:
             tensdim=None
@@ -245,7 +251,7 @@ class PlotTransformRotate90(PlotTransform):
             vecdim=values.shape[0]
         else:
             vecdim=None
-        if vecdim is not None and len(values.shape)>2:
+        if vecdim is not None and values is not None and len(values.shape)>2:
             tensdim=values.shape[1]
         else:
             tensdim=None            
@@ -481,21 +487,23 @@ class MatplotlibTriangulationBased(MatplotLibPartWithMeshData):
                 
             # Also create the bounding box
             if self.ptsinside is not None:
-                
+                # self.interpdata is always set together with self.ptsinside (see pre_process above)
+                interpdata=self.interpdata
+                assert interpdata is not None
                 if numpy.any(self.ptsinside):
                     pxmin:float= numpy.amin(coordinates[0, self.ptsinside]) #type:ignore
                     pxmax:float= numpy.amax(coordinates[0, self.ptsinside]) #type:ignore
                     pymin:float = numpy.amin(coordinates[1, self.ptsinside])#type:ignore
                     pymax:float =  numpy.amax(coordinates[1, self.ptsinside]) #type:ignore
-                elif len(self.interpdata)>0:
-                    idata=self.interpdata[0]
+                elif len(interpdata)>0:
+                    idata=interpdata[0]
                     pxmin:float= coordinates[0, idata[0]] * (1.0 - idata[2]) + coordinates[0, idata[1]] * (idata[2]) #type:ignore
                     pxmax:float= pxmin #type:ignore
                     pymin:float =coordinates[1, idata[0]] * (1.0 - idata[2]) + coordinates[1, idata[1]] * (idata[2]) #type:ignore
                     pymax:float = pymin #type:ignore
-                else: 
+                else:
                     raise RuntimeError("Should not happen")
-                for idata in self.interpdata: #type:ignore
+                for idata in interpdata: #type:ignore
                     interp:float = coordinates[0, idata[0]] * (1.0 - idata[2]) + coordinates[0, idata[1]] * (idata[2]) #type:ignore
                     if interp < pxmin: pxmin = interp #type:ignore
                     if interp > pxmax: pxmax = interp #type:ignore
@@ -654,6 +662,8 @@ class MatplotLibTricontourf(MatplotlibTriangulationBased):
     def add_to_plot(self):
         cb=self.colorbar
         assert cb is not None
+        scaled_data=self.scaled_data
+        assert scaled_data is not None
         kwargs={}
         if cb.range is None:
             return
@@ -685,8 +695,11 @@ class MatplotLibTricontourf(MatplotlibTriangulationBased):
             #kwargs["locator"]=matplotlib.ticker.LogLocator()
             kwargs["vmin"]=norm.vmin
             kwargs["vmax"] = norm.vmax
-            assert self.scaled_data is not None
-            self.scaled_data=numpy.maximum(norm.vmin,self.scaled_data)
+            # A custom norm passed via add_colorbar(norm=...) must have vmin/vmax set explicitly
+            # (matplotlib's own autoscaling from the data is not performed here)
+            assert norm.vmin is not None and norm.vmax is not None, "LogNorm colorbar norm must have vmin/vmax set"
+            scaled_data=numpy.maximum(norm.vmin,scaled_data)
+            self.scaled_data=scaled_data
 
             kwargs["levels"]=numpy.power(10,numpy.linspace(numpy.log10(norm.vmin),numpy.log10(norm.vmax),num=cb.Ndisc)) #type:ignore
 
@@ -695,10 +708,10 @@ class MatplotLibTricontourf(MatplotlibTriangulationBased):
 
         if self.invisible!=True and (self.triang is not None):
             if self.check_for_finite_values:
-                isbad=numpy.isnan(self.scaled_data)
+                isbad=numpy.isnan(scaled_data)
                 mask = numpy.any(numpy.where(isbad[self.triang.triangles], True, False), axis=1)
                 self.triang.set_mask(mask)
-            plt.tricontourf(self.triang, self.scaled_data,cmap=cb.cmap,norm=norm,extend=self.extend, **kwargs) #type:ignore
+            plt.tricontourf(self.triang, scaled_data,cmap=cb.cmap,norm=norm,extend=self.extend, **kwargs) #type:ignore
 
 
 @MatplotLibPart.register()
@@ -742,7 +755,7 @@ class MatplotlibVectorFieldArrows(MatplotlibTriangulationBased):
     arrowlength=-0.025
     arrowcenter=0.5
 
-    arrowstyle="->"
+    arrowstyle:str | dict[str, Any]="->"
     linewidths = 2
     linecolor = "black"
     arrowdensity:float=50
@@ -914,6 +927,10 @@ class MatplotlibVectorFieldStreams(MatplotlibTriangulationBased):
         if (self.plotter.xmin is None) or (self.plotter.xmax is None) or (self.plotter.ymax  is None) or (self.plotter.ymin  is None):
             raise RuntimeError("Must use set_view before plotting streamlines")
 
+        # self.scaled_data is always set by pre_process (see above) before add_to_plot runs
+        scaled_data=self.scaled_data
+        assert scaled_data is not None
+
         assert self.bounding_box is not None
         lx = (self.bounding_box[1] - self.bounding_box[0])
         ly = (self.bounding_box[3] - self.bounding_box[2])
@@ -921,7 +938,7 @@ class MatplotlibVectorFieldStreams(MatplotlibTriangulationBased):
         xls:NPFloatArray = numpy.linspace(self.bounding_box[0] + self.boundoffsx * lx / self.numx, self.bounding_box[1] - self.boundoffsx * lx / self.numx, self.numx) #type:ignore
         yls:NPFloatArray = numpy.linspace(self.bounding_box[2] + self.boundoffsy * ly / self.numy, self.bounding_box[3] - self.boundoffsy * ly / self.numy, self.numy) #type:ignore
 
-        if numpy.amax(self.scaled_data)<1e-20: #type:ignore
+        if numpy.amax(scaled_data)<1e-20: #type:ignore
             return
 
         if len(xls)==0  or len(yls)==0:
@@ -953,7 +970,7 @@ class MatplotlibVectorFieldStreams(MatplotlibTriangulationBased):
         kwargs={}
         kwargs["color"]=self.linecolor
         if self.colorbar is not None:
-            interp_mag = tri.LinearTriInterpolator(self.triang, self.scaled_data if self.color_data is None else self.color_data)
+            interp_mag = tri.LinearTriInterpolator(self.triang, scaled_data if self.color_data is None else self.color_data)
             inter_mag = interp_mag(xi, yi)
             kwargs["color"] = inter_mag
             kwargs["cmap"]=self.colorbar.cmap
@@ -1025,6 +1042,8 @@ class MatplotlibTensorFieldEllipses(MatplotlibTriangulationBased):
         ax:matplotlib.axes.Axes=plt.gca() #type:ignore
         arrl=self.size
         if arrl<0:
+            # get_sampled_points (called above) already raises RuntimeError if any of these are None
+            assert self.plotter.xmax is not None and self.plotter.xmin is not None and self.plotter.ymax is not None and self.plotter.ymin is not None
             arrl=-arrl*max(self.plotter.xmax-self.plotter.xmin,self.plotter.ymax-self.plotter.ymin)
         ellipses = []
         for xi in range(0, len(xls)):
@@ -2108,10 +2127,12 @@ class MatplotLibAxes(MatplotLibOverlayBase):
             lls=[]
             labs=[]
             for l in self._linelist:
-                lab=l.get_label()                
+                lab=l.get_label()
                 if lab and not lab.startswith("_"):
                     lls.append(l)
                     labs.append(lab)
+            # self.ax is always set by add_to_plot (called before post_process in the plotting pipeline)
+            assert self.ax is not None
             self.ax.legend(lls,labs, loc=self.legend_position)
 
 
@@ -2174,9 +2195,11 @@ class MatplotLibLinePlot(MatplotLibPartWithMeshData):
             self.axes.consider_range(ymin=numpy.amin(ydata),ymax=numpy.amax(ydata),use_y2=self.use_y2) #type:ignore
 
     def add_to_plot(self):
+        # self.axes is always set before add_to_plot runs (see pre_process above)
+        assert self.axes is not None
         kwargs={"linewidth":self.linewidth,"linestyle":self.linestyle}
         if self.color:
-            kwargs["color"]=self.color        
+            kwargs["color"]=self.color
         if self.label:
             kwargs["label"]=self.label
         if self.markerstyle:
@@ -2399,7 +2422,7 @@ class MatplotlibPlotter(BasePlotter):
     def save(self,fname:str | list[str] | None=None):
         if self._has_invalid_triangulation:
             return
-        pdir=os.path.join(self._problem.get_output_directory(),self._output_dir)
+        pdir=os.path.join(self.get_problem().get_output_directory(),self._output_dir)
         if fname is None:
             os.makedirs(pdir,exist_ok=True)
             file_exts=self.file_ext
@@ -2417,7 +2440,7 @@ class MatplotlibPlotter(BasePlotter):
             os.makedirs(os.path.join(pdir,"_cb_ranges"),exist_ok=True)
 
             #f.write("cb_ranges={}\n")
-            odict:dict[str,tuple[float,float]]={}
+            odict:dict[str,tuple[float | None,float | None]]={}
             for nam,rang in self._range_objects.items():
                 odict[nam]=(rang.vmin,rang.vmax)
                 #f.write('cb_ranges["'+nam+'"]=['+str(rang.vmin)+', '+str(rang.vmax)+']\n')
@@ -2657,7 +2680,7 @@ class MatplotlibPlotter(BasePlotter):
             return False
         field=msh[-1]
         mshname="/".join(msh[0:-1])
-        msh=self._problem.get_mesh(mshname,return_None_if_not_found=True)
+        msh=self.get_problem(problem_name=problem_name).get_mesh(mshname,return_None_if_not_found=True)
         if msh is None:
             return False
         cached = self._get_mesh_data(msh,problem_name=problem_name,ignore_eigenfactors=True)        
@@ -2737,7 +2760,7 @@ class MatplotlibPlotter(BasePlotter):
             else:
                 field=msh[-1]
                 mshname="/".join(msh[0:-1])
-            msh=self._problem.get_mesh(mshname,return_None_if_not_found=True)
+            msh=self.get_problem(problem_name=problem_name).get_mesh(mshname,return_None_if_not_found=True)
             if msh is None:
                 raise ValueError("Cannot find the mesh "+mshname+" in the problem to plot "+str(field))
             dim=msh.get_dimension()

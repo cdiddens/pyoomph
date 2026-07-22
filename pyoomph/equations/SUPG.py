@@ -99,8 +99,8 @@ class ElementSizeFromInitialCartesianSize(ElementSizeForSUPG):
     def define_residuals(self):
         pass
 
-    def get_element_h(self) -> Expression:
-        return 0.01
+    def get_element_h(self,domain:"str | FiniteElementCodeGenerator | None"=None) -> Expression:
+        return Expression(0.01)
     
 
 class GenericStabilizationMethod(Equations):
@@ -136,11 +136,13 @@ class GenericStabilizationMethod(Equations):
     def get_momentum_residual(self):
         ns=self.get_flow_equations()
         u,p=var(["velocity","pressure"])
-        res=ns.mass_density*material_derivative(u,u)+grad(p)
+        rho=ns.mass_density
+        assert rho is not None, "Must set mass_density on the (Navier-)StokesEquations to use it with a stabilization method"
+        res=rho*material_derivative(u,u)+grad(p)
         if ns.bulkforce is not None:
             res-=ns.bulkforce
         if ns.gravity is not None:
-            res-=ns.mass_density*ns.gravity
+            res-=rho*ns.gravity
         return res
 
 
@@ -160,9 +162,10 @@ class PSPG(GenericStabilizationMethod):
 
 
     def get_tau(self):        
-        h=self.get_element_size()        
+        h=self.get_element_size()
         ns=self.get_flow_equations()
         rho=ns.mass_density
+        assert rho is not None, "Must set mass_density on the (Navier-)StokesEquations to use it with PSPG stabilization"
         mu=ns.dynamic_viscosity
         u=var("velocity")
         if self.U_name is not None:
@@ -190,6 +193,7 @@ class PSPG(GenericStabilizationMethod):
             U=subexpression(square_root(dot(u,u)+self.velocity_offset**2))
         #Us=1
         rho=ns.mass_density
+        assert rho is not None, "Must set mass_density on the (Navier-)StokesEquations to use it with PSPG stabilization"
         tau=self.get_tau()
         moment_residual=self.get_momentum_residual()
 
@@ -208,9 +212,10 @@ class ASGS(GenericStabilizationMethod):
 
     def get_tau1(self):
         ns=self.get_flow_equations()
-        h=self.get_element_size()        
+        h=self.get_element_size()
         rho,mu=ns.mass_density,ns.dynamic_viscosity
-        
+        assert rho is not None, "Must set mass_density on the (Navier-)StokesEquations to use it with ASGS stabilization"
+
         tau1 =(self.alpha*timestepper_weight(1,0,"BDF1")+4*mu/(h**2*rho))**(-1)
 
         U=self.get_velocity_magnitude()
@@ -219,8 +224,9 @@ class ASGS(GenericStabilizationMethod):
     
     def get_tau2(self):
         ns=self.get_flow_equations()
-        h=self.get_element_size()        
+        h=self.get_element_size()
         rho,mu=ns.mass_density,ns.dynamic_viscosity
+        assert rho is not None, "Must set mass_density on the (Navier-)StokesEquations to use it with ASGS stabilization"
         U=self.get_velocity_magnitude()
         tau2=mu/rho
         tau2=mu+rho*U*h/(2)
