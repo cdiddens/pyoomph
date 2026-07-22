@@ -33,7 +33,7 @@ from ..expressions import CustomMultiReturnExpression, square_root, symbolic_dif
 from ..expressions.generic import ExpressionNumOrNone, ExpressionOrNum, FiniteElementSpaceEnum, dyadic, identity_matrix, partial_t, scale_factor, weak
 from ..generic import *
 from .navier_stokes import NavierStokesEquations #type:ignore
-from ..materials.generic import AnyFluidProperties, AnyFluidFluidInterface
+from ..materials.generic import AnyFluidProperties, AnyFluidFluidInterface, LiquidGasInterfaceProperties, LiquidLiquidInterfaceProperties
 from ..meshes.mesh import AnySpatialMesh,AnyMesh,MeshFromTemplate2d,Element,Node
 from ..typings import *
 
@@ -188,12 +188,20 @@ def CompositionNSCHEquations(positive_props:AnyFluidProperties,negative_props:An
     rho=subexpression(positive_props.mass_density*(1+phi_clamp)/2+negative_props.mass_density*(1-phi_clamp)/2)
 
     if interface_props is None:
-        interface_props=positive_props | negative_props
+        # positive_props and negative_props are both AnyFluidProperties (liquid or gas, never solid), so
+        # get_interface_properties (invoked via __or__) can only take the "liquid_gas" or "liquid_liquid"
+        # branch and thus can only return a LiquidGasInterfaceProperties or LiquidLiquidInterfaceProperties
+        # instance (i.e. AnyFluidFluidInterface). The declared return type of __or__ is a broader union
+        # (it also covers BaseInterfaceProperties/LiquidSolidInterfaceProperties for the solid-involving
+        # cases), which pyright cannot narrow away here, hence the assert to make the invariant explicit.
+        computed_interface_props=positive_props | negative_props
+        assert isinstance(computed_interface_props,(LiquidGasInterfaceProperties,LiquidLiquidInterfaceProperties))
+        interface_props=computed_interface_props
     sigma_nsch=3/(2*square_root(2))*interface_props.surface_tension
     res=CompositionNSCHPhaseField(epsilon=epsilon,mobility=mobility, sigma_nsch=sigma_nsch,phase_name=phase_field_name,partial_integrate_advection=partial_integrate_advection,swap_test_functions=swap_test_functions,skew_symmetric_advection=skew_symmetric_advection,piecewise_potential=piecewise_potential,mobility_for_scale=mobility_for_scale,potential_func=potential_func)
     res+=NavierStokesEquations(dynamic_viscosity=mu,mass_density=rho,boussinesq=True)
     #res+=SpatialErrorEstimator(evaluate_in_past(var(phase_field_name)),**{phase_field_name:1.0,"velocity":100})
-    res+=SpatialErrorEstimator(**{phase_field_name:1.0,"velocity":velocity_error_factor})
+    res+=SpatialErrorEstimator(**{phase_field_name:1.0,"velocity":velocity_error_factor}) #type:ignore
     #res+=SpatialErrorEstimator(**{phase_field_name:1.0})
 
     #u,u_test=var_and_test("velocity")

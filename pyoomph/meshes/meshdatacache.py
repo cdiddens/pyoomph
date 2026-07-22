@@ -162,10 +162,10 @@ class MeshDataCacheEntry:
     def get_unit(self,field:list[str],as_string:Literal[False]=...,with_brackets:bool=...)->list[ExpressionOrNum]: ...
 
     @overload
-    def get_unit(self,field:str,as_string:Literal[True]=...,with_brackets:bool=...)->str: ...
+    def get_unit(self,field:str,as_string:Literal[True],with_brackets:bool=...)->str: ...
 
     @overload
-    def get_unit(self,field:list[str],as_string:Literal[True]=...,with_brackets:bool=...)->list[str]: ...
+    def get_unit(self,field:list[str],as_string:Literal[True],with_brackets:bool=...)->list[str]: ...
 
     def get_unit(self,field:str | list[str],as_string:bool=False,with_brackets:bool=True)->ExpressionOrNum | list[ExpressionOrNum] | str | list[str]:
         if isinstance(field,list):
@@ -209,48 +209,48 @@ class MeshDataCacheEntry:
         assert isinstance(self.mesh,(InterfaceMesh,MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d))
         if isinstance(name, list):
             if isinstance(name[0], list): #tensor data
-                mdata:list[list[NPFloatArray]]=[]
+                tensor_mdata:list[list[NPFloatArray | None]]=[]
                 nonzero_length=-1
                 for row in name:
-                    rowdata:list[NPFloatArray]=[]
+                    rowdata:list[NPFloatArray | None]=[]
                     for entry in row:
                         d=self.get_data(entry,additional_eigenvector,eigen_real_imag)
                         if d is None:
                             rowdata.append(None)
-                        else:                
+                        else:
                             rowdata.append(d)
                             if nonzero_length==-1:
                                 nonzero_length=len(d)
                             elif nonzero_length!=len(d):
-                                raise RuntimeError("Inconsistent data!")                                                
-                    mdata.append(rowdata)
+                                raise RuntimeError("Inconsistent data!")
+                    tensor_mdata.append(rowdata)
                 if nonzero_length==-1:
                     raise RuntimeError("Tensor data "+str(name)+" does not contain anything")
                 zer=numpy.zeros((nonzero_length,))
-                for i,row in enumerate(mdata):
+                for i,row in enumerate(tensor_mdata):
                     for j,entry in enumerate(row):
                         if entry is None:
-                            mdata[i][j]=zer
-                return numpy.array(mdata) #type:ignore
+                            tensor_mdata[i][j]=zer
+                return numpy.array(tensor_mdata) #type:ignore
             else:
-                mdata:list[NPFloatArray]=[]
+                mdata:list[NPFloatArray | None]=[]
                 nonzero_length=-1
                 for n in name:
                     d=self.get_data(n,additional_eigenvector,eigen_real_imag)
                     if d is None:
                         mdata.append(None)
-                    else:                
+                    else:
                         mdata.append(d)
                         if nonzero_length==-1:
                             nonzero_length=len(d)
                         elif nonzero_length!=len(d):
-                            raise RuntimeError("Inconsistent data!")                                                
+                            raise RuntimeError("Inconsistent data!")
                 if nonzero_length==-1:
                     raise RuntimeError("Vector data "+str(name)+" does not contain anything")
                 zer=numpy.zeros((nonzero_length,))
                 for i,entry in enumerate(mdata):
                     if entry is None:
-                        mdata[i]=zer                        
+                        mdata[i]=zer
                 return numpy.array(mdata) #type:ignore
 
         if additional_eigenvector is not None:
@@ -676,12 +676,13 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
 
         # Getting the length
         L=self.default_length
-        if base.mesh.get_problem().get_last_eigenmodes_k() is not None:
-            if self.use_k_for_length:                
+        last_eigenmodes_k=base.mesh.get_problem().get_last_eigenmodes_k()
+        if last_eigenmodes_k is not None:
+            if self.use_k_for_length:
                 kcommon=None
                 for eigenindex,prefixPair in base._additional_eigendata.items(): #type:ignore
-                    if eigenindex<len(base.mesh.get_problem().get_last_eigenmodes_k()):
-                        k=base.mesh.get_problem().get_last_eigenmodes_k()[eigenindex] #type:ignore
+                    if eigenindex<len(last_eigenmodes_k):
+                        k=last_eigenmodes_k[eigenindex] #type:ignore
                         if kcommon is None:
                             kcommon=k
                         elif kcommon!=k:
@@ -1023,7 +1024,8 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
         if len(new_DL_data)>0:
             base.DL_data=numpy.transpose(new_DL_data,axes=(1,2,0))
             
-        if len(new_D0_data)>0:            
+        if len(new_D0_data)>0:
+            assert isinstance(new_D0_data,numpy.ndarray)
             base.D0_data=new_D0_data
             assert base.D0_data.shape[0]==len(elemental_phis)
 
@@ -1487,7 +1489,8 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
         if len(new_DL_data)>0:
             base.DL_data=numpy.transpose(new_DL_data,axes=(1,2,0))
             
-        if len(new_D0_data)>0:            
+        if len(new_D0_data)>0:
+            assert isinstance(new_D0_data,numpy.ndarray)
             base.D0_data=new_D0_data
             assert base.D0_data.shape[0]==len(elemental_phis)
 

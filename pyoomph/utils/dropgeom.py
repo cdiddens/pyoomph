@@ -68,7 +68,7 @@ class DropletGeometry:
         numgiven=0
         settings:dict[str,ExpressionNumOrNone]= {}
         self._sampled_gravity_shape:tuple[NPFloatArray, ExpressionOrNum] | None=None
-        self._sampled_gravity_shape_reference_pressure:ExpressionOrNum=None
+        self._sampled_gravity_shape_reference_pressure:ExpressionNumOrNone=None
         
         self.rivulet_instead=rivulet_instead
 
@@ -224,7 +224,7 @@ class DropletGeometry:
             slerps=[slerps]
         res=[]
         for s in slerps:
-            res.append(list((r*s+center)*self.curv_radius))
+            res.append(list((r*s+center)*self.curv_radius)) #type:ignore
         if isinstance(rel_apex_dist,float):
             return res[0]
         else:
@@ -239,7 +239,7 @@ class DropletGeometry:
         if isinstance((0+surface_tension),(Expression)):
             surface_tension=(0+surface_tension).parameters_to_current_values() #type:ignore
         if isinstance((0+delta_rho_times_g),(Expression)):
-            delta_rho_times_g=(0+delta_rho_times_g).parameters_to_current_values()        
+            delta_rho_times_g=(0+delta_rho_times_g).parameters_to_current_values() #type:ignore
         with YoungLaplaceDropletShape(self,sigma=surface_tension,rho_g_ez=delta_rho_times_g,fixations=fixations,N=N) as problem:
             problem.logfile_name=None # Do not change the log file here
             problem.set_output_directory(output_dir)
@@ -566,7 +566,7 @@ class _PrecachedPopovEvaporationRateByTau(InterpolateSpline1d):
         ev_array=0*tau_array
         print("Precaching evaporation rate")
         for i,t in enumerate(tau_array):
-            ev_array[i]=popov.eval([t])
+            ev_array[i]=popov.eval(numpy.array([t]))
         print("Done")
         data=numpy.transpose(numpy.vstack([tau_array,ev_array]))
         super(_PrecachedPopovEvaporationRateByTau, self).__init__(data)
@@ -604,7 +604,7 @@ class _PrecachedLebedevEvaporationRateByPhi(InterpolateSpline1d):
         ev_array=0*phi_array
         print("Precaching evaporation rate")
         for i,t in enumerate(phi_array):
-            ev_array[i]=lebedev.eval([t])
+            ev_array[i]=lebedev.eval(numpy.array([t]))
         print("Done")
         data=numpy.transpose(numpy.vstack([phi_array,ev_array]))
         super(_PrecachedLebedevEvaporationRateByPhi, self).__init__(data)

@@ -35,7 +35,7 @@ import shlex
 
 import distutils
 import distutils.ccompiler
-import distutils.log
+import distutils.log #type:ignore
 import distutils.errors
 
 
@@ -46,6 +46,7 @@ _TypeVarCompiler=TypeVar("_TypeVarCompiler",bound=type["BaseCCompiler"])
 
 class BaseCCompiler(_pyoomph.SharedLibCCompiler):
     compiler_id:str
+    compiler_quality:int
 
     def __init__(self):
         super(BaseCCompiler, self).__init__()
@@ -84,8 +85,8 @@ class BaseCCompiler(_pyoomph.SharedLibCCompiler):
     def get_lib_filename(self)->str:
         return self.get_code_trunk() + self.get_shared_lib_extension()
         
-    def expand_full_library_name(self, arg0: str) -> str:
-        return os.path.join(os.getcwd(),arg0)
+    def expand_full_library_name(self, relative_name: str) -> str:
+        return os.path.join(os.getcwd(),relative_name)
 
     _registered_compilers={"_internal_":_pyoomph.CCompiler}
 
@@ -134,7 +135,7 @@ class TCCBoxCompiler(BaseCCompiler):
             return False
         return True
     
-    def compile(self, suppress_compilation: bool, suppress_code_writing: bool, quiet: bool, extra_flags: list[str]) -> bool:
+    def compile(self, suppress_compilation: bool, suppress_code_writing: bool, quiet: bool, extra_flags: Sequence[str]) -> bool:
         if suppress_compilation:
             return True
         if not quiet:
@@ -147,7 +148,7 @@ class TCCBoxCompiler(BaseCCompiler):
                 fullcmd+=["-nostdinc", "-nostdlib"]
             else:
                 fullcmd+=["-rdynamic"]
-            fullcmd+=["-DPYOOMPH_TCC_TO_MEMORY","-Dsize_t=unsigned long long"]+extra_flags+[self.get_code_filename(), "-o",soname]
+            fullcmd+=["-DPYOOMPH_TCC_TO_MEMORY","-Dsize_t=unsigned long long"]+list(extra_flags)+[self.get_code_filename(), "-o",soname]
             self.call_cmd( fullcmd,quiet=quiet)
         return True
 
@@ -227,7 +228,7 @@ int main (int argc, char **argv) {
             return False
         return True
 
-    def compile(self, suppress_compilation:bool, suppress_code_writing:bool,quiet:bool,extra_flags:list[str]) -> bool:
+    def compile(self, suppress_compilation:bool, suppress_code_writing:bool,quiet:bool,extra_flags:Sequence[str]) -> bool:
         if suppress_compilation:
             return True
         distutils.log.set_verbosity(2 if not quiet else 0)
@@ -305,6 +306,6 @@ class CCacheCCompiler(SystemCCompiler):
     compiler_quality=6   
     def __init__(self, compile_args = None):
         super().__init__(compile_args)            
-        self.comp.compiler_so=["ccache"]+self.comp.compiler_so
-        self.comp.linker_so=["ccache"]+self.comp.linker_so
+        self.comp.compiler_so=["ccache"]+self.comp.compiler_so #type:ignore
+        self.comp.linker_so=["ccache"]+self.comp.linker_so #type:ignore
         # TODO: Check whether the c expression mode is "deterministic" and warn if not?

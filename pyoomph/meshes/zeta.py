@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from ..generic.codegen import InterfaceEquations,EquationTree
 from ..expressions import ExpressionOrNum
-from .mesh import InterfaceMesh
+from .mesh import InterfaceMesh, ODEStorageMesh
 from .meshdatacache import MeshDataCacheEntry
 import numpy
 from ..typings import *
@@ -39,16 +39,22 @@ if TYPE_CHECKING:
 
 
 class AssignZetaCoordinatesBase(InterfaceEquations):
-    def assign_zetas(self,mesh:InterfaceMesh):
+    def assign_zetas(self,mesh:InterfaceMesh)->None:
         raise RuntimeError("This function must be implemented!")
 
     def after_mapping_on_macro_elements(self):
         self.assign_zetas(self.get_mesh())
-        return super().after_mapping_on_macro_elements()    
-    
+        return super().after_mapping_on_macro_elements()
+
     def before_mesh_to_mesh_interpolation(self, eqtree: "EquationTree", interpolator: "BaseMeshToMeshInterpolator"):
-        new_mesh=eqtree._mesh # self.get_mesh()
-        old_mesh=interpolator.old.get_mesh(new_mesh.get_name())
+        new_mesh=eqtree.get_mesh() # self.get_mesh()
+        # This is only ever attached to InterfaceEquations, so the eqtree/interpolator here
+        # always belong to a spatial interface mesh, never an ODEStorageMesh.
+        assert isinstance(new_mesh,InterfaceMesh)
+        old_base=interpolator.old
+        assert not isinstance(old_base,ODEStorageMesh)
+        old_mesh=old_base.get_mesh(new_mesh.get_name())
+        assert isinstance(old_mesh,InterfaceMesh)
         self.assign_zetas(old_mesh)
         self.assign_zetas(new_mesh)
         return super().before_mesh_to_mesh_interpolation(eqtree,interpolator)
@@ -124,7 +130,7 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
         if (start_near_point is None and sort_along_axis is None) or (start_near_point is not None and sort_along_axis is not None):
             raise RuntimeError("Please add one parameter identifying the direction of the zeta parameterization")
 
-    def assign_zetas(self,mesh):        
+    def assign_zetas(self,mesh:InterfaceMesh)->None:
         if mesh.get_dimension()!=1:
             raise RuntimeError("Currently only implemented for 1d interfaces meshes")
         bmesh=mesh.get_bulk_mesh()
@@ -160,9 +166,10 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
             raise RuntimeError("NODEMAP AND SEGMENT LENGTH MISMATCH")
 
 
-        alengths:list[float]=[]
+        alengths_list:list[float]=[]
         ptinds:list[int]=[]
         aleng=0.0
+        alengths:NPFloatArray | list[float]
 
         if not self.individual_segments:
             for seg in segs:
@@ -171,14 +178,16 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
                     x,y=pts[0,ptind],pts[1,ptind]
                     dl=numpy.sqrt((x-oldx)**2+(y-oldy)**2)
                     aleng+=dl
-                    alengths.append(aleng)
+                    alengths_list.append(aleng)
                     ptinds.append(ptind)
                     oldx,oldy=x,y
                 aleng+=self.segment_jump_offset
-                    
+
             if self.normalized:
-                alengths=numpy.array(alengths)/alengths[-1]
-        else:   
+                alengths=numpy.array(alengths_list)/alengths_list[-1]
+            else:
+                alengths=alengths_list
+        else:
             aleng_segs:list[NPFloatArray]=[]
             for seg in segs:
                 alength_seg:list[float]=[]
@@ -190,13 +199,13 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
                     aleng+=dl
                     alength_seg.append(aleng)
                     ptinds.append(ptind)
-                    oldx,oldy=x,y                                   
+                    oldx,oldy=x,y
 
                 if self.normalized:
-                    alength_seg=numpy.array(alength_seg)/alength_seg[-1]
+                    alength_seg_arr=numpy.array(alength_seg)/alength_seg[-1]
                 else:
-                    alength_seg=numpy.array(alength_seg)
-                aleng_segs.append(alength_seg)
+                    alength_seg_arr=numpy.array(alength_seg)
+                aleng_segs.append(alength_seg_arr)
             offs=0.0
             for i in range(len(aleng_segs)):
                 aleng_segs[i]+=offs

@@ -176,10 +176,12 @@ def CompositionDarcyEquations(fluid_props:AnyFluidProperties,compo_space:FiniteE
         u_advect=porosity*var("velocity") # I think it is more reasonable that the temperature is transported with the slower one...
         #u_advect=var("velocity")
         if thermal_overrides is None:
-            thermal_kwargs={}
+            rho_override=cp_override=lambda_override=None
         else:
-            thermal_kwargs={"rho_override":thermal_overrides.get("mass_density",None),"cp_override":thermal_overrides.get("specific_heat_capacity",None),"lambda_override":thermal_overrides.get("thermal_conductivity",None)}
-        res += TemperatureAdvectionConductionEquation(fluid_props, space=compo_space,wind=u_advect,**thermal_kwargs)
+            rho_override=thermal_overrides.get("mass_density",None)
+            cp_override=thermal_overrides.get("specific_heat_capacity",None)
+            lambda_override=thermal_overrides.get("thermal_conductivity",None)
+        res += TemperatureAdvectionConductionEquation(fluid_props, space=compo_space,wind=u_advect,rho_override=rho_override,cp_override=cp_override,lambda_override=lambda_override)
     if with_IC:
         req_adv_diff = fluid_props.required_adv_diff_fields
         ic = fluid_props.initial_condition
@@ -192,12 +194,12 @@ def CompositionDarcyEquations(fluid_props:AnyFluidProperties,compo_space:FiniteE
                 else:
                     icT0=initial_temperature
             icsettings["temperature"]=icT0
-        res+=InitialCondition(**icsettings)
+        res+=InitialCondition(**icsettings) #type:ignore
 
     if spatial_errors is not None:
         if spatial_errors is True:
             compo_fields = {"massfrac_" + n: 1.0 for n in fluid_props.required_adv_diff_fields}
-            res += SpatialErrorEstimator(velocity=1, **compo_fields)
+            res += SpatialErrorEstimator(velocity=1, **compo_fields) #type:ignore
         elif spatial_errors is not False:
             raise RuntimeError("TODO")
 

@@ -375,7 +375,7 @@ class Remesher2d(RemesherBase):
                 for iname in hole:
                     if iname in mshbounds:
                         mshbounds.remove(iname)
-        self.gmsh.plane_surface(*mshbounds,name=n,holes=holes)
+        self.gmsh.plane_surface(*mshbounds,name=n,holes=holes) #type:ignore #holes is list[list[str]], which is a valid (but invariance-incompatible) special case of list[Sequence[str|Line|Spline|BSpline|CircleArc]]
 
 
     def _define_geometry(self):
@@ -404,7 +404,9 @@ class Remesher2d(RemesherBase):
                 p0=l.ptlist[0].gmsh_point
                 p1 = l.ptlist[-1].gmsh_point
                 assert p0 is not None and p1 is not None
-                l.gmsh_line=mesh.line(p0,p1,name=l.bname)
+                newline=mesh.line(p0,p1,name=l.bname) # Called with exactly 2 points, so this can only return a Line or None, never a list[Line]
+                assert newline is None or isinstance(newline,Line)
+                l.gmsh_line=newline
             elif l.mode=="spline":
                 pts:list[Point] = []
                 for p in l.ptlist:
@@ -504,9 +506,13 @@ class RemesherViaRecreation(RemesherBase):
     def remesh(self):
         if self.base_trunk is None:
             self.base_trunk=self.template._fntrunk
-        fnformat:str=self.base_trunk+"_REMESH_{:06d}"
-        
-                
+        if self.base_trunk is not None:
+            fnformat:str=self.base_trunk+"_REMESH_{:06d}"
+        else:
+            print(self.template)
+            raise RuntimeError("TODO: Good trunk name here. Set _fntrunk of the MeshTemplate")
+
+
         self._old_meshes={}
         for k,m in self.template.get_problem()._meshdict.items():
             if isinstance(m,(MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d)):
@@ -514,8 +520,9 @@ class RemesherViaRecreation(RemesherBase):
                     self._old_meshes[k]=m
 
         self.template._reset()
+        assert isinstance(self.template,GmshTemplate) # RemesherViaRecreation is only ever attached to a GmshTemplate (see RemeshableGmshTemplate2d), whose _do_define_geometry accepts the extra filename_trunk argument
         self.template._do_define_geometry(self.template.get_problem(),fnformat.format(self._cnt))
-        self._cnt+=1        
+        self._cnt+=1
         
         
 

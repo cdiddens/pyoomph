@@ -60,13 +60,12 @@ class ProjectionInternalInterpolator(BaseMeshToMeshInterpolator):
         for time_index in reversed(range(n_history_values)):
             problem.steady_newton_solve()
             if time_index>0: # Copy the history value at the correct position
-                for mesh in self.old:
-                        for n in mesh.nodes():
-                            for ni in range(n.nvalue()):
-                                n.set_value_at_t(time_index,ni,n.value(ni)) # Copy from time index 0 to time index
-                            coord=n.variable_position_pt() # Coordinate value storage:
-                            for ci in range(coord.nvalue()):
-                                coord.set_value_at_t(time_index,ci,coord.value(ci))
+                for n in self.old.nodes():
+                    for ni in range(n.nvalue()):
+                        n.set_value_at_t(time_index,ni,n.value(ni)) # Copy from time index 0 to time index
+                    coord=n.variable_position_pt() # Coordinate value storage:
+                    for ci in range(coord.nvalue()):
+                        coord.set_value_at_t(time_index,ci,coord.value(ci))
 
 
 class InternalInterpolator(BaseMeshToMeshInterpolator):
@@ -140,10 +139,10 @@ class ODEInterpolator(BaseMeshToMeshInterpolator):
         self.old:ODEStorageMesh=old
 
     def interpolate(self):
-        newode = self.new._get_ODE("ODE")
-        oldode = self.old._get_ODE("ODE")
-        oldindices=oldode.to_numpy()[1]
-        newindices = newode.to_numpy()[1]
+        newode = self.new.get_element()
+        oldode = self.old.get_element()
+        oldindices=oldode._ode_elem_to_numpy()[1]
+        newindices = newode._ode_elem_to_numpy()[1]
         new_to_old_indices={newi:oldindices[k] for k,newi in newindices.items() if k in oldindices.keys()}
 
         for newi,oldi in new_to_old_indices.items():

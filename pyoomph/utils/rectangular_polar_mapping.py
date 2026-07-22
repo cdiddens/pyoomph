@@ -41,6 +41,9 @@ from ..meshes.meshdatacache import MeshDataCacheOperatorBase
 from ..typings import *
 import numpy
 
+if TYPE_CHECKING:
+    from ..generic.codegen import Equations,FiniteElementSpaceEnum
+
 class PlotTransformPolarToCartesian(PlotTransform):
     """
     Transform the plots from polar coordinates in rectangular mesh to cartesian coordinates.
@@ -54,11 +57,15 @@ class PlotTransformPolarToCartesian(PlotTransform):
             vecdim=values.shape[0]
         else:
             vecdim=None
-        if vecdim is not None and len(values.shape)>2:
-            tensdim=values.shape[1]
+        if vecdim is not None:
+            assert values is not None
+            if len(values.shape)>2:
+                tensdim=values.shape[1]
+            else:
+                tensdim=None
         else:
             tensdim=None
-        
+
         # Convert R, theta coordinates to x,y coordinates
         R, theta = cs[0].copy(), cs[1].copy()  # type:ignore
         cs[0] = R * numpy.cos(theta)  # type:ignore
@@ -66,6 +73,7 @@ class PlotTransformPolarToCartesian(PlotTransform):
 
         # Convert vector values into new coordinate system
         if vecdim is not None and vecdim>1:
+            assert values is not None
             # Assuming values[0] is the x-component and values[1] is the y-component
             ur, utheta = values[0].copy(), values[1].copy()  # type:ignore
             values[0] = ur * numpy.cos(theta) - utheta * numpy.sin(theta)
@@ -160,7 +168,7 @@ class RectangularToPolarMappingCoordinateSystem(BaseCoordinateSystem):
     def define_tensor_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations", symmetric:bool)->tuple[list[list[Expression]],list[list[Expression]],list[list[str]]]:
         raise RuntimeError("Rectangular to polar mapping does not support tensors yet")
     
-    def tensor_divergence(self, T:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
+    def tensor_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
         raise RuntimeError("Rectangular to polar mapping does not support tensors yet")
     
     def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int,with_scales:bool,)->Expression:        

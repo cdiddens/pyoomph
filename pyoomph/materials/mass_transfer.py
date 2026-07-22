@@ -129,17 +129,27 @@ class ProjectedMassTransferModelBase(MassTransferModelBase):
             assert opp_pdom is not None
             space=opp_pdom.get_space_of_field("massfrac_"+name)
             if space=="":
-                for c in self.props_outside.components:
+                # props_outside is only defined on subclasses that actually know the fluid properties on both
+                # sides of the interface (e.g. FluidPropMassTransferModel). Other subclasses (e.g.
+                # PrescribedMassTransfer) never set it, so look it up dynamically here instead of declaring it
+                # on this base class (which would incorrectly widen its type for those other subclasses too).
+                props_outside=getattr(self,"props_outside",None)
+                if props_outside is None:
+                    raise RuntimeError("Cannot find a space for the field "+name+". Please set the projection_space attribute of the mass transfer model.")
+                for c in props_outside.components:
                     space=opp_pdom.get_space_of_field("massfrac_"+c)
                     if space!="":
                         break
             if space=="":
                 space=pdom.get_space_of_field("massfrac_"+name)
             if space=="":
-                for c in self.props_inside.components:
+                props_inside=getattr(self,"props_inside",None)
+                if props_inside is None:
+                    raise RuntimeError("Cannot find a space for the field "+name+". Please set the projection_space attribute of the mass transfer model.")
+                for c in props_inside.components:
                     space=pdom.get_space_of_field("massfrac_"+c)
                     if space!="":
-                        break                    
+                        break
             if space=="":
                 raise RuntimeError("Cannot find a space for the field "+name+". Please set the projection_space attribute.")
             space=cast(FiniteElementSpaceEnum,space)
@@ -351,7 +361,7 @@ class LagrangeMultiplierMassTransferModelLiquidGas(LagrangeMultiplierMassTransfe
                    break
         if space=="":
             # This actually happens for a case with only one component. Damn
-            space=ieqs.get_opposite_side_of_interface().get_parent_domain()._coordinate_space
+            space=opp_pdom._coordinate_space
             if space=="":
                 raise RuntimeError("What??")
         space=cast(FiniteElementSpaceEnum,space)
@@ -453,6 +463,8 @@ class HertzKnudsenSchrageMassTransferModel(DifferenceDrivenMassTransferModelLiqu
     def get_mass_flux_coeff_for(self,name:str)->Expression:
         from ..expressions.phys_consts import gas_constant
         pc=self.props_inside.get_pure_component(name)
+        if pc is None:
+            raise RuntimeError("Component '"+str(name)+"' is not present in "+str(self.props_inside))
         M=pc.molar_mass
         T=var("temperature")        
         R=gas_constant
@@ -472,12 +484,15 @@ class LLEMassTransferModel(DifferenceDrivenMassTransferModel):
     def __init__(self, props_inside: MixtureLiquidProperties, props_outside: MixtureLiquidProperties,*,unifac_model:str | None=None,FD_epsilon:float | None=1e-9,mass_transfer_factor:ExpressionNumOrNone | None=None, use_log_approach: bool = False, reference_molar_mass:ExpressionNumOrNone=None):
         super().__init__(props_inside, props_outside)
         from .activity import UNIFACMultiReturnExpression
-        if self.props_inside.components != self.props_inside.components:
+        self.props_inside=cast(MixtureLiquidProperties,self.props_inside)
+        self.props_outside=cast(MixtureLiquidProperties,self.props_outside)
+        if self.props_inside.components != self.props_outside.components:
             raise RuntimeError("Only works for the same components inside and outside")
         if unifac_model is None:
-            if self.props_inside._unifac_model is None:
+            unifac_model_attr=self.props_inside._unifac_model
+            if unifac_model_attr is None:
                 raise RuntimeError("No UNIFAC model specified in the mixture")
-            unifac_model=self.props_inside._unifac_model
+            unifac_model=unifac_model_attr
         if FD_epsilon is None:
             self.activity_calc=None
             assert isinstance(self.props_inside, MixtureLiquidProperties)
@@ -502,7 +517,10 @@ class LLEMassTransferModel(DifferenceDrivenMassTransferModel):
             muO=log(var("molefrac_"+name,domain="|.")*self.activity_calc.get_activity_coefficient(name,domain="|.")) if self.use_log_approach else var("molefrac_"+name,domain="|.")*self.activity_calc.get_activity_coefficient(name,domain="|.")
         res= (muI-muO)
         if self.reference_molar_mass is not None:
-            res*=self.reference_molar_mass/self.props_inside.get_pure_component(name).molar_mass
+            pc=self.props_inside.get_pure_component(name)
+            if pc is None:
+                raise RuntimeError("Component '"+str(name)+"' is not present in "+str(self.props_inside))
+            res*=self.reference_molar_mass/pc.molar_mass
         return res
     
     def get_mass_flux_coeff_for(self, name: str) -> Expression:
