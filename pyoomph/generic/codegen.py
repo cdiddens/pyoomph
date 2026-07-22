@@ -40,7 +40,7 @@ import numpy
 from ..typings import *
 if TYPE_CHECKING:
     from .problem import Problem,_DofSelector 
-    from ..expressions import ExpressionOrNum,ExpressionNumOrNone,FiniteElementSpaceEnum,OptionalCoordinateSystem
+    from ..expressions import ExpressionOrNum,ExpressionNumOrNone,FiniteElementSpaceEnum,OptionalCoordinateSystem,TimeSteppingScheme
     from ..meshes.mesh import AnySpatialMesh,AnyMesh,ODEStorageMesh
     from ..solvers.generic import GenericEigenSolver
     from ..meshes.remesher import RemesherBase
@@ -77,8 +77,8 @@ class FiniteElementCodeGenerator(_pyoomph.FiniteElementCode):
 
         self._custom_domain_name:str | None=None
 
-    def get_default_timestepping_scheme(self,order:int):        
-        return self.get_equations().get_default_timestepping_scheme(order,cg=self)
+    def get_default_timestepping_scheme(self,dt_order:int):
+        return self.get_equations().get_default_timestepping_scheme(dt_order,cg=self)
 
     def get_code(self)->_pyoomph.DynamicBulkElementInstance:
         assert self._code is not None
@@ -166,8 +166,8 @@ class FiniteElementCodeGenerator(_pyoomph.FiniteElementCode):
         return res._codegen
 
 
-    def _set_problem(self,p:"Problem"):
-        super()._set_problem(p) #type:ignore
+    def _set_problem(self,problem:"Problem | None"): #type:ignore
+        super()._set_problem(problem) #type:ignore
 
     def get_element_dimension(self) -> int:
         return self.dimension
@@ -326,8 +326,15 @@ class BaseEquations(_pyoomph.Equations):
     with_exception_info:bool=True
 
 
-    def __iter__(self):
+    def __iter__(self)->Iterator["BaseEquations"]:
         return self._iter_helper(set())
+
+    def _iter_helper(self,visited:set[int])->Iterator["BaseEquations"]:
+        # Leaf equations: a bare (non-combined) equation just yields itself once.
+        # CombinedEquations overrides __iter__ directly to iterate over its _subelements instead.
+        if id(self) not in visited:
+            visited.add(id(self))
+            yield self
 
     def __new__(cls, *args:Any, **kwargs:Any):
         new_instance = super(BaseEquations, cls).__new__(cls, *args, **kwargs)
@@ -482,7 +489,7 @@ class BaseEquations(_pyoomph.Equations):
         #self._external_data_links:Dict[str,Tuple["ODEEquations",str]] = {}
         self._dimension = None
         self.default_timestepping_scheme:Literal["BDF2", "BDF1", "Newmark2"] | None = None
-        self._problem:"Problem | None"=None
+        self._problem=None
         self._residuals_for_tex:dict[str,list["Expression"]]={}
         # A list of mapping functions (lambda destination,residual_expression -> dict({destination:new_residual_expression}))
         self._residual_mapping_functions:list[Callable[[str,Expression],Expression | dict[str, Expression]]]=[]
@@ -493,7 +500,7 @@ class BaseEquations(_pyoomph.Equations):
         self.requires_interior_facet_terms:bool=False   
         
         # Stores the data to pin for azimuthal stuff
-        self._azimuthal_r0_info:dict[int,set(str)]={} # Which fields will be pinned at the azimuthal symmetry axis for a given azimuthal mode
+        self._azimuthal_r0_info:dict[int,set[str]]={} # Which fields will be pinned at the azimuthal symmetry axis for a given azimuthal mode
         self._azimuthal_r0_info[0]=set()
         self._azimuthal_r0_info[1]=set()
         self._azimuthal_r0_info[2]=set()              
@@ -723,8 +730,9 @@ class BaseEquations(_pyoomph.Equations):
 
     def _perform_define_fields(self):
         master = self._get_combined_element()
-        if self.get_parent_domain() is not None:
-            p=self.get_parent_domain().get_equations().get_azimuthal_r0_info()
+        parent_domain=self.get_parent_domain()
+        if parent_domain is not None:
+            p=parent_domain.get_equations().get_azimuthal_r0_info()
             for i in range(3):
                 master._azimuthal_r0_info[i]=p[i].copy()
         master.define_fields()
@@ -871,7 +879,7 @@ class BaseEquations(_pyoomph.Equations):
             master._interior_facet_residuals[dn]=Expression(0)
         master._interior_facet_residuals[dn]+=expr
 
-    def add_residual(self, expr: "ExpressionOrNum", *, destination: str | None = None):
+    def add_residual(self, expr: "ExpressionOrNum | str", *, destination: str | None = None):
         """
         Adds a residual contribution to this equations.
 
@@ -966,6 +974,7 @@ class BaseEquations(_pyoomph.Equations):
         master.define_error_estimators()
         master._perform_initial_and_Dirichlet_conditions()
         master.define_additional_functions()
+        assert master._problem is not None
         master._problem.before_compile_equations(master)
         master._check_scalings()
         
@@ -999,6 +1008,7 @@ class BaseEquations(_pyoomph.Equations):
             else:
                 raise RuntimeError("Should not end up here")
 
+        assert isinstance(in_domain,FiniteElementCodeGenerator)
         if _pyoomph.get_verbosity_flag() != 0:
                 print("Expanding additional field ", name, dimensional,"self/in_domain",cg.get_full_name(),in_domain.get_full_name())
         
@@ -1009,7 +1019,7 @@ class BaseEquations(_pyoomph.Equations):
 
         only_base_mode=False
         only_perturbation_mode=False
-        axibreakcsys:AxisymmetryBreakingCoordinateSystem | None=None
+        axibreakcsys:BaseCoordinateSystem | None=None
         typeinfo=str(expression.op(1))
         if typeinfo.find("tags="):
             tags=typeinfo[typeinfo.find("tags=")+5:-1].split(", ")
@@ -1036,8 +1046,9 @@ class BaseEquations(_pyoomph.Equations):
                 return vector([vr("coordinate_x"), vr("coordinate_y")])
             elif dim == 3:
                 return vector([vr("coordinate_x"), vr("coordinate_y"), vr("coordinate_z")])
-        elif name == "mesh":            
+        elif name == "mesh":
             res=cg.get_coordinate_system().expand_coordinate_or_mesh_vector(cg,"mesh",dimensional=dimensional,no_jacobian=no_jacobian,no_hessian=no_hessian)
+            assert res is not None
             return res
             
         elif name == "lagrangian":
@@ -1105,10 +1116,12 @@ class BaseEquations(_pyoomph.Equations):
             return _pyoomph.FiniteElementCode._get_element_size_symbol(cg,True,False)*((scale_factor("lagrangian")**self.get_element_dimension()) if dimensional else 1)        
         elif name == "time":
             return scale * _pyoomph.GiNaC_TimeSymbol()  # get_global_symbol("t")
-        elif name in self._additional_fields.keys(): 
+        elif name in self._additional_fields.keys():
             if only_base_mode:
+                assert isinstance(axibreakcsys,AxisymmetryBreakingCoordinateSystem)
                 return scale * axibreakcsys.map_to_zero_epsilon(evaluate_in_domain(self._additional_fields[name],self.get_current_code_generator()))
             elif only_perturbation_mode:
+                assert isinstance(axibreakcsys,AxisymmetryBreakingCoordinateSystem)
                 return scale * axibreakcsys.map_to_first_order_epsilon(evaluate_in_domain(self._additional_fields[name],self.get_current_code_generator()),with_epsilon=True)
             else:
                 return scale * evaluate_in_domain(self._additional_fields[name],self.get_current_code_generator())
@@ -1121,9 +1134,11 @@ class BaseEquations(_pyoomph.Equations):
                     expr = bulkeq._additional_fields_also_on_interface[name]
                     expr=evaluate_in_domain(expr,self.get_current_code_generator())
                     if only_base_mode:
+                        assert isinstance(axibreakcsys,AxisymmetryBreakingCoordinateSystem)
                         expr= axibreakcsys.map_to_zero_epsilon(expr)
                     elif only_perturbation_mode:
-                        expr= axibreakcsys.map_to_first_order_epsilon(expr,with_epsilon=True)                    
+                        assert isinstance(axibreakcsys,AxisymmetryBreakingCoordinateSystem)
+                        expr= axibreakcsys.map_to_first_order_epsilon(expr,with_epsilon=True)
                     if dimensional:
                         scale = bulk.get_scaling(name)
                     else:
@@ -1231,7 +1246,7 @@ class BaseEquations(_pyoomph.Equations):
             else:
                 assert self._problem is not None
                 return cast(Literal["BDF2","BDF1","Newmark2"],self._problem.get_default_timestepping_scheme(order))
-        elif pdom:=self.get_parent_domain() is not None:
+        elif (pdom:=self.get_parent_domain()) is not None:
             return cast(Literal["BDF2","BDF1","Newmark2"],pdom.get_default_timestepping_scheme(order)) 
         else:
             assert self._problem is not None
@@ -1403,11 +1418,13 @@ class BaseEquations(_pyoomph.Equations):
             expr=_pyoomph.Expression(expr)
         csys=self.get_coordinate_system()
 
+        old_setting:bool | None=None
         if isinstance(csys,AxisymmetryBreakingCoordinateSystem) and with_mode_expansion:
             old_setting=csys.expand_with_modes_for_python_debugging
             csys.expand_with_modes_for_python_debugging=True
         expanded=cg.expand_placeholders(expr,raise_error)
         if isinstance(csys,AxisymmetryBreakingCoordinateSystem) and with_mode_expansion:
+            assert old_setting is not None
             csys.expand_with_modes_for_python_debugging=old_setting
 
         if collect_units:
@@ -1449,61 +1466,63 @@ class EquationTree:
 
     # Set my equations (and potentially also bulk,etc. for the codegenerator of this domain)
     def setup_codegen_to_equations(self,with_bulk_and_opp=True,reset_info:dict[str, FiniteElementCodeGenerator | None] | None=None)->dict[str,FiniteElementCodeGenerator | None]:
+        # _get_current_codegen() is declared (in the C++ stub) to return the base FiniteElementCode,
+        # but in practice it always holds a FiniteElementCodeGenerator (the only concrete Python subclass in use).
         if reset_info is None:
             if with_bulk_and_opp:
-                res={}
-                res["."]=self.get_code_gen().get_equations()._get_current_codegen()
-                self.get_equations()._set_current_codegen(self._codegen)                
+                res:dict[str,FiniteElementCodeGenerator | None]={}
+                res["."]=cast(FiniteElementCodeGenerator,self.get_code_gen().get_equations()._get_current_codegen())
+                self.get_equations()._set_current_codegen(self._codegen)
                 #print(self._codegen,self.get_equations()._get_current_codegen())
                 oppi = self.get_code_gen()._get_opposite_interface()
                 if oppi is not None:
                     assert isinstance(oppi, FiniteElementCodeGenerator)
-                    res["|."]=oppi.get_equations()._get_current_codegen()                    
+                    res["|."]=cast(FiniteElementCodeGenerator,oppi.get_equations()._get_current_codegen())
                     oppi.get_equations()._set_current_codegen(oppi)
-                    oppblk = oppi.get_parent_domain()        
+                    oppblk = oppi.get_parent_domain()
                     if oppblk is not None:
-                        res["|.."]=  oppblk.get_equations()._get_current_codegen()                
+                        res["|.."]=cast(FiniteElementCodeGenerator,oppblk.get_equations()._get_current_codegen())
                         oppblk.get_equations()._set_current_codegen(oppblk)
                 blk = self.get_code_gen().get_parent_domain()
                 if blk is not None:
-                    res[".."] = blk.get_equations()._get_current_codegen()
+                    res[".."] = cast(FiniteElementCodeGenerator,blk.get_equations()._get_current_codegen())
                     blk.get_equations()._set_current_codegen(blk)
                     blkblk=blk.get_parent_domain()
                     if blkblk is not None:
-                        res["../.."] = blkblk.get_equations()._get_current_codegen()
-                        blkblk.get_equations()._set_current_codegen(blkblk)                
+                        res["../.."] = cast(FiniteElementCodeGenerator,blkblk.get_equations()._get_current_codegen())
+                        blkblk.get_equations()._set_current_codegen(blkblk)
                 return res
             else:
-                res=self.get_code_gen().get_equations()._get_current_codegen()
+                res2=cast(FiniteElementCodeGenerator,self.get_code_gen().get_equations()._get_current_codegen())
                 self.get_equations()._set_current_codegen(self._codegen)
-                return {".":res}
+                return {".":res2}
         else:
-            if with_bulk_and_opp: 
+            if with_bulk_and_opp:
                 res={}
                 oppi = self.get_code_gen()._get_opposite_interface()
                 if oppi is not None:
                     assert isinstance(oppi, FiniteElementCodeGenerator)
-                    res["|."]=oppi.get_equations()._get_current_codegen()                    
+                    res["|."]=cast(FiniteElementCodeGenerator,oppi.get_equations()._get_current_codegen())
                     oppi.get_equations()._set_current_codegen(reset_info.get("|.",None))
-                    oppblk = oppi.get_parent_domain()        
+                    oppblk = oppi.get_parent_domain()
                     if oppblk is not None:
-                        res["|.."]= oppblk.get_equations()._get_current_codegen()                
+                        res["|.."]=cast(FiniteElementCodeGenerator,oppblk.get_equations()._get_current_codegen())
                         oppblk.get_equations()._set_current_codegen(reset_info.get("|..",None))
                 blk = self.get_code_gen().get_parent_domain()
                 if blk is not None:
-                    res[".."] = blk.get_equations()._get_current_codegen()
+                    res[".."] = cast(FiniteElementCodeGenerator,blk.get_equations()._get_current_codegen())
                     blk.get_equations()._set_current_codegen(reset_info.get("..",None))
                     blkblk=blk.get_parent_domain()
                     if blkblk is not None:
-                        res["../.."] = blkblk.get_equations()._get_current_codegen()
+                        res["../.."] = cast(FiniteElementCodeGenerator,blkblk.get_equations()._get_current_codegen())
                         blkblk.get_equations()._set_current_codegen(reset_info.get("../..",None))
-                res["."]=self.get_code_gen().get_equations()._get_current_codegen()
+                res["."]=cast(FiniteElementCodeGenerator,self.get_code_gen().get_equations()._get_current_codegen())
                 self.get_equations()._set_current_codegen(reset_info.get(".",None))
                 return res
             else:
-                res=self.get_code_gen().get_equations()._get_current_codegen()
+                res2=cast(FiniteElementCodeGenerator,self.get_code_gen().get_equations()._get_current_codegen())
                 self.get_equations()._set_current_codegen(reset_info.get(".",None))
-                return {".":res}
+                return {".":res2}
 
 
     def _change_output_directory(self,newdir:str):
@@ -1673,7 +1692,7 @@ class EquationTree:
         return must_reapply
 
     def _get_forced_zero_dofs_for_eigenproblem(self,eigensolver:"GenericEigenSolver",angular_mode:int | None,normal_k:float | None)->set[str | int]:
-        res:set[str]=set()
+        res:set[str | int]=set()
         if self._equations:
             oldcg = self._equations._get_current_codegen()
             self._equations._set_current_codegen(self._codegen)
@@ -1712,7 +1731,7 @@ class EquationTree:
             if self._equations.interior_facet_terms_required():
                 if "_internal_facets_" not in self._children.keys():
                     self._children["_internal_facets_"]=EquationTree(DummyEquations(),self)
-                    self._children["_internal_facets_"]._equations._problem=problem
+                    self._children["_internal_facets_"].get_equations()._problem=problem
         #for dn in list(self._children.keys()):
         for dn,v in self._children.items():
             #v=self._children[dn] # Cannot use .items() here
@@ -1737,71 +1756,86 @@ class EquationTree:
             v._set_parent_to_equations(problem)
 
     def _create_dummy_domains_for_DG(self,problem:"Problem",elemdim=None):
-        
+
         if elemdim is None and self._codegen is not None:
             elemdim=self._codegen.get_element_dimension()
-            if self.get_parent() and self.get_parent()._codegen is not None:
-                elemdim=self.get_parent()._codegen.get_element_dimension()-1
+            parent=self.get_parent()
+            if parent is not None and parent._codegen is not None:
+                elemdim=parent._codegen.get_element_dimension()-1
         #print("############")
         #print("ELEM DIM",elemdim)
         #print(self)
         #print("############")
         if self._equations is not None:
-            if self._codegen._name=="_internal_facets_":
+            assert self._codegen is not None
+            cg_self=self._codegen
+            if cg_self._name=="_internal_facets_":
                 #print("Creating dummy domains for DG, current path:",self.get_full_path(),", elemdim:",elemdim)
                 def generate_dummy_domain(source:EquationTree):
                     dummy=FiniteElementCodeGenerator()
-                    dummy._set_equations(source._equations)
+                    dummy._set_equations(source.get_equations())
                     dummy._set_problem(problem)
                     dummy._name=source.get_my_path_name()
                     dummy._custom_domain_name=dummy._name
                     cg=source.get_code_gen()
                     nodal_dim=cg.get_nodal_dimension()
-                    while nodal_dim==0 and cg.get_parent_domain() is not None:
-                        cg=cg.get_parent_domain()
+                    parent_domain=cg.get_parent_domain()
+                    while nodal_dim==0 and parent_domain is not None:
+                        cg=parent_domain
                         nodal_dim=cg.get_nodal_dimension()
+                        parent_domain=cg.get_parent_domain()
                     dummy._set_nodal_dimension(nodal_dim)
                     return dummy
 
-                dummy=generate_dummy_domain(self) # Opposite DG facet                
+                assert self._parent is not None
+                dummy=generate_dummy_domain(self) # Opposite DG facet
                 dummy_p=generate_dummy_domain(self._parent) # Opposite bulk facet
 
-                self._codegen._set_opposite_interface(dummy)
+                cg_self._set_opposite_interface(dummy)
                 dummy._set_bulk_element(dummy_p)
 
-                self._codegen._dummy_codegen_for_internal_facets=dummy
-                self._codegen._dummy_codegen_for_internal_facets_bulk=dummy_p
+                cg_self._dummy_codegen_for_internal_facets=dummy
+                cg_self._dummy_codegen_for_internal_facets_bulk=dummy_p
                 # TODO: This is a bit problematic
-                if self.get_parent():
-                    if self.get_parent().get_parent() and self.get_parent().get_parent()._equations is not None:
-                        #print(self.get_parent().get_parent(),self.get_parent().get_parent().get_equations())
-                        dummy_pp=generate_dummy_domain(self.get_parent().get_parent())
+                parent=self.get_parent()
+                if parent is not None:
+                    grandparent=parent.get_parent()
+                    if grandparent is not None and grandparent._equations is not None:
+                        #print(grandparent,grandparent.get_equations())
+                        dummy_pp=generate_dummy_domain(grandparent)
                         dummy_p._set_bulk_element(dummy_pp)
-                        self._codegen._dummy_codegen_for_internal_facets_bulk_bulk=dummy_pp                        
-                        #dummy_po=generate_dummy_domain(self.get_parent().get_parent())
+                        cg_self._dummy_codegen_for_internal_facets_bulk_bulk=dummy_pp
+                        #dummy_po=generate_dummy_domain(grandparent)
                         #dummy_po._set_bulk_element(dummy_pp)
-                        #self._codegen._dummy_codegen_for_internal_facets_bulk_opp=dummy_po
-                                                
-                
-                
+                        #cg_self._dummy_codegen_for_internal_facets_bulk_opp=dummy_po
+
+
+
                 if elemdim is None or elemdim<0:
                     raise RuntimeError("Element dimension was not set correctly here...")
-                if self._codegen._dummy_codegen_for_internal_facets_bulk_bulk is not None:
-                    self._codegen._dummy_codegen_for_internal_facets_bulk_bulk._find_all_accessible_spaces()
-                    self._codegen._dummy_codegen_for_internal_facets_bulk_bulk._do_define_fields(elemdim+2)
+                bulk_bulk=cg_self._dummy_codegen_for_internal_facets_bulk_bulk
+                if bulk_bulk is not None:
+                    bulk_bulk._find_all_accessible_spaces()
+                    bulk_bulk._do_define_fields(elemdim+2)
 
-                self._codegen._dummy_codegen_for_internal_facets_bulk._find_all_accessible_spaces()
-                #print("Calling do define fields on ",self._codegen._dummy_codegen_for_internal_facets_bulk.get_full_name(),self._codegen._dummy_codegen_for_internal_facets_bulk.get_domain_name(),"with",elemdim+1)
-                #self._codegen._transfer_my_fields_to_dummy_codegen(self._codegen._dummy_codegen_for_internal_facets_bulk)
-                self._codegen._dummy_codegen_for_internal_facets_bulk._set_opposite_interface(self._codegen._get_opposite_interface())
-                self._codegen._dummy_codegen_for_internal_facets_bulk._do_define_fields(elemdim+1)
+                bulk=cg_self._dummy_codegen_for_internal_facets_bulk
+                assert bulk is not None
+                bulk._find_all_accessible_spaces()
+                #print("Calling do define fields on ",bulk.get_full_name(),bulk.get_domain_name(),"with",elemdim+1)
+                #cg_self._transfer_my_fields_to_dummy_codegen(bulk)
+                opp=cg_self._get_opposite_interface()
+                assert opp is not None
+                bulk._set_opposite_interface(opp)
+                bulk._do_define_fields(elemdim+1)
 
-                self._codegen._dummy_codegen_for_internal_facets._coordinates_as_dofs=self._codegen._dummy_codegen_for_internal_facets_bulk._coordinates_as_dofs
-                self._codegen._dummy_codegen_for_internal_facets._coordinate_space=self._codegen._dummy_codegen_for_internal_facets_bulk._coordinate_space                
-#                self._codegen._dummy_codegen_for_internal_facets._define_fields()
-                self._codegen._dummy_codegen_for_internal_facets._find_all_accessible_spaces()
-                #self._codegen._dummy_codegen_for_internal_facets.define_scaling()
-                self._codegen._dummy_codegen_for_internal_facets._do_define_fields(elemdim)               
+                facets=cg_self._dummy_codegen_for_internal_facets
+                assert facets is not None
+                facets._coordinates_as_dofs=bulk._coordinates_as_dofs
+                facets._coordinate_space=bulk._coordinate_space
+#                facets._define_fields()
+                facets._find_all_accessible_spaces()
+                #facets.define_scaling()
+                facets._do_define_fields(elemdim)
 
             backup=self.setup_codegen_to_equations()
             self._equations.after_fill_dummy_equations(problem,self,self.get_full_path(),elem_dim=elemdim)
@@ -1834,7 +1868,10 @@ class EquationTree:
                     problem._meshdict[meshname]=mesh
 
         if self._codegen:
-            self._codegen._set_problem(problem)             
+            self._codegen._set_problem(problem)
+            # _codegen is only ever created above, inside the "if self._equations is not None:" branch,
+            # so its presence implies self._equations is also set.
+            assert self._equations is not None
             self._codegen._set_equations(self._equations)
         for _,v in self._children.items():
             v._finalize_equations(problem,second_loop=second_loop)
@@ -1887,7 +1924,7 @@ class EquationTree:
         chld=self._children.get(pth[0])
         if chld is None:
             self._children[pth[0]]=EquationTree(DummyEquations(),parent=self)
-            self._children[pth[0]]._equations._problem=problem
+            self._children[pth[0]].get_equations()._problem=problem
         self._children.get(pth[0])._create_dummy_equations_at_path("/".join(pth[1:]),root,problem) #type:ignore
 
     def get_child(self, name:str) -> "EquationTree":
@@ -2141,9 +2178,9 @@ class Equations(BaseEquations):
     
     def _internal_define_scalar_field(self,name:str, space:"FiniteElementSpaceEnum", scale:"ExpressionOrNum | str | None"=None, testscale:"ExpressionOrNum | str | None"=None, discontinuous_refinement_exponent:float | None=None,allow_scales_with_fields:bool=False):
         master = self._get_combined_element()
-        if master.get_parent_domain() is not None:
+        pdom=master.get_parent_domain()
+        if pdom is not None:
             # Check a bit what is possible
-            pdom=master.get_parent_domain()
             if space=="C2TB" or space=="D2TB":
                 if pdom._coordinate_space!="C2TB":
                     raise self.add_exception_info(RuntimeError("You tried to define a "+str(space)+" field '"+str(name)+"' at an interface attached to a bulk domain with element space "+str(pdom._coordinate_space)+". This does not work"))
@@ -2169,7 +2206,10 @@ class Equations(BaseEquations):
                 if space!="D0":
                     raise RuntimeError("Discontinuous refinement exponents only work for D0 at the moment")
                 cg._set_discontinuous_refinement_exponent(name,discontinuous_refinement_exponent)
-        cg._coordinate_space=find_dominant_element_space(cg._coordinate_space,space)
+        # cg._coordinate_space (a plain str C++ property) can legitimately be "" (not yet set) here;
+        # find_dominant_element_space() explicitly handles that empty-string sentinel, even though it
+        # is not part of the FiniteElementSpaceEnum literal, so a validating cast would wrongly reject it.
+        cg._coordinate_space=find_dominant_element_space(cast("FiniteElementSpaceEnum",cg._coordinate_space),space)
         cg._fields_defined_on_my_domain[name]=space
                 
         if scale is not None:
@@ -2199,7 +2239,10 @@ class Equations(BaseEquations):
             for n in name:
                 self.define_scalar_field(n, space, scale=scale, testscale=testscale,discontinuous_refinement_exponent=discontinuous_refinement_exponent,allow_scales_with_fields=allow_scales_with_fields)
             return        
-        self.get_coordinate_system().define_scalar_field(name, space, self,scale,testscale,discontinuous_refinement_exponent,allow_scales_with_fields=allow_scales_with_fields)
+        # BaseCoordinateSystem.define_scalar_field is annotated with scale/testscale:ExpressionOrNum|None,
+        # but it just forwards them unchanged to Equations._internal_define_scalar_field, which does accept
+        # a str (a named scale reference) as well - so passing a str through here is safe at runtime.
+        self.get_coordinate_system().define_scalar_field(name, space, self,scale,testscale,discontinuous_refinement_exponent,allow_scales_with_fields=allow_scales_with_fields) #type:ignore
 
     def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", dim:int | None=None,scale:"ExpressionNumOrNone"=None,testscale:"ExpressionNumOrNone"=None,allow_scales_with_fields:bool=False):
         """
@@ -2260,8 +2303,10 @@ class Equations(BaseEquations):
         mst=self._get_combined_element()
         assert isinstance(mst,Equations)
         mst._tensorfields[name]=comps
-        self.define_field_by_substitution(name, matrix(t), also_on_interface=also_on_interface)
-        self.define_testfunction_by_substitution(name, matrix(ttest),also_on_interface=also_on_interface)
+        # list is invariant, but matrix() only reads its argument, so a list[list[Expression]] is safe here
+        # even though it is not (structurally) assignable to list[list[ExpressionOrNum]].
+        self.define_field_by_substitution(name, matrix(cast("list[list[ExpressionOrNum]]",t)), also_on_interface=also_on_interface)
+        self.define_testfunction_by_substitution(name, matrix(cast("list[list[ExpressionOrNum]]",ttest)),also_on_interface=also_on_interface)
         if scale is not None:
             self.set_scaling({name:scale}, allow_scales_with_fields=allow_scales_with_fields)
         if testscale is not None:
@@ -2562,7 +2607,7 @@ class CombinedEquations(Equations):
         return must_reapply
 
     def _get_forced_zero_dofs_for_eigenproblem(self,eqtree:"EquationTree", eigensolver:"GenericEigenSolver",angular_mode:int | None,normal_k:float | None)->set[str | int]:
-        res:set[str] = set()
+        res:set[str | int] = set()
         for e in self._subelements:
             if isinstance(e, BaseEquations): #type:ignore
                 upd=e._get_forced_zero_dofs_for_eigenproblem(eqtree, eigensolver,angular_mode,normal_k)
@@ -2896,6 +2941,7 @@ class InterfaceEquations(Equations):
             interfid = bulkmesh.has_interface_dof_id(lagr)
             dg_space:str | None=None
             if interfid < 0:
+                assert mesh._eqtree._codegen is not None
                 dg_space=mesh._eqtree._codegen.get_space_of_field(lagr)
                 if dg_space=="":
                     raise RuntimeError(f"Something strange here. We have the bulk mesh '{bulkmesh.get_name()}' and it does not have the interface id '{lagr}'") 
@@ -2904,12 +2950,13 @@ class InterfaceEquations(Equations):
 
 ## NEW PART with DG fields
         if True:
-            def expand_depvars(depvars:str | list[str] | tuple[str, ...],msh:"AnySpatialMesh"):
+            def expand_depvars(depvars:str | list[str] | tuple[str, ...],msh:"AnySpatialMesh | None"):
                 depvars=[depvars] if isinstance(depvars,str) else depvars
                 depvars_expanded=[]
                 if len(depvars)==0:
                     return depvars_expanded
-                cgen=msh._codegen 
+                assert msh is not None
+                cgen=msh._codegen
                 assert cgen is not None 
                 ccode=cgen.get_code()
                 ndim = cgen.get_nodal_dimension()
@@ -3157,27 +3204,30 @@ class GlobalLagrangeMultiplier(ODEEquations):
 
     def _get_forced_zero_dofs_for_eigenproblem(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver", angular_mode:int | None,normal_k:float | None)->set[str | int]:
         if (not self.set_zero_on_normal_mode_eigensolve) or (angular_mode is None and normal_k is None):
-            return cast(set[str],set())
+            return set()
         elif angular_mode is not None:
             angular_mode=int(angular_mode)
             fullpath = eqtree.get_full_path().lstrip("/")
             if angular_mode == 0:
-                return cast(set[str],set())
+                return set()
             elif angular_mode == 1 or angular_mode == -1:
                 for_my_m = self._entries.keys()
             else:
                 for_my_m = self._entries.keys()
             lst=[fullpath + "/" + k for k in for_my_m]
-            res:set[str] = set(lst) 
+            res:set[str | int] = set(lst)
             return res
         elif normal_k is not None:
             if normal_k == 0:
-                return cast(set[str],set())
-            else:                
+                return set()
+            else:
                 fullpath = eqtree.get_full_path().lstrip("/")
                 lst=[fullpath + "/" + k for k in self._entries.keys()]
-                res:set[str] = set(lst) 
+                res:set[str | int] = set(lst)
                 return res
+        # angular_mode is None and normal_k is None is already handled above; this is unreachable
+        # but kept so the function has an explicit return on every static code path.
+        return set()
 
     def get_information_string(self) -> str:
         return ", ".join([str(n) + " with contrib. " + str(v) for n, v in self._entries.items()])
@@ -3298,22 +3348,22 @@ class ForceZeroOnEigenSolve(BaseEquations):
                 raise RuntimeError("Cannot set both angular_mode and normal_k")
             angular_mode=int(angular_mode)
             if angular_mode==0:
-                topin:set[str]=set(*self.default)
+                topin:set[str]=set(self.default)
             else:
-                topin:set[str]=set(*self.for_nonzero_angular)
+                assert self.for_nonzero_angular is not None
+                topin=set(self.for_nonzero_angular)
         elif normal_k is not None:
             if normal_k==0.0:
-                topin:set[str]=set(*self.default)
+                topin=set(self.default)
             else:
-                topin:set[str]=set(*self.for_nonzero_angular)
+                assert self.for_nonzero_angular is not None
+                topin=set(self.for_nonzero_angular)
         else:
-            topin:set[str]=set(*self.default)
-        
+            topin=set(self.default)
+
 
         fullpath=eqtree.get_full_path().lstrip("/")
-        if isinstance(topin,str):
-            topin=set([topin])
-        res=set([ fullpath+"/"+k for k in topin])
+        res:set[str | int]=set([ fullpath+"/"+k for k in topin])
         return res
 
 
@@ -3350,7 +3400,7 @@ class ConstrainFieldsToC1Space(Equations):
                 modes[field] = (BULKFIELD_CONSTRAIN_TO_C1, contifi)
             else:
                 # additional interface field?
-                contifi=mesh.get_code_gen().get_code().get_interface_field_index(field)
+                contifi=mesh.has_interface_dof_id(field)
                 if contifi>=0:
                     modes[field] = (INTERFACE_CONSTRAIN_TO_C1, contifi)
                 else:

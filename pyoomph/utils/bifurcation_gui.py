@@ -29,22 +29,26 @@ from __future__ import annotations
 
 from ..generic.codegen import EquationTree
 from ..generic import Problem
+from .. import _pyoomph_core as _pyoomph
 from ..typings import *
 
 import matplotlib
 import os
-if os.environ.get("PYOOMPH_MPLBACKEND") is not None:
-    matplotlib.use(os.environ.get("PYOOMPH_MPLBACKEND"))
+_mplbackend=os.environ.get("PYOOMPH_MPLBACKEND")
+if _mplbackend is not None:
+    matplotlib.use(_mplbackend)
 else:
     os.environ["PYOOMPH_MPLBACKEND"]=matplotlib.get_backend()
 
 import matplotlib.pyplot as plt
+import matplotlib.text
+import matplotlib.figure
 
 from pathlib import Path
 from collections import UserList
 import numpy
 from scipy.interpolate import UnivariateSpline
-import os 
+import os
 import json
 import glob
 import shutil
@@ -57,7 +61,7 @@ class BifurcationGUISolutionPoint:
         self.eig_value_Im=numpy.imag(eig_value)
         self.statefile=statefile
         self.outstep=outstep
-        self.scoord=0
+        self.scoord:float=0
         self._tangs={}
         self._branch_switch_tangs=[]
         self.tag=-1
@@ -129,18 +133,18 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
             return self.to_branch_stab_list(obs)
         s=[p.scoord for p in self]
         x=[p.param_value for p in self]
+        # Note: obs is checked once here to build y/yi together, since the two are only ever used
+        # consistently with each other (the "obs is None" branch producing an all-observables array is
+        # currently unsupported further down/in to_branch_stab_list, see comment near the sampling loop)
         if obs is not None:
             y=[p.obs_values[obs] for p in self]
+            yi:UnivariateSpline | list[UnivariateSpline]=UnivariateSpline(s,y,s=0,k=min(3,len(s)-1))
         else:
             y=numpy.array([[p.obs_values[k]  for p in self] for k in self[0].obs_values.keys()]).transpose()
-            
+            yi=[UnivariateSpline(s,y[:,i],s=0,k=min(3,len(s)-1)) for i in range(y.shape[1])]
         eigRe=[p.eig_value_Re for p in self]
         eigIm=[p.eig_value_Im for p in self]
         xi=UnivariateSpline(s,x,s=0,k=min(3,len(s)-1))
-        if obs is not None:
-            yi=UnivariateSpline(s,y,s=0,k=min(3,len(s)-1))
-        else:
-            yi=[UnivariateSpline(s,y[:,i],s=0,k=min(3,len(s)-1)) for i in range(y.shape[1])]
         eigRei=UnivariateSpline(s,eigRe,s=0,k=min(3,len(s)-1))
         eigImi=UnivariateSpline(s,eigIm,s=0,k=min(3,len(s)-1))
         segs,stabs=self.to_branch_stab_list(obs)
@@ -157,7 +161,10 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
                         ssamp=numpy.linspace(s0,s1,subsampling+1,endpoint=True)
                     else:
                         ssamp=numpy.linspace(s0,s1,subsampling,endpoint=False)
-                    for xs,ys,eR,eI,ss in zip(xi(ssamp),yi(ssamp),eigRei(ssamp),eigImi(ssamp),ssamp):
+                    # Note: when obs is None (all-observables mode), yi is a list of splines and
+                    # to_branch_stab_list(None) above already raises (obs_values has no None key),
+                    # so this line is only ever reached with obs not None, where yi is callable.
+                    for xs,ys,eR,eI,ss in zip(xi(ssamp),yi(ssamp),eigRei(ssamp),eigImi(ssamp),ssamp): #type:ignore
                         sseg.append([xs,ys,eR,eI,ss])
                 smoothsegs.append(numpy.array(sseg))
         return smoothsegs,stabs
@@ -201,7 +208,7 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
         return res,stabs
 
 class BifurcationGUI:
-    def __init__(self,problem:Problem,parameter:str | None=None) -> None:
+    def __init__(self,problem:Problem,parameter:"str | _pyoomph.GiNaC_GlobalParam | None"=None) -> None:
         self.problem=problem
         self.problem._runmode="overwrite"
         self.problem.write_states=True
@@ -210,19 +217,19 @@ class BifurcationGUI:
         self.neigen=10
         self.shift=0
         self.branches:list[BifurcationGUISolutionBranch]=[]
-        self.current_branch=None
-        self.current_point=None
-        self.selected_point=None
-        self.selected_branch=None
+        self.current_branch:BifurcationGUISolutionBranch | None=None
+        self.current_point:BifurcationGUISolutionPoint | None=None
+        self.selected_point:BifurcationGUISolutionPoint | None=None
+        self.selected_branch:BifurcationGUISolutionBranch | None=None
         self._last_ds=1
-        self._fig=None
+        self._fig:"matplotlib.figure.Figure | None"=None
         self._tangs={}
         self._paramname=parameter
-        self.parameter_range=[]
+        self.parameter_range:list[float]=[]
         self._out_demo_video=False
         self._demo_video_step=0
-        self._current_observable=None
-        self._avail_observables=[]
+        self._current_observable:str | None=None
+        self._avail_observables:list[str]=[]
         self._observable_funcs=None
         self._mode="al"
         self._move_point=False
@@ -236,40 +243,66 @@ class BifurcationGUI:
         self.custom_key_functions:dict[str,Callable[[BifurcationGUI],None]]={}
         self._initial_view=None
         self.classify_bifurcations=False
-        
-        
+
+
     def set_initial_view(self,xmin,xmax,ymin,ymax):
         self._initial_view=[xmin,xmax,ymin,ymax]
 
-    def get_bifurcation_parameter(self):
+    # The following small accessors document/enforce invariants that hold once the GUI has been
+    # started via start(): current_point/current_branch/_fig are always set from then on. Using
+    # them (instead of the raw Optional attributes) lets pyright narrow away the None-case at the
+    # many call sites that rely on this invariant without weakening the Optional attribute types.
+    def _get_fig(self) -> "matplotlib.figure.Figure":
+        assert self._fig is not None
+        return self._fig
+
+    def _get_current_point(self) -> "BifurcationGUISolutionPoint":
+        assert self.current_point is not None
+        return self.current_point
+
+    def _get_current_branch(self) -> "BifurcationGUISolutionBranch":
+        assert self.current_branch is not None
+        return self.current_branch
+
+    def _get_current_observable(self) -> str:
+        assert self._current_observable is not None
+        return self._current_observable
+
+    def _get_paramname_str(self) -> str:
+        assert isinstance(self._paramname,str)
+        return self._paramname
+
+    def get_bifurcation_parameter(self)->"_pyoomph.GiNaC_GlobalParam":
         if self._paramname is None:
             raise RuntimeError("This function must be customized or parameter must be passed")
         elif isinstance(self._paramname,str):
             if self._paramname not in self.problem.get_global_parameter_names():
                 raise RuntimeError("Parameter "+self._paramname+" not part of the problem")
             return self.problem.get_global_parameter(self._paramname)
-    
+        else:
+            return self._paramname
+
     # By default, we allow to access all integral observables (not beginning with _) and all ODE dofs
     def evaluate_observables(self)->dict[str,float]:
         if self._observable_funcs is None:
             obs={}
             def recursive_add_spatial_domains(eqtree:EquationTree):
                 if eqtree._equations is not None and eqtree.get_equations()._is_ode()==False:
-                    ifuncs=eqtree.get_mesh().list_integral_functions()                    
-                    deps = eqtree._codegen._dependent_integral_funcs
-                    ifuncs: set[str] = set(ifuncs)                    
+                    ifuncs_list=eqtree.get_mesh().list_integral_functions()
+                    deps = eqtree.get_code_gen()._dependent_integral_funcs
+                    ifuncs: set[str] = set(ifuncs_list)
                     ifuncs.update(deps.keys())
                     bn=eqtree.get_full_path().lstrip("/")
                     for valn in ifuncs:
                         if not valn.startswith("_"):
-                            obs[bn+"/"+valn]=lambda domname=bn,valn=valn: self.problem.get_mesh(domname).evaluate_observable(valn).float_value()
+                            obs[bn+"/"+valn]=lambda domname=bn,valn=valn: float(self.problem.get_mesh(domname).evaluate_observable(valn))
                 for child in eqtree.get_children().values():
                     recursive_add_spatial_domains(child)
 
             for name,eqtree in self.problem._equation_system.get_children().items():
                 if eqtree.get_equations()._is_ode()==True:
                     ode=self.problem.get_ode(name)
-                    _vals, inds = ode._get_ODE("ODE").to_numpy()
+                    _vals, inds = ode.get_element()._ode_elem_to_numpy()
                     for valn in inds.keys():
                         if not valn.startswith("_"):
                             obs[name+"/"+valn]=lambda domname=name,valn=valn: self.problem.get_ode(domname).get_value(valn,dimensional=True,as_float=True)
@@ -318,6 +351,8 @@ class BifurcationGUI:
         self.selected_point=None
 
     def output_curves(self):
+        paramname=self._get_paramname_str()
+        observable=self._get_current_observable()
         ddir=self.problem.get_output_directory(self.data_subdir)
         odir=os.path.join(ddir,"output")
         
@@ -345,19 +380,19 @@ class BifurcationGUI:
                 else:
                     fn="smoothed_unstable_{:03d}.txt".format(iunstab)
                     iunstab+=1
-                numpy.savetxt(os.path.join(bdir,fn),seg[:,:-1],header=self._paramname+"\t"+self._current_observable+"\tReEigen\tImEigen")
+                numpy.savetxt(os.path.join(bdir,fn),seg[:,:-1],header=paramname+"\t"+observable+"\tReEigen\tImEigen")
             nbif=0
             for p in b:
                 if p.eig_value_Re==0:
                     fn="bifurcation_{:03d}.txt".format(nbif)
                     pc=p.get_coordinate(self._current_observable,with_s=False,with_eigen=True)
-                    numpy.savetxt(os.path.join(bdir,fn),numpy.array([pc],ndmin=2),header=self._paramname+"\t"+self._current_observable+"\tReEigen\tImEigen")
+                    numpy.savetxt(os.path.join(bdir,fn),numpy.array([pc],ndmin=2),header=paramname+"\t"+observable+"\tReEigen\tImEigen")
                     nbif+=1
-                if p.tag>=0 and p.statefile is not None:                    
+                if p.tag>=0 and p.statefile is not None:
                     shutil.copy2(p.statefile, os.path.join(odir,"tag{:02d}.dump".format(p.tag)))
                     fn="tag_{:02d}.txt".format(p.tag)
-                    pc=p.get_coordinate(self._current_observable,with_s=False)                    
-                    numpy.savetxt(os.path.join(odir,fn),numpy.array([pc],ndmin=2),header=self._paramname+"\t"+self._current_observable)
+                    pc=p.get_coordinate(self._current_observable,with_s=False)
+                    numpy.savetxt(os.path.join(odir,fn),numpy.array([pc],ndmin=2),header=paramname+"\t"+observable)
 
 
     def toggle_point_tag(self,pt,tag):
@@ -432,58 +467,63 @@ class BifurcationGUI:
             self.save_all()
             self.update_plot()
         elif event.key=="backspace" or event.key=="delete":
+            cur_point=self._get_current_point()
+            cur_branch=self._get_current_branch()
             if self.selected_point is None:
-                self.selected_branch=self.current_branch
-                self.selected_point=self.current_point
+                self.selected_branch=cur_branch
+                self.selected_point=cur_point
             if self.selected_point is None:
-                self.selected_point=self.current_point
-                self.selected_branch=self.current_branch
-            if self.selected_point not in self.selected_branch:
-                self.selected_branch=self.current_branch
-                self.selected_point=self.current_point
+                self.selected_point=cur_point
+                self.selected_branch=cur_branch
+            if self.selected_branch is None or self.selected_point not in self.selected_branch:
+                self.selected_branch=cur_branch
+                self.selected_point=cur_point
+            assert self.selected_point is not None and self.selected_branch is not None
             torem=self.selected_point
-            index=self.selected_branch.index(torem)
+            sel_branch=self.selected_branch
+            index=sel_branch.index(torem)
             if index==0:
-                if len(self.selected_branch)==1:
-                    if len(self.branches)==1:                        
+                if len(sel_branch)==1:
+                    if len(self.branches)==1:
                         raise RuntimeError("Cannot delete the last point")
                     if torem.statefile:
                         os.remove(torem.statefile)
-                    
-                    self.branches.remove(self.selected_branch)                    
-                    if self.selected_branch==self.current_branch:
+
+                    self.branches.remove(sel_branch)
+                    if sel_branch==cur_branch:
                         self.current_branch=self.branches[-1]
-                        self.current_point=self.current_branch[-1]
-                        self.load_pt(self.current_branch[-1])
+                        new_branch=self._get_current_branch()
+                        self.current_point=new_branch[-1]
+                        self.load_pt(new_branch[-1])
                         self.selected_point=self.current_point
                         self.selected_branch=self.current_branch
                     else:
-                        self.selected_point=self.current_point
-                        self.selected_branch=self.current_branch
+                        self.selected_point=cur_point
+                        self.selected_branch=cur_branch
                     self.save_all()
                     self.update_plot()
                     return
                 else:
-                    if torem==self.current_point:
-                        self.load_pt(self.current_branch[1])                
-                        self.current_point=self.current_branch[1]
+                    if torem==cur_point:
+                        self.load_pt(cur_branch[1])
+                        self.current_point=cur_branch[1]
                     else:
-                        self.selected_point=self.selected_branch[1]
-                        self.selected_branch=self.selected_branch
+                        self.selected_point=sel_branch[1]
+                        self.selected_branch=sel_branch
             else:
-                if torem==self.current_point:
-                    self.load_pt(self.current_branch[index-1])                
-                    self.current_point=self.current_branch[index-1]
+                if torem==cur_point:
+                    self.load_pt(cur_branch[index-1])
+                    self.current_point=cur_branch[index-1]
                 else:
                     if index>0:
-                        self.selected_point=self.selected_branch[index-1]                        
-                    elif index+1<len(self.current_branch):
-                        self.selected_point=self.current_branch[index+1]                        
+                        self.selected_point=sel_branch[index-1]
+                    elif index+1<len(cur_branch):
+                        self.selected_point=cur_branch[index+1]
                     else:
-                        self.selected_point=None                        
+                        self.selected_point=None
             if torem.statefile:
                 os.remove(torem.statefile)
-            self.selected_branch.remove(torem)
+            sel_branch.remove(torem)
             self.save_all()
             self.update_plot()
         elif event.key=="+":
@@ -496,35 +536,40 @@ class BifurcationGUI:
             self._last_ds*=-1
             self.update_plot()
         elif event.key in {'pagedown',"pageup","home","end"}:
+            cur_point=self._get_current_point()
+            cur_branch=self._get_current_branch()
             if self.selected_point is None:
-                self.selected_point=self.current_point
-                self.selected_branch=self.current_branch
+                self.selected_point=cur_point
+                self.selected_branch=cur_branch
             if self.selected_branch is None:
-                self.selected_branch=self.current_branch
+                self.selected_branch=cur_branch
             if self.selected_point not in self.selected_branch:
-                self.selected_point=self.current_point
-                self.selected_branch=self.current_branch            
-            index=self.selected_branch.index(self.selected_point)
-            origindex=index            
+                self.selected_point=cur_point
+                self.selected_branch=cur_branch
+            assert self.selected_point is not None and self.selected_branch is not None
+            sel_point=self.selected_point
+            sel_branch=self.selected_branch
+            index=sel_branch.index(sel_point)
+            origindex=index
             if event.key=='pagedown' and index>0:
                 index-=1
-            elif event.key=="pageup" and index+1<len(self.selected_branch):
+            elif event.key=="pageup" and index+1<len(sel_branch):
                 index+=1
-            elif event.key=="end" and self.selected_point is not self.selected_branch[-1]:
-                index=len(self.selected_branch)-1
-            elif event.key=="home" and self.selected_point is not self.selected_branch[0]:
-                index=0 
-            else: 
+            elif event.key=="end" and sel_point is not sel_branch[-1]:
+                index=len(sel_branch)-1
+            elif event.key=="home" and sel_point is not sel_branch[0]:
+                index=0
+            else:
                 return
 
             if self._mode=="mp" and self._move_point:
-                backup=self.selected_branch[index]
-                self.selected_branch[index]=self.selected_point
-                self.selected_branch[origindex]=backup
-                self.reorder_branch_upon_point_insertion(self.selected_branch,None)
+                backup=sel_branch[index]
+                sel_branch[index]=sel_point
+                sel_branch[origindex]=backup
+                self.reorder_branch_upon_point_insertion(sel_branch,None)
                 self.update_plot()
             else:
-                self.selected_point=self.selected_branch[index]
+                self.selected_point=sel_branch[index]
             self.update_plot()
         elif event.key=="enter":
             if self.selected_point is not None:
@@ -535,7 +580,7 @@ class BifurcationGUI:
                     self.save_all()
                     self.update_plot()
         elif event.key=="y":
-            currindex=self._avail_observables.index(self._current_observable)
+            currindex=self._avail_observables.index(self._get_current_observable())
             newindex=(currindex+1)%len(self._avail_observables)
             if currindex!=newindex:
                 self._current_observable=self._avail_observables[newindex]
@@ -546,7 +591,7 @@ class BifurcationGUI:
                         y=p.get_coordinate(self._current_observable)[1]
                         ymin=min(ymin,y)
                         ymax=max(ymax,y)
-                self._fig.gca().set_ylim(ymin,ymax)
+                self._get_fig().gca().set_ylim(ymin,ymax)
                 self.save_all()
                 self.update_plot()
         elif event.key=="m":
@@ -577,9 +622,10 @@ class BifurcationGUI:
         
     def on_press(self,event):
         if event.xdata is None:
-            return 
-        xl=self._fig.gca().get_xlim()
-        yl=self._fig.gca().get_ylim()
+            return
+        fig=self._get_fig()
+        xl=fig.gca().get_xlim()
+        yl=fig.gca().get_ylim()
         dx=xl[1]-xl[0]
         dy=yl[1]-yl[0]
         bestbranch,bestpoint=None,None
@@ -614,23 +660,24 @@ class BifurcationGUI:
         #import matplotlib.pyplot as plt      
         if self._fig is None:
             self._open_plot()
-            cp=self.current_point.get_coordinate(self._current_observable)
-            if len(self.branches)==1 and len(self.current_branch)==1:
+            cp=self._get_current_point().get_coordinate(self._current_observable)
+            if len(self.branches)==1 and len(self._get_current_branch())==1:
                 if self._initial_view is not None:
-                    self._fig.gca().set_xlim(self._initial_view[0],self._initial_view[1])
-                    self._fig.gca().set_ylim(self._initial_view[2],self._initial_view[3])
+                    self._get_fig().gca().set_xlim(self._initial_view[0],self._initial_view[1])
+                    self._get_fig().gca().set_ylim(self._initial_view[2],self._initial_view[3])
                 else:
-                    self._fig.gca().set_xlim(cp[0]-1e-4,cp[0]+1e-4)
-                    self._fig.gca().set_ylim(cp[1]-1e-4,cp[1]+1e-4)
-            self.update_plot()            
-            if plt._get_backend_mod().FigureCanvas.required_interactive_framework is None:
+                    self._get_fig().gca().set_xlim(cp[0]-1e-4,cp[0]+1e-4)
+                    self._get_fig().gca().set_ylim(cp[1]-1e-4,cp[1]+1e-4)
+            self.update_plot()
+            _figure_canvas=plt._get_backend_mod().FigureCanvas
+            if _figure_canvas is None or _figure_canvas.required_interactive_framework is None:
                 raise RuntimeError("You likely have imported pyoomph.output.plotting before pyoomph.utils.bifurcation_gui.\nThis could also have happened if you import a file that imports pyoomph.output.plotting.\nMake sure to first import pyoomph.utils.bifurcation_gui!")
 #            print(plt._get_backend_mod())
 #            print(dir(plt._get_backend_mod()))
 #            print(plt._get_backend_mod().FigureCanvas.required_interactive_framework)
             plt.show()
-        
-        gca=self._fig.gca()
+
+        gca=self._get_fig().gca()
         xlim=list(gca.get_xlim())
         ylim=list(gca.get_ylim())
         xscal=gca.get_xscale()
@@ -650,11 +697,14 @@ class BifurcationGUI:
         annotations = [child for child in gca.get_children() if isinstance(child, matplotlib.text.Annotation)]
         for a in annotations:
             a.remove()
-        while len(gca.texts)>0:
+        # Note: gca.texts (an ArtistList) does not support item deletion, so the previous
+        # "except: del gca.texts[-1]" fallback would itself raise TypeError if .remove() ever
+        # failed. Removing from a snapshot list and ignoring individual failures is safe.
+        for t in list(gca.texts):
             try:
-                gca.texts[0].remove()
-            except:
-                del gca.texts[-1]
+                t.remove()
+            except Exception:
+                pass
 
         for b in self.branches:
             color="red" if b == self.current_branch else "grey"
@@ -686,16 +736,16 @@ class BifurcationGUI:
             for p in b:                
                 if p.eig_value_Re==0:                                        
                     pc=p.get_coordinate(self._current_observable)
-                    gca.plot([pc[0]],[pc[1]], marker='o', markersize=6,color="brown")                    
+                    gca.plot([pc[0]],[pc[1]], marker='o', markersize=6,color="brown")
                     if p.bifurcation_info is not None:
                         shorts={"transcritical":"T","fold":"F","pitchfork":"P","Hopf":"H"}
-                        if p.bifurcation_info["type"] in shorts:                            
-                            gca.annotate(str(p.tag)+"," if p.tag>=0 else ""+ shorts[p.bifurcation_info["type"]],pc)
+                        if p.bifurcation_info["type"] in shorts:
+                            gca.annotate(str(p.tag)+"," if p.tag>=0 else ""+ shorts[p.bifurcation_info["type"]],(pc[0],pc[1]))
                         elif p.tag>=0:
-                            gca.annotate(str(p.tag),pc)
+                            gca.annotate(str(p.tag),(pc[0],pc[1]))
                 elif p.tag>=0:
                     pc=p.get_coordinate(self._current_observable)
-                    gca.annotate(str(p.tag),pc)
+                    gca.annotate(str(p.tag),(pc[0],pc[1]))
 
             
 #            self._fig.gca().plot(curve[:,0],curve[:,1], marker='o', markersize=3)
@@ -704,18 +754,22 @@ class BifurcationGUI:
             extend_lims(self.current_point.get_coordinate(self._current_observable))
             pc=self.current_point.get_coordinate(self._current_observable,with_eigen=True)
             if self._mode=="al":
-                self._fig.gca().plot([pc[0]],[pc[1]], marker='o', markersize=5,color="green" )
+                self._get_fig().gca().plot([pc[0]],[pc[1]], marker='o', markersize=5,color="green" )
                 if self._current_observable in self._tangs and self._last_ds is not None:
                     x0=numpy.array([pc[0],pc[1]])
                     dx=self._last_ds*self._tangs[self._current_observable]
                     #self._fig.gca().arrow(x0[0],x0[1],dx[0],dx[1])
                     extend_lims(x0)
-                    self._fig.gca().annotate("", xy=x0+dx, xytext=x0,arrowprops=dict(arrowstyle="->"),annotation_clip=False)
+                    xy_end=(float(x0[0]+dx[0]),float(x0[1]+dx[1]))
+                    xy_start=(float(x0[0]),float(x0[1]))
+                    self._get_fig().gca().annotate("", xy=xy_end, xytext=xy_start,arrowprops=dict(arrowstyle="->"),annotation_clip=False)
                     for i,bst in enumerate(self.current_point._branch_switch_tangs):
                         dx=self._last_ds*bst[self._current_observable]
                         #self._fig.gca().arrow(x0[0],x0[1],dx[0],dx[1])
                         extend_lims(x0)
-                        self._fig.gca().annotate("", xy=x0+dx, xytext=x0,arrowprops=dict(arrowstyle="->",color="brown",linewidth=1 if i==0 else 0.1),annotation_clip=False)
+                        xy_end=(float(x0[0]+dx[0]),float(x0[1]+dx[1]))
+                        xy_start=(float(x0[0]),float(x0[1]))
+                        self._get_fig().gca().annotate("", xy=xy_end, xytext=xy_start,arrowprops=dict(arrowstyle="->",color="brown",linewidth=1 if i==0 else 0.1),annotation_clip=False)
                 eigv=pc[2]+1j*pc[3]
                 pttext="({:3.3g},{:3.3g})\n".format(pc[0],pc[1])+f'{eigv:.2g}'                
             else:
@@ -738,36 +792,37 @@ class BifurcationGUI:
             seltext=None
 
         if self.parameter_range is not None and len(self.parameter_range)==2:
-            gca.set_xlim(self.parameter_range)
+            gca.set_xlim(self.parameter_range[0],self.parameter_range[1])
 
 
         gca.set_xlabel(self.get_bifurcation_parameter().get_name())
-        gca.set_ylabel(self._current_observable)
-        gca.set_xlim(xlim)
-        gca.set_ylim(ylim)
+        gca.set_ylabel(self._get_current_observable())
+        gca.set_xlim(xlim[0],xlim[1])
+        gca.set_ylim(ylim[0],ylim[1])
         gca.set_xscale(xscal)
         gca.set_yscale(yscal)
         if infotext is not None:
             gca.text(0.5, 0.5, infotext,horizontalalignment='center',verticalalignment='center',transform=gca.transAxes,bbox = dict(boxstyle="round", fc="lightgrey", ec="0.5", alpha=0.9))
-        
+
         if pttext is not None:
             gca.text(0.1, 1.01, pttext,horizontalalignment='center',verticalalignment='bottom',transform=gca.transAxes,color="red")
         if seltext is not None:
             gca.text(0.9, 1.01, seltext,horizontalalignment='center',verticalalignment='bottom',transform=gca.transAxes,color="grey")
-        self._fig.canvas.draw()
-        self._fig.canvas.flush_events()
-        
+        self._get_fig().canvas.draw()
+        self._get_fig().canvas.flush_events()
+
         if self._out_demo_video:
             ddir=self.problem.get_output_directory(self.data_subdir)
-            odir=os.path.join(ddir,"demo_movie")        
+            odir=os.path.join(ddir,"demo_movie")
             Path(odir).mkdir(parents=True,exist_ok=True)
-            self._fig.savefig(os.path.join(odir,"plot_{:06d}.png".format(self._demo_video_step)))
+            self._get_fig().savefig(os.path.join(odir,"plot_{:06d}.png".format(self._demo_video_step)))
             self._demo_video_step+=1
         
     def _update_tangents(self):
         FD_eps=1e-6
-        #if self.current_point._tangs is not None and len(self.current_point._tangs)>0:
-        #    self._tangs=self.current_point._tangs.copy()
+        cp=self._get_current_point()
+        #if cp._tangs is not None and len(cp._tangs)>0:
+        #    self._tangs=cp._tangs.copy()
         backup,_=self.problem.get_current_dofs()
         dp=self.problem.get_arc_length_parameter_derivative()
         ddof=numpy.array(self.problem.get_arclength_dof_derivative_vector())
@@ -775,36 +830,37 @@ class BifurcationGUI:
             self.problem.set_current_dofs(backup+FD_eps*ddof)
             po=self.evaluate_observables()
         else:
-            po=self.current_point.obs_values.copy()
+            po=cp.obs_values.copy()
 
         for k in self._avail_observables:
-            do=(po[k]-self.current_point.obs_values[k])/FD_eps
-            self._tangs[k]=numpy.array([dp,do])    
-        self.current_point._tangs=self._tangs.copy()
-        
-        
-        if self.current_point.bifurcation_info is not None:
-            bi=self.current_point.bifurcation_info
-            self.current_point._branch_switch_tangs=[]
+            do=(po[k]-cp.obs_values[k])/FD_eps
+            self._tangs[k]=numpy.array([dp,do])
+        cp._tangs=self._tangs.copy()
+
+
+        if cp.bifurcation_info is not None:
+            bi=cp.bifurcation_info
+            cp._branch_switch_tangs=[]
             if bi["type"]=="transcritical":
                 for dptr in [-dp,dp]:
-                    ddof=numpy.array(bi["perturbation_predictor"](dptr))                    
+                    ddof=numpy.array(bi["perturbation_predictor"](dptr))
                     self.problem.set_current_dofs(backup+FD_eps*ddof)
                     po=self.evaluate_observables()
                     btangtangs={}
                     for k in self._avail_observables:
-                        do=(po[k]-self.current_point.obs_values[k])/FD_eps
-                        btangtangs[k]=numpy.array([dptr,do])    
-                    self.current_point._branch_switch_tangs.append(btangtangs)
-                    
+                        do=(po[k]-cp.obs_values[k])/FD_eps
+                        btangtangs[k]=numpy.array([dptr,do])
+                    cp._branch_switch_tangs.append(btangtangs)
+
         self.problem.set_current_dofs(backup)
 
     def branch_switch(self):
-        if self.current_point.eig_value_Re!=0:
+        cp=self._get_current_point()
+        if cp.eig_value_Re!=0:
             raise RuntimeError("Can only switch branches as bifurcations")
-        if self.current_point.bifurcation_info is None:
+        if cp.bifurcation_info is None:
             raise RuntimeError("No bifurcation info available. Please set gui.classify_bifurcations=True")
-        bi=self.current_point.bifurcation_info
+        bi=cp.bifurcation_info
         if bi["type"]=="fold":
             print("Cannot switch branches at fold bifurcations")
             return
@@ -812,13 +868,13 @@ class BifurcationGUI:
         param=self.get_bifurcation_parameter()
         curr=self.problem.get_current_dofs()[0]       
         
-        if self.current_point._branch_switch_tangs is None or len(self.current_point._branch_switch_tangs)==0:
-            ds=0.001 
+        if cp._branch_switch_tangs is None or len(cp._branch_switch_tangs)==0:
+            ds=0.001
             dp=bi["param_predictor"](ds)
-            du=bi["perturbation_predictor"](ds)      
+            du=bi["perturbation_predictor"](ds)
         else:
-            dp=self.current_point._branch_switch_tangs[0][self._current_observable][0]*self._last_ds
-            du=bi["perturbation_predictor"](dp)                
+            dp=cp._branch_switch_tangs[0][self._current_observable][0]*self._last_ds
+            du=bi["perturbation_predictor"](dp)
             ds=self._last_ds
         
         print("Branch switching with dp=",dp,"dunorm",numpy.linalg.norm(du))
@@ -839,7 +895,8 @@ class BifurcationGUI:
 
     def transient_leave_branch(self,eigenindex=0):
         self.update_plot("LEAVING BRANCH TRANSIENTLY")
-        eig=numpy.sqrt(self.current_point.eig_value_Re**2+self.current_point.eig_value_Im**2)
+        cp=self._get_current_point()
+        eig=numpy.sqrt(cp.eig_value_Re**2+cp.eig_value_Im**2)
         eig=max(1e-4,eig)
         tsnd=1/eig
         ts=self.problem.get_scaling("temporal")*tsnd
@@ -870,7 +927,7 @@ class BifurcationGUI:
         print("Integrated",1000*ts)
         
 
-    def reorder_branch_upon_point_insertion(self,branch:BifurcationGUISolutionBranch,newp:BifurcationGUISolutionPoint):
+    def reorder_branch_upon_point_insertion(self,branch:BifurcationGUISolutionBranch,newp:BifurcationGUISolutionPoint | None):
         if newp is not None:
             if newp not in branch:
                 branch.append(newp)
@@ -886,8 +943,8 @@ class BifurcationGUI:
             return
         
         #pscale,obsscale=1,1
-        xlim=self._fig.gca().get_xlim()
-        ylim=self._fig.gca().get_ylim()
+        xlim=self._get_fig().gca().get_xlim()
+        ylim=self._get_fig().gca().get_ylim()
         pscale=1/abs(xlim[1]-xlim[0])
         obsscale=1/abs(ylim[1]-ylim[0])
 
@@ -911,7 +968,11 @@ class BifurcationGUI:
             xbase.append(float(curr[0]*pscale))
             ybase.append(float(curr[1]*obsscale))
         # Now we have a scoord from 0 to 1
-        for p in self.current_branch:
+        # Note: this used to iterate over self.current_branch instead of the branch parameter,
+        # which is a bug whenever this method is called with a branch other than current_branch
+        # (e.g. from the pagedown/pageup/home/end handler operating on selected_branch) -- it
+        # normalized the wrong branch's scoords while leaving the just-updated `branch` unnormalized.
+        for p in branch:
             if p==newp:
                 continue
             p.scoord/=al
@@ -958,15 +1019,16 @@ class BifurcationGUI:
         branch.sort(key=lambda p : p.scoord)
 
     def multistep(self):
-        xlim=self._fig.gca().get_xlim()
-        ylim=self._fig.gca().get_ylim()
-        xscale=self._fig.gca().get_xscale()
-        yscale=self._fig.gca().get_yscale()
+        fig=self._get_fig()
+        xlim=fig.gca().get_xlim()
+        ylim=fig.gca().get_ylim()
+        xscale=fig.gca().get_xscale()
+        yscale=fig.gca().get_yscale()
         tvec=self._tangs[self._current_observable]*self._last_ds
         max_ds=numpy.sqrt(tvec[0]*tvec[0]+tvec[1]*tvec[1])
-        cp0=self.current_point.get_coordinate(self._current_observable)
+        cp0=self._get_current_point().get_coordinate(self._current_observable)
         while True:
-            cp=self.current_point.get_coordinate(self._current_observable)
+            cp=self._get_current_point().get_coordinate(self._current_observable)
             if cp[0]<xlim[0] or cp[0]>xlim[1] or cp[1]<ylim[0] or cp[1]>ylim[1]:                
                 break
             if self._escape_pressed:
@@ -988,20 +1050,20 @@ class BifurcationGUI:
     def step(self,ds=None):
         if ds is None:
             ds=self._last_ds
-        origin=self.current_point
+        origin=self._get_current_point()
         if self._escape_pressed:
             return
         self.update_plot("ARCLENGTH STEPPING")
         ds=self.problem.arclength_continuation(self.get_bifurcation_parameter(),ds)
         self.problem.solve_eigenproblem(self.neigen,self.shift)
-       
+
         self._add_current_state()
 
-        self.reorder_branch_upon_point_insertion(self.current_branch,self.current_point)
-        self._last_ds=ds        
-        self._update_tangents()  
+        self.reorder_branch_upon_point_insertion(self._get_current_branch(),self._get_current_point())
+        self._last_ds=ds
+        self._update_tangents()
         if origin._tangs is None or len(origin._tangs)==0:
-            origin._tangs=self.current_point._tangs.copy()
+            origin._tangs=self._get_current_point()._tangs.copy()
 
         return ds
 
@@ -1014,7 +1076,7 @@ class BifurcationGUI:
         self._add_current_state()
         self._update_tangents()
         self.problem.deactivate_bifurcation_tracking()
-        self.reorder_branch_upon_point_insertion(self.current_branch,self.current_point)
+        self.reorder_branch_upon_point_insertion(self._get_current_branch(),self._get_current_point())
 
     
     def start(self,init_ds,initial_max_newton_iterations=10):
@@ -1057,17 +1119,19 @@ class BifurcationGUI:
     def save_all(self):
         outdir=self.problem.get_output_directory(self.data_subdir)
         
+        fig=self._get_fig()
+        cur_branch=self._get_current_branch()
         fullinfo={}
         fullinfo["branches"]=[b.to_state_dict() for b in self.branches]
         fullinfo["demo_video_step"]=self._demo_video_step
-        fullinfo["xlim"]=self._fig.gca().get_xlim()
-        fullinfo["ylim"]=self._fig.gca().get_ylim()
-        fullinfo["xscale"]=self._fig.gca().get_xscale()
-        fullinfo["yscale"]=self._fig.gca().get_yscale()
+        fullinfo["xlim"]=fig.gca().get_xlim()
+        fullinfo["ylim"]=fig.gca().get_ylim()
+        fullinfo["xscale"]=fig.gca().get_xscale()
+        fullinfo["yscale"]=fig.gca().get_yscale()
 
         fullinfo["statestep"]=self._state_step
-        fullinfo["currentbranch"]=self.branches.index(self.current_branch)
-        fullinfo["currentpoint"]=self.current_branch.index(self.current_point)
+        fullinfo["currentbranch"]=self.branches.index(cur_branch)
+        fullinfo["currentpoint"]=cur_branch.index(self._get_current_point())
         if self.selected_branch is not None:
             fullinfo["selectedbranch"]=self.branches.index(self.selected_branch)
             if self.selected_point is not None:
@@ -1087,21 +1151,26 @@ class BifurcationGUI:
         self.branches=[BifurcationGUISolutionBranch.from_dict(b) for b in fullinfo["branches"]]
         if self._fig is None:
             self._open_plot()
-        self._fig.gca().set_xlim(fullinfo["xlim"])
-        self._fig.gca().set_ylim(fullinfo["ylim"])
-        self._fig.gca().set_xscale(fullinfo["xscale"])
-        self._fig.gca().set_yscale(fullinfo["yscale"])
-        
+        fig=self._get_fig()
+        fig.gca().set_xlim(fullinfo["xlim"])
+        fig.gca().set_ylim(fullinfo["ylim"])
+        fig.gca().set_xscale(fullinfo["xscale"])
+        fig.gca().set_yscale(fullinfo["yscale"])
+
         if "demo_video_step" in fullinfo:
             self._demo_video_step=fullinfo["demo_video_step"]
 
         self._state_step=fullinfo["statestep"]
-        self.current_branch=self.branches[fullinfo["currentbranch"]]
-        self.current_point=self.current_branch[fullinfo["currentpoint"]]
+        # Note: indices are explicitly converted to int (rather than indexing with the raw Any
+        # from the JSON dict) since otherwise UserList.__getitem__'s int/slice overload becomes
+        # ambiguous for an Any-typed index, which makes pyright widen the assignment back to the
+        # full Optional declared type instead of narrowing it to the non-None branch/point type.
+        self.current_branch=self.branches[int(fullinfo["currentbranch"])]
+        self.current_point=self.current_branch[int(fullinfo["currentpoint"])]
         if "selectedbranch" in fullinfo:
-            self.selected_branch=self.branches[fullinfo["selectedbranch"]]
+            self.selected_branch=self.branches[int(fullinfo["selectedbranch"])]
             if "selectedpoint" in fullinfo:
-                self.selected_point=self.selected_branch[fullinfo["selectedpoint"]]
+                self.selected_point=self.selected_branch[int(fullinfo["selectedpoint"])]
         self._last_ds=fullinfo["lastds"]
         self._current_observable=fullinfo["current_observable"]
         self._mode=fullinfo["mode"]

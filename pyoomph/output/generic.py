@@ -94,6 +94,12 @@ class _BaseOutputter:
     def clean_up(self)->None:
         pass
 
+    def change_output_directory(self,newdir:str,eqtree:"EquationTree")->None:
+        # Default no-op: not all outputter kinds support relocating their output
+        # (e.g. those without a persistent file handle); subclasses that do
+        # (e.g. _TextOutput, _ODEFileOutput, _IntegralObservableOutput) override this.
+        pass
+
     def close(self)->None:
         # Close any open output file handle(s). Unlike clean_up() (called after every
         # single output() step for transient per-step state), this is only called once,
@@ -146,7 +152,7 @@ class _TextOutput(_BaseNumpyOutput):
     def __init__(self,mesh:"AnySpatialMesh",*fields:str,ftrunk:str="txtout",in_subdir:bool=True,file_ext:str | list[str] | None=None,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs",nondimensional:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True,reverse_segment_if:Callable[[list[int], NPFloatArray], bool] | None=None,sort_segments_by:Callable[[list[int], NPFloatArray], float] | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True,operator:"MeshDataCacheOperatorBase | None"=None,tesselate_tri:bool=True):
         super().__init__(mesh)
         self.fname_trunk=ftrunk
-        self._orbit_subdir=None
+        self._orbit_subdir:str | None=None
         self.in_subdir=in_subdir
         self.file_ext=file_ext
         self.fields:list[str]=[*fields]
@@ -199,8 +205,8 @@ class _TextOutput(_BaseNumpyOutput):
         if Path(basedir).samefile(newdir):
             self._orbit_subdir=None
         else:
-            self._orbit_subdir=Path.relative_to(Path(newdir),Path(basedir))
-            Path(os.path.join(self.problem.get_output_directory(self._orbit_subdir)),self.fname_trunk).mkdir(parents=True, exist_ok=True) 
+            self._orbit_subdir=str(Path.relative_to(Path(newdir),Path(basedir)))
+            Path(os.path.join(self.problem.get_output_directory(self._orbit_subdir)),self.fname_trunk).mkdir(parents=True, exist_ok=True)
         
 
     def output(self,step:int):        
@@ -246,7 +252,8 @@ class _TextOutput(_BaseNumpyOutput):
                     if self.reverse_segment_if(l,coordsA):
                         lsegs[i]=list(reversed(l))
             if self.sort_segments_by is not None:
-                lsegs=list(sorted(lsegs,key=lambda k : self.sort_segments_by(k,coordsA)))
+                sort_fn=self.sort_segments_by
+                lsegs=list(sorted(lsegs,key=lambda k : sort_fn(k,coordsA)))
 
 
 
@@ -293,7 +300,7 @@ class _TextOutput(_BaseNumpyOutput):
 
 ####################
 
-def save_by_extension(fname:str,data:NPFloatArray,header:list[str],timeinfo:float,params:dict[str,str],discontinuous_elem_indices:NPInt32Array | None=None):
+def save_by_extension(fname:str,data:NPFloatArray,header:list[str],timeinfo:float,params:dict[str,str],discontinuous_elem_indices:NPIntArray | None=None):
     _,ext=os.path.splitext(fname)
     if ext in [".mat",".MAT"]:
         mdict={}
@@ -370,8 +377,8 @@ class _OutputTxtAlongLine(_BaseOutputter):
                 raise RuntimeError("Cannot specify start, end or N if coords are given")
             meshdata = self.mesh.get_problem().get_cached_mesh_data(self.mesh, tesselate_tri=True, nondimensional=False)
             ss=meshdata.get_unit("spatial")
-            coords=numpy.array(coords/ss,dtype=numpy.float64)
-            self.coords:NPFloatArray=numpy.array(coords) #type:ignore
+            coords_arr=numpy.array(coords,dtype=object)/ss # Convert first: coords may be a plain (nested) list, which does not support "/"
+            self.coords:NPFloatArray=numpy.array(coords_arr,dtype=numpy.float64)
             self.isovalue=None
 
     def init(self, eqtree:"EquationTree", continue_info:dict[str, Any] | None=None, rank:int=0):
@@ -423,13 +430,15 @@ class _OutputTxtAlongLine(_BaseOutputter):
             triang = tri.Triangulation(coordinates[0,:], coordinates[1,:], meshdata.elem_indices)
             if self.isovalue is not None:
                 import matplotlib.pyplot as plt
-                isodata=meshdata.get_data(self.isovalue[0])-float(self.isovalue[1]) # TODO: Nondimensionalize cast to float
+                isofield_data=meshdata.get_data(self.isovalue[0])
+                assert isofield_data is not None, "Field '"+self.isovalue[0]+"' used for the isovalue is not present in the mesh data"
+                isodata=isofield_data-float(self.isovalue[1]) # TODO: Nondimensionalize cast to float
                 isol=plt.tricontour(triang,isodata,[0.0])
-                self.coords=[]
+                coords_list:list[NPFloatArray]=[]
                 for path in isol.allsegs[0]:
                     for p in path:
-                        self.coords.append(p)
-                self.coords=numpy.array(self.coords)
+                        coords_list.append(p)
+                self.coords=numpy.array(coords_list)
                 plt.close()
                 del isol
 
@@ -437,7 +446,9 @@ class _OutputTxtAlongLine(_BaseOutputter):
             fields=[f for f in fields if f not in meshdata.elemental_field_inds.keys()] # Does not work for elemental fields
             dataL:list[NPFloatArray]=[]
             for f in fields:
-                inter=tri.LinearTriInterpolator(triang, meshdata.get_data(f))
+                fdata=meshdata.get_data(f)
+                assert fdata is not None, "Field '"+f+"' is not present in the mesh data"
+                inter=tri.LinearTriInterpolator(triang, fdata)
                 inter=inter(self.coords[:,0],self.coords[:,1]) #type:ignore
                 if self.NaN_outside:                    
                     if f not in {"coordinate_x","coordinate_y","coordinate_z"}:                        
@@ -478,9 +489,9 @@ class _OutputTxtAlongLine(_BaseOutputter):
             params[n] = self.mesh.get_problem().get_global_parameter(n).value
         if isinstance(fname,list):
             for fn in fname:
-                save_by_extension(fn, data, header=header,timeinfo=mesh.get_problem().get_current_time(as_float=True),params=params)
-        else:            
-            save_by_extension(fname,data,header=header,timeinfo=mesh.get_problem().get_current_time(as_float=True),params=params)
+                save_by_extension(fn, data, header=header,timeinfo=mesh.get_problem().get_current_time(dimensional=True,as_float=True),params=params)
+        else:
+            save_by_extension(fname,data,header=header,timeinfo=mesh.get_problem().get_current_time(dimensional=True,as_float=True),params=params)
         self.clean_up()
 
     def delete_files_from_previous_simulation(self):
@@ -502,7 +513,7 @@ class _OutputTxtAlongLine(_BaseOutputter):
 
 
 class _GridFileOutput(_BaseOutputter):
-    def __init__(self,*fields:str,lower:list[Sequence[ExpressionOrNum]],upper:list[ExpressionOrNum],N:list[int] | None=None,dx:list[ExpressionOrNum] | None,mesh:"AnySpatialMesh | None"=None,ftrunk:str="grid_out",in_subdir:bool=True,file_ext:str | list[str] | None=None,hide_lagrangian:bool=True,hide_underscore:bool=True,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs"):
+    def __init__(self,*fields:str,lower:NPFloatArray | list[ExpressionOrNum],upper:list[ExpressionOrNum],N:list[int] | None=None,dx:list[ExpressionOrNum] | None,mesh:"AnySpatialMesh | None"=None,ftrunk:str="grid_out",in_subdir:bool=True,file_ext:str | list[str] | None=None,hide_lagrangian:bool=True,hide_underscore:bool=True,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs"):
         super().__init__()
         if mesh is None:
             raise ValueError("Need to supply at least a mesh")
@@ -525,18 +536,19 @@ class _GridFileOutput(_BaseOutputter):
         pr=self.mesh.get_problem()
         meshdata = pr.get_cached_mesh_data(self.mesh, tesselate_tri=True, nondimensional=False)
         ss=meshdata.get_unit("spatial")
-        self.coords_per_dir=[]
+        self.coords_per_dir:list[NPFloatArray]=[]
         if self.dx is not None:
             for ll,uu,step in zip(self.lower,self.upper,self.dx):
                 ll_nd=float(ll/ss)
                 uu_nd=float(uu/ss)
-                step_nd=float(dx/ss)
+                step_nd=float(step/ss)
                 self.coords_per_dir.append(numpy.arange(ll_nd,uu_nd,step_nd))
         else:
-            for ll,uu,N in zip(self.lower,self.upper,self.N):
+            assert self.N is not None, "Must either set dx or N"
+            for ll,uu,n in zip(self.lower,self.upper,self.N):
                 ll_nd=float(ll/ss)
                 uu_nd=float(uu/ss)
-                self.coords_per_dir.append(numpy.linspace(ll_nd,uu_nd,num=N,endpoint=True))
+                self.coords_per_dir.append(numpy.linspace(ll_nd,uu_nd,num=n,endpoint=True))
         if len(self.coords_per_dir)!=2:
             raise RuntimeError("Only works for 2d")
         self.coords_x,self.coords_y=numpy.meshgrid(numpy.array(self.coords_per_dir[0]),numpy.array(self.coords_per_dir[1]))
@@ -595,7 +607,9 @@ class _GridFileOutput(_BaseOutputter):
             fields=meshdata.get_default_output_fields(rem_lagrangian=self.hide_lagrangian,rem_underscore=self.hide_underscore)
             dataL:list[NPFloatArray]=[]
             for f in fields:
-                inter=tri.LinearTriInterpolator(triang, meshdata.get_data(f))                
+                fdata=meshdata.get_data(f)
+                assert fdata is not None, "Field '"+f+"' is not present in the mesh data"
+                inter=tri.LinearTriInterpolator(triang, fdata)
                 inter=inter(self.coords_x,self.coords_y) #type:ignore
                 if True:                    
                     if f not in {"coordinate_x","coordinate_y","coordinate_z"}:                        
@@ -636,9 +650,9 @@ class _GridFileOutput(_BaseOutputter):
             params[n] = self.mesh.get_problem().get_global_parameter(n).value
         if isinstance(fname,list):
             for fn in fname:
-                save_by_extension(fn, data, header=header,timeinfo=mesh.get_problem().get_current_time(as_float=True),params=params)
-        else:            
-            save_by_extension(fname,data,header=header,timeinfo=mesh.get_problem().get_current_time(as_float=True),params=params)
+                save_by_extension(fn, data, header=header,timeinfo=mesh.get_problem().get_current_time(dimensional=True,as_float=True),params=params)
+        else:
+            save_by_extension(fname,data,header=header,timeinfo=mesh.get_problem().get_current_time(dimensional=True,as_float=True),params=params)
         self.clean_up()
 
     def delete_files_from_previous_simulation(self):
@@ -663,16 +677,17 @@ class _GridFileOutput(_BaseOutputter):
 class _BaseODEOutput(_BaseOutputter):
     def __init__(self):
         super().__init__()
-        self._element:_pyoomph.BulkElementODE0d
         self._odemesh:ODEStorageMesh
 
     def init(self,eqtree:"EquationTree",continue_info:dict[str, Any] | None=None,rank:int=0):
         self._eqtree=eqtree
-        self._mpi_rank=rank        
+        self._mpi_rank=rank
         pass
 
     def get_ODE_values(self)->tuple[NPFloatArray,dict[str,int]]:
-        values,fieldinds=self._eqtree._mesh._element._ode_elem_to_numpy()
+        elem=self._odemesh._element
+        assert elem is not None
+        values,fieldinds=elem._ode_elem_to_numpy()
         return values,fieldinds
 
     def output(self,step:int)->None:
@@ -705,7 +720,8 @@ class _ODEFileOutput(_BaseODEOutput):
 
     def change_output_directory(self,newdir:str,eqtree:"EquationTree"):
         oldname=self.fname
-        self.fname = os.path.join(newdir, os.path.basename(self.fname))        
+        assert self.fname is not None
+        self.fname = os.path.join(newdir, os.path.basename(self.fname))
         if self.fname!=oldname:
             self.file.close()
             if os.path.exists(self.fname):  
@@ -734,7 +750,9 @@ class _ODEFileOutput(_BaseODEOutput):
         #for i,n in enumerate(locs,start=len(values)+len(obs)):
          #   descs[i]=n
         
-        _, indices = self._odemesh._element._ode_elem_to_numpy()
+        odeelem=self._odemesh._element
+        assert odeelem is not None
+        _, indices = odeelem._ode_elem_to_numpy()
         scales:list[ExpressionOrNum] = [1.0] * (len(indices)+len(obs)) #+len(locs)
         for k, i in indices.items():            
             s = self._eqtree.get_equations().get_scaling(k)
@@ -806,7 +824,9 @@ class _ODEFileOutput(_BaseODEOutput):
         values,_=self.get_ODE_values()
         obs=self._eqtree.get_mesh().evaluate_all_observables()
         
-        _, indices = self._odemesh._element._ode_elem_to_numpy()
+        odeelem=self._odemesh._element
+        assert odeelem is not None
+        _, indices = odeelem._ode_elem_to_numpy()
         self._scales:list[ExpressionOrNum] = [1.0] * (len(indices)+len(obs))
         for k, i in indices.items():
             s = self._eqtree.get_equations().get_scaling(k)
@@ -891,8 +911,8 @@ class GenericOutput(BaseEquations):
     def _do_output(self, eqtree:"EquationTree", step:int,stage:str):
         self._outputter[eqtree].output(step)
         
-    def change_output_directory(self, dir:str,eqtree:"EquationTree"):
-        self._outputter[eqtree].change_output_directory(dir,eqtree)
+    def change_output_directory(self, newdir:str,eqtree:"EquationTree"):
+        self._outputter[eqtree].change_output_directory(newdir,eqtree)
 
 
 class ODEFileOutput(GenericOutput):
@@ -1006,12 +1026,12 @@ class TextFileOutputAlongLine(GenericOutput):
 
 
 class GridFileOutput(GenericOutput):
-    def __init__(self,lower:NPFloatArray | list[Sequence[ExpressionOrNum]],upper:list[ExpressionOrNum] | None,N:int | list[int]=None,dx:ExpressionOrNum | list[ExpressionOrNum]=None,filename:str | None=None,file_ext:str | list[str] | None=None,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs"):
+    def __init__(self,lower:NPFloatArray | list[ExpressionOrNum],upper:list[ExpressionOrNum],N:int | list[int] | None=None,dx:ExpressionOrNum | list[ExpressionOrNum] | None=None,filename:str | None=None,file_ext:str | list[str] | None=None,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs"):
         super(GridFileOutput, self).__init__()
         self.lower=lower
         self.upper=upper
         if len(self.lower)!=len(self.upper):
-            raise RuntimeError("Start coordinate vector 'lower' must have the same length as the end coordinate vector 'upper'")        
+            raise RuntimeError("Start coordinate vector 'lower' must have the same length as the end coordinate vector 'upper'")
         if N is None and dx is None:
             raise RuntimeError("Must either set dx or N")
         elif N is not None and dx is not None:
@@ -1019,24 +1039,24 @@ class GridFileOutput(GenericOutput):
         elif N is not None:
             if not isinstance(N,(list,tuple)):
                 N=[N]*len(self.lower)
-            self.N=N
-            self.dx=None
+            self.N:list[int] | None=N
+            self.dx:list[ExpressionOrNum] | None=None
         else:
+            assert dx is not None
             if not isinstance(dx,(list,tuple)):
                 dx=[dx]*len(self.lower)
             self.dx=dx
             self.N=None
         self.filename=filename
-        self.file_ext=file_ext            
-        self.N=N
+        self.file_ext=file_ext
         self.eigenvector=eigenvector
         self.eigenmode:"MeshDataEigenModes"=eigenmode
 
 
-    def _construct_outputter_for_eq_tree(self,eqtree:"EquationTree",continue_info:dict[str, Any] | None,mpirank:int) -> _OutputTxtAlongLine:
+    def _construct_outputter_for_eq_tree(self,eqtree:"EquationTree",continue_info:dict[str, Any] | None,mpirank:int) -> _GridFileOutput:
         fn=self._expand_filename(eqtree,self.filename,"",add_problem_outdir=False)
         mesh=eqtree.get_mesh()
-        assert not isinstance(mesh,ODEStorageMesh)        
+        assert not isinstance(mesh,ODEStorageMesh)
         return _GridFileOutput(mesh=mesh,ftrunk=fn,lower=self.lower,upper=self.upper,N=self.N,dx=self.dx,file_ext=self.file_ext,eigenvector=self.eigenvector,eigenmode=self.eigenmode)
 
     def _is_ode(self):

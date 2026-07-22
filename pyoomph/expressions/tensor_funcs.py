@@ -305,8 +305,8 @@ if (flag)
     }
 }
         """
-            return ccode
-        
+        return ccode
+
 # Axisymmetric case, evaluation and Jacobian
     def eval_axisymmetric(self,flag:int,arg_list:NPFloatArray,result_list:NPFloatArray,derivative_matrix:NPFloatArray):
         M11=arg_list[0]
@@ -503,6 +503,7 @@ class LogConfTensorDecompositionCartesian2d(CustomMultiReturnExpression):
         R=args[0]
         gradu=args[1]
         ev=args[2]
+        assert isinstance(R,Expression) and isinstance(gradu,Expression) and isinstance(ev,Expression)
         return [R[0,0],R[0,1],R[1,0],R[1,1],gradu[0,0],gradu[0,1],gradu[1,0],gradu[1,1],ev[0,0],ev[1,1]]
     
     # To the calculations in python, including the derivatives
@@ -898,6 +899,7 @@ class LogConfTensorDecompositionAxisymmetric(CustomMultiReturnExpression):
         R=args[0]
         gradu=args[1]
         ev=args[2]
+        assert isinstance(R,Expression) and isinstance(gradu,Expression) and isinstance(ev,Expression)
         return [R[0,0],R[0,1],R[1,0],R[1,1],gradu[0,0],gradu[0,1],gradu[1,0],gradu[1,1],gradu[2,2],ev[0,0],ev[1,1]]
     
     # To the calculations in python, including the derivatives
@@ -1588,16 +1590,12 @@ class SymmetricMatrixExponential(CustomMultiReturnExpression):
         else:
             raise RuntimeError("TODO: Axisymmetric case here")
 
-    def get_num_returned_scalars(self, nargs: int) -> int:
-        assert nargs==3
-        return 3
-
     # Assemble back to a list
     def process_result_list_to_results(self, result_list: list["Expression"]) -> tuple["ExpressionOrNum", ...]:
-        se= (lambda x:subexpression(x)) if self.use_subexpression else (lambda x:x)
+        se:Callable[[Expression],Expression]= (lambda x:subexpression(x)) if self.use_subexpression else (lambda x:x)
         if not self.axisymmetric:
             if self.dim==2:
-                return se(matrix([[result_list[0],result_list[1]],[result_list[1],result_list[2]]],fill_to_max_vector_dim=self.fill_to_max_vector_dim))
+                return (se(matrix([[result_list[0],result_list[1]],[result_list[1],result_list[2]]],fill_to_max_vector_dim=self.fill_to_max_vector_dim)),)
             else:
                 raise RuntimeError("TODO: "+str(self.dim)+"-dimensional case here")
         else:
@@ -1628,10 +1626,11 @@ class InvertMatrix(CustomMultiReturnExpression):
 
     # ---------- argument / result (de)packing ----------
 
-    def process_args_to_scalar_list(self, *args):
+    def process_args_to_scalar_list(self, *args: ExpressionOrNum) -> list[ExpressionOrNum]:
         if len(args) != 1:
             raise ValueError("InvertMatrix only supports one argument")
         M = args[0]
+        assert isinstance(M,Expression)
         n = self.n
         if self.matrix_type == "general":
             return [M[r, c] for r in range(n) for c in range(n)]
@@ -1643,6 +1642,8 @@ class InvertMatrix(CustomMultiReturnExpression):
         elif self.matrix_type == "antisymmetric":
             # n==2 guaranteed here (n==3 rejected in __init__)
             return [M[0, 1]]
+        else:
+            raise ValueError("Unknown matrix_type: "+str(self.matrix_type))
 
     def get_num_returned_scalars(self, nargs: int) -> int:
         n = self.n
@@ -1652,28 +1653,32 @@ class InvertMatrix(CustomMultiReturnExpression):
             return n * (n + 1) // 2
         elif self.matrix_type == "antisymmetric":
             return n * (n - 1) // 2
+        else:
+            raise ValueError("Unknown matrix_type: "+str(self.matrix_type))
 
     def process_result_list_to_results(self, result_list: list["Expression"]) -> tuple["ExpressionOrNum", ...]:
         n = self.n
         if self.matrix_type == "general":
             if n == 2:
-                return matrix([[result_list[0], result_list[1]],
-                                [result_list[2], result_list[3]]])
+                return (matrix([[result_list[0], result_list[1]],
+                                [result_list[2], result_list[3]]]),)
             else:
-                return matrix([[result_list[0], result_list[1], result_list[2]],
+                return (matrix([[result_list[0], result_list[1], result_list[2]],
                                 [result_list[3], result_list[4], result_list[5]],
-                                [result_list[6], result_list[7], result_list[8]]])
+                                [result_list[6], result_list[7], result_list[8]]]),)
         elif self.matrix_type == "symmetric":
             if n == 2:
-                return matrix([[result_list[0], result_list[1]],
-                                [result_list[1], result_list[2]]])
+                return (matrix([[result_list[0], result_list[1]],
+                                [result_list[1], result_list[2]]]),)
             else:
-                return matrix([[result_list[0], result_list[1], result_list[2]],
+                return (matrix([[result_list[0], result_list[1], result_list[2]],
                                 [result_list[1], result_list[3], result_list[4]],
-                                [result_list[2], result_list[4], result_list[5]]])
+                                [result_list[2], result_list[4], result_list[5]]]),)
         elif self.matrix_type == "antisymmetric":
             b_inv = result_list[0]
-            return matrix([[0, -b_inv], [b_inv, 0]])
+            return (matrix([[0, -b_inv], [b_inv, 0]]),)
+        else:
+            raise ValueError("Unknown matrix_type: "+str(self.matrix_type))
 
     # ---------- shared derivative loop ----------
 
