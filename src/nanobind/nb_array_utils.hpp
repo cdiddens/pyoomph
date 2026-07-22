@@ -56,3 +56,21 @@ static inline std::vector<T> ndarray_to_vector(const nb::ndarray<nb::numpy, T> &
 		n *= arr.shape(i);
 	return std::vector<T>(arr.data(), arr.data() + n);
 }
+
+// Wraps a rectangular std::vector<std::vector<T>> (all inner vectors of equal size) as a new
+// 2D numpy array, flattening it onto the heap analogously to vector_to_ndarray. Callers must
+// only use this for genuinely rectangular data (e.g. per-point field samples); ragged data
+// (e.g. per-row CSR arrays of differing length) must instead be returned as a list of
+// individually-converted 1D arrays.
+template <typename T>
+static inline nb::ndarray<nb::numpy, T> nested_vector_to_ndarray(const std::vector<std::vector<T>> &v)
+{
+	size_t rows = v.size();
+	size_t cols = rows ? v[0].size() : 0;
+	T *data = new T[rows * cols];
+	for (size_t i = 0; i < rows; i++)
+		std::copy(v[i].begin(), v[i].end(), data + i * cols);
+	nb::capsule owner(data, [](void *p) noexcept
+					   { delete[](T *) p; });
+	return nb::ndarray<nb::numpy, T>(data, {rows, cols}, owner);
+}

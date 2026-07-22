@@ -1035,7 +1035,7 @@ void PyReg_Mesh(nb::module_ &m)
 			}
 			std::vector<double> res(elerrs.size());
 			for (unsigned int i=0;i<elerrs.size();i++) res[i]=elerrs[i];
-			return res; }), "Returns the per-element spatial error estimate (as used by adaptive mesh refinement) for every element in this mesh; zero everywhere if adaptation is disabled")
+			return vector_to_ndarray(res); }), "Returns the per-element spatial error estimate (as used by adaptive mesh refinement) for every element in this mesh; zero everywhere if adaptation is disabled")
 		.def(
 			"node_pt",oomph_mesh_method([](oomph::Mesh *self, unsigned int i) -> pyoomph::Node *
 			{ return dynamic_cast<pyoomph::Node *>(self->node_pt(i)); }),
@@ -1065,7 +1065,7 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("is_mesh_distributed",mesh_method([](pyoomph::Mesh *m)
 			 { return m->is_mesh_distributed(); }), "Returns whether this mesh is distributed across multiple MPI processes")
 		.def("_save_state",mesh_method([](pyoomph::Mesh *m)
-			 {std::vector<double> data; m->_save_state(data); return data; }), "Serializes the current state of this mesh (nodal positions/values, refinement pattern, ...) into a flat list of doubles, for checkpointing")
+			 {std::vector<double> data; m->_save_state(data); return vector_to_ndarray(data); }), "Serializes the current state of this mesh (nodal positions/values, refinement pattern, ...) into a flat array of doubles, for checkpointing")
 		.def("_setup_information_from_old_mesh",mesh_method([](pyoomph::Mesh *self, MeshHandleBase *old_mesh){ self->_setup_information_from_old_mesh(old_mesh->mesh()); }), nb::arg("old_mesh"), "Prepares this (new) mesh to inherit information (e.g. for state restoration) from an old mesh")
 		.def("_load_state",mesh_method(&pyoomph::Mesh::_load_state), nb::arg("data"), "Restores the mesh state previously serialized by _save_state")
 		.def("_pin_noncontributing_dofs",mesh_method(&pyoomph::Mesh::pin_noncontributing_dofs), "Pins all degrees of freedom on this mesh that do not actually contribute to any residual (e.g. unused higher-order nodal values), to avoid singular Jacobians")
@@ -1192,7 +1192,7 @@ void PyReg_Mesh(nb::module_ &m)
 	    return result; }),
 			nb::rv_policy::reference, nb::arg("old_ordering"), "Returns the nodes of this mesh in the (potential) reordering used by reorder_nodes, without actually reordering the internal storage")
 		.def("evaluate_local_expression_at_nodes",mesh_method([](pyoomph::Mesh *self, unsigned index, bool nondimensional,bool discontinuous)
-			 { return self->evaluate_local_expression_at_nodes(index, nondimensional,discontinuous); }), nb::arg("expression_index"), nb::arg("nondimensional"), nb::arg("discontinuous"), "Evaluates a local (element-defined) expression, identified by its index, at every node of this mesh")
+			 { return vector_to_ndarray(self->evaluate_local_expression_at_nodes(index, nondimensional,discontinuous)); }), nb::arg("expression_index"), nb::arg("nondimensional"), nb::arg("discontinuous"), "Evaluates a local (element-defined) expression, identified by its index, at every node of this mesh")
 		// Exports the entire mesh (nodal positions/fields, elemental connectivity, discontinuous and elemental
 		// fields) into a set of numpy arrays in one go, for efficient plotting/post-processing from Python.
 		.def("to_numpy",mesh_method([](pyoomph::Mesh *self, bool tesselate_tri, bool nondimensional, unsigned history_index,bool discontinuous)
@@ -1328,13 +1328,13 @@ void PyReg_Mesh(nb::module_ &m)
 				descs[ef.first]=offset+ef.second;
 			}
 
-			return std::make_tuple(values,masked_lines,descs); }), nb::arg("coords"), nb::arg("with_scales"), "Interpolates all field values of this mesh at the given (N, dim) numpy array of intrinsic coordinates; returns the values, a mask of coordinates that could not be located, and a dict describing which field corresponds to which value column")
+			return std::make_tuple(nested_vector_to_ndarray(values),masked_lines,descs); }), nb::arg("coords"), nb::arg("with_scales"), "Interpolates all field values of this mesh at the given (N, dim) numpy array of intrinsic coordinates; returns the values, a mask of coordinates that could not be located, and a dict describing which field corresponds to which value column")
 		.def("describe_global_dofs",mesh_method([](pyoomph::Mesh *self)
 			 {
 	 std::vector<int> types;
 	 std::vector<std::string> names;
 	 self->describe_global_dofs(types,names);
-	 return std::make_tuple(types,names); }), "Returns, for every global degree of freedom associated with this mesh, its dof type and a human-readable name")
+	 return std::make_tuple(vector_to_ndarray(types),names); }), "Returns, for every global degree of freedom associated with this mesh, its dof type and a human-readable name")
 		.def("set_output_scale",mesh_method(&pyoomph::Mesh::set_output_scale), nb::arg("name"), nb::arg("scale"), nb::arg("code_instance"), "Sets an output (dimensional rescaling) factor for the field of the given name, used e.g. when exporting to numpy/VTK")
 		.def("get_output_scale",mesh_method(&pyoomph::Mesh::get_output_scale), nb::arg("name"), "Returns the output (dimensional rescaling) factor previously set for the field of the given name")
 		.def("get_element_dimension",mesh_method(&pyoomph::Mesh::get_element_dimension), "Returns the spatial dimension of the elements of this mesh")
@@ -1586,7 +1586,7 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("_prepare_advection", &pyoomph::TracerCollection::prepare_advection)
 		.def("_locate_elements", &pyoomph::TracerCollection::locate_elements)
 		.def("_save_state", [](pyoomph::TracerCollection *t)
-			 {std::vector<double> pos; std::vector<int> tags; t->_save_state(pos,tags); return std::make_tuple(pos,tags); })
+			 {std::vector<double> pos; std::vector<int> tags; t->_save_state(pos,tags); return std::make_tuple(vector_to_ndarray(pos),vector_to_ndarray(tags)); })
 		.def("_load_state", [](pyoomph::TracerCollection *t, std::vector<double> pos, std::vector<int> tags)
 			 { t->_load_state(pos, tags); })
 		.def("_set_transfer_interface", &pyoomph::TracerCollection::set_transfer_interface)

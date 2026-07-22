@@ -842,12 +842,19 @@ void PyReg_Problem(nb::module_ &m)
 			 { self->reset_arc_length_parameters(); }, "Reset all internal arclength continuation parameters (theta^2, sign of Jacobian, continuation direction, parameter derivative, ...) to their default starting values.")
 		.def("_set_dof_direction_arclength", &pyoomph::Problem::set_dof_direction_arclength, nb::arg("direction"),
 			 "Set the direction vector along which the dof-derivative for arclength continuation is initialized/oriented.")
-		.def("get_parameter_derivative", &pyoomph::Problem::get_parameter_derivative, nb::arg("parameter_name"),
-			 "Return the derivative of the residual vector with respect to the global parameter ``parameter_name`` (i.e. dR/dparam), evaluated at the current state.")
-		.def("get_arclength_dof_derivative_vector", &pyoomph::Problem::get_arclength_dof_derivative_vector,
-			 "Return the current derivative of the degrees of freedom with respect to arclength, as used/updated during arclength continuation.")
-		.def("get_arclength_dof_current_vector", &pyoomph::Problem::get_arclength_dof_current_vector,
-			 "Return the degrees of freedom at the last converged point on the arclength continuation branch.")
+		.def(
+			"get_parameter_derivative", [](pyoomph::Problem *self, const std::string &parameter_name)
+			{ return vector_to_ndarray(self->get_parameter_derivative(parameter_name)); },
+			nb::arg("parameter_name"),
+			"Return the derivative of the residual vector with respect to the global parameter ``parameter_name`` (i.e. dR/dparam), evaluated at the current state.")
+		.def(
+			"get_arclength_dof_derivative_vector", [](pyoomph::Problem *self)
+			{ return vector_to_ndarray(self->get_arclength_dof_derivative_vector()); },
+			"Return the current derivative of the degrees of freedom with respect to arclength, as used/updated during arclength continuation.")
+		.def(
+			"get_arclength_dof_current_vector", [](pyoomph::Problem *self)
+			{ return vector_to_ndarray(self->get_arclength_dof_current_vector()); },
+			"Return the degrees of freedom at the last converged point on the arclength continuation branch.")
 		.def(
 			"get_global_parameter", [](pyoomph::Problem *self, const std::string &n) -> GiNaC::GiNaCGlobalParameterWrapper
 			{ auto *gpd = self->assert_global_parameter(n); return GiNaC::GiNaCGlobalParameterWrapper(gpd); },
@@ -880,12 +887,12 @@ void PyReg_Problem(nb::module_ &m)
 				std::vector<double> res(self->ndof());
 				for (unsigned int i = 0; i < self->ndof(); i++)
 					res[i] = ov[i];
-				return res;
+				return vector_to_ndarray(res);
 			},
 			"Assemble and return the current residual vector (without the Jacobian) at the current state.")
 		.def(
 			"get_current_pinned_values", [](pyoomph::Problem *self, bool with_pos)
-			{ return self->get_current_pinned_values(with_pos); },
+			{ return vector_to_ndarray(self->get_current_pinned_values(with_pos)); },
 			nb::arg("with_position_dofs"), "Return the current values of all pinned degrees of freedom; also includes pinned nodal position dofs if ``with_position_dofs`` is True.")
 		.def(
 			"set_current_dofs", [](pyoomph::Problem *self, const std::vector<double> &inp)
@@ -962,7 +969,7 @@ void PyReg_Problem(nb::module_ &m)
 				std::vector<double> res(n);
 				for (unsigned int i = 0; i < n; i++)
 					res[i] = resi[i];
-				return std::make_tuple(res, n, J_nzz, J_nrow_local, J_values_arr, J_colindex_arr, J_row_start_arr);
+				return std::make_tuple(vector_to_ndarray(res), n, J_nzz, J_nrow_local, J_values_arr, J_colindex_arr, J_row_start_arr);
 			},
 			nb::arg("residual_name"),
 			"Temporarily activate the residual/Jacobian combination named ``residual_name`` (restoring the previously active one afterwards), "
@@ -985,10 +992,15 @@ void PyReg_Problem(nb::module_ &m)
 		.def("flush_sub_meshes", &pyoomph::Problem::flush_sub_meshes, "Remove all sub-meshes previously added via add_sub_mesh(), without deleting them.")
 		.def("_get_global_field_names", &pyoomph::Problem::get_global_field_names,
 			 "Return the names of all fields defined anywhere in the problem, in the (stable) global field index order.")
-		.def("_get_dof_to_global_field_index_mapping", &pyoomph::Problem::get_dof_to_global_field_index_mapping,
-			 "Return, for each degree of freedom, the index of the global field it belongs to (or a negative value if it does not correspond to a named field, e.g. a Lagrange multiplier).")
-		.def("get_second_order_directional_derivative", &pyoomph::Problem::get_second_order_directional_derivative, nb::arg("direction"),
-			 "Return the second order directional derivative of the residuals along ``direction``, i.e. the contraction of the Hessian with ``direction`` twice (a Hessian-vector-vector product).")
+		.def(
+			"_get_dof_to_global_field_index_mapping", [](pyoomph::Problem *self)
+			{ return vector_to_ndarray(self->get_dof_to_global_field_index_mapping()); },
+			"Return, for each degree of freedom, the index of the global field it belongs to (or a negative value if it does not correspond to a named field, e.g. a Lagrange multiplier).")
+		.def(
+			"get_second_order_directional_derivative", [](pyoomph::Problem *self, std::vector<double> direction)
+			{ return vector_to_ndarray(self->get_second_order_directional_derivative(direction)); },
+			nb::arg("direction"),
+			"Return the second order directional derivative of the residuals along ``direction``, i.e. the contraction of the Hessian with ``direction`` twice (a Hessian-vector-vector product).")
 		.def("nsub_mesh", &pyoomph::Problem::nsub_mesh, "Return the number of sub-meshes added via add_sub_mesh().")
 		.def(
 			"adapt", [](pyoomph::Problem &self)
@@ -1031,7 +1043,19 @@ void PyReg_Problem(nb::module_ &m)
 				std::vector<int> return_indices;
 				unsigned ndof;
 				p->assemble_multiassembly(what, contributions, params, hessian_vectors, hessian_vector_indices, data, csrdata, ndof, return_indices);
-				return std::make_tuple(ndof, data, csrdata, return_indices);
+				// data/csrdata are ragged (rows have different lengths, e.g. a dense
+				// residual vector vs. a sparse matrix's CSR arrays), so each row is
+				// individually wrapped as its own numpy array rather than nesting into
+				// a single (non-rectangular) 2D array.
+				std::vector<nb::ndarray<nb::numpy, double>> data_arrs;
+				data_arrs.reserve(data.size());
+				for (auto &row : data)
+					data_arrs.push_back(vector_to_ndarray(row));
+				std::vector<nb::ndarray<nb::numpy, int>> csrdata_arrs;
+				csrdata_arrs.reserve(csrdata.size());
+				for (auto &row : csrdata)
+					csrdata_arrs.push_back(vector_to_ndarray(row));
+				return std::make_tuple(ndof, data_arrs, csrdata_arrs, return_indices);
 			},
 			nb::arg("what"), nb::arg("contributions"), nb::arg("params"), nb::arg("hessian_vectors"), nb::arg("hessian_vector_indices"),
 			"Assemble several residual vectors and/or Jacobian-like matrices (and, if requested, Hessian-vector products) in a single sweep over the elements. "
