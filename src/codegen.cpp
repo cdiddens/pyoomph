@@ -78,13 +78,7 @@ namespace pyoomph
 		GiNaC::ex towrite;
 		std::string mode = csrc_opts.for_code->ccode_expression_mode;
 		csrc_opts.for_code->archive.archive_ex(expr, ("expression_"+std::to_string(csrc_opts.for_code->archive.num_expressions())).c_str());
-		if (mode == "deterministic")
-		{
-			//GiNaC::print_sorted_GiNaC(GiNaC::expand(GiNaC::expand(expr)),os,csrc_opts);
-			GiNaC::print_sorted_GiNaC(expr,os,csrc_opts);
-			return;
-		}
-		else if (mode == "factor")
+		if (mode == "factor")
 			towrite = GiNaC::factor(GiNaC::normal(GiNaC::expand(GiNaC::expand(expr).evalf())));
 		else if (mode == "normal")
 			towrite = GiNaC::normal(GiNaC::expand(GiNaC::expand(expr).evalf()));
@@ -122,7 +116,7 @@ namespace pyoomph
 	bool __ignore_dpsi_coord_diffs_in_jacobian = false;                // Suppresses dpsi/dX (moving-mesh) contributions in the Jacobian for the current residual
 	std::set<ShapeExpansion> __all_Hessian_shapeexps;                 // Accumulates all shape expansions encountered while building a Hessian contribution
 	std::set<TestFunction> __all_Hessian_testfuncs;                   // Accumulates all test functions encountered while building a Hessian contribution
-	std::set<FiniteElementField *> __all_Hessian_indices_required;    // Fields that need a Hessian index (i.e. contribute to the outer derivative direction)
+	std::set<FiniteElementField *,FiniteElementFieldPtrLess> __all_Hessian_indices_required;    // Fields that need a Hessian index (i.e. contribute to the outer derivative direction)
 	bool __in_hessian = false;                                        // True while performing second-order (Hessian) differentiation
 
 	// Pitchfork/symmetry-breaking constraint equations must not additionally pick up the usual
@@ -900,7 +894,7 @@ namespace pyoomph
 	}
 	bool operator<(const SpatialIntegralSymbol &lhs, const SpatialIntegralSymbol &rhs)
 	{		
-		return lhs.get_code() < rhs.get_code() || 
+		return lhs.get_code()->get_creation_index() < rhs.get_code()->get_creation_index() || 
 		       (lhs.get_code() == rhs.get_code() && lhs.is_lagrangian() < rhs.is_lagrangian()) || 
 			   (lhs.get_code() == rhs.get_code() && lhs.is_lagrangian() == rhs.is_lagrangian() && lhs.is_derived() < rhs.is_derived()) || 
 			   (lhs.get_code() == rhs.get_code() && lhs.is_lagrangian() == rhs.is_lagrangian() && lhs.is_derived() == rhs.is_derived() && lhs.get_derived_direction() < rhs.get_derived_direction()) ||			   
@@ -923,7 +917,7 @@ namespace pyoomph
 	}
 	bool operator<(const ElementSizeSymbol &lhs, const ElementSizeSymbol &rhs)
 	{
-		return lhs.get_code() < rhs.get_code() || (lhs.get_code() == rhs.get_code() && lhs.is_lagrangian() < rhs.is_lagrangian()) || (lhs.get_code() == rhs.get_code() && lhs.is_lagrangian() == rhs.is_lagrangian() && lhs.is_derived() < rhs.is_derived()) || (lhs.get_code() == rhs.get_code() && lhs.is_lagrangian() == rhs.is_lagrangian() && lhs.is_derived() == rhs.is_derived() && lhs.get_derived_direction() < rhs.get_derived_direction()) ||
+		return lhs.get_code()->get_creation_index() < rhs.get_code()->get_creation_index() || (lhs.get_code() == rhs.get_code() && lhs.is_lagrangian() < rhs.is_lagrangian()) || (lhs.get_code() == rhs.get_code() && lhs.is_lagrangian() == rhs.is_lagrangian() && lhs.is_derived() < rhs.is_derived()) || (lhs.get_code() == rhs.get_code() && lhs.is_lagrangian() == rhs.is_lagrangian() && lhs.is_derived() == rhs.is_derived() && lhs.get_derived_direction() < rhs.get_derived_direction()) ||
 			   (lhs.get_code() == rhs.get_code() && lhs.is_lagrangian() == rhs.is_lagrangian() && lhs.is_derived() == rhs.is_derived() && lhs.get_derived_direction() == rhs.get_derived_direction() && lhs.is_derived2() < rhs.is_derived2()) ||
 			   (lhs.get_code() == rhs.get_code() && lhs.is_lagrangian() == rhs.is_lagrangian() && lhs.is_derived() == rhs.is_derived() && lhs.get_derived_direction() == rhs.get_derived_direction() && lhs.is_derived2() == rhs.is_derived2() && lhs.get_derived_direction2() < rhs.get_derived_direction2()) ||
 			   (lhs.get_code() == rhs.get_code() && lhs.is_lagrangian() == rhs.is_lagrangian() && lhs.is_derived() == rhs.is_derived() && lhs.get_derived_direction() == rhs.get_derived_direction() && lhs.is_derived2() == rhs.is_derived2() && lhs.get_derived_direction2() == rhs.get_derived_direction2() && lhs.is_with_coordsys() < rhs.is_with_coordsys()) ||
@@ -936,7 +930,7 @@ namespace pyoomph
 	}
 	bool operator<(const NodalDeltaSymbol &lhs, const NodalDeltaSymbol &rhs)
 	{
-		return lhs.get_code() < rhs.get_code();
+		return lhs.get_code()->get_creation_index() < rhs.get_code()->get_creation_index();
 	}
       
 	bool operator==(const NormalSymbol &lhs, const NormalSymbol &rhs)
@@ -945,7 +939,7 @@ namespace pyoomph
 	}
 	bool operator<(const NormalSymbol &lhs, const NormalSymbol &rhs)
 	{
-		return lhs.get_code() < rhs.get_code() 
+		return lhs.get_code()->get_creation_index() < rhs.get_code()->get_creation_index() 
 		 || (lhs.get_code() == rhs.get_code() && lhs.get_direction() < rhs.get_direction()) 
 		 || (lhs.get_code() == rhs.get_code() && lhs.get_direction() == rhs.get_direction() && lhs.get_derived_direction() < rhs.get_derived_direction()) 
 		 || (lhs.get_code() == rhs.get_code() && lhs.get_direction() == rhs.get_direction() && lhs.get_derived_direction() == rhs.get_derived_direction() && lhs.get_derived_direction2() < rhs.get_derived_direction2()) 
@@ -980,7 +974,7 @@ namespace pyoomph
 	}
 	bool operator<(const ShapeExpansion &lhs, const ShapeExpansion &rhs)
 	{
-		return lhs.field < rhs.field || (lhs.field == rhs.field && lhs.dt_order < rhs.dt_order) || (lhs.field == rhs.field && lhs.dt_order == rhs.dt_order && lhs.basis < rhs.basis) || (lhs.field == rhs.field && lhs.dt_order == rhs.dt_order && lhs.basis == rhs.basis && lhs.is_derived < rhs.is_derived) || (lhs.field == rhs.field && lhs.dt_order == rhs.dt_order && lhs.basis == rhs.basis && lhs.is_derived == rhs.is_derived && lhs.is_derived_other_index < rhs.is_derived_other_index) || (lhs.field == rhs.field && lhs.dt_order == rhs.dt_order && lhs.basis == rhs.basis && lhs.is_derived == rhs.is_derived && lhs.is_derived_other_index == rhs.is_derived_other_index && lhs.nodal_coord_dir < rhs.nodal_coord_dir) || (lhs.field == rhs.field && lhs.dt_order == rhs.dt_order && lhs.basis == rhs.basis && lhs.is_derived == rhs.is_derived && lhs.is_derived_other_index == rhs.is_derived_other_index && lhs.nodal_coord_dir == rhs.nodal_coord_dir && lhs.time_history_index < rhs.time_history_index) || (lhs.field == rhs.field && lhs.dt_order == rhs.dt_order && lhs.basis == rhs.basis && lhs.is_derived == rhs.is_derived && lhs.is_derived_other_index == rhs.is_derived_other_index && lhs.nodal_coord_dir == rhs.nodal_coord_dir && lhs.time_history_index == rhs.time_history_index && (lhs.dt_order > 0 && lhs.dt_scheme < rhs.dt_scheme)) || (lhs.field == rhs.field && lhs.dt_order == rhs.dt_order && lhs.basis == rhs.basis && lhs.is_derived == rhs.is_derived && lhs.is_derived_other_index == rhs.is_derived_other_index && lhs.nodal_coord_dir == rhs.nodal_coord_dir && lhs.time_history_index == rhs.time_history_index && (lhs.dt_order == 0 || lhs.dt_scheme == rhs.dt_scheme) && (lhs.no_jacobian < rhs.no_jacobian)) || (lhs.field == rhs.field && lhs.dt_order == rhs.dt_order && lhs.basis == rhs.basis && lhs.is_derived == rhs.is_derived && lhs.is_derived_other_index == rhs.is_derived_other_index && lhs.nodal_coord_dir == rhs.nodal_coord_dir && lhs.time_history_index == rhs.time_history_index && (lhs.dt_order == 0 || lhs.dt_scheme == rhs.dt_scheme) && (lhs.no_jacobian == rhs.no_jacobian) && (lhs.no_hessian < rhs.no_hessian)) || (lhs.field == rhs.field && lhs.dt_order == rhs.dt_order && lhs.basis == rhs.basis && lhs.is_derived == rhs.is_derived && lhs.is_derived_other_index == rhs.is_derived_other_index && lhs.nodal_coord_dir == rhs.nodal_coord_dir && lhs.time_history_index == rhs.time_history_index && (lhs.dt_order == 0 || lhs.dt_scheme == rhs.dt_scheme) && (lhs.no_jacobian == rhs.no_jacobian) && (lhs.no_hessian == rhs.no_hessian) && (lhs.expansion_mode < rhs.expansion_mode)) || (lhs.field == rhs.field && lhs.dt_order == rhs.dt_order && lhs.basis == rhs.basis && lhs.is_derived == rhs.is_derived && lhs.is_derived_other_index == rhs.is_derived_other_index && lhs.nodal_coord_dir == rhs.nodal_coord_dir && lhs.time_history_index == rhs.time_history_index && (lhs.dt_order == 0 || lhs.dt_scheme == rhs.dt_scheme) && (lhs.no_jacobian == rhs.no_jacobian) && (lhs.no_hessian == rhs.no_hessian) && (lhs.expansion_mode == rhs.expansion_mode) && (lhs.nodal_coord_dir2 < rhs.nodal_coord_dir2));
+		return lhs.field->get_creation_index() < rhs.field->get_creation_index() || (lhs.field == rhs.field && lhs.dt_order < rhs.dt_order) || (lhs.field == rhs.field && lhs.dt_order == rhs.dt_order && lhs.basis->get_creation_index() < rhs.basis->get_creation_index()) || (lhs.field == rhs.field && lhs.dt_order == rhs.dt_order && lhs.basis == rhs.basis && lhs.is_derived < rhs.is_derived) || (lhs.field == rhs.field && lhs.dt_order == rhs.dt_order && lhs.basis == rhs.basis && lhs.is_derived == rhs.is_derived && lhs.is_derived_other_index < rhs.is_derived_other_index) || (lhs.field == rhs.field && lhs.dt_order == rhs.dt_order && lhs.basis == rhs.basis && lhs.is_derived == rhs.is_derived && lhs.is_derived_other_index == rhs.is_derived_other_index && lhs.nodal_coord_dir < rhs.nodal_coord_dir) || (lhs.field == rhs.field && lhs.dt_order == rhs.dt_order && lhs.basis == rhs.basis && lhs.is_derived == rhs.is_derived && lhs.is_derived_other_index == rhs.is_derived_other_index && lhs.nodal_coord_dir == rhs.nodal_coord_dir && lhs.time_history_index < rhs.time_history_index) || (lhs.field == rhs.field && lhs.dt_order == rhs.dt_order && lhs.basis == rhs.basis && lhs.is_derived == rhs.is_derived && lhs.is_derived_other_index == rhs.is_derived_other_index && lhs.nodal_coord_dir == rhs.nodal_coord_dir && lhs.time_history_index == rhs.time_history_index && (lhs.dt_order > 0 && lhs.dt_scheme < rhs.dt_scheme)) || (lhs.field == rhs.field && lhs.dt_order == rhs.dt_order && lhs.basis == rhs.basis && lhs.is_derived == rhs.is_derived && lhs.is_derived_other_index == rhs.is_derived_other_index && lhs.nodal_coord_dir == rhs.nodal_coord_dir && lhs.time_history_index == rhs.time_history_index && (lhs.dt_order == 0 || lhs.dt_scheme == rhs.dt_scheme) && (lhs.no_jacobian < rhs.no_jacobian)) || (lhs.field == rhs.field && lhs.dt_order == rhs.dt_order && lhs.basis == rhs.basis && lhs.is_derived == rhs.is_derived && lhs.is_derived_other_index == rhs.is_derived_other_index && lhs.nodal_coord_dir == rhs.nodal_coord_dir && lhs.time_history_index == rhs.time_history_index && (lhs.dt_order == 0 || lhs.dt_scheme == rhs.dt_scheme) && (lhs.no_jacobian == rhs.no_jacobian) && (lhs.no_hessian < rhs.no_hessian)) || (lhs.field == rhs.field && lhs.dt_order == rhs.dt_order && lhs.basis == rhs.basis && lhs.is_derived == rhs.is_derived && lhs.is_derived_other_index == rhs.is_derived_other_index && lhs.nodal_coord_dir == rhs.nodal_coord_dir && lhs.time_history_index == rhs.time_history_index && (lhs.dt_order == 0 || lhs.dt_scheme == rhs.dt_scheme) && (lhs.no_jacobian == rhs.no_jacobian) && (lhs.no_hessian == rhs.no_hessian) && (lhs.expansion_mode < rhs.expansion_mode)) || (lhs.field == rhs.field && lhs.dt_order == rhs.dt_order && lhs.basis == rhs.basis && lhs.is_derived == rhs.is_derived && lhs.is_derived_other_index == rhs.is_derived_other_index && lhs.nodal_coord_dir == rhs.nodal_coord_dir && lhs.time_history_index == rhs.time_history_index && (lhs.dt_order == 0 || lhs.dt_scheme == rhs.dt_scheme) && (lhs.no_jacobian == rhs.no_jacobian) && (lhs.no_hessian == rhs.no_hessian) && (lhs.expansion_mode == rhs.expansion_mode) && (lhs.nodal_coord_dir2 < rhs.nodal_coord_dir2));
 	}
 
 	bool operator==(const TestFunction &lhs, const TestFunction &rhs)
@@ -989,7 +983,7 @@ namespace pyoomph
 	}
 	bool operator<(const TestFunction &lhs, const TestFunction &rhs)
 	{
-		return lhs.field < rhs.field || (lhs.field == rhs.field && lhs.basis < rhs.basis) || (lhs.field == rhs.field && lhs.basis == rhs.basis && lhs.nodal_coord_dir < rhs.nodal_coord_dir) || (lhs.field == rhs.field && lhs.basis == rhs.basis && lhs.nodal_coord_dir == rhs.nodal_coord_dir && lhs.is_derived_other_index < rhs.is_derived_other_index) || (lhs.field == rhs.field && lhs.basis == rhs.basis && lhs.nodal_coord_dir == rhs.nodal_coord_dir && lhs.is_derived_other_index == rhs.is_derived_other_index && lhs.nodal_coord_dir2 < rhs.nodal_coord_dir2);
+		return lhs.field->get_creation_index() < rhs.field->get_creation_index() || (lhs.field == rhs.field && lhs.basis->get_creation_index() < rhs.basis->get_creation_index()) || (lhs.field == rhs.field && lhs.basis == rhs.basis && lhs.nodal_coord_dir < rhs.nodal_coord_dir) || (lhs.field == rhs.field && lhs.basis == rhs.basis && lhs.nodal_coord_dir == rhs.nodal_coord_dir && lhs.is_derived_other_index < rhs.is_derived_other_index) || (lhs.field == rhs.field && lhs.basis == rhs.basis && lhs.nodal_coord_dir == rhs.nodal_coord_dir && lhs.is_derived_other_index == rhs.is_derived_other_index && lhs.nodal_coord_dir2 < rhs.nodal_coord_dir2);
 	}
 
 	// Checks whether the GiNaC symbol `s` is the raw position-coordinate symbol of the nodal
@@ -1115,6 +1109,8 @@ namespace pyoomph
 		return field->get_nodal_index_str(forcode);
 	}
 
+	unsigned FiniteElementField::next_creation_index = 0;
+
 	// Bookkeeping of which (code, residual_index[, other field]) combinations a field actually
 	// contributes to. This is filled in while residuals are added/derived (mark_*) and later queried
 	// (has_*) to skip generating code for residual/Jacobian entries that are structurally zero,
@@ -1140,11 +1136,11 @@ namespace pyoomph
 	{
 		if (!this->jacobian_contribution_for_code.count(code))
 		{
-			this->jacobian_contribution_for_code[code]=std::map<unsigned,std::set<FiniteElementField*>>();
+			this->jacobian_contribution_for_code[code]=std::map<unsigned,std::set<FiniteElementField*,FiniteElementFieldPtrLess>>();
 		}
 		if (!this->jacobian_contribution_for_code[code].count(residual_index))
 		{
-			this->jacobian_contribution_for_code[code][residual_index]=std::set<FiniteElementField*>();
+			this->jacobian_contribution_for_code[code][residual_index]=std::set<FiniteElementField*,FiniteElementFieldPtrLess>();
 		}
 		this->jacobian_contribution_for_code[code][residual_index].insert(other);
 
@@ -1226,6 +1222,8 @@ namespace pyoomph
 	{
 		return "testfunction[" + test_index + "]";
 	}
+
+	unsigned BasisFunction::next_creation_index = 0;
 
 	BasisFunction *BasisFunction::get_diff_x(unsigned direction)
 	{
@@ -1397,6 +1395,8 @@ namespace pyoomph
 	// "nodal_local_eqn"/"nnode_of_space[...]" oomph-lib element members, while the position space
 	// (PositionFiniteElementSpace) uses the dedicated "pos_local_eqn"/"nnode", and the discontinuous
 	// D0 space (one DoF per element, not per node) always reports a single "node".
+	unsigned FiniteElementSpace::next_creation_index = 0;
+
 	std::string FiniteElementSpace::get_eqn_number_str(FiniteElementCode *forcode) const
 	{
 		std::string eleminfo = forcode->get_elem_info_str(this);
@@ -1920,7 +1920,7 @@ namespace pyoomph
 			}
 		}
 
-		std::set<FiniteElementField *> jacobian_fields;
+		std::set<FiniteElementField *,FiniteElementFieldPtrLess> jacobian_fields;
 		for (auto &s : jacobian_shapes)
 		{
 			if (s.field->get_space() == this)
@@ -1990,7 +1990,7 @@ namespace pyoomph
 			}
 
 			std::set<ShapeExpansion> hessian_shapes = for_code->get_all_shape_expansions_in(diffpart);
-			std::set<FiniteElementSpace *> hessian_spaces;
+			std::set<FiniteElementSpace *,FiniteElementSpacePtrLess> hessian_spaces;
 
 			// TODO: This is only necessary if a dx portion or dxdpsi is present
 			if (for_code->coordinates_as_dofs)
@@ -2044,7 +2044,7 @@ namespace pyoomph
 						continue;
 					}
 				}
-				std::set<FiniteElementField *> hessian_fields;
+				std::set<FiniteElementField *,FiniteElementFieldPtrLess> hessian_fields;
 				for (auto &s3 : hessian_shapes)
 				{
 					if (!s3.field->no_jacobian_at_all && s3.field->get_space() == s2)
@@ -2338,7 +2338,7 @@ namespace pyoomph
 			return a->get_nodal_index_str(for_code) < b->get_nodal_index_str(for_code); 
 		};
 		std::set<FiniteElementField *,decltype(cmp)> jacobian_fields(cmp);
-		//std::set<FiniteElementField *> jacobian_fields;
+		//std::set<FiniteElementField *,FiniteElementFieldPtrLess> jacobian_fields;
 		
 		for (auto &s : jacobian_shapes)
 		{
@@ -2635,7 +2635,7 @@ namespace pyoomph
 					return a->get_nodal_index_str(for_code) < b->get_nodal_index_str(for_code); 
 				};
 				std::set<FiniteElementField *, decltype(cmp)> jacobian_fields(cmp);
-				//std::set<FiniteElementField *> jacobian_fields;
+				//std::set<FiniteElementField *,FiniteElementFieldPtrLess> jacobian_fields;
 				for (auto &s : jacobian_shapes)
 				{					
 					//std::cout << "Test function " << test_name << " Jacobian Field " << s.field->get_name() << " Space " << s.field->get_space()->get_name() << " on " << s.field->get_space()->get_code()->get_full_domain_name() << std::endl;
@@ -2750,9 +2750,9 @@ namespace pyoomph
 		return res;
 	}
 
-	std::set<FiniteElementField *> FiniteElementCode::get_fields_on_space(FiniteElementSpace *space)
+	std::set<FiniteElementField *,FiniteElementFieldPtrLess> FiniteElementCode::get_fields_on_space(FiniteElementSpace *space)
 	{
-		std::set<FiniteElementField *> res;
+		std::set<FiniteElementField *,FiniteElementFieldPtrLess> res;
 		for (auto *f : myfields)
 		{
 			if (f->get_space() == space)
@@ -2787,7 +2787,7 @@ namespace pyoomph
 		if (dynamic_cast<ExternalD0Space *>(space))
 			return;
 		if (!required_shapes.count(func_type))
-			required_shapes[func_type] = std::map<FiniteElementSpace *, std::map<std::string, bool>>();
+			required_shapes[func_type] = std::map<FiniteElementSpace *, std::map<std::string, bool>, FiniteElementSpacePtrLess>();
 		if (dynamic_cast<DGFiniteElementSpace *>(space))
 		{
 			space = dynamic_cast<DGFiniteElementSpace *>(space)->get_corresponding_continuous_space(); // We only mark the continuous spaces here. Shape functions are identical
@@ -2869,6 +2869,8 @@ namespace pyoomph
 		return code->with_adaptivity;
 	}
 
+	unsigned FiniteElementCode::next_creation_index = 0;
+
 	// Constructs the built-in FiniteElementSpace hierarchy shared by every element (Pos, the
 	// continuous C2TB/C2/C1TB/C1 spaces, their discontinuous-Galerkin D2TB/D2/D1TB/D1 counterparts,
 	// the fully discontinuous DL/D0 spaces, and the external ED0 space), plus the symbolic
@@ -2877,7 +2879,7 @@ namespace pyoomph
 	// spatial derivatives of the integration measure w.r.t. moving nodal coordinates - these are
 	// pre-built for all 3 spatial directions upfront so that GiNaC::diff() on dx/element-size
 	// symbols can return the correctly-tagged symbol without having to construct new ones on the fly.
-	FiniteElementCode::FiniteElementCode() : residual_index(0), residual_names({""}), equations(NULL), bulk_code(NULL), opposite_interface_code(NULL), residual(std::vector<GiNaC::ex>{0}), dx(this, false), dX(this, true), dx_unity(this, false), elemsize_Eulerian(this, false, true), elemsize_Lagrangian(this, true, true), elemsize_Eulerian_Cart(this, false, false), elemsize_Lagrangian_Cart(this, true, false), nodal_delta(this), stage(0), nodal_dim(0), lagr_dim(0), coordinate_sys(&__no_coordinate_system), _x(GiNaC::indexed(GiNaC::potential_real_symbol("interpolated_x"), GiNaC::idx(0, 3))),
+	FiniteElementCode::FiniteElementCode() : creation_index(next_creation_index++), residual_index(0), residual_names({""}), equations(NULL), bulk_code(NULL), opposite_interface_code(NULL), residual(std::vector<GiNaC::ex>{0}), dx(this, false), dX(this, true), dx_unity(this, false), elemsize_Eulerian(this, false, true), elemsize_Lagrangian(this, true, true), elemsize_Eulerian_Cart(this, false, false), elemsize_Lagrangian_Cart(this, true, false), nodal_delta(this), stage(0), nodal_dim(0), lagr_dim(0), coordinate_sys(&__no_coordinate_system), _x(GiNaC::indexed(GiNaC::potential_real_symbol("interpolated_x"), GiNaC::idx(0, 3))),
 											 _y(GiNaC::indexed(GiNaC::potential_real_symbol("interpolated_x"), GiNaC::idx(1, 3))), _z(GiNaC::indexed(GiNaC::potential_real_symbol("interpolated_x"))), integration_order(0), IC_names({""}), has_constant_mass_matrix_for_sure(std::vector<bool>{false}), element_dim(-1), analytical_jacobian(true), analytical_position_jacobian(true), debug_jacobian_epsilon(0.0), with_adaptivity(true),
 											 coordinates_as_dofs(false), generate_hessian(false), assemble_hessian_by_symmetry(true), coordinate_space(""), stop_on_jacobian_difference(false), latex_printer(NULL)
 	{
@@ -4446,7 +4448,7 @@ namespace pyoomph
 				}*/
 		std::set<ShapeExpansion> all_shapeexps = __all_Hessian_shapeexps;
 		std::set<TestFunction> all_testfuncs = __all_Hessian_testfuncs;
-		std::set<FiniteElementField *> indices_required = __all_Hessian_indices_required;
+		std::set<FiniteElementField *,FiniteElementFieldPtrLess> indices_required = __all_Hessian_indices_required;
 
 		std::set<ShapeExpansion> merged_shapeexps;
 		for (auto &sp : all_shapeexps)
@@ -4663,7 +4665,7 @@ namespace pyoomph
 		std::set<ShapeExpansion> all_shapeexps = get_all_shape_expansions_in(resi, true);
 
 		std::set<TestFunction> all_testfuncs = get_all_test_functions_in(resi);
-		std::set<FiniteElementField *> indices_required;
+		std::set<FiniteElementField *,FiniteElementFieldPtrLess> indices_required;
 		for (auto &sp : all_shapeexps)
 		{
 			if (pyoomph_verbose)
@@ -4899,7 +4901,7 @@ namespace pyoomph
 		{
 			throw_runtime_error("Found test function in a custom integral/local expression");
 		}
-		std::set<FiniteElementField *> indices_required;
+		std::set<FiniteElementField *,FiniteElementFieldPtrLess> indices_required;
 		for (auto &sp : all_shapeexps)
 		{
 			indices_required.insert(sp.field);
@@ -5043,7 +5045,7 @@ namespace pyoomph
 		{
 			throw_runtime_error("Found test function in tracer advection terms");
 		}
-		std::set<FiniteElementField *> indices_required;
+		std::set<FiniteElementField *,FiniteElementFieldPtrLess> indices_required;
 		for (auto &sp : all_shapeexps)
 		{
 			indices_required.insert(sp.field);
@@ -5154,7 +5156,7 @@ namespace pyoomph
 			std::set<ShapeExpansion> all_shapeexps=get_all_shape_expansions_in(gathered);
 			std::set<TestFunction> all_testfuncs=get_all_test_functions_in(gathered);
 			if (!all_testfuncs.empty()) {throw_runtime_error("Found test function in a custom integral expression");}
-			std::set<FiniteElementField*> indices_required;
+			std::set<FiniteElementField*,FiniteElementFieldPtrLess> indices_required;
 			 for (auto & sp : all_shapeexps)
 			 {
 				indices_required.insert(sp.field);
@@ -5245,7 +5247,7 @@ namespace pyoomph
 		{
 			throw_runtime_error("Found test function in spatial error estimator");
 		}
-		std::set<FiniteElementField *> indices_required;
+		std::set<FiniteElementField *,FiniteElementFieldPtrLess> indices_required;
 		for (auto &sp : all_shapeexps)
 		{
 			indices_required.insert(sp.field);
@@ -7815,8 +7817,8 @@ namespace pyoomph
 	  // Build the contribution mapping
 	  std::vector<std::string> contribution_names;
 	  std::map<std::string, unsigned> contribution_name_to_index;	  
-	  std::map<FiniteElementField*, unsigned> contribution_field_to_index;	  
-	  std::map<FiniteElementField*,FiniteElementField*> to_where_it_was_defined;  
+	  std::map<FiniteElementField*, unsigned,FiniteElementFieldPtrLess> contribution_field_to_index;
+	  std::map<FiniteElementField*,FiniteElementField*,FiniteElementFieldPtrLess> to_where_it_was_defined;
 	  for (auto *f : contributing_fields)
 	  {
 		FiniteElementField *wheredef = f->get_defined_on_domain_equivalent_field();
@@ -8235,207 +8237,6 @@ namespace pyoomph
 
 namespace GiNaC
 {
-
-
-	/// SORTED PRINTS
-	// SortedGiNaC and its subclasses (declared in codegen.hpp) implement a small parallel expression
-	// tree, mirrored from a GiNaC::ex, whose sole purpose is to print C code with a *deterministic*
-	// term/factor ordering: plain GiNaC printing order can vary depending on internal hashing/pointer
-	// values, which would make generated code (and hence compiled-library caching/diffing) spuriously
-	// change between runs on otherwise-identical input. Each node type (Numeric/Add/Mul/Pow/Function/
-	// Symbol/Struct) defines an add_order()/mul_order() "sort class" priority plus a to_string(); the
-	// add_sort_compare()/mul_sort_compare() helpers first order by that priority and break ties by
-	// comparing the already-stringified sub-terms lexicographically, so the final printed C expression
-	// is fully reproducible. See print_sorted_GiNaC() below for the entry point that (via
-	// SortedGiNaC::factory) builds this tree from a plain GiNaC::ex and prints it.
-	SortedGiNaC::~SortedGiNaC()
-	{
-		for (auto ptr : op) {                
-			delete ptr;
-		}
-	}
-
-	bool SortedGiNaC::add_sort_compare(SortedGiNaC * other,std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
-	{
-		int add_order1 = this->add_order();
-		int add_order2 = other->add_order();
-		if (add_order1 != add_order2) {
-			return add_order1 < add_order2;
-		}
-		else {
-			return this->to_string(os, csrc_opts) < other->to_string(os, csrc_opts);
-		}
-	}
-
-    bool SortedGiNaC::mul_sort_compare(SortedGiNaC * other,std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
-	{
-		int mul_order1 = this->mul_order();
-		int mul_order2 = other->mul_order();
-		if (mul_order1 != mul_order2) {
-			return mul_order1 < mul_order2;
-		}
-		else {
-			return this->to_string(os, csrc_opts) < other->to_string(os, csrc_opts);
-		}
-	}
-
-
-	std::string SortedGiNaCNumeric::to_string(std::ostream &, GiNaC::print_FEM_options &csrc_opts)
-	{
-		std::ostringstream ss;
-		GiNaC::print_csrc_FEM p(ss, &csrc_opts);
-		value.print(p);
-		return ss.str();
-	}
-
-	std::string SortedGiNaCAdd::to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
-	{
-		std::string res="(";
-		for (size_t i=0;i<op.size();i++) {
-			if (i>0) res+="+";
-			res+=op[i]->to_string(os, csrc_opts);
-		}
-		res+=")";
-		return res;
-	}
-    int SortedGiNaCAdd::add_order() 
-    {
-        throw std::runtime_error("Not implemented. Add order for add makes no sense for expanded expressions.");
-    }
-
-	std::string SortedGiNaCMul::to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) 
-	{
-		std::string res="(";
-		for (size_t i=0;i<op.size();i++) {
-			if (i>0) res+="*";
-			res+=op[i]->to_string(os, csrc_opts);
-		}
-		res+=")";
-		return res;
-	}
-    int SortedGiNaCMul::mul_order() 
-    {
-            throw_runtime_error("Not implemented. Mul order for mul makes no sense for expanded expressions.");
-    }
-
-	std::string SortedGiNaCPow::to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) 
-	{
-		std::string res="pow(";
-		res+=op[0]->to_string(os, csrc_opts);
-		res+=",";
-		res+=op[1]->to_string(os, csrc_opts);
-		res+=")";
-		return res;
-	}
-
-	std::string SortedGiNaCFunction::to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
-	{
-		std::string res=fname+"(";
-		for (size_t i=0;i<op.size();i++) {
-			if (i>0) res+=",";
-			res+=op[i]->to_string(os, csrc_opts);
-		}
-		res+=")";
-		return res;
-	}
-
-	std::string SortedGiNaCStruct::to_string(std::ostream &, GiNaC::print_FEM_options &csrc_opts) 
-	{
-		std::ostringstream ss;
-		GiNaC::print_csrc_FEM p(ss, &csrc_opts);
-		contents.print(p);
-		return ss.str();
-	}
-	int SortedGiNaCStruct::mul_order() 
-	{
-		return 6; 
-	}
-
-	// Builds a SortedGiNaC tree from GiNaC expression `e` (after expand()): numbers/constants become
-	// SortedGiNaCNumeric, sums/products become SortedGiNaCAdd/Mul with their operands recursively
-	// built and then *sorted* (via add_sort_compare/mul_sort_compare) so the operand order is
-	// deterministic, powers/functions/symbols map to their respective node types, and any of this
-	// codebase's custom GiNaC structures (test functions, shape expansions, subexpressions, spatial-
-	// integral/normal symbols, fake-exponential-mode markers, global-parameter wrappers) are treated
-	// as opaque leaves (SortedGiNaCStruct) printed via the normal (non-sorted) print_csrc_FEM path,
-	// since their internal structure is not a plain algebraic sum/product to be reordered.
-	SortedGiNaC * SortedGiNaC::factory(const ex & e,std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
-    {
-		ex expa=e.expand();
-		if (is_a<numeric>(expa)) 
-		{
-			/*if (ex_to<numeric>(expa).is_crational() && !is_zero(ex_to<numeric>(expa).denom())-1) 
-			{
-				return new SortedGiNaCNumeric(ex_to<numeric>(expa).to_int64());
-			}*/
-			return new SortedGiNaCNumeric(ex_to<numeric>(expa));
-		}
-		else if (is_a<constant>(expa)) {
-			return new SortedGiNaCNumeric(ex_to<numeric>(ex_to<constant>(expa).evalf()));
-		}
-		else if (is_a<add>(expa)) {
-			std::vector<SortedGiNaC*> ops;
-			for (size_t i=0;i<expa.nops();i++) {
-				ops.push_back(SortedGiNaC::factory(expa.op(i), os, csrc_opts));
-			}
-			std::sort(ops.begin(), ops.end(),
-						[&os,&csrc_opts](SortedGiNaC * a, SortedGiNaC * b) {
-							return a->add_sort_compare(b,os, csrc_opts);
-						});
-			return new SortedGiNaCAdd(ops);
-		}
-		else if (is_a<mul>(expa)) {
-			std::vector<SortedGiNaC*> ops;
-			for (size_t i=0;i<expa.nops();i++) {
-				ops.push_back(SortedGiNaC::factory(expa.op(i), os, csrc_opts));
-			}
-			std::sort(ops.begin(), ops.end(),                          
-						[&os,&csrc_opts](SortedGiNaC * a, SortedGiNaC * b) {
-							return a->mul_sort_compare(b,os, csrc_opts);
-						});
-			return new SortedGiNaCMul(ops);
-		}
-		else if (is_a<power>(expa)) {
-			SortedGiNaC * base=SortedGiNaC::factory(expa.op(0), os, csrc_opts);
-			SortedGiNaC * exp=SortedGiNaC::factory(expa.op(1), os, csrc_opts);
-			GINAC_ASSERT(expa.nops()==2);
-			return new SortedGiNaCPow(base, exp);
-		}
-		else if (is_a<function>(expa)) {
-			std::vector<SortedGiNaC*> ops;
-			for (size_t i=0;i<expa.nops();i++) {
-				ops.push_back(SortedGiNaC::factory(expa.op(i), os, csrc_opts));
-			}
-			return new SortedGiNaCFunction(ex_to<function>(expa).get_name(), ops);
-		}
-		else if (is_a<symbol>(expa)) {
-			return new SortedGiNaCSymbol(ex_to<symbol>(expa).get_name());
-		}
-		else if (is_a<GiNaCTestFunction>(expa) || is_a<GiNaCShapeExpansion>(expa) || is_a<GiNaCSubExpression>(expa) || is_a<GiNaCSpatialIntegralSymbol>(expa) || is_a<GiNaCNormalSymbol>(expa) || is_a<GiNaCFakeExponentialMode>(expa) || is_a<GiNaCGlobalParameterWrapper>(expa)) 
-		{
-			return new SortedGiNaCStruct(expa);
-		}
-		else if (expa.is_zero())
-		{
-			return new SortedGiNaCStruct(0+expa);
-		}
-		else {
-			std::ostringstream err;
-			err << "Non implemented type in SortedGiNaC factory, got: " << expa;
-			throw_runtime_error(err.str());
-		}
-    }
-
-	// Entry point for the deterministic ("sorted") C-code printing mode (ccode_expression_mode ==
-	// "deterministic"): builds the SortedGiNaC tree for `e` and writes its canonically-ordered string
-	// form to `os`.
-	std::ostream &  print_sorted_GiNaC(ex  e,std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
-    {
-        SortedGiNaC * root=SortedGiNaC::factory(e, os, csrc_opts);
-        os << root->to_string(os, csrc_opts);
-        delete root;
-        return os; 
-    }
 
 	// print_csrc_FEM/print_latex_FEM are GiNaC print_context subclasses that carry a pointer to
 	// print_FEM_options (`FEM_opts`), which in turn carries the FiniteElementCode currently being

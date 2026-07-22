@@ -81,7 +81,7 @@ class HarmonicOscillatorProblem(Problem):
 		
 
 if __name__=="__main__":
-	for scheme in {"Newmark2","BDF1","BDF2"}:
+	for scheme in ["Newmark2","BDF1","BDF2"]:
 		with HarmonicOscillatorProblem(scheme=scheme) as problem:
 			problem.set_output_directory("osci_timestepping_"+scheme)
 			problem.run(endtime=100,numouts=1000)

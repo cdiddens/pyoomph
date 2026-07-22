@@ -308,4 +308,6 @@ class CCacheCCompiler(SystemCCompiler):
         super().__init__(compile_args)            
         self.comp.compiler_so=["ccache"]+self.comp.compiler_so #type:ignore
         self.comp.linker_so=["ccache"]+self.comp.linker_so #type:ignore
-        # TODO: Check whether the c expression mode is "deterministic" and warn if not?
+        # Code generation is deterministic across process runs regardless of ccode_expression_mode
+        # (see branch deterministic_codegen), so ccache hits are reliable here without needing a
+        # special mode.

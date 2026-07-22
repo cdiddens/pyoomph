@@ -365,117 +365,16 @@ namespace GiNaC
       print_latex_FEM(std::ostream &, print_FEM_options *fem_opts, unsigned options = 0);
    };
 
-   // Helper hierarchy used by print_sorted_GiNaC()/print_simplest_form() (mode "deterministic") to
-   // convert a GiNaC expression tree into a form with a fixed, reproducible term/factor ordering before
-   // printing it as C++ source. This avoids nondeterministic reordering of sums/products between GiNaC
-   // versions or runs, which would otherwise make generated code (and thus floating-point rounding)
-   // vary from build to build. Each subclass mirrors one GiNaC expression kind (numeric, add, mul, pow,
-   // function, symbol, generic struct) and knows how to print itself and where it ranks in add/mul sort order.
-   class SortedGiNaC
-    {
-      public:
-        std::vector<SortedGiNaC*> op; // Child nodes (e.g. summands, factors, function args), in original (pre-sort) order
-        virtual ~SortedGiNaC() ;
-        static SortedGiNaC * factory(const ex & e,std::ostream &os, GiNaC::print_FEM_options &csrc_opts); // Recursively builds a SortedGiNaC tree mirroring the given GiNaC expression
-        virtual std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) =0; // Renders this node (with its children sorted) as C++ source
-        virtual int add_order()=0; // Rank of this node's kind when sorting terms of a sum
-        virtual int mul_order()=0; // Rank of this node's kind when sorting factors of a product
-        bool add_sort_compare(SortedGiNaC * other, std::ostream &os, GiNaC::print_FEM_options &csrc_opts); // Strict-weak-order comparison used to sort summands deterministically
-        bool mul_sort_compare(SortedGiNaC * other, std::ostream &os, GiNaC::print_FEM_options &csrc_opts); // Strict-weak-order comparison used to sort factors deterministically
-    };
-
-    // Leaf node for a plain numeric literal
-    class SortedGiNaCNumeric : public SortedGiNaC
-    {
-      public:
-        GiNaC::numeric value;
-
-        SortedGiNaCNumeric(GiNaC::numeric v) : SortedGiNaC(), value(v) {}
-        std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;
-        int add_order() override { return 0; }
-        int mul_order() override { return 0; }
-        
-    };
-
-    // Node for a sum (GiNaC::add); to_string() sorts its "op" summands via add_sort_compare() before printing
-    class SortedGiNaCAdd : public SortedGiNaC
-    {
-      public:
-        SortedGiNaCAdd(const std::vector<SortedGiNaC*> & ops) : SortedGiNaC()  {op=ops;}
-        std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;        
-        int add_order() override;        
-        int mul_order() override { return 5; }
-            
-    };
-
-    // Node for a product (GiNaC::mul); to_string() sorts its "op" factors via mul_sort_compare() before printing
-    class SortedGiNaCMul : public SortedGiNaC
-    {
-      public:
-        SortedGiNaCMul(const std::vector<SortedGiNaC*> & ops) : SortedGiNaC(){op=ops;}
-        std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;        
-        int add_order() override { return 3; }
-        int mul_order() override;        
-    };
-
-    // Node for a power base^exp (GiNaC::power); op[0] is the base, op[1] the exponent
-    class SortedGiNaCPow : public SortedGiNaC
-    {
-      public:
-        SortedGiNaCPow(SortedGiNaC * base, SortedGiNaC * exp) : SortedGiNaC()
-        {
-            op.push_back(base);
-            op.push_back(exp);
-        }
-        std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;
-        int add_order() override { return 4; }
-        int mul_order() override { return 4; }
-    };
-
-    // Node for a GiNaC function call (sin, cos, ...); "op" holds the (already sorted-tree) arguments
-    class SortedGiNaCFunction : public SortedGiNaC
-    {
-      public:
-        std::string fname;
-        SortedGiNaCFunction(const std::string & fname, const std::vector<SortedGiNaC*> & ops) : SortedGiNaC(), fname(fname)     {            op=ops;        }
-        std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;
-        int add_order() override { return 1; }
-        int mul_order() override { return 1; }
-    };
-
-    // Leaf node for a plain GiNaC::symbol, printed verbatim as its already-resolved C++ variable name
-    class SortedGiNaCSymbol : public SortedGiNaC
-    {
-      public:
-        std::string vname;
-        SortedGiNaCSymbol(const std::string & vname) : SortedGiNaC(), vname(vname) {}
-        std::string to_string(std::ostream &, GiNaC::print_FEM_options &) override {return vname;}
-        int add_order() override {return 2;}
-        int mul_order() override {return 2;}
-    };
-
-    // Catch-all leaf for any of the pyoomph GiNaCStruct-wrapped symbols (ShapeExpansion, TestFunction,
-    // SpatialIntegralSymbol, ...) that aren't otherwise decomposed; delegates printing to their own print() specialization
-    class SortedGiNaCStruct : public SortedGiNaC
-    {
-      public:
-        ex contents;
-        SortedGiNaCStruct(GiNaC::ex _contents) : SortedGiNaC(), contents(_contents) {}
-        std::string to_string(std::ostream &os, GiNaC::print_FEM_options &csrc_opts) override;
-        int add_order() override { return 6; }
-        int mul_order() override;
-    };
-
-    // Entry point: builds a SortedGiNaC tree for e (via SortedGiNaC::factory) and writes its deterministically-sorted C++ form to os
-    std::ostream & print_sorted_GiNaC(ex  e,std::ostream &os, GiNaC::print_FEM_options &csrc_opts);
-
 }
 
 namespace pyoomph
 {
    // Prints expr to os as C++ source, choosing the simplification/canonicalization strategy according
-   // to csrc_opts.for_code->ccode_expression_mode (e.g. "deterministic" uses print_sorted_GiNaC() for
-   // reproducible output, others apply GiNaC::factor/normal/expand/collect_common_factors first).
+   // to csrc_opts.for_code->ccode_expression_mode (e.g. "factor"/"normal"/"expand"/"collect_common_factors"
+   // apply the corresponding GiNaC simplification first; the default just evaluates numerically).
+   // Output is deterministic across separate process runs regardless of mode - see GiNaC's own
+   // canonical term/factor ordering, made reproducible via citools/patches/*.patch (branch
+   // deterministic_codegen) - so no special-cased sorting pass is needed here any more.
    // Also archives expr (for later inspection/serialization) via for_code->archive.
    void print_simplest_form(GiNaC::ex expr, std::ostream &os, GiNaC::print_FEM_options &csrc_opts);
 
@@ -593,10 +492,19 @@ namespace pyoomph
    protected:
       FiniteElementSpace *space;
       std::vector<BasisFunction *> basis_deriv_x, lagr_deriv_x, local_coord_deriv_x; // Cached derivative BasisFunctions, indexed by spatial direction: Eulerian (x), Lagrangian (X), local/reference (S)
+      static unsigned next_creation_index;
+      unsigned creation_index;
 
    public:
-      BasisFunction(FiniteElementSpace *_space) : space(_space) {}
+      BasisFunction(FiniteElementSpace *_space) : space(_space), creation_index(next_creation_index++) {}
       virtual ~BasisFunction();
+      // Monotonically increasing, construction-order-assigned id - see FiniteElementField::get_creation_index()
+      // for why this replaces the raw BasisFunction* pointer as the ordering key in ShapeExpansion/TestFunction's
+      // operator<: get_diff_x()/get_diff_X()/get_diff_S() lazily allocate a distinct BasisFunction object per
+      // spatial direction (cached thereafter, so direction 0 always maps to the same object within one process),
+      // but the raw pointer *value* of that object is heap-address order, which is not reproducible across
+      // separate process runs of the exact same input.
+      unsigned get_creation_index() const { return creation_index; }
       virtual BasisFunction *get_diff_x(unsigned direction); // Eulerian spatial derivative d(phi)/dx_direction
       virtual BasisFunction *get_diff_X(unsigned direction); // Lagrangian spatial derivative d(phi)/dX_direction
       virtual BasisFunction *get_diff_S(unsigned direction); // Local/reference-coordinate derivative d(phi)/dS_direction
@@ -652,12 +560,23 @@ namespace pyoomph
    // position space, discontinuous/DG spaces, D0). Owns the (undifferentiated) BasisFunction for this
    // space and knows how to emit the C++ code that interpolates fields on it (spatial/time
    // interpolation, and the residual/Jacobian/Hessian contribution loops over its shape functions).
+   // Comparator for std::set<FiniteElementSpace*>/std::map<FiniteElementSpace*,...> containers
+   // (required_shapes, hessian_spaces, ...). Orders by FiniteElementSpace::get_creation_index()
+   // instead of the raw pointer - see FiniteElementFieldPtrLess above for why. Declared here (defined
+   // out-of-line just after the FiniteElementSpace class below, once it is complete).
+   struct FiniteElementSpacePtrLess
+   {
+      bool operator()(const FiniteElementSpace *a, const FiniteElementSpace *b) const;
+   };
+
    class FiniteElementSpace
    {
    protected:
       FiniteElementCode *code;
       std::string name;
       BasisFunction *Basis;
+      static unsigned next_creation_index;
+      unsigned creation_index;
 
    public:
       virtual std::string get_eqn_number_str(FiniteElementCode *forcode) const;
@@ -669,7 +588,7 @@ namespace pyoomph
       virtual bool write_generic_RJM_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hessian);
       virtual void write_generic_RJM_jacobian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns,FiniteElementField * residual_field);
       virtual bool write_generic_Hessian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns);
-      FiniteElementSpace(FiniteElementCode *_code, const std::string &_name) : code(_code), name(_name), Basis(new BasisFunction(this)) {}
+      FiniteElementSpace(FiniteElementCode *_code, const std::string &_name) : code(_code), name(_name), Basis(new BasisFunction(this)), creation_index(next_creation_index++) {}
       virtual ~FiniteElementSpace()
       {
          if (Basis)
@@ -681,7 +600,14 @@ namespace pyoomph
       virtual bool can_have_hanging_nodes() { return false; }
       virtual bool need_interpolation_loop() { return true; } // False for spaces (e.g. D0) where a single value replaces the usual per-node interpolation loop
       FiniteElementCode *get_code() const { return code; }
+      // Monotonically increasing, construction-order-assigned id - see FiniteElementField::get_creation_index()
+      unsigned get_creation_index() const { return creation_index; }
    };
+
+   inline bool FiniteElementSpacePtrLess::operator()(const FiniteElementSpace *a, const FiniteElementSpace *b) const
+   {
+      return a->get_creation_index() < b->get_creation_index();
+   }
 
    // A standard continuous (C1/C2-type) nodal Lagrange space, i.e. the usual "H1-conforming" FE space that can have hanging nodes on refined meshes
    class ContinuousFiniteElementSpace : public FiniteElementSpace
@@ -760,6 +686,19 @@ namespace pyoomph
       ExternalD0Space(FiniteElementCode *_code, const std::string &_name) : D0FiniteElementSpace(_code, _name) {}
    };
 
+   // Comparator for std::set<FiniteElementField*>/std::map<FiniteElementField*,...> containers used
+   // throughout codegen.cpp (jacobian_fields, contributing_fields, indices_required, ...). Orders by
+   // FiniteElementField::get_creation_index() instead of the raw pointer, since default pointer
+   // ordering is heap-address order, which is not reproducible across separate process runs of the
+   // exact same input (see branch deterministic_codegen). Declared here (defined out-of-line just
+   // after the FiniteElementField class below, once it is complete) so it is available as the
+   // Compare argument on FiniteElementField's own self-referential containers (e.g.
+   // jacobian_contribution_for_code) too.
+   struct FiniteElementFieldPtrLess
+   {
+      bool operator()(const FiniteElementField *a, const FiniteElementField *b) const;
+   };
+
    // A named unknown (or position) field defined on a FiniteElementSpace. Provides the symbolic
    // building blocks (via get_shape_expansion()/get_test_function()) used to write weak-form residuals,
    // and tracks, per FiniteElementCode/residual, whether this field actually contributes to the
@@ -771,8 +710,10 @@ namespace pyoomph
       FiniteElementSpace *space;
       GiNaC::symbol symb; // Plain GiNaC symbol identifying this field, used e.g. as a key in nondimensionalization/substitution maps
       std::map<FiniteElementCode *, std::set<unsigned>> residual_contribution_for_code; // For each code, the residual indices for which this field has a contribution
-      std::map<FiniteElementCode *, std::map<unsigned ,std::set<FiniteElementField*> >> jacobian_contribution_for_code; // For each code, the residual indices for which this field has a contribution
+      std::map<FiniteElementCode *, std::map<unsigned ,std::set<FiniteElementField*,FiniteElementFieldPtrLess> >> jacobian_contribution_for_code; // For each code, the residual indices for which this field has a contribution
       FiniteElementField * defined_on_domain_equivalent=NULL; // If a field is already defined on a bulk domain, it is transferred to interfaces and corners. This goes to the top level, i.e. where it is defined
+      static unsigned next_creation_index;
+      unsigned creation_index;
    public:
       double discontinuous_refinement_exponent = 0.0;
       bool no_jacobian_at_all; // used for Lagrangian entries
@@ -785,10 +726,17 @@ namespace pyoomph
       const GiNaC::symbol &get_symbol() const { return symb; }
       int index; // Position of this field's degree of freedom within its space's per-node data
       std::string get_name() { return name; }
+      // Monotonically increasing, construction-order-assigned id. Used (in place of the raw
+      // FiniteElementField* pointer, e.g. in ShapeExpansion/TestFunction's operator< and in the
+      // various std::set<FiniteElementField*>/std::map<FiniteElementField*,...> scattered through
+      // codegen.cpp) as the ordering/iteration key wherever fields end up in an ordered container -
+      // pointer order is heap-address order, which is not guaranteed reproducible across separate
+      // process runs of the exact same input, and empirically isn't (see branch deterministic_codegen).
+      unsigned get_creation_index() const { return creation_index; }
       virtual std::string get_nodal_index_str(FiniteElementCode *forcode) const;
       virtual std::string get_equation_str(FiniteElementCode *forcode, std::string index) const;
       FiniteElementSpace *get_space() { return space; }
-      FiniteElementField(const std::string &_name, FiniteElementSpace *_space) : name(_name), space(_space), symb(_name), no_jacobian_at_all(false), temporal_error_factor(0) {}
+      FiniteElementField(const std::string &_name, FiniteElementSpace *_space) : name(_name), space(_space), symb(_name), creation_index(next_creation_index++), no_jacobian_at_all(false), temporal_error_factor(0) {}
       // Symbolic sum_i u_i(t)*phi_i(x) representing this field's FE interpolation (see ShapeExpansion)
       GiNaC::ex get_shape_expansion(bool no_jacobian = false, bool no_hessian = false)
       {
@@ -809,6 +757,11 @@ namespace pyoomph
       FiniteElementField * get_defined_on_domain_equivalent_field();
       void set_defined_on_domain_equivalent_field(FiniteElementField *equiv_field);
    };
+
+   inline bool FiniteElementFieldPtrLess::operator()(const FiniteElementField *a, const FiniteElementField *b) const
+   {
+      return a->get_creation_index() < b->get_creation_index();
+   }
 
    // Bookkeeping entry for one common-subexpression-eliminated (CSE) piece of a residual/Jacobian
    // expression: the original expression, the C++ variable ("cvar") it gets substituted by, which
@@ -855,6 +808,8 @@ namespace pyoomph
    class FiniteElementCode
    {
    protected:
+      static unsigned next_creation_index;
+      unsigned creation_index;
       unsigned residual_index; // Index of the residual currently being assembled/derived (into residual/residual_names and the various per-residual vectors below)
       Problem *problem=NULL;
       std::vector<std::string> residual_names;
@@ -884,7 +839,7 @@ namespace pyoomph
 
       std::vector<FiniteElementSpace *> allspaces; // All spaces reachable from this code (own + bulk/interface/external), populated by find_all_accessible_spaces()
       std::vector<FiniteElementField *> myfields; // Fields registered directly on this code (owns them)
-      std::set<FiniteElementField*> contributing_fields; // Fields (possibly from other codes, e.g. bulk) that actually appear in this code's residuals
+      std::set<FiniteElementField*,FiniteElementFieldPtrLess> contributing_fields; // Fields (possibly from other codes, e.g. bulk) that actually appear in this code's residuals
       int stage; // 0: we can register fields, 1: fields are registered (cannot add any more), but now we can add residuals
 
       unsigned nodal_dim, lagr_dim; // Number of Eulerian / Lagrangian coordinate dimensions of the nodes
@@ -893,7 +848,7 @@ namespace pyoomph
       std::vector<CustomMathExpressionBase *> cb_expressions; // Python callback math expressions (single return value) referenced by this code, in order of first use
       std::vector<CustomMultiReturnExpressionBase *> multi_ret_expressions; // Python callback math expressions (multiple return values) referenced by this code, in order of first use
 
-      std::map<std::string, std::map<FiniteElementSpace *, std::map<std::string, bool>>> required_shapes; // [func_type][space][shape/dx flavor] -> required; tracks which shape-function tables must be filled for which generated routine
+      std::map<std::string, std::map<FiniteElementSpace *, std::map<std::string, bool>, FiniteElementSpacePtrLess>> required_shapes; // [func_type][space][shape/dx flavor] -> required; tracks which shape-function tables must be filled for which generated routine
       unsigned max_dt_order = 0; // Highest time-derivative order appearing in any residual of this code
       std::vector<GiNaC::ex> Z2_fluxes,Z2_fluxes_for_eigen; // Flux expressions used for the Zienkiewicz-Zhu (Z2) error estimator, registered via add_Z2_flux()
       std::map<std::string, GiNaC::ex> integral_expressions; // Named domain-integral output expressions, registered via register_integral_function()
@@ -965,7 +920,7 @@ namespace pyoomph
       const ElementSizeSymbol &get_elemsize_derived(int dir, bool _consider_coordsys); // Cached first nodal-coordinate derivative of the element size in direction dir
       const ElementSizeSymbol &get_elemsize_derived2(int dir, int dir2, bool _consider_coordsys) { return (_consider_coordsys ? elemsize_derived2[dir][dir2] : elemsize_Cart_derived2[dir][dir2]); }
       const std::vector<FiniteElementSpace *> get_all_spaces() { return allspaces; }
-      std::set<FiniteElementField *> get_fields_on_space(FiniteElementSpace *space);
+      std::set<FiniteElementField *,FiniteElementFieldPtrLess> get_fields_on_space(FiniteElementSpace *space);
       PositionFiniteElementSpace *get_my_position_space(); // Returns the space holding this code's own nodal (Eulerian) coordinates
       void find_all_accessible_spaces(); // Populates allspaces from this code plus bulk/opposite-interface/external codes
       FiniteElementCodeSubExpression *resolve_subexpression(const GiNaC::ex &e); // Looks up (or fails) the CSE bookkeeping entry for a GiNaCSubExpression-wrapped expression
@@ -985,7 +940,7 @@ namespace pyoomph
       std::vector<GiNaC::ex> local_parameter_symbols;
       std::vector<FiniteElementCodeSubExpression> subexpressions; // All CSE'd subexpressions registered for this code, in creation order (indices referenced by GiNaCSubExpression)
       std::vector<GiNaC::ex> multi_return_calls; // All distinct multi-return callback invocations registered for this code, in creation order
-      std::map<CustomMultiReturnExpressionBase *, std::pair<unsigned, std::string>> multi_return_ccodes; // Per multi-return callback: its assigned numeric id and generated C function name
+      std::map<CustomMultiReturnExpressionBase *, std::pair<unsigned, std::string>, CustomMultiReturnExpressionBasePtrLess> multi_return_ccodes; // Per multi-return callback: its assigned numeric id and generated C function name
       void set_integration_order(unsigned order) { integration_order = order; }
       int get_integration_order() { return integration_order; }
       virtual GiNaC::ex eval_flag(std::string flagname); // Evaluates a named boolean/numeric compile-time flag (e.g. from CustomCoordinateSystem) to a GiNaC expression
@@ -1018,6 +973,11 @@ namespace pyoomph
 
       FiniteElementCode();
       virtual ~FiniteElementCode();
+
+      // Monotonically increasing, construction-order-assigned id - see FiniteElementField::get_creation_index()
+      // for why this replaces the raw FiniteElementCode* pointer as the ordering key in e.g.
+      // SpatialIntegralSymbol/NormalSymbol/ElementSizeSymbol/NodalDeltaSymbol's operator<.
+      unsigned get_creation_index() const { return creation_index; }
 
       // Collects, respectively, all distinct ShapeExpansions / TestFunctions occurring anywhere in expression inp
       // (used to determine which shape-function tables must be computed before evaluating inp).
@@ -1117,7 +1077,7 @@ namespace pyoomph
       virtual void set_latex_printer(LaTeXPrinter *lp) { latex_printer = lp; }
 
 
-      std::set<FiniteElementField *> Hessian_symmetric_fields_completed; // Fields whose Hessian block has already been written for the current residual; used together with assemble_hessian_by_symmetry to avoid deriving symmetric entries twice, reset per residual
+      std::set<FiniteElementField *,FiniteElementFieldPtrLess> Hessian_symmetric_fields_completed; // Fields whose Hessian block has already been written for the current residual; used together with assemble_hessian_by_symmetry to avoid deriving symmetric entries twice, reset per residual
 
    };
 

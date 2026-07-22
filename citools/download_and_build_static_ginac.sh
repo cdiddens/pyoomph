@@ -46,6 +46,12 @@ wget --retry-connrefused  --read-timeout=20 --timeout=15 --tries=40 https://www.
 tar -xvjf ginac-${GINAC_VERSION}.tar.bz2  || exit 1
 mv ginac-${GINAC_VERSION} ginac || exit 1
 
+# Makes GiNaC's internal term/hash ordering deterministic across separate
+# process runs (upstream otherwise seeds it from an ASLR-dependent RTTI
+# pointer, in two different spots) - see citools/patches/*.patch and
+# branch deterministic_codegen for the full rationale.
+(cd ginac && bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/patches/apply_ginac_patch.sh") || exit 1
+
 #cp -r $AUTOTTOLS_FILES/m4 cln/
 #cp -r $AUTOTTOLS_FILES/build-aux cln/
 

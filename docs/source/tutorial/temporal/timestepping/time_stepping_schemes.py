@@ -70,7 +70,7 @@ class AnharmonicOscillatorProblem(Problem):
 
 
 if __name__ == "__main__":
-    for scheme in {"BDF1", "BDF2", "Newmark2", "MPT", "TPZ", "Simpson", "Boole"}:
+    for scheme in ["BDF1", "BDF2", "Newmark2", "MPT", "TPZ", "Simpson", "Boole"]:
         with AnharmonicOscillatorProblem(scheme) as problem:
             problem.set_output_directory("osci_timestepping_scheme_" + scheme)
             problem.run(endtime=100, numouts=200)

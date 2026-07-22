@@ -203,6 +203,9 @@ namespace GiNaC
 namespace pyoomph
 {
 
+	unsigned DelayedPythonCallbackExpansion::next_creation_index = 0;
+	unsigned CustomCoordinateSystem::next_creation_index = 0;
+
 	CustomCoordinateSystem __no_coordinate_system;
 	GiNaCCustomCoordinateSystemWrapper __no_coordinate_system_wrapper(&__no_coordinate_system);
 
@@ -226,7 +229,11 @@ namespace pyoomph
 
 	bool operator<(const CustomMathExpressionWrapper &lhs, const CustomMathExpressionWrapper &rhs)
 	{
-		return lhs.cme < rhs.cme;
+		// CustomMathExpressionBase::unique_id is a construction-order counter (see its declaration:
+		// "Required for Parallel processes and missing GiNaC order"), i.e. exactly the stable ordering
+		// key this comparison needs - unlike the raw pointer, which was used here instead (heap-address
+		// order, not reproducible across separate process runs of the exact same input).
+		return lhs.cme->get_unique_id() < rhs.cme->get_unique_id();
 	}
 
 	bool operator==(const CustomMultiReturnExpressionWrapper &lhs, const CustomMultiReturnExpressionWrapper &rhs)
@@ -236,7 +243,7 @@ namespace pyoomph
 
 	bool operator<(const CustomMultiReturnExpressionWrapper &lhs, const CustomMultiReturnExpressionWrapper &rhs)
 	{
-		return lhs.cme < rhs.cme;
+		return lhs.cme->unique_id < rhs.cme->unique_id;
 	}
 
 	bool operator==(const CustomMultiReturnExpressionResultSymbol &lhs, const CustomMultiReturnExpressionResultSymbol &rhs)
@@ -246,7 +253,7 @@ namespace pyoomph
 
 	bool operator<(const CustomMultiReturnExpressionResultSymbol &lhs, const CustomMultiReturnExpressionResultSymbol &rhs)
 	{
-		return (lhs.func < rhs.func) || ((lhs.func == rhs.func) && (lhs.arglist < rhs.arglist)) || ((lhs.func == rhs.func) && (lhs.arglist == rhs.arglist) && (lhs.index < rhs.index));
+		return (lhs.func->unique_id < rhs.func->unique_id) || ((lhs.func == rhs.func) && (lhs.arglist < rhs.arglist)) || ((lhs.func == rhs.func) && (lhs.arglist == rhs.arglist) && (lhs.index < rhs.index));
 	}
 
 	bool operator==(const DelayedPythonCallbackExpansionWrapper &lhs, const DelayedPythonCallbackExpansionWrapper &rhs)
@@ -256,7 +263,7 @@ namespace pyoomph
 
 	bool operator<(const DelayedPythonCallbackExpansionWrapper &lhs, const DelayedPythonCallbackExpansionWrapper &rhs)
 	{
-		return lhs.cme < rhs.cme;
+		return lhs.cme->get_creation_index() < rhs.cme->get_creation_index();
 	}
 
 	bool operator==(const CustomCoordinateSystemWrapper &lhs, const CustomCoordinateSystemWrapper &rhs)
@@ -266,7 +273,7 @@ namespace pyoomph
 
 	bool operator<(const CustomCoordinateSystemWrapper &lhs, const CustomCoordinateSystemWrapper &rhs)
 	{
-		return lhs.cme < rhs.cme;
+		return lhs.cme->get_creation_index() < rhs.cme->get_creation_index();
 	}
 
 	bool operator==(const GlobalParameterWrapper &lhs, const GlobalParameterWrapper &rhs)
@@ -276,7 +283,11 @@ namespace pyoomph
 
 	bool operator<(const GlobalParameterWrapper &lhs, const GlobalParameterWrapper &rhs)
 	{
-		return lhs.cme < rhs.cme;
+		// GlobalParameterDescriptor::global_index is assigned at registration time (see Problem::
+		// define_global_parameter), so it is a stable, reproducible ordering key - unlike the raw
+		// pointer (heap-address order, not reproducible across separate process runs of the exact
+		// same input; see branch deterministic_codegen).
+		return lhs.cme->get_global_index() < rhs.cme->get_global_index();
 	}
 
 	bool operator==(const PlaceHolderResolveInfo &lhs, const PlaceHolderResolveInfo &rhs)
@@ -293,10 +304,17 @@ namespace pyoomph
 
 	bool operator<(const PlaceHolderResolveInfo &lhs, const PlaceHolderResolveInfo &rhs)
 	{
-		if (lhs.code < rhs.code)
-			return true;
-		else if (lhs.code > rhs.code)
-			return false;
+		// Compare by FiniteElementCode::get_creation_index() instead of the raw pointer (heap-address
+		// order, not reproducible across separate process runs of the exact same input; see branch
+		// deterministic_codegen). NULL (no code attached) sorts before any real code.
+		if (lhs.code != rhs.code)
+		{
+			if (lhs.code == NULL)
+				return true;
+			if (rhs.code == NULL)
+				return false;
+			return lhs.code->get_creation_index() < rhs.code->get_creation_index();
+		}
 		if (lhs.tags.size() < rhs.tags.size())
 			return true;
 		else if (lhs.tags.size() > rhs.tags.size())
@@ -331,10 +349,10 @@ namespace pyoomph
 		return (lhs.arg.compare(rhs.arg) < 0) || (lhs.arg.compare(rhs.arg) == 0 && (lhs.dual < rhs.dual));
 	}
 
-	std::map<CustomMathExpressionBase *, int> CustomMathExpressionBase::code_map; // Mapping for indices
+	std::map<CustomMathExpressionBase *, int, CustomMathExpressionBasePtrLess> CustomMathExpressionBase::code_map; // Mapping for indices
 	unsigned CustomMathExpressionBase::unique_counter = 0;
 
-	std::map<CustomMultiReturnExpressionBase *, int> CustomMultiReturnExpressionBase::code_map; // Mapping for indices
+	std::map<CustomMultiReturnExpressionBase *, int, CustomMultiReturnExpressionBasePtrLess> CustomMultiReturnExpressionBase::code_map; // Mapping for indices
 	unsigned CustomMultiReturnExpressionBase::unique_counter = 0;
 
 	std::map<std::string, GiNaC::possymbol> base_units;

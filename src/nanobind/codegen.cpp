@@ -356,7 +356,7 @@ void PyReg_CodeGen(nb::module_ &m)
                         continue;
                         }
                     }
-                    std::set<pyoomph::FiniteElementField*> fields_on_s=code->get_fields_on_space(s);
+                    auto fields_on_s=code->get_fields_on_space(s);
                     for (auto f : fields_on_s)
                     {
                         res.insert(f->get_name());
