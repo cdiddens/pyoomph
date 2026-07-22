@@ -830,12 +830,12 @@ class Problem(_pyoomph.Problem):
 
 
     @overload
-    def assemble_jacobian(self,with_residual:Literal[True]=...,which_one:str=...)->tuple[list[float],DefaultMatrixType]: ...
+    def assemble_jacobian(self,with_residual:Literal[True]=...,which_one:str=...)->tuple[NPFloatArray,DefaultMatrixType]: ...
 
     @overload
     def assemble_jacobian(self,with_residual:Literal[False],which_one:str=...)->DefaultMatrixType: ...
-    
-    def assemble_jacobian(self,with_residual:bool=True,which_one:str="")->DefaultMatrixType | tuple[list[float], DefaultMatrixType]:
+
+    def assemble_jacobian(self,with_residual:bool=True,which_one:str="")->DefaultMatrixType | tuple[NPFloatArray, DefaultMatrixType]:
         res, n, _nzz, J_nrow_local, J_values_arr, J_colindex_arr, J_row_start_arr=self._assemble_residual_jacobian(which_one)        
         J = scipy.sparse.csr_matrix((J_values_arr, J_colindex_arr, J_row_start_arr), shape=(n, n)) #type:ignore ## TODO: Not J_nrow_local ?
         if with_residual:
@@ -4022,7 +4022,7 @@ class Problem(_pyoomph.Problem):
             self.minimum_arclength_ds = old_min_ds  # type:ignore
         return newds
 
-    def go_to_param(self, *, reset_pars:bool=True, startstep:float | None=None, call_after_step:Callable[[float], None] | None=None,final_adaptive_solve:bool | int=False,max_newton_iterations:int | None=None, epsilon:float=1e-6, max_step:float | None=None,**kwargs:float)->None:
+    def go_to_param(self, _param:"dict[str,float] | None"=None, *, reset_pars:bool=True, startstep:float | None=None, call_after_step:Callable[[float], None] | None=None,final_adaptive_solve:bool | int=False,max_newton_iterations:int | None=None, epsilon:float=1e-6, max_step:float | None=None,**kwargs:float)->None:
         """
         Perform arclength continuation in a parameter until we reach the desired value.
 
@@ -4043,7 +4043,9 @@ class Problem(_pyoomph.Problem):
         Returns:
             None
         """
-                        
+        kwargs=dict(kwargs)
+        if _param is not None:
+            kwargs.update(_param)
         if len(kwargs) != 1:
             raise RuntimeError("Please only give one parameter as keyword argument (you might have misspelled an optional keyword argument)!")
         pname:str=""
@@ -4468,7 +4470,7 @@ class Problem(_pyoomph.Problem):
         return zeromap
             
 
-    def activate_eigenbranch_tracking(self,branch_type:Literal["real", "complex", "normal_mode"] | None=None,eigenvector:int | None=None,eigenvalue:complex | None=None):
+    def activate_eigenbranch_tracking(self,branch_type:Literal["real", "complex", "normal_mode"] | None=None,eigenvector:NPFloatArray | NPComplexArray | int | None=None,eigenvalue:complex | None=None):
         """Activates eigenbranch tracking for the specified eigenbranch type. Subsequent calls of solve(...) and arclength_continuation(...) will then track the eigenbranch.
         This is similar to bifurcation tracking, but it does not adjust a parameter to find a bifurcation, i.e. where Re(lambda)=0. Instead, it starts with a eigenvalue/eigenvector pair. Once activated, you can follow the eigenbranch by calling arclength_continuation(...).        
         At each step, the eigenvalue/eigenvector pair will be updated and is available via get_last_eigenvalues()[0] and get_last_eigenvectors()[0].
@@ -5829,7 +5831,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         active_branches={} # Branch index -> current dofs
         
         # Find the first solutions
-        self.go_to_param(**{param:rang.pop(0)})
+        self.go_to_param({param:rang.pop(0)})
         self.solve()
         branch_index=0
         for dofs in self.iterate_over_multiple_solutions_by_deflation(max_newton_iterations=max_newton_iterations,perturbation_amplitude=perturbation_amplitude,deflation_alpha=deflation_alpha,deflation_p=deflation_p,newton_relaxation_factor=newton_relaxation_factor,use_eigenperturbation=use_eigenperturbation,skip_initial_solution=skip_initial_solution,num_random_tries=num_random_tries,keep_deflation_operator_active=True):

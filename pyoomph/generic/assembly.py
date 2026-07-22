@@ -41,7 +41,12 @@ class CustomAssemblyBase:
 
     def _set_problem(self,problem:"Problem"):
         self.problem=problem
-        
+
+    def get_problem(self)->"Problem":
+        assert self.problem is not None, "The problem has not been set yet on this "+type(self).__name__
+        return self.problem
+
+
     def has_custom_solve_routine(self)->bool:
         # You can override the default solve routine for J*dU=R
         return False

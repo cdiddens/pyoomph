@@ -42,6 +42,9 @@ patch_stub(
 patch_stub(
     "def set_current_pinned_values(self, values: Sequence[float], with_position_dofs: bool, t: int = 0) -> None:",
     "def set_current_pinned_values(self, values: Sequence[float] | NDArray[numpy.floating], with_position_dofs: bool, t: int = 0) -> None:")
+patch_stub(
+    "def add_vector(self, values: Sequence[float]) -> int:",
+    "def add_vector(self, values: Sequence[float] | NDArray[numpy.floating]) -> int:")
 
 # Write the file out again
 with open(stubfile, 'w') as file:
