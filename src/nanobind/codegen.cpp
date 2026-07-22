@@ -434,7 +434,12 @@ void PyReg_CodeGen(nb::module_ &m)
         .def_rw("warn_on_large_numerical_factor", &pyoomph::FiniteElementCode::warn_on_large_numerical_factor,
                         "Whether to emit a warning when a very large or very small numerical prefactor is encountered while generating code (often indicating a units/scaling mistake).")
         .def_rw("stop_on_jacobian_difference", &pyoomph::FiniteElementCode::stop_on_jacobian_difference,
-                        "Whether to raise an error (rather than just warn) when the analytical and finite-difference Jacobians disagree beyond debug_jacobian_epsilon.");
+                        "Whether to raise an error (rather than just warn) when the analytical and finite-difference Jacobians disagree beyond debug_jacobian_epsilon.")
+        .def("get_precodegen_fingerprint_text", &pyoomph::FiniteElementCode::get_precodegen_fingerprint_text,
+                        "Tier-2 JIT cache (shadow mode) helper: a canonical text serialization of every residual/expression and "
+                        "setting write_code() will read, computed cheaply BEFORE write_code()'s symbolic differentiation/CSE/printing. "
+                        "Used only to predict (and, in shadow mode, verify) whether codegen could be skipped - never to skip it "
+                        "directly. See pyoomph/generic/jit_cache.py.");
 
     m.def(
         "_currently_generated_element", []()
@@ -476,6 +481,23 @@ void PyReg_CodeGen(nb::module_ &m)
         "set_jit_include_dir", [](std::string dir)
         { return pyoomph::g_jit_include_dir = dir; },
         nb::arg("dir"), "Set the include directory containing pyoomph's JIT bridge headers, passed to the C compiler when building generated element code.");
+
+    m.def(
+        "ginac_hash_is_deterministic", []()
+        {
+#ifdef PYOOMPH_GINAC_HASH_PATCHED
+            return true;
+#else
+            return false;
+#endif
+        },
+        "Whether the GiNaC this extension was built/linked against is known to have "
+        "deterministic term/hash ordering across process runs (see citools/patches/ginac-"
+        "deterministic-*.patch, branch deterministic_codegen, and PYOOMPH_GINAC_HASH_PATCHED "
+        "in CMakeLists.txt/cmake/ThirdPartyGiNaC.cmake). False whenever GiNaC was supplied "
+        "system-wide without asserting this via -DPYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON - "
+        "pyoomph.generic.jit_cache disables the JIT code cache entirely in that case, since "
+        "generated code cannot be assumed reproducible across runs.");
    
 
     delete py_decl_PyoomphCCompiler;

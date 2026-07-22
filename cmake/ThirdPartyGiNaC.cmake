@@ -223,3 +223,22 @@ else()
   set(PYOOMPH_GINAC_INCLUDE_DIR_RESOLVED "${_pyoomph_ginac_include}")
   set(PYOOMPH_GINAC_LIBRARY "${_pyoomph_ginac_lib}")
 endif()
+
+# Whether the GiNaC actually being linked is known to have deterministic
+# term/hash ordering (see citools/patches/ginac-deterministic-*.patch and
+# branch deterministic_codegen): true when we downloaded and patched it
+# ourselves above, or when the user explicitly asserts a system-supplied one
+# already has it (PYOOMPH_ASSUME_GINAC_HASH_PATCHED); false otherwise. Consumed
+# by CMakeLists.txt to define PYOOMPH_GINAC_HASH_PATCHED for pyoomph_core,
+# which pyoomph/generic/jit_cache.py uses to disable the JIT code cache
+# entirely whenever it can't be sure generated code is reproducible.
+if(PYOOMPH_DOWNLOAD_GINAC OR PYOOMPH_ASSUME_GINAC_HASH_PATCHED)
+  set(PYOOMPH_GINAC_HASH_PATCHED TRUE)
+else()
+  set(PYOOMPH_GINAC_HASH_PATCHED FALSE)
+  message(WARNING
+    "Using a system-supplied GiNaC (PYOOMPH_DOWNLOAD_GINAC=OFF) without "
+    "PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON: its term/hash ordering cannot be "
+    "assumed deterministic across process runs, so pyoomph's JIT code cache "
+    "will disable itself entirely at runtime (see pyoomph/generic/jit_cache.py).")
+endif()

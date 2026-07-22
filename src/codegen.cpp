@@ -5475,6 +5475,139 @@ namespace pyoomph
 	
 	
 
+	// See get_precodegen_fingerprint_text() declaration in codegen.hpp for rationale: a canonical,
+	// cheap-to-compute text serialization of everything write_code() reads, captured BEFORE it does
+	// any (expensive) symbolic differentiation/CSE/printing. Used only in shadow mode (see
+	// pyoomph/generic/jit_cache.py): never to actually skip codegen, only to predict whether it would
+	// produce the same output as a previous run, so that gaps in this fingerprint's coverage (a
+	// mismatch between the prediction and the real write_code() output) can be caught empirically
+	// before ever trusting it to skip codegen for real.
+	std::string FiniteElementCode::get_precodegen_fingerprint_text()
+	{
+		std::ostringstream os;
+		GiNaC::print_dflt pc(os);
+		auto print_ex = [&](const GiNaC::ex &e)
+		{ e.print(pc); os << "\n"; };
+		auto print_named_ex_map = [&](const std::map<std::string, GiNaC::ex> &m)
+		{ for (auto &kv : m) { os << kv.first << "="; print_ex(kv.second); } };
+
+		os << "FMT2\n"; // Bump whenever this function's coverage/format changes
+		os << "dim=" << nodal_dim << " lagr_dim=" << lagr_dim << " max_dt_order=" << max_dt_order << " integration_order=" << integration_order << "\n";
+		os << "generate_hessian=" << generate_hessian << " assemble_hessian_by_symmetry=" << assemble_hessian_by_symmetry << "\n";
+		os << "analytical_jacobian=" << analytical_jacobian << " analytical_position_jacobian=" << analytical_position_jacobian << "\n";
+		os << "with_adaptivity=" << with_adaptivity << " ccode_expression_mode=" << ccode_expression_mode << "\n";
+		os << "use_shared_shape_buffer_during_multi_assemble=" << use_shared_shape_buffer_during_multi_assemble << "\n";
+		// typeid(...).name() returns a pointer to a compiler-generated constant string; we copy its
+		// *contents* into std::string here (not the pointer itself, which - like the ASLR-dependent
+		// GiNaC hashing bug fixed on branch deterministic_codegen - would vary across process runs).
+		os << "coordsys_type=" << (coordinate_sys ? std::string(typeid(*coordinate_sys).name()) : std::string("NULL")) << "\n";
+		os << "reference_pos=";
+		for (double v : reference_pos_for_IC_and_DBC)
+			os << v << ",";
+		os << "\n";
+
+		// Which fields/spaces this code actually operates on: two codes can have textually
+		// identical residual expressions (e.g. trivial/near-empty point constraints at an
+		// axisymmetric axis) while still emitting different C code, because that code also
+		// iterates over/emits per-field entries (e.g. SET_INTERNAL_FIELD_NAME(...), the
+		// Dirichlet-condition-name table) for whichever fields are actually registered here -
+		// which residual/settings alone do not capture. get_full_domain_name() is included for
+		// the same reason: it is literally embedded into the generated code as
+		// SET_INTERNAL_NAME(functable->domain_name, ...), so two codes on different domains with
+		// otherwise-identical fingerprints would otherwise silently collide (this is exactly the
+		// gap a shadow-mode mismatch on branch jit_cache's rising_bubble.py test caught, between
+		// two distinct axis-point element codes on different parent domains).
+		os << "full_domain_name=" << get_full_domain_name() << "\n";
+		os << "myfields=";
+		for (auto *f : myfields)
+			os << f->get_name() << "@" << f->get_space()->get_name() << ",";
+		os << "\n";
+		os << "spaces=";
+		for (auto *s : spaces)
+			os << s->get_name() << ",";
+		os << "\n";
+
+		os << "residual_names=";
+		for (auto &n : residual_names)
+			os << n << ",";
+		os << "\n";
+		os << "residuals:\n";
+		for (auto &r : residual)
+			print_ex(r);
+
+		os << "ignore_assemble_residuals=";
+		for (auto &n : ignore_assemble_residuals)
+			os << n << ",";
+		os << "\n";
+		os << "nullified_bulk_residuals=";
+		for (auto &n : nullified_bulk_residuals)
+			os << n << ",";
+		os << "\n";
+		os << "derive_jacobian_by_expansion_mode=";
+		for (auto &kv : derive_jacobian_by_expansion_mode)
+			os << kv.first << ":" << kv.second << ",";
+		os << "\n";
+		os << "derive_hessian_by_expansion_mode=";
+		for (auto &kv : derive_hessian_by_expansion_mode)
+			os << kv.first << ":" << kv.second << ",";
+		os << "\n";
+		os << "ignore_dpsi_coord_diffs_in_jacobian_set=";
+		for (auto &n : ignore_dpsi_coord_diffs_in_jacobian_set)
+			os << n << ",";
+		os << "\n";
+
+		os << "IC_names=";
+		for (auto &n : IC_names)
+			os << n << ",";
+		os << "\n";
+
+		os << "has_hessian_contribution=";
+		for (bool b : has_hessian_contribution)
+			os << b << ",";
+		os << "\n";
+		os << "has_constant_mass_matrix_for_sure=";
+		for (bool b : has_constant_mass_matrix_for_sure)
+			os << b << ",";
+		os << "\n";
+		os << "extra_steady_routine=";
+		for (bool b : extra_steady_routine)
+			os << b << ",";
+		os << "\n";
+
+		os << "Z2_fluxes:\n";
+		for (auto &e : Z2_fluxes)
+			print_ex(e);
+		os << "Z2_fluxes_for_eigen:\n";
+		for (auto &e : Z2_fluxes_for_eigen)
+			print_ex(e);
+
+		os << "integral_expressions:\n";
+		print_named_ex_map(integral_expressions);
+		os << "local_expressions:\n";
+		print_named_ex_map(local_expressions);
+		os << "extremum_expressions:\n";
+		print_named_ex_map(extremum_expressions);
+		os << "tracer_advection_terms:\n";
+		print_named_ex_map(tracer_advection_terms);
+
+		// Only the (deterministic, construction-order-based) identity of referenced Python callbacks is
+		// captured here, not whether the Python-side callable they wrap changed - a known coverage gap,
+		// left for shadow mode to surface empirically rather than solved here.
+		os << "cb_expressions_ids=";
+		for (auto *c : cb_expressions)
+			os << (c ? (long)c->get_unique_id() : -1L) << ",";
+		os << "\n";
+		os << "multi_ret_expressions_ids=";
+		for (auto *c : multi_ret_expressions)
+			os << (c ? (long)c->unique_id : -1L) << ",";
+		os << "\n";
+
+		os << "bulk_code=" << (bulk_code ? "1" : "0") << " opposite_interface_code=" << (opposite_interface_code ? "1" : "0") << "\n";
+		os << "required_odes_count=" << required_odes.size() << "\n";
+
+		return os.str();
+	}
+
 	// Top-level entry point that generates the *entire* C source file for this element: resolves
 	// external-ODE dependencies, then for every registered residual, emits the analytical Residual/
 	// Jacobian/Mass-matrix function (write_generic_RJM); if the timestepping scheme requires it
@@ -8121,8 +8254,14 @@ namespace pyoomph
 			}
 		}
 		
-		init << " SET_INTERNAL_NAME(functable->domain_name,\"" << this->get_domain_name() << "\");" << std::endl;
-		cleanup << " pyoomph_tested_free(functable->domain_name); functable->domain_name=PYOOMPH_NULL; " << std::endl;
+		// domain_name is deliberately NOT set here (nor freed in cleanup below): baking a
+		// per-instance string into the generated C code made otherwise textually-identical
+		// codes on different domains (e.g. a DirichletBC(u=0) on both "left" and "right" of a
+		// rectangle) compile to different .c/.so content, defeating the JIT code cache's
+		// ability to share one compiled artifact between them. It is instead set by the host
+		// (DynamicBulkElementCode's constructor in problem.cpp, right after calling this
+		// init function) and freed there too - see the comment there for why that keeps
+		// alloc/free symmetric regardless of the compiler backend's C runtime.
 		init << " functable->clean_up=&clean_up;" << std::endl;
 		init << " my_func_table=functable;" << std::endl;
 		init << "}" << std::endl;

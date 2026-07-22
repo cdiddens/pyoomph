@@ -53,6 +53,15 @@ option(PYOOMPH_DOWNLOAD_CLN  "Download and build CLN from source via its own aut
 option(PYOOMPH_DOWNLOAD_GINAC "Download and build GiNaC from source via its own autotools ./configure" ON)
 option(PYOOMPH_GENERATE_STUBS "Generate .pyi stubs for the _core extension via nanobind.stubgen (best effort, non-fatal)"  ON)
 option(PYOOMPH_COPY_STUBS_TO_SOURCE_TREE "Also mirror the generated .pyi stub into the source-tree pyoomph/ directory, so Pylance/Pyright/mypy can resolve pyoomph._core while editing without a full pip install" ON)
+# Only meaningful together with -DPYOOMPH_DOWNLOAD_GINAC=OFF (a system-supplied
+# GiNaC, never touched by citools/patches/apply_ginac_patch.sh): asserts that
+# said GiNaC was patched by other means to make its term/hash ordering
+# deterministic (see PYOOMPH_GINAC_HASH_PATCHED below). Leave OFF unless you
+# have actually verified this yourself - the JIT code cache (pyoomph/generic/
+# jit_cache.py) disables itself entirely whenever it can't be sure the
+# generated code is reproducible across process runs, and a wrong ON here
+# would silently defeat that safeguard.
+option(PYOOMPH_ASSUME_GINAC_HASH_PATCHED "Assert that a system-supplied GiNaC (PYOOMPH_DOWNLOAD_GINAC=OFF) already has deterministic term/hash ordering" OFF)
 
 # Left empty by default: ginac.de only ever hosts the *current* release
 # tarball, so a version pinned here goes dead as soon as a new release is
@@ -181,6 +190,7 @@ target_link_libraries(pyoomph_core PUBLIC generic)
 target_compile_definitions(pyoomph_core PUBLIC
   $<$<BOOL:${PYOOMPH_USE_MPI}>:OOMPH_HAS_MPI>
   $<$<BOOL:${PYOOMPH_PARANOID}>:PARANOID>
+  $<$<BOOL:${PYOOMPH_GINAC_HASH_PATCHED}>:PYOOMPH_GINAC_HASH_PATCHED>
 )
 
 if(PYOOMPH_DOWNLOAD_GINAC)

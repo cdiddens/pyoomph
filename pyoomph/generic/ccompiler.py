@@ -40,6 +40,7 @@ import distutils.errors
 
 
 from ..typings import *
+from .jit_cache import get_jit_cache
 
 _TypeVarCompiler=TypeVar("_TypeVarCompiler",bound=type["BaseCCompiler"])
 
@@ -88,6 +89,57 @@ class BaseCCompiler(_pyoomph.SharedLibCCompiler):
     def expand_full_library_name(self, relative_name: str) -> str:
         return os.path.join(os.getcwd(),relative_name)
 
+    def get_compiler_fingerprint(self) -> str:
+        """A string identifying this compiler backend/binary/version, used as part
+        of the JIT cache key (see jit_cache.py) so that a cached shared library is
+        never reused with an incompatible compiler. Subclasses that wrap a system
+        compiler executable should override this to include that executable's
+        identity/version, not just the backend name."""
+        return self.compiler_id
+
+    def get_cache_flag_state(self) -> str:
+        """Additional state (beyond extra_flags, which the caller already passes
+        separately) that affects the actual compile flags used, and therefore must
+        be part of the JIT cache key. Subclasses should override/extend this if
+        they derive flags from further object state or environment variables."""
+        return repr(os.environ.get('PYOOMPH_DEBUG'))
+
+    def compile(self, suppress_compilation: bool, suppress_code_writing: bool, quiet: bool, extra_flags: Sequence[str]) -> bool:
+        if suppress_compilation:
+            return True
+        cache = None if suppress_code_writing else get_jit_cache()
+        if cache is None:
+            return self._compile_impl(suppress_compilation, suppress_code_writing, quiet, extra_flags)
+        try:
+            with open(self.get_code_filename(), "r") as f:
+                code_text = f.read()
+        except OSError:
+            return self._compile_impl(suppress_compilation, suppress_code_writing, quiet, extra_flags)
+        # jitbridge.h defines the ABI (struct layouts etc.) the generated code is compiled
+        # against and the runtime loader reads back - it can change during pyoomph
+        # development without codegen.cpp's *output* changing at all (same generated .c
+        # text, different ABI it needs to be compiled against). Folding its content into
+        # the cache key ensures such a change invalidates every previously cached .so
+        # instead of silently reusing one built against a stale, now-incompatible ABI.
+        try:
+            with open(os.path.join(self.get_jit_include_dir(), "jitbridge.h"), "r") as f:
+                header_text = f.read()
+        except OSError:
+            header_text = ""
+        key = cache.compute_key(code_text, self.get_compiler_fingerprint(), extra_flags, self.get_cache_flag_state(), header_text)
+        dest = self.expand_full_library_name(self.get_lib_filename())
+        if cache.try_restore(key, dest):
+            if not quiet:
+                print("JIT cache hit, reusing previously compiled "+self.get_lib_filename())
+            return True
+        ok = self._compile_impl(suppress_compilation, suppress_code_writing, quiet, extra_flags)
+        if ok:
+            cache.store(key, dest)
+        return ok
+
+    def _compile_impl(self, suppress_compilation: bool, suppress_code_writing: bool, quiet: bool, extra_flags: Sequence[str]) -> bool:
+        raise NotImplementedError
+
     _registered_compilers={"_internal_":_pyoomph.CCompiler}
 
     @classmethod
@@ -128,14 +180,23 @@ class TCCBoxCompiler(BaseCCompiler):
     compiler_id="tccbox"
     compiler_quality = 4
     @staticmethod
-    def check_avail() -> bool:    
+    def check_avail() -> bool:
         try:
             pass
         except:
             return False
         return True
-    
-    def compile(self, suppress_compilation: bool, suppress_code_writing: bool, quiet: bool, extra_flags: Sequence[str]) -> bool:
+
+    def get_compiler_fingerprint(self) -> str:
+        version=""
+        try:
+            import importlib.metadata
+            version=importlib.metadata.version("tccbox")
+        except Exception:
+            pass
+        return self.compiler_id+"|"+version
+
+    def _compile_impl(self, suppress_compilation: bool, suppress_code_writing: bool, quiet: bool, extra_flags: Sequence[str]) -> bool:
         if suppress_compilation:
             return True
         if not quiet:
@@ -228,7 +289,20 @@ int main (int argc, char **argv) {
             return False
         return True
 
-    def compile(self, suppress_compilation:bool, suppress_code_writing:bool,quiet:bool,extra_flags:Sequence[str]) -> bool:
+    def get_compiler_fingerprint(self) -> str:
+        exe=self.comp.compiler_so[0] if getattr(self.comp,'compiler_so',None) else "" #type:ignore
+        version=""
+        try:
+            out=subprocess.run([exe,"--version"],capture_output=True,text=True,timeout=5)
+            version=out.stdout+out.stderr
+        except Exception:
+            pass
+        return self.compiler_id+"|"+str(self.comp.compiler_type)+"|"+exe+"|"+version #type:ignore
+
+    def get_cache_flag_state(self) -> str:
+        return super().get_cache_flag_state()+"|"+repr(self._optimize_full_speed)+"|"+repr(self.compile_args)
+
+    def _compile_impl(self, suppress_compilation:bool, suppress_code_writing:bool,quiet:bool,extra_flags:Sequence[str]) -> bool:
         if suppress_compilation:
             return True
         distutils.log.set_verbosity(2 if not quiet else 0) #type:ignore
@@ -311,3 +385,16 @@ class CCacheCCompiler(SystemCCompiler):
         # Code generation is deterministic across process runs regardless of ccode_expression_mode
         # (see branch deterministic_codegen), so ccache hits are reliable here without needing a
         # special mode.
+
+    def get_compiler_fingerprint(self) -> str:
+        # self.comp.compiler_so[0] is "ccache" itself here, not the wrapped compiler;
+        # probe the actual wrapped compiler (index 1) so the fingerprint tracks the
+        # real compiler's version, not just ccache's.
+        wrapped=self.comp.compiler_so[1] if len(self.comp.compiler_so)>1 else "" #type:ignore
+        version=""
+        try:
+            out=subprocess.run([wrapped,"--version"],capture_output=True,text=True,timeout=5)
+            version=out.stdout+out.stderr
+        except Exception:
+            pass
+        return self.compiler_id+"|"+str(self.comp.compiler_type)+"|"+wrapped+"|"+version #type:ignore

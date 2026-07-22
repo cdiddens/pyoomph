@@ -1017,6 +1017,7 @@ namespace pyoomph
       virtual void write_generic_RJM(std::ostream &os, std::string funcname, GiNaC::ex resi, bool with_hang);     // Generic Residual/Jacobian/Mass matrix (also for parameter derivatives)
       virtual bool write_generic_Hessian(std::ostream &os, std::string funcname, GiNaC::ex resi, bool with_hang); // Generic Hessian vector product
       virtual void write_code(std::ostream &os); // Top-level driver: writes the full generated C++ source for this element (calls the write_code_*()/write_generic_*() methods for every residual)
+      virtual std::string get_precodegen_fingerprint_text(); // Tier-2 JIT cache (shadow mode): canonical text capturing every residual/expression and setting write_code() will read, computed BEFORE the (expensive) symbolic differentiation/CSE/printing write_code() performs. Cheap to compute since it only walks/prints the already-built expression trees once, with no derivation. See pyoomph/generic/jit_cache.py.
       virtual GiNaC::ex get_dx(bool lagrangian,bool unity_only=false); // Returns the (cached) dx/dX integration-measure symbol wrapped as a GiNaC::ex
       virtual GiNaC::ex get_element_size_symbol(bool lagrangian, bool with_coordsys);
       virtual GiNaC::ex get_integral_dx(bool , bool lagrangian, CustomCoordinateSystem *) { return get_dx(lagrangian); }

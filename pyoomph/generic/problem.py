@@ -60,6 +60,7 @@ from ..expressions import ExpressionOrNum,ExpressionNumOrNone
 from ..meshes.meshdatacache import MeshDataCacheStorage, MeshDataCacheOperatorBase, MeshDataEigenModes,MeshDataCacheEntry
 
 from .ccompiler import BaseCCompiler,SystemCCompiler
+from .jit_cache import get_jit_cache,tier2_shadow_enabled
 
 import types 
 
@@ -504,6 +505,7 @@ class Problem(_pyoomph.Problem):
         self._first_step:bool=True
         self._suppress_code_writing:bool=False
         self._suppress_compilation:bool=False
+        self._no_cache:bool=False
         self._debug_largest_residual:int=0
         self.ignore_command_line:bool=False
 
@@ -2096,6 +2098,7 @@ class Problem(_pyoomph.Problem):
         self.cmdlineparser.add_argument('--outdir', help="output directory",type=str)
         self.cmdlineparser.add_argument('--suppress_code_writing',help="do not write FEM codes. Useful for debugging",action='store_true')
         self.cmdlineparser.add_argument('--suppress_compilation',help="do not compile FEM codes. Useful for debugging",action='store_true')
+        self.cmdlineparser.add_argument('--no-cache',help="Do not use the JIT code cache (pyoomph.generic.jit_cache) - always regenerate/recompile FEM codes from scratch",action='store_true')
         self.cmdlineparser.add_argument('-P','--parameter', help="Override some problem parameters",nargs='+', type=str)
         self.cmdlineparser.add_argument("--runmode",help="Selects the runmode ([d]elete and run, [o]verride and run, [c]ontinue, [p]lot again",type=str)
         self.cmdlineparser.add_argument("--recompile_on_continue",help="When using --runmode c, compilation and code writing is usually suppressed. You can recompile the code anyhow with this flag",action="store_true")
@@ -2156,6 +2159,11 @@ class Problem(_pyoomph.Problem):
             
         if self.cmdlineargs.suppress_compilation:
             self._suppress_compilation=True
+
+        if self.cmdlineargs.no_cache:
+            self._no_cache=True
+            from .jit_cache import set_enabled
+            set_enabled(False)
 
         if self.cmdlineargs.verbose:
             _pyoomph.set_verbosity_flag(1)
@@ -3524,9 +3532,36 @@ class Problem(_pyoomph.Problem):
                 suppress_compilation=True
         if self._suppress_code_writing or get_mpi_rank()>0:
             suppress_writing=True
-        mpi_barrier()        
+
+        # Tier-2 JIT cache shadow mode: capture the cheap pre-codegen fingerprint
+        # BEFORE write_code() runs (triggered inside generate_and_compile_bulk_element_code
+        # below), so it can be compared afterwards against what write_code() actually
+        # produced. See pyoomph/generic/jit_cache.py; this never skips codegen.
+        # Ignored entirely whenever code writing or compilation is suppressed (debugging
+        # runs, --runmode continue/replot without --recompile_on_continue, MPI rank>0):
+        # there either is no .c file to fingerprint/compare against, or the whole point of
+        # that mode is to leave everything alone rather than touch generated artifacts.
+        fingerprint_text:str | None=None
+        if not suppress_writing and not suppress_compilation and tier2_shadow_enabled():
+            try:
+                fingerprint_text=elementtype.get_precodegen_fingerprint_text()
+            except Exception:
+                fingerprint_text=None
+
+        mpi_barrier()
         res=self.generate_and_compile_bulk_element_code(elementtype,trunk,suppress_writing,suppress_compilation,bulkmesh,self.is_quiet(),self.extra_compiler_flags)
         #print("REt")
+
+        if fingerprint_text is not None:
+            try:
+                with open(trunk+".c","r") as f:
+                    actual_code_text=f.read()
+                cache=get_jit_cache()
+                if cache is not None:
+                    cache.check_fingerprint_shadow(fingerprint_text,actual_code_text,subname)
+            except OSError:
+                pass
+
         mpi_barrier()
         #print("REt MPI")
         self._bulk_element_code_counter=self._bulk_element_code_counter+1

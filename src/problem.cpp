@@ -133,6 +133,22 @@ namespace pyoomph
 		functable->check_compiler_size = _pyoomph_check_compiler_size;
 		initfunc(functable);
 
+		// Set (and, in the destructor, free) domain_name from the host side rather than in
+		// generated code: codegen.cpp deliberately no longer bakes this in, since doing so made
+		// otherwise textually-identical generated code (e.g. the same DirichletBC on two
+		// different domains, such as "left" and "right" of a rectangle) differ only by this one
+		// string, defeating the JIT code cache's ability to share a single compiled .so between
+		// them. Allocating AND freeing it here (both via the host's own malloc/free, never
+		// touching whatever C runtime the generated code itself was compiled/linked against)
+		// sidesteps any cross-DLL-heap mismatch between the compiler backend's runtime and
+		// pyoomph_core's own - which would otherwise be a real hazard on Windows, where a DLL's
+		// static CRT can have its own private heap distinct from the calling process's.
+		{
+			std::string dn = elem->get_domain_name();
+			functable->domain_name = (char *)malloc(sizeof(char) * (dn.size() + 1));
+			memcpy(functable->domain_name, dn.c_str(), dn.size() + 1);
+		}
+
 		functable->info_Pos.space_index=0;
 
 
@@ -227,6 +243,13 @@ namespace pyoomph
 			if (pyoomph_verbose)
 			{
 				std::cout << "Cleaning memory of functable" << std::endl << std::flush;
+			}
+			// Host-allocated (see the constructor) - freed here with the host's own free(),
+			// before clean_up()/close_handle() below ever touch the compiled library itself.
+			if (functable->domain_name)
+			{
+				free(functable->domain_name);
+				functable->domain_name = NULL;
 			}
 			if (functable->clean_up) functable->clean_up(functable);
 			delete functable; // TODO: Also delete the malloced subentries here
