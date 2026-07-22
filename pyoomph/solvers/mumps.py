@@ -27,7 +27,19 @@
  
 from .generic import GenericLinearSystemSolver
 from scipy.sparse import csr_matrix #type: ignore
-from mumps import DMumpsContext #type: ignore # Requires PyMUMPS: python3 -m pip install PyMUMPS
+from typing import Any
+# NOTE: this module's own filename ("mumps.py") is identical to the third-party
+# "mumps" package name it wraps (PyMUMPS). When that package is not installed
+# (as in this dev/type-checking environment), pyright's import resolver falls
+# back to this very file as a same-directory sibling match for "import mumps",
+# which makes it (wrongly) infer DMumpsContext's type as the "mumps" module
+# itself (self-referential), and then flag `DMumpsContext()` below as
+# "Module is not callable". Importing under a private alias and re-exposing it
+# via an explicit `Any`-typed name avoids that misinference without masking
+# any genuine type information (there is none available: PyMUMPS ships no
+# stubs anyway).
+from mumps import DMumpsContext as _DMumpsContext #type: ignore # Requires PyMUMPS: python3 -m pip install PyMUMPS
+DMumpsContext:Any=_DMumpsContext
 from .. import _pyoomph_core as _pyoomph
 
 from mpi4py import MPI

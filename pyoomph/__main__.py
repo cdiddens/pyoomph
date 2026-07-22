@@ -263,6 +263,11 @@ elif arglist.command=="check":
             cc=None
             try:
                cc=BaseCCompiler.factory_compiler(to_check)
+               # factory_compiler is declared to return the C++ base class _pyoomph.CCompiler,
+               # but at runtime it always instantiates one of the registered BaseCCompiler
+               # subclasses (see BaseCCompiler._registered_compilers), which is where
+               # check_avail()/toolchain_located() are actually defined.
+               assert isinstance(cc,BaseCCompiler)
                if cc.check_avail():
                   print("","loading seems to work")
                   try:
@@ -281,6 +286,7 @@ elif arglist.command=="check":
                # diagnostic than the raw exception below.
                located=None
                if cc is not None:
+                  assert isinstance(cc,BaseCCompiler)
                   try:
                      located=cc.toolchain_located()
                   except Exception:

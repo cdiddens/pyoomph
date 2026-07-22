@@ -198,6 +198,8 @@ class ScipyEigenSolver(GenericEigenSolver):
 			OPInv=self.get_OPInv(M,J,shift)
 			ncv=self.ncv
 			max_retries=3
+			evals=None
+			evects=None
 			for attempt in range(max_retries+1):
 				try:
 					evals,evects=scipy.sparse.linalg.eigs(J,M=M,sigma=shift,return_eigenvectors=True,k=neval,OPinv=OPInv,which=which,OPpart=OPpart,v0=v0,ncv=ncv,tol=self.tol) #type:ignore
@@ -209,6 +211,7 @@ class ScipyEigenSolver(GenericEigenSolver):
 					ncv=min(ncv,n)
 					if not quiet:
 						print("ARPACK failed to converge, retrying with ncv="+str(ncv)+" (attempt "+str(attempt+1)+"/"+str(max_retries)+")")
+			assert evals is not None and evects is not None
 			if sort:
 				if target:
 					srt = numpy.argsort(numpy.abs(evals-target))

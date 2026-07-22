@@ -66,7 +66,7 @@ class HelmholtzEquation(Equations):
 
     def define_residuals(self):
         if self.complex:
-            I=imaginary_i
+            I=imaginary_i()
             uR, uRtest = var_and_test(self.name+"_Re")
             uI, uItest = var_and_test(self.name + "_Im")
             u=uR+I*uI

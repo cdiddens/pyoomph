@@ -310,6 +310,7 @@ class _MeshFileOutput(_BaseNumpyOutput):
 		if get_mpi_nproc()>1 and mesh.is_mesh_distributed():
 			# Get nelement for all meshes and merge them via MPI
 			my_nelement=mesh.nelement()
+			assert MPI is not None # get_mpi_nproc()>1 implies mpi4py is available, see pyoomph.generic.mpi
 			comm = MPI.COMM_WORLD
 			all_nelement = numpy.array(comm.allgather(my_nelement))
    

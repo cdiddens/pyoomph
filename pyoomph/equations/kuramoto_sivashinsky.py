@@ -84,11 +84,15 @@ class KuramotoSivashinskyBoundary(Equations):
 			dot(grad(h),n) = 0
 	"""
 	def define_residuals(self):
-		peqs=self.get_parent_domain().get_equations().get_equation_of_type(KuramotoSivashinskyEquations,always_as_list=True)
+		parent_domain=self.get_parent_domain()
+		assert parent_domain is not None
+		peqs=parent_domain.get_equations().get_equation_of_type(KuramotoSivashinskyEquations,always_as_list=True)
 		if len(peqs)!=1:
 			raise ValueError("KuramotoSivashinskyBoundary requires exactly one KuramotoSivashinskyEquations in the parent domain")
+		peq=peqs[0]
+		assert isinstance(peq,KuramotoSivashinskyEquations)
 
-		hbulk, _ = var_and_test(peqs[0].fieldname, domain=self.get_parent_domain())
-		_, curv_test = var_and_test(peqs[0].curvfieldname)
+		hbulk, _ = var_and_test(peq.fieldname, domain=parent_domain)
+		_, curv_test = var_and_test(peq.curvfieldname)
 		n = self.get_normal()
 		self.add_residual(-weak(dot(n,grad(hbulk)),curv_test))

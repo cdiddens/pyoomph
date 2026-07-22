@@ -28,7 +28,7 @@ from __future__ import annotations
  
  
 from .cb import CustomMathExpression
-from .generic import vector,ExpressionOrNum,var
+from .generic import vector,ExpressionOrNum,var,Expression
 from ..typings import *
 import vtk
 
@@ -64,7 +64,7 @@ class _VTUInterpolatorBase:
         else:
             return fieldname,0
     
-    def get_field(self,fieldname:str,component_index:int | Literal["auto"]="auto",scale:ExpressionOrNum=1)->CustomMathExpression:
+    def get_field(self,fieldname:str,component_index:int | Literal["auto"]="auto",scale:ExpressionOrNum=1)->Expression:
         raise RuntimeError("Please override")
         
 
@@ -78,20 +78,23 @@ class _VTUFieldInterpolatorByVTK(CustomMathExpression):
             
         def eval(self, arg_array) -> float:
             x=list(arg_array)
-            if self.vtu._use_cache:
+            use_cache=self.vtu._use_cache
+            key=None
+            if use_cache:
                 key=tuple(arg_array)
                 if key in self.vtu._cache:
                     return self.vtu._cache[key][self._cache_index][self.component_index]
             while len(x)<3:
-                x.append(0.0)            
+                x.append(0.0)
             self.vtu.probe_pt.SetCenter(*x)
             self.vtu.probe_pt.Update()
             self.vtu.interpolator.Update()
-            if self.vtu._use_cache:
+            if use_cache:
+                assert key is not None
                 cache_res=[]
                 for f in self.vtu._fields_to_cache:
                     arr=self.vtu.interpolator.GetOutput().GetPointData().GetArray(f)
-                    
+
                     entry=[]
                     for e in range(arr.GetNumberOfComponents()):
                         res=arr.GetVariantValue(e)
@@ -192,7 +195,7 @@ class VTUInterpolatorByVTK(_VTUInterpolatorBase):
         self.interpolator.SetInputData(self.probe_pt.GetOutput())
         self.interpolator.SetSourceData(self.vtu.GetOutput())         
 
-    def get_field(self, fieldname: str,component_index:int | Literal["auto"]="auto",scale:ExpressionOrNum=1) -> CustomMathExpression:
+    def get_field(self, fieldname: str,component_index:int | Literal["auto"]="auto",scale:ExpressionOrNum=1) -> Expression:
         if component_index=="auto":
             fieldname,component_index=self._auto_strip_component(fieldname)
         self._num_interpolators+=1

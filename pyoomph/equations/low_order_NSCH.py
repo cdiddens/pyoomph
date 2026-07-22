@@ -276,7 +276,15 @@ class LowOrderNSCH(Equations):
 class MaterialBasedLowOrderNSCH(LowOrderNSCH):
     def __init__(self, fluidA:AnyFluidProperties, fluidB:AnyFluidProperties, epsilon, mobility, *, interface:AnyFluidFluidInterface | None=None,W=rational_num(1, 4), gravity=0, low_order=True, with_cut_off=True, with_subexpressions=True, mobility_mode: int = 0, phase_boundary_level: int | Literal['max'] = 0, incompressiblity_PI: bool = False, real_pressure: bool = False, use_sym_grad_u: bool = True, swap_test_functions: bool = True, piecewise_potential:bool=True,compression_term_lambda:ExpressionOrNum=0):
         if interface is None:
-            interface=fluidA | fluidB
+            # fluidA and fluidB are both AnyFluidProperties (liquid or gas, never solid), so
+            # get_interface_properties (invoked via __or__) can only take the "liquid_gas" or "liquid_liquid"
+            # branch and thus can only return a LiquidGasInterfaceProperties or LiquidLiquidInterfaceProperties
+            # instance (i.e. AnyFluidFluidInterface). The declared return type of __or__ is a broader union
+            # (it also covers BaseInterfaceProperties/LiquidSolidInterfaceProperties for the solid-involving
+            # cases), which pyright cannot narrow away here, hence the assert to make the invariant explicit.
+            computed_interface=fluidA | fluidB
+            assert isinstance(computed_interface,(LiquidGasInterfaceProperties,LiquidLiquidInterfaceProperties))
+            interface=computed_interface
         super().__init__(fluidA.mass_density, fluidB.mass_density, fluidA.dynamic_viscosity, fluidB.dynamic_viscosity, epsilon, interface.surface_tension, mobility, W=W, gravity=gravity, low_order=low_order, with_cut_off=with_cut_off, with_subexpressions=with_subexpressions, mobility_mode=mobility_mode, phase_boundary_level=phase_boundary_level, incompressiblity_PI=incompressiblity_PI, real_pressure=real_pressure, use_sym_grad_u=use_sym_grad_u, swap_test_functions=swap_test_functions,piecewise_potential=piecewise_potential,compression_term_lambda=compression_term_lambda)
         
         

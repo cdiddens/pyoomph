@@ -71,8 +71,10 @@ class DropletMesh3d(MeshTemplate):
         #print(self._node_calls,self._node_max)
         return res
 
-    def add_tetra_3d_C1(self,n1,n2,n3,n4):        
-        self._dom.add_tetra_3d_C1(n1,n2,n3,n4)
+    def add_tetra_3d_C1(self,n1,n2,n3,n4):
+        domain=self._dom
+        assert domain is not None
+        domain.add_tetra_3d_C1(n1,n2,n3,n4)
         self._tetra_nodes.append(set([n1,n2,n3,n4]))
         
 

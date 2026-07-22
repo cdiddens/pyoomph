@@ -27,6 +27,10 @@
  
  
 import pathlib
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+	from mpi4py import MPI
 
 no_mpi_file=pathlib.Path(__file__).parent.parent.joinpath("NO_MPI").resolve()
 
@@ -35,10 +39,10 @@ if no_mpi_file.exists():
 	from .. import _pyoomph_core as _pyoomph
 	_pyoomph.InitMPI(sys.argv)
 	
-	def has_mpi():
+	def has_mpi()->bool:
 		return False
-		
-	def get_mpi_world_comm():
+
+	def get_mpi_world_comm()->'Optional[MPI.Intracomm]':
 		return None
 
 	def get_mpi_rank(comm=None)->int: #type:ignore
@@ -57,10 +61,10 @@ else:
 
 	_pyoomph.InitMPI(sys.argv)
 
-	def has_mpi():
+	def has_mpi()->bool:
 		return True
-		
-	def get_mpi_world_comm():
+
+	def get_mpi_world_comm()->'Optional[MPI.Intracomm]':
 		return MPI.COMM_WORLD
 
 	def get_mpi_rank(comm=MPI.COMM_WORLD)->int: #type:ignore

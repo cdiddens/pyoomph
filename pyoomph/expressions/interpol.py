@@ -102,9 +102,13 @@ class InterpolateSmoothBivariateSpline2d(CustomMathExpression):
 		return self.interp(arg_array[0],arg_array[1]) #type:ignore
 
 	def derivative(self,index:int) -> CustomMathExpression:
-		dx=[0,0]
-		dx[index]=1
-		return InterpolateSmoothBivariateSpline2dDerivative(self,tuple(dx))
+		if index==0:
+			dx:tuple[int,int]=(1,0)
+		elif index==1:
+			dx=(0,1)
+		else:
+			raise ValueError("Index must be 0 or 1")
+		return InterpolateSmoothBivariateSpline2dDerivative(self,dx)
 
 class InterpolateSmoothBivariateSpline2dDerivative(CustomMathExpression):
 	def __init__(self,parent:InterpolateSmoothBivariateSpline2d,dx:tuple[int,int]):
@@ -117,9 +121,14 @@ class InterpolateSmoothBivariateSpline2dDerivative(CustomMathExpression):
 		return self.interp(arg_array[0],arg_array[1],dx=self.dx[0],dy=self.dx[1]) #type:ignore
 
 	def derivative(self,index:int) -> CustomMathExpression:
-		dx=[i for i in self.dx]
-		dx[index]=dx[index]+1
-		return InterpolateSmoothBivariateSpline2dDerivative(self.parent,tuple(dx))		
+		d0,d1=self.dx
+		if index==0:
+			d0=d0+1
+		elif index==1:
+			d1=d1+1
+		else:
+			raise ValueError("Index must be 0 or 1")
+		return InterpolateSmoothBivariateSpline2dDerivative(self.parent,(d0,d1))
 
 	def get_id_name(self)->str:
 		return  "D"+str(self.dx)+self.parent.get_id_name()
@@ -181,7 +190,7 @@ class MeshFileInterpolation2d(CustomMathExpression):
 
 	def eval(self, arg_array: NPFloatArray) -> float:
 		x,y=arg_array[0],arg_array[1]
-		return self.interp(x,y)
+		return self.interp(x,y) #type:ignore
 
 
 

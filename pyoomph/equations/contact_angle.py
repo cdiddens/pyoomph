@@ -686,15 +686,17 @@ class DynamicContactLineEquations(InterfaceEquations):
     """
     required_parent_type = MultiComponentNavierStokesInterface
 
-    def __init__(self,model:GenericContactLineModel,wall_normal:ExpressionOrNum=vector(0,1),wall_tangent:ExpressionOrNum=None,unpinned_indicator_name:str="_is_unpinned",velocity_enforcing_name:str="_cl_velo_lagr",actual_theta_name:str="measured_contact_angle",surface_tension_name:str="surf_tens_at_cl",override_dynamics_name:str="_override_cl_dynamics",with_observables:bool=False):
+    def __init__(self,model:GenericContactLineModel,wall_normal:ExpressionOrNum=vector(0,1),wall_tangent:ExpressionNumOrNone=None,unpinned_indicator_name:str="_is_unpinned",velocity_enforcing_name:str="_cl_velo_lagr",actual_theta_name:str="measured_contact_angle",surface_tension_name:str="surf_tens_at_cl",override_dynamics_name:str="_override_cl_dynamics",with_observables:bool=False):
         super(DynamicContactLineEquations, self).__init__()
         self.model=model
         self.wall_normal=wall_normal
-        self.wall_tangent=wall_tangent
-        if self.wall_tangent is None:
+        self.wall_tangent:ExpressionOrNum
+        if wall_tangent is None:
             # bac-cab rule assuming the wall_normal is normalized. Pointing inward to the bulk domain, along the substrate (i.e. orthogonal to the wall normal)
             self.wall_tangent=self.wall_normal*dot(self.wall_normal,var("normal",domain=".."))-var("normal",domain="..")
             self.wall_tangent=subexpression(self.wall_tangent/square_root(dot(self.wall_tangent,self.wall_tangent)))
+        else:
+            self.wall_tangent=wall_tangent
         self.unpinned_indicator_name=unpinned_indicator_name
         self.override_dynamics_name:str = override_dynamics_name
         self.velocity_enforcing_name=velocity_enforcing_name

@@ -126,6 +126,10 @@ class LaTeXPrinter(_pyoomph.LaTeXPrinter):
                     childlist = childlist[p]._children
                 parent_tree=entry
 
+            # parent_list is domain_name.split("/"), which always yields at least one
+            # element, so the loop above always runs and assigns entry at least once.
+            assert entry is not None
+
             contribution=""
             if not contribution in entry._residual_contributions.keys():
                 entry._residual_contributions[contribution]={}

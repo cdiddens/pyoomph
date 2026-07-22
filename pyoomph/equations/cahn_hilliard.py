@@ -156,6 +156,7 @@ class CahnHilliardWettingInterface(InterfaceEquations):
             if self.contact_angle_plus is not None:
                 delta_sigma=parent.sigma*cos(self.contact_angle_plus)
             else:
+                assert self.contact_angle_minus is not None
                 delta_sigma=-parent.sigma * cos(self.contact_angle_minus)
         else:
             assert self.sigma_fs_minus is not None

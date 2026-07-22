@@ -497,6 +497,7 @@ class PardisoSolver(GenericLinearSystemSolver):
             cols = global_col_index
             data_values = values
             comm=get_mpi_world_comm()
+            assert comm is not None
             #all_nnz = comm.gather(nnz_local, root=0)
             all_rows = comm.gather(rows, root=0)
             all_cols = comm.gather(cols, root=0)
@@ -521,6 +522,7 @@ class PardisoSolver(GenericLinearSystemSolver):
             mpi_barrier()            
         elif op_flag==2:
             comm=get_mpi_world_comm()
+            assert comm is not None
             counts = comm.gather(len(b), root=0)
             if rank == 0:
                 counts = np.array(counts, dtype=np.int32)    

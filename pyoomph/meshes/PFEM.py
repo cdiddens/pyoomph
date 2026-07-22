@@ -152,7 +152,7 @@ class PFEMMeshUpdater:
                                         
                     if n1.is_on_boundary() and n2.is_on_boundary():
                         if len(n1.get_boundary_indices().union(n2.get_boundary_indices())):
-                            mesh.add_node_to_mesh(e.create_interpolated_node(0.5*(numpy.array(s1)+numpy.array(s2)),True))
+                            mesh.add_node_to_mesh(e.create_interpolated_node((0.5*(numpy.array(s1)+numpy.array(s2))).tolist(),True))
                             n1.set_obsolete()                    
                             n2.set_obsolete()
                     elif not n1.is_on_boundary():
@@ -173,7 +173,7 @@ class PFEMMeshUpdater:
                 x2,y2=n2.x(0),n2.x(1)
                 dist=numpy.sqrt((x1-x2)**2+(y1-y2)**2)
                 if dist>0.2:                
-                    mesh.add_node_to_mesh(e.create_interpolated_node(0.5*(numpy.array(s1)+numpy.array(s2)),True))
+                    mesh.add_node_to_mesh(e.create_interpolated_node((0.5*(numpy.array(s1)+numpy.array(s2))).tolist(),True))
                 
                 
 

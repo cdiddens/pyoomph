@@ -134,8 +134,8 @@ class RectangularQuadMesh(MeshTemplate):
         self.name:str | Callable[[float, float], str] = name
         self.size = size
         self.N = N
-        self.lower_left = lower_left
-        
+        self.lower_left:ExpressionOrNum | list[ExpressionOrNum] | Literal["centered"] = lower_left
+
         if isinstance(periodic, bool):
             self.periodic = [periodic, periodic]
         else:
@@ -197,7 +197,7 @@ class RectangularQuadMesh(MeshTemplate):
             raise ValueError("Mesh size must be a positive integer, but got " + str(nN))
 
         lower_left = self.lower_left
-        if self.lower_left == "centered":
+        if lower_left == "centered":
             lower_left = [-size[0] / 2, -size[1] / 2]
         elif isinstance(lower_left, list) or isinstance(lower_left, tuple) or isinstance(lower_left, numpy.ndarray):
             lower_left=list(lower_left)

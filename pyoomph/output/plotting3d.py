@@ -58,7 +58,7 @@ class _PyVistaPlotPartMesh(_PyVistaPlotPartBase):
 
 class PyVistaPlotter(BasePlotter):
     def __init__(self, problem:"Problem | None"=None,filetrunk:str="plot_{:05d}",fileext:str | list[str]="svg",eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs",):
-        super().__init__(problem=problem,eigenvector=eigenvector,eigenmode=eigenmode) #type:ignore[arg-type] # problem may be attached later via "problem += plotter"
+        super().__init__(problem=problem,eigenvector=eigenvector,eigenmode=eigenmode) # problem may be attached later via "problem += plotter"
         self.filetrunk=filetrunk
         self.fileext=fileext
         self._parts:list[_PyVistaPlotPartBase]=[]
@@ -77,9 +77,11 @@ class PyVistaPlotter(BasePlotter):
         for p in self._parts:
             p._add_to_plotter(self,pl)
         #pl.show()
-        pdir=os.path.join(self._problem.get_output_directory(),self._output_dir)
+        pdir=os.path.join(self.get_problem().get_output_directory(),self._output_dir)
         os.makedirs(pdir,exist_ok=True)
-        pl.save_graphic(os.path.join(pdir,self.filetrunk.format(self.get_problem()._output_step)+"."+self.fileext),raster=True,painter=False)
+        file_exts=self.fileext if isinstance(self.fileext,(list,tuple,set)) else [self.fileext]
+        for fe in file_exts:
+            pl.save_graphic(os.path.join(pdir,self.filetrunk.format(self.get_problem()._output_step)+"."+fe),raster=True,painter=False)
         
         
         

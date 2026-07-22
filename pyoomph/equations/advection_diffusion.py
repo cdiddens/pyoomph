@@ -159,7 +159,7 @@ class AdvectionDiffusionEquations(Equations):
       else:
          for fn in self.fieldnames:
             f, f_test = var_and_test(fn)
-            self.add_residual(weak(ts(self.dt_factor * partial_t(f)),f_test)-weak(ts(self.source.get(fn, 0)),f_test))
+            self.add_residual(weak(ts(self.dt_factor * partial_t(f)),f_test)-weak(ts(Expression(self.source.get(fn, 0))),f_test))
             if self.advection_by_parts=="skew":
                self.add_residual(-weak( ts(self.wind* f),grad(f_test))/2)
                self.add_residual(weak(ts(dot(self.wind, grad(f))), f_test)/2)
@@ -209,7 +209,7 @@ class AdvectionDiffusionEquations(Equations):
             eq_additions+=WeakContribution(var(k),testfunction(lagr_names[k],domain=ode_domain_name),dimensional_dx=True)
             eq_additions+=WeakContribution(var(lagr_names[k],domain=ode_domain_name),testfunction(k),dimensional_dx=True)
 
-      ode_additions=GlobalLagrangeMultiplier(**lagr_mults,set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve)
+      ode_additions=GlobalLagrangeMultiplier(**lagr_mults,set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve) #type:ignore
       problem.add_equations(ode_additions@ode_domain_name)
       return eq_additions
 
