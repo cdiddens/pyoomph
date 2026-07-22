@@ -152,7 +152,9 @@ class GeneralSolverCallback(_pyoomph.GeneralSolverCallback):
 		except:
 			raise ImportError("PyMetis is not installed, cannot perform graph partitioning for distributed meshes. Please install PyMetis via e.g. 'pip install pymetis'")
 		adj=pymetis.CSRAdjacency(xadj, adjacency_vector) #type:ignore
-		if len(vwgt)==0:
+		# nanobind converts the C++-side null vwgt pointer (no vertex weights, the common case)
+		# to None rather than an empty array, unlike pybind11 before it.
+		if vwgt is None or len(vwgt)==0:
 			vwgt=None
 		opts=pymetis.Options()
 		opts.set_defaults() #type:ignore
