@@ -31,7 +31,6 @@ from .. import _pyoomph_core as _pyoomph
 from .generic import *
 
 from ..typings import *
-from ..expressions import *
 
 
 if TYPE_CHECKING:

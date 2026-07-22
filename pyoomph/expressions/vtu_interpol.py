@@ -146,7 +146,7 @@ class VTUInterpolatorByVTK(_VTUInterpolatorBase):
         
         
         # Load the VTU
-        self.vtu_in=vtk.vtkXMLUnstructuredGridReader()
+        self.vtu_in=vtk.vtkXMLUnstructuredGridReader() #type:ignore
         self.vtu_in.SetFileName(self.vtufile)        
         self.vtu_in.Update()
         if self.vtu_in.GetOutput().GetNumberOfCells()==0:
@@ -171,9 +171,9 @@ class VTUInterpolatorByVTK(_VTUInterpolatorBase):
         self.vector_scale=1
         # Rescale it to fit in unity range
         if self.resize_internally:
-            transform=vtk.vtkTransform()
+            transform=vtk.vtkTransform() #type:ignore
             transform.Scale(1/scalef,1/scalef,1/scalef)
-            self.vtu=vtk.vtkTransformFilter()
+            self.vtu=vtk.vtkTransformFilter() #type:ignore
             self.vtu.SetTransformAllInputVectors(False)
             self.vtu.SetInputData(self.vtu_in.GetOutput())
             self.vtu.SetTransform(transform)            
@@ -186,12 +186,12 @@ class VTUInterpolatorByVTK(_VTUInterpolatorBase):
         
 
 
-        self.probe_pt=vtk.vtkPointSource()
+        self.probe_pt=vtk.vtkPointSource() #type:ignore
         self.probe_pt.SetNumberOfPoints(1)
         #eps=1e-6*(scalef if not self.resize_internally else 1)
         self.probe_pt.SetRadius(0.0)       
         # And the interpolator
-        self.interpolator=vtk.vtkProbeFilter()        
+        self.interpolator=vtk.vtkProbeFilter() #type:ignore
         self.interpolator.SetInputData(self.probe_pt.GetOutput())
         self.interpolator.SetSourceData(self.vtu.GetOutput())         
 

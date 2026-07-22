@@ -347,7 +347,7 @@ class LagrangeMultiplierMassTransferModelLiquidGas(LagrangeMultiplierMassTransfe
         if props_outside.state_of_matter!="gas":
             raise RuntimeError("This mass transfer model only works for gases as outer phase")
         self.props_inside=cast("PureLiquidProperties | MixtureLiquidProperties",self.props_inside)
-        self.props_outside=cast("PureLiquidProperties | MixtureLiquidProperties",self.props_outside)
+        self.props_outside=cast("PureGasProperties | MixtureGasProperties",self.props_outside)
 
 
     def get_mass_transfer_space(self, name:str,ieqs:InterfaceEquations) -> FiniteElementSpaceEnum:
@@ -410,7 +410,7 @@ class DifferenceDrivenMassTransferModelLiquidGas(DifferenceDrivenMassTransferMod
         if props_outside.state_of_matter!="gas":
             raise RuntimeError("This mass transfer model only works for gases as outer phase")
         self.props_inside=cast("PureLiquidProperties | MixtureLiquidProperties",self.props_inside)
-        self.props_outside=cast("PureLiquidProperties | MixtureLiquidProperties",self.props_outside)
+        self.props_outside=cast("PureGasProperties | MixtureGasProperties",self.props_outside)
 
     def identify_transfer_components(self) -> set[str]:
         possible=super(DifferenceDrivenMassTransferModelLiquidGas, self).identify_transfer_components()

@@ -2948,181 +2948,87 @@ class InterfaceEquations(Equations):
                 elif dg_space not in {"D2TB","D2","D1"}:
                     raise RuntimeError(f"Something strange here. We have the bulk mesh '{bulkmesh.get_name()}' the Lagrange multiplier field '{lagr}' is defined on unsupported space {dg_space}") 
 
-## NEW PART with DG fields
-        if True:
-            def expand_depvars(depvars:str | list[str] | tuple[str, ...],msh:"AnySpatialMesh | None"):
-                depvars=[depvars] if isinstance(depvars,str) else depvars
-                depvars_expanded=[]
-                if len(depvars)==0:
-                    return depvars_expanded
-                assert msh is not None
-                cgen=msh._codegen
-                assert cgen is not None 
-                ccode=cgen.get_code()
-                ndim = cgen.get_nodal_dimension()
-                for dv in depvars:
-                    if dv in ccode.get_nodal_field_indices().keys():
-                        depvars_expanded.append(dv)
-                    elif dv == "mesh":                    
-                        for direct in range(ndim):
-                            depvars_expanded.append("mesh_"+(["x","y","z"][direct]))
-                    elif dv == "mesh_x" or dv=="mesh_y" or dv=="mesh_z":
-                        depvars_expanded.append(dv)
-                    else:
-                        current:"AnySpatialMesh | None" = msh
-                        while current is not None:
-                            assert current._codegen is not None
-                            ceqs=cast(Equations,current._codegen.get_equations()) 
-                            if not isinstance(ceqs,Equations):
-                                #print(f"Something strange here. We have the mesh  and it does not have the expected equations."+str(ceqs)+" Looking for "+str(dv))
-                                if isinstance(current,InterfaceMesh):                                    
-                                    current = current._parent 
-                                else:
-                                    current = None
-                                continue
-                            assert isinstance(ceqs,Equations)
-                            if dv in ceqs._vectorfields.keys():
-                                vcomps = ceqs._vectorfields[dv]
-                                for vc in vcomps:
-                                    depvars_expanded.append(vc)
-                                break
-                            else:
-                                if isinstance(current,InterfaceMesh):                                    
-                                    current = current._parent 
-                                else:
-                                    current = None
+
+        def expand_depvars(depvars:str | list[str] | tuple[str, ...],msh:"AnySpatialMesh | None"):
+            depvars=[depvars] if isinstance(depvars,str) else depvars
+            depvars_expanded=[]
+            if len(depvars)==0:
                 return depvars_expanded
-            
-            depvars_expanded=expand_depvars(depvars,mesh)
-            depvars_opp=expand_depvars(opposite_interface,mesh._opposite_interface_mesh)
-            for e in mesh.elements():
-                lagr_data=e.get_field_data_list(lagr,True)
-
-
-                #print(lagr,lagr_data)
-                checkdata=[e.get_field_data_list(cd,True) for cd in depvars_expanded ]
-#                print("CHECKING LAGR",lagr,interfid,e,lagr_data);
-#               print("WTITH",depvars_expanded)
-#                print("WHICH ARE",checkdata)
-
-                opp_e=e.get_opposite_interface_element()
-                if opp_e:
-                    checkopp=[opp_e.get_field_data_list(cd,True) for cd in depvars_opp ]
-                    opp_node_index_map={opp_e.node_pt(ni):ni for ni in range(opp_e.nnode())}
+            assert msh is not None
+            cgen=msh._codegen
+            assert cgen is not None 
+            ccode=cgen.get_code()
+            ndim = cgen.get_nodal_dimension()
+            for dv in depvars:
+                if dv in ccode.get_nodal_field_indices().keys():
+                    depvars_expanded.append(dv)
+                elif dv == "mesh":                    
+                    for direct in range(ndim):
+                        depvars_expanded.append("mesh_"+(["x","y","z"][direct]))
+                elif dv == "mesh_x" or dv=="mesh_y" or dv=="mesh_z":
+                    depvars_expanded.append(dv)
                 else:
-                    checkopp=[]
-                    opp_node_index_map={}
-                for nodeind,(l_pt,ni) in enumerate(lagr_data):
-#                    print("LOOP",nodeind,l_pt,ni)
-                    if ni>=0:
-#                        print("AT",e.node_pt(nodeind).x(0),e.node_pt(nodeind).x(1))
-
-                        all_pinned=True
-                        for cd in checkdata:
-                            if cd[nodeind][1]>=0:
-                                if not cd[nodeind][0].is_pinned(cd[nodeind][1]):
-                                    all_pinned=False
-                                    break
-                                #else:
-                                #    print("PINNED",cd[nodeind][0],"AT INDEX",cd[nodeind][1],e.node_pt(nodeind).is_pinned(cd[nodeind][1]))
-                        #if all_pinned:
-                        #    print("ALL PINNED",e.get_Eulerian_midpoint())
-                        #    if e.get_Eulerian_midpoint()[0]<0.264:
-                        #        exit()
-                        if all_pinned and len(checkopp)>0:
-                            oppnode=e.opposite_node_pt(nodeind)
-                            if oppnode is not None:
-                                oppi=opp_node_index_map.get(oppnode,-1)
-                                if oppi>=0:
-                                    for cd in checkopp:
-                                        if cd[oppi][1]>=0:
-                                            if not cd[oppi][0].is_pinned(cd[oppi][1]):
-                                                all_pinned=False
-                                                break
-
-                        if all_pinned:
-                            #print("PINNING LAGR ",lagr,l_pt," at index ",ni,"since all of ",depvars_opp,"are pinned",checkopp,opp_e,opposite_interface )
-                            l_pt.pin(ni)
-                            l_pt.set_value(ni,0)
-
-            return
-## END OF NEW PART                
-        else:
-### OLD PART,  #########################
-            def get_inds_and_pos(msh:"AnySpatialMesh",dvs:Sequence[str]):
-                cgen=msh._codegen 
-                assert cgen is not None 
-                ccode=cgen.get_code()
-                nodalfields = ccode.get_nodal_field_indices()
-                inds_to_check:list[int] = []
-                pos_to_check:list[int] = []
-                for dv in dvs:
-                    if dv in nodalfields.keys():
-                        inds_to_check.append(nodalfields[dv])
-                    else:  # Check vector
-                        if dv == "mesh":
-                            ndim = cgen.get_nodal_dimension()
-                            for direct in range(ndim):
-                                pos_to_check.append(direct)
-                        elif dv =="mesh_x":
-                            pos_to_check.append(0)
-                        elif dv =="mesh_y":
-                            pos_to_check.append(1)
-                        elif dv =="mesh_z":
-                            pos_to_check.append(2)
+                    current:"AnySpatialMesh | None" = msh
+                    while current is not None:
+                        assert current._codegen is not None
+                        ceqs=cast(Equations,current._codegen.get_equations()) 
+                        if not isinstance(ceqs,Equations):
+                            #print(f"Something strange here. We have the mesh  and it does not have the expected equations."+str(ceqs)+" Looking for "+str(dv))
+                            if isinstance(current,InterfaceMesh):                                    
+                                current = current._parent 
+                            else:
+                                current = None
+                            continue
+                        assert isinstance(ceqs,Equations)
+                        if dv in ceqs._vectorfields.keys():
+                            vcomps = ceqs._vectorfields[dv]
+                            for vc in vcomps:
+                                depvars_expanded.append(vc)
+                            break
                         else:
-                            current:AnySpatialMesh | None = msh
-                            while True:
-                                assert current._codegen is not None
-                                ceqs=cast(Equations,current._codegen.get_equations()) 
-                                assert isinstance(ceqs,Equations)
-                                if dv in ceqs._vectorfields.keys():
-                                    vcomps = ceqs._vectorfields[dv]
-                                    for vc in vcomps:
-                                        inds_to_check.append(nodalfields[vc])
-                                    break
-                                else:
-                                    if isinstance(current,InterfaceMesh):                                    
-                                        current = current._parent 
-                                    else:
-                                        current = None
-                                    if current is None:
-                                        raise RuntimeError("Cannot find the variable " + str(
-                                            dv) + " to pin redundant Lagrange multipliers for " + lagr)
-                return  inds_to_check,pos_to_check
-
-
-            inds_to_check,pos_to_check=get_inds_and_pos(mesh,depvars)
-
-            if len(opposite_interface)==0:
-                if interfid>=0:
-                    for n in mesh.nodes():
-                        if all(n.is_pinned(i) for i in inds_to_check) and all(n.position_is_pinned(i) for i in pos_to_check):
-                            lind = n.additional_value_index(interfid)
-                            n.pin(lind)
-                            n.set_value(lind, 0)
-                else:
-                    for e in mesh.elements():
-                        dg_data=e.get_field_data_list(k,False)
-                        l_data=e.get_field_data_list(lagr,False)
-                        for dg,l in zip(dg_data,l_data):
-                            if dg[0].is_pinned(dg[1]):
-                                l[0].pin(l[1])
-                                l[0].set_value(l[1],0)
-
+                            if isinstance(current,InterfaceMesh):                                    
+                                current = current._parent 
+                            else:
+                                current = None
+            return depvars_expanded
+        
+        depvars_expanded=expand_depvars(depvars,mesh)
+        depvars_opp=expand_depvars(opposite_interface,mesh._opposite_interface_mesh)
+        for e in mesh.elements():
+            lagr_data=e.get_field_data_list(lagr,True)
+            checkdata=[e.get_field_data_list(cd,True) for cd in depvars_expanded ]
+            opp_e=e.get_opposite_interface_element()
+            if opp_e:
+                checkopp=[opp_e.get_field_data_list(cd,True) for cd in depvars_opp ]
+                opp_node_index_map={opp_e.node_pt(ni):ni for ni in range(opp_e.nnode())}
             else:
-                assert mesh._opposite_interface_mesh is not None
-                opp_inds_to_check, opp_pos_to_check = get_inds_and_pos(mesh._opposite_interface_mesh, opposite_interface) 
-                for ni,no in mesh.nodes_on_both_sides():
-                    if no:
-                        opp_pinned=all(no.is_pinned(i) for i in opp_inds_to_check) and all(no.position_is_pinned(i) for i in opp_pos_to_check)
-                    else:
-                        opp_pinned=True
-                    if opp_pinned and all(ni.is_pinned(i) for i in inds_to_check) and all(ni.position_is_pinned(i) for i in pos_to_check):
-                        lind = ni.additional_value_index(interfid)
-                        ni.pin(lind)
-                        ni.set_value(lind, 0)
-### END OF OLD PART,  #########################
+                checkopp=[]
+                opp_node_index_map={}
+            for nodeind,(l_pt,ni) in enumerate(lagr_data):
+                if ni>=0:
+                    all_pinned=True
+                    for cd in checkdata:
+                        if cd[nodeind][1]>=0:
+                            if not cd[nodeind][0].is_pinned(cd[nodeind][1]):
+                                all_pinned=False
+                                break                         
+                    if all_pinned and len(checkopp)>0:
+                        oppnode=e.opposite_node_pt(nodeind)
+                        if oppnode is not None:
+                            oppi=opp_node_index_map.get(oppnode,-1)
+                            if oppi>=0:
+                                for cd in checkopp:
+                                    if cd[oppi][1]>=0:
+                                        if not cd[oppi][0].is_pinned(cd[oppi][1]):
+                                            all_pinned=False
+                                            break
+
+                    if all_pinned:
+                        l_pt.pin(ni)
+                        l_pt.set_value(ni,0)
+
+
+        
 
 
 class SpatialErrorEstimator(Equations):

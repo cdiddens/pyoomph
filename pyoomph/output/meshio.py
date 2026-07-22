@@ -250,6 +250,7 @@ class _MeshFileOutput(_BaseNumpyOutput):
 		self.active=True		
 		self.operator=operator
 		self.pvdcollection:ET.Element
+		self.pvddata:ET.Element
 		self.discontinuous=discontinuous
 		self.add_eigen_to_mesh_positions=add_eigen_to_mesh_positions
 
@@ -270,7 +271,9 @@ class _MeshFileOutput(_BaseNumpyOutput):
 				self.pvdcollection = ET.SubElement(self.pvddata, "Collection")
 			else:
 				self.pvdtree=ET.parse(self.write_pvd_file)
-				self.pvddata=self.pvdtree.getroot()
+				root=self.pvdtree.getroot()
+				assert isinstance(root,ET.Element)
+				self.pvddata=root
 				cll=self.pvddata.find("Collection")
 				assert isinstance(cll,ET.Element)
 				self.pvdcollection=cll
@@ -286,7 +289,7 @@ class _MeshFileOutput(_BaseNumpyOutput):
 			pvd_entry.set("timestep",str(self.mesh.get_problem().get_current_time(dimensional=not self.nondimensional, as_float=True)))
 			pvd_entry.set("part",str(i))
 			pvd_entry.set("file",f)
-		pretty_xml(self.pvdtree.getroot(),"\t","\n")
+		pretty_xml(self.pvddata,"\t","\n")
 		self.pvdtree.write(self.write_pvd_file)
 
 	def clean_up(self):

@@ -96,11 +96,11 @@ class PyoomphAzimuthalExtrusion(VTKPythonAlgorithmBase):
         input0 = dsa.WrapDataObject(vtkDataSet.GetData(inInfo[0]))
         assert input0 is not None
 
-        to_poly=vtk.vtkDataSetSurfaceFilter()
+        to_poly=vtk.vtkDataSetSurfaceFilter() #type:ignore
         to_poly.SetInputDataObject(0,input0.VTKObject)
         to_poly.Update()
 
-        extrusion=vtk.vtkRotationalExtrusionFilter()
+        extrusion=vtk.vtkRotationalExtrusionFilter() #type:ignore
         extrusion.SetInputDataObject(0,to_poly.GetOutputDataObject(0))
         extrusion.SetRotationAxis(0,1,0)
         extrusion.SetResolution(self.nextru)        
@@ -109,14 +109,14 @@ class PyoomphAzimuthalExtrusion(VTKPythonAlgorithmBase):
         extrusion.Update()
 
         extr=extrusion.GetOutput()
-        assert isinstance(extr,vtk.vtkPolyData)
+        assert isinstance(extr,vtk.vtkPolyData) #type:ignore
         pd=extr.GetPointData()
         arr_to_index:dict[str,int]={}
         for i in range(pd.GetNumberOfArrays()):
             arr_to_index[pd.GetArrayName(i)]=i
 
         pts=extr.GetPoints()
-        assert isinstance(pts,vtk.vtkPoints)
+        assert isinstance(pts,vtk.vtkPoints) #type:ignore
         ptdata=pts.GetData()
         ptarray=vtk_to_numpy(ptdata)
         phi=numpy.arctan2(ptarray[:,2],ptarray[:,0])

@@ -29,7 +29,7 @@ from __future__ import annotations
 import os
 from . plotting import BasePlotter
 from ..typings import *
-import pyvista
+import pyvista #type:ignore
 
 if TYPE_CHECKING:
     from ..generic.problem import Problem

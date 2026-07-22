@@ -739,7 +739,7 @@ class BaseLiquidProperties(MaterialProperties):
     A base class for defining liquid materials.
     """
     state_of_matter="liquid"
-    passive_field=None
+    passive_field:str | None=None
     required_adv_diff_fields:set[str]=set()
     possible_properties:set[str]={"mass_density","dynamic_viscosity","default_surface_tension"}
     _output_properties:OutputPropertiesType={"mass_density":None,"dynamic_viscosity":None,"default_surface_tension_gas":lambda self : cast(DefaultSurfaceTensionType,self.default_surface_tension).get("gas")} #type:ignore
@@ -865,7 +865,7 @@ class BaseGasProperties(MaterialProperties):
     A base class for defining gaseous materials.
     """    
     state_of_matter="gas"
-    passive_field=None
+    passive_field:str | None=None
     required_adv_diff_fields:set[str]=set()
     possible_properties:set[str]={"mass_density","dynamic_viscosity"}
     _output_properties = {"mass_density": None, "dynamic_viscosity": None}
@@ -880,7 +880,7 @@ class BaseSolidProperties(MaterialProperties):
     A base class for defining solid materials.
     """
     state_of_matter="solid"
-    passive_field=None
+    passive_field:str | None=None
     required_adv_diff_fields:set[str]=set()
     possible_properties:set[str]={"mass_density"}
     _output_properties = {"mass_density": None}

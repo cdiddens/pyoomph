@@ -159,11 +159,11 @@ class SystemCCompiler(BaseCCompiler):
     compiler_quality=5
     def __init__(self,compile_args:list[str] | None=None):
         super(SystemCCompiler, self).__init__()
-        self.comp=distutils.ccompiler.new_compiler(verbose=1)
+        self.comp=distutils.ccompiler.new_compiler(verbose=True)
         self.comp.add_include_dir(self.get_jit_include_dir())
         self.compile_args=compile_args
         self._optimize_full_speed:bool=False
-        distutils.log.set_verbosity(2)
+        distutils.log.set_verbosity(2) #type:ignore
 
     def optimize_for_max_speed(self):
         self._optimize_full_speed=True
@@ -210,9 +210,9 @@ int main (int argc, char **argv) {
     @staticmethod
     def check_avail()->bool:
         inst=SystemCCompiler()
-        distutils.log.set_verbosity(0)
+        distutils.log.set_verbosity(0) #type:ignore
         res:bool=inst.has_function("abort",includes=["stdlib.h"])
-        distutils.log.set_verbosity(2)
+        distutils.log.set_verbosity(2) #type:ignore
         return res
 
     def toolchain_located(self)->bool | None:
@@ -231,7 +231,7 @@ int main (int argc, char **argv) {
     def compile(self, suppress_compilation:bool, suppress_code_writing:bool,quiet:bool,extra_flags:Sequence[str]) -> bool:
         if suppress_compilation:
             return True
-        distutils.log.set_verbosity(2 if not quiet else 0)
+        distutils.log.set_verbosity(2 if not quiet else 0) #type:ignore
         preargs=[]
         link_extra_postargs=[]
         if self.compile_args is None:

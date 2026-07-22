@@ -42,7 +42,8 @@ from ..typings import *
 import numpy
 
 if TYPE_CHECKING:
-    from ..generic.codegen import Equations,FiniteElementSpaceEnum
+    from ..generic.codegen import Equations
+    from ..expressions.generic import FiniteElementSpaceEnum
 
 class PlotTransformPolarToCartesian(PlotTransform):
     """

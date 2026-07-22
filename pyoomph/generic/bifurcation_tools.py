@@ -1604,7 +1604,7 @@ class NormalFormCalculator:
         if numpy.isnan(numpy.sum(res)): #type:ignore
             print("Matrix rank warning. Going for a least squares solution")
             #res= numpy.linalg.lstsq(A.toarray(),rhs,rcond=None)[0]
-            res=scipy.sparse.linalg.lsqr(A,rhs)[0]
+            res=scipy.sparse.linalg.lsqr(A,rhs)[0] #type:ignore
         return res
             
       def get_left_eigenvector(self,lamb):            

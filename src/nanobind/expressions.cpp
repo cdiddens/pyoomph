@@ -376,11 +376,6 @@ namespace pyoomph
 		return 0 + w;
 	}
 
-	static GiNaC::ex GiNaCFromDouble(const double &v)
-	{
-		return GiNaC::ex(v);
-	}
-
 }
 
 void PyReg_Expressions(nb::module_ &m)
@@ -395,8 +390,6 @@ void PyReg_Expressions(nb::module_ &m)
 		.def(nb::init<const int &>())
 		.def(nb::init<const double &>())
 		.def(nb::init<const GiNaC::ex &>())
-		.def("__init__", [](GiNaC::ex *self, const double &v)
-			 { new (self) GiNaC::ex(pyoomph::GiNaCFromDouble(v)); })
 		.def("__init__", [](GiNaC::ex *self, const std::string &v)
 			 { new (self) GiNaC::ex(pyoomph::GiNaCFromString(v)); })
 		.def("__init__", [](GiNaC::ex *self, std::vector<double> v)
@@ -418,10 +411,10 @@ void PyReg_Expressions(nb::module_ &m)
 		.def(nb::self - double())
 
 		.def(nb::self * nb::self)
-		.def(double() * nb::self)
-		.def(nb::self * double())
 		.def(int() * nb::self)
 		.def(nb::self * int())
+		.def(double() * nb::self)
+		.def(nb::self * double())
 
 		.def(nb::self / nb::self)
 		.def(int() / nb::self)
@@ -591,17 +584,11 @@ void PyReg_Expressions(nb::module_ &m)
 			 { return GiNaC::pow(lh, rh); }, nb::is_operator())
 		.def("__pow__", [](const GiNaC::ex &lh, const int &rh)
 			 { return GiNaC::pow(lh, rh); }, nb::is_operator())
-		.def("__pow__", [](const int &lh, const GiNaC::ex &rh)
-			 { return GiNaC::pow(lh, rh); }, nb::is_operator())
-		.def("__pow__", [](const double &lh, const GiNaC::ex &rh)
-			 { return GiNaC::pow(lh, rh); }, nb::is_operator())
 		.def("__pow__", [](const GiNaC::ex &lh, const double &rh)
 			 { return GiNaC::pow(lh, rh); }, nb::is_operator())
 		.def("__pow__", [](const GiNaC::ex &lh, const GiNaC::GiNaCGlobalParameterWrapper &rh)
 			 { return GiNaC::pow(lh, rh); }, nb::is_operator())
 
-		.def("__rpow__", [](const GiNaC::ex &rh, const int &lh)
-			 { return GiNaC::pow(lh, rh); }, nb::is_operator())
 		.def("__rpow__", [](const GiNaC::ex &rh, const int &lh)
 			 { return GiNaC::pow(lh, rh); }, nb::is_operator())
 		.def("__rpow__", [](const GiNaC::ex &rh, const double &lh)

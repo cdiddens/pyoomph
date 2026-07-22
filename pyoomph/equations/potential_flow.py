@@ -178,6 +178,8 @@ class _PotentialFlowFreeInterfaceBase(_PotentialFlowInterfaceEquations):
                 result=oppot[0]
                 assert isinstance(result,PotentialFlow)
                 return result
+            else:
+                return None
         else:
             return None
 

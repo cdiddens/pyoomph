@@ -183,7 +183,7 @@ class UnpinnedContactLine(GenericContactLineModel):
             raise RuntimeError("Unpinned contact line has no equilibrium contact angle set. Set it in the constructor or use the set_missing_information to pass the initial contact angle as default value in the Problem.define_problem method")
         return subexpression(self.theta_eq)
 
-    def equations_for_simple_popov_model(self,theta_act_name:str,rc_name:str)->Equations:
+    def equations_for_simple_popov_model(self,theta_act_name:str,rc_name:str)->BaseEquations:
         eqs=GlobalLagrangeMultiplier(theta_eq=var("theta_eq")-self.get_equilibrium_contact_angle_expression(None))
         theta_eq=var("theta_eq")
         theta_act=var(theta_act_name)
@@ -201,7 +201,6 @@ class UnpinnedContactLine(GenericContactLineModel):
 
             eqs+=WeakContribution(actual_cl_velo - desired_cl_velo, testfunction(theta_act)/test_scale_factor(theta_act_name)*scale_factor("temporal")/scale_factor("spatial"))
         return eqs
-        pass
 
     def define_residuals(self,dyncl:"DynamicContactLineEquations"):
         X = var("mesh")  # contact line position

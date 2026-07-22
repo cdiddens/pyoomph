@@ -422,7 +422,7 @@ class CustomMultiReturnExpression(_pyoomph.CustomMultiReturnExpression):
         nres=self.get_num_returned_scalars(nargs)
         res=numpy.array([sympy.zeros(1)[0] for _i in range(nres)])
         Jdummy=numpy.zeros((nres,nargs),dtype=object)
-        self.eval(0,arg_symbs,res,Jdummy)
+        self.eval(0,arg_symbs,res,Jdummy) #type:ignore
         for i,r in enumerate(res):
             if isinstance(r,(float,int)):
                 res[i]=sympy.Number(r)        
