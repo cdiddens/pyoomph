@@ -412,6 +412,11 @@ namespace pyoomph
 		return n->hanging_pt(hangindex);
 	}
 
+	bool BulkElementBase::node_hangs_in_space(const JITFuncSpec_Table_FiniteElement_SpaceInfo_t *space_info, unsigned l_elem) const
+	{
+		return node_pt(l_elem)->is_hanging(space_info->hangindex);
+	}
+
 	// Geometric (positional) hanging info for element-local node l_elem, or NULL if the node's
 	// position does not hang. Mirrors the argument-less oomph-lib accessors (the info_Pos slot).
 	oomph::HangInfo *BulkElementBase::hang_info_for_position(unsigned l_elem) const
@@ -871,13 +876,11 @@ namespace pyoomph
 			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info = ft->present_continuous_spaces[ispace];
 			unsigned nnode_space=eleminfo.nnode_of_space[space_info->space_index];
 			const std::vector<unsigned> & space_node_to_elem_node=space_node_to_elem_node_map[space_info->space_index];
-			int hangindex=space_info->hangindex;
 			for (unsigned l = 0; l < nnode_space; l++)
 			{
 				const unsigned l_elem=space_node_to_elem_node[l];
-				pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(this->node_pt(l_elem));
 				unsigned ntstorage = node_pt(l_elem)->ntstorage();
-				if (n->is_hanging(hangindex))
+				if (this->node_hangs_in_space(space_info, l_elem))
 				{
 					for (unsigned f = 0; f < space_info->numfields_basebulk; f++)
 					{

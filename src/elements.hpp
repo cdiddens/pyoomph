@@ -282,6 +282,9 @@ namespace pyoomph
     // HangInfo pointers (geometric / C2(TB) / C1(TB), plus interface/constraint variants) without
     // having to touch the assembly call sites that go through here.
     oomph::HangInfo *hang_info_for_space(const JITFuncSpec_Table_FiniteElement_SpaceInfo_t *space_info, unsigned l_elem) const;
+    // Status-only companion of hang_info_for_space: does element-local node l_elem hang in this
+    // space? Equivalent to hang_info_for_space(...) != NULL but avoids implying a HangInfo is wanted.
+    bool node_hangs_in_space(const JITFuncSpec_Table_FiniteElement_SpaceInfo_t *space_info, unsigned l_elem) const;
     // Geometric (positional) hanging for the given element-local node, i.e. the info_Pos slot.
     oomph::HangInfo *hang_info_for_position(unsigned l_elem) const;
     // Sets up the local-equation-number bookkeeping for hanging nodes on the Lagrangian/Eulerian
