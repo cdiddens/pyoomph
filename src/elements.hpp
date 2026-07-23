@@ -306,6 +306,13 @@ namespace pyoomph
     void flatten_hang_for_value(oomph::Node *n, unsigned v, double weight, std::map<int, double> &out, int depth);
     // Position (geometric-hang) counterpart of flatten_hang_for_value for coordinate index i.
     void flatten_hang_for_position(oomph::Node *n, unsigned i, double weight, std::map<int, double> &out, int depth);
+    // Value counterparts of the flatten_* routines used by interpolate_hang_values: instead of local
+    // equation numbers they return the interpolated *value* (resp. coordinate) of node n at time level
+    // t, by recursing (constrained -> C1 corners; hanging -> masters) down to real free leaf dofs whose
+    // raw stored values are always current. This makes the pushed-back hanging/dummy/constrained
+    // storage order-independent and consistent with the hangbuffer flattening.
+    double flattened_value(oomph::Node *n, unsigned v, unsigned t, int depth);
+    double flattened_position(oomph::Node *n, unsigned i, unsigned t, int depth);
 
     // Sets up the local-equation-number bookkeeping for hanging nodes on the Lagrangian/Eulerian
     // position degrees of freedom (as opposed to field values), needed on refined (non-conforming)

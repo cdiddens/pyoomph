@@ -521,6 +521,54 @@ namespace pyoomph
 			out[le] += weight;
 	}
 
+	double BulkElementBase::flattened_value(oomph::Node *n, unsigned v, unsigned t, int depth)
+	{
+		if (depth > 32)
+			throw_runtime_error("flattened_value: recursion too deep - cyclic hang/constraint chain?");
+		Node *pn = dynamic_cast<Node *>(n);
+		if (pn && !pn->c1_constraint_corners.empty() && node_is_c1_constrained_for_value(pn, v))
+		{
+			double val = 0.0;
+			for (const auto &cw : pn->c1_constraint_corners)
+				val += cw.second * flattened_value(cw.first, v, t, depth + 1);
+			return val;
+		}
+		if (n->is_hanging(v))
+		{
+			oomph::HangInfo *h = n->hanging_pt(v);
+			const unsigned nm = h->nmaster();
+			double val = 0.0;
+			for (unsigned m = 0; m < nm; m++)
+				val += h->master_weight(m) * flattened_value(h->master_node_pt(m), v, t, depth + 1);
+			return val;
+		}
+		return n->raw_value(t, v); // real free leaf: its stored value is the current solution
+	}
+
+	double BulkElementBase::flattened_position(oomph::Node *n, unsigned i, unsigned t, int depth)
+	{
+		if (depth > 32)
+			throw_runtime_error("flattened_position: recursion too deep - cyclic hang/constraint chain?");
+		Node *pn = dynamic_cast<Node *>(n);
+		if (pn && !pn->c1_constraint_corners.empty() && node_is_c1_constrained_for_position(pn, i))
+		{
+			double val = 0.0;
+			for (const auto &cw : pn->c1_constraint_corners)
+				val += cw.second * flattened_position(cw.first, i, t, depth + 1);
+			return val;
+		}
+		if (n->is_hanging())
+		{
+			oomph::HangInfo *h = n->hanging_pt();
+			const unsigned nm = h->nmaster();
+			double val = 0.0;
+			for (unsigned m = 0; m < nm; m++)
+				val += h->master_weight(m) * flattened_position(h->master_node_pt(m), i, t, depth + 1);
+			return val;
+		}
+		return n->x(t, i); // real free leaf
+	}
+
 	// Write a flattened (local_eqn -> weight) map into a single hangbuffer entry. Near-zero weights are
 	// dropped to keep the master list within the fixed MAX_HANG capacity of the JIT buffer.
 	static void write_flattened_hangbuffer(JITHangInfo_t &hb, const std::map<int, double> &out)
@@ -783,156 +831,69 @@ namespace pyoomph
 	void BulkElementBase::interpolate_hang_values()
 	{
 
-		// First positional hanging
+		auto * ft = codeinst->get_func_table();
+
+		// Positions: geometrically hanging nodes, and nodes whose position was locally reduced to C1
+		// (ConstrainPositionsToC1Space). Both are flattened down to real free leaf dofs, so the pushed
+		// value is order-independent (leaves always hold current data) and consistent with the hangbuffer.
+		// Only the current position is pushed, matching the previous behaviour.
 		for (unsigned l = 0; l < this->nnode(); l++)
 		{
-			pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(this->node_pt(l));
-			if (n->is_hanging())
+			oomph::Node *n = node_pt(l);
+			for (unsigned i = 0; i < n->ndim(); i++)
 			{
-				for (unsigned i = 0; i < n->ndim(); i++)
-				{					
-					n->x(i) = n->position(i);  // position() considers the hanging
-				}
+				if (n->is_hanging() || this->node_is_c1_constrained_for_position(n, i))
+					n->x(i) = this->flattened_position(n, i, 0, 0);
 			}
 		}
 
-		// Then going over the basebulk fields of all continuous spaces
-		auto * ft=codeinst->get_func_table();
-		const std::vector<std::vector<unsigned>> & space_node_to_elem_node_map=this->get_nodal_space_index_to_element_index_map();
-		const std::vector<std::vector<std::vector<unsigned>>> & dummy_value_interpolation_map=this->get_dummy_value_interpolation_map();
-		for (unsigned ispace=0;ispace<ft->num_present_continuous_spaces;ispace++)
+		// Base-bulk field values of every continuous space: a node that is genuinely hanging in a value,
+		// or whose value was locally reduced to C1 (ConstrainFieldsToC1Space), gets the flattened value
+		// pushed into its raw storage for every history level.
+		const std::vector<std::vector<unsigned>> & space_node_to_elem_node_map = this->get_nodal_space_index_to_element_index_map();
+		const std::vector<std::vector<std::vector<unsigned>>> & dummy_value_interpolation_map = this->get_dummy_value_interpolation_map();
+		for (unsigned ispace = 0; ispace < ft->num_present_continuous_spaces; ispace++)
 		{
 			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info = ft->present_continuous_spaces[ispace];
-			unsigned nnode_space=eleminfo.nnode_of_space[space_info->space_index];
-			const std::vector<unsigned> & space_node_to_elem_node=space_node_to_elem_node_map[space_info->space_index];
+			const unsigned nnode_space = eleminfo.nnode_of_space[space_info->space_index];
+			const std::vector<unsigned> & space_node_to_elem_node = space_node_to_elem_node_map[space_info->space_index];
 			for (unsigned l = 0; l < nnode_space; l++)
 			{
-				const unsigned l_elem=space_node_to_elem_node[l];
-				unsigned ntstorage = node_pt(l_elem)->ntstorage();
-				if (this->node_hangs_in_space(space_info, l_elem))
+				const unsigned l_elem = space_node_to_elem_node[l];
+				oomph::Node *n = node_pt(l_elem);
+				const unsigned ntstorage = n->ntstorage();
+				for (unsigned f = 0; f < space_info->numfields_basebulk; f++)
 				{
-					for (unsigned f = 0; f < space_info->numfields_basebulk; f++)
+					const unsigned v = space_info->nodal_offset_basebulk + f;
+					if (n->is_hanging(v) || this->node_is_c1_constrained_for_value(n, v))
 					{
 						for (unsigned t = 0; t < ntstorage; t++)
-						{
-							node_pt(l_elem)->value_pt(space_info->nodal_offset_basebulk+f)[t] = node_pt(l_elem)->value(t, space_info->nodal_offset_basebulk+f);
-						}						
+							n->value_pt(v)[t] = this->flattened_value(n, v, t, 0);
 					}
 				}
 			}
-			// If you are e.g. on a C2 element, C1 fields have dummy values on the C2 only nodes. These are filled now by averaging the values of the C1 nodes. This is needed for hanging node interpolation, since the C2 nodes are not hanging, but the C1 nodes are.
-			const std::vector<std::vector<unsigned>> & dummy_value_interpolation=dummy_value_interpolation_map[space_info->space_index];
-			if (dummy_value_interpolation.size()>0)
+			// Dummy values (e.g. a C1 field stored on C2-only nodes): the average of the C1 corner nodes,
+			// each flattened so the average stays correct when a corner itself hangs or is constrained.
+			const std::vector<std::vector<unsigned>> & dummy_value_interpolation = dummy_value_interpolation_map[space_info->space_index];
+			for (const std::vector<unsigned> & interp : dummy_value_interpolation)
 			{
-				unsigned ntstorage = node_pt(0)->ntstorage();
-				for (const std::vector<unsigned> & interp : dummy_value_interpolation)
-				{															
-					for (unsigned f = 0; f < space_info->numfields_basebulk; f++)
-					{
-						for (unsigned t = 0; t < ntstorage; t++)
-						{
-							double val=0.0;
-							for (unsigned m=1;m<interp.size();m++)
-							{								
-								val+=node_pt(interp[m])->value(t, space_info->nodal_offset_basebulk+f);
-							}
-							node_pt(interp[0])->value_pt(space_info->nodal_offset_basebulk+f)[t] = val/(double)(interp.size()-1.0);
-						}						
-					}
-				}
-			}
-		}
-
-		// User-added additional dof constraints (see NodeWithFieldIndicesBase::add_additional_dof_constraint):
-		// these nodes are not genuinely hanging (they're plain pinned dofs, see pin_dummy_values), so the
-		// loops above never touch them; here we push the same C1-corner-averaged value that
-		// pin_dummy_values/fill_additional_hang_buffer_data already use as their equation-assembly target,
-		// so the raw storage stays consistent for output/restart and for further averaging on other nodes.
-		if (has_additional_dof_constraints)
-		{
-			const std::vector<std::vector<unsigned>> &c1_dummy_map = this->get_dummy_value_interpolation_map()[SPACE_INDEX_C1];
-			auto get_c1_masters = [&c1_dummy_map](unsigned l_elem) -> const std::vector<unsigned> *
-			{
-				for (const std::vector<unsigned> &entry : c1_dummy_map)
+				if (interp.size() < 2) continue;
+				const unsigned nmaster = interp.size() - 1;
+				oomph::Node *tgt = node_pt(interp[0]);
+				const unsigned ntstorage = tgt->ntstorage();
+				for (unsigned f = 0; f < space_info->numfields_basebulk; f++)
 				{
-					if (entry[0] == l_elem)
-						return &entry;
-				}
-				return NULL;
-			};
-			bool has_C1_hanging= ft->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk>0 || ft->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk>0;
-
-			for (unsigned int l_elem = 0; l_elem < this->nnode(); l_elem++)
-			{
-				pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(node_pt(l_elem));
-				bool hangs_on_C1 = has_C1_hanging && n->is_hanging(ft->continuous_spaces[SPACE_INDEX_C1].hangindex);
-				for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info != NULL; info = info->next)
-				{
-					if (info->mode == CONTINUOUS_BASE_DOF_CONSTRAIN_TO_C1)
+					const unsigned v = space_info->nodal_offset_basebulk + f;
+					for (unsigned t = 0; t < ntstorage; t++)
 					{
-						unsigned ntstorage = n->ntstorage();
-						if (hangs_on_C1)
-						{
-							// Genuinely hanging on the C1 space, not a C1-corner-averaged dummy node -> use the real hanging masters/weights instead of a plain average
-							oomph::HangInfo *hang_info_pt = n->hanging_pt(ft->continuous_spaces[SPACE_INDEX_C1].hangindex);
-							for (unsigned t = 0; t < ntstorage; t++)
-							{
-								double val = 0.0;
-								for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
-								{
-									val += hang_info_pt->master_weight(m) * hang_info_pt->master_node_pt(m)->value(t, info->index);
-								}
-								n->value_pt(info->index)[t] = val;
-							}
-							continue;
-						}
-						const std::vector<unsigned> *entry = get_c1_masters(l_elem);
-						if (!entry)
-						{
-							throw_runtime_error("A base dof constrained to C1 is only allowed on nodes which do not belong to the C1 space");
-						}
-						unsigned nmaster = entry->size() - 1;
-						for (unsigned t = 0; t < ntstorage; t++)
-						{
-							double val = 0.0;
-							for (unsigned m = 1; m < entry->size(); m++)
-							{
-								val += node_pt((*entry)[m])->value(t, info->index);
-							}
-							n->value_pt(info->index)[t] = val / (double)nmaster;
-						}
-					}
-					else if (info->mode == POSITION_CONSTRAIN_TO_C1)
-					{
-						if (hangs_on_C1)
-						{
-							// Genuinely hanging on the C1 space, not a C1-corner-averaged dummy node -> use the real hanging masters/weights instead of a plain average
-							oomph::HangInfo *hang_info_pt = n->hanging_pt(ft->continuous_spaces[SPACE_INDEX_C1].hangindex);
-							double val = 0.0;
-							for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
-							{
-								val += hang_info_pt->master_weight(m) * dynamic_cast<pyoomph::Node *>(hang_info_pt->master_node_pt(m))->x(info->index);
-							}
-							n->x(info->index) = val;
-							continue;
-						}
-						const std::vector<unsigned> *entry = get_c1_masters(l_elem);
-						if (!entry)
-						{
-							throw_runtime_error("A position dof constrained to C1 is only allowed on nodes which do not belong to the C1 space");
-						}
-						unsigned nmaster = entry->size() - 1;
 						double val = 0.0;
-						for (unsigned m = 1; m < entry->size(); m++)
-						{
-							val += dynamic_cast<pyoomph::Node *>(node_pt((*entry)[m]))->x(info->index);
-						}
-						n->x(info->index) = val / (double)nmaster;
+						for (unsigned m = 1; m < interp.size(); m++)
+							val += this->flattened_value(node_pt(interp[m]), v, t, 0);
+						tgt->value_pt(v)[t] = val / (double)nmaster;
 					}
 				}
 			}
 		}
-
 	}
 
 	// Looks up field "name" across all continuous interpolation spaces (both ordinary base-bulk
