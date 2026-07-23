@@ -895,6 +895,10 @@ class BaseEquations(_pyoomph.Equations):
             master._residuals_for_tex[dn] = []
         master._residuals_for_tex[dn].append(expr)
         cg = master._assert_codegen()
+        # Render the "as entered" (still-held grad/div/dot/...) snapshot before expanding it below - this is
+        # the only place this compact, unexpanded form is ever seen, so it must be captured here.
+        cg.render_expression_to_latex({"typ": "as_entered_residual", "destination": dn}, expr)
+        expr = _pyoomph.GiNaC_expand_held_calc_ops(expr)
         contributions = {dn: expr}
         all_mappings: list[Callable[[str, Expression], Expression | dict[str, Expression]]] = (
             cg.get_problem()._residual_mapping_functions + master._residual_mapping_functions  # type:ignore
@@ -916,8 +920,17 @@ class BaseEquations(_pyoomph.Equations):
             if dest is not None:
                 cg._activate_residual(dest)
             try:
-                #print("adding residual", expression, dest)
-                cg._add_residual(expression, False)
+                # cg._add_residual() does its own internal field/testfunction placeholder resolution and
+                # re-triggers grad/div/dot's real (eager) evaluation on the now-resolved arguments - it must
+                # see the capture flag off regardless of what it was set to around the surrounding
+                # define_residuals() call, since add_residual() can be (and commonly is) invoked directly
+                # from inside a define_residuals() body, nested within that outer flag-on window.
+                prev_capture_flag = _pyoomph.get_capture_held_calc_ops()
+                _pyoomph.set_capture_held_calc_ops(False)
+                try:
+                    cg._add_residual(expression, False)
+                finally:
+                    _pyoomph.set_capture_held_calc_ops(prev_capture_flag)
             except Exception as e:
                 self.add_exception_info(e)
             cg._activate_residual("")
@@ -956,7 +969,7 @@ class BaseEquations(_pyoomph.Equations):
                     raise RuntimeError("The test function scale for '"+str(n)+"' on domain '"+cg.get_full_name()+"' is not a simple dimensional number, but:\n    "+str(scal)+"\n   it expands to: "+str(scal_expa)+"\n.") 
 
     def _define_element(self):
-        
+
 
         self._setup_combined_element()
         master = self._get_combined_element()
@@ -966,7 +979,16 @@ class BaseEquations(_pyoomph.Equations):
 
 
 #            raise RuntimeError("Transfer fields here")
-        res=master.define_residuals()
+        # While define_residuals() runs, grad/div/directional_derivative/dot/double_dot/contract construct a
+        # lazily-held leaf instead of expanding immediately, so that add_residual() (below) can capture the
+        # compact "as entered" weak form before expanding it (via GiNaC_expand_held_calc_ops) into the exact
+        # same form eager evaluation would have produced - which is what everything else (Jacobian, code
+        # generation) then operates on. Scoped narrowly to this one call so nothing else is affected.
+        _pyoomph.set_capture_held_calc_ops(True)
+        try:
+            res=master.define_residuals()
+        finally:
+            _pyoomph.set_capture_held_calc_ops(False)
         if res is not None:
             master.add_residual(res)
         for d,add_res in master._additional_residuals.items():

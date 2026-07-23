@@ -2560,7 +2560,7 @@ namespace pyoomph
 					}
 					if (for_code->latex_printer)
 					{
-						std::map<std::string, std::string> latexinfo = {{"typ", "final_residual"}, {"test_name", test_name}};
+						std::map<std::string, std::string> latexinfo = {{"typ", "final_residual"}, {"test_name", test_name}, {"destination", for_code->get_current_residual_name()}};
 						for_code->latex_printer->print(latexinfo, var_part, csrc_opts);
 					}
 					oss << ", " << hang_info << "," << l_test << ")" << std::endl;
@@ -2580,6 +2580,11 @@ namespace pyoomph
 					if (for_code->is_current_residual_assembly_ignored())
 					{
 						oss << std::endl << "*/" << std::endl;
+					}
+					if (for_code->latex_printer)
+					{
+						std::map<std::string, std::string> latexinfo = {{"typ", "final_residual"}, {"test_name", test_name}, {"destination", for_code->get_current_residual_name()}};
+						for_code->latex_printer->print(latexinfo, var_part, csrc_opts);
 					}
 					oss << ")" << std::endl;
 					oss << indent << "      ADD_TO_RESIDUAL()" << std::endl;
@@ -8471,6 +8476,33 @@ namespace GiNaC
 				throw_runtime_error("No code supplied");
 			}
 		}
+		else if (GiNaC::is_a<print_latex_FEM>(c))
+		{
+			const auto &femprint = dynamic_cast<const print_latex_FEM &>(c);
+			if (femprint.FEM_opts->for_code && femprint.FEM_opts->for_code->latex_printer)
+			{
+				auto *se = femprint.FEM_opts->for_code->resolve_subexpression(get_struct().expr);
+				if (!se)
+					throw_runtime_error("Cannot resolve subexpressions");
+				std::string cvarname = se->get_cvar().get_name();
+
+				std::map<std::string, std::string> texinfo;
+				texinfo["typ"] = "subexpression";
+				texinfo["cvar"] = cvarname;
+				c.s << femprint.FEM_opts->for_code->latex_printer->_get_LaTeX_expression(texinfo, femprint.FEM_opts->for_code);
+
+				// Side-effect: (re-)register the full definition of this subexpression. The Python
+				// side deduplicates by cvar, so repeated encounters of the same subexpression across
+				// many residuals just re-render (and overwrite) the same definition entry.
+				std::map<std::string, std::string> definfo;
+				definfo["typ"] = "subexpression_definition";
+				definfo["cvar"] = cvarname;
+				femprint.FEM_opts->for_code->latex_printer->print(definfo, se->get_expression(), *femprint.FEM_opts);
+				return;
+			}
+			else
+				c.s << "<SUBEXPRESSION>";
+		}
 		else
 			c.s << "<SUBEXPRESSION: " << get_struct().expr << ">";
 	}
@@ -8657,6 +8689,41 @@ namespace GiNaC
 				throw_runtime_error("No code supplied");
 			}
 		}
+		else if (GiNaC::is_a<print_latex_FEM>(c))
+		{
+			const auto &femprint = dynamic_cast<const print_latex_FEM &>(c);
+			if (femprint.FEM_opts->for_code && femprint.FEM_opts->for_code->latex_printer)
+			{
+				int index = femprint.FEM_opts->for_code->resolve_multi_return_call(sp.invok);
+				std::string id_name = "unknown multi-ret cb";
+				if (index >= 0)
+				{
+					pyoomph::CustomMultiReturnExpressionBase *func = GiNaC::ex_to<GiNaC::GiNaCCustomMultiReturnExpressionWrapper>(femprint.FEM_opts->for_code->multi_return_calls[index].op(0)).get_struct().cme;
+					if (func)
+						id_name = func->get_id_name();
+				}
+				GiNaC::lst args = GiNaC::ex_to<GiNaC::lst>(sp.invok.op(1));
+				std::ostringstream argsoss;
+				for (unsigned int i = 0; i < args.nops(); i++)
+				{
+					if (i)
+						argsoss << ", ";
+					args.op(i).eval().print(GiNaC::print_latex_FEM(argsoss, femprint.FEM_opts));
+				}
+				std::map<std::string, std::string> texinfo;
+				texinfo["typ"] = "multiret_callback";
+				texinfo["index"] = std::to_string(index);
+				texinfo["id_name"] = id_name;
+				texinfo["retindex"] = std::to_string(sp.retindex);
+				texinfo["nargs"] = std::to_string(args.nops());
+				texinfo["args"] = argsoss.str();
+				texinfo["derived_by_arg"] = (sp.derived_by_arg < 0 ? "none" : std::to_string(sp.derived_by_arg));
+				c.s << femprint.FEM_opts->for_code->latex_printer->_get_LaTeX_expression(texinfo, femprint.FEM_opts->for_code);
+				return;
+			}
+			else
+				c.s << "<MULTIRET_CB>";
+		}
 		else
 		{
 			if (sp.derived_by_arg < 0)
@@ -8763,6 +8830,17 @@ namespace GiNaC
 						{*/
 			c.s << "nodal_delta_sym";
 			//			}
+		}
+		else if (GiNaC::is_a<print_latex_FEM>(c))
+		{
+			const auto &femprint = dynamic_cast<const print_latex_FEM &>(c);
+			if (femprint.FEM_opts->for_code && femprint.FEM_opts->for_code->latex_printer)
+			{
+				std::map<std::string, std::string> texinfo = {{"typ", "nodal_delta_symbol"}};
+				c.s << femprint.FEM_opts->for_code->latex_printer->_get_LaTeX_expression(texinfo, femprint.FEM_opts->for_code);
+			}
+			else
+				c.s << "<Nodal Delta>";
 		}
 		else
 		{
@@ -9134,6 +9212,21 @@ namespace GiNaC
 				{
 					c.s << prefix << "d2_normal_d2coord[" << sp.get_direction() << "][l_shape][" << sp.get_derived_direction() << "][l_shape2][" << sp.get_derived_direction2() << "]";
 				}
+				return;
+			}
+		}
+		else if (GiNaC::is_a<print_latex_FEM>(c))
+		{
+			const auto &femprint = dynamic_cast<const print_latex_FEM &>(c);
+			if (femprint.FEM_opts->for_code && femprint.FEM_opts->for_code->latex_printer)
+			{
+				std::map<std::string, std::string> texinfo;
+				texinfo["typ"] = "normal_symbol";
+				texinfo["direction"] = std::to_string(sp.get_direction());
+				texinfo["derived_in_direction"] = (sp.get_derived_direction() == -1 ? "none" : std::to_string(sp.get_derived_direction()));
+				texinfo["derived_in_direction2"] = (sp.get_derived_direction2() == -1 ? "none" : std::to_string(sp.get_derived_direction2()));
+				texinfo["domain"] = const_cast<pyoomph::FiniteElementCode *>(sp.get_code())->get_domain_name();
+				c.s << femprint.FEM_opts->for_code->latex_printer->_get_LaTeX_expression(texinfo, femprint.FEM_opts->for_code);
 				return;
 			}
 		}

@@ -639,7 +639,8 @@ class Problem(_pyoomph.Problem):
         self.plotter:list[MatplotlibPlotter] | MatplotlibPlotter | None=None
         self.plot_in_dedicated_process:bool=False
         self._plotting_process:subprocess.Popen | None=None
-        self.latex_printer:"LaTeXPrinter | None"=None
+        from ..output.latex import LaTeXPrinter as _LaTeXPrinter
+        self.latex_printer:"LaTeXPrinter | None"=_LaTeXPrinter()
 
         self.write_states:bool=True
         self.states_compression_level:int | None=6
@@ -2840,8 +2841,7 @@ class Problem(_pyoomph.Problem):
             infofile.write(self._equation_system.numerical_factors_to_string())
             infofile.close()
 
-        if self.latex_printer is not None:
-#            raise RuntimeError("LATEX PRINTER")
+        if self.latex_printer is not None and get_mpi_rank()==0:
             self.latex_printer.write_to_file(os.path.join(self.get_output_directory(), "system_info.tex"))
 
 

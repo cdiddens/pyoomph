@@ -198,6 +198,124 @@ namespace GiNaC
 		return (*this) * GiNaC::diff(this->get_struct().arg, s);
 	}
 
+	// Renders a single (already resolved) sub-expression to LaTeX using the same print_FEM_options as the
+	// enclosing held-op node, for the "arg"/"a"/"b"/"d" fields passed to the LaTeX handler.
+	static std::string render_sub_latex(const GiNaC::ex &sub, print_FEM_options *opts)
+	{
+		std::ostringstream oss;
+		sub.print(GiNaC::print_latex_FEM(oss, opts));
+		return oss.str();
+	}
+
+	// A held grad()/div() leaf must never reach C code generation - add_residual() always calls
+	// expand_held_calc_ops() before the residual is used for anything else - so print_csrc_FEM here is purely
+	// defensive. print_latex_FEM renders the compact "as entered" notation via the Python LaTeXPrinter.
+	template <>
+	void GiNaCHeldGradOrDiv::print(const print_context &c, unsigned) const
+	{
+		const auto &sp = get_struct();
+		if (GiNaC::is_a<print_csrc_FEM>(c))
+		{
+			throw_runtime_error("A held grad()/div() leaf reached C code generation without being expanded first - this is a pyoomph bug, please report it.");
+		}
+		else if (GiNaC::is_a<print_latex_FEM>(c))
+		{
+			const auto &femprint = dynamic_cast<const print_latex_FEM &>(c);
+			if (femprint.FEM_opts->for_code && femprint.FEM_opts->for_code->latex_printer)
+			{
+				std::map<std::string, std::string> texinfo;
+				texinfo["typ"] = sp.is_div ? "held_div" : "held_grad";
+				texinfo["arg"] = render_sub_latex(sp.f, femprint.FEM_opts);
+				c.s << femprint.FEM_opts->for_code->latex_printer->_get_LaTeX_expression(texinfo, femprint.FEM_opts->for_code);
+				return;
+			}
+			c.s << (sp.is_div ? "<div " : "<grad ") << sp.f << ">";
+		}
+		else
+		{
+			c.s << (sp.is_div ? "<HELD DIV: " : "<HELD GRAD: ") << sp.f << ">";
+		}
+	}
+
+	// Defensive only: expand_held_calc_ops() always runs before Jacobian/Hessian differentiation ever sees a
+	// held leaf in normal operation, so this should never actually be invoked.
+	template <>
+	GiNaC::ex GiNaCHeldGradOrDiv::derivative(const GiNaC::symbol &s) const
+	{
+		return GiNaC::diff(pyoomph::expressions::expand_held_calc_ops(*this), s);
+	}
+
+	template <>
+	void GiNaCHeldDirectionalDerivative::print(const print_context &c, unsigned) const
+	{
+		const auto &sp = get_struct();
+		if (GiNaC::is_a<print_csrc_FEM>(c))
+		{
+			throw_runtime_error("A held directional_derivative() leaf reached C code generation without being expanded first - this is a pyoomph bug, please report it.");
+		}
+		else if (GiNaC::is_a<print_latex_FEM>(c))
+		{
+			const auto &femprint = dynamic_cast<const print_latex_FEM &>(c);
+			if (femprint.FEM_opts->for_code && femprint.FEM_opts->for_code->latex_printer)
+			{
+				std::map<std::string, std::string> texinfo;
+				texinfo["typ"] = "held_directional_derivative";
+				texinfo["arg"] = render_sub_latex(sp.f, femprint.FEM_opts);
+				texinfo["direction"] = render_sub_latex(sp.d, femprint.FEM_opts);
+				c.s << femprint.FEM_opts->for_code->latex_printer->_get_LaTeX_expression(texinfo, femprint.FEM_opts->for_code);
+				return;
+			}
+			c.s << "<directional_derivative " << sp.f << ", " << sp.d << ">";
+		}
+		else
+		{
+			c.s << "<HELD DIRECTIONAL_DERIVATIVE: " << sp.f << ", " << sp.d << ">";
+		}
+	}
+
+	template <>
+	GiNaC::ex GiNaCHeldDirectionalDerivative::derivative(const GiNaC::symbol &s) const
+	{
+		return GiNaC::diff(pyoomph::expressions::expand_held_calc_ops(*this), s);
+	}
+
+	template <>
+	void GiNaCHeldBinaryCalcOp::print(const print_context &c, unsigned) const
+	{
+		const auto &sp = get_struct();
+		static const char *typenames[3] = {"held_dot", "held_double_dot", "held_contract"};
+		static const char *debugnames[3] = {"DOT", "DOUBLE_DOT", "CONTRACT"};
+		int idx = static_cast<int>(sp.optype);
+		if (GiNaC::is_a<print_csrc_FEM>(c))
+		{
+			throw_runtime_error(std::string("A held ") + debugnames[idx] + "() leaf reached C code generation without being expanded first - this is a pyoomph bug, please report it.");
+		}
+		else if (GiNaC::is_a<print_latex_FEM>(c))
+		{
+			const auto &femprint = dynamic_cast<const print_latex_FEM &>(c);
+			if (femprint.FEM_opts->for_code && femprint.FEM_opts->for_code->latex_printer)
+			{
+				std::map<std::string, std::string> texinfo;
+				texinfo["typ"] = typenames[idx];
+				texinfo["a"] = render_sub_latex(sp.a, femprint.FEM_opts);
+				texinfo["b"] = render_sub_latex(sp.b, femprint.FEM_opts);
+				c.s << femprint.FEM_opts->for_code->latex_printer->_get_LaTeX_expression(texinfo, femprint.FEM_opts->for_code);
+				return;
+			}
+			c.s << "<" << debugnames[idx] << " " << sp.a << ", " << sp.b << ">";
+		}
+		else
+		{
+			c.s << "<HELD " << debugnames[idx] << ": " << sp.a << ", " << sp.b << ">";
+		}
+	}
+
+	template <>
+	GiNaC::ex GiNaCHeldBinaryCalcOp::derivative(const GiNaC::symbol &s) const
+	{
+		return GiNaC::diff(pyoomph::expressions::expand_held_calc_ops(*this), s);
+	}
+
 }
 
 namespace pyoomph
@@ -349,6 +467,63 @@ namespace pyoomph
 		return (lhs.arg.compare(rhs.arg) < 0) || (lhs.arg.compare(rhs.arg) == 0 && (lhs.dual < rhs.dual));
 	}
 
+	bool operator==(const HeldGradOrDiv &lhs, const HeldGradOrDiv &rhs)
+	{
+		return lhs.f.is_equal(rhs.f) && lhs.coordsys_ex.is_equal(rhs.coordsys_ex) && lhs.ndim == rhs.ndim && lhs.edim == rhs.edim && lhs.flags == rhs.flags && lhs.is_div == rhs.is_div;
+	}
+	bool operator<(const HeldGradOrDiv &lhs, const HeldGradOrDiv &rhs)
+	{
+		if (lhs.is_div != rhs.is_div)
+			return lhs.is_div < rhs.is_div;
+		int c = lhs.f.compare(rhs.f);
+		if (c != 0)
+			return c < 0;
+		c = lhs.coordsys_ex.compare(rhs.coordsys_ex);
+		if (c != 0)
+			return c < 0;
+		if (lhs.ndim != rhs.ndim)
+			return lhs.ndim < rhs.ndim;
+		if (lhs.edim != rhs.edim)
+			return lhs.edim < rhs.edim;
+		return lhs.flags < rhs.flags;
+	}
+
+	bool operator==(const HeldDirectionalDerivative &lhs, const HeldDirectionalDerivative &rhs)
+	{
+		return lhs.f.is_equal(rhs.f) && lhs.d.is_equal(rhs.d) && lhs.coordsys_ex.is_equal(rhs.coordsys_ex) && lhs.ndim == rhs.ndim && lhs.edim == rhs.edim && lhs.flags == rhs.flags;
+	}
+	bool operator<(const HeldDirectionalDerivative &lhs, const HeldDirectionalDerivative &rhs)
+	{
+		int c = lhs.f.compare(rhs.f);
+		if (c != 0)
+			return c < 0;
+		c = lhs.d.compare(rhs.d);
+		if (c != 0)
+			return c < 0;
+		c = lhs.coordsys_ex.compare(rhs.coordsys_ex);
+		if (c != 0)
+			return c < 0;
+		if (lhs.ndim != rhs.ndim)
+			return lhs.ndim < rhs.ndim;
+		if (lhs.edim != rhs.edim)
+			return lhs.edim < rhs.edim;
+		return lhs.flags < rhs.flags;
+	}
+
+	bool operator==(const HeldBinaryCalcOp &lhs, const HeldBinaryCalcOp &rhs)
+	{
+		return lhs.optype == rhs.optype && lhs.a.is_equal(rhs.a) && lhs.b.is_equal(rhs.b);
+	}
+	bool operator<(const HeldBinaryCalcOp &lhs, const HeldBinaryCalcOp &rhs)
+	{
+		if (lhs.optype != rhs.optype)
+			return lhs.optype < rhs.optype;
+		int c = lhs.a.compare(rhs.a);
+		if (c != 0)
+			return c < 0;
+		return lhs.b.compare(rhs.b) < 0;
+	}
+
 	std::map<CustomMathExpressionBase *, int, CustomMathExpressionBasePtrLess> CustomMathExpressionBase::code_map; // Mapping for indices
 	unsigned CustomMathExpressionBase::unique_counter = 0;
 
@@ -360,35 +535,100 @@ namespace pyoomph
 	namespace expressions
 	{
 
+		bool __capture_held_calc_ops = false;
+
 		// Returns true if "arg" contains (anywhere in its subtree) an occurrence of one of pyoomph's own placeholder
 		// functions (field, test function, scale, grad, div, ...) that has not yet been resolved/expanded into a concrete
 		// expression. Used to decide whether an expression built on top of "arg" must call .hold() to prevent GiNaC from
 		// eagerly auto-evaluating/simplifying it before those placeholders are expanded during code generation.
+		// Also recognizes the lazily-held vector-calculus leaves (HeldGradOrDiv/HeldDirectionalDerivative/HeldBinaryCalcOp,
+		// see expand_held_calc_ops()) so that every other function whose eval_func already gates on need_to_hold() before
+		// calling .evalm() (dot, double_dot, contract, transpose, trace, determinant, matproduct, single_index,
+		// double_index, general_weak_differential_contribution) automatically stays held too, with no changes needed
+		// to their own logic.
 		bool need_to_hold(const ex &arg)
 		{
 			for (GiNaC::const_preorder_iterator i = arg.preorder_begin(); i != arg.preorder_end(); ++i)
 			{
-				if (is_ex_the_function(*i, testfunction) || 
-					is_ex_the_function(*i, dimtestfunction) || 
-					is_ex_the_function(*i, nondimfield) || 
-					is_ex_the_function(*i, scale) || 
-					is_ex_the_function(*i, test_scale) || 
-					is_ex_the_function(*i, field) || 
-					is_ex_the_function(*i, unitvect) || 
-					is_ex_the_function(*i, symbol_subs) || 
-					is_ex_the_function(*i, Diff) || 
-					is_ex_the_function(*i, eval_in_domain) || 
-					is_ex_the_function(*i,ginac_expand) || 
-					is_ex_the_function(*i,grad) || 
-					is_ex_the_function(*i,div) || 
+				if (is_ex_the_function(*i, testfunction) ||
+					is_ex_the_function(*i, dimtestfunction) ||
+					is_ex_the_function(*i, nondimfield) ||
+					is_ex_the_function(*i, scale) ||
+					is_ex_the_function(*i, test_scale) ||
+					is_ex_the_function(*i, field) ||
+					is_ex_the_function(*i, unitvect) ||
+					is_ex_the_function(*i, symbol_subs) ||
+					is_ex_the_function(*i, Diff) ||
+					is_ex_the_function(*i, eval_in_domain) ||
+					is_ex_the_function(*i,ginac_expand) ||
+					is_ex_the_function(*i,grad) ||
+					is_ex_the_function(*i,div) ||
 					is_ex_the_function(*i,transpose) ||
 					is_ex_the_function(*i,determinant) ||
 					is_ex_the_function(*i,trace) || // TODO: Add more!
-					is_ex_the_function(*i,minimize_functional_derivative) 
+					is_ex_the_function(*i,minimize_functional_derivative) ||
+					GiNaC::is_a<GiNaC::GiNaCHeldGradOrDiv>(*i) ||
+					GiNaC::is_a<GiNaC::GiNaCHeldDirectionalDerivative>(*i) ||
+					GiNaC::is_a<GiNaC::GiNaCHeldBinaryCalcOp>(*i)
 					)
 				{
 					return true;
 				}
+			}
+			return false;
+		}
+
+		// Same as need_to_hold(), but WITHOUT the 3 new leaf types - i.e. only genuinely pre-existing, unresolved
+		// placeholders (a test function still symbolic as dimtestfunction(...), a field not yet resolvable, a
+		// grad/div whose coordinate system isn't resolvable yet, ...). Used as the "stay held the old way" gate in
+		// grad_eval/div_eval/directional_derivative_eval/dot_eval/double_dot_eval/contract_eval - the ones that,
+		// unlike transpose/trace/single_index/etc., construct one of the 3 new leaf types themselves once past this
+		// gate. Using need_to_hold() (which also flags the new leaf types) there instead would be wrong: e.g.
+		// dot(grad(u), grad(v)) - where grad(u)/grad(v) are already HeldGradOrDiv leaves - must still reach
+		// dot_eval's own __capture_held_calc_ops branch to become a HeldBinaryCalcOp, not fall back to an ordinary
+		// held dot(...) function call just because need_to_hold() now also recognizes HeldGradOrDiv.
+		bool needs_old_style_hold(const ex &arg)
+		{
+			for (GiNaC::const_preorder_iterator i = arg.preorder_begin(); i != arg.preorder_end(); ++i)
+			{
+				if (is_ex_the_function(*i, testfunction) ||
+					is_ex_the_function(*i, dimtestfunction) ||
+					is_ex_the_function(*i, nondimfield) ||
+					is_ex_the_function(*i, scale) ||
+					is_ex_the_function(*i, test_scale) ||
+					is_ex_the_function(*i, field) ||
+					is_ex_the_function(*i, unitvect) ||
+					is_ex_the_function(*i, symbol_subs) ||
+					is_ex_the_function(*i, Diff) ||
+					is_ex_the_function(*i, eval_in_domain) ||
+					is_ex_the_function(*i,ginac_expand) ||
+					is_ex_the_function(*i,grad) ||
+					is_ex_the_function(*i,div) ||
+					is_ex_the_function(*i,transpose) ||
+					is_ex_the_function(*i,determinant) ||
+					is_ex_the_function(*i,trace) ||
+					is_ex_the_function(*i,minimize_functional_derivative)
+					)
+				{
+					return true;
+				}
+			}
+			return false;
+		}
+
+		// Narrower than need_to_hold(): true only if "arg" contains one of the 3 new lazily-held vector-calculus
+		// leaf types. Unlike need_to_hold(), this does NOT flag pre-existing placeholders (dimtestfunction, field,
+		// a still-unresolved-coordsys grad/div, ...) that are expected to remain symbolic at this point in the
+		// pipeline and get resolved later, downstream of expand_held_calc_ops() - so it is safe to use as the
+		// "did I actually miss a case" safety net at the end of expand_held_calc_ops().
+		static bool contains_held_calc_leaf(const ex &arg)
+		{
+			for (GiNaC::const_preorder_iterator i = arg.preorder_begin(); i != arg.preorder_end(); ++i)
+			{
+				if (GiNaC::is_a<GiNaC::GiNaCHeldGradOrDiv>(*i) ||
+					GiNaC::is_a<GiNaC::GiNaCHeldDirectionalDerivative>(*i) ||
+					GiNaC::is_a<GiNaC::GiNaCHeldBinaryCalcOp>(*i))
+					return true;
 			}
 			return false;
 		}
@@ -1037,7 +1277,7 @@ namespace pyoomph
 				return grad(f, nodal_dim, elem_dim, coordsys, flags).hold();
 			if (pyoomph::pyoomph_verbose)
 				std::cout << "ENTERING GRAD  " << f << "  " << nodal_dim << "  " << elem_dim << "  " << coordsys << "   " << flags << std::endl;
-			if (need_to_hold(f))
+			if (needs_old_style_hold(f))
 				return grad(f, nodal_dim, elem_dim, coordsys, flags).hold();
 			// Resolve coordinate system
 			GiNaCCustomCoordinateSystemWrapper w = ex_to<GiNaCCustomCoordinateSystemWrapper>(coordsys);
@@ -1104,10 +1344,37 @@ namespace pyoomph
 			//	 std::cout << "CALLING GRAD " << typeid(sys).name() << "   " <<  f << "  " << ndim << "  " << _flags << std::endl;
 			if (pyoomph::pyoomph_verbose)
 				std::cout << "CALLING GRAD " << sys << std::endl;
+			if (__capture_held_calc_ops)
+			{
+				GiNaC::ex coordsys_ex = GiNaC::GiNaCCustomCoordinateSystemWrapper(pyoomph::CustomCoordinateSystemWrapper(sys));
+				return GiNaC::GiNaCHeldGradOrDiv(pyoomph::HeldGradOrDiv(f, coordsys_ex, ndim, edim, _flags, false));
+			}
 			return sys->grad(f, ndim, edim, _flags);
 		}
 
-		REGISTER_FUNCTION(grad, eval_func(grad_eval).set_return_type(GiNaC::return_types::noncommutative))
+		// grad(f) can still be a plain (un-held-leaf) GiNaC::function call at LaTeX-render time even under
+		// __capture_held_calc_ops, whenever f itself was not yet resolvable (most commonly: f is a test function,
+		// which stays an unresolved dimtestfunction(...) placeholder until later downstream of add_residual() -
+		// see the long comment on need_to_hold()). This renders that case the same way as a genuine HeldGradOrDiv
+		// leaf; it is never needed for print_csrc_FEM since a still-held grad() never survives to code generation.
+		static void grad_print_latex_FEM(const ex &f, const ex &, const ex &, const ex &, const ex &, const print_context &c)
+		{
+			if (GiNaC::is_a<print_latex_FEM>(c))
+			{
+				const auto &femprint = dynamic_cast<const print_latex_FEM &>(c);
+				if (femprint.FEM_opts->for_code && femprint.FEM_opts->for_code->latex_printer)
+				{
+					std::map<std::string, std::string> texinfo;
+					texinfo["typ"] = "held_grad";
+					texinfo["arg"] = GiNaC::render_sub_latex(f, femprint.FEM_opts);
+					c.s << femprint.FEM_opts->for_code->latex_printer->_get_LaTeX_expression(texinfo, femprint.FEM_opts->for_code);
+					return;
+				}
+			}
+			c.s << "<grad " << f << ">";
+		}
+
+		REGISTER_FUNCTION(grad, eval_func(grad_eval).set_return_type(GiNaC::return_types::noncommutative).print_func<print_latex_FEM>(grad_print_latex_FEM))
 
 		// eval_func for directional_derivative(): same coordinate-system/dimension resolution pattern as grad_eval, but
 		// delegates to CustomCoordinateSystem::directional_derivative() and additionally holds if "d" (the direction) also
@@ -1118,7 +1385,7 @@ namespace pyoomph
 				return directional_derivative(f, d, nodal_dim, elem_dim, coordsys, flags).hold();
 			if (pyoomph::pyoomph_verbose)
 				std::cout << "ENTERING DIRECTIONAL DERIVATIVE  " << f << "  " << d << "  " << nodal_dim << "  " << elem_dim << "  " << coordsys << "   " << flags << std::endl;
-			if (need_to_hold(f) || need_to_hold(d))
+			if (needs_old_style_hold(f) || needs_old_style_hold(d))
 			{
 				if (pyoomph::pyoomph_verbose)
 					std::cout << "		MUST BE HELD  " << f << "  " << d << "  " << nodal_dim << "  " << elem_dim << "  " << coordsys << "   " << flags << std::endl;
@@ -1222,10 +1489,34 @@ namespace pyoomph
 				throw_runtime_error("Second argument of directional derivative must be a vector, but is: " + oss.str());
 			}
 
+			if (__capture_held_calc_ops)
+			{
+				GiNaC::ex coordsys_ex = GiNaC::GiNaCCustomCoordinateSystemWrapper(pyoomph::CustomCoordinateSystemWrapper(sys));
+				return GiNaC::GiNaCHeldDirectionalDerivative(pyoomph::HeldDirectionalDerivative(f, d, coordsys_ex, ndim, edim, _flags));
+			}
 			return sys->directional_derivative(f, d, ndim, edim, _flags);
 		}
 
-		REGISTER_FUNCTION(directional_derivative, eval_func(directional_derivative_eval)) //.set_return_type(GiNaC::return_types::noncommutative))
+		// See grad_print_latex_FEM's comment above for why this is needed at all.
+		static void directional_derivative_print_latex_FEM(const ex &f, const ex &d, const ex &, const ex &, const ex &, const ex &, const print_context &c)
+		{
+			if (GiNaC::is_a<print_latex_FEM>(c))
+			{
+				const auto &femprint = dynamic_cast<const print_latex_FEM &>(c);
+				if (femprint.FEM_opts->for_code && femprint.FEM_opts->for_code->latex_printer)
+				{
+					std::map<std::string, std::string> texinfo;
+					texinfo["typ"] = "held_directional_derivative";
+					texinfo["arg"] = GiNaC::render_sub_latex(f, femprint.FEM_opts);
+					texinfo["direction"] = GiNaC::render_sub_latex(d, femprint.FEM_opts);
+					c.s << femprint.FEM_opts->for_code->latex_printer->_get_LaTeX_expression(texinfo, femprint.FEM_opts->for_code);
+					return;
+				}
+			}
+			c.s << "<directional_derivative " << f << ", " << d << ">";
+		}
+
+		REGISTER_FUNCTION(directional_derivative, eval_func(directional_derivative_eval).print_func<print_latex_FEM>(directional_derivative_print_latex_FEM)) //.set_return_type(GiNaC::return_types::noncommutative))
 
 		// General weak contribution of the form WEAKCONTRIB("name",{f,g,h,..},testfunc)
 		// The specific coordinate system will take care of the evaluation
@@ -1329,13 +1620,19 @@ namespace pyoomph
 		{
 			if (v == wild())
 				return div(v, nodal_dim, elem_dim, coordsys, flags).hold();
-			if (need_to_hold(v))
+			if (needs_old_style_hold(v))
 				return div(v, nodal_dim, elem_dim, coordsys, flags).hold();
 			ex eva = v.evalm();
 			if (!is_a<matrix>(eva))
 			{
 				if (eva.is_zero())
 					return 0;
+				// v is (or contains) one of the new held-calc leaves, e.g. div(grad(u)): evalm() cannot see its
+				// shape yet, so div_eval cannot determine the tensor-vs-vector flag below. Stay held the old way;
+				// expand_held_calc_ops() has a whitelist case for a held div(...) call that resolves this once v
+				// has been recursively expanded into a genuine matrix.
+				if (contains_held_calc_leaf(eva))
+					return div(v, nodal_dim, elem_dim, coordsys, flags).hold();
 				throw_runtime_error("Tried to take the divergence of something which is not a matrix or a vector");
 			}
 			GiNaC::matrix evam = GiNaC::ex_to<GiNaC::matrix>(eva);
@@ -1405,10 +1702,33 @@ namespace pyoomph
 				_flags |= 16;
 			} // Tensor divergence!
 
+			if (__capture_held_calc_ops)
+			{
+				GiNaC::ex coordsys_ex = GiNaC::GiNaCCustomCoordinateSystemWrapper(pyoomph::CustomCoordinateSystemWrapper(sys));
+				return GiNaC::GiNaCHeldGradOrDiv(pyoomph::HeldGradOrDiv(v, coordsys_ex, ndim, edim, _flags, true));
+			}
 			return sys->div(v, ndim, edim, _flags);
 		}
 
-		REGISTER_FUNCTION(div, eval_func(div_eval))
+		// See grad_print_latex_FEM's comment above for why this is needed at all.
+		static void div_print_latex_FEM(const ex &v, const ex &, const ex &, const ex &, const ex &, const print_context &c)
+		{
+			if (GiNaC::is_a<print_latex_FEM>(c))
+			{
+				const auto &femprint = dynamic_cast<const print_latex_FEM &>(c);
+				if (femprint.FEM_opts->for_code && femprint.FEM_opts->for_code->latex_printer)
+				{
+					std::map<std::string, std::string> texinfo;
+					texinfo["typ"] = "held_div";
+					texinfo["arg"] = GiNaC::render_sub_latex(v, femprint.FEM_opts);
+					c.s << femprint.FEM_opts->for_code->latex_printer->_get_LaTeX_expression(texinfo, femprint.FEM_opts->for_code);
+					return;
+				}
+			}
+			c.s << "<div " << v << ">";
+		}
+
+		REGISTER_FUNCTION(div, eval_func(div_eval).print_func<print_latex_FEM>(div_print_latex_FEM))
 
 		////////////////
 
@@ -1496,22 +1816,10 @@ namespace pyoomph
 		// Dot (inner) product of two column vectors (Nx1 matrices). If the two vectors have different lengths, the shorter
 		// one is implicitly zero-padded (but only if the "extra" trailing components of the longer vector are actually
 		// zero -- otherwise this is an error, since silently dropping nonzero components would be wrong).
-		static ex dot_eval(const ex &a, const ex &b)
+		// Real dot-product combination logic, factored out of dot_eval so that expand_held_calc_ops() can reuse it
+		// verbatim once a HeldBinaryCalcOp(DOT)'s operands have been recursively resolved.
+		static ex do_dot(const ex &a, const ex &b)
 		{
-			if (pyoomph::pyoomph_verbose)
-				std::cout << "Entering dot " << std::endl
-						  << a << std::endl
-						  << b << std::endl
-						  << std::endl;
-			if (need_to_hold(a) || need_to_hold(b))
-				return dot(a, b).hold();
-			// Also stay held if either operand still contains an unresolved grad(...) call, since evalm() cannot expand a gradient's tensor shape yet
-			if (a.has(grad(wild(), wild(), wild(), wild(), wild())))
-				return dot(a, b).hold();
-			if (b.has(grad(wild(), wild(), wild(), wild(), wild())))
-				return dot(a, b).hold();
-			if (pyoomph::pyoomph_verbose)
-				std::cout << " DOT NOT HELD " << std::endl;
 			ex eva = a.evalm();
 			ex evb = b.evalm();
 			if (eva.is_zero() || evb.is_zero())
@@ -1583,7 +1891,52 @@ namespace pyoomph
 			}
 		}
 
-		REGISTER_FUNCTION(dot, eval_func(dot_eval).set_return_type(GiNaC::return_types::commutative))
+		static ex dot_eval(const ex &a, const ex &b)
+		{
+			if (pyoomph::pyoomph_verbose)
+				std::cout << "Entering dot " << std::endl
+						  << a << std::endl
+						  << b << std::endl
+						  << std::endl;
+			if (needs_old_style_hold(a) || needs_old_style_hold(b))
+				return dot(a, b).hold();
+			// Also stay held if either operand still contains an unresolved grad(...) call, since evalm() cannot expand a gradient's tensor shape yet
+			if (a.has(grad(wild(), wild(), wild(), wild(), wild())))
+				return dot(a, b).hold();
+			if (b.has(grad(wild(), wild(), wild(), wild(), wild())))
+				return dot(a, b).hold();
+			if (__capture_held_calc_ops)
+			{
+				return GiNaC::GiNaCHeldBinaryCalcOp(pyoomph::HeldBinaryCalcOp(a, b, pyoomph::HeldBinaryCalcOpType::DOT));
+			}
+			if (pyoomph::pyoomph_verbose)
+				std::cout << " DOT NOT HELD " << std::endl;
+			return do_dot(a, b);
+		}
+
+		// dot()/double_dot()/contract() can stay a plain held GiNaC::function call at LaTeX-render time too
+		// (e.g. built at define_problem() time, before any code-generation context/field resolution exists) -
+		// reuses the same held_dot/held_double_dot/held_contract LaTeX handlers as the HeldBinaryCalcOp leaf.
+		static void binary_calc_op_print_latex_FEM_impl(const char *typ, const ex &a, const ex &b, const print_context &c)
+		{
+			if (GiNaC::is_a<print_latex_FEM>(c))
+			{
+				const auto &femprint = dynamic_cast<const print_latex_FEM &>(c);
+				if (femprint.FEM_opts->for_code && femprint.FEM_opts->for_code->latex_printer)
+				{
+					std::map<std::string, std::string> texinfo;
+					texinfo["typ"] = typ;
+					texinfo["a"] = GiNaC::render_sub_latex(a, femprint.FEM_opts);
+					texinfo["b"] = GiNaC::render_sub_latex(b, femprint.FEM_opts);
+					c.s << femprint.FEM_opts->for_code->latex_printer->_get_LaTeX_expression(texinfo, femprint.FEM_opts->for_code);
+					return;
+				}
+			}
+			c.s << "<" << typ << " " << a << ", " << b << ">";
+		}
+		static void dot_print_latex_FEM(const ex &a, const ex &b, const print_context &c) { binary_calc_op_print_latex_FEM_impl("held_dot", a, b, c); }
+
+		REGISTER_FUNCTION(dot, eval_func(dot_eval).set_return_type(GiNaC::return_types::commutative).print_func<print_latex_FEM>(dot_print_latex_FEM))
 
 		// Debugging aid: prints the argument (held or, once fully resolvable, fully expanded/evalm()'d) to stdout. Note this
 		// deliberately terminates the process via exit(0) once the expression is fully resolved, since debug_ex() is only
@@ -1609,22 +1962,16 @@ namespace pyoomph
 		// Double contraction (Frobenius inner product) sum_ij a_ij*b_ij of two matrices. If the matrices have mismatched
 		// shapes, only the overlapping (min rows x min cols) block is contracted rather than raising an error (see the
 		// commented-out strict version below) -- this tolerates e.g. contracting a 2D tensor with a padded 3D one.
-		static ex double_dot_eval(const ex &a, const ex &b)
+		// Real double-dot (Frobenius contraction) combination logic, factored out of double_dot_eval so that
+		// expand_held_calc_ops() can reuse it once a HeldBinaryCalcOp(DOUBLE_DOT)'s operands are resolved.
+		static ex do_double_dot(const ex &a, const ex &b)
 		{
-			if (pyoomph::pyoomph_verbose)
-				std::cout << "Trying to eval double dot of " << std::endl
-						  << a << std::endl
-						  << b << std::endl
-						  << std::endl;
 			ex evma = a.evalm();
 			ex evmb = b.evalm();
 			if (is_a<matrix>(evma) && ex_to<matrix>(evma).is_zero_matrix())
 				return 0;
 			if (is_a<matrix>(evmb) && ex_to<matrix>(evmb).is_zero_matrix())
 				return 0;
-
-			if (need_to_hold(evma) || need_to_hold(evmb))
-				return double_dot(evma, evmb).hold();
 
 			if (is_a<matrix>(evma) && is_a<matrix>(evmb))
 			{
@@ -1659,18 +2006,10 @@ namespace pyoomph
 			throw_runtime_error("double_dot is only allowed between vectors or matrices");
 		}
 
-		REGISTER_FUNCTION(double_dot, eval_func(double_dot_eval).set_return_type(GiNaC::return_types::commutative))
-
-		////
-
-		// Generic index contraction, implementing the "@"/matmul operator for arbitrary vector/matrix combinations:
-		// vector.vector -> dot product; vector.matrix or matrix.vector -> matrix-vector product (returned as a column
-		// vector); matrix.matrix -> double_dot (full Frobenius contraction); scalar.scalar (or any non-matrix operand)
-		// -> plain multiplication.
-		static ex contract_eval(const ex &a, const ex &b)
+		static ex double_dot_eval(const ex &a, const ex &b)
 		{
 			if (pyoomph::pyoomph_verbose)
-				std::cout << "Trying to eval contract dot of " << std::endl
+				std::cout << "Trying to eval double dot of " << std::endl
 						  << a << std::endl
 						  << b << std::endl
 						  << std::endl;
@@ -1681,8 +2020,38 @@ namespace pyoomph
 			if (is_a<matrix>(evmb) && ex_to<matrix>(evmb).is_zero_matrix())
 				return 0;
 
-			if (need_to_hold(evma) || need_to_hold(evmb))
-				return contract(evma, evmb).hold();
+			if (needs_old_style_hold(evma) || needs_old_style_hold(evmb))
+				return double_dot(evma, evmb).hold();
+
+			if (__capture_held_calc_ops)
+			{
+				return GiNaC::GiNaCHeldBinaryCalcOp(pyoomph::HeldBinaryCalcOp(evma, evmb, pyoomph::HeldBinaryCalcOpType::DOUBLE_DOT));
+			}
+
+			return do_double_dot(evma, evmb);
+		}
+
+		static void double_dot_print_latex_FEM(const ex &a, const ex &b, const print_context &c) { binary_calc_op_print_latex_FEM_impl("held_double_dot", a, b, c); }
+
+		REGISTER_FUNCTION(double_dot, eval_func(double_dot_eval).set_return_type(GiNaC::return_types::commutative).print_func<print_latex_FEM>(double_dot_print_latex_FEM))
+
+		////
+
+		// Generic index contraction, implementing the "@"/matmul operator for arbitrary vector/matrix combinations:
+		// vector.vector -> dot product; vector.matrix or matrix.vector -> matrix-vector product (returned as a column
+		// vector); matrix.matrix -> double_dot (full Frobenius contraction); scalar.scalar (or any non-matrix operand)
+		// -> plain multiplication.
+		// Real generic-contraction combination logic, factored out of contract_eval so that expand_held_calc_ops()
+		// can reuse it once a HeldBinaryCalcOp(CONTRACT)'s operands are resolved. Calls do_dot/do_double_dot directly
+		// (not the dot()/double_dot() DSL entry points) so it never re-enters dot_eval/double_dot_eval.
+		static ex do_contract(const ex &a, const ex &b)
+		{
+			ex evma = a.evalm();
+			ex evmb = b.evalm();
+			if (is_a<matrix>(evma) && ex_to<matrix>(evma).is_zero_matrix())
+				return 0;
+			if (is_a<matrix>(evmb) && ex_to<matrix>(evmb).is_zero_matrix())
+				return 0;
 
 			if (is_a<matrix>(evma) && is_a<matrix>(evmb))
 			{
@@ -1690,7 +2059,7 @@ namespace pyoomph
 				matrix mb = ex_to<matrix>(evmb);
 				// std::cout << "COL ROW INFO" << ma.cols() << " " << mb.cols() << "    " << ma.rows() << "  " << mb.rows() << std::endl;
 				if (ma.cols() == 1 && mb.cols() == 1)
-					return dot(evma, evmb);
+					return do_dot(evma, evmb);
 				else if (ma.cols() == 1)
 				{
 					std::vector<GiNaC::ex> v(std::min(ma.rows(), mb.rows()), 0);
@@ -1719,7 +2088,7 @@ namespace pyoomph
 					return 0 + GiNaC::matrix(v.size(), 1, GiNaC::lst(v.begin(), v.end()));
 				}
 				else
-					return double_dot(evma, evmb);
+					return do_double_dot(evma, evmb);
 			}
 			if (!is_a<matrix>(evma) && !is_a<matrix>(evmb))
 			{
@@ -1737,7 +2106,141 @@ namespace pyoomph
 			return 0;
 		}
 
-		REGISTER_FUNCTION(contract, eval_func(contract_eval).set_return_type(GiNaC::return_types::commutative))
+		static ex contract_eval(const ex &a, const ex &b)
+		{
+			if (pyoomph::pyoomph_verbose)
+				std::cout << "Trying to eval contract dot of " << std::endl
+						  << a << std::endl
+						  << b << std::endl
+						  << std::endl;
+			ex evma = a.evalm();
+			ex evmb = b.evalm();
+			if (is_a<matrix>(evma) && ex_to<matrix>(evma).is_zero_matrix())
+				return 0;
+			if (is_a<matrix>(evmb) && ex_to<matrix>(evmb).is_zero_matrix())
+				return 0;
+
+			if (needs_old_style_hold(evma) || needs_old_style_hold(evmb))
+				return contract(evma, evmb).hold();
+
+			if (__capture_held_calc_ops)
+			{
+				return GiNaC::GiNaCHeldBinaryCalcOp(pyoomph::HeldBinaryCalcOp(evma, evmb, pyoomph::HeldBinaryCalcOpType::CONTRACT));
+			}
+
+			return do_contract(evma, evmb);
+		}
+
+		static void contract_print_latex_FEM(const ex &a, const ex &b, const print_context &c) { binary_calc_op_print_latex_FEM_impl("held_contract", a, b, c); }
+
+		REGISTER_FUNCTION(contract, eval_func(contract_eval).set_return_type(GiNaC::return_types::commutative).print_func<print_latex_FEM>(contract_print_latex_FEM))
+
+		// GiNaC's own basic::map() rebuilds a compound node by raw duplicate()+let_op(), WITHOUT calling eval()
+		// again - so it is safe to use for containers that don't need re-evaluation to be valid (matrix, lst), but
+		// it must NOT be used to "resolve" a held function call (single_index, transpose, ...): the rebuilt node
+		// would keep sitting there unresolved. This mapper is only ever applied to that safe, container-only case.
+		class ExpandHeldCalcOpsMapper : public GiNaC::map_function
+		{
+		public:
+			GiNaC::ex operator()(const GiNaC::ex &e) override { return expand_held_calc_ops(e); }
+		};
+
+		// Recursively resolves every held grad/div/directional_derivative/dot/double_dot/contract leaf - and any
+		// held single_index/double_index/transpose/trace/determinant/matproduct/general_weak_differential_contribution
+		// call wrapping one - into the same fully expanded form eager evaluation would have produced. See the
+		// declaration in expressions.hpp for why this needs to exist at all (map() does not retrigger eval_func).
+		GiNaC::ex expand_held_calc_ops(const GiNaC::ex &e)
+		{
+			if (GiNaC::is_a<GiNaC::GiNaCHeldGradOrDiv>(e))
+			{
+				const auto &sp = GiNaC::ex_to<GiNaC::GiNaCHeldGradOrDiv>(e).get_struct();
+				GiNaC::ex f2 = expand_held_calc_ops(sp.f);
+				CustomCoordinateSystem *sys = GiNaC::ex_to<GiNaC::GiNaCCustomCoordinateSystemWrapper>(sp.coordsys_ex).get_struct().cme;
+				return sp.is_div ? sys->div(f2, sp.ndim, sp.edim, sp.flags) : sys->grad(f2, sp.ndim, sp.edim, sp.flags);
+			}
+			if (GiNaC::is_a<GiNaC::GiNaCHeldDirectionalDerivative>(e))
+			{
+				const auto &sp = GiNaC::ex_to<GiNaC::GiNaCHeldDirectionalDerivative>(e).get_struct();
+				GiNaC::ex f2 = expand_held_calc_ops(sp.f);
+				GiNaC::ex d2 = expand_held_calc_ops(sp.d);
+				CustomCoordinateSystem *sys = GiNaC::ex_to<GiNaC::GiNaCCustomCoordinateSystemWrapper>(sp.coordsys_ex).get_struct().cme;
+				return sys->directional_derivative(f2, d2, sp.ndim, sp.edim, sp.flags);
+			}
+			if (GiNaC::is_a<GiNaC::GiNaCHeldBinaryCalcOp>(e))
+			{
+				const auto &sp = GiNaC::ex_to<GiNaC::GiNaCHeldBinaryCalcOp>(e).get_struct();
+				GiNaC::ex a2 = expand_held_calc_ops(sp.a);
+				GiNaC::ex b2 = expand_held_calc_ops(sp.b);
+				switch (sp.optype)
+				{
+				case pyoomph::HeldBinaryCalcOpType::DOT:
+					return do_dot(a2, b2);
+				case pyoomph::HeldBinaryCalcOpType::DOUBLE_DOT:
+					return do_double_dot(a2, b2);
+				default:
+					return do_contract(a2, b2);
+				}
+			}
+
+			// Held function calls that need their eval_func re-invoked on the recursively resolved arguments
+			// (raw map()-based rebuilding would NOT do this - see ExpandHeldCalcOpsMapper's comment above).
+			if (is_ex_the_function(e, single_index))
+				return single_index(expand_held_calc_ops(e.op(0)), e.op(1));
+			if (is_ex_the_function(e, double_index))
+				return double_index(expand_held_calc_ops(e.op(0)), e.op(1), e.op(2));
+			if (is_ex_the_function(e, transpose))
+				return transpose(expand_held_calc_ops(e.op(0)));
+			if (is_ex_the_function(e, trace))
+				return trace(expand_held_calc_ops(e.op(0)));
+			if (is_ex_the_function(e, determinant))
+				return determinant(expand_held_calc_ops(e.op(0)), e.op(1));
+			if (is_ex_the_function(e, matproduct))
+				return matproduct(expand_held_calc_ops(e.op(0)), expand_held_calc_ops(e.op(1)));
+			if (is_ex_the_function(e, div))
+				return div(expand_held_calc_ops(e.op(0)), e.op(1), e.op(2), e.op(3), e.op(4));
+			if (is_ex_the_function(e, general_weak_differential_contribution))
+				return general_weak_differential_contribution(e.op(0), expand_held_calc_ops(e.op(1)), expand_held_calc_ops(e.op(2)), e.op(3), e.op(4), e.op(5), e.op(6));
+			if (is_ex_the_function(e, weak))
+				return weak(expand_held_calc_ops(e.op(0)), expand_held_calc_ops(e.op(1)), e.op(2), e.op(3));
+			if (is_ex_the_function(e, minimize_functional_derivative))
+				return minimize_functional_derivative(expand_held_calc_ops(e.op(0)), e.op(1), e.op(2), e.op(3));
+
+			// Plain arithmetic: rebuild via the operator overloads (not map()) since combining matrix-valued terms
+			// correctly requires their eval()-triggered numeric combination logic, which map()'s raw rebuild skips.
+			if (GiNaC::is_a<GiNaC::add>(e))
+			{
+				GiNaC::ex result = 0;
+				for (size_t i = 0; i < e.nops(); i++)
+					result += expand_held_calc_ops(e.op(i));
+				return result;
+			}
+			if (GiNaC::is_a<GiNaC::mul>(e))
+			{
+				GiNaC::ex result = 1;
+				for (size_t i = 0; i < e.nops(); i++)
+					result *= expand_held_calc_ops(e.op(i));
+				return result;
+			}
+			if (GiNaC::is_a<GiNaC::power>(e))
+				return GiNaC::pow(expand_held_calc_ops(e.op(0)), expand_held_calc_ops(e.op(1)));
+
+			if (e.nops() == 0)
+				return e; // Any other atomic leaf (symbol, ShapeExpansion, TestFunction, NormalSymbol, SubExpression, number, ...): unchanged
+
+			// Generic container (matrix, lst, or some other function call not in the whitelist above): safe to
+			// rebuild structurally via map(), since none of these need eval()-triggered numeric re-combination.
+			ExpandHeldCalcOpsMapper mapper;
+			GiNaC::ex mapped = e.map(mapper);
+			if (contains_held_calc_leaf(mapped))
+			{
+				std::ostringstream oss;
+				oss << "expand_held_calc_ops: a held vector-calculus operator survived expansion (missing case for this expression type) - this is a pyoomph bug, please report it." << std::endl
+					<< "INPUT WAS: " << e << std::endl
+					<< "MAPPED TO: " << mapped << std::endl;
+				throw_runtime_error(oss.str());
+			}
+			return mapped;
+		}
 
 		////////////////
 
@@ -2259,19 +2762,46 @@ namespace pyoomph
 		// .hold()s, since resolving "name" (using the accompanying GiNaCPlaceHolderResolveInfo in "resolve") into a concrete
 		// expression requires the FiniteElementCode context and only happens in a later, explicit expansion pass (see
 		// codegen.cpp), not through GiNaC's ordinary automatic evaluation.
+		// field()/testfunction()/dimtestfunction()/nondimfield() stay unresolved placeholders (see the long
+		// need_to_hold() comment) all the way through define_residuals(), only being substituted with a concrete
+		// ShapeExpansion/TestFunction later, inside cg._add_residual(). This renders them by name (reusing the
+		// same "field"/"testfunction" LaTeX handlers used for the resolved leaf types), so the "as entered" view
+		// shows e.g. \nabla u instead of \nabla(field(u,<code=0,tags=...>)).
+		static void field_placeholder_print_latex_FEM_impl(const char *typ, const ex &name, const print_context &c)
+		{
+			if (GiNaC::is_a<print_latex_FEM>(c))
+			{
+				const auto &femprint = dynamic_cast<const print_latex_FEM &>(c);
+				if (femprint.FEM_opts->for_code && femprint.FEM_opts->for_code->latex_printer)
+				{
+					std::ostringstream noss;
+					noss << name;
+					std::map<std::string, std::string> texinfo;
+					texinfo["typ"] = typ;
+					texinfo["name"] = noss.str();
+					c.s << femprint.FEM_opts->for_code->latex_printer->_get_LaTeX_expression(texinfo, femprint.FEM_opts->for_code);
+					return;
+				}
+			}
+			c.s << "<" << typ << " " << name << ">";
+		}
+
+		static void field_print_latex_FEM(const ex &name, const ex &, const print_context &c) { field_placeholder_print_latex_FEM_impl("field", name, c); }
+		static void testfunction_print_latex_FEM(const ex &name, const ex &, const print_context &c) { field_placeholder_print_latex_FEM_impl("testfunction", name, c); }
+
 		static ex testfunction_eval(const ex &name, const ex &resolve)
 		{
 			return testfunction(name, resolve).hold();
 		}
 
-		REGISTER_FUNCTION(testfunction, eval_func(testfunction_eval).set_return_type(GiNaC::return_types::commutative))
+		REGISTER_FUNCTION(testfunction, eval_func(testfunction_eval).set_return_type(GiNaC::return_types::commutative).print_func<print_latex_FEM>(testfunction_print_latex_FEM))
 
 		static ex dimtestfunction_eval(const ex &name, const ex &resolve)
 		{
 			return dimtestfunction(name, resolve).hold();
 		}
 
-		REGISTER_FUNCTION(dimtestfunction, eval_func(dimtestfunction_eval).set_return_type(GiNaC::return_types::commutative))
+		REGISTER_FUNCTION(dimtestfunction, eval_func(dimtestfunction_eval).set_return_type(GiNaC::return_types::commutative).print_func<print_latex_FEM>(testfunction_print_latex_FEM))
 
 		static ex scale_eval(const ex &name, const ex &resolve)
 		{
@@ -2292,7 +2822,7 @@ namespace pyoomph
 			return field(name, resolve).hold();
 		}
 
-		REGISTER_FUNCTION(field, eval_func(field_eval).set_return_type(GiNaC::return_types::commutative))
+		REGISTER_FUNCTION(field, eval_func(field_eval).set_return_type(GiNaC::return_types::commutative).print_func<print_latex_FEM>(field_print_latex_FEM))
 
 		static ex eval_flag_eval(const ex &name)
 		{
@@ -2306,7 +2836,7 @@ namespace pyoomph
 			return nondimfield(name, resolve).hold();
 		}
 
-		REGISTER_FUNCTION(nondimfield, eval_func(nondimfield_eval).set_return_type(GiNaC::return_types::commutative))
+		REGISTER_FUNCTION(nondimfield, eval_func(nondimfield_eval).set_return_type(GiNaC::return_types::commutative).print_func<print_latex_FEM>(field_print_latex_FEM))
 
 		static ex eval_in_domain_eval(const ex &expr, const ex &resolve)
 		{
@@ -3576,7 +4106,30 @@ namespace pyoomph
 			}
 		}
 
-		REGISTER_FUNCTION(weak, eval_func(weak_eval).set_return_type(GiNaC::return_types::commutative))
+		// weak(a,b) can still be a plain held GiNaC::function call at LaTeX-render time (whenever a/b are not yet
+		// resolvable, most commonly because b is a still-unresolved test function) - render it compactly the same
+		// way as a fully expanded weak() contribution would look: (a)(b) dx (or dX for the Lagrangian flag).
+		static void weak_print_latex_FEM(const ex &a, const ex &b, const ex &flags, const ex &, const print_context &c)
+		{
+			if (GiNaC::is_a<print_latex_FEM>(c))
+			{
+				const auto &femprint = dynamic_cast<const print_latex_FEM &>(c);
+				if (femprint.FEM_opts->for_code && femprint.FEM_opts->for_code->latex_printer)
+				{
+					int flag = GiNaC::ex_to<GiNaC::numeric>(flags.evalf()).to_double();
+					std::map<std::string, std::string> texinfo;
+					texinfo["typ"] = "held_weak";
+					texinfo["a"] = GiNaC::render_sub_latex(a, femprint.FEM_opts);
+					texinfo["b"] = GiNaC::render_sub_latex(b, femprint.FEM_opts);
+					texinfo["lagrangian"] = (flag & 1) ? "true" : "false";
+					c.s << femprint.FEM_opts->for_code->latex_printer->_get_LaTeX_expression(texinfo, femprint.FEM_opts->for_code);
+					return;
+				}
+			}
+			c.s << "<weak " << a << ", " << b << ">";
+		}
+
+		REGISTER_FUNCTION(weak, eval_func(weak_eval).set_return_type(GiNaC::return_types::commutative).print_func<print_latex_FEM>(weak_print_latex_FEM))
 
 		/////////////////
 

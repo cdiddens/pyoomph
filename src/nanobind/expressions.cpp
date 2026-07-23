@@ -893,6 +893,20 @@ void PyReg_Expressions(nb::module_ &m)
 
 	m.def("GiNaC_debug_ex", [](const GiNaC::ex &arg)
 		  { return 0 + pyoomph::expressions::debug_ex(arg); }, nb::arg("arg"), "Print debugging information about the internal structure of ``arg`` and return it unchanged.");
+
+	m.def("get_capture_held_calc_ops", []()
+		  { return pyoomph::expressions::__capture_held_calc_ops; },
+		  "Whether grad/div/directional_derivative/dot/double_dot/contract currently construct a lazily-held "
+		  "leaf (for capturing the 'as entered' weak form) instead of expanding immediately.");
+	m.def("set_capture_held_calc_ops", [](bool v)
+		  { pyoomph::expressions::__capture_held_calc_ops = v; }, nb::arg("value"),
+		  "Set/unset the held-calc-ops capture mode - see get_capture_held_calc_ops. Must be narrowly scoped "
+		  "(only around the construction of an expression destined for add_residual()) and always paired with "
+		  "expand_held_calc_ops() before the expression is used for anything else.");
+	m.def("GiNaC_expand_held_calc_ops", [](const GiNaC::ex &arg)
+		  { return pyoomph::expressions::expand_held_calc_ops(arg); }, nb::arg("arg"),
+		  "Resolve every held grad/div/directional_derivative/dot/double_dot/contract leaf in arg into the same "
+		  "fully expanded form eager evaluation would have produced.");
 	m.def("GiNaC_matproduct", [](const GiNaC::ex &m1, const GiNaC::ex &m2)
 		  { return 0 + pyoomph::expressions::matproduct(m1, m2); }, nb::arg("m1"), nb::arg("m2"), "Calculates the matrix product m1*m2.");
 

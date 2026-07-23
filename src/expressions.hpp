@@ -348,6 +348,49 @@ namespace pyoomph
   bool operator==(const FakeExponentialMode &lhs, const FakeExponentialMode &rhs);
   bool operator<(const FakeExponentialMode &lhs, const FakeExponentialMode &rhs);
 
+  // Lazily-held vector-calculus operator grad(f) or div(f). Constructed by grad_eval/div_eval instead of
+  // immediately expanding into the component-wise matrix, so that the "as entered" LaTeX view can render
+  // it compactly (e.g. as \nabla u); resolved into the same expanded form produced by today's eager
+  // evaluation via expand_held_calc_ops() before Jacobian differentiation / code generation ever see it.
+  class HeldGradOrDiv
+  {
+  public:
+    GiNaC::ex f;
+    GiNaC::ex coordsys_ex; // A GiNaCCustomCoordinateSystemWrapper ex holding the already-resolved CustomCoordinateSystem*
+    int ndim, edim, flags;
+    bool is_div;
+    HeldGradOrDiv(GiNaC::ex _f, GiNaC::ex _coordsys_ex, int _ndim, int _edim, int _flags, bool _is_div) : f(_f), coordsys_ex(_coordsys_ex), ndim(_ndim), edim(_edim), flags(_flags), is_div(_is_div) {}
+  };
+  bool operator==(const HeldGradOrDiv &lhs, const HeldGradOrDiv &rhs);
+  bool operator<(const HeldGradOrDiv &lhs, const HeldGradOrDiv &rhs);
+
+  // Lazily-held directional_derivative(f,d); see HeldGradOrDiv above for the rationale.
+  class HeldDirectionalDerivative
+  {
+  public:
+    GiNaC::ex f, d;
+    GiNaC::ex coordsys_ex;
+    int ndim, edim, flags;
+    HeldDirectionalDerivative(GiNaC::ex _f, GiNaC::ex _d, GiNaC::ex _coordsys_ex, int _ndim, int _edim, int _flags) : f(_f), d(_d), coordsys_ex(_coordsys_ex), ndim(_ndim), edim(_edim), flags(_flags) {}
+  };
+  bool operator==(const HeldDirectionalDerivative &lhs, const HeldDirectionalDerivative &rhs);
+  bool operator<(const HeldDirectionalDerivative &lhs, const HeldDirectionalDerivative &rhs);
+
+  // Which binary vector-calculus operation a HeldBinaryCalcOp represents
+  enum class HeldBinaryCalcOpType { DOT = 0, DOUBLE_DOT = 1, CONTRACT = 2 };
+
+  // Lazily-held dot(a,b)/double_dot(a,b)/contract(a,b); see HeldGradOrDiv above for the rationale. Unlike
+  // grad/div, these do not need a coordinate system - they are pure matrix/vector algebra.
+  class HeldBinaryCalcOp
+  {
+  public:
+    GiNaC::ex a, b;
+    HeldBinaryCalcOpType optype;
+    HeldBinaryCalcOp(GiNaC::ex _a, GiNaC::ex _b, HeldBinaryCalcOpType _optype) : a(_a), b(_b), optype(_optype) {}
+  };
+  bool operator==(const HeldBinaryCalcOp &lhs, const HeldBinaryCalcOp &rhs);
+  bool operator<(const HeldBinaryCalcOp &lhs, const HeldBinaryCalcOp &rhs);
+
 }
 
 namespace GiNaC
@@ -378,6 +421,28 @@ namespace GiNaC
   PYGINACSTRUCT(pyoomph::CustomCoordinateSystemWrapper, GiNaCCustomCoordinateSystemWrapper);
   template <>
   void GiNaCCustomCoordinateSystemWrapper::print(const print_context &c, unsigned level) const;
+
+  // Leaves representing a lazily-held grad/div, directional_derivative, or dot/double_dot/contract call - see
+  // HeldGradOrDiv/HeldDirectionalDerivative/HeldBinaryCalcOp in the pyoomph namespace above. Each has a custom
+  // derivative() (expand-then-differentiate; only used defensively, since expand_held_calc_ops() normally runs
+  // before any .diff() call ever sees these) in addition to the print() specialization.
+  PYGINACSTRUCT(pyoomph::HeldGradOrDiv, GiNaCHeldGradOrDiv);
+  template <>
+  void GiNaCHeldGradOrDiv::print(const print_context &c, unsigned level) const;
+  template <>
+  GiNaC::ex GiNaCHeldGradOrDiv::derivative(const GiNaC::symbol &s) const;
+
+  PYGINACSTRUCT(pyoomph::HeldDirectionalDerivative, GiNaCHeldDirectionalDerivative);
+  template <>
+  void GiNaCHeldDirectionalDerivative::print(const print_context &c, unsigned level) const;
+  template <>
+  GiNaC::ex GiNaCHeldDirectionalDerivative::derivative(const GiNaC::symbol &s) const;
+
+  PYGINACSTRUCT(pyoomph::HeldBinaryCalcOp, GiNaCHeldBinaryCalcOp);
+  template <>
+  void GiNaCHeldBinaryCalcOp::print(const print_context &c, unsigned level) const;
+  template <>
+  GiNaC::ex GiNaCHeldBinaryCalcOp::derivative(const GiNaC::symbol &s) const;
 
   // Leaf wrapping a global parameter; info() is specialized so that GiNaC treats it as a real-valued (info_flags::real) atom
   PYGINACSTRUCT(pyoomph::GlobalParameterWrapper, GiNaCGlobalParameterWrapper);
@@ -463,6 +528,19 @@ namespace pyoomph
     extern GiNaC::idx l_test;  // Symbolic loop index over test functions (corresponds to the "l_test" loop variable in generated C code)
     extern GiNaC::potential_real_symbol *proj_on_test_function; // If set, restricts weak-form assembly to a single, given test function (projection) instead of looping over all of them
     extern int el_dim; // Currently active element (local) dimension during code generation
+
+    // While true, grad/div/directional_derivative/dot/double_dot/contract construct a lazily-held leaf
+    // (HeldGradOrDiv/HeldDirectionalDerivative/HeldBinaryCalcOp) instead of immediately expanding, so that the
+    // "as entered" weak form can be captured compactly. Scoped narrowly (only while building the expression
+    // passed to add_residual()) so that every other usage of these functions elsewhere is completely unaffected.
+    extern bool __capture_held_calc_ops;
+
+    // Recursively resolves every held grad/div/directional_derivative/dot/double_dot/contract leaf (and any
+    // held single_index/double_index/transpose/trace/determinant/matproduct/general_weak_differential_contribution
+    // call wrapping one) in expr into the same fully expanded form that eager evaluation would have produced -
+    // i.e. reproduces today's behavior exactly, just performed explicitly instead of inline. Throws if a held
+    // leaf survives resolution (a gap in this function's coverage) rather than silently returning a wrong residual.
+    GiNaC::ex expand_held_calc_ops(const GiNaC::ex &expr);
 
     GiNaC::ex diff(const GiNaC::ex &what, const GiNaC::ex &wrto); // Symbolic differentiation that additionally understands pyoomph's placeholder functions (fields, test functions, ...), unlike plain GiNaC::diff
     bool collect_base_units(GiNaC::ex arg, GiNaC::ex &factor, GiNaC::ex &units, GiNaC::ex &rest); // Splits arg into a numeric factor, a product of base units, and a dimensionless remainder; returns false if arg is not unit-consistent

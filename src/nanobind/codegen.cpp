@@ -431,6 +431,9 @@ void PyReg_CodeGen(nb::module_ &m)
              "Return the (dotted, possibly hierarchical) name of this code's domain.")
         .def("set_latex_printer", &pyoomph::FiniteElementCode::set_latex_printer, nb::arg("printer").none(),
              "Install a LaTeXPrinter used to render/collect this code's residual expressions as LaTeX.")
+        .def("render_expression_to_latex", &pyoomph::FiniteElementCode::render_expression_to_latex, nb::arg("info"), nb::arg("expr"),
+             "Render an arbitrary expression to LaTeX via the installed latex_printer (no-op if none is set); "
+             "used to render 'as entered' residual snapshots that are not part of normal code generation.")
         .def_rw("debug_jacobian_epsilon", &pyoomph::FiniteElementCode::debug_jacobian_epsilon,
                         "Finite-difference step size used when comparing the analytical Jacobian against a numerical one for debugging.")
         .def_rw("with_adaptivity", &pyoomph::FiniteElementCode::with_adaptivity,

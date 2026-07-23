@@ -892,6 +892,7 @@ namespace pyoomph
    public:
       void add_contributing_field(FiniteElementField *field) { contributing_fields.insert(field); }
       unsigned get_current_residual_index() const { return residual_index; }
+      std::string get_current_residual_name() const { return residual_names[residual_index]; } // Name/destination of the residual currently being assembled, e.g. for LaTeX output bucketing
       virtual void mark_nonconstant_mass_matrix() {has_constant_mass_matrix_for_sure[residual_index]=false;}
       // Sets the reference point (position, time, normal) used to evaluate initial conditions/Dirichlet
       // conditions that are only enforced/degraded relative to a single representative point rather than pointwise
@@ -1076,6 +1077,17 @@ namespace pyoomph
       bool use_shared_shape_buffer_during_multi_assemble = false; // If true, elements sharing the same shape-function buffer during a multi-assemble pass reuse it instead of recomputing it (performance optimization, see elements.cpp)
       LaTeXPrinter *latex_printer;
       virtual void set_latex_printer(LaTeXPrinter *lp) { latex_printer = lp; }
+      // Renders an arbitrary (not necessarily code-generation-bound) expression to LaTeX via the installed
+      // latex_printer, e.g. for the "as entered" residual snapshots captured in _residuals_for_tex - which
+      // were never routed through write_code()'s normal per-residual LaTeX call site. No-op if no printer is set.
+      void render_expression_to_latex(std::map<std::string, std::string> info, GiNaC::ex expr)
+      {
+         if (!latex_printer)
+            return;
+         GiNaC::print_FEM_options opts;
+         opts.for_code = this;
+         latex_printer->print(info, expr, opts);
+      }
 
 
       std::set<FiniteElementField *,FiniteElementFieldPtrLess> Hessian_symmetric_fields_completed; // Fields whose Hessian block has already been written for the current residual; used together with assemble_hessian_by_symmetry to avoid deriving symmetric entries twice, reset per residual
