@@ -301,15 +301,19 @@ populates `Local_hang_eqn[value_index]` for every field pyoomph later reads.
      (bulk field/position constraints are done).
    * `interpolate_hang_values` still uses the pre-flatten value interpolation
      (affects stored dummy/pinned values for output/restart, not the solve).
-   * **MPI**: could not be validated end-to-end because MPI + tree adaptivity fails
-     *before* assembly, in the distributed linear solver
-     (`pyoomph/solvers/pardiso.py:513`, `solve_distributed` gets `data=None`), and
-     this reproduces identically for a plain non-constrained adaptive Poisson on
-     ≥2 ranks — i.e. it is a pre-existing distributed-solver issue independent of
-     the hanging-node work. The flattening itself keeps the truth in oomph-lib's
-     `Node::Hanging_pt` / `Local_hang_eqn` and stores only element-local corner
-     nodes, so it is expected to compose with oomph's `synchronise_hanging_nodes`
-     once the distributed-solver path works, but that remains unverified.
+   * **MPI**: **validated.** (A pre-existing crash in the gather-to-root Pardiso
+     path — `pyoomph/solvers/pardiso.py:513` recomputed `nnz_local = len(data)`
+     from the always-`None` oomph solver-state handle — was fixed first; it hit
+     plain non-constrained adaptive Poisson too, so it was unrelated to the
+     hanging-node work.) With that fix, constrained + two-level-adaptive Poisson
+     with a Neumann face element solves under `mpirun -n {2,3}` and the reduced
+     integral observable matches the serial result to all printed digits, both
+     with the fixed Pardiso gather solver and with `--petsc_mumps` (true
+     distributed MUMPS). This works because the flattening keeps the truth in
+     oomph-lib's `Node::Hanging_pt` / `Local_hang_eqn` and stores only
+     element-local corner nodes, so oomph's `synchronise_hanging_nodes` handles
+     the halo masters. Note: run distributed with `--petsc_mumps`, not
+     `--distribute` with Pardiso (the latter only gathers to root).
 6. **`resize` interplay (medium)** — `Node::resize` (`nodes.cc:2167`) reallocates
    `Hanging_pt`, defaulting new slots to the geometric pointer. Interface dofs are
    added by resizing, so extra-`HangInfo` bookkeeping must be re-established after

@@ -506,11 +506,15 @@ class PardisoSolver(GenericLinearSystemSolver):
         rank=get_mpi_rank()
         nproc=get_mpi_nproc()
         if op_flag==1:
-            global_col_index = col_index 
+            global_col_index = col_index
             rows = numpy.empty(len(col_index), dtype=np.int64)
             for i in range(nrow_local):
-                rows[row_start[i]:row_start[i + 1]] = first_row + i            
-            nnz_local = len(data)
+                rows[row_start[i]:row_start[i + 1]] = first_row + i
+            # NOTE: `data` is the oomph-lib solver-state handle, which this (non-native-MPI)
+            # Pardiso wrapper does not use - it is passed as None. The local non-zero count is
+            # already supplied as the `nnz_local` argument (and only `values`/`col_index`/`row_start`
+            # are needed below), so do NOT recompute it from `data` (that raised
+            # "object of type 'NoneType' has no len()").
             cols = global_col_index
             data_values = values
             comm=get_mpi_world_comm()
