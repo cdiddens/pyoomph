@@ -219,3 +219,29 @@ def test_two_domain_interface_constrained_adaptivity():
         # rather than machine zero; a separate analytic-vs-FD Jacobian check confirms the hangbuffers
         # (incl. the opposite-domain path) are exact.
         assert _max_abs_residual(problem) < 1e-8
+
+
+# --- Mixed spaces: a C2 field partially constrained to C1 alongside a genuinely-C1 field ---
+# The native C1 field uses the C1 hang slot; the constrained C2 field is flattened via C1 corners.
+# Both must coexist on the same adaptively refined mesh.
+class MixedSpaceProblem(Problem):
+    def __init__(self, constrain=True):
+        super().__init__()
+        self.constrain = constrain
+
+    def define_problem(self):
+        self += RectangularQuadMesh(size=[1, 1], N=6)
+        eqs = PoissonEquation(name="u", space="C2", source=1) + DirichletBC(u=0) @ "left" + NeumannBC(u=1) @ "right"
+        eqs += PoissonEquation(name="v", space="C1", source=2) + DirichletBC(v=0) @ "left" + DirichletBC(v=1) @ "right"
+        if self.constrain:
+            # Partial constraint of the C2 field u to C1 on the right half only; v stays a real C1 field.
+            eqs += ConstrainFieldsToC1Space("u", where=lambda x: x[0] > 0.5)
+        self += eqs @ "domain"
+
+
+def test_mixed_space_partial_constraint_adaptivity():
+    with MixedSpaceProblem(constrain=True) as problem:
+        problem += RefineToLevel(2) @ "domain"
+        problem += RefineToLevel(4) @ "domain/right"
+        problem.solve()
+        assert _max_abs_residual(problem) < 1e-9

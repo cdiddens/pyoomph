@@ -339,6 +339,15 @@ populates `Local_hang_eqn[value_index]` for every field pyoomph later reads.
    (max diff 4.5e-9 at FD step 1e-7). See
    `tests/test_constrained_adaptivity.py::test_two_domain_interface_constrained_adaptivity`.
 
+   **Mixed spaces**: a C2 field *partially* constrained to C1 (via `where`) can
+   coexist with a genuinely-C1 field on the same adaptively refined mesh — the
+   native C1 field hangs via the C1 slot while the constrained C2 field is
+   flattened through the C1 corners. Validated both on a single mesh (machine-zero
+   residual) and across a two-domain mutual interface coupling both fields (correct
+   to an analytic-vs-FD Jacobian check, max diff ~4.5e-9; the residual is again
+   only saddle-point-conditioning-limited). See
+   `tests/test_constrained_adaptivity.py::test_mixed_space_partial_constraint_adaptivity`.
+
    **Still not covered**: non-matching refinement level across a mutual interface
    (a pre-existing pyoomph limitation, independent of C1 constraints).
    * **MPI**: **validated.** (A pre-existing crash in the gather-to-root Pardiso
