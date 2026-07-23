@@ -1735,13 +1735,19 @@ class GmshTemplate(MeshTemplate):
         sub_index:int | None=None
 
         for entry in res:
-            print("Entry",entry,given_names)
             if entry[0]==newdim:
                 start_index+=1
                 sub_index=0
             if entry[0]==newdim-1:
+                if sub_index is None:
+                    # gmsh lists the auto-generated "end"/top surface (a copy of
+                    # the original input surface) BEFORE the extruded volume
+                    # entry, not after -- it mirrors the whole input surface,
+                    # not one of its boundary curves, so there is no per-curve
+                    # name to propagate for it here (it is handled above, via
+                    # end_name()).
+                    continue
                 if entry[1] not in given_names:
-                    assert sub_index is not None, "Expected an entry of dimension "+str(newdim)+" in res before any entry of dimension "+str(newdim-1)
                     original=to_extrude[start_index]
                     if isinstance(original,PlaneSurface):
                         #print("Found missing entity, trying to find name for it. Original was",original,"with dim_tag",original.dim_tag,"subindex",sub_index)
@@ -1855,8 +1861,15 @@ class GmshTemplate(MeshTemplate):
                 start_index+=1
                 sub_index=0
             if entry[0]==newdim-1:
+                if sub_index is None:
+                    # gmsh lists the auto-generated "end"/top surface (a copy of
+                    # the original input surface) BEFORE the revolved volume
+                    # entry, not after -- it mirrors the whole input surface,
+                    # not one of its boundary curves, so there is no per-curve
+                    # name to propagate for it here (it is handled above, via
+                    # end_name()).
+                    continue
                 if entry[1] not in given_names:
-                    assert sub_index is not None, "Expected an entry of dimension "+str(newdim)+" in res before any entry of dimension "+str(newdim-1)
                     original=to_extrude[start_index]
                     if isinstance(original,PlaneSurface):
                         #print("Found missing entity, trying to find name for it. Original was",original,"with dim_tag",original.dim_tag,"subindex",sub_index)
