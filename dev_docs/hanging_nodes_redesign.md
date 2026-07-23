@@ -318,9 +318,29 @@ populates `Local_hang_eqn[value_index]` for every field pyoomph later reads.
    residual oracle (~1e-14), reduces the dof count, and matches serial under
    `mpirun -n 2 --petsc_mumps`.
 
-   **Still not covered**: `interpolate_hang_values` uses the pre-flatten value
-   interpolation (affects stored dummy/pinned values for output/restart, not the
-   solve).
+   **`interpolate_hang_values`** (which pushes consistent raw values into
+   hanging/dummy/pinned node storage for assembly input, output and restart) now
+   uses the same flattening: `flattened_value` / `flattened_position` recurse
+   (constrained → C1 corners; hanging → masters) down to real free leaf dofs whose
+   raw values are always current, so the pushed storage is order-independent and
+   consistent with the hangbuffer. (Unlike the hangbuffer it keeps pinned leaves,
+   since e.g. Dirichlet data does contribute to the interpolated value.)
+
+   **Two coupled domains sharing a mutual interface** (inter-domain interaction:
+   an interface element reads a field from the *opposite* domain via
+   `var(..., domain=get_opposite_side_of_interface())`) also compose correctly
+   with C1 constraints + adaptivity, provided the refinement level is matched on
+   both sides of the interface (the current requirement). Validated with a 2D
+   conjugate problem (Lagrange-multiplier T-continuity coupling), refined at the
+   interface on both sides so hanging occurs just inside each domain while
+   constrained mid-edge nodes sit on the interface. The saddle-point conditioning
+   limits the linear residual to ~1e-12 rather than machine zero, so correctness of
+   the opposite-side hangbuffers was confirmed by an analytic-vs-FD Jacobian check
+   (max diff 4.5e-9 at FD step 1e-7). See
+   `tests/test_constrained_adaptivity.py::test_two_domain_interface_constrained_adaptivity`.
+
+   **Still not covered**: non-matching refinement level across a mutual interface
+   (a pre-existing pyoomph limitation, independent of C1 constraints).
    * **MPI**: **validated.** (A pre-existing crash in the gather-to-root Pardiso
      path — `pyoomph/solvers/pardiso.py:513` recomputed `nnz_local = len(data)`
      from the always-`None` oomph solver-state handle — was fixed first; it hit

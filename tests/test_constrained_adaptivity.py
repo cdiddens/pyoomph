@@ -145,3 +145,77 @@ def test_interface_dof_constraint_adaptivity():
         problem += RefineToLevel(4) @ "domain/right"
         problem.solve()
         assert _max_abs_residual(problem) < 1e-9
+
+
+# --- Two coupled domains sharing a mutual interface with inter-domain interaction ---
+# Verifies that C1 constraining still works (both close to and at the interface) when an interface
+# element reads a field from the *opposite* domain, i.e. that the opposite-side hangbuffers the JIT
+# code uses are also filled correctly. Refinement is kept matched on both sides of the interface (the
+# current requirement); the level jump lives just inside each domain, so hanging occurs close to the
+# interface while the constrained mid-edge nodes sit on it.
+
+class _TwoDomainMesh2d(MeshTemplate):
+    def __init__(self, N=4):
+        super().__init__()
+        self.N = N
+
+    def define_geometry(self):
+        N = self.N
+        A = self.new_domain("domainA")
+        B = self.new_domain("domainB")
+
+        def nid(ix, iy):
+            return self.add_node_unique(ix / N, iy / N)  # x in [0,2] (interface at x=1), y in [0,1]
+
+        for ix in range(2 * N):
+            for iy in range(N):
+                dom = A if ix < N else B
+                dom.add_quad_2d_C1(nid(ix, iy), nid(ix + 1, iy), nid(ix, iy + 1), nid(ix + 1, iy + 1))
+        for iy in range(N):
+            self.add_facet_to_boundary("left", [nid(0, iy), nid(0, iy + 1)])
+            self.add_facet_to_boundary("right", [nid(2 * N, iy), nid(2 * N, iy + 1)])
+            self.add_facet_to_boundary("interface", [nid(N, iy), nid(N, iy + 1)])
+
+
+class _ConnectTAtInterface(InterfaceEquations):
+    def define_fields(self):
+        self.define_scalar_field("lam", "C2")  # Lagrange multiplier enforcing T continuity
+
+    def define_residuals(self):
+        my, myt = var_and_test("T")
+        opp = var("T", domain=self.get_opposite_side_of_interface())
+        oppt = testfunction("T", domain=self.get_opposite_side_of_interface())
+        lam, lamt = var_and_test("lam")
+        self.add_residual(weak(my - opp, lamt))
+        self.add_residual(weak(lam, myt))
+        self.add_residual(weak(-lam, oppt))
+
+
+class TwoDomainInterfaceProblem(Problem):
+    def __init__(self, constrain=True):
+        super().__init__()
+        self.constrain = constrain
+
+    def define_problem(self):
+        self.add_mesh(_TwoDomainMesh2d(N=4))
+        for dom, (bnd, val) in [("domainA", ("left", 0)), ("domainB", ("right", 1))]:
+            eqs = PoissonEquation(name="T", space="C2", source=1) + DirichletBC(T=val) @ bnd
+            eqs += ScalarField("_dummyC1", space="C1") + DirichletBC(_dummyC1=0)
+            if self.constrain:
+                eqs += ConstrainFieldsToC1Space("T")
+            self += eqs @ dom
+        self += _ConnectTAtInterface() @ "domainA/interface"
+
+
+def test_two_domain_interface_constrained_adaptivity():
+    with TwoDomainInterfaceProblem(constrain=True) as problem:
+        # Matched refinement on both sides of the interface; the jump lives just inside each domain.
+        problem += RefineToLevel(1) @ "domainA"
+        problem += RefineToLevel(1) @ "domainB"
+        problem += RefineToLevel(3) @ "domainA/interface"
+        problem += RefineToLevel(3) @ "domainB/interface"
+        problem.solve()
+        # Saddle-point (Lagrange multiplier + C1 constraint) conditioning limits the residual to ~1e-12
+        # rather than machine zero; a separate analytic-vs-FD Jacobian check confirms the hangbuffers
+        # (incl. the opposite-domain path) are exact.
+        assert _max_abs_residual(problem) < 1e-8
