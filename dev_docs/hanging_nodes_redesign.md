@@ -295,12 +295,32 @@ populates `Local_hang_eqn[value_index]` for every field pyoomph later reads.
    linear-response regressions still pass. See `tests/test_constrained_adaptivity.py`.
    The flattening is dimension-agnostic, so 3D bricks worked with no extra changes.
 
-   **Not yet covered** (follow-ups):
-   * `INTERFACE_DOF_CONSTRAIN_TO_C1` on refined interfaces still uses the old
-     one-level chaining in `InterfaceElementBase::fill_additional_hang_buffer_data`
-     (bulk field/position constraints are done).
-   * `interpolate_hang_values` still uses the pre-flatten value interpolation
-     (affects stored dummy/pinned values for output/restart, not the solve).
+   **Interface-dof constraints** (`INTERFACE_DOF_CONSTRAIN_TO_C1`, i.e.
+   `ConstrainFieldsToC1Space` applied to a surface/interface field) now work on
+   refined interfaces too — but the fix was *not* in the C++ hang fill. Two Python
+   wiring bugs had made the feature a silent no-op:
+   * `ConstrainFieldsToC1Space.before_assigning_equations_preorder` called
+     `n.set_additional_dof_constraint(index, mode)`, but the binding signature is
+     `(mode, index)` (see `src/nanobind/mesh.cpp` and `ConstrainPositionsToC1Space`).
+     The swap only happened to be harmless for a bulk field at value index 0
+     (mode==index==0) and mislabeled everything else — a bulk field at index ≥ 1
+     became an interface constraint, and an interface field became a bulk
+     constraint on the wrong index. Fixed to `(mode, index)`.
+   * `Problem.reapply_boundary_conditions` applied/cleared additional dof
+     constraints only on the top-level bulk meshes in `_meshdict`, never recursing
+     into the nested `_interfacemeshes`, so an interface element's
+     `setup_additional_dof_constraints` (which pins the constrained interface dof
+     and sets `has_additional_dof_constraints`) was never called. Now recurses.
+
+   With those two fixes the existing `InterfaceElementBase::fill_additional_hang_buffer_data`
+   chaining assembles a correct Jacobian: a surface field constrained to C1 on a
+   two-/three-/four-level adaptively refined interface converges to the linear
+   residual oracle (~1e-14), reduces the dof count, and matches serial under
+   `mpirun -n 2 --petsc_mumps`.
+
+   **Still not covered**: `interpolate_hang_values` uses the pre-flatten value
+   interpolation (affects stored dummy/pinned values for output/restart, not the
+   solve).
    * **MPI**: **validated.** (A pre-existing crash in the gather-to-root Pardiso
      path — `pyoomph/solvers/pardiso.py:513` recomputed `nnz_local = len(data)`
      from the always-`None` oomph solver-state handle — was fixed first; it hit

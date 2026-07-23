@@ -3236,14 +3236,27 @@ class Problem(_pyoomph.Problem):
 
 
     def reapply_boundary_conditions(self):
-        for m in self._meshdict.values():            
-            if not isinstance(m,ODEStorageMesh):
-                m.clear_additional_dof_constraints()
+        # Additional dof constraints (ConstrainFieldsToC1Space / ConstrainPositionsToC1Space) may live
+        # on interface fields, whose elements sit in the (nested) interface meshes rather than the
+        # top-level bulk meshes. So clear/apply must recurse into _interfacemeshes as well - otherwise
+        # an interface element's setup_additional_dof_constraints (which pins the constrained interface
+        # dof) is never called and the constraint silently does nothing.
+        def _clear(m):
+            if isinstance(m,ODEStorageMesh): return
+            m.clear_additional_dof_constraints()
+            for im in m._interfacemeshes.values():
+                _clear(im)
+        def _apply(m):
+            if isinstance(m,ODEStorageMesh): return
+            m.apply_additional_dof_constraints()
+            for im in m._interfacemeshes.values():
+                _apply(im)
+        for m in self._meshdict.values():
+            _clear(m)
         self.setup_pinning()
         self.before_assigning_equation_numbers(self._dof_selector)
-        for m in self._meshdict.values():            
-            if not isinstance(m,ODEStorageMesh):
-                m.apply_additional_dof_constraints()
+        for m in self._meshdict.values():
+            _apply(m)
         self._dof_selector_used=self._dof_selector
         neq=self.assign_eqn_numbers(True)
         if not self.is_quiet():

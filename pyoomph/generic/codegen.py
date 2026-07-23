@@ -3319,11 +3319,15 @@ class ConstrainFieldsToC1Space(Equations):
                     x=[n.x(i) for i in range(n.ndim())]
                     if not self._where(x):
                         continue
-                for field,(mode,index) in modes.items():  
+                for field,(mode,index) in modes.items():
+                    # NB: the binding signature is (mode, index) - see src/nanobind/mesh.cpp and the
+                    # matching call in ConstrainPositionsToC1Space. Passing them the other way round
+                    # silently mislabels the constraint (it only happened to work for a bulk field at
+                    # value index 0, where mode==index==0, and did nothing for interface fields).
                     if self._unconstrain_instead:
-                        n.remove_additional_dof_constraint(index, mode)
-                    else:                  
-                        n.set_additional_dof_constraint(index, mode)
+                        n.remove_additional_dof_constraint(mode, index)
+                    else:
+                        n.set_additional_dof_constraint(mode, index)
                     
         return super().before_assigning_equations_preorder(mesh)
 

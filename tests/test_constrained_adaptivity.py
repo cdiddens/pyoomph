@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 from pyoomph import *
 from pyoomph.expressions import *
-from pyoomph.meshes.simplemeshes import CircularMesh
+from pyoomph.meshes.simplemeshes import CircularMesh, RectangularQuadMesh
 from pyoomph.equations.poisson import *
 from pyoomph.equations.ALE import LaplaceSmoothedMesh, ConstrainPositionsToC1Space
 
@@ -90,5 +90,58 @@ def test_constrained_adaptivity_3d_brick():
     with Constrained3DBrickProblem(constrain=True) as problem:
         problem += RefineToLevel(1) @ "domain"
         problem += RefineToLevel(3) @ "domain/right"
+        problem.solve()
+        assert _max_abs_residual(problem) < 1e-9
+
+
+class _SurfaceField(InterfaceEquations):
+    """A linear surface field s coupled to the bulk trace u, for interface-dof tests."""
+
+    def define_fields(self):
+        self.define_scalar_field("s", "C2")
+
+    def define_residuals(self):
+        s, st = var_and_test("s")
+        u = var("u")
+        self.add_weak(grad(s), grad(st))
+        self.add_weak(s - u, st)
+
+
+class InterfaceConstrainedProblem(Problem):
+    def __init__(self, constrain=True):
+        super().__init__()
+        self.constrain = constrain
+
+    def define_problem(self):
+        self += RectangularQuadMesh(size=[1, 1], N=4)
+        eqs = PoissonEquation(source=1) + DirichletBC(u=0) @ "left"
+        eqs += ScalarField("_dummyC1", space="C1") + DirichletBC(_dummyC1=0)
+        self += eqs @ "domain"
+        seqs = _SurfaceField()
+        if self.constrain:
+            # Constrain the interface (surface) field s to C1 on the refined interface.
+            seqs += ConstrainFieldsToC1Space("s")
+        self += seqs @ "domain/right"
+
+
+def test_interface_dof_constraint_reduces_dofs():
+    # The constraint must actually pin the interface mid-edge dofs (this only works once the
+    # interface mesh's setup_additional_dof_constraints is invoked and the (mode, index) argument
+    # order is correct).
+    with InterfaceConstrainedProblem(constrain=False) as problem:
+        problem.initialise()
+        problem.reapply_boundary_conditions()
+        ndof_free = problem.ndof()
+    with InterfaceConstrainedProblem(constrain=True) as problem:
+        problem.initialise()
+        problem.reapply_boundary_conditions()
+        ndof_constrained = problem.ndof()
+    assert ndof_constrained < ndof_free
+
+
+def test_interface_dof_constraint_adaptivity():
+    with InterfaceConstrainedProblem(constrain=True) as problem:
+        problem += RefineToLevel(2) @ "domain"
+        problem += RefineToLevel(4) @ "domain/right"
         problem.solve()
         assert _max_abs_residual(problem) < 1e-9
