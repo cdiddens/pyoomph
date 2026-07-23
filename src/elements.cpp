@@ -569,6 +569,22 @@ namespace pyoomph
 		return n->x(t, i); // real free leaf
 	}
 
+	// True if none of a genuine hang's master nodes carries any additional dof constraint. Masters are
+	// non-hanging by construction, so when this holds the flattened expansion is exactly the plain hang
+	// and the hangbuffer can be written directly, skipping the std::map allocation. This keeps
+	// conventional (constraint-free) adaptive assembly as fast as before the constraint composition.
+	static bool hang_masters_are_unconstrained(oomph::HangInfo *h)
+	{
+		const unsigned nm = h->nmaster();
+		for (unsigned m = 0; m < nm; m++)
+		{
+			pyoomph::Node *mn = dynamic_cast<pyoomph::Node *>(h->master_node_pt(m));
+			if (mn && mn->get_additional_dof_constraints() != NULL)
+				return false;
+		}
+		return true;
+	}
+
 	// Write a flattened (local_eqn -> weight) map into a single hangbuffer entry. Near-zero weights are
 	// dropped to keep the master list within the fixed MAX_HANG capacity of the JIT buffer.
 	static void write_flattened_hangbuffer(JITHangInfo_t &hb, const std::map<int, double> &out)
@@ -601,7 +617,30 @@ namespace pyoomph
 				// was locally reduced to C1 (ConstrainPositionsToC1Space). A *field-only* constraint on a
 				// master node is irrelevant here (position is not constrained), so flatten_hang_for_position
 				// keys purely on POSITION_CONSTRAIN_TO_C1 and the geometric hang.
-				if (n->is_hanging() || this->node_is_c1_constrained_for_position(n, f))
+				if (n->is_hanging())
+				{
+					oomph::HangInfo *h = n->hanging_pt();
+					if ((!has_additional_dof_constraints || !this->node_is_c1_constrained_for_position(n, f)) && hang_masters_are_unconstrained(h))
+					{
+						// Fast path: plain geometric hang, no constraints to compose.
+						JITHangInfo_t &hb = shape_info->hanginfo_Pos[f][l];
+						hb.nummaster = h->nmaster();
+						for (unsigned m = 0; m < h->nmaster(); m++)
+						{
+							hb.masters[m].weight = h->master_weight(m);
+							oomph::DenseMatrix<int> pe = this->local_position_hang_eqn(h->master_node_pt(m));
+							hb.masters[m].local_eqn = pe(0, f);
+						}
+					}
+					else
+					{
+						std::map<int, double> out;
+						this->flatten_hang_for_position(n, f, 1.0, out, 0);
+						write_flattened_hangbuffer(shape_info->hanginfo_Pos[f][l], out);
+					}
+					res = true;
+				}
+				else if (has_additional_dof_constraints && this->node_is_c1_constrained_for_position(n, f))
 				{
 					std::map<int, double> out;
 					this->flatten_hang_for_position(n, f, 1.0, out, 0);
@@ -643,7 +682,31 @@ namespace pyoomph
 					// A node's value needs redistribution iff it is genuinely hanging in this value or it
 					// was locally reduced to C1 (a constraint). Both are handled uniformly by flattening
 					// into real free leaf dofs (which also composes the two on refined constraint regions).
-					if (n->is_hanging(v) || this->node_is_c1_constrained_for_value(n, v))
+					if (n->is_hanging(v))
+					{
+						oomph::HangInfo *h = n->hanging_pt(v);
+						// Fast path (the conventional case): the node is not itself constrained and none of
+						// its masters is, so the flattened expansion is exactly the plain hang. The
+						// node-constraint test is gated on has_additional_dof_constraints so a
+						// constraint-free element pays nothing for it.
+						if ((!has_additional_dof_constraints || !this->node_is_c1_constrained_for_value(n, v)) && hang_masters_are_unconstrained(h))
+						{
+							hangbuffer[l].nummaster = h->nmaster();
+							for (unsigned m = 0; m < h->nmaster(); m++)
+							{
+								hangbuffer[l].masters[m].weight = h->master_weight(m);
+								hangbuffer[l].masters[m].local_eqn = this->local_hang_eqn(h->master_node_pt(m), v);
+							}
+						}
+						else
+						{
+							std::map<int, double> out;
+							this->flatten_hang_for_value(n, v, 1.0, out, 0);
+							write_flattened_hangbuffer(hangbuffer[l], out);
+						}
+						res = true;
+					}
+					else if (has_additional_dof_constraints && this->node_is_c1_constrained_for_value(n, v))
 					{
 						std::map<int, double> out;
 						this->flatten_hang_for_value(n, v, 1.0, out, 0);

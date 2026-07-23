@@ -348,6 +348,19 @@ populates `Local_hang_eqn[value_index]` for every field pyoomph later reads.
    only saddle-point-conditioning-limited). See
    `tests/test_constrained_adaptivity.py::test_mixed_space_partial_constraint_adaptivity`.
 
+   **Performance / memory.** The flattening adds a `std::map` build + recursion per
+   hanging node, which would slow conventional (constraint-free) adaptive assembly.
+   To avoid that, `fill_hang_info_with_equations_{basebulk,for_pos}` take a fast
+   path when the node is not itself constrained and none of its hang masters is
+   (`hang_masters_are_unconstrained`): they then write the plain hang directly, with
+   no map. The node-constraint test is gated on the element's
+   `has_additional_dof_constraints`, so a constraint-free element pays nothing for a
+   non-hanging node, and a non-adaptive constraint-free problem hits exactly the
+   old code path. Measured (adaptive Poisson, ~6.8k dofs, many hanging nodes,
+   min-of-5 assembly time): main ≈ 21.05 ms vs this branch ≈ 21.1 ms — within
+   noise; peak RSS identical (~194 MB). So conventional problems are neither slower
+   nor heavier.
+
    **Still not covered**: non-matching refinement level across a mutual interface
    (a pre-existing pyoomph limitation, independent of C1 constraints).
    * **MPI**: **validated.** (A pre-existing crash in the gather-to-root Pardiso
