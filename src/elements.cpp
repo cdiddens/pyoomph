@@ -427,6 +427,120 @@ namespace pyoomph
 		return n->hanging_pt();
 	}
 
+	bool BulkElementBase::node_is_c1_constrained_for_value(oomph::Node *n, unsigned v) const
+	{
+		Node *pn = dynamic_cast<Node *>(n);
+		if (!pn) return false;
+		for (const AdditionalDofConstrainingInfo *info = pn->get_additional_dof_constraints(); info != NULL; info = info->next)
+			if (info->mode == CONTINUOUS_BASE_DOF_CONSTRAIN_TO_C1 && info->index == v)
+				return true;
+		return false;
+	}
+
+	bool BulkElementBase::node_is_c1_constrained_for_position(oomph::Node *n, unsigned i) const
+	{
+		Node *pn = dynamic_cast<Node *>(n);
+		if (!pn) return false;
+		for (const AdditionalDofConstrainingInfo *info = pn->get_additional_dof_constraints(); info != NULL; info = info->next)
+			if (info->mode == POSITION_CONSTRAIN_TO_C1 && info->index == i)
+				return true;
+		return false;
+	}
+
+	int BulkElementBase::leaf_local_eqn_for_value(oomph::Node *n, unsigned v)
+	{
+		const unsigned nn = this->nnode();
+		for (unsigned l = 0; l < nn; l++)
+			if (node_pt(l) == n)
+				return this->nodal_local_eqn(l, v);
+		// External free master: its value was registered by oomph's assign_hanging_local_eqn_numbers
+		// (as a master of some node genuinely hanging in v), so it has a local hang equation number.
+		return this->local_hang_eqn(n, v);
+	}
+
+	int BulkElementBase::leaf_local_eqn_for_position(oomph::Node *n, unsigned i)
+	{
+		const unsigned nn = this->nnode();
+		for (unsigned l = 0; l < nn; l++)
+			if (node_pt(l) == n)
+				return eleminfo.pos_local_eqn[l][i]; // as populated in fill_element_info / used by the JIT code
+		oomph::DenseMatrix<int> pe = this->local_position_hang_eqn(n);
+		return pe(0, i);
+	}
+
+	void BulkElementBase::flatten_hang_for_value(oomph::Node *n, unsigned v, double weight, std::map<int, double> &out, int depth)
+	{
+		if (depth > 32)
+			throw_runtime_error("flatten_hang_for_value: recursion too deep - cyclic hang/constraint chain?");
+		Node *pn = dynamic_cast<Node *>(n);
+		// 1. Locally reduced to C1 for this value: expand via the stored C1-corner average, then recurse
+		//    (a corner may itself be constrained and/or hanging).
+		if (pn && !pn->c1_constraint_corners.empty() && node_is_c1_constrained_for_value(pn, v))
+		{
+			for (const auto &cw : pn->c1_constraint_corners)
+				flatten_hang_for_value(cw.first, v, weight * cw.second, out, depth + 1);
+			return;
+		}
+		// 2. Genuinely hanging in this value: expand via the oomph hang masters (each recursed, since a
+		//    master may be a constrained node that must be flattened further).
+		if (n->is_hanging(v))
+		{
+			oomph::HangInfo *h = n->hanging_pt(v);
+			const unsigned nm = h->nmaster();
+			for (unsigned m = 0; m < nm; m++)
+				flatten_hang_for_value(h->master_node_pt(m), v, weight * h->master_weight(m), out, depth + 1);
+			return;
+		}
+		// 3. Real leaf: a free dof contributes; a genuinely pinned (e.g. Dirichlet) leaf drops out.
+		const int le = leaf_local_eqn_for_value(n, v);
+		if (le >= 0)
+			out[le] += weight;
+	}
+
+	void BulkElementBase::flatten_hang_for_position(oomph::Node *n, unsigned i, double weight, std::map<int, double> &out, int depth)
+	{
+		if (depth > 32)
+			throw_runtime_error("flatten_hang_for_position: recursion too deep - cyclic hang/constraint chain?");
+		Node *pn = dynamic_cast<Node *>(n);
+		if (pn && !pn->c1_constraint_corners.empty() && node_is_c1_constrained_for_position(pn, i))
+		{
+			for (const auto &cw : pn->c1_constraint_corners)
+				flatten_hang_for_position(cw.first, i, weight * cw.second, out, depth + 1);
+			return;
+		}
+		if (n->is_hanging()) // geometric (positional) hang
+		{
+			oomph::HangInfo *h = n->hanging_pt();
+			const unsigned nm = h->nmaster();
+			for (unsigned m = 0; m < nm; m++)
+				flatten_hang_for_position(h->master_node_pt(m), i, weight * h->master_weight(m), out, depth + 1);
+			return;
+		}
+		const int le = leaf_local_eqn_for_position(n, i);
+		if (le >= 0)
+			out[le] += weight;
+	}
+
+	// Write a flattened (local_eqn -> weight) map into a single hangbuffer entry. Near-zero weights are
+	// dropped to keep the master list within the fixed MAX_HANG capacity of the JIT buffer.
+	static void write_flattened_hangbuffer(JITHangInfo_t &hb, const std::map<int, double> &out)
+	{
+		const int MAX_HANG_LOCAL = 16; // must match the MAX_HANG used to allocate masters[] in fill_element_info
+		hb.nummaster = 0;
+		for (const auto &kv : out)
+		{
+			if (kv.second > -1e-15 && kv.second < 1e-15)
+				continue;
+			if (hb.nummaster >= MAX_HANG_LOCAL)
+				throw_runtime_error("Flattened hanging/constraint expansion exceeds MAX_HANG master slots. "
+				                    "This can happen with deep refinement inside a ConstrainFieldsToC1Space region; "
+				                    "please report with a reproducing script.");
+			hb.masters[hb.nummaster].local_eqn = kv.first;
+			hb.masters[hb.nummaster].weight = kv.second;
+			hb.nummaster++;
+		}
+	}
+
 	bool BulkElementBase::fill_hang_info_with_equations_for_pos(JITShapeInfo_t *shape_info)
 	{
 		bool res = false;
@@ -434,24 +548,17 @@ namespace pyoomph
 		{
 			for (unsigned int l = 0; l < eleminfo.nnode; l++)
 			{
-				if (oomph::HangInfo *hang_info_pt = this->hang_info_for_position(l))
+				oomph::Node *n = node_pt(l);
+				// The position needs redistribution iff the node is geometrically hanging or its position
+				// was locally reduced to C1 (ConstrainPositionsToC1Space). A *field-only* constraint on a
+				// master node is irrelevant here (position is not constrained), so flatten_hang_for_position
+				// keys purely on POSITION_CONSTRAIN_TO_C1 and the geometric hang.
+				if (n->is_hanging() || this->node_is_c1_constrained_for_position(n, f))
 				{
+					std::map<int, double> out;
+					this->flatten_hang_for_position(n, f, 1.0, out, 0);
+					write_flattened_hangbuffer(shape_info->hanginfo_Pos[f][l], out);
 					res = true;
-					shape_info->hanginfo_Pos[f][l].nummaster = hang_info_pt->nmaster();
-					for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
-					{
-						// See the matching check in BulkElementBase::assign_additional_local_eqn_numbers:
-						// this genuinely (geometrically) hanging node's real oomph-native master may live
-						// in a different, less-refined element that itself never shows up as
-						// has_additional_dof_constraints here - so the master needs its own check too.
-						if (dynamic_cast<Node *>(hang_info_pt->master_node_pt(m))->get_additional_dof_constraints() != NULL)
-						{
-							throw_runtime_error("ConstrainFieldsToC1Space/ConstrainPositionsToC1Space ('additional dof constraints') cannot currently be combined with genuine oomph-lib hanging nodes, i.e. with adaptively refined meshes where this element borders a neighbour of non-matching refinement level. Please avoid this combination (e.g. by keeping the mesh region using these constraints uniformly refined).");
-						}
-						shape_info->hanginfo_Pos[f][l].masters[m].weight = hang_info_pt->master_weight(m);
-						oomph::DenseMatrix<int> position_local_eqn_at_node = this->local_position_hang_eqn(hang_info_pt->master_node_pt(m));
-						shape_info->hanginfo_Pos[f][l].masters[m].local_eqn = position_local_eqn_at_node(0, f);
-					}
 				}
 				else
 				{
@@ -479,27 +586,21 @@ namespace pyoomph
 			const std::vector<unsigned> & space_node_to_elem_node=this->get_nodal_space_index_to_element_index_map()[space_info->space_index];
 			for (unsigned int f = 0; f < space_info->numfields_basebulk; f++)
 			{
+				const unsigned v = f+space_info->nodal_offset_basebulk;
 				JITHangInfo_t * hangbuffer=shape_info->hanginfo[space_info->buffer_offset_basebulk+f];
 				for (unsigned int l = 0; l < nnode_space; l++)
 				{
 					const unsigned l_elem=space_node_to_elem_node[l];
-					if (oomph::HangInfo *hang_info_pt = this->hang_info_for_space(space_info, l_elem))
+					oomph::Node *n = node_pt(l_elem);
+					// A node's value needs redistribution iff it is genuinely hanging in this value or it
+					// was locally reduced to C1 (a constraint). Both are handled uniformly by flattening
+					// into real free leaf dofs (which also composes the two on refined constraint regions).
+					if (n->is_hanging(v) || this->node_is_c1_constrained_for_value(n, v))
 					{
+						std::map<int, double> out;
+						this->flatten_hang_for_value(n, v, 1.0, out, 0);
+						write_flattened_hangbuffer(hangbuffer[l], out);
 						res = true;
-						hangbuffer[l].nummaster = hang_info_pt->nmaster();
-						for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
-						{
-							// See the matching check in BulkElementBase::assign_additional_local_eqn_numbers:
-							// this genuinely (geometrically) hanging node's real oomph-native master may live
-							// in a different, less-refined element that itself never shows up as
-							// has_additional_dof_constraints here - so the master needs its own check too.
-							if (dynamic_cast<Node *>(hang_info_pt->master_node_pt(m))->get_additional_dof_constraints() != NULL)
-							{
-								throw_runtime_error("ConstrainFieldsToC1Space/ConstrainPositionsToC1Space ('additional dof constraints') cannot currently be combined with genuine oomph-lib hanging nodes, i.e. with adaptively refined meshes where this element borders a neighbour of non-matching refinement level. Please avoid this combination (e.g. by keeping the mesh region using these constraints uniformly refined).");
-							}
-							hangbuffer[l].masters[m].weight = hang_info_pt->master_weight(m);
-							hangbuffer[l].masters[m].local_eqn = this->local_hang_eqn(hang_info_pt->master_node_pt(m), f+space_info->nodal_offset_basebulk);
-						}
 					}
 					else
 					{
@@ -521,185 +622,13 @@ namespace pyoomph
 	// contributions there exactly as it does for genuinely hanging nodes.
 	bool BulkElementBase::fill_additional_hang_buffer_data(JITShapeInfo_t *shape_info)
 	{
-		bool res=false;
-		if (!has_additional_dof_constraints)
-			return res;
-		auto * ft = codeinst->get_func_table();
-		const std::vector<std::vector<unsigned>> &c1_dummy_map = this->get_dummy_value_interpolation_map()[SPACE_INDEX_C1];
-
-		bool has_C1_hanging= ft->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk>0 || ft->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk>0; 
-
-		auto get_c1_masters = [&c1_dummy_map](unsigned l_elem) -> const std::vector<unsigned> *
-		{
-			for (const std::vector<unsigned> &entry : c1_dummy_map)
-			{
-				if (entry[0] == l_elem)
-					return &entry;
-			}
-			return NULL;
-		};
-
-		std::map<unsigned , int > global_to_local_map;
-		for (unsigned int i=0;i<this->ndof();i++)
-		{
-			global_to_local_map[this->eqn_number(i)]=i;
-		}
-
-		for (unsigned int ispace = 0; ispace < ft->num_present_continuous_spaces; ispace++)
-		{
-			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info = ft->present_continuous_spaces[ispace];
-			const std::vector<unsigned> & space_node_to_elem_node = this->get_nodal_space_index_to_element_index_map()[space_info->space_index];
-			const std::vector<int> & elem_node_to_space_node = this->get_element_index_to_nodal_space_index_map()[space_info->space_index];
-			unsigned nnode_space = eleminfo.nnode_of_space[space_info->space_index];
-			for (unsigned int l = 0; l < nnode_space; l++)
-			{
-				const unsigned l_elem = space_node_to_elem_node[l];
-				Node *n = dynamic_cast<Node *>(node_pt(l_elem));
-				for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info != NULL; info = info->next)
-				{
-					if (info->mode == CONTINUOUS_BASE_DOF_CONSTRAIN_TO_C1)
-					{
-						if (info->index < space_info->nodal_offset_basebulk || info->index >= space_info->nodal_offset_basebulk + space_info->numfields_basebulk)
-							continue; // not a value index of this space
-						unsigned f = info->index - space_info->nodal_offset_basebulk;
-						JITHangInfo_t * hangbuffer = shape_info->hanginfo[space_info->buffer_offset_basebulk + f];
-						if (has_C1_hanging && n->is_hanging(ft->continuous_spaces[SPACE_INDEX_C1].hangindex))
-						{
-							// Genuinely hanging on the C1 space (e.g. on a hanging edge), not a C1-corner-averaged dummy node -> use the real hanging masters/weights instead of a plain average
-							oomph::HangInfo *hang_info_pt = n->hanging_pt(ft->continuous_spaces[SPACE_INDEX_C1].hangindex);
-							hangbuffer[l].nummaster = hang_info_pt->nmaster();
-							for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
-							{
-								hangbuffer[l].masters[m].weight = hang_info_pt->master_weight(m);
-								hangbuffer[l].masters[m].local_eqn = this->local_hang_eqn(hang_info_pt->master_node_pt(m), space_info->nodal_offset_basebulk + f);
-							}
-							res = true;
-							continue;
-						}
-						const std::vector<unsigned> *entry = get_c1_masters(l_elem);
-						if (!entry)
-						{
-							throw_runtime_error("A base dof constrained to C1 is only allowed on nodes which do not belong to the C1 space");
-						}
-						unsigned nmaster = entry->size() - 1;
-						hangbuffer[l].nummaster = 0;
-						for (unsigned m = 0; m < nmaster; m++)
-						{
-							unsigned l2=elem_node_to_space_node[(*entry)[m + 1]];
-							if (hangbuffer[l2].nummaster==0)
-							{
-								hangbuffer[l].masters[hangbuffer[l].nummaster].weight=1.0/(double)nmaster;
-								hangbuffer[l].masters[hangbuffer[l].nummaster].local_eqn=this->nodal_local_eqn((*entry)[m + 1], space_info->nodal_offset_basebulk + f);
-								hangbuffer[l].nummaster++;
-							}
-							else
-							{
-								for (int m2 = 0; m2 < hangbuffer[l2].nummaster; m2++)
-								{
-									hangbuffer[l].masters[hangbuffer[l].nummaster].weight=hangbuffer[l2].masters[m2].weight/(double)nmaster;
-									hangbuffer[l].masters[hangbuffer[l].nummaster].local_eqn=hangbuffer[l2].masters[m2].local_eqn;
-									hangbuffer[l].nummaster++;
-								}
-							}							
-						}
-						res = true;
-					}
-				}
-			}
-		}
-
-		// Positions locally reduced to C1 via POSITION_CONSTRAIN_TO_C1 (index = coordinate index); the
-		// position hanginfo (shape_info->hanginfo_Pos, already filled for genuinely hanging positions by
-		// fill_hang_info_with_equations_for_pos) is indexed by the full element node index directly, not
-		// by a per-space node index, so no elem_node_to_space_node lookup is needed here.
-
-		for (unsigned int l_elem = 0; l_elem < eleminfo.nnode; l_elem++)
-		{
-			Node *n = dynamic_cast<Node *>(node_pt(l_elem));
-			bool hangs_on_C1= node_pt(l_elem)->is_hanging(ft->continuous_spaces[SPACE_INDEX_C1].hangindex);
-			bool hangs_on_C2= node_pt(l_elem)->is_hanging(ft->continuous_spaces[SPACE_INDEX_C2].hangindex);
-			//if (n->get_additional_dof_constraints())
-			//{
-			//	std::cout << "Node " << l_elem << "  hang status " << (hangs_on_C1 ? "true" : "false") << " and C2 : " << (hangs_on_C2 ? "true" : "false") << std::endl;
-			//}
-			for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info != NULL; info = info->next)
-			{
-				if (info->mode != POSITION_CONSTRAIN_TO_C1)
-					continue;
-				if (info->index >= this->nodal_dimension())
-					continue; // not a valid coordinate index
-				unsigned f = info->index;
-
-				JITHangInfo_t * hangbuffer_pos = shape_info->hanginfo_Pos[f];
-
-				if (hangs_on_C1 && !hangs_on_C2)
-				{
-					if (!has_C1_hanging)
-					{						
-						throw_runtime_error("When constraining the position space to C1, you need a C1 space in the element. Potentially just create one by adding ScalarField(\"_dummyC1\",space=\"C1\")+DirichletBC(_dummyC1=0) to the bulk equations.");
-					}
-					oomph::HangInfo *hang_info_pt = n->hanging_pt(ft->continuous_spaces[SPACE_INDEX_C1].hangindex);
-					hangbuffer_pos[l_elem].nummaster = hang_info_pt->nmaster();
-					std::cout << "HITTING nmaster " << hang_info_pt->nmaster() << std::endl;
-					for (unsigned int m=0;m<hang_info_pt->nmaster();m++)
-					{	
-						hangbuffer_pos[l_elem].masters[m].weight=hang_info_pt->master_weight(m);					
-						std::cout << " master node " << m << " is hanging on C1 " << (hang_info_pt->master_node_pt(m)->is_hanging(ft->continuous_spaces[SPACE_INDEX_C1].hangindex) ? "true" : "false") << std::endl;
-						std::cout << "    and on C2 " << (hang_info_pt->master_node_pt(m)->is_hanging(ft->continuous_spaces[SPACE_INDEX_C2].hangindex) ? "true" : "false") << std::endl;
-						long glob_eq=dynamic_cast<pyoomph::Node*>(hang_info_pt->master_node_pt(m))->variable_position_pt()->eqn_number(f);
-						if (glob_eq<0)
-						{
-						
-						hangbuffer_pos[l_elem].masters[m].local_eqn=0; // TODO local_eqns(0,f);	
-						}
-						else if (global_to_local_map.count(glob_eq)==0)
-						{
-							throw_runtime_error("The master node for a position dof constrained to C1 is not part of the element's equation set");
-						}
-						else
-						{
-							hangbuffer_pos[l_elem].masters[m].local_eqn=global_to_local_map[glob_eq];
-						}						
-					}
-					continue;
-				}
-				
-				const std::vector<unsigned> *entry = get_c1_masters(l_elem);				
-				if (!entry)
-				{
-					std::cout << "Node " << l_elem << " is a C1 corner node, but has a position dof constrained to C1" << std::endl;
-					std::cout << "Hangs on C1 " << (hangs_on_C1 ? "true" : "false") << std::endl;
-					std::cout << "hangs on C2 " << (hangs_on_C2 ? "true" : "false") << std::endl;
-					std::cout << "has hang info C1 " << (has_C1_hanging ? "true" : "false") << std::endl;
-					throw_runtime_error("A position dof constrained to C1 is only allowed on nodes which do not belong to the C1 space");
-				}
-				unsigned nmaster = entry->size() - 1;
-				
-				hangbuffer_pos[l_elem].nummaster = 0;
-				for (unsigned m = 0; m < nmaster; m++)
-				{
-					unsigned l2 = (*entry)[m + 1];
-					if (hangbuffer_pos[l2].nummaster == 0)
-					{
-						hangbuffer_pos[l_elem].masters[hangbuffer_pos[l_elem].nummaster].weight = 1.0 / (double)nmaster;
-						hangbuffer_pos[l_elem].masters[hangbuffer_pos[l_elem].nummaster].local_eqn = eleminfo.pos_local_eqn[l2][f];
-						hangbuffer_pos[l_elem].nummaster++;
-					}
-					else
-					{
-						for (int m2 = 0; m2 < hangbuffer_pos[l2].nummaster; m2++)
-						{
-							hangbuffer_pos[l_elem].masters[hangbuffer_pos[l_elem].nummaster].weight = hangbuffer_pos[l2].masters[m2].weight / (double)nmaster;
-							hangbuffer_pos[l_elem].masters[hangbuffer_pos[l_elem].nummaster].local_eqn = hangbuffer_pos[l2].masters[m2].local_eqn;
-							hangbuffer_pos[l_elem].nummaster++;
-						}
-					}
-				}
-				res = true;
-			}
-		}
-
-		return res;
+		// The base-bulk field and position C1-constraint handling that used to live here (a one-level
+		// C1-corner average with limited chaining) is now performed -- and correctly composed with
+		// genuine adaptive hanging -- by fill_hang_info_with_equations_basebulk / _for_pos via
+		// flatten_hang_for_value / flatten_hang_for_position. This base version is intentionally a no-op.
+		// The InterfaceElementBase override still adds INTERFACE_DOF_CONSTRAIN_TO_C1 handling on top.
+		(void)shape_info;
+		return false;
 	}
 
 
@@ -2340,6 +2269,24 @@ namespace pyoomph
 				}
 				info = next;
 			}
+		}
+
+		// Precompute, for every constrained node that is a non-vertex node of THIS element, its
+		// immediate C1-corner expansion (the element's C1 vertex nodes, equal weights). Stored on the
+		// node so that flatten_hang_for_value() can recursively expand it into real free dofs even when
+		// the node is later encountered as a hang master from a neighbouring element (where it may be a
+		// C1 vertex, so its own corners are not locally derivable). See
+		// NodeWithFieldIndicesBase::c1_constraint_corners and dev_docs/hanging_nodes_redesign.md 5.5.
+		const std::vector<std::vector<unsigned>> & c1_dummy_map = this->get_dummy_value_interpolation_map()[SPACE_INDEX_C1];
+		for (const std::vector<unsigned> & entry : c1_dummy_map)
+		{
+			if (entry.size() < 2) continue;
+			Node *tgt = dynamic_cast<Node *>(node_pt(entry[0]));
+			if (!tgt || tgt->get_additional_dof_constraints() == NULL) continue;
+			const unsigned nc = entry.size() - 1;
+			tgt->c1_constraint_corners.clear();
+			for (unsigned m = 1; m < entry.size(); m++)
+				tgt->c1_constraint_corners.push_back(std::make_pair(node_pt(entry[m]), 1.0 / (double)nc));
 		}
 	}
 
@@ -5889,47 +5836,14 @@ namespace pyoomph
 	{
 		this->RefineableSolidElement::assign_additional_local_eqn_numbers();
 		// ConstrainFieldsToC1Space/ConstrainPositionsToC1Space ("additional dof constraints") locally
-		// reduce a higher-order field/position to a C1/linear interpolation by averaging over this
-		// element's own C1 corner nodes. That mechanism is entirely independent of, and unaware of,
-		// oomph-lib's native geometric hanging-node scheme used for T-junctions on adaptively refined
-		// meshes with non-matching refinement levels between neighbouring elements. Combining the two
-		// (e.g. a confined node that is itself a genuine hanging node, or one whose C1-corner is) is
-		// not supported and silently produces a wrong (or only slowly converging) Jacobian - refuse it
-		// outright with an actionable error instead.
-		if (this->has_additional_dof_constraints && this->nnode())
-		{
-			bool any_hanging = false;
-			for (unsigned int l = 0; l < this->nnode(); l++)
-			{
-				if (node_pt(l)->is_hanging())
-				{
-					any_hanging = true;
-					break;
-				}
-			}
-			if (!any_hanging)
-			{
-				auto *ft = codeinst->get_func_table();
-				for (unsigned int ispace = 0; ispace < ft->num_present_continuous_spaces && !any_hanging; ispace++)
-				{
-					const JITFuncSpec_Table_FiniteElement_SpaceInfo_t *space_info = ft->present_continuous_spaces[ispace];
-					unsigned nnode_space = eleminfo.nnode_of_space[space_info->space_index];
-					const std::vector<unsigned> &space_node_to_elem_node = this->get_nodal_space_index_to_element_index_map()[space_info->space_index];
-					for (unsigned int l = 0; l < nnode_space; l++)
-					{
-						if (node_pt(space_node_to_elem_node[l])->is_hanging(space_info->hangindex))
-						{
-							any_hanging = true;
-							break;
-						}
-					}
-				}
-			}
-			if (any_hanging)
-			{
-				throw_runtime_error("ConstrainFieldsToC1Space/ConstrainPositionsToC1Space ('additional dof constraints') cannot currently be combined with genuine oomph-lib hanging nodes, i.e. with adaptively refined meshes where this element borders a neighbour of non-matching refinement level. Please avoid this combination (e.g. by keeping the mesh region using these constraints uniformly refined).");
-			}
-		}
+		// reduce a higher-order field/position to a C1/linear interpolation. This is now composed with
+		// oomph-lib's native geometric hanging-node scheme (T-junctions on adaptively refined meshes):
+		// a constrained dof, and any genuine hang that references a constrained master, are flattened
+		// into real free leaf dofs in fill_hang_info_with_equations_{basebulk,for_pos} via
+		// flatten_hang_for_value / flatten_hang_for_position (using each constrained node's precomputed
+		// c1_constraint_corners). No separate equation numbers are required, because the flattened leaf
+		// dofs are exactly the coarse vertices that oomph-lib already registered as hang masters. See
+		// dev_docs/hanging_nodes_redesign.md section 5.5.
 		// std::cout << "ABOUT TO FILL ELEMINFO" << std::endl;
 		fill_element_info();
 		if (this->nnode())

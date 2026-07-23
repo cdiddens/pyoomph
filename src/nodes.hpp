@@ -56,6 +56,17 @@ namespace pyoomph
     friend class NodeAccess;
     friend class BulkElementBase;
     AdditionalDofConstrainingInfo *additional_dof_constraints = NULL; // Linked list of additional dofs that constrain this node's, to e.g. reduce from C2 to C1 locally
+    // Flattened one-level C1-corner expansion for a node that is constrained to C1 (i.e. a non-vertex
+    // node in its home element): the element's C1 vertex nodes whose average defines this node's
+    // constrained value, each with weight 1/ncorners. Empty for unconstrained nodes. Purely
+    // geometric, so it is shared by all constrained value indices and by position constraints. It is
+    // (re)computed by BulkElementBase::setup_additional_dof_constraints after constraints are applied
+    // (and hence after every mesh adaptation) and lets a constrained node's dof be recursively
+    // flattened into real free dofs even when the node is reached as a master from a *neighbouring*
+    // element (where it may be a C1 vertex and its own corners are not locally known). This is what
+    // makes ConstrainFieldsToC1Space / ConstrainPositionsToC1Space compose with genuine adaptive
+    // hanging nodes. See dev_docs/hanging_nodes_redesign.md section 5.5.
+    std::vector<std::pair<oomph::Node*, double>> c1_constraint_corners;
   public:
     virtual void add_additional_dof_constraint(unsigned index, AdditionalDofConstraintMode mode);
     virtual void remove_additional_dof_constraint(unsigned index, AdditionalDofConstraintMode mode);

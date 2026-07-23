@@ -287,6 +287,26 @@ namespace pyoomph
     bool node_hangs_in_space(const JITFuncSpec_Table_FiniteElement_SpaceInfo_t *space_info, unsigned l_elem) const;
     // Geometric (positional) hanging for the given element-local node, i.e. the info_Pos slot.
     oomph::HangInfo *hang_info_for_position(unsigned l_elem) const;
+
+    // --- Flattened hang/constraint composition (see dev_docs/hanging_nodes_redesign.md 5.5) ---
+    // Does node n carry a CONTINUOUS_BASE_DOF_CONSTRAIN_TO_C1 constraint for value index v?
+    bool node_is_c1_constrained_for_value(oomph::Node *n, unsigned v) const;
+    // Does node n carry a POSITION_CONSTRAIN_TO_C1 constraint for coordinate index i?
+    bool node_is_c1_constrained_for_position(oomph::Node *n, unsigned i) const;
+    // Local equation number of a genuine free leaf node's value v as seen by this element: its nodal
+    // local eqn if it is one of this element's nodes, else its (hang-registered) local_hang_eqn.
+    int leaf_local_eqn_for_value(oomph::Node *n, unsigned v);
+    // As above but for the leaf's coordinate i (position dof).
+    int leaf_local_eqn_for_position(oomph::Node *n, unsigned i);
+    // Flatten the value v of node n into a weighted sum over real free leaf dofs, accumulating
+    // local_eqn -> weight into `out`. Composes genuine oomph hanging (n->hanging_pt(v)) with C1
+    // dof-constraints (a constrained node is expanded via its stored c1_constraint_corners, then each
+    // corner recursed), so ConstrainFieldsToC1Space works on adaptively refined meshes. depth guards
+    // against runaway recursion (cyclic hang/constraint chains).
+    void flatten_hang_for_value(oomph::Node *n, unsigned v, double weight, std::map<int, double> &out, int depth);
+    // Position (geometric-hang) counterpart of flatten_hang_for_value for coordinate index i.
+    void flatten_hang_for_position(oomph::Node *n, unsigned i, double weight, std::map<int, double> &out, int depth);
+
     // Sets up the local-equation-number bookkeeping for hanging nodes on the Lagrangian/Eulerian
     // position degrees of freedom (as opposed to field values), needed on refined (non-conforming)
     // meshes with ALE/solid mechanics where the mesh position itself is a degree of freedom.

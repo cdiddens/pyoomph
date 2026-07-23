@@ -90,6 +90,7 @@ namespace pyoomph
         delete temp;
       }
       additional_dof_constraints = NULL;
+      c1_constraint_corners.clear();
     }
 
 }
