@@ -218,6 +218,49 @@ populates `Local_hang_eqn[value_index]` for every field pyoomph later reads.
    the two linear maps must be **composed** (substitute one into the other) into a
    single `HangInfo`. Needs dedicated tests on a refined mesh straddling a
    constraint region.
+
+   ### 5.5.1 What a local per-element patch cannot do (investigated on `new_hanging`)
+
+   A first attempt tried to keep the composition purely local: in
+   `fill_hang_info_with_equations_{for_pos,basebulk}`, route a C1-constrained
+   field through the C1 hang instead of its native (C2) hang, drop the three
+   throws, and rely on `fill_additional_hang_buffer_data`'s existing one-level
+   chaining. Reproducer: `tests/test_constrained_adaptivity.py` (Poisson C2 field
+   `u` constrained to C1, plus a `_dummyC1` C1 space, on a two-level adaptively
+   refined `CircularMesh`). Oracle: the problem is linear, so the post-solve
+   residual must be ~0.
+
+   Result: single-level / uniformly-refined constraint regions **do** converge to
+   machine zero, but the genuinely non-conforming case **diverges**. Runtime
+   instrumentation pinned the cause precisely:
+
+   * For a constrained mid-edge node on a T-junction, `hanging_pt(C1.hangindex)`
+     returns the **quadratic (3-master) geometric hang**, not a linear C1 hang —
+     e.g. masters with weights `(-0.125, 0.375, 0.75)`. The `0.75` master is the
+     coarse edge's mid-node, whose value the constraint **pins** (`local_eqn=-1`).
+     Its contribution is silently dropped, leaving only `0.375-0.125` of the
+     value. So "just use the C1 hang" retrieves the wrong object for non-vertex
+     nodes.
+   * The correct expansion of that pinned-constrained master (mid-node `cm`
+     `= 0.5(c1+c2)`) needs `cm`'s **home coarse element's** C1 corners. From the
+     neighbouring fine element `cm` is a C1 *vertex*, so `get_c1_masters(cm)`
+     returns NULL and its constraint cannot be expressed there at all. The needed
+     information is cross-element.
+   * Equivalently: pinning `cm` **severs the sensitivity chain** `M1 -> cm ->
+     (c1,c2)` that the hang depends on; the constraint's redistribution of `cm`
+     lives only in `cm`'s own element's hangbuffer, invisible to `M1`'s element.
+
+   Conclusion: correctness requires the constraint to be materialised as a
+   **flattened, globally-visible `HangInfo` on the node** (`cm`'s constraint =
+   `{c1:0.5, c2:0.5}` with real, non-hanging, non-pinned leaf masters), computed
+   once (in `cm`'s home element or by a global fixpoint pass) and read by every
+   element that uses `cm` as a master. Genuine hangs that reference a constrained
+   master must then be **flattened against it** so all masters are real dofs
+   (oomph requires masters to be non-hanging), and the leaf dofs must be
+   registered in `Local_hang_eqn`. This is exactly the named-`HangInfo` model of
+   section 3/6 — so the unification is gated on that redesign and was reverted to
+   the protective throws rather than shipping a silently-wrong Jacobian. The
+   reproducer test remains as a `skip` documenting the target + oracle.
 6. **`resize` interplay (medium)** — `Node::resize` (`nodes.cc:2167`) reallocates
    `Hanging_pt`, defaulting new slots to the geometric pointer. Interface dofs are
    added by resizing, so extra-`HangInfo` bookkeeping must be re-established after
@@ -247,9 +290,14 @@ populates `Local_hang_eqn[value_index]` for every field pyoomph later reads.
    assigned in one auditable place instead of the implicit codegen `hangindex`.
 3. **Generalise interface-added dofs** to carry their own C2/C1 `HangInfo`s via
    the existing `Local_interface_hang_eqn` path; add refined-interface tests.
-4. **Unify dof-constraints with genuine hanging** (5.5): compose constraint maps
-   with refinement maps into single `HangInfo`s, remove the two `throw`s, add
-   straddling-region tests.
+4. **Unify dof-constraints with genuine hanging** (5.5): as 5.5.1 establishes,
+   this cannot be a local per-element patch. Materialise each C1 constraint as a
+   flattened, globally-visible `HangInfo` on the node (real leaf masters, no
+   pinned/hanging masters), via a global fixpoint pass after refinement +
+   constraint application; flatten genuine hangs that reference constrained
+   masters against it; register the leaf dofs in `Local_hang_eqn`. Then remove the
+   three `throw`s and flip `tests/test_constrained_adaptivity.py` from skip to a
+   residual-oracle assertion.
 5. **MPI**: verify `synchronise_hanging_nodes` +
    `additional_synchronise_hanging_nodes` cover the new `HangInfo`s; add a
    distributed adaptivity test.
