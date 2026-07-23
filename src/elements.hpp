@@ -273,6 +273,17 @@ namespace pyoomph
     // differentiates normal-dependent boundary conditions w.r.t. the moving mesh position.
     virtual void get_dnormal_dcoords_at_s(const oomph::Vector<double> &s, double *  PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dnormal_dcoord, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2normal_dcoord2) const;
     void update_in_solid_position_fd(const unsigned &i) override; // For FD with element_sizes, we have to update the element size buffer
+    // --- Named hanging-node accessors (see dev_docs/hanging_nodes_redesign.md) ---
+    // Single, auditable point where pyoomph maps an interpolation space to the oomph-lib HangInfo
+    // that governs it at a given element-local node (or NULL if that node does not hang in that
+    // space). Today these just resolve the per-space `hangindex` convention that codegen writes into
+    // the func table (info_Pos.hangindex==-1 for the geometric slot; C2TB/C2 share it; C1TB/C1 either
+    // share it or use their own value slot). Later phases will redirect these to pyoomph-owned named
+    // HangInfo pointers (geometric / C2(TB) / C1(TB), plus interface/constraint variants) without
+    // having to touch the assembly call sites that go through here.
+    oomph::HangInfo *hang_info_for_space(const JITFuncSpec_Table_FiniteElement_SpaceInfo_t *space_info, unsigned l_elem) const;
+    // Geometric (positional) hanging for the given element-local node, i.e. the info_Pos slot.
+    oomph::HangInfo *hang_info_for_position(unsigned l_elem) const;
     // Sets up the local-equation-number bookkeeping for hanging nodes on the Lagrangian/Eulerian
     // position degrees of freedom (as opposed to field values), needed on refined (non-conforming)
     // meshes with ALE/solid mechanics where the mesh position itself is a degree of freedom.

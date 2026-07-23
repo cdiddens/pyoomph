@@ -399,17 +399,39 @@ namespace pyoomph
 	// of freedom into shape_info->hanginfo_Pos[l]. This lets the generated ALE/solid-mechanics code
 	// correctly distribute a hanging node's position-Jacobian contributions to its masters. Returns
 	// true if any node in the element is hanging.
+	// See dev_docs/hanging_nodes_redesign.md. Central resolution of "which HangInfo governs
+	// continuous space `space_info` at element-local node l_elem". Returns NULL if the node does not
+	// hang in that space. This is the single seam that later phases will redirect to pyoomph-owned
+	// named HangInfo pointers; for now it faithfully reproduces the per-space hangindex convention.
+	oomph::HangInfo *BulkElementBase::hang_info_for_space(const JITFuncSpec_Table_FiniteElement_SpaceInfo_t *space_info, unsigned l_elem) const
+	{
+		const int hangindex = space_info->hangindex;
+		oomph::Node *const &n = node_pt(l_elem);
+		if (!n->is_hanging(hangindex))
+			return NULL;
+		return n->hanging_pt(hangindex);
+	}
+
+	// Geometric (positional) hanging info for element-local node l_elem, or NULL if the node's
+	// position does not hang. Mirrors the argument-less oomph-lib accessors (the info_Pos slot).
+	oomph::HangInfo *BulkElementBase::hang_info_for_position(unsigned l_elem) const
+	{
+		oomph::Node *const &n = node_pt(l_elem);
+		if (!n->is_hanging())
+			return NULL;
+		return n->hanging_pt();
+	}
+
 	bool BulkElementBase::fill_hang_info_with_equations_for_pos(JITShapeInfo_t *shape_info)
 	{
 		bool res = false;
-		for (unsigned int f = 0; f < this->nodal_dimension(); f++) 
+		for (unsigned int f = 0; f < this->nodal_dimension(); f++)
 		{
 			for (unsigned int l = 0; l < eleminfo.nnode; l++)
 			{
-				if (node_pt(l)->is_hanging())
+				if (oomph::HangInfo *hang_info_pt = this->hang_info_for_position(l))
 				{
 					res = true;
-					auto hang_info_pt = node_pt(l)->hanging_pt();
 					shape_info->hanginfo_Pos[f][l].nummaster = hang_info_pt->nmaster();
 					for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
 					{
@@ -450,17 +472,15 @@ namespace pyoomph
 			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info = ft->present_continuous_spaces[ispace];
 			unsigned nnode_space=eleminfo.nnode_of_space[space_info->space_index];
 			const std::vector<unsigned> & space_node_to_elem_node=this->get_nodal_space_index_to_element_index_map()[space_info->space_index];
-			int hangindex=space_info->hangindex;
 			for (unsigned int f = 0; f < space_info->numfields_basebulk; f++)
 			{
 				JITHangInfo_t * hangbuffer=shape_info->hanginfo[space_info->buffer_offset_basebulk+f];
 				for (unsigned int l = 0; l < nnode_space; l++)
 				{
 					const unsigned l_elem=space_node_to_elem_node[l];
-					if (node_pt(l_elem)->is_hanging(hangindex))
+					if (oomph::HangInfo *hang_info_pt = this->hang_info_for_space(space_info, l_elem))
 					{
 						res = true;
-						auto hang_info_pt = node_pt(l_elem)->hanging_pt(hangindex);
 						hangbuffer[l].nummaster = hang_info_pt->nmaster();
 						for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
 						{
@@ -687,17 +707,15 @@ namespace pyoomph
 			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info = ft->present_continuous_spaces[ispace];
 			unsigned nnode_space=eleminfo.nnode_of_space[space_info->space_index];
 			const std::vector<unsigned> & space_node_to_elem_node=this->get_nodal_space_index_to_element_index_map()[space_info->space_index];
-			int hangindex=space_info->hangindex;
 			for (unsigned int f = 0; f < space_info->numfields-space_info->numfields_basebulk; f++)
 			{
 				JITHangInfo_t * hangbuffer=shape_info->hanginfo[space_info->buffer_offset_interf+f];
 				for (unsigned int l = 0; l < nnode_space; l++)
 				{
 					const unsigned l_elem=space_node_to_elem_node[l];
-					if (node_pt(l_elem)->is_hanging(hangindex))
+					if (oomph::HangInfo *hang_info_pt = this->hang_info_for_space(space_info, l_elem))
 					{
 						res = true;
-						auto hang_info_pt = node_pt(l_elem)->hanging_pt(hangindex);
 						hangbuffer[l].nummaster = hang_info_pt->nmaster();
 						for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
 						{
