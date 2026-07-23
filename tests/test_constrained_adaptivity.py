@@ -67,3 +67,28 @@ def test_constrained_position_adaptivity():
         problem._adapt_refine()
         problem.solve()
         assert _max_abs_residual(problem) < 1e-9
+
+
+class Constrained3DBrickProblem(Problem):
+    """3D brick version: the flattening composition is dimension-agnostic."""
+
+    def __init__(self, constrain=True):
+        super().__init__()
+        self.constrain = constrain
+
+    def define_problem(self):
+        from pyoomph.meshes.simplemeshes import CuboidBrickMesh
+        self += CuboidBrickMesh(size=1, N=2)
+        eqs = PoissonEquation(source=1) + DirichletBC(u=0) @ "left" + NeumannBC(u=1) @ "right"
+        eqs += ScalarField("_dummyC1", space="C1") + DirichletBC(_dummyC1=0)
+        if self.constrain:
+            eqs += ConstrainFieldsToC1Space("u")
+        self += eqs @ "domain"
+
+
+def test_constrained_adaptivity_3d_brick():
+    with Constrained3DBrickProblem(constrain=True) as problem:
+        problem += RefineToLevel(1) @ "domain"
+        problem += RefineToLevel(3) @ "domain/right"
+        problem.solve()
+        assert _max_abs_residual(problem) < 1e-9

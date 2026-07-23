@@ -288,18 +288,28 @@ populates `Local_hang_eqn[value_index]` for every field pyoomph later reads.
      protective throws are removed.
 
    **Validated** with the linear residual oracle (residual → machine zero certifies
-   the analytic Jacobian): `ConstrainFieldsToC1Space` (full and `where`-restricted)
-   and `ConstrainPositionsToC1Space` (on a Laplace-smoothed moving mesh), each with
-   two-level adaptive refinement, all converge; non-constrained adaptivity, Stokes
-   and linear-response regressions still pass. See
-   `tests/test_constrained_adaptivity.py`.
+   the analytic Jacobian): `ConstrainFieldsToC1Space` (full and `where`-restricted),
+   `ConstrainPositionsToC1Space` (on a Laplace-smoothed moving mesh), and a 3D
+   `CuboidBrickMesh`, each with two-level adaptive refinement plus a Neumann face
+   element, all converge; non-constrained adaptivity (2D/3D), Stokes and
+   linear-response regressions still pass. See `tests/test_constrained_adaptivity.py`.
+   The flattening is dimension-agnostic, so 3D bricks worked with no extra changes.
 
-   **Not yet covered** (follow-ups): `INTERFACE_DOF_CONSTRAIN_TO_C1` on refined
-   interfaces still uses the old one-level chaining in
-   `InterfaceElementBase::fill_additional_hang_buffer_data` (bulk field/position
-   constraints are done); `interpolate_hang_values` still uses the pre-flatten
-   value interpolation (affects stored dummy/pinned values for output/restart, not
-   the solve); 3D brick/tet coverage and MPI are untested for the combined case.
+   **Not yet covered** (follow-ups):
+   * `INTERFACE_DOF_CONSTRAIN_TO_C1` on refined interfaces still uses the old
+     one-level chaining in `InterfaceElementBase::fill_additional_hang_buffer_data`
+     (bulk field/position constraints are done).
+   * `interpolate_hang_values` still uses the pre-flatten value interpolation
+     (affects stored dummy/pinned values for output/restart, not the solve).
+   * **MPI**: could not be validated end-to-end because MPI + tree adaptivity fails
+     *before* assembly, in the distributed linear solver
+     (`pyoomph/solvers/pardiso.py:513`, `solve_distributed` gets `data=None`), and
+     this reproduces identically for a plain non-constrained adaptive Poisson on
+     ≥2 ranks — i.e. it is a pre-existing distributed-solver issue independent of
+     the hanging-node work. The flattening itself keeps the truth in oomph-lib's
+     `Node::Hanging_pt` / `Local_hang_eqn` and stores only element-local corner
+     nodes, so it is expected to compose with oomph's `synchronise_hanging_nodes`
+     once the distributed-solver path works, but that remains unverified.
 6. **`resize` interplay (medium)** — `Node::resize` (`nodes.cc:2167`) reallocates
    `Hanging_pt`, defaulting new slots to the geometric pointer. Interface dofs are
    added by resizing, so extra-`HangInfo` bookkeeping must be re-established after
