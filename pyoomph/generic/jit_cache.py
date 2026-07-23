@@ -53,7 +53,49 @@ from ..typings import *
 # whenever this cache's key composition changes. Old cache entries simply
 # become permanent misses (never read, eventually evicted) after a bump -
 # there is no migration.
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3
+
+
+def _platform_runtime_tag() -> str:
+    """A string identifying the C runtime / OS version the compiled .so will be
+    loaded against, folded into the cache key (see compute_key()) alongside
+    platform.system()/machine().
+
+    The cache is content-addressed on the *generated C source* plus the compiler
+    identity, and is explicitly meant to be reusable across machines (see the
+    module docstring). But a shared library is linked against a C runtime, and
+    that runtime is NOT captured by the compiler version string (gcc --version
+    says nothing about glibc). On a single machine updated in place this is
+    harmless - glibc/libSystem/UCRT all keep backward compatibility, so an .so
+    built before an update still loads after it. The unsafe case is cross-machine
+    reuse (shared/NFS cache dir, copied cache) or a downgrade: an .so built
+    against a newer runtime can reference versioned symbols (e.g. memcpy@GLIBC_2.14)
+    absent on an older one, and dlopen() then fails at load time. Mixing the
+    runtime version into the key makes a mismatched host recompile instead.
+
+    Reports the runtime pyoomph is *running* on (the conservative, load-time
+    view). Degrades cleanly to "" on platforms/libcs it cannot identify (e.g.
+    musl, where platform.libc_ver() typically yields nothing) - that just
+    reproduces today's behaviour of not discriminating on the runtime there,
+    never a wrong reuse beyond what already happens now."""
+    try:
+        if sys.platform.startswith("linux"):
+            # ('glibc', '2.39') on a glibc host; ('', '') on musl / when it
+            # cannot tell - both hash cleanly.
+            name, ver = platform.libc_ver()
+            return "linux|" + name + "|" + ver
+        elif sys.platform == "darwin":
+            # Running macOS version; a slightly-too-strict proxy for the binary's
+            # MACOSX_DEPLOYMENT_TARGET (worst case: an occasional needless recompile).
+            return "mac|" + platform.mac_ver()[0]
+        elif sys.platform == "win32":
+            # Windows build number - tracks UCRT/vcruntime movement.
+            return "win|" + platform.win32_ver()[1]
+    except Exception:
+        # platform.* helpers shell out / read files on some hosts; a caching
+        # convenience must never crash a run, so fall back to no discrimination.
+        return ""
+    return ""
 
 
 def _default_cache_dir() -> str:
@@ -256,6 +298,8 @@ class JITCache:
         h.update(platform.system().encode("utf-8"))
         h.update(b"\0")
         h.update(platform.machine().encode("utf-8"))
+        h.update(b"\0")
+        h.update(_platform_runtime_tag().encode("utf-8"))
         h.update(b"\0")
         h.update(compiler_fingerprint.encode("utf-8", errors="replace"))
         h.update(b"\0")
