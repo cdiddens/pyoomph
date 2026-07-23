@@ -4,7 +4,8 @@ set -euo pipefail
 
 # Dedicated static prebuild for CLN + GiNaC in MSYS2 (Windows)
 
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/resolve_ginac_cln_versions.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/resolve_ginac_cln_versions.sh"
 PYOOMPH_STATIC_GINAC_DIR="${PYOOMPH_STATIC_GINAC_DIR:-GiNaC_static}"
 PYOOMPH_GINAC_CONFIGURE_OPTIONS="${PYOOMPH_GINAC_CONFIGURE_OPTIONS:-}"
 
@@ -58,7 +59,7 @@ cd "${ROOT_DIR}/ginac"
 # branch deterministic_codegen) - without this, a prebuilt GiNaC here would make pyoomph's
 # JIT code cache (pyoomph/generic/jit_cache.py) unsafe to trust, since it would then have no
 # way to tell this static prebuild apart from a genuinely unpatched system GiNaC.
-bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/patches/apply_ginac_patch.sh"
+bash "${SCRIPT_DIR}/patches/apply_ginac_patch.sh"
 autoreconf -i -f
 CLN_CFLAGS="-I${PREFIX}/include" CLN_LIBS="-L${PREFIX}/lib -l:libcln.a" \
   ./configure --disable-shared --enable-static --with-pic=yes --prefix "${PREFIX}" ${PYOOMPH_GINAC_CONFIGURE_OPTIONS}
