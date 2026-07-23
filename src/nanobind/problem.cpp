@@ -1021,6 +1021,11 @@ void PyReg_Problem(nb::module_ &m)
 			"the Hessian assembly exploits its symmetry in the last two indices (``use_symmetry``).")
 		.def("set_FD_step_used_in_get_hessian_vector_products", &pyoomph::Problem::set_FD_step_used_in_get_hessian_vector_products, nb::arg("step"),
 			 "Set the finite-difference step size used when Hessian-vector products are computed by finite differences (see set_analytic_hessian_products()).")
+		.def("are_hessian_products_calculated_analytically", &pyoomph::Problem::are_hessian_products_calculated_analytically,
+			 "Whether Hessian-vector products are currently set to be computed analytically via the generated code (see set_analytic_hessian_products()), "
+			 "rather than by finite differences.")
+		.def("get_symmetric_hessian_assembly", &pyoomph::Problem::get_symmetric_hessian_assembly,
+			 "Whether Hessian assembly currently exploits its symmetry in the last two indices (see set_analytic_hessian_products()).")
 		.def("build_global_mesh", &pyoomph::Problem::build_global_mesh, "Combine all sub-meshes added via add_sub_mesh() into the problem's global mesh.")
 		.def("rebuild_global_mesh", &pyoomph::Problem::rebuild_global_mesh, "Re-build the problem's global mesh from the current set of sub-meshes, e.g. after sub-meshes were modified.")
 		.def("mesh_pt", [](pyoomph::Problem *self)
@@ -1165,8 +1170,10 @@ void PyReg_Problem(nb::module_ &m)
 
 				if (!suppress_compilation)
 				{
-					if (!quiet)
-						std::cout << "Compiling equation C code" << std::endl;
+					// "Compiling equation C code" is printed from CCompiler::compile() itself (see
+					// BaseCCompiler.compile() in ccompiler.py), not here - it is only known once
+					// compile() actually decides it needs to invoke the compiler, i.e. never on a
+					// JIT cache hit.
 					compiler->compile(suppress_compilation, suppress_writing, quiet, extra_flags);
 				}
 

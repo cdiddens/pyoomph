@@ -123,7 +123,22 @@ def _report_cache_io_failure(cache_dir: str, exc: BaseException) -> None:
               "to a writable location (or PYOOMPH_JIT_CACHE=0 to silence this) to use caching.")
 
 
+def _jit_cache_enabled_at_build_time() -> bool:
+    """PYOOMPH_ENABLE_JIT_CACHE in CMakeLists.txt: a build-time kill switch, independent of
+    (and checked before) any runtime flag/env var - those can only narrow this down further,
+    never override an OFF set here. Defaults to True (matches the CMake option's own ON
+    default) if the compiled extension predates this check entirely, for backward
+    compatibility with already-built binaries."""
+    from .. import _pyoomph_core as _pyoomph
+    try:
+        return bool(_pyoomph.jit_cache_enabled_at_build_time())
+    except AttributeError:
+        return True
+
+
 def is_enabled() -> bool:
+    if not _jit_cache_enabled_at_build_time():
+        return False
     if _runtime_disabled or _cache_io_broken:
         return False
     if os.environ.get("PYOOMPH_JIT_CACHE", "1") in ("0", "false", "False", ""):
@@ -172,7 +187,7 @@ def tier2_shadow_enabled() -> bool:
 
 # Bump whenever get_precodegen_fingerprint_text()'s coverage/format changes (keep
 # in sync with the "FMTn" tag inside that C++ function).
-FINGERPRINT_FORMAT_VERSION = 2
+FINGERPRINT_FORMAT_VERSION = 5
 
 
 class JITCache:
@@ -182,6 +197,11 @@ class JITCache:
         self.max_fingerprint_entries = max_fingerprint_entries if max_fingerprint_entries is not None else get_max_fingerprint_entries()
         self._objects_dir = os.path.join(self.cache_dir, "objects")
         self._fingerprints_dir = os.path.join(self.cache_dir, "fingerprints")
+        # Tier-1 hit/miss counters, purely for diagnostics - e.g. `python -m pyoomph check
+        # compiler` uses these to verify the cache is actually being read from, not just
+        # written to (see try_restore() below).
+        self.hits = 0
+        self.misses = 0
 
     def _path_for_key(self, key: str) -> str:
         return os.path.join(self._objects_dir, key[:2], key[2:])
@@ -251,12 +271,15 @@ class JITCache:
     def try_restore(self, key: str, dest_path: str) -> bool:
         src = self._path_for_key(key)
         if not os.path.isfile(src):
+            self.misses += 1
             return False
         try:
             shutil.copy2(src, dest_path)
             os.utime(src, None)  # bump mtime for LRU purposes
+            self.hits += 1
             return True
         except OSError:
+            self.misses += 1
             return False
 
     def store(self, key: str, src_path: str) -> None:
@@ -350,6 +373,21 @@ class JITCache:
         except OSError:
             pass
 
+    def get_usage_stats(self) -> dict[str, int]:
+        """Read-only directory inspection for `python -m pyoomph cache usage` - deliberately
+        does not go through is_enabled()/get_jit_cache(), so usage of a cache directory that
+        was populated earlier can still be reported even if caching is currently disabled
+        (e.g. after switching to an unpatched GiNaC, or with PYOOMPH_JIT_CACHE=0 set)."""
+        objects = self._list_shard_entries(self._objects_dir)
+        fingerprints = self._list_shard_entries(self._fingerprints_dir)
+        return {
+            "objects_count": len(objects),
+            "objects_bytes": sum(size for _mtime, size, _p in objects),
+            "objects_max_bytes": self.max_size_bytes,
+            "fingerprints_count": len(fingerprints),
+            "fingerprints_max_count": self.max_fingerprint_entries,
+        }
+
 
 _global_cache: JITCache | None = None
 _global_cache_dir_used: str | None = None
@@ -366,3 +404,20 @@ def get_jit_cache() -> JITCache | None:
         _global_cache = JITCache(cache_dir)
         _global_cache_dir_used = cache_dir
     return _global_cache
+
+
+def clear_cache(cache_dir: str | None = None) -> bool:
+    """Removes the entire on-disk cache directory (compiled objects, trust-mode entries if
+    any, and Tier-2 fingerprint bookkeeping alike) - for `python -m pyoomph cache clear`.
+    Returns whether a directory was actually found and removed. Resets the process-wide
+    JITCache singleton if it pointed at the same directory, so hit/miss counters etc. don't
+    keep referring to a now-deleted location."""
+    global _global_cache, _global_cache_dir_used
+    target = cache_dir if cache_dir is not None else get_cache_dir()
+    existed = os.path.isdir(target)
+    if existed:
+        shutil.rmtree(target, ignore_errors=True)
+    if _global_cache_dir_used == target:
+        _global_cache = None
+        _global_cache_dir_used = None
+    return existed

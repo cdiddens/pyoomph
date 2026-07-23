@@ -450,6 +450,8 @@ def _destroy_superseded_mesh(m:"AnySpatialMesh") -> None:
     m._destroy_now()
 
 
+_TypeVarMeshTemplate=TypeVar("_TypeVarMeshTemplate",bound=MeshTemplate)
+
 #Problem with some automatic behaviour
 class Problem(_pyoomph.Problem):
     """A class representing a problem in the pyoomph library.
@@ -1602,7 +1604,6 @@ class Problem(_pyoomph.Problem):
     def flush_mesh_templates(self):
         self._meshtemplate_list=[]
 
-    _TypeVarMeshTemplate=TypeVar("_TypeVarMeshTemplate",bound=MeshTemplate)
     def add_mesh(self,mesh:_TypeVarMeshTemplate)->_TypeVarMeshTemplate:
         """
         Adds a mesh to the problem. Based on the domain and boundary names of the mesh, equations can be added by using the same domain and boundary names.
@@ -3544,6 +3545,15 @@ class Problem(_pyoomph.Problem):
         fingerprint_text:str | None=None
         if not suppress_writing and not suppress_compilation and tier2_shadow_enabled():
             try:
+                # generate_and_compile_bulk_element_code() below sets these two as a side effect,
+                # immediately before calling write_code() - mirror that assignment here first, so
+                # the fingerprint reflects the same up-to-date values write_code() will actually
+                # see, not whatever they held from this element's previous compile (if any). Found
+                # missing while investigating a Tier-2 shadow-mode mismatch on branch jit_cache
+                # between two bifurcation-tracking scripts that differed only in whether Hessian-
+                # vector-product code got emitted.
+                elementtype.generate_hessian=self.are_hessian_products_calculated_analytically()
+                elementtype.assemble_hessian_by_symmetry=self.get_symmetric_hessian_assembly()
                 fingerprint_text=elementtype.get_precodegen_fingerprint_text()
             except Exception:
                 fingerprint_text=None
@@ -3608,7 +3618,7 @@ class Problem(_pyoomph.Problem):
     
 
     def define_global_parameter(self, **params: float) -> _pyoomph.GiNaC_GlobalParam:
-        """
+        r"""
         Define a single global parameter for the problem.
 
         Args:
@@ -3621,7 +3631,7 @@ class Problem(_pyoomph.Problem):
             Passing more than one keyword argument at once (to define several parameters in a
             single call, returning a tuple) still works, but is deprecated and emits a
             DeprecationWarning - call this once per parameter instead. Python's type system
-            cannot express a return type that depends on the runtime length of **params, so the
+            cannot express a return type that depends on the runtime length of \*\*params, so the
             declared return type here only reflects the single-parameter form; the multi-parameter
             form's actual tuple return is not statically visible.
         """

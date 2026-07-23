@@ -5491,16 +5491,46 @@ namespace pyoomph
 		auto print_named_ex_map = [&](const std::map<std::string, GiNaC::ex> &m)
 		{ for (auto &kv : m) { os << kv.first << "="; print_ex(kv.second); } };
 
-		os << "FMT2\n"; // Bump whenever this function's coverage/format changes
+		os << "FMT5\n"; // Bump whenever this function's coverage/format changes
 		os << "dim=" << nodal_dim << " lagr_dim=" << lagr_dim << " max_dt_order=" << max_dt_order << " integration_order=" << integration_order << "\n";
 		os << "generate_hessian=" << generate_hessian << " assemble_hessian_by_symmetry=" << assemble_hessian_by_symmetry << "\n";
 		os << "analytical_jacobian=" << analytical_jacobian << " analytical_position_jacobian=" << analytical_position_jacobian << "\n";
 		os << "with_adaptivity=" << with_adaptivity << " ccode_expression_mode=" << ccode_expression_mode << "\n";
 		os << "use_shared_shape_buffer_during_multi_assemble=" << use_shared_shape_buffer_during_multi_assemble << "\n";
-		// typeid(...).name() returns a pointer to a compiler-generated constant string; we copy its
-		// *contents* into std::string here (not the pointer itself, which - like the ASLR-dependent
-		// GiNaC hashing bug fixed on branch deterministic_codegen - would vary across process runs).
-		os << "coordsys_type=" << (coordinate_sys ? std::string(typeid(*coordinate_sys).name()) : std::string("NULL")) << "\n";
+		os << "coordinates_as_dofs=" << coordinates_as_dofs << "\n"; // moving-mesh/ALE flag (functable->moving_nodes)
+		// NOTE: typeid(*coordinate_sys).name() is deliberately NOT used here (unlike elsewhere in
+		// this function) - every Python-level CustomCoordinateSystem subclass (Cartesian,
+		// Axisymmetric, ...) is wrapped by the same single nanobind trampoline class on the C++
+		// side, so its RTTI type is identical regardless of which one it actually is. This was
+		// tried and found completely non-discriminating (see branch jit_cache's investigation of
+		// cross-script Tier-2 fingerprint collisions between e.g. poisson_2d.py and
+		// poisson_axisymm_adaptive.py, whose "left" boundary codes have identical fingerprints
+		// under a typeid-based check but differ in the actual generated GeometricJacobian(),
+		// since it embeds the coordinate system's geometric_jacobian(), not its C++ type). Using
+		// get_id_name() (a virtual, Python-overridden, human-readable identifier - "Cartesian",
+		// "Axisymmetric", ...) plus the actual symbolic geometric_jacobian()/
+		// jacobian_for_element_size() expressions instead directly captures what the coordinate
+		// system actually *does*, the same way `residual` below captures behavior rather than a
+		// type name. Uses get_coordinate_system() (virtual - "to be overloaded to get it from the
+		// element as well", see its declaration) rather than the raw coordinate_sys member
+		// directly: boundary/interface codes typically leave their own coordinate_sys member
+		// unset and resolve it from the bulk domain through this override instead, so reading the
+		// raw member here returned the same base-class default ("<unknown coordinate system>",
+		// geometric_jacobian()==1.0) for every boundary code regardless of its actual coordinate
+		// system - exactly the same non-discriminating result as the typeid() attempt above.
+		CustomCoordinateSystem *effective_coordsys = this->get_coordinate_system();
+		if (effective_coordsys)
+		{
+			os << "coordsys_id=" << effective_coordsys->get_id_name() << "\n";
+			os << "coordsys_geometric_jacobian=";
+			print_ex(effective_coordsys->geometric_jacobian());
+			os << "coordsys_jacobian_for_element_size=";
+			print_ex(effective_coordsys->jacobian_for_element_size());
+		}
+		else
+		{
+			os << "coordsys_id=NULL\n";
+		}
 		os << "reference_pos=";
 		for (double v : reference_pos_for_IC_and_DBC)
 			os << v << ",";
@@ -5518,9 +5548,29 @@ namespace pyoomph
 		// gap a shadow-mode mismatch on branch jit_cache's rising_bubble.py test caught, between
 		// two distinct axis-point element codes on different parent domains).
 		os << "full_domain_name=" << get_full_domain_name() << "\n";
+		// Per-field Dirichlet/initial-condition state: two codes can agree on residual, settings,
+		// coordinate system and even the plain name@space list above while still differing here -
+		// e.g. a NoSlipBC() pinning both velocity components vs. a symmetry condition pinning only
+		// one, or the same field with different initial conditions. Found missing this exact case
+		// (a moving-mesh free_surface.py boundary colliding with a fixed-mesh cavity_forward_
+		// problem.py boundary that pins one fewer component) while investigating Tier-2 shadow-
+		// mode mismatches on branch jit_cache.
 		os << "myfields=";
 		for (auto *f : myfields)
-			os << f->get_name() << "@" << f->get_space()->get_name() << ",";
+		{
+			os << f->get_name() << "@" << f->get_space()->get_name();
+			if (f->Dirichlet_condition_set)
+			{
+				os << "|DBC" << (f->Dirichlet_condition_pin_only ? "(pin_only)" : "") << "=";
+				print_ex(f->Dirichlet_condition);
+			}
+			for (auto &kv : f->initial_condition)
+			{
+				os << "|IC[" << kv.first << "]=";
+				print_ex(kv.second);
+			}
+			os << ",";
+		}
 		os << "\n";
 		os << "spaces=";
 		for (auto *s : spaces)

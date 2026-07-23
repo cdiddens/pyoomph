@@ -34,11 +34,9 @@ import os
 import platform
 import sys
 import weakref
-os.environ['OPENBLAS_NUM_THREADS'] = '4' 
-os.environ['MKL_NUM_THREADS'] = '4'
-# To Deactivate OpenMP parallelization
-#os.environ['OPENBLAS_NUM_THREADS'] = '1' 
-#os.environ['MKL_NUM_THREADS'] = '1'
+os.environ.setdefault('OPENBLAS_NUM_THREADS', os.environ.get('PYOOMPH_OPENBLAS_NUM_THREADS', '4'))
+os.environ.setdefault('MKL_NUM_THREADS', os.environ.get('PYOOMPH_MKL_NUM_THREADS', '4'))
+# To Deactivate OpenMP parallelization, set PYOOMPH_OPENBLAS_NUM_THREADS=1 and PYOOMPH_MKL_NUM_THREADS=1
 
 
 

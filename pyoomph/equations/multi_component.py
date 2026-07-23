@@ -33,6 +33,7 @@ from ..equations.generic import InitialCondition, SpatialErrorEstimator, FiniteE
 from ..expressions import *  # Import grad et al
 from .navier_stokes import NavierStokesEquations , PFEMOptions #type:ignore
 from ..materials.generic import *
+from ..materials.mass_transfer import MassTransferModelBase
 from .SUPG import ElementSizeForSUPG
 from .generic import get_interface_field_connection_space
 
@@ -382,7 +383,6 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
     """
             
         
-    from ..materials.mass_transfer import MassTransferModelBase
     def __init__(self, interface_props:AnyFluidFluidInterface, *, kinbc_name:str="_kin_bc", velo_connect_prefix:str="_lagr_conn_",
                  masstransfer_model:MassTransferModelBase | Literal[False] | None=None, static:Literal["auto"] | bool="auto", surface_tension_theta:float=1, total_mass_loss_factor_inside:ExpressionOrNum=1,total_mass_loss_factor_outside:ExpressionOrNum=1,
                  surface_tension_projection_space:FiniteElementSpaceEnum | None=None,additional_normal_traction:ExpressionOrNum=0,surface_tension_gradient_directly:bool=False,use_highest_space_for_velo_connection:bool=False,kinematic_bc_coordinate_sys:BaseCoordinateSystem | None=None,kinematic_bc_space:FiniteElementSpaceEnum | None=None,additional_masstransfer_scale=1,additional_kin_bc_test_scale=1,static_normal_interface_motion:ExpressionOrNum=0,static_interface_motion_testfunction:ExpressionNumOrNone=None,project_interface_flux:bool=False,surface_tension_factor:ExpressionOrNum=1):

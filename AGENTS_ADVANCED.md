@@ -182,13 +182,15 @@ for an exact symbolic derivative (defaults to a finite-difference derivative), a
 
 `Problem.set_c_compiler(name_or_instance)` chooses the backend used to compile
 generated element code: `"tcc"` (bundled TinyC — fast in-memory compile, no
-optimization; the default when no system compiler is detected), `"system"`
-(optimizing compiler via `distutils.ccompiler`, roughly `-O3 -fPIC -march=native`),
-or `"ccache"` (wraps the system compiler with `ccache`, best for iterating on the same
-equations repeatedly). `get_default_c_compiler()` auto-ranks available backends.
-Set the environment variable `PYOOMPH_DEBUG=1` to instead compile with `-O0 -g3`
-symbols for debugging the generated C directly. CLI flags `--tcc`/`--distutils`/
-`--fast-math` toggle the same knobs from the command line.
+optimization; the default when no system compiler is detected), or `"system"`
+(optimizing compiler via `distutils.ccompiler`, roughly `-O3 -fPIC -march=native`).
+`get_default_c_compiler()` auto-ranks available backends. Set the environment
+variable `PYOOMPH_DEBUG=1` to instead compile with `-O0 -g3` symbols for
+debugging the generated C directly. CLI flags `--tcc`/`--distutils`/`--fast-math`
+toggle the same knobs from the command line. Independently of the backend, a
+content-addressed JIT code cache (`pyoomph/generic/jit_cache.py`, see
+`python -m pyoomph cache usage`/`cache clear`) reuses compiled shared libraries
+across runs whenever the generated code is unchanged - `--no-cache` disables it.
 
 ## 3. Discontinuous Galerkin (DG) methods
 

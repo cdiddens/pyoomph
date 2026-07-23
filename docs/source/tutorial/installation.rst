@@ -9,6 +9,8 @@ Depending on your operating system (Windows, Mac and Linux are supported), you h
 
    installation/pypa.rst
    installation/compile.rst
+   installation/envvars.rst
+   installation/cmdlineoptions.rst
    installation/additional.rst
    installation/petscslepc.rst
    installation/wsl.rst

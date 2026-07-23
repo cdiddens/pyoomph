@@ -172,6 +172,7 @@ jobs:
           CIBW_CONFIG_SETTINGS: >
             cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF
             cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF
+            cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON
             cmake.define.PYOOMPH_USE_MPI=OFF
             cmake.define.PYOOMPH_PARANOID=OFF
         uses: pypa/cibuildwheel@v4.1.0
@@ -213,6 +214,7 @@ jobs:
           CIBW_CONFIG_SETTINGS: >
             cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF
             cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF
+            cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON
             cmake.define.PYOOMPH_USE_MPI=OFF
             cmake.define.PYOOMPH_PARANOID=OFF
             wheel.py-api=cp312
@@ -266,11 +268,11 @@ jobs:
             LEGACY_SELECTOR="${LEGACY_SELECTOR:+$LEGACY_SELECTOR }cp${v//./}-win_amd64"
           done
           export CIBW_BUILD="${LEGACY_SELECTOR}"
-          export CIBW_CONFIG_SETTINGS="cmake.args=-GUnix\ Makefiles cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF cmake.define.PYOOMPH_USE_MPI=OFF cmake.define.PYOOMPH_PARANOID=OFF"
+          export CIBW_CONFIG_SETTINGS="cmake.args=-GUnix\ Makefiles cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON cmake.define.PYOOMPH_USE_MPI=OFF cmake.define.PYOOMPH_PARANOID=OFF"
           python -m cibuildwheel --output-dir wheelhouse
 
           export CIBW_BUILD="cp${PYTHON_STABLE_ABI_BASE//./}-win_amd64"
-          export CIBW_CONFIG_SETTINGS="cmake.args=-GUnix\ Makefiles cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF cmake.define.PYOOMPH_USE_MPI=OFF cmake.define.PYOOMPH_PARANOID=OFF wheel.py-api=cp312"
+          export CIBW_CONFIG_SETTINGS="cmake.args=-GUnix\ Makefiles cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON cmake.define.PYOOMPH_USE_MPI=OFF cmake.define.PYOOMPH_PARANOID=OFF wheel.py-api=cp312"
           python -m cibuildwheel --output-dir wheelhouse
 
       - name: Verify NO_MPI marker in wheel

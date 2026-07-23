@@ -76,6 +76,22 @@ modindex_common_prefix = ['pyoomph.']
 # Do not inherit e.g. the define_residuals or something for InitialCondition, etc
 autodoc_inherit_docstrings=False
 
+# sphinx_autodoc_typehints resolves "if TYPE_CHECKING:" blocks by actually executing them, to
+# make forward-referenced types resolvable. pyoomph/meshes/mesh.py deliberately has TYPE_CHECKING-
+# only classes (_MeshFromTemplate1dTypingBase, _InterfaceMeshTypingBase, ...) that combine a
+# nanobind-bound C++ base with a plain Python base purely for static type checkers - nanobind
+# itself does not support that combination at runtime (see the comments above those classes), so
+# executing them for real raises a "metaclass conflict" TypeError. This is caught and only
+# reported as a warning by sphinx_autodoc_typehints, but the warning is spurious: the code is
+# working exactly as intended and never meant to actually run. Filter it out.
+import logging as _logging
+class _SuppressSpuriousGuardedImportWarning(_logging.Filter):
+    def filter(self, record: _logging.LogRecord) -> bool:
+        return "Failed guarded type import" not in record.getMessage()
+# Sphinx re-registers extension loggers under a "sphinx.<module name>" prefix (see
+# sphinx.util.logging), so the actual logger name at runtime is not the plain module name.
+_logging.getLogger("sphinx.sphinx_autodoc_typehints").addFilter(_SuppressSpuriousGuardedImportWarning())
+
 
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output

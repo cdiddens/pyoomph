@@ -28,6 +28,7 @@
 from .generic import GenericLinearSystemSolver
 from scipy.sparse import csr_matrix #type: ignore
 from typing import Any
+import sys
 # NOTE: this module's own filename ("mumps.py") is identical to the third-party
 # "mumps" package name it wraps (PyMUMPS). When that package is not installed
 # (as in this dev/type-checking environment), pyright's import resolver falls
@@ -57,7 +58,22 @@ class MUMPSSolver(GenericLinearSystemSolver):
         super().__init__(problem)
         self.ctx=None
 
-    def __del__(self):
+    def __del__(self, _is_finalizing:Any=sys.is_finalizing):
+        # Skip once the interpreter itself is shutting down: this instance may only be
+        # reachable this late because the owning Problem never called .release()/used
+        # "with" (see project_nanobind_migration memory) - by that point self.ctx's own
+        # module (PyMUMPS) may already be torn down, which would otherwise surface as a
+        # harmless but scary "Exception ignored in __del__". Freeing MUMPS's internal
+        # memory here is unnecessary anyway - the OS reclaims it on process exit regardless.
+        # _is_finalizing is bound as a default arg (evaluated once, at function-definition
+        # time) rather than looked up as "sys.is_finalizing" at call time: CPython clears
+        # nearly all module-level globals to None during interpreter shutdown, including
+        # this module's own "sys" name - a bare "sys.is_finalizing()" call here can itself
+        # raise "'NoneType' object has no attribute 'is_finalizing'" depending on shutdown
+        # GC ordering (confirmed empirically in pardiso.py's identical guard). A default-arg
+        # value lives in the function object itself, not the module dict, so it survives.
+        if _is_finalizing():
+            return
         if self.ctx is not None:
             self.ctx.destroy()
 

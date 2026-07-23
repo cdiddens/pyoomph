@@ -107,14 +107,23 @@ class BaseCCompiler(_pyoomph.SharedLibCCompiler):
     def compile(self, suppress_compilation: bool, suppress_code_writing: bool, quiet: bool, extra_flags: Sequence[str]) -> bool:
         if suppress_compilation:
             return True
+
+        def do_compile() -> bool:
+            # Printed here (rather than by the C++ caller, which cannot know this in advance)
+            # so it is only shown when a compiler is actually about to be invoked - never on a
+            # JIT cache hit, where "compiling" would be misleading.
+            if not quiet:
+                print("Compiling equation C code")
+            return self._compile_impl(suppress_compilation, suppress_code_writing, quiet, extra_flags)
+
         cache = None if suppress_code_writing else get_jit_cache()
         if cache is None:
-            return self._compile_impl(suppress_compilation, suppress_code_writing, quiet, extra_flags)
+            return do_compile()
         try:
             with open(self.get_code_filename(), "r") as f:
                 code_text = f.read()
         except OSError:
-            return self._compile_impl(suppress_compilation, suppress_code_writing, quiet, extra_flags)
+            return do_compile()
         # jitbridge.h defines the ABI (struct layouts etc.) the generated code is compiled
         # against and the runtime loader reads back - it can change during pyoomph
         # development without codegen.cpp's *output* changing at all (same generated .c
@@ -130,9 +139,9 @@ class BaseCCompiler(_pyoomph.SharedLibCCompiler):
         dest = self.expand_full_library_name(self.get_lib_filename())
         if cache.try_restore(key, dest):
             if not quiet:
-                print("JIT cache hit, reusing previously compiled "+self.get_lib_filename())
+                print("  JIT cache hit, reusing previously compiled "+self.get_lib_filename())
             return True
-        ok = self._compile_impl(suppress_compilation, suppress_code_writing, quiet, extra_flags)
+        ok = do_compile()
         if ok:
             cache.store(key, dest)
         return ok
@@ -140,7 +149,7 @@ class BaseCCompiler(_pyoomph.SharedLibCCompiler):
     def _compile_impl(self, suppress_compilation: bool, suppress_code_writing: bool, quiet: bool, extra_flags: Sequence[str]) -> bool:
         raise NotImplementedError
 
-    _registered_compilers={"_internal_":_pyoomph.CCompiler}
+    _registered_compilers:dict[str,type["BaseCCompiler"]]={}
 
     @classmethod
     def register_compiler(cls,*,override:bool=False):
@@ -157,13 +166,9 @@ class BaseCCompiler(_pyoomph.SharedLibCCompiler):
     def available_compilers(cls) -> dict[str, int]:
         compiler_dict:dict[str,int]={}
         for n,compclass in cls._registered_compilers.items():
-            quality=0
-            if n!="_internal_":
-                assert issubclass(compclass,BaseCCompiler)
-                if not compclass.check_avail():
-                    continue
-                quality=compclass.compiler_quality
-            compiler_dict[n]=quality
+            if not compclass.check_avail():
+                continue
+            compiler_dict[n]=compclass.compiler_quality
         return compiler_dict
 
     @classmethod
@@ -370,31 +375,3 @@ def get_ccompiler(comp:str | None=None)->_pyoomph.CCompiler:   #If None, we set 
 
     else:
         raise RuntimeError("Should not end here")
-
-
-
-
-@BaseCCompiler.register_compiler()
-class CCacheCCompiler(SystemCCompiler):
-    compiler_id = "ccache"
-    compiler_quality=6   
-    def __init__(self, compile_args = None):
-        super().__init__(compile_args)            
-        self.comp.compiler_so=["ccache"]+self.comp.compiler_so #type:ignore
-        self.comp.linker_so=["ccache"]+self.comp.linker_so #type:ignore
-        # Code generation is deterministic across process runs regardless of ccode_expression_mode
-        # (see branch deterministic_codegen), so ccache hits are reliable here without needing a
-        # special mode.
-
-    def get_compiler_fingerprint(self) -> str:
-        # self.comp.compiler_so[0] is "ccache" itself here, not the wrapped compiler;
-        # probe the actual wrapped compiler (index 1) so the fingerprint tracks the
-        # real compiler's version, not just ccache's.
-        wrapped=self.comp.compiler_so[1] if len(self.comp.compiler_so)>1 else "" #type:ignore
-        version=""
-        try:
-            out=subprocess.run([wrapped,"--version"],capture_output=True,text=True,timeout=5)
-            version=out.stdout+out.stderr
-        except Exception:
-            pass
-        return self.compiler_id+"|"+str(self.comp.compiler_type)+"|"+wrapped+"|"+version #type:ignore

@@ -1524,8 +1524,6 @@ class InterfaceMesh(_InterfaceMeshTypingBase):
             curri = cast(AnySpatialMesh, curri._parent)
         # assert isinstance(curri,(MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d))
         assert isinstance(curri, MeshFromTemplateBase)
-        if not self.get_problem().is_quiet():
-            print("Generating interface code "+curri._name+" "+name)
         templ: MeshTemplate | None = curri._templatemesh
         # Get point to evaluate the IC and DBC to check whether it is a numeric value (Can prevent problems if somethink like 1/x is used)
         if templ is not None:

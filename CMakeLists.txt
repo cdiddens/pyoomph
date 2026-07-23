@@ -62,6 +62,12 @@ option(PYOOMPH_COPY_STUBS_TO_SOURCE_TREE "Also mirror the generated .pyi stub in
 # generated code is reproducible across process runs, and a wrong ON here
 # would silently defeat that safeguard.
 option(PYOOMPH_ASSUME_GINAC_HASH_PATCHED "Assert that a system-supplied GiNaC (PYOOMPH_DOWNLOAD_GINAC=OFF) already has deterministic term/hash ordering" OFF)
+# Build-time kill switch for the JIT code cache (pyoomph/generic/jit_cache.py): if OFF, the
+# cache is permanently disabled for this build, regardless of runtime flags/env vars
+# (--no-cache, PYOOMPH_JIT_CACHE, ...) - those can only ever narrow ON down to OFF, never
+# override an OFF set here. Independent of PYOOMPH_GINAC_HASH_PATCHED below: that one governs
+# whether caching is *safe*; this one governs whether it exists at all in this build.
+option(PYOOMPH_ENABLE_JIT_CACHE "Enable the JIT code cache at build time" ON)
 
 # Left empty by default: ginac.de only ever hosts the *current* release
 # tarball, so a version pinned here goes dead as soon as a new release is
@@ -191,6 +197,7 @@ target_compile_definitions(pyoomph_core PUBLIC
   $<$<BOOL:${PYOOMPH_USE_MPI}>:OOMPH_HAS_MPI>
   $<$<BOOL:${PYOOMPH_PARANOID}>:PARANOID>
   $<$<BOOL:${PYOOMPH_GINAC_HASH_PATCHED}>:PYOOMPH_GINAC_HASH_PATCHED>
+  $<$<BOOL:${PYOOMPH_ENABLE_JIT_CACHE}>:PYOOMPH_ENABLE_JIT_CACHE>
 )
 
 if(PYOOMPH_DOWNLOAD_GINAC)

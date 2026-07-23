@@ -74,6 +74,11 @@ export PKG_CONFIG_PATH="${PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 
 echo "BUILDING GINAC"
 cd "${ROOT_DIR}/ginac"
+# Deterministic term/hash ordering (see citools/patches/ginac-deterministic-*.patch and
+# branch deterministic_codegen) - without this, a prebuilt GiNaC here would make pyoomph's
+# JIT code cache (pyoomph/generic/jit_cache.py) unsafe to trust, since it would then have no
+# way to tell this static prebuild apart from a genuinely unpatched system GiNaC.
+bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/patches/apply_ginac_patch.sh"
 autoreconf -i -f
 CLN_CFLAGS="-I${PREFIX}/include" CLN_LIBS="-L${PREFIX}/lib -l:libcln.a" \
   ./configure --disable-shared --enable-static --with-pic=yes --prefix "${PREFIX}" ${PYOOMPH_GINAC_CONFIGURE_OPTIONS}

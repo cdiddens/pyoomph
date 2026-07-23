@@ -1,3 +1,5 @@
+.. _installcompile:
+
 Compilation from source
 -----------------------
 
@@ -9,4 +11,5 @@ The following sections discuss the possibility of building pyoomph from source. 
 
    source/mac.rst
    source/linux.rst
+   cmakeoptions.rst
 

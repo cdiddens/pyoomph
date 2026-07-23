@@ -406,6 +406,14 @@ void PyReg_CodeGen(nb::module_ &m)
                         "Whether the Jacobian is assembled analytically (via generated derivative code) rather than by finite differences.")
         .def_rw("analytical_position_jacobian", &pyoomph::FiniteElementCode::analytical_position_jacobian,
                         "Whether the Jacobian entries with respect to nodal position degrees of freedom (moving-mesh problems) are assembled analytically rather than by finite differences.")
+        .def_rw("generate_hessian", &pyoomph::FiniteElementCode::generate_hessian,
+                        "Whether to generate Hessian-vector-product code at all. Normally set as a side effect of "
+                        "generate_and_compile_bulk_element_code() (from Problem.are_hessian_products_calculated_analytically()) "
+                        "right before write_code() runs; exposed read-write here so the JIT cache's Tier-2 pre-codegen "
+                        "fingerprint (see jit_cache.py) can be computed with the same up-to-date value instead of "
+                        "whatever this held at some earlier, possibly stale point.")
+        .def_rw("assemble_hessian_by_symmetry", &pyoomph::FiniteElementCode::assemble_hessian_by_symmetry,
+                        "Whether Hessian assembly exploits its symmetry to only derive half of the entries - see generate_hessian.")
         .def("_debug_second_order_Hessian_deriv", &pyoomph::FiniteElementCode::debug_second_order_Hessian_deriv,
              "Debugging helper comparing the analytically derived second-order (Hessian) derivatives against a finite-difference approximation.")
         .def("_do_define_fields", &pyoomph::FiniteElementCode::_do_define_fields,
@@ -498,7 +506,21 @@ void PyReg_CodeGen(nb::module_ &m)
         "system-wide without asserting this via -DPYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON - "
         "pyoomph.generic.jit_cache disables the JIT code cache entirely in that case, since "
         "generated code cannot be assumed reproducible across runs.");
-   
+
+    m.def(
+        "jit_cache_enabled_at_build_time", []()
+        {
+#ifdef PYOOMPH_ENABLE_JIT_CACHE
+            return true;
+#else
+            return false;
+#endif
+        },
+        "Build-time kill switch for the JIT code cache (PYOOMPH_ENABLE_JIT_CACHE in "
+        "CMakeLists.txt): if False, pyoomph.generic.jit_cache disables itself permanently for "
+        "this build, regardless of any runtime flag/env var (--no-cache, PYOOMPH_JIT_CACHE, ...) "
+        "trying to turn it back on.");
+
 
     delete py_decl_PyoomphCCompiler;
     delete py_decl_PyoomphFiniteElementCode;

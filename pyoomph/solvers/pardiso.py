@@ -312,7 +312,24 @@ class pardisoSolver(object):
     def clear(self):        
         self.run_pardiso(phase=-1)
 
-    def __del__(self):
+    def __del__(self, _is_finalizing:Any=sys.is_finalizing):
+        # Skip once the interpreter itself is shutting down: this instance may only be
+        # reachable this late because the owning Problem never called .release()/used
+        # "with" (see project_nanobind_migration memory) - by that point module globals
+        # this depends on (e.g. numpy as np, imported above) may already be cleared to
+        # None, which would otherwise surface as a harmless but scary "Exception ignored
+        # in __del__" (AttributeError: 'NoneType' object has no attribute 'zeros').
+        # Freeing MKL's internal memory here is unnecessary anyway - the OS reclaims it
+        # on process exit regardless.
+        # _is_finalizing is bound as a default arg (evaluated once, at function-definition
+        # time) rather than looked up as "sys.is_finalizing" at call time: CPython clears
+        # nearly all module-level globals to None during interpreter shutdown, including
+        # this module's own "sys" name - a bare "sys.is_finalizing()" call here can itself
+        # raise "'NoneType' object has no attribute 'is_finalizing'" depending on shutdown
+        # GC ordering (confirmed empirically). A default-arg value lives in the function
+        # object itself, not the module dict, so it survives regardless.
+        if _is_finalizing():
+            return
         self.clear()
 
     def factor(self):

@@ -30,9 +30,14 @@ from __future__ import annotations
 from ..generic import Equations,InterfaceEquations
 from ..expressions import *  # Import grad et al
 from ..typings import *
+from ..materials.generic import AnyFluidProperties
 
 if TYPE_CHECKING:
-    pass
+    # AnyFluidProperties is a string-valued TypeAlias (see materials/generic.py) whose members
+    # (PureLiquidProperties, PureGasProperties, ...) are only resolvable via a wildcard import -
+    # needed so tools that resolve forward references in type annotations (e.g. sphinx_autodoc_typehints)
+    # can look them up in this module's namespace too, same as materials/generic.py itself does.
+    from ..materials.generic import *
 
 
 class CahnHilliardEquation(Equations):
@@ -186,7 +191,6 @@ class SimpleNSCH(Equations):
     """
     TODO: Add description    
     """
-    from ..materials.generic import AnyFluidProperties
     def __init__(self,fluid_plus:AnyFluidProperties,fluid_minus:AnyFluidProperties,sigma:ExpressionOrNum=1,epsilon:ExpressionOrNum=1,mobility:ExpressionOrNum=1,space:FiniteElementSpaceEnum="C2",phase_name:str="c",potential_name:str="mu",velocity_name:str="velocity",temporal_error_factor:float=0,dyadic_forcing:bool=False):
         super(SimpleNSCH, self).__init__()
         self.mobility=mobility

@@ -48,9 +48,9 @@ entries = {"check": _CheckEntry()}
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
-    "command", help="Use one of the following commands: check, cbrange")
+    "command", help="Use one of the following commands: check, cbrange, cache")
 parser.add_argument("check_type", nargs='?',
-                    help="What to check: solver, eigen or compiler. If command=='cbrange', it is the mode (currently only 'merge')", default="")
+                    help="What to check: solver, eigen or compiler. If command=='cbrange', it is the mode (currently only 'merge'). If command=='cache', it is the action ('usage' or 'clear')", default="")
 parser.add_argument("check_name", nargs='?',
                     help="Which solver/eigensolver/compiler to check. If command=='cbrange', it is the output dir", default="")
 parser.add_argument("cbrange_in", nargs='*',
@@ -105,6 +105,44 @@ def test_compiler(compiler):
          p+=InitialCondition(y=1-var("time"))@"globals"
 
          p.initialise()
+
+def check_jit_cache(compiler):
+   # Verifies the JIT code cache (pyoomph/generic/jit_cache.py) actually gets used, not just
+   # that it fails to crash: run the same tiny problem twice against a fresh, empty cache
+   # directory. The first pass can't possibly find anything cached yet ("ignoring the cache"
+   # in the sense of not benefiting from whatever might already be in the real default cache
+   # location), but writes its result into it normally. The second pass reuses that same
+   # (now populated) directory, and should be served entirely from what the first pass wrote -
+   # checked via the cache's own hit counter, since test_compiler() runs quiet() and the
+   # ordinary "JIT cache hit" progress message is suppressed.
+   from .generic.jit_cache import get_jit_cache, is_enabled as jit_cache_is_enabled
+   import shutil
+
+   if not jit_cache_is_enabled():
+      print("","","JIT code cache is disabled (see pyoomph.generic.jit_cache), skipping cache verification")
+      return
+
+   old_cache_dir_env = os.environ.get("PYOOMPH_JIT_CACHE_DIR")
+   tempdir = tempfile.mkdtemp(prefix="pyoomph_jitcache_check_")
+   os.environ["PYOOMPH_JIT_CACHE_DIR"] = tempdir
+   try:
+      test_compiler(compiler)  # Pass 1: populates the fresh cache directory
+      cache = get_jit_cache()
+      if cache is None:
+         print("","","JIT code cache is disabled (see pyoomph.generic.jit_cache), skipping cache verification")
+         return
+      hits_before = cache.hits
+      test_compiler(compiler)  # Pass 2: should be served entirely from pass 1's writes
+      if cache.hits > hits_before:
+         print("","","JIT code cache seems to work ("+str(cache.hits-hits_before)+" hit(s) on the second pass)")
+      else:
+         print("","","JIT code cache does NOT seem to be used (0 hits on the second pass, "+str(cache.misses)+" entries were written on the first pass)")
+   finally:
+      if old_cache_dir_env is None:
+         os.environ.pop("PYOOMPH_JIT_CACHE_DIR", None)
+      else:
+         os.environ["PYOOMPH_JIT_CACHE_DIR"] = old_cache_dir_env
+      shutil.rmtree(tempdir, ignore_errors=True)
 
 def test_eigen(eigensolver):
    from . generic.problem import Problem
@@ -273,6 +311,7 @@ elif arglist.command=="check":
                   try:
                      test_compiler(to_check)
                      print("","","running seems to work")
+                     check_jit_cache(to_check)
                   except Exception as e:
                      print("","","C compilation seems to work: "+str(e.with_traceback(None)))
                else:
@@ -302,7 +341,48 @@ elif arglist.command=="check":
                   print("","For instructions on how to install a compiler, see "+install_doc_url)
       else:
          raise RuntimeError("TODO: ")
+
+elif arglist.command=="cache":
+   from .generic.jit_cache import get_cache_dir, is_enabled as jit_cache_is_enabled, JITCache, clear_cache
+
+   def _format_bytes(n):
+      f = float(n)
+      for unit in ("B","KB","MB","GB","TB"):
+         if f < 1024 or unit=="TB":
+            return "{:.1f} {}".format(f,unit) if unit!="B" else "{:.0f} {}".format(f,unit)
+         f/=1024
+      return "{:.1f} TB".format(f) # unreachable, keeps type checkers happy
+
+   action = arglist.check_type
+   if action not in {"usage","clear"}:
+      raise RuntimeError("Please specify 'cache usage' or 'cache clear'")
+
+   cache_dir = get_cache_dir()
+
+   if action=="usage":
+      print("Cache directory: "+cache_dir)
+      if jit_cache_is_enabled():
+         print("JIT code cache is currently ACTIVE")
+      else:
+         print("JIT code cache is currently DISABLED (see pyoomph.generic.jit_cache for why - "
+               "e.g. GiNaC was not built with the deterministic-hash patches, or PYOOMPH_JIT_CACHE=0)")
+      if not os.path.isdir(cache_dir):
+         print("","Cache directory does not exist yet (nothing has been cached so far)")
+      else:
+         stats=JITCache(cache_dir).get_usage_stats()
+         print("","Compiled code objects: "+str(stats["objects_count"])+" entries, "
+               +_format_bytes(stats["objects_bytes"])+" / "+_format_bytes(stats["objects_max_bytes"])
+               +" (PYOOMPH_JIT_CACHE_MAX_MB)")
+         print("","Tier-2 fingerprint bookkeeping: "+str(stats["fingerprints_count"])+" entries "
+               +"/ "+str(stats["fingerprints_max_count"])+" (PYOOMPH_JIT_CACHE_MAX_FINGERPRINTS)")
+
+   elif action=="clear":
+      if clear_cache(cache_dir):
+         print("Cleared JIT code cache directory: "+cache_dir)
+      else:
+         print("Cache directory did not exist, nothing to clear: "+cache_dir)
+
 else:
-   raise RuntimeError("Please use one of the following commands: check")
+   raise RuntimeError("Please use one of the following commands: check, cbrange, cache")
 
 
