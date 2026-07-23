@@ -251,16 +251,55 @@ populates `Local_hang_eqn[value_index]` for every field pyoomph later reads.
      lives only in `cm`'s own element's hangbuffer, invisible to `M1`'s element.
 
    Conclusion: correctness requires the constraint to be materialised as a
-   **flattened, globally-visible `HangInfo` on the node** (`cm`'s constraint =
+   **flattened, globally-visible** map on the node (`cm`'s constraint =
    `{c1:0.5, c2:0.5}` with real, non-hanging, non-pinned leaf masters), computed
-   once (in `cm`'s home element or by a global fixpoint pass) and read by every
-   element that uses `cm` as a master. Genuine hangs that reference a constrained
-   master must then be **flattened against it** so all masters are real dofs
-   (oomph requires masters to be non-hanging), and the leaf dofs must be
-   registered in `Local_hang_eqn`. This is exactly the named-`HangInfo` model of
-   section 3/6 — so the unification is gated on that redesign and was reverted to
-   the protective throws rather than shipping a silently-wrong Jacobian. The
-   reproducer test remains as a `skip` documenting the target + oracle.
+   once and read by every element that uses `cm` as a master. Genuine hangs that
+   reference a constrained master are then **flattened against it** so all masters
+   are real dofs.
+
+   ### 5.5.2 Implemented solution (landed on `new_hanging`)
+
+   The flattening above is implemented directly in pyoomph's JIT hangbuffer fill,
+   without touching oomph-lib's `Node::Hanging_pt`, pin state, or equation
+   numbering:
+
+   * **Per-node stored expansion.** `NodeWithFieldIndicesBase::c1_constraint_corners`
+     holds each constrained node's immediate C1-corner expansion (the C1 vertices
+     of the element where it is a non-vertex node, equal weights). It is computed
+     in `BulkElementBase::setup_additional_dof_constraints` — i.e. in the element
+     that *can* see those corners — so it is available even when the node is later
+     reached as a hang master from a neighbouring element (where it is a C1 vertex
+     and its own corners are not locally derivable). Recomputed after every adapt.
+   * **Recursive flatten.** `flatten_hang_for_value` / `flatten_hang_for_position`
+     expand a dof into a weighted sum over real free leaf dofs: a constrained node
+     → its stored C1 corners (recursed); a genuinely hanging node →
+     `hanging_pt(v)` masters (recursed); otherwise a real leaf, whose local eqn is
+     `nodal_local_eqn` if it is one of this element's nodes, else the
+     hang-registered `local_hang_eqn` / `local_position_hang_eqn`.
+   * **Why no new equation numbers are needed.** The leaf vertices reached by the
+     flattening are exactly the coarse edge/face vertices that oomph-lib already
+     registered in `Local_hang_eqn` as masters of the genuinely-hanging non-vertex
+     nodes on the same edge/face. The one native master the constraint *drops* is
+     the coarse mid-node it pins.
+   * **Fill.** `fill_hang_info_with_equations_{basebulk,for_pos}` build each
+     hangbuffer entry from the flattened map (deduped; capped at `MAX_HANG`, with a
+     clear error on overflow). The old one-level corner-average in
+     `fill_additional_hang_buffer_data` (base version) is retired; the three
+     protective throws are removed.
+
+   **Validated** with the linear residual oracle (residual → machine zero certifies
+   the analytic Jacobian): `ConstrainFieldsToC1Space` (full and `where`-restricted)
+   and `ConstrainPositionsToC1Space` (on a Laplace-smoothed moving mesh), each with
+   two-level adaptive refinement, all converge; non-constrained adaptivity, Stokes
+   and linear-response regressions still pass. See
+   `tests/test_constrained_adaptivity.py`.
+
+   **Not yet covered** (follow-ups): `INTERFACE_DOF_CONSTRAIN_TO_C1` on refined
+   interfaces still uses the old one-level chaining in
+   `InterfaceElementBase::fill_additional_hang_buffer_data` (bulk field/position
+   constraints are done); `interpolate_hang_values` still uses the pre-flatten
+   value interpolation (affects stored dummy/pinned values for output/restart, not
+   the solve); 3D brick/tet coverage and MPI are untested for the combined case.
 6. **`resize` interplay (medium)** — `Node::resize` (`nodes.cc:2167`) reallocates
    `Hanging_pt`, defaulting new slots to the geometric pointer. Interface dofs are
    added by resizing, so extra-`HangInfo` bookkeeping must be re-established after
@@ -290,14 +329,13 @@ populates `Local_hang_eqn[value_index]` for every field pyoomph later reads.
    assigned in one auditable place instead of the implicit codegen `hangindex`.
 3. **Generalise interface-added dofs** to carry their own C2/C1 `HangInfo`s via
    the existing `Local_interface_hang_eqn` path; add refined-interface tests.
-4. **Unify dof-constraints with genuine hanging** (5.5): as 5.5.1 establishes,
-   this cannot be a local per-element patch. Materialise each C1 constraint as a
-   flattened, globally-visible `HangInfo` on the node (real leaf masters, no
-   pinned/hanging masters), via a global fixpoint pass after refinement +
-   constraint application; flatten genuine hangs that reference constrained
-   masters against it; register the leaf dofs in `Local_hang_eqn`. Then remove the
-   three `throw`s and flip `tests/test_constrained_adaptivity.py` from skip to a
-   residual-oracle assertion.
+4. **Unify dof-constraints with genuine hanging** (5.5): **DONE** for bulk field
+   and position constraints — see 5.5.2. Each C1 constraint is materialised as a
+   per-node stored corner expansion and flattened (composed with the refinement
+   hang) into real free leaf dofs at hangbuffer-fill time; the three `throw`s are
+   removed and `tests/test_constrained_adaptivity.py` asserts the residual oracle.
+   Remaining: interface-dof constraints on refined interfaces, and
+   `interpolate_hang_values` value consistency.
 5. **MPI**: verify `synchronise_hanging_nodes` +
    `additional_synchronise_hanging_nodes` cover the new `HangInfo`s; add a
    distributed adaptivity test.
