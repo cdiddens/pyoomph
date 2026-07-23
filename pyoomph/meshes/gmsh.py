@@ -1228,7 +1228,7 @@ class GmshTemplate(MeshTemplate):
         # Find the maximum element dimension. All domains of this dimension will be considered to be bulk domains, the rest are interfaces
         maxeldim = -1
         named_eldims = {"line": 1, "line3": 1, "quad": 2, "quad9": 2, "triangle": 2, "triangle6": 2, "hexahedron27": 3,
-                        "hexahedron": 3, "vertex": 0, "tetra10":3,"tetra":3,"wedge":3,"wedge18":3}
+                        "hexahedron": 3, "vertex": 0, "tetra10":3,"tetra":3,"wedge":3,"wedge18":3,"pyramid":3,"pyramid14":3}
         for name, entry in self._mesh.cell_sets.items(): #type:ignore
             if name == "gmsh:bounding_entities":
                 continue
@@ -1389,6 +1389,22 @@ class GmshTemplate(MeshTemplate):
                     perm=[0, 1, 2, 6, 7, 9, 8, 10, 11, 15, 16, 17, 3, 4, 5, 12, 13, 14]
                     for q in mycells:
                         domain.add_wedge_3d_C2(self._nodeinds[q[perm]]) #type:ignore
+                elif cells.type == "pyramid":
+                    # meshio passes gmsh's raw 5-node pyramid order through unchanged
+                    # (base quad 0-3 in CCW order seen from the apex, then apex 4),
+                    # which already matches pyoomph's reference pyramid -- no reorder needed.
+                    perm = [0, 1, 2, 3, 4]
+                    for q in mycells:
+                        domain.add_pyramid_3d_C1(*self._nodeinds[q[perm]]) #type:ignore
+                elif cells.type == "pyramid14":
+                    # meshio/gmsh order: 0-3 base verts, 4 apex, 5-8 base mid-edges,
+                    # 9-12 verts-to-apex mid-edges, 13 base-face centroid.
+                    # pyoomph order: 0-3 base verts, 4 apex, 5=mid(0,1), 6=mid(1,2),
+                    # 7=mid(2,3), 8=mid(0,3), 9=mid(0,4), 10=mid(1,4), 11=mid(2,4),
+                    # 12=mid(3,4), 13=base-face centroid.
+                    perm = [0, 1, 2, 3, 4, 5, 8, 10, 6, 7, 9, 11, 12, 13]
+                    for q in mycells:
+                        domain.add_pyramid_3d_C2(self._nodeinds[q[perm]]) #type:ignore
                 else:
                     print("Unsupported cell type in 3d domain:", cells.type)
                     q0=mycells[0]
