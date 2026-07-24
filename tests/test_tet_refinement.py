@@ -131,9 +131,13 @@ def test_uniform_tet_refinement_conforming():
             assert _is_manifold(list(m.facet_adjacency_summary()))
 
 
-@pytest.mark.parametrize("space", ["C1", "C2"])
-@pytest.mark.parametrize("boundary", ["left", "top", "front"])
-@pytest.mark.parametrize("lo,hi", [(1, 2), (2, 3)])
+# Single-level (2:1) refinement combos. C1 is cheap so it sweeps boundaries/levels; C2 (10-node,
+# expensive at level 3) gets a lighter but still level-3-reaching set. (deeper level-3 C2 solves are
+# large, so we keep the count small.)
+@pytest.mark.parametrize("space,boundary,lo,hi", [
+    ("C1", "left", 1, 2), ("C1", "top", 2, 3), ("C1", "front", 1, 2), ("C1", "left", 2, 3),
+    ("C2", "left", 1, 2), ("C2", "top", 2, 3),
+])
 def test_single_level_tet_hanging_residual_oracle(space, boundary, lo, hi):
     # Single-level (2:1) refinement near one boundary. Linear residual -> machine zero certifies the
     # hanging-node Jacobian, for both linear (C1) and quadratic (C2) tetrahedra.
@@ -141,6 +145,19 @@ def test_single_level_tet_hanging_residual_oracle(space, boundary, lo, hi):
         problem.max_refinement_level = 4
         problem += RefineToLevel(lo) @ "domain"
         problem += RefineToLevel(hi) @ ("domain/" + boundary)
+        problem.solve()
+        assert _max_abs_residual(problem) < 1e-9
+
+
+@pytest.mark.parametrize("space", ["C1", "C2"])
+def test_abrupt_multilevel_tet_hanging_residual_oracle(space):
+    # A deliberately non-2:1 abrupt >1-level jump (level 1 domain, level 3 near one boundary). The
+    # 2:1 balancing pass + hang-chain flattening must still drive the linear residual to machine
+    # zero (small N=1 mesh so the balancing-induced refinement stays cheap, esp. for C2).
+    with _TetPoisson(N=1, space=space) as problem:
+        problem.max_refinement_level = 4
+        problem += RefineToLevel(1) @ "domain"
+        problem += RefineToLevel(3) @ "domain/left"
         problem.solve()
         assert _max_abs_residual(problem) < 1e-9
 

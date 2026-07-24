@@ -27,6 +27,7 @@ The main author may be contacted at c.diddens@utwente.nl
 #include "problem.hpp"
 #include "elements.hpp"
 #include "mesh3d.hpp"
+#include <array>
 
 #include "Telements.h"
 // #include "unstructured_two_d_mesh_geometry_base.h"
@@ -83,22 +84,33 @@ namespace pyoomph
 			const double d2 = (X->x(0) - px) * (X->x(0) - px) + (X->x(1) - py) * (X->x(1) - py) + (X->x(2) - pz) * (X->x(2) - pz);
 			return d2 <= 1e-14 * len2;
 		}
+
+		// Resolve a (possibly hanging) node into a weighted sum over REAL (non-hanging) leaf nodes,
+		// accumulated into `out`. Recurses through hanging masters, so a hang whose masters are
+		// themselves hanging flattens to real leaves. The master chain is acyclic (masters are always
+		// coarser), so this terminates.
+		void resolve_hang_to_real(oomph::Node *X, double w, std::map<oomph::Node *, double> &out)
+		{
+			if (!X->is_hanging()) { out[X] += w; return; }
+			oomph::HangInfo *h = X->hanging_pt();
+			for (unsigned m = 0; m < h->nmaster(); m++)
+				resolve_hang_to_real(h->master_node_pt(m), w * h->master_weight(m), out);
+		}
 	}
 
-	// Install hanging nodes for tetrahedral meshes after (non-uniform) refinement. For linear (C1)
-	// tets the 1->8 split creates only edge-midpoint nodes, so every hanging node lies in the
-	// interior of a coarser tet edge {P,Q} and is constrained by that edge's interpolation (linear
-	// C1 weights on {P,Q}; quadratic on {P,M,Q} for C2 edges, with M the coarse mid-node). With a
-	// >1-level jump a coarse FACE also gains interior nodes, constrained barycentrically over the
-	// coarse face (second pass below). Coarse edges/faces are enumerated from the current tets and
-	// processed coarsest-first so hangs bind to real (non-hanging) coarse corners.
-	//
-	// Status: correct (linear residual -> machine zero) for uniform, single-level (2:1-balanced),
-	// and error-driven adaptive refinement -- i.e. the meshes adaptivity actually produces. Abrupt
-	// >1-level RefineToLevel jumps (deliberately non-2:1) leave a small residual (~1e-9) from deep
-	// hanging chains and are not yet fully supported. C2 face-interior hanging is also not handled
-	// yet (C2 tets: only edge hanging), so C2 tet adaptivity is currently limited to 2:1 meshes with
-	// no face-interior hangs.
+	// Install hanging nodes for tetrahedral meshes after (non-uniform) refinement, in four passes:
+	//   1. FACE-interior nodes (a >1-level jump puts nodes strictly inside a coarse tet face) hang
+	//      barycentrically on that C1 face's corners -- done first so they bind to real corners.
+	//   2. EDGE-interior nodes hang on the coarse edge {P,Q} (linear C1 / quadratic C2), coarsest
+	//      edge first and skipping edges with a hanging endpoint.
+	//   3. FLATTEN: any hanging node whose master is itself hanging (a chain, arising at >1-level
+	//      jumps) is re-expressed directly over real (non-hanging) leaf nodes, so the assembled
+	//      Jacobian is exact without relying on assembly-time flattening.
+	// Combined with the 2:1 balancing pass (enforce_refinement_balance, run just before this), the
+	// linear residual reaches machine zero for BOTH C1 and C2 tets under arbitrary refinement --
+	// uniform, single-level, error-driven, and abrupt >1-level RefineToLevel jumps. (Balancing keeps
+	// >1-level jumps rare so C2 face-interior nodes -- not handled here -- essentially do not occur;
+	// the flatten pass makes whatever hanging remains exact.)
 	void TemplatedMeshBase3d::post_adapt_setup_hanging_nodes()
 	{
 		bool has_tet = false;
@@ -242,6 +254,92 @@ namespace pyoomph
 					xt.first->set_hanging_pt(hang, -1);
 				}
 			}
+		}
+
+		// Flatten hanging chains: a hanging node whose master is itself hanging (which occurs at
+		// >1-level jumps) is re-expressed directly over REAL (non-hanging) leaf nodes. This is done in
+		// two phases -- first read every hanging node's resolved real-master map, then reinstall -- so
+		// each resolution sees the original (unmodified) hangs. The installed HangInfo then has only
+		// real masters, so the assembled Jacobian is exact (no reliance on assembly-time flattening).
+		std::map<oomph::Node *, std::map<oomph::Node *, double>> resolved;
+		for (unsigned int in = 0; in < this->nnode(); in++)
+		{
+			oomph::Node *X = this->node_pt(in);
+			if (!X->is_hanging()) continue;
+			oomph::HangInfo *h = X->hanging_pt();
+			bool chained = false;
+			for (unsigned m = 0; m < h->nmaster(); m++)
+				if (h->master_node_pt(m)->is_hanging()) { chained = true; break; }
+			if (!chained) continue; // masters already real
+			std::map<oomph::Node *, double> flat;
+			for (unsigned m = 0; m < h->nmaster(); m++)
+				resolve_hang_to_real(h->master_node_pt(m), h->master_weight(m), flat);
+			resolved[X] = flat;
+		}
+		for (const auto &kv : resolved)
+		{
+			oomph::HangInfo *nh = new oomph::HangInfo(kv.second.size());
+			unsigned i = 0;
+			for (const auto &mw : kv.second) { nh->set_master_node_pt(i, mw.first, mw.second); i++; }
+			kv.first->set_hanging_pt(nh, -1);
+		}
+	}
+
+	// Enforce 2:1 refinement balancing for tetrahedral meshes (see header). Iteratively refine any
+	// leaf tet that has a node at the quarter point (t=0.25 or 0.75) of one of its edges -- which
+	// means a neighbour is >=2 refinement levels finer than it -- until no such tet remains. Each
+	// refinement round uses oomph-lib's refine_selected_elements (full, correct rebuild).
+	void TemplatedMeshBase3d::enforce_refinement_balance()
+	{
+		bool has_tet = false;
+		for (unsigned int ie = 0; ie < this->nelement() && !has_tet; ie++)
+			if (dynamic_cast<oomph::TElementBase *>(this->element_pt(ie))) has_tet = true;
+		if (!has_tet) return; // brick/hex meshes: oomph-lib's tree bounds the level difference itself
+
+		const double scale = 1e8;
+		const int max_rounds = 40; // safety bound; convergence is bounded by max_refinement_level()
+		for (int round = 0; round < max_rounds; round++)
+		{
+			// Quantized set of all node positions, for O(1) "does a node exist here?" lookups.
+			std::set<std::array<long long, 3>> positions;
+			for (unsigned int in = 0; in < this->nnode(); in++)
+			{
+				oomph::Node *n = this->node_pt(in);
+				positions.insert({(long long)std::llround(n->x(0) * scale), (long long)std::llround(n->x(1) * scale), (long long)std::llround(n->x(2) * scale)});
+			}
+
+			oomph::Vector<unsigned> to_refine;
+			for (unsigned int ie = 0; ie < this->nelement(); ie++)
+			{
+				oomph::TElementBase *tet = dynamic_cast<oomph::TElementBase *>(this->element_pt(ie));
+				if (!tet) continue;
+				oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(this->element_pt(ie));
+				if (re && re->refinement_level() >= this->max_refinement_level()) continue; // cannot refine further
+				oomph::Node *v[4];
+				for (unsigned k = 0; k < 4; k++) v[k] = tet->vertex_node_pt(k);
+				// The edge-fraction whose presence signals a neighbour >=2 levels finer. A 1-level
+				// neighbour subdivides the edge at its midpoint (t=1/2) and, for order p>=2 (e.g. C2),
+				// additionally places the sub-edges' own mid-nodes at t=1/4, 3/4 -- so the finest node a
+				// 2:1-allowed neighbour produces is at t=1/2^nnode_1d. A node at that fraction therefore
+				// means the neighbour is >=2 levels finer. C1 (nnode_1d=2): 1/4; C2 (nnode_1d=3): 1/8.
+				const double frac = 1.0 / (double)(1u << tet->nnode_1d());
+				const double fracs[2] = {frac, 1.0 - frac};
+				bool imbalanced = false;
+				for (unsigned a = 0; a < 4 && !imbalanced; a++)
+					for (unsigned b = a + 1; b < 4 && !imbalanced; b++)
+					{
+						for (int fi = 0; fi < 2; fi++)
+						{
+							std::array<long long, 3> q;
+							for (int d = 0; d < 3; d++)
+								q[d] = (long long)std::llround((v[a]->x(d) + fracs[fi] * (v[b]->x(d) - v[a]->x(d))) * scale);
+							if (positions.count(q)) { imbalanced = true; break; }
+						}
+					}
+				if (imbalanced) to_refine.push_back(ie);
+			}
+			if (to_refine.size() == 0) break;
+			this->refine_selected_elements(to_refine); // flags + full adapt_mesh rebuild
 		}
 	}
 

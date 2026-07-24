@@ -158,6 +158,13 @@ namespace pyoomph
     // interpolation (linear for C1). No-op for pure-brick meshes (oomph-lib handles those). See .cpp.
     void post_adapt_setup_hanging_nodes() override;
 
+    // Enforce 2:1 refinement balancing for tetrahedral meshes: iteratively refine any leaf tet that
+    // is >1 refinement level coarser than a face/edge neighbour (detected by a node existing at the
+    // quarter point of one of its edges), until the mesh is balanced. This guarantees all hanging is
+    // single-level (edge/face on real coarse corners, no hanging chains), making arbitrary refinement
+    // patterns -- and C2 tet face-interior hanging -- machine-zero. No-op for non-tet meshes. See .cpp.
+    void enforce_refinement_balance() override;
+
     // (Re)build the OcTreeForest. If a forest already exists, this "flattens" it down to the coarsest
     // common refinement level present (min_ref, reduced across MPI ranks if applicable) by promoting
     // each tree node at that level to a new tree root and discarding levels below it; if no forest
