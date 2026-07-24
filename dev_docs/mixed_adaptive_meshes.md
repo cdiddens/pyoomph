@@ -365,14 +365,20 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
      barycentrically on the coarse C1 face. The face-interior pass runs BEFORE the edge pass
      and the edge pass skips edges with a hanging endpoint, so a face-interior node binds to
      its coarse face's real corners rather than a fine sub-edge with a hanging endpoint.
+     Two further passes make **arbitrary** refinement machine-zero: (i) **2:1 balancing**
+     (`enforce_refinement_balance`, run in `adapt` before the hang pass) iteratively refines any
+     leaf tet with a node at `t = 1/2^nnode_1d` of an edge — meaning a neighbour is ≥2 levels
+     finer — via `refine_selected_elements`, to a fixed point. The fraction is order-aware (C1:
+     1/4, C2: 1/8), since a 1-level neighbour already puts C2 sub-edge mid-nodes at 1/4 — a naive
+     quarter-point test would false-positive every refined C2 tet and explode the mesh. (ii)
+     **Hang-chain flattening**: a hanging node whose master is itself hanging is re-expressed over
+     real (non-hanging) leaf nodes, so the assembled `HangInfo` has only real masters and the
+     Jacobian is exact (assembly-time flattening left ~1e-9 for tets). Balancing keeps the mesh
+     2:1 so the unhandled C2 face-interior case does not arise.
      **Validated** (machine-zero oracle) for **C1 and C2** tets: uniform (6→48→384, manifold),
-     single-level 2:1, and Z2 error-driven adaptivity — i.e. the meshes adaptivity produces
-     (`tests/test_tet_refinement.py`, parametrised over C1/C2).
-     **Known limits:** abrupt >1-level `RefineToLevel` jumps still leave ~1e-9 (residual
-     hanging chains at similar-length interface edges whose processing order is not stable —
-     full removal needs genuine 2:1 balancing, which oomph does for boxes via the tree but is
-     bypassed for the geometric tet scheme); C2 tet face-interior hanging (a >1-level-only
-     case) not handled yet. Wedges/pyramids: TODO.
+     single-level 2:1, Z2 error-driven adaptivity, **and abrupt >1-level `RefineToLevel` jumps**
+     (`tests/test_tet_refinement.py`, parametrised over C1/C2; 13/13). C2 tet face-interior
+     hanging is still not handled directly (balancing avoids it). Wedges/pyramids: TODO.
 5. **Variable / anisotropic schemes** (§5): quad 1→2 (both directions), simplex
    bisection; directional error estimator; generalised balance rule.
 6. **MPI hardening** across all shapes; distributed adaptivity tests.
