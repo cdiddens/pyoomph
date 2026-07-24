@@ -750,9 +750,9 @@ namespace oomph
             bool node_done = false;
             Vector<double> s = s_in_parent[i];
             Vector<double> s_fraction = s_in_son[i];
-            // Registry key (father-edge corner-node pair) used to share/create this node without
-            // duplication; empty if node i is not a shareable father-edge (mid-edge) node.
-            std::set<Node *> reg_key = this->father_edge_node_key(i, son_type, father_el_pt);
+            // Registry key (father node-pointer pair that this node bisects) used to share/create
+            // this node without duplication; empty if node i is a reused father node.
+            std::set<Node *> reg_key = this->father_edge_node_key(s, father_el_pt);
 
             Node *created_node_pt = father_el_pt->get_node_at_local_coordinate(s);
 
@@ -1432,25 +1432,33 @@ namespace oomph
   // Shared-node registry for geometric node-sharing during triangle refinement (see header).
   std::map<std::set<Node *>, Node *> RefineableTElement<2>::Shared_edge_node_registry;
 
-  // The (unordered) pair of father corner nodes that son-local node i bisects, if it lies on a
-  // father edge (S=v2-v0, E=v0-v1, W=v1-v2, consistent with setup_father_bounds); empty otherwise.
-  // Currently only linear (3-node) triangles are supported: each father edge yields a single new
-  // mid-edge node, so the corner pair uniquely identifies it.
-  std::set<Node *> RefineableTElement<2>::father_edge_node_key(unsigned i, int son_type, RefineableTElement<2> *father_el_pt) const
+  // Registry key for a new son node at father-local coordinate s_in_father: every node created by
+  // a 1->4 triangle refinement is the midpoint of exactly two father nodes (two corners for a
+  // linear triangle; a corner+mid-edge or two mid-edge nodes for a quadratic one). The key is that
+  // father node-pointer pair, which is identical from every element that creates the same node
+  // (sibling sons AND the edge-sharing neighbour father's sons, since they share the father edge's
+  // nodes), so mid-edge nodes are deduplicated with no coordinate descent. Returns empty if
+  // s_in_father is not the midpoint of any father-node pair (e.g. a reused father node, handled
+  // separately via get_node_at_local_coordinate).
+  std::set<Node *> RefineableTElement<2>::father_edge_node_key(const Vector<double> &s_in_father, RefineableTElement<2> *father_el_pt) const
   {
-    using namespace QuadTreeNames;
     std::set<Node *> key;
-    if (this->nnode() != 3)
+    unsigned nf = father_el_pt->nnode();
+    Vector<double> sa(2), sb(2);
+    for (unsigned a = 0; a < nf; a++)
     {
-      throw_runtime_error("Geometric node-sharing for triangle refinement is currently only implemented for linear (3-node) C1 triangles");
-    }
-    int father_bound = Father_bound[nnode_1d()](i, son_type);
-    switch (father_bound)
-    {
-    case S: key = {father_el_pt->node_pt(2), father_el_pt->node_pt(0)}; break;
-    case E: key = {father_el_pt->node_pt(0), father_el_pt->node_pt(1)}; break;
-    case W: key = {father_el_pt->node_pt(1), father_el_pt->node_pt(2)}; break;
-    default: break; // interior (OMEGA) or a father vertex -> not a shareable mid-edge node
+      father_el_pt->local_coordinate_of_node(a, sa);
+      for (unsigned b = a + 1; b < nf; b++)
+      {
+        father_el_pt->local_coordinate_of_node(b, sb);
+        if (std::abs(0.5 * (sa[0] + sb[0]) - s_in_father[0]) < 1e-10 &&
+            std::abs(0.5 * (sa[1] + sb[1]) - s_in_father[1]) < 1e-10)
+        {
+          key.insert(father_el_pt->node_pt(a));
+          key.insert(father_el_pt->node_pt(b));
+          return key;
+        }
+      }
     }
     return key;
   }

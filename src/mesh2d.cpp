@@ -266,11 +266,14 @@ namespace pyoomph
     for (unsigned int in = 0; in < this->nnode(); in++) this->node_pt(in)->set_nonhanging();
 
     // A hanging node lies strictly in the interior of a coarser neighbour's edge. That edge shows
-    // up in the facet adjacency as an interior facet {P,Q} incident on exactly one element (the
-    // coarse element; the refined side has the sub-edges {P,M},{M,Q} instead). For each such
-    // facet, constrain every mesh node collinear strictly between P and Q to the linear
-    // interpolation of P and Q. Exact for straight-sided linear (C1) triangles; hanging masters
-    // that are themselves hanging are resolved by pyoomph's assembly-time flattening.
+    // up in the facet adjacency as an interior facet {P,Q} (vertex nodes) incident on exactly one
+    // element (the coarse element; the refined side carries the sub-edges instead). The hanging
+    // node is constrained by the coarse element's edge interpolation evaluated at its position:
+    //   - linear (C1) triangle: weights (1-t), t on the two corner nodes {P,Q};
+    //   - quadratic (C2) triangle: quadratic Lagrange weights on {P,M,Q}, where M is the coarse
+    //     edge mid-node (at t=0.5, a real shared node -- not itself hanging).
+    // t is the position parameter X = P + t (Q-P). Exact for straight-sided triangles; hanging
+    // masters that are themselves hanging are resolved by pyoomph's assembly-time flattening.
     FacetAdjacencyMap adj = this->build_facet_adjacency();
     for (const auto &kv : adj)
     {
@@ -278,16 +281,52 @@ namespace pyoomph
       if (kv.first.size() != 2) continue;  // an edge has exactly two vertex nodes in 2d
       std::set<pyoomph::Node *>::const_iterator it = kv.first.begin();
       oomph::Node *P = *it; ++it; oomph::Node *Q = *it;
+
+      // Nodes collinear strictly between P and Q (the coarse edge's interior nodes on the fine side).
+      std::vector<std::pair<oomph::Node *, double>> between;
       for (unsigned int in = 0; in < this->nnode(); in++)
       {
         oomph::Node *X = this->node_pt(in);
-        if (X == P || X == Q || X->is_hanging()) continue;
+        if (X == P || X == Q) continue;
         double t;
-        if (!node_strictly_on_segment(P, Q, X, t)) continue;
-        oomph::HangInfo *hang = new oomph::HangInfo(2);
-        hang->set_master_node_pt(0, P, 1.0 - t);
-        hang->set_master_node_pt(1, Q, t);
-        X->set_hanging_pt(hang, -1); // geometric slot; C1/C2 value slots alias it
+        if (node_strictly_on_segment(P, Q, X, t)) between.push_back(std::make_pair(X, t));
+      }
+      if (between.empty()) continue; // a genuine (conforming) boundary/interior edge, nothing hangs
+
+      // Interpolation order of the coarse element on this edge.
+      oomph::FiniteElement *coarse_el = dynamic_cast<oomph::FiniteElement *>(kv.second[0].first);
+      const unsigned order_1d = coarse_el ? coarse_el->nnode_1d() : 2;
+
+      if (order_1d <= 2)
+      {
+        // Linear edge: each interior node hangs on {P,Q}.
+        for (std::pair<oomph::Node *, double> &xt : between)
+        {
+          if (xt.first->is_hanging()) continue;
+          oomph::HangInfo *hang = new oomph::HangInfo(2);
+          hang->set_master_node_pt(0, P, 1.0 - xt.second);
+          hang->set_master_node_pt(1, Q, xt.second);
+          xt.first->set_hanging_pt(hang, -1);
+        }
+      }
+      else
+      {
+        // Quadratic edge: M is the coarse mid-node (t=0.5), a real shared node; the other interior
+        // nodes hang on {P,M,Q} with quadratic Lagrange weights (nodes at t=0, 0.5, 1).
+        oomph::Node *M = 0;
+        for (std::pair<oomph::Node *, double> &xt : between)
+          if (std::abs(xt.second - 0.5) < 1e-6) { M = xt.first; break; }
+        if (!M) continue; // coarse mid-node not found (should not happen for a C2 coarse edge)
+        for (std::pair<oomph::Node *, double> &xt : between)
+        {
+          if (xt.first == M || xt.first->is_hanging()) continue;
+          const double t = xt.second;
+          oomph::HangInfo *hang = new oomph::HangInfo(3);
+          hang->set_master_node_pt(0, P, 2.0 * (t - 0.5) * (t - 1.0));
+          hang->set_master_node_pt(1, M, 4.0 * t * (1.0 - t));
+          hang->set_master_node_pt(2, Q, 2.0 * t * (t - 0.5));
+          xt.first->set_hanging_pt(hang, -1);
+        }
       }
     }
   }

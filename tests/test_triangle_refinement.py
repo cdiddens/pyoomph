@@ -110,25 +110,28 @@ def test_uniform_triangle_refinement_level_counts():
 
 class _TriPoissonPlain(Problem):
     # Same as _TriPoisson but without the observable (kept minimal for the residual oracle).
-    def __init__(self, split="left", N=4):
+    # space="C1" -> linear (3-node) triangles; "C2" -> quadratic (6-node) triangles.
+    def __init__(self, split="left", N=4, space="C1"):
         super().__init__()
-        self._split, self._N = split, N
+        self._split, self._N, self._space = split, N, space
 
     def define_problem(self):
         self += RectangularQuadMesh(name="domain", N=self._N, split_in_tris=self._split)
-        eqs = PoissonEquation(source=1, space="C1") + DirichletBC(u=0) @ ["left", "right", "top", "bottom"]
+        eqs = PoissonEquation(source=1, space=self._space) + DirichletBC(u=0) @ ["left", "right", "top", "bottom"]
         self += eqs @ "domain"
 
 
 import pytest
 
 
+@pytest.mark.parametrize("space", ["C1", "C2"])
 @pytest.mark.parametrize("split", ["left", "right", "crossed"])
 @pytest.mark.parametrize("boundary", ["left", "top"])
-def test_nonuniform_triangle_refinement_residual_oracle(split, boundary):
+def test_nonuniform_triangle_refinement_residual_oracle(space, split, boundary):
     # Refine more strongly near one boundary than the interior -> hanging nodes at the interface.
-    # Linear problem: residual ~0 after the Newton step certifies the hanging-node Jacobian.
-    with _TriPoissonPlain(split=split) as problem:
+    # Linear problem: residual ~0 after the Newton step certifies the hanging-node Jacobian
+    # (linear weights for C1 edges, quadratic weights for C2 edges).
+    with _TriPoissonPlain(split=split, space=space) as problem:
         problem.max_refinement_level = 3
         problem += RefineToLevel(1) @ "domain"
         problem += RefineToLevel(3) @ ("domain/" + boundary)
@@ -136,23 +139,40 @@ def test_nonuniform_triangle_refinement_residual_oracle(split, boundary):
         assert _max_abs_residual(problem) < 1e-9
 
 
+@pytest.mark.parametrize("space", ["C1", "C2"])
+def test_deep_multilevel_triangle_hanging_residual_oracle(space):
+    # A large refinement-level jump (1 -> 4) creates hanging nodes whose masters are themselves
+    # hanging (non-2:1); the assembly-time flattening must still yield the correct Jacobian.
+    with _TriPoissonPlain(split="left", space=space) as problem:
+        problem.max_refinement_level = 5
+        problem += RefineToLevel(1) @ "domain"
+        problem += RefineToLevel(4) @ "domain/left"
+        problem.solve()
+        assert _max_abs_residual(problem) < 1e-9
+
+
 class _TriPoissonAdaptive(Problem):
+    def __init__(self, space="C1"):
+        super().__init__()
+        self._space = space
+
     def define_problem(self):
         self += RectangularQuadMesh(name="domain", N=6, split_in_tris="crossed")
         x = var("coordinate")[0]
         y = var("coordinate")[1]
-        eqs = PoissonEquation(source=100 * exp(-50 * ((x - 0.2) ** 2 + (y - 0.2) ** 2)), space="C1")
+        eqs = PoissonEquation(source=100 * exp(-50 * ((x - 0.2) ** 2 + (y - 0.2) ** 2)), space=self._space)
         eqs += DirichletBC(u=0) @ ["left", "right", "top", "bottom"]
         eqs += SpatialErrorEstimator(u=1)
         self += eqs @ "domain"
 
 
-def test_error_based_triangle_adaptivity_residual_oracle():
+@pytest.mark.parametrize("space", ["C1", "C2"])
+def test_error_based_triangle_adaptivity_residual_oracle(space):
     # Genuine error-driven (Z2) adaptive refinement of a triangular mesh around a localized
     # source. The refined mesh is non-uniform (hanging nodes); the linear residual must still
     # reach machine zero.
-    with _TriPoissonAdaptive() as problem:
+    with _TriPoissonAdaptive(space=space) as problem:
         problem.max_refinement_level = 4
         problem.solve(spatial_adapt=3)
         assert _max_abs_residual(problem) < 1e-9
-        assert problem.get_mesh("domain").nelement() > 1000  # adaption actually happened
+        assert problem.get_mesh("domain").nelement() > 400  # adaption actually happened

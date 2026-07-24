@@ -221,8 +221,9 @@ namespace oomph
     // (3-node) triangles, where each father edge spawns exactly one new (mid-edge) node. Cleared
     // at the start of each refinement round by TemplatedMeshBase::split_elements_if_required.
     static std::map<std::set<Node *>, Node *> Shared_edge_node_registry;
-    // The father-edge corner-node key for son-local node i (empty if i is not a father-edge node).
-    std::set<Node *> father_edge_node_key(unsigned i, int son_type, RefineableTElement<2> *father_el_pt) const;
+    // Registry key (father node-pointer pair that this son node bisects) for a new son node at
+    // father-local coordinate s_in_father; empty if it is not the midpoint of a father-node pair.
+    std::set<Node *> father_edge_node_key(const Vector<double> &s_in_father, RefineableTElement<2> *father_el_pt) const;
   };
 
   template <>
