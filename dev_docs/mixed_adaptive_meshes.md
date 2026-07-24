@@ -330,6 +330,23 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
 4. **3D tets → wedges → pyramids** (pyramid last: forces mixed offspring). Fill
    the wedge/pyramid `bulk_coordinate_derivatives` gaps (§1.2) as needed for face
    Jacobians.
+   * **Phase 4 (tets) [DONE for C1]** — pure-tet meshes now h-refine, the 2D triangle
+     recipe lifted a dimension. A linear tet refines 1→8 on the OcTree hierarchy (8 sons =
+     4 corner sub-tets + 4 tiling the interior octahedron along a fixed diagonal — a free
+     choice, since the octahedron never touches a shared face so conformity holds via
+     edge-midpoint sharing). `RefineableTElement<3>::build` was written from scratch
+     (barycentric son→father map; registry keyed by the bisected father-node pair, 3D
+     `father_edge_node_key`; new-node boundary/BC/coords derived directly from the two
+     father nodes, so no `Father_bound` table). Forest: `octree.h/.cc` got the 2D quadtree
+     treatment (skip-init ctor flag + virtual `find_neighbours`); new `DynamicOcTreeForest`
+     skips brick neighbouring/self-test for tets, delegates for bricks. Hanging
+     (`TemplatedMeshBase3d::post_adapt_setup_hanging_nodes`): edge-interior nodes hang on the
+     coarse edge (linear C1 / quadratic C2), and for >1-level jumps face-interior nodes hang
+     barycentrically on the coarse C1 face; coarsest-first so masters are real. **Validated**
+     (machine-zero oracle): uniform (6→48→384, manifold), single-level 2:1, and Z2
+     error-driven adaptivity — i.e. the meshes adaptivity produces. Regression 42/42.
+     **Known limits:** abrupt >1-level `RefineToLevel` jumps leave ~1e-9 (deep hanging
+     chains, non-2:1); C2 tet face-interior hanging not handled yet. Wedges/pyramids: TODO.
 5. **Variable / anisotropic schemes** (§5): quad 1→2 (both directions), simplex
    bisection; directional error estimator; generalised balance rule.
 6. **MPI hardening** across all shapes; distributed adaptivity tests.
