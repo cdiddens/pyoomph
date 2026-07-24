@@ -1483,6 +1483,8 @@ void PyReg_Mesh(nb::module_ &m)
 			 { oomph::Vector<unsigned> oomphvec(inds.size()); for (unsigned int i=0;i<inds.size();i++) oomphvec[i]=inds[i]; m->refine_selected_elements(oomphvec); }), nb::arg("element_indices"), "Refines only the elements at the given indices in this mesh")
 		.def("setup_boundary_element_info",handle_method<TemplatedMeshBase1dHandle>([](pyoomph::TemplatedMeshBase1d *self)
 			 { std::ostringstream oss; self->setup_boundary_element_info(oss); }), "(Re-)builds the lookup of which elements are adjacent to which mesh boundary")
+		.def("facet_adjacency_summary",handle_method<TemplatedMeshBase1dHandle>([](pyoomph::TemplatedMeshBase1d *self)
+			 { return self->facet_adjacency_summary(); }), "Returns [n_facets, n_boundary_facets, n_interior_facets, max_incidence] of the facet-adjacency map (generic neighbour-finding primitive)")
 		.def_prop_rw("identication_of_boundary_elements_by_facets",handle_method<TemplatedMeshBase1dHandle>([](pyoomph::TemplatedMeshBase1d *self)
 			 { return self->identication_of_boundary_elements_by_facets; }),handle_method<TemplatedMeshBase1dHandle>([](pyoomph::TemplatedMeshBase1d *self, bool val) { self->identication_of_boundary_elements_by_facets=val; }), "Controls whether boundary elements are identified by matching facets (True) or by node membership (False)")
 		.def("setup_tree_forest",handle_method<TemplatedMeshBase1dHandle>(&pyoomph::TemplatedMeshBase1d::setup_tree_forest), "Builds the binary tree forest used for adaptive mesh refinement of this 1d mesh");
@@ -1516,6 +1518,8 @@ void PyReg_Mesh(nb::module_ &m)
 			 { oomph::Vector<unsigned> oomphvec(inds.size()); for (unsigned int i=0;i<inds.size();i++) oomphvec[i]=inds[i]; m->refine_selected_elements(oomphvec); }), nb::arg("element_indices"), "Refines only the elements at the given indices in this mesh")
 		 .def_prop_rw("identication_of_boundary_elements_by_facets",handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *self)
 			 { return self->identication_of_boundary_elements_by_facets; }),handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *self, bool val) { self->identication_of_boundary_elements_by_facets=val; }), "Controls whether boundary elements are identified by matching facets (True) or by node membership (False)")
+		.def("facet_adjacency_summary",handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *self)
+			 { return self->facet_adjacency_summary(); }), "Returns [n_facets, n_boundary_facets, n_interior_facets, max_incidence] of the facet-adjacency map (generic neighbour-finding primitive)")
 		.def("setup_boundary_element_info",handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *self)
 			 { std::ostringstream oss; self->setup_boundary_element_info(oss); }), "(Re-)builds the lookup of which elements are adjacent to which mesh boundary");
 
@@ -1544,6 +1548,8 @@ void PyReg_Mesh(nb::module_ &m)
 			 { oomph::Vector<unsigned> oomphvec(inds.size()); for (unsigned int i=0;i<inds.size();i++) oomphvec[i]=inds[i]; m->refine_selected_elements(oomphvec); }), nb::arg("element_indices"), "Refines only the elements at the given indices in this mesh")
 		.def_prop_rw("identication_of_boundary_elements_by_facets",handle_method<TemplatedMeshBase3dHandle>([](pyoomph::TemplatedMeshBase3d *self)
 			 { return self->identication_of_boundary_elements_by_facets; }),handle_method<TemplatedMeshBase3dHandle>([](pyoomph::TemplatedMeshBase3d *self, bool val) { self->identication_of_boundary_elements_by_facets=val; }), "Controls whether boundary elements are identified by matching facets (True) or by node membership (False)")
+		.def("facet_adjacency_summary",handle_method<TemplatedMeshBase3dHandle>([](pyoomph::TemplatedMeshBase3d *self)
+			 { return self->facet_adjacency_summary(); }), "Returns [n_facets, n_boundary_facets, n_interior_facets, max_incidence] of the facet-adjacency map (generic neighbour-finding primitive)")
 		.def("setup_boundary_element_info",handle_method<TemplatedMeshBase3dHandle>([](pyoomph::TemplatedMeshBase3d *self)
 			 { std::ostringstream oss; self->setup_boundary_element_info(oss); }), "(Re-)builds the lookup of which elements are adjacent to which mesh boundary");
 

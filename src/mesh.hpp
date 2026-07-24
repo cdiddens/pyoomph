@@ -395,6 +395,26 @@ namespace pyoomph
 #endif
 
 	public:
+		// --- Facet-based adjacency (generic, shape/scheme-neutral neighbour lookup) ---
+		// Groups the current active (leaf) bulk elements by the vertex-node set of each of their
+		// facets (edges in 2d, faces in 3d), yielding for every facet the list of (element, local
+		// face index) pairs incident on it. This is the shape- and split-scheme-neutral
+		// neighbour-finding primitive for the generic refinement engine (see
+		// dev_docs/mixed_adaptive_meshes.md): unlike oomph's compass-based QuadTree/OcTree neighbour
+		// tables it works uniformly for triangles/tets/wedges/pyramids and mixed meshes. It is built
+		// from get_possible_face_indices() / get_vertex_nodes_of_face(), the same primitives the
+		// boundary detection uses.
+		typedef std::map<std::set<pyoomph::Node *>, std::vector<std::pair<pyoomph::BulkElementBase *, int>>> FacetAdjacencyMap;
+		FacetAdjacencyMap build_facet_adjacency() const;
+
+		// Consistency summary of build_facet_adjacency() as {n_facets, n_boundary_facets,
+		// n_interior_facets, max_incidence}. On a conforming mesh every facet is incident on exactly
+		// 1 (boundary) or 2 (interior) element faces, so max_incidence == 2 and n_boundary_facets
+		// equals the number of genuine boundary faces. A max_incidence > 2 signals a
+		// non-manifold/hanging configuration (expected on a non-conformingly refined mesh). Used to
+		// validate the adjacency primitive.
+		std::vector<unsigned> facet_adjacency_summary() const;
+
 	    bool identication_of_boundary_elements_by_facets=true;
 		//	void set_spatial_error_estimator_pt(oomph::Z2ErrorEstimator * errest) {this->spatial_error_estimator_pt()=errest;}
 		TemplatedMeshBase() : pyoomph::Mesh() {}

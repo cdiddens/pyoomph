@@ -5481,6 +5481,43 @@ namespace pyoomph
 
 
 
+  // Groups the current active bulk elements by the vertex-node set of each facet, returning for
+  // every facet the (element, local face index) pairs incident on it. Shape- and
+  // split-scheme-neutral neighbour-finding primitive for the generic refinement engine; see the
+  // declaration in mesh.hpp and dev_docs/mixed_adaptive_meshes.md.
+  TemplatedMeshBase::FacetAdjacencyMap TemplatedMeshBase::build_facet_adjacency() const
+  {
+    FacetAdjacencyMap adj;
+    for (unsigned int ie = 0; ie < this->nelement(); ie++)
+    {
+      pyoomph::BulkElementBase *el = dynamic_cast<pyoomph::BulkElementBase *>(this->element_pt(ie));
+      if (!el) continue; // Skip anything that is not a bulk element (should not occur here)
+      for (int face_id : el->get_possible_face_indices())
+      {
+        std::vector<pyoomph::Node *> face_nodes = el->get_vertex_nodes_of_face(face_id);
+        if (face_nodes.empty()) continue; // e.g. 0d "point" faces that carry no vertex set
+        std::set<pyoomph::Node *> key(face_nodes.begin(), face_nodes.end());
+        adj[key].push_back(std::make_pair(el, face_id));
+      }
+    }
+    return adj;
+  }
+
+  // {n_facets, n_boundary_facets, n_interior_facets, max_incidence}. See declaration for semantics.
+  std::vector<unsigned> TemplatedMeshBase::facet_adjacency_summary() const
+  {
+    FacetAdjacencyMap adj = build_facet_adjacency();
+    unsigned n_boundary = 0, n_interior = 0, max_incidence = 0;
+    for (const auto &kv : adj)
+    {
+      unsigned incidence = kv.second.size();
+      if (incidence == 1) n_boundary++;
+      else if (incidence == 2) n_interior++;
+      if (incidence > max_incidence) max_incidence = incidence;
+    }
+    return {static_cast<unsigned>(adj.size()), n_boundary, n_interior, max_incidence};
+  }
+
   // Builds the `facets` lookup (vertex-node-set -> boundary indices) used by the
   // facet-based setup_boundary_element_info above, from the mesh template's own
   // facet records. bound_map translates template-local boundary indices to this
