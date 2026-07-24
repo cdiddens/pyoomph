@@ -302,11 +302,20 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
      neighbours by shared edges; `check_all_neighbours` skips the quad self-test for
      triangle forests. Validated: 8→32→128 elements, conforming (facet-adjacency
      manifold), Poisson solve + `IntegralObservables` converge; `tests/test_triangle_refinement.py`.
-   * **Phase 2b [NEXT] — non-conforming (hanging-node) triangle refinement.** The
-     geometric hang helper (§3.3): `setup_hanging_nodes` is currently a no-op and a
-     conformity guard turns an attempted non-uniform triangle refinement into a clear
-     error instead of a crash. Only linear (3-node) C1 triangles handled so far; C2
-     needs a finer node-sharing key.
+   * **Phase 2b [DONE] — non-conforming (hanging-node) triangle refinement.** After
+     oomph's `adapt()` returns, `TemplatedMeshBase::adapt` calls the new virtual
+     `post_adapt_setup_hanging_nodes()` (overridden in `TemplatedMeshBase2d`). A hanging
+     node lies strictly in the interior of a coarser neighbour's edge `{P,Q}` — that edge
+     appears in the facet adjacency as an interior facet incident on exactly one element.
+     Each node collinear strictly between `P` and `Q` is constrained to the linear
+     interpolation of `P,Q` (`HangInfo` weights `(1-t), t`). No coordinate descent, no 2:1
+     assumption; hanging masters that are themselves hanging are resolved by the
+     assembly-time flattening from the hanging redesign. Runs before equation numbering.
+     **Validated** with the linear-residual oracle (residual → machine zero): non-uniform
+     `RefineToLevel` on a boundary (3 splits × 2 boundaries, ~1e-16) and genuine Z2
+     error-driven adaptive refinement (~6.6e-16). Full suite 24/24. Linear (C1) triangles
+     only; C2 needs a finer node-sharing key (Phase 2a registry keys on the two corner
+     nodes, which is ambiguous for the multiple new nodes a C2 father edge spawns).
 3. **2D mixed quad + tri**, incl. quad-face/two-tri-face hangs and boundary
    facets across shape changes.
 4. **3D tets → wedges → pyramids** (pyramid last: forces mixed offspring). Fill
