@@ -196,7 +196,7 @@ class GmshSizeCallback:
 
 
 
-def generate_mesh_to_file(geom:pygmsh.geo.Geometry, outdir:str, trunk:str, mesher:"GmshTemplate | None"=None,dim:int=2, order:int | None=None, algorithm:int | None=None, verbose:bool=False, recombine_algo:int | None=None,
+def generate_mesh_to_file(geom:pygmsh.geo.Geometry | pygmsh.occ.Geometry, outdir:str, trunk:str, mesher:"GmshTemplate | None"=None,dim:int=2, order:int | None=None, algorithm:int | None=None, verbose:bool=False, recombine_algo:int | None=None,
                           postgen_cb:Callable[[], None] | None=None, only_geo:bool=False,mesh_mode:str | None=None,mesh_size_callback:GmshSizeCallback | Callable[[int, int, float, float, float], float] | None=None,quiet:bool=False):
     if quiet:
         gmsh.option.setNumber("General.Terminal", 0) #type:ignore
@@ -319,7 +319,9 @@ class GmshTemplate(MeshTemplate):
         
         #: If True, macro elements will be used for the mesh, i.e. curved elements will be considered
         self.use_macro_elements:bool=True
-        self._geom:pygmsh.geo.Geometry | None = None
+        #: Selects the Gmsh geometry kernel. ``"geo"`` (default) is Gmsh's built-in kernel; ``"occ"`` uses the OpenCASCADE kernel, which additionally supports boolean operations and CAD file import.
+        self.kernel:Literal["geo","occ"]="geo"
+        self._geom:pygmsh.geo.Geometry | pygmsh.occ.Geometry | None = None
         self._named_entities:dict[str,list[object]] = {}
         self._rev_names:dict[object,str] = {}
         self._dim_tag_names:dict[tuple[int,int],tuple[str,object]] = {}
@@ -919,9 +921,18 @@ class GmshTemplate(MeshTemplate):
             raise RuntimeError("Can only add geometry inside the function 'define_geometry'")
         ball = self._geom.add_ball([x for x in origin.x], radius, mesh_size=mesh_size) #type:ignore
         if surface_name is not None:
-            for entry in ball.surface_loop.surfaces: #type:ignore
-                self._store_name(surface_name, entry) #type:ignore
-                self._entities2d[entry._id] = entry #type:ignore
+            if self.kernel == "occ":
+                # occ's add_ball returns a plain Ball with just a dim_tag (no .surface_loop like
+                # the geo kernel's ellipsoid-based ball) -- fetch its boundary surfaces instead.
+                self._geom.env.synchronize() #type:ignore
+                for dim, tag in gmsh.model.getBoundary([ball.dim_tag], combined=False, oriented=False): #type:ignore
+                    entry = GmshTemplate.GmshFakeEntry(tag, (dim, tag))
+                    self._store_name(surface_name, entry)
+                    self._entities2d[tag] = entry #type:ignore
+            else:
+                for entry in ball.surface_loop.surfaces: #type:ignore
+                    self._store_name(surface_name, entry) #type:ignore
+                    self._entities2d[entry._id] = entry #type:ignore
         self._maxdim = max(self._maxdim, 2)  ##TODO 2 or 1
         return ball
 
@@ -1326,7 +1337,8 @@ class GmshTemplate(MeshTemplate):
             self._fntrunk = mshtrunk
 
             if self._loaded_from_mesh_file is None:
-                with pygmsh.geo.Geometry(["-noenv"]) as geom:
+                GeometryClass = pygmsh.occ.Geometry if self.kernel == "occ" else pygmsh.geo.Geometry
+                with GeometryClass(["-noenv"]) as geom:
                     self._geom = geom
                     super(GmshTemplate, self)._do_define_geometry(problem)
                     for name, objlist in self._named_entities.items():
@@ -1624,29 +1636,83 @@ class GmshTemplate(MeshTemplate):
         #num_patt = '[-+]? (?: (?: \d* \. \d+ ) | (?: \d+ \.? ) )(?: [Ee] [+-]? \d+ ) ?'
         #num_patt="[-+]?\d*\.?\d+|[-+]?\d+"
         num_patt=r"[-+]?(\d+([.]\d*)?|[.]\d+)([eE][-+]?\d+)?"
+
+        # The OCC kernel writes some auto-generated points (e.g. circle arc centers) with
+        # tags relative to a script variable instead of a plain integer literal, e.g.:
+        #   p3 = newp;
+        #   Point(p3 + 1) = {0, 0, 0};
+        #   Circle(3) = {7, p3 + 1, 6};
+        # Track those variables plus a running "newp" counter (mirroring Gmsh's own semantics:
+        # newp == highest point tag emitted so far, plus one) to resolve such expressions to
+        # concrete point tags. Under the geo kernel every tag is already a plain integer, so
+        # this is a no-op there.
+        varvals:dict[str,int] = {}
+        last_point_tag = 0
+
+        def resolve_tag(expr:str)->int:
+            expr=expr.strip()
+            m=re.match(r"^(?P<name>[A-Za-z_]\w*)\s*(?P<op>[+-])\s*(?P<num>\d+)$",expr)
+            if m:
+                base=varvals.get(m.group("name"))
+                if base is None:
+                    raise RuntimeError("Unknown script variable '"+m.group("name")+"' referenced in gmsh geo_unrolled output: "+expr)
+                return base+int(m.group("num")) if m.group("op")=="+" else base-int(m.group("num"))
+            m=re.match(r"^(?P<name>[A-Za-z_]\w*)$",expr)
+            if m:
+                val=varvals.get(m.group("name"))
+                if val is None:
+                    raise RuntimeError("Unknown script variable '"+m.group("name")+"' referenced in gmsh geo_unrolled output: "+expr)
+                return val
+            return int(expr)
+
         for c in cmds:
+            c=c.strip()
+            if not c:
+                continue
+            newp_assign=re.match(r"^(?P<name>[A-Za-z_]\w*)\s*=\s*newp\s*$",c)
+            if newp_assign:
+                varvals[newp_assign.group("name")]=last_point_tag+1
+                continue
             if c.startswith("Point("):
-                match=re.search(r"\s*Point\(\s*(?P<index>\d*)\s*\)\s*=\s*\{\s*(?P<x>"+num_patt+r")\s*,\s*(?P<y>"+num_patt+r")\s*,\s*(?P<z>"+num_patt+r")\s*",c)
+                match=re.search(r"\s*Point\(\s*(?P<index>[^)]+?)\s*\)\s*=\s*\{\s*(?P<x>"+num_patt+r")\s*,\s*(?P<y>"+num_patt+r")\s*,\s*(?P<z>"+num_patt+r")\s*",c)
                 if not match:
                     raise RuntimeError("Cannot match Point at "+c)
-                ind=int(match.group("index"))
+                ind=resolve_tag(match.group("index"))
                 pos=list(map(float,match.group("x","y","z")))
                 points[ind]=pos
+                last_point_tag=max(last_point_tag,ind)
             elif c.startswith("Circle"):
-                match = re.search(r"\s*Circle\(\s*(?P<index>\d*)\s*\)\s*=\s*\{\s*(?P<P1>\d*)\s*,\s*(?P<P2>\d*)\s*,\s*(?P<P3>\d*)\s*",c)
+                match = re.search(r"\s*Circle\(\s*(?P<index>[^)]+?)\s*\)\s*=\s*\{\s*(?P<args>[^}]*)\}",c)
                 if not match:
                     raise RuntimeError("Cannot match Circle at " + c)
-                ind = int(match.group("index"))
-                PS=list(map(int,match.group("P1","P2","P3")))
+                ind = resolve_tag(match.group("index"))
+                PS=[resolve_tag(a) for a in match.group("args").split(",")]
                 center,startpt,endpt=points[PS[1]],points[PS[0]],points[PS[2]] #type:ignore
                 self._curved_entities1d[ind]=_pyoomph.CurvedEntityCircleArc(center, startpt, endpt) #type:ignore
             elif c.startswith("Spline"):
-                match=re.search(r"\s*Spline\(\s*(?P<index>\d*)\s*\)\s*=\s*\{\s*(?P<list>(?:\d+,\s*)+\d+\s*)",c)
+                if self.kernel=="occ":
+                    # Under the geo kernel, Gmsh's Spline is literally the same Catmull-Rom curve
+                    # pyoomph's own CurvedEntityCatmullRomSpline reconstructs, through the exact
+                    # points pyoomph passed in -- so re-parsing the dump always reproduces the
+                    # true meshed curve there. Under OCC, add_spline instead builds a genuine CAD
+                    # B-spline, and neither the original input points nor OCC's own (differently
+                    # resampled) dumped point list reliably reconstruct a Catmull-Rom curve close
+                    # enough to what was actually meshed for every case: e.g. OCC's dense dump
+                    # works for a simple few-point spline but its C++ inversion fails for a
+                    # remeshed, already-dense interface spline, while the original sparse points
+                    # do the opposite. Rather than pick a heuristic that only works sometimes,
+                    # skip macro-element curvature for OCC-kernel splines entirely -- the actual
+                    # mesh boundary nodes are still exactly where Gmsh placed them (following the
+                    # true curve at the mesh's own resolution), this just forgoes the additional
+                    # curvature-aware sub-facet refinement for spline curves specifically. Circle
+                    # arcs are unaffected: CurvedEntityCircleArc is analytic and OCC's arc is the
+                    # same curve, so there is no approximation mismatch there.
+                    continue
+                match=re.search(r"\s*Spline\(\s*(?P<index>[^)]+?)\s*\)\s*=\s*\{\s*(?P<args>[^}]*)\}",c)
                 if not match:
                     raise RuntimeError("Cannot match Spline at "+c)
-                ind = int(match.group("index"))
-                lst=match.group("list").replace(" ","").replace("\t","")
-                lst=list(map(int,lst.split(",")))
+                ind = resolve_tag(match.group("index"))
+                lst=[resolve_tag(a) for a in match.group("args").split(",")]
                 PTS=numpy.array([points[l] for l in lst]) #type:ignore
                 self._curved_entities1d[ind]=_pyoomph.CurvedEntityCatmullRomSpline(PTS) #type:ignore
 
@@ -1678,7 +1744,7 @@ class GmshTemplate(MeshTemplate):
             if isinstance(c,Expression):
                 c=c.float_value()
             shift[i] = c
-        gmsh.model.geo.synchronize()
+        self._geom.env.synchronize()
         dimtags=[]
         newdim=0
         name_list=[]
@@ -1713,11 +1779,11 @@ class GmshTemplate(MeshTemplate):
 
         newdim+=1 # The new dimension
         self._maxdim=max(self._maxdim,newdim)
-        res=gmsh.model.geo.extrude(dimtags,shift[0],shift[1],shift[2],recombine=recombine,numElements=([layers]*len(dimtags) if layers is not None else None))        
+        res=self._geom.env.extrude(dimtags,shift[0],shift[1],shift[2],recombine=recombine,numElements=([layers]*len(dimtags) if layers is not None else None))
         
         
         
-        gmsh.model.geo.synchronize()
+        self._geom.env.synchronize()
         bulk_name_index=0
         for i,entry in enumerate(res):            
             #print("ADD PHYSICAL GROUP",entry[0],[entry[1]])
@@ -1802,7 +1868,7 @@ class GmshTemplate(MeshTemplate):
             angle=angle.float_value()
         
         
-        gmsh.model.geo.synchronize()
+        self._geom.env.synchronize()
         dimtags=[]
         newdim=0
         name_list=[]
@@ -1836,9 +1902,9 @@ class GmshTemplate(MeshTemplate):
         newdim+=1 # The new dimension
         self._maxdim=max(self._maxdim,newdim)
         
-        res=gmsh.model.geo.revolve(dimtags,center[0],center[1],center[2],axis[0],axis[1],axis[2],angle,recombine=recombine,numElements=([layers]*len(dimtags) if layers is not None else None)) 
+        res=self._geom.env.revolve(dimtags,center[0],center[1],center[2],axis[0],axis[1],axis[2],angle,recombine=recombine,numElements=([layers]*len(dimtags) if layers is not None else None))
         
-        gmsh.model.geo.synchronize()
+        self._geom.env.synchronize()
         
         bulk_name_index=0
         for i,entry in enumerate(res):            

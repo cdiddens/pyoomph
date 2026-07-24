@@ -120,6 +120,7 @@ class GmshRemesher2d(GmshTemplate):
             self.mesh_mode=self.remesher.template.mesh_mode #TODO: Optionally also copy other props
             self.use_macro_elements=self.remesher.template.use_macro_elements
             self.gmsh_options=self.remesher.template.gmsh_options.copy()
+            self.kernel=self.remesher.template.kernel
         self.remesher._define_geometry() 
 
 class Remesher2dBoundaryLineCollection:
