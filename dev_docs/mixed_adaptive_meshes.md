@@ -362,11 +362,17 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
      skips brick neighbouring/self-test for tets, delegates for bricks. Hanging
      (`TemplatedMeshBase3d::post_adapt_setup_hanging_nodes`): edge-interior nodes hang on the
      coarse edge (linear C1 / quadratic C2), and for >1-level jumps face-interior nodes hang
-     barycentrically on the coarse C1 face; coarsest-first so masters are real. **Validated**
-     (machine-zero oracle): uniform (6→48→384, manifold), single-level 2:1, and Z2
-     error-driven adaptivity — i.e. the meshes adaptivity produces. Regression 42/42.
-     **Known limits:** abrupt >1-level `RefineToLevel` jumps leave ~1e-9 (deep hanging
-     chains, non-2:1); C2 tet face-interior hanging not handled yet. Wedges/pyramids: TODO.
+     barycentrically on the coarse C1 face. The face-interior pass runs BEFORE the edge pass
+     and the edge pass skips edges with a hanging endpoint, so a face-interior node binds to
+     its coarse face's real corners rather than a fine sub-edge with a hanging endpoint.
+     **Validated** (machine-zero oracle) for **C1 and C2** tets: uniform (6→48→384, manifold),
+     single-level 2:1, and Z2 error-driven adaptivity — i.e. the meshes adaptivity produces
+     (`tests/test_tet_refinement.py`, parametrised over C1/C2).
+     **Known limits:** abrupt >1-level `RefineToLevel` jumps still leave ~1e-9 (residual
+     hanging chains at similar-length interface edges whose processing order is not stable —
+     full removal needs genuine 2:1 balancing, which oomph does for boxes via the tree but is
+     bypassed for the geometric tet scheme); C2 tet face-interior hanging (a >1-level-only
+     case) not handled yet. Wedges/pyramids: TODO.
 5. **Variable / anisotropic schemes** (§5): quad 1→2 (both directions), simplex
    bisection; directional error estimator; generalised balance rule.
 6. **MPI hardening** across all shapes; distributed adaptivity tests.
