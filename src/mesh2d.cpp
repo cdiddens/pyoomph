@@ -184,15 +184,54 @@ namespace pyoomph
           }
           else
           {
-            throw_runtime_error("Check tri neighbors of quads");
+            throw_runtime_error("Mixed quad/tri neighbours not yet supported");
+          }
+        }
+        else if (dynamic_cast<oomph::TElementBase *>(Trees_pt[i]->object_pt()))
+        {
+          // Triangle root neighbours are found topologically by shared edges (a pair of
+          // shared vertex nodes), reusing the QuadTree edge slots S/E/W for the triangle's
+          // three edges (consistent with the Father_bound table: E=v0-v1, W=v1-v2, S=v2-v0).
+          // The N slot is unused for triangles. The geometric node-sharing/hanging code does
+          // not rely on the QuadTree coordinate descent, so only this topological adjacency
+          // is needed here.
+          oomph::TElementBase *ti = dynamic_cast<oomph::TElementBase *>(Trees_pt[i]->object_pt());
+          if (dynamic_cast<oomph::TElementBase *>(Trees_pt[j]->object_pt()))
+          {
+            oomph::FiniteElement *obj_j = Trees_pt[j]->object_pt();
+            oomph::Node *v0 = ti->vertex_node_pt(0);
+            oomph::Node *v1 = ti->vertex_node_pt(1);
+            oomph::Node *v2 = ti->vertex_node_pt(2);
+            bool has0 = (obj_j->get_node_number(v0) != -1);
+            bool has1 = (obj_j->get_node_number(v1) != -1);
+            bool has2 = (obj_j->get_node_number(v2) != -1);
+            if (has0 && has1) Trees_pt[i]->neighbour_pt(E) = Trees_pt[j];
+            if (has1 && has2) Trees_pt[i]->neighbour_pt(W) = Trees_pt[j];
+            if (has2 && has0) Trees_pt[i]->neighbour_pt(S) = Trees_pt[j];
+          }
+          else
+          {
+            throw_runtime_error("Mixed quad/tri neighbours not yet supported");
           }
         }
         else
         {
-          throw_runtime_error("Check neighbors of tris");
+          throw_runtime_error("Strange element in tree forest neighbour finding");
         }
       }
     }
+  }
+
+  // Skip oomph's quad-coordinate neighbour self-test for triangle forests (their node-sharing and
+  // hanging are done geometrically, not via the QuadTree coordinate descent); fall through to the
+  // base check for quad forests.
+  void DynamicQuadTreeForest::check_all_neighbours(oomph::DocInfo &doc_info)
+  {
+    if (ntree() > 0 && dynamic_cast<oomph::TElementBase *>(Trees_pt[0]->object_pt()))
+    {
+      return;
+    }
+    oomph::QuadTreeForest::check_all_neighbours(doc_info);
   }
 
   // True only if every element in the mesh is a quad (h-refinement via a QuadTreeForest is only
@@ -200,12 +239,20 @@ namespace pyoomph
   // refinement was requested but the mesh contains non-quad (e.g. triangular) elements.
   bool TemplatedMeshBase2d::refinement_possible()
     {
+      // h-refinement via the (Dynamic)QuadTreeForest is implemented for pure-quad meshes
+      // and (Phase 2, branch mixed_adapt) pure-triangle meshes: a triangle refines 1->4,
+      // reusing the QuadTree's 4-son bookkeeping, with geometric node-sharing/hanging.
+      // Mixed quad+tri meshes are not yet supported (need cross-shape facet neighbouring).
       bool allquads = true;
+      bool alltris = true;
       for (unsigned int i = 0; i < this->nelement(); i++)
       {
-        allquads = allquads && (dynamic_cast<oomph::QuadElementBase *>(this->element_pt(i)) != NULL);
+        bool is_quad = (dynamic_cast<oomph::QuadElementBase *>(this->element_pt(i)) != NULL);
+        bool is_tri = (dynamic_cast<oomph::TElementBase *>(this->element_pt(i)) != NULL);
+        allquads = allquads && is_quad;
+        alltris = alltris && is_tri;
       }
-      if (allquads)
+      if (allquads || alltris)
       {
         return true;
       }
@@ -213,7 +260,7 @@ namespace pyoomph
       {
         if (this->max_refinement_level() && issued_tri_refinement_warning==false && !this->problem->is_quiet())
         {
-          std::cout << "WARNING: Found a tri or something in the mesh "<< this->domainname << " -> cannot be adaptive right now. Requires to implement a good tree for mixed meshes" << std::endl;
+          std::cout << "WARNING: Mixed-element mesh "<< this->domainname << " -> cannot be adaptive yet. Requires cross-shape facet neighbouring for mixed meshes" << std::endl;
           issued_tri_refinement_warning = true;
         }
         return false;
@@ -348,6 +395,39 @@ namespace pyoomph
       {
         Boundary_element_pt[bi].erase(Boundary_element_pt[bi].begin()+remove[i-1]);
         Face_index_at_boundary[bi].erase(Face_index_at_boundary[bi].begin()+remove[i-1]);
+      }
+    }
+
+    // Guard (Phase 2a, branch mixed_adapt): non-uniform triangle refinement produces hanging
+    // nodes, whose setup is not yet implemented (Phase 2b). A hanging edge shows up in the facet
+    // adjacency as an interior facet incident on only ONE element face (the coarse element's full
+    // edge, and each fine sub-edge, appear once), with at least one non-boundary node. Left
+    // unhandled this crashes later in assembly/output, so detect it here (only for adaptive
+    // meshes that actually contain triangles) and fail with a clear message. Conforming triangle
+    // meshes (e.g. uniformly refined via RefineToLevel) have every incidence-1 facet on the mesh
+    // boundary and pass unchanged.
+    if (is_adaptation_enabled())
+    {
+      bool has_tri = false;
+      for (unsigned int ie = 0; ie < this->nelement() && !has_tri; ie++)
+        if (dynamic_cast<oomph::TElementBase *>(this->element_pt(ie))) has_tri = true;
+      if (has_tri)
+      {
+        FacetAdjacencyMap adj = this->build_facet_adjacency();
+        for (const auto &kv : adj)
+        {
+          if (kv.second.size() != 1) continue; // interior conforming (2) or fine (handled)
+          bool all_on_boundary = true;
+          for (pyoomph::Node *nod : kv.first)
+          {
+            oomph::BoundaryNodeBase *bn = dynamic_cast<oomph::BoundaryNodeBase *>(nod);
+            if (!bn || !bn->is_on_boundary()) { all_on_boundary = false; break; }
+          }
+          if (!all_on_boundary)
+          {
+            throw_runtime_error("Non-uniform (hanging-node) refinement of triangular meshes is not yet implemented (Phase 2b). Use uniform refinement (e.g. RefineToLevel) for now.");
+          }
+        }
       }
     }
 

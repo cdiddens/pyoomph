@@ -501,9 +501,13 @@ namespace oomph
   //===================================================================
   Node *RefineableTElement<2>::
       node_created_by_neighbour(const Vector<double> &,
-                                bool &)
+                                bool &is_periodic)
   {
-    throw_runtime_error("Implement");
+    // Not used: triangle build() shares father-edge nodes via the geometric shared-node
+    // registry (father_edge_node_key) instead of oomph's quad compass neighbour finding,
+    // whose coordinate descent is geometrically wrong for triangles. Kept as a non-throwing
+    // stub for interface compatibility.
+    is_periodic = false;
     return 0;
   }
 
@@ -746,6 +750,9 @@ namespace oomph
             bool node_done = false;
             Vector<double> s = s_in_parent[i];
             Vector<double> s_fraction = s_in_son[i];
+            // Registry key (father-edge corner-node pair) used to share/create this node without
+            // duplication; empty if node i is not a shareable father-edge (mid-edge) node.
+            std::set<Node *> reg_key = this->father_edge_node_key(i, son_type, father_el_pt);
 
             Node *created_node_pt = father_el_pt->get_node_at_local_coordinate(s);
 
@@ -776,12 +783,18 @@ namespace oomph
             //-------------------------------------------
             else
             {
-              // Was the node created by one of its neighbours
-              // Whether or not the node lies on an edge can be calculated
-              // by from the fractional position
+              // Was the node created by one of its neighbours (or another son of the same
+              // father)? For triangles we do NOT use oomph's quad compass neighbour finding
+              // (geometrically wrong here); instead a father-edge node is looked up in the
+              // shared-node registry by the pair of father corner nodes it bisects. This shares
+              // the node across the edge-sharing neighbour father's sons AND the other sons of
+              // this father, so no duplicate mid-edge nodes are created.
               bool is_periodic = false;
-              ;
-              created_node_pt = node_created_by_neighbour(s_fraction, is_periodic);
+              if (!reg_key.empty())
+              {
+                std::map<std::set<Node *>, Node *>::iterator reg_it = Shared_edge_node_registry.find(reg_key);
+                if (reg_it != Shared_edge_node_registry.end()) created_node_pt = reg_it->second;
+              }
 
               // If the node was so created, assign the pointers
               if (created_node_pt != 0)
@@ -1206,6 +1219,10 @@ namespace oomph
               // Add new node to mesh
               mesh_pt->add_node_pt(created_node_pt);
 
+              // Register this freshly created father-edge node so the other sons of this father
+              // and the sons of the edge-sharing neighbour father reuse it instead of duplicating.
+              if (!reg_key.empty()) Shared_edge_node_registry[reg_key] = created_node_pt;
+
             } // End of case when we build the node ourselves
 
             // Check if the element is an algebraic element
@@ -1356,17 +1373,20 @@ namespace oomph
   void RefineableTElement<2>::output_corners(std::ostream &,
                                              const std::string &) const
   {
-    throw_runtime_error("Implement");
+    // Debug-only output; not needed for refinement itself.
   }
 
   //====================================================================
-  /// Set up all hanging nodes. If we are documenting the output then
-  /// open the output files and pass the open files to the helper function
+  /// Set up all hanging nodes.
   //====================================================================
   void RefineableTElement<2>::setup_hanging_nodes(Vector<std::ofstream *>
                                                       &)
   {
-    throw_runtime_error("Implement");
+    // Phase 2a (branch mixed_adapt): uniform (conforming) triangle refinement produces no
+    // hanging nodes, so this is a no-op for now. The geometric hang helper for non-conforming
+    // (adaptive) triangle refinement is Phase 2b -- see dev_docs/mixed_adaptive_meshes.md.
+    // NOTE: with this no-op, NON-uniform triangle refinement would silently miss hanging nodes;
+    // it must not be relied upon until Phase 2b lands.
   }
 
   //================================================================
@@ -1375,7 +1395,8 @@ namespace oomph
   //===============================================================
   void RefineableTElement<2>::setup_hang_for_value(const int &)
   {
-    throw_runtime_error("Implement");
+    // See setup_hanging_nodes: no-op for now (Phase 2a uniform refinement); Phase 2b will
+    // implement the geometric hanging scheme for non-conforming triangle refinement.
   }
 
   //=================================================================
@@ -1407,6 +1428,32 @@ namespace oomph
   ///
   //========================================================================
   std::map<unsigned, DenseMatrix<int>> RefineableTElement<2>::Father_bound;
+
+  // Shared-node registry for geometric node-sharing during triangle refinement (see header).
+  std::map<std::set<Node *>, Node *> RefineableTElement<2>::Shared_edge_node_registry;
+
+  // The (unordered) pair of father corner nodes that son-local node i bisects, if it lies on a
+  // father edge (S=v2-v0, E=v0-v1, W=v1-v2, consistent with setup_father_bounds); empty otherwise.
+  // Currently only linear (3-node) triangles are supported: each father edge yields a single new
+  // mid-edge node, so the corner pair uniquely identifies it.
+  std::set<Node *> RefineableTElement<2>::father_edge_node_key(unsigned i, int son_type, RefineableTElement<2> *father_el_pt) const
+  {
+    using namespace QuadTreeNames;
+    std::set<Node *> key;
+    if (this->nnode() != 3)
+    {
+      throw_runtime_error("Geometric node-sharing for triangle refinement is currently only implemented for linear (3-node) C1 triangles");
+    }
+    int father_bound = Father_bound[nnode_1d()](i, son_type);
+    switch (father_bound)
+    {
+    case S: key = {father_el_pt->node_pt(2), father_el_pt->node_pt(0)}; break;
+    case E: key = {father_el_pt->node_pt(0), father_el_pt->node_pt(1)}; break;
+    case W: key = {father_el_pt->node_pt(1), father_el_pt->node_pt(2)}; break;
+    default: break; // interior (OMEGA) or a father vertex -> not a shareable mid-edge node
+    }
+    return key;
+  }
 
   //==================================================================
   /// Setup static matrix for coincidence between son nodal points and

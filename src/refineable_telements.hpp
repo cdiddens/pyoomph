@@ -206,6 +206,23 @@ namespace oomph
 
     // Set up hanging nodes on one particular edge of the element for a given value.
     virtual void quad_hang_helper(const int &value_id, const int &my_edge, std::ofstream &output_hangfile);
+
+  public:
+    // Clear the shared-node registry (call once before each refinement round). See below.
+    static void clear_shared_edge_node_registry() { Shared_edge_node_registry.clear(); }
+
+  protected:
+    // --- Geometric node-sharing during triangle refinement (Phase 2, branch mixed_adapt) ---
+    // Instead of oomph's quad compass neighbour finding (geometrically wrong for triangles), a
+    // newly created son node lying on a father edge is keyed by the (unordered) pair of that
+    // father edge's two corner nodes. That key is identical for every element touching the edge
+    // (both sons of the same father and sons of the edge-sharing neighbour father), so a shared
+    // registry lets them all reuse a single node instead of duplicating it. Valid for linear
+    // (3-node) triangles, where each father edge spawns exactly one new (mid-edge) node. Cleared
+    // at the start of each refinement round by TemplatedMeshBase::split_elements_if_required.
+    static std::map<std::set<Node *>, Node *> Shared_edge_node_registry;
+    // The father-edge corner-node key for son-local node i (empty if i is not a father-edge node).
+    std::set<Node *> father_edge_node_key(unsigned i, int son_type, RefineableTElement<2> *father_el_pt) const;
   };
 
   template <>

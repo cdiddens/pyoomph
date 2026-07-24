@@ -54,6 +54,12 @@ namespace pyoomph
     // Recompute neighbour (edge-adjacency) information across the forest's quadtrees, needed after
     // topology changes (refinement/coarsening) so hanging-node/halo logic can find adjacent elements.
     void find_neighbours() override;
+
+    // Self-test of the neighbour-finding scheme. oomph's version drives the quad coordinate
+    // descent (gteq_edge_neighbour), which is geometrically wrong for triangle forests (their
+    // node-sharing/hanging is done geometrically instead), so it is skipped when the forest holds
+    // triangles; for quad forests it falls through to the base check.
+    void check_all_neighbours(oomph::DocInfo &doc_info) override;
   };
 
   // DynamicTree specialization for 2d quad-refined (QuadTree) elements.

@@ -27,6 +27,7 @@ The main author may be contacted at c.diddens@utwente.nl
 #include "ginac.hpp"
 #include "lagr_error_estimator.hpp"
 #include "kdtree.hpp"
+#include "refineable_telements.hpp" // for RefineableTElement<2>::clear_shared_edge_node_registry()
 
 namespace pyoomph
 {
@@ -358,6 +359,10 @@ namespace pyoomph
 		// Traverse the tree forest and p/h-refine any leaf element that oomph-lib has flagged for splitting.
 		void split_elements_if_required() override
 		{
+			// Start of a refinement round: clear the triangle shared-node registry so it only
+			// holds nodes created during this round (keyed by father corner-node pairs). See
+			// RefineableTElement<2>'s Shared_edge_node_registry.
+			oomph::RefineableTElement<2>::clear_shared_edge_node_registry();
 			// Find the number of trees in the forest
 			if (!this->Forest_pt)
 			{
