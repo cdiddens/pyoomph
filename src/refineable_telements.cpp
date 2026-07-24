@@ -324,9 +324,48 @@ namespace oomph
   ///   - bound_cons[ival]=0 if value ival on this boundary is free
   ///   - bound_cons[ival]=1 if value ival on this boundary is pinned
   //==================================================================
-  void RefineableTElement<2>::get_bcs(int , Vector<int> &) const
+  void RefineableTElement<2>::get_bcs(int bound, Vector<int> &bound_cons) const
   {
-    throw_runtime_error("Implement");
+    using namespace QuadTreeNames;
+    unsigned nvalue = bound_cons.size();
+    // Triangle vertices SW/SE/NW map to father corner nodes v2/v0/v1; each is the
+    // meeting point of two edges. At a vertex we apply the *most* restrictive (OR)
+    // of its two adjacent edges' bcs; along a proper edge we forward to get_edge_bcs.
+    switch (bound)
+    {
+    case E:
+    case W:
+    case S:
+      get_edge_bcs(bound, bound_cons);
+      break;
+    case SE: // father vertex v0 = edges S (v2-v0) and E (v0-v1)
+    {
+      Vector<int> bc1(nvalue), bc2(nvalue);
+      get_edge_bcs(S, bc1);
+      get_edge_bcs(E, bc2);
+      for (unsigned k = 0; k < nvalue; k++) bound_cons[k] = (bc1[k] || bc2[k]);
+      break;
+    }
+    case NW: // father vertex v1 = edges E (v0-v1) and W (v1-v2)
+    {
+      Vector<int> bc1(nvalue), bc2(nvalue);
+      get_edge_bcs(E, bc1);
+      get_edge_bcs(W, bc2);
+      for (unsigned k = 0; k < nvalue; k++) bound_cons[k] = (bc1[k] || bc2[k]);
+      break;
+    }
+    case SW: // father vertex v2 = edges W (v1-v2) and S (v2-v0)
+    {
+      Vector<int> bc1(nvalue), bc2(nvalue);
+      get_edge_bcs(W, bc1);
+      get_edge_bcs(S, bc2);
+      for (unsigned k = 0; k < nvalue; k++) bound_cons[k] = (bc1[k] || bc2[k]);
+      break;
+    }
+    default:
+      for (unsigned k = 0; k < nvalue; k++) bound_cons[k] = 0;
+      break;
+    }
   }
 
   //==================================================================
@@ -338,9 +377,31 @@ namespace oomph
   ///   - bound_cons[ival]=0 if value ival on this boundary is free
   ///   - bound_cons[ival]=1 if value ival on this boundary is pinned
   //==================================================================
-  void RefineableTElement<2>::get_edge_bcs(const int &, Vector<int> &) const
+  void RefineableTElement<2>::get_edge_bcs(const int &edge, Vector<int> &bound_cons) const
   {
-    throw_runtime_error("Implement");
+    using namespace QuadTreeNames;
+    // The two corner nodes at the ends of this triangle edge (consistent with the
+    // Father_bound table: E = v0-v1, W = v1-v2, S = v2-v0).
+    int left_node = -1, right_node = -1;
+    switch (edge)
+    {
+    case E: left_node = 0; right_node = 1; break;
+    case W: left_node = 1; right_node = 2; break;
+    case S: left_node = 2; right_node = 0; break;
+    default: break;
+    }
+    unsigned nvalue = bound_cons.size();
+    if (left_node < 0 || right_node < 0)
+    {
+      for (unsigned k = 0; k < nvalue; k++) bound_cons[k] = 0;
+      return;
+    }
+    // A value is treated as pinned along the edge only if it is pinned at *both*
+    // end nodes (least restrictive combination), mirroring oomph's quad get_edge_bcs.
+    for (unsigned k = 0; k < nvalue; k++)
+    {
+      bound_cons[k] = node_pt(left_node)->is_pinned(k) * node_pt(right_node)->is_pinned(k);
+    }
   }
 
   //==================================================================
@@ -352,10 +413,50 @@ namespace oomph
   /// both vertex nodes). For vertex nodes, we just return their
   /// boundaries.
   //==================================================================
-  void RefineableTElement<2>::get_boundaries(const int &,
-                                             std::set<unsigned> &) const
+  void RefineableTElement<2>::get_boundaries(const int &edge,
+                                             std::set<unsigned> &boundary) const
   {
-    throw_runtime_error("Implement");
+    using namespace QuadTreeNames;
+    boundary.clear();
+    // Edge -> its two end (corner) nodes; vertex codes -> a single corner node.
+    // Consistent with setup_father_bounds: E=v0-v1, W=v1-v2, S=v2-v0; the son
+    // corners coinciding with father vertices are SE=v0, NW=v1, SW=v2.
+    int left_node = -1, right_node = -1;
+    switch (edge)
+    {
+    case E: left_node = 0; right_node = 1; break;
+    case W: left_node = 1; right_node = 2; break;
+    case S: left_node = 2; right_node = 0; break;
+    case SE: right_node = 0; break;
+    case NW: right_node = 1; break;
+    case SW: right_node = 2; break;
+    default: return;
+    }
+
+    std::set<unsigned> *right_bound_pt = 0;
+    if (right_node >= 0)
+    {
+      if (BoundaryNodeBase *bn = dynamic_cast<BoundaryNodeBase *>(node_pt(right_node)))
+        bn->get_boundaries_pt(right_bound_pt);
+    }
+
+    // Vertex: just return that node's boundaries.
+    if (left_node < 0)
+    {
+      if (right_bound_pt) boundary = *right_bound_pt;
+      return;
+    }
+
+    // Proper edge: the boundaries shared by *both* end nodes.
+    std::set<unsigned> *left_bound_pt = 0;
+    if (BoundaryNodeBase *bn = dynamic_cast<BoundaryNodeBase *>(node_pt(left_node)))
+      bn->get_boundaries_pt(left_bound_pt);
+    if (left_bound_pt && right_bound_pt)
+    {
+      std::set_intersection(left_bound_pt->begin(), left_bound_pt->end(),
+                            right_bound_pt->begin(), right_bound_pt->end(),
+                            std::inserter(boundary, boundary.begin()));
+    }
   }
 
   //===================================================================
@@ -363,11 +464,32 @@ namespace oomph
   /// along the edge (S/W/N/E)
   //===================================================================
   void RefineableTElement<2>::
-      interpolated_zeta_on_edge(const unsigned &,
-                                const int &, const Vector<double> &,
-                                Vector<double> &)
+      interpolated_zeta_on_edge(const unsigned &boundary,
+                                const int &edge, const Vector<double> &s,
+                                Vector<double> &zeta)
   {
-    throw_runtime_error("Implement");
+    using namespace QuadTreeNames;
+    unsigned n_node = this->nnode();
+    Shape psi(n_node);
+    this->shape(s, psi);
+    // Nodes lying on this triangle edge (corners, plus the mid-edge node for a
+    // 6-node quadratic triangle): E=v0-v1(+mid 3), W=v1-v2(+mid 4), S=v2-v0(+mid 5).
+    std::vector<unsigned> edge_nodes;
+    switch (edge)
+    {
+    case E: edge_nodes = {0, 1}; if (n_node > 3) edge_nodes.push_back(3); break;
+    case W: edge_nodes = {1, 2}; if (n_node > 3) edge_nodes.push_back(4); break;
+    case S: edge_nodes = {2, 0}; if (n_node > 3) edge_nodes.push_back(5); break;
+    default: zeta[0] = 0.0; return;
+    }
+    double inter_zeta = 0.0;
+    Vector<double> zeta_tmp(1);
+    for (unsigned n : edge_nodes)
+    {
+      node_pt(n)->get_coordinates_on_boundary(boundary, zeta_tmp);
+      inter_zeta += zeta_tmp[0] * psi(n);
+    }
+    zeta[0] = inter_zeta;
   }
 
   //===================================================================
