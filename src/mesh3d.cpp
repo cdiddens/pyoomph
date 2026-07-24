@@ -164,7 +164,14 @@ namespace pyoomph
 
 		for (const FaceRec &f : facevec)
 		{
-			if (f.el && f.el->nnode_1d() > 2) continue; // C2 face hanging not yet supported
+			// C1 (linear) coarse face -> node hangs barycentrically on the 3 corners. C2TB
+			// (bubble-enriched, e.g. Crouzeix-Raviart velocity) coarse face -> hangs on the 7 face
+			// nodes (3 corners + 3 edge-mids + face-bubble) via the enriched triangle shape; C2TB
+			// produces face-interior fine nodes (sub-face bubbles + inner-edge-mids) already at a
+			// single-level 2:1 interface, unlike plain C2 (still unsupported here, avoided by balancing).
+			pyoomph::BulkElementBase *beb = dynamic_cast<pyoomph::BulkElementBase *>(f.el);
+			const bool enriched = beb && beb->has_bubble();
+			if (f.el && f.el->nnode_1d() > 2 && !enriched) continue; // plain C2 face hanging not supported
 			oomph::Node *A = f.A, *B = f.B, *D = f.D;
 			double e0[3], e1[3];
 			for (int d = 0; d < 3; d++) { e0[d] = B->x(d) - A->x(d); e1[d] = D->x(d) - A->x(d); }
@@ -175,10 +182,37 @@ namespace pyoomph
 			if (std::abs(denom) < 1e-30) continue;
 			double nrm[3] = {e0[1] * e1[2] - e0[2] * e1[1], e0[2] * e1[0] - e0[0] * e1[2], e0[0] * e1[1] - e0[1] * e1[0]};
 			const double nlen2 = nrm[0] * nrm[0] + nrm[1] * nrm[1] + nrm[2] * nrm[2];
+
+			// For an enriched face, locate its 3 edge-mid nodes and the face-bubble among the coarse
+			// element's nodes (real, non-hanging masters). If any is missing, fall back to skipping.
+			oomph::Node *mAB = 0, *mBD = 0, *mDA = 0, *Fc = 0;
+			if (enriched)
+			{
+				auto find_in_el = [&](double tx, double ty, double tz) -> oomph::Node * {
+					for (unsigned n = 0; n < f.el->nnode(); n++)
+					{
+						oomph::Node *nd = f.el->node_pt(n);
+						const double dx = nd->x(0) - tx, dy = nd->x(1) - ty, dz = nd->x(2) - tz;
+						if (dx * dx + dy * dy + dz * dz < 1e-12 * (d00 + d11)) return nd;
+					}
+					return (oomph::Node *)0;
+				};
+				mAB = find_in_el(0.5 * (A->x(0) + B->x(0)), 0.5 * (A->x(1) + B->x(1)), 0.5 * (A->x(2) + B->x(2)));
+				mBD = find_in_el(0.5 * (B->x(0) + D->x(0)), 0.5 * (B->x(1) + D->x(1)), 0.5 * (B->x(2) + D->x(2)));
+				mDA = find_in_el(0.5 * (D->x(0) + A->x(0)), 0.5 * (D->x(1) + A->x(1)), 0.5 * (D->x(2) + A->x(2)));
+				Fc = find_in_el((A->x(0) + B->x(0) + D->x(0)) / 3.0, (A->x(1) + B->x(1) + D->x(1)) / 3.0, (A->x(2) + B->x(2) + D->x(2)) / 3.0);
+				if (!mAB || !mBD || !mDA || !Fc) continue;
+			}
+
 			for (unsigned int in = 0; in < this->nnode(); in++)
 			{
 				oomph::Node *X = this->node_pt(in);
 				if (X == A || X == B || X == D || X->is_hanging()) continue;
+				// The coarse face's own edge-mids and bubble sit ON the face (the bubble at its very
+				// centroid) -- they are real masters, never hanging slaves; excluding them by pointer
+				// also stops the bubble from hanging on itself. The fine central sub-face bubble is a
+				// DIFFERENT node at the same position, so it is (correctly) still constrained below.
+				if (enriched && (X == mAB || X == mBD || X == mDA || X == Fc)) continue;
 				double e2[3];
 				for (int d = 0; d < 3; d++) e2[d] = X->x(d) - A->x(d);
 				const double e2n = e2[0] * nrm[0] + e2[1] * nrm[1] + e2[2] * nrm[2];
@@ -190,11 +224,31 @@ namespace pyoomph
 				const double bA = 1.0 - bB - bD;
 				const double eps = 1e-7;
 				if (bA <= eps || bB <= eps || bD <= eps) continue; // on an edge (edge pass) or outside
-				oomph::HangInfo *hang = new oomph::HangInfo(3);
-				hang->set_master_node_pt(0, A, bA);
-				hang->set_master_node_pt(1, B, bB);
-				hang->set_master_node_pt(2, D, bD);
-				X->set_hanging_pt(hang, -1);
+				if (enriched)
+				{
+					// Enriched (quadratic + cubic-bubble) triangle interpolation over the coarse face,
+					// with corners A,B,D <-> barycentric bA,bB,bD (shape nodes 0,1,2), edge-mids
+					// mAB,mBD,mDA (nodes 3,4,5) and face-bubble Fc (node 6). Weights match
+					// oomph::TBubbleEnrichedElementShape<2,3>::shape.
+					const double L0 = bA, L1 = bB, L2 = bD, bub = L0 * L1 * L2;
+					oomph::HangInfo *hang = new oomph::HangInfo(7);
+					hang->set_master_node_pt(0, A, 2.0 * L0 * (L0 - 0.5) + 3.0 * bub);
+					hang->set_master_node_pt(1, B, 2.0 * L1 * (L1 - 0.5) + 3.0 * bub);
+					hang->set_master_node_pt(2, D, 2.0 * L2 * (L2 - 0.5) + 3.0 * bub);
+					hang->set_master_node_pt(3, mAB, 4.0 * L0 * L1 - 12.0 * bub);
+					hang->set_master_node_pt(4, mBD, 4.0 * L1 * L2 - 12.0 * bub);
+					hang->set_master_node_pt(5, mDA, 4.0 * L2 * L0 - 12.0 * bub);
+					hang->set_master_node_pt(6, Fc, 27.0 * bub);
+					X->set_hanging_pt(hang, -1);
+				}
+				else
+				{
+					oomph::HangInfo *hang = new oomph::HangInfo(3);
+					hang->set_master_node_pt(0, A, bA);
+					hang->set_master_node_pt(1, B, bB);
+					hang->set_master_node_pt(2, D, bD);
+					X->set_hanging_pt(hang, -1);
+				}
 			}
 		}
 

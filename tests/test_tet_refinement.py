@@ -223,3 +223,61 @@ def test_taylor_hood_tet_cavity_error_adaptivity():
         problem.solve(spatial_adapt=1)
         assert _max_abs_residual(problem) < 1e-9
         assert problem.get_mesh("domain").nelement() > 384
+
+
+class _CavityStokes3DCR(Problem):
+    # Lid-driven cavity Stokes with 3D Crouzeix-Raviart tets: C2TB bubble-enriched velocity (10 C2
+    # nodes + 4 face-centroid + 1 volume-centroid bubble) and DL discontinuous pressure. Refinement
+    # must build & SHARE the 4 face-bubble nodes across face-adjacent tets (continuous velocity),
+    # keep the volume bubble interior, and -- crucially, unlike C2/Taylor-Hood -- hang the C2TB
+    # face-interior fine nodes (sub-face bubbles + inner-edge-mids) that appear on a 2:1 coarse face,
+    # using the enriched triangle face interpolation over the coarse face's 7 nodes. CR is 2-Newton-
+    # step and more poorly conditioned than TH (residual floor ~1e-11 even without refinement), so
+    # the tolerance is looser (~1e-7).
+    def __init__(self, N=2, error_adapt=False):
+        super().__init__()
+        self._N = N
+        self._error_adapt = error_adapt
+
+    def define_problem(self):
+        self += TetCubeMesh(N=self._N)
+        stokes = StokesEquations(mode="CR", dynamic_viscosity=1)
+        eqs = stokes
+        eqs += DirichletBC(velocity_x=1, velocity_y=0, velocity_z=0) @ "top"
+        eqs += DirichletBC(velocity_x=0, velocity_y=0, velocity_z=0) @ ["left", "right", "bottom", "front", "back"]
+        eqs += stokes.create_pressure_fixation(value=0)
+        if self._error_adapt:
+            eqs += SpatialErrorEstimator(velocity=1)
+        self += eqs @ "domain"
+
+
+def test_crouzeix_raviart_tet_cavity_uniform():
+    # Uniform (conforming) refinement of a 3D CR mesh: no hanging, so this isolates the bubble-node
+    # build -- creating the volume bubble fresh and sharing the 4 face bubbles across adjacent tets.
+    with _CavityStokes3DCR(N=1) as problem:
+        problem.max_refinement_level = 2
+        problem += RefineToLevel(1) @ "domain"
+        problem.solve()
+        assert _max_abs_residual(problem) < 1e-7
+        assert problem.get_mesh("domain").nelement() == 48  # 6 tets x8
+
+
+def test_crouzeix_raviart_tet_cavity_single_level():
+    # Single-level (2:1) non-conforming CR refinement: exercises the enriched C2TB face-interior
+    # hanging (sub-face bubbles + inner-edge-mids hang on the coarse face's 7 nodes).
+    with _CavityStokes3DCR(N=2) as problem:
+        problem.max_refinement_level = 2
+        problem += RefineToLevel(1) @ "domain"
+        problem += RefineToLevel(2) @ "domain/top"
+        problem.solve()
+        assert _max_abs_residual(problem) < 1e-7
+        assert problem.get_mesh("domain").nelement() > 384
+
+
+def test_crouzeix_raviart_tet_cavity_error_adaptivity():
+    # Genuine Z2 error-driven adaptivity (the 2:1-balanced meshes adaptivity produces) for 3D CR.
+    with _CavityStokes3DCR(N=2, error_adapt=True) as problem:
+        problem.max_refinement_level = 2
+        problem.solve(spatial_adapt=1)
+        assert _max_abs_residual(problem) < 1e-7
+        assert problem.get_mesh("domain").nelement() > 384

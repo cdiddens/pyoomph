@@ -416,6 +416,26 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
      Z2 error-driven (`test_crouzeix_raviart_triangle_*`). KNOWN GAP: abrupt >1-level jumps on very
      coarse CR meshes (e.g. N=2, level 1→3) diverge -- a C2TB deep-jump-flattening interaction; real
      (2:1-balanced) adaptivity never produces these, and TH handles the same jumps fine.
+   * **[DONE] — 3D Crouzeix-Raviart (C2TB bubble velocity / DL pressure tets).** The 3D C2TB tet has
+     15 nodes: 10 C2 (4 corners + 6 edge-mids) + **4 face-centroid bubbles + 1 volume-centroid
+     bubble**. Fixes: (1) `BulkElementTetra3dC2::create_son_instance` returns a real
+     `BulkElementTetra3dC2TB` for C2TB fathers (else `local_coordinate_of_node(10..)` throws --
+     15-node map vs 10 oomph slots). (2) `RefineableTElement<3>::build` shares the 4 face bubbles
+     across face-adjacent tets: a face bubble (son nodes 10-13) is keyed on its **three son face-
+     corner nodes** (already shared coarse corners / edge-mids), so both tets meeting on a face build
+     one node -> continuous enriched velocity; the volume bubble (node 14) is interior/never shared;
+     boundary/pin data generalised from the 2-node edge case to N generating nodes. (3) UNLIKE
+     C2/TH, C2TB produces face-INTERIOR fine nodes (sub-face bubbles + inner-edge-mids) already at a
+     single-level 2:1 interface, so `post_adapt_setup_hanging_nodes`'s face pass now hangs them on
+     the coarse face's **7 nodes** (3 corners + 3 edge-mids + face-bubble) via the enriched triangle
+     shape -- which is exactly the trace of the 3D enriched tet shape on a face (verified: corner
+     `(2L-1)L+3·L0L1L2`, mid `4LiLj-12·L0L1L2`, bubble `27·L0L1L2`). The coarse face's own 7 nodes
+     are excluded as slaves (the face-bubble would otherwise hang on itself -> infinite flatten
+     recursion); the coincident fine central sub-face bubble is a different pointer and stays
+     constrained. **Validated** for uniform (machine-zero), single-level 2:1 and Z2 error-driven
+     (`test_crouzeix_raviart_tet_cavity_*`). NOTE: 3D CR is inherently 2-Newton-step and poorly
+     conditioned (residual floor ~1e-11 even unrefined), so the oracle uses the FINAL residual with a
+     ~1e-7 tolerance, not the 1-step value.
 5. **Variable / anisotropic schemes** (§5): quad 1→2 (both directions), simplex
    bisection; directional error estimator; generalised balance rule.
 6. **MPI hardening** across all shapes; distributed adaptivity tests.

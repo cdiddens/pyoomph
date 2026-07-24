@@ -1622,9 +1622,30 @@ namespace oomph
         continue;
       }
 
-      // (2) Reuse a node already created (by a sibling son or the face-sharing neighbour father's
-      // sons) via the geometric shared-node registry.
-      std::set<Node *> reg_key = father_edge_node_key(s, father_el_pt);
+      // Generating nodes of son node j -- the already-built (earlier-index) son nodes whose average
+      // is j. A new node is keyed on, and inherits boundary/pin data from, these nodes; the key is
+      // identical from every element that creates the same node, so it is shared without duplication.
+      //   - edge-midpoint nodes (j < 10): the two father nodes j bisects (father_edge_node_key);
+      //   - C2TB face-centroid bubbles (j in 10..13): the son's three face-corner nodes (already
+      //     built, and themselves shared coarse corners / edge-mids -> shared across the two tets
+      //     meeting on that face, keeping the enriched velocity continuous);
+      //   - the C2TB volume-centroid bubble (j == 14): interior, never shared/on a boundary.
+      std::vector<Node *> gen;
+      std::set<Node *> reg_key;
+      if (j >= 10 && j <= 13)
+      {
+        static const unsigned facecorner[4][3] = {{0, 1, 3}, {0, 1, 2}, {0, 2, 3}, {1, 2, 3}};
+        const unsigned *fc = facecorner[j - 10];
+        for (int c = 0; c < 3; c++) { gen.push_back(node_pt(fc[c])); reg_key.insert(node_pt(fc[c])); }
+      }
+      else if (j != 14)
+      {
+        reg_key = father_edge_node_key(s, father_el_pt);
+        for (Node *nd : reg_key) gen.push_back(nd);
+      }
+
+      // (2) Reuse a node already created (by a sibling son or the face-/edge-sharing neighbour
+      // father's sons) via the geometric shared-node registry.
       if (!reg_key.empty())
       {
         std::map<std::set<Node *>, Node *>::iterator it = Shared_edge_node_registry.find(reg_key);
@@ -1635,25 +1656,24 @@ namespace oomph
         }
       }
 
-      // (3) Build a new node. A new (edge-midpoint) node lies on a mesh boundary iff both father
-      // nodes it bisects do; its pinned values are those pinned at both. Boundary coordinates are
-      // linearly interpolated (its midpoint position).
+      // (3) Build a new node. It lies on a mesh boundary iff ALL its generating nodes do (their
+      // common boundaries); its pinned values are those pinned at every generating node; boundary
+      // coordinates are the average of the generating nodes' (its centroid/midpoint position).
       std::set<unsigned> boundaries;
-      Node *A = 0, *B = 0;
-      if (reg_key.size() == 2)
+      bool have_bounds = false;
+      for (Node *g : gen)
       {
-        std::set<Node *>::iterator kit = reg_key.begin();
-        A = *kit; ++kit; B = *kit;
-        oomph::BoundaryNodeBase *bA = dynamic_cast<oomph::BoundaryNodeBase *>(A);
-        oomph::BoundaryNodeBase *bB = dynamic_cast<oomph::BoundaryNodeBase *>(B);
-        if (bA && bB)
+        oomph::BoundaryNodeBase *bg = dynamic_cast<oomph::BoundaryNodeBase *>(g);
+        std::set<unsigned> *sg = 0;
+        if (bg) bg->get_boundaries_pt(sg);
+        if (!sg) { boundaries.clear(); break; } // a generating node off every boundary -> interior
+        if (!have_bounds) { boundaries = *sg; have_bounds = true; }
+        else
         {
-          std::set<unsigned> *sA = 0, *sB = 0;
-          bA->get_boundaries_pt(sA);
-          bB->get_boundaries_pt(sB);
-          if (sA && sB)
-            std::set_intersection(sA->begin(), sA->end(), sB->begin(), sB->end(),
-                                  std::inserter(boundaries, boundaries.begin()));
+          std::set<unsigned> inter;
+          std::set_intersection(boundaries.begin(), boundaries.end(), sg->begin(), sg->end(),
+                                std::inserter(inter, inter.begin()));
+          boundaries.swap(inter);
         }
       }
 
@@ -1662,17 +1682,24 @@ namespace oomph
         created_node_pt = construct_boundary_node(j, time_stepper_pt);
         unsigned n_value = created_node_pt->nvalue();
         for (unsigned k = 0; k < n_value; k++)
-          if (A->is_pinned(k) && B->is_pinned(k)) created_node_pt->pin(k);
+        {
+          bool all_pinned = true;
+          for (Node *g : gen) if (!g->is_pinned(k)) { all_pinned = false; break; }
+          if (all_pinned) created_node_pt->pin(k);
+        }
         for (std::set<unsigned>::iterator it = boundaries.begin(); it != boundaries.end(); ++it)
         {
           mesh_pt->add_boundary_node(*it, created_node_pt);
           if (mesh_pt->boundary_coordinate_exists(*it))
           {
-            Vector<double> zA, zB;
-            dynamic_cast<oomph::BoundaryNodeBase *>(A)->get_coordinates_on_boundary(*it, zA);
-            dynamic_cast<oomph::BoundaryNodeBase *>(B)->get_coordinates_on_boundary(*it, zB);
-            Vector<double> z(zA.size());
-            for (unsigned zi = 0; zi < zA.size(); zi++) z[zi] = 0.5 * (zA[zi] + zB[zi]);
+            Vector<double> z;
+            for (Node *g : gen)
+            {
+              Vector<double> zg;
+              dynamic_cast<oomph::BoundaryNodeBase *>(g)->get_coordinates_on_boundary(*it, zg);
+              if (z.empty()) z.resize(zg.size(), 0.0);
+              for (unsigned zi = 0; zi < zg.size(); zi++) z[zi] += zg[zi] / gen.size();
+            }
             created_node_pt->set_coordinates_on_boundary(*it, z);
           }
         }

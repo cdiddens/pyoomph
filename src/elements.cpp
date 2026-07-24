@@ -9478,7 +9478,13 @@ namespace pyoomph
    BulkElementBase *BulkElementTetra3dC2::create_son_instance() const
     {
       BulkElementBase::__CurrentCodeInstance = codeinst;
-      auto res = new BulkElementTetra3dC2(dynamic_cast<const BulkElementTetra3dC2TB*>(this)!=nullptr);
+      // A C2TB (bubble-enriched) father must spawn a genuine BulkElementTetra3dC2TB son: the bubble
+      // needs real 11th-15th (4 face-centroid + 1 volume-centroid) node slots and the 15-node nodal
+      // space map. A plain BulkElementTetra3dC2(true) only bumps nnode_of_space[C2TB] to 15 while
+      // keeping 10 oomph node slots and the 10-node map -> local_coordinate_of_node(10..) throws.
+      BulkElementTetra3dC2 *res;
+      if (dynamic_cast<const BulkElementTetra3dC2TB*>(this) != nullptr) res = new BulkElementTetra3dC2TB();
+      else res = new BulkElementTetra3dC2(false);
       res->codeinst = codeinst;
       BulkElementBase::__CurrentCodeInstance = NULL;
       return res;
