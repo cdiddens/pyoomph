@@ -61,6 +61,44 @@ namespace pyoomph
     }
   };
 
+  // OcTreeForest specialization that (a) skips oomph's brick compass neighbour finding for
+  // tetrahedral forests -- tets use geometric node-sharing/hanging instead -- while delegating to
+  // it for brick forests, and (b) skips the quad-coordinate neighbour self-test for tets.
+  class DynamicOcTreeForest : public oomph::OcTreeForest
+  {
+  public:
+    DynamicOcTreeForest(oomph::Vector<oomph::TreeRoot *> &trees_pt) : oomph::OcTreeForest(trees_pt, true)
+    {
+      if (trees_pt.size() == 0) return;
+      find_neighbours();
+      construct_up_right_equivalents();
+    }
+
+    DynamicOcTreeForest(const DynamicOcTreeForest &) : oomph::OcTreeForest()
+    {
+      oomph::BrokenCopy::broken_copy("DynamicOcTreeForest");
+    }
+
+    void operator=(const DynamicOcTreeForest &)
+    {
+      oomph::BrokenCopy::broken_assign("DynamicOcTreeForest");
+    }
+
+    void check_all_neighbours(oomph::DocInfo &doc_info) override
+    {
+      if (ntree() > 0 && dynamic_cast<oomph::TElementBase *>(Trees_pt[0]->object_pt())) return;
+      oomph::OcTreeForest::check_all_neighbours(doc_info);
+    }
+
+  protected:
+    void find_neighbours() override
+    {
+      // Tetrahedral forests: no tree neighbour finding (node-sharing/hanging are geometric).
+      if (ntree() > 0 && dynamic_cast<oomph::TElementBase *>(Trees_pt[0]->object_pt())) return;
+      oomph::OcTreeForest::find_neighbours(); // brick forests keep oomph's compass neighbouring
+    }
+  };
+
   // 3d specialization of TemplatedMeshBase: builds/refines meshes of brick (hex) or tetrahedral
   // elements. Bricks use an octree forest for h-refinement; tets are not tree-refineable (see
   // refinement_possible()).
@@ -115,6 +153,11 @@ namespace pyoomph
       setup_octree_forest();
     }
 
+    // After (non-uniform) refinement, install hanging nodes for tetrahedral meshes. A hanging node
+    // lies in the interior of a coarser neighbour's edge; it is constrained by that edge's
+    // interpolation (linear for C1). No-op for pure-brick meshes (oomph-lib handles those). See .cpp.
+    void post_adapt_setup_hanging_nodes() override;
+
     // (Re)build the OcTreeForest. If a forest already exists, this "flattens" it down to the coarsest
     // common refinement level present (min_ref, reduced across MPI ranks if applicable) by promoting
     // each tree node at that level to a new tree root and discarding levels below it; if no forest
@@ -157,7 +200,7 @@ namespace pyoomph
           oomph::Vector<oomph::TreeRoot *> trees_pt;
 
           // Make a new (empty) Forest
-          this->Forest_pt = new oomph::OcTreeForest(trees_pt);
+          this->Forest_pt = new pyoomph::DynamicOcTreeForest(trees_pt);
 
           return;
         }
@@ -255,7 +298,7 @@ namespace pyoomph
         delete this->Forest_pt;
 
         // Make a new Forest with the trees_pt roots created earlier
-        this->Forest_pt = new oomph::OcTreeForest(trees_pt);
+        this->Forest_pt = new pyoomph::DynamicOcTreeForest(trees_pt);
       }
       else // Create a new Forest from scratch in the "usual" uniform way
       {
@@ -273,7 +316,7 @@ namespace pyoomph
           trees_pt.push_back(octree_root_pt);
         }
         // Plant OcTreeRoots in OcTreeForest
-        this->Forest_pt = new oomph::OcTreeForest(trees_pt);
+        this->Forest_pt = new pyoomph::DynamicOcTreeForest(trees_pt);
       }
     }
 

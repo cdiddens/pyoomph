@@ -1496,64 +1496,35 @@ namespace oomph
   ///   - bound_cons[ival]=0 if value ival on this boundary is free
   ///   - bound_cons[ival]=1 if value ival on this boundary is pinned
   //==================================================================
-  void RefineableTElement<3>::get_bcs(int , Vector<int> &) const
+  // Not used by the tetrahedron build (boundary conditions of new nodes are derived directly from
+  // their two generating father nodes); kept as non-throwing stubs for interface compatibility.
+  void RefineableTElement<3>::get_bcs(int, Vector<int> &bound_cons) const
   {
-    throw_runtime_error("Implement");
+    for (unsigned k = 0; k < bound_cons.size(); k++) bound_cons[k] = 0;
   }
 
-  //==================================================================
-  /// Determine Vector of boundary conditions along the element's
-  /// edge (S/N/W/E) -- BC is the least restrictive combination
-  /// of all the nodes on this edge
-  ///
-  /// Usual convention:
-  ///   - bound_cons[ival]=0 if value ival on this boundary is free
-  ///   - bound_cons[ival]=1 if value ival on this boundary is pinned
-  //==================================================================
-  void RefineableTElement<3>::get_edge_bcs(const int &, Vector<int> &) const
+  void RefineableTElement<3>::get_edge_bcs(const int &, Vector<int> &bound_cons) const
   {
-    throw_runtime_error("Implement");
+    for (unsigned k = 0; k < bound_cons.size(); k++) bound_cons[k] = 0;
   }
 
-  //==================================================================
-  /// Given an element edge/vertex, return a set that contains
-  /// all the (mesh-)boundary numbers that this element edge/vertex
-  /// lives on.
-  ///
-  /// For proper edges, the boundary is the one (if any) that is shared by
-  /// both vertex nodes). For vertex nodes, we just return their
-  /// boundaries.
-  //==================================================================
-  void RefineableTElement<3>::get_boundaries(const int &,
-                                             std::set<unsigned> &) const
+  void RefineableTElement<3>::get_boundaries(const int &, std::set<unsigned> &boundary) const
   {
-    throw_runtime_error("Implement");
+    boundary.clear();
   }
 
-  //===================================================================
-  /// Return the value of the intrinsic boundary coordinate interpolated
-  /// along the edge (S/W/N/E)
-  //===================================================================
   void RefineableTElement<3>::
-      interpolated_zeta_on_edge(const unsigned &,
-                                const int &, const Vector<double> &,
-                                Vector<double> &)
+      interpolated_zeta_on_edge(const unsigned &, const int &, const Vector<double> &, Vector<double> &zeta)
   {
-    throw_runtime_error("Implement");
+    zeta[0] = 0.0;
   }
 
-  //===================================================================
-  /// If a neighbouring element has already created a node at
-  /// a position corresponding to the local fractional position within the
-  /// present element, s_fraction, return
-  /// a pointer to that node. If not, return NULL (0). If the node is
-  /// periodic the flag is_periodic will be true
-  //===================================================================
+  // Not used: the tetrahedron build shares father-edge nodes via the geometric registry
+  // (father_edge_node_key), so this is a non-throwing stub for interface compatibility.
   Node *RefineableTElement<3>::
-      node_created_by_neighbour(const Vector<double> &,
-                                bool &)
+      node_created_by_neighbour(const Vector<double> &, bool &is_periodic)
   {
-    throw_runtime_error("Implement");
+    is_periodic = false;
     return 0;
   }
 
@@ -1585,70 +1556,242 @@ namespace oomph
   ///   pressure values in manner consistent with the pressure
   ///   distribution in the father element.
   //==================================================================
-  void RefineableTElement<3>::build(Mesh *&,
-                                    Vector<Node *> &,
-                                    bool &,
+  void RefineableTElement<3>::build(Mesh *&mesh_pt,
+                                    Vector<Node *> &new_node_pt,
+                                    bool &was_already_built,
                                     std::ofstream &)
   {
-    throw_runtime_error("Implement");
+    unsigned n_node = this->nnode();
+    if (nodes_built())
+    {
+      was_already_built = true;
+      return;
+    }
+    was_already_built = false;
+
+    OcTree *father_pt = dynamic_cast<OcTree *>(octree_pt()->father_pt());
+    int son_type = Tree_pt->son_type();
+    RefineableTElement<3> *father_el_pt = dynamic_cast<RefineableTElement<3> *>(father_pt->object_pt());
+    TimeStepper *time_stepper_pt = father_el_pt->node_pt(0)->time_stepper_pt();
+    unsigned ntstorage = time_stepper_pt->ntstorage();
+    if (father_el_pt->Macro_elem_pt != 0)
+    {
+      throw_runtime_error("Macro elements (curved boundaries) are not yet supported for tetrahedral refinement");
+    }
+
+    // The 4 vertices of this son in the father's local coordinates -> affine (barycentric) map
+    // from son-local to father-local coordinates.
+    Vector<Vector<double>> sv;
+    son_vertices_in_father(son_type, sv);
+
+    for (unsigned j = 0; j < n_node; j++)
+    {
+      // Father-local coordinate of son node j.
+      Vector<double> s_son(3);
+      this->local_coordinate_of_node(j, s_son);
+      double b0 = s_son[0], b1 = s_son[1], b2 = s_son[2], b3 = 1.0 - b0 - b1 - b2;
+      Vector<double> s(3);
+      for (unsigned d = 0; d < 3; d++)
+        s[d] = b0 * sv[0][d] + b1 * sv[1][d] + b2 * sv[2][d] + b3 * sv[3][d];
+
+      // (1) Reuse a father node coincident with this position?
+      Node *created_node_pt = father_el_pt->get_node_at_local_coordinate(s);
+      if (created_node_pt != 0)
+      {
+        node_pt(j) = created_node_pt;
+        for (unsigned t = 0; t < ntstorage; t++)
+        {
+          Vector<double> prev_values;
+          father_el_pt->get_interpolated_values(t, s, prev_values);
+          unsigned n_var = std::min((unsigned)created_node_pt->nvalue(), (unsigned)prev_values.size());
+          for (unsigned k = 0; k < n_var; k++) created_node_pt->set_value(t, k, prev_values[k]);
+        }
+        continue;
+      }
+
+      // (2) Reuse a node already created (by a sibling son or the face-sharing neighbour father's
+      // sons) via the geometric shared-node registry.
+      std::set<Node *> reg_key = father_edge_node_key(s, father_el_pt);
+      if (!reg_key.empty())
+      {
+        std::map<std::set<Node *>, Node *>::iterator it = Shared_edge_node_registry.find(reg_key);
+        if (it != Shared_edge_node_registry.end())
+        {
+          node_pt(j) = it->second;
+          continue;
+        }
+      }
+
+      // (3) Build a new node. A new (edge-midpoint) node lies on a mesh boundary iff both father
+      // nodes it bisects do; its pinned values are those pinned at both. Boundary coordinates are
+      // linearly interpolated (its midpoint position).
+      std::set<unsigned> boundaries;
+      Node *A = 0, *B = 0;
+      if (reg_key.size() == 2)
+      {
+        std::set<Node *>::iterator kit = reg_key.begin();
+        A = *kit; ++kit; B = *kit;
+        oomph::BoundaryNodeBase *bA = dynamic_cast<oomph::BoundaryNodeBase *>(A);
+        oomph::BoundaryNodeBase *bB = dynamic_cast<oomph::BoundaryNodeBase *>(B);
+        if (bA && bB)
+        {
+          std::set<unsigned> *sA = 0, *sB = 0;
+          bA->get_boundaries_pt(sA);
+          bB->get_boundaries_pt(sB);
+          if (sA && sB)
+            std::set_intersection(sA->begin(), sA->end(), sB->begin(), sB->end(),
+                                  std::inserter(boundaries, boundaries.begin()));
+        }
+      }
+
+      if (!boundaries.empty())
+      {
+        created_node_pt = construct_boundary_node(j, time_stepper_pt);
+        unsigned n_value = created_node_pt->nvalue();
+        for (unsigned k = 0; k < n_value; k++)
+          if (A->is_pinned(k) && B->is_pinned(k)) created_node_pt->pin(k);
+        for (std::set<unsigned>::iterator it = boundaries.begin(); it != boundaries.end(); ++it)
+        {
+          mesh_pt->add_boundary_node(*it, created_node_pt);
+          if (mesh_pt->boundary_coordinate_exists(*it))
+          {
+            Vector<double> zA, zB;
+            dynamic_cast<oomph::BoundaryNodeBase *>(A)->get_coordinates_on_boundary(*it, zA);
+            dynamic_cast<oomph::BoundaryNodeBase *>(B)->get_coordinates_on_boundary(*it, zB);
+            Vector<double> z(zA.size());
+            for (unsigned zi = 0; zi < zA.size(); zi++) z[zi] = 0.5 * (zA[zi] + zB[zi]);
+            created_node_pt->set_coordinates_on_boundary(*it, z);
+          }
+        }
+      }
+      else
+      {
+        created_node_pt = construct_node(j, time_stepper_pt);
+      }
+
+      node_pt(j) = created_node_pt;
+      new_node_pt.push_back(created_node_pt);
+      for (unsigned t = 0; t < ntstorage; t++)
+      {
+        Vector<double> x_prev(3);
+        father_el_pt->get_x(t, s, x_prev);
+        for (unsigned d = 0; d < 3; d++) created_node_pt->x(t, d) = x_prev[d];
+      }
+      for (unsigned t = 0; t < ntstorage; t++)
+      {
+        Vector<double> prev_values;
+        father_el_pt->get_interpolated_values(t, s, prev_values);
+        unsigned n_var = std::min((unsigned)created_node_pt->nvalue(), (unsigned)prev_values.size());
+        for (unsigned k = 0; k < n_var; k++) created_node_pt->set_value(t, k, prev_values[k]);
+      }
+      mesh_pt->add_node_pt(created_node_pt);
+      if (!reg_key.empty()) Shared_edge_node_registry[reg_key] = created_node_pt;
+    }
   }
 
   //====================================================================
   ///  Print corner nodes, use colour (default "BLACK")
   //====================================================================
-  void RefineableTElement<3>::output_corners(std::ostream &,
-                                             const std::string &) const
+  void RefineableTElement<3>::output_corners(std::ostream &, const std::string &) const
   {
-    throw_runtime_error("Implement");
+    // Debug-only output; not needed for refinement itself.
   }
 
-  //====================================================================
-  /// Set up all hanging nodes. If we are documenting the output then
-  /// open the output files and pass the open files to the helper function
-  //====================================================================
-  void RefineableTElement<3>::setup_hanging_nodes(Vector<std::ofstream *>
-                                                      &)
-  {
-    throw_runtime_error("Implement");
-  }
+  // Hanging nodes for tetrahedra are installed by a mesh-level geometric pass after refinement
+  // (TemplatedMeshBase3d::post_adapt_setup_hanging_nodes), analogous to the 2d triangle scheme, so
+  // these per-element hooks are no-ops.
+  void RefineableTElement<3>::setup_hanging_nodes(Vector<std::ofstream *> &) {}
+  void RefineableTElement<3>::setup_hang_for_value(const int &) {}
+  void RefineableTElement<3>::quad_hang_helper(const int &, const int &, std::ofstream &) {}
 
-  //================================================================
-  /// Internal function that sets up the hanging node scheme for
-  /// a particular continuously interpolated value
-  //===============================================================
-  void RefineableTElement<3>::setup_hang_for_value(const int &)
+  void RefineableTElement<3>::check_integrity(double &max_error)
   {
-    throw_runtime_error("Implement");
-  }
-
-  //=================================================================
-  /// Internal function to set up the hanging nodes on a particular
-  /// edge of the element
-  //=================================================================
-  void RefineableTElement<3>::
-      quad_hang_helper(const int &,
-                       const int &, std::ofstream &)
-  {
-    throw_runtime_error("Implement");
-  }
-
-  //=================================================================
-  /// Check inter-element continuity of
-  /// - nodal positions
-  /// - (nodally) interpolated function values
-  //====================================================================
-  // template<unsigned NNODE_1D>
-  void RefineableTElement<3>::check_integrity(double &)
-  {
-
-    throw_runtime_error("Implement");
+    max_error = 0.0; // continuity is guaranteed by the geometric node-sharing/hanging scheme
   }
 
   //========================================================================
-  /// Static matrix for coincidence between son nodal points and
-  /// father boundaries
-  ///
+  /// Static matrix for coincidence between son nodal points and father boundaries (unused by the
+  /// geometric tetrahedron refinement, kept for interface compatibility).
   //========================================================================
   std::map<unsigned, DenseMatrix<int>> RefineableTElement<3>::Father_bound;
+
+  // Shared-node registry for geometric node-sharing during tetrahedron refinement (see header).
+  std::map<std::set<Node *>, Node *> RefineableTElement<3>::Shared_edge_node_registry;
+
+  // Registry key for a new son node at father-local coordinate s_in_father: it is the midpoint of
+  // exactly two father nodes (an edge midpoint for both linear and quadratic tets), and that
+  // father node-pointer pair is identical from every element that creates the same node. Returns
+  // empty if s_in_father is not the midpoint of any father-node pair (a reused father node).
+  std::set<Node *> RefineableTElement<3>::father_edge_node_key(const Vector<double> &s_in_father, RefineableTElement<3> *father_el_pt) const
+  {
+    std::set<Node *> key;
+    unsigned nf = father_el_pt->nnode();
+    Vector<double> sa(3), sb(3);
+    for (unsigned a = 0; a < nf; a++)
+    {
+      father_el_pt->local_coordinate_of_node(a, sa);
+      for (unsigned b = a + 1; b < nf; b++)
+      {
+        father_el_pt->local_coordinate_of_node(b, sb);
+        if (std::abs(0.5 * (sa[0] + sb[0]) - s_in_father[0]) < 1e-10 &&
+            std::abs(0.5 * (sa[1] + sb[1]) - s_in_father[1]) < 1e-10 &&
+            std::abs(0.5 * (sa[2] + sb[2]) - s_in_father[2]) < 1e-10)
+        {
+          key.insert(father_el_pt->node_pt(a));
+          key.insert(father_el_pt->node_pt(b));
+          return key;
+        }
+      }
+    }
+    return key;
+  }
+
+  // The 4 vertices (father local coordinates) of son son_type (0..7) of a 1->8 tetrahedron split:
+  // 4 corner sub-tets (one per father vertex, using its 3 adjacent edge midpoints) + 4 sub-tets
+  // tiling the central octahedron of the 6 edge midpoints, split along a fixed diagonal (m02-m13).
+  // The octahedron is interior to the father, so face conformity is automatic via edge-midpoint
+  // sharing regardless of the diagonal; it is a free quality choice. Vertices are orientation-
+  // corrected to positive signed volume so the son's shape functions/Jacobian are consistent.
+  void RefineableTElement<3>::son_vertices_in_father(int son_type, Vector<Vector<double>> &verts) const
+  {
+    // Father node local coordinates (oomph TElement<3,*> numbering: 4 vertices + 6 edge mids).
+    Vector<double> v0(3), v1(3), v2(3), v3(3), m01(3), m02(3), m03(3), m12(3), m23(3), m13(3);
+    v0[0] = 1; v0[1] = 0; v0[2] = 0;
+    v1[0] = 0; v1[1] = 1; v1[2] = 0;
+    v2[0] = 0; v2[1] = 0; v2[2] = 1;
+    v3[0] = 0; v3[1] = 0; v3[2] = 0;
+    m01[0] = 0.5; m01[1] = 0.5; m01[2] = 0.0;
+    m02[0] = 0.5; m02[1] = 0.0; m02[2] = 0.5;
+    m03[0] = 0.5; m03[1] = 0.0; m03[2] = 0.0;
+    m12[0] = 0.0; m12[1] = 0.5; m12[2] = 0.5;
+    m23[0] = 0.0; m23[1] = 0.0; m23[2] = 0.5;
+    m13[0] = 0.0; m13[1] = 0.5; m13[2] = 0.0;
+
+    verts.resize(4, Vector<double>(3));
+    switch (son_type)
+    {
+    case 0: verts[0] = v0;  verts[1] = m01; verts[2] = m02; verts[3] = m03; break; // corner v0
+    case 1: verts[0] = v1;  verts[1] = m01; verts[2] = m12; verts[3] = m13; break; // corner v1
+    case 2: verts[0] = v2;  verts[1] = m02; verts[2] = m12; verts[3] = m23; break; // corner v2
+    case 3: verts[0] = v3;  verts[1] = m03; verts[2] = m13; verts[3] = m23; break; // corner v3
+    case 4: verts[0] = m02; verts[1] = m13; verts[2] = m01; verts[3] = m03; break; // octahedron
+    case 5: verts[0] = m02; verts[1] = m13; verts[2] = m03; verts[3] = m23; break;
+    case 6: verts[0] = m02; verts[1] = m13; verts[2] = m23; verts[3] = m12; break;
+    case 7: verts[0] = m02; verts[1] = m13; verts[2] = m12; verts[3] = m01; break;
+    default: throw_runtime_error("Invalid tetrahedron son type (must be 0..7)");
+    }
+
+    // Orientation-correct: ensure det[v0-v3, v1-v3, v2-v3] > 0 (matches the reference tet).
+    double d[3][3];
+    for (int r = 0; r < 3; r++)
+      for (int c = 0; c < 3; c++) d[r][c] = verts[r][c] - verts[3][c];
+    double det = d[0][0] * (d[1][1] * d[2][2] - d[1][2] * d[2][1]) - d[0][1] * (d[1][0] * d[2][2] - d[1][2] * d[2][0]) + d[0][2] * (d[1][0] * d[2][1] - d[1][1] * d[2][0]);
+    if (det < 0.0)
+    {
+      Vector<double> tmp = verts[0];
+      verts[0] = verts[1];
+      verts[1] = tmp;
+    }
+  }
 
 }

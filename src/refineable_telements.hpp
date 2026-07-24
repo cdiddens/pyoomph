@@ -251,11 +251,10 @@ namespace oomph
     {
     }
 
-    unsigned required_nsons() const override
-    {
-      throw_runtime_error("TODO");
-      return 4;
-    }
+    unsigned required_nsons() const override { return 8; } // a tetrahedron refines 1->8
+
+    // Clear the shared-node registry (call once before each refinement round). See below.
+    static void clear_shared_edge_node_registry() { Shared_edge_node_registry.clear(); }
 
     // Return the node already created by a neighbouring element at fractional local
     // position s_fraction (if any), so it can be shared rather than duplicated; see .cpp.
@@ -313,6 +312,19 @@ namespace oomph
 
     // Set up hanging nodes on one particular edge of the element for a given value.
     virtual void quad_hang_helper(const int &value_id, const int &my_edge, std::ofstream &output_hangfile);
+
+    // --- Geometric node-sharing during tetrahedron refinement (Phase 4, branch mixed_adapt) ---
+    // Direct 3D analog of the 2D triangle scheme: every node a 1->8 tet refinement creates is the
+    // midpoint of two father nodes (an edge midpoint), so it is keyed by that father node-pointer
+    // pair, identical from every element that creates it (sibling sons and the face-sharing
+    // neighbour father's sons), giving duplicate-free node-sharing with no coordinate descent.
+    // Cleared each refinement round by TemplatedMeshBase::split_elements_if_required.
+    static std::map<std::set<Node *>, Node *> Shared_edge_node_registry;
+    // The father node-pointer pair that a son node at father-local coordinate s_in_father bisects
+    // (empty if it is a reused father node).
+    std::set<Node *> father_edge_node_key(const Vector<double> &s_in_father, RefineableTElement<3> *father_el_pt) const;
+    // The 4 vertices (in father local coordinates) of son number son_type (0..7) of a 1->8 split.
+    void son_vertices_in_father(int son_type, Vector<Vector<double>> &verts) const;
   };
 
 }

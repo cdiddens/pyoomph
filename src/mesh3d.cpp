@@ -42,12 +42,18 @@ namespace pyoomph
 	// refinement was requested but the mesh contains non-brick (e.g. tetrahedral) elements.
 	bool TemplatedMeshBase3d::refinement_possible()
 	{
-		bool allQ = true;
+		// h-refinement via the OcTree hierarchy is implemented for pure-brick meshes and (branch
+		// mixed_adapt) pure-tetrahedron meshes (a tet refines 1->8, reusing the OcTree's 8-son
+		// bookkeeping, with geometric node-sharing/hanging). Mixed brick+tet is not yet supported.
+		bool allQ = true, allT = true;
 		for (unsigned int i = 0; i < this->nelement(); i++)
 		{
-			allQ = allQ && (dynamic_cast<oomph::BrickElementBase *>(this->element_pt(i)) != NULL);
+			bool is_brick = (dynamic_cast<oomph::BrickElementBase *>(this->element_pt(i)) != NULL);
+			bool is_tet = (dynamic_cast<oomph::TElementBase *>(this->element_pt(i)) != NULL);
+			allQ = allQ && is_brick;
+			allT = allT && is_tet;
 		}
-		if (allQ)
+		if (allQ || allT)
 		{
 			return true;
 		}
@@ -55,10 +61,183 @@ namespace pyoomph
 		{
 			if (this->max_refinement_level() && !issued_tri_refinement_warning && !this->problem->is_quiet())
 			{
-				std::cerr << "WARNING: Found a tri or something in the mesh -> cannot be adaptive right now. Requires to implement a good tree for mixed meshes" << std::endl;
+				std::cerr << "WARNING: Mixed-element 3d mesh -> cannot be adaptive yet. Requires cross-shape facet neighbouring for mixed meshes" << std::endl;
 				issued_tri_refinement_warning = true;
 			}
 			return false;
+		}
+	}
+
+	namespace
+	{
+		// If X lies strictly in the interior of the 3d segment [P,Q] (collinear, endpoints excluded),
+		// set t so X = P + t (Q-P) with 0 < t < 1 and return true; otherwise return false.
+		bool node_strictly_on_segment_3d(oomph::Node *P, oomph::Node *Q, oomph::Node *X, double &t)
+		{
+			const double dx = Q->x(0) - P->x(0), dy = Q->x(1) - P->x(1), dz = Q->x(2) - P->x(2);
+			const double len2 = dx * dx + dy * dy + dz * dz;
+			if (len2 < 1e-30) return false;
+			t = ((X->x(0) - P->x(0)) * dx + (X->x(1) - P->x(1)) * dy + (X->x(2) - P->x(2)) * dz) / len2;
+			if (t <= 1e-9 || t >= 1.0 - 1e-9) return false;
+			const double px = P->x(0) + t * dx, py = P->x(1) + t * dy, pz = P->x(2) + t * dz;
+			const double d2 = (X->x(0) - px) * (X->x(0) - px) + (X->x(1) - py) * (X->x(1) - py) + (X->x(2) - pz) * (X->x(2) - pz);
+			return d2 <= 1e-14 * len2;
+		}
+	}
+
+	// Install hanging nodes for tetrahedral meshes after (non-uniform) refinement. For linear (C1)
+	// tets the 1->8 split creates only edge-midpoint nodes, so every hanging node lies in the
+	// interior of a coarser tet edge {P,Q} and is constrained by that edge's interpolation (linear
+	// C1 weights on {P,Q}; quadratic on {P,M,Q} for C2 edges, with M the coarse mid-node). With a
+	// >1-level jump a coarse FACE also gains interior nodes, constrained barycentrically over the
+	// coarse face (second pass below). Coarse edges/faces are enumerated from the current tets and
+	// processed coarsest-first so hangs bind to real (non-hanging) coarse corners.
+	//
+	// Status: correct (linear residual -> machine zero) for uniform, single-level (2:1-balanced),
+	// and error-driven adaptive refinement -- i.e. the meshes adaptivity actually produces. Abrupt
+	// >1-level RefineToLevel jumps (deliberately non-2:1) leave a small residual (~1e-9) from deep
+	// hanging chains and are not yet fully supported. C2 face-interior hanging is also not handled
+	// yet (C2 tets: only edge hanging), so C2 tet adaptivity is currently limited to 2:1 meshes with
+	// no face-interior hangs.
+	void TemplatedMeshBase3d::post_adapt_setup_hanging_nodes()
+	{
+		bool has_tet = false;
+		for (unsigned int ie = 0; ie < this->nelement() && !has_tet; ie++)
+			if (dynamic_cast<oomph::TElementBase *>(this->element_pt(ie))) has_tet = true;
+		if (!has_tet) return; // brick meshes: oomph-lib already handled hanging
+
+		for (unsigned int in = 0; in < this->nnode(); in++) this->node_pt(in)->set_nonhanging();
+
+		// Unique tetrahedron edges (all vertex pairs), each with one incident element (for order) and
+		// its squared length. Processed LONGEST (coarsest) first so a fine node binds directly to its
+		// coarsest containing edge -- i.e. to real (non-hanging) coarse corners -- rather than to a
+		// fine sub-edge whose endpoints are themselves hanging.
+		struct EdgeRec { oomph::Node *P; oomph::Node *Q; oomph::FiniteElement *el; double len2; };
+		std::map<std::pair<oomph::Node *, oomph::Node *>, oomph::FiniteElement *> edgemap;
+		for (unsigned int ie = 0; ie < this->nelement(); ie++)
+		{
+			oomph::TElementBase *tet = dynamic_cast<oomph::TElementBase *>(this->element_pt(ie));
+			if (!tet) continue;
+			oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(this->element_pt(ie));
+			oomph::Node *v[4];
+			for (unsigned k = 0; k < 4; k++) v[k] = tet->vertex_node_pt(k);
+			for (unsigned a = 0; a < 4; a++)
+				for (unsigned b = a + 1; b < 4; b++)
+				{
+					oomph::Node *P = v[a], *Q = v[b];
+					if (P > Q) std::swap(P, Q);
+					edgemap[std::make_pair(P, Q)] = fe;
+				}
+		}
+		std::vector<EdgeRec> edgevec;
+		for (const auto &kv : edgemap)
+		{
+			oomph::Node *P = kv.first.first, *Q = kv.first.second;
+			double len2 = 0.0;
+			for (int d = 0; d < 3; d++) len2 += (Q->x(d) - P->x(d)) * (Q->x(d) - P->x(d));
+			edgevec.push_back(EdgeRec{P, Q, kv.second, len2});
+		}
+		std::sort(edgevec.begin(), edgevec.end(), [](const EdgeRec &a, const EdgeRec &b) { return a.len2 > b.len2; });
+
+		for (const EdgeRec &e : edgevec)
+		{
+			oomph::Node *P = e.P, *Q = e.Q;
+			std::vector<std::pair<oomph::Node *, double>> between;
+			for (unsigned int in = 0; in < this->nnode(); in++)
+			{
+				oomph::Node *X = this->node_pt(in);
+				if (X == P || X == Q) continue;
+				double t;
+				if (node_strictly_on_segment_3d(P, Q, X, t)) between.push_back(std::make_pair(X, t));
+			}
+			if (between.empty()) continue;
+			const unsigned order_1d = e.el ? e.el->nnode_1d() : 2;
+			if (order_1d <= 2)
+			{
+				for (std::pair<oomph::Node *, double> &xt : between)
+				{
+					if (xt.first->is_hanging()) continue;
+					oomph::HangInfo *hang = new oomph::HangInfo(2);
+					hang->set_master_node_pt(0, P, 1.0 - xt.second);
+					hang->set_master_node_pt(1, Q, xt.second);
+					xt.first->set_hanging_pt(hang, -1);
+				}
+			}
+			else
+			{
+				oomph::Node *M = 0;
+				for (std::pair<oomph::Node *, double> &xt : between)
+					if (std::abs(xt.second - 0.5) < 1e-6) { M = xt.first; break; }
+				if (!M) continue;
+				for (std::pair<oomph::Node *, double> &xt : between)
+				{
+					if (xt.first == M || xt.first->is_hanging()) continue;
+					const double t = xt.second;
+					oomph::HangInfo *hang = new oomph::HangInfo(3);
+					hang->set_master_node_pt(0, P, 2.0 * (t - 0.5) * (t - 1.0));
+					hang->set_master_node_pt(1, M, 4.0 * t * (1.0 - t));
+					hang->set_master_node_pt(2, Q, 2.0 * t * (t - 0.5));
+					xt.first->set_hanging_pt(hang, -1);
+				}
+			}
+		}
+
+		// Face-interior hanging (>1 level jumps): a coarse tet face that refines more than once gains
+		// nodes strictly INSIDE the face (not on any edge). A coarse face is a triangle facet incident
+		// on exactly one element (build_facet_adjacency, keyed by the 3 face vertex nodes). Processed
+		// LARGEST (coarsest) first, so interior nodes bind to real coarse corners. For C1 (linear)
+		// faces the weights are the node's barycentric coordinates. (C2 face-interior hanging --
+		// quadratic barycentric over 6 face nodes -- is not handled yet.)
+		struct FaceRec { oomph::Node *A; oomph::Node *B; oomph::Node *D; oomph::FiniteElement *el; double area2; };
+		FacetAdjacencyMap adj = this->build_facet_adjacency();
+		std::vector<FaceRec> facevec;
+		for (const auto &kv : adj)
+		{
+			if (kv.second.size() != 1) continue;
+			if (kv.first.size() != 3) continue;
+			std::set<pyoomph::Node *>::const_iterator it = kv.first.begin();
+			oomph::Node *A = *it; ++it; oomph::Node *B = *it; ++it; oomph::Node *D = *it;
+			double e0[3], e1[3];
+			for (int d = 0; d < 3; d++) { e0[d] = B->x(d) - A->x(d); e1[d] = D->x(d) - A->x(d); }
+			double nx = e0[1] * e1[2] - e0[2] * e1[1], ny = e0[2] * e1[0] - e0[0] * e1[2], nz = e0[0] * e1[1] - e0[1] * e1[0];
+			facevec.push_back(FaceRec{A, B, D, dynamic_cast<oomph::FiniteElement *>(kv.second[0].first), nx * nx + ny * ny + nz * nz});
+		}
+		std::sort(facevec.begin(), facevec.end(), [](const FaceRec &a, const FaceRec &b) { return a.area2 > b.area2; });
+
+		for (const FaceRec &f : facevec)
+		{
+			if (f.el && f.el->nnode_1d() > 2) continue; // C2 face hanging not yet supported
+			oomph::Node *A = f.A, *B = f.B, *D = f.D;
+			double e0[3], e1[3];
+			for (int d = 0; d < 3; d++) { e0[d] = B->x(d) - A->x(d); e1[d] = D->x(d) - A->x(d); }
+			const double d00 = e0[0] * e0[0] + e0[1] * e0[1] + e0[2] * e0[2];
+			const double d01 = e0[0] * e1[0] + e0[1] * e1[1] + e0[2] * e1[2];
+			const double d11 = e1[0] * e1[0] + e1[1] * e1[1] + e1[2] * e1[2];
+			const double denom = d00 * d11 - d01 * d01;
+			if (std::abs(denom) < 1e-30) continue;
+			double nrm[3] = {e0[1] * e1[2] - e0[2] * e1[1], e0[2] * e1[0] - e0[0] * e1[2], e0[0] * e1[1] - e0[1] * e1[0]};
+			const double nlen2 = nrm[0] * nrm[0] + nrm[1] * nrm[1] + nrm[2] * nrm[2];
+			for (unsigned int in = 0; in < this->nnode(); in++)
+			{
+				oomph::Node *X = this->node_pt(in);
+				if (X == A || X == B || X == D || X->is_hanging()) continue;
+				double e2[3];
+				for (int d = 0; d < 3; d++) e2[d] = X->x(d) - A->x(d);
+				const double e2n = e2[0] * nrm[0] + e2[1] * nrm[1] + e2[2] * nrm[2];
+				if (e2n * e2n > 1e-14 * nlen2 * d00) continue; // not on the face's plane
+				const double d20 = e2[0] * e0[0] + e2[1] * e0[1] + e2[2] * e0[2];
+				const double d21 = e2[0] * e1[0] + e2[1] * e1[1] + e2[2] * e1[2];
+				const double bB = (d11 * d20 - d01 * d21) / denom;
+				const double bD = (d00 * d21 - d01 * d20) / denom;
+				const double bA = 1.0 - bB - bD;
+				const double eps = 1e-7;
+				if (bA <= eps || bB <= eps || bD <= eps) continue; // on an edge (edge pass) or outside
+				oomph::HangInfo *hang = new oomph::HangInfo(3);
+				hang->set_master_node_pt(0, A, bA);
+				hang->set_master_node_pt(1, B, bB);
+				hang->set_master_node_pt(2, D, bD);
+				X->set_hanging_pt(hang, -1);
+			}
 		}
 	}
 

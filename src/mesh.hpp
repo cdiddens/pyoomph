@@ -359,10 +359,11 @@ namespace pyoomph
 		// Traverse the tree forest and p/h-refine any leaf element that oomph-lib has flagged for splitting.
 		void split_elements_if_required() override
 		{
-			// Start of a refinement round: clear the triangle shared-node registry so it only
-			// holds nodes created during this round (keyed by father corner-node pairs). See
-			// RefineableTElement<2>'s Shared_edge_node_registry.
+			// Start of a refinement round: clear the triangle/tet shared-node registries so they
+			// only hold nodes created during this round (keyed by father node pairs). See
+			// RefineableTElement<2>/<3>'s Shared_edge_node_registry.
 			oomph::RefineableTElement<2>::clear_shared_edge_node_registry();
+			oomph::RefineableTElement<3>::clear_shared_edge_node_registry();
 			// Find the number of trees in the forest
 			if (!this->Forest_pt)
 			{

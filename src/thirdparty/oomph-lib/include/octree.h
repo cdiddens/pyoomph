@@ -928,8 +928,10 @@ namespace oomph
   {
   public:
     /// Constructor for OcTree forest: Pass Vector of
-    /// (pointers to) trees.
-    OcTreeForest(Vector<TreeRoot*>& trees_pt);
+    /// (pointers to) trees. FOR PYOOMPH: skip_init_call suppresses the
+    /// find_neighbours()/construct_up_right_equivalents() calls so a derived forest
+    /// (DynamicOcTreeForest) can run its own (e.g. tet-aware) versions afterwards.
+    OcTreeForest(Vector<TreeRoot*>& trees_pt, bool skip_init_call = false);
 
     /// Default constructor (empty and broken)
     OcTreeForest()
@@ -1009,9 +1011,11 @@ namespace oomph
     /// Construct the rotation schemes
     void construct_up_right_equivalents();
 
-  private:
-    /// Construct the neighbour scheme
-    void find_neighbours();
+  protected:
+    /// Construct the neighbour scheme. FOR PYOOMPH: made virtual+protected so a derived
+    /// forest (DynamicOcTreeForest) can override it (e.g. skip it for tetrahedral forests,
+    /// which use geometric node-sharing/hanging instead of the OcTree coordinate descent).
+    virtual void find_neighbours();
   };
 
 } // namespace oomph
