@@ -234,6 +234,64 @@ namespace pyoomph
     oomph::QuadTreeForest::check_all_neighbours(doc_info);
   }
 
+  namespace
+  {
+    // If X lies strictly in the interior of the segment [P,Q] (collinear, endpoints excluded),
+    // set t so that X = P + t (Q - P) with 0 < t < 1 and return true; otherwise return false.
+    bool node_strictly_on_segment(oomph::Node *P, oomph::Node *Q, oomph::Node *X, double &t)
+    {
+      const double dx = Q->x(0) - P->x(0);
+      const double dy = Q->x(1) - P->x(1);
+      const double len2 = dx * dx + dy * dy;
+      if (len2 < 1e-30) return false;
+      t = ((X->x(0) - P->x(0)) * dx + (X->x(1) - P->x(1)) * dy) / len2;
+      if (t <= 1e-9 || t >= 1.0 - 1e-9) return false; // strictly between the endpoints
+      // Perpendicular distance^2 from X to the line, relative to the edge length^2.
+      const double projx = P->x(0) + t * dx, projy = P->x(1) + t * dy;
+      const double d2 = (X->x(0) - projx) * (X->x(0) - projx) + (X->x(1) - projy) * (X->x(1) - projy);
+      return d2 <= 1e-14 * len2; // hanging nodes sit exactly on the coarse edge (straight-sided)
+    }
+  }
+
+  // Install hanging nodes for triangle meshes after (non-uniform) refinement. See the header.
+  void TemplatedMeshBase2d::post_adapt_setup_hanging_nodes()
+  {
+    bool has_tri = false;
+    for (unsigned int ie = 0; ie < this->nelement() && !has_tri; ie++)
+      if (dynamic_cast<oomph::TElementBase *>(this->element_pt(ie))) has_tri = true;
+    if (!has_tri) return; // quad/hex meshes: oomph-lib already handled hanging
+
+    // Triangle hanging status is managed entirely here, so clear it first (a node that was
+    // hanging can stop hanging once its coarse neighbour is itself refined).
+    for (unsigned int in = 0; in < this->nnode(); in++) this->node_pt(in)->set_nonhanging();
+
+    // A hanging node lies strictly in the interior of a coarser neighbour's edge. That edge shows
+    // up in the facet adjacency as an interior facet {P,Q} incident on exactly one element (the
+    // coarse element; the refined side has the sub-edges {P,M},{M,Q} instead). For each such
+    // facet, constrain every mesh node collinear strictly between P and Q to the linear
+    // interpolation of P and Q. Exact for straight-sided linear (C1) triangles; hanging masters
+    // that are themselves hanging are resolved by pyoomph's assembly-time flattening.
+    FacetAdjacencyMap adj = this->build_facet_adjacency();
+    for (const auto &kv : adj)
+    {
+      if (kv.second.size() != 1) continue; // conforming interior facet (2), or a fine sub-edge
+      if (kv.first.size() != 2) continue;  // an edge has exactly two vertex nodes in 2d
+      std::set<pyoomph::Node *>::const_iterator it = kv.first.begin();
+      oomph::Node *P = *it; ++it; oomph::Node *Q = *it;
+      for (unsigned int in = 0; in < this->nnode(); in++)
+      {
+        oomph::Node *X = this->node_pt(in);
+        if (X == P || X == Q || X->is_hanging()) continue;
+        double t;
+        if (!node_strictly_on_segment(P, Q, X, t)) continue;
+        oomph::HangInfo *hang = new oomph::HangInfo(2);
+        hang->set_master_node_pt(0, P, 1.0 - t);
+        hang->set_master_node_pt(1, Q, t);
+        X->set_hanging_pt(hang, -1); // geometric slot; C1/C2 value slots alias it
+      }
+    }
+  }
+
   // True only if every element in the mesh is a quad (h-refinement via a QuadTreeForest is only
   // implemented for pure-quad meshes). Also issues a one-off warning (per mesh) if adaptive
   // refinement was requested but the mesh contains non-quad (e.g. triangular) elements.
@@ -395,39 +453,6 @@ namespace pyoomph
       {
         Boundary_element_pt[bi].erase(Boundary_element_pt[bi].begin()+remove[i-1]);
         Face_index_at_boundary[bi].erase(Face_index_at_boundary[bi].begin()+remove[i-1]);
-      }
-    }
-
-    // Guard (Phase 2a, branch mixed_adapt): non-uniform triangle refinement produces hanging
-    // nodes, whose setup is not yet implemented (Phase 2b). A hanging edge shows up in the facet
-    // adjacency as an interior facet incident on only ONE element face (the coarse element's full
-    // edge, and each fine sub-edge, appear once), with at least one non-boundary node. Left
-    // unhandled this crashes later in assembly/output, so detect it here (only for adaptive
-    // meshes that actually contain triangles) and fail with a clear message. Conforming triangle
-    // meshes (e.g. uniformly refined via RefineToLevel) have every incidence-1 facet on the mesh
-    // boundary and pass unchanged.
-    if (is_adaptation_enabled())
-    {
-      bool has_tri = false;
-      for (unsigned int ie = 0; ie < this->nelement() && !has_tri; ie++)
-        if (dynamic_cast<oomph::TElementBase *>(this->element_pt(ie))) has_tri = true;
-      if (has_tri)
-      {
-        FacetAdjacencyMap adj = this->build_facet_adjacency();
-        for (const auto &kv : adj)
-        {
-          if (kv.second.size() != 1) continue; // interior conforming (2) or fine (handled)
-          bool all_on_boundary = true;
-          for (pyoomph::Node *nod : kv.first)
-          {
-            oomph::BoundaryNodeBase *bn = dynamic_cast<oomph::BoundaryNodeBase *>(nod);
-            if (!bn || !bn->is_on_boundary()) { all_on_boundary = false; break; }
-          }
-          if (!all_on_boundary)
-          {
-            throw_runtime_error("Non-uniform (hanging-node) refinement of triangular meshes is not yet implemented (Phase 2b). Use uniform refinement (e.g. RefineToLevel) for now.");
-          }
-        }
       }
     }
 

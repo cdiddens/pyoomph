@@ -155,6 +155,13 @@ namespace pyoomph
 
     void setup_tree_forest() override;
 
+    // After (non-uniform) refinement, install hanging nodes for triangle meshes. oomph-lib's
+    // per-element hang setup is a no-op for triangles (their node-sharing/hanging is geometric,
+    // not the quad coordinate descent). A hanging node is one lying in the interior of a coarser
+    // neighbour's edge; it is constrained by linear interpolation of that edge's two end nodes.
+    // No-op for pure-quad meshes.
+    void post_adapt_setup_hanging_nodes() override;
+
 
     // (Re)build the QuadTreeForest. If a forest already exists, this "flattens" it down to the
     // globally coarsest common refinement level (min_ref, reduced via MPI_Allreduce under MPI) by

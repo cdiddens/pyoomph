@@ -494,7 +494,16 @@ namespace pyoomph
 			for (unsigned int i = 0; i < elemental_error.size(); i++)
 				updated_errors[i] = errors[i];
 			TreeBasedRefineableMeshBase::adapt(updated_errors);
+			// After oomph-lib's refinement, install any shape-specific hanging nodes that its
+			// per-element setup did not (e.g. triangles, which use a geometric hang scheme rather
+			// than the quad coordinate descent). Runs before equation numbering, so the hangs are
+			// picked up by assign_(hanging_)local_eqn_numbers. No-op for quad/hex meshes.
+			this->post_adapt_setup_hanging_nodes();
 		}
+
+		// Hook to (re)build shape-specific hanging nodes after refinement; overridden by the
+		// dimension-specific subclasses that need it (currently 2d triangles). No-op by default.
+		virtual void post_adapt_setup_hanging_nodes() {}
 
 		// Remove nodes flagged as obsolete (is_obsolete()) from Node_pt, deleting them. Unlike oomph-lib's
 		// usual node-pruning, this does not update boundary node lists, so it must only be used when the

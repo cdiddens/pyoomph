@@ -23,12 +23,20 @@
 #
 # ========================================================================
 
-# Phase 2a (branch mixed_adapt): tree-based UNIFORM refinement of pure triangular meshes.
-# A linear (C1) triangle refines 1->4 via the QuadTree hierarchy, with mid-edge nodes shared
-# geometrically (father-edge corner-node registry) so the refined mesh stays conforming
-# (manifold: every facet incident on 1 or 2 element faces). We check the element counts
-# (x4 per uniform level), manifoldness, and that a Poisson integral converges to the known
-# value. Non-uniform (hanging-node) triangle refinement is Phase 2b and not exercised here.
+# Phase 2 (branch mixed_adapt): tree-based refinement of pure triangular meshes.
+#
+# Phase 2a -- UNIFORM refinement: a linear (C1) triangle refines 1->4 via the QuadTree
+# hierarchy, with mid-edge nodes shared geometrically (father-edge corner-node registry) so
+# the refined mesh stays conforming (manifold: every facet incident on 1 or 2 element faces).
+# We check element counts (x4 per uniform level), manifoldness, and Poisson-integral convergence.
+#
+# Phase 2b -- NON-UNIFORM (hanging-node) refinement: a node lying in the interior of a coarser
+# neighbour's edge is constrained by linear interpolation of that edge's two end nodes. Because
+# the Poisson problem is linear, a single Newton step drives the residual to machine zero *iff*
+# the hanging-node constraints (and hence the assembled Jacobian) are correct -- the same oracle
+# used by test_constrained_adaptivity.py.
+
+import numpy as np
 
 from pyoomph import *
 from pyoomph.expressions import *
@@ -52,6 +60,10 @@ class _TriPoisson(Problem):
 def _is_manifold(summary):
     n_facets, n_bnd, n_int, max_inc = summary
     return max_inc == 2 and n_bnd + n_int == n_facets
+
+
+def _max_abs_residual(problem):
+    return float(np.max(np.abs(np.asarray(problem.get_residuals()))))
 
 
 def test_uniform_triangle_refinement_conforming_and_converges():
@@ -94,3 +106,53 @@ def test_uniform_triangle_refinement_level_counts():
             if prev_intu is not None:
                 assert intu > prev_intu  # monotone convergence from below
             prev_intu = intu
+
+
+class _TriPoissonPlain(Problem):
+    # Same as _TriPoisson but without the observable (kept minimal for the residual oracle).
+    def __init__(self, split="left", N=4):
+        super().__init__()
+        self._split, self._N = split, N
+
+    def define_problem(self):
+        self += RectangularQuadMesh(name="domain", N=self._N, split_in_tris=self._split)
+        eqs = PoissonEquation(source=1, space="C1") + DirichletBC(u=0) @ ["left", "right", "top", "bottom"]
+        self += eqs @ "domain"
+
+
+import pytest
+
+
+@pytest.mark.parametrize("split", ["left", "right", "crossed"])
+@pytest.mark.parametrize("boundary", ["left", "top"])
+def test_nonuniform_triangle_refinement_residual_oracle(split, boundary):
+    # Refine more strongly near one boundary than the interior -> hanging nodes at the interface.
+    # Linear problem: residual ~0 after the Newton step certifies the hanging-node Jacobian.
+    with _TriPoissonPlain(split=split) as problem:
+        problem.max_refinement_level = 3
+        problem += RefineToLevel(1) @ "domain"
+        problem += RefineToLevel(3) @ ("domain/" + boundary)
+        problem.solve()
+        assert _max_abs_residual(problem) < 1e-9
+
+
+class _TriPoissonAdaptive(Problem):
+    def define_problem(self):
+        self += RectangularQuadMesh(name="domain", N=6, split_in_tris="crossed")
+        x = var("coordinate")[0]
+        y = var("coordinate")[1]
+        eqs = PoissonEquation(source=100 * exp(-50 * ((x - 0.2) ** 2 + (y - 0.2) ** 2)), space="C1")
+        eqs += DirichletBC(u=0) @ ["left", "right", "top", "bottom"]
+        eqs += SpatialErrorEstimator(u=1)
+        self += eqs @ "domain"
+
+
+def test_error_based_triangle_adaptivity_residual_oracle():
+    # Genuine error-driven (Z2) adaptive refinement of a triangular mesh around a localized
+    # source. The refined mesh is non-uniform (hanging nodes); the linear residual must still
+    # reach machine zero.
+    with _TriPoissonAdaptive() as problem:
+        problem.max_refinement_level = 4
+        problem.solve(spatial_adapt=3)
+        assert _max_abs_residual(problem) < 1e-9
+        assert problem.get_mesh("domain").nelement() > 1000  # adaption actually happened
