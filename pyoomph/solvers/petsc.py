@@ -433,16 +433,21 @@ class SlepcEigenSolver(GenericEigenSolver):
                 Min=Min.tocsr()
                 assert isinstance(Min,DefaultMatrixType)
                 
-            M=PETSc.Mat().createAIJ(size=((n, n), (n, n),), csr=(Min.indptr, Min.indices, Min.data)) #type:ignore
-            J=PETSc.Mat().createAIJ(size=((n, n), (n, n),), csr=(Jin.indptr, Jin.indices, Jin.data)) #type:ignore
+            # Min/Jin's CSR arrays may be zero-copy views onto oomph-lib's CRDoubleMatrix buffers
+            # (see get_J_M_n_and_type() / src/nanobind/problem.cpp). astype(..., copy=False) is a
+            # no-op when the dtypes already match PETSc's own (the common case) and only allocates a
+            # converted copy on a 64-bit-index or complex PETSc build; mirrors the fix applied to
+            # PETSCSolver.solve_serial()/assemble_matrix() above.
+            M=PETSc.Mat().createAIJ(size=((n, n), (n, n),), csr=(Min.indptr.astype(PETSc.IntType, copy=False), Min.indices.astype(PETSc.IntType, copy=False), Min.data.astype(PETSc.ScalarType, copy=False))) #type:ignore
+            J=PETSc.Mat().createAIJ(size=((n, n), (n, n),), csr=(Jin.indptr.astype(PETSc.IntType, copy=False), Jin.indices.astype(PETSc.IntType, copy=False), Jin.data.astype(PETSc.ScalarType, copy=False))) #type:ignore
 
         else:
             Jin,Min,n,complex_mat=self.get_J_M_n_and_type()
             upscale_to_complex=complex_mat and (PETSc.ScalarType in {numpy.float64,numpy.float128,numpy.float32}) #type:ignore
             if upscale_to_complex:
                 raise RuntimeError("Your PETSc/SLEPc installation cannot handle a complex eigenvalue problem. Please compile another PETSc/SLEPc version with complex number and adjust the PYTHONPATH accordingly so that the complex petsc4py / slepc4py is used.")
-            M=PETSc.Mat().createAIJ(size=((n, n), (n, n),), csr=(Min.indptr, Min.indices, Min.data)) #type:ignore
-            J=PETSc.Mat().createAIJ(size=((n, n), (n, n),), csr=(Jin.indptr, Jin.indices, Jin.data)) #type:ignore
+            M=PETSc.Mat().createAIJ(size=((n, n), (n, n),), csr=(Min.indptr.astype(PETSc.IntType, copy=False), Min.indices.astype(PETSc.IntType, copy=False), Min.data.astype(PETSc.ScalarType, copy=False))) #type:ignore
+            J=PETSc.Mat().createAIJ(size=((n, n), (n, n),), csr=(Jin.indptr.astype(PETSc.IntType, copy=False), Jin.indices.astype(PETSc.IntType, copy=False), Jin.data.astype(PETSc.ScalarType, copy=False))) #type:ignore
             
         #if self.imag_contribution is not None:
         #    raise RuntimeError("Cannot have imaginary matrix contributions yet here")
