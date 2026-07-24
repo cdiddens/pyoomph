@@ -88,3 +88,4 @@ src/thirdparty/tinycc/tccdefs_.h
 typings/_pyoomph-stubs/__init__.pyi
 pyoomph/NO_MPI
 citools/pyoomph_tutorial_scripts/
+/valgrind.*
