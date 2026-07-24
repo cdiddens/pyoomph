@@ -6626,19 +6626,45 @@ namespace pyoomph
 		// std::cout << "FURTHER SETUP HANG" << std::endl;
 	}
 
-	// oomph-lib refinement hook: creates the son elements (via the type-specific
-	// create_son_instance()) and initializes their refinement level and initial size fraction;
-	// the sons are then filled in by pre_build()/further_build() as the mesh machinery proceeds.
+	// Default split scheme: isotropic subdivision into required_nsons() sons of the same type.
+	const RefinementPattern *BulkElementBase::refinement_pattern() const
+	{
+		return IsotropicSameTypeRefinementPattern::instance();
+	}
+
+	// --- IsotropicSameTypeRefinementPattern ---------------------------------------------------
+	// Reproduces the historical dynamic_split() behaviour: N = required_nsons() sons, each a
+	// create_son_instance() of the same element type.
+	unsigned IsotropicSameTypeRefinementPattern::nsons(const BulkElementBase *parent) const
+	{
+		return parent->required_nsons();
+	}
+
+	BulkElementBase *IsotropicSameTypeRefinementPattern::construct_son(const BulkElementBase *parent, unsigned) const
+	{
+		return parent->create_son_instance();
+	}
+
+	const IsotropicSameTypeRefinementPattern *IsotropicSameTypeRefinementPattern::instance()
+	{
+		static const IsotropicSameTypeRefinementPattern the_instance;
+		return &the_instance;
+	}
+
+	// oomph-lib refinement hook: creates the son elements (via the current refinement_pattern())
+	// and initializes their refinement level and initial size fraction; the sons are then filled in
+	// by pre_build()/further_build() as the mesh machinery proceeds.
 	void BulkElementBase::dynamic_split(oomph::Vector<BulkElementBase *> &son_pt) const
 	{
 		// std::cout << "DYN SPLIT " << std::endl;
+		const RefinementPattern *pattern = this->refinement_pattern();
 		int son_refine_level = Refine_level + 1;
-		unsigned n_sons = required_nsons();
+		unsigned n_sons = pattern->nsons(this);
 		son_pt.resize(n_sons);
 		for (unsigned i = 0; i < n_sons; i++)
 		{
 			// std::cout << "C SON INST" << std::endl;
-			son_pt[i] = this->create_son_instance();
+			son_pt[i] = pattern->construct_son(this, i);
 			// std::cout << "SET REF" << std::endl;
 			son_pt[i]->set_refinement_level(son_refine_level);
 			son_pt[i]->initial_cartesian_nondim_size = this->initial_cartesian_nondim_size / ((double)n_sons);

@@ -30,6 +30,7 @@ The main author may be contacted at c.diddens@utwente.nl
 
 #include "refineable_telements.hpp"
 #include "wedges_and_pyramids.hpp"
+#include "refinement_pattern.hpp"
 #include "problem.hpp"
 
 #include "mesh_as_geometric_object.h"
@@ -747,8 +748,15 @@ namespace pyoomph
 
     // Splits this element into its refinement "sons" and returns pointers to the newly created son
     // elements in son_pt, without altering the mesh's element list (unlike a normal adaptive
-    // refinement step) - used e.g. for one-off geometric subdivision/export.
+    // refinement step) - used e.g. for one-off geometric subdivision/export. Delegates the actual
+    // choice of son count/types to refinement_pattern().
     void dynamic_split(oomph::Vector<BulkElementBase *> &son_pt) const;
+
+    // The split scheme currently used to refine this element. Default: isotropic subdivision into
+    // required_nsons() sons of the same type (IsotropicSameTypeRefinementPattern). Override (or make
+    // configurable) to support anisotropic / heterogeneous splits; see
+    // dev_docs/mixed_adaptive_meshes.md.
+    virtual const RefinementPattern *refinement_pattern() const;
 
     // Geometric (non-solid) Jacobian determinant of the mapping from local to given global
     // coordinates x, used by oomph-lib's locate_zeta / point-location machinery.
