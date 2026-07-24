@@ -108,86 +108,15 @@ namespace pyoomph
 
 		for (unsigned int in = 0; in < this->nnode(); in++) this->node_pt(in)->set_nonhanging();
 
-		// Unique tetrahedron edges (all vertex pairs), each with one incident element (for order) and
-		// its squared length. Processed LONGEST (coarsest) first so a fine node binds directly to its
-		// coarsest containing edge -- i.e. to real (non-hanging) coarse corners -- rather than to a
-		// fine sub-edge whose endpoints are themselves hanging.
-		struct EdgeRec { oomph::Node *P; oomph::Node *Q; oomph::FiniteElement *el; double len2; };
-		std::map<std::pair<oomph::Node *, oomph::Node *>, oomph::FiniteElement *> edgemap;
-		for (unsigned int ie = 0; ie < this->nelement(); ie++)
-		{
-			oomph::TElementBase *tet = dynamic_cast<oomph::TElementBase *>(this->element_pt(ie));
-			if (!tet) continue;
-			oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(this->element_pt(ie));
-			oomph::Node *v[4];
-			for (unsigned k = 0; k < 4; k++) v[k] = tet->vertex_node_pt(k);
-			for (unsigned a = 0; a < 4; a++)
-				for (unsigned b = a + 1; b < 4; b++)
-				{
-					oomph::Node *P = v[a], *Q = v[b];
-					if (P > Q) std::swap(P, Q);
-					edgemap[std::make_pair(P, Q)] = fe;
-				}
-		}
-		std::vector<EdgeRec> edgevec;
-		for (const auto &kv : edgemap)
-		{
-			oomph::Node *P = kv.first.first, *Q = kv.first.second;
-			double len2 = 0.0;
-			for (int d = 0; d < 3; d++) len2 += (Q->x(d) - P->x(d)) * (Q->x(d) - P->x(d));
-			edgevec.push_back(EdgeRec{P, Q, kv.second, len2});
-		}
-		std::sort(edgevec.begin(), edgevec.end(), [](const EdgeRec &a, const EdgeRec &b) { return a.len2 > b.len2; });
-
-		for (const EdgeRec &e : edgevec)
-		{
-			oomph::Node *P = e.P, *Q = e.Q;
-			std::vector<std::pair<oomph::Node *, double>> between;
-			for (unsigned int in = 0; in < this->nnode(); in++)
-			{
-				oomph::Node *X = this->node_pt(in);
-				if (X == P || X == Q) continue;
-				double t;
-				if (node_strictly_on_segment_3d(P, Q, X, t)) between.push_back(std::make_pair(X, t));
-			}
-			if (between.empty()) continue;
-			const unsigned order_1d = e.el ? e.el->nnode_1d() : 2;
-			if (order_1d <= 2)
-			{
-				for (std::pair<oomph::Node *, double> &xt : between)
-				{
-					if (xt.first->is_hanging()) continue;
-					oomph::HangInfo *hang = new oomph::HangInfo(2);
-					hang->set_master_node_pt(0, P, 1.0 - xt.second);
-					hang->set_master_node_pt(1, Q, xt.second);
-					xt.first->set_hanging_pt(hang, -1);
-				}
-			}
-			else
-			{
-				oomph::Node *M = 0;
-				for (std::pair<oomph::Node *, double> &xt : between)
-					if (std::abs(xt.second - 0.5) < 1e-6) { M = xt.first; break; }
-				if (!M) continue;
-				for (std::pair<oomph::Node *, double> &xt : between)
-				{
-					if (xt.first == M || xt.first->is_hanging()) continue;
-					const double t = xt.second;
-					oomph::HangInfo *hang = new oomph::HangInfo(3);
-					hang->set_master_node_pt(0, P, 2.0 * (t - 0.5) * (t - 1.0));
-					hang->set_master_node_pt(1, M, 4.0 * t * (1.0 - t));
-					hang->set_master_node_pt(2, Q, 2.0 * t * (t - 0.5));
-					xt.first->set_hanging_pt(hang, -1);
-				}
-			}
-		}
-
-		// Face-interior hanging (>1 level jumps): a coarse tet face that refines more than once gains
-		// nodes strictly INSIDE the face (not on any edge). A coarse face is a triangle facet incident
-		// on exactly one element (build_facet_adjacency, keyed by the 3 face vertex nodes). Processed
-		// LARGEST (coarsest) first, so interior nodes bind to real coarse corners. For C1 (linear)
-		// faces the weights are the node's barycentric coordinates. (C2 face-interior hanging --
-		// quadratic barycentric over 6 face nodes -- is not handled yet.)
+		// FACE-interior hanging runs FIRST: a coarse tet face that refines more than once (a >1-level
+		// jump) gains nodes strictly INSIDE the face (not on any edge). Such a node must bind to that
+		// coarse face's real corners; if the (later) edge pass grabbed it first it would land on a
+		// FINE sub-edge whose endpoints are themselves hanging, creating a hanging chain the assembly
+		// only approximately resolves. A coarse face is a triangle facet incident on exactly one
+		// element (build_facet_adjacency, keyed by the 3 face vertex nodes), processed LARGEST
+		// (coarsest) first. For C1 (linear) faces the weights are the node's barycentric coordinates.
+		// (C2 face-interior hanging -- quadratic barycentric over 6 face nodes -- is not handled yet;
+		// C2 tets are validated for 2:1/error-driven refinement, which produces no face-interior hangs.)
 		struct FaceRec { oomph::Node *A; oomph::Node *B; oomph::Node *D; oomph::FiniteElement *el; double area2; };
 		FacetAdjacencyMap adj = this->build_facet_adjacency();
 		std::vector<FaceRec> facevec;
@@ -237,6 +166,81 @@ namespace pyoomph
 				hang->set_master_node_pt(1, B, bB);
 				hang->set_master_node_pt(2, D, bD);
 				X->set_hanging_pt(hang, -1);
+			}
+		}
+
+		// EDGE hanging (after faces): a node strictly inside a coarser tet edge {P,Q} is constrained by
+		// that edge's interpolation. Enumerate all tet edges (vertex pairs) with one incident element
+		// (for order) and squared length, processed LONGEST (coarsest) first, and skip any edge with a
+		// hanging endpoint (a fine sub-edge) so hangs bind only to real (non-hanging) coarse corners.
+		struct EdgeRec { oomph::Node *P; oomph::Node *Q; oomph::FiniteElement *el; double len2; };
+		std::map<std::pair<oomph::Node *, oomph::Node *>, oomph::FiniteElement *> edgemap;
+		for (unsigned int ie = 0; ie < this->nelement(); ie++)
+		{
+			oomph::TElementBase *tet = dynamic_cast<oomph::TElementBase *>(this->element_pt(ie));
+			if (!tet) continue;
+			oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(this->element_pt(ie));
+			oomph::Node *v[4];
+			for (unsigned k = 0; k < 4; k++) v[k] = tet->vertex_node_pt(k);
+			for (unsigned a = 0; a < 4; a++)
+				for (unsigned b = a + 1; b < 4; b++)
+				{
+					oomph::Node *P = v[a], *Q = v[b];
+					if (P > Q) std::swap(P, Q);
+					edgemap[std::make_pair(P, Q)] = fe;
+				}
+		}
+		std::vector<EdgeRec> edgevec;
+		for (const auto &kv : edgemap)
+		{
+			oomph::Node *P = kv.first.first, *Q = kv.first.second;
+			double len2 = 0.0;
+			for (int d = 0; d < 3; d++) len2 += (Q->x(d) - P->x(d)) * (Q->x(d) - P->x(d));
+			edgevec.push_back(EdgeRec{P, Q, kv.second, len2});
+		}
+		std::sort(edgevec.begin(), edgevec.end(), [](const EdgeRec &a, const EdgeRec &b) { return a.len2 > b.len2; });
+
+		for (const EdgeRec &e : edgevec)
+		{
+			oomph::Node *P = e.P, *Q = e.Q;
+			if (P->is_hanging() || Q->is_hanging()) continue; // fine sub-edge -> would create a chain
+			std::vector<std::pair<oomph::Node *, double>> between;
+			for (unsigned int in = 0; in < this->nnode(); in++)
+			{
+				oomph::Node *X = this->node_pt(in);
+				if (X == P || X == Q) continue;
+				double t;
+				if (node_strictly_on_segment_3d(P, Q, X, t)) between.push_back(std::make_pair(X, t));
+			}
+			if (between.empty()) continue;
+			const unsigned order_1d = e.el ? e.el->nnode_1d() : 2;
+			if (order_1d <= 2)
+			{
+				for (std::pair<oomph::Node *, double> &xt : between)
+				{
+					if (xt.first->is_hanging()) continue;
+					oomph::HangInfo *hang = new oomph::HangInfo(2);
+					hang->set_master_node_pt(0, P, 1.0 - xt.second);
+					hang->set_master_node_pt(1, Q, xt.second);
+					xt.first->set_hanging_pt(hang, -1);
+				}
+			}
+			else
+			{
+				oomph::Node *M = 0;
+				for (std::pair<oomph::Node *, double> &xt : between)
+					if (std::abs(xt.second - 0.5) < 1e-6) { M = xt.first; break; }
+				if (!M) continue;
+				for (std::pair<oomph::Node *, double> &xt : between)
+				{
+					if (xt.first == M || xt.first->is_hanging()) continue;
+					const double t = xt.second;
+					oomph::HangInfo *hang = new oomph::HangInfo(3);
+					hang->set_master_node_pt(0, P, 2.0 * (t - 0.5) * (t - 1.0));
+					hang->set_master_node_pt(1, M, 4.0 * t * (1.0 - t));
+					hang->set_master_node_pt(2, Q, 2.0 * t * (t - 0.5));
+					xt.first->set_hanging_pt(hang, -1);
+				}
 			}
 		}
 	}

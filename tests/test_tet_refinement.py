@@ -104,14 +104,15 @@ def _is_manifold(summary):
 
 
 class _TetPoisson(Problem):
-    def __init__(self, N=2, source=None):
+    def __init__(self, N=2, source=None, space="C1"):
         super().__init__()
         self._N = N
         self._source = source if source is not None else 1
+        self._space = space
 
     def define_problem(self):
-        self += TetCubeMesh(N=self._N, space="C1")
-        eqs = PoissonEquation(source=self._source, space="C1") + DirichletBC(u=0) @ _ALL_BOUNDS
+        self += TetCubeMesh(N=self._N, space=self._space)
+        eqs = PoissonEquation(source=self._source, space=self._space) + DirichletBC(u=0) @ _ALL_BOUNDS
         eqs += SpatialErrorEstimator(u=1)
         self += eqs @ "domain"
 
@@ -130,12 +131,13 @@ def test_uniform_tet_refinement_conforming():
             assert _is_manifold(list(m.facet_adjacency_summary()))
 
 
+@pytest.mark.parametrize("space", ["C1", "C2"])
 @pytest.mark.parametrize("boundary", ["left", "top", "front"])
 @pytest.mark.parametrize("lo,hi", [(1, 2), (2, 3)])
-def test_single_level_tet_hanging_residual_oracle(boundary, lo, hi):
-    # Single-level (2:1) refinement near one boundary -> edge-hanging nodes only. Linear residual
-    # -> machine zero certifies the hanging-node Jacobian.
-    with _TetPoisson(N=3) as problem:
+def test_single_level_tet_hanging_residual_oracle(space, boundary, lo, hi):
+    # Single-level (2:1) refinement near one boundary. Linear residual -> machine zero certifies the
+    # hanging-node Jacobian, for both linear (C1) and quadratic (C2) tetrahedra.
+    with _TetPoisson(N=3, space=space) as problem:
         problem.max_refinement_level = 4
         problem += RefineToLevel(lo) @ "domain"
         problem += RefineToLevel(hi) @ ("domain/" + boundary)
@@ -143,13 +145,14 @@ def test_single_level_tet_hanging_residual_oracle(boundary, lo, hi):
         assert _max_abs_residual(problem) < 1e-9
 
 
+@pytest.mark.parametrize("space", ["C1", "C2"])
 @pytest.mark.parametrize("nadapt", [1, 2])
-def test_error_based_tet_adaptivity_residual_oracle(nadapt):
+def test_error_based_tet_adaptivity_residual_oracle(space, nadapt):
     # Genuine Z2 error-driven adaptive refinement around a localized source. The refined mesh is
     # non-uniform (hanging nodes) but 2:1-balanced; the linear residual must reach machine zero.
     x, y, z = var("coordinate")[0], var("coordinate")[1], var("coordinate")[2]
     src = 100 * exp(-40 * ((x - 0.3) ** 2 + (y - 0.3) ** 2 + (z - 0.3) ** 2))
-    with _TetPoisson(N=3, source=src) as problem:
+    with _TetPoisson(N=3, source=src, space=space) as problem:
         problem.max_refinement_level = 4
         problem.solve(spatial_adapt=nadapt)
         assert _max_abs_residual(problem) < 1e-9
