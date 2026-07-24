@@ -289,6 +289,24 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
    `Father_bound` / `build`. Establish the generic hang helper, the dynamic facet
    map (§4.3), and the closure rule. Oracle: linear-residual → machine zero on an
    adapted triangular mesh (as in the hanging redesign tests).
+   * **Phase 2a [DONE] — uniform (conforming) triangle refinement.** `refinement_possible()`
+     now accepts pure-triangle meshes; a linear (C1) triangle refines 1→4 reusing the
+     QuadTree hierarchy, but node-sharing is **geometric**, not via oomph's compass
+     descent: a new son node on a father edge is keyed by the pair of father corner
+     nodes it bisects (`RefineableTElement<2>::Shared_edge_node_registry`), a key
+     identical from every element touching the edge (sibling sons + the edge-sharing
+     neighbour father's sons). This confirmed the compass descent is unusable for
+     triangles (the NW son touches father edges E+W not N+W; the centre son shares no
+     full father edge). Build helpers (`get_boundaries`/`get_bcs`/`get_edge_bcs`/
+     `interpolated_zeta_on_edge`) implemented; `find_neighbours` sets triangle root
+     neighbours by shared edges; `check_all_neighbours` skips the quad self-test for
+     triangle forests. Validated: 8→32→128 elements, conforming (facet-adjacency
+     manifold), Poisson solve + `IntegralObservables` converge; `tests/test_triangle_refinement.py`.
+   * **Phase 2b [NEXT] — non-conforming (hanging-node) triangle refinement.** The
+     geometric hang helper (§3.3): `setup_hanging_nodes` is currently a no-op and a
+     conformity guard turns an attempted non-uniform triangle refinement into a clear
+     error instead of a crash. Only linear (3-node) C1 triangles handled so far; C2
+     needs a finer node-sharing key.
 3. **2D mixed quad + tri**, incl. quad-face/two-tri-face hangs and boundary
    facets across shape changes.
 4. **3D tets → wedges → pyramids** (pyramid last: forces mixed offspring). Fill
