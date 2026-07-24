@@ -69,6 +69,42 @@ def test_constrained_position_adaptivity():
         assert _max_abs_residual(problem) < 1e-9
 
 
+# Error-driven adaptivity that both refines AND unrefines. Coarsening turns former fine corners into
+# coarse edge-mids that are then C1-constrained but geometrically hanging; pinning such a value would
+# leave its C1-corner masters unregistered by oomph's hanging machinery, so the analytic Jacobian
+# would not match the residual (slow / failed Newton). The fix gives every constrained non-vertex
+# node a genuine registered linear value-slot HangInfo instead of pinning. Oracle: after the adaptive
+# solve, zero all dofs and solve once -- a linear problem hits machine zero in one Newton step iff the
+# Jacobian on the refined+unrefined mesh is exact.
+class _ConstrainedPoissonBox(Problem):
+    def __init__(self, tris="left", N=4):
+        super().__init__()
+        self._tris = tris
+        self._N = N
+
+    def define_problem(self):
+        self += RectangularQuadMesh(name="domain", N=self._N, split_in_tris=self._tris)
+        x, y = var("coordinate")[0], var("coordinate")[1]
+        eqs = PoissonEquation(source=100 * exp(-50 * ((x - 0.35) ** 2 + (y - 0.35) ** 2)), space="C2")
+        eqs += DirichletBC(u=0) @ ["left", "right", "top", "bottom"]
+        eqs += ScalarField("_dummyC1", space="C1") + DirichletBC(_dummyC1=0)
+        eqs += ConstrainFieldsToC1Space("u")
+        eqs += SpatialErrorEstimator(u=1)
+        self += eqs @ "domain"
+
+
+@pytest.mark.parametrize("tris", ["left", "crossed"])
+def test_constrained_field_unrefinement(tris):
+    with _ConstrainedPoissonBox(tris=tris) as problem:
+        problem.max_refinement_level = 3
+        problem.min_refinement_level = 0  # allow coarsening below the initial level
+        problem.solve(spatial_adapt=3)    # several cycles -> refines near the source, unrefines elsewhere
+        assert problem.get_mesh("domain").nelement() > 100  # genuine non-uniform adaptation happened
+        problem.set_current_dofs(np.zeros(problem.ndof()))
+        problem.solve()
+        assert _max_abs_residual(problem) < 1e-9
+
+
 class Constrained3DBrickProblem(Problem):
     """3D brick version: the flattening composition is dimension-agnostic."""
 

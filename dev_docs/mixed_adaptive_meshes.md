@@ -489,6 +489,31 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
      the Jacobian is exact, Pardiso solves these fine too (cf. §4.1's Pardiso concerns were about
      accuracy on a *wrong*/ill-conditioned system, not these now-exact ones).
 
+   * **§4.3 — `ConstrainFieldsToC1Space` × unrefinement [DONE].** The explicit "degrade a C2 field to
+     C1" feature (`set_additional_dof_constraint`, distinct from the C1-field hanging) also broke under
+     error-driven coarsening -- but only on simplex meshes; quads were fine. Symptom: correct solution
+     but a **wrong Jacobian** (FD-confirmed wrong redistribution weights on the constrained field's
+     rows) -> geometric (slow) Newton, hitting the adaptive-Newton cap. Root cause: the mechanism
+     **pinned** each constrained non-vertex value and expanded it via `c1_constraint_corners` only in
+     the assembly flatten. A pinned dof is not processed by oomph's hanging machinery, so its C1-corner
+     masters are **never registered** -- and when a constrained mid-node is itself a master of a finer
+     node's hang, the flatten drops it (pinned leaf) instead of resolving it through to the real coarse
+     corners. Quads never hit this because `RefineableQElement::setup_hang_for_value` gives every value
+     a genuine registered hang; simplex `setup_hang_for_value` is a no-op (mesh-level geometric pass
+     instead), and that pass doesn't touch the *constrained* value slot. Fix (in
+     `BulkElementBase::setup_additional_dof_constraints`): give each constrained non-vertex value a
+     **genuine linear value-slot `HangInfo`** on the element's C1 corner nodes instead of pinning.
+     oomph then registers those masters and resolves any master that is itself hanging via
+     `complete_hanging_nodes` -- exactly the quad behaviour, and MPI-consistent. Order-independent: a
+     node that is a C1 vertex of a finer neighbour (a 2:1 coarse mid) is simply skipped there and gets
+     its (identical) hang from the element(s) where it is a non-vertex; it is **never pinned** (a pin
+     from the vertex side would clobber the hang, order-dependently -- bad under MPI). Constraint
+     markers are cleared+reapplied each assign, so every live constrained node is a non-vertex of some
+     element and always receives its hang. **Validated** (reset-and-resolve + FD-Jacobian oracle) for
+     2D/3D C2-Poisson-constrained-to-C1 under refine+unrefine, on Pardiso and SuperLU (1-step machine
+     zero); quad `ConstrainFieldsToC1Space` unchanged; full suite green
+     (`test_constrained_field_unrefinement`).
+
 5. **Variable / anisotropic schemes** (§5): quad 1→2 (both directions), simplex
    bisection; directional error estimator; generalised balance rule.
 6. **MPI hardening** across all shapes; distributed adaptivity tests.

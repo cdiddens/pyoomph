@@ -2250,6 +2250,17 @@ namespace pyoomph
 		auto * functable = codeinst->get_func_table();
 		const std::vector<int> & elem_to_C1_map = this->get_element_index_to_nodal_space_index_map()[SPACE_INDEX_C1];
 		bool has_C1_fields=functable->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk>0 || functable->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk>0;
+		// Lookup from a non-vertex node's local index to its element C1-corner local indices (the same
+		// map used below for c1_constraint_corners). Used to give a constrained *hanging* value its own
+		// genuine, oomph-registered linear value-slot hang (see the CONTINUOUS_BASE_DOF_CONSTRAIN_TO_C1
+		// branch): pinning such a node would leave its value-slot hang masters unregistered, so the
+		// assembled Jacobian would not match the residual on adaptively (un)refined simplex meshes.
+		std::map<unsigned, std::vector<unsigned>> c1_corner_lookup;
+		{
+			const std::vector<std::vector<unsigned>> & c1_dummy_map0 = this->get_dummy_value_interpolation_map()[SPACE_INDEX_C1];
+			for (const std::vector<unsigned> & entry : c1_dummy_map0)
+				if (entry.size() >= 2) c1_corner_lookup[entry[0]] = std::vector<unsigned>(entry.begin() + 1, entry.end());
+		}
 		for (unsigned int l = 0; l < nnode(); l++)
 		{
 			Node *n = dynamic_cast<Node *>(node_pt(l));
@@ -2272,7 +2283,36 @@ namespace pyoomph
 							 Add a ScalarField(\"_dummyC1\",space=\"C1\")+DirichletBC(_dummyC1=0) to the bulk domain to avoid this.");
 					}
 
-					n->pin(info->index);
+					// Pinning a constrained value leaves its C1-corner masters unregistered by oomph's
+					// hanging machinery. That is harmless on a conforming mesh, but once refinement makes
+					// the node (or one of its corner masters) hang, the assembly-time flatten can no longer
+					// resolve those masters to real free dofs -- a pinned master is simply dropped -- so the
+					// assembled Jacobian's redistribution no longer matches the residual (wrong Jacobian ->
+					// slow/failed Newton on adaptively (un)refined simplex meshes). Instead give the value
+					// its own genuine linear value-slot HangInfo on the element's C1 corner nodes: oomph
+					// then registers these masters (and resolves any master that is itself hanging via
+					// complete_hanging_nodes), exactly as RefineableQElement::setup_hang_for_value does for
+					// the C1 fields on quads -- which keeps it MPI-consistent.
+					//
+					// A constrained node is a non-vertex node (edge-/face-mid) of the element(s) that added
+					// the constraint, so its C1 corners are found here via the dummy-interpolation map. The
+					// SAME node may also be a C1 vertex of a finer neighbouring element (a 2:1 coarse
+					// mid-node): there it is not in that element's map, so we do nothing -- the hang is set
+					// (identically) by the element(s) where it is a non-vertex. Never pin such a node: a pin
+					// from the vertex-side element would clobber the value-slot hang (order-dependently, so
+					// especially harmful under MPI) and drop it from its masters' redistribution. Constraint
+					// markers are cleared+reapplied every assign (Mesh::clear/apply_additional_dof_constraints),
+					// so every currently-constrained node is a non-vertex of at least one live element and
+					// therefore always receives its hang.
+					std::map<unsigned, std::vector<unsigned>>::const_iterator cit = c1_corner_lookup.find(l);
+					if (cit != c1_corner_lookup.end() && !cit->second.empty())
+					{
+						const std::vector<unsigned> & corners = cit->second;
+						oomph::HangInfo *hang = new oomph::HangInfo(corners.size());
+						for (unsigned m = 0; m < corners.size(); m++)
+							hang->set_master_node_pt(m, node_pt(corners[m]), 1.0 / (double)corners.size());
+						n->set_hanging_pt(hang, (int)info->index);
+					}
 					has_additional_dof_constraints = true;
 				}
 				else if (info->mode == POSITION_CONSTRAIN_TO_C1)
