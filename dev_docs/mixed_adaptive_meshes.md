@@ -395,6 +395,27 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
      single-level 2:1, Z2 error-driven adaptivity, **and abrupt >1-level `RefineToLevel` jumps**
      (`tests/test_tet_refinement.py`, parametrised over C1/C2; 13/13). C2 tet face-interior
      hanging is still not handled directly (balancing avoids it). Wedges/pyramids: TODO.
+   * **[DONE] — 3D Taylor-Hood (mixed C2 velocity / C1 pressure tets).** Same separate-C1-slot fix as
+     2D Phase 2d, in `TemplatedMeshBase3d::post_adapt_setup_hanging_nodes`: after the geometric hang,
+     for each separate C1(TB) slot install a linear hang on the coarse edge corners `{P,Q}` for every
+     interior node carrying that dof (including the coarse mid-node). The edge pass skips edges with a
+     hanging endpoint, so the C1 masters `{P,Q}` are always real -> no C1 flattening needed. Single-
+     level 2:1 tets produce only edge-interior hangs (face-interior only at >1-level jumps), so the
+     edge pass suffices. **Validated** (machine-zero) — cavity Stokes, uniform / single-level 2:1 /
+     Z2 error-driven (`test_taylor_hood_tet_cavity_*`); residual ~1e-16 (was ~1e-2, non-convergent).
+   * **[DONE] — Crouzeix-Raviart (C2TB bubble velocity / DL discontinuous pressure) triangles.**
+     Refinement of bubble-enriched elements: (1) `BulkElementTri2dC2::create_son_instance` now returns
+     a genuine `BulkElementTri2dC2TB` for C2TB fathers (the old `BulkElementTri2dC2(true)` bumped
+     `nnode_of_space[C2TB]` to 7 while keeping 6 oomph node slots + the 6-node nodal-space map, so
+     `fill_element_info` ran off the map and segfaulted); (2) `RefineableTElement<2>::build` +
+     `setup_father_bounds` handle the 7th (centroid) node -- interior, never on a boundary/shared/
+     hanging; the central son reuses the father's centroid node, the other three get fresh ones. The
+     DL pressure is element-internal (allocated per son, never hangs); the C2TB velocity hangs
+     quadratically on edges exactly like C2 (bubble vanishes on edges). **Validated** (machine-zero,
+     looser ~1e-7 tol for CR's poorer conditioning) — cavity Stokes, uniform / single-level 2:1 /
+     Z2 error-driven (`test_crouzeix_raviart_triangle_*`). KNOWN GAP: abrupt >1-level jumps on very
+     coarse CR meshes (e.g. N=2, level 1→3) diverge -- a C2TB deep-jump-flattening interaction; real
+     (2:1-balanced) adaptivity never produces these, and TH handles the same jumps fine.
 5. **Variable / anisotropic schemes** (§5): quad 1→2 (both directions), simplex
    bisection; directional error estimator; generalised balance rule.
 6. **MPI hardening** across all shapes; distributed adaptivity tests.

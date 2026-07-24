@@ -214,3 +214,49 @@ def test_taylor_hood_triangle_cavity_residual_oracle(split):
         assert _max_abs_residual(problem) < 1e-9
         # Non-uniform refinement happened (base is 32 tris for left/right, more for crossed).
         assert problem.get_mesh("domain").nelement() > 150
+
+
+class _CavityStokesCR(Problem):
+    # Lid-driven cavity Stokes with Crouzeix-Raviart (C2TB bubble-enriched velocity + DL
+    # discontinuous pressure) triangles. Refinement must build the son bubble (centroid) node and
+    # allocate the son's internal (DL) pressure data. The pressure is element-internal (never hangs);
+    # the velocity hangs quadratically on edges just like C2 (the bubble vanishes on edges).
+    def __init__(self, split="left", N=4):
+        super().__init__()
+        self._split = split
+        self._N = N
+
+    def define_problem(self):
+        self += RectangularQuadMesh(name="domain", N=self._N, split_in_tris=self._split)
+        stokes = StokesEquations(mode="CR", dynamic_viscosity=1)
+        eqs = stokes
+        eqs += DirichletBC(velocity_x=1, velocity_y=0) @ "top"
+        eqs += DirichletBC(velocity_x=0, velocity_y=0) @ ["left", "right", "bottom"]
+        eqs += stokes.create_pressure_fixation(value=0)
+        eqs += SpatialErrorEstimator(velocity=1)
+        self += eqs @ "domain"
+
+
+@pytest.mark.parametrize("split", ["left", "right", "crossed"])
+def test_crouzeix_raviart_triangle_cavity_single_level(split):
+    # Single-level (2:1) non-conforming refinement of a CR mesh. Linear Stokes -> the residual after
+    # solve certifies the bubble-enriched velocity hanging Jacobian + the son DL pressure allocation.
+    # CR is more poorly conditioned than TH, so the machine-zero tolerance is looser (~1e-7).
+    with _CavityStokesCR(split=split) as problem:
+        problem.max_refinement_level = 3
+        problem += RefineToLevel(1) @ "domain"
+        problem += RefineToLevel(2) @ "domain/top"
+        problem.solve()
+        assert _max_abs_residual(problem) < 1e-7
+        assert problem.get_mesh("domain").nelement() > 150
+
+
+@pytest.mark.parametrize("split", ["left", "crossed"])
+def test_crouzeix_raviart_triangle_error_adaptivity(split):
+    # Genuine Z2 error-driven adaptivity (the mesh adaptivity actually produces: 2:1-balanced,
+    # non-uniform). CR bubble refinement must keep the linear Stokes residual near machine zero.
+    with _CavityStokesCR(split=split) as problem:
+        problem.max_refinement_level = 3
+        problem.solve(spatial_adapt=2)
+        assert _max_abs_residual(problem) < 1e-7
+        assert problem.get_mesh("domain").nelement() > 150

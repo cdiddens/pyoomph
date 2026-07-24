@@ -120,6 +120,23 @@ namespace pyoomph
 
 		for (unsigned int in = 0; in < this->nnode(); in++) this->node_pt(in)->set_nonhanging();
 
+		// A C1(TB) field on a C2-coordinate tet mesh (e.g. 3D Taylor-Hood: C2 velocity + C1 pressure)
+		// owns a SEPARATE value-hang slot (continuous_spaces[...].hangindex >= 0), distinct from the
+		// geometric slot -1 the C2 fields hang on. Such a field hangs LINEARLY on the coarse edge
+		// corners {P,Q} -- even at the coarse edge mid-node M, whose velocity is a real dof but whose
+		// pressure the coarse element does not carry. Collect those separate slots (empty for pure-C1
+		// meshes, where hangindex == -1 and the geometric slot already covers the field).
+		std::vector<int> c1_hang_slots;
+		if (this->codeinst)
+		{
+			auto *ft = this->codeinst->get_func_table();
+			for (int sp : {SPACE_INDEX_C1TB, SPACE_INDEX_C1})
+			{
+				int h = ft->continuous_spaces[sp].hangindex;
+				if (h >= 0) c1_hang_slots.push_back(h);
+			}
+		}
+
 		// FACE-interior hanging runs FIRST: a coarse tet face that refines more than once (a >1-level
 		// jump) gains nodes strictly INSIDE the face (not on any edge). Such a node must bind to that
 		// coarse face's real corners; if the (later) edge pass grabbed it first it would land on a
@@ -252,6 +269,26 @@ namespace pyoomph
 					hang->set_master_node_pt(1, M, 4.0 * t * (1.0 - t));
 					hang->set_master_node_pt(2, Q, 2.0 * t * (t - 0.5));
 					xt.first->set_hanging_pt(hang, -1);
+				}
+			}
+
+			// Extra LINEAR hang for C1(TB) fields with a separate slot (3D Taylor-Hood pressure on C2
+			// geometry). Every interior node carrying that dof -- corners AND the coarse mid-node M --
+			// hangs linearly on the coarse edge corners {P,Q}. P,Q are real here (edges with a hanging
+			// endpoint were skipped above), so these masters need no flattening. Nodes without the dof
+			// (C2-only edge midpoints, nvalue <= slot) are skipped. Empty for pure-C1/C2 meshes.
+			for (int slot : c1_hang_slots)
+			{
+				for (std::pair<oomph::Node *, double> &xt : between)
+				{
+					oomph::Node *X = xt.first;
+					if ((int)X->nvalue() <= slot) continue; // no dof in this C1 space
+					if (X->is_hanging(slot)) continue;      // already constrained
+					const double t = xt.second;
+					oomph::HangInfo *hang = new oomph::HangInfo(2);
+					hang->set_master_node_pt(0, P, 1.0 - t);
+					hang->set_master_node_pt(1, Q, t);
+					X->set_hanging_pt(hang, slot);
 				}
 			}
 		}

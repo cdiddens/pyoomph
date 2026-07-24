@@ -241,6 +241,8 @@ namespace oomph
     // Total number of nodes in the element (3 for linear, 6 for quadratic triangles)
     unsigned nnode = this->nnode();
     // Allocate space for the boundary information
+    // 3 (C1), 6 (C2) or 7 (C2TB: node 6 is the interior centroid/bubble, never on a father
+    // boundary -- it stays OMEGA and needs no explicit assignment below).
     if (nnode == 3)
     {
       Father_bound[n_p].resize(3, 4);
@@ -248,6 +250,10 @@ namespace oomph
     else if (nnode == 6)
     {
       Father_bound[n_p].resize(6, 4);
+    }
+    else if (nnode == 7)
+    {
+      Father_bound[n_p].resize(7, 4);
     }
     else
     {
@@ -594,7 +600,8 @@ namespace oomph
       Vector<Vector<double>> s_in_parent(n_node, Vector<double>(2));
       Vector<Vector<double>> s_in_son(n_node, Vector<double>(2));
 
-      if (n_node != 3 && n_node != 6)
+      // 3-node (C1), 6-node (C2) and 7-node (C2TB, bubble-enriched: node 6 is the centroid) tris.
+      if (n_node != 3 && n_node != 6 && n_node != 7)
       {
         throw_runtime_error("Implement");
       }
@@ -615,9 +622,11 @@ namespace oomph
         s_in_son[4][1] = 0.5;
         s_in_son[5][0] = 0.5;
         s_in_son[5][1] = 0.0;
+        // Bubble-enriched (C2TB): node 6 is the centroid, interior to the son.
         if (n_node > 6)
         {
-          throw_runtime_error("Implement");
+          s_in_son[6][0] = 1.0 / 3.0;
+          s_in_son[6][1] = 1.0 / 3.0;
         }
       }
 
@@ -711,9 +720,13 @@ namespace oomph
           s_in_parent[4][i] = 0.5 * (s_in_parent[1][i] + s_in_parent[2][i]);
           s_in_parent[5][i] = 0.5 * (s_in_parent[2][i] + s_in_parent[0][i]);
         }
+        // Bubble node (C2TB): the son centroid in father coordinates is the average of the son's
+        // three corner vertices (already expressed in father coordinates above). Interior node --
+        // never on a father boundary, never shared/hanging.
         if (n_node > 6)
         {
-          throw_runtime_error("Impplement");
+          for (unsigned int i = 0; i < 2; i++)
+            s_in_parent[6][i] = (s_in_parent[0][i] + s_in_parent[1][i] + s_in_parent[2][i]) / 3.0;
         }
       }
 

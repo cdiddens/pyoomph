@@ -174,3 +174,52 @@ def test_error_based_tet_adaptivity_residual_oracle(space, nadapt):
         problem.solve(spatial_adapt=nadapt)
         assert _max_abs_residual(problem) < 1e-9
         assert problem.get_mesh("domain").nelement() > 162  # more than the 27*6 base tets: adaption happened
+
+
+from pyoomph.equations.navier_stokes import StokesEquations
+
+
+class _CavityStokes3D(Problem):
+    # Lid-driven cavity Stokes flow with 3D Taylor-Hood (C2 velocity + C1 pressure) tetrahedra. On a
+    # C2-coordinate tet mesh the C1 pressure owns a SEPARATE hang slot (hangindex >= 0) and must hang
+    # linearly on the coarse edge corners -- even at the coarse edge mid-node, whose velocity is a
+    # real dof but whose pressure must hang. Without that separate pressure hang the Jacobian is
+    # wrong and the (linear) Stokes Newton step does not converge in one step.
+    def __init__(self, N=2, error_adapt=False):
+        super().__init__()
+        self._N = N
+        self._error_adapt = error_adapt
+
+    def define_problem(self):
+        self += TetCubeMesh(N=self._N)
+        stokes = StokesEquations(mode="TH", dynamic_viscosity=1)
+        eqs = stokes
+        eqs += DirichletBC(velocity_x=1, velocity_y=0, velocity_z=0) @ "top"
+        eqs += DirichletBC(velocity_x=0, velocity_y=0, velocity_z=0) @ ["left", "right", "bottom", "front", "back"]
+        eqs += stokes.create_pressure_fixation(value=0)
+        if self._error_adapt:
+            eqs += SpatialErrorEstimator(velocity=1)
+        self += eqs @ "domain"
+
+
+def test_taylor_hood_tet_cavity_single_level():
+    # Single-level (2:1) non-conforming refinement near the lid of a 3D Taylor-Hood tet mesh. Stokes
+    # is linear, so max|residual| ~ 0 after solve certifies the mixed C2-velocity / C1-pressure
+    # hanging-node Jacobian (the C1 pressure hangs linearly on the coarse edge corners).
+    with _CavityStokes3D(N=2) as problem:
+        problem.max_refinement_level = 2
+        problem += RefineToLevel(1) @ "domain"
+        problem += RefineToLevel(2) @ "domain/top"
+        problem.solve()
+        assert _max_abs_residual(problem) < 1e-9
+        assert problem.get_mesh("domain").nelement() > 384  # uniform level 1 is 384; the lid added more
+
+
+def test_taylor_hood_tet_cavity_error_adaptivity():
+    # Genuine Z2 error-driven adaptivity (the 2:1-balanced non-uniform meshes adaptivity produces).
+    # The mixed C2/C1 hanging Jacobian must keep the linear Stokes residual at machine zero.
+    with _CavityStokes3D(N=2, error_adapt=True) as problem:
+        problem.max_refinement_level = 2
+        problem.solve(spatial_adapt=1)
+        assert _max_abs_residual(problem) < 1e-9
+        assert problem.get_mesh("domain").nelement() > 384
