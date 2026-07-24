@@ -313,9 +313,18 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
      assembly-time flattening from the hanging redesign. Runs before equation numbering.
      **Validated** with the linear-residual oracle (residual → machine zero): non-uniform
      `RefineToLevel` on a boundary (3 splits × 2 boundaries, ~1e-16) and genuine Z2
-     error-driven adaptive refinement (~6.6e-16). Full suite 24/24. Linear (C1) triangles
-     only; C2 needs a finer node-sharing key (Phase 2a registry keys on the two corner
-     nodes, which is ambiguous for the multiple new nodes a C2 father edge spawns).
+     error-driven adaptive refinement (~6.6e-16).
+   * **Phase 2c [DONE] — quadratic (C2) triangles.** Node-sharing generalised: every node a
+     1→4 refinement creates is the midpoint of exactly two father nodes (two corners for C1;
+     a corner+mid-edge or two mid-edge nodes for C2), so `father_edge_node_key` keys on that
+     father node-pointer pair (disambiguates the two edge quarter-points + interior nodes a
+     C2 father edge spawns; reduces to the C1 corner-pair rule). Hanging generalised:
+     `post_adapt_setup_hanging_nodes` reads the coarse element's edge order — a C2 coarse edge
+     interpolates quadratically through `{P,M,Q}` (M = mid-node at t=0.5, real/shared), so its
+     interior fine nodes hang on `{P,M,Q}` with quadratic Lagrange weights; C1 edges keep the
+     2-master linear weights. **Validated** (C1+C2, machine-zero oracle): uniform, non-uniform,
+     Z2-adaptive, and a deep level-1→4 jump (hanging-on-hanging via assembly-time flattening).
+     Full suite 33/33.
 3. **2D mixed quad + tri**, incl. quad-face/two-tri-face hangs and boundary
    facets across shape changes.
 4. **3D tets → wedges → pyramids** (pyramid last: forces mixed offspring). Fill
