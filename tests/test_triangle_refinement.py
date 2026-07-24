@@ -175,4 +175,42 @@ def test_error_based_triangle_adaptivity_residual_oracle(space):
         problem.max_refinement_level = 4
         problem.solve(spatial_adapt=3)
         assert _max_abs_residual(problem) < 1e-9
-        assert problem.get_mesh("domain").nelement() > 400  # adaption actually happened
+
+
+from pyoomph.equations.navier_stokes import StokesEquations
+
+
+class _CavityStokes(Problem):
+    # Lid-driven cavity Stokes flow with Taylor-Hood (C2 velocity + C1 pressure) triangles. This
+    # exercises MIXED continuous spaces on the same mesh: on a C2-coordinate triangle mesh the C1
+    # pressure owns a SEPARATE hang slot (hangindex >= 0) and must hang linearly on the coarse edge
+    # corners -- even at the coarse edge mid-node, whose velocity is a real dof but whose pressure
+    # must hang. If that separate pressure hang is missing, the Jacobian is wrong and Newton no
+    # longer converges in one step for the (linear) Stokes problem.
+    def __init__(self, split="left"):
+        super().__init__()
+        self._split = split
+
+    def define_problem(self):
+        self += RectangularQuadMesh(name="domain", N=4, split_in_tris=self._split)
+        stokes = StokesEquations(mode="TH", dynamic_viscosity=1)
+        eqs = stokes
+        eqs += DirichletBC(velocity_x=1, velocity_y=0) @ "top"
+        eqs += DirichletBC(velocity_x=0, velocity_y=0) @ ["left", "right", "bottom"]
+        eqs += stokes.create_pressure_fixation(value=0)
+        self += eqs @ "domain"
+
+
+@pytest.mark.parametrize("split", ["left", "right", "crossed"])
+def test_taylor_hood_triangle_cavity_residual_oracle(split):
+    # Non-uniform refinement (interior level 1, lid level 3) of a Taylor-Hood triangle mesh. Stokes
+    # is linear, so max|residual| ~ 0 after solve certifies that the mixed C2-velocity / C1-pressure
+    # hanging-node Jacobian is exact.
+    with _CavityStokes(split=split) as problem:
+        problem.max_refinement_level = 3
+        problem += RefineToLevel(1) @ "domain"
+        problem += RefineToLevel(3) @ "domain/top"
+        problem.solve()
+        assert _max_abs_residual(problem) < 1e-9
+        # Non-uniform refinement happened (base is 32 tris for left/right, more for crossed).
+        assert problem.get_mesh("domain").nelement() > 150

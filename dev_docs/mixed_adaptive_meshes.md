@@ -325,6 +325,22 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
      2-master linear weights. **Validated** (C1+C2, machine-zero oracle): uniform, non-uniform,
      Z2-adaptive, and a deep level-1→4 jump (hanging-on-hanging via assembly-time flattening).
      Full suite 33/33.
+   * **Phase 2d [DONE] — mixed continuous spaces on one triangle mesh (Taylor-Hood).** A C1(TB)
+     field living on a C2-coordinate mesh (e.g. the Taylor-Hood pressure: C2 velocity + C1
+     pressure) owns a **separate value-hang slot** — `continuous_spaces[SPACE_INDEX_C1(TB)].hangindex`
+     is `>= 0` (codegen sets it to `numfields_basebulk[C2TB]+numfields_basebulk[C2]`), distinct from
+     the geometric slot `-1` the C2 fields hang on. The C2 hang (quadratic on `{P,M,Q}`, slot `-1`)
+     aliases *every* value slot onto slot 0, which is **wrong for the linear pressure**. Fix in
+     `post_adapt_setup_hanging_nodes`: after the geometric hang, for each such separate slot install
+     an extra **linear** hang on the coarse edge corners `{P,Q}` (weights `1-t, t`) for every interior
+     node carrying that dof — including the coarse edge **mid-node M**, whose velocity is a real dof
+     (not hanging) but whose pressure the coarse element does not carry and so must hang. Nodes without
+     the dof (C2-only edge midpoints, `nvalue() <= slot`) are skipped. Ordering (velocity `-1` first,
+     then the C1 slot) is double-free-safe: `Node::set_hanging_pt` only deletes a value slot when it
+     differs from the geometric pointer, and the aliased slot equals it. **Validated** (machine-zero
+     residual oracle) — lid-driven cavity Stokes, non-uniform refinement, splits left/right/crossed
+     (`test_taylor_hood_triangle_cavity_residual_oracle`). Without the fix the (linear) Stokes Newton
+     step does not converge (residual ~0.68, stalling), with it → ~3e-15.
 3. **2D mixed quad + tri**, incl. quad-face/two-tri-face hangs and boundary
    facets across shape changes.
    * **[INVESTIGATED — reverted, not landed]** The hard case: quads share nodes /

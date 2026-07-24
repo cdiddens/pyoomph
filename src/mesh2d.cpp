@@ -274,6 +274,26 @@ namespace pyoomph
     //     edge mid-node (at t=0.5, a real shared node -- not itself hanging).
     // t is the position parameter X = P + t (Q-P). Exact for straight-sided triangles; hanging
     // masters that are themselves hanging are resolved by pyoomph's assembly-time flattening.
+    //
+    // A C1(TB) field on a C2-coordinate mesh (e.g. the Taylor-Hood pressure: C2 velocity + C1
+    // pressure) carries its own value-hang slot (continuous_spaces[...].hangindex >= 0), distinct
+    // from the geometric slot -1 used for the C2 fields. Such a field hangs LINEARLY on the coarse
+    // edge corners even at nodes where the C2 geometry does not hang -- notably the coarse edge
+    // mid-node M, which is a real velocity dof but whose pressure the coarse element does not carry.
+    // Collect those separate slots so the edge loop can install the extra linear pressure hang.
+    // (hangindex == -1 means the field shares the geometric slot -- a pure-C1 mesh -- and needs no
+    // extra pass.)
+    std::vector<int> c1_hang_slots;
+    if (this->codeinst)
+    {
+      auto *ft = this->codeinst->get_func_table();
+      for (int sp : {SPACE_INDEX_C1TB, SPACE_INDEX_C1})
+      {
+        int h = ft->continuous_spaces[sp].hangindex;
+        if (h >= 0) c1_hang_slots.push_back(h);
+      }
+    }
+
     FacetAdjacencyMap adj = this->build_facet_adjacency();
     for (const auto &kv : adj)
     {
@@ -326,6 +346,26 @@ namespace pyoomph
           hang->set_master_node_pt(1, M, 4.0 * t * (1.0 - t));
           hang->set_master_node_pt(2, Q, 2.0 * t * (t - 0.5));
           xt.first->set_hanging_pt(hang, -1);
+        }
+      }
+
+      // Extra linear hang for C1(TB) fields that own a separate value slot (Taylor-Hood pressure on
+      // C2 geometry). Every interior node carrying that dof -- corners AND the coarse mid-node M --
+      // hangs linearly on the coarse edge corner dofs {P,Q}; the C2 fields' quadratic hang above is
+      // on slot -1 and does not touch these value slots. Nodes without the dof (C2-only edge
+      // midpoints, nvalue <= slot) are skipped. Empty (and a no-op) for pure-C1/C2 meshes.
+      for (int slot : c1_hang_slots)
+      {
+        for (std::pair<oomph::Node *, double> &xt : between)
+        {
+          oomph::Node *X = xt.first;
+          if ((int)X->nvalue() <= slot) continue; // this node has no dof in this C1 space
+          if (X->is_hanging(slot)) continue;      // already constrained (coarser neighbour)
+          const double t = xt.second;
+          oomph::HangInfo *hang = new oomph::HangInfo(2);
+          hang->set_master_node_pt(0, P, 1.0 - t);
+          hang->set_master_node_pt(1, Q, t);
+          X->set_hanging_pt(hang, slot);
         }
       }
     }
