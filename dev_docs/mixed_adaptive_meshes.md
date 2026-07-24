@@ -327,6 +327,26 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
      Full suite 33/33.
 3. **2D mixed quad + tri**, incl. quad-face/two-tri-face hangs and boundary
    facets across shape changes.
+   * **[INVESTIGATED — reverted, not landed]** The hard case: quads share nodes /
+     hang via oomph-lib's box (QuadTree) machinery, triangles via the geometric
+     registry + post-adapt pass, and the two clash at a quad-tri interface. Findings:
+     (a) the geometric hang pass **reproduces oomph's quad hanging to machine
+     precision** on pure-quad meshes (so hanging *can* be unified); (b) a full
+     geometric quad *build* is blocked — oomph's quad build handles curved-boundary
+     **macro elements** (e.g. `CircularMesh`) that the geometric build does not; (c) at
+     the interface, quad and triangle each create a *coincident duplicate* mid-edge
+     node. Pruning the duplicate corrupts oomph's tree-based adapt (it retains nodes
+     for unrefinement → `reorder_nodes` crash), so instead the duplicates were **tied**
+     (a weight-1 hang slaving one to a representative). This gave a correct, conforming
+     mesh for **uniform** refinement (converges to the analytic solution) and for a few
+     adapt cycles, **but** robust multi-cycle error-driven adaptivity fails: on ~the 3rd
+     cycle the geometric quad hangs from the previous cycle collide with oomph's own
+     quad adaptation (inconsistent Jacobian → slow Newton; earlier variants crashed in
+     `reorder_nodes`). Clearing hangs before oomph's adapt and various tie/representative
+     rules did not fully resolve it. **Conclusion:** mixed needs a genuine reconciliation
+     of the two adaptation mechanisms across cycles (or a geometric quad build that also
+     supports macro elements), not a post-hoc weld. Reverted to keep pure-shape
+     adaptivity solid; the approach and dead-ends are recorded here for the next attempt.
 4. **3D tets → wedges → pyramids** (pyramid last: forces mixed offspring). Fill
    the wedge/pyramid `bulk_coordinate_derivatives` gaps (§1.2) as needed for face
    Jacobians.
