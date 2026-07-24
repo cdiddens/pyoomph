@@ -106,13 +106,101 @@ function(pyoomph_resolve_ginac_de_version page_url filename_prefix human_name fa
   set(${out_version_var} "${_pyoomph_version}" PARENT_SCOPE)
 endfunction()
 
-if(PYOOMPH_DOWNLOAD_CLN AND NOT PYOOMPH_CLN_VERSION)
-  pyoomph_resolve_ginac_de_version("https://www.ginac.de/CLN/" "cln" "CLN" "${_pyoomph_cln_fallback_version}" PYOOMPH_CLN_VERSION)
+# Verifies a tarball URL actually exists (a cheap HEAD-only check - no file
+# argument means file(DOWNLOAD) checks reachability without saving anything,
+# added in CMake 3.19). Sets ${out_ok_var} to TRUE/FALSE in the caller's scope
+# instead of failing outright, so callers can decide what an unreachable URL
+# means for them (a hard error vs. "go auto-detect something else instead").
+function(pyoomph_url_is_reachable url out_ok_var)
+  file(DOWNLOAD "${url}" STATUS _pyoomph_url_status TIMEOUT 15)
+  list(GET _pyoomph_url_status 0 _pyoomph_url_code)
+  if(_pyoomph_url_code EQUAL 0)
+    set(${out_ok_var} TRUE PARENT_SCOPE)
+  else()
+    set(${out_ok_var} FALSE PARENT_SCOPE)
+  endif()
+endfunction()
+
+# PYOOMPH_CLN_VERSION / PYOOMPH_GINAC_VERSION are meant to either be left
+# empty (auto-detect the current release on every configure) or explicitly
+# pinned by the caller (e.g. -DPYOOMPH_GINAC_VERSION=1.8.9, to reproduce an
+# old build). The tricky part is that once auto-detection resolves a version
+# into that same cache variable, a naive "only resolve if empty" check (as
+# used to be here) makes it stick forever afterwards, indistinguishable from
+# a deliberate pin - and ginac.de removes old tarballs as soon as a new
+# release replaces them. That combination is exactly how this was found: a
+# build tree's cache had PYOOMPH_GINAC_VERSION=1.8.7 left over from an
+# earlier configure; ginac.de had since moved on to 1.8.10, so the
+# ExternalProject download 404'd deep inside the ninja build log instead of
+# failing at configure time with an actionable message.
+#
+# Fix: mirror whatever gets auto-resolved into a paired *_AUTODETECTED
+# internal cache entry, so a later configure can tell "we set this ourselves
+# last time" apart from "the caller pinned this deliberately":
+#  - value empty, or equal to our own last recorded marker -> re-detect
+#    (self-heals against ginac.de rotating its tarball on every configure).
+#  - value present but no marker recorded yet -> this is a build tree from
+#    before this self-healing logic existed (exactly the case that motivated
+#    it - see above). Give it the benefit of the doubt only if it's actually
+#    broken: check whether it's still downloadable, and re-detect only if not.
+#  - value present and *differs* from a recorded marker -> an unambiguous
+#    deliberate override; left alone unconditionally (pyoomph_check_tarball_
+#    reachable below still catches a typo'd/dead pin, just louder and later).
+function(pyoomph_resolve_and_track_version page_url filename_prefix human_name fallback_version tarball_url_prefix version_var)
+  string(TOUPPER "${filename_prefix}" _prefix_upper)
+  set(_marker_var "_PYOOMPH_${_prefix_upper}_VERSION_AUTODETECTED")
+  set(_need_resolve FALSE)
+  if(NOT ${version_var} OR "${${version_var}}" STREQUAL "${${_marker_var}}")
+    set(_need_resolve TRUE)
+  elseif(NOT DEFINED ${_marker_var})
+    pyoomph_url_is_reachable("${tarball_url_prefix}${${version_var}}.tar.bz2" _pyoomph_pin_ok)
+    if(NOT _pyoomph_pin_ok)
+      message(WARNING
+        "${human_name} ${${version_var}} (cached in this build tree's "
+        "CMakeCache.txt, predating pyoomph's version self-healing) is no "
+        "longer downloadable from ginac.de - auto-detecting the current "
+        "release instead. If ${${version_var}} was a deliberate pin (e.g. to "
+        "reproduce an old build against a locally cached tarball), re-pin it "
+        "explicitly with -D${version_var}=${${version_var}} after this "
+        "reconfigure.")
+      set(_need_resolve TRUE)
+    endif()
+  endif()
+  if(_need_resolve)
+    pyoomph_resolve_ginac_de_version("${page_url}" "${filename_prefix}" "${human_name}" "${fallback_version}" _pyoomph_resolved)
+    set(${version_var} "${_pyoomph_resolved}" CACHE STRING "${human_name} version to download when PYOOMPH_DOWNLOAD_${_prefix_upper}=ON (auto-detected from ginac.de if left matching the last auto-detected value)" FORCE)
+    set(${_marker_var} "${_pyoomph_resolved}" CACHE INTERNAL "Last version pyoomph_resolve_and_track_version auto-detected for ${version_var}; used to tell an auto-detected value apart from a deliberate user pin")
+  endif()
+endfunction()
+
+# Verifies a tarball URL actually exists and fails the configure step
+# immediately with actionable guidance if not, rather than letting
+# ExternalProject_Add hit a 404 mid-build. Runs regardless of where the
+# version came from (freshly scraped, the offline fallback, a caller-supplied
+# pin, or the legacy-cache self-heal above) as a last-resort backstop -
+# any of those can in principle still point at a tarball ginac.de doesn't
+# host (e.g. fully offline with no matching fallback either).
+function(pyoomph_check_tarball_reachable url human_name version_var)
+  pyoomph_url_is_reachable("${url}" _pyoomph_ok)
+  if(NOT _pyoomph_ok)
+    message(FATAL_ERROR
+      "${human_name} ${${version_var}} does not look downloadable at ${url}. "
+      "ginac.de only ever hosts the current release tarball, so this version "
+      "has likely been superseded (see the comment above "
+      "pyoomph_resolve_and_track_version in this file) - or the network/site "
+      "is unreachable right now. Fix by either reconfiguring with "
+      "-U ${version_var} to let it auto-detect the current version again, or "
+      "pinning a known-good one explicitly with -D${version_var}=<version>.")
+  endif()
+endfunction()
+
+if(PYOOMPH_DOWNLOAD_CLN)
+  pyoomph_resolve_and_track_version("https://www.ginac.de/CLN/" "cln" "CLN" "${_pyoomph_cln_fallback_version}" "https://www.ginac.de/CLN/cln-" PYOOMPH_CLN_VERSION)
   message(STATUS "pyoomph: using CLN version ${PYOOMPH_CLN_VERSION}")
 endif()
 
-if(PYOOMPH_DOWNLOAD_GINAC AND NOT PYOOMPH_GINAC_VERSION)
-  pyoomph_resolve_ginac_de_version("https://www.ginac.de/Download.html" "ginac" "GiNaC" "${_pyoomph_ginac_fallback_version}" PYOOMPH_GINAC_VERSION)
+if(PYOOMPH_DOWNLOAD_GINAC)
+  pyoomph_resolve_and_track_version("https://www.ginac.de/Download.html" "ginac" "GiNaC" "${_pyoomph_ginac_fallback_version}" "https://www.ginac.de/ginac-" PYOOMPH_GINAC_VERSION)
   message(STATUS "pyoomph: using GiNaC version ${PYOOMPH_GINAC_VERSION}")
 endif()
 
@@ -132,8 +220,10 @@ set(_pyoomph_cln_cxxflags "CXXFLAGS=-MD -DNO_ASM -O2${_pyoomph_macos_arch_flag}"
 # ---------------------------------------------------------------- CLN -----
 if(PYOOMPH_DOWNLOAD_CLN)
   set(_cln_lib "${PYOOMPH_THIRDPARTY_PREFIX}/${CMAKE_INSTALL_LIBDIR}/libcln.a")
+  set(_cln_tarball_url "https://www.ginac.de/CLN/cln-${PYOOMPH_CLN_VERSION}.tar.bz2")
+  pyoomph_check_tarball_reachable("${_cln_tarball_url}" "CLN" PYOOMPH_CLN_VERSION)
   ExternalProject_Add(cln_external
-    URL "https://www.ginac.de/CLN/cln-${PYOOMPH_CLN_VERSION}.tar.bz2"
+    URL "${_cln_tarball_url}"
     PREFIX "${CMAKE_BINARY_DIR}/cln_build"
     BUILD_IN_SOURCE 1
     CONFIGURE_COMMAND <SOURCE_DIR>/configure
@@ -181,8 +271,10 @@ if(PYOOMPH_DOWNLOAD_GINAC)
     set(_cln_pkgconfig_dir "${_cln_lib_dir}/pkgconfig")
   endif()
 
+  set(_ginac_tarball_url "https://www.ginac.de/ginac-${PYOOMPH_GINAC_VERSION}.tar.bz2")
+  pyoomph_check_tarball_reachable("${_ginac_tarball_url}" "GiNaC" PYOOMPH_GINAC_VERSION)
   ExternalProject_Add(ginac_external
-    URL "https://www.ginac.de/ginac-${PYOOMPH_GINAC_VERSION}.tar.bz2"
+    URL "${_ginac_tarball_url}"
     PREFIX "${CMAKE_BINARY_DIR}/ginac_build"
     DEPENDS ${_ginac_depends}
     BUILD_IN_SOURCE 1
