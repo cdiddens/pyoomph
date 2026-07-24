@@ -413,9 +413,10 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
      DL pressure is element-internal (allocated per son, never hangs); the C2TB velocity hangs
      quadratically on edges exactly like C2 (bubble vanishes on edges). **Validated** (machine-zero,
      looser ~1e-7 tol for CR's poorer conditioning) — cavity Stokes, uniform / single-level 2:1 /
-     Z2 error-driven (`test_crouzeix_raviart_triangle_*`). KNOWN GAP: abrupt >1-level jumps on very
-     coarse CR meshes (e.g. N=2, level 1→3) diverge -- a C2TB deep-jump-flattening interaction; real
-     (2:1-balanced) adaptivity never produces these, and TH handles the same jumps fine.
+     Z2 error-driven (`test_crouzeix_raviart_triangle_*`). ~~KNOWN GAP: abrupt >1-level jumps on very
+     coarse CR meshes (e.g. N=2, level 1→3) diverge~~ **[RESOLVED — this was a Pardiso artifact, see
+     §4.1: with SuperLU these deep jumps converge to machine zero (1.4e-13); the hanging was correct
+     all along.]**
    * **[DONE] — 3D Crouzeix-Raviart (C2TB bubble velocity / DL pressure tets).** The 3D C2TB tet has
      15 nodes: 10 C2 (4 corners + 6 edge-mids) + **4 face-centroid bubbles + 1 volume-centroid
      bubble**. Fixes: (1) `BulkElementTetra3dC2::create_son_instance` returns a real
@@ -435,7 +436,30 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
      constrained. **Validated** for uniform (machine-zero), single-level 2:1 and Z2 error-driven
      (`test_crouzeix_raviart_tet_cavity_*`). NOTE: 3D CR is inherently 2-Newton-step and poorly
      conditioned (residual floor ~1e-11 even unrefined), so the oracle uses the FINAL residual with a
-     ~1e-7 tolerance, not the 1-step value.
+     ~1e-7 tolerance, not the 1-step value. **[Superseded — see §4.1: this "poor conditioning" is a
+     Pardiso artifact, not intrinsic; with SuperLU it is 1-step machine-zero.]**
+
+   * **§4.1 — Linear-solver sensitivity of the bubble/DL-pressure Stokes systems (IMPORTANT).**
+     The "CR is inherently 2-Newton-step / poorly conditioned (~1e-11 floor)" and "2D CR abrupt
+     >1-level jumps diverge" caveats above are **NOT** properties of the elements or the hanging
+     scheme -- they are artifacts of the **default linear solver, Pardiso**, on these Stokes
+     saddle-point + hanging-constraint matrices (bubble-enriched velocity, discontinuous DL
+     pressure). Switching to **SuperLU** (`problem.set_linear_solver("superlu")`, SciPy's serial
+     direct solver) makes **every** CR/TH case -- 2D and 3D, uniform / single-level 2:1 / Z2
+     error-driven, AND the previously "diverging" 2D deep jumps (N=2, level 1→3 and 1→4) --
+     converge in a **single Newton step to true machine zero** (~1e-13 residual). Head-to-head on
+     the 3D CR 2:1 cavity: Pardiso 1.9e-10 (2 steps), SuperLU 1.2e-12 (1 step).
+
+     Consequences: (a) the exact-Jacobian residual oracle actually **passes at 1 step** for all the
+     bubble/DL cases once the linear solve is exact -- i.e. the enriched C2TB face-hanging (and all
+     the other hangs) are provably **correct**, not merely approximately right; (b) the "known gap"
+     for 2D CR deep jumps is a solver issue, not a hanging bug -- SuperLU handles them fine;
+     (c) Pardiso is losing accuracy / diverging on these indefinite saddle-point matrices (suspect
+     matrix-type / pivoting handling for the DL-pressure + hanging block structure) -- a solver-side
+     item, tracked separately from this branch. The committed tests still run on the default (Pardiso)
+     with looser ~1e-7 tolerances so they pass on the shipped default; a SuperLU + tight-1-step
+     variant would be a strictly stronger oracle (not yet added).
+
 5. **Variable / anisotropic schemes** (§5): quad 1→2 (both directions), simplex
    bisection; directional error estimator; generalised balance rule.
 6. **MPI hardening** across all shapes; distributed adaptivity tests.
