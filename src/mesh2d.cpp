@@ -31,6 +31,7 @@ The main author may be contacted at c.diddens@utwente.nl
 #include "Telements.h"
 #include "unstructured_two_d_mesh_geometry_base.h"
 #include <array>
+#include <functional>
 namespace pyoomph
 {
 
@@ -366,6 +367,92 @@ namespace pyoomph
           hang->set_master_node_pt(0, P, 1.0 - t);
           hang->set_master_node_pt(1, Q, t);
           X->set_hanging_pt(hang, slot);
+        }
+      }
+    }
+
+    // Spurious C1(TB) dof cleanup (post-unrefinement). A node that was a fine corner (and so carries
+    // a C1 pressure value slot) can, after that region is coarsened, become a plain C2 edge-mid of a
+    // conforming coarse element -- oomph does not shrink the node, so its pressure slot survives but
+    // no element assembles it, leaving an unconstrained free dof that corrupts the Jacobian. Any such
+    // node is the midpoint of a coarse element edge whose two endpoints ARE pressure vertices, so
+    // constrain its pressure to the linear interpolation over that edge (which both removes the free
+    // dof and is the physically correct value). Nodes on a 2:1 interface were already hung above (with
+    // the correct, possibly non-midpoint, weights) and are skipped via is_hanging(slot).
+    if (!c1_hang_slots.empty())
+    {
+      std::set<oomph::Node *> vertices;
+      for (unsigned int ie = 0; ie < this->nelement(); ie++)
+        if (oomph::TElementBase *te = dynamic_cast<oomph::TElementBase *>(this->element_pt(ie)))
+          for (unsigned k = 0; k < 3; k++) vertices.insert(te->vertex_node_pt(k));
+
+      // The three C2 mid-edge nodes (local 3,4,5) bisect vertex pairs (0,1),(1,2),(2,0).
+      static const unsigned edge_ends[3][2] = {{0, 1}, {1, 2}, {2, 0}};
+      for (unsigned int ie = 0; ie < this->nelement(); ie++)
+      {
+        oomph::FiniteElement *el = dynamic_cast<oomph::FiniteElement *>(this->element_pt(ie));
+        oomph::TElementBase *te = dynamic_cast<oomph::TElementBase *>(this->element_pt(ie));
+        if (!el || !te || el->nnode() < 6) continue; // only C2(+) triangles have mid-edge nodes
+        for (unsigned e = 0; e < 3; e++)
+        {
+          oomph::Node *M = el->node_pt(3 + e);
+          if (vertices.count(M)) continue; // genuine (shared) vertex elsewhere -> not spurious
+          oomph::Node *A = te->vertex_node_pt(edge_ends[e][0]);
+          oomph::Node *B = te->vertex_node_pt(edge_ends[e][1]);
+          for (int slot : c1_hang_slots)
+          {
+            if ((int)M->nvalue() <= slot || M->is_hanging(slot)) continue;
+            if ((int)A->nvalue() <= slot || (int)B->nvalue() <= slot) continue; // masters must carry the dof
+            oomph::HangInfo *hang = new oomph::HangInfo(2);
+            hang->set_master_node_pt(0, A, 0.5);
+            hang->set_master_node_pt(1, B, 0.5);
+            M->set_hanging_pt(hang, slot);
+          }
+        }
+      }
+    }
+
+    // Flatten hanging chains for EVERY hang slot (geometric velocity slot -1 and each separate C1
+    // pressure slot). Scattered (error-driven) refinement produces hanging nodes whose masters are
+    // themselves hanging; a hang expressed over hanging masters gives a wrong Jacobian unless the
+    // masters are resolved to real (non-hanging) leaf nodes. oomph's assembly-time resolution covers
+    // the geometric slot but NOT the separate C1 value slot, so we do it explicitly here (as the 3d
+    // tet pass does). Two-phase per slot -- read every node's resolved real-master map first, then
+    // reinstall -- so each resolution sees the original (unmodified) hangs.
+    {
+      std::vector<int> slots;
+      slots.push_back(-1);
+      for (int s : c1_hang_slots) slots.push_back(s);
+      for (int slot : slots)
+      {
+        std::function<void(oomph::Node *, double, std::map<oomph::Node *, double> &)> resolve =
+            [&](oomph::Node *X, double w, std::map<oomph::Node *, double> &out) {
+              if (!X->is_hanging(slot)) { out[X] += w; return; }
+              oomph::HangInfo *h = X->hanging_pt(slot);
+              for (unsigned m = 0; m < h->nmaster(); m++) resolve(h->master_node_pt(m), w * h->master_weight(m), out);
+            };
+        std::map<oomph::Node *, std::map<oomph::Node *, double>> resolved;
+        for (unsigned int in = 0; in < this->nnode(); in++)
+        {
+          oomph::Node *X = this->node_pt(in);
+          if (slot >= 0 && (int)X->nvalue() <= slot) continue;
+          if (!X->is_hanging(slot)) continue;
+          oomph::HangInfo *h = X->hanging_pt(slot);
+          bool chained = false;
+          for (unsigned m = 0; m < h->nmaster(); m++)
+            if (h->master_node_pt(m)->is_hanging(slot)) { chained = true; break; }
+          if (!chained) continue; // masters already real
+          std::map<oomph::Node *, double> flat;
+          resolve(X, 1.0, flat);
+          flat.erase(X); // guard against a degenerate self-reference
+          resolved[X] = flat;
+        }
+        for (const auto &kv : resolved)
+        {
+          oomph::HangInfo *nh = new oomph::HangInfo(kv.second.size());
+          unsigned i = 0;
+          for (const auto &mw : kv.second) { nh->set_master_node_pt(i, mw.first, mw.second); i++; }
+          kv.first->set_hanging_pt(nh, slot);
         }
       }
     }

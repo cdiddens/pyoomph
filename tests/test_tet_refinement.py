@@ -281,3 +281,19 @@ def test_crouzeix_raviart_tet_cavity_error_adaptivity():
         problem.solve(spatial_adapt=1)
         assert _max_abs_residual(problem) < 1e-7
         assert problem.get_mesh("domain").nelement() > 384
+
+
+def test_taylor_hood_tet_unrefinement_residual_oracle():
+    # 3D Taylor-Hood unrefinement (coarsening). Z2 adaptivity that refines AND unrefines yields a
+    # non-conforming mesh reached partly by coarsening; the mixed C2/C1 hanging Jacobian must stay
+    # exact. Oracle: after the adaptive solve, zero all dofs and solve once more -- a linear problem
+    # reaches machine zero in ONE Newton step iff the Jacobian on the refined+unrefined mesh is exact.
+    with _CavityStokes3D(N=2, error_adapt=True) as problem:
+        problem.max_refinement_level = 2
+        problem.min_refinement_level = 0
+        problem.solve(spatial_adapt=2)
+        nel = problem.get_mesh("domain").nelement()
+        problem.set_current_dofs(np.zeros(problem.ndof()))
+        problem.solve()
+        assert _max_abs_residual(problem) < 1e-9
+        assert nel > 384

@@ -460,6 +460,35 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
      with looser ~1e-7 tolerances so they pass on the shipped default; a SuperLU + tight-1-step
      variant would be a strictly stronger oracle (not yet added).
 
+   * **§4.2 — Unrefinement (coarsening) of mixed-space (Taylor-Hood / Crouzeix-Raviart) meshes
+     [DONE].** Pure C1/C2 Poisson coarsening already worked; the mixed-space Stokes cases failed
+     (slow-diverging Newton / hit the adaptive Newton iteration cap) specifically when Z2 adaptivity
+     *unrefined* into a non-conforming state. `rebuild_from_sons` field reconstruction was fine
+     (conforming coarsening was machine-zero); the bug was in the C1-pressure hanging on the coarsened
+     mesh, and had two parts, both fixed in `TemplatedMeshBase2d::post_adapt_setup_hanging_nodes`:
+     (1) **Stale-pressure edge-mids.** A node that was a fine corner (so carries a C1 pressure value
+     slot) can, once its region is coarsened, become a plain C2 edge-mid of a *conforming* coarse
+     element. oomph does not shrink the node, so its pressure slot survives but no element assembles
+     it -> an unconstrained free dof. Fix: any C1-carrying node that is not a vertex of any element is
+     hung linearly (0.5,0.5) on the two endpoints of the coarse element edge it bisects (removes the
+     free dof and is the physically correct value).
+     (2) **Unflattened C1-pressure chains.** Scattered (error-driven) refinement makes hanging nodes
+     whose masters are themselves hanging. The 2D pass had relied on oomph's *assembly-time* flattening
+     -- which resolves the geometric (velocity) slot but NOT the separate C1 pressure value slot, so
+     the pressure hang was expressed over hanging masters -> wrong Jacobian -> multi-step Newton. Fix:
+     explicit two-phase chain flattening (as the 3D tet pass does) now run for EVERY slot (geometric -1
+     and each C1 slot), resolving all masters to real leaf nodes. (The 3D edge pass already skips
+     hanging-endpoint edges, so its C1 masters are always real -> 3D TH needed no change.)
+     Diagnosis was decisive via the *reset-and-resolve* oracle: zero all dofs on the final adapted
+     mesh and solve -- a linear problem reaches machine zero in ONE Newton step iff the Jacobian is
+     exact. Before: multi-step; after: 1 step (~1e-13 SuperLU, ~1e-15 Pardiso). The nodal
+     pressure-fixation "failure" was only a symptom (the wrong Jacobian's slow convergence tripped the
+     Newton iteration cap); with the exact Jacobian it converges in one step. **Validated** for 2D TH,
+     2D CR and 3D TH unrefinement (`test_stokes_triangle_unrefinement_residual_oracle`,
+     `test_taylor_hood_tet_unrefinement_residual_oracle`). Works on BOTH Pardiso and SuperLU -- once
+     the Jacobian is exact, Pardiso solves these fine too (cf. §4.1's Pardiso concerns were about
+     accuracy on a *wrong*/ill-conditioned system, not these now-exact ones).
+
 5. **Variable / anisotropic schemes** (§5): quad 1→2 (both directions), simplex
    bisection; directional error estimator; generalised balance rule.
 6. **MPI hardening** across all shapes; distributed adaptivity tests.

@@ -260,3 +260,36 @@ def test_crouzeix_raviart_triangle_error_adaptivity(split):
         problem.solve(spatial_adapt=2)
         assert _max_abs_residual(problem) < 1e-7
         assert problem.get_mesh("domain").nelement() > 150
+
+
+def _reset_dofs_to_zero(problem):
+    problem.set_current_dofs(np.zeros(problem.ndof()))
+
+
+# UNREFINEMENT (coarsening). Z2 error-driven adaptivity that both refines AND unrefines produces a
+# non-conforming mesh reached partly by coarsening. On such a mesh a mixed C2/C1 (Taylor-Hood) or
+# C2TB/DL (Crouzeix-Raviart) field can develop hanging-on-hanging chains in the C1-pressure value
+# slot (and former-corner nodes left as stale-pressure edge-mids). The oracle: after the adaptive
+# solve, zero all dofs and solve once more -- a linear problem reaches machine zero in ONE Newton
+# step from any start iff the hanging Jacobian on the (refined+unrefined) mesh is exact.
+@pytest.mark.parametrize("mode,tol", [("TH", 1e-9), ("CR", 1e-6)])
+def test_stokes_triangle_unrefinement_residual_oracle(mode, tol):
+    class _Cav(Problem):
+        def define_problem(self):
+            self += RectangularQuadMesh(name="domain", N=4, split_in_tris="left")
+            st = StokesEquations(mode=mode, dynamic_viscosity=1)
+            eqs = st + DirichletBC(velocity_x=1, velocity_y=0) @ "top"
+            eqs += DirichletBC(velocity_x=0, velocity_y=0) @ ["left", "right", "bottom"]
+            eqs += st.create_pressure_fixation(value=0)
+            eqs += SpatialErrorEstimator(velocity=1)
+            self += eqs @ "domain"
+
+    with _Cav() as problem:
+        problem.max_refinement_level = 3
+        problem.min_refinement_level = 0  # allow coarsening below the initial level
+        problem.solve(spatial_adapt=3)    # several cycles -> refines near the lid, unrefines interior
+        nel = problem.get_mesh("domain").nelement()
+        _reset_dofs_to_zero(problem)
+        problem.solve()
+        assert _max_abs_residual(problem) < tol
+        assert nel > 150  # genuine (non-uniform) adaptation happened
