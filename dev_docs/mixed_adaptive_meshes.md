@@ -267,11 +267,24 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
 
 ## 6. Implementation phases
 
-1. **Generic engine skeleton — no behaviour change.** Introduce
+1. **Generic engine skeleton — no behaviour change. [DONE]** Introduce
    `RefinementPattern` + a facet-adjacency builder; re-express the existing
    quad/hex/line refinement through them. Validate at parity against
    `tests/test_adaptivity.py` and `tests/test_constrained_adaptivity.py`. De-risks
    the abstraction on the known-good path before any new shape.
+   * `src/refinement_pattern.hpp`: `RefinementPattern` +
+     `IsotropicSameTypeRefinementPattern`; `BulkElementBase::dynamic_split` routes
+     through `refinement_pattern()` (default reproduces `required_nsons()` +
+     `create_son_instance()` exactly). No behaviour change (10/10 adaptivity tests,
+     quadtree neighbour error 0).
+   * `TemplatedMeshBase::build_facet_adjacency()` + `facet_adjacency_summary()`
+     (bound on all three dims): the shape-neutral neighbour primitive, validated
+     manifold on quad/tri/brick meshes by `tests/test_facet_adjacency.py`.
+   * *Not* done here (deliberately): oomph's quad/hex neighbour finding is left in
+     place — the facet-adjacency builder is added alongside it as scaffolding for
+     Phase 2, not a rip-and-replace (that would be high-risk on the known-good
+     path). `rebuild_from_sons` generalisation deferred to Phase 7 (the method is
+     pervasively `QuadTreeNames`-specific below its DG loop).
 2. **2D triangles, isotropic 1→4.** First new shape; reuse `RefineableTElement<2>`
    `Father_bound` / `build`. Establish the generic hang helper, the dynamic facet
    map (§4.3), and the closure rule. Oracle: linear-residual → machine zero on an
