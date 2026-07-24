@@ -83,7 +83,10 @@ class MacAccelerateLinearSolver(GenericLinearSystemSolver):
         if op_flag==1:
             A=csr_matrix((values,rowind,colptr),shape=(n,n))
             A.sort_indices()
-            self.solver.factorize(n,n,A.indptr.astype("int64"),A.indices.astype("int64"),A.data.astype("float64"),self.method)
+            # indptr/indices genuinely need int32->int64 for the Accelerate C++ wrapper, so those
+            # astype calls copy. A.data is already float64, so astype(...,copy=False) is a no-op that
+            # avoids a redundant ~nnz*8 byte copy.
+            self.solver.factorize(n,n,A.indptr.astype("int64"),A.indices.astype("int64"),A.data.astype("float64",copy=False),self.method)
         elif op_flag==2:
             if nrhs != 1:
                 raise NotImplementedError("Only single right-hand side is supported")
@@ -108,7 +111,8 @@ class AccelerateInvOp(object):
         self._solver=_pyoomph.MacAccelerateSparseSolver()
         Acsr=csr_matrix(self.mat)
         Acsr.sort_indices()
-        self._solver.factorize(Acsr.shape[0],Acsr.shape[1],Acsr.indptr.astype("int64"),Acsr.indices.astype("int64"),Acsr.data.astype("float64"),method)
+        # data is already float64 -> copy=False avoids a redundant copy; the index arrays must widen to int64.
+        self._solver.factorize(Acsr.shape[0],Acsr.shape[1],Acsr.indptr.astype("int64"),Acsr.indices.astype("int64"),Acsr.data.astype("float64",copy=False),method)
 
     def __call__(self, b): #type:ignore
         return numpy.array(self._solver.solve(b)) #type:ignore

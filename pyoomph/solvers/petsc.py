@@ -58,9 +58,7 @@ class PETSCSolver(GenericLinearSystemSolver):
         self.petsc_rhs=None
         self.ksp=None
         self.x=None
-        
-        
-        
+
         self._dofs_to_field_info=None
 
     #		opts=PETSc.Options().getAll()
@@ -235,9 +233,17 @@ class PETSCSolver(GenericLinearSystemSolver):
                 for IS in self._dofs_to_field_info[2].values():
                     IS.destroy() #type:ignore
                 self._dofs_to_field_info=None
-                
-            #self.petsc_mat.destroy() #type:ignore
-            self.petsc_mat = PETSc.Mat().createAIJ(size=(n, n), csr=(colptr.astype(numpy.int32), rowind.astype(numpy.int32), values.astype(numpy.float64)),comm=get_mpi_world_comm()) #type:ignore
+
+            # The CSR arrays arrive as zero-copy numpy views onto oomph-lib's CRDoubleMatrix buffers
+            # (see src/nanobind/solver.cpp) and are normally already in PETSc's own index/scalar
+            # dtypes. astype(..., copy=False) is then a no-op that returns those same views; it only
+            # allocates a converted copy when the dtypes genuinely differ (e.g. a 64-bit-index or
+            # complex PETSc build). Targeting PETSc.IntType/ScalarType keeps it correct on any build,
+            # and avoids the redundant ~nnz*12 byte transient copy the old hard-coded astype made.
+            # (createAIJ then copies the CSR into PETSc's own AIJ storage. A zero-copy
+            # MatCreateSeqAIJWithArrays was tried but silently breaks hypre/BoomerAMG -- CG diverges
+            # with KSP reason DIVERGED_ITS -- so we keep the safe, universally-correct copying path.)
+            self.petsc_mat = PETSc.Mat().createAIJ(size=(n, n), csr=(colptr.astype(PETSc.IntType, copy=False), rowind.astype(PETSc.IntType, copy=False), values.astype(PETSc.ScalarType, copy=False)),comm=get_mpi_world_comm()) #type:ignore
             
             self.petsc_mat.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False) #type:ignore
             # Force diagonal:
@@ -346,7 +352,7 @@ class PETSCSolver(GenericLinearSystemSolver):
 
     def assemble_matrix(self,which_one:str):
         res, n, _nzz, nrow_local, values, col_index, row_start=self.problem._assemble_residual_jacobian(which_one)                                
-        res=PETSc.Mat().createAIJ(size=((nrow_local, n), (n, n),),csr=(row_start.astype(numpy.int32), col_index.astype(numpy.int32), values.astype(numpy.float64)), comm=PETSc.COMM_WORLD) #type:ignore
+        res=PETSc.Mat().createAIJ(size=((nrow_local, n), (n, n),),csr=(row_start.astype(PETSc.IntType, copy=False), col_index.astype(PETSc.IntType, copy=False), values.astype(PETSc.ScalarType, copy=False)), comm=PETSc.COMM_WORLD) #type:ignore
         res.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False) #type:ignore
         res.shift(0.0)
         res.assemble()

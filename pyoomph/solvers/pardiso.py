@@ -402,6 +402,22 @@ class PardisoSolver(GenericLinearSystemSolver):
 
     def __init__(self, problem:"Problem",verbose:bool=False):
         super().__init__(problem)
+        # MKL Pardiso is not MPI-parallel. Neither MPI mode works correctly:
+        #  - with --distribute it is unsupported outright (the distributed mesh cannot be handled);
+        #  - without --distribute the mesh is replicated (is_distributed()==False) while the linear
+        #    algebra is still row-partitioned across ranks, so the gather-to-root solve returns the
+        #    correct solution but only each rank's half is written back into its (full, replicated)
+        #    dof vector. The un-owned dofs are never synchronised, so the subsequent residual
+        #    assembly reads stale/uninitialised values -> intermittently wrong or NaN residuals.
+        # Fail fast with a clear message instead of silently returning garbage.
+        if get_mpi_nproc() > 1:
+            raise RuntimeError(
+                "The Pardiso linear solver cannot be used under MPI (running with "
+                + str(get_mpi_nproc()) + " processes): MKL Pardiso is not MPI-parallel, and pyoomph's "
+                "gather-to-root fallback does not correctly propagate the solution back onto a "
+                "replicated (non-distributed) mesh. Use Pardiso only in serial (a single process), or "
+                "for MPI runs switch to a distributed-capable solver, e.g. --petsc_mumps (or --petsc "
+                "with an iterative preconditioner) together with --distribute.")
         self._current_pardiso = None
         self.try_to_reuse_solver=False
         self.verbose=verbose
@@ -425,7 +441,13 @@ class PardisoSolver(GenericLinearSystemSolver):
             
 
     def get_jacobian_matrix(self,n:int,values:NPFloatArray, rowind:NPIntArray, colptr:NPIntArray)->Any:
-        # TODO: Really a copy here? Valgrind can report problems otherwise
+        # The .copy() is load-bearing, not redundant: csr_matrix((values,rowind,colptr)) only *wraps*
+        # the incoming arrays, which are zero-copy numpy views onto oomph-lib's CRDoubleMatrix buffers
+        # (see src/nanobind/solver.cpp). pardisoSolver keeps ctypes pointers into a/ia/ja and MKL
+        # Pardiso dereferences them again at the solve phase, after oomph may already have reassembled
+        # (freed/reallocated) that Jacobian -> use-after-free (the "Valgrind can report problems"). The
+        # copy gives Pardiso storage it owns for the whole factor->solve cycle. This is the one
+        # unavoidable matrix copy every direct backend needs; see also the PETSc solver notes.
         return csr_matrix((values, rowind, colptr), shape=(n, n)).copy() #type:ignore
 
     def get_b(self,n:int,b:NPFloatArray):
@@ -532,11 +554,11 @@ class PardisoSolver(GenericLinearSystemSolver):
                 #assert isinstance(A,csr_matrix)
                 A = csr_matrix((global_data, (global_rows,global_cols)),shape=(n, n))
                 A.eliminate_zeros()
-                A.sort_indices()                  
+                A.sort_indices()
                 if self._current_pardiso:
                     self._current_pardiso.clear()  # TODO: Only if matrix is entirely changed
-                mode = 11                
-                self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=False)                
+                mode = 11
+                self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=False)
                 self._current_pardiso.factor()
 
                 
@@ -583,8 +605,8 @@ class PardisoSolver(GenericLinearSystemSolver):
             x_local = np.empty(len(b), dtype=np.float64)
             
             comm.Scatterv([x_global, counts, displs, MPI.DOUBLE],x_local,root=0)
-            b[:] = x_local[:]                
-            mpi_barrier()            
+            b[:] = x_local[:]
+            mpi_barrier()
         else:
             raise RuntimeError("Not implemented")
 
