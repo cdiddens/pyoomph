@@ -185,10 +185,12 @@ class GmshSizeCallback:
     def finalize(self):
         pass
 
-    def _setup_for_mesh(self,gmsh:"GmshTemplate")->Callable[[int,int,float,float,float],float]:
+    def _setup_for_mesh(self,gmsh:"GmshTemplate")->Callable[...,float]:
         self.gmsh=gmsh
         self.initialize()
-        return lambda dim,tag,x,y,z : self._cb(dim,tag,x,y,z)
+        # gmsh invokes the size callback with (dim, tag, x, y, z, lc); older versions
+        # pass (dim, tag, x, y, z). Accept a variadic tail so both arities work.
+        return lambda dim,tag,x,y,z,*_ : self._cb(dim,tag,x,y,z)
 
 
 
