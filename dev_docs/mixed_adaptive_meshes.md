@@ -777,13 +777,17 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
          reference edge. `locate_zeta`'s 2D Newton inversion returned `s` slightly off the edge → leaked
          tiny basis weights onto off-edge coarse nodes (which may themselves hang → spurious masters / hang
          cycles); the analytic `s_c` has zero off-edge leakage.
-       * **Shared-node skip is weight-based, not pointer-based.** Skip X when the coarse basis puts weight
-         ≈1 on a single master (X sits *at* a coarse interpolating node). Pointer equality
-         (`get_interpolating_node_at_local_coordinate == X`) was too strict: at a T-junction **two distinct
-         coincident nodes** can each be the C2 mid of a *different* coarse element's edge at the same point;
-         pointer-guard let each hang on the other → **2-cycle** (caught by the flatten depth guard on the CR
-         error-adaptivity test). The weight-based test skips both, matching the old hand-written "skip the
-         mid M" semantics physically.
+       * **Shared-node skip is a PHYSICAL coincidence test, per field.** Skip X (for a given `value_id`)
+         when X sits within roundoff — relative to the coarse edge length — of any of the coarse element's
+         *interpolating nodes for that field* (`interpolating_node_pt(m, value_id)`). This is per-field so
+         the C2 edge mid-node M is "shared" for the geometry slot (−1) yet still hangs *linearly* for a
+         C1(TB) pressure slot. Two weaker versions were tried and failed: (a) **pointer equality**
+         (`get_interpolating_node_at_local_coordinate == X`) — too strict, at a T-junction **two distinct
+         coincident nodes** each the C2 mid of a *different* coarse element hang on each other → **2-cycle**
+         (CR error-adaptivity); (b) **basis-weight ≈1** (`|psi[m]−1|<1e-9`) — fails on a **moved/curved**
+         edge where the detected `t` is slightly off 0.5, so the coarse mid's own basis is ~0.99999996 and
+         the mid hangs on **itself** → **self-cycle** (transient droplet, axis edge). The physical-distance
+         test is robust to both (commit `888d58d`).
        * **Cross-validation harness (`PYOOMPH_TRI_HANG=validate`, `tree`).** `post_adapt` can snapshot the
          tree-set hanging (per node, per slot: sorted master position+weight) and diff it against the
          geometric/hybrid hanging, logging every mismatch. This is what isolated the `gteq` tri-son failure
