@@ -618,12 +618,16 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
        With (A)-(C) resolved and macro elements off, `initialise()` succeeds but the droplet's
        `presolve_gas_phase()` solve converges only **linearly** (residual ×~0.66 per Newton step, e.g.
        3.4e-3→8.3e-5 over 10 steps, then hits the iteration cap) — the classic inexact-Jacobian signature.
-       It is NOT the tri hanging Jacobian for Stokes (CR/TH oracle tests are machine-zero) nor
-       `get_nodal_s_in_father` (values only): the suspects are the **interface (inter-domain
-       droplet_gas / mass-transfer) coupling Jacobian on a refined tri mesh**, and/or the **moving-mesh
-       (SolidNode/ALE) position hanging** (the pre-existing gap for which position work was reverted).
-       Next step: reproduce with a minimal axisymmetric interface-coupled tri problem under the
-       reset-and-resolve residual oracle to isolate which coupling assembles an inexact Jacobian.
+       Isolated by the reset-and-resolve residual oracle: it is caused by the **hanging nodes on the
+       refined tri mesh** (with `max_refinement_level=0` the same solve converges **quadratically** to
+       machine zero), but NOT by the bulk hanging Jacobian — verified machine-zero for tri Poisson
+       (Cartesian AND axisymmetric, C1/C2) and Stokes (CR/TH), and `get_nodal_s_in_father` only sets
+       values. That leaves the **inter-domain interface (droplet_gas mass-transfer) coupling Jacobian on
+       a refined tri mesh** (Face/opposite-element contributions across hanging interface nodes), and/or
+       the **moving-mesh (SolidNode/ALE) position hanging** (the pre-existing reverted gap). Next step:
+       reproduce with a minimal two-domain interface-coupled tri problem (bulk field on each side coupled
+       across a shared interface) under the residual oracle, and check how interface/opposite-face
+       elements assemble their Jacobian rows when the coupled bulk nodes hang.
      **Net:** the reported **crash is fixed**; a full droplet run is still blocked by (D), the inexact
      Jacobian on the adapted tri mesh. Interim workaround for users needing the run now: force gmsh
      remeshing instead of tree refinement (`pyoomph/meshes/remesher.py`). Core tri refinement is unaffected
