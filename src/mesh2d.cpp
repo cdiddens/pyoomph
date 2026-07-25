@@ -484,6 +484,11 @@ namespace pyoomph
         oomph::Vector<double> s_c(2);
         s_c[0] = (1.0 - t) * s_P[0] + t * s_Q[0];
         s_c[1] = (1.0 - t) * s_P[1] + t * s_Q[1];
+        // Coincidence tolerance (squared) relative to the coarse edge length: a node "shared" with a
+        // coarse node sits within roundoff of it, while the nearest distinct fine node is O(edge/2^L)
+        // away -- so any modest relative tolerance separates them cleanly.
+        const double edge_len2 = (Q->x(0) - P->x(0)) * (Q->x(0) - P->x(0)) + (Q->x(1) - P->x(1)) * (Q->x(1) - P->x(1));
+        const double coincide_tol2 = 1e-14 * edge_len2;
         for (int value_id : value_ids)
         {
           const int slot = value_id; // slot == value_id for geometry (-1) and for the C1(TB) field
@@ -492,14 +497,21 @@ namespace pyoomph
           const unsigned nmax = coarse_re->ninterpolating_node(value_id);
           oomph::Shape psi(nmax);
           coarse_re->interpolating_basis(s_c, psi, value_id);
-          // Skip if X sits AT one of the coarse element's interpolating nodes (basis == 1 there): X is
-          // then shared / coincident with that coarse node -- e.g. the C2 edge mid-node at t=0.5, or a
-          // duplicate node coincident with it at a T-junction. A physical (weight-based) test, not
-          // pointer equality: coincident-but-distinct duplicate nodes would otherwise hang on each
-          // other and form a 2-cycle. Genuine interior fine nodes (t=0.25, 0.75, ...) never hit 1.
+          // Skip if X sits AT one of the coarse element's interpolating nodes FOR THIS FIELD: X is then
+          // shared / coincident with that coarse node and must not hang on it. A PHYSICAL coincidence
+          // test (not the basis-==-1 weight test, which fails when a moved/curved edge makes the detected
+          // t slightly off 0.5 -> basis ~0.99999996 -> the coarse mid hangs on ITSELF -> self-cycle; seen
+          // on the transient droplet). Per-field, via interpolating_node_pt: the C2 edge mid-node M is
+          // shared for the geometry slot (-1) but is NOT a coarse pressure node, so it still hangs
+          // linearly for a C1(TB) pressure slot. Also catches a coincident-but-distinct duplicate node at
+          // a T-junction (which would otherwise hang on the coarse node's twin -> 2-cycle).
           bool at_coarse_node = false;
           for (unsigned m = 0; m < nmax; m++)
-            if (std::abs(psi[m] - 1.0) < 1e-9) { at_coarse_node = true; break; }
+          {
+            oomph::Node *nm = coarse_re->interpolating_node_pt(m, value_id);
+            const double d2 = (nm->x(0) - X->x(0)) * (nm->x(0) - X->x(0)) + (nm->x(1) - X->x(1)) * (nm->x(1) - X->x(1));
+            if (d2 <= coincide_tol2) { at_coarse_node = true; break; }
+          }
           if (at_coarse_node) continue;
           unsigned nmaster = 0;
           for (unsigned m = 0; m < nmax; m++)
