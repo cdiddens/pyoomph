@@ -7820,7 +7820,66 @@ namespace pyoomph
 		sfather[1] = s_lo[1] + (s_hi[1] - s_lo[1]) * s_fraction[1];
 	}
 
-	
+	// Local coordinate of son node l in the father element for the 1->4 triangle split. This is the
+	// same s_in_parent map used in RefineableTElement<2>::build (SW/SE/NE/NW son geometry): corner
+	// nodes 0-2 depend on son_type, the C2 mid-edge nodes 3-5 are midpoints of the son corners (in
+	// father coords), and the bubble node (l==3 for a 4-node C1TB, l==6 for a 7-node C2TB) is the son
+	// centroid. Used by BulkElementBase::further_build() to sample father DG/axisymmetric data at the
+	// son nodes.
+	static void tri2d_nodal_s_in_father(int son_type, unsigned n_node,
+	                                    const unsigned &l, oomph::Vector<double> &sfather)
+	{
+		using namespace oomph::QuadTreeNames;
+		double c[3][2]; // son corner vertices, in father local coordinates
+		switch (son_type)
+		{
+		case SW:
+			c[0][0] = 0.5; c[0][1] = 0.0; c[1][0] = 0.0; c[1][1] = 0.5; c[2][0] = 0.0; c[2][1] = 0.0;
+			break;
+		case SE:
+			c[0][0] = 1.0; c[0][1] = 0.0; c[1][0] = 0.5; c[1][1] = 0.5; c[2][0] = 0.5; c[2][1] = 0.0;
+			break;
+		case NE:
+			c[0][0] = 0.5; c[0][1] = 0.0; c[1][0] = 0.5; c[1][1] = 0.5; c[2][0] = 0.0; c[2][1] = 0.5;
+			break;
+		case NW:
+			c[0][0] = 0.5; c[0][1] = 0.5; c[1][0] = 0.0; c[1][1] = 1.0; c[2][0] = 0.0; c[2][1] = 0.5;
+			break;
+		default:
+			throw_runtime_error("Unexpected triangle son_type in get_nodal_s_in_father");
+		}
+		sfather.resize(2, 0.0);
+		if (l < 3)
+		{
+			sfather[0] = c[l][0];
+			sfather[1] = c[l][1];
+		}
+		else if (n_node == 4) // C1TB: node 3 is the centroid bubble
+		{
+			for (unsigned i = 0; i < 2; i++) sfather[i] = (c[0][i] + c[1][i] + c[2][i]) / 3.0;
+		}
+		else // C2 / C2TB: nodes 3-5 mid-edges, node 6 centroid bubble
+		{
+			if (l == 3)
+				for (unsigned i = 0; i < 2; i++) sfather[i] = 0.5 * (c[0][i] + c[1][i]);
+			else if (l == 4)
+				for (unsigned i = 0; i < 2; i++) sfather[i] = 0.5 * (c[1][i] + c[2][i]);
+			else if (l == 5)
+				for (unsigned i = 0; i < 2; i++) sfather[i] = 0.5 * (c[2][i] + c[0][i]);
+			else // l == 6 (C2TB bubble)
+				for (unsigned i = 0; i < 2; i++) sfather[i] = (c[0][i] + c[1][i] + c[2][i]) / 3.0;
+		}
+	}
+
+	void BulkElementTri2dC1::get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather)
+	{
+		tri2d_nodal_s_in_father(Tree_pt->son_type(), this->nnode(), l, sfather);
+	}
+
+	void BulkElementTri2dC2::get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather)
+	{
+		tri2d_nodal_s_in_father(Tree_pt->son_type(), this->nnode(), l, sfather);
+	}
 
 	// For a C2 (biquadratic, 9-node) node index n that is not itself a C1 corner node (i.e. an
 	// edge-midside node 1/3/5/7 or the center node 4), returns the C1 corner nodes that

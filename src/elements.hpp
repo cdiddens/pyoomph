@@ -1341,7 +1341,11 @@ namespace pyoomph
     oomph::Node *boundary_node_pt(const int &face_index, const unsigned int index) override;
     int nedges() const override { return 3; }
     unsigned nnode_on_face() const override { return 2; }
-    BulkElementTri2dC1(bool has_bubble = false);    
+    // Maps son node l to its local coordinate in the father, based on the son_type of the 1->4
+    // triangle split. Mirrors the s_in_parent map in RefineableTElement<2>::build; handles the
+    // 3-node (C1), 4-node (C1TB bubble), 6-node (C2) and 7-node (C2TB) tri layouts via nnode().
+    void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
+    BulkElementTri2dC1(bool has_bubble = false);
     unsigned get_meshio_type_index() const override { return 3; }
     void check_integrity(double &max_error) override { max_error = 0; } // TODO
     
@@ -1449,6 +1453,8 @@ namespace pyoomph
     void get_supporting_C1_nodes_of_C2_node(const unsigned &n, std::vector<oomph::Node *> &support) override;
     oomph::Node *boundary_node_pt(const int &face_index, const unsigned int index) override;
     int nedges() const override { return 3; }
+    // See BulkElementTri2dC1::get_nodal_s_in_father. Same map; handles 6/7-node (C2/C2TB) via nnode().
+    void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
     unsigned nnode_on_face() const override { return 3; }
     BulkElementTri2dC2(bool with_bubble = false);    
     unsigned get_meshio_type_index() const override { return 9; }
