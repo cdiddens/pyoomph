@@ -587,35 +587,46 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
      a mesh with FaceElement/InterfaceMesh layers, a moving mesh and curved (macro-element) boundaries.
      Established by valgrind + a leak-test (skip `delete Object_pt` in `Tree::~Tree` → the abort turns
      into a clean error) + targeted instrumentation:
-     - **(A) The crash [ROOT-CAUSED, not fixed].** `Tree::~Tree` (`tree.cc:132-139`) deletes `Object_pt`
+     - **(A) The crash [FIXED, commit c0df5e2].** `Tree::~Tree` (`tree.cc:132-139`) deletes `Object_pt`
        only for **father** nodes (`nsons>0`); leaf elements live in `Mesh::Element_pt` and are deleted by
-       `Mesh::~Mesh`. Invariant: after adapt `Element_pt` holds **only leaves**. Valgrind shows a refined
-       **father is ALSO in `Element_pt`** (freed by `Tree::~Tree`, then re-deleted by `Mesh::~Mesh`
-       (mesh.cc:678) → use-after-free of a 600-byte element block → cascading heap corruption). Leaking
-       the father in `Tree::~Tree` makes the abort disappear, confirming the mechanism. The father does
-       NOT come from `adapt_mesh`'s leaf rebuild (`stick_leaves_into_vector` → `Element_pt`, verified
-       clean: 0 non-leaf entries right after rebuild). It enters `Element_pt` via a **non-adapt path** —
-       the forest flatten/rebuild (`setup_tree_forest` → oomph `setup_quadtree_forest`) and/or the
-       remesh / mesh-copy machinery leaves a tree node that later gains sons without an `Element_pt`
-       rebuild, or an old forest shares elements with a new one. Locating that exact site is the next
-       step. (Note the base-pointer subtlety: the tree holds `RefineableElement*` while `Element_pt`
-       holds `FiniteElement*`; the same object has *different* pointer values under multiple inheritance,
-       so identity checks must use `dynamic_cast<void*>` — and can't be done on the already-freed side.)
-     - **(B) `MACRO ELEM` unimplemented [KNOWN GAP].** `RefineableTElement<2>::build`
-       (`refineable_telements.cpp:736-745`) `throw`s "MACRO ELEM" when a triangle father carries a macro
-       element (curvilinear boundary) — explicitly "not yet implemented for triangles". The droplet's
-       curved surface uses macro elements, so a deeper adapt hits this. Fix: derive the son's
-       macro-element sub-region from the father's (the commented-out `s_macro_ll`/`s_macro_ur` formulas),
-       as the quad refineable elements do.
+       `Mesh::~Mesh`. Invariant: after adapt `Element_pt` holds **only leaves**. Valgrind + a
+       `Tree::~Tree` leak-test showed a refined **father was ALSO in `Element_pt`** (freed by the tree,
+       then re-deleted by `Mesh::~Mesh` (mesh.cc:678) → use-after-free → cascading heap corruption).
+       Root cause: `adapt_mesh` was **aborted mid-way by an exception** (the `get_nodal_s_in_father`
+       "Implement" throw below, and/or MACRO ELEM), *after* splitting the 37 elements but *before* the
+       `Element_pt` leaf-rebuild (`stick_leaves_into_vector`), leaving exactly 37 refined fathers stuck in
+       `Element_pt` (confirmed by an `nsons()>0` count in the `~TemplatedMeshBase2d` body: `fathers=37`).
+       The fix is to stop the abort: implement the missing tri method (B') so adapt completes and rebuilds
+       `Element_pt` cleanly. (Base-pointer subtlety for future debuggers: the tree holds
+       `RefineableElement*`, `Element_pt` holds `FiniteElement*` — different values under multiple
+       inheritance; identity checks need `dynamic_cast<void*>`, unusable on the already-freed side.)
+     - **(B') `get_nodal_s_in_father` unimplemented for tri/tet [FIXED, commit c0df5e2].** Only
+       Line/Quad/Brick overrode it; tris threw "Implement" whenever `further_build()` sampled father data
+       at son nodes — for **DG/discontinuous fields** or `nodal_dimension != dim`. Basic tri Poisson/Stokes
+       tests never hit that branch; the droplet (axisymmetric, moving mesh, interface DG fields) does.
+       Implemented for `BulkElementTri2dC1/C2` using the same son→father map as
+       `RefineableTElement<2>::build`. **`initialise()` now completes** (with macro elements off). Verified
+       machine-zero on the CR/TH triangle residual-oracle tests (which exercise the DG branch).
+     - **(B) `MACRO ELEM` unimplemented [DEFERRED — disable instead].** `RefineableTElement<2>::build`
+       (`refineable_telements.cpp:736-745`) throws "MACRO ELEM" on a triangle father with a macro element
+       (curved boundary). Per project decision, **deactivate macro elements** on such meshes
+       (`use_macro_elements=False` on the GmshTemplate) rather than implementing curved tri refinement.
+       With macro elements off the throw does not occur.
      - **(C) A latent double-delete of reused opposite interior-facet elements [FIXED, commit 5309fee].**
-       See that commit: `opposite_interior_facets` held duplicate pointers on 2:1 non-conforming
-       inter-domain facets.
-     - **(D) Moving-mesh (SolidNode/ALE) tri adaptivity Newton failures** — the pre-existing foundational
-       gap already noted (position/ALE work was reverted earlier for the same root reason).
-     **Net:** the crash (A) is root-caused but not fixed; (B) and (D) are additional gaps the droplet also
-     needs. Complete support for curved+moving+multi-domain tri adaptivity is a multi-part effort. Interim
-     workaround: force gmsh remeshing instead of tree refinement for such problems
-     (`pyoomph/meshes/remesher.py`). Core tri refinement is unaffected
+       `opposite_interior_facets` held duplicate pointers on 2:1 non-conforming inter-domain facets.
+     - **(D) Inexact Jacobian on the adapted tri mesh [OPEN — remaining blocker for a full droplet run].**
+       With (A)-(C) resolved and macro elements off, `initialise()` succeeds but the droplet's
+       `presolve_gas_phase()` solve converges only **linearly** (residual ×~0.66 per Newton step, e.g.
+       3.4e-3→8.3e-5 over 10 steps, then hits the iteration cap) — the classic inexact-Jacobian signature.
+       It is NOT the tri hanging Jacobian for Stokes (CR/TH oracle tests are machine-zero) nor
+       `get_nodal_s_in_father` (values only): the suspects are the **interface (inter-domain
+       droplet_gas / mass-transfer) coupling Jacobian on a refined tri mesh**, and/or the **moving-mesh
+       (SolidNode/ALE) position hanging** (the pre-existing gap for which position work was reverted).
+       Next step: reproduce with a minimal axisymmetric interface-coupled tri problem under the
+       reset-and-resolve residual oracle to isolate which coupling assembles an inexact Jacobian.
+     **Net:** the reported **crash is fixed**; a full droplet run is still blocked by (D), the inexact
+     Jacobian on the adapted tri mesh. Interim workaround for users needing the run now: force gmsh
+     remeshing instead of tree refinement (`pyoomph/meshes/remesher.py`). Core tri refinement is unaffected
      (`tests/test_triangle_refinement.py` 28/28) — no interface/macro/moving-mesh coverage there is the
      gap that let this through; new tests should cover NeumannBC interfaces, macro-element boundaries and
      moving meshes under tri refinement.
