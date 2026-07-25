@@ -214,6 +214,21 @@ namespace oomph
     // coordinate descent (geometrically wrong for triangles).
     void tri_hang_helper(const int &value_id, const int &my_edge);
 
+    // Affine map of a local coordinate between a son element (of the given son_type) and its father,
+    // s_father = A*s_son + b (and its inverse). Unlike oomph's quad box representation
+    // (s_lo/s_hi/translate_s), a full 2x2 A correctly represents ALL four triangle sons including the
+    // inverted middle (NE) son. These compose up/down the tree to map coordinates across refinement
+    // levels with no locate_zeta. son_type is a QuadTreeNames SW/SE/NE/NW value.
+    static void son_to_father_local(const Vector<double> &s_son, int son_type, Vector<double> &s_father);
+    static void father_to_son_local(const Vector<double> &s_father, int son_type, Vector<double> &s_son);
+    // Map a local coordinate in THIS (leaf) element up to the local coordinate system of `ancestor`
+    // (an ancestor element of this one in the same tree), by composing son_to_father_local up the tree.
+    void local_coordinate_in_ancestor(const Vector<double> &s_here, RefineableTElement<2> *ancestor, Vector<double> &s_ancestor) const;
+    // Map a local coordinate in THIS element into the local coordinates of `target` when both share the
+    // SAME tree root (up to the common root, then down): compose son_to_father up + father_to_son down.
+    // Returns false if the two elements are in different tree roots (cross-root handled elsewhere).
+    bool local_coordinate_in_other_leaf(const Vector<double> &s_here, RefineableTElement<2> *target, Vector<double> &s_target) const;
+
   public:
     // Clear the shared-node registry (call once before each refinement round). See below.
     static void clear_shared_edge_node_registry() { Shared_edge_node_registry.clear(); }

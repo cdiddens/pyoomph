@@ -763,6 +763,16 @@ namespace oomph
             bool node_done = false;
             Vector<double> s = s_in_parent[i];
             Vector<double> s_fraction = s_in_son[i];
+            if (getenv("PYOOMPH_TRI_AFFINE_CHECK")) // self-check: son<->father affine reproduces build's s_in_parent/s_in_son
+            {
+              Vector<double> sf(2), ss(2);
+              son_to_father_local(s_in_son[i], son_type, sf);
+              father_to_son_local(s_in_parent[i], son_type, ss);
+              double e1 = std::abs(sf[0] - s_in_parent[i][0]) + std::abs(sf[1] - s_in_parent[i][1]);
+              double e2 = std::abs(ss[0] - s_in_son[i][0]) + std::abs(ss[1] - s_in_son[i][1]);
+              if (e1 > 1e-12 || e2 > 1e-12)
+                std::fprintf(stderr, "[affine-check] son_type=%d node=%u FAIL fwd_err=%.3e inv_err=%.3e\n", son_type, i, e1, e2);
+            }
             // Registry key (father node-pointer pair that this node bisects) used to share/create
             // this node without duplication; empty if node i is a reused father node.
             std::set<Node *> reg_key = this->father_edge_node_key(s, father_el_pt);
@@ -1440,6 +1450,90 @@ namespace oomph
     return mode;
   }
 
+  namespace
+  {
+    // Father-local coordinates of a tri son's three vertices (son local v0=(1,0), v1=(0,1), v2=(0,0)),
+    // per son_type -- read straight off RefineableTElement<2>::build's s_in_parent switch. The son->
+    // father map is then the barycentric affine s_father = a*P0 + b*P1 + (1-a-b)*P2.
+    inline void tri_son_vertex_father_coords(int son_type, double P[3][2])
+    {
+      using namespace oomph::QuadTreeNames;
+      switch (son_type)
+      {
+      case SW: P[0][0]=0.5;P[0][1]=0.0; P[1][0]=0.0;P[1][1]=0.5; P[2][0]=0.0;P[2][1]=0.0; break;
+      case SE: P[0][0]=1.0;P[0][1]=0.0; P[1][0]=0.5;P[1][1]=0.5; P[2][0]=0.5;P[2][1]=0.0; break;
+      case NE: P[0][0]=0.5;P[0][1]=0.0; P[1][0]=0.5;P[1][1]=0.5; P[2][0]=0.0;P[2][1]=0.5; break;
+      case NW: P[0][0]=0.5;P[0][1]=0.5; P[1][0]=0.0;P[1][1]=1.0; P[2][0]=0.0;P[2][1]=0.5; break;
+      default: P[0][0]=1.0;P[0][1]=0.0; P[1][0]=0.0;P[1][1]=1.0; P[2][0]=0.0;P[2][1]=0.0; break; // identity
+      }
+    }
+  }
+
+  void RefineableTElement<2>::son_to_father_local(const Vector<double> &s_son, int son_type, Vector<double> &s_father)
+  {
+    double P[3][2];
+    tri_son_vertex_father_coords(son_type, P);
+    const double a = s_son[0], b = s_son[1], c = 1.0 - a - b;
+    s_father[0] = a * P[0][0] + b * P[1][0] + c * P[2][0];
+    s_father[1] = a * P[0][1] + b * P[1][1] + c * P[2][1];
+  }
+
+  void RefineableTElement<2>::father_to_son_local(const Vector<double> &s_father, int son_type, Vector<double> &s_son)
+  {
+    double P[3][2];
+    tri_son_vertex_father_coords(son_type, P);
+    // s_father = P2 + A*s_son, A columns = (P0-P2),(P1-P2). Invert the 2x2.
+    const double A00 = P[0][0] - P[2][0], A01 = P[1][0] - P[2][0];
+    const double A10 = P[0][1] - P[2][1], A11 = P[1][1] - P[2][1];
+    const double det = A00 * A11 - A01 * A10;
+    const double rx = s_father[0] - P[2][0], ry = s_father[1] - P[2][1];
+    s_son[0] = (A11 * rx - A01 * ry) / det;
+    s_son[1] = (-A10 * rx + A00 * ry) / det;
+  }
+
+  void RefineableTElement<2>::local_coordinate_in_ancestor(const Vector<double> &s_here, RefineableTElement<2> *ancestor, Vector<double> &s_ancestor) const
+  {
+    // Walk up the tree from this element to `ancestor`, composing son->father at each level.
+    s_ancestor = s_here;
+    Tree *tp = this->Tree_pt;
+    while (tp && tp->object_pt() != ancestor)
+    {
+      Tree *father_tp = tp->father_pt();
+      if (!father_tp) break; // reached the root without meeting the ancestor
+      Vector<double> s_up(2);
+      son_to_father_local(s_ancestor, tp->son_type(), s_up);
+      s_ancestor = s_up;
+      tp = father_tp;
+    }
+  }
+
+  bool RefineableTElement<2>::local_coordinate_in_other_leaf(const Vector<double> &s_here, RefineableTElement<2> *target, Vector<double> &s_target) const
+  {
+    if (!this->Tree_pt || !target || !target->Tree_pt) return false;
+    Tree *my_root = this->Tree_pt->root_pt();
+    Tree *tgt_root = target->Tree_pt->root_pt();
+    if (my_root != tgt_root) return false; // cross-root: handled by the inter-tree map, not here
+    RefineableTElement<2> *root_el = dynamic_cast<RefineableTElement<2> *>(my_root->object_pt());
+    if (!root_el) return false;
+    // Up: this element's coord -> root coord.
+    Vector<double> s_root(2);
+    this->local_coordinate_in_ancestor(s_here, root_el, s_root);
+    // Down: root coord -> target coord. Collect target's son_type chain up to the root, then apply
+    // father_to_son from the root's direct son down to the target (chain in reverse).
+    std::vector<int> chain;
+    Tree *tp = target->Tree_pt;
+    while (tp != tgt_root) { chain.push_back(tp->son_type()); tp = tp->father_pt(); if (!tp) return false; }
+    Vector<double> s = s_root;
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it)
+    {
+      Vector<double> sd(2);
+      father_to_son_local(s, *it, sd);
+      s = sd;
+    }
+    s_target = s;
+    return true;
+  }
+
   //=================================================================
   /// Tree-based hanging on one triangle edge. See the header for the rationale (topology from the
   /// QuadTree, coordinates from locate_zeta -- never the quad compass coordinate descent).
@@ -1483,10 +1577,32 @@ namespace oomph
       Vector<double> X_pos(2);
       X_pos[0] = X->x(0);
       X_pos[1] = X->x(1);
+      // Local coordinate of X inside the coarse neighbour. Preferred: the exact tree affine map (no
+      // Newton); it works whenever this element and the neighbour share a tree root. Cross-root pairs
+      // still fall back to locate_zeta until the inter-tree map lands. PYOOMPH_TRI_AFFINE_XCHECK also
+      // runs locate_zeta and logs any disagreement.
       Vector<double> s_neigh(2);
-      GeomObject *geom = 0;
-      neigh_fe->locate_zeta(X_pos, geom, s_neigh);
-      if (geom == 0) continue; // X is not inside the neighbour (should not happen for a shared edge)
+      static const bool USE_AFFINE = getenv("PYOOMPH_NO_AFFINE") == 0; // affine on by default; set PYOOMPH_NO_AFFINE=1 to force locate_zeta
+      RefineableTElement<2> *neigh_te = USE_AFFINE ? dynamic_cast<RefineableTElement<2> *>(neigh->object_pt()) : nullptr;
+      bool have_affine = neigh_te && this->local_coordinate_in_other_leaf(s, neigh_te, s_neigh);
+      static const bool XCHECK = getenv("PYOOMPH_TRI_AFFINE_XCHECK") != 0;
+      if (!have_affine || XCHECK)
+      {
+        Vector<double> s_lz(2);
+        GeomObject *geom = 0;
+        neigh_fe->locate_zeta(X_pos, geom, s_lz);
+        if (have_affine && XCHECK && geom != 0)
+        {
+          double e = std::abs(s_neigh[0] - s_lz[0]) + std::abs(s_neigh[1] - s_lz[1]);
+          if (e > 1e-9)
+            std::fprintf(stderr, "[affine-xcheck] X(%.4f,%.4f) affine=(%.5f,%.5f) lz=(%.5f,%.5f) err=%.3e\n", X_pos[0], X_pos[1], s_neigh[0], s_neigh[1], s_lz[0], s_lz[1], e);
+        }
+        if (!have_affine)
+        {
+          if (geom == 0) continue; // cross-root and not located (should not happen for a shared edge)
+          s_neigh = s_lz;
+        }
+      }
       // If the neighbour has its own interpolating node exactly here, X is shared -> not hanging.
       if (neigh_re->get_interpolating_node_at_local_coordinate(s_neigh, value_id) == X) continue;
       // Otherwise X hangs on the neighbour's interpolation at s_neigh.
