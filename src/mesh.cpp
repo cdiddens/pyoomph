@@ -777,11 +777,17 @@ namespace pyoomph
         }
         else
         {
-          ofe = gen_face_elem(opposite_elements[ei], opposite_face_dir[ei]);          
+          ofe = gen_face_elem(opposite_elements[ei], opposite_face_dir[ei]);
           dynamic_cast<InterfaceElementBase *>(ofe)->set_as_internal_facet_opposite_dummy();
+          // opposite_interior_facets owns and later deletes these; only register a
+          // NEWLY created opposite element. A reused ofe (many small elements sharing
+          // one large opposite face, as arises on a 2:1 non-conforming interior facet
+          // after tree-based refinement) is already registered -- pushing it again put
+          // a duplicate pointer in the delete list and double-freed it in
+          // InterfaceMesh::~InterfaceMesh.
+          dynamic_cast<InterfaceMesh *>(imesh)->opposite_interior_facets.push_back(ofe);
         }
         generated_opposite_face_elems.push_back(ofe);
-        dynamic_cast<InterfaceMesh *>(imesh)->opposite_interior_facets.push_back(ofe);
         dynamic_cast<InterfaceElementBase *>(fe)->set_opposite_interface_element(dynamic_cast<BulkElementBase *>(ofe),std::vector<double>());
       }
 
