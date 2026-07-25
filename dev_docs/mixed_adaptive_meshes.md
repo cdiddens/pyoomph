@@ -855,6 +855,27 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
          the curved multi-domain droplet central-diff FD-check (`scratchpad/drop_fd_central.py tris`) still
          **exact**.
 
+   - **§4.9 — Flat evaporating-film positive control + a mesh-compression robustness edge case (`Scratchpad/flatfilm.py`).**
+     A minimal flat film (axisymmetric rectangle, `NavierStokesEquations` Taylor-Hood + `PseudoElasticMesh`
+     moving mesh + `NavierStokesFreeSurface(mass_transfer_rate=jevap)` with `jevap` smooth and zero at the
+     side wall — the droplet's `_kin_bc`/free-surface constraint but NO singular triple point) was built to
+     isolate whether tri adaptive re-adaptation of a moving-mesh evaporation problem works.
+       * **Positive control PASSES:** with a gentle rate (`JEVAP=0.04`) the film runs the full transient
+         t=0→1 to completion with tri spatial re-adaptation throughout (many refinements per step). So the
+         tri hanging/adaptation machinery IS production-ready for moving-mesh evaporation; the droplet's
+         re-adapt divergence (§4.7) really is the contact-line singularity, not a general tri-adapt bug.
+       * **Edge case found:** with an AGGRESSIVE rate (`JEVAP=0.2`, peaked on the axis) the film thins ~9× at
+         the axis, the moving mesh compresses that region until refined axis nodes cluster at ~0.0014 spacing
+         (finer than max-level-3 from the base, 0.0125), and at t=0.5 the geometric facet-hang detection forms
+         **two overlapping "coarse" edges on the compressed straight axis** (E_A=[0.0676,B], E_B=[A,0.0766],
+         overlapping in [A,B]) so A hangs on B and B hangs on A → **mutual hang cycle** (caught by the flatten
+         depth guard; NOT a use-after-free — reproduces with unrefinement disabled, no nodes freed). Root
+         cause = the `between` loop (`node_strictly_on_segment`) captures nodes by pure geometric collinearity,
+         which on a straight boundary with stacked/compressed refinement over-captures across levels. Fix (if
+         pursued): restrict `between` to topologically one-level-finer sub-edge nodes (or hang on the shortest
+         containing coarse edge) so overlapping coarse edges can't both capture. Deferred — it is an
+         extreme-compression robustness limitation, not a normal-operation bug.
+
 5. **Variable / anisotropic schemes** (§5): quad 1→2 (both directions), simplex
    bisection; directional error estimator; generalised balance rule.
 6. **MPI hardening** across all shapes; distributed adaptivity tests.
