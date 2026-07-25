@@ -798,13 +798,22 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
              (`drop_maxlevel2.py`; residual 1.58e10 — milder than level-3's 3e11 but still over the 1e10 cap),
              because the base tri mesh is already fine enough at the contact line that even shallow refinement
              tips it over.
+           - **A larger slip length does NOT help — it makes it worse** (`drop_slip.py`, sweep). L_slip
+             100 nm→1 µm→10 µm gives contact-line refinements ref 23→43→157 and still blows up
+             (residual 3e11 → 1.6e10 → 4.15e11). **Root reason (per problem owner): there are TWO singularities
+             at the pinned triple point — the hydrodynamic slip singularity AND an evaporative-flux singularity
+             (vapour-concentration gradient diverges there, coffee-ring edge singularity).** The slip length
+             regularises only the hydrodynamic one; the evaporative singularity is untouched, so it keeps
+             driving the contact-line error/refinement/ill-conditioning regardless of L_slip (and a wider slip
+             region even makes the estimator flag *more* elements). So slip length is not a lever here.
            - **Conclusion / open direction (physics/numerics, NOT a hanging/estimator bug):** the blocker is
              the slip-regularized contact-line constraint block going ill-conditioned as tri refinement drives
-             h toward L_slip = 100 nm. Chasing a true singularity with refinement is futile anyway. Fix belongs
-             at the problem/solver level: **region-specific** refinement cap or a minimum element size (~L_slip)
-             at the triple point (freeze/limit contact-line refinement — a global level cap is too blunt), a
-             block-preconditioned solve for the slip/kinematic/pressure/Lagrange constraint block, or a larger
-             L_slip. Deferred to the droplet problem owner; the hanging/adaptation machinery itself is correct.
+             h small at the triple point. Chasing a true singularity with refinement is futile anyway. Neither
+             a global `max_refinement_level` cap nor a larger L_slip fixes it (both tested). Fix belongs at the
+             problem/solver level: **region-specific** refinement cap or a minimum element size at the triple
+             point (freeze/limit contact-line refinement — the only lever that directly stops h shrinking
+             there), or a block-preconditioned solve for the slip/kinematic/pressure/Lagrange constraint block.
+             Deferred to the droplet problem owner; the hanging/adaptation machinery itself is correct.
 
    - **§4.8 — Tri hanging weights now come from the oomph "interpolating node" facilities (hybrid) [DONE].**
      Follow-up to §4.7: replace the hand-written linear/quadratic Lagrange weight formulas in
