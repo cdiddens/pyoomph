@@ -614,20 +614,35 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
        With macro elements off the throw does not occur.
      - **(C) A latent double-delete of reused opposite interior-facet elements [FIXED, commit 5309fee].**
        `opposite_interior_facets` held duplicate pointers on 2:1 non-conforming inter-domain facets.
-     - **(D) Inexact Jacobian on the adapted tri mesh [OPEN — remaining blocker for a full droplet run].**
-       With (A)-(C) resolved and macro elements off, `initialise()` succeeds but the droplet's
-       `presolve_gas_phase()` solve converges only **linearly** (residual ×~0.66 per Newton step, e.g.
-       3.4e-3→8.3e-5 over 10 steps, then hits the iteration cap) — the classic inexact-Jacobian signature.
-       Isolated by the reset-and-resolve residual oracle: it is caused by the **hanging nodes on the
-       refined tri mesh** (with `max_refinement_level=0` the same solve converges **quadratically** to
-       machine zero), but NOT by the bulk hanging Jacobian — verified machine-zero for tri Poisson
-       (Cartesian AND axisymmetric, C1/C2) and Stokes (CR/TH), and `get_nodal_s_in_father` only sets
-       values. That leaves the **inter-domain interface (droplet_gas mass-transfer) coupling Jacobian on
-       a refined tri mesh** (Face/opposite-element contributions across hanging interface nodes), and/or
-       the **moving-mesh (SolidNode/ALE) position hanging** (the pre-existing reverted gap). Next step:
-       reproduce with a minimal two-domain interface-coupled tri problem (bulk field on each side coupled
-       across a shared interface) under the residual oracle, and check how interface/opposite-face
-       elements assemble their Jacobian rows when the coupled bulk nodes hang.
+     - **(D) Position-hang ALE Jacobian on adapted moving-mesh tris [OPEN, ROOT-CAUSED — remaining blocker
+       for a full droplet run].** With (A)-(C) resolved and macro elements off, `initialise()` succeeds
+       but `presolve_gas_phase()` converges only **linearly** (residual ×~0.66/step → inexact Jacobian).
+       An FD Jacobian check on the full droplet system pinned the inexact rows to
+       **`d[droplet_gas/velocity]/d[droplet_gas/mesh_position]`** (7e-2 err) — the **ALE (moving-mesh)
+       coupling**, refinement-induced (unrefined = quadratic/exact). Reproduced minimally
+       (`scratchpad/move_fd.py`: `LaplaceSmoothedMesh` + `PoissonEquation(source=f(x))` on split-in-tris,
+       error-based adapt, FD-check): `d[u]/d[mesh]` off by ~200-1400. Isolation:
+       * **Conforming** refinement (`refine_uniformly`) → **exact** ALE Jacobian; only **hanging**
+         (non-conforming) refinement breaks it → it is the **position hanging**, not the son geometry.
+       * `fd_position_jacobian=0` here, so the **analytic** JIT position Jacobian is used.
+       * `fill_hang_info_with_equations_for_pos` (elements.cpp:608) **does** fill `hanginfo_Pos` correctly
+         (verified: a C2-quadratic position hang with masters/weights `-1(0.375) 4(0.75) -1(-0.125)`, the
+         two pinned boundary masters → -1, the free master → weight 0.75). The redistribution machinery
+         exists in the codegen (`PositionFiniteElementSpace::write_generic_RJM_jacobian_contribution`,
+         codegen.cpp:1850 → base, via `get_hanginfo_str`→`hanginfo_Pos`, codegen.cpp:1179-1191). **Yet the
+         field-equation `d[field]/d[position]` (ALE) Jacobian does not apply the position-hang
+         redistribution** to the master position dofs → the hanging-position column contribution is
+         dropped → inexact.
+       Because the codegen and `hanginfo_Pos` machinery are **shared with quads**, this is very likely a
+       **general** latent pyoomph bug (moving mesh + hanging position + analytic position Jacobian), not
+       tri-only — tri adaptivity just exposes it (quad adaptive moving-mesh problems commonly stay
+       conforming or use `fd_position_jacobian`). This connects to the earlier moving-mesh-tri Newton
+       failures (position/ALE work reverted). **Fix:** ensure the analytic ALE Jacobian
+       (`FiniteElementSpace::write_generic_RJM_jacobian_contribution`, codegen.cpp:~2295) redistributes
+       the **position column** through `hanginfo_Pos` for hanging position dofs, exactly as it already
+       does for hanging field dofs (rows). This is a careful, general codegen change (touches all Jacobian
+       generation) and should be done and validated on its own (moving-mesh + hanging FD-oracle for both
+       quads and tris) rather than rushed.
      **Net:** the reported **crash is fixed**; a full droplet run is still blocked by (D), the inexact
      Jacobian on the adapted tri mesh. Interim workaround for users needing the run now: force gmsh
      remeshing instead of tree refinement (`pyoomph/meshes/remesher.py`). Core tri refinement is unaffected
