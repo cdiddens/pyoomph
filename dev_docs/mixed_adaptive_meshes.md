@@ -577,31 +577,48 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
        messaging bug; symptom-patching yields silently wrong meshes and is intentionally NOT committed.
        Serial 3D tet adaptivity is unaffected and remains machine-zero.
 
-   * **§4.5 — Interface (Face) elements + tree-based triangle refinement [OPEN REGRESSION, serial].**
-     Reported crash: `pinned_water_droplet_tri_adapt.py` (a multi-domain droplet-on-substrate problem,
-     `mesh_mode="tris"`, moving mesh, `spatial_adapt`) aborts serially with `double free or corruption`
-     during `initialise()`. Diagnosed: it is a **regression introduced by this branch** — on `main`,
-     triangle meshes are not tree-refineable, so a problem's initial/spatial adaptation falls back to
-     gmsh **remeshing**; Phase 2 made `TemplatedMeshBase2d` triangle meshes tree-refineable, and the
-     droplet's initial adaptation now takes the tree-refinement path ("37 elements to be refined").
-     That path is broken when the bulk triangle mesh carries **interface (FaceElement) meshes**
-     (`InterfaceTElementLine1dC2`, `InterfaceElementPoint0d`) and a **moving mesh** (SolidNodes):
-     during the interface rebuild (`src/mesh.cpp` ~655-790: old Face elements `delete`d then
-     recreated via `construct_face_element`), two *distinct* Face-element objects end up sharing one
-     `GeneralisedElement::Eqn_number` allocation, so tearing the interface meshes down double-frees it
-     (`elements.cc:301`). Confirmed via global-freed-pointer instrumentation (`same=0` → different
-     objects, same `Eqn_number` ptr). **Reproduction is specific**: single-domain C2-tri + `NeumannBC`
-     + adapt does NOT crash; adding a moving mesh reproduces the *separate* known moving-mesh-tri Newton
-     failure; the double-free needs the multi-domain **inter-domain interface** + moving mesh + the
-     tree-refinement-during-initial-adapt combination. This ties into the same foundational gap as the
-     moving-mesh triangle adaptivity Newton failures (position work was reverted earlier for the same
-     root reason). **Not yet fixed.** Fix direction: make tree-based triangle refinement correctly
-     rebuild attached FaceElement/InterfaceMesh layers (and cooperate with SolidNode/ALE + the
-     remesher) the way quad refinement does. Interim workaround for users: force gmsh remeshing for
-     triangle adaptivity on such problems rather than tree refinement (verify the opt-out path in
-     `pyoomph/meshes/remesher.py`). The core tri refinement itself is unaffected
-     (`tests/test_triangle_refinement.py` 28/28 green) — those tests carry no interface elements, which
-     is the coverage gap that let this through.
+   * **§4.5 — Complex tri-adaptive problems (curved / moving / multi-domain) [OPEN, serial].**
+     Reported crash: `pinned_water_droplet_tri_adapt.py` (multi-domain droplet-on-substrate,
+     `mesh_mode="tris"`, moving mesh, curved surface, `spatial_adapt`) aborts serially with
+     `double free or corruption` during `initialise()`. **Regression introduced by this branch**: on
+     `main`, triangle meshes are not tree-refineable so adaptation falls back to gmsh **remeshing**;
+     Phase 2 made triangle meshes tree-refineable and the droplet's initial adaptation now takes the
+     tree path. Several **distinct** foundational gaps are exposed once tree-based tri refinement runs on
+     a mesh with FaceElement/InterfaceMesh layers, a moving mesh and curved (macro-element) boundaries.
+     Established by valgrind + a leak-test (skip `delete Object_pt` in `Tree::~Tree` → the abort turns
+     into a clean error) + targeted instrumentation:
+     - **(A) The crash [ROOT-CAUSED, not fixed].** `Tree::~Tree` (`tree.cc:132-139`) deletes `Object_pt`
+       only for **father** nodes (`nsons>0`); leaf elements live in `Mesh::Element_pt` and are deleted by
+       `Mesh::~Mesh`. Invariant: after adapt `Element_pt` holds **only leaves**. Valgrind shows a refined
+       **father is ALSO in `Element_pt`** (freed by `Tree::~Tree`, then re-deleted by `Mesh::~Mesh`
+       (mesh.cc:678) → use-after-free of a 600-byte element block → cascading heap corruption). Leaking
+       the father in `Tree::~Tree` makes the abort disappear, confirming the mechanism. The father does
+       NOT come from `adapt_mesh`'s leaf rebuild (`stick_leaves_into_vector` → `Element_pt`, verified
+       clean: 0 non-leaf entries right after rebuild). It enters `Element_pt` via a **non-adapt path** —
+       the forest flatten/rebuild (`setup_tree_forest` → oomph `setup_quadtree_forest`) and/or the
+       remesh / mesh-copy machinery leaves a tree node that later gains sons without an `Element_pt`
+       rebuild, or an old forest shares elements with a new one. Locating that exact site is the next
+       step. (Note the base-pointer subtlety: the tree holds `RefineableElement*` while `Element_pt`
+       holds `FiniteElement*`; the same object has *different* pointer values under multiple inheritance,
+       so identity checks must use `dynamic_cast<void*>` — and can't be done on the already-freed side.)
+     - **(B) `MACRO ELEM` unimplemented [KNOWN GAP].** `RefineableTElement<2>::build`
+       (`refineable_telements.cpp:736-745`) `throw`s "MACRO ELEM" when a triangle father carries a macro
+       element (curvilinear boundary) — explicitly "not yet implemented for triangles". The droplet's
+       curved surface uses macro elements, so a deeper adapt hits this. Fix: derive the son's
+       macro-element sub-region from the father's (the commented-out `s_macro_ll`/`s_macro_ur` formulas),
+       as the quad refineable elements do.
+     - **(C) A latent double-delete of reused opposite interior-facet elements [FIXED, commit 5309fee].**
+       See that commit: `opposite_interior_facets` held duplicate pointers on 2:1 non-conforming
+       inter-domain facets.
+     - **(D) Moving-mesh (SolidNode/ALE) tri adaptivity Newton failures** — the pre-existing foundational
+       gap already noted (position/ALE work was reverted earlier for the same root reason).
+     **Net:** the crash (A) is root-caused but not fixed; (B) and (D) are additional gaps the droplet also
+     needs. Complete support for curved+moving+multi-domain tri adaptivity is a multi-part effort. Interim
+     workaround: force gmsh remeshing instead of tree refinement for such problems
+     (`pyoomph/meshes/remesher.py`). Core tri refinement is unaffected
+     (`tests/test_triangle_refinement.py` 28/28) — no interface/macro/moving-mesh coverage there is the
+     gap that let this through; new tests should cover NeumannBC interfaces, macro-element boundaries and
+     moving meshes under tri refinement.
 
 5. **Variable / anisotropic schemes** (§5): quad 1→2 (both directions), simplex
    bisection; directional error estimator; generalised balance rule.
