@@ -1214,6 +1214,38 @@ namespace oomph
                 }
               }
 
+              // For a moving (Solid) mesh the new node is a SolidNode carrying
+              // Lagrangian (reference) coordinates. These are NOT touched by the
+              // Eulerian-position loop above, so without this they stay at their
+              // construct_node() default (0). LaplaceSmoothedMesh (and any
+              // solid-mechanics residual) is written in terms of the deformation
+              // x - xi, so a wrong xi makes the identity mesh look grossly
+              // deformed -> a large spurious residual/Jacobian on every refined
+              // element (even conforming, no hanging). Interpolate xi from the
+              // father, exactly as RefineableSolidQElement does for quads.
+              if (SolidNode *solid_node_pt = dynamic_cast<SolidNode *>(created_node_pt))
+              {
+                const unsigned n_lagr = solid_node_pt->nlagrangian();
+                // Interpolate the Lagrangian coordinates from the father with the SAME geometric
+                // shape functions used for the Eulerian position above (pyoomph stores the
+                // Lagrangian coords per node but does not register a Lagrangian dimension at the
+                // element level, so oomph's SolidFiniteElement::interpolated_xi returns 0 here --
+                // hence the manual interpolation).
+                const unsigned nnod = father_el_pt->nnode();
+                Shape psi(nnod);
+                father_el_pt->shape(s, psi);
+                for (unsigned i = 0; i < n_lagr; i++)
+                {
+                  double xi_i = 0.0;
+                  for (unsigned l = 0; l < nnod; l++)
+                  {
+                    if (SolidNode *fn = dynamic_cast<SolidNode *>(father_el_pt->node_pt(l)))
+                      xi_i += psi(l) * fn->xi(i);
+                  }
+                  solid_node_pt->xi(i) = xi_i;
+                }
+              }
+
               // Loop over all history values
               for (unsigned t = 0; t < ntstorage; t++)
               {
@@ -1716,6 +1748,27 @@ namespace oomph
         Vector<double> x_prev(3);
         father_el_pt->get_x(t, s, x_prev);
         for (unsigned d = 0; d < 3; d++) created_node_pt->x(t, d) = x_prev[d];
+      }
+      // Interpolate the Lagrangian (reference) coordinates from the father with the geometric
+      // shape functions -- see the 2d build for the full rationale. Without this, new tet nodes on
+      // a moving (Solid) mesh keep xi=0 while their Eulerian x is correct, so LaplaceSmoothedMesh /
+      // solid residuals see a spurious deformation on every refined element.
+      if (SolidNode *solid_node_pt = dynamic_cast<SolidNode *>(created_node_pt))
+      {
+        const unsigned n_lagr = solid_node_pt->nlagrangian();
+        const unsigned nnod = father_el_pt->nnode();
+        Shape psi(nnod);
+        father_el_pt->shape(s, psi);
+        for (unsigned i = 0; i < n_lagr; i++)
+        {
+          double xi_i = 0.0;
+          for (unsigned l = 0; l < nnod; l++)
+          {
+            if (SolidNode *fn = dynamic_cast<SolidNode *>(father_el_pt->node_pt(l)))
+              xi_i += psi(l) * fn->xi(i);
+          }
+          solid_node_pt->xi(i) = xi_i;
+        }
       }
       for (unsigned t = 0; t < ntstorage; t++)
       {

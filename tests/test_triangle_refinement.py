@@ -293,3 +293,47 @@ def test_stokes_triangle_unrefinement_residual_oracle(mode, tol):
         problem.solve()
         assert _max_abs_residual(problem) < tol
         assert nel > 150  # genuine (non-uniform) adaptation happened
+
+
+from pyoomph.equations.ALE import LaplaceSmoothedMesh
+
+
+# MOVING MESH (LaplaceSmoothedMesh): refined SolidNodes must inherit their Lagrangian (reference)
+# coordinates, interpolated from the father element. Historic bug: RefineableTElement<2>/<3>::build
+# set every new node's Eulerian position x but never its Lagrangian xi, so refined tri/tet nodes
+# kept xi=0 while x sat at the correct geometric midpoint. Mesh-smoothing/solid residuals are written
+# in terms of the deformation x - xi, so on the IDENTITY mesh (which has not moved) the residual was
+# grossly nonzero -- O(10) even for CONFORMING uniform refinement with zero hanging nodes. With all
+# boundary positions pinned, identity is the exact solution, so the residual right after refinement
+# (no solve) must be ~machine zero for ANY refinement pattern and any element shape.
+class _MovingMeshIdentity(Problem):
+    def __init__(self, split="left", refine_where="domain"):
+        super().__init__()
+        self._split, self._where = split, refine_where
+
+    def define_problem(self):
+        self += RectangularQuadMesh(name="domain", N=4, split_in_tris=self._split)
+        eqs = LaplaceSmoothedMesh()
+        eqs += PoissonEquation(source=0, space="C2")  # fixes the coordinate space to C2; u=0 is exact
+        eqs += DirichletBC(u=0) @ ["left", "right", "top", "bottom"]
+        # Pin ALL boundary positions -> the undeformed (identity) mesh is the exact solution.
+        eqs += DirichletBC(mesh_x=True, mesh_y=True) @ ["left", "right", "top", "bottom"]
+        if self._where == "top":
+            eqs += RefineToLevel(2) @ "top"  # refine only the top band -> 2:1 hanging interface
+        self += eqs @ "domain"
+        if self._where == "domain":
+            self += RefineToLevel(2) @ "domain"  # uniform (conforming) refinement of the whole mesh
+
+
+@pytest.mark.parametrize("split", [False, "left", "crossed"])  # False -> quads (regression baseline)
+@pytest.mark.parametrize("where", ["domain", "top"])  # "domain" -> conforming uniform, "top" -> 2:1 hanging
+def test_moving_mesh_refinement_identity_residual(split, where):
+    base = {False: 16, "left": 32, "crossed": 64}[split]
+    with _MovingMeshIdentity(split=split, refine_where=where) as problem:
+        problem.max_refinement_level = 3
+        problem.initialise()
+        m = problem.get_mesh("domain")
+        assert m.nelement() > base  # refinement actually happened
+        # No solve: the mesh has not moved, so identity is exactly the current state. Pre-fix this
+        # residual was O(10) for tris (any refinement); it must now be ~machine zero.
+        assert _max_abs_residual(problem) < 1e-10

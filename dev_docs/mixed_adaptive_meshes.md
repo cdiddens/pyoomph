@@ -614,41 +614,76 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
        With macro elements off the throw does not occur.
      - **(C) A latent double-delete of reused opposite interior-facet elements [FIXED, commit 5309fee].**
        `opposite_interior_facets` held duplicate pointers on 2:1 non-conforming inter-domain facets.
-     - **(D) Position-hang ALE Jacobian on adapted moving-mesh tris [OPEN, ROOT-CAUSED — remaining blocker
-       for a full droplet run].** With (A)-(C) resolved and macro elements off, `initialise()` succeeds
-       but `presolve_gas_phase()` converges only **linearly** (residual ×~0.66/step → inexact Jacobian).
-       An FD Jacobian check on the full droplet system pinned the inexact rows to
-       **`d[droplet_gas/velocity]/d[droplet_gas/mesh_position]`** (7e-2 err) — the **ALE (moving-mesh)
-       coupling**, refinement-induced (unrefined = quadratic/exact). Reproduced minimally
-       (`scratchpad/move_fd.py`: `LaplaceSmoothedMesh` + `PoissonEquation(source=f(x))` on split-in-tris,
-       error-based adapt, FD-check): `d[u]/d[mesh]` off by ~200-1400. Isolation:
-       * **Conforming** refinement (`refine_uniformly`) → **exact** ALE Jacobian; only **hanging**
-         (non-conforming) refinement breaks it → it is the **position hanging**, not the son geometry.
-       * `fd_position_jacobian=0` here, so the **analytic** JIT position Jacobian is used.
-       * `fill_hang_info_with_equations_for_pos` (elements.cpp:608) **does** fill `hanginfo_Pos` correctly
-         (verified: a C2-quadratic position hang with masters/weights `-1(0.375) 4(0.75) -1(-0.125)`, the
-         two pinned boundary masters → -1, the free master → weight 0.75). The redistribution machinery
-         exists in the codegen (`PositionFiniteElementSpace::write_generic_RJM_jacobian_contribution`,
-         codegen.cpp:1850 → base, via `get_hanginfo_str`→`hanginfo_Pos`, codegen.cpp:1179-1191). **Yet the
-         field-equation `d[field]/d[position]` (ALE) Jacobian does not apply the position-hang
-         redistribution** to the master position dofs → the hanging-position column contribution is
-         dropped → inexact.
-       Because the codegen and `hanginfo_Pos` machinery are **shared with quads**, this is very likely a
-       **general** latent pyoomph bug (moving mesh + hanging position + analytic position Jacobian), not
-       tri-only — tri adaptivity just exposes it (quad adaptive moving-mesh problems commonly stay
-       conforming or use `fd_position_jacobian`). This connects to the earlier moving-mesh-tri Newton
-       failures (position/ALE work reverted). **Fix:** ensure the analytic ALE Jacobian
-       (`FiniteElementSpace::write_generic_RJM_jacobian_contribution`, codegen.cpp:~2295) redistributes
-       the **position column** through `hanginfo_Pos` for hanging position dofs, exactly as it already
-       does for hanging field dofs (rows). This is a careful, general codegen change (touches all Jacobian
-       generation) and should be done and validated on its own (moving-mesh + hanging FD-oracle for both
-       quads and tris) rather than rushed.
-     **Net:** the reported **crash is fixed**; a full droplet run is still blocked by (D), the inexact
-     Jacobian on the adapted tri mesh. Interim workaround for users needing the run now: force gmsh
-     remeshing instead of tree refinement (`pyoomph/meshes/remesher.py`). Core tri refinement is unaffected
-     (`tests/test_triangle_refinement.py` 28/28) — no interface/macro/moving-mesh coverage there is the
-     gap that let this through; new tests should cover NeumannBC interfaces, macro-element boundaries and
-     moving meshes under tri refinement.
+     - **(D) Position-hang ALE Jacobian on adapted moving-mesh tris [NOT A BUG — the analytic ALE Jacobian
+       is EXACT for both quads and tris; the earlier "inexact" finding was an FD-oracle artifact].**
+       An earlier forward-difference FD Jacobian check reported the tri ALE coupling
+       `d[field]/d[mesh_position]` as inexact on adapted (hanging) tri meshes (off by ~200-1400) and only
+       for hanging (non-conforming) refinement. **This was a false positive caused by forward-difference
+       truncation on stiff entries, not a real Jacobian defect.** Definitive minimal test
+       (`scratchpad/ale_rect.py`: `LaplaceSmoothedMesh` + `PoissonEquation(source=f(x), space="C2")` on a
+       compressed rectangle, prescribed/error-based refinement, quad **and** tri):
+       * `hanginfo_Pos` is filled **correctly** for both shapes — verified by direct dump: a C2-quadratic
+         position hang whose masters are the coarse edge's 3 nodes with the correct quadratic Lagrange
+         weights (e.g. tri hang node at edge-param t=0.8 → weights `{-0.12, 0.64, 0.48}`; quad at t=0.75 →
+         `{-0.125, 0.75, 0.375}`), valid master local-eqns, `pos_local_eqn=-2` for the hanging node.
+       * The codegen redistribution (`PositionFiniteElementSpace::write_generic_RJM_jacobian_contribution`,
+         codegen.cpp:1850; via `get_hanginfo_str`→`hanginfo_Pos`) **is** applied for both.
+       * **eps sweep + central difference (`scratchpad/eps_sweep.py`) proves the analytic Jacobian is
+         correct**: the tri's *relative* forward-difference error (~8e-4) is **identical** to the quad's,
+         and it scales **linearly with eps** (3738 → 376 → 37.7 → 3.8 as eps 1e-6→1e-9) — the textbook
+         signature of O(eps·f″) truncation. **Central difference at eps=1e-7 matches the analytic to
+         ~6.5e-7 relative (tri) / ~5.8e-9 (quad).** The tri only *looked* worse in absolute terms because
+         refinement+compression produces a small distorted element → a stiff entry (analytic ≈ 4.6e5 vs
+         quad's ≈ 55), so the same relative truncation shows up as a large absolute number.
+       * With a **central-difference relative** FD-oracle, **all** cases (quad/tri × uniform/selected/
+         error-based-adapt, with hanging nodes) are **exact**.
+       **Lesson:** the forward-difference FD-oracle (`move_fd.py`, and earlier droplet checks) gives false
+       positives on stiff moving-mesh entries; always use central differences with a relative tolerance for
+       ALE Jacobian verification. The core adaptive ALE machinery (position hanging + analytic position
+       Jacobian) is correct for tris.
+     **Net:** the reported **crash is fixed** and the core adaptive-tri ALE Jacobian is **exact**. The
+     droplet's separately-observed slow (×0.66) `presolve_gas_phase()` Newton was previously attributed to
+     (D) via the same forward-difference oracle; since (D) is now disproven, that attribution is void and
+     the droplet's slow Newton (if it reproduces) must be **re-investigated with a central-difference
+     oracle** — likely a different term (interface/opposite-side coupling) or genuine stiffness/conditioning
+     from the distorted adapted mesh, **not** the ALE position hang. Core tri refinement is unaffected
+     (`tests/test_triangle_refinement.py` 28/28); the coverage gap that let the misdiagnosis stand is the
+     absence of a **central-difference** moving-mesh + hanging FD-oracle regression test (for both quads and
+     tris) — that should be added.
+   - **§4.6 — Refined tri/tet nodes were missing their interpolated Lagrangian coordinates on moving
+     meshes [ROOT-CAUSED + FIXED, `src/refineable_telements.cpp`].** Repro
+     `pyoomph_runs/Bugs/TriAdapt/adapt_test.py` (`RectangularQuadMesh(split_in_tris="crossed")` +
+     `LaplaceSmoothedMesh` + Taylor-Hood Stokes + `RefineToLevel(1)@"top"`; `p.solve(); p.adapt();
+     p.solve()`): quads take 1 Newton step post-adapt; **tris took 2 steps or diverged to ~1e20,
+     non-deterministically** (valgrind clean).
+       * **Root cause:** `RefineableTElement<2>::build` (and `<3>::build`) set every new node's Eulerian
+         position `x` (via `father->get_x`) and field values, but **never set the Lagrangian/reference
+         coordinates `xi`** — so new tri/tet nodes kept `xi=0` while their `x` sat at the correct geometric
+         midpoint (verified: 1752 nodes with `x≠xi`, worst discrepancy 0.5; quads had 0). `LaplaceSmoothedMesh`
+         (and any solid residual) is written in terms of the deformation `x − xi`, so the identity mesh looked
+         grossly deformed → a **spurious mesh residual** (`27.5` on `mesh_x`; the identity-mesh test residual
+         was `17.5` even for *conforming* `refine_uniformly` with **zero** hanging nodes — proving it was not a
+         hanging-interface issue). This both (a) drove the mesh to move — activating the weakly-nonlinear
+         `bulkforce` coupling → multi-step Newton — and (b) blew the conditioning up to cond ≈2e8 (`smax`
+         11670), on which MKL Pardiso non-deterministically produced a garbage factorization (`||J·dx+r||~1e20`).
+         Those were **downstream symptoms**, not the disease: scipy SuperLU always solved the (spurious) matrix
+         cleanly, which is why the earlier investigation mis-attributed it to "Pardiso fragility."
+       * **Fix:** in both build methods, interpolate `xi` from the father with the same geometric shape
+         functions used for `x`, guarded on `dynamic_cast<SolidNode*>`. (Note: oomph's
+         `SolidFiniteElement::interpolated_xi` returns 0 here because pyoomph carries the Lagrangian coords per
+         node but does not register a Lagrangian dimension at the element level — hence the manual shape-based
+         interpolation. This mirrors what `RefineableSolidQElement` does for quads via `get_x_and_xi`.)
+       * **Verified after fix:** identity-mesh residual `17.5 → 1e-16`; `x≠xi` count `1752 → 0`; post-adapt
+         residual `27.5 → 0.37` (genuine interpolation error, same scale as quads); **1-step convergence** with
+         umfpack; cond `2e8 → 2.7e6` (now on par with quads); Pardiso robust **12/12** (crossed) and 3/3
+         (alternate_left/right); `tests/test_triangle_refinement.py` **28/28**.
+       * This is almost certainly the true cause of the earlier "droplet slow-Newton (×0.66)" (§4.5(D)) and
+         any other tri-adaptive **moving-mesh** slowness: the FD-oracle there passed because the Jacobian is
+         self-consistent with the (spurious) residual — an FD check verifies dJ/dx, not that the residual
+         itself is physically zero, so it cannot catch a wrong-`xi` residual. Re-test the droplet on this fix.
+       * The coverage gap that hid this: `tests/test_triangle_refinement.py` had no **moving-mesh**
+         (`LaplaceSmoothedMesh`/solid) case. Add an identity-mesh regression: pin all boundary positions, refine
+         (uniform and 2:1), assert the mesh residual is ~machine-zero for both quads and tris.
 
 5. **Variable / anisotropic schemes** (§5): quad 1→2 (both directions), simplex
    bisection; directional error estimator; generalised balance rule.
