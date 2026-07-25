@@ -3834,10 +3834,21 @@ namespace oomph
                       el_pt->get_x(t, s, x_exp);
 
                       // Get actual position
+                      // NOTE(pyoomph): compare like-for-like at the SAME
+                      // history level t. The original oomph-lib code read the
+                      // current position nod_pt->x(dir) here while x_exp is
+                      // interpolated at history level t via get_x(t,...). On
+                      // meshes whose position history at t>=1 is left at zero
+                      // (e.g. simplex meshes on stationary problems, where
+                      // ntstorage()>1 but only t=0/1 are initialised) this
+                      // falsely flagged every non-hanging node as "position
+                      // differs", generating spurious halo synchronisation
+                      // records. Reading x(t,dir) makes the comparison
+                      // consistent so conforming nodes are not flagged.
                       Vector<double> x_act(n_dim);
                       for (unsigned dir = 0; dir < n_dim; dir++)
                       {
-                        x_act[dir] = nod_pt->x(dir);
+                        x_act[dir] = nod_pt->x(t, dir);
                       }
 
                       // Compare actual and expected positions

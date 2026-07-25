@@ -514,6 +514,43 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
      zero); quad `ConstrainFieldsToC1Space` unchanged; full suite green
      (`test_constrained_field_unrefinement`).
 
+   * **§4.4 — MPI distributed adaptivity (`--petsc_mumps --distribute`) [2D DONE; 3D tet BLOCKED].**
+     Validated distributed (real METIS-partitioned meshes, MUMPS since Pardiso is not MPI-capable)
+     via the reset/resolve residual oracle on `get_last_residual_convergence()` (NOT `get_residuals()`,
+     which returns garbage for non-owned dofs under MPI). **2D machine-zero, all cases:** triangle
+     Poisson C1 (3-rank final_res 6.9e-16, integral 0.4425747) and C2 (1.2e-15); Stokes TH
+     (final_res 1.3e-15, ke matches serial) and CR (1.5e-15). **3D tets: serial machine-zero, but
+     distributed refinement fails** — root-caused to two distinct bugs in oomph-lib's distributed
+     halo synchronisation, exposed because simplex meshes carry `ntstorage()>1` position storage with
+     only t=0/1 initialised (t>=2 left at zero), which 2D happens to tolerate and 3D does not:
+     - **Bug A [FIXED].** `TreeBasedRefineableMeshBase::synchronise_nonhanging_nodes`
+       (`refineable_mesh.cc`) compared the node's **current** position `nod_pt->x(dir)` against
+       `x_exp = get_x(t, s)` interpolated at **history level t**. With history t>=2 = 0, every
+       non-vertex node was falsely flagged as "position differs" (dmax ~0.5, not roundoff), emitting
+       ~250 spurious halo records per rank. For 3D tets the resulting send/recv unsigned stream
+       desynced by one entry -> one rank throws `recv_unsigneds_count != recv_unsigneds_index`
+       (`refineable_mesh.cc:3777`) while its peer blocks in `MPI_Recv` -> **deadlock**. 2D triangles
+       hit the same spurious flagging but did not desync, so they "worked". Fix: read `nod_pt->x(t, dir)`
+       so the comparison is like-for-like at each history level; conforming nodes are then never
+       flagged and nothing is sent (verified: send count 0). This is a genuine oomph-lib bug; the
+       one-line fix is regression-clean (2D Poisson C1/C2 + Stokes TH/CR distributed still machine-zero,
+       serial unchanged since the function is MPI-only).
+     - **Bug B [OPEN, blocks 3D tet distributed].** With Bug A fixed the deadlock is gone but a deeper
+       fault surfaces: during real h-refinement an **unmatched tag-0 message (3 uints, rank0->rank1)**
+       is left pending in the queue by the upstream base `Mesh::classify_halo_and_haloed_nodes`
+       (confirmed by `MPI_Iprobe` at `synchronise_hanging_nodes` entry). Whichever next tag-0 consumer
+       runs grabs it: `synchronise_nonhanging_nodes` misreads it as a count -> resizes to garbage ->
+       **segfault**; give that function unique tags and the poison instead lands in
+       `synchronise_hanging_nodes` -> **hang**. The stray message means the base classify's
+       per-node processor-association send/recv (`mesh.cc:3483/3505`, keyed on
+       haloed/halo element correspondence) is **unbalanced for tets** — the same "tet halo/haloed
+       element lists are not consistently ordered/populated" family as the other simplex-distribution
+       gaps. Proper fix requires making the distributed tet halo/haloed correspondence consistent (a
+       substantial oomph-internals task); MPI tracing is hampered here because the sandbox blocks
+       live gdb/ptrace, so this was pinpointed by C++ `MPI_Iprobe`/checkpoint instrumentation.
+     - **Net:** 2D distributed adaptivity (all element types) is production-ready; 3D tet distributed
+       adaptivity is blocked on Bug B. Serial 3D tet adaptivity is unaffected and remains machine-zero.
+
 5. **Variable / anisotropic schemes** (§5): quad 1→2 (both directions), simplex
    bisection; directional error estimator; generalised balance rule.
 6. **MPI hardening** across all shapes; distributed adaptivity tests.
