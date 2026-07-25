@@ -8615,7 +8615,85 @@ namespace pyoomph
 	{
 		psi[0] = s[0];
 		psi[1] = s[1];
-		psi[2] = 1.0 - s[0] - s[1];	
+		psi[2] = 1.0 - s[0] - s[1];
+	}
+
+	// --- oomph "interpolating node" facilities for mixed-order (C1-on-C2) hanging on triangles ---
+	// A value_id belongs to a C1/C1TB field iff it is >= the number of C2/C2TB base-bulk fields.
+	namespace
+	{
+		inline bool tri_value_is_C1(DynamicBulkElementInstance *codeinst, const int &value_id)
+		{
+			auto *ft = codeinst->get_func_table();
+			return value_id >= static_cast<int>(ft->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk + ft->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk);
+		}
+	}
+
+	// For a C1 field the interpolating nodes are the 3 corner vertices; for a C2 field they are the
+	// element's geometric nodes. Set up the hanging scheme for every C1 value id (mirrors the quad).
+	void BulkElementTri2dC2::further_setup_hanging_nodes()
+	{
+		BulkElementBase::further_setup_hanging_nodes();
+		auto *ft = codeinst->get_func_table();
+		if (ft->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk || ft->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk)
+		{
+			unsigned nC2 = ft->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk + ft->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk;
+			for (unsigned i = nC2; i < ncont_interpolated_values(); i++)
+			{
+				this->setup_hang_for_value(i);
+			}
+		}
+	}
+
+	oomph::Node *BulkElementTri2dC2::interpolating_node_pt(const unsigned &n, const int &value_id)
+	{
+		if (tri_value_is_C1(codeinst, value_id))
+			return this->node_pt(this->get_nodal_space_index_to_element_index_map()[SPACE_INDEX_C1][n]);
+		return this->node_pt(n);
+	}
+
+	// Triangles are not a tensor product, so there is no genuine 1d fraction; the tri hang helper does
+	// not use this (it works off the barycentric edge parametrisation). Kept for interface compatibility:
+	// C1 corner nodes sit at the ends (0 or 1); C2 delegates to the standard node fraction.
+	double BulkElementTri2dC2::local_one_d_fraction_of_interpolating_node(const unsigned &n1d, const unsigned &i, const int &value_id)
+	{
+		if (tri_value_is_C1(codeinst, value_id))
+			return double(n1d);
+		return this->local_one_d_fraction_of_node(n1d, i);
+	}
+
+	oomph::Node *BulkElementTri2dC2::get_interpolating_node_at_local_coordinate(const oomph::Vector<double> &s, const int &value_id)
+	{
+		if (tri_value_is_C1(codeinst, value_id))
+		{
+			// C1 corners: node 0 at s=(1,0), node 1 at s=(0,1), node 2 at s=(0,0) (cf. shape_at_s_C1).
+			const double tol = oomph::FiniteElement::Node_location_tolerance;
+			const std::vector<unsigned> &c1map = this->get_nodal_space_index_to_element_index_map()[SPACE_INDEX_C1];
+			if (std::abs(s[0] - 1.0) < tol && std::abs(s[1]) < tol) return this->node_pt(c1map[0]);
+			if (std::abs(s[0]) < tol && std::abs(s[1] - 1.0) < tol) return this->node_pt(c1map[1]);
+			if (std::abs(s[0]) < tol && std::abs(s[1]) < tol) return this->node_pt(c1map[2]);
+			return 0;
+		}
+		return this->get_node_at_local_coordinate(s);
+	}
+
+	unsigned BulkElementTri2dC2::ninterpolating_node_1d(const int &value_id)
+	{
+		if (tri_value_is_C1(codeinst, value_id)) return 2;
+		return this->nnode_1d();
+	}
+
+	unsigned BulkElementTri2dC2::ninterpolating_node(const int &value_id)
+	{
+		if (tri_value_is_C1(codeinst, value_id)) return 3;
+		return this->nnode();
+	}
+
+	void BulkElementTri2dC2::interpolating_basis(const oomph::Vector<double> &s, oomph::Shape &psi, const int &value_id) const
+	{
+		if (tri_value_is_C1(codeinst, value_id))
+			return this->shape_at_s_C1(s, psi);
+		return this->shape(s, psi);
 	}
 
 	void BulkElementTri2dC2::dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const

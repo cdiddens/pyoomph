@@ -1487,7 +1487,17 @@ namespace pyoomph
     void output(std::ostream &outfile, const unsigned &n_plot) override { BulkElementBase::output(outfile, n_plot); }
     unsigned nvertex_node() const override { return oomph::TElement<2, 3>::nvertex_node(); }
     oomph::Node *vertex_node_pt(const unsigned &j) const override { return TElement<2, 3>::vertex_node_pt(j); }
-    void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
+    // oomph "interpolating node" facilities for mixed-order (C1-on-C2) hanging, analogous to
+    // BulkElementQuad2dC2. For C1/C1TB value ids the interpolating nodes are the 3 corner vertices with
+    // the linear (barycentric) basis; for C2/C2TB value ids they are the geometric nodes with the
+    // quadratic basis. Used by RefineableTElement<2>::setup_hang_for_value / tri_hang_helper.
+    void further_setup_hanging_nodes() override;
+    oomph::Node *interpolating_node_pt(const unsigned &n, const int &value_id) override;
+    double local_one_d_fraction_of_interpolating_node(const unsigned &n1d, const unsigned &i, const int &value_id) override;
+    oomph::Node *get_interpolating_node_at_local_coordinate(const oomph::Vector<double> &s, const int &value_id) override;
+    unsigned ninterpolating_node_1d(const int &value_id) override;
+    unsigned ninterpolating_node(const int &value_id) override;
+    void interpolating_basis(const oomph::Vector<double> &s, oomph::Shape &psi, const int &value_id) const override;
     BulkElementBase *create_son_instance() const override;
     double factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance) override;
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 2, order)); }
