@@ -415,6 +415,36 @@ namespace pyoomph
     }
 
     FacetAdjacencyMap adj = this->build_facet_adjacency();
+
+    // Topological hanging detection (PYOOMPH_TRI_HANG_TOPO). oomph's quad hanging finds the fine nodes on
+    // a coarse edge purely from the tree; for tris the tree descent (gteq_edge_neighbour) is unreliable,
+    // but the SAME "which fine nodes sit on this coarse edge" question can be answered topologically from
+    // the facet adjacency, avoiding the geometric collinearity test that over-captures on a straight
+    // boundary squeezed by a moving mesh (dev_docs 4.9). The fine midpoint of a coarse edge {P,Q} is the
+    // unique vertex V with {P,V} and {V,Q} both facets. 0 = geometric (default), 1 = topological,
+    // 2 = validate (run both, compare node sets, use geometric).
+    static const int tri_hang_topo = []() {
+      const char *e = getenv("PYOOMPH_TRI_HANG_TOPO");
+      if (!e) return 0;
+      if (std::string(e) == "topo") return 1;
+      if (std::string(e) == "validate") return 2;
+      return 0;
+    }();
+    std::map<pyoomph::Node *, std::vector<pyoomph::Node *>> edge_nbr; // vertex -> vertices it shares an edge with
+    if (tri_hang_topo != 0)
+      for (const auto &kv : adj)
+      {
+        if (kv.first.size() != 2) continue;
+        auto it2 = kv.first.begin();
+        pyoomph::Node *a = *it2; ++it2; pyoomph::Node *b = *it2;
+        edge_nbr[a].push_back(b);
+        edge_nbr[b].push_back(a);
+      }
+    auto is_facet = [&](pyoomph::Node *a, pyoomph::Node *b) -> bool {
+      std::set<pyoomph::Node *> key; key.insert(a); key.insert(b);
+      return adj.find(key) != adj.end();
+    };
+
     for (const auto &kv : adj)
     {
       if (kv.second.size() != 1) continue; // conforming interior facet (2), or a fine sub-edge
@@ -444,6 +474,78 @@ namespace pyoomph
         if (!on && edge_mid) on = node_strictly_on_quadratic_edge(P, edge_mid, Q, X, t);
         if (on) between.push_back(std::make_pair(X, t));
       }
+      // Topological reconstruction of the SAME `between` list, with no geometry: the fine midpoint vertex
+      // V of the coarse edge {P,Q} is the unique vertex with {P,V} and {V,Q} both facets; for a C2 coarse
+      // edge the two fine sub-edge mid-nodes hang at t=0.25 and 0.75 (V itself is the shared coarse mid at
+      // t=0.5). This cannot over-capture unrelated collinear nodes on a compressed straight boundary.
+      std::vector<std::pair<oomph::Node *, double>> between_topo;
+      if (tri_hang_topo != 0)
+      {
+        pyoomph::Node *Pp = dynamic_cast<pyoomph::Node *>(P), *Qp = dynamic_cast<pyoomph::Node *>(Q);
+        // coarse_el's OWN third vertex forms a triangle {P,Wc,Q}, so it too satisfies {P,Wc}&{Wc,Q};
+        // it must be excluded -- the fine subdivision midpoint is the OTHER common neighbour (which does
+        // NOT form a triangle with {P,Q}, since the coarse edge is incident on only coarse_el).
+        oomph::Node *Wc = nullptr;
+        if (oomph::TElementBase *cte = dynamic_cast<oomph::TElementBase *>(coarse_el))
+          for (unsigned k = 0; k < 3; k++)
+          {
+            oomph::Node *vk = cte->vertex_node_pt(k);
+            if (vk != P && vk != Q) Wc = vk;
+          }
+        // Candidates = vertices adjacent (by a facet) to BOTH P and Q, excluding coarse_el's own third
+        // vertex Wc. On a collinear boundary chain this pattern also matches nodes BEYOND the segment
+        // (e.g. a fine sub-edge {A,M} finding the far coarse vertex B), so disambiguate with a single
+        // between-check on this SMALL candidate set -- unlike the all-nodes geometric scan it cannot
+        // over-capture, because a conforming (compressed) region yields no candidate at all.
+        pyoomph::Node *V = nullptr;
+        if (Pp && Qp)
+        {
+          auto nit = edge_nbr.find(Pp);
+          if (nit != edge_nbr.end())
+            for (pyoomph::Node *cand : nit->second)
+            {
+              if (cand == Qp || static_cast<oomph::Node *>(cand) == Wc || !is_facet(cand, Qp)) continue;
+              double tc;
+              oomph::Node *cn = static_cast<oomph::Node *>(cand);
+              bool betw = node_strictly_on_segment(P, Q, cn, tc);
+              if (!betw && edge_mid) betw = node_strictly_on_quadratic_edge(P, edge_mid, Q, cn, tc);
+              if (betw) { V = cand; break; }
+            }
+        }
+        if (V)
+        {
+          between_topo.push_back(std::make_pair(static_cast<oomph::Node *>(V), 0.5));
+          if (order_1d > 2) // C2: the two fine half-edges' mid-nodes hang at t=0.25 and 0.75
+          {
+            std::set<pyoomph::Node *> kPV{Pp, V}, kVQ{V, Qp};
+            auto itPV = adj.find(kPV), itVQ = adj.find(kVQ);
+            if (itPV != adj.end() && !itPV->second.empty())
+              if (oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(itPV->second[0].first))
+                if (oomph::Node *m1 = coarse_edge_mid_node(fe, P, static_cast<oomph::Node *>(V))) between_topo.push_back(std::make_pair(m1, 0.25));
+            if (itVQ != adj.end() && !itVQ->second.empty())
+              if (oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(itVQ->second[0].first))
+                if (oomph::Node *m2 = coarse_edge_mid_node(fe, static_cast<oomph::Node *>(V), Q)) between_topo.push_back(std::make_pair(m2, 0.75));
+          }
+        }
+      }
+      if (tri_hang_topo == 2) // cross-validate: geometric vs topological node sets
+      {
+        // Exclude the coarse element's own C2 mid-node (edge_mid): the geometric scan always picks it up
+        // as "between" P and Q (it is skipped later as a shared node), but the topological scan only
+        // includes it at a genuine 2:1 interface. Comparing without it avoids that false mismatch.
+        std::set<oomph::Node *> sg, st;
+        for (auto &xt : between) if (xt.first != edge_mid) sg.insert(xt.first);
+        for (auto &xt : between_topo) if (xt.first != edge_mid) st.insert(xt.first);
+        if (sg != st)
+        {
+          std::cout << "[tri-hang topo-validate] MISMATCH edge (" << P->x(0) << "," << P->x(1) << ")-(" << Q->x(0) << "," << Q->x(1) << ") geom=" << sg.size() << " topo=" << st.size() << ":";
+          for (auto *n : sg) if (!st.count(n)) std::cout << " geom-only(" << n->x(0) << "," << n->x(1) << ")";
+          for (auto *n : st) if (!sg.count(n)) std::cout << " topo-only(" << n->x(0) << "," << n->x(1) << ")";
+          std::cout << std::endl;
+        }
+      }
+      if (tri_hang_topo == 1) between.swap(between_topo); // use the topological list
+
       if (between.empty()) continue; // a genuine (conforming) boundary/interior edge, nothing hangs
 
       // Hanging weights come from the coarse element's OWN interpolation, read through the oomph

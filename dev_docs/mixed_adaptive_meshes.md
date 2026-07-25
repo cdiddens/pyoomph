@@ -876,6 +876,26 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
          containing coarse edge) so overlapping coarse edges can't both capture. Deferred — it is an
          extreme-compression robustness limitation, not a normal-operation bug.
 
+   - **§4.10 — Topological hanging detection (`PYOOMPH_TRI_HANG_TOPO`, WIP behind flag).** How oomph's
+     quad `quad_hang_helper` works: for each interpolating node on my edge it asks the (tree-found) coarse
+     neighbour "do you have a node here?" (`get_interpolating_node_at_local_coordinate`); if not → it hangs,
+     masters = neighbour `interpolating_basis`. That is exactly pyoomph's hybrid per-field loop already; only
+     the *fine-node selection* still uses geometry (`node_strictly_on_segment`), the part that over-captures
+     under compression (§4.9). Replacement (mesh2d.cpp, flag: 0=geometric default, 1=topological,
+     2=validate): the fine midpoint V of a coarse edge {P,Q} is the vertex adjacent (by a facet) to BOTH P
+     and Q, **excluding coarse_el's own third vertex Wc** (which also forms {P,Wc}&{Wc,Q}); a small
+     between-check on that tiny candidate set disambiguates collinear-chain matches (a fine sub-edge {A,M}
+     otherwise finds the far coarse vertex B). For C2, V's two half-edges give the fine sub-edge mid-nodes.
+     STATUS: `validate` reports **0 node-set mismatches across the whole tri suite**, and `topo` mode gets the
+     aggressive flat film **past t=0.5** (fixes the §4.9 compression cycle). BUT `topo` mode fails 3
+     CR-error-adaptivity tests with an OomphException (31/34): pyoomph's tri refinement makes the fine
+     midpoint **vertex** V a *distinct node coincident with* the coarse C2 mid-node M, and the topological
+     `between` handles that pair differently from the geometric scan for the C1(TB)/DL pressure slot — a
+     difference the node-set `validate` **masks** because it excludes `edge_mid`. To finish: compare the
+     FINAL per-slot HangInfo (not node sets), then handle the coincident fine-vertex/coarse-mid pair
+     explicitly (or make `father_edge_node_key` provenance persistent so the midpoint is identified with zero
+     geometry). Default stays geometric (34/34) until topo passes everything.
+
 5. **Variable / anisotropic schemes** (§5): quad 1→2 (both directions), simplex
    bisection; directional error estimator; generalised balance rule.
 6. **MPI hardening** across all shapes; distributed adaptivity tests.
