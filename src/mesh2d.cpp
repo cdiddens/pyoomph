@@ -252,6 +252,80 @@ namespace pyoomph
       const double d2 = (X->x(0) - projx) * (X->x(0) - projx) + (X->x(1) - projy) * (X->x(1) - projy);
       return d2 <= 1e-14 * len2; // hanging nodes sit exactly on the coarse edge (straight-sided)
     }
+
+    // Curvature-aware analogue of node_strictly_on_segment for a QUADRATIC (C2) coarse edge whose
+    // three nodes are P (t=0), M (t=0.5) and Q (t=1). On a gmsh-generated / macro curved mesh a fine
+    // node on such an edge lies on the parabola through {P,M,Q}, NOT on the straight chord P-Q, so the
+    // straight-chord test above wrongly rejects it (observed: 1428 rejected C1 nodes on the droplet gas
+    // mesh, leaving them unhung -> missing Jacobian couplings). We locate the parameter t of X on the
+    // quadratic by Newton-minimising |X - C(t)|^2 (C(t)=N0 P + N1 M + N2 Q, quadratic Lagrange), then
+    // accept if the closest-point residual is machine-small relative to the edge length.
+    bool node_strictly_on_quadratic_edge(oomph::Node *P, oomph::Node *M, oomph::Node *Q, oomph::Node *X, double &t)
+    {
+      const double px = P->x(0), py = P->x(1), mx = M->x(0), my = M->x(1), qx = Q->x(0), qy = Q->x(1);
+      const double xx = X->x(0), xy = X->x(1);
+      const double dx = qx - px, dy = qy - py;
+      const double len2 = dx * dx + dy * dy;
+      if (len2 < 1e-30) return false;
+      t = ((xx - px) * dx + (xy - py) * dy) / len2; // chord-projection initial guess
+      const double d2cx = 4.0 * (px - 2.0 * mx + qx), d2cy = 4.0 * (py - 2.0 * my + qy); // C''(t) (constant)
+      for (int iter = 0; iter < 40; iter++)
+      {
+        const double dN0 = 4.0 * t - 3.0, dN1 = 4.0 - 8.0 * t, dN2 = 4.0 * t - 1.0;
+        const double N0 = 2.0 * (t - 0.5) * (t - 1.0), N1 = 4.0 * t * (1.0 - t), N2 = 2.0 * t * (t - 0.5);
+        const double cx = N0 * px + N1 * mx + N2 * qx, cy = N0 * py + N1 * my + N2 * qy;
+        const double dcx = dN0 * px + dN1 * mx + dN2 * qx, dcy = dN0 * py + dN1 * my + dN2 * qy;
+        const double rx = cx - xx, ry = cy - xy;
+        const double g = rx * dcx + ry * dcy;                          // 0.5 d/dt |X-C|^2
+        const double hh = dcx * dcx + dcy * dcy + rx * d2cx + ry * d2cy; // 0.5 d2/dt2
+        if (!(std::abs(hh) > 1e-30)) break;                            // (also breaks on NaN)
+        const double step = g / hh;
+        t -= step;
+        if (!(std::abs(t) < 5.0)) return false;                        // diverged / NaN -> not on edge
+        if (std::abs(step) < 1e-14) break;
+      }
+      if (!(t > 1e-6 && t < 1.0 - 1e-6)) return false; // strictly between the endpoints (also rejects NaN)
+      const double N0 = 2.0 * (t - 0.5) * (t - 1.0), N1 = 4.0 * t * (1.0 - t), N2 = 2.0 * t * (t - 0.5);
+      const double cx = N0 * px + N1 * mx + N2 * qx, cy = N0 * py + N1 * my + N2 * qy;
+      const double d2 = (cx - xx) * (cx - xx) + (cy - xy) * (cy - xy);
+      // The node was placed exactly on the edge (by refinement / gmsh), so after Newton the
+      // closest-point residual is machine-small; a near-but-not-on node stays O(gap^2). Use the same
+      // threshold as the straight-edge test (to which this reduces for a straight edge, so behaviour on
+      // straight meshes is unchanged and nearby nodes are not spuriously hung).
+      return d2 <= 1e-14 * len2;
+    }
+
+    // The C2 coarse element's own mid-edge node for the edge {P,Q} (topological, so curvature-robust):
+    // for a 6-node triangle, mid nodes 3,4,5 bisect vertex pairs (0,1),(1,2),(2,0). Returns nullptr if
+    // the element is not a >=6-node triangle or {P,Q} are not two of its vertices.
+    oomph::Node *coarse_edge_mid_node(oomph::FiniteElement *coarse_el, oomph::Node *P, oomph::Node *Q)
+    {
+      oomph::TElementBase *te = dynamic_cast<oomph::TElementBase *>(coarse_el);
+      if (!te || coarse_el->nnode() < 6) return nullptr;
+      int ip = -1, iq = -1;
+      for (int k = 0; k < 3; k++)
+      {
+        if (te->vertex_node_pt(k) == P) ip = k;
+        if (te->vertex_node_pt(k) == Q) iq = k;
+      }
+      if (ip < 0 || iq < 0) return nullptr;
+      static const int mid_of[3][3] = {{-1, 3, 5}, {3, -1, 4}, {5, 4, -1}};
+      const int me = mid_of[ip][iq];
+      if (me < 0) return nullptr;
+      oomph::Node *M = coarse_el->node_pt(me);
+      // Sanity: the edge mid-node must sit NEAR the chord midpoint -- a curved C2 edge deflects it only
+      // slightly (sagitta ~ curvature*len^2). If the element's node numbering does not put a genuine
+      // edge mid-node here (e.g. a bubble/centroid on a bubble-enriched CR element sits ~1/3 of the way
+      // into the element), reject it so the caller falls back to the safe straight-chord test rather
+      // than building a bogus quadratic that would catch spurious "on-edge" nodes and create hanging
+      // cycles (observed: stack-overflow in the flatten resolve on CR error-adaptivity meshes).
+      const double mxc = 0.5 * (P->x(0) + Q->x(0)), myc = 0.5 * (P->x(1) + Q->x(1));
+      const double ex = M->x(0) - mxc, ey = M->x(1) - myc;
+      const double edx = Q->x(0) - P->x(0), edy = Q->x(1) - P->x(1);
+      const double len2 = edx * edx + edy * edy;
+      if (ex * ex + ey * ey > 0.04 * len2) return nullptr; // >20% of edge length off the midpoint
+      return M;
+    }
   }
 
   // Install hanging nodes for triangle meshes after (non-uniform) refinement. See the header.
@@ -303,20 +377,29 @@ namespace pyoomph
       std::set<pyoomph::Node *>::const_iterator it = kv.first.begin();
       oomph::Node *P = *it; ++it; oomph::Node *Q = *it;
 
-      // Nodes collinear strictly between P and Q (the coarse edge's interior nodes on the fine side).
+      // Interpolation order of the coarse element on this edge, and (for a C2 edge) its own mid-node,
+      // which defines the quadratic geometry of the (possibly curved) coarse edge.
+      oomph::FiniteElement *coarse_el = dynamic_cast<oomph::FiniteElement *>(kv.second[0].first);
+      const unsigned order_1d = coarse_el ? coarse_el->nnode_1d() : 2;
+      oomph::Node *edge_mid = (order_1d > 2) ? coarse_edge_mid_node(coarse_el, P, Q) : nullptr;
+
+      // Nodes strictly between P and Q on the (straight C1 or curved C2) coarse edge -- the coarse
+      // edge's interior nodes on the fine side. A straight-chord test is only valid for straight edges;
+      // for a curved C2 edge we test against the quadratic through {P, edge_mid, Q} instead.
       std::vector<std::pair<oomph::Node *, double>> between;
       for (unsigned int in = 0; in < this->nnode(); in++)
       {
         oomph::Node *X = this->node_pt(in);
         if (X == P || X == Q) continue;
         double t;
-        if (node_strictly_on_segment(P, Q, X, t)) between.push_back(std::make_pair(X, t));
+        // Straight-chord test first (unchanged behaviour on straight meshes); only if it misses X do we
+        // additionally test against the coarse element's quadratic edge, which recovers the fine nodes
+        // that sit on a CURVED (gmsh/macro) C2 coarse edge, off the straight chord.
+        bool on = node_strictly_on_segment(P, Q, X, t);
+        if (!on && edge_mid) on = node_strictly_on_quadratic_edge(P, edge_mid, Q, X, t);
+        if (on) between.push_back(std::make_pair(X, t));
       }
       if (between.empty()) continue; // a genuine (conforming) boundary/interior edge, nothing hangs
-
-      // Interpolation order of the coarse element on this edge.
-      oomph::FiniteElement *coarse_el = dynamic_cast<oomph::FiniteElement *>(kv.second[0].first);
-      const unsigned order_1d = coarse_el ? coarse_el->nnode_1d() : 2;
 
       if (order_1d <= 2)
       {
@@ -425,11 +508,15 @@ namespace pyoomph
       for (int s : c1_hang_slots) slots.push_back(s);
       for (int slot : slots)
       {
-        std::function<void(oomph::Node *, double, std::map<oomph::Node *, double> &)> resolve =
-            [&](oomph::Node *X, double w, std::map<oomph::Node *, double> &out) {
+        // Depth guard: a correct hanging scheme is acyclic, so this recursion terminates; the guard
+        // turns any (bug-induced) hang cycle into a clean error instead of a stack-overflow segfault.
+        std::function<void(oomph::Node *, double, std::map<oomph::Node *, double> &, int)> resolve =
+            [&](oomph::Node *X, double w, std::map<oomph::Node *, double> &out, int depth) {
+              if (depth > 40)
+                throw_runtime_error("Hanging cycle detected while flattening tri hanging chains (slot " + std::to_string(slot) + ")");
               if (!X->is_hanging(slot)) { out[X] += w; return; }
               oomph::HangInfo *h = X->hanging_pt(slot);
-              for (unsigned m = 0; m < h->nmaster(); m++) resolve(h->master_node_pt(m), w * h->master_weight(m), out);
+              for (unsigned m = 0; m < h->nmaster(); m++) resolve(h->master_node_pt(m), w * h->master_weight(m), out, depth + 1);
             };
         std::map<oomph::Node *, std::map<oomph::Node *, double>> resolved;
         for (unsigned int in = 0; in < this->nnode(); in++)
@@ -443,7 +530,7 @@ namespace pyoomph
             if (h->master_node_pt(m)->is_hanging(slot)) { chained = true; break; }
           if (!chained) continue; // masters already real
           std::map<oomph::Node *, double> flat;
-          resolve(X, 1.0, flat);
+          resolve(X, 1.0, flat, 0);
           flat.erase(X); // guard against a degenerate self-reference
           resolved[X] = flat;
         }

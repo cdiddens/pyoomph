@@ -684,6 +684,79 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
        * The coverage gap that hid this: `tests/test_triangle_refinement.py` had no **moving-mesh**
          (`LaplaceSmoothedMesh`/solid) case. Add an identity-mesh regression: pin all boundary positions, refine
          (uniform and 2:1), assert the mesh residual is ~machine-zero for both quads and tris.
+   - **§4.7 — C1-field (C1-on-C2) Jacobian missing a coupling at tri 2:1 interfaces [OPEN, deeply localized].**
+     After §4.6, the full evaporating-droplet case (`pyoomph_runs/DropletEvapExamples/pinned_water_droplet_tri_adapt.py`,
+     `mesh_mode="tris"`) **no longer segfaults**, **quads run end-to-end (exact Jacobian, quadratic Newton, exit 0)**,
+     but **tris converge only linearly (~0.30/step)** and can hit the Newton iteration cap. A central-difference
+     FD-check (`scratchpad/drop_fd_central.py`) localizes a single dominant defect: the **gas water mass-fraction**
+     self-coupling `d[gas/massfrac_water]/d[gas/massfrac_water]` is wrong on tris (quads: fully exact).
+       * **It is a genuinely MISSING analytic entry, not an FD artifact.** An eps sweep on the worst entry
+         (`scratchpad/drop_epssweep.py`) gives **analytic ≡ 0.0** while the finite difference is a **constant ≈0.28
+         across eps 1e-5…1e-10** (a non-shrinking FD vs an exact zero = a structural sparsity gap). Use this eps-sweep
+         technique whenever an FD "inexactness" is suspected — forward-diff truncation on stiff entries fooled the
+         earlier §4.5(D) investigation.
+       * **Localization (via `scratchpad/drop_topo.py`, `drop_perturb.py`, `drop_values.py` + temporary C++ dumps in
+         `fill_hang_info_with_equations_basebulk`):** the two coupled dofs are **free C1 massfrac vertices** ~0.02 apart
+         in a **2:1 tri interface region near the contact line**; the coupling is **purely massfrac→massfrac** (no
+         interface/position/multiplier fields); the two nodes **share no element**; **none of the row-node's C1 vertices
+         hang**; perturbing the column dof changes **only its own stored value** (no intermediary node's stored value
+         moves); the massfrac space is genuinely **C1** (`nnode_space=3`, vertices only, `space_index=3`).
+       * **Ruled out:** dropped-to-(−1) hang masters (instrumented both the fast path and `flatten_hang_for_value`
+         — **zero** free masters dropped); macro elements (disabling them changes nothing); the inter-domain
+         `droplet_gas` interface coupling (a matched two-domain nonlinear opposite-side FD-oracle is exact; unmatched
+         throws "Cannot locate opposite", which the droplet avoids); and ~24 single-domain minimal FD-oracles
+         (nonlinear diffusion incl. reciprocal `rho`, subexpressions incl. nested/grad-of-ratio, `define_field_by_substitution`
+         for the passive field, advection, mesh-velocity advection, moving mesh Laplace/PseudoElastic, C1, C1-on-C2,
+         `time_scheme(BDF2)`, transient step, deep hanging chains) — **all exact**.
+       * **CONFIRMED ROOT CAUSE — curved-mesh collinearity failure in the C1-hang detection.** The residual/Jacobian
+         inconsistency traces to a single fragile test. pyoomph builds the C1(-on-C2) hanging in `mesh2d.cpp`
+         `post_adapt_setup_hanging_nodes` by finding fine-side vertices that lie on a coarse element edge, using the
+         **straight-chord** geometric predicate `node_strictly_on_segment` (mesh2d.cpp:242) with tolerance
+         `d2 <= 1e-14*len2` — it explicitly assumes straight-sided edges. The droplet gas mesh is **gmsh-generated,
+         C2 (curved)**: a fine vertex on a 2:1 coarse edge sits on the *curve*, off the straight chord by
+         `d2/len2 ≈ 4e-6…8e-6` (≫ 1e-14). Instrumenting the predicate on the live droplet showed **1428 such
+         rejections** (all at t≈0.5). Rejected → the node is never registered as hanging in the C1 value slot →
+         its C1 value is instead set by the **dummy-value interpolation** in `interpolate_hang_values`
+         (elements.cpp:938-958, the *residual* path) as the average of the coarse-edge corners — but the **Jacobian**
+         (`fill_hang_info_with_equations_basebulk`, elements.cpp:665) has **no matching redistribution** (it sees the
+         node as a pinned, non-hanging, non-c1-constrained dead dof, `nummaster=0`). Residual depends on the corners
+         (incl. `j`); Jacobian doesn't → `analytic[i][j]=0`, FD finite. Quads never hit this: they carry oomph's
+         standard mixed-order hanging (`setup_hanging_nodes` via the interpolating-node facilities) which is
+         topological, not geometric. `numfields_C2=0` on the gas (a C2-*geometry* mesh whose only field is C1)
+         maximizes the exposure.
+       * **THE FIX (per code review): give `BulkElementTri2dC2` the oomph "interpolating node" facilities the quad has**
+         — `further_setup_hanging_nodes`, `interpolating_node_pt`, `local_one_d_fraction_of_interpolating_node`,
+         `get_interpolating_node_at_local_coordinate`, `ninterpolating_node_1d`, `ninterpolating_node`,
+         `interpolating_basis` (all keyed on `value_id`; cf. `BulkElementQuad2dC2::*`). With these, oomph's own
+         `setup_hanging_nodes` builds the mixed-order (C1-on-C2) hanging **topologically** for tris — no geometric
+         collinearity guessing, curvature-robust — and both residual and Jacobian use the same real HangInfo. This
+         removes the reliance on `node_strictly_on_segment` + the dummy-value residual path for C1 fields.
+         (Interim/defensive alternative if the full port is deferred: make `node_strictly_on_segment` curvature-aware
+         by testing against the coarse edge's C2 quadratic P-M-Q instead of the straight chord.)
+       * **FIX IMPLEMENTED [mesh2d.cpp].** Rather than porting oomph's full tri tree-hanging (a large Phase-2b
+         effort — `RefineableTElement<2>::setup_hanging_nodes/setup_hang_for_value/quad_hang_helper` are all
+         stubs, so pyoomph does *all* tri hanging in `post_adapt_setup_hanging_nodes` geometrically), the
+         detection was made **curvature-aware**: `node_strictly_on_quadratic_edge(P,M,Q,X,t)` tests a node
+         against the coarse element's **quadratic** edge (M = the coarse element's own edge mid-node, found
+         topologically via `coarse_edge_mid_node`), used as an **additive fallback** after the straight-chord
+         test (so straight-mesh behaviour is unchanged). A depth guard on the flatten `resolve` recursion
+         turns any bug-induced hang cycle into a clean error instead of a segfault. Verified: droplet tri
+         central-diff FD-check now **exact** (was 15%); first Newton solve **quadratic** (was linear ~0.3);
+         **without** re-adaptation the full transient droplet runs to completion with quadratic convergence;
+         `tests/test_triangle_refinement.py` 34/34 and the adapt/tet/stokes/constrained suites 66/66 (no
+         regression). NOTE: the coarse mid-node must **not** be used directly as the C2-hang master M (it can
+         itself be hanging → hang cycle → stack overflow, seen on CR error-adaptivity); keep M = the fine leaf
+         node found from the `between` set.
+       * **REMAINING (separate) follow-up: transient divergence under *re-adaptation*.** With the (now exact)
+         Jacobian, a droplet run *with* `spatial_adapt` during the transient diverges/stalls at the first
+         re-adapt step, while the identical run *without* re-adaptation converges quadratically to completion,
+         and a central-diff FD-check of the (stationary) Jacobian *after* a re-adapt is exact. So this is NOT a
+         hanging/stationary-Jacobian bug; it is a transient issue (BDF2 time-derivative history interpolated
+         onto the re-adapted moving mesh) that was previously **masked** by the inexact-massfrac Jacobian
+         damping Newton into slow-but-stable convergence. Line-search (`globally_convergent_newton=True`)
+         removes the blow-up but the Newton then stalls, confirming a residual transient-Jacobian/history
+         inconsistency. Next: central-difference FD-check of the **transient** Jacobian (with dt + history)
+         right after a re-adapt.
 
 5. **Variable / anisotropic schemes** (§5): quad 1→2 (both directions), simplex
    bisection; directional error estimator; generalised balance rule.
