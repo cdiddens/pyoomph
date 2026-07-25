@@ -21,6 +21,7 @@ The main author may be contacted at c.diddens@utwente.nl
 
 #include "refineable_telements.hpp"
 #include "exception.hpp"
+#include <functional>
 namespace oomph
 {
 
@@ -1548,8 +1549,13 @@ namespace oomph
     int neigh_edge = 0, diff_level = 0;
     bool in_neigh_tree = false;
     QuadTree *neigh = qt->gteq_edge_neighbour(my_edge, translate_s, s_lo, s_hi, neigh_edge, diff_level, in_neigh_tree);
-    // No neighbour (domain boundary), a same-level (conforming) neighbour, or a non-leaf: nothing hangs.
-    if (neigh == 0 || diff_level == 0 || !neigh->is_leaf()) return;
+    // Hang only onto a STRICTLY COARSER leaf neighbour (diff_level < 0). oomph's quad helper uses
+    // diff_level != 0 because quad gteq_edge_neighbour never returns a finer neighbour; the triangle
+    // gteq DOES return finer neighbours (diff_level > 0) in some inverted-son configurations -- hanging
+    // on those makes a coarse node depend on a finer one and, together with the finer node's own
+    // (correct) hang on this element, forms a mutual cycle (stack overflow in complete_hanging_nodes).
+    // A finer neighbour hangs on THIS element from its own side, so skipping it here loses nothing.
+    if (neigh == 0 || diff_level >= 0 || !neigh->is_leaf()) return;
     RefineableElement *neigh_re = dynamic_cast<RefineableElement *>(neigh->object_pt());
     FiniteElement *neigh_fe = dynamic_cast<FiniteElement *>(neigh->object_pt());
     if (!neigh_re || !neigh_fe) return;
@@ -1613,6 +1619,24 @@ namespace oomph
       for (unsigned m = 0; m < nmax; m++)
         if (std::abs(psi[m]) > 1e-12) nmaster++;
       if (nmaster == 0) continue;
+      // Cycle guard: would any master (transitively) hang back on X? If so this hang would create a
+      // mutual/cyclic dependency (infinite recursion in oomph's complete_hanging_nodes). Detect and skip.
+      std::function<bool(Node *, Node *, int, int)> reaches = [&](Node *from, Node *to, int slot, int depth) -> bool {
+        if (from == to) return true;
+        if (depth > 30 || !from->is_hanging(slot)) return false;
+        HangInfo *h = from->hanging_pt(slot);
+        for (unsigned k = 0; k < h->nmaster(); k++) if (reaches(h->master_node_pt(k), to, slot, depth + 1)) return true;
+        return false;
+      };
+      bool cyclic = false;
+      for (unsigned m = 0; m < nmax && !cyclic; m++)
+        if (std::abs(psi[m]) > 1e-12 && reaches(neigh_re->interpolating_node_pt(m, value_id), X, value_id, 0)) cyclic = true;
+      if (cyclic)
+      {
+        if (getenv("PYOOMPH_TRI_NEIGH_DBG"))
+          std::fprintf(stderr, "[cyc-skip] X(%.5f,%.5f) slot=%d edge=%d neigh-centroid via gteq (dl=%d)\n", X->x(0), X->x(1), value_id, my_edge, diff_level);
+        continue;
+      }
       HangInfo *hang = new HangInfo(nmaster);
       unsigned mm = 0;
       for (unsigned m = 0; m < nmax; m++)
