@@ -207,6 +207,13 @@ namespace oomph
     // Set up hanging nodes on one particular edge of the element for a given value.
     virtual void quad_hang_helper(const int &value_id, const int &my_edge, std::ofstream &output_hangfile);
 
+    // Tree-based hanging on one triangle edge (my_edge = S/E/W for tri edges 0-1/1-2/2-0). Finds the
+    // coarser neighbour via the QuadTree (gteq_edge_neighbour, topology only), then hangs each of this
+    // element's interpolating edge nodes that is interior to the neighbour's edge onto the neighbour's
+    // interpolating basis -- coordinates via locate_zeta (curvature-robust), not the quad compass
+    // coordinate descent (geometrically wrong for triangles).
+    void tri_hang_helper(const int &value_id, const int &my_edge);
+
   public:
     // Clear the shared-node registry (call once before each refinement round). See below.
     static void clear_shared_edge_node_registry() { Shared_edge_node_registry.clear(); }

@@ -32,6 +32,13 @@ The main author may be contacted at c.diddens@utwente.nl
 #include "unstructured_two_d_mesh_geometry_base.h"
 #include <array>
 #include <functional>
+#include <map>
+#include <set>
+#include <string>
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <iostream>
 namespace pyoomph
 {
 
@@ -336,6 +343,44 @@ namespace pyoomph
       if (dynamic_cast<oomph::TElementBase *>(this->element_pt(ie))) has_tri = true;
     if (!has_tri) return; // quad/hex meshes: oomph-lib already handled hanging
 
+    // PYOOMPH_TRI_HANG: 0/unset = geometric (this function), tree = the oomph-style
+    // RefineableTElement<2>::setup_hang* path already ran during adapt (skip here), validate = that
+    // tree path ran and we now re-derive the geometric hanging and CROSS-VALIDATE the two node-by-node.
+    static const int tri_hang_mode = []() {
+      const char *e = getenv("PYOOMPH_TRI_HANG");
+      if (!e) return 0;
+      if (std::string(e) == "tree") return 1;
+      if (std::string(e) == "validate") return 2;
+      return 0;
+    }();
+    if (tri_hang_mode == 1) return; // tree path already set the hanging during adapt
+
+    // Snapshot a node's full hanging state (all slots) as a comparable string: for each slot where it
+    // hangs, the sorted list of (master position, weight). Used only for the "validate" cross-check.
+    auto snapshot_hang = [](oomph::Node *n) -> std::map<int, std::string> {
+      std::map<int, std::string> out;
+      for (int slot = -1; slot < (int)n->nvalue(); slot++)
+      {
+        if (!n->is_hanging(slot)) continue;
+        oomph::HangInfo *h = n->hanging_pt(slot);
+        std::vector<std::string> ms;
+        for (unsigned m = 0; m < h->nmaster(); m++)
+        {
+          char buf[96];
+          std::snprintf(buf, sizeof(buf), "(%.7f,%.7f):%.7f", h->master_node_pt(m)->x(0), h->master_node_pt(m)->x(1), h->master_weight(m));
+          ms.push_back(buf);
+        }
+        std::sort(ms.begin(), ms.end());
+        std::string s;
+        for (auto &x : ms) { s += x; s += " "; }
+        out[slot] = s;
+      }
+      return out;
+    };
+    std::map<oomph::Node *, std::map<int, std::string>> tree_snapshot;
+    if (tri_hang_mode == 2)
+      for (unsigned int in = 0; in < this->nnode(); in++) tree_snapshot[this->node_pt(in)] = snapshot_hang(this->node_pt(in));
+
     // Triangle hanging status is managed entirely here, so clear it first (a node that was
     // hanging can stop hanging once its coarse neighbour is itself refined).
     for (unsigned int in = 0; in < this->nnode(); in++) this->node_pt(in)->set_nonhanging();
@@ -401,54 +446,73 @@ namespace pyoomph
       }
       if (between.empty()) continue; // a genuine (conforming) boundary/interior edge, nothing hangs
 
-      if (order_1d <= 2)
+      // Hanging weights come from the coarse element's OWN interpolation, read through the oomph
+      // "interpolating node" facilities (the same route the quad hanging uses): locate each interior
+      // fine node inside the coarse element with locate_zeta, then evaluate the coarse basis there.
+      // This replaces hand-written linear/quadratic Lagrange weights with the proven facilities and
+      // handles curved (macro/gmsh) coarse edges natively via the iso-parametric inversion.
+      //   - value_id -1  : geometry / C2 fields (linear coarse -> 2 corner masters; quadratic coarse
+      //                    -> 3 edge-node masters {P,M,Q}; the shared C2 mid-node M skips itself).
+      //   - each c1_hang_slot : a separate C1(TB) field (Taylor-Hood pressure) whose C1 interpolation
+      //                    hangs the node on the 2 coarse edge corners (incl. M, a real velocity node
+      //                    the coarse element carries no pressure for).
+      // A node coinciding with one of the coarse element's own interpolating nodes for a field is
+      // genuinely shared there and does not hang in that slot.
+      oomph::RefineableElement *coarse_re = dynamic_cast<oomph::RefineableElement *>(coarse_el);
+      if (!coarse_re) continue;
+      // P and Q are vertices of the coarse element (the facet {P,Q} is one of its edges); their local
+      // indices give the reference-edge endpoints. We build X's local coordinate ANALYTICALLY from the
+      // edge parameter t (see below) rather than with locate_zeta -- a 2D Newton inversion returns an s
+      // slightly off the reference edge, leaking tiny basis weights onto off-edge coarse nodes (which may
+      // themselves be hanging -> spurious masters / hang cycles). The analytic s is exactly on the edge.
+      const int ip = coarse_el->get_node_number(P);
+      const int iq = coarse_el->get_node_number(Q);
+      if (ip < 0 || iq < 0) continue; // P,Q must be vertices of the coarse element
+      oomph::Vector<double> s_P(2), s_Q(2);
+      coarse_el->local_coordinate_of_node(ip, s_P);
+      coarse_el->local_coordinate_of_node(iq, s_Q);
+      std::vector<int> value_ids;
+      value_ids.push_back(-1);
+      for (int s : c1_hang_slots) value_ids.push_back(s);
+      for (std::pair<oomph::Node *, double> &xt : between)
       {
-        // Linear edge: each interior node hangs on {P,Q}.
-        for (std::pair<oomph::Node *, double> &xt : between)
+        oomph::Node *X = xt.first;
+        // X sits on the reference edge P->Q at parameter t (the geometric edge parameter from the
+        // detection above equals the LOCAL edge coordinate for both straight and quadratic edges, since
+        // the quadratic test parametrises the edge as C(t)=N0(t)P+N1(t)M+N2(t)Q in that same t).
+        const double t = xt.second;
+        oomph::Vector<double> s_c(2);
+        s_c[0] = (1.0 - t) * s_P[0] + t * s_Q[0];
+        s_c[1] = (1.0 - t) * s_P[1] + t * s_Q[1];
+        for (int value_id : value_ids)
         {
-          if (xt.first->is_hanging()) continue;
-          oomph::HangInfo *hang = new oomph::HangInfo(2);
-          hang->set_master_node_pt(0, P, 1.0 - xt.second);
-          hang->set_master_node_pt(1, Q, xt.second);
-          xt.first->set_hanging_pt(hang, -1);
-        }
-      }
-      else
-      {
-        // Quadratic edge: M is the coarse mid-node (t=0.5), a real shared node; the other interior
-        // nodes hang on {P,M,Q} with quadratic Lagrange weights (nodes at t=0, 0.5, 1).
-        oomph::Node *M = 0;
-        for (std::pair<oomph::Node *, double> &xt : between)
-          if (std::abs(xt.second - 0.5) < 1e-6) { M = xt.first; break; }
-        if (!M) continue; // coarse mid-node not found (should not happen for a C2 coarse edge)
-        for (std::pair<oomph::Node *, double> &xt : between)
-        {
-          if (xt.first == M || xt.first->is_hanging()) continue;
-          const double t = xt.second;
-          oomph::HangInfo *hang = new oomph::HangInfo(3);
-          hang->set_master_node_pt(0, P, 2.0 * (t - 0.5) * (t - 1.0));
-          hang->set_master_node_pt(1, M, 4.0 * t * (1.0 - t));
-          hang->set_master_node_pt(2, Q, 2.0 * t * (t - 0.5));
-          xt.first->set_hanging_pt(hang, -1);
-        }
-      }
-
-      // Extra linear hang for C1(TB) fields that own a separate value slot (Taylor-Hood pressure on
-      // C2 geometry). Every interior node carrying that dof -- corners AND the coarse mid-node M --
-      // hangs linearly on the coarse edge corner dofs {P,Q}; the C2 fields' quadratic hang above is
-      // on slot -1 and does not touch these value slots. Nodes without the dof (C2-only edge
-      // midpoints, nvalue <= slot) are skipped. Empty (and a no-op) for pure-C1/C2 meshes.
-      for (int slot : c1_hang_slots)
-      {
-        for (std::pair<oomph::Node *, double> &xt : between)
-        {
-          oomph::Node *X = xt.first;
-          if ((int)X->nvalue() <= slot) continue; // this node has no dof in this C1 space
-          if (X->is_hanging(slot)) continue;      // already constrained (coarser neighbour)
-          const double t = xt.second;
-          oomph::HangInfo *hang = new oomph::HangInfo(2);
-          hang->set_master_node_pt(0, P, 1.0 - t);
-          hang->set_master_node_pt(1, Q, t);
+          const int slot = value_id; // slot == value_id for geometry (-1) and for the C1(TB) field
+          if (slot >= 0 && (int)X->nvalue() <= slot) continue; // node has no dof in this field
+          if (X->is_hanging(slot)) continue;                   // already constrained by a coarser neighbour
+          const unsigned nmax = coarse_re->ninterpolating_node(value_id);
+          oomph::Shape psi(nmax);
+          coarse_re->interpolating_basis(s_c, psi, value_id);
+          // Skip if X sits AT one of the coarse element's interpolating nodes (basis == 1 there): X is
+          // then shared / coincident with that coarse node -- e.g. the C2 edge mid-node at t=0.5, or a
+          // duplicate node coincident with it at a T-junction. A physical (weight-based) test, not
+          // pointer equality: coincident-but-distinct duplicate nodes would otherwise hang on each
+          // other and form a 2-cycle. Genuine interior fine nodes (t=0.25, 0.75, ...) never hit 1.
+          bool at_coarse_node = false;
+          for (unsigned m = 0; m < nmax; m++)
+            if (std::abs(psi[m] - 1.0) < 1e-9) { at_coarse_node = true; break; }
+          if (at_coarse_node) continue;
+          unsigned nmaster = 0;
+          for (unsigned m = 0; m < nmax; m++)
+            if (std::abs(psi[m]) > 1e-12) nmaster++;
+          if (nmaster == 0) continue;
+          oomph::HangInfo *hang = new oomph::HangInfo(nmaster);
+          unsigned mm = 0;
+          for (unsigned m = 0; m < nmax; m++)
+            if (std::abs(psi[m]) > 1e-12)
+            {
+              hang->set_master_node_pt(mm, coarse_re->interpolating_node_pt(m, value_id), psi[m]);
+              mm++;
+            }
           X->set_hanging_pt(hang, slot);
         }
       }
@@ -542,6 +606,40 @@ namespace pyoomph
           kv.first->set_hanging_pt(nh, slot);
         }
       }
+    }
+
+    // Cross-validation: compare the tree-set hanging (snapshotted above) against the geometric hanging
+    // just derived. Any per-node/per-slot mismatch (different masters, weights, or hang/non-hang) is a
+    // real discrepancy between the two implementations and gets reported to std::cout.
+    if (tri_hang_mode == 2)
+    {
+      unsigned n_mismatch = 0, n_hang_tree = 0, n_hang_geo = 0;
+      for (unsigned int in = 0; in < this->nnode(); in++)
+      {
+        oomph::Node *n = this->node_pt(in);
+        std::map<int, std::string> geo = snapshot_hang(n);
+        std::map<int, std::string> tree = tree_snapshot[n];
+        n_hang_tree += tree.size();
+        n_hang_geo += geo.size();
+        if (tree == geo) continue;
+        n_mismatch++;
+        if (n_mismatch <= 40)
+        {
+          std::cout << "[tri-hang validate] MISMATCH at node (" << n->x(0) << "," << n->x(1) << "):\n";
+          std::set<int> slots;
+          for (auto &kv : tree) slots.insert(kv.first);
+          for (auto &kv : geo) slots.insert(kv.first);
+          for (int slot : slots)
+          {
+            std::string ts = tree.count(slot) ? tree[slot] : std::string("<non-hang>");
+            std::string gs = geo.count(slot) ? geo[slot] : std::string("<non-hang>");
+            if (ts != gs)
+              std::cout << "    slot " << slot << ":\n      tree: " << ts << "\n      geo : " << gs << "\n";
+          }
+        }
+      }
+      std::cout << "[tri-hang validate] nodes=" << this->nnode() << " tree_hang_slots=" << n_hang_tree
+                << " geo_hang_slots=" << n_hang_geo << " mismatched_nodes=" << n_mismatch << std::endl;
     }
   }
 

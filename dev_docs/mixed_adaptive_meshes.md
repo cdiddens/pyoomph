@@ -758,6 +758,42 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
          inconsistency. Next: central-difference FD-check of the **transient** Jacobian (with dt + history)
          right after a re-adapt.
 
+   - **§4.8 — Tri hanging weights now come from the oomph "interpolating node" facilities (hybrid) [DONE].**
+     Follow-up to §4.7: replace the hand-written linear/quadratic Lagrange weight formulas in
+     `post_adapt_setup_hanging_nodes` with the same interpolating-node facilities the quad hanging uses
+     (`interpolating_basis`, `interpolating_node_pt`, `ninterpolating_node` on `BulkElementTri2dC2`; the
+     base `RefineableElement` isoparametric defaults cover plain linear coarse tris). **Design = "hybrid":**
+     the *coarse neighbour element* is still found by the robust **geometric facet adjacency** (a facet
+     {P,Q} incident on exactly one element is the coarse side), because the pure oomph **tree** route
+     `RefineableTElement<2>::gteq_edge_neighbour` is **unreliable for triangle sons** — the QuadTree
+     descent (translate_s / s_lo/s_hi / north-equivalent rotation) assumes quad son geometry, and the
+     triangle split's **inverted middle son** makes it return `dl=0` (claims a same-level neighbour) for
+     genuine 2:1 interface edges, so it misses ~2/3 of the tri interfaces (verified by the cross-validator
+     below: 32 tree slots vs 96 geometric, tree ⊂ geo, never wrong masters). The interpolating-node
+     facilities the quads use (committed `b566043`) are kept and now *consumed* by the hybrid path.
+       * **Local coordinate is analytic, not `locate_zeta`.** The detection already yields `t` (the edge
+         parameter, which *equals* the local edge coordinate for both straight and quadratic edges), and
+         P,Q are vertices of the coarse element, so `s_c = (1-t)·s(P) + t·s(Q)` lands *exactly* on the
+         reference edge. `locate_zeta`'s 2D Newton inversion returned `s` slightly off the edge → leaked
+         tiny basis weights onto off-edge coarse nodes (which may themselves hang → spurious masters / hang
+         cycles); the analytic `s_c` has zero off-edge leakage.
+       * **Shared-node skip is weight-based, not pointer-based.** Skip X when the coarse basis puts weight
+         ≈1 on a single master (X sits *at* a coarse interpolating node). Pointer equality
+         (`get_interpolating_node_at_local_coordinate == X`) was too strict: at a T-junction **two distinct
+         coincident nodes** can each be the C2 mid of a *different* coarse element's edge at the same point;
+         pointer-guard let each hang on the other → **2-cycle** (caught by the flatten depth guard on the CR
+         error-adaptivity test). The weight-based test skips both, matching the old hand-written "skip the
+         mid M" semantics physically.
+       * **Cross-validation harness (`PYOOMPH_TRI_HANG=validate`, `tree`).** `post_adapt` can snapshot the
+         tree-set hanging (per node, per slot: sorted master position+weight) and diff it against the
+         geometric/hybrid hanging, logging every mismatch. This is what isolated the `gteq` tri-son failure
+         and proved the hybrid HangInfo is a correct superset. The `tree` path is **retained only as this
+         diagnostic** — it is inert by default (`PYOOMPH_TRI_HANG` unset ⇒ mode 0 ⇒ the tree helpers
+         `setup_hanging_nodes`/`setup_hang_for_value` return immediately and `post_adapt` runs the hybrid).
+       * **Verified:** `tests/test_triangle_refinement.py` 34/34, tet suite 20/20 (no 3D regression), and
+         the curved multi-domain droplet central-diff FD-check (`scratchpad/drop_fd_central.py tris`) still
+         **exact**.
+
 5. **Variable / anisotropic schemes** (§5): quad 1→2 (both directions), simplex
    bisection; directional error estimator; generalised balance rule.
 6. **MPI hardening** across all shapes; distributed adaptivity tests.

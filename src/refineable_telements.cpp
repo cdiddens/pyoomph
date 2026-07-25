@@ -1424,24 +1424,115 @@ namespace oomph
   //====================================================================
   /// Set up all hanging nodes.
   //====================================================================
-  void RefineableTElement<2>::setup_hanging_nodes(Vector<std::ofstream *>
-                                                      &)
+  // Which triangle-hanging path is active (env PYOOMPH_TRI_HANG): 0 = geometric (default, the
+  // node_strictly_on_*/facet-adjacency scheme in mesh2d.cpp post_adapt_setup_hanging_nodes);
+  // 1 = tree (this oomph-style setup_hang* path); 2 = validate (tree runs during adapt, then the
+  // geometric pass captures it, redoes itself and compares -- see post_adapt_setup_hanging_nodes).
+  int tri_hang_mode()
   {
-    // Phase 2a (branch mixed_adapt): uniform (conforming) triangle refinement produces no
-    // hanging nodes, so this is a no-op for now. The geometric hang helper for non-conforming
-    // (adaptive) triangle refinement is Phase 2b -- see dev_docs/mixed_adaptive_meshes.md.
-    // NOTE: with this no-op, NON-uniform triangle refinement would silently miss hanging nodes;
-    // it must not be relied upon until Phase 2b lands.
+    static const int mode = []() {
+      const char *e = getenv("PYOOMPH_TRI_HANG");
+      if (!e) return 0;
+      if (std::string(e) == "tree") return 1;
+      if (std::string(e) == "validate") return 2;
+      return 0;
+    }();
+    return mode;
+  }
+
+  //=================================================================
+  /// Tree-based hanging on one triangle edge. See the header for the rationale (topology from the
+  /// QuadTree, coordinates from locate_zeta -- never the quad compass coordinate descent).
+  //=================================================================
+  void RefineableTElement<2>::tri_hang_helper(const int &value_id, const int &my_edge)
+  {
+    using namespace QuadTreeNames;
+    QuadTree *qt = quadtree_pt();
+    if (!qt) return;
+    Vector<unsigned> translate_s(2);
+    Vector<double> s_lo(2), s_hi(2);
+    int neigh_edge = 0, diff_level = 0;
+    bool in_neigh_tree = false;
+    QuadTree *neigh = qt->gteq_edge_neighbour(my_edge, translate_s, s_lo, s_hi, neigh_edge, diff_level, in_neigh_tree);
+    // No neighbour (domain boundary), a same-level (conforming) neighbour, or a non-leaf: nothing hangs.
+    if (neigh == 0 || diff_level == 0 || !neigh->is_leaf()) return;
+    RefineableElement *neigh_re = dynamic_cast<RefineableElement *>(neigh->object_pt());
+    FiniteElement *neigh_fe = dynamic_cast<FiniteElement *>(neigh->object_pt());
+    if (!neigh_re || !neigh_fe) return;
+
+    // Interpolating nodes along MY edge. Tri edge<->compass convention (must match get_edge_bcs and the
+    // forest root-neighbour setup, both derived from Father_bound): E=v0-v1, W=v1-v2, S=v2-v0. This is
+    // the slot passed to gteq_edge_neighbour, so the local-coordinate walk below MUST trace the same
+    // edge. TElement<2,3> vertex local coords v0=(1,0), v1=(0,1), v2=(0,0). n_edge is 2 for a C1 field
+    // (corners), 3 for C2 (+mid).
+    const unsigned n_edge = this->ninterpolating_node_1d(value_id);
+    for (unsigned i = 0; i < n_edge; i++)
+    {
+      const double f = (n_edge > 1) ? double(i) / double(n_edge - 1) : 0.0; // 0 .. 1 along my edge
+      Vector<double> s(2);
+      switch (my_edge)
+      {
+        case E: s[0] = 1.0 - f; s[1] = f; break;   // edge v0-v1: v0(1,0) -> v1(0,1)
+        case W: s[0] = 0.0;     s[1] = 1.0 - f; break; // edge v1-v2: v1(0,1) -> v2(0,0)
+        case S: s[0] = f;       s[1] = 0.0; break; // edge v2-v0: v2(0,0) -> v0(1,0)
+        default: return;
+      }
+      Node *X = this->get_interpolating_node_at_local_coordinate(s, value_id);
+      if (X == 0) continue;
+      // Global position of X, and its local coordinate inside the coarse neighbour.
+      Vector<double> X_pos(2);
+      X_pos[0] = X->x(0);
+      X_pos[1] = X->x(1);
+      Vector<double> s_neigh(2);
+      GeomObject *geom = 0;
+      neigh_fe->locate_zeta(X_pos, geom, s_neigh);
+      if (geom == 0) continue; // X is not inside the neighbour (should not happen for a shared edge)
+      // If the neighbour has its own interpolating node exactly here, X is shared -> not hanging.
+      if (neigh_re->get_interpolating_node_at_local_coordinate(s_neigh, value_id) == X) continue;
+      // Otherwise X hangs on the neighbour's interpolation at s_neigh.
+      const unsigned nmax = neigh_re->ninterpolating_node(value_id);
+      Shape psi(nmax);
+      neigh_re->interpolating_basis(s_neigh, psi, value_id);
+      unsigned nmaster = 0;
+      for (unsigned m = 0; m < nmax; m++)
+        if (std::abs(psi[m]) > 1e-12) nmaster++;
+      if (nmaster == 0) continue;
+      HangInfo *hang = new HangInfo(nmaster);
+      unsigned mm = 0;
+      for (unsigned m = 0; m < nmax; m++)
+      {
+        if (std::abs(psi[m]) > 1e-12)
+        {
+          hang->set_master_node_pt(mm, neigh_re->interpolating_node_pt(m, value_id), psi[m]);
+          mm++;
+        }
+      }
+      X->set_hanging_pt(hang, value_id);
+    }
+  }
+
+  void RefineableTElement<2>::setup_hanging_nodes(Vector<std::ofstream *> &)
+  {
+    // Geometric mode: mesh2d.cpp post_adapt_setup_hanging_nodes handles all tri hanging.
+    if (tri_hang_mode() == 0) return;
+    using namespace QuadTreeNames;
+    // Geometric (position / C2) hanging is value_id -1.
+    tri_hang_helper(-1, S);
+    tri_hang_helper(-1, E);
+    tri_hang_helper(-1, W);
   }
 
   //================================================================
   /// Internal function that sets up the hanging node scheme for
   /// a particular continuously interpolated value
   //===============================================================
-  void RefineableTElement<2>::setup_hang_for_value(const int &)
+  void RefineableTElement<2>::setup_hang_for_value(const int &value_id)
   {
-    // See setup_hanging_nodes: no-op for now (Phase 2a uniform refinement); Phase 2b will
-    // implement the geometric hanging scheme for non-conforming triangle refinement.
+    if (tri_hang_mode() == 0) return; // geometric mode handles it in mesh2d.cpp
+    using namespace QuadTreeNames;
+    tri_hang_helper(value_id, S);
+    tri_hang_helper(value_id, E);
+    tri_hang_helper(value_id, W);
   }
 
   //=================================================================
