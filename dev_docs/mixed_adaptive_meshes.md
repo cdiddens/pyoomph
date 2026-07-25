@@ -770,10 +770,15 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
              ill-conditioning, not inconsistency).
            - **Quads don't disprove/confirm:** the quad run completes but does `ref=0 unref=0` during the
              transient (never re-adapts where tris do), so it does not exercise this path.
-           - **Open direction (physics/numerics, not a hanging bug):** either robustify the post-re-adapt solve
-             (smaller dt / pseudo-transient continuation after re-adapt), cap refinement level at the contact
-             line, or check whether tri refinement produces near-degenerate (sliver) elements at the moving
-             contact line that quads' structured refinement avoids (an element-quality check is the next probe).
+           - **Not sliver elements either.** Element-quality check after the refining re-adapt
+             (`Scratchpad/drop_elemquality.py`): droplet+gas max aspect ratio 1.63, **zero** elements with
+             aspect > 10, before and after re-adapt. So the ill-conditioning is not from degenerate geometry;
+             it is the slip-BC coefficient (~ μ/(L_slip·h)) stiffening as the contact-line region is refined
+             into good-quality but smaller elements.
+           - **Open direction (physics/numerics, not a hanging bug):** robustify the post-re-adapt solve
+             (line-search `globally_convergent_newton` — worth re-testing now the Jacobian is exact
+             everywhere; smaller dt / pseudo-transient continuation after re-adapt) or cap refinement level at
+             the contact line so tris behave like quads (whose estimator does not flag it, `ref=0`).
 
    - **§4.8 — Tri hanging weights now come from the oomph "interpolating node" facilities (hybrid) [DONE].**
      Follow-up to §4.7: replace the hand-written linear/quadratic Lagrange weight formulas in
