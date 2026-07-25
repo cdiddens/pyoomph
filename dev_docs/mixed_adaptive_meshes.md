@@ -775,10 +775,22 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
              aspect > 10, before and after re-adapt. So the ill-conditioning is not from degenerate geometry;
              it is the slip-BC coefficient (~ μ/(L_slip·h)) stiffening as the contact-line region is refined
              into good-quality but smaller elements.
-           - **Open direction (physics/numerics, not a hanging bug):** robustify the post-re-adapt solve
-             (line-search `globally_convergent_newton` — worth re-testing now the Jacobian is exact
-             everywhere; smaller dt / pseudo-transient continuation after re-adapt) or cap refinement level at
-             the contact line so tris behave like quads (whose estimator does not flag it, `ref=0`).
+           - **Remedies tested (`Scratchpad/drop_remedy.py`, `drop_smalldt.py`):**
+             `globally_convergent_newton=True` (line search) **removes the blow-up** — the first solve now
+             converges 7.54 → 4.9e-11 — but the *re-adapted* step then **stalls**: line-search λ collapses to
+             ~0.004 and the residual oscillates around 0.08 until the iteration cap throws (matches the earlier
+             "stalls" note, now under the exact Jacobian). A small adaptive `startstep=0.01*second` + line
+             search helps — the re-adapted-step residual **decreases** (0.090 → 0.054 over 10 iters) instead of
+             oscillating (mass/dt regularizes the diagonal) — but only *linearly* at ~5%/step, so it exhausts
+             the iteration budget (≈200 iters/step needed). Neither is a practical fix on its own.
+           - **Conclusion / open direction (physics/numerics, NOT a hanging bug):** the blocker is the
+             slip-BC-regularized pinned-contact-line constraint block becoming severely ill-conditioned once
+             the tri error estimator refines the contact line (h → toward L_slip = 100 nm). Quads succeed only
+             because their estimator leaves the contact line at `ref=0`. The principled fix is to **stop the
+             tri estimator over-refining the contact line** (cap refinement level there / clip the error
+             indicator at the triple point) so tris match quads — the next probe is whether the tri Z2 error
+             at the contact line is *legitimately* high (the singularity) or a tri-estimator artifact.
+             Alternatives: block-preconditioned linear solve for the constraint block, or a larger L_slip.
 
    - **§4.8 — Tri hanging weights now come from the oomph "interpolating node" facilities (hybrid) [DONE].**
      Follow-up to §4.7: replace the hand-written linear/quadratic Lagrange weight formulas in
