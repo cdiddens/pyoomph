@@ -1535,36 +1535,293 @@ namespace oomph
     return true;
   }
 
+  namespace
+  {
+    // Symbolic "father points": a tri son's vertex always lands either on a father VERTEX (FV0/FV1/FV2)
+    // or on a father EDGE MIDPOINT (FmS/FmE/FmW), per son_type. Read straight off build()'s s_in_parent.
+    enum FatherPoint { FV0 = 0, FV1 = 1, FV2 = 2, FmS = 3, FmE = 4, FmW = 5 };
+
+    // son_vertex_fp[son_type][local_vertex 0..2] -> FatherPoint. son_type is QuadTreeNames SW/SE/NW/NE = 0/1/2/3.
+    inline int son_vertex_fp(int son_type, int v)
+    {
+      using namespace oomph::QuadTreeNames;
+      static const int tab[4][3] = {
+          /*SW*/ {FmS, FmW, FV2},
+          /*SE*/ {FV0, FmE, FmS},
+          /*NW*/ {FmE, FV1, FmW},
+          /*NE*/ {FmS, FmE, FmW}};
+      if (son_type < 0 || son_type > 3) return -1;
+      return tab[son_type][v];
+    }
+
+    // The three father points on each father edge (S = v2-v0, E = v0-v1, W = v1-v2).
+    inline bool fp_on_edge(int fp, int edge)
+    {
+      using namespace oomph::QuadTreeNames;
+      switch (edge)
+      {
+      case S: return fp == FV2 || fp == FmS || fp == FV0;
+      case E: return fp == FV0 || fp == FmE || fp == FV1;
+      case W: return fp == FV1 || fp == FmW || fp == FV2;
+      default: return false;
+      }
+    }
+
+    // If both father points lie on ONE father edge, return that edge (S/E/W); else -1 (edge is interior).
+    inline int father_edge_of_pair(int fpa, int fpb)
+    {
+      using namespace oomph::QuadTreeNames;
+      for (int e : {S, E, W})
+        if (fp_on_edge(fpa, e) && fp_on_edge(fpb, e)) return e;
+      return -1;
+    }
+
+    // Local vertex indices bounding a triangle edge (E=v0-v1, W=v1-v2, S=v2-v0). Ordered so a=param 0, b=param 1.
+    inline void edge_local_vertices(int edge, int &a, int &b)
+    {
+      using namespace oomph::QuadTreeNames;
+      switch (edge)
+      {
+      case E: a = 0; b = 1; break;
+      case W: a = 1; b = 2; break;
+      case S: a = 2; b = 0; break;
+      default: a = -1; b = -1; break;
+      }
+    }
+
+    // Inverse of edge_local_vertices: the edge (S/E/W) bounded by the unordered vertex pair {a,b}, else -1.
+    inline int edge_from_local_vertices(int a, int b)
+    {
+      using namespace oomph::QuadTreeNames;
+      int lo = a < b ? a : b, hi = a < b ? b : a;
+      if (lo == 0 && hi == 1) return E;
+      if (lo == 1 && hi == 2) return W;
+      if (lo == 0 && hi == 2) return S;
+      return -1;
+    }
+
+    // An interior father edge connects two father-edge-midpoints and is shared by NE and exactly one
+    // corner son. Given the current son_type and the two (midpoint) father points, return the sibling.
+    inline int interior_sibling(int son_type, int fpa, int fpb)
+    {
+      using namespace oomph::QuadTreeNames;
+      int m0 = fpa < fpb ? fpa : fpb, m1 = fpa < fpb ? fpb : fpa;
+      int corner;
+      if (m0 == FmS && m1 == FmW) corner = SW;      // {FmS,FmW}
+      else if (m0 == FmS && m1 == FmE) corner = SE; // {FmS,FmE}
+      else if (m0 == FmE && m1 == FmW) corner = NW; // {FmE,FmW}
+      else return -1;
+      return (son_type == NE) ? corner : NE;
+    }
+
+    // Which son covers the given HALF (0 = param [0,0.5], 1 = [0.5,1]) of a father boundary edge. Only
+    // corner (like-oriented) sons touch a father boundary edge, and the edge direction is preserved.
+    inline int son_on_edge_half(int edge, int half)
+    {
+      using namespace oomph::QuadTreeNames;
+      switch (edge)
+      {
+      case S: return half == 0 ? SW : SE; // S: v2..mid = SW, mid..v0 = SE
+      case E: return half == 0 ? SE : NW; // E: v0..mid = SE, mid..v1 = NW
+      case W: return half == 0 ? NW : SW; // W: v1..mid = NW, mid..v2 = SW
+      default: return -1;
+      }
+    }
+
+    // Local coordinate of the point at parameter t (0..1) along edge (S/E/W) in a tri's local frame.
+    inline void point_on_edge(int edge, double t, oomph::Vector<double> &s)
+    {
+      using namespace oomph::QuadTreeNames;
+      switch (edge)
+      {
+      case S: s[0] = t;       s[1] = 0.0;     break; // v2(0,0)->v0(1,0)
+      case E: s[0] = 1.0 - t; s[1] = t;       break; // v0(1,0)->v1(0,1)
+      case W: s[0] = 0.0;     s[1] = 1.0 - t; break; // v1(0,1)->v2(0,0)
+      default: s[0] = 0.0; s[1] = 0.0; break;
+      }
+    }
+
+    // Parameter t (0..1) of a local coordinate lying on edge (S/E/W).
+    inline double param_on_edge(int edge, const oomph::Vector<double> &s)
+    {
+      using namespace oomph::QuadTreeNames;
+      switch (edge)
+      {
+      case S: return s[0];         // (t,0)
+      case E: return s[1];         // (1-t,t)
+      case W: return 1.0 - s[1];   // (0,1-t)
+      default: return 0.0;
+      }
+    }
+  } // namespace
+
+  bool RefineableTElement<2>::root_coord_to_leaf(const Vector<double> &s_root, RefineableTElement<2> *leaf, Vector<double> &s_leaf)
+  {
+    if (!leaf || !leaf->Tree_pt) return false;
+    Tree *root = leaf->Tree_pt->root_pt();
+    std::vector<int> chain; // son_types from just-below-root down to leaf
+    Tree *tp = leaf->Tree_pt;
+    while (tp != root) { chain.push_back(tp->son_type()); tp = tp->father_pt(); if (!tp) return false; }
+    Vector<double> s = s_root;
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it)
+    {
+      Vector<double> sd(2);
+      father_to_son_local(s, *it, sd);
+      s = sd;
+    }
+    s_leaf = s;
+    return true;
+  }
+
+  //=================================================================
+  /// Tri-native topological neighbour finder. See the header comment on TriEdgeNeighbour /
+  /// tri_edge_neighbour for the algorithm (son_type ascent + father-point edge tracking).
+  //=================================================================
+  RefineableTElement<2>::TriEdgeNeighbour RefineableTElement<2>::tri_edge_neighbour(int my_edge) const
+  {
+    using namespace QuadTreeNames;
+    TriEdgeNeighbour res;
+    if (!this->Tree_pt) return res;
+
+    // --- Ascent: track the edge as a (local vertex a,b) pair, climbing while it stays on a father edge. ---
+    int ea, eb;
+    edge_local_vertices(my_edge, ea, eb);
+    if (ea < 0) return res;
+    const Tree *cur = this->Tree_pt;
+    int climbs = 0;
+    while (true)
+    {
+      Tree *fath = cur->father_pt();
+      if (!fath) break; // reached the root with the edge on the boundary -> cross-root case below
+      const int st = cur->son_type();
+      const int fpa = son_vertex_fp(st, ea), fpb = son_vertex_fp(st, eb);
+      const int D = father_edge_of_pair(fpa, fpb);
+      if (D < 0)
+      {
+        // Edge is interior to `fath`: the >=-sized neighbour is the sibling son sharing this edge.
+        const int sib_st = interior_sibling(st, fpa, fpb);
+        if (sib_st < 0) return res;
+        Tree *sib = fath->son_pt(sib_st);
+        if (!sib) return res;
+        // climbs==0 => sibling is the same size (equal neighbour); a non-leaf sibling means the
+        // neighbour is equal-or-finer. Either way this element does not hang on that edge.
+        if (climbs >= 1 && sib->is_leaf())
+        {
+          res.el = dynamic_cast<RefineableTElement<2> *>(sib->object_pt());
+          res.diff_level = -climbs;
+        }
+        return res;
+      }
+      // Edge lies on `fath`'s D edge -> climb, re-expressing the edge in the father's vertices.
+      cur = fath;
+      edge_local_vertices(D, ea, eb);
+      climbs++;
+    }
+
+    // --- Cross-root: `cur` is the root; the edge is its boundary edge my_D. ---
+    const int my_D = edge_from_local_vertices(ea, eb);
+    if (my_D < 0) return res;
+    TreeRoot *root = cur->root_pt();
+    TreeRoot *nr = root->neighbour_pt(my_D);
+    if (!nr) return res; // domain boundary: no neighbour
+    RefineableTElement<2> *my_root_el = dynamic_cast<RefineableTElement<2> *>(root->object_pt());
+    RefineableTElement<2> *nr_root_el = dynamic_cast<RefineableTElement<2> *>(nr->object_pt());
+    if (!my_root_el || !nr_root_el) return res;
+
+    // Topological shared-edge correspondence: my root edge's two vertex nodes -> the neighbour root's
+    // vertex indices, giving the neighbour's edge direction and whether the parametrisation is reversed.
+    Node *na = my_root_el->vertex_node_pt(ea);
+    Node *nb = my_root_el->vertex_node_pt(eb);
+    int ca = -1, cb = -1;
+    for (int j = 0; j < 3; j++)
+    {
+      Node *vj = nr_root_el->vertex_node_pt(j);
+      if (vj == na) ca = j;
+      if (vj == nb) cb = j;
+    }
+    if (ca < 0 || cb < 0) return res; // roots not actually edge-sharing (should not happen)
+    const int nr_D = edge_from_local_vertices(ca, cb);
+    if (nr_D < 0) return res;
+    int nca, ncb;
+    edge_local_vertices(nr_D, nca, ncb); // neighbour edge param: 0 at nca, 1 at ncb
+    const bool reversed = (nca != ca);   // my param-0 node (na<->ca) vs neighbour param-0 node (nca)
+
+    // L's edge interval [t0,t1] along my root edge (via the exact affine map), then in the neighbour frame.
+    Vector<double> sa(2), sb(2), ra(2), rb(2);
+    edge_local_vertices(my_edge, ea, eb); // this element's own local vertices for my_edge
+    point_on_edge(my_edge, 0.0, sa);      // = vertex ea in this element
+    point_on_edge(my_edge, 1.0, sb);      // = vertex eb
+    this->local_coordinate_in_ancestor(sa, my_root_el, ra);
+    this->local_coordinate_in_ancestor(sb, my_root_el, rb);
+    double t0 = param_on_edge(my_D, ra), t1 = param_on_edge(my_D, rb);
+    if (reversed) { t0 = 1.0 - t0; t1 = 1.0 - t1; }
+    if (t0 > t1) std::swap(t0, t1);
+
+    // Descend into the neighbour root along nr_D toward [t0,t1], stopping at the >=-sized element.
+    Tree *node = nr;
+    int dep = 0;
+    double lo = 0.0, hi = 1.0;
+    const double tol = 1e-9;
+    while (true)
+    {
+      if (node->is_leaf()) break;    // spans [lo,hi] >= L's edge -> this is the >= neighbour
+      if (dep >= climbs) break;      // do not descend finer than L
+      const double mid = 0.5 * (lo + hi);
+      const double a = (t0 - lo) / (hi - lo), b = (t1 - lo) / (hi - lo); // interval in node's [0,1] param
+      int half;
+      if (b <= 0.5 + tol) half = 0;
+      else if (a >= 0.5 - tol) half = 1;
+      else break; // straddles the midpoint: the neighbour side is equal-or-finer here -> no coarse neighbour
+      const int cst = son_on_edge_half(nr_D, half);
+      Tree *child = node->son_pt(cst);
+      if (!child) break;
+      node = child;
+      if (half == 0) hi = mid; else lo = mid;
+      dep++;
+    }
+    RefineableTElement<2> *nb_el = dynamic_cast<RefineableTElement<2> *>(node->object_pt());
+    if (!nb_el || !node->is_leaf()) return res; // only a leaf can be a hang master; non-leaf => equal/finer
+    res.el = nb_el;
+    res.diff_level = dep - climbs;
+    res.cross_root = true;
+    res.my_edge_dir = my_D;
+    res.nr_edge_dir = nr_D;
+    res.reversed = reversed;
+    return res;
+  }
+
   //=================================================================
   /// Tree-based hanging on one triangle edge. See the header for the rationale (topology from the
-  /// QuadTree, coordinates from locate_zeta -- never the quad compass coordinate descent).
+  /// QuadTree son_type descent, coordinates from the exact affine map -- never locate_zeta nor the
+  /// quad compass coordinate descent).
   //=================================================================
   void RefineableTElement<2>::tri_hang_helper(const int &value_id, const int &my_edge)
   {
     using namespace QuadTreeNames;
-    QuadTree *qt = quadtree_pt();
-    if (!qt) return;
-    Vector<unsigned> translate_s(2);
-    Vector<double> s_lo(2), s_hi(2);
-    int neigh_edge = 0, diff_level = 0;
-    bool in_neigh_tree = false;
-    QuadTree *neigh = qt->gteq_edge_neighbour(my_edge, translate_s, s_lo, s_hi, neigh_edge, diff_level, in_neigh_tree);
-    // Hang only onto a STRICTLY COARSER leaf neighbour (diff_level < 0). oomph's quad helper uses
-    // diff_level != 0 because quad gteq_edge_neighbour never returns a finer neighbour; the triangle
-    // gteq DOES return finer neighbours (diff_level > 0) in some inverted-son configurations -- hanging
-    // on those makes a coarse node depend on a finer one and, together with the finer node's own
-    // (correct) hang on this element, forms a mutual cycle (stack overflow in complete_hanging_nodes).
+    // Tri-native topological neighbour search (son_type ascent + father-point edge tracking). Returns the
+    // >=-sized LEAF neighbour across my_edge; we hang only when it is STRICTLY COARSER (diff_level < 0).
     // A finer neighbour hangs on THIS element from its own side, so skipping it here loses nothing.
-    if (neigh == 0 || diff_level >= 0 || !neigh->is_leaf()) return;
-    RefineableElement *neigh_re = dynamic_cast<RefineableElement *>(neigh->object_pt());
-    FiniteElement *neigh_fe = dynamic_cast<FiniteElement *>(neigh->object_pt());
+    TriEdgeNeighbour nb = this->tri_edge_neighbour(my_edge);
+    if (nb.el == 0 || nb.diff_level >= 0) return;
+    RefineableElement *neigh_re = dynamic_cast<RefineableElement *>(nb.el);
+    FiniteElement *neigh_fe = dynamic_cast<FiniteElement *>(nb.el);
     if (!neigh_re || !neigh_fe) return;
+
+    // For a cross-root neighbour we bridge coordinates through the two root frames (this root -> shared
+    // edge parameter -> neighbour root -> neighbour leaf), all with the exact affine map. Fetch the roots.
+    RefineableTElement<2> *my_root_el = nullptr, *nr_root_el = nullptr;
+    if (nb.cross_root)
+    {
+      my_root_el = dynamic_cast<RefineableTElement<2> *>(this->Tree_pt->root_pt()->object_pt());
+      nr_root_el = dynamic_cast<RefineableTElement<2> *>(nb.el->Tree_pt->root_pt()->object_pt());
+      if (!my_root_el || !nr_root_el) return;
+    }
 
     // Interpolating nodes along MY edge. Tri edge<->compass convention (must match get_edge_bcs and the
     // forest root-neighbour setup, both derived from Father_bound): E=v0-v1, W=v1-v2, S=v2-v0. This is
-    // the slot passed to gteq_edge_neighbour, so the local-coordinate walk below MUST trace the same
-    // edge. TElement<2,3> vertex local coords v0=(1,0), v1=(0,1), v2=(0,0). n_edge is 2 for a C1 field
-    // (corners), 3 for C2 (+mid).
+    // the slot passed to tri_edge_neighbour, so the local-coordinate walk below MUST trace the same edge.
+    // TElement<2,3> vertex local coords v0=(1,0), v1=(0,1), v2=(0,0). n_edge is 2 for a C1 field (corners),
+    // 3 for C2 (+mid).
     const unsigned n_edge = this->ninterpolating_node_1d(value_id);
     for (unsigned i = 0; i < n_edge; i++)
     {
@@ -1579,34 +1836,37 @@ namespace oomph
       }
       Node *X = this->get_interpolating_node_at_local_coordinate(s, value_id);
       if (X == 0) continue;
-      // Global position of X, and its local coordinate inside the coarse neighbour.
-      Vector<double> X_pos(2);
-      X_pos[0] = X->x(0);
-      X_pos[1] = X->x(1);
-      // Local coordinate of X inside the coarse neighbour. Preferred: the exact tree affine map (no
-      // Newton); it works whenever this element and the neighbour share a tree root. Cross-root pairs
-      // still fall back to locate_zeta until the inter-tree map lands. PYOOMPH_TRI_AFFINE_XCHECK also
-      // runs locate_zeta and logs any disagreement.
+      // Local coordinate of X inside the coarse neighbour, via the exact affine tree map (no locate_zeta,
+      // no Newton -- exact even on curved meshes because refinement is defined in local coordinates).
       Vector<double> s_neigh(2);
-      static const bool USE_AFFINE = getenv("PYOOMPH_NO_AFFINE") == 0; // affine on by default; set PYOOMPH_NO_AFFINE=1 to force locate_zeta
-      RefineableTElement<2> *neigh_te = USE_AFFINE ? dynamic_cast<RefineableTElement<2> *>(neigh->object_pt()) : nullptr;
-      bool have_affine = neigh_te && this->local_coordinate_in_other_leaf(s, neigh_te, s_neigh);
-      static const bool XCHECK = getenv("PYOOMPH_TRI_AFFINE_XCHECK") != 0;
-      if (!have_affine || XCHECK)
+      bool have_neigh;
+      if (!nb.cross_root)
       {
-        Vector<double> s_lz(2);
+        have_neigh = this->local_coordinate_in_other_leaf(s, nb.el, s_neigh); // same root: up to root, down to nb
+      }
+      else
+      {
+        // Cross root: this leaf -> my root -> shared-edge parameter -> neighbour root edge -> neighbour leaf.
+        Vector<double> s_root(2), s_nrroot(2);
+        this->local_coordinate_in_ancestor(s, my_root_el, s_root);
+        double t = param_on_edge(nb.my_edge_dir, s_root);
+        if (nb.reversed) t = 1.0 - t;
+        point_on_edge(nb.nr_edge_dir, t, s_nrroot);
+        have_neigh = root_coord_to_leaf(s_nrroot, nb.el, s_neigh);
+      }
+      if (!have_neigh) continue;
+      static const bool XCHECK = getenv("PYOOMPH_TRI_AFFINE_XCHECK") != 0;
+      if (XCHECK)
+      {
+        Vector<double> X_pos(2), s_lz(2);
+        X_pos[0] = X->x(0); X_pos[1] = X->x(1);
         GeomObject *geom = 0;
         neigh_fe->locate_zeta(X_pos, geom, s_lz);
-        if (have_affine && XCHECK && geom != 0)
+        if (geom != 0)
         {
           double e = std::abs(s_neigh[0] - s_lz[0]) + std::abs(s_neigh[1] - s_lz[1]);
           if (e > 1e-9)
-            std::fprintf(stderr, "[affine-xcheck] X(%.4f,%.4f) affine=(%.5f,%.5f) lz=(%.5f,%.5f) err=%.3e\n", X_pos[0], X_pos[1], s_neigh[0], s_neigh[1], s_lz[0], s_lz[1], e);
-        }
-        if (!have_affine)
-        {
-          if (geom == 0) continue; // cross-root and not located (should not happen for a shared edge)
-          s_neigh = s_lz;
+            std::fprintf(stderr, "[affine-xcheck] X(%.4f,%.4f) %s affine=(%.5f,%.5f) lz=(%.5f,%.5f) err=%.3e\n", X_pos[0], X_pos[1], nb.cross_root ? "xroot" : "sameroot", s_neigh[0], s_neigh[1], s_lz[0], s_lz[1], e);
         }
       }
       // If the neighbour has its own interpolating node exactly here, X is shared -> not hanging.
@@ -1634,7 +1894,7 @@ namespace oomph
       if (cyclic)
       {
         if (getenv("PYOOMPH_TRI_NEIGH_DBG"))
-          std::fprintf(stderr, "[cyc-skip] X(%.5f,%.5f) slot=%d edge=%d neigh-centroid via gteq (dl=%d)\n", X->x(0), X->x(1), value_id, my_edge, diff_level);
+          std::fprintf(stderr, "[cyc-skip] X(%.5f,%.5f) slot=%d edge=%d dl=%d xroot=%d\n", X->x(0), X->x(1), value_id, my_edge, nb.diff_level, (int)nb.cross_root);
         continue;
       }
       HangInfo *hang = new HangInfo(nmaster);

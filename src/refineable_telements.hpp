@@ -214,6 +214,32 @@ namespace oomph
     // coordinate descent (geometrically wrong for triangles).
     void tri_hang_helper(const int &value_id, const int &my_edge);
 
+    // Result of the tri-native topological neighbour search (see tri_edge_neighbour).
+    struct TriEdgeNeighbour
+    {
+      RefineableTElement<2> *el = nullptr; // >=-sized LEAF neighbour across the queried edge (or null)
+      int diff_level = 0;                  // level(neighbour)-level(this) along the edge; <0 => strictly coarser => this hangs
+      bool cross_root = false;             // true if the neighbour lives in an adjacent tree root
+      int my_edge_dir = -1;                // this element's edge direction expressed in ITS root frame (S/E/W)
+      int nr_edge_dir = -1;                // the shared edge's direction in the NEIGHBOUR's root frame (S/E/W)
+      bool reversed = false;               // whether the two roots parametrise the shared edge in opposite senses
+    };
+
+    // Tri-native topological neighbour finder (the "oomph way": son_type ascent, NOT the geometric
+    // node_strictly_on_* scheme, NOT locate_zeta). Tracks the queried edge as a pair of tree-node local
+    // vertex indices and, at each level, maps them to father points (a father vertex or a father edge
+    // midpoint) via the build()'s s_in_parent data; the edge is interior to the father exactly when the
+    // two father points lie on different father edges, at which moment the >=-sized neighbour is simply
+    // the sibling son -- so NO quad Reflect/Rotate/Is_adjacent tables are needed and the inverted middle
+    // (NE) son is handled correctly. If the ascent reaches the root with the edge still on the boundary,
+    // the neighbour lives in the adjacent root (found topologically from shared vertex nodes) and we
+    // descend into it along the shared edge. Returns the >=-sized leaf neighbour + the data needed to
+    // bridge coordinates across roots with the affine map (never locate_zeta).
+    TriEdgeNeighbour tri_edge_neighbour(int my_edge) const;
+    // Map a coordinate given in `leaf`'s ROOT-element local frame down to `leaf`'s own local frame, by
+    // composing father_to_son_local along leaf's son_type chain (used for cross-root coordinate bridging).
+    static bool root_coord_to_leaf(const Vector<double> &s_root, RefineableTElement<2> *leaf, Vector<double> &s_leaf);
+
     // Affine map of a local coordinate between a son element (of the given son_type) and its father,
     // s_father = A*s_son + b (and its inverse). Unlike oomph's quad box representation
     // (s_lo/s_hi/translate_s), a full 2x2 A correctly represents ALL four triangle sons including the
