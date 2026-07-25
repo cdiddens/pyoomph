@@ -747,16 +747,33 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
          regression). NOTE: the coarse mid-node must **not** be used directly as the C2-hang master M (it can
          itself be hanging → hang cycle → stack overflow, seen on CR error-adaptivity); keep M = the fine leaf
          node found from the `between` set.
-       * **REMAINING (separate) follow-up: transient divergence under *re-adaptation*.** With the (now exact)
-         Jacobian, a droplet run *with* `spatial_adapt` during the transient diverges/stalls at the first
-         re-adapt step, while the identical run *without* re-adaptation converges quadratically to completion,
-         and a central-diff FD-check of the (stationary) Jacobian *after* a re-adapt is exact. So this is NOT a
-         hanging/stationary-Jacobian bug; it is a transient issue (BDF2 time-derivative history interpolated
-         onto the re-adapted moving mesh) that was previously **masked** by the inexact-massfrac Jacobian
-         damping Newton into slow-but-stable convergence. Line-search (`globally_convergent_newton=True`)
-         removes the blow-up but the Newton then stalls, confirming a residual transient-Jacobian/history
-         inconsistency. Next: central-difference FD-check of the **transient** Jacobian (with dt + history)
-         right after a re-adapt.
+       * **REMAINING (separate) follow-up: transient divergence under *re-adaptation* [DIAGNOSED — stiff
+         contact-line constraint block, NOT a Jacobian bug].** A droplet run *with* `spatial_adapt` during
+         the transient blows up (Newton residual 3.8 → 3e11) at the first re-adapt; *without* re-adaptation
+         all steps converge quadratically to completion. Full diagnosis (scratchpad `drop_fd_transient.py`,
+         `drop_no_unrefine.py`, `drop_readapt_resid.py`, `drop_readapt_jac.py`, `drop_quads_readapt.py`):
+           - **Transient Jacobian after re-adapt is FD-EXACT** (central-diff, with dt + BDF2 history, on the
+             re-adapted mesh: worst rel < 1e-4). So it is **not** a missing transient/history Jacobian term —
+             the earlier "history inconsistency" hypothesis is **disproven**.
+           - **Not unrefinement.** Disabling coarsening entirely (`problem.min_permitted_error = 0`) still
+             blows up (pure-refinement re-adapt). And it is **not** the hanging (§4.8 is FD-exact).
+           - **Localized to the pinned contact line.** After re-adapt the residual is dominated by ONE dof:
+             `droplet/droplet_gas/droplet_substrate/velocity_x` (the triple point) at **7.54**, vs ~1e-3
+             without re-adapt; everything else ≤ 0.02. That equation is the **Navier slip BC** (diag 7.5e-3,
+             |row|₁ ≈ 1.18e4 — coefficients ~ μ/slip_length with slip_length = 100 nm). The exact Newton step
+             is **huge**: max |δ| = 8.4 on `_kin_bc` (kinematic BC), −2.1 on `_lagr_conn_mesh_y` (mesh-connection
+             Lagrange multiplier), and **+2.08 uniformly on every `pressure` dof** (a whole-field pressure-datum
+             shift). I.e. tri refinement of the contact-line region makes the coupled constraint block
+             (slip velocity ↔ kinematic BC ↔ pressure datum/volume ↔ mesh-connection multipliers)
+             ill-conditioned; the interpolated guess falls outside Newton's basin and the exact-but-stiff step
+             overshoots. `globally_convergent_newton` stops the blow-up but stalls (consistent with
+             ill-conditioning, not inconsistency).
+           - **Quads don't disprove/confirm:** the quad run completes but does `ref=0 unref=0` during the
+             transient (never re-adapts where tris do), so it does not exercise this path.
+           - **Open direction (physics/numerics, not a hanging bug):** either robustify the post-re-adapt solve
+             (smaller dt / pseudo-transient continuation after re-adapt), cap refinement level at the contact
+             line, or check whether tri refinement produces near-degenerate (sliver) elements at the moving
+             contact line that quads' structured refinement avoids (an element-quality check is the next probe).
 
    - **§4.8 — Tri hanging weights now come from the oomph "interpolating node" facilities (hybrid) [DONE].**
      Follow-up to §4.7: replace the hand-written linear/quadratic Lagrange weight formulas in
