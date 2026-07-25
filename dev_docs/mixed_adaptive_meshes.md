@@ -783,14 +783,28 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
              search helps — the re-adapted-step residual **decreases** (0.090 → 0.054 over 10 iters) instead of
              oscillating (mass/dt regularizes the diagonal) — but only *linearly* at ~5%/step, so it exhausts
              the iteration budget (≈200 iters/step needed). Neither is a practical fix on its own.
-           - **Conclusion / open direction (physics/numerics, NOT a hanging bug):** the blocker is the
-             slip-BC-regularized pinned-contact-line constraint block becoming severely ill-conditioned once
-             the tri error estimator refines the contact line (h → toward L_slip = 100 nm). Quads succeed only
-             because their estimator leaves the contact line at `ref=0`. The principled fix is to **stop the
-             tri estimator over-refining the contact line** (cap refinement level there / clip the error
-             indicator at the triple point) so tris match quads — the next probe is whether the tri Z2 error
-             at the contact line is *legitimately* high (the singularity) or a tri-estimator artifact.
-             Alternatives: block-preconditioned linear solve for the constraint block, or a larger L_slip.
+           - **The contact-line Z2 error is LEGITIMATE, not a tri-estimator artifact** (`Scratchpad/drop_errors.py`,
+             tris vs quads, post-step-1). BOTH mesh types flag a sharp error peak at the triple point that
+             decays away from it (the classic real-singularity signature): tris max 0.16 (all 40 over-threshold
+             elements in the contact-line band, 0 elsewhere), **quads max 0.33 with 69 over-threshold elements**
+             — quads estimate it *higher*, not lower. So the estimator is doing the right thing; the singularity
+             (evaporation flux at the pinned contact line) is genuinely there.
+           - **The tri/quad difference is refinement DEPTH at the tip, not estimator quality.** Tri top-error
+             elements sit at z ≈ 0.0007 (right at the triple point); quad ones at z ≈ 0.023 — tris resolve the
+             tip ~30× closer to the singularity, so h there is far smaller and the slip-BC coupling
+             μ/(L_slip·h) far larger. Quads run only because they are already at max level at the contact line
+             and refine 0 further; tris still have headroom and refine into the ill-conditioned regime.
+           - **A global `max_refinement_level` cap is NOT the lever:** `max_refinement_level=2` still blows up
+             (`drop_maxlevel2.py`; residual 1.58e10 — milder than level-3's 3e11 but still over the 1e10 cap),
+             because the base tri mesh is already fine enough at the contact line that even shallow refinement
+             tips it over.
+           - **Conclusion / open direction (physics/numerics, NOT a hanging/estimator bug):** the blocker is
+             the slip-regularized contact-line constraint block going ill-conditioned as tri refinement drives
+             h toward L_slip = 100 nm. Chasing a true singularity with refinement is futile anyway. Fix belongs
+             at the problem/solver level: **region-specific** refinement cap or a minimum element size (~L_slip)
+             at the triple point (freeze/limit contact-line refinement — a global level cap is too blunt), a
+             block-preconditioned solve for the slip/kinematic/pressure/Lagrange constraint block, or a larger
+             L_slip. Deferred to the droplet problem owner; the hanging/adaptation machinery itself is correct.
 
    - **§4.8 — Tri hanging weights now come from the oomph "interpolating node" facilities (hybrid) [DONE].**
      Follow-up to §4.7: replace the hand-written linear/quadratic Lagrange weight formulas in
