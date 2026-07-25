@@ -755,6 +755,38 @@ namespace pyoomph
       std::cout << "[tri-hang validate] nodes=" << this->nnode() << " tree_hang_slots=" << n_hang_tree
                 << " geo_hang_slots=" << n_hang_geo << " mismatched_nodes=" << n_mismatch << std::endl;
     }
+
+    // Diagnostic dump of the FINAL per-slot HangInfo (sorted, position-keyed) for diffing two runs
+    // (e.g. geometric vs topological detection). Env-gated; off by default.
+    if (getenv("PYOOMPH_TRI_HANG_DUMP"))
+    {
+      std::vector<std::string> lines;
+      for (unsigned int in = 0; in < this->nnode(); in++)
+      {
+        oomph::Node *n = this->node_pt(in);
+        for (int slot = -1; slot < (int)n->nvalue(); slot++)
+        {
+          if (!n->is_hanging(slot)) continue;
+          oomph::HangInfo *h = n->hanging_pt(slot);
+          std::vector<std::string> ms;
+          for (unsigned m = 0; m < h->nmaster(); m++)
+          {
+            char b[128];
+            std::snprintf(b, sizeof(b), "(%.5f,%.5f):%.5f", h->master_node_pt(m)->x(0), h->master_node_pt(m)->x(1), h->master_weight(m));
+            ms.push_back(b);
+          }
+          std::sort(ms.begin(), ms.end());
+          char pos[64];
+          std::snprintf(pos, sizeof(pos), "(%.5f,%.5f) s%d:", n->x(0), n->x(1), slot);
+          std::string line = pos;
+          for (auto &s : ms) { line += " "; line += s; }
+          lines.push_back(line);
+        }
+      }
+      std::sort(lines.begin(), lines.end());
+      for (auto &l : lines) std::cout << "[HDUMP] " << l << "\n";
+      std::cout << "[HDUMP] --- end adapt (nhang_lines=" << lines.size() << ") ---" << std::endl;
+    }
   }
 
   // True only if every element in the mesh is a quad (h-refinement via a QuadTreeForest is only

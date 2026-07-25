@@ -891,10 +891,25 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
      CR-error-adaptivity tests with an OomphException (31/34): pyoomph's tri refinement makes the fine
      midpoint **vertex** V a *distinct node coincident with* the coarse C2 mid-node M, and the topological
      `between` handles that pair differently from the geometric scan for the C1(TB)/DL pressure slot — a
-     difference the node-set `validate` **masks** because it excludes `edge_mid`. To finish: compare the
-     FINAL per-slot HangInfo (not node sets), then handle the coincident fine-vertex/coarse-mid pair
-     explicitly (or make `father_edge_node_key` provenance persistent so the midpoint is identified with zero
-     geometry). Default stays geometric (34/34) until topo passes everything.
+     difference the node-set `validate` **masks** because it excludes `edge_mid`.
+       * **Per-slot HangInfo diff (`PYOOMPH_TRI_HANG_DUMP`, geom vs topo on CR-adaptivity[left]):** adapt
+         round 1 is **identical** (24=24 hang-lines); round 2 geom=72 but **topo=0** (a TOTAL miss, which then
+         diverges the stationary solve → OomphException); rounds 3-4 topo is also short (216 vs 258, 342 vs
+         354). So the topological reconstruction is correct for the first simple single-level 2:1 round but
+         **systematically breaks on the multi-level / interior-edge refinement** that error-driven CR
+         adaptivity produces — the geometric scan naturally captures a coarse edge's whole subdivision (nodes
+         at t=0.125, 0.375, ... appear after the flatten composes 2:1 chains), while the single-midpoint
+         V-search + between-check does not, and round 2's 0-result shows the candidate search failing outright
+         for those configurations (interior C2 edges / coincident fine-vertex vs coarse-mid).
+       * **Assessment:** reconstructing the subdivision topology from the facet graph is doable for one level
+         but gets genuinely intricate for multi-level + interior + C2-mid + coincident-node cases (each a
+         separate special case). The robust way is **node provenance**: make `father_edge_node_key` (already
+         computed at refinement time, pure topology) **persistent** on each created node (store its father
+         node-pair), then a fine node hangs iff its father-pair edge is a coarse leaf edge — zero geometry,
+         no reconstruction, handles all levels uniformly. That is the recommended route to finish this; the
+         facet-reconstruction path is left committed behind the flag as a working single-level reference +
+         the `validate`/`DUMP` diagnostics. Default stays geometric (34/34) until a topological path passes
+         the whole suite + the aggressive flat film + droplet FD.
 
 5. **Variable / anisotropic schemes** (§5): quad 1→2 (both directions), simplex
    bisection; directional error estimator; generalised balance rule.
