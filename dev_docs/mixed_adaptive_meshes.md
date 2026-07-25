@@ -535,21 +535,47 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
        flagged and nothing is sent (verified: send count 0). This is a genuine oomph-lib bug; the
        one-line fix is regression-clean (2D Poisson C1/C2 + Stokes TH/CR distributed still machine-zero,
        serial unchanged since the function is MPI-only).
-     - **Bug B [OPEN, blocks 3D tet distributed].** With Bug A fixed the deadlock is gone but a deeper
-       fault surfaces: during real h-refinement an **unmatched tag-0 message (3 uints, rank0->rank1)**
-       is left pending in the queue by the upstream base `Mesh::classify_halo_and_haloed_nodes`
-       (confirmed by `MPI_Iprobe` at `synchronise_hanging_nodes` entry). Whichever next tag-0 consumer
-       runs grabs it: `synchronise_nonhanging_nodes` misreads it as a count -> resizes to garbage ->
-       **segfault**; give that function unique tags and the poison instead lands in
-       `synchronise_hanging_nodes` -> **hang**. The stray message means the base classify's
-       per-node processor-association send/recv (`mesh.cc:3483/3505`, keyed on
-       haloed/halo element correspondence) is **unbalanced for tets** — the same "tet halo/haloed
-       element lists are not consistently ordered/populated" family as the other simplex-distribution
-       gaps. Proper fix requires making the distributed tet halo/haloed correspondence consistent (a
-       substantial oomph-internals task); MPI tracing is hampered here because the sandbox blocks
-       live gdb/ptrace, so this was pinpointed by C++ `MPI_Iprobe`/checkpoint instrumentation.
-     - **Net:** 2D distributed adaptivity (all element types) is production-ready; 3D tet distributed
-       adaptivity is blocked on Bug B. Serial 3D tet adaptivity is unaffected and remains machine-zero.
+     - **Bug B [OPEN, blocks 3D tet distributed — ROOT CAUSE IDENTIFIED].** With Bug A fixed a deeper,
+       fundamental fault surfaces. Traced end-to-end (an `LD_PRELOAD` PMPI `MPI_Send` shim with
+       `backtrace()` pinned the sender; `MPI_Iprobe`/checkpoint instrumentation the rest, since the
+       sandbox blocks live gdb/ptrace):
+       * **Symptom chain.** A stray tag-0 message is left unmatched during refinement and later grabbed
+         by an unrelated tag-0 recv: `synchronise_nonhanging_nodes` misreads it as a count -> resizes to
+         garbage -> **segfault**; if that path is retagged/fixed, `synchronise_hanging_nodes` chokes ->
+         **deadlock**. The sender is **`Mesh::resize_halo_nodes()`** (called from within base
+         `Mesh::classify_halo_and_haloed_nodes`), whose sender guards data transmission on the local
+         **haloed** count while the receiver guards on the local **halo** count.
+       * **Root cause (the real bug).** After 3D-tet refinement the halo/haloed **node** classification
+         is **asymmetric across ranks**: measured directly, `rank0.nhaloed_node(1)=249` but
+         `rank1.nhalo_node(0)=0` (while the other direction `rank1.nhaloed_node(0)=480 == rank0.nhalo_node(1)=480`
+         is fine). The invariant `rankA.nhaloed_node(B) == rankB.nhalo_node(A)` — which
+         `resize_halo_nodes`, `synchronise_hanging_nodes` and `additional_synchronise_hanging_nodes`
+         all assume (they only *check* it under `#ifdef PARANOID`, compiled out in the opt build) — is
+         **violated**. Mechanism: a node newly created on a shared boundary during refinement is not
+         registered symmetrically in the distributed shared-node scheme, so **both** ranks end up
+         believing they own it (`processor_in_charge` disagreement) and **both** put it in their
+         *haloed* list, **neither** in the *halo* list. oomph's quad/hex distributed refinement keeps
+         this consistent via the Quad/OcTree neighbour structure; pyoomph's tet refinement shares new
+         nodes **geometrically** (bypassing that structure, §3.2/§3.3) and never reconciles the new
+         nodes into `Shared_node_pt` / the halo classification.
+       * **Why symptom-patching is NOT a fix (tested, then reverted).** Making the three exchanges drain
+         cleanly under asymmetry (always exchange the header/count; for asymmetric pairs set
+         `halo_hanging=haloed_hanging` so no spurious hang discrepancy corrupts pyoomph's geometric
+         hanging) made **C1 uniform + error-based distributed run to machine-zero** and **C2 survive 2
+         adapt cycles** — but it is papering over a **mis-classified mesh**: the observable
+         `∫u` comes out **~2x** the serial value for distributed 3D tet C1 (`0.083` serial vs `0.166`
+         2-rank — halo elements double-counted), whereas 2D distributed matches serial **exactly**
+         (`0.4425747`). So the residual oracle passes (self-consistent solve) but on a **doubled/wrong
+         mesh**; C2 deep refinement (level 3) still diverges to `inf`/NaN. Conclusion: the fix must be
+         at the **root** — register newly-created shared tet nodes into the distributed shared-node /
+         halo scheme so `classify_halo_and_haloed_nodes` produces **symmetric** halo/haloed node lists.
+         Relevant machinery: `Mesh::synchronise_shared_nodes`, `additional_setup_shared_node_scheme`
+         (`problem.cc`), and the halo/haloed node population in `Mesh::classify_halo_and_haloed_nodes`.
+     - **Net:** 2D distributed adaptivity (all element types) is production-ready and correct
+       (integrals match serial). 3D tet distributed adaptivity is blocked on Bug B — a genuine
+       distributed-tet-mesh-construction defect (asymmetric halo/haloed node classification), not a
+       messaging bug; symptom-patching yields silently wrong meshes and is intentionally NOT committed.
+       Serial 3D tet adaptivity is unaffected and remains machine-zero.
 
 5. **Variable / anisotropic schemes** (§5): quad 1→2 (both directions), simplex
    bisection; directional error estimator; generalised balance rule.
