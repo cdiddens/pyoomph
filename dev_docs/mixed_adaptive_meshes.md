@@ -577,6 +577,32 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
        messaging bug; symptom-patching yields silently wrong meshes and is intentionally NOT committed.
        Serial 3D tet adaptivity is unaffected and remains machine-zero.
 
+   * **§4.5 — Interface (Face) elements + tree-based triangle refinement [OPEN REGRESSION, serial].**
+     Reported crash: `pinned_water_droplet_tri_adapt.py` (a multi-domain droplet-on-substrate problem,
+     `mesh_mode="tris"`, moving mesh, `spatial_adapt`) aborts serially with `double free or corruption`
+     during `initialise()`. Diagnosed: it is a **regression introduced by this branch** — on `main`,
+     triangle meshes are not tree-refineable, so a problem's initial/spatial adaptation falls back to
+     gmsh **remeshing**; Phase 2 made `TemplatedMeshBase2d` triangle meshes tree-refineable, and the
+     droplet's initial adaptation now takes the tree-refinement path ("37 elements to be refined").
+     That path is broken when the bulk triangle mesh carries **interface (FaceElement) meshes**
+     (`InterfaceTElementLine1dC2`, `InterfaceElementPoint0d`) and a **moving mesh** (SolidNodes):
+     during the interface rebuild (`src/mesh.cpp` ~655-790: old Face elements `delete`d then
+     recreated via `construct_face_element`), two *distinct* Face-element objects end up sharing one
+     `GeneralisedElement::Eqn_number` allocation, so tearing the interface meshes down double-frees it
+     (`elements.cc:301`). Confirmed via global-freed-pointer instrumentation (`same=0` → different
+     objects, same `Eqn_number` ptr). **Reproduction is specific**: single-domain C2-tri + `NeumannBC`
+     + adapt does NOT crash; adding a moving mesh reproduces the *separate* known moving-mesh-tri Newton
+     failure; the double-free needs the multi-domain **inter-domain interface** + moving mesh + the
+     tree-refinement-during-initial-adapt combination. This ties into the same foundational gap as the
+     moving-mesh triangle adaptivity Newton failures (position work was reverted earlier for the same
+     root reason). **Not yet fixed.** Fix direction: make tree-based triangle refinement correctly
+     rebuild attached FaceElement/InterfaceMesh layers (and cooperate with SolidNode/ALE + the
+     remesher) the way quad refinement does. Interim workaround for users: force gmsh remeshing for
+     triangle adaptivity on such problems rather than tree refinement (verify the opt-out path in
+     `pyoomph/meshes/remesher.py`). The core tri refinement itself is unaffected
+     (`tests/test_triangle_refinement.py` 28/28 green) — those tests carry no interface elements, which
+     is the coverage gap that let this through.
+
 5. **Variable / anisotropic schemes** (§5): quad 1→2 (both directions), simplex
    bisection; directional error estimator; generalised balance rule.
 6. **MPI hardening** across all shapes; distributed adaptivity tests.
