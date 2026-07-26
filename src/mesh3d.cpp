@@ -208,12 +208,12 @@ namespace pyoomph
 			c2_hang_slot = ft->continuous_spaces[SPACE_INDEX_C2].hangindex;
 		}
 
-		// -------- PER-ELEMENT TOPOLOGICAL HANGING (the tet tree route, env PYOOMPH_TET_HANG_TREE) --------
+		// -------- PER-ELEMENT TOPOLOGICAL HANGING (the tet tree route) --------
 		// The 3d analogue of the triangle tree route: install hanging per element via tet_hang_face /
 		// tet_hang_edge (OcTree neighbour finders + the exact affine map + interpolating_basis) instead of
-		// the geometric position/facet-adjacency passes below. Validated against those passes (this same
-		// function with the env unset) as a machine-zero oracle before it becomes the default.
-		if (getenv("PYOOMPH_TET_HANG_TREE"))
+		// the geometric position/facet-adjacency passes below. This is now the DEFAULT; the legacy geometric
+		// pass is kept behind PYOOMPH_TET_HANG_GEOMETRIC as an escape hatch (validated machine-zero equal).
+		if (!getenv("PYOOMPH_TET_HANG_GEOMETRIC"))
 		{
 			// Valid hang slots only: value_id -1 (geometric) plus any separate C1/C2 slot that is a real
 			// value index (< ncont). continuous_spaces[...].hangindex can be a placeholder >= ncont on a mesh
