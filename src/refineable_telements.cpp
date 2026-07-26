@@ -838,6 +838,7 @@ namespace oomph
                 if (pit != Existing_node_by_position.end()) created_node_pt = pit->second;
               }
 
+
               // If the node was so created, assign the pointers
               if (created_node_pt != 0)
               {
@@ -1755,11 +1756,76 @@ namespace oomph
         // => strictly coarser (diff_level<0). The hang helper acts only on diff_level<0, so returning the
         // equal neighbour is behaviour-preserving there; node-sharing (node_created_by_neighbour) needs
         // the equal neighbour too. A non-leaf sibling is equal-or-finer -> leave res.el null.
-        if (sib->is_leaf())
+        if (sib->is_leaf() || climbs == 0)
         {
-          res.el = dynamic_cast<RefineableTElement<2> *>(sib->object_pt());
-          res.diff_level = -climbs;
+          // Leaf sibling (or the immediate equal sibling): return it directly.
+          if (sib->is_leaf())
+          {
+            res.el = dynamic_cast<RefineableTElement<2> *>(sib->object_pt());
+            res.diff_level = -climbs;
+          }
+          return res;
         }
+        // Non-leaf sibling: the equal (or finer/coarser) neighbour is a DESCENDANT of sib. Descend into
+        // sib toward THIS element's edge position, exactly as oomph's gteq_edge_neighbour descends through
+        // its recursion (its node_created_by_son_of_neighbour is a no-op for h-refinement). Without this,
+        // an equal same-root COUSIN (this and it refined in different rounds) is never found -> its shared
+        // C2 mid-node is duplicated -> a velocity/position jump on adaptive (moving) meshes.
+        //
+        // The interior shared edge is {fpa,fpb} (father points) in fath's frame. Find sib's local edge that
+        // carries the same father points, and this element's edge interval [t0,t1] along that shared edge.
+        static const double FPC[6][2] = {{1, 0}, {0, 1}, {0, 0}, {0.5, 0}, {0.5, 0.5}, {0, 0.5}}; // FV0,FV1,FV2,FmS,FmE,FmW
+        RefineableTElement<2> *fath_el = dynamic_cast<RefineableTElement<2> *>(fath->object_pt());
+        if (!fath_el) return res;
+        int sib_edge = -1;
+        bool sib_rev = false;
+        for (int e : {S, E, W})
+        {
+          int a2, b2;
+          edge_local_vertices(e, a2, b2);
+          const int p0 = son_vertex_fp(sib_st, a2), p1 = son_vertex_fp(sib_st, b2);
+          if (p0 == fpa && p1 == fpb) { sib_edge = e; sib_rev = false; break; }
+          if (p0 == fpb && p1 == fpa) { sib_edge = e; sib_rev = true; break; }
+        }
+        if (sib_edge < 0) return res;
+        // THIS element's own edge endpoints, mapped into fath's frame, then a parameter along {fpa,fpb}.
+        int oa, ob;
+        edge_local_vertices(my_edge, oa, ob);
+        Vector<double> se0(2), se1(2), f0(2), f1(2);
+        point_on_edge(my_edge, 0.0, se0);
+        point_on_edge(my_edge, 1.0, se1);
+        this->local_coordinate_in_ancestor(se0, fath_el, f0);
+        this->local_coordinate_in_ancestor(se1, fath_el, f1);
+        const double A0 = FPC[fpa][0], A1 = FPC[fpa][1], B0 = FPC[fpb][0], B1 = FPC[fpb][1];
+        const double L2 = (B0 - A0) * (B0 - A0) + (B1 - A1) * (B1 - A1);
+        if (L2 < 1e-30) return res;
+        double t0 = ((f0[0] - A0) * (B0 - A0) + (f0[1] - A1) * (B1 - A1)) / L2;
+        double t1 = ((f1[0] - A0) * (B0 - A0) + (f1[1] - A1) * (B1 - A1)) / L2;
+        if (sib_rev) { t0 = 1.0 - t0; t1 = 1.0 - t1; } // sib parametrises the shared edge in the opposite sense
+        if (t0 > t1) std::swap(t0, t1);
+        // Descend into sib toward [t0,t1] along sib_edge, to at most THIS element's depth (climbs).
+        Tree *node = sib;
+        int dep = 0;
+        double lo = 0.0, hi = 1.0;
+        const double tol = 1e-9;
+        while (true)
+        {
+          if (node->is_leaf()) break;
+          if (dep >= climbs) break;
+          const double mid = 0.5 * (lo + hi);
+          const double a = (t0 - lo) / (hi - lo), b = (t1 - lo) / (hi - lo);
+          int half;
+          if (b <= 0.5 + tol) half = 0;
+          else if (a >= 0.5 - tol) half = 1;
+          else break; // straddles the midpoint: equal-or-finer on the sib side -> no coarser neighbour
+          Tree *child = node->son_pt(son_on_edge_half(sib_edge, half));
+          if (!child) break;
+          node = child;
+          if (half == 0) hi = mid; else lo = mid;
+          dep++;
+        }
+        RefineableTElement<2> *cnb = dynamic_cast<RefineableTElement<2> *>(node->object_pt());
+        if (cnb && node->is_leaf()) { res.el = cnb; res.diff_level = dep - climbs; } // same-root -> cross_root stays false
         return res;
       }
       // Edge lies on `fath`'s D edge -> climb, re-expressing the edge in the father's vertices.
