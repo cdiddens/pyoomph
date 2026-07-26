@@ -297,3 +297,39 @@ def test_taylor_hood_tet_unrefinement_residual_oracle():
         problem.solve()
         assert _max_abs_residual(problem) < 1e-9
         assert nel > 384
+
+
+# CROSS-ROUND node-sharing (tetrahedra): the 3d analogue of the triangle mesh-tear bug. Refining to
+# level 2 takes two rounds; a son built in round 2 that coincides with a node round 1 already built --
+# notably one built by a FINER neighbour's son -- must be REUSED, not duplicated. The per-round
+# Shared_edge_node_registry (cleared each round) cannot dedupe cross-round, so without the start-of-
+# round position-snapshot fallback the shared node is duplicated (a torn mesh: e.g. 15 coincident-but-
+# distinct nodes here). This uses a FIXED mesh (Poisson) so the check is purely topological.
+class _TetReadaptShare(Problem):
+    def __init__(self, N=3):
+        super().__init__()
+        self._N = N
+
+    def define_problem(self):
+        self += TetCubeMesh(N=self._N)
+        eqs = PoissonEquation(source=1, space="C1")
+        eqs += DirichletBC(u=0) @ ["bottom", "top", "left", "right", "front", "back"]
+        eqs += RefineAccordingToElement(level_func=lambda e: 2 if e.get_Eulerian_midpoint()[2] > 0.45 else 0)
+        self += eqs @ "domain"
+
+
+def test_tet_readapt_no_torn_nodes():
+    with _TetReadaptShare(N=3) as p:
+        p.max_refinement_level = 2
+        p.initial_adaption_steps = 0
+        p.solve(spatial_adapt=2)
+        m = p.get_mesh("domain")
+        seen = {}
+        dup = 0
+        for n in m.nodes():
+            key = (round(n.x(0), 8), round(n.x(1), 8), round(n.x(2), 8))
+            if key in seen:
+                dup += 1
+            seen[key] = n
+        assert dup == 0, f"{dup} duplicate (torn) tet nodes across the level-1/level-2 interface"
+        assert m.nelement() > 384

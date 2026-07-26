@@ -273,6 +273,11 @@ namespace oomph
     // this the shared vertex is duplicated and a moving mesh tears apart at a refine/coarsen interface.
     static void clear_existing_node_positions() { Existing_node_by_position.clear(); }
     static void register_existing_node_position(oomph::Node *n);
+    // Look up a snapshot node coincident with position x (dim coords). Shared by the 2d triangle and 3d
+    // tetrahedron build() fallbacks (the snapshot is stored here and populated for meshes of either dim).
+    static oomph::Node *find_existing_node_at_position(const double *x, unsigned dim);
+    // Position-string key (rounded to ~12 sig figs), 1/2/3-d. Public so RefineableTElement<3> can share it.
+    static std::string position_key(const double *x, unsigned dim);
 
   protected:
     // --- Geometric node-sharing during triangle refinement (Phase 2, branch mixed_adapt) ---
@@ -293,7 +298,6 @@ namespace oomph
     // position matches to ~12 significant figures. Looked up in build() when both the tree
     // (node_created_by_neighbour) and the per-round registry miss.
     static std::map<std::string, oomph::Node *> Existing_node_by_position;
-    static std::string position_key(const double *x, unsigned dim);
   };
 
   template <>
