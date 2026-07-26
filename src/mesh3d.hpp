@@ -71,7 +71,11 @@ namespace pyoomph
     {
       if (trees_pt.size() == 0) return;
       find_neighbours();
-      construct_up_right_equivalents();
+      // Brick forests need oomph's rotation/orientation equivalents for the compass coordinate descent;
+      // tet forests bypass that descent entirely (shared-node face correspondence + the affine map), so
+      // skip it -- and it assumes brick geometry.
+      if (!(ntree() > 0 && dynamic_cast<oomph::TElementBase *>(Trees_pt[0]->object_pt())))
+        construct_up_right_equivalents();
     }
 
     DynamicOcTreeForest(const DynamicOcTreeForest &) : oomph::OcTreeForest()
@@ -93,8 +97,49 @@ namespace pyoomph
   protected:
     void find_neighbours() override
     {
-      // Tetrahedral forests: no tree neighbour finding (node-sharing/hanging are geometric).
-      if (ntree() > 0 && dynamic_cast<oomph::TElementBase *>(Trees_pt[0]->object_pt())) return;
+      // Tetrahedral forests: topological FACE neighbour finding, the 3d analogue of
+      // DynamicQuadTreeForest::find_neighbours (mesh2d.cpp). Two tet roots are neighbours across a face
+      // iff they share that face's three corner (vertex) nodes; the tet's four faces reuse four of the
+      // six OcTree face slots (L,R,D,U; face f is opposite vertex f). The tet neighbour/hang path bypasses
+      // oomph's compass coordinate descent (shared-node correspondence + the exact affine map), so only
+      // this topological adjacency is needed -- exactly as for triangles.
+      if (ntree() > 0 && dynamic_cast<oomph::TElementBase *>(Trees_pt[0]->object_pt()))
+      {
+        using namespace oomph::OcTreeNames;
+        static const int FACE_SLOT[4] = {L, R, D, U};          // tet face f -> OcTree face slot
+        static const int FACE_CORNER[4][3] = {{1, 2, 3}, {0, 2, 3}, {0, 1, 3}, {0, 1, 2}};
+        const unsigned numtrees = ntree();
+        // Trees sharing a common corner node are potential face neighbours.
+        std::map<oomph::Node *, std::set<unsigned>> tree_at_vertex;
+        for (unsigned i = 0; i < numtrees; i++)
+        {
+          oomph::TElementBase *ti = dynamic_cast<oomph::TElementBase *>(Trees_pt[i]->object_pt());
+          if (!ti) throw_runtime_error("Strange element in tet tree forest");
+          for (unsigned v = 0; v < 4; v++) tree_at_vertex[ti->vertex_node_pt(v)].insert(i);
+        }
+        oomph::Vector<std::set<unsigned>> potential(numtrees);
+        for (auto &kv : tree_at_vertex)
+          for (unsigned a : kv.second)
+            for (unsigned b : kv.second)
+              if (a != b) potential[a].insert(b);
+        for (unsigned i = 0; i < numtrees; i++)
+        {
+          oomph::TElementBase *ti = dynamic_cast<oomph::TElementBase *>(Trees_pt[i]->object_pt());
+          for (unsigned j : potential[i])
+          {
+            oomph::FiniteElement *obj_j = Trees_pt[j]->object_pt();
+            if (!dynamic_cast<oomph::TElementBase *>(obj_j)) throw_runtime_error("Mixed tet/brick neighbours not yet supported");
+            for (int f = 0; f < 4; f++)
+            {
+              bool all = true;
+              for (int c = 0; c < 3 && all; c++)
+                if (obj_j->get_node_number(ti->vertex_node_pt(FACE_CORNER[f][c])) == -1) all = false;
+              if (all) Trees_pt[i]->neighbour_pt(FACE_SLOT[f]) = Trees_pt[j];
+            }
+          }
+        }
+        return;
+      }
       oomph::OcTreeForest::find_neighbours(); // brick forests keep oomph's compass neighbouring
     }
   };

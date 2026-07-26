@@ -425,6 +425,11 @@ namespace oomph
       RefineableTElement<3> *el = nullptr; // >=-sized LEAF neighbour across the queried face (or null)
       int diff_level = 0;                  // level(neighbour)-level(this); <0 => strictly coarser => this hangs
       bool cross_root = false;             // neighbour lives in an adjacent tree root
+      // Cross-root coordinate bridging: my ROOT vertex index -> the NEIGHBOUR ROOT vertex index, for the
+      // three shared face corners (the fourth, opposite the shared face on each side, is -1). A point on the
+      // shared face keeps its barycentric weights on the corresponding corners, so this permutation maps it
+      // from my root frame into the neighbour root frame (the 3d analogue of the tri my/nr_edge_dir+reversed).
+      int corner_map[4] = {-1, -1, -1, -1};
     };
     // Tet-native topological FACE-neighbour finder (the octree analogue of the 2d tri_edge_neighbour):
     // OcTree son_type ascent + father-point tracking. Tracks the queried face (my_face in 0..3, opposite
@@ -435,6 +440,15 @@ namespace oomph
     // Reflect/Rotate tables and the octahedron inner sons are handled naturally. (Same-root only for now;
     // cross-root + the descent land in a later step.)
     TetFaceNeighbour tet_face_neighbour(int my_face) const;
+    // Reuse a node an already-built FACE-neighbour has created, located via the OcTree (persists across
+    // adaptation rounds), the 3d analogue of RefineableTElement<2>::node_created_by_neighbour. Closes the
+    // cross-round gap of the per-round Shared_edge_node_registry for face-shared nodes: during transient
+    // re-adaptation a son built this round must reuse a coincident node an equal-sized neighbour built in an
+    // earlier round (else the shared node is duplicated and a moving tet mesh tears apart). s_son is node j's
+    // local coordinate in THIS (son) element. Returns the shared node, or 0 if none (falls through to the
+    // position snapshot, which still covers the finer-neighbour and edge-only-shared cases). Same signature
+    // clash note as 2d: this hides the oomph base node_created_by_neighbour(s_fraction,is_periodic).
+    Node *node_created_by_neighbour(const Vector<double> &s_son) const;
   };
 
 }

@@ -2321,6 +2321,17 @@ namespace oomph
         for (Node *nd : reg_key) gen.push_back(nd);
       }
 
+      // (1.5) Topological: reuse a node an already-built FACE-NEIGHBOUR created, found via the OcTree
+      // (which persists across adaptation rounds). This closes the cross-round gap for face-shared nodes --
+      // an equal-sized COUSIN built in an EARLIER round -- so a moving tet mesh does not tear at a
+      // refine/coarsen interface (the 3d analogue of the triangle node_created_by_neighbour). The per-round
+      // registry below only dedupes nodes built within THIS round. Only for genuine shared nodes.
+      if (!reg_key.empty())
+      {
+        Node *nbn = this->node_created_by_neighbour(s_son);
+        if (nbn) { node_pt(j) = nbn; continue; }
+      }
+
       // (2) Reuse a node already created (by a sibling son or the face-/edge-sharing neighbour
       // father's sons) via the geometric shared-node registry.
       if (!reg_key.empty())
@@ -2688,6 +2699,51 @@ namespace oomph
       }
       return -1;
     }
+
+    // Reference-tet vertex local coordinates (v0..v3) and the centroid of face f (opposite vertex f).
+    inline void tet_face_centroid(int f, oomph::Vector<double> &s_c)
+    {
+      static const double V[4][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {0, 0, 0}};
+      s_c.resize(3);
+      s_c[0] = s_c[1] = s_c[2] = 0.0;
+      for (int v = 0; v < 4; v++)
+        if (v != f)
+          for (int d = 0; d < 3; d++) s_c[d] += V[v][d] / 3.0;
+    }
+
+    // Descend into `start`'s subtree toward the point s (given in start's OWN local frame), following at
+    // each level the son that CONTAINS the point (largest minimum barycentric = most interior, so shared
+    // son faces are unambiguous for an interior target). Stops at a leaf or after max_extra levels. Writes
+    // the point in the reached node's frame + the number of levels descended, and returns the node. The 3d
+    // analogue of the tri interval-bisection descent, but by point-containment (a face region is 2d).
+    inline oomph::Tree *tet_descend_to_point(oomph::Tree *start, oomph::Vector<double> s, int max_extra,
+                                             oomph::Vector<double> &s_out, int &depth_out)
+    {
+      oomph::Tree *node = start;
+      int d = 0;
+      while (!node->is_leaf() && d < max_extra)
+      {
+        int best = -1;
+        double best_min = -1e30;
+        oomph::Vector<double> best_s(3);
+        for (int c = 0; c < 8; c++)
+        {
+          if (!node->son_pt(c)) continue;
+          oomph::Vector<double> sc(3);
+          oomph::RefineableTElement<3>::father_to_son_local(s, c, sc);
+          const double b3 = 1.0 - sc[0] - sc[1] - sc[2];
+          const double mn = std::min(std::min(sc[0], sc[1]), std::min(sc[2], b3));
+          if (mn > best_min) { best_min = mn; best = c; best_s = sc; }
+        }
+        if (best < 0 || best_min < -1e-9) break; // point not inside any son (should not happen for interior s)
+        node = node->son_pt(best);
+        s = best_s;
+        d++;
+      }
+      s_out = s;
+      depth_out = d;
+      return node;
+    }
   } // namespace
 
   RefineableTElement<3>::TetFaceNeighbour RefineableTElement<3>::tet_face_neighbour(int my_face) const
@@ -2712,17 +2768,39 @@ namespace oomph
       if (DBG) std::fprintf(stderr, "[facenb-asc] climb=%d st=%d fv={%d,%d,%d} fp={%d,%d,%d} F=%d\n", climbs, st, fv[0], fv[1], fv[2], fp[0], fp[1], fp[2], F);
       if (F < 0)
       {
-        // Face is interior to `fath`: the >=-sized neighbour is the sibling son sharing it.
+        // Face is interior to `fath`: the >=-sized neighbour is the sibling son sharing it (or a
+        // descendant of it if that sibling is refined).
         const int sib_st = tet_sibling_across_face(st, fp[0], fp[1], fp[2]);
         if (sib_st < 0) return res;
         Tree *sib = fath->son_pt(sib_st);
         if (!sib) return res;
-        // climbs==0 => equal-sized sibling; climbs>=1 => strictly coarser. A non-leaf sibling is
-        // equal-or-finer -> leave res.el null. (Hang path acts only on diff_level<0.)
-        if (sib->is_leaf())
+        if (sib->is_leaf() || climbs == 0)
         {
-          res.el = dynamic_cast<RefineableTElement<3> *>(sib->object_pt());
-          res.diff_level = -climbs;
+          // Leaf sibling (or the immediate equal sibling): return it directly. climbs==0 => equal
+          // (diff 0); climbs>=1 => strictly coarser (diff<0, this hangs on it). A non-leaf immediate
+          // sibling is equal-or-finer -> leave res.el null (hang path acts only on diff_level<0).
+          if (sib->is_leaf())
+          {
+            res.el = dynamic_cast<RefineableTElement<3> *>(sib->object_pt());
+            res.diff_level = -climbs;
+          }
+          return res;
+        }
+        // Non-leaf sibling: the equal (or finer/coarser) neighbour is a DESCENDANT of sib -- descend into
+        // it toward THIS element's face position, exactly as the 2d tri path descends into a non-leaf
+        // sibling. Without this an equal same-root COUSIN (this and it refined in different rounds) is never
+        // found, so its shared face node is duplicated. Target = this element's my_face centroid (strictly
+        // interior to the shared face), mapped up to fath's frame then into sib's own frame.
+        Vector<double> s_c(3), s_fath(3), s_sib(3), s_leaf(3);
+        tet_face_centroid(my_face, s_c);
+        this->local_coordinate_in_ancestor(s_c, dynamic_cast<RefineableTElement<3> *>(fath->object_pt()), s_fath);
+        father_to_son_local(s_fath, sib_st, s_sib);
+        int dep = 0;
+        Tree *leaf = tet_descend_to_point(sib, s_sib, climbs, s_leaf, dep);
+        if (leaf && leaf->is_leaf())
+        {
+          res.el = dynamic_cast<RefineableTElement<3> *>(leaf->object_pt());
+          res.diff_level = dep - climbs; // <0 coarser, 0 equal
         }
         return res;
       }
@@ -2731,8 +2809,93 @@ namespace oomph
       { int k = 0; for (int v = 0; v < 4; v++) if (v != F) fv[k++] = v; }
       climbs++;
     }
-    res.cross_root = true; // reached the root with the face on the boundary: descent into the adjacent root is a later step
+
+    // --- Cross-root: `cur` is the root; the face is its boundary face opposite the vertex not in fv[]. ---
+    const int my_root_face = 6 - fv[0] - fv[1] - fv[2]; // the vertex (0..3) NOT among fv[]
+    using namespace oomph::OcTreeNames;
+    static const int FACE_SLOT[4] = {L, R, D, U};
+    TreeRoot *root = cur->root_pt();
+    Tree *nr = root->neighbour_pt(FACE_SLOT[my_root_face]);
+    if (!nr) return res; // domain boundary: no neighbour
+    RefineableTElement<3> *my_root_el = dynamic_cast<RefineableTElement<3> *>(root->object_pt());
+    RefineableTElement<3> *nr_root_el = dynamic_cast<RefineableTElement<3> *>(nr->object_pt());
+    if (!my_root_el || !nr_root_el) return res;
+
+    // Topological shared-face correspondence: each shared corner NODE (my root vertex fv[i]) -> its vertex
+    // index in the neighbour root. A point on the shared face keeps its barycentric weights on these corners.
+    for (int i = 0; i < 3; i++)
+    {
+      Node *nd = my_root_el->vertex_node_pt(fv[i]);
+      for (int j = 0; j < 4; j++)
+        if (nr_root_el->vertex_node_pt(j) == nd) { res.corner_map[fv[i]] = j; break; }
+      if (res.corner_map[fv[i]] < 0) return res; // roots not actually face-sharing (should not happen)
+    }
+
+    // This element's my_face centroid -> my root frame -> (barycentric relabel) -> neighbour root frame.
+    Vector<double> s_c(3), s_root(3);
+    tet_face_centroid(my_face, s_c);
+    this->local_coordinate_in_ancestor(s_c, my_root_el, s_root);
+    const double b[4] = {s_root[0], s_root[1], s_root[2], 1.0 - s_root[0] - s_root[1] - s_root[2]};
+    double nb_bary[4] = {0, 0, 0, 0};
+    for (int d = 0; d < 4; d++)
+      if (res.corner_map[d] >= 0) nb_bary[res.corner_map[d]] = b[d];
+    Vector<double> s_nrroot(3);
+    s_nrroot[0] = nb_bary[0]; s_nrroot[1] = nb_bary[1]; s_nrroot[2] = nb_bary[2];
+
+    // Descend into the neighbour root toward that point, to at most THIS element's depth (climbs).
+    Vector<double> s_leaf(3);
+    int dep = 0;
+    Tree *leaf = tet_descend_to_point(nr, s_nrroot, climbs, s_leaf, dep);
+    if (!leaf || !leaf->is_leaf()) return res; // only a leaf can be a hang master; non-leaf => equal/finer
+    res.el = dynamic_cast<RefineableTElement<3> *>(leaf->object_pt());
+    res.diff_level = dep - climbs;
+    res.cross_root = true;
     return res;
+  }
+
+  //=================================================================
+  /// Reuse a node an already-built FACE-neighbour created (topological, via the OcTree). The 3d analogue
+  /// of RefineableTElement<2>::node_created_by_neighbour: for each father-face the son node lies on, find
+  /// the face-neighbour, map the node's local coordinate into it (exact affine map / shared-face corner
+  /// relabel), and return its node there if one exists. Covers same-root cousins and cross-root neighbours,
+  /// coarser and equal. A node shared ONLY across an edge (no common face) or built by a strictly-finer
+  /// neighbour is not found here -- the position snapshot in build() still covers those.
+  //=================================================================
+  Node *RefineableTElement<3>::node_created_by_neighbour(const Vector<double> &s_son) const
+  {
+    if (!this->Tree_pt) return 0;
+    // Father-faces the node lies on: face f (opposite vertex f) is the plane barycentric_f == 0.
+    const double b[4] = {s_son[0], s_son[1], s_son[2], 1.0 - s_son[0] - s_son[1] - s_son[2]};
+    for (int f = 0; f < 4; f++)
+    {
+      if (std::abs(b[f]) > 1e-12) continue; // node not on this face
+      TetFaceNeighbour nb = this->tet_face_neighbour(f);
+      if (!nb.el || !nb.el->nodes_built()) continue;
+      Vector<double> s_neigh(3);
+      bool ok;
+      if (!nb.cross_root)
+      {
+        ok = this->local_coordinate_in_other_leaf(s_son, nb.el, s_neigh);
+      }
+      else
+      {
+        RefineableTElement<3> *my_root = dynamic_cast<RefineableTElement<3> *>(this->Tree_pt->root_pt()->object_pt());
+        if (!my_root) continue;
+        Vector<double> s_root(3);
+        this->local_coordinate_in_ancestor(s_son, my_root, s_root);
+        const double br[4] = {s_root[0], s_root[1], s_root[2], 1.0 - s_root[0] - s_root[1] - s_root[2]};
+        double nb_bary[4] = {0, 0, 0, 0};
+        for (int d = 0; d < 4; d++)
+          if (nb.corner_map[d] >= 0) nb_bary[nb.corner_map[d]] = br[d];
+        Vector<double> s_nrroot(3);
+        s_nrroot[0] = nb_bary[0]; s_nrroot[1] = nb_bary[1]; s_nrroot[2] = nb_bary[2];
+        ok = root_coord_to_leaf(s_nrroot, nb.el, s_neigh);
+      }
+      if (!ok) continue;
+      Node *nn = nb.el->get_node_at_local_coordinate(s_neigh);
+      if (nn) return nn;
+    }
+    return 0;
   }
 
 }
