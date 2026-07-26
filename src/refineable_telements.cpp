@@ -2711,6 +2711,25 @@ namespace oomph
           for (int d = 0; d < 3; d++) s_c[d] += V[v][d] / 3.0;
     }
 
+    // The 6 local edges of a tet as vertex-index pairs (consistent indexing for edge tracking).
+    static const int TET_EDGE_V[6][2] = {{0, 1}, {0, 2}, {0, 3}, {1, 2}, {1, 3}, {2, 3}};
+    // Father-point triples of the 6 father edges: [FVi, FMij, FVj] (fp ids from tet_fp_id).
+    static const int TET_FATHER_EDGE_FP[6][3] = {
+        {0, 4, 1}, {0, 5, 2}, {0, 6, 3}, {1, 7, 2}, {1, 8, 3}, {2, 9, 3}};
+    // Which father edge (0..5) carries BOTH father points fpa,fpb (a sub-segment of it), or -1 if the pair
+    // is not collinear on any father edge (the edge went interior to the father).
+    inline int tet_father_edge_of_pair(int fpa, int fpb)
+    {
+      for (int e = 0; e < 6; e++)
+      {
+        const int *t = TET_FATHER_EDGE_FP[e];
+        bool ha = (fpa == t[0] || fpa == t[1] || fpa == t[2]);
+        bool hb = (fpb == t[0] || fpb == t[1] || fpb == t[2]);
+        if (ha && hb) return e;
+      }
+      return -1;
+    }
+
     // Descend into `start`'s subtree toward the point s (given in start's OWN local frame), following at
     // each level the son that CONTAINS the point (largest minimum barycentric = most interior, so shared
     // son faces are unambiguous for an interior target). Stops at a leaf or after max_extra levels. Writes
@@ -2896,6 +2915,236 @@ namespace oomph
       if (nn) return nn;
     }
     return 0;
+  }
+
+  //=================================================================
+  /// Map this element's local coordinate s into the coarse face-neighbour nb (affine same-root / corner-map
+  /// relabel cross-root). Small shared helper for the face hang + node share. Returns false if not mappable.
+  //=================================================================
+  namespace
+  {
+    bool tet_map_into_face_neighbour(const RefineableTElement<3> *self,
+                                     const RefineableTElement<3>::TetFaceNeighbour &nb,
+                                     RefineableTElement<3> *my_root,
+                                     const Vector<double> &s, Vector<double> &s_neigh)
+    {
+      if (!nb.cross_root)
+        return self->local_coordinate_in_other_leaf(s, nb.el, s_neigh);
+      if (!my_root) return false;
+      Vector<double> s_root(3);
+      self->local_coordinate_in_ancestor(s, my_root, s_root);
+      const double br[4] = {s_root[0], s_root[1], s_root[2], 1.0 - s_root[0] - s_root[1] - s_root[2]};
+      double nbb[4] = {0, 0, 0, 0};
+      for (int d = 0; d < 4; d++)
+        if (nb.corner_map[d] >= 0) nbb[nb.corner_map[d]] = br[d];
+      Vector<double> s_nr(3);
+      s_nr[0] = nbb[0]; s_nr[1] = nbb[1]; s_nr[2] = nbb[2];
+      return RefineableTElement<3>::root_coord_to_leaf(s_nr, nb.el, s_neigh);
+    }
+  }
+
+  //=================================================================
+  /// Per-element FACE hanging. See the header. Mirrors the 2d tri_hang_helper but for a triangular face,
+  /// using the element's own interpolating_basis so C1/C2/C2TB (enriched) traces are handled uniformly.
+  //=================================================================
+  void RefineableTElement<3>::tet_hang_face(const int &value_id, int my_face)
+  {
+    TetFaceNeighbour nb = this->tet_face_neighbour(my_face);
+    if (nb.el == 0 || nb.diff_level >= 0) return; // only hang on a STRICTLY COARSER neighbour
+    RefineableElement *neigh_re = dynamic_cast<RefineableElement *>(nb.el);
+    if (!neigh_re) return;
+    RefineableTElement<3> *my_root = nullptr;
+    if (nb.cross_root)
+    {
+      my_root = dynamic_cast<RefineableTElement<3> *>(this->Tree_pt->root_pt()->object_pt());
+      if (!my_root) return;
+    }
+    const unsigned nn = this->nnode();
+    for (unsigned m = 0; m < nn; m++)
+    {
+      Vector<double> s(3);
+      this->local_coordinate_of_node(m, s);
+      const double bary[4] = {s[0], s[1], s[2], 1.0 - s[0] - s[1] - s[2]};
+      if (std::abs(bary[my_face]) > 1e-10) continue; // node m not on this face
+      Node *X = this->get_interpolating_node_at_local_coordinate(s, value_id);
+      if (X == 0) continue;
+      if (value_id >= 0 && (int)X->nvalue() <= value_id) continue; // node carries no dof in this separate slot
+      if (X->is_hanging(value_id)) continue;                       // already constrained (another facet)
+      Vector<double> s_neigh(3);
+      if (!tet_map_into_face_neighbour(this, nb, my_root, s, s_neigh)) continue;
+      // If the neighbour has its own interpolating node exactly here, X is shared -> not hanging.
+      if (neigh_re->get_interpolating_node_at_local_coordinate(s_neigh, value_id) == X) continue;
+      const unsigned nmax = neigh_re->ninterpolating_node(value_id);
+      Shape psi(nmax);
+      neigh_re->interpolating_basis(s_neigh, psi, value_id);
+      unsigned nmaster = 0;
+      for (unsigned k = 0; k < nmax; k++)
+        if (std::abs(psi[k]) > 1e-12) nmaster++;
+      if (nmaster == 0) continue;
+      // Cycle guard (as in the 2d helper): skip if a master transitively hangs back on X.
+      std::function<bool(Node *, Node *, int, int)> reaches = [&](Node *from, Node *to, int slot, int depth) -> bool {
+        if (from == to) return true;
+        if (depth > 30 || !from->is_hanging(slot)) return false;
+        HangInfo *h = from->hanging_pt(slot);
+        for (unsigned k = 0; k < h->nmaster(); k++)
+          if (reaches(h->master_node_pt(k), to, slot, depth + 1)) return true;
+        return false;
+      };
+      bool cyclic = false;
+      for (unsigned k = 0; k < nmax && !cyclic; k++)
+        if (std::abs(psi[k]) > 1e-12 && reaches(neigh_re->interpolating_node_pt(k, value_id), X, value_id, 0)) cyclic = true;
+      if (cyclic) continue;
+      HangInfo *hang = new HangInfo(nmaster);
+      unsigned mm = 0;
+      for (unsigned k = 0; k < nmax; k++)
+        if (std::abs(psi[k]) > 1e-12)
+        {
+          hang->set_master_node_pt(mm, neigh_re->interpolating_node_pt(k, value_id), psi[k]);
+          mm++;
+        }
+      X->set_hanging_pt(hang, value_id);
+    }
+  }
+
+  //=================================================================
+  /// Coarser-or-equal LEAF sharing this element's edge my_edge. OcTree ascent to the coarse edge (tracked
+  /// as a vertex-index pair, climbing while it stays on a father edge) then a face-neighbour ring check.
+  //=================================================================
+  RefineableTElement<3>::TetEdgeNeighbour RefineableTElement<3>::tet_edge_neighbour(int my_edge) const
+  {
+    TetEdgeNeighbour res;
+    if (!this->Tree_pt || my_edge < 0 || my_edge > 5) return res;
+    int a = TET_EDGE_V[my_edge][0], b = TET_EDGE_V[my_edge][1];
+    const Tree *cur = this->Tree_pt;
+    int climbs = 0;
+    while (true)
+    {
+      Tree *fath = cur->father_pt();
+      if (!fath) break; // reached the root: cross-root coarse edge (handled via the ring below from `cur`)
+      const int st = cur->son_type();
+      Vector<Vector<double>> sv;
+      son_vertices_in_father(st, sv);
+      const int fpa = tet_fp_id(sv[a]), fpb = tet_fp_id(sv[b]);
+      const int FE = tet_father_edge_of_pair(fpa, fpb);
+      if (FE < 0) break; // edge interior to fath -> the coarse edge is (a,b) at `cur`'s level
+      cur = fath;
+      // Re-express the edge as the father-edge's two father VERTICES (indices 0..3) for the next climb.
+      a = TET_EDGE_V[FE][0];
+      b = TET_EDGE_V[FE][1];
+      climbs++;
+    }
+    if (climbs == 0) return res; // a full edge of this element (or a refinement-diagonal): never hangs
+
+    // Coarse edge (a,b) lives on `cur` (this element's ancestor, climbs levels up). Its endpoint NODES:
+    RefineableTElement<3> *cur_el = dynamic_cast<RefineableTElement<3> *>(cur->object_pt());
+    FiniteElement *cur_fe = dynamic_cast<FiniteElement *>(cur->object_pt());
+    if (!cur_el || !cur_fe) return res;
+    res.P = cur_el->vertex_node_pt(a);
+    res.Q = cur_el->vertex_node_pt(b);
+    if (!res.P || !res.Q) return res;
+    // Coarse edge mid node (quadratic spaces): the node at the (a,b) midpoint local coordinate of cur.
+    if (cur_fe->nnode_1d() > 2)
+    {
+      static const double VC[4][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {0, 0, 0}};
+      Vector<double> smid(3);
+      for (int d = 0; d < 3; d++) smid[d] = 0.5 * (VC[a][d] + VC[b][d]);
+      res.M = cur_fe->get_node_at_local_coordinate(smid);
+    }
+
+    // Confirm a coarser LEAF actually shares edge (P,Q): check cur's two faces incident to the edge (a
+    // standard 2:1 coarse neighbour is face-adjacent to cur across the edge). If found, this node hangs.
+    for (int f = 0; f < 4; f++)
+    {
+      if (f == a || f == b) continue; // faces NOT incident to edge (a,b) are opposite a or b
+      TetFaceNeighbour fn = cur_el->tet_face_neighbour(f);
+      if (!fn.el || fn.diff_level > 0) continue; // finer or none
+      FiniteElement *fe = dynamic_cast<FiniteElement *>(fn.el);
+      if (!fe) continue;
+      if (fe->get_node_number(res.P) != -1 && fe->get_node_number(res.Q) != -1)
+      {
+        res.el = fn.el;
+        res.diff_level = fn.diff_level - climbs; // relative to THIS element
+        return res;
+      }
+    }
+    return res;
+  }
+
+  namespace
+  {
+    // Install the edge-interpolation hang for node X (slot value_id) at parameter t along coarse edge P->Q:
+    // linear (1-t,t) on {P,Q}, or quadratic on {P,M,Q} for a quadratic space (the bubble vanishes on edges,
+    // so this is the exact trace). Skips masters the node cannot carry (nvalue guard for separate slots).
+    void install_tet_edge_hang(Node *X, int value_id, Node *P, Node *Q, Node *M, double t, bool quadratic)
+    {
+      const int slot = value_id;
+      if (slot >= 0)
+      {
+        if ((int)X->nvalue() <= slot || (int)P->nvalue() <= slot || (int)Q->nvalue() <= slot) return;
+        if (quadratic && M && (int)M->nvalue() <= slot) quadratic = false; // M carries no dof here -> linear
+      }
+      if (!quadratic || !M)
+      {
+        HangInfo *h = new HangInfo(2);
+        h->set_master_node_pt(0, P, 1.0 - t);
+        h->set_master_node_pt(1, Q, t);
+        X->set_hanging_pt(h, value_id);
+      }
+      else
+      {
+        HangInfo *h = new HangInfo(3);
+        h->set_master_node_pt(0, P, 2.0 * (t - 0.5) * (t - 1.0));
+        h->set_master_node_pt(1, M, 4.0 * t * (1.0 - t));
+        h->set_master_node_pt(2, Q, 2.0 * t * (t - 0.5));
+        X->set_hanging_pt(h, value_id);
+      }
+    }
+  }
+
+  //=================================================================
+  /// Per-element EDGE hanging. Hang this element's interpolating nodes strictly inside a coarser tet edge
+  /// {P,Q}(,M) on that edge's interpolation (linear for a linear space, quadratic for C2/C2TB where the
+  /// bubble vanishes on edges). The coarse edge nodes come topologically from tet_edge_neighbour; the
+  /// parameter t along the (straight) coarse edge is the exact projection of X onto P->Q.
+  //=================================================================
+  void RefineableTElement<3>::tet_hang_edge(const int &value_id, int my_edge)
+  {
+    TetEdgeNeighbour nb = this->tet_edge_neighbour(my_edge);
+    if (!nb.el || nb.diff_level >= 0 || !nb.P || !nb.Q) return; // only hang on a strictly coarser edge
+    if (nb.P->is_hanging(value_id) || nb.Q->is_hanging(value_id)) return; // coarse masters must be real
+    RefineableElement *neigh_re = dynamic_cast<RefineableElement *>(nb.el);
+    if (!neigh_re) return;
+    // Whether THIS value's space is quadratic along the edge (C2/C2TB: masters {P,M,Q}) or linear (C1
+    // pressure: masters {P,Q}, and the edge-mid M itself is an ordinary slave). Keyed on the value_id's
+    // own 1d interpolation order in the coarse element -- NOT the mesh's dominant space (a linear pressure
+    // on a C2 mesh must still hang linearly).
+    const bool quadratic = nb.M && neigh_re->ninterpolating_node_1d(value_id) > 2;
+    const int va = TET_EDGE_V[my_edge][0], vb = TET_EDGE_V[my_edge][1];
+    double den = 0.0;
+    for (int d = 0; d < 3; d++) { const double e = nb.Q->x(d) - nb.P->x(d); den += e * e; }
+    if (den < 1e-30) return;
+    const unsigned nn = this->nnode();
+    for (unsigned m = 0; m < nn; m++)
+    {
+      Vector<double> s(3);
+      this->local_coordinate_of_node(m, s);
+      // On this element's edge (va,vb)? barycentric of the two OFF-edge vertices must both be ~0.
+      const double bary[4] = {s[0], s[1], s[2], 1.0 - s[0] - s[1] - s[2]};
+      bool on_edge = true;
+      for (int v = 0; v < 4; v++)
+        if (v != va && v != vb && std::abs(bary[v]) > 1e-10) { on_edge = false; break; }
+      if (!on_edge) continue;
+      Node *X = this->get_interpolating_node_at_local_coordinate(s, value_id);
+      if (X == 0 || X == nb.P || X == nb.Q) continue;
+      if (quadratic && X == nb.M) continue;  // M is a real quadratic master (only for a quadratic value space)
+      if (value_id >= 0 && (int)X->nvalue() <= value_id) continue; // node carries no dof in this separate slot
+      if (X->is_hanging(value_id)) continue;                       // already constrained (e.g. by the face pass)
+      double num = 0.0;
+      for (int d = 0; d < 3; d++) num += (X->x(d) - nb.P->x(d)) * (nb.Q->x(d) - nb.P->x(d));
+      const double t = num / den;
+      if (t < 1e-7 || t > 1.0 - 1e-7) continue; // at an endpoint (real coarse node) -> not hanging
+      install_tet_edge_hang(X, value_id, nb.P, nb.Q, nb.M, t, quadratic);
+    }
   }
 
 }

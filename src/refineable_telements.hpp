@@ -449,6 +449,29 @@ namespace oomph
     // position snapshot, which still covers the finer-neighbour and edge-only-shared cases). Same signature
     // clash note as 2d: this hides the oomph base node_created_by_neighbour(s_fraction,is_periodic).
     Node *node_created_by_neighbour(const Vector<double> &s_son) const;
+
+    // --- Per-element topological hanging (the tet tree route; 3d analogue of RefineableTElement<2>::
+    // tri_hang_helper) --- Hang this element's interpolating nodes for `value_id` that lie on face
+    // my_face (0..3) onto a STRICTLY COARSER face-neighbour, using the exact affine map for coordinates and
+    // the oomph interpolating_basis for weights (so C1/C2/C2TB enriched traces are all handled by the
+    // element's own facilities, never hand-written formulas). A finer neighbour hangs from its own side.
+    void tet_hang_face(const int &value_id, int my_face);
+    // Hang this element's interpolating nodes for `value_id` strictly inside a coarser tet EDGE. The coarse
+    // edge {P,Q} (+ mid M for a quadratic space) and this node's parameter along it come from the OcTree
+    // ascent + affine map (exact); a coarser leaf actually sharing {P,Q} is confirmed via tet_edge_neighbour.
+    void tet_hang_edge(const int &value_id, int my_edge);
+    // Coarser-or-equal LEAF sharing this element's edge my_edge (0..5), found by ascending the OcTree to the
+    // coarse edge then walking the face-neighbour ring around it. Fills the coarse edge's endpoint/mid NODES
+    // and this element's parameter interval, so tet_hang_edge can build the edge-interpolation hang directly.
+    struct TetEdgeNeighbour
+    {
+      RefineableTElement<3> *el = nullptr; // a coarser LEAF sharing the coarse edge (null => none => no hang)
+      int diff_level = 0;                  // level(neighbour)-level(this); <0 => strictly coarser => this hangs
+      Node *P = nullptr;                   // coarse edge endpoint nodes (real, non-hanging)
+      Node *Q = nullptr;
+      Node *M = nullptr;                   // coarse edge mid node (quadratic spaces only; else null)
+    };
+    TetEdgeNeighbour tet_edge_neighbour(int my_edge) const;
   };
 
 }

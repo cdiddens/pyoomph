@@ -96,6 +96,16 @@ namespace pyoomph
 			for (unsigned m = 0; m < h->nmaster(); m++)
 				resolve_hang_to_real(h->master_node_pt(m), w * h->master_weight(m), out);
 		}
+
+		// Slot-aware variant (resolve within a specific hang slot). A master not hanging in `slot` is a real
+		// leaf for that slot. Used by the tree-route flatten, which runs per slot (-1, C2, C1).
+		void resolve_hang_to_real_slot(oomph::Node *X, double w, std::map<oomph::Node *, double> &out, int slot)
+		{
+			if (!X->is_hanging(slot)) { out[X] += w; return; }
+			oomph::HangInfo *h = X->hanging_pt(slot);
+			for (unsigned m = 0; m < h->nmaster(); m++)
+				resolve_hang_to_real_slot(h->master_node_pt(m), w * h->master_weight(m), out, slot);
+		}
 	}
 
 	// Install hanging nodes for tetrahedral meshes after (non-uniform) refinement, in four passes:
@@ -196,6 +206,102 @@ namespace pyoomph
 				if (h >= 0) c1_hang_slots.push_back(h);
 			}
 			c2_hang_slot = ft->continuous_spaces[SPACE_INDEX_C2].hangindex;
+		}
+
+		// -------- PER-ELEMENT TOPOLOGICAL HANGING (the tet tree route, env PYOOMPH_TET_HANG_TREE) --------
+		// The 3d analogue of the triangle tree route: install hanging per element via tet_hang_face /
+		// tet_hang_edge (OcTree neighbour finders + the exact affine map + interpolating_basis) instead of
+		// the geometric position/facet-adjacency passes below. Validated against those passes (this same
+		// function with the env unset) as a machine-zero oracle before it becomes the default.
+		if (getenv("PYOOMPH_TET_HANG_TREE"))
+		{
+			// Valid hang slots only: value_id -1 (geometric) plus any separate C1/C2 slot that is a real
+			// value index (< ncont). continuous_spaces[...].hangindex can be a placeholder >= ncont on a mesh
+			// with no such field (e.g. C1 hangindex on a pure-C2 mesh); the geometric pass tolerates that via
+			// its per-node nvalue guards, but the per-element helpers must not iterate an out-of-range slot.
+			const int ncont = this->nelement() ? (int)dynamic_cast<oomph::RefineableElement *>(this->element_pt(0))->ncont_interpolated_values() : 0;
+			std::vector<int> slots, valid_c1_slots;
+			slots.push_back(-1);
+			if (c2_hang_slot >= 0 && c2_hang_slot < ncont) slots.push_back(c2_hang_slot);
+			for (int s : c1_hang_slots)
+				if (s >= 0 && s < ncont && std::find(slots.begin(), slots.end(), s) == slots.end())
+				{ slots.push_back(s); valid_c1_slots.push_back(s); }
+			for (unsigned int ie = 0; ie < this->nelement(); ie++)
+			{
+				oomph::RefineableTElement<3> *re = dynamic_cast<oomph::RefineableTElement<3> *>(this->element_pt(ie));
+				if (!re || !re->tree_pt() || !re->tree_pt()->is_leaf()) continue;
+				for (int slot : slots)
+				{
+					for (int f = 0; f < 4; f++) re->tet_hang_face(slot, f);
+					for (int e = 0; e < 6; e++) re->tet_hang_edge(slot, e);
+				}
+			}
+			// C1(TB) mid-node rule (mirror BulkElementTri2dC2::further_setup_hanging_nodes): every C2 edge-mid
+			// node carrying a separate C1 slot hangs 0.5/0.5 on its two edge-corner nodes -- the C1-on-C2 rule.
+			// This also constrains the STALE pressure slot left on a former fine corner that becomes a plain
+			// conforming C2 mid-edge after UNREFINEMENT (the edge pass only hangs across a coarser neighbour,
+			// so it misses this conforming case). Nodes hung above (2:1) are skipped via is_hanging.
+			for (int slot : valid_c1_slots)
+			{
+				for (unsigned int ie = 0; ie < this->nelement(); ie++)
+				{
+					oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(this->element_pt(ie));
+					oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(this->element_pt(ie));
+					if (!fe || !re || !re->tree_pt() || !re->tree_pt()->is_leaf() || fe->nnode() < 10) continue;
+					oomph::Vector<double> sm(3);
+					static const double VC[4][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {0, 0, 0}};
+					for (unsigned em = 4; em < 10; em++) // the 6 edge-mid nodes of a (C2) tet
+					{
+						oomph::Node *M = fe->node_pt(em);
+						if ((int)M->nvalue() <= slot || M->is_hanging(slot)) continue; // no stale slot / already hung (2:1)
+						fe->local_coordinate_of_node(em, sm);
+						int ca = -1, cb = -1; // the two corner vertices this edge-mid bisects
+						for (int v = 0; v < 4; v++)
+							for (int w = v + 1; w < 4; w++)
+							{
+								bool match = true;
+								for (int d = 0; d < 3; d++)
+									if (std::abs(0.5 * (VC[v][d] + VC[w][d]) - sm[d]) > 1e-9) { match = false; break; }
+								if (match) { ca = v; cb = w; }
+							}
+						if (ca < 0) continue;
+						oomph::Node *A = fe->node_pt(ca), *B = fe->node_pt(cb);
+						if ((int)A->nvalue() <= slot || (int)B->nvalue() <= slot) continue;
+						oomph::HangInfo *hang = new oomph::HangInfo(2);
+						hang->set_master_node_pt(0, A, 0.5);
+						hang->set_master_node_pt(1, B, 0.5);
+						M->set_hanging_pt(hang, slot);
+					}
+				}
+			}
+			// Flatten hanging chains on every slot (a master that is itself hanging -> resolve to real
+			// leaves), so the assembled Jacobian is exact. Two-phase (read all, then reinstall) per slot.
+			for (int slot : slots)
+			{
+				std::map<oomph::Node *, std::map<oomph::Node *, double>> resolved;
+				for (unsigned int in = 0; in < this->nnode(); in++)
+				{
+					oomph::Node *X = this->node_pt(in);
+					if (!X->is_hanging(slot)) continue;
+					oomph::HangInfo *h = X->hanging_pt(slot);
+					bool chained = false;
+					for (unsigned m = 0; m < h->nmaster(); m++)
+						if (h->master_node_pt(m)->is_hanging(slot)) { chained = true; break; }
+					if (!chained) continue;
+					std::map<oomph::Node *, double> flat;
+					for (unsigned m = 0; m < h->nmaster(); m++)
+						resolve_hang_to_real_slot(h->master_node_pt(m), h->master_weight(m), flat, slot);
+					resolved[X] = flat;
+				}
+				for (const auto &kv : resolved)
+				{
+					oomph::HangInfo *nh = new oomph::HangInfo(kv.second.size());
+					unsigned i = 0;
+					for (const auto &mw : kv.second) { nh->set_master_node_pt(i, mw.first, mw.second); i++; }
+					kv.first->set_hanging_pt(nh, slot);
+				}
+			}
+			return;
 		}
 
 		// FACE-interior hanging runs FIRST: a coarse tet face that refines more than once (a >1-level
