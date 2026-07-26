@@ -28,3 +28,17 @@
 .framed img { border: 1px solid black;}
 
 .exampletable td {text-align: center;}
+
+/* The RTD theme forces `white-space: nowrap` on table cells, so tables with
+   long text (e.g. the oomph-lib comparison) never wrap and overflow into a
+   horizontal scrollbar. Let cells wrap and the table use the full width. */
+.wy-table-responsive table td,
+.wy-table-responsive table th {
+    white-space: normal;
+    word-wrap: break-word;
+}
+
+.wy-table-responsive {
+    width: 100%;
+    overflow: visible;
+}

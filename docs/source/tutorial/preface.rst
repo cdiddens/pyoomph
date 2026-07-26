@@ -15,4 +15,5 @@ Alternatively, you could just try to start somewhere in a section of interest an
    preface/cite.rst   
    preface/motivation.rst
    preface/general.rst
-   preface/whentouse.rst   
+   preface/whentouse.rst
+   preface/oomph_lib_comparison.rst   
