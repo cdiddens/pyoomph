@@ -547,6 +547,10 @@ class Problem(_pyoomph.Problem):
         #:  There are different methods implemented in oomph-lib to fill the sparse matrices (Jacobian, mass matrix, etc.). Depending on the problem, one or the other method may be faster or more memory efficient. The default method is "vectors_of_pairs", which is the most general one.                
         self.sparse_assembly_method:Literal["vectors_of_pairs","two_vectors","lists","maps","two_arrays"]="vectors_of_pairs"
         self.only_write_logfile_on_proc0:bool=True
+        #: Start time of the simulation, stamped into the log file header and used to compute the elapsed time in the footer
+        self._log_start_time=None
+        #: Guards against writing the elapsed-time log footer twice (release() vs. the atexit fallback)
+        self._log_footer_written=False
         #: Checks whether the elements in the meshes are nicely oriented (facing) so that refinement works as it should. Can be only done once initially or at each refinement step
         self.check_mesh_integrity:bool | Literal["initially"]="initially"
 
@@ -1009,6 +1013,8 @@ class Problem(_pyoomph.Problem):
         self.invalidate_cached_mesh_data()
         self.invalidate_eigendata()
         self.flush_sub_meshes()
+        # Stamp the end/elapsed time into the log file before closing it.
+        self._write_log_footer()
         # Close the log file (if any) now, rather than waiting for the C++ Problem
         # object's destructor: on Windows, a still-open log file handle prevents the
         # containing directory from being deleted (WinError 32), which bites e.g.
@@ -2706,13 +2712,31 @@ class Problem(_pyoomph.Problem):
         # since numpy 2.0) raise a DeprecationWarning on any attribute access,
         # so they must be filtered out by name first rather than probed.
         modules= {m.__name__:m.__version__ for m in sorted(sys.modules.values(),key=lambda a : getattr(a,"__name__","")) if hasattr(m,"__name__") and len(m.__name__.split("."))==1 and hasattr(m,"__version__")}
-        _pyoomph._write_to_log_file("Loaded module versions: "+str(modules)+os.linesep)                
-        _pyoomph._write_to_log_file("Log file started: "+str(datetime.datetime.now())+os.linesep)
+        _pyoomph._write_to_log_file("Loaded module versions: "+str(modules)+os.linesep)
+        self._log_start_time=datetime.datetime.now()
+        _pyoomph._write_to_log_file("Log file started: "+str(self._log_start_time)+os.linesep)
         _pyoomph._write_to_log_file("####################"+os.linesep)
         _pyoomph._write_to_log_file("Args: "+str(sys.argv)+os.linesep)
         _pyoomph._write_to_log_file("####################"+os.linesep)
         _pyoomph._write_to_log_file(os.linesep)
-        
+
+
+    def _write_log_footer(self):
+        # Idempotent: the footer must be written exactly once, whether we get here via
+        # release() (with-block/explicit call) or via the atexit fallback registered in
+        # initialise() for plain scripts that never call release() at all. Guard on
+        # _log_start_time so nothing is written when no header was ever emitted.
+        if self._log_start_time is None or self._log_footer_written:
+            return
+        self._log_footer_written=True
+        import datetime
+        end_time=datetime.datetime.now()
+        _pyoomph._write_to_log_file(os.linesep)
+        _pyoomph._write_to_log_file("####################"+os.linesep)
+        _pyoomph._write_to_log_file("Log file ended: "+str(end_time)+os.linesep)
+        _pyoomph._write_to_log_file("Elapsed time: "+str(end_time-self._log_start_time)+os.linesep)
+        _pyoomph._write_to_log_file("####################"+os.linesep)
+
 
     def initialise(self):
         """
@@ -2748,8 +2772,19 @@ class Problem(_pyoomph.Problem):
             from . logging import pyoomph_activate_logging_to_file
             pyoomph_activate_logging_to_file()
             self._write_log_header()
-            
-            
+            # Plain scripts (no "with" block, no explicit release()) never reach release()
+            # before the interpreter shuts down - __del__ bails out at sys.is_finalizing() -
+            # so the elapsed-time footer would be lost. Register an atexit fallback that writes
+            # it while the C++ log-file handle is still open. Use a weakref so this registration
+            # does not, by itself, keep the whole Problem alive until interpreter exit.
+            import atexit, weakref
+            _self_ref=weakref.ref(self)
+            def _log_footer_atexit():
+                _p=_self_ref()
+                if _p is not None:
+                    _p._write_log_footer()
+            atexit.register(_log_footer_atexit)
+
 
         if self._runmode=="continue":
             # Find the highest dump
