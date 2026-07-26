@@ -295,6 +295,18 @@ populates `Local_hang_eqn[value_index]` for every field pyoomph later reads.
    linear-response regressions still pass. See `tests/test_constrained_adaptivity.py`.
    The flattening is dimension-agnostic, so 3D bricks worked with no extra changes.
 
+   > **Caveat (added after simplex adaptivity landed).** The `ConstrainFieldsToC1Space`
+   > fix generalises to triangles/tets (the value constraint gets a genuine registered
+   > value-slot `HangInfo` on the C1 corners — see `mixed_adaptive_meshes.md` §4.3). But
+   > `ConstrainPositionsToC1Space` was validated **only on quads** (`CircularMesh`) and
+   > **does not yet work on adaptive TRIS once hanging nodes appear**: it aborts with
+   > `Assertion local_eqn < eleminfo->ndof`. `POSITION_CONSTRAIN_TO_C1` still
+   > `pin_position`s + redistributes via `c1_constraint_corners`, so at a 2:1 T-junction
+   > it reaches external coarse position masters that oomph never registered
+   > (`pin_position` registers nothing, unlike the field fix's `set_hanging_pt`), and
+   > position cannot reuse the geometric `−1` hang without wrongly degrading the dominant
+   > C2 values. Root-caused, fix deferred — see `mixed_adaptive_meshes.md` §4.14.
+
    **Interface-dof constraints** (`INTERFACE_DOF_CONSTRAIN_TO_C1`, i.e.
    `ConstrainFieldsToC1Space` applied to a surface/interface field) now work on
    refined interfaces too — but the fix was *not* in the C++ hang fill. Two Python

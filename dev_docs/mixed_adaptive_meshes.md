@@ -1,6 +1,19 @@
 # Mixed adaptive meshes (branch `mixed_adapt`)
 
-Status: **design + phased implementation, just started**. Author: development notes.
+Status: **large parts implemented and validated.** 2D **triangles** (C1/C2, Taylor-Hood, Crouzeix-Raviart)
+and 3D **tetrahedra** (C1/C2, TH, CR) now h-refine with hanging nodes through a fully **topological** tree
+route (the geometric bolt-on passes have been deleted); **mixed 2D quad+tri** meshes refine and solve
+correctly across the cross-shape interface (node-sharing + hanging + interface 2:1 balancing, all
+topological). Remaining: wedges/pyramids (needed before 3D *mixed* meshes — a hex face is a quad and a tet
+face is a triangle, so hex↔tet cannot share a facet; wedges/pyramids are the required transition elements),
+anisotropic/variable split schemes, `ConstrainPositionsToC1Space` under tri hanging (root-caused, see §4.14),
+and full MPI for 3D tets. Author: development notes.
+
+> **Reading note.** §§1–5 are the original design and are still the correct mental model, but the "Present
+> state" table below and §§4.8–4.10 describe an early **geometric/hybrid** tri-hanging era that has since
+> been **superseded** by the topological tree route. The authoritative account of the *current* code is
+> §§4.11–4.15 (tri tree route, tet migration, mixed quad+tri, position-C1, summary). Where they conflict,
+> §§4.11+ win.
 
 This document describes how pyoomph currently performs adaptive (hanging-node)
 mesh refinement, why that machinery is restricted to pure quad (2D) / pure hex
@@ -24,22 +37,26 @@ of the tree at the time of writing.
 
 ## 1. Present state
 
+The table below is the **original** (pre-implementation) state and is kept for historical framing. The
+rows that changed are annotated **→ now**; see §§4.11–4.15 for the current mechanisms.
+
 | Case | Mechanism today | Status |
 |---|---|---|
 | 1D lines | `BinaryTree` hanging-node refinement | works |
 | 2D pure quad | `QuadTree` (`DynamicQuadTreeForest`) hanging-node refinement | works |
 | 3D pure hex | `OcTree` hanging-node refinement | works |
-| 2D triangle / mixed | none — `refinement_possible()` false → full Gmsh **remesh** | no h-adaptivity |
-| 3D tet / wedge / pyramid / mixed | none — `refinement_possible()` false (brick-only) → remesh only | no h-adaptivity |
+| 2D triangle / mixed | ~~none — remesh only~~ **→ now: topological QuadTree tri route (C1/C2/TH/CR); MIXED quad+tri works** (§4.11, §4.13) | works |
+| 3D tet | ~~none — remesh only~~ **→ now: topological OcTree tet route (C1/C2/TH/CR)** (§4.12) | works |
+| 3D wedge / pyramid / mixed | none — `refinement_possible()` false → remesh only | no h-adaptivity (needs wedges/pyramids first) |
 
 The gate is `refinement_possible()`:
 
 * 1D: always true (`src/mesh1d.hpp:86`).
-* 2D: true only if **every** element casts to `oomph::QuadElementBase`
-  (`src/mesh2d.cpp:201-221`); a triangle anywhere warns *"Found a tri or
-  something in the mesh … cannot be adaptive right now. Requires to implement a
-  good tree for mixed meshes"* and disables adaptation.
-* 3D: true only if **every** element is a brick/hex (`src/mesh3d.cpp:43-63`).
+* 2D **(current)**: true if **every** element is a quad **or a tri** — pure-quad, pure-tri **and mixed
+  quad+tri** are all refineable (`src/mesh2d.cpp` `refinement_possible`, §4.13); only a genuinely foreign
+  element type disables adaptation.
+* 3D **(current)**: true if every element is a **brick or a tet** (pure only; mixed 3D still gated off
+  until wedges/pyramids land). Wedges/pyramids/mixed still disable adaptation.
 
 When the gate is false, `setup_tree_forest()` calls `disable_adaptation()`
 (`src/mesh2d.cpp:225-236`, `src/mesh3d.hpp:113`), and simplex/mixed meshes obtain
@@ -910,6 +927,125 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
          facet-reconstruction path is left committed behind the flag as a working single-level reference +
          the `validate`/`DUMP` diagnostics. Default stays geometric (34/34) until a topological path passes
          the whole suite + the aggressive flat film + droplet FD.
+
+   - **§4.11 — Tri-native topological tree route is now the DEFAULT; the geometric bolt-on is DELETED
+     [SUPERSEDES §4.8–4.10].** The §4.10 "node provenance" recommendation was, in effect, adopted: the tri
+     hanging is now purely topological via a **tri-native neighbour finder + an exact affine son↔father
+     coordinate map**, and the whole geometric `post_adapt_setup_hanging_nodes` (facet-adjacency +
+     `node_strictly_on_segment` + `locate_zeta`, ~550 lines incl. the `PYOOMPH_TRI_HANG*` diagnostics) has
+     been removed for 2D. Pieces (`src/refineable_telements.{cpp,hpp}`):
+     * **Affine map** `son_to_father_local` / `father_to_son_local` / `local_coordinate_in_ancestor` /
+       `local_coordinate_in_other_leaf` / `root_coord_to_leaf`: a full 2×2 `A = [P0−P2, P1−P2]` represents
+       **all four** triangle sons *including the inverted middle (NE) son*, which oomph's quad box
+       (`s_lo/s_hi/translate_s`) cannot. Exact even on curved meshes (refinement is defined in local
+       coordinates), so it replaces `locate_zeta` — **zero off-edge leakage**, no Newton.
+     * **`tri_edge_neighbour(my_edge)`** (the "oomph way", *not* oomph's quad `gteq_edge_neighbour`, which is
+       structurally quad-only): son_type ascent tracking the edge as a pair of **father-points** (a father
+       vertex `FV0..2` or a father edge-mid `FmS/E/W`); the edge is interior to the father exactly when its
+       two father-points are not on one father edge, at which moment the ≥-neighbour is simply the sibling
+       son — so **no Reflect/Rotate tables and the inverted NE son is handled naturally**. Cross-root uses the
+       forest `neighbour_pt` + a shared-vertex-node correspondence + an affine-interval descent. It also
+       **descends into a non-leaf sibling** toward this element's edge (the way oomph's `gteq_edge_neighbour`
+       descends through its recursion) so an *equal same-root cousin* refined in a different round is found.
+     * **`tri_hang_helper`** hangs each interpolating node on the ≥-coarser neighbour's `interpolating_basis`
+       (generic over C1/C2/C2TB), with a cycle guard. `BulkElementTri2dC2::further_setup_hanging_nodes`
+       installs the separate C1(TB)/C2 value-slot hangs (stale-slot fix under unrefinement).
+     * **Node-sharing** (so a moving/re-adapting tri mesh does not tear): a new son node reuses one an
+       already-built neighbour created, found via `node_created_by_neighbour` (= `tri_edge_neighbour` + affine
+       map + `get_node_at_local_coordinate`, the oomph mechanism), then the per-round `Shared_edge_node_registry`
+       (keyed on the father node-pointer pair the node bisects — pure topology), then a start-of-round
+       position snapshot as a final fallback for the finer-neighbour / edge-only cases. The descent fix above
+       closed a real bug: on the TH droplet two same-root conforming cousins duplicated their shared C2 mid-node
+       (drifted ~7e-5 after the mesh moved) → a velocity jump across a bulk edge; now `dup=0` at every re-adapt.
+     * **Validated:** `tests/test_triangle_refinement.py` machine-zero across C1/C2/TH/CR, uniform / 2:1 /
+       multi-level / error-based, and the moving-mesh re-adapt tear test; the geometric-vs-tree cross-validator
+       (before deletion) showed the tree route == geometric to machine precision.
+
+   - **§4.12 — Tetrahedra: the same topological tree route; `mesh3d` geometric pass DELETED.** The 3D analogue
+     of §4.11, completed in phases (`src/refineable_telements.{cpp,hpp}`, `src/mesh3d.{cpp,hpp}`):
+     * **Affine 3×3 map** + **`tet_face_neighbour`** (OcTree analogue of `tri_edge_neighbour`: track a face as
+       a father-point triple; interior ⇔ not all on one father face ⇒ sibling; **cross-root via a new
+       `DynamicOcTreeForest::find_neighbours` for tets** that populates root face `neighbour_pt` from shared
+       3-corner-node faces — the direct mirror of the 2D tri forest — + a shared-face corner correspondence +
+       a point-containment descent). Non-leaf-sibling descent as in 2D. `node_created_by_neighbour(3D)` wired
+       into `build()` for topological face-based node-sharing.
+     * **Per-element hanging** (`tet_hang_face` via `tet_face_neighbour` + `interpolating_basis`; `tet_hang_edge`
+       via an OcTree ascent to the coarse edge; separate C1/C2 value slots; the C1 mid-node rule; per-slot
+       chain flatten) replaced the geometric face/edge passes. Driven from `post_adapt_setup_hanging_nodes` and
+       validated against the (then still present) geometric pass as a machine-zero oracle, then the geometric
+       pass was deleted.
+     * **Key gotcha:** `continuous_spaces[…].hangindex` can be a *placeholder ≥ ncont* on a mesh without that
+       field (e.g. C1 hangindex on a pure-C2 mesh); the deleted geometric pass tolerated it via per-node
+       `nvalue()` guards, the per-element helpers must **filter slots to valid value ids** (`slot==−1 ||
+       0≤slot<ncont`) or it bus/segfaults.
+     * **Validated:** `tests/test_tet_refinement.py` + `test_constrained_adaptivity.py` machine-zero (C1/C2/
+       TH/CR, uniform / 2:1 / abrupt multi-level / error-based / unrefinement); `PYOOMPH_TET_FACENB_CHECK`
+       geometric oracle reports **bad=0** on every leaf face incl. heavily cross-root TetCubeMesh patterns.
+     * **Still mesh-level:** the driver runs in `post_adapt` (a mesh loop), not inside `adapt_mesh`'s
+       per-element hooks, so the tet `refine_selected`/`custom_adapt` hanging gap and MPI per-element halo
+       composition remain (the chain-flatten inherently needs an all-elements-done post-pass). 3D-tet MPI is
+       separately blocked (asymmetric halo node classification, §4.4 BUG B).
+
+   - **§4.13 — MIXED quad+tri (2D) works — the concrete goal of this document, done TOPOLOGICALLY.** A single
+     domain may now contain both quads and tris and be adaptively refined through the shared QuadTree forest.
+     The quad↔tri **interface** uses **no geometry / no `locate_zeta`**, mirroring how oomph shares/hangs
+     pure-quad nodes. (This retires the failed 2015-era geometric "weld" attempt noted in §6/Phase-3 —
+     duplicate interface nodes tied by weight-1 hangs, which broke at ~cycle 3 of error-driven adapt.)
+     * **Forest** (`src/mesh2d.cpp`): `DynamicQuadTreeForest::find_neighbours` resolves quad↔tri root
+       neighbours (the neighbour tests already key only on shared corner nodes — dropped the two "Mixed
+       quad/tri not supported" throws); `refinement_possible()` allows mixed; `check_all_neighbours` skips
+       oomph's quad-coordinate self-test whenever any tri is present.
+     * **Cross-shape core** (`BulkElementBase::mixed_hang_edge_node` / `mixed_hang_node_at`,
+       `src/elements.cpp`): a point at fraction `t` along the shared edge maps to the neighbour by the affine
+       blend `(1−t)·s(Pb) + t·s(Qb)` of the neighbour's **local coords of the shared root-edge corner nodes**
+       `Pb,Qb` (pure topology — node indices + local coords), then it **descends the neighbour ROOT to the
+       coarse LEAF** (`leaf_at_root_coordinate` / `quad_leaf_at_root_coordinate`) and hangs on that leaf's
+       `interpolating_basis`, with a level guard (strictly-coarser leaf only). The fine-side ascent to `t` is
+       per-shape (quad axis-aligned son-box compose; tri affine map).
+     * **Hanging wiring:** the **virtual** `quad_hang_helper` is overridden on `BulkElementQuad2dC1/C2` — a
+       tri neighbour routes to the cross-shape path, quad↔quad falls through to oomph. On the tri side,
+       `TriEdgeNeighbour` gained `cross_shape_root` (a quad neighbour isn't a `RefineableTElement<2>`) and
+       `tri_hang_helper` uses it. This is why oomph's quad compass `gteq_edge_neighbour` — meaningless for a
+       tri neighbour — no longer produces the cyclic hang (stack overflow in `complete_hanging_nodes`) it did
+       before the override.
+     * **Node-sharing** (the crux — a quad and a tri that both refine to the same level must *share* the
+       coincident interface node, not duplicate it): the **virtual** `node_created_by_neighbour` is overridden
+       on the quad (`mixed_quad_shared_node`) and extended on the tri — find the neighbour ROOT, map the
+       shared-edge point into its root frame, **descend to the leaf** (`node_at_root_coordinate` /
+       `quad_node_at_root_coordinate`: point-in-simplex / axis-aligned box descent) and
+       `get_node_at_local_coordinate`. This is exactly oomph's own topological node-sharing, applied
+       cross-shape. Uniform-refine interface duplicates: **8 → 0**.
+     * **Interface 2:1 balancing** (`TemplatedMeshBase2d::enforce_refinement_balance`, cross-shape only):
+       refine the coarser element wherever a *different-shape* node sits at the `t = 1/2^nnode_1d` edge
+       fraction (the 2D analogue of the tet balancer, restricted to cross-shape so pure-tri multi-level is not
+       over-refined). Keeps every quad↔tri jump single-level, where the validated hang applies.
+     * **Validated** (`tests/test_mixed_mesh.py`, 5 tests): uniform 0 duplicates; single-level 2:1 both
+       directions 0 torn and matches the uniform solution *exactly*; multi-cycle error-based (source crossing
+       the interface) **torn=0 every cycle**, machine-zero, and the field matches a uniform-fine reference to
+       ~1e-5. Pure quad/tri/tet regression 65/65 unaffected.
+     * **3D generalisation (design):** the coarse-side coordinate map is a barycentric/bilinear blend over the
+       shared **face** corner nodes; the fine-side ascent + neighbour-leaf descent reuse the per-shape
+       affine/box maps. **But** a hex face is a quad and a tet face is a triangle, so hex↔tet **cannot share a
+       facet** — 3D mixed needs **wedges/pyramids** as transition elements first (a pyramid has 1 quad + 4 tri
+       faces; a wedge has 3 quad + 2 tri faces). So the 3D mixed interface waits on §6/wedge-pyramid work.
+
+   - **§4.14 — `ConstrainPositionsToC1Space` × tri hanging [ROOT-CAUSED, DEFERRED].** Works on adaptive
+     quads (conforming + 2:1) and on *uniform* tris, but **aborts on tris once hanging nodes appear** (2:1):
+     `Assertion local_eqn < eleminfo->ndof` in the generated residual code. `POSITION_CONSTRAIN_TO_C1` still
+     `pin_position`s + relies on the `c1_constraint_corners` redistribution, unlike the §4.3 field fix which
+     installs a *registered* `set_hanging_pt`. At a 2:1 T-junction the constrained node's C1 corner is itself
+     hanging, so its position redistributes onto **external coarse vertices** that oomph never registered as
+     position-hang masters (`pin_position` registers nothing) → `local_position_hang_eqn` returns garbage ≥
+     ndof. Position can't reuse the geometric `−1` hang (it couples the dominant C2 values → would wrongly
+     degrade velocity to C1). A registration fix (mirror the solid-hang new-master allocation) was attempted
+     but tangles with oomph's two-pass eqn assignment; deferred. Repro `Scratchpad/pos_c1_arg.py`.
+
+   - **§4.15 — Current status summary.** Working & validated: 2D tri (C1/C2/TH/CR) + 3D tet (C1/C2/TH/CR) via
+     the topological tree route (geometric passes deleted); 2D mixed quad+tri (refine + solve + moving-mesh
+     tear-free). Pending: wedges/pyramids ⇒ 3D mixed; anisotropic/variable splits (§5); tet per-element
+     hanging inside `adapt_mesh` (refine_selected gap + MPI); `ConstrainPositionsToC1Space` under tri hanging
+     (§4.14); 3D-tet MPI (§4.4 BUG B). Tests: `test_triangle_refinement.py`, `test_tet_refinement.py`,
+     `test_constrained_adaptivity.py`, `test_mixed_mesh.py`.
 
 5. **Variable / anisotropic schemes** (§5): quad 1→2 (both directions), simplex
    bisection; directional error estimator; generalised balance rule.
