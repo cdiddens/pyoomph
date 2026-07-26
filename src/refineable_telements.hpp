@@ -397,6 +397,8 @@ namespace oomph
     // The father node-pointer pair that a son node at father-local coordinate s_in_father bisects
     // (empty if it is a reused father node).
     std::set<Node *> father_edge_node_key(const Vector<double> &s_in_father, RefineableTElement<3> *father_el_pt) const;
+
+  public:
     // The 4 vertices (in father local coordinates) of son number son_type (0..7) of a 1->8 split.
     static void son_vertices_in_father(int son_type, Vector<Vector<double>> &verts);
 
@@ -415,6 +417,24 @@ namespace oomph
     bool local_coordinate_in_other_leaf(const Vector<double> &s_here, RefineableTElement<3> *target, Vector<double> &s_target) const;
     // Map a coordinate given in `leaf`'s ROOT-element frame down to `leaf`'s own frame (father_to_son chain).
     static bool root_coord_to_leaf(const Vector<double> &s_root, RefineableTElement<3> *leaf, Vector<double> &s_leaf);
+
+    // Result of the tet-native topological neighbour search (see tet_face_neighbour). Same shape as the 2d
+    // TriEdgeNeighbour but for a triangular FACE of a tetrahedron.
+    struct TetFaceNeighbour
+    {
+      RefineableTElement<3> *el = nullptr; // >=-sized LEAF neighbour across the queried face (or null)
+      int diff_level = 0;                  // level(neighbour)-level(this); <0 => strictly coarser => this hangs
+      bool cross_root = false;             // neighbour lives in an adjacent tree root
+    };
+    // Tet-native topological FACE-neighbour finder (the octree analogue of the 2d tri_edge_neighbour):
+    // OcTree son_type ascent + father-point tracking. Tracks the queried face (my_face in 0..3, opposite
+    // local vertex my_face) as a triple of tree-node local vertex indices; at each level maps them to
+    // father points (a father vertex or a father edge-midpoint) via son_vertices_in_father; the face is
+    // interior to the father exactly when its three father points do not all lie on one father face, at
+    // which moment the >=-sized neighbour is the sibling son sharing that face -- so no oomph OcTree
+    // Reflect/Rotate tables and the octahedron inner sons are handled naturally. (Same-root only for now;
+    // cross-root + the descent land in a later step.)
+    TetFaceNeighbour tet_face_neighbour(int my_face) const;
   };
 
 }

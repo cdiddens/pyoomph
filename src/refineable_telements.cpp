@@ -2562,4 +2562,111 @@ namespace oomph
     return root_coord_to_leaf(s_root, target, s_target);
   }
 
+  namespace
+  {
+    // Father "points" of a 1->8 tet split: 4 father vertices + 6 father edge-midpoints. Every son vertex
+    // is one of these (C1: sons are built from the 4 corners + 6 edge-mids). Ids: FV0..3 = 0..3;
+    // FM01,FM02,FM03,FM12,FM13,FM23 = 4..9.
+    inline int tet_fp_id(const oomph::Vector<double> &c)
+    {
+      static const double P[10][3] = {
+          {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {0, 0, 0},                     // FV0..3
+          {0.5, 0.5, 0}, {0.5, 0, 0.5}, {0.5, 0, 0},                      // FM01,FM02,FM03
+          {0, 0.5, 0.5}, {0, 0.5, 0}, {0, 0, 0.5}};                       // FM12,FM13,FM23
+      for (int i = 0; i < 10; i++)
+        if (std::abs(c[0] - P[i][0]) + std::abs(c[1] - P[i][1]) + std::abs(c[2] - P[i][2]) < 1e-9) return i;
+      return -1;
+    }
+
+    // The 6 father points on each father face (face f is opposite father vertex f).
+    inline bool tet_fp_on_face(int fp, int f)
+    {
+      static const int FACE[4][6] = {
+          {1, 2, 3, 7, 8, 9},  // face 0 (opp v0): v1,v2,v3,m12,m13,m23
+          {0, 2, 3, 5, 6, 9},  // face 1 (opp v1): v0,v2,v3,m02,m03,m23
+          {0, 1, 3, 4, 6, 8},  // face 2 (opp v2): v0,v1,v3,m01,m03,m13
+          {0, 1, 2, 4, 5, 7}}; // face 3 (opp v3): v0,v1,v2,m01,m02,m12
+      for (int k = 0; k < 6; k++) if (FACE[f][k] == fp) return true;
+      return false;
+    }
+
+    // Which father face (0..3) contains all three father points, or -1 if the triple is INTERIOR.
+    inline int tet_father_face_of_triple(int a, int b, int c)
+    {
+      for (int f = 0; f < 4; f++)
+        if (tet_fp_on_face(a, f) && tet_fp_on_face(b, f) && tet_fp_on_face(c, f)) return f;
+      return -1;
+    }
+
+    // Father-point ids of son son_type's four LOCAL faces (face i is opposite local vertex i).
+    inline void tet_son_face_fps(int son_type, int faceFP[4][3])
+    {
+      oomph::Vector<oomph::Vector<double>> sv;
+      oomph::RefineableTElement<3>::son_vertices_in_father(son_type, sv);
+      int vfp[4];
+      for (int v = 0; v < 4; v++) vfp[v] = tet_fp_id(sv[v]);
+      for (int f = 0; f < 4; f++) { int k = 0; for (int v = 0; v < 4; v++) if (v != f) faceFP[f][k++] = vfp[v]; }
+    }
+
+    // The sibling son (0..7, != st) that shares the interior face whose father-point set is {t0,t1,t2}.
+    inline int tet_sibling_across_face(int st, int t0, int t1, int t2)
+    {
+      std::set<int> T{t0, t1, t2};
+      for (int s = 0; s < 8; s++)
+      {
+        if (s == st) continue;
+        int fp[4][3];
+        tet_son_face_fps(s, fp);
+        for (int f = 0; f < 4; f++)
+          if (std::set<int>{fp[f][0], fp[f][1], fp[f][2]} == T) return s;
+      }
+      return -1;
+    }
+  } // namespace
+
+  RefineableTElement<3>::TetFaceNeighbour RefineableTElement<3>::tet_face_neighbour(int my_face) const
+  {
+    TetFaceNeighbour res;
+    if (!this->Tree_pt) return res;
+    // Track the face as its 3 local vertex indices (the vertices != my_face).
+    int fv[3]; { int k = 0; for (int v = 0; v < 4; v++) if (v != my_face) fv[k++] = v; }
+    static const bool DBG = getenv("PYOOMPH_TET_FACENB_DBG") != 0;
+    const Tree *cur = this->Tree_pt;
+    int climbs = 0;
+    while (true)
+    {
+      Tree *fath = cur->father_pt();
+      if (!fath) break; // reached the root with the face on the boundary -> cross-root (later step)
+      const int st = cur->son_type();
+      Vector<Vector<double>> sv;
+      son_vertices_in_father(st, sv);
+      int fp[3];
+      for (int i = 0; i < 3; i++) fp[i] = tet_fp_id(sv[fv[i]]);
+      const int F = tet_father_face_of_triple(fp[0], fp[1], fp[2]);
+      if (DBG) std::fprintf(stderr, "[facenb-asc] climb=%d st=%d fv={%d,%d,%d} fp={%d,%d,%d} F=%d\n", climbs, st, fv[0], fv[1], fv[2], fp[0], fp[1], fp[2], F);
+      if (F < 0)
+      {
+        // Face is interior to `fath`: the >=-sized neighbour is the sibling son sharing it.
+        const int sib_st = tet_sibling_across_face(st, fp[0], fp[1], fp[2]);
+        if (sib_st < 0) return res;
+        Tree *sib = fath->son_pt(sib_st);
+        if (!sib) return res;
+        // climbs==0 => equal-sized sibling; climbs>=1 => strictly coarser. A non-leaf sibling is
+        // equal-or-finer -> leave res.el null. (Hang path acts only on diff_level<0.)
+        if (sib->is_leaf())
+        {
+          res.el = dynamic_cast<RefineableTElement<3> *>(sib->object_pt());
+          res.diff_level = -climbs;
+        }
+        return res;
+      }
+      // Face lies on `fath`'s face F -> climb, re-expressing it as the father's 3 vertices != F.
+      cur = fath;
+      { int k = 0; for (int v = 0; v < 4; v++) if (v != F) fv[k++] = v; }
+      climbs++;
+    }
+    res.cross_root = true; // reached the root with the face on the boundary: descent into the adjacent root is a later step
+    return res;
+  }
+
 }

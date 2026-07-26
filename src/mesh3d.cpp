@@ -118,6 +118,60 @@ namespace pyoomph
 			if (dynamic_cast<oomph::TElementBase *>(this->element_pt(ie))) has_tet = true;
 		if (!has_tet) return; // brick meshes: oomph-lib already handled hanging
 
+		// Validate the tet-native FACE-neighbour finder against geometry (env PYOOMPH_TET_FACENB_CHECK).
+		// For every leaf tet face: the tree-found >=-sized neighbour must contain all 3 face vertex nodes
+		// (equal neighbour shares the exact face; a coarser one has them as its own vertices/edge-mids).
+		// Also count faces the tree leaves as null vs the geometric interior faces (facet adjacency).
+		if (getenv("PYOOMPH_TET_FACENB_CHECK"))
+		{
+			FacetAdjacencyMap fadj = this->build_facet_adjacency();
+			int nface = 0, nfound = 0, nnull = 0, nbadnode = 0, ncross = 0, ninterior_missed = 0;
+			int ncoarser = 0, ncoarser_bad = 0;
+			for (unsigned int ie = 0; ie < this->nelement(); ie++)
+			{
+				oomph::TElementBase *te = dynamic_cast<oomph::TElementBase *>(this->element_pt(ie));
+				oomph::RefineableTElement<3> *re = dynamic_cast<oomph::RefineableTElement<3> *>(this->element_pt(ie));
+				if (!te || !re || !re->tree_pt() || !re->tree_pt()->is_leaf()) continue;
+				for (int f = 0; f < 4; f++)
+				{
+					oomph::Node *fn[3]; { int k = 0; for (int v = 0; v < 4; v++) if (v != f) fn[k++] = te->vertex_node_pt(v); }
+					std::set<pyoomph::Node *> fkey; for (int i = 0; i < 3; i++) fkey.insert(dynamic_cast<pyoomph::Node *>(fn[i]));
+					auto ait = fadj.find(fkey);
+					const bool geo_interior = (ait != fadj.end() && ait->second.size() > 1);
+					nface++;
+					oomph::RefineableTElement<3>::TetFaceNeighbour nb = re->tet_face_neighbour(f);
+					if (nb.el)
+					{
+						nfound++;
+						oomph::FiniteElement *nfe = dynamic_cast<oomph::FiniteElement *>(nb.el);
+						// Geometric containment: each of the leaf face's 3 vertex POSITIONS must lie inside the
+						// neighbour (equal -> on the shared face; coarser -> on the coarse face, where the fine
+						// node is NOT a node of the coarse element -- that is what hanging IS). locate_zeta is
+						// the right check; node-membership would falsely flag every correct coarse neighbour.
+						bool bad = false;
+						for (int i = 0; i < 3; i++)
+						{
+							oomph::Vector<double> xp(3), sloc(3);
+							for (int d = 0; d < 3; d++) xp[d] = fn[i]->x(d);
+							oomph::GeomObject *go = 0;
+							nfe->locate_zeta(xp, go, sloc);
+							if (go == 0) { bad = true; break; }
+						}
+						if (bad) nbadnode++;
+						if (nb.diff_level < 0) { ncoarser++; if (bad) ncoarser_bad++; } // the hanging-relevant case
+					}
+					else
+					{
+						nnull++;
+						if (nb.cross_root) ncross++;
+						else if (geo_interior) ninterior_missed++; // same-root interior face the tree failed to resolve
+					}
+				}
+			}
+			std::fprintf(stderr, "[tet-facenb] leaf-faces=%d found=%d(bad-node=%d) null=%d(cross-root=%d, same-root-null=%d) | COARSER(hang-relevant)=%d bad=%d\n",
+				nface, nfound, nbadnode, nnull, ncross, ninterior_missed, ncoarser, ncoarser_bad);
+		}
+
 		for (unsigned int in = 0; in < this->nnode(); in++) this->node_pt(in)->set_nonhanging();
 
 		// A C1(TB) field on a C2-coordinate tet mesh (e.g. 3D Taylor-Hood: C2 velocity + C1 pressure)
