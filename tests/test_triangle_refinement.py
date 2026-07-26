@@ -337,3 +337,48 @@ def test_moving_mesh_refinement_identity_residual(split, where):
         # No solve: the mesh has not moved, so identity is exactly the current state. Pre-fix this
         # residual was O(10) for tris (any refinement); it must now be ~machine zero.
         assert _max_abs_residual(problem) < 1e-10
+
+
+# TRANSIENT RE-ADAPTATION node-sharing (moving mesh): a LaplaceSmoothedMesh whose refinement level
+# follows a spatial threshold. As the mesh moves, elements repeatedly cross the threshold, forcing
+# refine AND unrefine each step. A son node built in one round that coincides with a node an EARLIER
+# round already built -- notably one created by a FINER neighbour's son (which the >=-sized tree
+# neighbour search cannot reach) -- must be REUSED, not duplicated. Otherwise the shared vertex splits
+# into two coincident nodes and the moving mesh tears apart at the refine/coarsen interface. This is a
+# regression for RefineableTElement<2>::build's node-sharing (node_created_by_neighbour + the
+# start-of-round position snapshot fallback).
+class _MovingReadaptTear(Problem):
+    def __init__(self, N=4):
+        super().__init__()
+        self._N = N
+
+    def define_problem(self):
+        self += RectangularQuadMesh(split_in_tris="left", N=self._N)
+        eqs = LaplaceSmoothedMesh() + ElementSpace("C1")
+        eqs += DirichletBC(mesh_x=True, mesh_y=0) @ "bottom"
+        eqs += NeumannBC(mesh_y=-var("time")) @ "top"
+        eqs += RefineAccordingToElement(level_func=lambda e: 2 if e.get_Eulerian_midpoint()[1] > 0.5 else 0)
+        self += eqs @ "domain"
+
+
+def _count_coincident_nodes(mesh):
+    seen = {}
+    dup = 0
+    for n in mesh.nodes():
+        key = (round(n.x(0), 8), round(n.x(1), 8))
+        if key in seen:
+            dup += 1
+        seen[key] = n
+    return dup
+
+
+def test_moving_mesh_readapt_no_torn_nodes():
+    with _MovingReadaptTear(N=4) as p:
+        p.max_refinement_level = 2
+        p.initial_adaption_steps = 0
+        p.solve()  # t=0
+        assert _count_coincident_nodes(p.get_mesh("domain")) == 0
+        # Step through time with re-adaptation; the tear appeared once coarsening kicked in (t~0.5).
+        for _ in range(8):
+            p.solve(timestep=0.1, spatial_adapt=2)
+            assert _count_coincident_nodes(p.get_mesh("domain")) == 0, "duplicate (torn) shared nodes after re-adaptation"

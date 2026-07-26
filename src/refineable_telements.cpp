@@ -814,10 +814,28 @@ namespace oomph
               // the node across the edge-sharing neighbour father's sons AND the other sons of
               // this father, so no duplicate mid-edge nodes are created.
               bool is_periodic = false;
-              if (!reg_key.empty())
+              // First, the oomph-quad way: reuse a node an EDGE-NEIGHBOUR already built, found via the tri
+              // tree (which persists across adaptation rounds). This is what closes the cross-round gap --
+              // during transient re-adaptation a son built this round must reuse a coincident node an
+              // equal-sized neighbour built in an EARLIER round, else the shared vertex is duplicated and
+              // the moving mesh tears apart. The per-round Shared_edge_node_registry below only dedupes
+              // nodes built within THIS round (e.g. sibling sons not yet visited by the tree search).
+              created_node_pt = this->node_created_by_neighbour(s_fraction);
+              if (created_node_pt == 0 && !reg_key.empty())
               {
                 std::map<std::set<Node *>, Node *>::iterator reg_it = Shared_edge_node_registry.find(reg_key);
                 if (reg_it != Shared_edge_node_registry.end()) created_node_pt = reg_it->second;
+              }
+              // Final fallback: a coincident node may already exist from an EARLIER round -- notably one
+              // built by a FINER neighbour's son, which node_created_by_neighbour (>=-sized neighbours only)
+              // cannot reach. Match it by position against the start-of-round snapshot. Only for genuine
+              // father-edge nodes (reg_key non-empty), so interior/vertex nodes are unaffected.
+              if (created_node_pt == 0 && !reg_key.empty() && !Existing_node_by_position.empty())
+              {
+                Vector<double> x_new(father_el_pt->nodal_dimension(), 0.0);
+                father_el_pt->interpolated_x(s, x_new);
+                std::map<std::string, Node *>::iterator pit = Existing_node_by_position.find(position_key(&x_new[0], x_new.size()));
+                if (pit != Existing_node_by_position.end()) created_node_pt = pit->second;
               }
 
               // If the node was so created, assign the pointers
@@ -1662,6 +1680,47 @@ namespace oomph
     return true;
   }
 
+  Node *RefineableTElement<2>::node_created_by_neighbour(const Vector<double> &s_son) const
+  {
+    using namespace QuadTreeNames;
+    if (!this->Tree_pt) return 0;
+    // Son edges the node lies on (S=v2-v0 at y=0, W=v1-v2 at x=0, E=v0-v1 at x+y=1); a vertex lies on two.
+    const double x = s_son[0], y = s_son[1];
+    int es[2], ne = 0;
+    if (std::abs(y) < 1e-12) es[ne++] = S;
+    if (std::abs(x) < 1e-12) es[ne++] = W;
+    if (std::abs(x + y - 1.0) < 1e-12) es[ne++] = E;
+    for (int k = 0; k < ne; k++)
+    {
+      TriEdgeNeighbour nb = this->tri_edge_neighbour(es[k]);
+      if (!nb.el) continue;
+      if (!nb.el->nodes_built()) continue; // neighbour built in an earlier round (or earlier this round)
+      // Map the son-node's local coordinate into the neighbour (exact affine map; same route as the hang
+      // helper). A coarser neighbour has no node at this interior position -> get_node returns 0.
+      Vector<double> s_neigh(2);
+      bool ok;
+      if (!nb.cross_root)
+      {
+        ok = this->local_coordinate_in_other_leaf(s_son, nb.el, s_neigh);
+      }
+      else
+      {
+        RefineableTElement<2> *my_root = dynamic_cast<RefineableTElement<2> *>(this->Tree_pt->root_pt()->object_pt());
+        if (!my_root) continue;
+        Vector<double> s_root(2), s_nrroot(2);
+        this->local_coordinate_in_ancestor(s_son, my_root, s_root);
+        double t = param_on_edge(nb.my_edge_dir, s_root);
+        if (nb.reversed) t = 1.0 - t;
+        point_on_edge(nb.nr_edge_dir, t, s_nrroot);
+        ok = root_coord_to_leaf(s_nrroot, nb.el, s_neigh);
+      }
+      if (!ok) continue;
+      Node *nn = nb.el->get_node_at_local_coordinate(s_neigh);
+      if (nn) return nn;
+    }
+    return 0;
+  }
+
   //=================================================================
   /// Tri-native topological neighbour finder. See the header comment on TriEdgeNeighbour /
   /// tri_edge_neighbour for the algorithm (son_type ascent + father-point edge tracking).
@@ -1692,9 +1751,11 @@ namespace oomph
         if (sib_st < 0) return res;
         Tree *sib = fath->son_pt(sib_st);
         if (!sib) return res;
-        // climbs==0 => sibling is the same size (equal neighbour); a non-leaf sibling means the
-        // neighbour is equal-or-finer. Either way this element does not hang on that edge.
-        if (climbs >= 1 && sib->is_leaf())
+        // Return the sibling if it is a leaf: climbs==0 => EQUAL-sized neighbour (diff_level 0), climbs>=1
+        // => strictly coarser (diff_level<0). The hang helper acts only on diff_level<0, so returning the
+        // equal neighbour is behaviour-preserving there; node-sharing (node_created_by_neighbour) needs
+        // the equal neighbour too. A non-leaf sibling is equal-or-finer -> leave res.el null.
+        if (sib->is_leaf())
         {
           res.el = dynamic_cast<RefineableTElement<2> *>(sib->object_pt());
           res.diff_level = -climbs;
@@ -1953,6 +2014,26 @@ namespace oomph
 
   // Shared-node registry for geometric node-sharing during triangle refinement (see header).
   std::map<std::set<Node *>, Node *> RefineableTElement<2>::Shared_edge_node_registry;
+
+  // Position -> node snapshot for the cross-round (finer-neighbour) node-sharing fallback (see header).
+  std::map<std::string, Node *> RefineableTElement<2>::Existing_node_by_position;
+
+  std::string RefineableTElement<2>::position_key(const double *x, unsigned dim)
+  {
+    char buf[96];
+    if (dim >= 2) std::snprintf(buf, sizeof(buf), "%.12g|%.12g", x[0], x[1]);
+    else std::snprintf(buf, sizeof(buf), "%.12g", x[0]);
+    return std::string(buf);
+  }
+
+  void RefineableTElement<2>::register_existing_node_position(Node *n)
+  {
+    if (!n) return;
+    const unsigned dim = n->ndim();
+    double x[3] = {0, 0, 0};
+    for (unsigned i = 0; i < dim && i < 3; i++) x[i] = n->x(i);
+    Existing_node_by_position[position_key(x, dim)] = n;
+  }
 
   // Registry key for a new son node at father-local coordinate s_in_father: every node created by
   // a 1->4 triangle refinement is the midpoint of exactly two father nodes (two corners for a

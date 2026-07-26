@@ -236,6 +236,13 @@ namespace oomph
     // descend into it along the shared edge. Returns the >=-sized leaf neighbour + the data needed to
     // bridge coordinates across roots with the affine map (never locate_zeta).
     TriEdgeNeighbour tri_edge_neighbour(int my_edge) const;
+    // Reuse a node that an EDGE-NEIGHBOUR element has already built, located via the tri tree (which
+    // persists across adaptation rounds), like oomph's RefineableQElement::node_created_by_neighbour for
+    // quads. This closes the cross-round gap of the per-round Shared_edge_node_registry: during transient
+    // re-adaptation a son built this round must reuse a coincident node an equal-sized neighbour built in
+    // an EARLIER round (else the shared vertex is duplicated and the moving mesh tears apart). s_son is
+    // node i's local coordinate in THIS (son) element. Returns the shared node, or 0 if none.
+    Node *node_created_by_neighbour(const Vector<double> &s_son) const;
     // Map a coordinate given in `leaf`'s ROOT-element local frame down to `leaf`'s own local frame, by
     // composing father_to_son_local along leaf's son_type chain (used for cross-root coordinate bridging).
     static bool root_coord_to_leaf(const Vector<double> &s_root, RefineableTElement<2> *leaf, Vector<double> &s_leaf);
@@ -259,6 +266,14 @@ namespace oomph
     // Clear the shared-node registry (call once before each refinement round). See below.
     static void clear_shared_edge_node_registry() { Shared_edge_node_registry.clear(); }
 
+    // Snapshot every existing mesh node's position (call once before each refinement round, after
+    // clearing). Used by build() as the FINAL node-sharing fallback: a son node built this round must
+    // reuse a coincident node that already exists -- notably one created by a FINER neighbour in an
+    // earlier round, which node_created_by_neighbour (only >=-sized neighbours) cannot find. Without
+    // this the shared vertex is duplicated and a moving mesh tears apart at a refine/coarsen interface.
+    static void clear_existing_node_positions() { Existing_node_by_position.clear(); }
+    static void register_existing_node_position(oomph::Node *n);
+
   protected:
     // --- Geometric node-sharing during triangle refinement (Phase 2, branch mixed_adapt) ---
     // Instead of oomph's quad compass neighbour finding (geometrically wrong for triangles), a
@@ -272,6 +287,13 @@ namespace oomph
     // Registry key (father node-pointer pair that this son node bisects) for a new son node at
     // father-local coordinate s_in_father; empty if it is not the midpoint of a father-node pair.
     std::set<Node *> father_edge_node_key(const Vector<double> &s_in_father, RefineableTElement<2> *father_el_pt) const;
+
+    // Position -> node snapshot of the mesh at the start of the current refinement round (see
+    // clear/register_existing_node_position). Keyed by a rounded-coordinate string so a coincident
+    // position matches to ~12 significant figures. Looked up in build() when both the tree
+    // (node_created_by_neighbour) and the per-round registry miss.
+    static std::map<std::string, oomph::Node *> Existing_node_by_position;
+    static std::string position_key(const double *x, unsigned dim);
   };
 
   template <>

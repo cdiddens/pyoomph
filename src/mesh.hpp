@@ -364,6 +364,12 @@ namespace pyoomph
 			// RefineableTElement<2>/<3>'s Shared_edge_node_registry.
 			oomph::RefineableTElement<2>::clear_shared_edge_node_registry();
 			oomph::RefineableTElement<3>::clear_shared_edge_node_registry();
+			// Snapshot existing node positions so build() can reuse a coincident node created in an
+			// EARLIER round (e.g. by a finer neighbour) instead of duplicating it -- which would tear a
+			// moving mesh apart at a refine/coarsen interface. See RefineableTElement<2>::build.
+			oomph::RefineableTElement<2>::clear_existing_node_positions();
+			for (unsigned long in = 0; in < this->nnode(); in++)
+				oomph::RefineableTElement<2>::register_existing_node_position(this->node_pt(in));
 			// Find the number of trees in the forest
 			if (!this->Forest_pt)
 			{
