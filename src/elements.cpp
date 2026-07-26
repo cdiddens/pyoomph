@@ -8652,7 +8652,7 @@ namespace pyoomph
 			// only if it was ever a corner, so ordinary mid-edge nodes (which never store the pressure) are
 			// skipped by the nvalue guard; genuine 2:1 mid-nodes were already hung above and are skipped via
 			// is_hanging. Weights 0.5/0.5 are exact for the straight edge that a C2 mid-edge bisects.
-			static const int hang_mode = []() { const char *e = getenv("PYOOMPH_TRI_HANG"); if (!e) return 0; if (std::string(e) == "tree") return 1; if (std::string(e) == "validate") return 2; return 0; }();
+			static const int hang_mode = []() { const char *e = getenv("PYOOMPH_TRI_HANG"); if (!e) return 1; if (std::string(e) == "geometric") return 0; if (std::string(e) == "tree") return 1; if (std::string(e) == "validate") return 2; return 1; }();
 			if (hang_mode != 0 && this->nnode() >= 6)
 			{
 				std::vector<int> c1_slots;

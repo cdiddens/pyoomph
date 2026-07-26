@@ -1443,10 +1443,11 @@ namespace oomph
   {
     static const int mode = []() {
       const char *e = getenv("PYOOMPH_TRI_HANG");
-      if (!e) return 0;
+      if (!e) return 1;                            // DEFAULT: tree route (per-element, the oomph way)
+      if (std::string(e) == "geometric") return 0; // legacy mesh-level facet-adjacency pass (mesh2d.cpp)
       if (std::string(e) == "tree") return 1;
       if (std::string(e) == "validate") return 2;
-      return 0;
+      return 1;
     }();
     return mode;
   }

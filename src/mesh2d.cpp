@@ -348,10 +348,11 @@ namespace pyoomph
     // tree path ran and we now re-derive the geometric hanging and CROSS-VALIDATE the two node-by-node.
     static const int tri_hang_mode = []() {
       const char *e = getenv("PYOOMPH_TRI_HANG");
-      if (!e) return 0;
+      if (!e) return 1;                            // DEFAULT: tree route already set the hanging during adapt
+      if (std::string(e) == "geometric") return 0; // legacy mesh-level facet-adjacency pass (below)
       if (std::string(e) == "tree") return 1;
       if (std::string(e) == "validate") return 2;
-      return 0;
+      return 1;
     }();
     if (tri_hang_mode == 1) return; // tree path already set the hanging during adapt
 
