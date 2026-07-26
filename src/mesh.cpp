@@ -5401,88 +5401,112 @@ namespace pyoomph
 
 #endif
 
-  // Facet-based boundary element lookup: uses the `facets` map (built once from the
-  // mesh template by setup_facets_from_template) that records, for each set of
-  // vertex nodes forming a facet, which boundaries that facet belongs to. For every
-  // element face whose vertices are all boundary nodes, looks up the matching facet
-  // entry and verifies all its nodes are actually still tagged with each candidate
-  // boundary (nodes can end up on multiple boundaries at mixed corners/edges, hence
-  // the extra check) before registering the element/face as a boundary element. This
-  // is more robust than the purely node-based approach in mixed-corner situations,
-  // but is only valid for non-adaptive meshes since it relies on the original
-  // template's facet topology (see TemplatedMeshBase3d::setup_boundary_element_info).
-  void  TemplatedMeshBase::setup_boundary_element_info(std::ostream &)
+  // Seeds the per-element face boundary tags from the `facets` map (built once from the mesh
+  // template by setup_facets_from_template), which records, for each set of vertex nodes forming a
+  // facet, which boundaries that facet belongs to. For every element face whose vertices are all
+  // boundary nodes, looks up the matching facet entry and verifies all its nodes are actually
+  // tagged with each candidate boundary (nodes can end up on multiple boundaries at mixed
+  // corners/edges, hence the extra check) before recording the boundary on the element's face.
+  //
+  // This runs exactly once per mesh generation, on the UNREFINED mesh, where the template's facet
+  // topology is by construction exact. Everything after that is handled by forward propagation of
+  // the tags onto the son elements at each split (BulkElementBase::dynamic_split), which is what
+  // makes the scheme survive both non-uniform refinement and re-rooting/pruning of the tree forest.
+  void TemplatedMeshBase::seed_face_boundaries_from_facets()
   {
-    if (!identication_of_boundary_elements_by_facets)
+    for (unsigned int ie = 0; ie < this->nelement(); ie++)
     {
-      throw_runtime_error("This method should only be called if identication_of_boundary_elements_by_facets is false");
-    }
+      pyoomph::BulkElementBase *el = dynamic_cast<pyoomph::BulkElementBase *>(this->element_pt(ie));
+      if (!el) continue; // e.g. interface/point elements that may live in the same storage
+      el->clear_face_boundaries();
+      if (facets.empty()) continue;
+      for (int face_id : el->get_possible_face_indices())
+      {
+        std::vector<pyoomph::Node *> el_face_nodes = el->get_vertex_nodes_of_face(face_id);
+        if (el_face_nodes.empty()) continue;
+        bool may_skip = false;
+        for (unsigned int i = 0; i < el_face_nodes.size(); i++)
+        {
+          if (!dynamic_cast<oomph::BoundaryNodeBase *>(el_face_nodes[i]))
+          {
+            may_skip = true;
+            break;
+          }
+        }
+        if (may_skip) continue;
+        std::set<pyoomph::Node *> facet_nodes(el_face_nodes.begin(), el_face_nodes.end());
+        auto found = facets.find(facet_nodes);
+        if (found == facets.end()) continue;
 
+        // Double-check that every node of this face is really tagged with the candidate boundary
+        // before accepting it (a facet's node set can be shared with facets on other boundaries).
+        std::vector<unsigned> accepted;
+        for (unsigned int boundary_id : found->second)
+        {
+          may_skip = false;
+          for (unsigned int i = 0; i < el_face_nodes.size(); i++)
+          {
+            if (!dynamic_cast<oomph::BoundaryNodeBase *>(el_face_nodes[i])->is_on_boundary(boundary_id))
+            {
+              may_skip = true;
+              break;
+            }
+          }
+          if (!may_skip) accepted.push_back(boundary_id);
+        }
+        el->set_face_boundaries(face_id, accepted);
+      }
+    }
+    face_boundary_tags_valid = !facets.empty();
+  }
+
+  // Drops every face tag and marks them invalid, so setup_boundary_element_info() falls back to the
+  // legacy node-membership reconstruction. For meshes whose element set is replaced by something
+  // that carries no facet information (PFEM's define_new_mesh).
+  void TemplatedMeshBase::invalidate_face_boundary_tags()
+  {
+    for (unsigned int ie = 0; ie < this->nelement(); ie++)
+    {
+      pyoomph::BulkElementBase *el = dynamic_cast<pyoomph::BulkElementBase *>(this->element_pt(ie));
+      if (el) el->clear_face_boundaries();
+    }
+    face_boundary_tags_valid = false;
+  }
+
+  // THE boundary-element identification: shape-, order- and dimension-neutral, and exact on
+  // arbitrarily (non-uniformly) refined meshes, because it only reads the per-face boundary tags
+  // that were seeded from the template and inherited through every split. No nodal boundary
+  // membership is consulted, so an interior face whose vertices all happen to lie on one boundary
+  // (a corner triangle's third edge; a quad in a channel whose opposite walls share a name) is
+  // never mistaken for a boundary face.
+  void TemplatedMeshBase::setup_boundary_element_info_from_face_tags()
+  {
     unsigned nbound = nboundary();
     Boundary_element_pt.clear();
     Face_index_at_boundary.clear();
     Boundary_element_pt.resize(nbound);
     Face_index_at_boundary.resize(nbound);
 
-    //std::cout << "Number of facets found " << facets.size() << std::endl;
-    for (unsigned int ie=0;ie<this->nelement();ie++)
+    for (unsigned int ie = 0; ie < this->nelement(); ie++)
     {
       pyoomph::BulkElementBase *el = dynamic_cast<pyoomph::BulkElementBase *>(this->element_pt(ie));
-      if (!el)
+      if (!el) continue;
+      for (const auto &entry : el->get_all_face_boundaries())
       {
-        throw_runtime_error("This method should only be called for meshes with BulkElementBase elements");
-      }
-      for (int face_id : el->get_possible_face_indices())
-      {
-        std::vector<pyoomph::Node *> el_face_nodes=el->get_vertex_nodes_of_face(face_id);
-        bool may_skip=false;
-        for (unsigned int i=0;i<el_face_nodes.size();i++)
+        const int face_id = entry.first;
+        for (unsigned boundary_id : entry.second)
         {
-          if (!dynamic_cast<oomph::BoundaryNodeBase *>(el_face_nodes[i]))
-          {
-            //std::cout << "Element " << ie << " face " << face_id << " has node " << i << " which is not a boundary node" << std::endl;
-            may_skip=true; break;
-          }
+          if (boundary_id >= nbound) continue; // boundary was removed since the tags were seeded
+          Boundary_element_pt[boundary_id].push_back(el);
+          Face_index_at_boundary[boundary_id].push_back(face_id);
         }
-        if (may_skip) continue;
-        std::set<pyoomph::Node *> facet_nodes(el_face_nodes.begin(), el_face_nodes.end());
-        if (facets.count(facet_nodes))
-        {
-          std::vector<unsigned int> facet_boundaries=facets[facet_nodes];
-          /*std::cout << "Adding a facet for a patch of " << facet_nodes.size() << " nodes for element " << ie << " face " << face_id << " with boundaries: ";
-          for (unsigned int boundary_id : facet_boundaries)
-          {
-            std::cout << boundary_id << " ";
-          }
-          std::cout << std::endl;*/
-
-          // Double-check that every node of this face is still tagged with the
-          // candidate boundary before accepting it (a facet's node set can be
-          // shared with facets on other boundaries after mesh operations).
-          for (unsigned int boundary_id : facet_boundaries)
-          {
-            may_skip=false;
-            for (unsigned int i=0;i<el_face_nodes.size();i++) 
-            {
-               if (!dynamic_cast<oomph::BoundaryNodeBase *>(el_face_nodes[i])->is_on_boundary(boundary_id))
-               {
-                 //std::cout << "Element " << ie << " face " << face_id << " has node " << i << " which is not on boundary " << boundary_id << std::endl;
-                 may_skip=true; break;            
-               }
-            }
-            if (!may_skip)
-            {
-              Boundary_element_pt[boundary_id].push_back(el);
-              Face_index_at_boundary[boundary_id].push_back(face_id);
-            }
-          }
-        }
-        
       }
-      //throw_runtime_error("This method is not implemented yet");
-      // std::cout << "Element " << ie << " has " << el_facets.size() << " facets" << std::endl;
     }
-    
+  }
+
+  void TemplatedMeshBase::setup_boundary_element_info(std::ostream &)
+  {
+    setup_boundary_element_info_from_face_tags();
   }
 
 

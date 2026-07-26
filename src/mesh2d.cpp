@@ -379,15 +379,17 @@ namespace pyoomph
   }
 
   // Build Boundary_element_pt / Face_index_at_boundary for a (possibly mixed quad/tri) 2d mesh.
-  // For adaptive, pure-quad meshes, delegates to the generic facet-based TemplatedMeshBase
-  // implementation (identication_of_boundary_elements_by_facets), which is robust under refinement.
-  // Otherwise (non-adaptive or mixed meshes), uses the quad- and tri-specific helpers below and then
-  // does a cleanup pass that drops any recorded boundary element/face whose face nodes are not
-  // actually flagged as lying on that boundary (defensive check against mismatches at mixed corners).
+  // Normally this is the single, shape-neutral identification from the per-element face boundary
+  // tags (TemplatedMeshBase::setup_boundary_element_info_from_face_tags), which is exact on
+  // arbitrarily refined meshes. Only meshes that never received tags -- no facet information in the
+  // template, or an element set built outside the template/refinement path (PFEM) -- fall back to
+  // the legacy per-shape reconstruction from nodal boundary membership below, followed by a cleanup
+  // pass that drops any recorded boundary element/face whose face nodes are not actually flagged as
+  // lying on that boundary.
   void TemplatedMeshBase2d::setup_boundary_element_info(std::ostream &outfile)
   {
-    
-   
+
+
     unsigned nbound = nboundary();
 
     Boundary_element_pt.clear();
@@ -395,16 +397,9 @@ namespace pyoomph
     Boundary_element_pt.resize(nbound);
     Face_index_at_boundary.resize(nbound);
 
-    if (identication_of_boundary_elements_by_facets)
+    if (face_boundary_tags_valid)
     {
-      if (is_adaptation_enabled() &&refinement_possible() )
-      {
-        identication_of_boundary_elements_by_facets=false; // For adaptive meshes, we find the facets conventionally, but for non-adaptive meshes we can use the facet information from the mesh template which is always accurate, even at mixed corners
-      } 
-    }
-    if (identication_of_boundary_elements_by_facets)
-    {
-      TemplatedMeshBase::setup_boundary_element_info(outfile);
+      setup_boundary_element_info_from_face_tags();
       Lookup_for_elements_next_boundary_is_setup = true;
       return;
     }
@@ -600,6 +595,11 @@ namespace pyoomph
   // (checked pairwise per edge: (0,1)->face 2, (0,2)->face 1, (1,2)->face 0).
   void TemplatedMeshBase2d::setup_interior_boundary_elements(unsigned bindex)
   {
+    // With per-face boundary tags an interior boundary is nothing special: the template records its
+    // facets like any other boundary, both incident elements get tagged, and
+    // setup_boundary_element_info_from_face_tags has already registered both of them. Running the
+    // scan below on top of that would add every element a second time.
+    if (face_boundary_tags_valid) return;
     unsigned nel = nelement();
     for (unsigned int ie = 0; ie < nel; ie++)
     {

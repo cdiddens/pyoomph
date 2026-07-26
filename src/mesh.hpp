@@ -427,7 +427,31 @@ namespace pyoomph
 		// validate the adjacency primitive.
 		std::vector<unsigned> facet_adjacency_summary() const;
 
-	    bool identication_of_boundary_elements_by_facets=true;
+		// --- Per-face boundary tags (the unified boundary-element identification) ---
+		// Seeds BulkElementBase::face_boundaries on every current element from the `facets` map, i.e.
+		// from the MeshTemplate's explicit facet->boundary records. Called once right after
+		// generate_from_template/setup_facets_from_template; from then on the tags are carried by the
+		// elements themselves and propagated to the sons at every split (BulkElementBase::dynamic_split),
+		// so they stay exact under non-uniform refinement and survive re-rooting of the tree forest.
+		// Sets face_boundary_tags_valid if the template supplied any facet information at all.
+		void seed_face_boundaries_from_facets();
+
+		// The single, shape- and dimension-neutral boundary-element identification: fills
+		// Boundary_element_pt / Face_index_at_boundary purely from the elements' face tags. Replaces
+		// the per-shape reconstructions from nodal boundary membership (quads/tris in 2d,
+		// bricks/tets in 3d), which cannot tell a genuine boundary face from an interior face whose
+		// vertices all happen to lie on one and the same boundary.
+		void setup_boundary_element_info_from_face_tags();
+
+		// True once seed_face_boundaries_from_facets() has run on a mesh whose template actually
+		// carried facet information. Meshes that build their elements outside the template +
+		// refinement path (e.g. PFEM's define_new_mesh) leave this false and keep using the legacy
+		// node-membership reconstruction.
+		bool face_boundary_tags_valid = false;
+		// Drops all face tags and the validity flag; used when the element set is replaced wholesale
+		// by something that cannot supply facet information (PFEM).
+		void invalidate_face_boundary_tags();
+
 		//	void set_spatial_error_estimator_pt(oomph::Z2ErrorEstimator * errest) {this->spatial_error_estimator_pt()=errest;}
 		TemplatedMeshBase() : pyoomph::Mesh() {}
 		//	Problem * get_problem() {return problem;}

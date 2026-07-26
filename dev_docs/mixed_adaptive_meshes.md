@@ -160,7 +160,11 @@ Keyed by *(element type × scheme)*. Declares, for one parent element:
   (child-ref → parent-ref), used to place/create son nodes and to compose
   coordinate maps for hanging;
 * each child **facet → parent facet (or interior)** map, used for boundary-facet
-  propagation (§4.3) and neighbour matching.
+  propagation (§4.3) and neighbour matching. **[LANDED, outside `RefinementPattern`
+  for now]** as `BulkElementBase::face_index_in_father(my_face, son_type)`, which
+  already serves §4.3 for lines/quads/tris/bricks/tets. When `RefinementPattern`
+  grows heterogeneous and anisotropic schemes this is the method that must move onto
+  the pattern (the son's shape may then differ from the father's).
 
 This replaces `required_nsons()` + `create_son_instance()` inside
 `BulkElementBase::dynamic_split` (`src/elements.cpp:6632`) and the per-shape
@@ -225,24 +229,105 @@ to reconcile halo masters. Facet-based neighbour finding (§3.2) must be made
 halo-aware, but **no new hang representation is invented** — the explicit warning
 of the hanging redesign (§5.7).
 
-### 4.3 Facet boundary marking under refinement (the "third edge" problem)
-Two boundary mechanisms coexist: per-node membership (oomph, propagated to
-mid-edge nodes during `build()`) and pyoomph's per-facet `facets` map
-(`src/mesh.hpp:351`). The facet map fixes the false positive where a first-order
-triangle with two edges on the same boundary also marks its third (interior)
-edge (`src/mesh2d.cpp:604-634`), by requiring an **exact facet vertex-node-set
-match** (`src/mesh.cpp:5429-5473`). But the map is a **one-shot snapshot** of the
-coarse template and is therefore *disabled* whenever adaptation is on
-(`src/mesh2d.cpp:303-315`, `src/mesh3d.cpp:86-98`), falling back to the node-based
-reconstruction — which reintroduces the third-edge false positive.
+### 4.3 Facet boundary marking under refinement (the "third edge" problem) — **[DONE]**
 
-**Fix enabled by the engine:** make the `facets` map **dynamic**. On split,
-propagate each parent boundary facet to its child facets (via §3.1's
-child-facet→parent-facet map, inserting the new mid/inner nodes into the key); on
-unrefine, remove the child facets and restore the parent. Exact facet identity is
-then preserved through refinement, eliminating *both* the third-edge false
-positive *and* the stale-snapshot problem, for every shape — so the facet scheme
-no longer needs disabling under adaptation.
+**The problem.** Two boundary mechanisms coexisted: per-node membership (oomph,
+propagated to mid-edge nodes during `build()`) and pyoomph's per-facet `facets`
+map. Reconstructing boundary *elements* from nodal membership cannot distinguish a
+genuine boundary face from an **interior** face all of whose vertices happen to lie
+on one and the same boundary. Both shapes have such a configuration:
+
+* triangle: two edges on boundary `b` ⇒ the third (interior) edge also has both
+  ends on `b`;
+* quad: a one-element-wide channel whose opposite walls share a boundary name ⇒
+  all four corners on `b`, so *all four* faces match.
+
+The old tri routine masked its case with an "edge seen exactly once" filter, which
+silently breaks as soon as the neighbour across that edge sits at a different
+refinement level. The `facets` map fixed both by requiring an exact facet
+vertex-node-set match, but it is a one-shot snapshot of the coarse template and was
+therefore disabled whenever adaptation was on — and once triangles became
+refineable, that disabled it for essentially every 2D mesh. Measured before the
+fix: a 2-triangle unit square with one shared boundary name, refining only one side
+of the diagonal, produced 3/5/9 spurious boundary faces at levels 1/2/3; the quad
+channel produced 8 spurious faces out of 16.
+
+**Rejected: making the `facets` map dynamic.** The original plan here was to
+propagate parent boundary facets to child facets in the map (inserting the new
+mid/inner nodes into the key) and invert that on unrefine. Also rejected: keeping
+the map at root level and *ascending* the tree at query time. Both are unsound,
+because **ancestry does not survive**: `TemplatedMeshBase2d::setup_quadtree_forest`
+(and its 1D/3D counterparts) flattens an existing forest to the globally coarsest
+common refinement level and `delete`s every element below it, re-rooting at
+`min_ref`; oomph's MPI `prune_halo_elements_and_nodes` does the same. Any scheme
+keyed on the roots' node sets, or on walking up to a root, goes stale there.
+
+**Landed: forward propagation onto the elements themselves.** Facet identity is
+stored *on the element*, as `BulkElementBase::face_boundaries`, a
+`std::map<short, std::vector<unsigned>>` from local face index (signed: quads and
+bricks use ±1, ±2, ±3) to the boundaries that face lies on. Empty for interior
+elements; ~48 B plus ~112 B per tagged face, i.e. ~2 % of the ~2.16 kB marginal
+memory of a C1 triangle (measured: same node set, 40 000 extra elements).
+
+* **Seed** — `TemplatedMeshBase::seed_face_boundaries_from_facets()`
+  (`src/mesh.cpp`) runs once on the *unrefined* mesh, straight after
+  `setup_facets_from_template` in all three `generate_from_template`s, where the
+  template's facet topology is exact by construction. Sets
+  `face_boundary_tags_valid`.
+* **Inherit** — `BulkElementBase::dynamic_split` (`src/elements.cpp`) copies each
+  father face's tag onto the son faces that are part of it. The son→father face map
+  is `BulkElementBase::face_index_in_father(my_face, son_type)`; `son_type` is the
+  son index, which is exactly the `QuadTreeNames` (SW=0…NE=3) / `OcTreeNames`
+  (LDB=0…RUF=7) ordering `build()` assumes. It depends only on shape + split
+  scheme, never on polynomial order, so it is one dispatch rather than an override
+  per element class:
+  - lines / quads / bricks: tensor-product bit test — a son face survives iff its
+    sign matches the son's half in that direction;
+  - triangles: a 4×3 table derived from `RefineableTElement<2>::setup_father_bounds`
+    (father edges E=v0-v1, W=v1-v2, S=v2-v0; son corners SE=v0, NW=v1, SW=v2). Each
+    father edge is covered by exactly two sons; the central (NE) son covers none;
+  - tetrahedra: evaluated from `RefineableTElement<3>::son_vertices_in_father`
+    against the father's four faces (`s0=0`, `s1=0`, `s2=0`, `s0+s1+s2=1`), so it
+    cannot drift from the split code — which matters because the octahedron sons are
+    orientation-corrected and their local vertex numbering is not obvious;
+  - anything else (wedges, pyramids) throws rather than silently dropping tags.
+* **Query** — `TemplatedMeshBase::setup_boundary_element_info_from_face_tags()`:
+  one loop over elements × tagged faces, identical for every shape and dimension.
+  No nodal membership is consulted, so neither false positive can occur.
+
+Because the tags travel with the elements, re-rooting and halo pruning are
+non-events (what survives carries its own truth), and unrefinement needs no
+bookkeeping at all — the father still holds the tags it was given when it was built.
+
+**What this replaced.** `setup_boundary_element_info_{quads,tris}` (2D),
+`..._{bricks,tris}` (3D), the post-hoc cleanup pass and the quad-face dedup hack in
+the tri routine, and the `is_adaptation_enabled() && refinement_possible()` gate.
+Those legacy routines remain only as the fallback for meshes that never receive
+tags — no facet information in the template, or an element set built outside the
+template/refinement path (PFEM's `define_new_mesh`; the
+`flush_element_storage` binding calls `invalidate_face_boundary_tags()`).
+`setup_interior_boundary_elements` returns early when tags are valid: an interior
+boundary is nothing special, both incident elements are tagged from the template
+facets and already registered, so the old scan would double-add them. The Python
+property `identication_of_boundary_elements_by_facets` survives, now re-seeding
+(True) or discarding (False) the tags.
+
+**Validation** (`tests/test_boundary_element_identification.py`, 6 tests): the two
+adversarial meshes above go 9→0 and 8→0 spurious faces; error-driven adaptivity on
+all three tri splits stays exact; previously-correct meshes are unchanged. Checks
+run in *both* directions — no interior face registered, and no genuine boundary
+face missed — against a geometric oracle. 3D on the tag route is exact for both
+families: brick and tet cubes give 4/16/64 and 8/32/128 faces per side at levels
+0/1/2.
+
+**Still open.** `RefineableTElement<2>::get_boundaries` (and its 3D counterpart)
+still marks a new mid-edge node as on `b` whenever both edge ends are, so the
+spurious third edge's midpoint is still added to the boundary *node* list (56 such
+nodes in one non-uniform run). Nothing in the identification path reads that any
+more and `DirichletBC` is unaffected (it goes via boundary elements), but
+`nboundary_node`/`boundary_node_pt` still report them. The fix is the same tag: a
+new node should join boundary `b` only if the father face it was created on is
+tagged `b`.
 
 ### 4.4 Mixed offspring (refinement not shape-closed)
 Already structurally supported (§2.1): `dynamic_split_if_required` builds one
@@ -303,9 +388,9 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
      path). `rebuild_from_sons` generalisation deferred to Phase 7 (the method is
      pervasively `QuadTreeNames`-specific below its DG loop).
 2. **2D triangles, isotropic 1→4.** First new shape; reuse `RefineableTElement<2>`
-   `Father_bound` / `build`. Establish the generic hang helper, the dynamic facet
-   map (§4.3), and the closure rule. Oracle: linear-residual → machine zero on an
-   adapted triangular mesh (as in the hanging redesign tests).
+   `Father_bound` / `build`. Establish the generic hang helper, exact boundary-facet
+   identity under refinement (§4.3), and the closure rule. Oracle: linear-residual →
+   machine zero on an adapted triangular mesh (as in the hanging redesign tests).
    * **Phase 2a [DONE] — uniform (conforming) triangle refinement.** `refinement_possible()`
      now accepts pure-triangle meshes; a linear (C1) triangle refines 1→4 reusing the
      QuadTree hierarchy, but node-sharing is **geometric**, not via oomph's compass
@@ -359,7 +444,10 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
      (`test_taylor_hood_triangle_cavity_residual_oracle`). Without the fix the (linear) Stokes Newton
      step does not converge (residual ~0.68, stalling), with it → ~3e-15.
 3. **2D mixed quad + tri**, incl. quad-face/two-tri-face hangs and boundary
-   facets across shape changes.
+   facets across shape changes (the boundary-facet half is **[DONE]** — §4.3's face
+   tags are per element, so a quad and a triangle meeting at a boundary corner need
+   no reconciliation at all, and the tri routine's "remove faces a quad already
+   claimed" dedup hack is gone).
    * **[INVESTIGATED — reverted, not landed]** The hard case: quads share nodes /
      hang via oomph-lib's box (QuadTree) machinery, triangles via the geometric
      registry + post-adapt pass, and the two clash at a quad-tri interface. Findings:
@@ -1042,10 +1130,13 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
 
    - **§4.15 — Current status summary.** Working & validated: 2D tri (C1/C2/TH/CR) + 3D tet (C1/C2/TH/CR) via
      the topological tree route (geometric passes deleted); 2D mixed quad+tri (refine + solve + moving-mesh
-     tear-free). Pending: wedges/pyramids ⇒ 3D mixed; anisotropic/variable splits (§5); tet per-element
+     tear-free); boundary-element identification unified onto per-element face tags for every shape and
+     dimension (§4.3), so the per-shape quad/tri and brick/tet reconstructions are now only a fallback for
+     untagged meshes. Pending: wedges/pyramids ⇒ 3D mixed; anisotropic/variable splits (§5); tet per-element
      hanging inside `adapt_mesh` (refine_selected gap + MPI); `ConstrainPositionsToC1Space` under tri hanging
-     (§4.14); 3D-tet MPI (§4.4 BUG B). Tests: `test_triangle_refinement.py`, `test_tet_refinement.py`,
-     `test_constrained_adaptivity.py`, `test_mixed_mesh.py`.
+     (§4.14); 3D-tet MPI (§4.4 BUG B); nodal boundary marking of spurious mid-edge nodes (§4.3, "still open").
+     Tests: `test_triangle_refinement.py`, `test_tet_refinement.py`, `test_constrained_adaptivity.py`,
+     `test_mixed_mesh.py`, `test_boundary_element_identification.py`.
 
 5. **Variable / anisotropic schemes** (§5): quad 1→2 (both directions), simplex
    bisection; directional error estimator; generalised balance rule.

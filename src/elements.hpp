@@ -325,6 +325,10 @@ namespace pyoomph
     bool mixed_hang_node_at(oomph::Node *X, oomph::RefineableElement *nb_re, const oomph::Vector<double> &s_nb, const int &value_id);
 
   protected:
+    // Local face index -> mesh boundary indices this face lies on. See the accessors
+    // get_face_boundaries()/set_face_boundaries() below for what this is and how it is maintained.
+    // Empty for the (vast majority of) elements that do not touch any boundary.
+    std::map<short, std::vector<unsigned>> face_boundaries;
     // Cross-shape node-sharing on THIS quad's side: for the son node at fractional coordinate s_fraction on
     // an edge shared with a TRI, map topologically into the tri ROOT frame and descend to the tri leaf. The
     // quad node_created_by_neighbour override calls this after oomph's own quad<->quad sharing returns null.
@@ -391,6 +395,42 @@ namespace pyoomph
     virtual oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *, int ) {throw_runtime_error(std::string("Specify the face element constructor for the element type ")+typeid(*this).name()); return NULL;}
     virtual const std::vector<int> & get_possible_face_indices() const=0;
     virtual  std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const=0;
+
+    // --- Per-face boundary tags -------------------------------------------------------------
+    // Which mesh boundaries each of this element's local faces lies on. This is the single source
+    // of truth for TemplatedMeshBase::setup_boundary_element_info_from_face_tags(), replacing the
+    // old per-shape reconstruction from nodal boundary membership (which cannot distinguish a
+    // genuine boundary face from an interior face all of whose vertices happen to sit on the same
+    // boundary -- the "third edge" false positive of a corner triangle, and its quad analogue in a
+    // channel whose opposite walls share a boundary name).
+    //
+    // The tags are seeded once from the MeshTemplate's facet records
+    // (TemplatedMeshBase::seed_face_boundaries_from_facets) and are then propagated FORWARD onto
+    // the son elements at every split (BulkElementBase::dynamic_split, via face_index_in_father).
+    // Because they live on the elements themselves rather than in a mesh-level map keyed by the
+    // roots' node sets, they survive re-rooting/pruning of the tree forest (see
+    // TemplatedMeshBase2d::setup_quadtree_forest, which deletes all ancestors below the coarsest
+    // common refinement level) and need no bookkeeping on unrefinement (the father element still
+    // carries the tags it was given when it was built).
+    //
+    // Key is the LOCAL FACE INDEX, i.e. one of the values in get_possible_face_indices() -- these
+    // can be negative (quads/bricks use +/-1, +/-2, +/-3), hence the signed key type. Only faces
+    // that actually lie on a boundary get an entry, so the map is empty for interior elements.
+    const std::vector<unsigned> * get_face_boundaries(const int & face_index) const;
+    void set_face_boundaries(const int & face_index, const std::vector<unsigned> & boundaries);
+    void clear_face_boundaries() { face_boundaries.clear(); }
+    const std::map<short, std::vector<unsigned>> & get_all_face_boundaries() const { return face_boundaries; }
+
+    // Returned by face_index_in_father() when the son face lies in the father's interior, i.e. it
+    // is not part of any father face and therefore inherits no boundary tag.
+    static const int FACE_INTERIOR_IN_FATHER = -1000;
+
+    // Given a local face index of THIS element (a son) and the son type (= son index, which is what
+    // DynamicTree::dynamic_split_if_required passes to construct_son), return the local face index
+    // of the father element that this face is a part of, or FACE_INTERIOR_IN_FATHER. Depends only on
+    // the element shape and the split scheme, not on the polynomial order, so the default
+    // implementation dispatches on dim()/shape; see elements.cpp.
+    virtual int face_index_in_father(const int & my_face_index, const unsigned & son_type) const;
     // Evaluates and stores (into the shape_info buffer) the shape function values/derivatives
     // required at one integration point, as requested by "required_shapes" (a bitmask-like struct
     // generated alongside the JIT code, describing exactly which shapes the weak form needs).

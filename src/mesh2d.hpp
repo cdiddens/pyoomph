@@ -332,6 +332,9 @@ namespace pyoomph
 
 
       setup_facets_from_template(templ,bound_map);
+      // Turn the template's facet records into per-element face boundary tags right away; from here
+      // on the tags are carried (and inherited on refinement) by the elements themselves.
+      seed_face_boundaries_from_facets();
       
       
 

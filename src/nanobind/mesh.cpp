@@ -1052,7 +1052,12 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("remove_boundary_nodes_of_bound",mesh_method([](pyoomph::Mesh *self,unsigned b) {self->remove_boundary_nodes(b);}), nb::arg("boundary_index"), "Removes all nodes from the given mesh boundary (without deleting the nodes themselves)")
 		.def("add_interpolated_nodes_at",mesh_method(&pyoomph::Mesh::add_interpolated_nodes_at),nb::rv_policy::reference, "Creates and adds new nodes interpolated at the given positions, used e.g. when refining or remeshing")
 		.def("add_boundary_node",mesh_method([](pyoomph::Mesh *self,unsigned bind,pyoomph::Node *n) {self->add_boundary_node(bind,n);}), nb::arg("boundary_index"), nb::arg("node"), "Adds the given node to the given mesh boundary")
-		.def("flush_element_storage",mesh_method([](pyoomph::Mesh *self){self->flush_element_storage();}), "Clears this mesh's list of elements without deleting them (ownership is assumed to be transferred elsewhere)")
+		.def("flush_element_storage",mesh_method([](pyoomph::Mesh *self){
+			// The replacement elements (e.g. PFEM's define_new_mesh) cannot inherit the per-face
+			// boundary tags of the discarded ones, so drop them and let setup_boundary_element_info
+			// fall back to the legacy node-membership reconstruction for this mesh.
+			if (auto *tm=dynamic_cast<pyoomph::TemplatedMeshBase*>(self)) tm->invalidate_face_boundary_tags();
+			self->flush_element_storage();}), "Clears this mesh's list of elements without deleting them (ownership is assumed to be transferred elsewhere)")
 		.def("_set_time_level_for_projection",mesh_method([](pyoomph::Mesh *self, unsigned time_level){self->set_time_level_for_projection(time_level);}), nb::arg("time_level"), "Sets the history/time level that is used as the source when projecting field values onto a new mesh")
 		.def("get_field_information",mesh_method([](pyoomph::Mesh *self)
 			 { return self->get_field_information(); }), "Returns a description of all fields (nodal, discontinuous, elemental) available on this mesh")
@@ -1486,7 +1491,7 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("facet_adjacency_summary",handle_method<TemplatedMeshBase1dHandle>([](pyoomph::TemplatedMeshBase1d *self)
 			 { return self->facet_adjacency_summary(); }), "Returns [n_facets, n_boundary_facets, n_interior_facets, max_incidence] of the facet-adjacency map (generic neighbour-finding primitive)")
 		.def_prop_rw("identication_of_boundary_elements_by_facets",handle_method<TemplatedMeshBase1dHandle>([](pyoomph::TemplatedMeshBase1d *self)
-			 { return self->identication_of_boundary_elements_by_facets; }),handle_method<TemplatedMeshBase1dHandle>([](pyoomph::TemplatedMeshBase1d *self, bool val) { self->identication_of_boundary_elements_by_facets=val; }), "Controls whether boundary elements are identified by matching facets (True) or by node membership (False)")
+			 { return self->face_boundary_tags_valid; }),handle_method<TemplatedMeshBase1dHandle>([](pyoomph::TemplatedMeshBase1d *self, bool val) { if (val) self->seed_face_boundaries_from_facets(); else self->invalidate_face_boundary_tags(); }), "Controls whether boundary elements are identified from the per-face boundary tags seeded from the mesh template facets (True) or reconstructed from nodal boundary membership (False). Setting it to True re-seeds the tags from the template facets, setting it to False discards them.")
 		.def("setup_tree_forest",handle_method<TemplatedMeshBase1dHandle>(&pyoomph::TemplatedMeshBase1d::setup_tree_forest), "Builds the binary tree forest used for adaptive mesh refinement of this 1d mesh");
 
 	// A mesh built from a 2d part of a MeshTemplate (triangles/quads), with the corresponding
@@ -1517,7 +1522,7 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("refine_selected_elements",handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *m, std::vector<unsigned int> inds)
 			 { oomph::Vector<unsigned> oomphvec(inds.size()); for (unsigned int i=0;i<inds.size();i++) oomphvec[i]=inds[i]; m->refine_selected_elements(oomphvec); }), nb::arg("element_indices"), "Refines only the elements at the given indices in this mesh")
 		 .def_prop_rw("identication_of_boundary_elements_by_facets",handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *self)
-			 { return self->identication_of_boundary_elements_by_facets; }),handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *self, bool val) { self->identication_of_boundary_elements_by_facets=val; }), "Controls whether boundary elements are identified by matching facets (True) or by node membership (False)")
+			 { return self->face_boundary_tags_valid; }),handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *self, bool val) { if (val) self->seed_face_boundaries_from_facets(); else self->invalidate_face_boundary_tags(); }), "Controls whether boundary elements are identified from the per-face boundary tags seeded from the mesh template facets (True) or reconstructed from nodal boundary membership (False). Setting it to True re-seeds the tags from the template facets, setting it to False discards them.")
 		.def("facet_adjacency_summary",handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *self)
 			 { return self->facet_adjacency_summary(); }), "Returns [n_facets, n_boundary_facets, n_interior_facets, max_incidence] of the facet-adjacency map (generic neighbour-finding primitive)")
 		.def("setup_boundary_element_info",handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *self)
@@ -1547,7 +1552,7 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("refine_selected_elements",handle_method<TemplatedMeshBase3dHandle>([](pyoomph::TemplatedMeshBase3d *m, std::vector<unsigned int> inds)
 			 { oomph::Vector<unsigned> oomphvec(inds.size()); for (unsigned int i=0;i<inds.size();i++) oomphvec[i]=inds[i]; m->refine_selected_elements(oomphvec); }), nb::arg("element_indices"), "Refines only the elements at the given indices in this mesh")
 		.def_prop_rw("identication_of_boundary_elements_by_facets",handle_method<TemplatedMeshBase3dHandle>([](pyoomph::TemplatedMeshBase3d *self)
-			 { return self->identication_of_boundary_elements_by_facets; }),handle_method<TemplatedMeshBase3dHandle>([](pyoomph::TemplatedMeshBase3d *self, bool val) { self->identication_of_boundary_elements_by_facets=val; }), "Controls whether boundary elements are identified by matching facets (True) or by node membership (False)")
+			 { return self->face_boundary_tags_valid; }),handle_method<TemplatedMeshBase3dHandle>([](pyoomph::TemplatedMeshBase3d *self, bool val) { if (val) self->seed_face_boundaries_from_facets(); else self->invalidate_face_boundary_tags(); }), "Controls whether boundary elements are identified from the per-face boundary tags seeded from the mesh template facets (True) or reconstructed from nodal boundary membership (False). Setting it to True re-seeds the tags from the template facets, setting it to False discards them.")
 		.def("facet_adjacency_summary",handle_method<TemplatedMeshBase3dHandle>([](pyoomph::TemplatedMeshBase3d *self)
 			 { return self->facet_adjacency_summary(); }), "Returns [n_facets, n_boundary_facets, n_interior_facets, max_incidence] of the facet-adjacency map (generic neighbour-finding primitive)")
 		.def("setup_boundary_element_info",handle_method<TemplatedMeshBase3dHandle>([](pyoomph::TemplatedMeshBase3d *self)

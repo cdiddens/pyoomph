@@ -346,9 +346,9 @@ namespace pyoomph
 	}
 
 	// Build Boundary_element_pt / Face_index_at_boundary for a (possibly mixed brick/tet) 3d mesh.
-	// For adaptive, pure-brick meshes, delegates to the generic facet-based TemplatedMeshBase
-	// implementation (identication_of_boundary_elements_by_facets), which is robust under refinement.
-	// Otherwise (non-adaptive or mixed meshes), uses the brick- and tet-specific helpers below.
+	// Normally the single, shape-neutral identification from the per-element face boundary tags,
+	// which is exact on arbitrarily refined meshes; only untagged meshes use the brick- and
+	// tet-specific legacy helpers below.
 	void TemplatedMeshBase3d::setup_boundary_element_info(std::ostream &outfile)
 	{
 
@@ -359,19 +359,15 @@ namespace pyoomph
 		Boundary_element_pt.resize(nbound);
 		Face_index_at_boundary.resize(nbound);
 
-		if (identication_of_boundary_elements_by_facets)
-        {
-         if (is_adaptation_enabled() &&refinement_possible() )
-         {
-          identication_of_boundary_elements_by_facets=false; // For adaptive meshes, we find the facets conventionally, but for non-adaptive meshes we can use the facet information from the mesh template which is always accurate, even at mixed corners
-         }
-        }
-        if (identication_of_boundary_elements_by_facets)
-        {
-         TemplatedMeshBase::setup_boundary_element_info(outfile);
-		 Lookup_for_elements_next_boundary_is_setup = true;
-         return;
-        }
+		// Unified, shape-neutral identification from the per-element face boundary tags; see
+		// TemplatedMeshBase::setup_boundary_element_info_from_face_tags. Meshes without tags fall
+		// back to the legacy per-shape reconstruction below.
+		if (face_boundary_tags_valid)
+		{
+			setup_boundary_element_info_from_face_tags();
+			Lookup_for_elements_next_boundary_is_setup = true;
+			return;
+		}
 
 		setup_boundary_element_info_bricks(outfile);
 		setup_boundary_element_info_tris(outfile);

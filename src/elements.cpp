@@ -6906,6 +6906,121 @@ namespace pyoomph
 		// std::cout << "FURTHER SETUP HANG" << std::endl;
 	}
 
+	// --- Per-face boundary tags ------------------------------------------------------------------
+	// See the declarations in elements.hpp for the rationale (single source of truth for boundary
+	// element identification, seeded from the mesh template's facets, propagated forward on split).
+
+	const std::vector<unsigned> *BulkElementBase::get_face_boundaries(const int &face_index) const
+	{
+		auto it = face_boundaries.find(static_cast<short>(face_index));
+		if (it == face_boundaries.end()) return NULL;
+		return &(it->second);
+	}
+
+	void BulkElementBase::set_face_boundaries(const int &face_index, const std::vector<unsigned> &boundaries)
+	{
+		if (boundaries.empty()) face_boundaries.erase(static_cast<short>(face_index));
+		else face_boundaries[static_cast<short>(face_index)] = boundaries;
+	}
+
+	// Son face -> father face for the isotropic split schemes currently implemented. The map depends
+	// only on the element SHAPE and the split scheme, never on the polynomial order, so everything is
+	// dispatched here rather than duplicated over the C1/C2/C1TB/... variants of each shape.
+	//
+	// son_type is the son index handed to construct_son() by DynamicTree::dynamic_split_if_required,
+	// which is exactly the tree's son_type, i.e. the QuadTreeNames (SW=0,SE=1,NW=2,NE=3) /
+	// OcTreeNames (LDB=0..RUF=7) ordering that the build() machinery assumes.
+	int BulkElementBase::face_index_in_father(const int &my_face_index, const unsigned &son_type) const
+	{
+		const unsigned d = this->dim();
+
+		if (d == 1)
+		{
+			// BinaryTree: son 0 = L (s<0 half), son 1 = R. Faces are the two end points -1/+1.
+			if (son_type == 0) return (my_face_index == -1 ? -1 : FACE_INTERIOR_IN_FATHER);
+			return (my_face_index == 1 ? 1 : FACE_INTERIOR_IN_FATHER);
+		}
+
+		if (dynamic_cast<const oomph::QElementBase *>(this))
+		{
+			// Tensor-product bisection: the son occupies the half of the father selected, per
+			// direction, by one bit of son_type (QuadTree: bit0 = E, bit1 = N; OcTree: bit0 = R,
+			// bit1 = U, bit2 = F). A son face survives as a father face iff it is the outer face in
+			// that direction, i.e. its sign matches the son's half; the opposite face is interior.
+			// Face index conventions (get_vertex_nodes_of_face): +/-1 = s0 (W/E, L/R), +/-2 = s1
+			// (S/N, D/U), +/-3 = s2 (B/F).
+			const int dir = std::abs(my_face_index);        // 1, 2 or 3
+			if (dir < 1 || dir > (int)d) return FACE_INTERIOR_IN_FATHER;
+			const bool son_is_upper = ((son_type >> (dir - 1)) & 1u) != 0u;
+			const bool face_is_upper = (my_face_index > 0);
+			return (son_is_upper == face_is_upper ? my_face_index : FACE_INTERIOR_IN_FATHER);
+		}
+
+		if (d == 2 && dynamic_cast<const oomph::TElementBase *>(this))
+		{
+			// Triangle 1->4 split on the QuadTree son names. Derived from
+			// RefineableTElement<2>::setup_father_bounds (refineable_telements.cpp): the father edge
+			// names are E = v0-v1, W = v1-v2, S = v2-v0, and the son corner nodes coinciding with
+			// father vertices are SE=v0, NW=v1, SW=v2. pyoomph's triangle face indices (see
+			// BulkElementTri2dC1::get_vertex_nodes_of_face) are face 0 = {v2,v1} = W, face 1 =
+			// {v2,v0} = S, face 2 = {v0,v1} = E. Reading Father_bound for each son node and
+			// intersecting over the two end nodes of each son edge gives:
+			//   SW (corner at v2): face0 -> W(0), face1 -> S(1), face2 interior
+			//   SE (corner at v0): face1 -> S(1), face2 -> E(2), face0 interior
+			//   NW (corner at v1): face0 -> W(0), face2 -> E(2), face1 interior
+			//   NE (the central son): every face interior
+			// Cross-check: each father face is covered by exactly two sons, the central son by none.
+			static const int X = FACE_INTERIOR_IN_FATHER;
+			static const int tri_map[4][3] = {
+				/* SW */ {0, 1, X},
+				/* SE */ {X, 1, 2},
+				/* NW */ {0, X, 2},
+				/* NE */ {X, X, X}};
+			if (son_type > 3 || my_face_index < 0 || my_face_index > 2) return FACE_INTERIOR_IN_FATHER;
+			return tri_map[son_type][my_face_index];
+		}
+
+		if (d == 3 && dynamic_cast<const oomph::TElementBase *>(this))
+		{
+			// Tetrahedron 1->8 split. Rather than hard-coding a table (the four octahedron sons are
+			// orientation-corrected, so the son-local vertex numbering is not obvious), evaluate it
+			// from the very same geometric description the split itself uses:
+			// RefineableTElement<3>::son_vertices_in_father gives the son's 4 vertices in FATHER
+			// local coordinates, and the father's faces are the coordinate planes s0=0 (face 0),
+			// s1=0 (face 1), s2=0 (face 2) and s0+s1+s2=1 (face 3) -- face k is opposite vertex k,
+			// matching BulkElementTetra3dC1::get_vertex_nodes_of_face. Son face k consists of the
+			// three son vertices other than k; it lies on a father face iff all three satisfy that
+			// face's equation. All coordinates involved are 0, 1/2 or 1, so the test is exact.
+			if (son_type > 7 || my_face_index < 0 || my_face_index > 3) return FACE_INTERIOR_IN_FATHER;
+			oomph::Vector<oomph::Vector<double>> sv;
+			oomph::RefineableTElement<3>::son_vertices_in_father((int)son_type, sv);
+			const double tol = 1e-12;
+			for (int f = 0; f < 4; f++)
+			{
+				bool all_on = true;
+				for (int v = 0; v < 4 && all_on; v++)
+				{
+					if (v == my_face_index) continue; // the vertex opposite this son face
+					const double s0 = sv[v][0], s1 = sv[v][1], s2 = sv[v][2];
+					double resid;
+					if (f == 0) resid = s0;
+					else if (f == 1) resid = s1;
+					else if (f == 2) resid = s2;
+					else resid = s0 + s1 + s2 - 1.0;
+					if (std::fabs(resid) > tol) all_on = false;
+				}
+				if (all_on) return f;
+			}
+			return FACE_INTERIOR_IN_FATHER;
+		}
+
+		// Any other shape (wedges, pyramids) has no implemented refinement scheme, so this is only
+		// reachable if such an element is ever split -- fail loudly rather than silently dropping
+		// the boundary tags of its sons.
+		throw_runtime_error(std::string("face_index_in_father is not implemented for the element type ") + typeid(*this).name());
+		return FACE_INTERIOR_IN_FATHER;
+	}
+
 	// Default split scheme: isotropic subdivision into required_nsons() sons of the same type.
 	const RefinementPattern *BulkElementBase::refinement_pattern() const
 	{
@@ -6948,6 +7063,21 @@ namespace pyoomph
 			// std::cout << "SET REF" << std::endl;
 			son_pt[i]->set_refinement_level(son_refine_level);
 			son_pt[i]->initial_cartesian_nondim_size = this->initial_cartesian_nondim_size / ((double)n_sons);
+			// Propagate the per-face boundary tags: each son face that is part of a father face
+			// inherits that father face's boundaries; son faces interior to the father get nothing.
+			// This is what keeps boundary-element identification exact under (non-uniform)
+			// refinement, without depending on the ancestry surviving (the tree forest may be
+			// re-rooted, see TemplatedMeshBase2d::setup_quadtree_forest).
+			if (!face_boundaries.empty())
+			{
+				for (int son_face : son_pt[i]->get_possible_face_indices())
+				{
+					const int father_face = son_pt[i]->face_index_in_father(son_face, i);
+					if (father_face == FACE_INTERIOR_IN_FATHER) continue;
+					const std::vector<unsigned> *fb = this->get_face_boundaries(father_face);
+					if (fb) son_pt[i]->set_face_boundaries(son_face, *fb);
+				}
+			}
 		}
 	}
 
