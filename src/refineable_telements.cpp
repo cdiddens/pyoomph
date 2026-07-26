@@ -765,16 +765,6 @@ namespace oomph
             bool node_done = false;
             Vector<double> s = s_in_parent[i];
             Vector<double> s_fraction = s_in_son[i];
-            if (getenv("PYOOMPH_TRI_AFFINE_CHECK")) // self-check: son<->father affine reproduces build's s_in_parent/s_in_son
-            {
-              Vector<double> sf(2), ss(2);
-              son_to_father_local(s_in_son[i], son_type, sf);
-              father_to_son_local(s_in_parent[i], son_type, ss);
-              double e1 = std::abs(sf[0] - s_in_parent[i][0]) + std::abs(sf[1] - s_in_parent[i][1]);
-              double e2 = std::abs(ss[0] - s_in_son[i][0]) + std::abs(ss[1] - s_in_son[i][1]);
-              if (e1 > 1e-12 || e2 > 1e-12)
-                std::fprintf(stderr, "[affine-check] son_type=%d node=%u FAIL fwd_err=%.3e inv_err=%.3e\n", son_type, i, e1, e2);
-            }
             // Registry key (father node-pointer pair that this node bisects) used to share/create
             // this node without duplication; empty if node i is a reused father node.
             std::set<Node *> reg_key = this->father_edge_node_key(s, father_el_pt);
@@ -2184,20 +2174,6 @@ namespace oomph
         have_neigh = root_coord_to_leaf(s_nrroot, nb.el, s_neigh);
       }
       if (!have_neigh) continue;
-      static const bool XCHECK = getenv("PYOOMPH_TRI_AFFINE_XCHECK") != 0;
-      if (XCHECK)
-      {
-        Vector<double> X_pos(2), s_lz(2);
-        X_pos[0] = X->x(0); X_pos[1] = X->x(1);
-        GeomObject *geom = 0;
-        neigh_fe->locate_zeta(X_pos, geom, s_lz);
-        if (geom != 0)
-        {
-          double e = std::abs(s_neigh[0] - s_lz[0]) + std::abs(s_neigh[1] - s_lz[1]);
-          if (e > 1e-9)
-            std::fprintf(stderr, "[affine-xcheck] X(%.4f,%.4f) %s affine=(%.5f,%.5f) lz=(%.5f,%.5f) err=%.3e\n", X_pos[0], X_pos[1], nb.cross_root ? "xroot" : "sameroot", s_neigh[0], s_neigh[1], s_lz[0], s_lz[1], e);
-        }
-      }
       // If the neighbour has its own interpolating node exactly here, X is shared -> not hanging.
       if (neigh_re->get_interpolating_node_at_local_coordinate(s_neigh, value_id) == X) continue;
       // Otherwise X hangs on the neighbour's interpolation at s_neigh.
@@ -2221,11 +2197,7 @@ namespace oomph
       for (unsigned m = 0; m < nmax && !cyclic; m++)
         if (std::abs(psi[m]) > 1e-12 && reaches(neigh_re->interpolating_node_pt(m, value_id), X, value_id, 0)) cyclic = true;
       if (cyclic)
-      {
-        if (getenv("PYOOMPH_TRI_NEIGH_DBG"))
-          std::fprintf(stderr, "[cyc-skip] X(%.5f,%.5f) slot=%d edge=%d dl=%d xroot=%d\n", X->x(0), X->x(1), value_id, my_edge, nb.diff_level, (int)nb.cross_root);
         continue;
-      }
       HangInfo *hang = new HangInfo(nmaster);
       unsigned mm = 0;
       for (unsigned m = 0; m < nmax; m++)
@@ -2485,17 +2457,6 @@ namespace oomph
       Vector<double> s(3);
       for (unsigned d = 0; d < 3; d++)
         s[d] = b0 * sv[0][d] + b1 * sv[1][d] + b2 * sv[2][d] + b3 * sv[3][d];
-
-      if (getenv("PYOOMPH_TET_AFFINE_CHECK")) // self-check: son<->father 3x3 affine reproduces build's s / inverse
-      {
-        Vector<double> sf(3), ss(3);
-        son_to_father_local(s_son, son_type, sf);
-        father_to_son_local(s, son_type, ss);
-        const double e1 = std::abs(sf[0] - s[0]) + std::abs(sf[1] - s[1]) + std::abs(sf[2] - s[2]);
-        const double e2 = std::abs(ss[0] - s_son[0]) + std::abs(ss[1] - s_son[1]) + std::abs(ss[2] - s_son[2]);
-        if (e1 > 1e-12 || e2 > 1e-12)
-          std::fprintf(stderr, "[tet-affine-check] son_type=%d node=%u FAIL fwd_err=%.3e inv_err=%.3e\n", son_type, j, e1, e2);
-      }
 
       // (1) Reuse a father node coincident with this position?
       Node *created_node_pt = father_el_pt->get_node_at_local_coordinate(s);
@@ -2984,7 +2945,6 @@ namespace oomph
     if (!this->Tree_pt) return res;
     // Track the face as its 3 local vertex indices (the vertices != my_face).
     int fv[3]; { int k = 0; for (int v = 0; v < 4; v++) if (v != my_face) fv[k++] = v; }
-    static const bool DBG = getenv("PYOOMPH_TET_FACENB_DBG") != 0;
     const Tree *cur = this->Tree_pt;
     int climbs = 0;
     while (true)
@@ -2997,7 +2957,6 @@ namespace oomph
       int fp[3];
       for (int i = 0; i < 3; i++) fp[i] = tet_fp_id(sv[fv[i]]);
       const int F = tet_father_face_of_triple(fp[0], fp[1], fp[2]);
-      if (DBG) std::fprintf(stderr, "[facenb-asc] climb=%d st=%d fv={%d,%d,%d} fp={%d,%d,%d} F=%d\n", climbs, st, fv[0], fv[1], fv[2], fp[0], fp[1], fp[2], F);
       if (F < 0)
       {
         // Face is interior to `fath`: the >=-sized neighbour is the sibling son sharing it (or a
