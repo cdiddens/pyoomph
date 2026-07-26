@@ -1933,16 +1933,43 @@ class EquationTree:
             raise ValueError("No sub-equation path '" + name + "' found at '" + self.get_full_path() + "'")
         return res
 
-    def __matmul__(self, other:str)->"EquationTree":
+    def _clone_structure(self)->"EquationTree":
+        """Creates a copy of this (sub)tree. Only the EquationTree nodes are new objects, the Equations
+        stored within are shared with the original. This is exactly the same semantics as restricting a
+        single Equations object to several domains at once, i.e. eqs@["domA","domB"], where the very same
+        Equations object ends up in both domains."""
+        if self._codegen is not None or self._mesh is not None:
+            raise RuntimeError("Cannot reuse an equation tree that is already part of an initialized problem")
+        res = EquationTree(self._equations, parent=None)
+        res._name = getattr(self,"_name",None) #type:ignore
+        for k, v in self._children.items():
+            child = v._clone_structure()
+            child._parent = res
+            res._children[k] = child
+        return res
+
+    def __matmul__(self, other:str | list[str] | tuple[str, ...] | set[str])->"EquationTree":
+        if isinstance(other, (list,tuple,set,)):
+            # Restricting to several domains at once: each domain gets its own copy of the tree structure,
+            # but shares the Equations objects (as it is also the case for BaseEquations@[...])
+            res = EquationTree(None, None)
+            for d in other:
+                if d is None or d==".": #type:ignore
+                    res += self._clone_structure()
+                else:
+                    res += self._clone_structure() @ d
+            return res
         if isinstance(other, str): #type:ignore
             splt = other.split("/")
             splt = [x for x in splt if x]  # Remove empties
             if len(splt) == 0:
                 raise ValueError("Please restrict equations with a non-empty domain name")
+            if not (self._parent is None):
+                # Already part of another tree, i.e. the same equations are meant to be used at several
+                # places. Work on a copy then, so that each place has its own tree nodes.
+                return self._clone_structure() @ other
             res = EquationTree(None, parent=None)
             res._children[splt[-1]] = self
-            if not (self._parent is None):
-                raise RuntimeError("Part of an equation tree is multiple times present in the entire tree")            
             res._name = splt[-1]
             _check_for_valid_var_name(res._name,True)
             self._parent = res
@@ -1951,7 +1978,7 @@ class EquationTree:
             return res
         else:
             raise ValueError(
-                "Please combine equation with a string (name of the domain) to restrict the equations to a domain")
+                "Please combine equation with a string (name of the domain) or a list/tuple/set of strings (names of several domains) to restrict the equations to a domain")
 
     def __radd__(self, other:Literal[0])->"EquationTree":
         if other==0:
