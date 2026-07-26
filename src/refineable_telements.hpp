@@ -217,12 +217,20 @@ namespace oomph
     // Result of the tri-native topological neighbour search (see tri_edge_neighbour).
     struct TriEdgeNeighbour
     {
-      RefineableTElement<2> *el = nullptr; // >=-sized LEAF neighbour across the queried edge (or null)
+      RefineableTElement<2> *el = nullptr; // >=-sized LEAF TRIANGLE neighbour across the queried edge (or null)
       int diff_level = 0;                  // level(neighbour)-level(this) along the edge; <0 => strictly coarser => this hangs
       bool cross_root = false;             // true if the neighbour lives in an adjacent tree root
       int my_edge_dir = -1;                // this element's edge direction expressed in ITS root frame (S/E/W)
       int nr_edge_dir = -1;                // the shared edge's direction in the NEIGHBOUR's root frame (S/E/W)
       bool reversed = false;               // whether the two roots parametrise the shared edge in opposite senses
+      // Cross-SHAPE coarser neighbour (a QUAD at a mixed quad+tri interface): stored separately because it is
+      // not a RefineableTElement<2>. Set only for a coarser (unrefined) cross-root quad; `el` stays null.
+      // The tri hang path then uses my_edge_dir + the shape-agnostic BulkElementBase::mixed_hang_edge_node.
+      oomph::RefineableElement *cross_shape_el = nullptr;
+      // The neighbour QUAD's ROOT element (set whenever the cross-root neighbour is a quad, refined or not).
+      // Node-sharing needs this (to descend the quad tree to the leaf at the shared-edge point) even when the
+      // quad is equal/finer (not a coarse leaf, so cross_shape_el is null).
+      oomph::RefineableElement *cross_shape_root = nullptr;
     };
 
     // Tri-native topological neighbour finder (the "oomph way": son_type ascent, NOT the geometric
@@ -243,6 +251,19 @@ namespace oomph
     // an EARLIER round (else the shared vertex is duplicated and the moving mesh tears apart). s_son is
     // node i's local coordinate in THIS (son) element. Returns the shared node, or 0 if none.
     Node *node_created_by_neighbour(const Vector<double> &s_son) const;
+    // Given a coordinate in THIS TREE's ROOT-element local frame, descend the tree to the LEAF that
+    // contains it (topological point-in-simplex descent: at each level pick the son whose barycentric
+    // coords are all >=0 via father_to_son_local -- no geometry), then return the leaf's node at that
+    // coordinate (get_node_at_local_coordinate) or null. Used for cross-shape (mixed quad+tri) node-
+    // sharing: a quad finds the coincident node an adjacent refined tri already built. Call on the root.
+    // Public because the quad node-sharing path (BulkElementBase::mixed_quad_shared_node) calls it.
+  public:
+    Node *node_at_root_coordinate(const Vector<double> &s_root) const;
+    // As above but returns the LEAF element and the coordinate in its own frame (for cross-shape HANGING:
+    // the quad hangs on this tri leaf's interpolating_basis at s_leaf). null if not resolvable.
+    RefineableElement *leaf_at_root_coordinate(const Vector<double> &s_root, Vector<double> &s_leaf) const;
+
+  protected:
     // Map a coordinate given in `leaf`'s ROOT-element local frame down to `leaf`'s own local frame, by
     // composing father_to_son_local along leaf's son_type chain (used for cross-root coordinate bridging).
     static bool root_coord_to_leaf(const Vector<double> &s_root, RefineableTElement<2> *leaf, Vector<double> &s_leaf);

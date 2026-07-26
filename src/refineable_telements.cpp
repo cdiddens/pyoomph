@@ -20,6 +20,7 @@ The main author may be contacted at c.diddens@utwente.nl
 ================================================================================*/
 
 #include "refineable_telements.hpp"
+#include "elements.hpp" // for pyoomph::BulkElementBase::mixed_hang_edge_node (cross-shape mixed-mesh hanging)
 #include "exception.hpp"
 #include <functional>
 namespace oomph
@@ -1694,6 +1695,38 @@ namespace oomph
     for (int k = 0; k < ne; k++)
     {
       TriEdgeNeighbour nb = this->tri_edge_neighbour(es[k]);
+      // Cross-shape (mixed quad+tri interface): reuse a coincident node an adjacent QUAD already built,
+      // found topologically -- map the son node's shared-edge parameter into the quad ROOT frame (blend of
+      // the shared corner nodes' quad-root local coords) and descend the quad tree to the leaf there. This
+      // is the quad-neighbour counterpart of the tri branch below and mirrors oomph's quad node_created_by_
+      // neighbour (get_node_at_local_coordinate on the neighbour leaf), never using positions/locate_zeta.
+      if (nb.cross_shape_root != nullptr)
+      {
+        pyoomph::BulkElementBase *qroot = dynamic_cast<pyoomph::BulkElementBase *>(nb.cross_shape_root);
+        RefineableTElement<2> *my_root = dynamic_cast<RefineableTElement<2> *>(this->Tree_pt->root_pt()->object_pt());
+        FiniteElement *qroot_fe = dynamic_cast<FiniteElement *>(nb.cross_shape_root);
+        if (qroot && my_root && qroot_fe && nb.cross_shape_root->nodes_built())
+        {
+          int ea, eb;
+          edge_local_vertices(nb.my_edge_dir, ea, eb);
+          Node *Pb = my_root->vertex_node_pt(ea); // t=0
+          Node *Qb = my_root->vertex_node_pt(eb); // t=1
+          Vector<double> s_root(2);
+          this->local_coordinate_in_ancestor(s_son, my_root, s_root);
+          const double t = param_on_edge(nb.my_edge_dir, s_root);
+          const int iP = qroot_fe->get_node_number(Pb), iQ = qroot_fe->get_node_number(Qb);
+          if (iP >= 0 && iQ >= 0)
+          {
+            Vector<double> sP(2), sQ(2), s_qroot(2);
+            qroot_fe->local_coordinate_of_node(iP, sP);
+            qroot_fe->local_coordinate_of_node(iQ, sQ);
+            for (int d = 0; d < 2; d++) s_qroot[d] = (1.0 - t) * sP[d] + t * sQ[d];
+            Node *nn = qroot->quad_node_at_root_coordinate(s_qroot);
+            if (nn) return nn;
+          }
+        }
+        continue;
+      }
       if (!nb.el) continue;
       if (!nb.el->nodes_built()) continue; // neighbour built in an earlier round (or earlier this round)
       // Map the son-node's local coordinate into the neighbour (exact affine map; same route as the hang
@@ -1720,6 +1753,43 @@ namespace oomph
       if (nn) return nn;
     }
     return 0;
+  }
+
+  RefineableElement *RefineableTElement<2>::leaf_at_root_coordinate(const Vector<double> &s_root, Vector<double> &s_leaf) const
+  {
+    if (!this->Tree_pt) return 0;
+    Tree *node = this->Tree_pt->root_pt();
+    Vector<double> s = s_root;
+    while (!node->is_leaf())
+    {
+      int best = -1;
+      double best_min = -1e30;
+      Vector<double> best_s(2);
+      for (int c = 0; c < 4; c++) // tri 1->4 sons, son_type 0..3
+      {
+        Tree *ch = node->son_pt(c);
+        if (!ch) continue;
+        Vector<double> sc(2);
+        father_to_son_local(s, c, sc);
+        const double b = 1.0 - sc[0] - sc[1];
+        const double mn = std::min(std::min(sc[0], sc[1]), b); // most-interior son contains the point
+        if (mn > best_min) { best_min = mn; best = c; best_s = sc; }
+      }
+      if (best < 0 || best_min < -1e-9) break;
+      node = node->son_pt(best);
+      s = best_s;
+    }
+    s_leaf = s;
+    return dynamic_cast<RefineableElement *>(node->object_pt());
+  }
+
+  Node *RefineableTElement<2>::node_at_root_coordinate(const Vector<double> &s_root) const
+  {
+    Vector<double> s_leaf(2);
+    RefineableElement *leaf = this->leaf_at_root_coordinate(s_root, s_leaf);
+    FiniteElement *leaf_fe = dynamic_cast<FiniteElement *>(leaf);
+    if (!leaf_fe) return 0;
+    return leaf_fe->get_node_at_local_coordinate(s_leaf);
   }
 
   //=================================================================
@@ -1841,8 +1911,25 @@ namespace oomph
     TreeRoot *nr = root->neighbour_pt(my_D);
     if (!nr) return res; // domain boundary: no neighbour
     RefineableTElement<2> *my_root_el = dynamic_cast<RefineableTElement<2> *>(root->object_pt());
+    if (!my_root_el) return res;
     RefineableTElement<2> *nr_root_el = dynamic_cast<RefineableTElement<2> *>(nr->object_pt());
-    if (!my_root_el || !nr_root_el) return res;
+    if (!nr_root_el)
+    {
+      // Cross-SHAPE neighbour root (a QUAD at a mixed quad+tri interface): the tri son-descent tables do
+      // not apply. Expose the quad ROOT + shared edge direction for both node-sharing (descend the quad
+      // tree to the leaf at the shared-edge point) and hanging. For HANGING we additionally need the quad
+      // to be strictly coarser, i.e. the UNREFINED quad root (a leaf): a refined quad hangs on the tri from
+      // its own quad_hang_helper. Coordinates are bridged shape-agnostically via my_edge_dir.
+      res.cross_shape_root = dynamic_cast<oomph::RefineableElement *>(nr->object_pt());
+      res.cross_root = true;
+      res.my_edge_dir = my_D;
+      if (nr->is_leaf())
+      {
+        res.cross_shape_el = res.cross_shape_root; // strictly coarser quad -> this tri hangs on it
+        res.diff_level = -climbs;
+      }
+      return res;
+    }
 
     // Topological shared-edge correspondence: my root edge's two vertex nodes -> the neighbour root's
     // vertex indices, giving the neighbour's edge direction and whether the parametrisation is reversed.
@@ -1918,6 +2005,43 @@ namespace oomph
     // >=-sized LEAF neighbour across my_edge; we hang only when it is STRICTLY COARSER (diff_level < 0).
     // A finer neighbour hangs on THIS element from its own side, so skipping it here loses nothing.
     TriEdgeNeighbour nb = this->tri_edge_neighbour(my_edge);
+    // Cross-SHAPE coarser neighbour (a QUAD at a mixed quad+tri interface): hang each of THIS tri edge's
+    // interpolating nodes on the coarse quad via the shape-agnostic primitive -- the shared root-edge corner
+    // nodes + the neighbour's own interpolating_basis (the tri affine edge map does not apply to a quad).
+    if (nb.cross_shape_root != nullptr)
+    {
+      // Hang each of THIS tri edge's interpolating nodes on the coarse QUAD: mixed_hang_edge_node maps the
+      // node's shared-edge parameter into the quad ROOT (blend of the shared corner nodes) and descends to
+      // the correct quad LEAF (coarser-or-equal); the level guard there hangs only where the quad leaf is
+      // strictly coarser (equal is shared, finer hangs from its own side). Handles a refined-but-coarser quad.
+      RefineableTElement<2> *my_root_el = dynamic_cast<RefineableTElement<2> *>(this->Tree_pt->root_pt()->object_pt());
+      pyoomph::BulkElementBase *self = dynamic_cast<pyoomph::BulkElementBase *>(this);
+      if (!my_root_el || !self) return;
+      int ea, eb;
+      edge_local_vertices(nb.my_edge_dir, ea, eb);
+      Node *Pb = my_root_el->vertex_node_pt(ea); // shared root-edge corner at t=0
+      Node *Qb = my_root_el->vertex_node_pt(eb); // at t=1
+      const unsigned n_edge = this->ninterpolating_node_1d(value_id);
+      for (unsigned i = 0; i < n_edge; i++)
+      {
+        const double f = (n_edge > 1) ? double(i) / double(n_edge - 1) : 0.0;
+        Vector<double> s(2);
+        switch (my_edge)
+        {
+          case E: s[0] = 1.0 - f; s[1] = f; break;
+          case W: s[0] = 0.0; s[1] = 1.0 - f; break;
+          case S: s[0] = f; s[1] = 0.0; break;
+          default: return;
+        }
+        Node *X = this->get_interpolating_node_at_local_coordinate(s, value_id);
+        if (!X) continue;
+        Vector<double> s_root(2);
+        this->local_coordinate_in_ancestor(s, my_root_el, s_root);
+        const double t = param_on_edge(nb.my_edge_dir, s_root);
+        self->mixed_hang_edge_node(X, Pb, Qb, t, nb.cross_shape_root, value_id);
+      }
+      return;
+    }
     if (nb.el == 0 || nb.diff_level >= 0) return;
     RefineableElement *neigh_re = dynamic_cast<RefineableElement *>(nb.el);
     FiniteElement *neigh_fe = dynamic_cast<FiniteElement *>(nb.el);

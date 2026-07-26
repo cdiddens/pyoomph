@@ -149,78 +149,44 @@ namespace pyoomph
       for (std::set<unsigned>::iterator it = potentially_neighb_tree[i].begin(); it != potentially_neighb_tree[i].end(); it++)
       {
         unsigned j = (*it);
+        // The neighbour tests below key purely on SHARED CORNER NODES (get_node_number on the neighbour
+        // object), so they resolve quad<->quad, tri<->tri AND mixed quad<->tri roots uniformly -- the
+        // neighbour object's own shape is irrelevant to whether it contains element i's edge corners.
+        oomph::FiniteElement *obj_j = Trees_pt[j]->object_pt();
         if (dynamic_cast<oomph::QuadElementBase *>(Trees_pt[i]->object_pt()))
         {
-          if (dynamic_cast<oomph::QuadElementBase *>(Trees_pt[j]->object_pt()))
-          {
-            // is it the Northern neighbour ?
-            bool is_N_neighbour =
-                ((Trees_pt[j]->object_pt()->get_node_number(
-                      Trees_pt[i]->object_pt()->node_pt(n * (n - 1))) != -1) &&
-                 (Trees_pt[j]->object_pt()->get_node_number(
-                      Trees_pt[i]->object_pt()->node_pt(n * n - 1)) != -1));
-
-            // is it the Southern neighbour ?
-            bool is_S_neighbour =
-                ((Trees_pt[j]->object_pt()->get_node_number(
-                      Trees_pt[i]->object_pt()->node_pt(0)) != -1) &&
-                 (Trees_pt[j]->object_pt()->get_node_number(
-                      Trees_pt[i]->object_pt()->node_pt(n - 1)) != -1));
-
-            // is it the Eastern neighbour ?
-            bool is_E_neighbour =
-                ((Trees_pt[j]->object_pt()->get_node_number(
-                      Trees_pt[i]->object_pt()->node_pt(n - 1)) != -1) &&
-                 (Trees_pt[j]->object_pt()->get_node_number(
-                      Trees_pt[i]->object_pt()->node_pt(n * n - 1)) != -1));
-
-            // is it the Western neighbour ?
-            bool is_W_neighbour =
-                ((Trees_pt[j]->object_pt()->get_node_number(
-                      Trees_pt[i]->object_pt()->node_pt(0)) != -1) &&
-                 (Trees_pt[j]->object_pt()->get_node_number(
-                      Trees_pt[i]->object_pt()->node_pt(n * (n - 1))) != -1));
-
-            if (is_N_neighbour)
-              Trees_pt[i]->neighbour_pt(N) = Trees_pt[j];
-            if (is_S_neighbour)
-              Trees_pt[i]->neighbour_pt(S) = Trees_pt[j];
-            if (is_E_neighbour)
-              Trees_pt[i]->neighbour_pt(E) = Trees_pt[j];
-            if (is_W_neighbour)
-              Trees_pt[i]->neighbour_pt(W) = Trees_pt[j];
-          }
-          else
-          {
-            throw_runtime_error("Mixed quad/tri neighbours not yet supported");
-          }
+          // Quad edges via oomph's compass corner indices (n = nnode_1d): corners 0, n-1, n(n-1), n^2-1.
+          bool is_N_neighbour =
+              ((obj_j->get_node_number(Trees_pt[i]->object_pt()->node_pt(n * (n - 1))) != -1) &&
+               (obj_j->get_node_number(Trees_pt[i]->object_pt()->node_pt(n * n - 1)) != -1));
+          bool is_S_neighbour =
+              ((obj_j->get_node_number(Trees_pt[i]->object_pt()->node_pt(0)) != -1) &&
+               (obj_j->get_node_number(Trees_pt[i]->object_pt()->node_pt(n - 1)) != -1));
+          bool is_E_neighbour =
+              ((obj_j->get_node_number(Trees_pt[i]->object_pt()->node_pt(n - 1)) != -1) &&
+               (obj_j->get_node_number(Trees_pt[i]->object_pt()->node_pt(n * n - 1)) != -1));
+          bool is_W_neighbour =
+              ((obj_j->get_node_number(Trees_pt[i]->object_pt()->node_pt(0)) != -1) &&
+               (obj_j->get_node_number(Trees_pt[i]->object_pt()->node_pt(n * (n - 1))) != -1));
+          if (is_N_neighbour) Trees_pt[i]->neighbour_pt(N) = Trees_pt[j];
+          if (is_S_neighbour) Trees_pt[i]->neighbour_pt(S) = Trees_pt[j];
+          if (is_E_neighbour) Trees_pt[i]->neighbour_pt(E) = Trees_pt[j];
+          if (is_W_neighbour) Trees_pt[i]->neighbour_pt(W) = Trees_pt[j];
         }
-        else if (dynamic_cast<oomph::TElementBase *>(Trees_pt[i]->object_pt()))
+        else if (oomph::TElementBase *ti = dynamic_cast<oomph::TElementBase *>(Trees_pt[i]->object_pt()))
         {
-          // Triangle root neighbours are found topologically by shared edges (a pair of
-          // shared vertex nodes), reusing the QuadTree edge slots S/E/W for the triangle's
-          // three edges (consistent with the Father_bound table: E=v0-v1, W=v1-v2, S=v2-v0).
-          // The N slot is unused for triangles. The geometric node-sharing/hanging code does
-          // not rely on the QuadTree coordinate descent, so only this topological adjacency
-          // is needed here.
-          oomph::TElementBase *ti = dynamic_cast<oomph::TElementBase *>(Trees_pt[i]->object_pt());
-          if (dynamic_cast<oomph::TElementBase *>(Trees_pt[j]->object_pt()))
-          {
-            oomph::FiniteElement *obj_j = Trees_pt[j]->object_pt();
-            oomph::Node *v0 = ti->vertex_node_pt(0);
-            oomph::Node *v1 = ti->vertex_node_pt(1);
-            oomph::Node *v2 = ti->vertex_node_pt(2);
-            bool has0 = (obj_j->get_node_number(v0) != -1);
-            bool has1 = (obj_j->get_node_number(v1) != -1);
-            bool has2 = (obj_j->get_node_number(v2) != -1);
-            if (has0 && has1) Trees_pt[i]->neighbour_pt(E) = Trees_pt[j];
-            if (has1 && has2) Trees_pt[i]->neighbour_pt(W) = Trees_pt[j];
-            if (has2 && has0) Trees_pt[i]->neighbour_pt(S) = Trees_pt[j];
-          }
-          else
-          {
-            throw_runtime_error("Mixed quad/tri neighbours not yet supported");
-          }
+          // Triangle root neighbours are found topologically by shared edges (a pair of shared vertex
+          // nodes), reusing the QuadTree edge slots S/E/W for the triangle's three edges (consistent with
+          // the Father_bound table: E=v0-v1, W=v1-v2, S=v2-v0). N is unused for triangles.
+          oomph::Node *v0 = ti->vertex_node_pt(0);
+          oomph::Node *v1 = ti->vertex_node_pt(1);
+          oomph::Node *v2 = ti->vertex_node_pt(2);
+          bool has0 = (obj_j->get_node_number(v0) != -1);
+          bool has1 = (obj_j->get_node_number(v1) != -1);
+          bool has2 = (obj_j->get_node_number(v2) != -1);
+          if (has0 && has1) Trees_pt[i]->neighbour_pt(E) = Trees_pt[j];
+          if (has1 && has2) Trees_pt[i]->neighbour_pt(W) = Trees_pt[j];
+          if (has2 && has0) Trees_pt[i]->neighbour_pt(S) = Trees_pt[j];
         }
         else
         {
@@ -235,10 +201,11 @@ namespace pyoomph
   // base check for quad forests.
   void DynamicQuadTreeForest::check_all_neighbours(oomph::DocInfo &doc_info)
   {
-    if (ntree() > 0 && dynamic_cast<oomph::TElementBase *>(Trees_pt[0]->object_pt()))
-    {
-      return;
-    }
+    // oomph's self-test verifies neighbours via the QUAD coordinate descent, which is meaningless once
+    // any triangle root is present (tris/mixed forests use topological shared-node neighbouring). Skip it
+    // whenever ANY tree is a triangle (pure-tri OR mixed quad+tri); pure-quad forests still get the check.
+    for (unsigned i = 0; i < ntree(); i++)
+      if (dynamic_cast<oomph::TElementBase *>(Trees_pt[i]->object_pt())) return;
     oomph::QuadTreeForest::check_all_neighbours(doc_info);
   }
 
@@ -248,20 +215,18 @@ namespace pyoomph
   // refinement was requested but the mesh contains non-quad (e.g. triangular) elements.
   bool TemplatedMeshBase2d::refinement_possible()
     {
-      // h-refinement via the (Dynamic)QuadTreeForest is implemented for pure-quad meshes
-      // and (Phase 2, branch mixed_adapt) pure-triangle meshes: a triangle refines 1->4,
-      // reusing the QuadTree's 4-son bookkeeping, with geometric node-sharing/hanging.
-      // Mixed quad+tri meshes are not yet supported (need cross-shape facet neighbouring).
-      bool allquads = true;
-      bool alltris = true;
+      // h-refinement via the (Dynamic)QuadTreeForest is implemented for pure-quad, pure-triangle AND
+      // MIXED quad+tri meshes: every element (quad or tri) refines 1->4 on the shared QuadTree 4-son
+      // bookkeeping, and DynamicQuadTreeForest::find_neighbours resolves quad<->tri root neighbours
+      // topologically (shared corner nodes). Any OTHER element type disables adaptation.
+      bool all_refineable = true;
       for (unsigned int i = 0; i < this->nelement(); i++)
       {
         bool is_quad = (dynamic_cast<oomph::QuadElementBase *>(this->element_pt(i)) != NULL);
         bool is_tri = (dynamic_cast<oomph::TElementBase *>(this->element_pt(i)) != NULL);
-        allquads = allquads && is_quad;
-        alltris = alltris && is_tri;
+        if (!is_quad && !is_tri) { all_refineable = false; break; }
       }
-      if (allquads || alltris)
+      if (all_refineable)
       {
         return true;
       }
@@ -269,7 +234,7 @@ namespace pyoomph
       {
         if (this->max_refinement_level() && issued_tri_refinement_warning==false && !this->problem->is_quiet())
         {
-          std::cout << "WARNING: Mixed-element mesh "<< this->domainname << " -> cannot be adaptive yet. Requires cross-shape facet neighbouring for mixed meshes" << std::endl;
+          std::cout << "WARNING: Mesh "<< this->domainname << " contains a non-quad/tri element -> cannot be adaptive." << std::endl;
           issued_tri_refinement_warning = true;
         }
         return false;
@@ -281,7 +246,7 @@ namespace pyoomph
   void TemplatedMeshBase2d::setup_tree_forest()
     {
       if (refinement_possible())  setup_quadtree_forest();
-      else {        
+      else {
         if (issued_tri_refinement_warning==false && !this->problem->is_quiet())
         {
           std::cout << "WARNING: Found a tri or something in the mesh "<< this->domainname << " -> cannot be adaptive right now. Requires to implement a good tree for mixed meshes" << std::endl;
@@ -290,6 +255,80 @@ namespace pyoomph
         this->disable_adaptation();
       }
     }
+
+  // Enforce 2:1 balancing across a MIXED quad<->tri interface (see header). Cross-shape hanging is only
+  // implemented for a single-level jump, so any quad+tri edge whose finer side is >=2 levels finer (detected
+  // by a DIFFERENT-shape node at the t=1/2^nnode_1d edge fraction, exactly as the tet balancer detects >=2
+  // finer) triggers refinement of the coarser element. Iterated to a fixed point. No-op on pure meshes.
+  void TemplatedMeshBase2d::enforce_refinement_balance()
+  {
+    bool has_quad = false, has_tri = false;
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+    {
+      if (dynamic_cast<oomph::QuadElementBase *>(this->element_pt(ie))) has_quad = true;
+      else if (dynamic_cast<oomph::TElementBase *>(this->element_pt(ie))) has_tri = true;
+    }
+    if (!(has_quad && has_tri)) return; // only mixed meshes need cross-shape balancing
+
+    const double scale = 1e8;
+    const int max_rounds = 40; // convergence bounded by max_refinement_level()
+    for (int round = 0; round < max_rounds; round++)
+    {
+      auto qpos = [&](oomph::Node *nd) { return std::array<long long, 2>{(long long)std::llround(nd->x(0) * scale), (long long)std::llround(nd->x(1) * scale)}; };
+      // Quantized node position -> bitmask of element shapes touching it (1=quad, 2=tri).
+      std::map<std::array<long long, 2>, int> shapes_at;
+      for (unsigned ie = 0; ie < this->nelement(); ie++)
+      {
+        oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(this->element_pt(ie));
+        const int shp = dynamic_cast<oomph::QuadElementBase *>(fe) ? 1 : (dynamic_cast<oomph::TElementBase *>(fe) ? 2 : 0);
+        if (!shp) continue;
+        for (unsigned k = 0; k < fe->nnode(); k++) shapes_at[qpos(fe->node_pt(k))] |= shp;
+      }
+      oomph::Vector<unsigned> to_refine;
+      for (unsigned ie = 0; ie < this->nelement(); ie++)
+      {
+        oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(this->element_pt(ie));
+        oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(this->element_pt(ie));
+        const int myshp = dynamic_cast<oomph::QuadElementBase *>(fe) ? 1 : (dynamic_cast<oomph::TElementBase *>(fe) ? 2 : 0);
+        if (!myshp || !re) continue;
+        if (re->refinement_level() >= this->max_refinement_level()) continue;
+        // Vertex nodes + the element's edges (quad: SW,SE,NW,NE = 0,1,2,3; tri: 0,1,2).
+        std::vector<oomph::Node *> vtx;
+        std::vector<std::pair<int, int>> edges;
+        if (myshp == 1)
+        {
+          oomph::QuadElementBase *q = dynamic_cast<oomph::QuadElementBase *>(fe);
+          for (unsigned j = 0; j < 4; j++) vtx.push_back(q->vertex_node_pt(j));
+          edges = {{0, 1}, {1, 3}, {2, 3}, {0, 2}};
+        }
+        else
+        {
+          oomph::TElementBase *t = dynamic_cast<oomph::TElementBase *>(fe);
+          for (unsigned j = 0; j < 3; j++) vtx.push_back(t->vertex_node_pt(j));
+          edges = {{0, 1}, {1, 2}, {2, 0}};
+        }
+        const int otherbit = 3 & ~myshp; // the OTHER shape's bit
+        const double frac = 1.0 / (double)(1u << fe->nnode_1d());
+        const double fracs[2] = {frac, 1.0 - frac};
+        bool imbalanced = false;
+        for (const auto &e : edges)
+        {
+          if (imbalanced) break;
+          oomph::Node *Va = vtx[e.first], *Vb = vtx[e.second];
+          for (int fi = 0; fi < 2 && !imbalanced; fi++)
+          {
+            std::array<long long, 2> q = {(long long)std::llround((Va->x(0) + fracs[fi] * (Vb->x(0) - Va->x(0))) * scale),
+                                          (long long)std::llround((Va->x(1) + fracs[fi] * (Vb->x(1) - Va->x(1))) * scale)};
+            auto it = shapes_at.find(q);
+            if (it != shapes_at.end() && (it->second & otherbit)) imbalanced = true; // other-shape node >=2 levels finer
+          }
+        }
+        if (imbalanced) to_refine.push_back(ie);
+      }
+      if (to_refine.size() == 0) break;
+      this->refine_selected_elements(to_refine);
+    }
+  }
 
   // Overload used by the generic (oomph-lib) interface: discards the documentation output.
   void TemplatedMeshBase2d::setup_boundary_element_info()

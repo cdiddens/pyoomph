@@ -468,6 +468,246 @@ namespace pyoomph
 		return pe(0, i);
 	}
 
+	bool BulkElementBase::mixed_hang_node_at(oomph::Node *X, oomph::RefineableElement *nb_re, const oomph::Vector<double> &s_nb, const int &value_id)
+	{
+		if (!X || !nb_re) return false;
+		// Neighbour already owns an interpolating node here -> X is shared/real, not hanging.
+		if (nb_re->get_interpolating_node_at_local_coordinate(s_nb, value_id) == X) return false;
+		const unsigned nmax = nb_re->ninterpolating_node(value_id);
+		oomph::Shape psi(nmax);
+		nb_re->interpolating_basis(s_nb, psi, value_id);
+		unsigned nmaster = 0;
+		for (unsigned m = 0; m < nmax; m++)
+			if (std::abs(psi[m]) > 1e-12) nmaster++;
+		if (nmaster == 0) return false;
+		// Cycle guard (as in the triangle/tet helpers): skip if a master transitively hangs back on X.
+		std::function<bool(oomph::Node *, oomph::Node *, int, int)> reaches = [&](oomph::Node *from, oomph::Node *to, int slot, int depth) -> bool {
+			if (from == to) return true;
+			if (depth > 30 || !from->is_hanging(slot)) return false;
+			oomph::HangInfo *h = from->hanging_pt(slot);
+			for (unsigned k = 0; k < h->nmaster(); k++)
+				if (reaches(h->master_node_pt(k), to, slot, depth + 1)) return true;
+			return false;
+		};
+		for (unsigned m = 0; m < nmax; m++)
+			if (std::abs(psi[m]) > 1e-12 && reaches(nb_re->interpolating_node_pt(m, value_id), X, value_id, 0)) return false;
+		oomph::HangInfo *hang = new oomph::HangInfo(nmaster);
+		unsigned mm = 0;
+		for (unsigned m = 0; m < nmax; m++)
+			if (std::abs(psi[m]) > 1e-12)
+			{
+				hang->set_master_node_pt(mm, nb_re->interpolating_node_pt(m, value_id), psi[m]);
+				mm++;
+			}
+		X->set_hanging_pt(hang, value_id);
+		return true;
+	}
+
+	bool BulkElementBase::mixed_hang_edge_node(oomph::Node *X, oomph::Node *Pb, oomph::Node *Qb, double t, oomph::RefineableElement *nb_root, const int &value_id)
+	{
+		oomph::FiniteElement *nb_fe = dynamic_cast<oomph::FiniteElement *>(nb_root);
+		if (!nb_fe || !X || !Pb || !Qb) return false;
+		const int iP = nb_fe->get_node_number(Pb), iQ = nb_fe->get_node_number(Qb);
+		if (iP < 0 || iQ < 0) return false; // shared root-edge corners not both present in the neighbour ROOT
+		const unsigned nd = nb_fe->dim();
+		oomph::Vector<double> sP(nd), sQ(nd), s_root(nd);
+		nb_fe->local_coordinate_of_node(iP, sP);
+		nb_fe->local_coordinate_of_node(iQ, sQ);
+		for (unsigned d = 0; d < nd; d++) s_root[d] = (1.0 - t) * sP[d] + t * sQ[d];
+		// Descend the neighbour ROOT to the LEAF containing this shared-edge point (topological), then hang X
+		// on that leaf's interpolating_basis. Handles a coarser neighbour whether it is the UNREFINED root or
+		// a REFINED (>=1 level) leaf (a single-level 2:1 where the coarse side itself sits one level down).
+		oomph::Vector<double> s_leaf(nd);
+		oomph::RefineableElement *leaf = nullptr;
+		if (oomph::RefineableTElement<2> *tri = dynamic_cast<oomph::RefineableTElement<2> *>(nb_root))
+			leaf = tri->leaf_at_root_coordinate(s_root, s_leaf);
+		else if (BulkElementBase *q = dynamic_cast<BulkElementBase *>(nb_root))
+			leaf = q->quad_leaf_at_root_coordinate(s_root, s_leaf);
+		if (!leaf) return false;
+		// Hang X only on a STRICTLY COARSER neighbour leaf: an equal-level leaf shares X (node-sharing) and a
+		// finer leaf hangs on THIS element from its own side. The shared-node check in mixed_hang_node_at
+		// also catches the equal case, but the level guard makes the finer-neighbour case explicit + robust.
+		oomph::RefineableElement *this_re = dynamic_cast<oomph::RefineableElement *>(this);
+		if (this_re && leaf->refinement_level() >= this_re->refinement_level()) return false;
+		return this->mixed_hang_node_at(X, leaf, s_leaf, value_id);
+	}
+
+	void BulkElementBase::mixed_quad_edge_hang(const int &value_id, const int &my_edge, oomph::RefineableElement *coarse_nb)
+	{
+		using namespace oomph::QuadTreeNames;
+		oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(this);
+		if (!re || !re->tree_pt() || !coarse_nb) return;
+		oomph::FiniteElement *root_fe = dynamic_cast<oomph::FiniteElement *>(re->tree_pt()->root_pt()->object_pt());
+		if (!root_fe) return;
+		const unsigned n = root_fe->nnode_1d();
+		// The quad's son boxes are axis-aligned (no rotation), so my_edge keeps its compass direction all
+		// the way to the root; the shared coarse edge's corner nodes are the root quad's corners on my_edge.
+		oomph::Node *Pb = 0, *Qb = 0; // Pb at edge-fraction t=0, Qb at t=1
+		switch (my_edge)
+		{
+			case S: Pb = root_fe->node_pt(0);           Qb = root_fe->node_pt(n - 1);       break;
+			case N: Pb = root_fe->node_pt(n * (n - 1)); Qb = root_fe->node_pt(n * n - 1);   break;
+			case W: Pb = root_fe->node_pt(0);           Qb = root_fe->node_pt(n * (n - 1)); break;
+			case E: Pb = root_fe->node_pt(n - 1);       Qb = root_fe->node_pt(n * n - 1);   break;
+			default: return;
+		}
+		const unsigned n_p = re->ninterpolating_node_1d(value_id);
+		for (unsigned i0 = 0; i0 < n_p; i0++)
+		{
+			oomph::Vector<double> s_leaf(2);
+			oomph::Node *X = 0;
+			switch (my_edge)
+			{
+				case S: s_leaf[0] = -1.0 + 2.0 * re->local_one_d_fraction_of_interpolating_node(i0, 0, value_id); s_leaf[1] = -1.0; X = re->interpolating_node_pt(i0, value_id); break;
+				case N: s_leaf[0] = -1.0 + 2.0 * re->local_one_d_fraction_of_interpolating_node(i0, 0, value_id); s_leaf[1] = 1.0;  X = re->interpolating_node_pt(i0 + n_p * (n_p - 1), value_id); break;
+				case W: s_leaf[1] = -1.0 + 2.0 * re->local_one_d_fraction_of_interpolating_node(i0, 1, value_id); s_leaf[0] = -1.0; X = re->interpolating_node_pt(n_p * i0, value_id); break;
+				case E: s_leaf[1] = -1.0 + 2.0 * re->local_one_d_fraction_of_interpolating_node(i0, 1, value_id); s_leaf[0] = 1.0;  X = re->interpolating_node_pt(n_p - 1 + n_p * i0, value_id); break;
+				default: return;
+			}
+			if (!X) continue;
+			// Ascend to the root frame by composing the axis-aligned son boxes (son s in [-1,1] maps to
+			// s_father = offset(son_type) + 0.5*s, offsets +-0.5 per SW/SE/NW/NE quadrant).
+			oomph::Vector<double> s = s_leaf;
+			oomph::Tree *tr = re->tree_pt();
+			while (tr->father_pt())
+			{
+				const int st = tr->son_type();
+				const double xoff = (st == SE || st == NE) ? 0.5 : -0.5;
+				const double yoff = (st == NW || st == NE) ? 0.5 : -0.5;
+				s[0] = xoff + 0.5 * s[0];
+				s[1] = yoff + 0.5 * s[1];
+				tr = tr->father_pt();
+			}
+			const double t = (my_edge == S || my_edge == N) ? 0.5 * (s[0] + 1.0) : 0.5 * (s[1] + 1.0);
+			this->mixed_hang_edge_node(X, Pb, Qb, t, coarse_nb, value_id);
+		}
+	}
+
+	oomph::RefineableElement *BulkElementBase::quad_leaf_at_root_coordinate(const oomph::Vector<double> &s_root, oomph::Vector<double> &s_leaf)
+	{
+		using namespace oomph::QuadTreeNames;
+		oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(this);
+		if (!re || !re->tree_pt()) return nullptr;
+		oomph::Tree *node = re->tree_pt()->root_pt();
+		oomph::Vector<double> s = s_root;
+		while (!node->is_leaf())
+		{
+			const bool east = s[0] >= 0.0, north = s[1] >= 0.0; // pick the quadrant/son containing the point
+			const int st = east ? (north ? NE : SE) : (north ? NW : SW);
+			oomph::Tree *ch = node->son_pt(st);
+			if (!ch) break;
+			const double xoff = (st == SE || st == NE) ? 0.5 : -0.5;
+			const double yoff = (st == NW || st == NE) ? 0.5 : -0.5;
+			s[0] = 2.0 * (s[0] - xoff); // inverse of the son box map s_father = off + 0.5*s_son
+			s[1] = 2.0 * (s[1] - yoff);
+			node = ch;
+		}
+		s_leaf = s;
+		return dynamic_cast<oomph::RefineableElement *>(node->object_pt());
+	}
+
+	oomph::Node *BulkElementBase::quad_node_at_root_coordinate(const oomph::Vector<double> &s_root)
+	{
+		oomph::Vector<double> s_leaf(2);
+		oomph::RefineableElement *leaf = this->quad_leaf_at_root_coordinate(s_root, s_leaf);
+		oomph::FiniteElement *leaf_fe = dynamic_cast<oomph::FiniteElement *>(leaf);
+		if (!leaf_fe) return nullptr;
+		return leaf_fe->get_node_at_local_coordinate(s_leaf);
+	}
+
+	oomph::Node *BulkElementBase::mixed_quad_shared_node(const oomph::Vector<double> &s_fraction)
+	{
+		using namespace oomph::QuadTreeNames;
+		oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(this);
+		oomph::RefineableQElement<2> *qre = dynamic_cast<oomph::RefineableQElement<2> *>(this);
+		if (!re || !qre || !re->tree_pt()) return nullptr;
+		std::vector<int> edges;
+		if (s_fraction[0] == 0.0) edges.push_back(W);
+		if (s_fraction[0] == 1.0) edges.push_back(E);
+		if (s_fraction[1] == 0.0) edges.push_back(S);
+		if (s_fraction[1] == 1.0) edges.push_back(N);
+		for (int my_edge : edges)
+		{
+			oomph::Vector<unsigned> tr(2);
+			oomph::Vector<double> slo(2), shi(2);
+			int ne, dl;
+			bool intree;
+			oomph::QuadTree *neigh = qre->quadtree_pt()->gteq_edge_neighbour(my_edge, tr, slo, shi, ne, dl, intree);
+			if (!neigh) continue;
+			oomph::RefineableTElement<2> *tri_root = dynamic_cast<oomph::RefineableTElement<2> *>(neigh->root_pt()->object_pt());
+			if (!tri_root || !tri_root->nodes_built()) continue; // quad neighbour -> oomph base already handled it
+			// Ascend THIS quad son to the root frame (axis-aligned son boxes) -> t along the root edge.
+			oomph::Vector<double> s = {-1.0 + 2.0 * s_fraction[0], -1.0 + 2.0 * s_fraction[1]};
+			oomph::Tree *trn = re->tree_pt();
+			while (trn->father_pt())
+			{
+				const int st = trn->son_type();
+				const double xo = (st == SE || st == NE) ? 0.5 : -0.5, yo = (st == NW || st == NE) ? 0.5 : -0.5;
+				s[0] = xo + 0.5 * s[0];
+				s[1] = yo + 0.5 * s[1];
+				trn = trn->father_pt();
+			}
+			const double t = (my_edge == S || my_edge == N) ? 0.5 * (s[0] + 1.0) : 0.5 * (s[1] + 1.0);
+			oomph::FiniteElement *qroot = dynamic_cast<oomph::FiniteElement *>(re->tree_pt()->root_pt()->object_pt());
+			const unsigned n = qroot->nnode_1d();
+			oomph::Node *Pb = 0, *Qb = 0; // Pb at t=0, Qb at t=1
+			switch (my_edge)
+			{
+				case S: Pb = qroot->node_pt(0);           Qb = qroot->node_pt(n - 1);       break;
+				case N: Pb = qroot->node_pt(n * (n - 1)); Qb = qroot->node_pt(n * n - 1);   break;
+				case W: Pb = qroot->node_pt(0);           Qb = qroot->node_pt(n * (n - 1)); break;
+				case E: Pb = qroot->node_pt(n - 1);       Qb = qroot->node_pt(n * n - 1);   break;
+				default: continue;
+			}
+			oomph::FiniteElement *tri_root_fe = dynamic_cast<oomph::FiniteElement *>(neigh->root_pt()->object_pt());
+			const int iP = tri_root_fe->get_node_number(Pb), iQ = tri_root_fe->get_node_number(Qb);
+			if (iP < 0 || iQ < 0) continue;
+			oomph::Vector<double> sP(2), sQ(2), s_troot(2);
+			tri_root_fe->local_coordinate_of_node(iP, sP);
+			tri_root_fe->local_coordinate_of_node(iQ, sQ);
+			for (int d = 0; d < 2; d++) s_troot[d] = (1.0 - t) * sP[d] + t * sQ[d];
+			oomph::Node *nn = tri_root->node_at_root_coordinate(s_troot);
+			if (nn) return nn;
+		}
+		return nullptr;
+	}
+
+	void BulkElementQuad2dC1::quad_hang_helper(const int &value_id, const int &my_edge, std::ofstream &output_hangfile)
+	{
+		oomph::Vector<unsigned> translate_s(2);
+		oomph::Vector<double> s_lo(2), s_hi(2);
+		int neigh_edge, diff_level;
+		bool in_tree;
+		oomph::QuadTree *neigh = quadtree_pt()->gteq_edge_neighbour(my_edge, translate_s, s_lo, s_hi, neigh_edge, diff_level, in_tree);
+		if (neigh && dynamic_cast<oomph::TElementBase *>(neigh->object_pt()))
+		{
+			// Cross-shape tri neighbour: hang on the correct tri LEAF (found by descending the tri ROOT per
+			// node), which is coarser-or-equal. Pass the tri ROOT; the level guard in mixed_hang_edge_node
+			// hangs only where the tri leaf is strictly coarser (equal is shared, finer hangs from its side).
+			this->mixed_quad_edge_hang(value_id, my_edge, dynamic_cast<oomph::RefineableElement *>(neigh->root_pt()->object_pt()));
+			return;
+		}
+		oomph::RefineableQElement<2>::quad_hang_helper(value_id, my_edge, output_hangfile);
+	}
+
+	void BulkElementQuad2dC2::quad_hang_helper(const int &value_id, const int &my_edge, std::ofstream &output_hangfile)
+	{
+		oomph::Vector<unsigned> translate_s(2);
+		oomph::Vector<double> s_lo(2), s_hi(2);
+		int neigh_edge, diff_level;
+		bool in_tree;
+		oomph::QuadTree *neigh = quadtree_pt()->gteq_edge_neighbour(my_edge, translate_s, s_lo, s_hi, neigh_edge, diff_level, in_tree);
+		if (neigh && dynamic_cast<oomph::TElementBase *>(neigh->object_pt()))
+		{
+			// Cross-shape tri neighbour: hang on the correct tri LEAF (found by descending the tri ROOT per
+			// node), which is coarser-or-equal. Pass the tri ROOT; the level guard in mixed_hang_edge_node
+			// hangs only where the tri leaf is strictly coarser (equal is shared, finer hangs from its side).
+			this->mixed_quad_edge_hang(value_id, my_edge, dynamic_cast<oomph::RefineableElement *>(neigh->root_pt()->object_pt()));
+			return;
+		}
+		oomph::RefineableQElement<2>::quad_hang_helper(value_id, my_edge, output_hangfile);
+	}
+
 	void BulkElementBase::flatten_hang_for_value(oomph::Node *n, unsigned v, double weight, std::map<int, double> &out, int depth)
 	{
 		if (depth > 32)

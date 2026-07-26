@@ -299,6 +299,42 @@ namespace pyoomph
     int leaf_local_eqn_for_value(oomph::Node *n, unsigned v);
     // As above but for the leaf's coordinate i (position dof).
     int leaf_local_eqn_for_position(oomph::Node *n, unsigned i);
+
+    // --- Cross-shape (mixed-mesh) hanging (topological, no geometry) ---
+  public:
+    // Hang node X (one of THIS fine element's edge interpolating nodes for value_id) on the strictly
+    // COARSER neighbour nb_re of a DIFFERENT shape, given X's fraction t along the shared coarse edge
+    // whose real corner nodes are Pb (t=0) and Qb (t=1). The neighbour-local coordinate is the affine
+    // blend (1-t)*s(Pb in nb) + t*s(Qb in nb) of the neighbour's local coords of the shared corner nodes
+    // (pure topology -- node indices + local coords, no positions/locate_zeta) and the master weights come
+    // from the neighbour's interpolating_basis. Shape-agnostic; the 3D analogue blends 3/4 face-corner
+    // nodes barycentrically. Skips X if the neighbour already owns an interpolating node there, and guards
+    // cyclic hangs. Public because the triangle hang path (RefineableTElement<2>) calls it too. Returns
+    // true iff a hang was installed.
+    bool mixed_hang_edge_node(oomph::Node *X, oomph::Node *Pb, oomph::Node *Qb, double t, oomph::RefineableElement *nb_re, const int &value_id);
+    // Given a coordinate in THIS QUAD's ROOT-element local frame ([-1,1]^2), descend the QuadTree to the
+    // leaf that contains it (topological axis-aligned son-box descent, no geometry) and return that leaf's
+    // node at the coordinate, or null. The quad counterpart of RefineableTElement<2>::node_at_root_coordinate,
+    // used for cross-shape node-sharing (a tri finds the coincident node an adjacent refined quad built).
+    oomph::Node *quad_node_at_root_coordinate(const oomph::Vector<double> &s_root);
+    // As above but returns the LEAF element and the coordinate in its own frame (for cross-shape HANGING:
+    // a tri hangs on this quad leaf's interpolating_basis at s_leaf). null if not resolvable.
+    oomph::RefineableElement *quad_leaf_at_root_coordinate(const oomph::Vector<double> &s_root, oomph::Vector<double> &s_leaf);
+    // Hang core: hang node X on neighbour nb_re's interpolating_basis at nb-local coordinate s_nb (shared
+    // skip + cycle guard). The shape/dimension-agnostic primitive shared by all cross-shape hang paths.
+    bool mixed_hang_node_at(oomph::Node *X, oomph::RefineableElement *nb_re, const oomph::Vector<double> &s_nb, const int &value_id);
+
+  protected:
+    // Cross-shape node-sharing on THIS quad's side: for the son node at fractional coordinate s_fraction on
+    // an edge shared with a TRI, map topologically into the tri ROOT frame and descend to the tri leaf. The
+    // quad node_created_by_neighbour override calls this after oomph's own quad<->quad sharing returns null.
+    oomph::Node *mixed_quad_shared_node(const oomph::Vector<double> &s_fraction);
+    // Called from the overridden quad_hang_helper when the edge my_edge (N/S/E/W) has a strictly coarser
+    // cross-shape (triangular) neighbour coarse_nb: enumerate this quad's edge interpolating nodes for
+    // value_id, ascend each to the quad's root frame (axis-aligned son boxes -> the edge keeps its compass
+    // direction, so the root-edge corners are the coarse edge corners Pb,Qb), get its fraction t along that
+    // edge, and hang it via mixed_hang_edge_node.
+    void mixed_quad_edge_hang(const int &value_id, const int &my_edge, oomph::RefineableElement *coarse_nb);
     // Flatten the value v of node n into a weighted sum over real free leaf dofs, accumulating
     // local_eqn -> weight into `out`. Composes genuine oomph hanging (n->hanging_pt(v)) with C1
     // dof-constraints (a constrained node is expanded via its stored c1_constraint_corners, then each
@@ -1239,6 +1275,18 @@ namespace pyoomph
     unsigned nvertex_node() const override { return oomph::QElement<2, 2>::nvertex_node(); }
     oomph::Node *vertex_node_pt(const unsigned &j) const override { return QElement<2, 2>::vertex_node_pt(j); }
     void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
+    // Override to handle a cross-shape (triangular) coarse neighbour at a mixed quad+tri interface, which
+    // oomph's QuadTree gteq_edge_neighbour compass math cannot (it would hang on wrong masters -> a cyclic
+    // hang). Quad<->quad edges fall through to the base implementation.
+    void quad_hang_helper(const int &value_id, const int &my_edge, std::ofstream &output_hangfile) override;
+    // Override to also share a coincident interface node with an adjacent TRI (mixed mesh); quad<->quad
+    // sharing falls through to the oomph base. Prevents duplicate interface nodes when both sides refine.
+    oomph::Node *node_created_by_neighbour(const oomph::Vector<double> &s_fraction, bool &is_periodic) override
+    {
+      oomph::Node *n = oomph::RefineableQElement<2>::node_created_by_neighbour(s_fraction, is_periodic);
+      if (n) return n;
+      return this->mixed_quad_shared_node(s_fraction);
+    }
     BulkElementBase *create_son_instance() const override
     {
       BulkElementBase::__CurrentCodeInstance = codeinst;
@@ -1304,6 +1352,15 @@ namespace pyoomph
     oomph::Node *vertex_node_pt(const unsigned &j) const override { return QElement<2, 3>::vertex_node_pt(j); }
 
     void further_setup_hanging_nodes() override;
+    // See BulkElementQuad2dC1: handle a cross-shape (tri) coarse neighbour at a mixed interface.
+    void quad_hang_helper(const int &value_id, const int &my_edge, std::ofstream &output_hangfile) override;
+    // See BulkElementQuad2dC1: share a coincident interface node with an adjacent tri (mixed mesh).
+    oomph::Node *node_created_by_neighbour(const oomph::Vector<double> &s_fraction, bool &is_periodic) override
+    {
+      oomph::Node *n = oomph::RefineableQElement<2>::node_created_by_neighbour(s_fraction, is_periodic);
+      if (n) return n;
+      return this->mixed_quad_shared_node(s_fraction);
+    }
     oomph::Node *interpolating_node_pt(const unsigned &n, const int &value_id) override;
     double local_one_d_fraction_of_interpolating_node(const unsigned &n1d, const unsigned &i, const int &value_id) override;
     oomph::Node *get_interpolating_node_at_local_coordinate(const oomph::Vector<double> &s, const int &value_id) override;

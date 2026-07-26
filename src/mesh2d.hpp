@@ -155,6 +155,13 @@ namespace pyoomph
 
     void setup_tree_forest() override;
 
+    // Enforce 2:1 balancing across a MIXED quad+tri interface only: the cross-shape hanging
+    // (BulkElementBase::mixed_hang_edge_node) is implemented for a single-level (2:1) jump, so keep every
+    // quad<->tri interface at most 2:1 by refining the coarser side (iterated to a fixed point). No-op for
+    // pure-quad meshes (oomph's own tree adapt balances them) and pure-tri meshes (the tri hang descends
+    // through multi-level jumps, so they must NOT be over-refined). See mesh2d.cpp.
+    void enforce_refinement_balance() override;
+
     // Triangle hanging is now done per-element inside adapt_mesh (RefineableTElement<2>::
     // setup_hanging_nodes / BulkElementTri2dC2::further_setup_hanging_nodes -> tri_hang_helper),
     // exactly as oomph does for quads, so no mesh-level post-adapt pass is needed (the base no-op
