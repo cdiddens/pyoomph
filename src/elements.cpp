@@ -8642,18 +8642,16 @@ namespace pyoomph
 			{
 				this->setup_hang_for_value(i);
 			}
-			// TREE-HANG mode only (in geometric mode the mesh-level post_adapt pass does this): hang each C2
-			// mid-edge node's separate C1(TB) value slot linearly on its two edge-corner nodes. This is the
-			// C1-on-C2 rule (a mid-edge pressure IS the mean of its edge corners) and, crucially, it
-			// constrains the STALE pressure slot oomph leaves behind on a former fine corner once its region
-			// is UNREFINED and the node becomes a plain conforming C2 mid-edge: setup_hang_for_value only
-			// hangs nodes across a coarser (2:1) neighbour, so without this the stale slot is a free,
+			// Hang each C2 mid-edge node's separate C1(TB) value slot linearly on its two edge-corner nodes.
+			// This is the C1-on-C2 rule (a mid-edge pressure IS the mean of its edge corners) and, crucially,
+			// it constrains the STALE pressure slot oomph leaves behind on a former fine corner once its
+			// region is UNREFINED and the node becomes a plain conforming C2 mid-edge: setup_hang_for_value
+			// only hangs nodes across a coarser (2:1) neighbour, so without this the stale slot is a free,
 			// unassembled dof (wrong Jacobian / a "degrade to C1 on a vertex" throw). A node carries the slot
 			// only if it was ever a corner, so ordinary mid-edge nodes (which never store the pressure) are
 			// skipped by the nvalue guard; genuine 2:1 mid-nodes were already hung above and are skipped via
 			// is_hanging. Weights 0.5/0.5 are exact for the straight edge that a C2 mid-edge bisects.
-			static const int hang_mode = []() { const char *e = getenv("PYOOMPH_TRI_HANG"); if (!e) return 1; if (std::string(e) == "geometric") return 0; if (std::string(e) == "tree") return 1; if (std::string(e) == "validate") return 2; return 1; }();
-			if (hang_mode != 0 && this->nnode() >= 6)
+			if (this->nnode() >= 6)
 			{
 				std::vector<int> c1_slots;
 				for (int sp : {SPACE_INDEX_C1TB, SPACE_INDEX_C1})

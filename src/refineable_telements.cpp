@@ -1435,22 +1435,10 @@ namespace oomph
   //====================================================================
   /// Set up all hanging nodes.
   //====================================================================
-  // Which triangle-hanging path is active (env PYOOMPH_TRI_HANG): 0 = geometric (default, the
-  // node_strictly_on_*/facet-adjacency scheme in mesh2d.cpp post_adapt_setup_hanging_nodes);
-  // 1 = tree (this oomph-style setup_hang* path); 2 = validate (tree runs during adapt, then the
-  // geometric pass captures it, redoes itself and compares -- see post_adapt_setup_hanging_nodes).
-  int tri_hang_mode()
-  {
-    static const int mode = []() {
-      const char *e = getenv("PYOOMPH_TRI_HANG");
-      if (!e) return 1;                            // DEFAULT: tree route (per-element, the oomph way)
-      if (std::string(e) == "geometric") return 0; // legacy mesh-level facet-adjacency pass (mesh2d.cpp)
-      if (std::string(e) == "tree") return 1;
-      if (std::string(e) == "validate") return 2;
-      return 1;
-    }();
-    return mode;
-  }
+  // Triangle hanging is done per-element here (setup_hanging_nodes / setup_hang_for_value ->
+  // tri_hang_helper), inside oomph's adapt_mesh, exactly as RefineableQElement does for quads. The
+  // legacy mesh-level geometric facet-adjacency pass (mesh2d.cpp post_adapt_setup_hanging_nodes) was
+  // removed once this tree route was validated to match it (machine-zero) across the full tri suite.
 
   namespace
   {
@@ -1914,10 +1902,8 @@ namespace oomph
 
   void RefineableTElement<2>::setup_hanging_nodes(Vector<std::ofstream *> &)
   {
-    // Geometric mode: mesh2d.cpp post_adapt_setup_hanging_nodes handles all tri hanging.
-    if (tri_hang_mode() == 0) return;
     using namespace QuadTreeNames;
-    // Geometric (position / C2) hanging is value_id -1.
+    // Geometry / position / C2 hanging is value_id -1 (the shared geometric slot).
     tri_hang_helper(-1, S);
     tri_hang_helper(-1, E);
     tri_hang_helper(-1, W);
@@ -1929,7 +1915,6 @@ namespace oomph
   //===============================================================
   void RefineableTElement<2>::setup_hang_for_value(const int &value_id)
   {
-    if (tri_hang_mode() == 0) return; // geometric mode handles it in mesh2d.cpp
     using namespace QuadTreeNames;
     tri_hang_helper(value_id, S);
     tri_hang_helper(value_id, E);
