@@ -47,18 +47,36 @@ from importlib import metadata
 if TYPE_CHECKING:
     from ..generic.problem import Problem
 
-def _try_to_find_lib(nam:str | list[str])->CDLL | None:
-    # First try to find the library via the packages
+def _mkl_rt_from_package()->CDLL | None:
+    # Most deterministic source when the pip 'mkl' wheel is installed: it records
+    # the (versioned) runtime library in its RECORD as a path relative to
+    # site-packages, e.g. "../../libmkl_rt.so.2" -> <env>/lib/libmkl_rt.so.2.
+    # Note there is never a bare "libmkl_rt.so" - the wheel only ships the
+    # versioned name, so we must not assume a single, unversioned match.
     try:
-        mkl_files=metadata.files('mkl')
-        mkl_rt=[p for p in (mkl_files or []) if 'mkl_rt' in str(p)]
-        if len(mkl_rt)==1:
-            mkl_rt=first(mkl_rt)
-            res=CDLL(mkl_rt.locate())
-            if res is not None:
-                return res
-    except:
-        pass
+        files=metadata.files('mkl') or []
+    except metadata.PackageNotFoundError:
+        return None
+    cands:list[str]=[]
+    for p in files:
+        base=os.path.basename(str(p))
+        if base.startswith(("libmkl_rt.so","libmkl_rt.dylib","mkl_rt")):
+            loc=os.path.realpath(p.locate())  # p.locate() is un-normalized (has ../..)
+            if os.path.exists(loc):
+                cands.append(loc)
+    # Prefer an unversioned name if one ever appears, else try each candidate.
+    def _rank(path:str)->tuple[int,str]:
+        b=os.path.basename(path)
+        return (0 if b in ("libmkl_rt.so","libmkl_rt.dylib","mkl_rt.dll") else 1, b)
+    for loc in sorted(set(cands),key=_rank):
+        try:
+            return CDLL(loc)
+        except OSError:
+            continue
+    return None
+
+
+def _try_to_find_lib(nam:str | list[str])->CDLL | None:
     if isinstance(nam,list):
         for l in nam:
             res=_try_to_find_lib(l)
@@ -89,17 +107,17 @@ if sys.platform == "linux":
     if "PYOOMPH_PARDISO_LIB" in os.environ.keys():
         MKLlib=CDLL(os.environ["PYOOMPH_PARDISO_LIB"])
     else:
-        MKLlib=_try_to_find_lib(["libmkl_rt.so",os.path.join(Path.home(), ".local/lib/libmkl_rt.so"),"mkl_rt",os.path.join(Path.home(), ".local/lib/libmkl_rt.so.2"),os.path.join(Path.home(), ".local/lib/libmkl_rt.so.3"),os.path.join(Path.home(), ".local/lib/libmkl_rt.so.4")])
+        MKLlib=_mkl_rt_from_package() or _try_to_find_lib(["libmkl_rt.so",os.path.join(Path.home(), ".local/lib/libmkl_rt.so"),"mkl_rt",os.path.join(Path.home(), ".local/lib/libmkl_rt.so.2"),os.path.join(Path.home(), ".local/lib/libmkl_rt.so.3"),os.path.join(Path.home(), ".local/lib/libmkl_rt.so.4")])
 elif sys.platform == "win32":
     if "PYOOMPH_PARDISO_LIB" in os.environ.keys():
         MKLlib=CDLL(os.environ["PYOOMPH_PARDISO_LIB"])
     else:
-        MKLlib = _try_to_find_lib(["mkl_rt.dll", "mkl_rt.1.dll","mkl_rt.2.dll","mkl_rt.3.dll","mkl_rt.4.dll", "mkl_rt"])
+        MKLlib = _mkl_rt_from_package() or _try_to_find_lib(["mkl_rt.dll", "mkl_rt.1.dll","mkl_rt.2.dll","mkl_rt.3.dll","mkl_rt.4.dll", "mkl_rt"])
 elif sys.platform=="darwin":
     if "PYOOMPH_PARDISO_LIB" in os.environ.keys():
         MKLlib=CDLL(os.environ["PYOOMPH_PARDISO_LIB"])
     else:
-        MKLlib = _try_to_find_lib(["libmkl_rt.dylib", "libmkl_rt.1.dylib", "libmkl_rt.2.dylib","libmkl_rt.3.dylib","libmkl_rt.4.dylib", "mkl_rt"])
+        MKLlib = _mkl_rt_from_package() or _try_to_find_lib(["libmkl_rt.dylib", "libmkl_rt.1.dylib", "libmkl_rt.2.dylib","libmkl_rt.3.dylib","libmkl_rt.4.dylib", "mkl_rt"])
 else:
     raise RuntimeError("Unknown platform: "+sys.platform)
 

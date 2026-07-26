@@ -98,6 +98,28 @@ class PETSCSolver(GenericLinearSystemSolver):
         """
         return PETSc
     
+    def _field_split_required(self)->bool:
+        # The field-index sets (IS) built by setup_field_split() are only ever consumed to configure a
+        # PETSc "fieldsplit" preconditioner (via pc.setFieldSplitIS in setup_solver, or by a derived
+        # solver calling get_field_split_IS). Building them is not free: it triggers an O(ndof) sweep
+        # over every submesh in the problem (see Problem::get_dof_to_global_field_index_mapping) on every
+        # solve after the equations have been (re)assigned. So only do it when a fieldsplit PC is actually
+        # in play, which happens in two ways:
+        #   (a) the user requested a named split via problem.petsc_fieldsplit, or
+        #   (b) a fieldsplit preconditioner was selected through PETSc options, e.g. -pc_type fieldsplit
+        #       (also matches a prefixed option such as -fieldsplit_..._pc_type fieldsplit). This covers
+        #       options set programmatically via PETSc.Options()[...] too, not just the command line.
+        # NOTE: this runs before setup_solver creates the PC, so a fieldsplit PC configured purely by hand
+        # on the PC object (pc.setType("fieldsplit") in an overridden setup_solver, with neither signal
+        # above set) is invisible here. Such a subclass should either set one of the two signals above, or
+        # fetch its indices via get_field_split_IS(), which builds the mapping lazily on demand.
+        if self.problem.petsc_fieldsplit is not None:
+            return True
+        for key, val in PETSc.Options().getAll().items(): #type:ignore
+            if key.endswith("pc_type") and val == "fieldsplit":
+                return True
+        return False
+
     def setup_field_split(self):
         if not self.problem.is_quiet():
             print("Setting up field split for PETSc solver")
@@ -183,8 +205,14 @@ class PETSCSolver(GenericLinearSystemSolver):
         self._dofs_to_field_info=[names,mapping,field_is]
         
     def get_field_split_IS(self,splitname:str)->PETSc.IS: #type:ignore
+        # Lazily build the field split on demand. _field_split_required() (checked before solve) only
+        # sees fieldsplit requested via problem.petsc_fieldsplit or the PETSc options database -- it runs
+        # before setup_solver and so cannot detect a fieldsplit PC configured by hand on the PC object.
+        # A subclass whose overridden setup_solver calls this method to fetch the IS is exactly such a
+        # manual path, so build the mapping here rather than relying on the detector having fired first.
         if self._dofs_to_field_info is None:
-            raise RuntimeError("Field split IS requested but field split info is not set up yet. Please call this method only in setup_solver and with having set the petsc_fieldsplit attribute on the problem")
+            self.setup_field_split()
+        assert self._dofs_to_field_info is not None
         if splitname not in self._dofs_to_field_info[2].keys():
             raise RuntimeError("Requested field split "+splitname+" not found. Available splits: "+str(self._dofs_to_field_info[2].keys()))
         return self._dofs_to_field_info[2][splitname]
@@ -229,10 +257,11 @@ class PETSCSolver(GenericLinearSystemSolver):
             if self.x is not None:
                 self.x.destroy() #type:ignore
                 self.x=None
-            if self._dofs_to_field_info is not None:
-                for IS in self._dofs_to_field_info[2].values():
-                    IS.destroy() #type:ignore
-                self._dofs_to_field_info=None
+            # NOTE: _dofs_to_field_info (the field-split index sets) is deliberately NOT reset here.
+            # The IS only depend on the global DOF numbering, which changes solely when the equations
+            # are reassigned -- and that path already invalidates them in _before_assigning_equation_numbers.
+            # Recreating the matrix (this op_flag==1) with an unchanged numbering leaves the IS valid, so
+            # keeping them cached avoids rebuilding the (O(ndof)) field map on every single solve.
 
             # The CSR arrays arrive as zero-copy numpy views onto oomph-lib's CRDoubleMatrix buffers
             # (see src/nanobind/solver.cpp) and are normally already in PETSc's own index/scalar
@@ -256,7 +285,10 @@ class PETSCSolver(GenericLinearSystemSolver):
             self.x = PETSc.Vec().createSeq(n) #type:ignore
         elif op_flag == 2:
             #print("Solving linear system with PETSc", op_flag, n, nnz, nrhs, transpose, "SPLIT INFO",self._dofs_to_field_info)
-            if self._dofs_to_field_info is None:
+            # _dofs_to_field_info is reset to None whenever the equations are reassigned
+            # (_before_assigning_equation_numbers), so this only recomputes the field split after a
+            # reassignment, and only when a fieldsplit preconditioner actually needs the indices.
+            if self._dofs_to_field_info is None and self._field_split_required():
                 self.setup_field_split()
             bv = PETSc.Vec().createWithArray(b) #type:ignore
             self.petsc_rhs=bv
@@ -296,10 +328,8 @@ class PETSCSolver(GenericLinearSystemSolver):
             if self.x is not None:
                 self.x.destroy() #type:ignore
                 self.x=None
-            if self._dofs_to_field_info is not None:
-                for IS in self._dofs_to_field_info[2].values():
-                    IS.destroy() #type:ignore
-                self._dofs_to_field_info=None
+            # See solve_serial: the field-split IS depend only on the DOF numbering, so they are
+            # invalidated in _before_assigning_equation_numbers (on reassignment), not on every matrix rebuild.
             #print("PETSCINF",nrow_local,n)
             #print("Creating petsc mat ")
             self.petsc_mat = PETSc.Mat().createAIJ(size=((nrow_local, n), (nrow_local, n),),csr=(row_start, col_index, values)) #type:ignore
@@ -320,8 +350,10 @@ class PETSCSolver(GenericLinearSystemSolver):
         # self.petsc_mat
             
         elif op_flag == 2:
-            
-            if self._dofs_to_field_info is None:
+
+            # See solve_serial: only (re)build the field split after an equation reassignment, and only
+            # when a fieldsplit preconditioner actually needs the field indices.
+            if self._dofs_to_field_info is None and self._field_split_required():
                 self.setup_field_split()
             bv = PETSc.Vec().createWithArray(b) #type:ignore
             self.petsc_rhs=bv
