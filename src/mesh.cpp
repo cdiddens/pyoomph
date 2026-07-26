@@ -64,7 +64,9 @@ namespace pyoomph
       if (this->element_pt(ne)->is_halo()) continue; // Skip halo elements, as they will be handled by the owning process
 #endif
 */
-      dynamic_cast<BulkElementBase *>(this->element_pt(ne))->_numpy_index = cnt++;
+      BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(ne));
+      be->_numpy_index = cnt++;
+      be->_tess_hang_scoord.clear(); // fresh per tesselated-numpy pass (populated by inform_coarser below)
     }
     std::vector<std::vector<std::set<oomph::Node *>>> additional_elemental_tri_nodes(nelement);
     if (tesselate_tri && !discontinuous)
@@ -1556,7 +1558,9 @@ namespace pyoomph
     // Additional nodes due to different refinements:
     for (unsigned int ne = 0; ne < nelement; ne++)
     {
-      dynamic_cast<BulkElementBase *>(this->element_pt(ne))->_numpy_index = ne;
+      BulkElementBase *bee = dynamic_cast<BulkElementBase *>(this->element_pt(ne));
+      bee->_numpy_index = ne;
+      bee->_tess_hang_scoord.clear(); // fresh per tesselated-numpy pass (populated by inform_coarser below)
     }
     std::vector<std::vector<std::set<oomph::Node *>>> additional_elemental_tri_nodes(nelement);
     if (tesselate_tri && !discontinuous)

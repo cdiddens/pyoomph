@@ -177,6 +177,106 @@ def test_error_based_triangle_adaptivity_residual_oracle(space):
         assert _max_abs_residual(problem) < 1e-9
 
 
+def _tesselated_triangles(mesh):
+    # (points, triangles) of the tesselate_tri=True numpy export used by MeshFileOutput/pyvista.
+    nodal, eleminds = mesh.to_numpy(True, False, 0, False)[:2]
+    pts = np.asarray(nodal)[:, :2]
+    tris = []
+    for row in np.asarray(eleminds):
+        valid = [int(i) for i in row if i >= 0]
+        if len(valid) == 3:
+            tris.append(valid)
+    return pts, np.asarray(tris, dtype=int)
+
+
+def _count_tjunctions(pts, tris):
+    # A conforming triangulation has no vertex in the interior of another triangle's edge. Each such
+    # hanging vertex on a coarser element's edge that is NOT introduced as a sub-triangle vertex is a
+    # visible T-junction crack in the plotted output.
+    verts = np.unique(tris.reshape(-1))
+    tj, seen = 0, set()
+    for t in tris:
+        for a, b in ((t[0], t[1]), (t[1], t[2]), (t[2], t[0])):
+            A, B = pts[a], pts[b]
+            AB = B - A
+            L2 = AB @ AB
+            if L2 < 1e-20:
+                continue
+            for p in verts:
+                if p == a or p == b:
+                    continue
+                lam = ((pts[p] - A) @ AB) / L2
+                if lam <= 1e-7 or lam >= 1 - 1e-7:
+                    continue
+                perp = pts[p] - A - lam * AB
+                if perp @ perp < 1e-14 * L2:
+                    key = (min(a, b), max(a, b), int(p))
+                    if key not in seen:
+                        seen.add(key)
+                        tj += 1
+    return tj
+
+
+def _tess_area(pts, tris):
+    a, b, c = pts[tris[:, 0]], pts[tris[:, 1]], pts[tris[:, 2]]
+    return float(0.5 * np.abs((b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (c[:, 0] - a[:, 0]) * (b[:, 1] - a[:, 1])).sum())
+
+
+@pytest.mark.parametrize("space", ["C1", "C2", "C1TB", "C2TB"])
+def test_tesselate_tri_output_no_tjunctions(space):
+    # MeshFileOutput(tesselate_tri=True) must split every element (including coarser ones on a
+    # hanging/T-junction edge, and under pure-tri MULTI-level hanging where an edge carries several
+    # collinear subdivision points) so the plotted triangulation is crack-free and covers the domain
+    # exactly. The oracle: zero T-junctions and total sub-triangle area == the unit square.
+    with _TriPoissonAdaptive(space=space) as problem:
+        problem.max_refinement_level = 4
+        problem.solve(spatial_adapt=3)
+        pts, tris = _tesselated_triangles(problem.get_mesh("domain"))
+        assert len(tris) > 0
+        assert _count_tjunctions(pts, tris) == 0, "T-junction cracks in tesselated tri output"
+        assert abs(_tess_area(pts, tris) - 1.0) < 1e-9, "tesselated output does not cover the domain exactly"
+
+
+from pyoomph.equations.ALE import LaplaceSmoothedMesh
+
+
+@pytest.mark.parametrize("space", ["C2", "C2TB"])
+def test_tesselate_tri_curved_geometry_valid(space):
+    # Regression for the droplet-evaporation crash: on CURVED (C2/C2TB-geometry) elements the finer-
+    # neighbour hanging nodes sit on the BOWED physical edge, off the straight corner chord. A straight-
+    # line edge test would reject them, so the coarser element keeps a straight chord that OVERLAPS the
+    # finer neighbour's curve-following triangles -- an invalid self-overlapping triangulation that
+    # matplotlib's TrapezoidMapTriFinder rejects (as the plotter builds). tess_locate_on_edge places the
+    # nodes on the quadratic edge instead. Oracle: consistent triangle orientation (no folds) AND a valid
+    # matplotlib triangulation. (Straight-triangle tesselation of VERY strongly curved elements can still
+    # fold; this uses a realistic, droplet-scale curvature.)
+    mtri = pytest.importorskip("matplotlib.tri")
+
+    class _Curved(Problem):
+        def define_problem(self):
+            self += RectangularQuadMesh(name="domain", N=6, split_in_tris="crossed")
+            X = var("lagrangian")
+            eqs = LaplaceSmoothedMesh() + ElementSpace(space)
+            eqs += DirichletBC(mesh_x=True, mesh_y=True) @ "bottom"
+            eqs += DirichletBC(mesh_x=True) @ ["left", "right"]
+            eqs += DirichletBC(mesh_y=1 + 0.05 * sin(pi * X[0])) @ "top"  # smoothly bow the top -> curved C2 geometry
+            # multi-level (0/2/3) refinement -> curved elements carrying several hanging nodes per edge
+            eqs += RefineAccordingToElement(level_func=lambda e: 3 if e.get_Eulerian_midpoint()[1] > 0.55 else (2 if e.get_Eulerian_midpoint()[0] > 0.5 else 0))
+            self += eqs @ "domain"
+
+    with _Curved() as problem:
+        problem.max_refinement_level = 3
+        problem.solve()
+        pts, tris = _tesselated_triangles(problem.get_mesh("domain"))
+        assert len(tris) > 0
+        a, b, c = pts[tris[:, 0]], pts[tris[:, 1]], pts[tris[:, 2]]
+        area = (b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (c[:, 0] - a[:, 0]) * (b[:, 1] - a[:, 1])
+        assert (area > 0).all() or (area < 0).all(), "folded (inverted) sub-triangles in curved tesselation"
+        span = max(np.ptp(pts[:, 0]), np.ptp(pts[:, 1]), 1e-30)
+        tr = mtri.Triangulation(pts[:, 0] / span, pts[:, 1] / span, tris)
+        tr.get_trifinder()  # raises "Triangulation is invalid" on any self-overlap
+
+
 from pyoomph.equations.navier_stokes import StokesEquations
 
 

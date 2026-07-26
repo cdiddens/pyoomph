@@ -1755,6 +1755,95 @@ namespace oomph
     return 0;
   }
 
+  // See declaration. The coordinate machinery mirrors node_created_by_neighbour() (which computes exactly
+  // "this node's local coordinate in the edge neighbour"), but here we REGISTER our edge nodes on a strictly
+  // coarser neighbour for the tesselated-numpy hanging-node export instead of reusing a coincident node.
+  void RefineableTElement<2>::tess_register_on_coarser_for_numpy(std::vector<std::vector<std::set<Node *>>> &add_nodes)
+  {
+    using namespace QuadTreeNames;
+    pyoomph::BulkElementBase *me = dynamic_cast<pyoomph::BulkElementBase *>(this);
+    if (!me || !this->Tree_pt)
+      return;
+    RefineableTElement<2> *my_root = dynamic_cast<RefineableTElement<2> *>(this->Tree_pt->root_pt()->object_pt());
+    const int compass[3] = {S, E, W};
+    for (int ci = 0; ci < 3; ci++)
+    {
+      TriEdgeNeighbour nb = this->tri_edge_neighbour(compass[ci]);
+      // A coarser tri neighbour (nb.el, diff_level<0) or ANY cross-root quad neighbour (cross_shape_root):
+      // we descend the quad to the leaf at our edge point and let the pointer-identity + reference-edge tests
+      // in the coarse element's add_node discard equal/finer (2:1-balanced interface) neighbours.
+      RefineableTElement<2> *coarse_tri = (nb.el && nb.diff_level < 0 && nb.el != this) ? nb.el : nullptr;
+      pyoomph::BulkElementBase *qroot = nullptr;
+      FiniteElement *qroot_fe = nullptr;
+      if (!coarse_tri && nb.cross_shape_root)
+      {
+        qroot = dynamic_cast<pyoomph::BulkElementBase *>(nb.cross_shape_root);
+        qroot_fe = dynamic_cast<FiniteElement *>(nb.cross_shape_root);
+      }
+      if (!coarse_tri && !qroot)
+        continue;
+      for (unsigned li = 0; li < me->nnode(); li++)
+      {
+        Vector<double> s_here(2);
+        me->local_coordinate_of_node(li, s_here);
+        bool on_edge;
+        if (compass[ci] == S)
+          on_edge = std::abs(s_here[1]) < 1e-9;
+        else if (compass[ci] == W)
+          on_edge = std::abs(s_here[0]) < 1e-9;
+        else // E
+          on_edge = std::abs(s_here[0] + s_here[1] - 1.0) < 1e-9;
+        if (!on_edge)
+          continue;
+        Vector<double> s_coarse(2);
+        if (coarse_tri)
+        {
+          bool ok;
+          if (!nb.cross_root)
+            ok = this->local_coordinate_in_other_leaf(s_here, coarse_tri, s_coarse);
+          else
+          {
+            if (!my_root)
+              continue;
+            Vector<double> s_root(2), s_nrroot(2);
+            this->local_coordinate_in_ancestor(s_here, my_root, s_root);
+            double t = param_on_edge(nb.my_edge_dir, s_root);
+            if (nb.reversed)
+              t = 1.0 - t;
+            point_on_edge(nb.nr_edge_dir, t, s_nrroot);
+            ok = root_coord_to_leaf(s_nrroot, coarse_tri, s_coarse);
+          }
+          if (ok)
+            dynamic_cast<pyoomph::BulkElementBase *>(coarse_tri)->add_node_from_finer_neighbor_for_tesselated_numpy(s_coarse, me->node_pt(li), add_nodes);
+        }
+        else // cross-shape quad: blend our shared-root-edge parameter into the quad ROOT frame, descend to leaf
+        {
+          if (!my_root || !qroot_fe || !nb.cross_shape_root->nodes_built())
+            continue;
+          int ea, eb;
+          edge_local_vertices(nb.my_edge_dir, ea, eb);
+          Node *Pb = my_root->vertex_node_pt(ea);
+          Node *Qb = my_root->vertex_node_pt(eb);
+          Vector<double> s_root(2);
+          this->local_coordinate_in_ancestor(s_here, my_root, s_root);
+          const double t = param_on_edge(nb.my_edge_dir, s_root);
+          const int iP = qroot_fe->get_node_number(Pb), iQ = qroot_fe->get_node_number(Qb);
+          if (iP < 0 || iQ < 0)
+            continue;
+          Vector<double> sP(2), sQ(2), s_qroot(2);
+          qroot_fe->local_coordinate_of_node(iP, sP);
+          qroot_fe->local_coordinate_of_node(iQ, sQ);
+          for (int d = 0; d < 2; d++)
+            s_qroot[d] = (1.0 - t) * sP[d] + t * sQ[d];
+          RefineableElement *qleaf = qroot->quad_leaf_at_root_coordinate(s_qroot, s_coarse);
+          pyoomph::BulkElementBase *qleaf_be = dynamic_cast<pyoomph::BulkElementBase *>(qleaf);
+          if (qleaf_be)
+            qleaf_be->add_node_from_finer_neighbor_for_tesselated_numpy(s_coarse, me->node_pt(li), add_nodes);
+        }
+      }
+    }
+  }
+
   RefineableElement *RefineableTElement<2>::leaf_at_root_coordinate(const Vector<double> &s_root, Vector<double> &s_leaf) const
   {
     if (!this->Tree_pt) return 0;

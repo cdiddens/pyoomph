@@ -1138,6 +1138,48 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
      Tests: `test_triangle_refinement.py`, `test_tet_refinement.py`, `test_constrained_adaptivity.py`,
      `test_mixed_mesh.py`, `test_boundary_element_identification.py`.
 
+   - **§4.16 — `tesselate_tri` output on adaptive tri / mixed meshes [DONE].** `MeshFileOutput(tesselate_tri=True)`
+     and the matplotlib plotter split every element into linear triangles for VTK/plot output. A COARSER element
+     on a hanging (T-junction) edge must include the finer neighbours' edge nodes as sub-triangle vertices, else
+     the plot cracks (and matplotlib's `TrapezoidMapTriFinder` rejects the self-overlap). Quads already did this
+     via `inform_coarser_neighbors_for_tesselated_numpy` + a delaunator fill; the four tri classes did not, so
+     adaptive tri/mixed output was wrong. **FULLY TOPOLOGICAL** (no physical positions, no `locate_zeta`, exact on
+     curved elements): the finer element computes each of its edge nodes' LOCAL COORDINATE in the coarse neighbour
+     via the tree neighbour finders' coordinate facilities, hands (node, s_coarse) to the coarse element, which
+     buckets by REFERENCE-SPACE edge + parameter. s_coarse is stored on the coarse element in the transient
+     `_tess_hang_scoord` member (cleared per pass by `Mesh::to_numpy` / `get_num_numpy_elemental_indices`), so the
+     `add_nodes` set-of-nodes structure and its `to_numpy` output-index resolution are unchanged. Fine-side
+     coordinate computation (mirrors the hang path):
+       * Quad (`quad_register_on_coarser_for_numpy`): `gteq_edge_neighbour` returns the coarser neighbour AND the
+         `translate_s`/`s_lo`/`s_hi` mapping; a coarser QUAD's frame is `s_in_neigh[i]=s_lo[i]+s_frac[translate_s[i]]*(s_hi[i]-s_lo[i])`;
+         a coarser TRI (mixed) uses the shared-root-edge corner blend → `leaf_at_root_coordinate` (mirrors
+         `mixed_quad_shared_node`).
+       * Tri (`RefineableTElement<2>::tess_register_on_coarser_for_numpy`, mirrors `node_created_by_neighbour`):
+         `tri_edge_neighbour` per edge (S/E/W); same-root tri → `local_coordinate_in_other_leaf`; cross-root tri →
+         `local_coordinate_in_ancestor`+`param_on_edge`+`point_on_edge`+`root_coord_to_leaf`; cross-shape quad →
+         quad-root blend + `quad_leaf_at_root_coordinate`. Covers the shared hypotenuse and ≥2-level (multi-level)
+         jumps. The coarse element's pointer-identity + reference-edge tests discard equal/finer (2:1) neighbours.
+       * `tess_register_hanging_node` (coarse side): finds which reference edge s_coarse lies on (exact reference-
+         space segment test — curvature-independent, replacing the earlier geometric quadratic-edge fit) and
+         records it. This reference-space exactness is what fixed the droplet-evaporation plotter crash: on curved
+         C2 geometry a straight physical-chord test rejected hanging nodes on the bowed edge, so the coarse element
+         kept a straight chord that OVERLAPPED the finer neighbour's curve-following triangles (matplotlib
+         "Triangulation is invalid").
+       * `tess_hanging_delaunay` (NOT delaunator despite the name): builds the boundary loop (corners + own mids +
+         hanging, ordered by edge parameter) in LOCAL coordinates — own nodes from `local_coordinate_of_node`,
+         hanging nodes from `_tess_hang_scoord` — and triangulates. Interior node (C1TB/C2TB centroid) → fan from
+         centroid; else EAR-CLIP with a full containment test. Ear clipping (not a plain fan, not delaunator) is
+         required because pure-tri MULTI-level hanging puts ≥3 EXACTLY collinear points on an edge: a corner fan is
+         degenerate, a first-non-degenerate-ear fan spans a chord past collinear points (T-junction), delaunator
+         mis-chains collinear hull points. All four tri get_num/fill route through this one path so base (no-hanging)
+         and hanging tesselations are mutually consistent. The quad fills likewise now take the hanging nodes' local
+         coordinates from `_tess_hang_scoord` instead of a physical distance blend.
+       * Limitation: straight-triangle tesselation of a VERY strongly curved higher-order element can still fold
+         (inverted sub-triangle) — inherent to linear output primitives, the same limit as the quad path; realistic
+         (droplet-scale) curvature is fine. Made `tri_edge_neighbour`+`TriEdgeNeighbour` public. Tests:
+         `test_triangle_refinement.py::test_tesselate_tri_output_no_tjunctions` (C1/C2/C1TB/C2TB, T-junction-free +
+         area-exact) and `::test_tesselate_tri_curved_geometry_valid` (curved C2/C2TB, matplotlib-valid).
+
 5. **Variable / anisotropic schemes** (§5): quad 1→2 (both directions), simplex
    bisection; directional error estimator; generalised balance rule.
 6. **MPI hardening** across all shapes; distributed adaptivity tests.

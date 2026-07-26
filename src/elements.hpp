@@ -323,6 +323,12 @@ namespace pyoomph
     // Hang core: hang node X on neighbour nb_re's interpolating_basis at nb-local coordinate s_nb (shared
     // skip + cycle guard). The shape/dimension-agnostic primitive shared by all cross-shape hang paths.
     bool mixed_hang_node_at(oomph::Node *X, oomph::RefineableElement *nb_re, const oomph::Vector<double> &s_nb, const int &value_id);
+    // Tesselated-numpy export, quad fine side: for each of this quad's 4 edges use gteq_edge_neighbour to find
+    // a strictly coarser neighbour and register this quad's edge nodes on it, computing each node's coordinate
+    // in the coarse neighbour TOPOLOGICALLY -- via gteq_edge_neighbour's own translate_s/s_lo/s_hi mapping for
+    // a coarser QUAD, or (mixed interface) the shared-root-edge blend + leaf_at_root_coordinate for a coarser
+    // TRI. No physical positions / locate_zeta. Shared by BulkElementQuad2dC1/C2::inform_coarser_*.
+    void quad_register_on_coarser_for_numpy(std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes);
 
   protected:
     // Local face index -> mesh boundary indices this face lies on. See the accessors
@@ -388,6 +394,11 @@ namespace pyoomph
     // indices i for which get_element_index_to_nodal_space_index_map()[3][i]==-1.
     virtual const std::vector<unsigned> & non_vertex_node_indices() const=0;
     unsigned _numpy_index;
+    // Transient (per tesselated-numpy pass, cleared by Mesh::to_numpy / get_num_numpy_elemental_indices):
+    // for each finer-neighbour hanging node registered on THIS element, its LOCAL coordinate in this element,
+    // computed TOPOLOGICALLY by the finer neighbour from the tree neighbour finder (no physical geometry, no
+    // locate_zeta). Drives edge/parameter placement in the tesselation and is exact on curved elements.
+    std::map<oomph::Node *, oomph::Vector<double>> _tess_hang_scoord;
     double initial_cartesian_nondim_size = 0.0;
     double initial_quality_factor = 0.0;
     // Factory for the FaceElement (interface element) attached to a given face/edge of this bulk
@@ -474,8 +485,29 @@ namespace pyoomph
 
     virtual void get_DG_fields_at_s(unsigned space_index,unsigned history_index, const oomph::Vector<double> &s, oomph::Vector<double> &result) const;
     virtual int nedges() const = 0;
-    virtual void add_node_from_finer_neighbor_for_tesselated_numpy(int , oomph::Node *, std::vector<std::vector<std::set<oomph::Node *>>> &) {}
+    // Called by a finer neighbour to register its hanging node `n` on THIS (coarser) element for the
+    // tesselated-numpy export. `s_coarse` is the node's LOCAL coordinate in THIS element, computed
+    // TOPOLOGICALLY by the finer neighbour from the tree neighbour finder (gteq_edge_neighbour /
+    // tri_edge_neighbour coordinate facilities), NOT from physical positions. The default records it via
+    // tess_register_hanging_node; every shape uses that (edge determined in reference space).
+    virtual void add_node_from_finer_neighbor_for_tesselated_numpy(const oomph::Vector<double> &, oomph::Node *, std::vector<std::vector<std::set<oomph::Node *>>> &) {}
     virtual void inform_coarser_neighbors_for_tesselated_numpy(std::vector<std::vector<std::set<oomph::Node *>>> &) {}
+    // --- Shared tesselated-numpy hanging-node helpers (used by both quad and tri paths) ---
+    // Record a finer neighbour's hanging node n at local coordinate s_coarse in THIS element: find which of
+    // this element's edges s_coarse lies on IN REFERENCE SPACE (exact, curvature-independent), bucket n on
+    // that edge in add_nodes, and store s_coarse in _tess_hang_scoord. No-op if n is already my node or
+    // s_coarse is on no edge. edge_corner_pairs are local corner-node index pairs (one per edge).
+    void tess_register_hanging_node(const oomph::Vector<double> &s_coarse, oomph::Node *n, const std::vector<std::pair<unsigned, unsigned>> &edge_corner_pairs, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes);
+    // Triangulate this element (corners + own mids + finer-neighbour hanging nodes) for the tesselated-numpy
+    // export, entirely in LOCAL (reference) coordinates: own nodes from local_coordinate_of_node, hanging
+    // nodes from _tess_hang_scoord (topological). Fills `triangles` (flat CCW index triples; each index an
+    // own-node local index, or nnode()+running in add_nodes edge order — matching Mesh::to_numpy).
+    void tess_hanging_delaunay(const std::vector<std::pair<unsigned, unsigned>> &edge_corner_pairs, const std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes, std::vector<unsigned> &triangles) const;
+    // Tri-native counterpart of BulkElementQuad2dC1::inform_coarser_neighbors_for_tesselated_numpy: for each
+    // of this triangle's 3 edges, use tri_edge_neighbour to find a strictly coarser neighbour (tri, or quad
+    // across a mixed interface), compute each edge node's coordinate in that coarse neighbour topologically,
+    // and register it. Shared by all four tri variants. (Implemented on RefineableTElement<2>.)
+    void tess_inform_coarser_tri(const std::vector<std::pair<unsigned, unsigned>> &edge_corner_pairs, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes);
     // Re-derives the values at hanging nodes from their constraining (master) nodes after
     // refinement, for all history (time-level) slots. Used by discontinuous-field bookkeeping in
     // addition to oomph-lib's own hanging-node value interpolation.
@@ -1304,7 +1336,7 @@ namespace pyoomph
     void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const override { throw_runtime_error("Makes no sense"); }
     void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
 
-    void add_node_from_finer_neighbor_for_tesselated_numpy(int edge, oomph::Node *n, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) override;
+    void add_node_from_finer_neighbor_for_tesselated_numpy(const oomph::Vector<double> &s_coarse, oomph::Node *n, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) override;
     void inform_coarser_neighbors_for_tesselated_numpy(std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) override;
     int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
     void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
@@ -1381,7 +1413,7 @@ namespace pyoomph
     
     
 
-    void add_node_from_finer_neighbor_for_tesselated_numpy(int edge, oomph::Node *n, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) override;
+    void add_node_from_finer_neighbor_for_tesselated_numpy(const oomph::Vector<double> &s_coarse, oomph::Node *n, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) override;
     void inform_coarser_neighbors_for_tesselated_numpy(std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) override;
     int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
     void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
@@ -1452,11 +1484,9 @@ namespace pyoomph
     void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
     void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const override { throw_runtime_error("Makes no sense"); }
     void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
-    int get_num_numpy_elemental_indices(bool , unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
-    {
-      nsubdiv = 1;
-      return 3;
-    }
+    void add_node_from_finer_neighbor_for_tesselated_numpy(const oomph::Vector<double> &s_coarse, oomph::Node *n, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) override;
+    void inform_coarser_neighbors_for_tesselated_numpy(std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) override;
+    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
     void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
     std::vector<double> get_outline(bool lagrangian) override;
     unsigned nrecovery_order() override { return 1; }
@@ -1509,19 +1539,7 @@ namespace pyoomph
     void local_coordinate_of_node(const unsigned &j, oomph::Vector<double> &s) const override;
     bool has_bubble() const override { return true; }
     unsigned get_meshio_type_index() const override { return 66; } // Just some otherwise unused value here
-    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
-    {
-      if (tesselate_tri)
-      {
-        nsubdiv = 3;
-        return 3;
-      }
-      else
-      {
-        nsubdiv = 1;
-        return 4;
-      }
-    }
+    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
     void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
 
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 2, order, true)); }
@@ -1565,19 +1583,9 @@ namespace pyoomph
     void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
     void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
     void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
-    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
-    {
-      if (tesselate_tri)
-      {
-        nsubdiv = 4;
-        return 3;
-      }
-      else
-      {
-        nsubdiv = 1;
-        return 6;
-      }
-    }
+    void add_node_from_finer_neighbor_for_tesselated_numpy(const oomph::Vector<double> &s_coarse, oomph::Node *n, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) override;
+    void inform_coarser_neighbors_for_tesselated_numpy(std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) override;
+    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
     void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
     std::vector<double> get_outline(bool lagrangian) override;
     unsigned nrecovery_order() override { return 2; }
@@ -1633,19 +1641,7 @@ namespace pyoomph
     inline void local_coordinate_of_node(const unsigned &j, oomph::Vector<double> &s) const override { oomph::TBubbleEnrichedElementShape<2, 3>::local_coordinate_of_node(j, s); }
     bool has_bubble() const override { return true; }
     unsigned get_meshio_type_index() const override { return 99; } // Just some otherwise unused value here
-    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
-    {
-      if (tesselate_tri)
-      {
-        nsubdiv = 3;
-        return 3;
-      }
-      else
-      {
-        nsubdiv = 1;
-        return 7;
-      }
-    }
+    int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
     void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
 
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 2, order, true)); }

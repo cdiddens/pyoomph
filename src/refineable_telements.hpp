@@ -214,6 +214,7 @@ namespace oomph
     // coordinate descent (geometrically wrong for triangles).
     void tri_hang_helper(const int &value_id, const int &my_edge);
 
+  public:
     // Result of the tri-native topological neighbour search (see tri_edge_neighbour).
     struct TriEdgeNeighbour
     {
@@ -244,6 +245,16 @@ namespace oomph
     // descend into it along the shared edge. Returns the >=-sized leaf neighbour + the data needed to
     // bridge coordinates across roots with the affine map (never locate_zeta).
     TriEdgeNeighbour tri_edge_neighbour(int my_edge) const;
+
+    // Tesselated-numpy export: for each of this triangle's 3 edges, find a strictly coarser edge neighbour
+    // (a coarser tri, or a coarser quad across a mixed interface) via tri_edge_neighbour, compute each of
+    // this element's edge nodes' LOCAL coordinate in that coarse neighbour TOPOLOGICALLY (the same affine
+    // son/father maps, cross-root corner correspondence and cross-shape quad-root blend the hang path uses --
+    // no physical positions, no locate_zeta), and register it there. The coarse element then places the node
+    // by its reference-space edge/parameter, so the result is exact even on curved elements.
+    void tess_register_on_coarser_for_numpy(std::vector<std::vector<std::set<Node *>>> &add_nodes);
+
+  protected:
     // Reuse a node that an EDGE-NEIGHBOUR element has already built, located via the tri tree (which
     // persists across adaptation rounds), like oomph's RefineableQElement::node_created_by_neighbour for
     // quads. This closes the cross-round gap of the per-round Shared_edge_node_registry: during transient

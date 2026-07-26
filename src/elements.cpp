@@ -672,6 +672,97 @@ namespace pyoomph
 		return nullptr;
 	}
 
+	// See declaration. Mirrors mixed_quad_shared_node's quad->tri blend but registers, for the tesselated-numpy
+	// export, each quad edge node on the coarser neighbour at its topologically-computed coordinate there.
+	void BulkElementBase::quad_register_on_coarser_for_numpy(std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes)
+	{
+		using namespace oomph::QuadTreeNames;
+		oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(this);
+		oomph::RefineableQElement<2> *qre = dynamic_cast<oomph::RefineableQElement<2> *>(this);
+		if (!re || !qre || !re->tree_pt())
+			return;
+		oomph::FiniteElement *qroot = dynamic_cast<oomph::FiniteElement *>(re->tree_pt()->root_pt()->object_pt());
+		const int edges[4] = {S, N, W, E};
+		for (int my_edge : edges)
+		{
+			oomph::Vector<unsigned> translate_s(2);
+			oomph::Vector<double> s_lo(2), s_hi(2);
+			int neigh_edge, diff_level;
+			bool in_tree;
+			oomph::QuadTree *neigh = qre->quadtree_pt()->gteq_edge_neighbour(my_edge, translate_s, s_lo, s_hi, neigh_edge, diff_level, in_tree);
+			if (!neigh || diff_level == 0)
+				continue; // no strictly-coarser neighbour across this edge
+			BulkElementBase *coarse = dynamic_cast<BulkElementBase *>(neigh->object_pt());
+			oomph::RefineableTElement<2> *coarse_tri = dynamic_cast<oomph::RefineableTElement<2> *>(neigh->object_pt());
+			// Cross-shape (coarser tri) shared-root-edge corner nodes, computed once per edge.
+			oomph::RefineableTElement<2> *tri_root = nullptr;
+			oomph::FiniteElement *tri_root_fe = nullptr;
+			oomph::Node *Pb = nullptr, *Qb = nullptr;
+			if (coarse_tri)
+			{
+				tri_root = dynamic_cast<oomph::RefineableTElement<2> *>(neigh->root_pt()->object_pt());
+				tri_root_fe = dynamic_cast<oomph::FiniteElement *>(neigh->root_pt()->object_pt());
+				if (!tri_root || !tri_root_fe || !tri_root->nodes_built())
+					continue;
+				const unsigned n = qroot->nnode_1d();
+				switch (my_edge)
+				{
+				case S: Pb = qroot->node_pt(0);           Qb = qroot->node_pt(n - 1);      break;
+				case N: Pb = qroot->node_pt(n * (n - 1)); Qb = qroot->node_pt(n * n - 1);  break;
+				case W: Pb = qroot->node_pt(0);           Qb = qroot->node_pt(n * (n - 1)); break;
+				case E: Pb = qroot->node_pt(n - 1);       Qb = qroot->node_pt(n * n - 1);  break;
+				}
+			}
+			for (unsigned li = 0; li < this->nnode(); li++)
+			{
+				oomph::Vector<double> s_node(2);
+				this->local_coordinate_of_node(li, s_node);
+				oomph::Vector<double> s_frac = {0.5 * (s_node[0] + 1.0), 0.5 * (s_node[1] + 1.0)};
+				bool on_edge;
+				if (my_edge == S)      on_edge = std::abs(s_frac[1]) < 1e-9;
+				else if (my_edge == N) on_edge = std::abs(s_frac[1] - 1.0) < 1e-9;
+				else if (my_edge == W) on_edge = std::abs(s_frac[0]) < 1e-9;
+				else                   on_edge = std::abs(s_frac[0] - 1.0) < 1e-9;
+				if (!on_edge)
+					continue;
+				if (coarse_tri)
+				{
+					// Ascend this quad son to the root frame -> parameter t along the shared root edge.
+					oomph::Vector<double> s = {s_node[0], s_node[1]};
+					oomph::Tree *trn = re->tree_pt();
+					while (trn->father_pt())
+					{
+						const int st = trn->son_type();
+						const double xo = (st == SE || st == NE) ? 0.5 : -0.5, yo = (st == NW || st == NE) ? 0.5 : -0.5;
+						s[0] = xo + 0.5 * s[0];
+						s[1] = yo + 0.5 * s[1];
+						trn = trn->father_pt();
+					}
+					const double t = (my_edge == S || my_edge == N) ? 0.5 * (s[0] + 1.0) : 0.5 * (s[1] + 1.0);
+					const int iP = tri_root_fe->get_node_number(Pb), iQ = tri_root_fe->get_node_number(Qb);
+					if (iP < 0 || iQ < 0)
+						continue;
+					oomph::Vector<double> sP(2), sQ(2), s_troot(2), s_leaf(2);
+					tri_root_fe->local_coordinate_of_node(iP, sP);
+					tri_root_fe->local_coordinate_of_node(iQ, sQ);
+					for (int d = 0; d < 2; d++) s_troot[d] = (1.0 - t) * sP[d] + t * sQ[d];
+					oomph::RefineableElement *tleaf = tri_root->leaf_at_root_coordinate(s_troot, s_leaf);
+					BulkElementBase *tleaf_be = dynamic_cast<BulkElementBase *>(tleaf);
+					if (tleaf_be)
+						tleaf_be->add_node_from_finer_neighbor_for_tesselated_numpy(s_leaf, this->node_pt(li), add_nodes);
+				}
+				else if (coarse)
+				{
+					// Coarser quad: gteq_edge_neighbour's own coordinate mapping into the neighbour frame.
+					oomph::Vector<double> s_in_neigh(2);
+					for (int i = 0; i < 2; i++)
+						s_in_neigh[i] = s_lo[i] + s_frac[translate_s[i]] * (s_hi[i] - s_lo[i]);
+					coarse->add_node_from_finer_neighbor_for_tesselated_numpy(s_in_neigh, this->node_pt(li), add_nodes);
+				}
+			}
+		}
+	}
+
 	void BulkElementQuad2dC1::quad_hang_helper(const int &value_id, const int &my_edge, std::ofstream &output_hangfile)
 	{
 		oomph::Vector<unsigned> translate_s(2);
@@ -7744,88 +7835,281 @@ namespace pyoomph
 		dpsi(2, 1) = 1.0;
 	}
 
+	// --- Shared tesselated-numpy hanging-node helpers (used by both the quad and tri paths) ---
+
+	// Record a finer neighbour's hanging node n at its (topologically computed) LOCAL coordinate s_coarse in
+	// THIS element. The receiving edge is found in REFERENCE space: which corner-pair's reference segment
+	// s_coarse lies on. This is exact and curvature-independent (no physical positions, no locate_zeta) -- the
+	// straight/bowed shape of the physical edge is irrelevant because reference edges are always straight.
+	void BulkElementBase::tess_register_hanging_node(const oomph::Vector<double> &s_coarse, oomph::Node *n, const std::vector<std::pair<unsigned, unsigned>> &edge_corner_pairs, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes)
+	{
+		for (unsigned ni = 0; ni < this->nnode(); ni++)
+		{
+			if (this->node_pt(ni) == n)
+				return; // already my node
+		}
+		for (unsigned e = 0; e < edge_corner_pairs.size(); e++)
+		{
+			oomph::Vector<double> sa, sb;
+			this->local_coordinate_of_node(edge_corner_pairs[e].first, sa);
+			this->local_coordinate_of_node(edge_corner_pairs[e].second, sb);
+			double AB2 = 0.0, An = 0.0;
+			for (unsigned d = 0; d < 2; d++)
+			{
+				double ab = sb[d] - sa[d];
+				AB2 += ab * ab;
+				An += (s_coarse[d] - sa[d]) * ab;
+			}
+			if (AB2 < 1e-30)
+				continue;
+			double t = An / AB2;
+			if (t < 1e-9 || t > 1.0 - 1e-9)
+				continue; // beyond/at the reference endpoints
+			double perp2 = 0.0;
+			for (unsigned d = 0; d < 2; d++)
+			{
+				double p = (s_coarse[d] - sa[d]) - t * (sb[d] - sa[d]);
+				perp2 += p * p;
+			}
+			if (perp2 > 1e-12 * AB2)
+				continue; // not on this reference edge
+			unsigned myindex = this->_numpy_index;
+			if (add_nodes[myindex].empty())
+				add_nodes[myindex].resize(this->nedges());
+			add_nodes[myindex][e].insert(n);
+			this->_tess_hang_scoord[n] = s_coarse;
+			return;
+		}
+	}
+
+	// Triangulate this element for the tesselated-numpy export, including the finer-neighbour hanging nodes
+	// registered on its edges. The element's boundary is the convex polygon of its corner nodes plus, along
+	// each edge, that edge's own mid node(s) and any registered hanging nodes (each placed by a linear blend
+	// along the edge). We build that ordered boundary loop and fan-triangulate it - NOT via Delaunay, because
+	// with pure-tri multi-level hanging an edge can carry >=3 interior points that are exactly collinear, a
+	// degeneracy delaunator mis-handles (it may chain a long edge past a collinear midpoint => T-junction).
+	// A tri has at most one interior node (the C1TB/C2TB centroid); with it we fan from the centroid to every
+	// boundary segment, without it we fan from boundary vertex 0. `triangles` is filled with flat CCW index
+	// triples where each index is an own-node local index (< nnode()) or nnode()+running in add_nodes edge
+	// order - exactly the indexing Mesh::to_numpy expects.
+	void BulkElementBase::tess_hanging_delaunay(const std::vector<std::pair<unsigned, unsigned>> &edge_corner_pairs, const std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes, std::vector<unsigned> &triangles) const
+	{
+		triangles.clear();
+		const unsigned nn = this->nnode();
+		const unsigned dim = this->nodal_dimension();
+		// All triangulation topology is done in LOCAL (reference-element) coordinates, where every edge is a
+		// straight segment and the edge-mid / centroid nodes sit at their exact reference positions. This is
+		// essential for CURVED (C2/higher-geometry) elements, whose nodes are not collinear/planar in physical
+		// space; using physical positions there would misclassify edge nodes and produce an invalid mesh.
+		std::vector<oomph::Vector<double>> sloc(nn);
+		for (unsigned i = 0; i < nn; i++)
+			this->local_coordinate_of_node(i, sloc[i]);
+		// Corner local indices (edge endpoints).
+		std::set<unsigned> corners;
+		for (auto &ec : edge_corner_pairs)
+		{
+			corners.insert(ec.first);
+			corners.insert(ec.second);
+		}
+		// A boundary point carries its OUTPUT index, its parameter along the edge it lies on, and its LOCAL position.
+		struct BPt
+		{
+			unsigned outidx;
+			double param;
+			double x, y;
+		};
+		std::vector<std::vector<BPt>> edge_interior(edge_corner_pairs.size()); // non-corner points per edge, unsorted
+		std::vector<unsigned> interior_pts;                                     // own nodes not on any edge (centroid)
+		// Classify this element's own non-corner nodes onto an edge (by collinearity in LOCAL space) or as interior.
+		for (unsigned i = 0; i < nn; i++)
+		{
+			if (corners.count(i))
+				continue;
+			bool placed = false;
+			for (unsigned e = 0; e < edge_corner_pairs.size(); e++)
+			{
+				const oomph::Vector<double> &sA = sloc[edge_corner_pairs[e].first];
+				const oomph::Vector<double> &sB = sloc[edge_corner_pairs[e].second];
+				double AB2 = 0.0, An = 0.0;
+				for (unsigned d = 0; d < 2; d++)
+				{
+					double ab = sB[d] - sA[d];
+					AB2 += ab * ab;
+					An += (sloc[i][d] - sA[d]) * ab;
+				}
+				if (AB2 < 1e-30)
+					continue;
+				double lam = An / AB2;
+				if (lam < 1e-9 || lam > 1.0 - 1e-9)
+					continue;
+				double perp2 = 0.0;
+				for (unsigned d = 0; d < 2; d++)
+				{
+					double p = (sloc[i][d] - sA[d]) - lam * (sB[d] - sA[d]);
+					perp2 += p * p;
+				}
+				if (perp2 > 1e-10 * AB2)
+					continue;
+				edge_interior[e].push_back({i, lam, sloc[i][0], sloc[i][1]});
+				placed = true;
+				break;
+			}
+			if (!placed)
+				interior_pts.push_back(i);
+		}
+		// Registered finer-neighbour hanging nodes: output index nn+running in add_nodes edge order. Each node's
+		// LOCAL position in this element was computed TOPOLOGICALLY by the finer neighbour and stored in
+		// _tess_hang_scoord; the ordering parameter is its projection onto the reference edge.
+		const std::vector<std::set<oomph::Node *>> &mine = add_nodes[this->_numpy_index];
+		unsigned running = 0;
+		for (unsigned e = 0; e < edge_corner_pairs.size(); e++)
+		{
+			if (e >= mine.size())
+				break;
+			const oomph::Vector<double> &sA = sloc[edge_corner_pairs[e].first];
+			const oomph::Vector<double> &sB = sloc[edge_corner_pairs[e].second];
+			double AB2 = 0.0;
+			for (unsigned d = 0; d < 2; d++)
+				AB2 += (sB[d] - sA[d]) * (sB[d] - sA[d]);
+			for (oomph::Node *n : mine[e])
+			{
+				auto it = this->_tess_hang_scoord.find(n);
+				oomph::Vector<double> sc = (it != this->_tess_hang_scoord.end()) ? it->second : oomph::Vector<double>(2, 0.0);
+				double lam = 0.5;
+				if (AB2 > 1e-30)
+				{
+					double An = 0.0;
+					for (unsigned d = 0; d < 2; d++)
+						An += (sc[d] - sA[d]) * (sB[d] - sA[d]);
+					lam = An / AB2;
+				}
+				edge_interior[e].push_back({nn + running, lam, sc[0], sc[1]});
+				running++;
+			}
+		}
+		// Build the ordered boundary loop: for each edge, its start corner then its interior points sorted by
+		// parameter. Edges are taken in edge_corner_pairs order, which for the tri corner layout is CCW.
+		std::vector<BPt> loop;
+		for (unsigned e = 0; e < edge_corner_pairs.size(); e++)
+		{
+			unsigned cidx = edge_corner_pairs[e].first;
+			loop.push_back({cidx, 0.0, sloc[cidx][0], sloc[cidx][1]});
+			std::sort(edge_interior[e].begin(), edge_interior[e].end(), [](const BPt &a, const BPt &b)
+					  { return a.param < b.param; });
+			for (auto &bp : edge_interior[e])
+				loop.push_back(bp);
+		}
+		if (loop.size() < 3)
+			return;
+		if (!interior_pts.empty())
+		{
+			// A genuine interior node (the C1TB/C2TB centroid): fan from it around the whole boundary loop.
+			unsigned c = interior_pts[0];
+			for (unsigned i = 0; i < loop.size(); i++)
+			{
+				triangles.push_back(c);
+				triangles.push_back(loop[i].outidx);
+				triangles.push_back(loop[(i + 1) % loop.size()].outidx);
+			}
+			return;
+		}
+		// No interior node: triangulate the convex boundary polygon by ear clipping. A plain fan (or clipping
+		// the first non-degenerate corner) fails here because an edge can carry several EXACTLY collinear
+		// interior points (own C2 mid + several finer-neighbour hanging nodes under multi-level tri hanging):
+		// such a chord would skip the points between its endpoints, re-introducing a T-junction. So a triple
+		// (a,b,c) is a valid ear only if it is non-degenerate AND no other loop vertex lies inside it or on
+		// its base a-c. That keeps every boundary point as a triangle vertex with no spanning chords.
+		std::vector<BPt> poly = loop;
+		double area2max = 0.0;
+		for (unsigned i = 1; i + 1 < poly.size(); i++)
+		{
+			double a2 = std::abs((poly[i].x - poly[0].x) * (poly[i + 1].y - poly[0].y) - (poly[i + 1].x - poly[0].x) * (poly[i].y - poly[0].y));
+			if (a2 > area2max)
+				area2max = a2;
+		}
+		double area_eps = 1e-9 * area2max;
+		while (poly.size() > 3)
+		{
+			unsigned n2 = poly.size();
+			bool clipped = false;
+			for (unsigned i = 0; i < n2; i++)
+			{
+				const BPt &a = poly[(i + n2 - 1) % n2];
+				const BPt &b = poly[i];
+				const BPt &c = poly[(i + 1) % n2];
+				double area2 = (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y);
+				if (area2 <= area_eps)
+					continue; // degenerate/reflex (loop is CCW)
+				// Reject if any other loop vertex lies inside triangle (a,b,c) or on its base a-c: for a CCW
+				// triangle a point is inside-or-on when all three edge cross products are >= -eps.
+				bool empty = true;
+				for (unsigned j = 0; j < n2 && empty; j++)
+				{
+					const BPt &p = poly[j];
+					if (&p == &a || &p == &b || &p == &c)
+						continue;
+					double e1 = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+					double e2 = (c.x - b.x) * (p.y - b.y) - (c.y - b.y) * (p.x - b.x);
+					double e3 = (a.x - c.x) * (p.y - c.y) - (a.y - c.y) * (p.x - c.x);
+					if (e1 >= -area_eps && e2 >= -area_eps && e3 >= -area_eps)
+						empty = false;
+				}
+				if (!empty)
+					continue;
+				triangles.push_back(a.outidx);
+				triangles.push_back(b.outidx);
+				triangles.push_back(c.outidx);
+				poly.erase(poly.begin() + i);
+				clipped = true;
+				break;
+			}
+			if (!clipped)
+				break; // safety: no valid ear found (should not happen for a real convex element)
+		}
+		if (poly.size() == 3)
+		{
+			triangles.push_back(poly[0].outidx);
+			triangles.push_back(poly[1].outidx);
+			triangles.push_back(poly[2].outidx);
+		}
+	}
+
+	// Tri-native counterpart of BulkElementQuad2dC1::inform_coarser_neighbors_for_tesselated_numpy(): for
+	// each of this triangle's 3 edges, use the topological tri_edge_neighbour finder to detect a strictly
+	// coarser neighbour (a coarser tri, or - across a mixed quad/tri interface - a coarser quad) and
+	// register this triangle's edge nodes with that coarser neighbour.
+	void BulkElementBase::tess_inform_coarser_tri(const std::vector<std::pair<unsigned, unsigned>> &edge_corner_pairs, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes)
+	{
+		(void)edge_corner_pairs;
+		if (dynamic_cast<InterfaceElementBase *>(this))
+			throw_runtime_error("Cannot yet tesselate interface meshes [will fail in connecting hanging nodes and have to go via the parent mesh]");
+		oomph::RefineableTElement<2> *re = dynamic_cast<oomph::RefineableTElement<2> *>(this);
+		if (!re)
+			return;
+		// Fully topological: RefineableTElement<2> finds the coarser edge neighbours via tri_edge_neighbour and
+		// computes each edge node's coordinate in the coarse neighbour with the tree affine/cross-shape maps.
+		re->tess_register_on_coarser_for_numpy(add_nodes);
+	}
+
 	// Called (by a finer neighbor, via inform_coarser_neighbors_for_tesselated_numpy) to register
 	// an extra hanging node `n` sitting on this (coarser) element's edge `edge`, so that when this
 	// element is tesselated for numpy/plotting export, it can insert extra triangles that connect
 	// to the finer neighbor's edge nodes instead of leaving a T-junction gap in the visualization.
-	void BulkElementQuad2dC1::add_node_from_finer_neighbor_for_tesselated_numpy(int edge, oomph::Node *n, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes)
+	void BulkElementQuad2dC1::add_node_from_finer_neighbor_for_tesselated_numpy(const oomph::Vector<double> &s_coarse, oomph::Node *n, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes)
 	{
-		using namespace oomph::QuadTreeNames;
-		// Check if we have already the node
-		for (unsigned ni = 0; ni < this->nnode(); ni++)
-		{
-			if (this->node_pt(ni) == n)
-				return; // Discard existing nodes
-		}
-
-		unsigned myindex = this->_numpy_index;
-		if (add_nodes[myindex].empty())
-		{
-			add_nodes[myindex].resize(this->nedges());
-		}
-		int edgedir;
-		if (edge == S)
-			edgedir = 0;
-		else if (edge == N)
-			edgedir = 1;
-		else if (edge == W)
-			edgedir = 2;
-		else if (edge == E)
-			edgedir = 3;
-		else
-			throw std::runtime_error("Should not end up here");
-		add_nodes[myindex][edgedir].insert(n);
+		// edgedir 0=S(0,1) 1=N(2,3) 2=W(0,2) 3=E(1,3), matching the corner_pairs used in the fill below.
+		this->tess_register_hanging_node(s_coarse, n, {{0, 1}, {2, 3}, {0, 2}, {1, 3}}, add_nodes);
 	}
 
-	// For every edge of this element, checks whether the neighboring element is on a coarser
-	// refinement level (i.e. this element's edge is a hanging/T-junction edge from the
-	// neighbor's point of view) and, if so, registers this element's edge nodes with that
-	// coarser neighbor via add_node_from_finer_neighbor_for_tesselated_numpy(), so the numpy
-	// tesselation of the coarser element can be split to avoid a visible crack at the junction.
+	// For every edge of this element, checks (via gteq_edge_neighbour) whether the neighbouring element is on
+	// a coarser refinement level and, if so, registers this element's edge nodes with that coarser neighbour --
+	// at each node's TOPOLOGICALLY-computed coordinate in the neighbour -- so the numpy tesselation of the
+	// coarser element can be split to avoid a visible crack at the junction.
 	void BulkElementQuad2dC1::inform_coarser_neighbors_for_tesselated_numpy(std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes)
 	{
-		using namespace oomph::QuadTreeNames;
-
 		if (dynamic_cast<InterfaceElementBase *>(this))
-		{
 			throw_runtime_error("Cannot yet tesselate interface meshes [will fail in connecting hanging nodes and have to go via the parent mesh");
-		}
-
-		oomph::Vector<int> edges(4);
-		edges[0] = S;
-		edges[1] = N;
-		edges[2] = W;
-		edges[3] = E;
-		// Check my neighbors whether they are on a finer level. If so, we need to add more triangles here
-
-		for (unsigned edge_counter = 0; edge_counter < 4; edge_counter++)
-		{
-			oomph::Vector<unsigned> translate_s(2);
-			oomph::Vector<double> s(2), s_lo_neigh(2), s_hi_neigh(2), s_fraction(2);
-			int neigh_edge, diff_level;
-			bool in_neighbouring_tree;
-			// Find pointer to neighbour in this direction
-			oomph::QuadTree *neigh_pt;
-			neigh_pt = quadtree_pt()->gteq_edge_neighbour(edges[edge_counter], translate_s, s_lo_neigh, s_hi_neigh, neigh_edge, diff_level, in_neighbouring_tree);
-			if ((neigh_pt != 0) && diff_level != 0)
-			{
-				BulkElementBase *coarse_neigh = dynamic_cast<BulkElementBase *>(neigh_pt->object_pt());
-				// Iterate along the nodes of this boundary
-				std::vector<unsigned> local_nodes;
-				if (edge_counter == 0)
-					local_nodes = {0, 1};
-				else if (edge_counter == 1)
-					local_nodes = {2, 3};
-				else if (edge_counter == 2)
-					local_nodes = {0, 2};
-				else
-					local_nodes = {1, 3};
-				for (auto lni : local_nodes)
-				{
-					coarse_neigh->add_node_from_finer_neighbor_for_tesselated_numpy(neigh_edge, this->node_pt(lni), add_nodes);
-				}
-			}
-		}
+		this->quad_register_on_coarser_for_numpy(add_nodes);
 	}
 
 	// Number of sub-elements (nsubdiv) this quad is tesselated into for numpy/plotting export, and
@@ -7905,25 +8189,14 @@ namespace pyoomph
 					this->local_coordinate_of_node(i, scoords[i]);
 				}
 				cnt = this->nnode();
-				std::vector<int> corner_pairs = {0, 1, 2, 3, 0, 2, 1, 3};
 				for (unsigned int d = 0; d < 4; d++)
 				{
 					for (auto *n : add_nodes[this->_numpy_index][d])
 					{
-						scoords[cnt].resize(2);
-						// Now resolve the local coordinate by blending between the local coordinate (works, since elements are linear)
-						double dist1 = 0.0;
-						double dist2 = 0.0;
-						for (unsigned int i = 0; i < this->nodal_dimension(); i++)
-						{
-							dist1 += (n->x(i) - this->node_pt(corner_pairs[2 * d])->x(i)) * (n->x(i) - this->node_pt(corner_pairs[2 * d])->x(i));
-							dist2 += (n->x(i) - this->node_pt(corner_pairs[2 * d + 1])->x(i)) * (n->x(i) - this->node_pt(corner_pairs[2 * d + 1])->x(i));
-						}
-						dist1 = sqrt(dist1);
-						dist2 = sqrt(dist2);
-						double lambda = dist1 / (dist1 + dist2);
-						scoords[cnt][0] = scoords[corner_pairs[2 * d]][0] * (1 - lambda) + scoords[corner_pairs[2 * d + 1]][0] * lambda;
-						scoords[cnt][1] = scoords[corner_pairs[2 * d]][1] * (1 - lambda) + scoords[corner_pairs[2 * d + 1]][1] * lambda;
+						// The hanging node's LOCAL coordinate in this element was computed topologically by the
+						// finer neighbour and stored in _tess_hang_scoord (exact, no physical blend).
+						auto it = this->_tess_hang_scoord.find(n);
+						scoords[cnt] = (it != this->_tess_hang_scoord.end()) ? it->second : oomph::Vector<double>(2, 0.0);
 						cnt++;
 					}
 				}
@@ -8470,83 +8743,20 @@ namespace pyoomph
 		}
 	}
 
-	// Same purpose as BulkElementQuad2dC1::add_node_from_finer_neighbor_for_tesselated_numpy()
-	// above.
-	void BulkElementQuad2dC2::add_node_from_finer_neighbor_for_tesselated_numpy(int edge, oomph::Node *n, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes)
+	// Same purpose as BulkElementQuad2dC1::add_node_from_finer_neighbor_for_tesselated_numpy() above.
+	void BulkElementQuad2dC2::add_node_from_finer_neighbor_for_tesselated_numpy(const oomph::Vector<double> &s_coarse, oomph::Node *n, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes)
 	{
-		using namespace oomph::QuadTreeNames;
-		// Check if we have already the node
-		for (unsigned ni = 0; ni < this->nnode(); ni++)
-		{
-			if (this->node_pt(ni) == n)
-				return; // Discard existing nodes
-		}
-
-		unsigned myindex = this->_numpy_index;
-		if (add_nodes[myindex].empty())
-		{
-			add_nodes[myindex].resize(this->nedges());
-		}
-		int edgedir;
-		if (edge == S)
-			edgedir = 0;
-		else if (edge == N)
-			edgedir = 1;
-		else if (edge == W)
-			edgedir = 2;
-		else if (edge == E)
-			edgedir = 3;
-		else
-			throw std::runtime_error("Should not end up here");
-		add_nodes[myindex][edgedir].insert(n);
+		// edgedir 0=S(0,2) 1=N(6,8) 2=W(0,6) 3=E(2,8), matching the `circum_data` edge indices in the fill.
+		this->tess_register_hanging_node(s_coarse, n, {{0, 2}, {6, 8}, {0, 6}, {2, 8}}, add_nodes);
 	}
 
-	// Same purpose as BulkElementQuad2dC1::inform_coarser_neighbors_for_tesselated_numpy() above,
-	// but registering the 3 edge nodes (2 corners + midside) of each of this 9-node element's
-	// sides.
+	// Same purpose as BulkElementQuad2dC1::inform_coarser_neighbors_for_tesselated_numpy() above; the shared
+	// quad_register_on_coarser_for_numpy walks all 9 nodes so the mid-side nodes are registered too.
 	void BulkElementQuad2dC2::inform_coarser_neighbors_for_tesselated_numpy(std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes)
 	{
-		using namespace oomph::QuadTreeNames;
-
 		if (dynamic_cast<InterfaceElementBase *>(this))
-		{
 			throw_runtime_error("Cannot yet tesselate interface meshes [will fail in connecting hanging nodes and have to go via the parent mesh");
-		}
-
-		oomph::Vector<int> edges(4);
-		edges[0] = S;
-		edges[1] = N;
-		edges[2] = W;
-		edges[3] = E;
-		// Check my neighbors whether they are on a finer level. If so, we need to add more triangles here
-		for (unsigned edge_counter = 0; edge_counter < 4; edge_counter++)
-		{
-			oomph::Vector<unsigned> translate_s(2);
-			oomph::Vector<double> s(2), s_lo_neigh(2), s_hi_neigh(2), s_fraction(2);
-			int neigh_edge, diff_level;
-			bool in_neighbouring_tree;
-			// Find pointer to neighbour in this direction
-			oomph::QuadTree *neigh_pt;
-			neigh_pt = quadtree_pt()->gteq_edge_neighbour(edges[edge_counter], translate_s, s_lo_neigh, s_hi_neigh, neigh_edge, diff_level, in_neighbouring_tree);
-			if ((neigh_pt != 0) && diff_level != 0)
-			{
-				BulkElementBase *coarse_neigh = dynamic_cast<BulkElementBase *>(neigh_pt->object_pt());
-				// Iterate along the nodes of this boundary
-				std::vector<unsigned> local_nodes;
-				if (edge_counter == 0)
-					local_nodes = {0, 1, 2};
-				else if (edge_counter == 1)
-					local_nodes = {6, 7, 8};
-				else if (edge_counter == 2)
-					local_nodes = {0, 3, 6};
-				else
-					local_nodes = {2, 5, 8};
-				for (auto lni : local_nodes)
-				{
-					coarse_neigh->add_node_from_finer_neighbor_for_tesselated_numpy(neigh_edge, this->node_pt(lni), add_nodes);
-				}
-			}
-		}
+		this->quad_register_on_coarser_for_numpy(add_nodes);
 	}
 
 	// Same purpose as BulkElementQuad2dC1::get_num_numpy_elemental_indices() above; the base
@@ -8655,17 +8865,21 @@ namespace pyoomph
 					int edgeindex = side[1];
 					int L2node_along = side[2];
 					circular_nodemap.push_back(start_corner); // Start at node 0
+					// Order the edge's nodes by their LOCAL-coordinate distance from the start corner (own nodes
+					// from local_coordinate_of_node, hanging nodes from _tess_hang_scoord -- topological, exact).
+					oomph::Vector<double> sc(2);
+					this->local_coordinate_of_node(start_corner, sc);
 					std::map<double, oomph::Node *> sorted;
 					for (auto *n : add_nodes[this->_numpy_index][edgeindex])
 					{
-						double dist = 0.0;
-						for (unsigned int i = 0; i < this->nodal_dimension(); i++)
-							dist += (n->x(i) - this->node_pt(start_corner)->x(i)) * (n->x(i) - this->node_pt(start_corner)->x(i));
+						auto it = this->_tess_hang_scoord.find(n);
+						oomph::Vector<double> sn = (it != this->_tess_hang_scoord.end()) ? it->second : oomph::Vector<double>(2, 0.0);
+						double dist = (sn[0] - sc[0]) * (sn[0] - sc[0]) + (sn[1] - sc[1]) * (sn[1] - sc[1]);
 						sorted[dist] = n;
 					}
-					double dist = 0.0;
-					for (unsigned int i = 0; i < this->nodal_dimension(); i++)
-						dist += (this->node_pt(L2node_along)->x(i) - this->node_pt(start_corner)->x(i)) * (this->node_pt(L2node_along)->x(i) - this->node_pt(start_corner)->x(i));
+					oomph::Vector<double> sL(2);
+					this->local_coordinate_of_node(L2node_along, sL);
+					double dist = (sL[0] - sc[0]) * (sL[0] - sc[0]) + (sL[1] - sc[1]) * (sL[1] - sc[1]);
 					sorted[dist] = this->node_pt(L2node_along);
 					for (auto &entry : sorted)
 						circular_nodemap.push_back(add_indices[entry.second]);
@@ -8895,8 +9109,44 @@ namespace pyoomph
 		dpsi(2, 1) = 1.0;
 	}
 
-	void BulkElementTri2dC1::fill_element_nodal_indices_for_numpy(int *indices, unsigned, bool, std::vector<std::vector<std::set<oomph::Node *>>> &) const
+	// Tri hanging-node tesselation (see the quad counterparts). The three tri edges as corner-node pairs;
+	// shared by C1/C1TB (and, with more nodes per edge, C2/C2TB via the same edge corners).
+	static const std::vector<std::pair<unsigned, unsigned>> Tri_edge_corner_pairs = {{0, 1}, {1, 2}, {2, 0}};
+
+	void BulkElementTri2dC1::add_node_from_finer_neighbor_for_tesselated_numpy(const oomph::Vector<double> &s_coarse, oomph::Node *n, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes)
 	{
+		this->tess_register_hanging_node(s_coarse, n, Tri_edge_corner_pairs, add_nodes);
+	}
+
+	void BulkElementTri2dC1::inform_coarser_neighbors_for_tesselated_numpy(std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes)
+	{
+		this->tess_inform_coarser_tri(Tri_edge_corner_pairs, add_nodes);
+	}
+
+	int BulkElementTri2dC1::get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+	{
+		if (tesselate_tri)
+		{
+			std::vector<unsigned> tris;
+			this->tess_hanging_delaunay(Tri_edge_corner_pairs, add_nodes, tris);
+			nsubdiv = tris.size() / 3;
+			return 3;
+		}
+		nsubdiv = 1;
+		return 3;
+	}
+
+	void BulkElementTri2dC1::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+	{
+		if (tesselate_tri)
+		{
+			std::vector<unsigned> tris;
+			this->tess_hanging_delaunay(Tri_edge_corner_pairs, add_nodes, tris);
+			indices[0] = tris[3 * isubelem];
+			indices[2] = tris[3 * isubelem + 1];
+			indices[1] = tris[3 * isubelem + 2];
+			return;
+		}
 		indices[0] = 0;
 		indices[1] = 1;
 		indices[2] = 2;
@@ -9166,44 +9416,46 @@ namespace pyoomph
 		dpsi(2, 1) = 1.0;
 	}
 
-	void BulkElementTri2dC2::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &) const
+	void BulkElementTri2dC2::add_node_from_finer_neighbor_for_tesselated_numpy(const oomph::Vector<double> &s_coarse, oomph::Node *n, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes)
+	{
+		this->tess_register_hanging_node(s_coarse, n, Tri_edge_corner_pairs, add_nodes);
+	}
+
+	void BulkElementTri2dC2::inform_coarser_neighbors_for_tesselated_numpy(std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes)
+	{
+		this->tess_inform_coarser_tri(Tri_edge_corner_pairs, add_nodes);
+	}
+
+	int BulkElementTri2dC2::get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
 	{
 		if (tesselate_tri)
 		{
-			if (isubelem == 0)
-			{
-				indices[0] = 0;
-				indices[1] = 3;
-				indices[2] = 5;
-			}
-			else if (isubelem == 1)
-			{
-				indices[0] = 1;
-				indices[1] = 4;
-				indices[2] = 3;
-			}
-			else if (isubelem == 2)
-			{
-				indices[0] = 2;
-				indices[1] = 5;
-				indices[2] = 4;
-			}
-			else
-			{
-				indices[0] = 3;
-				indices[1] = 4;
-				indices[2] = 5;
-			}
+			std::vector<unsigned> tris;
+			this->tess_hanging_delaunay(Tri_edge_corner_pairs, add_nodes, tris);
+			nsubdiv = tris.size() / 3;
+			return 3;
 		}
-		else
+		nsubdiv = 1;
+		return 6;
+	}
+
+	void BulkElementTri2dC2::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+	{
+		if (tesselate_tri)
 		{
-			indices[0] = 0;
-			indices[1] = 1;
-			indices[2] = 2;
-			indices[3] = 3;
-			indices[4] = 4;
-			indices[5] = 5;
+			std::vector<unsigned> tris;
+			this->tess_hanging_delaunay(Tri_edge_corner_pairs, add_nodes, tris);
+			indices[0] = tris[3 * isubelem];
+			indices[2] = tris[3 * isubelem + 1];
+			indices[1] = tris[3 * isubelem + 2];
+			return;
 		}
+		indices[0] = 0;
+		indices[1] = 1;
+		indices[2] = 2;
+		indices[3] = 3;
+		indices[4] = 4;
+		indices[5] = 5;
 	}
 
 	std::vector<double> BulkElementTri2dC2::get_outline(bool lagrangian)
@@ -9336,28 +9588,32 @@ namespace pyoomph
 	}
    }
    
-   void BulkElementTri2dC1TB::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &) const
+   // Inherits add_node_from_finer_neighbor_for_tesselated_numpy + inform_coarser_neighbors_for_tesselated_numpy
+   // from BulkElementTri2dC1. The centroid (node 3) is an interior point, so the hanging-node Delaunay path
+   // over all 4 nodes reproduces the 3-triangle centroid fan when there are no hanging nodes.
+   int BulkElementTri2dC1TB::get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+   {
+      if (tesselate_tri)
+      {
+         std::vector<unsigned> tris;
+         this->tess_hanging_delaunay(Tri_edge_corner_pairs, add_nodes, tris);
+         nsubdiv = tris.size() / 3;
+         return 3;
+      }
+      nsubdiv = 1;
+      return 4;
+   }
+
+   void BulkElementTri2dC1TB::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
    {
       if (tesselate_tri)
 		{
-			if (isubelem == 0)
-			{
-				indices[0] = 0;
-				indices[1] = 1;
-				indices[2] = 3;
-			}
-			else if (isubelem == 1)
-			{
-				indices[0] = 1;
-				indices[1] = 2;
-				indices[2] = 3;
-			}
-			else if (isubelem == 2)
-			{
-				indices[0] = 2;
-				indices[1] = 0;
-				indices[2] = 3;
-			}
+			std::vector<unsigned> tris;
+			this->tess_hanging_delaunay(Tri_edge_corner_pairs, add_nodes, tris);
+			indices[0] = tris[3 * isubelem];
+			indices[2] = tris[3 * isubelem + 1];
+			indices[1] = tris[3 * isubelem + 2];
+			return;
 		}
 		else
 		{
@@ -9423,39 +9679,40 @@ namespace pyoomph
     
 
 
-	void BulkElementTri2dC2TB::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &) const
+	// Inherits add_node/inform_coarser from BulkElementTri2dC2. When hanging nodes are present the Delaunay
+	// path triangulates all 7 nodes (6 boundary + centroid node 6), giving a finer split than the plain
+	// 3-triangle centroid fan used in the no-hanging base case; both are valid coverings for plotting.
+	int BulkElementTri2dC2TB::get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
 	{
 		if (tesselate_tri)
 		{
-			if (isubelem == 0)
-			{
-				indices[0] = 0;
-				indices[1] = 1;
-				indices[2] = 6;
-			}
-			else if (isubelem == 1)
-			{
-				indices[0] = 1;
-				indices[1] = 2;
-				indices[2] = 6;
-			}
-			else if (isubelem == 2)
-			{
-				indices[0] = 2;
-				indices[1] = 0;
-				indices[2] = 6;
-			}
+			std::vector<unsigned> tris;
+			this->tess_hanging_delaunay(Tri_edge_corner_pairs, add_nodes, tris);
+			nsubdiv = tris.size() / 3;
+			return 3;
 		}
-		else
+		nsubdiv = 1;
+		return 7;
+	}
+
+	void BulkElementTri2dC2TB::fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const
+	{
+		if (tesselate_tri)
 		{
-			indices[0] = 0;
-			indices[1] = 1;
-			indices[2] = 2;
-			indices[3] = 3;
-			indices[4] = 4;
-			indices[5] = 5;
-			indices[6] = 6;
+			std::vector<unsigned> tris;
+			this->tess_hanging_delaunay(Tri_edge_corner_pairs, add_nodes, tris);
+			indices[0] = tris[3 * isubelem];
+			indices[2] = tris[3 * isubelem + 1];
+			indices[1] = tris[3 * isubelem + 2];
+			return;
 		}
+		indices[0] = 0;
+		indices[1] = 1;
+		indices[2] = 2;
+		indices[3] = 3;
+		indices[4] = 4;
+		indices[5] = 5;
+		indices[6] = 6;
 	}
 
 	//////////////////////////////
