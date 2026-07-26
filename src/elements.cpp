@@ -8642,6 +8642,39 @@ namespace pyoomph
 			{
 				this->setup_hang_for_value(i);
 			}
+			// TREE-HANG mode only (in geometric mode the mesh-level post_adapt pass does this): hang each C2
+			// mid-edge node's separate C1(TB) value slot linearly on its two edge-corner nodes. This is the
+			// C1-on-C2 rule (a mid-edge pressure IS the mean of its edge corners) and, crucially, it
+			// constrains the STALE pressure slot oomph leaves behind on a former fine corner once its region
+			// is UNREFINED and the node becomes a plain conforming C2 mid-edge: setup_hang_for_value only
+			// hangs nodes across a coarser (2:1) neighbour, so without this the stale slot is a free,
+			// unassembled dof (wrong Jacobian / a "degrade to C1 on a vertex" throw). A node carries the slot
+			// only if it was ever a corner, so ordinary mid-edge nodes (which never store the pressure) are
+			// skipped by the nvalue guard; genuine 2:1 mid-nodes were already hung above and are skipped via
+			// is_hanging. Weights 0.5/0.5 are exact for the straight edge that a C2 mid-edge bisects.
+			static const int hang_mode = []() { const char *e = getenv("PYOOMPH_TRI_HANG"); if (!e) return 0; if (std::string(e) == "tree") return 1; if (std::string(e) == "validate") return 2; return 0; }();
+			if (hang_mode != 0 && this->nnode() >= 6)
+			{
+				std::vector<int> c1_slots;
+				for (int sp : {SPACE_INDEX_C1TB, SPACE_INDEX_C1})
+				{ int h = ft->continuous_spaces[sp].hangindex; if (h >= 0) c1_slots.push_back(h); }
+				static const unsigned edge_ends[3][2] = {{0, 1}, {1, 2}, {2, 0}}; // C2 mid nodes 3,4,5 bisect these corner pairs
+				for (unsigned e = 0; e < 3; e++)
+				{
+					oomph::Node *M = this->node_pt(3 + e);
+					oomph::Node *A = this->node_pt(edge_ends[e][0]);
+					oomph::Node *B = this->node_pt(edge_ends[e][1]);
+					for (int slot : c1_slots)
+					{
+						if ((int)M->nvalue() <= slot || M->is_hanging(slot)) continue;        // no stale slot, or already hung (2:1)
+						if ((int)A->nvalue() <= slot || (int)B->nvalue() <= slot) continue;    // masters must carry the dof
+						oomph::HangInfo *hang = new oomph::HangInfo(2);
+						hang->set_master_node_pt(0, A, 0.5);
+						hang->set_master_node_pt(1, B, 0.5);
+						M->set_hanging_pt(hang, slot);
+					}
+				}
+			}
 		}
 	}
 
