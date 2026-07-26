@@ -7765,9 +7765,23 @@ namespace pyoomph
 			init << " functable->continuous_spaces[SPACE_INDEX_C1].hangindex=-1;" << std::endl;
 		}
 		else
-		{			
+		{
+			// Position + the dominant (max) space share the geometric slot -1. When the dominant space is
+			// C2TB (either C2TB fields are present, a C1TB-enriched coordinate at line ~7753, or a manual
+			// C2TB element upgrade), the position/-1 interpolation is the BUBBLE-ENRICHED one. On a
+			// tetrahedron the C2TB face-centroid bubbles live ON the faces, so the enriched face trace
+			// (7 masters) differs from the plain C2 face trace (6) -- unlike edges (2D) / hex faces, where
+			// the bubble vanishes and the two coincide. So a plain C2 field must NOT read the enriched -1
+			// hang: give C2 its OWN hang slot (its first value index) exactly as C1TB/C1 already do, so it
+			// carries the plain trace. Dimension-independent (like the C1 slot) to stay consistent between a
+			// bulk element and its interface facets, which inherit dominant_space but have a lower
+			// element_dim; on 2D/hex the C2 slot is a harmless mirror of -1. When the dominant space is C2
+			// (no enrichment) C2 shares -1 with position as before.
 			init << " functable->continuous_spaces[SPACE_INDEX_C2TB].hangindex=-1;" << std::endl;
-			init << " functable->continuous_spaces[SPACE_INDEX_C2].hangindex=-1;" << std::endl;
+			if (coordinate_space == "C2TB")
+				init << " functable->continuous_spaces[SPACE_INDEX_C2].hangindex=functable->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk;" << std::endl;
+			else
+				init << " functable->continuous_spaces[SPACE_INDEX_C2].hangindex=-1;" << std::endl;
 			init << " functable->continuous_spaces[SPACE_INDEX_C1TB].hangindex=functable->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk+functable->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk;" << std::endl;
 			init << " functable->continuous_spaces[SPACE_INDEX_C1].hangindex=functable->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk+functable->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk;" << std::endl;
 		}

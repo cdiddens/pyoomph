@@ -127,6 +127,12 @@ namespace pyoomph
 		// pressure the coarse element does not carry. Collect those separate slots (empty for pure-C1
 		// meshes, where hangindex == -1 and the geometric slot already covers the field).
 		std::vector<int> c1_hang_slots;
+		// When the dominant (position/-1) space is C2TB, the -1 hang carries the BUBBLE-ENRICHED trace,
+		// which on a tet face differs from the plain C2 trace. A plain C2 field therefore owns its own
+		// hang slot (continuous_spaces[C2].hangindex >= 0) and must NOT read -1. C2 only ever hangs on
+		// EDGES (it has no face-interior nodes -- those are C2TB bubbles), where the bubble vanishes so
+		// the hang equals -1's; we mirror the -1 EDGE hang onto this slot below. -1 if C2 shares the slot.
+		int c2_hang_slot = -1;
 		if (this->codeinst)
 		{
 			auto *ft = this->codeinst->get_func_table();
@@ -135,6 +141,7 @@ namespace pyoomph
 				int h = ft->continuous_spaces[sp].hangindex;
 				if (h >= 0) c1_hang_slots.push_back(h);
 			}
+			c2_hang_slot = ft->continuous_spaces[SPACE_INDEX_C2].hangindex;
 		}
 
 		// FACE-interior hanging runs FIRST: a coarse tet face that refines more than once (a >1-level
@@ -240,6 +247,24 @@ namespace pyoomph
 					hang->set_master_node_pt(5, mDA, 4.0 * L2 * L0 - 12.0 * bub);
 					hang->set_master_node_pt(6, Fc, 27.0 * bub);
 					X->set_hanging_pt(hang, -1);
+					// A plain C2 field on its own slot must hang on the PLAIN quadratic-triangle trace of the
+					// coarse face -- the same 6 corner+edge-mid masters but WITHOUT the face bubble (a C2 field
+					// carries no dof there). Only the inner-edge-mid fine nodes carry C2 (nvalue > slot); the
+					// sub-face bubbles are C2TB-only and are skipped by the guard. This is the face analogue of
+					// the edge mirror; it is exactly why C2 needs a slot distinct from the enriched -1.
+					if (c2_hang_slot >= 0 && (int)X->nvalue() > c2_hang_slot && !X->is_hanging(c2_hang_slot) &&
+						(int)A->nvalue() > c2_hang_slot && (int)B->nvalue() > c2_hang_slot && (int)D->nvalue() > c2_hang_slot &&
+						(int)mAB->nvalue() > c2_hang_slot && (int)mBD->nvalue() > c2_hang_slot && (int)mDA->nvalue() > c2_hang_slot)
+					{
+						oomph::HangInfo *ch = new oomph::HangInfo(6);
+						ch->set_master_node_pt(0, A, 2.0 * L0 * (L0 - 0.5));
+						ch->set_master_node_pt(1, B, 2.0 * L1 * (L1 - 0.5));
+						ch->set_master_node_pt(2, D, 2.0 * L2 * (L2 - 0.5));
+						ch->set_master_node_pt(3, mAB, 4.0 * L0 * L1);
+						ch->set_master_node_pt(4, mBD, 4.0 * L1 * L2);
+						ch->set_master_node_pt(5, mDA, 4.0 * L2 * L0);
+						X->set_hanging_pt(ch, c2_hang_slot);
+					}
 				}
 				else
 				{
@@ -297,33 +322,40 @@ namespace pyoomph
 			}
 			if (between.empty()) continue;
 			const unsigned order_1d = e.el ? e.el->nnode_1d() : 2;
-			if (order_1d <= 2)
+			// Coarse edge mid-node (real, non-hanging) for a quadratic edge; needed for the C2 interpolation.
+			oomph::Node *M = 0;
+			if (order_1d > 2)
 			{
-				for (std::pair<oomph::Node *, double> &xt : between)
-				{
-					if (xt.first->is_hanging()) continue;
-					oomph::HangInfo *hang = new oomph::HangInfo(2);
-					hang->set_master_node_pt(0, P, 1.0 - xt.second);
-					hang->set_master_node_pt(1, Q, xt.second);
-					xt.first->set_hanging_pt(hang, -1);
-				}
-			}
-			else
-			{
-				oomph::Node *M = 0;
 				for (std::pair<oomph::Node *, double> &xt : between)
 					if (std::abs(xt.second - 0.5) < 1e-6) { M = xt.first; break; }
 				if (!M) continue;
-				for (std::pair<oomph::Node *, double> &xt : between)
+			}
+			// Fresh copy of the edge-interpolation hang for a node at parameter t: linear on {P,Q} for a
+			// linear edge, quadratic on {P,M,Q} for a quadratic one. Used for the geometric slot -1 and,
+			// mirrored, for C2's own slot (set_hanging_pt takes ownership, so each slot needs its own copy).
+			auto make_edge_hang = [&](double t) -> oomph::HangInfo * {
+				if (order_1d <= 2)
 				{
-					if (xt.first == M || xt.first->is_hanging()) continue;
-					const double t = xt.second;
-					oomph::HangInfo *hang = new oomph::HangInfo(3);
-					hang->set_master_node_pt(0, P, 2.0 * (t - 0.5) * (t - 1.0));
-					hang->set_master_node_pt(1, M, 4.0 * t * (1.0 - t));
-					hang->set_master_node_pt(2, Q, 2.0 * t * (t - 0.5));
-					xt.first->set_hanging_pt(hang, -1);
+					oomph::HangInfo *h = new oomph::HangInfo(2);
+					h->set_master_node_pt(0, P, 1.0 - t);
+					h->set_master_node_pt(1, Q, t);
+					return h;
 				}
+				oomph::HangInfo *h = new oomph::HangInfo(3);
+				h->set_master_node_pt(0, P, 2.0 * (t - 0.5) * (t - 1.0));
+				h->set_master_node_pt(1, M, 4.0 * t * (1.0 - t));
+				h->set_master_node_pt(2, Q, 2.0 * t * (t - 0.5));
+				return h;
+			};
+			for (std::pair<oomph::Node *, double> &xt : between)
+			{
+				if (xt.first == M || xt.first->is_hanging()) continue; // M is a real coarse node; skip fine sub-edge chains
+				xt.first->set_hanging_pt(make_edge_hang(xt.second), -1);
+				// Mirror onto C2's own slot (dominant space C2TB): C2 hangs on an edge exactly as the
+				// geometric slot does (bubble vanishes on edges) but reads its own slot. Nodes without a C2
+				// dof (nvalue <= slot, e.g. the C2TB-only face bubbles) are skipped.
+				if (c2_hang_slot >= 0 && (int)xt.first->nvalue() > c2_hang_slot && !xt.first->is_hanging(c2_hang_slot))
+					xt.first->set_hanging_pt(make_edge_hang(xt.second), c2_hang_slot);
 			}
 
 			// Extra LINEAR hang for C1(TB) fields with a separate slot (3D Taylor-Hood pressure on C2
@@ -346,6 +378,7 @@ namespace pyoomph
 				}
 			}
 		}
+
 
 		// Flatten hanging chains: a hanging node whose master is itself hanging (which occurs at
 		// >1-level jumps) is re-expressed directly over REAL (non-hanging) leaf nodes. This is done in

@@ -7909,10 +7909,18 @@ namespace pyoomph
 	void BulkElementQuad2dC2::further_setup_hanging_nodes()
 	{
 		BulkElementBase::further_setup_hanging_nodes();
-		if (codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk || codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk)
+		auto *ft = codeinst->get_func_table();
+		const int c2_hang = ft->continuous_spaces[SPACE_INDEX_C2].hangindex;
+		const bool has_c1 = ft->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk || ft->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk;
+		if (has_c1 || c2_hang >= 0)
 		{
-			unsigned int nC2=codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk+codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk;
-			for (unsigned int i = nC2; i < ncont_interpolated_values(); i++)
+			const unsigned nC2TB = ft->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk;
+			const unsigned nC2 = nC2TB + ft->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk;
+			// C2 has its OWN (non-geometric) hang slot when the dominant space is C2TB (its enriched -1
+			// trace differs from plain C2 -- on tet faces). Its values [nC2TB,nC2) then need the plain hang
+			// on their own slot; otherwise only the C1(TB) values [nC2,ncont) hang separately.
+			const unsigned start = (c2_hang >= 0) ? nC2TB : nC2;
+			for (unsigned i = start; i < ncont_interpolated_values(); i++)
 			{
 				this->setup_hang_for_value(i);
 			}
@@ -8635,10 +8643,17 @@ namespace pyoomph
 	{
 		BulkElementBase::further_setup_hanging_nodes();
 		auto *ft = codeinst->get_func_table();
-		if (ft->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk || ft->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk)
+		const int c2_hang = ft->continuous_spaces[SPACE_INDEX_C2].hangindex;
+		const bool has_c1 = ft->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk || ft->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk;
+		if (has_c1 || c2_hang >= 0)
 		{
-			unsigned nC2 = ft->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk + ft->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk;
-			for (unsigned i = nC2; i < ncont_interpolated_values(); i++)
+			const unsigned nC2TB = ft->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk;
+			const unsigned nC2 = nC2TB + ft->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk;
+			// C2 has its OWN hang slot when the dominant space is C2TB (see BulkElementQuad2dC2). In 2D the
+			// C2TB bubble is interior (vanishes on edges), so this slot is just a mirror of -1, but it keeps
+			// the value-slot layout consistent with 3d where it genuinely differs on tet faces.
+			const unsigned start = (c2_hang >= 0) ? nC2TB : nC2;
+			for (unsigned i = start; i < ncont_interpolated_values(); i++)
 			{
 				this->setup_hang_for_value(i);
 			}
@@ -9245,14 +9260,22 @@ namespace pyoomph
 	{
 
 		BulkElementBase::further_setup_hanging_nodes();
-		if (codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk || codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk)
-		{			
-			unsigned int nC2=codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk+codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk;
-			for (unsigned int i = nC2; i < ncont_interpolated_values(); i++)
+		auto *ft = codeinst->get_func_table();
+		const int c2_hang = ft->continuous_spaces[SPACE_INDEX_C2].hangindex;
+		const bool has_c1 = ft->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk || ft->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk;
+		if (has_c1 || c2_hang >= 0)
+		{
+			const unsigned nC2TB = ft->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk;
+			const unsigned nC2 = nC2TB + ft->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk;
+			// C2 gets its own hang slot when the dominant space is C2TB (see BulkElementQuad2dC2). On a hex
+			// the C2TB bubble is cell-interior (vanishes on faces), so oomph's generic setup_hang_for_value
+			// installs the same quadratic hang on the C2 slot as on -1 -- a harmless mirror.
+			const unsigned start = (c2_hang >= 0) ? nC2TB : nC2;
+			for (unsigned int i = start; i < ncont_interpolated_values(); i++)
 			{
-				this->setup_hang_for_value(i);		
+				this->setup_hang_for_value(i);
 			}
-		}				
+		}
 	}
 
 
