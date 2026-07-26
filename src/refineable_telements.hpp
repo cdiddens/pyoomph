@@ -398,7 +398,23 @@ namespace oomph
     // (empty if it is a reused father node).
     std::set<Node *> father_edge_node_key(const Vector<double> &s_in_father, RefineableTElement<3> *father_el_pt) const;
     // The 4 vertices (in father local coordinates) of son number son_type (0..7) of a 1->8 split.
-    void son_vertices_in_father(int son_type, Vector<Vector<double>> &verts) const;
+    static void son_vertices_in_father(int son_type, Vector<Vector<double>> &verts);
+
+    // --- son<->father 3x3 affine coordinate map (the 3d analogue of the RefineableTElement<2> map) ---
+    // A tet son (of the given son_type 0..7 of a 1->8 split) maps to its father by the barycentric affine
+    // s_father = sum_i b_i(s_son) * son_vertex_father_coord_i. A full 3x3 A correctly represents ALL 8 sons,
+    // including the 4 inner (octahedron) sons. These compose up/down the OcTree to map local coordinates
+    // across refinement levels with NO locate_zeta -- the machinery the tet tree hang/neighbour path needs.
+    static void son_to_father_local(const Vector<double> &s_son, int son_type, Vector<double> &s_father);
+    static void father_to_son_local(const Vector<double> &s_father, int son_type, Vector<double> &s_son);
+    // Map a local coordinate in THIS (leaf) element up to the local frame of `ancestor` (an ancestor in
+    // the same tree), composing son_to_father_local up the tree.
+    void local_coordinate_in_ancestor(const Vector<double> &s_here, RefineableTElement<3> *ancestor, Vector<double> &s_ancestor) const;
+    // Map a local coordinate in THIS element into the local frame of `target`, both in the SAME tree root
+    // (up to the common root, then down). Returns false if they are in different roots.
+    bool local_coordinate_in_other_leaf(const Vector<double> &s_here, RefineableTElement<3> *target, Vector<double> &s_target) const;
+    // Map a coordinate given in `leaf`'s ROOT-element frame down to `leaf`'s own frame (father_to_son chain).
+    static bool root_coord_to_leaf(const Vector<double> &s_root, RefineableTElement<3> *leaf, Vector<double> &s_leaf);
   };
 
 }

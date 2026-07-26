@@ -2207,6 +2207,17 @@ namespace oomph
       for (unsigned d = 0; d < 3; d++)
         s[d] = b0 * sv[0][d] + b1 * sv[1][d] + b2 * sv[2][d] + b3 * sv[3][d];
 
+      if (getenv("PYOOMPH_TET_AFFINE_CHECK")) // self-check: son<->father 3x3 affine reproduces build's s / inverse
+      {
+        Vector<double> sf(3), ss(3);
+        son_to_father_local(s_son, son_type, sf);
+        father_to_son_local(s, son_type, ss);
+        const double e1 = std::abs(sf[0] - s[0]) + std::abs(sf[1] - s[1]) + std::abs(sf[2] - s[2]);
+        const double e2 = std::abs(ss[0] - s_son[0]) + std::abs(ss[1] - s_son[1]) + std::abs(ss[2] - s_son[2]);
+        if (e1 > 1e-12 || e2 > 1e-12)
+          std::fprintf(stderr, "[tet-affine-check] son_type=%d node=%u FAIL fwd_err=%.3e inv_err=%.3e\n", son_type, j, e1, e2);
+      }
+
       // (1) Reuse a father node coincident with this position?
       Node *created_node_pt = father_el_pt->get_node_at_local_coordinate(s);
       if (created_node_pt != 0)
@@ -2432,7 +2443,7 @@ namespace oomph
   // The octahedron is interior to the father, so face conformity is automatic via edge-midpoint
   // sharing regardless of the diagonal; it is a free quality choice. Vertices are orientation-
   // corrected to positive signed volume so the son's shape functions/Jacobian are consistent.
-  void RefineableTElement<3>::son_vertices_in_father(int son_type, Vector<Vector<double>> &verts) const
+  void RefineableTElement<3>::son_vertices_in_father(int son_type, Vector<Vector<double>> &verts)
   {
     // Father node local coordinates (oomph TElement<3,*> numbering: 4 vertices + 6 edge mids).
     Vector<double> v0(3), v1(3), v2(3), v3(3), m01(3), m02(3), m03(3), m12(3), m23(3), m13(3);
@@ -2472,6 +2483,83 @@ namespace oomph
       verts[0] = verts[1];
       verts[1] = tmp;
     }
+  }
+
+  void RefineableTElement<3>::son_to_father_local(const Vector<double> &s_son, int son_type, Vector<double> &s_father)
+  {
+    Vector<Vector<double>> sv;
+    son_vertices_in_father(son_type, sv);
+    const double b0 = s_son[0], b1 = s_son[1], b2 = s_son[2], b3 = 1.0 - b0 - b1 - b2;
+    s_father.resize(3);
+    for (unsigned d = 0; d < 3; d++)
+      s_father[d] = b0 * sv[0][d] + b1 * sv[1][d] + b2 * sv[2][d] + b3 * sv[3][d];
+  }
+
+  void RefineableTElement<3>::father_to_son_local(const Vector<double> &s_father, int son_type, Vector<double> &s_son)
+  {
+    // s_father = P3 + A * s_son, A columns = (P0-P3),(P1-P3),(P2-P3). Invert the 3x3.
+    Vector<Vector<double>> sv;
+    son_vertices_in_father(son_type, sv);
+    const double A[3][3] = {
+        {sv[0][0] - sv[3][0], sv[1][0] - sv[3][0], sv[2][0] - sv[3][0]},
+        {sv[0][1] - sv[3][1], sv[1][1] - sv[3][1], sv[2][1] - sv[3][1]},
+        {sv[0][2] - sv[3][2], sv[1][2] - sv[3][2], sv[2][2] - sv[3][2]}};
+    const double r0 = s_father[0] - sv[3][0], r1 = s_father[1] - sv[3][1], r2 = s_father[2] - sv[3][2];
+    const double det = A[0][0] * (A[1][1] * A[2][2] - A[1][2] * A[2][1]) - A[0][1] * (A[1][0] * A[2][2] - A[1][2] * A[2][0]) + A[0][2] * (A[1][0] * A[2][1] - A[1][1] * A[2][0]);
+    // Inverse via the adjugate (cofactor) matrix / det.
+    const double inv[3][3] = {
+        {(A[1][1] * A[2][2] - A[1][2] * A[2][1]) / det, (A[0][2] * A[2][1] - A[0][1] * A[2][2]) / det, (A[0][1] * A[1][2] - A[0][2] * A[1][1]) / det},
+        {(A[1][2] * A[2][0] - A[1][0] * A[2][2]) / det, (A[0][0] * A[2][2] - A[0][2] * A[2][0]) / det, (A[0][2] * A[1][0] - A[0][0] * A[1][2]) / det},
+        {(A[1][0] * A[2][1] - A[1][1] * A[2][0]) / det, (A[0][1] * A[2][0] - A[0][0] * A[2][1]) / det, (A[0][0] * A[1][1] - A[0][1] * A[1][0]) / det}};
+    s_son.resize(3);
+    s_son[0] = inv[0][0] * r0 + inv[0][1] * r1 + inv[0][2] * r2;
+    s_son[1] = inv[1][0] * r0 + inv[1][1] * r1 + inv[1][2] * r2;
+    s_son[2] = inv[2][0] * r0 + inv[2][1] * r1 + inv[2][2] * r2;
+  }
+
+  void RefineableTElement<3>::local_coordinate_in_ancestor(const Vector<double> &s_here, RefineableTElement<3> *ancestor, Vector<double> &s_ancestor) const
+  {
+    s_ancestor = s_here;
+    Tree *tp = this->Tree_pt;
+    while (tp && tp->object_pt() != ancestor)
+    {
+      Tree *father_tp = tp->father_pt();
+      if (!father_tp) break; // reached the root without meeting the ancestor
+      Vector<double> s_up(3);
+      son_to_father_local(s_ancestor, tp->son_type(), s_up);
+      s_ancestor = s_up;
+      tp = father_tp;
+    }
+  }
+
+  bool RefineableTElement<3>::root_coord_to_leaf(const Vector<double> &s_root, RefineableTElement<3> *leaf, Vector<double> &s_leaf)
+  {
+    if (!leaf || !leaf->Tree_pt) return false;
+    Tree *root = leaf->Tree_pt->root_pt();
+    std::vector<int> chain; // son_types from just-below-root down to leaf
+    Tree *tp = leaf->Tree_pt;
+    while (tp != root) { chain.push_back(tp->son_type()); tp = tp->father_pt(); if (!tp) return false; }
+    Vector<double> s = s_root;
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it)
+    {
+      Vector<double> sd(3);
+      father_to_son_local(s, *it, sd);
+      s = sd;
+    }
+    s_leaf = s;
+    return true;
+  }
+
+  bool RefineableTElement<3>::local_coordinate_in_other_leaf(const Vector<double> &s_here, RefineableTElement<3> *target, Vector<double> &s_target) const
+  {
+    if (!this->Tree_pt || !target || !target->Tree_pt) return false;
+    Tree *my_root = this->Tree_pt->root_pt();
+    if (my_root != target->Tree_pt->root_pt()) return false; // cross-root handled by the inter-tree map
+    RefineableTElement<3> *root_el = dynamic_cast<RefineableTElement<3> *>(my_root->object_pt());
+    if (!root_el) return false;
+    Vector<double> s_root(3);
+    this->local_coordinate_in_ancestor(s_here, root_el, s_root);
+    return root_coord_to_leaf(s_root, target, s_target);
   }
 
 }
