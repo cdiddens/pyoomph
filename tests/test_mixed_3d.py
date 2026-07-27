@@ -112,3 +112,37 @@ def test_mixed_tet_wedge_uniform_manufactured(order, field, level):
         else:
             err = max(abs(nn.value(0) - (nn.x(0) ** 2 + 2 * nn.x(1) ** 2 + 3 * nn.x(2) ** 2)) for nn in m.nodes())
         assert err < 1e-10, f"mixed tet+wedge ({order},{field}) not reproduced at level {level} (max err {err:.2e})"
+
+
+# (refine, field): refine only the wedge (z near 0.5) or only the tet (z near 1.3) -> a 2:1 hang exactly on
+# the shared triangular interface, tested for both the linear and the stricter quadratic C2 field.
+@pytest.mark.parametrize("refine,zc", [("wedge", 0.5), ("tet", 1.3)])
+@pytest.mark.parametrize("field", ["linear", "quadratic"])
+def test_mixed_tet_wedge_cross_shape_hanging(refine, zc, field):
+    # Non-uniform (2:1) CROSS-SHAPE hanging across the mixed tet<->wedge interface. Refining only one side
+    # makes the finer side's extra face nodes hang on the coarser cross-shape neighbour's C2 interpolation
+    # (the unified post_adapt_setup_hanging_nodes pass). A free/mis-constrained hang node would deviate; the
+    # manufactured field (linear, or the strict quadratic u=x^2+2y^2+3z^2, source -12) must be reproduced to
+    # machine precision at every node. Which side is refined is chosen by a midpoint-z band.
+    x, y, z = var("coordinate")[0], var("coordinate")[1], var("coordinate")[2]
+    uex = (x + 2 * y + 3 * z) if field == "linear" else (x * x + 2 * y * y + 3 * z * z)
+    src = 0 if field == "linear" else -12
+
+    class _P(Problem):
+        def define_problem(self):
+            self += TetWedgeMesh()
+            eqs = PoissonEquation(source=src, space="C2") + DirichletBC(u=uex) @ "outer"
+            eqs += RefineAccordingToElement(level_func=lambda e: 1 if abs(e.get_Eulerian_midpoint()[2] - zc) < 0.4 else 0)
+            self += eqs @ "domain"
+
+    with _P() as p:
+        p.max_refinement_level = 1
+        p.solve()
+        m = p.get_mesh("domain")
+        assert sum(1 for nn in m.nodes() if nn.is_hanging()) > 0, "no hanging nodes on the mixed 2:1 interface"
+        assert _dup(m) == 0, "duplicate (torn) nodes at the mixed tet<->wedge interface"
+        if field == "linear":
+            err = max(abs(nn.value(0) - (nn.x(0) + 2 * nn.x(1) + 3 * nn.x(2))) for nn in m.nodes())
+        else:
+            err = max(abs(nn.value(0) - (nn.x(0) ** 2 + 2 * nn.x(1) ** 2 + 3 * nn.x(2) ** 2)) for nn in m.nodes())
+        assert err < 1e-10, f"mixed tet+wedge 2:1 hanging (refine {refine}, {field}) not reproduced (max err {err:.2e})"

@@ -103,26 +103,32 @@ namespace pyoomph
 	// pyoomph pass entirely -- refine_selected_elements / custom_adapt (the tet analogue of the 2d fix).
 	void TemplatedMeshBase3d::post_adapt_setup_hanging_nodes()
 	{
-		// --- Pyramid forest 2:1 hanging (M3c), CROSS-SHAPE. -----------------------------------------------
-		// A pyramid refines into 6 sub-pyramids + 4 tets, so after non-uniform refinement the leaves are a
-		// MIX of pyramids and tets. Same generative, position-based idea as the wedge branch below (NOT
-		// locate_zeta): for every leaf element and every face, walk the face's fine lattice (step
-		// h=0.5/(nnode_1d-1)), map each point to physical x via interpolated_x, look the node up by position,
-		// and hang it on THIS (coarse) element's interpolating_basis via mixed_hang_node_at. Shape-agnostic on
-		// the finer side (it only needs the node's position); the coarse side may be a pyramid (4 tri + 1 quad
-		// face) or a tet (4 tri faces). The pyramid's triangular faces meet at the apex (s2=1) where the
-		// 1/(1-s2) shape is singular, so lattice points with a non-finite image are skipped (only the apex
-		// VERTEX is affected, never a hang node, which sits at s2<=0.5).
+		// --- Cross-shape 2:1 hanging for the registry-based families (tet, wedge, pyramid): pure OR mixed. --
+		// After non-uniform refinement a 2:1 interface has a finer neighbour whose extra face nodes must hang
+		// on the coarser leaf's interpolation. One generative, position-based pass (NOT locate_zeta): for
+		// every leaf element and every face, walk the face's fine lattice (step h=0.5/(nnode_1d-1)), map each
+		// point to physical x via interpolated_x, look the node up by position, and hang it on THIS (coarse)
+		// element's interpolating_basis via mixed_hang_node_at. It is shape-agnostic on the finer side (it
+		// only needs the node's position), so it handles ANY combination: a coarse pyramid (4 tri + 1 quad
+		// face), tet (4 tri) or wedge (2 tri + 3 quad) with a finer neighbour of any shape -- a tet meets a
+		// wedge/pyramid on a triangle, a wedge meets a pyramid on a triangle (cap<->tri face) or quad
+		// (side<->base). The pyramid's triangular faces meet at the apex (s2=1) where the 1/(1-s2) shape is
+		// singular, so lattice points with a non-finite image are skipped (only the apex VERTEX, never a hang
+		// node at s2<=0.5). This subsumes the former separate pure-pyramid (M3c) and pure-wedge (M2) passes.
 		{
-			bool has_pyr = false, all_pyr_or_tet = true;
+			bool has_pyr = false, has_wedge = false, all_reg = true;
 			for (unsigned int ie = 0; ie < this->nelement(); ie++)
 			{
 				const bool isp = (dynamic_cast<oomph::RefineablePyramidElement *>(this->element_pt(ie)) != nullptr);
+				const bool isw = (dynamic_cast<oomph::RefineableWedgeElement *>(this->element_pt(ie)) != nullptr);
 				const bool ist = (dynamic_cast<oomph::TElementBase *>(this->element_pt(ie)) != nullptr);
 				has_pyr = has_pyr || isp;
-				all_pyr_or_tet = all_pyr_or_tet && (isp || ist);
+				has_wedge = has_wedge || isw;
+				all_reg = all_reg && (isp || isw || ist);
 			}
-			if (has_pyr && all_pyr_or_tet)
+			// Pure-tet meshes use the per-element OcTree hooks (and bricks use oomph-lib); this generative pass
+			// runs for any registry-based mesh containing a wedge or pyramid -- pure OR mixed with the others.
+			if (all_reg && (has_pyr || has_wedge))
 			{
 				// Face tables (corner local coords). Pyramid vertices 0(0,0,0)1(1,0,0)2(1,1,0)3(0,1,0)4(0,0,1)
 				// apex; tet vertices 0(0,0,0)1(1,0,0)2(0,1,0)3(0,0,1). Matching get_vertex_nodes_of_face.
@@ -138,6 +144,14 @@ namespace pyoomph
 					{false, 3, {{0, 0, 0}, {0, 1, 0}, {0, 0, 1}, {0, 0, 0}}}, // 1
 					{false, 3, {{0, 0, 0}, {1, 0, 0}, {0, 0, 1}, {0, 0, 0}}}, // 2
 					{false, 3, {{1, 0, 0}, {0, 1, 0}, {0, 0, 0}, {0, 0, 0}}}};// 3
+				// Wedge: (s0,s1)=triangular cross-section, s2=extrusion. 2 tri caps + 3 quad sides
+				// (see BulkElementWedge3dC1::get_vertex_nodes_of_face).
+				static const PFace WEDGE_FACES[5] = {
+					{false, 3, {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 0}}}, // 0 bottom tri s2=0
+					{false, 3, {{0, 0, 1}, {1, 0, 1}, {0, 1, 1}, {0, 0, 0}}}, // 1 top tri s2=1
+					{true,  4, {{0, 0, 0}, {0, 1, 0}, {0, 1, 1}, {0, 0, 1}}}, // 2 quad s0=0
+					{true,  4, {{0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1}}}, // 3 quad s1=0
+					{true,  4, {{1, 0, 0}, {0, 1, 0}, {0, 1, 1}, {1, 0, 1}}}};// 4 quad hypotenuse s0+s1=1
 
 				for (unsigned int in = 0; in < this->nnode(); in++) this->node_pt(in)->set_nonhanging();
 				const double scale = 1e8;
@@ -156,8 +170,9 @@ namespace pyoomph
 					oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(this->element_pt(ie));
 					if (!be || !re || !fe || !re->tree_pt() || !re->tree_pt()->is_leaf()) continue;
 					const bool is_pyr = (dynamic_cast<oomph::RefineablePyramidElement *>(this->element_pt(ie)) != nullptr);
-					const PFace *FACES = is_pyr ? PYR_FACES : TET_FACES;
-					const int nfaces = is_pyr ? 5 : 4;
+					const bool is_wedge = (dynamic_cast<oomph::RefineableWedgeElement *>(this->element_pt(ie)) != nullptr);
+					const PFace *FACES = is_pyr ? PYR_FACES : (is_wedge ? WEDGE_FACES : TET_FACES);
+					const int nfaces = (is_pyr || is_wedge) ? 5 : 4;
 					const unsigned n1d = fe->nnode_1d();
 					const int steps = 2 * ((int)n1d - 1);
 					if (steps < 1) continue;
@@ -193,86 +208,6 @@ namespace pyoomph
 			}
 		}
 
-		// --- Wedge (triangular-prism) 2:1 hanging (M2). ---------------------------------------------------
-		// Wedges do not (yet) have a topological OcTree neighbour finder, so -- like the tet route did before
-		// its per-element migration -- non-uniform (2:1) wedge hanging is installed by this mesh-level pass.
-		// It is NOT locate_zeta: for each wedge and each of its 5 faces we visit the FIXED local coordinates
-		// where a one-level-finer neighbour places nodes, find the node sitting there by position, and -- if
-		// it is not one of this element's own interpolating nodes -- hang it on this element's
-		// interpolating_basis at that exactly-known local coordinate via mixed_hang_node_at. The candidate
-		// coordinates are GENERATED from each face's fine lattice at step h = 0.5/(nnode_1d-1): a 2:1-finer
-		// neighbour refines the face 1->4 and places its order-p nodes at that spacing (C1 -> 0.5, i.e. edge
-		// midpoints + quad centre; C2 -> 0.25, i.e. additionally the sub-face quarter points). Coordinates
-		// that coincide with this element's own nodes are skipped by mixed_hang_node_at. Combined with
-		// enforce_refinement_balance (2:1), the masters are the coarse element's real nodes -> no flattening.
-		bool has_wedge = false, all_wedge = true;
-		for (unsigned int ie = 0; ie < this->nelement(); ie++)
-		{
-			bool w = (dynamic_cast<oomph::RefineableWedgeElement *>(this->element_pt(ie)) != nullptr);
-			has_wedge = has_wedge || w;
-			all_wedge = all_wedge && w;
-		}
-		if (!has_wedge || !all_wedge)
-			return; // tets: per-element hooks; bricks: oomph; mixed: not supported yet
-
-		// The 5 wedge faces as {is_quad, 3 or 4 corner local coords}. (s0,s1) is the triangular cross-section,
-		// s2 the extrusion. Faces: 0=bottom tri (s2=0), 1=top tri (s2=1), 2=quad s0=0, 3=quad s1=0,
-		// 4=quad hypotenuse s0+s1=1 (see BulkElementWedge3dC1::get_vertex_nodes_of_face).
-		struct WFace { bool quad; double c[4][3]; };
-		static const WFace FACES[5] = {
-			{false, {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 0}}},                 // 0 bottom tri
-			{false, {{0, 0, 1}, {1, 0, 1}, {0, 1, 1}, {0, 0, 0}}},                 // 1 top tri
-			{true,  {{0, 0, 0}, {0, 1, 0}, {0, 1, 1}, {0, 0, 1}}},                 // 2 quad s0=0
-			{true,  {{0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1}}},                 // 3 quad s1=0
-			{true,  {{1, 0, 0}, {0, 1, 0}, {0, 1, 1}, {1, 0, 1}}}};                // 4 quad hypotenuse
-
-		// Reset, then build a position -> node lookup over the whole mesh.
-		for (unsigned int in = 0; in < this->nnode(); in++) this->node_pt(in)->set_nonhanging();
-		const double scale = 1e8;
-		std::map<std::array<long long, 3>, oomph::Node *> node_at;
-		for (unsigned int in = 0; in < this->nnode(); in++)
-		{
-			oomph::Node *n = this->node_pt(in);
-			node_at[{(long long)std::llround(n->x(0) * scale), (long long)std::llround(n->x(1) * scale), (long long)std::llround(n->x(2) * scale)}] = n;
-		}
-
-		const int ncont = this->nelement() ? (int)dynamic_cast<oomph::RefineableElement *>(this->element_pt(0))->ncont_interpolated_values() : 0;
-		for (unsigned int ie = 0; ie < this->nelement(); ie++)
-		{
-			BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
-			oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(this->element_pt(ie));
-			oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(this->element_pt(ie));
-			if (!be || !re || !fe || !re->tree_pt() || !re->tree_pt()->is_leaf()) continue;
-			const unsigned n1d = fe->nnode_1d();
-			const int steps = 2 * ((int)n1d - 1); // lattice divisions per face direction (C1:2, C2:4)
-			if (steps < 1) continue;
-			const double h = 1.0 / steps;
-			for (int f = 0; f < 5; f++)
-			{
-				const WFace &F = FACES[f];
-				for (int iu = 0; iu <= steps; iu++)
-					for (int iv = 0; iv <= steps; iv++)
-					{
-						const double u = iu * h, v = iv * h;
-						if (!F.quad && u + v > 1.0 + 1e-12) continue; // triangular face: barycentric u+v<=1
-						oomph::Vector<double> s(3), x(3);
-						for (int d = 0; d < 3; d++)
-						{
-							if (F.quad) // bilinear blend of the 4 corners
-								s[d] = (1 - u) * (1 - v) * F.c[0][d] + u * (1 - v) * F.c[1][d] + u * v * F.c[2][d] + (1 - u) * v * F.c[3][d];
-							else        // triangular: c0 + u(c1-c0) + v(c2-c0)
-								s[d] = F.c[0][d] + u * (F.c[1][d] - F.c[0][d]) + v * (F.c[2][d] - F.c[0][d]);
-						}
-						be->interpolated_x(s, x);
-						std::array<long long, 3> key = {(long long)std::llround(x[0] * scale), (long long)std::llround(x[1] * scale), (long long)std::llround(x[2] * scale)};
-						std::map<std::array<long long, 3>, oomph::Node *>::iterator it = node_at.find(key);
-						if (it == node_at.end()) continue; // no node here -> conforming/boundary, nothing to hang
-						oomph::Node *H = it->second;
-						be->mixed_hang_node_at(H, re, s, -1); // skips H if it is this element's own node
-						for (int val = 0; val < ncont; val++) be->mixed_hang_node_at(H, re, s, val);
-					}
-			}
-		}
 	}
 
 	// Enforce 2:1 refinement balancing for tetrahedral meshes (see header). Iteratively refine any
