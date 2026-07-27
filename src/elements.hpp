@@ -440,8 +440,10 @@ namespace pyoomph
     // DynamicTree::dynamic_split_if_required passes to construct_son), return the local face index
     // of the father element that this face is a part of, or FACE_INTERIOR_IN_FATHER. Depends only on
     // the element shape and the split scheme, not on the polynomial order, so the default
-    // implementation dispatches on dim()/shape; see elements.cpp.
-    virtual int face_index_in_father(const int & my_face_index, const unsigned & son_type) const;
+    // implementation dispatches on dim()/shape; see elements.cpp. father_el is the parent element, needed
+    // only for HETEROGENEOUS splits (a pyramid -> pyramids + tets) where the son shape alone does not reveal
+    // the father shape -- a tet son of a pyramid is not a tet son of a tet; pass it from dynamic_split.
+    virtual int face_index_in_father(const int & my_face_index, const unsigned & son_type, const BulkElementBase *father_el = nullptr) const;
     // Evaluates and stores (into the shape_info buffer) the shape function values/derivatives
     // required at one integration point, as requested by "required_shapes" (a bitmask-like struct
     // generated alongside the JIT code, describing exactly which shapes the weak form needs).

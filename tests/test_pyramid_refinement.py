@@ -3,11 +3,12 @@
 #  A pyramid is NOT shape-closed under refinement: its "red" split produces MIXED offspring -- 6 sub-pyramids
 #  + 4 tetrahedra (10 children). This exercises the heterogeneous-son path (PyramidMixedRefinementPattern +
 #  the cross-shape son builder BulkElementBase::build_as_pyramid_son). New father-boundary nodes are shared
-#  via a father-node-keyed registry; at refinement level >= 2 a sub-pyramid and an adjacent tet-of-pyramid
-#  share a face while being built by DIFFERENT registries, so a mesh-wide POSITION registry unifies them
-#  (RefineablePyramidElement::Shared_position_registry). Oracle: exact mixed element counts, ZERO duplicate
-#  (torn) nodes -- crucially at the pyramid<->tet interfaces -- and, since the problem is linear, a machine-
-#  zero residual in one Newton step iff shape/integration/node-sharing are all correct.
+#  topologically via a father-node-keyed registry (the same one the tet build uses in a pyramid forest), so a
+#  sub-pyramid and an adjacent tet-of-pyramid sharing a face key on the same shared father vertex pointers and
+#  reuse one node -- no tearing, MPI-safe. Oracles: exact mixed element counts, ZERO duplicate (torn) nodes at
+#  the pyramid<->tet interfaces, and a manufactured linear solution reproduced to machine precision with
+#  Dirichlet BCs (which needs face_index_in_father for boundary-tag propagation AND the conical Gauss-Jacobi
+#  pyramid quadrature for a patch-exact stiffness at the pyramid<->tet interfaces).
 
 import pytest
 
@@ -28,13 +29,16 @@ class PyramidCubeMesh(MeshTemplate):
         N = self.N
         dom = self.new_domain("domain")
         nd = {}
+        coord = {}
 
         def node(x, y, z):
             k = (round(x, 9), round(y, 9), round(z, 9))
             if k not in nd:
                 nd[k] = self.add_node_unique(x, y, z)
+                coord[nd[k]] = (x, y, z)
             return nd[k]
 
+        bases = []  # each pyramid's quad base (its 4 nodes), for boundary-facet detection
         for ix in range(N):
             for iy in range(N):
                 for iz in range(N):
@@ -46,7 +50,17 @@ class PyramidCubeMesh(MeshTemplate):
                     # 6 cube faces as quad bases (wound so the apex=centre gives a positive-volume pyramid).
                     faces = [[0, 1, 2, 3], [4, 7, 6, 5], [0, 4, 5, 1], [1, 5, 6, 2], [2, 6, 7, 3], [3, 7, 4, 0]]
                     for f in faces:
-                        dom.add_pyramid_3d_C1(c[f[0]], c[f[1]], c[f[2]], c[f[3]], ctr)
+                        q = [c[f[0]], c[f[1]], c[f[2]], c[f[3]]]
+                        dom.add_pyramid_3d_C1(q[0], q[1], q[2], q[3], ctr)
+                        bases.append(q)
+        # A pyramid base (a cube face) is a boundary facet iff all four of its nodes lie in one cube-face plane.
+        # This exercises face_index_in_father: the boundary tag must propagate to the refined sub-faces so
+        # DirichletBC pins the refined boundary nodes.
+        bounds = {"left": (0, 0.0), "right": (0, 1.0), "front": (1, 0.0), "back": (1, 1.0), "bottom": (2, 0.0), "top": (2, 1.0)}
+        for q in bases:
+            for bname, (ax, val) in bounds.items():
+                if all(abs(coord[n][ax] - val) < 1e-9 for n in q):
+                    self.add_facet_to_boundary(bname, list(q))
 
 
 class _HelmholtzLike(Equations):
@@ -133,3 +147,39 @@ def test_pyramid_red_split_tiles_exactly():
                 a, b, c, d = pts
                 tot += abs(np.dot(np.cross(b - a, c - a), d - a)) / 6
         assert abs(tot - 1.0) < 1e-10, f"pyramid red split does not tile exactly (total volume {tot})"
+
+
+from pyoomph.equations.poisson import PoissonEquation
+
+
+@pytest.mark.parametrize("level", [0, 1, 2])
+def test_pyramid_dirichlet_manufactured_linear(level):
+    # Strict correctness oracle for pyramid refinement WITH boundaries. The exact solution of -laplace(u)=0
+    # with Dirichlet u=x+2y+3z is that harmonic linear field, exactly representable in the (isoparametric) C1
+    # space -- so it must be reproduced to machine precision at every node IFF (a) face_index_in_father
+    # propagates the boundary tags to the refined sub-faces (so DirichletBC pins the right nodes) and (b) the
+    # pyramid element integrates its stiffness patch-exactly. (b) needs the CONICAL Gauss-Jacobi quadrature:
+    # plain tensor Gauss samples the rational shape functions OUTSIDE the shrinking [0,1-s2] cross-section and
+    # is not patch-exact, which -- while it cancels in a pure-pyramid mesh -- fails at the pyramid<->tet
+    # interfaces the red split creates, giving an O(1e-2) error that this test would catch.
+    x, y, z = var("coordinate")[0], var("coordinate")[1], var("coordinate")[2]
+    uex = x + 2 * y + 3 * z
+
+    class _P(Problem):
+        def define_problem(self):
+            self += PyramidCubeMesh(N=1)
+            eqs = PoissonEquation(source=0, space="C1")
+            eqs += DirichletBC(u=uex) @ ["left", "right", "front", "back", "bottom", "top"]
+            self += eqs @ "domain"
+
+    with _P() as p:
+        p.max_refinement_level = level
+        p.initialise()
+        for _ in range(level):
+            p.refine_uniformly()
+        p.solve()
+        m = p.get_mesh("domain")
+        err = 0.0
+        for n in m.nodes():
+            err = max(err, abs(n.value(0) - (n.x(0) + 2 * n.x(1) + 3 * n.x(2))))
+        assert err < 1e-10, f"pyramid mesh does not reproduce the linear field at level {level} (max err {err:.2e})"

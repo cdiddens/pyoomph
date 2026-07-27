@@ -7021,9 +7021,53 @@ namespace pyoomph
 	// son_type is the son index handed to construct_son() by DynamicTree::dynamic_split_if_required,
 	// which is exactly the tree's son_type, i.e. the QuadTreeNames (SW=0,SE=1,NW=2,NE=3) /
 	// OcTreeNames (LDB=0..RUF=7) ordering that the build() machinery assumes.
-	int BulkElementBase::face_index_in_father(const int &my_face_index, const unsigned &son_type) const
+	int BulkElementBase::face_index_in_father(const int &my_face_index, const unsigned &son_type, const BulkElementBase *father_el) const
 	{
 		const unsigned d = this->dim();
+
+		// Pyramid father: the heterogeneous "red" split (6 sub-pyramids + 4 tets). Dispatch on the FATHER (a
+		// tet son of a pyramid must NOT go through the tet-in-tet branch below). `this` is the son; son_type
+		// 0..5 => a sub-pyramid (5 faces), 6..9 => a tet (4 faces). Evaluated from son_vertices_in_father (the
+		// son's vertices in FATHER local coords) against the 5 father face planes -- matching
+		// PyramidElementC1's facet definitions: F0 s1=0 {0,1,4}, F1 s0+s2=1 {1,2,4}, F2 s1+s2=1 {2,3,4},
+		// F3 s0=0 {0,3,4}, F4 s2=0 (quad base) {0,1,2,3}. A son face lies on father face F iff all its corner
+		// nodes satisfy F's plane; coordinates are 0, 1/2 or 1 so the test is exact.
+		if (father_el && dynamic_cast<const oomph::RefineablePyramidElement *>(father_el))
+		{
+			static const int X = FACE_INTERIOR_IN_FATHER;
+			oomph::Vector<oomph::Vector<double>> sv;
+			oomph::RefineablePyramidElement::son_vertices_in_father((int)son_type, sv);
+			std::vector<std::vector<int>> FN; // this son's faces -> its own vertex indices
+			if (son_type < 6)
+			{
+				FN = {{0, 1, 4}, {1, 2, 4}, {2, 3, 4}, {0, 3, 4}, {0, 1, 2, 3}}; // sub-pyramid: 4 tri + quad base
+				if (my_face_index < 0 || my_face_index > 4) return X;
+			}
+			else
+			{
+				FN = {{1, 2, 3}, {0, 2, 3}, {0, 1, 3}, {0, 1, 2}}; // tet: face k opposite vertex k
+				if (my_face_index < 0 || my_face_index > 3) return X;
+			}
+			const std::vector<int> &corners = FN[my_face_index];
+			const double tol = 1e-12;
+			for (int F = 0; F < 5; F++)
+			{
+				bool all_on = true;
+				for (int vi : corners)
+				{
+					const double s0 = sv[vi][0], s1 = sv[vi][1], s2 = sv[vi][2];
+					double resid;
+					if (F == 0) resid = s1;
+					else if (F == 1) resid = s0 + s2 - 1.0;
+					else if (F == 2) resid = s1 + s2 - 1.0;
+					else if (F == 3) resid = s0;
+					else resid = s2;
+					if (std::fabs(resid) > tol) { all_on = false; break; }
+				}
+				if (all_on) return F;
+			}
+			return X;
+		}
 
 		if (d == 1)
 		{
@@ -7230,7 +7274,7 @@ namespace pyoomph
 			{
 				for (int son_face : son_pt[i]->get_possible_face_indices())
 				{
-					const int father_face = son_pt[i]->face_index_in_father(son_face, i);
+					const int father_face = son_pt[i]->face_index_in_father(son_face, i, this);
 					if (father_face == FACE_INTERIOR_IN_FATHER) continue;
 					const std::vector<unsigned> *fb = this->get_face_boundaries(father_face);
 					if (fb) son_pt[i]->set_face_boundaries(son_face, *fb);

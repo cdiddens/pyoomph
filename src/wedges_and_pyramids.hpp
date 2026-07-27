@@ -47,9 +47,9 @@ public:
 
 class PyramidGaussC1 : public Integral
   {
-  private:    
-    static const unsigned Npts = 12;
-    static const double Knot[12][3], Weight[12];
+  private:
+    static const unsigned Npts = 27;
+    static const double Knot[27][3], Weight[27];
   public:    
     PyramidGaussC1(){};
     PyramidGaussC1(const PyramidGaussC1& dummy) = delete;
