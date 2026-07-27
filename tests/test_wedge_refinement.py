@@ -26,21 +26,37 @@ class WedgeCubeMesh(MeshTemplate):
         N = self.N
         dom = self.new_domain("domain")
         nd = {}
+        coord = {}
 
         def node(x, y, z):
             k = (x, y, z)
             if k not in nd:
                 nd[k] = self.add_node_unique(x / N, y / N, z / N)
+                coord[nd[k]] = (x, y, z)
             return nd[k]
 
+        wedges = []
         for ix in range(N):
             for iy in range(N):
                 for iz in range(N):
                     n = lambda a, b, c: node(a, b, c)
                     c = [n(ix, iy, iz), n(ix + 1, iy, iz), n(ix + 1, iy + 1, iz), n(ix, iy + 1, iz)]
                     t = [n(ix, iy, iz + 1), n(ix + 1, iy, iz + 1), n(ix + 1, iy + 1, iz + 1), n(ix, iy + 1, iz + 1)]
-                    dom.add_wedge_3d_C1(c[0], c[1], c[2], t[0], t[1], t[2])
-                    dom.add_wedge_3d_C1(c[0], c[2], c[3], t[0], t[2], t[3])
+                    w1 = [c[0], c[1], c[2], t[0], t[1], t[2]]
+                    w2 = [c[0], c[2], c[3], t[0], t[2], t[3]]
+                    dom.add_wedge_3d_C1(*w1)
+                    dom.add_wedge_3d_C1(*w2)
+                    wedges += [w1, w2]
+        # Boundary facets: a wedge face (local nodes) is on a cube-face boundary iff all its nodes lie in
+        # that plane. Faces: 2 triangular caps {0,1,2},{3,4,5} + 3 quad sides.
+        bounds = {"left": (0, 0), "right": (0, N), "bottom": (1, 0), "top": (1, N), "back": (2, 0), "front": (2, N)}
+        facelists = [[0, 1, 2], [3, 4, 5], [0, 1, 4, 3], [0, 3, 5, 2], [1, 2, 5, 4]]
+        for w in wedges:
+            for fl in facelists:
+                fn = [w[i] for i in fl]
+                for bname, (ax, val) in bounds.items():
+                    if all(coord[x][ax] == val for x in fn):
+                        self.add_facet_to_boundary(bname, list(fn))
 
 
 class _HelmholtzLike(Equations):
@@ -91,3 +107,38 @@ def test_uniform_wedge_refinement(order, level):
         assert m.nelement() == 2 * 8 ** level, f"expected {2 * 8 ** level} wedges, got {m.nelement()}"
         assert _count_coincident_nodes(m) == 0, "duplicate (torn) nodes after uniform wedge refinement"
         assert _max_abs_residual(p) < 1e-9
+
+
+from pyoomph.equations.poisson import PoissonEquation
+
+
+def test_nonuniform_wedge_2to1_hanging():
+    # Non-uniform (2:1) C1 wedge refinement: refine only the cells with Eulerian x<0.5, creating a 2:1
+    # hanging interface at x=0.5 (enforce_refinement_balance keeps it single-level). The exact solution of
+    # -laplace(u)=0 with Dirichlet u=x+2y+3z is that linear field itself, which the C1 space represents
+    # exactly -- so it is reproduced to machine precision at every node IFF the hanging nodes on the 2:1
+    # interface are correctly constrained (a free/mis-constrained hanging node would deviate). This is a
+    # strict correctness oracle for the hanging (unlike a bare linear-residual check, which is auto-zero).
+    x = var("coordinate")[0]
+    y = var("coordinate")[1]
+    z = var("coordinate")[2]
+    uex = x + 2 * y + 3 * z
+
+    class _P(Problem):
+        def define_problem(self):
+            self += WedgeCubeMesh(N=2)
+            eqs = PoissonEquation(source=0, space="C1")
+            eqs += DirichletBC(u=uex) @ ["left", "right", "top", "bottom", "front", "back"]
+            eqs += RefineAccordingToElement(level_func=lambda e: 1 if e.get_Eulerian_midpoint()[0] < 0.5 else 0)
+            self += eqs @ "domain"
+
+    with _P() as p:
+        p.max_refinement_level = 2
+        p.solve()
+        m = p.get_mesh("domain")
+        assert m.nelement() > 16, "refinement did not happen"
+        assert _count_coincident_nodes(m) == 0, "duplicate (torn) nodes at the 2:1 wedge interface"
+        err = 0.0
+        for n in m.nodes():
+            err = max(err, abs(n.value(0) - (n.x(0) + 2 * n.x(1) + 3 * n.x(2))))
+        assert err < 1e-10, f"linear field not reproduced across the 2:1 wedge interface (max err {err:.2e})"

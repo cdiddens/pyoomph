@@ -85,6 +85,83 @@ namespace pyoomph
 	// pyoomph pass entirely -- refine_selected_elements / custom_adapt (the tet analogue of the 2d fix).
 	void TemplatedMeshBase3d::post_adapt_setup_hanging_nodes()
 	{
+		// --- Wedge (triangular-prism) 2:1 hanging (M2). ---------------------------------------------------
+		// Wedges do not (yet) have a topological OcTree neighbour finder, so -- like the tet route did before
+		// its per-element migration -- non-uniform (2:1) wedge hanging is installed by a mesh-level pass here.
+		// It is NOT locate_zeta: for each wedge and each of its 5 faces we visit the FIXED local coordinates
+		// where a one-level-finer neighbour places nodes (the face's 1->4 subdivision points), find the node
+		// sitting there by position, and -- if that node is not one of this element's own nodes -- hang it on
+		// this element's interpolating_basis at that (exactly known) local coordinate via mixed_hang_node_at.
+		// Combined with enforce_refinement_balance (run just before), which keeps the mesh 2:1, the coarse
+		// face's edge/centre nodes are the only hanging nodes and their masters are this element's real
+		// (non-hanging) nodes, so no chain flattening is needed. Scoped to C1 wedges for now (C2 wedge faces
+		// carry additional quarter-point nodes -- a follow-up).
+		bool has_wedge = false, all_wedge = true;
+		for (unsigned int ie = 0; ie < this->nelement(); ie++)
+		{
+			bool w = (dynamic_cast<oomph::RefineableWedgeElement *>(this->element_pt(ie)) != nullptr);
+			has_wedge = has_wedge || w;
+			all_wedge = all_wedge && w;
+		}
+		if (!has_wedge || !all_wedge)
+			return; // tets: per-element hooks; bricks: oomph; mixed: not supported yet
+
+		// C2 wedge 2:1 hanging carries extra quarter-point nodes on the sub-divided faces (beyond the C1
+		// edge-midpoint/centre set enumerated below), so refuse a non-uniform C2 wedge mesh rather than
+		// silently under-constrain it. C2 UNIFORM refinement (no hanging) is fine and handled in build().
+		{
+			unsigned milev = 0, malev = 0;
+			if (oomph::TreeBasedRefineableMeshBase *tb = dynamic_cast<oomph::TreeBasedRefineableMeshBase *>(this))
+				tb->get_refinement_levels(milev, malev);
+			if (milev < malev && this->nelement() && dynamic_cast<oomph::FiniteElement *>(this->element_pt(0))->nnode() > 6)
+				throw_runtime_error("Non-uniform (2:1) refinement of C2 wedge meshes is not implemented yet (only C1). Use C1 wedges, or uniform C2 refinement.");
+		}
+
+		// The local coordinates, per wedge face, at which a 2:1-finer neighbour puts nodes that must hang:
+		// the 1->4 subdivision points of each face (triangular caps: 3 edge midpoints; quad sides: 4 edge
+		// midpoints + the face centre). (s0,s1) is the triangular cross-section, s2 the extrusion.
+		static const std::vector<std::vector<double>> FACE_HANG_S = {
+			// face 0: bottom triangle (s2=0)
+			{0.5, 0.0, 0.0}, {0.5, 0.5, 0.0}, {0.0, 0.5, 0.0},
+			// face 1: top triangle (s2=1)
+			{0.5, 0.0, 1.0}, {0.5, 0.5, 1.0}, {0.0, 0.5, 1.0},
+			// face 2: quad s1=0 (edge mids + centre)
+			{0.5, 0.0, 0.0}, {1.0, 0.0, 0.5}, {0.5, 0.0, 1.0}, {0.0, 0.0, 0.5}, {0.5, 0.0, 0.5},
+			// face 3: quad s0=0
+			{0.0, 0.5, 0.0}, {0.0, 1.0, 0.5}, {0.0, 0.5, 1.0}, {0.0, 0.0, 0.5}, {0.0, 0.5, 0.5},
+			// face 4: quad hypotenuse s0+s1=1
+			{0.5, 0.5, 0.0}, {0.0, 1.0, 0.5}, {0.5, 0.5, 1.0}, {1.0, 0.0, 0.5}, {0.5, 0.5, 0.5}};
+
+		// Reset, then build a position -> node lookup over the whole mesh.
+		for (unsigned int in = 0; in < this->nnode(); in++) this->node_pt(in)->set_nonhanging();
+		const double scale = 1e8;
+		std::map<std::array<long long, 3>, oomph::Node *> node_at;
+		for (unsigned int in = 0; in < this->nnode(); in++)
+		{
+			oomph::Node *n = this->node_pt(in);
+			node_at[{(long long)std::llround(n->x(0) * scale), (long long)std::llround(n->x(1) * scale), (long long)std::llround(n->x(2) * scale)}] = n;
+		}
+
+		const int ncont = this->nelement() ? (int)dynamic_cast<oomph::RefineableElement *>(this->element_pt(0))->ncont_interpolated_values() : 0;
+		for (unsigned int ie = 0; ie < this->nelement(); ie++)
+		{
+			BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+			oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(this->element_pt(ie));
+			if (!be || !re || !re->tree_pt() || !re->tree_pt()->is_leaf()) continue;
+			for (const std::vector<double> &sc : FACE_HANG_S)
+			{
+				oomph::Vector<double> s(3), x(3);
+				for (int d = 0; d < 3; d++) s[d] = sc[d];
+				be->interpolated_x(s, x);
+				std::array<long long, 3> key = {(long long)std::llround(x[0] * scale), (long long)std::llround(x[1] * scale), (long long)std::llround(x[2] * scale)};
+				std::map<std::array<long long, 3>, oomph::Node *>::iterator it = node_at.find(key);
+				if (it == node_at.end()) continue; // no node here -> conforming/boundary face, nothing to hang
+				oomph::Node *H = it->second;
+				// mixed_hang_node_at skips the case where H is this element's own interpolating node.
+				be->mixed_hang_node_at(H, re, s, -1);
+				for (int v = 0; v < ncont; v++) be->mixed_hang_node_at(H, re, s, v);
+			}
+		}
 	}
 
 	// Enforce 2:1 refinement balancing for tetrahedral meshes (see header). Iteratively refine any
@@ -93,10 +170,11 @@ namespace pyoomph
 	// refinement round uses oomph-lib's refine_selected_elements (full, correct rebuild).
 	void TemplatedMeshBase3d::enforce_refinement_balance()
 	{
-		bool has_tet = false;
-		for (unsigned int ie = 0; ie < this->nelement() && !has_tet; ie++)
-			if (dynamic_cast<oomph::TElementBase *>(this->element_pt(ie))) has_tet = true;
-		if (!has_tet) return; // brick/hex meshes: oomph-lib's tree bounds the level difference itself
+		bool has_simplexlike = false;
+		for (unsigned int ie = 0; ie < this->nelement() && !has_simplexlike; ie++)
+			if (dynamic_cast<oomph::TElementBase *>(this->element_pt(ie)) || dynamic_cast<oomph::RefineableWedgeElement *>(this->element_pt(ie)))
+				has_simplexlike = true;
+		if (!has_simplexlike) return; // brick/hex meshes: oomph-lib's tree bounds the level difference itself
 
 		const double scale = 1e8;
 		const int max_rounds = 40; // safety bound; convergence is bounded by max_refinement_level()
@@ -114,30 +192,38 @@ namespace pyoomph
 			for (unsigned int ie = 0; ie < this->nelement(); ie++)
 			{
 				oomph::TElementBase *tet = dynamic_cast<oomph::TElementBase *>(this->element_pt(ie));
-				if (!tet) continue;
+				oomph::RefineableWedgeElement *wedge = dynamic_cast<oomph::RefineableWedgeElement *>(this->element_pt(ie));
+				oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(this->element_pt(ie));
+				if ((!tet && !wedge) || !fe) continue;
 				oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(this->element_pt(ie));
 				if (re && re->refinement_level() >= this->max_refinement_level()) continue; // cannot refine further
-				oomph::Node *v[4];
-				for (unsigned k = 0; k < 4; k++) v[k] = tet->vertex_node_pt(k);
+				// This element's edges as vertex-index pairs: a tet's 6, or a wedge's 9 (2 tri caps + 3
+				// verticals). Only genuine edges (not face diagonals), so a node at their 1/2^nnode_1d
+				// quarter-point signals a neighbour >=2 levels finer (see the C1:1/4, C2:1/8 note below).
+				static const int TET_E[6][2] = {{0, 1}, {0, 2}, {0, 3}, {1, 2}, {1, 3}, {2, 3}};
+				static const int WEDGE_E[9][2] = {{0, 1}, {1, 2}, {2, 0}, {3, 4}, {4, 5}, {5, 3}, {0, 3}, {1, 4}, {2, 5}};
+				const int(*E)[2] = tet ? TET_E : WEDGE_E;
+				const int nE = tet ? 6 : 9;
 				// The edge-fraction whose presence signals a neighbour >=2 levels finer. A 1-level
 				// neighbour subdivides the edge at its midpoint (t=1/2) and, for order p>=2 (e.g. C2),
 				// additionally places the sub-edges' own mid-nodes at t=1/4, 3/4 -- so the finest node a
 				// 2:1-allowed neighbour produces is at t=1/2^nnode_1d. A node at that fraction therefore
 				// means the neighbour is >=2 levels finer. C1 (nnode_1d=2): 1/4; C2 (nnode_1d=3): 1/8.
-				const double frac = 1.0 / (double)(1u << tet->nnode_1d());
+				const double frac = 1.0 / (double)(1u << fe->nnode_1d());
 				const double fracs[2] = {frac, 1.0 - frac};
 				bool imbalanced = false;
-				for (unsigned a = 0; a < 4 && !imbalanced; a++)
-					for (unsigned b = a + 1; b < 4 && !imbalanced; b++)
+				for (int e = 0; e < nE && !imbalanced; e++)
+				{
+					oomph::Node *va = fe->vertex_node_pt(E[e][0]);
+					oomph::Node *vb = fe->vertex_node_pt(E[e][1]);
+					for (int fi = 0; fi < 2; fi++)
 					{
-						for (int fi = 0; fi < 2; fi++)
-						{
-							std::array<long long, 3> q;
-							for (int d = 0; d < 3; d++)
-								q[d] = (long long)std::llround((v[a]->x(d) + fracs[fi] * (v[b]->x(d) - v[a]->x(d))) * scale);
-							if (positions.count(q)) { imbalanced = true; break; }
-						}
+						std::array<long long, 3> q;
+						for (int d = 0; d < 3; d++)
+							q[d] = (long long)std::llround((va->x(d) + fracs[fi] * (vb->x(d) - va->x(d))) * scale);
+						if (positions.count(q)) { imbalanced = true; break; }
 					}
+				}
 				if (imbalanced) to_refine.push_back(ie);
 			}
 			if (to_refine.size() == 0) break;

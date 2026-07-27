@@ -7105,9 +7105,42 @@ namespace pyoomph
 			return FACE_INTERIOR_IN_FATHER;
 		}
 
-		// Any other shape (wedges, pyramids) has no implemented refinement scheme, so this is only
-		// reachable if such an element is ever split -- fail loudly rather than silently dropping
-		// the boundary tags of its sons.
+		if (d == 3 && dynamic_cast<const oomph::RefineableWedgeElement *>(this))
+		{
+			// Wedge 1->8 split. Evaluated from son_vertices_in_father (the son's 6 vertices in FATHER local
+			// coordinates), like the tet: the father's 5 faces are the planes s2=0 (face 0), s2=1 (face 1),
+			// s0=0 (face 2), s1=0 (face 3) and s0+s1=1 (face 4) -- matching BulkElementWedge3dC1::
+			// get_vertex_nodes_of_face. A son face (its corner nodes listed below) lies on father face F iff
+			// all its corners satisfy F's plane equation; coordinates are all 0, 1/2 or 1 so the test is exact.
+			static const int X = FACE_INTERIOR_IN_FATHER;
+			if (son_type > 7 || my_face_index < 0 || my_face_index > 4) return X;
+			static const int FACE_NODES[5][4] = {{0, 1, 2, -1}, {3, 4, 5, -1}, {0, 2, 3, 5}, {0, 1, 3, 4}, {1, 2, 4, 5}};
+			oomph::Vector<oomph::Vector<double>> sv;
+			oomph::RefineableWedgeElement::son_vertices_in_father((int)son_type, sv);
+			const double tol = 1e-12;
+			for (int f = 0; f < 5; f++)
+			{
+				bool all_on = true;
+				for (int k = 0; k < 4 && all_on; k++)
+				{
+					const int vi = FACE_NODES[my_face_index][k];
+					if (vi < 0) continue; // triangular face has only 3 nodes
+					const double s0 = sv[vi][0], s1 = sv[vi][1], s2 = sv[vi][2];
+					double resid;
+					if (f == 0) resid = s2;
+					else if (f == 1) resid = s2 - 1.0;
+					else if (f == 2) resid = s0;
+					else if (f == 3) resid = s1;
+					else resid = s0 + s1 - 1.0;
+					if (std::fabs(resid) > tol) all_on = false;
+				}
+				if (all_on) return f;
+			}
+			return X;
+		}
+
+		// Any other shape (pyramids) has no implemented refinement scheme, so this is only reachable if such
+		// an element is ever split -- fail loudly rather than silently dropping the boundary tags of its sons.
 		throw_runtime_error(std::string("face_index_in_father is not implemented for the element type ") + typeid(*this).name());
 		return FACE_INTERIOR_IN_FATHER;
 	}
