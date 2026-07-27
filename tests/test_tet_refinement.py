@@ -333,3 +333,43 @@ def test_tet_readapt_no_torn_nodes():
             seen[key] = n
         assert dup == 0, f"{dup} duplicate (torn) tet nodes across the level-1/level-2 interface"
         assert m.nelement() > 384
+
+
+from pyoomph.equations.ALE import LaplaceSmoothedMesh
+
+
+class _MovingTetIdentity(Problem):
+    # 3d analogue of test_triangle_refinement.py::_MovingMeshIdentity. A moving (LaplaceSmoothed) tet mesh
+    # whose boundary positions are all pinned -> the undeformed (identity) mesh is the exact solution, so
+    # the residual must be ~machine zero without solving IFF the POSITION hanging installed during
+    # refinement is correct. This exercises the refinement path that runs at problem setup
+    # (refine_selected_elements / custom_adapt), which BYPASSES the mesh-level post_adapt pass -- the tet
+    # analogue of the 2d fix. Before the per-element tet-hang hooks, that path installed no hanging and the
+    # residual was O(1); it must now be machine zero.
+    def __init__(self, where="domain"):
+        super().__init__()
+        self._where = where
+
+    def define_problem(self):
+        self += TetCubeMesh(N=2)
+        eqs = LaplaceSmoothedMesh()
+        eqs += PoissonEquation(source=0, space="C2")  # fixes the coordinate space to C2; u=0 is exact
+        eqs += DirichletBC(u=0) @ _ALL_BOUNDS
+        eqs += DirichletBC(mesh_x=True, mesh_y=True, mesh_z=True) @ _ALL_BOUNDS  # pin boundary positions
+        if self._where == "top":
+            eqs += RefineToLevel(2) @ "top"  # refine only the top band -> 2:1 hanging interface
+        self += eqs @ "domain"
+        if self._where == "domain":
+            self += RefineToLevel(2) @ "domain"  # uniform (conforming) refinement
+
+
+@pytest.mark.parametrize("where", ["domain", "top"])
+def test_moving_tet_refinement_identity_residual(where):
+    with _MovingTetIdentity(where=where) as problem:
+        problem.max_refinement_level = 3
+        problem.initialise()
+        m = problem.get_mesh("domain")
+        assert m.nelement() > 48  # refinement actually happened (base = 2^3 * 6 = 48 tets)
+        # No solve: the mesh has not moved, so the identity is the exact state; the residual is machine zero
+        # only if the position (and field) hanging installed during refinement is exact.
+        assert _max_abs_residual(problem) < 1e-10

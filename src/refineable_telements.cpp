@@ -2639,11 +2639,23 @@ namespace oomph
     // Debug-only output; not needed for refinement itself.
   }
 
-  // Hanging nodes for tetrahedra are installed by a mesh-level geometric pass after refinement
-  // (TemplatedMeshBase3d::post_adapt_setup_hanging_nodes), analogous to the 2d triangle scheme, so
-  // these per-element hooks are no-ops.
-  void RefineableTElement<3>::setup_hanging_nodes(Vector<std::ofstream *> &) {}
-  void RefineableTElement<3>::setup_hang_for_value(const int &) {}
+  // Per-element hanging setup, driven by oomph's adapt loop (setup_hanging_nodes + further_setup_hanging_nodes
+  // per element, then complete_hanging_nodes) -- the 3d analogue of RefineableTElement<2>. The geometric slot
+  // -1 (position/C2/C2TB) is done here; the separate C1/C2 value slots are driven from the tet element's
+  // further_setup_hanging_nodes (which calls setup_hang_for_value). Each helper uses the OcTree neighbour
+  // finders + the exact affine map + interpolating_basis -- fully topological. A per-element install (vs the
+  // former mesh-level pass) means refine_selected_elements / custom_adapt get hanging too, and it composes
+  // with oomph's complete_hanging_nodes (which flattens recursive master chains).
+  void RefineableTElement<3>::setup_hanging_nodes(Vector<std::ofstream *> &)
+  {
+    for (int f = 0; f < 4; f++) tet_hang_face(-1, f);
+    for (int e = 0; e < 6; e++) tet_hang_edge(-1, e);
+  }
+  void RefineableTElement<3>::setup_hang_for_value(const int &value_id)
+  {
+    for (int f = 0; f < 4; f++) tet_hang_face(value_id, f);
+    for (int e = 0; e < 6; e++) tet_hang_edge(value_id, e);
+  }
   void RefineableTElement<3>::quad_hang_helper(const int &, const int &, std::ofstream &) {}
 
   void RefineableTElement<3>::check_integrity(double &max_error)

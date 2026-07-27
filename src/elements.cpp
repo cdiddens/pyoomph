@@ -10354,13 +10354,66 @@ namespace pyoomph
 	// (this is already done for the analogous 2d Quad/Tri elements).
 	void BulkElementTetra3dC2::further_setup_hanging_nodes()
 	{
-
 		BulkElementBase::further_setup_hanging_nodes();
-		/*if (codeinst->get_func_table()->numfields_C1_basebulk)
+		// 3d analogue of BulkElementTri2dC2::further_setup_hanging_nodes. The geometric slot -1 is done in
+		// RefineableTElement<3>::setup_hanging_nodes; here we drive the separate C1/C2 value slots (their hang
+		// on a coarser neighbour) and then apply the C1(TB) mid-node rule. Runs before oomph's
+		// complete_hanging_nodes, so recursive master chains are flattened there.
+		auto *ft = codeinst->get_func_table();
+		const int c2_hang = ft->continuous_spaces[SPACE_INDEX_C2].hangindex;
+		const bool has_c1 = ft->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk || ft->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk;
+		if (!(has_c1 || c2_hang >= 0))
+			return;
+		const unsigned nC2TB = ft->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk;
+		const unsigned nC2 = nC2TB + ft->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk;
+		// C2 owns its own hang slot only when the dominant space is C2TB (its enriched face trace differs
+		// from the plain C2 one on a tet face); otherwise C2 shares the -1 geometric slot done above.
+		const unsigned start = (c2_hang >= 0) ? nC2TB : nC2;
+		for (unsigned i = start; i < ncont_interpolated_values(); i++)
+			this->setup_hang_for_value(i);
+		// C1(TB) mid-node rule: every C2 edge-mid node carrying a separate C1 slot hangs 0.5/0.5 on its two
+		// edge-corner nodes (the C1-on-C2 rule; also constrains the STALE pressure slot left on a former fine
+		// corner that becomes a plain conforming C2 mid-edge after UNREFINEMENT). Nodes already hung across a
+		// 2:1 neighbour (by the edge/face passes above) are skipped via is_hanging; ordinary mid-edge nodes
+		// that never carried the slot are skipped via the nvalue guard. The edge-mid <-> corner-pair mapping
+		// is read off the local coordinates (mid = midpoint of its two corner vertices).
+		if (this->nnode() < 10)
+			return;
+		std::vector<int> c1_slots;
+		for (int sp : {SPACE_INDEX_C1TB, SPACE_INDEX_C1})
 		{
-			for (unsigned int i = codeinst->get_func_table()->numfields_C2_basebulk; i < codeinst->get_func_table()->numfields_C2_basebulk + codeinst->get_func_table()->numfields_C1_basebulk; i++)
-				this->setup_hang_for_value(i);
-		}*/
+			int h = ft->continuous_spaces[sp].hangindex;
+			if (h >= 0)
+				c1_slots.push_back(h);
+		}
+		static const double VC[4][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {0, 0, 0}};
+		oomph::Vector<double> sm(3);
+		for (unsigned em = 4; em < 10; em++) // the 6 edge-mid nodes of a (C2) tet
+		{
+			oomph::Node *M = this->node_pt(em);
+			this->local_coordinate_of_node(em, sm);
+			int ca = -1, cb = -1;
+			for (int v = 0; v < 4; v++)
+				for (int w = v + 1; w < 4; w++)
+				{
+					bool match = true;
+					for (int d = 0; d < 3; d++)
+						if (std::abs(0.5 * (VC[v][d] + VC[w][d]) - sm[d]) > 1e-9) { match = false; break; }
+					if (match) { ca = v; cb = w; }
+				}
+			if (ca < 0)
+				continue;
+			oomph::Node *A = this->node_pt(ca), *B = this->node_pt(cb);
+			for (int slot : c1_slots)
+			{
+				if ((int)M->nvalue() <= slot || M->is_hanging(slot)) continue;     // no stale slot, or already hung (2:1)
+				if ((int)A->nvalue() <= slot || (int)B->nvalue() <= slot) continue; // masters must carry the dof
+				oomph::HangInfo *hang = new oomph::HangInfo(2);
+				hang->set_master_node_pt(0, A, 0.5);
+				hang->set_master_node_pt(1, B, 0.5);
+				M->set_hanging_pt(hang, slot);
+			}
+		}
 	}
 
 	// Discontinuous (elemental, non-nodal) linear shape functions {1, s0, s1, s2} for the DL space of this element.

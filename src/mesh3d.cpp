@@ -69,161 +69,18 @@ namespace pyoomph
 		}
 	}
 
-	namespace
-	{
-		// Resolve a (possibly hanging in `slot`) node into a weighted sum over REAL (non-hanging in that
-		// slot) leaf nodes, accumulated into `out`. Recurses through hanging masters, so a hang whose
-		// masters are themselves hanging flattens to real leaves; the master chain is acyclic (masters are
-		// always coarser) so this terminates. Used by the tree-route flatten, per slot (-1, C2, C1).
-		void resolve_hang_to_real_slot(oomph::Node *X, double w, std::map<oomph::Node *, double> &out, int slot)
-		{
-			if (!X->is_hanging(slot)) { out[X] += w; return; }
-			oomph::HangInfo *h = X->hanging_pt(slot);
-			for (unsigned m = 0; m < h->nmaster(); m++)
-				resolve_hang_to_real_slot(h->master_node_pt(m), w * h->master_weight(m), out, slot);
-		}
-	}
-
-	// Install hanging nodes for tetrahedral meshes after (non-uniform) refinement, in four passes:
-	//   1. FACE-interior nodes (a >1-level jump puts nodes strictly inside a coarse tet face) hang
-	//      barycentrically on that C1 face's corners -- done first so they bind to real corners.
-	//   2. EDGE-interior nodes hang on the coarse edge {P,Q} (linear C1 / quadratic C2), coarsest
-	//      edge first and skipping edges with a hanging endpoint.
-	//   3. FLATTEN: any hanging node whose master is itself hanging (a chain, arising at >1-level
-	//      jumps) is re-expressed directly over real (non-hanging) leaf nodes, so the assembled
-	//      Jacobian is exact without relying on assembly-time flattening.
-	// Combined with the 2:1 balancing pass (enforce_refinement_balance, run just before this), the
-	// linear residual reaches machine zero for BOTH C1 and C2 tets under arbitrary refinement --
-	// uniform, single-level, error-driven, and abrupt >1-level RefineToLevel jumps. (Balancing keeps
-	// >1-level jumps rare so C2 face-interior nodes -- not handled here -- essentially do not occur;
-	// the flatten pass makes whatever hanging remains exact.)
+	// Tetrahedral hanging nodes are now installed PER ELEMENT by oomph's adapt loop, fully topologically:
+	// RefineableTElement<3>::setup_hanging_nodes (geometric slot -1) and setup_hang_for_value (the separate
+	// C1/C2 value slots, driven from BulkElementTetra3dC2::further_setup_hanging_nodes, which also applies the
+	// C1(TB) mid-node rule) -- each via tet_hang_face / tet_hang_edge (OcTree neighbour finders + the exact
+	// affine map + interpolating_basis). oomph's complete_hanging_nodes then flattens the recursive master
+	// chains (an earlier explicit mesh-level re-flatten here was not only redundant once the install moved
+	// into the hooks -- it ran AFTER complete_hanging_nodes and could corrupt an already-correct scheme).
+	// So this pass has nothing left to do for tets; it replaced the former mesh-level geometric facet-
+	// adjacency passes. Being per-element, the scheme now also covers refinement paths that bypass this
+	// pyoomph pass entirely -- refine_selected_elements / custom_adapt (the tet analogue of the 2d fix).
 	void TemplatedMeshBase3d::post_adapt_setup_hanging_nodes()
 	{
-		bool has_tet = false;
-		for (unsigned int ie = 0; ie < this->nelement() && !has_tet; ie++)
-			if (dynamic_cast<oomph::TElementBase *>(this->element_pt(ie))) has_tet = true;
-		if (!has_tet) return; // brick meshes: oomph-lib already handled hanging
-
-		for (unsigned int in = 0; in < this->nnode(); in++) this->node_pt(in)->set_nonhanging();
-
-		// A C1(TB) field on a C2-coordinate tet mesh (e.g. 3D Taylor-Hood: C2 velocity + C1 pressure)
-		// owns a SEPARATE value-hang slot (continuous_spaces[...].hangindex >= 0), distinct from the
-		// geometric slot -1 the C2 fields hang on. Such a field hangs LINEARLY on the coarse edge
-		// corners {P,Q} -- even at the coarse edge mid-node M, whose velocity is a real dof but whose
-		// pressure the coarse element does not carry. Collect those separate slots (empty for pure-C1
-		// meshes, where hangindex == -1 and the geometric slot already covers the field).
-		std::vector<int> c1_hang_slots;
-		// When the dominant (position/-1) space is C2TB, the -1 hang carries the BUBBLE-ENRICHED trace,
-		// which on a tet face differs from the plain C2 trace. A plain C2 field therefore owns its own
-		// hang slot (continuous_spaces[C2].hangindex >= 0) and must NOT read -1. C2 only ever hangs on
-		// EDGES (it has no face-interior nodes -- those are C2TB bubbles), where the bubble vanishes so
-		// the hang equals -1's; we mirror the -1 EDGE hang onto this slot below. -1 if C2 shares the slot.
-		int c2_hang_slot = -1;
-		if (this->codeinst)
-		{
-			auto *ft = this->codeinst->get_func_table();
-			for (int sp : {SPACE_INDEX_C1TB, SPACE_INDEX_C1})
-			{
-				int h = ft->continuous_spaces[sp].hangindex;
-				if (h >= 0) c1_hang_slots.push_back(h);
-			}
-			c2_hang_slot = ft->continuous_spaces[SPACE_INDEX_C2].hangindex;
-		}
-
-		// -------- PER-ELEMENT TOPOLOGICAL HANGING (the tet tree route) --------
-		// The 3d analogue of the triangle tree route: install hanging per element via tet_hang_face /
-		// tet_hang_edge (OcTree neighbour finders + the exact affine map + interpolating_basis). This
-		// replaced the geometric position/facet-adjacency passes (deleted; validated machine-zero equal
-		// against them across C1/C2/TH/CR, uniform/2:1/multi-level/error-based/unrefinement).
-		{
-			// Valid hang slots only: value_id -1 (geometric) plus any separate C1/C2 slot that is a real
-			// value index (< ncont). continuous_spaces[...].hangindex can be a placeholder >= ncont on a mesh
-			// with no such field (e.g. C1 hangindex on a pure-C2 mesh); the geometric pass tolerates that via
-			// its per-node nvalue guards, but the per-element helpers must not iterate an out-of-range slot.
-			const int ncont = this->nelement() ? (int)dynamic_cast<oomph::RefineableElement *>(this->element_pt(0))->ncont_interpolated_values() : 0;
-			std::vector<int> slots, valid_c1_slots;
-			slots.push_back(-1);
-			if (c2_hang_slot >= 0 && c2_hang_slot < ncont) slots.push_back(c2_hang_slot);
-			for (int s : c1_hang_slots)
-				if (s >= 0 && s < ncont && std::find(slots.begin(), slots.end(), s) == slots.end())
-				{ slots.push_back(s); valid_c1_slots.push_back(s); }
-			for (unsigned int ie = 0; ie < this->nelement(); ie++)
-			{
-				oomph::RefineableTElement<3> *re = dynamic_cast<oomph::RefineableTElement<3> *>(this->element_pt(ie));
-				if (!re || !re->tree_pt() || !re->tree_pt()->is_leaf()) continue;
-				for (int slot : slots)
-				{
-					for (int f = 0; f < 4; f++) re->tet_hang_face(slot, f);
-					for (int e = 0; e < 6; e++) re->tet_hang_edge(slot, e);
-				}
-			}
-			// C1(TB) mid-node rule (mirror BulkElementTri2dC2::further_setup_hanging_nodes): every C2 edge-mid
-			// node carrying a separate C1 slot hangs 0.5/0.5 on its two edge-corner nodes -- the C1-on-C2 rule.
-			// This also constrains the STALE pressure slot left on a former fine corner that becomes a plain
-			// conforming C2 mid-edge after UNREFINEMENT (the edge pass only hangs across a coarser neighbour,
-			// so it misses this conforming case). Nodes hung above (2:1) are skipped via is_hanging.
-			for (int slot : valid_c1_slots)
-			{
-				for (unsigned int ie = 0; ie < this->nelement(); ie++)
-				{
-					oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(this->element_pt(ie));
-					oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(this->element_pt(ie));
-					if (!fe || !re || !re->tree_pt() || !re->tree_pt()->is_leaf() || fe->nnode() < 10) continue;
-					oomph::Vector<double> sm(3);
-					static const double VC[4][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {0, 0, 0}};
-					for (unsigned em = 4; em < 10; em++) // the 6 edge-mid nodes of a (C2) tet
-					{
-						oomph::Node *M = fe->node_pt(em);
-						if ((int)M->nvalue() <= slot || M->is_hanging(slot)) continue; // no stale slot / already hung (2:1)
-						fe->local_coordinate_of_node(em, sm);
-						int ca = -1, cb = -1; // the two corner vertices this edge-mid bisects
-						for (int v = 0; v < 4; v++)
-							for (int w = v + 1; w < 4; w++)
-							{
-								bool match = true;
-								for (int d = 0; d < 3; d++)
-									if (std::abs(0.5 * (VC[v][d] + VC[w][d]) - sm[d]) > 1e-9) { match = false; break; }
-								if (match) { ca = v; cb = w; }
-							}
-						if (ca < 0) continue;
-						oomph::Node *A = fe->node_pt(ca), *B = fe->node_pt(cb);
-						if ((int)A->nvalue() <= slot || (int)B->nvalue() <= slot) continue;
-						oomph::HangInfo *hang = new oomph::HangInfo(2);
-						hang->set_master_node_pt(0, A, 0.5);
-						hang->set_master_node_pt(1, B, 0.5);
-						M->set_hanging_pt(hang, slot);
-					}
-				}
-			}
-			// Flatten hanging chains on every slot (a master that is itself hanging -> resolve to real
-			// leaves), so the assembled Jacobian is exact. Two-phase (read all, then reinstall) per slot.
-			for (int slot : slots)
-			{
-				std::map<oomph::Node *, std::map<oomph::Node *, double>> resolved;
-				for (unsigned int in = 0; in < this->nnode(); in++)
-				{
-					oomph::Node *X = this->node_pt(in);
-					if (!X->is_hanging(slot)) continue;
-					oomph::HangInfo *h = X->hanging_pt(slot);
-					bool chained = false;
-					for (unsigned m = 0; m < h->nmaster(); m++)
-						if (h->master_node_pt(m)->is_hanging(slot)) { chained = true; break; }
-					if (!chained) continue;
-					std::map<oomph::Node *, double> flat;
-					for (unsigned m = 0; m < h->nmaster(); m++)
-						resolve_hang_to_real_slot(h->master_node_pt(m), h->master_weight(m), flat, slot);
-					resolved[X] = flat;
-				}
-				for (const auto &kv : resolved)
-				{
-					oomph::HangInfo *nh = new oomph::HangInfo(kv.second.size());
-					unsigned i = 0;
-					for (const auto &mw : kv.second) { nh->set_master_node_pt(i, mw.first, mw.second); i++; }
-					kv.first->set_hanging_pt(nh, slot);
-				}
-			}
-			return;
-		}
 	}
 
 	// Enforce 2:1 refinement balancing for tetrahedral meshes (see header). Iteratively refine any
