@@ -258,8 +258,11 @@ namespace pyoomph
 				oomph::TElementBase *tet = dynamic_cast<oomph::TElementBase *>(this->element_pt(ie));
 				oomph::RefineableWedgeElement *wedge = dynamic_cast<oomph::RefineableWedgeElement *>(this->element_pt(ie));
 				oomph::RefineablePyramidElement *pyr = dynamic_cast<oomph::RefineablePyramidElement *>(this->element_pt(ie));
+				oomph::BrickElementBase *brick = dynamic_cast<oomph::BrickElementBase *>(this->element_pt(ie));
 				oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(this->element_pt(ie));
-				if ((!tet && !wedge && !pyr) || !fe) continue;
+				// Bricks are candidates too, but only in a mixed mesh: a pure-brick mesh returns above
+				// (has_simplexlike is false) and is balanced by oomph-lib's own tree.
+				if ((!tet && !wedge && !pyr && !brick) || !fe) continue;
 				oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(this->element_pt(ie));
 				if (re && re->refinement_level() >= this->max_refinement_level()) continue; // cannot refine further
 				// This element's edges as vertex-index pairs: a tet's 6, a wedge's 9 (2 tri caps + 3
@@ -269,8 +272,11 @@ namespace pyoomph
 				static const int TET_E[6][2] = {{0, 1}, {0, 2}, {0, 3}, {1, 2}, {1, 3}, {2, 3}};
 				static const int WEDGE_E[9][2] = {{0, 1}, {1, 2}, {2, 0}, {3, 4}, {4, 5}, {5, 3}, {0, 3}, {1, 4}, {2, 5}};
 				static const int PYR_E[8][2] = {{0, 1}, {1, 2}, {2, 3}, {3, 0}, {0, 4}, {1, 4}, {2, 4}, {3, 4}};
-				const int(*E)[2] = tet ? TET_E : (wedge ? WEDGE_E : PYR_E);
-				const int nE = tet ? 6 : (wedge ? 9 : 8);
+				// Brick vertices (vertex_node_pt) in tensor order 000,100,010,110,001,101,011,111; its 12 edges
+				// are the 4 bottom + 4 top + 4 vertical edges (no face/body diagonals).
+				static const int BRICK_E[12][2] = {{0, 1}, {1, 3}, {3, 2}, {2, 0}, {4, 5}, {5, 7}, {7, 6}, {6, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+				const int(*E)[2] = tet ? TET_E : (wedge ? WEDGE_E : (pyr ? PYR_E : BRICK_E));
+				const int nE = tet ? 6 : (wedge ? 9 : (pyr ? 8 : 12));
 				// The edge-fraction whose presence signals a neighbour >=2 levels finer. A 1-level
 				// neighbour subdivides the edge at its midpoint (t=1/2) and, for order p>=2 (e.g. C2),
 				// additionally places the sub-edges' own mid-nodes at t=1/4, 3/4 -- so the finest node a

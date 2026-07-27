@@ -33,9 +33,10 @@
 # through the registry (build_as_brick_son) instead of oomph-lib's native octree build. Non-uniform 2:1
 # hanging among the registry families is installed by the unified post_adapt_setup_hanging_nodes pass.
 #
-# Coverage: for tet+wedge, wedge+pyramid, the three-way mix, and hex+pyramid / hex+wedge -- UNIFORM refinement
-# and NON-UNIFORM 2:1 cross-shape hanging (including across a hex face, both refine directions), C1 and C2,
-# with strict manufactured (linear + quadratic) oracles at every node.
+# Coverage: for tet+wedge, wedge+pyramid, the three-way mix, and hex+pyramid / hex+wedge -- UNIFORM refinement,
+# NON-UNIFORM 2:1 cross-shape hanging (including across a hex face, both refine directions), and MULTI-LEVEL
+# (>1) non-uniform refinement (balancing + the cross-round position snapshot), C1 and C2, with strict
+# manufactured (linear + quadratic) oracles at every node.
 
 import pytest
 
@@ -361,3 +362,36 @@ def test_mixed_hex_cross_shape_hanging(other, which, field):
         assert sum(1 for nn in m.nodes() if nn.is_hanging()) > 0, f"no hanging nodes (hex+{other} {which})"
         assert _dup(m) == 0, f"duplicate (torn) nodes at the hex<->{other} 2:1 interface"
         assert _err(m, field) < 1e-10, f"hex+{other} 2:1 hanging ({which},{field}) not reproduced (err {_err(m, field):.2e})"
+
+
+# MULTI-LEVEL (>1) non-uniform refinement across a mixed interface: refine ONE side to level 2 while the other
+# starts coarse, so enforce_refinement_balance must refine the coarse side to level 1 (keeping every jump 2:1)
+# and the cross-round position snapshot must let a level-2 element reuse a node a level-1 neighbour built in
+# the previous round. Both are exercised here: without balancing a hex+pyramid mesh jumps 0->2 (fails); without
+# the cross-round reuse the registry families tear (dup>0). Small meshes + a one-sided band keep it cheap.
+@pytest.mark.parametrize("label,mesh,lf", [
+    ("tet_wedge", lambda: TetWedgeMesh(), lambda e: 2 if e.get_Eulerian_midpoint()[2] > 1.0 else 0),
+    ("wedge_pyr", lambda: WedgePyrMesh(), lambda e: 2 if e.get_Eulerian_midpoint()[1] < 0 else 0),
+    ("three_way", lambda: WedgePyrMesh(three_way=True), lambda e: 2 if e.get_Eulerian_midpoint()[1] < 0 else 0),
+    ("hex_pyr", lambda: HexMixMesh(other="pyr"), lambda e: 2 if e.get_Eulerian_midpoint()[2] > 1.0 else 0),
+    ("hex_wedge", lambda: HexMixMesh(other="wedge"), lambda e: 2 if e.get_Eulerian_midpoint()[2] > 1.0 else 0),
+])
+def test_mixed_multilevel_quadratic(label, mesh, lf):
+    x, y, z = var("coordinate")[0], var("coordinate")[1], var("coordinate")[2]
+
+    class _P(Problem):
+        def define_problem(self):
+            eqs = PoissonEquation(source=-12, space="C2") + DirichletBC(u=x * x + 2 * y * y + 3 * z * z) @ "outer"
+            eqs += RefineAccordingToElement(level_func=lf)
+            self += mesh()
+            self += eqs @ "domain"
+
+    with _P() as p:
+        p.max_refinement_level = 2
+        p.solve(spatial_adapt=3)
+        m = p.get_mesh("domain")
+        lvls = sorted({m.element_pt(ie).refinement_level() for ie in range(m.nelement())})
+        assert 2 in lvls, f"{label}: level-2 refinement did not happen (levels {lvls})"
+        assert max(lvls) - min(lvls) <= 1, f"{label}: unbalanced jump >2:1 (levels {lvls})"  # balancing worked
+        assert _dup(m) == 0, f"{label}: torn nodes at the multi-level interface (cross-round sharing failed)"
+        assert _err(m, "quadratic") < 1e-10, f"{label}: quadratic not reproduced at multi-level (err {_err(m, 'quadratic'):.2e})"

@@ -430,6 +430,18 @@ const double PyramidGaussC2::Weight[27] =
         if (it != reg.end()) { node_pt(j) = it->second; continue; }
       }
 
+      // (2b) Cross-round: reuse a node coincident at the START of this round (built by a finer neighbour in an
+      // EARLIER round; the per-round registry only dedupes within THIS round). Without it a shared node is
+      // duplicated under multi-level (non-uniform) refinement. Mirrors the tet build -- the position snapshot
+      // on RefineableTElement<2> is populated for every node by Mesh::split_elements_if_required.
+      if (!reg_key.empty())
+      {
+        Vector<double> xq(3);
+        father_el_pt->get_x(0, s, xq);
+        double xn[3] = {xq[0], xq[1], xq[2]};
+        if (Node *ex = oomph::RefineableTElement<2>::find_existing_node_at_position(xn, 3)) { node_pt(j) = ex; continue; }
+      }
+
       // (3) Build a new node. It lies on a mesh boundary iff ALL its generating nodes share one; pinned
       // values are those pinned at every generating node; boundary coordinates the generating-node average.
       std::set<unsigned> boundaries;

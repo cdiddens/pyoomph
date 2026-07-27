@@ -285,6 +285,43 @@ def test_pyramid_c2_nonuniform_2to1_hanging(field):
         assert err < 1e-10, f"C2 {field} field not reproduced across the 2:1 pyramid interface (max err {err:.2e})"
 
 
+@pytest.mark.parametrize("order", ["C1", "C2"])
+def test_pyramid_multilevel_manufactured(order):
+    # MULTI-LEVEL (>1) non-uniform pyramid refinement: refine the central region to level 2 while the outside
+    # stays coarse. This needs both enforce_refinement_balance (to keep every jump 2:1 -> single-level hanging)
+    # AND the cross-round position-snapshot reuse in build_as_pyramid_son -- a level-2 son must reuse a node a
+    # level-1 neighbour built in the PREVIOUS round rather than duplicating it. Without the snapshot the mesh
+    # tore and the C2 solve diverged; the manufactured field (quadratic for C2) is the strict oracle.
+    x, y, z = var("coordinate")[0], var("coordinate")[1], var("coordinate")[2]
+    uex = (x + 2 * y + 3 * z) if order == "C1" else (x * x + 2 * y * y + 3 * z * z)
+    src = 0 if order == "C1" else -12
+
+    def _central(e):
+        mx = e.get_Eulerian_midpoint()
+        return 2 if ((mx[0] - 0.5) ** 2 + (mx[1] - 0.5) ** 2 + (mx[2] - 0.5) ** 2) ** 0.5 < 0.25 else 0
+
+    class _P(Problem):
+        def define_problem(self):
+            self += PyramidCubeMesh(N=3)
+            eqs = PoissonEquation(source=src, space=order)
+            eqs += DirichletBC(u=uex) @ ["left", "right", "front", "back", "bottom", "top"]
+            eqs += RefineAccordingToElement(level_func=_central)
+            self += eqs @ "domain"
+
+    with _P() as p:
+        p.max_refinement_level = 2
+        p.solve(spatial_adapt=3)
+        m = p.get_mesh("domain")
+        lvls = sorted({m.element_pt(ie).refinement_level() for ie in range(m.nelement())})
+        assert 2 in lvls, f"level-2 refinement did not happen (levels {lvls})"
+        assert _count_coincident_nodes(m) == 0, "duplicate (torn) nodes after multi-level pyramid refinement"
+        if order == "C1":
+            err = max(abs(n.value(0) - (n.x(0) + 2 * n.x(1) + 3 * n.x(2))) for n in m.nodes())
+        else:
+            err = max(abs(n.value(0) - (n.x(0) ** 2 + 2 * n.x(1) ** 2 + 3 * n.x(2) ** 2)) for n in m.nodes())
+        assert err < 1e-10, f"{order} field not reproduced at multi-level (max err {err:.2e})"
+
+
 def test_pyramid_nonuniform_2to1_hanging():
     # Non-uniform (2:1) pyramid refinement with CROSS-SHAPE hanging. Refine only the interior pyramids near
     # the cube centre (an interior region, so the DirichletBC interfacial-error spreading does not force

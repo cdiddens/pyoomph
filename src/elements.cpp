@@ -7381,6 +7381,19 @@ namespace pyoomph
 				if (it != RefineablePyramidElement::Shared_node_registry.end()) { this->node_pt(j) = it->second; continue; }
 			}
 
+			// (2b) Cross-round: reuse a node coincident at the START of this round -- notably one built by a
+			// FINER neighbour in an EARLIER round, which the per-round registry above cannot see. Without this a
+			// shared node is DUPLICATED under multi-level (non-uniform) refinement, tearing the mesh. Mirrors
+			// the tet build; the position snapshot lives on RefineableTElement<2> and is populated for every
+			// node (2d/3d) by Mesh::split_elements_if_required. Only for genuine shared (non-interior) nodes.
+			if (!reg_key.empty())
+			{
+				oomph::Vector<double> xq(3);
+				father_el_pt->get_x(0, s, xq);
+				double xn[3] = {xq[0], xq[1], xq[2]};
+				if (oomph::Node *ex = oomph::RefineableTElement<2>::find_existing_node_at_position(xn, 3)) { this->node_pt(j) = ex; continue; }
+			}
+
 			// (3) Build a new node (boundary iff all generating nodes share a boundary; pinned iff all pinned).
 			std::set<unsigned> boundaries;
 			bool have_bounds = false;
@@ -7509,6 +7522,19 @@ namespace pyoomph
 			{
 				auto it = RefineablePyramidElement::Shared_node_registry.find(reg_key);
 				if (it != RefineablePyramidElement::Shared_node_registry.end()) { this->node_pt(j) = it->second; continue; }
+			}
+
+			// (2b) Cross-round: reuse a node coincident at the START of this round -- notably one built by a
+			// FINER neighbour in an EARLIER round, which the per-round registry above cannot see. Without this a
+			// shared node is DUPLICATED under multi-level (non-uniform) refinement, tearing the mesh. Mirrors
+			// the tet build; the position snapshot lives on RefineableTElement<2> and is populated for every
+			// node (2d/3d) by Mesh::split_elements_if_required. Only for genuine shared (non-interior) nodes.
+			if (!reg_key.empty())
+			{
+				oomph::Vector<double> xq(3);
+				father_el_pt->get_x(0, s, xq);
+				double xn[3] = {xq[0], xq[1], xq[2]};
+				if (oomph::Node *ex = oomph::RefineableTElement<2>::find_existing_node_at_position(xn, 3)) { this->node_pt(j) = ex; continue; }
 			}
 
 			// (3) Build a new node (boundary iff all generating nodes share a boundary; pinned iff all pinned).
