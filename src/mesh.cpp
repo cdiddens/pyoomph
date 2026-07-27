@@ -282,6 +282,15 @@ namespace pyoomph
   // Find elements that do not share a facet with the boundary
   void Mesh::enlarge_elemental_error_max_override_to_only_nodal_connected_elems(unsigned bind)
   {
+    // This spreads a boundary element's refine flag to elements that touch the boundary only at a vertex,
+    // to force refinement rather than leave a 2:1 hang on the boundary. In a PYRAMID forest that is both
+    // unnecessary (post_adapt_setup_hanging_nodes now hangs boundary sub-faces too) and harmful: all 6
+    // pyramids of a cube share its boundary edges, so the spread cascades and a selective refinement
+    // collapses to uniform. Skip it there and let the cross-shape hanging handle the boundary interface.
+    for (unsigned int ie = 0; ie < this->nelement(); ie++)
+      if (dynamic_cast<oomph::RefineablePyramidElement *>(this->element_pt(ie)))
+        return;
+
     std::set<pyoomph::BulkElementBase *> elems_with_boundnodes;
     for (unsigned int ie = 0; ie < this->nelement(); ie++)
     {

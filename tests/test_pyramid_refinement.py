@@ -221,3 +221,35 @@ def test_pyramid_nonuniform_2to1_hanging():
         for n in m.nodes():
             err = max(err, abs(n.value(0) - (n.x(0) + 2 * n.x(1) + 3 * n.x(2))))
         assert err < 1e-10, f"linear field not reproduced across the 2:1 pyramid interface (max err {err:.2e})"
+
+
+def test_pyramid_nonuniform_boundary_adjacent_not_over_refined():
+    # A BOUNDARY-adjacent selective refinement (x<0.5) with Dirichlet BCs must stay a graded 2:1 mesh, NOT
+    # collapse to uniform. It used to over-refine because the interfacial-error machinery
+    # (Mesh::enlarge_elemental_error_max_override_to_only_nodal_connected_elems) spread the refine flag across
+    # the x=0.5 boundary via shared boundary edges -- and, since all 6 pyramids of a cube share those edges,
+    # the spread cascaded to the whole mesh. That spreading (meant to avoid a 2:1 hang ON the boundary) is now
+    # skipped for pyramid forests, because post_adapt_setup_hanging_nodes hangs boundary sub-faces too. Oracle:
+    # the mesh keeps coarse (unrefined) elements AND reproduces the linear field to machine precision (the
+    # boundary 2:1 hang is correct).
+    x, y, z = var("coordinate")[0], var("coordinate")[1], var("coordinate")[2]
+    uex = x + 2 * y + 3 * z
+
+    class _P(Problem):
+        def define_problem(self):
+            self += PyramidCubeMesh(N=2)
+            eqs = PoissonEquation(source=0, space="C1")
+            eqs += DirichletBC(u=uex) @ ["left", "right", "front", "back", "bottom", "top"]
+            eqs += RefineAccordingToElement(level_func=lambda e: 1 if e.get_Eulerian_midpoint()[0] < 0.5 else 0)
+            self += eqs @ "domain"
+
+    with _P() as p:
+        p.max_refinement_level = 1
+        p.solve()
+        m = p.get_mesh("domain")
+        # Not uniform: 48 base pyramids -> 480 if all refined; a graded mesh has fewer.
+        assert 48 < m.nelement() < 480, f"expected a graded 2:1 mesh, got {m.nelement()} (48<n<480)"
+        assert sum(1 for n in m.nodes() if n.is_hanging()) > 0, "no hanging nodes on the boundary 2:1 interface"
+        assert _count_coincident_nodes(m) == 0, "duplicate (torn) nodes at the 2:1 pyramid interface"
+        err = max(abs(n.value(0) - (n.x(0) + 2 * n.x(1) + 3 * n.x(2))) for n in m.nodes())
+        assert err < 1e-10, f"linear field not reproduced across the boundary 2:1 pyramid interface ({err:.2e})"
