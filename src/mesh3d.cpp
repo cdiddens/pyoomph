@@ -63,20 +63,22 @@ namespace pyoomph
 		// pyramid mesh refines with HETEROGENEOUS offspring (1 pyramid -> 6 pyramids + 4 tets), so its
 		// leaves become a mix of pyramids and tets after the first level.
 		//
-		// A MIXED registry-based mesh -- any combination of tets, wedges and pyramids (no bricks) -- also
-		// refines: the three families all key their new interface nodes into one shared weight-augmented
-		// registry (RefineablePyramidElement::Mixed_forest_active), so a tet and an adjacent wedge sharing a
-		// triangular face produce one shared node, not a torn pair. Bricks are excluded: they refine via
-		// oomph-lib's native octree machinery, which does not yet bridge to the registry-based builds.
-		bool allReg = true; // every element is registry-based (tet/wedge/pyramid), i.e. no bricks
+		// A MIXED mesh -- any combination of bricks, tets, wedges and pyramids -- also refines: all four
+		// families key their new interface nodes into one shared weight-augmented registry (via
+		// RefineablePyramidElement::Mixed_forest_active), so elements of different shapes sharing a face (a
+		// brick meets a pyramid base / wedge side on a QUAD; a tet meets a wedge/pyramid on a TRIANGLE) produce
+		// one shared node, not a torn pair. In a mixed mesh a brick refines through the registry
+		// (build_as_brick_son) rather than oomph-lib's native octree node-reuse.
+		bool allRefinable = true; // every element is a refineable family: brick/tet/wedge/pyramid
 		for (unsigned int i = 0; i < this->nelement(); i++)
 		{
+			bool is_brick = (dynamic_cast<oomph::BrickElementBase *>(this->element_pt(i)) != NULL);
 			bool is_tet = (dynamic_cast<oomph::TElementBase *>(this->element_pt(i)) != NULL);
 			bool is_wedge = (dynamic_cast<oomph::RefineableWedgeElement *>(this->element_pt(i)) != NULL);
 			bool is_pyramid = (dynamic_cast<oomph::RefineablePyramidElement *>(this->element_pt(i)) != NULL);
-			allReg = allReg && (is_tet || is_wedge || is_pyramid);
+			allRefinable = allRefinable && (is_brick || is_tet || is_wedge || is_pyramid);
 		}
-		if (allQ || allT || allW || allP || allReg)
+		if (allQ || allT || allW || allP || allRefinable)
 		{
 			return true;
 		}

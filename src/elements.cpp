@@ -7462,6 +7462,167 @@ namespace pyoomph
 		}
 	}
 
+	// Fill this element as a son of a brick father in a MIXED forest (see the header). Mirrors
+	// build_as_pyramid_son node-for-node, but the son node's father-local coordinate is the octree 1->8
+	// affine image get_nodal_s_in_father(j) (no son-vertex/apex handling -- a brick has no singular vertex),
+	// and every new node is shared through RefineablePyramidElement::Shared_node_registry keyed on the father
+	// brick's positive-shape nodes + rounded weight -- identical keys to an adjacent pyramid/wedge on a shared
+	// quad face (off-face shapes vanish there), and to another brick son on a shared brick face.
+	void BulkElementBase::build_as_brick_son(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt)
+	{
+		using oomph::RefineablePyramidElement;
+		const unsigned n_node = this->nnode();
+
+		oomph::FiniteElement *father_el_pt = dynamic_cast<oomph::FiniteElement *>(this->tree_pt()->father_pt()->object_pt());
+		oomph::RefineableElement *father_re = dynamic_cast<oomph::RefineableElement *>(father_el_pt);
+		if (father_el_pt->macro_elem_pt() != 0)
+			throw_runtime_error("Macro elements (curved boundaries) are not yet supported for mixed brick refinement");
+		oomph::TimeStepper *time_stepper_pt = father_el_pt->node_pt(0)->time_stepper_pt();
+		const unsigned ntstorage = time_stepper_pt->ntstorage();
+		const unsigned nfath = father_el_pt->nnode();
+
+		for (unsigned j = 0; j < n_node; j++)
+		{
+			// Son node j's father-local coordinate (octree 1->8 affine map).
+			oomph::Vector<double> s(3);
+			this->get_nodal_s_in_father(j, s);
+
+			// (1) Reuse a father node coincident with this position (its values are already correct).
+			oomph::Node *created_node_pt = father_el_pt->get_node_at_local_coordinate(s);
+			if (created_node_pt != 0) { this->node_pt(j) = created_node_pt; continue; }
+
+			// Generating father nodes = those with POSITIVE father shape at s; key on (node, rounded weight)
+			// pairs (the same weight-augmented key the pyramid/wedge builds use).
+			oomph::Shape psi(nfath);
+			father_el_pt->shape(s, psi);
+			std::vector<oomph::Node *> gen;
+			RefineablePyramidElement::SharedNodeKey reg_key;
+			for (unsigned l = 0; l < nfath; l++)
+				if (psi(l) > 1e-6)
+				{
+					gen.push_back(father_el_pt->node_pt(l));
+					reg_key.insert(std::make_pair(father_el_pt->node_pt(l), (long long)std::llround(psi(l) * 1e6)));
+				}
+
+			// (2) Reuse a node another son (of this brick or an adjacent brick/pyramid/wedge) built this round.
+			if (!reg_key.empty())
+			{
+				auto it = RefineablePyramidElement::Shared_node_registry.find(reg_key);
+				if (it != RefineablePyramidElement::Shared_node_registry.end()) { this->node_pt(j) = it->second; continue; }
+			}
+
+			// (3) Build a new node (boundary iff all generating nodes share a boundary; pinned iff all pinned).
+			std::set<unsigned> boundaries;
+			bool have_bounds = false;
+			for (oomph::Node *g : gen)
+			{
+				oomph::BoundaryNodeBase *bg = dynamic_cast<oomph::BoundaryNodeBase *>(g);
+				std::set<unsigned> *sg = 0;
+				if (bg) bg->get_boundaries_pt(sg);
+				if (!sg) { boundaries.clear(); break; }
+				if (!have_bounds) { boundaries = *sg; have_bounds = true; }
+				else
+				{
+					std::set<unsigned> inter;
+					std::set_intersection(boundaries.begin(), boundaries.end(), sg->begin(), sg->end(), std::inserter(inter, inter.begin()));
+					boundaries.swap(inter);
+				}
+			}
+
+			if (!boundaries.empty())
+			{
+				created_node_pt = this->construct_boundary_node(j, time_stepper_pt);
+				const unsigned nval = created_node_pt->nvalue();
+				for (unsigned k = 0; k < nval; k++)
+				{
+					bool all_pinned = true;
+					for (oomph::Node *g : gen) if (!g->is_pinned(k)) { all_pinned = false; break; }
+					if (all_pinned) created_node_pt->pin(k);
+				}
+				for (std::set<unsigned>::iterator it = boundaries.begin(); it != boundaries.end(); ++it)
+				{
+					mesh_pt->add_boundary_node(*it, created_node_pt);
+					if (mesh_pt->boundary_coordinate_exists(*it))
+					{
+						oomph::Vector<double> z;
+						for (oomph::Node *g : gen)
+						{
+							oomph::Vector<double> zg;
+							dynamic_cast<oomph::BoundaryNodeBase *>(g)->get_coordinates_on_boundary(*it, zg);
+							if (z.empty()) z.resize(zg.size(), 0.0);
+							for (unsigned zi = 0; zi < zg.size(); zi++) z[zi] += zg[zi] / gen.size();
+						}
+						created_node_pt->set_coordinates_on_boundary(*it, z);
+					}
+				}
+			}
+			else
+			{
+				created_node_pt = this->construct_node(j, time_stepper_pt);
+			}
+
+			this->node_pt(j) = created_node_pt;
+			new_node_pt.push_back(created_node_pt);
+			for (unsigned t = 0; t < ntstorage; t++)
+			{
+				oomph::Vector<double> xp(3);
+				father_el_pt->get_x(t, s, xp);
+				for (int d = 0; d < 3; d++) created_node_pt->x(t, d) = xp[d];
+			}
+			if (oomph::SolidNode *sn = dynamic_cast<oomph::SolidNode *>(created_node_pt))
+			{
+				const unsigned nl = sn->nlagrangian();
+				for (unsigned i = 0; i < nl; i++)
+				{
+					double xi = 0.0;
+					for (unsigned l = 0; l < nfath; l++)
+						if (oomph::SolidNode *fn = dynamic_cast<oomph::SolidNode *>(father_el_pt->node_pt(l))) xi += psi(l) * fn->xi(i);
+					sn->xi(i) = xi;
+				}
+			}
+			for (unsigned t = 0; t < ntstorage; t++)
+			{
+				oomph::Vector<double> prev;
+				father_re->get_interpolated_values(t, s, prev);
+				const unsigned nv = std::min((unsigned)created_node_pt->nvalue(), (unsigned)prev.size());
+				for (unsigned k = 0; k < nv; k++) created_node_pt->set_value(t, k, prev[k]);
+			}
+			mesh_pt->add_node_pt(created_node_pt);
+			if (!reg_key.empty()) RefineablePyramidElement::Shared_node_registry[reg_key] = created_node_pt;
+		}
+	}
+
+	// Brick build() overrides: in a MIXED forest go through the registry (build_as_brick_son) so a brick shares
+	// interface nodes with adjacent pyramids/wedges (and other bricks); otherwise keep oomph-lib's native
+	// octree build for pure-brick meshes (unchanged, fully validated).
+	void BulkElementBrick3dC1::build(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file)
+	{
+		if (oomph::RefineablePyramidElement::Mixed_forest_active)
+		{
+			if (this->nodes_built()) { was_already_built = true; return; }
+			was_already_built = false;
+			this->build_as_brick_son(mesh_pt, new_node_pt);
+		}
+		else
+		{
+			oomph::RefineableSolidQElement<3>::build(mesh_pt, new_node_pt, was_already_built, new_nodes_file);
+		}
+	}
+
+	void BulkElementBrick3dC2::build(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file)
+	{
+		if (oomph::RefineablePyramidElement::Mixed_forest_active)
+		{
+			if (this->nodes_built()) { was_already_built = true; return; }
+			was_already_built = false;
+			this->build_as_brick_son(mesh_pt, new_node_pt);
+		}
+		else
+		{
+			oomph::RefineableSolidQElement<3>::build(mesh_pt, new_node_pt, was_already_built, new_nodes_file);
+		}
+	}
+
    // Total number of DG (discontinuous-Galerkin, per-node-but-not-shared) fields across all
    // present DG spaces; base_bulk_only restricts the count to fields defined in the bulk element
    // itself, excluding additional fields only present on interfaces.

@@ -23,18 +23,19 @@
 #
 # ========================================================================
 
-# Branch mixed_adapt, slice A: genuinely MIXED 3d meshes (>=2 of {tet, wedge, pyramid} in one domain, no
-# bricks), refined via the shared OcTree forest. The registry-based families all key their new interface nodes
-# into one weight-augmented shared-node registry (RefineablePyramidElement::Mixed_forest_active), so elements
-# of different shapes sharing a face create one shared node instead of a torn pair. A tet meets a wedge/pyramid
-# only on a TRIANGLE (a tet has no quad face); a wedge meets a pyramid on a triangle (cap<->tri face) or a QUAD
-# (side<->base). Both families' shapes restrict to the standard triangle/quad trace on the shared face, so they
-# produce matching keys. Non-uniform 2:1 hanging is installed by the unified post_adapt_setup_hanging_nodes
-# pass (shape-agnostic on the finer side via mixed_hang_node_at).
+# Branch mixed_adapt: genuinely MIXED 3d meshes (>=2 of {brick, tet, wedge, pyramid} in one domain), refined
+# via the shared OcTree forest. All four families key their new interface nodes into one weight-augmented
+# shared-node registry (RefineablePyramidElement::Mixed_forest_active), so elements of different shapes sharing
+# a face create one shared node instead of a torn pair. A tet meets a wedge/pyramid only on a TRIANGLE (a tet
+# has no quad face); a wedge meets a pyramid on a triangle (cap<->tri face) or a QUAD (side<->base); a brick
+# (only quad faces) meets a pyramid base or a wedge side on a QUAD. Both sides' shapes restrict to the standard
+# triangle/quad trace on the shared face, so they produce matching keys. In a mixed mesh a brick refines
+# through the registry (build_as_brick_son) instead of oomph-lib's native octree build. Non-uniform 2:1
+# hanging among the registry families is installed by the unified post_adapt_setup_hanging_nodes pass.
 #
-# Coverage: UNIFORM (conforming) and NON-UNIFORM (2:1 cross-shape hanging) refinement, for tet+wedge (tri
-# interface), wedge+pyramid (quad interface) and the full three-way mix, C1 and C2, with strict manufactured
-# (linear + quadratic) oracles at every node.
+# Coverage: for tet+wedge, wedge+pyramid, the three-way mix, and hex+pyramid / hex+wedge -- UNIFORM refinement
+# (all combos) and NON-UNIFORM 2:1 cross-shape hanging (registry families), C1 and C2, with strict manufactured
+# (linear + quadratic) oracles at every node. Cross-shape hanging ACROSS a hex face is not covered yet.
 
 import pytest
 
@@ -105,6 +106,44 @@ class WedgePyrMesh(MeshTemplate):
             dom.add_tetra_3d_C1(wt[0], wt[1], wt[2], ta)
             interior.append(frozenset([wt[0], wt[1], wt[2]]))  # the wedge<->tet tri interface
             faces += [[wt[1], wt[2], ta], [wt[0], wt[2], ta], [wt[0], wt[1], ta]]
+        for f in faces:
+            if frozenset(f) not in interior:
+                self.add_facet_to_boundary("outer", list(f))
+
+
+class HexMixMesh(MeshTemplate):
+    # A brick/hex on [0,1]^3 sharing its z=1 QUAD face with a pyramid (base == that face, apex (0.5,0.5,2)) or
+    # a wedge (its s1=0 quad side == that face). A hex has only quad faces, so it can only meet a pyramid base
+    # or a wedge side (never a tet). In a mixed mesh the brick refines through the shared registry
+    # (build_as_brick_son), so hex and pyramid/wedge sub-nodes on the shared quad face coincide, not tear.
+    def __init__(self, other="pyr"):
+        super().__init__()
+        self.other = other
+
+    def define_geometry(self):
+        dom = self.new_domain("domain")
+        nd = {}
+
+        def n(a, b, c):
+            k = (round(a, 9), round(b, 9), round(c, 9))
+            if k not in nd:
+                nd[k] = self.add_node_unique(a, b, c)
+            return nd[k]
+
+        h = [n(0, 0, 0), n(1, 0, 0), n(0, 1, 0), n(1, 1, 0), n(0, 0, 1), n(1, 0, 1), n(0, 1, 1), n(1, 1, 1)]
+        dom.add_brick_3d_C1(*h)  # oomph brick order: 000,100,010,110,001,101,011,111
+        top = [h[4], h[5], h[7], h[6]]  # the z=1 quad face
+        interior = [frozenset(top)]
+        faces = [[h[0], h[1], h[3], h[2]], [h[4], h[5], h[7], h[6]], [h[0], h[1], h[5], h[4]],
+                 [h[2], h[3], h[7], h[6]], [h[0], h[2], h[6], h[4]], [h[1], h[3], h[7], h[5]]]  # hex faces
+        if self.other == "pyr":
+            pa = n(0.5, 0.5, 2)
+            dom.add_pyramid_3d_C1(top[0], top[1], top[2], top[3], pa)  # base == hex top face
+            faces += [[top[0], top[1], pa], [top[1], top[2], pa], [top[2], top[3], pa], [top[3], top[0], pa]]
+        else:  # wedge whose quad side {h4,h5,h7,h6} == hex top face; ridge nodes above
+            b2, t2 = n(0.5, 0.5, 2), n(0.5, 1.5, 2)
+            dom.add_wedge_3d_C1(h[4], h[5], b2, h[6], h[7], t2)
+            faces += [[h[4], h[5], b2], [h[6], h[7], t2], [h[4], b2, t2, h[6]], [h[5], b2, t2, h[7]]]
         for f in faces:
             if frozenset(f) not in interior:
                 self.add_facet_to_boundary("outer", list(f))
@@ -259,3 +298,32 @@ def test_mixed_wedge_pyramid_cross_shape_hanging(label, three_way, which, field)
         assert sum(1 for nn in m.nodes() if nn.is_hanging()) > 0, f"no hanging nodes ({label})"
         assert _dup(m) == 0, f"duplicate (torn) nodes at the mixed interface ({label})"
         assert _err(m, field) < 1e-10, f"mixed 2:1 hanging {label} ({field}) not reproduced (max err {_err(m, field):.2e})"
+
+
+# Bricks in a mixed mesh: a hex sharing a QUAD face with a pyramid (base) or a wedge (side). The hex refines
+# through the shared registry (build_as_brick_son) only when the forest is mixed; pure-brick meshes keep
+# oomph-lib's native octree build. (other, order, field): linear is exact for both spaces, quadratic is the
+# strict C2 oracle. UNIFORM (conforming) refinement here; 2:1 cross-shape hanging across a hex face is a
+# separate step.
+@pytest.mark.parametrize("other", ["pyr", "wedge"])
+@pytest.mark.parametrize("order,field", [("C1", "linear"), ("C2", "linear"), ("C2", "quadratic")])
+@pytest.mark.parametrize("level", [1, 2])
+def test_mixed_hex_uniform_manufactured(other, order, field, level):
+    src = 0 if field == "linear" else -12
+    x, y, z = var("coordinate")[0], var("coordinate")[1], var("coordinate")[2]
+    uex = (x + 2 * y + 3 * z) if field == "linear" else (x * x + 2 * y * y + 3 * z * z)
+
+    class _P(Problem):
+        def define_problem(self):
+            self += HexMixMesh(other=other)
+            self += (PoissonEquation(source=src, space=order) + DirichletBC(u=uex) @ "outer") @ "domain"
+
+    with _P() as p:
+        p.max_refinement_level = level
+        p.initialise()
+        for _ in range(level):
+            p.refine_uniformly()
+        p.solve()
+        m = p.get_mesh("domain")
+        assert _dup(m) == 0, f"duplicate (torn) nodes at the hex<->{other} interface"
+        assert _err(m, field) < 1e-10, f"mixed hex+{other} ({order},{field}) not reproduced at L{level}"

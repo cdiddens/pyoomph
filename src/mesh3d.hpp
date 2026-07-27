@@ -102,6 +102,28 @@ namespace pyoomph
   protected:
     void find_neighbours() override
     {
+      // A MIXED forest (its roots are not all the same element family) shares interface nodes via the
+      // weight-augmented registry and installs 2:1 hanging via the mesh-level post_adapt pass, so NO octree
+      // neighbour pointers are needed -- and oomph's brick compass finder must not run (it would misread a
+      // 5-node pyramid / 6-node wedge as an 8-node hex) nor the tet finder (it throws on a non-tet neighbour).
+      // Skipping here also makes the pure registry mixes (tet+wedge etc.) robust to root ordering.
+      if (ntree() > 1)
+      {
+        oomph::FiniteElement *o0 = Trees_pt[0]->object_pt();
+        const bool b0 = dynamic_cast<oomph::BrickElementBase *>(o0) != nullptr;
+        const bool t0 = dynamic_cast<oomph::TElementBase *>(o0) != nullptr;
+        const bool w0 = dynamic_cast<oomph::RefineableWedgeElement *>(o0) != nullptr;
+        const bool p0 = dynamic_cast<oomph::RefineablePyramidElement *>(o0) != nullptr;
+        for (unsigned i = 1; i < ntree(); i++)
+        {
+          oomph::FiniteElement *oi = Trees_pt[i]->object_pt();
+          if ((dynamic_cast<oomph::BrickElementBase *>(oi) != nullptr) != b0 ||
+              (dynamic_cast<oomph::TElementBase *>(oi) != nullptr) != t0 ||
+              (dynamic_cast<oomph::RefineableWedgeElement *>(oi) != nullptr) != w0 ||
+              (dynamic_cast<oomph::RefineablePyramidElement *>(oi) != nullptr) != p0)
+            return; // mixed forest -> registry node-sharing + mesh-level hanging
+        }
+      }
       // Tetrahedral forests: topological FACE neighbour finding, the 3d analogue of
       // DynamicQuadTreeForest::find_neighbours (mesh2d.cpp). Two tet roots are neighbours across a face
       // iff they share that face's three corner (vertex) nodes; the tet's four faces reuse four of the

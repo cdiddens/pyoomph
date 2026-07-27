@@ -881,6 +881,16 @@ namespace pyoomph
     // build(). Lives here (not on the pyramid) so it can call the son's protected construct_node().
     void build_as_pyramid_son(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt);
 
+    // Fill this element as a son of a BRICK father, sharing interface nodes through the mixed-forest registry
+    // (RefineablePyramidElement::Shared_node_registry). Used only when RefineablePyramidElement::
+    // Mixed_forest_active -- i.e. a mixed 3d mesh with a brick and a pyramid/wedge -- so that a brick and an
+    // adjacent pyramid/wedge sharing a QUAD face (hex face <-> pyramid base / wedge side) key that face's nodes
+    // on the same (father node, rounded father-shape weight) pairs and reuse one shared node. The son node's
+    // father-local coordinate is get_nodal_s_in_father(j) (the octree 1->8 affine map). Pure-brick meshes keep
+    // oomph-lib's native RefineableQElement<3>::build (octree compass node reuse) untouched. Called from the
+    // brick elements' build() override; lives here so it can call the son's protected construct_node().
+    void build_as_brick_son(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt);
+
     // Geometric (non-solid) Jacobian determinant of the mapping from local to given global
     // coordinates x, used by oomph-lib's locate_zeta / point-location machinery.
     double geometric_jacobian(const oomph::Vector<double> &x) override;
@@ -1723,6 +1733,9 @@ namespace pyoomph
       return res;
     }
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 3, order)); }
+    // In a MIXED forest, share interface nodes via the registry (build_as_brick_son); otherwise oomph's native
+    // octree build. Defined in elements.cpp (needs RefineablePyramidElement::Mixed_forest_active).
+    void build(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file) override;
   };
 
   // 3d brick element, triquadratic (C2) interpolation (plus a C1 dummy sub-space).
@@ -1798,6 +1811,9 @@ namespace pyoomph
       return res;
     }
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 3, order)); }
+    // In a MIXED forest, share interface nodes via the registry (build_as_brick_son); otherwise oomph's native
+    // octree build. Defined in elements.cpp (needs RefineablePyramidElement::Mixed_forest_active).
+    void build(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file) override;
   };
 
   // 3d tetrahedral element, linear (C1) interpolation.
