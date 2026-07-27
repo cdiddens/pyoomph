@@ -978,10 +978,18 @@ class RefineablePyramidElement : public virtual RefineableElement, public virtua
     // uses THIS registry too when its forest root is a pyramid (RefineableTElement<3>::in_pyramid_forest),
     // so at refinement level >= 2 a sub-pyramid and an adjacent tet-of-pyramid, sharing a triangular face,
     // both key that face's edge-midpoints on the same two shared father vertex pointers -> one node, no tear.
-    // Cleared each round. C1 only for now (father-node SETS are a unique key for C1; C2 pyramids -- with
-    // distinct interior points sharing a positive-node set -- would need the weight-augmented key like C2
-    // wedges).
-    static std::map<std::set<Node *>, Node *> Shared_node_registry;
+    // Cleared each round. The key is (father node, rounded father-shape weight) PAIRS, not a bare node set:
+    // for C1 the positive-node set alone is a unique position identifier, but for C2 two distinct interior
+    // points can share the same positive-node set (e.g. the 1/4 and 3/4 points of a father edge both have
+    // positive weight on exactly its two vertices and its edge-mid node), so keying on the set alone
+    // over-merges them and tears the mesh. The rounded weight distinguishes them, while a node on a shared
+    // father face/edge still gets identical (node,weight) pairs from every adjacent father (off-face node
+    // shapes vanish on the face) so it is shared, not duplicated -- exactly the C2-wedge approach. The
+    // ORDINARY tet build uses THIS registry too when its forest root is a pyramid
+    // (RefineableTElement<3>::in_pyramid_forest), producing matching (node,weight) pairs from its father
+    // shape, so a sub-pyramid and an adjacent tet-of-pyramid sharing a triangular face key on the same pairs.
+    typedef std::set<std::pair<Node *, long long>> SharedNodeKey;
+    static std::map<SharedNodeKey, Node *> Shared_node_registry;
     static void clear_shared_node_registry() { Shared_node_registry.clear(); }
 
     // Not yet implemented: see RefineableElement interface for semantics

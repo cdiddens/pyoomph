@@ -2321,8 +2321,12 @@ namespace pyoomph
           BulkElementBase::__CurrentCodeInstance = NULL;
           return res;
       }
+      // Mixed red-split of a C2 pyramid: 6 sub-pyramids (create_son_instance) + 4 tets. The tet son is a
+      // C2 tet bound to the same physics, mirroring BulkElementPyramid3dC1::create_tet_son_instance.
+      BulkElementBase *create_tet_son_instance() const;
+      const RefinementPattern *refinement_pattern() const override;
       void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 5, order)); }
-      oomph::Vector<double> get_midpoint_s() override { oomph::Vector<double> res(this->dim(), 0.375); res[2]=0.25; return res; }            
+      oomph::Vector<double> get_midpoint_s() override { oomph::Vector<double> res(this->dim(), 0.375); res[2]=0.25; return res; }
   };
 
   // 0-dimensional spatial point element (a single node, no extent) - used e.g. as the "face

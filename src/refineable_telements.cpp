@@ -2519,16 +2519,33 @@ namespace oomph
       // (2) Reuse a node already created (by a sibling son or the face-/edge-sharing neighbour father's sons)
       // via the geometric shared-node registry. In a PYRAMID forest use the pyramid forest's registry
       // instead of the tet-only one, so a tet-of-pyramid and an adjacent sub-pyramid share their interface
-      // face nodes (both key on the same shared father vertex pointers). Topological -> MPI-safe.
-      std::map<std::set<Node *>, Node *> &shared_reg =
-          in_pyramid_forest() ? oomph::RefineablePyramidElement::Shared_node_registry : Shared_edge_node_registry;
+      // face nodes. That registry's key is the (father node, rounded father-shape weight) PAIRS -- the same
+      // weight-augmented key build_as_pyramid_son builds -- so a shared triangular face node gets identical
+      // pairs from either side (the pyramid and tet face traces are both the standard quadratic on the shared
+      // face), while for C2 two distinct interior points on one father edge no longer collide. Topological ->
+      // MPI-safe. Outside a pyramid forest the bare father-node SET key into the tet-only registry suffices.
+      const bool pyr_forest = in_pyramid_forest();
+      oomph::RefineablePyramidElement::SharedNodeKey pyr_key;
+      if (pyr_forest && !reg_key.empty())
+      {
+        Shape fpsi(father_el_pt->nnode());
+        father_el_pt->shape(s, fpsi);
+        for (unsigned l = 0; l < father_el_pt->nnode(); l++)
+          if (fpsi(l) > 1e-6)
+            pyr_key.insert(std::make_pair(father_el_pt->node_pt(l), (long long)std::llround(fpsi(l) * 1e6)));
+      }
       if (!reg_key.empty())
       {
-        std::map<std::set<Node *>, Node *>::iterator it = shared_reg.find(reg_key);
-        if (it != shared_reg.end())
+        if (pyr_forest)
         {
-          node_pt(j) = it->second;
-          continue;
+          std::map<oomph::RefineablePyramidElement::SharedNodeKey, Node *>::iterator it =
+              oomph::RefineablePyramidElement::Shared_node_registry.find(pyr_key);
+          if (it != oomph::RefineablePyramidElement::Shared_node_registry.end()) { node_pt(j) = it->second; continue; }
+        }
+        else
+        {
+          std::map<std::set<Node *>, Node *>::iterator it = Shared_edge_node_registry.find(reg_key);
+          if (it != Shared_edge_node_registry.end()) { node_pt(j) = it->second; continue; }
         }
       }
 
@@ -2641,7 +2658,11 @@ namespace oomph
         for (unsigned k = 0; k < n_var; k++) created_node_pt->set_value(t, k, prev_values[k]);
       }
       mesh_pt->add_node_pt(created_node_pt);
-      if (!reg_key.empty()) shared_reg[reg_key] = created_node_pt;
+      if (!reg_key.empty())
+      {
+        if (pyr_forest) oomph::RefineablePyramidElement::Shared_node_registry[pyr_key] = created_node_pt;
+        else Shared_edge_node_registry[reg_key] = created_node_pt;
+      }
     }
   }
 

@@ -152,6 +152,30 @@ def test_pyramid_red_split_tiles_exactly():
 from pyoomph.equations.poisson import PoissonEquation
 
 
+@pytest.mark.parametrize("level", [1, 2])
+def test_uniform_pyramid_refinement_c2(level):
+    # C2 (quadratic-field) analogue of test_uniform_pyramid_refinement. The mixed red split is built with C2
+    # sub-pyramids + C2 tets; the element counts are identical (the split is geometric, order-independent), so
+    # torn nodes here would mean the C2 node-sharing registry mis-keys. See test_pyramid_c2_manufactured_quadratic
+    # for why the C1 registry key was insufficient for C2.
+    class _P(Problem):
+        def define_problem(self):
+            self += PyramidCubeMesh(N=1)
+            self += _HelmholtzLike("C2") @ "domain"
+
+    with _P() as p:
+        p.max_refinement_level = level
+        p.initialise()
+        for _ in range(level):
+            p.refine_uniformly()
+        p.solve()
+        m = p.get_mesh("domain")
+        assert m.nelement() == _EXPECTED_NELEM[level], f"expected {_EXPECTED_NELEM[level]} elements, got {m.nelement()}"
+        assert _count_coincident_nodes(m) == 0, "duplicate (torn) nodes after uniform C2 pyramid refinement"
+        r = p.get_last_residual_convergence()
+        assert r and r[-1] < 1e-9, f"residual not machine-zero ({r[-1] if r else None})"
+
+
 @pytest.mark.parametrize("level", [0, 1, 2])
 def test_pyramid_dirichlet_manufactured_linear(level):
     # Strict correctness oracle for pyramid refinement WITH boundaries. The exact solution of -laplace(u)=0
@@ -183,6 +207,82 @@ def test_pyramid_dirichlet_manufactured_linear(level):
         for n in m.nodes():
             err = max(err, abs(n.value(0) - (n.x(0) + 2 * n.x(1) + 3 * n.x(2))))
         assert err < 1e-10, f"pyramid mesh does not reproduce the linear field at level {level} (max err {err:.2e})"
+
+
+@pytest.mark.parametrize("level", [0, 1, 2])
+def test_pyramid_c2_manufactured_quadratic(level):
+    # Strict correctness oracle for C2 (quadratic-field) pyramid refinement. A linear field is too weak for C2
+    # (it is reproduced even by a torn/mis-keyed mesh), so the oracle is the harmonic-adjacent QUADRATIC
+    # u=x^2+2y^2+3z^2 with source -laplace(u)=-12, exactly representable in the C2 space -> machine precision at
+    # every node IFF the refined C2 mesh is conforming.
+    #
+    # This catches the C2 node-sharing bug the C1 code hid: the shared-node registry keyed each new node on the
+    # SET of father nodes with positive father-shape weight. For C1 that set is a unique position identifier,
+    # but for C2 two DISTINCT interior points on one father edge (its 1/4 and 3/4 points) both have positive
+    # weight on exactly that edge's two vertices and its mid-node -> the SAME set -> the two nodes collapse onto
+    # one, tearing the mesh. Without a fix this gives an O(0.1) error at level 1 (and a crash at level 2). The
+    # fix augments the key with the rounded father-shape WEIGHT (the C2-wedge approach), which distinguishes the
+    # two interior points while a shared face/edge node still gets identical (node,weight) pairs from either side
+    # (the pyramid and tet face traces are both the standard quadratic on a shared triangular face).
+    x, y, z = var("coordinate")[0], var("coordinate")[1], var("coordinate")[2]
+    uex = x * x + 2 * y * y + 3 * z * z
+
+    class _P(Problem):
+        def define_problem(self):
+            self += PyramidCubeMesh(N=1)
+            eqs = PoissonEquation(source=-12, space="C2")
+            eqs += DirichletBC(u=uex) @ ["left", "right", "front", "back", "bottom", "top"]
+            self += eqs @ "domain"
+
+    with _P() as p:
+        p.max_refinement_level = level
+        p.initialise()
+        for _ in range(level):
+            p.refine_uniformly()
+        p.solve()
+        m = p.get_mesh("domain")
+        assert _count_coincident_nodes(m) == 0, "duplicate (torn) nodes after C2 pyramid refinement"
+        err = max(abs(n.value(0) - (n.x(0) ** 2 + 2 * n.x(1) ** 2 + 3 * n.x(2) ** 2)) for n in m.nodes())
+        assert err < 1e-10, f"C2 pyramid mesh does not reproduce the quadratic field at level {level} (max err {err:.2e})"
+
+
+@pytest.mark.parametrize("field", ["linear", "quadratic"])
+def test_pyramid_c2_nonuniform_2to1_hanging(field):
+    # C2 cross-shape 2:1 hanging: the non-uniform analogue of test_pyramid_c2_manufactured_quadratic. Refine
+    # only the interior pyramids near the cube centre -> a 2:1 interface whose finer side mixes C2 sub-pyramids
+    # and C2 tets. Both the linear AND the (stricter) quadratic manufactured field must be reproduced to machine
+    # precision, which requires the hanging C2 nodes on the interface to be correctly constrained on the coarse
+    # elements' quadratic interpolation (post_adapt_setup_hanging_nodes pyramid-forest branch) AND the finer side
+    # to be conforming (the weight-augmented registry key).
+    x, y, z = var("coordinate")[0], var("coordinate")[1], var("coordinate")[2]
+    uex = (x + 2 * y + 3 * z) if field == "linear" else (x * x + 2 * y * y + 3 * z * z)
+    src = 0 if field == "linear" else -12
+
+    def _central(e):
+        mx = e.get_Eulerian_midpoint()
+        d = ((mx[0] - 0.5) ** 2 + (mx[1] - 0.5) ** 2 + (mx[2] - 0.5) ** 2) ** 0.5
+        return 1 if d < 0.22 else 0
+
+    class _P(Problem):
+        def define_problem(self):
+            self += PyramidCubeMesh(N=3)
+            eqs = PoissonEquation(source=src, space="C2")
+            eqs += DirichletBC(u=uex) @ ["left", "right", "front", "back", "bottom", "top"]
+            eqs += RefineAccordingToElement(level_func=_central)
+            self += eqs @ "domain"
+
+    with _P() as p:
+        p.max_refinement_level = 1
+        p.solve()
+        m = p.get_mesh("domain")
+        assert m.nelement() > 162, "central refinement did not happen"
+        assert sum(1 for n in m.nodes() if n.is_hanging()) > 0, "no hanging nodes -> the 2:1 interface was not created"
+        assert _count_coincident_nodes(m) == 0, "duplicate (torn) nodes at the 2:1 C2 pyramid interface"
+        if field == "linear":
+            err = max(abs(n.value(0) - (n.x(0) + 2 * n.x(1) + 3 * n.x(2))) for n in m.nodes())
+        else:
+            err = max(abs(n.value(0) - (n.x(0) ** 2 + 2 * n.x(1) ** 2 + 3 * n.x(2) ** 2)) for n in m.nodes())
+        assert err < 1e-10, f"C2 {field} field not reproduced across the 2:1 pyramid interface (max err {err:.2e})"
 
 
 def test_pyramid_nonuniform_2to1_hanging():

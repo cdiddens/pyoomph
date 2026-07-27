@@ -791,7 +791,7 @@ const double PyramidGaussC2::Weight[27] =
   // Per-round father-node-keyed shared-node registry for the whole mixed pyramid forest (see header): the
   // pyramid-son build AND the tet-son build (in a pyramid forest) both key on shared father Node pointers, so
   // a node on a pyramid<->tet shared face is created once. Topological -> MPI-safe.
-  std::map<std::set<Node *>, Node *> RefineablePyramidElement::Shared_node_registry;
+  std::map<RefineablePyramidElement::SharedNodeKey, Node *> RefineablePyramidElement::Shared_node_registry;
 
   
 

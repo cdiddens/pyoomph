@@ -7219,12 +7219,16 @@ namespace pyoomph
 
 	BulkElementBase *PyramidMixedRefinementPattern::construct_son(const BulkElementBase *parent, unsigned ison) const
 	{
-		// Sons 0..5 are sub-pyramids (same shape as the parent), sons 6..9 are tetrahedra. Both are built
-		// with the parent's physics via the concrete pyramid element's factories.
-		const BulkElementPyramid3dC1 *pyr = dynamic_cast<const BulkElementPyramid3dC1 *>(parent);
-		if (!pyr) throw_runtime_error("PyramidMixedRefinementPattern applied to a non-pyramid element");
+		// Sons 0..5 are sub-pyramids (same shape/order as the parent), sons 6..9 are tetrahedra of the
+		// matching order. Both are built with the parent's physics via the concrete pyramid element's
+		// factories. The parent can be a C1 or a C2 pyramid; the tet-son factory is virtual-dispatched to
+		// build a tet of the same order.
 		if (ison < 6) return parent->create_son_instance();
-		return pyr->create_tet_son_instance();
+		if (const BulkElementPyramid3dC1 *pyr1 = dynamic_cast<const BulkElementPyramid3dC1 *>(parent))
+			return pyr1->create_tet_son_instance();
+		if (const BulkElementPyramid3dC2 *pyr2 = dynamic_cast<const BulkElementPyramid3dC2 *>(parent))
+			return pyr2->create_tet_son_instance();
+		throw_runtime_error("PyramidMixedRefinementPattern applied to a non-pyramid element");
 	}
 
 	const PyramidMixedRefinementPattern *PyramidMixedRefinementPattern::instance()
@@ -7244,6 +7248,21 @@ namespace pyoomph
 	}
 
 	const RefinementPattern *BulkElementPyramid3dC1::refinement_pattern() const
+	{
+		return PyramidMixedRefinementPattern::instance();
+	}
+
+	// Tet son of a C2 pyramid: a BulkElementTetra3dC2 bound to the same physics (codeinst) as this pyramid.
+	BulkElementBase *BulkElementPyramid3dC2::create_tet_son_instance() const
+	{
+		BulkElementBase::__CurrentCodeInstance = codeinst;
+		auto res = new BulkElementTetra3dC2();
+		res->set_code_instance(codeinst); // res is a tet, not a pyramid -> use the public setter
+		BulkElementBase::__CurrentCodeInstance = NULL;
+		return res;
+	}
+
+	const RefinementPattern *BulkElementPyramid3dC2::refinement_pattern() const
 	{
 		return PyramidMixedRefinementPattern::instance();
 	}
@@ -7301,13 +7320,29 @@ namespace pyoomph
 
 		oomph::Vector<oomph::Vector<double>> sv;
 		RefineablePyramidElement::son_vertices_in_father(son_type, sv);
-		if (sv.size() != n_node)
-			throw_runtime_error("pyramid son build: node count does not match vertex count (C1-only for now)");
+		const unsigned nvert = sv.size(); // 5 for a pyramid son, 4 for a tet son
+		// The son GEOMETRY is C1 (sub-parametric even for a C2 field element): son-local -> father-local is
+		// the son's C1 shape interpolating its vertices' father-local coords. A pyramid son's C1 shape has
+		// the 1/(1-s2) apex singularity, so a node exactly at the son apex (s2=1) is mapped directly to the
+		// son's apex vertex sv[4] rather than through the singular shape.
+		const bool is_pyr_son = (dynamic_cast<oomph::RefineablePyramidElement *>(this) != nullptr);
 
 		for (unsigned j = 0; j < n_node; j++)
 		{
-			// C1: son node j is vertex j -> its father-local coordinate is exactly the son vertex.
-			oomph::Vector<double> s = sv[j];
+			oomph::Vector<double> s_son(3);
+			this->local_coordinate_of_node(j, s_son);
+			oomph::Vector<double> s(3, 0.0);
+			if (is_pyr_son && s_son[2] >= 1.0 - 1e-9)
+			{
+				s = sv[4];
+			}
+			else
+			{
+				oomph::Shape gpsi(nvert);
+				this->shape_at_s_C1(s_son, gpsi);
+				for (unsigned k = 0; k < nvert; k++)
+					for (int d = 0; d < 3; d++) s[d] += gpsi[k] * sv[k][d];
+			}
 
 			// (1) Reuse a father node coincident with this position (shared vertex). Its values are already
 			// correct (it is an existing father node) -- do NOT re-interpolate them: the pyramid shape's
@@ -7321,18 +7356,20 @@ namespace pyoomph
 			}
 
 			// Generating father nodes = those with POSITIVE father shape at s (for C1: the endpoints of the
-			// edge this node bisects, or the four base corners for the base centre). The SET of those shared
-			// father Node pointers is the topological registry key -- identical from every son (of this or an
-			// adjacent father, of either shape) that creates the same node, so the node is shared not torn.
+			// edge this node bisects, or the four base corners for the base centre). The registry key is the
+			// (father node, rounded weight) PAIRS, not the bare node set: for C2 two distinct interior points
+			// can share the same positive-node set (the 1/4 and 3/4 points of a father edge), so the weight is
+			// needed to tell them apart, while a shared face/edge node still gets identical pairs from every
+			// adjacent father (off-face node shapes vanish on the face) -- shared, not torn. See the header.
 			oomph::Shape psi(nfath);
 			father_el_pt->shape(s, psi);
 			std::vector<oomph::Node *> gen;
-			std::set<oomph::Node *> reg_key;
+			oomph::RefineablePyramidElement::SharedNodeKey reg_key;
 			for (unsigned l = 0; l < nfath; l++)
 				if (psi(l) > 1e-6)
 				{
 					gen.push_back(father_el_pt->node_pt(l));
-					reg_key.insert(father_el_pt->node_pt(l));
+					reg_key.insert(std::make_pair(father_el_pt->node_pt(l), (long long)std::llround(psi(l) * 1e6)));
 				}
 
 			// (2) Reuse a node already created this round -- by another of this father's sons, OR (at level
