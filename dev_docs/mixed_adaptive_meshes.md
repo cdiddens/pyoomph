@@ -1132,9 +1132,12 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
      the topological tree route (geometric passes deleted); 2D mixed quad+tri (refine + solve + moving-mesh
      tear-free); boundary-element identification unified onto per-element face tags for every shape and
      dimension (§4.3), so the per-shape quad/tri and brick/tet reconstructions are now only a fallback for
-     untagged meshes. Pending: wedges/pyramids ⇒ 3D mixed; anisotropic/variable splits (§5); tet per-element
-     hanging inside `adapt_mesh` (refine_selected gap + MPI); `ConstrainPositionsToC1Space` under tri hanging
-     (§4.14); 3D-tet MPI (§4.4 BUG B); nodal boundary marking of spurious mid-edge nodes (§4.3, "still open").
+     untagged meshes. Pending: anisotropic/variable splits (§5); tet per-element
+     hanging inside `adapt_mesh` (refine_selected gap); `ConstrainPositionsToC1Space` under tri hanging
+     (§4.14); nodal boundary marking of spurious mid-edge nodes (§4.3, "still open"). DONE since: wedges/
+     pyramids ⇒ 3D mixed (all families, C1/C2, uniform + non-uniform + multi-level); MPI distributed adaptive
+     SOLVES incl. 3D-tet — §4.4 BUG B now fixed (§4.17). Still open under MPI: distributed EIGENSOLVES (§4.17,
+     a general `parallel_sparse_assemble` crash, not adaptivity-specific).
      Tests: `test_triangle_refinement.py`, `test_tet_refinement.py`, `test_constrained_adaptivity.py`,
      `test_mixed_mesh.py`, `test_boundary_element_identification.py`.
 
@@ -1180,9 +1183,57 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
          `test_triangle_refinement.py::test_tesselate_tri_output_no_tjunctions` (C1/C2/C1TB/C2TB, T-junction-free +
          area-exact) and `::test_tesselate_tri_curved_geometry_valid` (curved C2/C2TB, matplotlib-valid).
 
+   - **§4.17 — MPI distributed adaptivity [DONE for solves; eigensolves are a separate open limitation].**
+     Distributed (`mpirun -n N ... --distribute --petsc_mumps`) adaptive refinement now works and is
+     machine-zero for ALL 3D families (tet / wedge / pyramid / hex+pyramid / tet+wedge / three-way), for
+     uniform, non-uniform (2:1 cross-shape hanging) AND multi-level refinement, and for both linear and
+     nonlinear problems (a `-lap(u)+u^3=f` distributed adaptive solve matches the serial result exactly on
+     every rank). Two root causes, both small fixes; serial is untouched in both.
+       * **Fix 1 — resolves §4.4 BUG B (the "asymmetric halo/haloed classification" that blocked 3D-tet MPI).**
+         `RefineableTElement<2>::build` (2D tri) propagates the halo-ownership tag to each son under
+         `OOMPH_HAS_MPI` (`Non_halo_proc_ID = father->non_halo_proc_ID()`), which the distributed
+         `classify_halo_and_haloed_nodes` uses to decide which rank owns each new node. The 3D builds never
+         did: `RefineableTElement<3>::build`, `build_as_pyramid_son`, `build_as_brick_son` and the wedge build
+         all lacked it, so refined 3D sons kept the default tag, the classify mis-owned their new interface
+         nodes, and the per-rank halo/haloed node LISTS drifted apart — leaking an unmatched header message in
+         `Mesh::resize_halo_nodes` that then poisoned the tag-0 halo-node sync (SEGV in
+         `synchronise_nonhanging_nodes`, deadlock in `synchronise_hanging_nodes`). Diagnosed via gdb + MPI
+         message tracing; the fix mirrors the working 2D path. Guarded to `is_halo()` so serial is a no-op.
+         [commit feabbf4]
+       * **Fix 2 — distributed non-uniform hanging VALUES.** The cross-shape hang CONSTRAINT was already
+         correct across ranks (real dofs machine-zero; a 2nd solve made everything consistent). The bug was the
+         hanging nodes' own RAW value storage: pyoomph reads a node's raw value (`oomph::Data::value`, NOT the
+         hanging-aware `Node::value` that interpolates from masters on the fly) both in the JIT elemental
+         assembly and for output. On a distributed mesh the masters are halo nodes value-synced only at each
+         Newton step's end, so a hanging node's raw storage is left stale — wrong hanging values across the
+         halo boundary and, for NONLINEAR problems, a residual/Jacobian assembled from stale hanging values
+         every iteration (a single linear step converges regardless, which is why it only showed in the final
+         values). Fix: `Mesh::collapse_hanging_node_values()` writes each hanging node's master-interpolated
+         value into its own raw storage; called from the START of `Problem::get_residuals` AND
+         `Problem::get_jacobian` (helper `sync_hanging_values_if_distributed`) so it runs before EVERY assembly
+         — i.e. every Newton iteration, when the masters are current — guarded to `is_mesh_distributed()`.
+         Also exposed as `Mesh._collapse_hanging_node_values()`. [commit d90f55c]
+       * **OPEN LIMITATION — distributed EIGENSOLVES crash (separate from adaptivity).** `--distribute
+         --slepc_mumps` SEGVs in oomph's `Problem::parallel_sparse_assemble` (problem.cc:6909), reached via
+         `get_eigenproblem_matrices` (problem.cc:8761) ← `Problem::assemble_eigenproblem_matrices`
+         (problem.cpp:1111). This happens **even on a NON-adaptive mesh with zero hanging nodes**, so it is a
+         GENERAL pre-existing distributed-eigen-assembly defect, NOT specific to (or caused by) the
+         adaptive-mesh work — the Fix-1/Fix-2 changes never touch the eigen assembly path. SERIAL eigensolves
+         work fine, including on adaptive meshes with hanging nodes (e.g. the exact adaptive tet mesh above
+         gives eigenvalues serially). To enable distributed eigensolves the order is: (1) fix the
+         `parallel_sparse_assemble` crash for the eigen matrices (an oomph-level distributed-assembly issue),
+         THEN (2) extend the Fix-2 hanging-value collapse to `assemble_eigenproblem_matrices` (so nonlinear
+         eigen matrices see current hanging base values) AND to the eigenvector→node output path (so displayed
+         eigenfunction values at hanging nodes are correct) — both identified but untestable until (1) lands.
+         Repro: `Scratchpad/eig_dist.py` (adaptive), `eig_noadapt.py` (non-adaptive; still crashes).
+       * Not yet covered by an automated MPI test in `tests/` (the pytest suite runs serially). Verified via
+         `Scratchpad/mpi_fam.py` (parametrised by `MESHKIND`/`MODE`), `mpi_nonlinear.py`, `mpi_collapse.py`.
+
 5. **Variable / anisotropic schemes** (§5): quad 1→2 (both directions), simplex
    bisection; directional error estimator; generalised balance rule.
-6. **MPI hardening** across all shapes; distributed adaptivity tests.
+6. **MPI hardening** across all shapes; distributed adaptivity tests. [Distributed adaptive SOLVES done — see
+   §4.17; remaining: automated MPI test target in `tests/`, and distributed EIGENSOLVES (blocked on the
+   general `parallel_sparse_assemble` eigen-assembly crash, §4.17).]
 7. **Unrefinement / `rebuild_from_sons` per pattern**, and curvilinear
    macro-element mapping for simplices/wedges/pyramids (§1.2) where curved
    boundaries meet refinement.
