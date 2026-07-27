@@ -335,6 +335,62 @@ def test_tet_readapt_no_torn_nodes():
         assert m.nelement() > 384
 
 
+def _tet_dup(m):
+    seen = set()
+    d = 0
+    for n in m.nodes():
+        k = (round(n.x(0), 8), round(n.x(1), 8), round(n.x(2), 8))
+        if k in seen:
+            d += 1
+        seen.add(k)
+    return d
+
+
+@pytest.mark.parametrize("mode", ["uniform1", "uniform2", "nonuniform"])
+def test_tet_c2_manufactured_quadratic(mode):
+    # STRICT correctness oracle for C2 (quadratic-field) tetrahedra. The other C2 tet tests here use a
+    # residual oracle (source=const, homogeneous Dirichlet), which certifies the hanging Jacobian but -- as
+    # the C2 pyramid work showed -- can read machine-zero even on a torn mesh (a duplicated node just adds an
+    # independent dof the linear solve still zeroes). This test instead checks the manufactured harmonic-
+    # adjacent QUADRATIC u=x^2+2y^2+3z^2 (source -laplace(u)=-12) is reproduced at every node, which fails
+    # unless the refined C2 mesh is truly conforming. It confirms the tet edge-node registry key
+    # (father_edge_node_key: the father node PAIR a son node bisects) stays unique for C2 -- the father's own
+    # edge-mid nodes disambiguate the 1/4 and 3/4 points of an edge, so tets need no weight-augmented key (the
+    # pyramid, whose son vertices include non-node tri-face-centres, does).
+    x, y, z = var("coordinate")[0], var("coordinate")[1], var("coordinate")[2]
+    uex = x * x + 2 * y * y + 3 * z * z
+
+    def _central(e):
+        mx = e.get_Eulerian_midpoint()
+        return 1 if ((mx[0] - 0.5) ** 2 + (mx[1] - 0.5) ** 2 + (mx[2] - 0.5) ** 2) ** 0.5 < 0.25 else 0
+
+    N = 1 if mode.startswith("uniform") else 3
+
+    class _P(Problem):
+        def define_problem(self):
+            self += TetCubeMesh(N=N, space="C2")
+            eqs = PoissonEquation(source=-12, space="C2") + DirichletBC(u=uex) @ _ALL_BOUNDS
+            if mode == "nonuniform":
+                eqs += RefineAccordingToElement(level_func=_central)
+            self += eqs @ "domain"
+
+    with _P() as p:
+        p.max_refinement_level = 1 if mode != "uniform2" else 2
+        if mode == "nonuniform":
+            p.solve()
+        else:
+            p.initialise()
+            for _ in range(2 if mode == "uniform2" else 1):
+                p.refine_uniformly()
+            p.solve()
+        m = p.get_mesh("domain")
+        assert _tet_dup(m) == 0, "duplicate (torn) nodes after C2 tet refinement"
+        if mode == "nonuniform":
+            assert sum(1 for n in m.nodes() if n.is_hanging()) > 0, "no hanging nodes on the 2:1 interface"
+        err = max(abs(n.value(0) - (n.x(0) ** 2 + 2 * n.x(1) ** 2 + 3 * n.x(2) ** 2)) for n in m.nodes())
+        assert err < 1e-10, f"C2 tet mesh ({mode}) does not reproduce the quadratic field (max err {err:.2e})"
+
+
 from pyoomph.equations.ALE import LaplaceSmoothedMesh
 
 
