@@ -1355,8 +1355,29 @@ namespace pyoomph
 	// matrix-manipulation Dirichlet strategy is active, a subsequent zeroing of the Dirichlet rows via
 	// remove_dirichlets_by_matrix_manipulation), or the user-supplied custom residual when
 	// use_custom_residual_jacobian is set.
+	// On a DISTRIBUTED mesh, make each hanging node's own (raw) value storage consistent with the value
+	// interpolated from its masters BEFORE assembling. The elemental (JIT) assembly reads a node's raw value,
+	// but a hanging node's raw storage is only made consistent with its masters when this is called -- and the
+	// masters (halo nodes) are freshly value-synchronised at the end of every Newton step. Without this, a
+	// NONLINEAR residual/Jacobian would be assembled from stale hanging values on every iteration (a single
+	// linear step happens to converge regardless, which is why the bug only showed up in the final values).
+	// Must therefore run every iteration, not just once after the solve. No-op on serial meshes.
+	static inline void sync_hanging_values_if_distributed(pyoomph::Problem *prob)
+	{
+#ifdef OOMPH_HAS_MPI
+		auto do_mesh = [](oomph::Mesh *mp) {
+			pyoomph::Mesh *m = dynamic_cast<pyoomph::Mesh *>(mp);
+			if (m && m->is_mesh_distributed()) m->collapse_hanging_node_values();
+		};
+		const unsigned nm = prob->nsub_mesh();
+		if (nm == 0) { if (prob->mesh_pt()) do_mesh(prob->mesh_pt()); }
+		else for (unsigned i = 0; i < nm; i++) do_mesh(prob->mesh_pt(i));
+#endif
+	}
+
 	void Problem::get_residuals(oomph::DoubleVector &residuals)
 	{
+		sync_hanging_values_if_distributed(this);
 		if (!use_custom_residual_jacobian)
 		{
 			get_residuals_by_elemental_assembly(residuals);
@@ -1425,6 +1446,7 @@ namespace pyoomph
 	// Top-level Jacobian assembly entry point; same dispatch/Dirichlet-handling pattern as get_residuals()
 	void Problem::get_jacobian(oomph::DoubleVector &residuals, oomph::CRDoubleMatrix &jacobian)
 	{
+		sync_hanging_values_if_distributed(this);
 		if (!use_custom_residual_jacobian)
 		{
 			get_jacobian_by_elemental_assembly(residuals, jacobian);

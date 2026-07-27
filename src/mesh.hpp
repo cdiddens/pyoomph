@@ -96,6 +96,26 @@ namespace pyoomph
 		virtual void set_time_level_for_projection(unsigned time_level);
 		// Prepare internal caches (e.g. KD-tree) required before interpolation calls; must be called before nodal_interpolate_*.
 		virtual void prepare_interpolation();
+		// Write each hanging node's constrained value (interpolated from its masters via the hanging scheme)
+		// into its own RAW storage. Node::value() computes the hanging value on the fly from the masters'
+		// RAW values, but the raw storage of the hanging node itself is what Data::value() (and hence direct
+		// node value access / output) returns. On a distributed mesh the raw storage is left stale after the
+		// first post-adapt solve (the masters -- halo nodes -- are only value-synchronised at solve end), so
+		// this pass, called after that synchronisation, makes the raw values consistent with the constraint.
+		void collapse_hanging_node_values()
+		{
+			for (unsigned long in = 0; in < this->nnode(); in++)
+			{
+				oomph::Node *n = this->node_pt(in);
+				if (!n) continue;
+				const unsigned nt = n->ntstorage();
+				const unsigned nv = n->nvalue();
+				for (unsigned i = 0; i < nv; i++)
+					if (n->is_hanging(i))
+						for (unsigned t = 0; t < nt; t++)
+							n->set_value(t, i, n->value(t, i));
+			}
+		}
 
 		virtual void clear_additional_dof_constraints(); // Clear any additional dof constraints that have been applied to this mesh's nodes
 		virtual void apply_additional_dof_constraints(); // Apply any additional dof constraints that have been registered on this mesh's nodes
