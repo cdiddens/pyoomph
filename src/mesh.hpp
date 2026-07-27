@@ -367,6 +367,21 @@ namespace pyoomph
 			oomph::RefineableTElement<3>::clear_shared_edge_node_registry();
 			oomph::RefineableWedgeElement::clear_shared_node_registry();
 			oomph::RefineablePyramidElement::clear_shared_node_registry();
+			// Detect a MIXED 3d forest (>=2 of {tet,wedge,pyramid} present among the current leaves). When set,
+			// the tet/wedge/pyramid builds share one weight-augmented registry so cross-shape triangular-face
+			// nodes are shared, not torn. A pure single-family mesh leaves it false (each keeps its own path).
+			{
+				bool has_tet = false, has_wedge = false, has_pyr = false;
+				for (unsigned long e = 0; e < this->nelement(); e++)
+				{
+					oomph::GeneralisedElement *g = this->element_pt(e);
+					if (dynamic_cast<oomph::RefineableWedgeElement *>(g)) has_wedge = true;
+					else if (dynamic_cast<oomph::RefineablePyramidElement *>(g)) has_pyr = true;
+					else if (dynamic_cast<oomph::RefineableTElement<3> *>(g)) has_tet = true;
+				}
+				oomph::RefineablePyramidElement::Mixed_forest_active =
+					((has_tet ? 1 : 0) + (has_wedge ? 1 : 0) + (has_pyr ? 1 : 0)) >= 2;
+			}
 			// Snapshot existing node positions so build() can reuse a coincident node created in an
 			// EARLIER round (e.g. by a finer neighbour) instead of duplicating it -- which would tear a
 			// moving mesh apart at a refine/coarsen interface. See RefineableTElement<2>::build.

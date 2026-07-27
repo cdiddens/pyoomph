@@ -992,6 +992,16 @@ class RefineablePyramidElement : public virtual RefineableElement, public virtua
     static std::map<SharedNodeKey, Node *> Shared_node_registry;
     static void clear_shared_node_registry() { Shared_node_registry.clear(); }
 
+    // True during the refinement of a MIXED 3d mesh (>=2 of {tet,wedge,pyramid} present). When set, the tet,
+    // wedge and pyramid builds all route their new interface nodes into THIS registry with the weight-augmented
+    // key (RefineableWedgeElement::SharedNodeKey and SharedNodeKey are the same underlying type), so a tet and
+    // an adjacent wedge sharing a triangular face key that face's nodes on the same (father node, rounded
+    // weight) pairs -- one shared node, not a torn pair. Set once per round by Mesh::split_elements_if_required
+    // (mesh.hpp). For a PURE single-family mesh it stays false and each family keeps its own registry
+    // (pure-tet/-wedge/-pyramid meshes are validated as-is); a pure-pyramid mesh routes its tet offspring via
+    // in_pyramid_forest() instead, which targets this same registry.
+    static bool Mixed_forest_active;
+
     // Not yet implemented: see RefineableElement interface for semantics
     virtual Node *node_created_by_neighbour(const Vector<double> &s_fraction, bool &is_periodic);
 

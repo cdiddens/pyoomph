@@ -2524,7 +2524,10 @@ namespace oomph
       // pairs from either side (the pyramid and tet face traces are both the standard quadratic on the shared
       // face), while for C2 two distinct interior points on one father edge no longer collide. Topological ->
       // MPI-safe. Outside a pyramid forest the bare father-node SET key into the tet-only registry suffices.
-      const bool pyr_forest = in_pyramid_forest();
+      // Route into the shared pyramid registry when this tet is a son of a pyramid (in_pyramid_forest) OR the
+      // mesh is a mixed 3d forest (a tet adjacent to a wedge/pyramid): both need the weight-augmented key so a
+      // shared triangular face node is keyed identically from either side.
+      const bool pyr_forest = in_pyramid_forest() || oomph::RefineablePyramidElement::Mixed_forest_active;
       oomph::RefineablePyramidElement::SharedNodeKey pyr_key;
       if (pyr_forest && !reg_key.empty())
       {

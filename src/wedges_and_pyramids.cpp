@@ -419,11 +419,15 @@ const double PyramidGaussC2::Weight[27] =
 
       // (2) Reuse a node an already-built element created this round (keyed on the same generating
       // (node,weight) pairs; adjacent fathers produce identical pairs for a shared face/edge node, so the
-      // key -- and hence the node -- is shared, but distinct interior points get distinct keys).
+      // key -- and hence the node -- is shared, but distinct interior points get distinct keys). In a MIXED
+      // 3d mesh route into the shared pyramid registry so a wedge and an adjacent tet/pyramid sharing a
+      // triangular face key that face's nodes on the same pairs (both traces are the standard triangle shape).
+      std::map<SharedNodeKey, Node *> &reg =
+          RefineablePyramidElement::Mixed_forest_active ? RefineablePyramidElement::Shared_node_registry : Shared_node_registry;
       if (!reg_key.empty())
       {
-        std::map<SharedNodeKey, Node *>::iterator it = Shared_node_registry.find(reg_key);
-        if (it != Shared_node_registry.end()) { node_pt(j) = it->second; continue; }
+        std::map<SharedNodeKey, Node *>::iterator it = reg.find(reg_key);
+        if (it != reg.end()) { node_pt(j) = it->second; continue; }
       }
 
       // (3) Build a new node. It lies on a mesh boundary iff ALL its generating nodes share one; pinned
@@ -505,7 +509,7 @@ const double PyramidGaussC2::Weight[27] =
         for (unsigned k = 0; k < nv; k++) created_node_pt->set_value(t, k, prev[k]);
       }
       mesh_pt->add_node_pt(created_node_pt);
-      if (!reg_key.empty()) Shared_node_registry[reg_key] = created_node_pt;
+      if (!reg_key.empty()) reg[reg_key] = created_node_pt;
     }
   }
 
@@ -792,6 +796,7 @@ const double PyramidGaussC2::Weight[27] =
   // pyramid-son build AND the tet-son build (in a pyramid forest) both key on shared father Node pointers, so
   // a node on a pyramid<->tet shared face is created once. Topological -> MPI-safe.
   std::map<RefineablePyramidElement::SharedNodeKey, Node *> RefineablePyramidElement::Shared_node_registry;
+  bool RefineablePyramidElement::Mixed_forest_active = false;
 
   
 

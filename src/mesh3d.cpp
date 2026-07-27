@@ -62,7 +62,21 @@ namespace pyoomph
 		// wedge refines its triangular cross-section 1->4 and its extrusion 1->2 (shape-closed). A pure-
 		// pyramid mesh refines with HETEROGENEOUS offspring (1 pyramid -> 6 pyramids + 4 tets), so its
 		// leaves become a mix of pyramids and tets after the first level.
-		if (allQ || allT || allW || allP)
+		//
+		// A MIXED registry-based mesh -- any combination of tets, wedges and pyramids (no bricks) -- also
+		// refines: the three families all key their new interface nodes into one shared weight-augmented
+		// registry (RefineablePyramidElement::Mixed_forest_active), so a tet and an adjacent wedge sharing a
+		// triangular face produce one shared node, not a torn pair. Bricks are excluded: they refine via
+		// oomph-lib's native octree machinery, which does not yet bridge to the registry-based builds.
+		bool allReg = true; // every element is registry-based (tet/wedge/pyramid), i.e. no bricks
+		for (unsigned int i = 0; i < this->nelement(); i++)
+		{
+			bool is_tet = (dynamic_cast<oomph::TElementBase *>(this->element_pt(i)) != NULL);
+			bool is_wedge = (dynamic_cast<oomph::RefineableWedgeElement *>(this->element_pt(i)) != NULL);
+			bool is_pyramid = (dynamic_cast<oomph::RefineablePyramidElement *>(this->element_pt(i)) != NULL);
+			allReg = allReg && (is_tet || is_wedge || is_pyramid);
+		}
+		if (allQ || allT || allW || allP || allReg)
 		{
 			return true;
 		}
