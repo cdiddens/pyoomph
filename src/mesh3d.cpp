@@ -89,6 +89,96 @@ namespace pyoomph
 	// pyoomph pass entirely -- refine_selected_elements / custom_adapt (the tet analogue of the 2d fix).
 	void TemplatedMeshBase3d::post_adapt_setup_hanging_nodes()
 	{
+		// --- Pyramid forest 2:1 hanging (M3c), CROSS-SHAPE. -----------------------------------------------
+		// A pyramid refines into 6 sub-pyramids + 4 tets, so after non-uniform refinement the leaves are a
+		// MIX of pyramids and tets. Same generative, position-based idea as the wedge branch below (NOT
+		// locate_zeta): for every leaf element and every face, walk the face's fine lattice (step
+		// h=0.5/(nnode_1d-1)), map each point to physical x via interpolated_x, look the node up by position,
+		// and hang it on THIS (coarse) element's interpolating_basis via mixed_hang_node_at. Shape-agnostic on
+		// the finer side (it only needs the node's position); the coarse side may be a pyramid (4 tri + 1 quad
+		// face) or a tet (4 tri faces). The pyramid's triangular faces meet at the apex (s2=1) where the
+		// 1/(1-s2) shape is singular, so lattice points with a non-finite image are skipped (only the apex
+		// VERTEX is affected, never a hang node, which sits at s2<=0.5).
+		{
+			bool has_pyr = false, all_pyr_or_tet = true;
+			for (unsigned int ie = 0; ie < this->nelement(); ie++)
+			{
+				const bool isp = (dynamic_cast<oomph::RefineablePyramidElement *>(this->element_pt(ie)) != nullptr);
+				const bool ist = (dynamic_cast<oomph::TElementBase *>(this->element_pt(ie)) != nullptr);
+				has_pyr = has_pyr || isp;
+				all_pyr_or_tet = all_pyr_or_tet && (isp || ist);
+			}
+			if (has_pyr && all_pyr_or_tet)
+			{
+				// Face tables (corner local coords). Pyramid vertices 0(0,0,0)1(1,0,0)2(1,1,0)3(0,1,0)4(0,0,1)
+				// apex; tet vertices 0(0,0,0)1(1,0,0)2(0,1,0)3(0,0,1). Matching get_vertex_nodes_of_face.
+				struct PFace { bool quad; int nc; double c[4][3]; };
+				static const PFace PYR_FACES[5] = {
+					{false, 3, {{0, 0, 0}, {1, 0, 0}, {0, 0, 1}, {0, 0, 0}}}, // 0 tri s1=0
+					{false, 3, {{1, 0, 0}, {1, 1, 0}, {0, 0, 1}, {0, 0, 0}}}, // 1 tri s0=1-s2
+					{false, 3, {{1, 1, 0}, {0, 1, 0}, {0, 0, 1}, {0, 0, 0}}}, // 2 tri s1=1-s2
+					{false, 3, {{0, 0, 0}, {0, 1, 0}, {0, 0, 1}, {0, 0, 0}}}, // 3 tri s0=0
+					{true,  4, {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}}}};// 4 quad base s2=0
+				static const PFace TET_FACES[4] = {
+					{false, 3, {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {0, 0, 0}}}, // 0
+					{false, 3, {{0, 0, 0}, {0, 1, 0}, {0, 0, 1}, {0, 0, 0}}}, // 1
+					{false, 3, {{0, 0, 0}, {1, 0, 0}, {0, 0, 1}, {0, 0, 0}}}, // 2
+					{false, 3, {{1, 0, 0}, {0, 1, 0}, {0, 0, 0}, {0, 0, 0}}}};// 3
+
+				for (unsigned int in = 0; in < this->nnode(); in++) this->node_pt(in)->set_nonhanging();
+				const double scale = 1e8;
+				std::map<std::array<long long, 3>, oomph::Node *> node_at;
+				for (unsigned int in = 0; in < this->nnode(); in++)
+				{
+					oomph::Node *n = this->node_pt(in);
+					node_at[{(long long)std::llround(n->x(0) * scale), (long long)std::llround(n->x(1) * scale), (long long)std::llround(n->x(2) * scale)}] = n;
+				}
+
+				const int ncont = this->nelement() ? (int)dynamic_cast<oomph::RefineableElement *>(this->element_pt(0))->ncont_interpolated_values() : 0;
+				for (unsigned int ie = 0; ie < this->nelement(); ie++)
+				{
+					BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+					oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(this->element_pt(ie));
+					oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(this->element_pt(ie));
+					if (!be || !re || !fe || !re->tree_pt() || !re->tree_pt()->is_leaf()) continue;
+					const bool is_pyr = (dynamic_cast<oomph::RefineablePyramidElement *>(this->element_pt(ie)) != nullptr);
+					const PFace *FACES = is_pyr ? PYR_FACES : TET_FACES;
+					const int nfaces = is_pyr ? 5 : 4;
+					const unsigned n1d = fe->nnode_1d();
+					const int steps = 2 * ((int)n1d - 1);
+					if (steps < 1) continue;
+					const double h = 1.0 / steps;
+					for (int f = 0; f < nfaces; f++)
+					{
+						const PFace &F = FACES[f];
+						for (int iu = 0; iu <= steps; iu++)
+							for (int iv = 0; iv <= steps; iv++)
+							{
+								const double u = iu * h, v = iv * h;
+								if (!F.quad && u + v > 1.0 + 1e-12) continue; // tri face: barycentric u+v<=1
+								oomph::Vector<double> s(3), x(3);
+								for (int d = 0; d < 3; d++)
+								{
+									if (F.quad)
+										s[d] = (1 - u) * (1 - v) * F.c[0][d] + u * (1 - v) * F.c[1][d] + u * v * F.c[2][d] + (1 - u) * v * F.c[3][d];
+									else
+										s[d] = F.c[0][d] + u * (F.c[1][d] - F.c[0][d]) + v * (F.c[2][d] - F.c[0][d]);
+								}
+								be->interpolated_x(s, x);
+								if (!std::isfinite(x[0]) || !std::isfinite(x[1]) || !std::isfinite(x[2])) continue; // apex (s2=1)
+								std::array<long long, 3> key = {(long long)std::llround(x[0] * scale), (long long)std::llround(x[1] * scale), (long long)std::llround(x[2] * scale)};
+								auto it = node_at.find(key);
+								if (it == node_at.end()) continue;
+								oomph::Node *H = it->second;
+								be->mixed_hang_node_at(H, re, s, -1);
+								for (int val = 0; val < ncont; val++) be->mixed_hang_node_at(H, re, s, val);
+							}
+					}
+				}
+				return;
+			}
+		}
+
 		// --- Wedge (triangular-prism) 2:1 hanging (M2). ---------------------------------------------------
 		// Wedges do not (yet) have a topological OcTree neighbour finder, so -- like the tet route did before
 		// its per-element migration -- non-uniform (2:1) wedge hanging is installed by this mesh-level pass.
@@ -179,7 +269,8 @@ namespace pyoomph
 	{
 		bool has_simplexlike = false;
 		for (unsigned int ie = 0; ie < this->nelement() && !has_simplexlike; ie++)
-			if (dynamic_cast<oomph::TElementBase *>(this->element_pt(ie)) || dynamic_cast<oomph::RefineableWedgeElement *>(this->element_pt(ie)))
+			if (dynamic_cast<oomph::TElementBase *>(this->element_pt(ie)) || dynamic_cast<oomph::RefineableWedgeElement *>(this->element_pt(ie)) ||
+				dynamic_cast<oomph::RefineablePyramidElement *>(this->element_pt(ie)))
 				has_simplexlike = true;
 		if (!has_simplexlike) return; // brick/hex meshes: oomph-lib's tree bounds the level difference itself
 
@@ -200,17 +291,20 @@ namespace pyoomph
 			{
 				oomph::TElementBase *tet = dynamic_cast<oomph::TElementBase *>(this->element_pt(ie));
 				oomph::RefineableWedgeElement *wedge = dynamic_cast<oomph::RefineableWedgeElement *>(this->element_pt(ie));
+				oomph::RefineablePyramidElement *pyr = dynamic_cast<oomph::RefineablePyramidElement *>(this->element_pt(ie));
 				oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(this->element_pt(ie));
-				if ((!tet && !wedge) || !fe) continue;
+				if ((!tet && !wedge && !pyr) || !fe) continue;
 				oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(this->element_pt(ie));
 				if (re && re->refinement_level() >= this->max_refinement_level()) continue; // cannot refine further
-				// This element's edges as vertex-index pairs: a tet's 6, or a wedge's 9 (2 tri caps + 3
-				// verticals). Only genuine edges (not face diagonals), so a node at their 1/2^nnode_1d
-				// quarter-point signals a neighbour >=2 levels finer (see the C1:1/4, C2:1/8 note below).
+				// This element's edges as vertex-index pairs: a tet's 6, a wedge's 9 (2 tri caps + 3
+				// verticals), or a pyramid's 8 (4 base + 4 lateral to the apex). Only genuine edges (not face
+				// diagonals), so a node at their 1/2^nnode_1d quarter-point signals a neighbour >=2 levels
+				// finer (see the C1:1/4, C2:1/8 note below).
 				static const int TET_E[6][2] = {{0, 1}, {0, 2}, {0, 3}, {1, 2}, {1, 3}, {2, 3}};
 				static const int WEDGE_E[9][2] = {{0, 1}, {1, 2}, {2, 0}, {3, 4}, {4, 5}, {5, 3}, {0, 3}, {1, 4}, {2, 5}};
-				const int(*E)[2] = tet ? TET_E : WEDGE_E;
-				const int nE = tet ? 6 : 9;
+				static const int PYR_E[8][2] = {{0, 1}, {1, 2}, {2, 3}, {3, 0}, {0, 4}, {1, 4}, {2, 4}, {3, 4}};
+				const int(*E)[2] = tet ? TET_E : (wedge ? WEDGE_E : PYR_E);
+				const int nE = tet ? 6 : (wedge ? 9 : 8);
 				// The edge-fraction whose presence signals a neighbour >=2 levels finer. A 1-level
 				// neighbour subdivides the edge at its midpoint (t=1/2) and, for order p>=2 (e.g. C2),
 				// additionally places the sub-edges' own mid-nodes at t=1/4, 3/4 -- so the finest node a

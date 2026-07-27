@@ -183,3 +183,41 @@ def test_pyramid_dirichlet_manufactured_linear(level):
         for n in m.nodes():
             err = max(err, abs(n.value(0) - (n.x(0) + 2 * n.x(1) + 3 * n.x(2))))
         assert err < 1e-10, f"pyramid mesh does not reproduce the linear field at level {level} (max err {err:.2e})"
+
+
+def test_pyramid_nonuniform_2to1_hanging():
+    # Non-uniform (2:1) pyramid refinement with CROSS-SHAPE hanging. Refine only the interior pyramids near
+    # the cube centre (an interior region, so the DirichletBC interfacial-error spreading does not force
+    # uniform refinement) -> a 2:1 interface whose finer side is a mix of sub-pyramids and tets. The exact
+    # solution of -laplace(u)=0 with Dirichlet u=x+2y+3z is that linear field, reproduced to machine precision
+    # at every node IFF the hanging nodes on the 2:1 interface are correctly constrained on the coarse
+    # elements' interpolation (post_adapt_setup_hanging_nodes pyramid-forest branch). A free/mis-constrained
+    # hanging node would deviate -- a strict oracle (unlike a bare linear-residual check, which is auto-zero).
+    x, y, z = var("coordinate")[0], var("coordinate")[1], var("coordinate")[2]
+    uex = x + 2 * y + 3 * z
+
+    def _central(e):
+        mx = e.get_Eulerian_midpoint()
+        d = ((mx[0] - 0.5) ** 2 + (mx[1] - 0.5) ** 2 + (mx[2] - 0.5) ** 2) ** 0.5
+        return 1 if d < 0.22 else 0
+
+    class _P(Problem):
+        def define_problem(self):
+            self += PyramidCubeMesh(N=3)
+            eqs = PoissonEquation(source=0, space="C1")
+            eqs += DirichletBC(u=uex) @ ["left", "right", "front", "back", "bottom", "top"]
+            eqs += RefineAccordingToElement(level_func=_central)
+            self += eqs @ "domain"
+
+    with _P() as p:
+        p.max_refinement_level = 1
+        p.solve()
+        m = p.get_mesh("domain")
+        nhang = sum(1 for n in m.nodes() if n.is_hanging())
+        assert m.nelement() > 162, "central refinement did not happen"
+        assert nhang > 0, "no hanging nodes -> the 2:1 interface was not created (or over-refined to uniform)"
+        assert _count_coincident_nodes(m) == 0, "duplicate (torn) nodes at the 2:1 pyramid interface"
+        err = 0.0
+        for n in m.nodes():
+            err = max(err, abs(n.value(0) - (n.x(0) + 2 * n.x(1) + 3 * n.x(2))))
+        assert err < 1e-10, f"linear field not reproduced across the 2:1 pyramid interface (max err {err:.2e})"
