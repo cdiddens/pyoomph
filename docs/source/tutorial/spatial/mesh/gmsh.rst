@@ -52,10 +52,5 @@ The differences are that we do not allow for spatial adaptivity and introduce ne
 		    
 
 .. warning::
-
-   At the moment, spatial adaptivity does not work for triangular elements. The moment one triangular element is present in the mesh, spatial adaptivity is entirely deactivated. This will change in future to also allow for adaptivity of triangular and mixed meshes. As a workaround, you can set the :py:attr:`~pyoomph.meshes.gmsh.GmshTemplate.mesh_mode` to ``"only_quads"``. It will force gmsh to create only quadrilateral elements, but it will also lead to a less optimal mesh.
-   
-   
-.. warning::
 	Again, the orientation of the elements can matter, in particular for refineable meshes. *Gmsh* will select the element facing based on the order of the boundaries passed to :py:meth:`~pyoomph.meshes.gmsh.GmshTemplate.plane_surface`. When using refineable meshes, make sure that all elements in a mesh are oriented in the same direction by adjusting the order of the boundaries passed here. If it is wrong, pyoomph will raise an error, unless you set :py:attr:`~pyoomph.generic.problem.Problem.check_mesh_integrity` of the :py:class:`~pyoomph.generic.problem.Problem` class to ``False``. After doing so, you can easily check the mesh by *Paraview*. After outputting the mesh with :py:class:`~pyoomph.output.meshio.MeshFileOutput`, you can open it with Paraview and search for *Backface Representation* in the search box of the *Properties* box (hidden by default). Then, select *Cull Frontface* or *Cull Backface*. The entire mesh should be visible in one of these settings and entirely invisible in the other setting. If not, permute the order of the boundaries passed.
 
