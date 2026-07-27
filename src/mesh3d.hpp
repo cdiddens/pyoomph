@@ -90,7 +90,11 @@ namespace pyoomph
 
     void check_all_neighbours(oomph::DocInfo &doc_info) override
     {
+      // Tets and wedges bypass oomph's brick (hex) compass neighbour self-test: they do not use the OcTree's
+      // compass neighbour structure (tets have their own topological finder; wedges skip it for now), and the
+      // brick test would misread their 4/6-node elements as an 8-node hex.
       if (ntree() > 0 && dynamic_cast<oomph::TElementBase *>(Trees_pt[0]->object_pt())) return;
+      if (ntree() > 0 && dynamic_cast<oomph::RefineableWedgeElement *>(Trees_pt[0]->object_pt())) return;
       oomph::OcTreeForest::check_all_neighbours(doc_info);
     }
 
@@ -138,6 +142,15 @@ namespace pyoomph
             }
           }
         }
+        return;
+      }
+      // Wedge forests: skip neighbour finding for now. Uniform (1->8) wedge refinement stays conforming and
+      // shares new father-boundary nodes via the father-node-keyed registry (RefineableWedgeElement::build),
+      // so no inter-tree neighbour pointers are needed. (Non-uniform 2:1 wedge hanging -- a later milestone --
+      // will need a topological wedge face/edge neighbour finder, as tets have above. oomph's brick compass
+      // find_neighbours below must NOT run on wedges: it would misread the 6-node wedge as an 8-node hex.)
+      if (ntree() > 0 && dynamic_cast<oomph::RefineableWedgeElement *>(Trees_pt[0]->object_pt()))
+      {
         return;
       }
       oomph::OcTreeForest::find_neighbours(); // brick forests keep oomph's compass neighbouring

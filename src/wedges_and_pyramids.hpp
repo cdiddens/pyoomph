@@ -806,12 +806,21 @@ class RefineableWedgeElement : public virtual RefineableElement, public virtual 
     {
     }
 
-    // Number of sons created upon refinement -- not yet implemented (wedge refinement is TODO)
-    unsigned required_nsons() const override
-    {
-      throw_runtime_error("TODO"); // Here, nothing is do be done for now
-      return 4;
-    }
+    // A wedge (triangular prism) refines 1->8: the triangular cross-section splits 1->4 (three corner
+    // sub-triangles + the inverted middle one, as for a 2d triangle) and the extrusion direction splits 1->2.
+    // All eight offspring are wedges, so wedge refinement is shape-closed.
+    unsigned required_nsons() const override { return 8; }
+
+    // The 6 vertices (in the FATHER's local coordinates) of son `son_type` (0..7): son_type % 4 selects the
+    // cross-section sub-triangle (0=corner v0, 1=corner v1, 2=corner v2, 3=middle), son_type / 4 the extrusion
+    // half (0=lower s2 in [0,0.5], 1=upper [0.5,1]). Used by build() (son->father affine map).
+    static void son_vertices_in_father(int son_type, Vector<Vector<double>> &verts);
+
+    // Per-refinement-round registry of nodes created on a father edge/face, keyed by the set of father nodes
+    // they are the average of (identical from every element that creates the same node -> shared, not
+    // duplicated). Cleared each round (mesh.hpp). The 3d wedge analogue of RefineableTElement<3>'s registry.
+    static std::map<std::set<Node *>, Node *> Shared_node_registry;
+    static void clear_shared_node_registry() { Shared_node_registry.clear(); }
 
     // Not yet implemented: see RefineableElement interface for semantics
     virtual Node *node_created_by_neighbour(const Vector<double> &s_fraction, bool &is_periodic);
@@ -1062,6 +1071,7 @@ class WedgeElementC1 :  public virtual RefineableWedgeElement
 
     inline void local_coordinate_of_node(const unsigned& j,Vector<double>& s) const override
     {
+      s.resize(3); // oomph's get_node_at_local_coordinate passes an empty Vector to be sized here
       if (j==0) { s[0] = 0.0; s[1] = 0.0; s[2] = 0.0;}
       else if (j==1) { s[0] = 1.0; s[1] = 0.0; s[2] = 0.0;}
       else if (j==2) { s[0] = 0.0; s[1] = 1.0; s[2] = 0.0;}
@@ -1144,6 +1154,7 @@ Index : Local coordinates (s0,s1,s2)
 
     inline void local_coordinate_of_node(const unsigned& j,Vector<double>& s) const override
     {
+      s.resize(3); // oomph's get_node_at_local_coordinate passes an empty Vector to be sized here
       if (j==0) { s[0] = 0.0; s[1] = 0.0; s[2] = 0.0;}
       else if (j==1) { s[0] = 1.0; s[1] = 0.0; s[2] = 0.0;}
       else if (j==2) { s[0] = 1.0; s[1] = 1.0; s[2] = 0.0;}
@@ -1360,6 +1371,7 @@ class WedgeElementC2 : public virtual RefineableWedgeElement
     inline void local_coordinate_of_node(const unsigned& j,
                                           Vector<double>& s) const override
     {
+        s.resize(3); // oomph's get_node_at_local_coordinate passes an empty Vector to be sized here
         if (j >= 18)
         {
             std::ostringstream error_message;
@@ -1540,6 +1552,7 @@ class PyramidElementC2 : public virtual RefineablePyramidElement
     inline void local_coordinate_of_node(const unsigned& j,
                                           Vector<double>& s) const override
     {
+        s.resize(3); // oomph's get_node_at_local_coordinate passes an empty Vector to be sized here
         if (j >= 14)
         {
             std::ostringstream error_message;

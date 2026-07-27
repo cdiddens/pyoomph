@@ -28,6 +28,7 @@ The main author may be contacted at c.diddens@utwente.nl
 #include "lagr_error_estimator.hpp"
 #include "kdtree.hpp"
 #include "refineable_telements.hpp" // for RefineableTElement<2>::clear_shared_edge_node_registry()
+#include "wedges_and_pyramids.hpp"  // for RefineableWedgeElement::clear_shared_node_registry()
 
 namespace pyoomph
 {
@@ -364,6 +365,7 @@ namespace pyoomph
 			// RefineableTElement<2>/<3>'s Shared_edge_node_registry.
 			oomph::RefineableTElement<2>::clear_shared_edge_node_registry();
 			oomph::RefineableTElement<3>::clear_shared_edge_node_registry();
+			oomph::RefineableWedgeElement::clear_shared_node_registry();
 			// Snapshot existing node positions so build() can reuse a coincident node created in an
 			// EARLIER round (e.g. by a finer neighbour) instead of duplicating it -- which would tear a
 			// moving mesh apart at a refine/coarsen interface. See RefineableTElement<2>::build.

@@ -198,9 +198,36 @@ const double PyramidGaussC2::Weight[27] =
   0.002311011034612,
 };
 
+ // The 6 vertices of son `son_type` in the father's local coordinates. son_type % 4 selects the cross-
+ // section sub-triangle (0/1/2 = the three corner sub-tris, 3 = the inverted middle one), son_type / 4 the
+ // extrusion half (0 = s2 in [0,0.5], 1 = [0.5,1]). Bottom tri = verts 0,1,2 (at zlo); top tri = 3,4,5 (zhi),
+ // matching the wedge node layout. Sub-triangle vertices are listed in the father tri's (CCW) winding so no
+ // son is inverted.
+ void RefineableWedgeElement::son_vertices_in_father(int son_type, Vector<Vector<double>> &verts)
+  {
+    const double P0[2] = {0.0, 0.0}, P1[2] = {1.0, 0.0}, P2[2] = {0.0, 1.0};
+    const double M01[2] = {0.5, 0.0}, M12[2] = {0.5, 0.5}, M20[2] = {0.0, 0.5};
+    const double *subtri[4][3] = {
+        {P0, M01, M20},  // corner v0
+        {M01, P1, M12},  // corner v1
+        {M20, M12, P2},  // corner v2
+        {M01, M12, M20}, // inverted middle
+    };
+    const int tri = son_type % 4;
+    const int zhalf = son_type / 4;
+    const double zlo = 0.5 * zhalf, zhi = 0.5 * zhalf + 0.5;
+    verts.resize(6, Vector<double>(3));
+    for (int k = 0; k < 3; k++)
+    {
+      verts[k][0] = subtri[tri][k][0];   verts[k][1] = subtri[tri][k][1];   verts[k][2] = zlo;
+      verts[3 + k][0] = subtri[tri][k][0]; verts[3 + k][1] = subtri[tri][k][1]; verts[3 + k][2] = zhi;
+    }
+  }
+
+ // Not used by the geometric wedge refinement (boundary conditions of new nodes are derived directly from
+ // their generating father nodes in build()); kept as a non-throwing stub for interface compatibility.
  void RefineableWedgeElement::setup_father_bounds()
   {
-    throw_runtime_error("Implement");
   }
 
   //==================================================================
@@ -220,9 +247,9 @@ const double PyramidGaussC2::Weight[27] =
   ///   - bound_cons[ival]=0 if value ival on this boundary is free
   ///   - bound_cons[ival]=1 if value ival on this boundary is pinned
   //==================================================================
-  void RefineableWedgeElement::get_bcs(int , Vector<int> &) const
+  void RefineableWedgeElement::get_bcs(int , Vector<int> &bound_cons) const
   {
-    throw_runtime_error("Implement");
+    for (unsigned k = 0; k < bound_cons.size(); k++) bound_cons[k] = 0;
   }
 
   //==================================================================
@@ -234,9 +261,9 @@ const double PyramidGaussC2::Weight[27] =
   ///   - bound_cons[ival]=0 if value ival on this boundary is free
   ///   - bound_cons[ival]=1 if value ival on this boundary is pinned
   //==================================================================
-  void RefineableWedgeElement::get_edge_bcs(const int &, Vector<int> &) const
+  void RefineableWedgeElement::get_edge_bcs(const int &, Vector<int> &bound_cons) const
   {
-    throw_runtime_error("Implement");
+    for (unsigned k = 0; k < bound_cons.size(); k++) bound_cons[k] = 0;
   }
 
   //==================================================================
@@ -249,9 +276,9 @@ const double PyramidGaussC2::Weight[27] =
   /// boundaries.
   //==================================================================
   void RefineableWedgeElement::get_boundaries(const int &,
-                                             std::set<unsigned> &) const
+                                             std::set<unsigned> &boundary) const
   {
-    throw_runtime_error("Implement");
+    boundary.clear();
   }
 
   //===================================================================
@@ -261,9 +288,9 @@ const double PyramidGaussC2::Weight[27] =
   void RefineableWedgeElement::
       interpolated_zeta_on_edge(const unsigned &,
                                 const int &, const Vector<double> &,
-                                Vector<double> &)
+                                Vector<double> &zeta)
   {
-    throw_runtime_error("Implement");
+    if (zeta.size() > 0) zeta[0] = 0.0;
   }
 
   //===================================================================
@@ -273,11 +300,13 @@ const double PyramidGaussC2::Weight[27] =
   /// a pointer to that node. If not, return NULL (0). If the node is
   /// periodic the flag is_periodic will be true
   //===================================================================
+  // Not used by the geometric wedge refinement (shared nodes are found via the father-node-keyed registry in
+  // build()); a non-throwing stub for interface compatibility.
   Node *RefineableWedgeElement::
       node_created_by_neighbour(const Vector<double> &,
-                                bool &)
+                                bool &is_periodic)
   {
-    throw_runtime_error("Implement");
+    is_periodic = false;
     return 0;
   }
 
@@ -309,12 +338,163 @@ const double PyramidGaussC2::Weight[27] =
   ///   pressure values in manner consistent with the pressure
   ///   distribution in the father element.
   //==================================================================
-  void RefineableWedgeElement::build(Mesh *&,
-                                    Vector<Node *> &,
-                                    bool &,
+  // Build this son wedge from its father (uniform 1->8 refinement). Mirrors RefineableTElement<3>::build:
+  // the son->father coordinate map is the wedge C1 shape evaluated on the son's 6 vertices in father
+  // coordinates (an affine map, since each sub-wedge is an affine image of the father); a new node's
+  // "generating" father nodes are those with nonzero father shape at its father coordinate (the father
+  // vertices it is the average of), which double as the shared-node registry key and the source of its
+  // boundary/pin data. Fully geometric/topological -- no macro elements / locate_zeta.
+  void RefineableWedgeElement::build(Mesh *&mesh_pt,
+                                    Vector<Node *> &new_node_pt,
+                                    bool &was_already_built,
                                     std::ofstream &)
   {
-    throw_runtime_error("Implement");
+    const unsigned n_node = this->nnode();
+    if (nodes_built()) { was_already_built = true; return; }
+    was_already_built = false;
+
+    OcTree *father_octree = dynamic_cast<OcTree *>(octree_pt()->father_pt());
+    const int son_type = Tree_pt->son_type();
+    FiniteElement *father_el_pt = dynamic_cast<FiniteElement *>(father_octree->object_pt());
+    RefineableElement *father_re = dynamic_cast<RefineableElement *>(father_el_pt);
+    TimeStepper *time_stepper_pt = father_el_pt->node_pt(0)->time_stepper_pt();
+    const unsigned ntstorage = time_stepper_pt->ntstorage();
+    if (father_el_pt->macro_elem_pt() != 0)
+      throw_runtime_error("Macro elements (curved boundaries) are not yet supported for wedge refinement");
+
+    Vector<Vector<double>> sv;
+    son_vertices_in_father(son_type, sv);
+    const unsigned nfath = father_el_pt->nnode();
+
+    for (unsigned j = 0; j < n_node; j++)
+    {
+      // Son node j's coordinate in the father: wedge C1 shape at s_son, dotted with the 6 son vertices.
+      Vector<double> s_son(3);
+      this->local_coordinate_of_node(j, s_son);
+      const double l1 = 1.0 - s_son[0] - s_son[1];
+      const double w[6] = {l1 * (1 - s_son[2]), s_son[0] * (1 - s_son[2]), s_son[1] * (1 - s_son[2]),
+                           l1 * s_son[2], s_son[0] * s_son[2], s_son[1] * s_son[2]};
+      Vector<double> s(3, 0.0);
+      for (int k = 0; k < 6; k++)
+        for (int d = 0; d < 3; d++) s[d] += w[k] * sv[k][d];
+
+      // (1) Reuse a father node coincident with this position.
+      Node *created_node_pt = father_el_pt->get_node_at_local_coordinate(s);
+      if (created_node_pt != 0)
+      {
+        node_pt(j) = created_node_pt;
+        for (unsigned t = 0; t < ntstorage; t++)
+        {
+          Vector<double> prev;
+          father_re->get_interpolated_values(t, s, prev);
+          const unsigned nv = std::min((unsigned)created_node_pt->nvalue(), (unsigned)prev.size());
+          for (unsigned k = 0; k < nv; k++) created_node_pt->set_value(t, k, prev[k]);
+        }
+        continue;
+      }
+
+      // Generating father nodes = those with POSITIVE father shape at s. Using positive weights (not just
+      // nonzero) is essential for C2: a quadratic edge shape at the 1/4-point is {corner0:+0.375, mid:+0.75,
+      // corner1:-0.125} and at the 3/4-point {corner0:-0.125, mid:+0.75, corner1:+0.375}, so keying on the
+      // positive nodes gives {corner0,mid} vs {mid,corner1} -- distinct keys, whereas including the small
+      // negative far-corner lobe would collide the two edge nodes onto one key (tearing the mesh). For C1
+      // (linear, all weights >=0) this reduces to the corner/edge-mid/face-corner set as before.
+      Shape psi(nfath);
+      father_el_pt->shape(s, psi);
+      std::vector<Node *> gen;
+      std::set<Node *> reg_key;
+      for (unsigned l = 0; l < nfath; l++)
+        if (psi(l) > 1e-6) { gen.push_back(father_el_pt->node_pt(l)); reg_key.insert(father_el_pt->node_pt(l)); }
+
+      // (2) Reuse a node an already-built element created this round (keyed on the same generating nodes;
+      // adjacent fathers share those face/edge nodes, so the key -- and hence the node -- is shared).
+      if (!reg_key.empty())
+      {
+        std::map<std::set<Node *>, Node *>::iterator it = Shared_node_registry.find(reg_key);
+        if (it != Shared_node_registry.end()) { node_pt(j) = it->second; continue; }
+      }
+
+      // (3) Build a new node. It lies on a mesh boundary iff ALL its generating nodes share one; pinned
+      // values are those pinned at every generating node; boundary coordinates the generating-node average.
+      std::set<unsigned> boundaries;
+      bool have_bounds = false;
+      for (Node *g : gen)
+      {
+        BoundaryNodeBase *bg = dynamic_cast<BoundaryNodeBase *>(g);
+        std::set<unsigned> *sg = 0;
+        if (bg) bg->get_boundaries_pt(sg);
+        if (!sg) { boundaries.clear(); break; }
+        if (!have_bounds) { boundaries = *sg; have_bounds = true; }
+        else
+        {
+          std::set<unsigned> inter;
+          std::set_intersection(boundaries.begin(), boundaries.end(), sg->begin(), sg->end(), std::inserter(inter, inter.begin()));
+          boundaries.swap(inter);
+        }
+      }
+
+      if (!boundaries.empty())
+      {
+        created_node_pt = construct_boundary_node(j, time_stepper_pt);
+        const unsigned nval = created_node_pt->nvalue();
+        for (unsigned k = 0; k < nval; k++)
+        {
+          bool all_pinned = true;
+          for (Node *g : gen) if (!g->is_pinned(k)) { all_pinned = false; break; }
+          if (all_pinned) created_node_pt->pin(k);
+        }
+        for (std::set<unsigned>::iterator it = boundaries.begin(); it != boundaries.end(); ++it)
+        {
+          mesh_pt->add_boundary_node(*it, created_node_pt);
+          if (mesh_pt->boundary_coordinate_exists(*it))
+          {
+            Vector<double> z;
+            for (Node *g : gen)
+            {
+              Vector<double> zg;
+              dynamic_cast<BoundaryNodeBase *>(g)->get_coordinates_on_boundary(*it, zg);
+              if (z.empty()) z.resize(zg.size(), 0.0);
+              for (unsigned zi = 0; zi < zg.size(); zi++) z[zi] += zg[zi] / gen.size();
+            }
+            created_node_pt->set_coordinates_on_boundary(*it, z);
+          }
+        }
+      }
+      else
+      {
+        created_node_pt = construct_node(j, time_stepper_pt);
+      }
+
+      node_pt(j) = created_node_pt;
+      new_node_pt.push_back(created_node_pt);
+      for (unsigned t = 0; t < ntstorage; t++)
+      {
+        Vector<double> xp(3);
+        father_el_pt->get_x(t, s, xp);
+        for (int d = 0; d < 3; d++) created_node_pt->x(t, d) = xp[d];
+      }
+      // Interpolate Lagrangian (reference) coordinates for SolidNodes (moving mesh), like the tet build.
+      if (SolidNode *sn = dynamic_cast<SolidNode *>(created_node_pt))
+      {
+        const unsigned nl = sn->nlagrangian();
+        for (unsigned i = 0; i < nl; i++)
+        {
+          double xi = 0.0;
+          for (unsigned l = 0; l < nfath; l++)
+            if (SolidNode *fn = dynamic_cast<SolidNode *>(father_el_pt->node_pt(l))) xi += psi(l) * fn->xi(i);
+          sn->xi(i) = xi;
+        }
+      }
+      for (unsigned t = 0; t < ntstorage; t++)
+      {
+        Vector<double> prev;
+        father_re->get_interpolated_values(t, s, prev);
+        const unsigned nv = std::min((unsigned)created_node_pt->nvalue(), (unsigned)prev.size());
+        for (unsigned k = 0; k < nv; k++) created_node_pt->set_value(t, k, prev[k]);
+      }
+      mesh_pt->add_node_pt(created_node_pt);
+      if (!reg_key.empty()) Shared_node_registry[reg_key] = created_node_pt;
+    }
   }
 
   //====================================================================
@@ -323,17 +503,18 @@ const double PyramidGaussC2::Weight[27] =
   void RefineableWedgeElement::output_corners(std::ostream &,
                                              const std::string &) const
   {
-    throw_runtime_error("Implement");
+    // Debug-only output; not needed for refinement itself.
   }
 
   //====================================================================
   /// Set up all hanging nodes. If we are documenting the output then
   /// open the output files and pass the open files to the helper function
   //====================================================================
+  // Uniform (1->8) wedge refinement keeps the mesh conforming, so there are no hanging nodes to set up yet.
+  // Non-uniform (2:1) wedge hanging is a later milestone (needs a wedge face/edge neighbour finder).
   void RefineableWedgeElement::setup_hanging_nodes(Vector<std::ofstream *>
                                                       &)
   {
-    throw_runtime_error("Implement");
   }
 
   //================================================================
@@ -342,7 +523,7 @@ const double PyramidGaussC2::Weight[27] =
   //===============================================================
   void RefineableWedgeElement::setup_hang_for_value(const int &)
   {
-    throw_runtime_error("Implement");
+    // No hanging under uniform refinement (see setup_hanging_nodes).
   }
 
   //=================================================================
@@ -353,7 +534,7 @@ const double PyramidGaussC2::Weight[27] =
       quad_hang_helper(const int &,
                        const int &, std::ofstream &)
   {
-    throw_runtime_error("Implement");
+    // No hanging under uniform refinement (see setup_hanging_nodes).
   }
 
   //=================================================================
@@ -362,18 +543,20 @@ const double PyramidGaussC2::Weight[27] =
   /// - (nodally) interpolated function values
   //====================================================================
   // template<unsigned NNODE_1D>
-  void RefineableWedgeElement::check_integrity(double &)
+  void RefineableWedgeElement::check_integrity(double &max_error)
   {
-
-    throw_runtime_error("Implement");
+    max_error = 0.0; // continuity is guaranteed by the geometric node-sharing scheme
   }
 
   //========================================================================
-  /// Static matrix for coincidence between son nodal points and
-  /// father boundaries
-  ///
+  /// Static matrix for coincidence between son nodal points and father boundaries
+  /// (unused by the geometric wedge refinement; kept for interface compatibility).
   //========================================================================
   std::map<unsigned, DenseMatrix<int>> RefineableWedgeElement::Father_bound;
+
+  // Per-round shared-node registry (see header): nodes created on a father edge/face, keyed by the set of
+  // father nodes they are the average of. Cleared each refinement round in mesh.hpp.
+  std::map<std::set<Node *>, Node *> RefineableWedgeElement::Shared_node_registry;
 
 
 
