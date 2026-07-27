@@ -488,6 +488,9 @@ namespace oomph
     // the oomph interpolating_basis for weights (so C1/C2/C2TB enriched traces are all handled by the
     // element's own facilities, never hand-written formulas). A finer neighbour hangs from its own side.
     void tet_hang_face(const int &value_id, int my_face);
+    // True iff this tet's forest root is a pyramid (i.e. this is a tet son of the pyramid red split); the
+    // tet-in-tet neighbour/hanging tree-walk does not apply then. See the .cpp.
+    bool in_pyramid_forest() const;
     // Hang this element's interpolating nodes for `value_id` strictly inside a coarser tet EDGE. The coarse
     // edge {P,Q} (+ mid M for a quadratic space) and this node's parameter along it come from the OcTree
     // ascent + affine map (exact); a coarser leaf actually sharing {P,Q} is confirmed via tet_edge_neighbour.

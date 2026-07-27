@@ -552,6 +552,10 @@ namespace pyoomph
     virtual std::vector<double> get_macro_element_coordinate_at_s(oomph::Vector<double> s);
     DynamicBulkElementInstance *get_code_instance() { return codeinst; }
     const DynamicBulkElementInstance *get_code_instance() const { return codeinst; }
+    // Bind this element to a physics (codeinst). Needed when a factory creates a son of a DIFFERENT element
+    // type than the parent (e.g. a pyramid's tet son), where the parent cannot touch the son's protected
+    // codeinst directly. Same-type factories set codeinst inline.
+    void set_code_instance(DynamicBulkElementInstance *c) { codeinst = c; }
 
     // Global "current code instance" used to pass the DynamicBulkElementInstance through
     // oomph-lib's mesh/element construction machinery (e.g. Mesh::build, refinement son-element
@@ -865,6 +869,15 @@ namespace pyoomph
     // configurable) to support anisotropic / heterogeneous splits; see
     // dev_docs/mixed_adaptive_meshes.md.
     virtual const RefinementPattern *refinement_pattern() const;
+
+    // Fill this element as a C1 son of a PYRAMID father (mixed 6-pyramid + 4-tet red split). Works whether
+    // `this` is a sub-pyramid or a tet: for a C1 son each node IS a vertex, so its father-local coordinate is
+    // oomph::RefineablePyramidElement::son_vertices_in_father[son_type][j] -- no son-shape evaluation (which
+    // would hit the pyramid's 1/(1-s2) apex singularity). Reuses coincident father nodes and shares new
+    // edge/face nodes across all 10 sons (and adjacent fathers) via the pyramid registry. Called from
+    // RefineablePyramidElement::build() and, when a tet's father is a pyramid, from RefineableTElement<3>::
+    // build(). Lives here (not on the pyramid) so it can call the son's protected construct_node().
+    void build_as_pyramid_son(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt);
 
     // Geometric (non-solid) Jacobian determinant of the mapping from local to given global
     // coordinates x, used by oomph-lib's locate_zeta / point-location machinery.
@@ -2123,6 +2136,11 @@ namespace pyoomph
           BulkElementBase::__CurrentCodeInstance = NULL;
           return res;
       }
+      // Factory for a TETRAHEDRAL son of the same physics (same codeinst) -- used by
+      // PyramidMixedRefinementPattern for the 4 tet children of the 6-pyramid+4-tet red split.
+      BulkElementBase *create_tet_son_instance() const;
+      // Mixed (pyramid -> 6 pyramids + 4 tets) split scheme; see PyramidMixedRefinementPattern.
+      const RefinementPattern *refinement_pattern() const override;
       void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 5, order)); }
       oomph::Vector<double> get_midpoint_s() override { oomph::Vector<double> res(this->dim(), 0.375); res[2]=0.25; return res; }
   };

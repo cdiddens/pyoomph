@@ -46,19 +46,23 @@ namespace pyoomph
 		// h-refinement via the OcTree hierarchy is implemented for pure-brick meshes and (branch
 		// mixed_adapt) pure-tetrahedron meshes (a tet refines 1->8, reusing the OcTree's 8-son
 		// bookkeeping, with geometric node-sharing/hanging). Mixed brick+tet is not yet supported.
-		bool allQ = true, allT = true, allW = true;
+		bool allQ = true, allT = true, allW = true, allP = true;
 		for (unsigned int i = 0; i < this->nelement(); i++)
 		{
 			bool is_brick = (dynamic_cast<oomph::BrickElementBase *>(this->element_pt(i)) != NULL);
 			bool is_tet = (dynamic_cast<oomph::TElementBase *>(this->element_pt(i)) != NULL);
 			bool is_wedge = (dynamic_cast<oomph::RefineableWedgeElement *>(this->element_pt(i)) != NULL);
+			bool is_pyramid = (dynamic_cast<oomph::RefineablePyramidElement *>(this->element_pt(i)) != NULL);
 			allQ = allQ && is_brick;
 			allT = allT && is_tet;
 			allW = allW && is_wedge;
+			allP = allP && is_pyramid;
 		}
 		// Pure-brick, pure-tet, or (branch mixed_adapt) pure-wedge meshes refine 1->8 via the OcTree; a
-		// wedge refines its triangular cross-section 1->4 and its extrusion 1->2 (shape-closed).
-		if (allQ || allT || allW)
+		// wedge refines its triangular cross-section 1->4 and its extrusion 1->2 (shape-closed). A pure-
+		// pyramid mesh refines with HETEROGENEOUS offspring (1 pyramid -> 6 pyramids + 4 tets), so its
+		// leaves become a mix of pyramids and tets after the first level.
+		if (allQ || allT || allW || allP)
 		{
 			return true;
 		}

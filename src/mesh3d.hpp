@@ -95,6 +95,7 @@ namespace pyoomph
       // brick test would misread their 4/6-node elements as an 8-node hex.
       if (ntree() > 0 && dynamic_cast<oomph::TElementBase *>(Trees_pt[0]->object_pt())) return;
       if (ntree() > 0 && dynamic_cast<oomph::RefineableWedgeElement *>(Trees_pt[0]->object_pt())) return;
+      if (ntree() > 0 && dynamic_cast<oomph::RefineablePyramidElement *>(Trees_pt[0]->object_pt())) return;
       oomph::OcTreeForest::check_all_neighbours(doc_info);
     }
 
@@ -150,6 +151,16 @@ namespace pyoomph
       // will need a topological wedge face/edge neighbour finder, as tets have above. oomph's brick compass
       // find_neighbours below must NOT run on wedges: it would misread the 6-node wedge as an 8-node hex.)
       if (ntree() > 0 && dynamic_cast<oomph::RefineableWedgeElement *>(Trees_pt[0]->object_pt()))
+      {
+        return;
+      }
+      // Pyramid forests: skip neighbour finding for now (like wedges). Uniform pyramid refinement stays
+      // conforming (the mixed 6-pyr+4-tet offspring share their father-boundary nodes via the cross-shape
+      // registry in RefineablePyramidElement::build_son_from_pyramid_father), so no inter-tree neighbour
+      // pointers are needed. oomph's brick compass find_neighbours must NOT run: it would misread the 5-node
+      // pyramid as an 8-node hex. (Non-uniform pyramid hanging -- a later milestone -- needs a topological
+      // cross-shape face/edge neighbour finder.)
+      if (ntree() > 0 && dynamic_cast<oomph::RefineablePyramidElement *>(Trees_pt[0]->object_pt()))
       {
         return;
       }

@@ -2435,6 +2435,16 @@ namespace oomph
 
     OcTree *father_pt = dynamic_cast<OcTree *>(octree_pt()->father_pt());
     int son_type = Tree_pt->son_type();
+
+    // A tet can be a son of a PYRAMID (the 4 tet children of the pyramid red split). In that case the
+    // father is not a tet, so the tet-in-tet affine map below does not apply -- route to the pyramid's
+    // generic C1 son builder, which handles the mixed offspring uniformly.
+    if (dynamic_cast<oomph::RefineablePyramidElement *>(father_pt->object_pt()))
+    {
+      dynamic_cast<pyoomph::BulkElementBase *>(this)->build_as_pyramid_son(mesh_pt, new_node_pt);
+      return;
+    }
+
     RefineableTElement<3> *father_el_pt = dynamic_cast<RefineableTElement<3> *>(father_pt->object_pt());
     TimeStepper *time_stepper_pt = father_el_pt->node_pt(0)->time_stepper_pt();
     unsigned ntstorage = time_stepper_pt->ntstorage();
@@ -2506,12 +2516,16 @@ namespace oomph
         if (nbn) { node_pt(j) = nbn; continue; }
       }
 
-      // (2) Reuse a node already created (by a sibling son or the face-/edge-sharing neighbour
-      // father's sons) via the geometric shared-node registry.
+      // (2) Reuse a node already created (by a sibling son or the face-/edge-sharing neighbour father's sons)
+      // via the geometric shared-node registry. In a PYRAMID forest use the pyramid forest's registry
+      // instead of the tet-only one, so a tet-of-pyramid and an adjacent sub-pyramid share their interface
+      // face nodes (both key on the same shared father vertex pointers). Topological -> MPI-safe.
+      std::map<std::set<Node *>, Node *> &shared_reg =
+          in_pyramid_forest() ? oomph::RefineablePyramidElement::Shared_node_registry : Shared_edge_node_registry;
       if (!reg_key.empty())
       {
-        std::map<std::set<Node *>, Node *>::iterator it = Shared_edge_node_registry.find(reg_key);
-        if (it != Shared_edge_node_registry.end())
+        std::map<std::set<Node *>, Node *>::iterator it = shared_reg.find(reg_key);
+        if (it != shared_reg.end())
         {
           node_pt(j) = it->second;
           continue;
@@ -2627,7 +2641,7 @@ namespace oomph
         for (unsigned k = 0; k < n_var; k++) created_node_pt->set_value(t, k, prev_values[k]);
       }
       mesh_pt->add_node_pt(created_node_pt);
-      if (!reg_key.empty()) Shared_edge_node_registry[reg_key] = created_node_pt;
+      if (!reg_key.empty()) shared_reg[reg_key] = created_node_pt;
     }
   }
 
@@ -2646,13 +2660,25 @@ namespace oomph
   // finders + the exact affine map + interpolating_basis -- fully topological. A per-element install (vs the
   // former mesh-level pass) means refine_selected_elements / custom_adapt get hanging too, and it composes
   // with oomph's complete_hanging_nodes (which flattens recursive master chains).
+  // A tet that is a son of a PYRAMID (the 4 tet children of the pyramid red split) lives in a pyramid-rooted
+  // forest. Its son_type (6..9) and the tree ancestry above it are NOT the tet-in-tet map, so the tet
+  // neighbour/hanging tree-walk (son_vertices_in_father, son_to_father_local) does not apply. Uniform pyramid
+  // refinement is conforming (node-sharing via the pyramid registry), so there is nothing to hang -- skip.
+  // (Non-uniform pyramid hanging will need a dedicated cross-shape scheme, a later milestone.)
+  bool RefineableTElement<3>::in_pyramid_forest() const
+  {
+    return this->Tree_pt && this->Tree_pt->root_pt() &&
+           dynamic_cast<oomph::RefineablePyramidElement *>(this->Tree_pt->root_pt()->object_pt()) != 0;
+  }
   void RefineableTElement<3>::setup_hanging_nodes(Vector<std::ofstream *> &)
   {
+    if (in_pyramid_forest()) return;
     for (int f = 0; f < 4; f++) tet_hang_face(-1, f);
     for (int e = 0; e < 6; e++) tet_hang_edge(-1, e);
   }
   void RefineableTElement<3>::setup_hang_for_value(const int &value_id)
   {
+    if (in_pyramid_forest()) return;
     for (int f = 0; f < 4; f++) tet_hang_face(value_id, f);
     for (int e = 0; e < 6; e++) tet_hang_edge(value_id, e);
   }
@@ -3067,6 +3093,12 @@ namespace oomph
   Node *RefineableTElement<3>::node_created_by_neighbour(const Vector<double> &s_son) const
   {
     if (!this->Tree_pt) return 0;
+    // In a pyramid-rooted forest the tet neighbour tree-walk (tet_face_neighbour -> son_vertices_in_father)
+    // does not apply: the ancestry above a tet son of a pyramid is not the tet-in-tet map (son_type 6..9).
+    // Cross-parent node sharing there is handled instead by the father-edge-node registry (a node on a face
+    // shared by two adjacent parents keys identically from both), so this fallback is not needed -- and would
+    // throw on son_vertices_in_father(6..9). Return 0 to defer to the registry.
+    if (in_pyramid_forest()) return 0;
     // Father-faces the node lies on: face f (opposite vertex f) is the plane barycentric_f == 0.
     const double b[4] = {s_son[0], s_son[1], s_son[2], 1.0 - s_son[0] - s_son[1] - s_son[2]};
     for (int f = 0; f < 4; f++)

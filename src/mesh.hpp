@@ -366,6 +366,7 @@ namespace pyoomph
 			oomph::RefineableTElement<2>::clear_shared_edge_node_registry();
 			oomph::RefineableTElement<3>::clear_shared_edge_node_registry();
 			oomph::RefineableWedgeElement::clear_shared_node_registry();
+			oomph::RefineablePyramidElement::clear_shared_node_registry();
 			// Snapshot existing node positions so build() can reuse a coincident node created in an
 			// EARLIER round (e.g. by a finer neighbour) instead of duplicating it -- which would tear a
 			// moving mesh apart at a refine/coarsen interface. See RefineableTElement<2>::build.

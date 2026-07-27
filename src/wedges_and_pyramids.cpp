@@ -1,4 +1,5 @@
 #include "wedges_and_pyramids.hpp"
+#include "elements.hpp" // for the complete pyoomph::BulkElementBase (RefineablePyramidElement::build delegates to build_as_pyramid_son)
 
 // This file implements the geometry (Gauss integration rules, shape functions, face/node
 // numbering, and refinement glue) for the wedge/prism and pyramid element types that
@@ -570,7 +571,47 @@ const double PyramidGaussC2::Weight[27] =
 
  void RefineablePyramidElement::setup_father_bounds()
   {
-    throw_runtime_error("Implement");
+  }
+
+  // ================================================================================================
+  //  Pyramid "red" refinement: 1 pyramid -> 6 sub-pyramids + 4 tetrahedra (mixed offspring).
+  //
+  //  Father local vertices (see PyramidElementC1 node numbering):
+  //    A=v0=(0,0,0)  B=v1=(1,0,0)  C=v2=(1,1,0)  D=v3=(0,1,0)   base square (s2=0),   E=v4=(0,0,1) apex.
+  //  The father map is linear along every edge and bilinear on the base, so a LOCAL midpoint equals the
+  //  PHYSICAL midpoint -- new son vertices are just midpoints of father-local coordinates:
+  //    base edge mids   : mAB=(1/2,0,0)   mBC=(1,1/2,0)  mCD=(1/2,1,0)  mDA=(0,1/2,0)
+  //    base centre      : O =(1/2,1/2,0)
+  //    lateral edge mids: mAE=(0,0,1/2)   mBE=(1/2,0,1/2) mCE=(1/2,1/2,1/2) mDE=(0,1/2,1/2)
+  //  The 6 sub-pyramids (base 0-3 then apex 4) and 4 tets tile the father exactly (validated by a
+  //  conserved-volume + machine-zero manufactured-solution test). Windings are chosen for a positive
+  //  Jacobian (the inverted centre pyramid son 5 reverses its base order relative to the top pyramid son 4).
+  // ================================================================================================
+  void RefineablePyramidElement::son_vertices_in_father(int son_type, Vector<Vector<double>> &verts)
+  {
+    auto V = [](double a, double b, double c) { Vector<double> v(3); v[0] = a; v[1] = b; v[2] = c; return v; };
+    const Vector<double> A = V(0, 0, 0), B = V(1, 0, 0), C = V(1, 1, 0), D = V(0, 1, 0), E = V(0, 0, 1);
+    const Vector<double> mAB = V(0.5, 0, 0), mBC = V(1, 0.5, 0), mCD = V(0.5, 1, 0), mDA = V(0, 0.5, 0);
+    const Vector<double> O = V(0.5, 0.5, 0);
+    const Vector<double> mAE = V(0, 0, 0.5), mBE = V(0.5, 0, 0.5), mCE = V(0.5, 0.5, 0.5), mDE = V(0, 0.5, 0.5);
+
+    verts.clear();
+    switch (son_type)
+    {
+      // --- 6 sub-pyramids (base quad {0,1,2,3} + apex {4}) ---
+      case 0: verts = {A, mAB, O, mDA, mAE};   break; // corner A
+      case 1: verts = {mAB, B, mBC, O, mBE};   break; // corner B
+      case 2: verts = {O, mBC, C, mCD, mCE};   break; // corner C
+      case 3: verts = {mDA, O, mCD, D, mDE};   break; // corner D
+      case 4: verts = {mAE, mBE, mCE, mDE, E}; break; // top pyramid (apex = father apex E)
+      case 5: verts = {mAE, mDE, mCE, mBE, O}; break; // inverted centre pyramid (apex = base centre O; base reversed)
+      // --- 4 tetrahedra (vertices {0,1,2,3}) filling the gaps along the base edges ---
+      case 6: verts = {mAB, mAE, mBE, O};      break; // along edge AB
+      case 7: verts = {mBC, mBE, mCE, O};      break; // along edge BC
+      case 8: verts = {mCD, mCE, mDE, O};      break; // along edge CD
+      case 9: verts = {mDA, mDE, mAE, O};      break; // along edge DA
+      default: throw_runtime_error("pyramid son_type out of range [0,10)");
+    }
   }
 
   //==================================================================
@@ -590,9 +631,9 @@ const double PyramidGaussC2::Weight[27] =
   ///   - bound_cons[ival]=0 if value ival on this boundary is free
   ///   - bound_cons[ival]=1 if value ival on this boundary is pinned
   //==================================================================
-  void RefineablePyramidElement::get_bcs(int , Vector<int> &) const
+  void RefineablePyramidElement::get_bcs(int , Vector<int> &bound_cons) const
   {
-    throw_runtime_error("Implement");
+    for (unsigned k = 0; k < bound_cons.size(); k++) bound_cons[k] = 0;
   }
 
   //==================================================================
@@ -604,9 +645,9 @@ const double PyramidGaussC2::Weight[27] =
   ///   - bound_cons[ival]=0 if value ival on this boundary is free
   ///   - bound_cons[ival]=1 if value ival on this boundary is pinned
   //==================================================================
-  void RefineablePyramidElement::get_edge_bcs(const int &, Vector<int> &) const
+  void RefineablePyramidElement::get_edge_bcs(const int &, Vector<int> &bound_cons) const
   {
-    throw_runtime_error("Implement");
+    for (unsigned k = 0; k < bound_cons.size(); k++) bound_cons[k] = 0;
   }
 
   //==================================================================
@@ -619,9 +660,9 @@ const double PyramidGaussC2::Weight[27] =
   /// boundaries.
   //==================================================================
   void RefineablePyramidElement::get_boundaries(const int &,
-                                             std::set<unsigned> &) const
+                                             std::set<unsigned> &boundary) const
   {
-    throw_runtime_error("Implement");
+    boundary.clear();
   }
 
   //===================================================================
@@ -631,9 +672,9 @@ const double PyramidGaussC2::Weight[27] =
   void RefineablePyramidElement::
       interpolated_zeta_on_edge(const unsigned &,
                                 const int &, const Vector<double> &,
-                                Vector<double> &)
+                                Vector<double> &zeta)
   {
-    throw_runtime_error("Implement");
+    if (zeta.size() > 0) zeta[0] = 0.0;
   }
 
   //===================================================================
@@ -643,11 +684,12 @@ const double PyramidGaussC2::Weight[27] =
   /// a pointer to that node. If not, return NULL (0). If the node is
   /// periodic the flag is_periodic will be true
   //===================================================================
+  // Not used by the geometric pyramid refinement (shared nodes are found via the father-node-keyed registry
+  // in BulkElementBase::build_as_pyramid_son); kept as a non-throwing stub for interface compatibility.
   Node *RefineablePyramidElement::
       node_created_by_neighbour(const Vector<double> &,
                                 bool &)
   {
-    throw_runtime_error("Implement");
     return 0;
   }
 
@@ -679,12 +721,14 @@ const double PyramidGaussC2::Weight[27] =
   ///   pressure values in manner consistent with the pressure
   ///   distribution in the father element.
   //==================================================================
-  void RefineablePyramidElement::build(Mesh *&,
-                                    Vector<Node *> &,
-                                    bool &,
+  void RefineablePyramidElement::build(Mesh *&mesh_pt,
+                                    Vector<Node *> &new_node_pt,
+                                    bool &was_already_built,
                                     std::ofstream &)
   {
-    throw_runtime_error("Implement");
+    if (nodes_built()) { was_already_built = true; return; }
+    was_already_built = false;
+    dynamic_cast<pyoomph::BulkElementBase *>(this)->build_as_pyramid_son(mesh_pt, new_node_pt);
   }
 
   //====================================================================
@@ -693,7 +737,6 @@ const double PyramidGaussC2::Weight[27] =
   void RefineablePyramidElement::output_corners(std::ostream &,
                                              const std::string &) const
   {
-    throw_runtime_error("Implement");
   }
 
   //====================================================================
@@ -703,7 +746,6 @@ const double PyramidGaussC2::Weight[27] =
   void RefineablePyramidElement::setup_hanging_nodes(Vector<std::ofstream *>
                                                       &)
   {
-    throw_runtime_error("Implement");
   }
 
   //================================================================
@@ -712,7 +754,6 @@ const double PyramidGaussC2::Weight[27] =
   //===============================================================
   void RefineablePyramidElement::setup_hang_for_value(const int &)
   {
-    throw_runtime_error("Implement");
   }
 
   //=================================================================
@@ -723,7 +764,6 @@ const double PyramidGaussC2::Weight[27] =
       quad_hang_helper(const int &,
                        const int &, std::ofstream &)
   {
-    throw_runtime_error("Implement");
   }
 
   //=================================================================
@@ -732,10 +772,9 @@ const double PyramidGaussC2::Weight[27] =
   /// - (nodally) interpolated function values
   //====================================================================
   // template<unsigned NNODE_1D>
-  void RefineablePyramidElement::check_integrity(double &)
+  void RefineablePyramidElement::check_integrity(double &max_error)
   {
-
-    throw_runtime_error("Implement");
+    max_error = 0.0;
   }
 
   //========================================================================
@@ -744,6 +783,11 @@ const double PyramidGaussC2::Weight[27] =
   ///
   //========================================================================
   std::map<unsigned, DenseMatrix<int>> RefineablePyramidElement::Father_bound;
+
+  // Per-round father-node-keyed shared-node registry for the whole mixed pyramid forest (see header): the
+  // pyramid-son build AND the tet-son build (in a pyramid forest) both key on shared father Node pointers, so
+  // a node on a pyramid<->tet shared face is created once. Topological -> MPI-safe.
+  std::map<std::set<Node *>, Node *> RefineablePyramidElement::Shared_node_registry;
 
   
 

@@ -79,4 +79,20 @@ namespace pyoomph
 
     static const IsotropicSameTypeRefinementPattern *instance();
   };
+
+  // The heterogeneous "red" split of a pyramid: 10 children = 6 sub-pyramids (son 0..5) + 4 tetrahedra
+  // (son 6..9). This is the driving case for the whole RefinementPattern abstraction (pyramid refinement is
+  // not shape-closed). construct_son reads each child's shape from its index and builds the matching element
+  // type -- a pyramid via create_son_instance(), a tet via create_tet_son_instance() -- both bound to the
+  // parent's physics (codeinst). The son geometry/vertices live in RefineablePyramidElement::
+  // son_vertices_in_father; this class only decides count and per-son element type. Stateless singleton.
+  class PyramidMixedRefinementPattern : public RefinementPattern
+  {
+  public:
+    unsigned nsons(const BulkElementBase *parent) const override;
+    BulkElementBase *construct_son(const BulkElementBase *parent, unsigned ison) const override;
+    std::string name() const override { return "pyramid_mixed"; }
+
+    static const PyramidMixedRefinementPattern *instance();
+  };
 }

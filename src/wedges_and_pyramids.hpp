@@ -4,6 +4,10 @@
 #include "exception.hpp"
 // Wedges and pyramids are not supported by oomph-lib, but the basic Element classes are defined in the oomph namespace here,
 // they are adjusted for pyoomph in the elements.{cpp,hpp} files.
+namespace pyoomph
+{
+  class BulkElementBase; // pyoomph bulk element base (referenced by the pyramid mixed-son builder below)
+}
 namespace oomph
 {
 
@@ -944,12 +948,41 @@ class RefineablePyramidElement : public virtual RefineableElement, public virtua
     {
     }
 
-    // Number of sons created upon refinement -- not yet implemented (pyramid refinement is TODO)
-    unsigned required_nsons() const override
-    {
-      throw_runtime_error("TODO"); // Here, nothing is do be done for now
-      return 4;
-    }
+    // Pyramid refinement is NOT shape-closed: a pyramid red-splits into 6 sub-pyramids + 4 tetrahedra
+    // (10 mixed children). The son count/types come from PyramidMixedRefinementPattern (see
+    // refinement_pattern() on the concrete BulkElementPyramid3dC1); required_nsons() just reports the total.
+    unsigned required_nsons() const override { return 10; }
+
+    // The son's vertices, in FATHER local coordinates, for son index son_type in [0,10). son_type 0..5 are
+    // the sub-pyramids (5 vertices each, in pyramid local node order: base 0-3 then apex 4); son_type 6..9
+    // are the tetrahedra (4 vertices each). This is the geometric description of the red split and doubles as
+    // the son->father coordinate map source in build_son_from_pyramid_father(). Static: the map depends only
+    // on the (single) pyramid split scheme.
+    static void son_vertices_in_father(int son_type, Vector<Vector<double>> &verts);
+
+    // True iff son son_type is one of the 4 tetrahedra (the last 4 children); the first 6 are sub-pyramids.
+    static bool son_is_tet(int son_type) { return son_type >= 6; }
+
+    // The generic C1 builder that fills a son of a pyramid father lives on pyoomph::BulkElementBase
+    // (build_as_pyramid_son), because it must call the protected construct_node()/construct_boundary_node()
+    // on the son itself (this) -- which works for BOTH a pyramid son and a tet son. It consumes the geometry
+    // above (son_vertices_in_father) and the shared-node registry below.
+
+    // Per-round shared-node registry for the whole mixed pyramid forest, keyed TOPOLOGICALLY on the SET of
+    // father Node pointers a new node is built from (its positive-father-shape-weight nodes -- e.g. the two
+    // endpoints of an edge it bisects, or the four base corners for the base centre). Every element that
+    // creates the same geometric node keys on the same shared father pointers, so it is created once. This
+    // is the SAME mechanism the tri/tet/wedge builds use (RefineableTElement<3>::Shared_edge_node_registry),
+    // NOT a physical-position map: it is purely topological and therefore MPI-safe (across-rank interface
+    // nodes are reconciled by the halo machinery, exactly as for tets). Crucially the ORDINARY tet build
+    // uses THIS registry too when its forest root is a pyramid (RefineableTElement<3>::in_pyramid_forest),
+    // so at refinement level >= 2 a sub-pyramid and an adjacent tet-of-pyramid, sharing a triangular face,
+    // both key that face's edge-midpoints on the same two shared father vertex pointers -> one node, no tear.
+    // Cleared each round. C1 only for now (father-node SETS are a unique key for C1; C2 pyramids -- with
+    // distinct interior points sharing a positive-node set -- would need the weight-augmented key like C2
+    // wedges).
+    static std::map<std::set<Node *>, Node *> Shared_node_registry;
+    static void clear_shared_node_registry() { Shared_node_registry.clear(); }
 
     // Not yet implemented: see RefineableElement interface for semantics
     virtual Node *node_created_by_neighbour(const Vector<double> &s_fraction, bool &is_periodic);

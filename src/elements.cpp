@@ -7170,6 +7170,40 @@ namespace pyoomph
 		return &the_instance;
 	}
 
+	// --- PyramidMixedRefinementPattern (pyramid -> 6 pyramids + 4 tets) -----------------------
+	unsigned PyramidMixedRefinementPattern::nsons(const BulkElementBase *) const { return 10; }
+
+	BulkElementBase *PyramidMixedRefinementPattern::construct_son(const BulkElementBase *parent, unsigned ison) const
+	{
+		// Sons 0..5 are sub-pyramids (same shape as the parent), sons 6..9 are tetrahedra. Both are built
+		// with the parent's physics via the concrete pyramid element's factories.
+		const BulkElementPyramid3dC1 *pyr = dynamic_cast<const BulkElementPyramid3dC1 *>(parent);
+		if (!pyr) throw_runtime_error("PyramidMixedRefinementPattern applied to a non-pyramid element");
+		if (ison < 6) return parent->create_son_instance();
+		return pyr->create_tet_son_instance();
+	}
+
+	const PyramidMixedRefinementPattern *PyramidMixedRefinementPattern::instance()
+	{
+		static const PyramidMixedRefinementPattern the_instance;
+		return &the_instance;
+	}
+
+	// Tet son of a pyramid: a BulkElementTetra3dC1 bound to the same physics (codeinst) as this pyramid.
+	BulkElementBase *BulkElementPyramid3dC1::create_tet_son_instance() const
+	{
+		BulkElementBase::__CurrentCodeInstance = codeinst;
+		auto res = new BulkElementTetra3dC1();
+		res->set_code_instance(codeinst); // res is a tet, not a pyramid -> use the public setter
+		BulkElementBase::__CurrentCodeInstance = NULL;
+		return res;
+	}
+
+	const RefinementPattern *BulkElementPyramid3dC1::refinement_pattern() const
+	{
+		return PyramidMixedRefinementPattern::instance();
+	}
+
 	// oomph-lib refinement hook: creates the son elements (via the current refinement_pattern())
 	// and initializes their refinement level and initial size fraction; the sons are then filled in
 	// by pre_build()/further_build() as the mesh machinery proceeds.
@@ -7202,6 +7236,148 @@ namespace pyoomph
 					if (fb) son_pt[i]->set_face_boundaries(son_face, *fb);
 				}
 			}
+		}
+	}
+
+	// Fill this element as a C1 son of a pyramid father (mixed 6-pyramid + 4-tet red split); see the header.
+	void BulkElementBase::build_as_pyramid_son(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt)
+	{
+		using oomph::RefineablePyramidElement;
+		const unsigned n_node = this->nnode();
+
+		oomph::Tree *my_tree = this->tree_pt();
+		const int son_type = my_tree->son_type();
+		oomph::FiniteElement *father_el_pt = dynamic_cast<oomph::FiniteElement *>(my_tree->father_pt()->object_pt());
+		oomph::RefineableElement *father_re = dynamic_cast<oomph::RefineableElement *>(father_el_pt);
+		if (father_el_pt->macro_elem_pt() != 0)
+			throw_runtime_error("Macro elements (curved boundaries) are not yet supported for pyramid refinement");
+		oomph::TimeStepper *time_stepper_pt = father_el_pt->node_pt(0)->time_stepper_pt();
+		const unsigned ntstorage = time_stepper_pt->ntstorage();
+		const unsigned nfath = father_el_pt->nnode();
+
+		oomph::Vector<oomph::Vector<double>> sv;
+		RefineablePyramidElement::son_vertices_in_father(son_type, sv);
+		if (sv.size() != n_node)
+			throw_runtime_error("pyramid son build: node count does not match vertex count (C1-only for now)");
+
+		for (unsigned j = 0; j < n_node; j++)
+		{
+			// C1: son node j is vertex j -> its father-local coordinate is exactly the son vertex.
+			oomph::Vector<double> s = sv[j];
+
+			// (1) Reuse a father node coincident with this position (shared vertex). Its values are already
+			// correct (it is an existing father node) -- do NOT re-interpolate them: the pyramid shape's
+			// 1/(1-s2) is singular at the apex s2=1 (the father apex is exactly such a reused node), so
+			// get_interpolated_values there would return inf and corrupt the shared node.
+			oomph::Node *created_node_pt = father_el_pt->get_node_at_local_coordinate(s);
+			if (created_node_pt != 0)
+			{
+				this->node_pt(j) = created_node_pt;
+				continue;
+			}
+
+			// Generating father nodes = those with POSITIVE father shape at s (for C1: the endpoints of the
+			// edge this node bisects, or the four base corners for the base centre). The SET of those shared
+			// father Node pointers is the topological registry key -- identical from every son (of this or an
+			// adjacent father, of either shape) that creates the same node, so the node is shared not torn.
+			oomph::Shape psi(nfath);
+			father_el_pt->shape(s, psi);
+			std::vector<oomph::Node *> gen;
+			std::set<oomph::Node *> reg_key;
+			for (unsigned l = 0; l < nfath; l++)
+				if (psi(l) > 1e-6)
+				{
+					gen.push_back(father_el_pt->node_pt(l));
+					reg_key.insert(father_el_pt->node_pt(l));
+				}
+
+			// (2) Reuse a node already created this round -- by another of this father's sons, OR (at level
+			// >= 2) by an adjacent tet-of-pyramid whose ordinary tet build keys the same shared face node on
+			// the same father pointers via this same registry (RefineableTElement<3>::in_pyramid_forest).
+			if (!reg_key.empty())
+			{
+				auto it = RefineablePyramidElement::Shared_node_registry.find(reg_key);
+				if (it != RefineablePyramidElement::Shared_node_registry.end()) { this->node_pt(j) = it->second; continue; }
+			}
+
+			// (3) Build a new node (boundary iff all generating nodes share a boundary; pinned iff all pinned).
+			std::set<unsigned> boundaries;
+			bool have_bounds = false;
+			for (oomph::Node *g : gen)
+			{
+				oomph::BoundaryNodeBase *bg = dynamic_cast<oomph::BoundaryNodeBase *>(g);
+				std::set<unsigned> *sg = 0;
+				if (bg) bg->get_boundaries_pt(sg);
+				if (!sg) { boundaries.clear(); break; }
+				if (!have_bounds) { boundaries = *sg; have_bounds = true; }
+				else
+				{
+					std::set<unsigned> inter;
+					std::set_intersection(boundaries.begin(), boundaries.end(), sg->begin(), sg->end(), std::inserter(inter, inter.begin()));
+					boundaries.swap(inter);
+				}
+			}
+
+			if (!boundaries.empty())
+			{
+				created_node_pt = this->construct_boundary_node(j, time_stepper_pt);
+				const unsigned nval = created_node_pt->nvalue();
+				for (unsigned k = 0; k < nval; k++)
+				{
+					bool all_pinned = true;
+					for (oomph::Node *g : gen) if (!g->is_pinned(k)) { all_pinned = false; break; }
+					if (all_pinned) created_node_pt->pin(k);
+				}
+				for (std::set<unsigned>::iterator it = boundaries.begin(); it != boundaries.end(); ++it)
+				{
+					mesh_pt->add_boundary_node(*it, created_node_pt);
+					if (mesh_pt->boundary_coordinate_exists(*it))
+					{
+						oomph::Vector<double> z;
+						for (oomph::Node *g : gen)
+						{
+							oomph::Vector<double> zg;
+							dynamic_cast<oomph::BoundaryNodeBase *>(g)->get_coordinates_on_boundary(*it, zg);
+							if (z.empty()) z.resize(zg.size(), 0.0);
+							for (unsigned zi = 0; zi < zg.size(); zi++) z[zi] += zg[zi] / gen.size();
+						}
+						created_node_pt->set_coordinates_on_boundary(*it, z);
+					}
+				}
+			}
+			else
+			{
+				created_node_pt = this->construct_node(j, time_stepper_pt);
+			}
+
+			this->node_pt(j) = created_node_pt;
+			new_node_pt.push_back(created_node_pt);
+			for (unsigned t = 0; t < ntstorage; t++)
+			{
+				oomph::Vector<double> xp(3);
+				father_el_pt->get_x(t, s, xp);
+				for (int d = 0; d < 3; d++) created_node_pt->x(t, d) = xp[d];
+			}
+			if (oomph::SolidNode *sn = dynamic_cast<oomph::SolidNode *>(created_node_pt))
+			{
+				const unsigned nl = sn->nlagrangian();
+				for (unsigned i = 0; i < nl; i++)
+				{
+					double xi = 0.0;
+					for (unsigned l = 0; l < nfath; l++)
+						if (oomph::SolidNode *fn = dynamic_cast<oomph::SolidNode *>(father_el_pt->node_pt(l))) xi += psi(l) * fn->xi(i);
+					sn->xi(i) = xi;
+				}
+			}
+			for (unsigned t = 0; t < ntstorage; t++)
+			{
+				oomph::Vector<double> prev;
+				father_re->get_interpolated_values(t, s, prev);
+				const unsigned nv = std::min((unsigned)created_node_pt->nvalue(), (unsigned)prev.size());
+				for (unsigned k = 0; k < nv; k++) created_node_pt->set_value(t, k, prev[k]);
+			}
+			mesh_pt->add_node_pt(created_node_pt);
+			if (!reg_key.empty()) RefineablePyramidElement::Shared_node_registry[reg_key] = created_node_pt;
 		}
 	}
 
