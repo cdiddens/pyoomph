@@ -7317,6 +7317,12 @@ namespace pyoomph
 		oomph::TimeStepper *time_stepper_pt = father_el_pt->node_pt(0)->time_stepper_pt();
 		const unsigned ntstorage = time_stepper_pt->ntstorage();
 		const unsigned nfath = father_el_pt->nnode();
+#ifdef OOMPH_HAS_MPI
+		// Propagate the halo-ownership tag father->son (see RefineableTElement<3>::build): without it a
+		// refined simplex/mixed son is mis-classified under MPI and the distributed halo/haloed node lists
+		// drift between ranks. Serial builds have a non-halo (-1) father, so this is a no-op there.
+		if (father_el_pt->is_halo()) this->set_halo(father_el_pt->non_halo_proc_ID());
+#endif
 
 		oomph::Vector<oomph::Vector<double>> sv;
 		RefineablePyramidElement::son_vertices_in_father(son_type, sv);
@@ -7493,6 +7499,12 @@ namespace pyoomph
 		oomph::TimeStepper *time_stepper_pt = father_el_pt->node_pt(0)->time_stepper_pt();
 		const unsigned ntstorage = time_stepper_pt->ntstorage();
 		const unsigned nfath = father_el_pt->nnode();
+#ifdef OOMPH_HAS_MPI
+		// Propagate the halo-ownership tag father->son (see RefineableTElement<3>::build): without it a
+		// refined simplex/mixed son is mis-classified under MPI and the distributed halo/haloed node lists
+		// drift between ranks. Serial builds have a non-halo (-1) father, so this is a no-op there.
+		if (father_el_pt->is_halo()) this->set_halo(father_el_pt->non_halo_proc_ID());
+#endif
 
 		for (unsigned j = 0; j < n_node; j++)
 		{

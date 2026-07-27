@@ -370,6 +370,11 @@ const double PyramidGaussC2::Weight[27] =
     Vector<Vector<double>> sv;
     son_vertices_in_father(son_type, sv);
     const unsigned nfath = father_el_pt->nnode();
+#ifdef OOMPH_HAS_MPI
+    // Propagate the halo-ownership tag father->son (see RefineableTElement<3>::build) so a refined wedge son
+    // is correctly classified under MPI; no-op for a non-halo (serial) father.
+    if (father_el_pt->is_halo()) this->set_halo(father_el_pt->non_halo_proc_ID());
+#endif
 
     for (unsigned j = 0; j < n_node; j++)
     {

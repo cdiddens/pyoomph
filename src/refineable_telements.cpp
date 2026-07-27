@@ -2453,6 +2453,15 @@ namespace oomph
       throw_runtime_error("Macro elements (curved boundaries) are not yet supported for tetrahedral refinement");
     }
 
+#ifdef OOMPH_HAS_MPI
+    // Propagate the halo-ownership tag from father to son, exactly as RefineableTElement<2>::build does.
+    // Without it a refined tet son keeps the default Non_halo_proc_ID, so under MPI the distributed
+    // classify_halo_and_haloed_nodes misclassifies its nodes and the per-rank halo/haloed node lists drift
+    // apart -- which leaks an unmatched message in Mesh::resize_halo_nodes and then crashes/deadlocks the
+    // downstream halo-node synchronisation. (Pure-serial builds ignore this field.)
+    Non_halo_proc_ID = father_el_pt->non_halo_proc_ID();
+#endif
+
     // The 4 vertices of this son in the father's local coordinates -> affine (barycentric) map
     // from son-local to father-local coordinates.
     Vector<Vector<double>> sv;
