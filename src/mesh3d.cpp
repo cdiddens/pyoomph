@@ -118,19 +118,24 @@ namespace pyoomph
 		// singular, so lattice points with a non-finite image are skipped (only the apex VERTEX, never a hang
 		// node at s2<=0.5). This subsumes the former separate pure-pyramid (M3c) and pure-wedge (M2) passes.
 		{
-			bool has_pyr = false, has_wedge = false, all_reg = true;
+			bool has_pyr = false, has_wedge = false, has_brick = false, has_tet = false, all_reg = true;
 			for (unsigned int ie = 0; ie < this->nelement(); ie++)
 			{
 				const bool isp = (dynamic_cast<oomph::RefineablePyramidElement *>(this->element_pt(ie)) != nullptr);
 				const bool isw = (dynamic_cast<oomph::RefineableWedgeElement *>(this->element_pt(ie)) != nullptr);
+				const bool isb = (dynamic_cast<oomph::BrickElementBase *>(this->element_pt(ie)) != nullptr);
 				const bool ist = (dynamic_cast<oomph::TElementBase *>(this->element_pt(ie)) != nullptr);
 				has_pyr = has_pyr || isp;
 				has_wedge = has_wedge || isw;
-				all_reg = all_reg && (isp || isw || ist);
+				has_brick = has_brick || isb;
+				has_tet = has_tet || ist;
+				all_reg = all_reg && (isp || isw || isb || ist);
 			}
-			// Pure-tet meshes use the per-element OcTree hooks (and bricks use oomph-lib); this generative pass
-			// runs for any registry-based mesh containing a wedge or pyramid -- pure OR mixed with the others.
-			if (all_reg && (has_pyr || has_wedge))
+			// Pure-tet meshes use the per-element OcTree hooks and pure-brick meshes oomph-lib's octree hanging;
+			// this generative pass runs for a pure wedge/pyramid mesh OR any MIXED refineable mesh (>=2 of
+			// {brick,tet,wedge,pyramid}) -- where find_neighbours is skipped so ALL hanging comes from here.
+			const int nfam = (has_pyr ? 1 : 0) + (has_wedge ? 1 : 0) + (has_brick ? 1 : 0) + (has_tet ? 1 : 0);
+			if (all_reg && (has_pyr || has_wedge || nfam >= 2))
 			{
 				// Face tables (corner local coords). Pyramid vertices 0(0,0,0)1(1,0,0)2(1,1,0)3(0,1,0)4(0,0,1)
 				// apex; tet vertices 0(0,0,0)1(1,0,0)2(0,1,0)3(0,0,1). Matching get_vertex_nodes_of_face.
@@ -154,6 +159,15 @@ namespace pyoomph
 					{true,  4, {{0, 0, 0}, {0, 1, 0}, {0, 1, 1}, {0, 0, 1}}}, // 2 quad s0=0
 					{true,  4, {{0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1}}}, // 3 quad s1=0
 					{true,  4, {{1, 0, 0}, {0, 1, 0}, {0, 1, 1}, {1, 0, 1}}}};// 4 quad hypotenuse s0+s1=1
+				// Brick: local coords in [-1,1]^3; 6 quad faces at s0/s1/s2 = -+1 (a mixed-mesh brick reaches
+				// this pass; a pure-brick mesh uses oomph-lib's own octree hanging instead).
+				static const PFace BRICK_FACES[6] = {
+					{true, 4, {{-1, -1, -1}, {-1, 1, -1}, {-1, 1, 1}, {-1, -1, 1}}}, // s0=-1
+					{true, 4, {{1, -1, -1}, {1, 1, -1}, {1, 1, 1}, {1, -1, 1}}},     // s0=+1
+					{true, 4, {{-1, -1, -1}, {1, -1, -1}, {1, -1, 1}, {-1, -1, 1}}}, // s1=-1
+					{true, 4, {{-1, 1, -1}, {1, 1, -1}, {1, 1, 1}, {-1, 1, 1}}},     // s1=+1
+					{true, 4, {{-1, -1, -1}, {1, -1, -1}, {1, 1, -1}, {-1, 1, -1}}}, // s2=-1
+					{true, 4, {{-1, -1, 1}, {1, -1, 1}, {1, 1, 1}, {-1, 1, 1}}}};    // s2=+1
 
 				for (unsigned int in = 0; in < this->nnode(); in++) this->node_pt(in)->set_nonhanging();
 				const double scale = 1e8;
@@ -173,8 +187,9 @@ namespace pyoomph
 					if (!be || !re || !fe || !re->tree_pt() || !re->tree_pt()->is_leaf()) continue;
 					const bool is_pyr = (dynamic_cast<oomph::RefineablePyramidElement *>(this->element_pt(ie)) != nullptr);
 					const bool is_wedge = (dynamic_cast<oomph::RefineableWedgeElement *>(this->element_pt(ie)) != nullptr);
-					const PFace *FACES = is_pyr ? PYR_FACES : (is_wedge ? WEDGE_FACES : TET_FACES);
-					const int nfaces = (is_pyr || is_wedge) ? 5 : 4;
+					const bool is_brick = (dynamic_cast<oomph::BrickElementBase *>(this->element_pt(ie)) != nullptr);
+					const PFace *FACES = is_pyr ? PYR_FACES : (is_wedge ? WEDGE_FACES : (is_brick ? BRICK_FACES : TET_FACES));
+					const int nfaces = is_brick ? 6 : ((is_pyr || is_wedge) ? 5 : 4);
 					const unsigned n1d = fe->nnode_1d();
 					const int steps = 2 * ((int)n1d - 1);
 					if (steps < 1) continue;

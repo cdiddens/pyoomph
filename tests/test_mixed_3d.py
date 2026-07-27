@@ -34,8 +34,8 @@
 # hanging among the registry families is installed by the unified post_adapt_setup_hanging_nodes pass.
 #
 # Coverage: for tet+wedge, wedge+pyramid, the three-way mix, and hex+pyramid / hex+wedge -- UNIFORM refinement
-# (all combos) and NON-UNIFORM 2:1 cross-shape hanging (registry families), C1 and C2, with strict manufactured
-# (linear + quadratic) oracles at every node. Cross-shape hanging ACROSS a hex face is not covered yet.
+# and NON-UNIFORM 2:1 cross-shape hanging (including across a hex face, both refine directions), C1 and C2,
+# with strict manufactured (linear + quadratic) oracles at every node.
 
 import pytest
 
@@ -327,3 +327,37 @@ def test_mixed_hex_uniform_manufactured(other, order, field, level):
         m = p.get_mesh("domain")
         assert _dup(m) == 0, f"duplicate (torn) nodes at the hex<->{other} interface"
         assert _err(m, field) < 1e-10, f"mixed hex+{other} ({order},{field}) not reproduced at L{level}"
+
+
+# Non-uniform 2:1 cross-shape hanging ACROSS a hex face. Refining only the pyramid/wedge (band z>1) or only
+# the hex (band z<1) makes the finer side's extra nodes on the shared quad face hang on the coarser
+# cross-shape neighbour's interpolation -- installed by the mesh-level post_adapt pass, which now includes
+# bricks (BRICK_FACES). Both the linear and the strict C2 quadratic field must be reproduced to machine
+# precision. (other, which, field).
+@pytest.mark.parametrize("other", ["pyr", "wedge"])
+@pytest.mark.parametrize("which", ["refine_other", "refine_hex"])
+@pytest.mark.parametrize("field", ["linear", "quadratic"])
+def test_mixed_hex_cross_shape_hanging(other, which, field):
+    src = 0 if field == "linear" else -12
+    x, y, z = var("coordinate")[0], var("coordinate")[1], var("coordinate")[2]
+    uex = (x + 2 * y + 3 * z) if field == "linear" else (x * x + 2 * y * y + 3 * z * z)
+    # the hex occupies z in [0,1], the pyramid/wedge z in [1,2]; refine the band on one side of z=1
+    if which == "refine_hex":
+        lf = lambda e: 1 if e.get_Eulerian_midpoint()[2] < 1.0 else 0
+    else:
+        lf = lambda e: 1 if e.get_Eulerian_midpoint()[2] > 1.0 else 0
+
+    class _P(Problem):
+        def define_problem(self):
+            eqs = PoissonEquation(source=src, space="C2") + DirichletBC(u=uex) @ "outer"
+            eqs += RefineAccordingToElement(level_func=lf)
+            self += HexMixMesh(other=other)
+            self += eqs @ "domain"
+
+    with _P() as p:
+        p.max_refinement_level = 1
+        p.solve()
+        m = p.get_mesh("domain")
+        assert sum(1 for nn in m.nodes() if nn.is_hanging()) > 0, f"no hanging nodes (hex+{other} {which})"
+        assert _dup(m) == 0, f"duplicate (torn) nodes at the hex<->{other} 2:1 interface"
+        assert _err(m, field) < 1e-10, f"hex+{other} 2:1 hanging ({which},{field}) not reproduced (err {_err(m, field):.2e})"
