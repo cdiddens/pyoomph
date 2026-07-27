@@ -816,10 +816,16 @@ class RefineableWedgeElement : public virtual RefineableElement, public virtual 
     // half (0=lower s2 in [0,0.5], 1=upper [0.5,1]). Used by build() (son->father affine map).
     static void son_vertices_in_father(int son_type, Vector<Vector<double>> &verts);
 
-    // Per-refinement-round registry of nodes created on a father edge/face, keyed by the set of father nodes
-    // they are the average of (identical from every element that creates the same node -> shared, not
-    // duplicated). Cleared each round (mesh.hpp). The 3d wedge analogue of RefineableTElement<3>'s registry.
-    static std::map<std::set<Node *>, Node *> Shared_node_registry;
+    // Per-refinement-round registry of nodes created on a father edge/face, keyed by the (father node,
+    // rounded father-shape weight) pairs that generate the node. The weights are essential for C2: the bare
+    // positive-node set is NOT a unique position identifier (e.g. the two distinct interior tri points
+    // (0.25,0.25) and (0.25,0.5) both have positive weights on exactly the three tri edge-mid nodes), so
+    // keying on the set alone over-merges distinct nodes and collapses the cross-section quadratic space.
+    // Including the rounded weight distinguishes them, while a node on a shared father face/edge still gets
+    // identical (node,weight) pairs from every adjacent father (shape functions of off-face nodes vanish on
+    // the face), so it is shared, not duplicated. Cleared each round (mesh.hpp).
+    typedef std::set<std::pair<Node *, long long>> SharedNodeKey;
+    static std::map<SharedNodeKey, Node *> Shared_node_registry;
     static void clear_shared_node_registry() { Shared_node_registry.clear(); }
 
     // Not yet implemented: see RefineableElement interface for semantics

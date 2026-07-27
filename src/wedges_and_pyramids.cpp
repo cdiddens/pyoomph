@@ -402,15 +402,22 @@ const double PyramidGaussC2::Weight[27] =
       Shape psi(nfath);
       father_el_pt->shape(s, psi);
       std::vector<Node *> gen;
-      std::set<Node *> reg_key;
+      SharedNodeKey reg_key;
       for (unsigned l = 0; l < nfath; l++)
-        if (psi(l) > 1e-6) { gen.push_back(father_el_pt->node_pt(l)); reg_key.insert(father_el_pt->node_pt(l)); }
+        if (psi(l) > 1e-6)
+        {
+          gen.push_back(father_el_pt->node_pt(l));
+          // Round the weight so bit-level FP differences between two adjacent fathers evaluating the same
+          // shared-face point still collapse, while genuinely different interior positions stay distinct.
+          reg_key.insert(std::make_pair(father_el_pt->node_pt(l), (long long)std::llround(psi(l) * 1e6)));
+        }
 
-      // (2) Reuse a node an already-built element created this round (keyed on the same generating nodes;
-      // adjacent fathers share those face/edge nodes, so the key -- and hence the node -- is shared).
+      // (2) Reuse a node an already-built element created this round (keyed on the same generating
+      // (node,weight) pairs; adjacent fathers produce identical pairs for a shared face/edge node, so the
+      // key -- and hence the node -- is shared, but distinct interior points get distinct keys).
       if (!reg_key.empty())
       {
-        std::map<std::set<Node *>, Node *>::iterator it = Shared_node_registry.find(reg_key);
+        std::map<SharedNodeKey, Node *>::iterator it = Shared_node_registry.find(reg_key);
         if (it != Shared_node_registry.end()) { node_pt(j) = it->second; continue; }
       }
 
@@ -556,7 +563,7 @@ const double PyramidGaussC2::Weight[27] =
 
   // Per-round shared-node registry (see header): nodes created on a father edge/face, keyed by the set of
   // father nodes they are the average of. Cleared each refinement round in mesh.hpp.
-  std::map<std::set<Node *>, Node *> RefineableWedgeElement::Shared_node_registry;
+  std::map<RefineableWedgeElement::SharedNodeKey, Node *> RefineableWedgeElement::Shared_node_registry;
 
 
 

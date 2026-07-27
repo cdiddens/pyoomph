@@ -142,3 +142,65 @@ def test_nonuniform_wedge_2to1_hanging():
         for n in m.nodes():
             err = max(err, abs(n.value(0) - (n.x(0) + 2 * n.x(1) + 3 * n.x(2))))
         assert err < 1e-10, f"linear field not reproduced across the 2:1 wedge interface (max err {err:.2e})"
+
+
+def test_nonuniform_wedge_2to1_hanging_C2():
+    # C2 (quadratic) analogue of the 2:1 test. The exact solution of -laplace(u)=-12 with Dirichlet
+    # u = x^2+2y^2+3z^2 is that quadratic field, which the C2 wedge space (quadratic-triangle x
+    # quadratic-line = 18 nodes) represents exactly on an affine mesh -- so it must be reproduced to machine
+    # precision at every node IFF (a) the uniform C2 build shares the cross-section quadratic nodes correctly
+    # (the share key must carry weights, not just the positive-node set, or distinct interior tri points
+    # collide and the quadratic space collapses) and (b) the C2 quarter-point hanging nodes on the 2:1
+    # interface are all constrained. This caught an over-merging share-key bug invisible to the residual and
+    # coincident-node checks (over-merged nodes are not torn -- they are simply missing).
+    x = var("coordinate")[0]
+    y = var("coordinate")[1]
+    z = var("coordinate")[2]
+    uex = x * x + 2 * y * y + 3 * z * z
+
+    class _P(Problem):
+        def define_problem(self):
+            self += WedgeCubeMesh(N=2)
+            eqs = PoissonEquation(source=-12, space="C2")  # -laplace(u) = -(2+4+6) = -12
+            eqs += DirichletBC(u=uex) @ ["left", "right", "top", "bottom", "front", "back"]
+            eqs += RefineAccordingToElement(level_func=lambda e: 1 if e.get_Eulerian_midpoint()[0] < 0.5 else 0)
+            self += eqs @ "domain"
+
+    with _P() as p:
+        p.max_refinement_level = 2
+        p.solve()
+        m = p.get_mesh("domain")
+        assert m.nelement() > 16, "refinement did not happen"
+        assert _count_coincident_nodes(m) == 0, "duplicate (torn) nodes at the 2:1 C2 wedge interface"
+        err = 0.0
+        for n in m.nodes():
+            err = max(err, abs(n.value(0) - (n.x(0) ** 2 + 2 * n.x(1) ** 2 + 3 * n.x(2) ** 2)))
+        assert err < 1e-10, f"quadratic field not reproduced across the 2:1 C2 wedge interface (max err {err:.2e})"
+
+
+def test_uniform_wedge_C2_reproduces_quadratic():
+    # Uniform (conforming, no hanging) C2 refinement must reproduce a global quadratic exactly. The bare
+    # linear-residual oracle above cannot see the cross-section share-key over-merge (it silently drops DOFs
+    # without tearing the mesh); this manufactured-quadratic check does.
+    x = var("coordinate")[0]
+    y = var("coordinate")[1]
+    z = var("coordinate")[2]
+    uex = x * x + 2 * y * y + 3 * z * z
+
+    class _P(Problem):
+        def define_problem(self):
+            self += WedgeCubeMesh(N=2)
+            eqs = PoissonEquation(source=-12, space="C2")
+            eqs += DirichletBC(u=uex) @ ["left", "right", "top", "bottom", "front", "back"]
+            eqs += RefineToLevel(1)
+            self += eqs @ "domain"
+
+    with _P() as p:
+        p.max_refinement_level = 2
+        p.solve()
+        m = p.get_mesh("domain")
+        assert m.nelement() == 2 * 8 * 8, "uniform refinement of 16 base wedges did not produce 128 wedges"
+        err = 0.0
+        for n in m.nodes():
+            err = max(err, abs(n.value(0) - (n.x(0) ** 2 + 2 * n.x(1) ** 2 + 3 * n.x(2) ** 2)))
+        assert err < 1e-10, f"uniform C2 wedge mesh does not reproduce a quadratic (max err {err:.2e})"
