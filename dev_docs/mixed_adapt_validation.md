@@ -787,6 +787,16 @@ the equation numbering is a symptom, not a cause. **The fix belongs in the distr
 elements must be refined to match their owner before hanging is installed.** Nothing downstream of that can
 be right while a rank holds elements the global mesh does not contain.
 
+**Attempted: making the 2:1 balancing pass globally consistent — landed, but does NOT fix this.**
+`TemplatedMeshBase3d::enforce_refinement_balance()` was entirely rank-local: each process chose which of
+*its* elements to refine (a halo copy included) and, worse, decided when to stop from its own selection
+count, around a `refine_selected_elements()` that is collective. It now unions the selection across all
+processes by quantized centroid, re-selects locally from that union, and terminates on the global set being
+empty, so every rank runs the same rounds and enters the collective together. That removes a genuine latent
+inconsistency — but the six phantom elements survive it unchanged, so they are produced by
+`TreeBasedRefineableMeshBase::adapt()` itself (oomph's own refinement of halo elements), *upstream* of the
+balancing pass. The next attempt should start there, not in pyoomph's balancing.
+
 This also explains the family pattern. Every tet-*containing* mixed layout passes because its hanging comes
 from the position-based mesh-level pass, which asks "is there a node at this position on a coarser
 element's face lattice" — a stale coarse halo element contributes no node the finer elements do not already
