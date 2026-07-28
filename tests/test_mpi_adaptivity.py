@@ -111,7 +111,7 @@ pytestmark = [pytest.mark.skipif(_SKIP_REASON is not None, reason=str(_SKIP_REAS
               pytest.mark.slow]
 
 
-def _run_distributed(cases, nproc, tmpdir, cases_module="box_cases", timeout=900):
+def _run_distributed(cases, nproc, tmpdir, cases_module="box_cases", timeout=900, extra_env=None):
     """Launch the worker under mpirun and return {case_id: [per-rank result dicts]}."""
     spec = json.dumps([[k, e, list(l)] for k, e, l in cases])
     cmd = ["mpirun", "-n", str(nproc)]
@@ -129,6 +129,8 @@ def _run_distributed(cases, nproc, tmpdir, cases_module="box_cases", timeout=900
     ompi_tmp = os.path.join(str(tmpdir), "_ompi_session")
     os.makedirs(ompi_tmp, exist_ok=True)
     env["TMPDIR"] = ompi_tmp
+    if extra_env:
+        env.update(extra_env)
     # A bounded timeout on purpose: a distributed deadlock (one rank stuck in a collective while the
     # other has finished) must surface as a test FAILURE, not as a suite that never returns. Seen at
     # ~50 minutes on a workload that takes 1.5 s serially, so anything past a few minutes is a hang.
@@ -192,11 +194,12 @@ def _assert_matches_serial(cid, per_rank, serial, eq):
                 "%s: %s differs between rank %d and rank %d" % (cid, key, first["rank"], r["rank"])
 
 
-def _check(cases, nproc, tmp_path, mod=None, timeout=900):
+def _check(cases, nproc, tmp_path, mod=None, timeout=900, extra_env=None):
     """Solve `cases` distributed and serially from the SAME case module and require them to agree.
     `mod` defaults to the 2D campaign; test_mpi_adaptivity_3d.py passes box_cases_3d."""
     mod = mod or box_cases
-    dist = _run_distributed(cases, nproc, tmp_path / "dist", cases_module=mod.__name__, timeout=timeout)
+    dist = _run_distributed(cases, nproc, tmp_path / "dist", cases_module=mod.__name__, timeout=timeout,
+                            extra_env=extra_env)
     for kind, eq, levels in cases:
         cid = mod.case_id(kind, eq, levels)
         serial = mod.solve_case(kind, eq, levels, outdir=str(tmp_path / "serial" / cid))
@@ -249,3 +252,24 @@ def test_distributed_four_ranks(tmp_path):
     cases = [(kind, eq, (1, 3)) for kind in box_cases.MESH_KINDS
              for eq in ["poisson2", "unconstrain12", "stokes_th", "ale"]]
     _check(cases, 4, tmp_path)
+
+
+def test_halo_consistency_check_stays_clean(tmp_path):
+    # Runs the campaign with pyoomph's own halo-consistency check armed in THROW mode
+    # (PYOOMPH_CHECK_HALO_CONSISTENCY=2), so any adapt during these cases that leaves the processes
+    # disagreeing about the elements they share fails the run outright instead of quietly producing a
+    # wrong mesh.
+    #
+    # This pins the invariant behind the defect-C fix (see dev_docs/mixed_adapt_validation.md section
+    # 9.8): pyoomph applies per-element refinement overrides rank-locally after oomph-lib's estimator has
+    # synchronised its errors, so without Mesh::synchronise_elemental_errors() the ranks refine different
+    # elements. It also pins the CHECK -- if the check itself stops working, the negative test below
+    # notices, and if it starts firing spuriously, this one does.
+    #
+    # Deliberately spans the mechanisms that can drive refinement apart: a mesh-level RefineToLevel plus a
+    # boundary-restricted one (the pair that produced the original divergence), across both refinement
+    # states and every discretisation.
+    cases = [(kind, eq, lv) for kind in box_cases.MESH_KINDS
+             for eq in ["poisson2", "unconstrain12", "stokes_th", "ale"]
+             for lv in [(1, 1), (1, 3)]]
+    _check(cases, 2, tmp_path, extra_env={"PYOOMPH_CHECK_HALO_CONSISTENCY": "2"})

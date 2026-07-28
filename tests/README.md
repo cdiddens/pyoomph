@@ -46,3 +46,28 @@ count, and MPI-reduced integral observables), and they are checked both against 
 
 These tests **skip** rather than fail if `mpirun`, MPI support, or PETSc with MUMPS is unavailable, so a
 serial-only installation still runs the full suite. Do not run pytest itself under `mpirun`.
+
+### Debugging a distributed adaptive run
+
+Set `PYOOMPH_CHECK_HALO_CONSISTENCY` to have every adapt cross-check that the processes still agree about
+the elements they share — their positions, refinement levels, pending refinement flags, and the error
+estimates about to decide their fate:
+
+| value | effect |
+|---|---|
+| unset, `0`, `off` | off (the default; no cost) |
+| `1`, `warn`, `report` | report mismatches to stdout and carry on |
+| `2`, `throw` | raise on the first mismatch |
+
+```bash
+PYOOMPH_CHECK_HALO_CONSISTENCY=throw mpirun -n 2 python my_script.py --distribute
+```
+
+Reach for this whenever a distributed run disagrees with the serial one, produces a partition-dependent
+answer, or diverges where serial converges. Divergent meshes are silent at the point they happen and only
+surface much later as a wrong `ndof`, an `inf` residual or a deadlock — this names the offending elements
+by position at the adapt that created them. The verdict is agreed across processes, so throwing mode fails
+the whole job rather than one rank while the others block.
+
+`Mesh.check_halo_consistency()` runs the same check on demand from Python; it is collective, so every rank
+must call it. `test_halo_consistency_check_stays_clean[_3d]` keeps the campaign clean under `throw`.

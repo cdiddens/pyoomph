@@ -1374,6 +1374,12 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("get_boundary_names",mesh_method(&pyoomph::Mesh::get_boundary_names), "Returns the names of all boundaries of this mesh, ordered by their numeric index")
 		.def("set_spatial_error_estimator_pt",mesh_method(&pyoomph::Mesh::set_spatial_error_estimator_pt), nb::keep_alive<1, 2>(), nb::arg("error_estimator"), "Assigns the Z2ErrorEstimator used to drive adaptive mesh refinement on this mesh")
 		.def("_enlarge_elemental_error_max_override_to_only_nodal_connected_elems",mesh_method(&pyoomph::Mesh::enlarge_elemental_error_max_override_to_only_nodal_connected_elems), nb::arg("boundary_index"), "Propagates the per-element maximum-error override of elements on the given boundary to all elements sharing a node with them")
+		.def("check_halo_consistency",mesh_method([](pyoomph::Mesh *m, bool throw_on_mismatch)
+			 { return m->check_halo_consistency(throw_on_mismatch); }), nb::arg("throw_on_mismatch") = false,
+			 "In parallel (MPI) runs, checks that all processes agree about the elements they share -- their positions, "
+			 "refinement levels and pending refinement flags. Returns the number of inconsistencies found (0 if the "
+			 "processes agree), reporting details to stdout; pass throw_on_mismatch to raise instead. Collective: every "
+			 "process must call it. Returns 0 on a mesh that is not distributed.")
 		.def("adapt_by_elemental_errors",mesh_method([](pyoomph::Mesh *self, const std::vector<double> &errs)
 			 {
  	   oomph::Vector<double> oerrs(errs.size());

@@ -876,6 +876,15 @@ is fooled by it.
 * The consistency check that would have found this on day one already existed upstream, behind a build flag
   that is off. When a distributed run misbehaves, look for the vendored `PARANOID` checks *first* — and
   consider whether some of them belong in a debug-only pyoomph path rather than a rebuild-the-world flag.
+  **This one now does:** `check_halo_element_consistency()` (`src/mesh.cpp`), armed with
+  `PYOOMPH_CHECK_HALO_CONSISTENCY=1|throw` and off by default, runs at three points in every adapt — after
+  the error synchronisation, after refinement, and after 2:1 balancing. It is verified against the defect
+  it was built for: with `synchronise_elemental_errors()` disabled it names the six offending elements by
+  position at the stage that created the divergence, and fails the run in ~10 s rather than deadlocking,
+  because the verdict is `MPI_Allreduce`d before anyone throws (only the process that *owns* a contested
+  element can see the disagreement, so an un-agreed throw would be asymmetric — the exact failure mode this
+  check exists to prevent). `test_halo_consistency_check_stays_clean[_3d]` runs the campaign under
+  `throw`.
 * Comparing only what you suspect is wrong (flags, hanging sets, levels) tells you nothing when the two
   lists being compared have themselves drifted out of correspondence. Carrying an independent identity
   (here: the element centroid) in every diagnostic exchange is what turned unreadable output into a

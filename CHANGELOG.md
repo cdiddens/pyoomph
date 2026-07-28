@@ -18,6 +18,14 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
   identification) and 3D Gmsh facet support.
 - **New solver backends**: a macOS Accelerate-framework linear solver and
   eigensolver. PETSc gained automatic field-split   index sets and general solver improvements.
+- **Halo consistency check for distributed runs** (`PYOOMPH_CHECK_HALO_CONSISTENCY=1|throw`, off by
+  default): every adapt cross-checks that all processes agree about the elements they share -- positions,
+  refinement levels, pending refinement flags and the error estimates about to decide their fate --
+  reporting or raising if they do not. Divergent meshes are silent where they happen and only surface much
+  later as a wrong `ndof`, an `inf` residual or a deadlock; this names the offending elements by position
+  at the adapt that created them. The verdict is agreed across processes, so raising mode fails the whole
+  job rather than one rank while the others block. Also callable from Python as
+  `Mesh.check_halo_consistency()`.
 - **`pyoomph check`** (`python -m pyoomph check solver|eigen|compiler|all`):
   reworked solver selection, checking, and reporting, including install hints
   for missing optional dependencies (MKL/Pardiso, PETSc/SLEPc).

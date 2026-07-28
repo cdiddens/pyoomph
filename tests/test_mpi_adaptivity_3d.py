@@ -97,3 +97,13 @@ def test_distributed_3d_pure_tet_nonuniform(tmp_path):
     # TemplatedMeshBase::synchronise_elemental_errors(). Kept on a short timeout: the old failure mode was
     # a hang, so a regression must not be allowed to stall a suite run.
     _check([("tet", "neumann", (1, 2))], 2, tmp_path, mod=box_cases_3d, timeout=240)
+
+
+def test_halo_consistency_check_stays_clean_3d(tmp_path):
+    # The 3D counterpart of test_halo_consistency_check_stays_clean, on the layouts whose hanging comes
+    # from the tree-based per-element route (pure tet) as well as the position-based mesh-level one --
+    # the distinction that decided which layouts defect C could reach at all. Armed in THROW mode, so a
+    # reintroduced divergence fails here rather than surfacing as an inf residual somewhere downstream.
+    cases = [(kind, eq, (1, 2)) for kind in ["tet", "hex", "all_four"]
+             for eq in ["neumann", "stokes_th", "ale"]]
+    _check(cases, 2, tmp_path, mod=box_cases_3d, extra_env={"PYOOMPH_CHECK_HALO_CONSISTENCY": "2"})

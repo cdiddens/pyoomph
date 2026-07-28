@@ -43,6 +43,26 @@ namespace pyoomph
 	class Mesh;
 
 
+	// Cross-check that all processes agree about the elements they share, and report or throw if they do
+	// not. For every pair of processes, each haloed element is compared against the halo copy the other
+	// process holds of it: their positions, their refinement levels, their pending refinement/unrefinement
+	// flags, and -- if `errors` is given -- the error estimate that is about to decide their fate.
+	//
+	// Comparing the POSITIONS is what makes the output usable. Mesh::halo_element_pt() and
+	// haloed_element_pt() build their vectors by walking the leaves of the same root elements' trees, so
+	// the two lists correspond entry by entry only for as long as the trees agree. Once they diverge, every
+	// later comparison (and every real halo exchange, including the error estimator's) is silently
+	// comparing unrelated elements. Carrying an independent identity tells "these two processes disagree
+	// about this element" apart from "these two lists no longer describe the same elements at all".
+	//
+	// Returns the number of inconsistencies found ACROSS ALL PROCESSES (every process gets the same
+	// number, so a caller cannot act on a verdict its peers do not share); 0 means they agree. Costs a
+	// handful of
+	// point-to-point messages, so it is meant for diagnosis, not for every adapt of a production run --
+	// see PYOOMPH_CHECK_HALO_CONSISTENCY in TemplatedMeshBase::adapt(). No-op unless the mesh is
+	// distributed over more than one process.
+	unsigned check_halo_element_consistency(oomph::Mesh *mesh_pt, const std::string &stage,
+											const oomph::Vector<double> *errors, bool throw_on_mismatch);
 
 
 	// Base class for all pyoomph meshes. Wraps an oomph-lib (Refineable)Mesh and adds
@@ -115,6 +135,15 @@ namespace pyoomph
 						for (unsigned t = 0; t < nt; t++)
 							n->set_value(t, i, n->value(t, i));
 			}
+		}
+
+		// Diagnostic: cross-check that all processes agree about the elements they share (positions,
+		// refinement levels, pending refinement flags). Returns the number of inconsistencies found, 0 if
+		// the processes agree; no-op and 0 unless the mesh is distributed over more than one process.
+		// Collective -- every process must call it. See check_halo_element_consistency.
+		unsigned check_halo_consistency(bool throw_on_mismatch = false)
+		{
+			return check_halo_element_consistency(this, "manual check", NULL, throw_on_mismatch);
 		}
 
 		virtual void clear_additional_dof_constraints(); // Clear any additional dof constraints that have been applied to this mesh's nodes
@@ -570,12 +599,19 @@ namespace pyoomph
 			// end up with a different error than the element it is a copy of, and oomph-lib then refines
 			// the two inconsistently. Re-impose the owner's value on every halo element before adapting.
 			this->synchronise_elemental_errors(updated_errors);
+			// Opt-in diagnostic, off by default. Checked AFTER the synchronisation above, not before:
+			// disagreeing overrides are expected there and are exactly what it just repaired, so what is
+			// worth reporting is any disagreement that SURVIVED the repair.
+			const int halochk = this->halo_consistency_check_mode();
+			if (halochk) check_halo_element_consistency(this, "after error synchronisation", &updated_errors, halochk > 1);
 			TreeBasedRefineableMeshBase::adapt(updated_errors);
+			if (halochk) check_halo_element_consistency(this, "after refinement", NULL, halochk > 1);
 			// Enforce 2:1 refinement balancing where the shape needs it (tetrahedra, whose geometric
 			// hang scheme has no tree-level balancing): refine any element that is >1 level coarser
 			// than a neighbour, iterating to a fixed point, so all hanging is single-level. No-op for
 			// meshes handled by oomph-lib's own tree (quad/hex) or that tolerate multi-level hangs.
 			this->enforce_refinement_balance();
+			if (halochk) check_halo_element_consistency(this, "after 2:1 balancing", NULL, halochk > 1);
 			// After refinement, install any shape-specific hanging nodes that oomph-lib's per-element
 			// setup did not (triangles/tets use a geometric hang scheme rather than the box coordinate
 			// descent). Runs before equation numbering, so the hangs are picked up by
@@ -589,6 +625,12 @@ namespace pyoomph
 		// are applied afterwards and rank-locally, which would otherwise reintroduce the disagreement.
 		// No-op in serial or on a non-distributed mesh.
 		void synchronise_elemental_errors(oomph::Vector<double> &errs);
+
+		// How thoroughly adapt() should cross-check that the processes still agree about the elements they
+		// share: 0 off, 1 report to stdout, 2 throw. Read from PYOOMPH_CHECK_HALO_CONSISTENCY
+		// ("1"/"warn"/"report", or "2"/"throw"), then agreed across all processes -- the check itself is
+		// collective, so a variable set on only some ranks would otherwise deadlock rather than diagnose.
+		int halo_consistency_check_mode();
 
 		// Hook to enforce 2:1 refinement balancing after adapt; overridden by dimension-specific
 		// subclasses that need it (currently 3d tetrahedra). No-op by default.
