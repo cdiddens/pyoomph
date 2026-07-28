@@ -677,11 +677,19 @@ the moment one starts passing — which is the signal to delete the marker. 38 o
 ### 9.7 Next
 
 ~~Defect B~~ — **done**, §9.5. ~~Defect A~~ — **done**, §9.4; it cleared the 3D halves of tasks 2/3, 4 and
-5 in one go, as expected, since they all failed for the same reason. ~~Defect C~~ — **done**, §9.8. What
-remains is **Phase D** (`ConstrainPositionsToC1Space`, §4), which is
-independent of all of it. Note that Phase D should also revisit the `POSITION_CONSTRAIN_TO_C1` guard left
-deliberately strict in §9.5, and that the position analogue of the C1-corner tables fixed in §9.4 is worth
-re-checking at the same time -- `pin_position` uses the same `c1_constraint_corners` redistribution.
+5 in one go, as expected, since they all failed for the same reason. ~~Defect C~~ — **done**, §9.8.
+~~Phase D~~ (`ConstrainPositionsToC1Space`) — **done**, §11, which is where it became task 6. That also
+settled the two items flagged here: the `POSITION_CONSTRAIN_TO_C1` guard left deliberately strict in §9.5
+was relaxed to match the field branch once the missing masters were registered (§11.3), and the position
+analogue of the §9.4 C1-corner tables needed no separate fix — `pin_position` uses the same
+`c1_constraint_corners` redistribution, so correcting the tables corrected both, now covered by
+`ale_posc1`/`ale_posc1_unc` across all 11 3D layouts.
+
+**Nothing from the seven tasks remains open.** The campaign carries no `xfail` and no excluded
+discretisation, in 2D or 3D, serial or distributed. The one adjacent limitation that is still open is
+*not* part of this campaign and predates it: distributed **eigensolves** segfault inside oomph-lib's
+`parallel_sparse_assemble` during `get_eigenproblem_matrices`, on non-adaptive meshes too. See
+`mixed_adaptive_meshes.md` §4.17 for the diagnosis and the two-step path to enabling them.
 
 ### 9.8 Defect C — distributed pure-tet, non-uniform — **[FIXED]**
 
