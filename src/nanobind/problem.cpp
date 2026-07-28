@@ -58,6 +58,29 @@ namespace nb = nanobind;
 namespace pyoomph
 {
 
+	// Copy a residual/solution DoubleVector into a plain std::vector indexed by GLOBAL equation number.
+	//
+	// oomph::DoubleVector::operator[] indexes the vector's LOCAL rows (see double_vector.h: "[] access
+	// function to the (local) values of this vector"). On a distributed (MPI) problem the vector is
+	// row-partitioned, so it stores only nrow_local() doubles while callers here want all nrow() of them --
+	// reading by global index would run off the end of the buffer and return whatever is in memory (we saw
+	// 1e+148 / nan for residuals that are machine zero serially). Redistribute onto a non-distributed
+	// (globally replicated) distribution first, so every rank ends up with the same full-length vector.
+	// Serial runs take the cheap path: the vector is already non-distributed.
+	static std::vector<double> double_vector_to_global_std_vector(oomph::DoubleVector &v)
+	{
+		if (v.distributed())
+		{
+			oomph::LinearAlgebraDistribution global_dist(v.distribution_pt()->communicator_pt(), v.nrow(), false);
+			v.redistribute(&global_dist);
+		}
+		const unsigned n = v.nrow();
+		std::vector<double> res(n);
+		for (unsigned int i = 0; i < n; i++)
+			res[i] = v[i];
+		return res;
+	}
+
 	// Trampoline class forwarding the virtual hook functions of pyoomph::Problem to Python,
 	// so that a Python class derived from Problem can override e.g. setup_pinning() or
 	// set_initial_condition() and have the C++ core call back into Python.
@@ -884,12 +907,10 @@ void PyReg_Problem(nb::module_ &m)
 			{
 				oomph::DoubleVector ov;
 				self->get_residuals(ov);
-				std::vector<double> res(self->ndof());
-				for (unsigned int i = 0; i < self->ndof(); i++)
-					res[i] = ov[i];
-				return vector_to_ndarray(res);
+				return vector_to_ndarray(pyoomph::double_vector_to_global_std_vector(ov));
 			},
-			"Assemble and return the current residual vector (without the Jacobian) at the current state.")
+			"Assemble and return the current residual vector (without the Jacobian) at the current state. On a distributed (MPI) problem, "
+			"the residuals are gathered so that every process returns the same full-length vector.")
 		.def(
 			"get_current_pinned_values", [](pyoomph::Problem *self, bool with_pos)
 			{ return vector_to_ndarray(self->get_current_pinned_values(with_pos)); },
@@ -966,14 +987,16 @@ void PyReg_Problem(nb::module_ &m)
 				auto J_colindex_arr = vector_to_ndarray(J_colindex_vec);
 				auto J_row_start_arr = vector_to_ndarray(J_row_start_vec);
 
-				std::vector<double> res(n);
-				for (unsigned int i = 0; i < n; i++)
-					res[i] = resi[i];
+				// Same distributed-indexing caveat as get_residuals(): resi is row-partitioned under MPI, so
+				// it must be gathered before it can be read by global equation number. (The Jacobian stays
+				// in LOCAL CSR -- that is what the callers expect, hence J_nrow_local being returned too.)
+				auto res = pyoomph::double_vector_to_global_std_vector(resi);
 				return std::make_tuple(vector_to_ndarray(res), n, J_nzz, J_nrow_local, J_values_arr, J_colindex_arr, J_row_start_arr);
 			},
 			nb::arg("residual_name"),
 			"Temporarily activate the residual/Jacobian combination named ``residual_name`` (restoring the previously active one afterwards), "
-			"and assemble and return (residuals, n, J_nnz, J_nrow_local, J_values, J_column_index, J_row_start) with the Jacobian in local CSR format.")
+			"and assemble and return (residuals, n, J_nnz, J_nrow_local, J_values, J_column_index, J_row_start) with the Jacobian in local CSR format. "
+			"On a distributed (MPI) problem the residuals are gathered to full length on every process, while the Jacobian stays process-local.")
 		.def("quiet", &pyoomph::Problem::quiet, nb::arg("quiet") = true, "Deactivate output messages from the oomph-lib and pyoomph C++ core")
 		.def("_open_log_file", &pyoomph::Problem::open_log_file, nb::arg("fname"), nb::arg("activate_logging") = true, "Open a log file for the problem")
 		.def("_assemble_hessian_tensor", &pyoomph::Problem::assemble_hessian_tensor, nb::arg("symmetric"),

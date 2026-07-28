@@ -137,7 +137,7 @@ jump). That is ~1.5k–6k elements and stays well under 1 GB, which is also safe
 
 ## 3. MPI blockers — both outside the refinement engine
 
-### 3.1 `Problem.get_residuals()` is unsound on a distributed vector — **[BLOCKED → fix first]**
+### 3.1 `Problem.get_residuals()` is unsound on a distributed vector — **[DONE]**
 
 This is **the** blocker: it silently destroys the oracle that essentially every adaptivity test in `tests/`
 relies on.
@@ -182,15 +182,34 @@ if (ov.distributed()) {
 }
 ```
 
-The same read-by-global-index bug is present in `_assemble_residual_jacobian` (`problem.cpp:~969`,
-`res[i] = resi[i]` over `n = J.distribution_pt()->nrow()`); fix both. Audit any other binding that indexes
-a `DoubleVector` beyond `nrow_local()`.
+**Landed.** A `double_vector_to_global_std_vector()` helper in `src/nanobind/problem.cpp` now redistributes
+before reading; `get_residuals()` and `_assemble_residual_jacobian()` both use it. The same
+read-by-global-index bug was present in three more places and is fixed with a matching pair of helpers
+(`gather_double_vector_to_global` / `scatter_global_to_double_vector`) in `src/problem.cpp`:
 
-Note this changes `get_residuals()` from "silently wrong" to "globally replicated" under MPI, so every rank
-returns the same full-length vector — which is what test code naturally assumes and what makes a
-per-rank `assert max|res| < tol` a valid oracle.
+* `Problem::get_history_dofs()` — read out of bounds,
+* `Problem::get_current_dofs()` — read out of bounds,
+* `Problem::set_current_dofs()` — **wrote** out of bounds (it built a vector on the distributed dof
+  distribution and then filled `ndof()` entries); this one is used by
+  `test_constrained_field_unrefinement`, so it would have been the next thing to bite.
 
-### 3.2 `create_pressure_fixation()` pins a rank-local node — **[BLOCKED → fix first]**
+This changes `get_residuals()` / `get_current_dofs()` / `get_history_dofs()` from "silently wrong" to
+"globally replicated" under MPI: every rank returns the same full-length vector, which is what test code
+naturally assumes and what makes a per-rank `assert max|res| < tol` a valid oracle. `set_current_dofs()`
+correspondingly now takes a globally indexed vector on every rank. The Jacobian returned by
+`_assemble_residual_jacobian` deliberately stays process-local CSR — that is what its callers expect.
+
+*Not* fixed (out of scope, and blocked anyway): the bifurcation-handler `get_eigenfunction` bindings
+(`problem.cpp:~446` and friends) index `oomph::Vector<DoubleVector>` the same way. Distributed eigensolves
+are already known broken for an unrelated reason (engine doc §4.17), so this is recorded, not repaired.
+
+**Verified.** 4×4 quad Poisson, `mpirun -n 2 --distribute`, ndof 9 / 49 / 225: max\|res\| now
+6.3e-17 / 5.8e-17 / 9.1e-17, **identical on both ranks** and matching serial. The full 36-case matrix
+(C1 Poisson, C2 Poisson, coupled C2+C1, Taylor–Hood Stokes × quad/tri/mixed × 3 refinement states) is
+machine zero on every rank, with nodal values matching the serial reference. Serial suite unaffected
+(152 refinement tests pass).
+
+### 3.2 `create_pressure_fixation()` pins a rank-local node — **[DONE]**
 
 `pyoomph/equations/navier_stokes.py:~73`:
 
@@ -212,19 +231,47 @@ and the printout shows `PINNING some pressure with value 0` once per rank. Repla
 globally well-defined `DirichletBC(pressure=0) @ "bottom"` makes the same run complete, which isolates the
 cause.
 
-**Fix.** Choose the pinned node deterministically and globally: over **non-halo** nodes only, take the
-lexicographically smallest coordinate, `allreduce` to agree on one winner across ranks, and pin it on the
-owning rank (and on any rank holding it as a halo, so the pinned state is consistent). Serial reduces to
-today's behaviour. The stray `print("PINNING some pressure with value", …)` should also be demoted to the
-existing verbosity mechanism.
+**Landed.** All three fixation classes had the same `element_pt(0)` defect and all three are fixed
+(`pyoomph/equations/navier_stokes.py`):
 
-### 3.3 What the MPI matrix actually shows once the oracle is discounted
+* `PressureFixationTaylorHood` — candidates are the vertex (C1) nodes of **non-halo** elements; the
+  lexicographically smallest coordinate wins, agreed across ranks by `allreduce(…, MPI.MIN)`. Every rank
+  then pins whichever local copy matches — **including halo copies**, since a halo node must mirror the
+  owner's pinned state or the per-rank dof counts diverge. The lookup scans all local nodes, not just each
+  element's `node_pt(0)`, because on another rank the winner may not be any element's vertex 0.
+* `PressureFixationCrouzeixRaviart` / `PressureFixationScottVogelius` — same selection by smallest element
+  **centroid** among non-halo elements. Unlike the nodal case, an element-internal dof exists only on its
+  owner, so a rank that does not own the winner pins nothing.
 
-Reading only the *solution* columns of the `-n 2 --distribute` matrix (C1 Poisson, C2 Poisson, coupled
-C2+C1, Taylor–Hood Stokes × quad/tri/mixed × 3 refinement states): the distributed nodal values reproduce
-the serial ones in every case that ran to completion. That is encouraging but **not** evidence — with a
-broken oracle and a crashing pressure fixation, nothing here is validated yet. Re-run the whole matrix as
-the first thing after §3.1 and §3.2 land.
+Two details worth remembering:
+* Selection happens in `apply()`, not cached in `setup()`: refinement and distribution both rebuild the
+  node/element objects, and after distribution the winner may live on a different rank. `apply()` runs on
+  all ranks in lockstep (driven by the global `reapply_boundary_conditions()`), so the collective is safe
+  there. `setup()` — which is *not* re-run after adaptation — would have left a stale pointer.
+* The no-candidate marker in the reduction is `(1,)` against tagged candidates `(0, key)`, **not** an
+  inf-filled tuple: a rank with no local elements does not know `ndim`, and `(inf,) < (inf, inf)` is true,
+  so a length-mismatched sentinel would have won the min. Every rank must reach the reduction, including
+  ones with an empty partition.
+
+The stray `print("PINNING some pressure with value", …)` is gone.
+
+**Verified.** Serial unchanged (9 Stokes/TH/CR tests pass, and the serial residuals in §2.1 are unmoved).
+Distributed Taylor–Hood Stokes box on quad / tri_left / tri_crossed / mixed at levels (1,3), which
+previously segfaulted, now runs at `-n 2` **and** `-n 4` with max\|res\| ≤ 1.7e-16 identical on all ranks
+and `max|u|` matching serial to all printed digits. Crouzeix–Raviart likewise (`-n 2`, residuals ≤ 1.6e-15,
+serial-matching velocities).
+
+### 3.3 What the MPI matrix shows now that the oracle is sound
+
+With §3.1 and §3.2 landed, the full `-n 2 --distribute` matrix — C1 Poisson, C2 Poisson, coupled C2+C1,
+Taylor–Hood Stokes × quad / tri_left / mixed × non-adaptive / uniform / two-level 2:1 — is **machine zero
+in all 36 cases, with the residual identical on both ranks and the nodal values matching the serial
+reference**. Adding the Taylor–Hood box with its own pressure fixation at `-n 2` and `-n 4`, and
+Crouzeix–Raviart at `-n 2`, all on the two-level non-uniform mesh, all clean.
+
+So distributed adaptive solving on mixed adaptive meshes — including mixed C1/C2 spaces across a quad↔tri
+interface with two levels of refinement jump — is now genuinely evidenced, where before it was
+unmeasurable. What remains for Phase B is to turn this sweep into automated tests (§5.2).
 
 ---
 
@@ -285,12 +332,11 @@ downstream is testable.
 
 **Phase A — unblock (must precede everything MPI).**
 - A1. **[DONE]** Default solver under MPI (§1).
-- A2. Fix `get_residuals()` (and `_assemble_residual_jacobian`) for distributed vectors (§3.1); rebuild via
-  `build_for_develop.sh`. Regression: serial `tests/` unchanged; `mpirun -n 2 --distribute` on a Poisson
-  ladder must now give machine zero where serial does.
-- A3. Fix `create_pressure_fixation()` for distributed meshes (§3.2).
-- A4. Add the MPI pytest harness (§5.2) and re-run the full `probe_mpi_matrix` sweep — this is the first
-  moment any distributed claim on this branch becomes evidence.
+- A2. **[DONE]** Distributed `get_residuals()` / `_assemble_residual_jacobian()` / `get_current_dofs()` /
+  `get_history_dofs()` / `set_current_dofs()` (§3.1).
+- A3. **[DONE]** Globally consistent pressure fixation for all three modes (§3.2).
+- A4. Add the MPI pytest harness (§5.2) and codify the `probe_mpi_matrix` sweep as tests — the sweep itself
+  is already green (§3.3), so this is transcription plus the serial-reference comparison.
 
 **Phase B — 2D campaign (mostly codification; serial half already verified).**
 - B1. Stokes box f=(−y,x), Taylor–Hood, quad / tri_left / tri_crossed / mixed, levels (0,0)/(1,1)/(1,3);

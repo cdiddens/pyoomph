@@ -55,6 +55,21 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
 
 ### Fixed
 
+- **MPI**: under `mpirun -n N` with `N>1`, PETSc+MUMPS is now selected as the default
+  linear/eigen solver on every platform (previously the platform cascade picked the
+  serial-only Pardiso on Linux, which then raised from its own constructor). Serial
+  solver selection is unchanged.
+- **MPI**: `Problem.get_residuals()`, `get_current_dofs()`, `get_history_dofs()` and
+  `_assemble_residual_jacobian()` read an `oomph::DoubleVector` by *global* equation
+  number, but that vector is row-partitioned on a distributed problem — they returned
+  out-of-bounds garbage (`nan`, `1e+148`, …) as soon as `ndof > nrow_local`.
+  `set_current_dofs()` wrote out of bounds in the same way. All now gather/scatter
+  properly, so under MPI every rank sees the same full-length vector. (The Jacobian
+  returned by `_assemble_residual_jacobian` remains process-local CSR, as before.)
+- **MPI**: `create_pressure_fixation()` (Taylor-Hood, Crouzeix-Raviart and
+  Scott-Vogelius) pinned the pressure dof of the *rank-local* element 0, so each rank
+  constrained a different dof and distributed Stokes solves crashed. The pinned
+  node/element is now selected deterministically and agreed across ranks.
 - Interface-dof bugs breaking adaptive multi-physics interfaces, C1TB
   interfaces, and edge cases on interfaces with opposite orientation.
 - Hele-Shaw factors corrected
