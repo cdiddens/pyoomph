@@ -42,7 +42,8 @@ from pyoomph import *
 from pyoomph.expressions import *
 from pyoomph.equations.poisson import PoissonEquation
 from pyoomph.equations.navier_stokes import StokesEquations
-from pyoomph.equations.ALE import LaplaceSmoothedMesh
+from pyoomph.equations.ALE import (LaplaceSmoothedMesh, ConstrainPositionsToC1Space,
+                                   UnconstrainPositionsFromC1Space)
 
 from box_mesh_3d import MixedBoxMesh3D, ALL_LAYOUTS, MIXED_LAYOUTS, PURE_LAYOUTS
 
@@ -51,7 +52,7 @@ _SIDE_WALLS = ["left", "right", "front", "back", "bottom"]  # everything except 
 
 MESH_KINDS = ALL_LAYOUTS
 EQUATIONS = ["poisson1", "poisson2", "mixed12", "constrain12", "unconstrain12", "neumann",
-             "stokes_th", "ale"]
+             "stokes_th", "ale", "ale_posc1", "ale_posc1_unc"]
 LEVELS = [(0, 0), (1, 1), (1, 2)]
 
 J_EVAP = 0.1
@@ -96,7 +97,7 @@ class BoxProblem3D(Problem):
             eqs += st.create_pressure_fixation(value=0)
             eqs += IntegralObservables(intcurl=x * var("velocity_y") - y * var("velocity_x"),
                                        intu2=dot(var("velocity"), var("velocity")))
-        elif self.eq == "ale":
+        elif self.eq in ("ale", "ale_posc1", "ale_posc1_unc"):
             st = StokesEquations(mode="TH", dynamic_viscosity=1)
             eqs = st
             eqs += LaplaceSmoothedMesh()
@@ -105,6 +106,11 @@ class BoxProblem3D(Problem):
             eqs += DirichletBC(velocity_x=0, velocity_y=0, velocity_z=0) @ _SIDE_WALLS
             eqs += DirichletBC(velocity_x=0, velocity_y=0, velocity_z=J_EVAP) @ "top"
             eqs += DirichletBC(pressure=0) @ "bottom"
+            # See the 2D counterpart in box_cases.py.
+            if self.eq != "ale":
+                eqs += ConstrainPositionsToC1Space()
+            if self.eq == "ale_posc1_unc":
+                eqs += UnconstrainPositionsFromC1Space() @ "top"
             eqs += IntegralObservables(volume=1, intuz=var("velocity_z"),
                                        intu2=dot(var("velocity"), var("velocity")))
         else:

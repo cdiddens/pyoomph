@@ -52,7 +52,8 @@ from pyoomph import *
 from pyoomph.expressions import *
 from pyoomph.equations.poisson import PoissonEquation
 from pyoomph.equations.navier_stokes import StokesEquations
-from pyoomph.equations.ALE import LaplaceSmoothedMesh
+from pyoomph.equations.ALE import (LaplaceSmoothedMesh, ConstrainPositionsToC1Space,
+                                   UnconstrainPositionsFromC1Space)
 from pyoomph.meshes.mesh import MeshTemplate
 from pyoomph.meshes.simplemeshes import RectangularQuadMesh
 
@@ -60,7 +61,7 @@ _BND = ["left", "right", "top", "bottom"]
 
 MESH_KINDS = ["quad", "tri_left", "tri_crossed", "mixed"]
 EQUATIONS = ["poisson1", "poisson2", "mixed12", "constrain12", "unconstrain12", "neumann",
-             "stokes_th", "stokes_cr", "ale"]
+             "stokes_th", "stokes_cr", "ale", "ale_posc1", "ale_posc1_unc"]
 LEVELS = [(0, 0), (1, 1), (1, 3)]
 
 # The prescribed outflow ("evaporation") through the free top surface in the ALE case.
@@ -164,7 +165,7 @@ class BoxProblem(Problem):
             eqs += NeumannBC(u=1) @ "right"
             eqs += NeumannBC(u=x) @ "top"
             eqs += IntegralObservables(intu=var("u"), intu2=var("u") ** 2)
-        elif self.eq == "ale":
+        elif self.eq in ("ale", "ale_posc1", "ale_posc1_unc"):
             # Moving mesh (ALE): Stokes on a Laplace-smoothed mesh whose top surface is free in y, with a
             # prescribed outflow standing in for evaporation. The nodal POSITIONS are unknowns coupled to
             # the flow, so this exercises the hanging-node machinery on the position dofs as well as on the
@@ -177,6 +178,13 @@ class BoxProblem(Problem):
             eqs += DirichletBC(velocity_x=0, velocity_y=0) @ ["left", "right", "bottom"]
             eqs += DirichletBC(velocity_x=0, velocity_y=J_EVAP) @ "top"
             eqs += DirichletBC(pressure=0) @ "bottom"
+            # ConstrainPositionsToC1Space degrades the mesh POSITION to the C1 space (the moving-mesh
+            # analogue of ConstrainFieldsToC1Space); the "_unc" variant restores the C2 position dofs on the
+            # free surface, which is the combination a curved free boundary needs.
+            if self.eq != "ale":
+                eqs += ConstrainPositionsToC1Space()
+            if self.eq == "ale_posc1_unc":
+                eqs += UnconstrainPositionsFromC1Space() @ "top"
             eqs += IntegralObservables(area=1, intuy=var("velocity_y"),
                                        intu2=dot(var("velocity"), var("velocity")))
         elif self.eq in ("stokes_th", "stokes_cr"):

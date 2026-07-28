@@ -765,3 +765,51 @@ boundary-facet propagation under refinement is the most shape-dependent part of 
 3D campaign continues to sweep all 11 exhaustively, so nothing is uncovered; the distributed campaign only
 has to show that partitioning does not break what serial already proved. Full-run time fell from 16 to 11
 minutes with identical pass/xfail counts.
+
+---
+
+## 11. Task 6 / Phase D — `ConstrainPositionsToC1Space`: measured current state
+
+The position constraint is the last item of the original task list. Before planning the work, the whole
+matrix was measured — `ale_posc1` (ALE + `ConstrainPositionsToC1Space`) and `ale_posc1_unc` (the same plus
+`UnconstrainPositionsFromC1Space @ "top"`), added to `box_cases.py` / `box_cases_3d.py`. Each case runs in
+its own process, because the 2D failure is a C-level `assert` (SIGABRT) that a `try/except` cannot catch and
+that otherwise kills the whole sweep.
+
+| discretisation | non-adaptive | uniform | non-uniform (2:1) |
+|---|---|---|---|
+| 2D quad | pass | pass | **pass** |
+| 2D tri_left / tri_crossed / mixed | pass | pass | `Assertion local_eqn < eleminfo->ndof` (§4.14) |
+| 3D — all 11 layouts | pass | pass | `RuntimeError: Cannot enforce a degration to C1 on a C1 vertex node` |
+
+Both variants behave identically, and the boundary unconstrain does bite (2D quad ndof 1289 → 1321; 3D hex
+1219 → 1259), so these are real tests and not silent no-ops.
+
+### 11.1 What this changes about the §4.14 estimate
+
+* **The conforming case is in better shape than §4.14 suggested.** It described the feature as working "on
+  adaptive quads and on *uniform* tris". In fact it works on non-adaptive and uniformly refined meshes of
+  **every** 2D and 3D family, including all the mixed 3D layouts. Only 2:1 hanging breaks it.
+* **The 3D failure is not a separate defect** — it is the `POSITION_CONSTRAIN_TO_C1` guard deliberately left
+  strict in §9.5 (`src/elements.cpp:2727`) while its field-branch twin was relaxed. Relaxing it would let 3D
+  proceed to whatever the 2D tri path reaches, which is almost certainly the same assertion; it was left in
+  place precisely so the failure stays legible instead of turning into a wrong Jacobian.
+* So there is **one** underlying defect, not three, and it is the one §4.14 named: at a 2:1 T-junction a
+  constrained position must hang on the coarse vertices with **registered** masters, but
+  `POSITION_CONSTRAIN_TO_C1` still enforces it with `pin_position()`, which registers nothing. Pure 2D quads
+  are the exception because oomph-lib's own quad machinery registers the position hang for them.
+* The C1-corner table fixes from §9.4 (pyramid base centre, swapped wedge edge mids) did **not** incidentally
+  fix this: 2D tris are unaffected by them, and 3D cannot get past the guard to tell.
+
+### 11.2 Shape of the work
+
+1. Replace the `pin_position()` enforcement with a genuine registered position hang on the element's C1
+   corner nodes — the position analogue of what the field branch already does with `set_hanging_pt()`,
+   mirroring oomph-lib's solid-hang new-master allocation. §4.14 records that an earlier attempt at this
+   tangled with oomph's two-pass equation assignment; that is the risk to plan around.
+2. Then relax the `POSITION_CONSTRAIN_TO_C1` guard to match the field branch (§9.5).
+3. Then the 2D and 3D matrices above, plus their MPI variants, become ordinary campaign cases — the
+   `ale_posc1` / `ale_posc1_unc` definitions are already in place and will pick them up.
+
+`Node.get_hanging_masters()` (now bound) makes step 1 far more tractable than it was: the position hang's
+master list and weights can be inspected directly from a test rather than inferred from a Newton failure.
