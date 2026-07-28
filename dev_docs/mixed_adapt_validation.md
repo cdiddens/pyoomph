@@ -811,7 +811,7 @@ minutes with identical pass/xfail counts.
 
 ---
 
-## 11. Task 6 / Phase D — `ConstrainPositionsToC1Space`: measured current state
+## 11. Task 6 / Phase D — `ConstrainPositionsToC1Space` — **[FIXED]**
 
 The position constraint is the last item of the original task list. Before planning the work, the whole
 matrix was measured — `ale_posc1` (ALE + `ConstrainPositionsToC1Space`) and `ale_posc1_unc` (the same plus
@@ -858,7 +858,42 @@ Both variants behave identically, and the boundary unconstrain does bite (2D qua
 master list and weights can be inspected directly from a test rather than inferred from a Newton failure.
 
 
-### 11.3 First fix attempt — registered geometric position hang — **FAILED, reverted**
+### 11.3 The fix
+
+Two earlier attempts failed (§11.4 keeps them on record). What worked was neither: the missing piece was
+never the *enforcement* mechanism but the **registration**, and the diagnostic added in §11.5 pointed
+straight at it.
+
+`BulkElementBase::assign_additional_local_eqn_numbers` carried this claim:
+
+> *"No separate equation numbers are required, because the flattened leaf dofs are exactly the coarse
+> vertices that oomph-lib already registered as hang masters."*
+
+**That is false for positions.** oomph registers position-hang masters by walking the GEOMETRIC hang of an
+element's *own* nodes only. But a constrained node's `c1_constraint_corners` are written by whichever
+element sees that node as a NON-vertex — which may be a **neighbour**. So the corners can be vertices of a
+neighbouring element that this element never registers. The diagnostic named the node immediately: a free,
+unpinned vertex of six *other* elements, and a hang master of four nodes, but not registered here.
+
+`register_c1_constraint_position_masters()` (called from `assign_additional_local_eqn_numbers`, which
+oomph documents as running after all other numbering, so `Local_position_hang_eqn` is populated and `ndof()`
+is final) walks each constrained node's position redistribution with the same recursion as
+`flatten_hang_for_position`, collects the leaves, and registers any that are neither nodes of this element
+nor already known — allocating their local equation numbers via `add_global_eqn_numbers`. With the
+registration in place the `POSITION_CONSTRAIN_TO_C1` guard could finally be relaxed to match the field
+branch (§9.5), which is what unblocked 3D.
+
+**Result.** `ale_posc1` and `ale_posc1_unc` pass on **every** discretisation at **every** refinement state:
+24/24 in 2D (quad, both triangle splits, mixed) and 66/66 in 3D (all 11 layouts), with
+`ndof(constrained) < ndof(unconstrained on top) < ndof(baseline)` and the prescribed evaporation outflow
+preserved. Both are now ordinary campaign tests. Full suite **576 passed, 1 xfailed**.
+
+This closes the last of the seven requested tasks, and the §4.14 item that has been open since the branch
+began.
+
+### 11.4 Two approaches that did not work (kept on record)
+
+**Attempt 1 — registered geometric position hang.**
 
 The plan of §11.2 step 1 was attempted and does not work as stated. Recording it so the next attempt does
 not repeat it.
@@ -889,10 +924,9 @@ registration the position path is missing.
   the `HangInfo` bookkeeping accounts for the lost dofs; installing refinement-style geometric hangs on an
   unrefined mesh appears not to be something oomph's dof accounting expects.
 
-**Suggested next direction.** Do *not* route this through the geometric slot. Register the missing masters
+**Why it was the wrong layer.** Routing through the geometric slot was never necessary: Register the missing masters
 directly in `Local_position_hang_eqn` instead — the route §4.14 called "tangles with oomph's two-pass
-equation assignment", which now looks like the lesser problem of the two. A cheap first step that is worth
-doing regardless: `RefineableElement::local_position_hang_eqn` reads the map with `std::map::operator[]`,
+equation assignment", which now looks like the lesser problem of the two. The step that actually mattered: `RefineableElement::local_position_hang_eqn` reads the map with `std::map::operator[]`,
 which default-constructs an EMPTY `DenseMatrix<int>` for an unregistered node, so
 `leaf_local_eqn_for_position` reads out of bounds and returns a garbage index — that is the whole mechanism
 of the §4.14 abort. Adding a membership check there would turn it into a precise diagnostic naming the

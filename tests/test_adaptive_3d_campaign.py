@@ -132,6 +132,21 @@ def test_ale_moving_mesh(kind, levels, tmp_path):
 
 @pytest.mark.parametrize("kind", _KINDS)
 @pytest.mark.parametrize("levels", _LEVELS)
+def test_ale_constrain_positions_to_c1(kind, levels, tmp_path):
+    # See the 2D counterpart. Exercised on every element-family combination.
+    base = _solve(kind, "ale", levels, tmp_path)
+    constrained = _solve(kind, "ale_posc1", levels, tmp_path)
+    unconstrained = _solve(kind, "ale_posc1_unc", levels, tmp_path)
+    for eq, res in (("ale_posc1", constrained), ("ale_posc1_unc", unconstrained)):
+        _assert_linear_solve(res, "ale", box_cases_3d.case_id(kind, eq, levels))
+    assert constrained["ndof"] < unconstrained["ndof"] < base["ndof"], \
+        "expected ndof(constrained) < ndof(unconstrained on top) < ndof(baseline), got %d / %d / %d" % (
+            constrained["ndof"], unconstrained["ndof"], base["ndof"])
+    assert abs(constrained["obs_intuz"] - box_cases_3d.J_EVAP) < 1e-6
+
+
+@pytest.mark.parametrize("kind", _KINDS)
+@pytest.mark.parametrize("levels", _LEVELS)
 def test_constrain_field_to_c1_space(kind, levels, tmp_path):
     # ConstrainFieldsToC1Space / UnconstrainFieldsFromC1Space on a C2 field coupled to a live C1 field.
     # Oracles as in 2D: it converges in one Newton step, it removes dofs, and unconstraining "top" puts

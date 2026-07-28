@@ -178,6 +178,26 @@ def test_neumann_bcs(kind, levels, tmp_path):
 
 
 @pytest.mark.parametrize("kind", _KINDS)
+@pytest.mark.parametrize("levels", _LEVELS)
+def test_ale_constrain_positions_to_c1(kind, levels, tmp_path):
+    # ConstrainPositionsToC1Space / UnconstrainPositionsFromC1Space on the moving mesh: the position
+    # analogue of test_constrain_field_to_c1_space. At a 2:1 T-junction the constrained position
+    # redistributes onto its C1 corners, which -- because c1_constraint_corners are written by whichever
+    # element sees the node as a NON-vertex -- can be vertices of a NEIGHBOURING element that oomph-lib
+    # never registered as position-hang masters here. That is what used to abort.
+    base = _solve(kind, "ale", levels, tmp_path)
+    constrained = _solve(kind, "ale_posc1", levels, tmp_path)
+    unconstrained = _solve(kind, "ale_posc1_unc", levels, tmp_path)
+    for eq, res in (("ale_posc1", constrained), ("ale_posc1_unc", unconstrained)):
+        _assert_linear_solve(res, "ale", box_cases.case_id(kind, eq, levels))
+    assert constrained["ndof"] < unconstrained["ndof"] < base["ndof"], \
+        "expected ndof(constrained) < ndof(unconstrained on top) < ndof(baseline), got %d / %d / %d" % (
+            constrained["ndof"], unconstrained["ndof"], base["ndof"])
+    # the prescribed outflow must survive the position constraint
+    assert abs(constrained["obs_intuy"] - box_cases.J_EVAP) < 1e-6
+
+
+@pytest.mark.parametrize("kind", _KINDS)
 @pytest.mark.parametrize("levels", [(0, 0), (1, 1), (1, 3)])
 def test_ale_moving_mesh(kind, levels, tmp_path):
     # ALE: Stokes on a Laplace-smoothed mesh with a free top surface and a prescribed outflow standing in

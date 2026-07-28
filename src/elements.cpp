@@ -2748,14 +2748,12 @@ namespace pyoomph
 					{
 						throw_runtime_error("Cannot enforce a degration to C1 on a coordinate index larger than the nodal dimension of this element");
 					}
-					// Deliberately NOT relaxed the way the field branch above was. Unlike a field value, a
-					// constrained POSITION is still enforced by pin_position() rather than by a registered
-					// hang, so letting a 2:1 vertex-side element through here would not make the position
-					// case correct -- it would only move the failure to the generated residual code
-					// (the "local_eqn < eleminfo->ndof" abort root-caused in
-					// dev_docs/mixed_adaptive_meshes.md 4.14). Keep the early, legible abort until the
-					// registered position-hang lands; then this guard should follow the field one.
-					if (elem_to_C1_map[l]>=0 &&!is_hanging_on_C1)
+					// Same relaxation as the field branch: a constrained node that is a C1 VERTEX of THIS
+					// element is the ordinary 2:1 situation, not an error. This was held back until the
+					// position redistribution actually worked at a T-junction; with
+					// register_c1_constraint_position_masters() supplying the missing registrations it does,
+					// so the guard now tests only the genuine misuse it describes.
+					if (elem_to_C1_map[l]>=0 && !has_C1_fields)
 					{
 						throw_runtime_error("Cannot enforce a degration to C1 on a C1 vertex node\n\
 							 This can happen in adaptive problems without any C1 or C1TB fields present in the bulk mesh.\n\
@@ -6330,9 +6328,98 @@ namespace pyoomph
 	// rebuilds the JIT eleminfo buffer (which caches those numbers) and makes sure all internal
 	// data shares the nodes' timestepper, since internal data may be created before the element
 	// is fully connected to the mesh's timestepping.
+	// Collect every node that flatten_hang_for_position() would eventually resolve to as a LEAF, starting
+	// from n. Mirrors that function's recursion exactly (C1 position constraint -> stored corners; geometric
+	// hang -> masters; otherwise a leaf), but records nodes instead of equation numbers.
+	void BulkElementBase::collect_position_leaf_nodes(oomph::Node *n, std::set<oomph::Node *> &out, int depth)
+	{
+		if (!n || depth > 32) return;
+		Node *pn = dynamic_cast<Node *>(n);
+		if (pn && !pn->c1_constraint_corners.empty())
+		{
+			bool constrained = false;
+			for (unsigned d = 0; d < this->nodal_dimension(); d++)
+				if (this->node_is_c1_constrained_for_position(pn, d)) { constrained = true; break; }
+			if (constrained)
+			{
+				for (const auto &cw : pn->c1_constraint_corners)
+					collect_position_leaf_nodes(cw.first, out, depth + 1);
+				return;
+			}
+		}
+		if (n->is_hanging())
+		{
+			oomph::HangInfo *h = n->hanging_pt();
+			for (unsigned m = 0; m < h->nmaster(); m++)
+				collect_position_leaf_nodes(h->master_node_pt(m), out, depth + 1);
+			return;
+		}
+		out.insert(n);
+	}
+
+	// Register, as position-hang masters of THIS element, the leaf nodes that the C1 position constraint
+	// redistributes onto but oomph-lib does not know about.
+	//
+	// The comment that used to sit in assign_additional_local_eqn_numbers claimed "no separate equation
+	// numbers are required, because the flattened leaf dofs are exactly the coarse vertices that oomph-lib
+	// already registered as hang masters". That is FALSE for positions. oomph registers position-hang masters
+	// by walking the GEOMETRIC hang of this element's own nodes only, whereas a constrained node's
+	// c1_constraint_corners are written by whichever element sees that node as a NON-vertex -- which may be a
+	// neighbour. The corners can therefore be vertices of a neighbouring element that this element never
+	// registers, and reading their local equation number then returns garbage (the section 4.14 abort; since
+	// the previous commit, a named diagnostic instead).
+	//
+	// Runs from assign_additional_local_eqn_numbers(), which oomph documents as being called after ALL other
+	// local equation numbering, so Local_position_hang_eqn is already populated and ndof() is final.
+	void BulkElementBase::register_c1_constraint_position_masters()
+	{
+		if (!has_additional_dof_constraints) return;
+		const unsigned nd = this->nodal_dimension();
+		const unsigned nn = this->nnode();
+
+		std::set<oomph::Node *> leaves;
+		for (unsigned l = 0; l < nn; l++)
+		{
+			Node *n = dynamic_cast<Node *>(node_pt(l));
+			if (!n) continue;
+			bool constrained = false;
+			for (unsigned d = 0; d < nd; d++)
+				if (this->node_is_c1_constrained_for_position(n, d)) { constrained = true; break; }
+			if (constrained) collect_position_leaf_nodes(n, leaves, 0);
+		}
+		if (leaves.empty()) return;
+
+		std::deque<unsigned long> new_eqs;
+		unsigned local_eqn_number = this->ndof();
+		for (std::set<oomph::Node *>::iterator it = leaves.begin(); it != leaves.end(); ++it)
+		{
+			oomph::Node *n = *it;
+			bool is_local = false;
+			for (unsigned l = 0; l < nn; l++)
+				if (node_pt(l) == n) { is_local = true; break; }
+			if (is_local) continue; // resolved through eleminfo.pos_local_eqn instead
+			oomph::DenseMatrix<int> &pe = this->local_position_hang_eqn(n);
+			if (pe.nrow() > 0) continue; // oomph already registered it
+			oomph::SolidNode *sn = dynamic_cast<oomph::SolidNode *>(n);
+			if (!sn) continue;
+			pe.resize(1, nd);
+			for (unsigned k = 0; k < nd; k++)
+			{
+				long e = sn->position_eqn_number(0, k);
+				if (e >= 0) { new_eqs.push_back((unsigned long)e); pe(0, k) = (int)local_eqn_number++; }
+				else pe(0, k) = -1; // pinned
+			}
+		}
+		// Empty dof-pointer deque: add_global_eqn_numbers() skips that block entirely, which matches the
+		// store_local_dof_pt==false case. These extra masters therefore do not appear in Dof_pt, which is
+		// only used for optional local-dof caching, not for assembly.
+		if (!new_eqs.empty()) this->add_global_eqn_numbers(new_eqs, std::deque<double *>());
+	}
+
 	void BulkElementBase::assign_additional_local_eqn_numbers()
 	{
 		this->RefineableSolidElement::assign_additional_local_eqn_numbers();
+		this->register_c1_constraint_position_masters();
 		// ConstrainFieldsToC1Space/ConstrainPositionsToC1Space ("additional dof constraints") locally
 		// reduce a higher-order field/position to a C1/linear interpolation. This is now composed with
 		// oomph-lib's native geometric hanging-node scheme (T-junctions on adaptively refined meshes):

@@ -66,6 +66,13 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
   `set_current_dofs()` wrote out of bounds in the same way. All now gather/scatter
   properly, so under MPI every rank sees the same full-length vector. (The Jacobian
   returned by `_assemble_residual_jacobian` remains process-local CSR, as before.)
+- **`ConstrainPositionsToC1Space` on non-uniformly refined meshes**: aborted at any
+  2:1 T-junction on triangle, mixed and all 3D meshes. A constrained node's position
+  redistributes onto its C1 corners, but those corners are recorded by whichever
+  element sees the node as a non-vertex -- which may be a *neighbour*, so they can be
+  vertices of another element that oomph-lib never registered as position-hang masters
+  here. Reading their local equation number then returned garbage. Those masters are
+  now registered explicitly. Works on every element family in 2D and 3D.
 - **Mixed-order spaces on 3D wedges/pyramids/tets**: a C1 field living on a C2-geometry
   element was interpolated with the *geometric* (quadratic, all-nodes) basis instead of
   the linear basis over the corner vertices, because the wedge and pyramid C2 elements

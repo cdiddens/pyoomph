@@ -303,6 +303,10 @@ namespace pyoomph
     // never registered as a position-hang master of this element (oomph's accessor would silently return an
     // empty matrix and hence a junk index). See the implementation comment.
     int position_hang_eqn_or_throw(oomph::Node *n, unsigned i, const std::string &context);
+    // Leaf nodes that flatten_hang_for_position() would resolve to, starting from n (same recursion).
+    void collect_position_leaf_nodes(oomph::Node *n, std::set<oomph::Node *> &out, int depth);
+    // Register the C1-position-constraint leaves that oomph does not know are masters of this element.
+    void register_c1_constraint_position_masters();
 
     // --- Cross-shape (mixed-mesh) hanging (topological, no geometry) ---
   public:
