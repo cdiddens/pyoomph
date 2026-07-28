@@ -108,14 +108,15 @@ _SKIP_REASON = _mpi_reason()
 pytestmark = pytest.mark.skipif(_SKIP_REASON is not None, reason=str(_SKIP_REASON))
 
 
-def _run_distributed(cases, nproc, tmpdir):
+def _run_distributed(cases, nproc, tmpdir, cases_module="box_cases", timeout=900):
     """Launch the worker under mpirun and return {case_id: [per-rank result dicts]}."""
     spec = json.dumps([[k, e, list(l)] for k, e, l in cases])
     cmd = ["mpirun", "-n", str(nproc)]
     if os.environ.get("PYOOMPH_MPI_OVERSUBSCRIBE", "1") == "1":
         # CI machines routinely have fewer slots than we ask for; without this OpenMPI refuses to start.
         cmd += ["--oversubscribe"]
-    cmd += [sys.executable, _WORKER, "--spec", spec, "--outdir", str(tmpdir), "--distribute"]
+    cmd += [sys.executable, _WORKER, "--spec", spec, "--outdir", str(tmpdir),
+            "--cases", cases_module, "--distribute"]
     # Importing pyoomph calls MPI_Init, so THIS pytest process is already a (singleton) MPI job and owns an
     # Open MPI session directory under TMPDIR. A nested mpirun collides with it and dies immediately with
     # exit code 1 and no diagnostics at all. Giving the child its own TMPDIR keeps the two session
@@ -125,7 +126,15 @@ def _run_distributed(cases, nproc, tmpdir):
     ompi_tmp = os.path.join(str(tmpdir), "_ompi_session")
     os.makedirs(ompi_tmp, exist_ok=True)
     env["TMPDIR"] = ompi_tmp
-    proc = subprocess.run(cmd, cwd=_HERE, capture_output=True, text=True, timeout=3600, env=env)
+    # A bounded timeout on purpose: a distributed deadlock (one rank stuck in a collective while the
+    # other has finished) must surface as a test FAILURE, not as a suite that never returns. Seen at
+    # ~50 minutes on a workload that takes 1.5 s serially, so anything past a few minutes is a hang.
+    try:
+        proc = subprocess.run(cmd, cwd=_HERE, capture_output=True, text=True, timeout=timeout, env=env)
+    except subprocess.TimeoutExpired as e:
+        raise AssertionError(
+            "mpirun did not finish within %d s -- suspect a distributed deadlock.\ncases: %r\n"
+            "--- stdout tail ---\n%s" % (timeout, cases, (e.stdout or b"")[-3000:]))
     results = {}
     for line in proc.stdout.splitlines():
         if line.startswith("PYOOMPH_MPI_RESULT "):
@@ -180,11 +189,14 @@ def _assert_matches_serial(cid, per_rank, serial, eq):
                 "%s: %s differs between rank %d and rank %d" % (cid, key, first["rank"], r["rank"])
 
 
-def _check(cases, nproc, tmp_path):
-    dist = _run_distributed(cases, nproc, tmp_path / "dist")
+def _check(cases, nproc, tmp_path, mod=None, timeout=900):
+    """Solve `cases` distributed and serially from the SAME case module and require them to agree.
+    `mod` defaults to the 2D campaign; test_mpi_adaptivity_3d.py passes box_cases_3d."""
+    mod = mod or box_cases
+    dist = _run_distributed(cases, nproc, tmp_path / "dist", cases_module=mod.__name__, timeout=timeout)
     for kind, eq, levels in cases:
-        cid = box_cases.case_id(kind, eq, levels)
-        serial = box_cases.solve_case(kind, eq, levels, outdir=str(tmp_path / "serial" / cid))
+        cid = mod.case_id(kind, eq, levels)
+        serial = mod.solve_case(kind, eq, levels, outdir=str(tmp_path / "serial" / cid))
         assert serial["maxres"] < _RES_TOL.get(eq, _RES_TOL_DEFAULT), \
             "%s: the SERIAL reference did not converge (max|residual| = %.3e)" % (cid, serial["maxres"])
         _assert_matches_serial(cid, dist[cid], serial, eq)

@@ -24,7 +24,7 @@
 # ========================================================================
 
 # Worker launched by tests/test_mpi_adaptivity.py as
-#     mpirun -n N python mpi_worker.py --spec '<json>' --outdir <dir> --distribute
+#     mpirun -n N python mpi_worker.py --spec '<json>' --outdir <dir> [--cases box_cases_3d] --distribute
 # It is NOT a test module itself (the name deliberately does not start with "test_", so pytest ignores it).
 #
 # Each rank solves the requested cases and prints one machine-readable line per case:
@@ -45,7 +45,6 @@ import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import box_cases  # noqa: E402  (must follow the sys.path tweak)
 from pyoomph.generic.mpi import get_mpi_rank, get_mpi_nproc  # noqa: E402
 
 
@@ -53,7 +52,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--spec", required=True, help="JSON list of [kind, eq, [lo,hi]] cases")
     parser.add_argument("--outdir", required=True)
+    # Which case module to solve from: the 2D campaign (box_cases) or the 3D one (box_cases_3d). Both
+    # expose the same solve_case()/case_id() interface, so the harness is dimension-agnostic.
+    parser.add_argument("--cases", default="box_cases")
     args, _ = parser.parse_known_args()
+
+    import importlib
+    box_cases = importlib.import_module(args.cases)
 
     rank, nproc = get_mpi_rank(), get_mpi_nproc()
     for kind, eq, levels in json.loads(args.spec):

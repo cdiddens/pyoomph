@@ -66,6 +66,12 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
   `set_current_dofs()` wrote out of bounds in the same way. All now gather/scatter
   properly, so under MPI every rank sees the same full-length vector. (The Jacobian
   returned by `_assemble_residual_jacobian` remains process-local CSR, as before.)
+- **3D adaptivity**: `DynamicOcTreeForest::check_all_neighbours` inspected only the
+  *first* tree when deciding whether to skip oomph-lib's brick compass neighbour
+  self-test. A mixed 3D forest whose first root happened to be a brick therefore ran
+  that self-test on a forest for which no neighbour pointers are set at all, aborting
+  with a bogus "Max. error in octree neighbour finding" (or running away into an
+  out-of-memory). It now scans every tree, as the 2D equivalent already did.
 - **MPI**: `create_pressure_fixation()` (Taylor-Hood, Crouzeix-Raviart and
   Scott-Vogelius) pinned the pressure dof of the *rank-local* element 0, so each rank
   constrained a different dof and distributed Stokes solves crashed. The pinned

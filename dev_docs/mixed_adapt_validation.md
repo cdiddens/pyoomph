@@ -306,7 +306,7 @@ today's list that is engine work rather than test work, and it should be schedul
 
 ## 5. Missing infrastructure
 
-1. **No mixed 3D *box* mesh.** `tests/test_mixed_3d.py` exercises mixed shapes with deliberately minimal
+1. ~~**No mixed 3D *box* mesh.**~~ **[DONE — `tests/box_mesh_3d.py`, see §9.1.]** Originally: `tests/test_mixed_3d.py` exercises mixed shapes with deliberately minimal
    2–3-element meshes (`TetWedgeMesh`, `WedgePyrMesh`, `HexMixMesh`) whose purpose is to isolate one
    cross-shape facet. Today's 3D tasks (Stokes, ALE, Neumann, constraints, MPI, ≥2 refinement levels) need
    a *domain*: a parametrised `MixedBoxMesh3D(kind=…)` on [-0.5,0.5]³ built from 2×2×2 cells, where each
@@ -335,11 +335,7 @@ downstream is testable.
 
 **Phase B — 2D campaign. [DONE] — see §8.**
 
-**Phase C — 3D campaign.**
-- C1. Build `MixedBoxMesh3D` (§5.1) with the family combinations, and a `refinement_possible` /
-  tear-freeness smoke test per combination.
-- C2–C5. The 3D analogues of B1/B3/B4/B5 on tet, hex, wedge, pyramid and each mixed combination, at the
-  measured-safe envelope of §2.5 (base 2×2×2, level 1 + level-3 band), serial + `-n 2 --distribute`.
+**Phase C — 3D campaign. [DONE for everything that works; two defects found and characterised — see §9.]**
 
 **Phase D — the hard item.**
 - D1. `ConstrainPositionsToC1Space` under triangle/mixed hanging (§4): registered position-hang masters
@@ -493,3 +489,171 @@ constrains the *same global set of dofs* after distribution.
 
 Remaining for the 2D half: nothing on the original task list except `ConstrainPositionsToC1Space` (§4),
 which is Phase D.
+
+---
+
+## 9. Phase C — the 3D campaign — **[DONE for what works; two defects found]**
+
+Phase C delivered the missing 3D infrastructure, fixed one bug that blocked it outright, and — as the
+campaign was designed to do — **found two real defects** that no existing test could have caught. The
+passing coverage is large; the failures are characterised exactly and tracked as strict xfails.
+
+### 9.1 `tests/box_mesh_3d.py` — the mixed 3D box
+
+`MixedBoxMesh3D` fills the box [-0.5,0.5]³ as an N×N×N grid of cells, each cell filled by one element
+family, per a named layout. The existing mixed-3D meshes (`TetWedgeMesh`, `WedgePyrMesh`, `HexMixMesh`) are
+deliberately minimal 2–3-element toys built to isolate one cross-shape facet — the wrong tool for Stokes,
+ALE or Neumann on a refined domain.
+
+**Which combinations are geometrically possible** — this is real geometry, not an engine limitation, and it
+determined the layout catalogue. What each family presents on a shared cube face:
+
+| family | x-faces | y-faces | z-faces |
+|---|---|---|---|
+| brick | quad | quad | quad |
+| pyramid | quad | quad | quad |
+| wedge | quad | quad | 2 triangles |
+| tet | 2 triangles | 2 triangles | 2 triangles |
+
+so brick↔brick / brick↔pyramid / pyramid↔pyramid and wedge↔wedge / tet↔tet work in any direction;
+brick↔wedge and pyramid↔wedge only across **x or y**; tet↔wedge only across **z**; and **tet↔brick and
+tet↔pyramid are impossible in any direction** — a tet has no quad face, so no shared facet can match. The
+triangle traces also have to split along the same diagonal, and they do: the Kuhn split cuts every cube
+face from the corner minimal in both in-plane coordinates to the maximal one (translation-invariant), and
+the wedge's (x,y) diagonal split produces that same diagonal on its z-faces.
+
+For the impossible pair there is a **transition cell**: one cube holding a single pyramid whose base is the
+cube's bottom quad face (so a brick fits below) plus 10 tets filling the other five pyramidal wedges (so
+tets fit beside and above), with each outer quad split along the Kuhn diagonal. That is the classic
+hex-to-tet transition, and it puts pyramids and tets inside one cube.
+
+Catalogue: 4 pure (`hex`, `tet`, `wedge`, `pyr`), 4 pairs (`hex_pyr` — a checkerboard, `hex_wedge`,
+`pyr_wedge`, `tet_wedge`), a three-way (`hex_pyr_wedge`), and two using the transition cell (`hex_tet`,
+`all_four`). **All 11 validated** at 0 / uniform-1 / non-uniform-2 refinement: facet adjacency manifold, no
+duplicate nodes, and a manufactured linear field reproduced at every node.
+
+### 9.2 Bug fixed — the 3D neighbour self-test guard
+
+`DynamicOcTreeForest::check_all_neighbours` (`src/mesh3d.hpp`) inspected only `Trees_pt[0]` when deciding
+whether to skip oomph's brick compass neighbour self-test. In a mixed forest whose *first* root happens to
+be a brick — which any hex-containing box layout has — the guard did not fire, so the brick self-test ran
+on a forest for which `find_neighbours()` had deliberately set **no neighbour pointers at all**. It then
+reported a bogus `Max. error in octree neighbour finding: 1.24373 is too big` and aborted, or ran away into
+an OOM. Fixed by scanning **every** tree, exactly as the 2D `DynamicQuadTreeForest::check_all_neighbours`
+already did. Pure-brick forests still get the full check; this only ever removes a check that was invalid.
+Full suite green afterwards (285 passed).
+
+### 9.3 What passes
+
+`tests/test_adaptive_3d_campaign.py`: **194 passed, 38 xfailed** (~3.5 min).
+
+* **Single-space problems pass on all 11 layouts at all three refinement states**, including two-level
+  non-uniform 2:1 hanging across brick/tet/wedge/pyramid interfaces and through the transition cells: C1
+  Poisson, C2 Poisson, and **the entire Neumann campaign** (a constant flux on an unrefined wall plus a
+  spatially varying flux on the refined wall, integrated over face elements of every shape). Task 7's 3D
+  half is therefore complete.
+* **Multi-space problems** — coupled C2+C1 Poisson, Taylor–Hood Stokes with f = (−y, x, 0), and ALE
+  (Stokes + `LaplaceSmoothedMesh` + prescribed evaporation outflow) — **pass on all 11 layouts** when the
+  mesh is non-adaptive or uniformly refined, and pass under non-uniform refinement on **bricks and tets**.
+* Cross-family agreement: the same Stokes problem discretised by every family and every legal mixture
+  agrees on the global angular momentum, with no family an outlier.
+* Cost is comfortable: the whole 3D matrix is base 2×2×2 with level 1 + a level-2 band, i.e. 1–6 k
+  elements, 1–3 s and ~300 MB per case.
+
+### 9.4 Defect A — two continuous spaces × non-uniform refinement on wedge/pyramid/mixed
+
+Coupled C2+C1 Poisson, Taylor–Hood Stokes and ALE all **fail under non-uniform refinement on wedges,
+pyramids and every mixed layout**, while passing on bricks and tets and passing on *all* families under
+uniform refinement. The failure mode is Newton not converging (or, for pyramids, "converging" to
+`max|residual| = 2.2e-04`), i.e. an inconsistent Jacobian — not a crash.
+
+The discriminator is sharp and points straight at the cause: single-space problems are fine on exactly the
+same meshes, so it is not the mesh, the refinement or the boundary conditions. What breaks is specifically
+the case where **two continuous spaces coexist**: a C1 field on C2 geometry needs its *own* hang slot at a
+different value index, hanging linearly on the coarse cell's C1 corners. That per-value-index hang is
+installed for bricks (oomph's own `RefineableQElement::setup_hang_for_value`) and for tets (§4.12 of the
+engine document, which validated tet Taylor-Hood/Crouzeix-Raviart), but **not** for the wedge / pyramid /
+registry families — whose validation (§4.15) only ever used single-space Poisson, C1 *or* C2, never both at
+once. So this is a genuine gap in the wedge/pyramid work rather than a regression.
+
+### 9.5 Defect B — `ConstrainFieldsToC1Space` × non-uniform 3D refinement, on *every* family
+
+`ConstrainFieldsToC1Space` throws under non-uniform 3D refinement on **all** families, bricks included:
+
+> `src/elements.cpp:2612: Cannot enforce a degration to C1 on a C1 vertex node.`
+
+The existing `test_constrained_adaptivity_3d_brick` passes, so this looked at first like a mixed-mesh
+issue. A bisection over four independent knobs (mesh: `CuboidBrickMesh` vs `MixedBoxMesh3D`; boundary
+conditions; which wall carries the refinement band; and a *live* coupled C1 field vs the Dirichlet-pinned
+`_dummyC1`) shows otherwise — **16 of 16 combinations fail except the single one the existing test happens
+to use**, and the mesh makes no difference whatsoever:
+
+| band | C1 field | Dirichlet 1 wall + Neumann | Dirichlet 5 walls |
+|---|---|---|---|
+| `right` | dummy (pinned) | **passes** | fails |
+| `right` | live | fails | fails |
+| `top` | dummy (pinned) | fails | fails |
+| `top` | live | fails | fails |
+
+So the feature works only in one narrow configuration, and this is **pre-existing on `main`, not a
+`mixed_adapt` regression**. The throw site explains the mechanism: the code deliberately intends to *do
+nothing* when a constrained node is also a C1 **vertex** of a finer neighbouring element (its own comment
+says "there it is not in that element's map, so we do nothing"), but the guard that lets that path through
+requires the node to hang on the C1 slot (`is_hanging_on_C1`). At a 2:1 interface the node in question is a
+genuine, non-hanging node of the coarse element, so the guard is false and it throws instead. In 2D the
+same geometry does hang on the C1 slot (a coarse edge-mid node's C1 value is the average of the two coarse
+corners), which is why 2D is unaffected; 3D additionally has face-centre and volume-centre nodes, where
+that is evidently not set up.
+
+Adding `_dummyC1`, as the error message suggests, does **not** help.
+
+### 9.6 How the failures are tracked
+
+Every failing configuration is marked `xfail(strict=True)` with the reason string, not skipped and not
+dropped from the matrix. They stay visible in the run, they cannot silently rot, and the suite will **fail**
+the moment one starts passing — which is the signal to delete the marker. 38 of them.
+
+### 9.7 Next
+
+Defect B is the smaller and higher-value fix: it is one guard condition at a known line, it affects plain
+bricks on `main`, and it blocks task 4's 3D half. Defect A is the larger one — installing the
+per-value-index C1 hang for the wedge/pyramid/registry families, mirroring what the tet route already does
+— and it blocks the 3D halves of tasks 2/3 and 5 on non-uniformly refined mixed meshes. Neither blocks
+Phase D (`ConstrainPositionsToC1Space`, §4), which is independent.
+
+### 9.8 Defect C — distributed 3D pure-tet, non-uniform: asymmetric throw → deadlock
+
+Found by the 3D MPI harness (`tests/test_mpi_adaptivity_3d.py`). On the **pure-tet** layout at the
+two-level non-uniform state under `--distribute`, `Mesh::get_elemental_errors()` throws an
+`OomphException` on *some* ranks and not others during the initial adaption
+(`Problem._adapt_with_interfacial_errors` → `mesh.get_elemental_errors()`, `problem.py:1678`).
+
+Because the throw is **asymmetric**, the ranks that did not throw block forever in the next collective, so
+the presenting symptom is a **deadlock**, not an error: the first time this was hit, one `mpirun` sat for
+50 minutes on a workload that takes 1.5 s serially. That is why `_run_distributed` now takes a bounded
+subprocess timeout (900 s, and 240 s for the pinned case) and converts an overrun into an explicit
+assertion failure — a distributed deadlock must never be able to stall the suite.
+
+Scope, from the run:
+* **not serial** — the identical cases pass in `test_adaptive_3d_campaign.py`;
+* **not uniform refinement** — every layout passes distributed at `(1,1)`;
+* **not the mixed layouts** — `hex_tet`, `all_four` and `tet_wedge` all pass distributed at `(1,2)`, so
+  merely containing tets is not enough; it is the pure-tet forest;
+* **equation-dependent** — C1 and C2 Poisson pass on that exact mesh, while Neumann, Taylor–Hood and ALE
+  do not, which points at the interfacial-error path rather than at the bulk field.
+
+Pinned by `test_distributed_3d_pure_tet_nonuniform_xfail` (strict, short timeout) and excluded from the
+other matrices, so the rest of the 3D distributed coverage stays meaningful.
+
+### 9.9 Phase C scoreboard
+
+| | serial | distributed (`-n 2`, `-n 4`) |
+|---|---|---|
+| C1/C2 Poisson, **Neumann** — all 11 layouts, incl. two-level non-uniform | pass | pass (except pure-tet Neumann, §9.8) |
+| coupled C2+C1, Taylor–Hood Stokes, ALE — all 11 layouts, uniform | pass | pass |
+| coupled C2+C1, Taylor–Hood Stokes, ALE — non-uniform, brick/tet | pass | pass (hex; pure-tet §9.8) |
+| coupled C2+C1, Taylor–Hood Stokes, ALE — non-uniform, wedge/pyramid/mixed | **defect A** | not reached |
+| `ConstrainFieldsToC1Space` — non-uniform, any family | **defect B** | not reached |
+
+Three defects found, one fixed (§9.2), two characterised and tracked (§9.4, §9.5), plus a distributed-only
+one (§9.8). All failing configurations are `xfail(strict=True)`, never skipped or dropped.
