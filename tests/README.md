@@ -21,6 +21,29 @@ Before merging a branch, run **everything** (~11 min):
 or, where passing a flag is awkward (CI), set `PYOOMPH_FULL_TESTS=1`. Nothing is permanently excluded —
 `--full` runs the entire suite, and the skipped tests are reported as skipped rather than silently dropped.
 
+### What the wheel builds run
+
+A second, independent axis: the `campaign` marker covers the four mixed-adaptive-mesh validation modules
+(`test_adaptive_2d_campaign.py`, `test_adaptive_3d_campaign.py`, `test_mpi_adaptivity.py`,
+`test_mpi_adaptivity_3d.py`). The wheel-building workflow deselects them:
+
+> python -m pytest tests -m "not campaign"     # 177 tests, ~4 min
+
+set as `test-command` in `pyproject.toml`. cibuildwheel repeats that command once per Python version per
+platform, so a suite that takes minutes locally costs a multiple of that there. What CI keeps is the test
+set that predates the campaign, which is what a wheel actually needs to certify: that the built extension
+imports, compiles elements and solves. Proving the refinement engine correct across every discretisation
+is a branch-merge job, not a per-wheel one.
+
+The two axes are orthogonal. `slow` is about what *you* wait for while working; `campaign` is about what
+CI pays per wheel. A default local run still executes the 2D campaign, and `--full` still runs everything:
+
+| invocation | tests | who |
+|---|---|---|
+| `pytest *.py` | 581 collected, `slow` skipped | working locally |
+| `pytest *.py --full` | 581 | before merging a branch |
+| `pytest tests -m "not campaign"` | 177 | the wheel builds |
+
 ## The adaptive-mesh campaign
 
 `test_adaptive_2d_campaign.py` and `test_adaptive_3d_campaign.py` exercise the physics that adaptive

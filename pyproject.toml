@@ -93,7 +93,18 @@ build-frontend = { name = "pip", args = ["--no-build-isolation", "--verbose", "-
 
 
 test-requires = "pytest"
-test-command = "pytest {package}/tests" # does not work, since the gmsh library has unresolvable requirements
+# Deselect the mixed-adaptive-mesh validation campaign (the test_adaptive_*_campaign and
+# test_mpi_adaptivity* modules, marked "campaign" -- see tests/conftest.py). cibuildwheel repeats this
+# command once per Python version per platform, so a suite that takes minutes locally costs a multiple of
+# that here. What remains is the test set that predates the campaign -- 177 tests, ~4 minutes -- which is
+# what a wheel actually needs to certify: that the built extension imports, compiles elements and solves.
+# Proving the refinement engine correct across every discretisation is a branch-merge job (run the full
+# suite with --full), not a per-wheel one.
+#
+# NB the quoting: this single string is also run by cmd.exe on Windows (there is no per-platform override),
+# so the marker expression is in DOUBLE quotes, and the TOML literal string (single quotes) is what lets it
+# be written that way without escaping.
+test-command = 'pytest {package}/tests -m "not campaign"'
 test-sources = ["tests"]
 # CMake now downloads+builds GiNaC/CLN itself (see cmake/ThirdPartyGiNaC.cmake)
 # instead of the old citools/download_and_build_static_ginac.sh script, so

@@ -35,6 +35,22 @@
 # run, so a quick check still covers the 2D physics end to end.
 #
 # Nothing is ever deleted or permanently excluded: --full runs the entire suite.
+#
+# There is a SECOND, independent axis: "campaign". It marks the mixed-adaptive-mesh validation campaign
+# (the four test_adaptive_*_campaign / test_mpi_adaptivity* modules), which sweeps a large matrix of
+# discretisations to prove the refinement engine correct. The wheel-building workflow deselects it with
+#
+#   pytest tests -m "not campaign"     # see test-command in pyproject.toml
+#
+# because cibuildwheel repeats the test command once per Python version per platform, so a suite that takes
+# minutes locally costs a multiple of that there. What CI keeps is the set of tests that predates the
+# campaign -- 177 tests, ~4 minutes -- which is what a wheel needs to certify: that the built extension
+# imports, compiles elements and solves. Proving the refinement engine correct is the job of a branch merge,
+# not of every wheel.
+#
+# The two axes are orthogonal on purpose. "slow" is about what YOU wait for while working; "campaign" is
+# about what CI pays for per wheel. A default local run still executes the 2D campaign, and --full still
+# runs absolutely everything.
 
 import os
 
@@ -53,6 +69,10 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         "slow: large sweep or mpirun-based; skipped unless --full (or PYOOMPH_FULL_TESTS=1) is given")
+    config.addinivalue_line(
+        "markers",
+        "campaign: part of the mixed-adaptive-mesh validation campaign; deselected in the wheel builds "
+        "with -m 'not campaign' (see pyproject.toml), never skipped by default locally")
 
 
 def _full_requested(config):

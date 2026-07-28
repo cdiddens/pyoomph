@@ -42,7 +42,7 @@ from box_mesh_3d import ALL_LAYOUTS
 from test_mpi_adaptivity import _check, _SKIP_REASON  # the harness, shared with the 2D module
 
 pytestmark = [pytest.mark.skipif(_SKIP_REASON is not None, reason=str(_SKIP_REASON)),
-              pytest.mark.slow]
+              pytest.mark.slow, pytest.mark.campaign]
 
 # The SERIAL campaign (test_adaptive_3d_campaign.py) already sweeps all 11 layouts exhaustively. The job of
 # the distributed campaign is narrower -- to show that PARTITIONING does not break what serial already

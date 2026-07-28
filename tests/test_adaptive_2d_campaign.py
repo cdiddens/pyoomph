@@ -52,6 +52,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import box_cases
 
+# Part of the validation campaign, so the wheel builds deselect it with -m "not campaign" (see
+# conftest.py). Deliberately NOT marked "slow": at ~30 s it stays in the fast local run.
+pytestmark = pytest.mark.campaign
+
 _KINDS = box_cases.MESH_KINDS
 _LEVELS = box_cases.LEVELS
 
