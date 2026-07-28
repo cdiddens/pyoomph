@@ -683,26 +683,47 @@ independent of all of it. Note that Phase D should also revisit the `POSITION_CO
 deliberately strict in §9.5, and that the position analogue of the C1-corner tables fixed in §9.4 is worth
 re-checking at the same time -- `pin_position` uses the same `c1_constraint_corners` redistribution.
 
-### 9.8 Defect C — distributed 3D pure-tet, non-uniform: asymmetric throw → deadlock
+### 9.8 Defect C — distributed pure-tet, non-uniform — **[SHARPENED, NOT FIXED]**
 
-Found by the 3D MPI harness (`tests/test_mpi_adaptivity_3d.py`). On the **pure-tet** layout at the
-two-level non-uniform state under `--distribute`, `Mesh::get_elemental_errors()` throws an
-`OomphException` on *some* ranks and not others during the initial adaption
-(`Problem._adapt_with_interfacial_errors` → `mesh.get_elemental_errors()`, `problem.py:1678`).
+Found by the 3D MPI harness. On the **pure-tet** layout at the two-level non-uniform state under
+`--distribute`, the solve fails; serially the identical case is machine zero.
 
-Because the throw is **asymmetric**, the ranks that did not throw block forever in the next collective, so
-the presenting symptom is a **deadlock**, not an error: the first time this was hit, one `mpirun` sat for
-50 minutes on a workload that takes 1.5 s serially. That is why `_run_distributed` now takes a bounded
-subprocess timeout (900 s, and 240 s for the pinned case) and converts an overrun into an explicit
-assertion failure — a distributed deadlock must never be able to stall the suite.
+**What the earlier characterisation got right and wrong.** It was first seen as an asymmetric
+`get_elemental_errors()` throw that deadlocked the other ranks (one `mpirun` sat for 50 minutes on a 1.5 s
+workload). After the defect-A fixes the symptom changed: both ranks now fail *symmetrically* with
+`MAXIMUM RESIDUALS: inf EXCEEDS PREDEFINED MAXIMUM 1e+10`. The deadlock is therefore gone — which is why
+`_run_distributed` keeping a bounded timeout still matters, but the hang itself is no longer the issue.
 
-Scope, from the run:
-* **not serial** — the identical cases pass in `test_adaptive_3d_campaign.py`;
-* **not uniform refinement** — every layout passes distributed at `(1,1)`;
-* **not the mixed layouts** — `hex_tet`, `all_four` and `tet_wedge` all pass distributed at `(1,2)`, so
-  merely containing tets is not enough; it is the pure-tet forest;
-* **equation-dependent** — C1 and C2 Poisson pass on that exact mesh, while Neumann, Taylor–Hood and ALE
-  do not, which points at the interfacial-error path rather than at the bulk field.
+**Sharpened isolation.** The failure needs all three of: a **pure-tet forest**, **non-uniform** refinement,
+and **free (unpinned) boundary dofs**. Measured:
+
+| case | distributed result |
+|---|---|
+| tet, non-adaptive / uniform | pass |
+| tet, non-uniform, C2 Poisson with Dirichlet on 5 walls | pass |
+| tet, non-uniform, Dirichlet on 5 walls + one Neumann wall | pass |
+| tet, non-uniform, Dirichlet on **3** walls (rest natural) | **fail (inf)** |
+| `hex_tet`, `tet_wedge`, `all_four` — non-uniform, same BCs | pass |
+
+So it is not the Neumann fluxes (a Dirichlet-only variant fails too) and not tets as such — every
+tet-*containing* mixed layout passes. Pinning more of the boundary masks it, which is what made it look
+boundary-condition dependent.
+
+**The measurement that matters.** For the failing configuration the global dof count differs from serial:
+**1460 serially, 1573 distributed**, and the ranks disagree about the boundary hanging set (36 vs 39
+hanging nodes on a wall, against 36 serially). Mixed layouts pass precisely because their hanging comes
+entirely from the mesh-level generative pass in `post_adapt_setup_hanging_nodes`, whereas a pure-tet forest
+uses the per-element OcTree hooks.
+
+**A fix was attempted and rejected.** Routing distributed pure-tet meshes through the same generative pass
+(gated to `is_mesh_distributed()`, leaving serial untouched) did change the hanging set but did **not** fix
+the dof-count discrepancy or the `inf`, and it moved rank 1 further from the serial hanging set rather than
+closer. It was reverted rather than left in as a speculative change to a validated path.
+
+Note the surviving hypothesis is *not* settled: the distributed element counts leave open whether the
+partitioned run also **refines a different set of elements** than serial, in which case the dof-count
+difference is a symptom of divergent refinement selection rather than of hanging alone. That is the first
+thing to establish next — compare the refined element sets, not just the totals.
 
 Pinned by `test_distributed_3d_pure_tet_nonuniform_xfail` (strict, short timeout) and excluded from the
 other matrices, so the rest of the 3D distributed coverage stays meaningful.
