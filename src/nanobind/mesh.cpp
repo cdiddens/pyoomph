@@ -43,6 +43,7 @@ namespace nb = nanobind;
 #include "../mesh.hpp"
 #include "../nodes.hpp"
 #include "../meshtemplate.hpp"
+#include "../refinement_coupling.hpp"
 #include "../problem.hpp"
 #include "../elements.hpp"
 #include "../mesh1d.hpp"
@@ -1616,6 +1617,45 @@ void PyReg_Mesh(nb::module_ &m)
 		  { pyoomph::InterfaceElementBase::interpolate_new_interface_dofs = on; }, nb::arg("on"), "Globally controls whether newly created interface degrees of freedom (e.g. after refinement) are interpolated from the neighbouring nodes or initialized to zero");
 	m.def("set_use_eigen_Z2_error_estimators", [](bool on)
 		  { pyoomph::BulkElementBase::use_eigen_error_estimators = on; }, nb::arg("on"), "Globally controls whether the Eigen-based implementation is used for the Zienkiewicz-Zhu (Z2) spatial error estimator");
+
+	// --- Conforming refinement across coupled domain interfaces (see refinement_coupling.hpp) ------
+	// Both entry points take the coupled interfaces as a plain list of
+	// (bulk mesh A, boundary name A, bulk mesh B, boundary name B, offset A->B) and are stateless.
+	// Deliberately so: the interface MESHES are destroyed and rebuilt on every adapt, and the bulk
+	// meshes themselves are replaced by remeshing, so nothing here may outlive a single call.
+	m.def("_enforce_interface_conformity", [](const std::vector<std::tuple<MeshHandleBase *, std::string, MeshHandleBase *, std::string, std::vector<double>>> &conns, unsigned max_rounds)
+		  {
+			std::vector<pyoomph::CoupledInterfacePair> pairs;
+			for (const auto &c : conns)
+			{
+				pyoomph::CoupledInterfacePair p;
+				p.meshA = std::get<0>(c) ? std::get<0>(c)->mesh() : NULL;
+				p.bnameA = std::get<1>(c);
+				p.meshB = std::get<2>(c) ? std::get<2>(c)->mesh() : NULL;
+				p.bnameB = std::get<3>(c);
+				p.offset = std::get<4>(c);
+				pairs.push_back(p);
+			}
+			return pyoomph::enforce_interface_conformity(pairs, max_rounds); },
+		  nb::arg("connections"), nb::arg("max_rounds") = 40,
+		  "Refines the coarser side of every coupled interface until both sides carry identical boundary facets, interleaved with each mesh's own 2:1 balancing; returns the number of elements refined");
+
+	m.def("_check_interface_conformity", [](const std::vector<std::tuple<MeshHandleBase *, std::string, MeshHandleBase *, std::string, std::vector<double>>> &conns, const std::string &when, int mode)
+		  {
+			std::vector<pyoomph::CoupledInterfacePair> pairs;
+			for (const auto &c : conns)
+			{
+				pyoomph::CoupledInterfacePair p;
+				p.meshA = std::get<0>(c) ? std::get<0>(c)->mesh() : NULL;
+				p.bnameA = std::get<1>(c);
+				p.meshB = std::get<2>(c) ? std::get<2>(c)->mesh() : NULL;
+				p.bnameB = std::get<3>(c);
+				p.offset = std::get<4>(c);
+				pairs.push_back(p);
+			}
+			return pyoomph::check_interface_conformity(pairs, when, mode); },
+		  nb::arg("connections"), nb::arg("when") = "", nb::arg("mode") = 1,
+		  "Counts boundary facets of a coupled interface that have no counterpart on the opposite side; mode 0 silent, 1 report, 2 throw. Collective: every process must call it");
 
 	nb::class_<pyoomph::TracerCollection>(m, "TracerCollection")
 		.def(nb::init<std::string>())

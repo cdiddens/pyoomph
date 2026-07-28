@@ -3529,7 +3529,79 @@ class Problem(_pyoomph.Problem):
         for h in self._hooks:
             h.actions_after_newton_step()
 
+    def _collect_coupled_interfaces(self) -> list[tuple[AnySpatialMesh,str,AnySpatialMesh,str,list[float]]]:
+        """Every declared opposite-interface connection, expressed on the BULK meshes.
+
+        The connections are declared as equation-tree paths ("domainA/interface"), but the machinery
+        that keeps the two sides equally refined must not depend on interface meshes: those are torn
+        down by clear_before_adapt() and only rebuilt afterwards. A bulk mesh plus a boundary name is
+        permanent, and is exactly what the C++ side reads the boundary facets from.
+        """
+        conns:list[tuple[AnySpatialMesh,str,AnySpatialMesh,str,list[float]]]=[]
+        seen:set[frozenset[tuple[str,str]]]=set()
+        for templ in self._meshtemplate_list:
+            for c in templ._opposite_interface_connections:
+                a=c._sideA.split("/")
+                b=c._sideB.split("/")
+                # Only a bulk domain and one of its boundaries. A deeper path is an interface OF an
+                # interface, whose conformity follows from that of the bulk facets it sits on.
+                if len(a)!=2 or len(b)!=2:
+                    continue
+                key=frozenset({(a[0],a[1]),(b[0],b[1])})
+                if key in seen:
+                    continue
+                seen.add(key)
+                ma=self._meshdict.get(a[0])
+                mb=self._meshdict.get(b[0])
+                if ma is None or mb is None:
+                    continue
+                if isinstance(ma,ODEStorageMesh) or isinstance(mb,ODEStorageMesh):
+                    continue
+                assert not isinstance(ma,InterfaceMesh) and not isinstance(mb,InterfaceMesh)
+                if not ma.refinement_possible() and not mb.refinement_possible():
+                    continue
+                if a[1] not in ma.get_boundary_names() or b[1] not in mb.get_boundary_names():
+                    continue # a side may legitimately be absent (dummy equations only)
+                conns.append((ma,a[1],mb,b[1],[0.0,0.0,0.0]))
+        return conns
+
+    def enforce_interface_conformity(self) -> int:
+        """Make both sides of every coupled interface carry identical boundary facets.
+
+        oomph-lib adapts meshes one at a time, so two domains sharing an interface can refine
+        different facets of it -- and then the opposite-element matcher (which pairs interface
+        elements by exact vertex-position sets) has nothing to pair up and throws. This refines the
+        coarser side wherever they disagree, interleaved with each mesh's own 2:1 balancing, until
+        they agree. Refinement only, so it terminates.
+
+        Collective under MPI: every process must call it. Returns the number of elements refined.
+        """
+        # Escape hatch for negative testing: a test that still passes with the enforcement switched
+        # off is not measuring the enforcement. Not meant for production use.
+        if os.environ.get("PYOOMPH_DISABLE_INTERFACE_CONFORMITY","")not in ("","0","off"):
+            return 0
+        conns=self._collect_coupled_interfaces()
+        if not conns:
+            return 0
+        return _pyoomph._enforce_interface_conformity(conns,40) #type:ignore
+
+    def check_interface_conformity(self,throw_on_mismatch:bool=False,when:str="") -> int:
+        """Count boundary facets of a coupled interface that have no counterpart on the opposite side.
+
+        Zero means the two sides are conforming and the opposite-element matcher will succeed. A
+        non-zero result names the offending facets by position and says, for each, which side is the
+        coarser one. Collective under MPI: every process must call it.
+        """
+        conns=self._collect_coupled_interfaces()
+        if not conns:
+            return 0
+        return _pyoomph._check_interface_conformity(conns,when,2 if throw_on_mismatch else 1) #type:ignore
+
     def actions_after_adapt(self):
+        # BEFORE the interface meshes are rebuilt below, and before _connect_opposite_elements pairs
+        # them up: the two sides of a coupled interface may have been refined differently (the meshes
+        # are adapted individually), and this is the one point where that can still be repaired.
+        self.enforce_interface_conformity()
         for m in self._interfacemeshes:
             #print("REBUILDING INTERFACE MESH",m,m.get_name(), m.nelement())
             m.rebuild_after_adapt()
