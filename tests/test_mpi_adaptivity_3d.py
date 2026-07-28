@@ -69,7 +69,7 @@ def test_distributed_3d_single_space_all_families(eq, tmp_path):
     _check([(k, eq, (1, 2)) for k in kinds], 2, tmp_path, mod=box_cases_3d)
 
 
-@pytest.mark.parametrize("eq", ["mixed12", "stokes_th", "ale"])
+@pytest.mark.parametrize("eq", ["mixed12", "constrain12", "unconstrain12", "stokes_th", "ale"])
 def test_distributed_3d_multispace_uniform_all_families(eq, tmp_path):
     # Two coexisting continuous spaces (a C1 field on C2 geometry) on every family combination, at uniform
     # refinement -- where all families work serially. Distributing this exercises the C1 field's own hang
@@ -78,7 +78,7 @@ def test_distributed_3d_multispace_uniform_all_families(eq, tmp_path):
     _check(cases, 2, tmp_path, mod=box_cases_3d)
 
 
-@pytest.mark.parametrize("eq", ["mixed12", "stokes_th", "ale"])
+@pytest.mark.parametrize("eq", ["mixed12", "constrain12", "unconstrain12", "stokes_th", "ale"])
 def test_distributed_3d_multispace_nonuniform(eq, tmp_path):
     # The same, at the two-level NON-uniform state, on the families where that works serially.
     kinds = [k for k in _MULTISPACE_OK if k not in _MPI_NONUNIFORM_BROKEN]
@@ -91,7 +91,7 @@ def test_distributed_3d_four_ranks(tmp_path):
     cases = [(kind, eq, (1, 2)) for kind in ["all_four", "hex_tet"]
              for eq in ["poisson2", "neumann"]]
     cases += [(kind, eq, (1, 1)) for kind in ["all_four", "hex_pyr_wedge"]
-              for eq in ["stokes_th", "ale"]]
+              for eq in ["stokes_th", "ale", "unconstrain12"]]
     _check(cases, 4, tmp_path, mod=box_cases_3d)
 
 

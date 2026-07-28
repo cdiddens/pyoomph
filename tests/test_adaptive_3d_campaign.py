@@ -36,8 +36,10 @@
 #     tetrahedra, but FAIL under non-uniform refinement on wedges, pyramids and every mixed layout. A C1
 #     field on a C2-geometry mesh needs its own hang slot; that per-value-index hang is installed for
 #     bricks and tets but not for the wedge/pyramid/registry families.
-#   * ConstrainFieldsToC1Space fails under non-uniform 3D refinement on EVERY family, bricks included --
-#     i.e. this one is not specific to mixed meshes and is not a mixed_adapt regression.
+#     The two ConstrainFieldsToC1Space variants behave exactly like the other multi-space cases: they used
+#     to fail on every family, including bricks, because of a separate defect in the constraint's own
+#     vertex-node guard (src/elements.cpp) -- that is fixed, and what remains is the same family
+#     restriction as above.
 #
 # The failing configurations are marked xfail(strict=True) rather than skipped or dropped, so they stay
 # visible, cannot silently rot, and will fail the suite the moment they start working (which is the signal
@@ -63,18 +65,16 @@ _RES_TOL_DEFAULT = 1e-9
 _NEWTON_REDUCTION = 1e-10
 
 # The families whose C1 hang slot is installed correctly under non-uniform refinement (see the header).
+# The two ConstrainFieldsToC1Space variants belong here as well: they also carry a live C1 field alongside
+# the C2 one, so once the separate defect in the constraint's own vertex-node guard was fixed they inherited
+# exactly the same family restriction as the other multi-space cases.
 _MULTISPACE_OK = {"hex", "tet"}
-_MULTISPACE_EQS = {"mixed12", "stokes_th", "ale"}
-_CONSTRAINT_EQS = {"constrain12", "unconstrain12"}
+_MULTISPACE_EQS = {"mixed12", "constrain12", "unconstrain12", "stokes_th", "ale"}
 
 
 def _expected_broken(eq, kind, levels):
     """Reason string if this configuration is a known failure, else None."""
     non_uniform = levels[0] != levels[1]
-    if eq in _CONSTRAINT_EQS and non_uniform:
-        return ("ConstrainFieldsToC1Space under non-uniform 3D refinement: a constrained node that is a "
-                "C1 VERTEX of a finer neighbouring element is rejected unless it hangs on the C1 slot "
-                "(src/elements.cpp:2612). Affects bricks too, so not mixed-mesh specific.")
     if eq in _MULTISPACE_EQS and non_uniform and kind not in _MULTISPACE_OK:
         return ("two coexisting continuous spaces (C1 field on C2 geometry) under non-uniform refinement: "
                 "the separate C1 hang slot is not installed for the wedge/pyramid/registry families")

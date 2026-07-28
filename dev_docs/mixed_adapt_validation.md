@@ -576,7 +576,7 @@ engine document, which validated tet Taylor-Hood/Crouzeix-Raviart), but **not** 
 registry families — whose validation (§4.15) only ever used single-space Poisson, C1 *or* C2, never both at
 once. So this is a genuine gap in the wedge/pyramid work rather than a regression.
 
-### 9.5 Defect B — `ConstrainFieldsToC1Space` × non-uniform 3D refinement, on *every* family
+### 9.5 Defect B — `ConstrainFieldsToC1Space` × non-uniform 3D refinement — **[FIXED]**
 
 `ConstrainFieldsToC1Space` throws under non-uniform 3D refinement on **all** families, bricks included:
 
@@ -607,6 +607,27 @@ that is evidently not set up.
 
 Adding `_dummyC1`, as the error message suggests, does **not** help.
 
+**Fix.** The guard was inconsistent with the code immediately below it. That code already handles the
+vertex case correctly — `c1_corner_lookup.find(l)` misses for a node this element sees as a C1 vertex, so
+nothing is installed here and the hang comes (identically) from the element(s) where the node *is* a
+non-vertex, exactly as the block comment there describes. The guard aborted before that code could run.
+It demanded the node hang on the C1 slot, which happens to hold in 2D (a coarse edge-mid node's C1 value
+*is* the mean of the two coarse corners) but not in 3D, where a father's face-centre and volume-centre
+nodes also become sons' vertices. The guard now tests the condition its own error message describes —
+asking to degrade to a C1 space that does not exist (`!has_C1_fields`) — and the legitimate 2:1 vertex case
+falls through to the do-nothing path.
+
+The **position** branch (`POSITION_CONSTRAIN_TO_C1`) was deliberately left strict: a constrained position is
+still enforced by `pin_position()` rather than by a registered hang, so relaxing it would not make the
+position case correct, only move the failure into the generated residual code (the §4.14
+`local_eqn < eleminfo->ndof` abort). It should follow the field branch once Phase D lands.
+
+**Result.** `constrain12` / `unconstrain12` now pass under non-uniform 3D refinement on bricks and tets —
+machine zero, one Newton step, and the dof ordering `constrained < unconstrained-on-top < baseline` holds.
+What remains on wedges/pyramids/mixed layouts is **defect A**, which these cases share with every other
+multi-space problem (they too carry a live C1 field beside the C2 one); their xfail predicate is now simply
+the same one. Exactly two xfails flipped to passes, and nothing else moved.
+
 ### 9.6 How the failures are tracked
 
 Every failing configuration is marked `xfail(strict=True)` with the reason string, not skipped and not
@@ -615,11 +636,12 @@ the moment one starts passing — which is the signal to delete the marker. 38 o
 
 ### 9.7 Next
 
-Defect B is the smaller and higher-value fix: it is one guard condition at a known line, it affects plain
-bricks on `main`, and it blocks task 4's 3D half. Defect A is the larger one — installing the
-per-value-index C1 hang for the wedge/pyramid/registry families, mirroring what the tet route already does
-— and it blocks the 3D halves of tasks 2/3 and 5 on non-uniformly refined mixed meshes. Neither blocks
-Phase D (`ConstrainPositionsToC1Space`, §4), which is independent.
+~~Defect B is the smaller and higher-value fix~~ — **done**, see §9.5. What is left is **defect A**:
+installing the per-value-index C1 hang for the wedge/pyramid/registry families, mirroring what the tet
+route already does. It is the single remaining blocker for the 3D halves of tasks 2/3, 4 and 5 on
+non-uniformly refined wedge/pyramid/mixed meshes — one fix would clear all four at once, since they all
+fail for the same reason. **Defect C** (§9.8) is separate and distributed-only. Neither blocks Phase D
+(`ConstrainPositionsToC1Space`, §4), which is independent.
 
 ### 9.8 Defect C — distributed 3D pure-tet, non-uniform: asymmetric throw → deadlock
 
@@ -653,7 +675,9 @@ other matrices, so the rest of the 3D distributed coverage stays meaningful.
 | coupled C2+C1, Taylor–Hood Stokes, ALE — all 11 layouts, uniform | pass | pass |
 | coupled C2+C1, Taylor–Hood Stokes, ALE — non-uniform, brick/tet | pass | pass (hex; pure-tet §9.8) |
 | coupled C2+C1, Taylor–Hood Stokes, ALE — non-uniform, wedge/pyramid/mixed | **defect A** | not reached |
-| `ConstrainFieldsToC1Space` — non-uniform, any family | **defect B** | not reached |
+| `ConstrainFieldsToC1Space` — non-uniform, brick/tet | pass (**defect B fixed**) | pass |
+| `ConstrainFieldsToC1Space` — non-uniform, wedge/pyramid/mixed | **defect A** | not reached |
 
-Three defects found, one fixed (§9.2), two characterised and tracked (§9.4, §9.5), plus a distributed-only
-one (§9.8). All failing configurations are `xfail(strict=True)`, never skipped or dropped.
+Four defects found, **two fixed** (§9.2 the neighbour self-test guard, §9.5 the C1-constraint vertex
+guard), two characterised and tracked (§9.4 defect A, §9.8 defect C). All remaining failing configurations
+are `xfail(strict=True)`, never skipped or dropped.

@@ -66,6 +66,14 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
   `set_current_dofs()` wrote out of bounds in the same way. All now gather/scatter
   properly, so under MPI every rank sees the same full-length vector. (The Jacobian
   returned by `_assemble_residual_jacobian` remains process-local CSR, as before.)
+- **3D adaptivity**: `ConstrainFieldsToC1Space` aborted with "Cannot enforce a
+  degration to C1 on a C1 vertex node" on any 3D mesh carrying a 2:1 (non-uniformly
+  refined) interface, plain bricks included. A constrained node is legitimately a C1
+  *vertex* of the finer neighbouring elements — and of the sons created at a father's
+  face/volume centre — and the code already handled that by leaving the hang to the
+  elements where the node is a non-vertex; the guard aborted before reaching it. It
+  demanded the node hang on the C1 slot, which holds in 2D but not in 3D. The guard now
+  tests what its message describes: degrading to a C1 space that is not present.
 - **3D adaptivity**: `DynamicOcTreeForest::check_all_neighbours` inspected only the
   *first* tree when deciding whether to skip oomph-lib's brick compass neighbour
   self-test. A mixed 3D forest whose first root happened to be a brick therefore ran

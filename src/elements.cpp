@@ -2607,7 +2607,20 @@ namespace pyoomph
 					{
 						throw_runtime_error("Cannot enforce a degration to C1 on a base dof index larger than the number of base dofs on this element: index="+std::to_string(info->index)+" vs. ncont_interpolated_values()="+std::to_string(this->ncont_interpolated_values()));
 					}
-					if (elem_to_C1_map[l]>=0 && !is_hanging_on_C1)
+					// A constrained node being a C1 VERTEX of THIS element is not an error, and must not
+					// abort: at a 2:1 interface the coarse element's constrained mid-node is a genuine
+					// (non-hanging) vertex of each finer neighbour, and in 3d also of the sons created at a
+					// father's face/volume centre. The block below already handles that case correctly by
+					// doing nothing here -- the hang is installed, identically, by the element(s) where the
+					// node IS a non-vertex (see the comment there). The previous guard demanded the node
+					// hang on the C1 slot instead, which is true in 2d (a coarse edge-mid node's C1 value is
+					// the mean of the two coarse corners) but not in 3d, so any 3d mesh with a 2:1 interface
+					// threw. Bisection showed it aborted for plain bricks too, in every configuration except
+					// the single one the existing 3d test happens to use.
+					//
+					// What IS a genuine misuse is asking to degrade to a C1 space that does not exist, which
+					// is what this message has always described -- so that is what it now tests.
+					if (elem_to_C1_map[l]>=0 && !has_C1_fields)
 					{
 						throw_runtime_error("Cannot enforce a degration to C1 on a C1 vertex node.\n\
 							 This can happen in adaptive problems without any C1 or C1TB fields present in the bulk mesh.\n\
@@ -2652,6 +2665,13 @@ namespace pyoomph
 					{
 						throw_runtime_error("Cannot enforce a degration to C1 on a coordinate index larger than the nodal dimension of this element");
 					}
+					// Deliberately NOT relaxed the way the field branch above was. Unlike a field value, a
+					// constrained POSITION is still enforced by pin_position() rather than by a registered
+					// hang, so letting a 2:1 vertex-side element through here would not make the position
+					// case correct -- it would only move the failure to the generated residual code
+					// (the "local_eqn < eleminfo->ndof" abort root-caused in
+					// dev_docs/mixed_adaptive_meshes.md 4.14). Keep the early, legible abort until the
+					// registered position-hang lands; then this guard should follow the field one.
 					if (elem_to_C1_map[l]>=0 &&!is_hanging_on_C1)
 					{
 						throw_runtime_error("Cannot enforce a degration to C1 on a C1 vertex node\n\
