@@ -813,3 +813,44 @@ Both variants behave identically, and the boundary unconstrain does bite (2D qua
 
 `Node.get_hanging_masters()` (now bound) makes step 1 far more tractable than it was: the position hang's
 master list and weights can be inspected directly from a test rather than inferred from a Newton failure.
+
+
+### 11.3 First fix attempt — registered geometric position hang — **FAILED, reverted**
+
+The plan of §11.2 step 1 was attempted and does not work as stated. Recording it so the next attempt does
+not repeat it.
+
+**The approach.** Replace `pin_position()` with a registered hang on the element's C1 corners, installed in
+the node's *geometric* slot (`set_hanging_pt(hang, -1)`), so that oomph's own
+`assign_hanging_local_eqn_numbers` walks it and enters the masters into `Local_position_hang_eqn` — the
+registration the position path is missing.
+
+**What was learned, and what is now known to be wrong in §4.14.**
+
+* §4.14's stated reason for rejecting the geometric hang — that it "couples the dominant C2 values" — is
+  **not correct as stated**. `Node::is_hanging(i)` for `i >= 0` reads `Hanging_pt[i+1]` with **no fallback**
+  to the geometric slot (`nodes.h`), and pyoomph's `flatten_hang_for_value` keys on exactly that. A
+  geometric hang does not by itself make any value hang.
+* The real obstacle is different and is in `Node::set_hanging_pt(hang, -1)` (`nodes.cc:2068`): before
+  overwriting the geometric slot it marks every value slot holding the *same pointer* as the geometric one
+  and re-points all of them at the new hang. When a node hangs in nothing, every slot is null **and so is
+  the geometric one**, so a naive call makes every field hang on the C1 corners too. This is surmountable —
+  snapshot the value slots, install, then restore (a slot that shared the old geometric pointer gets its own
+  copy of the original; a slot that was null goes back to null) — and it was implemented and verified:
+  `Node.get_hanging_masters()` confirmed the installed constraint had the right masters and weights and that
+  the value slots stayed clean.
+* **It still fails.** With a demonstrably correct hang installed, the global dof count collapses (2D quad
+  base mesh: 139 with `pin_position`, 59 with the hang) and Newton diverges to ~1e+54 from the first step —
+  on the NON-adaptive mesh, which previously passed. Guarding the install against Dirichlet-pinned positions
+  (a hang replaces a pin, so it would silently release a pinned boundary) did not help. So something beyond
+  the `HangInfo` bookkeeping accounts for the lost dofs; installing refinement-style geometric hangs on an
+  unrefined mesh appears not to be something oomph's dof accounting expects.
+
+**Suggested next direction.** Do *not* route this through the geometric slot. Register the missing masters
+directly in `Local_position_hang_eqn` instead — the route §4.14 called "tangles with oomph's two-pass
+equation assignment", which now looks like the lesser problem of the two. A cheap first step that is worth
+doing regardless: `RefineableElement::local_position_hang_eqn` reads the map with `std::map::operator[]`,
+which default-constructs an EMPTY `DenseMatrix<int>` for an unregistered node, so
+`leaf_local_eqn_for_position` reads out of bounds and returns a garbage index — that is the whole mechanism
+of the §4.14 abort. Adding a membership check there would turn it into a precise diagnostic naming the
+unregistered node, which would make the required registration set directly enumerable rather than inferred.
