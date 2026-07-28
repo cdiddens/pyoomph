@@ -234,7 +234,36 @@ def _warn_suboptimal_solver(name:str) -> None:
 	)
 
 
-if _is_macos and _is_arm64:
+def _running_under_mpi() -> bool:
+	# True only for a genuine multi-process run (mpirun -n N with N>1). get_mpi_nproc() returns 0
+	# when pyoomph was built without MPI, and 1 for a single-process run -- both mean "serial".
+	try:
+		from .generic.mpi import get_mpi_nproc #type:ignore
+		return get_mpi_nproc() > 1
+	except Exception:
+		return False
+
+
+def _warn_no_mpi_capable_solver(name:str) -> None:
+	import warnings
+	warnings.warn(
+		"pyoomph is running with multiple MPI processes, but no MPI-capable direct solver was found; "
+		"falling back to '"+name+"', which is not MPI-parallel. Install PETSc/SLEPc with MUMPS support "
+		"(then --petsc_mumps / the automatic default applies) -- see "
+		"https://pyoomph.readthedocs.io/en/latest/tutorial/installation/petscslepc.html",
+		RuntimeWarning,
+		stacklevel=2,
+	)
+
+
+# Under MPI (mpirun -n N, N>1) the platform-preferred serial solvers are not usable: MKL Pardiso is not
+# MPI-parallel at all (it raises in its constructor) and Accelerate is macOS-serial. PETSc+MUMPS is the
+# only distributed-capable direct solver pyoomph ships, so it becomes the default whenever it is present,
+# regardless of platform. Falls through to the normal serial cascade (with a warning) if it is missing,
+# so that a run without PETSc still starts and can be steered explicitly from the command line.
+if _running_under_mpi() and _set_petsc_mumps_solver():
+	pass
+elif _is_macos and _is_arm64:
 	if not _set_petsc_mumps_solver():
 		if _set_accelerate_solver():
 			_warn_suboptimal_solver("accelerate")
@@ -254,3 +283,12 @@ else:
 		if not _set_petsc_mumps_solver():
 			_set_superlu_fallback()
 			_warn_suboptimal_solver("superlu")
+
+if _running_under_mpi():
+	from .solvers.generic import get_default_linear_solver as _get_default_linear_solver
+	_chosen=_get_default_linear_solver()
+	if _chosen not in ("petsc_mumps","petsc","mumps"):
+		from .generic.mpi import get_mpi_rank as _get_mpi_rank #type:ignore
+		if _get_mpi_rank()==0:  # one warning per run, not one per rank
+			_warn_no_mpi_capable_solver(str(_chosen))
+	del _chosen
