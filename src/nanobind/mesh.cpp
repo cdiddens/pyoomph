@@ -1375,6 +1375,10 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("get_boundary_names",mesh_method(&pyoomph::Mesh::get_boundary_names), "Returns the names of all boundaries of this mesh, ordered by their numeric index")
 		.def("set_spatial_error_estimator_pt",mesh_method(&pyoomph::Mesh::set_spatial_error_estimator_pt), nb::keep_alive<1, 2>(), nb::arg("error_estimator"), "Assigns the Z2ErrorEstimator used to drive adaptive mesh refinement on this mesh")
 		.def("_enlarge_elemental_error_max_override_to_only_nodal_connected_elems",mesh_method(&pyoomph::Mesh::enlarge_elemental_error_max_override_to_only_nodal_connected_elems), nb::arg("boundary_index"), "Propagates the per-element maximum-error override of elements on the given boundary to all elements sharing a node with them")
+		.def("_add_refinement_directive_to_level",mesh_method(&pyoomph::Mesh::add_refinement_directive_to_level), nb::arg("level"), "Registers a persistent refinement criterion on this mesh: refine every element until its refinement level reaches `level` (negative for the maximum permitted level)")
+		.def("_add_refinement_directive_max_element_size",mesh_method(&pyoomph::Mesh::add_refinement_directive_max_element_size), nb::arg("max_nondim_size"), "Registers a persistent refinement criterion on this mesh: refine every element larger than the given non-dimensional Cartesian size")
+		.def("_clear_refinement_directives",mesh_method(&pyoomph::Mesh::clear_refinement_directives), "Removes all refinement criteria registered with _add_refinement_directive_*")
+		.def("_apply_refinement_directives",mesh_method(&pyoomph::Mesh::apply_refinement_directives), "Evaluates all registered refinement criteria and raises the per-element maximum-error overrides accordingly")
 		.def("check_halo_consistency",mesh_method([](pyoomph::Mesh *m, bool throw_on_mismatch)
 			 { return m->check_halo_consistency(throw_on_mismatch); }), nb::arg("throw_on_mismatch") = false,
 			 "In parallel (MPI) runs, checks that all processes agree about the elements they share -- their positions, "

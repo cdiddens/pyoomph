@@ -15,6 +15,8 @@ The real main part is the :py:class:`~pyoomph.equations.solid.FSIConnection`, wh
 
 As opposed to the :py:class:`~pyoomph.equations.ALE.ConnectMeshAtInterface` class, which moves the nodes of the meshes on both sides, the :py:class:`~pyoomph.equations.solid.FSIConnection` only moves the nodes of the liquid mesh to match those of the solid mesh. Otherwise, the particular moving mesh dynamics of the fluid domain, which does not reflect any physics, would add additional unphysical tractions to the system.
 
+Note that spatial adaptivity is driven here by a :py:class:`~pyoomph.equations.generic.SpatialErrorEstimator` on the liquid velocity alone. The solid domain is given no refinement criterion of its own, yet both sides of the mutual interface must always be refined identically -- an interface element on one side has to find exactly one counterpart on the other. Since the two domains are separate meshes, oomph-lib adapts them individually, so pyoomph takes care of this itself: after every adaptation, the coarser side of a connected interface is refined until the two sides carry matching facets again. You therefore do not have to constrain the interface refinement by hand, and this works under ``mpirun --distribute`` as well, where the two domains are partitioned independently of each other.
+
 .. only:: html
 
 	.. raw:: html 

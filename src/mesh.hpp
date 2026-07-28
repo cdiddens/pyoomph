@@ -233,6 +233,55 @@ namespace pyoomph
 		virtual void fill_node_map(std::map<oomph::Node *, unsigned> &nodemap);
 		virtual std::vector<oomph::Node *> fill_reversed_node_map(bool discontinuous = false);
 		virtual void enlarge_elemental_error_max_override_to_only_nodal_connected_elems(unsigned bind);
+
+		// --- Refinement directives -------------------------------------------------------------------
+		// The declarative refinement criteria (RefineToLevel, RefineMaxElementSize) evaluated in C++
+		// rather than by a Python loop over the elements.
+		//
+		// The point is not speed. These criteria are pure functions of an element's own level or size, so
+		// evaluating them here means they are evaluated for EVERY element this process holds, halo copies
+		// included -- and a halo copy therefore reaches the same verdict as the element it is a copy of,
+		// by construction, with nothing to synchronise afterwards. The Python versions ran over
+		// mesh.elements() and produced exactly the same values, but they did so as one more rank-local
+		// override that the halo exchange then had to repair.
+		//
+		// Registered once, when the equations are compiled; the override VALUES are recomputed on every
+		// adapt (they are reset each time), the directives themselves persist.
+		struct RefinementDirective
+		{
+			enum Kind
+			{
+				ToLevel,      // refine until refinement_level() >= level; level < 0 means "to the maximum"
+				MaxElementSize // refine while the element is larger than max_size
+			};
+			Kind kind;
+			int level;
+			double max_size;
+		};
+		void add_refinement_directive_to_level(int level)
+		{
+			RefinementDirective d;
+			d.kind = RefinementDirective::ToLevel;
+			d.level = level;
+			d.max_size = 0.0;
+			refinement_directives.push_back(d);
+		}
+		void add_refinement_directive_max_element_size(double s)
+		{
+			RefinementDirective d;
+			d.kind = RefinementDirective::MaxElementSize;
+			d.level = 0;
+			d.max_size = s;
+			refinement_directives.push_back(d);
+		}
+		void clear_refinement_directives() { refinement_directives.clear(); }
+		unsigned nrefinement_directives() const { return refinement_directives.size(); }
+		// Evaluate every registered directive over this mesh's elements, raising their
+		// elemental_error_max_override where the directive asks for refinement (or merely asks that an
+		// element not be unrefined away again). Only ever raises, so the order of the directives -- and
+		// of this call relative to the other override sources -- does not matter.
+		virtual void apply_refinement_directives();
+		std::vector<RefinementDirective> refinement_directives;
 		virtual unsigned get_nodal_dimension();
 		virtual int get_element_dimension();
 		// Discard the cached lagrangian_kdtree (e.g. because nodes moved); it will be rebuilt lazily on next use.
@@ -619,10 +668,12 @@ namespace pyoomph
 			this->post_adapt_setup_hanging_nodes();
 		}
 
-		// Copy each haloed element's error estimate onto the corresponding halo element on every other
-		// process, so all processes agree on which elements are to be refined/unrefined. oomph-lib's own
-		// Z2 estimator does this for the values it computes, but pyoomph's per-element error overrides
-		// are applied afterwards and rank-locally, which would otherwise reintroduce the disagreement.
+		// Make every process agree on the error of each shared element, by MAX-reducing over all copies
+		// (halo -> owner -> halo again) rather than by letting the owner's value win. oomph-lib's own Z2
+		// estimator synchronises the values IT computes, but pyoomph's per-element error overrides are
+		// applied afterwards and rank-locally, which would otherwise reintroduce the disagreement -- and
+		// an override is not always computed on the rank that owns the element it applies to (see the
+		// implementation). A max is the right reduction: the quantity is an upper-bound override.
 		// No-op in serial or on a non-distributed mesh.
 		void synchronise_elemental_errors(oomph::Vector<double> &errs);
 

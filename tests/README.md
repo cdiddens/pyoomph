@@ -23,9 +23,10 @@ or, where passing a flag is awkward (CI), set `PYOOMPH_FULL_TESTS=1`. Nothing is
 
 ### What the wheel builds run
 
-A second, independent axis: the `campaign` marker covers the four mixed-adaptive-mesh validation modules
+A second, independent axis: the `campaign` marker covers the adaptive-mesh validation modules
 (`test_adaptive_2d_campaign.py`, `test_adaptive_3d_campaign.py`, `test_mpi_adaptivity.py`,
-`test_mpi_adaptivity_3d.py`). The wheel-building workflow deselects them:
+`test_mpi_adaptivity_3d.py`, `test_adaptive_interface_coupling.py`, `test_mpi_interface_coupling.py`).
+The wheel-building workflow deselects them:
 
 > python -m pytest tests -m "not campaign"     # 177 tests, ~4 min
 
@@ -58,6 +59,25 @@ harness is what keeps the serial and distributed campaigns from drifting apart.
 A number of 3D configurations are marked `xfail(strict=True)` with a reason: they are known defects, not
 gaps in coverage. See `dev_docs/mixed_adapt_validation.md` §9. Being strict, they will fail the suite as
 soon as they start passing, which is the signal to remove the marker.
+
+## Coupled interfaces between two domains
+
+`test_adaptive_interface_coupling.py` (serial) and `test_mpi_interface_coupling.py` (distributed) cover a
+different problem from the campaign above: two domains that share an interface are adapted **individually**
+by oomph-lib, so a refinement criterion stated for one of them leaves the other with no reason to follow —
+and the opposite-element matcher, which pairs interface elements by exact vertex-position sets, then has
+nothing to pair up. Every case drives refinement asymmetrically on purpose.
+
+The definitions live in `two_domain_cases.py`, shared between the serial and MPI halves exactly as
+`box_cases.py` is. `Problem.check_interface_conformity()` is the oracle: it states the invariant directly
+rather than inferring it from the absence of a crash, and reports the two failure modes separately — facets
+with no counterpart at all (the meshes were refined differently) versus facets whose counterpart exists but
+not on the process holding them (the halo layer does not cover the opposite domain). Under MPI those need
+different fixes and the matcher's own error message cannot tell them apart.
+
+Set `PYOOMPH_DISABLE_INTERFACE_CONFORMITY=1` to switch the repair off. That is for negative testing — a
+test that still passes with the repair disabled is not measuring the repair. With it set, 80 of the 112
+(mesh kind, equation, refinement state) combinations fail.
 
 ## MPI tests
 

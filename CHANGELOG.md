@@ -12,6 +12,23 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
 
 ### Added
 
+- **Adaptivity across coupled domain interfaces.** Two domains that share an interface (tied by
+  `ConnectFieldsAtInterface`, `ConnectMeshAtInterface` or any other opposite-interface connection) are
+  adapted individually by oomph-lib, so a refinement criterion stated for one of them left the other with
+  no reason to follow -- and the opposite-element matcher, which pairs interface elements by exact
+  vertex-position sets, then died with "Cannot locate opposite element". The only way to have an adaptive
+  coupled interface was not to: `RefineToLevel()` on *both* sides, so that they could not disagree
+  (see `docs/source/tutorial/multidom/simple_fsi.py`). pyoomph now keeps the two sides carrying identical
+  boundary facets automatically, refining the coarser one where they differ, interleaved with each mesh's
+  own 2:1 balancing, to a joint fixed point. Works under `mpirun --distribute`, where the two domains are
+  partitioned independently. Diagnosable with `Problem.check_interface_conformity()`, which reports
+  facets with no counterpart separately from facets whose counterpart is not on the process holding them
+  -- under MPI those are different defects needing different fixes. See
+  `dev_docs/interface_refinement_coupling.md`.
+- **`RefineToLevel` and `RefineMaxElementSize` are now evaluated in the C++ core** instead of by a Python
+  loop over the elements on each adapt. Same criteria, same values, unchanged API -- but they now cover
+  every element a process holds, halo copies included, so a distributed run needs no repair pass to make
+  the halo layer agree with its owner about them.
 - **New element types**: pyramids and wedges, including C1/C2 variants and the
   bubble-enriched `TetraC1TB`/`Tetra3dC1TB`/`Tetra3dC2TB` tetrahedra, with
   proper facet-based boundary/interface detection (replacing boundary-node-only
@@ -63,6 +80,13 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
 
 ### Fixed
 
+- **MPI**: per-element error overrides are now agreed between processes by a MAX-reduction over all
+  copies of an element, rather than by letting the owner's value win. An override is not always computed
+  on the rank that owns the element it applies to: an interface element pushes its error onto the bulk
+  element behind it, including — at a coupled interface — the bulk element of the *opposite* domain, and
+  since two coupled domains share no nodes the partitioner cuts them independently, so the rank holding
+  the interface element routinely holds only a halo copy of that opposite element. Owner-wins discarded
+  such an override silently, on every rank.
 - **MPI**: under `mpirun -n N` with `N>1`, PETSc+MUMPS is now selected as the default
   linear/eigen solver on every platform (previously the platform cascade picked the
   serial-only Pardiso on Linux, which then raised from its own constructor). Serial

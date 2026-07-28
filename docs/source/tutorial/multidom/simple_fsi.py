@@ -42,11 +42,12 @@ class SimpleFSIProblem(Problem):
         # Fluid-structure interaction at the mutual interface
         leqs+=FSIConnection()@"liquid_solid"
         
-        # Adaptivity
+        # Adaptivity. The two domains are adapted individually, but pyoomph keeps both sides of the
+        # mutual interface at the same refinement, so the error estimator can drive it freely. This used
+        # to require RefineToLevel()@"liquid_solid" on BOTH sides -- forcing the interface to maximum
+        # refinement everywhere so that the two sides could not disagree -- which is no longer needed.
         leqs+=SpatialErrorEstimator(velocity=1)
-        leqs+=RefineToLevel()@"liquid_solid"
-        seqs+=RefineToLevel()@"liquid_solid"
-        
+
         self+=leqs@"liquid"+seqs@"solid"
         
         

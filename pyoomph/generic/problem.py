@@ -90,6 +90,26 @@ def breakpoint():
     os.kill(os.getpid(), signal.SIGTRAP)
 
 #To use "with problem.custom_adapt:" statement
+_interface_conformity_check_mode_cache:list[int]=[]
+
+def _interface_conformity_check_mode() -> int:
+    """0 off, 1 report, 2 throw -- read once from PYOOMPH_CHECK_HALO_CONSISTENCY.
+
+    Shares the halo consistency check's variable on purpose: both are "do the pieces that must agree
+    still agree?" checks, both are off by default, and asking a user to know which of two variables
+    applies to their symptom would be asking them to already know the answer.
+    """
+    if not _interface_conformity_check_mode_cache:
+        val=os.environ.get("PYOOMPH_CHECK_HALO_CONSISTENCY","").strip().lower()
+        if val in ("2","throw","raise"):
+            _interface_conformity_check_mode_cache.append(2)
+        elif val in ("1","warn","report"):
+            _interface_conformity_check_mode_cache.append(1)
+        else:
+            _interface_conformity_check_mode_cache.append(0)
+    return _interface_conformity_check_mode_cache[0]
+
+
 class _CustomAdaptWithHelper:
     def __init__(self, problem: "Problem",skip_init_call:bool=False):
         self._problem=problem
@@ -1715,8 +1735,13 @@ class Problem(_pyoomph.Problem):
                     return
                 if depth==0:
                     #print("GET ERRS ON MESH",mesh,mesh.get_name())
+                    # The declarative criteria (RefineToLevel, RefineMaxElementSize) are evaluated in C++
+                    # over every element this process holds, halo copies included, so they need no
+                    # synchronisation afterwards. Only criteria that genuinely need Python -- a
+                    # user-supplied callback -- are left to calculate_error_overrides below.
+                    mesh._apply_refinement_directives()
                     assert mesh._codegen is not None
-                    mesh._codegen.calculate_error_overrides() 
+                    mesh._codegen.calculate_error_overrides()
                 elif depth>0:
                     for _,imesh in mesh._interfacemeshes.items(): 
                         get_errs(imesh,depth-1)
@@ -2881,7 +2906,11 @@ class Problem(_pyoomph.Problem):
 
 
         self.rebuild_global_mesh_from_list(rebuild=False)
-        
+
+        # Coupled domains must enter distribute() at a COMMON uniform level; whatever they do not share
+        # is applied again after distribution (see _defer_uneven_initial_refinement).
+        deferred_initial_refinement=self._defer_uneven_initial_refinement()
+
         must_uniform_refine=False
         for mesh in self._meshdict.values():
             if isinstance(mesh,MeshFromTemplateBase) and mesh._initial_uniform_refinement_level>0:
@@ -2918,8 +2947,11 @@ class Problem(_pyoomph.Problem):
             self.distribute()
             self.actions_after_distribute()
             print("DISTRIBUTING DONE")
-            
-            
+
+        # Distribution (if any) is done, so partial refinement is allowed again: give the coupled
+        # domains the levels they do not share, and repair the conformity that breaks.
+        self._apply_deferred_initial_refinement(deferred_initial_refinement)
+
         if self.check_mesh_integrity:
             for _,m in self._meshdict.items():
                 assert m._codegen is not None                                
@@ -3538,7 +3570,7 @@ class Problem(_pyoomph.Problem):
         permanent, and is exactly what the C++ side reads the boundary facets from.
         """
         conns:list[tuple[AnySpatialMesh,str,AnySpatialMesh,str,list[float]]]=[]
-        seen:set[frozenset[tuple[str,str]]]=set()
+        seen:set[tuple[str,str,str,str]]=set()
         for templ in self._meshtemplate_list:
             for c in templ._opposite_interface_connections:
                 a=c._sideA.split("/")
@@ -3547,7 +3579,19 @@ class Problem(_pyoomph.Problem):
                 # interface, whose conformity follows from that of the bulk facets it sits on.
                 if len(a)!=2 or len(b)!=2:
                     continue
-                key=frozenset({(a[0],a[1]),(b[0],b[1])})
+                # ORIENT THE PAIR CANONICALLY, by name. The order in which a connection is discovered is
+                # NOT the same on every process -- it comes out of the C++ auto-detection, which walks
+                # pointer-keyed containers, and heap addresses differ between processes. Two ranks then
+                # disagree about which domain is "side A", and since the facet sets are unioned across
+                # ranks per side, the union ends up mixing facets of BOTH domains into one side. The
+                # result is a globally consistent-looking but entirely fictitious interface. Sorting by
+                # (domain name, boundary name) is rank-independent by construction.
+                #
+                # This was found the hard way: two coupled triangle meshes in the same process, where the
+                # allocation pattern happened to differ between ranks.
+                if (b[0],b[1])<(a[0],a[1]):
+                    a,b=b,a
+                key=(a[0],a[1],b[0],b[1])
                 if key in seen:
                     continue
                 seen.add(key)
@@ -3563,7 +3607,66 @@ class Problem(_pyoomph.Problem):
                 if a[1] not in ma.get_boundary_names() or b[1] not in mb.get_boundary_names():
                     continue # a side may legitimately be absent (dummy equations only)
                 conns.append((ma,a[1],mb,b[1],[0.0,0.0,0.0]))
+        # Same reasoning for the ORDER of the connections themselves: the C++ side refines meshes in the
+        # order they appear here, and refine_selected_elements is collective on a distributed mesh, so
+        # ranks that visited them in different orders would deadlock.
+        conns.sort(key=lambda c:(c[0].get_name(),c[1],c[2].get_name(),c[3]))
         return conns
+
+    def _defer_uneven_initial_refinement(self) -> list[tuple["MeshFromTemplateBase",int]]:
+        """Hold back the part of the initial uniform refinement that coupled domains do not share.
+
+        Domains that start at different uniform levels are non-conforming from the outset. Repairing
+        that the usual way -- refining the coarser one where the interface needs it -- is not available
+        here: oomph's Problem::distribute() refuses to run on a mesh that is "no longer uniformly
+        refined", since it has to preserve the tree forest, and a partial refinement is by definition
+        non-uniform. Doing the repair before distribution would therefore break distribution instead.
+
+        Levelling everyone UP to the maximum would keep the meshes uniform, but it over-refines: a domain
+        asked for level 1 would silently get level 2, and RefineToLevel(1) then marks those level-2
+        elements "may not unrefine", so the excess never goes away again.
+
+        So: uniform-refine every coupled domain only as far as they agree, distribute, and apply the
+        remainder afterwards -- where partial refinement is allowed and enforce_interface_conformity()
+        can do its job. This lowers the stored levels to the common minimum and returns what it took, for
+        the caller to re-apply after the distribute step.
+
+        Coupling is transitive (A-B and B-C means all three must agree), so the minimum propagates to a
+        fixed point over the coupling graph rather than in a single pass.
+        """
+        conns=self._collect_coupled_interfaces()
+        if not conns:
+            return []
+        original:dict[MeshFromTemplateBase,int]={}
+        for ma,_bna,mb,_bnb,_off in conns:
+            for m in (ma,mb):
+                if isinstance(m,MeshFromTemplateBase) and m not in original:
+                    original[m]=m._initial_uniform_refinement_level
+        for _ in range(len(conns)+1):
+            changed=False
+            for ma,_bna,mb,_bnb,_off in conns:
+                if not isinstance(ma,MeshFromTemplateBase) or not isinstance(mb,MeshFromTemplateBase):
+                    continue
+                lvl=min(ma._initial_uniform_refinement_level,mb._initial_uniform_refinement_level)
+                for m in (ma,mb):
+                    if m._initial_uniform_refinement_level>lvl:
+                        m._initial_uniform_refinement_level=lvl
+                        changed=True
+            if not changed:
+                break
+        return [(m,original[m]-m._initial_uniform_refinement_level) for m in original
+                if original[m]>m._initial_uniform_refinement_level]
+
+    def _apply_deferred_initial_refinement(self,deferred:list[tuple["MeshFromTemplateBase",int]]):
+        """Apply what _defer_uneven_initial_refinement held back, once distribution is done."""
+        if not deferred:
+            return
+        self.actions_before_adapt()
+        for mesh,extra in deferred:
+            for _ in range(extra):
+                mesh.refine_uniformly()
+        self.relink_external_data()
+        self.actions_after_adapt() # repairs the conformity this just broke
 
     def enforce_interface_conformity(self) -> int:
         """Make both sides of every coupled interface carry identical boundary facets.
@@ -3602,6 +3705,13 @@ class Problem(_pyoomph.Problem):
         # them up: the two sides of a coupled interface may have been refined differently (the meshes
         # are adapted individually), and this is the one point where that can still be repaired.
         self.enforce_interface_conformity()
+        # Same opt-in diagnostic knob as the halo consistency check, deliberately: both answer the same
+        # question ("do the pieces that must agree still agree?") and a user should not have to know
+        # which one to switch on. Checked AFTER the repair, so what it reports is a mismatch that
+        # SURVIVED it -- which the repair cannot fix and the matcher below is about to die on.
+        _confmode=_interface_conformity_check_mode()
+        if _confmode:
+            self.check_interface_conformity(throw_on_mismatch=_confmode>1,when="after enforcement")
         for m in self._interfacemeshes:
             #print("REBUILDING INTERFACE MESH",m,m.get_name(), m.nelement())
             m.rebuild_after_adapt()

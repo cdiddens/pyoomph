@@ -236,22 +236,27 @@ namespace pyoomph
     if (pairs.empty()) return 0;
     oomph::OomphCommunicator *comm_pt = coupling_communicator(pairs);
 
-    unsigned n_bad_local = 0;
+    unsigned n_bad_local = 0;  // globally-reduced facet sets disagree: the meshes were refined differently
+    unsigned n_unreachable = 0; // they agree, but this rank does not HOLD the partner it would be paired to
     std::ostringstream msg;
     const unsigned MAX_REPORTED = 8; // per side of a pair; enough to see the pattern, not a flood
 
     for (const CoupledInterfacePair &p : pairs)
     {
-      InterfaceSideFacets A, B;
+      InterfaceSideFacets A, B, A_local, B_local;
       // Both sides are keyed in side-A coordinates: the offset moves A onto B, so A carries it.
       collect_interface_side(p.meshA, p.bnameA, p.offset, A);
       collect_interface_side(p.meshB, p.bnameB, std::vector<double>(), B);
+      A_local = A; // keep the rank-local facet sets before they are replaced by the global union
+      B_local = B;
       allgather_side(A, comm_pt);
       allgather_side(B, comm_pt);
       if (A.facets.empty() && B.facets.empty()) continue;
 
       const InterfaceSideFacets *sides[2] = {&A, &B};
       const InterfaceSideFacets *others[2] = {&B, &A};
+      const InterfaceSideFacets *loc[2] = {&A_local, &B_local};
+      const InterfaceSideFacets *loc_other[2] = {&B_local, &A_local};
       const char *labels[2] = {"A", "B"};
       for (int s = 0; s < 2; s++)
       {
@@ -268,6 +273,28 @@ namespace pyoomph
                 << "\n";
           }
         }
+        // The globally-conforming case is not yet enough for connect_interface_elements_by_kdtree, which
+        // is RANK-LOCAL: it pairs the interface elements THIS rank holds. The two domains are partitioned
+        // independently (they share no nodes, so the partitioner sees two disconnected components), so a
+        // rank can hold one side of a facet pair and not the other -- a halo-coverage problem, not a
+        // refinement one, and it needs a different fix. Counted and reported separately for exactly that
+        // reason: the two failure modes look identical from the matcher's error message.
+        //
+        // Only meaningful when distributed. Serially the local sets ARE the global ones, so this would
+        // just count the same mismatches a second time and report them under a misleading heading.
+        if (!comm_pt || comm_pt->nproc() < 2) continue;
+        unsigned reported_unreachable = 0;
+        for (const auto &f : loc[s]->local)
+        {
+          if (loc_other[s]->facets.count(f.second)) continue;
+          n_unreachable++;
+          if (mode && reported_unreachable < MAX_REPORTED)
+          {
+            reported_unreachable++;
+            msg << "  side " << labels[s] << " facet held here but its partner is NOT on this process: "
+                << facet_to_string(f.second) << "\n";
+          }
+        }
       }
     }
 
@@ -276,23 +303,34 @@ namespace pyoomph
     // verdict is unanimous -- an asymmetric throw would leave the other ranks blocked in the next
     // collective, which is the failure mode this check exists to prevent.
     unsigned n_bad = n_bad_local;
+    unsigned n_unreach_total = n_unreachable;
 #ifdef OOMPH_HAS_MPI
     if (comm_pt && comm_pt->nproc() > 1)
+    {
       MPI_Allreduce(&n_bad_local, &n_bad, 1, MPI_UNSIGNED, MPI_MAX, comm_pt->mpi_comm());
+      // Unreachable facets ARE per-rank, so sum them -- but still collectively, so the verdict below
+      // is unanimous and a throwing check fails the whole job rather than one rank while the others
+      // block in the next collective.
+      MPI_Allreduce(&n_unreachable, &n_unreach_total, 1, MPI_UNSIGNED, MPI_SUM, comm_pt->mpi_comm());
+    }
 #endif
 
-    if (n_bad && mode)
+    if ((n_bad || n_unreach_total) && mode)
     {
       std::ostringstream full;
-      full << "Interface conformity violated (" << when << "): " << n_bad
-           << " boundary facet(s) of a coupled interface have no counterpart on the opposite side.\n"
-           << "The two domains have been refined differently along a shared interface, so the "
-              "opposite-element matcher cannot pair them up.\n"
+      full << "Interface conformity violated (" << when << "): ";
+      if (n_bad)
+        full << n_bad << " boundary facet(s) of a coupled interface have no counterpart on the opposite "
+                         "side -- the two domains were refined differently along a shared interface.\n";
+      if (n_unreach_total)
+        full << n_unreach_total << " boundary facet(s) have a counterpart, but not on the process that "
+                                   "holds them -- the halo layer does not cover the opposite domain.\n";
+      full << "Either way the opposite-element matcher cannot pair them up.\n"
            << msg.str();
       if (mode > 1) throw_runtime_error(full.str());
       std::cout << "pyoomph WARNING: " << full.str() << std::flush;
     }
-    return n_bad;
+    return n_bad + n_unreach_total;
   }
 
   unsigned enforce_interface_conformity(const std::vector<CoupledInterfacePair> &pairs, unsigned max_rounds)
@@ -312,7 +350,9 @@ namespace pyoomph
           meshes.push_back(sides[s]);
     }
 
-    unsigned total_refined = 0;
+    unsigned total_refined = 0;   // rank-local: only ever used through global_refined below
+    unsigned global_refined = 0;
+    bool converged = false;
     for (unsigned round = 0; round < max_rounds; round++)
     {
       // Each mesh's own 2:1 balancing refines further elements of its own accord, some of them at a
@@ -339,6 +379,7 @@ namespace pyoomph
         {
           if (!ms[s] || !ms[s]->refinement_possible()) continue;
           const int mi = (int)(std::find(meshes.begin(), meshes.end(), ms[s]) - meshes.begin());
+          if (mi < 0 || mi >= (int)meshes.size()) continue; // cannot happen: ms[s] was put in `meshes` above
           for (const auto &f : sides[s]->local)
           {
             if (!facet_is_too_coarse(f.second, *others[s])) continue;
@@ -360,7 +401,7 @@ namespace pyoomph
         to_refine[i].erase(std::unique(to_refine[i].begin(), to_refine[i].end()), to_refine[i].end());
         selected_local += (unsigned)to_refine[i].size();
       }
-      if (!global_sum(selected_local, comm_pt)) break;
+      if (!global_sum(selected_local, comm_pt)) { converged = true; break; }
 
       for (unsigned i = 0; i < meshes.size(); i++)
       {
@@ -372,21 +413,29 @@ namespace pyoomph
         total_refined += (unsigned)to_refine[i].size();
         meshes[i]->refine_selected_elements(sel);
       }
+      global_refined += global_sum(selected_local, comm_pt);
+    }
 
-      if (round + 1 == max_rounds)
-      {
-        throw_runtime_error(
-            "enforce_interface_conformity did not converge in " + std::to_string(max_rounds) +
-            " rounds. This usually means the two sides of a coupled interface cannot be brought into "
-            "correspondence at all -- e.g. incompatible facet shapes, or one side capped by a lower "
-            "max_refinement_level than the other needs.");
-      }
+    if (!converged)
+    {
+      // Every rank drove the loop off the same globally-summed selection count, so every rank arrives
+      // here together and the throw is unanimous -- an asymmetric one would leave the others blocked in
+      // the next collective.
+      throw_runtime_error(
+          "enforce_interface_conformity did not converge in " + std::to_string(max_rounds) +
+          " rounds. This usually means the two sides of a coupled interface cannot be brought into "
+          "correspondence at all -- e.g. incompatible facet shapes, or one side capped by a lower "
+          "max_refinement_level than the other needs.");
     }
 
     // The extra refinement above bypassed the per-adapt hanging-node pass, so re-derive it. It is a
     // full, generative re-derivation (see TemplatedMeshBase3d::post_adapt_setup_hanging_nodes), not an
     // incremental one, so running it again is exactly what is wanted here; 2d is a no-op.
-    if (total_refined)
+    //
+    // Gated on the GLOBAL count, not this rank's: a rank that happened to refine nothing itself must
+    // still re-derive its hanging nodes, or its (halo) copies of elements another rank refined keep a
+    // stale hang scheme and the ranks disagree about the equation numbering.
+    if (global_refined)
       for (unsigned i = 0; i < meshes.size(); i++)
         if (meshes[i]->refinement_possible()) meshes[i]->post_adapt_setup_hanging_nodes();
 

@@ -478,58 +478,141 @@ namespace pyoomph
     for (unsigned int e = 0; e < this->nelement() && e < errs.size(); e++)
       index_of[this->element_pt(e)] = e;
 
-    // Same order of communication as oomph-lib's Z2 estimator: each process sends the errors of its
-    // haloed elements to the process that holds them as halos. The two lists are built by walking the
-    // same root elements' trees, so they correspond entry by entry.
-    for (int iproc = 0; iproc < n_proc; iproc++)
+    // Two passes, and it has to be two. The obvious "owner wins" single pass is not enough, because an
+    // error override is not always computed on the rank that OWNS the element it applies to. An
+    // interface element pushes its error onto the bulk element behind it -- including, at a coupled
+    // interface, the bulk element of the OPPOSITE domain. Two coupled domains share no nodes, so the
+    // partitioner treats them as disconnected components and cuts them independently: the rank holding
+    // the interface element routinely holds only a halo copy of that opposite bulk element. Owner-wins
+    // would discard the override there, silently, on every rank.
+    //
+    // So reduce instead of copy. The quantity IS a maximum (elemental_error_max_override), so the
+    // reduction is a max, and it is idempotent:
+    //   pass 0  halo -> haloed : every copy's value reaches the owner, which takes the max
+    //   pass 1  haloed -> halo : the owner's (now maximal) value goes back out to every copy
+    // The lists are built by walking the same root elements' trees, so they correspond entry by entry;
+    // pass 0 sends along halo_element_pt(p) and is received into haloed_element_pt(sender), which is
+    // exactly the mirror of pass 1.
+    for (int pass = 0; pass < 2; pass++)
     {
-      if (iproc != my_rank) // Send my haloed errors to iproc
+      const int tag_n = (pass == 0 ? 81 : 83), tag_v = (pass == 0 ? 82 : 84);
+      for (int iproc = 0; iproc < n_proc; iproc++)
       {
-        oomph::Vector<oomph::GeneralisedElement *> haloed_el(this->haloed_element_pt(iproc));
-        unsigned n = haloed_el.size();
-        std::vector<double> buf(n);
-        for (unsigned e = 0; e < n; e++)
+        if (iproc != my_rank)
         {
-          std::map<oomph::GeneralisedElement *, unsigned>::iterator it = index_of.find(haloed_el[e]);
-          buf[e] = (it == index_of.end() ? -1.0 : errs[it->second]);
-        }
-        MPI_Send(&n, 1, MPI_UNSIGNED, iproc, 81, mc);
-        if (n) MPI_Send(&buf[0], (int)n, MPI_DOUBLE, iproc, 82, mc);
-      }
-      else // Receive the owners' errors and impose them on my halo elements
-      {
-        for (int send_rank = 0; send_rank < n_proc; send_rank++)
-        {
-          if (send_rank == iproc) continue;
-          oomph::Vector<oomph::GeneralisedElement *> halo_el(this->halo_element_pt(send_rank));
-          unsigned n_remote = 0;
-          MPI_Status status;
-          MPI_Recv(&n_remote, 1, MPI_UNSIGNED, send_rank, 81, mc, &status);
-          std::vector<double> buf(n_remote);
-          if (n_remote) MPI_Recv(&buf[0], (int)n_remote, MPI_DOUBLE, send_rank, 82, mc, &status);
-
-          if (n_remote != halo_el.size())
+          oomph::Vector<oomph::GeneralisedElement *> src(
+              pass == 0 ? this->halo_element_pt(iproc) : this->haloed_element_pt(iproc));
+          unsigned n = src.size();
+          std::vector<double> buf(n);
+          for (unsigned e = 0; e < n; e++)
           {
-            // The two element lists no longer correspond, so there is no way to tell which error
-            // belongs to which element. That means the meshes have already diverged; imposing
-            // anything here would be guesswork, so leave the errors alone and say so.
-            std::cout << "pyoomph WARNING: cannot synchronise elemental errors between process "
-                      << my_rank << " and " << send_rank << ": " << halo_el.size()
-                      << " halo elements here but " << n_remote << " haloed elements there. "
-                      << "The distributed meshes have diverged; adaptation may be inconsistent."
-                      << std::endl;
-            continue;
+            std::map<oomph::GeneralisedElement *, unsigned>::iterator it = index_of.find(src[e]);
+            buf[e] = (it == index_of.end() ? -1.0 : errs[it->second]);
           }
-          for (unsigned e = 0; e < n_remote; e++)
+          MPI_Send(&n, 1, MPI_UNSIGNED, iproc, tag_n, mc);
+          if (n) MPI_Send(&buf[0], (int)n, MPI_DOUBLE, iproc, tag_v, mc);
+        }
+        else
+        {
+          for (int send_rank = 0; send_rank < n_proc; send_rank++)
           {
-            if (buf[e] < 0.0) continue; // Owner could not resolve this element
-            std::map<oomph::GeneralisedElement *, unsigned>::iterator it = index_of.find(halo_el[e]);
-            if (it != index_of.end()) errs[it->second] = buf[e];
+            if (send_rank == iproc) continue;
+            oomph::Vector<oomph::GeneralisedElement *> dst(
+                pass == 0 ? this->haloed_element_pt(send_rank) : this->halo_element_pt(send_rank));
+            unsigned n_remote = 0;
+            MPI_Status status;
+            MPI_Recv(&n_remote, 1, MPI_UNSIGNED, send_rank, tag_n, mc, &status);
+            std::vector<double> buf(n_remote);
+            if (n_remote) MPI_Recv(&buf[0], (int)n_remote, MPI_DOUBLE, send_rank, tag_v, mc, &status);
+
+            if (n_remote != dst.size())
+            {
+              // The two element lists no longer correspond, so there is no way to tell which error
+              // belongs to which element. That means the meshes have already diverged; imposing
+              // anything here would be guesswork, so leave the errors alone and say so.
+              std::cout << "pyoomph WARNING: cannot synchronise elemental errors between process "
+                        << my_rank << " and " << send_rank << ": " << dst.size()
+                        << " elements here but " << n_remote << " there (pass " << pass << "). "
+                        << "The distributed meshes have diverged; adaptation may be inconsistent."
+                        << std::endl;
+              continue;
+            }
+            for (unsigned e = 0; e < n_remote; e++)
+            {
+              if (buf[e] < 0.0) continue; // The sender could not resolve this element
+              std::map<oomph::GeneralisedElement *, unsigned>::iterator it = index_of.find(dst[e]);
+              if (it == index_of.end()) continue;
+              errs[it->second] = (pass == 0 ? std::max(errs[it->second], buf[e]) : buf[e]);
+            }
           }
         }
       }
     }
 #endif
+  }
+
+  // See the declaration in mesh.hpp for why these live here rather than in the Python equation classes
+  // that state them.
+  void Mesh::apply_refinement_directives()
+  {
+    if (refinement_directives.empty()) return;
+    oomph::RefineableMeshBase *rm = dynamic_cast<oomph::RefineableMeshBase *>(this);
+    if (!rm) return; // a non-refineable mesh has no thresholds to express the directive in
+
+    // The same two magic values the Python criteria used. "must refine" is far above the refinement
+    // threshold so that nothing else can outvote it; "may not unrefine" sits between the two thresholds,
+    // which is what tells oomph to leave the element exactly as it is.
+    const double must_refine = 100.0 * rm->max_permitted_error();
+    const double may_not_unrefine = 0.5 * (rm->max_permitted_error() + rm->min_permitted_error());
+
+    for (unsigned int ie = 0; ie < this->nelement(); ie++)
+    {
+      pyoomph::BulkElementBase *el = dynamic_cast<pyoomph::BulkElementBase *>(this->element_pt(ie));
+      if (!el) continue;
+      for (const RefinementDirective &d : refinement_directives)
+      {
+        if (d.kind == RefinementDirective::ToLevel)
+        {
+          if (d.level >= 0)
+          {
+            // The refinement LEVEL is a property of the bulk element. A directive stated on an interface
+            // ("... @ 'domain/boundary'") is registered on the interface mesh, whose elements are face
+            // elements with no level of their own, so walk up to the bulk element they hang off. More
+            // than one step for an interface of an interface.
+            pyoomph::BulkElementBase *blk = el;
+            while (true)
+            {
+              InterfaceElementBase *ie_el = dynamic_cast<InterfaceElementBase *>(blk);
+              if (!ie_el) break;
+              pyoomph::BulkElementBase *parent = dynamic_cast<pyoomph::BulkElementBase *>(ie_el->bulk_element_pt());
+              if (!parent) break;
+              blk = parent;
+            }
+            oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(blk);
+            if (re && (int)re->refinement_level() >= d.level)
+            {
+              el->elemental_error_max_override = std::max(el->elemental_error_max_override, may_not_unrefine);
+              continue; // deep enough already
+            }
+          }
+          el->elemental_error_max_override = std::max(el->elemental_error_max_override, must_refine);
+        }
+        else if (d.kind == RefinementDirective::MaxElementSize)
+        {
+          const double size = el->size();
+          if (size > d.max_size)
+            el->elemental_error_max_override = std::max(el->elemental_error_max_override, must_refine);
+          else
+          {
+            // One unrefinement multiplies the size by 2^dim. If that would immediately put the element
+            // back over the threshold, refuse the unrefinement instead of oscillating.
+            const double grown = size * (double)(1u << el->dim());
+            if (grown > d.max_size)
+              el->elemental_error_max_override = std::max(el->elemental_error_max_override, may_not_unrefine);
+          }
+        }
+      }
+    }
   }
 
   // Find elements that do not share a facet with the boundary

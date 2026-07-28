@@ -254,27 +254,15 @@ class RefineToLevel(Equations):
         super(RefineToLevel, self).__init__()
         self.level:Literal["max"] | int = level
 
-    def calculate_error_overrides(self):
-        mesh=self.get_current_code_generator()._mesh 
-        assert mesh is not None
-        must_refine = 100 * mesh.max_permitted_error
-        may_not_unrefine = 0.5 * (mesh.max_permitted_error+mesh.min_permitted_error)
-        for e in mesh.elements():
-            #e._elemental_error_max_override
-            if self.level!="max":
-                assert isinstance(self.level,int)
-                blk=e
-                while blk.get_bulk_element() is not None:
-                    blk=blk.get_bulk_element()
-                lvl=blk.refinement_level()
-                if lvl>=self.level: 
-                    e._elemental_error_max_override = max(e._elemental_error_max_override,may_not_unrefine)
-                    continue
-            e._elemental_error_max_override=must_refine
-            
     def after_compilation(self,codegen):
         mesh=codegen._mesh
         assert mesh is not None
+        # Registered as a C++ refinement directive rather than evaluated by a Python loop over the
+        # elements on every adapt. Same values, but evaluated for every element this process holds --
+        # halo copies included -- so a halo copy reaches the same verdict as the element it copies,
+        # instead of being one more rank-local override for the halo exchange to repair afterwards.
+        # See pyoomph::Mesh::apply_refinement_directives.
+        mesh._add_refinement_directive_to_level(-1 if self.level=="max" else int(self.level))
         # Only MeshFromTemplate1d/2d/3d actually carry _initial_uniform_refinement_level.
         # The previous "not isinstance(mesh,InterfaceMesh)" check also let ODEStorageMesh
         # through, which does not have this attribute at all and would raise an
@@ -300,18 +288,12 @@ class RefineMaxElementSize(Equations):
         super(RefineMaxElementSize, self).__init__()
         self.max_nondim_size=max_nondim_cartesian_size
 
-    def calculate_error_overrides(self):
-        mesh = self.get_current_code_generator()._mesh  # get the mesh the equation is defined on
+    def after_compilation(self,codegen):
+        mesh=codegen._mesh
         assert mesh is not None
-        must_refine = 100 * mesh.max_permitted_error # To force a refinement, we just set a error sufficiently large
-        may_not_unrefine = 0.5 * (mesh.max_permitted_error + mesh.min_permitted_error) # We also prevent unrefinement if the element is still quite large
-        unrefine_factor=2**(mesh.get_element_dimension()) # Factor an element growth or shrinks when it is (un)refined: 2**(element_dimension)
-        for e in mesh.elements():
-            size=e.get_current_cartesian_nondim_size() # get the current size of the element
-            if size>self.max_nondim_size: # if it is too large
-                e._elemental_error_max_override = must_refine # Setting large error -> invoking refinemenet
-            elif size*unrefine_factor>self.max_nondim_size: # If an unrefinement would cause a refinement in the next step
-                e._elemental_error_max_override = max(e._elemental_error_max_override, may_not_unrefine) # prevent unrefinement
+        # A C++ refinement directive, for the same reason as RefineToLevel: it is a pure function of the
+        # element's own size, so evaluating it in C++ covers halo copies too and needs no synchronisation.
+        mesh._add_refinement_directive_max_element_size(float(self.max_nondim_size))
 
 
 

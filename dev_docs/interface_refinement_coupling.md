@@ -1,7 +1,12 @@
 # Conforming refinement across coupled domain interfaces
 
-Status: **plan only, nothing implemented**. Written 2026-07-28 on branch `mixed_adapt`, after the
-mixed-adaptive-mesh validation campaign (`mixed_adapt_validation.md`) closed.
+Written 2026-07-28 on branch `interface_refine_coupling`, after the mixed-adaptive-mesh validation
+campaign (`mixed_adapt_validation.md`) closed.
+
+Status: **S0–S2, S5, most of S3 and most of S6 implemented and passing, serially and under MPI.**
+§14 records what building it turned up that this plan did not predict — including two defects the plan's
+own reasoning would not have caught, and one place (§2) where the plan is simply wrong about
+distribution. **S4, the two-phase adapt, remains**, and with it the one part of S6 that depends on it.
 
 ---
 
@@ -441,3 +446,111 @@ Each stage is independently mergeable and leaves the tree working.
 
 S2 alone already fixes the user-visible crash. S3/S4 are quality: without them the interface coarsens
 by round trip rather than by decision.
+
+---
+
+## 14. What building S0–S2 and S5 actually turned up
+
+Four things the plan above did not anticipate. Two are ordering constraints; two are defects that the
+plan's own reasoning would have produced.
+
+### 14.1 `distribute()` refuses a non-uniformly refined mesh (ordering)
+
+oomph's `Problem::distribute()` throws *"at least one of your meshes is no longer uniformly refined"* —
+it has to preserve the tree forest. The repair refines part of a domain, which is by definition
+non-uniform, so repairing an initial mismatch **before** distribution breaks distribution instead.
+
+Levelling everyone *up* to the maximum would keep the meshes uniform, and was the first thing tried. It
+is wrong: a domain asked for level 1 silently gets level 2, and `RefineToLevel(1)` then marks those
+level-2 elements "may not unrefine", so the excess never goes away again.
+
+What works: uniform-refine coupled domains only as far as they agree, distribute, then apply the
+remainder — where partial refinement is allowed and the repair can do its job.
+`Problem._defer_uneven_initial_refinement` / `_apply_deferred_initial_refinement`, held in place by
+`test_uneven_initial_levels_survive_distribution`.
+
+### 14.2 Side A and side B are not the same two domains on every rank (defect)
+
+The one that cost the most to find, and the most general lesson here.
+
+`_collect_coupled_interfaces` reads the connections out of the mesh template, where they are put by the
+C++ auto-detection. That detection walks pointer-keyed containers, and **heap addresses differ between
+processes**, so two ranks can discover the same connection with the two sides in opposite order:
+
+```
+rank 0: [('upper', 'interface', 'lower', 'interface')]
+rank 1: [('lower', 'interface', 'upper', 'interface')]
+```
+
+The facet sets are unioned across ranks *per side*, so "side A" became a mixture of facets from both
+domains. Globally consistent-looking, entirely fictitious. The symptom was that a case passed alone and
+failed when a *triangle* case had run before it in the same process — an allocation-pattern dependence
+with no plausible mechanism until the two orders were printed side by side.
+
+Fixed by orienting each pair canonically by `(domain name, boundary name)` and sorting the connection
+list the same way. The general rule, which applies to anything else added here: **a collective decision
+may not depend on discovery order.** Not on pointer order, not on hash order, not on partition order.
+
+### 14.3 Conformity is necessary but not sufficient under MPI (design gap)
+
+§2 claims facet conformity is exactly the matcher's precondition. That is true serially and false under
+distribution: `connect_interface_elements_by_kdtree` is **rank-local**, and the two domains share no
+nodes, so the partitioner sees two disconnected components and cuts them independently. A rank therefore
+routinely holds one side of a facet pair and not the other. Globally conforming, locally unpairable.
+
+That is a halo-coverage property, supplied by the `set_must_be_kept_as_halo` marking in
+`actions_before_distribute` — a different mechanism with a different failure mode, and the matcher's
+error message cannot tell the two apart. `check_interface_conformity` therefore counts and reports them
+**separately**: "no counterpart on the opposite side" vs "a counterpart, but not on the process that
+holds them". Without that split, §14.2 would have been diagnosed as a refinement bug and fixed in the
+wrong place; with it, the first diagnostic run said "the halo layer does not cover the opposite domain"
+and pointed straight at the orientation.
+
+### 14.4 The geometry-free coarse-side test held up
+
+§8's test — a facet absent from the other side's facet set but with all its corners in the other side's
+vertex set was subdivided there — needed no adjustment for any of the four families, for quads meeting
+triangles across the interface, or for moving meshes. Nesting does all the work: a facet's corners
+survive as corners of its children. No point-in-facet predicate was ever needed.
+
+### 14.5 What S3 turned into
+
+Two of the three parts of §5 landed; the third did not, and the reason is worth recording.
+
+**The declarative criteria moved.** `RefineToLevel` and `RefineMaxElementSize` are now registered once,
+at compile time, as C++ refinement directives (`pyoomph::Mesh::apply_refinement_directives`) instead of
+looping over `mesh.elements()` from Python on every adapt. The values are identical. What changes is
+*coverage*: a C++ pass runs over every element the process holds, **halo copies included**, so a halo
+copy reaches the same verdict as the element it copies, by construction, with nothing left to
+synchronise. The Python versions produced the same numbers but produced them as one more rank-local
+override for the halo exchange to repair afterwards. `RefineAccordingToElement` stays in Python — it is
+a user callback, and that is not something to move.
+
+**The synchronisation changed from owner-wins to max-reduce** (§5, "A required change in step 7"), and
+the argument there held up exactly as written. Now two passes: halo → owner (owner takes the max) →
+halo. The quantity is `elemental_error_max_override`; a max is both the semantically right reduction and
+idempotent.
+
+**`_override_bulk_errors_where_necessary` did not move.** It is the propagation, not a criterion, and it
+is entangled with Python-side state (`_opposite_interface_mesh`, `_parent`, `_interface_name`) that would
+have to be mirrored in C++ first. Its rank-locality problem — an override computed on the rank holding
+the interface element but written to a bulk element owned elsewhere — is already covered by the
+max-reduce above, so the port is now a refactor rather than a fix, and was not worth the regression risk
+in the same change.
+
+### 14.6 Still open
+
+* **S4, the two-phase adapt.** The repair still runs *after* `adapt()`, so a domain that unrefines a
+  patch its partner keeps gets re-refined from the merged father — correct, but lossy, and it makes
+  adapt non-idempotent. §6's counterexample stands unchanged. This is the remaining quality gap: the
+  interface currently coarsens by round trip rather than by decision.
+* **The old Python heuristic at [problem.py](pyoomph/generic/problem.py) `# Ensure same refinement at
+  connected interfaces` stays for now.** S6 planned to delete it, but that assumed S4 had replaced it
+  with the exact flag harmonisation. It is a crude version of the §6 pre-pass, it is no longer load-
+  bearing for correctness, and removing it before S4 exists would only increase the churn described
+  above. Delete it together with S4, not before.
+* **The `_override_bulk_errors_where_necessary` port**, per §14.5.
+* **A failing case poisons later cases in the same worker process.** Seen while bisecting §14.2: after a
+  case raised, the next one in the same `mpi_worker.py` process failed too. Pre-existing (the worker has
+  always looped over cases in one process) and not investigated. It matters for reading MPI test output:
+  the *first* failing case is the real one.
