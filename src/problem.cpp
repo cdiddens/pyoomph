@@ -1115,17 +1115,53 @@ namespace pyoomph
 		}
 	}
 
+	// oomph::DoubleVector::operator[] indexes the vector's LOCAL rows. On a distributed (MPI) problem the
+	// vector holds only nrow_local() doubles, so reading/writing it by GLOBAL equation number runs past the
+	// end of the buffer. These two helpers convert between the (possibly distributed) DoubleVector and a
+	// globally indexed std::vector; serially they are a plain copy, since the vector is not distributed.
+	static void gather_double_vector_to_global(oomph::DoubleVector &v, std::vector<double> &res)
+	{
+		if (v.distributed())
+		{
+			oomph::LinearAlgebraDistribution global_dist(v.distribution_pt()->communicator_pt(), v.nrow(), false);
+			v.redistribute(&global_dist);
+		}
+		res.resize(v.nrow());
+		for (unsigned int i = 0; i < v.nrow(); i++)
+			res[i] = v[i];
+	}
+
+	// Fill v (built on the given, possibly distributed, distribution) from a globally indexed std::vector.
+	static void scatter_global_to_double_vector(const std::vector<double> &src, oomph::DoubleVector &v,
+											   oomph::LinearAlgebraDistribution *target_dist)
+	{
+		if (target_dist->distributed())
+		{
+			// Build globally replicated first, then redistribute onto the target (local) distribution.
+			oomph::LinearAlgebraDistribution global_dist(target_dist->communicator_pt(), src.size(), false);
+			v.build(&global_dist, 0.0);
+			for (unsigned int i = 0; i < src.size(); i++)
+				v[i] = src[i];
+			v.redistribute(target_dist);
+		}
+		else
+		{
+			v.build(target_dist, 0.0);
+			for (unsigned int i = 0; i < src.size(); i++)
+				v[i] = src[i];
+		}
+	}
+
 	// Dof values at history time level t (t=0 is the current time), as a plain std::vector<double>
 	std::vector<double> Problem::get_history_dofs(unsigned t)
 	{
-		std::vector<double> res(this->ndof(), 0.0);
+		std::vector<double> res;
 		oomph::DoubleVector dofs;
 		if (t == 0)
 			this->get_dofs(dofs);
 		else
 			this->get_dofs(t, dofs);
-		for (unsigned int i = 0; i < this->ndof(); i++)
-			res[i] = dofs[i];
+		gather_double_vector_to_global(dofs, res);
 		return res;
 	}
 
@@ -1134,12 +1170,11 @@ namespace pyoomph
 	// is determined by scanning all nodes of all submeshes for equation numbers coming from their position data.
 	std::tuple<std::vector<double>, std::vector<bool>> Problem::get_current_dofs()
 	{
-		std::vector<double> res(this->ndof(), 0.0);
+		std::vector<double> res;
 		std::vector<bool> is_positional(this->ndof(), false);
 		oomph::DoubleVector dofs;
 		this->get_dofs(dofs);
-		for (unsigned int i = 0; i < this->ndof(); i++)
-			res[i] = dofs[i];
+		gather_double_vector_to_global(dofs, res);
 
 		for (unsigned int ism = 0; ism < this->nsub_mesh(); ism++)
 		{
@@ -1161,12 +1196,11 @@ namespace pyoomph
 
 	void Problem::set_current_dofs(const std::vector<double> &inp)
 	{
-		oomph::DoubleVector dofs;
-		dofs.build(this->dof_distribution_pt(), 0.0);
 		if (inp.size() != this->ndof())
 			throw_runtime_error("Mismatch in dof vector size");
-		for (unsigned int i = 0; i < this->ndof(); i++)
-			dofs[i] = inp[i];
+		oomph::DoubleVector dofs;
+		// inp is indexed by GLOBAL equation number; the dof distribution may be row-partitioned under MPI.
+		scatter_global_to_double_vector(inp, dofs, this->dof_distribution_pt());
 		this->set_dofs(dofs);
 	}
 

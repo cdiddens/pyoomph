@@ -231,6 +231,23 @@ namespace pyoomph
 	// leaf tet that has a node at the quarter point (t=0.25 or 0.75) of one of its edges -- which
 	// means a neighbour is >=2 refinement levels finer than it -- until no such tet remains. Each
 	// refinement round uses oomph-lib's refine_selected_elements (full, correct rebuild).
+	// Quantized centroid of an element: a rank-independent key, so a selection made on one process can be
+	// recognised on another that holds the same element as a halo copy.
+	static std::array<long long, 3> element_centroid_key(oomph::GeneralisedElement *ge, double scale)
+	{
+		oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(ge);
+		std::array<long long, 3> key = {0, 0, 0};
+		if (!fe || !fe->nnode()) return key;
+		const unsigned n = fe->nnode();
+		for (unsigned d = 0; d < 3; d++)
+		{
+			double c = 0.0;
+			for (unsigned k = 0; k < n; k++) c += fe->node_pt(k)->x(d);
+			key[d] = (long long)std::llround((c / n) * scale);
+		}
+		return key;
+	}
+
 	void TemplatedMeshBase3d::enforce_refinement_balance()
 	{
 		bool has_simplexlike = false;
@@ -299,7 +316,53 @@ namespace pyoomph
 				}
 				if (imbalanced) to_refine.push_back(ie);
 			}
-			if (to_refine.size() == 0) break;
+			// On a DISTRIBUTED mesh this selection must be made globally, not per rank. Each rank can only
+			// see its own elements plus a halo layer, so a rank may fail to select a HALO copy of an element
+			// that its owner selects -- leaving behind a coarse parent whose sons exist on every other rank.
+			// That stale halo element then makes the tet face-neighbour finder report a genuinely coarser
+			// neighbour where there is none, so a 2:1 hang is installed that does not exist globally, the
+			// hanging sets diverge between ranks, and with them the global equation numbering
+			// (dev_docs/mixed_adapt_validation.md §9.8). The loop bound was rank-local too, so ranks could
+			// even run different numbers of rounds around the collective inside refine_selected_elements.
+			//
+			// Fix both: union the selected elements across all processes (keyed by quantized centroid, the
+			// same shape- and rank-independent key style used for node positions above), re-select locally
+			// from that union, and terminate on the GLOBAL set being empty so every rank runs the same
+			// rounds and enters refine_selected_elements together -- even with nothing of its own to refine.
+			bool global_empty = (to_refine.size() == 0);
+#ifdef OOMPH_HAS_MPI
+			if (this->is_mesh_distributed() && this->communicator_pt())
+			{
+				MPI_Comm mc = this->communicator_pt()->mpi_comm();
+				int nproc = 1;
+				MPI_Comm_size(mc, &nproc);
+				std::vector<long long> mine;
+				mine.reserve(3 * to_refine.size());
+				for (unsigned int k = 0; k < to_refine.size(); k++)
+				{
+					std::array<long long, 3> c = element_centroid_key(this->element_pt(to_refine[k]), scale);
+					mine.push_back(c[0]); mine.push_back(c[1]); mine.push_back(c[2]);
+				}
+				int mycount = (int)mine.size();
+				std::vector<int> counts(nproc, 0), displs(nproc, 0);
+				MPI_Allgather(&mycount, 1, MPI_INT, &counts[0], 1, MPI_INT, mc);
+				int total = 0;
+				for (int i = 0; i < nproc; i++) { displs[i] = total; total += counts[i]; }
+				std::vector<long long> all((size_t)std::max(total, 1));
+				MPI_Allgatherv(mycount ? &mine[0] : NULL, mycount, MPI_LONG_LONG,
+							   &all[0], &counts[0], &displs[0], MPI_LONG_LONG, mc);
+				std::set<std::array<long long, 3>> global_sel;
+				for (int i = 0; i + 2 < total; i += 3)
+					global_sel.insert({all[i], all[i + 1], all[i + 2]});
+				global_empty = global_sel.empty();
+				to_refine.clear();
+				if (!global_empty)
+					for (unsigned int ie = 0; ie < this->nelement(); ie++)
+						if (global_sel.count(element_centroid_key(this->element_pt(ie), scale)))
+							to_refine.push_back(ie);
+			}
+#endif
+			if (global_empty) break;
 			this->refine_selected_elements(to_refine); // flags + full adapt_mesh rebuild
 		}
 	}

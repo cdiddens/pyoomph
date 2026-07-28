@@ -299,6 +299,14 @@ namespace pyoomph
     int leaf_local_eqn_for_value(oomph::Node *n, unsigned v);
     // As above but for the leaf's coordinate i (position dof).
     int leaf_local_eqn_for_position(oomph::Node *n, unsigned i);
+    // Read a node's local position-hang equation number, throwing a diagnostic naming the node if it was
+    // never registered as a position-hang master of this element (oomph's accessor would silently return an
+    // empty matrix and hence a junk index). See the implementation comment.
+    int position_hang_eqn_or_throw(oomph::Node *n, unsigned i, const std::string &context);
+    // Leaf nodes that flatten_hang_for_position() would resolve to, starting from n (same recursion).
+    void collect_position_leaf_nodes(oomph::Node *n, std::set<oomph::Node *> &out, int depth);
+    // Register the C1-position-constraint leaves that oomph does not know are masters of this element.
+    void register_c1_constraint_position_masters();
 
     // --- Cross-shape (mixed-mesh) hanging (topological, no geometry) ---
   public:
@@ -323,6 +331,22 @@ namespace pyoomph
     // Hang core: hang node X on neighbour nb_re's interpolating_basis at nb-local coordinate s_nb (shared
     // skip + cycle guard). The shape/dimension-agnostic primitive shared by all cross-shape hang paths.
     bool mixed_hang_node_at(oomph::Node *X, oomph::RefineableElement *nb_re, const oomph::Vector<double> &s_nb, const int &value_id);
+
+    // --- Generic per-value ("interpolating node") hooks for MIXED-ORDER spaces --------------------------
+    // oomph-lib's defaults are isoparametric: ninterpolating_node()==nnode() and interpolating_basis()==
+    // shape(). That is wrong the moment a C1 field lives on a C2-geometry element -- a hanging constraint
+    // for such a field must be built from the LINEAR basis on the corner vertices, not from the quadratic
+    // basis on all nodes -- and it is silently wrong, because the mismatch also leaves the tail of the
+    // Shape array UNINITIALISED (oomph::Shape allocates with new double[N], which does not zero).
+    // BulkElementBrick3dC2 / BulkElementQuad2dC2 / BulkElementTri2dC2 each hand-roll these overrides; the
+    // helpers below give the same behaviour shape-agnostically, so the remaining C2 element families
+    // (tet, wedge, pyramid) can share one implementation instead of repeating index arithmetic per shape.
+    // value_id < 0 means the geometry/position, which always uses the geometric basis.
+    bool interpolation_value_is_C1(const int &value_id) const;
+    unsigned generic_ninterpolating_node(const int &value_id);
+    oomph::Node *generic_interpolating_node_pt(const unsigned &n, const int &value_id);
+    void generic_interpolating_basis(const oomph::Vector<double> &s, oomph::Shape &psi, const int &value_id) const;
+    oomph::Node *generic_get_interpolating_node_at_local_coordinate(const oomph::Vector<double> &s, const int &value_id);
     // Tesselated-numpy export, quad fine side: for each of this quad's 4 edges use gteq_edge_neighbour to find
     // a strictly coarser neighbour and register this quad's edge nodes on it, computing each node's coordinate
     // in the coarse neighbour TOPOLOGICALLY -- via gteq_edge_neighbour's own translate_s/s_lo/s_hi mapping for
@@ -1981,12 +2005,15 @@ namespace pyoomph
     oomph::Node *vertex_node_pt(const unsigned &j) const override { return TElement<3, 3>::vertex_node_pt(j); }
 
     void further_setup_hanging_nodes() override;
-    // TODO: For refinement!
-    // oomph::Node* interpolating_node_pt(const unsigned &n,const int &value_id);
-    // double local_one_d_fraction_of_interpolating_node(const unsigned &n1d,const unsigned &i,const int &value_id);
-    // oomph::Node* get_interpolating_node_at_local_coordinate(const oomph::Vector<double> &s,const int &value_id); //TO be done
-    // unsigned ninterpolating_node_1d(const int &value_id);
-    // unsigned ninterpolating_node(const int &value_id);
+    // interpolating_basis() alone used to be overridden here, which left ninterpolating_node() at oomph's
+    // isoparametric default (nnode()==10) while the C1 basis only writes 4 entries -- so callers read 6
+    // UNINITIALISED doubles from the Shape array (oomph::Shape allocates with new double[N]). It happened
+    // to work because a TElement numbers its vertices first, so the garbage entries were usually rejected
+    // by the |psi|>1e-12 master test; that is luck, not correctness. The four hooks now agree with each
+    // other. See BulkElementBase::interpolation_value_is_C1.
+    unsigned ninterpolating_node(const int &value_id) override { return this->generic_ninterpolating_node(value_id); }
+    oomph::Node *interpolating_node_pt(const unsigned &n, const int &value_id) override { return this->generic_interpolating_node_pt(n, value_id); }
+    oomph::Node *get_interpolating_node_at_local_coordinate(const oomph::Vector<double> &s, const int &value_id) override { return this->generic_get_interpolating_node_at_local_coordinate(s, value_id); }
     void interpolating_basis(const oomph::Vector<double> &s, oomph::Shape &psi, const int &value_id) const override;
     BulkElementBase *create_son_instance() const override;
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 3, order)); }
@@ -2210,7 +2237,15 @@ namespace pyoomph
       void output(std::ostream &outfile, const unsigned &n_plot) override { BulkElementBase::output(outfile, n_plot); }      
       unsigned nvertex_node() const override { return oomph::WedgeElementC2::nvertex_node(); }
       oomph::Node *vertex_node_pt(const unsigned &j) const override { return WedgeElementC2::vertex_node_pt(j); }      
-      void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
+      void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); }
+      // A C1 field on this C2-geometry element must hang on the LINEAR basis over the corner vertices,
+      // not on the quadratic geometric basis over all nodes -- see BulkElementBase::interpolation_value_is_C1.
+      // (The former comment here, "there can't be any problem since it is all isoparametric", only holds
+      // while every field shares the geometric space.)
+      unsigned ninterpolating_node(const int &value_id) override { return this->generic_ninterpolating_node(value_id); }
+      oomph::Node *interpolating_node_pt(const unsigned &n, const int &value_id) override { return this->generic_interpolating_node_pt(n, value_id); }
+      void interpolating_basis(const oomph::Vector<double> &s, oomph::Shape &psi, const int &value_id) const override { this->generic_interpolating_basis(s, psi, value_id); }
+      oomph::Node *get_interpolating_node_at_local_coordinate(const oomph::Vector<double> &s, const int &value_id) override { return this->generic_get_interpolating_node_at_local_coordinate(s, value_id); }
       BulkElementBase *create_son_instance() const override
       {
           BulkElementBase::__CurrentCodeInstance = codeinst;
@@ -2328,7 +2363,15 @@ namespace pyoomph
       void output(std::ostream &outfile, const unsigned &n_plot) override { BulkElementBase::output(outfile, n_plot); }      
       unsigned nvertex_node() const override { return oomph::PyramidElementC2::nvertex_node(); }
       oomph::Node *vertex_node_pt(const unsigned &j) const override { return PyramidElementC2::vertex_node_pt(j); }      
-      void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
+      void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); }
+      // A C1 field on this C2-geometry element must hang on the LINEAR basis over the corner vertices,
+      // not on the quadratic geometric basis over all nodes -- see BulkElementBase::interpolation_value_is_C1.
+      // (The former comment here, "there can't be any problem since it is all isoparametric", only holds
+      // while every field shares the geometric space.)
+      unsigned ninterpolating_node(const int &value_id) override { return this->generic_ninterpolating_node(value_id); }
+      oomph::Node *interpolating_node_pt(const unsigned &n, const int &value_id) override { return this->generic_interpolating_node_pt(n, value_id); }
+      void interpolating_basis(const oomph::Vector<double> &s, oomph::Shape &psi, const int &value_id) const override { this->generic_interpolating_basis(s, psi, value_id); }
+      oomph::Node *get_interpolating_node_at_local_coordinate(const oomph::Vector<double> &s, const int &value_id) override { return this->generic_get_interpolating_node_at_local_coordinate(s, value_id); }
       BulkElementBase *create_son_instance() const override
       {
           BulkElementBase::__CurrentCodeInstance = codeinst;

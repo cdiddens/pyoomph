@@ -458,14 +458,97 @@ namespace pyoomph
 		return this->local_hang_eqn(n, v);
 	}
 
+	// Read a node's local position-hang equation number, failing loudly if the node was never registered.
+	//
+	// oomph's local_position_hang_eqn() looks the node up in Local_position_hang_eqn with
+	// std::map::operator[], which DEFAULT-CONSTRUCTS an empty DenseMatrix<int> when the node is absent.
+	// Indexing that empty matrix is undefined behaviour; in practice it yields a junk equation number, which
+	// surfaces much later and far from the cause as the generated code's "local_eqn < eleminfo->ndof"
+	// assertion (dev_docs/mixed_adaptive_meshes.md §4.14). Registration happens in oomph's
+	// assign_hanging_local_eqn_numbers, which walks only the GEOMETRIC hang of this element's OWN nodes, so
+	// a node reached by any other route -- notably the C1 position-constraint redistribution, whose corners
+	// may resolve onto coarse-side vertices of a 2:1 neighbour -- is legitimately absent, and that absence
+	// is the bug. Naming the node here turns an unattributable abort into a diagnosis.
+	// (The lookup itself inserts the empty entry as a side effect; harmless, since oomph clears the whole
+	// map at the start of every assign_all_generic_local_eqn_numbers.)
+	int BulkElementBase::position_hang_eqn_or_throw(oomph::Node *n, unsigned i, const std::string &context)
+	{
+		oomph::DenseMatrix<int> &pe = this->local_position_hang_eqn(n);
+		if (pe.nrow() == 0 || i >= pe.ncol())
+		{
+			std::ostringstream oss;
+			oss << "Position hang equation requested for a node that is not registered as a position-hang "
+				   "master of this element (" << context << ").\n"
+				   "Node at (";
+			for (unsigned d = 0; d < n->ndim(); d++) oss << (d ? ", " : "") << n->x(d);
+			oss << "), coordinate direction " << i << ".\n"
+				   "oomph-lib registers position-hang masters only from the GEOMETRIC hang of this element's "
+				   "own nodes, so this node was reached by some other route -- e.g. the C1 position-constraint "
+				   "redistribution resolving onto a coarse-side vertex across a 2:1 interface. Without the "
+				   "registration there is no local equation number for it, so the contribution cannot be "
+				   "assembled. See dev_docs/mixed_adapt_validation.md §11.";
+			throw_runtime_error(oss.str());
+		}
+		return pe(0, i);
+	}
+
 	int BulkElementBase::leaf_local_eqn_for_position(oomph::Node *n, unsigned i)
 	{
 		const unsigned nn = this->nnode();
 		for (unsigned l = 0; l < nn; l++)
 			if (node_pt(l) == n)
 				return eleminfo.pos_local_eqn[l][i]; // as populated in fill_element_info / used by the JIT code
-		oomph::DenseMatrix<int> pe = this->local_position_hang_eqn(n);
-		return pe(0, i);
+		return this->position_hang_eqn_or_throw(n, i, "flattening a hanging/constrained position");
+	}
+
+	// See the block comment on the declarations in elements.hpp. A value id addresses the continuous fields
+	// in space order -- C2 and C2TB first, then C1 -- so anything at or beyond the end of the C2 block is a
+	// C1 field and must be interpolated with the linear basis on the corner vertices.
+	bool BulkElementBase::interpolation_value_is_C1(const int &value_id) const
+	{
+		if (value_id < 0) return false; // geometry/position: always the geometric basis
+		const JITFuncSpec_Table_FiniteElement_t *ft = codeinst->get_func_table();
+		return value_id >= static_cast<int>(ft->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk +
+											ft->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk);
+	}
+
+	unsigned BulkElementBase::generic_ninterpolating_node(const int &value_id)
+	{
+		if (!this->interpolation_value_is_C1(value_id)) return this->nnode();
+		return static_cast<unsigned>(this->get_nodal_space_index_to_element_index_map()[SPACE_INDEX_C1].size());
+	}
+
+	oomph::Node *BulkElementBase::generic_interpolating_node_pt(const unsigned &n, const int &value_id)
+	{
+		if (!this->interpolation_value_is_C1(value_id)) return this->node_pt(n);
+		return this->node_pt(this->get_nodal_space_index_to_element_index_map()[SPACE_INDEX_C1][n]);
+	}
+
+	void BulkElementBase::generic_interpolating_basis(const oomph::Vector<double> &s, oomph::Shape &psi, const int &value_id) const
+	{
+		if (!this->interpolation_value_is_C1(value_id))
+			this->shape(s, psi);
+		else
+			this->shape_at_s_C1(s, psi);
+	}
+
+	oomph::Node *BulkElementBase::generic_get_interpolating_node_at_local_coordinate(const oomph::Vector<double> &s, const int &value_id)
+	{
+		if (!this->interpolation_value_is_C1(value_id)) return this->get_node_at_local_coordinate(s);
+		// Shape-agnostic: a C1 node sits at a vertex, so just compare local coordinates. This avoids
+		// per-shape index arithmetic (which for a pyramid or a wedge is not a tensor product at all).
+		const std::vector<unsigned> &c1 = this->get_nodal_space_index_to_element_index_map()[SPACE_INDEX_C1];
+		const unsigned nd = this->dim();
+		oomph::Vector<double> sl(nd);
+		for (unsigned k = 0; k < c1.size(); k++)
+		{
+			this->local_coordinate_of_node(c1[k], sl);
+			bool same = true;
+			for (unsigned d = 0; d < nd && same; d++)
+				same = (std::abs(sl[d] - s[d]) < 1e-10);
+			if (same) return this->node_pt(c1[k]);
+		}
+		return 0;
 	}
 
 	bool BulkElementBase::mixed_hang_node_at(oomph::Node *X, oomph::RefineableElement *nb_re, const oomph::Vector<double> &s_nb, const int &value_id)
@@ -959,8 +1042,8 @@ namespace pyoomph
 						for (unsigned m = 0; m < h->nmaster(); m++)
 						{
 							hb.masters[m].weight = h->master_weight(m);
-							oomph::DenseMatrix<int> pe = this->local_position_hang_eqn(h->master_node_pt(m));
-							hb.masters[m].local_eqn = pe(0, f);
+							hb.masters[m].local_eqn = this->position_hang_eqn_or_throw(
+								h->master_node_pt(m), f, "geometric position hang master");
 						}
 					}
 					else
@@ -2607,7 +2690,20 @@ namespace pyoomph
 					{
 						throw_runtime_error("Cannot enforce a degration to C1 on a base dof index larger than the number of base dofs on this element: index="+std::to_string(info->index)+" vs. ncont_interpolated_values()="+std::to_string(this->ncont_interpolated_values()));
 					}
-					if (elem_to_C1_map[l]>=0 && !is_hanging_on_C1)
+					// A constrained node being a C1 VERTEX of THIS element is not an error, and must not
+					// abort: at a 2:1 interface the coarse element's constrained mid-node is a genuine
+					// (non-hanging) vertex of each finer neighbour, and in 3d also of the sons created at a
+					// father's face/volume centre. The block below already handles that case correctly by
+					// doing nothing here -- the hang is installed, identically, by the element(s) where the
+					// node IS a non-vertex (see the comment there). The previous guard demanded the node
+					// hang on the C1 slot instead, which is true in 2d (a coarse edge-mid node's C1 value is
+					// the mean of the two coarse corners) but not in 3d, so any 3d mesh with a 2:1 interface
+					// threw. Bisection showed it aborted for plain bricks too, in every configuration except
+					// the single one the existing 3d test happens to use.
+					//
+					// What IS a genuine misuse is asking to degrade to a C1 space that does not exist, which
+					// is what this message has always described -- so that is what it now tests.
+					if (elem_to_C1_map[l]>=0 && !has_C1_fields)
 					{
 						throw_runtime_error("Cannot enforce a degration to C1 on a C1 vertex node.\n\
 							 This can happen in adaptive problems without any C1 or C1TB fields present in the bulk mesh.\n\
@@ -2652,7 +2748,12 @@ namespace pyoomph
 					{
 						throw_runtime_error("Cannot enforce a degration to C1 on a coordinate index larger than the nodal dimension of this element");
 					}
-					if (elem_to_C1_map[l]>=0 &&!is_hanging_on_C1)
+					// Same relaxation as the field branch: a constrained node that is a C1 VERTEX of THIS
+					// element is the ordinary 2:1 situation, not an error. This was held back until the
+					// position redistribution actually worked at a T-junction; with
+					// register_c1_constraint_position_masters() supplying the missing registrations it does,
+					// so the guard now tests only the genuine misuse it describes.
+					if (elem_to_C1_map[l]>=0 && !has_C1_fields)
 					{
 						throw_runtime_error("Cannot enforce a degration to C1 on a C1 vertex node\n\
 							 This can happen in adaptive problems without any C1 or C1TB fields present in the bulk mesh.\n\
@@ -6227,9 +6328,98 @@ namespace pyoomph
 	// rebuilds the JIT eleminfo buffer (which caches those numbers) and makes sure all internal
 	// data shares the nodes' timestepper, since internal data may be created before the element
 	// is fully connected to the mesh's timestepping.
+	// Collect every node that flatten_hang_for_position() would eventually resolve to as a LEAF, starting
+	// from n. Mirrors that function's recursion exactly (C1 position constraint -> stored corners; geometric
+	// hang -> masters; otherwise a leaf), but records nodes instead of equation numbers.
+	void BulkElementBase::collect_position_leaf_nodes(oomph::Node *n, std::set<oomph::Node *> &out, int depth)
+	{
+		if (!n || depth > 32) return;
+		Node *pn = dynamic_cast<Node *>(n);
+		if (pn && !pn->c1_constraint_corners.empty())
+		{
+			bool constrained = false;
+			for (unsigned d = 0; d < this->nodal_dimension(); d++)
+				if (this->node_is_c1_constrained_for_position(pn, d)) { constrained = true; break; }
+			if (constrained)
+			{
+				for (const auto &cw : pn->c1_constraint_corners)
+					collect_position_leaf_nodes(cw.first, out, depth + 1);
+				return;
+			}
+		}
+		if (n->is_hanging())
+		{
+			oomph::HangInfo *h = n->hanging_pt();
+			for (unsigned m = 0; m < h->nmaster(); m++)
+				collect_position_leaf_nodes(h->master_node_pt(m), out, depth + 1);
+			return;
+		}
+		out.insert(n);
+	}
+
+	// Register, as position-hang masters of THIS element, the leaf nodes that the C1 position constraint
+	// redistributes onto but oomph-lib does not know about.
+	//
+	// The comment that used to sit in assign_additional_local_eqn_numbers claimed "no separate equation
+	// numbers are required, because the flattened leaf dofs are exactly the coarse vertices that oomph-lib
+	// already registered as hang masters". That is FALSE for positions. oomph registers position-hang masters
+	// by walking the GEOMETRIC hang of this element's own nodes only, whereas a constrained node's
+	// c1_constraint_corners are written by whichever element sees that node as a NON-vertex -- which may be a
+	// neighbour. The corners can therefore be vertices of a neighbouring element that this element never
+	// registers, and reading their local equation number then returns garbage (the section 4.14 abort; since
+	// the previous commit, a named diagnostic instead).
+	//
+	// Runs from assign_additional_local_eqn_numbers(), which oomph documents as being called after ALL other
+	// local equation numbering, so Local_position_hang_eqn is already populated and ndof() is final.
+	void BulkElementBase::register_c1_constraint_position_masters()
+	{
+		if (!has_additional_dof_constraints) return;
+		const unsigned nd = this->nodal_dimension();
+		const unsigned nn = this->nnode();
+
+		std::set<oomph::Node *> leaves;
+		for (unsigned l = 0; l < nn; l++)
+		{
+			Node *n = dynamic_cast<Node *>(node_pt(l));
+			if (!n) continue;
+			bool constrained = false;
+			for (unsigned d = 0; d < nd; d++)
+				if (this->node_is_c1_constrained_for_position(n, d)) { constrained = true; break; }
+			if (constrained) collect_position_leaf_nodes(n, leaves, 0);
+		}
+		if (leaves.empty()) return;
+
+		std::deque<unsigned long> new_eqs;
+		unsigned local_eqn_number = this->ndof();
+		for (std::set<oomph::Node *>::iterator it = leaves.begin(); it != leaves.end(); ++it)
+		{
+			oomph::Node *n = *it;
+			bool is_local = false;
+			for (unsigned l = 0; l < nn; l++)
+				if (node_pt(l) == n) { is_local = true; break; }
+			if (is_local) continue; // resolved through eleminfo.pos_local_eqn instead
+			oomph::DenseMatrix<int> &pe = this->local_position_hang_eqn(n);
+			if (pe.nrow() > 0) continue; // oomph already registered it
+			oomph::SolidNode *sn = dynamic_cast<oomph::SolidNode *>(n);
+			if (!sn) continue;
+			pe.resize(1, nd);
+			for (unsigned k = 0; k < nd; k++)
+			{
+				long e = sn->position_eqn_number(0, k);
+				if (e >= 0) { new_eqs.push_back((unsigned long)e); pe(0, k) = (int)local_eqn_number++; }
+				else pe(0, k) = -1; // pinned
+			}
+		}
+		// Empty dof-pointer deque: add_global_eqn_numbers() skips that block entirely, which matches the
+		// store_local_dof_pt==false case. These extra masters therefore do not appear in Dof_pt, which is
+		// only used for optional local-dof caching, not for assembly.
+		if (!new_eqs.empty()) this->add_global_eqn_numbers(new_eqs, std::deque<double *>());
+	}
+
 	void BulkElementBase::assign_additional_local_eqn_numbers()
 	{
 		this->RefineableSolidElement::assign_additional_local_eqn_numbers();
+		this->register_c1_constraint_position_masters();
 		// ConstrainFieldsToC1Space/ConstrainPositionsToC1Space ("additional dof constraints") locally
 		// reduce a higher-order field/position to a C1/linear interpolation. This is now composed with
 		// oomph-lib's native geometric hanging-node scheme (T-junctions on adaptively refined meshes):
@@ -13975,7 +14165,13 @@ namespace pyoomph
 		{}, // C2TB 
 		{}, // C2
 		{}, // C1TB
-		{{3,0,1},{4,1,2},{5,0,2},{15,12,13},{16,12,14},{17,13,14},{6,0,12},{7,1,13},{8,2,14},{9,0,1,12,13},{10,0,2,12,14},{11,1,2,13,14}}  // C1
+		// Bottom-layer edge mids are nodes 3,4,5 over corner pairs (0,1),(0,2),(1,2) -- the same pattern the
+		// top layer (15,16,17 over (12,13),(12,14),(13,14)) already used. Entries 4 and 5 used to have their
+		// pairs exchanged, so a C1-constrained field on a wedge was tied to the wrong two corners: node 4
+		// sits at the 0-2 midpoint and node 5 at the 1-2 midpoint, not the other way round. Verified against
+		// the actual nodal positions -- for an affine wedge the geometry and a C1 field interpolate
+		// identically, so each listed corner set must average to the target node's position.
+		{{3,0,1},{4,0,2},{5,1,2},{15,12,13},{16,12,14},{17,13,14},{6,0,12},{7,1,13},{8,2,14},{9,0,1,12,13},{10,0,2,12,14},{11,1,2,13,14}}  // C1
 	};
 
 	const std::vector<std::vector<unsigned>> BulkElementPyramid3dC1::Nodal_Space_Index_To_Element_Index_Map={
@@ -13997,7 +14193,12 @@ namespace pyoomph
 		{}, // C2TB 
 		{}, // C2
 		{}, // C1TB
-		{{5,0,1},{6,1,2},{7,2,3},{8,0,3},{9,0,4},{10,1,4},{11,2,4},{12,3,4},{13,0,2}}  // C1		
+		// Node 13 is the BASE QUAD CENTRE, so its C1 value is the average of all FOUR base corners -- the
+		// pyramid's base interpolation is bilinear. It used to be listed as {13,0,2}, i.e. the mean of one
+		// diagonal, which is only equal to the bilinear centre when v0+v2 == v1+v3 and therefore degraded
+		// a C1-constrained field to something that is not the element's C1 space at all (visible as the
+		// Green identity int(v)==int(u^2) failing by ~30% even on a NON-adaptive pyramid mesh).
+		{{5,0,1},{6,1,2},{7,2,3},{8,0,3},{9,0,4},{10,1,4},{11,2,4},{12,3,4},{13,0,1,2,3}}  // C1
 	};
 
 	const std::vector<std::vector<unsigned>> BulkElementODE0d::Nodal_Space_Index_To_Element_Index_Map={

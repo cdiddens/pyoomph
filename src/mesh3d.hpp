@@ -90,12 +90,24 @@ namespace pyoomph
 
     void check_all_neighbours(oomph::DocInfo &doc_info) override
     {
-      // Tets and wedges bypass oomph's brick (hex) compass neighbour self-test: they do not use the OcTree's
-      // compass neighbour structure (tets have their own topological finder; wedges skip it for now), and the
-      // brick test would misread their 4/6-node elements as an 8-node hex.
-      if (ntree() > 0 && dynamic_cast<oomph::TElementBase *>(Trees_pt[0]->object_pt())) return;
-      if (ntree() > 0 && dynamic_cast<oomph::RefineableWedgeElement *>(Trees_pt[0]->object_pt())) return;
-      if (ntree() > 0 && dynamic_cast<oomph::RefineablePyramidElement *>(Trees_pt[0]->object_pt())) return;
+      // Tets, wedges and pyramids bypass oomph's brick (hex) compass neighbour self-test: they do not use
+      // the OcTree's compass neighbour structure (tets have their own topological finder; wedges/pyramids
+      // share interface nodes through the registry instead), and the brick test would misread their
+      // 4/5/6-node elements as an 8-node hex.
+      //
+      // The scan must cover EVERY tree, not just Trees_pt[0]: in a mixed forest whose first root happens to
+      // be a brick (e.g. a hex+pyramid box whose cell (0,0,0) is a hex), inspecting only tree 0 lets the
+      // brick self-test run on a forest for which find_neighbours() deliberately set NO neighbour pointers
+      // at all -- it then reports a bogus "Max. error in octree neighbour finding: 1.24 is too big" and
+      // aborts the solve. This mirrors DynamicQuadTreeForest::check_all_neighbours (mesh2d.cpp), which
+      // already loops over all trees. Pure-brick forests still get the full check.
+      for (unsigned i = 0; i < ntree(); i++)
+      {
+        oomph::FiniteElement *o = Trees_pt[i]->object_pt();
+        if (dynamic_cast<oomph::TElementBase *>(o)) return;
+        if (dynamic_cast<oomph::RefineableWedgeElement *>(o)) return;
+        if (dynamic_cast<oomph::RefineablePyramidElement *>(o)) return;
+      }
       oomph::OcTreeForest::check_all_neighbours(doc_info);
     }
 

@@ -54,13 +54,68 @@ if TYPE_CHECKING:
 # These will take care of it by either pinning one nodal pressure dof (TH) or one elemental pressure dof (CR)
 # The corresponding BC can be created via StokesElement.create_pressure_fixation()
 
+# A pressure fixation must select ONE degree of freedom for the whole problem. Picking it as
+# "element_pt(0)" is only well defined in serial: on a distributed (MPI) mesh element 0 is the rank-LOCAL
+# first element, so every rank would pin a different dof -- the global system ends up inconsistently
+# constrained (and PETSc then segfaults during the solve). The helpers below instead select the candidate
+# with the lexicographically smallest coordinate among all NON-HALO entities, agree on it across ranks with
+# an MPI min-reduction, and let every rank pin whichever local copy (owned or halo) matches -- halo copies
+# must mirror the owner's pinned state, or the per-rank dof counts diverge. Serially this reduces to a
+# deterministic, mesh-ordering-independent choice.
+
+def _mpi_agree_on_smallest(local_key:"tuple[float,...] | None")->"tuple[float,...] | None":
+    """Agree across all ranks on the smallest of the per-rank candidate keys (None = "this rank has no
+    candidate"). MUST be reached by every rank, including ones with no local elements at all, since the
+    reduction is collective. Candidates are tagged (0,key) and the no-candidate marker is (1,), so the
+    marker always loses regardless of key length -- an inf-filled tuple would not (``(inf,) < (inf,inf)``)."""
+    from ..generic.mpi import get_mpi_nproc, get_mpi_world_comm
+    if get_mpi_nproc() <= 1:
+        return local_key
+    from mpi4py import MPI  # type:ignore
+    comm = get_mpi_world_comm()
+    assert comm is not None
+    tagged = (0, local_key) if local_key is not None else (1,)
+    best = comm.allreduce(tagged, op=MPI.MIN)
+    return best[1] if best[0] == 0 else None
+
+
+def _coord_key(entity, ndim:int, rounding:int=9)->"tuple[float,...]":
+    return tuple(round(entity.x(i), rounding) for i in range(ndim))
+
+
+def _element_centroid_key(el, ndim:int, rounding:int=9)->"tuple[float,...]":
+    n=el.nnode()
+    return tuple(round(sum(el.node_pt(k).x(i) for k in range(n))/n, rounding) for i in range(ndim))
+
+
+def _select_global_element_index(mesh)->"int | None":
+    """Local index of the one globally agreed element whose element-internal pressure dof gets pinned
+    (Crouzeix-Raviart / Scott-Vogelius). Selected by smallest centroid among non-halo elements, agreed
+    across ranks. Unlike the nodal case, an element-internal dof lives only on its owner, so a rank that
+    does not own the winner pins nothing."""
+    best, best_ie = None, None
+    if mesh.nelement() > 0:
+        ndim = mesh.element_pt(0).node_pt(0).ndim()
+        for ie in range(mesh.nelement()):
+            el = mesh.element_pt(ie)
+            if el.non_halo_proc_ID() >= 0:
+                continue
+            key = _element_centroid_key(el, ndim)
+            if best is None or key < best:
+                best, best_ie = key, ie
+    target = _mpi_agree_on_smallest(best)  # collective: reached even with no local elements
+    if target is None or best != target:
+        return None  # another rank owns the winning element
+    return best_ie
+
+
 class PressureFixationTaylorHood(BoundaryCondition):
     def __init__(self, pname,value:float | None):
         super().__init__()
         self.value:float | None = value
         self.node:"Node | None" = None
         self.pname=pname
-        
+
 
     def setup(self):
         assert self.mesh is not None
@@ -70,17 +125,44 @@ class PressureFixationTaylorHood(BoundaryCondition):
             for k,v in allfields.items():
                 print(k,v,self.mesh.element_pt(0).get_code_instance().get_nodal_field_index(k))
             raise RuntimeError("Missing nodal data for 'pressure'. Found only: "+str(allfields))
-        if self.node is None:
-            self.node = self.mesh.element_pt(0).node_pt(0)  # Is definitely a C1 node
-            ps=[self.node.x(i) for i in range(self.node.ndim())]
-            print("Got Node at " + str(ps))
+
+    def _select_node(self)->"Node | None":
+        assert self.mesh is not None
+        # Candidates: vertex (C1) nodes of non-halo elements. node_pt(0) of a bulk element is always a
+        # vertex node, hence always carries the Taylor-Hood (C1) pressure.
+        best:"tuple[float,...] | None" = None
+        ndim = 0
+        if self.mesh.nelement() > 0:
+            ndim = self.mesh.element_pt(0).node_pt(0).ndim()
+            for ie in range(self.mesh.nelement()):
+                el = self.mesh.element_pt(ie)
+                if el.non_halo_proc_ID() >= 0:
+                    continue  # halo copy -- its owner offers the same candidate
+                key = _coord_key(el.node_pt(0), ndim)
+                if best is None or key < best:
+                    best = key
+        target = _mpi_agree_on_smallest(best)  # collective: reached even with no local elements
+        if target is None or ndim == 0:
+            return None  # no candidate anywhere, or this rank holds no elements at all
+        # Now find that node locally -- including on ranks where it exists only as a halo copy, and where
+        # it may not be the local element's node_pt(0). The target is a vertex node, so a coordinate match
+        # over all local nodes identifies exactly it.
+        for nd in self.mesh.nodes():
+            if _coord_key(nd, ndim) == target:
+                return nd
+        return None  # the winning node is simply not present on this rank
 
     def apply(self):
-        assert self.node is not None
+        # Re-selected on every application rather than cached: refinement/unrefinement and mesh
+        # distribution both rebuild the node objects, and after distribution the winning node may live on
+        # a different rank than before. apply() runs on all ranks in lockstep (it is driven by the global
+        # reapply_boundary_conditions()), so the collective inside _select_node() is safe here.
+        self.node = self._select_node()
+        if self.node is None:
+            return  # the globally selected pressure node does not live on this rank
         self.node.pin(self.pindex)
         if self.value is not None:
             self.node.set_value(self.pindex, self.value)
-        print("PINNING some pressure with value",self.value)
 
     def _before_eigen_solve(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver",angular_m:int | None=None,normal_k:float | None=None) -> bool:
         if angular_m is not None:
@@ -101,7 +183,10 @@ class PressureFixationScottVogelius(BoundaryCondition):
             fl=e.get_field_data_list(self.pname,False)
             for d,ind in fl:
                 d.unpin(ind)
-        fl=self.mesh.element_pt(0).get_field_data_list(self.pname,False)[0]
+        ei=_select_global_element_index(self.mesh)  # see the note above PressureFixationTaylorHood
+        if ei is None:
+            return
+        fl=self.mesh.element_pt(ei).get_field_data_list(self.pname,False)[0]
         fl[0].pin(fl[1])
         if self.value is not None:
             fl[0].set_value(fl[1], self.value)
@@ -127,9 +212,12 @@ class PressureFixationCrouzeixRaviart(BoundaryCondition):
         assert self.mesh is not None
         for ei in range(self.mesh.nelement()):
             self.mesh.element_pt(ei).internal_data_pt(self.pindex).unpin(0)
-        self.mesh.element_pt(0).internal_data_pt(self.pindex).pin(0)
+        ei=_select_global_element_index(self.mesh)  # see the note above PressureFixationTaylorHood
+        if ei is None:
+            return
+        self.mesh.element_pt(ei).internal_data_pt(self.pindex).pin(0)
         if self.value is not None:
-            self.mesh.element_pt(0).internal_data_pt(self.pindex).set_value(0, self.value)
+            self.mesh.element_pt(ei).internal_data_pt(self.pindex).set_value(0, self.value)
 
     def _before_eigen_solve(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver",angular_m:float | None=None,normal_k:float | None=None) -> bool:
         if angular_m is not None:

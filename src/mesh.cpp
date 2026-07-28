@@ -279,6 +279,259 @@ namespace pyoomph
     }
   }
 
+  // See declaration in mesh.hpp.
+  unsigned check_halo_element_consistency(oomph::Mesh *mesh_pt, const std::string &stage,
+                                          const oomph::Vector<double> *errors, bool throw_on_mismatch)
+  {
+    unsigned n_bad = 0;
+#ifdef OOMPH_HAS_MPI
+    if (!mesh_pt || !mesh_pt->is_mesh_distributed() || !mesh_pt->communicator_pt()) return 0;
+
+    oomph::OomphCommunicator *comm_pt = mesh_pt->communicator_pt();
+    MPI_Comm mc = comm_pt->mpi_comm();
+    int n_proc = comm_pt->nproc();
+    int my_rank = comm_pt->my_rank();
+    if (n_proc < 2) return 0;
+
+    // cx, cy, cz, refinement level, to_be_refined, sons_to_be_unrefined, error
+    const unsigned NPER = 7;
+    const unsigned MAX_REPORTED = 8; // Per process pair; enough to see the pattern, not a flood
+
+    // errors, when given, is indexed by the mesh's element numbering.
+    std::map<oomph::GeneralisedElement *, double> err_of;
+    if (errors)
+      for (unsigned int e = 0; e < mesh_pt->nelement() && e < errors->size(); e++)
+        err_of[mesh_pt->element_pt(e)] = (*errors)[e];
+
+    std::vector<double> mine(NPER);
+    // Describe one element as NPER doubles.
+    std::function<void(oomph::GeneralisedElement *, double *)> pack =
+        [&](oomph::GeneralisedElement *ge, double *into)
+    {
+      oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(ge);
+      into[0] = into[1] = into[2] = 0.0;
+      if (fe && fe->nnode())
+      {
+        unsigned nn = fe->nnode();
+        for (unsigned k = 0; k < nn; k++)
+          for (unsigned d = 0; d < fe->node_pt(k)->ndim() && d < 3; d++)
+            into[d] += fe->node_pt(k)->x(d);
+        for (unsigned d = 0; d < 3; d++) into[d] /= nn;
+      }
+      oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(ge);
+      into[3] = (re ? (double)re->refinement_level() : -1.0);
+      into[4] = (re ? (re->to_be_refined() ? 1.0 : 0.0) : -1.0);
+      into[5] = (re ? (re->sons_to_be_unrefined() ? 1.0 : 0.0) : -1.0);
+      into[6] = (err_of.count(ge) ? err_of[ge] : -1.0);
+    };
+
+    std::ostringstream report;
+
+    // Same communication order oomph-lib uses for its own halo exchanges: my halo-with-d goes to d, where
+    // it meets d's haloed-with-me. Both sides therefore walk their lists in the same order.
+    for (int d = 0; d < n_proc; d++)
+    {
+      if (d != my_rank) // Send the halo copies I hold of d's elements back to d
+      {
+        oomph::Vector<oomph::GeneralisedElement *> halo_el(mesh_pt->halo_element_pt(d));
+        unsigned n = halo_el.size();
+        std::vector<double> buf(n * NPER);
+        for (unsigned e = 0; e < n; e++) pack(halo_el[e], &buf[e * NPER]);
+        MPI_Send(&n, 1, MPI_UNSIGNED, d, 91, mc);
+        if (n) MPI_Send(&buf[0], (int)buf.size(), MPI_DOUBLE, d, 92, mc);
+      }
+      else // Compare what everyone else holds against the originals I own
+      {
+        for (int dd = 0; dd < n_proc; dd++)
+        {
+          if (dd == d) continue;
+          oomph::Vector<oomph::GeneralisedElement *> haloed_el(mesh_pt->haloed_element_pt(dd));
+          unsigned n_remote = 0;
+          MPI_Status status;
+          MPI_Recv(&n_remote, 1, MPI_UNSIGNED, dd, 91, mc, &status);
+          std::vector<double> buf(n_remote * NPER);
+          if (n_remote) MPI_Recv(&buf[0], (int)buf.size(), MPI_DOUBLE, dd, 92, mc, &status);
+
+          if (n_remote != haloed_el.size())
+          {
+            n_bad++;
+            report << "  [" << stage << "] process " << my_rank << " vs " << dd
+                   << ": list length mismatch -- " << haloed_el.size() << " haloed elements here, "
+                   << n_remote << " halo copies there. The distributed meshes have diverged.\n";
+          }
+
+          unsigned n_cmp = std::min((unsigned)haloed_el.size(), n_remote);
+          unsigned n_pos = 0, n_lvl = 0, n_ref = 0, n_unref = 0, n_err = 0, n_shown = 0;
+          for (unsigned e = 0; e < n_cmp; e++)
+          {
+            pack(haloed_el[e], &mine[0]);
+            double *theirs = &buf[e * NPER];
+            double dist2 = 0.0;
+            for (unsigned k = 0; k < 3; k++) dist2 += (mine[k] - theirs[k]) * (mine[k] - theirs[k]);
+            bool bad_pos = (sqrt(dist2) > 1e-9);
+            bool bad_lvl = (mine[3] != theirs[3]);
+            bool bad_ref = (mine[4] != theirs[4]);
+            bool bad_unref = (mine[5] != theirs[5]);
+            bool bad_err = (errors && fabs(mine[6] - theirs[6]) > 1e-12 * (1.0 + fabs(mine[6])));
+            if (bad_pos) n_pos++;
+            if (bad_lvl) n_lvl++;
+            if (bad_ref) n_ref++;
+            if (bad_unref) n_unref++;
+            if (bad_err) n_err++;
+            if ((bad_pos || bad_lvl || bad_ref || bad_unref || bad_err) && n_shown < MAX_REPORTED)
+            {
+              n_shown++;
+              report << "  [" << stage << "] process " << my_rank << " vs " << dd << ", entry " << e
+                     << ":\n      owned at (" << mine[0] << "," << mine[1] << "," << mine[2]
+                     << ") level " << mine[3] << " refine " << mine[4] << " unrefine " << mine[5]
+                     << " error " << mine[6] << "\n      copy  at (" << theirs[0] << "," << theirs[1]
+                     << "," << theirs[2] << ") level " << theirs[3] << " refine " << theirs[4]
+                     << " unrefine " << theirs[5] << " error " << theirs[6] << "\n";
+            }
+          }
+          unsigned n_here = n_pos + n_lvl + n_ref + n_unref + n_err;
+          n_bad += n_here;
+          if (n_here)
+            report << "  [" << stage << "] process " << my_rank << " vs " << dd << ": " << n_cmp
+                   << " elements compared -- " << n_pos << " position, " << n_lvl << " level, " << n_ref
+                   << " refine-flag, " << n_unref << " unrefine-flag, " << n_err
+                   << " error mismatches"
+                   << (n_shown < (n_pos + n_lvl + n_ref + n_unref + n_err) ? " (first few shown)" : "")
+                   << "\n";
+        }
+      }
+    }
+
+    // Only the process that OWNS an element sees the disagreement about it, so without this every rank
+    // but one would sail past a failure -- and in throwing mode the detecting rank would raise while the
+    // others blocked in the next collective. An asymmetric throw is the very failure mode this check
+    // exists to prevent, so agree on the verdict before acting on it.
+    unsigned global_bad = n_bad;
+    MPI_Allreduce(&n_bad, &global_bad, 1, MPI_UNSIGNED, MPI_SUM, mc);
+
+    if (global_bad)
+    {
+      std::ostringstream msg;
+      msg << "Halo consistency check failed at stage '" << stage << "': " << global_bad
+          << " inconsistencies across all processes (" << n_bad << " detected on process " << my_rank
+          << "). The processes do not agree about the elements they share, so adaptation and equation "
+          << "numbering will diverge between them.\n"
+          << report.str();
+      if (throw_on_mismatch) throw_runtime_error(msg.str());
+      // Report from every process, so the run does not look clean on the ranks that own nothing contested.
+      std::cout << "pyoomph WARNING: " << msg.str() << std::flush;
+    }
+    n_bad = global_bad;
+#endif
+    return n_bad;
+  }
+
+  // See declaration in mesh.hpp.
+  int TemplatedMeshBase::halo_consistency_check_mode()
+  {
+    // The environment does not change during a run, so only look at it once.
+    static int mode = -1;
+    if (mode < 0)
+    {
+      mode = 0;
+      const char *v = getenv("PYOOMPH_CHECK_HALO_CONSISTENCY");
+      if (v)
+      {
+        std::string s(v);
+        if (s == "2" || s == "throw" || s == "raise") mode = 2;
+        else if (s == "1" || s == "warn" || s == "report") mode = 1;
+        else if (s != "" && s != "0" && s != "off")
+        {
+          std::cout << "pyoomph WARNING: ignoring PYOOMPH_CHECK_HALO_CONSISTENCY='" << s
+                    << "'; expected one of 0/off, 1/warn/report, 2/throw." << std::endl;
+        }
+      }
+    }
+#ifdef OOMPH_HAS_MPI
+    // The check is collective. If it were enabled on some processes and not others, the ones running it
+    // would block in MPI_Recv forever -- a diagnostic that hangs the run is worse than no diagnostic, so
+    // take the strictest mode anyone asked for and have everyone use it.
+    if (this->is_mesh_distributed() && this->communicator_pt() && this->communicator_pt()->nproc() > 1)
+    {
+      int agreed = mode;
+      MPI_Allreduce(&mode, &agreed, 1, MPI_INT, MPI_MAX, this->communicator_pt()->mpi_comm());
+      return agreed;
+    }
+#endif
+    return mode;
+  }
+
+  // See declaration in mesh.hpp.
+  void TemplatedMeshBase::synchronise_elemental_errors(oomph::Vector<double> &errs)
+  {
+#ifdef OOMPH_HAS_MPI
+    if (!this->is_mesh_distributed() || !this->communicator_pt()) return;
+
+    oomph::OomphCommunicator *comm_pt = this->communicator_pt();
+    MPI_Comm mc = comm_pt->mpi_comm();
+    int n_proc = comm_pt->nproc();
+    int my_rank = comm_pt->my_rank();
+    if (n_proc < 2) return;
+
+    // errs is indexed by this mesh's element numbering; we address elements by pointer.
+    std::map<oomph::GeneralisedElement *, unsigned> index_of;
+    for (unsigned int e = 0; e < this->nelement() && e < errs.size(); e++)
+      index_of[this->element_pt(e)] = e;
+
+    // Same order of communication as oomph-lib's Z2 estimator: each process sends the errors of its
+    // haloed elements to the process that holds them as halos. The two lists are built by walking the
+    // same root elements' trees, so they correspond entry by entry.
+    for (int iproc = 0; iproc < n_proc; iproc++)
+    {
+      if (iproc != my_rank) // Send my haloed errors to iproc
+      {
+        oomph::Vector<oomph::GeneralisedElement *> haloed_el(this->haloed_element_pt(iproc));
+        unsigned n = haloed_el.size();
+        std::vector<double> buf(n);
+        for (unsigned e = 0; e < n; e++)
+        {
+          std::map<oomph::GeneralisedElement *, unsigned>::iterator it = index_of.find(haloed_el[e]);
+          buf[e] = (it == index_of.end() ? -1.0 : errs[it->second]);
+        }
+        MPI_Send(&n, 1, MPI_UNSIGNED, iproc, 81, mc);
+        if (n) MPI_Send(&buf[0], (int)n, MPI_DOUBLE, iproc, 82, mc);
+      }
+      else // Receive the owners' errors and impose them on my halo elements
+      {
+        for (int send_rank = 0; send_rank < n_proc; send_rank++)
+        {
+          if (send_rank == iproc) continue;
+          oomph::Vector<oomph::GeneralisedElement *> halo_el(this->halo_element_pt(send_rank));
+          unsigned n_remote = 0;
+          MPI_Status status;
+          MPI_Recv(&n_remote, 1, MPI_UNSIGNED, send_rank, 81, mc, &status);
+          std::vector<double> buf(n_remote);
+          if (n_remote) MPI_Recv(&buf[0], (int)n_remote, MPI_DOUBLE, send_rank, 82, mc, &status);
+
+          if (n_remote != halo_el.size())
+          {
+            // The two element lists no longer correspond, so there is no way to tell which error
+            // belongs to which element. That means the meshes have already diverged; imposing
+            // anything here would be guesswork, so leave the errors alone and say so.
+            std::cout << "pyoomph WARNING: cannot synchronise elemental errors between process "
+                      << my_rank << " and " << send_rank << ": " << halo_el.size()
+                      << " halo elements here but " << n_remote << " haloed elements there. "
+                      << "The distributed meshes have diverged; adaptation may be inconsistent."
+                      << std::endl;
+            continue;
+          }
+          for (unsigned e = 0; e < n_remote; e++)
+          {
+            if (buf[e] < 0.0) continue; // Owner could not resolve this element
+            std::map<oomph::GeneralisedElement *, unsigned>::iterator it = index_of.find(halo_el[e]);
+            if (it != index_of.end()) errs[it->second] = buf[e];
+          }
+        }
+      }
+    }
+#endif
+  }
+
   // Find elements that do not share a facet with the boundary
   void Mesh::enlarge_elemental_error_max_override_to_only_nodal_connected_elems(unsigned bind)
   {

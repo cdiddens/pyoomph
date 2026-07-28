@@ -18,6 +18,14 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
   identification) and 3D Gmsh facet support.
 - **New solver backends**: a macOS Accelerate-framework linear solver and
   eigensolver. PETSc gained automatic field-split   index sets and general solver improvements.
+- **Halo consistency check for distributed runs** (`PYOOMPH_CHECK_HALO_CONSISTENCY=1|throw`, off by
+  default): every adapt cross-checks that all processes agree about the elements they share -- positions,
+  refinement levels, pending refinement flags and the error estimates about to decide their fate --
+  reporting or raising if they do not. Divergent meshes are silent where they happen and only surface much
+  later as a wrong `ndof`, an `inf` residual or a deadlock; this names the offending elements by position
+  at the adapt that created them. The verdict is agreed across processes, so raising mode fails the whole
+  job rather than one rank while the others block. Also callable from Python as
+  `Mesh.check_halo_consistency()`.
 - **`pyoomph check`** (`python -m pyoomph check solver|eigen|compiler|all`):
   reworked solver selection, checking, and reporting, including install hints
   for missing optional dependencies (MKL/Pardiso, PETSc/SLEPc).
@@ -55,6 +63,80 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
 
 ### Fixed
 
+- **MPI**: under `mpirun -n N` with `N>1`, PETSc+MUMPS is now selected as the default
+  linear/eigen solver on every platform (previously the platform cascade picked the
+  serial-only Pardiso on Linux, which then raised from its own constructor). Serial
+  solver selection is unchanged.
+- **MPI**: `Problem.get_residuals()`, `get_current_dofs()`, `get_history_dofs()` and
+  `_assemble_residual_jacobian()` read an `oomph::DoubleVector` by *global* equation
+  number, but that vector is row-partitioned on a distributed problem — they returned
+  out-of-bounds garbage (`nan`, `1e+148`, …) as soon as `ndof > nrow_local`.
+  `set_current_dofs()` wrote out of bounds in the same way. All now gather/scatter
+  properly, so under MPI every rank sees the same full-length vector. (The Jacobian
+  returned by `_assemble_residual_jacobian` remains process-local CSR, as before.)
+- **`ConstrainPositionsToC1Space` on non-uniformly refined meshes**: aborted at any
+  2:1 T-junction on triangle, mixed and all 3D meshes. A constrained node's position
+  redistributes onto its C1 corners, but those corners are recorded by whichever
+  element sees the node as a non-vertex -- which may be a *neighbour*, so they can be
+  vertices of another element that oomph-lib never registered as position-hang masters
+  here. Reading their local equation number then returned garbage. Those masters are
+  now registered explicitly. Works on every element family in 2D and 3D.
+- **Mixed-order spaces on 3D wedges/pyramids/tets**: a C1 field living on a C2-geometry
+  element was interpolated with the *geometric* (quadratic, all-nodes) basis instead of
+  the linear basis over the corner vertices, because the wedge and pyramid C2 elements
+  never overrode oomph-lib's isoparametric `ninterpolating_node`/`interpolating_basis`
+  defaults. Any Taylor-Hood, coupled C2+C1 or ALE problem on a non-uniformly refined
+  wedge/pyramid/mixed 3D mesh therefore got an inconsistent Jacobian and Newton failed
+  to converge. `BulkElementBase` now provides these hooks shape-agnostically, and the
+  wedge, pyramid and tetrahedral C2 elements use them. The tet previously overrode
+  `interpolating_basis` alone, which left callers reading uninitialised entries of the
+  `Shape` array.
+- **C1-space constraints on 3D wedges/pyramids**: two wrong entries in the C1-corner
+  tables meant `ConstrainFieldsToC1Space` degraded a field to something that was not
+  the element's C1 space at all, even without adaptivity. The pyramid's base-quad
+  centre was expanded over one diagonal instead of all four base corners, and two of
+  the wedge's bottom-layer edge midpoints were tied to the wrong corner pairs.
+- **3D adaptivity**: `ConstrainFieldsToC1Space` aborted with "Cannot enforce a
+  degration to C1 on a C1 vertex node" on any 3D mesh carrying a 2:1 (non-uniformly
+  refined) interface, plain bricks included. A constrained node is legitimately a C1
+  *vertex* of the finer neighbouring elements — and of the sons created at a father's
+  face/volume centre — and the code already handled that by leaving the hang to the
+  elements where the node is a non-vertex; the guard aborted before reaching it. It
+  demanded the node hang on the C1 slot, which holds in 2D but not in 3D. The guard now
+  tests what its message describes: degrading to a C1 space that is not present.
+- **3D adaptivity**: `DynamicOcTreeForest::check_all_neighbours` inspected only the
+  *first* tree when deciding whether to skip oomph-lib's brick compass neighbour
+  self-test. A mixed 3D forest whose first root happened to be a brick therefore ran
+  that self-test on a forest for which no neighbour pointers are set at all, aborting
+  with a bogus "Max. error in octree neighbour finding" (or running away into an
+  out-of-memory). It now scans every tree, as the 2D equivalent already did.
+- **MPI**: adaptive refinement could refine different elements on different processes, silently
+  corrupting the mesh. oomph-lib's error estimator synchronises the errors it computes from haloed to
+  halo elements -- but pyoomph applies its own per-element error *overrides* afterwards
+  (`RefineToLevel`, `RefineMaxElementSize`, `RefineAccordingToElement`, interface-driven bulk overrides
+  and any user `calculate_error_overrides`), and those ran rank-locally, so an element could be marked
+  "must refine" on the process that owns it and "do not refine" on a process holding a halo copy. The
+  ranks then built different meshes: stale coarse elements survived in the halo layer, the tree-based
+  hanging-node search installed 2:1 constraints that globally do not exist, and the global equation
+  numbering diverged, so the first Newton step produced `inf` (earlier, an asymmetric throw that
+  deadlocked the remaining ranks). Because the halo/haloed element lists are built by walking the leaves
+  of the same trees, a single divergence also misaligned every later halo exchange. The final error
+  vector is now synchronised owner-to-halo before adaptation. Note oomph-lib has a check for exactly
+  this, but only under `PARANOID`, which pyoomph does not enable by default.
+  What decided whether a run was affected was not *which* criterion was used but *where it was stated*:
+  a criterion on the bulk mesh reads only the element's own geometry, so a halo copy agreed with its
+  owner anyway, whereas one restricted to a boundary/interface (`... @ "domain/top"`) reaches the bulk
+  through the interface elements -- which a rank holding only halo copies of those bulk elements does
+  not have. All of `RefineToLevel`, `RefineMaxElementSize` and `RefineAccordingToElement` were affected
+  in that position.
+- **MPI**: the 3D 2:1 refinement-balancing pass (`TemplatedMeshBase3d::enforce_refinement_balance`) was
+  rank-local: each process selected its own elements (halo copies included) and decided when to stop from
+  its own selection count, around a collective `refine_selected_elements()`. The selection is now unioned
+  across processes and the loop terminates on the global set being empty.
+- **MPI**: `create_pressure_fixation()` (Taylor-Hood, Crouzeix-Raviart and
+  Scott-Vogelius) pinned the pressure dof of the *rank-local* element 0, so each rank
+  constrained a different dof and distributed Stokes solves crashed. The pinned
+  node/element is now selected deterministically and agreed across ranks.
 - Interface-dof bugs breaking adaptive multi-physics interfaces, C1TB
   interfaces, and edge cases on interfaces with opposite orientation.
 - Hele-Shaw factors corrected
