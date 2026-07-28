@@ -546,6 +546,11 @@ class Problem(_pyoomph.Problem):
 
         #: Spatial adaption steps for the initial condition. If set to ``None``, we refine initially up to :py:attr:`max_refinement_level`.
         self.initial_adaption_steps:None | int=None #Adapting in the first step
+        #: Cumulative number of elements that enforce_interface_conformity() had to refine after the
+        #: fact to keep the two sides of a coupled interface matching. Diagnostic: it should stay at
+        #: whatever the initial mesh setup needed, since the reconciliation during adapt is meant to get
+        #: there first. Reset it yourself to measure a particular stretch of a run.
+        self._interface_conformity_repairs:int=0
         self.remove_macro_elements_after_initial_adaption:bool | Literal["auto"]="auto" # "auto" means: Only if the coordinates are free
         #: In distributed runs, we call load balance after each non-uniform adaptions
         self.call_load_balance_in_initial_adaption=False
@@ -1775,41 +1780,29 @@ class Problem(_pyoomph.Problem):
                 #errs[name]=mesh._merge_my_error_with_elemental_max_override()   # This is done in advance now
                 
 
-            # Ensure same refinement at connected interfaces
-
+            # Interfaces with an opposite side used to get a one-shot error nudge here -- if my bulk
+            # element was above min_permitted_error and the opposite one was not, the opposite one's
+            # error was bumped, and vice versa. That is gone. It could only ever approximate the goal,
+            # for the reason set out in dev_docs/interface_refinement_coupling.md section 6: oomph merges
+            # a father only if ALL of its sons agree, so an unrefinement vetoed by a son that does not
+            # touch the interface is invisible to any comparison made at the interface, whatever it does
+            # with the errors. It also never iterated (so an A-B-C chain stayed open), and under MPI
+            # get_opposite_bulk_element() may return an element this rank does not own, or nothing at all.
+            #
+            # The two sides are now reconciled on their FLAGS instead, after both meshes have decided and
+            # before either acts (see the adapt call below), which is exact; and whatever still slips
+            # through is repaired by Problem.enforce_interface_conformity() afterwards.
+            #
+            # _internal_facets_ is still rejected -- see the throw in InterfaceMesh::rebuild_after_adapt.
             for name,mesh in self._meshdict.items():
                 if isinstance(mesh,ODEStorageMesh): continue
-                for inam,imesh in mesh._interfacemeshes.items():                      
-                    if imesh._opposite_interface_mesh is not None:  
-                        if inam=="_internal_facets_":
-                            raise RuntimeError("TODO: Adaption with internal facets")
-                        # make sure that we override the mesh errors correctly
-
-                        obm=imesh._opposite_interface_mesh._parent  
-                        assert obm is not None and not isinstance(obm,InterfaceMesh)
-                        my_maxerr=mesh.max_permitted_error
-                        my_minerr = mesh.min_permitted_error
-                        opp_maxerr = obm.max_permitted_error
-                        opp_minerr = obm.min_permitted_error
-                        for ie in imesh.elements():
-                            be=ie.get_bulk_element()
-                            obe=ie.get_opposite_bulk_element()
-                            if obe is None:                            
-                                raise RuntimeError("Interface mesh "+imesh.get_full_name()+" has an opposite interface mesh, but the opposite bulk element is None. This should not happen.")
-                            if obe is not None:                            
-                                if obe._elemental_error_max_override<opp_minerr and be._elemental_error_max_override>=my_minerr:
-                                    obe._elemental_error_max_override=0.5*(opp_minerr+opp_maxerr)
-                                elif obe._elemental_error_max_override>=opp_minerr and be._elemental_error_max_override<my_minerr:
-                                    be._elemental_error_max_override=0.5*(my_minerr+my_maxerr)
-                        for i,e in enumerate(mesh.elements()):
-                            errs[name][i]=max(errs[name][i],e._elemental_error_max_override)
-                        for i,e in enumerate(obm.elements()):
-                            errs[obm._name][i]=max(errs[obm._name][i],e._elemental_error_max_override) 
+                for inam,imesh in mesh._interfacemeshes.items():
+                    if imesh._opposite_interface_mesh is not None and inam=="_internal_facets_":
+                        raise RuntimeError("TODO: Adaption with internal facets")
 
 
         messed_around_in_history=False
         has_arclength_data=False
-        # TODO: Ensure same refinement at connected interfaces
         if self._last_arclength_parameter is not None:
             dof_deriv=self.get_arclength_dof_derivative_vector()
             if len(dof_deriv)>0:
@@ -1837,6 +1830,40 @@ class Problem(_pyoomph.Problem):
         nref=0
         nuref=0
         with self.custom_adapt(True):
+            # When domains are coupled across an interface, adapt each mesh in two stages with a
+            # reconciliation in between: decide for all of them, make the two sides of every coupled
+            # interface agree about what they decided, and only then act. This is the one point where
+            # the two sides can be brought into agreement EXACTLY. Reconciling the errors instead --
+            # which is what the block further up does, and all pyoomph could do before -- cannot: oomph
+            # merges a father only if all of its sons agree, so an unrefinement vetoed by a son that
+            # does not touch the interface is invisible to any comparison made at the interface.
+            # See dev_docs/interface_refinement_coupling.md sections 6 and 7.
+            #
+            # Order matters and is deterministic on every process: errs follows _meshdict's insertion
+            # order, and the refinement calls underneath are collective on a distributed mesh.
+            coupled=self._collect_coupled_interfaces()
+            # Negative-testing hatch, same purpose as PYOOMPH_DISABLE_INTERFACE_CONFORMITY: with this
+            # set, the two sides act on their own decisions and the post-adapt repair has to clean up
+            # afterwards -- which is exactly the lossy behaviour the reconciliation exists to avoid, and
+            # the only way to demonstrate that it does.
+            if os.environ.get("PYOOMPH_DISABLE_ADAPT_RECONCILIATION","") not in ("","0","off"):
+                coupled=[]
+            if coupled:
+                adaptable=[(n,e) for n,e in errs.items() if self.get_mesh(n).refinement_possible()]
+                for name,errors in adaptable:
+                    self.get_mesh(name)._adapt_select(errors)
+                _pyoomph._harmonise_adapt_selection(coupled,40) #type:ignore
+                for name,_ in adaptable:
+                    self.get_mesh(name)._adapt_execute()
+                for name,_ in adaptable:
+                    self.get_mesh(name)._adapt_finalise()
+                for name,_ in adaptable:
+                    mesh=self.get_mesh(name)
+                    if not self.is_quiet():
+                        print("IN MESH "+name+" ref=",mesh.nrefined(),"unref=",mesh.nunrefined())
+                    nref += mesh.nrefined()
+                    nuref += mesh.nunrefined()
+                errs={}  # handled above; skip the single-mesh loop below
             for name,errors in errs.items():
                 mesh=self.get_mesh(name)
                 if mesh.refinement_possible():
@@ -3686,7 +3713,15 @@ class Problem(_pyoomph.Problem):
         conns=self._collect_coupled_interfaces()
         if not conns:
             return 0
-        return _pyoomph._enforce_interface_conformity(conns,40) #type:ignore
+        n=_pyoomph._enforce_interface_conformity(conns,40) #type:ignore
+        # How much repairing this had to do. Zero is the good case and the interesting one: it means the
+        # two sides agreed BEFORE they acted (the flag reconciliation in _adapt_with_interfacial_errors
+        # got there first), rather than one of them being refined back afterwards. A repair is correct
+        # but lossy -- re-refining an element that has just been merged away re-interpolates its sons
+        # from the merged father, and the fine-scale information is gone. See
+        # test_adapt_selection_is_reconciled_before_acting.
+        self._interface_conformity_repairs+=n
+        return n
 
     def check_interface_conformity(self,throw_on_mismatch:bool=False,when:str="") -> int:
         """Count boundary facets of a coupled interface that have no counterpart on the opposite side.

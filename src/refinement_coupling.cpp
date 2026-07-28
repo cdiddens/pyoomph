@@ -175,6 +175,111 @@ namespace pyoomph
       return true;
     }
 
+    // The pending adaptation decision for the element behind one boundary facet, as flag bits.
+    int facet_flags(oomph::Mesh *om, TemplatedMeshBase *tm, unsigned elem_index)
+    {
+      oomph::RefineableElement *el = dynamic_cast<oomph::RefineableElement *>(om->element_pt(elem_index));
+      if (!el) return 0;
+      int f = 0;
+      if (el->to_be_refined()) f |= IFACET_TO_BE_REFINED;
+      oomph::Tree *father = (el->tree_pt() ? el->tree_pt()->father_pt() : NULL);
+      if (father && father->object_pt())
+      {
+        oomph::RefineableElement *fel = dynamic_cast<oomph::RefineableElement *>(father->object_pt());
+        if (fel && fel->sons_to_be_unrefined()) f |= IFACET_SONS_TO_BE_UNREFINED;
+      }
+      if (el->refinement_is_enabled() && tm && el->refinement_level() < tm->max_refinement_level())
+        f |= IFACET_CAN_REFINE;
+      return f;
+    }
+
+    // Collect one side AND the adaptation decision behind each of its facets, reduced across processes
+    // so every rank sees the same picture of both sides. The two reductions differ on purpose:
+    //   refine / can-refine are OR-ed  -- if any copy of an element wants (or is able) to refine, it does
+    //   unrefine is AND-ed             -- a father is only merged away if every copy agrees to it
+    // Halo and owner should already agree after synchronise_elemental_errors; these are the safe
+    // directions if they somehow do not.
+    void collect_side_with_flags(Mesh *m, const std::string &bname, const std::vector<double> &offset,
+                                 InterfaceSideFacets &out, oomph::OomphCommunicator *comm_pt)
+    {
+      collect_interface_side(m, bname, offset, out);
+      out.flags.clear();
+      oomph::Mesh *om = dynamic_cast<oomph::Mesh *>(m);
+      TemplatedMeshBase *tm = dynamic_cast<TemplatedMeshBase *>(m);
+      if (om)
+        for (const auto &f : out.local)
+        {
+          const int fl = facet_flags(om, tm, f.first.first);
+          auto it = out.flags.find(f.second);
+          if (it == out.flags.end())
+            out.flags[f.second] = fl;
+          else
+            it->second = ((it->second | fl) & (IFACET_TO_BE_REFINED | IFACET_CAN_REFINE)) |
+                         ((it->second & fl) & IFACET_SONS_TO_BE_UNREFINED);
+        }
+
+#ifdef OOMPH_HAS_MPI
+      if (!comm_pt || comm_pt->nproc() < 2)
+      {
+        allgather_side(out, comm_pt);
+        return;
+      }
+      MPI_Comm mc = comm_pt->mpi_comm();
+      const int nproc = comm_pt->nproc();
+      // [nkeys, keys..., flags] per facet
+      std::vector<long long> mine;
+      for (const auto &kv : out.flags)
+      {
+        mine.push_back((long long)kv.first.size());
+        for (const InterfacePosKey &k : kv.first)
+        {
+          mine.push_back(k[0]);
+          mine.push_back(k[1]);
+          mine.push_back(k[2]);
+        }
+        mine.push_back((long long)kv.second);
+      }
+      int mycount = (int)mine.size();
+      std::vector<int> counts(nproc, 0), displs(nproc, 0);
+      MPI_Allgather(&mycount, 1, MPI_INT, &counts[0], 1, MPI_INT, mc);
+      int total = 0;
+      for (int i = 0; i < nproc; i++) { displs[i] = total; total += counts[i]; }
+      std::vector<long long> all((size_t)std::max(total, 1));
+      MPI_Allgatherv(mycount ? &mine[0] : NULL, mycount, MPI_LONG_LONG,
+                     &all[0], &counts[0], &displs[0], MPI_LONG_LONG, mc);
+
+      out.flags.clear();
+      out.facets.clear();
+      out.vertices.clear();
+      int i = 0;
+      while (i < total)
+      {
+        const int n = (int)all[i++];
+        if (n <= 0 || i + 3 * n >= total + 1) break;
+        std::vector<InterfacePosKey> keys;
+        keys.reserve(n);
+        for (int j = 0; j < n; j++)
+        {
+          InterfacePosKey k = {all[i], all[i + 1], all[i + 2]};
+          i += 3;
+          keys.push_back(k);
+          out.vertices.insert(k);
+        }
+        const int fl = (int)all[i++];
+        std::sort(keys.begin(), keys.end());
+        out.facets.insert(keys);
+        auto it = out.flags.find(keys);
+        if (it == out.flags.end())
+          out.flags[keys] = fl;
+        else
+          it->second = ((it->second | fl) & (IFACET_TO_BE_REFINED | IFACET_CAN_REFINE)) |
+                       ((it->second & fl) & IFACET_SONS_TO_BE_UNREFINED);
+      }
+#else
+      (void)comm_pt;
+#endif
+    }
+
     std::string key_to_string(const InterfacePosKey &k)
     {
       std::ostringstream oss;
@@ -191,6 +296,55 @@ namespace pyoomph
       for (unsigned i = 0; i < keys.size(); i++) oss << (i ? " " : "") << key_to_string(keys[i]);
       return oss.str();
     }
+
+    // Facets whose counterpart does not exist on the other side AT ALL, globally reduced. Deliberately
+    // not the same question as check_interface_conformity's full count: this one excludes the
+    // "counterpart exists but not on this process" case, which is a halo-coverage problem and not
+    // something refinement can repair.
+    unsigned count_facet_mismatch(const std::vector<CoupledInterfacePair> &pairs,
+                                  oomph::OomphCommunicator *comm_pt, std::string &detail)
+    {
+      unsigned n = 0;
+      std::ostringstream oss;
+      unsigned reported = 0;
+      const unsigned MAX_REPORTED = 6;
+      for (const CoupledInterfacePair &p : pairs)
+      {
+        InterfaceSideFacets A, B;
+        collect_interface_side(p.meshA, p.bnameA, p.offset, A);
+        collect_interface_side(p.meshB, p.bnameB, std::vector<double>(), B);
+        allgather_side(A, comm_pt);
+        allgather_side(B, comm_pt);
+        if (A.facets.empty() && B.facets.empty()) continue;
+        const InterfaceSideFacets *sides[2] = {&A, &B};
+        const InterfaceSideFacets *others[2] = {&B, &A};
+        const char *labels[2] = {"A", "B"};
+        for (int s = 0; s < 2; s++)
+          for (const auto &kv : sides[s]->facets)
+            if (!others[s]->facets.count(kv))
+            {
+              n++;
+              if (reported < MAX_REPORTED)
+              {
+                reported++;
+                oss << "  side " << labels[s] << " facet " << facet_to_string(kv)
+                    << (facet_is_too_coarse(kv, *others[s]) ? "  [too coarse -- could not be refined]"
+                                                            : "  [too fine]")
+                    << "\n";
+              }
+            }
+      }
+      detail = oss.str();
+      // Already identical on every rank (the facet sets are globally reduced), but reduce anyway so the
+      // verdict -- and any throw built on it -- is unanimous rather than merely expected to be.
+      unsigned total = n;
+#ifdef OOMPH_HAS_MPI
+      if (comm_pt && comm_pt->nproc() > 1)
+        MPI_Allreduce(&n, &total, 1, MPI_UNSIGNED, MPI_MAX, comm_pt->mpi_comm());
+#endif
+      return total;
+    }
+
   }
 
   void collect_interface_side(Mesh *m, const std::string &bname, const std::vector<double> &offset,
@@ -333,6 +487,92 @@ namespace pyoomph
     return n_bad + n_unreach_total;
   }
 
+  unsigned harmonise_adapt_selection(const std::vector<CoupledInterfacePair> &pairs, unsigned max_rounds)
+  {
+    if (pairs.empty()) return 0;
+    oomph::OomphCommunicator *comm_pt = coupling_communicator(pairs);
+    unsigned total_changes = 0;
+
+    // Unrefinement first, then refinement -- and to separate fixed points, because the two have
+    // opposite monotonicity. Deselecting an unrefinement never creates a new refinement selection and
+    // selecting a refinement never creates a new unrefinement selection, so run in this order they
+    // cannot chase each other.
+    for (int phase = 0; phase < 2; phase++)
+    {
+      for (unsigned round = 0; round < max_rounds; round++)
+      {
+        unsigned changes = 0;
+        for (const CoupledInterfacePair &p : pairs)
+        {
+          InterfaceSideFacets A, B;
+          collect_side_with_flags(p.meshA, p.bnameA, p.offset, A, comm_pt);
+          collect_side_with_flags(p.meshB, p.bnameB, std::vector<double>(), B, comm_pt);
+          if (A.facets.empty() || B.facets.empty()) continue;
+
+          oomph::Mesh *ms[2] = {dynamic_cast<oomph::Mesh *>(p.meshA), dynamic_cast<oomph::Mesh *>(p.meshB)};
+          TemplatedMeshBase *tms[2] = {dynamic_cast<TemplatedMeshBase *>(p.meshA),
+                                       dynamic_cast<TemplatedMeshBase *>(p.meshB)};
+          InterfaceSideFacets *sides[2] = {&A, &B};
+          const InterfaceSideFacets *others[2] = {&B, &A};
+          for (int s = 0; s < 2; s++)
+          {
+            if (!ms[s] || !tms[s]) continue;
+            for (const auto &f : sides[s]->local)
+            {
+              auto oit = others[s]->flags.find(f.second);
+              if (oit == others[s]->flags.end()) continue; // no partner: already non-conforming, not our job
+              const int other = oit->second;
+              oomph::RefineableElement *el =
+                  dynamic_cast<oomph::RefineableElement *>(ms[s]->element_pt(f.first.first));
+              if (!el || !el->tree_pt()) continue;
+
+              if (phase == 0)
+              {
+                // My father is about to be merged away but my partner's is not. Deselect mine: an
+                // unrefinement cannot be manufactured on the other side, since that needs unanimity
+                // among sons this code does not control.
+                oomph::Tree *father = el->tree_pt()->father_pt();
+                if (!father || !father->object_pt()) continue;
+                oomph::RefineableElement *fel = dynamic_cast<oomph::RefineableElement *>(father->object_pt());
+                if (!fel || !fel->sons_to_be_unrefined()) continue;
+                if (other & IFACET_SONS_TO_BE_UNREFINED) continue;
+                fel->deselect_sons_for_unrefinement();
+                changes++;
+              }
+              else
+              {
+                const bool mine_refines = el->to_be_refined();
+                const bool i_can = el->refinement_is_enabled() &&
+                                   el->refinement_level() < tms[s]->max_refinement_level();
+                if ((other & IFACET_TO_BE_REFINED) && !mine_refines && i_can)
+                {
+                  el->select_for_refinement();
+                  changes++;
+                }
+                else if (mine_refines && !(other & IFACET_TO_BE_REFINED) && !(other & IFACET_CAN_REFINE))
+                {
+                  // The other side is capped (at its max_refinement_level, or refinement disabled), so
+                  // it can never follow. Refining here would create a mismatch nothing downstream could
+                  // repair, so hold instead. The other side reaches the mirror-image conclusion from the
+                  // same globally-reduced flags, so the two agree without talking about it.
+                  el->deselect_for_refinement();
+                  changes++;
+                }
+              }
+            }
+          }
+        }
+        const unsigned global_changes = global_sum(changes, comm_pt);
+        total_changes += global_changes;
+        if (!global_changes) break;
+        if (round + 1 == max_rounds)
+          throw_runtime_error("harmonise_adapt_selection did not reach a fixed point in " +
+                              std::to_string(max_rounds) + " rounds (phase " + std::to_string(phase) + ")");
+      }
+    }
+    return total_changes;
+  }
+
   unsigned enforce_interface_conformity(const std::vector<CoupledInterfacePair> &pairs, unsigned max_rounds)
   {
     if (pairs.empty()) return 0;
@@ -438,6 +678,26 @@ namespace pyoomph
     if (global_refined)
       for (unsigned i = 0; i < meshes.size(); i++)
         if (meshes[i]->refinement_possible()) meshes[i]->post_adapt_setup_hanging_nodes();
+
+    // The loop stops as soon as it has nothing left to SELECT, which is not the same as having
+    // succeeded: an element it wanted to refine may have been at max_refinement_level, or the two
+    // sides' facets may not be in bijection at all. Left alone, that lands in
+    // connect_interface_elements_by_kdtree a moment later as "Cannot locate opposite node at
+    // x=(...)", which says nothing about the cause. Diagnose it here instead, while the reason is
+    // still in scope.
+    std::string detail;
+    if (count_facet_mismatch(pairs, comm_pt, detail))
+    {
+      std::ostringstream msg;
+      msg << "Cannot make the two sides of a coupled interface match.\n"
+          << "The coarser side could not be refined any further, so no amount of refinement will "
+             "bring them into correspondence. The usual cause is that the two domains have different "
+             "max_refinement_level and the shallower one cannot follow the deeper one; the other is "
+             "that their facets are not in bijection to begin with (e.g. a triangular face meeting a "
+             "quadrilateral one), which no refinement can fix either.\n"
+          << detail;
+      throw_runtime_error(msg.str());
+    }
 
     return total_refined;
   }

@@ -462,6 +462,27 @@ namespace pyoomph
   }
 
   // See declaration in mesh.hpp.
+  // See the declaration in mesh.hpp. Mirrors how oomph's own adapt() arrives at these numbers:
+  // n_refine counts elements flagged for refinement, n_unrefine counts the SONS that are about to be
+  // merged away (one per leaf whose father is selected, which sums to n_sons per selected father).
+  void TemplatedMeshBase::recount_pending_adaptation()
+  {
+    pending_n_refine = 0;
+    pending_n_unrefine = 0;
+    for (unsigned long e = 0; e < this->nelement(); e++)
+    {
+      oomph::RefineableElement *el = dynamic_cast<oomph::RefineableElement *>(this->element_pt(e));
+      if (!el) continue;
+      if (el->to_be_refined()) pending_n_refine++;
+      oomph::Tree *father = (el->tree_pt() ? el->tree_pt()->father_pt() : NULL);
+      if (father && father->object_pt())
+      {
+        oomph::RefineableElement *fel = dynamic_cast<oomph::RefineableElement *>(father->object_pt());
+        if (fel && fel->sons_to_be_unrefined()) pending_n_unrefine++;
+      }
+    }
+  }
+
   void TemplatedMeshBase::synchronise_elemental_errors(oomph::Vector<double> &errs)
   {
 #ifdef OOMPH_HAS_MPI

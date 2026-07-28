@@ -75,9 +75,18 @@ with no counterpart at all (the meshes were refined differently) versus facets w
 not on the process holding them (the halo layer does not cover the opposite domain). Under MPI those need
 different fixes and the matcher's own error message cannot tell them apart.
 
-Set `PYOOMPH_DISABLE_INTERFACE_CONFORMITY=1` to switch the repair off. That is for negative testing — a
-test that still passes with the repair disabled is not measuring the repair. With it set, 80 of the 112
-(mesh kind, equation, refinement state) combinations fail.
+Two negative-testing switches, both for the same reason — a test that still passes with the machinery
+disabled is not measuring the machinery:
+
+| variable | effect |
+|---|---|
+| `PYOOMPH_DISABLE_INTERFACE_CONFORMITY=1` | no repair at all. 80 of the 112 (mesh kind, equation, refinement state) combinations fail. |
+| `PYOOMPH_DISABLE_ADAPT_RECONCILIATION=1` | the two sides act on their own decisions and the repair cleans up afterwards. Everything still *passes*; what changes is that the repair has to refine 5–7 elements back on the `estimator` cases, which `test_adapt_selection_is_reconciled_before_acting` asserts it does not. |
+
+The second one is the subtler property. Both routes end at a conforming mesh, so no ordinary oracle
+distinguishes them — but repairing after the fact means an element that was just merged away is refined
+again and its sons re-interpolated from the merged father, so the patch keeps the right answer and loses
+its fine-scale solution.
 
 ## MPI tests
 

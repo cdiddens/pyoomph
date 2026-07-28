@@ -236,10 +236,16 @@ def solve_case(kind, eq, levels, N=4, outdir=None):
         if outdir is not None:
             p.set_output_directory(outdir)
         p.max_refinement_level = max(levels[0], levels[1]) + 1
+        p.initialise()
+        # Repairs done while setting the mesh up (the uneven part of the initial uniform refinement is
+        # deliberately applied after distribute, so it genuinely has to be repaired). Only what happens
+        # from here on is a statement about the ADAPT path.
+        repairs_at_init = p._interface_conformity_repairs
         # The refinement is driven by explicit criteria, not by a converging error estimate, so a couple
         # of adapt steps is enough for all of them to have taken effect.
         for _ in range(3):
             p.solve(spatial_adapt=1)
+        repairs_during_adapt = p._interface_conformity_repairs - repairs_at_init
 
         # The Newton history of that last solve is useless as a Jacobian oracle: the field was already
         # converged from the previous pass, so it starts at machine zero and one step "reduces" nothing.
@@ -264,6 +270,11 @@ def solve_case(kind, eq, levels, N=4, outdir=None):
             # carry identical boundary facets, which is precisely what the opposite-element matcher needs.
             # Collective under MPI, so every rank calls it and every rank gets the same number.
             "nonconforming": int(p.check_interface_conformity(throw_on_mismatch=False, when="end of case")),
+            # How many elements the post-adapt repair had to refine AFTER the fact. Zero is the good
+            # case: it means the two sides agreed before either acted, rather than one of them being
+            # merged away and then refined back -- a round trip that is correct but re-interpolates the
+            # sons from the merged father and loses the fine-scale solution.
+            "repairs_during_adapt": int(repairs_during_adapt),
         }
         for dom in ("lower", "upper"):
             for name, val in p.get_mesh(dom).evaluate_all_observables().items():

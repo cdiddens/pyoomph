@@ -1389,7 +1389,25 @@ void PyReg_Mesh(nb::module_ &m)
 			 {
  	   oomph::Vector<double> oerrs(errs.size());
  	   for (unsigned int i=0;i<errs.size();i++) oerrs[i]=errs[i];
- 	   self->adapt(oerrs); }), nb::arg("elemental_errors"), "Adapts (refines/unrefines) this mesh according to the given per-element spatial error estimate");
+ 	   self->adapt(oerrs); }), nb::arg("elemental_errors"), "Adapts (refines/unrefines) this mesh according to the given per-element spatial error estimate")
+		// adapt_by_elemental_errors in its three separately callable stages, so that the decisions of two
+		// meshes sharing a coupled interface can be reconciled in the gap between deciding and acting
+		// (see _harmonise_adapt_selection). Calling these three back to back is exactly adapt().
+		.def("_adapt_select",mesh_method([](pyoomph::Mesh *self, const std::vector<double> &errs)
+			 {
+	   pyoomph::TemplatedMeshBase *tm=dynamic_cast<pyoomph::TemplatedMeshBase*>(self);
+	   if (!tm) return;
+	   oomph::Vector<double> oerrs(errs.size());
+	   for (unsigned int i=0;i<errs.size();i++) oerrs[i]=errs[i];
+	   tm->adapt_select(oerrs); }), nb::arg("elemental_errors"), "Decides which elements to refine/unrefine from the given per-element error estimate, without acting on the decision")
+		.def("_adapt_execute",mesh_method([](pyoomph::Mesh *self)
+			 {
+	   pyoomph::TemplatedMeshBase *tm=dynamic_cast<pyoomph::TemplatedMeshBase*>(self);
+	   if (tm) tm->adapt_execute(); }), "Carries out the refinement/unrefinement decided by _adapt_select")
+		.def("_adapt_finalise",mesh_method([](pyoomph::Mesh *self)
+			 {
+	   pyoomph::TemplatedMeshBase *tm=dynamic_cast<pyoomph::TemplatedMeshBase*>(self);
+	   if (tm) tm->adapt_finalise(); }), "Restores 2:1 balancing and rebuilds the shape-specific hanging nodes after _adapt_execute");
 
 	   /*
 	nb::class_<pyoomph::BulkElementODE0d, oomph::GeneralisedElement>(m, "BulkElementODE0d")
@@ -1643,6 +1661,23 @@ void PyReg_Mesh(nb::module_ &m)
 			return pyoomph::enforce_interface_conformity(pairs, max_rounds); },
 		  nb::arg("connections"), nb::arg("max_rounds") = 40,
 		  "Refines the coarser side of every coupled interface until both sides carry identical boundary facets, interleaved with each mesh's own 2:1 balancing; returns the number of elements refined");
+
+	m.def("_harmonise_adapt_selection", [](const std::vector<std::tuple<MeshHandleBase *, std::string, MeshHandleBase *, std::string, std::vector<double>>> &conns, unsigned max_rounds)
+		  {
+			std::vector<pyoomph::CoupledInterfacePair> pairs;
+			for (const auto &c : conns)
+			{
+				pyoomph::CoupledInterfacePair p;
+				p.meshA = std::get<0>(c) ? std::get<0>(c)->mesh() : NULL;
+				p.bnameA = std::get<1>(c);
+				p.meshB = std::get<2>(c) ? std::get<2>(c)->mesh() : NULL;
+				p.bnameB = std::get<3>(c);
+				p.offset = std::get<4>(c);
+				pairs.push_back(p);
+			}
+			return pyoomph::harmonise_adapt_selection(pairs, max_rounds); },
+		  nb::arg("connections"), nb::arg("max_rounds") = 40,
+		  "Reconciles the pending refine/unrefine flags of the two sides of every coupled interface, to be called between Mesh._adapt_select and Mesh._adapt_execute; returns the number of flag changes made");
 
 	m.def("_check_interface_conformity", [](const std::vector<std::tuple<MeshHandleBase *, std::string, MeshHandleBase *, std::string, std::vector<double>>> &conns, const std::string &when, int mode)
 		  {

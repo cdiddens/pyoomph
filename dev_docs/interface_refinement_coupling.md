@@ -3,10 +3,9 @@
 Written 2026-07-28 on branch `interface_refine_coupling`, after the mixed-adaptive-mesh validation
 campaign (`mixed_adapt_validation.md`) closed.
 
-Status: **S0–S2, S5, most of S3 and most of S6 implemented and passing, serially and under MPI.**
-§14 records what building it turned up that this plan did not predict — including two defects the plan's
-own reasoning would not have caught, and one place (§2) where the plan is simply wrong about
-distribution. **S4, the two-phase adapt, remains**, and with it the one part of S6 that depends on it.
+Status: **implemented.** All six stages, serially and under MPI. §14 records what building it turned up
+that this plan did not predict — including two defects the plan's own reasoning would not have caught,
+and one place (§2) where the plan is simply wrong about distribution.
 
 ---
 
@@ -538,18 +537,74 @@ the interface element but written to a bulk element owned elsewhere — is alrea
 max-reduce above, so the port is now a refactor rather than a fix, and was not worth the regression risk
 in the same change.
 
-### 14.6 Still open
+### 14.6 S4 landed, and it was worth it
 
-* **S4, the two-phase adapt.** The repair still runs *after* `adapt()`, so a domain that unrefines a
-  patch its partner keeps gets re-refined from the merged father — correct, but lossy, and it makes
-  adapt non-idempotent. §6's counterexample stands unchanged. This is the remaining quality gap: the
-  interface currently coarsens by round trip rather than by decision.
-* **The old Python heuristic at [problem.py](pyoomph/generic/problem.py) `# Ensure same refinement at
-  connected interfaces` stays for now.** S6 planned to delete it, but that assumed S4 had replaced it
-  with the exact flag harmonisation. It is a crude version of the §6 pre-pass, it is no longer load-
-  bearing for correctness, and removing it before S4 exists would only increase the churn described
-  above. Delete it together with S4, not before.
-* **The `_override_bulk_errors_where_necessary` port**, per §14.5.
+The split of oomph's `adapt()` went in as §7 described: a `select_elements_for_refinement_and_unrefinement`
+/ `execute_selected_adaptation` pair in the vendored `refineable_mesh.{h,cc}`, with `adapt()` reduced to
+the two-line composition, and the same three-way split mirrored on `TemplatedMeshBase`
+(`adapt_select` / `adapt_execute` / `adapt_finalise`). The flag reconciliation runs in the gap, as
+`harmonise_adapt_selection`: unrefinement deselection to a fixed point first, then refinement selection,
+which cannot chase each other for the monotonicity reason in §7.
+
+Two things worth recording.
+
+**The counts had to be recomputed.** oomph counts `n_refine`/`n_unrefine` as it sets the flags, and those
+counts drive the collective "is this worth doing at all" gate inside the execute half. Reconciling the
+flags in between invalidates them — and a stale zero there does not merely mis-report, it skips the
+adaptation entirely. `TemplatedMeshBase::recount_pending_adaptation()` re-derives both from the flags as
+they stand.
+
+**The payoff is measurable, and only one criterion measures it.** With
+`PYOOMPH_DISABLE_ADAPT_RECONCILIATION=1` the post-adapt repair has to refine 5-7 elements back on the
+`estimator` cases; with reconciliation, zero. The criteria that reach their target level at *initialise*
+(`level`, `size`, `callback`) never disagree during adapt at all, so they need no repair either way and
+cannot detect this -- which is exactly why `test_adapt_selection_is_reconciled_before_acting` uses the
+estimator case and says so. Both routes reach a conforming mesh, so nothing else in the suite can tell
+them apart; what the repair route loses is the fine-scale solution on the patch it merges and then
+re-refines.
+
+The old Python heuristic (`# Ensure same refinement at connected interfaces`) is gone with it, along with
+the `# TODO: Ensure same refinement at connected interfaces` thirty lines below it that had been the
+honest summary of the situation since the branch began.
+
+### 14.7 Differing `max_refinement_level` (§9), as actually resolved
+
+§9 offered two options and recommended clamping both sides to the minimum. That is the wrong one: it
+takes refinement away from a domain in its *interior*, where nothing requires it. What is implemented
+instead is narrower and better.
+
+The reconciliation carries a `can_refine` bit per facet (`IFACET_CAN_REFINE`), so a facet whose partner
+sits at its own `max_refinement_level` is never selected for refinement. Both sides reach the
+mirror-image conclusion from the same globally-reduced flags, so they agree without an extra exchange.
+The result is that **the shallower cap governs the interface and only the interface**. Measured, with
+`lower` capped at 3 and `upper` at 1, driven by an adapt-time criterion:
+
+```
+lower interior levels = [0, 1, 3]      lower AT the interface = [0, 1]
+                                       upper AT the interface = [0, 1]      nonconforming = 0
+```
+
+**But `RefineToLevel` does not go through `adapt`.** It sets `_initial_uniform_refinement_level`, and
+`refine_uniformly` ignores `max_refinement_level` entirely -- so one domain can be driven past a cap the
+other cannot follow, and no reconciliation or repair can rescue it. The repair loop stops when it has
+nothing left to *select*, which is not the same as having succeeded, and that difference used to fall
+through to `connect_interface_elements_by_kdtree` as `Cannot locate opposite node at x=(...)`.
+
+§9's "silently spinning in the repair loop is the one outcome to rule out" was therefore only half done:
+the loop was bounded, but its giving-up was not distinguished from its succeeding.
+`enforce_interface_conformity` now ends with a facet-mismatch count (deliberately excluding the MPI
+"partner not on this process" case, which is a halo problem refinement cannot fix) and throws with the
+offending facets and the two plausible causes. Pinned by
+`test_unsatisfiable_cap_is_diagnosed_not_left_to_the_matcher` and
+`test_lower_max_refinement_level_governs_the_interface`.
+
+### 14.8 Still open
+
+* **`_override_bulk_errors_where_necessary` is still Python**, per §14.5. It is the propagation rather
+  than a criterion, its rank-locality problem is already covered by the max-reduce, and moving it needs
+  `_opposite_interface_mesh` / `_parent` / `_interface_name` mirrored in C++ first. A refactor now, not a
+  fix.
+* **`_internal_facets_` (DG) adaptivity** remains rejected outright, as it was before this work.
 * **A failing case poisons later cases in the same worker process.** Seen while bisecting §14.2: after a
   case raised, the next one in the same `mpi_worker.py` process failed too. Pre-existing (the worker has
   always looped over cases in one process) and not investigated. It matters for reading MPI test output:

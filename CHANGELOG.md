@@ -23,8 +23,18 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
   own 2:1 balancing, to a joint fixed point. Works under `mpirun --distribute`, where the two domains are
   partitioned independently. Diagnosable with `Problem.check_interface_conformity()`, which reports
   facets with no counterpart separately from facets whose counterpart is not on the process holding them
-  -- under MPI those are different defects needing different fixes. See
-  `dev_docs/interface_refinement_coupling.md`.
+  -- under MPI those are different defects needing different fixes. The two sides are reconciled on their
+  pending refine/unrefine *decisions*, after both meshes have decided and before either acts, rather than
+  on the errors that produced them: oomph merges a father only if all of its sons agree, so an
+  unrefinement vetoed by a son that does not touch the interface is invisible to any comparison made at
+  the interface. That is what keeps a coarsening interface from being merged away and refined straight
+  back, which would be correct but would re-interpolate the patch from the merged father and lose its
+  fine-scale solution. Coupled domains with different `max_refinement_level` are allowed: the shallower
+  cap governs the shared interface, while each domain still refines to its own cap away from it. Where
+  that cannot work -- `RefineToLevel` refines uniformly and does not respect `max_refinement_level`, so
+  one side can be driven past a cap the other cannot follow -- the run now stops with the offending
+  facets and the reason, instead of the opposite-element matcher's bare "Cannot locate opposite node".
+  See `dev_docs/interface_refinement_coupling.md`.
 - **`RefineToLevel` and `RefineMaxElementSize` are now evaluated in the C++ core** instead of by a Python
   loop over the elements on each adapt. Same criteria, same values, unchanged API -- but they now cover
   every element a process holds, halo copies included, so a distributed run needs no repair pass to make

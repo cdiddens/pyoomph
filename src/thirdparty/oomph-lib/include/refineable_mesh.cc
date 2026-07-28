@@ -304,26 +304,25 @@ namespace oomph
   /// - Store # of refined/unrefined elements.
   /// - Doc refinement process (if required)
   //========================================================================
-  void TreeBasedRefineableMeshBase::adapt(const Vector<double>& elemental_error)
+  //========================================================================
+  /// Split out of adapt() below so that a caller can interpose between the two
+  /// halves: this one only translates the elemental errors into per-element
+  /// refine/unrefine FLAGS, without acting on them. pyoomph uses that gap to make
+  /// two separately-adapted meshes that share an interface agree about which
+  /// elements they refine, which has to happen after the decision is taken and
+  /// before it is executed (see pyoomph's dev_docs/interface_refinement_coupling.md).
+  /// adapt() itself is unchanged in behaviour -- it is now just the composition.
+  //========================================================================
+  //FOR PYOOMPH: adapt() split into this half and execute_selected_adaptation() below;
+  // adapt() is now the composition of the two. See src/thirdparty/INFO_oomph-lib.
+  void TreeBasedRefineableMeshBase::select_elements_for_refinement_and_unrefinement(
+    const Vector<double>& elemental_error, unsigned& n_refine, unsigned& n_unrefine)
   {
     // Set the refinement tolerance to be the max permissible error
     double refine_tol = max_permitted_error();
 
     // Set the unrefinement tolerance to be the min permissible error
     double unrefine_tol = min_permitted_error();
-
-    // Setup doc info
-    DocInfo local_doc_info;
-    if (doc_info_pt() == 0)
-    {
-      local_doc_info.disable_doc();
-    }
-    else
-    {
-      local_doc_info = doc_info();
-    }
-
-
     // Check that the errors make sense
     if (refine_tol <= unrefine_tol)
     {
@@ -337,8 +336,6 @@ namespace oomph
       throw OomphLibError(
         error_stream.str(), OOMPH_CURRENT_FUNCTION, OOMPH_EXCEPTION_LOCATION);
     }
-
-
     // Select elements for refinement and unrefinement
     //================================================
     // Reset counter for number of elements that would like to be
@@ -350,7 +347,7 @@ namespace oomph
     std::map<RefineableElement*, bool> wants_to_be_unrefined;
 
     // Initialise a variable to store the number of elements for refinment
-    unsigned n_refine = 0;
+    n_refine = 0; // out-param, see the signature (was a local before adapt() was split)
 
     // Loop over all elements and mark them according to the error criterion
     unsigned long Nelement = this->nelement();
@@ -430,7 +427,7 @@ namespace oomph
     // all brothers want to be unrefined.
     // Loop over all elements again and let the first set of sons check if their
     // brothers also want to be unrefined
-    unsigned n_unrefine = 0;
+    n_unrefine = 0; // out-param, see the signature (was a local before adapt() was split)
     for (unsigned long e = 0; e < Nelement; e++)
     {
       //(Cast) pointer to the element
@@ -481,8 +478,26 @@ namespace oomph
     oomph_info << " \n Number of elements to be merged : " << n_unrefine
                << std::endl
                << std::endl;
+  }
 
-
+  //========================================================================
+  /// The other half of adapt(): act on the flags that
+  /// select_elements_for_refinement_and_unrefinement() has already set.
+  //========================================================================
+  //FOR PYOOMPH: the acting half of the original adapt(); see the note above.
+  void TreeBasedRefineableMeshBase::execute_selected_adaptation(unsigned n_refine,
+                                                                unsigned n_unrefine)
+  {
+    // Setup doc info
+    DocInfo local_doc_info;
+    if (doc_info_pt() == 0)
+    {
+      local_doc_info.disable_doc();
+    }
+    else
+    {
+      local_doc_info = doc_info();
+    }
     // Now do the actual mesh adaptation
     //---------------------------------
 
@@ -822,6 +837,18 @@ namespace oomph
       Nunrefined = 0;
       Nrefined = 0;
     }
+  }
+
+  //========================================================================
+  /// Adapt mesh in response to a vector of elemental errors: select, then execute.
+  //========================================================================
+  void TreeBasedRefineableMeshBase::adapt(const Vector<double>& elemental_error)
+  {
+    unsigned n_refine = 0;
+    unsigned n_unrefine = 0;
+    select_elements_for_refinement_and_unrefinement(
+      elemental_error, n_refine, n_unrefine);
+    execute_selected_adaptation(n_refine, n_unrefine);
   }
 
   //========================================================================

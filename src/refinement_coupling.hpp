@@ -92,6 +92,20 @@ namespace pyoomph
     // Includes halo copies, deliberately: every rank must reach the same verdict about every element
     // it holds, or the halo layer drifts out of step with its owner.
     std::vector<std::pair<std::pair<unsigned, int>, std::vector<InterfacePosKey>>> local;
+    // Per facet, the pending adaptation decision of the element behind it, globally reduced:
+    // bit 0 = the element is flagged for refinement
+    // bit 1 = its father is flagged for unrefinement
+    // bit 2 = it COULD be refined (refinement enabled and not already at max_refinement_level)
+    // Only filled by collect_interface_side_with_flags; empty otherwise.
+    std::map<std::vector<InterfacePosKey>, int> flags;
+  };
+
+  // Bit meanings of InterfaceSideFacets::flags.
+  enum InterfaceFacetFlag
+  {
+    IFACET_TO_BE_REFINED = 1,
+    IFACET_SONS_TO_BE_UNREFINED = 2,
+    IFACET_CAN_REFINE = 4
   };
 
   // Gather one side. Silently yields an empty result if the mesh is null or carries no such boundary
@@ -103,6 +117,24 @@ namespace pyoomph
   // mode: 0 silent, 1 report to stdout, 2 throw. `when` labels the call site in the message.
   unsigned check_interface_conformity(const std::vector<CoupledInterfacePair> &pairs,
                                       const std::string &when, int mode);
+
+  // Reconcile the per-element refine/unrefine FLAGS across every coupled interface, in the gap between
+  // TemplatedMeshBase::select_for_adaptation and ::execute_adaptation -- after both meshes have decided
+  // and before either has acted. This is the exact step: it works on the decision itself rather than on
+  // the error that produced it, so it is not defeated by the case that defeats any error-level
+  // comparison (a father whose unrefinement is vetoed by a son that does not touch the interface).
+  //
+  // Two directions with opposite monotonicity, run in this order and each to a fixed point:
+  //   1. unrefinement -- DESELECT a father whose partner's father is not being unrefined. Only ever
+  //      deselects: an unrefinement cannot be manufactured, since it needs unanimity among sons we do
+  //      not control. Monotone downwards.
+  //   2. refinement -- SELECT an element whose partner is selected. Monotone upwards.
+  // They cannot oscillate against each other: selecting a refinement never creates a new unrefinement
+  // selection, and deselecting an unrefinement never creates a new refinement selection.
+  //
+  // Returns the number of flag changes made (globally summed).
+  unsigned harmonise_adapt_selection(const std::vector<CoupledInterfacePair> &pairs,
+                                     unsigned max_rounds = 40);
 
   // Restore conformity by refining the coarser side of every coupled interface, interleaved with each
   // mesh's own 2:1 balancing (which itself refines further, and can therefore break conformity again),
