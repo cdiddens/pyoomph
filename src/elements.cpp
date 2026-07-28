@@ -458,14 +458,47 @@ namespace pyoomph
 		return this->local_hang_eqn(n, v);
 	}
 
+	// Read a node's local position-hang equation number, failing loudly if the node was never registered.
+	//
+	// oomph's local_position_hang_eqn() looks the node up in Local_position_hang_eqn with
+	// std::map::operator[], which DEFAULT-CONSTRUCTS an empty DenseMatrix<int> when the node is absent.
+	// Indexing that empty matrix is undefined behaviour; in practice it yields a junk equation number, which
+	// surfaces much later and far from the cause as the generated code's "local_eqn < eleminfo->ndof"
+	// assertion (dev_docs/mixed_adaptive_meshes.md §4.14). Registration happens in oomph's
+	// assign_hanging_local_eqn_numbers, which walks only the GEOMETRIC hang of this element's OWN nodes, so
+	// a node reached by any other route -- notably the C1 position-constraint redistribution, whose corners
+	// may resolve onto coarse-side vertices of a 2:1 neighbour -- is legitimately absent, and that absence
+	// is the bug. Naming the node here turns an unattributable abort into a diagnosis.
+	// (The lookup itself inserts the empty entry as a side effect; harmless, since oomph clears the whole
+	// map at the start of every assign_all_generic_local_eqn_numbers.)
+	int BulkElementBase::position_hang_eqn_or_throw(oomph::Node *n, unsigned i, const std::string &context)
+	{
+		oomph::DenseMatrix<int> &pe = this->local_position_hang_eqn(n);
+		if (pe.nrow() == 0 || i >= pe.ncol())
+		{
+			std::ostringstream oss;
+			oss << "Position hang equation requested for a node that is not registered as a position-hang "
+				   "master of this element (" << context << ").\n"
+				   "Node at (";
+			for (unsigned d = 0; d < n->ndim(); d++) oss << (d ? ", " : "") << n->x(d);
+			oss << "), coordinate direction " << i << ".\n"
+				   "oomph-lib registers position-hang masters only from the GEOMETRIC hang of this element's "
+				   "own nodes, so this node was reached by some other route -- e.g. the C1 position-constraint "
+				   "redistribution resolving onto a coarse-side vertex across a 2:1 interface. Without the "
+				   "registration there is no local equation number for it, so the contribution cannot be "
+				   "assembled. See dev_docs/mixed_adapt_validation.md §11.";
+			throw_runtime_error(oss.str());
+		}
+		return pe(0, i);
+	}
+
 	int BulkElementBase::leaf_local_eqn_for_position(oomph::Node *n, unsigned i)
 	{
 		const unsigned nn = this->nnode();
 		for (unsigned l = 0; l < nn; l++)
 			if (node_pt(l) == n)
 				return eleminfo.pos_local_eqn[l][i]; // as populated in fill_element_info / used by the JIT code
-		oomph::DenseMatrix<int> pe = this->local_position_hang_eqn(n);
-		return pe(0, i);
+		return this->position_hang_eqn_or_throw(n, i, "flattening a hanging/constrained position");
 	}
 
 	// See the block comment on the declarations in elements.hpp. A value id addresses the continuous fields
@@ -1009,8 +1042,8 @@ namespace pyoomph
 						for (unsigned m = 0; m < h->nmaster(); m++)
 						{
 							hb.masters[m].weight = h->master_weight(m);
-							oomph::DenseMatrix<int> pe = this->local_position_hang_eqn(h->master_node_pt(m));
-							hb.masters[m].local_eqn = pe(0, f);
+							hb.masters[m].local_eqn = this->position_hang_eqn_or_throw(
+								h->master_node_pt(m), f, "geometric position hang master");
 						}
 					}
 					else

@@ -299,6 +299,10 @@ namespace pyoomph
     int leaf_local_eqn_for_value(oomph::Node *n, unsigned v);
     // As above but for the leaf's coordinate i (position dof).
     int leaf_local_eqn_for_position(oomph::Node *n, unsigned i);
+    // Read a node's local position-hang equation number, throwing a diagnostic naming the node if it was
+    // never registered as a position-hang master of this element (oomph's accessor would silently return an
+    // empty matrix and hence a junk index). See the implementation comment.
+    int position_hang_eqn_or_throw(oomph::Node *n, unsigned i, const std::string &context);
 
     // --- Cross-shape (mixed-mesh) hanging (topological, no geometry) ---
   public:
