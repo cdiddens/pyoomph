@@ -57,3 +57,14 @@ Included <initializer_list> for clang compilation on Mac
 
 
 
+
+refineable_mesh.h / refineable_mesh.cc (Changed on 28th July 2026):
+Split TreeBasedRefineableMeshBase::adapt(elemental_error) into its two existing halves --
+select_elements_for_refinement_and_unrefinement(), which only translates the elemental errors into
+per-element refine/unrefine flags, and execute_selected_adaptation(), which acts on them. adapt() is
+now the composition of the two and is unchanged in behaviour; no logic was altered, only moved (the
+two n_refine/n_unrefine locals became out-params, and the DocInfo setup moved to the executing half).
+pyoomph needs to interpose between deciding and acting: two meshes that share a coupled interface are
+adapted individually, and that gap is the only place their decisions can be reconciled exactly -- an
+unrefinement is vetoed per FATHER by unanimity among its sons, which no comparison of the errors at
+the interface can see. See pyoomph's dev_docs/interface_refinement_coupling.md.

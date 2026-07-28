@@ -423,6 +423,23 @@ namespace oomph
     /// and (try to) unrefine those whose error is smaller than err_min
     void adapt(const Vector<double>& elemental_error) override;
 
+    //FOR PYOOMPH: adapt() split into these two halves so a caller can interpose between
+    // deciding and acting. See src/thirdparty/INFO_oomph-lib.
+    /// The first half of adapt(): translate the elemental errors into per-element
+    /// refine/unrefine FLAGS, without acting on them. Split out so that a caller can
+    /// interpose between deciding and executing -- pyoomph uses the gap to make two
+    /// separately-adapted meshes that share an interface agree about which elements
+    /// they refine. adapt() is now the composition of this and the next, and is
+    /// unchanged in behaviour.
+    virtual void select_elements_for_refinement_and_unrefinement(
+      const Vector<double>& elemental_error,
+      unsigned& n_refine,
+      unsigned& n_unrefine);
+
+    /// The second half of adapt(): act on the flags already set by
+    /// select_elements_for_refinement_and_unrefinement().
+    virtual void execute_selected_adaptation(unsigned n_refine, unsigned n_unrefine);
+
     /// p-adapt mesh: Refine elements whose error is lager than err_max
     /// and (try to) unrefine those whose error is smaller than err_min
     void p_adapt(const Vector<double>& elemental_error) override;

@@ -233,6 +233,55 @@ namespace pyoomph
 		virtual void fill_node_map(std::map<oomph::Node *, unsigned> &nodemap);
 		virtual std::vector<oomph::Node *> fill_reversed_node_map(bool discontinuous = false);
 		virtual void enlarge_elemental_error_max_override_to_only_nodal_connected_elems(unsigned bind);
+
+		// --- Refinement directives -------------------------------------------------------------------
+		// The declarative refinement criteria (RefineToLevel, RefineMaxElementSize) evaluated in C++
+		// rather than by a Python loop over the elements.
+		//
+		// The point is not speed. These criteria are pure functions of an element's own level or size, so
+		// evaluating them here means they are evaluated for EVERY element this process holds, halo copies
+		// included -- and a halo copy therefore reaches the same verdict as the element it is a copy of,
+		// by construction, with nothing to synchronise afterwards. The Python versions ran over
+		// mesh.elements() and produced exactly the same values, but they did so as one more rank-local
+		// override that the halo exchange then had to repair.
+		//
+		// Registered once, when the equations are compiled; the override VALUES are recomputed on every
+		// adapt (they are reset each time), the directives themselves persist.
+		struct RefinementDirective
+		{
+			enum Kind
+			{
+				ToLevel,      // refine until refinement_level() >= level; level < 0 means "to the maximum"
+				MaxElementSize // refine while the element is larger than max_size
+			};
+			Kind kind;
+			int level;
+			double max_size;
+		};
+		void add_refinement_directive_to_level(int level)
+		{
+			RefinementDirective d;
+			d.kind = RefinementDirective::ToLevel;
+			d.level = level;
+			d.max_size = 0.0;
+			refinement_directives.push_back(d);
+		}
+		void add_refinement_directive_max_element_size(double s)
+		{
+			RefinementDirective d;
+			d.kind = RefinementDirective::MaxElementSize;
+			d.level = 0;
+			d.max_size = s;
+			refinement_directives.push_back(d);
+		}
+		void clear_refinement_directives() { refinement_directives.clear(); }
+		unsigned nrefinement_directives() const { return refinement_directives.size(); }
+		// Evaluate every registered directive over this mesh's elements, raising their
+		// elemental_error_max_override where the directive asks for refinement (or merely asks that an
+		// element not be unrefined away again). Only ever raises, so the order of the directives -- and
+		// of this call relative to the other override sources -- does not matter.
+		virtual void apply_refinement_directives();
+		std::vector<RefinementDirective> refinement_directives;
 		virtual unsigned get_nodal_dimension();
 		virtual int get_element_dimension();
 		// Discard the cached lagrangian_kdtree (e.g. because nodes moved); it will be rebuilt lazily on next use.
@@ -577,6 +626,26 @@ namespace pyoomph
 		// refinement) before handing them to the actual oomph-lib refinement/coarsening logic.
 		void adapt(const oomph::Vector<double> &elemental_error) override
 		{
+			adapt_select(elemental_error);
+			adapt_execute();
+			adapt_finalise();
+		}
+
+		// adapt() in three separately callable pieces. The point of the split is the gap between the
+		// first and the second: two meshes that share a coupled interface are adapted individually, and
+		// the only place their decisions can be reconciled EXACTLY is after both have decided and before
+		// either has acted. Reconciling the ERRORS beforehand cannot do it -- oomph unrefines a father
+		// only if all its sons agree, and a veto from a son that does not touch the interface is
+		// invisible to any interface-level comparison of errors
+		// (dev_docs/interface_refinement_coupling.md §6). Only the flags carry that information.
+		//
+		// Used in the split form only when there is something to reconcile; everything else keeps calling
+		// adapt(), which is these three back to back and behaves exactly as it did before the split.
+
+		// Decide, without acting: translate the errors (after the Python hook and the halo
+		// synchronisation) into per-element refine/unrefine flags.
+		void adapt_select(const oomph::Vector<double> &elemental_error)
+		{
 			if (!this->refinement_possible())
 			{
 				return; // No-op if the mesh type does not support refinement
@@ -597,32 +666,72 @@ namespace pyoomph
 			// equations override them per element (RefineToLevel, RefineMaxElementSize, interface-driven
 			// overrides, user hooks...). Those overrides are computed rank-locally, so a halo copy can
 			// end up with a different error than the element it is a copy of, and oomph-lib then refines
-			// the two inconsistently. Re-impose the owner's value on every halo element before adapting.
+			// the two inconsistently. Reduce over all copies before adapting.
 			this->synchronise_elemental_errors(updated_errors);
 			// Opt-in diagnostic, off by default. Checked AFTER the synchronisation above, not before:
 			// disagreeing overrides are expected there and are exactly what it just repaired, so what is
 			// worth reporting is any disagreement that SURVIVED the repair.
 			const int halochk = this->halo_consistency_check_mode();
 			if (halochk) check_halo_element_consistency(this, "after error synchronisation", &updated_errors, halochk > 1);
-			TreeBasedRefineableMeshBase::adapt(updated_errors);
+			pending_n_refine = 0;
+			pending_n_unrefine = 0;
+			this->select_elements_for_refinement_and_unrefinement(updated_errors, pending_n_refine, pending_n_unrefine);
+		}
+
+		// Act on the flags. Recounts them first: anything that reconciled the flags in the gap (see
+		// harmonise_adapt_selection) has invalidated the counts select produced, and those counts drive
+		// the collective "is this worth doing at all" gate inside execute_selected_adaptation -- a stale
+		// zero there would skip the adaptation entirely.
+		void adapt_execute()
+		{
+			if (!this->refinement_possible()) return;
+			this->recount_pending_adaptation();
+			this->execute_selected_adaptation(pending_n_refine, pending_n_unrefine);
+			pending_n_refine = 0;
+			pending_n_unrefine = 0;
+			const int halochk = this->halo_consistency_check_mode();
 			if (halochk) check_halo_element_consistency(this, "after refinement", NULL, halochk > 1);
+		}
+
+		// Everything that has to happen after the elements have actually been split/merged. Deferred to
+		// its own call because the 2:1 balancing below refines FURTHER elements of its own accord, some
+		// of them at a coupled interface -- so on a coupled problem it has to converge jointly with the
+		// cross-mesh conformity repair, not before it.
+		void adapt_finalise()
+		{
+			if (!this->refinement_possible()) return;
 			// Enforce 2:1 refinement balancing where the shape needs it (tetrahedra, whose geometric
 			// hang scheme has no tree-level balancing): refine any element that is >1 level coarser
 			// than a neighbour, iterating to a fixed point, so all hanging is single-level. No-op for
 			// meshes handled by oomph-lib's own tree (quad/hex) or that tolerate multi-level hangs.
 			this->enforce_refinement_balance();
-			if (halochk) check_halo_element_consistency(this, "after 2:1 balancing", NULL, halochk > 1);
 			// After refinement, install any shape-specific hanging nodes that oomph-lib's per-element
 			// setup did not (triangles/tets use a geometric hang scheme rather than the box coordinate
 			// descent). Runs before equation numbering, so the hangs are picked up by
 			// assign_(hanging_)local_eqn_numbers. No-op for quad/hex meshes.
 			this->post_adapt_setup_hanging_nodes();
+			const int halochk = this->halo_consistency_check_mode();
+			if (halochk) check_halo_element_consistency(this, "after 2:1 balancing", NULL, halochk > 1);
 		}
 
-		// Copy each haloed element's error estimate onto the corresponding halo element on every other
-		// process, so all processes agree on which elements are to be refined/unrefined. oomph-lib's own
-		// Z2 estimator does this for the values it computes, but pyoomph's per-element error overrides
-		// are applied afterwards and rank-locally, which would otherwise reintroduce the disagreement.
+		// Recompute the pending refine/unrefine counts from the flags as they stand now. oomph's adapt()
+		// counts them as it sets them, which is fine as long as nothing touches the flags in between --
+		// exactly what the split above allows.
+		void recount_pending_adaptation();
+
+	private:
+		// Carried from adapt_select() to adapt_execute(). oomph's own adapt() keeps these on the stack;
+		// the split needs them to survive the gap.
+		unsigned pending_n_refine = 0, pending_n_unrefine = 0;
+
+	public:
+
+		// Make every process agree on the error of each shared element, by MAX-reducing over all copies
+		// (halo -> owner -> halo again) rather than by letting the owner's value win. oomph-lib's own Z2
+		// estimator synchronises the values IT computes, but pyoomph's per-element error overrides are
+		// applied afterwards and rank-locally, which would otherwise reintroduce the disagreement -- and
+		// an override is not always computed on the rank that owns the element it applies to (see the
+		// implementation). A max is the right reduction: the quantity is an upper-bound override.
 		// No-op in serial or on a non-distributed mesh.
 		void synchronise_elemental_errors(oomph::Vector<double> &errs);
 
