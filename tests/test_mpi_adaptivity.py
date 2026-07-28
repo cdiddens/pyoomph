@@ -105,7 +105,10 @@ def _mpi_reason():
 
 
 _SKIP_REASON = _mpi_reason()
-pytestmark = pytest.mark.skipif(_SKIP_REASON is not None, reason=str(_SKIP_REASON))
+# Skipped when MPI is unavailable, and -- because each test launches mpirun and re-solves every case
+# serially for its reference -- also held back from the fast run (see conftest.py).
+pytestmark = [pytest.mark.skipif(_SKIP_REASON is not None, reason=str(_SKIP_REASON)),
+              pytest.mark.slow]
 
 
 def _run_distributed(cases, nproc, tmpdir, cases_module="box_cases", timeout=900):

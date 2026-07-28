@@ -55,6 +55,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import box_cases_3d
 from box_mesh_3d import ALL_LAYOUTS, MIXED_LAYOUTS, PURE_LAYOUTS
 
+# The full 11-layout x 3-state x 8-equation sweep is ~3.5 min: a pre-merge check, not a per-edit one.
+pytestmark = pytest.mark.slow
+
 _KINDS = ALL_LAYOUTS
 _LEVELS = box_cases_3d.LEVELS
 

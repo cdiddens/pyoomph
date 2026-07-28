@@ -8,6 +8,19 @@ You must have installed `pytest` via
 
 > python -m pip install pytest
 
+## Fast run vs. full run
+
+The command above is the **fast** run (~6 min): it skips the tests marked `slow`, which are the ones that
+sweep a large matrix or launch `mpirun` — the 3D adaptive-mesh campaign and both MPI modules. It still
+covers everything else end to end, including the 2D adaptive-mesh campaign.
+
+Before merging a branch, run **everything** (~11 min):
+
+> python -m pytest *.py --full
+
+or, where passing a flag is awkward (CI), set `PYOOMPH_FULL_TESTS=1`. Nothing is permanently excluded —
+`--full` runs the entire suite, and the skipped tests are reported as skipped rather than silently dropped.
+
 ## The adaptive-mesh campaign
 
 `test_adaptive_2d_campaign.py` and `test_adaptive_3d_campaign.py` exercise the physics that adaptive

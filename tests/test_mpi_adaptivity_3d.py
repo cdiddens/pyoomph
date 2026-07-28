@@ -45,9 +45,20 @@ import box_cases_3d
 from box_mesh_3d import ALL_LAYOUTS
 from test_mpi_adaptivity import _check, _SKIP_REASON  # the harness, shared with the 2D module
 
-pytestmark = pytest.mark.skipif(_SKIP_REASON is not None, reason=str(_SKIP_REASON))
+pytestmark = [pytest.mark.skipif(_SKIP_REASON is not None, reason=str(_SKIP_REASON)),
+              pytest.mark.slow]
 
 _MULTISPACE_OK = ["hex", "tet"]  # families whose C1 hang slot survives non-uniform refinement
+
+# The SERIAL campaign (test_adaptive_3d_campaign.py) already sweeps all 11 layouts exhaustively. The job of
+# the distributed campaign is narrower -- to show that PARTITIONING does not break what serial already
+# proved -- so most of its matrices use a representative subset instead of all 11: every pure family, plus
+# "all_four", which puts bricks, tets, wedges, pyramids AND the brick-to-tet transition cells in one mesh
+# and therefore carries every legal interface kind at once. Running the remaining six mixtures adds
+# permutations of interfaces already covered here, at roughly six minutes.
+# "neumann" is the exception and keeps all 11: boundary-facet propagation under refinement is the most
+# shape-dependent thing in the campaign, so it is worth the full sweep.
+_REPRESENTATIVE = ["hex", "tet", "wedge", "pyr", "all_four"]
 
 # DISTRIBUTED-ONLY defect: on the pure-tet layout at the two-level non-uniform state, get_elemental_errors()
 # throws an OomphException on SOME ranks but not others during the initial adaption
@@ -65,7 +76,8 @@ def test_distributed_3d_single_space_all_families(eq, tmp_path):
     # Single-space problems on EVERY family combination at the two-level non-uniform state: the case that
     # exercises distributed 2:1 hanging across brick/tet/wedge/pyramid interfaces, including the
     # brick-to-tet transition cells.
-    kinds = [k for k in ALL_LAYOUTS if not (eq == "neumann" and k in _MPI_NONUNIFORM_BROKEN)]
+    kinds = ALL_LAYOUTS if eq == "neumann" else _REPRESENTATIVE
+    kinds = [k for k in kinds if not (eq == "neumann" and k in _MPI_NONUNIFORM_BROKEN)]
     _check([(k, eq, (1, 2)) for k in kinds], 2, tmp_path, mod=box_cases_3d)
 
 
@@ -74,8 +86,7 @@ def test_distributed_3d_multispace_uniform_all_families(eq, tmp_path):
     # Two coexisting continuous spaces (a C1 field on C2 geometry) on every family combination, at uniform
     # refinement -- where all families work serially. Distributing this exercises the C1 field's own hang
     # slot across partition boundaries.
-    cases = [(kind, eq, (1, 1)) for kind in ALL_LAYOUTS]
-    _check(cases, 2, tmp_path, mod=box_cases_3d)
+    _check([(k, eq, (1, 1)) for k in _REPRESENTATIVE], 2, tmp_path, mod=box_cases_3d)
 
 
 @pytest.mark.parametrize("eq", ["mixed12", "constrain12", "unconstrain12", "stokes_th", "ale"])

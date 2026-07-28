@@ -681,3 +681,28 @@ other matrices, so the rest of the 3D distributed coverage stays meaningful.
 Four defects found, **two fixed** (§9.2 the neighbour self-test guard, §9.5 the C1-constraint vertex
 guard), two characterised and tracked (§9.4 defect A, §9.8 defect C). All remaining failing configurations
 are `xfail(strict=True)`, never skipped or dropped.
+
+
+---
+
+## 10. Running the suite
+
+The campaign made the full suite substantially larger, so `tests/conftest.py` splits it:
+
+| | command | contents | time |
+|---|---|---|---|
+| fast (default) | `python -m pytest *.py` | everything except the `slow` mark | ~6 min |
+| full | `python -m pytest *.py --full` | everything | ~11 min |
+
+`slow` marks the tests that sweep a large matrix or launch `mpirun`: the 3D campaign and both MPI modules.
+The 2D campaign deliberately stays in the fast run — it is the branch's core physics and only costs a
+couple of minutes. `PYOOMPH_FULL_TESTS=1` is equivalent to `--full` for CI. Nothing is permanently
+excluded, and skipped tests are reported as skipped rather than silently dropped.
+
+The 3D **MPI** matrices were also trimmed from all 11 layouts to a representative five — every pure family
+plus `all_four`, which carries bricks, tets, wedges, pyramids *and* the brick-to-tet transition cells in
+one mesh and therefore exercises every legal interface kind at once. `neumann` keeps the full 11, since
+boundary-facet propagation under refinement is the most shape-dependent part of the campaign. The serial
+3D campaign continues to sweep all 11 exhaustively, so nothing is uncovered; the distributed campaign only
+has to show that partitioning does not break what serial already proved. Full-run time fell from 16 to 11
+minutes with identical pass/xfail counts.
