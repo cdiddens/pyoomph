@@ -27,12 +27,8 @@
 # worker takes a --cases module, and both box_cases (2D) and box_cases_3d expose the same
 # solve_case()/case_id() interface -- so this module only has to choose the case matrix.
 #
-# The matrix is restricted to the configurations that work SERIALLY: it is not informative to run a
-# distributed test of something that is already broken in serial. Concretely, the multi-space cases
-# (coupled C2+C1, Taylor-Hood Stokes, ALE) are run under non-uniform refinement only on bricks and tets,
-# and on every layout only at uniform refinement -- see the header of test_adaptive_3d_campaign.py and
-# dev_docs/mixed_adapt_validation.md §9 for why. The single-space cases (Poisson, Neumann) run on all 11
-# layouts at the full two-level non-uniform state.
+# Everything the serial campaign covers now passes, so the matrix here is restricted only for COST (see
+# _REPRESENTATIVE below) and for the one remaining distributed-only defect (_MPI_NONUNIFORM_BROKEN).
 
 import os
 import sys
@@ -47,8 +43,6 @@ from test_mpi_adaptivity import _check, _SKIP_REASON  # the harness, shared with
 
 pytestmark = [pytest.mark.skipif(_SKIP_REASON is not None, reason=str(_SKIP_REASON)),
               pytest.mark.slow]
-
-_MULTISPACE_OK = ["hex", "tet"]  # families whose C1 hang slot survives non-uniform refinement
 
 # The SERIAL campaign (test_adaptive_3d_campaign.py) already sweeps all 11 layouts exhaustively. The job of
 # the distributed campaign is narrower -- to show that PARTITIONING does not break what serial already
@@ -83,16 +77,16 @@ def test_distributed_3d_single_space_all_families(eq, tmp_path):
 
 @pytest.mark.parametrize("eq", ["mixed12", "constrain12", "unconstrain12", "stokes_th", "ale"])
 def test_distributed_3d_multispace_uniform_all_families(eq, tmp_path):
-    # Two coexisting continuous spaces (a C1 field on C2 geometry) on every family combination, at uniform
-    # refinement -- where all families work serially. Distributing this exercises the C1 field's own hang
-    # slot across partition boundaries.
+    # Two coexisting continuous spaces (a C1 field on C2 geometry) at uniform refinement. Distributing this
+    # exercises the C1 field's own hang slot across partition boundaries.
     _check([(k, eq, (1, 1)) for k in _REPRESENTATIVE], 2, tmp_path, mod=box_cases_3d)
 
 
 @pytest.mark.parametrize("eq", ["mixed12", "constrain12", "unconstrain12", "stokes_th", "ale"])
 def test_distributed_3d_multispace_nonuniform(eq, tmp_path):
-    # The same, at the two-level NON-uniform state, on the families where that works serially.
-    kinds = [k for k in _MULTISPACE_OK if k not in _MPI_NONUNIFORM_BROKEN]
+    # The same at the two-level NON-uniform state -- distributed 2:1 hanging with two coexisting continuous
+    # spaces, which is the combination that needed the wedge/pyramid per-value interpolation hooks.
+    kinds = [k for k in _REPRESENTATIVE if k not in _MPI_NONUNIFORM_BROKEN]
     _check([(k, eq, (1, 2)) for k in kinds], 2, tmp_path, mod=box_cases_3d)
 
 

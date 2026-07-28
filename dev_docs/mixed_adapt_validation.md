@@ -560,7 +560,7 @@ Full suite green afterwards (285 passed).
 * Cost is comfortable: the whole 3D matrix is base 2×2×2 with level 1 + a level-2 band, i.e. 1–6 k
   elements, 1–3 s and ~300 MB per case.
 
-### 9.4 Defect A — two continuous spaces × non-uniform refinement on wedge/pyramid/mixed
+### 9.4 Defect A — two continuous spaces × non-uniform refinement on wedge/pyramid/mixed — **[FIXED]**
 
 Coupled C2+C1 Poisson, Taylor–Hood Stokes and ALE all **fail under non-uniform refinement on wedges,
 pyramids and every mixed layout**, while passing on bricks and tets and passing on *all* families under
@@ -575,6 +575,46 @@ installed for bricks (oomph's own `RefineableQElement::setup_hang_for_value`) an
 engine document, which validated tet Taylor-Hood/Crouzeix-Raviart), but **not** for the wedge / pyramid /
 registry families — whose validation (§4.15) only ever used single-space Poisson, C1 *or* C2, never both at
 once. So this is a genuine gap in the wedge/pyramid work rather than a regression.
+
+**Fix — three separate bugs, found in this order.**
+
+1. **The wedge and pyramid C2 elements never overrode the per-value interpolation hooks.** oomph-lib's
+   defaults are isoparametric — `ninterpolating_node()` returns `nnode()` and `interpolating_basis()`
+   returns `shape()` — so a C1 field's hanging constraint was built from the **quadratic geometric basis
+   over all 18 (wedge) / 14 (pyramid) nodes** instead of the linear basis over the corner vertices. The
+   brick and the 2D quad/tri C2 elements each hand-roll these overrides; `BulkElementBase` now provides
+   them shape-agnostically (`interpolation_value_is_C1`, `generic_ninterpolating_node`,
+   `generic_interpolating_node_pt`, `generic_interpolating_basis`,
+   `generic_get_interpolating_node_at_local_coordinate`) and the wedge and pyramid C2 elements use them.
+   The stale comment on their `further_setup_hanging_nodes` — *"there can't be any problem here, since it
+   is all isoparametric"* — was precisely the wrong assumption.
+
+   The same helpers also went onto **`BulkElementTetra3dC2`**, which overrode `interpolating_basis` *alone*.
+   That left `ninterpolating_node()` at 10 while the C1 basis writes only 4 entries, so callers read six
+   **uninitialised** doubles (`oomph::Shape` allocates with `new double[N]`, which does not zero). It
+   happened to work because a `TElement` numbers its vertices first, so the garbage was usually rejected by
+   the `|psi| > 1e-12` master test — luck, not correctness.
+
+2. **The pyramid's C1-corner table was wrong for the base centre.** `Dummy_Value_Interpolation_Map` listed
+   node 13 (the base quad centre) as `{13, 0, 2}` — the mean of *one diagonal* — where the bilinear base
+   requires all four corners. Fixed to `{13, 0, 1, 2, 3}`.
+
+3. **The wedge's C1-corner table had two entries swapped.** Bottom-layer edge mids 3, 4, 5 were listed over
+   corner pairs (0,1), (1,2), (0,2), but node 4 sits at the 0–2 midpoint and node 5 at the 1–2 midpoint —
+   the top layer (15, 16, 17 over (12,13), (12,14), (13,14)) already had the right pattern.
+
+Bugs 2 and 3 were found by the **Green identity** `∫v = ∫u²`, which reads ~0 for an exact C1 restriction:
+it showed 0.29 on pyramids and 0.089 on wedges *even on a non-adaptive mesh*, where no hanging is involved,
+which is what separated "the constraint is wrong" from "the hanging is wrong". Both tables were then
+verified against the actual nodal positions — on an affine element the geometry and a C1 field interpolate
+identically, so each listed corner set must average to its target node's position. That check found bug 3
+after two rounds of reading the table had missed it.
+
+**Result.** All five multi-space equation systems — coupled C2+C1 Poisson, both `ConstrainFieldsToC1Space`
+variants, Taylor–Hood Stokes and ALE — now pass on **all 11 layouts at all three refinement states**,
+serially and distributed. The Green identity holds to ~1e-14 on every family, so it is now asserted for all
+of them rather than only for bricks and tets. The 3D campaign has **no xfails left**: 232 passed, 0
+xfailed.
 
 ### 9.5 Defect B — `ConstrainFieldsToC1Space` × non-uniform 3D refinement — **[FIXED]**
 
@@ -636,12 +676,12 @@ the moment one starts passing — which is the signal to delete the marker. 38 o
 
 ### 9.7 Next
 
-~~Defect B is the smaller and higher-value fix~~ — **done**, see §9.5. What is left is **defect A**:
-installing the per-value-index C1 hang for the wedge/pyramid/registry families, mirroring what the tet
-route already does. It is the single remaining blocker for the 3D halves of tasks 2/3, 4 and 5 on
-non-uniformly refined wedge/pyramid/mixed meshes — one fix would clear all four at once, since they all
-fail for the same reason. **Defect C** (§9.8) is separate and distributed-only. Neither blocks Phase D
-(`ConstrainPositionsToC1Space`, §4), which is independent.
+~~Defect B~~ — **done**, §9.5. ~~Defect A~~ — **done**, §9.4; it cleared the 3D halves of tasks 2/3, 4 and
+5 in one go, as expected, since they all failed for the same reason. What remains is **defect C** (§9.8),
+which is distributed-only and narrow, and **Phase D** (`ConstrainPositionsToC1Space`, §4), which is
+independent of all of it. Note that Phase D should also revisit the `POSITION_CONSTRAIN_TO_C1` guard left
+deliberately strict in §9.5, and that the position analogue of the C1-corner tables fixed in §9.4 is worth
+re-checking at the same time -- `pin_position` uses the same `c1_constraint_corners` redistribution.
 
 ### 9.8 Defect C — distributed 3D pure-tet, non-uniform: asymmetric throw → deadlock
 
@@ -673,14 +713,12 @@ other matrices, so the rest of the 3D distributed coverage stays meaningful.
 |---|---|---|
 | C1/C2 Poisson, **Neumann** — all 11 layouts, incl. two-level non-uniform | pass | pass (except pure-tet Neumann, §9.8) |
 | coupled C2+C1, Taylor–Hood Stokes, ALE — all 11 layouts, uniform | pass | pass |
-| coupled C2+C1, Taylor–Hood Stokes, ALE — non-uniform, brick/tet | pass | pass (hex; pure-tet §9.8) |
-| coupled C2+C1, Taylor–Hood Stokes, ALE — non-uniform, wedge/pyramid/mixed | **defect A** | not reached |
-| `ConstrainFieldsToC1Space` — non-uniform, brick/tet | pass (**defect B fixed**) | pass |
-| `ConstrainFieldsToC1Space` — non-uniform, wedge/pyramid/mixed | **defect A** | not reached |
+| coupled C2+C1, Taylor–Hood Stokes, ALE, `ConstrainFieldsToC1Space` — all 11 layouts, non-uniform | pass (**defects A + B fixed**) | pass (except pure tet, §9.8) |
 
-Four defects found, **two fixed** (§9.2 the neighbour self-test guard, §9.5 the C1-constraint vertex
-guard), two characterised and tracked (§9.4 defect A, §9.8 defect C). All remaining failing configurations
-are `xfail(strict=True)`, never skipped or dropped.
+Six defects found, **five fixed**: the neighbour self-test guard (§9.2), the C1-constraint vertex guard
+(§9.5), and the three behind defect A (§9.4 — the missing per-value interpolation hooks, the pyramid base
+centre, the swapped wedge edge mids). Only **defect C** (§9.8, distributed pure-tet) remains, tracked as a
+single `xfail(strict=True)`.
 
 
 ---

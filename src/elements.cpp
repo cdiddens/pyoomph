@@ -468,6 +468,56 @@ namespace pyoomph
 		return pe(0, i);
 	}
 
+	// See the block comment on the declarations in elements.hpp. A value id addresses the continuous fields
+	// in space order -- C2 and C2TB first, then C1 -- so anything at or beyond the end of the C2 block is a
+	// C1 field and must be interpolated with the linear basis on the corner vertices.
+	bool BulkElementBase::interpolation_value_is_C1(const int &value_id) const
+	{
+		if (value_id < 0) return false; // geometry/position: always the geometric basis
+		const JITFuncSpec_Table_FiniteElement_t *ft = codeinst->get_func_table();
+		return value_id >= static_cast<int>(ft->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk +
+											ft->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk);
+	}
+
+	unsigned BulkElementBase::generic_ninterpolating_node(const int &value_id)
+	{
+		if (!this->interpolation_value_is_C1(value_id)) return this->nnode();
+		return static_cast<unsigned>(this->get_nodal_space_index_to_element_index_map()[SPACE_INDEX_C1].size());
+	}
+
+	oomph::Node *BulkElementBase::generic_interpolating_node_pt(const unsigned &n, const int &value_id)
+	{
+		if (!this->interpolation_value_is_C1(value_id)) return this->node_pt(n);
+		return this->node_pt(this->get_nodal_space_index_to_element_index_map()[SPACE_INDEX_C1][n]);
+	}
+
+	void BulkElementBase::generic_interpolating_basis(const oomph::Vector<double> &s, oomph::Shape &psi, const int &value_id) const
+	{
+		if (!this->interpolation_value_is_C1(value_id))
+			this->shape(s, psi);
+		else
+			this->shape_at_s_C1(s, psi);
+	}
+
+	oomph::Node *BulkElementBase::generic_get_interpolating_node_at_local_coordinate(const oomph::Vector<double> &s, const int &value_id)
+	{
+		if (!this->interpolation_value_is_C1(value_id)) return this->get_node_at_local_coordinate(s);
+		// Shape-agnostic: a C1 node sits at a vertex, so just compare local coordinates. This avoids
+		// per-shape index arithmetic (which for a pyramid or a wedge is not a tensor product at all).
+		const std::vector<unsigned> &c1 = this->get_nodal_space_index_to_element_index_map()[SPACE_INDEX_C1];
+		const unsigned nd = this->dim();
+		oomph::Vector<double> sl(nd);
+		for (unsigned k = 0; k < c1.size(); k++)
+		{
+			this->local_coordinate_of_node(c1[k], sl);
+			bool same = true;
+			for (unsigned d = 0; d < nd && same; d++)
+				same = (std::abs(sl[d] - s[d]) < 1e-10);
+			if (same) return this->node_pt(c1[k]);
+		}
+		return 0;
+	}
+
 	bool BulkElementBase::mixed_hang_node_at(oomph::Node *X, oomph::RefineableElement *nb_re, const oomph::Vector<double> &s_nb, const int &value_id)
 	{
 		if (!X || !nb_re) return false;
@@ -13995,7 +14045,13 @@ namespace pyoomph
 		{}, // C2TB 
 		{}, // C2
 		{}, // C1TB
-		{{3,0,1},{4,1,2},{5,0,2},{15,12,13},{16,12,14},{17,13,14},{6,0,12},{7,1,13},{8,2,14},{9,0,1,12,13},{10,0,2,12,14},{11,1,2,13,14}}  // C1
+		// Bottom-layer edge mids are nodes 3,4,5 over corner pairs (0,1),(0,2),(1,2) -- the same pattern the
+		// top layer (15,16,17 over (12,13),(12,14),(13,14)) already used. Entries 4 and 5 used to have their
+		// pairs exchanged, so a C1-constrained field on a wedge was tied to the wrong two corners: node 4
+		// sits at the 0-2 midpoint and node 5 at the 1-2 midpoint, not the other way round. Verified against
+		// the actual nodal positions -- for an affine wedge the geometry and a C1 field interpolate
+		// identically, so each listed corner set must average to the target node's position.
+		{{3,0,1},{4,0,2},{5,1,2},{15,12,13},{16,12,14},{17,13,14},{6,0,12},{7,1,13},{8,2,14},{9,0,1,12,13},{10,0,2,12,14},{11,1,2,13,14}}  // C1
 	};
 
 	const std::vector<std::vector<unsigned>> BulkElementPyramid3dC1::Nodal_Space_Index_To_Element_Index_Map={
@@ -14017,7 +14073,12 @@ namespace pyoomph
 		{}, // C2TB 
 		{}, // C2
 		{}, // C1TB
-		{{5,0,1},{6,1,2},{7,2,3},{8,0,3},{9,0,4},{10,1,4},{11,2,4},{12,3,4},{13,0,2}}  // C1		
+		// Node 13 is the BASE QUAD CENTRE, so its C1 value is the average of all FOUR base corners -- the
+		// pyramid's base interpolation is bilinear. It used to be listed as {13,0,2}, i.e. the mean of one
+		// diagonal, which is only equal to the bilinear centre when v0+v2 == v1+v3 and therefore degraded
+		// a C1-constrained field to something that is not the element's C1 space at all (visible as the
+		// Green identity int(v)==int(u^2) failing by ~30% even on a NON-adaptive pyramid mesh).
+		{{5,0,1},{6,1,2},{7,2,3},{8,0,3},{9,0,4},{10,1,4},{11,2,4},{12,3,4},{13,0,1,2,3}}  // C1
 	};
 
 	const std::vector<std::vector<unsigned>> BulkElementODE0d::Nodal_Space_Index_To_Element_Index_Map={

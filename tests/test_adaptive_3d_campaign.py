@@ -31,19 +31,12 @@
 #
 #   * Single-space problems -- C1 Poisson, C2 Poisson, and the whole Neumann campaign -- pass on ALL 11
 #     layouts at all three refinement states, including two-level non-uniform 2:1 hanging.
-#   * Multi-space problems -- coupled C2+C1 Poisson, Taylor-Hood Stokes, ALE -- pass on all 11 layouts when
-#     the mesh is non-adaptive or UNIFORMLY refined, and pass under NON-UNIFORM refinement on bricks and
-#     tetrahedra, but FAIL under non-uniform refinement on wedges, pyramids and every mixed layout. A C1
-#     field on a C2-geometry mesh needs its own hang slot; that per-value-index hang is installed for
-#     bricks and tets but not for the wedge/pyramid/registry families.
-#     The two ConstrainFieldsToC1Space variants behave exactly like the other multi-space cases: they used
-#     to fail on every family, including bricks, because of a separate defect in the constraint's own
-#     vertex-node guard (src/elements.cpp) -- that is fixed, and what remains is the same family
-#     restriction as above.
+#   * Multi-space problems -- coupled C2+C1 Poisson, ConstrainFieldsToC1Space, Taylor-Hood Stokes, ALE --
+#     likewise pass on all 11 layouts at all three refinement states. Getting there took three fixes
+#     (dev_docs/mixed_adapt_validation.md 9.4/9.5): the per-value interpolation hooks for the wedge and
+#     pyramid C2 elements, the C1-constraint vertex-node guard, and two wrong C1-corner tables.
 #
-# The failing configurations are marked xfail(strict=True) rather than skipped or dropped, so they stay
-# visible, cannot silently rot, and will fail the suite the moment they start working (which is the signal
-# to delete the marker).
+# Everything in this module is expected to pass; there are no known-broken configurations left here.
 
 import sys
 import os
@@ -67,23 +60,6 @@ _RES_TOL_DEFAULT = 1e-9
 # cases is 4.5e-13 (wedge ALE), so 1e-10 keeps headroom while staying far below an inconsistent Jacobian.
 _NEWTON_REDUCTION = 1e-10
 
-# The families whose C1 hang slot is installed correctly under non-uniform refinement (see the header).
-# The two ConstrainFieldsToC1Space variants belong here as well: they also carry a live C1 field alongside
-# the C2 one, so once the separate defect in the constraint's own vertex-node guard was fixed they inherited
-# exactly the same family restriction as the other multi-space cases.
-_MULTISPACE_OK = {"hex", "tet"}
-_MULTISPACE_EQS = {"mixed12", "constrain12", "unconstrain12", "stokes_th", "ale"}
-
-
-def _expected_broken(eq, kind, levels):
-    """Reason string if this configuration is a known failure, else None."""
-    non_uniform = levels[0] != levels[1]
-    if eq in _MULTISPACE_EQS and non_uniform and kind not in _MULTISPACE_OK:
-        return ("two coexisting continuous spaces (C1 field on C2 geometry) under non-uniform refinement: "
-                "the separate C1 hang slot is not installed for the wedge/pyramid/registry families")
-    return None
-
-
 def _solve(kind, eq, levels, tmp_path):
     cid = box_cases_3d.case_id(kind, eq, levels)
     return box_cases_3d.solve_case(kind, eq, levels, outdir=str(tmp_path / cid))
@@ -103,10 +79,7 @@ def _assert_linear_solve(res, eq, cid):
         "that means the analytic Jacobian does not match the residual" % (cid, reduction, conv[0], conv[1])
 
 
-def _run(eq, kind, levels, tmp_path, request):
-    reason = _expected_broken(eq, kind, levels)
-    if reason is not None:
-        request.node.add_marker(pytest.mark.xfail(strict=True, reason=reason))
+def _run(eq, kind, levels, tmp_path):
     cid = box_cases_3d.case_id(kind, eq, levels)
     _assert_linear_solve(_solve(kind, eq, levels, tmp_path), eq, cid)
 
@@ -114,43 +87,40 @@ def _run(eq, kind, levels, tmp_path, request):
 @pytest.mark.parametrize("kind", _KINDS)
 @pytest.mark.parametrize("levels", _LEVELS)
 @pytest.mark.parametrize("eq", ["poisson1", "poisson2"])
-def test_poisson_baselines(eq, kind, levels, tmp_path, request):
+def test_poisson_baselines(eq, kind, levels, tmp_path):
     # Single-space baselines. These are the configurations the wedge/pyramid work was validated against,
     # so they must hold on every layout at every refinement state.
-    _run(eq, kind, levels, tmp_path, request)
+    _run(eq, kind, levels, tmp_path)
 
 
 @pytest.mark.parametrize("kind", _KINDS)
 @pytest.mark.parametrize("levels", _LEVELS)
-def test_neumann_bcs(kind, levels, tmp_path, request):
+def test_neumann_bcs(kind, levels, tmp_path):
     # Neumann fluxes over face elements of every shape: a constant flux on an unrefined wall ("right") and
     # a spatially varying one on the refined wall ("top"), so the flux is integrated over sub-facets of
     # hanging-node parents of bricks, tets, wedges and pyramids alike. Passes throughout.
-    _run("neumann", kind, levels, tmp_path, request)
+    _run("neumann", kind, levels, tmp_path)
 
 
 @pytest.mark.parametrize("kind", _KINDS)
 @pytest.mark.parametrize("levels", _LEVELS)
-def test_mixed_c1c2_poisson(kind, levels, tmp_path, request):
+def test_mixed_c1c2_poisson(kind, levels, tmp_path):
     # u on C2 driving v on C1: two continuous spaces on one mesh, so the C1 field needs its own hang slot.
-    _run("mixed12", kind, levels, tmp_path, request)
+    _run("mixed12", kind, levels, tmp_path)
 
 
 @pytest.mark.parametrize("kind", _KINDS)
 @pytest.mark.parametrize("levels", _LEVELS)
-def test_stokes_box_bulkforce(kind, levels, tmp_path, request):
+def test_stokes_box_bulkforce(kind, levels, tmp_path):
     # Taylor-Hood Stokes driven by f = (-y, x, 0), i.e. a rotation about z: C2 velocity + C1 pressure.
-    _run("stokes_th", kind, levels, tmp_path, request)
+    _run("stokes_th", kind, levels, tmp_path)
 
 
 @pytest.mark.parametrize("kind", _KINDS)
 @pytest.mark.parametrize("levels", _LEVELS)
-def test_ale_moving_mesh(kind, levels, tmp_path, request):
+def test_ale_moving_mesh(kind, levels, tmp_path):
     # ALE: Stokes on a Laplace-smoothed mesh with a free top surface and a prescribed evaporation outflow,
     # so the nodal POSITIONS are unknowns too.
-    reason = _expected_broken("ale", kind, levels)
-    if reason is not None:
-        request.node.add_marker(pytest.mark.xfail(strict=True, reason=reason))
     cid = box_cases_3d.case_id(kind, "ale", levels)
     res = _solve(kind, "ale", levels, tmp_path)
     _assert_linear_solve(res, "ale", cid)
@@ -162,16 +132,13 @@ def test_ale_moving_mesh(kind, levels, tmp_path, request):
 
 @pytest.mark.parametrize("kind", _KINDS)
 @pytest.mark.parametrize("levels", _LEVELS)
-def test_constrain_field_to_c1_space(kind, levels, tmp_path, request):
+def test_constrain_field_to_c1_space(kind, levels, tmp_path):
     # ConstrainFieldsToC1Space / UnconstrainFieldsFromC1Space on a C2 field coupled to a live C1 field.
     # Oracles as in 2D: it converges in one Newton step, it removes dofs, and unconstraining "top" puts
     # some back. The exact Green identity int(v)==int(u^2) is asserted only for bricks and tets: it needs u
     # and v to see the SAME discrete bilinear form, which fails for pyramids (whose geometric map is
     # rational, so the two fields' stiffness integrals are not identical even when the constraint is exact)
     # and for the mixed layouts containing them.
-    reason = _expected_broken("constrain12", kind, levels)
-    if reason is not None:
-        request.node.add_marker(pytest.mark.xfail(strict=True, reason=reason))
     base = _solve(kind, "mixed12", levels, tmp_path)
     constrained = _solve(kind, "constrain12", levels, tmp_path)
     unconstrained = _solve(kind, "unconstrain12", levels, tmp_path)
@@ -182,12 +149,12 @@ def test_constrain_field_to_c1_space(kind, levels, tmp_path, request):
         "expected ndof(constrained) < ndof(unconstrained on top) < ndof(baseline), got %d / %d / %d" % (
             constrained["ndof"], unconstrained["ndof"], base["ndof"])
 
-    if kind in ("hex", "tet"):
-        scale = abs(constrained["obs_intu2"])
-        assert abs(constrained["obs_intv"] - constrained["obs_intu2"]) < 1e-10 * scale, \
-            "Green identity int(v)==int(u^2) broken under the C1 constraint: %.16g vs %.16g" % (
-                constrained["obs_intv"], constrained["obs_intu2"])
-        assert abs(base["obs_intv"] - base["obs_intu2"]) > 1e-6 * abs(base["obs_intu2"])
+    scale = abs(constrained["obs_intu2"])
+    assert abs(constrained["obs_intv"] - constrained["obs_intu2"]) < 1e-10 * scale, \
+        "Green identity int(v)==int(u^2) broken under the C1 constraint: %.16g vs %.16g" % (
+            constrained["obs_intv"], constrained["obs_intu2"])
+    # ... and it is a real discriminator, not a triviality: without the constraint it does NOT hold.
+    assert abs(base["obs_intv"] - base["obs_intu2"]) > 1e-6 * abs(base["obs_intu2"])
 
 
 def test_stokes_agrees_across_families(tmp_path):

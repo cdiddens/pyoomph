@@ -66,6 +66,21 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
   `set_current_dofs()` wrote out of bounds in the same way. All now gather/scatter
   properly, so under MPI every rank sees the same full-length vector. (The Jacobian
   returned by `_assemble_residual_jacobian` remains process-local CSR, as before.)
+- **Mixed-order spaces on 3D wedges/pyramids/tets**: a C1 field living on a C2-geometry
+  element was interpolated with the *geometric* (quadratic, all-nodes) basis instead of
+  the linear basis over the corner vertices, because the wedge and pyramid C2 elements
+  never overrode oomph-lib's isoparametric `ninterpolating_node`/`interpolating_basis`
+  defaults. Any Taylor-Hood, coupled C2+C1 or ALE problem on a non-uniformly refined
+  wedge/pyramid/mixed 3D mesh therefore got an inconsistent Jacobian and Newton failed
+  to converge. `BulkElementBase` now provides these hooks shape-agnostically, and the
+  wedge, pyramid and tetrahedral C2 elements use them. The tet previously overrode
+  `interpolating_basis` alone, which left callers reading uninitialised entries of the
+  `Shape` array.
+- **C1-space constraints on 3D wedges/pyramids**: two wrong entries in the C1-corner
+  tables meant `ConstrainFieldsToC1Space` degraded a field to something that was not
+  the element's C1 space at all, even without adaptivity. The pyramid's base-quad
+  centre was expanded over one diagonal instead of all four base corners, and two of
+  the wedge's bottom-layer edge midpoints were tied to the wrong corner pairs.
 - **3D adaptivity**: `ConstrainFieldsToC1Space` aborted with "Cannot enforce a
   degration to C1 on a C1 vertex node" on any 3D mesh carrying a 2:1 (non-uniformly
   refined) interface, plain bricks included. A constrained node is legitimately a C1
