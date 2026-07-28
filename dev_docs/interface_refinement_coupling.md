@@ -1,0 +1,443 @@
+# Conforming refinement across coupled domain interfaces
+
+Status: **plan only, nothing implemented**. Written 2026-07-28 on branch `mixed_adapt`, after the
+mixed-adaptive-mesh validation campaign (`mixed_adapt_validation.md`) closed.
+
+---
+
+## 1. The problem
+
+Two bulk domains built from the same `MeshTemplate` — say `domainA` and `domainB` — can share a
+geometric interface. Their nodes at that interface are *distinct objects*: continuity is imposed
+weakly, by Lagrange multipliers (`ConnectFieldsAtInterface`) or by position constraints
+(`ConnectMeshAtInterface`). The two sides are wired together by an *opposite-interface connection*
+declared on the template, which at runtime pairs up the interface elements of `domainA/if` with
+those of `domainB/if`.
+
+That pairing is exact and one-to-one. `InterfaceMesh::connect_interface_elements_by_kdtree`
+([src/mesh.cpp:4884](src/mesh.cpp#L4884)) indexes every vertex position of side B in a KD-tree, then
+looks up side A's vertices and demands an element of B whose vertex-index *set* matches exactly:
+
+```
+if (!nodes_to_elemB.count(indices)) { throw_runtime_error("Cannot locate opposite element"); }
+```
+
+Refinement breaks this. oomph-lib adapts meshes **individually** — `Problem._adapt_with_interfacial_errors`
+loops `for name, errors in errs.items(): mesh.adapt_by_elemental_errors(errors)`
+([pyoomph/generic/problem.py:1814-1822](pyoomph/generic/problem.py#L1814-L1822)) — and nothing makes
+the two sides arrive at the same decision. As soon as one side refines a facet the other does not,
+the vertex sets no longer correspond and the run dies in the matcher, or (worse, in the cases where
+the matcher happens to still find *a* partner) silently couples the wrong elements.
+
+### What exists today
+
+Two partial mitigations, both in Python, both insufficient:
+
+1. **`InterfaceMesh._override_bulk_errors_where_necessary`**
+   ([pyoomph/meshes/mesh.py:1432](pyoomph/meshes/mesh.py#L1432)) pushes an interface element's error
+   onto the adjacent bulk element and, when an opposite side is present, onto the opposite bulk
+   element too, via the `get_opposite_bulk_element()` pointer.
+
+2. **The block at [pyoomph/generic/problem.py:1753-1783](pyoomph/generic/problem.py#L1753-L1783)**,
+   comment `# Ensure same refinement at connected interfaces`. One pass, no iteration: for each
+   interface element, if my bulk element is above `min_permitted_error` and the opposite one is not,
+   bump the opposite one to `0.5*(min+max)` and vice versa.
+
+Thirty lines later the file still says
+`# TODO: Ensure same refinement at connected interfaces` ([:1787](pyoomph/generic/problem.py#L1787)) —
+the author's own verdict on how far that got.
+
+It gets *refinement* roughly right and *unrefinement* wrong, does not iterate (so an A–B–C chain is
+not closed), does not survive MPI (`get_opposite_bulk_element()` may return an element this rank does
+not own, or nothing at all), and does not account for the extra refinement that
+`enforce_refinement_balance` performs **after** `adapt()` on simplex-family meshes
+([src/mesh3d.cpp:251](src/mesh3d.cpp#L251)).
+
+The practical status is visible in the tutorials. [docs/source/tutorial/multidom/simple_fsi.py:46-48](docs/source/tutorial/multidom/simple_fsi.py#L46-L48):
+
+```python
+leqs += SpatialErrorEstimator(velocity=1)
+leqs += RefineToLevel()@"liquid_solid"
+seqs += RefineToLevel()@"liquid_solid"
+```
+
+The interface is forced to maximum refinement on *both* sides so that the two sides cannot disagree.
+That is the user-visible cost of the missing feature: you cannot have an adaptive coupled interface,
+only a uniformly-maximally-refined one. Removing those two lines is the acceptance test for this work.
+
+---
+
+## 2. The invariant to enforce
+
+> **Interface conformity.** For every declared opposite-interface connection
+> (`meshA`, boundary `bA`) ↔ (`meshB`, boundary `bB`) with offset vector `t`: the set of boundary
+> facets of `meshA` on `bA`, translated by `t`, equals the set of boundary facets of `meshB` on `bB`,
+> facet for facet.
+
+This is precisely the precondition of `connect_interface_elements_by_kdtree`, stated on the bulk
+meshes rather than on the interface meshes. Three things follow, and they matter:
+
+- **It is a statement about facets, not about refinement levels.** Two domains may carry different
+  `_initial_uniform_refinement_level`, so equal `refinement_level()` is neither necessary nor
+  sufficient. Facet identity is the thing the matcher actually needs.
+- **It is checkable and repairable without any interface element existing.** Boundary facets come
+  from `nboundary_element(bind)` + `Face_index_at_boundary`, which `Mesh::generate_interface_elements`
+  itself uses ([src/mesh.cpp:903-916](src/mesh.cpp#L903-L916)) and which `adapt` keeps current via
+  `setup_boundary_element_info`. **This is the answer to "interface elements are removed during
+  adaptation": the new machinery never looks at an interface mesh at all.**
+- **It implies matching hanging-node patterns along the interface.** A node on an interface facet
+  hangs because a *neighbouring interface facet* is finer; conformity forces that neighbour to be
+  equally fine on both sides, so the hang pattern within the interface surface agrees. (Claim to be
+  validated by test, §9, not assumed.)
+
+---
+
+## 3. Architecture
+
+One new C++ component, `src/refinement_coupling.{hpp,cpp}`:
+
+```cpp
+struct CoupledInterface {
+  Mesh *meshA, *meshB;
+  unsigned bindA, bindB;         // boundary indices, resolved lazily (a side may be absent)
+  std::vector<double> offset;    // A + offset == B, for periodic/translated pairs
+  bool enforce;                  // "auto" => on iff a connection was declared
+};
+
+class InterfaceRefinementCoupler {          // owned by pyoomph::Problem
+  std::vector<CoupledInterface> pairs;
+  // -- the primitive everything else is built on --
+  FacetTable collect(Mesh*, unsigned bind, const std::vector<double>& off) const;
+  void       exchange(FacetTable&) const;   // MPI Allgatherv, no-op in serial
+  // -- the three users --
+  unsigned harmonise_error_overrides();     // §6, pre-adapt
+  unsigned harmonise_adapt_selection();     // §7, between selection and execution
+  unsigned repair_after_adapt();            // §8, the guarantee
+  unsigned check(bool throw_on_mismatch);   // §10, diagnostic
+};
+```
+
+Registration mirrors `MeshTemplateOppositeInterfaceConnection._connect_elements`
+([pyoomph/meshes/mesh.py:441-460](pyoomph/meshes/mesh.py#L441-L460)) but keys on **(bulk mesh,
+boundary index)**, which are permanent, instead of on interface mesh objects, which are destroyed and
+rebuilt on every adapt. It is refreshed in `actions_after_adapt` alongside `_connect_opposite_elements`.
+
+### The facet key
+
+`FacetRec` per boundary facet:
+
+| field | meaning |
+|---|---|
+| `key` | quantised facet centroid, `llround(x*1e8)` per component, offset applied |
+| `elem` | local element index (may be a halo copy) |
+| `face` | face index at boundary |
+| `level` | `refinement_level()` of the owning bulk element |
+| `err` | current merged error / error override |
+| `flags` | `to_be_refined`, `father_sons_to_be_unrefined`, `at_max_level`, `is_halo` |
+
+Quantisation scale `1e8` matches both `enforce_refinement_balance`
+([src/mesh3d.cpp:262](src/mesh3d.cpp#L262)) and the KD-tree's `epsilon = 1e-8`
+([src/kdtree.hpp:57-58](src/kdtree.hpp#L57-L58)), so a pair the coupler considers matched is exactly a
+pair the matcher will later find. Eulerian coordinates, deliberately: the existing matcher already
+runs on Eulerian coordinates after every adapt and copes with moving meshes, so there is no evidence
+a Lagrangian key is needed. If ALE tolerance ever bites, §11 has the fallback.
+
+A shape-neutral "vertices of face *f* of element *e*" accessor is needed. The per-element face
+boundary-tag machinery (`setup_boundary_element_info_from_face_tags`) already enumerates faces
+generically for every family; the accessor should be factored out of it rather than written afresh.
+
+---
+
+## 4. Where this plugs into the adapt cycle
+
+Today (Python-driven):
+
+```
+custom_adapt.__enter__  ->  actions_before_adapt: every interface mesh clear_before_adapt()
+   ...for each bulk mesh: adapt_by_elemental_errors(errors)
+        TemplatedMeshBase::adapt:  update_elemental_errors (py hook)
+                                   synchronise_elemental_errors      (MPI)
+                                   TreeBasedRefineableMeshBase::adapt = select + adapt_mesh
+                                   enforce_refinement_balance        (simplex families)
+                                   post_adapt_setup_hanging_nodes
+custom_adapt.__exit__   ->  actions_after_adapt: rebuild_after_adapt, _connect_opposite_elements <-- throws here
+```
+
+Proposed (C++-driven, one `Problem::adapt_all_meshes()`):
+
+```
+ A  compute error overrides                        (§5, moved to C++)
+ B  harmonise overrides across coupled interfaces  (§6, new, iterated)
+ C  per mesh: SELECT elements for refine/unrefine  (§7, split out of oomph's adapt)
+ D  harmonise the SELECTION across interfaces      (§7, new, iterated)   <-- the exact step
+ E  per mesh: EXECUTE  (adapt_mesh)
+ F  fixed point { per mesh: one 2:1 balance round ; per pair: one conformity repair round }  (§8)
+ G  per mesh: post_adapt_setup_hanging_nodes
+ H  check conformity                               (§10)
+```
+
+The important structural change is that **G must move out of `TemplatedMeshBase::adapt` and run after
+F**, and that F is a *joint* fixed point over all meshes rather than a per-mesh loop. `adapt()` keeps
+working as a standalone entry point for the single-mesh case by calling the same pieces.
+
+---
+
+## 5. Moving the error overrides into C++
+
+Prerequisite for §6, and requested independently. The state already lives in C++:
+`BulkElementBase::elemental_error_max_override` ([src/elements.hpp:925](src/elements.hpp#L925)),
+`max_permitted_error()` / `min_permitted_error()` / `max_refinement_level()` on the oomph base. Only
+the *orchestration* and the *criteria* are in Python.
+
+**Criteria → C++ directives.** Register a small list of directives per domain, evaluated in C++ over
+every element (halo copies included, so they are consistent by construction and need no
+synchronisation at all):
+
+| Python API (unchanged) | becomes |
+|---|---|
+| `RefineToLevel(level)` ([generic.py:257](pyoomph/equations/generic.py#L257)) | `RefineToLevelDirective` |
+| `RefineMaxElementSize(s)` ([generic.py:303](pyoomph/equations/generic.py#L303)) | `RefineMaxElementSizeDirective` |
+| `RefineAccordingToElement(f)` ([generic.py:326](pyoomph/equations/generic.py#L326)) | stays Python — it *is* a callback |
+| user `calculate_error_overrides` | stays Python, called via a virtual hook |
+
+The Python classes keep their public signatures; `calculate_error_overrides` becomes a thin
+registration call in `after_compilation`.
+
+**Orchestration → `Problem::compute_elemental_error_overrides()`**, a C++ port of
+[problem.py:1668-1751](pyoomph/generic/problem.py#L1668-L1751):
+
+1. reset overrides on all meshes, all tree depths;
+2. seed from the Z2 estimate per mesh;
+3. eigen-error contribution — **stays in Python for now** (it swaps eigenvectors into the dof
+   vector and back; porting it is a separate job with its own risks);
+4. deepest-tree-depth-first, apply directives + the Python hook;
+5. deepest-first, `override_bulk_errors_where_necessary()` — C++ port of
+   [mesh.py:1432-1494](pyoomph/meshes/mesh.py#L1432-L1494), including
+   `enlarge_elemental_error_max_override_to_only_nodal_connected_elems`, which is already C++
+   ([src/mesh.cpp:536](src/mesh.cpp#L536));
+6. cross-domain harmonisation (§6);
+7. synchronise across MPI copies.
+
+### A required change in step 7
+
+`TemplatedMeshBase::synchronise_elemental_errors` ([src/mesh.hpp:625](src/mesh.hpp#L625)) currently
+does **owner wins**: each haloed element's value is copied onto its halo counterparts. That was right
+for the defect it was written for, and it is wrong here.
+
+Step 5 computes an override *from* an interface element and writes it *to* the bulk element on the
+**opposite domain**. The two domains are partitioned independently, so the rank holding the interface
+element frequently does not own the opposite bulk element — it holds a halo copy, retained by the
+`set_must_be_kept_as_halo` marking in `actions_before_distribute`
+([problem.py:3194-3199](pyoomph/generic/problem.py#L3194-L3199)). Owner-wins would then throw the
+override away, on every rank, silently.
+
+Change it to a **max-reduce over all copies**: halo → haloed, max at the owner, haloed → halo. This is
+semantically exact (the field is called `..._max_override`; the operation is a max), it is a strict
+superset of the current behaviour for the §9.8 defect it was written for (the rank with the larger
+override still wins), and it is idempotent.
+
+---
+
+## 6. Pre-adapt harmonisation of the overrides (step B)
+
+Cheap, approximate, and *not* where correctness comes from. Its job is to stop the two sides from
+disagreeing in the first place, so that §8 has nothing to repair.
+
+Per coupled pair, per shared facet key:
+
+- `refineA := errA > maxerrA && levelA < maxlevelA`. If `refineA != refineB`, raise the other side's
+  error to `100 * maxerr`; if that side cannot refine (at max level), instead *lower* the first side
+  to `0.5*(min+max)` — "hold, do not refine" — and count it as an overruled refinement.
+- `keepA := errA >= minerrA` (not eligible for unrefinement). If `keepA && !keepB`, raise `errB` to
+  `0.5*(min+max)_B`.
+
+Iterate to a global fixed point (`MPI_Allreduce` on a change counter). Only ever *raises* errors, so
+it terminates.
+
+### Why this cannot be the whole answer
+
+Take a 3D brick refined into 8 sons, 4 of which touch the interface. oomph unrefines a father only if
+**all** of its sons want it ([refineable_mesh.cc:432-461](src/thirdparty/oomph-lib/include/refineable_mesh.cc#L432-L461)).
+Suppose on side A one of the four *interior* sons vetoes, and on side B none does. The four
+interface-touching sons agree on both sides, so no facet-level harmonisation sees anything wrong —
+and yet A keeps its 8 sons while B merges its 8 into one. Conformity broken, by a veto that never
+appears on the interface.
+
+Error-space harmonisation at facet granularity is therefore structurally incapable of guaranteeing
+the invariant. Two consequences: §8 is mandatory, and §7 is worth the effort.
+
+---
+
+## 7. Harmonising the *decision* instead of the error (steps C/D)
+
+oomph's `TreeBasedRefineableMeshBase::adapt(errors)`
+([refineable_mesh.cc:307](src/thirdparty/oomph-lib/include/refineable_mesh.cc#L307)) is two phases in
+one function: ~150 lines that translate errors into per-element flags, then a call to the public
+`adapt_mesh(doc_info)` ([refineable_mesh.h:513](src/thirdparty/oomph-lib/include/refineable_mesh.h#L513))
+that executes them. The selection phase touches only public API — `select_for_refinement`,
+`deselect_for_refinement`, `select_sons_for_unrefinement`, `deselect_sons_for_unrefinement`,
+`refinement_is_enabled`, `refinement_level`, `tree_pt`.
+
+**Split it.** Patch the vendored oomph to factor the selection out into a virtual
+`select_elements_for_refinement_and_unrefinement(errors)`, leaving `adapt()` as the two-line
+composition. Minimal, behaviour-preserving, upstreamable — and much better than copying 150 lines of
+vendored logic into pyoomph, where it would silently drift the next time oomph is refreshed.
+
+Then insert step D between them and harmonise the *flags*, which is exact:
+
+- **Unrefinement, first, to a fixed point.** A's element unrefines iff its father has
+  `sons_to_be_unrefined()`. If A's father is selected and B's partner's father is not, **deselect A's
+  father**. Only ever deselects — we cannot manufacture an unrefinement, since that needs unanimity
+  among sons we do not control. Monotone downward, terminates.
+- **Refinement, second, to a fixed point.** If A's element is selected and B's partner is not, select
+  B's — unless B cannot refine, in which case deselect A's and record the overrule. Monotone upward,
+  terminates.
+
+The order matters and there is no oscillation between the two: selecting a refinement never creates a
+new unrefinement selection, and deselecting an unrefinement never creates a new refinement selection.
+
+The fixed point must be global — chains A–B–C need more than one round — with `MPI_Allreduce` on the
+change count so every rank runs the same number of rounds and enters the collectives inside
+`adapt_mesh` together. Exactly the failure mode fixed in `enforce_refinement_balance`
+([src/mesh3d.cpp:325-340](src/mesh3d.cpp#L325-L340)); the same discipline applies here.
+
+Also replicate oomph's `total_n_refine`/`total_n_unrefine` Allreduce gate before calling `adapt_mesh`
+([refineable_mesh.cc:497-545](src/thirdparty/oomph-lib/include/refineable_mesh.cc#L497-L545)) — after
+harmonisation, not before, since harmonisation changes the counts.
+
+Note the vendored `son_type() == OcTreeNames::LDB` "first son in charge" assumption
+([refineable_mesh.cc:446](src/thirdparty/oomph-lib/include/refineable_mesh.cc#L446)) — check it holds
+for pyoomph's `DynamicTree` sons on wedges and pyramids before relying on the unrefinement flags.
+
+---
+
+## 8. The post-adapt repair loop (step F) — where the guarantee comes from
+
+Even with §7 exact, execution is not the end: `enforce_refinement_balance` runs *after* `adapt_mesh`
+and refines further elements to restore 2:1 balance on simplex-family meshes. Some of those are at
+the interface, and their partners were not refined. So balancing and conformity have to be solved in
+**one** fixed point, not in sequence:
+
+```
+repeat
+    changed = 0
+    for each mesh:  changed += one round of enforce_refinement_balance
+    for each pair:  changed += one round of conform_by_refining_the_coarse_side
+    MPI_Allreduce(changed, MAX)
+until changed == 0
+```
+
+`conform_by_refining_the_coarse_side`: collect and exchange both sides' facet tables; a facet present
+on A but subdivided on B (its key absent from B while keys strictly inside it are present) selects
+A's owning element for refinement. Selection is unioned globally by centroid key and re-resolved
+locally, so halo copies are refined too — the pattern already proven in
+[src/mesh3d.cpp:325-364](src/mesh3d.cpp#L325-L364).
+
+Refinement only, never unrefinement, so it terminates: levels are bounded by `max_refinement_level()`.
+
+This loop subsumes today's per-mesh `enforce_refinement_balance` call inside `adapt`.
+`post_adapt_setup_hanging_nodes` moves after it.
+
+**Repairing is lossy, which is why §6 and §7 exist.** If A unrefines a patch that B keeps, the repair
+re-refines A — and the son values are re-interpolated from the merged father. The fine-scale
+information is gone. A correct-but-churning implementation would also make adapt non-idempotent and
+could oscillate across successive adapts. §7 prevents the round trip; §8 catches whatever §7 could not
+foresee.
+
+---
+
+## 9. Level caps and unsatisfiable couplings
+
+If `meshA.max_refinement_level < meshB.max_refinement_level`, B can reach a fineness A cannot match
+and the repair loop cannot converge. Detect at registration and resolve explicitly:
+
+- clamp the effective max level **on both sides** to the minimum of the two, and say so once; or
+- honour a per-connection `max_refinement_level` override.
+
+Silently spinning in the repair loop is the one outcome to rule out — bound the loop and throw with
+the offending facet positions if it is hit. Likewise, detect at registration when the two sides'
+level-0 facets are not in bijection at all (a triangular face against a quadrilateral one) and throw
+there, where the message can be useful, rather than in the KD-tree matcher.
+
+---
+
+## 10. Diagnostics
+
+Extend the pattern that caught §9.8. `InterfaceRefinementCoupler::check()` compares the two facet
+tables and reports non-matching facets by position, count, and level, on both sides.
+
+- `Problem.check_interface_conformity(throw_on_mismatch=False)` — collective, callable from Python.
+- Fold into the existing `PYOOMPH_CHECK_HALO_CONSISTENCY` env var rather than adding a second one:
+  the two checks answer the same question ("do the pieces that must agree still agree?") and users
+  should not have to know which to set. Same `0 / 1=warn / 2=throw` levels, same
+  `MPI_Allreduce`-the-verdict discipline so throwing mode fails the whole job instead of one rank
+  while the others block ([src/mesh.cpp](src/mesh.cpp), `check_halo_element_consistency`).
+- Run the check unconditionally under `--full` / `PYOOMPH_FULL_TESTS`.
+
+---
+
+## 11. Known risks
+
+| risk | mitigation |
+|---|---|
+| Eulerian keys drift under ALE, since `ConnectMeshAtInterface` only equates positions to solver tolerance | The existing matcher already runs on Eulerian coordinates post-adapt and copes. Fallback: key on Lagrangian coordinates (`InterfaceMesh` already maintains a Lagrangian KD-tree — note `invalidate_lagrangian_kdtree`), or on a topological key (level-0 facet id + son path), which is exact and motion-invariant but needs facet-descendant tracking. |
+| Lagrange multipliers on *hanging* interface nodes — `pin_redundant_lagrange_multipliers` ([generic.py:144-154](pyoomph/equations/generic.py#L144-L154)) has never been exercised with a hanging interface | Dedicated test (§12 case f). This may turn out to be the hard part, independent of everything above. |
+| Global `Allgatherv` of all interface facets is O(N_interface) per rank | Fine at current scale. Optimisation: build a persistent facet-key → owning-rank routing table at setup, refresh on adapt, exchange point-to-point. |
+| Duplicating vendored oomph selection logic drifts on the next oomph refresh | Patch oomph to split `adapt()`; do not copy (§7). |
+| `_internal_facets_` / DG | Already rejected: `"TODO: Adaption with internal facets"` ([problem.py:1761](pyoomph/generic/problem.py#L1761)) and `"Cannot adapt yet when having discontinuous fields added at an interface"` ([src/mesh.cpp:4843](src/mesh.cpp#L4843)). Out of scope; keep the throws. |
+| Remeshing invalidates the correspondence | Geometric keys need no rebuild — one more reason to prefer them over topological keys for v1. |
+| The eigen-error path (`_adapt_eigenindex`) stays in Python and writes overrides after the C++ pass | Order it before step B; assert in C++ that nothing writes overrides after harmonisation. |
+
+---
+
+## 12. Test plan
+
+New helper `tests/two_domain_cases.py`, alongside `box_cases.py` / `box_cases_3d.py` and shared with
+the MPI harness exactly as those are — that sharing is what kept the serial and distributed campaigns
+from drifting apart, and the same applies here.
+
+Two boxes sharing a face, every element family, 2D and 3D, serial and `mpirun --distribute`:
+
+a. error estimator active in one domain only
+b. `RefineToLevel` on one side only
+c. `RefineMaxElementSize` on one side only
+d. criterion stated **on the interface** rather than on the bulk — the case that broke §9.8, and the
+   one where a halo-holding rank has no interface element to read
+e. refine, then let the solution smooth so one side wants to unrefine and the other does not
+   (the §6 counterexample, built deliberately)
+f. `ConnectMeshAtInterface` + moving mesh, with a hanging node on the interface
+g. a chain A–B–C, to prove the fixed point closes
+h. differing `max_refinement_level` per domain (§9)
+i. differing `_initial_uniform_refinement_level` per domain
+
+Assertions after **every** adapt, not only at the end: facet sets equal per pair; the KD-tree matcher
+does not throw; under MPI the gathered residual, global `ndof` and MPI-reduced observables match the
+serial reference.
+
+**Negative-test every fix**: disable the coupler by env var, rebuild, confirm each test actually
+fails. A test that passes with the fix disabled is measuring nothing — §9.8's first `callback` test
+was exactly that.
+
+Regression: [simple_fsi.py](docs/source/tutorial/multidom/simple_fsi.py) with the
+`RefineToLevel()@"liquid_solid"` workaround **removed** must run and agree with the reference.
+
+Mark the new modules `campaign` so the wheel builds skip them (`tests/README.md`).
+
+---
+
+## 13. Staging
+
+Each stage is independently mergeable and leaves the tree working.
+
+| | | |
+|---|---|---|
+| **S0** | Diagnostics + failing tests. `check_interface_conformity`, env var, the §12 matrix as `xfail(strict=True)`. | Makes the bug visible and reproducible before anything moves. |
+| **S1** | Coupler registry, facet collection, MPI exchange primitive. No behaviour change — only the checker consumes it. | Lands the primitive under test. |
+| **S2** | Post-adapt repair loop (§8), merged with `enforce_refinement_balance` into one fixed point. | **The guarantee.** After this the xfails flip to passing; churn and data loss remain. |
+| **S3** | Error overrides to C++ (§5), including the max-reduce synchronisation change. | Pure refactor: the existing 581-test suite must be bit-identical. |
+| **S4** | Two-phase adapt (§7): patch oomph, split selection from execution, harmonise flags. | Removes the churn and the unrefine/re-refine data loss. |
+| **S5** | MPI hardening; fold conformity into the halo consistency check. | |
+| **S6** | Delete the Python heuristic ([problem.py:1753-1783](pyoomph/generic/problem.py#L1753-L1783)) and the tutorial workarounds; docs, CHANGELOG. | The feature is only done when the workarounds are gone. |
+
+S2 alone already fixes the user-visible crash. S3/S4 are quality: without them the interface coarsens
+by round trip rather than by decision.
