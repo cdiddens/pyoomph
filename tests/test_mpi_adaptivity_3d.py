@@ -27,8 +27,8 @@
 # worker takes a --cases module, and both box_cases (2D) and box_cases_3d expose the same
 # solve_case()/case_id() interface -- so this module only has to choose the case matrix.
 #
-# Everything the serial campaign covers now passes, so the matrix here is restricted only for COST (see
-# _REPRESENTATIVE below) and for the one remaining distributed-only defect (_MPI_NONUNIFORM_BROKEN).
+# Everything the serial campaign covers now passes distributed too, so the matrix here is restricted for
+# COST only (see _REPRESENTATIVE below).
 
 import os
 import sys
@@ -54,16 +54,6 @@ pytestmark = [pytest.mark.skipif(_SKIP_REASON is not None, reason=str(_SKIP_REAS
 # shape-dependent thing in the campaign, so it is worth the full sweep.
 _REPRESENTATIVE = ["hex", "tet", "wedge", "pyr", "all_four"]
 
-# DISTRIBUTED-ONLY defect: on the pure-tet layout at the two-level non-uniform state, get_elemental_errors()
-# throws an OomphException on SOME ranks but not others during the initial adaption
-# (Problem._adapt_with_interfacial_errors -> Mesh.get_elemental_errors). Because the throw is asymmetric,
-# the ranks that did not throw block forever in the next collective, so the symptom is a deadlock rather
-# than a clean error -- that is what the harness's bounded subprocess timeout turns into a failure. It is
-# equation-dependent (C1/C2 Poisson are fine on the same mesh; Neumann, Taylor-Hood and ALE are not) and it
-# does NOT occur serially, nor at uniform refinement, nor on the layouts that merely CONTAIN tets
-# (hex_tet, all_four, tet_wedge all pass). Pinned by test_distributed_3d_pure_tet_nonuniform_xfail below.
-_MPI_NONUNIFORM_BROKEN = {"tet"}
-
 
 @pytest.mark.parametrize("eq", ["poisson1", "poisson2", "neumann"])
 def test_distributed_3d_single_space_all_families(eq, tmp_path):
@@ -71,7 +61,6 @@ def test_distributed_3d_single_space_all_families(eq, tmp_path):
     # exercises distributed 2:1 hanging across brick/tet/wedge/pyramid interfaces, including the
     # brick-to-tet transition cells.
     kinds = ALL_LAYOUTS if eq == "neumann" else _REPRESENTATIVE
-    kinds = [k for k in kinds if not (eq == "neumann" and k in _MPI_NONUNIFORM_BROKEN)]
     _check([(k, eq, (1, 2)) for k in kinds], 2, tmp_path, mod=box_cases_3d)
 
 
@@ -86,8 +75,7 @@ def test_distributed_3d_multispace_uniform_all_families(eq, tmp_path):
 def test_distributed_3d_multispace_nonuniform(eq, tmp_path):
     # The same at the two-level NON-uniform state -- distributed 2:1 hanging with two coexisting continuous
     # spaces, which is the combination that needed the wedge/pyramid per-value interpolation hooks.
-    kinds = [k for k in _REPRESENTATIVE if k not in _MPI_NONUNIFORM_BROKEN]
-    _check([(k, eq, (1, 2)) for k in kinds], 2, tmp_path, mod=box_cases_3d)
+    _check([(k, eq, (1, 2)) for k in _REPRESENTATIVE], 2, tmp_path, mod=box_cases_3d)
 
 
 def test_distributed_3d_four_ranks(tmp_path):
@@ -100,11 +88,12 @@ def test_distributed_3d_four_ranks(tmp_path):
     _check(cases, 4, tmp_path, mod=box_cases_3d)
 
 
-@pytest.mark.xfail(strict=True, reason="asymmetric get_elemental_errors() throw on a distributed pure-tet "
-                                       "mesh under non-uniform refinement, which then deadlocks the other "
-                                       "ranks (see _MPI_NONUNIFORM_BROKEN above)")
-def test_distributed_3d_pure_tet_nonuniform_xfail(tmp_path):
-    # Pins the one distributed 3D configuration that is known broken, so it stays visible and the suite
-    # tells us when it is fixed. Kept to a single case and a short timeout: the failure mode is a hang, so
-    # this must not be allowed to stall a suite run.
+def test_distributed_3d_pure_tet_nonuniform(tmp_path):
+    # REGRESSION TEST. This configuration used to deadlock: pyoomph's per-element error overrides are
+    # applied rank-locally after oomph-lib's estimator has synchronised its own errors, so a halo element
+    # could be told "must refine" on its owner and "do not refine" on the rank holding the copy. The two
+    # ranks then refined different elements, leaving stale coarse elements in the halo layer, which grew
+    # into divergent hanging-node sets and divergent global equation numbering. Now fixed by
+    # TemplatedMeshBase::synchronise_elemental_errors(). Kept on a short timeout: the old failure mode was
+    # a hang, so a regression must not be allowed to stall a suite run.
     _check([("tet", "neumann", (1, 2))], 2, tmp_path, mod=box_cases_3d, timeout=240)

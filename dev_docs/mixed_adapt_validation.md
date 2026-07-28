@@ -677,13 +677,66 @@ the moment one starts passing — which is the signal to delete the marker. 38 o
 ### 9.7 Next
 
 ~~Defect B~~ — **done**, §9.5. ~~Defect A~~ — **done**, §9.4; it cleared the 3D halves of tasks 2/3, 4 and
-5 in one go, as expected, since they all failed for the same reason. What remains is **defect C** (§9.8),
-which is distributed-only and narrow, and **Phase D** (`ConstrainPositionsToC1Space`, §4), which is
+5 in one go, as expected, since they all failed for the same reason. ~~Defect C~~ — **done**, §9.8. What
+remains is **Phase D** (`ConstrainPositionsToC1Space`, §4), which is
 independent of all of it. Note that Phase D should also revisit the `POSITION_CONSTRAIN_TO_C1` guard left
 deliberately strict in §9.5, and that the position analogue of the C1-corner tables fixed in §9.4 is worth
 re-checking at the same time -- `pin_position` uses the same `c1_constraint_corners` redistribution.
 
-### 9.8 Defect C — distributed pure-tet, non-uniform — **[SHARPENED, NOT FIXED]**
+### 9.8 Defect C — distributed pure-tet, non-uniform — **[FIXED]**
+
+> **Resolution (read this first).** The refinement criteria disagreed between a halo element and the
+> element it is a copy of, so the two ranks refined different elements. oomph-lib's Z2 estimator carefully
+> synchronises the errors *it* computes from haloed to halo elements — but pyoomph then applies its own
+> per-element **error overrides** on top (`RefineToLevel`, `RefineMaxElementSize`,
+> `RefineAccordingToElement`, the interface-driven `_override_bulk_errors_where_necessary`, any user
+> `calculate_error_overrides`), and those run **rank-locally, after the synchronisation**. Fixed by
+> `TemplatedMeshBase::synchronise_elemental_errors()`, called from `TemplatedMeshBase::adapt()` on the
+> final error vector, just before handing it to oomph-lib. The subsections below are kept as the record of
+> how it was found, because most of the intermediate characterisations were wrong in instructive ways.
+
+#### 9.8.0 How it was finally caught
+
+Everything below §9.8.1 narrowed the symptom without reaching the cause. What closed it was giving up on
+reasoning about the mesh and instead **reproducing oomph-lib's own consistency check**, which turned out to
+already exist — and to be compiled out:
+
+`TreeBasedRefineableMeshBase::adapt()` contains, inside `#ifdef PARANOID`, an exchange that compares the
+refinement and unrefinement flags of every haloed element against its halo counterpart, and throws with:
+
+> *"This is most likely because the error estimator has not assigned the same errors to halo and haloed
+> elements -- it ought to!"*
+
+pyoomph builds with `PYOOMPH_PARANOID=OFF` by default, so this check never ran. A temporary diagnostic was
+added to `TemplatedMeshBase::adapt()` reproducing that exchange but comparing element **geometry and error
+values** as well as the flags — the extra geometry column is what made the output readable, because it
+distinguishes a real disagreement from the two lists simply having drifted out of alignment.
+
+On the failing case, before the very first adapt:
+
+```
+[HALOCHK before-adapt] r0 vs r1 idx 54 haloed(-0.3125,0.375,0.3125) lvl=1 err=0.1  ||  halo(...) lvl=1 err=0.00055
+[HALOCHK before-adapt] r0 vs r1 idx 55 haloed(-0.375,0.4375,0.3125) lvl=1 err=0.1  ||  halo(...) lvl=1 err=0.00055
+... (6 in total)
+[HALOCHK before-adapt] r0 vs r1: n=116 geom_mismatch=0 level_mismatch=0 error_mismatch=6
+```
+
+Six elements, **geometrically identical** on both ranks (`geom_mismatch=0`), same refinement level, but
+carrying different errors: `0.1` = `must_refine` (100 × `max_permitted_error`) on the owner, `0.00055` =
+`may_not_unrefine` (½(max+min)) on the halo copy. Rank 0 is told to refine them; rank 1 is told not to.
+
+**Six error mismatches, six phantom elements** — the count that §9.8.5 had measured independently. And
+after that first adapt the halo/haloed lists desynchronise wholesale (375 vs 333 entries, 258 geometry
+mismatches), because `Mesh::halo_element_pt()` / `haloed_element_pt()` build their vectors by walking the
+*leaves* of the same root elements' trees. Once the trees differ, every subsequent halo exchange — errors
+included — is silently misaligned, so the initial six-element disagreement amplifies rather than staying
+local. That is why the damage looked so much larger than its cause.
+
+After the fix, every stage reports `geom_mismatch=0 level_mismatch=0 refineflag_mismatch=0
+error_mismatch=0`, the lists stay aligned (375/375, 170/170), the phantom count on both ranks is **0**, and
+`ndof` is 1460 distributed — matching serial exactly.
+
+#### 9.8.1 Original characterisation (superseded)
 
 Found by the 3D MPI harness. On the **pure-tet** layout at the two-level non-uniform state under
 `--distribute`, the solve fails; serially the identical case is machine zero.
@@ -787,6 +840,10 @@ the equation numbering is a symptom, not a cause. **The fix belongs in the distr
 elements must be refined to match their owner before hanging is installed.** Nothing downstream of that can
 be right while a rank holds elements the global mesh does not contain.
 
+This conclusion was correct as far as it went, but it still pointed one layer too low: the halo elements
+were not "failing to be refined", they were *correctly* refined according to an error vector that was
+already wrong when it arrived. See §9.8.0.
+
 **Attempted: making the 2:1 balancing pass globally consistent — landed, but does NOT fix this.**
 `TemplatedMeshBase3d::enforce_refinement_balance()` was entirely rank-local: each process chose which of
 *its* elements to refine (a halo copy included) and, worse, decided when to stop from its own selection
@@ -797,27 +854,44 @@ inconsistency — but the six phantom elements survive it unchanged, so they are
 `TreeBasedRefineableMeshBase::adapt()` itself (oomph's own refinement of halo elements), *upstream* of the
 balancing pass. The next attempt should start there, not in pyoomph's balancing.
 
+(It is worth keeping this change: it is a real latent inconsistency, and it is *independent* of the actual
+defect-C cause. But it fixed nothing on its own, and was committed with that stated up front.)
+
 This also explains the family pattern. Every tet-*containing* mixed layout passes because its hanging comes
 from the position-based mesh-level pass, which asks "is there a node at this position on a coarser
 element's face lattice" — a stale coarse halo element contributes no node the finer elements do not already
 have, so it cannot manufacture a constraint. Only the pure-tet route, which reasons from tree neighbours,
 is fooled by it.
 
-Pinned by `test_distributed_3d_pure_tet_nonuniform_xfail` (strict, short timeout) and excluded from the
-other matrices, so the rest of the 3D distributed coverage stays meaningful.
+**Lessons worth keeping.**
+
+* The consistency check that would have found this on day one already existed upstream, behind a build flag
+  that is off. When a distributed run misbehaves, look for the vendored `PARANOID` checks *first* — and
+  consider whether some of them belong in a debug-only pyoomph path rather than a rebuild-the-world flag.
+* Comparing only what you suspect is wrong (flags, hanging sets, levels) tells you nothing when the two
+  lists being compared have themselves drifted out of correspondence. Carrying an independent identity
+  (here: the element centroid) in every diagnostic exchange is what turned unreadable output into a
+  one-line answer.
+* Four rounds chased the symptom *downstream* (value collapse → equation numbering → hang installation →
+  stale halo elements) and each was a layer too low. The error vector — the actual input to the whole
+  process — was the last thing checked and the first thing that was wrong.
+
+Now covered by `test_distributed_3d_pure_tet_nonuniform` as a regression test (short timeout retained: the
+old failure mode was a hang), and the pure-tet exclusions have been removed from the other 3D distributed
+matrices.
 
 ### 9.9 Phase C scoreboard
 
 | | serial | distributed (`-n 2`, `-n 4`) |
 |---|---|---|
-| C1/C2 Poisson, **Neumann** — all 11 layouts, incl. two-level non-uniform | pass | pass (except pure-tet Neumann, §9.8) |
+| C1/C2 Poisson, **Neumann** — all 11 layouts, incl. two-level non-uniform | pass | pass |
 | coupled C2+C1, Taylor–Hood Stokes, ALE — all 11 layouts, uniform | pass | pass |
-| coupled C2+C1, Taylor–Hood Stokes, ALE, `ConstrainFieldsToC1Space` — all 11 layouts, non-uniform | pass (**defects A + B fixed**) | pass (except pure tet, §9.8) |
+| coupled C2+C1, Taylor–Hood Stokes, ALE, `ConstrainFieldsToC1Space` — all 11 layouts, non-uniform | pass (**defects A + B fixed**) | pass (**defect C fixed**) |
 
-Six defects found, **five fixed**: the neighbour self-test guard (§9.2), the C1-constraint vertex guard
-(§9.5), and the three behind defect A (§9.4 — the missing per-value interpolation hooks, the pyramid base
-centre, the swapped wedge edge mids). Only **defect C** (§9.8, distributed pure-tet) remains, tracked as a
-single `xfail(strict=True)`.
+Six defects found, **all six fixed**: the neighbour self-test guard (§9.2), the C1-constraint vertex guard
+(§9.5), the three behind defect A (§9.4 — the missing per-value interpolation hooks, the pyramid base
+centre, the swapped wedge edge mids), and defect C (§9.8 — rank-local error overrides desynchronising
+halo from haloed refinement). No `xfail` remains in the campaign.
 
 
 ---

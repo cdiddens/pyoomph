@@ -102,6 +102,23 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
   that self-test on a forest for which no neighbour pointers are set at all, aborting
   with a bogus "Max. error in octree neighbour finding" (or running away into an
   out-of-memory). It now scans every tree, as the 2D equivalent already did.
+- **MPI**: adaptive refinement could refine different elements on different processes, silently
+  corrupting the mesh. oomph-lib's error estimator synchronises the errors it computes from haloed to
+  halo elements -- but pyoomph applies its own per-element error *overrides* afterwards
+  (`RefineToLevel`, `RefineMaxElementSize`, `RefineAccordingToElement`, interface-driven bulk overrides
+  and any user `calculate_error_overrides`), and those ran rank-locally, so an element could be marked
+  "must refine" on the process that owns it and "do not refine" on a process holding a halo copy. The
+  ranks then built different meshes: stale coarse elements survived in the halo layer, the tree-based
+  hanging-node search installed 2:1 constraints that globally do not exist, and the global equation
+  numbering diverged, so the first Newton step produced `inf` (earlier, an asymmetric throw that
+  deadlocked the remaining ranks). Because the halo/haloed element lists are built by walking the leaves
+  of the same trees, a single divergence also misaligned every later halo exchange. The final error
+  vector is now synchronised owner-to-halo before adaptation. Note oomph-lib has a check for exactly
+  this, but only under `PARANOID`, which pyoomph does not enable by default.
+- **MPI**: the 3D 2:1 refinement-balancing pass (`TemplatedMeshBase3d::enforce_refinement_balance`) was
+  rank-local: each process selected its own elements (halo copies included) and decided when to stop from
+  its own selection count, around a collective `refine_selected_elements()`. The selection is now unioned
+  across processes and the loop terminates on the global set being empty.
 - **MPI**: `create_pressure_fixation()` (Taylor-Hood, Crouzeix-Raviart and
   Scott-Vogelius) pinned the pressure dof of the *rank-local* element 0, so each rank
   constrained a different dof and distributed Stokes solves crashed. The pinned

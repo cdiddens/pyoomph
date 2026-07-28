@@ -279,6 +279,77 @@ namespace pyoomph
     }
   }
 
+  // See declaration in mesh.hpp.
+  void TemplatedMeshBase::synchronise_elemental_errors(oomph::Vector<double> &errs)
+  {
+#ifdef OOMPH_HAS_MPI
+    if (!this->is_mesh_distributed() || !this->communicator_pt()) return;
+
+    oomph::OomphCommunicator *comm_pt = this->communicator_pt();
+    MPI_Comm mc = comm_pt->mpi_comm();
+    int n_proc = comm_pt->nproc();
+    int my_rank = comm_pt->my_rank();
+    if (n_proc < 2) return;
+
+    // errs is indexed by this mesh's element numbering; we address elements by pointer.
+    std::map<oomph::GeneralisedElement *, unsigned> index_of;
+    for (unsigned int e = 0; e < this->nelement() && e < errs.size(); e++)
+      index_of[this->element_pt(e)] = e;
+
+    // Same order of communication as oomph-lib's Z2 estimator: each process sends the errors of its
+    // haloed elements to the process that holds them as halos. The two lists are built by walking the
+    // same root elements' trees, so they correspond entry by entry.
+    for (int iproc = 0; iproc < n_proc; iproc++)
+    {
+      if (iproc != my_rank) // Send my haloed errors to iproc
+      {
+        oomph::Vector<oomph::GeneralisedElement *> haloed_el(this->haloed_element_pt(iproc));
+        unsigned n = haloed_el.size();
+        std::vector<double> buf(n);
+        for (unsigned e = 0; e < n; e++)
+        {
+          std::map<oomph::GeneralisedElement *, unsigned>::iterator it = index_of.find(haloed_el[e]);
+          buf[e] = (it == index_of.end() ? -1.0 : errs[it->second]);
+        }
+        MPI_Send(&n, 1, MPI_UNSIGNED, iproc, 81, mc);
+        if (n) MPI_Send(&buf[0], (int)n, MPI_DOUBLE, iproc, 82, mc);
+      }
+      else // Receive the owners' errors and impose them on my halo elements
+      {
+        for (int send_rank = 0; send_rank < n_proc; send_rank++)
+        {
+          if (send_rank == iproc) continue;
+          oomph::Vector<oomph::GeneralisedElement *> halo_el(this->halo_element_pt(send_rank));
+          unsigned n_remote = 0;
+          MPI_Status status;
+          MPI_Recv(&n_remote, 1, MPI_UNSIGNED, send_rank, 81, mc, &status);
+          std::vector<double> buf(n_remote);
+          if (n_remote) MPI_Recv(&buf[0], (int)n_remote, MPI_DOUBLE, send_rank, 82, mc, &status);
+
+          if (n_remote != halo_el.size())
+          {
+            // The two element lists no longer correspond, so there is no way to tell which error
+            // belongs to which element. That means the meshes have already diverged; imposing
+            // anything here would be guesswork, so leave the errors alone and say so.
+            std::cout << "pyoomph WARNING: cannot synchronise elemental errors between process "
+                      << my_rank << " and " << send_rank << ": " << halo_el.size()
+                      << " halo elements here but " << n_remote << " haloed elements there. "
+                      << "The distributed meshes have diverged; adaptation may be inconsistent."
+                      << std::endl;
+            continue;
+          }
+          for (unsigned e = 0; e < n_remote; e++)
+          {
+            if (buf[e] < 0.0) continue; // Owner could not resolve this element
+            std::map<oomph::GeneralisedElement *, unsigned>::iterator it = index_of.find(halo_el[e]);
+            if (it != index_of.end()) errs[it->second] = buf[e];
+          }
+        }
+      }
+    }
+#endif
+  }
+
   // Find elements that do not share a facet with the boundary
   void Mesh::enlarge_elemental_error_max_override_to_only_nodal_connected_elems(unsigned bind)
   {

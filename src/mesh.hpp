@@ -564,6 +564,12 @@ namespace pyoomph
 			oomph::Vector<double> updated_errors(elemental_error.size());
 			for (unsigned int i = 0; i < elemental_error.size(); i++)
 				updated_errors[i] = errors[i];
+			// The errors reaching this point are not necessarily the pure Z2 estimates: pyoomph lets
+			// equations override them per element (RefineToLevel, RefineMaxElementSize, interface-driven
+			// overrides, user hooks...). Those overrides are computed rank-locally, so a halo copy can
+			// end up with a different error than the element it is a copy of, and oomph-lib then refines
+			// the two inconsistently. Re-impose the owner's value on every halo element before adapting.
+			this->synchronise_elemental_errors(updated_errors);
 			TreeBasedRefineableMeshBase::adapt(updated_errors);
 			// Enforce 2:1 refinement balancing where the shape needs it (tetrahedra, whose geometric
 			// hang scheme has no tree-level balancing): refine any element that is >1 level coarser
@@ -576,6 +582,13 @@ namespace pyoomph
 			// assign_(hanging_)local_eqn_numbers. No-op for quad/hex meshes.
 			this->post_adapt_setup_hanging_nodes();
 		}
+
+		// Copy each haloed element's error estimate onto the corresponding halo element on every other
+		// process, so all processes agree on which elements are to be refined/unrefined. oomph-lib's own
+		// Z2 estimator does this for the values it computes, but pyoomph's per-element error overrides
+		// are applied afterwards and rank-locally, which would otherwise reintroduce the disagreement.
+		// No-op in serial or on a non-distributed mesh.
+		void synchronise_elemental_errors(oomph::Vector<double> &errs);
 
 		// Hook to enforce 2:1 refinement balancing after adapt; overridden by dimension-specific
 		// subclasses that need it (currently 3d tetrahedra). No-op by default.
