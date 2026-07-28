@@ -27,7 +27,7 @@
 #
 # pytest itself runs serially, so each test here launches tests/mpi_worker.py under
 # `mpirun -n N ... --distribute` in a subprocess, then compares the per-rank results against a serial
-# reference computed in-process from the SAME definitions (tests/mpi_cases.py). Two independent oracles:
+# reference computed in-process from the SAME definitions (tests/box_cases.py). Two independent oracles:
 #
 #   1. cross-rank agreement -- every measured quantity is global (gathered residual, global ndof,
 #      MPI_Allreduce'd integral observables), so all ranks must report the same numbers. A partition-
@@ -52,7 +52,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import mpi_cases
+import box_cases
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _WORKER = os.path.join(_HERE, "mpi_worker.py")
@@ -75,6 +75,10 @@ _RES_TOL_DEFAULT = 1e-9
 _OBS_RTOL = {"stokes_cr": 1e-7}
 _OBS_RTOL_DEFAULT = 1e-9
 _OBS_ATOL_REL = 1e-12
+# Same Jacobian oracle and same Crouzeix-Raviart exemption as the serial campaign; see the calibration note
+# in test_adaptive_2d_campaign.py.
+_NEWTON_REDUCTION = 1e-10
+_NO_REDUCTION_TEST = {"stokes_cr"}
 
 
 def _obs_tol(sval, case_scale, eq):
@@ -147,6 +151,16 @@ def _assert_matches_serial(cid, per_rank, serial, eq):
     for r in per_rank:
         # (1) the distributed solve is itself converged
         assert r["maxres"] < res_tol, "%s: max|residual| = %.3e on rank %d" % (cid, r["maxres"], r["rank"])
+        # (1b) and converged the way a linear problem should: one Newton step removes the whole residual.
+        #      This is the DISTRIBUTED Jacobian being exact, which needs more than the serial case -- the
+        #      hanging nodes' values must be collapsed from their (halo) masters before every assembly, or
+        #      the Jacobian is built from stale values. Crouzeix-Raviart is exempt for the conditioning
+        #      reason documented in test_adaptive_2d_campaign.py.
+        conv = r["newton_conv"]
+        if eq not in _NO_REDUCTION_TEST and len(conv) >= 2 and conv[0] > 1e-6:
+            assert conv[1] / conv[0] < _NEWTON_REDUCTION, \
+                "%s: one Newton step reduced the residual by only %.2e on rank %d (history %r)" % (
+                    cid, conv[1] / conv[0], r["rank"], conv)
         # (2) same global discretisation -> same hanging-node structure was built
         assert r["ndof"] == serial["ndof"], "%s: ndof %d on rank %d vs %d serially" % (
             cid, r["ndof"], r["rank"], serial["ndof"])
@@ -169,8 +183,8 @@ def _assert_matches_serial(cid, per_rank, serial, eq):
 def _check(cases, nproc, tmp_path):
     dist = _run_distributed(cases, nproc, tmp_path / "dist")
     for kind, eq, levels in cases:
-        cid = mpi_cases.case_id(kind, eq, levels)
-        serial = mpi_cases.solve_case(kind, eq, levels, outdir=str(tmp_path / "serial" / cid))
+        cid = box_cases.case_id(kind, eq, levels)
+        serial = box_cases.solve_case(kind, eq, levels, outdir=str(tmp_path / "serial" / cid))
         assert serial["maxres"] < _RES_TOL.get(eq, _RES_TOL_DEFAULT), \
             "%s: the SERIAL reference did not converge (max|residual| = %.3e)" % (cid, serial["maxres"])
         _assert_matches_serial(cid, dist[cid], serial, eq)
@@ -179,22 +193,44 @@ def _check(cases, nproc, tmp_path):
 # One test per equation system, sweeping all four discretisations and all three refinement states, so a
 # failure names the physics immediately. Each invocation is a single mpirun (the worker loops over the
 # cases), which keeps the MPI start-up cost to one per test rather than one per case.
-@pytest.mark.parametrize("eq", ["poisson1", "poisson2", "mixed12", "stokes_th"])
+@pytest.mark.parametrize("eq", ["poisson1", "poisson2", "mixed12", "constrain12", "unconstrain12",
+                                "neumann", "stokes_th", "ale"])
 def test_distributed_adaptive_matches_serial(eq, tmp_path):
-    cases = [(kind, eq, lv) for kind in mpi_cases.MESH_KINDS for lv in mpi_cases.LEVELS]
+    cases = [(kind, eq, lv) for kind in box_cases.MESH_KINDS for lv in box_cases.LEVELS]
     _check(cases, 2, tmp_path)
+
+
+def test_distributed_c1_constraint_still_reduces_dofs(tmp_path):
+    # The C1 field constraint must survive mesh DISTRIBUTION, not merely coexist with it. It is applied
+    # from Python by walking the mesh's own elements, so on a distributed mesh each rank only sees its own
+    # partition (plus halos) -- if the halo copies were skipped, or if a constrained node's C1 corners
+    # landed on another rank, the constraint would silently apply to fewer dofs. Since ndof is global,
+    # reproducing the serial ordering constrained < unconstrained-on-top < baseline under --distribute is
+    # what shows the constraint was applied to the same set of dofs everywhere.
+    levels = (1, 3)
+    cases = [(kind, eq, levels) for kind in box_cases.MESH_KINDS
+             for eq in ("mixed12", "constrain12", "unconstrain12")]
+    dist = _run_distributed(cases, 2, tmp_path / "dist")
+    for kind in box_cases.MESH_KINDS:
+        got = {eq: dist[box_cases.case_id(kind, eq, levels)][0]["ndof"]
+               for eq in ("mixed12", "constrain12", "unconstrain12")}
+        assert got["constrain12"] < got["unconstrain12"] < got["mixed12"], \
+            "%s under MPI: expected ndof(constrained) < ndof(unconstrained on top) < ndof(baseline), " \
+            "got %r" % (kind, got)
 
 
 def test_distributed_crouzeix_raviart(tmp_path):
     # CR pins an ELEMENT-INTERNAL pressure dof, i.e. the other pressure-fixation path; and its bubble
     # (C2TB) velocity allocates son internal data on refinement. Level 3 is dropped: CR is the most
     # expensive discretisation here and level (1,2) already covers the 2:1 hanging case.
-    cases = [(kind, "stokes_cr", lv) for kind in mpi_cases.MESH_KINDS for lv in [(0, 0), (1, 1), (1, 2)]]
+    cases = [(kind, "stokes_cr", lv) for kind in box_cases.MESH_KINDS for lv in [(0, 0), (1, 1), (1, 2)]]
     _check(cases, 2, tmp_path)
 
 
 def test_distributed_four_ranks(tmp_path):
     # More ranks than the 2-rank default: more partition boundaries cut through the refined band, and the
-    # globally selected pressure node is more likely to live on a rank other than 0.
-    cases = [(kind, eq, (1, 3)) for kind in mpi_cases.MESH_KINDS for eq in ["poisson2", "stokes_th"]]
+    # globally selected pressure node is more likely to live on a rank other than 0. Includes the ALE case,
+    # where the mesh POSITIONS are distributed unknowns, and the constrained case.
+    cases = [(kind, eq, (1, 3)) for kind in box_cases.MESH_KINDS
+             for eq in ["poisson2", "unconstrain12", "stokes_th", "ale"]]
     _check(cases, 4, tmp_path)

@@ -23,11 +23,13 @@
 #
 # ========================================================================
 
-# Shared problem definitions for the MPI adaptivity tests. Imported BOTH by the pytest harness
-# (tests/test_mpi_adaptivity.py, which runs them serially in-process to produce the reference) and by the
-# worker that the harness launches under `mpirun -n N ... --distribute` (tests/mpi_worker.py). Keeping the
+# Shared problem definitions for the 2D adaptive-mesh campaign on branch mixed_adapt. Imported by three
+# places, which is the point: the serial tests (tests/test_adaptive_2d_campaign.py), the MPI harness
+# (tests/test_mpi_adaptivity.py, which also runs them serially in-process to produce its reference), and
+# the worker the harness launches under `mpirun -n N ... --distribute` (tests/mpi_worker.py). Keeping the
 # definitions in one place is what makes the distributed-vs-serial comparison meaningful: both sides solve
-# a bit-identical problem and differ only in how it is partitioned.
+# a bit-identical problem and differ only in how it is partitioned. It also means the serial and the MPI
+# campaign cannot drift apart.
 #
 # All cases live on the box [-0.5,0.5]^2 in four discretisations -- pure quads, two triangle splits, and a
 # genuinely MIXED quad+tri mesh with a cross-shape interface at x=0 -- at three refinement states:
@@ -50,14 +52,19 @@ from pyoomph import *
 from pyoomph.expressions import *
 from pyoomph.equations.poisson import PoissonEquation
 from pyoomph.equations.navier_stokes import StokesEquations
+from pyoomph.equations.ALE import LaplaceSmoothedMesh
 from pyoomph.meshes.mesh import MeshTemplate
 from pyoomph.meshes.simplemeshes import RectangularQuadMesh
 
 _BND = ["left", "right", "top", "bottom"]
 
 MESH_KINDS = ["quad", "tri_left", "tri_crossed", "mixed"]
-EQUATIONS = ["poisson1", "poisson2", "mixed12", "stokes_th", "stokes_cr"]
+EQUATIONS = ["poisson1", "poisson2", "mixed12", "constrain12", "unconstrain12", "neumann",
+             "stokes_th", "stokes_cr", "ale"]
 LEVELS = [(0, 0), (1, 1), (1, 3)]
+
+# The prescribed outflow ("evaporation") through the free top surface in the ALE case.
+J_EVAP = 0.1
 
 
 class MixedBoxMesh(MeshTemplate):
@@ -118,12 +125,60 @@ class BoxProblem(Problem):
             eqs = PoissonEquation(source=1, space=space)
             eqs += DirichletBC(u=0) @ _BND
             eqs += IntegralObservables(intu=var("u"), intu2=var("u") ** 2)
-        elif self.eq == "mixed12":
+        elif self.eq in ("mixed12", "constrain12", "unconstrain12"):
             # u on C2 driving v on C1: mixed continuous spaces on one mesh, so C1 owns a separate hang slot.
+            # Three variants of the same problem, differing only in the C1 constraint on u:
+            #   mixed12       -- none (baseline)
+            #   constrain12   -- ConstrainFieldsToC1Space("u") everywhere: u is degraded to the C1 space
+            #   unconstrain12 -- the same, plus UnconstrainFieldsFromC1Space("u") @ "top", restoring u's C2
+            #                    dofs along the top edge only
+            # so ndof(constrain12) < ndof(unconstrain12) < ndof(mixed12) certifies that the constraint bites
+            # AND that the boundary unconstrain undoes it. On a hanging-node mesh the constrained non-vertex
+            # nodes must receive a REGISTERED linear hang onto their C1 corners; merely pinning them would
+            # leave the analytic Jacobian inconsistent with the residual (Newton would not converge in one
+            # step), which is what newton_steps checks.
+            #
+            # NB the BCs: u and v are both Dirichlet on left/right/bottom and NATURAL (zero-flux) on "top".
+            # Two reasons. (a) With u Dirichlet on top as well, its top-edge C2 mid-node values would be
+            # pinned anyway and the boundary unconstrain would be a silent no-op -- the test would pass
+            # while testing nothing. (b) With u and v carrying the SAME boundary conditions, the Green
+            # identity int(v) == int(u^2) holds EXACTLY (all boundary terms drop), and it holds discretely
+            # too whenever u and v live in the same discrete space -- i.e. exactly for constrain12. That is
+            # asserted as an independent oracle: a mis-hung or sloppily restricted C1 constraint breaks it.
             eqs = PoissonEquation(source=1, space="C2")
             eqs += PoissonEquation(source=var("u"), space="C1", name="v")
-            eqs += DirichletBC(u=0, v=0) @ _BND
+            eqs += DirichletBC(u=0, v=0) @ ["left", "right", "bottom"]
+            if self.eq != "mixed12":
+                eqs += ConstrainFieldsToC1Space("u")
+            if self.eq == "unconstrain12":
+                eqs += UnconstrainFieldsFromC1Space("u") @ "top"
             eqs += IntegralObservables(intu=var("u"), intv=var("v"), intu2=var("u") ** 2)
+        elif self.eq == "neumann":
+            # Neumann fluxes on adaptive/mixed meshes: the flux is integrated over FACE elements whose
+            # parent may be a hanging-node element of either shape. "right" is a constant flux; "top" is
+            # spatially varying AND is the boundary that carries the refinement band, so its face elements
+            # sit on refined parents while "right" mixes refined and unrefined ones.
+            x = var("coordinate_x")
+            eqs = PoissonEquation(source=1, space="C2")
+            eqs += DirichletBC(u=0) @ ["left", "bottom"]
+            eqs += NeumannBC(u=1) @ "right"
+            eqs += NeumannBC(u=x) @ "top"
+            eqs += IntegralObservables(intu=var("u"), intu2=var("u") ** 2)
+        elif self.eq == "ale":
+            # Moving mesh (ALE): Stokes on a Laplace-smoothed mesh whose top surface is free in y, with a
+            # prescribed outflow standing in for evaporation. The nodal POSITIONS are unknowns coupled to
+            # the flow, so this exercises the hanging-node machinery on the position dofs as well as on the
+            # fields. "area" detects the mesh motion itself -- without it a frozen mesh would pass.
+            st = StokesEquations(mode="TH", dynamic_viscosity=1)
+            eqs = st
+            eqs += LaplaceSmoothedMesh()
+            eqs += DirichletBC(mesh_x=True, mesh_y=True) @ ["left", "right", "bottom"]
+            eqs += DirichletBC(mesh_x=True) @ "top"
+            eqs += DirichletBC(velocity_x=0, velocity_y=0) @ ["left", "right", "bottom"]
+            eqs += DirichletBC(velocity_x=0, velocity_y=J_EVAP) @ "top"
+            eqs += DirichletBC(pressure=0) @ "bottom"
+            eqs += IntegralObservables(area=1, intuy=var("velocity_y"),
+                                       intu2=dot(var("velocity"), var("velocity")))
         elif self.eq in ("stokes_th", "stokes_cr"):
             # Stokes in the box driven by the bulk force f = (-y, x). Taylor-Hood is the mixed C2/C1 case;
             # Crouzeix-Raviart has bubble-enriched velocity and an ELEMENT-INTERNAL (discontinuous) pressure,
@@ -159,9 +214,20 @@ def solve_case(kind, eq, levels, N=4, outdir=None):
         p.max_refinement_level = max(max(levels), 1) + 1
         p.solve()
         m = p.get_mesh("domain")
+        conv = p.get_last_residual_convergence()
         res = {
             "maxres": float(np.max(np.abs(np.asarray(p.get_residuals())))),
             "ndof": int(p.ndof()),
+            # Newton convergence history (max residual before the solve and after each iteration). The
+            # meaningful Jacobian oracle is conv[1]/conv[0] -- how much ONE Newton step removes. For a
+            # linear problem with an exact analytic Jacobian that ratio is ~1e-14; a constrained or hanging
+            # dof that was pinned instead of being given a registered hang makes the Jacobian inconsistent
+            # with the residual and the ratio collapses towards 1. Counting iterations instead would be
+            # tolerance-dependent: an ill-conditioned discretisation (Crouzeix-Raviart on triangles) can
+            # land at 1.9e-8 after a perfect first step and take a cosmetic second one purely because the
+            # Newton tolerance is 1e-8.
+            "newton_steps": max(len(conv) - 1, 0),
+            "newton_conv": [float(c) for c in conv],
         }
         for name, val in m.evaluate_all_observables().items():
             res["obs_" + name] = float(val)

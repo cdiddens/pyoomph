@@ -333,17 +333,7 @@ downstream is testable.
 - A3. **[DONE]** Globally consistent pressure fixation for all three modes (§3.2).
 - A4. **[DONE]** MPI pytest harness + the sweep codified as tests (§7).
 
-**Phase B — 2D campaign (mostly codification; serial half already verified).**
-- B1. Stokes box f=(−y,x), Taylor–Hood, quad / tri_left / tri_crossed / mixed, levels (0,0)/(1,1)/(1,3);
-  residual oracle + cross-discretisation agreement of an integral observable (§2.1).
-- B2. Same under `mpirun -n 2 --distribute`, with the multi-level case included, plus a serial-reference
-  field comparison.
-- B3. `ConstrainFieldsToC1Space` / `UnconstrainFieldsFromC1Space` on coupled C2 `u` + C1 `v`, same mesh
-  matrix, serial + MPI; assert the dof reduction as well as the residual, so a silently inert constraint
-  cannot pass (§2.2).
-- B4. Neumann campaign: constant and spatially varying fluxes, on walls that are refined and on walls that
-  are not, same mesh matrix, serial + MPI (§2.3).
-- B5. ALE: Stokes + `LaplaceSmoothedMesh` + top evaporation outflow, same mesh matrix, serial + MPI (§2.4).
+**Phase B — 2D campaign. [DONE] — see §8.**
 
 **Phase C — 3D campaign.**
 - C1. Build `MixedBoxMesh3D` (§5.1) with the family combinations, and a `refinement_possible` /
@@ -426,3 +416,80 @@ are stable (6 passed, ~33 s each). Full serial suite unaffected.
 `test_distributed_four_ranks` (`-n 4`, the two-level non-uniform state) all pass. Phase B's remaining work
 is now to extend `mpi_cases.py` with the constrain-C1, Neumann and ALE cases — the harness itself takes
 them without modification.
+
+---
+
+## 8. Phase B — the 2D campaign — **[DONE]**
+
+`tests/mpi_cases.py` is now `tests/box_cases.py`: it is no longer MPI-specific but the single definition of
+the whole 2D campaign, imported by three places — the serial tests, the MPI harness (for its in-process
+reference) and the `mpirun` worker. The serial and distributed campaigns therefore cannot drift apart.
+
+**Nine equation systems** on four discretisations (`quad`, `tri_left`, `tri_crossed`, `mixed` quad+tri) at
+three refinement states (`(0,0)`, `(1,1)`, `(1,3)` = two levels of 2:1 jump):
+
+| case | what it exercises |
+|---|---|
+| `poisson1`, `poisson2` | pure C1 / pure C2 baselines |
+| `mixed12` | `u` on C2 driving `v` on C1 — two spaces hanging independently |
+| `constrain12` | + `ConstrainFieldsToC1Space("u")` everywhere |
+| `unconstrain12` | + `UnconstrainFieldsFromC1Space("u") @ "top"` |
+| `neumann` | constant flux on `right`, spatially varying on `top` (the refined wall) |
+| `stokes_th`, `stokes_cr` | Stokes with f = (−y, x); Taylor–Hood and Crouzeix–Raviart |
+| `ale` | Stokes + `LaplaceSmoothedMesh`, free top surface, prescribed evaporation outflow |
+
+`tests/test_adaptive_2d_campaign.py` (97 tests, ~27 s) is the serial half; `tests/test_mpi_adaptivity.py`
+(11 tests, ~63 s) runs the same cases under `mpirun -n 2` and `-n 4`.
+
+### 8.1 The oracles, and why the obvious ones are not enough
+
+A converged residual only says *the solve converged*; it does not say the field is right. Four layers:
+
+1. **`max|residual|` ≈ 0.**
+2. **One Newton step removes the whole residual.** These problems are linear, so an exact analytic Jacobian
+   goes from O(1e-2) to machine zero in one step. Expressed as the *ratio* `conv[1]/conv[0]`, not as an
+   iteration count — see §8.2. This is what would catch a constrained or hanging dof that was pinned
+   instead of being given a registered hang. Under MPI it additionally exercises the distributed
+   hanging-value collapse (engine doc §4.17 Fix 2): a Jacobian assembled from stale halo-master values
+   fails this even though it may still converge eventually.
+3. **Cross-discretisation agreement.** The same physical problem on quads, on two triangle splits and on
+   the mixed mesh must give the same global angular momentum, and *refinement must bring them together* —
+   the spread drops from 3% at `(0,0)` to 0.2% at `(1,3)`. A tear at the quad↔tri interface leaves free
+   nodes and shifts the integral instead of converging it, which no residual check would notice.
+4. **Exact discrete identities.** Two of them:
+   * `ndof(constrain12) < ndof(unconstrain12) < ndof(mixed12)` on every mesh and level (e.g. 252 < 284 <
+     650), so a silently inert constraint — or a boundary unconstrain that restores nothing — cannot pass.
+   * the Green identity **∫v = ∫u²**, which holds *exactly* once `u` is restricted to `v`'s space. Verified
+     to ~5e-18 on every mesh and refinement state, including the two-level hanging mixed mesh. It does
+     **not** hold for the unconstrained baseline (asserted), so it genuinely distinguishes a correct
+     restriction from an approximate one rather than being a triviality.
+
+### 8.2 Three calibration findings worth keeping
+
+* **The boundary unconstrain was almost a no-op test.** With `u` Dirichlet on all four walls, the top-edge
+  C2 mid-node values are pinned anyway, so `UnconstrainFieldsFromC1Space @ "top"` restores nothing and the
+  test would have passed while testing nothing. The cases therefore give `u` and `v` a *natural* (zero-flux)
+  condition on `top`. That also makes the Green identity's boundary terms drop, which is what enables
+  oracle 4 above — the same choice buys both.
+* **Iteration counts are the wrong Jacobian oracle.** Crouzeix–Raviart on triangles lands at 1.9e-8 after a
+  perfect first step and takes a cosmetic second one purely because the Newton tolerance is 1e-8. The ratio
+  formulation is tolerance-independent. Calibrated on the data: the worst non-CR ratio across all 8 × 4 × 3
+  cases is **1.5e-13**, so the bound is set at 1e-10 — three orders of headroom, and eight or more orders
+  below what an inconsistent Jacobian gives.
+* **Crouzeix–Raviart is exempt from that test, and it is not a regression.** On refined triangle meshes its
+  saddle-point system is ill-conditioned enough that the direct linear solve is itself inaccurate (8.4e-04
+  → 1.5e-05 in one step, then ~1e-10). This was checked against the *pre-existing* pressure fixation
+  (commit `dadc4ae`): the same ratios appear there (3.7e-3 / 6.3e-4 / 5.6e-5 vs 1.8e-2 / 6.2e-4 / 8.1e-5),
+  so it is a property of the discretisation, not of the §3.2 change or of the hanging-node Jacobian. CR is
+  held to convergence within 3 iterations and the loose residual bound the rest of the suite already uses.
+
+### 8.3 Result
+
+Serial: **97 tests pass**. Distributed: **11 tests pass** at `-n 2` and `-n 4`, every case matching its
+serial reference in `ndof` and in every global integral, with all ranks agreeing. Notably
+`test_distributed_c1_constraint_still_reduces_dofs` checks that the C1 constraint — which is applied from
+Python by walking the mesh's own elements, so each rank sees only its own partition plus halos — still
+constrains the *same global set of dofs* after distribution.
+
+Remaining for the 2D half: nothing on the original task list except `ConstrainPositionsToC1Space` (§4),
+which is Phase D.
