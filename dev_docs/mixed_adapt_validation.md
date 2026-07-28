@@ -741,17 +741,32 @@ on nodes it does not own, from its incomplete halo-side neighbour information �
 hanging per element via the OcTree neighbour finders, which on a partitioned mesh cannot see that the
 neighbour across the cut is equally fine, and so concludes a 2:1 jump that is not there.
 
-**Likely mechanism for the `inf`.** Halo elements are skipped during assembly, so a spurious constraint on a
-halo node should be inert — except that `Mesh::collapse_hanging_node_values()` (engine doc §4.17 Fix 2)
-writes every hanging node's master-interpolated value into its own raw storage before each assembly. For
-these spuriously-hanging halo nodes that *overwrites the correctly synced value from the owner* with a bogus
-interpolation, corrupting the halo and hence the residual. That is the first thing to test.
+**Mechanism — it is the EQUATION NUMBERING, not value corruption.** The first guess was that the spurious
+constraints corrupt halo values through `Mesh::collapse_hanging_node_values()` (engine doc §4.17 Fix 2),
+which writes every hanging node's master-interpolated value into its raw storage before each assembly.
+That was **tested and ruled out**: restricting the collapse to nodes the rank owns changes nothing, and the
+change was reverted rather than carried as an unmotivated edit to a validated path.
 
-**Suggested fix to try first**, in order of cheapness: (1) make `collapse_hanging_node_values()` skip nodes
-the rank does not own, since their values come from the owner via the halo sync anyway; (2) failing that,
-suppress hang installation on non-owned nodes in the pure-tet route and let the halo sync carry the owner's
-verdict. `Node.get_hanging_masters()` makes the check itself a three-line diagnostic: dump the hanging set
-per rank and diff it against serial.
+The measurement that relocates it: the **initial** residual is healthy and identical on both ranks
+(0.00364583), and only the residual **after the first Newton step** is `inf`. So the residual assembly at
+the initial state is right; what is wrong is the Jacobian, or rather the global system it belongs to. That
+fits the dof counts: a hanging node's dofs are removed from the global numbering, so rank 1 believing 80
+extra nodes hang makes the ranks disagree about the global equation numbering — which is exactly the
+observed `ndof` 1573 (distributed) vs 1460 (serial). An inconsistent global numbering yields a garbage
+solution vector from an otherwise-correct residual, hence `inf` on the update.
+
+Note this also explains why the 80 being halo-only does *not* make them inert: they never enter rank 1's
+element assembly (halo elements are skipped), but they do enter the equation numbering.
+
+**So the fix must stop the spurious hangs from being installed**, not mitigate their effects. The
+installation site is the pure-tet route's per-element OcTree hooks
+(`RefineableTElement<3>::setup_hanging_nodes` / `setup_hang_for_value`), which on a partitioned mesh cannot
+see that the neighbour across the cut is equally fine. Two directions worth trying, in order: reconcile the
+hanging set against the owner after installation (the halo layer knows who owns each node, and
+`Node.get_hanging_masters()` makes the comparison trivial to verify); or give the pure-tet route the same
+position-based mesh-level pass the mixed layouts use, which does not depend on tree-neighbour completeness —
+noting that a first, coarse attempt at the latter (§ above) changed the hanging set without fixing the dof
+gap, so it would need to *replace* the per-element install rather than run alongside it.
 
 Pinned by `test_distributed_3d_pure_tet_nonuniform_xfail` (strict, short timeout) and excluded from the
 other matrices, so the rest of the 3D distributed coverage stays meaningful.
