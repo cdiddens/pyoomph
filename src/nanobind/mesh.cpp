@@ -369,6 +369,27 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("unpin_position", (void(pyoomph::Node::*)(const unsigned &)) & pyoomph::Node::unpin_position, nb::arg("coordinate_index"), "Unpins the position at the given coordinate index, i.e. makes it a free unknown again, relevant for moving meshes")
 		.def("position_is_pinned", (bool(pyoomph::Node::*)(const unsigned &)) & pyoomph::Node::position_is_pinned, nb::arg("coordinate_index"), "Returns whether the position at the given coordinate index is pinned")
 		.def("is_hanging", (bool(pyoomph::Node::*)(const int &) const) & pyoomph::Node::is_hanging, "index"_a = -1, "Returns whether this node is a hanging node (i.e. constrained by other nodes due to non-conforming mesh refinement); index=-1 checks all values, otherwise only the given value index")
+		.def(
+			"get_hanging_masters", [](pyoomph::Node *n, const int &index)
+			{
+				// Exposes the actual hanging constraint, not just its existence: the (master node, weight)
+				// pairs this node's value is interpolated from. Without it a Python-side diagnostic can see
+				// THAT two MPI ranks disagree about a hanging node but not HOW, which is exactly the
+				// information needed to debug a non-conforming or mis-synchronised hanging set.
+				// index=-1 is the geometric/position hang, index>=0 a specific value's own hang slot.
+				std::vector<std::pair<pyoomph::Node *, double>> res;
+				if (!n->is_hanging(index)) return res;
+				oomph::HangInfo *h = n->hanging_pt(index);
+				if (!h) return res;
+				for (unsigned k = 0; k < h->nmaster(); k++)
+					res.push_back(std::make_pair(dynamic_cast<pyoomph::Node *>(h->master_node_pt(k)), h->master_weight(k)));
+				return res;
+			},
+			nb::rv_policy::reference, "index"_a = -1,
+			"Returns the hanging constraint of this node as a list of (master node, weight) pairs, or an "
+			"empty list if the node does not hang. index=-1 queries the geometric/position hang, index>=0 "
+			"the hang of that value index (a C1 field on a C2 element owns its own slot). The weights of a "
+			"consistent constraint sum to 1.")
 		.def("variable_position_pt", &pyoomph::Node::variable_position_pt, nb::rv_policy::reference, "Returns the underlying oomph-lib Data object storing the (potentially pinned) nodal position")
 		.def("is_on_boundary", (bool(pyoomph::Node::*)() const) & pyoomph::Node::is_on_boundary, "Returns whether this node lies on any mesh boundary")
 		.def("set_obsolete", &pyoomph::Node::set_obsolete, "Marks this node as obsolete, e.g. after adaptive refinement/unrefinement, so it can be pruned later")
