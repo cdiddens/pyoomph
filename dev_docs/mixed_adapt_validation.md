@@ -720,10 +720,38 @@ uses the per-element OcTree hooks.
 the dof-count discrepancy or the `inf`, and it moved rank 1 further from the serial hanging set rather than
 closer. It was reverted rather than left in as a speculative change to a validated path.
 
-Note the surviving hypothesis is *not* settled: the distributed element counts leave open whether the
-partitioned run also **refines a different set of elements** than serial, in which case the dof-count
-difference is a symptom of divergent refinement selection rather than of hanging alone. That is the first
-thing to establish next — compare the refined element sets, not just the totals.
+**The open question is now answered: the refinement is NOT divergent.** Dumping the refined mesh before the
+solve, serially and on both ranks, and comparing as sets:
+
+| | serial | distributed (union over ranks) | dist-only | serial-only |
+|---|---|---|---|---|
+| node positions | 2031 | 2031 | **0** | **0** |
+| element centroids | 1112 | 1118 | 6 | 0 |
+| **hanging nodes** | 246 | 326 | **80** | 0 |
+
+The mesh is identical — the node sets match exactly, in both directions. What differs is the **hanging set**,
+and asymmetrically: **rank 0's hanging set is exactly the serial one (246), while rank 1 installs 80
+constraints that exist neither serially nor on rank 0.** They are not missing constraints, as the dof-count
+gap suggested — they are *spurious* ones. They sit at z = 0.125…0.5, i.e. in the interior of the FINER
+region and even on the top wall, whereas every legitimate hang is at z = 0.0625…0.25, on the 2:1 interface.
+
+**And all 80 lie in rank 1's HALO region:** zero of them belong to any non-halo element of rank 1, so every
+one is a node whose owner (rank 0) correctly says it does not hang. Rank 1 is installing hanging constraints
+on nodes it does not own, from its incomplete halo-side neighbour information — the pure-tet route installs
+hanging per element via the OcTree neighbour finders, which on a partitioned mesh cannot see that the
+neighbour across the cut is equally fine, and so concludes a 2:1 jump that is not there.
+
+**Likely mechanism for the `inf`.** Halo elements are skipped during assembly, so a spurious constraint on a
+halo node should be inert — except that `Mesh::collapse_hanging_node_values()` (engine doc §4.17 Fix 2)
+writes every hanging node's master-interpolated value into its own raw storage before each assembly. For
+these spuriously-hanging halo nodes that *overwrites the correctly synced value from the owner* with a bogus
+interpolation, corrupting the halo and hence the residual. That is the first thing to test.
+
+**Suggested fix to try first**, in order of cheapness: (1) make `collapse_hanging_node_values()` skip nodes
+the rank does not own, since their values come from the owner via the halo sync anyway; (2) failing that,
+suppress hang installation on non-owned nodes in the pure-tet route and let the halo sync carry the owner's
+verdict. `Node.get_hanging_masters()` makes the check itself a three-line diagnostic: dump the hanging set
+per rank and diff it against serial.
 
 Pinned by `test_distributed_3d_pure_tet_nonuniform_xfail` (strict, short timeout) and excluded from the
 other matrices, so the rest of the 3D distributed coverage stays meaningful.
