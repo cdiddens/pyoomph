@@ -758,15 +758,40 @@ solution vector from an otherwise-correct residual, hence `inf` on the update.
 Note this also explains why the 80 being halo-only does *not* make them inert: they never enter rank 1's
 element assembly (halo elements are skipped), but they do enter the equation numbering.
 
-**So the fix must stop the spurious hangs from being installed**, not mitigate their effects. The
-installation site is the pure-tet route's per-element OcTree hooks
-(`RefineableTElement<3>::setup_hanging_nodes` / `setup_hang_for_value`), which on a partitioned mesh cannot
-see that the neighbour across the cut is equally fine. Two directions worth trying, in order: reconcile the
-hanging set against the owner after installation (the halo layer knows who owns each node, and
-`Node.get_hanging_masters()` makes the comparison trivial to verify); or give the pure-tet route the same
-position-based mesh-level pass the mixed layouts use, which does not depend on tree-neighbour completeness —
-noting that a first, coarse attempt at the latter (§ above) changed the hanging set without fixing the dof
-gap, so it would need to *replace* the per-element install rather than run alongside it.
+**ROOT CAUSE — a stale halo layer after adaptation.** Two candidate explanations were tested and killed
+before the real one turned up, both by measurement rather than argument:
+
+* *"legitimate hangs are on owned nodes, spurious ones on halo nodes, so skip halo nodes"* — **false**.
+  Legitimate hangs sit on halo-only nodes too (36 on rank 0, 25 on rank 1). That rule would have deleted 61
+  correct constraints.
+* *"halo elements are under-refined locally, so a neighbour looks coarser"* — **false**. Comparing every
+  element's `refinement_level()` by centroid against serial gives **zero** mismatches on either rank.
+
+What that comparison *did* show is that rank 1 holds **6 elements that exist nowhere else** — not on rank 0,
+not serially. All six are **halo copies at refinement level 1**, and each sits exactly where the real mesh
+contains only level-**2** elements (8–12 serial level-2 elements within one element-width of each, and no
+level-1 element at all). They are coarse **parents whose sons exist everywhere else**: rank 1's halo layer
+was not brought up to date when the mesh was refined.
+
+That closes the causal chain end to end:
+
+> stale coarse halo element → `tet_face_neighbour` legitimately reports a strictly coarser neighbour →
+> `tet_hang_face` installs a 2:1 hang that globally does not exist (24 of the 80 spurious hangs lie within
+> one element-width of those six; the rest follow from them and from 2:1 balancing) → the hanging set
+> diverges between ranks → the global equation numbering diverges (`ndof` 1573 vs 1460) → the linear system
+> is inconsistent → `inf` after the first Newton step.
+
+Note how far upstream this is of everything the earlier rounds suspected. The hang finder is behaving
+correctly given what it is shown; `collapse_hanging_node_values()` is a red herring (tested, §above); and
+the equation numbering is a symptom, not a cause. **The fix belongs in the distributed adapt path: halo
+elements must be refined to match their owner before hanging is installed.** Nothing downstream of that can
+be right while a rank holds elements the global mesh does not contain.
+
+This also explains the family pattern. Every tet-*containing* mixed layout passes because its hanging comes
+from the position-based mesh-level pass, which asks "is there a node at this position on a coarser
+element's face lattice" — a stale coarse halo element contributes no node the finer elements do not already
+have, so it cannot manufacture a constraint. Only the pure-tet route, which reasons from tree neighbours,
+is fooled by it.
 
 Pinned by `test_distributed_3d_pure_tet_nonuniform_xfail` (strict, short timeout) and excluded from the
 other matrices, so the rest of the 3D distributed coverage stays meaningful.
