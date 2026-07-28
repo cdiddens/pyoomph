@@ -112,6 +112,14 @@ def test_uneven_initial_levels_survive_distribution(tmp_path):
     _run([("quad", "connect1", (1, 2, "level")), ("quad", "connect1", (0, 3, "level"))], 2, tmp_path)
 
 
+def test_four_domains_at_a_cross_point_distributed(tmp_path):
+    # Four domains meeting at a cross point, so the coupling graph is a CYCLE and the partitioner sees
+    # FOUR disconnected components to cut independently. A rank can therefore hold a piece of one domain
+    # and nothing of the domain its refinement demand has to reach -- the global facet exchange is the
+    # only thing that can carry it.
+    _run([(k, "connect1", (0, 0, "level")) for k in two_domain_cases.FOUR_DOMAIN_KINDS], 2, tmp_path)
+
+
 def test_conformity_check_stays_clean_under_throw(tmp_path):
     # Run the whole thing with the conformity/halo cross-check in THROWING mode, so a divergence between
     # the processes fails the job at the adapt that created it rather than surfacing later as a wrong

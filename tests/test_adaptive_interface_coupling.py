@@ -248,6 +248,30 @@ def test_unsatisfiable_cap_is_diagnosed_not_left_to_the_matcher(tmp_path):
             p.initialise()
 
 
+@pytest.mark.parametrize("kind", two_domain_cases.FOUR_DOMAIN_KINDS)
+def test_four_domains_meeting_at_a_cross_point(kind, tmp_path):
+    # Four domains, A|B over C|D. Two things here that the two-domain cases cannot reach.
+    #
+    # The coupling graph is a CYCLE, not a chain: A-B-D-C-A. D shares no interface with A -- they touch
+    # only at the cross point -- so a refinement demand raised in A reaches D only by travelling all the
+    # way round. And the cross point is four distinct nodes tied pairwise by four Lagrange multipliers,
+    # of which only three are independent: a genuine over-constraint at a single point.
+    res = two_domain_cases.solve_case(kind, None, None, outdir=str(tmp_path / kind))
+    _assert_case_is_sound(res, "connect1", kind)
+    if kind == "four_corner":
+        # Raised in A alone, at the cross point; every other domain has to follow it round the cycle.
+        assert res["maxlevel"]["D"] == 3, \
+            "refinement did not reach the diagonally opposite domain (levels %r)" % (res["maxlevel"],)
+    elif kind == "four_away":
+        # ...but only where it must. A is refined far from every interface, so nothing may propagate.
+        # This is what separates "the neighbours follow where they have to" from "the neighbours follow
+        # always"; the other two cases cannot tell those apart.
+        assert res["maxlevel"]["A"] == 3
+        assert all(res["maxlevel"][d] == 0 for d in "BCD"), \
+            "refinement away from the interfaces still dragged the neighbours along (levels %r)" \
+            % (res["maxlevel"],)
+
+
 def test_conformity_check_reports_a_torn_interface(tmp_path, monkeypatch):
     # The checker is the oracle every other test in this file leans on, so it must be able to FAIL.
     # Switch the enforcement off, refine one domain only, and require the check to say so -- and to say

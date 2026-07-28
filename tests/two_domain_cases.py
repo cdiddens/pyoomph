@@ -229,8 +229,15 @@ class TwoDomainProblem(Problem):
 
 
 def solve_case(kind, eq, levels, N=4, outdir=None):
-    """Solve one case and return the partition-independent measurements."""
+    """Solve one case and return the partition-independent measurements.
+
+    `kind` also accepts the four-domain layouts (see FOUR_DOMAIN_KINDS at the bottom of this file), for
+    which `eq` and `levels` are ignored -- that keeps the MPI harness, which drives everything through
+    solve_case/case_id, working for both topologies without needing to know about either.
+    """
     import numpy as np
+    if kind in FOUR_DOMAIN_KINDS:
+        return solve_four_domain_case(kind, outdir=outdir)
     prob = TwoDomainProblem(kind=kind, eq=eq, levels=tuple(levels), N=N)
     with prob as p:
         if outdir is not None:
@@ -302,5 +309,126 @@ def solve_case(kind, eq, levels, N=4, outdir=None):
 
 
 def case_id(kind, eq, levels):
+    if kind in FOUR_DOMAIN_KINDS:
+        return kind
     crit = levels[2] if len(levels) > 2 else "level"
     return "%s-%s-%d%d-%s" % (eq, kind, levels[0], levels[1], crit)
+
+
+# --- Four domains meeting at a cross point ----------------------------------------------------------
+#
+#         A | B
+#         --+--
+#         C | D
+#
+# A different topology from everything above, and the two things it adds are worth stating.
+#
+# The coupling graph is a CYCLE (A-B-D-C-A), not a chain, so the reconciliation has to close a loop
+# rather than propagate along one. D shares no interface with A at all -- they touch only at the cross
+# point -- so a refinement demand raised in A can only reach D by travelling around the cycle.
+#
+# And the cross point itself is four DISTINCT nodes, one per domain, tied pairwise by four Lagrange
+# multipliers (A=B, A=C, B=D, C=D). Only three of those four constraints are independent; the fourth
+# follows. That is a genuine over-constraint at a single point, and it is
+# ConnectFieldsAtInterface.pin_redundant_lagrange_multipliers that has to notice.
+#
+# Exact solution u = y everywhere, so a mis-paired interface shows up directly as a nodal error.
+
+FOUR_DOMAIN_KINDS = ["four_corner", "four_diagonal", "four_away"]
+_FOUR_DOMS = ["A", "B", "C", "D"]
+# RectangularQuadMesh names an auto-generated internal interface after the two domains it separates.
+_FOUR_IFACES = [("A", "A_B"), ("A", "A_C"), ("B", "B_D"), ("C", "C_D")]
+
+
+def _four_domain_of(x, y):
+    if y >= 0.5:
+        return "A" if x < 0.5 else "B"
+    return "C" if x < 0.5 else "D"
+
+
+class FourDomainProblem(Problem):
+    def __init__(self, kind="four_corner", N=4):
+        super().__init__()
+        self.kind, self.N = kind, N
+
+    def define_problem(self):
+        self += RectangularQuadMesh(N=[self.N, self.N], size=[1, 1], name=_four_domain_of)
+        for d in _FOUR_DOMS:
+            self += PoissonEquation(name="u", source=0, space="C1") @ d
+            self += IntegralObservables(intu=var("u"), intu2=var("u") ** 2) @ d
+        self += DirichletBC(u=0) @ "C/bottom"
+        self += DirichletBC(u=0) @ "D/bottom"
+        self += DirichletBC(u=1) @ "A/top"
+        self += DirichletBC(u=1) @ "B/top"
+        for dom, nm in _FOUR_IFACES:
+            self += ConnectFieldsAtInterface("u") @ (dom + "/" + nm)
+
+        if self.kind == "four_corner":
+            # Refinement concentrated ON the cross point, in A only: the level jump sits exactly where
+            # all four domains meet, and both of A's interfaces have to carry it into B and C, and then
+            # around to D.
+            def lev(e):
+                x, y = e.get_Eulerian_midpoint()[0], e.get_Eulerian_midpoint()[1]
+                d = max(abs(x - 0.5), abs(y - 0.5))
+                return 3 if d < 0.2 else (1 if d < 0.35 else 0)
+            self += RefineAccordingToElement(lev) @ "A"
+        elif self.kind == "four_diagonal":
+            # The DIAGONAL pair driven, to different levels: A and D are each pulled by two neighbours
+            # that disagree with each other about how fine the interface should be.
+            self += RefineAccordingToElement(lambda e: 3) @ "B"
+            self += RefineAccordingToElement(lambda e: 2) @ "C"
+        elif self.kind == "four_away":
+            # Refinement in A but AWAY from every interface. Nothing may propagate: this is the case
+            # that separates "the neighbours follow where they must" from "the neighbours follow
+            # always", which the other two cannot distinguish.
+            def lev(e):
+                x, y = e.get_Eulerian_midpoint()[0], e.get_Eulerian_midpoint()[1]
+                return 3 if (x < 0.2 and y > 0.8) else 0
+            self += RefineAccordingToElement(lev) @ "A"
+        else:
+            raise ValueError("unknown four-domain kind: " + str(self.kind))
+
+
+def solve_four_domain_case(kind, outdir=None):
+    import numpy as np
+    prob = FourDomainProblem(kind=kind)
+    with prob as p:
+        if outdir is not None:
+            p.set_output_directory(outdir)
+        p.max_refinement_level = 3
+        p.initialise()
+        repairs_at_init = p._interface_conformity_repairs
+        for _ in range(4):
+            p.solve(spatial_adapt=1)
+        # Wipe and re-solve on the final mesh, so the Newton history is a Jacobian oracle rather than
+        # the tail of an already-converged solve (see solve_case).
+        for d in _FOUR_DOMS:
+            m = p.get_mesh(d)
+            iu = m.get_nodal_field_indices()["u"]
+            for n in m.nodes():
+                if not n.is_pinned(iu):
+                    n.set_value(iu, 0.0)
+        p.solve()
+        conv = p.get_last_residual_convergence()
+        worst = 0.0
+        levels = {}
+        for d in _FOUR_DOMS:
+            m = p.get_mesh(d)
+            iu = m.get_nodal_field_indices()["u"]
+            for n in m.nodes():
+                worst = max(worst, abs(n.value(iu) - n.x(1)))
+            levels[d] = sorted({e.refinement_level() for e in m.elements()})
+        res = {
+            "maxres": float(np.max(np.abs(np.asarray(p.get_residuals())))),
+            "ndof": int(p.ndof()),
+            "newton_steps": max(len(conv) - 1, 0),
+            "newton_conv": [float(c) for c in conv],
+            "nonconforming": int(p.check_interface_conformity(False, "four-domain")),
+            "repairs_during_adapt": int(p._interface_conformity_repairs - repairs_at_init),
+            "maxuerr": float(worst),
+            "maxlevel": {d: max(levels[d]) for d in _FOUR_DOMS},
+        }
+        for d in _FOUR_DOMS:
+            for name, val in p.get_mesh(d).evaluate_all_observables().items():
+                res["obs_" + d + "_" + name] = float(val)
+        return res

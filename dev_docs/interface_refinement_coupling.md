@@ -598,7 +598,50 @@ offending facets and the two plausible causes. Pinned by
 `test_unsatisfiable_cap_is_diagnosed_not_left_to_the_matcher` and
 `test_lower_max_refinement_level_governs_the_interface`.
 
-### 14.8 Still open
+### 14.8 Four domains at a cross point, and why the junction is well-posed
+
+`RectangularQuadMesh` split four ways (A|B over C|D) is a topology the two-domain matrix cannot reach,
+and it exercises two things:
+
+* the coupling graph is a **cycle** (A-B-D-C-A), not a chain, so the reconciliation has to close a loop.
+  D shares no interface with A -- they touch only at the cross point -- yet refinement raised in A
+  reaches D, by travelling round. Measured: `four_corner` drives A alone and D ends at level 3, with
+  `repairs_during_adapt == 0`, i.e. the reconciliation gets there before the repair does. Under
+  `mpirun -n 2` the `ndof` matches the serial run exactly (481 / 1923 / 253).
+* the cross point itself, which is where a naive reading says the system must be over-constrained -- and
+  it is not, for a reason worth writing down because it is not obvious and is easy to break.
+
+**Why the cross point is not over-constrained.** An interface field is a nodal value on the *bulk* node,
+allocated by `Mesh::resolve_interface_dof_id(name)` -- keyed on the NAME, once per bulk mesh. Domain A
+owns two interfaces here (`A_B` and `A_C`); `ConnectFieldsAtInterface` names its multiplier
+`lagr_mult_prefix + inner + "_" + outer`, which is `_lagr_conn_u_u` on both. They therefore resolve to
+the *same* slot: A's cross-point node carries ONE multiplier serving both interfaces, and its residual
+there is the sum of the two contributions. Seven multipliers for seven independent conditions.
+
+Verified by forcing the names apart (`lagr_mult_prefix="_lm_<iface>_"` per interface), which gives A's
+cross node two slots:
+
+| | ndof | smallest singular value | condition number | rank |
+|---|---|---|---|---|
+| shared name (default) | 13 | 1.2e-02 | 7.5e+01 | **13/13** |
+| distinct names | 14 | 7.8e-18 | 1.1e+17 | **13/14** |
+
+So the shared name is load-bearing, not incidental.
+
+**The trap.** The rank-deficient case still produces the correct answer -- `max|u-y| = 0`, Newton
+converging in one step to 5.6e-17. The null space lives entirely in the multipliers, so the primal
+solution is still determined and a direct solver simply returns some λ from the affine family. Neither
+the residual nor the one-Newton-step Jacobian oracle notices. A user who gives a different
+`lagr_mult_prefix` per interface at a multi-domain junction therefore gets a Jacobian that is singular to
+machine precision while everything looks healthy, and pays for it later in an eigensolve or an iterative
+solver. This is pre-existing `ConnectFieldsAtInterface` behaviour, not introduced here;
+`with_removed_overconstraining(*corners)` is the existing escape hatch.
+
+For the record: `pin_redundant_lagrange_multipliers` is NOT what makes the junction work. It pins a
+multiplier only when every variable it constrains is already pinned, and at an interior cross point none
+of them is.
+
+### 14.9 Still open
 
 * **`_override_bulk_errors_where_necessary` is still Python**, per §14.5. It is the propagation rather
   than a criterion, its rank-locality problem is already covered by the max-reduce, and moving it needs
