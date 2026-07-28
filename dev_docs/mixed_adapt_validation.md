@@ -317,11 +317,7 @@ today's list that is engine work rather than test work, and it should be schedul
    * plus a three-way and an all-four-way region.
    Boundary facets must be tagged per element face (the §4.3 mechanism) for all six walls, since the
    Neumann and ALE tasks depend on face elements over every shape.
-2. **No MPI test target in `tests/`.** The pytest suite is serial. Needs a harness that re-launches a
-   parametrised worker script under `mpirun -n 2` via `subprocess`, `pytest.skip`s when `mpirun` or
-   PETSc+MUMPS is absent, and asserts on the worker's structured stdout. Worker must also compare its
-   distributed result against a serial reference of the same problem, since a per-rank residual check alone
-   does not catch a globally-consistent-but-wrong field.
+2. ~~**No MPI test target in `tests/`.**~~ **[DONE]** — see §7.
 
 ---
 
@@ -335,8 +331,7 @@ downstream is testable.
 - A2. **[DONE]** Distributed `get_residuals()` / `_assemble_residual_jacobian()` / `get_current_dofs()` /
   `get_history_dofs()` / `set_current_dofs()` (§3.1).
 - A3. **[DONE]** Globally consistent pressure fixation for all three modes (§3.2).
-- A4. Add the MPI pytest harness (§5.2) and codify the `probe_mpi_matrix` sweep as tests — the sweep itself
-  is already green (§3.3), so this is transcription plus the serial-reference comparison.
+- A4. **[DONE]** MPI pytest harness + the sweep codified as tests (§7).
 
 **Phase B — 2D campaign (mostly codification; serial half already verified).**
 - B1. Stokes box f=(−y,x), Taylor–Hood, quad / tri_left / tri_crossed / mixed, levels (0,0)/(1,1)/(1,3);
@@ -368,3 +363,66 @@ downstream is testable.
   but it needs a note in `CHANGELOG.md`.
 * 3D mixed + ALE + MPI is the deepest untested stack on the branch; expect the C-phase to surface engine
   issues that the 2-element mixed toys never could.
+
+---
+
+## 7. The MPI test harness — **[DONE]**
+
+Three new files in `tests/`:
+
+* **`mpi_cases.py`** — the problem definitions, imported by *both* sides. The serial reference and the
+  distributed run therefore solve a bit-identical problem and differ only in partitioning, which is what
+  makes the comparison mean anything. Covers the box [-0.5,0.5]² as `quad` / `tri_left` / `tri_crossed` /
+  `mixed` (quad+tri, cross-shape interface at x=0), at refinement states `(0,0)` / `(1,1)` / `(1,3)`, for
+  `poisson1` (C1), `poisson2` (C2), `mixed12` (C2 `u` driving C1 `v`), `stokes_th` and `stokes_cr` (both
+  driven by f = (−y, x), both using `create_pressure_fixation`).
+* **`mpi_worker.py`** — run as `mpirun -n N python mpi_worker.py --spec '<json>' --outdir … --distribute`;
+  prints one `PYOOMPH_MPI_RESULT <json>` line per rank per case. A case that raises reports its exception
+  and traceback in the payload instead of killing the run, so one broken case still yields a diagnosis.
+  Deliberately not named `test_*` so pytest does not collect it.
+* **`test_mpi_adaptivity.py`** — the harness. Skips (does not fail) when `mpirun`, MPI, or PETSc+MUMPS is
+  missing. 6 tests, ~33 s total.
+
+### 7.1 What is compared, and why those quantities
+
+Everything measured is **partition-independent**, so a distributed run must reproduce the serial numbers:
+
+| quantity | why it is valid under MPI | what it catches |
+|---|---|---|
+| `max\|residual\|` | gathered to full length since §3.1, so identical on every rank | an inexact hanging-node Jacobian |
+| `ndof` | global on a distributed problem | a different discretisation / hanging structure |
+| integral observables | `Mesh::evaluate_integral_function` skips halo elements and `MPI_Allreduce`-sums | a **wrong field** — which a residual check alone would pass |
+
+Deliberately *not* compared: `nelement()` (per-rank, includes halos) and nodal values (a rank holds only
+its own partition). Two independent oracles are applied: distributed-vs-serial, and cross-rank agreement.
+
+### 7.2 Three things that had to be got right
+
+* **Nested `mpirun` dies silently.** Importing pyoomph calls `MPI_Init`, so the pytest process is itself a
+  singleton MPI job owning an Open MPI session directory under `TMPDIR`. A nested `mpirun` collides with it
+  and exits 1 with *no stdout and no stderr at all*. Fix: give the child its own `TMPDIR`. This cannot be
+  dodged by import discipline in the test module — any other test module in the same pytest process has
+  already imported pyoomph.
+* **Don't assert on an observable that is zero by symmetry.** ∫u_x and ∫u_y vanish identically for this
+  forcing on this box, so the first version compared round-off (~1e-13) against round-off and failed for no
+  physical reason. Replaced by the angular momentum ∫(x·u_y − y·u_x), which the forcing actually drives.
+  The tolerance additionally carries an absolute term scaled by the case's largest observable, so a
+  near-zero observable can never fail on noise again.
+* **Crouzeix–Raviart needs its own tolerance** (1e-7 relative, vs 1e-9 elsewhere), for the same reason its
+  residual bound is looser: it is markedly worse conditioned than Taylor–Hood, and re-partitioning
+  perturbs its observables by ~1e-9 relative. A genuinely torn or mis-hung interface moves these integrals
+  by orders of magnitude more, so the looser bound does not blunt the test.
+
+### 7.3 Verified sensitivity
+
+The oracle was negative-controlled, not just observed to pass: perturbing the reference field integral by
+**1e-8 relative** is caught, and so is a **single-dof** difference in `ndof`. Three consecutive full runs
+are stable (6 passed, ~33 s each). Full serial suite unaffected.
+
+### 7.4 Result
+
+`test_distributed_adaptive_matches_serial` (C1 Poisson, C2 Poisson, coupled C2+C1, Taylor–Hood Stokes ×
+4 meshes × 3 refinement states, `-n 2`), `test_distributed_crouzeix_raviart` (`-n 2`) and
+`test_distributed_four_ranks` (`-n 4`, the two-level non-uniform state) all pass. Phase B's remaining work
+is now to extend `mpi_cases.py` with the constrain-C1, Neumann and ALE cases — the harness itself takes
+them without modification.

@@ -1,0 +1,200 @@
+#  @file
+#  @author Christian Diddens <c.diddens@utwente.nl>
+#
+#  @section LICENSE
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+#  The main author may be contacted at c.diddens@utwente.nl
+#
+# ========================================================================
+
+# Distributed (MPI) adaptivity tests for branch mixed_adapt.
+#
+# pytest itself runs serially, so each test here launches tests/mpi_worker.py under
+# `mpirun -n N ... --distribute` in a subprocess, then compares the per-rank results against a serial
+# reference computed in-process from the SAME definitions (tests/mpi_cases.py). Two independent oracles:
+#
+#   1. cross-rank agreement -- every measured quantity is global (gathered residual, global ndof,
+#      MPI_Allreduce'd integral observables), so all ranks must report the same numbers. A partition-
+#      dependent answer means something is being computed on the wrong subset of the mesh.
+#   2. serial agreement    -- the distributed numbers must match the serial run. This is what catches a
+#      globally consistent but WRONG field, which a per-rank residual check alone would happily pass.
+#
+# Coverage: the box [-0.5,0.5]^2 as pure quads / two triangle splits / a MIXED quad+tri mesh, at three
+# refinement states including a two-level non-uniform 2:1 jump, for C1 Poisson, C2 Poisson, coupled
+# C2+C1 Poisson, and Taylor-Hood / Crouzeix-Raviart Stokes driven by f = (-y, x).
+#
+# The tests skip (rather than fail) when mpirun or an MPI-capable solver is missing, so the suite stays
+# runnable on a serial-only install.
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import mpi_cases
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_WORKER = os.path.join(_HERE, "mpi_worker.py")
+
+# Tolerances. The residual oracle is machine zero for these linear problems; Crouzeix-Raviart is more
+# poorly conditioned than Taylor-Hood, hence its own (still tiny) bound. The serial-vs-distributed
+# comparison is a comparison of two different summation orders of the same exact computation, so it is
+# allowed a relative slack rather than being required bit-identical.
+_RES_TOL = {"stokes_cr": 1e-6}
+_RES_TOL_DEFAULT = 1e-9
+# numpy-allclose semantics. The absolute part is scaled by the LARGEST observable of the case rather than
+# being a fixed constant: an observable that happens to be ~0 (e.g. one that vanishes by symmetry) would
+# otherwise be compared round-off against round-off and fail for no physical reason.
+#
+# Crouzeix-Raviart gets a looser relative tolerance for the same reason its residual bound is looser: it is
+# markedly worse conditioned than Taylor-Hood (its serial residual sits around 1e-10 rather than at machine
+# zero), so re-partitioning it perturbs the observables by ~1e-9 relative. That is solver noise on an
+# ill-conditioned system, not a differing field -- a torn or mis-hung interface shifts these integrals by
+# orders of magnitude more.
+_OBS_RTOL = {"stokes_cr": 1e-7}
+_OBS_RTOL_DEFAULT = 1e-9
+_OBS_ATOL_REL = 1e-12
+
+
+def _obs_tol(sval, case_scale, eq):
+    return _OBS_RTOL.get(eq, _OBS_RTOL_DEFAULT) * abs(sval) + _OBS_ATOL_REL * case_scale
+
+
+def _mpi_reason():
+    """None if a distributed run is possible here, else the reason to skip."""
+    if shutil.which("mpirun") is None:
+        return "mpirun not found"
+    try:
+        from pyoomph.generic.mpi import has_mpi
+        if not has_mpi():
+            return "pyoomph was built without MPI"
+    except Exception as e:
+        return "MPI unavailable: " + str(e)
+    try:
+        from petsc4py import PETSc  # type:ignore
+        if not PETSc.Sys.hasExternalPackage("mumps"):
+            return "PETSc has no MUMPS support (no distributed-capable direct solver)"
+    except Exception:
+        return "petsc4py not available (no distributed-capable direct solver)"
+    return None
+
+
+_SKIP_REASON = _mpi_reason()
+pytestmark = pytest.mark.skipif(_SKIP_REASON is not None, reason=str(_SKIP_REASON))
+
+
+def _run_distributed(cases, nproc, tmpdir):
+    """Launch the worker under mpirun and return {case_id: [per-rank result dicts]}."""
+    spec = json.dumps([[k, e, list(l)] for k, e, l in cases])
+    cmd = ["mpirun", "-n", str(nproc)]
+    if os.environ.get("PYOOMPH_MPI_OVERSUBSCRIBE", "1") == "1":
+        # CI machines routinely have fewer slots than we ask for; without this OpenMPI refuses to start.
+        cmd += ["--oversubscribe"]
+    cmd += [sys.executable, _WORKER, "--spec", spec, "--outdir", str(tmpdir), "--distribute"]
+    # Importing pyoomph calls MPI_Init, so THIS pytest process is already a (singleton) MPI job and owns an
+    # Open MPI session directory under TMPDIR. A nested mpirun collides with it and dies immediately with
+    # exit code 1 and no diagnostics at all. Giving the child its own TMPDIR keeps the two session
+    # directories apart. (Note this bites whenever any test module in the same pytest process has imported
+    # pyoomph, which is essentially always -- so it cannot be avoided by import discipline here.)
+    env = dict(os.environ)
+    ompi_tmp = os.path.join(str(tmpdir), "_ompi_session")
+    os.makedirs(ompi_tmp, exist_ok=True)
+    env["TMPDIR"] = ompi_tmp
+    proc = subprocess.run(cmd, cwd=_HERE, capture_output=True, text=True, timeout=3600, env=env)
+    results = {}
+    for line in proc.stdout.splitlines():
+        if line.startswith("PYOOMPH_MPI_RESULT "):
+            payload = json.loads(line[len("PYOOMPH_MPI_RESULT "):])
+            results.setdefault(payload["case"], []).append(payload)
+    if not results:
+        raise AssertionError(
+            "no results from mpirun (exit %d)\n--- stdout tail ---\n%s\n--- stderr tail ---\n%s"
+            % (proc.returncode, proc.stdout[-3000:], proc.stderr[-3000:]))
+    for cid, per_rank in results.items():
+        assert len(per_rank) == nproc, "case %s reported from %d of %d ranks" % (cid, len(per_rank), nproc)
+        for r in per_rank:
+            assert "error" not in r, "case %s failed on rank %d: %s\n%s" % (
+                cid, r["rank"], r["error"], r.get("traceback", ""))
+    return results
+
+
+def _assert_matches_serial(cid, per_rank, serial, eq):
+    res_tol = _RES_TOL.get(eq, _RES_TOL_DEFAULT)
+    obs_keys = [k for k in serial if k.startswith("obs_")]
+    assert obs_keys, "%s: no integral observables defined -- the field would go unchecked" % cid
+    case_scale = max(abs(serial[k]) for k in obs_keys)
+    for r in per_rank:
+        # (1) the distributed solve is itself converged
+        assert r["maxres"] < res_tol, "%s: max|residual| = %.3e on rank %d" % (cid, r["maxres"], r["rank"])
+        # (2) same global discretisation -> same hanging-node structure was built
+        assert r["ndof"] == serial["ndof"], "%s: ndof %d on rank %d vs %d serially" % (
+            cid, r["ndof"], r["rank"], serial["ndof"])
+        # (3) the FIELD matches serial (global, halo-free, MPI-reduced integrals)
+        for key in obs_keys:
+            sval, dval = serial[key], r[key]
+            assert abs(dval - sval) <= _obs_tol(sval, case_scale, eq), \
+                "%s: %s = %.16g on rank %d vs %.16g serially" % (cid, key, dval, r["rank"], sval)
+    # (4) all ranks agree with each other (MPI_Allreduce hands every rank the same sum, so this should be
+    #     exact; compared with a tolerance anyway so the test does not depend on that guarantee)
+    first = per_rank[0]
+    for r in per_rank[1:]:
+        assert r["ndof"] == first["ndof"], "%s: ndof differs between rank %d and rank %d" % (
+            cid, first["rank"], r["rank"])
+        for key in obs_keys:
+            assert abs(r[key] - first[key]) <= _obs_tol(first[key], case_scale, eq), \
+                "%s: %s differs between rank %d and rank %d" % (cid, key, first["rank"], r["rank"])
+
+
+def _check(cases, nproc, tmp_path):
+    dist = _run_distributed(cases, nproc, tmp_path / "dist")
+    for kind, eq, levels in cases:
+        cid = mpi_cases.case_id(kind, eq, levels)
+        serial = mpi_cases.solve_case(kind, eq, levels, outdir=str(tmp_path / "serial" / cid))
+        assert serial["maxres"] < _RES_TOL.get(eq, _RES_TOL_DEFAULT), \
+            "%s: the SERIAL reference did not converge (max|residual| = %.3e)" % (cid, serial["maxres"])
+        _assert_matches_serial(cid, dist[cid], serial, eq)
+
+
+# One test per equation system, sweeping all four discretisations and all three refinement states, so a
+# failure names the physics immediately. Each invocation is a single mpirun (the worker loops over the
+# cases), which keeps the MPI start-up cost to one per test rather than one per case.
+@pytest.mark.parametrize("eq", ["poisson1", "poisson2", "mixed12", "stokes_th"])
+def test_distributed_adaptive_matches_serial(eq, tmp_path):
+    cases = [(kind, eq, lv) for kind in mpi_cases.MESH_KINDS for lv in mpi_cases.LEVELS]
+    _check(cases, 2, tmp_path)
+
+
+def test_distributed_crouzeix_raviart(tmp_path):
+    # CR pins an ELEMENT-INTERNAL pressure dof, i.e. the other pressure-fixation path; and its bubble
+    # (C2TB) velocity allocates son internal data on refinement. Level 3 is dropped: CR is the most
+    # expensive discretisation here and level (1,2) already covers the 2:1 hanging case.
+    cases = [(kind, "stokes_cr", lv) for kind in mpi_cases.MESH_KINDS for lv in [(0, 0), (1, 1), (1, 2)]]
+    _check(cases, 2, tmp_path)
+
+
+def test_distributed_four_ranks(tmp_path):
+    # More ranks than the 2-rank default: more partition boundaries cut through the refined band, and the
+    # globally selected pressure node is more likely to live on a rank other than 0.
+    cases = [(kind, eq, (1, 3)) for kind in mpi_cases.MESH_KINDS for eq in ["poisson2", "stokes_th"]]
+    _check(cases, 4, tmp_path)
