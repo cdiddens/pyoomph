@@ -13,6 +13,12 @@ Status legend: **[DONE]** landed and verified · **[READY]** verified to work, n
 
 ## 0. Executive summary of the analysis
 
+> **This section is the INITIAL analysis, written before any of the work, and is kept unedited as the
+> record of what was predicted.** It is no longer a status report — every item below has since been
+> resolved. Two of its three predictions held; the "serially, everything already works" one did not, and
+> the way it failed is the most useful thing in this document. Jump to §9.9 and §12 for where things
+> actually landed, or read on for what was expected.
+
 The serial story is much better than expected and the MPI story is worse — but for a reason that has
 nothing to do with the refinement engine.
 
@@ -29,6 +35,22 @@ nothing to do with the refinement engine.
   pins a rank-local node. Both are small, well-understood fixes; both must land before any MPI test in this
   campaign can even be *written*, because the first one destroys the oracle and the second one segfaults.
 * The default-solver-under-MPI item is **[DONE]** (§1).
+
+**How this analysis held up.** The two MPI blockers were real and were exactly as described (§3.1, §3.2).
+The `ConstrainPositionsToC1Space` prediction was right that it needed real engine work, and right that it
+was the schedule risk — it cost two failed approaches (§11.4).
+
+The claim that did **not** hold is the first and most confident one: *"serially, everything on today's
+list already works … those tasks are therefore codification work, not implementation work."* In 2D that
+was true. In 3D it was wrong, and wrong in a way the 2D probes could not have revealed — the wedge and
+pyramid C1-corner tables were incorrect **without any adaptivity at all** (§9.4), so a whole class of
+mixed-order 3D problems had been silently wrong. Three of the six defects on this branch came out of that
+supposedly-already-working territory.
+
+The lesson is about the evidence, not the estimate: "it converges" was doing the work of "it is correct".
+What broke the deadlock was oracles that can fail on a *non-adaptive* mesh — chiefly the Green identity
+∫v = ∫u², which is exact once u is restricted to v's space and which failed immediately on plain
+non-adaptive wedges.
 
 Consequence for sequencing: fix the three blockers (§1 done, §3.1, §3.2) → then the 2D/3D serial tests are
 mostly transcription of the probes in this document → then MPI variants of the same tests → then the one
@@ -335,20 +357,26 @@ downstream is testable.
 
 **Phase B — 2D campaign. [DONE] — see §8.**
 
-**Phase C — 3D campaign. [DONE for everything that works; two defects found and characterised — see §9.]**
+**Phase C — 3D campaign. [DONE] — see §9.** Three defects found (A, B, C), all three fixed.
 
-**Phase D — the hard item.**
-- D1. `ConstrainPositionsToC1Space` under triangle/mixed hanging (§4): registered position-hang masters
-  mirroring the solid-hang allocation. Then the ALE + position-C1 matrix in 2D and 3D, serial + MPI, which
-  is currently the only part of the task list with no working baseline at all.
+**Phase D — the hard item. [DONE] — see §11.**
+- D1. ~~`ConstrainPositionsToC1Space` under triangle/mixed hanging (§4)~~: done via
+  `register_c1_constraint_position_masters()`, which registers the position-hang masters oomph never
+  allocated. The ALE + position-C1 matrix passes in 2D and 3D, serial and MPI.
 
-**Risks / open questions.**
-* D1 is the schedule risk: it previously failed against oomph's two-pass equation numbering, and the fix
-  touches equation assignment rather than the pyoomph-owned refinement engine.
-* §3.1's fix changes the semantics of a public API under MPI (from garbage to globally replicated). Cheap,
-  but it needs a note in `CHANGELOG.md`.
-* 3D mixed + ALE + MPI is the deepest untested stack on the branch; expect the C-phase to surface engine
-  issues that the 2-element mixed toys never could.
+**How the risks played out.**
+* D1 *was* the schedule risk, and it did cost two failed approaches (§11.4) before the right layer was
+  found — but the fix landed and the guard left strict in §9.5 could then be relaxed.
+* §3.1's fix changes the semantics of a public API under MPI (from garbage to globally replicated).
+  Noted in `CHANGELOG.md`.
+* "3D mixed + ALE + MPI is the deepest untested stack on the branch; expect the C-phase to surface engine
+  issues that the 2-element mixed toys never could." — correct, and the most useful prediction on this
+  list. It produced defect A (three separate bugs, two of them wrong index tables that were also broken
+  *without* adaptivity) and defect C.
+
+**Everything on the original seven-task list is complete.** The suite carries no `xfail` and no excluded
+discretisation. See §9.7 for the one adjacent limitation that remains open and is *not* part of this
+campaign (distributed eigensolves).
 
 ---
 
@@ -871,6 +899,29 @@ element's face lattice" — a stale coarse halo element contributes no node the 
 have, so it cannot manufacture a constraint. Only the pure-tet route, which reasons from tree neighbours,
 is fooled by it.
 
+**Which refinement criteria this actually affected.** The fix works on the final error vector, and there is
+exactly one call site into `Mesh::adapt()` (`adapt_by_elemental_errors`, from
+`Problem._adapt_with_interfacial_errors`), so structurally no criterion can bypass it. Tested rather than
+assumed, by disabling `synchronise_elemental_errors()` and re-running
+`test_distributed_refinement_criteria`:
+
+| criterion | stated on | diverged without the fix? |
+|---|---|---|
+| `RefineToLevel` | `"domain"` (bulk) | no |
+| `RefineToLevel` | `"domain/top"` (interface) | **yes** — this is defect C |
+| `RefineMaxElementSize` | `"domain/top"` (interface) | **yes** (3 inconsistencies) |
+| `RefineAccordingToElement` | `"domain"` (bulk) | no |
+| `RefineAccordingToElement` | `"domain/top"` (interface) | **yes** |
+
+The pattern is not *which* criterion but *where it is stated*. A criterion evaluated on the bulk mesh reads
+nothing but the element's own geometry and level, so a halo copy necessarily agrees with its owner. A
+criterion stated on an **interface** mesh reaches the bulk through
+`_override_bulk_errors_where_necessary`, and a rank holds halo copies of bulk elements *without* holding
+the interface elements that would override their error — so the override simply never arrives. Any
+criterion in that position was affected; any criterion restricted to the bulk was not. (The same argument
+puts `_enlarge_elemental_error_max_override_to_only_nodal_connected_elems`, which spreads by nodal
+connectivity, firmly in the affected class.)
+
 **Lessons worth keeping.**
 
 * The consistency check that would have found this on day one already existed upstream, behind a build flag
@@ -1057,3 +1108,45 @@ which default-constructs an EMPTY `DenseMatrix<int>` for an unregistered node, s
 `leaf_local_eqn_for_position` reads out of bounds and returns a garbage index — that is the whole mechanism
 of the §4.14 abort. Adding a membership check there would turn it into a precise diagnostic naming the
 unregistered node, which would make the required registration set directly enumerable rather than inferred.
+
+---
+
+## 12. Final status
+
+**All seven requested tasks are complete**, serially and under `mpirun --distribute` with more than one
+refinement level, on every discretisation each task asked for.
+
+| # | task | serial | distributed |
+|---|---|---|---|
+| 1 | `--petsc_mumps` as the default solver under `mpirun -n N`, N>1 | n/a | done (§1) |
+| 2 | mixed C1/C2 on adaptive quad / tri / mixed, Stokes with f = (−y, x) | pass | pass (§8) |
+| 3 | the same in 3D, all brick/tet/wedge/pyramid combinations | pass | pass (§9) |
+| 4 | coupled C2+C1 Poisson, `ConstrainFieldsToC1Space` / `Unconstrain...` at boundaries, 2D+3D | pass | pass |
+| 5 | ALE — Stokes with evaporation from the top, 2D+3D, all families | pass | pass |
+| 6 | ALE with `ConstrainPositionsToC1Space` / `Unconstrain...` | pass | pass (§11) |
+| 7 | Neumann BCs on mixed adaptive meshes, same configurations | pass | pass |
+
+**Six defects found, all six fixed.** In the order they were found: the MPI default solver (§1); the
+distributed `DoubleVector` accessors (§3.1); the rank-local pressure fixation (§3.2); the 3D
+`check_all_neighbours` guard (§9.2); defect B, the C1-constraint vertex guard (§9.5); defect A, three
+separate bugs behind one symptom (§9.4); and defect C, rank-local error overrides (§9.8). Plus task 6's
+missing position-hang master registration (§11.3).
+
+Three of them — the two wrong C1-corner tables and the missing per-value interpolation hooks — were
+broken **without any adaptivity**, in territory §0 had assessed as already working.
+
+**Test suite: 579 passed, no `xfail`, no excluded discretisation.** Roughly 6 minutes for the fast run,
+12 with `--full` (§10).
+
+**What is NOT covered, stated explicitly:**
+
+* **Distributed eigensolves.** Segfault inside oomph-lib's `parallel_sparse_assemble` during
+  `get_eigenproblem_matrices`, on non-adaptive meshes too — a general distributed-assembly defect that
+  predates this campaign and is not part of it. Diagnosis and the two-step path to fixing it are in
+  `mixed_adaptive_meshes.md` §4.17.
+* **The refinement-criterion axis is 2D only.** `RefineMaxElementSize` and `RefineAccordingToElement` are
+  swept distributed in 2D (§9.8); in 3D only `RefineToLevel` is. The mechanism is dimension-independent,
+  so this is a coverage choice, not a known gap.
+* **Real-world scripts.** Everything here runs on purpose-built box meshes. The tutorial and example
+  scripts have not been run under `--distribute` with adaptivity.
+* **More than 4 ranks**, and meshes large enough for partitioning to produce genuinely thin halo layers.

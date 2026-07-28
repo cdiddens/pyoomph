@@ -273,3 +273,23 @@ def test_halo_consistency_check_stays_clean(tmp_path):
              for eq in ["poisson2", "unconstrain12", "stokes_th", "ale"]
              for lv in [(1, 1), (1, 3)]]
     _check(cases, 2, tmp_path, extra_env={"PYOOMPH_CHECK_HALO_CONSISTENCY": "2"})
+
+
+@pytest.mark.parametrize("crit", ["size", "callback"])
+def test_distributed_refinement_criteria(crit, tmp_path):
+    # The defect-C fix (Mesh::synchronise_elemental_errors) works on the FINAL error vector, so it covers
+    # every way of asking for refinement rather than just the RefineToLevel that exposed the bug -- there
+    # is exactly one call site into Mesh::adapt(), so nothing can bypass it. This tests that claim instead
+    # of relying on it, on the two other criteria pyoomph ships:
+    #
+    #   size     -- RefineMaxElementSize, stated on the bulk mesh AND on the "top" interface mesh. The
+    #               interface-restricted form is the shape that broke: a rank holds halo copies of bulk
+    #               elements without the interface elements that would override their error.
+    #   callback -- RefineAccordingToElement, whose 2:1 interface runs through the mesh INTERIOR (x=0)
+    #               rather than along a boundary, so a partition cut is far more likely to lie along it.
+    #
+    # Run with the halo-consistency check in throw mode, so a divergence fails at the adapt that caused it
+    # rather than being inferred afterwards from a mismatched ndof.
+    cases = [(kind, eq, (1, 2, crit)) for kind in box_cases.MESH_KINDS
+             for eq in ["poisson2", "unconstrain12", "stokes_th"]]
+    _check(cases, 2, tmp_path, extra_env={"PYOOMPH_CHECK_HALO_CONSISTENCY": "2"})

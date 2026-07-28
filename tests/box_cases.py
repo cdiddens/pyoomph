@@ -204,11 +204,57 @@ class BoxProblem(Problem):
         else:
             raise ValueError("unknown equation: " + str(self.eq))
         self += eqs @ "domain"
-        lo, hi = self.levels
-        if lo:
-            self += RefineToLevel(lo) @ "domain"
-        if hi and hi != lo:
-            self += RefineToLevel(hi) @ "domain/top"
+        self._add_refinement_criterion()
+
+    def _add_refinement_criterion(self):
+        # `levels` is (lo, hi) or (lo, hi, criterion). The criterion selects WHICH refinement-driving
+        # equation states the requirement; the resulting mesh is meant to be the same either way, which is
+        # what lets the distributed-vs-serial comparison stay meaningful across all of them.
+        #
+        # Why more than one: pyoomph's refinement criteria set a per-element error OVERRIDE, and those are
+        # computed rank-locally -- that is what defect C was (dev_docs/mixed_adapt_validation.md section
+        # 9.8). The dangerous shape is a criterion stated on an INTERFACE mesh ("domain/top"): a rank holds
+        # halo copies of bulk elements without holding the interface elements that would override their
+        # error, so the ranks disagree about what to refine. Every criterion here is exercised in exactly
+        # that boundary-restricted position for that reason.
+        lo, hi = self.levels[0], self.levels[1]
+        crit = self.levels[2] if len(self.levels) > 2 else "level"
+        h = 1.0 / self.N  # base element edge length on the unit box
+
+        def centroid_x(e):
+            nodes = e.nodes()
+            return sum(n.x(0) for n in nodes) / len(nodes)
+
+        if crit == "level":
+            if lo:
+                self += RefineToLevel(lo) @ "domain"
+            if hi and hi != lo:
+                self += RefineToLevel(hi) @ "domain/top"
+        elif crit == "size":
+            # Stated as a maximum element SIZE rather than a level. RefineMaxElementSize compares against
+            # get_current_cartesian_nondim_size(), which is an AREA on the bulk mesh and a LENGTH on the
+            # 1D interface mesh -- hence the two different thresholds for the same target level. Each is
+            # set a hair below the size at the target level so rounding cannot land on the boundary.
+            if lo:
+                self += RefineMaxElementSize(0.99 * (h / 2 ** (lo - 1)) ** 2) @ "domain"
+            if hi and hi != lo:
+                self += RefineMaxElementSize(0.99 * h / 2 ** (hi - 1)) @ "domain/top"
+        elif crit == "callback":
+            # A per-element callback, in two positions. On the bulk it gives this campaign its only 2:1
+            # interface running through the mesh INTERIOR (at x=0) rather than along a boundary, which a
+            # partition cut is far more likely to lie along.
+            #
+            # That bulk form alone cannot detect a rank-local criterion, though: it reads nothing but the
+            # element's own geometry, so a halo copy necessarily agrees with its owner. (Verified -- with
+            # the error synchronisation disabled this criterion still passes, while "size" fails.) The
+            # interface-restricted form below is what carries the teeth, for the reason in the note above:
+            # a rank holds halo bulk elements without the interface elements that would override them.
+            if lo:
+                self += RefineAccordingToElement(lambda e: lo + (1 if centroid_x(e) < 0 else 0)) @ "domain"
+            if hi and hi != lo:
+                self += RefineAccordingToElement(lambda e: hi) @ "domain/top"
+        else:
+            raise ValueError("unknown refinement criterion: " + str(crit))
 
 
 def solve_case(kind, eq, levels, N=4, outdir=None):
@@ -219,7 +265,9 @@ def solve_case(kind, eq, levels, N=4, outdir=None):
     with prob as p:
         if outdir is not None:
             p.set_output_directory(outdir)
-        p.max_refinement_level = max(max(levels), 1) + 1
+        # levels may carry a trailing criterion tag (see BoxProblem._add_refinement_criterion), so take
+        # the cap from the numeric entries only.
+        p.max_refinement_level = max(max(levels[0], levels[1]), 1) + 1
         p.solve()
         m = p.get_mesh("domain")
         conv = p.get_last_residual_convergence()
@@ -243,4 +291,7 @@ def solve_case(kind, eq, levels, N=4, outdir=None):
 
 
 def case_id(kind, eq, levels):
-    return "%s-%s-%d%d" % (eq, kind, levels[0], levels[1])
+    base = "%s-%s-%d%d" % (eq, kind, levels[0], levels[1])
+    # The criterion is part of the identity: the same (kind, eq, levels) solved through a different
+    # refinement criterion is a different case and must not collide with it in the results dict.
+    return base if len(levels) < 3 or levels[2] == "level" else base + "-" + str(levels[2])

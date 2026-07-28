@@ -123,6 +123,12 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
   of the same trees, a single divergence also misaligned every later halo exchange. The final error
   vector is now synchronised owner-to-halo before adaptation. Note oomph-lib has a check for exactly
   this, but only under `PARANOID`, which pyoomph does not enable by default.
+  What decided whether a run was affected was not *which* criterion was used but *where it was stated*:
+  a criterion on the bulk mesh reads only the element's own geometry, so a halo copy agreed with its
+  owner anyway, whereas one restricted to a boundary/interface (`... @ "domain/top"`) reaches the bulk
+  through the interface elements -- which a rank holding only halo copies of those bulk elements does
+  not have. All of `RefineToLevel`, `RefineMaxElementSize` and `RefineAccordingToElement` were affected
+  in that position.
 - **MPI**: the 3D 2:1 refinement-balancing pass (`TemplatedMeshBase3d::enforce_refinement_balance`) was
   rank-local: each process selected its own elements (halo copies included) and decided when to stop from
   its own selection count, around a collective `refine_selected_elements()`. The selection is now unioned
