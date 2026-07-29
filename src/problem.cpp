@@ -1065,6 +1065,26 @@ namespace pyoomph
 	  // Dirichlet changes all funnel through here. assign_eqn_numbers() is collective, so every MPI
 	  // rank bumps the id in lockstep.
 	  this->invalidate_jacobian_structure();
+#if defined(OOMPH_HAS_MPI) && defined(PARANOID)
+	  // Ranks that disagree about the pattern id would disagree about whether to rebuild the matrix,
+	  // and rebuilding it is itself collective - so a split decision deadlocks rather than producing a
+	  // wrong answer. Check it here, in a place that is already collective, rather than inside
+	  // get_jacobian_structure_id(): that one is called from Python and may well be read on a single
+	  // rank, where a collective call would be the deadlock it is meant to prevent.
+	  if (this->communicator_pt() && this->communicator_pt()->nproc() > 1)
+	  {
+		  unsigned long mine = jacobian_structure_id, lo = 0, hi = 0;
+		  MPI_Allreduce(&mine, &lo, 1, MPI_UNSIGNED_LONG, MPI_MIN, this->communicator_pt()->mpi_comm());
+		  MPI_Allreduce(&mine, &hi, 1, MPI_UNSIGNED_LONG, MPI_MAX, this->communicator_pt()->mpi_comm());
+		  if (lo != hi)
+		  {
+			  throw_runtime_error("The Jacobian sparsity pattern id diverged across MPI ranks (min " +
+								  std::to_string(lo) + ", max " + std::to_string(hi) + "). Some rank "
+								  "invalidated the pattern without the others doing so, which would let "
+								  "the ranks disagree about whether to rebuild the linear system.");
+		  }
+	  }
+#endif
 	  return res;
 	}
 

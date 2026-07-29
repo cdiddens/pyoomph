@@ -307,6 +307,43 @@ def test_structure_id_changes_on_renumbering():
         assert p.jacobian_structure_id != sid
 
 
+def test_structure_id_changes_when_the_active_residual_is_switched():
+    """A multi-residual problem has a different Jacobian per residual/Jacobian combination -- different
+    field couplings, and different fields pinned for having an empty Jacobian row. Switching between
+    them via _set_solved_residual() does not renumber anything, so, like augmentation, this is caught
+    only by the lazy re-validation in Problem::get_jacobian_structure_id()."""
+
+    class _TwoResidualProblem(Problem):
+        def define_problem(self):
+            self.add_mesh(RectangularQuadMesh(N=4))
+
+            class _Eqs(Equations):
+                def define_fields(self):
+                    self.define_scalar_field("u", "C2")
+
+                def define_residuals(self):
+                    u, v = var_and_test("u")
+                    self.add_residual(weak(grad(u), grad(v)) - weak(1, v))
+                    # A second, differently-coupled residual living on the same fields.
+                    self.add_residual(weak(u, v) - weak(2, v), destination="alt")
+
+            eqs = _Eqs()
+            for b in ["left", "right", "top", "bottom"]:
+                eqs += DirichletBC(u=0) @ b
+            self.add_equations(eqs @ "domain")
+
+    with _TwoResidualProblem() as p:
+        p.quiet()
+        p.initialise()
+        p.keep_structural_zeros = True
+        sid_default = p.jacobian_structure_id
+        assert p._set_solved_residual("alt", True, True)
+        sid_alt = p.jacobian_structure_id
+        assert sid_alt != sid_default, "switching the active residual must invalidate the pattern"
+        p._set_solved_residual("", False, True)
+        assert p.jacobian_structure_id != sid_alt
+
+
 def test_structure_id_changes_when_the_dof_vector_is_augmented():
     """Bifurcation tracking installs an assembly handler with its own eqn_number() over an augmented dof
     vector, which is a different matrix entirely. Nothing in assign_eqn_numbers() sees that, so this

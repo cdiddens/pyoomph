@@ -523,8 +523,8 @@ Note `-n 1 --distribute` still takes the *serial* solver path — `get_jacobian`
   would be a no-op (the diagonal is already complete, verified by test), so it only becomes
   meaningful together with Phase 3's pruning — it is deferred to there rather than added as a
   no-op knob now.
-* The `MPI_Allreduce` `PARANOID` assertion that `jacobian_structure_id` agrees across ranks (§7.3).
-  Currently checked empirically by the benchmark rather than enforced in code.
+* Invalidation after **remeshing** is not covered by a test. It goes through `assign_eqn_numbers()`
+  like adaptation does, so it should be covered by construction, but "should be" is not a test.
 
 ---
 
@@ -547,19 +547,24 @@ Every phase must keep these green before it lands:
    augmented dofs — `structure_id` must have changed and the rebuilt pattern must still satisfy (1).
    Conversely it must *not* change across Newton steps or arclength continuation steps, or the reuse
    never fires. This is the highest-risk area: a *missed* invalidation is a silent wrong-answer bug,
-   not a crash. ✔ `test_structure_id_*` (5 tests). Still uncovered: remeshing, and switching
-   `_solved_residual` on a multi-residual problem.
-5. **Existing suites.** ✔ `tests/` `--full` passes (504 passed / 310 skipped / 3 pre-existing xfails
-   in the fast run; the 3 xfails are the documented curved-boundary over-marking). The tutorial
-   pipeline is still owed, batched at the end of a phase — not per fix.
+   not a crash. ✔ `test_structure_id_*` (6 tests), covering renumbering, augmentation by fold
+   tracking, and switching the active residual. Still uncovered: remeshing.
+5. **Existing suites.** ✔ `tests/` passes: 518 passed / 314 skipped / 3 pre-existing xfails (the
+   documented curved-boundary over-marking), and `--full` is green. The tutorial pipeline is still
+   owed, batched at the end of a phase — not per fix.
 6. **MPI gates** — every one of 1–5 also under `mpirun -n 2` and `-n 4` with `--distribute`, plus:
    * cross-rank agreement and serial agreement on the gathered residual / global observables, the
      two oracles `tests/test_mpi_adaptivity.py` already implements (see its header);
-     ✔ checked by `tests/benchmarks/bench_assembly.py` (12 significant digits, `-n` 1/2/4, 2D and
-     3D) and by the existing MPI suites (26 tests). **Not yet a pytest gate** — the structural
-     variant should be added to the `box_cases` matrix so it runs in CI, not by hand.
-   * `jacobian_structure_id` identical on all ranks after every renumbering
-     (an `MPI_Allreduce(MIN/MAX)` assertion under `PARANOID`) — not yet implemented, see §5b;
+     ✔ `tests/test_mpi_structural_assembly.py` (+ `tests/mpi_structural_worker.py`): 4 tests, 2D and
+     3D at `-n 2` and `-n 4`, each checking cross-rank agreement, agreement between the filtered and
+     structural runs, and agreement with an in-process serial reference. The worker solves *twice*
+     on purpose — the first solve can never reuse a factorisation, so a single-solve test would pass
+     with the reuse path dead.
+   * `jacobian_structure_id` identical on all ranks after every renumbering.
+     ✔ asserted with `MPI_Allreduce(MIN/MAX)` under `PARANOID` in
+     `pyoomph::Problem::assign_eqn_numbers`. Deliberately *not* in `get_jacobian_structure_id()`:
+     that one is called from Python and may legitimately be read on a single rank, where a
+     collective call would be the very deadlock it is meant to prevent;
    * the assembled distributed Jacobian equals the serial one (gather and compare on the common
      pattern; extra entries exactly 0.0).
 
