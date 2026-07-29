@@ -3,7 +3,7 @@
 Written 2026-07-29 on branch `macro_elements`, after the interface-refinement-coupling work
 (`interface_refinement_coupling.md`) landed on `main`.
 
-Status: **S0, S1, S3, S4 and gmsh-3d done.** Every element shape is covered, in 2d and 3d, from hand-built templates and from gmsh. S2 (re-scoped), S5–S7 remain. §1 and §2 are measured, not assumed — every claim about current
+Status: **S0, S1, S3, S4 and gmsh-3d done; S5 investigated and deliberately closed without a code change (§18).** Every element shape is covered, in 2d and 3d, from hand-built templates and from gmsh. S2 (re-scoped), S6 and S7 remain. §1 and §2 are measured, not assumed — every claim about current
 behaviour below was reproduced, and the numbers are quoted. §3–§5 are the design. §11 is the
 staging. **§13 records what S0 actually turned up**, including a defect worse than anything §1 and
 §2 predicted and a measurement that materially weakens the case for part of S2 — read it before
@@ -928,8 +928,10 @@ Each stage ends with its tests green and is committed separately.
   §3.2.2 — see §15.3 for why the registry turned out not to be needed yet.
 - **S4 — wedge, pyramid, mixed forests.** ✅ **Done.** The last four throws removed (wedge, pyramid,
   mixed brick, and the tet-of-pyramid path). T5 green; curved module 61 passed, fast suite 477.
-- **S5 — moving meshes.** The `moving_nodes` split of §5, `Undeformed_macro_elem_pt` wiring, revisit
-  `remove_macro_elements_after_initial_adaption`. T10 green.
+- **S5 — moving meshes.** ⏹ **Investigated, closed without a code change** — the mechanism §5 named
+  turned out not to be the one pyoomph uses, and the behaviour change it implied was declined in
+  favour of keeping ALE semantics stable. §18 records the measurements and the decision. T10 is
+  therefore not written: there is no new behaviour to pin.
 - **S6 — MPI and coupled interfaces.** §6.2's decision, validated against the `mixed_adapt` MPI
   harness. T8, T9 green.
 - **S7 — docs and tutorials.** Curved-entity documentation, `CylinderMesh` curved entities, remove
@@ -1329,3 +1331,69 @@ Two details worth keeping:
 
 With the registry, 70 of the 126 elements carry a macro element — the 45 with faces plus exactly the
 25 with edges — and the shell is exact at every refinement level.
+
+---
+
+## 18. S5 (moving meshes): investigated, closed without a code change
+
+Decided on 2026-07-29. Recorded here rather than silently dropped, because the plan promised
+something that turned out to rest on a false premise, and because the alternative was a change to ALE
+behaviour that should not happen by accident.
+
+### 18.1 The `Undeformed_macro_elem_pt` route does not apply
+
+§5 proposed that on a moving mesh the macro element should drive the **Lagrangian** coordinate ξ, via
+oomph's `Undeformed_macro_elem_pt` and
+`enable_use_of_undeformed_macro_element_for_new_lagrangian_coords`. The mechanism exists and is
+plumbed for the Q family: `QSolidElementBase::get_x_and_xi`
+([Qelements.h:379-414](src/thirdparty/oomph-lib/include/Qelements.h#L379-L414)) takes ξ from the
+undeformed macro element when one is set.
+
+It is not the mechanism pyoomph uses. `pyoomph::Node` *is* an `oomph::SolidNode`
+([nodes.hpp:119](src/nodes.hpp#L119)), and `MeshTemplateElementCollection::lagrangian_dimension()`
+defaults to the nodal dimension, so ξ storage is allocated — yet in a Poisson +
+`PseudoElasticMesh` problem `interpolated_xi` returns zeros at every node, including a boundary node
+whose Eulerian position is `(0, 1)`. The element's `nlagrangian()` comes from the generated code's
+`lagr_dim`, and pyoomph's `var("lagrangian")` — which `PseudoElasticMesh` really does use, via
+`grad(..., lagrangian=True)` — reaches the reference configuration by its own route, not through
+oomph's `xi`.
+
+So there is no ξ defect here to fix, and wiring `Undeformed_macro_elem_pt` would have driven a
+quantity nothing reads. Anyone reviving this must first establish where pyoomph's ALE reference
+configuration actually lives; the plan's §5 assumed an answer it did not check.
+
+### 18.2 What is really left is a policy question about x
+
+The measurable gap is in the Eulerian position: a moving mesh with a curved boundary drifts to
+**7.13e-4** after two runtime refinements, where a static one is exact.
+
+The cause is S1's own gate. `reapply_macro_element_positions` is a no-op when `moving_nodes` is set
+(§5 asked for exactly that, to keep ALE semantics unchanged until this stage), and separately
+`remove_macro_elements_after_initial_adaption="auto"` drops the macro elements once the coordinates
+are free. Both were checked, and it is the gate that matters: forcing the flag to `False` keeps 32
+macro elements alive through the refinement and the error is still 7.13e-4.
+
+Whether that is a bug depends on what the curved boundary *means*, which the code cannot know:
+
+- On a **free surface** — `droplet_spread_3d`'s shell — the sphere is only the initial shape. Snapping
+  new nodes back onto it would drag the interface toward a shape the solve has already left. Today's
+  behaviour is correct.
+- On a **curved rigid wall** whose position is pinned, the curve is the geometry for all time, and
+  today's behaviour degrades it a little on every adapt.
+
+Four options were weighed: leave as today; snap only where the mesh position is pinned; always snap;
+or add an explicit per-boundary flag. **Decision: leave as today.** The drift is second-order and only
+affects a case (a pinned curved boundary on an adaptively refined ALE mesh) that no shipped example
+exercises, whereas every candidate fix changes ALE results for meshes that are currently correct.
+Stability of ALE semantics is worth more than the last 7e-4 here.
+
+If it is ever revisited, "snap only where pinned" is the one to build: it leaves free surfaces alone
+by construction. Note that it cannot be done in `build()` — position boundary conditions are not
+applied yet at that point — so it belongs in a post-adapt pass alongside
+`Problem.map_nodes_on_macro_elements()`.
+
+### 18.3 One thing fixed on the way
+
+`Mesh::set_lagrangian_nodal_coordinates` printed `"Setting Lagrangian nodal coordinates for all nodes
+in mesh"` unconditionally on every call — the same class of leftover as the three removed in S0, and
+noisy on any moving mesh since it runs on every macro-element mapping pass. Removed.

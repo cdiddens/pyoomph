@@ -2158,7 +2158,6 @@ namespace pyoomph
 
   void Mesh::set_lagrangian_nodal_coordinates()
   {
-    std::cout << "Setting Lagrangian nodal coordinates for all nodes in mesh" << std::endl;
     unsigned long n_node = nnode();
     for (unsigned n = 0; n < n_node; n++)
     {
