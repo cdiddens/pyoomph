@@ -581,12 +581,13 @@ class SphericalOctantMesh(MeshTemplate):
         domain_name: The name of the domain.
         interface_names: A dictionary mapping the interface names to their corresponding names.
     """
-    def __init__(self, radius:ExpressionOrNum=1, inner_factor:float=0.4,domain_name:str="domain",interface_names:dict[str,str]={"shell":"shell","plane_x0":"plane_x0","plane_y0":"plane_y0"}):
+    def __init__(self, radius:ExpressionOrNum=1, inner_factor:float=0.4,domain_name:str="domain",interface_names:dict[str,str]={"shell":"shell","plane_x0":"plane_x0","plane_y0":"plane_y0"},with_curved_entities:bool=True):
         super(SphericalOctantMesh, self).__init__()
         self.radius=radius
         self.inner_factor=inner_factor
         self.domain_name=domain_name
         self.interface_names=interface_names
+        self.with_curved_entities=with_curved_entities
 
     def define_geometry(self):
         router = self.nondim_size(self.radius)
@@ -620,14 +621,19 @@ class SphericalOctantMesh(MeshTemplate):
         domain.add_brick_3d_C1(ni00,no00,nii0,ndd0,ni0i,nd0d,niii,nttt)
 
         iname=self.interface_names.get("shell","shell")
-        if iname is not None:            
-            self.add_facet_to_boundary(iname, [nttt,nd0d,n00o,n0dd])
-            self.add_facet_to_boundary(iname, [nttt,ndd0,n0dd,n0o0])
-            self.add_facet_to_boundary(iname, [ndd0,nttt,nd0d,no00])
+        if iname is not None:
+            # Attach the three shell faces to the sphere, so that refinement puts new nodes on it
+            # rather than on the polyhedral approximation. Kept alive on self: the C++ side stores the
+            # entity as a borrowed pointer.
+            if self.with_curved_entities:
+                self._curved_shell=ce=_pyoomph.CurvedEntitySpherePart(self.get_node_position(n000), self.get_node_position(n00o))
+            else:
+                ce=None
+            self.add_facet_to_boundary(iname, [nttt,nd0d,n00o,n0dd],[nttt,nd0d,n00o,n0dd],ce)
+            self.add_facet_to_boundary(iname, [nttt,ndd0,n0dd,n0o0],[nttt,ndd0,n0dd,n0o0],ce)
+            self.add_facet_to_boundary(iname, [ndd0,nttt,nd0d,no00],[ndd0,nttt,nd0d,no00],ce)
 
 
-            
-            
         iname = self.interface_names.get("plane_x0","plane_x0")
         if iname is not None:
             self.add_facet_to_boundary(iname, [n000,n0i0,n0ii,n00i])
@@ -643,17 +649,6 @@ class SphericalOctantMesh(MeshTemplate):
             self.add_facet_to_boundary(iname, [n000,nii0,n0i0,ni00])
             self.add_facet_to_boundary(iname, [nii0,ndd0,n0i0,n0o0])
             self.add_facet_to_boundary(iname, [ndd0,nii0,no00,ni00])
-
-        if False:
-            # TODO: This does not work yet
-            from .. import _pyoomph_core as _pyoomph
-            ce = _pyoomph.CurvedEntitySpherePart(self.get_node_position(n000), self.get_node_position(n00o),[1,0,0])
-            self._ce=ce
-            self.add_facet_to_curve_entity([n00o, n0dd,nd0d,nttt], ce)
-            self.add_facet_to_curve_entity([nd0d, no00, nttt, ndd0], ce)
-            self.add_facet_to_curve_entity([ndd0, nttt, nd0d, ndd0], ce)
-
-
 
 
 # TODO: Add curved entities!

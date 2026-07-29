@@ -275,98 +275,77 @@ namespace pyoomph
     };
   };
 
-  // A patch on a sphere (with less than 90 deg opening angle), defined by
-  // the sphere's center, a point on the sphere marking the pole/normal
-  // direction of the patch, and a tangent direction. The parametric
-  // coordinate is (polar angle theta, azimuthal angle phi) in the local
-  // tangent/cotangent/normal frame constructed in the constructor.
+  // A patch on a sphere, defined by its centre and any point lying on it.
+  //
+  // The parametric coordinate is the outward *unit normal* (nx, ny, nz) -- three numbers for a
+  // two-dimensional surface. That redundancy is the point. An angular chart such as (theta, phi) has
+  // a branch cut in phi AND a genuine coordinate degeneracy at the pole, where every phi names the
+  // same point, so a facet containing or straddling a pole cannot be blended correctly no matter how
+  // the wrap-around is patched up; it is also what forced the old implementation's local
+  // tangent/cotangent frame and its refusal of patches wider than 90 degrees. The unit normal is a
+  // single global chart of the sphere: no seam, no pole, no frame, no opening-angle limit.
+  //
+  // Blending unit normals with the facet's weights and renormalising is the spherical analogue of
+  // linear interpolation (nlerp): the result is exactly on the sphere for any weights, and at weight
+  // 1/2 -- the bisector, which is what edge refinement asks for -- it is exactly the arc midpoint.
+  // The renormalisation lives in parametric_to_position, so the blend itself stays a plain weighted
+  // sum and no separate blend hook is needed. See dev_docs/macro_elements_generalisation.md 4.3.
   class CurvedEntitySpherePart : public MeshTemplateCurvedEntity
   {
   protected:
-    std::vector<double> center, normal, tangent, cotangent;
+    std::vector<double> center;
     double radius;
 
   public:
-    CurvedEntitySpherePart(const std::vector<double> &_center, const std::vector<double> &_onsphere_center, const std::vector<double> &_tangent) : MeshTemplateCurvedEntity(2), center(_center), normal(_onsphere_center), cotangent(_tangent)
+    // The third argument used to orient the local frame and is no longer needed; it is kept so that
+    // existing callers (and the Python binding) continue to work unchanged.
+    CurvedEntitySpherePart(const std::vector<double> &_center, const std::vector<double> &_onsphere_center, const std::vector<double> & = std::vector<double>()) : MeshTemplateCurvedEntity(3), center(_center)
     {
-      radius = 0;
+      radius = 0.0;
       for (unsigned int i = 0; i < 3; i++)
-        radius += (normal[i] - center[i]) * (normal[i] - center[i]);
+        radius += (_onsphere_center[i] - center[i]) * (_onsphere_center[i] - center[i]);
       radius = sqrt(radius);
-      for (unsigned int i = 0; i < 3; i++)
-        normal[i] = (normal[i] - center[i]) / radius;
-      double tdot = 0.0;
-      for (unsigned int i = 0; i < 3; i++)
-        tdot += cotangent[i] * cotangent[i];
-      tdot = sqrt(tdot);
-      for (unsigned int i = 0; i < 3; i++)
-        cotangent[i] /= tdot;
-      tdot = 0.0;
-      for (unsigned int i = 0; i < 3; i++)
-        tdot += normal[i] * cotangent[i];
-      if (fabs(tdot) > 1 - 1e-7)
-      {
-        throw_runtime_error("CurvedEntitySpherePart tangent and normal (almost) coinciding... n=[" + std::to_string(normal[0]) + ", " + std::to_string(normal[1]) + "," + std::to_string(normal[2]) + "]  and  t=[" + std::to_string(cotangent[0]) + ", " + std::to_string(cotangent[1]) + "," + std::to_string(cotangent[2]) + "]");
-      }
-      tangent.resize(3);
-      tangent[0] = normal[1] * cotangent[2] - normal[2] * cotangent[1];
-      tangent[1] = normal[2] * cotangent[0] - normal[0] * cotangent[2];
-      tangent[2] = normal[0] * cotangent[1] - normal[1] * cotangent[0];
-      tdot = 0.0;
-      for (unsigned int i = 0; i < 3; i++)
-        tdot += tangent[i] * tangent[i];
-      tdot = sqrt(tdot);
-      for (unsigned int i = 0; i < 3; i++)
-        tangent[i] /= tdot;
-      cotangent[0] = (normal[1] * tangent[2] - normal[2] * tangent[1]);
-      cotangent[1] = (normal[2] * tangent[0] - normal[0] * tangent[2]);
-      cotangent[2] = (normal[0] * tangent[1] - normal[1] * tangent[0]);
-      tdot = 0.0;
-      for (unsigned int i = 0; i < 3; i++)
-        tdot += cotangent[i] * cotangent[i];
-      tdot = sqrt(tdot);
-      for (unsigned int i = 0; i < 3; i++)
-        cotangent[i] /= tdot;
+      if (radius < 1e-14)
+        throw_runtime_error("CurvedEntitySpherePart: the point on the sphere coincides with the centre");
     }
+
     void parametric_to_position(const unsigned &, const std::vector<double> &parametric, std::vector<double> &position) override
     {
-      position = center;
-      double theta = parametric[0];
-      double phi = parametric[1];
-      double x = radius * cos(phi) * sin(theta);
-      double y = radius * sin(phi) * sin(theta);
-      double z = radius * cos(theta);
+      double len = 0.0;
       for (unsigned int i = 0; i < 3; i++)
+        len += parametric[i] * parametric[i];
+      len = sqrt(len);
+      // Only reachable if a facet spans half the sphere or more, where its corner normals cancel and
+      // the blend genuinely has no answer. Refusing beats returning a point at the centre.
+      if (len < 1e-12)
       {
-        position[i] += x * tangent[i] + y * cotangent[i] + z * normal[i];
+        throw_runtime_error("CurvedEntitySpherePart: blended normal is degenerate, i.e. this facet "
+                            "spans (at least) half the sphere. Split it into smaller facets.");
       }
+      position = center;
+      for (unsigned int i = 0; i < 3; i++)
+        position[i] += radius * parametric[i] / len;
     }
+
     void position_to_parametric(const unsigned &, const std::vector<double> &position, std::vector<double> &parametric) override
     {
-      std::vector<double> rel = position;
-      for (unsigned int i = 0; i < 3; i++)
-        rel[i] -= center[i];
-      double dot = 0.0;
-      for (unsigned int i = 0; i < 3; i++)
-        dot += rel[i] * rel[i];
-      dot = sqrt(dot);
-      for (unsigned int i = 0; i < 3; i++)
-        rel[i] /= dot;
-      double z = 0.0;
-      double x = 0.0;
-      double y = 0.0;
+      double len = 0.0;
+      std::vector<double> rel(3);
       for (unsigned int i = 0; i < 3; i++)
       {
-        x += tangent[i] * rel[i];
-        y += cotangent[i] * rel[i];
-        z += normal[i] * rel[i];
+        rel[i] = position[i] - center[i];
+        len += rel[i] * rel[i];
       }
-      parametric[0] = acos(z);
-      parametric[1] = atan2(y, x);
-    };
-    void apply_periodicity(std::vector<std::vector<double>> &) override{
-        // TODO:; SHoukld not be required
-    };
+      len = sqrt(len);
+      if (len < 1e-14)
+        throw_runtime_error("CurvedEntitySpherePart: cannot take the normal at the sphere's centre");
+      parametric.resize(3);
+      for (unsigned int i = 0; i < 3; i++)
+        parametric[i] = rel[i] / len;
+    }
+
+    // Nothing to do: a unit normal is unique, so there is no wrap-around ambiguity to resolve.
+    void apply_periodicity(std::vector<std::vector<double>> &) override {}
   };
 
   // A curve interpolating a sequence of control points `pts` with a

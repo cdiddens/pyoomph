@@ -54,20 +54,21 @@ from pyoomph import *
 from pyoomph import _pyoomph_core as _pyoomph
 from pyoomph.equations.poisson import PoissonEquation
 from pyoomph.meshes.mesh import MeshTemplate
-from pyoomph.meshes.simplemeshes import CircularMesh
+from pyoomph.meshes.simplemeshes import CircularMesh, SphericalOctantMesh
 
 
 _R = 1.0
 _EXACT = 1e-14
 
 
-def _max_radius_error(mesh, boundary_name, radius=_R):
-    # Largest deviation from the circle over every node sitting on the named boundary.
+def _max_radius_error(mesh, boundary_name, radius=_R, ndim=2):
+    # Largest deviation from the circle/sphere over every node sitting on the named boundary.
     bidx = mesh.get_boundary_index(boundary_name)
     worst = 0.0
     for node in mesh.nodes():
         if node.is_on_boundary(bidx):
-            worst = max(worst, abs(math.hypot(node.x(0), node.x(1)) - radius))
+            r = math.sqrt(sum(node.x(i) ** 2 for i in range(ndim)))
+            worst = max(worst, abs(r - radius))
     return worst
 
 
@@ -120,6 +121,20 @@ class _TriDisk(Problem):
     def define_problem(self):
         self += _TriDiskTemplate()
         eqs = PoissonEquation(source=1, space=self._space) + DirichletBC(u=0) @ "circumference"
+        eqs += SpatialErrorEstimator(u=1)
+        self += eqs @ "domain"
+
+
+class _SphereOctant(Problem):
+    # A spherical octant of bricks; SphericalOctantMesh attaches a CurvedEntitySpherePart to each of
+    # the three shell faces. One curved facet per element, so no shared-edge correction is involved.
+    def __init__(self, space="C1"):
+        super().__init__()
+        self._space = space
+
+    def define_problem(self):
+        self += SphericalOctantMesh(radius=_R)
+        eqs = PoissonEquation(source=1, space=self._space) + DirichletBC(u=0) @ "shell"
         eqs += SpatialErrorEstimator(u=1)
         self += eqs @ "domain"
 
@@ -209,6 +224,16 @@ def _worker_main(argv):
     elif kind == "arc":
         a0, nref, order = float(argv[2]), int(argv[3]), argv[4]
         problem, mesh_name, boundary = _ArcSector(a0, a0 + 30.0, order=order), "domain", "arc"
+    elif kind == "sphere":
+        space, nref = argv[2], int(argv[3])
+        problem = _SphereOctant(space=space)
+        problem.set_output_directory(outdir)
+        problem.max_refinement_level = 4
+        problem.initialise()
+        for _ in range(nref):
+            problem.refine_uniformly()
+        print("RESULT", _max_radius_error(problem.get_mesh("domain"), "shell", ndim=3))
+        return
     elif kind == "hang":
         _worker_hanging(outdir, argv[2])
         return
@@ -405,3 +430,17 @@ def test_non_uniform_refinement_keeps_curved_boundary_exact(shape, tmp_path):
     assert int(out["NHANG"]) > 0, "refinement was uniform after all, so this proves nothing"
     assert int(out["NHANGBOUNDARY"]) == 0
     assert float(out["MAXRIMERR"]) < _EXACT
+
+
+# --------------------------------------------------------------------------------------------
+# T4 -- 3d
+# --------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("nref", [0, 1, 2])
+@pytest.mark.parametrize("space", ["C1", "C2"])
+def test_curved_brick_sphere_is_exact(space, nref, tmp_path):
+    # The first 3d curved boundary pyoomph can actually build. Before S3 the shell entity of
+    # SphericalOctantMesh sat behind "if False: # TODO: This does not work yet", and the sphere entity
+    # it would have used was parametrised by (theta, phi) -- a chart with a branch cut and a genuine
+    # degeneracy at the pole. It is now the outward unit normal, which has neither.
+    assert _worker_radius_error(tmp_path, "sphere", space, nref) < _EXACT

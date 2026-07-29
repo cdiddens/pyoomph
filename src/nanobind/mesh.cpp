@@ -324,8 +324,10 @@ void PyReg_Mesh(nb::module_ &m)
 	nb::class_<pyoomph::CurvedEntityCatmullRomSpline, pyoomph::MeshTemplateCurvedEntity>(m, "CurvedEntityCatmullRomSpline", "A curved entity interpolating a given set of points by a Catmull-Rom spline")
 		.def(nb::init<const std::vector<std::vector<double>> &>(), nb::arg("points"));
 
-	nb::class_<pyoomph::CurvedEntitySpherePart, pyoomph::MeshTemplateCurvedEntity>(m, "CurvedEntitySpherePart", "A curved entity representing a part of a sphere, defined by its center, a point on the sphere and a tangent direction")
-		.def(nb::init<const std::vector<double> &, const std::vector<double> &, const std::vector<double> &>(), nb::arg("center"), nb::arg("point_on_sphere"), nb::arg("tangent")); // center,onsphere, tangent
+	// The parametric coordinate is the outward unit normal, so no orientation is required; `tangent` is
+	// accepted and ignored so that existing callers keep working.
+	nb::class_<pyoomph::CurvedEntitySpherePart, pyoomph::MeshTemplateCurvedEntity>(m, "CurvedEntitySpherePart", "A curved entity representing a part of a sphere, defined by its center and a point on the sphere")
+		.def(nb::init<const std::vector<double> &, const std::vector<double> &, const std::vector<double> &>(), nb::arg("center"), nb::arg("point_on_sphere"), nb::arg("tangent") = std::vector<double>());
 
 	// Trampoline-backed base class allowing users to implement custom curved boundary shapes directly in Python
 	// by subclassing MeshTemplateCurvedEntity and overriding pos_to_parametric/parametric_to_pos/ensure_periodicity.
