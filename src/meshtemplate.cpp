@@ -99,250 +99,10 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		}
 	}
 
-	// Precompute the element's "default" (straight-sided) facet node pointers, used as the
-	// fallback for facets that aren't attached to a curved entity, and initialise per-facet
-	// storage (facets/permutation) to be filled in later via set_facet().
-	MeshTemplateMacroElementBase::MeshTemplateMacroElementBase(MeshTemplateElement *e, std::vector<MeshTemplateNode *> *nodes) : facets(e->nfacets(), NULL), permutation(e->nfacets(), std::vector<unsigned>()), default_facet_nodes(e->nfacets())
-	{
-		for (unsigned int i = 0; i < e->nfacets(); i++)
-		{
-			MeshTemplateFacet *f = e->construct_facet(i);
-			for (unsigned int j = 0; j < f->nodeinds.size(); j++)
-				default_facet_nodes[i].push_back((*nodes)[f->nodeinds[j]]->oomph_node);
-			delete f;
-		}
-	}
-
-	// Attach `new_facet` as local facet `ifacet` and compute the node permutation that maps
-	// the macro element's canonical facet-node order onto new_facet's own order, using
-	// `for_orientation` (the element's straight-sided version of the same facet) as reference.
-	void MeshTemplateMacroElementBase::set_facet(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation)
-	{
-		facets[ifacet] = new_facet;
-		permutation[ifacet] = find_permutation(ifacet, new_facet, for_orientation);
-	}
-
-	MeshTemplateQMacroElement2::MeshTemplateQMacroElement2(MeshTemplateDomain *domain, unsigned index, MeshTemplateElement *e, std::vector<MeshTemplateNode *> *nodes) : oomph::QMacroElement<2>(domain, index), MeshTemplateMacroElementBase(e, nodes)
-	{
-	}
-
-	// A 2d quad edge only has 2 nodes, hence only 2 possible orderings: return whichever
-	// ordering makes new_facet's first node coincide with for_orientation's first node.
-	std::vector<unsigned> MeshTemplateQMacroElement2::find_permutation(const unsigned &, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation)
-	{
-		if (new_facet->nodeinds[0] == for_orientation->nodeinds[0])
-		{
-			return std::vector<unsigned>{0, 1};
-		}
-		else
-		{
-			return std::vector<unsigned>{1, 0};
-		}
-	}
-
-	// Evaluate the physical position on local facet (i_direct-4, one of the 4 edges of the
-	// reference square) at parametric position s. Without a curved entity, linearly blend
-	// between the two facet corner nodes; with one, blend the corners' curve parameters and
-	// map that through the curved entity's parametric_to_position().
-	void MeshTemplateQMacroElement2::macro_element_boundary(const unsigned &t, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f)
-	{
-		unsigned fi = i_direct - 4;
-		double lambda = 0.5 * (s[0] + 1);
-		if (!facets[fi] || !facets[fi]->curved_entity)
-		{
-			for (unsigned int i = 0; i < f.size(); i++)
-			{
-				f[i] = default_facet_nodes[fi][0]->x(t, i) * (1 - lambda) + default_facet_nodes[fi][1]->x(t, i) * lambda;
-			}
-		}
-		else
-		{
-			std::vector<double> parametric(1);
-			std::vector<double> default_f(2);
-			for (unsigned int i = 0; i < 2; i++)
-				default_f[i] = default_facet_nodes[fi][0]->x(t, i) * (1 - lambda) + default_facet_nodes[fi][1]->x(t, i) * lambda;
-			parametric[0] = (1 - lambda) * facets[fi]->parametrics[permutation[fi][0]][0] + (lambda)*facets[fi]->parametrics[permutation[fi][1]][0];
-			std::vector<double> pos(2);
-			facets[fi]->curved_entity->parametric_to_position(t, parametric, pos);
-			f[0] = pos[0];
-			f[1] = pos[1];
-		}
-	}
-
-	////
-
-	MeshTemplateTMacroElement2::MeshTemplateTMacroElement2(MeshTemplateDomain *domain, unsigned index, MeshTemplateElement *e, std::vector<MeshTemplateNode *> *nodes) : oomph::TMacroElement<2>(domain, index), MeshTemplateMacroElementBase(e, nodes)
-	{
-	}
-
-	// Same 2-node edge-orientation logic as MeshTemplateQMacroElement2::find_permutation, for the triangular macro element.
-	std::vector<unsigned> MeshTemplateTMacroElement2::find_permutation(const unsigned &, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation)
-	{
-		if (new_facet->nodeinds[0] == for_orientation->nodeinds[0])
-		{
-			return std::vector<unsigned>{0, 1};
-		}
-		else
-		{
-			return std::vector<unsigned>{1, 0};
-		}
-	}
-
-	// Triangle counterpart of MeshTemplateQMacroElement2::macro_element_boundary: linear
-	// (or curved-entity) blending along local edge (i_direct-4) of the reference triangle.
-	void MeshTemplateTMacroElement2::macro_element_boundary(const unsigned &t, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f)
-	{
-		unsigned fi = i_direct - 4;
-		double lambda = 0.5 * (s[0] + 1);
-		if (!facets[fi] || !facets[fi]->curved_entity)
-		{
-			for (unsigned int i = 0; i < f.size(); i++)
-			{
-				f[i] = default_facet_nodes[fi][0]->x(t, i) * (1 - lambda) + default_facet_nodes[fi][1]->x(t, i) * lambda;
-			}
-		}
-		else
-		{
-			std::vector<double> parametric(1);
-			std::vector<double> default_f(2);
-			for (unsigned int i = 0; i < 2; i++)
-				default_f[i] = default_facet_nodes[fi][0]->x(t, i) * (1 - lambda) + default_facet_nodes[fi][1]->x(t, i) * lambda;
-			parametric[0] = (1 - lambda) * facets[fi]->parametrics[permutation[fi][0]][0] + (lambda)*facets[fi]->parametrics[permutation[fi][1]][0];
-			std::vector<double> pos(2);
-			facets[fi]->curved_entity->parametric_to_position(t, parametric, pos);
-			f[0] = pos[0];
-			f[1] = pos[1];
-		}
-	}
-
-	////
-
-	MeshTemplateQMacroElement3::MeshTemplateQMacroElement3(MeshTemplateDomain *domain, unsigned index, MeshTemplateElement *e, std::vector<MeshTemplateNode *> *nodes) : oomph::QMacroElement<3>(domain, index), MeshTemplateMacroElementBase(e, nodes)
-	{
-	}
-
-	// A 3d brick face has 4 nodes and its node order relative to the element isn't fixed a
-	// priori, so brute-force search over all 4! permutations for the one under which
-	// for_orientation's nodes (reordered by perm) match new_facet's node order.
-	std::vector<unsigned> MeshTemplateQMacroElement3::find_permutation(const unsigned &, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation)
-	{
-		std::vector<unsigned> perm(4);
-		for (unsigned int i = 0; i < 4; i++)
-			perm[i] = i;
-
-		while (true)
-		{
-			for (unsigned int i = 0; i < 4; i++)
-			{
-				if (for_orientation->nodeinds[perm[i]] != new_facet->nodeinds[i])
-				{
-					break;
-				}
-				else if (i == 3)
-				{
-					return perm;
-				}
-			}
-			if (!std::next_permutation(perm.begin(), perm.end()))
-			{
-				std::ostringstream oss;
-				oss << std::endl
-					<< "  NF :" << new_facet->nodeinds[0] << "  " << new_facet->nodeinds[1] << "  " << new_facet->nodeinds[2] << "  " << new_facet->nodeinds[3];
-				oss << std::endl
-					<< "  FO :" << for_orientation->nodeinds[0] << "  " << for_orientation->nodeinds[1] << "  " << for_orientation->nodeinds[2] << "  " << for_orientation->nodeinds[3] << std::endl;
-				throw_runtime_error("Strange permutation: " + oss.str());
-			}
-		}
-	}
-
-	// Evaluate the physical position on local face (i_direct-20, one of the 6 faces of the
-	// reference cube) at parametric position s, by bilinearly blending in the face's two
-	// local directions (lambda0, lambda1). Falls back to blending nodal positions directly
-	// if the face has no curved entity attached; otherwise blends the corner curve
-	// parameters (permuted via `permutation` into the facet's own node order) and maps
-	// through the curved entity. Note: contains left-over std::cout debug output.
-	void MeshTemplateQMacroElement3::macro_element_boundary(const unsigned &t, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f)
-	{
-
-		unsigned fi = i_direct - 20;
-		double lambda0 = 0.5 * (s[0] + 1);
-		double lambda1 = 0.5 * (s[1] + 1);
-
-		if (!facets[fi] || !facets[fi]->curved_entity)
-		{
-			for (unsigned int i = 0; i < f.size(); i++)
-			{
-				f[i] = (default_facet_nodes[fi][0]->x(t, i) * (1 - lambda0) + default_facet_nodes[fi][1]->x(t, i) * lambda0) * (1 - lambda1) + (default_facet_nodes[fi][2]->x(t, i) * (1 - lambda0) + default_facet_nodes[fi][3]->x(t, i) * lambda0) * lambda1;
-			}
-		}
-		else
-		{
-			std::vector<double> parametric(2);
-			std::vector<double> default_f(3);
-			for (unsigned int i = 0; i < 3; i++)
-			{
-				default_f[i] = (default_facet_nodes[fi][0]->x(t, i) * (1 - lambda0) + default_facet_nodes[fi][1]->x(t, i) * lambda0) * (1 - lambda1) + (default_facet_nodes[fi][2]->x(t, i) * (1 - lambda0) + default_facet_nodes[fi][3]->x(t, i) * lambda0) * lambda1;
-			}
-
-			// return;
-			std::vector<unsigned> perm = permutation[fi];
-			/*for (unsigned int i=0;i<4;i++) perm[i]=i;
-			std::vector<unsigned> iperm(4);
-			for (unsigned int i=0;i<4;i++) iperm[perm[i]]=i;
-			std::cout << "PERM IS " << " :  " << perm[0] << " " << perm[1] << " " << perm[2] << "  " << perm[3] << std::endl;
-		   */
-			/*   for (unsigned int i=0;i<3;i++)
-			   {
-				  f[i]=((1-lambda0)*facets[fi]->parametrics[iperm[0]][i]+(lambda0)*facets[fi]->parametrics[iperm[1]][i])*(1-lambda1)+((1-lambda0)*facets[fi]->parametrics[iperm[2]][i]+(lambda0)*facets[fi]->parametrics[iperm[3]][i])*lambda1;
-			   }*/
-
-			for (unsigned int i = 0; i < 2; i++)
-			{
-				parametric[i] = ((1 - lambda0) * facets[fi]->parametrics[perm[0]][i] + (lambda0)*facets[fi]->parametrics[perm[1]][i]) * (1 - lambda1) + ((1 - lambda0) * facets[fi]->parametrics[perm[2]][i] + (lambda0)*facets[fi]->parametrics[perm[3]][i]) * lambda1;
-			}
-			std::vector<double> pos(3);
-			facets[fi]->curved_entity->parametric_to_position(t, parametric, pos);
-			f[0] = pos[0];
-			f[1] = pos[1];
-			f[2] = pos[2];
-			/*
-			std::cout << "SETTING F TO " << f[0] << "  " << f[1] << "  " << f[2] << std::endl;
-			std::cout << "WHILE DEFAULT_F is " << default_f[0] << "  " << default_f[1] << "  " << default_f[2] << std::endl;
-			std::vector<double> defpar(2);
-			facets[fi]->curved_entity->position_to_parametric(t,default_f,defpar);
-			std::cout << "PARAMETERICS " << parametric[0] << "  " << parametric[1] << "   vs def param " << defpar[0] << "  " << defpar[1] << std::endl;
-			std::cout << "SUBPARAMETERICS  " << lambda0 << "  " << lambda1 << std::endl;
-			//double rad=f[0]*f[0]+f[1]*f[1]+(f[2]+0.3582272)*(f[2]+0.3582272);
-			//std::cout << "RAD " << rad << std::endl;
-			for (unsigned int i=0;i<4;i++)
-			{
-			 std::cout << facets[fi]->parametrics[i][0] << "  " << facets[fi]->parametrics[i][1] << std::endl;
-			}
-			*/
-		}
-	}
-
-	// oomph-lib Domain used only to dispatch macro_element_boundary() calls; no state of its own.
+	// Holds (and, via ~Domain, owns) the macro elements of one mesh template. No dispatch logic: a
+	// GenericMacroElement evaluates its own blend rather than asking its Domain for facet positions.
 	MeshTemplateDomain::MeshTemplateDomain()
 	{
-	}
-
-	// Forward the boundary evaluation to the concrete MeshTemplateXMacroElementN stored at
-	// Macro_element_pt[i_macro] (identified via dynamic_cast, since oomph-lib's MacroElement
-	// base doesn't know about our curved-facet extension).
-	void MeshTemplateDomain::macro_element_boundary(const unsigned &t, const unsigned &i_macro, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f)
-	{
-		// TODO: Remove the if via virtual base
-		if (dynamic_cast<MeshTemplateQMacroElement2 *>(Macro_element_pt[i_macro]))
-		{
-			MeshTemplateQMacroElement2 *macro = dynamic_cast<MeshTemplateQMacroElement2 *>(Macro_element_pt[i_macro]);
-			macro->macro_element_boundary(t, i_direct, s, f);
-		}
-		else if (dynamic_cast<MeshTemplateQMacroElement3 *>(Macro_element_pt[i_macro]))
-		{
-			MeshTemplateQMacroElement3 *macro = dynamic_cast<MeshTemplateQMacroElement3 *>(Macro_element_pt[i_macro]);
-			macro->macro_element_boundary(t, i_direct, s, f);
-		}
 	}
 
 	// Register this element's nodes as belonging to collection `dom`, so that later
@@ -2401,161 +2161,81 @@ Index : Local coordinates (s0,s1,s2)
 		{
 			if (!domain)
 				domain = new MeshTemplateDomain();
+
+			// Which reference shape the macro coordinates live in. This is the only thing the macro map
+			// needs to know about the element type -- the blend itself is shape-agnostic.
+			MacroElementShape shape;
 			if (dynamic_cast<BulkElementQuad2dC1 *>(res) || dynamic_cast<BulkElementQuad2dC2 *>(res))
-			{
-				MeshTemplateQMacroElement2 *macro = NULL;
-				for (unsigned int ifacet = 0; ifacet < el->nfacets(); ifacet++)
-				{
-					MeshTemplateFacet *test_facet = el->construct_facet(ifacet);
-					if (pyoomph_verbose)
-					{
-						std::cout << "LOOKING FOR FACET ";
-						for (auto &i : test_facet->sorted_inds)
-							std::cout << "  " << i;
-						std::cout << std::endl;
-					}
-					for (auto &fm : facetmap)
-					{
-						if (pyoomph_verbose)
-						{
-							std::cout << "	DEFINED ";
-							for (auto &i : fm.first->sorted_inds)
-								std::cout << "  " << i;
-							std::cout << std::endl;
-						}
-					}
-
-					if (facetmap.count(test_facet))
-					{
-						if (pyoomph_verbose)
-							std::cout << "MACRO ELEM: FACET IDENTIFIED" << std::endl;
-						MeshTemplateFacet *actual_facet = facets[facetmap[test_facet]];
-						if (actual_facet->curved_entity)
-						{
-							if (pyoomph_verbose)
-								std::cout << "MACRO ELEM: CURVED ENTITY PRESENT : MACRO " << macro << std::endl;
-							if (!macro)
-							{
-								macro = new MeshTemplateQMacroElement2(domain, domain->nmacro_element(), el, &nodes);
-								domain->push_back_macro_element(macro);
-							}
-							macro->set_facet(ifacet, actual_facet, test_facet);
-						}
-					}
-					delete test_facet;
-				}
-				if (macro)
-				{
-					if (pyoomph_verbose)
-						std::cout << "ADDING MACRO ELEMENT " << std::endl;
-					res->set_macro_elem_pt(macro);
-					res->map_nodes_on_macro_element();
-				}
-			}
+				shape = MacroElementShape::Quad2d;
 			else if (dynamic_cast<BulkElementTri2dC1 *>(res) || dynamic_cast<BulkElementTri2dC2 *>(res))
-			{
-				MeshTemplateTMacroElement2 *macro = NULL;
-				for (unsigned int ifacet = 0; ifacet < el->nfacets(); ifacet++)
-				{
-					MeshTemplateFacet *test_facet = el->construct_facet(ifacet);
-					if (pyoomph_verbose)
-					{
-						std::cout << "LOOKING FOR FACET ";
-						for (auto &i : test_facet->sorted_inds)
-							std::cout << "  " << i;
-						std::cout << std::endl;
-					}
-					for (auto &fm : facetmap)
-					{
-						if (pyoomph_verbose)
-						{
-							std::cout << "	DEFINED ";
-							for (auto &i : fm.first->sorted_inds)
-								std::cout << "  " << i;
-							std::cout << std::endl;
-						}
-					}
-
-					if (facetmap.count(test_facet))
-					{
-						if (pyoomph_verbose)
-							std::cout << "MACRO ELEM: FACET IDENTIFIED" << std::endl;
-						MeshTemplateFacet *actual_facet = facets[facetmap[test_facet]];
-						if (actual_facet->curved_entity)
-						{
-							if (pyoomph_verbose)
-								std::cout << "MACRO ELEM: CURVED ENTITY PRESENT : MACRO " << macro << std::endl;
-							if (!macro)
-							{
-								macro = new MeshTemplateTMacroElement2(domain, domain->nmacro_element(), el, &nodes);
-								domain->push_back_macro_element(macro);
-							}
-							macro->set_facet(ifacet, actual_facet, test_facet);
-						}
-					}
-					delete test_facet;
-				}
-				if (macro)
-				{
-					if (pyoomph_verbose)
-						std::cout << "ADDING MACRO ELEMENT " << std::endl;
-					res->set_macro_elem_pt(macro);
-					res->map_nodes_on_macro_element();
-				}
-			}
+				shape = MacroElementShape::Tri2d;
 			else if (dynamic_cast<BulkElementBrick3dC1 *>(res) || dynamic_cast<BulkElementBrick3dC2 *>(res))
-			{
-				MeshTemplateQMacroElement3 *macro = NULL;
-				for (unsigned int ifacet = 0; ifacet < el->nfacets(); ifacet++)
-				{
-					MeshTemplateFacet *test_facet = el->construct_facet(ifacet);
-					if (pyoomph_verbose)
-					{
-						std::cout << "LOOKING FOR FACET ";
-						for (auto &i : test_facet->sorted_inds)
-							std::cout << "  " << i;
-						std::cout << std::endl;
-					}
-					for (auto &fm : facetmap)
-					{
-						if (pyoomph_verbose)
-						{
-							std::cout << "	DEFINED ";
-							for (auto &i : fm.first->sorted_inds)
-								std::cout << "  " << i;
-							std::cout << std::endl;
-						}
-					}
-
-					if (facetmap.count(test_facet))
-					{
-						if (pyoomph_verbose)
-							std::cout << "MACRO ELEM: FACET IDENTIFIED" << std::endl;
-						MeshTemplateFacet *actual_facet = facets[facetmap[test_facet]];
-						if (actual_facet->curved_entity)
-						{
-							if (pyoomph_verbose)
-								std::cout << "MACRO ELEM: CURVED ENTITY PRESENT : MACRO " << macro << std::endl;
-							if (!macro)
-							{
-								macro = new MeshTemplateQMacroElement3(domain, domain->nmacro_element(), el, &nodes);
-								domain->push_back_macro_element(macro);
-							}
-							macro->set_facet(ifacet, actual_facet, test_facet);
-						}
-					}
-					delete test_facet;
-				}
-				if (macro)
-				{
-					if (pyoomph_verbose)
-						std::cout << "ADDING MACRO ELEMENT " << std::endl;
-					res->set_macro_elem_pt(macro);
-					res->map_nodes_on_macro_element();
-				}
-			}
+				shape = MacroElementShape::Brick3d;
 			else
-				throw_runtime_error("MacroElements not implement for this element type");
+				throw_runtime_error("MacroElements (curved boundaries) are not implemented for this element type yet");
+
+			// The element's vertex nodes, in the order macro_c1_shape() uses. FiniteElement::vertex_node_pt
+			// already returns exactly that order for both the Q and T families (and skips the higher-order
+			// nodes of a C2 element, which take no part in the blend).
+			std::vector<oomph::Node *> vertices(res->nvertex_node());
+			for (unsigned int v = 0; v < vertices.size(); v++)
+				vertices[v] = res->vertex_node_pt(v);
+
+			GenericMacroElement *macro = NULL;
+			for (unsigned int ifacet = 0; ifacet < el->nfacets(); ifacet++)
+			{
+				MeshTemplateFacet *test_facet = el->construct_facet(ifacet);
+				if (!facetmap.count(test_facet))
+				{
+					delete test_facet;
+					continue;
+				}
+				MeshTemplateFacet *actual_facet = facets[facetmap[test_facet]];
+				delete test_facet;
+				if (!actual_facet->curved_entity)
+					continue;
+
+				// Match the facet's nodes against the element's vertices by identity. This is what replaces
+				// the old find_permutation(): each blend weight is carried together with the vertex it
+				// belongs to, so no ordering convention has to be discovered or agreed on. Facet nodes that
+				// are not element vertices (a C2 facet's mid-side node) simply take no part in the blend.
+				std::vector<unsigned> local_vertices, parametric_index;
+				for (unsigned int k = 0; k < actual_facet->nodeinds.size(); k++)
+				{
+					oomph::Node *fn = nodes[actual_facet->nodeinds[k]]->oomph_node;
+					if (!fn)
+						continue;
+					for (unsigned int v = 0; v < vertices.size(); v++)
+					{
+						if (vertices[v] == fn)
+						{
+							local_vertices.push_back(v);
+							parametric_index.push_back(k);
+							break;
+						}
+					}
+				}
+				// A facet contributes nothing unless at least an edge of it is pinned to the entity.
+				if (local_vertices.size() < 2)
+					continue;
+
+				if (pyoomph_verbose)
+					std::cout << "MACRO ELEM: curved facet " << ifacet << " with " << local_vertices.size() << " vertices" << std::endl;
+				if (!macro)
+				{
+					macro = new GenericMacroElement(domain, domain->nmacro_element(), shape, vertices);
+					domain->push_back_macro_element(macro);
+				}
+				macro->add_curved_facet(actual_facet, local_vertices, parametric_index);
+			}
+
+			if (macro)
+			{
+				if (pyoomph_verbose)
+					std::cout << "ADDING MACRO ELEMENT with " << macro->ncurved_facets() << " curved facets" << std::endl;
+				res->set_macro_elem_pt(macro);
+				res->map_nodes_on_macro_element();
+			}
 		}
 
 		BulkElementBase::__CurrentCodeInstance = NULL;

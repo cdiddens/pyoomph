@@ -35,7 +35,7 @@ The main author may be contacted at c.diddens@utwente.nl
 #include "kdtree.hpp"
 
 #include "oomph_lib.hpp"
-#include "Tmacroelements.hpp"
+#include "macroelements.hpp"
 #include <vector>
 #include <map>
 #include <set>
@@ -417,81 +417,26 @@ namespace pyoomph
   class MeshTemplateDomain;
   class MeshTemplateElement;
 
-  // Base class gluing pyoomph's curved-facet description to oomph-lib's
-  // MacroElement machinery. An oomph-lib MacroElement maps a reference cube/
-  // square/triangle/etc. to a curved physical region by blending its facet
-  // parametrizations; this base stores, for each local facet of the element,
-  // the corresponding MeshTemplateFacet plus a node permutation (`permutation`)
-  // that maps the macro element's canonical facet-node ordering onto the
-  // facet's own node ordering (set up in set_facet()/find_permutation()).
-  // Concrete subclasses (below) implement macro_element_boundary() for a
-  // specific reference-element shape/order by evaluating the appropriate
-  // blending function.
-  class MeshTemplateMacroElementBase
-  {
-  protected:
-    // Determine how the local node ordering of `new_facet` must be permuted
-    // to align with the canonical ordering expected for macro-element facet
-    // `ifacet`, using `for_orientation` (the element's own facet) as reference.
-    virtual std::vector<unsigned> find_permutation(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation) = 0;
-
-  public:
-    // Attach `new_facet` as the macro element's local facet number `ifacet`,
-    // computing and storing the required node permutation.
-    void set_facet(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation);
-    std::vector<MeshTemplateFacet *> facets;
-    std::vector<std::vector<unsigned>> permutation;
-    std::vector<std::vector<pyoomph::Node *>> default_facet_nodes;
-    MeshTemplateMacroElementBase(MeshTemplateElement *e, std::vector<MeshTemplateNode *> *nodes);
-    // Evaluate the macro-element boundary mapping: for local coordinate `s`
-    // on the i_direct-th "direction" of the reference element at history
-    // time level t, return the corresponding global position f (called by
-    // oomph-lib's macro-element blending during mesh construction/refinement).
-    virtual void macro_element_boundary(const unsigned &t, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f) = 0;
-  };
-
-  // Macro element for 2d, quadrilateral (Q-type), second-order (9-node) elements.
-  class MeshTemplateQMacroElement2 : public oomph::QMacroElement<2>, public MeshTemplateMacroElementBase
-  {
-  protected:
-    std::vector<unsigned> find_permutation(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation) override;
-
-  public:
-    MeshTemplateQMacroElement2(MeshTemplateDomain *domain, unsigned index, MeshTemplateElement *e, std::vector<MeshTemplateNode *> *nodes);
-    void macro_element_boundary(const unsigned &t, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f) override;
-  };
-
-  // Macro element for 2d, triangular (T-type), second-order (6-node) elements.
-  class MeshTemplateTMacroElement2 : public oomph::TMacroElement<2>, public MeshTemplateMacroElementBase
-  {
-  protected:
-    std::vector<unsigned> find_permutation(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation) override;
-
-  public:
-    MeshTemplateTMacroElement2(MeshTemplateDomain *domain, unsigned index, MeshTemplateElement *e, std::vector<MeshTemplateNode *> *nodes);
-    void macro_element_boundary(const unsigned &t, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f) override;
-  };
-
-  // Macro element for 3d, brick (Q-type), second-order (27-node) elements.
-  class MeshTemplateQMacroElement3 : public oomph::QMacroElement<3>, public MeshTemplateMacroElementBase
-  {
-  protected:
-    std::vector<unsigned> find_permutation(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation) override;
-
-  public:
-    MeshTemplateQMacroElement3(MeshTemplateDomain *domain, unsigned index, MeshTemplateElement *e, std::vector<MeshTemplateNode *> *nodes);
-    void macro_element_boundary(const unsigned &t, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f) override;
-  };
-
-  // oomph-lib Domain implementation that simply forwards macro_element_boundary()
-  // calls to the individual MeshTemplateMacroElementBase-derived macro elements
-  // that were pushed onto Macro_element_pt (one per curved bulk element).
+  // oomph-lib Domain holding the macro elements of one mesh template (one per curved bulk element),
+  // and owning them: ~Domain deletes everything pushed onto Macro_element_pt.
+  //
+  // It exists only because oomph::MacroElement's constructor demands a Domain. It used to also carry
+  // a macro_element_boundary() override, because oomph's QMacroElement asks its Domain to evaluate
+  // each facet's parametrisation and then blends the answers itself; pyoomph's GenericMacroElement
+  // does the blending directly, so nothing routes through the Domain any more and the dynamic_cast
+  // chain that dispatched those calls (and silently had no branch for triangles) is gone.
   class MeshTemplateDomain : public oomph::Domain
   {
   public:
     MeshTemplateDomain();
     void push_back_macro_element(oomph::MacroElement *macro) { Macro_element_pt.push_back(macro); }
-    void macro_element_boundary(const unsigned &t, const unsigned &i_macro, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f) override;
+    // Pure virtual in oomph::Domain, so it has to exist; nothing should ever call it, since a
+    // GenericMacroElement does not decompose its map into per-facet queries back to the Domain.
+    void macro_element_boundary(const unsigned &, const unsigned &, const unsigned &, const oomph::Vector<double> &, oomph::Vector<double> &) override
+    {
+      throw_runtime_error("MeshTemplateDomain::macro_element_boundary should never be called: pyoomph's "
+                          "GenericMacroElement evaluates its own blend");
+    }
   };
 
   // Abstract base class describing the geometry/topology of a single bulk
