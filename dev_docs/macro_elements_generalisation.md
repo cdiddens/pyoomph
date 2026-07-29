@@ -3,7 +3,7 @@
 Written 2026-07-29 on branch `macro_elements`, after the interface-refinement-coupling work
 (`interface_refinement_coupling.md`) landed on `main`.
 
-Status: **S0, S1, S3, S4, gmsh-3d and S6 done; S5 investigated and deliberately closed without a code change (§18).** Every element shape is covered, in 2d and 3d, from hand-built templates and from gmsh, serially and under MPI. S2 (re-scoped) and S7 remain. §1 and §2 are measured, not assumed — every claim about current
+Status: **S0, S1, S2, S3, S4, gmsh-3d and S6 done; S5 investigated and deliberately closed without a code change (§18).** Every element shape is covered, in 2d and 3d, from hand-built templates and from gmsh, serially and under MPI. Only S7 (docs) remains. §1 and §2 are measured, not assumed — every claim about current
 behaviour below was reproduced, and the numbers are quoted. §3–§5 are the design. §11 is the
 staging. **§13 records what S0 actually turned up**, including a defect worse than anything §1 and
 §2 predicted and a measurement that materially weakens the case for part of S2 — read it before
@@ -918,9 +918,10 @@ Each stage ends with its tests green and is committed separately.
   flipped to XPASS and the markers came off; curved module 39 passed, fast suite 455 passed.
   **The gmsh-triangle failure of §1.3 is fixed: that mesh now refines with a boundary error of
   exactly 0.0 where it previously died.** §14 records what S1 turned up.
-- **S2 — the parametric coordinate.** `get_intrinsic_dimension`, `blend_parametric`, `facet_map`,
-  buffer sizing from `get_parametric_dimension()`; rewrite `CurvedEntityCircleArc` and the Python
-  `CurvedEntityCircle` on normals; deprecate `apply_periodicity`. T2, T3 green.
+- **S2 — the parametric coordinate.** ✅ **Done**, though not as written: buffer sizing landed in S1a
+  and the normal-based sphere in S3a, `blend_parametric` and `get_intrinsic_dimension` landed here,
+  and rewriting `CurvedEntityCircleArc` on normals was **deliberately not done** — §20.2 explains why
+  it would have made that entity worse. `facet_map` and `project_onto` were dropped as speculative.
 - **S3 — 3d Q and simplex.** ✅ **Done**, in three commits: S3a the normal-parametrised sphere plus
   `SphericalOctantMesh`'s shell (bricks), S3b tetrahedra, S3c the shared-edge inclusion–exclusion.
   T4 and T13 green; curved module 55 passed, fast suite 471 passed. **Not** done here, and moved to
@@ -1471,3 +1472,64 @@ where it matters.
 
 Measured: all five geometries (quad disc, triangular disc, spherical octant of bricks, tetrahedral
 ball, gmsh tetrahedral ball) exact to machine precision on every rank at 2 and 4 ranks.
+
+---
+
+## 20. S2 as actually built
+
+By the time S2 came round, most of it had already happened elsewhere: buffer sizing from
+`get_parametric_dimension()` fell out of S1a, and the normal-parametrised sphere was pulled into S3a
+because the pole degeneracy blocked all 3d testing (§13.2, §15.4). What was left was the interface —
+and one item that turned out to be a bad idea.
+
+### 20.1 `blend_parametric`, and why it is load-bearing rather than decorative
+
+A parametric coordinate is an opaque vector whose meaning belongs to the entity, so the rule for
+combining two of them belongs to the entity too. `MeshTemplateCurvedEntity::blend_parametric(weights,
+params, result)` defaults to the weighted sum — correct for a flat, non-redundant chart: an angle, an
+arclength, a spline parameter — and `CurvedEntitySpherePart` overrides it to renormalise, because the
+average of two unit normals is not a unit normal.
+
+`GenericMacroElement::subentity_deviation` now calls it instead of summing inline. It is called at
+arbitrary weights, not only at a facet's vertices, since refinement evaluates the blend anywhere on
+the facet. This is distinct from `apply_periodicity()`, which runs once when a facet is built and
+merely chooses which representatives of a periodic coordinate to store; both are kept and the header
+says which is which.
+
+The hook is exposed to Python (`blend`), which is the point of it: a user can now define an entity
+whose chart is redundant. `test_user_entity_can_own_its_blending_rule` builds exactly that — a circle
+charted by a 2-component unit normal — and asserts **both** halves, because the interesting claim is
+not that it works but that the hook is doing something: with the override the rim is exact at
+`1.1e-16`, and with the default weighted sum left in place it is `7.6e-2`, the chord sagitta of a 45°
+facet, i.e. no better than no curved treatment at all.
+
+### 20.2 `CurvedEntityCircleArc` should NOT be rewritten on normals
+
+§4.3's table said to move the circle to a unit normal alongside the sphere. That would make it worse,
+and the reason is worth recording so it is not "fixed" later.
+
+`CurvedEntityCircleArc` parametrises by angle and maps through `cos`/`sin`, so blending the angle
+linearly **is already exact slerp** — uniform in arclength, exact at every weight. Moving to normals
+would mean either nlerp, which §10.2 measured at up to 1% of an element edge for a 45° facet, or
+implementing slerp on normals to get back to precisely where it started.
+
+The sphere is a different case and the distinction is the whole point: there the angular chart has a
+genuine *degeneracy* at the pole, not merely a branch cut, so no repair of the blend could fix it and
+the redundant chart was a correctness matter. For a circle, the branch cut is handled exactly by
+`unwrap_periodic_component` (S0), verified across the full orientation sweep in both node orders. A
+redundant chart buys nothing there.
+
+The rule this leaves: **use a redundant chart when the natural one is degenerate, not merely when it
+wraps.**
+
+### 20.3 Dropped as speculative
+
+`facet_map` (blend-then-map as one overridable call) and `project_onto` (closest-point projection)
+were both in §4.4. Neither has a caller: `blend_parametric` plus `parametric_to_position` already
+covers everything the macro element does, and projection was motivated by splines whose
+parametrisation is only approximately arclength — a real concern, but one no current entity or test
+exercises. Adding unused virtuals to a class users subclass is a cost with no return, so they are
+left in §4.4 as designs rather than shipped as API. `get_intrinsic_dimension()` *was* added despite
+having no caller in the core, because it makes an otherwise puzzling asymmetry legible: a sphere
+patch reporting `get_parametric_dimension() == 3` looks like a bug until something says it is a
+2-manifold on purpose.

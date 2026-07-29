@@ -48,6 +48,7 @@ import os
 import subprocess
 import sys
 
+import numpy
 import pytest
 
 from pyoomph import *
@@ -266,6 +267,68 @@ class _MixedShell(Problem):
         self += eqs @ "domain"
 
 
+class _CircleByNormal(_pyoomph.MeshTemplateCurvedEntity):
+    # A user-defined entity charted REDUNDANTLY: a 1-dimensional manifold described by a 2-component
+    # unit normal. That is the case a plain weighted sum of parametric coordinates gets wrong -- the
+    # average of two unit normals is not a unit normal -- so it is what blend() exists for.
+    # `renormalise=False` leaves the default sum in place, to show the difference is real.
+    def __init__(self, centre, radius, renormalise=True):
+        super().__init__(2)
+        self._c = numpy.array(centre, dtype=float)
+        self._r = radius
+        self._renormalise = renormalise
+
+    def get_intrinsic_dimension(self):
+        return 1
+
+    def pos_to_parametric(self, t, pos, param):
+        d = numpy.array([pos[0], pos[1]]) - self._c
+        param[:] = d / numpy.linalg.norm(d)
+
+    def parametric_to_pos(self, t, param, pos):
+        n = numpy.array(param[:2])
+        pos[0] = self._c[0] + self._r * n[0]
+        pos[1] = self._c[1] + self._r * n[1]
+
+    def blend(self, weights, params, result):
+        result[:] = weights @ params
+        if self._renormalise:
+            result /= numpy.linalg.norm(result)
+
+
+class _NormalDiskTemplate(MeshTemplate):
+    # The triangular disc again, but with its rim on a Python-defined entity rather than a built-in.
+    def __init__(self, renormalise=True, nseg=8):
+        super().__init__()
+        self._renormalise, self._nseg = renormalise, nseg
+        self._entities = []
+
+    def define_geometry(self):
+        domain = self.new_domain("domain")
+        centre = self.add_node_unique(0, 0)
+        rim = [self.add_node_unique(_R * math.cos(2 * math.pi * i / self._nseg),
+                                    _R * math.sin(2 * math.pi * i / self._nseg))
+               for i in range(self._nseg)]
+        entity = _CircleByNormal([0, 0], _R, self._renormalise)
+        self._entities.append(entity)
+        for i in range(self._nseg):
+            j = (i + 1) % self._nseg
+            domain.add_tri_2d_C1(centre, rim[i], rim[j])
+            self.add_facet_to_boundary("circumference", [rim[i], rim[j]], [rim[i], rim[j]], entity)
+
+
+class _NormalDisk(Problem):
+    def __init__(self, renormalise=True):
+        super().__init__()
+        self._renormalise = renormalise
+
+    def define_problem(self):
+        self += _NormalDiskTemplate(self._renormalise)
+        eqs = PoissonEquation(source=1, space="C1") + DirichletBC(u=0) @ "circumference"
+        eqs += SpatialErrorEstimator(u=1)
+        self += eqs @ "domain"
+
+
 class _GmshBallTemplate(GmshTemplate):
     # An octant of a ball meshed by gmsh with tetrahedra, its shell mapped onto the sphere. Unlike the
     # hand-built meshes above this is unstructured, which is what makes it the interesting case: most
@@ -397,6 +460,16 @@ def _worker_main(argv):
         for _ in range(nref):
             problem.refine_uniformly()
         print("RESULT", _max_radius_error(problem.get_mesh("domain"), "shell", ndim=3))
+        return
+    elif kind == "normaldisk":
+        renormalise, nref = argv[2] == "1", int(argv[3])
+        problem = _NormalDisk(renormalise=renormalise)
+        problem.set_output_directory(outdir)
+        problem.max_refinement_level = 3
+        problem.initialise()
+        for _ in range(nref):
+            problem.refine_uniformly()
+        print("RESULT", _max_radius_error(problem.get_mesh("domain"), "circumference"))
         return
     elif kind == "gmshball":
         nref, mapped = int(argv[2]), argv[3] == "1"
@@ -770,3 +843,35 @@ def test_gmsh_map_to_sphere_is_opt_in(tmp_path):
     # shell stays polyhedral, as it always has.
     out = _worker_lines(tmp_path, "gmshball", 1, 0)
     assert float(out["RESULT"]) > 1e-3
+
+
+# --------------------------------------------------------------------------------------------
+# The entity interface: a user-defined chart that needs its own blending rule
+# --------------------------------------------------------------------------------------------
+
+def test_user_entity_can_own_its_blending_rule(tmp_path):
+    # A parametric coordinate is an opaque vector whose meaning belongs to the entity, so how two of
+    # them combine has to belong to the entity too. The default is a weighted sum, which is right for
+    # a flat chart (an angle, an arclength, a spline parameter) and wrong for a redundant one: the
+    # average of two unit normals is not a unit normal.
+    #
+    # Both halves are asserted, because the interesting claim is not "it works" but "the hook is
+    # load-bearing": the same geometry with the default sum is off by 7.6e-2, exactly the chord
+    # sagitta of a 45 degree facet, i.e. no better than no curved treatment at all.
+    assert _worker_radius_error(tmp_path, "normaldisk", 1, 1) < _EXACT
+    assert _worker_radius_error(tmp_path, "normaldisk", 0, 1) > 1e-3
+
+
+def test_intrinsic_and_parametric_dimensions_are_reported_separately():
+    # A sphere patch is a 2-manifold charted by 3 numbers, and a curve can be charted by 2. The
+    # redundancy is the point (no 2-component chart of a sphere avoids a degeneracy at the poles), so
+    # it is reported rather than left looking like an inconsistency.
+    sphere = _pyoomph.CurvedEntitySpherePart([0, 0, 0], [_R, 0, 0])
+    assert sphere.get_parametric_dimension() == 3
+    assert sphere.get_intrinsic_dimension() == 2
+    arc = _pyoomph.CurvedEntityCircleArc([0, 0, 0], [_R, 0, 0], [0, _R, 0])
+    assert arc.get_parametric_dimension() == 1
+    assert arc.get_intrinsic_dimension() == 1
+    user = _CircleByNormal([0, 0], _R)
+    assert user.get_parametric_dimension() == 2
+    assert user.get_intrinsic_dimension() == 1

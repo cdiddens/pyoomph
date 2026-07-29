@@ -129,7 +129,38 @@ namespace pyoomph
     // from their serialized string representation (as written by
     // get_information_string()), starting at line `currline` of `s`.
     static std::map<int, MeshTemplateCurvedEntity *> load_from_strings(const std::vector<std::string> &s, size_t &currline);
+    // How many numbers a parametric coordinate of this entity has.
     virtual unsigned get_parametric_dimension() const { return dim; }
+    // The dimension of the entity as a manifold: 1 for a curve, 2 for a surface. Usually the same as
+    // the parametric dimension, but deliberately allowed to be smaller -- a sphere patch is a
+    // 2-manifold charted by a 3-component unit normal, precisely because no 2-component chart of a
+    // sphere is free of a degeneracy. Reported separately so that the redundancy is legible rather
+    // than looking like a bug.
+    virtual unsigned get_intrinsic_dimension() const { return get_parametric_dimension(); }
+
+    // Combine the parametric coordinates of a facet's vertices with the given weights (which form a
+    // partition of unity) into the parametric coordinate of the blended point.
+    //
+    // This is the entity's own business, and it is why the parametric coordinate can be an opaque
+    // vector rather than a point in some agreed chart. The default -- a plain weighted sum -- is
+    // correct exactly when the chart is flat and non-redundant, which covers an angle, an arclength
+    // or a spline parameter. It is not correct for a redundant chart: averaging unit normals gives a
+    // vector that is no longer a unit normal, so CurvedEntitySpherePart renormalises here.
+    //
+    // Called for arbitrary weights, not only at the facet's own vertices: refinement evaluates the
+    // blend anywhere on the facet. Distinct from apply_periodicity(), which runs once when the facet
+    // is built and merely chooses which representatives of a periodic coordinate to store.
+    virtual void blend_parametric(const std::vector<double> &weights,
+                                  const std::vector<std::vector<double>> &params,
+                                  std::vector<double> &result)
+    {
+      result.assign(get_parametric_dimension(), 0.0);
+      for (unsigned int k = 0; k < params.size() && k < weights.size(); k++)
+      {
+        for (unsigned int i = 0; i < result.size() && i < params[k].size(); i++)
+          result[i] += weights[k] * params[k][i];
+      }
+    }
     // Map a parametric coordinate to the Eulerian position at time level t (t=0 is current).
     virtual void parametric_to_position(const unsigned &, const std::vector<double> &, std::vector<double> &) { throw_runtime_error("Empty parametric_to_position called"); }
     // Inverse of parametric_to_position: find the parametric coordinate of a given Eulerian position.
@@ -342,6 +373,31 @@ namespace pyoomph
       parametric.resize(3);
       for (unsigned int i = 0; i < 3; i++)
         parametric[i] = rel[i] / len;
+    }
+
+    // A sphere is a surface; the third component of the normal is redundancy, not a dimension.
+    unsigned get_intrinsic_dimension() const override { return 2; }
+
+    // The blend of unit normals is not itself a unit normal, so renormalise: this is exactly nlerp,
+    // which lands on the sphere for any weights and gives the arc midpoint at weight 1/2 -- the case
+    // edge refinement actually asks for. parametric_to_position also normalises, and deliberately so:
+    // it must stay usable on a coordinate that did not come from here (a round trip through
+    // position_to_parametric, say).
+    void blend_parametric(const std::vector<double> &weights, const std::vector<std::vector<double>> &params,
+                          std::vector<double> &result) override
+    {
+      MeshTemplateCurvedEntity::blend_parametric(weights, params, result);
+      double len = 0.0;
+      for (unsigned int i = 0; i < result.size(); i++)
+        len += result[i] * result[i];
+      len = sqrt(len);
+      if (len < 1e-12)
+      {
+        throw_runtime_error("CurvedEntitySpherePart: blended normal is degenerate, i.e. this facet "
+                            "spans (at least) half the sphere. Split it into smaller facets.");
+      }
+      for (unsigned int i = 0; i < result.size(); i++)
+        result[i] /= len;
     }
 
     // Nothing to do: a unit normal is unique, so there is no wrap-around ambiguity to resolve.

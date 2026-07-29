@@ -107,6 +107,49 @@ namespace pyoomph
 		{
 		}
 
+		// Combines the parametric coordinates of a facet's vertices, weighted, into the parametric
+		// coordinate of the blended point. Override in Python when a plain weighted sum is not the right
+		// rule -- e.g. when the coordinate is a direction that has to be renormalised after averaging.
+		// `weights` has one entry per row of `params`, and the result is written into `result`.
+		virtual void blend(const nb::ndarray<nb::numpy, double> &weights,
+						   const nb::ndarray<nb::numpy, double> &params,
+						   nb::ndarray<nb::numpy, double> &result)
+		{
+			// Default: the weighted sum, matching MeshTemplateCurvedEntity::blend_parametric.
+			const size_t nk = weights.shape(0), nd = result.shape(0);
+			for (size_t i = 0; i < nd; i++) result.data()[i] = 0.0;
+			for (size_t k = 0; k < nk; k++)
+				for (size_t i = 0; i < nd; i++)
+					result.data()[i] += weights.data()[k] * params.data()[k * nd + i];
+		}
+
+		// Marshals to numpy and back around the (potentially Python-overridden) blend().
+		void blend_parametric(const std::vector<double> &weights, const std::vector<std::vector<double>> &params,
+							  std::vector<double> &result) override
+		{
+			const size_t nk = params.size();
+			const size_t nd = get_parametric_dimension();
+			result.assign(nd, 0.0);
+			if (!nk) return;
+			double *wbuf = new double[nk];
+			double *pbuf = new double[nk * nd];
+			for (size_t k = 0; k < nk; k++)
+			{
+				wbuf[k] = (k < weights.size() ? weights[k] : 0.0);
+				for (size_t i = 0; i < nd; i++) pbuf[k * nd + i] = (i < params[k].size() ? params[k][i] : 0.0);
+			}
+			double *rbuf = new double[nd];
+			for (size_t i = 0; i < nd; i++) rbuf[i] = 0.0;
+			nb::capsule wown(wbuf, [](void *p) noexcept { delete[] (double *) p; });
+			nb::capsule pown(pbuf, [](void *p) noexcept { delete[] (double *) p; });
+			nb::capsule rown(rbuf, [](void *p) noexcept { delete[] (double *) p; });
+			nb::ndarray<nb::numpy, double> warr(wbuf, {nk}, wown);
+			nb::ndarray<nb::numpy, double> parr(pbuf, {nk, nd}, pown);
+			nb::ndarray<nb::numpy, double> rarr(rbuf, {nd}, rown);
+			blend(warr, parr, rarr);
+			for (size_t i = 0; i < nd; i++) result[i] = rarr.data()[i];
+		}
+
 		// Converts a batch of parametric coordinates into a 2d numpy array, calls the (potentially
 		// Python-overridden) ensure_periodicity, and writes the result back.
 		void apply_periodicity(std::vector<std::vector<double>> &parametric) override
@@ -141,7 +184,7 @@ namespace pyoomph
 	class PyMeshTemplateCurvedEntityTrampoline : public PyMeshTemplateCurvedEntity
 	{
 	public:
-		NB_TRAMPOLINE(PyMeshTemplateCurvedEntity, 3);
+		NB_TRAMPOLINE(PyMeshTemplateCurvedEntity, 4);
 
 		void pos_to_parametric(const unsigned &t, const nb::ndarray<nb::numpy, double> &pos, nb::ndarray<nb::numpy, double> &param) override
 		{
@@ -156,6 +199,12 @@ namespace pyoomph
 		void ensure_periodicity(nb::ndarray<nb::numpy, double> &parametrics) override
 		{
 			NB_OVERRIDE(ensure_periodicity, parametrics);
+		}
+
+		void blend(const nb::ndarray<nb::numpy, double> &weights, const nb::ndarray<nb::numpy, double> &params,
+				   nb::ndarray<nb::numpy, double> &result) override
+		{
+			NB_OVERRIDE(blend, weights, params, result);
 		}
 	};
 
@@ -313,6 +362,8 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("get_information_string", &pyoomph::MeshTemplateCurvedEntity::get_information_string)
 		.def("get_pos_from_parametric", &pyoomph::MeshTemplateCurvedEntity::parametric_to_position)
 		.def("get_parametric_from_pos", &pyoomph::MeshTemplateCurvedEntity::position_to_parametric)
+		.def("get_parametric_dimension", &pyoomph::MeshTemplateCurvedEntity::get_parametric_dimension, "Number of components a parametric coordinate of this entity has")
+		.def("get_intrinsic_dimension", &pyoomph::MeshTemplateCurvedEntity::get_intrinsic_dimension, "Dimension of the entity as a manifold (1 for a curve, 2 for a surface). May be smaller than the parametric dimension when the chart is deliberately redundant, e.g. a sphere charted by a unit normal")
 		.doc()="A generic class representing a relation for a curved boundary representation";
 
 	nb::class_<pyoomph::CurvedEntityCircleArc, pyoomph::MeshTemplateCurvedEntity>(m, "CurvedEntityCircleArc", "A curved entity representing an arc of a circle, defined by its center, a point on the circle and a tangent direction")
@@ -335,7 +386,8 @@ void PyReg_Mesh(nb::module_ &m)
 		.def(nb::init<unsigned>(), nb::arg("num_parameters"))
       .def("pos_to_parametric",&pyoomph::PyMeshTemplateCurvedEntity::pos_to_parametric, nb::arg("t"),nb::arg("pos"),nb::arg("param"), "Maps a Cartesian position to a parametric coordinate. To be implemented by the Python subclass")
       .def("parametric_to_pos",&pyoomph::PyMeshTemplateCurvedEntity::parametric_to_pos,nb::arg("t"),nb::arg("param"),nb::arg("pos"), "Maps a parametric coordinate to a Cartesian position. To be implemented by the Python subclass")
-      .def("ensure_periodicity",&pyoomph::PyMeshTemplateCurvedEntity::ensure_periodicity,nb::arg("param"), "Adjusts a batch of parametric coordinates to lie within a canonical periodic range. Can be implemented by the Python subclass if the parametrisation is periodic");
+      .def("ensure_periodicity",&pyoomph::PyMeshTemplateCurvedEntity::ensure_periodicity,nb::arg("param"), "Adjusts a batch of parametric coordinates to lie within a canonical periodic range. Can be implemented by the Python subclass if the parametrisation is periodic")
+      .def("blend",&pyoomph::PyMeshTemplateCurvedEntity::blend,nb::arg("weights"),nb::arg("params"),nb::arg("result"), "Combines a facet's parametric coordinates, weighted, into the blended point's parametric coordinate. Defaults to the weighted sum; override when that is not the right rule for this parametrisation (e.g. a direction that must be renormalised after averaging)");
 
 
 

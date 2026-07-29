@@ -276,15 +276,15 @@ namespace pyoomph
     for (unsigned int k = 0; k < nfv; k++)
       sigma[k] = lambda[cf.local_vertices[k]] / w;
 
-    // Curved image: blend the stored parametric coordinates with those weights and map.
-    const unsigned npar = entity->get_parametric_dimension();
-    std::vector<double> parametric(npar, 0.0);
+    // Curved image: hand the sub-entity's stored parametric coordinates and the weights to the entity
+    // and let it combine them. The entity owns that rule -- a plain weighted sum is right for an angle
+    // or an arclength but not for a redundant chart such as a unit normal, which has to be
+    // renormalised. See MeshTemplateCurvedEntity::blend_parametric.
+    std::vector<std::vector<double>> facet_params(nfv);
     for (unsigned int k = 0; k < nfv; k++)
-    {
-      const std::vector<double> &p = cf.facet->parametrics[cf.parametric_index[k]];
-      for (unsigned int i = 0; i < npar && i < p.size(); i++)
-        parametric[i] += sigma[k] * p[i];
-    }
+      facet_params[k] = cf.facet->parametrics[cf.parametric_index[k]];
+    std::vector<double> parametric;
+    entity->blend_parametric(sigma, facet_params, parametric);
     std::vector<double> curved(dim, 0.0);
     entity->parametric_to_position(t, parametric, curved);
 
