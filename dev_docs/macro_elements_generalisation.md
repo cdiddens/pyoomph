@@ -328,40 +328,111 @@ it.** `build_as_pyramid_son` already uses it exactly this way
 
 The straight-sided reference map is then just `x_lin(s) = Σ_v λ_v(s) · X_v`.
 
-### 3.2 Blended deviation
+### 3.2 Blended deviation — which is exactly the Coons / Gordon–Hall blend
 
 For a sub-entity *S* (a facet or an edge) with vertex set `V(S)`, define
 
 - weight `w_S(s) = Σ_{v∈V(S)} λ_v(s)`;
 - restriction `σ_S,v(s) = λ_v(s) / w_S(s)` for `v ∈ V(S)` — a partition of unity *on S*, and by the
   third property above it is the correct facet-local coordinate whenever *s* lies on *S*;
-- deviation `d_S(σ) = C_S(σ) − Σ_{v∈V(S)} σ_v X_v`, where `C_S(σ)` is the curved entity evaluated at
-  the σ-blend of *S*'s stored parametrics (§4). `d_S` vanishes at every vertex of *S* by
-  construction.
+- straight image `L_S(σ) = Σ_{v∈V(S)} σ_v X_v`;
+- curved image `C_S(σ)` — the entity evaluated at the σ-blend of *S*'s stored parametrics (§4);
+- deviation `d_S = C_S − L_S`, which vanishes at every vertex of *S* by construction.
 
 The macro map is
 
 > **x(s) = Σ_v λ_v X_v  +  Σ_{F curved} w_F · d_F(σ_F)  −  Σ_E (m_E − 1) · w_E · d_E(σ_E)**
 
-where the last sum runs over edges *E* contained in `m_E ≥ 2` curved facets (3d only; empty in 2d).
+where the last sum runs over edges *E* contained in `m_E ≥ 2` curved facets (3d only; empty in 2d,
+because two edges of a 2d element meet only at a vertex, where `d` already vanishes).
 
-Why it is correct:
+**This is not a new or weaker blend — it is the classical transfinite interpolant, rewritten so
+that the shape does not appear.** The interior is genuinely curved, exactly as a Coons patch is.
+
+*Quad.* Write `ξ = (s₀+1)/2`, `η = (s₁+1)/2`, so `w_S = 1−η`, `w_N = η`, `w_W = 1−ξ`, `w_E = ξ`, and
+`Σ_v λ_v X_v = f_rect` (the bilinear corner interpolant). The bilinear interpolant is linear between
+its own edge restrictions in either direction, so `(1−η)L_S + ηL_N = f_rect = (1−ξ)L_W + ξL_E`.
+Substituting,
+
+```
+x = f_rect + Σ_E w_E (C_E − L_E)
+  = f_rect + [(1−η)C_S + ηC_N + (1−ξ)C_W + ξC_E] − 2·f_rect
+  = (1−η)C_S + ηC_N + (1−ξ)C_W + ξC_E − f_rect
+```
+
+which is line for line
+[`QMacroElement<2>::macro_map`](src/thirdparty/oomph-lib/include/macro_element.cc#L200-L203) —
+the Boolean sum `P₁ ⊕ P₂ = P₁ + P₂ − P₁P₂`. **Existing curved quad meshes do not move at all**, in
+the interior or on the boundary.
+
+*Brick, all six faces curved.* The same telescoping applies twice. `Σ_F w_F L_F = 3L` (each of the
+three opposite-face pairs blends back to the trilinear interpolant `L`) and `Σ_E w_E L_E = 3L` (each
+of the three groups of four parallel edges does the same), and every edge has `m_E = 2`, so
+
+```
+x = L + Σ_F w_F C_F − Σ_E w_E C_E
+```
+
+which is `ΣPᵢ − ΣPᵢPⱼ + P₁P₂P₃`, i.e. exactly
+[`QMacroElement<3>::macro_map`](src/thirdparty/oomph-lib/include/macro_element.cc#L440).
+
+*Triangle.* Each vertex lies on two edges, so `Σ_E w_E L_E = 2L` and the formula collapses to
+`x = Σ_E w_E C_E(σ_E) − L` — the same Boolean-sum shape as the quad, with three terms instead of
+four. *Tetrahedron:* three faces and three edges meet at each vertex, giving the brick's closed form
+`x = L + Σ_F w_F C_F − Σ_E w_E C_E`. Wedges and pyramids need no separate derivation: they are
+covered by the general `(m_E − 1)` statement, which is what the implementation evaluates. The closed
+forms are stated only because they are easier to check by hand.
+
+Correctness, independent of the equivalences:
 
 - **On a curved facet F** (`w_F = 1`, `σ_F` = the actual facet coordinate) the first two terms give
   exactly `C_F`. Every *other* curved facet `F'` contributes at a point where `σ_{F'}` has collapsed
-  onto `F ∩ F'`, so `d_{F'}` is the deviation on that shared edge — and the correction term
-  subtracts exactly that. Net: `x = C_F`, the boundary is reproduced exactly.
-- **In 2d the correction sum is empty.** Two edges of a 2d element share only a vertex, and every
-  `d_E` vanishes at its own vertices, so the cross terms are already zero. No inclusion–exclusion
-  needed.
+  onto `F ∩ F'`, so `d_{F'}` is that shared edge's deviation — and the correction term subtracts
+  exactly that. Net `x = C_F`.
 - **At any vertex** all deviations vanish, so `x = X_v`. Vertices never move.
-- **For a quad with one curved edge** this is *not* oomph's Coons blend, but it agrees with it on the
-  boundary and differs only in how the deviation decays into the interior (linearly in `w_F` here,
-  with the same linear factor there). §9 lists the check that says whether that difference is
-  visible.
 
-If two curved facets sharing an edge disagree about that edge's image, the geometry itself is
-inconsistent; the implementation should compare the two `d_E` and warn rather than silently pick one.
+### 3.2.1 Partially curved 3d elements — where this is strictly better
+
+A brick with one curved face *B* and five interior faces is the common 3d case, and it is the one
+where the existing 3d path is wrong. `MeshTemplateQMacroElement3::macro_element_boundary` returns
+the **flat** bilinear corner interpolation for a face with no entity attached
+([src/meshtemplate.cpp:272-278](src/meshtemplate.cpp#L272-L278)). But the four edges of *B* lie on
+the curved surface, so a side face *W* meeting *B* along edge `E` claims `E` is straight while *B*
+claims it is curved. Gordon–Hall then blends two contradictory boundary descriptions and *B* is no
+longer reproduced exactly. (In 2d this cannot happen: an edge's boundary is two corner nodes, on
+which everybody agrees. That is why the 2d path has never shown the symptom.)
+
+The deviation form has no such failure mode, because an uncurved facet contributes nothing and the
+curved facet's deviation is what propagates. On the side face *W* one gets
+
+```
+x|_W = L_W + w_B|_W · d_E(σ_E)
+```
+
+i.e. *W* becomes the **ruled surface** between the curved edge `E` and the opposite straight edge —
+which is the geometrically right answer, and the weight `w_B|_W` is the linear function on *W* that
+is 1 on `E` and 0 on the opposite edge. That expression depends only on *W*'s vertices and on `E`,
+so the neighbouring element across *W* computes the identical surface: the mapped geometry stays
+watertight without any extra machinery.
+
+### 3.2.2 Edge geometry must be a mesh-level fact, not an element-level one
+
+The watertightness argument above has one precondition: both elements sharing *W* must know that `E`
+is curved. Element *A* knows because it owns a curved face containing `E`. Element *B* usually knows
+for the same reason — but not necessarily: *B* can touch the curved surface along `E` alone, without
+having a face on it. Then *A* would rule *W* and *B* would leave it flat, and the two would disagree.
+
+Facets are already deduplicated mesh-wide in `MeshTemplate::facetmap`
+([src/meshtemplate.cpp:2082](src/meshtemplate.cpp#L2082)); edges are not. The fix is small and
+should be part of S3: build an **edge → curved entity registry** at template level, derived once
+from the curved facets (every edge of every curved facet inherits that facet's entity and the
+parametrics of its two endpoints), and have `GenericMacroElement` take `C_E` from that registry
+rather than from whichever facet of *this* element happens to carry it. This also gives the natural
+home for a future explicitly-attached 3d feature edge (§7), and it is where an inconsistency check
+belongs: if two different entities claim the same edge, warn with both names rather than silently
+picking one.
+
+In 2d the registry is unnecessary — edges *are* the facets and are already deduplicated.
 
 ### 3.3 Son-region tracking, generalised
 
@@ -709,12 +780,13 @@ formulation was chosen precisely so that a tet son of a pyramid father is not a 
    and `QElementBase` both want to override the same `FiniteElement` virtual through virtual
    inheritance. Mitigation is mechanical (per-class `override` forwarding), but it touches every
    quad/brick class and will produce confusing compiler errors if approached the other way.
-2. **The interior deviation differs from oomph's Coons blend** for quads/bricks (§3.2). The boundary
-   is exact either way, but interior node positions on the *initial* mesh will shift slightly for
-   existing curved quad meshes — every stored reference result for `CircularMesh`-based tutorials
-   may move at the 1e-3 level. This is the change most likely to produce a wall of test diffs.
-   Alternative: keep oomph's `QMacroElement` blending for Q-shapes and use §3.2 only for the others,
-   at the cost of two code paths. **Recommendation: one path, accept the diffs, quantify them at S1.**
+2. ~~The interior deviation differs from oomph's Coons blend.~~ **Retracted** — §3.2 proves the
+   deviation form *is* the Coons blend for quads and Gordon–Hall for bricks, so existing curved
+   quad meshes do not move by even a rounding error and no second code path is needed. What remains
+   is the narrower risk that the equivalence is asserted rather than executed: S1 must verify it
+   numerically (§10.1) before the old `QMacroElement` path is deleted, not after. The one place the
+   two genuinely differ is partially-curved 3d bricks, where the old path is wrong (§3.2.1) — a 3d
+   path nothing currently reaches (§1.2), so there is nothing to regress.
 3. **Snapping in the runtime `adapt()` path is a behaviour change** for every existing static curved
    mesh — positions that used to drift now do not. That is the point of the work, but it will move
    results.
@@ -760,16 +832,21 @@ precision. All of these are cheap and belong in `tests/`.
 - **T11 — regressions.** `with_macro_element=False` still produces a straight-sided mesh; entity
   lifetime (§1.5) no longer segfaults when the Python object is dropped; no stray `std::cout`.
 - **T12 — the tutorials.** The full 126-script pipeline, once, at the end — not per stage.
+- **T13 — partially curved 3d and watertightness.** A brick and a tet with exactly one curved face,
+  plus a neighbour that touches the curved surface only along an edge (§3.2.2): the curved face must
+  be reproduced exactly, the adjacent interior faces must be ruled, and the two elements sharing an
+  interior face must agree on it to machine precision. Also the equivalence check of §10.1, sampled
+  over the *interior* of the reference domain.
 
 ---
 
 ## 10. What to measure before writing code
 
-Two numbers decide questions the design cannot answer on its own:
-
-1. **How far do interior nodes move** when oomph's Coons blend is replaced by §3.2 on an existing
-   curved quad mesh (risk 2)? Measure on `CircularMesh` at several refinement levels. If it is at
-   the 1e-3 level as expected, one code path; if it is larger, reconsider.
+1. **Execute the equivalence proof of §3.2.** For a curved quad and a curved brick, sample
+   `GenericMacroElement::macro_map` and oomph's `QMacroElement<2>/<3>::macro_map` on a grid over the
+   whole reference domain — interior included, not just the boundary — and require agreement to
+   `1e-14`. This is a unit test, not an integration test, and it is the gate for deleting the old
+   path. If it passes, no tutorial result can move.
 2. **Does slerp vs normalised-sum matter?** Compute the placement error of a quarter-arc facet under
    both at weights 0.25/0.5/0.75. If normalised-sum is within the discretisation error, skip slerp
    and keep the blend a one-liner.
@@ -792,9 +869,10 @@ Each stage ends with its tests green and is committed separately.
 - **S2 — the parametric coordinate.** `get_intrinsic_dimension`, `blend_parametric`, `facet_map`,
   buffer sizing from `get_parametric_dimension()`; rewrite `CurvedEntityCircleArc` and the Python
   `CurvedEntityCircle` on normals; deprecate `apply_periodicity`. T2, T3 green.
-- **S3 — 3d Q and simplex.** Brick and tetra, the edge inclusion–exclusion of §3.2, rewrite
-  `CurvedEntitySpherePart` and `CurvedEntityCylinderArc` on normals; populate
-  `GmshTemplate._curved_entities2d`; un-`if False` `SphericalOctantMesh`. T4 green.
+- **S3 — 3d Q and simplex.** Brick and tetra, the edge inclusion–exclusion of §3.2 and the
+  edge→entity registry of §3.2.2, rewrite `CurvedEntitySpherePart` and `CurvedEntityCylinderArc` on
+  normals; populate `GmshTemplate._curved_entities2d`; un-`if False` `SphericalOctantMesh`. T4, T13
+  green.
 - **S4 — wedge, pyramid, mixed forests.** Remove the last two throws. T5 green.
 - **S5 — moving meshes.** The `moving_nodes` split of §5, `Undeformed_macro_elem_pt` wiring, revisit
   `remove_macro_elements_after_initial_adaption`. T10 green.
@@ -809,11 +887,15 @@ Each stage ends with its tests green and is committed separately.
 
 **Aspect 1 — how to generalise to all shapes.** Stop specialising the macro element per shape and
 specialise the *coordinate system* instead. `shape_at_s_C1` gives every one of the six shapes a
-partition of unity whose members vanish on non-adjacent facets; that is all a transfinite-style
-blend needs. The macro map becomes one formula (§3.2), the son-region box becomes one formula
-(§3.3), six classes become one, and `find_permutation` becomes unnecessary. The genuinely
-shape-specific part — "where is son *k*'s vertex in father coordinates" — already exists for every
-shape from the mixed-adaptivity work.
+partition of unity whose members vanish on non-adjacent facets; that is all a transfinite blend
+needs. Written in those coordinates, the Coons/Gordon–Hall Boolean sum stops mentioning N/S/W/E or
+L/R/D/U/B/F and becomes a single formula (§3.2) valid for quad, tri, brick, tet, wedge and pyramid
+alike — provably identical to oomph's blend where oomph has one, so the interior is curved exactly
+as before and no existing mesh moves. The son-region box becomes one formula (§3.3), six classes
+become one, and `find_permutation` becomes unnecessary. The genuinely shape-specific part — "where
+is son *k*'s vertex in father coordinates" — already exists for every shape from the
+mixed-adaptivity work. As a by-product the partially-curved 3d case, which the present blend gets
+wrong (§3.2.1), comes out right.
 
 **Aspect 2 — the closed-loop discontinuity.** Yes, and the storage layer already permits it: make
 the parametric coordinate an opaque vector whose length is the entity's business, let the entity own
