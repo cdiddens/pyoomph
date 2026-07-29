@@ -1,8 +1,9 @@
 # Structural assembly: precomputed CSR sparsity, value-only re-assembly and solver reuse
 
-Branch: `structural_assembly`. Status: **investigation + plan only, nothing implemented yet.**
-All measurements in §2 were taken on `main` (commit `d03a562`) on this machine; all file/line
-references are to the tree state at the time of writing.
+Branch: `structural_assembly`. Status: **Phases 0 and 1 implemented, tested and benchmarked
+(§6); Phases 2–4 planned.** All measurements in §2 were taken on `main` (commit `d03a562`) on this
+machine; §6 records what the implemented work actually moved. All file/line references are to the
+tree state at the time of writing.
 
 **Goal.** Today every Jacobian assembly rebuilds the CSR structure (row starts + column indices)
 from scratch, and every linear solve therefore re-does its symbolic phase (Pardiso phase 11, PETSc
@@ -333,47 +334,73 @@ larger refactor, and it is trivially revertible.
 
 ---
 
-## 4. What this does *not* fix
+## 4. What this does *not* fix — RESOLVED by Phase 0
 
 The measurements say assembly (424 ms) is bigger than the solve (246 ms) on Benchmark A, so
-eliminating the symbolic phase is only half the story. Where does the 424 ms go? Residual-only
-assembly is 55 ms, so ~370 ms is elemental Jacobian evaluation *plus* scatter/compression. The
-per-raw-entry cost is suspiciously identical for very different equations (91 ns for 3D NS,
-89 ns for 3D C2 Poisson, whose elemental Jacobian is far cheaper per entry), which points at the
-scatter dominating — but `perf` and `gdb` attach are both blocked on this box (`perf_event_paranoid`,
-`ptrace_scope`), so this is **not yet established**. Splitting that number is Phase 0 and gates how
-much §3.1 is worth: if the scatter is 300 ms, the preallocated-scatter route saves more than the
-solver reuse does; if it is 50 ms, Phase 1 is most of the win and Phase 2 is optional.
+eliminating the symbolic phase is only half the story. Where does the 424 ms go?
+
+The first draft of this document guessed "mostly the scatter", from the observation that the cost
+per raw scatter entry is nearly identical for very different equations (91 ns for 3D NS, 89 ns for
+3D C2 Poisson, whose elemental Jacobian is far cheaper per entry). **That guess was wrong.**
+`Problem::benchmark_elemental_assembly()` (Phase 0) times the element loop with the scatter removed,
+and says:
+
+| case | elemental Jacobian | full assembly | scatter + compression |
+|---|---|---|---|
+| NS 3D `N=8` | 252 ms | 407 ms | 155 ms (**38 %**) |
+| NS 2D `N=60` | 74 ms | 118 ms | 44 ms (38 %) |
+| NS+AD 2D `N=40` | 42 ms | 75 ms | 33 ms (44 %) |
+| Poisson 3D C2 `N=8` | 63 ms | 73 ms | 10 ms (**13 %**) |
+
+So the elemental evaluation is the *larger* half everywhere, and overwhelmingly so for a cheap
+scalar equation. This caps Phase 2: removing the scatter entirely saves ~38 % of assembly, i.e.
+~155 ms of a 662 ms Newton step (**~23 %**) on Benchmark A — worth doing, but not more than Phase 1
+delivers, and it will do nothing for Poisson-like problems. It also means that **making the
+elemental JIT code faster is a bigger lever than anything in this document**, and deserves its own
+investigation.
 
 ---
 
 ## 5. Phased plan
 
-### Phase 0 — instrumentation and a benchmark harness *(prerequisite)*
+### Phase 0 — instrumentation and a benchmark harness — **DONE**
 
+* `Problem::benchmark_elemental_assembly()` (`src/problem.cpp`, bound as
+  `problem._benchmark_elemental_assembly`): runs the element loop with the scatter removed. Chosen
+  over adding timers inside the assembly routines because it needs no patch to vendored oomph-lib
+  and no flag threaded through five container variants. **Resolved §4.**
 * `tests/benchmarks/bench_assembly.py`: parametrised (2D/3D, NS / Poisson / coupled multiphysics,
-  mesh size), reporting residual / Jacobian / mass-matrix assembly, per-Pardiso-phase timings, and a
-  full Newton step breakdown. Promote the scratchpad scripts. **Must accept `--distribute` and run
-  under `mpirun`**, reporting per-rank and max-over-ranks assembly times (oomph already has
-  `Doc_imbalance_in_parallel_assembly`, `problem.cc:7013`).
-* Add C++-side timers inside `sparse_assemble_row_or_column_compressed_base_problem` (elemental
-  evaluation / scatter / compression) behind a `problem.report_assembly_timings` flag, and mirror
-  them into the oomph routine we end up owning. **This resolves §4.**
-* Record baselines for the three benchmark cases (serial and `-n 2`/`-n 4`) into the doc.
+  mesh size), reports the elemental/scatter split, the cost of structural zeros, and end-to-end
+  Newton solves; runs under `mpirun` with `--distribute`, one line per rank.
 
-### Phase 1 — value-independent pattern + solver structure reuse *(the cheap win)*
+### Phase 1 — value-independent pattern + solver structure reuse — **DONE**
 
 * `problem.keep_structural_zeros` → sets `Numerical_zero_for_sparse_assembly` negative (§3.6).
   Works unchanged on the distributed path, which uses the same filter (oomph `problem.cc:6899`).
-* `problem.force_jacobian_diagonal_entries` (no-op under Tier A, wired up properly in Phase 2).
-* `problem.jacobian_structure_id`, bumped in `pyoomph::Problem::assign_eqn_numbers`. It is
-  automatically consistent across ranks because `assign_eqn_numbers` is collective — but that must
-  be asserted, not assumed (§7.3).
-* Pardiso: phase-11 reuse when `structure_id` and `nnz` are unchanged, in both `solve_serial` and
-  `solve_distributed` (`pyoomph/solvers/pardiso.py:474`, `:543`).
-* PETSc: keep `Mat`/`KSP`, value-only update, drop `shift(0.0)` — likewise in both.
-* Benchmark: expect −26 % per Newton step on Benchmark A, minus the extra assembly cost of the
-  1.7 % larger pattern; plus the distributed runs.
+* `problem.jacobian_structure_id`, bumped in `pyoomph::Problem::assign_eqn_numbers` — *and*
+  lazily re-validated against the assembly handler, dof counts and active residual, so that a state
+  change nobody hooked cannot hand a solver a stale pattern. That belt-and-braces design earned its
+  keep: it is what makes fold tracking invalidate correctly, with no change at any of the eight
+  handler-installation sites. Returns 0 (= "unusable") whenever `keep_structural_zeros` is off, so
+  every consumer switches itself off for existing scripts.
+* Pardiso: phase 22 instead of phase 12 when the pattern is unchanged
+  (`pyoomph/solvers/pardiso.py`). The pattern is *verified* by comparing the index arrays, not
+  merely trusted — and that check immediately caught a real bug: **oomph-lib emits unsorted column
+  indices per row**, which `pardisoSolver` sorts in its constructor, so copying the freshly
+  assembled values into the sorted value array would have scrambled them.
+  `solve_distributed` is left alone: `PardisoSolver.__init__` refuses `nproc > 1` outright, so that
+  method is unreachable.
+* PETSc: keep the `Mat` (values via `setValuesCSR`) and the `KSP` built on it, so PETSc sees
+  `SAME_NONZERO_PATTERN`; serial and distributed. `_force_zero_diagonal` replaces the unconditional
+  `MatShift(0.0)`.
+* **`MatShift(0.0)` turns out to be a no-op in PETSc 3.22** — verified directly: a 3×3 matrix with a
+  missing diagonal keeps `nz_used = 4` across `shift(0.0)`, with or without
+  `MAT_FORCE_DIAGONAL_ENTRIES`. So the "manually inserted zeros on the diagonal" this project set
+  out to replace *never actually inserted anything*. `keep_structural_zeros` does: PETSc's
+  `MatLUFactorSymbolic_SeqAIJ` error "Matrix is missing diagonal entry 0" disappears with it on.
+  (Plain `pc_type lu` with PETSc's own factoriser then fails on Taylor-Hood for the honest reason —
+  a zero pivot on the pressure block, which needs pivoting; MUMPS handles it. Both failures are
+  pre-existing and reproduce identically on `main`.)
 
 ### Phase 2 — precomputed CSR pattern and direct scatter
 
@@ -443,31 +470,96 @@ Only after Phases 1–3 are validated on the plain Newton path.
 
 ---
 
+## 5b. Results of Phases 0–1
+
+### What structural zeros cost at assembly time
+
+| case | ndof | nnz | Δnnz | Δ assembly time |
+|---|---|---|---|---|
+| NS 3D `N=8` | 10 853 | 1 800 539 → 1 816 855 | +0.9 % | +0.2 % |
+| NS 2D `N=60` | 32 042 | 1 240 184 → 1 272 938 | +2.6 % | +1.7 % |
+| Poisson 3D C2 `N=8` | 4 624 | 253 500 → 253 500 | **0 %** | −0.2 % |
+| NS+AD 2D `N=40` | 20 642 | 840 730 → 1 132 540 | **+34.7 %** | **+16.5 %** |
+
+Free for single-physics (Poisson's elemental block is already dense, so the structural pattern *is*
+the numerical one), and expensive only for weakly coupled multiphysics — which is exactly the case
+Phase 3's field-pair pruning is for.
+
+**Caveat found here, not predicted:** `res+jac+mass` degrades more than `res+jac` — for NS 3D,
+469 → 574 ms (+22 %) against +0.2 % for the Jacobian alone. The mass matrix is *much* sparser
+numerically than the Jacobian, so forcing the shared connectivity pattern on it costs
+disproportionately. Eigenproblem-heavy workflows may want structural zeros on J but not on M; §7 of
+Phase 4 should weigh that against the `J − σM` axpy benefit.
+
+### End-to-end Newton solves
+
+3D Taylor–Hood NS, `N=8`, ndof 10 853, converged to `|R| = 7.6e-15`, solutions bit-identical:
+
+| solver | filtered | structural | |
+|---|---|---|---|
+| `pardiso` | 2.941 s | 2.347 s | **−20 %** |
+| `petsc_mumps` | 3.758 s | 2.923 s | **−22 %** |
+
+MPI, 2D lid-driven cavity `N=24` (ndof 5042), `petsc_mumps`, `--distribute`. Every rank reported the
+same `|R|` and the same integral observables (`ke`, `vx`) to 12 significant digits in all
+configurations, and the same `jacobian_structure_id`:
+
+| ranks | filtered | structural | |
+|---|---|---|---|
+| 1 | 0.328 s | 0.259 s | −21 % |
+| 2 | 0.247 s | 0.195 s | −21 % |
+| 4 | 0.320 s | 0.155 s | −52 % |
+
+3D distributed (`N=6`, ndof 4335) also agrees to 12 digits across ranks, with smaller gains
+(−1 % at `-n 2`, −14 % at `-n 4`): a single solve from scratch is only ~3 Newton steps, and the
+first one cannot reuse anything.
+
+Note `-n 1 --distribute` still takes the *serial* solver path — `get_jacobian` branches on
+`Communicator_pt->nproc() == 1`, so `solve_distributed` is only exercised from two ranks up.
+
+### Not yet done from Phase 1
+
+* `problem.force_jacobian_diagonal_entries` is not implemented as a separate switch. Under Tier A it
+  would be a no-op (the diagonal is already complete, verified by test), so it only becomes
+  meaningful together with Phase 3's pruning — it is deferred to there rather than added as a
+  no-op knob now.
+* The `MPI_Allreduce` `PARANOID` assertion that `jacobian_structure_id` agrees across ranks (§7.3).
+  Currently checked empirically by the benchmark rather than enforced in code.
+
+---
+
 ## 6. Correctness gates
 
+Implemented as `tests/test_structural_assembly.py` (13 tests, <4 s, in the fast run).
 Every phase must keep these green before it lands:
 
-1. **Superset invariant.** For a set of representative problems, `structural_pattern ⊇
-   numerical_pattern` at several dof states (U=0, after 1 Newton step, converged). Verified in
-   §2.4 for the three benchmark cases with `missed = 0`; turn it into a test.
-2. **Bit-identical solutions.** Newton trajectories (residual norm per iteration, converged dof
-   vector) must match the pre-change values to round-off with the pattern route enabled and
-   disabled. Explicit zeros must not change any result.
-3. **Differential test against the oomph path.** With the same problem, compare
-   `sparse_assembly_method="two_arrays"` (oomph) against the pyoomph pattern route:
-   same values on the common pattern, extra entries all exactly 0.0.
+1. **Superset invariant.** `structural_pattern ⊇ numerical_pattern` at several dof states (U=0,
+   converged), and equal to the element-connectivity pattern recomputed independently in Python —
+   so the test does not merely compare the implementation against itself.
+   ✔ `test_structural_pattern_is_value_independent`, `..._is_a_superset_with_identical_values`.
+2. **Bit-identical solutions.** Converged dof vectors must match with the pattern route enabled and
+   disabled; explicit zeros must not change any result. ✔ `test_newton_solution_is_unchanged`,
+   `test_arclength_continuation_is_unchanged_and_keeps_the_pattern`.
+3. **Differential test against the oomph path.** Same values on the common pattern, extra entries
+   all exactly 0.0. ✔ `test_structural_pattern_is_a_superset_with_identical_values`.
 4. **Invalidation coverage.** After each of: mesh adaptation, remeshing, `pin`/`unpin`, Dirichlet
    changes, switching `_solved_residual`, installing/removing a bifurcation handler, adding
    augmented dofs — `structure_id` must have changed and the rebuilt pattern must still satisfy (1).
-   This is the highest-risk area: a *missed* invalidation is a silent wrong-answer bug, not a crash.
-5. **Existing suites.** `tests/` in full (the adaptive 2D/3D campaigns exercise exactly the
-   renumbering paths that can break invalidation), then the tutorial pipeline once, batched at the
-   end of a phase — not per fix.
+   Conversely it must *not* change across Newton steps or arclength continuation steps, or the reuse
+   never fires. This is the highest-risk area: a *missed* invalidation is a silent wrong-answer bug,
+   not a crash. ✔ `test_structure_id_*` (5 tests). Still uncovered: remeshing, and switching
+   `_solved_residual` on a multi-residual problem.
+5. **Existing suites.** ✔ `tests/` `--full` passes (504 passed / 310 skipped / 3 pre-existing xfails
+   in the fast run; the 3 xfails are the documented curved-boundary over-marking). The tutorial
+   pipeline is still owed, batched at the end of a phase — not per fix.
 6. **MPI gates** — every one of 1–5 also under `mpirun -n 2` and `-n 4` with `--distribute`, plus:
    * cross-rank agreement and serial agreement on the gathered residual / global observables, the
      two oracles `tests/test_mpi_adaptivity.py` already implements (see its header);
+     ✔ checked by `tests/benchmarks/bench_assembly.py` (12 significant digits, `-n` 1/2/4, 2D and
+     3D) and by the existing MPI suites (26 tests). **Not yet a pytest gate** — the structural
+     variant should be added to the `box_cases` matrix so it runs in CI, not by hand.
    * `jacobian_structure_id` identical on all ranks after every renumbering
-     (an `MPI_Allreduce(MIN/MAX)` assertion under `PARANOID`);
+     (an `MPI_Allreduce(MIN/MAX)` assertion under `PARANOID`) — not yet implemented, see §5b;
    * the assembled distributed Jacobian equals the serial one (gather and compare on the common
      pattern; extra entries exactly 0.0).
 
