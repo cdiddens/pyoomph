@@ -296,7 +296,11 @@ namespace pyoomph
     // (note: completely pinned fields without any weak formulation (usually helper field, e.g. references for normalized arclength etc) are always removed from the dofs, independent of this setting)
     bool dirichlets_by_removing_from_dof_vector=true;
 
-    bool keep_structural_zeros=false; // See set_keep_structural_zeros(): assemble the value-independent (connectivity) pattern instead of dropping exact zeros
+    // ON by default. It was opt-in while the pattern was the full element-connectivity one (which cost
+    // up to +35% nonzeros on weakly coupled multi-physics); pruning it by the code generator's field
+    // coupling made it free (<= +0.2% nonzeros, within noise on time), and it is what lets the linear
+    // solvers skip their symbolic phase - about -20% per Newton solve.
+    bool keep_structural_zeros=true; // See set_keep_structural_zeros()
     bool keep_structural_zeros_in_secondary_matrices=false; // Same, but for the mass matrix / other non-primary matrices of a multi-matrix assembly
     bool prune_structural_zeros_by_field_coupling=true; // Use the codegen field-coupling tables to keep the structural pattern tight (see the setter)
     bool force_jacobian_diagonal_entries=true; // Keep an entry on every diagonal even where no field pair contributes to it

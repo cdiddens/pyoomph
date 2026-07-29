@@ -184,7 +184,7 @@ def test_default_pattern_does_change_with_the_dofs():
     with _CavityProblem(with_scalar=True) as p:
         p.quiet()
         p.initialise()
-        assert p.keep_structural_zeros is False
+        p.keep_structural_zeros = False   # the pre-Phase-3 behaviour, now no longer the default
         assert p.jacobian_structure_id == 0, "no pattern may be advertised while zeros are filtered"
         J_zero = p.assemble_jacobian(with_residual=False)
         p.solve()
@@ -435,6 +435,7 @@ def test_field_coupling_mask_is_tighter_than_connectivity():
     with _CavityProblem(N=6, with_scalar=True) as p:
         p.quiet()
         p.initialise()
+        p.keep_structural_zeros = False   # compare the masks against the purely numerical pattern
         p.solve()
         connectivity = _connectivity_pattern(p)
         masked = _masked_pattern(p, "jacobian")
@@ -499,11 +500,12 @@ def test_structure_id_is_zero_unless_the_pattern_is_usable():
     with _CavityProblem() as p:
         p.quiet()
         p.initialise()
-        assert p.jacobian_structure_id == 0
-        p.keep_structural_zeros = True
+        assert p.keep_structural_zeros is True, "structural zeros are expected to be on by default"
         assert p.jacobian_structure_id != 0
         p.keep_structural_zeros = False
-        assert p.jacobian_structure_id == 0
+        assert p.jacobian_structure_id == 0, "a value-dependent pattern must not be advertised"
+        p.keep_structural_zeros = True
+        assert p.jacobian_structure_id != 0
 
 
 def test_structure_id_survives_newton_steps():
@@ -526,6 +528,73 @@ def test_structure_id_changes_on_renumbering():
         sid = p.jacobian_structure_id
         p.assign_eqn_numbers()
         assert p.jacobian_structure_id != sid
+
+
+def test_structure_id_changes_on_remeshing():
+    """Remeshing replaces the mesh wholesale, so nothing about the old pattern survives. It funnels
+    through assign_eqn_numbers() like adaptation does, but "should be covered by construction" is not
+    evidence, and this is the one invalidation path with no other test.
+
+    Also checks the pattern is still VALID after the remesh, not merely different: a stale
+    element -> dof attribution surviving a mesh rebuild would produce a mask that no longer covers the
+    numerical pattern, which is the silent-truncation failure mode.
+
+    NOTE: this test makes the suite print "nanobind: leaked N instances!" at interpreter exit. That is
+    NOT caused by the test or by the structural-sparsity work -- remeshing leaks in pyoomph regardless:
+    a plain tutorial-style remeshing script (docs/source/tutorial/ale/remeshing.py) leaks ~187
+    instances on its own. Recorded here so nobody spends an afternoon blaming this file."""
+    gmsh = pytest.importorskip("gmsh", reason="remeshing needs gmsh")  # noqa: F841
+    from pyoomph.equations.ALE import LaplaceSmoothedMesh
+    from pyoomph.meshes.remesher import Remesher2d
+    from pyoomph.equations.generic import RemeshWhen, RemeshingOptions, ElementSpace
+
+    class _RemeshProblem(Problem):
+        def __init__(self):
+            super().__init__()
+            self.remeshing = True
+            self.remesh_options = RemeshingOptions(max_expansion=1.3, min_expansion=0.7,
+                                                   min_quality_decrease=0.2)
+            self.remesh_count = 0
+
+        def actions_after_remeshing(self):
+            super().actions_after_remeshing()
+            self.remesh_count += 1
+
+        def define_problem(self):
+            mesh = RectangularQuadMesh(N=6)
+            mesh.remesher = Remesher2d(mesh)
+            self.add_mesh(mesh)
+            eqs = LaplaceSmoothedMesh()
+            eqs += ElementSpace("C2")  # the mesh motion alone does not pin down the coordinate space
+            eqs += DirichletBC(mesh_x=0, mesh_y=True) @ "left"
+            eqs += DirichletBC(mesh_x=True, mesh_y=0) @ "bottom"
+            eqs += DirichletBC(mesh_y=1) @ "top"
+            xi = var("lagrangian")
+            # Stretch the right edge until the elements are distorted enough to trigger a remesh.
+            eqs += DirichletBC(mesh_x=1 + 1.5 * xi[1] * var("time")) @ "right"
+            eqs += RemeshWhen(self.remesh_options)
+            self.add_equations(eqs @ "domain")
+
+    with _RemeshProblem() as p:
+        p.quiet()
+        p.initialise()
+        p.keep_structural_zeros = True
+        p.solve()
+        sid_before = p.jacobian_structure_id
+        assert sid_before != 0
+
+        for _ in range(8):
+            p.run(0.5, startstep=0.5, maxstep=0.5, outstep=False, temporal_error=None)
+            if p.remesh_count:
+                break
+        assert p.remesh_count > 0, "no remesh was triggered -- the test would prove nothing"
+
+        assert p.jacobian_structure_id != sid_before, "remeshing must invalidate the sparsity pattern"
+        # ...and the rebuilt pattern must still be a superset of what is numerically nonzero.
+        J = p.assemble_jacobian(with_residual=False)
+        masked = _masked_pattern(p, "jacobian")
+        assert ((J != 0).astype(int) - (masked > 0).astype(int) > 0).nnz == 0
+        assert _rows_without_diagonal(J) == 0
 
 
 def test_structure_id_changes_when_the_active_residual_is_switched():
