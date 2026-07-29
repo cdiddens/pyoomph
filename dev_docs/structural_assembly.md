@@ -13,6 +13,13 @@ changed" promise so they can skip reordering/symbolic factorisation, and (c) get
 "zeros on the diagonal" that some PETSc backends require *for free*, instead of the current manual
 `MatShift(0.0)` hack.
 
+**MPI is a requirement, not an afterthought.** Every feature below must work, and be tested, under
+`--distribute` with `mpirun -n N`, on the same footing as the serial path. The distributed assembly
+is a *separate* oomph routine (`parallel_sparse_assemble`) with its own containers and an
+index+value exchange between ranks, so it needs its own treatment — but it is also where a frozen
+pattern pays off most, because the column-index half of every exchange becomes redundant. §7 is the
+MPI design; the MPI work is folded into each phase rather than deferred to the end.
+
 ---
 
 ## 1. How pyoomph assembles the Jacobian today
@@ -68,6 +75,20 @@ pyoomph has three additional, structurally identical assembly routines of its ow
 | `..._for_periodic_orbit` | `src/problem.cpp:2510` | augmented periodic-orbit system | `std::map` |
 | `..._base_problem` | `src/problem.cpp:2813` | unaugmented block while bifurcation/arclength augmentation is active; also the engine behind `assemble_multiassembly` | `std::map` |
 | `assemble_hessian_tensor` | `src/problem.cpp:2224` | rank-3 Hessian | `SparseRank3Tensor` |
+
+And when the problem is distributed, `get_jacobian` takes an entirely different branch
+(oomph `problem.cc:4160`) into `Problem::parallel_sparse_assemble` (oomph `problem.cc:6574`) —
+see §7.
+
+### 1.2b An abandoned first attempt already exists
+
+`Problem::update_jacobian_csr_structure()` (`src/problem.cpp:2774`, declared
+`src/problem.hpp:328`) is a stub for precisely this idea — it was meant to fill
+`global_eqs_to_jacobian_buffer_index` (`src/problem.hpp:315`) so that "a later assembly pass could
+write directly into a preallocated buffer instead of building the sparsity pattern from scratch each
+time". The body is commented out and it `throw_runtime_error("Implement and check performance")`s.
+Phase 2 replaces it; the `std::map<unsigned,unsigned>`-per-row data structure it proposed is *not*
+what we want (see §3.1 for the flat-array alternative).
 
 ### 1.3 The symbolic information the code generator already has
 
@@ -332,25 +353,32 @@ solver reuse does; if it is 50 ms, Phase 1 is most of the win and Phase 2 is opt
 
 * `tests/benchmarks/bench_assembly.py`: parametrised (2D/3D, NS / Poisson / coupled multiphysics,
   mesh size), reporting residual / Jacobian / mass-matrix assembly, per-Pardiso-phase timings, and a
-  full Newton step breakdown. Promote the scratchpad scripts.
+  full Newton step breakdown. Promote the scratchpad scripts. **Must accept `--distribute` and run
+  under `mpirun`**, reporting per-rank and max-over-ranks assembly times (oomph already has
+  `Doc_imbalance_in_parallel_assembly`, `problem.cc:7013`).
 * Add C++-side timers inside `sparse_assemble_row_or_column_compressed_base_problem` (elemental
   evaluation / scatter / compression) behind a `problem.report_assembly_timings` flag, and mirror
   them into the oomph routine we end up owning. **This resolves §4.**
-* Record baselines for the three benchmark cases into the doc.
+* Record baselines for the three benchmark cases (serial and `-n 2`/`-n 4`) into the doc.
 
 ### Phase 1 — value-independent pattern + solver structure reuse *(the cheap win)*
 
 * `problem.keep_structural_zeros` → sets `Numerical_zero_for_sparse_assembly` negative (§3.6).
+  Works unchanged on the distributed path, which uses the same filter (oomph `problem.cc:6899`).
 * `problem.force_jacobian_diagonal_entries` (no-op under Tier A, wired up properly in Phase 2).
-* `problem.jacobian_structure_id`, bumped in `pyoomph::Problem::assign_eqn_numbers`.
-* Pardiso: phase-11 reuse when `structure_id` and `nnz` are unchanged.
-* PETSc: keep `Mat`/`KSP`, value-only update, drop `shift(0.0)`.
+* `problem.jacobian_structure_id`, bumped in `pyoomph::Problem::assign_eqn_numbers`. It is
+  automatically consistent across ranks because `assign_eqn_numbers` is collective — but that must
+  be asserted, not assumed (§7.3).
+* Pardiso: phase-11 reuse when `structure_id` and `nnz` are unchanged, in both `solve_serial` and
+  `solve_distributed` (`pyoomph/solvers/pardiso.py:474`, `:543`).
+* PETSc: keep `Mat`/`KSP`, value-only update, drop `shift(0.0)` — likewise in both.
 * Benchmark: expect −26 % per Newton step on Benchmark A, minus the extra assembly cost of the
-  1.7 % larger pattern.
+  1.7 % larger pattern; plus the distributed runs.
 
 ### Phase 2 — precomputed CSR pattern and direct scatter
 
-* `JacobianSparsity` (§3.1), Tier A, built in `assign_eqn_numbers`.
+* `JacobianSparsity` (§3.1), Tier A, built in `assign_eqn_numbers`. Replaces the abandoned
+  `update_jacobian_csr_structure()` stub (§1.2b).
 * A pyoomph-owned `sparse_assemble_row_or_column_compressed` that uses it, replacing the delegation
   to oomph for the serial non-augmented case. Keep the oomph path reachable via
   `sparse_assembly_method = "..."` as a fallback and as the differential-test oracle.
@@ -360,6 +388,14 @@ solver reuse does; if it is 50 ms, Phase 1 is most of the win and Phase 2 is opt
   persistent `CRDoubleMatrix`.
 * Extend to `..._base_problem` (`src/problem.cpp:2813`) and `..._for_periodic_orbit`
   (`src/problem.cpp:2510`), which are `std::map`-based and hence the slowest paths in the codebase.
+
+### Phase 2b — distributed pattern and value-only exchange *(MPI, same phase, own step)*
+
+* `pyoomph::Problem::parallel_sparse_assemble` override holding a `DistributedJacobianSparsity`
+  (§7.2): cached `my_eqns`, per-rank send plan, frozen local column indices and scatter map.
+* Per assembly, exchange **values only**; send the column indices once per `structure_id`.
+* Falls back to the oomph routine whenever the pattern is invalid, so this is always revertible at
+  runtime.
 
 ### Phase 3 — Tier B (field-pair pruning)
 
@@ -398,11 +434,12 @@ Only after Phases 1–3 are validated on the plain Newton path.
 
 ### Out of scope (for now)
 
-* MPI / distributed assembly (`oomph::Problem::parallel_sparse_assemble`) — a separate routine with
-  its own row distribution; revisit once the serial path is proven. Note pyoomph's own
-  `..._base_problem` already throws for distributed problems (`src/problem.cpp:2822-2825`).
 * Threaded/openmp assembly. A precomputed scatter index makes a colour- or lock-free parallel
   scatter feasible, but that is a follow-up.
+* Making bifurcation tracking / `assemble_multiassembly` work under MPI at all — pyoomph's
+  `..._base_problem` throws for `nproc > 1` today (`src/problem.cpp:2822-2825`). That is a
+  pre-existing gap, not one this work introduces; the plan must not make it worse, and §7.4 records
+  what would be needed.
 
 ---
 
@@ -426,8 +463,95 @@ Every phase must keep these green before it lands:
 5. **Existing suites.** `tests/` in full (the adaptive 2D/3D campaigns exercise exactly the
    renumbering paths that can break invalidation), then the tutorial pipeline once, batched at the
    end of a phase — not per fix.
+6. **MPI gates** — every one of 1–5 also under `mpirun -n 2` and `-n 4` with `--distribute`, plus:
+   * cross-rank agreement and serial agreement on the gathered residual / global observables, the
+     two oracles `tests/test_mpi_adaptivity.py` already implements (see its header);
+   * `jacobian_structure_id` identical on all ranks after every renumbering
+     (an `MPI_Allreduce(MIN/MAX)` assertion under `PARANOID`);
+   * the assembled distributed Jacobian equals the serial one (gather and compare on the common
+     pattern; extra entries exactly 0.0).
 
-## 7. Open questions
+---
+
+## 7. MPI / distributed design
+
+### 7.1 What the distributed path does today
+
+When the problem is distributed, `get_jacobian` (oomph `problem.cc:4160`) calls
+`Problem::parallel_sparse_assemble` (oomph `problem.cc:6574`) instead of
+`sparse_assemble_row_or_column_compressed`. pyoomph does **not** override it, so this is pure
+oomph-lib today. It works in four stages:
+
+1. **`my_eqns`** (`get_my_eqns`, called at `problem.cc:6684`): the sorted set of *global* equations
+   this rank contributes to, gathered from its non-halo elements. Note this is **not** the set of
+   equations this rank *owns* — a non-halo element can touch a halo node, whose equation lives on
+   another rank. Purely a function of the element→eqn map: **structural**.
+2. **Local accumulation** into `matrix_col_indices[m][local_row][k]` / `matrix_values[...]`, sized
+   by `Sparse_assemble_with_arrays_previous_allocation` and grown by
+   `Sparse_assemble_with_arrays_allocation_increment`. Row lookup is a **binary search into
+   `my_eqns` per elemental dof** (`problem.cc:6801-6873`), and insertion is a **linear scan of the
+   row** (`problem.cc:6932-6968`) — both would disappear with a precomputed scatter index. The value
+   filter is the same `fabs(value) > Numerical_zero_for_sparse_assembly` (`problem.cc:6899`), so
+   §3.6 applies here verbatim.
+3. **Send plan**: `n_eqn_for_proc`, `first_eqn_element_for_proc` (`problem.cc:7086-7105`) and
+   `nnz_for_proc` (`problem.cc:7108`). The first two are structural; `nnz_for_proc` becomes
+   structural as soon as the pattern is frozen.
+4. **Exchange**: each rank ships the rows it does not own to their owner — row starts, **column
+   indices** and values — then the owner merges them into its local CSR block.
+
+### 7.2 What a frozen pattern buys under MPI
+
+* **The column-index payload of stage 4 is sent once instead of every assembly.** Per entry the
+  exchange currently costs 4 bytes of `unsigned` index + 8 bytes of `double`; freezing the pattern
+  drops it to 8. That is a **1/3 reduction in message volume** on the assembly critical path, and it
+  removes the per-assembly `nnz_for_proc` handshake.
+* Stages 1 and 3 (binary searches, send-plan construction, allocation growth) collapse into table
+  lookups.
+* The owner-side merge becomes a fixed `value[perm[k]] += recv[k]` scatter instead of a
+  pattern-dependent merge.
+* Downstream, `structure_id` lets the distributed solvers skip their symbolic phases exactly as in
+  the serial case: `pyoomph/solvers/pardiso.py:543` (which currently gathers the whole matrix to
+  rank 0 and solves there — so it benefits from serial phase-11 reuse) and
+  `pyoomph/solvers/petsc.py:319` (`createAIJ` per rank each solve → keep the `Mat`).
+
+Proposed object, mirroring `JacobianSparsity`:
+
+```cpp
+class DistributedJacobianSparsity {
+  std::vector<unsigned> my_eqns;              // stage 1, cached
+  std::vector<int>      scatter_index;        // elemental (i,j) -> slot in the local value array
+  std::vector<int>      element_offset;
+  std::vector<int>      local_row_start, local_col_index;   // frozen local block
+  std::vector<int>      n_eqn_for_proc, first_eqn_for_proc; // stage 3, cached
+  std::vector<int>      recv_permutation;     // incoming value k -> slot in the owned CSR block
+  unsigned long         generation;
+};
+```
+
+### 7.3 MPI-specific invalidation and hazards
+
+* `assign_eqn_numbers` is collective, so bumping `structure_id` there is automatically consistent —
+  but a *silently* divergent `structure_id` would make ranks disagree about whether to re-send
+  indices and deadlock. Assert equality with an `MPI_Allreduce` under `PARANOID`.
+* `Must_recompute_load_balance_for_assembly` / `recompute_load_balanced_assembly()`
+  (`problem.cc:7066-7081`) **changes `el_lo`/`el_hi` between assemblies** on non-distributed MPI
+  runs. That changes which rank contributes which elemental block, hence `my_eqns` and the scatter
+  map — it must invalidate the distributed pattern. This is the subtlest hazard in the whole plan.
+* Halo/haloed node list drift after distributed adaptive refinement is a **known open defect** for
+  custom 3D simplex meshes (see the `mpi_distributed_adaptivity_gap` notes). The pattern must be
+  rebuilt after every adapt anyway, so this work neither fixes nor worsens it — but MPI benchmarks
+  should avoid that configuration until it is fixed, or the failure will be misattributed here.
+* When MPI misbehaves, check the vendored oomph `PARANOID` blocks first — several of them abort on
+  conditions pyoomph legitimately produces (lesson from the mixed-adapt validation campaign).
+
+### 7.4 Bifurcation tracking under MPI
+
+`..._base_problem` (`src/problem.cpp:2813`) and `..._for_periodic_orbit` (`:2510`) both hard-throw
+for `nproc > 1`. Making them distributed means giving the augmented rows/columns an owner and
+adding them to the exchange — a genuinely separate project. Recorded here so the Phase 4 work does
+not silently assume MPI support it does not have.
+
+## 8. Open questions
 
 * Does the residual-only assembly path (`get_residuals`, 55 ms on Benchmark A) share enough with the
   Jacobian path to also benefit? It has no structure at all, so probably not, but 55 ms of a 675 ms
@@ -441,3 +565,12 @@ Every phase must keep these green before it lands:
 * Do any *numerical* entries fall outside the connectivity pattern in exotic setups — external data
   coupling across domains, `add_interior_facet_terms`, tracer/ODE couplings, `DofAugmentations`?
   Gate (1) run over a broad problem set is the way to find out.
+* Under MPI, is it worth freezing the pattern of the *local* block only (cheap, self-contained) as an
+  intermediate step, before also freezing the exchange (§7.2)? The local binary searches and linear
+  row scans may already be the bulk of the distributed assembly cost — Phase 0's per-rank timers
+  will say.
+* Does `Sparse_assemble_with_arrays_previous_allocation` (oomph `problem.h:708` region, reset at
+  `problem.cc:2151`/`:2481`) interact badly with `keep_structural_zeros`? It sizes rows from the
+  previous assembly; a first assembly at `U = 0` under the old value filter would under-allocate for
+  every later one. With structural zeros kept, allocations stabilise immediately — likely a small
+  side benefit, worth confirming.
