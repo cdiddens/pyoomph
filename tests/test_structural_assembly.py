@@ -219,18 +219,31 @@ def test_structural_pattern_is_a_superset_with_identical_values(with_scalar):
 
 
 @pytest.mark.parametrize("with_scalar", [False, True], ids=["navier_stokes", "coupled"])
-def test_structural_pattern_contains_the_full_diagonal(with_scalar):
-    """The 'add zeros on the diagonal' requirement. Taylor-Hood has an empty pressure-pressure block, so
-    the filtered pattern leaves those diagonals out and PETSc's LU refuses the matrix outright."""
+def test_full_diagonal_is_available_on_request(with_scalar):
+    """The "add zeros on the diagonal" requirement. Taylor-Hood has an empty pressure-pressure block, so
+    neither the value-filtered pattern nor the field-pruned one contains those diagonals, and some PETSc
+    factorisations refuse such a matrix outright. force_jacobian_diagonal_entries supplies them.
+
+    It is OFF by default: only some PETSc factorisations need it (MUMPS does not, and PETSc can insert
+    them itself where it does), and stored zeros are not free -- they change the matrix a direct solver
+    sees, hence its pivoting. So this checks the option is available and exact, not that it is on."""
     with _CavityProblem(with_scalar=with_scalar) as p:
         p.quiet()
         p.initialise()
         p.solve()
 
+        assert p.force_jacobian_diagonal_entries is False, "expected the forced diagonal to be opt-in"
         p.keep_structural_zeros = False
         assert _rows_without_diagonal(p.assemble_jacobian(with_residual=False)) > 0, \
             "expected the filtered pattern to be missing pressure diagonals"
         p.keep_structural_zeros = True
+        assert _rows_without_diagonal(p.assemble_jacobian(with_residual=False)) > 0, \
+            "the pruned pattern should not invent diagonals unless asked"
+        p.force_jacobian_diagonal_entries = True
+        assert _rows_without_diagonal(p.assemble_jacobian(with_residual=False)) == 0
+        # Tier A gets the full diagonal for free: connectivity always contains (i,i).
+        p.force_jacobian_diagonal_entries = False
+        p.prune_structural_zeros_by_field_coupling = False
         assert _rows_without_diagonal(p.assemble_jacobian(with_residual=False)) == 0
 
 
@@ -263,7 +276,7 @@ def test_mass_matrix_is_not_inflated_to_the_jacobian_pattern(with_scalar):
         p.keep_structural_zeros = True
         M_str, J_str = _eigen_matrices(p)
 
-        assert J_str.nnz > J_ref.nnz, "the Jacobian should have gained its structural zeros"
+        assert J_str.nnz >= J_ref.nnz, "the structural pattern must contain the numerical one"
         assert M_str.nnz == M_ref.nnz, "the mass matrix must keep its own pattern"
         assert M_str.nnz < J_str.nnz / 2, "expected the mass matrix to be several times sparser"
 
@@ -397,7 +410,8 @@ def test_tier_b_assembles_exactly_the_masked_pattern(with_scalar):
     with _CavityProblem(N=6, with_scalar=with_scalar) as p:
         p.quiet()
         p.initialise()
-        p.keep_structural_zeros = True   # pruning and forced diagonals are the defaults
+        p.keep_structural_zeros = True   # pruning is the default; the forced diagonal is not
+        p.force_jacobian_diagonal_entries = True
         p.solve()
         M, J = _eigen_matrices(p)
 
@@ -413,21 +427,20 @@ def test_tier_b_assembles_exactly_the_masked_pattern(with_scalar):
         assert M.nnz < J.nnz / 2, "the mass matrix must not have been given the Jacobian's pattern"
 
 
-def test_forced_diagonal_can_be_switched_off():
+def test_forced_diagonal_adds_exactly_the_missing_diagonals():
     with _CavityProblem(N=6) as p:
         p.quiet()
         p.initialise()
         p.keep_structural_zeros = True
         p.solve()
+        without = p.assemble_jacobian(with_residual=False)
+        missing = _rows_without_diagonal(without)
+        # Taylor-Hood has no pressure-pressure coupling, so the pruned pattern has no pressure diagonal.
+        assert missing > 0
+        p.force_jacobian_diagonal_entries = True
         with_diag = p.assemble_jacobian(with_residual=False)
         assert _rows_without_diagonal(with_diag) == 0
-        p.force_jacobian_diagonal_entries = False
-        without = p.assemble_jacobian(with_residual=False)
-        # Taylor-Hood has no pressure-pressure coupling, so pruning empties those diagonals again --
-        # which is exactly why forcing them is the default.
-        assert _rows_without_diagonal(without) > 0
-        assert without.nnz == with_diag.nnz - _rows_without_diagonal(without)
-
+        assert with_diag.nnz == without.nnz + missing, "it should add the missing diagonals and nothing else"
 
 def test_field_coupling_mask_is_tighter_than_connectivity():
     """...and is worth having: on a weakly coupled problem the pure connectivity pattern over-allocates

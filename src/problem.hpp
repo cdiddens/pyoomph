@@ -342,7 +342,12 @@ namespace pyoomph
     bool keep_structural_zeros=true; // See set_keep_structural_zeros()
     bool keep_structural_zeros_in_secondary_matrices=false; // Same, but for the mass matrix / other non-primary matrices of a multi-matrix assembly
     bool prune_structural_zeros_by_field_coupling=true; // Use the codegen field-coupling tables to keep the structural pattern tight (see the setter)
-    bool force_jacobian_diagonal_entries=true; // Keep an entry on every diagonal even where no field pair contributes to it
+    // OFF by default. Only some PETSc factorisations need an explicit diagonal; MUMPS does not, and
+    // PETSc can insert the entries itself where it does. Storing zeros nobody asked for is not free:
+    // they change the matrix handed to the direct solver, hence its pivoting, hence the solution at
+    // round-off level -- enough to flip the adaptation decisions of a marginal ALE problem into
+    // non-convergence (see dev_docs/structural_assembly.md).
+    bool force_jacobian_diagonal_entries=false;
     // One scratch buffer PER MATRIX INDEX, not one shared buffer: a multi-matrix assembly fetches the
     // masks for all matrices of an element before using any of them, so the pointers handed out for
     // different matrix_index must stay valid simultaneously. Sharing one buffer silently aliased the
@@ -436,9 +441,9 @@ namespace pyoomph
     void set_prune_structural_zeros_by_field_coupling(bool yesno);
     bool get_prune_structural_zeros_by_field_coupling() const { return prune_structural_zeros_by_field_coupling; }
     // Whether every diagonal entry is forced into the pattern even where no field pair contributes to
-    // it. Needed by PETSc/MUMPS-style factorisations, which reject a matrix with a missing diagonal;
-    // with pruning on, Taylor-Hood's pressure-pressure block is exactly such a case. Free: it only ever
-    // adds up to ndof entries.
+    // it. Off by default: only some PETSc factorisations require it (MUMPS does not), and the stored
+    // zeros perturb a direct solver's pivoting. Turn it on for a solver that needs it -- with pruning
+    // on, Taylor-Hood's pressure-pressure diagonal is exactly such a case.
     void set_force_jacobian_diagonal_entries(bool yesno);
     bool get_force_jacobian_diagonal_entries() const { return force_jacobian_diagonal_entries; }
     // Whether assembly may write straight into a preallocated CSR using a precomputed scatter map,

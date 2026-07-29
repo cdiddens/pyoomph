@@ -900,6 +900,74 @@ for `nproc > 1`. Making them distributed means giving the augmented rows/columns
 adding them to the exchange — a genuinely separate project. Recorded here so the Phase 4 work does
 not silently assume MPI support it does not have.
 
+## 7c. Open regression: `test_moving_mesh_distributed`
+
+**Status at end of session: still failing, cause understood, fix not settled.**
+
+`tests/test_mpi_interface_coupling.py::test_moving_mesh_distributed`, case
+`ale-tri_crossed-12-level`, fails with "reached max. number of adaptations" when the structural
+pattern is on. Everything else is green (37 structural tests, `test_mpi_adaptivity_3d`, the other 27
+MPI tests, the whole fast suite, all 126 tutorial scripts).
+
+It is **not a wrong Jacobian**: the values are bit-identical, and under MPI the frozen path is
+disabled anyway, so only the OR-filter mask is active and that can merely *add* stored zeros.
+Bisecting the flags on the standalone case:
+
+| configuration | extra stored zeros | result |
+|---|---|---|
+| feature off | none | passes |
+| Tier B, forced diagonal off | none (pattern == numerical) | passes |
+| Tier B + forced diagonal | ~80 | fails |
+| Tier A (connectivity) | many | fails |
+
+So *any* extra stored zero tips this case over: extra entries change MUMPS's pivoting, which moves
+the solution at round-off level, which changes the adaptive refinement decisions, which in a
+marginal problem ends in non-convergence.
+
+**Unresolved wrinkle, to pick up next.** Defaulting `force_jacobian_diagonal_entries` to off was
+expected to fix it — injecting exactly that setting via `sitecustomize` *did* make the test pass
+earlier in the session — yet with the same setting as the shipped default the test still fails. The
+two are not obviously different (setting the flag bumps `jacobian_structure_id`, so a stale cached
+pattern is not the explanation). That discrepancy has to be understood before trusting either result;
+do not assume the remaining failure has the same cause as the bisection above until it is reproduced
+against the shipped default.
+
+Reproduce with:
+`python -m pytest tests/test_mpi_interface_coupling.py::test_moving_mesh_distributed -q --full`
+and compare against `PYTHONPATH=<dir with a sitecustomize that sets keep_structural_zeros=False>`.
+
+---
+
+## 7b. TODO: the forced diagonal belongs to the solver, not the problem
+
+`force_jacobian_diagonal_entries` now defaults to **off**, and the flag is in the wrong place.
+
+Why off: an explicit diagonal is required by *some* PETSc factorisations only. MUMPS does not need it,
+and where PETSc does, PETSc can insert the entries itself. Storing zeros nobody asked for is not free
+— they change the matrix a direct solver sees, hence its pivoting, hence the solution at round-off
+level. That is enough to matter: with the diagonal forced on, the adaptation decisions of
+`tests/test_mpi_interface_coupling.py::test_moving_mesh_distributed` (`ale-tri_crossed-12-level`) shift
+and the adaptive Newton solver runs out of adaptations. Isolated by bisecting the flags — see the
+table in §7c. The Jacobian *values* are bit-identical throughout; only which zeros are stored differs.
+
+**What is still needed.** Whether the diagonal must be present is a property of the *linear solver*,
+not of the problem, so `problem.force_jacobian_diagonal_entries` is the wrong owner. The right shape:
+
+* `GenericLinearSystemSolver` grows something like `requires_explicit_diagonal()`, default `False`.
+* `PETSCSolver` returns `True` only when the configured factorisation actually needs it — i.e. keyed
+  on `pc_factor_mat_solver_type` / the PC type. `petsc_mumps` returns `False`; PETSc's own
+  `pc_type lu` (`MatLUFactorSymbolic_SeqAIJ`, which rejects a missing diagonal outright) returns
+  `True`. Pardiso and the SuperLU path return `False`.
+* The problem consults the active solver when building the pattern, instead of carrying a global flag
+  the user has to know to set. `force_jacobian_diagonal_entries` then becomes an override for the
+  cases the solver cannot introspect.
+
+Until that exists, a user hitting "Matrix is missing diagonal entry 0" must set the flag by hand.
+Note the historical alternative does **not** work: `MatShift(0.0)` is a no-op in PETSc 3.22 (§5b), so
+the diagonal cannot be patched up after assembly the way pyoomph used to attempt.
+
+---
+
 ## 8. Open questions
 
 * Does the residual-only assembly path (`get_residuals`, 55 ms on Benchmark A) share enough with the

@@ -793,9 +793,11 @@ void PyReg_Problem(nb::module_ &m)
 					  "against up to 1.37x more nonzeros for plain connectivity on weakly coupled multi-physics. Only has an effect together with "
 					  "``keep_structural_zeros``. Incompatible with ``sparse_assembly_method=\"lists\"``.")
 		.def_prop_rw("force_jacobian_diagonal_entries", &pyoomph::Problem::get_force_jacobian_diagonal_entries, &pyoomph::Problem::set_force_jacobian_diagonal_entries,
-					  "Whether an entry is kept on every diagonal of the Jacobian, even where no field pair contributes to it. PETSc-, MUMPS- and Pardiso-style "
-					  "factorisations reject a matrix with a missing diagonal, and a Taylor-Hood pressure-pressure block is exactly such a case once the pattern "
-					  "is pruned by field coupling. Costs at most ``ndof`` extra entries. Only has an effect together with ``keep_structural_zeros``.")
+					  "Whether an entry is kept on every diagonal of the Jacobian, even where no field pair contributes to it -- as a Taylor-Hood "
+					  "pressure-pressure block does not, once the pattern is pruned by field coupling. **Off by default**: only some PETSc factorisations "
+					  "require an explicit diagonal (MUMPS does not, and PETSc can insert the entries itself where it does), and the stored zeros are not "
+					  "free -- they change the matrix a direct solver sees, hence its pivoting, hence the solution at round-off level. Turn it on for a "
+					  "solver that needs it. Only has an effect together with ``keep_structural_zeros``.")
 		.def("_enable_doc_imbalance_in_parallel_assembly", &oomph::Problem::enable_doc_imbalance_in_parallel_assembly,
 			 "Make the distributed assembly report its local-stage time and the load imbalance across ranks. Diagnostics for the MPI assembly work.")
 		.def_prop_rw("use_frozen_sparsity", &pyoomph::Problem::get_use_frozen_sparsity, &pyoomph::Problem::set_use_frozen_sparsity,
