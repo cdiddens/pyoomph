@@ -1715,3 +1715,66 @@ lists all read — at the end of a large branch, in exchange for fixing zero occ
 suite contains. The risk is concentrated exactly where this branch already found its subtlest defects
 (§19), and the payoff is not measurable on realistic input. It is a good change to make deliberately,
 with its own validation pass; it is a bad change to slip in here.
+
+### 18.4 "Snap only where pinned" is the wrong criterion — two objections that settle it
+
+Raised after §18 was written, and both are fatal to the option §18.2 recommended.
+
+**Dirichlet conditions come and go during a run.** A boundary can be pinned for part of a simulation
+and free for the rest, so "is this position pinned?" is not a property of the boundary but a snapshot
+of the current state. Neither reading of it works:
+
+* *Decide at node-creation time.* Coherent, and it matches oomph's own view — its solid build comments
+  that "pinning doesn't mean 'pin in place' or 'pin to the curvilinear boundary'". But a node created
+  while the boundary was free is then permanently off the curve on a boundary that is fixed for the
+  rest of the run.
+* *Re-snap whenever pinned.* Fixes that, at the price of moving the nodes of an already-solved mesh
+  discontinuously the moment a condition is switched on.
+
+The tension is not resolvable because "pinned" is a proxy for the thing actually meant: *this
+boundary's geometry is prescribed by the template for all time*. That is a statement about the model,
+not about the current boundary conditions, and only the mesh author can make it. **So the right design
+is the explicit per-boundary declaration** — the fourth option in the original list, not the second
+one this document recommended. §18.2 is corrected accordingly.
+
+**A fixed curved boundary meeting a moving one.** In the corner element the two share a node, and that
+node slides *along* the curved boundary — a contact line moving on a curved wall. The macro element
+caches each curved facet's parametric coordinates when the template is built
+(`MeshTemplateFacet::parametrics`), and S6 additionally made it cache the vertex positions by value,
+so both go stale as soon as that corner moves.
+
+The consequence is worse than "slightly stale", and is easy to miss: **the macro element pins the
+parametrisation, not just the geometry.** Demonstrated by rotating a circular boundary along itself,
+so that every node stays exactly on the circle and only its position along it changes:
+
+```
+after the solve                       r in [1.000000, 1.000000]   (exactly on the circle)
+after map_nodes_on_macro_elements()   r in [1.000000, 1.000000]   shifted by up to 0.0927 rad
+```
+
+Nothing was geometrically wrong, and the macro map moved the nodes anyway — back toward the
+parameters they had when the template was built. In a corner element that is precisely the contact
+line being dragged back.
+
+Any future implementation therefore has to recompute a facet's parametric coordinates from the
+*current* node positions rather than using the cached ones. That is possible — a curved entity is a
+global object and `position_to_parametric` is exactly that query — but it reintroduces the need for
+live node access, which §19.1 removed because node pointers dangle when `Mesh::distribute()` deletes
+the elements a rank does not own. The two constraints have to be satisfied together, and that is the
+real cost of S5, rather than the "small, bounded" impression §18.2 gives.
+
+### 18.5 What protects the current code, and how thin it is
+
+Today a moving mesh is safe for exactly one reason: `remove_macro_elements_after_initial_adaption`
+defaults to `"auto"`, which deletes the macro elements once the coordinates are free. The guard is one
+flag wide. With them retained, calling the equally public `map_nodes_on_macro_elements()` after the
+mesh has moved silently undoes the motion:
+
+```
+boundary driven outward to r = 1.2, macro elements retained
+after map_nodes_on_macro_elements()   r in [1.0000, 1.0000]
+```
+
+The mesh is dragged back to the template geometry. That is not a bug in the current default -- it is
+what the mapping pass is *for* -- but the combination is reachable through documented API, so the
+tutorial's moving-mesh warning now says so.
