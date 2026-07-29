@@ -889,10 +889,12 @@ void PyReg_Problem(nb::module_ &m)
 			"get_current_dofs", [](pyoomph::Problem *self)
 			{
 				auto rs = self->get_current_dofs();
-				return std::make_tuple(vector_to_ndarray(std::get<0>(rs)), std::get<1>(rs));
-				// return self->get_current_dofs();
+				// Both halves as numpy arrays, not one array and one Python list: they are parallel to
+				// each other and to every other dof-length vector this class hands out, and callers
+				// index and mask with them (dofs[~is_positional]), which a list cannot do.
+				return std::make_tuple(vector_to_ndarray(std::get<0>(rs)), vector_to_ndarray(std::get<1>(rs)));
 			},
-			"Return a tuple (values, is_pinned) with the current values of all degrees of freedom and, for each, whether it is currently pinned.")
+			"Return a tuple (values, is_positional) of numpy arrays with the current values of all degrees of freedom and, for each, whether it is a nodal position (mesh coordinate) degree of freedom rather than a field value.")
 		.def(
 			"get_history_dofs", [](pyoomph::Problem *self, unsigned t)
 			{

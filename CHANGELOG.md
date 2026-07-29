@@ -82,6 +82,12 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
   and of DG field handling.
 - The compiled core extension moved from a top-level `_pyoomph` module to
   `pyoomph._pyoomph_core`.
+- **`Problem.get_current_dofs()` returns two numpy arrays**, not one array and a Python
+  `list[bool]`. The second half is parallel to the first and to every other dof-length vector the
+  class hands out, so it should be usable the same way -- `dofs[~is_positional]` now works. Its
+  docstring also said it flagged *pinned* dofs; it has always flagged nodal *position* dofs (a
+  pinned value is not a dof and does not appear in this vector at all), and now says so.
+  `Problem.get_all_values_at_current_time()` passes the array through unchanged.
 - Removed unused oomph-lib thirdparty code (FSI, multi-domain, spectral
   elements, DG elements, spines, triangle meshes, the LAPACK QZ eigensolver) —
   a meaningful source-tree size reduction.

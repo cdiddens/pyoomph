@@ -413,7 +413,7 @@ namespace pyoomph
     unsigned long assign_eqn_numbers(const bool& assign_local_eqn_numbers = true) override; // Also (re)builds the defined-field list and pins fields with empty Jacobian rows/columns
     virtual void setup_pinning() {} // Hook for problem-specific pinning of dofs, called during equation numbering; overridden in Python
     void set_initial_condition() override; // Hook to set up initial conditions; overridden in Python (default calls the mesh-level setup_initial_conditions)
-    virtual std::tuple<std::vector<double>, std::vector<bool>> get_current_dofs(); // Current dof values and, for each, whether it is pinned
+    virtual std::tuple<std::vector<double>, std::vector<bool>> get_current_dofs(); // Current dof values and, for each, whether it is a nodal POSITION dof (not whether it is pinned -- a pinned value is not a dof at all and does not appear here). See the implementation.
     virtual std::vector<double> get_history_dofs(unsigned t); // Dof values at history time level t
     virtual std::vector<double> get_current_pinned_values(bool with_pos); // Values of all pinned Data (optionally including nodal positions), used to save/restore state independent of the dof vector
 

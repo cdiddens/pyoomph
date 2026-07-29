@@ -1178,7 +1178,7 @@ class Problem(_pyoomph.Problem):
             raise RuntimeError("You tried to get an ODE with name "+str(name)+", but apparently, this is not an ODE!")
         return res
 
-    def get_all_values_at_current_time(self,with_pos:bool)->tuple[NPFloatArray,list[bool],NPFloatArray]:
+    def get_all_values_at_current_time(self,with_pos:bool)->tuple[NPFloatArray,NPBoolArray,NPFloatArray]:
         dofs,positional_dof=self.get_current_dofs()
         pinned=self.get_current_pinned_values(with_pos)
         return numpy.array(dofs),positional_dof,numpy.array(pinned) #type:ignore

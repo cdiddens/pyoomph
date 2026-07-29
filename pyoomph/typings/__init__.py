@@ -39,6 +39,7 @@ NPComplexArray=numpy.typing.NDArray[numpy.complex128]
 NPAnyArray=numpy.typing.NDArray[Any]
 NPUInt64Array= numpy.typing.NDArray[numpy.uint64]
 NPInt32Array=numpy.typing.NDArray[numpy.uint32]
+NPBoolArray=numpy.typing.NDArray[numpy.bool_]
 
 _AnyPyoomphType=TypeVar("_AnyPyoomphType",bound=Any)
 def assert_type(obj:Any,typ:_AnyPyoomphType)->_AnyPyoomphType:
@@ -47,6 +48,6 @@ def assert_type(obj:Any,typ:_AnyPyoomphType)->_AnyPyoomphType:
     else:
         return cast(type[typ],obj) # type: ignore
     
-__all__ = ["Union","Any","Sequence","Iterable","Callable","Iterator","Optional","TYPE_CHECKING","NPFloatArray","NPIntArray","NPComplexArray","NPUInt64Array","NPInt32Array","Type","Set","Literal","List","Dict","overload","Tuple","cast","NPAnyArray","TypeVar","Generator","OrderedDict","SupportsFloat","TypeAlias","assert_type","TypedDict"]
+__all__ = ["Union","Any","Sequence","Iterable","Callable","Iterator","Optional","TYPE_CHECKING","NPFloatArray","NPIntArray","NPComplexArray","NPUInt64Array","NPInt32Array","Type","Set","Literal","List","Dict","overload","Tuple","cast","NPAnyArray","NPBoolArray","TypeVar","Generator","OrderedDict","SupportsFloat","TypeAlias","assert_type","TypedDict"]
 
 
