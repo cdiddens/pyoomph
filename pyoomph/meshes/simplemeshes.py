@@ -625,10 +625,7 @@ class SphericalOctantMesh(MeshTemplate):
             # Attach the three shell faces to the sphere, so that refinement puts new nodes on it
             # rather than on the polyhedral approximation. Kept alive on self: the C++ side stores the
             # entity as a borrowed pointer.
-            if self.with_curved_entities:
-                self._curved_shell=ce=_pyoomph.CurvedEntitySpherePart(self.get_node_position(n000), self.get_node_position(n00o))
-            else:
-                ce=None
+            ce = self.create_curved_entity("sphere_part", n00o, center=n000) if self.with_curved_entities else None
             self.add_facet_to_boundary(iname, [nttt,nd0d,n00o,n0dd],[nttt,nd0d,n00o,n0dd],ce)
             self.add_facet_to_boundary(iname, [nttt,ndd0,n0dd,n0o0],[nttt,ndd0,n0dd,n0o0],ce)
             self.add_facet_to_boundary(iname, [ndd0,nttt,nd0d,no00],[ndd0,nttt,nd0d,no00],ce)
@@ -651,10 +648,27 @@ class SphericalOctantMesh(MeshTemplate):
             self.add_facet_to_boundary(iname, [ndd0,nii0,no00,ni00])
 
 
-# TODO: Add curved entities!
 class CylinderMesh(MeshTemplate):
-    def __init__(self, radius:ExpressionOrNum=1, height:ExpressionOrNum=1, nsegments_h:int=1, inner_factor:float=0.4,  domain_name:str="domain", outer_interface:str="mantle",top_interface:str="top",bottom_interface:str="bottom",zshift:ExpressionOrNum=0):
+    """
+    A cylindrical mesh of brick elements, split into an inner block and four outer segments.
+
+    Args:
+        radius: Radius of the cylinder.
+        height: Height of the cylinder.
+        nsegments_h: Number of element layers along the axis.
+        inner_factor: Radius of the inner (square-ish) block relative to ``radius``.
+        domain_name: Name of the bulk domain.
+        outer_interface: Name of the mantle boundary.
+        top_interface: Name of the top boundary.
+        bottom_interface: Name of the bottom boundary.
+        zshift: Offset of the cylinder's base along the axis.
+        with_curved_entities: Attach the mantle to the exact cylinder, so that nodes created by
+            refinement land on it rather than on the polygonal approximation through the coarse mesh's
+            nodes. On by default; pass ``False`` for the old straight-sided behaviour.
+    """
+    def __init__(self, radius:ExpressionOrNum=1, height:ExpressionOrNum=1, nsegments_h:int=1, inner_factor:float=0.4,  domain_name:str="domain", outer_interface:str="mantle",top_interface:str="top",bottom_interface:str="bottom",zshift:ExpressionOrNum=0,with_curved_entities:bool=True):
         super(CylinderMesh, self).__init__()
+        self.with_curved_entities=with_curved_entities
         self.radius = radius
         self.height=height
         self.nsegments_h=nsegments_h
@@ -709,8 +723,16 @@ class CylinderMesh(MeshTemplate):
                 domain.add_brick_3d_C1(ni0l, no0l, niil, nddl , ni0u, no0u, niiu, nddu)
                 #self.add_nodes_to_boundary(self.outer_interface, [n0ol, nddl,n0ou, nddu])
                 #self.add_nodes_to_boundary(self.outer_interface, [no0l, nddl , no0u, nddu])
-                self.add_facet_to_boundary(self.outer_interface, [n0ol, nddl,n0ou, nddu])
-                self.add_facet_to_boundary(self.outer_interface, [no0l, nddl , no0u, nddu])
+                # The mantle facets lie on the exact cylinder. One entity per facet, since a
+                # CurvedEntityCylinderArc is defined by the arc it spans; both are kept alive on self
+                # because the C++ side stores them as borrowed pointers.
+                ce1 = ce2 = None
+                if self.with_curved_entities:
+                    axis_lower = self.add_node_unique(0, 0, zlower)
+                    ce1 = self.create_curved_entity("cylinder_arc", n0ol, nddl, center=axis_lower)
+                    ce2 = self.create_curved_entity("cylinder_arc", nddl, no0l, center=axis_lower)
+                self.add_facet_to_boundary(self.outer_interface, [n0ol, nddl,n0ou, nddu],[n0ol, nddl,n0ou, nddu],ce1)
+                self.add_facet_to_boundary(self.outer_interface, [no0l, nddl , no0u, nddu],[no0l, nddl , no0u, nddu],ce2)
                 if ns==0:
                     #bottom
                     self.add_facet_to_boundary(self.bottom_interface, [niil,ni0l,norigl,n0il])

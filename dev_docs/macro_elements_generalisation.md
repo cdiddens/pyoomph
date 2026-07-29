@@ -3,7 +3,7 @@
 Written 2026-07-29 on branch `macro_elements`, after the interface-refinement-coupling work
 (`interface_refinement_coupling.md`) landed on `main`.
 
-Status: **S0, S1, S2, S3, S4, gmsh-3d and S6 done; S5 investigated and deliberately closed without a code change (§18).** Every element shape is covered, in 2d and 3d, from hand-built templates and from gmsh, serially and under MPI. Only S7 (docs) remains. §1 and §2 are measured, not assumed — every claim about current
+Status: **complete.** S0–S4, S6, S7 and gmsh-3d are done; S5 was investigated and deliberately closed without a code change (§18). Every element shape is covered, in 2d and 3d, from hand-built templates and from gmsh, serially and under MPI. §1 and §2 are measured, not assumed — every claim about current
 behaviour below was reproduced, and the numbers are quoted. §3–§5 are the design. §11 is the
 staging. **§13 records what S0 actually turned up**, including a defect worse than anything §1 and
 §2 predicted and a measurement that materially weakens the case for part of S2 — read it before
@@ -936,8 +936,10 @@ Each stage ends with its tests green and is committed separately.
 - **S6 — MPI.** ✅ **Done**, and it found two defects that only this combination could reach (§19).
   `tests/test_mpi_curved_boundaries.py` + `mpi_curved_worker.py`, all five geometries on 2 and 4
   ranks. T8 (coupled interfaces with curved boundaries) is *not* done — see §19.4.
-- **S7 — docs and tutorials.** Curved-entity documentation, `CylinderMesh` curved entities, remove
-  the `with_macro_element=False` workarounds from any tutorial that carries them. T12.
+- **S7 — docs and tutorials.** ✅ **Done** (§21). Two new sections in
+  `docs/source/tutorial/spatial/mesh/unitsandmacro.rst`; `create_curved_entity` extended to spheres
+  and cylinders; `CylinderMesh` given its curved mantle. No tutorial carried a
+  `with_macro_element=False` workaround, so there was none to remove.
 
 ---
 
@@ -1573,3 +1575,49 @@ now also in the header where someone writing an entity will meet it: fold a corr
 `parametric_to_position` when it can be expressed pointwise; override `blend_parametric` only when the
 rule genuinely needs the other samples, such as unwrapping a periodic coordinate relative to its
 neighbours, or a true slerp.
+
+---
+
+## 21. S7 (docs), and the API gap it exposed
+
+### 21.1 The public factory could not build anything this work added
+
+Writing the documentation surfaced a gap the implementation stages had all worked around without
+noticing: `MeshTemplate.create_curved_entity` — the *supported* way to build a curved entity from a
+hand-written template — only ever accepted `"circle_arc"`. Every sphere in this branch, including the
+ones in `tests/test_curved_boundaries.py` and in `SphericalOctantMesh`, reached past it into
+`_pyoomph.CurvedEntitySpherePart` directly. That is a fair signal: if the tests cannot use the public
+API, neither can a user.
+
+It now accepts `"sphere_part"` (a point on the sphere plus the `center`) and `"cylinder_arc"` (start,
+end, plus the `center`, with the axis following from the three points), both taking node indices or
+coordinates like `"circle_arc"` does, and both registered in `_macrobounds` so the entity stays alive.
+`SphericalOctantMesh` was switched over to it, so the shipped meshes exercise the same path a user
+would take.
+
+### 21.2 `CylinderMesh` has a curved mantle
+
+The `# TODO: Add curved entities!` above it is resolved. Measured: the mantle is exact at every
+refinement level, against `7.6e-2` before — a number that, as everywhere else in this work, does not
+improve with refinement, because subdividing a polygon gives a finer polygon.
+
+Consistent with `CircularMesh` and `SphericalOctantMesh`, it takes `with_curved_entities` (default
+`True`) for the old behaviour.
+
+### 21.3 What the documentation says
+
+Two new sections in `docs/source/tutorial/spatial/mesh/unitsandmacro.rst`, which already covered the
+2d quadrilateral case and already claimed curved boundaries "resemble the very same smooth boundary
+curve also upon refinement" — a promise that was aspirational when written and is now true.
+
+*Curved boundaries in general* states the coverage (all six element types, 2d and 3d, hand-built and
+gmsh, serial and distributed), lists the entity types, and makes the cost of *not* using one concrete
+with the spherical octant's 23% volume deficit — deliberately, because the intuition this work
+repeatedly ran into is that refinement will fix a coarse curved boundary, and it will not. It also
+carries a warning about moving meshes, so §18's decision is visible to users rather than buried here.
+
+*Writing your own curved entity* documents the Python subclass interface, and in particular that the
+parametric coordinate is opaque and may be redundant, with the sphere's unit normal as the worked
+reason. It gives the §20.4 guidance in the form a user needs it: prefer to absorb a correction into
+`parametric_to_pos`, which runs anyway, and override `blend` only when the rule needs the other
+samples.

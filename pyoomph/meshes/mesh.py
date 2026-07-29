@@ -727,12 +727,24 @@ class MeshTemplate(_pyoomph.MeshTemplate):
 
     def create_curved_entity(self, typ: str, *args: Any, **kwargs: Any)-> _pyoomph.MeshTemplateCurvedEntityBase:
         """
-        Creates a curved entity on the mesh. Currently only the type ``"circle_arc"`` is supported, which requires the start and end point as positional arguments and either the ``center`` or ``through_point`` as keyword argument.
+        Creates a curved entity, i.e. the exact geometry that facets of this mesh lie on. Nodes created
+        by spatial refinement are then placed on that geometry instead of on the straight-sided
+        interpolation between the coarse mesh's nodes.
+
+        Supported types, with the arguments each expects (points may be given either as node indices or
+        as coordinate lists):
+
+        * ``"circle_arc"``: the arc's ``start`` and ``end`` as positional arguments, plus ``center``.
+        * ``"sphere_part"``: one ``point_on_sphere`` as positional argument, plus ``center``. The
+          parametrisation is the outward unit normal, so a patch may be of any size short of half the
+          sphere and may contain the poles.
+        * ``"cylinder_arc"``: the arc's ``start`` and ``end`` as positional arguments, plus ``center``.
+          The cylinder's axis follows from those three points.
 
         Args:
-            typ: Type of the curved entity. Currently only ``"circle_arc"`` is supported.
-            args: Positional arguments for the curved entity.
-            kwargs: Keyword arguments for the curved entity.
+            typ: One of ``"circle_arc"``, ``"sphere_part"``, ``"cylinder_arc"``.
+            args: Positional arguments for the curved entity, as listed above.
+            kwargs: Keyword arguments for the curved entity, in particular ``center``.
 
         Returns:
             The created curved entity to be used in :py:meth:`add_facet_to_boundary`.
@@ -759,6 +771,28 @@ class MeshTemplate(_pyoomph.MeshTemplate):
                 end = self.get_node_position(end)
             res = _pyoomph.CurvedEntityCircleArc(
                 center, start, end)  # type:ignore
+        elif typ == "sphere_part":
+            if len(args) != 1 or kwargs.get("center") is None:
+                raise RuntimeError(
+                    "sphere_part must have one positional arg {point_on_sphere} and center as kwarg")
+            center, onsphere = kwargs.get("center"), args[0]
+            if isinstance(center, int):
+                center = self.get_node_position(center)
+            if isinstance(onsphere, int):
+                onsphere = self.get_node_position(onsphere)
+            res = _pyoomph.CurvedEntitySpherePart(center, onsphere)  # type:ignore
+        elif typ == "cylinder_arc":
+            if len(args) != 2 or kwargs.get("center") is None:
+                raise RuntimeError(
+                    "cylinder_arc must have two positional args {start,end} and center as kwarg")
+            center, start, end = kwargs.get("center"), args[0], args[1]
+            if isinstance(center, int):
+                center = self.get_node_position(center)
+            if isinstance(start, int):
+                start = self.get_node_position(start)
+            if isinstance(end, int):
+                end = self.get_node_position(end)
+            res = _pyoomph.CurvedEntityCylinderArc(center, start, end)  # type:ignore
         else:
             raise RuntimeError("Unknown type "+str(typ))
         if store_entity:
