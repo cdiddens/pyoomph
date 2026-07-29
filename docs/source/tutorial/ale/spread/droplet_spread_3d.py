@@ -44,7 +44,10 @@ class DropletSpreading3d(Problem):
         eqs = NavierStokesEquations(mass_density=0.01, dynamic_viscosity=1)  # flow
         # PseudoElasticMesh is a bit more expensive to calculate, but is more stable in terms of larger deformations than LaplaceSmoothedMesh
         eqs += PseudoElasticMesh()
-        eqs += RefineToLevel(2)  # Since the SphericalOctanctMesh is really coarse
+        eqs += RefineToLevel(2)  # The SphericalOctantMesh only has four elements, so resolve it a bit
+        # The shell of the SphericalOctantMesh carries a curved entity, so the nodes created by this
+        # refinement land exactly on the sphere rather than on the polyhedron through the coarse
+        # mesh's corners -- without it, the initial droplet would be short of its volume by 23%.
 
         # No flow through the boundaries and
         eqs += DirichletBC(mesh_x=0, velocity_x=0) @ "plane_x0"
