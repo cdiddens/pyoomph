@@ -3273,6 +3273,9 @@ namespace pyoomph
 	void BulkElementBase::fill_element_info(bool without_equations)
 	{
 		free_element_info();
+		// The local equation numbering is about to be rebuilt, so the local dof -> contribution map
+		// keyed on it is stale.
+		local_dof_contribution_indices_valid = false;
 
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
 
@@ -5616,6 +5619,107 @@ namespace pyoomph
 	{
 		oomph::DenseMatrix<double> Ccopy = C;
 		this->fill_in_generic_hessian(Y, Ccopy, product, 0);
+	}
+
+	// Small helper for the contribution-index map below: assign, but never downgrade an already
+	// attributed dof back to "unknown", and ignore slots the code did not emit an index for.
+	static inline void set_contrib(std::vector<int> &dest, int local_eqn, const int *table, unsigned slot)
+	{
+		if (local_eqn < 0 || !table) return;
+		if (dest[local_eqn] < 0) dest[local_eqn] = table[slot];
+	}
+
+	// See the declaration in elements.hpp. Walks the same field/space order as get_dof_names(), but
+	// records which CONTRIBUTION each local dof belongs to instead of a printable name. A hanging dof
+	// is attributed to the field of the constrained node, which is what its master dofs contribute to.
+	void BulkElementBase::fill_local_dof_contribution_indices(std::vector<int> &dest)
+	{
+		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+
+		// Positions (nodal coordinates), non-hanging then hanging
+		const unsigned npos = std::min(functable->nodal_dim, functable->info_Pos.numfields);
+		for (unsigned int i = 0; i < eleminfo.nnode; i++)
+		{
+			for (unsigned int j = 0; j < npos; j++)
+			{
+				if (!this->node_pt(i)->is_hanging())
+				{
+					set_contrib(dest, eleminfo.pos_local_eqn[i][j], functable->info_Pos.field_contribution_index, j);
+				}
+				else
+				{
+					oomph::HangInfo *hang_info_pt = this->node_pt(i)->hanging_pt();
+					for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
+					{
+						oomph::DenseMatrix<int> pos_eqn = this->local_position_hang_eqn(hang_info_pt->master_node_pt(m));
+						set_contrib(dest, pos_eqn(0, j), functable->info_Pos.field_contribution_index, j);
+					}
+				}
+			}
+		}
+
+		// Continuous spaces (C2TB/C2/C1TB/C1), non-hanging and hanging
+		const std::vector<std::vector<unsigned>> &space_node_to_elem_node_map = this->get_nodal_space_index_to_element_index_map();
+		for (unsigned int si = 0; si < functable->num_present_continuous_spaces; si++)
+		{
+			auto *space_info = functable->present_continuous_spaces[si];
+			for (unsigned int i = 0; i < eleminfo.nnode_of_space[space_info->space_index]; i++)
+			{
+				unsigned elem_node_index = space_node_to_elem_node_map[space_info->space_index][i];
+				for (unsigned int j = 0; j < space_info->numfields_basebulk; j++)
+				{
+					unsigned val_index = j + space_info->nodal_offset_basebulk;
+					if (!this->node_pt(elem_node_index)->is_hanging(space_info->hangindex))
+					{
+						set_contrib(dest, eleminfo.nodal_local_eqn[i][val_index], space_info->field_contribution_index, j);
+					}
+					else
+					{
+						oomph::HangInfo *hang_info_pt = this->node_pt(elem_node_index)->hanging_pt(space_info->hangindex);
+						for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
+						{
+							set_contrib(dest, this->local_hang_eqn(hang_info_pt->master_node_pt(m), val_index),
+										space_info->field_contribution_index, j);
+						}
+					}
+				}
+			}
+		}
+
+		// Discontinuous (DG) spaces
+		for (unsigned int i_space = 0; i_space < functable->num_present_dg_spaces; i_space++)
+		{
+			auto *space_info = functable->present_dg_spaces[i_space];
+			for (unsigned int j = 0; j < space_info->numfields; j++)
+				for (unsigned int i = 0; i < eleminfo.nnode_of_space[space_info->space_index]; i++)
+					set_contrib(dest, this->get_DG_local_equation(space_info->space_index, j, i),
+								space_info->field_contribution_index, j);
+		}
+
+		// Element-local spaces: discontinuous Lagrange, piecewise constant, external ODE
+		for (unsigned int i = 0; i < eleminfo.nnode_DL; i++)
+			for (unsigned int j = 0; j < functable->info_DL.numfields; j++)
+				set_contrib(dest, eleminfo.nodal_local_eqn[i][j + functable->info_DL.buffer_offset_basebulk],
+							functable->info_DL.field_contribution_index, j);
+		for (unsigned int j = 0; j < functable->info_D0.numfields; j++)
+			set_contrib(dest, eleminfo.nodal_local_eqn[0][j + functable->info_D0.buffer_offset_basebulk],
+						functable->info_D0.field_contribution_index, j);
+		for (unsigned int j = 0; j < functable->info_ED0.numfields; j++)
+			set_contrib(dest, eleminfo.nodal_local_eqn[0][j + functable->info_ED0.buffer_offset_basebulk],
+						functable->info_ED0.field_contribution_index, j);
+	}
+
+	const std::vector<int> &BulkElementBase::get_local_dof_contribution_indices()
+	{
+		if (!local_dof_contribution_indices_valid)
+		{
+			// -1 everywhere to begin with: anything the walk below does not attribute stays "unknown",
+			// which downstream must read as "assume coupled to everything" (see elements.hpp).
+			local_dof_contribution_indices.assign(this->ndof(), -1);
+			this->fill_local_dof_contribution_indices(local_dof_contribution_indices);
+			local_dof_contribution_indices_valid = true;
+		}
+		return local_dof_contribution_indices;
 	}
 
 	// Builds a human-readable name for each local dof/equation of this element, used for

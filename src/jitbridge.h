@@ -352,6 +352,12 @@ typedef struct JITFuncSpec_Table_FiniteElement_SpaceInfo
 
  unsigned int * interface_dof_indices; // For continuous fields (C2TB-C1), this is of length numfields-numfields_basebulk and gives the index for additional dofs on interface nodes. Created at problem level
 
+ // Parallel to fieldnames: the index into contribution_names (and hence the row/column class of
+ // contributes_to_jacobian / contributes_to_mass_matrix) that each field of this space belongs to.
+ // -1 for a field that takes part in no contribution at all. Lets an element translate a local dof
+ // into the class the symbolic coupling tables are indexed by; see dev_docs/structural_assembly.md.
+ int * field_contribution_index;
+
  unsigned space_index; // Index to the arrays [4]
  bool is_dominant; // Is this the dominant space for the element, i.e. the geometric space where also the coordinates live? (e.g. C2TB>C2>C1TB>C1) // Set during problem level 
 

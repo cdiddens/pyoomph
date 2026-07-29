@@ -7480,6 +7480,12 @@ namespace pyoomph
 	void FiniteElementCode::write_code_info(std::ostream &os)
 	{
 	   std::ostringstream init,cleanup;
+	   // Which functable SpaceInfo slot each field ends up in, recorded while the per-space field names
+	   // are emitted below. Read further down - once the contribution indices have been assigned - to
+	   // emit the slot -> contribution-index map, so that the per-space index arithmetic (which differs
+	   // between the continuous and the discontinuous branch) lives in exactly one place.
+	   // Entries are (SpaceInfo member name, index within that space, field).
+	   std::vector<std::tuple<std::string,unsigned,FiniteElementField*>> field_contribution_slots;
 		init << "JIT_API void JIT_ELEMENT_init(JITFuncSpec_Table_FiniteElement_t *functable)" << std::endl;
 		init << "{" << std::endl;
 
@@ -7556,6 +7562,7 @@ namespace pyoomph
 					
 					init << " SET_INTERNAL_FIELD_NAME(functable->info_" << space->get_name() << ".fieldnames," << (f->index - index_offset) << ", \"" << f->get_name() << "\" );" << std::endl;										
 					cleanup << " pyoomph_tested_free(functable->info_" << space->get_name() << ".fieldnames[" << (f->index - index_offset) << "]); functable->info_" << space->get_name() << ".fieldnames[" << (f->index - index_offset) << "]=PYOOMPH_NULL; " << std::endl;
+					field_contribution_slots.push_back(std::make_tuple("info_"+space->get_name(), f->index - index_offset, f));
 				}
 								
 				cleanup << " pyoomph_tested_free(functable->info_" << space->get_name() << ".fieldnames); functable->info_" << space->get_name() << ".fieldnames=PYOOMPH_NULL; " << std::endl;
@@ -7734,6 +7741,7 @@ namespace pyoomph
 					unsigned contiindex = reindex2[f->index];
 					init << " SET_INTERNAL_FIELD_NAME(functable->" << info_name << ".fieldnames," << contiindex << ", \"" << f->get_name() << "\" );" << std::endl;					
 					cleanup << " pyoomph_tested_free(functable->" << info_name << ".fieldnames[" << (contiindex) <<"]); functable->" << info_name << ".fieldnames[" <<(contiindex) << "]=PYOOMPH_NULL; " << std::endl;
+					field_contribution_slots.push_back(std::make_tuple(info_name, contiindex, f));
 				}
 				cleanup << " pyoomph_tested_free(functable->" << info_name << ".fieldnames); functable->" << info_name << ".fieldnames=PYOOMPH_NULL; " << std::endl;
 				index_offset += numfields;
@@ -8147,6 +8155,37 @@ namespace pyoomph
 	  	cleanup << " pyoomph_tested_free(functable->contributes_to_jacobian); functable->contributes_to_jacobian=PYOOMPH_NULL; " << std::endl;
 	  	cleanup << " pyoomph_tested_free(functable->contributes_to_mass_matrix); functable->contributes_to_mass_matrix=PYOOMPH_NULL; " << std::endl;
 	   }
+
+	  // Emit, per space, the map from that space's field slot to the contribution index used by
+	  // contributes_to_jacobian / contributes_to_mass_matrix. The elements need it to translate a LOCAL
+	  // DOF (which they know as "field f of space s at node n") into the row/column class those tables
+	  // are indexed by, and hence to decide which entries of their dense elemental block are
+	  // structurally present. -1 means the field takes part in no contribution at all.
+	  // Cannot be emitted next to the field names above: the contribution indices are only assigned
+	  // here, from the set of fields that turned out to contribute.
+	  {
+		std::map<std::string, unsigned> slots_per_space; // SpaceInfo member name -> number of slots
+		for (auto &slot : field_contribution_slots)
+		{
+			const std::string &info_name = std::get<0>(slot);
+			unsigned idx = std::get<1>(slot);
+			if (!slots_per_space.count(info_name) || slots_per_space[info_name] < idx + 1)
+				slots_per_space[info_name] = idx + 1;
+		}
+		for (auto &pair : slots_per_space)
+		{
+			init << " functable->" << pair.first << ".field_contribution_index=(int*)malloc(sizeof(int)*" << pair.second << ");" << std::endl;
+			init << " for (unsigned int _i=0;_i<" << pair.second << ";_i++) { functable->" << pair.first << ".field_contribution_index[_i]=-1; }" << std::endl;
+			cleanup << " pyoomph_tested_free(functable->" << pair.first << ".field_contribution_index); functable->" << pair.first << ".field_contribution_index=PYOOMPH_NULL; " << std::endl;
+		}
+		for (auto &slot : field_contribution_slots)
+		{
+			FiniteElementField *f = std::get<2>(slot);
+			if (!contribution_field_to_index.count(f)) continue; // Field contributes to nothing: stays -1
+			init << " functable->" << std::get<0>(slot) << ".field_contribution_index[" << std::get<1>(slot)
+				 << "]=" << contribution_field_to_index[f] << "; //" << contribution_names[contribution_field_to_index[f]] << std::endl;
+		}
+	  }
 
 	   init << " functable->dirichlet_field_index_to_global_field_index=(int*)calloc(functable->Dirichlet_set_size,sizeof(int)); // Filling is done in the problem once all fields are defined" << std::endl;
 	   init << " for (unsigned int i=0;i<functable->Dirichlet_set_size;i++) { functable->dirichlet_field_index_to_global_field_index[i]=-1; }" << std::endl;

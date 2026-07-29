@@ -313,6 +313,88 @@ def test_hessian_tensor_is_not_given_structural_zeros():
 
 
 # ---------------------------------------------------------------------------------------------------
+# Phase 3 -- the symbolic field-coupling tables and the per-element dof attribution they are indexed by
+# ---------------------------------------------------------------------------------------------------
+
+def _masked_pattern(problem, which, meshname="domain"):
+    """The sparsity pattern implied by codegen's symbolic field-coupling table for `which` ("jacobian"
+    or "mass"), i.e. element connectivity pruned to the field pairs that can contribute at all."""
+    mesh = problem.get_mesh(meshname)
+    rows, cols = [], []
+    for e in range(mesh.nelement()):
+        el = mesh.element_pt(e)
+        _names, jac, mass = el._get_contribution_tables()
+        table = numpy.array(jac if which == "jacobian" else mass, dtype=bool)
+        cidx = numpy.array(el._get_dof_contribution_indices())
+        eq = numpy.array([el.eqn_number(i) for i in range(el.ndof())])
+        keep = eq >= 0
+        eq, ci = eq[keep], cidx[keep]
+        R, C = numpy.repeat(eq, len(eq)), numpy.tile(eq, len(eq))
+        FR, FC = numpy.repeat(ci, len(ci)), numpy.tile(ci, len(ci))
+        # An unattributed dof (-1) must be read conservatively as "coupled to everything", never as
+        # "decoupled" -- see BulkElementBase::get_local_dof_contribution_indices.
+        sel = (FR < 0) | (FC < 0)
+        known = ~sel
+        sel[known] = table[FR[known], FC[known]]
+        rows.append(R[sel])
+        cols.append(C[sel])
+    n = problem.ndof()
+    S = coo_matrix((numpy.ones(len(numpy.concatenate(rows))),
+                    (numpy.concatenate(rows), numpy.concatenate(cols))), shape=(n, n)).tocsr()
+    S.sum_duplicates()
+    return S
+
+
+@pytest.mark.parametrize("with_scalar", [False, True], ids=["navier_stokes", "coupled"])
+def test_every_local_dof_is_attributed_to_a_field(with_scalar):
+    """The mask is only as good as the local dof -> contribution map behind it. An unattributed dof is
+    handled safely (assume coupled), but it costs density, so it should not happen for ordinary
+    problems -- and if it starts happening, that is worth being told about."""
+    with _CavityProblem(N=6, with_scalar=with_scalar) as p:
+        p.quiet()
+        p.initialise()
+        p.solve()
+        mesh = p.get_mesh("domain")
+        unattributed = sum(1 for e in range(mesh.nelement())
+                           for v in mesh.element_pt(e)._get_dof_contribution_indices() if v < 0)
+        assert unattributed == 0
+
+
+@pytest.mark.parametrize("which", ["jacobian", "mass"])
+@pytest.mark.parametrize("with_scalar", [False, True], ids=["navier_stokes", "coupled"])
+def test_field_coupling_mask_covers_the_numerical_pattern(which, with_scalar):
+    """The invariant the whole of Phase 3 rests on: the symbolic table is a SUPERSET of whatever is
+    numerically nonzero. If it ever under-reports, the assembled matrix is silently truncated."""
+    with _CavityProblem(N=6, with_scalar=with_scalar) as p:
+        p.quiet()
+        p.initialise()
+        p.solve()
+        M, J = _eigen_matrices(p)
+        numerical = J if which == "jacobian" else M
+        masked = _masked_pattern(p, which)
+        missing = ((numerical != 0).astype(int) - (masked > 0).astype(int) > 0)
+        assert missing.nnz == 0, "%d numerically nonzero entries lie outside the symbolic mask" % missing.nnz
+
+
+def test_field_coupling_mask_is_tighter_than_connectivity():
+    """...and is worth having: on a weakly coupled problem the pure connectivity pattern over-allocates
+    by ~37%, which the field-pair mask removes entirely."""
+    with _CavityProblem(N=6, with_scalar=True) as p:
+        p.quiet()
+        p.initialise()
+        p.solve()
+        connectivity = _connectivity_pattern(p)
+        masked = _masked_pattern(p, "jacobian")
+        assert masked.nnz < connectivity.nnz
+        _M, J = _eigen_matrices(p)
+        assert masked.nnz == J.nnz, "the field-pair mask should reproduce the numerical pattern exactly here"
+        # The mass matrix mask must be tighter still, and a subset of the Jacobian's.
+        mass_masked = _masked_pattern(p, "mass")
+        assert mass_masked.nnz < masked.nnz / 2
+        assert ((mass_masked > 0).astype(int) - (masked > 0).astype(int) > 0).nnz == 0
+
+
+# ---------------------------------------------------------------------------------------------------
 # Gate 2 -- the solution is unchanged
 # ---------------------------------------------------------------------------------------------------
 
