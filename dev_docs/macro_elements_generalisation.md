@@ -1179,9 +1179,9 @@ the boundary value 0). Dirichlet conditions are applied through interface elemen
 problem is unaffected.
 
 What it does affect is anything that iterates nodes *by boundary index* — user post-processing,
-boundary-coordinate assignment, and tests like the ones in this file. Worth fixing on its own merits
-(the honest rule is "on the boundary iff the containing facet is"), but it is not this work's, and
-nothing here depends on it.
+boundary-coordinate assignment, and tests like the ones in this file. **Characterised properly in
+§23**, which supersedes the "needs a degenerate geometry" reading here: the trigger is narrower than
+it looks and the worst case is larger.
 
 ### 15.3 ~~The edge→entity registry of §3.2.2 is not needed yet~~ — wrong, see §17.2
 
@@ -1652,3 +1652,66 @@ the problem at all. It is recorded here because this is where it was found, not 
 this work: something about the manual entry point leaves an interface mesh without its bulk mesh after
 redistribution. Anyone wanting it should start from the fact that the flag-driven path through the
 initial adaption works.
+
+---
+
+## 23. §15.2 characterised: boundary-node membership
+
+Pre-existing and unrelated to curved boundaries — it reproduces with straight-sided elements and no
+macro element anywhere. Followed up because it was found here and left vaguely stated.
+
+### 23.1 The rule, the trigger, and the size of it
+
+A node is on a boundary iff it belongs to one of that boundary's facets. When refining, oomph
+approximates that: a new mid-edge node inherits the boundaries **shared by both its end nodes**
+([src/refineable_telements.cpp:458-467](src/refineable_telements.cpp#L458-L467)). Two nodes can share
+a boundary label without the edge between them lying on that boundary.
+
+§15.2 read this as needing a degenerate geometry. That was wrong in both directions. The actual
+trigger is precise:
+
+> An element with **two or more faces on the same boundary**. Its remaining faces then have all their
+> vertices on that boundary, so every edge of them is mislabelled — and each such edge seeds more of
+> them at the next refinement.
+
+Measured, as (nodes marked) → (of those, on no facet of that boundary):
+
+```
+                                          nref=1        nref=2        nref=3
+tet, 2 of 4 faces on the boundary        1 of 10      10 of 35      84 of 165   (51%)
+tet, 4 of 4 faces on the boundary        0 of 10       1 of 35      35 of 165   (21%)
+```
+
+So where it does bite it is not marginal. But on every mesh anyone would actually write it does not
+bite at all — measured **0 spurious nodes** across a triangular disc, a spherical octant of bricks, a
+tetrahedral ball, a rectangular quad/tri mesh, a full circular disc and an unstructured gmsh
+tetrahedral ball, each at one, two and three refinements, up to 64512 elements. The reason is
+structural: an element normally meets a given boundary in a single face, so no interior edge has both
+ends on it. Two faces of one element on the *same* boundary needs the boundary to wrap around the
+element — a one-element-thick shell or slot. Reachable, but not what the shipped meshes do.
+
+Both halves are pinned: `test_boundary_node_membership_matches_the_facets` guards the realistic
+meshes, and `test_boundary_node_membership_is_wrong_when_a_boundary_wraps_an_element` is a strict
+xfail carrying the numbers above, so a fix cannot land unnoticed.
+
+### 23.2 Not repaired, and why
+
+The consequences are bounded. Dirichlet conditions are applied through interface elements built from
+element *faces*, not node labels, so the assembled problem is unaffected — verified in §15.2 by
+solving and checking that the mislabelled nodes are not pinned and carry ordinary interior values.
+What is affected is code that iterates nodes *by boundary index*: user post-processing, boundary
+coordinates, and tests.
+
+The fix is not the inheritance rule. An element cannot tell whether its face is on a boundary from its
+own nodes — that is the circularity the rule exists to work around — so it would have to consult the
+mesh's boundary-element information, which is exactly what `setup_boundary_element_info` rebuilds
+*after* an adapt. The natural shape is therefore a post-adapt repair: for each boundary, recompute the
+node set from its facets and drop anything else, which is precisely what the test above already does
+in Python.
+
+That was deliberately **not** implemented here. It changes which nodes belong to which boundary —
+mesh topology bookkeeping that boundary coordinates, hanging-node setup and the distributed halo node
+lists all read — at the end of a large branch, in exchange for fixing zero occurrences in any mesh the
+suite contains. The risk is concentrated exactly where this branch already found its subtlest defects
+(§19), and the payoff is not measurable on realistic input. It is a good change to make deliberately,
+with its own validation pass; it is a bad change to slip in here.

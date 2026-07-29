@@ -523,6 +523,45 @@ def _worker_main(argv):
             problem.refine_uniformly()
         print("RESULT", _max_radius_error(problem.get_mesh("domain"), "shell", ndim=3))
         return
+    elif kind == "overmark":
+        # Compare the nodes MARKED as being on a boundary against the nodes that actually lie on one of
+        # its facets. The interface mesh for a boundary is generated from those facets, so its node set
+        # is the truth; positions are the key, since the two meshes hand out distinct wrappers for the
+        # same node.
+        which, nref = argv[2], int(argv[3])
+        boundary = "circumference" if which == "tri" else "shell"
+        if which == "tetball":
+            template = _TetBallTemplate()
+        elif which == "gmshball":
+            template = _GmshBallTemplate()
+        elif which == "tri":
+            template = _TriDiskTemplate()
+        else:
+            template = _SphericalTetTemplate(4 if which == "singletet" else 2)
+
+        class _P(Problem):
+            def define_problem(self):
+                self += template
+                eqs = PoissonEquation(source=1, space="C1") + DirichletBC(u=0) @ boundary
+                eqs += SpatialErrorEstimator(u=1)
+                self += eqs @ "domain"
+
+        with _P() as problem:
+            problem.set_output_directory(outdir)
+            problem.max_refinement_level = nref + 1
+            problem.initialise()
+            for _ in range(nref):
+                problem.refine_uniformly()
+            mesh = problem.get_mesh("domain")
+            bidx = mesh.get_boundary_index(boundary)
+
+            def key(nd):
+                return tuple(round(nd.x(i), 12) for i in range(nd.ndim()))
+            marked = set(key(nd) for nd in mesh.nodes() if nd.is_on_boundary(bidx))
+            on_facets = set(key(nd) for nd in problem.get_mesh("domain/" + boundary).nodes())
+            print("MARKED", len(marked))
+            print("SPURIOUS", len(marked - on_facets))
+        return
     elif kind == "coupled":
         curved = argv[2] == "1"
         with _CurvedInterfaceProblem(curved) as problem:
@@ -982,3 +1021,39 @@ def test_curved_shared_interface_agrees_from_both_sides(curved, tmp_path):
         assert float(out["RESULT"]) < _EXACT
     else:
         assert float(out["RESULT"]) > 1e-3      # straight-sided, as a control
+
+
+# --------------------------------------------------------------------------------------------
+# Boundary-node membership (dev_docs 15.2) -- pre-existing, not part of this work
+# --------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("which", ["tri", "tetball", "gmshball"])
+@pytest.mark.parametrize("nref", [1, 2])
+def test_boundary_node_membership_matches_the_facets(which, nref, tmp_path):
+    # A node is on a boundary iff it belongs to one of that boundary's facets. oomph approximates this
+    # when refining, by giving a new mid-edge node the boundaries SHARED BY BOTH its end nodes
+    # (refineable_telements.cpp:458-467) -- and two nodes can share a boundary label without the edge
+    # between them lying on that boundary.
+    #
+    # On every mesh anyone would actually write, the approximation is exact, because an element meets a
+    # given boundary in a single face and so no interior edge has both ends on it. This pins that:
+    # measured 0 spurious nodes across these meshes at every level, up to 64512 elements.
+    out = _worker_lines(tmp_path, "overmark", which, nref)
+    assert int(out["MARKED"]) > 0
+    assert int(out["SPURIOUS"]) == 0
+
+
+@pytest.mark.parametrize("which,nref,expected", [("halftet", 1, 1), ("halftet", 3, 84), ("singletet", 3, 35)])
+@pytest.mark.xfail(strict=True,
+                   reason="dev_docs/macro_elements_generalisation.md 23: pre-existing over-marking. A "
+                          "node inherits the boundaries shared by its parents, so an element with two "
+                          "or more faces on the SAME boundary mislabels the interior edges joining "
+                          "them. Not repaired -- see 23.2 for why, and for what repairing it costs.")
+def test_boundary_node_membership_is_wrong_when_a_boundary_wraps_an_element(which, nref, expected, tmp_path):
+    # The configuration the approximation breaks on: a tetrahedron with several of its faces on one
+    # boundary. Its other faces then have all their vertices on that boundary, so every edge of them is
+    # mislabelled, and the error compounds with refinement -- measured 51% of marked nodes at three
+    # refinements for the two-face case. Kept as a strict xfail so that fixing it is noticed here.
+    out = _worker_lines(tmp_path, "overmark", which, nref)
+    assert int(out["SPURIOUS"]) == 0, "%s at nref=%d: %s spurious (was %d)" % (
+        which, nref, out["SPURIOUS"], expected)
