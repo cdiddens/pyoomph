@@ -85,8 +85,9 @@ namespace pyoomph
   {
     Quad2d,
     Tri2d,
-    Brick3d
-    // Tet3d, Wedge3d, Pyramid3d follow in S3/S4 of the plan.
+    Brick3d,
+    Tet3d
+    // Wedge3d, Pyramid3d follow in S4 of the plan.
   };
 
   // Spatial dimension of a shape's reference domain.
@@ -123,9 +124,21 @@ namespace pyoomph
     // that the map follows them through history levels (and, on a moving mesh, through the solve).
     std::vector<oomph::Node *> vertex_nodes;
     std::vector<MacroCurvedFacet> curved_facets;
+    // The inclusion-exclusion terms of the blend, one per sub-entity (in practice an edge) shared by
+    // two or more curved facets, which would otherwise contribute its deviation once per facet. Each
+    // carries the shared vertices, borrowed parametrics from one of the incident facets, and the
+    // multiplicity m_E - 1 to subtract. Empty in 2d, where two facets meet only at a vertex and every
+    // deviation already vanishes there. Rebuilt whenever a facet is added.
+    std::vector<std::pair<MacroCurvedFacet, double>> edge_corrections;
+    void rebuild_edge_corrections();
 
     // Position of vertex v at time level t, zero-padded to the requested dimension.
     void vertex_position(const unsigned &v, const unsigned &t, const unsigned &dim, std::vector<double> &x) const;
+    // Weight w_S and deviation d_S of one sub-entity at the given generalised barycentric coordinates.
+    // Returns false when the weight vanishes, i.e. the sub-entity contributes nothing here.
+    bool subentity_deviation(const MacroCurvedFacet &cf, const std::vector<double> &lambda,
+                             const unsigned &t, const unsigned &dim,
+                             double &w, std::vector<double> &deviation) const;
 
   public:
     GenericMacroElement(oomph::Domain *domain, const unsigned &index, const MacroElementShape &shape_,

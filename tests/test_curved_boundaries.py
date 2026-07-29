@@ -139,6 +139,80 @@ class _SphereOctant(Problem):
         self += eqs @ "domain"
 
 
+def _unit(v):
+    length = math.sqrt(sum(c * c for c in v))
+    return [c / length for c in v]
+
+
+class _SphericalTetTemplate(MeshTemplate):
+    # A single tetrahedron with all four vertices on the unit sphere, of which the first `ncurved`
+    # faces are declared to lie on it. Any two faces of a tet share an edge, so ncurved >= 2 is exactly
+    # the configuration the blend needs its inclusion-exclusion term for: without it each of the two
+    # faces would add that shared edge's deviation and the edge would overshoot the sphere.
+    _VERTS = [_unit([1, 0, 0]), _unit([0, 1, 0]), _unit([0, 0, 1]), _unit([1, 1, 1])]
+    _FACES = [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]]
+
+    def __init__(self, ncurved):
+        super().__init__()
+        self._ncurved = ncurved
+        self._entities = []
+
+    def define_geometry(self):
+        domain = self.new_domain("domain")
+        n = [self.add_node_unique(*p) for p in self._VERTS]
+        domain.add_tetra_3d_C1(n[0], n[1], n[2], n[3])
+        sphere = _pyoomph.CurvedEntitySpherePart([0, 0, 0], [_R, 0, 0])
+        self._entities.append(sphere)
+        for face in self._FACES[:self._ncurved]:
+            nodes = [n[i] for i in face]
+            self.add_facet_to_boundary("shell", nodes, nodes, sphere)
+
+
+class _SphericalTet(Problem):
+    def __init__(self, ncurved):
+        super().__init__()
+        self._ncurved = ncurved
+
+    def define_problem(self):
+        self += _SphericalTetTemplate(self._ncurved)
+        eqs = PoissonEquation(source=1, space="C1") + DirichletBC(u=0) @ "shell"
+        eqs += SpatialErrorEstimator(u=1)
+        self += eqs @ "domain"
+
+
+class _TetBallTemplate(MeshTemplate):
+    # An octant of a ball as three tetrahedra fanning out of the centre, each with exactly one face on
+    # the sphere. Unlike _SphericalTetTemplate this is a mesh someone might actually write, and every
+    # node marked as a shell node genuinely lies on the shell.
+    def __init__(self):
+        super().__init__()
+        self._entities = []
+
+    def define_geometry(self):
+        domain = self.new_domain("domain")
+        centre = self.add_node_unique(0, 0, 0)
+        axis = [self.add_node_unique(_R, 0, 0), self.add_node_unique(0, _R, 0), self.add_node_unique(0, 0, _R)]
+        diag = self.add_node_unique(*[c * _R for c in _unit([1, 1, 1])])
+        sphere = _pyoomph.CurvedEntitySpherePart([0, 0, 0], [_R, 0, 0])
+        self._entities.append(sphere)
+        for a, b in ((0, 1), (1, 2), (2, 0)):
+            domain.add_tetra_3d_C1(centre, axis[a], axis[b], diag)
+            face = [axis[a], axis[b], diag]
+            self.add_facet_to_boundary("shell", face, face, sphere)
+
+
+class _TetBall(Problem):
+    def __init__(self, space="C1"):
+        super().__init__()
+        self._space = space
+
+    def define_problem(self):
+        self += _TetBallTemplate()
+        eqs = PoissonEquation(source=1, space=self._space) + DirichletBC(u=0) @ "shell"
+        eqs += SpatialErrorEstimator(u=1)
+        self += eqs @ "domain"
+
+
 class _ArcSectorTemplate(MeshTemplate):
     # One quad annulus sector spanning [a0, a1] degrees with its outer edge on a circular arc, used
     # to sweep the arc across the atan2 branch cut at +-pi. keep_entity=False deliberately drops the
@@ -234,6 +308,19 @@ def _worker_main(argv):
             problem.refine_uniformly()
         print("RESULT", _max_radius_error(problem.get_mesh("domain"), "shell", ndim=3))
         return
+    elif kind == "tetball":
+        space, nref = argv[2], int(argv[3])
+        problem = _TetBall(space=space)
+        problem.set_output_directory(outdir)
+        problem.max_refinement_level = 4
+        problem.initialise()
+        for _ in range(nref):
+            problem.refine_uniformly()
+        print("RESULT", _max_radius_error(problem.get_mesh("domain"), "shell", ndim=3))
+        return
+    elif kind == "gridtet":
+        _worker_grid_tet(outdir, int(argv[2]))
+        return
     elif kind == "hang":
         _worker_hanging(outdir, argv[2])
         return
@@ -247,6 +334,39 @@ def _worker_main(argv):
     for _ in range(nref):
         problem.refine_uniformly()
     print("RESULT", _max_radius_error(problem.get_mesh(mesh_name), boundary))
+
+
+def _worker_grid_tet(outdir, ncurved):
+    # Sample the macro map densely over each of the tet's four faces and report the worst deviation
+    # from the sphere, separately for the faces declared curved and the ones not. This asks only
+    # whether the blend is right, independent of which nodes the mesh happens to mark as boundary
+    # nodes -- see test_spherical_tet_blend_is_exact_on_every_curved_face for why that matters.
+    problem = _SphericalTet(ncurved)
+    problem.set_output_directory(outdir)
+    problem.max_refinement_level = 0
+    problem.initialise()
+    element = problem.get_mesh("domain").element_pt(0)
+    # lambda = (s0, s1, s2, 1-s0-s1-s2), so face k is the set where lambda_k == 0.
+    curved_sets = [set(f) for f in _SphericalTetTemplate._FACES[:ncurved]]
+    worst_curved, worst_flat, npts = 0.0, 0.0, 21
+    for k in range(4):
+        verts = sorted({0, 1, 2, 3} - {k})
+        worst = 0.0
+        for i in range(npts):
+            for j in range(npts - i):
+                bary = [i / (npts - 1.0), j / (npts - 1.0), 0.0]
+                bary[2] = 1.0 - bary[0] - bary[1]
+                lam = [0.0] * 4
+                for slot, v in enumerate(verts):
+                    lam[v] = bary[slot]
+                r = element.get_macro_element_position_at_s(lam[:3])
+                worst = max(worst, abs(math.sqrt(sum(c * c for c in r)) - _R))
+        if set(verts) in curved_sets:
+            worst_curved = max(worst_curved, worst)
+        else:
+            worst_flat = max(worst_flat, worst)
+    print("CURVED", worst_curved)
+    print("FLAT", worst_flat)
 
 
 def _worker_hanging(outdir, shape):
@@ -444,3 +564,38 @@ def test_curved_brick_sphere_is_exact(space, nref, tmp_path):
     # it would have used was parametrised by (theta, phi) -- a chart with a branch cut and a genuine
     # degeneracy at the pole. It is now the outward unit normal, which has neither.
     assert _worker_radius_error(tmp_path, "sphere", space, nref) < _EXACT
+
+
+# --------------------------------------------------------------------------------------------
+# T13 -- the 3d shared-edge correction
+# --------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("ncurved", [1, 2, 3, 4])
+def test_spherical_tet_blend_is_exact_on_every_curved_face(ncurved, tmp_path):
+    # Any two faces of a tetrahedron share an edge, so ncurved >= 2 exercises the inclusion-exclusion
+    # term: each face's deviation includes that of the shared edge, and without the correction the
+    # edge would receive it twice. Before the correction existed this configuration was refused
+    # outright rather than answered wrongly.
+    #
+    # This samples the macro map itself rather than looking at node positions, deliberately. A tet
+    # with only some of its faces on a boundary is the pathological case for oomph's rule that a new
+    # node inherits the boundaries shared by its parents: the midpoint of an edge joining two shell
+    # nodes gets marked as a shell node even when the edge itself runs through the interior. That
+    # happens with no macro element in sight -- measured with straight-sided elements, 1 of 35 nodes
+    # at two refinements -- so it is not this machinery's doing, and measuring node positions here
+    # would charge it for someone else's bookkeeping.
+    out = _worker_lines(tmp_path, "gridtet", ncurved)
+    assert float(out["CURVED"]) < _EXACT
+    # The faces that were not declared curved must NOT be pulled onto the sphere: they are ruled
+    # surfaces carrying whatever curved edges they inherit, which is the geometrically right answer
+    # for a partially curved element and the thing the old flat-face treatment got wrong.
+    if ncurved < 4:
+        assert float(out["FLAT"]) > 1e-3
+
+
+@pytest.mark.parametrize("space", ["C1", "C2"])
+@pytest.mark.parametrize("nref", [0, 1, 2])
+def test_curved_tet_ball_is_exact(space, nref, tmp_path):
+    # The realistic 3d simplex case: an octant of a ball as three tets, each with exactly one face on
+    # the sphere, so the boundary bookkeeping above is unambiguous.
+    assert _worker_radius_error(tmp_path, "tetball", space, nref) < _EXACT

@@ -22,6 +22,10 @@ The main author may be contacted at c.diddens@utwente.nl
 #include "macroelements.hpp"
 #include "meshtemplate.hpp"
 
+#include <algorithm>
+#include <iterator>
+#include <set>
+
 namespace pyoomph
 {
 
@@ -35,6 +39,8 @@ namespace pyoomph
       return 3;
     case MacroElementShape::Brick3d:
       return 8;
+    case MacroElementShape::Tet3d:
+      return 4;
     }
     throw_runtime_error("Unknown macro element shape");
     return 0;
@@ -48,6 +54,7 @@ namespace pyoomph
     case MacroElementShape::Tri2d:
       return 2;
     case MacroElementShape::Brick3d:
+    case MacroElementShape::Tet3d:
       return 3;
     }
     throw_runtime_error("Unknown macro element shape");
@@ -86,6 +93,15 @@ namespace pyoomph
                  (1.0 + ((v & 4u) ? 1.0 : -1.0) * s[2]);
       }
       return;
+    case MacroElementShape::Tet3d:
+      // TElementShape<3,2>::shape, i.e. the barycentric coordinates, with vertices
+      // (1,0,0), (0,1,0), (0,0,1), (0,0,0).
+      psi.resize(4);
+      psi[0] = s[0];
+      psi[1] = s[1];
+      psi[2] = s[2];
+      psi[3] = 1.0 - s[0] - s[1] - s[2];
+      return;
     }
     throw_runtime_error("Unknown macro element shape");
   }
@@ -108,6 +124,9 @@ namespace pyoomph
         sv[v][1] = (v & 2u) ? 1.0 : -1.0;
         sv[v][2] = (v & 4u) ? 1.0 : -1.0;
       }
+      return;
+    case MacroElementShape::Tet3d:
+      sv = {{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}, {0.0, 0.0, 0.0}};
       return;
     }
     throw_runtime_error("Unknown macro element shape");
@@ -137,16 +156,7 @@ namespace pyoomph
     if (local_vertices.size() != parametric_index.size())
       throw_runtime_error("Mismatched vertex/parametric index lists for a curved macro element facet");
     curved_facets.push_back(MacroCurvedFacet{facet, local_vertices, parametric_index});
-    // In 3d, two curved facets sharing an edge each contribute that edge's deviation, so the blend
-    // needs the inclusion-exclusion term of the plan's 3.2 to avoid counting it twice. That term is
-    // S3 work; until then refuse the case rather than silently returning a doubled deviation. A
-    // single curved facet per element -- the only 3d case reachable today -- needs no correction.
-    if (macro_shape_dim(shape) == 3 && curved_facets.size() > 1)
-    {
-      throw_runtime_error("More than one curved facet on a 3d macro element is not supported yet "
-                          "(the shared-edge correction is stage S3 of "
-                          "dev_docs/macro_elements_generalisation.md)");
-    }
+    rebuild_edge_corrections();
   }
 
   void GenericMacroElement::vertex_position(const unsigned &v, const unsigned &t, const unsigned &dim,
@@ -159,8 +169,137 @@ namespace pyoomph
       x[i] = n->x(t, i);
   }
 
-  // The blend of macroelements.hpp. In 2d there is no edge-correction term: two facets of a 2d element
-  // meet only at a vertex, and every facet deviation already vanishes at its own vertices.
+  // Weight and deviation of one sub-entity (a curved facet, or a shared edge being corrected for).
+  bool GenericMacroElement::subentity_deviation(const MacroCurvedFacet &cf, const std::vector<double> &lambda,
+                                                const unsigned &t, const unsigned &dim,
+                                                double &w, std::vector<double> &deviation) const
+  {
+    MeshTemplateCurvedEntity *entity = cf.facet->curved_entity;
+    if (!entity)
+      return false;
+
+    w = 0.0;
+    for (auto &v : cf.local_vertices)
+      w += lambda[v];
+    // Away from this sub-entity the weight vanishes and so does its contribution. Skipping also keeps
+    // the division below well posed.
+    if (std::fabs(w) < 1e-14)
+      return false;
+
+    // Sub-entity-local coordinates: the vertex weights renormalised over it. When s lies on the
+    // sub-entity these are its own coordinates; elsewhere they collapse onto the part of it that is
+    // nearest in the barycentric sense, which is what makes the deviation die out there.
+    const unsigned nfv = cf.local_vertices.size();
+    std::vector<double> sigma(nfv);
+    for (unsigned int k = 0; k < nfv; k++)
+      sigma[k] = lambda[cf.local_vertices[k]] / w;
+
+    // Curved image: blend the stored parametric coordinates with those weights and map.
+    const unsigned npar = entity->get_parametric_dimension();
+    std::vector<double> parametric(npar, 0.0);
+    for (unsigned int k = 0; k < nfv; k++)
+    {
+      const std::vector<double> &p = cf.facet->parametrics[cf.parametric_index[k]];
+      for (unsigned int i = 0; i < npar && i < p.size(); i++)
+        parametric[i] += sigma[k] * p[i];
+    }
+    std::vector<double> curved(dim, 0.0);
+    entity->parametric_to_position(t, parametric, curved);
+
+    // ... minus the straight image of the same point.
+    std::vector<double> xv;
+    deviation.assign(dim, 0.0);
+    for (unsigned int k = 0; k < nfv; k++)
+    {
+      vertex_position(cf.local_vertices[k], t, dim, xv);
+      for (unsigned int i = 0; i < dim; i++)
+        deviation[i] -= sigma[k] * xv[i];
+    }
+    for (unsigned int i = 0; i < dim && i < curved.size(); i++)
+      deviation[i] += curved[i];
+    return true;
+  }
+
+  // Find the sub-entities shared by two or more curved facets, which the facet sum would otherwise
+  // count once per facet. In 3d two adjacent facets share an edge; in 2d they share only a vertex,
+  // where every deviation already vanishes, so there is nothing to correct.
+  void GenericMacroElement::rebuild_edge_corrections()
+  {
+    edge_corrections.clear();
+    if (macro_shape_dim(shape) < 3 || curved_facets.size() < 2)
+      return;
+
+    // Candidate shared sets: the intersections of each pair of curved facets' vertex sets.
+    std::set<std::vector<unsigned>> candidates;
+    for (unsigned int i = 0; i < curved_facets.size(); i++)
+    {
+      for (unsigned int j = i + 1; j < curved_facets.size(); j++)
+      {
+        std::vector<unsigned> a = curved_facets[i].local_vertices, b = curved_facets[j].local_vertices;
+        std::sort(a.begin(), a.end());
+        std::sort(b.begin(), b.end());
+        std::vector<unsigned> shared;
+        std::set_intersection(a.begin(), a.end(), b.begin(), b.end(), std::back_inserter(shared));
+        if (shared.size() >= 2)
+          candidates.insert(shared);
+      }
+    }
+
+    for (auto &shared : candidates)
+    {
+      // How many curved facets contain this whole set, and which was the first?
+      unsigned multiplicity = 0;
+      const MacroCurvedFacet *host = NULL;
+      MeshTemplateCurvedEntity *first_entity = NULL;
+      bool inconsistent = false;
+      for (auto &cf : curved_facets)
+      {
+        std::vector<unsigned> sorted = cf.local_vertices;
+        std::sort(sorted.begin(), sorted.end());
+        if (!std::includes(sorted.begin(), sorted.end(), shared.begin(), shared.end()))
+          continue;
+        multiplicity++;
+        if (!host)
+        {
+          host = &cf;
+          first_entity = cf.facet->curved_entity;
+        }
+        else if (cf.facet->curved_entity != first_entity)
+        {
+          inconsistent = true;
+        }
+      }
+      if (multiplicity < 2 || !host)
+        continue;
+      if (inconsistent)
+      {
+        // Two different curved entities claiming the same edge means the geometry itself disagrees
+        // about where that edge lies; the blend cannot repair that, only report it.
+        throw_runtime_error("Two different curved entities are attached to facets sharing the same "
+                            "edge of one element, so they disagree about where that edge lies. Split "
+                            "the element, or make the entities agree there.");
+      }
+      // Map the shared vertices back to the host facet's parametric slots.
+      MacroCurvedFacet edge;
+      edge.facet = host->facet;
+      for (auto &v : shared)
+      {
+        for (unsigned int k = 0; k < host->local_vertices.size(); k++)
+        {
+          if (host->local_vertices[k] == v)
+          {
+            edge.local_vertices.push_back(v);
+            edge.parametric_index.push_back(host->parametric_index[k]);
+            break;
+          }
+        }
+      }
+      edge_corrections.push_back({edge, double(multiplicity - 1)});
+    }
+  }
+
+  // x(s) = sum_v lambda_v X_v + sum_F w_F d_F - sum_E (m_E - 1) w_E d_E, the transfinite blend of
+  // macroelements.hpp written in generalised barycentric coordinates.
   void GenericMacroElement::macro_map(const unsigned &t, const oomph::Vector<double> &s, oomph::Vector<double> &r)
   {
     const unsigned dim = r.size();
@@ -178,51 +317,21 @@ namespace pyoomph
         r[i] += lambda[v] * xv[i];
     }
 
+    double w;
+    std::vector<double> deviation;
     for (auto &cf : curved_facets)
     {
-      MeshTemplateCurvedEntity *entity = cf.facet->curved_entity;
-      if (!entity)
+      if (!subentity_deviation(cf, lambda, t, dim, w, deviation))
         continue;
-
-      double w = 0.0;
-      for (auto &v : cf.local_vertices)
-        w += lambda[v];
-      // Away from this facet the weight vanishes and so does its contribution. Skipping also keeps the
-      // division below well posed.
-      if (std::fabs(w) < 1e-14)
+      for (unsigned int i = 0; i < dim; i++)
+        r[i] += w * deviation[i];
+    }
+    for (auto &ec : edge_corrections)
+    {
+      if (!subentity_deviation(ec.first, lambda, t, dim, w, deviation))
         continue;
-
-      // Facet-local coordinates: the vertex weights renormalised over the facet. When s lies on the
-      // facet these are its own coordinates; when it lies on a neighbouring facet they collapse onto
-      // the shared sub-entity, which is exactly what makes the deviation die out there.
-      const unsigned nfv = cf.local_vertices.size();
-      std::vector<double> sigma(nfv);
-      for (unsigned int k = 0; k < nfv; k++)
-        sigma[k] = lambda[cf.local_vertices[k]] / w;
-
-      // Curved image: blend the facet's stored parametric coordinates with those weights and map.
-      const unsigned npar = entity->get_parametric_dimension();
-      std::vector<double> parametric(npar, 0.0);
-      for (unsigned int k = 0; k < nfv; k++)
-      {
-        const std::vector<double> &p = cf.facet->parametrics[cf.parametric_index[k]];
-        for (unsigned int i = 0; i < npar && i < p.size(); i++)
-          parametric[i] += sigma[k] * p[i];
-      }
-      std::vector<double> curved(dim, 0.0);
-      entity->parametric_to_position(t, parametric, curved);
-
-      // Straight image of the same facet point, and the deviation between the two.
-      std::vector<double> straight(dim, 0.0);
-      for (unsigned int k = 0; k < nfv; k++)
-      {
-        vertex_position(cf.local_vertices[k], t, dim, xv);
-        for (unsigned int i = 0; i < dim; i++)
-          straight[i] += sigma[k] * xv[i];
-      }
-
-      for (unsigned int i = 0; i < dim && i < curved.size(); i++)
-        r[i] += w * (curved[i] - straight[i]);
+      for (unsigned int i = 0; i < dim; i++)
+        r[i] -= ec.second * w * deviation[i];
     }
   }
 
@@ -230,7 +339,21 @@ namespace pyoomph
   {
     const unsigned dim = macro_shape_dim(shape);
     oomph::Vector<double> s(dim), r(dim);
-    if (shape == MacroElementShape::Brick3d)
+    if (shape == MacroElementShape::Tet3d)
+    {
+      outfile << "ZONE" << std::endl;
+      for (unsigned i = 0; i < nplot; i++)
+        for (unsigned j = 0; i + j < nplot; j++)
+          for (unsigned k = 0; i + j + k < nplot; k++)
+          {
+            s[0] = double(i) / double(nplot - 1);
+            s[1] = double(j) / double(nplot - 1);
+            s[2] = double(k) / double(nplot - 1);
+            macro_map(t, s, r);
+            outfile << r[0] << " " << r[1] << " " << r[2] << std::endl;
+          }
+    }
+    else if (shape == MacroElementShape::Brick3d)
     {
       outfile << "ZONE I=" << nplot << ", J=" << nplot << ", K=" << nplot << std::endl;
       for (unsigned k = 0; k < nplot; k++)

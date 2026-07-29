@@ -1942,6 +1942,12 @@ namespace pyoomph
     std::vector<double> get_outline(bool lagrangian) override;
     unsigned nrecovery_order() override { return 1; }
     void output(std::ostream &outfile, const unsigned &n_plot) override { BulkElementBase::output(outfile, n_plot); }
+    // As for the triangles: TElementBase leaves this virtual broken, so route it to the generic
+    // vertex-coordinate implementation.
+    void get_x_from_macro_element(const oomph::Vector<double> &s, oomph::Vector<double> &x) const override
+    { this->get_x_from_generic_macro_element(0, s, x); }
+    void get_x_from_macro_element(const unsigned &t, const oomph::Vector<double> &s, oomph::Vector<double> &x) override
+    { this->get_x_from_generic_macro_element(t, s, x); }
     unsigned nvertex_node() const override { return oomph::TElement<3, 2>::nvertex_node(); }
     oomph::Node *vertex_node_pt(const unsigned &j) const override { return TElement<3, 2>::vertex_node_pt(j); }
     void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
@@ -2056,6 +2062,12 @@ namespace pyoomph
 
     unsigned nrecovery_order() override { return 2; }
     void output(std::ostream &outfile, const unsigned &n_plot) override { BulkElementBase::output(outfile, n_plot); }
+    // As for the triangles: TElementBase leaves this virtual broken, so route it to the generic
+    // vertex-coordinate implementation.
+    void get_x_from_macro_element(const oomph::Vector<double> &s, oomph::Vector<double> &x) const override
+    { this->get_x_from_generic_macro_element(0, s, x); }
+    void get_x_from_macro_element(const unsigned &t, const oomph::Vector<double> &s, oomph::Vector<double> &x) override
+    { this->get_x_from_generic_macro_element(t, s, x); }
     unsigned nvertex_node() const override { return oomph::TElement<3, 3>::nvertex_node(); }
     oomph::Node *vertex_node_pt(const unsigned &j) const override { return TElement<3, 3>::vertex_node_pt(j); }
 

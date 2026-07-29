@@ -2457,10 +2457,6 @@ namespace oomph
     RefineableTElement<3> *father_el_pt = dynamic_cast<RefineableTElement<3> *>(father_pt->object_pt());
     TimeStepper *time_stepper_pt = father_el_pt->node_pt(0)->time_stepper_pt();
     unsigned ntstorage = time_stepper_pt->ntstorage();
-    if (father_el_pt->Macro_elem_pt != 0)
-    {
-      throw_runtime_error("Macro elements (curved boundaries) are not yet supported for tetrahedral refinement");
-    }
 
 #ifdef OOMPH_HAS_MPI
     // Propagate the halo-ownership tag from father to son, exactly as RefineableTElement<2>::build does.
@@ -2475,6 +2471,26 @@ namespace oomph
     // from son-local to father-local coordinates.
     Vector<Vector<double>> sv;
     son_vertices_in_father(son_type, sv);
+
+    // If the father sits on a curved macro element, hand it down together with this son's region of
+    // the macro reference domain -- which is exactly the four vertices just computed. New nodes below
+    // take their positions from father_el_pt->get_x(), which routes through it.
+    if (father_el_pt->Macro_elem_pt != 0)
+    {
+      pyoomph::BulkElementBase *son_be = dynamic_cast<pyoomph::BulkElementBase *>(this);
+      pyoomph::BulkElementBase *father_be = dynamic_cast<pyoomph::BulkElementBase *>(father_el_pt);
+      if (son_be && father_be)
+      {
+        std::vector<std::vector<double>> son_vertices(sv.size(), std::vector<double>(3, 0.0));
+        for (unsigned int v = 0; v < sv.size(); v++)
+          for (unsigned int i = 0; i < 3; i++) son_vertices[v][i] = sv[v][i];
+        son_be->inherit_macro_element_from_father(father_be, son_vertices);
+      }
+      else
+      {
+        set_macro_elem_pt(father_el_pt->Macro_elem_pt);
+      }
+    }
 
     for (unsigned j = 0; j < n_node; j++)
     {

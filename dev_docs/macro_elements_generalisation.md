@@ -3,7 +3,7 @@
 Written 2026-07-29 on branch `macro_elements`, after the interface-refinement-coupling work
 (`interface_refinement_coupling.md`) landed on `main`.
 
-Status: **S0 and S1 done, S2/S3 next.** §1 and §2 are measured, not assumed — every claim about current
+Status: **S0, S1 and S3 done; S2 (re-scoped) and S4 next.** §1 and §2 are measured, not assumed — every claim about current
 behaviour below was reproduced, and the numbers are quoted. §3–§5 are the design. §11 is the
 staging. **§13 records what S0 actually turned up**, including a defect worse than anything §1 and
 §2 predicted and a measurement that materially weakens the case for part of S2 — read it before
@@ -921,10 +921,11 @@ Each stage ends with its tests green and is committed separately.
 - **S2 — the parametric coordinate.** `get_intrinsic_dimension`, `blend_parametric`, `facet_map`,
   buffer sizing from `get_parametric_dimension()`; rewrite `CurvedEntityCircleArc` and the Python
   `CurvedEntityCircle` on normals; deprecate `apply_periodicity`. T2, T3 green.
-- **S3 — 3d Q and simplex.** Brick and tetra, the edge inclusion–exclusion of §3.2 and the
-  edge→entity registry of §3.2.2, rewrite `CurvedEntitySpherePart` and `CurvedEntityCylinderArc` on
-  normals; populate `GmshTemplate._curved_entities2d`; un-`if False` `SphericalOctantMesh`. T4, T13
-  green.
+- **S3 — 3d Q and simplex.** ✅ **Done**, in three commits: S3a the normal-parametrised sphere plus
+  `SphericalOctantMesh`'s shell (bricks), S3b tetrahedra, S3c the shared-edge inclusion–exclusion.
+  T4 and T13 green; curved module 55 passed, fast suite 471 passed. **Not** done here, and moved to
+  their own stage: populating `GmshTemplate._curved_entities2d`, and the edge→entity registry of
+  §3.2.2 — see §15.3 for why the registry turned out not to be needed yet.
 - **S4 — wedge, pyramid, mixed forests.** Remove the last two throws. T5 green.
 - **S5 — moving meshes.** The `moving_nodes` split of §5, `Undeformed_macro_elem_pt` wiring, revisit
   `remove_macro_elements_after_initial_adaption`. T10 green.
@@ -1116,3 +1117,81 @@ and is still what S3/S4 will use; it just does not have to displace something th
 - Moving meshes are unchanged: `reapply_macro_element_positions` is gated on `moving_nodes`, so an
   ALE mesh still gets the macro element only through the initial-adaption pass, exactly as before.
   S5 gives it the undeformed-macro-element treatment of §5.
+
+---
+
+## 15. What S3 turned up
+
+### 15.1 The inclusion–exclusion term is right, and the test had to be chosen carefully to show it
+
+A tetrahedron whose four vertices all lie on the sphere can have any number of its faces declared
+curved, and *any two faces of a tet share an edge* — so it is the sharpest available test of §3.2's
+correction. Sampling the macro map on a 21-point barycentric grid over each face:
+
+```
+curved faces   max |r-1| on the declared-curved faces   on the others
+      1                    2.2e-16                        1.1e-01
+      2                    3.3e-16                        1.1e-01
+      3                    3.3e-16                        9.7e-02
+      4                    5.6e-16                          --
+```
+
+Exact in every configuration. The right-hand column matters as much as the left: a face that was not
+declared curved must *not* be dragged onto the sphere — it is a ruled surface carrying whatever
+curved edges it inherits (§3.2.1), which is what makes a partially curved element watertight against
+its neighbour.
+
+Getting there needed one correction of method. Measuring *node positions* after refinement showed
+errors of 1.1e-1 that had nothing to do with the blend — see §15.2. The test therefore samples the
+macro map directly, which is the thing under test, and leaves node bookkeeping to its own test.
+
+### 15.2 A node can be marked as being on a boundary it is not on
+
+`RefineableTElement<2>::get_boundaries` gives a new mid-edge node the boundaries **shared by both end
+nodes** ([src/refineable_telements.cpp:458-467](src/refineable_telements.cpp#L458-L467)), which the
+3d builder uses too. Two nodes can share a boundary label without the edge between them lying on that
+boundary, and then the new node is labelled for a boundary it is nowhere near.
+
+This is not new and has nothing to do with macro elements — it reproduces with straight-sided
+elements and no curved entity anywhere. Measured on the degenerate case, a *single* tet with all four
+faces on one boundary:
+
+```
+refinements   nodes marked "shell"   of those, geometrically interior   pinned by DirichletBC
+     1                 10                          0                            0
+     2                 35                          1                            0
+     3                165                         35                            0
+```
+
+Two things bound its consequences. It needs a genuinely ambiguous geometry: the same measurement on
+the tet-ball octant — three tets, one face each on the shell, i.e. a mesh someone might actually
+write — gives **0** spurious nodes at every level. And where it does happen, the mislabelled nodes
+are **not pinned**: their solution values come out as ordinary interior values (3.6e-3, 5.8e-3, not
+the boundary value 0). Dirichlet conditions are applied through interface elements built from element
+*faces* (`nboundary_element` + `Face_index_at_boundary`), not from node labels, so the assembled
+problem is unaffected.
+
+What it does affect is anything that iterates nodes *by boundary index* — user post-processing,
+boundary-coordinate assignment, and tests like the ones in this file. Worth fixing on its own merits
+(the honest rule is "on the boundary iff the containing facet is"), but it is not this work's, and
+nothing here depends on it.
+
+### 15.3 The edge→entity registry of §3.2.2 is not needed yet
+
+§3.2.2 argued that watertightness needs edge geometry to be a mesh-level fact, because an element can
+touch a curved surface along an edge alone, without owning a face on it — and would then leave a
+shared face flat while its neighbour ruled it. That case did not arise in any mesh built here: in
+both `SphericalOctantMesh` and the tet ball, every element that touches the sphere touches it in a
+face, so both sides of every interior face agree. The registry is therefore deferred rather than
+built, with the reasoning left in §3.2.2 for when a mesh does produce the case. The
+inconsistency check it was also meant to host is implemented directly in
+`GenericMacroElement::rebuild_edge_corrections`, which refuses two different entities claiming the
+same edge of one element.
+
+### 15.4 The sphere is now the reason to finish S2, not the seam
+
+S3a needed the normal-parametrised sphere before anything 3d could be tested at all, so the part of
+S2 that is a genuine correctness matter (§13.2) is already in. What remains of S2 —
+`blend_parametric`, the intrinsic/parametric dimension split, and the optional projection hook — is
+now purely about giving user-defined entities a clean interface, since the built-in entities that
+needed it have it. It has no dependents left and can be scheduled freely.
