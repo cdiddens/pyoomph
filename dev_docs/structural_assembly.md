@@ -498,6 +498,23 @@ rounding alone, which it duly did on the first attempt.
 
 ### Phase 2b — distributed pattern and value-only exchange *(MPI, same phase, own step)*
 
+**Measured first, as for Phase 2.** 2D lid-driven cavity `N=40`, ndof 14 162, `--distribute`, timing
+the C++ assembly directly (`_assemble_residual_jacobian`; note `assemble_jacobian` cannot be used on a
+distributed problem — it wraps the local block in a scipy matrix of *global* shape and raises):
+
+| ranks | elemental | total assembly | scatter + exchange |
+|---|---|---|---|
+| 1 (serial, frozen — Phase 2) | 35.0 ms | 37.1 ms | **2.2 ms (6 %)** |
+| 2 (oomph `parallel_sparse_assemble`) | 20.0 ms | 39.8 ms | **19.9 ms (50 %)** |
+| 4 (oomph `parallel_sparse_assemble`) | 13.4 ms | 24.9 ms | **11.7 ms (47 %)** |
+
+Two things follow. Half of a distributed assembly is scatter and exchange, against 6 % once the
+serial path is frozen — so the headroom here is larger than anywhere else left in the plan. And at
+two ranks the total is *worse than serial* (39.8 vs 37.1 ms) even though the elemental work has
+halved: the overhead eats the entire parallel gain. Distributed assembly does not currently pay for
+itself below about four ranks on a problem this size.
+
+
 * `pyoomph::Problem::parallel_sparse_assemble` override holding a `DistributedJacobianSparsity`
   (§7.2): cached `my_eqns`, per-rank send plan, frozen local column indices and scatter map.
 * Per assembly, exchange **values only**; send the column indices once per `structure_id`.
