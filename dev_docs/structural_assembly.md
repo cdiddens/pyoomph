@@ -675,9 +675,17 @@ Every phase must keep these green before it lands:
    never fires. This is the highest-risk area: a *missed* invalidation is a silent wrong-answer bug,
    not a crash. ✔ `test_structure_id_*` (6 tests), covering renumbering, augmentation by fold
    tracking, and switching the active residual. Still uncovered: remeshing.
-5. **Existing suites.** ✔ `tests/` passes: 524 passed / 314 skipped / 3 pre-existing xfails (the
-   documented curved-boundary over-marking), and `--full` is green. The tutorial pipeline is still
-   owed, batched at the end of a phase — not per fix.
+5. **Existing suites.** ✔ `tests/` passes: 536 passed / 314 skipped / 3 pre-existing xfails (the
+   documented curved-boundary over-marking), and `--full` is green.
+   ✔ **Tutorial pipeline**, `citools/test_all_tutorial_scripts.py --quick-test --no-petsc`, run
+   twice: once with the shipped default (structural pattern off — the regression gate for the
+   oomph-lib patch, whose new filter and mask-fetch lines execute on every assembly regardless), and
+   once with `keep_structural_zeros` forced on for every problem via a `sitecustomize.py` on
+   `PYTHONPATH`. **All 126 scripts pass both ways.** 119 of the 126 logs verifiably report
+   `keep_structural_zeros=True prune=True forcediag=True`; the other 7 are scripts that never
+   initialise a `Problem` (material-definition examples) or that only launch further subprocesses.
+   This is the broadest evidence available that the feature is safe on real problems — moving
+   meshes, interfaces, eigenproblems, bifurcation tracking and continuation all appear in that set.
 7. **Per-matrix policy.** The mass matrix must keep its own pattern, its values must be unaffected by
    the Jacobian's policy, its entries must lie inside the Jacobian's structural pattern, and the
    Hessian tensor must not be dragged in (§3.7). ✔ `test_mass_matrix_*`,
