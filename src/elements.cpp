@@ -20,6 +20,7 @@ The main author may be contacted at c.diddens@utwente.nl
 ================================================================================*/
 
 
+#include "macroelements.hpp"
 #include "elements.hpp"
 #include "exception.hpp"
 #include "problem.hpp"
@@ -7587,8 +7588,9 @@ namespace pyoomph
 		const int son_type = my_tree->son_type();
 		oomph::FiniteElement *father_el_pt = dynamic_cast<oomph::FiniteElement *>(my_tree->father_pt()->object_pt());
 		oomph::RefineableElement *father_re = dynamic_cast<oomph::RefineableElement *>(father_el_pt);
-		if (father_el_pt->macro_elem_pt() != 0)
-			throw_runtime_error("Macro elements (curved boundaries) are not yet supported for pyramid refinement");
+		// Curved-boundary support: the son takes over the father's macro element together with its own
+		// region of the macro reference domain, expressed as its vertices in the father's coordinates.
+		// Set up after sv is known, below.
 		oomph::TimeStepper *time_stepper_pt = father_el_pt->node_pt(0)->time_stepper_pt();
 		const unsigned ntstorage = time_stepper_pt->ntstorage();
 		const unsigned nfath = father_el_pt->nnode();
@@ -7607,6 +7609,22 @@ namespace pyoomph
 		// the 1/(1-s2) apex singularity, so a node exactly at the son apex (s2=1) is mapped directly to the
 		// son's apex vertex sv[4] rather than through the singular shape.
 		const bool is_pyr_son = (dynamic_cast<oomph::RefineablePyramidElement *>(this) != nullptr);
+
+		// Curved boundaries: take over the father's macro element together with this son's region of the
+		// macro reference domain -- its own vertices, expressed in the father's local coordinates, which
+		// is exactly sv. Because the conversion runs through the father's C1 shape functions it does not
+		// care that a pyramid father can have tet sons: the two shapes never meet in one expression.
+		if (father_el_pt->macro_elem_pt() != 0)
+		{
+			BulkElementBase *father_be = dynamic_cast<BulkElementBase *>(father_el_pt);
+			if (father_be)
+			{
+				std::vector<std::vector<double>> son_vertices(nvert, std::vector<double>(3, 0.0));
+				for (unsigned int v = 0; v < nvert; v++)
+					for (unsigned int i = 0; i < 3; i++) son_vertices[v][i] = sv[v][i];
+				this->inherit_macro_element_from_father(father_be, son_vertices);
+			}
+		}
 
 		for (unsigned j = 0; j < n_node; j++)
 		{
@@ -7762,6 +7780,37 @@ namespace pyoomph
 	// and every new node is shared through RefineablePyramidElement::Shared_node_registry keyed on the father
 	// brick's positive-shape nodes + rounded weight -- identical keys to an adjacent pyramid/wedge on a shared
 	// quad face (off-face shapes vanish there), and to another brick son on a shared brick face.
+	// The son's C1 vertices expressed in its father's local coordinates, for the mixed-forest builders
+	// that map node-by-node rather than exposing a vertex list. Matches each reference vertex of `shape`
+	// to the son node sitting there, then asks the builder where that node lies in the father.
+	static bool collect_son_vertex_coords_in_father(BulkElementBase *son, const MacroElementShape &shape,
+	                                                std::vector<std::vector<double>> &sv)
+	{
+		std::vector<std::vector<double>> refv;
+		macro_reference_vertices(shape, refv);
+		sv.assign(refv.size(), std::vector<double>(3, 0.0));
+		for (unsigned int v = 0; v < refv.size(); v++)
+		{
+			bool found = false;
+			for (unsigned int j = 0; j < son->nnode() && !found; j++)
+			{
+				oomph::Vector<double> sj;
+				son->local_coordinate_of_node(j, sj);
+				double d = 0.0;
+				for (unsigned int i = 0; i < refv[v].size() && i < sj.size(); i++) d = std::max(d, std::fabs(sj[i] - refv[v][i]));
+				if (d < 1e-10)
+				{
+					oomph::Vector<double> sf(3, 0.0);
+					son->get_nodal_s_in_father(j, sf);
+					for (unsigned int i = 0; i < 3 && i < sf.size(); i++) sv[v][i] = sf[i];
+					found = true;
+				}
+			}
+			if (!found) return false;
+		}
+		return true;
+	}
+
 	void BulkElementBase::build_as_brick_son(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt)
 	{
 		using oomph::RefineablePyramidElement;
@@ -7769,8 +7818,15 @@ namespace pyoomph
 
 		oomph::FiniteElement *father_el_pt = dynamic_cast<oomph::FiniteElement *>(this->tree_pt()->father_pt()->object_pt());
 		oomph::RefineableElement *father_re = dynamic_cast<oomph::RefineableElement *>(father_el_pt);
+		// As in build_as_pyramid_son, but a brick son maps node-by-node rather than from a vertex list,
+		// so recover its eight vertices in the father's coordinates first.
 		if (father_el_pt->macro_elem_pt() != 0)
-			throw_runtime_error("Macro elements (curved boundaries) are not yet supported for mixed brick refinement");
+		{
+			BulkElementBase *father_be = dynamic_cast<BulkElementBase *>(father_el_pt);
+			std::vector<std::vector<double>> son_vertices;
+			if (father_be && collect_son_vertex_coords_in_father(this, MacroElementShape::Brick3d, son_vertices))
+				this->inherit_macro_element_from_father(father_be, son_vertices);
+		}
 		oomph::TimeStepper *time_stepper_pt = father_el_pt->node_pt(0)->time_stepper_pt();
 		const unsigned ntstorage = time_stepper_pt->ntstorage();
 		const unsigned nfath = father_el_pt->nnode();

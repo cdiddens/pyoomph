@@ -213,6 +213,58 @@ class _TetBall(Problem):
         self += eqs @ "domain"
 
 
+class _WedgeShellTemplate(MeshTemplate):
+    # A single wedge whose quadrilateral facet 4 (s0+s1=1, nodes 1,2,4,5) lies on the sphere.
+    def __init__(self):
+        super().__init__()
+        self._entities = []
+
+    def define_geometry(self):
+        domain = self.new_domain("domain")
+        n0 = self.add_node_unique(0, 0, 0)
+        n1 = self.add_node_unique(*[c * _R for c in _unit([1, 0, 0.35])])
+        n2 = self.add_node_unique(*[c * _R for c in _unit([0, 1, 0.35])])
+        n3 = self.add_node_unique(0, 0, 0.6 * _R)
+        n4 = self.add_node_unique(*[c * _R for c in _unit([1, 0, 1.4])])
+        n5 = self.add_node_unique(*[c * _R for c in _unit([0, 1, 1.4])])
+        domain.add_wedge_3d_C1(n0, n1, n2, n3, n4, n5)
+        sphere = _pyoomph.CurvedEntitySpherePart([0, 0, 0], [_R, 0, 0])
+        self._entities.append(sphere)
+        face = [n1, n2, n4, n5]
+        self.add_facet_to_boundary("shell", face, face, sphere)
+
+
+class _PyramidShellTemplate(MeshTemplate):
+    # A single pyramid whose quadrilateral base (facet 4, s2=0) lies on the sphere. Refining it
+    # produces six pyramids and four tetrahedra, so this also exercises a tet son of a pyramid
+    # father -- the mixed-forest case, where son and father do not even have the same shape.
+    def __init__(self):
+        super().__init__()
+        self._entities = []
+
+    def define_geometry(self):
+        domain = self.new_domain("domain")
+        quad = [self.add_node_unique(*[c * _R for c in _unit(v)])
+                for v in ([1, -0.4, -0.4], [1, 0.4, -0.4], [1, 0.4, 0.4], [1, -0.4, 0.4])]
+        apex = self.add_node_unique(0.2 * _R, 0, 0)
+        domain.add_pyramid_3d_C1(quad[0], quad[1], quad[2], quad[3], apex)
+        sphere = _pyoomph.CurvedEntitySpherePart([0, 0, 0], [_R, 0, 0])
+        self._entities.append(sphere)
+        self.add_facet_to_boundary("shell", quad, quad, sphere)
+
+
+class _MixedShell(Problem):
+    def __init__(self, kind):
+        super().__init__()
+        self._kind = kind
+
+    def define_problem(self):
+        self += _WedgeShellTemplate() if self._kind == "wedge" else _PyramidShellTemplate()
+        eqs = PoissonEquation(source=1, space="C1") + DirichletBC(u=0) @ "shell"
+        eqs += SpatialErrorEstimator(u=1)
+        self += eqs @ "domain"
+
+
 class _ArcSectorTemplate(MeshTemplate):
     # One quad annulus sector spanning [a0, a1] degrees with its outer edge on a circular arc, used
     # to sweep the arc across the atan2 branch cut at +-pi. keep_entity=False deliberately drops the
@@ -301,6 +353,16 @@ def _worker_main(argv):
     elif kind == "sphere":
         space, nref = argv[2], int(argv[3])
         problem = _SphereOctant(space=space)
+        problem.set_output_directory(outdir)
+        problem.max_refinement_level = 4
+        problem.initialise()
+        for _ in range(nref):
+            problem.refine_uniformly()
+        print("RESULT", _max_radius_error(problem.get_mesh("domain"), "shell", ndim=3))
+        return
+    elif kind in ("wedge", "pyramid"):
+        nref = int(argv[3])
+        problem = _MixedShell(kind)
         problem.set_output_directory(outdir)
         problem.max_refinement_level = 4
         problem.initialise()
@@ -599,3 +661,20 @@ def test_curved_tet_ball_is_exact(space, nref, tmp_path):
     # The realistic 3d simplex case: an octant of a ball as three tets, each with exactly one face on
     # the sphere, so the boundary bookkeeping above is unambiguous.
     assert _worker_radius_error(tmp_path, "tetball", space, nref) < _EXACT
+
+
+# --------------------------------------------------------------------------------------------
+# T5 -- wedges, pyramids, and the mixed forest
+# --------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("nref", [0, 1, 2])
+@pytest.mark.parametrize("kind", ["wedge", "pyramid"])
+def test_curved_wedge_and_pyramid_are_exact(kind, nref, tmp_path):
+    # The pyramid is the interesting one twice over. Its C1 shape functions are rational with a
+    # removable singularity at the apex, where the whole quadrilateral base collapses to a point --
+    # the shipped shape function divides by 1-s2 unguarded, so the macro version takes the limit
+    # explicitly. And refining it yields six pyramids and four tetrahedra, so a son inherits a macro
+    # element from a father of a *different shape*: 10 elements after one refinement, 92 after two.
+    # That works only because the son's region is carried as vertex coordinates rather than as
+    # oomph's axis-aligned box, which cannot express it.
+    assert _worker_radius_error(tmp_path, kind, "C1", nref) < _EXACT

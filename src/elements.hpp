@@ -2157,6 +2157,12 @@ namespace pyoomph
       int nedges() const override { throw_runtime_error("Not implemented"); }
       unsigned get_meshio_type_index() const override { return 13; }      
       void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const override {oomph::WedgeElementC1::shape(s, psi); }
+      // WedgeElementBase/PyramidElementBase leave FiniteElement's macro-element hook broken, as the
+      // T family does; route it to the generic vertex-coordinate implementation.
+      void get_x_from_macro_element(const oomph::Vector<double> &s, oomph::Vector<double> &x) const override
+      { this->get_x_from_generic_macro_element(0, s, x); }
+      void get_x_from_macro_element(const unsigned &t, const oomph::Vector<double> &s, oomph::Vector<double> &x) override
+      { this->get_x_from_generic_macro_element(t, s, x); }
       void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const override { this->shape(s, psi); }
       void shape_at_s_C2(const oomph::Vector<double> &, oomph::Shape &) const override { throw_runtime_error("Makes no sense"); }
       void shape_at_s_DL(const oomph::Vector<double> &, oomph::Shape &) const override;
@@ -2215,6 +2221,12 @@ namespace pyoomph
       int nedges() const override { throw_runtime_error("Not implemented"); } // No need tom implement this now
       unsigned get_meshio_type_index() const override { return 15; }      
       void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const override {oomph::PyramidElementC1::shape(s, psi); }
+      // WedgeElementBase/PyramidElementBase leave FiniteElement's macro-element hook broken, as the
+      // T family does; route it to the generic vertex-coordinate implementation.
+      void get_x_from_macro_element(const oomph::Vector<double> &s, oomph::Vector<double> &x) const override
+      { this->get_x_from_generic_macro_element(0, s, x); }
+      void get_x_from_macro_element(const unsigned &t, const oomph::Vector<double> &s, oomph::Vector<double> &x) override
+      { this->get_x_from_generic_macro_element(t, s, x); }
       void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const override { this->shape(s, psi); }
       void shape_at_s_C2(const oomph::Vector<double> &, oomph::Shape &) const override { throw_runtime_error("Makes no sense"); }
       void shape_at_s_DL(const oomph::Vector<double> &, oomph::Shape &) const override;

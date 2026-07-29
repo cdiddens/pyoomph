@@ -3,7 +3,7 @@
 Written 2026-07-29 on branch `macro_elements`, after the interface-refinement-coupling work
 (`interface_refinement_coupling.md`) landed on `main`.
 
-Status: **S0, S1 and S3 done; S2 (re-scoped) and S4 next.** §1 and §2 are measured, not assumed — every claim about current
+Status: **S0, S1, S3 and S4 done — every element shape is covered. S2 (re-scoped) is what remains.** §1 and §2 are measured, not assumed — every claim about current
 behaviour below was reproduced, and the numbers are quoted. §3–§5 are the design. §11 is the
 staging. **§13 records what S0 actually turned up**, including a defect worse than anything §1 and
 §2 predicted and a measurement that materially weakens the case for part of S2 — read it before
@@ -926,7 +926,8 @@ Each stage ends with its tests green and is committed separately.
   T4 and T13 green; curved module 55 passed, fast suite 471 passed. **Not** done here, and moved to
   their own stage: populating `GmshTemplate._curved_entities2d`, and the edge→entity registry of
   §3.2.2 — see §15.3 for why the registry turned out not to be needed yet.
-- **S4 — wedge, pyramid, mixed forests.** Remove the last two throws. T5 green.
+- **S4 — wedge, pyramid, mixed forests.** ✅ **Done.** The last four throws removed (wedge, pyramid,
+  mixed brick, and the tet-of-pyramid path). T5 green; curved module 61 passed, fast suite 477.
 - **S5 — moving meshes.** The `moving_nodes` split of §5, `Undeformed_macro_elem_pt` wiring, revisit
   `remove_macro_elements_after_initial_adaption`. T10 green.
 - **S6 — MPI and coupled interfaces.** §6.2's decision, validated against the `mixed_adapt` MPI
@@ -1195,3 +1196,62 @@ S2 that is a genuine correctness matter (§13.2) is already in. What remains of 
 `blend_parametric`, the intrinsic/parametric dimension split, and the optional projection hook — is
 now purely about giving user-defined entities a clean interface, since the built-in entities that
 needed it have it. It has no dependents left and can be scheduled freely.
+
+---
+
+## 16. What S4 turned up
+
+### 16.1 The pyramid was the test of the whole design, and it passed unchanged
+
+Every earlier stage could in principle have been done by special-casing. The pyramid could not, and
+it is where the two central choices earn their keep.
+
+Its C1 shape functions are *rational* — `psi_0 = (w-s0)(w-s1)/w` with `w = 1-s2` — because the whole
+quadrilateral base collapses to a point at the apex. They are still a partition of unity, still 1 at
+their own vertex and 0 at the others, and still vanish on the facets not containing their vertex,
+which is all §3.2 ever asked of them. So the blend needed no pyramid-specific term: only an entry in
+`macro_c1_shape`. One caveat had to be handled — the shipped `PyramidElementShapeC1::shape` divides
+by `1-s2` unguarded, which is fine for its callers but not for a macro map evaluated at arbitrary
+points of the reference domain, so the macro version takes the apex limit explicitly.
+
+And refining a pyramid yields **six pyramids and four tetrahedra** — 10 elements after one
+refinement, 92 after two, both measured. A son therefore inherits a macro element from a father *of a
+different shape*. That works only because §3.3 carries the son's region as vertex coordinates
+converted through the father's own shape functions: the two shapes never appear in the same
+expression, so nothing has to reconcile 5 vertices with 4. oomph's axis-aligned `s_macro_ll`/
+`s_macro_ur` cannot express it at all, which is the concrete reason the box had to be generalised
+rather than extended.
+
+Wedge and pyramid, one curved facet each, are exact at 0, 1 and 2 refinements (`0`, `0`, `1.1e-16`).
+
+### 16.2 Four throws, three call sites, one mechanism
+
+The remaining refusals were at
+[wedges_and_pyramids.cpp:367](src/wedges_and_pyramids.cpp#L367) (wedge),
+[elements.cpp:7590](src/elements.cpp#L7590) (`build_as_pyramid_son`, which also serves tet sons of a
+pyramid) and [elements.cpp:7772](src/elements.cpp#L7772) (`build_as_brick_son`, the mixed-forest
+brick). All three became the same two lines — `inherit_macro_element_from_father(father, sv)` — since
+each builder already computes `sv`, the son's vertices in the father's coordinates, for its own node
+mapping.
+
+The brick son was the only one that needed anything extra: it maps node-by-node rather than from a
+vertex list, so `collect_son_vertex_coords_in_father` recovers the eight vertices by matching each
+reference vertex to the son node sitting there and asking the builder where that node lies in the
+father. Generic over shapes, and the natural hook if another builder ever needs the same.
+
+### 16.3 Coverage now, and what is left
+
+Every element shape pyoomph has — quad, triangle, brick, tetrahedron, wedge, pyramid — places
+refinement-generated nodes on curved boundaries exactly, in 2d and 3d, including mixed forests.
+`GenericMacroElement` is ~300 lines and contains one shape-dependent function.
+
+What remains is not about shapes:
+
+- **S2 residual** (§15.4): `blend_parametric`, the intrinsic/parametric dimension split, the optional
+  projection hook. Purely an interface for user-defined entities now; the built-ins that needed
+  normals have them.
+- **gmsh 3d**: `GmshTemplate._curved_entities2d` is still never populated, so 3d curved boundaries
+  are reachable from hand-built templates and `SphericalOctantMesh` but not yet from gmsh. This is
+  now the largest user-visible gap and deserves its own stage.
+- **S5 moving meshes**, **S6 MPI**, **S7 docs** as planned.
+- The boundary-inheritance over-marking of §15.2, on its own merits.

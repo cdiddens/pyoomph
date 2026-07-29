@@ -86,8 +86,9 @@ namespace pyoomph
     Quad2d,
     Tri2d,
     Brick3d,
-    Tet3d
-    // Wedge3d, Pyramid3d follow in S4 of the plan.
+    Tet3d,
+    Wedge3d,
+    Pyramid3d
   };
 
   // Spatial dimension of a shape's reference domain.

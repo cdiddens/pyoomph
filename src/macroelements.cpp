@@ -41,6 +41,10 @@ namespace pyoomph
       return 8;
     case MacroElementShape::Tet3d:
       return 4;
+    case MacroElementShape::Wedge3d:
+      return 6;
+    case MacroElementShape::Pyramid3d:
+      return 5;
     }
     throw_runtime_error("Unknown macro element shape");
     return 0;
@@ -55,6 +59,8 @@ namespace pyoomph
       return 2;
     case MacroElementShape::Brick3d:
     case MacroElementShape::Tet3d:
+    case MacroElementShape::Wedge3d:
+    case MacroElementShape::Pyramid3d:
       return 3;
     }
     throw_runtime_error("Unknown macro element shape");
@@ -102,6 +108,41 @@ namespace pyoomph
       psi[2] = s[2];
       psi[3] = 1.0 - s[0] - s[1] - s[2];
       return;
+    case MacroElementShape::Wedge3d:
+    {
+      // WedgeElementShapeC1: a triangle barycentric in (s0,s1) times a linear factor in s2.
+      const double l1 = 1.0 - s[0] - s[1];
+      psi.resize(6);
+      psi[0] = l1 * (1.0 - s[2]);
+      psi[1] = s[0] * (1.0 - s[2]);
+      psi[2] = s[1] * (1.0 - s[2]);
+      psi[3] = l1 * s[2];
+      psi[4] = s[0] * s[2];
+      psi[5] = s[1] * s[2];
+      return;
+    }
+    case MacroElementShape::Pyramid3d:
+    {
+      // PyramidElementShapeC1: rational, with a removable singularity at the apex s2 = 1 where the
+      // whole quad base collapses to a point. The shipped shape function divides by 1-s2 unguarded
+      // because its callers never evaluate exactly there; the macro map is evaluated at arbitrary
+      // points of the reference domain, so take the limit explicitly.
+      const double w = 1.0 - s[2];
+      psi.resize(5);
+      if (w < 1e-13)
+      {
+        psi[0] = psi[1] = psi[2] = psi[3] = 0.0;
+        psi[4] = 1.0;
+        return;
+      }
+      const double iw = 1.0 / w;
+      psi[0] = (w - s[0]) * (w - s[1]) * iw;
+      psi[1] = s[0] * (w - s[1]) * iw;
+      psi[2] = s[0] * s[1] * iw;
+      psi[3] = (w - s[0]) * s[1] * iw;
+      psi[4] = s[2];
+      return;
+    }
     }
     throw_runtime_error("Unknown macro element shape");
   }
@@ -127,6 +168,13 @@ namespace pyoomph
       return;
     case MacroElementShape::Tet3d:
       sv = {{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}, {0.0, 0.0, 0.0}};
+      return;
+    case MacroElementShape::Wedge3d:
+      sv = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0},
+            {0.0, 0.0, 1.0}, {1.0, 0.0, 1.0}, {0.0, 1.0, 1.0}};
+      return;
+    case MacroElementShape::Pyramid3d:
+      sv = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 1.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}};
       return;
     }
     throw_runtime_error("Unknown macro element shape");
@@ -339,7 +387,7 @@ namespace pyoomph
   {
     const unsigned dim = macro_shape_dim(shape);
     oomph::Vector<double> s(dim), r(dim);
-    if (shape == MacroElementShape::Tet3d)
+    if (shape == MacroElementShape::Tet3d || shape == MacroElementShape::Wedge3d || shape == MacroElementShape::Pyramid3d)
     {
       outfile << "ZONE" << std::endl;
       for (unsigned i = 0; i < nplot; i++)

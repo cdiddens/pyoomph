@@ -2173,6 +2173,10 @@ Index : Local coordinates (s0,s1,s2)
 				shape = MacroElementShape::Brick3d;
 			else if (dynamic_cast<BulkElementTetra3dC1 *>(res) || dynamic_cast<BulkElementTetra3dC2 *>(res))
 				shape = MacroElementShape::Tet3d;
+			else if (dynamic_cast<BulkElementWedge3dC1 *>(res))
+				shape = MacroElementShape::Wedge3d;
+			else if (dynamic_cast<BulkElementPyramid3dC1 *>(res))
+				shape = MacroElementShape::Pyramid3d;
 			else
 				throw_runtime_error("MacroElements (curved boundaries) are not implemented for this element type yet");
 

@@ -364,12 +364,24 @@ const double PyramidGaussC2::Weight[27] =
     RefineableElement *father_re = dynamic_cast<RefineableElement *>(father_el_pt);
     TimeStepper *time_stepper_pt = father_el_pt->node_pt(0)->time_stepper_pt();
     const unsigned ntstorage = time_stepper_pt->ntstorage();
-    if (father_el_pt->macro_elem_pt() != 0)
-      throw_runtime_error("Macro elements (curved boundaries) are not yet supported for wedge refinement");
-
     Vector<Vector<double>> sv;
     son_vertices_in_father(son_type, sv);
     const unsigned nfath = father_el_pt->nnode();
+
+    // Curved boundaries: inherit the father's macro element together with this son's region of the
+    // macro reference domain, which is just its six vertices in the father's local coordinates.
+    if (father_el_pt->macro_elem_pt() != 0)
+    {
+      pyoomph::BulkElementBase *son_be = dynamic_cast<pyoomph::BulkElementBase *>(this);
+      pyoomph::BulkElementBase *father_be = dynamic_cast<pyoomph::BulkElementBase *>(father_el_pt);
+      if (son_be && father_be)
+      {
+        std::vector<std::vector<double>> son_vertices(sv.size(), std::vector<double>(3, 0.0));
+        for (unsigned int v = 0; v < sv.size(); v++)
+          for (unsigned int i = 0; i < 3; i++) son_vertices[v][i] = sv[v][i];
+        son_be->inherit_macro_element_from_father(father_be, son_vertices);
+      }
+    }
 #ifdef OOMPH_HAS_MPI
     // Propagate the halo-ownership tag father->son (see RefineableTElement<3>::build) so a refined wedge son
     // is correctly classified under MPI; no-op for a non-halo (serial) father.
