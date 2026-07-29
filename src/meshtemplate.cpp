@@ -265,7 +265,6 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 	{
 
 		unsigned fi = i_direct - 20;
-		std::cout << "STARTING FACE I " << fi << std::endl;
 		double lambda0 = 0.5 * (s[0] + 1);
 		double lambda1 = 0.5 * (s[1] + 1);
 
@@ -303,9 +302,6 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 			}
 			std::vector<double> pos(3);
 			facets[fi]->curved_entity->parametric_to_position(t, parametric, pos);
-			std::vector<double> test(3);
-			facets[fi]->curved_entity->position_to_parametric(t, pos, test);
-			std::cout << "COMPARING PARAMS " << parametric[0] << "  " << parametric[1] << "  vs " << test[0] << "  " << test[1] << "  with pos " << pos[0] << "  " << pos[1] << "  " << pos[2] << std::endl;
 			f[0] = pos[0];
 			f[1] = pos[1];
 			f[2] = pos[2];

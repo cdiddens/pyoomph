@@ -1501,7 +1501,11 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("_get_problem", &pyoomph::MeshTemplate::get_problem, nb::rv_policy::reference, "Return the Problem this mesh template is associated with (or None if not yet set)")
 		.def("get_node_position", &pyoomph::MeshTemplate::get_node_position, nb::arg("node_index"), "Returns the position [x, y, z] of the node at the given index of this template")
 		.def("new_bulk_element_collection", &pyoomph::MeshTemplate::new_bulk_element_collection, nb::rv_policy::reference, nb::arg("name"), "Creates a new named bulk element domain (MeshTemplateElementCollection) within this template")
-		.def("add_facet_to_boundary", &pyoomph::MeshTemplate::add_facet_to_boundary,"boundary_name"_a, "all_node_indices"_a,nb::arg("vertex_node_indices")=std::vector<pyoomph::nodeindex_t>(),nb::arg("curved_entity")=nullptr,"Adds a list of nodes, i.e. a facet, to a boundary. Must pass all nodes of the facet, the vertex nodes and a potential curved entity for MacroElements")
+		// keep_alive<1,5>: the curved entity is stored as a bare borrowed pointer in MeshTemplateFacet
+		// (and later in the MacroElements built from it), so without this the Python object may be
+		// collected as soon as the caller's local goes out of scope -- which segfaults the macro map
+		// during mesh generation. Tie its lifetime to the template that now points at it.
+		.def("add_facet_to_boundary", &pyoomph::MeshTemplate::add_facet_to_boundary,"boundary_name"_a, "all_node_indices"_a,nb::arg("vertex_node_indices")=std::vector<pyoomph::nodeindex_t>(),nb::arg("curved_entity").none()=nullptr,nb::keep_alive<1,5>(),"Adds a list of nodes, i.e. a facet, to a boundary. Must pass all nodes of the facet, the vertex nodes and a potential curved entity for MacroElements")
 		//.def("add_nodes_to_boundary", &pyoomph::MeshTemplate::add_nodes_to_boundary,"Adds a list of nodes, i.e. a facet, to a boundary")
 		//.def("add_facet_to_curve_entity", &pyoomph::MeshTemplate::add_facet_to_curve_entity,"Adds a facet to a curved boundary so that e.g. additional nodes of refined meshes will be exactly on this curve")
 		.def("add_nodes_to_boundary", [](pyoomph::MeshTemplate & self, const std::string &boundname, const std::vector<pyoomph::nodeindex_t> &ni){ throw_runtime_error("add_nodes_to_boundary is deprecated. Use add_facet_to_boundary instead"); }, nb::arg("boundary_name"), nb::arg("node_indices"))

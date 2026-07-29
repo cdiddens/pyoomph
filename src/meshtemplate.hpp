@@ -252,7 +252,6 @@ namespace pyoomph
       {
         position[i] += normal[i] * parametric[1] + radius * (cos(parametric[0]) * ta[i] + sin(parametric[0]) * ct[i]);
       }
-      std::cout << " CYL PARAM TO POS " << parametric[0] << "  " << parametric[1] << "  leads to " << position[0] << "  " << position[1] << "  " << position[2] << std::endl;
     }
     void position_to_parametric(const unsigned &, const std::vector<double> &position, std::vector<double> &parametric) override
     {
@@ -266,7 +265,6 @@ namespace pyoomph
         y += delta * ct[i];
       }
       parametric[0] = atan2(y, x);
-      std::cout << " CYL POS TO PARAM " << position[0] << "  " << position[1] << "  " << position[2] << "  leads to x,y= " << x << " " << y << " parametric " << parametric[0] << " , " << parametric[1] << std::endl;
     };
     void apply_periodicity(std::vector<std::vector<double>> &parametric) override
     {
@@ -329,10 +327,6 @@ namespace pyoomph
       tdot = sqrt(tdot);
       for (unsigned int i = 0; i < 3; i++)
         cotangent[i] /= tdot;
-
-      std::cout << "NORM TANG COTANG" << std::endl;
-      for (unsigned int i = 0; i < 3; i++)
-        std::cout << normal[i] << "  " << tangent[i] << "  " << cotangent[i] << std::endl;
     }
     void parametric_to_position(const unsigned &, const std::vector<double> &parametric, std::vector<double> &position) override
     {
@@ -347,7 +341,7 @@ namespace pyoomph
         position[i] += x * tangent[i] + y * cotangent[i] + z * normal[i];
       }
     }
-    void position_to_parametric(const unsigned &t, const std::vector<double> &position, std::vector<double> &parametric) override
+    void position_to_parametric(const unsigned &, const std::vector<double> &position, std::vector<double> &parametric) override
     {
       std::vector<double> rel = position;
       for (unsigned int i = 0; i < 3; i++)
@@ -369,13 +363,6 @@ namespace pyoomph
       }
       parametric[0] = acos(z);
       parametric[1] = atan2(y, x);
-
-      std::vector<double> testpos(3);
-      this->parametric_to_position(t, parametric, testpos);
-      for (unsigned int i = 0; i < 3; i++)
-      {
-        std::cout << "TEST FOR pos->par->pos " << i << "  " << position[i] << " vs " << testpos[i] << std::endl;
-      }
     };
     void apply_periodicity(std::vector<std::vector<double>> &) override{
         // TODO:; SHoukld not be required
