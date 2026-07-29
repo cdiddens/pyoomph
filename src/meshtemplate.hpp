@@ -105,6 +105,24 @@ namespace pyoomph
       os << std::endl;
     }
 
+    // Remove the period ambiguity of an angular parametric component: shift component `comp` of
+    // every facet node onto the branch nearest the first node's, so that a facet straddling the
+    // parametrisation's branch cut still blends along the short way round. Works for any number of
+    // facet nodes (a 3d face has three or four), which the ad-hoc two-node repairs it replaces did
+    // not. Only differences between the blended values matter, so shifting the whole facet by a
+    // common multiple of the period is harmless.
+    static void unwrap_periodic_component(std::vector<std::vector<double>> &parametric, unsigned comp, double period)
+    {
+      if (parametric.size() < 2)
+        return;
+      const double ref = parametric[0][comp];
+      for (unsigned int i = 1; i < parametric.size(); i++)
+      {
+        double &p = parametric[i][comp];
+        p -= period * std::round((p - ref) / period);
+      }
+    }
+
   public:
     MeshTemplateCurvedEntity(unsigned d) : dim(d) {}
     // Factory: reconstructs a set of curved entities (keyed by an integer id)
@@ -150,28 +168,11 @@ namespace pyoomph
     {
       parametric[0] = atan2(position[1] - center[1], position[0] - center[0]);
     };
+    // The polar angle is only defined modulo 2*pi, so an arc crossing atan2's branch cut on the
+    // negative x axis arrives here with endpoints near +pi and -pi. Unwrap onto a common branch.
     void apply_periodicity(std::vector<std::vector<double>> &parametric) override
     {
-      if (fabs(parametric[0][0] - parametric[1][0]) > M_PI)
-      {
-        if (fabs(parametric[0][0]) > fabs(parametric[1][0]))
-        {
-          if (parametric[0][0] > 0)
-          {
-            parametric[0][0] = -M_PI + (parametric[0][0] - M_PI);
-          }
-          else
-          {
-            parametric[0][0] = M_PI - (parametric[0][0] + M_PI);
-          }
-        }
-        else
-        {
-          std::ostringstream oss;
-          oss << parametric[0][0] / M_PI << "  " << parametric[1][0] / M_PI << std::endl;
-          throw_runtime_error("Handle periodic case here: " + oss.str());
-        }
-      }
+      unwrap_periodic_component(parametric, 0, 2.0 * M_PI);
     };
     std::string get_information_string() override
     {
@@ -266,12 +267,11 @@ namespace pyoomph
       }
       parametric[0] = atan2(y, x);
     };
+    // Component 0 is the angle around the axis and wraps; component 1 is the axial position and
+    // does not.
     void apply_periodicity(std::vector<std::vector<double>> &parametric) override
     {
-      if (fabs(parametric[0][0] - parametric[1][0]) > M_PI)
-      {
-        throw_runtime_error("Handle periodic case here");
-      }
+      unwrap_periodic_component(parametric, 0, 2.0 * M_PI);
     };
   };
 
