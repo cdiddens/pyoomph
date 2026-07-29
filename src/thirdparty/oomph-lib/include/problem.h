@@ -707,6 +707,20 @@ namespace oomph
     /// matrix is zero. If it is then storage need not be allocated.
     double Numerical_zero_for_sparse_assembly;
 
+    //FOR PYOOMPH
+    /// The tolerance above to use for the matrix_index-th matrix of a multi-matrix assembly (the
+    /// sparse assembly routines can build several matrices in one pass over the elements, e.g. the
+    /// Jacobian AND the mass matrix for an eigenproblem). Defaults to the single problem-wide value,
+    /// so behaviour is unchanged unless a derived Problem overrides this. It is virtual so that a
+    /// derived problem can apply a different sparsity policy per matrix: pyoomph keeps structurally
+    /// zero entries in the Jacobian, which makes its pattern depend on the equation numbering alone
+    /// and hence reusable by the linear solver, but must NOT do so for the mass matrix, which is
+    /// several times sparser and would otherwise be inflated to the Jacobian's pattern.
+    virtual double numerical_zero_for_sparse_assembly(const unsigned& matrix_index) const
+    {
+      return Numerical_zero_for_sparse_assembly;
+    }
+
     /// Protected helper function that is used to assemble the Jacobian
     /// matrix in the case when the storage is row or column compressed.
     /// The boolean Flag indicates

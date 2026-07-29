@@ -58,6 +58,18 @@ Included <initializer_list> for clang compilation on Mac
 
 
 
+problem.h / problem.cc (Changed on 29th July 2026):
+Made the "is this entry small enough not to store?" threshold of the sparse assembly per matrix.
+The sparse assembly routines can build several matrices in one pass over the elements (the Jacobian
+AND the mass matrix for an eigenproblem), but all of them shared the single Numerical_zero_for_sparse_assembly
+member. Added a virtual numerical_zero_for_sparse_assembly(matrix_index) returning that member by
+default -- so behaviour is unchanged -- and called it instead of reading the member directly at the
+seven filter sites in the five serial assembly variants and the distributed one. pyoomph overrides it
+to keep structurally zero entries in the Jacobian, which makes its sparsity pattern depend on the
+equation numbering alone and hence reusable by the linear solver across Newton steps, while leaving
+the mass matrix on its own (roughly three times tighter) pattern. See pyoomph's
+dev_docs/structural_assembly.md.
+
 refineable_mesh.h / refineable_mesh.cc (Changed on 28th July 2026):
 Split TreeBasedRefineableMeshBase::adapt(elemental_error) into its two existing halves --
 select_elements_for_refinement_and_unrefinement(), which only translates the elemental errors into

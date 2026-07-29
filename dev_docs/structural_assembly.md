@@ -332,6 +332,42 @@ assembly loop. That immediately buys: a stable pattern, a full diagonal, and hen
 This is the right thing to land first: it makes the payoff measurable before committing to the
 larger refactor, and it is trivially revertible.
 
+### 3.7 The threshold must be per matrix, not per problem
+
+A single problem-wide threshold is the wrong granularity, because a sparse assembly pass can build
+**several matrices at once** and they do not want the same policy:
+
+* `get_eigenproblem_matrices` (oomph `problem.cc:8641`) assembles with `n_matrix = 2`:
+  index 0 = the Jacobian, index 1 = the mass matrix.
+* `assemble_multiassembly` (`src/problem.cpp`) packs an arbitrary number of matrices.
+
+Measured on the 2D cavity, `N=8` — the mass matrix is **~3× sparser** than the Jacobian, because only
+fields carrying a time derivative contribute to it at all:
+
+| | J nnz | M nnz | M/J |
+|---|---|---|---|
+| both value-filtered | 17 560 | 6 050 | 0.34 |
+| structural zeros on both | 18 178 | 18 178 | 1.00 |
+| **structural on J only** | 18 178 | 6 050 | 0.33 |
+
+Forcing J's connectivity pattern onto M inflates it threefold for no benefit: what a stable pattern
+buys is symbolic-factorisation reuse, and the operator being factorised is J. So the fix is a
+per-matrix threshold — implemented as a new `virtual double
+numerical_zero_for_sparse_assembly(matrix_index)` on `oomph::Problem` (defaulting to the existing
+member, so oomph behaviour is unchanged) called at the seven filter sites, with pyoomph overriding
+it. Recorded in `src/thirdparty/INFO_oomph-lib` per the vendoring convention.
+
+Two consequences worth stating explicitly:
+
+* **The mixed policy is still safe for eigenproblems.** A shift-and-invert solve factorises
+  `J − σM`, whose pattern is the union of the two — and M's entries all lie inside J's structural
+  pattern (both come from the same elemental blocks), so that union *is* J's pattern. It stays
+  value-independent and reusable even though M is stored more tightly. Tested.
+* **The Hessian must be excluded.** `assemble_hessian_tensor` used the same threshold, and it is a
+  rank-3 tensor: structural zeros there would store every `(i,j,k)` triple of an element — `nvar³`,
+  about 700 k entries per element for 3D Taylor-Hood, against `nvar²` for a matrix. It keeps the raw
+  value filter, with a test guarding against it being wired into the policy later.
+
 ---
 
 ## 4. What this does *not* fix — RESOLVED by Phase 0
@@ -375,8 +411,11 @@ investigation.
 
 ### Phase 1 — value-independent pattern + solver structure reuse — **DONE**
 
-* `problem.keep_structural_zeros` → sets `Numerical_zero_for_sparse_assembly` negative (§3.6).
-  Works unchanged on the distributed path, which uses the same filter (oomph `problem.cc:6899`).
+* `problem.keep_structural_zeros` → makes the assembly's zero threshold negative (§3.6), **for the
+  Jacobian only** (§3.7). Works unchanged on the distributed path, which uses the same filter
+  (oomph `problem.cc:6899`).
+* `problem.keep_structural_zeros_in_mass_matrix` (default off) extends it to the secondary matrices
+  of a multi-matrix assembly.
 * `problem.jacobian_structure_id`, bumped in `pyoomph::Problem::assign_eqn_numbers` — *and*
   lazily re-validated against the assembly handler, dof counts and active residual, so that a state
   change nobody hooked cannot hand a solver a stale pattern. That belt-and-braces design earned its
@@ -440,11 +479,13 @@ Only after Phases 1–3 are validated on the plain Newton path.
 
 * **Eigenproblems.** `assemble_eigenproblem_matrices` (`src/problem.cpp:1091`) →
   `get_eigenproblem_matrices` (oomph `problem.cc:8641`) → same sparse-assembly routine with
-  `n_matrix = 2`. J and M share the element connectivity, so they can share **one** pattern
-  (M's numerical pattern is a strict subset; storing M on J's pattern costs explicit zeros but makes
-  `J - σM` a pure `axpy` on the value arrays — attractive for shift-and-invert sweeps). Measured
-  cost of the second matrix today: 43 ms on Benchmark A. SLEPc/ARPACK shift-invert would then only
-  need one symbolic factorisation for a whole parameter sweep.
+  `n_matrix = 2`. **Do not give M the Jacobian's pattern** — §3.7 measured the cost (3× inflation)
+  and the per-matrix threshold now prevents it. The `J − σM` operator still gets a stable,
+  value-independent pattern for free, because M's entries lie inside J's structural pattern, so
+  SLEPc/ARPACK shift-invert needs only one symbolic factorisation for a whole parameter sweep.
+  What remains open is whether the *values-only* `J − σM` update is worth a dedicated path
+  (`keep_structural_zeros_in_mass_matrix = True` would make it a pure `axpy` on the value arrays, at
+  the price of the 3× inflation — measure both).
 * **Bifurcation tracking.** `MyFoldHandler` / `MyPitchForkHandler` / `MyHopfHandler` /
   `AzimuthalSymmetryBreakingHandler` / `PeriodicOrbitHandler` (`src/bifurcation.hpp:53-532`) each
   define their own `eqn_number(elem, i)` over the *augmented* dof vector. The pattern is still fixed
@@ -485,11 +526,18 @@ Free for single-physics (Poisson's elemental block is already dense, so the stru
 the numerical one), and expensive only for weakly coupled multiphysics — which is exactly the case
 Phase 3's field-pair pruning is for.
 
-**Caveat found here, not predicted:** `res+jac+mass` degrades more than `res+jac` — for NS 3D,
-469 → 574 ms (+22 %) against +0.2 % for the Jacobian alone. The mass matrix is *much* sparser
-numerically than the Jacobian, so forcing the shared connectivity pattern on it costs
-disproportionately. Eigenproblem-heavy workflows may want structural zeros on J but not on M; §7 of
-Phase 4 should weigh that against the `J − σM` axpy benefit.
+**Caveat found here, not predicted — and since fixed.** The first cut used one problem-wide
+threshold, so the mass matrix was given the Jacobian's pattern too and `res+jac+mass` degraded far
+more than `res+jac`: for NS 3D, 469 → 574 ms (+22 %) against +0.2 % for the Jacobian alone. §3.7 is
+the fix (a per-matrix threshold). After it:
+
+| case | `res+jac+mass` filtered | structural | |
+|---|---|---|---|
+| NS 3D `N=8` | 474 ms | 480 ms | +1.2 % (was +22 %) |
+| NS+AD 2D `N=40` | 96.6 ms | 112.1 ms | +16 % (was +50 %) |
+
+The residual +16 % on the coupled case is the Jacobian's own connectivity blow-up (+34.7 % nnz), not
+the mass matrix — that is what Phase 3's field-pair pruning is for.
 
 ### End-to-end Newton solves
 
@@ -549,9 +597,13 @@ Every phase must keep these green before it lands:
    never fires. This is the highest-risk area: a *missed* invalidation is a silent wrong-answer bug,
    not a crash. ✔ `test_structure_id_*` (6 tests), covering renumbering, augmentation by fold
    tracking, and switching the active residual. Still uncovered: remeshing.
-5. **Existing suites.** ✔ `tests/` passes: 518 passed / 314 skipped / 3 pre-existing xfails (the
+5. **Existing suites.** ✔ `tests/` passes: 524 passed / 314 skipped / 3 pre-existing xfails (the
    documented curved-boundary over-marking), and `--full` is green. The tutorial pipeline is still
    owed, batched at the end of a phase — not per fix.
+7. **Per-matrix policy.** The mass matrix must keep its own pattern, its values must be unaffected by
+   the Jacobian's policy, its entries must lie inside the Jacobian's structural pattern, and the
+   Hessian tensor must not be dragged in (§3.7). ✔ `test_mass_matrix_*`,
+   `test_hessian_tensor_is_not_given_structural_zeros`.
 6. **MPI gates** — every one of 1–5 also under `mpirun -n 2` and `-n 4` with `--distribute`, plus:
    * cross-rank agreement and serial agreement on the gathered residual / global observables, the
      two oracles `tests/test_mpi_adaptivity.py` already implements (see its header);

@@ -4802,7 +4802,7 @@ namespace oomph
                 // Get the value of the matrix at this point
                 double value = el_jacobian[m](i, j);
                 // Only bother to add to the map if it's non-zero
-                if (std::fabs(value) > Numerical_zero_for_sparse_assembly)
+                if (std::fabs(value) > numerical_zero_for_sparse_assembly(m)) //FOR PYOOMPH: per-matrix threshold, see problem.h
                 {
                   // If it's compressed row storage, then our vector of maps
                   // is indexed by row (equation number)
@@ -5149,7 +5149,7 @@ namespace oomph
                 // Get the value of the matrix at this point
                 double value = el_jacobian[m](i, j);
                 // Only add to theif it's non-zero
-                if (std::fabs(value) > Numerical_zero_for_sparse_assembly)
+                if (std::fabs(value) > numerical_zero_for_sparse_assembly(m)) //FOR PYOOMPH: per-matrix threshold, see problem.h
                 {
                   // If it's compressed row storage, then our vector is indexed
                   // by row (the equation number)
@@ -5280,7 +5280,7 @@ namespace oomph
           // of the present entry to the value.
           // Additionally check that the entry is non-zero
           if ((it->first == current_index) &&
-              (std::fabs(it->second) > Numerical_zero_for_sparse_assembly))
+              (std::fabs(it->second) > numerical_zero_for_sparse_assembly(m))) //FOR PYOOMPH: per-matrix threshold, see problem.h
           {
             current_value += it->second;
           }
@@ -5551,7 +5551,7 @@ namespace oomph
                 // Get the value of the matrix at this point
                 double value = el_jacobian[m](i, j);
                 // Only bother to add to the vector if it's non-zero
-                if (std::fabs(value) > Numerical_zero_for_sparse_assembly)
+                if (std::fabs(value) > numerical_zero_for_sparse_assembly(m)) //FOR PYOOMPH: per-matrix threshold, see problem.h
                 {
                   // If it's compressed row storage, then our vector of maps
                   // is indexed by row (equation number)
@@ -5909,7 +5909,7 @@ namespace oomph
                 // Get the value of the matrix at this point
                 double value = el_jacobian[m](i, j);
                 // Only bother to add to the vector if it's non-zero
-                if (std::fabs(value) > Numerical_zero_for_sparse_assembly)
+                if (std::fabs(value) > numerical_zero_for_sparse_assembly(m)) //FOR PYOOMPH: per-matrix threshold, see problem.h
                 {
                   // If it's compressed row storage, then our vector of maps
                   // is indexed by row (equation number)
@@ -6287,7 +6287,7 @@ namespace oomph
                 // Get the value of the matrix at this point
                 double value = el_jacobian[m](i, j);
                 // Only bother to add to the vector if it's non-zero
-                if (std::fabs(value) > Numerical_zero_for_sparse_assembly)
+                if (std::fabs(value) > numerical_zero_for_sparse_assembly(m)) //FOR PYOOMPH: per-matrix threshold, see problem.h
                 {
                   // number of entrys in this row
                   const unsigned size = ncoef[m][eqn_number];
@@ -6896,7 +6896,7 @@ namespace oomph
                 // Get the value of the matrix at this point
                 double value = el_jacobian[m](i, j);
                 // Only bother to add to the vector if it's non-zero
-                if (std::fabs(value) > Numerical_zero_for_sparse_assembly)
+                if (std::fabs(value) > numerical_zero_for_sparse_assembly(m)) //FOR PYOOMPH: per-matrix threshold, see problem.h
                 {
                   // number of entrys in this row
                   const unsigned size = ncoef[m][eqn_number];

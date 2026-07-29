@@ -782,6 +782,11 @@ void PyReg_Problem(nb::module_ &m)
 					  "equation numbering alone, so linear solvers can reuse their symbolic phase across solves (see ``jacobian_structure_id``), and every "
 					  "diagonal entry is guaranteed to be present. Costs a few percent more nonzeros for single-physics problems, more for weakly coupled "
 					  "multi-physics ones.")
+		.def_prop_rw("keep_structural_zeros_in_mass_matrix", &pyoomph::Problem::get_keep_structural_zeros_in_secondary_matrices, &pyoomph::Problem::set_keep_structural_zeros_in_secondary_matrices,
+					  "Whether ``keep_structural_zeros`` also applies to the secondary matrices of a multi-matrix assembly, i.e. to the mass matrix of the "
+					  "eigenproblem assembly. Off by default and usually best left off: the mass matrix is typically several times sparser than the Jacobian "
+					  "(only fields carrying a time derivative contribute), so giving it the Jacobian's pattern inflates it for no benefit -- what a stable "
+					  "pattern buys is symbolic-factorisation reuse, and the operator being factorised is the Jacobian.")
 		.def_prop_ro("jacobian_structure_id", &pyoomph::Problem::get_jacobian_structure_id,
 					  "Identifier of the current Jacobian sparsity pattern. Anything derived from the pattern stays valid as long as this value is unchanged "
 					  "and non-zero. It is 0 whenever ``keep_structural_zeros`` is off, since the pattern is then value-dependent and cannot be reused.")

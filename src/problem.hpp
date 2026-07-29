@@ -297,6 +297,7 @@ namespace pyoomph
     bool dirichlets_by_removing_from_dof_vector=true;
 
     bool keep_structural_zeros=false; // See set_keep_structural_zeros(): assemble the value-independent (connectivity) pattern instead of dropping exact zeros
+    bool keep_structural_zeros_in_secondary_matrices=false; // Same, but for the mass matrix / other non-primary matrices of a multi-matrix assembly
     unsigned long jacobian_structure_id=1; // Generation counter of the Jacobian sparsity pattern; 0 is reserved for "no usable pattern"
     // Snapshot of everything besides the equation numbering that the pattern depends on; compared in
     // get_jacobian_structure_id() so that an unhooked state change still invalidates the pattern.
@@ -355,8 +356,16 @@ namespace pyoomph
     // reuse their symbolic phase (Pardiso phase 11, a PETSc Mat's preallocation) across solves. It
     // also guarantees an entry on every diagonal, since every dof sits in an element whose block
     // contains (i,i) - replacing the manual MatShift(0.0) some PETSc backends need.
+    // Applies to the Jacobian / main matrix only; the mass matrix keeps its own, much tighter pattern
+    // (see numerical_zero_for_sparse_assembly() in the .cpp).
     void set_keep_structural_zeros(bool yesno);
     bool get_keep_structural_zeros() const { return keep_structural_zeros; }
+    // Opt in to structural zeros for the secondary matrices of a multi-matrix assembly too (the mass
+    // matrix of the eigenproblem assembly). Off by default, and usually should stay off.
+    void set_keep_structural_zeros_in_secondary_matrices(bool yesno);
+    bool get_keep_structural_zeros_in_secondary_matrices() const { return keep_structural_zeros_in_secondary_matrices; }
+    // Per-matrix "treat as zero and do not store" threshold used by every sparse assembly routine.
+    double numerical_zero_for_sparse_assembly(const unsigned &matrix_index) const override;
     // Identifies the current Jacobian sparsity pattern. Changes whenever the pattern may have
     // changed. Solvers may reuse anything derived from the pattern (a symbolic factorisation, a
     // preallocated PETSc Mat) while this value is unchanged and non-zero.

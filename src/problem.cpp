@@ -1900,24 +1900,61 @@ namespace pyoomph
 		}
 	}
 
-	// Switches between the value-dependent (oomph-lib default) and the structural, value-independent
-	// Jacobian sparsity pattern. oomph-lib's assembly routines - serial and distributed alike - filter
-	// entries with "if (fabs(value) > Numerical_zero_for_sparse_assembly)". That member defaults to 0.0
-	// and the comparison is strict, so exact zeros are dropped and the pattern follows the dof values.
-	// Setting the threshold negative makes the test unconditionally true, which turns every one of
-	// those routines into a structural assembly without touching a single assembly loop. The pattern is
-	// then the union of all elemental blocks, i.e. a function of the equation numbering only.
+	// Per-matrix version of oomph-lib's "is this entry small enough to not store?" threshold, called from
+	// every sparse assembly routine (serial and distributed) once per candidate entry.
+	//
+	// oomph-lib filters with "if (fabs(value) > threshold)", and the threshold defaults to 0.0 with a
+	// strict comparison, so exact zeros are dropped and the emitted pattern follows the dof values.
+	// Returning a NEGATIVE threshold makes that test unconditionally true, which turns the routine into a
+	// structural assembly - the pattern becomes the union of all elemental blocks, i.e. a function of the
+	// equation numbering alone - without touching a single assembly loop.
+	//
+	// This is deliberately per matrix, because a multi-matrix assembly builds matrices with very
+	// different sparsity. The eigenproblem assembly passes matrix 0 = Jacobian and matrix 1 = mass
+	// matrix, and the mass matrix is typically ~3x sparser than the Jacobian (only fields carrying a
+	// time derivative contribute to it at all). Giving it the Jacobian's connectivity pattern would
+	// inflate it threefold, for no benefit: what makes a stable pattern worth having is that the linear
+	// solver can reuse a symbolic factorisation, and the operator it factorises is J (or J - sigma*M,
+	// whose pattern is J's, since M's entries are a subset of J's structural pattern). So the mass matrix
+	// keeps its own, much tighter pattern unless explicitly asked otherwise.
+	double Problem::numerical_zero_for_sparse_assembly(const unsigned &matrix_index) const
+	{
+		// -1.0 rather than -inf or -eps: any negative value makes the test always true, and a plain
+		// -1.0 stays readable in a debugger.
+		if (matrix_index == 0)
+		{
+			if (keep_structural_zeros) return -1.0;
+		}
+		else if (keep_structural_zeros_in_secondary_matrices)
+		{
+			return -1.0;
+		}
+		return Numerical_zero_for_sparse_assembly;
+	}
+
+	// Turns the structural (value-independent) sparsity pattern on or off for the Jacobian / main
+	// matrix. See numerical_zero_for_sparse_assembly() above for how it takes effect, and
+	// get_jacobian_structure_id() for what it buys.
 	void Problem::set_keep_structural_zeros(bool yesno)
 	{
 		if (yesno == keep_structural_zeros) return;
 		keep_structural_zeros = yesno;
-		// -1.0 rather than -inf/-eps: any negative value makes fabs(value) > threshold always true,
-		// and a plain -1.0 stays readable in a debugger.
-		Numerical_zero_for_sparse_assembly = (yesno ? -1.0 : 0.0);
 		// The row-length hints from the previous (differently filtered) assembly are now wrong, and the
 		// pattern itself has changed, so nothing derived from it may be reused.
 		Sparse_assemble_with_arrays_previous_allocation.resize(0);
 		this->invalidate_jacobian_structure();
+	}
+
+	// Extends the structural pattern to the secondary matrices of a multi-matrix assembly - in practice
+	// the mass matrix of the eigenproblem assembly. Off by default: see the note in
+	// numerical_zero_for_sparse_assembly() on why the mass matrix does not want the Jacobian's pattern.
+	// Worth turning on only if something downstream needs M to have a stable, reusable pattern of its
+	// own (e.g. repeatedly re-assembling M for a parameter sweep and updating values in place).
+	void Problem::set_keep_structural_zeros_in_secondary_matrices(bool yesno)
+	{
+		if (yesno == keep_structural_zeros_in_secondary_matrices) return;
+		keep_structural_zeros_in_secondary_matrices = yesno;
+		Sparse_assemble_with_arrays_previous_allocation.resize(0);
 	}
 
 	// Returns the id of the current Jacobian sparsity pattern, re-validating it first. The explicit
@@ -2346,6 +2383,11 @@ namespace pyoomph
 					for (unsigned int k = 0; k < nvar; k++)
 					{
 						double hval = hessian_buffer(i, k * nvar + j);
+						// Deliberately the raw threshold, NOT numerical_zero_for_sparse_assembly(): this is
+						// a rank-3 tensor, so keeping structural zeros would store every (i,j,k) triple of
+						// an element - nvar^3, i.e. ~700k entries per element for 3D Taylor-Hood - where the
+						// matrices only pay nvar^2. A stable Hessian pattern buys nothing anyway, since
+						// nothing factorises it.
 						if (std::fabs(hval) > Numerical_zero_for_sparse_assembly)
 						{
 							unsigned kG = assembly_handler_pt()->eqn_number(elem_pt, k);
@@ -2764,7 +2806,7 @@ namespace pyoomph
 						for (unsigned j = 0; j < nvar; j++)
 						{
 							double value = el_jacobian(i, j);
-							if (std::fabs(value) > Numerical_zero_for_sparse_assembly)
+							if (std::fabs(value) > numerical_zero_for_sparse_assembly(0))
 							{
 								unsigned unknown = assembly_handler_pt->eqn_number(elem_pt, j);	
 								if (compressed_row_flag)
@@ -3056,7 +3098,7 @@ namespace pyoomph
               				for (unsigned m = 0; m < n_matrix; m++)
               				{
 								double value = el_jacobian[m](i, j);
-								if (std::fabs(value) > Numerical_zero_for_sparse_assembly)
+								if (std::fabs(value) > numerical_zero_for_sparse_assembly(m))
 								{
 									unsigned unknown = assembly_handler_pt->eqn_number(elem_pt, j);	
 									if (compressed_row_flag)

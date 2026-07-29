@@ -227,6 +227,92 @@ def test_structural_pattern_contains_the_full_diagonal(with_scalar):
 
 
 # ---------------------------------------------------------------------------------------------------
+# The mass matrix keeps its own, much tighter pattern
+# ---------------------------------------------------------------------------------------------------
+
+def _eigen_matrices(p):
+    """(M, J) from the two-matrix eigenproblem assembly. Copies, because the returned arrays are
+    zero-copy views onto oomph's buffers and the next assembly reallocates them."""
+    n, _, _, Mv, Mc, Mr, _, _, Jv, Jc, Jr = p.assemble_eigenproblem_matrices(0.0)
+    from scipy.sparse import csr_matrix
+    return (csr_matrix((Mv, Mc, Mr), shape=(n, n)).copy(),
+            csr_matrix((Jv, Jc, Jr), shape=(n, n)).copy())
+
+
+@pytest.mark.parametrize("with_scalar", [False, True], ids=["navier_stokes", "coupled"])
+def test_mass_matrix_is_not_inflated_to_the_jacobian_pattern(with_scalar):
+    """Only fields carrying a time derivative appear in the mass matrix at all, so M is several times
+    sparser than J. Handing it J's connectivity pattern would inflate it for nothing -- what a stable
+    pattern buys is symbolic-factorisation reuse, and the operator being factorised is J. So
+    keep_structural_zeros must apply to the Jacobian and leave the mass matrix alone."""
+    with _CavityProblem(N=8, with_scalar=with_scalar) as p:
+        p.quiet()
+        p.initialise()
+        p.solve()
+
+        p.keep_structural_zeros = False
+        M_ref, J_ref = _eigen_matrices(p)
+        p.keep_structural_zeros = True
+        M_str, J_str = _eigen_matrices(p)
+
+        assert J_str.nnz > J_ref.nnz, "the Jacobian should have gained its structural zeros"
+        assert M_str.nnz == M_ref.nnz, "the mass matrix must keep its own pattern"
+        assert M_str.nnz < J_str.nnz / 2, "expected the mass matrix to be several times sparser"
+
+        # ... and opting in must actually opt in.
+        p.keep_structural_zeros_in_mass_matrix = True
+        M_all, J_all = _eigen_matrices(p)
+        assert M_all.nnz == J_all.nnz
+
+
+@pytest.mark.parametrize("with_scalar", [False, True], ids=["navier_stokes", "coupled"])
+def test_mass_matrix_entries_lie_inside_the_structural_jacobian_pattern(with_scalar):
+    """Why the mixed policy is safe for eigenproblems: a shift-and-invert solve factorises J - sigma*M,
+    whose pattern is the union of the two. Since M's entries all sit inside J's structural pattern, that
+    union IS J's pattern -- so it is still value-independent and still reusable, even though M itself is
+    stored on a tighter pattern."""
+    with _CavityProblem(N=8, with_scalar=with_scalar) as p:
+        p.quiet()
+        p.initialise()
+        p.solve()
+        p.keep_structural_zeros = True
+        M, J = _eigen_matrices(p)
+        outside = ((M != 0).astype(int) - (J != 0).astype(int) > 0)
+        assert outside.nnz == 0
+
+
+def test_mass_matrix_values_are_unchanged_by_the_jacobian_policy():
+    with _CavityProblem(N=6) as p:
+        p.quiet()
+        p.initialise()
+        p.solve()
+        p.keep_structural_zeros = False
+        M_ref, _ = _eigen_matrices(p)
+        p.keep_structural_zeros = True
+        M_str, _ = _eigen_matrices(p)
+        D = (M_str - M_ref).tocsr()
+        D.eliminate_zeros()
+        assert D.nnz == 0
+
+
+def test_hessian_tensor_is_not_given_structural_zeros():
+    """The Hessian is a rank-3 tensor: keeping structural zeros would store every (i,j,k) triple of an
+    element, i.e. nvar^3 rather than nvar^2 entries. Nothing factorises it, so a stable pattern buys
+    nothing and the blow-up is pure cost. Guard against it being wired into the per-matrix policy by
+    accident later."""
+    with _CavityProblem(N=4) as p:
+        p.quiet()
+        p.setup_for_stability_analysis(analytic_hessian=True)
+        p.initialise()
+        p.solve()
+        p.keep_structural_zeros = False
+        n_ref = p._assemble_hessian_tensor(False).finalize_for_vector_product()[1][-1]
+        p.keep_structural_zeros = True
+        n_str = p._assemble_hessian_tensor(False).finalize_for_vector_product()[1][-1]
+        assert n_str == n_ref
+
+
+# ---------------------------------------------------------------------------------------------------
 # Gate 2 -- the solution is unchanged
 # ---------------------------------------------------------------------------------------------------
 
