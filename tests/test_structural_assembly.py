@@ -449,6 +449,71 @@ def test_field_coupling_mask_is_tighter_than_connectivity():
 
 
 # ---------------------------------------------------------------------------------------------------
+# Phase 2 -- assembling straight into the frozen pattern
+# ---------------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("with_scalar", [False, True], ids=["navier_stokes", "coupled"])
+def test_frozen_sparsity_matches_the_container_assembly(with_scalar):
+    """The fast path skips the accumulate-and-compress machinery entirely, so it has to be checked
+    against it: same pattern, same values, for both matrices of the eigenproblem assembly."""
+    ref = None
+    for frozen in (False, True):
+        with _CavityProblem(N=8, with_scalar=with_scalar) as p:
+            p.quiet()
+            p.initialise()
+            p.use_frozen_sparsity = frozen
+            p.solve()
+            J = p.assemble_jacobian(with_residual=False)
+            M, J_eig = _eigen_matrices(p)
+            dofs = numpy.asarray(p.get_history_dofs(0)).copy()
+            if ref is None:
+                ref = (J.copy(), M.copy(), J_eig.copy(), dofs)
+                continue
+            J0, M0, E0, d0 = ref
+            assert numpy.allclose(dofs, d0, rtol=0, atol=1e-12)
+            for got, want, what in ((J, J0, "jacobian"), (M, M0, "mass matrix"), (J_eig, E0, "eigen jacobian")):
+                assert got.nnz == want.nnz, "%s: %d vs %d nonzeros" % (what, got.nnz, want.nnz)
+                d = (got - want).tocsr()
+                d.eliminate_zeros()
+                assert d.nnz == 0, "%s differs between the frozen and the container assembly" % what
+
+
+def test_frozen_sparsity_emits_canonically_sorted_csr():
+    """A side benefit worth keeping: oomph's container assembly emits each row's column indices in
+    insertion order, whereas the frozen path emits them ascending. Consumers that need sorted indices
+    (MKL Pardiso, among others) then get them for free."""
+    with _CavityProblem(N=6) as p:
+        p.quiet()
+        p.initialise()
+        p.solve()
+        assert p.assemble_jacobian(with_residual=False).has_sorted_indices
+        p.use_frozen_sparsity = False
+        assert not p.assemble_jacobian(with_residual=False).has_sorted_indices
+
+
+def test_frozen_sparsity_falls_back_where_it_cannot_apply():
+    """It must decline, not misbehave, when the pattern route does not fit -- here an augmented dof
+    vector from bifurcation tracking, whose elemental blocks are indexed by the handler's own numbering
+    and are not described by the element's field map."""
+    with _BratuProblem() as p:
+        p.quiet()
+        p.initialise()
+        lam = p.get_global_parameter("lam")
+        lam.value = 3.0
+        p.solve()
+        ndof_plain = p.ndof()
+        p.activate_bifurcation_tracking("lam", "fold")
+        p.solve()   # would throw or corrupt if the frozen path tried to handle the augmented system
+        assert p.ndof() > ndof_plain
+        assert numpy.isfinite(numpy.asarray(p.get_history_dofs(0))).all()
+        # Converged onto the turning point, which is what the augmented system is for. (Do not solve the
+        # plain problem again here: at a fold the unaugmented Jacobian is singular by definition.)
+        assert float(lam.value) == pytest.approx(6.808, abs=0.05)
+        p.deactivate_bifurcation_tracking()
+        assert p.ndof() == ndof_plain
+
+
+# ---------------------------------------------------------------------------------------------------
 # Gate 2 -- the solution is unchanged
 # ---------------------------------------------------------------------------------------------------
 

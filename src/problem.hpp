@@ -272,6 +272,45 @@ namespace pyoomph
   //  - custom sparse assembly, Dirichlet handling (either by dof removal or by matrix manipulation), logging
   // Most of the heavy lifting is implemented in problem.cpp; this header is the primary interface used both
   // from C++ (e.g. by generated element code, bifurcation.cpp) and from Python via src/nanobind/problem.cpp.
+  // A frozen CSR sparsity pattern for ONE assembled matrix, together with the map that lets an
+  // element's dense block be scattered straight into the value array by indexing, instead of being
+  // accumulated into a searchable container and compressed afterwards. See
+  // dev_docs/structural_assembly.md; this is what replaces the abandoned update_jacobian_csr_structure().
+  //
+  // Only meaningful while the pattern is value-independent (Problem::keep_structural_zeros), because
+  // the whole point is that the same structure serves every assembly until the equations are
+  // renumbered. `generation` records which Problem::get_jacobian_structure_id() it was built for.
+  class FrozenSparsity
+  {
+  public:
+    unsigned long generation = 0; // Pattern id this was built for; 0 means "not built"
+    unsigned ndof = 0;
+    unsigned long nelement = 0;
+    std::vector<int> row_start;      // ndof+1, CSR row pointers
+    std::vector<int> column_index;   // nnz, ascending within each row
+    std::vector<int> element_offset; // nelement+1, where each element's entries start in the two arrays below
+    // The scatter map, as a COMPACT list of the positions an element actually contributes to, rather
+    // than a slot-or-(-1) entry for all nvar*nvar positions. Two parallel arrays: scatter_source is the
+    // row-major offset i*nvar+j within the elemental block, scatter_slot the index in the value array.
+    //
+    // Sorted by scatter_slot within each element. That is the whole trick: the value array is far too
+    // large to stay in cache, so scattered writes cost about a cache miss each, and walking an element's
+    // contributions in increasing slot order turns them into a forward sweep that touches each cache
+    // line once instead of revisiting it per row.
+    std::vector<int> scatter_source;
+    std::vector<int> scatter_slot;
+
+    unsigned nnz() const { return row_start.empty() ? 0u : (unsigned)row_start.back(); }
+    void clear()
+    {
+      generation = 0; ndof = 0; nelement = 0;
+      row_start.clear(); column_index.clear(); element_offset.clear();
+      scatter_source.clear(); scatter_slot.clear();
+      row_start.shrink_to_fit(); column_index.shrink_to_fit(); element_offset.shrink_to_fit();
+      scatter_source.shrink_to_fit(); scatter_slot.shrink_to_fit();
+    }
+  };
+
   class Problem : public oomph::Problem
   {
   protected:
@@ -309,6 +348,16 @@ namespace pyoomph
     // different matrix_index must stay valid simultaneously. Sharing one buffer silently aliased the
     // Jacobian's mask onto the mass matrix's.
     std::vector<std::vector<char>> sparsity_mask_scratch;
+
+    bool verify_frozen_sparsity=true; // Check per element that nothing nonzero fell outside the frozen pattern
+    bool use_frozen_sparsity=true; // Assemble straight into a preallocated CSR when the pattern allows it (see assemble_with_frozen_sparsity)
+    std::vector<FrozenSparsity> frozen_sparsity; // One per matrix index of a multi-matrix assembly; rebuilt when the pattern id changes
+    // Builds the frozen pattern and scatter map for matrix matrix_index. Returns false if this problem
+    // cannot be described that way (any element without a symbolic mask), leaving sp cleared.
+    bool build_frozen_sparsity(unsigned matrix_index, FrozenSparsity &sp);
+    // The fast assembly path: fills the output arrays directly from the frozen pattern. Returns false
+    // without touching them if the pattern route does not apply, so the caller falls back to oomph-lib.
+    bool assemble_with_frozen_sparsity(oomph::Vector<int*>& column_or_row_index, oomph::Vector<int*>& row_or_column_start, oomph::Vector<double*>& value, oomph::Vector<unsigned>& nnz, oomph::Vector<double*>& residuals, bool compressed_row_flag);
     unsigned long jacobian_structure_id=1; // Generation counter of the Jacobian sparsity pattern; 0 is reserved for "no usable pattern"
     // Snapshot of everything besides the equation numbering that the pattern depends on; compared in
     // get_jacobian_structure_id() so that an unhooked state change still invalidates the pattern.
@@ -392,6 +441,18 @@ namespace pyoomph
     // adds up to ndof entries.
     void set_force_jacobian_diagonal_entries(bool yesno);
     bool get_force_jacobian_diagonal_entries() const { return force_jacobian_diagonal_entries; }
+    // Whether assembly may write straight into a preallocated CSR using a precomputed scatter map,
+    // skipping the accumulate-into-a-container-then-compress work entirely. Requires a value-independent
+    // pattern; falls back to oomph-lib's assembly automatically whenever it cannot apply (distributed
+    // runs, augmented systems, compressed-column output, any element without a symbolic mask).
+    void set_use_frozen_sparsity(bool yesno);
+    bool get_use_frozen_sparsity() const { return use_frozen_sparsity; }
+    // Whether each element's block is checked against the frozen pattern during assembly (see the
+    // assembly loop). Cheap relative to the scatter, and it is the only thing standing between a
+    // hypothetical code-generation bug and a silently truncated Jacobian, so it defaults to on.
+    void set_verify_frozen_sparsity(bool yesno) { verify_frozen_sparsity = yesno; }
+    bool get_verify_frozen_sparsity() const { return verify_frozen_sparsity; }
+    unsigned get_frozen_sparsity_nnz(unsigned matrix_index=0) const { return matrix_index < frozen_sparsity.size() ? frozen_sparsity[matrix_index].nnz() : 0; } // Diagnostics/tests
     // Identifies the current Jacobian sparsity pattern. Changes whenever the pattern may have
     // changed. Solvers may reuse anything derived from the pattern (a symbolic factorisation, a
     // preallocated PETSc Mat) while this value is unchanged and non-zero.

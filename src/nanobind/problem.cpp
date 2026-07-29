@@ -796,6 +796,11 @@ void PyReg_Problem(nb::module_ &m)
 					  "Whether an entry is kept on every diagonal of the Jacobian, even where no field pair contributes to it. PETSc-, MUMPS- and Pardiso-style "
 					  "factorisations reject a matrix with a missing diagonal, and a Taylor-Hood pressure-pressure block is exactly such a case once the pattern "
 					  "is pruned by field coupling. Costs at most ``ndof`` extra entries. Only has an effect together with ``keep_structural_zeros``.")
+		.def_prop_rw("use_frozen_sparsity", &pyoomph::Problem::get_use_frozen_sparsity, &pyoomph::Problem::set_use_frozen_sparsity,
+					  "Whether assembly writes straight into a preallocated CSR through a precomputed scatter map, instead of accumulating into a searchable "
+					  "container and compressing it afterwards. Requires a value-independent pattern (``keep_structural_zeros``), and falls back to oomph-lib's "
+					  "assembly by itself whenever it cannot apply -- distributed runs, augmented systems (bifurcation tracking), compressed-column output, or "
+					  "any element the code generator cannot describe symbolically.")
 		.def_prop_ro("jacobian_structure_id", &pyoomph::Problem::get_jacobian_structure_id,
 					  "Identifier of the current Jacobian sparsity pattern. Anything derived from the pattern stays valid as long as this value is unchanged "
 					  "and non-zero. It is 0 whenever ``keep_structural_zeros`` is off, since the pattern is then value-dependent and cannot be reused.")

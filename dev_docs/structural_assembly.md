@@ -1,7 +1,7 @@
 # Structural assembly: precomputed CSR sparsity, value-only re-assembly and solver reuse
 
-Branch: `structural_assembly`. Status: **Phases 0, 1 and 3 implemented, tested and benchmarked
-(§6); Phases 2 and 4 planned.** All measurements in §2 were taken on `main` (commit `d03a562`) on this
+Branch: `structural_assembly`. Status: **Phases 0, 1, 2 and 3 implemented, tested and benchmarked
+(§6); Phase 2b (distributed) and Phase 4 planned.** All measurements in §2 were taken on `main` (commit `d03a562`) on this
 machine; §6 records what the implemented work actually moved. All file/line references are to the
 tree state at the time of writing.
 
@@ -441,7 +441,48 @@ investigation.
   a zero pivot on the pressure block, which needs pivoting; MUMPS handles it. Both failures are
   pre-existing and reproduce identically on `main`.)
 
-### Phase 2 — precomputed CSR pattern and direct scatter
+### Phase 2 — precomputed CSR pattern and direct scatter — **DONE**
+
+`FrozenSparsity` (one per matrix of a multi-matrix assembly) holds the CSR pattern plus a compact,
+slot-sorted scatter map; `assemble_with_frozen_sparsity()` fills the output arrays straight from it,
+with no container, no per-row search, no sort and no compression pass. It declines (returning false,
+having touched nothing) whenever the route does not fit — distributed runs, augmented systems,
+compressed-column output, or any element the code generator cannot describe — so oomph-lib's
+assembly remains the fallback.
+
+Measured, assembly only:
+
+| case | container | frozen | | scatter share |
+|---|---|---|---|---|
+| NS 3D `N=8` | 435 ms | 271 ms | **−38 %** | 176 → 9.6 ms (**18×**) |
+| NS 2D `N=60` | 132 ms | 87 ms | **−35 %** | 57 → 12 ms (4.9×) |
+| NS+AD 2D `N=40` | 88 ms | 51 ms | **−42 %** | 41 → 4.5 ms (9.2×) |
+| Poisson 3D C2 | 75 ms | 67 ms | −11 % | 13 → 4.7 ms (2.8×) |
+
+End-to-end Newton solve (3D Taylor-Hood NS, ndof 10 853, pardiso, identical converged solutions):
+3.031 s → 2.381 s with Phases 1+3 → **1.723 s** with Phase 2, i.e. **−43 % cumulative**.
+
+That beats the ≤ −23 % this document predicted from the Phase 0 breakdown, because removing ~95 % of
+the scatter compounds with the symbolic-factorisation reuse across every Newton step.
+
+Two things worth recording:
+
+* **A false negative nearly buried this.** The first measurements said the frozen path was 11–16 %
+  *slower*. It was never running: `build_frozen_sparsity` bailed out on the Dirichlet-condition
+  elements, whose `current_res_jac` is −1 and whose mask was therefore NULL — so every assembly paid
+  for a full (two-pass, sorting) pattern build and then fell back. Those elements contribute nothing,
+  so the fix is to return an all-zero mask rather than "no description". Lesson: the fast path needs
+  a positive signal that it engaged, not just a flag that permits it.
+* **The frozen path emits canonically sorted CSR**, where the container assembly emits insertion
+  order. Free bonus: `sort_indices()` in the Pardiso reuse check becomes a no-op.
+
+Safety: the compact scatter never visits the positions the pattern omits, so nothing would notice a
+mask that under-reported. `verify_frozen_sparsity` (on by default) counts the nonzeros of each
+elemental block and of the part actually scattered and refuses to continue if they differ. Counting,
+not summing — a magnitude comparison over two different orderings reports spurious mismatches from
+rounding alone, which it duly did on the first attempt.
+
+#### Original plan
 
 * `JacobianSparsity` (§3.1), Tier A, built in `assign_eqn_numbers`. Replaces the abandoned
   `update_jacobian_csr_structure()` stub (§1.2b).

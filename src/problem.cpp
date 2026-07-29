@@ -1972,7 +1972,19 @@ namespace pyoomph
 		if (!be) return NULL;
 		const JITFuncSpec_Table_FiniteElement_t *ft = be->get_code_instance()->get_func_table();
 		int resind = ft->current_res_jac;
-		if (resind < 0 || !ft->contributes_to_jacobian || !ft->contributes_to_mass_matrix) return NULL;
+		if (resind < 0)
+		{
+			// This code has no contribution to the residual currently being solved, so its assembly
+			// routine returns before writing anything: the element's block is identically zero. An
+			// all-zero mask says exactly that. Returning NULL ("no symbolic description") instead would
+			// be equally correct for the OR-filter, but would deny the frozen-sparsity path a complete
+			// description of the mesh and force it to give up on the whole problem.
+			if (sparsity_mask_scratch.size() <= matrix_index) sparsity_mask_scratch.resize(matrix_index + 1);
+			std::vector<char> &empty = sparsity_mask_scratch[matrix_index];
+			empty.assign((size_t)nvar * nvar, 0);
+			return empty.data();
+		}
+		if (!ft->contributes_to_jacobian || !ft->contributes_to_mass_matrix) return NULL;
 		bool **table = (matrix_index == 0 ? ft->contributes_to_jacobian[resind] : ft->contributes_to_mass_matrix[resind]);
 		if (!table) return NULL;
 		const unsigned nclass = ft->contribution_entries_size;
@@ -2102,7 +2114,7 @@ namespace pyoomph
 				for (unsigned m = 0; m < n_matrix; m++) el_jacobian[m].resize(nvar);
 				if (n_matrix)
 				{
-					assembly_handler_pt->get_all_vectors_and_matrices(elem_pt, el_residuals, el_jacobian);
+			assembly_handler_pt->get_all_vectors_and_matrices(elem_pt, el_residuals, el_jacobian);
 				}
 				else
 				{
@@ -3001,11 +3013,232 @@ namespace pyoomph
 		{
 			sparse_assemble_row_or_column_compressed_for_periodic_orbit(column_or_row_index,row_or_column_start,value,nnz,residual,compressed_row_flag);
 		}
+		else if (this->assemble_with_frozen_sparsity(column_or_row_index,row_or_column_start,value,nnz,residual,compressed_row_flag))
+		{
+			// Assembled straight into the preallocated pattern; nothing else to do.
+		}
 		else
 		{
 			oomph::Problem::sparse_assemble_row_or_column_compressed(column_or_row_index,row_or_column_start,value,nnz,residual,compressed_row_flag);
 		}
-		
+
+	}
+
+	void Problem::set_use_frozen_sparsity(bool yesno)
+	{
+		if (yesno == use_frozen_sparsity) return;
+		use_frozen_sparsity = yesno;
+		frozen_sparsity.clear();
+	}
+
+	// Builds the CSR pattern and the elemental scatter map for one matrix of the assembly, from the same
+	// symbolic masks the ordinary assembly consults (sparsity_mask_for_element). Two passes over the
+	// elements: the first collects the column indices each row can ever hold, the second records, for
+	// every position of every elemental block, which slot of the value array it lands in.
+	//
+	// Returns false - and leaves sp cleared - if any element has no symbolic mask. That is not a
+	// failure: it means the pattern for this problem is only knowable from the values, so the caller
+	// must fall back to oomph-lib's assembly.
+	bool Problem::build_frozen_sparsity(unsigned matrix_index, FrozenSparsity &sp)
+	{
+		sp.clear();
+		const unsigned long n_element = mesh_pt()->nelement();
+		const unsigned nd = this->ndof();
+		oomph::AssemblyHandler *const assembly_handler_pt = this->assembly_handler_pt();
+
+		// Pass 1: which columns can appear in each row, and how much scatter space each element needs.
+		std::vector<std::vector<int>> cols_of_row(nd);
+		for (unsigned long e = 0; e < n_element; e++)
+		{
+			oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
+			const unsigned nvar = assembly_handler_pt->ndof(elem_pt);
+			const char *mask = this->sparsity_mask_for_element(matrix_index, elem_pt, nvar);
+			if (!mask && nvar)
+			{
+				sp.clear();
+				return false; // No symbolic description of this element: the pattern is value-dependent
+			}
+			for (unsigned i = 0; i < nvar; i++)
+			{
+				const int row = (int)assembly_handler_pt->eqn_number(elem_pt, i);
+				if (row < 0 || (unsigned)row >= nd) continue;
+				for (unsigned j = 0; j < nvar; j++)
+				{
+					if (!mask[(size_t)i * nvar + j]) continue;
+					const int col = (int)assembly_handler_pt->eqn_number(elem_pt, j);
+					if (col < 0) continue;
+					cols_of_row[row].push_back(col);
+				}
+			}
+		}
+
+		// Compress the per-row column lists into CSR.
+		sp.row_start.assign(nd + 1, 0);
+		for (unsigned r = 0; r < nd; r++)
+		{
+			std::vector<int> &c = cols_of_row[r];
+			std::sort(c.begin(), c.end());
+			c.erase(std::unique(c.begin(), c.end()), c.end());
+			sp.row_start[r + 1] = sp.row_start[r] + (int)c.size();
+		}
+		sp.column_index.resize(sp.row_start[nd]);
+		for (unsigned r = 0; r < nd; r++)
+		{
+			std::copy(cols_of_row[r].begin(), cols_of_row[r].end(), sp.column_index.begin() + sp.row_start[r]);
+		}
+
+		// Pass 2: resolve each contributing position of each elemental block to its slot in the value
+		// array, and store the pairs sorted by slot so that assembly writes sweep forward through the
+		// value array instead of hopping between rows.
+		sp.element_offset.assign(n_element + 1, 0);
+		sp.scatter_source.clear();
+		sp.scatter_slot.clear();
+		sp.scatter_source.reserve(sp.column_index.size());
+		sp.scatter_slot.reserve(sp.column_index.size());
+		std::vector<std::pair<int, int>> pairs; // (slot, source offset) for one element
+		for (unsigned long e = 0; e < n_element; e++)
+		{
+			oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
+			const unsigned nvar = assembly_handler_pt->ndof(elem_pt);
+			pairs.clear();
+			if (nvar)
+			{
+				const char *mask = this->sparsity_mask_for_element(matrix_index, elem_pt, nvar);
+				if (!mask) { sp.clear(); return false; }
+				for (unsigned i = 0; i < nvar; i++)
+				{
+					const int row = (int)assembly_handler_pt->eqn_number(elem_pt, i);
+					if (row < 0 || (unsigned)row >= nd) continue;
+					const int *row_cols = &sp.column_index[sp.row_start[row]];
+					const int row_len = sp.row_start[row + 1] - sp.row_start[row];
+					for (unsigned j = 0; j < nvar; j++)
+					{
+						if (!mask[(size_t)i * nvar + j]) continue;
+						const int col = (int)assembly_handler_pt->eqn_number(elem_pt, j);
+						if (col < 0) continue;
+						const int *found = std::lower_bound(row_cols, row_cols + row_len, col);
+						// Cannot miss: pass 1 put exactly this (row,col) into the list.
+						pairs.push_back(std::make_pair(sp.row_start[row] + (int)(found - row_cols),
+													   (int)((size_t)i * nvar + j)));
+					}
+				}
+				std::sort(pairs.begin(), pairs.end());
+			}
+			for (size_t k = 0; k < pairs.size(); k++)
+			{
+				sp.scatter_slot.push_back(pairs[k].first);
+				sp.scatter_source.push_back(pairs[k].second);
+			}
+			sp.element_offset[e + 1] = (int)sp.scatter_slot.size();
+		}
+
+		sp.ndof = nd;
+		sp.nelement = n_element;
+		return true;
+	}
+
+	// Fast assembly: no container, no sort, no compression pass, no allocation of the index arrays from
+	// scratch - just zero the value array and add each element's block into it through the precomputed
+	// scatter map. Returns false, having touched nothing, whenever the frozen route does not apply.
+	bool Problem::assemble_with_frozen_sparsity(oomph::Vector<int*>& column_or_row_index, oomph::Vector<int*>& row_or_column_start, oomph::Vector<double*>& value, oomph::Vector<unsigned>& nnz, oomph::Vector<double*>& residuals, bool compressed_row_flag)
+	{
+		if (!use_frozen_sparsity || !keep_structural_zeros) return false;
+		if (!compressed_row_flag) return false; // Compressed-column output is not worth a second scatter map
+		if (n_unaugmented_dofs != 0) return false; // Augmented system: handled by the base-problem routine
+#ifdef OOMPH_HAS_MPI
+		// The distributed assembly is a different routine with its own row distribution and inter-rank
+		// exchange; freezing that is Phase 2b.
+		if (Problem_has_been_distributed) return false;
+		if (Communicator_pt && Communicator_pt->nproc() > 1) return false;
+#endif
+		const unsigned long gen = this->get_jacobian_structure_id();
+		if (!gen) return false; // Pattern is value-dependent
+
+		const unsigned n_matrix = column_or_row_index.size();
+		const unsigned n_vector = residuals.size();
+		const unsigned nd = this->ndof();
+		if (frozen_sparsity.size() < n_matrix) frozen_sparsity.resize(n_matrix);
+		for (unsigned m = 0; m < n_matrix; m++)
+		{
+			if (frozen_sparsity[m].generation != gen || frozen_sparsity[m].ndof != nd)
+			{
+				if (!build_frozen_sparsity(m, frozen_sparsity[m])) return false;
+				frozen_sparsity[m].generation = gen;
+			}
+		}
+
+		// Hand out the pattern. These arrays must be freshly allocated every time even though their
+		// contents never change: CRDoubleMatrix::build_without_copy() takes ownership and frees them.
+		for (unsigned m = 0; m < n_matrix; m++)
+		{
+			const FrozenSparsity &sp = frozen_sparsity[m];
+			nnz[m] = sp.nnz();
+			row_or_column_start[m] = new int[nd + 1];
+			std::copy(sp.row_start.begin(), sp.row_start.end(), row_or_column_start[m]);
+			column_or_row_index[m] = new int[nnz[m] ? nnz[m] : 1];
+			std::copy(sp.column_index.begin(), sp.column_index.end(), column_or_row_index[m]);
+			value[m] = new double[nnz[m] ? nnz[m] : 1];
+			std::fill(value[m], value[m] + nnz[m], 0.0);
+		}
+		for (unsigned v = 0; v < n_vector; v++)
+		{
+			residuals[v] = new double[nd ? nd : 1];
+			std::fill(residuals[v], residuals[v] + nd, 0.0);
+		}
+
+		oomph::AssemblyHandler *const assembly_handler_pt = this->assembly_handler_pt();
+		const unsigned long n_element = mesh_pt()->nelement();
+		oomph::Vector<oomph::Vector<double>> el_residuals(n_vector);
+		oomph::Vector<oomph::DenseMatrix<double>> el_jacobian(n_matrix);
+		for (unsigned long e = 0; e < n_element; e++)
+		{
+			oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
+			const unsigned nvar = assembly_handler_pt->ndof(elem_pt);
+			if (!nvar) continue;
+			for (unsigned v = 0; v < n_vector; v++) el_residuals[v].resize(nvar);
+			for (unsigned m = 0; m < n_matrix; m++) el_jacobian[m].resize(nvar);
+			assembly_handler_pt->get_all_vectors_and_matrices(elem_pt, el_residuals, el_jacobian);
+
+			for (unsigned i = 0; i < nvar; i++)
+			{
+				const unsigned eqn_number = assembly_handler_pt->eqn_number(elem_pt, i);
+				for (unsigned v = 0; v < n_vector; v++) residuals[v][eqn_number] += el_residuals[v][i];
+			}
+			for (unsigned m = 0; m < n_matrix; m++)
+			{
+				const FrozenSparsity &sp = frozen_sparsity[m];
+				const int lo = sp.element_offset[e], hi = sp.element_offset[e + 1];
+				const int *slot = &sp.scatter_slot[0];
+				const int *src = &sp.scatter_source[0];
+				double *val = value[m];
+				const double *flat = &el_jacobian[m](0, 0); // Row-major nvar*nvar block
+				for (int k = lo; k < hi; k++) val[slot[k]] += flat[src[k]];
+				if (verify_frozen_sparsity)
+				{
+					// The compact scatter never looks at the positions the pattern omits, so nothing would
+					// notice if the symbolic mask under-reported and a real entry landed there -- a
+					// silently truncated Jacobian. Count the nonzeros of the whole block and of the part
+					// actually scattered: equal iff everything omitted was exactly zero. Counting rather
+					// than summing on purpose -- a sum over the block and a sum over the slot-sorted
+					// subset differ in rounding, so a magnitude comparison reports spurious mismatches.
+					// O(nvar^2) reads of a block already in L1, against O(nvar^2) cache-missing writes for
+					// the scatter itself.
+					unsigned all = 0, taken = 0;
+					const size_t nblock = (size_t)nvar * nvar;
+					for (size_t q = 0; q < nblock; q++) all += (flat[q] != 0.0);
+					for (int k = lo; k < hi; k++) taken += (flat[src[k]] != 0.0);
+					if (all > taken)
+					{
+						throw_runtime_error("A Jacobian entry appeared outside the symbolic sparsity pattern (matrix " +
+											std::to_string(m) + ", element " + std::to_string(e) + "). Silently dropping "
+											"it would truncate the Jacobian, so assembly is refused. This is a bug in the "
+											"field-coupling analysis -- please report it. Workaround: set "
+											"problem.use_frozen_sparsity=False.");
+					}
+				}
+			}
+		}
+		return true;
 	}
 
 
