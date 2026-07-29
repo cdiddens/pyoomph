@@ -1060,6 +1060,11 @@ namespace pyoomph
 		//dirichlet_info.build_equation_to_value_map();
 		dirichlet_info.build_global_pinned_equation_set(this);
 	  }
+	  // The Jacobian sparsity pattern is a function of the equation numbering, which has just been
+	  // (re)assigned. This is the central invalidation point: mesh adaptation, remeshing, pinning and
+	  // Dirichlet changes all funnel through here. assign_eqn_numbers() is collective, so every MPI
+	  // rank bumps the id in lockstep.
+	  this->invalidate_jacobian_structure();
 	  return res;
 	}
 
@@ -1873,6 +1878,88 @@ namespace pyoomph
 		default:
 			return "unknown";
 		}
+	}
+
+	// Switches between the value-dependent (oomph-lib default) and the structural, value-independent
+	// Jacobian sparsity pattern. oomph-lib's assembly routines - serial and distributed alike - filter
+	// entries with "if (fabs(value) > Numerical_zero_for_sparse_assembly)". That member defaults to 0.0
+	// and the comparison is strict, so exact zeros are dropped and the pattern follows the dof values.
+	// Setting the threshold negative makes the test unconditionally true, which turns every one of
+	// those routines into a structural assembly without touching a single assembly loop. The pattern is
+	// then the union of all elemental blocks, i.e. a function of the equation numbering only.
+	void Problem::set_keep_structural_zeros(bool yesno)
+	{
+		if (yesno == keep_structural_zeros) return;
+		keep_structural_zeros = yesno;
+		// -1.0 rather than -inf/-eps: any negative value makes fabs(value) > threshold always true,
+		// and a plain -1.0 stays readable in a debugger.
+		Numerical_zero_for_sparse_assembly = (yesno ? -1.0 : 0.0);
+		// The row-length hints from the previous (differently filtered) assembly are now wrong, and the
+		// pattern itself has changed, so nothing derived from it may be reused.
+		Sparse_assemble_with_arrays_previous_allocation.resize(0);
+		this->invalidate_jacobian_structure();
+	}
+
+	// Returns the id of the current Jacobian sparsity pattern, re-validating it first. The explicit
+	// bump in assign_eqn_numbers() covers everything that renumbers the equations, but the pattern also
+	// depends on state that is changed elsewhere: installing or removing a bifurcation-tracking /
+	// periodic-orbit assembly handler (which defines its own eqn_number() over an augmented dof
+	// vector), adding augmented dofs, and switching the active residual/Jacobian combination (which
+	// changes both the field couplings and which fields get pinned). Rather than trusting every one of
+	// those call sites to remember to invalidate, we snapshot them here and compare. Cheap: a pointer
+	// compare, two integer compares and a short string compare, once per solve.
+	unsigned long Problem::get_jacobian_structure_id()
+	{
+		if (!keep_structural_zeros) return 0; // Pattern is value-dependent; nothing may be reused
+		void *handler = static_cast<void *>(this->assembly_handler_pt());
+		unsigned long nd = this->ndof();
+		if (handler != structure_watch_handler || nd != structure_watch_ndof ||
+			n_unaugmented_dofs != structure_watch_n_unaugmented || _solved_residual != structure_watch_residual)
+		{
+			structure_watch_handler = handler;
+			structure_watch_ndof = nd;
+			structure_watch_n_unaugmented = n_unaugmented_dofs;
+			structure_watch_residual = _solved_residual;
+			jacobian_structure_id++;
+		}
+		return jacobian_structure_id;
+	}
+
+	// Elemental-assembly-only timing loop, see the declaration in problem.hpp. Deliberately mirrors the
+	// element loop of sparse_assemble_row_or_column_compressed_base_problem() (halo skipping, resizing,
+	// get_all_vectors_and_matrices) but throws the results away, so the difference to a full assembly
+	// isolates the scatter + CSR compression cost.
+	double Problem::benchmark_elemental_assembly(unsigned n_repeat, bool with_jacobian, bool with_mass_matrix)
+	{
+		if (n_repeat == 0) return 0.0;
+		oomph::AssemblyHandler *const assembly_handler_pt = this->assembly_handler_pt();
+		const unsigned long n_elements = mesh_pt()->nelement();
+		const unsigned n_matrix = (with_jacobian ? (with_mass_matrix ? 2 : 1) : 0);
+		oomph::Vector<oomph::Vector<double>> el_residuals(1);
+		oomph::Vector<oomph::DenseMatrix<double>> el_jacobian(n_matrix);
+		double t_start = oomph::TimingHelpers::timer();
+		for (unsigned r = 0; r < n_repeat; r++)
+		{
+			for (unsigned long e = 0; e < n_elements; e++)
+			{
+				oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
+#ifdef OOMPH_HAS_MPI
+				if (elem_pt->is_halo()) continue;
+#endif
+				const unsigned nvar = assembly_handler_pt->ndof(elem_pt);
+				el_residuals[0].resize(nvar);
+				for (unsigned m = 0; m < n_matrix; m++) el_jacobian[m].resize(nvar);
+				if (n_matrix)
+				{
+					assembly_handler_pt->get_all_vectors_and_matrices(elem_pt, el_residuals, el_jacobian);
+				}
+				else
+				{
+					assembly_handler_pt->get_residuals(elem_pt, el_residuals[0]);
+				}
+			}
+		}
+		return (oomph::TimingHelpers::timer() - t_start) / n_repeat;
 	}
 
 	// Selects how the distributed Jacobian matrix is partitioned across MPI ranks ("default" defers to

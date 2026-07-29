@@ -776,6 +776,19 @@ void PyReg_Problem(nb::module_ &m)
 			"Whether an improved (but more expensive) pitchfork bifurcation tracking scheme is used, required for some unstructured meshes.")
 		.def_prop_rw("sparse_assembly_method", &pyoomph::Problem::get_sparse_assembly_method, &pyoomph::Problem::set_sparse_assembly_method,
 					  "Method used to assemble the sparse Jacobian matrix: one of \"vectors_of_pairs\", \"two_vectors\", \"maps\", \"lists\" or \"two_arrays\" (see oomph-lib for details).")
+		.def_prop_rw("keep_structural_zeros", &pyoomph::Problem::get_keep_structural_zeros, &pyoomph::Problem::set_keep_structural_zeros,
+					  "Whether the assembled Jacobian keeps entries that evaluate to exactly zero. By default they are dropped, which makes the sparsity "
+					  "pattern depend on the current degrees of freedom and hence change between Newton steps. Keeping them makes the pattern depend on the "
+					  "equation numbering alone, so linear solvers can reuse their symbolic phase across solves (see ``jacobian_structure_id``), and every "
+					  "diagonal entry is guaranteed to be present. Costs a few percent more nonzeros for single-physics problems, more for weakly coupled "
+					  "multi-physics ones.")
+		.def_prop_ro("jacobian_structure_id", &pyoomph::Problem::get_jacobian_structure_id,
+					  "Identifier of the current Jacobian sparsity pattern. Anything derived from the pattern stays valid as long as this value is unchanged "
+					  "and non-zero. It is 0 whenever ``keep_structural_zeros`` is off, since the pattern is then value-dependent and cannot be reused.")
+		.def("_benchmark_elemental_assembly", &pyoomph::Problem::benchmark_elemental_assembly,
+			 nb::arg("n_repeat"), nb::arg("with_jacobian") = true, nb::arg("with_mass_matrix") = false,
+			 "Time only the elemental part of an assembly (evaluating each element's residual/Jacobian, discarding the result), averaged over ``n_repeat`` "
+			 "passes. Subtracting this from a full assembly isolates the cost of scattering into the sparse matrix. Instrumentation, not a solver routine.")
 		.def_prop_rw("dist_problem_matrix_distribution", &pyoomph::Problem::get_dist_problem_matrix_distribution, &pyoomph::Problem::set_dist_problem_matrix_distribution,
 					  "How the Jacobian matrix rows are distributed across MPI processes in a distributed problem: one of \"default\", \"problem\" or \"uniform\". No-op without MPI support.")
 		.def("adaptive_unsteady_newton_solve", (double(pyoomph::Problem::*)(const double &, const double &)) & pyoomph::Problem::adaptive_unsteady_newton_solve,

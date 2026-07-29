@@ -296,6 +296,15 @@ namespace pyoomph
     // (note: completely pinned fields without any weak formulation (usually helper field, e.g. references for normalized arclength etc) are always removed from the dofs, independent of this setting)
     bool dirichlets_by_removing_from_dof_vector=true;
 
+    bool keep_structural_zeros=false; // See set_keep_structural_zeros(): assemble the value-independent (connectivity) pattern instead of dropping exact zeros
+    unsigned long jacobian_structure_id=1; // Generation counter of the Jacobian sparsity pattern; 0 is reserved for "no usable pattern"
+    // Snapshot of everything besides the equation numbering that the pattern depends on; compared in
+    // get_jacobian_structure_id() so that an unhooked state change still invalidates the pattern.
+    void *structure_watch_handler=nullptr;    // The active assembly handler (bifurcation/periodic-orbit handlers renumber the system)
+    unsigned long structure_watch_ndof=0;     // Total dof count, including any augmentation
+    unsigned structure_watch_n_unaugmented=0; // Where the augmented block starts
+    std::string structure_watch_residual="";  // Active residual/Jacobian combination (different field couplings, different pinning)
+
     void actions_after_change_in_global_parameter(double *const &parameter_pt) override; // oomph-lib hook: resolves parameter_pt to its name and forwards to the string-named overload below
     void actions_after_parameter_increase(double *const &parameter_pt) override;
 
@@ -337,6 +346,33 @@ namespace pyoomph
 
     void set_sparse_assembly_method(const std::string & method); // Selects the sparse assembly implementation (oomph-lib's built-in variants, e.g. "default","single_thread","openmp_...")
     std::string get_sparse_assembly_method();
+
+    // --- Structural (value-independent) sparsity, see dev_docs/structural_assembly.md ---
+    // By default, oomph-lib drops any Jacobian entry that evaluates to exactly zero, which makes the
+    // emitted CSR pattern depend on the current dof values: it can (and does) change from one Newton
+    // step to the next. Keeping structural zeros makes the pattern depend on the equation numbering
+    // alone, so it is stable until the next assign_eqn_numbers() - which is what lets linear solvers
+    // reuse their symbolic phase (Pardiso phase 11, a PETSc Mat's preallocation) across solves. It
+    // also guarantees an entry on every diagonal, since every dof sits in an element whose block
+    // contains (i,i) - replacing the manual MatShift(0.0) some PETSc backends need.
+    void set_keep_structural_zeros(bool yesno);
+    bool get_keep_structural_zeros() const { return keep_structural_zeros; }
+    // Identifies the current Jacobian sparsity pattern. Changes whenever the pattern may have
+    // changed. Solvers may reuse anything derived from the pattern (a symbolic factorisation, a
+    // preallocated PETSc Mat) while this value is unchanged and non-zero.
+    // Only meaningful while keep_structural_zeros is set - otherwise the pattern is value-dependent
+    // and no id can describe it, so this returns 0 ("unusable"). It is deliberately NOT const: it
+    // re-validates lazily against the state the pattern depends on (see the .cpp), so that a state
+    // change nobody remembered to hook cannot silently hand a solver a stale pattern. A missed
+    // invalidation is a wrong answer, not a crash, so this must not rely on call-site discipline alone.
+    unsigned long get_jacobian_structure_id();
+    void invalidate_jacobian_structure() { jacobian_structure_id++; } // Explicit bump; assign_eqn_numbers() is the main caller
+
+    // Phase-0 instrumentation: run the elemental part of the assembly (get_all_vectors_and_matrices
+    // for every non-halo element) n_repeat times without scattering anything into a matrix, and
+    // return the average seconds per pass. Subtracting this from a full assembly gives the cost of
+    // the scatter + CSR compression, which is what the structural-assembly work removes.
+    double benchmark_elemental_assembly(unsigned n_repeat, bool with_jacobian, bool with_mass_matrix);
 
     void set_dist_problem_matrix_distribution(const std::string & mode); // Controls how the distributed Jacobian matrix is partitioned across MPI ranks
     std::string get_dist_problem_matrix_distribution() ;
