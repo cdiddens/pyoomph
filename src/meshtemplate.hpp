@@ -35,7 +35,7 @@ The main author may be contacted at c.diddens@utwente.nl
 #include "kdtree.hpp"
 
 #include "oomph_lib.hpp"
-#include "Tmacroelements.hpp"
+#include "macroelements.hpp"
 #include <vector>
 #include <map>
 #include <set>
@@ -105,13 +105,69 @@ namespace pyoomph
       os << std::endl;
     }
 
+    // Remove the period ambiguity of an angular parametric component: shift component `comp` of
+    // every facet node onto the branch nearest the first node's, so that a facet straddling the
+    // parametrisation's branch cut still blends along the short way round. Works for any number of
+    // facet nodes (a 3d face has three or four), which the ad-hoc two-node repairs it replaces did
+    // not. Only differences between the blended values matter, so shifting the whole facet by a
+    // common multiple of the period is harmless.
+    static void unwrap_periodic_component(std::vector<std::vector<double>> &parametric, unsigned comp, double period)
+    {
+      if (parametric.size() < 2)
+        return;
+      const double ref = parametric[0][comp];
+      for (unsigned int i = 1; i < parametric.size(); i++)
+      {
+        double &p = parametric[i][comp];
+        p -= period * std::round((p - ref) / period);
+      }
+    }
+
   public:
     MeshTemplateCurvedEntity(unsigned d) : dim(d) {}
     // Factory: reconstructs a set of curved entities (keyed by an integer id)
     // from their serialized string representation (as written by
     // get_information_string()), starting at line `currline` of `s`.
     static std::map<int, MeshTemplateCurvedEntity *> load_from_strings(const std::vector<std::string> &s, size_t &currline);
+    // How many numbers a parametric coordinate of this entity has.
     virtual unsigned get_parametric_dimension() const { return dim; }
+    // The dimension of the entity as a manifold: 1 for a curve, 2 for a surface. Usually the same as
+    // the parametric dimension, but deliberately allowed to be smaller -- a sphere patch is a
+    // 2-manifold charted by a 3-component unit normal, precisely because no 2-component chart of a
+    // sphere is free of a degeneracy. Reported separately so that the redundancy is legible rather
+    // than looking like a bug.
+    virtual unsigned get_intrinsic_dimension() const { return get_parametric_dimension(); }
+
+    // Combine the parametric coordinates of a facet's vertices with the given weights (which form a
+    // partition of unity) into the parametric coordinate of the blended point.
+    //
+    // This is the entity's own business, and it is why the parametric coordinate can be an opaque
+    // vector rather than a point in some agreed chart. The default -- a plain weighted sum -- is
+    // correct exactly when the chart is flat and non-redundant, which covers an angle, an arclength
+    // or a spline parameter. It is not correct for a redundant chart: averaging unit normals gives a
+    // vector that is no longer a unit normal, so CurvedEntitySpherePart renormalises here.
+    //
+    // Called for arbitrary weights, not only at the facet's own vertices: refinement evaluates the
+    // blend anywhere on the facet. Distinct from apply_periodicity(), which runs once when the facet
+    // is built and merely chooses which representatives of a periodic coordinate to store.
+    //
+    // Cost, for an entity implemented in Python: this is one extra callback per evaluation on top of
+    // parametric_to_position, and it roughly doubles the Python-side cost of the macro map (measured
+    // in dev_docs/macro_elements_generalisation.md 20.4). So prefer to fold a correction into
+    // parametric_to_position when it can be expressed pointwise -- normalising a direction, say, which
+    // is free there because that call happens anyway. Override this when the rule genuinely needs the
+    // other samples: unwrapping a periodic coordinate relative to its neighbours, or a true slerp.
+    virtual void blend_parametric(const std::vector<double> &weights,
+                                  const std::vector<std::vector<double>> &params,
+                                  std::vector<double> &result)
+    {
+      result.assign(get_parametric_dimension(), 0.0);
+      for (unsigned int k = 0; k < params.size() && k < weights.size(); k++)
+      {
+        for (unsigned int i = 0; i < result.size() && i < params[k].size(); i++)
+          result[i] += weights[k] * params[k][i];
+      }
+    }
     // Map a parametric coordinate to the Eulerian position at time level t (t=0 is current).
     virtual void parametric_to_position(const unsigned &, const std::vector<double> &, std::vector<double> &) { throw_runtime_error("Empty parametric_to_position called"); }
     // Inverse of parametric_to_position: find the parametric coordinate of a given Eulerian position.
@@ -150,28 +206,11 @@ namespace pyoomph
     {
       parametric[0] = atan2(position[1] - center[1], position[0] - center[0]);
     };
+    // The polar angle is only defined modulo 2*pi, so an arc crossing atan2's branch cut on the
+    // negative x axis arrives here with endpoints near +pi and -pi. Unwrap onto a common branch.
     void apply_periodicity(std::vector<std::vector<double>> &parametric) override
     {
-      if (fabs(parametric[0][0] - parametric[1][0]) > M_PI)
-      {
-        if (fabs(parametric[0][0]) > fabs(parametric[1][0]))
-        {
-          if (parametric[0][0] > 0)
-          {
-            parametric[0][0] = -M_PI + (parametric[0][0] - M_PI);
-          }
-          else
-          {
-            parametric[0][0] = M_PI - (parametric[0][0] + M_PI);
-          }
-        }
-        else
-        {
-          std::ostringstream oss;
-          oss << parametric[0][0] / M_PI << "  " << parametric[1][0] / M_PI << std::endl;
-          throw_runtime_error("Handle periodic case here: " + oss.str());
-        }
-      }
+      unwrap_periodic_component(parametric, 0, 2.0 * M_PI);
     };
     std::string get_information_string() override
     {
@@ -252,7 +291,6 @@ namespace pyoomph
       {
         position[i] += normal[i] * parametric[1] + radius * (cos(parametric[0]) * ta[i] + sin(parametric[0]) * ct[i]);
       }
-      std::cout << " CYL PARAM TO POS " << parametric[0] << "  " << parametric[1] << "  leads to " << position[0] << "  " << position[1] << "  " << position[2] << std::endl;
     }
     void position_to_parametric(const unsigned &, const std::vector<double> &position, std::vector<double> &parametric) override
     {
@@ -266,120 +304,111 @@ namespace pyoomph
         y += delta * ct[i];
       }
       parametric[0] = atan2(y, x);
-      std::cout << " CYL POS TO PARAM " << position[0] << "  " << position[1] << "  " << position[2] << "  leads to x,y= " << x << " " << y << " parametric " << parametric[0] << " , " << parametric[1] << std::endl;
     };
+    // Component 0 is the angle around the axis and wraps; component 1 is the axial position and
+    // does not.
     void apply_periodicity(std::vector<std::vector<double>> &parametric) override
     {
-      if (fabs(parametric[0][0] - parametric[1][0]) > M_PI)
-      {
-        throw_runtime_error("Handle periodic case here");
-      }
+      unwrap_periodic_component(parametric, 0, 2.0 * M_PI);
     };
   };
 
-  // A patch on a sphere (with less than 90 deg opening angle), defined by
-  // the sphere's center, a point on the sphere marking the pole/normal
-  // direction of the patch, and a tangent direction. The parametric
-  // coordinate is (polar angle theta, azimuthal angle phi) in the local
-  // tangent/cotangent/normal frame constructed in the constructor.
+  // A patch on a sphere, defined by its centre and any point lying on it.
+  //
+  // The parametric coordinate is the outward *unit normal* (nx, ny, nz) -- three numbers for a
+  // two-dimensional surface. That redundancy is the point. An angular chart such as (theta, phi) has
+  // a branch cut in phi AND a genuine coordinate degeneracy at the pole, where every phi names the
+  // same point, so a facet containing or straddling a pole cannot be blended correctly no matter how
+  // the wrap-around is patched up; it is also what forced the old implementation's local
+  // tangent/cotangent frame and its refusal of patches wider than 90 degrees. The unit normal is a
+  // single global chart of the sphere: no seam, no pole, no frame, no opening-angle limit.
+  //
+  // Blending unit normals with the facet's weights and renormalising is the spherical analogue of
+  // linear interpolation (nlerp): the result is exactly on the sphere for any weights, and at weight
+  // 1/2 -- the bisector, which is what edge refinement asks for -- it is exactly the arc midpoint.
+  // The renormalisation lives in parametric_to_position, so the blend itself stays a plain weighted
+  // sum and no separate blend hook is needed. See dev_docs/macro_elements_generalisation.md 4.3.
   class CurvedEntitySpherePart : public MeshTemplateCurvedEntity
   {
   protected:
-    std::vector<double> center, normal, tangent, cotangent;
+    std::vector<double> center;
     double radius;
 
   public:
-    CurvedEntitySpherePart(const std::vector<double> &_center, const std::vector<double> &_onsphere_center, const std::vector<double> &_tangent) : MeshTemplateCurvedEntity(2), center(_center), normal(_onsphere_center), cotangent(_tangent)
+    // The third argument used to orient the local frame and is no longer needed; it is kept so that
+    // existing callers (and the Python binding) continue to work unchanged.
+    CurvedEntitySpherePart(const std::vector<double> &_center, const std::vector<double> &_onsphere_center, const std::vector<double> & = std::vector<double>()) : MeshTemplateCurvedEntity(3), center(_center)
     {
-      radius = 0;
+      radius = 0.0;
       for (unsigned int i = 0; i < 3; i++)
-        radius += (normal[i] - center[i]) * (normal[i] - center[i]);
+        radius += (_onsphere_center[i] - center[i]) * (_onsphere_center[i] - center[i]);
       radius = sqrt(radius);
-      for (unsigned int i = 0; i < 3; i++)
-        normal[i] = (normal[i] - center[i]) / radius;
-      double tdot = 0.0;
-      for (unsigned int i = 0; i < 3; i++)
-        tdot += cotangent[i] * cotangent[i];
-      tdot = sqrt(tdot);
-      for (unsigned int i = 0; i < 3; i++)
-        cotangent[i] /= tdot;
-      tdot = 0.0;
-      for (unsigned int i = 0; i < 3; i++)
-        tdot += normal[i] * cotangent[i];
-      if (fabs(tdot) > 1 - 1e-7)
-      {
-        throw_runtime_error("CurvedEntitySpherePart tangent and normal (almost) coinciding... n=[" + std::to_string(normal[0]) + ", " + std::to_string(normal[1]) + "," + std::to_string(normal[2]) + "]  and  t=[" + std::to_string(cotangent[0]) + ", " + std::to_string(cotangent[1]) + "," + std::to_string(cotangent[2]) + "]");
-      }
-      tangent.resize(3);
-      tangent[0] = normal[1] * cotangent[2] - normal[2] * cotangent[1];
-      tangent[1] = normal[2] * cotangent[0] - normal[0] * cotangent[2];
-      tangent[2] = normal[0] * cotangent[1] - normal[1] * cotangent[0];
-      tdot = 0.0;
-      for (unsigned int i = 0; i < 3; i++)
-        tdot += tangent[i] * tangent[i];
-      tdot = sqrt(tdot);
-      for (unsigned int i = 0; i < 3; i++)
-        tangent[i] /= tdot;
-      cotangent[0] = (normal[1] * tangent[2] - normal[2] * tangent[1]);
-      cotangent[1] = (normal[2] * tangent[0] - normal[0] * tangent[2]);
-      cotangent[2] = (normal[0] * tangent[1] - normal[1] * tangent[0]);
-      tdot = 0.0;
-      for (unsigned int i = 0; i < 3; i++)
-        tdot += cotangent[i] * cotangent[i];
-      tdot = sqrt(tdot);
-      for (unsigned int i = 0; i < 3; i++)
-        cotangent[i] /= tdot;
-
-      std::cout << "NORM TANG COTANG" << std::endl;
-      for (unsigned int i = 0; i < 3; i++)
-        std::cout << normal[i] << "  " << tangent[i] << "  " << cotangent[i] << std::endl;
+      if (radius < 1e-14)
+        throw_runtime_error("CurvedEntitySpherePart: the point on the sphere coincides with the centre");
     }
+
     void parametric_to_position(const unsigned &, const std::vector<double> &parametric, std::vector<double> &position) override
     {
+      double len = 0.0;
+      for (unsigned int i = 0; i < 3; i++)
+        len += parametric[i] * parametric[i];
+      len = sqrt(len);
+      // Only reachable if a facet spans half the sphere or more, where its corner normals cancel and
+      // the blend genuinely has no answer. Refusing beats returning a point at the centre.
+      if (len < 1e-12)
+      {
+        throw_runtime_error("CurvedEntitySpherePart: blended normal is degenerate, i.e. this facet "
+                            "spans (at least) half the sphere. Split it into smaller facets.");
+      }
       position = center;
-      double theta = parametric[0];
-      double phi = parametric[1];
-      double x = radius * cos(phi) * sin(theta);
-      double y = radius * sin(phi) * sin(theta);
-      double z = radius * cos(theta);
       for (unsigned int i = 0; i < 3; i++)
-      {
-        position[i] += x * tangent[i] + y * cotangent[i] + z * normal[i];
-      }
+        position[i] += radius * parametric[i] / len;
     }
-    void position_to_parametric(const unsigned &t, const std::vector<double> &position, std::vector<double> &parametric) override
-    {
-      std::vector<double> rel = position;
-      for (unsigned int i = 0; i < 3; i++)
-        rel[i] -= center[i];
-      double dot = 0.0;
-      for (unsigned int i = 0; i < 3; i++)
-        dot += rel[i] * rel[i];
-      dot = sqrt(dot);
-      for (unsigned int i = 0; i < 3; i++)
-        rel[i] /= dot;
-      double z = 0.0;
-      double x = 0.0;
-      double y = 0.0;
-      for (unsigned int i = 0; i < 3; i++)
-      {
-        x += tangent[i] * rel[i];
-        y += cotangent[i] * rel[i];
-        z += normal[i] * rel[i];
-      }
-      parametric[0] = acos(z);
-      parametric[1] = atan2(y, x);
 
-      std::vector<double> testpos(3);
-      this->parametric_to_position(t, parametric, testpos);
+    void position_to_parametric(const unsigned &, const std::vector<double> &position, std::vector<double> &parametric) override
+    {
+      double len = 0.0;
+      std::vector<double> rel(3);
       for (unsigned int i = 0; i < 3; i++)
       {
-        std::cout << "TEST FOR pos->par->pos " << i << "  " << position[i] << " vs " << testpos[i] << std::endl;
+        rel[i] = position[i] - center[i];
+        len += rel[i] * rel[i];
       }
-    };
-    void apply_periodicity(std::vector<std::vector<double>> &) override{
-        // TODO:; SHoukld not be required
-    };
+      len = sqrt(len);
+      if (len < 1e-14)
+        throw_runtime_error("CurvedEntitySpherePart: cannot take the normal at the sphere's centre");
+      parametric.resize(3);
+      for (unsigned int i = 0; i < 3; i++)
+        parametric[i] = rel[i] / len;
+    }
+
+    // A sphere is a surface; the third component of the normal is redundancy, not a dimension.
+    unsigned get_intrinsic_dimension() const override { return 2; }
+
+    // The blend of unit normals is not itself a unit normal, so renormalise: this is exactly nlerp,
+    // which lands on the sphere for any weights and gives the arc midpoint at weight 1/2 -- the case
+    // edge refinement actually asks for. parametric_to_position also normalises, and deliberately so:
+    // it must stay usable on a coordinate that did not come from here (a round trip through
+    // position_to_parametric, say).
+    void blend_parametric(const std::vector<double> &weights, const std::vector<std::vector<double>> &params,
+                          std::vector<double> &result) override
+    {
+      MeshTemplateCurvedEntity::blend_parametric(weights, params, result);
+      double len = 0.0;
+      for (unsigned int i = 0; i < result.size(); i++)
+        len += result[i] * result[i];
+      len = sqrt(len);
+      if (len < 1e-12)
+      {
+        throw_runtime_error("CurvedEntitySpherePart: blended normal is degenerate, i.e. this facet "
+                            "spans (at least) half the sphere. Split it into smaller facets.");
+      }
+      for (unsigned int i = 0; i < result.size(); i++)
+        result[i] /= len;
+    }
+
+    // Nothing to do: a unit normal is unique, so there is no wrap-around ambiguity to resolve.
+    void apply_periodicity(std::vector<std::vector<double>> &) override {}
   };
 
   // A curve interpolating a sequence of control points `pts` with a
@@ -430,81 +459,26 @@ namespace pyoomph
   class MeshTemplateDomain;
   class MeshTemplateElement;
 
-  // Base class gluing pyoomph's curved-facet description to oomph-lib's
-  // MacroElement machinery. An oomph-lib MacroElement maps a reference cube/
-  // square/triangle/etc. to a curved physical region by blending its facet
-  // parametrizations; this base stores, for each local facet of the element,
-  // the corresponding MeshTemplateFacet plus a node permutation (`permutation`)
-  // that maps the macro element's canonical facet-node ordering onto the
-  // facet's own node ordering (set up in set_facet()/find_permutation()).
-  // Concrete subclasses (below) implement macro_element_boundary() for a
-  // specific reference-element shape/order by evaluating the appropriate
-  // blending function.
-  class MeshTemplateMacroElementBase
-  {
-  protected:
-    // Determine how the local node ordering of `new_facet` must be permuted
-    // to align with the canonical ordering expected for macro-element facet
-    // `ifacet`, using `for_orientation` (the element's own facet) as reference.
-    virtual std::vector<unsigned> find_permutation(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation) = 0;
-
-  public:
-    // Attach `new_facet` as the macro element's local facet number `ifacet`,
-    // computing and storing the required node permutation.
-    void set_facet(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation);
-    std::vector<MeshTemplateFacet *> facets;
-    std::vector<std::vector<unsigned>> permutation;
-    std::vector<std::vector<pyoomph::Node *>> default_facet_nodes;
-    MeshTemplateMacroElementBase(MeshTemplateElement *e, std::vector<MeshTemplateNode *> *nodes);
-    // Evaluate the macro-element boundary mapping: for local coordinate `s`
-    // on the i_direct-th "direction" of the reference element at history
-    // time level t, return the corresponding global position f (called by
-    // oomph-lib's macro-element blending during mesh construction/refinement).
-    virtual void macro_element_boundary(const unsigned &t, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f) = 0;
-  };
-
-  // Macro element for 2d, quadrilateral (Q-type), second-order (9-node) elements.
-  class MeshTemplateQMacroElement2 : public oomph::QMacroElement<2>, public MeshTemplateMacroElementBase
-  {
-  protected:
-    std::vector<unsigned> find_permutation(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation) override;
-
-  public:
-    MeshTemplateQMacroElement2(MeshTemplateDomain *domain, unsigned index, MeshTemplateElement *e, std::vector<MeshTemplateNode *> *nodes);
-    void macro_element_boundary(const unsigned &t, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f) override;
-  };
-
-  // Macro element for 2d, triangular (T-type), second-order (6-node) elements.
-  class MeshTemplateTMacroElement2 : public oomph::TMacroElement<2>, public MeshTemplateMacroElementBase
-  {
-  protected:
-    std::vector<unsigned> find_permutation(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation) override;
-
-  public:
-    MeshTemplateTMacroElement2(MeshTemplateDomain *domain, unsigned index, MeshTemplateElement *e, std::vector<MeshTemplateNode *> *nodes);
-    void macro_element_boundary(const unsigned &t, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f) override;
-  };
-
-  // Macro element for 3d, brick (Q-type), second-order (27-node) elements.
-  class MeshTemplateQMacroElement3 : public oomph::QMacroElement<3>, public MeshTemplateMacroElementBase
-  {
-  protected:
-    std::vector<unsigned> find_permutation(const unsigned &ifacet, MeshTemplateFacet *new_facet, MeshTemplateFacet *for_orientation) override;
-
-  public:
-    MeshTemplateQMacroElement3(MeshTemplateDomain *domain, unsigned index, MeshTemplateElement *e, std::vector<MeshTemplateNode *> *nodes);
-    void macro_element_boundary(const unsigned &t, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f) override;
-  };
-
-  // oomph-lib Domain implementation that simply forwards macro_element_boundary()
-  // calls to the individual MeshTemplateMacroElementBase-derived macro elements
-  // that were pushed onto Macro_element_pt (one per curved bulk element).
+  // oomph-lib Domain holding the macro elements of one mesh template (one per curved bulk element),
+  // and owning them: ~Domain deletes everything pushed onto Macro_element_pt.
+  //
+  // It exists only because oomph::MacroElement's constructor demands a Domain. It used to also carry
+  // a macro_element_boundary() override, because oomph's QMacroElement asks its Domain to evaluate
+  // each facet's parametrisation and then blends the answers itself; pyoomph's GenericMacroElement
+  // does the blending directly, so nothing routes through the Domain any more and the dynamic_cast
+  // chain that dispatched those calls (and silently had no branch for triangles) is gone.
   class MeshTemplateDomain : public oomph::Domain
   {
   public:
     MeshTemplateDomain();
     void push_back_macro_element(oomph::MacroElement *macro) { Macro_element_pt.push_back(macro); }
-    void macro_element_boundary(const unsigned &t, const unsigned &i_macro, const unsigned &i_direct, const oomph::Vector<double> &s, oomph::Vector<double> &f) override;
+    // Pure virtual in oomph::Domain, so it has to exist; nothing should ever call it, since a
+    // GenericMacroElement does not decompose its map into per-facet queries back to the Domain.
+    void macro_element_boundary(const unsigned &, const unsigned &, const unsigned &, const oomph::Vector<double> &, oomph::Vector<double> &) override
+    {
+      throw_runtime_error("MeshTemplateDomain::macro_element_boundary should never be called: pyoomph's "
+                          "GenericMacroElement evaluates its own blend");
+    }
   };
 
   // Abstract base class describing the geometry/topology of a single bulk
@@ -935,6 +909,14 @@ namespace pyoomph
     std::vector<MeshTemplateFacet *> facets;
     std::map<MeshTemplateFacet *, unsigned, std::function<bool(const MeshTemplateFacet *, const MeshTemplateFacet *)>> facetmap; // Required for fast finding facets
     MeshTemplateDomain *domain;
+    // Edges of curved facets, keyed by their (sorted) template node index pair. An element that
+    // touches a curved surface along an edge without owning a facet there still has to curve that
+    // edge -- otherwise it places the edge's new nodes on the chord while the element on the other
+    // side places them on the surface, and the two disagree. Built lazily from `facets`, which is
+    // complete by the time any element is created. See dev_docs/macro_elements_generalisation.md 3.2.2.
+    std::map<std::pair<nodeindex_t, nodeindex_t>, MeshTemplateFacet *> curved_edge_map;
+    bool curved_edge_map_built = false;
+    void build_curved_edge_map();
     std::vector<MeshTemplatePeriodicIntermediateNodeInfo> inter_nodes_periodic;
 
   public:

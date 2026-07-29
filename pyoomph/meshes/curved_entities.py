@@ -49,11 +49,9 @@ class CurvedEntityCircle(_pyoomph.MeshTemplateCurvedEntity):
       param[0] = numpy.arctan2(diff_y, diff_x)
 
    def ensure_periodicity(self, param:NPFloatArray):
-      # print("DIFF",abs(parametrics[0]-parametrics[1]),numpy.pi)
-      if abs(param[0] - param[1]) >= numpy.pi:
-         param[0] = numpy.mod(param[0], 2 * numpy.pi)
-         param[1] = numpy.mod(param[1], 2 * numpy.pi)
-         # raise NotImplementedError("Handle the periodic case here")
-         # pass
-      # exit()
+      # The polar angle is only defined modulo 2*pi, so a facet crossing arctan2's branch cut on the
+      # negative x axis arrives with endpoints near +pi and -pi. Shift every node onto the branch
+      # nearest the first one's, so the facet blends the short way round. Taking a mod of each value
+      # separately would only move the cut somewhere else instead of removing it.
+      param[1:] -= 2 * numpy.pi * numpy.round((param[1:] - param[0]) / (2 * numpy.pi))
 
