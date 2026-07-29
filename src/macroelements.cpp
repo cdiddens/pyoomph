@@ -215,17 +215,21 @@ namespace pyoomph
   GenericMacroElement::GenericMacroElement(oomph::Domain *domain, const unsigned &index,
                                            const MacroElementShape &shape_,
                                            const std::vector<oomph::Node *> &vertices)
-      : oomph::MacroElement(domain, index), shape(shape_), vertex_nodes(vertices)
+      : oomph::MacroElement(domain, index), shape(shape_)
   {
-    if (vertex_nodes.size() != macro_num_vertices(shape))
+    if (vertices.size() != macro_num_vertices(shape))
     {
-      throw_runtime_error("GenericMacroElement got " + std::to_string(vertex_nodes.size()) +
+      throw_runtime_error("GenericMacroElement got " + std::to_string(vertices.size()) +
                           " vertex nodes, but its shape has " + std::to_string(macro_num_vertices(shape)));
     }
-    for (unsigned int i = 0; i < vertex_nodes.size(); i++)
+    // Copy the positions out now; the nodes themselves are not retained (see the header).
+    vertex_positions.resize(vertices.size());
+    for (unsigned int i = 0; i < vertices.size(); i++)
     {
-      if (!vertex_nodes[i])
+      if (!vertices[i])
         throw_runtime_error("GenericMacroElement got a null vertex node at index " + std::to_string(i));
+      vertex_positions[i].assign(vertices[i]->ndim(), 0.0);
+      for (unsigned int j = 0; j < vertices[i]->ndim(); j++) vertex_positions[i][j] = vertices[i]->x(j);
     }
   }
 
@@ -239,14 +243,12 @@ namespace pyoomph
     rebuild_edge_corrections();
   }
 
-  void GenericMacroElement::vertex_position(const unsigned &v, const unsigned &t, const unsigned &dim,
-                                            std::vector<double> &x) const
+  void GenericMacroElement::vertex_position(const unsigned &v, const unsigned &dim, std::vector<double> &x) const
   {
-    oomph::Node *n = vertex_nodes[v];
-    const unsigned ndim = n->ndim();
+    const std::vector<double> &p = vertex_positions[v];
     x.assign(dim, 0.0);
-    for (unsigned int i = 0; i < dim && i < ndim; i++)
-      x[i] = n->x(t, i);
+    for (unsigned int i = 0; i < dim && i < p.size(); i++)
+      x[i] = p[i];
   }
 
   // Weight and deviation of one sub-entity (a curved facet, or a shared edge being corrected for).
@@ -291,7 +293,7 @@ namespace pyoomph
     deviation.assign(dim, 0.0);
     for (unsigned int k = 0; k < nfv; k++)
     {
-      vertex_position(cf.local_vertices[k], t, dim, xv);
+      vertex_position(cf.local_vertices[k], dim, xv);
       for (unsigned int i = 0; i < dim; i++)
         deviation[i] -= sigma[k] * xv[i];
     }
@@ -392,7 +394,7 @@ namespace pyoomph
       r[i] = 0.0;
     for (unsigned int v = 0; v < lambda.size(); v++)
     {
-      vertex_position(v, t, dim, xv);
+      vertex_position(v, dim, xv);
       for (unsigned int i = 0; i < dim; i++)
         r[i] += lambda[v] * xv[i];
     }

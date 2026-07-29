@@ -2404,9 +2404,20 @@ namespace pyoomph
 			if (s_macro.empty()) continue;
 			oomph::Vector<double> s_macro_o(s_macro.size());
 			for (unsigned int i = 0; i < s_macro.size(); i++) s_macro_o[i] = s_macro[i];
-			macro_elem_pt()->macro_map(s_macro_o, r); // TODO: Time loop
-			for (unsigned int id = 0; id < r.size() && id < this->node_pt(ni)->ndim(); id++)
-				this->node_pt(ni)->x(id) = r[id];
+			macro_elem_pt()->macro_map(s_macro_o, r);
+			// Every history level, not just the present one. The macro geometry does not depend on time,
+			// so one evaluation serves them all -- but leaving t>=1 behind on the straight interpolant is
+			// not merely untidy. It makes the node's stored history disagree with what get_x(t,...)
+			// returns, which (a) presents a mesh at rest as though it had been moving between t=1 and
+			// t=0, and (b) makes oomph's synchronise_nonhanging_nodes -- which compares exactly those two
+			// at every t while distributing -- classify conforming nodes as needing repair, corrupting
+			// the geometry of a distributed curved mesh. Serial runs never compare them, which is why
+			// the original "TODO: Time loop" here went unnoticed.
+			oomph::Node *nod_pt = this->node_pt(ni);
+			const unsigned nt = nod_pt->ntstorage();
+			for (unsigned int id = 0; id < r.size() && id < nod_pt->ndim(); id++)
+				for (unsigned int t = 0; t < nt; t++)
+					nod_pt->x(t, id) = r[id];
 		}
 	}
 

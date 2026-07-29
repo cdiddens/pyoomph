@@ -3,7 +3,7 @@
 Written 2026-07-29 on branch `macro_elements`, after the interface-refinement-coupling work
 (`interface_refinement_coupling.md`) landed on `main`.
 
-Status: **S0, S1, S3, S4 and gmsh-3d done; S5 investigated and deliberately closed without a code change (§18).** Every element shape is covered, in 2d and 3d, from hand-built templates and from gmsh. S2 (re-scoped), S6 and S7 remain. §1 and §2 are measured, not assumed — every claim about current
+Status: **S0, S1, S3, S4, gmsh-3d and S6 done; S5 investigated and deliberately closed without a code change (§18).** Every element shape is covered, in 2d and 3d, from hand-built templates and from gmsh, serially and under MPI. S2 (re-scoped) and S7 remain. §1 and §2 are measured, not assumed — every claim about current
 behaviour below was reproduced, and the numbers are quoted. §3–§5 are the design. §11 is the
 staging. **§13 records what S0 actually turned up**, including a defect worse than anything §1 and
 §2 predicted and a measurement that materially weakens the case for part of S2 — read it before
@@ -932,8 +932,9 @@ Each stage ends with its tests green and is committed separately.
   turned out not to be the one pyoomph uses, and the behaviour change it implied was declined in
   favour of keeping ALE semantics stable. §18 records the measurements and the decision. T10 is
   therefore not written: there is no new behaviour to pin.
-- **S6 — MPI and coupled interfaces.** §6.2's decision, validated against the `mixed_adapt` MPI
-  harness. T8, T9 green.
+- **S6 — MPI.** ✅ **Done**, and it found two defects that only this combination could reach (§19).
+  `tests/test_mpi_curved_boundaries.py` + `mpi_curved_worker.py`, all five geometries on 2 and 4
+  ranks. T8 (coupled interfaces with curved boundaries) is *not* done — see §19.4.
 - **S7 — docs and tutorials.** Curved-entity documentation, `CylinderMesh` curved entities, remove
   the `with_macro_element=False` workarounds from any tutorial that carries them. T12.
 
@@ -1397,3 +1398,76 @@ applied yet at that point — so it belongs in a post-adapt pass alongside
 `Mesh::set_lagrangian_nodal_coordinates` printed `"Setting Lagrangian nodal coordinates for all nodes
 in mesh"` unconditionally on every call — the same class of leftover as the three removed in S0, and
 noisy on any moving mesh since it runs on every macro-element mapping pass. Removed.
+
+---
+
+## 19. S6 (MPI): two defects that only `--distribute` could reach
+
+§6.2 offered two options — build macro elements on every rank, or accept FE placement on halos and
+let halo synchronisation copy the owner's positions — and guessed the second would be enough. Neither
+was the issue. The macro elements were already present on every rank (the mesh is built replicated and
+then thinned), and the failures were in what a macro element *holds* and what it *sets*.
+
+Nothing had ever run this combination: distributed adaptivity was covered, curved boundaries were
+covered, the two together were not.
+
+### 19.1 A macro element must not hold node pointers
+
+The first `--distribute` run on a curved mesh segfaulted, in
+`GenericMacroElement::vertex_position` reached from
+`Mesh::distribute` → `classify_halo_and_haloed_nodes` → `synchronise_nonhanging_nodes` →
+`FiniteElement::get_x`.
+
+`Mesh::distribute()` deletes the elements and nodes a rank does not own. A macro element belongs to
+the **root** element and is shared by every son, so a son that survives on this rank can be left
+holding a macro element whose root vertices have been freed — and the halo classification pass then
+calls `get_x()` on it.
+
+This was **not introduced by this work**: the implementation it replaced stored
+`std::vector<std::vector<pyoomph::Node *>> default_facet_nodes` and dereferenced it at
+`meshtemplate.cpp:155` from the same call site. It had simply never been exercised.
+
+`GenericMacroElement` now stores vertex **positions by value**. The header records why the obvious
+choice is wrong, since it is the sort of thing a later reader would try to "fix" back: node pointers
+would let the map follow the nodes through history levels and, on a moving mesh, through the solve —
+but the macro element is only ever consulted for geometry that is fixed (on a moving mesh it
+deliberately does not drive the Eulerian position, §18.2), so there is no motion to follow and
+nothing is lost.
+
+### 19.2 `map_nodes_on_macro_element` was only setting the present time level
+
+With the crash gone, the mesh came out geometrically corrupt: *"Max. error in quadtree neighbour
+finding: 0.447214 is too big"*. Serial and replicated-MPI runs of the same problem were exact
+(`2.5e-16`), so it was distribution-specific.
+
+The cause was a `// TODO: Time loop` that had been sitting in `map_nodes_on_macro_element` since
+before this work: it snapped `x(id)` — history level 0 only — leaving `t >= 1` on the straight
+interpolant that `factory_element` had written there. `synchronise_nonhanging_nodes` compares
+`get_x(t, s)` against `x(t, ·)` **at every history level** while distributing, saw conforming nodes
+disagree, and "repaired" them.
+
+Now every history level is set. The macro geometry does not depend on time, so one evaluation serves
+them all. This also fixes something visible without MPI: a curved mesh used to start with `x(0)` on
+the curve and `x(1)` on the chord, i.e. presenting a mesh at rest as though it had been moving into
+its initial state.
+
+### 19.3 A Problem must be released before the next one distributes
+
+Not a curved-boundary defect, but it cost time and belongs in the record. The worker initially ran its
+five cases in one process without a `with` block; the *second* case always failed, whichever it was.
+An un-released `Problem` keeps its distributed state alive and the next `distribute()` in that process
+dies. `box_cases.solve_case` already used `with` for the same reason. The worker says so at the point
+where it matters.
+
+### 19.4 What S6 does not cover
+
+- **T8, coupled interfaces with curved boundaries.** `InterfaceRefinementCoupler` is exercised by its
+  own MPI module, and curved boundaries now are too, but not together. Two domains sharing a *curved*
+  interface should agree on it by construction — both sides attach the same entity to the same facets
+  — but that is an argument, not a measurement.
+- **Curved boundaries under load balancing.** `load_balance()` redistributes after the initial
+  adaption; the same class of lifetime question applies to it as to `distribute()`, and it is not
+  tested here.
+
+Measured: all five geometries (quad disc, triangular disc, spherical octant of bricks, tetrahedral
+ball, gmsh tetrahedral ball) exact to machine precision on every rank at 2 and 4 ranks.

@@ -128,9 +128,20 @@ namespace pyoomph
   {
   protected:
     MacroElementShape shape;
-    // The element's vertex nodes in C1 shape-function order. Stored as nodes rather than positions so
-    // that the map follows them through history levels (and, on a moving mesh, through the solve).
-    std::vector<oomph::Node *> vertex_nodes;
+    // The element's vertex positions in C1 shape-function order, stored BY VALUE.
+    //
+    // Node pointers would be the obvious choice -- the map would then follow the nodes through history
+    // levels and, on a moving mesh, through the solve. They are also unsafe: Mesh::distribute() deletes
+    // the elements and nodes a rank does not own, and a macro element belongs to the ROOT element and is
+    // shared by every son, so a son surviving on this rank can be left holding a macro element whose
+    // root vertices have been freed. classify_halo_and_haloed_nodes() then calls get_x() on it and the
+    // rank segfaults. (The implementation this replaced had the same hazard for the same reason; it was
+    // simply never exercised, as nothing combined --distribute with a curved boundary.)
+    //
+    // Copying costs nothing here: the macro element is only ever consulted for a mesh whose geometry is
+    // fixed. On a moving mesh the Eulerian position is a dof and the macro element deliberately does not
+    // drive it (see dev_docs/macro_elements_generalisation.md 18.2), so there is no motion to follow.
+    std::vector<std::vector<double>> vertex_positions;
     std::vector<MacroCurvedFacet> curved_facets;
     // The inclusion-exclusion terms of the blend, one per sub-entity (in practice an edge) shared by
     // two or more curved facets, which would otherwise contribute its deviation once per facet. Each
@@ -140,13 +151,14 @@ namespace pyoomph
     std::vector<std::pair<MacroCurvedFacet, double>> edge_corrections;
     void rebuild_edge_corrections();
 
-    // Position of vertex v at time level t, zero-padded to the requested dimension.
-    void vertex_position(const unsigned &v, const unsigned &t, const unsigned &dim, std::vector<double> &x) const;
+    // Position of vertex v, zero-padded to the requested dimension. There is no time level: see above.
+    void vertex_position(const unsigned &v, const unsigned &dim, std::vector<double> &x) const;
     // Weight w_S and deviation d_S of one sub-entity at the given generalised barycentric coordinates.
     // Returns false when the weight vanishes, i.e. the sub-entity contributes nothing here.
     bool subentity_deviation(const MacroCurvedFacet &cf, const std::vector<double> &lambda,
                              const unsigned &t, const unsigned &dim,
                              double &w, std::vector<double> &deviation) const;
+
 
   public:
     GenericMacroElement(oomph::Domain *domain, const unsigned &index, const MacroElementShape &shape_,
