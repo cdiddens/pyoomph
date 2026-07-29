@@ -4737,6 +4737,9 @@ namespace oomph
       // This means that the storage is only allocated (and deleted) once
       Vector<Vector<double>> el_residuals(n_vector);
       Vector<DenseMatrix<double>> el_jacobian(n_matrix);
+      //FOR PYOOMPH: per-element structural sparsity masks (see Problem::sparsity_mask_for_element).
+      //             Declared out here so the per-element fetch below allocates nothing.
+      Vector<const char*> sparsity_masks(n_matrix, 0);
 
       // Loop over the elements for this processor
       for (unsigned long e = el_lo; e <= el_hi; e++)
@@ -4775,6 +4778,12 @@ namespace oomph
           assembly_handler_pt->get_all_vectors_and_matrices(
             elem_pt, el_residuals, el_jacobian);
 
+          //FOR PYOOMPH: fetch the structural sparsity masks once per element, not per entry.
+          for (unsigned m = 0; m < n_matrix; m++)
+          {
+            sparsity_masks[m] = sparsity_mask_for_element(m, elem_pt, nvar);
+          }
+
           //---------------Insert the values into the maps--------------
 
           // Loop over the first index of local variables
@@ -4802,7 +4811,9 @@ namespace oomph
                 // Get the value of the matrix at this point
                 double value = el_jacobian[m](i, j);
                 // Only bother to add to the map if it's non-zero
-                if (std::fabs(value) > numerical_zero_for_sparse_assembly(m)) //FOR PYOOMPH: per-matrix threshold, see problem.h
+                //FOR PYOOMPH: the mask may only ADD entries, never remove them -- see problem.h
+                if ((sparsity_masks[m] && sparsity_masks[m][i * nvar + j]) ||
+                    std::fabs(value) > numerical_zero_for_sparse_assembly(m))
                 {
                   // If it's compressed row storage, then our vector of maps
                   // is indexed by row (equation number)
@@ -5080,6 +5091,9 @@ namespace oomph
       // This means that the stored is only allocated (and deleted) once
       Vector<Vector<double>> el_residuals(n_vector);
       Vector<DenseMatrix<double>> el_jacobian(n_matrix);
+      //FOR PYOOMPH: per-element structural sparsity masks (see Problem::sparsity_mask_for_element).
+      //             Declared out here so the per-element fetch below allocates nothing.
+      Vector<const char*> sparsity_masks(n_matrix, 0);
 
 
       // Pointer to a single list to be used during the assembly
@@ -5121,6 +5135,12 @@ namespace oomph
           // Now get the residuals and jacobian for the element
           assembly_handler_pt->get_all_vectors_and_matrices(
             elem_pt, el_residuals, el_jacobian);
+
+          //FOR PYOOMPH: fetch the structural sparsity masks once per element, not per entry.
+          for (unsigned m = 0; m < n_matrix; m++)
+          {
+            sparsity_masks[m] = sparsity_mask_for_element(m, elem_pt, nvar);
+          }
 
           //---------------- Insert the values into the lists -----------
 
@@ -5484,6 +5504,9 @@ namespace oomph
       // This means that the storage is only allocated (and deleted) once
       Vector<Vector<double>> el_residuals(n_vector);
       Vector<DenseMatrix<double>> el_jacobian(n_matrix);
+      //FOR PYOOMPH: per-element structural sparsity masks (see Problem::sparsity_mask_for_element).
+      //             Declared out here so the per-element fetch below allocates nothing.
+      Vector<const char*> sparsity_masks(n_matrix, 0);
 
       // Loop over the elements
       for (unsigned long e = el_lo; e <= el_hi; e++)
@@ -5522,6 +5545,12 @@ namespace oomph
           assembly_handler_pt->get_all_vectors_and_matrices(
             elem_pt, el_residuals, el_jacobian);
 
+          //FOR PYOOMPH: fetch the structural sparsity masks once per element, not per entry.
+          for (unsigned m = 0; m < n_matrix; m++)
+          {
+            sparsity_masks[m] = sparsity_mask_for_element(m, elem_pt, nvar);
+          }
+
           //---------------Insert the values into the vectors--------------
 
           // Loop over the first index of local variables
@@ -5551,7 +5580,9 @@ namespace oomph
                 // Get the value of the matrix at this point
                 double value = el_jacobian[m](i, j);
                 // Only bother to add to the vector if it's non-zero
-                if (std::fabs(value) > numerical_zero_for_sparse_assembly(m)) //FOR PYOOMPH: per-matrix threshold, see problem.h
+                //FOR PYOOMPH: the mask may only ADD entries, never remove them -- see problem.h
+                if ((sparsity_masks[m] && sparsity_masks[m][i * nvar + j]) ||
+                    std::fabs(value) > numerical_zero_for_sparse_assembly(m))
                 {
                   // If it's compressed row storage, then our vector of maps
                   // is indexed by row (equation number)
@@ -5842,6 +5873,9 @@ namespace oomph
       // This means that the storage will only be allocated (and deleted) once
       Vector<Vector<double>> el_residuals(n_vector);
       Vector<DenseMatrix<double>> el_jacobian(n_matrix);
+      //FOR PYOOMPH: per-element structural sparsity masks (see Problem::sparsity_mask_for_element).
+      //             Declared out here so the per-element fetch below allocates nothing.
+      Vector<const char*> sparsity_masks(n_matrix, 0);
 
       // Loop over the elements
       for (unsigned long e = el_lo; e <= el_hi; e++)
@@ -5880,6 +5914,12 @@ namespace oomph
           assembly_handler_pt->get_all_vectors_and_matrices(
             elem_pt, el_residuals, el_jacobian);
 
+          //FOR PYOOMPH: fetch the structural sparsity masks once per element, not per entry.
+          for (unsigned m = 0; m < n_matrix; m++)
+          {
+            sparsity_masks[m] = sparsity_mask_for_element(m, elem_pt, nvar);
+          }
+
           //---------------Insert the values into the vectors--------------
 
           // Loop over the first index of local variables
@@ -5909,7 +5949,9 @@ namespace oomph
                 // Get the value of the matrix at this point
                 double value = el_jacobian[m](i, j);
                 // Only bother to add to the vector if it's non-zero
-                if (std::fabs(value) > numerical_zero_for_sparse_assembly(m)) //FOR PYOOMPH: per-matrix threshold, see problem.h
+                //FOR PYOOMPH: the mask may only ADD entries, never remove them -- see problem.h
+                if ((sparsity_masks[m] && sparsity_masks[m][i * nvar + j]) ||
+                    std::fabs(value) > numerical_zero_for_sparse_assembly(m))
                 {
                   // If it's compressed row storage, then our vector of maps
                   // is indexed by row (equation number)
@@ -6220,6 +6262,9 @@ namespace oomph
       // This means that the storage will only be allocated (and deleted) once
       Vector<Vector<double>> el_residuals(n_vector);
       Vector<DenseMatrix<double>> el_jacobian(n_matrix);
+      //FOR PYOOMPH: per-element structural sparsity masks (see Problem::sparsity_mask_for_element).
+      //             Declared out here so the per-element fetch below allocates nothing.
+      Vector<const char*> sparsity_masks(n_matrix, 0);
 
       // Loop over the elements
       for (unsigned long e = el_lo; e <= el_hi; e++)
@@ -6258,6 +6303,12 @@ namespace oomph
           assembly_handler_pt->get_all_vectors_and_matrices(
             elem_pt, el_residuals, el_jacobian);
 
+          //FOR PYOOMPH: fetch the structural sparsity masks once per element, not per entry.
+          for (unsigned m = 0; m < n_matrix; m++)
+          {
+            sparsity_masks[m] = sparsity_mask_for_element(m, elem_pt, nvar);
+          }
+
           //---------------Insert the values into the vectors--------------
 
           // Loop over the first index of local variables
@@ -6287,7 +6338,9 @@ namespace oomph
                 // Get the value of the matrix at this point
                 double value = el_jacobian[m](i, j);
                 // Only bother to add to the vector if it's non-zero
-                if (std::fabs(value) > numerical_zero_for_sparse_assembly(m)) //FOR PYOOMPH: per-matrix threshold, see problem.h
+                //FOR PYOOMPH: the mask may only ADD entries, never remove them -- see problem.h
+                if ((sparsity_masks[m] && sparsity_masks[m][i * nvar + j]) ||
+                    std::fabs(value) > numerical_zero_for_sparse_assembly(m))
                 {
                   // number of entrys in this row
                   const unsigned size = ncoef[m][eqn_number];
@@ -6759,6 +6812,9 @@ namespace oomph
       // This means that the storage will only be allocated (and deleted) once
       Vector<Vector<double>> el_residuals(n_vector);
       Vector<DenseMatrix<double>> el_jacobian(n_matrix);
+      //FOR PYOOMPH: per-element structural sparsity masks (see Problem::sparsity_mask_for_element).
+      //             Declared out here so the per-element fetch below allocates nothing.
+      Vector<const char*> sparsity_masks(n_matrix, 0);
 
       // Loop over the elements
       for (unsigned long e = el_lo; e < el_hi_plus_one; e++)
@@ -6791,6 +6847,12 @@ namespace oomph
           // Now get the residuals and jacobian for the element
           assembly_handler_pt->get_all_vectors_and_matrices(
             elem_pt, el_residuals, el_jacobian);
+
+          //FOR PYOOMPH: fetch the structural sparsity masks once per element, not per entry.
+          for (unsigned m = 0; m < n_matrix; m++)
+          {
+            sparsity_masks[m] = sparsity_mask_for_element(m, elem_pt, nvar);
+          }
 
           //---------------Insert the values into the vectors--------------
 
@@ -6896,7 +6958,9 @@ namespace oomph
                 // Get the value of the matrix at this point
                 double value = el_jacobian[m](i, j);
                 // Only bother to add to the vector if it's non-zero
-                if (std::fabs(value) > numerical_zero_for_sparse_assembly(m)) //FOR PYOOMPH: per-matrix threshold, see problem.h
+                //FOR PYOOMPH: the mask may only ADD entries, never remove them -- see problem.h
+                if ((sparsity_masks[m] && sparsity_masks[m][i * nvar + j]) ||
+                    std::fabs(value) > numerical_zero_for_sparse_assembly(m))
                 {
                   // number of entrys in this row
                   const unsigned size = ncoef[m][eqn_number];

@@ -58,6 +58,20 @@ Included <initializer_list> for clang compilation on Mac
 
 
 
+problem.h / problem.cc (Changed on 29th July 2026, second change):
+Added an optional per-element structural sparsity mask to the sparse assembly. New virtual
+sparsity_mask_for_element(matrix_index, elem_pt, nvar) returns NULL by default -- so behaviour is
+unchanged -- or an nvar*nvar array of 0/1 marking positions of the elemental block that must be
+stored even when they currently evaluate to zero. It is fetched once per element per matrix (hoisted
+above the i/j loops, so there is no virtual call per entry) and applied with OR, never instead of,
+the numerical test: the mask can therefore only ever ADD entries. A mask that over-reports merely
+stores explicit zeros, whereas one that under-reported would silently drop real entries.
+Applied in the maps, vectors_of_pairs, two_vectors and two_arrays variants and in
+parallel_sparse_assemble. Deliberately NOT in the "lists" variant: it filters a second time during
+compression, when merging duplicate column indices, at a point where the elemental (i,j) is out of
+scope, and feeding it explicit zeros there makes it emit the same column index twice; pyoomph
+refuses that combination instead. See pyoomph's dev_docs/structural_assembly.md.
+
 problem.h / problem.cc (Changed on 29th July 2026):
 Made the "is this entry small enough not to store?" threshold of the sparse assembly per matrix.
 The sparse assembly routines can build several matrices in one pass over the elements (the Jacobian

@@ -721,6 +721,29 @@ namespace oomph
       return Numerical_zero_for_sparse_assembly;
     }
 
+    //FOR PYOOMPH
+    /// Optional structural sparsity mask for one element's contribution to the matrix_index-th matrix
+    /// of a multi-matrix assembly: an nvar*nvar array of 0/1 in row-major order, or NULL for "no mask"
+    /// (the default, which reproduces the original behaviour exactly). Fetched once per element, so a
+    /// derived problem may return a pointer into a scratch buffer rather than allocating -- but note
+    /// that the masks for ALL matrices of an element are fetched before any of them is used, so the
+    /// pointers returned for different matrix_index must remain valid simultaneously (i.e. one scratch
+    /// buffer per matrix, not one shared buffer).
+    ///
+    /// A set entry means "this position of the elemental block is STRUCTURALLY present": store it even
+    /// if it currently evaluates to zero. The mask is applied with OR, never instead of, the numerical
+    /// test -- so it can only ever ADD entries. That asymmetry is deliberate: a mask that over-reports
+    /// merely stores explicit zeros, whereas one that under-reported would silently drop real entries
+    /// from the assembled matrix. pyoomph uses it to give the Jacobian a sparsity pattern that depends
+    /// on the equation numbering alone (and is hence reusable by the linear solver across Newton
+    /// steps) without paying for the entries its symbolic analysis proves can never be nonzero.
+    virtual const char* sparsity_mask_for_element(const unsigned& matrix_index,
+                                                  GeneralisedElement* const& elem_pt,
+                                                  const unsigned& nvar)
+    {
+      return 0;
+    }
+
     /// Protected helper function that is used to assemble the Jacobian
     /// matrix in the case when the storage is row or column compressed.
     /// The boolean Flag indicates

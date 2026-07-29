@@ -1868,6 +1868,17 @@ namespace pyoomph
 		}
 		else if (method == "lists")
 		{
+			// The "lists" variant filters a second time during compression, when merging duplicate
+			// column indices, at a point where the elemental (i,j) is out of scope and the structural
+			// mask therefore cannot be consulted. Feeding it explicit zeros there makes it emit the same
+			// column index twice. Rather than silently producing an unusable pattern (or a corrupt
+			// matrix), refuse the combination - "lists" is neither the default nor the fastest variant.
+			if (keep_structural_zeros && prune_structural_zeros_by_field_coupling)
+			{
+				throw_runtime_error("The 'lists' sparse assembly method cannot be combined with the pruned structural "
+									"sparsity pattern. Either choose another assembly method (e.g. the default "
+									"'vectors_of_pairs'), or set prune_structural_zeros_by_field_coupling=False.");
+			}
 			Sparse_assembly_method=Perform_assembly_using_lists;
 		}
 		else if (method == "two_arrays")
@@ -1921,6 +1932,10 @@ namespace pyoomph
 	{
 		// -1.0 rather than -inf or -eps: any negative value makes the test always true, and a plain
 		// -1.0 stays readable in a debugger.
+		// When the field-coupling mask is in use it decides which structural zeros to keep, entry by
+		// entry, and this threshold must stay at its normal value so that everything the mask does NOT
+		// mark is still filtered by value. Blanket-keeping zeros here would make the mask pointless.
+		if (prune_structural_zeros_by_field_coupling) return Numerical_zero_for_sparse_assembly;
 		if (matrix_index == 0)
 		{
 			if (keep_structural_zeros) return -1.0;
@@ -1932,12 +1947,91 @@ namespace pyoomph
 		return Numerical_zero_for_sparse_assembly;
 	}
 
+	// Builds the structural sparsity mask for one element's contribution to matrix matrix_index, from
+	// the symbolic field-coupling tables the code generator emits (contributes_to_jacobian /
+	// contributes_to_mass_matrix, indexed by contribution class) combined with the element's own
+	// local-dof-to-contribution-class map. Returning NULL means "no mask", i.e. fall back to the plain
+	// value filter - always a safe answer, at the cost of a pattern that is not value-independent.
+	//
+	// Everything below is a guard establishing that the local dof indexing the mask would be written in
+	// really is the element's own. It is not paranoia: an augmenting assembly handler (fold, Hopf,
+	// periodic orbit, ...) presents a larger elemental block over its own augmented dof numbering, for
+	// which the element's contribution map says nothing.
+	const char *Problem::sparsity_mask_for_element(const unsigned &matrix_index, oomph::GeneralisedElement *const &elem_pt, const unsigned &nvar)
+	{
+		if (!keep_structural_zeros || !prune_structural_zeros_by_field_coupling) return NULL;
+		// Tier A (no pruning) is expressed through the threshold instead, so no mask is needed there.
+		if (matrix_index > 0 && !dynamic_cast<oomph::EigenProblemHandler *>(this->assembly_handler_pt()))
+		{
+			// Only the eigenproblem assembly has a known meaning for a secondary matrix (index 1 = mass
+			// matrix). For anything else - e.g. the several matrices of a multi-assembly - we have no
+			// table to describe it, so do not guess.
+			return NULL;
+		}
+		BulkElementBase *be = dynamic_cast<BulkElementBase *>(elem_pt);
+		if (!be) return NULL;
+		const JITFuncSpec_Table_FiniteElement_t *ft = be->get_code_instance()->get_func_table();
+		int resind = ft->current_res_jac;
+		if (resind < 0 || !ft->contributes_to_jacobian || !ft->contributes_to_mass_matrix) return NULL;
+		bool **table = (matrix_index == 0 ? ft->contributes_to_jacobian[resind] : ft->contributes_to_mass_matrix[resind]);
+		if (!table) return NULL;
+		const unsigned nclass = ft->contribution_entries_size;
+		const std::vector<int> &cidx = be->get_local_dof_contribution_indices();
+		// The element's map is indexed by ITS local dofs; if the handler presents a different number,
+		// the two indexings are unrelated and the mask would be nonsense.
+		if (cidx.size() != nvar) return NULL;
+
+		if (sparsity_mask_scratch.size() <= matrix_index) sparsity_mask_scratch.resize(matrix_index + 1);
+		std::vector<char> &scratch = sparsity_mask_scratch[matrix_index];
+		scratch.assign((size_t)nvar * nvar, 0);
+		for (unsigned i = 0; i < nvar; i++)
+		{
+			const int fi = cidx[i];
+			char *row = &scratch[(size_t)i * nvar];
+			for (unsigned j = 0; j < nvar; j++)
+			{
+				const int fj = cidx[j];
+				// A dof that could not be attributed to a field (-1) is treated as coupled to
+				// everything. Over-reporting only stores explicit zeros; under-reporting would drop
+				// real entries, so the unknown case must err this way.
+				if (fi < 0 || fj < 0 || (unsigned)fi >= nclass || (unsigned)fj >= nclass)
+					row[j] = 1;
+				else
+					row[j] = (table[fi][fj] ? 1 : 0);
+			}
+			if (force_jacobian_diagonal_entries && matrix_index == 0) row[i] = 1;
+		}
+		return scratch.data();
+	}
+
+	void Problem::set_prune_structural_zeros_by_field_coupling(bool yesno)
+	{
+		if (yesno == prune_structural_zeros_by_field_coupling) return;
+		prune_structural_zeros_by_field_coupling = yesno;
+		Sparse_assemble_with_arrays_previous_allocation.resize(0);
+		this->invalidate_jacobian_structure();
+	}
+
+	void Problem::set_force_jacobian_diagonal_entries(bool yesno)
+	{
+		if (yesno == force_jacobian_diagonal_entries) return;
+		force_jacobian_diagonal_entries = yesno;
+		Sparse_assemble_with_arrays_previous_allocation.resize(0);
+		this->invalidate_jacobian_structure();
+	}
+
 	// Turns the structural (value-independent) sparsity pattern on or off for the Jacobian / main
 	// matrix. See numerical_zero_for_sparse_assembly() above for how it takes effect, and
 	// get_jacobian_structure_id() for what it buys.
 	void Problem::set_keep_structural_zeros(bool yesno)
 	{
 		if (yesno == keep_structural_zeros) return;
+		if (yesno && prune_structural_zeros_by_field_coupling && Sparse_assembly_method == Perform_assembly_using_lists)
+		{
+			throw_runtime_error("The 'lists' sparse assembly method cannot be combined with the pruned structural "
+								"sparsity pattern. Either choose another assembly method (e.g. the default "
+								"'vectors_of_pairs'), or set prune_structural_zeros_by_field_coupling=False.");
+		}
 		keep_structural_zeros = yesno;
 		// The row-length hints from the previous (differently filtered) assembly are now wrong, and the
 		// pattern itself has changed, so nothing derived from it may be reused.
@@ -3047,6 +3141,7 @@ namespace pyoomph
 
       		oomph::Vector<oomph::Vector<double>> el_residuals(n_vector);
       		oomph::Vector<oomph::DenseMatrix<double>> el_jacobian(n_matrix);
+			oomph::Vector<const char*> sparsity_masks(n_matrix, 0); // Refilled per element, allocated once
 			//oomph::Vector<double> el_residuals;
 	
       		for (unsigned long e = el_lo; e <= el_hi; e++)
@@ -3077,6 +3172,8 @@ namespace pyoomph
 
           
 					assembly_handler_pt->get_all_vectors_and_matrices(elem_pt, el_residuals, el_jacobian);
+					// Fetch the structural sparsity masks once per element, not once per entry.
+					for (unsigned m = 0; m < n_matrix; m++) sparsity_masks[m] = sparsity_mask_for_element(m, elem_pt, nvar);
 					//assembly_handler_pt->get_jacobian(elem_pt, el_residuals, el_jacobian);
 
 
@@ -3098,7 +3195,9 @@ namespace pyoomph
               				for (unsigned m = 0; m < n_matrix; m++)
               				{
 								double value = el_jacobian[m](i, j);
-								if (std::fabs(value) > numerical_zero_for_sparse_assembly(m))
+								// The mask may only ADD entries, never remove them; see sparsity_mask_for_element().
+								if ((sparsity_masks[m] && sparsity_masks[m][i * nvar + j]) ||
+									std::fabs(value) > numerical_zero_for_sparse_assembly(m))
 								{
 									unsigned unknown = assembly_handler_pt->eqn_number(elem_pt, j);	
 									if (compressed_row_flag)

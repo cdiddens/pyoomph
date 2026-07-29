@@ -1,7 +1,7 @@
 # Structural assembly: precomputed CSR sparsity, value-only re-assembly and solver reuse
 
-Branch: `structural_assembly`. Status: **Phases 0 and 1 implemented, tested and benchmarked
-(§6); Phases 2–4 planned.** All measurements in §2 were taken on `main` (commit `d03a562`) on this
+Branch: `structural_assembly`. Status: **Phases 0, 1 and 3 implemented, tested and benchmarked
+(§6); Phases 2 and 4 planned.** All measurements in §2 were taken on `main` (commit `d03a562`) on this
 machine; §6 records what the implemented work actually moved. All file/line references are to the
 tree state at the time of writing.
 
@@ -463,7 +463,22 @@ investigation.
 * Falls back to the oomph routine whenever the pattern is invalid, so this is always revertible at
   runtime.
 
-### Phase 3 — Tier B (field-pair pruning) — **IN PROGRESS**
+### Phase 3 — Tier B (field-pair pruning) — **DONE**
+
+Result, measured after all four steps below (2D cavity `N=8`, and the same + advection–diffusion):
+
+| | J nnz, filtered | Tier A (connectivity) | **Tier B (field mask)** |
+|---|---|---|---|
+| cavity | 17 560 (unstable, 80 empty diagonals) | 18 178 | **17 640** |
+| coupled | 28 186 (unstable, 80 empty diagonals) | 38 716 | **28 266** |
+
+Tier B is the numerical pattern plus exactly the 80 forced diagonals, stable and with a complete
+diagonal. On assembly cost the coupled case goes from **+34.7 % nnz / +16.5 % time** (Tier A) to
+**+0.2 % / −0.2 %**, i.e. the structural pattern is now essentially free there too. Mass matrix:
+6 050 / 9 950, its own pattern from `contributes_to_mass_matrix`, now value-independent as well —
+so §3.7's compromise (tight *or* stable) is gone. Newton solves unchanged: pardiso −21 %,
+petsc_mumps −22 %, bit-identical solutions.
+
 
 Goal: bring the coupled case from 1.35× back to 1.00× nnz (§2.4 measured that the field-pair mask
 reproduces the numerical pattern *exactly*), which is what would let `keep_structural_zeros` default
@@ -482,8 +497,8 @@ to on. Steps:
    (`src/elements.cpp:5626`, interface variant `:13819`), which already walks
    `eleminfo.nodal_local_eqn` / `pos_local_eqn` and the functable field info to attribute each local
    dof to a field. Cache per `(code, element type)`, not per element. This is the bulk of the work.
-3. **Getting the mask into the scatter.** The per-matrix threshold hook of §3.7 is not enough — a
-   mask is per `(i,j)`, not per matrix. Proposed: extend the same oomph patch with
+3. **Getting the mask into the scatter.** ✔ **DONE.** The per-matrix threshold hook of §3.7 is not
+   enough — a mask is per `(i,j)`, not per matrix. The same oomph patch was extended with
 
    ```cpp
    //FOR PYOOMPH
@@ -503,18 +518,38 @@ to on. Steps:
    Note the **`||`**, not a replacement: the mask may only ever *add* entries, never remove them. A
    wrong or stale mask then costs storage, not correctness — and a mask that under-reports cannot
    silently truncate the Jacobian, which is the one failure mode that would be a wrong answer rather
-   than a slowdown. It also makes `keep_structural_zeros` the special case "mask is all-true".
-4. **`force_jacobian_diagonal_entries`** becomes meaningful here and should default to on: the
-   field-pair mask leaves the pressure–pressure diagonal empty (§2.4 measured 1680 such rows), which
-   is exactly what PETSc's factorisers reject.
+   than a slowdown.
+
+   Applied in the `maps`, `vectors_of_pairs`, `two_vectors` and `two_arrays` variants and in
+   `parallel_sparse_assemble`. **Not** in `lists`: it filters a second time during compression, when
+   merging duplicate column indices, where the elemental `(i,j)` is out of scope — feeding it explicit
+   zeros there makes it emit the same column index twice. pyoomph throws if that method is combined
+   with pruning rather than silently producing an unusable pattern.
+
+   **Bug found here, worth remembering.** The hook's contract lets the implementation return a pointer
+   into a scratch buffer instead of allocating. With one shared buffer that is wrong: a multi-matrix
+   assembly fetches the masks for *all* matrices of an element before using any of them, so the
+   Jacobian's pointer was left aliasing the mass matrix's (much sparser) mask — the Jacobian silently
+   lost its forced diagonals and the whole feature appeared not to work on the eigenproblem path while
+   working perfectly on the Newton path (`n_matrix == 1`). One scratch buffer *per matrix index*, and
+   the contract in oomph's `problem.h` now says so explicitly.
+4. **`force_jacobian_diagonal_entries`** ✔ **DONE**, defaulting to on: the field-pair mask leaves the
+   pressure–pressure diagonal empty, which is exactly what PETSc's factorisers reject. It is applied
+   inside the mask build, so it costs nothing and only ever adds up to `ndof` entries.
 5. Guard: the mask is per *residual/Jacobian combination* (`_solved_residual`,
    `src/problem.hpp:293`) — switching the active residual changes the coupling table and therefore
    the pattern. Already covered: `structure_id` re-validates against `_solved_residual`, with a test.
 
-Once step 3 exists, the mass matrix gets its own tight structural pattern from
-`contributes_to_mass_matrix` for free, replacing the value filter it falls back to today — so M
-becomes value-independent *and* stays ~3× sparser than J, rather than having to choose between the
-two as §3.7 currently does.
+The mass matrix now gets its own tight structural pattern from `contributes_to_mass_matrix`,
+replacing the value filter of §3.7 — so M is value-independent *and* ~3× sparser than J, rather than
+having to choose. `keep_structural_zeros_in_mass_matrix` consequently only does anything under
+Tier A, where it remains the only way to give M a stable pattern.
+
+**Not yet done:** `keep_structural_zeros` still defaults to **off**. It is now measurably free
+(≤ +0.2 % nnz and within noise on time for every benchmarked case, with bit-identical solutions), so
+defaulting it on is the natural next step — but it should wait until the tutorial pipeline has run
+and until remeshing invalidation and interface-heavy problems are covered, since flipping it also
+turns on solver symbolic reuse for every user.
 
 ### Phase 4 — eigenproblems and bifurcation tracking
 

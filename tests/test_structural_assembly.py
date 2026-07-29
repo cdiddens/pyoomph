@@ -141,11 +141,13 @@ def _rows_without_diagonal(J):
 # Gate 1 -- the pattern really is value-independent, and really does contain the numerical one
 # ---------------------------------------------------------------------------------------------------
 
+@pytest.mark.parametrize("prune", [False, True], ids=["tier_a_connectivity", "tier_b_field_coupling"])
 @pytest.mark.parametrize("with_scalar", [False, True], ids=["navier_stokes", "coupled"])
-def test_structural_pattern_is_value_independent(with_scalar):
+def test_structural_pattern_is_value_independent(prune, with_scalar):
     with _CavityProblem(with_scalar=with_scalar) as p:
         p.quiet()
         p.initialise()
+        p.prune_structural_zeros_by_field_coupling = prune
         p.keep_structural_zeros = True
 
         J_zero = p.assemble_jacobian(with_residual=False)
@@ -157,11 +159,17 @@ def test_structural_pattern_is_value_independent(with_scalar):
         assert numpy.array_equal(pat[1], J_solved.indices), \
             "the pattern must not depend on the degrees of freedom"
 
-        # ... and it is genuinely the element-connectivity pattern, computed independently.
         S = _connectivity_pattern(p)
-        assert J_solved.nnz == S.nnz
-        assert numpy.array_equal(J_solved.indptr, S.indptr)
-        assert numpy.array_equal(numpy.sort(J_solved.indices), numpy.sort(S.indices))
+        if not prune:
+            # Tier A: genuinely the element-connectivity pattern, computed independently.
+            assert J_solved.nnz == S.nnz
+            assert numpy.array_equal(J_solved.indptr, S.indptr)
+            assert numpy.array_equal(numpy.sort(J_solved.indices), numpy.sort(S.indices))
+        else:
+            # Tier B: connectivity pruned to the field pairs that can contribute, so strictly tighter,
+            # and still a superset of everything the value-filtered assembly produces.
+            assert J_solved.nnz <= S.nnz
+            assert ((S > 0).astype(int) - (J_solved != 0).astype(int) > 0).nnz > 0 or J_solved.nnz == S.nnz
 
 
 def test_default_pattern_does_change_with_the_dofs():
@@ -259,7 +267,11 @@ def test_mass_matrix_is_not_inflated_to_the_jacobian_pattern(with_scalar):
         assert M_str.nnz == M_ref.nnz, "the mass matrix must keep its own pattern"
         assert M_str.nnz < J_str.nnz / 2, "expected the mass matrix to be several times sparser"
 
-        # ... and opting in must actually opt in.
+        # Under Tier A the mass matrix can be opted in to the Jacobian's connectivity pattern, which is
+        # the only way it ever gets a value-independent pattern there. Under Tier B that opt-in is
+        # superseded: contributes_to_mass_matrix gives the mass matrix a pattern that is BOTH
+        # value-independent and ~3x tighter than the Jacobian's, so there is nothing to opt in to.
+        p.prune_structural_zeros_by_field_coupling = False
         p.keep_structural_zeros_in_mass_matrix = True
         M_all, J_all = _eigen_matrices(p)
         assert M_all.nnz == J_all.nnz
@@ -374,6 +386,47 @@ def test_field_coupling_mask_covers_the_numerical_pattern(which, with_scalar):
         masked = _masked_pattern(p, which)
         missing = ((numerical != 0).astype(int) - (masked > 0).astype(int) > 0)
         assert missing.nnz == 0, "%d numerically nonzero entries lie outside the symbolic mask" % missing.nnz
+
+
+@pytest.mark.parametrize("with_scalar", [False, True], ids=["navier_stokes", "coupled"])
+def test_tier_b_assembles_exactly_the_masked_pattern(with_scalar):
+    """End to end: with pruning on, what actually comes out of the assembly is the field-masked pattern
+    plus the forced diagonal -- nothing more, nothing less -- for BOTH matrices of the eigenproblem
+    assembly. The mass matrix is the interesting half: it gets its own tight pattern from
+    contributes_to_mass_matrix rather than the Jacobian's."""
+    with _CavityProblem(N=6, with_scalar=with_scalar) as p:
+        p.quiet()
+        p.initialise()
+        p.keep_structural_zeros = True   # pruning and forced diagonals are the defaults
+        p.solve()
+        M, J = _eigen_matrices(p)
+
+        expect_J = (_masked_pattern(p, "jacobian") > 0).astype(int)
+        for i in range(J.shape[0]):
+            expect_J[i, i] = 1           # force_jacobian_diagonal_entries
+        assert J.nnz == expect_J.nnz
+        assert ((J != 0).astype(int) - expect_J > 0).nnz == 0
+
+        expect_M = _masked_pattern(p, "mass")
+        assert M.nnz == expect_M.nnz
+        assert ((M != 0).astype(int) - (expect_M > 0).astype(int) > 0).nnz == 0
+        assert M.nnz < J.nnz / 2, "the mass matrix must not have been given the Jacobian's pattern"
+
+
+def test_forced_diagonal_can_be_switched_off():
+    with _CavityProblem(N=6) as p:
+        p.quiet()
+        p.initialise()
+        p.keep_structural_zeros = True
+        p.solve()
+        with_diag = p.assemble_jacobian(with_residual=False)
+        assert _rows_without_diagonal(with_diag) == 0
+        p.force_jacobian_diagonal_entries = False
+        without = p.assemble_jacobian(with_residual=False)
+        # Taylor-Hood has no pressure-pressure coupling, so pruning empties those diagonals again --
+        # which is exactly why forcing them is the default.
+        assert _rows_without_diagonal(without) > 0
+        assert without.nnz == with_diag.nnz - _rows_without_diagonal(without)
 
 
 def test_field_coupling_mask_is_tighter_than_connectivity():
