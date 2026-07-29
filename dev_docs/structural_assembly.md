@@ -684,6 +684,35 @@ first one cannot reuse anything.
 Note `-n 1 --distribute` still takes the *serial* solver path — `get_jacobian` branches on
 `Communicator_pt->nproc() == 1`, so `solve_distributed` is only exercised from two ranks up.
 
+### Whole-pipeline comparison against `main`
+
+The numbers above are microbenchmarks of assembly and of a single Newton solve. To see what the work
+is worth on a broad, realistic mix, the tutorial suite was run on both branches:
+`citools/test_all_tutorial_scripts.py --quick-test --no-petsc`, 126 scripts, each branch built from
+scratch and run twice (the first run warms the JIT cache, the second is the measurement).
+
+| | `main` (d03a562) | `structural_assembly` (7e40bf7) | |
+|---|---|---|---|
+| Wall clock | 4:46.35 (286.4 s) | 4:21.36 (261.4 s) | **−8.7 %** |
+| User CPU | 312.2 s | 280.9 s | **−10.0 %** |
+| System CPU | 52.2 s | 50.0 s | −4.3 % |
+| Peak RSS | 812 992 kB | 810 836 kB | −0.3 % |
+
+Both pass all 126 scripts. The warm-up runs agree on the direction (293.4 s vs 275.5 s).
+
+**Read that −8.7 % in context, in both directions.** `--quick-test` stops each script after its first
+successful Newton solve, so the suite is deliberately dominated by JIT-compiling the generated element
+code, process startup, mesh generation and output writing — assembly and linear solves are a small
+slice of it. A ~9 % wall-clock gain on *that* workload is therefore a lower bound on what a real
+production run sees; the −43 % measured on an actual Newton solve is the upper end. Where a given
+simulation lands between the two depends entirely on how much of its time is spent solving.
+
+**Peak memory is unchanged**, which was the open question: the frozen scatter map costs about 8 bytes
+per raw elemental entry (two ints per stored position), and at tutorial problem sizes that is lost in
+the noise. It is not free at scale — for the 3D Taylor-Hood benchmark (2.7 M raw entries) it is
+~21 MB per matrix — so it remains worth watching on genuinely large 3D problems, where
+`use_frozen_sparsity=False` is the escape hatch.
+
 ### Not yet done from Phase 1
 
 * `problem.force_jacobian_diagonal_entries` is not implemented as a separate switch. Under Tier A it
