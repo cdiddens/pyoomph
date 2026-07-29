@@ -106,6 +106,13 @@ namespace pyoomph
   // Reference-domain coordinates of the vertices, i.e. the macro coordinates of an unrefined element.
   void macro_reference_vertices(const MacroElementShape &shape, std::vector<std::vector<double>> &sv);
 
+  // The shape's edges as vertex-index pairs. Needed because an element can touch a curved surface
+  // along an edge without owning a face on it -- common in an unstructured tetrahedral mesh -- and
+  // must then still curve that edge, or it would place new nodes on the chord while its neighbour
+  // places them on the surface. Only genuine edges: a face diagonal joins two points of the surface
+  // but is not an edge of the element, and curving it would bulge the interior.
+  const std::vector<std::pair<unsigned, unsigned>> &macro_edges(const MacroElementShape &shape);
+
   // One curved facet attached to a macro element. `facet` owns both the curved entity and the
   // parametric coordinates of its nodes; it lives in MeshTemplate::facets, which outlives the mesh.
   struct MacroCurvedFacet
@@ -155,6 +162,7 @@ namespace pyoomph
     void add_curved_facet(MeshTemplateFacet *facet, const std::vector<unsigned> &local_vertices,
                           const std::vector<unsigned> &parametric_index);
     unsigned ncurved_facets() const { return curved_facets.size(); }
+    const std::vector<unsigned> &curved_facet_vertices(const unsigned &i) const { return curved_facets[i].local_vertices; }
     const MacroElementShape &get_shape() const { return shape; }
 
     void macro_map(const unsigned &t, const oomph::Vector<double> &s, oomph::Vector<double> &r) override;

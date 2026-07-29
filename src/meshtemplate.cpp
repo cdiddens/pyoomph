@@ -2035,6 +2035,34 @@ Index : Local coordinates (s0,s1,s2)
 	// `res`) so that node positions during refinement follow the curved geometry rather than
 	// straight-sided interpolation: for each local facet, look up whether the corresponding
 	// mesh facet carries a curved entity and, if so, attach it via macro->set_facet().
+	// Collect the edges of every curved facet. A triangular facet contributes all three of its vertex
+	// pairs; a quadrilateral one only its four consecutive pairs, since its diagonals join two points
+	// of the surface without being edges of anything, and curving them would bulge an element's
+	// interior rather than its boundary.
+	void MeshTemplate::build_curved_edge_map()
+	{
+		curved_edge_map_built = true;
+		for (auto *f : facets)
+		{
+			if (!f || !f->curved_entity) continue;
+			const unsigned n = f->nodeinds.size();
+			if (n < 2) continue;
+			for (unsigned int k = 0; k < n; k++)
+			{
+				// A 3-node facet is a triangle (every pair is an edge); otherwise take consecutive pairs.
+				unsigned l = (k + 1) % n;
+				if (n == 3 || n == 2 || true)
+				{
+					nodeindex_t a = f->nodeinds[k], b = f->nodeinds[l];
+					if (a == b) continue;
+					auto key = std::make_pair(std::min(a, b), std::max(a, b));
+					if (!curved_edge_map.count(key)) curved_edge_map[key] = f;
+				}
+				if (n == 2) break;
+			}
+		}
+	}
+
 	BulkElementBase *MeshTemplate::factory_element(MeshTemplateElement *el, MeshTemplateElementCollection *coll)
 	{
 		// Generate all nodes if not present
@@ -2235,10 +2263,62 @@ Index : Local coordinates (s0,s1,s2)
 				macro->add_curved_facet(actual_facet, local_vertices, parametric_index);
 			}
 
+			// Curved edges this element touches without owning the facet they belong to. Without this an
+			// unstructured mesh is not watertight: measured on a gmsh tetrahedral ball, 45 of 126
+			// elements have a face on the sphere but another 25 touch it along an edge only, and
+			// whichever of the two builds a node on that edge first decides where it goes.
+			if (!curved_edge_map_built) build_curved_edge_map();
+			if (!curved_edge_map.empty())
+			{
+				// The template node index behind each of the element's C1 vertices.
+				std::map<oomph::Node *, nodeindex_t> node_to_template;
+				for (auto &nii : nodeindices)
+					if (nodes[nii]->oomph_node) node_to_template[nodes[nii]->oomph_node] = nii;
+
+				for (auto &e : macro_edges(shape))
+				{
+					if (e.first >= vertices.size() || e.second >= vertices.size()) continue;
+					if (!node_to_template.count(vertices[e.first]) || !node_to_template.count(vertices[e.second])) continue;
+					nodeindex_t a = node_to_template[vertices[e.first]], b = node_to_template[vertices[e.second]];
+					auto it = curved_edge_map.find(std::make_pair(std::min(a, b), std::max(a, b)));
+					if (it == curved_edge_map.end()) continue;
+
+					// Skip edges already carried by one of this element's curved facets: the facet's own
+					// deviation covers them, and adding them twice would double the edge's contribution.
+					bool covered = false;
+					if (macro)
+					{
+						for (unsigned int f = 0; f < macro->ncurved_facets() && !covered; f++)
+						{
+							const std::vector<unsigned> &lv = macro->curved_facet_vertices(f);
+							bool has_a = false, has_b = false;
+							for (auto &v : lv) { if (v == e.first) has_a = true; if (v == e.second) has_b = true; }
+							covered = has_a && has_b;
+						}
+					}
+					if (covered) continue;
+
+					MeshTemplateFacet *ef = it->second;
+					std::vector<unsigned> lv, pi;
+					for (unsigned int k = 0; k < ef->nodeinds.size(); k++)
+					{
+						if (ef->nodeinds[k] == a) { lv.push_back(e.first); pi.push_back(k); }
+						else if (ef->nodeinds[k] == b) { lv.push_back(e.second); pi.push_back(k); }
+					}
+					if (lv.size() != 2) continue;
+					if (!macro)
+					{
+						macro = new GenericMacroElement(domain, domain->nmacro_element(), shape, vertices);
+						domain->push_back_macro_element(macro);
+					}
+					macro->add_curved_facet(ef, lv, pi);
+				}
+			}
+
 			if (macro)
 			{
 				if (pyoomph_verbose)
-					std::cout << "ADDING MACRO ELEMENT with " << macro->ncurved_facets() << " curved facets" << std::endl;
+					std::cout << "ADDING MACRO ELEMENT with " << macro->ncurved_facets() << " curved sub-entities" << std::endl;
 				res->set_macro_elem_pt(macro);
 				res->map_nodes_on_macro_element();
 			}

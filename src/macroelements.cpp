@@ -180,6 +180,38 @@ namespace pyoomph
     throw_runtime_error("Unknown macro element shape");
   }
 
+  const std::vector<std::pair<unsigned, unsigned>> &macro_edges(const MacroElementShape &shape)
+  {
+    // Vertex numbering as in macro_reference_vertices.
+    static const std::vector<std::pair<unsigned, unsigned>> tri = {{0, 1}, {1, 2}, {2, 0}};
+    static const std::vector<std::pair<unsigned, unsigned>> quad = {{0, 1}, {1, 3}, {3, 2}, {2, 0}};
+    static const std::vector<std::pair<unsigned, unsigned>> tet = {{0, 1}, {0, 2}, {0, 3}, {1, 2}, {1, 3}, {2, 3}};
+    // Brick vertex v has coordinates given by its bits, so its edges join vertices differing in one bit.
+    static const std::vector<std::pair<unsigned, unsigned>> brick = {
+        {0, 1}, {2, 3}, {4, 5}, {6, 7}, {0, 2}, {1, 3}, {4, 6}, {5, 7}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+    static const std::vector<std::pair<unsigned, unsigned>> wedge = {
+        {0, 1}, {1, 2}, {2, 0}, {3, 4}, {4, 5}, {5, 3}, {0, 3}, {1, 4}, {2, 5}};
+    static const std::vector<std::pair<unsigned, unsigned>> pyramid = {
+        {0, 1}, {1, 2}, {2, 3}, {3, 0}, {0, 4}, {1, 4}, {2, 4}, {3, 4}};
+    switch (shape)
+    {
+    case MacroElementShape::Tri2d:
+      return tri;
+    case MacroElementShape::Quad2d:
+      return quad;
+    case MacroElementShape::Tet3d:
+      return tet;
+    case MacroElementShape::Brick3d:
+      return brick;
+    case MacroElementShape::Wedge3d:
+      return wedge;
+    case MacroElementShape::Pyramid3d:
+      return pyramid;
+    }
+    throw_runtime_error("Unknown macro element shape");
+    return tri;
+  }
+
   GenericMacroElement::GenericMacroElement(oomph::Domain *domain, const unsigned &index,
                                            const MacroElementShape &shape_,
                                            const std::vector<oomph::Node *> &vertices)

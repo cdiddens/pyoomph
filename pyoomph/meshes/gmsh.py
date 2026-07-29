@@ -1083,7 +1083,101 @@ class GmshTemplate(MeshTemplate):
         
         return allres
 
-    def ruled_surface(self, *args:str | Line | Spline | BSpline | CircleArc, name:str | None=None,reversed_order:bool=False) -> list[Surface]:
+    def _sphere_from_boundary_curves(self, curves:Sequence[Any], explicit_center:Sequence[float] | None=None) -> tuple[NPFloatArray,float]:
+        """Work out which sphere a surface's bounding curves lie on.
+
+        Only the points that are certainly ON the surface are used: the two end points of every
+        bounding curve. A CircleArc's middle point is its arc centre, which lies on the sphere only
+        when the arc happens to be a great circle, so it is collected separately and merely offered
+        as a candidate centre. Interior control points of splines are ignored for the same reason.
+
+        The centre is taken from the first arc centre that is equidistant from every boundary point,
+        which is exact for the usual construction (a patch bounded by great-circle arcs about the
+        sphere's own centre); failing that, from a least-squares sphere fit, which needs four
+        boundary points that are not coplanar. Either way the result is verified against every
+        boundary point before it is used -- an unverifiable guess here would silently deform the
+        mesh, so this raises instead.
+        """
+        on_sphere:list[NPFloatArray] = []
+        arc_centers:list[NPFloatArray] = []
+        for c in curves:
+            pts = getattr(c, "points", None)
+            if not pts:
+                continue
+            if isinstance(c, CircleArc) and len(pts) == 3:
+                on_sphere.append(numpy.array(pts[0].x, dtype=numpy.float64))
+                on_sphere.append(numpy.array(pts[2].x, dtype=numpy.float64))
+                arc_centers.append(numpy.array(pts[1].x, dtype=numpy.float64))
+            else:
+                on_sphere.append(numpy.array(pts[0].x, dtype=numpy.float64))
+                on_sphere.append(numpy.array(pts[-1].x, dtype=numpy.float64))
+        uniq:list[NPFloatArray] = []
+        for q in on_sphere:
+            if not any(numpy.linalg.norm(q - u) < 1e-12 for u in uniq): #type:ignore
+                uniq.append(q)
+        if len(uniq) < 3:
+            raise RuntimeError("map_to_sphere: the surface's bounding curves give only "+str(len(uniq))+" distinct points, which cannot determine a sphere")
+
+        def consistent(centre:NPFloatArray) -> float | None:
+            radii = [float(numpy.linalg.norm(q - centre)) for q in uniq] #type:ignore
+            rmean = sum(radii) / len(radii)
+            if rmean < 1e-12:
+                return None
+            if max(abs(r - rmean) for r in radii) > 1e-8 * rmean:
+                return None
+            return rmean
+
+        candidates:list[NPFloatArray] = []
+        if explicit_center is not None:
+            candidates.append(numpy.array([float(c) for c in explicit_center], dtype=numpy.float64))
+        else:
+            candidates.extend(arc_centers)
+            if len(uniq) >= 5:
+                # Algebraic sphere fit: |p-c|^2 = r^2  <=>  2 p.c + (r^2 - |c|^2) = |p|^2, linear in
+                # (c, r^2-|c|^2). Five points minimum, not four: four points in general position lie on
+                # exactly one sphere, so a fit through four always succeeds and the verification below
+                # could never reject anything. Only from the fifth point on does agreeing with the fit
+                # say something about the surface rather than about the arithmetic.
+                A = numpy.array([[2 * q[0], 2 * q[1], 2 * q[2], 1.0] for q in uniq], dtype=numpy.float64)
+                b = numpy.array([float(numpy.dot(q, q)) for q in uniq], dtype=numpy.float64) #type:ignore
+                try:
+                    sol, *_ = numpy.linalg.lstsq(A, b, rcond=None) #type:ignore
+                    candidates.append(numpy.array(sol[:3], dtype=numpy.float64))
+                except numpy.linalg.LinAlgError:
+                    pass
+
+        for centre in candidates:
+            radius = consistent(centre)
+            if radius is not None:
+                return centre, radius
+
+        raise RuntimeError(
+            "map_to_sphere: could not find a sphere through this surface's bounding curves. Its "
+            "boundary points are not equidistant from any arc centre, and either there are too few "
+            "of them for a fit to mean anything (four points always lie on some sphere) or the fit "
+            "does not pass through them. So this surface is either not a spherical patch, or its "
+            "boundary does not pin the sphere down. Pass map_to_sphere=(cx,cy,cz) to state the "
+            "centre explicitly.")
+
+    def ruled_surface(self, *args:str | Line | Spline | BSpline | CircleArc, name:str | None=None,reversed_order:bool=False,map_to_sphere:bool | Sequence[float]=False) -> list[Surface]:
+        """
+        Adds a ruled surface spanned by the given bounding curves.
+
+        Args:
+            args: The bounding curves, by name or object.
+            name: The name of the surface, to identify it later e.g. as boundary.
+            reversed_order: Whether to reverse the orientation of the curve loop.
+            map_to_sphere: Attach a spherical macro element to this surface, so that nodes created
+                by spatial refinement are placed on the sphere rather than on the surface Gmsh
+                actually meshed. Pass ``True`` to work the sphere out from the bounding curves, or a
+                ``(cx, cy, cz)`` centre to state it explicitly.
+
+                This is opt-in on purpose. A ruled surface is *not* in general a sphere -- Gmsh's
+                built-in kernel does not produce an exact sphere from one even when the bounding
+                curves are great-circle arcs -- so pyoomph cannot assume it. Say so only when the
+                surface really is meant to be spherical; the mesh's own nodes on it are then also
+                projected onto the exact sphere, which moves them slightly.
+        """
         resolved = self._resolve_name("lines", *args)
         srted = self._sort_line_loop(resolved, name=name) #type:ignore
         allres:list[Surface] = []
@@ -1093,6 +1187,11 @@ class GmshTemplate(MeshTemplate):
             ll = self._geom.add_curve_loop(s) #type:ignore
             res = self._geom.add_surface(ll) #type:ignore
             self._entities2d[res._id] = res #type:ignore
+            if map_to_sphere is not False and self.use_macro_elements:
+                centre, radius = self._sphere_from_boundary_curves(
+                    s, None if map_to_sphere is True else map_to_sphere) #type:ignore
+                onsphere = [centre[0] + radius, centre[1], centre[2]]
+                self._curved_entities2d[res._id] = _pyoomph.CurvedEntitySpherePart(list(centre), onsphere) #type:ignore
             if name is not None:
                 self._store_name(name, res)
             if self.mesh_mode in ["quads","only_quads"]:

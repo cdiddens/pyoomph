@@ -3,7 +3,7 @@
 Written 2026-07-29 on branch `macro_elements`, after the interface-refinement-coupling work
 (`interface_refinement_coupling.md`) landed on `main`.
 
-Status: **S0, S1, S3 and S4 done — every element shape is covered. S2 (re-scoped) is what remains.** §1 and §2 are measured, not assumed — every claim about current
+Status: **S0, S1, S3, S4 and gmsh-3d done.** Every element shape is covered, in 2d and 3d, from hand-built templates and from gmsh. S2 (re-scoped), S5–S7 remain. §1 and §2 are measured, not assumed — every claim about current
 behaviour below was reproduced, and the numbers are quoted. §3–§5 are the design. §11 is the
 staging. **§13 records what S0 actually turned up**, including a defect worse than anything §1 and
 §2 predicted and a measurement that materially weakens the case for part of S2 — read it before
@@ -1177,17 +1177,15 @@ boundary-coordinate assignment, and tests like the ones in this file. Worth fixi
 (the honest rule is "on the boundary iff the containing facet is"), but it is not this work's, and
 nothing here depends on it.
 
-### 15.3 The edge→entity registry of §3.2.2 is not needed yet
+### 15.3 ~~The edge→entity registry of §3.2.2 is not needed yet~~ — wrong, see §17.2
 
-§3.2.2 argued that watertightness needs edge geometry to be a mesh-level fact, because an element can
-touch a curved surface along an edge alone, without owning a face on it — and would then leave a
-shared face flat while its neighbour ruled it. That case did not arise in any mesh built here: in
-both `SphericalOctantMesh` and the tet ball, every element that touches the sphere touches it in a
-face, so both sides of every interior face agree. The registry is therefore deferred rather than
-built, with the reasoning left in §3.2.2 for when a mesh does produce the case. The
-inconsistency check it was also meant to host is implemented directly in
-`GenericMacroElement::rebuild_edge_corrections`, which refuses two different entities claiming the
-same edge of one element.
+*Retracted.* This section argued the registry could be deferred because every element that touches
+the sphere in `SphericalOctantMesh` and the tet ball touches it in a face. That is true of those two
+meshes and false in general: it is a property of hand-built structured meshes, not of the geometry.
+An unstructured gmsh tetrahedral ball has 25 of 126 elements touching the sphere along an **edge**
+only, and they were silently placing that edge's new nodes on the chord. §17.2 has the measurement
+and the fix. The inconsistency check this section mentions is still where it says, in
+`GenericMacroElement::rebuild_edge_corrections`.
 
 ### 15.4 The sphere is now the reason to finish S2, not the seam
 
@@ -1255,3 +1253,79 @@ What remains is not about shapes:
   now the largest user-visible gap and deserves its own stage.
 - **S5 moving meshes**, **S6 MPI**, **S7 docs** as planned.
 - The boundary-inheritance over-marking of §15.2, on its own merits.
+
+---
+
+## 17. gmsh in 3d
+
+### 17.1 `map_to_sphere` has to be opt-in
+
+`GmshTemplate._curved_entities2d` was declared with a `# TODO: Set those` and never populated, so a
+gmsh 3d mesh had no curved geometry at all. The consumer side already existed
+([gmsh.py:1450](pyoomph/meshes/gmsh.py#L1450)) and needed no change: populating the dict is the whole
+of the wiring.
+
+What it cannot be is automatic. **Gmsh's built-in kernel does not produce an exact sphere from a
+ruled surface**, even when the bounding curves are great-circle arcs — the surface it meshes is its
+own ruled interpolant, not the sphere. Attaching a spherical entity to every ruled surface would
+therefore impose a geometry gmsh never meshed. So `ruled_surface(..., map_to_sphere=True)` is opt-in,
+and it is the user asserting "this surface is meant to be a sphere", which pyoomph then makes exactly
+true (including projecting the surface's own nodes onto it, which moves them slightly).
+
+The centre and radius are recovered from the bounding curves, with a deliberate bias toward refusing:
+
+- Only points *certainly* on the surface are used — the two endpoints of each bounding curve. A
+  `CircleArc`'s middle point is its arc centre, which lies on the sphere only if the arc is a great
+  circle, so it is collected separately as a *candidate centre* instead.
+- A candidate centre is accepted only if every boundary point is equidistant from it. For the usual
+  construction — a patch bounded by great-circle arcs about the sphere's centre — the arc centre is
+  that point exactly, so no fitting happens at all.
+- Failing that, a least-squares sphere fit, but **only from five distinct boundary points on**. Four
+  points in general position lie on exactly one sphere, so a fit through four always succeeds and the
+  verification could never reject anything; requiring a fifth is what makes agreement evidence.
+- Otherwise it raises, and says that `map_to_sphere=(cx,cy,cz)` will state the centre explicitly.
+
+Measured on an octant of a ball meshed with tetrahedra: `map_to_sphere=True` gives a shell error of
+`0`, `2.2e-16`, `2.2e-16` at 0, 1 and 2 refinements; without it, `3.3e-16`, `1.5e-2`, `1.6e-2` — the
+nodes gmsh itself places are on the sphere, everything refinement adds is not.
+
+### 17.2 An unstructured mesh needs the curved-edge registry, and §15.3 was wrong to defer it
+
+The first `map_to_sphere=True` run improved the refined shell from `1.5e-2` to `1.1e-2` — better, and
+nowhere near exact. Classifying the coarse mesh's 126 elements by how much of the sphere they touch:
+
+```
+nodes on the shell   elements   had a macro element
+        0               44             no
+        1               12             no
+        2               25             no      <-- these are the problem
+        3               45             yes
+```
+
+45 elements own a face on the sphere and get a macro element. **25 touch it along an edge only.**
+Those have no curved facet, so before this they got no macro element at all, and when refined they
+placed the midpoint of that shared edge by straight interpolation — on the chord — while the element
+on the other side of it placed the same node on the sphere. Whichever built the node first won.
+
+This is exactly the case §3.2.2 predicted and §15.3 dismissed, and the dismissal was the wrong
+inference: "every element touching the sphere owns a face on it" is a property of the two structured
+meshes that had been tried, not of curved boundaries. An unstructured mesh breaks it as a matter of
+course.
+
+The fix is §3.2.2's registry, and the pieces were already in place. `MeshTemplate` now builds
+`curved_edge_map`, keyed by sorted template node-index pair, from the edges of every curved facet;
+`factory_element` gives an element a macro element carrying those edges as **two-vertex curved
+sub-entities** whenever it touches one without owning the facet. `GenericMacroElement` needed nothing
+at all: a sub-entity of two vertices is already what the blend expects, and `w_E d_E` on an otherwise
+straight element is precisely the ruled surface that makes the two sides agree.
+
+Two details worth keeping:
+
+- Edges already inside one of the element's own curved facets are skipped, or the facet deviation and
+  the edge deviation would both be applied and the edge would be counted twice.
+- Only *genuine* edges are registered, from a per-shape table (`macro_edges`). A quadrilateral facet's
+  diagonal joins two points of the surface but is not an edge of anything; curving it would bulge an
+  element's interior rather than its boundary.
+
+With the registry, 70 of the 126 elements carry a macro element — the 45 with faces plus exactly the
+25 with edges — and the shell is exact at every refinement level.

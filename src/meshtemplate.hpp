@@ -846,6 +846,14 @@ namespace pyoomph
     std::vector<MeshTemplateFacet *> facets;
     std::map<MeshTemplateFacet *, unsigned, std::function<bool(const MeshTemplateFacet *, const MeshTemplateFacet *)>> facetmap; // Required for fast finding facets
     MeshTemplateDomain *domain;
+    // Edges of curved facets, keyed by their (sorted) template node index pair. An element that
+    // touches a curved surface along an edge without owning a facet there still has to curve that
+    // edge -- otherwise it places the edge's new nodes on the chord while the element on the other
+    // side places them on the surface, and the two disagree. Built lazily from `facets`, which is
+    // complete by the time any element is created. See dev_docs/macro_elements_generalisation.md 3.2.2.
+    std::map<std::pair<nodeindex_t, nodeindex_t>, MeshTemplateFacet *> curved_edge_map;
+    bool curved_edge_map_built = false;
+    void build_curved_edge_map();
     std::vector<MeshTemplatePeriodicIntermediateNodeInfo> inter_nodes_periodic;
 
   public:

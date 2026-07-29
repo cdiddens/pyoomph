@@ -53,6 +53,7 @@ import pytest
 from pyoomph import *
 from pyoomph import _pyoomph_core as _pyoomph
 from pyoomph.equations.poisson import PoissonEquation
+from pyoomph.meshes.gmsh import GmshTemplate
 from pyoomph.meshes.mesh import MeshTemplate
 from pyoomph.meshes.simplemeshes import CircularMesh, SphericalOctantMesh
 
@@ -265,6 +266,43 @@ class _MixedShell(Problem):
         self += eqs @ "domain"
 
 
+class _GmshBallTemplate(GmshTemplate):
+    # An octant of a ball meshed by gmsh with tetrahedra, its shell mapped onto the sphere. Unlike the
+    # hand-built meshes above this is unstructured, which is what makes it the interesting case: most
+    # elements touching the sphere own a face on it, but a substantial minority touch it along an edge
+    # only, and those need the curved-edge registry to agree with their neighbours.
+    def __init__(self, map_to_sphere=True):
+        super().__init__()
+        self._map = map_to_sphere
+
+    def define_geometry(self):
+        self.default_resolution = 0.35
+        self.mesh_mode = "tetras"
+        o = self.point(0, 0, 0)
+        px, py, pz = self.point(_R, 0, 0), self.point(0, _R, 0), self.point(0, 0, _R)
+        axy = self.circle_arc(px, py, center=o)
+        ayz = self.circle_arc(py, pz, center=o)
+        azx = self.circle_arc(pz, px, center=o)
+        lx, ly, lz = self.line(o, px), self.line(o, py), self.line(o, pz)
+        shell = self.ruled_surface(axy, ayz, azx, name="shell", map_to_sphere=self._map)[0]
+        sxy = self.plane_surface(lx, axy, ly, name="plane_z0")[0]
+        syz = self.plane_surface(ly, ayz, lz, name="plane_x0")[0]
+        szx = self.plane_surface(lz, azx, lx, name="plane_y0")[0]
+        self.volume(shell, sxy, syz, szx, name="domain")
+
+
+class _GmshBall(Problem):
+    def __init__(self, map_to_sphere=True):
+        super().__init__()
+        self._map = map_to_sphere
+
+    def define_problem(self):
+        self += _GmshBallTemplate(self._map)
+        eqs = PoissonEquation(source=1, space="C1") + DirichletBC(u=0) @ "shell"
+        eqs += SpatialErrorEstimator(u=1)
+        self += eqs @ "domain"
+
+
 class _ArcSectorTemplate(MeshTemplate):
     # One quad annulus sector spanning [a0, a1] degrees with its outer edge on a circular arc, used
     # to sweep the arc across the atan2 branch cut at +-pi. keep_entity=False deliberately drops the
@@ -359,6 +397,25 @@ def _worker_main(argv):
         for _ in range(nref):
             problem.refine_uniformly()
         print("RESULT", _max_radius_error(problem.get_mesh("domain"), "shell", ndim=3))
+        return
+    elif kind == "gmshball":
+        nref, mapped = int(argv[2]), argv[3] == "1"
+        problem = _GmshBall(map_to_sphere=mapped)
+        problem.set_output_directory(outdir)
+        problem.max_refinement_level = 3
+        problem.initialise()
+        for _ in range(nref):
+            problem.refine_uniformly()
+        mesh = problem.get_mesh("domain")
+        bidx = mesh.get_boundary_index("shell")
+        nmacro = sum(1 for e in mesh.elements() if e.get_macro_element() is not None)
+        nface = 0
+        for e in mesh.elements():
+            if sum(1 for i in range(e.nnode()) if e.node_pt(i).is_on_boundary(bidx)) >= 3:
+                nface += 1
+        print("RESULT", _max_radius_error(mesh, "shell", ndim=3))
+        print("NMACRO", nmacro)
+        print("NFACE", nface)
         return
     elif kind in ("wedge", "pyramid"):
         nref = int(argv[3])
@@ -678,3 +735,38 @@ def test_curved_wedge_and_pyramid_are_exact(kind, nref, tmp_path):
     # That works only because the son's region is carried as vertex coordinates rather than as
     # oomph's axis-aligned box, which cannot express it.
     assert _worker_radius_error(tmp_path, kind, "C1", nref) < _EXACT
+
+
+# --------------------------------------------------------------------------------------------
+# gmsh in 3d, and the curved-edge registry it needs
+# --------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("nref", [0, 1, 2])
+def test_gmsh_ball_shell_is_exact(nref, tmp_path):
+    # Curved boundaries reachable from gmsh in 3d, which they were not before: _curved_entities2d was
+    # declared with a "TODO: Set those" and never populated, so a gmsh 3d mesh had no curved geometry
+    # at all regardless of how it was built.
+    out = _worker_lines(tmp_path, "gmshball", nref, 1)
+    assert float(out["RESULT"]) < _EXACT
+
+
+def test_gmsh_ball_needs_the_curved_edge_registry(tmp_path):
+    # The reason an unstructured mesh needs §3.2.2's registry, stated as a measurement. On the coarse
+    # gmsh ball 45 of 126 elements own a face on the sphere -- but 70 carry a macro element, because
+    # another 25 touch the sphere along an edge only. Those 25 have no curved facet of their own, and
+    # before the registry they placed that edge's new nodes on the chord while the element on the
+    # other side placed them on the sphere; whichever built the node first won, and the shell came out
+    # 1.1e-2 off rather than exact.
+    out = _worker_lines(tmp_path, "gmshball", 0, 1)
+    nmacro, nface = int(out["NMACRO"]), int(out["NFACE"])
+    assert nface == 45
+    assert nmacro == 70, "expected the 45 face-touching elements plus 25 edge-only ones"
+    assert float(out["RESULT"]) < _EXACT
+
+
+def test_gmsh_map_to_sphere_is_opt_in(tmp_path):
+    # Gmsh's built-in kernel does not produce an exact sphere from a ruled surface even when the
+    # bounding curves are great-circle arcs, so pyoomph must not assume one. Without the opt-in the
+    # shell stays polyhedral, as it always has.
+    out = _worker_lines(tmp_path, "gmshball", 1, 0)
+    assert float(out["RESULT"]) > 1e-3
