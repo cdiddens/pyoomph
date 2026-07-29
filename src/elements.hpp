@@ -576,6 +576,12 @@ namespace pyoomph
     JITElementInfo_t *get_eleminfo() { return &eleminfo; }
     double get_element_diam() const;
     virtual std::vector<double> get_macro_element_coordinate_at_s(oomph::Vector<double> s);
+    // Evaluate the macro-element geometry itself: the Eulerian position this element's macro element
+    // maps the local coordinate s to. Empty if the element has no macro element. Unlike
+    // get_macro_element_coordinate_at_s (which stops at the macro-element coordinate) this returns a
+    // position, which is what lets a test sample the curved geometry over the whole reference domain
+    // -- interior included -- rather than only where nodes happen to sit.
+    virtual std::vector<double> get_macro_element_position_at_s(oomph::Vector<double> s);
     DynamicBulkElementInstance *get_code_instance() { return codeinst; }
     const DynamicBulkElementInstance *get_code_instance() const { return codeinst; }
     // Bind this element to a physics (codeinst). Needed when a factory creates a son of a DIFFERENT element

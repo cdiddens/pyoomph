@@ -579,7 +579,14 @@ void PyReg_Mesh(nb::module_ &m)
 			if (!be) return {};
 			oomph::Vector<double> so(s.size()); for (unsigned int i=0;i<s.size();i++) so[i]=s[i];
 			return be->get_macro_element_coordinate_at_s(so);
-		   }, nb::arg("s"), "Returns the position given by the element's macro element mapping at the local coordinate s (used e.g. for curved/undeformed geometries)")
+		   }, nb::arg("s"), "Returns the macro element coordinate corresponding to the local coordinate s of this element, or an empty list if this element has no macro element")
+		.def("get_macro_element_position_at_s",[](oomph::GeneralisedElement *self, std::vector<double> s) -> std::vector<double>
+		   {
+			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);
+			if (!be) return {};
+			oomph::Vector<double> so(s.size()); for (unsigned int i=0;i<s.size();i++) so[i]=s[i];
+			return be->get_macro_element_position_at_s(so);
+		   }, nb::arg("s"), "Returns the position given by the element's macro element mapping at the local coordinate s (used e.g. for curved/undeformed geometries), or an empty list if this element has no macro element")
 		.def("evaluate_local_expression_at_s", [](oomph::GeneralisedElement *self, int index, std::vector<double> s) -> double
 			 {
 			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);

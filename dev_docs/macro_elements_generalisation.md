@@ -3,9 +3,11 @@
 Written 2026-07-29 on branch `macro_elements`, after the interface-refinement-coupling work
 (`interface_refinement_coupling.md`) landed on `main`.
 
-Status: **plan only, nothing implemented.** §1 and §2 are measured, not assumed — every claim about
-current behaviour below was reproduced with a script in the session scratchpad, and the numbers are
-quoted. §3–§5 are the design. §11 is the staging.
+Status: **S0 done, S1 next.** §1 and §2 are measured, not assumed — every claim about current
+behaviour below was reproduced, and the numbers are quoted. §3–§5 are the design. §11 is the
+staging. **§13 records what S0 actually turned up**, including a defect worse than anything §1 and
+§2 predicted and a measurement that materially weakens the case for part of S2 — read it before
+starting S1.
 
 Two questions drive this document:
 
@@ -205,6 +207,8 @@ That one is *correct* and must be preserved — see §6.1.
 
 ### 1.5 Two incidental defects found on the way
 
+*(Both fixed in S0, along with a third and worse one that only the harness found — §13.1.)*
+
 - **Leftover debug output.** `MeshTemplateQMacroElement3::macro_element_boundary` prints
   `STARTING FACE i` and `COMPARING PARAMS ...` unconditionally
   ([src/meshtemplate.cpp:268](src/meshtemplate.cpp#L268),
@@ -238,6 +242,12 @@ That one is *correct* and must be preserved — see §6.1.
 ## 2. The second problem: one scalar is not enough
 
 ### 2.1 The seam
+
+> **Superseded in part by §13.1–13.2.** The measurements below stand, but their *cause* was a plain
+> arithmetic bug (a reflection where an unwrap was meant), not the limitation this section infers
+> from them — and the sweep that found it also found a silent-wrong-geometry mode this section
+> misses entirely. Both are fixed; the 1d seam is no longer an argument for S2. Read §13.2 for what
+> is left of the case.
 
 `CurvedEntityCircleArc::position_to_parametric` is `atan2`
 ([src/meshtemplate.hpp:149-152](src/meshtemplate.hpp#L149-L152)), so the parameter lives on
@@ -840,16 +850,56 @@ precision. All of these are cheap and belong in `tests/`.
 
 ---
 
-## 10. What to measure before writing code
+## 10. What to measure before writing code — **done, results below**
 
-1. **Execute the equivalence proof of §3.2.** For a curved quad and a curved brick, sample
-   `GenericMacroElement::macro_map` and oomph's `QMacroElement<2>/<3>::macro_map` on a grid over the
-   whole reference domain — interior included, not just the boundary — and require agreement to
-   `1e-14`. This is a unit test, not an integration test, and it is the gate for deleting the old
-   path. If it passes, no tutorial result can move.
-2. **Does slerp vs normalised-sum matter?** Compute the placement error of a quarter-arc facet under
-   both at weights 0.25/0.5/0.75. If normalised-sum is within the discretisation error, skip slerp
-   and keep the blend a one-liner.
+### 10.1 The equivalence of §3.2, executed
+
+A reference implementation of the deviation form (generalised barycentrics, in Python) was compared
+against oomph's actual `QMacroElement<2>::macro_map` on a 41×41 grid over the **whole** reference
+square, sampled through the new `Element.get_macro_element_position_at_s()`:
+
+```
+arc      curved facets   max |coons - deviation|   interior bending
+0..45          1                4.0e-16                7.6e-02
+170..200       1                1.1e-15                3.4e-02
+150..210       1                9.0e-16                1.3e-01
+355..25        1                4.4e-16                3.4e-02
+0..45          2                4.0e-16                5.0e-01
+170..200       2                1.1e-15                5.0e-01
+```
+
+"Interior bending" is how far the macro map departs from the straight-sided bilinear map, i.e. how
+much of the reference domain's interior is actually curved. It is three to five orders of magnitude
+larger than the discrepancy, so the agreement is a real statement about two different curved maps,
+not two flat ones agreeing trivially.
+
+**Conclusion: risk 2 is retired.** One code path, no interior diffs, and this comparison becomes
+unit test T13 rather than a one-off measurement.
+
+### 10.2 slerp vs normalised-sum, measured
+
+If a circle is parametrised by its unit normal (§4.3), both blends put the node *exactly* on the
+circle — the boundary is exact either way. They differ only in where along the arc it lands, so the
+error is tangential (uneven spacing) rather than normal (wrong geometry). Worst case over all
+weights, on a unit circle:
+
+```
+facet width   tangential shift   as % of edge length   as % of the sagitta
+   15 deg        2.9e-04                0.11%                 3.4%
+   30 deg        2.3e-03                0.45%                 6.9%
+   45 deg        8.0e-03                1.05%                10.5%
+   90 deg        7.1e-02                5.03%                24.3%
+  120 deg        1.9e-01               11.03%                38.2%
+```
+
+At weight ½ — the bisector, which is what edge refinement of a facet actually asks for — the two
+agree exactly; the numbers above come from the off-centre weights that deeper tree levels produce.
+
+**Conclusion: keep the §4.3 plan as written.** Up to ~45° facets normalised-sum costs about 1% of
+an element edge, which is tolerable, but exact slerp for the two-point case is three lines and 1d
+facets are *always* two-point, so there is no reason to accept even that. Normalised-sum stays for
+the three- and four-point facets of a 3d face, where no closed-form slerp exists and where §3.2.1's
+ruled-surface behaviour dominates the error budget anyway.
 
 ---
 
@@ -857,10 +907,10 @@ precision. All of these are cheap and belong in `tests/`.
 
 Each stage ends with its tests green and is committed separately.
 
-- **S0 — harness and honesty.** Add T1/T2/T6 as *expected-fail* tests recording the measured
-  present-day numbers, so the improvement is visible rather than asserted. Fix the two incidental
-  defects of §1.5 (debug output, entity lifetime) — they are independent and cheap. Run §10's two
-  measurements.
+- **S0 — harness and honesty.** ✅ **Done** (`tests/test_curved_boundaries.py`, 31 passed /
+  6 xfailed; full fast suite 447 passed). T1/T2/T6 recorded as strict-xfail against the measured
+  present-day numbers; §1.5's two incidental defects fixed, plus a third and worse one found while
+  writing the harness; both §10 measurements run. **See §13 — it changes S2.**
 - **S1 — the generic 2d macro map.** `GenericMacroElement`, `c1_shape`, `S_macro_vertex`,
   `get_x_from_macro_element`, generic `map_nodes_on_macro_element`; the post-build re-snap for
   quads; delete `Tmacroelements.hpp`, the three `MeshTemplate*MacroElement*` classes,
@@ -906,3 +956,107 @@ sphere's 90°-opening-angle restriction — ceases to exist. The only code chang
 mechanism itself is replacing two hardcoded buffer sizes
 ([src/meshtemplate.cpp:160](src/meshtemplate.cpp#L160),
 [:281](src/meshtemplate.cpp#L281)) with `get_parametric_dimension()`.
+
+*(§13.2 and §13.3 qualify the second paragraph: the 1d seam turned out to be a plain arithmetic bug
+and is now fixed independently of S2. What is left for the normal representation is surfaces, and
+simplification.)*
+
+---
+
+## 13. What S0 actually turned up
+
+Four things, in descending order of how much they change the plan.
+
+### 13.1 The seam failure was a reflection, not a limitation — and it was silent
+
+Writing the T2 orientation sweep produced failures the plan did not predict, at orientations §2.1
+said were fine. The cause was in the second branch of `CurvedEntityCircleArc::apply_periodicity`:
+
+```cpp
+if (parametric[0][0] > 0)  parametric[0][0] = -M_PI + (parametric[0][0] - M_PI);   //  p - 2*pi   correct
+else                       parametric[0][0] =  M_PI - (parametric[0][0] + M_PI);   //  -p         a reflection
+```
+
+The first line unwraps by a period. The second returns `-p`, which is not congruent to `p` modulo
+2π at all — it is the mirror image across the *x* axis. The entity then reported the wrong point
+for that facet corner, the Coons blend's corner values stopped agreeing (§1.4 shows why the blend
+is only exact when they do), and the mesh came out **silently wrong**: no error, no warning, a
+boundary node up to `3.4e-2` off a unit circle.
+
+Which of the two failure modes an arc hit depended on the order in which the mesh author happened
+to declare the facet's two nodes — a free choice describing identical geometry:
+
+```
+30 deg arc, facet order   a0 = 155..165           a0 = 170..180
+start-to-end              throws                  exact
+end-to-start              builds, 1.9e-2..3.4e-2  throws
+```
+
+So for *every* arc straddling the cut, one of the two equally valid ways of writing it down was
+wrong, and half the time wrong without saying so. That is materially worse than §2.1's "it throws
+in a narrow band", and it is the kind of defect the acceptance criterion of the harness — machine
+precision, not "looks plausible" — exists to catch.
+
+Fixed in S0 by replacing both that heuristic and `CurvedEntityCylinderArc`'s unconditional throw
+with one shared `unwrap_periodic_component()`: shift every facet node onto the branch nearest the
+first node's. It is correct at every orientation, in both node orders, and — unlike the two-node
+code it replaces — for the three- and four-node facets a 3d face has. The Python
+`CurvedEntityCircle` example had the same class of bug (a per-value `numpy.mod`, which moves the
+cut instead of removing it) and got the same fix.
+
+### 13.2 Which weakens the case for S2, and the plan should say so
+
+With per-facet unwrapping in place, T2 passes at every orientation in both node orders. **The 1d
+seam is no longer a reason to change the representation.** The honest remaining case for the
+normal-based parametrisation of §4.3 is narrower than §2.1 implies:
+
+- **Surfaces, where it is still a correctness matter.** `(θ, φ)` on a sphere has a coordinate
+  *degeneracy* at the pole, not merely a branch cut: at θ = 0 every φ names the same point, so no
+  amount of unwrapping makes a facet containing or straddling the pole blend correctly. This is
+  also what forces `CurvedEntitySpherePart`'s 90°-opening-angle restriction
+  ([src/meshtemplate.hpp:309](src/meshtemplate.hpp#L309)). Normals remove both.
+- **Facets spanning half the period or more**, where "nearest branch" is a tie and unwrapping is
+  ambiguous. Normals fail here too (antipodal normals sum to zero, §4.3), but they fail *loudly*
+  and at a facet width no reasonable mesh reaches.
+- **Simplification.** Unwrapping is an atlas of per-facet local charts that works because facets
+  are small. Normals are a single global chart, so `apply_periodicity`, the per-component period
+  bookkeeping and the whole question disappear rather than being handled.
+
+None of that is a blocker, so **S2 should be re-scoped**: it is no longer "fix the seam" but
+"remove the pole degeneracy and retire a class of bug", and it can move after S3 (3d) if the 3d
+work wants the entity interface settled first. The `blend_parametric` hook of §4.2 remains the
+right shape, because unwrapping is exactly a blend rule the entity should own.
+
+### 13.3 The triangular gap is worse than "cannot refine"
+
+§1.2 recorded that triangles throw on refinement. They are also wrong *before* refinement: a
+C2 curved triangular mesh has a mid-edge node per rim facet, placed at the chord midpoint by
+`convert_for_C2_space` and never snapped onto the arc, because
+`BulkElementBase::map_nodes_on_macro_element` returns early for T-elements
+([src/elements.cpp:2337](src/elements.cpp#L2337)). Measured on an 8-segment disc: `7.6e-2`, exactly
+`1 − cos(22.5°)`. C1 is exact only because it has no node that could be wrong.
+
+So the macro element does *nothing whatsoever* for triangles — it is not "built but unusable during
+refinement", it is inert from the moment it is created. Recorded as
+`test_curved_tri_template_mesh_is_exact[C2]`.
+
+### 13.4 The throw is unrecoverable, which the harness has to work around
+
+`throw_runtime_error("MACRO ELEM")` fires *during* `RefineableTElement<2>::build`, leaving a
+partially built son tree. Catching the `RuntimeError` is not enough: the next teardown of that
+`Problem` walks the half-built tree and **aborts the interpreter**. Verified both ways — the same
+script survives without a `with` block (release deferred to interpreter shutdown, which is skipped)
+and aborts with one.
+
+Consequence for the harness: the triangular cases run in a child process, so one unimplemented
+feature cannot decide whether the rest of the suite gets to run. S1 removes the throw and with it
+the need for the isolation, but the isolation is kept — it costs under a second per case and it is
+the right shape for any future case that can crash rather than fail.
+
+### 13.5 A test hook that did not exist, and a docstring that lied
+
+§10.1 needed to sample the macro map over the reference *interior*, which nothing exposed:
+`Element.get_macro_element_coordinate_at_s()` stops at the macro-element coordinate, although its
+docstring claimed it "Returns the position given by the element's macro element mapping". Added
+`get_macro_element_position_at_s()` (which does), corrected the other docstring, and T13 will use
+it as its primary oracle.

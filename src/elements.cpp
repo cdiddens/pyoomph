@@ -2302,6 +2302,20 @@ namespace pyoomph
 		return s_macro;
 	}
 
+	// Position of the macro-element mapping at local coordinate s. Returns an empty vector if this
+	// element has no macro element (or is not one of the shapes whose macro coordinate can be formed
+	// yet -- see get_macro_element_coordinate_at_s).
+	std::vector<double> BulkElementBase::get_macro_element_position_at_s(oomph::Vector<double> s)
+	{
+		std::vector<double> s_macro = this->get_macro_element_coordinate_at_s(s);
+		if (s_macro.empty()) return {};
+		oomph::Vector<double> s_macro_o(s_macro.size());
+		for (unsigned int i = 0; i < s_macro.size(); i++) s_macro_o[i] = s_macro[i];
+		oomph::Vector<double> r(this->nodal_dimension(), 0.0);
+		macro_elem_pt()->macro_map(s_macro_o, r);
+		return std::vector<double>(r.begin(), r.end());
+	}
+
 	// For elements built on a macro-element (structured, e.g. curved-boundary) mesh, snaps every
 	// node's Eulerian position exactly onto the macro element's geometric mapping (evaluated at that
 	// node's local coordinate), so the initial mesh exactly represents the macro-element geometry
