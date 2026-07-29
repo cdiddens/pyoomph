@@ -61,10 +61,48 @@ class PETSCSolver(GenericLinearSystemSolver):
 
         self._dofs_to_field_info=None
 
+        # Keep the Mat (and the KSP built on it) across solves whenever the Jacobian sparsity pattern is
+        # unchanged, updating only the values. This is what lets PETSc detect SAME_NONZERO_PATTERN and
+        # reuse the symbolic factorisation / preconditioner setup instead of redoing it every Newton
+        # step. Requires problem.keep_structural_zeros; without it jacobian_structure_id is 0 and this
+        # switches itself off, so the behaviour is unchanged for existing scripts.
+        self.reuse_matrix_structure=True
+        self._structure_id:int=0   # Pattern the current Mat/KSP were built for; 0 = none
+        self._structure_nnz:int=-1
+        self._structure_nrow_local:int=-1
+
     #		opts=PETSc.Options().getAll()
     #		if "add_zero_diagonal" in opts.keys():
     #			problem.set_diagonal_zero_entries(True)
-    
+
+    def _force_zero_diagonal(self,mat:Any)->None:
+        # Several PETSc backends (LU/ILU factorisations, MUMPS, some AMG setups) require an explicit
+        # entry on every diagonal, including where the Jacobian is structurally zero -- for a Taylor-Hood
+        # Navier-Stokes problem that is the whole pressure-pressure block. MatShift(0.0) inserts them,
+        # but it does so by growing the AIJ storage after the fact, on every single assembly.
+        # problem.keep_structural_zeros makes the assembled pattern the element-connectivity pattern,
+        # which contains (i,i) for every dof by construction, so the shift is then pure overhead --
+        # and, worse, it would defeat structure reuse by changing the Mat's nonzero pattern.
+        if self.problem.keep_structural_zeros:
+            return
+        mat.shift(0.0)
+
+    def _can_reuse_structure(self,n:int,nnz:int)->bool:
+        structure_id = self.problem.jacobian_structure_id
+        return (self.reuse_matrix_structure and structure_id != 0
+                and structure_id == self._structure_id
+                and self.petsc_mat is not None
+                and self._structure_nnz == nnz
+                and self.petsc_mat.getSize()[0] == n) #type:ignore
+
+    def _can_reuse_structure_distributed(self,nrow_local:int,nnz_local:int)->bool:
+        structure_id = self.problem.jacobian_structure_id
+        return (self.reuse_matrix_structure and structure_id != 0
+                and structure_id == self._structure_id
+                and self.petsc_mat is not None
+                and self._structure_nnz == nnz_local
+                and self._structure_nrow_local == nrow_local)
+
     def _before_assigning_equation_numbers(self):
         if self._dofs_to_field_info is not None:
             if len(self._dofs_to_field_info)>2:
@@ -217,7 +255,19 @@ class PETSCSolver(GenericLinearSystemSolver):
             raise RuntimeError("Requested field split "+splitname+" not found. Available splits: "+str(self._dofs_to_field_info[2].keys()))
         return self._dofs_to_field_info[2][splitname]
 
-    def setup_solver(self):                
+    def _setup_solver_if_needed(self):
+        # setup_solver() builds a brand new KSP (and PC) on every call, which throws away any
+        # factorisation or preconditioner PETSc has already computed. When the matrix structure is being
+        # reused, the Mat object survives across solves, so the KSP built on it stays valid too and
+        # PETSc can reuse the symbolic factorisation -- keep it. Without structure reuse this falls back
+        # to the previous behaviour (a fresh KSP per solve) exactly, so that options set between solves
+        # and subclasses overriding setup_solver() keep behaving as before.
+        if self.ksp is not None and self.reuse_matrix_structure and self._structure_id != 0 \
+                and self._structure_id == self.problem.jacobian_structure_id:
+            return
+        self.setup_solver()
+
+    def setup_solver(self):
         #print("Setting up solver")
         opts = PETSc.Options().getAll() #type:ignore
         #if "add_zero_diagonal" in opts.keys(): #type:ignore
@@ -248,6 +298,12 @@ class PETSCSolver(GenericLinearSystemSolver):
 
     def solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPIntArray,colptr:NPIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
         if op_flag == 1:
+            if self._can_reuse_structure(n,nnz):
+                # Same nonzero pattern, new values. Overwriting them in place (rather than destroying
+                # and rebuilding the Mat) keeps the KSP's factorisation/preconditioner reusable.
+                self.petsc_mat.setValuesCSR(colptr.astype(PETSc.IntType, copy=False), rowind.astype(PETSc.IntType, copy=False), values.astype(PETSc.ScalarType, copy=False)) #type:ignore
+                self.petsc_mat.assemble() #type:ignore
+                return 0
             if self.petsc_mat is not None:
                 self.petsc_mat.destroy()
                 self.petsc_mat=None
@@ -273,15 +329,17 @@ class PETSCSolver(GenericLinearSystemSolver):
             # MatCreateSeqAIJWithArrays was tried but silently breaks hypre/BoomerAMG -- CG diverges
             # with KSP reason DIVERGED_ITS -- so we keep the safe, universally-correct copying path.)
             self.petsc_mat = PETSc.Mat().createAIJ(size=(n, n), csr=(colptr.astype(PETSc.IntType, copy=False), rowind.astype(PETSc.IntType, copy=False), values.astype(PETSc.ScalarType, copy=False)),comm=get_mpi_world_comm()) #type:ignore
-            
+
             self.petsc_mat.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False) #type:ignore
             # Force diagonal:
             #diag = self.petsc_mat.getDiagonal()
             #self.petsc_mat.setDiagonal(diag, addv=PETSc.InsertMode.INSERT_VALUES)
-            self.petsc_mat.shift(0.0)
-            
+            self._force_zero_diagonal(self.petsc_mat)
+
             self.petsc_mat.assemble()
-            
+            self._structure_id = self.problem.jacobian_structure_id
+            self._structure_nnz = nnz
+
             self.x = PETSc.Vec().createSeq(n) #type:ignore
         elif op_flag == 2:
             #print("Solving linear system with PETSc", op_flag, n, nnz, nrhs, transpose, "SPLIT INFO",self._dofs_to_field_info)
@@ -292,8 +350,8 @@ class PETSCSolver(GenericLinearSystemSolver):
                 self.setup_field_split()
             bv = PETSc.Vec().createWithArray(b) #type:ignore
             self.petsc_rhs=bv
-            self.setup_solver()
-            
+            self._setup_solver_if_needed()
+
             if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine():
                 raise RuntimeError("Cannot use custom solve routine with PETSc yet. Also, iterative solving might require different handling here")
             else:
@@ -319,6 +377,15 @@ class PETSCSolver(GenericLinearSystemSolver):
     def solve_distributed(self, op_flag: int, allow_permutations: int, n: int, nnz_local: int, nrow_local: int, first_row: int, values: NPFloatArray, col_index: NPIntArray, row_start: NPIntArray, b: NPFloatArray, nprow: int, npcol: int, doc: int, data: NPUInt64Array, info: NPIntArray)->None:
         #print("solve distributed with flag ",op_flag)
         if op_flag == 1:
+            # Same reuse logic as solve_serial. jacobian_structure_id is bumped inside the collective
+            # assign_eqn_numbers(), so every rank agrees on it and either all reuse or all rebuild --
+            # which matters, because rebuilding the Mat is itself collective and a split decision would
+            # deadlock. _can_reuse_structure compares the LOCAL row count and local nnz, both of which
+            # are per-rank quantities derived from the same global pattern.
+            if self._can_reuse_structure_distributed(nrow_local,nnz_local):
+                self.petsc_mat.setValuesCSR(row_start.astype(PETSc.IntType, copy=False), col_index.astype(PETSc.IntType, copy=False), values.astype(PETSc.ScalarType, copy=False)) #type:ignore
+                self.petsc_mat.assemble() #type:ignore
+                return
             if self.petsc_mat is not None:
                 self.petsc_mat.destroy()
                 self.petsc_mat=None
@@ -333,15 +400,18 @@ class PETSCSolver(GenericLinearSystemSolver):
             #print("PETSCINF",nrow_local,n)
             #print("Creating petsc mat ")
             self.petsc_mat = PETSc.Mat().createAIJ(size=((nrow_local, n), (nrow_local, n),),csr=(row_start, col_index, values)) #type:ignore
-            
+
             self.petsc_mat.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False) #type:ignore
             # Force diagonal:
             #diag = self.petsc_mat.getDiagonal()
             #self.petsc_mat.setDiagonal(diag, addv=PETSc.InsertMode.INSERT_VALUES)
-            self.petsc_mat.shift(0.0)
-            
+            self._force_zero_diagonal(self.petsc_mat)
+
             self.petsc_mat.assemble()
-            
+            self._structure_id = self.problem.jacobian_structure_id
+            self._structure_nnz = nnz_local
+            self._structure_nrow_local = nrow_local
+
             #print("OWNERSHIP RANGE",self.petsc_mat.getOwnershipRange()) #type:ignore
         #			print("PROCESSOR Ns",get_mpi_rank(),nrow_local,n)
         #			print("PROCESSOR RS",get_mpi_rank(),row_start)
@@ -358,9 +428,9 @@ class PETSCSolver(GenericLinearSystemSolver):
             bv = PETSc.Vec().createWithArray(b) #type:ignore
             self.petsc_rhs=bv
             self.x = self.petsc_rhs.duplicate()
-            
-            self.setup_solver()
-            
+
+            self._setup_solver_if_needed()
+
             if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine():
                 raise RuntimeError("Cannot use custom solve routine with PETSc yet. Also, iterative solving might require different handling here")
             else:
