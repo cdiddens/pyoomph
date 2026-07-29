@@ -23,25 +23,24 @@
 #
 # ========================================================================
 
-# S0 of the MacroElement generalisation -- see dev_docs/macro_elements_generalisation.md.
+# Curved boundaries via MacroElements -- see dev_docs/macro_elements_generalisation.md.
 #
 # One acceptance criterion runs through all of this: a node that lies on a curved boundary must
 # satisfy that boundary's implicit equation to machine precision, no matter which element shape it
 # belongs to and no matter which code path created it. For a circle of radius R that is simply
 # |r - R| ~ 1e-16, which makes the check independent of any reference solution.
 #
-# Several of these tests state that criterion for cases pyoomph does not meet yet, and are marked
-# xfail(strict=True) with the value measured on 2026-07-29 in the reason string. strict=True is the
-# point: when the generalisation lands, they turn from XFAIL into FAILED-because-it-passed, which
-# forces the marker to be removed rather than letting a fixed bug keep its "known broken" label.
-# The tests that pass today are equally deliberate -- they pin the behaviour that must survive.
+# Written at stage S0 with most of it failing, as strict xfails carrying the measured value; S1 made
+# them pass and the markers came off. The pre-S1 numbers are kept in the comments, because a test that
+# says what it used to return is a much better guard than one that only says "< 1e-14" -- 5.4e-4 and
+# 7.6e-2 are what silent regressions in this area look like.
 #
-# Two families run in a child process (see _worker_radius_error). Not for speed -- a case costs
-# under a second -- but because they can take the interpreter down rather than raise: a curved
-# triangular mesh throws "MACRO ELEM" mid-refinement and leaves a half-built tree whose teardown
-# then aborts, so even catching the RuntimeError does not make the process reusable. Isolating them
-# keeps one unimplemented feature from deciding whether the rest of the suite gets to run. When S1
-# removes those throws the isolation becomes redundant, not wrong.
+# Two families run in a child process (see _worker_radius_error). Not for speed -- a case costs under
+# a second -- but because before S1 they could take the interpreter down rather than raise: a curved
+# triangular mesh threw "MACRO ELEM" mid-refinement and left a half-built tree whose teardown then
+# aborted, so even catching the RuntimeError did not make the process reusable. That throw is gone,
+# so the isolation is now redundant rather than wrong; it is kept because it costs almost nothing and
+# is the right shape for any future case that crashes instead of failing.
 
 import gc
 import math
@@ -185,6 +184,23 @@ def _worker_radius_error(tmp_path, *args):
     raise AssertionError(f"worker {args} did not report a result (exit {proc.returncode}):\n{tail}")
 
 
+def _worker_lines(tmp_path, *args):
+    # Like _worker_radius_error, but for cases reporting several named quantities. Returns them as a
+    # dict of the child's "KEY value" lines.
+    proc = subprocess.run([sys.executable, os.path.abspath(__file__), str(tmp_path), *map(str, args)],
+                          capture_output=True, text=True, timeout=600,
+                          cwd=os.path.dirname(os.path.abspath(__file__)))
+    out = {}
+    for line in proc.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0].isupper() and parts[0].isalpha():
+            out[parts[0]] = parts[1]
+    if not out:
+        tail = "\n".join((proc.stdout + proc.stderr).splitlines()[-12:])
+        raise AssertionError(f"worker {args} reported nothing (exit {proc.returncode}):\n{tail}")
+    return out
+
+
 def _worker_main(argv):
     outdir, kind = argv[0], argv[1]
     if kind == "tri":
@@ -193,6 +209,9 @@ def _worker_main(argv):
     elif kind == "arc":
         a0, nref, order = float(argv[2]), int(argv[3]), argv[4]
         problem, mesh_name, boundary = _ArcSector(a0, a0 + 30.0, order=order), "domain", "arc"
+    elif kind == "hang":
+        _worker_hanging(outdir, argv[2])
+        return
     else:
         raise SystemExit(f"unknown worker case {kind!r}")
     # No "with": the teardown of a mesh left half-refined by the MACRO ELEM throw aborts, which
@@ -203,6 +222,32 @@ def _worker_main(argv):
     for _ in range(nref):
         problem.refine_uniformly()
     print("RESULT", _max_radius_error(problem.get_mesh(mesh_name), boundary))
+
+
+def _worker_hanging(outdir, shape):
+    # Refine the rim region harder than the interior, so the mesh ends up genuinely non-conforming,
+    # and report how many nodes hang in total, how many of those are on the curved boundary, and how
+    # far the boundary nodes are off the circle.
+    problem = _QuadDisk() if shape == "quad" else _TriDisk()
+    problem.set_output_directory(outdir)
+    problem.max_refinement_level = 4
+    problem += RefineToLevel(1) @ "domain"
+    problem += RefineToLevel(3) @ "domain/circumference"
+    problem.initialise()
+    mesh = problem.get_mesh("domain")
+    bidx = mesh.get_boundary_index("circumference")
+
+    nhang = sum(1 for n in mesh.nodes() if n.is_hanging())
+    nhang_boundary, max_rim_err = 0, 0.0
+    for node in mesh.nodes():
+        if not node.is_on_boundary(bidx):
+            continue
+        if node.is_hanging():
+            nhang_boundary += 1
+        max_rim_err = max(max_rim_err, abs(math.hypot(node.x(0), node.x(1)) - _R))
+    print("NHANG", nhang)
+    print("NHANGBOUNDARY", nhang_boundary)
+    print("MAXRIMERR", max_rim_err)
 
 
 if __name__ == "__main__":
@@ -224,20 +269,22 @@ def test_curved_quad_template_mesh_is_exact(space):
         assert _max_radius_error(problem.get_mesh("domain"), "circumference") < _EXACT
 
 
-def test_map_nodes_on_macro_elements_repairs_refined_quad():
-    # The mechanism that makes curved quad boundaries work today: refinement places new nodes by FE
-    # interpolation, and Problem.map_nodes_on_macro_elements() re-snaps every node afterwards. The
-    # initial-adaption and remeshing paths call it; the runtime adapt() path does not, which is what
-    # test_curved_quad_runtime_adapt_is_exact below is about. Pinned here so that the eventual fix
-    # (placing nodes correctly at creation) does not silently break the repair pass as well.
+def test_map_nodes_on_macro_elements_is_idempotent():
+    # Until S1, refinement placed new nodes by FE interpolation and this global pass was what repaired
+    # them -- so this test used to assert the mesh had drifted before calling it. Now nodes are placed
+    # correctly when they are created and the pass has nothing left to do. Idempotence is the stronger
+    # statement of the two: it says the two routes onto the geometry (at creation, and by re-snapping
+    # afterwards) agree, which is what makes the pass safe to keep.
     with _QuadDisk() as problem:
         problem.max_refinement_level = 4
         problem.initialise()
         problem.refine_uniformly()
         mesh = problem.get_mesh("domain")
-        assert _max_radius_error(mesh, "circumference") > 1e-10      # drifted, as expected
+        before = [(n.x(0), n.x(1)) for n in mesh.nodes()]
+        assert _max_radius_error(mesh, "circumference") < _EXACT
         problem.map_nodes_on_macro_elements()
-        assert _max_radius_error(mesh, "circumference") < _EXACT     # ... and is repaired
+        after = [(n.x(0), n.x(1)) for n in mesh.nodes()]
+        assert max(max(abs(a[0] - b[0]), abs(a[1] - b[1])) for a, b in zip(before, after)) < _EXACT
 
 
 def test_curved_entity_survives_dropped_python_reference():
@@ -258,11 +305,9 @@ def test_curved_entity_survives_dropped_python_reference():
 # --------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("space", ["C1", "C2"])
-@pytest.mark.xfail(strict=True,
-                   reason="dev_docs/macro_elements_generalisation.md 1.4(ii): "
-                          "RefineableSolidQElement<2>::build overwrites the macro-element position "
-                          "with the FE one. Measured 2026-07-29: 7.6e-2 (C1), 5.4e-4 (C2).")
 def test_curved_quad_uniform_refinement_is_exact(space):
+    # Before S1: 7.6e-2 (C1) / 5.4e-4 (C2), because RefineableSolidQElement<2>::build overwrote the
+    # macro-element position with the FE one and nothing put it back.
     with _QuadDisk(space=space) as problem:
         problem.max_refinement_level = 4
         problem.initialise()
@@ -272,26 +317,17 @@ def test_curved_quad_uniform_refinement_is_exact(space):
 
 
 @pytest.mark.parametrize("space", ["C1", "C2"])
-@pytest.mark.xfail(strict=True,
-                   reason="dev_docs/macro_elements_generalisation.md 1.2: triangular macro elements "
-                          "are unimplemented; refineable_telements.cpp:743 throws 'MACRO ELEM'.")
 def test_curved_tri_uniform_refinement_is_exact(space, tmp_path):
+    # Before S1 this threw "MACRO ELEM" outright (refineable_telements.cpp:743).
     assert _worker_radius_error(tmp_path, "tri", space, 1) < _EXACT
 
 
-@pytest.mark.parametrize("space", [
-    "C1",
-    pytest.param("C2", marks=pytest.mark.xfail(
-        strict=True,
-        reason="dev_docs/macro_elements_generalisation.md 1.2: BulkElementBase::"
-               "map_nodes_on_macro_element() is a no-op for T-elements (elements.cpp:2337), so the "
-               "mid-edge node stays on the chord. Measured 2026-07-29: 7.6e-2 = 1 - cos(22.5 deg).")),
-])
+@pytest.mark.parametrize("space", ["C1", "C2"])
 def test_curved_tri_template_mesh_is_exact(space, tmp_path):
-    # Even *unrefined*, a curved triangular mesh is only exact for C1. C1 has nothing but the
-    # template's own rim nodes, which are on the circle by construction; C2 adds a mid-edge node per
-    # rim facet, placed at the chord midpoint, and nothing ever snaps it onto the arc. So the
-    # triangular gap is not merely "cannot refine" -- the macro element does nothing at all.
+    # Before S1 the C2 case gave 7.6e-2 = 1 - cos(22.5 deg): map_nodes_on_macro_element() returned
+    # early for T-elements, so the mid-edge node each rim facet gains from convert_for_C2_space stayed
+    # at the chord midpoint. The triangular gap was not merely "cannot refine" -- an *unrefined*
+    # curved triangular mesh was already wrong, i.e. the macro element did nothing at all.
     assert _worker_radius_error(tmp_path, "tri", space, 0) < _EXACT
 
 
@@ -299,11 +335,9 @@ def test_curved_tri_template_mesh_is_exact(space, tmp_path):
 # T6 -- the runtime adapt() path, which never calls the global re-snap
 # --------------------------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True,
-                   reason="dev_docs/macro_elements_generalisation.md 1.3 (Experiment B): "
-                          "map_nodes_on_macro_elements() is only called from the initial-adaption "
-                          "and remeshing paths. Measured 2026-07-29: 2.2e-06.")
 def test_curved_quad_runtime_adapt_is_exact():
+    # Before S1: 2.2e-06. map_nodes_on_macro_elements() is only called from the initial-adaption and
+    # remeshing paths, so error-estimator driven adaptation during a solve never got the repair.
     # Refine after initialisation without invoking the repair pass -- i.e. what error-estimator
     # driven adaptation does during a time loop.
     with _QuadDisk() as problem:
@@ -348,3 +382,26 @@ _ARC_CASES = [
 @pytest.mark.parametrize("order,a0", [pytest.param(o, a, id=f"{o}-{a}") for o, a in _ARC_CASES])
 def test_curved_arc_is_exact_at_every_orientation(order, a0, tmp_path):
     assert _worker_radius_error(tmp_path, "arc", a0, 0, order) < _EXACT
+
+
+# --------------------------------------------------------------------------------------------
+# T7 -- hanging nodes on a curved boundary
+# --------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("shape", ["quad", "tri"])
+def test_non_uniform_refinement_keeps_curved_boundary_exact(shape, tmp_path):
+    # map_nodes_on_macro_element() skips hanging nodes, because a hanging node's position is dictated
+    # by its masters and snapping it onto the curve would put it somewhere its own constraint does not.
+    # In 2d that guard turns out never to fire, and the reason is worth recording rather than leaving
+    # to be rediscovered: a node interior to a *boundary* edge belongs to exactly one element, since a
+    # boundary facet has no neighbour across it, so nothing coarser can constrain it. Boundary nodes in
+    # 2d therefore cannot hang at all. (In 3d two boundary faces do share an edge, so a node on that
+    # shared edge can hang and the guard becomes load-bearing -- that case belongs to S3.)
+    #
+    # What this does test, and what actually matters here, is that a strongly non-conforming mesh --
+    # 24 hanging nodes for the quad disc, 64 for the triangular one, measured 2026-07-29 -- leaves the
+    # curved boundary exact anyway.
+    out = _worker_lines(tmp_path, "hang", shape)
+    assert int(out["NHANG"]) > 0, "refinement was uniform after all, so this proves nothing"
+    assert int(out["NHANGBOUNDARY"]) == 0
+    assert float(out["MAXRIMERR"]) < _EXACT

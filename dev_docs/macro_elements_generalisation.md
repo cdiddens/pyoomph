@@ -3,7 +3,7 @@
 Written 2026-07-29 on branch `macro_elements`, after the interface-refinement-coupling work
 (`interface_refinement_coupling.md`) landed on `main`.
 
-Status: **S0 done, S1 next.** §1 and §2 are measured, not assumed — every claim about current
+Status: **S0 and S1 done, S2/S3 next.** §1 and §2 are measured, not assumed — every claim about current
 behaviour below was reproduced, and the numbers are quoted. §3–§5 are the design. §11 is the
 staging. **§13 records what S0 actually turned up**, including a defect worse than anything §1 and
 §2 predicted and a measurement that materially weakens the case for part of S2 — read it before
@@ -911,11 +911,13 @@ Each stage ends with its tests green and is committed separately.
   6 xfailed; full fast suite 447 passed). T1/T2/T6 recorded as strict-xfail against the measured
   present-day numbers; §1.5's two incidental defects fixed, plus a third and worse one found while
   writing the harness; both §10 measurements run. **See §13 — it changes S2.**
-- **S1 — the generic 2d macro map.** `GenericMacroElement`, `c1_shape`, `S_macro_vertex`,
-  `get_x_from_macro_element`, generic `map_nodes_on_macro_element`; the post-build re-snap for
-  quads; delete `Tmacroelements.hpp`, the three `MeshTemplate*MacroElement*` classes,
-  `find_permutation` and the `dynamic_cast` dispatch; remove the `"MACRO ELEM"` throw. T1, T6, T7
-  green. **This stage alone fixes the gmsh-triangle failure of §1.3.**
+- **S1 — the generic 2d macro map.** ✅ **Done**, in two commits: S1a the refactor (one
+  `GenericMacroElement`, `Tmacroelements.hpp` and `find_permutation` and the Domain dispatch all
+  deleted), S1b the behaviour (`Macro_element_vertex_s`, generic `map_nodes_on_macro_element`, the
+  post-build re-snap for quads and bricks, the `"MACRO ELEM"` throw removed). All six strict xfails
+  flipped to XPASS and the markers came off; curved module 39 passed, fast suite 455 passed.
+  **The gmsh-triangle failure of §1.3 is fixed: that mesh now refines with a boundary error of
+  exactly 0.0 where it previously died.** §14 records what S1 turned up.
 - **S2 — the parametric coordinate.** `get_intrinsic_dimension`, `blend_parametric`, `facet_map`,
   buffer sizing from `get_parametric_dimension()`; rewrite `CurvedEntityCircleArc` and the Python
   `CurvedEntityCircle` on normals; deprecate `apply_periodicity`. T2, T3 green.
@@ -1060,3 +1062,57 @@ the right shape for any future case that can crash rather than fail.
 docstring claimed it "Returns the position given by the element's macro element mapping". Added
 `get_macro_element_position_at_s()` (which does), corrected the other docstring, and T13 will use
 it as its primary oracle.
+
+---
+
+## 14. What S1 turned up
+
+### 14.1 The equivalence held, and it is now the refactor's safety net
+
+S1a swapped the blend before S1b changed any behaviour, precisely so the swap could be judged on its
+own. §10.1's comparison run against the new `GenericMacroElement` gives 2e-16 to 5e-16 over the whole
+reference square at every orientation, against a Python reference that had been measured against
+oomph's `QMacroElement<2>::macro_map` at 1.1e-15 before the swap. Transitively the new blend is the
+old one, and the fast suite was byte-for-byte unchanged across S1a (447 passed either side). Risk 2
+never materialised because it was never real.
+
+### 14.2 Hanging nodes on a curved boundary do not exist in 2d — and the reason generalises
+
+§6.1 flagged that `map_nodes_on_macro_element` snaps every node unconditionally, hanging ones
+included, and asked for a test. The test found the guard never fires, for a structural reason worth
+stating: **a node interior to a boundary facet belongs to exactly one element**, because a boundary
+facet has no neighbour across it, so nothing coarser can ever constrain it. In 2d the facets of a
+curved boundary *are* its edges, so boundary nodes simply cannot hang. Measured on a deliberately
+non-conforming disc — 24 hanging nodes (quad) and 64 (tri), none of them on the rim, rim error 0.
+
+The guard is still right, and it stops being vacuous in 3d: there two boundary *faces* share an edge,
+so a node on that shared edge can hang when the two faces differ in refinement level. That is the
+case S3 has to test, and §6.1's concern should be read as a 3d one.
+
+`test_non_uniform_refinement_keeps_curved_boundary_exact` therefore asserts what is actually true and
+useful in 2d — that a strongly non-conforming mesh leaves the curved boundary exact — and records why
+the hanging case is absent rather than leaving it to be rediscovered.
+
+### 14.3 The Q family did not need `Macro_element_vertex_s` after all
+
+The plan (§3.3) proposed replacing `s_macro_ll`/`s_macro_ur` everywhere. In the event the Q family
+keeps them: oomph's own build already maintains the box correctly, the affine map into it is exactly
+what the general vertex form would reproduce, and `QElementBase` already provides a final overrider
+for `get_x_from_macro_element`. Adding a second one reachable from the same class would have been
+ambiguous (risk 1) and would have forced a disambiguating override into every Q class for no gain.
+
+So `get_macro_element_coordinate_at_s` branches once: box for Q, vertex coordinates for everything
+else. Risk 1 evaporates with it — only the simplex classes, whose bases leave the virtual broken,
+need the two-line forwarder. The general form is still what makes the simplex and mixed cases work,
+and is still what S3/S4 will use; it just does not have to displace something that already works.
+
+### 14.4 What is deferred, explicitly
+
+- `Brick3d` is carried over so the 3d template-level path does not regress, and bricks get the same
+  post-build re-snap as quads. But a 3d element with **more than one curved facet now throws**: two
+  curved facets sharing an edge each contribute that edge's deviation and the blend needs §3.2's
+  inclusion–exclusion term. Refusing is better than silently doubling a deviation, and S3 removes it.
+- Tetrahedra, wedges and pyramids still throw in `factory_element` — S3/S4.
+- Moving meshes are unchanged: `reapply_macro_element_positions` is gated on `moving_nodes`, so an
+  ALE mesh still gets the macro element only through the initial-adaption pass, exactly as before.
+  S5 gives it the undeformed-macro-element treatment of §5.

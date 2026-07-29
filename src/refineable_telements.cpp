@@ -732,17 +732,26 @@ namespace oomph
         }
       }
 
-      // If the father is defined via a macro element (curvilinear boundary
-      // representation), the son should inherit/derive its own macro-element
-      // sub-region -- not yet implemented for triangles
+      // If the father is defined via a macro element (curvilinear boundary representation), the son
+      // inherits it along with its own region of the macro reference domain. A triangular son is not
+      // an axis-aligned sub-box of its father, so oomph's s_macro_ll/s_macro_ur cannot express this;
+      // the son's three vertices in father coordinates -- s_in_parent[0..2], already computed above --
+      // can, and are what BulkElementBase::macro_coordinate_from_local interpolates. New nodes below
+      // are positioned by father_el_pt->get_x(t, s, ...), which routes through it.
       if (father_el_pt->Macro_elem_pt != 0)
       {
-        set_macro_elem_pt(father_el_pt->Macro_elem_pt);
-        for (unsigned i = 0; i < 2; i++)
+        pyoomph::BulkElementBase *son_be = dynamic_cast<pyoomph::BulkElementBase *>(this);
+        pyoomph::BulkElementBase *father_be = dynamic_cast<pyoomph::BulkElementBase *>(father_el_pt);
+        if (son_be && father_be)
         {
-          throw_runtime_error("MACRO ELEM");
-          // s_macro_ll(i)=      father_el_pt->s_macro_ll(i)+0.5*(s_lo[i]+1.0)*(father_el_pt->s_macro_ur(i)-father_el_pt->s_macro_ll(i));
-          // s_macro_ur(i)=      father_el_pt->s_macro_ll(i)+0.5*(s_hi[i]+1.0)*(father_el_pt->s_macro_ur(i)-father_el_pt->s_macro_ll(i));
+          std::vector<std::vector<double>> son_vertices(3, std::vector<double>(2, 0.0));
+          for (unsigned int v = 0; v < 3; v++)
+            for (unsigned int i = 0; i < 2; i++) son_vertices[v][i] = s_in_parent[v][i];
+          son_be->inherit_macro_element_from_father(father_be, son_vertices);
+        }
+        else
+        {
+          set_macro_elem_pt(father_el_pt->Macro_elem_pt);
         }
       }
 

@@ -2285,21 +2285,85 @@ namespace pyoomph
 		return h;
 	}
 
-	// Maps a local coordinate s of this element (assumed in [-1,1] per direction) into the local
-	// coordinate range of the underlying macro element (structured/domain macro-element mesh), or
-	// returns an empty vector if this element has no macro element associated (unstructured mesh).
+	// Maps a local coordinate s of this element into the reference domain of the macro element it is
+	// attached to, or returns an empty vector if there is no macro element.
+	//
+	// The Q family keeps oomph's own bookkeeping: QElementBase tracks the son's region as an
+	// axis-aligned box (s_macro_ll/s_macro_ur) that oomph's build() maintains, and the affine map into
+	// it is exactly what Macro_element_vertex_s would reproduce. Everything else uses the general
+	// vertex-coordinate form, which is the only one that survives a simplex son (not a sub-box of its
+	// father) or a mixed forest (a son whose shape differs from its father's).
 	std::vector<double> BulkElementBase::get_macro_element_coordinate_at_s(oomph::Vector<double> s)
 	{
 		if (!macro_elem_pt()) return {};
 		unsigned el_dim = dim();
 		oomph::QElementBase *qelem = dynamic_cast<oomph::QElementBase *>(this);
-		if (!qelem) return {};
-		std::vector<double> s_macro(el_dim,0);
-		for (unsigned i = 0; i < el_dim; i++)
+		if (qelem)
 		{
-				s_macro[i] = qelem->s_macro_ll(i) + 0.5 * (s[i] + 1.0) * (qelem->s_macro_ur(i) - qelem->s_macro_ll(i));
+			std::vector<double> s_macro(el_dim,0);
+			for (unsigned i = 0; i < el_dim; i++)
+			{
+					s_macro[i] = qelem->s_macro_ll(i) + 0.5 * (s[i] + 1.0) * (qelem->s_macro_ur(i) - qelem->s_macro_ll(i));
+			}
+			return s_macro;
+		}
+		return this->macro_coordinate_from_local(s);
+	}
+
+	// Interpolate the son's vertex positions in the macro reference domain with this element's own C1
+	// shape functions. On a root element Macro_element_vertex_s is empty and the map is the identity.
+	std::vector<double> BulkElementBase::macro_coordinate_from_local(const oomph::Vector<double> &s) const
+	{
+		if (Macro_element_vertex_s.empty()) return std::vector<double>(s.begin(), s.end());
+		const unsigned nvert = this->nvertex_node();
+		oomph::Shape psi(nvert);
+		this->shape_at_s_C1(s, psi);
+		const unsigned mdim = Macro_element_vertex_s[0].size();
+		std::vector<double> s_macro(mdim, 0.0);
+		for (unsigned int v = 0; v < nvert && v < Macro_element_vertex_s.size(); v++)
+		{
+			for (unsigned int i = 0; i < mdim; i++) s_macro[i] += psi[v] * Macro_element_vertex_s[v][i];
 		}
 		return s_macro;
+	}
+
+	// Pass the macro element from father to son, converting the son's vertex coordinates (given in the
+	// father's local frame) into the macro element's reference domain via the father's own map. Because
+	// the conversion goes through the father's C1 shape functions rather than through any box, it does
+	// not care whether father and son have the same shape.
+	void BulkElementBase::inherit_macro_element_from_father(BulkElementBase *father_pt, const std::vector<std::vector<double>> &son_vertices_in_father)
+	{
+		if (!father_pt || !father_pt->macro_elem_pt()) return;
+		this->set_macro_elem_pt(father_pt->macro_elem_pt());
+		Macro_element_vertex_s.clear();
+		Macro_element_vertex_s.reserve(son_vertices_in_father.size());
+		for (auto &sv : son_vertices_in_father)
+		{
+			oomph::Vector<double> sf(sv.size());
+			for (unsigned int i = 0; i < sv.size(); i++) sf[i] = sv[i];
+			Macro_element_vertex_s.push_back(father_pt->macro_coordinate_from_local(sf));
+		}
+	}
+
+	// Shared body of the simplex/mixed families' get_x_from_macro_element overrides.
+	void BulkElementBase::get_x_from_generic_macro_element(const unsigned &t, const oomph::Vector<double> &s, oomph::Vector<double> &x) const
+	{
+		std::vector<double> s_macro = this->macro_coordinate_from_local(s);
+		oomph::Vector<double> s_macro_o(s_macro.size());
+		for (unsigned int i = 0; i < s_macro.size(); i++) s_macro_o[i] = s_macro[i];
+		const_cast<oomph::MacroElement *>(this->Macro_elem_pt)->macro_map(t, s_macro_o, x);
+	}
+
+	// A moving (ALE) mesh solves for the nodal positions, so snapping them onto the template geometry
+	// would fight the solve. There the macro element keeps doing only what it does today: shape the
+	// initial configuration, through Problem.map_nodes_on_macro_elements(). Stage S5 gives moving
+	// meshes the treatment they should have -- the macro element driving the Lagrangian coordinate via
+	// the undeformed macro element.
+	bool BulkElementBase::macro_element_may_set_positions() const
+	{
+		if (!this->codeinst) return true;
+		const JITFuncSpec_Table_FiniteElement_t *ft = this->codeinst->get_func_table();
+		return !(ft && ft->moving_nodes);
 	}
 
 	// Position of the macro-element mapping at local coordinate s. Returns an empty vector if this
@@ -2325,35 +2389,42 @@ namespace pyoomph
 	{
 		if (!macro_elem_pt())
 			return;
-		unsigned el_dim = dim();
+		const unsigned el_dim = dim();
 		oomph::Vector<double> s(el_dim);
-		oomph::Vector<double> r(el_dim);
-		oomph::QElementBase *qelem = dynamic_cast<oomph::QElementBase *>(this);
-		if (qelem)
+		oomph::Vector<double> r(this->nodal_dimension(), 0.0);
+		for (unsigned int ni = 0; ni < this->nnode(); ni++)
 		{
-			for (unsigned int ni = 0; ni < this->nnode(); ni++)
-			{
-				this->local_coordinate_of_node(ni, s);
-				oomph::Vector<double> s_macro(el_dim);
-
-				for (unsigned i = 0; i < el_dim; i++)
-				{
-					s_macro[i] = qelem->s_macro_ll(i) + 0.5 * (s[i] + 1.0) * (qelem->s_macro_ur(i) - qelem->s_macro_ll(i));
-				}
-
-				macro_elem_pt()->macro_map(s_macro, r); // TODO: Time loop
-				for (unsigned int id = 0; id < r.size(); id++)
-					this->node_pt(ni)->x(id) = r[id];
-			}
-			return;
+			// A hanging node's position is dictated by its masters; snapping it onto the geometry would
+			// break agreement with the coarse neighbour that constrains it, and the boundary is anyway
+			// only as accurate as that neighbour's edge. Leave it to the hanging-node machinery.
+			if (this->node_pt(ni)->is_hanging()) continue;
+			this->local_coordinate_of_node(ni, s);
+			std::vector<double> s_macro = this->get_macro_element_coordinate_at_s(s);
+			if (s_macro.empty()) continue;
+			oomph::Vector<double> s_macro_o(s_macro.size());
+			for (unsigned int i = 0; i < s_macro.size(); i++) s_macro_o[i] = s_macro[i];
+			macro_elem_pt()->macro_map(s_macro_o, r); // TODO: Time loop
+			for (unsigned int id = 0; id < r.size() && id < this->node_pt(ni)->ndim(); id++)
+				this->node_pt(ni)->x(id) = r[id];
 		}
+	}
 
-		oomph::TElementBase *telem = dynamic_cast<oomph::TElementBase *>(this);
-		if (telem)
-		{
-			/* TODO*/
-			return;
-		}
+	// Undo the FE overwrite that oomph's solid build performs. RefineableSolidQElement<2>/<3>::build
+	// calls the plain RefineableQElement build (which does place new nodes through the macro map) and
+	// then unconditionally resets every node to the FE interpolation -- deliberately, since in a solid
+	// problem the position is a dof; its own comment says "If you wish to reposition nodes on
+	// curvilinear boundaries of a domain to their exact positions on those boundaries you'll have to do
+	// this yourself". This is that. It cannot be done from further_build(), which runs inside the build
+	// being corrected; the concrete Q classes call it after theirs returns.
+	//
+	// Safe with respect to hanging nodes even though they are not yet marked as such here: oomph sets
+	// up hanging nodes after every element has been built (refineable_mesh.cc, build at :1028 vs
+	// setup_hanging_nodes at :1259), and that pass overwrites a hanging node's position with the coarse
+	// neighbour's interpolation, which is what it must be.
+	void BulkElementBase::reapply_macro_element_positions()
+	{
+		if (!macro_elem_pt() || !this->macro_element_may_set_positions()) return;
+		this->map_nodes_on_macro_element();
 	}
 
 	// Factory that instantiates the concrete BulkElement* subclass matching a MeshTemplateElement's
@@ -7834,6 +7905,25 @@ namespace pyoomph
 		}
 	}
 
+	// Quad build() overrides. oomph's RefineableSolidQElement<2>::build calls the plain quad build --
+	// which does place new nodes through the macro map -- and then overwrites every node with the FE
+	// interpolation, so on a curved boundary the macro element had no effect at all and the geometry was
+	// only ever repaired afterwards by Problem.map_nodes_on_macro_elements(), which the runtime adapt()
+	// path never calls. Re-apply the macro positions here, once that build has returned.
+	void BulkElementQuad2dC1::build(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file)
+	{
+		oomph::RefineableSolidQElement<2>::build(mesh_pt, new_node_pt, was_already_built, new_nodes_file);
+		if (was_already_built) return;
+		this->reapply_macro_element_positions();
+	}
+
+	void BulkElementQuad2dC2::build(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file)
+	{
+		oomph::RefineableSolidQElement<2>::build(mesh_pt, new_node_pt, was_already_built, new_nodes_file);
+		if (was_already_built) return;
+		this->reapply_macro_element_positions();
+	}
+
 	// Brick build() overrides: in a MIXED forest go through the registry (build_as_brick_son) so a brick shares
 	// interface nodes with adjacent pyramids/wedges (and other bricks); otherwise keep oomph-lib's native
 	// octree build for pure-brick meshes (unchanged, fully validated).
@@ -7848,7 +7938,10 @@ namespace pyoomph
 		else
 		{
 			oomph::RefineableSolidQElement<3>::build(mesh_pt, new_node_pt, was_already_built, new_nodes_file);
+			if (was_already_built) return;
 		}
+		// Same FE overwrite as the 2d solid build; see BulkElementQuad2dC1::build.
+		this->reapply_macro_element_positions();
 	}
 
 	void BulkElementBrick3dC2::build(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file)
@@ -7862,7 +7955,9 @@ namespace pyoomph
 		else
 		{
 			oomph::RefineableSolidQElement<3>::build(mesh_pt, new_node_pt, was_already_built, new_nodes_file);
+			if (was_already_built) return;
 		}
+		this->reapply_macro_element_positions();
 	}
 
    // Total number of DG (discontinuous-Galerkin, per-node-but-not-shared) fields across all

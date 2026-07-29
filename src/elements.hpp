@@ -553,6 +553,9 @@ namespace pyoomph
     // For macro-element-based (structured) meshes: projects/attaches nodes to their position on the
     // underlying macro element geometry, used e.g. for curved boundary representation.
     virtual void map_nodes_on_macro_element();
+    // Re-apply the macro map to this element's nodes after a build that discarded it (see the
+    // definition: oomph's solid build overwrites node positions with the FE interpolation).
+    void reapply_macro_element_positions();
     // Assembles the full dense Hessian (second derivative of the residuals w.r.t. two degrees of
     // freedom) of this element into hbuffer, by calling the generated Hessian code at each
     // integration point. Used for bifurcation-tracking / Hessian-based solvers where the explicit
@@ -576,6 +579,30 @@ namespace pyoomph
     JITElementInfo_t *get_eleminfo() { return &eleminfo; }
     double get_element_diam() const;
     virtual std::vector<double> get_macro_element_coordinate_at_s(oomph::Vector<double> s);
+    // Where this element's C1 vertices sit in the reference domain of the macro element it is attached
+    // to. Empty means "this is the macro element's own root element", i.e. the identity map.
+    //
+    // This generalises oomph's s_macro_ll/s_macro_ur, which record the same thing as an axis-aligned
+    // box and therefore only work for the Q family: a red-refined triangle son is not an axis-aligned
+    // sub-box of its father, and in a mixed forest a son need not even have its father's shape. Vertex
+    // coordinates carry all of those cases, and reduce to the box for quads and bricks.
+    std::vector<std::vector<double>> Macro_element_vertex_s;
+    // Map a local coordinate of this element into the macro element's reference domain, by
+    // interpolating Macro_element_vertex_s with this element's own C1 shape functions.
+    std::vector<double> macro_coordinate_from_local(const oomph::Vector<double> &s) const;
+    // Take over the father's macro element, recording where this son lies in the macro reference
+    // domain. `son_vertices_in_father` gives this son's C1 vertices in the father's local coordinates.
+    void inherit_macro_element_from_father(BulkElementBase *father_pt, const std::vector<std::vector<double>> &son_vertices_in_father);
+    // Generic get_x_from_macro_element. Not an override: oomph::QElementBase already overrides that
+    // virtual for the Q family (via the s_macro_ll/ur box, which stays correct), and having a second
+    // final overrider reachable from the same class would be ambiguous. The simplex/mixed classes,
+    // whose bases leave the virtual broken, forward to this.
+    void get_x_from_generic_macro_element(const unsigned &t, const oomph::Vector<double> &s, oomph::Vector<double> &x) const;
+    // True if this element's nodes should be snapped onto the macro geometry. False on a moving
+    // (ALE) mesh, where the Eulerian position is an unknown and forcing it would fight the solve --
+    // there the macro element only drives the initial configuration, exactly as it does today. See
+    // dev_docs/macro_elements_generalisation.md 5; the full moving-mesh treatment is stage S5.
+    bool macro_element_may_set_positions() const;
     // Evaluate the macro-element geometry itself: the Eulerian position this element's macro element
     // maps the local coordinate s to. Empty if the element has no macro element. Unlike
     // get_macro_element_coordinate_at_s (which stops at the macro-element coordinate) this returns a
@@ -1399,6 +1426,9 @@ namespace pyoomph
     std::vector<double> get_outline(bool lagrangian) override;
     unsigned nrecovery_order() override { return 1; }
     void output(std::ostream &outfile, const unsigned &n_plot) override { BulkElementBase::output(outfile, n_plot); }
+    // See BulkElementBase::reapply_macro_element_positions: oomph's solid build throws the
+    // macro-element positions away, so re-apply them once it has finished.
+    void build(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file) override;
     unsigned nvertex_node() const override { return oomph::QElement<2, 2>::nvertex_node(); }
     oomph::Node *vertex_node_pt(const unsigned &j) const override { return QElement<2, 2>::vertex_node_pt(j); }
     void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
@@ -1475,6 +1505,9 @@ namespace pyoomph
 
     unsigned nrecovery_order() override { return 2; }
     void output(std::ostream &outfile, const unsigned &n_plot) override { BulkElementBase::output(outfile, n_plot); }
+    // See BulkElementBase::reapply_macro_element_positions: oomph's solid build throws the
+    // macro-element positions away, so re-apply them once it has finished.
+    void build(oomph::Mesh *&mesh_pt, oomph::Vector<oomph::Node *> &new_node_pt, bool &was_already_built, std::ofstream &new_nodes_file) override;
     unsigned nvertex_node() const override { return oomph::QElement<2, 3>::nvertex_node(); }
     oomph::Node *vertex_node_pt(const unsigned &j) const override { return QElement<2, 3>::vertex_node_pt(j); }
 
@@ -1546,6 +1579,14 @@ namespace pyoomph
     std::vector<double> get_outline(bool lagrangian) override;
     unsigned nrecovery_order() override { return 1; }
     void output(std::ostream &outfile, const unsigned &n_plot) override { BulkElementBase::output(outfile, n_plot); }
+    // TElementBase leaves FiniteElement's macro-element hook broken, so route it to the generic
+    // vertex-coordinate implementation. (The Q family must NOT do this: QElementBase already provides
+    // a final overrider via its s_macro_ll/ur box, and a second one reachable from the same class
+    // would be ambiguous.)
+    void get_x_from_macro_element(const oomph::Vector<double> &s, oomph::Vector<double> &x) const override
+    { this->get_x_from_generic_macro_element(0, s, x); }
+    void get_x_from_macro_element(const unsigned &t, const oomph::Vector<double> &s, oomph::Vector<double> &x) override
+    { this->get_x_from_generic_macro_element(t, s, x); }
     unsigned nvertex_node() const override { return oomph::TElement<2, 2>::nvertex_node(); }
     oomph::Node *vertex_node_pt(const unsigned &j) const override { return TElement<2, 2>::vertex_node_pt(j); }
     void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
@@ -1645,6 +1686,14 @@ namespace pyoomph
     std::vector<double> get_outline(bool lagrangian) override;
     unsigned nrecovery_order() override { return 2; }
     void output(std::ostream &outfile, const unsigned &n_plot) override { BulkElementBase::output(outfile, n_plot); }
+    // TElementBase leaves FiniteElement's macro-element hook broken, so route it to the generic
+    // vertex-coordinate implementation. (The Q family must NOT do this: QElementBase already provides
+    // a final overrider via its s_macro_ll/ur box, and a second one reachable from the same class
+    // would be ambiguous.)
+    void get_x_from_macro_element(const oomph::Vector<double> &s, oomph::Vector<double> &x) const override
+    { this->get_x_from_generic_macro_element(0, s, x); }
+    void get_x_from_macro_element(const unsigned &t, const oomph::Vector<double> &s, oomph::Vector<double> &x) override
+    { this->get_x_from_generic_macro_element(t, s, x); }
     unsigned nvertex_node() const override { return oomph::TElement<2, 3>::nvertex_node(); }
     oomph::Node *vertex_node_pt(const unsigned &j) const override { return TElement<2, 3>::vertex_node_pt(j); }
     // oomph "interpolating node" facilities for mixed-order (C1-on-C2) hanging, analogous to
