@@ -77,14 +77,19 @@ class _CurvedProblem(Problem):
         self += eqs @ "domain"
 
 
-def _solve(kind, level, outdir):
+def _solve(kind, level, outdir, load_balance=False):
     # "with" is load-bearing here, not tidiness: a Problem left un-released keeps its distributed state
     # alive, and the NEXT Problem's distribute() in the same process then dies. Measured while writing
     # this -- whichever case ran second failed, regardless of which it was. box_cases.solve_case uses
     # the same pattern for the same reason.
     with _CurvedProblem(kind, level) as problem:
-        problem.set_output_directory(os.path.join(outdir, "out_" + kind))
+        problem.set_output_directory(os.path.join(outdir, "out_" + kind + ("_lb" if load_balance else "")))
         problem.max_refinement_level = level + 1
+        # The supported way to load-balance: pyoomph does it inside the initial adaption. (Calling
+        # Problem.load_balance() by hand afterwards dies in generate_interface_elements with "bulkmesh
+        # was not set" -- identically with and without curved entities, so that is a separate,
+        # pre-existing defect and not what this is testing. See dev_docs 22.2.)
+        problem.call_load_balance_in_initial_adaption = load_balance
         problem.initialise()
         problem.solve()
         mesh = problem.get_mesh("domain")
@@ -103,11 +108,12 @@ def main():
     parser.add_argument("--kinds", required=True)
     parser.add_argument("--level", type=int, default=1)
     parser.add_argument("--outdir", required=True)
+    parser.add_argument("--load-balance", action="store_true")
     args, _ = parser.parse_known_args()
     for kind in args.kinds.split(","):
         payload = {"kind": kind, "rank": get_mpi_rank(), "nproc": get_mpi_nproc()}
         try:
-            payload.update(_solve(kind, args.level, args.outdir))
+            payload.update(_solve(kind, args.level, args.outdir, args.load_balance))
         except Exception as e:  # a failure in one case still yields a diagnosable line
             payload["error"] = repr(e)
             payload["traceback"] = traceback.format_exc()

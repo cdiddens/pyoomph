@@ -1462,15 +1462,10 @@ An un-released `Problem` keeps its distributed state alive and the next `distrib
 dies. `box_cases.solve_case` already used `with` for the same reason. The worker says so at the point
 where it matters.
 
-### 19.4 What S6 does not cover
+### 19.4 What S6 did not cover — **both closed in §22**
 
-- **T8, coupled interfaces with curved boundaries.** `InterfaceRefinementCoupler` is exercised by its
-  own MPI module, and curved boundaries now are too, but not together. Two domains sharing a *curved*
-  interface should agree on it by construction — both sides attach the same entity to the same facets
-  — but that is an argument, not a measurement.
-- **Curved boundaries under load balancing.** `load_balance()` redistributes after the initial
-  adaption; the same class of lifetime question applies to it as to `distribute()`, and it is not
-  tested here.
+- ~~T8, coupled interfaces with curved boundaries.~~ Measured in §22.1.
+- ~~Curved boundaries under load balancing.~~ Measured in §22.2.
 
 Measured: all five geometries (quad disc, triangular disc, spherical octant of bricks, tetrahedral
 ball, gmsh tetrahedral ball) exact to machine precision on every rank at 2 and 4 ranks.
@@ -1621,3 +1616,39 @@ parametric coordinate is opaque and may be redundant, with the sphere's unit nor
 reason. It gives the §20.4 guidance in the form a user needs it: prefer to absorb a correction into
 `parametric_to_pos`, which runs anyway, and override `blend` only when the rule needs the other
 samples.
+
+---
+
+## 22. Closing §19.4
+
+### 22.1 A curved interface shared by two coupled domains
+
+Two concentric annular domains sharing a circular interface, with only the inner one told to refine so
+that `InterfaceRefinementCoupler` has to carry the requirement across. Each side then places the
+interface's new nodes through its *own* macro elements, and they have to land in the same places or
+`connect_interface_elements_by_kdtree` has nothing to pair up.
+
+They do. Measured: interface exact to `1.1e-16` from both sides, and the two domains' interface node
+sets are **identical** — not merely close, the same rounded coordinates. The straight-sided control
+gives `1.3e-2`, so the test is discriminating.
+
+§19.4 called this "an argument, not a measurement", the argument being that both sides attach the same
+entity to the same facets. The argument was right, but it was worth checking: the two sides run
+independent refinement decisions through independently constructed macro elements, and "same inputs"
+only implies "same outputs" if nothing in between introduces an ordering or accumulation difference.
+Now it is `test_curved_shared_interface_agrees_from_both_sides`.
+
+### 22.2 Load balancing, and a pre-existing defect next to it
+
+`call_load_balance_in_initial_adaption = True` redistributes the mesh during the initial adaption, and
+curved boundaries come through it exact (`0.0` on both ranks, all five geometries). Covered by
+`test_curved_boundaries_survive_load_balancing`.
+
+Calling `Problem.load_balance()` **by hand** after `initialise()` is a different matter: it dies in
+`Mesh::generate_interface_elements` with *"bulkmesh was not set"*
+([src/mesh.cpp:4958](src/mesh.cpp#L4958)) and then segfaults. That is **not** a curved-boundary
+defect — it reproduces identically with `with_curved_entities=False`, i.e. with no macro element in
+the problem at all. It is recorded here because this is where it was found, not because it belongs to
+this work: something about the manual entry point leaves an interface mesh without its bulk mesh after
+redistribution. Anyone wanting it should start from the fact that the flag-driven path through the
+initial adaption works.

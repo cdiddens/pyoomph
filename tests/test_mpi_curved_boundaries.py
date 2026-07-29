@@ -62,12 +62,14 @@ pytestmark = [pytest.mark.skipif(_SKIP_REASON is not None, reason=str(_SKIP_REAS
               pytest.mark.slow]
 
 
-def _run(kinds, nproc, tmpdir, level=1, timeout=1200):
+def _run(kinds, nproc, tmpdir, level=1, timeout=1200, load_balance=False):
     cmd = ["mpirun", "-n", str(nproc)]
     if os.environ.get("PYOOMPH_MPI_OVERSUBSCRIBE", "1") == "1":
         cmd += ["--oversubscribe"]
     cmd += [sys.executable, _WORKER, "--kinds", ",".join(kinds), "--level", str(level),
             "--outdir", str(tmpdir), "--distribute"]
+    if load_balance:
+        cmd += ["--load-balance"]
     # Importing pyoomph calls MPI_Init, so this pytest process already owns an Open MPI session
     # directory under TMPDIR; a nested mpirun collides with it and dies with no diagnostics. Give the
     # child its own. (Same reasoning as test_mpi_adaptivity._run_distributed.)
@@ -124,6 +126,19 @@ def test_distributed_curved_boundaries_stay_exact(nproc, tmp_path):
         # Every rank that holds part of the curved boundary must have it exact. A rank holding none is
         # legitimate -- these meshes are deliberately coarse, and on four ranks the spherical octant's
         # boundary does not reach all of them -- so the "somebody has it" check is global.
+        assert sum(r["bnodes"] for r in results[kind]) > 0, kind + ": no rank holds any boundary node"
+        for r in results[kind]:
+            assert r["worst"] < _EXACT, "%s: rank %d worst |r-R| = %.3e" % (kind, r["rank"], r["worst"])
+
+
+def test_curved_boundaries_survive_load_balancing(tmp_path):
+    # load_balance() redistributes the mesh after the initial adaption, so it raises the same question
+    # distribute() did: whether anything a macro element depends on is invalidated by moving elements
+    # between ranks. dev_docs 19.4 left it untested; it is covered here, on the path pyoomph actually
+    # uses (call_load_balance_in_initial_adaption).
+    results = _run(_KINDS_2D + _KINDS_3D, 2, tmp_path, load_balance=True)
+    for kind in _KINDS_2D + _KINDS_3D:
+        assert kind in results, "no result for " + kind
         assert sum(r["bnodes"] for r in results[kind]) > 0, kind + ": no rank holds any boundary node"
         for r in results[kind]:
             assert r["worst"] < _EXACT, "%s: rank %d worst |r-R| = %.3e" % (kind, r["rank"], r["worst"])

@@ -53,6 +53,7 @@ import pytest
 
 from pyoomph import *
 from pyoomph import _pyoomph_core as _pyoomph
+from pyoomph.equations.generic import ConnectFieldsAtInterface
 from pyoomph.equations.poisson import PoissonEquation
 from pyoomph.meshes.gmsh import GmshTemplate
 from pyoomph.meshes.mesh import MeshTemplate
@@ -329,6 +330,67 @@ class _NormalDisk(Problem):
         self += eqs @ "domain"
 
 
+class _CurvedInterfaceTemplate(MeshTemplate):
+    # Two concentric annular domains sharing a CIRCULAR interface, plus curved inner and outer walls.
+    # The point is the shared interface: it belongs to both domains, and both must place its refined
+    # nodes in the same places or the opposite-element matcher has nothing to pair up.
+    _R = (0.4, 0.7, 1.0)
+
+    def __init__(self, curved=True, nseg=16):
+        super().__init__()
+        self._curved, self._nseg = curved, nseg
+        self._entities = []
+
+    def define_geometry(self):
+        inner = self.new_domain("inner")
+        outer = self.new_domain("outer")
+        n = self._nseg
+        cache = {}
+
+        def node(i, r):
+            key = (i % n, r)
+            if key not in cache:
+                t = 2 * math.pi * (i % n) / n
+                cache[key] = self.add_node_unique(r * math.cos(t), r * math.sin(t))
+            return cache[key]
+
+        def arc(a, b):
+            if not self._curved:
+                return None
+            entity = self.create_curved_entity("circle_arc", a, b, center=[0, 0, 0])
+            self._entities.append(entity)
+            return entity
+
+        r0, r1, r2 = self._R
+        for i in range(n):
+            a0, b0 = node(i, r0), node(i + 1, r0)
+            a1, b1 = node(i, r1), node(i + 1, r1)
+            a2, b2 = node(i, r2), node(i + 1, r2)
+            inner.add_quad_2d_C1(a0, b0, a1, b1)
+            outer.add_quad_2d_C1(a1, b1, a2, b2)
+            self.add_facet_to_boundary("inner_wall", [a0, b0], [a0, b0], arc(a0, b0))
+            self.add_facet_to_boundary("interface", [a1, b1], [a1, b1], arc(a1, b1))
+            self.add_facet_to_boundary("outer_wall", [a2, b2], [a2, b2], arc(a2, b2))
+
+
+class _CurvedInterfaceProblem(Problem):
+    def __init__(self, curved=True):
+        super().__init__()
+        self._curved = curved
+
+    def define_problem(self):
+        self += _CurvedInterfaceTemplate(self._curved)
+        self += PoissonEquation(name="u", source=0, space="C1") @ "inner"
+        self += PoissonEquation(name="u", source=0, space="C1") @ "outer"
+        self += DirichletBC(u=0) @ "inner/inner_wall"
+        self += DirichletBC(u=1) @ "outer/outer_wall"
+        self += ConnectFieldsAtInterface("u") @ "inner/interface"
+        # Deliberately asymmetric: only "inner" is told to refine, so the interface-refinement coupler
+        # has to carry the requirement across to "outer".
+        self += (SpatialErrorEstimator(u=1) + RefineToLevel(2)) @ "inner"
+        self += SpatialErrorEstimator(u=1) @ "outer"
+
+
 class _GmshBallTemplate(GmshTemplate):
     # An octant of a ball meshed by gmsh with tetrahedra, its shell mapped onto the sphere. Unlike the
     # hand-built meshes above this is unstructured, which is what makes it the interesting case: most
@@ -460,6 +522,29 @@ def _worker_main(argv):
         for _ in range(nref):
             problem.refine_uniformly()
         print("RESULT", _max_radius_error(problem.get_mesh("domain"), "shell", ndim=3))
+        return
+    elif kind == "coupled":
+        curved = argv[2] == "1"
+        with _CurvedInterfaceProblem(curved) as problem:
+            problem.set_output_directory(outdir)
+            problem.max_refinement_level = 3
+            problem.initialise()
+            problem.solve()
+            r1 = _CurvedInterfaceTemplate._R[1]
+            worst = 0.0
+            sets = []
+            for dom in ("inner", "outer"):
+                mesh = problem.get_mesh(dom)
+                bidx = mesh.get_boundary_index("interface")
+                pts = []
+                for nd in mesh.nodes():
+                    if nd.is_on_boundary(bidx):
+                        worst = max(worst, abs(math.hypot(nd.x(0), nd.x(1)) - r1))
+                        pts.append((round(nd.x(0), 12), round(nd.x(1), 12)))
+                sets.append(sorted(pts))
+            print("RESULT", worst)
+            print("IDENTICAL", 1 if sets[0] == sets[1] and sets[0] else 0)
+            print("NIFACE", len(sets[0]))
         return
     elif kind == "normaldisk":
         renormalise, nref = argv[2] == "1", int(argv[3])
@@ -875,3 +960,25 @@ def test_intrinsic_and_parametric_dimensions_are_reported_separately():
     user = _CircleByNormal([0, 0], _R)
     assert user.get_parametric_dimension() == 2
     assert user.get_intrinsic_dimension() == 1
+
+
+# --------------------------------------------------------------------------------------------
+# Coupled interfaces (dev_docs 19.4)
+# --------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("curved", [True, False])
+def test_curved_shared_interface_agrees_from_both_sides(curved, tmp_path):
+    # A curved boundary shared by two coupled domains. The two sides refine independently -- only
+    # "inner" carries the refinement requirement, and InterfaceRefinementCoupler carries it across --
+    # so each places the interface's new nodes through its own macro elements. They must land in the
+    # same places, or connect_interface_elements_by_kdtree has nothing to pair up.
+    #
+    # dev_docs 19.4 listed this as an argument rather than a measurement: both sides attach the same
+    # entity to the same facets, so agreement "should" follow. This is the measurement.
+    out = _worker_lines(tmp_path, "coupled", 1 if curved else 0)
+    assert int(out["NIFACE"]) > 0
+    assert int(out["IDENTICAL"]) == 1, "the two domains disagree about where the interface nodes are"
+    if curved:
+        assert float(out["RESULT"]) < _EXACT
+    else:
+        assert float(out["RESULT"]) > 1e-3      # straight-sided, as a control
