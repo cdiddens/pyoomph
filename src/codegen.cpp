@@ -1146,6 +1146,23 @@ namespace pyoomph
 
 	}
 
+    bool FiniteElementField::has_mass_matrix_contribution_for_code(FiniteElementCode *code,unsigned residual_index, FiniteElementField *other)
+	{
+		return this->mass_matrix_contribution_for_code.count(code) > 0 && this->mass_matrix_contribution_for_code[code].count(residual_index) > 0 && this->mass_matrix_contribution_for_code[code][residual_index].count(other) > 0;
+	}
+    void FiniteElementField::mark_mass_matrix_contribution_for_code(FiniteElementCode *code,unsigned residual_index, FiniteElementField *other)
+	{
+		if (!this->mass_matrix_contribution_for_code.count(code))
+		{
+			this->mass_matrix_contribution_for_code[code]=std::map<unsigned,std::set<FiniteElementField*,FiniteElementFieldPtrLess>>();
+		}
+		if (!this->mass_matrix_contribution_for_code[code].count(residual_index))
+		{
+			this->mass_matrix_contribution_for_code[code][residual_index]=std::set<FiniteElementField*,FiniteElementFieldPtrLess>();
+		}
+		this->mass_matrix_contribution_for_code[code][residual_index].insert(other);
+	}
+
 	// If a field is already defined on a bulk domain and merely re-exposed on an interface/corner
 	// domain, returns the top-level (bulk) field it is equivalent to; otherwise returns itself.
 	FiniteElementField * FiniteElementField::get_defined_on_domain_equivalent_field()
@@ -2433,6 +2450,14 @@ namespace pyoomph
 			GiNaC::ex mass_part = GiNaC::diff(diffpart, pyoomph::expressions::__partial_t_mass_matrix);
 			if (!mass_part.is_zero())
 			{
+				// Same bookkeeping as the Jacobian marking above, but for the mass-matrix half of this
+				// contribution. "mass_part is not zero" is exactly "this (row field, column field) pair
+				// can appear in the mass matrix", decided symbolically and therefore a superset of
+				// whatever the numbers turn out to be - which is what a sparsity pattern must be. The
+				// information was already computed here and discarded; recording it is what lets the
+				// mass matrix get a tight, value-independent pattern of its own instead of either
+				// inheriting the Jacobian's (3x too dense) or being value-filtered (not reusable).
+				residual_field->mark_mass_matrix_contribution_for_code(for_code,for_code->get_current_residual_index(),f);
 				os << indent << "    ADD_TO_MASS_MATRIX_" << (hanging_eqns ? "HANG" : "NOHANG") << "_" << (hang ? "HANG" : "NOHANG") << "(";
 				//		    mass_part.evalf().print(GiNaC::print_csrc_FEM(os,&csrc_opts));
 				//          GiNaC::factor(GiNaC::normal(GiNaC::expand(GiNaC::expand(mass_part).evalf()))).print(GiNaC::print_csrc_FEM(os,&csrc_opts));
@@ -8058,6 +8083,7 @@ namespace pyoomph
 		*/
 	  init << " functable->contributes_to_residual=(bool**)calloc(functable->num_res_jacs,sizeof(*functable->contributes_to_residual));" << std::endl;
 	  init << " functable->contributes_to_jacobian=(bool***)calloc(functable->num_res_jacs,sizeof(*functable->contributes_to_jacobian));" << std::endl;
+	  init << " functable->contributes_to_mass_matrix=(bool***)calloc(functable->num_res_jacs,sizeof(*functable->contributes_to_mass_matrix));" << std::endl;
 	  init << " functable->contribution_entries_size=" << contribution_names.size() << ";" << std::endl;
 	  if (contribution_names.size()>0)
 	  {
@@ -8076,8 +8102,11 @@ namespace pyoomph
 				init << " functable->contributes_to_residual[" << resiind << "]=(bool*)calloc("<< contribution_names.size() <<",sizeof(bool));" << std::endl;				
 				init << " functable->contributes_to_jacobian[" << resiind << "]=(bool**)calloc("<< contribution_names.size() <<",sizeof(**functable->contributes_to_jacobian));" << std::endl;				
 				init << " for (unsigned int _i=0;_i<"<< contribution_names.size() <<";_i++) { functable->contributes_to_jacobian[" << resiind << "][_i]=(bool*)calloc("<< contribution_names.size() <<",sizeof(bool)); }" << std::endl;				
+				init << " functable->contributes_to_mass_matrix[" << resiind << "]=(bool**)calloc("<< contribution_names.size() <<",sizeof(**functable->contributes_to_mass_matrix));" << std::endl;				
+				init << " for (unsigned int _i=0;_i<"<< contribution_names.size() <<";_i++) { functable->contributes_to_mass_matrix[" << resiind << "][_i]=(bool*)calloc("<< contribution_names.size() <<",sizeof(bool)); }" << std::endl;				
 				std::vector<bool> written_residual_contribution(contribution_names.size(), false);
 				std::vector<std::vector<bool>> written_jacobian_contribution(contribution_names.size(), std::vector<bool>(contribution_names.size(), false));
+				std::vector<std::vector<bool>> written_mass_matrix_contribution(contribution_names.size(), std::vector<bool>(contribution_names.size(), false));
 				for (auto &pair1 : to_where_it_was_defined)
 				{
 					FiniteElementField *f = pair1.first;					
@@ -8099,16 +8128,24 @@ namespace pyoomph
 							init << " functable->contributes_to_jacobian[" << resiind << "][" << i1 << "][" << i2 << "]=true; //" << contribution_names[i1] << " vs " << contribution_names[i2] << std::endl;
 							written_jacobian_contribution[i1][i2] = true;
 						}
+						if ((f->has_mass_matrix_contribution_for_code(this,resiind,f2) || f->has_mass_matrix_contribution_for_code(this,resiind,pair2.second)) && !written_mass_matrix_contribution[i1][i2])
+						{
+							init << " functable->contributes_to_mass_matrix[" << resiind << "][" << i1 << "][" << i2 << "]=true; //" << contribution_names[i1] << " vs " << contribution_names[i2] << std::endl;
+							written_mass_matrix_contribution[i1][i2] = true;
+						}
 					}
 				}
 				cleanup << " for (unsigned int _i=0;_i<functable->contribution_entries_size;_i++) { pyoomph_tested_free(functable->contributes_to_jacobian[" << resiind << "][_i]); functable->contributes_to_jacobian[" << resiind << "][_i]=PYOOMPH_NULL; }" << std::endl;
 				cleanup << " pyoomph_tested_free(functable->contributes_to_jacobian[" << resiind << "]); functable->contributes_to_jacobian[" << resiind << "]=PYOOMPH_NULL; " << std::endl;
+				cleanup << " for (unsigned int _i=0;_i<functable->contribution_entries_size;_i++) { pyoomph_tested_free(functable->contributes_to_mass_matrix[" << resiind << "][_i]); functable->contributes_to_mass_matrix[" << resiind << "][_i]=PYOOMPH_NULL; }" << std::endl;
+				cleanup << " pyoomph_tested_free(functable->contributes_to_mass_matrix[" << resiind << "]); functable->contributes_to_mass_matrix[" << resiind << "]=PYOOMPH_NULL; " << std::endl;
 				cleanup << " pyoomph_tested_free(functable->contributes_to_residual[" << resiind << "]); functable->contributes_to_residual[" << resiind << "]=PYOOMPH_NULL; " << std::endl;
 	  
 	  	}
 
 	  	cleanup << " pyoomph_tested_free(functable->contributes_to_residual); functable->contributes_to_residual=PYOOMPH_NULL; " << std::endl;
 	  	cleanup << " pyoomph_tested_free(functable->contributes_to_jacobian); functable->contributes_to_jacobian=PYOOMPH_NULL; " << std::endl;
+	  	cleanup << " pyoomph_tested_free(functable->contributes_to_mass_matrix); functable->contributes_to_mass_matrix=PYOOMPH_NULL; " << std::endl;
 	   }
 
 	   init << " functable->dirichlet_field_index_to_global_field_index=(int*)calloc(functable->Dirichlet_set_size,sizeof(int)); // Filling is done in the problem once all fields are defined" << std::endl;

@@ -476,6 +476,12 @@ typedef struct JITFuncSpec_Table_FiniteElement
   char **contribution_names;
   bool ARRAY_DECL_RESIDUAL_DESTINATION(ARRAY_DECL_NFIELDS(contributes_to_residual));
   bool ARRAY_DECL_RESIDUAL_DESTINATION(ARRAY_DECL_NFIELDS(ARRAY_DECL_NFIELDS(contributes_to_jacobian)));
+  // Same shape as contributes_to_jacobian, but restricted to the mass-matrix half of each Jacobian
+  // contribution (the part carrying a time derivative of the column field). Always a subset of
+  // contributes_to_jacobian. Decided symbolically at code generation time, so it is a superset of
+  // whatever entries turn out to be numerically nonzero -- i.e. a valid sparsity pattern. Used to give
+  // the mass matrix its own tight, value-independent pattern; see dev_docs/structural_assembly.md.
+  bool ARRAY_DECL_RESIDUAL_DESTINATION(ARRAY_DECL_NFIELDS(ARRAY_DECL_NFIELDS(contributes_to_mass_matrix)));
   // Fields defined on this domain (i.e. without taking over from parent)
   unsigned num_defined_fields_on_this_domain;
   char **defined_field_names_on_this_domain;

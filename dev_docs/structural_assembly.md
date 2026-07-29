@@ -463,15 +463,58 @@ investigation.
 * Falls back to the oomph routine whenever the pattern is invalid, so this is always revertible at
   runtime.
 
-### Phase 3 — Tier B (field-pair pruning)
+### Phase 3 — Tier B (field-pair pruning) — **IN PROGRESS**
 
-* Per-element-code map: local dof index → contribution/field index. Follow `get_dof_names()`
-  (`src/elements.cpp:5626`, `:13819`); cache per `(code, element type)`, not per element.
-* Mask the pattern with `ft->contributes_to_jacobian[res][j][k]`.
-* Make `force_jacobian_diagonal_entries` default to on here.
-* Guard: the mask must be per *residual/Jacobian combination* (`_solved_residual`,
-  `src/problem.hpp:293`) — switching the active residual changes the coupling table and therefore
-  the pattern, so it must bump `structure_id`.
+Goal: bring the coupled case from 1.35× back to 1.00× nnz (§2.4 measured that the field-pair mask
+reproduces the numerical pattern *exactly*), which is what would let `keep_structural_zeros` default
+to on. Steps:
+
+1. **The symbolic tables.** ✔ **DONE.** `contributes_to_jacobian[res][field_i][field_j]` already
+   existed (`src/jitbridge.h`, emitted in `src/codegen.cpp`). Its mass-matrix counterpart,
+   `contributes_to_mass_matrix`, is now emitted alongside it: codegen was *already* computing
+   `mass_part = diff(diffpart, __partial_t_mass_matrix)` at `src/codegen.cpp` (the
+   `ADD_TO_MASS_MATRIX` emission point) and discarding the fact of its non-zeroness. Recording it
+   costs one call, mirroring `mark_jacobian_contribution_for_code`.
+   Verified on NS + advection–diffusion: 11 Jacobian field pairs, **3** mass-matrix pairs —
+   `(c,c)`, `(velocity_x,velocity_x)`, `(velocity_y,velocity_y)`, i.e. exactly the `∂t` terms, with
+   pressure correctly absent. 3/11 = 0.27 against the measured M/J nnz ratio of 0.257.
+2. **Per-element local dof → contribution index map.** Follow `get_dof_names()`
+   (`src/elements.cpp:5626`, interface variant `:13819`), which already walks
+   `eleminfo.nodal_local_eqn` / `pos_local_eqn` and the functable field info to attribute each local
+   dof to a field. Cache per `(code, element type)`, not per element. This is the bulk of the work.
+3. **Getting the mask into the scatter.** The per-matrix threshold hook of §3.7 is not enough — a
+   mask is per `(i,j)`, not per matrix. Proposed: extend the same oomph patch with
+
+   ```cpp
+   //FOR PYOOMPH
+   virtual const bool* sparsity_mask_for_element(const unsigned& matrix_index,
+                                                 GeneralisedElement* const& elem_pt,
+                                                 const unsigned& nvar) const { return 0; }
+   ```
+
+   fetched **once per element per matrix** (hoisted above the `i`/`j` loops, so no virtual call per
+   entry), with the filter becoming
+
+   ```cpp
+   if ((mask[m] && mask[m][i * nvar + j]) ||
+       std::fabs(value) > numerical_zero_for_sparse_assembly(m))
+   ```
+
+   Note the **`||`**, not a replacement: the mask may only ever *add* entries, never remove them. A
+   wrong or stale mask then costs storage, not correctness — and a mask that under-reports cannot
+   silently truncate the Jacobian, which is the one failure mode that would be a wrong answer rather
+   than a slowdown. It also makes `keep_structural_zeros` the special case "mask is all-true".
+4. **`force_jacobian_diagonal_entries`** becomes meaningful here and should default to on: the
+   field-pair mask leaves the pressure–pressure diagonal empty (§2.4 measured 1680 such rows), which
+   is exactly what PETSc's factorisers reject.
+5. Guard: the mask is per *residual/Jacobian combination* (`_solved_residual`,
+   `src/problem.hpp:293`) — switching the active residual changes the coupling table and therefore
+   the pattern. Already covered: `structure_id` re-validates against `_solved_residual`, with a test.
+
+Once step 3 exists, the mass matrix gets its own tight structural pattern from
+`contributes_to_mass_matrix` for free, replacing the value filter it falls back to today — so M
+becomes value-independent *and* stays ~3× sparser than J, rather than having to choose between the
+two as §3.7 currently does.
 
 ### Phase 4 — eigenproblems and bifurcation tracking
 

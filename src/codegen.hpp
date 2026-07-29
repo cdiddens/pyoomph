@@ -711,6 +711,7 @@ namespace pyoomph
       GiNaC::symbol symb; // Plain GiNaC symbol identifying this field, used e.g. as a key in nondimensionalization/substitution maps
       std::map<FiniteElementCode *, std::set<unsigned>> residual_contribution_for_code; // For each code, the residual indices for which this field has a contribution
       std::map<FiniteElementCode *, std::map<unsigned ,std::set<FiniteElementField*,FiniteElementFieldPtrLess> >> jacobian_contribution_for_code; // For each code, the residual indices for which this field has a contribution
+      std::map<FiniteElementCode *, std::map<unsigned ,std::set<FiniteElementField*,FiniteElementFieldPtrLess> >> mass_matrix_contribution_for_code; // Same, but only for the mass-matrix part (the d/d(dU/dt) piece) of that contribution, which is a strict subset
       FiniteElementField * defined_on_domain_equivalent=NULL; // If a field is already defined on a bulk domain, it is transferred to interfaces and corners. This goes to the top level, i.e. where it is defined
       static unsigned next_creation_index;
       unsigned creation_index;
@@ -752,8 +753,14 @@ namespace pyoomph
       virtual std::string get_hanginfo_str(FiniteElementCode *forcode) const;
       bool has_residual_contribution_for_code(FiniteElementCode *code,unsigned residual_index);
       bool has_jacobian_contribution_for_code(FiniteElementCode *code,unsigned residual_index, FiniteElementField *other);
+      // Whether the contribution above has a MASS MATRIX part, i.e. whether d(residual of this field)
+      // /d(other) contains a time derivative of "other". Always a subset of the Jacobian contribution:
+      // only fields carrying a time derivative enter the mass matrix at all, which is why the mass
+      // matrix is typically several times sparser than the Jacobian.
+      bool has_mass_matrix_contribution_for_code(FiniteElementCode *code,unsigned residual_index, FiniteElementField *other);
       void mark_residual_contribution_for_code(FiniteElementCode *code,unsigned residual_index);
       void mark_jacobian_contribution_for_code(FiniteElementCode *code,unsigned residual_index, FiniteElementField *other);
+      void mark_mass_matrix_contribution_for_code(FiniteElementCode *code,unsigned residual_index, FiniteElementField *other);
       FiniteElementField * get_defined_on_domain_equivalent_field();
       void set_defined_on_domain_equivalent_field(FiniteElementField *equiv_field);
    };
