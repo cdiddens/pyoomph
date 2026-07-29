@@ -7552,6 +7552,12 @@ namespace pyoomph
 								
 				init << " functable->info_" << space->get_name() << ".numfields=" << numfields << ";" << std::endl;
 				init << " functable->info_" << space->get_name() << ".fieldnames=(char **)malloc(sizeof(char*)*functable->info_" << space->get_name() << ".numfields);" << std::endl;				
+				// Allocated here, alongside fieldnames and with exactly the same count, so the two can never
+				// disagree: the element walk indexes it by the space's field count, and sizing it from the
+				// slots recorded below would under-allocate whenever a field takes part in no contribution.
+				init << " functable->info_" << space->get_name() << ".field_contribution_index=(int*)malloc(sizeof(int)*functable->info_" << space->get_name() << ".numfields);" << std::endl;
+				init << " for (unsigned int _i=0;_i<functable->info_" << space->get_name() << ".numfields;_i++) { functable->info_" << space->get_name() << ".field_contribution_index[_i]=-1; }" << std::endl;
+				cleanup << " pyoomph_tested_free(functable->info_" << space->get_name() << ".field_contribution_index); functable->info_" << space->get_name() << ".field_contribution_index=PYOOMPH_NULL; " << std::endl;
 				for (auto &f : myfields)
 				{
 					if (f->get_space() != space)
@@ -7721,6 +7727,10 @@ namespace pyoomph
 					}
 				}
 				init << " functable->" << info_name << ".fieldnames=(char **)malloc(sizeof(char*)*functable->" << info_name << ".numfields);" << std::endl;
+				// Same count as fieldnames; see the note at the other emission site.
+				init << " functable->" << info_name << ".field_contribution_index=(int*)malloc(sizeof(int)*functable->" << info_name << ".numfields);" << std::endl;
+				init << " for (unsigned int _i=0;_i<functable->" << info_name << ".numfields;_i++) { functable->" << info_name << ".field_contribution_index[_i]=-1; }" << std::endl;
+				cleanup << " pyoomph_tested_free(functable->" << info_name << ".field_contribution_index); functable->" << info_name << ".field_contribution_index=PYOOMPH_NULL; " << std::endl;
 				std::map<unsigned, FiniteElementField *> reindex;
 				for (auto &f : myfields)
 				{
@@ -8164,20 +8174,8 @@ namespace pyoomph
 	  // Cannot be emitted next to the field names above: the contribution indices are only assigned
 	  // here, from the set of fields that turned out to contribute.
 	  {
-		std::map<std::string, unsigned> slots_per_space; // SpaceInfo member name -> number of slots
-		for (auto &slot : field_contribution_slots)
-		{
-			const std::string &info_name = std::get<0>(slot);
-			unsigned idx = std::get<1>(slot);
-			if (!slots_per_space.count(info_name) || slots_per_space[info_name] < idx + 1)
-				slots_per_space[info_name] = idx + 1;
-		}
-		for (auto &pair : slots_per_space)
-		{
-			init << " functable->" << pair.first << ".field_contribution_index=(int*)malloc(sizeof(int)*" << pair.second << ");" << std::endl;
-			init << " for (unsigned int _i=0;_i<" << pair.second << ";_i++) { functable->" << pair.first << ".field_contribution_index[_i]=-1; }" << std::endl;
-			cleanup << " pyoomph_tested_free(functable->" << pair.first << ".field_contribution_index); functable->" << pair.first << ".field_contribution_index=PYOOMPH_NULL; " << std::endl;
-		}
+		// The arrays themselves are allocated next to fieldnames above, with the space's own field count,
+		// so only the values are filled in here.
 		for (auto &slot : field_contribution_slots)
 		{
 			FiniteElementField *f = std::get<2>(slot);

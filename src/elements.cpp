@@ -5625,7 +5625,12 @@ namespace pyoomph
 	// attributed dof back to "unknown", and ignore slots the code did not emit an index for.
 	static inline void set_contrib(std::vector<int> &dest, int local_eqn, const int *table, unsigned slot)
 	{
+		// The bounds check is not belt-and-braces: an element with no unknowns at all (every dof pinned,
+		// or a halo element) still carries eleminfo local-equation numbers from whenever it last had
+		// some, and those are >= 0. Writing them into a dest sized by the CURRENT ndof() then runs off
+		// the end. Seen as a segfault in distributed 3D adaptive meshes.
 		if (local_eqn < 0 || !table) return;
+		if ((size_t)local_eqn >= dest.size()) return;
 		if (dest[local_eqn] < 0) dest[local_eqn] = table[slot];
 	}
 
@@ -5713,6 +5718,13 @@ namespace pyoomph
 	{
 		if (!local_dof_contribution_indices_valid)
 		{
+			if (!this->ndof())
+			{
+				// Nothing to attribute, and the walk below would read stale eleminfo entries.
+				local_dof_contribution_indices.clear();
+				local_dof_contribution_indices_valid = true;
+				return local_dof_contribution_indices;
+			}
 			// -1 everywhere to begin with: anything the walk below does not attribute stays "unknown",
 			// which downstream must read as "assume coupled to everything" (see elements.hpp).
 			local_dof_contribution_indices.assign(this->ndof(), -1);

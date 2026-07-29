@@ -1960,6 +1960,7 @@ namespace pyoomph
 	const char *Problem::sparsity_mask_for_element(const unsigned &matrix_index, oomph::GeneralisedElement *const &elem_pt, const unsigned &nvar)
 	{
 		if (!keep_structural_zeros || !prune_structural_zeros_by_field_coupling) return NULL;
+		if (!nvar) return NULL; // Element contributes nothing; there is no block to describe
 		// Tier A (no pruning) is expressed through the threshold instead, so no mask is needed there.
 		if (matrix_index > 0 && !dynamic_cast<oomph::EigenProblemHandler *>(this->assembly_handler_pt()))
 		{

@@ -803,6 +803,10 @@ void PyReg_Problem(nb::module_ &m)
 					  "container and compressing it afterwards. Requires a value-independent pattern (``keep_structural_zeros``), and falls back to oomph-lib's "
 					  "assembly by itself whenever it cannot apply -- distributed runs, augmented systems (bifurcation tracking), compressed-column output, or "
 					  "any element the code generator cannot describe symbolically.")
+		.def("_get_frozen_sparsity_nnz", &pyoomph::Problem::get_frozen_sparsity_nnz, nb::arg("matrix_index") = 0,
+			 "Number of nonzeros in the frozen sparsity pattern currently held for the given matrix of a multi-matrix assembly, or 0 if none is built. "
+			 "A positive value is the only direct evidence that the preallocated-CSR assembly path actually engaged rather than quietly falling back, "
+			 "which is worth checking before believing any benchmark of it.")
 		.def_prop_ro("jacobian_structure_id", &pyoomph::Problem::get_jacobian_structure_id,
 					  "Identifier of the current Jacobian sparsity pattern. Anything derived from the pattern stays valid as long as this value is unchanged "
 					  "and non-zero. It is 0 whenever ``keep_structural_zeros`` is off, since the pattern is then value-dependent and cannot be reused.")
