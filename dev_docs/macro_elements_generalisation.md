@@ -1533,3 +1533,43 @@ left in §4.4 as designs rather than shipped as API. `get_intrinsic_dimension()`
 having no caller in the core, because it makes an otherwise puzzling asymmetry legible: a sphere
 patch reporting `get_parametric_dimension() == 3` looks like a bug until something says it is a
 2-manifold on purpose.
+
+### 20.4 What the blend path costs
+
+Asked after the fact, and worth recording because the answer changes how a user should write an
+entity. The macro map is *not* in the assembly loop — it is reached only from
+`map_nodes_on_macro_element` (once per node, at mesh build and after each adaption) and from
+`FiniteElement::get_x` while refinement builds new nodes. So the frequency is O(nodes created), not
+O(quadrature points × Newton steps), and `pyoomph/meshes/interpolator.py` already strips macro
+elements before `locate_zeta`, which is the one other route that would have made it hot.
+
+Measured on a triangular disc refined to 8192 elements — `refine` is four uniform refinements,
+`resnap` one full `map_nodes_on_macro_elements()` pass:
+
+```
+                                     refine     resnap    boundary error
+no macro element at all              0.221 s    0.006 s      4.8e-03
+built-in C++ entity                  0.240 s    0.026 s      2.2e-16
+Python entity, no blend() override   0.333 s    0.171 s      2.2e-16
+Python entity, with blend()          0.431 s    0.311 s      2.2e-16
+```
+
+Three things follow.
+
+**The C++ path is not a concern.** Curved geometry costs ~8% on refinement and 20 ms per re-snap pass
+at this size. An attempt to remove the remaining per-call allocation (hoisting the blend scratch into
+member buffers) recovered about 8% of the 26 ms and was **reverted**: it introduces a mutable member
+whose failure mode, if a re-entrant Python callback ever clobbered it mid-use, is silently wrong
+geometry. Not a trade worth making for that.
+
+**A Python entity costs roughly an order of magnitude more**, and that is mostly *not* new — the
+`parametric_to_position` callback has always been there. Still linear in mesh size, so a 10^5-element
+mesh pays ~2 s per re-snap pass.
+
+**Overriding `blend()` roughly doubles the Python cost**, because it is a second callback per
+evaluation. The third row above is the useful one: that entity leaves `blend()` alone and normalises
+inside `parametric_to_pos` instead — and is *equally exact*, at half the overhead. So the guidance,
+now also in the header where someone writing an entity will meet it: fold a correction into
+`parametric_to_position` when it can be expressed pointwise; override `blend_parametric` only when the
+rule genuinely needs the other samples, such as unwrapping a periodic coordinate relative to its
+neighbours, or a true slerp.

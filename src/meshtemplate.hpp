@@ -150,6 +150,13 @@ namespace pyoomph
     // Called for arbitrary weights, not only at the facet's own vertices: refinement evaluates the
     // blend anywhere on the facet. Distinct from apply_periodicity(), which runs once when the facet
     // is built and merely chooses which representatives of a periodic coordinate to store.
+    //
+    // Cost, for an entity implemented in Python: this is one extra callback per evaluation on top of
+    // parametric_to_position, and it roughly doubles the Python-side cost of the macro map (measured
+    // in dev_docs/macro_elements_generalisation.md 20.4). So prefer to fold a correction into
+    // parametric_to_position when it can be expressed pointwise -- normalising a direction, say, which
+    // is free there because that call happens anyway. Override this when the rule genuinely needs the
+    // other samples: unwrapping a periodic coordinate relative to its neighbours, or a true slerp.
     virtual void blend_parametric(const std::vector<double> &weights,
                                   const std::vector<std::vector<double>> &params,
                                   std::vector<double> &result)
