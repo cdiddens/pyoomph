@@ -34,6 +34,11 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
   that cannot work -- `RefineToLevel` refines uniformly and does not respect `max_refinement_level`, so
   one side can be driven past a cap the other cannot follow -- the run now stops with the offending
   facets and the reason, instead of the opposite-element matcher's bare "Cannot locate opposite node".
+  Elements that touch a coupled interface at a single *vertex* are kept graded with it as well: they
+  carry no boundary facet, so nothing that enforces conformity can see them, and a domain whose whole
+  refinement is forced from the other side used to leave them arbitrarily coarser -- a refined band one
+  element thick with a four-level drop beside it, while every conformity check reported success. The
+  2:1 rule is now closed at the interface vertices too, in the same fixed point.
   See `dev_docs/interface_refinement_coupling.md`.
 - **`RefineToLevel` and `RefineMaxElementSize` are now evaluated in the C++ core** instead of by a Python
   loop over the elements on each adapt. Same criteria, same values, unchanged API -- but they now cover

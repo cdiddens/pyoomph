@@ -641,7 +641,69 @@ For the record: `pin_redundant_lagrange_multipliers` is NOT what makes the junct
 multiplier only when every variable it constrains is already pinned, and at an interior cross point none
 of them is.
 
-### 14.9 Still open
+### 14.9 Conformity is stated on facets, and some elements have none
+
+Found on a real case rather than in the matrix: an evaporating droplet coupled to a gas domain
+(`DropletOnSubstrate`, pure triangles), with a Z2 estimator on the velocity in the **droplet only**, so
+every bit of refinement the gas ever does is forced on it from the other side.
+
+§2 says the invariant is about facets, and everything built on it — the flag reconciliation (§7), the
+repair loop (§8), the checker (§10) — reads `nboundary_element()`/`face_index_at_boundary()`. An
+element that touches the interface at a single **vertex** appears in none of those. It is not a
+boundary element, it contributes no key to either side's facet set, and no test above can even
+mention it. So the gas refined its facet-carrying elements to follow the droplet, and left their
+vertex-only neighbours exactly where they were:
+
+```
+gas, after 5 adapts:   levels present            0 1 2 3 4      nonconforming = 0
+                       vertex-only elements >= 2 levels behind their interface: 34
+                       worst: level 0 at the contact line, against level 4 facets
+```
+
+A refined band one element thick, dropping four levels at a stroke — and every oracle in this document
+reported success, because every one of them is a statement about facets.
+
+**The rule.** 2:1, stated at the vertex: an element that shares an interface vertex with a boundary
+facet may not be more than one level coarser than the finest facet at that vertex. It lives in the
+same fixed point as the facet repair and each mesh's own `enforce_refinement_balance`
+(`select_vertex_connected_too_coarse`, `src/refinement_coupling.cpp`), which it has to, because such an
+element can carry a facet of a *different* coupled interface.
+
+Three things make it well-behaved, and they are the reason it can be a repair rather than a
+reconciliation:
+
+* **it never creates a facet.** A corner element has no edge/face on the interface, so neither has any
+  of its sons — the son at the shared vertex is again corner-only. It therefore cannot cascade along
+  the interface and cannot invalidate the facet sets the repair has just agreed on.
+* **it is not lossy.** §8 warns that repairing is lossy, and it is — for an element merged away and
+  then refined back. These elements have never been refined at all, so their sons interpolate a father
+  that still holds the current solution. There is no round trip to lose anything in. That is why the
+  count is reported separately (`Problem._interface_vertex_balance_refinements`) instead of being added
+  to `_interface_conformity_repairs`, whose whole point is that a non-zero value is bad news.
+* **it is bounded**, by the finest facet level and by `max_refinement_level()`.
+
+**Why the error path did not already do this.** It knows about exactly this set of elements:
+`Mesh::enlarge_elemental_error_max_override_to_only_nodal_connected_elems` spreads a boundary element's
+override to them, "to force refinement rather than leave a 2:1 hang on the boundary". But it can only
+fire when the refinement is *driven by an error at that interface*. A refinement forced by the opposite
+domain never passes through an error at all — it is a flag reconciliation and a facet repair — so
+nothing spreads it.
+
+**Why the §12 matrix did not catch it, which is the part worth remembering.** It was not that the cases
+could not reproduce it. They reproduce it perfectly: `tri_left` driven to level 3 in `lower` alone leaves
+`upper` with vertex-only triangles at levels 0, 1, 2 and 3 against level-3 facets, a jump of 3. The
+matrix simply had no oracle that could see it — every measurement in `solve_case` was a residual, a dof
+count, an integral, or `nonconforming`, and a mesh can be badly graded while all four are perfect. The
+missing test was not a missing case. `two_domain_cases.max_vertex_level_jump` is now that oracle,
+`test_vertex_connected_elements_follow_the_forced_interface` asserts it, and its negative twin
+(`PYOOMPH_DISABLE_INTERFACE_VERTEX_BALANCE=1`) measures 3 where the fix measures 1.
+
+The general lesson, and it is the same shape as §14.3: **an invariant stated on one kind of mesh entity
+says nothing about the others.** Facet conformity was necessary, and it was never sufficient — not
+under MPI (§14.3, a halo property) and not at a vertex (here, a grading property). Both times the
+symptom was a check that reported success.
+
+### 14.10 Still open
 
 * **`_override_bulk_errors_where_necessary` is still Python**, per §14.5. It is the propagation rather
   than a criterion, its rank-locality problem is already covered by the max-reduce, and moving it needs

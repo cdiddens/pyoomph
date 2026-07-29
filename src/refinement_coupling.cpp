@@ -26,6 +26,7 @@ The authors may be contacted at c.diddens@utwente.nl and d.rocha@utwente.nl
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <map>
 #include <sstream>
@@ -278,6 +279,153 @@ namespace pyoomph
 #else
       (void)comm_pt;
 #endif
+    }
+
+    // --- The vertex-connected balance closure ------------------------------------------------------
+    //
+    // Conformity is a statement about FACETS, and so is everything above that restores it. That leaves
+    // one blind spot, and it is not a small one: an element can touch a coupled interface at a single
+    // VERTEX and carry no facet on it at all. Nothing above can see such an element -- it is not in
+    // nboundary_element(), it contributes no key to either side's facet set -- so when the opposite
+    // domain forces the interface to be refined, its facet-carrying neighbours follow and it does not.
+    // The level jump across that shared vertex then grows without bound. Measured on an evaporating
+    // droplet coupled to a gas domain, with a Z2 error estimator stated in the droplet alone: after
+    // five adapts the gas carried level-0 elements sharing an interface vertex with level-4 ones, in a
+    // refined band exactly one element thick.
+    //
+    // The error path already knows about this set of elements. Mesh::enlarge_elemental_error_max_
+    // override_to_only_nodal_connected_elems spreads a boundary element's error override to precisely
+    // the elements that touch the boundary only at a vertex, "to force refinement rather than leave a
+    // 2:1 hang on the boundary". But it can only fire when the refinement is DRIVEN BY AN ERROR at
+    // that interface. A refinement forced by the opposite domain never passes through an error at all
+    // -- it is a flag reconciliation (harmonise_adapt_selection) and a facet repair (below) -- so
+    // nothing spreads it, and the closure has to be stated here as well.
+    //
+    // Stated as the 2:1 rule at the vertex: an element sharing an interface vertex with a boundary
+    // facet may not be more than one level coarser than the finest facet at that vertex. Two
+    // properties make this safe to run inside the conformity fixed point:
+    //
+    //  * it never creates a facet. A corner element has no edge/face on the interface, so neither has
+    //    any of its sons -- the son at the shared vertex is again corner-only. The closure therefore
+    //    cannot cascade ALONG the interface, and cannot invalidate the facet sets the repair just
+    //    agreed on. (It can split a facet of a DIFFERENT coupled interface the same element sits on;
+    //    that is exactly why the two share one fixed point rather than running in sequence.)
+    //  * it is monotone and bounded, by the finest facet level and by max_refinement_level().
+    //
+    // Unlike a conformity repair it is also not lossy: these elements have never been refined, so
+    // their sons are interpolated from a father that still holds the current solution. There is no
+    // unrefine/re-refine round trip to lose anything in, which is why the count is reported separately
+    // from the repair count rather than added to it.
+    bool vertex_balance_disabled()
+    {
+      // Negative-testing hatch, the C++ counterpart of PYOOMPH_DISABLE_INTERFACE_CONFORMITY: a test
+      // that still passes with the closure switched off is not measuring the closure. Read on every
+      // call rather than cached in a static, so a test can toggle it in-process and get the answer it
+      // asked for rather than whichever value the first case in the worker happened to see.
+      const char *v = getenv("PYOOMPH_DISABLE_INTERFACE_VERTEX_BALANCE");
+      const std::string s(v ? v : "");
+      return !(s == "" || s == "0" || s == "off");
+    }
+
+    // Globally MAX-reduce a "vertex key -> finest facet level" map, so every rank reaches the same
+    // verdict about every element it holds. This is the reason to key on position rather than to union
+    // selected elements after the fact (the pattern in TemplatedMeshBase3d::enforce_refinement_balance):
+    // a rank can hold a coarse corner element whose fine facet neighbours all live elsewhere, and with
+    // the reduced map it still sees the level it has to match, halo copy or not.
+    void allreduce_level_map(std::map<InterfacePosKey, int> &m, oomph::OomphCommunicator *comm_pt)
+    {
+#ifdef OOMPH_HAS_MPI
+      if (!comm_pt || comm_pt->nproc() < 2) return;
+      MPI_Comm mc = comm_pt->mpi_comm();
+      const int nproc = comm_pt->nproc();
+      std::vector<long long> mine;
+      mine.reserve(4 * m.size());
+      for (const auto &kv : m)
+      {
+        mine.push_back(kv.first[0]);
+        mine.push_back(kv.first[1]);
+        mine.push_back(kv.first[2]);
+        mine.push_back((long long)kv.second);
+      }
+      int mycount = (int)mine.size();
+      std::vector<int> counts(nproc, 0), displs(nproc, 0);
+      MPI_Allgather(&mycount, 1, MPI_INT, &counts[0], 1, MPI_INT, mc);
+      int total = 0;
+      for (int i = 0; i < nproc; i++) { displs[i] = total; total += counts[i]; }
+      std::vector<long long> all((size_t)std::max(total, 1));
+      MPI_Allgatherv(mycount ? &mine[0] : NULL, mycount, MPI_LONG_LONG,
+                     &all[0], &counts[0], &displs[0], MPI_LONG_LONG, mc);
+      m.clear();
+      for (int i = 0; i + 3 < total; i += 4)
+      {
+        InterfacePosKey k = {all[i], all[i + 1], all[i + 2]};
+        const int lvl = (int)all[i + 3];
+        auto it = m.find(k);
+        if (it == m.end()) m[k] = lvl;
+        else it->second = std::max(it->second, lvl);
+      }
+#else
+      (void)m;
+      (void)comm_pt;
+#endif
+    }
+
+    // Append to `out` the indices of this mesh's elements that touch boundary `bname` at a vertex only
+    // and sit more than one level below the finest boundary facet at that vertex.
+    void select_vertex_connected_too_coarse(TemplatedMeshBase *tm, const std::string &bname,
+                                            oomph::OomphCommunicator *comm_pt, std::vector<unsigned> &out)
+    {
+      if (!tm || vertex_balance_disabled()) return;
+      oomph::Mesh *om = dynamic_cast<oomph::Mesh *>(tm);
+      if (!om) return;
+      const int bindi = find_boundary_index(tm, bname);
+      if (bindi < 0) return; // a side may legitimately be absent
+      const unsigned bind = (unsigned)bindi;
+
+      const std::vector<double> no_offset; // one mesh, so no side-A/side-B translation applies here
+      std::map<InterfacePosKey, int> finest;                    // interface vertex -> finest facet level
+      std::set<oomph::GeneralisedElement *> carries_facet;       // elements the facet machinery already sees
+      const unsigned nbe = om->nboundary_element(bind);
+      for (unsigned i = 0; i < nbe; i++)
+      {
+        BulkElementBase *el = dynamic_cast<BulkElementBase *>(om->boundary_element_pt(bind, i));
+        if (!el) continue;
+        carries_facet.insert(el);
+        oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(el);
+        const int lvl = (re ? (int)re->refinement_level() : 0);
+        std::vector<pyoomph::Node *> verts = el->get_vertex_nodes_of_face(om->face_index_at_boundary(bind, i));
+        for (unsigned v = 0; v < verts.size(); v++)
+        {
+          const InterfacePosKey k = node_key(verts[v], no_offset);
+          auto it = finest.find(k);
+          if (it == finest.end()) finest[k] = lvl;
+          else it->second = std::max(it->second, lvl);
+        }
+      }
+      allreduce_level_map(finest, comm_pt);
+      if (finest.empty()) return;
+
+      for (unsigned ie = 0; ie < om->nelement(); ie++)
+      {
+        BulkElementBase *el = dynamic_cast<BulkElementBase *>(om->element_pt(ie));
+        // An element that carries a facet of this interface is the facet repair's business, not this
+        // one's -- even if it ALSO touches the interface at some unrelated vertex. Same exclusion as
+        // enlarge_elemental_error_max_override_to_only_nodal_connected_elems makes.
+        if (!el || carries_facet.count(el)) continue;
+        oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(el);
+        if (!re || !re->refinement_is_enabled()) continue;
+        const int lvl = (int)re->refinement_level();
+        if (lvl >= (int)tm->max_refinement_level()) continue; // cannot go finer; the jump has to stand
+        for (unsigned v = 0; v < el->nvertex_node(); v++)
+        {
+          auto it = finest.find(node_key(el->vertex_node_pt(v), no_offset));
+          if (it != finest.end() && lvl < it->second - 1)
+          {
+            out.push_back(ie);
+            break;
+          }
+        }
+      }
     }
 
     std::string key_to_string(const InterfacePosKey &k)
@@ -573,8 +721,10 @@ namespace pyoomph
     return total_changes;
   }
 
-  unsigned enforce_interface_conformity(const std::vector<CoupledInterfacePair> &pairs, unsigned max_rounds)
+  unsigned enforce_interface_conformity(const std::vector<CoupledInterfacePair> &pairs, unsigned max_rounds,
+                                        unsigned *n_vertex_balance)
   {
+    if (n_vertex_balance) *n_vertex_balance = 0;
     if (pairs.empty()) return 0;
     oomph::OomphCommunicator *comm_pt = coupling_communicator(pairs);
 
@@ -591,6 +741,7 @@ namespace pyoomph
     }
 
     unsigned total_refined = 0;   // rank-local: only ever used through global_refined below
+    unsigned total_balanced = 0;  // ditto, for the vertex-connected closure
     unsigned global_refined = 0;
     bool converged = false;
     for (unsigned round = 0; round < max_rounds; round++)
@@ -601,7 +752,10 @@ namespace pyoomph
       for (unsigned i = 0; i < meshes.size(); i++)
         if (meshes[i]->refinement_possible()) meshes[i]->enforce_refinement_balance();
 
-      std::vector<std::vector<unsigned>> to_refine(meshes.size());
+      // Kept apart until both are deduplicated, so the two counts below are exact rather than an
+      // apportionment of one merged list: a repair means information was lost and is worth reporting,
+      // a vertex-balance refinement does not (see the closure).
+      std::vector<std::vector<unsigned>> to_refine(meshes.size()), to_balance(meshes.size());
       for (const CoupledInterfacePair &p : pairs)
       {
         InterfaceSideFacets A, B;
@@ -629,6 +783,9 @@ namespace pyoomph
             if (re->refinement_level() >= ms[s]->max_refinement_level()) continue; // cannot go finer
             to_refine[mi].push_back(f.first.first);
           }
+          // ...and, in the same round, the elements that touch this interface at a vertex only. They
+          // carry no facet, so the loop above is structurally blind to them; see the closure itself.
+          select_vertex_connected_too_coarse(ms[s], (s == 0 ? p.bnameA : p.bnameB), comm_pt, to_balance[mi]);
         }
       }
 
@@ -639,7 +796,14 @@ namespace pyoomph
       {
         std::sort(to_refine[i].begin(), to_refine[i].end());
         to_refine[i].erase(std::unique(to_refine[i].begin(), to_refine[i].end()), to_refine[i].end());
-        selected_local += (unsigned)to_refine[i].size();
+        std::sort(to_balance[i].begin(), to_balance[i].end());
+        to_balance[i].erase(std::unique(to_balance[i].begin(), to_balance[i].end()), to_balance[i].end());
+        // An element selected by both is a repair; drop it from the balance list so it is counted once.
+        std::vector<unsigned> only_balance;
+        std::set_difference(to_balance[i].begin(), to_balance[i].end(),
+                            to_refine[i].begin(), to_refine[i].end(), std::back_inserter(only_balance));
+        to_balance[i].swap(only_balance);
+        selected_local += (unsigned)(to_refine[i].size() + to_balance[i].size());
       }
       if (!global_sum(selected_local, comm_pt)) { converged = true; break; }
 
@@ -647,10 +811,13 @@ namespace pyoomph
       {
         // refine_selected_elements() ends in a collective adapt_mesh() on a distributed mesh, so every
         // rank has to enter it for every mesh -- including ranks with nothing of their own to refine.
-        if (!global_sum((unsigned)to_refine[i].size(), comm_pt)) continue;
-        oomph::Vector<unsigned> sel(to_refine[i].size());
+        const unsigned n_here = (unsigned)(to_refine[i].size() + to_balance[i].size());
+        if (!global_sum(n_here, comm_pt)) continue;
+        oomph::Vector<unsigned> sel(n_here);
         for (unsigned k = 0; k < to_refine[i].size(); k++) sel[k] = to_refine[i][k];
+        for (unsigned k = 0; k < to_balance[i].size(); k++) sel[to_refine[i].size() + k] = to_balance[i][k];
         total_refined += (unsigned)to_refine[i].size();
+        total_balanced += (unsigned)to_balance[i].size();
         meshes[i]->refine_selected_elements(sel);
       }
       global_refined += global_sum(selected_local, comm_pt);
@@ -699,6 +866,7 @@ namespace pyoomph
       throw_runtime_error(msg.str());
     }
 
+    if (n_vertex_balance) *n_vertex_balance = total_balanced;
     return total_refined;
   }
 }

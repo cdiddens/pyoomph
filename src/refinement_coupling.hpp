@@ -139,7 +139,14 @@ namespace pyoomph
   // Restore conformity by refining the coarser side of every coupled interface, interleaved with each
   // mesh's own 2:1 balancing (which itself refines further, and can therefore break conformity again),
   // to a joint fixed point. Refinement only, never unrefinement, so it terminates: levels are bounded
-  // by max_refinement_level(). Returns the number of elements refined in total.
+  // by max_refinement_level(). Returns the number of elements refined to restore FACET conformity.
+  //
+  // The same fixed point also closes the vertex-connected balance (see the implementation): an element
+  // that touches a coupled interface only at a VERTEX carries no facet, so nothing above can see it,
+  // and a refinement forced onto its facet-carrying neighbours would leave it arbitrarily coarser.
+  // Those refinements are counted separately, into *n_vertex_balance when given, because they are a
+  // grading closure inside one mesh and not a conformity repair -- and unlike a repair they are not
+  // lossy, so a non-zero count is not the warning sign that a non-zero return value is.
   unsigned enforce_interface_conformity(const std::vector<CoupledInterfacePair> &pairs,
-                                        unsigned max_rounds = 40);
+                                        unsigned max_rounds = 40, unsigned *n_vertex_balance = NULL);
 }

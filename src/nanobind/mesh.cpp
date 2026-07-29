@@ -1723,9 +1723,11 @@ void PyReg_Mesh(nb::module_ &m)
 				p.offset = std::get<4>(c);
 				pairs.push_back(p);
 			}
-			return pyoomph::enforce_interface_conformity(pairs, max_rounds); },
+			unsigned n_vertex_balance = 0;
+			const unsigned n_repaired = pyoomph::enforce_interface_conformity(pairs, max_rounds, &n_vertex_balance);
+			return std::make_pair(n_repaired, n_vertex_balance); },
 		  nb::arg("connections"), nb::arg("max_rounds") = 40,
-		  "Refines the coarser side of every coupled interface until both sides carry identical boundary facets, interleaved with each mesh's own 2:1 balancing; returns the number of elements refined");
+		  "Refines the coarser side of every coupled interface until both sides carry identical boundary facets, interleaved with each mesh's own 2:1 balancing and with the vertex-connected balance closure; returns (elements refined to repair facet conformity, elements refined by the vertex closure)");
 
 	m.def("_harmonise_adapt_selection", [](const std::vector<std::tuple<MeshHandleBase *, std::string, MeshHandleBase *, std::string, std::vector<double>>> &conns, unsigned max_rounds)
 		  {

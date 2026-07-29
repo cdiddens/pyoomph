@@ -128,6 +128,43 @@ def centroid_x(e):
     return e.get_Eulerian_midpoint()[0]
 
 
+def max_vertex_level_jump(problem, domain, boundary):
+    """How far an element touching `boundary` at a VERTEX ONLY lags behind the interface at that vertex.
+
+    Everything that enforces conformity is stated on FACETS, and an element can share a single vertex
+    with a coupled interface while carrying no facet on it -- it is not a boundary element, it puts no
+    key into either side's facet set, and so nothing in the conformity machinery can see it. When the
+    OPPOSITE domain is what forces the refinement, its facet-carrying neighbours follow and it does
+    not, and the level jump across that shared vertex grows without bound. In the tri kinds here every
+    interface cell has exactly one such triangle (the second of the two the cell splits into), so this
+    returns 0 for "quad" and the full driven level for the others unless the closure in
+    enforce_interface_conformity() is doing its job. 2:1 balance means <= 1.
+
+    Two-dimensional and rank-local, both on purpose. An element is taken to carry a facet when two of
+    its vertex nodes lie on the boundary, which is exact for the straight interface these cases use but
+    not in 3d (where two boundary vertices mean a shared EDGE, not a shared face). And it can only see
+    the elements this process holds, so under MPI it may UNDER-report -- safe for an upper bound, and
+    the reason the distributed harness does not compare it against the serial value.
+    """
+    m = problem.get_mesh(domain)
+    bind = m.get_boundary_names().index(boundary)
+    finest, corners = {}, []
+
+    def key(n):
+        return (round(n.x(0) * 1e8), round(n.x(1) * 1e8))
+
+    for e in m.elements():
+        bn = e.boundary_vertex_nodes(bind)
+        lvl = e.refinement_level()
+        if len(bn) >= 2:
+            for n in bn:
+                k = key(n)
+                finest[k] = max(finest.get(k, 0), lvl)
+        elif len(bn) == 1:
+            corners.append((key(bn[0]), lvl))
+    return max([finest[k] - lvl for k, lvl in corners if k in finest] + [0])
+
+
 class TwoDomainProblem(Problem):
     def __init__(self, kind="quad", eq="connect1", levels=(1, 2, "level"), N=4):
         super().__init__()
@@ -282,6 +319,10 @@ def solve_case(kind, eq, levels, N=4, outdir=None):
             # merged away and then refined back -- a round trip that is correct but re-interpolates the
             # sons from the merged father and loses the fine-scale solution.
             "repairs_during_adapt": int(repairs_during_adapt),
+            # The 2:1 balance at the interface VERTICES, which facet conformity says nothing about.
+            # See max_vertex_level_jump: not compared between serial and distributed runs, since it is
+            # rank-local by construction.
+            "vertex_jump": max(max_vertex_level_jump(p, dom, "interface") for dom in ("lower", "upper")),
         }
         for dom in ("lower", "upper"):
             for name, val in p.get_mesh(dom).evaluate_all_observables().items():

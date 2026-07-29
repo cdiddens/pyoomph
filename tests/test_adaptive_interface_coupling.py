@@ -43,6 +43,11 @@
 #     discretisation here. A mis-paired opposite element leaves the two sides coupled to the WRONG
 #     neighbour, which this catches even when the residual has happily converged.
 #
+# All four are statements about FACETS or about the solution, and a mesh can be badly graded while every
+# one of them is perfect -- which is how the vertex-only blind spot of dev_docs section 14.9 survived
+# this matrix. two_domain_cases.max_vertex_level_jump is the fifth oracle, and the only one that looks
+# at an element the conformity machinery cannot see.
+#
 # Negative-tested: with PYOOMPH_DISABLE_INTERFACE_CONFORMITY=1, 80 of the 112 (kind, eq, levels)
 # combinations fail. The 32 that survive are exactly the ones that cannot detect anything -- the
 # non-adaptive (0,0) baseline and the "interface" criterion, which is symmetric by construction (see
@@ -288,3 +293,39 @@ def test_conformity_check_reports_a_torn_interface(tmp_path, monkeypatch):
         assert p.check_interface_conformity(throw_on_mismatch=False, when="torn") > 0
         with pytest.raises(RuntimeError, match="Interface conformity violated"):
             p.check_interface_conformity(throw_on_mismatch=True, when="torn")
+
+
+@pytest.mark.parametrize("kind", _KINDS)
+def test_vertex_connected_elements_follow_the_forced_interface(kind, tmp_path):
+    # Conformity is a statement about FACETS -- and an element can share a single VERTEX with a coupled
+    # interface while carrying no facet on it at all. Nothing that enforces conformity can see such an
+    # element: it is not a boundary element, and it contributes no key to either side's facet set. So
+    # when the OPPOSITE domain is what forces the refinement, its facet-carrying neighbours follow it
+    # and it does not, and the level jump across that shared vertex grows without bound.
+    #
+    # Every tri kind here has such triangles at the interface -- one per cell for the two-way splits,
+    # two for tri_crossed -- so driving "lower" to level 3 uniformly used to leave the "upper" side
+    # with level-3 facet elements sitting against corner neighbours at levels 0 through 2. "quad" has
+    # none of them (every quad above the interface meets it with a full edge) and is carried along to
+    # show the test measures the geometry rather than the driving.
+    res = _solve(kind, "connect1", (0, 3, "level"), tmp_path)
+    assert res["nonconforming"] == 0
+    assert res["vertex_jump"] <= 1, \
+        "%s: an element touching the coupled interface at a vertex only is %d levels coarser than the " \
+        "interface there -- the facet-based conformity machinery cannot see it, so the vertex closure " \
+        "has to" % (kind, res["vertex_jump"])
+
+
+@pytest.mark.parametrize("kind", ["tri_left", "tri_crossed", "mixed"])
+def test_vertex_balance_closure_is_what_closes_it(kind, tmp_path, monkeypatch):
+    # The negative test for the one above: with the closure switched off the same case must FAIL, or
+    # that assertion is measuring nothing. Only the kinds that actually have vertex-only elements at the
+    # interface can discriminate -- "quad" cannot, which is why it is not parametrised here.
+    monkeypatch.setenv("PYOOMPH_DISABLE_INTERFACE_VERTEX_BALANCE", "1")
+    res = _solve(kind, "connect1", (0, 3, "level"), tmp_path)
+    # Facet conformity is untouched by the closure and must still hold -- the two are separate
+    # properties, and this is what says so.
+    assert res["nonconforming"] == 0
+    assert res["vertex_jump"] > 1, \
+        "%s: no vertex-only element lags behind the interface even with the closure disabled, so " \
+        "test_vertex_connected_elements_follow_the_forced_interface cannot be measuring it" % kind

@@ -551,6 +551,13 @@ class Problem(_pyoomph.Problem):
         #: whatever the initial mesh setup needed, since the reconciliation during adapt is meant to get
         #: there first. Reset it yourself to measure a particular stretch of a run.
         self._interface_conformity_repairs:int=0
+        #: Cumulative number of elements refined by the vertex-connected balance closure of
+        #: enforce_interface_conformity(): elements that touch a coupled interface at a single vertex
+        #: and carry no facet on it, which the facet-based conformity machinery cannot see and which
+        #: would otherwise be left arbitrarily coarser than the interface next to them. Counted apart
+        #: from _interface_conformity_repairs because, unlike a repair, this loses no information -
+        #: these elements have never been refined, so their sons interpolate a current father.
+        self._interface_vertex_balance_refinements:int=0
         self.remove_macro_elements_after_initial_adaption:bool | Literal["auto"]="auto" # "auto" means: Only if the coordinates are free
         #: In distributed runs, we call load balance after each non-uniform adaptions
         self.call_load_balance_in_initial_adaption=False
@@ -3704,7 +3711,14 @@ class Problem(_pyoomph.Problem):
         coarser side wherever they disagree, interleaved with each mesh's own 2:1 balancing, until
         they agree. Refinement only, so it terminates.
 
-        Collective under MPI: every process must call it. Returns the number of elements refined.
+        The same fixed point also closes the VERTEX-connected balance: an element touching a coupled
+        interface at a single vertex carries no facet, so none of the above can see it, and it would
+        otherwise be left arbitrarily coarser than the interface beside it. Those refinements are
+        accumulated into :py:attr:`_interface_vertex_balance_refinements` instead, since they are a
+        grading closure inside one mesh rather than a conformity repair.
+
+        Collective under MPI: every process must call it. Returns the number of elements refined to
+        repair facet conformity.
         """
         # Escape hatch for negative testing: a test that still passes with the enforcement switched
         # off is not measuring the enforcement. Not meant for production use.
@@ -3713,7 +3727,8 @@ class Problem(_pyoomph.Problem):
         conns=self._collect_coupled_interfaces()
         if not conns:
             return 0
-        n=_pyoomph._enforce_interface_conformity(conns,40) #type:ignore
+        n,nvert=_pyoomph._enforce_interface_conformity(conns,40) #type:ignore
+        self._interface_vertex_balance_refinements+=nvert
         # How much repairing this had to do. Zero is the good case and the interesting one: it means the
         # two sides agreed BEFORE they acted (the flag reconciliation in _adapt_with_interfacial_errors
         # got there first), rather than one of them being refined back afterwards. A repair is correct
