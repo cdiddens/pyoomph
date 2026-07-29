@@ -324,6 +324,10 @@ class DirichletBC(BaseEquations):
         prefer_weak_for_DG (bool, optional): Flag indicating whether to prefer weak contributions for Discontinuous Galerkin (DG) methods. If set and the bulk equations provide a specific implementation of get_weak_dirichlet_terms_for_DG, these terms are used to enforce the condition in a weak sense. Otherwise, just stronly. Defaults to True.
         **kwargs (ExpressionOrNum): Keyword arguments representing the Dirichlet conditions, where the keys are the variable names and the values are the corresponding expressions or numbers. Expressions for strong DirichletBCs may not depend on unknowns.
 
+    A vector field may be given as a whole, i.e. ``DirichletBC(velocity=vector(0,1))`` instead of
+    ``DirichletBC(velocity_x=0, velocity_y=1)``. The value is split component by component onto the
+    field's components in their own order, so this is also correct in e.g. an axisymmetric coordinate
+    system. See :py:meth:`~pyoomph.generic.codegen.BaseEquations.expand_vectorial_entries`.
     """
 
     def __init__(self, *, prefer_weak_for_DG: bool = True, **kwargs: ExpressionOrNum):
@@ -332,12 +336,18 @@ class DirichletBC(BaseEquations):
         self._dcs.update(kwargs)
         self.prefer_weak_for_DG = prefer_weak_for_DG
 
+    def _expanded_dcs(self) -> dict[str, ExpressionOrNum]:
+        # Vector-valued entries split into their components. Not done in __init__: which components
+        # "velocity" has is a property of the domain this condition ends up on (and, for an interface
+        # condition, of its parent), which is not known until the equations are attached.
+        return self.expand_vectorial_entries(self._dcs, "Dirichlet condition")
+
     def define_residuals(self):
         pdom = self.get_parent_domain()
         peqs = pdom.get_equations() if pdom is not None else None
         if not isinstance(peqs, Equations):
             peqs = None
-        for n, val in self._dcs.items():
+        for n, val in self._expanded_dcs().items():
             if self.prefer_weak_for_DG and (peqs is not None) and (val is not True):
                 # Check if some equation is defining weak contributions instead
                 weak_DBC = peqs.get_weak_dirichlet_terms_for_DG(n, val)
@@ -393,7 +403,9 @@ class InactiveDirichletBC(DirichletBC):
     def before_assigning_equations_preorder(self, mesh: "AnyMesh"):
         if mesh in self._init_setup_for_mesh: # Only init it once during problem init. Someone might have switched it later on
             return super().before_assigning_equations_preorder(mesh)        
-        mesh.set_dirichlet_active(**{k:False for k in self._dcs.keys()})        
+        # Expanded, like define_residuals: set_dirichlet_active names the SCALAR fields, so a
+        # vectorial entry has to be split here too or its components would stay active.
+        mesh.set_dirichlet_active(**{k:False for k in self._expanded_dcs().keys()})
         self._init_setup_for_mesh.add(mesh) # Don't ever set it again for this mesh
         # TODO: Check redefine_problem and/or remeshing
         return super().before_assigning_equations_preorder(mesh)

@@ -419,7 +419,83 @@ class BaseEquations(_pyoomph.Equations):
 
     def get_list_of_vector_fields(self,codegen:"FiniteElementCodeGenerator")->list[dict[str,list[str]]]:
         return []
-    
+
+    def expand_vectorial_entries(self,entries:dict[str,"ExpressionOrNum"],what:str)->dict[str,"ExpressionOrNum"]:
+        """Split vector-valued entries into one entry per component of the corresponding vector field.
+
+        ``DirichletBC(velocity=vector(0,1))`` and ``InitialCondition(velocity=vector(...))`` both name
+        a FIELD in their keyword arguments, but both act on the scalar fields the code generator knows
+        about -- ``velocity_x``, ``velocity_y`` -- rather than on the vector ``velocity`` that
+        :py:meth:`define_vector_field` composed out of them. This maps the one onto the other.
+
+        The mapping is POSITIONAL, and it has to be: component *i* of the value goes to component *i*
+        of the field, which is exactly the correspondence ``var("velocity")`` is itself built with
+        (``define_vector_field`` substitutes it by ``vector(*components)`` in that same order). So it
+        holds in every coordinate system -- an axisymmetric ``velocity`` takes its radial and axial
+        components in the order the coordinate system declared them, not in x/y order -- without this
+        code having to know anything about coordinate systems.
+
+        ``vector()`` always pads to :py:func:`GiNaC_vector_dim` components, so a 2d field is routinely
+        handed a third one. Padding is accepted, a non-zero component the field has no slot for is not:
+        that is a real mistake (a 3-component condition on a 2-component field) and it would otherwise
+        be dropped in silence.
+
+        The field list is only looked up when at least one entry is vectorial, so the ordinary scalar
+        case costs nothing. Call it once the equations are attached to a domain (from
+        ``define_residuals`` onwards): a condition stated on an interface finds its vector fields on the
+        PARENT domain, which is not known before that.
+
+        Args:
+            entries: field name -> value, as the equation received them.
+            what: what the entries are, for the error messages ("Dirichlet condition", ...).
+
+        Returns:
+            The same mapping with every vectorial entry replaced by its per-component entries.
+        """
+        def _is_vectorial(v:"ExpressionOrNum")->bool:
+            return isinstance(v,_pyoomph.Expression) and _pyoomph.GiNaC_is_a_matrix(v)
+
+        if not any(_is_vectorial(v) for v in entries.values()):
+            return entries
+
+        # Walk the code generators rather than asking the combined element for its list: when this
+        # condition is the ONLY equation on its boundary there is nothing to combine it with, so the
+        # "combined element" is this very object -- a BaseEquations, which has no _vectorfields and
+        # would report an empty list. The domains themselves always know.
+        known:dict[str,list[str]]={}
+        cg:"FiniteElementCodeGenerator | None"=self.get_current_code_generator()
+        while cg is not None:
+            vfs=getattr(cg.get_equations(),"_vectorfields",None)
+            if vfs:
+                for name,comps in vfs.items():
+                    known.setdefault(name,comps) # the most local definition wins over the parent domains'
+            cg=cg._get_parent_domain()
+
+        res:dict[str,"ExpressionOrNum"]={}
+        for name,val in entries.items():
+            if not _is_vectorial(val):
+                res[name]=val
+                continue
+            assert isinstance(val,_pyoomph.Expression)
+            comps=known.get(name)
+            if comps is None:
+                raise RuntimeError("Got a vectorial "+what+" for '"+name+"', but '"+name+
+                                   "' is not a vector field on domain "+str(self.get_current_code_generator().get_full_name())+
+                                   ". Vector fields here: "+(", ".join(sorted(known.keys())) if known else "(none)")+
+                                   ". For a scalar field, pass a scalar; for a single component, name it explicitly (e.g. '"+name+"_x').")
+            ncomp=val.nops()
+            if ncomp<len(comps):
+                raise RuntimeError("The vectorial "+what+" for '"+name+"' has "+str(ncomp)+
+                                   " component(s), but the field has "+str(len(comps))+" ("+", ".join(comps)+").")
+            for i,c in enumerate(comps):
+                res[c]=val[i]
+            for i in range(len(comps),ncomp):
+                if not val[i].is_zero():
+                    raise RuntimeError("The vectorial "+what+" for '"+name+"' has a non-zero component "+
+                                       str(i)+" ("+str(val[i])+"), but the field only has "+str(len(comps))+
+                                       " component(s) here ("+", ".join(comps)+").")
+        return res
+
     def get_problem(self)->"Problem":
         mst=self.get_combined_equations()
         if mst._problem is not None:

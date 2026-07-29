@@ -528,6 +528,12 @@ class InitialCondition(BaseEquations):
         degraded_start: Flag indicating whether to use degraded start (i.e. first order time stepping in the first step) or not. Defaults to "auto", meaning we degrade if the initial condition does not depend on time.
         IC_name: Name of the initial condition. Defaults to an empty string, which are the default initial conditions.
         **kwargs: Keyword arguments representing the initial conditions for each variable.
+
+    A vector field may be given as a whole, i.e. ``InitialCondition(velocity=vector(0,1))`` instead of
+    ``InitialCondition(velocity_x=0, velocity_y=1)``. The value is split component by component onto
+    the field's components in their own order, so this is also correct in e.g. an axisymmetric
+    coordinate system. See
+    :py:meth:`~pyoomph.generic.codegen.BaseEquations.expand_vectorial_entries`.
     """
 
     def __init__(self, *, degraded_start: bool | Literal["auto"] = "auto", IC_name: str = "", **kwargs: ExpressionOrNum):
@@ -540,7 +546,10 @@ class InitialCondition(BaseEquations):
         return ",".join([str(k) + "=" + str(v) for k, v in self._ics.items()])
 
     def define_residuals(self):
-        for n, val in self._ics.items():
+        # Vector-valued entries split into their components. Not done in __init__: which components
+        # "velocity" has is a property of the domain this condition ends up on, which is not known
+        # until the equations are attached.
+        for n, val in self.expand_vectorial_entries(self._ics, "initial condition").items():
             assert isinstance(self._degraded_start, bool) or self._degraded_start == "auto"
             self.set_initial_condition(n, val, degraded_start=self._degraded_start, IC_name=self._ic_name)
             if self.get_problem().project_initial_conditions:

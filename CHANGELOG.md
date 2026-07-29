@@ -40,6 +40,13 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
   element thick with a four-level drop beside it, while every conformity check reported success. The
   2:1 rule is now closed at the interface vertices too, in the same fixed point.
   See `dev_docs/interface_refinement_coupling.md`.
+- **Vector fields can be given to `DirichletBC` and `InitialCondition` as a whole**, i.e.
+  `DirichletBC(velocity=vector(1,0))` and `InitialCondition(velocity=vector(u,v))` instead of naming
+  every component. The value is split onto the field's components positionally -- the same
+  correspondence `var("velocity")` itself is built with -- so it is correct in any coordinate system,
+  including an axisymmetric one where the components are not x/y. The padding `vector()` adds up to
+  `GiNaC_vector_dim()` is ignored; a non-zero component the field has no slot for is an error rather
+  than silently dropped, as is a vector given for a scalar field.
 - **`RefineToLevel` and `RefineMaxElementSize` are now evaluated in the C++ core** instead of by a Python
   loop over the elements on each adapt. Same criteria, same values, unchanged API -- but they now cover
   every element a process holds, halo copies included, so a distributed run needs no repair pass to make
