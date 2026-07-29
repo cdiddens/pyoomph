@@ -514,6 +514,33 @@ two ranks the total is *worse than serial* (39.8 vs 37.1 ms) even though the ele
 halved: the overhead eats the entire parallel gain. Distributed assembly does not currently pay for
 itself below about four ranks on a problem this size.
 
+**Which half of that 50 % is it?** §8 asked whether the local binary searches and row scans are the
+bulk, with the inter-rank exchange secondary. Instrumenting the local stage of
+`parallel_sparse_assemble` directly (temporary timer around everything up to "End of vector
+assembly") answers it — **the opposite way round**. Per assembly at 2 ranks:
+
+| stage | time |
+|---|---|
+| elemental evaluation | 20.0 ms |
+| local scatter (`my_eqns` bisection + per-row scan + regrow) | **6.7 ms** |
+| exchange + owner-side merge | **~12.5 ms** |
+
+So the exchange is about **two thirds** of the overhead, not the local scatter. That reprioritises
+Phase 2b and changes what it is worth:
+
+* Freezing the local scatter alone (the direct reuse of Phase 2's machinery, and by far the easier
+  half) caps out at roughly **−17 %** of distributed assembly.
+* The exchange is the real target. Freezing the pattern makes the column indices, the send plan and
+  the owner-side merge permutation all constant, so the per-assembly traffic drops to values plus
+  residuals — a third less payload, and the packing/unpacking and allocation around it becomes a
+  cached permutation instead of work redone every time.
+
+Both halves are therefore needed for 2b to be worth its risk; the local half on its own is not.
+Note also that the diagnostic oomph-lib already has for this
+(`enable_doc_imbalance_in_parallel_assembly`, bound as
+`problem._enable_doc_imbalance_in_parallel_assembly`) prints through `oomph_info`, which pyoomph
+redirects — so it produced nothing here and a direct timer was needed.
+
 
 * `pyoomph::Problem::parallel_sparse_assemble` override holding a `DistributedJacobianSparsity`
   (§7.2): cached `my_eqns`, per-rank send plan, frozen local column indices and scatter map.

@@ -796,6 +796,8 @@ void PyReg_Problem(nb::module_ &m)
 					  "Whether an entry is kept on every diagonal of the Jacobian, even where no field pair contributes to it. PETSc-, MUMPS- and Pardiso-style "
 					  "factorisations reject a matrix with a missing diagonal, and a Taylor-Hood pressure-pressure block is exactly such a case once the pattern "
 					  "is pruned by field coupling. Costs at most ``ndof`` extra entries. Only has an effect together with ``keep_structural_zeros``.")
+		.def("_enable_doc_imbalance_in_parallel_assembly", &oomph::Problem::enable_doc_imbalance_in_parallel_assembly,
+			 "Make the distributed assembly report its local-stage time and the load imbalance across ranks. Diagnostics for the MPI assembly work.")
 		.def_prop_rw("use_frozen_sparsity", &pyoomph::Problem::get_use_frozen_sparsity, &pyoomph::Problem::set_use_frozen_sparsity,
 					  "Whether assembly writes straight into a preallocated CSR through a precomputed scatter map, instead of accumulating into a searchable "
 					  "container and compressing it afterwards. Requires a value-independent pattern (``keep_structural_zeros``), and falls back to oomph-lib's "
