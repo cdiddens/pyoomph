@@ -921,39 +921,43 @@ not silently assume MPI support it does not have.
 
 ## 7c. Open regression: `test_moving_mesh_distributed`
 
-**Status: still failing, and the earlier explanation in this section was wrong.** One test, one case
-(`ale-tri_crossed-12-level`). Everything else is green: 39 structural tests, `test_mpi_adaptivity_3d`,
-the other 27 MPI tests, the whole fast suite (543 passed), all 126 tutorial scripts.
+**Status: open. Read the retraction below before trusting anything previously written here.**
 
-### What is established
+One test, one case (`ale-tri_crossed-12-level`). Everything else is green: 39 structural tests,
+`test_mpi_adaptivity_3d`, the other 27 MPI tests, the fast suite (543 passed), all 126 tutorial scripts.
 
-* It is **not a wrong Jacobian**. The values are bit-identical, and under MPI the frozen path is
-  disabled anyway, so only the OR-filter mask is active and that can merely *add* stored zeros.
-* It **passes when run alone** — 4/4, both with the feature on and off.
-* It **fails after any predecessor** in the same pytest process. Both
-  `test_connected_fields_distributed` and `test_refinement_criteria_distributed` trigger it, so it is
-  not specific to one predecessor.
-* With the structural pattern **off**, every ordering passes (whole module: 12 passed).
-* It is **not the JIT cache**: `PYOOMPH_JIT_CACHE=0` does not change the outcome.
-* It is **not simply round-off sensitivity**: with the feature off, perturbing the accumulation order
-  (`sparse_assembly_method="maps"`) alongside a predecessor still passes. So the earlier claim in this
-  section — "any extra stored zero tips it, the case is knife-edge" — is **not supported**. That
-  bisection was run on the single test in isolation, where the outcome is confounded.
+### Retraction
 
-### What is not established
+Two explanations were recorded in this section and **both were wrong**, because both were built on
+single runs of a reproduction that turns out not to be reliable:
 
-How a *preceding test in the pytest parent* can change what a **freshly spawned `mpirun` child**
-does. The child inherits only its command line, its environment (with a per-test `TMPDIR`) and the
-on-disk JIT cache, and the cache is ruled out. Until that channel is identified the failure is not
-understood, and no conclusion should be drawn about whether the case is marginal.
+1. *"Any extra stored zero tips this knife-edge case."* The flag bisection behind that was run on the
+   single test in isolation, where it passes regardless.
+2. *"It fails only after a predecessor in the same pytest process."* Later the same standalone case
+   failed with no predecessor at all.
+
+The manual reproduction — running `mpi_worker.py` under `mpirun -n 2` with the single
+`tri_crossed / ale / (1,2,"level")` spec — gives **batches** of consistent passes and batches of
+consistent failures with no change to the build in between: 12 consecutive passes, then 3 consecutive
+failures, with the JIT cache warm both times (clearing it changed nothing). Whatever switches it is
+not yet identified, and until it is, no attribution from a single manual run is worth anything.
+
+### What is solid
+
+* The pytest module fails **consistently**: 4 out of 4 whole-module runs, `1 failed / 11 passed`.
+* With the structural pattern forced off, the same module passes: `12 passed`, twice.
+* So the feature is implicated, but *which part* is not established — the flag bisection that appeared
+  to show it was unsound.
+* It is not the JIT cache: `PYOOMPH_JIT_CACHE=0` and a physically removed cache both behave the same.
+* It is not the accumulation order: feature off with `sparse_assembly_method="maps"` passes.
 
 ### Where to pick it up
 
-The worker solves four layouts sequentially in one child (`quad`, `tri_left`, `tri_crossed`,
-`mixed`); `tri_crossed` is the third. Running that exact four-case spec by hand under `mpirun`
-**passes**, which is the contradiction to resolve first. Suggested next step: have
-`_run_distributed` dump the child's full command and environment on failure, replicate it verbatim
-outside pytest, and diff the environment against a standalone run.
+Use the **pytest module** as the reproduction, not the manual worker — the module is the only form
+that has been consistent. Then bisect with the `sitecustomize.py`-on-`PYTHONPATH` trick (there are
+ready-made ones in the session scratchpad) *inside that harness*, repeating each configuration several
+times before believing it. The first question to settle is what makes the manual and the pytest
+reproductions disagree, since that is the same question as what makes the manual one bistable.
 
 ## 7b. TODO: the forced diagonal belongs to the solver, not the problem
 

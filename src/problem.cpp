@@ -1073,7 +1073,7 @@ namespace pyoomph
 	  // rank, where a collective call would be the deadlock it is meant to prevent.
 	  if (this->communicator_pt() && this->communicator_pt()->nproc() > 1)
 	  {
-		  unsigned long mine = jacobian_structure_id, lo = 0, hi = 0;
+		  unsigned long mine = this->get_jacobian_structure_id(), lo = 0, hi = 0;
 		  MPI_Allreduce(&mine, &lo, 1, MPI_UNSIGNED_LONG, MPI_MIN, this->communicator_pt()->mpi_comm());
 		  MPI_Allreduce(&mine, &hi, 1, MPI_UNSIGNED_LONG, MPI_MAX, this->communicator_pt()->mpi_comm());
 		  if (lo != hi)
