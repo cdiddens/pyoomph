@@ -58,6 +58,17 @@ Included <initializer_list> for clang compilation on Mac
 
 
 
+problem.h (Changed on 30th July 2026):
+Moved get_my_eqns() and parallel_sparse_assemble() from the private to the protected section and made
+the latter virtual, so that a derived Problem can substitute its own distributed assembly. No
+implementation was touched: a class that does not override sees exactly the previous behaviour.
+pyoomph overrides it to freeze the distributed assembly plan -- which rows a rank contributes to,
+which rank owns each of them, the column indices, and the permutation that merges the pieces arriving
+from several ranks into one row -- so that only values and residuals travel per assembly. oomph-lib
+recomputes all of that every time, and its owner-side merge rescans the row built so far for every
+incoming entry. pyoomph falls back to this implementation whenever the pattern cannot be frozen.
+See pyoomph's dev_docs/structural_assembly.md.
+
 problem.h / problem.cc (Changed on 29th July 2026, second change):
 Added an optional per-element structural sparsity mask to the sparse assembly. New virtual
 sparsity_mask_for_element(matrix_index, elem_pt, nvar) returns NULL by default -- so behaviour is

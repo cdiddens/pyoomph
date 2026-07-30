@@ -496,7 +496,63 @@ rounding alone, which it duly did on the first attempt.
 * Extend to `..._base_problem` (`src/problem.cpp:2813`) and `..._for_periodic_orbit`
   (`src/problem.cpp:2510`), which are `std::map`-based and hence the slowest paths in the codebase.
 
-### Phase 2b — distributed pattern and value-only exchange *(MPI, same phase, own step)*
+### Phase 2b — distributed pattern and value-only exchange — **DONE**
+
+**Result, measured with the same harness on both sides** (2D cavity `N=40`, ndof 14 162, `--distribute`,
+`_assemble_residual_jacobian` timed over 12 assemblies after a warm-up):
+
+| ranks | oomph-lib | frozen | | vs. serial |
+|---|---|---|---|---|
+| 1 (serial frozen path, for reference) | — | 36.4 ms | | 1.00× |
+| 2 | 49.1 ms | **20.7 ms** | −58 % | **1.76×** |
+| 4 | 23.3 ms | **12.0 ms** | −49 % | **3.03×** |
+
+Better than the −33 % this section predicted, and it settles the other finding below: distributed
+assembly used to be *slower than serial* at two ranks (49.1 vs 36.4 ms — the overhead ate the whole
+parallel gain). It now pays for itself from two ranks up, and scales.
+
+The reason it beat the estimate is that freezing does not merely remove the exchange *traffic*, it
+removes the owner-side *merge*. oomph-lib merges each incoming entry into the row built so far by
+**linearly rescanning that row** — quadratic in the row length, on every assembly, with chunked
+reallocation and copying whenever the estimate runs out. Frozen, that whole loop is one precomputed
+permutation and a scatter-add. Two further consequences fell out for free:
+
+* the send buffers are **contiguous slices**, so nothing has to be gathered before sending. `my_eqns`
+  is sorted and the target distribution gives each rank a contiguous global range, so the rows
+  destined for rank *p* are a single run — which is the same property oomph-lib's own
+  `first_eqn_element_for_proc` relies on, just never exploited for the payload;
+* the final column indices come out **sorted within each row**, where oomph-lib emits them in
+  first-seen order. That is what PETSc and the direct solvers want anyway, and it makes the
+  Phase 1 index-array comparison in `_can_reuse_structure` stable.
+
+**Verified against oomph-lib directly**, not just at the solution level: `--mode compare-distributed`
+in `tests/mpi_structural_worker.py` assembles the same converged state through both routes and
+compares the local CSRs as `{column: value}` maps per row (not element-wise — the column *order*
+legitimately differs). At 2, 3 and 4 ranks in 2D and 3D: identical nnz, no entry present in one and
+absent from the other, worst value difference **3.5e-18** (the two routes sum an entry's
+cross-rank contributions in a different order), residuals identical. A solution-level check would
+not have been enough — Newton converges to the right answer from a slightly wrong Jacobian, so a
+defective merge permutation would have passed.
+
+**What it does not cover**, each falling back to oomph-lib:
+
+* a **replicated problem whose elements are merely split across ranks** (`--distribute` absent but
+  `nproc > 1`). oomph-lib re-tunes `First_el_for_assembly` from measured per-element timings as it
+  goes, so the element range is *not* a function of the equation numbering and a frozen plan could
+  silently describe the wrong slice of the mesh. Deliberately excluded rather than guarded;
+* residual-only assembly (`ParallelResidualsHandler`), augmented systems, and any element the code
+  generator cannot describe symbolically.
+
+Whether the plan can be built is agreed with an `MPI_Allreduce(MIN)` before anyone commits: half the
+ranks in the frozen exchange and half in oomph-lib's would deadlock rather than give a wrong answer.
+
+The knob is `problem.use_frozen_distributed_sparsity` (default on) and
+`problem._get_distributed_frozen_rebuild_count()` is the positive signal that it engaged — the
+lesson from the Phase 2 false negative, where a fast path that never ran was measured as "slower".
+
+The original analysis follows.
+
+#### Original analysis
 
 **Measured first, as for Phase 2.** 2D lid-driven cavity `N=40`, ndof 14 162, `--distribute`, timing
 the C++ assembly directly (`_assemble_residual_jacobian`; note `assemble_jacobian` cannot be used on a

@@ -88,7 +88,7 @@ _OBS_RTOL = 1e-10
 _RES_TOL = 1e-7
 
 
-def _run_distributed(nproc, tmpdir, dim, size, structural, timeout=900):
+def _run_distributed(nproc, tmpdir, dim, size, structural, timeout=900, mode="solve"):
     """Launch the worker under mpirun and return the list of per-rank result dicts."""
     cmd = ["mpirun", "-n", str(nproc)]
     if os.environ.get("PYOOMPH_MPI_OVERSUBSCRIBE", "1") == "1":
@@ -96,7 +96,7 @@ def _run_distributed(nproc, tmpdir, dim, size, structural, timeout=900):
         cmd += ["--oversubscribe"]
     cmd += [sys.executable, _WORKER, "--outdir", str(tmpdir),
             "--dim", str(dim), "--size", str(size), "--structural", str(int(structural)),
-            "--distribute"]
+            "--mode", mode, "--distribute"]
     # Importing pyoomph calls MPI_Init, so THIS pytest process is already a (singleton) MPI job and owns
     # an Open MPI session directory under TMPDIR. A nested mpirun collides with it and dies immediately
     # with exit code 1 and no diagnostics at all. Give the child its own TMPDIR.
@@ -176,3 +176,56 @@ def test_structural_zeros_agree_across_ranks_and_with_serial(tmp_path, nproc, di
     serial = _serial_reference(tmp_path, dim, size, structural=True)
     assert serial["maxres"] < _RES_TOL
     _assert_same_solution("distributed vs serial", serial, structural[0])
+
+
+# ---------------------------------------------------------------------------------------------
+# Phase 2b: the frozen distributed assembly (dev_docs/structural_assembly.md section 5, Phase 2b)
+#
+# pyoomph substitutes its own parallel_sparse_assemble() for oomph-lib's when the pattern is frozen:
+# the rows, the owner of each, the column indices and the owner-side merge permutation are all
+# computed once, and only values and residuals travel per assembly. That is a full reimplementation
+# of a 1200-line MPI routine, so it is certified against the original directly -- the same converged
+# state assembled through both routes must give the same matrix, on every rank.
+#
+# Comparing the MATRIX rather than the solution is the point. A merge permutation that misplaced a
+# handful of entries would still let Newton converge (to the right answer, from a wrong Jacobian, in
+# more steps), so a solution-level test would pass while the routine was broken.
+
+@pytest.mark.parametrize("nproc", [2, 3, 4])
+@pytest.mark.parametrize("dim,size", [(2, 16), (3, 5)], ids=["2d", "3d"])
+def test_frozen_distributed_assembly_matches_oomph(tmp_path, nproc, dim, size):
+    per_rank = _run_distributed(nproc, tmp_path, dim, size, structural=True,
+                                mode="compare-distributed")
+    for r in per_rank:
+        where = "rank %d/%d (dim=%d)" % (r["rank"], nproc, dim)
+        # Without this the rest of the test is vacuous: every other assertion is also satisfied by
+        # a frozen route that quietly fell back and compared oomph-lib against itself.
+        assert r["plans_built"] > 0, "%s: the frozen distributed route never engaged" % where
+        assert r["missing_nonzero"] == 0, \
+            "%s: %d entries oomph-lib stores are absent from the frozen pattern" % (where, r["missing_nonzero"])
+        assert r["extra_nonzero"] == 0, \
+            "%s: %d entries the frozen route stores are absent from oomph-lib's" % (where, r["extra_nonzero"])
+        # Not exact equality: the two routes sum each entry's contributions in a different order, so
+        # entries assembled from several ranks differ in the last bits.
+        assert r["max_value_diff"] < 1e-12, \
+            "%s: worst Jacobian entry differs by %.3e" % (where, r["max_value_diff"])
+        assert r["maxres_diff"] < 1e-12, \
+            "%s: residual differs by %.3e" % (where, r["maxres_diff"])
+        # The pattern is derived from the same symbolic mask by both routes, so it must agree exactly.
+        assert r["nnz_frozen"] == r["nnz_oomph"], \
+            "%s: nnz %d vs %d" % (where, r["nnz_frozen"], r["nnz_oomph"])
+
+
+def test_frozen_distributed_plan_is_not_rebuilt_every_assembly(tmp_path):
+    """A plan costs a communication round plus two passes over the mesh; it has to be amortised.
+
+    The worker converges (several Newton steps, hence several assemblies) and then assembles twice
+    more. Toggling the flag off and on again deliberately discards the plan, so exactly two builds
+    are expected: one for the solve, one after the toggle. More would mean the pattern is being
+    invalidated on every assembly, which makes the frozen route slower than the one it replaces.
+    """
+    per_rank = _run_distributed(2, tmp_path, 2, 16, structural=True, mode="compare-distributed")
+    for r in per_rank:
+        assert r["plans_built"] == 2, \
+            "rank %d built %d distributed plans, expected 2 -- the plan cache is thrashing" % (
+                r["rank"], r["plans_built"])

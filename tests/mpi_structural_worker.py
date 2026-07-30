@@ -93,18 +93,81 @@ def solve_case(dim, N, structural, outdir=None):
         return res
 
 
+def _row_maps(values, cols, row_start):
+    """The local CSR as one {column: value} dict per row.
+
+    Compared as maps, not as arrays, on purpose: the frozen route emits each row's columns in
+    ascending order while oomph-lib emits them in first-seen order, so an element-wise comparison
+    would report a difference in LAYOUT as a difference in the MATRIX.
+    """
+    return [dict(zip(cols[row_start[i]:row_start[i + 1]].tolist(),
+                     values[row_start[i]:row_start[i + 1]].tolist()))
+            for i in range(len(row_start) - 1)]
+
+
+def compare_frozen_distributed(dim, N, outdir=None):
+    """Assemble the same converged state through both distributed routes and diff them.
+
+    This is the direct certificate for Phase 2b: pyoomph's frozen distributed assembly reproduces
+    oomph-lib's parallel_sparse_assemble() exactly. Comparing the assembled matrix rather than the
+    solution is deliberate -- a solver can converge to the right answer from a slightly wrong
+    Jacobian, so a solution-level check would not see a defective merge permutation.
+    """
+    prob = CavityProblem(dim=dim, N=N)
+    with prob as p:
+        if outdir is not None:
+            p.set_output_directory(outdir)
+        p.quiet()
+        p.set_linear_solver("petsc_mumps")
+        p.initialise()
+        p.solve()  # converge first, so both assemblies see identical dof values
+
+        p.use_frozen_distributed_sparsity = False
+        r0, ndof, nnz0, nloc0, v0, c0, s0 = p._assemble_residual_jacobian("")
+        p.use_frozen_distributed_sparsity = True
+        r1, ndof, nnz1, nloc1, v1, c1, s1 = p._assemble_residual_jacobian("")
+
+        out = {"ndof": int(ndof), "nrow_local": int(nloc1), "nnz_oomph": int(nnz0),
+               "nnz_frozen": int(nnz1),
+               # Zero means the frozen route never engaged and this test proved nothing.
+               "plans_built": int(p._get_distributed_frozen_rebuild_count()),
+               "maxres_diff": float(numpy.max(numpy.abs(r1 - r0))) if len(r0) else 0.0}
+        if nloc0 != nloc1:
+            out["error"] = "nrow_local differs between the two routes: %d vs %d" % (nloc0, nloc1)
+            return out
+        A, B = _row_maps(v0, c0, s0), _row_maps(v1, c1, s1)
+        worst, missing, extra_nonzero = 0.0, 0, 0
+        for ra, rb in zip(A, B):
+            for col, val in ra.items():
+                if col in rb:
+                    worst = max(worst, abs(val - rb[col]))
+                elif val != 0.0:
+                    missing += 1  # oomph-lib stored a real entry the frozen pattern has no room for
+            for col, val in rb.items():
+                if col not in ra and val != 0.0:
+                    extra_nonzero += 1  # the frozen route put a real entry where oomph-lib has none
+        out["max_value_diff"] = worst
+        out["missing_nonzero"] = missing
+        out["extra_nonzero"] = extra_nonzero
+        return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dim", type=int, default=2)
     ap.add_argument("--size", type=int, default=16)
     ap.add_argument("--structural", type=int, default=0)
+    ap.add_argument("--mode", default="solve", choices=["solve", "compare-distributed"])
     ap.add_argument("--outdir", required=True)
     args, _ = ap.parse_known_args()
 
     payload = {"rank": get_mpi_rank(), "nproc": get_mpi_nproc(),
                "case": "dim%d_N%d_struct%d" % (args.dim, args.size, args.structural)}
     try:
-        payload.update(solve_case(args.dim, args.size, bool(args.structural), outdir=args.outdir))
+        if args.mode == "compare-distributed":
+            payload.update(compare_frozen_distributed(args.dim, args.size, outdir=args.outdir))
+        else:
+            payload.update(solve_case(args.dim, args.size, bool(args.structural), outdir=args.outdir))
     except Exception as e:
         payload["error"] = type(e).__name__ + ": " + str(e)
         payload["traceback"] = traceback.format_exc()[-2000:]

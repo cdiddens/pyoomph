@@ -483,7 +483,11 @@ namespace oomph
     /// be uniform over all processors.
     LinearAlgebraDistribution* Dof_distribution_pt;
 
-  private:
+    // FOR PYOOMPH: get_my_eqns() and parallel_sparse_assemble() were private; they are now protected
+    // and the latter is virtual, so that a derived Problem can substitute its own distributed
+    // assembly. Nothing else changed -- in particular the default implementations are untouched, so
+    // a class that does not override sees exactly the previous behaviour.
+  protected:
 #ifdef OOMPH_HAS_MPI
 
     /// Helper method that returns the (unique) global equations to which
@@ -496,13 +500,18 @@ namespace oomph
 
     /// Helper method to assemble CRDoubleMatrices from distributed
     /// on multiple processors.
-    void parallel_sparse_assemble(
+    virtual void parallel_sparse_assemble( // FOR PYOOMPH: made virtual
       const LinearAlgebraDistribution* const& dist_pt,
       Vector<int*>& column_or_row_index,
       Vector<int*>& row_or_column_start,
       Vector<double*>& value,
       Vector<unsigned>& nnz,
       Vector<double*>& residuals);
+
+#endif
+
+  private:
+#ifdef OOMPH_HAS_MPI
 
     /// A private helper function to
     /// copy the haloed equation numbers into the halo equation numbers,

@@ -820,6 +820,17 @@ void PyReg_Problem(nb::module_ &m)
 					  "container and compressing it afterwards. Requires a value-independent pattern (``keep_structural_zeros``), and falls back to oomph-lib's "
 					  "assembly by itself whenever it cannot apply -- distributed runs, augmented systems (bifurcation tracking), compressed-column output, or "
 					  "any element the code generator cannot describe symbolically.")
+		.def_prop_rw("use_frozen_distributed_sparsity", &pyoomph::Problem::get_use_frozen_distributed_sparsity, &pyoomph::Problem::set_use_frozen_distributed_sparsity,
+					  "The distributed counterpart of ``use_frozen_sparsity``: on a ``--distribute``\\ d run, freeze the whole assembly plan -- which rows this rank "
+					  "touches, which rank owns each of them, the column indices, and how the pieces arriving from several ranks merge into one row -- so that only "
+					  "values and residuals travel per assembly. oomph-lib redoes all of it every time, and its owner-side merge rescans the row built so far for "
+					  "every incoming entry. Falls back to oomph-lib's routine by itself whenever it cannot apply: a replicated problem whose elements are merely "
+					  "split across ranks (its element ranges are re-tuned from measured timings, so they are not a function of the equation numbering), a "
+					  "residual-only assembly, an augmented system, or a pattern the code generator cannot describe symbolically. Always False in a non-MPI build.")
+		.def("_get_distributed_frozen_rebuild_count", &pyoomph::Problem::get_distributed_frozen_rebuild_count,
+			 "How many distributed assembly plans have been built since the problem was created. A plan costs a round of communication on top of two passes over "
+			 "the mesh, so this should settle: if it keeps rising, the pattern is being invalidated every assembly and the frozen route is a pure loss. Zero after "
+			 "a distributed solve means the route never engaged at all.")
 		.def("_get_frozen_sparsity_rebuild_count", &pyoomph::Problem::get_frozen_sparsity_rebuild_count,
 			 "How many frozen sparsity patterns have been built since the problem was created. It should stop growing once a workflow settles: a count that "
 			 "keeps rising assembly after assembly means the pattern cache is thrashing (too small for the number of distinct patterns in play), which is "

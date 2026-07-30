@@ -3340,6 +3340,582 @@ namespace pyoomph
 		return true;
 	}
 
+#ifdef OOMPH_HAS_MPI
+
+	// Phase 2b. See the comment on DistributedFrozenSparsity for what this replaces and why.
+	//
+	// Builds the entire distributed plan. Everything up to "exchange the pattern" is local and mirrors
+	// build_frozen_sparsity(), only with my_eqns as the row set instead of 0..ndof-1; after that one
+	// round of communication tells each rank which (row, column) pairs will arrive from where, which is
+	// all it needs to lay out the final CSR and precompute the merge.
+	bool Problem::build_distributed_frozen_sparsity(const oomph::LinearAlgebraDistribution* const& dist_pt, unsigned n_matrix, unsigned n_vector, DistributedFrozenSparsity &sp)
+	{
+		sp.clear();
+		if (!Communicator_pt || !dist_pt) return false;
+		const unsigned nproc = Communicator_pt->nproc();
+		const unsigned my_rank = Communicator_pt->my_rank();
+		MPI_Comm comm = Communicator_pt->mpi_comm();
+		oomph::AssemblyHandler *const assembly_handler_pt = this->assembly_handler_pt();
+		const unsigned long n_element = mesh_pt()->nelement();
+
+		// Only a genuinely distributed problem is frozen here. The other mode oomph-lib's routine serves
+		// -- a replicated problem whose ELEMENTS are split across ranks -- re-tunes First_el_for_assembly
+		// from measured per-element timings as it goes, so the element range is not a function of the
+		// equation numbering and a frozen pattern could silently describe the wrong slice of the mesh.
+		if (!Problem_has_been_distributed) return false;
+		const unsigned long el_lo = 0, el_hi_plus_one = n_element;
+
+		// The equations this rank contributes to, sorted and unique -- exactly oomph-lib's own set, so
+		// the send plan below partitions it the same way theirs does.
+		oomph::Vector<unsigned> my_eqns;
+		if (el_hi_plus_one > el_lo)
+		{
+			this->get_my_eqns(assembly_handler_pt, el_lo, el_hi_plus_one - 1, my_eqns);
+		}
+		const unsigned my_n_eqn = my_eqns.size();
+		sp.my_eqns.assign(my_eqns.begin(), my_eqns.end());
+
+		// A global equation -> its row in my_eqns. my_eqns is sorted, so this is a bisection; the
+		// global numbering is far too sparse here for a dense lookup table to be worth it.
+		const unsigned *eq0 = my_n_eqn ? &my_eqns[0] : 0;
+
+		// ---- local pattern, per matrix: CSR over my_eqns rows with global column indices ----
+		sp.mats.resize(n_matrix);
+		for (unsigned m = 0; m < n_matrix; m++)
+		{
+			DistributedFrozenSparsity::Mat &mt = sp.mats[m];
+			std::vector<std::vector<int>> cols_of_row(my_n_eqn);
+			for (unsigned long e = el_lo; e < el_hi_plus_one; e++)
+			{
+				oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
+				if (elem_pt->is_halo()) continue;
+				const unsigned nvar = assembly_handler_pt->ndof(elem_pt);
+				if (!nvar) continue;
+				const char *mask = this->sparsity_mask_for_element(m, elem_pt, nvar);
+				if (!mask) { sp.clear(); return false; } // Value-dependent: cannot be frozen
+				for (unsigned i = 0; i < nvar; i++)
+				{
+					const unsigned g = assembly_handler_pt->eqn_number(elem_pt, i);
+					const unsigned *f = std::lower_bound(eq0, eq0 + my_n_eqn, g);
+					if (f == eq0 + my_n_eqn || *f != g) continue;
+					std::vector<int> &row_cols = cols_of_row[f - eq0];
+					for (unsigned j = 0; j < nvar; j++)
+					{
+						if (!mask[(size_t)i * nvar + j]) continue;
+						row_cols.push_back((int)assembly_handler_pt->eqn_number(elem_pt, j));
+					}
+				}
+			}
+			mt.local_row_start.assign(my_n_eqn + 1, 0);
+			for (unsigned r = 0; r < my_n_eqn; r++)
+			{
+				std::vector<int> &c = cols_of_row[r];
+				std::sort(c.begin(), c.end());
+				c.erase(std::unique(c.begin(), c.end()), c.end());
+				mt.local_row_start[r + 1] = mt.local_row_start[r] + (int)c.size();
+			}
+			mt.local_col.resize(mt.local_row_start[my_n_eqn]);
+			for (unsigned r = 0; r < my_n_eqn; r++)
+			{
+				std::copy(cols_of_row[r].begin(), cols_of_row[r].end(), mt.local_col.begin() + mt.local_row_start[r]);
+			}
+
+			// The scatter map, slot-sorted per element for the same cache reason as the serial one.
+			mt.element_offset.assign(n_element + 1, 0);
+			mt.scatter_source.reserve(mt.local_col.size());
+			mt.scatter_slot.reserve(mt.local_col.size());
+			std::vector<std::pair<int, int>> pairs;
+			for (unsigned long e = 0; e < n_element; e++)
+			{
+				pairs.clear();
+				if (e >= el_lo && e < el_hi_plus_one)
+				{
+					oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
+					const unsigned nvar = elem_pt->is_halo() ? 0 : assembly_handler_pt->ndof(elem_pt);
+					if (nvar)
+					{
+						const char *mask = this->sparsity_mask_for_element(m, elem_pt, nvar);
+						if (!mask) { sp.clear(); return false; }
+						for (unsigned i = 0; i < nvar; i++)
+						{
+							const unsigned g = assembly_handler_pt->eqn_number(elem_pt, i);
+							const unsigned *f = std::lower_bound(eq0, eq0 + my_n_eqn, g);
+							if (f == eq0 + my_n_eqn || *f != g) continue;
+							const int row = (int)(f - eq0);
+							const int *row_cols = mt.local_col.data() + mt.local_row_start[row];
+							const int row_len = mt.local_row_start[row + 1] - mt.local_row_start[row];
+							for (unsigned j = 0; j < nvar; j++)
+							{
+								if (!mask[(size_t)i * nvar + j]) continue;
+								const int col = (int)assembly_handler_pt->eqn_number(elem_pt, j);
+								const int *found = std::lower_bound(row_cols, row_cols + row_len, col);
+								pairs.push_back(std::make_pair(mt.local_row_start[row] + (int)(found - row_cols),
+															   (int)((size_t)i * nvar + j)));
+							}
+						}
+						std::sort(pairs.begin(), pairs.end());
+					}
+				}
+				for (size_t k = 0; k < pairs.size(); k++)
+				{
+					mt.scatter_slot.push_back(pairs[k].first);
+					mt.scatter_source.push_back(pairs[k].second);
+				}
+				mt.element_offset[e + 1] = (int)mt.scatter_slot.size();
+			}
+		}
+
+		// ---- send plan ----
+		// my_eqns is sorted and the target distribution hands each rank a contiguous global range, so
+		// the rows for rank p form a single run. oomph-lib assumes the same; assert it rather than trust
+		// it, because a non-monotonic distribution would silently send the wrong rows.
+		sp.send_row_start.assign(nproc + 1, 0);
+		{
+			std::vector<int> n_eqn_for_proc(nproc, 0);
+			unsigned prev_p = 0;
+			for (unsigned i = 0; i < my_n_eqn; i++)
+			{
+				const unsigned p = dist_pt->rank_of_global_row(my_eqns[i]);
+				if (p >= nproc) { sp.clear(); return false; }
+				if (i && p < prev_p) { sp.clear(); return false; } // Not contiguous by rank: fall back
+				prev_p = p;
+				n_eqn_for_proc[p]++;
+			}
+			for (unsigned p = 0; p < nproc; p++) sp.send_row_start[p + 1] = sp.send_row_start[p] + n_eqn_for_proc[p];
+		}
+		for (unsigned m = 0; m < n_matrix; m++)
+		{
+			DistributedFrozenSparsity::Mat &mt = sp.mats[m];
+			mt.send_nz_start.assign(nproc + 1, 0);
+			for (unsigned p = 0; p < nproc; p++)
+			{
+				mt.send_nz_start[p + 1] = mt.local_row_start[sp.send_row_start[p + 1]];
+			}
+		}
+
+		// ---- can the local half be described at all? ----
+		// Every bail-out up to this point is per-rank -- a missing symbolic mask, a distribution that is
+		// not contiguous by rank -- and everything after it is collective. So the answer is agreed here,
+		// before the first collective, rather than discovered afterwards by a rank left waiting.
+		{
+			int ok = 1, all_ok = 0;
+			MPI_Allreduce(&ok, &all_ok, 1, MPI_INT, MPI_MIN, comm);
+			if (!all_ok) { sp.clear(); return false; }
+		}
+
+		// ---- exchange the pattern ----
+		// One message per peer, laid out as
+		//     [ global equation numbers ] [ per matrix: row lengths ] [ per matrix: column indices ]
+		// and preceded by an all-to-all of the sizes so the receivers can allocate.
+		const unsigned stride = 1 + n_matrix; // n_eqn, then nnz per matrix
+		std::vector<int> send_counts(nproc * stride, 0), recv_counts(nproc * stride, 0);
+		for (unsigned p = 0; p < nproc; p++)
+		{
+			send_counts[p * stride] = sp.send_row_start[p + 1] - sp.send_row_start[p];
+			for (unsigned m = 0; m < n_matrix; m++)
+			{
+				send_counts[p * stride + 1 + m] = sp.mats[m].send_nz_start[p + 1] - sp.mats[m].send_nz_start[p];
+			}
+		}
+		MPI_Alltoall(send_counts.data(), stride, MPI_INT, recv_counts.data(), stride, MPI_INT, comm);
+
+		std::vector<std::vector<int>> send_buf(nproc), recv_buf(nproc);
+		std::vector<MPI_Request> reqs;
+		for (unsigned p = 0; p < nproc; p++)
+		{
+			if (p == my_rank) continue;
+			const int neq = send_counts[p * stride];
+			size_t total = (size_t)neq * (1 + n_matrix);
+			for (unsigned m = 0; m < n_matrix; m++) total += send_counts[p * stride + 1 + m];
+			if (total)
+			{
+				send_buf[p].reserve(total);
+				for (int i = sp.send_row_start[p]; i < sp.send_row_start[p + 1]; i++) send_buf[p].push_back((int)my_eqns[i]);
+				for (unsigned m = 0; m < n_matrix; m++)
+				{
+					const DistributedFrozenSparsity::Mat &mt = sp.mats[m];
+					for (int i = sp.send_row_start[p]; i < sp.send_row_start[p + 1]; i++)
+					{
+						send_buf[p].push_back(mt.local_row_start[i + 1] - mt.local_row_start[i]);
+					}
+				}
+				for (unsigned m = 0; m < n_matrix; m++)
+				{
+					const DistributedFrozenSparsity::Mat &mt = sp.mats[m];
+					send_buf[p].insert(send_buf[p].end(), mt.local_col.begin() + mt.send_nz_start[p],
+									   mt.local_col.begin() + mt.send_nz_start[p + 1]);
+				}
+				reqs.push_back(MPI_Request());
+				MPI_Isend(send_buf[p].data(), (int)send_buf[p].size(), MPI_INT, p, 71, comm, &reqs.back());
+			}
+			const int rneq = recv_counts[p * stride];
+			size_t rtotal = (size_t)rneq * (1 + n_matrix);
+			for (unsigned m = 0; m < n_matrix; m++) rtotal += recv_counts[p * stride + 1 + m];
+			if (rtotal)
+			{
+				recv_buf[p].resize(rtotal);
+				reqs.push_back(MPI_Request());
+				MPI_Irecv(recv_buf[p].data(), (int)rtotal, MPI_INT, p, 71, comm, &reqs.back());
+			}
+		}
+		// The self entries of recv_counts came from the Alltoall, which includes the diagonal, so what
+		// this rank "receives" from itself is already recorded; it simply never travels.
+		if (!reqs.empty()) MPI_Waitall((int)reqs.size(), reqs.data(), MPI_STATUSES_IGNORE);
+
+		// ---- lay out the final CSR and the merge permutation ----
+		sp.nrow_local = dist_pt->nrow_local();
+		sp.first_row = dist_pt->first_row();
+
+		// Per rank, a view of what it contributed: equations, row lengths and columns. For self these
+		// point straight into our own arrays instead of a copy.
+		std::vector<const int*> in_eqn(nproc, 0), in_len(nproc, 0), in_col(nproc, 0);
+		std::vector<std::vector<int>> self_eqn(1), self_len(n_matrix);
+		std::vector<int> recv_neq(nproc, 0);
+		{
+			self_eqn[0].reserve(sp.send_row_start[my_rank + 1] - sp.send_row_start[my_rank]);
+			for (int i = sp.send_row_start[my_rank]; i < sp.send_row_start[my_rank + 1]; i++) self_eqn[0].push_back((int)my_eqns[i]);
+			for (unsigned m = 0; m < n_matrix; m++)
+			{
+				const DistributedFrozenSparsity::Mat &mt = sp.mats[m];
+				for (int i = sp.send_row_start[my_rank]; i < sp.send_row_start[my_rank + 1]; i++)
+				{
+					self_len[m].push_back(mt.local_row_start[i + 1] - mt.local_row_start[i]);
+				}
+			}
+		}
+		for (unsigned p = 0; p < nproc; p++)
+		{
+			recv_neq[p] = recv_counts[p * stride];
+			if (!recv_neq[p]) continue;
+			if (p == my_rank) continue; // filled per matrix below
+			in_eqn[p] = recv_buf[p].data();
+		}
+
+		sp.recv_eq_start.assign(nproc + 1, 0);
+		for (unsigned p = 0; p < nproc; p++) sp.recv_eq_start[p + 1] = sp.recv_eq_start[p] + recv_neq[p];
+		sp.recv_eq_row.resize(sp.recv_eq_start[nproc]);
+		for (unsigned p = 0; p < nproc; p++)
+		{
+			const int *eq = (p == my_rank) ? self_eqn[0].data() : in_eqn[p];
+			for (int k = 0; k < recv_neq[p]; k++)
+			{
+				const int row = eq[k] - (int)sp.first_row;
+				if (row < 0 || row >= (int)sp.nrow_local) { sp.clear(); return false; }
+				sp.recv_eq_row[sp.recv_eq_start[p] + k] = row;
+			}
+		}
+
+		for (unsigned m = 0; m < n_matrix; m++)
+		{
+			DistributedFrozenSparsity::Mat &mt = sp.mats[m];
+			// Where each rank's row lengths and columns sit inside its message.
+			for (unsigned p = 0; p < nproc; p++)
+			{
+				if (!recv_neq[p]) { in_len[p] = 0; in_col[p] = 0; continue; }
+				if (p == my_rank)
+				{
+					in_len[p] = self_len[m].data();
+					in_col[p] = mt.local_col.data() + mt.send_nz_start[my_rank];
+					continue;
+				}
+				size_t off = (size_t)recv_neq[p]; // past the equation numbers
+				off += (size_t)recv_neq[p] * m;   // past earlier matrices' row lengths
+				in_len[p] = recv_buf[p].data() + off;
+				off = (size_t)recv_neq[p] * (1 + n_matrix);
+				for (unsigned q = 0; q < m; q++) off += recv_counts[p * stride + 1 + q];
+				in_col[p] = recv_buf[p].data() + off;
+			}
+
+			// Gather the columns of every local row from every contributing rank, then sort and unique
+			// them. Unlike oomph-lib's merge this is O(nnz log nnz) once rather than O(row_nnz^2) on
+			// every assembly, and it leaves the columns ascending within a row.
+			std::vector<std::vector<int>> cols_of_row(sp.nrow_local);
+			std::vector<int> nz_cursor(nproc, 0);
+			for (unsigned p = 0; p < nproc; p++)
+			{
+				int c = 0;
+				for (int k = 0; k < recv_neq[p]; k++)
+				{
+					const int row = sp.recv_eq_row[sp.recv_eq_start[p] + k];
+					const int len = in_len[p][k];
+					cols_of_row[row].insert(cols_of_row[row].end(), in_col[p] + c, in_col[p] + c + len);
+					c += len;
+				}
+				nz_cursor[p] = c;
+			}
+			mt.final_row_start.assign(sp.nrow_local + 1, 0);
+			for (unsigned r = 0; r < sp.nrow_local; r++)
+			{
+				std::vector<int> &c = cols_of_row[r];
+				std::sort(c.begin(), c.end());
+				c.erase(std::unique(c.begin(), c.end()), c.end());
+				mt.final_row_start[r + 1] = mt.final_row_start[r] + (int)c.size();
+			}
+			mt.final_col.resize(mt.final_row_start[sp.nrow_local]);
+			for (unsigned r = 0; r < sp.nrow_local; r++)
+			{
+				std::copy(cols_of_row[r].begin(), cols_of_row[r].end(), mt.final_col.begin() + mt.final_row_start[r]);
+			}
+
+			// The permutation: incoming nonzero -> its slot in the final value array.
+			mt.recv_nz_start.assign(nproc + 1, 0);
+			for (unsigned p = 0; p < nproc; p++) mt.recv_nz_start[p + 1] = mt.recv_nz_start[p] + nz_cursor[p];
+			mt.merge_perm.resize(mt.recv_nz_start[nproc]);
+			for (unsigned p = 0; p < nproc; p++)
+			{
+				int c = 0;
+				for (int k = 0; k < recv_neq[p]; k++)
+				{
+					const int row = sp.recv_eq_row[sp.recv_eq_start[p] + k];
+					const int len = in_len[p][k];
+					const int *row_cols = &mt.final_col[mt.final_row_start[row]];
+					const int row_len = mt.final_row_start[row + 1] - mt.final_row_start[row];
+					for (int l = 0; l < len; l++)
+					{
+						const int *found = std::lower_bound(row_cols, row_cols + row_len, in_col[p][c + l]);
+						// Cannot miss: the union above was taken over exactly these columns.
+						mt.merge_perm[mt.recv_nz_start[p] + c + l] = mt.final_row_start[row] + (int)(found - row_cols);
+					}
+					c += len;
+				}
+			}
+		}
+
+		sp.nproc = nproc;
+		sp.my_rank = my_rank;
+		sp.ndof = this->ndof();
+		sp.nelement = n_element;
+		sp.n_matrix = n_matrix;
+		sp.n_vector = n_vector;
+		return true;
+	}
+
+
+	// The per-assembly distributed fast path: evaluate elements into a frozen local CSR, ship the
+	// values (nothing else) to their owners, and scatter-add them into the final one.
+	bool Problem::assemble_distributed_with_frozen_sparsity(const oomph::LinearAlgebraDistribution* const& dist_pt, oomph::Vector<int*>& column_or_row_index, oomph::Vector<int*>& row_or_column_start, oomph::Vector<double*>& value, oomph::Vector<unsigned>& nnz, oomph::Vector<double*>& residuals)
+	{
+		if (!use_frozen_distributed_sparsity || !use_frozen_sparsity || !keep_structural_zeros) return false;
+		if (n_unaugmented_dofs != 0) return false;
+		if (!Communicator_pt || !dist_pt) return false;
+		const unsigned n_matrix = column_or_row_index.size();
+		const unsigned n_vector = residuals.size();
+		if (!n_matrix) return false; // Residual-only assembly: nothing to gain, and one fewer path to get wrong
+		// A ParallelResidualsHandler assembles residuals only; it has no business here.
+		if (dynamic_cast<oomph::ParallelResidualsHandler*>(this->assembly_handler_pt())) return false;
+
+		const unsigned long gen = this->get_jacobian_structure_id();
+		if (!gen) return false;
+
+		// Checked here rather than inside the build so that the collectives below are never reached in a
+		// configuration that can never be frozen; see build_distributed_frozen_sparsity() for why.
+		if (!Problem_has_been_distributed) return false;
+
+		DistributedFrozenSparsity &sp = distributed_frozen_sparsity;
+		// Everything from here on is collective, so every branch has to be taken by every rank or the
+		// ones that took it hang waiting for the ones that did not. Two things could diverge, and both
+		// are put to a vote: whether the plan needs rebuilding (nrow_local, first_row and nelement are
+		// per-rank quantities), and whether the rebuild succeeded.
+		{
+			int need = (sp.generation != gen || sp.n_matrix != n_matrix || sp.n_vector != n_vector ||
+						sp.nrow_local != dist_pt->nrow_local() || sp.first_row != dist_pt->first_row() ||
+						sp.nelement != mesh_pt()->nelement()) ? 1 : 0;
+			int any_need = 0;
+			MPI_Allreduce(&need, &any_need, 1, MPI_INT, MPI_MAX, Communicator_pt->mpi_comm());
+			if (any_need)
+			{
+				DistributedFrozenSparsity fresh;
+				// Collective, and it agrees internally on everything it can decide before communicating.
+				// What is left is the handful of checks it can only make once the pattern has arrived.
+				int ok = build_distributed_frozen_sparsity(dist_pt, n_matrix, n_vector, fresh) ? 1 : 0;
+				int all_ok = 0;
+				MPI_Allreduce(&ok, &all_ok, 1, MPI_INT, MPI_MIN, Communicator_pt->mpi_comm());
+				if (!all_ok) { sp.clear(); return false; }
+				fresh.generation = gen;
+				sp = fresh;
+				distributed_frozen_rebuilds++;
+			}
+		}
+
+		const unsigned nproc = sp.nproc, my_rank = sp.my_rank;
+		MPI_Comm comm = Communicator_pt->mpi_comm();
+		const unsigned my_n_eqn = sp.my_eqns.size();
+
+		// ---- local stage ----
+		std::vector<std::vector<double>> local_values(n_matrix);
+		for (unsigned m = 0; m < n_matrix; m++) local_values[m].assign(sp.mats[m].local_col.size(), 0.0);
+		std::vector<std::vector<double>> local_res(n_vector);
+		for (unsigned v = 0; v < n_vector; v++) local_res[v].assign(my_n_eqn, 0.0);
+
+		oomph::AssemblyHandler *const assembly_handler_pt = this->assembly_handler_pt();
+		const unsigned long n_element = mesh_pt()->nelement();
+		// build_distributed_frozen_sparsity() refuses anything but a genuinely distributed problem, so
+		// every non-halo element on this rank belongs to it.
+		const unsigned long el_lo = 0, el_hi_plus_one = n_element;
+		// my_eqns is sorted, so a row index for a global equation is a bisection. Residuals need it;
+		// the matrix entries do not, they go through the scatter map.
+		const unsigned *eq0 = sp.my_eqns.data();
+
+		oomph::Vector<oomph::Vector<double>> el_residuals(n_vector);
+		oomph::Vector<oomph::DenseMatrix<double>> el_jacobian(n_matrix);
+		for (unsigned long e = el_lo; e < el_hi_plus_one; e++)
+		{
+			oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
+			if (elem_pt->is_halo()) continue;
+			const unsigned nvar = assembly_handler_pt->ndof(elem_pt);
+			if (!nvar) continue;
+			for (unsigned v = 0; v < n_vector; v++) el_residuals[v].resize(nvar);
+			for (unsigned m = 0; m < n_matrix; m++) el_jacobian[m].resize(nvar);
+			assembly_handler_pt->get_all_vectors_and_matrices(elem_pt, el_residuals, el_jacobian);
+
+			for (unsigned i = 0; i < nvar; i++)
+			{
+				const unsigned g = assembly_handler_pt->eqn_number(elem_pt, i);
+				const unsigned *found = std::lower_bound(eq0, eq0 + my_n_eqn, g);
+				if (found == eq0 + my_n_eqn || *found != g) continue;
+				const size_t row = found - eq0;
+				for (unsigned v = 0; v < n_vector; v++) local_res[v][row] += el_residuals[v][i];
+			}
+			for (unsigned m = 0; m < n_matrix; m++)
+			{
+				const DistributedFrozenSparsity::Mat &mt = sp.mats[m];
+				const int lo = mt.element_offset[e], hi = mt.element_offset[e + 1];
+				const int *slot = mt.scatter_slot.data();
+				const int *src = mt.scatter_source.data();
+				double *val = local_values[m].data();
+				const double *flat = &el_jacobian[m](0, 0);
+				for (int k = lo; k < hi; k++) val[slot[k]] += flat[src[k]];
+				if (verify_frozen_sparsity)
+				{
+					// Same guard as the serial path: the compact scatter cannot notice an entry that fell
+					// outside the pattern, so count instead of trusting.
+					unsigned all = 0, taken = 0;
+					const size_t nblock = (size_t)nvar * nvar;
+					for (size_t q = 0; q < nblock; q++) all += (flat[q] != 0.0);
+					for (int k = lo; k < hi; k++) taken += (flat[src[k]] != 0.0);
+					if (all > taken)
+					{
+						throw_runtime_error("A Jacobian entry appeared outside the symbolic sparsity pattern during "
+											"distributed assembly (matrix " + std::to_string(m) + ", element " +
+											std::to_string(e) + "). Workaround: set problem.use_frozen_sparsity=False.");
+					}
+				}
+			}
+		}
+
+		// ---- exchange values ----
+		// One message per peer: [ residuals, vector by vector ] [ values, matrix by matrix ]. The
+		// sources are separate arrays so this is packed, but it is n_vector+n_matrix memcpys of
+		// contiguous runs -- no gathering, no index computation, because the send slices are contiguous.
+		std::vector<std::vector<double>> dsend(nproc), drecv(nproc);
+		std::vector<MPI_Request> reqs;
+		reqs.reserve(2 * nproc);
+		for (unsigned p = 0; p < nproc; p++)
+		{
+			if (p == my_rank) continue;
+			const int neq = sp.send_row_start[p + 1] - sp.send_row_start[p];
+			size_t total = (size_t)neq * n_vector;
+			for (unsigned m = 0; m < n_matrix; m++) total += sp.mats[m].send_nz_start[p + 1] - sp.mats[m].send_nz_start[p];
+			if (total)
+			{
+				dsend[p].reserve(total);
+				for (unsigned v = 0; v < n_vector; v++)
+				{
+					dsend[p].insert(dsend[p].end(), local_res[v].begin() + sp.send_row_start[p],
+									local_res[v].begin() + sp.send_row_start[p + 1]);
+				}
+				for (unsigned m = 0; m < n_matrix; m++)
+				{
+					dsend[p].insert(dsend[p].end(), local_values[m].begin() + sp.mats[m].send_nz_start[p],
+									local_values[m].begin() + sp.mats[m].send_nz_start[p + 1]);
+				}
+				reqs.push_back(MPI_Request());
+				MPI_Isend(dsend[p].data(), (int)dsend[p].size(), MPI_DOUBLE, p, 72, comm, &reqs.back());
+			}
+			const int rneq = sp.recv_eq_start[p + 1] - sp.recv_eq_start[p];
+			size_t rtotal = (size_t)rneq * n_vector;
+			for (unsigned m = 0; m < n_matrix; m++) rtotal += sp.mats[m].recv_nz_start[p + 1] - sp.mats[m].recv_nz_start[p];
+			if (rtotal)
+			{
+				drecv[p].resize(rtotal);
+				reqs.push_back(MPI_Request());
+				MPI_Irecv(drecv[p].data(), (int)rtotal, MPI_DOUBLE, p, 72, comm, &reqs.back());
+			}
+		}
+
+		// ---- hand out the answer and merge ----
+		// Freshly allocated every time: CRDoubleMatrix::build_without_copy() takes ownership.
+		for (unsigned m = 0; m < n_matrix; m++)
+		{
+			const DistributedFrozenSparsity::Mat &mt = sp.mats[m];
+			nnz[m] = (unsigned)mt.final_col.size();
+			row_or_column_start[m] = new int[sp.nrow_local + 1];
+			std::copy(mt.final_row_start.begin(), mt.final_row_start.end(), row_or_column_start[m]);
+			column_or_row_index[m] = new int[nnz[m] ? nnz[m] : 1];
+			std::copy(mt.final_col.begin(), mt.final_col.end(), column_or_row_index[m]);
+			value[m] = new double[nnz[m] ? nnz[m] : 1];
+			std::fill(value[m], value[m] + nnz[m], 0.0);
+		}
+		for (unsigned v = 0; v < n_vector; v++)
+		{
+			residuals[v] = new double[sp.nrow_local ? sp.nrow_local : 1];
+			std::fill(residuals[v], residuals[v] + sp.nrow_local, 0.0);
+		}
+
+		// Our own contribution needs no message; do it while the others are in flight.
+		{
+			const unsigned p = my_rank;
+			for (unsigned v = 0; v < n_vector; v++)
+			{
+				for (int k = sp.recv_eq_start[p]; k < sp.recv_eq_start[p + 1]; k++)
+				{
+					residuals[v][sp.recv_eq_row[k]] += local_res[v][sp.send_row_start[p] + (k - sp.recv_eq_start[p])];
+				}
+			}
+			for (unsigned m = 0; m < n_matrix; m++)
+			{
+				const DistributedFrozenSparsity::Mat &mt = sp.mats[m];
+				const int lo = mt.recv_nz_start[p], hi = mt.recv_nz_start[p + 1];
+				const double *src = local_values[m].data() + mt.send_nz_start[p];
+				double *dst = value[m];
+				for (int k = lo; k < hi; k++) dst[mt.merge_perm[k]] += src[k - lo];
+			}
+		}
+
+		if (!reqs.empty()) MPI_Waitall((int)reqs.size(), reqs.data(), MPI_STATUSES_IGNORE);
+
+		for (unsigned p = 0; p < nproc; p++)
+		{
+			if (p == my_rank || drecv[p].empty()) continue;
+			const double *buf = drecv[p].data();
+			for (unsigned v = 0; v < n_vector; v++)
+			{
+				for (int k = sp.recv_eq_start[p]; k < sp.recv_eq_start[p + 1]; k++)
+				{
+					residuals[v][sp.recv_eq_row[k]] += *buf++;
+				}
+			}
+			for (unsigned m = 0; m < n_matrix; m++)
+			{
+				const DistributedFrozenSparsity::Mat &mt = sp.mats[m];
+				const int lo = mt.recv_nz_start[p], hi = mt.recv_nz_start[p + 1];
+				double *dst = value[m];
+				for (int k = lo; k < hi; k++) dst[mt.merge_perm[k]] += *buf++;
+			}
+		}
+		return true;
+	}
+
+
+	// Phase 2b entry point. Try the frozen distributed assembly; otherwise oomph-lib's.
+	void Problem::parallel_sparse_assemble(const oomph::LinearAlgebraDistribution* const& dist_pt, oomph::Vector<int*>& column_or_row_index, oomph::Vector<int*>& row_or_column_start, oomph::Vector<double*>& value, oomph::Vector<unsigned>& nnz, oomph::Vector<double*>& residuals)
+	{
+		if (assemble_distributed_with_frozen_sparsity(dist_pt, column_or_row_index, row_or_column_start, value, nnz, residuals)) return;
+		oomph::Problem::parallel_sparse_assemble(dist_pt, column_or_row_index, row_or_column_start, value, nnz, residuals);
+	}
+
+#endif
+
 
 	// NOTE: currently unimplemented (unconditionally throws below) - intended to precompute, for every
 	// global equation, the set of Jacobian entries (global_eqs_to_jacobian_buffer_index) it contributes

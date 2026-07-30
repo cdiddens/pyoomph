@@ -315,6 +315,79 @@ namespace pyoomph
     }
   };
 
+#ifdef OOMPH_HAS_MPI
+  // The distributed counterpart of FrozenSparsity (Phase 2b of dev_docs/structural_assembly.md).
+  //
+  // oomph-lib's parallel_sparse_assemble() redoes, on every single assembly, work that only depends
+  // on the equation numbering: which global rows this rank touches, which of them each other rank
+  // owns, which column indices go with them, and -- the expensive part -- how the pieces arriving
+  // from several ranks merge into one row. That merge is a linear rescan of the row built so far for
+  // every incoming entry, i.e. quadratic in the row length, and it emits columns in first-seen order.
+  // Measured on a 2D cavity at 2 ranks it was ~12.5 ms of the 19.9 ms of non-elemental time.
+  //
+  // Once the pattern is frozen every one of those is a constant, so this holds them:
+  //
+  //   * the local stage is a FrozenSparsity whose rows are my_eqns rather than 0..ndof-1;
+  //   * the send plan is a set of CONTIGUOUS slices. my_eqns is sorted and the target distribution
+  //     gives each rank a contiguous global range, so the rows destined for rank p are one run --
+  //     which is the same property oomph's own first_eqn_element_for_proc relies on. Nothing has to
+  //     be gathered before sending;
+  //   * the merge becomes merge_perm: received value slot -> slot in the final value array. One
+  //     scatter-add pass, no searching, no duplicate detection, no reallocation.
+  //
+  // Only values and residuals travel per assembly; the equation numbers, row lengths and column
+  // indices go once, when the pattern is built. Unlike oomph's version the final column indices come
+  // out sorted within each row, which is what the solvers want anyway.
+  class DistributedFrozenSparsity
+  {
+  public:
+    // One matrix's worth of pattern. The row/equation plan below is shared by all of them.
+    class Mat
+    {
+    public:
+      // Local stage: CSR over my_eqns rows, global column indices, sorted within a row.
+      std::vector<int> local_row_start;  // my_eqns.size()+1
+      std::vector<int> local_col;        // local nnz
+      std::vector<int> element_offset;   // nelement+1
+      std::vector<int> scatter_source;   // i*nvar+j within the elemental block
+      std::vector<int> scatter_slot;     // slot in the local value array; sorted per element, as in FrozenSparsity
+      // Send plan: values for rank p are local_values[send_nz_start[p] .. send_nz_start[p+1]).
+      std::vector<int> send_nz_start;    // nproc+1
+      // Merge plan: the block received from rank p occupies merge_perm[recv_nz_start[p] .. [p+1]),
+      // and entry k of it adds into final_values[merge_perm[recv_nz_start[p]+k]].
+      std::vector<int> recv_nz_start;    // nproc+1
+      std::vector<int> merge_perm;
+      // The answer.
+      std::vector<int> final_row_start;  // nrow_local+1
+      std::vector<int> final_col;        // final nnz
+    };
+
+    unsigned long generation = 0; // Pattern id this was built for; 0 means "not built"
+    unsigned long last_used = 0;
+    unsigned nproc = 0, my_rank = 0;
+    unsigned ndof = 0;                  // global
+    unsigned nrow_local = 0, first_row = 0;
+    unsigned long nelement = 0;
+    unsigned n_matrix = 0, n_vector = 0;
+    std::vector<unsigned> my_eqns;      // sorted global equations this rank contributes to
+    // Rows destined for rank p are my_eqns[send_row_start[p] .. send_row_start[p+1]).
+    std::vector<int> send_row_start;    // nproc+1
+    // Equations arriving from rank p are recv_eq_row[recv_eq_start[p] .. [p+1]), already converted
+    // to a local row index (global row - first_row).
+    std::vector<int> recv_eq_start;     // nproc+1
+    std::vector<int> recv_eq_row;
+    std::vector<Mat> mats;
+
+    void clear()
+    {
+      generation = 0; nproc = my_rank = 0; ndof = 0; nrow_local = first_row = 0;
+      nelement = 0; n_matrix = n_vector = 0;
+      my_eqns.clear(); send_row_start.clear(); recv_eq_start.clear(); recv_eq_row.clear();
+      mats.clear();
+    }
+  };
+#endif
+
   class Problem : public oomph::Problem
   {
   protected:
@@ -386,6 +459,21 @@ namespace pyoomph
     // The fast assembly path: fills the output arrays directly from the frozen pattern. Returns false
     // without touching them if the pattern route does not apply, so the caller falls back to oomph-lib.
     bool assemble_with_frozen_sparsity(oomph::Vector<int*>& column_or_row_index, oomph::Vector<int*>& row_or_column_start, oomph::Vector<double*>& value, oomph::Vector<unsigned>& nnz, oomph::Vector<double*>& residuals, bool compressed_row_flag);
+#ifdef OOMPH_HAS_MPI
+    // Phase 2b. Substitutes the frozen distributed assembly for oomph-lib's whenever the pattern is
+    // known, and calls oomph-lib's otherwise -- so this is always revertible at runtime, and any
+    // configuration the freezing does not cover simply keeps the old behaviour.
+    void parallel_sparse_assemble(const oomph::LinearAlgebraDistribution* const& dist_pt, oomph::Vector<int*>& column_or_row_index, oomph::Vector<int*>& row_or_column_start, oomph::Vector<double*>& value, oomph::Vector<unsigned>& nnz, oomph::Vector<double*>& residuals) override;
+    DistributedFrozenSparsity distributed_frozen_sparsity;
+    unsigned long distributed_frozen_rebuilds = 0;
+    bool use_frozen_distributed_sparsity = true; // Freeze the distributed pattern and exchange values only
+    // Builds the whole distributed plan -- local pattern, send slices, and the merge permutation
+    // derived from one round of pattern exchange. False (leaving sp cleared) if this configuration
+    // cannot be frozen, in which case the caller falls back to oomph-lib.
+    bool build_distributed_frozen_sparsity(const oomph::LinearAlgebraDistribution* const& dist_pt, unsigned n_matrix, unsigned n_vector, DistributedFrozenSparsity &sp);
+    // The fast distributed path. False, having touched nothing, if the frozen route does not apply.
+    bool assemble_distributed_with_frozen_sparsity(const oomph::LinearAlgebraDistribution* const& dist_pt, oomph::Vector<int*>& column_or_row_index, oomph::Vector<int*>& row_or_column_start, oomph::Vector<double*>& value, oomph::Vector<unsigned>& nnz, oomph::Vector<double*>& residuals);
+#endif
     // Everything besides the equation numbering that the sparsity pattern depends on. The id is a
     // FUNCTION of this state, not a counter: returning to a configuration seen before must yield the id
     // it had before, or nothing downstream can ever hit its cache. A workflow that alternates between
@@ -495,6 +583,15 @@ namespace pyoomph
     unsigned get_frozen_sparsity_nnz(unsigned matrix_index=0);
     unsigned long get_frozen_sparsity_rebuild_count() const { return frozen_sparsity_rebuilds; } // Watch for cache thrashing
     unsigned get_frozen_sparsity_cache_capacity() const { return frozen_sparsity_cache_capacity; }
+#ifdef OOMPH_HAS_MPI
+    void set_use_frozen_distributed_sparsity(bool yesno) { use_frozen_distributed_sparsity = yesno; if (!yesno) distributed_frozen_sparsity.clear(); }
+    bool get_use_frozen_distributed_sparsity() const { return use_frozen_distributed_sparsity; }
+    unsigned long get_distributed_frozen_rebuild_count() const { return distributed_frozen_rebuilds; }
+#else
+    void set_use_frozen_distributed_sparsity(bool yesno) {}
+    bool get_use_frozen_distributed_sparsity() const { return false; }
+    unsigned long get_distributed_frozen_rebuild_count() const { return 0; }
+#endif
     void set_frozen_sparsity_cache_capacity(unsigned n) { frozen_sparsity_cache_capacity = (n < 1 ? 1 : n); frozen_sparsity_cache.clear(); }
     // Identifies the current Jacobian sparsity pattern. Changes whenever the pattern may have
     // changed. Solvers may reuse anything derived from the pattern (a symbolic factorisation, a
@@ -506,7 +603,11 @@ namespace pyoomph
     // invalidation is a wrong answer, not a crash, so this must not rely on call-site discipline alone.
     unsigned long get_jacobian_structure_id();
     // Declare every pattern seen so far dead. assign_eqn_numbers() is the main caller.
-    void invalidate_jacobian_structure() { jacobian_structure_ids.clear(); frozen_sparsity_cache.clear(); }
+    void invalidate_jacobian_structure() { jacobian_structure_ids.clear(); frozen_sparsity_cache.clear();
+#ifdef OOMPH_HAS_MPI
+      distributed_frozen_sparsity.clear();
+#endif
+    }
 
     // Phase-0 instrumentation: run the elemental part of the assembly (get_all_vectors_and_matrices
     // for every non-halo element) n_repeat times without scattering anything into a matrix, and
