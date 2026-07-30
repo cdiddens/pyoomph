@@ -1,9 +1,12 @@
 # Structural assembly: precomputed CSR sparsity, value-only re-assembly and solver reuse
 
-Branch: `structural_assembly`. Status: **Phases 0, 1, 2 and 3 implemented, tested and benchmarked
-(§6); Phase 2b (distributed) and Phase 4 planned.** All measurements in §2 were taken on `main` (commit `d03a562`) on this
-machine; §6 records what the implemented work actually moved. All file/line references are to the
-tree state at the time of writing.
+Branch: `structural_assembly`. Status: **all planned phases implemented, tested and benchmarked
+(§6) — 0, 1, 2, 2b (distributed), 3 and 4.** All measurements in §2 were taken on `main`
+(commit `d03a562`) on this machine; §6 records what the implemented work actually moved. All
+file/line references are to the tree state at the time of writing.
+
+One open item remains, unrelated to the phases: the bistable `test_moving_mesh_distributed`
+regression of §7c, deferred to a fresh agent.
 
 **Goal.** Today every Jacobian assembly rebuilds the CSR structure (row starts + column indices)
 from scratch, and every linear solve therefore re-does its symbolic phase (Pardiso phase 11, PETSc
@@ -543,8 +546,27 @@ defective merge permutation would have passed.
 * residual-only assembly (`ParallelResidualsHandler`), augmented systems, and any element the code
   generator cannot describe symbolically.
 
-Whether the plan can be built is agreed with an `MPI_Allreduce(MIN)` before anyone commits: half the
-ranks in the frozen exchange and half in oomph-lib's would deadlock rather than give a wrong answer.
+**Everything from the freshness check onwards is collective**, so both things that could diverge
+between ranks are put to a vote rather than assumed: whether the plan needs rebuilding (`nrow_local`,
+`first_row` and `nelement` are per-rank quantities) and whether the build succeeded. There is a
+second, internal vote inside the build, immediately before the first collective — every bail-out up
+to that point (a missing symbolic mask, a distribution that is not contiguous by rank) is decided
+per rank, and a rank that bailed while the others entered `MPI_Alltoall` would hang them. Half the
+ranks in the frozen exchange and half in oomph-lib's is a deadlock, not a wrong answer, which is why
+this is voted on rather than checked afterwards. The two extra `MPI_Allreduce`s of one `int` cost
+nothing measurable against a 20 ms assembly.
+
+**The two-matrix case works too** — a Jacobian and a mass matrix in one pass, each on its own
+pattern (the mass matrix's is about three times tighter, from `contributes_to_mass_matrix`), each
+with its own exchange plan and merge permutation. Checked through
+`assemble_eigenproblem_matrices()` at 2 and 4 ranks: both matrices reproduce oomph-lib's exactly.
+Note that this had to be checked below the Python eigen layer, which cannot handle a distributed
+problem at all — `get_J_M_n_and_type()` wraps a *row-local* CSR in a `csr_matrix` of *global* shape
+and raises. That is pre-existing and unrelated: it fails identically with the frozen route off.
+(Also note that the arrays `assemble_eigenproblem_matrices()` returns are views into
+`eigen_{Mass,Jacobian}MatrixPt`, which the next call deletes and reallocates. Comparing two calls
+without copying first compares freed memory against live memory and reports pure noise — it briefly
+looked like a serious defect in this very code.)
 
 The knob is `problem.use_frozen_distributed_sparsity` (default on) and
 `problem._get_distributed_frozen_rebuild_count()` is the positive signal that it engaged — the
