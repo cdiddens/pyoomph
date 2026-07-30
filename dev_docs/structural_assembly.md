@@ -1418,6 +1418,29 @@ structural block is **identical** to the value-filtered one, and the Hopf point 
 (`rho = 24.7368421053`). The only differences are the three `Dense` border columns, 1 -> 3 each,
 because only one of the three Lorenz equations depends on rho.
 
+### Before writing the azimuthal or pitchfork spec: the vocabulary is not yet enough
+
+`AugmentedBlockSpec::Kind` names *which matrix* a block's pattern comes from, but not *which residual
+index*. The builder reads a single `ft->current_res_jac` and indexes `contributes_to_jacobian[resind]`
+with it, which is correct for fold and Hopf: every block of those comes from one residual.
+
+It is not correct for the other two. `AzimuthalSymmetryBreakingResidualContributionList` holds
+**three** indices at once -- `{base (axisymmetric), real azimuthal, imag azimuthal}` -- and
+`PitchForkResidualContributionList` holds two (`{base, mass-matrix residual}`). A spec written in
+today's vocabulary would describe every block with whichever residual happened to be active, silently.
+
+Neither handler is affected today: neither inherits `AugmentedSparsityProvider`, so no provider is
+found, the builder returns NULL and both fall back exactly as before. Their `ndof` (`3*raw+2`,
+`2*raw+2`) can never equal `raw` either, so the augmented dispatch always fires and always declines --
+there is no path by which they could pick up a *wrong* mask rather than none.
+
+**So the fix is not needed until one of those specs is written -- and is then a prerequisite, not an
+afterthought.** The shape of it: give `Kind` (or the block entry) a residual index alongside the
+matrix choice, and have `augmented_sparsity_mask_for_element` fetch
+`contributes_to_{jacobian,mass_matrix,hessian}[that index]` rather than `[current_res_jac]`. The raw
+masks would then have to be fetched per (matrix, residual) pair instead of the three buffers used now,
+which is why it is better done before the first such spec than retrofitted around one.
+
 ### Three defects this exposed, all worth remembering
 
 1. **The mass table was unreachable.** `sparsity_mask_for_element` refuses `matrix_index > 0` unless
