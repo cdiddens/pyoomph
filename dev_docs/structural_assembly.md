@@ -1181,9 +1181,31 @@ residual check fails. That is a **third, independent tier** of reuse:
 | symbolic (Phase 1) | fill-reducing ordering, elimination tree | always, while the pattern holds |
 | numeric-as-preconditioner (`try_to_reuse_solver`) | the LU factors themselves | only while the values stay close; checked a posteriori |
 
-They compose, and are currently untested together — the symbolic-reuse branch deliberately excludes
-`try_to_reuse_solver`. Worth benchmarking: for a slowly-varying Jacobian (time stepping, continuation)
-the combination could skip phase 22 as well, leaving only triangular solves.
+**Composed and measured — and the answer is that the numeric tier is not worth having.**
+
+The two are now composed: when a numeric reuse stalls, the fallback is a phase-22 refactorisation
+rather than a full rebuild, because a failed *numerical* reuse says nothing about the sparsity. That
+makes `try_to_reuse_solver` strictly better than it was. It does not make it a good idea.
+
+Six time steps of 3D Taylor-Hood NS (the slowly-varying-Jacobian case the numeric tier is for),
+observables identical to 10 digits throughout:
+
+| | `N=6` | `N=9` | full (ph12) | numeric (ph22) | CGS reuse |
+|---|---|---|---|---|---|
+| no reuse at all | 1.804 s | 7.652 s | 10 | 0 | 0 |
+| **symbolic only** | **1.191 s** | **5.19–5.28 s** | 2 | 8 | 0 |
+| both tiers | 1.191 s | 5.85–5.91 s | 1 | 1–2 | 9 |
+| both, pre-composition fallback | — | 5.888 s | 2 | 0 | 9 |
+
+Symbolic reuse alone is worth **−32 %**. Adding the numeric tier is a wash at `N=6` and a
+**+13 % loss** at `N=9`, reproduced three times: once the problem is big enough, up to 30 CGS
+iterations plus a sparse mat-vec for the residual check cost more than simply redoing the numbers.
+The composition recovers a little of that (one full factorisation instead of two) but cannot rescue it.
+
+So `try_to_reuse_solver` stays **off by default**, and the recommendation is to leave it off — its
+premise, that reusing numerical factors beats recomputing them, stopped holding once phase 11 was no
+longer part of "recomputing them". Phase 1 made the cheap thing cheap enough that the clever thing
+lost.
 
 ### A4. scipy and Mac Accelerate backends
 
