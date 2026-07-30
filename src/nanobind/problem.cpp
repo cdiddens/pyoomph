@@ -827,6 +827,13 @@ void PyReg_Problem(nb::module_ &m)
 					  "every incoming entry. Falls back to oomph-lib's routine by itself whenever it cannot apply: a replicated problem whose elements are merely "
 					  "split across ranks (its element ranges are re-tuned from measured timings, so they are not a function of the equation numbering), a "
 					  "residual-only assembly, an augmented system, or a pattern the code generator cannot describe symbolically. Always False in a non-MPI build.")
+		.def("_request_newton_abort", &pyoomph::Problem::request_newton_abort, nb::arg("reason"),
+			 "Abandon the Newton solve that is currently running. The next residual evaluation raises the same error an ordinary divergence would, so callers "
+			 "that already recover from a failed solve (an adaptive time-stepper cutting dt, for instance) need no change. Unlike the mechanism this replaces it "
+			 "leaves the dofs untouched, so the rejected state can still be inspected or written out, and it agrees the request across MPI ranks -- the decision "
+			 "to reject is usually only visible on the ranks holding the relevant part of the mesh. The reason is printed when the abort fires.")
+		.def("_newton_abort_requested", &pyoomph::Problem::newton_abort_requested,
+			 "Whether an abort has been requested on THIS rank and not yet consumed. Note that the abort actually fires if any rank has requested one.")
 		.def("_get_distributed_residual_rebuild_count", &pyoomph::Problem::get_distributed_residual_rebuild_count,
 			 "How many distributed RESIDUAL plans have been built since the problem was created (the equation/exchange half only, used by get_residuals() under "
 			 "MPI -- see ``use_frozen_distributed_sparsity``). Counted separately from the matrix plans because get_residuals() installs its own assembly handler "

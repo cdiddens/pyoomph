@@ -1343,11 +1343,26 @@ returns early regardless of allocation policy. The conclusion of §5b stands, no
 
 ### Still open
 
-* **The residual-only assembly path** (`get_residuals`, 55 ms of a 675 ms Newton step on
-  Benchmark A). It has no sparsity structure at all, so the pattern machinery buys nothing directly;
-  what it might reuse is the elemental loop and the dof-gather. Under MPI it is a separate
-  `ParallelResidualsHandler` route that Phase 2b deliberately does not touch. Untouched, and the
-  clearest remaining assembly-side item after the JIT work.
+* ~~**The residual-only assembly path**~~ — **done, and the premise was half wrong.** Measured
+  serially it is **96–101 % elemental JIT evaluation** (2D: 17.15 ms total, 16.41 elemental; 3D:
+  178.9 total, 180.7 elemental — the difference is noise), so there is nothing there to win outside
+  the JIT and the idea that it could reuse the elemental loop and dof-gather is refuted.
+
+  Under MPI it was a different story, and that half is now fixed. oomph-lib routes `get_residuals()`
+  through the whole of `parallel_sparse_assemble()` with zero matrices — recomputing `my_eqns`,
+  building the array-of-arrays, exchanging equation numbers and merging by bisection per row, all to
+  sum a vector, once per Newton step. Overhead: 2.85 ms of 11.16 (26 %) at 2 ranks and 3.28 of 7.32
+  (**45 %**) at 4, and roughly *constant* in absolute terms as ranks grow. Frozen, the residual
+  assembly is **−20 %** at both 2 and 4 ranks, and the end-to-end distributed Newton step goes to
+  −18 % / −27 % (Phase 2b alone was −12 % / −41 %).
+
+  Worth noting for anyone re-treading this: the Newton loop evaluates the residual **twice at every
+  state** — once standalone for the convergence check, once again inside the next `get_jacobian`.
+  That looks like free money and is not. The bundled one is nearly free (same elemental pass), so the
+  only way to remove the duplication is to restructure the loop to assemble R+J before the
+  convergence test, which wastes a Jacobian on the final step. For *n* Newton steps that trades
+  *n*×R against one marginal J: a win in 2D (R = 17 ms, marginal J = 20 ms) but a clear loss in 3D,
+  where the marginal J is 895 ms against a 179 ms residual and it would need *n* ≥ 6 to break even.
 * **Memory footprint of the scatter map on large 3D problems.** The compact slot-sorted form
   (`scatter_source`/`scatter_slot`) is much smaller than the per-position table it replaced, and
   Phase 2b adds a per-rank plan (`merge_perm`, `final_col`, `local_col`, the scatter map) of order a

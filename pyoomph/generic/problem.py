@@ -3596,13 +3596,16 @@ class Problem(_pyoomph.Problem):
         print()
 
     def actions_before_newton_convergence_check(self)->None:
-        accept_step=self._equation_system._before_newton_convergence_check() 
+        accept_step=self._equation_system._before_newton_convergence_check()
         if not accept_step:
-            print("Invalidating step by filling the dof vector with random exteme values")
-            dofs,_=self.get_current_dofs()
-            dofs=numpy.array(dofs)
-            dofs[:]=1e40*dofs[:]+numpy.random.rand(len(dofs))*1e40
-            self.set_current_dofs(dofs)            
+            # Ask for the solve to be abandoned. This used to be done by multiplying the whole dof
+            # vector by 1e40 and adding noise, so that the next residual evaluation would exceed
+            # max_residuals and make oomph-lib throw. That destroyed the state -- the rejected
+            # configuration, which is usually exactly what one wants to look at, was gone -- and it
+            # went through get_current_dofs()/set_current_dofs(), which redistribute and are therefore
+            # collective, while this decision is typically only reached on the ranks that hold the
+            # offending part of the mesh. A rejection seen by some ranks and not others deadlocked.
+            self._request_newton_abort("a step was rejected by before_newton_convergence_check")
 
     def actions_after_newton_step(self):
         #if self._solve_in_arclength_conti is not None:

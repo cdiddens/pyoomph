@@ -19,6 +19,7 @@ The main author may be contacted at c.diddens@utwente.nl
 
 ================================================================================*/
 
+#include <limits>
 #include "problem.hpp"
 #include "elements.hpp"
 #include "jitbridge.h"
@@ -1434,8 +1435,62 @@ namespace pyoomph
 #endif
 	}
 
+	// Ask for the running Newton solve to be abandoned. Cheap and side-effect-free: it records the
+	// request, and the next residual evaluation acts on it. See the header for what this replaces.
+	void Problem::request_newton_abort(const std::string &reason)
+	{
+		newton_abort_flag = true;
+		newton_abort_reason = reason;
+	}
+
+	// Consume a pending abort request, agreeing across ranks first.
+	//
+	// The agreement is the point. Whatever decides to reject a step -- an interface about to
+	// self-intersect, say -- usually only sees it on the ranks holding that part of the mesh, so the
+	// request is inherently partition-dependent, while abandoning the solve has to be unanimous. One
+	// int through MPI_Allreduce, on a path that is collective anyway.
+	bool Problem::consume_newton_abort_request()
+	{
+		bool aborting = newton_abort_flag;
+#ifdef OOMPH_HAS_MPI
+		if (Communicator_pt && Communicator_pt->nproc() > 1)
+		{
+			int mine = aborting ? 1 : 0, any = 0;
+			MPI_Allreduce(&mine, &any, 1, MPI_INT, MPI_MAX, Communicator_pt->mpi_comm());
+			aborting = (any != 0);
+		}
+#endif
+		if (!aborting) return false;
+		if (!newton_abort_reason.empty())
+		{
+			// Reported rather than carried: oomph::NewtonSolverError has no room for a message.
+			std::cout << "Abandoning the Newton solve: " << newton_abort_reason << std::endl;
+		}
+		newton_abort_flag = false;
+		newton_abort_reason.clear();
+		return true;
+	}
+
 	void Problem::get_residuals(oomph::DoubleVector &residuals)
 	{
+		// Before anything else, including the halo sync: an abandoned solve should cost nothing.
+		if (consume_newton_abort_request())
+		{
+			// Raise the error directly rather than returning a residual so large that oomph-lib's own
+			// max_residuals test trips. That was the first attempt and it silently did nothing when the
+			// request arrived before the FIRST Newton step: the count==1 convergence check compares
+			// against the tolerance only, never against max_residuals, so the huge residual was
+			// consumed, the step proceeded, and the next check saw an ordinary residual and converged.
+			// Throwing does not depend on which check happens to read the residual, nor on the user's
+			// max_residuals being set to anything in particular.
+			//
+			// oomph-lib's steady_newton_solve() wraps the whole Newton loop in catch(NewtonSolverError),
+			// so this lands in exactly the handler an ordinary divergence lands in, and callers that
+			// already recover from a failed solve need no change. Outside a Newton solve there is
+			// nothing to catch it and it surfaces as a generic error -- which is the honest outcome for
+			// "abandon the solve" when no solve is running.
+			throw oomph::NewtonSolverError(0, std::numeric_limits<double>::max());
+		}
 		sync_hanging_values_if_distributed(this);
 		if (!use_custom_residual_jacobian)
 		{

@@ -860,6 +860,25 @@ namespace pyoomph
     // normal elemental assembly and the custom-residual-Jacobian path (use_custom_residual_jacobian),
     // and additionally apply the matrix-manipulation Dirichlet enforcement when that strategy is active.
     void get_residuals(oomph::DoubleVector &residuals) override;
+    // Abort the Newton solve currently running, without touching the dofs.
+    //
+    // Replaces the old mechanism, which multiplied the whole dof vector by 1e40 and added noise so
+    // that the NEXT residual evaluation would exceed max_residuals and make oomph-lib throw. Three
+    // things were wrong with that: it destroyed the state, so nothing could be inspected or recovered
+    // afterwards; it went through get_current_dofs()/set_current_dofs(), which redistribute and are
+    // therefore COLLECTIVE, while the decision to reject is typically partition-dependent -- so a
+    // rejection seen by only some ranks deadlocked; and it paid for a full extra residual assembly to
+    // communicate one bit. This sets a flag that the next get_residuals() consumes, agreeing it across
+    // ranks first. The reason is reported when it fires.
+    void request_newton_abort(const std::string &reason);
+    bool newton_abort_requested() const { return newton_abort_flag; }
+  protected:
+    bool newton_abort_flag = false;
+    std::string newton_abort_reason;
+    // True (having reported the reason) if an abort was requested on ANY rank, in which case the
+    // caller must not assemble. Clears the request, so it fires once.
+    bool consume_newton_abort_request();
+  public:
     void get_jacobian(oomph::DoubleVector &residuals,oomph::CRDoubleMatrix &jacobian) override;
     void get_derivative_wrt_global_parameter(double* const& parameter_pt,oomph::DoubleVector& result) override;
     virtual void remove_dirichlets_by_matrix_manipulation(oomph::DoubleVector &residuals,oomph::CRDoubleMatrix *jacobian=NULL); // Zeroes out rows/columns of Dirichlet-pinned dofs and sets the residual to the constraint violation, in-place on residuals/jacobian
