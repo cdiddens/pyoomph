@@ -553,7 +553,7 @@ namespace pyoomph
   // constraint fixes the phase/translation invariance of the orbit along time (T_constraint_mode
   // selects either a Poincare-plane constraint through (x0,n0,d_plane) or a period constraint),
   // and T itself is an unknown solved for as part of the augmented system.
-  class PeriodicOrbitHandler : public oomph::AssemblyHandler
+  class PeriodicOrbitHandler : public oomph::AssemblyHandler, public AugmentedSparsityProvider
   {
   protected:
     Problem *Problem_pt;                    // Pointer to the problem class
@@ -606,6 +606,9 @@ namespace pyoomph
     // Destructor (used for cleaning up memory)
     ~PeriodicOrbitHandler() override;
     unsigned n_tsteps() const { return 1 + Tadd.size(); }
+
+    // Describes the augmented block for the frozen sparsity machinery; see AugmentedBlockSpec.
+    bool get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const override;
     unsigned long eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local) override;
     unsigned ndof(oomph::GeneralisedElement *const &elem_pt) override;
     // Dispatches to the residual assembly routine matching the active discretization mode.

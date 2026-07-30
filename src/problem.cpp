@@ -2241,9 +2241,11 @@ namespace pyoomph
 					if (scalar_pair && t.kind != AugmentedBlockSpec::Dense) return decline("non-Dense kind on a scalar group");
 					if (t.kind == AugmentedBlockSpec::Diagonal)
 					{
-						// Only (i,i) of a square block. Used where a row is overwritten with an identity,
-						// which no coupling table can know about because it does not come from a residual.
-						if (gr == gc)
+						// Entry (i,i) of the block only. Used where an identity is written -- an azimuthal
+						// row overwritten by a boundary condition, or the periodic orbit's wrap-around
+						// term u(nT-1) - u(0), which lands on the DIAGONAL of an OFF-DIAGONAL block. So
+						// this is not restricted to gr == gc; it only needs both groups to be raw-sized.
+						if (nr == nc)
 							for (unsigned i = 0; i < nr; i++) scratch[(size_t)(gstart[gr] + i) * nvar + gstart[gc] + i] = 1;
 						continue;
 					}
@@ -3060,8 +3062,7 @@ namespace pyoomph
 
 		unsigned ndof = this->ndof();
 		const unsigned n_vector = residuals.size();    
-		const unsigned n_matrix = column_or_row_index.size();    
-		std::cout << "Sparse assembly for periodic orbit:"  << n_vector << "  " << n_matrix << std::endl;
+		const unsigned n_matrix = column_or_row_index.size();
 		if (n_vector != 1 || n_matrix != 1)
 		{
 			throw_runtime_error("Periodic orbit assembly only supports one vector and one matrix");
@@ -3289,13 +3290,18 @@ namespace pyoomph
     // oomph-lib assembly (which itself uses whichever Sparse_assembly_method is configured).
     void Problem::sparse_assemble_row_or_column_compressed(oomph::Vector<int*>& column_or_row_index,oomph::Vector<int*>& row_or_column_start,oomph::Vector<double*>& value,oomph::Vector<unsigned>& nnz,oomph::Vector<double*>& residual,bool compressed_row_flag)
 	{
-		if (dynamic_cast<PeriodicOrbitHandler*>(this->assembly_handler_pt()))
-		{
-			sparse_assemble_row_or_column_compressed_for_periodic_orbit(column_or_row_index,row_or_column_start,value,nnz,residual,compressed_row_flag);
-		}
-		else if (this->assemble_with_frozen_sparsity(column_or_row_index,row_or_column_start,value,nnz,residual,compressed_row_flag))
+		// The frozen path is tried FIRST, including for periodic orbits. It used to sit behind the
+		// orbit branch, which meant the orbit assembly could never be frozen no matter what the handler
+		// described -- and that assembly is 64-74% of an orbit solve (see section 7e and
+		// tests/benchmarks/bench_periodic_orbit_1d.py). assemble_with_frozen_sparsity declines by itself
+		// whenever it cannot apply, so the orbit routine below is still the fallback.
+		if (this->assemble_with_frozen_sparsity(column_or_row_index,row_or_column_start,value,nnz,residual,compressed_row_flag))
 		{
 			// Assembled straight into the preallocated pattern; nothing else to do.
+		}
+		else if (dynamic_cast<PeriodicOrbitHandler*>(this->assembly_handler_pt()))
+		{
+			sparse_assemble_row_or_column_compressed_for_periodic_orbit(column_or_row_index,row_or_column_start,value,nnz,residual,compressed_row_flag);
 		}
 		else
 		{

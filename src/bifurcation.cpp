@@ -3838,6 +3838,156 @@ namespace pyoomph
   // (tindex = which time point, local_eqn = which raw dof; the global numbering groups all
   // dofs of one time point together, offset by Ndof*tindex), and the final local dof is the
   // shared unknown period T (T_global_eqn).
+  // Describes the augmented block of a periodic-orbit solve for the frozen sparsity machinery.
+  //
+  // The augmented unknowns are nT copies of the raw dof set -- one per time node around the orbit --
+  // followed by the single scalar period T, so the block is an (nT+1)x(nT+1) grid of groups. Within a
+  // pair of coupled time nodes the pattern is just the base Jacobian and mass matrix of the underlying
+  // element, so the only thing this has to describe is WHICH TIME NODES COUPLE. That is what differs
+  // between the discretisations (see the class comment), and both answers are read off the very data
+  // the assembly loops use rather than re-derived here:
+  //
+  //   * B-spline / collocation (basis != NULL): two time nodes couple iff they are supported on a
+  //     common basis element. get_integration_info() reports that support as `indices`, exactly as
+  //     get_jacobian_bspline_mode() consumes it.
+  //   * Floquet / plain finite differences (basis == NULL): a node couples to itself, to its
+  //     neighbours, and to whatever the ds stencil FD_ds_inds[t] reaches.
+  //
+  // Deliberately conservative in two places, because over-describing only costs stored zeros while
+  // under-describing would be wrong: the wrap-around identity that closes the orbit is declared for
+  // every mode (it is written only in Floquet mode, where the last block row is flushed first), and
+  // the base coupling is left on that flushed row too rather than special-cased per mode.
+  bool PeriodicOrbitHandler::get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const
+  {
+    pyoomph::BulkElementBase *pyoomph_elem_pt = dynamic_cast<pyoomph::BulkElementBase *>(elem_pt);
+    if (!pyoomph_elem_pt) return false;
+    auto *ft = pyoomph_elem_pt->get_code_instance()->get_func_table();
+    if (!ft) return false;
+    // The orbit assembles J and M together from this residual in a single multi-assemble pass; if the
+    // element does not have it, we cannot say what its pattern is.
+    const int resind = (int)ft->current_res_jac;
+    if (resind < 0) return false;
+
+    const unsigned nT = this->n_tsteps();
+    if (nT < 2) return false;
+    const unsigned Tgrp = nT; // the scalar period
+
+    spec.resize(nT + 1);
+    for (unsigned t = 0; t < nT; t++) spec.group_is_scalar[t] = false;
+    spec.group_is_scalar[Tgrp] = true;
+
+    // Couples time node a to time node b with the base Jacobian and mass-matrix patterns. Both are
+    // needed: the residual carries J*u from the spatial operator and M*du/ds from the time derivative.
+    // Also records that a carries an equation at all, which the period column below is gated on --
+    // not every time node does (see the collocation branch).
+    std::vector<bool> is_eqn_row(nT, false);
+    auto couple = [&](unsigned a, unsigned b)
+    {
+      if (a >= nT || b >= nT) return;
+      is_eqn_row[a] = true;
+      spec.add(a, b, AugmentedBlockSpec::Jacobian, resind);
+      spec.add(a, b, AugmentedBlockSpec::MassMatrix, resind);
+    };
+
+    // Same priority order as get_residuals()/get_jacobian(): collocation, Floquet, nodal FD, B-spline.
+    if (!this->basis)
+    {
+      if (this->time_mesh)
+      {
+        // Collocation (the default). Rows and columns do NOT run over the same node set, which is the
+        // whole subtlety here: a time element with nnode() nodes carries only nnode()-1 collocation
+        // points, and get_jacobian_collocation_mode() writes the equation of collocation point `inode`
+        // into the row of node `inode` -- so only the FIRST nnode()-1 nodes of an element are equation
+        // rows, while all nnode() of them are interpolated and hence appear as columns. Declaring the
+        // last node as a row too is what made every element-boundary block (3,0), (6,3), (9,6), ...
+        // come out 100% structural zeros. The time index a node stands for is TimeNode::get_index(),
+        // which is what the assembly indexes the block with.
+        for (unsigned ie = 0; ie < this->time_mesh->nelement(); ie++)
+        {
+          oomph::FiniteElement *el = dynamic_cast<oomph::FiniteElement *>(this->time_mesh->element_pt(ie));
+          if (!el || el->nnode() < 2) return false;
+          const unsigned nn = el->nnode();
+          for (unsigned in = 0; in + 1 < nn; in++) // rows: collocation points only
+          {
+            TimeNode *ni = dynamic_cast<TimeNode *>(el->node_pt(in));
+            if (!ni) return false;
+            for (unsigned in2 = 0; in2 < nn; in2++) // columns: every node of the element
+            {
+              TimeNode *nj = dynamic_cast<TimeNode *>(el->node_pt(in2));
+              if (!nj) return false;
+              couple(ni->get_index(), nj->get_index());
+            }
+          }
+        }
+      }
+      else if (this->floquet_mode)
+      {
+        // Floquet: trapezoidal between consecutive time nodes, so a node couples to itself and to its
+        // successor only -- both through J and M. The last block row carries no equation of its own;
+        // it is flushed and replaced by the wrap-around identity declared below, which is also why it
+        // must not be marked as an equation row here (it has no period column either).
+        for (unsigned t = 0; t + 1 < nT; t++)
+        {
+          couple(t, t);
+          couple(t, t + 1);
+        }
+      }
+      else
+      {
+        // Plain nodal finite differences (central, BDF2). Unlike Floquet there is NO t -> t+1 term:
+        // the spatial operator is evaluated at the node itself, and the only coupling to other time
+        // nodes is the dU/ds stencil, whose reach is FD_ds_inds[t]. That stencil multiplies the MASS
+        // matrix alone, so declaring the Jacobian pattern there as well would be pure over-inclusion
+        // (it cost +44% nnz for central and +89% for BDF2 when this branch was a guess).
+        for (unsigned t = 0; t < nT; t++)
+        {
+          couple(t, t);
+          if (t < this->FD_ds_inds.size())
+            for (unsigned k = 0; k < this->FD_ds_inds[t].size(); k++)
+            {
+              const unsigned b = this->FD_ds_inds[t][k];
+              if (b < nT) { is_eqn_row[t] = true; spec.add(t, b, AugmentedBlockSpec::MassMatrix, resind); }
+            }
+        }
+      }
+    }
+    else
+    {
+      // B-spline: two time nodes couple iff they are supported on a common basis element, which the
+      // basis reports as `indices` -- exactly what get_jacobian_bspline_mode() indexes the block with.
+      for (unsigned ie = 0; ie < this->basis->get_num_elements(); ie++)
+      {
+        std::vector<double> w;
+        std::vector<unsigned> indices;
+        std::vector<std::vector<double>> psi_s, dpsi_ds;
+        this->basis->get_integration_info(ie, w, indices, psi_s, dpsi_ds);
+        for (unsigned l = 0; l < indices.size(); l++)
+          for (unsigned l2 = 0; l2 < indices.size(); l2++)
+            couple(indices[l], indices[l2]);
+      }
+    }
+
+    // The period column dR/dT (from the M*dU/ds terms, which carry a 1/T), and the phase/plane
+    // constraint row that pins the orbit's time origin. Neither has a pattern of its own.
+    for (unsigned t = 0; t < nT; t++)
+    {
+      // dR/dT comes from the M*dU/ds term, so it exists exactly where there is an equation to
+      // differentiate; a time node that is only ever interpolated (collocation's element-boundary
+      // node) has no period column.
+      if (is_eqn_row[t]) spec.set(t, Tgrp, AugmentedBlockSpec::Dense);
+      spec.set(Tgrp, t, AugmentedBlockSpec::Dense);
+    }
+    spec.set(Tgrp, Tgrp, AugmentedBlockSpec::Dense);
+
+    // The wrap-around u(nT-1) - u(0) = 0 closing the orbit in Floquet mode. It is an identity, so it
+    // lands on the DIAGONAL of the off-diagonal block (nT-1, 0) -- not on a Jacobian pattern, and not
+    // on a square block, which is why AugmentedBlockSpec::Diagonal is not restricted to gr == gc.
+    spec.add(nT - 1, nT - 1, AugmentedBlockSpec::Diagonal);
+    spec.add(nT - 1, 0, AugmentedBlockSpec::Diagonal);
+
+    return true;
+  }
+
   unsigned long PeriodicOrbitHandler::eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local)
   {
     unsigned raw_ndof = elem_pt->ndof();

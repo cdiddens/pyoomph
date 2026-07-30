@@ -1700,6 +1700,100 @@ rather than inheriting whatever `csr_matrix` happened to keep.
 3. `MyHopfHandler` (adds the mass-matrix and transpose kinds), then the remaining C++ handlers.
 4. The Python bordering, which is a separate mechanism and can be judged on its own.
 
+## 7f. Freezing the periodic-orbit assembly
+
+The orbit handler was the last tracker left, and the most valuable one: on the 1D Brusselator
+(`tests/benchmarks/bench_periodic_orbit_1d.py`) the assembly is 64-74% of an orbit solve, because the
+orbit matrix is so sparse (0.17% at N=80/NT=60) that the factorisation is cheap next to it.
+
+### Two things I had wrong
+
+I had recorded that "periodic orbits never form the augmented elemental block, so a spec would never
+be consulted", on the strength of the comment in
+`sparse_assemble_row_or_column_compressed_for_periodic_orbit`:
+
+> Periodic orbits would have very huge elemental Jacobians, so we must assemble them with block jacobians
+
+That comment describes the band-matrix path, which is `#define`d **out** (`//#define
+PYOOMPH_PERIODIC_ORBIT_BAND_MATRIX`) and never implemented -- its body is
+`//throw_runtime_error("TODO: Fill it in")`. The path that actually runs builds a dense
+`nvar x nvar` `oomph::DenseMatrix` with `nvar = raw*nT+1` and scans all of it into a
+`std::map<unsigned,double>` per row. So the augmented block is formed after all, and
+`AugmentedBlockSpec` applies exactly as it does to Fold/Hopf/Pitchfork/azimuthal.
+
+The reason a spec would nonetheless never have been consulted was something else entirely: the
+dispatcher tried the orbit routine *before* `assemble_with_frozen_sparsity`. Reordering it is the
+whole enabling change; the frozen path declines on its own when it cannot apply, so the orbit routine
+stays as the fallback.
+
+### The spec: nT raw-sized groups plus the period
+
+The augmented unknowns are nT copies of the raw dof set followed by the scalar period T, so the block
+is an (nT+1)x(nT+1) grid. Within a coupled pair of time nodes the pattern is just the base Jacobian
+and mass matrix, so the only thing the spec has to describe is **which time nodes couple** -- and that
+is what differs between the five discretisations. All of it is read off the same data the assembly
+loops use rather than re-derived:
+
+| mode | coupling |
+|---|---|
+| collocation (default) | pairs within a time element of `time_mesh`, via `TimeNode::get_index()` |
+| B-spline | pairs supported on a common basis element, via `get_integration_info()`'s `indices` |
+| Floquet | `t -> t` and `t -> t+1` (J and M), last row flushed and replaced by the wrap identity |
+| central, BDF2 | `t -> t` (J and M), plus the `dU/ds` stencil `FD_ds_inds[t]` -- **mass matrix only** |
+
+### Two subtleties, both caught by measurement rather than by reading
+
+**Rows and columns do not run over the same node set.** A collocation time element with `nnode()`
+nodes carries only `nnode()-1` collocation points, and the equation of collocation point `inode` is
+written into the row of node `inode`. So only the *first* `nnode()-1` nodes of an element are equation
+rows, while all of them appear as columns. Declaring the last node as a row too is legal -- it only
+stores zeros -- but it cost +25% nnz, and the give-away was that blocks (3,0), (6,3), (9,6), (12,9)
+came out **100%** structural zeros, i.e. exactly the element-boundary nodes at order 3. The period
+column has the same asymmetry, so it is gated on whether a time node carries an equation at all.
+
+**The FD stencil multiplies the mass matrix alone.** The first version of that branch guessed
+`t, t+-1, FD_ds_inds[t]` with both J and M. It was correct but cost +44% nnz for central and +89% for
+BDF2. The nodal modes have no `t -> t+1` term at all -- the spatial operator is evaluated at the node
+itself -- and the stencil carries only M.
+
+`AugmentedBlockSpec::Diagonal` also had to stop requiring `gr == gc`: the wrap-around
+`u(nT-1) - u(0) = 0` that closes the orbit is an identity landing on the diagonal of an *off-diagonal*
+block. That is the second consumer of `Diagonal`, after the azimuthal axis boundary conditions.
+
+### Verified
+
+Frozen vs unfrozen assembled at the **identical state** (toggling the flag between two assemblies in
+one run, rather than comparing two independent runs -- those drift, and a 7.5e-03 difference that
+looked like a defect was just that). Brusselator N=20, NT=12:
+
+| mode | order | engaged | nnz off | nnz on | d nnz | max abs dJ |
+|---|---|---|---|---|---|---|
+| collocation | 3 | yes | 33126 | 33127 | +0.00% | 0 |
+| collocation | 2 | yes | 25398 | 25399 | +0.00% | 0 |
+| floquet | 0 | yes | 17670 | 17671 | +0.01% | 0 |
+| central | 2 | yes | 17424 | 17425 | +0.01% | 0 |
+| BDF2 | 2 | yes | 17424 | 17507 | +0.48% | 0 |
+| bspline | 3 | yes | 56064 | 56065 | +0.00% | 0 |
+
+Bit-identical in every mode. The one extra entry is the (T,T) diagonal, declared deliberately so the
+period row has a stored diagonal (see the null-pivot discussion in 7d). BDF2's +0.48% is the wrap
+identity, which that mode does not use.
+
+Speedup, collocation, frozen vs unfrozen:
+
+| N / NT | orbit ndof | nnz | assembly | orbit solve |
+|---|---|---|---|---|
+| 20 / 12 | 1067 | 33k | 3.29 -> 0.95 ms (-71%) | -69% |
+| 40 / 30 | 5023 | 164k | 24.8 -> 5.8 ms (-77%) | -71% |
+| 80 / 60 | 19643 | 655k | 116.1 -> 29.0 ms (-75%) | -66% |
+
+`docs/.../orbit/hopf_switch.py` produces identical output with the flag forced on and off.
+`langford_floquet.py` fails identically both ways with `TypeError: must be real number, not complex`
+-- a pre-existing Python-side bug in that tutorial, unrelated to this work.
+
+A stray `std::cout << "Sparse assembly for periodic orbit:"` that printed on every fallback orbit
+assembly, even under `quiet()`, was removed while here.
+
 ## 8. Open questions
 
 ### Closed by the work
