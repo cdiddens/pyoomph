@@ -1235,6 +1235,16 @@ namespace pyoomph
     // (see the analogous comment in set_dofs below) - this override fixes that up afterwards.
     void Problem::get_dofs(const unsigned& t, oomph::DoubleVector& dofs) const
 	{
+#ifdef OOMPH_HAS_MPI
+	  // oomph-lib declares the HISTORY dof accessors unsupported for distributed problems and guards
+	  // them with a PARANOID throw -- but pyoomph builds with PARANOID off by default, in which case
+	  // the guard vanishes and the loops below silently corrupt the heap: eqn_number() is a GLOBAL
+	  // equation number while the vector holds only this rank's rows. Refuse instead. The current-time
+	  // accessors (get_dofs/set_dofs without t) are distribution-aware and unaffected.
+	  if (this->distributed())
+	    throw_runtime_error("History dof values (time level t>0) are not implemented for distributed problems. "
+	                        "Only the current dof values are available under --distribute.");
+#endif
       oomph::Problem::get_dofs(t,dofs);
 	  //std::cout << "GET HISTORY DOFS " << t << std::endl;
 	  for (unsigned i = 0, ni = mesh_pt()->nnode(); i < ni; i++)
@@ -1256,6 +1266,16 @@ namespace pyoomph
 	// override does the base-class assignment and then additionally writes back the position dofs.
 	void Problem::set_dofs(const unsigned& t, oomph::DoubleVector& dof_pt)
 	{
+#ifdef OOMPH_HAS_MPI
+	  // oomph-lib declares the HISTORY dof accessors unsupported for distributed problems and guards
+	  // them with a PARANOID throw -- but pyoomph builds with PARANOID off by default, in which case
+	  // the guard vanishes and the loops below silently corrupt the heap: eqn_number() is a GLOBAL
+	  // equation number while the vector holds only this rank's rows. Refuse instead. The current-time
+	  // accessors (get_dofs/set_dofs without t) are distribution-aware and unaffected.
+	  if (this->distributed())
+	    throw_runtime_error("History dof values (time level t>0) are not implemented for distributed problems. "
+	                        "Only the current dof values are available under --distribute.");
+#endif
 	 oomph::Problem::set_dofs(t,dof_pt);
 	 //std::cout << "SET HISTORY DOFS " << t << std::endl;
 	 // But oomph-lib forgot the variable position pt of moving nodes...
@@ -1277,6 +1297,16 @@ namespace pyoomph
     // Same fix-up as the DoubleVector overload above, for the raw-pointer-array variant of set_dofs
     void Problem::set_dofs(const unsigned& t, oomph::Vector<double*>& dof_pt)
 	{
+#ifdef OOMPH_HAS_MPI
+	  // oomph-lib declares the HISTORY dof accessors unsupported for distributed problems and guards
+	  // them with a PARANOID throw -- but pyoomph builds with PARANOID off by default, in which case
+	  // the guard vanishes and the loops below silently corrupt the heap: eqn_number() is a GLOBAL
+	  // equation number while the vector holds only this rank's rows. Refuse instead. The current-time
+	  // accessors (get_dofs/set_dofs without t) are distribution-aware and unaffected.
+	  if (this->distributed())
+	    throw_runtime_error("History dof values (time level t>0) are not implemented for distributed problems. "
+	                        "Only the current dof values are available under --distribute.");
+#endif
      oomph::Problem::set_dofs(t,dof_pt);
 	 //std::cout << "SET HISTORY DOFS " << t << std::endl;
 	 // But oomph-lib forgot the variable position pt of moving nodes...
