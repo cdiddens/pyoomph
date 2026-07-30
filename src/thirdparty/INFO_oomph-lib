@@ -58,6 +58,21 @@ Included <initializer_list> for clang compilation on Mac
 
 
 
+oomph_definitions.cc (Changed on 30th July 2026):
+Reference-counted TerminateHelper's Exception_stringstream_pt, and null-guarded the two places that
+dereference it. It is a namespace-level global that every OomphLibException writes its banner into,
+but Problem's CONSTRUCTOR allocates it (TerminateHelper::setup()) and Problem's DESTRUCTOR frees it
+and sets it to null (TerminateHelper::clean_up_memory()). With more than one Problem alive, the first
+one destroyed therefore pulled the stream out from under all the others, and the next OomphLibError
+any of them raised segfaulted while writing its message -- from the error path, giving no hint of the
+cause. Merely rebinding a variable (p = Problem(); ...; p = Problem(); ...), i.e. any loop over cases,
+was enough to trigger it. setup() now allocates only if the stream is absent and bumps a counter;
+clean_up_memory() frees only when the last Problem goes. Consequence: the buffer accumulates across
+concurrently live Problems rather than being cleared whenever one is constructed -- it is a
+diagnostic printed only by the terminate handler, and suppress_exception_error_messages() still
+clears it when an error is caught. The null guards matter separately, since an OomphLibError can be
+raised when no Problem is alive at all. See pyoomph's tests/test_multiple_problems.py.
+
 problem.cc (Changed on 30th July 2026, second change):
 Fixed two out-of-bounds writes on the distributed path, in Problem::get_dofs(DoubleVector&) and
 Problem::set_dofs(const DoubleVector&). Both looped to ndof(), which is the GLOBAL number of dofs,

@@ -69,11 +69,26 @@ namespace oomph
   /// =======================================================================
   namespace TerminateHelper
   {
+    // FOR PYOOMPH: how many Problems have called setup() and not yet cleaned up.
+    // Exception_stringstream_pt below is a namespace-level global, but Problem's CONSTRUCTOR calls
+    // setup() and its DESTRUCTOR calls clean_up_memory(). With more than one Problem alive, the first
+    // one destroyed therefore deleted and null-ed a pointer every remaining Problem still needs, and
+    // the next OomphLibError thrown by any of them dereferenced null while writing its banner --
+    // a segfault, from an error path, with no hint of the real cause. Just
+    //     p = Problem(); ... ; p = Problem(); ...   (rebinding destroys the first)
+    // was enough. Reference-count it instead, and free only when the last Problem goes.
+    unsigned Setup_count = 0;
+
     /// Setup terminate helper
     void setup()
     {
-      if (Exception_stringstream_pt != 0) delete Exception_stringstream_pt;
-      Exception_stringstream_pt = new std::stringstream;
+      // FOR PYOOMPH: keep the existing stream rather than replacing it, so that a second Problem
+      // being constructed does not pull it out from under the first. The buffer now accumulates
+      // across concurrently live Problems until the last is destroyed; it is a diagnostic printed
+      // only by the terminate handler, and suppress_exception_error_messages() still clears it
+      // whenever an error is caught.
+      if (Exception_stringstream_pt == 0) Exception_stringstream_pt = new std::stringstream;
+      Setup_count++;
       std::set_terminate(spawn_errors_from_uncaught_errors);
     }
 
@@ -88,6 +103,9 @@ namespace oomph
     /// Function to spawn messages from uncaught errors
     void spawn_errors_from_uncaught_errors()
     {
+      // FOR PYOOMPH: null-check. This runs from std::terminate, where there may be no live Problem
+      // left to have allocated the stream.
+      if (Exception_stringstream_pt == 0) return;
       (*Error_message_stream_pt) << (*Exception_stringstream_pt).str();
     }
 
@@ -95,6 +113,10 @@ namespace oomph
     /// in this namespace
     void clean_up_memory()
     {
+      // FOR PYOOMPH: only the last Problem out frees the stream; see the comment on Setup_count.
+      if (Setup_count > 0) Setup_count--;
+      if (Setup_count > 0) return;
+
       // If it's a null pointer
       if (Exception_stringstream_pt != 0)
       {
@@ -222,8 +244,14 @@ namespace oomph
 
     // Copy message to stream in terminate helper in case the message
     // doesn't get caught and/or doesn/t make it to the destructor
-    (*TerminateHelper::Exception_stringstream_pt)
-      << (*Exception_stringstream_pt).str();
+    // FOR PYOOMPH: null-check. An OomphLibError can be constructed when no Problem is alive to have
+    // allocated this stream -- from a Mesh, or after the last Problem has been destroyed -- and the
+    // unguarded dereference turned that into a segfault while REPORTING an error.
+    if (TerminateHelper::Exception_stringstream_pt != 0)
+    {
+      (*TerminateHelper::Exception_stringstream_pt)
+        << (*Exception_stringstream_pt).str();
+    }
   }
 
   //========================================================================
