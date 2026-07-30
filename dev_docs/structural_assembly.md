@@ -1215,7 +1215,7 @@ lost.
 * **scipy** (`pyoomph/solvers/scipy.py`): `splu` exposes no symbolic-reuse API, so there is nothing to
   reuse at the factorisation level. It still benefits from the frozen *assembly*, and from the frozen
   path emitting canonically sorted CSR. Low priority.
-* **Mac Accelerate** (`src/mac_accelerate.{hpp,cpp}`): **done, but unverified.**
+* **Mac Accelerate** (`src/mac_accelerate.{hpp,cpp}`): **done and verified on real hardware.**
   `MacAccelerateSparseSolver::refactorize_values_only()` keeps the symbolic factorization and calls
   `SparseRefactor`, refilling the values through a cached CSR→CSC permutation;
   `MacAccelerateLinearSolver` calls it while `jacobian_structure_id` is unchanged, and it verifies the
@@ -1224,7 +1224,7 @@ lost.
   factorization — reusing a symbolic factorization fixes the pivoting, and new values may not tolerate
   it where a fresh one would have chosen differently.
 
-  **None of this has ever been compiled.** It is inside `#ifdef __APPLE__`, so a Linux build does not
+  **None of this could be compiled here.** It is inside `#ifdef __APPLE__`, so a Linux build does not
   even syntax-check it. `.github/workflows/test_mac_accelerate.yml` (manual dispatch, `macos-14`,
   arm64) builds pyoomph and runs `citools/check_accelerate_reuse.py`, which checks three things: that
   the answers match an independent solver, that the reuse *actually happened*
@@ -1232,6 +1232,22 @@ lost.
   timings, which is how the Phase 2 false negative survived so long), and that renumbering forces a
   new symbolic factorization. GitHub only shows the dispatch button for workflows on the default
   branch, so the file has to reach `main` before it can be run.
+
+  **Result of run `30524219210`** (branch `structural_assembly`, macos-14/arm64) — all checks passed:
+
+  | check | outcome |
+  | --- | --- |
+  | reuse agrees with no-reuse | `max\|du\| = 0.0` — bit-identical |
+  | reuse agrees with an independent superlu solve | `max\|du\| = 5.6e-17` |
+  | reuse on: symbolic / numeric-only factorizations | **1 / 2** |
+  | reuse off: symbolic / numeric-only factorizations | **3 / 0** |
+  | re-solve on an unchanged pattern | no new symbolic (1 → 1), 4 numeric-only |
+  | after renumbering | a new symbolic is taken (1 → 2) |
+
+  So the saving is real (2 of 3 factorizations became numeric-only) *and* it is given up exactly when
+  it must be. The one thing this does not measure is wall-clock: `SparseRefactor` is assumed cheaper
+  than `SparseFactor`, and a shared CI runner is too noisy to prove it. That is the same assumption the
+  Pardiso path makes, where it was measured locally and held.
 
 ### A5. A preconditioner matrix would thrash the single frozen pattern — **real gap**
 
