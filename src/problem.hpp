@@ -497,6 +497,10 @@ namespace pyoomph
     // products (bifurcation tracking on a LEFT eigenvector) whose pattern is J^T, not J.
     static const unsigned MASK_UNION_SYMMETRIC = (unsigned)-3;
     std::vector<char> union_mask_scratch;
+    // Whether the multi-assembly currently being built asks for a TRANSPOSED product, whose pattern is
+    // J^T rather than J. Set from the request list; true by default so that any other caller of the
+    // base-problem assembly gets the safe superset rather than a refusal.
+    bool multiassembly_wants_transposed = true;
     const char *symmetrised_union_mask(oomph::GeneralisedElement *elem_pt, unsigned nvar);
     // The fast assembly path: fills the output arrays directly from the frozen pattern. Returns false
     // without touching them if the pattern route does not apply, so the caller falls back to oomph-lib.

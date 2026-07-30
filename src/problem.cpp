@@ -4349,9 +4349,9 @@ namespace pyoomph
 #endif
 			const unsigned long gen = this->get_jacobian_structure_id();
 			std::vector<int> pinned;
+			const unsigned mask_sel = multiassembly_wants_transposed ? MASK_UNION_SYMMETRIC : 0u;
 			const int slot = (parallel || !gen) ? -1
-											   : this->acquire_frozen_sparsity(MASK_UNION_SYMMETRIC, gen, ndof, pinned,
-																			   MASK_UNION_SYMMETRIC);
+											   : this->acquire_frozen_sparsity(mask_sel, gen, ndof, pinned, mask_sel);
 			if (slot >= 0)
 			{
 				const FrozenSparsity &sp = frozen_sparsity_cache[slot];
@@ -4707,6 +4707,18 @@ namespace pyoomph
 		oomph::Vector<unsigned> nnz;
 		oomph::Vector<double*> residuals;
 
+		// Only a transposed product needs the symmetrised pattern (see symmetrised_union_mask). Deciding
+		// it from the request list keeps fold, pitchfork and right-eigenvector Hopf tracking on the exact
+		// Jacobian pattern, and pays for the transpose only where it is mathematically required.
+		multiassembly_wants_transposed = false;
+		for (unsigned i = 0; i < what.size(); i++)
+		{
+			if (what[i].size() >= 11 && what[i].compare(what[i].size() - 11, 11, "_transposed") == 0)
+			{
+				multiassembly_wants_transposed = true;
+				break;
+			}
+		}
 		oomph::AssemblyHandler * old_handler=this->assembly_handler_pt();
 		pyoomph::CustomMultiAssembleHandler * new_handler=new pyoomph::CustomMultiAssembleHandler(this,what,contributions,params,hessian_vectors,hessian_vector_indices,return_indices);
 	    ndof = this->get_n_unaugmented_dofs();
