@@ -152,12 +152,53 @@ def compare_frozen_distributed(dim, N, outdir=None):
         return out
 
 
+def compare_frozen_distributed_residuals(dim, N, outdir=None):
+    """The frozen residual-only distributed assembly must reproduce oomph-lib's.
+
+    Under MPI, get_residuals() installs a ParallelResidualsHandler and goes through the whole of
+    parallel_sparse_assemble() with zero matrices -- recomputing my_eqns, exchanging equation numbers
+    and merging by bisection per row, all to sum a vector, once per Newton step. pyoomph substitutes
+    a much smaller frozen plan for it.
+
+    Checked at TWO states. A converged residual is ~1e-10, so comparing two near-zero vectors would
+    pass whatever the routine did; the unsolved initial state, where the lid boundary condition makes
+    the residual O(1), is what actually constrains it.
+    """
+    prob = CavityProblem(dim=dim, N=N)
+    with prob as p:
+        if outdir is not None:
+            p.set_output_directory(outdir)
+        p.quiet()
+        p.set_linear_solver("petsc_mumps")
+        p.initialise()
+
+        def both():
+            p.use_frozen_distributed_sparsity = False
+            a = numpy.array(p.get_residuals(), copy=True)
+            p.use_frozen_distributed_sparsity = True
+            b = numpy.array(p.get_residuals(), copy=True)
+            return a, b
+
+        a0, b0 = both()                      # unsolved: residual is O(1)
+        p.solve()
+        a1, b1 = both()                      # converged: the state a Newton step asks about
+        return {
+            "ndof": int(p.ndof()),
+            # Zero means the frozen route never engaged and this test proved nothing.
+            "res_plans_built": int(p._get_distributed_residual_rebuild_count()),
+            "init_norm": float(numpy.max(numpy.abs(a0))),
+            "init_maxdiff": float(numpy.max(numpy.abs(b0 - a0))),
+            "conv_norm": float(numpy.max(numpy.abs(a1))),
+            "conv_maxdiff": float(numpy.max(numpy.abs(b1 - a1))),
+        }
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dim", type=int, default=2)
     ap.add_argument("--size", type=int, default=16)
     ap.add_argument("--structural", type=int, default=0)
-    ap.add_argument("--mode", default="solve", choices=["solve", "compare-distributed"])
+    ap.add_argument("--mode", default="solve", choices=["solve", "compare-distributed", "compare-residuals"])
     ap.add_argument("--outdir", required=True)
     args, _ = ap.parse_known_args()
 
@@ -166,6 +207,8 @@ def main():
     try:
         if args.mode == "compare-distributed":
             payload.update(compare_frozen_distributed(args.dim, args.size, outdir=args.outdir))
+        elif args.mode == "compare-residuals":
+            payload.update(compare_frozen_distributed_residuals(args.dim, args.size, outdir=args.outdir))
         else:
             payload.update(solve_case(args.dim, args.size, bool(args.structural), outdir=args.outdir))
     except Exception as e:

@@ -338,6 +338,42 @@ namespace pyoomph
   // Only values and residuals travel per assembly; the equation numbers, row lengths and column
   // indices go once, when the pattern is built. Unlike oomph's version the final column indices come
   // out sorted within each row, which is what the solvers want anyway.
+  // The row/equation half of a distributed assembly plan: which global equations this rank
+  // contributes to, how that set splits by owning rank, and which local row each incoming equation
+  // lands on. It depends on the equation numbering and the mesh partition alone -- not on any matrix,
+  // not on the symbolic mask, not even on keep_structural_zeros -- which is why the residual-only
+  // assembly can use it when nothing else about the frozen machinery applies.
+  //
+  // Held separately from the matrix plan rather than shared with it. During get_residuals() oomph-lib
+  // installs a ParallelResidualsHandler, which reports a different assembly-handler type and hence a
+  // different pattern id, so one slot would be evicted and rebuilt on every single Newton step -- the
+  // same thrashing that §A5 had to fix for the serial cache.
+  class DistributedResidualPlan
+  {
+  public:
+    unsigned long generation = 0; // 0 means "not built"
+    unsigned nproc = 0, my_rank = 0;
+    unsigned nrow_local = 0, first_row = 0;
+    unsigned long nelement = 0;
+    unsigned ndof = 0;
+    unsigned n_vector = 0;
+    std::vector<unsigned> my_eqns;   // sorted global equations this rank contributes to
+    std::vector<int> send_row_start; // nproc+1; rows for rank p are my_eqns[send_row_start[p]..[p+1])
+    std::vector<int> recv_eq_start;  // nproc+1 into recv_eq_row
+    std::vector<int> recv_eq_row;    // local row (global - first_row) of each equation arriving
+    // Elemental dof -> row in my_eqns, precomputed. Without it every scatter bisects my_eqns once per
+    // dof, which is the bulk of what is left of a residual-only assembly once the exchange is frozen.
+    std::vector<int> res_element_offset; // nelement+1
+    std::vector<int> res_slot;           // row in my_eqns, one per contributing elemental dof
+    void clear()
+    {
+      generation = 0; nproc = my_rank = 0; nrow_local = first_row = 0; nelement = 0; ndof = 0;
+      n_vector = 0;
+      my_eqns.clear(); send_row_start.clear(); recv_eq_start.clear(); recv_eq_row.clear();
+      res_element_offset.clear(); res_slot.clear();
+    }
+  };
+
   class DistributedFrozenSparsity
   {
   public:
@@ -471,6 +507,17 @@ namespace pyoomph
     // derived from one round of pattern exchange. False (leaving sp cleared) if this configuration
     // cannot be frozen, in which case the caller falls back to oomph-lib.
     bool build_distributed_frozen_sparsity(const oomph::LinearAlgebraDistribution* const& dist_pt, unsigned n_matrix, unsigned n_vector, DistributedFrozenSparsity &sp);
+    // The row/equation half, shared by the matrix and the residual-only plans so there is one
+    // implementation of it. COLLECTIVE: it exchanges the equation numbers. Returns false, identically
+    // on every rank, if the configuration cannot be planned.
+    bool build_distributed_residual_plan(const oomph::LinearAlgebraDistribution* const& dist_pt, unsigned n_vector, DistributedResidualPlan &rp);
+    DistributedResidualPlan distributed_residual_plan;
+    unsigned long distributed_residual_rebuilds = 0;
+    // The residual-only distributed fast path. oomph-lib routes get_residuals() under MPI through the
+    // whole of parallel_sparse_assemble() with zero matrices: it recomputes my_eqns, builds the
+    // array-of-arrays, exchanges equation numbers and merges by bisection per row -- all to sum a
+    // vector. Measured at 45 % of a residual assembly at 4 ranks, and roughly constant as ranks grow.
+    bool assemble_distributed_residuals_only(const oomph::LinearAlgebraDistribution* const& dist_pt, oomph::Vector<double*>& residuals);
     // The fast distributed path. False, having touched nothing, if the frozen route does not apply.
     bool assemble_distributed_with_frozen_sparsity(const oomph::LinearAlgebraDistribution* const& dist_pt, oomph::Vector<int*>& column_or_row_index, oomph::Vector<int*>& row_or_column_start, oomph::Vector<double*>& value, oomph::Vector<unsigned>& nnz, oomph::Vector<double*>& residuals);
 #endif
@@ -584,13 +631,15 @@ namespace pyoomph
     unsigned long get_frozen_sparsity_rebuild_count() const { return frozen_sparsity_rebuilds; } // Watch for cache thrashing
     unsigned get_frozen_sparsity_cache_capacity() const { return frozen_sparsity_cache_capacity; }
 #ifdef OOMPH_HAS_MPI
-    void set_use_frozen_distributed_sparsity(bool yesno) { use_frozen_distributed_sparsity = yesno; if (!yesno) distributed_frozen_sparsity.clear(); }
+    void set_use_frozen_distributed_sparsity(bool yesno) { use_frozen_distributed_sparsity = yesno; if (!yesno) { distributed_frozen_sparsity.clear(); distributed_residual_plan.clear(); } }
     bool get_use_frozen_distributed_sparsity() const { return use_frozen_distributed_sparsity; }
     unsigned long get_distributed_frozen_rebuild_count() const { return distributed_frozen_rebuilds; }
+    unsigned long get_distributed_residual_rebuild_count() const { return distributed_residual_rebuilds; }
 #else
     void set_use_frozen_distributed_sparsity(bool yesno) {}
     bool get_use_frozen_distributed_sparsity() const { return false; }
     unsigned long get_distributed_frozen_rebuild_count() const { return 0; }
+    unsigned long get_distributed_residual_rebuild_count() const { return 0; }
 #endif
     void set_frozen_sparsity_cache_capacity(unsigned n) { frozen_sparsity_cache_capacity = (n < 1 ? 1 : n); frozen_sparsity_cache.clear(); }
     // Identifies the current Jacobian sparsity pattern. Changes whenever the pattern may have
@@ -605,7 +654,7 @@ namespace pyoomph
     // Declare every pattern seen so far dead. assign_eqn_numbers() is the main caller.
     void invalidate_jacobian_structure() { jacobian_structure_ids.clear(); frozen_sparsity_cache.clear();
 #ifdef OOMPH_HAS_MPI
-      distributed_frozen_sparsity.clear();
+      distributed_frozen_sparsity.clear(); distributed_residual_plan.clear();
 #endif
     }
 

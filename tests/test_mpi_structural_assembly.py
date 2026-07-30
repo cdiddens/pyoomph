@@ -229,3 +229,28 @@ def test_frozen_distributed_plan_is_not_rebuilt_every_assembly(tmp_path):
         assert r["plans_built"] == 2, \
             "rank %d built %d distributed plans, expected 2 -- the plan cache is thrashing" % (
                 r["rank"], r["plans_built"])
+
+
+@pytest.mark.parametrize("nproc", [2, 3, 4])
+@pytest.mark.parametrize("dim,size", [(2, 16), (3, 5)], ids=["2d", "3d"])
+def test_frozen_distributed_residuals_match_oomph(tmp_path, nproc, dim, size):
+    """The residual-only distributed path (get_residuals under MPI) against oomph-lib's."""
+    per_rank = _run_distributed(nproc, tmp_path, dim, size, structural=True,
+                                mode="compare-residuals")
+    for r in per_rank:
+        where = "rank %d/%d (dim=%d)" % (r["rank"], nproc, dim)
+        assert r["res_plans_built"] > 0, "%s: the frozen residual route never engaged" % where
+        # The unsolved state is the one that constrains anything -- the converged residual is ~1e-10,
+        # so agreeing there is nearly free. Tolerances are relative to each state's own magnitude.
+        assert r["init_norm"] > 1e-3, \
+            "%s: initial residual is only %.3e -- this test would prove nothing" % (where, r["init_norm"])
+        assert r["init_maxdiff"] < 1e-14 * r["init_norm"], \
+            "%s: unsolved residual differs by %.3e (norm %.3e)" % (where, r["init_maxdiff"], r["init_norm"])
+        # Scaled by the UNSOLVED norm, not the converged one. A converged residual is a cancellation:
+        # its norm is ~1e-10 while the elemental contributions being summed are O(1), so a tolerance
+        # relative to the cancelled sum would demand far better than double precision -- and the two
+        # routes legitimately sum each entry's cross-rank contributions in a different order.
+        scale = max(r["conv_norm"], r["init_norm"])
+        assert r["conv_maxdiff"] < 1e-14 * scale, \
+            "%s: converged residual differs by %.3e (norm %.3e, contributions O(%.1e))" % (
+                where, r["conv_maxdiff"], r["conv_norm"], r["init_norm"])

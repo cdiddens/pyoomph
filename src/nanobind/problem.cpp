@@ -827,6 +827,10 @@ void PyReg_Problem(nb::module_ &m)
 					  "every incoming entry. Falls back to oomph-lib's routine by itself whenever it cannot apply: a replicated problem whose elements are merely "
 					  "split across ranks (its element ranges are re-tuned from measured timings, so they are not a function of the equation numbering), a "
 					  "residual-only assembly, an augmented system, or a pattern the code generator cannot describe symbolically. Always False in a non-MPI build.")
+		.def("_get_distributed_residual_rebuild_count", &pyoomph::Problem::get_distributed_residual_rebuild_count,
+			 "How many distributed RESIDUAL plans have been built since the problem was created (the equation/exchange half only, used by get_residuals() under "
+			 "MPI -- see ``use_frozen_distributed_sparsity``). Counted separately from the matrix plans because get_residuals() installs its own assembly handler "
+			 "and would otherwise appear to be a different pattern. Should settle to a small number; zero after a distributed solve means the route never engaged.")
 		.def("_get_distributed_frozen_rebuild_count", &pyoomph::Problem::get_distributed_frozen_rebuild_count,
 			 "How many distributed assembly plans have been built since the problem was created. A plan costs a round of communication on top of two passes over "
 			 "the mesh, so this should settle: if it keeps rising, the pattern is being invalidated every assembly and the frozen route is a pure loss. Zero after "
