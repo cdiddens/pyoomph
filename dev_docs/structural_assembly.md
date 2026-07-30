@@ -1482,10 +1482,36 @@ Two things it taught, both about *declining*:
   no coupling table can predict them, and the verification caught them immediately once the spec was
   actually being used. Hence a `Diagonal` kind: the diagonal of a square block only.
 
-**`PeriodicOrbitHandler` is not described** and still falls back. Its layout is `nT` copies of the raw
-block plus a scalar, so it is describable in principle -- `nT` diagonal `Jacobian` groups, mass-matrix
-coupling between time levels, and the period border -- but it is a different shape from the other four
-and was not attempted here.
+**`PeriodicOrbitHandler` is deliberately NOT described, and a spec for it would do nothing.** Periodic
+orbits never form the augmented elemental block at all -- the routine says so:
+
+```
+// Periodic orbits would have very huge elemental Jacobians, so we must assemble them with block jacobians
+```
+
+They have their own assembly, `sparse_assemble_row_or_column_compressed_for_periodic_orbit`, which is
+`std::map`-per-row. So `get_sparsity_pattern` would never be consulted; freezing them means a new fast
+path in that routine, which is the Phase 2 item ("extend to ..._for_periodic_orbit") rather than a
+tracker spec.
+
+**It is worth doing.** Measured on `tests/benchmarks/bench_periodic_orbit_1d.py`, a 1D Brusselator
+(validated against theory: Hopf at `b = 1 + a^2 = 2`, `omega = a = 1`, found at `b = 1.99999996`,
+`omega = 1`):
+
+| N | NT | orbit ndof | nnz | density | assembly | orbit solve | assembly share |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 20 | 20 | 1 805 | 57 786 | 1.77 % | 7.3 ms | 0.01 s | 64 % |
+| 40 | 30 | 5 023 | 164 286 | 0.65 % | 25.3 ms | 0.03 s | 74 % |
+| 40 | 60 | 9 883 | 328 086 | 0.34 % | 55.6 ms | 0.08 s | 72 % |
+| 80 | 60 | 19 643 | 654 966 | 0.17 % | 113.4 ms | 0.16 s | 70 % |
+
+The assembly is **64-74 % of an orbit solve**, far above the 30-50 % typical elsewhere, and the table
+shows why: the orbit matrix is so sparse that the factorisation is cheap and the map-based assembly
+dominates. Freezing it therefore targets ~70 % of the runtime.
+
+Note this could not be judged from the tutorials. All three that use periodic orbits drive them from a
+3-dof ODE where the entire solve is sub-millisecond; extrapolating from those suggested it did not
+matter, which is why the PDE case was written.
 
 ### Three defects this exposed, all worth remembering
 
