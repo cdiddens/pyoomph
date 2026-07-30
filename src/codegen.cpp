@@ -7556,7 +7556,7 @@ namespace pyoomph
 				// disagree: the element walk indexes it by the space's field count, and sizing it from the
 				// slots recorded below would under-allocate whenever a field takes part in no contribution.
 				init << " functable->info_" << space->get_name() << ".field_contribution_index=(int*)malloc(sizeof(int)*functable->info_" << space->get_name() << ".numfields);" << std::endl;
-				init << " for (unsigned int _i=0;_i<functable->info_" << space->get_name() << ".numfields;_i++) { functable->info_" << space->get_name() << ".field_contribution_index[_i]=-1; }" << std::endl;
+				init << " for (unsigned int _i=0;_i<functable->info_" << space->get_name() << ".numfields;_i++) { functable->info_" << space->get_name() << ".field_contribution_index[_i]=-2; }" << std::endl; // -2: present but contributes to nothing; see jitbridge.h
 				cleanup << " pyoomph_tested_free(functable->info_" << space->get_name() << ".field_contribution_index); functable->info_" << space->get_name() << ".field_contribution_index=PYOOMPH_NULL; " << std::endl;
 				for (auto &f : myfields)
 				{
@@ -7729,7 +7729,7 @@ namespace pyoomph
 				init << " functable->" << info_name << ".fieldnames=(char **)malloc(sizeof(char*)*functable->" << info_name << ".numfields);" << std::endl;
 				// Same count as fieldnames; see the note at the other emission site.
 				init << " functable->" << info_name << ".field_contribution_index=(int*)malloc(sizeof(int)*functable->" << info_name << ".numfields);" << std::endl;
-				init << " for (unsigned int _i=0;_i<functable->" << info_name << ".numfields;_i++) { functable->" << info_name << ".field_contribution_index[_i]=-1; }" << std::endl;
+				init << " for (unsigned int _i=0;_i<functable->" << info_name << ".numfields;_i++) { functable->" << info_name << ".field_contribution_index[_i]=-2; }" << std::endl; // -2: present but contributes to nothing; see jitbridge.h
 				cleanup << " pyoomph_tested_free(functable->" << info_name << ".field_contribution_index); functable->" << info_name << ".field_contribution_index=PYOOMPH_NULL; " << std::endl;
 				std::map<unsigned, FiniteElementField *> reindex;
 				for (auto &f : myfields)
@@ -8170,7 +8170,9 @@ namespace pyoomph
 	  // contributes_to_jacobian / contributes_to_mass_matrix. The elements need it to translate a LOCAL
 	  // DOF (which they know as "field f of space s at node n") into the row/column class those tables
 	  // are indexed by, and hence to decide which entries of their dense elemental block are
-	  // structurally present. -1 means the field takes part in no contribution at all.
+	  // structurally present. -2 means the field is known to take part in NO contribution of this code,
+	  // so its row and column of the elemental block are empty; -1 (never written here) is reserved for
+	  // "not attributed", which the reader must treat as coupled to everything.
 	  // Cannot be emitted next to the field names above: the contribution indices are only assigned
 	  // here, from the set of fields that turned out to contribute.
 	  {

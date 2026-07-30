@@ -354,8 +354,12 @@ typedef struct JITFuncSpec_Table_FiniteElement_SpaceInfo
 
  // Parallel to fieldnames: the index into contribution_names (and hence the row/column class of
  // contributes_to_jacobian / contributes_to_mass_matrix) that each field of this space belongs to.
- // -1 for a field that takes part in no contribution at all. Lets an element translate a local dof
- // into the class the symbolic coupling tables are indexed by; see dev_docs/structural_assembly.md.
+ // -2 for a field that is present but takes part in NO contribution of this code, which is a
+ // POSITIVE statement: that field's row and column of this element's block are empty, so nothing has
+ // to be stored for them. Distinguished from -1, which means "could not be attributed" and must be
+ // read as coupled to everything -- conflating the two is what forced a structural zero onto the
+ // diagonal of every unclassifiable dof. Lets an element translate a local dof into the class the
+ // symbolic coupling tables are indexed by; see dev_docs/structural_assembly.md.
  int * field_contribution_index;
 
  unsigned space_index; // Index to the arrays [4]

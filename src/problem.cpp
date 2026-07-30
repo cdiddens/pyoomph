@@ -2089,10 +2089,18 @@ namespace pyoomph
 			for (unsigned j = 0; j < nvar; j++)
 			{
 				const int fj = cidx[j];
-				// A dof that could not be attributed to a field (-1) is treated as coupled to
-				// everything. Over-reporting only stores explicit zeros; under-reporting would drop
-				// real entries, so the unknown case must err this way.
-				if (fi < 0 || fj < 0 || (unsigned)fi >= nclass || (unsigned)fj >= nclass)
+				// -2 is a POSITIVE statement: the field takes part in no contribution of this code, so
+				// this element writes nothing in its row or column and there is nothing to store. -1 is
+				// the absence of information ("not attributed") and must be read as coupled to
+				// everything, since under-reporting would drop real entries.
+				//
+				// Conflating the two is what put a structural zero on the DIAGONAL of every
+				// unclassifiable dof -- "coupled to everything" includes itself. On a saddle-point
+				// system those stored zero diagonals are not free: they invite MUMPS's analysis to plan
+				// an elimination that then hits a null pivot (see section 7c).
+				if (fi == -2 || fj == -2)
+					row[j] = 0;
+				else if (fi < 0 || fj < 0 || (unsigned)fi >= nclass || (unsigned)fj >= nclass)
 					row[j] = 1;
 				else
 					row[j] = (table[fi][fj] ? 1 : 0);

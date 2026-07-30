@@ -5710,6 +5710,48 @@ namespace pyoomph
 								space_info->field_contribution_index, j);
 		}
 
+		// Interface-only fields of the continuous spaces (the numfields-numfields_basebulk part). These
+		// are extra values that an interface element adds to nodes it shares with the bulk, addressed
+		// through interface_dof_indices rather than the nodal offset, which is why the basebulk loop
+		// above cannot reach them. Without this they stayed "not attributed", i.e. assumed coupled to
+		// everything -- including themselves, which put a structural zero on their diagonal.
+		for (unsigned int si = 0; si < functable->num_present_continuous_spaces; si++)
+		{
+			auto *space_info = functable->present_continuous_spaces[si];
+			const unsigned n_interf = space_info->numfields - space_info->numfields_basebulk;
+			if (!n_interf || !space_info->interface_dof_indices) continue;
+			for (unsigned int i = 0; i < eleminfo.nnode_of_space[space_info->space_index]; i++)
+			{
+				const unsigned elem_node_index = space_node_to_elem_node_map[space_info->space_index][i];
+				oomph::Node *nod_pt = this->node_pt(elem_node_index);
+				auto *bnod_pt = dynamic_cast<pyoomph::BoundaryNode *>(nod_pt);
+				if (!bnod_pt) continue; // Not an interface node: nothing of ours here
+				for (unsigned int f = 0; f < n_interf; f++)
+				{
+					const unsigned interface_dof_id = space_info->interface_dof_indices[f];
+					const unsigned slot = space_info->numfields_basebulk + f; // field_contribution_index is parallel to fieldnames
+					if (!nod_pt->is_hanging(space_info->hangindex))
+					{
+						const unsigned val_index = bnod_pt->index_of_first_value_assigned_by_face_element(interface_dof_id);
+						set_contrib(dest, this->nodal_local_eqn(elem_node_index, val_index),
+									space_info->field_contribution_index, slot);
+					}
+					else if (auto *ielem = dynamic_cast<InterfaceElementBase *>(this))
+					{
+						// Resolving a hanging interface dof to its masters is an interface-element
+						// operation. On a bulk element these are somebody else's dofs anyway, and the
+						// pass at the end of this function marks them as such.
+						oomph::HangInfo *const hang_info_pt = nod_pt->hanging_pt(space_info->hangindex);
+						for (unsigned m = 0; m < hang_info_pt->nmaster(); m++)
+						{
+							set_contrib(dest, ielem->local_interface_hang_eqn(interface_dof_id, hang_info_pt->master_node_pt(m)),
+										space_info->field_contribution_index, slot);
+						}
+					}
+				}
+			}
+		}
+
 		// Element-local spaces: discontinuous Lagrange, piecewise constant, external ODE
 		for (unsigned int i = 0; i < eleminfo.nnode_DL; i++)
 			for (unsigned int j = 0; j < functable->info_DL.numfields; j++)
@@ -5721,6 +5763,27 @@ namespace pyoomph
 		for (unsigned int j = 0; j < functable->info_ED0.numfields; j++)
 			set_contrib(dest, eleminfo.nodal_local_eqn[0][j + functable->info_ED0.buffer_offset_basebulk],
 						functable->info_ED0.field_contribution_index, j);
+
+		// Values that some OTHER code added to our nodes -- an interface element's extra dofs seen from
+		// the bulk element, or a second interface's seen from the first. They sit past
+		// ncont_interpolated_values(), which is exactly how get_dof_names() identifies them (it labels
+		// them "<added interface dof>"). This element has no field for them, hence no residual and no
+		// Jacobian entry: their row and column of its block are empty, which is a positive statement
+		// and not the absence of one, so they get -2 rather than being left "not attributed".
+		//
+		// Anything the walk above already attributed is left alone: this only fills in dofs still at -1.
+		{
+			const unsigned ncont = this->ncont_interpolated_values();
+			for (unsigned int l = 0; l < this->nnode(); l++)
+			{
+				oomph::Node *nod_pt = this->node_pt(l);
+				for (unsigned int n = ncont; n < nod_pt->nvalue(); n++)
+				{
+					const int le = this->nodal_local_eqn(l, n);
+					if (le >= 0 && (size_t)le < dest.size() && dest[le] == -1) dest[le] = -2;
+				}
+			}
+		}
 	}
 
 	const std::vector<int> &BulkElementBase::get_local_dof_contribution_indices()
