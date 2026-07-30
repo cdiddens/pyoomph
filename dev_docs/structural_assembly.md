@@ -663,6 +663,25 @@ Only after Phases 1–3 are validated on the plain Newton path.
   revisited afterwards: with a shared pattern its `matJ + w0*matM + 0.5*H` becomes an elementwise
   `data` operation instead of scipy sparse additions that re-derive the union pattern every step.
 
+### Phase 5 — backend reuse contract *(new, from the §7d review)*
+
+Ordered by value:
+
+1. **Multi-pattern cache** (§7d A5). Replace the single `FrozenSparsity` per matrix index with a
+   small keyed cache on `(structure_id, matrix_index)`. Without it, any setup that alternates between
+   two residuals — a PETSc preconditioner matrix built by `assemble_matrix`, a multi-residual problem
+   — rebuilds the pattern on every assembly and is *slower* than no cache at all. This is a
+   correctness-of-claim issue, not just an optimisation.
+2. **Per-solver diagonal requirement** (§7b). `requires_explicit_diagonal()` on the solver, answered
+   by `PETSCSolver` from the configured factorisation, replacing the global flag.
+3. **Mac Accelerate symbolic reuse** (§7d A4). `refactorize()` and a cached CSR already exist; hook
+   them to `jacobian_structure_id` as Pardiso is hooked. Needs a Mac to test.
+4. **Compose the Pardiso tiers** (§7d A3). Benchmark symbolic reuse together with
+   `try_to_reuse_solver`'s numeric-as-preconditioner mode on a time-stepping / continuation workload,
+   where the Jacobian changes slowly.
+5. `assemble_matrix` should drop `shift(0.0)` (§7d A6 — it does nothing) and route through the same
+   diagonal policy as the main path.
+
 ### Out of scope (for now)
 
 * Threaded/openmp assembly. A precomputed scatter index makes a colour- or lock-free parallel
@@ -965,6 +984,99 @@ not of the problem, so `problem.force_jacobian_diagonal_entries` is the wrong ow
 Until that exists, a user hitting "Matrix is missing diagonal entry 0" must set the flag by hand.
 Note the historical alternative does **not** work: `MatShift(0.0)` is a no-op in PETSc 3.22 (§5b), so
 the diagonal cannot be patched up after assembly the way pyoomph used to attempt.
+
+---
+
+## 7d. Review of the reuse contract with each backend
+
+Six concerns raised in review, investigated. Two are real gaps that change the plan (**A5**, **A4**);
+the rest are answered.
+
+### A1. Does any backend use the CSR index arrays as scratch, destroying the pattern?
+
+**No evidence of it, and the design fails safe either way.**
+
+* **PETSc.** `createAIJ(csr=...)` *copies* into PETSc's own AIJ storage, so nothing we hold is aliased.
+  The zero-copy alternative, `MatCreateSeqAIJWithArrays`, *would* alias — it was tried before and
+  abandoned because it silently broke hypre/BoomerAMG (see the comment at
+  `pyoomph/solvers/petsc.py`). It must stay abandoned: with a frozen pattern the aliasing hazard is
+  worse, not better, since the arrays now outlive a single solve.
+* **MKL Pardiso.** `a`, `ia`, `ja` are documented inputs; MKL keeps its permutations in its own
+  storage. pyoomph additionally hands Pardiso a private `.copy()`.
+* **oomph-lib.** `CRDoubleMatrix::sort_entries()` would reorder in place, but nothing in pyoomph or
+  oomph calls it — checked.
+
+The important structural point is that this does not rest on the audit being exhaustive: the Pardiso
+reuse path *verifies* `ia`/`ja` by comparison before reusing (§5b), so anything that did modify them
+produces a full refactorisation, not a wrong answer. Any future backend reuse must keep that property.
+
+### A2. Is MUMPS/PETSc symbolic reuse actually happening? — **verified**
+
+Yes. With `-info`, a Mat kept across two solves with only its values changed emits
+`MatLUFactorSymbolic_SeqAIJ` **once**, not twice: PETSc compares the matrix's nonzero state, sees
+`SAME_NONZERO_PATTERN`, and calls only `MatLUFactorNumeric`. This is what the measured op2 drop
+(294 → 134 ms) was; it is now confirmed rather than inferred.
+
+### A3. Pardiso's iterative resolve mode
+
+`PardisoSolver.try_to_reuse_solver` (off by default) sets `iparm[3] = 63` — MKL's preconditioned
+CGS with the *previous numerical* factorisation as preconditioner, tolerance 1e-6 — plus
+`iparm[7]` iterative-refinement steps, and falls back to a fresh factorisation when it stalls or the
+residual check fails. That is a **third, independent tier** of reuse:
+
+| tier | reuses | validity |
+|---|---|---|
+| symbolic (Phase 1) | fill-reducing ordering, elimination tree | always, while the pattern holds |
+| numeric-as-preconditioner (`try_to_reuse_solver`) | the LU factors themselves | only while the values stay close; checked a posteriori |
+
+They compose, and are currently untested together — the symbolic-reuse branch deliberately excludes
+`try_to_reuse_solver`. Worth benchmarking: for a slowly-varying Jacobian (time stepping, continuation)
+the combination could skip phase 22 as well, leaving only triangular solves.
+
+### A4. scipy and Mac Accelerate backends
+
+* **scipy** (`pyoomph/solvers/scipy.py`): `splu` exposes no symbolic-reuse API, so there is nothing to
+  reuse at the factorisation level. It still benefits from the frozen *assembly*, and from the frozen
+  path emitting canonically sorted CSR. Low priority.
+* **Mac Accelerate** (`src/mac_accelerate.{hpp,cpp}`): **this one can benefit and is not yet wired
+  up.** `MacAccelerateSparseSolver::refactorize()` already exists and caches its CSR input, and
+  Accelerate's own `SparseFactor`/`SparseRefactor` split is exactly a symbolic/numeric split. Hooking
+  it to `jacobian_structure_id` the way Pardiso is hooked should give the same class of win.
+  **Cannot be tested here** (no macOS), so it needs a Mac to land.
+
+### A5. A preconditioner matrix would thrash the single frozen pattern — **real gap**
+
+`PETSCSolver.assemble_matrix(which_one)` builds a second matrix from a *different residual* for
+preconditioner construction. Switching the active residual changes the field couplings and the
+pinning, so `get_jacobian_structure_id()` correctly reports a different pattern — but
+`Problem::frozen_sparsity` holds **one** pattern per matrix index and rebuilds whenever the generation
+changes. Alternating between the Jacobian and a preconditioner matrix therefore rebuilds the pattern
+on *every* assembly, which is strictly worse than not caching at all (a rebuild is two passes over the
+mesh plus a sort).
+
+Nothing is corrupted — the handed-out arrays are copies — but the performance claim collapses for
+exactly the setups that most need a good preconditioner.
+
+**Fix:** key the cache by pattern identity rather than holding a single generation, i.e. a small
+map/LRU of `FrozenSparsity` keyed on `(structure_id, matrix_index)`, holding a handful of entries.
+`assemble_matrix` should also stop calling `shift(0.0)` (A6) and go through the same
+`_force_zero_diagonal` policy as the main path.
+
+### A6. Is `shift(0.0)` a no-op *together with* `NEW_NONZERO_ALLOCATION_ERR = False`? — **still a no-op**
+
+Tested all four combinations on a 3x3 matrix with a deliberately missing diagonal, checking the actual
+stored column indices and whether PETSc's LU accepts the matrix — not just `nz_used`, which was the
+weaker evidence used the first time:
+
+| `NEW_NONZERO_ALLOCATION_ERR` | `shift(0.0)` | row 0 diagonal stored | PETSc LU |
+|---|---|---|---|
+| False | False | no | "Matrix is missing diagonal entry 0" |
+| False | True | no | same |
+| True | False | no | same |
+| **True** | **True** | **no** | **same** |
+
+So the option does not rescue it: the two together still insert nothing. `MatShift` with a zero shift
+returns early regardless of allocation policy. The conclusion of §5b stands, now on stronger evidence.
 
 ---
 
