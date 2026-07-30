@@ -453,10 +453,22 @@ class PETSCSolver(GenericLinearSystemSolver):
 
 
     def assemble_matrix(self,which_one:str):
-        res, n, _nzz, nrow_local, values, col_index, row_start=self.problem._assemble_residual_jacobian(which_one)                                
+        """Assemble a second matrix -- typically for building a preconditioner -- from the named
+        residual/Jacobian combination.
+
+        Note this is a DIFFERENT sparsity pattern from the main Jacobian's, because a different
+        residual has different field couplings and different pinning. The problem's pattern cache holds
+        several patterns at once precisely so that alternating between the two does not rebuild either
+        (see dev_docs/structural_assembly.md 7d A5); if a workflow alternates between more distinct
+        patterns than the cache holds, raise ``problem._frozen_sparsity_cache_capacity``.
+        """
+        res, n, _nzz, nrow_local, values, col_index, row_start=self.problem._assemble_residual_jacobian(which_one)
         res=PETSc.Mat().createAIJ(size=((nrow_local, n), (n, n),),csr=(row_start.astype(PETSc.IntType, copy=False), col_index.astype(PETSc.IntType, copy=False), values.astype(PETSc.ScalarType, copy=False)), comm=PETSc.COMM_WORLD) #type:ignore
         res.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False) #type:ignore
-        res.shift(0.0)
+        # No shift(0.0) here: it is a no-op in PETSc (verified on every combination of matrix options,
+        # see the dev doc), so it never inserted the diagonal entries it appeared to be there for. Use
+        # the same policy as the main solve path instead.
+        self._force_zero_diagonal(res)
         res.assemble()
         return res
 

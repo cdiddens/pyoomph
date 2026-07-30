@@ -921,41 +921,39 @@ not silently assume MPI support it does not have.
 
 ## 7c. Open regression: `test_moving_mesh_distributed`
 
-**Status at end of session: still failing, cause understood, fix not settled.**
+**Status: still failing, and the earlier explanation in this section was wrong.** One test, one case
+(`ale-tri_crossed-12-level`). Everything else is green: 39 structural tests, `test_mpi_adaptivity_3d`,
+the other 27 MPI tests, the whole fast suite (543 passed), all 126 tutorial scripts.
 
-`tests/test_mpi_interface_coupling.py::test_moving_mesh_distributed`, case
-`ale-tri_crossed-12-level`, fails with "reached max. number of adaptations" when the structural
-pattern is on. Everything else is green (37 structural tests, `test_mpi_adaptivity_3d`, the other 27
-MPI tests, the whole fast suite, all 126 tutorial scripts).
+### What is established
 
-It is **not a wrong Jacobian**: the values are bit-identical, and under MPI the frozen path is
-disabled anyway, so only the OR-filter mask is active and that can merely *add* stored zeros.
-Bisecting the flags on the standalone case:
+* It is **not a wrong Jacobian**. The values are bit-identical, and under MPI the frozen path is
+  disabled anyway, so only the OR-filter mask is active and that can merely *add* stored zeros.
+* It **passes when run alone** — 4/4, both with the feature on and off.
+* It **fails after any predecessor** in the same pytest process. Both
+  `test_connected_fields_distributed` and `test_refinement_criteria_distributed` trigger it, so it is
+  not specific to one predecessor.
+* With the structural pattern **off**, every ordering passes (whole module: 12 passed).
+* It is **not the JIT cache**: `PYOOMPH_JIT_CACHE=0` does not change the outcome.
+* It is **not simply round-off sensitivity**: with the feature off, perturbing the accumulation order
+  (`sparse_assembly_method="maps"`) alongside a predecessor still passes. So the earlier claim in this
+  section — "any extra stored zero tips it, the case is knife-edge" — is **not supported**. That
+  bisection was run on the single test in isolation, where the outcome is confounded.
 
-| configuration | extra stored zeros | result |
-|---|---|---|
-| feature off | none | passes |
-| Tier B, forced diagonal off | none (pattern == numerical) | passes |
-| Tier B + forced diagonal | ~80 | fails |
-| Tier A (connectivity) | many | fails |
+### What is not established
 
-So *any* extra stored zero tips this case over: extra entries change MUMPS's pivoting, which moves
-the solution at round-off level, which changes the adaptive refinement decisions, which in a
-marginal problem ends in non-convergence.
+How a *preceding test in the pytest parent* can change what a **freshly spawned `mpirun` child**
+does. The child inherits only its command line, its environment (with a per-test `TMPDIR`) and the
+on-disk JIT cache, and the cache is ruled out. Until that channel is identified the failure is not
+understood, and no conclusion should be drawn about whether the case is marginal.
 
-**Unresolved wrinkle, to pick up next.** Defaulting `force_jacobian_diagonal_entries` to off was
-expected to fix it — injecting exactly that setting via `sitecustomize` *did* make the test pass
-earlier in the session — yet with the same setting as the shipped default the test still fails. The
-two are not obviously different (setting the flag bumps `jacobian_structure_id`, so a stale cached
-pattern is not the explanation). That discrepancy has to be understood before trusting either result;
-do not assume the remaining failure has the same cause as the bisection above until it is reproduced
-against the shipped default.
+### Where to pick it up
 
-Reproduce with:
-`python -m pytest tests/test_mpi_interface_coupling.py::test_moving_mesh_distributed -q --full`
-and compare against `PYTHONPATH=<dir with a sitecustomize that sets keep_structural_zeros=False>`.
-
----
+The worker solves four layouts sequentially in one child (`quad`, `tri_left`, `tri_crossed`,
+`mixed`); `tri_crossed` is the third. Running that exact four-case spec by hand under `mpirun`
+**passes**, which is the contradiction to resolve first. Suggested next step: have
+`_run_distributed` dump the child's full command and environment on failure, replicate it verbatim
+outside pytest, and diff the environment against a standalone run.
 
 ## 7b. TODO: the forced diagonal belongs to the solver, not the problem
 
