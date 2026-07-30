@@ -1190,11 +1190,23 @@ the combination could skip phase 22 as well, leaving only triangular solves.
 * **scipy** (`pyoomph/solvers/scipy.py`): `splu` exposes no symbolic-reuse API, so there is nothing to
   reuse at the factorisation level. It still benefits from the frozen *assembly*, and from the frozen
   path emitting canonically sorted CSR. Low priority.
-* **Mac Accelerate** (`src/mac_accelerate.{hpp,cpp}`): **this one can benefit and is not yet wired
-  up.** `MacAccelerateSparseSolver::refactorize()` already exists and caches its CSR input, and
-  Accelerate's own `SparseFactor`/`SparseRefactor` split is exactly a symbolic/numeric split. Hooking
-  it to `jacobian_structure_id` the way Pardiso is hooked should give the same class of win.
-  **Cannot be tested here** (no macOS), so it needs a Mac to land.
+* **Mac Accelerate** (`src/mac_accelerate.{hpp,cpp}`): **done, but unverified.**
+  `MacAccelerateSparseSolver::refactorize_values_only()` keeps the symbolic factorization and calls
+  `SparseRefactor`, refilling the values through a cached CSR→CSC permutation;
+  `MacAccelerateLinearSolver` calls it while `jacobian_structure_id` is unchanged, and it verifies the
+  index arrays before acting, exactly as the Pardiso path does. A failed `SparseRefactor` releases the
+  factorization and returns false rather than throwing, so the caller falls back to a full
+  factorization — reusing a symbolic factorization fixes the pivoting, and new values may not tolerate
+  it where a fresh one would have chosen differently.
+
+  **None of this has ever been compiled.** It is inside `#ifdef __APPLE__`, so a Linux build does not
+  even syntax-check it. `.github/workflows/test_mac_accelerate.yml` (manual dispatch, `macos-14`,
+  arm64) builds pyoomph and runs `citools/check_accelerate_reuse.py`, which checks three things: that
+  the answers match an independent solver, that the reuse *actually happened*
+  (`num_symbolic_factorizations()` stops growing while `num_numeric_refactorizations()` climbs — not
+  timings, which is how the Phase 2 false negative survived so long), and that renumbering forces a
+  new symbolic factorization. GitHub only shows the dispatch button for workflows on the default
+  branch, so the file has to reach `main` before it can be run.
 
 ### A5. A preconditioner matrix would thrash the single frozen pattern — **real gap**
 

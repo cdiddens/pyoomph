@@ -95,6 +95,24 @@ namespace pyoomph
         // the CSR arrays again.
         void refactorize(MacAccelerateMethod method);
 
+        // Numeric-only refactorization: keep the symbolic factorization Accelerate already computed
+        // (the fill-reducing ordering and elimination structure) and recompute only the numbers, via
+        // SparseRefactor. Valid exactly while the sparsity pattern is unchanged, which the caller must
+        // establish -- pyoomph does so with Problem::jacobian_structure_id plus an index comparison.
+        //
+        // Returns false, having changed nothing, if it cannot apply (nothing factorized yet, a
+        // different nonzero count, or a pattern that does not match). The caller then falls back to
+        // factorize(). Never reports success without having refactorized.
+        bool refactorize_values_only(const std::vector<long long> &indptr,
+                                     const std::vector<long long> &indices,
+                                     const std::vector<double> &data);
+
+        // Counters, so a caller (or a test) can see which path was taken rather than infer it from
+        // timings. A workflow that keeps a stable pattern should show num_symbolic_factorizations()
+        // stop growing while num_numeric_refactorizations() keeps climbing.
+        unsigned long num_symbolic_factorizations() const { return m_n_symbolic; }
+        unsigned long num_numeric_refactorizations() const { return m_n_numeric_only; }
+
         // solve(b) -> x. b must have length rows(); returns a vector of length cols(), reusing
         // the cached factorization (equivalent to calling this repeatedly for new right-hand
         // sides without re-factorizing).
@@ -123,6 +141,11 @@ namespace pyoomph
         std::vector<long long> m_colStarts;
         std::vector<long> m_colStarts32;
         std::vector<int32_t> m_rowIndices;
+        // For each stored CSC slot, the index of the CSR entry it came from. Lets refactorize_values_only()
+        // refill the values by a gather instead of redoing the CSR->CSC conversion.
+        std::vector<long long> m_csc_from_csr;
+        unsigned long m_n_symbolic = 0;    // Full SparseFactor calls (symbolic + numeric)
+        unsigned long m_n_numeric_only = 0; // SparseRefactor calls (numeric only)
         std::vector<double> m_values;
 
         SparseMatrix_Double m_matrix{};

@@ -259,6 +259,9 @@ namespace pyoomph
         const long long kept_nnz = m_colStarts[n_cols];
         m_rowIndices.assign(kept_nnz, 0);
         m_values.assign(kept_nnz, 0.0);
+        // Remember where each stored value came from, so a later numeric-only refactorization can
+        // refill m_values by a gather instead of redoing this conversion.
+        m_csc_from_csr.assign(kept_nnz, 0);
         std::vector<long long> writeCursor(m_colStarts.begin(), m_colStarts.end());
 
         for (int row = 0; row < n_rows; ++row)
@@ -272,6 +275,7 @@ namespace pyoomph
                 const long long dest = writeCursor[col]++;
                 m_rowIndices[dest] = static_cast<int32_t>(row);
                 m_values[dest] = val;
+                m_csc_from_csr[dest] = k;
             }
         }
 
@@ -302,6 +306,43 @@ namespace pyoomph
         checkStatus(m_factorization.status, ("SparseFactor (" + mac_accelerate_method_to_string(method) + ")").c_str());
         m_hasFactorization = true;
         m_method = method;
+        m_n_symbolic++;
+    }
+
+    // See the declaration in mac_accelerate.hpp. SparseRefactor reuses the symbolic factorization held
+    // inside m_factorization and recomputes only the numbers, which is valid exactly while the pattern
+    // is unchanged -- so the pattern is checked here rather than trusted.
+    bool MacAccelerateSparseSolver::refactorize_values_only(const std::vector<long long> &indptr,
+                                                            const std::vector<long long> &indices,
+                                                            const std::vector<double> &data)
+    {
+        if (!m_hasFactorization) return false;
+        if (m_csr_indptr.size() != indptr.size()) return false;
+        if (m_csr_indices.size() != indices.size()) return false;
+        if (m_csr_data.size() != data.size()) return false;
+        if (m_csc_from_csr.size() != m_values.size()) return false; // Factorized before the map existed
+        if (!std::equal(m_csr_indptr.begin(), m_csr_indptr.end(), indptr.begin())) return false;
+        if (!std::equal(m_csr_indices.begin(), m_csr_indices.end(), indices.begin())) return false;
+
+        m_csr_data = data;
+        for (size_t dest = 0; dest < m_values.size(); ++dest)
+        {
+            m_values[dest] = data[static_cast<size_t>(m_csc_from_csr[dest])];
+        }
+        // m_matrix.data already points at m_values.data(); the assignment above wrote through it, and
+        // m_values has not been reallocated, so the pointer Accelerate holds is still valid.
+        SparseRefactor(m_matrix, &m_factorization);
+        if (m_factorization.status != SparseStatusOK)
+        {
+            // Deliberately not an error. Reusing the symbolic factorization fixes the pivoting, and the
+            // new values may not tolerate it where a fresh factorization would have chosen differently.
+            // Drop what we have and report failure so the caller does a full factorize; turning a
+            // recoverable situation into an exception would make the optimisation a liability.
+            releaseFactorization();
+            return false;
+        }
+        m_n_numeric_only++;
+        return true;
     }
 
     std::vector<double> MacAccelerateSparseSolver::solve(const std::vector<double> &b) const
