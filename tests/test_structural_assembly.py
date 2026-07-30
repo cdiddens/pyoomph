@@ -504,6 +504,49 @@ def test_frozen_sparsity_emits_canonically_sorted_csr():
         assert not p.assemble_jacobian(with_residual=False).has_sorted_indices
 
 
+def test_frozen_sparsity_cache_survives_alternating_assemblies():
+    """The pattern cache must hold several patterns at once, and the pattern id must be a FUNCTION of
+    the configuration rather than a counter.
+
+    A workflow that alternates between the Newton assembly and the eigenproblem assembly switches
+    assembly handler on every step, which is a different pattern -- correctly so. If the id merely
+    counted changes, returning to a configuration would produce a NEW id, every lookup would miss, and
+    each assembly would re-derive its pattern: two passes over the mesh plus a sort, i.e. slower than
+    having no cache at all. The same applies to a PETSc preconditioner matrix assembled from another
+    residual (PETSCSolver.assemble_matrix), which is what prompted this.
+
+    Three patterns are involved here -- Newton's Jacobian, and the eigenproblem's Jacobian and mass
+    matrix -- so three builds is the floor no matter how many times we go round."""
+    with _CavityProblem(N=6) as p:
+        p.quiet()
+        p.initialise()
+        p.solve()
+        for _ in range(4):
+            p.assemble_jacobian(with_residual=False)
+            p.assemble_eigenproblem_matrices(0.0)
+        assert p._get_frozen_sparsity_rebuild_count() == 3, \
+            "expected one build per distinct pattern; more means the cache is thrashing"
+
+
+def test_structure_id_is_stable_when_returning_to_a_configuration():
+    """The property the cache rests on, checked directly: leaving a configuration and coming back must
+    give the same id, or nothing downstream (the pattern cache, Pardiso's symbolic factorisation, a
+    PETSc Mat) can be reused across the round trip."""
+    with _CavityProblem(N=6) as p:
+        p.quiet()
+        p.initialise()
+        p.solve()
+        first = p.jacobian_structure_id
+        assert first != 0
+        p.assemble_eigenproblem_matrices(0.0)      # installs and removes another assembly handler
+        assert p.jacobian_structure_id == first
+        p.keep_structural_zeros = False            # a real change: no usable pattern
+        assert p.jacobian_structure_id == 0
+        p.keep_structural_zeros = True
+        # Ids are never recycled after an invalidation, so this must differ from the pre-invalidation one.
+        assert p.jacobian_structure_id not in (0, first)
+
+
 def test_frozen_sparsity_falls_back_where_it_cannot_apply():
     """It must decline, not misbehave, when the pattern route does not fit -- here an augmented dof
     vector from bifurcation tracking, whose elemental blocks are indexed by the handler's own numbering

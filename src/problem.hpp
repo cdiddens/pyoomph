@@ -28,6 +28,8 @@ The main author may be contacted at c.diddens@utwente.nl
 #include <map>
 #include <unordered_set>
 #include <memory>
+#include <tuple>
+#include <typeinfo>
 
 #include "jitbridge.h"
 #include "mesh.hpp"
@@ -283,7 +285,9 @@ namespace pyoomph
   class FrozenSparsity
   {
   public:
-    unsigned long generation = 0; // Pattern id this was built for; 0 means "not built"
+    unsigned long generation = 0;   // Pattern id this was built for; 0 means "not built"
+    unsigned matrix_index = 0;      // Which matrix of a multi-matrix assembly this describes
+    unsigned long last_used = 0;    // LRU stamp, for choosing which entry to evict
     unsigned ndof = 0;
     unsigned long nelement = 0;
     std::vector<int> row_start;      // ndof+1, CSR row pointers
@@ -303,7 +307,7 @@ namespace pyoomph
     unsigned nnz() const { return row_start.empty() ? 0u : (unsigned)row_start.back(); }
     void clear()
     {
-      generation = 0; ndof = 0; nelement = 0;
+      generation = 0; matrix_index = 0; last_used = 0; ndof = 0; nelement = 0;
       row_start.clear(); column_index.clear(); element_offset.clear();
       scatter_source.clear(); scatter_slot.clear();
       row_start.shrink_to_fit(); column_index.shrink_to_fit(); element_offset.shrink_to_fit();
@@ -356,20 +360,38 @@ namespace pyoomph
 
     bool verify_frozen_sparsity=true; // Check per element that nothing nonzero fell outside the frozen pattern
     bool use_frozen_sparsity=true; // Assemble straight into a preallocated CSR when the pattern allows it (see assemble_with_frozen_sparsity)
-    std::vector<FrozenSparsity> frozen_sparsity; // One per matrix index of a multi-matrix assembly; rebuilt when the pattern id changes
+    // Several frozen patterns are kept at once, keyed by (pattern id, matrix index). A single slot per
+    // matrix index is not enough: a workflow that alternates between two DIFFERENT patterns -- most
+    // obviously a PETSc preconditioner matrix assembled from another residual via
+    // PETSCSolver.assemble_matrix, but also any multi-residual problem -- would evict and rebuild on
+    // every assembly, and a rebuild is two passes over the mesh plus a sort. That is strictly worse
+    // than not caching at all, so the cache has to hold more than one.
+    std::vector<FrozenSparsity> frozen_sparsity_cache;
+    unsigned frozen_sparsity_cache_capacity = 8; // Raised on the fly if a single assembly needs more
+    unsigned long frozen_sparsity_clock = 0;     // Monotonic source for the LRU stamps
+    unsigned long frozen_sparsity_rebuilds = 0;  // How many patterns have been built; a test can watch this for thrashing
+    // Index into frozen_sparsity_cache of a usable pattern for (matrix_index, generation), building it
+    // if necessary. `pinned` lists slots the current assembly is already using, which must not be
+    // evicted. Returns -1 if the pattern cannot be built (see build_frozen_sparsity).
+    int acquire_frozen_sparsity(unsigned matrix_index, unsigned long generation, unsigned ndof, const std::vector<int> &pinned);
     // Builds the frozen pattern and scatter map for matrix matrix_index. Returns false if this problem
     // cannot be described that way (any element without a symbolic mask), leaving sp cleared.
     bool build_frozen_sparsity(unsigned matrix_index, FrozenSparsity &sp);
     // The fast assembly path: fills the output arrays directly from the frozen pattern. Returns false
     // without touching them if the pattern route does not apply, so the caller falls back to oomph-lib.
     bool assemble_with_frozen_sparsity(oomph::Vector<int*>& column_or_row_index, oomph::Vector<int*>& row_or_column_start, oomph::Vector<double*>& value, oomph::Vector<unsigned>& nnz, oomph::Vector<double*>& residuals, bool compressed_row_flag);
-    unsigned long jacobian_structure_id=1; // Generation counter of the Jacobian sparsity pattern; 0 is reserved for "no usable pattern"
-    // Snapshot of everything besides the equation numbering that the pattern depends on; compared in
-    // get_jacobian_structure_id() so that an unhooked state change still invalidates the pattern.
-    void *structure_watch_handler=nullptr;    // The active assembly handler (bifurcation/periodic-orbit handlers renumber the system)
-    unsigned long structure_watch_ndof=0;     // Total dof count, including any augmentation
-    unsigned structure_watch_n_unaugmented=0; // Where the augmented block starts
-    std::string structure_watch_residual="";  // Active residual/Jacobian combination (different field couplings, different pinning)
+    // Everything besides the equation numbering that the sparsity pattern depends on. The id is a
+    // FUNCTION of this state, not a counter: returning to a configuration seen before must yield the id
+    // it had before, or nothing downstream can ever hit its cache. A workflow that alternates between
+    // the Newton assembly and the eigenproblem assembly (which installs its own assembly handler) does
+    // exactly that on every step, and with a counter it re-derived the pattern every single time.
+    // Ids are never recycled: invalidation clears the map but the counter keeps climbing, so an id held
+    // by a solver from before a renumbering can never accidentally match afterwards.
+    // Keyed on the assembly handler's TYPE, not its address: the eigenproblem assembly news and deletes
+    // its handler on every call, so the address varies and an address key would miss every time.
+    typedef std::tuple<std::string, unsigned long, unsigned, std::string> JacobianStructureKey; // handler type, ndof, n_unaugmented, active residual
+    std::map<JacobianStructureKey, unsigned long> jacobian_structure_ids;
+    unsigned long next_jacobian_structure_id = 0;
 
     void actions_after_change_in_global_parameter(double *const &parameter_pt) override; // oomph-lib hook: resolves parameter_pt to its name and forwards to the string-named overload below
     void actions_after_parameter_increase(double *const &parameter_pt) override;
@@ -457,7 +479,12 @@ namespace pyoomph
     // hypothetical code-generation bug and a silently truncated Jacobian, so it defaults to on.
     void set_verify_frozen_sparsity(bool yesno) { verify_frozen_sparsity = yesno; }
     bool get_verify_frozen_sparsity() const { return verify_frozen_sparsity; }
-    unsigned get_frozen_sparsity_nnz(unsigned matrix_index=0) const { return matrix_index < frozen_sparsity.size() ? frozen_sparsity[matrix_index].nnz() : 0; } // Diagnostics/tests
+    // Diagnostics/tests. nnz of the cached pattern for the CURRENT pattern id, or 0 if none is held --
+    // a positive value is the only direct evidence the preallocated path engaged rather than falling back.
+    unsigned get_frozen_sparsity_nnz(unsigned matrix_index=0);
+    unsigned long get_frozen_sparsity_rebuild_count() const { return frozen_sparsity_rebuilds; } // Watch for cache thrashing
+    unsigned get_frozen_sparsity_cache_capacity() const { return frozen_sparsity_cache_capacity; }
+    void set_frozen_sparsity_cache_capacity(unsigned n) { frozen_sparsity_cache_capacity = (n < 1 ? 1 : n); frozen_sparsity_cache.clear(); }
     // Identifies the current Jacobian sparsity pattern. Changes whenever the pattern may have
     // changed. Solvers may reuse anything derived from the pattern (a symbolic factorisation, a
     // preallocated PETSc Mat) while this value is unchanged and non-zero.
@@ -467,7 +494,8 @@ namespace pyoomph
     // change nobody remembered to hook cannot silently hand a solver a stale pattern. A missed
     // invalidation is a wrong answer, not a crash, so this must not rely on call-site discipline alone.
     unsigned long get_jacobian_structure_id();
-    void invalidate_jacobian_structure() { jacobian_structure_id++; } // Explicit bump; assign_eqn_numbers() is the main caller
+    // Declare every pattern seen so far dead. assign_eqn_numbers() is the main caller.
+    void invalidate_jacobian_structure() { jacobian_structure_ids.clear(); frozen_sparsity_cache.clear(); }
 
     // Phase-0 instrumentation: run the elemental part of the assembly (get_all_vectors_and_matrices
     // for every non-halo element) n_repeat times without scattering anything into a matrix, and

@@ -805,6 +805,14 @@ void PyReg_Problem(nb::module_ &m)
 					  "container and compressing it afterwards. Requires a value-independent pattern (``keep_structural_zeros``), and falls back to oomph-lib's "
 					  "assembly by itself whenever it cannot apply -- distributed runs, augmented systems (bifurcation tracking), compressed-column output, or "
 					  "any element the code generator cannot describe symbolically.")
+		.def("_get_frozen_sparsity_rebuild_count", &pyoomph::Problem::get_frozen_sparsity_rebuild_count,
+			 "How many frozen sparsity patterns have been built since the problem was created. It should stop growing once a workflow settles: a count that "
+			 "keeps rising assembly after assembly means the pattern cache is thrashing (too small for the number of distinct patterns in play), which is "
+			 "slower than not caching at all.")
+		.def_prop_rw("_frozen_sparsity_cache_capacity", &pyoomph::Problem::get_frozen_sparsity_cache_capacity, &pyoomph::Problem::set_frozen_sparsity_cache_capacity,
+			 "How many frozen sparsity patterns are kept at once, keyed by (pattern id, matrix index). Needs to be at least the number of DISTINCT patterns a "
+			 "workflow alternates between -- the Jacobian, a preconditioner matrix built from another residual, the mass matrix -- or each will evict the "
+			 "others. Raised automatically if a single assembly needs more. Changing it clears the cache.")
 		.def("_get_frozen_sparsity_nnz", &pyoomph::Problem::get_frozen_sparsity_nnz, nb::arg("matrix_index") = 0,
 			 "Number of nonzeros in the frozen sparsity pattern currently held for the given matrix of a multi-matrix assembly, or 0 if none is built. "
 			 "A positive value is the only direct evidence that the preallocated-CSR assembly path actually engaged rather than quietly falling back, "

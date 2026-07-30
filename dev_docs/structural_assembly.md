@@ -1084,10 +1084,40 @@ mesh plus a sort).
 Nothing is corrupted — the handed-out arrays are copies — but the performance claim collapses for
 exactly the setups that most need a good preconditioner.
 
-**Fix:** key the cache by pattern identity rather than holding a single generation, i.e. a small
-map/LRU of `FrozenSparsity` keyed on `(structure_id, matrix_index)`, holding a handful of entries.
-`assemble_matrix` should also stop calling `shift(0.0)` (A6) and go through the same
-`_force_zero_diagonal` policy as the main path.
+**Fixed**, and the fix turned out to need two halves — the second only came to light when asked
+whether the cache also covers mass matrices assembled through the eigenproblem assembly:
+
+1. **A keyed cache.** `Problem::frozen_sparsity_cache` now holds several `FrozenSparsity` entries
+   keyed on `(pattern id, matrix index)`, LRU-evicted, capacity 8 (raised automatically if a single
+   assembly needs more, and never evicting a slot the current assembly is using).
+2. **A pattern id that is a *function* of the configuration, not a counter.** This was the real
+   blocker. `get_jacobian_structure_id()` used to increment whenever the watched state differed from a
+   snapshot, so alternating between two configurations produced ids 5, 6, 7, 8 … that never repeated —
+   *no* cache could hit, whatever its capacity, and neither could Pardiso's symbolic factorisation or
+   a retained PETSc `Mat`. The id is now looked up in a map keyed on
+   `(assembly-handler type, ndof, n_unaugmented_dofs, active residual)`, so returning to a
+   configuration returns the id it had before. Ids are still never recycled across an invalidation:
+   the map is cleared but the counter keeps climbing, so an id a solver held from before a renumbering
+   cannot accidentally match afterwards.
+
+   Keyed on the handler's **type**, not its address: the eigenproblem assembly `new`s and deletes its
+   `EigenProblemHandler` on every call, so an address key missed every time. That cost a measurement
+   to notice — the address key took the alternation benchmark from 12 rebuilds to 9, not to 3.
+
+Measured on four Newton/eigenproblem alternations, which involve exactly three distinct patterns
+(Newton's Jacobian, the eigenproblem's Jacobian, the mass matrix):
+
+| | pattern rebuilds |
+|---|---|
+| counter id, single slot per matrix index | 12 |
+| stable id keyed on handler *address* | 9 |
+| **stable id keyed on handler *type*, keyed cache** | **3** (the floor) |
+
+So yes — mass matrices assembled through `assemble_eigenproblem_matrices` are cached, and now survive
+alternation with the Newton assembly rather than being rebuilt each time.
+
+Still to do: `assemble_matrix` should stop calling `shift(0.0)` (A6 — it does nothing) and route
+through the same `_force_zero_diagonal` policy as the main path.
 
 ### A6. Is `shift(0.0)` a no-op *together with* `NEW_NONZERO_ALLOCATION_ERR = False`? — **still a no-op**
 

@@ -2075,18 +2075,19 @@ namespace pyoomph
 	unsigned long Problem::get_jacobian_structure_id()
 	{
 		if (!keep_structural_zeros) return 0; // Pattern is value-dependent; nothing may be reused
-		void *handler = static_cast<void *>(this->assembly_handler_pt());
-		unsigned long nd = this->ndof();
-		if (handler != structure_watch_handler || nd != structure_watch_ndof ||
-			n_unaugmented_dofs != structure_watch_n_unaugmented || _solved_residual != structure_watch_residual)
-		{
-			structure_watch_handler = handler;
-			structure_watch_ndof = nd;
-			structure_watch_n_unaugmented = n_unaugmented_dofs;
-			structure_watch_residual = _solved_residual;
-			jacobian_structure_id++;
-		}
-		return jacobian_structure_id;
+		// Identify the configuration rather than counting changes to it. The explicit bump in
+		// assign_eqn_numbers() (via invalidate_jacobian_structure) covers renumbering; everything else the
+		// pattern depends on is in this key, so a state nobody remembered to hook still gets its own id --
+		// and, crucially, coming BACK to a configuration returns the id it had before, which is what lets
+		// a cache survive alternation between two assemblies.
+		oomph::AssemblyHandler *ah = this->assembly_handler_pt();
+		JacobianStructureKey key(std::string(ah ? typeid(*ah).name() : "none"),
+								 (unsigned long)this->ndof(), n_unaugmented_dofs, _solved_residual);
+		auto it = jacobian_structure_ids.find(key);
+		if (it != jacobian_structure_ids.end()) return it->second;
+		const unsigned long id = ++next_jacobian_structure_id;
+		jacobian_structure_ids[key] = id;
+		return id;
 	}
 
 	// Elemental-assembly-only timing loop, see the declaration in problem.hpp. Deliberately mirrors the
@@ -3029,7 +3030,80 @@ namespace pyoomph
 	{
 		if (yesno == use_frozen_sparsity) return;
 		use_frozen_sparsity = yesno;
-		frozen_sparsity.clear();
+		frozen_sparsity_cache.clear();
+	}
+
+	// Returns the cache slot holding a usable pattern for (matrix_index, generation), building it if the
+	// cache does not already have one. `pinned` holds the slots the current assembly has already taken,
+	// which must survive eviction. Returns -1 if the pattern cannot be built at all.
+	//
+	// Why a cache rather than one slot per matrix index: a workflow can legitimately alternate between
+	// two different patterns -- a PETSc preconditioner matrix assembled from another residual, or any
+	// multi-residual problem -- and with a single slot each assembly would evict the other's pattern and
+	// rebuild, which costs two passes over the mesh plus a sort. That is worse than no cache at all.
+	int Problem::acquire_frozen_sparsity(unsigned matrix_index, unsigned long generation, unsigned nd, const std::vector<int> &pinned)
+	{
+		if (frozen_sparsity_cache_capacity < 1) frozen_sparsity_cache_capacity = 1;
+		frozen_sparsity_clock++;
+
+		for (unsigned i = 0; i < frozen_sparsity_cache.size(); i++)
+		{
+			FrozenSparsity &sp = frozen_sparsity_cache[i];
+			if (sp.generation == generation && sp.matrix_index == matrix_index && sp.ndof == nd)
+			{
+				sp.last_used = frozen_sparsity_clock;
+				return (int)i;
+			}
+		}
+
+		// Miss. Grow the cache if it is still below capacity, else evict the least recently used entry
+		// that this assembly is not already using.
+		int slot = -1;
+		if (frozen_sparsity_cache.size() < frozen_sparsity_cache_capacity)
+		{
+			frozen_sparsity_cache.push_back(FrozenSparsity());
+			slot = (int)frozen_sparsity_cache.size() - 1;
+		}
+		else
+		{
+			unsigned long oldest = 0;
+			for (unsigned i = 0; i < frozen_sparsity_cache.size(); i++)
+			{
+				if (std::find(pinned.begin(), pinned.end(), (int)i) != pinned.end()) continue;
+				if (slot < 0 || frozen_sparsity_cache[i].last_used < oldest)
+				{
+					oldest = frozen_sparsity_cache[i].last_used;
+					slot = (int)i;
+				}
+			}
+			if (slot < 0)
+			{
+				// Every entry is in use by this very assembly, i.e. the capacity is below n_matrix.
+				// Grow rather than fail; the caller cannot proceed otherwise.
+				frozen_sparsity_cache_capacity = (unsigned)frozen_sparsity_cache.size() + 1;
+				frozen_sparsity_cache.push_back(FrozenSparsity());
+				slot = (int)frozen_sparsity_cache.size() - 1;
+			}
+		}
+
+		FrozenSparsity &sp = frozen_sparsity_cache[slot];
+		if (!build_frozen_sparsity(matrix_index, sp)) { sp.clear(); return -1; }
+		sp.generation = generation;
+		sp.matrix_index = matrix_index;
+		sp.last_used = frozen_sparsity_clock;
+		frozen_sparsity_rebuilds++;
+		return slot;
+	}
+
+	// nnz of the cached pattern for the current pattern id, or 0 if none is held. Diagnostics only, so it
+	// deliberately does NOT build one -- asking must not change what is being measured.
+	unsigned Problem::get_frozen_sparsity_nnz(unsigned matrix_index)
+	{
+		const unsigned long gen = this->get_jacobian_structure_id();
+		if (!gen) return 0;
+		for (const auto &sp : frozen_sparsity_cache)
+			if (sp.generation == gen && sp.matrix_index == matrix_index) return sp.nnz();
+		return 0;
 	}
 
 	// Builds the CSR pattern and the elemental scatter map for one matrix of the assembly, from the same
@@ -3158,21 +3232,18 @@ namespace pyoomph
 		const unsigned n_matrix = column_or_row_index.size();
 		const unsigned n_vector = residuals.size();
 		const unsigned nd = this->ndof();
-		if (frozen_sparsity.size() < n_matrix) frozen_sparsity.resize(n_matrix);
+		std::vector<int> slots(n_matrix, -1);
 		for (unsigned m = 0; m < n_matrix; m++)
 		{
-			if (frozen_sparsity[m].generation != gen || frozen_sparsity[m].ndof != nd)
-			{
-				if (!build_frozen_sparsity(m, frozen_sparsity[m])) return false;
-				frozen_sparsity[m].generation = gen;
-			}
+			slots[m] = this->acquire_frozen_sparsity(m, gen, nd, slots);
+			if (slots[m] < 0) return false; // Not describable: fall back to oomph-lib's assembly
 		}
 
 		// Hand out the pattern. These arrays must be freshly allocated every time even though their
 		// contents never change: CRDoubleMatrix::build_without_copy() takes ownership and frees them.
 		for (unsigned m = 0; m < n_matrix; m++)
 		{
-			const FrozenSparsity &sp = frozen_sparsity[m];
+			const FrozenSparsity &sp = frozen_sparsity_cache[slots[m]];
 			nnz[m] = sp.nnz();
 			row_or_column_start[m] = new int[nd + 1];
 			std::copy(sp.row_start.begin(), sp.row_start.end(), row_or_column_start[m]);
@@ -3207,7 +3278,7 @@ namespace pyoomph
 			}
 			for (unsigned m = 0; m < n_matrix; m++)
 			{
-				const FrozenSparsity &sp = frozen_sparsity[m];
+				const FrozenSparsity &sp = frozen_sparsity_cache[slots[m]];
 				const int lo = sp.element_offset[e], hi = sp.element_offset[e + 1];
 				const int *slot = &sp.scatter_slot[0];
 				const int *src = &sp.scatter_source[0];
