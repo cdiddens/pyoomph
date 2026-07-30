@@ -28,6 +28,8 @@ The main author may be contacted at c.diddens@utwente.nl
 #include <map>
 #include <unordered_set>
 #include <memory>
+#include <tuple>
+#include <typeinfo>
 
 #include "jitbridge.h"
 #include "mesh.hpp"
@@ -272,6 +274,156 @@ namespace pyoomph
   //  - custom sparse assembly, Dirichlet handling (either by dof removal or by matrix manipulation), logging
   // Most of the heavy lifting is implemented in problem.cpp; this header is the primary interface used both
   // from C++ (e.g. by generated element code, bifurcation.cpp) and from Python via src/nanobind/problem.cpp.
+  // A frozen CSR sparsity pattern for ONE assembled matrix, together with the map that lets an
+  // element's dense block be scattered straight into the value array by indexing, instead of being
+  // accumulated into a searchable container and compressed afterwards. See
+  // dev_docs/structural_assembly.md; this is what replaces the abandoned update_jacobian_csr_structure().
+  //
+  // Only meaningful while the pattern is value-independent (Problem::keep_structural_zeros), because
+  // the whole point is that the same structure serves every assembly until the equations are
+  // renumbered. `generation` records which Problem::get_jacobian_structure_id() it was built for.
+  class FrozenSparsity
+  {
+  public:
+    unsigned long generation = 0;   // Pattern id this was built for; 0 means "not built"
+    unsigned matrix_index = 0;      // Which matrix of a multi-matrix assembly this describes
+    unsigned long last_used = 0;    // LRU stamp, for choosing which entry to evict
+    unsigned ndof = 0;
+    unsigned long nelement = 0;
+    std::vector<int> row_start;      // ndof+1, CSR row pointers
+    std::vector<int> column_index;   // nnz, ascending within each row
+    std::vector<int> element_offset; // nelement+1, where each element's entries start in the two arrays below
+    // The scatter map, as a COMPACT list of the positions an element actually contributes to, rather
+    // than a slot-or-(-1) entry for all nvar*nvar positions. Two parallel arrays: scatter_source is the
+    // row-major offset i*nvar+j within the elemental block, scatter_slot the index in the value array.
+    //
+    // Sorted by scatter_slot within each element. That is the whole trick: the value array is far too
+    // large to stay in cache, so scattered writes cost about a cache miss each, and walking an element's
+    // contributions in increasing slot order turns them into a forward sweep that touches each cache
+    // line once instead of revisiting it per row.
+    std::vector<int> scatter_source;
+    std::vector<int> scatter_slot;
+
+    unsigned nnz() const { return row_start.empty() ? 0u : (unsigned)row_start.back(); }
+    void clear()
+    {
+      generation = 0; matrix_index = 0; last_used = 0; ndof = 0; nelement = 0;
+      row_start.clear(); column_index.clear(); element_offset.clear();
+      scatter_source.clear(); scatter_slot.clear();
+      row_start.shrink_to_fit(); column_index.shrink_to_fit(); element_offset.shrink_to_fit();
+      scatter_source.shrink_to_fit(); scatter_slot.shrink_to_fit();
+    }
+  };
+
+#ifdef OOMPH_HAS_MPI
+  // The distributed counterpart of FrozenSparsity (Phase 2b of dev_docs/structural_assembly.md).
+  //
+  // oomph-lib's parallel_sparse_assemble() redoes, on every single assembly, work that only depends
+  // on the equation numbering: which global rows this rank touches, which of them each other rank
+  // owns, which column indices go with them, and -- the expensive part -- how the pieces arriving
+  // from several ranks merge into one row. That merge is a linear rescan of the row built so far for
+  // every incoming entry, i.e. quadratic in the row length, and it emits columns in first-seen order.
+  // Measured on a 2D cavity at 2 ranks it was ~12.5 ms of the 19.9 ms of non-elemental time.
+  //
+  // Once the pattern is frozen every one of those is a constant, so this holds them:
+  //
+  //   * the local stage is a FrozenSparsity whose rows are my_eqns rather than 0..ndof-1;
+  //   * the send plan is a set of CONTIGUOUS slices. my_eqns is sorted and the target distribution
+  //     gives each rank a contiguous global range, so the rows destined for rank p are one run --
+  //     which is the same property oomph's own first_eqn_element_for_proc relies on. Nothing has to
+  //     be gathered before sending;
+  //   * the merge becomes merge_perm: received value slot -> slot in the final value array. One
+  //     scatter-add pass, no searching, no duplicate detection, no reallocation.
+  //
+  // Only values and residuals travel per assembly; the equation numbers, row lengths and column
+  // indices go once, when the pattern is built. Unlike oomph's version the final column indices come
+  // out sorted within each row, which is what the solvers want anyway.
+  // The row/equation half of a distributed assembly plan: which global equations this rank
+  // contributes to, how that set splits by owning rank, and which local row each incoming equation
+  // lands on. It depends on the equation numbering and the mesh partition alone -- not on any matrix,
+  // not on the symbolic mask, not even on keep_structural_zeros -- which is why the residual-only
+  // assembly can use it when nothing else about the frozen machinery applies.
+  //
+  // Held separately from the matrix plan rather than shared with it. During get_residuals() oomph-lib
+  // installs a ParallelResidualsHandler, which reports a different assembly-handler type and hence a
+  // different pattern id, so one slot would be evicted and rebuilt on every single Newton step -- the
+  // same thrashing that §A5 had to fix for the serial cache.
+  class DistributedResidualPlan
+  {
+  public:
+    unsigned long generation = 0; // 0 means "not built"
+    unsigned nproc = 0, my_rank = 0;
+    unsigned nrow_local = 0, first_row = 0;
+    unsigned long nelement = 0;
+    unsigned ndof = 0;
+    unsigned n_vector = 0;
+    std::vector<unsigned> my_eqns;   // sorted global equations this rank contributes to
+    std::vector<int> send_row_start; // nproc+1; rows for rank p are my_eqns[send_row_start[p]..[p+1])
+    std::vector<int> recv_eq_start;  // nproc+1 into recv_eq_row
+    std::vector<int> recv_eq_row;    // local row (global - first_row) of each equation arriving
+    // Elemental dof -> row in my_eqns, precomputed. Without it every scatter bisects my_eqns once per
+    // dof, which is the bulk of what is left of a residual-only assembly once the exchange is frozen.
+    std::vector<int> res_element_offset; // nelement+1
+    std::vector<int> res_slot;           // row in my_eqns, one per contributing elemental dof
+    void clear()
+    {
+      generation = 0; nproc = my_rank = 0; nrow_local = first_row = 0; nelement = 0; ndof = 0;
+      n_vector = 0;
+      my_eqns.clear(); send_row_start.clear(); recv_eq_start.clear(); recv_eq_row.clear();
+      res_element_offset.clear(); res_slot.clear();
+    }
+  };
+
+  class DistributedFrozenSparsity
+  {
+  public:
+    // One matrix's worth of pattern. The row/equation plan below is shared by all of them.
+    class Mat
+    {
+    public:
+      // Local stage: CSR over my_eqns rows, global column indices, sorted within a row.
+      std::vector<int> local_row_start;  // my_eqns.size()+1
+      std::vector<int> local_col;        // local nnz
+      std::vector<int> element_offset;   // nelement+1
+      std::vector<int> scatter_source;   // i*nvar+j within the elemental block
+      std::vector<int> scatter_slot;     // slot in the local value array; sorted per element, as in FrozenSparsity
+      // Send plan: values for rank p are local_values[send_nz_start[p] .. send_nz_start[p+1]).
+      std::vector<int> send_nz_start;    // nproc+1
+      // Merge plan: the block received from rank p occupies merge_perm[recv_nz_start[p] .. [p+1]),
+      // and entry k of it adds into final_values[merge_perm[recv_nz_start[p]+k]].
+      std::vector<int> recv_nz_start;    // nproc+1
+      std::vector<int> merge_perm;
+      // The answer.
+      std::vector<int> final_row_start;  // nrow_local+1
+      std::vector<int> final_col;        // final nnz
+    };
+
+    unsigned long generation = 0; // Pattern id this was built for; 0 means "not built"
+    unsigned long last_used = 0;
+    unsigned nproc = 0, my_rank = 0;
+    unsigned ndof = 0;                  // global
+    unsigned nrow_local = 0, first_row = 0;
+    unsigned long nelement = 0;
+    unsigned n_matrix = 0, n_vector = 0;
+    std::vector<unsigned> my_eqns;      // sorted global equations this rank contributes to
+    // Rows destined for rank p are my_eqns[send_row_start[p] .. send_row_start[p+1]).
+    std::vector<int> send_row_start;    // nproc+1
+    // Equations arriving from rank p are recv_eq_row[recv_eq_start[p] .. [p+1]), already converted
+    // to a local row index (global row - first_row).
+    std::vector<int> recv_eq_start;     // nproc+1
+    std::vector<int> recv_eq_row;
+    std::vector<Mat> mats;
+
+    void clear()
+    {
+      generation = 0; nproc = my_rank = 0; ndof = 0; nrow_local = first_row = 0;
+      nelement = 0; n_matrix = n_vector = 0;
+      my_eqns.clear(); send_row_start.clear(); recv_eq_start.clear(); recv_eq_row.clear();
+      mats.clear();
+    }
+  };
+#endif
+
   class Problem : public oomph::Problem
   {
   protected:
@@ -295,6 +447,102 @@ namespace pyoomph
     // If true, we do it the oomph-lib way (remove dofs of Dirichlet). If false, all Dirichlets are kept as dofs and the system is manipulated afterwards
     // (note: completely pinned fields without any weak formulation (usually helper field, e.g. references for normalized arclength etc) are always removed from the dofs, independent of this setting)
     bool dirichlets_by_removing_from_dof_vector=true;
+
+    // ON by default. It was opt-in while the pattern was the full element-connectivity one (which cost
+    // up to +35% nonzeros on weakly coupled multi-physics); pruning it by the code generator's field
+    // coupling made it free (<= +0.2% nonzeros, within noise on time), and it is what lets the linear
+    // solvers skip their symbolic phase - about -20% per Newton solve.
+    bool keep_structural_zeros=true; // See set_keep_structural_zeros()
+    bool keep_structural_zeros_in_secondary_matrices=false; // Same, but for the mass matrix / other non-primary matrices of a multi-matrix assembly
+    bool prune_structural_zeros_by_field_coupling=true; // Use the codegen field-coupling tables to keep the structural pattern tight (see the setter)
+    // Whether an explicit diagonal is needed is a property of the LINEAR SOLVER, not of the problem:
+    // only some PETSc factorisations require one, MUMPS does not, and the stored zeros are not free --
+    // they change the matrix a direct solver sees, hence its pivoting, hence the solution at round-off
+    // level (see dev_docs/structural_assembly.md). So this is a tri-state: by default the problem asks
+    // the active solver (solver_requires_explicit_diagonal, pushed down from Python before each solve),
+    // and setting the flag explicitly overrides that answer in either direction.
+    bool force_jacobian_diagonal_entries=false;      // The override value; only consulted when not auto
+    bool force_jacobian_diagonal_entries_auto=true;  // Cleared by set_force_jacobian_diagonal_entries()
+    bool solver_requires_explicit_diagonal=false;    // What the active linear solver last reported
+    bool diagonal_entries_are_forced() const { return force_jacobian_diagonal_entries_auto ? solver_requires_explicit_diagonal : force_jacobian_diagonal_entries; }
+    // One scratch buffer PER MATRIX INDEX, not one shared buffer: a multi-matrix assembly fetches the
+    // masks for all matrices of an element before using any of them, so the pointers handed out for
+    // different matrix_index must stay valid simultaneously. Sharing one buffer silently aliased the
+    // Jacobian's mask onto the mass matrix's.
+    std::vector<std::vector<char>> sparsity_mask_scratch;
+
+    bool verify_frozen_sparsity=true; // Check per element that nothing nonzero fell outside the frozen pattern
+    bool use_frozen_sparsity=true; // Assemble straight into a preallocated CSR when the pattern allows it (see assemble_with_frozen_sparsity)
+    // Several frozen patterns are kept at once, keyed by (pattern id, matrix index). A single slot per
+    // matrix index is not enough: a workflow that alternates between two DIFFERENT patterns -- most
+    // obviously a PETSc preconditioner matrix assembled from another residual via
+    // PETSCSolver.assemble_matrix, but also any multi-residual problem -- would evict and rebuild on
+    // every assembly, and a rebuild is two passes over the mesh plus a sort. That is strictly worse
+    // than not caching at all, so the cache has to hold more than one.
+    std::vector<FrozenSparsity> frozen_sparsity_cache;
+    unsigned frozen_sparsity_cache_capacity = 8; // Raised on the fly if a single assembly needs more
+    unsigned long frozen_sparsity_clock = 0;     // Monotonic source for the LRU stamps
+    unsigned long frozen_sparsity_rebuilds = 0;  // How many patterns have been built; a test can watch this for thrashing
+    // Index into frozen_sparsity_cache of a usable pattern for (matrix_index, generation), building it
+    // if necessary. `pinned` lists slots the current assembly is already using, which must not be
+    // evicted. Returns -1 if the pattern cannot be built (see build_frozen_sparsity).
+    int acquire_frozen_sparsity(unsigned matrix_index, unsigned long generation, unsigned ndof, const std::vector<int> &pinned, unsigned mask_matrix_index_override=(unsigned)-1);
+    // Builds the frozen pattern and scatter map for matrix matrix_index. Returns false if this problem
+    // cannot be described that way (any element without a symbolic mask), leaving sp cleared.
+    // `nd_override` is the row/column count to build for, or 0 for this->ndof(). The base-problem
+    // assembly needs the UNAUGMENTED count, which differs from ndof() while an augmentation is active.
+    bool build_frozen_sparsity(unsigned mask_matrix_index, FrozenSparsity &sp, unsigned nd_override=0);
+    // Sentinel mask index: not a matrix, but "the union of the Jacobian and mass-matrix masks together
+    // with their TRANSPOSES". Needed by the multi-assembly, which builds transposed Hessian-vector
+    // products (bifurcation tracking on a LEFT eigenvector) whose pattern is J^T, not J.
+    static const unsigned MASK_UNION_SYMMETRIC = (unsigned)-3;
+    std::vector<char> union_mask_scratch;
+    // Whether the multi-assembly currently being built asks for a TRANSPOSED product, whose pattern is
+    // J^T rather than J. Set from the request list; true by default so that any other caller of the
+    // base-problem assembly gets the safe superset rather than a refusal.
+    bool multiassembly_wants_transposed = true;
+    const char *symmetrised_union_mask(oomph::GeneralisedElement *elem_pt, unsigned nvar);
+    // The fast assembly path: fills the output arrays directly from the frozen pattern. Returns false
+    // without touching them if the pattern route does not apply, so the caller falls back to oomph-lib.
+    bool assemble_with_frozen_sparsity(oomph::Vector<int*>& column_or_row_index, oomph::Vector<int*>& row_or_column_start, oomph::Vector<double*>& value, oomph::Vector<unsigned>& nnz, oomph::Vector<double*>& residuals, bool compressed_row_flag);
+#ifdef OOMPH_HAS_MPI
+    // Phase 2b. Substitutes the frozen distributed assembly for oomph-lib's whenever the pattern is
+    // known, and calls oomph-lib's otherwise -- so this is always revertible at runtime, and any
+    // configuration the freezing does not cover simply keeps the old behaviour.
+    void parallel_sparse_assemble(const oomph::LinearAlgebraDistribution* const& dist_pt, oomph::Vector<int*>& column_or_row_index, oomph::Vector<int*>& row_or_column_start, oomph::Vector<double*>& value, oomph::Vector<unsigned>& nnz, oomph::Vector<double*>& residuals) override;
+    DistributedFrozenSparsity distributed_frozen_sparsity;
+    unsigned long distributed_frozen_rebuilds = 0;
+    bool use_frozen_distributed_sparsity = true; // Freeze the distributed pattern and exchange values only
+    // Builds the whole distributed plan -- local pattern, send slices, and the merge permutation
+    // derived from one round of pattern exchange. False (leaving sp cleared) if this configuration
+    // cannot be frozen, in which case the caller falls back to oomph-lib.
+    bool build_distributed_frozen_sparsity(const oomph::LinearAlgebraDistribution* const& dist_pt, unsigned n_matrix, unsigned n_vector, DistributedFrozenSparsity &sp);
+    // The row/equation half, shared by the matrix and the residual-only plans so there is one
+    // implementation of it. COLLECTIVE: it exchanges the equation numbers. Returns false, identically
+    // on every rank, if the configuration cannot be planned.
+    bool build_distributed_residual_plan(const oomph::LinearAlgebraDistribution* const& dist_pt, unsigned n_vector, DistributedResidualPlan &rp);
+    DistributedResidualPlan distributed_residual_plan;
+    unsigned long distributed_residual_rebuilds = 0;
+    // The residual-only distributed fast path. oomph-lib routes get_residuals() under MPI through the
+    // whole of parallel_sparse_assemble() with zero matrices: it recomputes my_eqns, builds the
+    // array-of-arrays, exchanges equation numbers and merges by bisection per row -- all to sum a
+    // vector. Measured at 45 % of a residual assembly at 4 ranks, and roughly constant as ranks grow.
+    bool assemble_distributed_residuals_only(const oomph::LinearAlgebraDistribution* const& dist_pt, oomph::Vector<double*>& residuals);
+    // The fast distributed path. False, having touched nothing, if the frozen route does not apply.
+    bool assemble_distributed_with_frozen_sparsity(const oomph::LinearAlgebraDistribution* const& dist_pt, oomph::Vector<int*>& column_or_row_index, oomph::Vector<int*>& row_or_column_start, oomph::Vector<double*>& value, oomph::Vector<unsigned>& nnz, oomph::Vector<double*>& residuals);
+#endif
+    // Everything besides the equation numbering that the sparsity pattern depends on. The id is a
+    // FUNCTION of this state, not a counter: returning to a configuration seen before must yield the id
+    // it had before, or nothing downstream can ever hit its cache. A workflow that alternates between
+    // the Newton assembly and the eigenproblem assembly (which installs its own assembly handler) does
+    // exactly that on every step, and with a counter it re-derived the pattern every single time.
+    // Ids are never recycled: invalidation clears the map but the counter keeps climbing, so an id held
+    // by a solver from before a renumbering can never accidentally match afterwards.
+    // Keyed on the assembly handler's TYPE, not its address: the eigenproblem assembly news and deletes
+    // its handler on every call, so the address varies and an address key would miss every time.
+    typedef std::tuple<std::string, unsigned long, unsigned, std::string> JacobianStructureKey; // handler type, ndof, n_unaugmented, active residual
+    std::map<JacobianStructureKey, unsigned long> jacobian_structure_ids;
+    unsigned long next_jacobian_structure_id = 0;
 
     void actions_after_change_in_global_parameter(double *const &parameter_pt) override; // oomph-lib hook: resolves parameter_pt to its name and forwards to the string-named overload below
     void actions_after_parameter_increase(double *const &parameter_pt) override;
@@ -337,6 +585,94 @@ namespace pyoomph
 
     void set_sparse_assembly_method(const std::string & method); // Selects the sparse assembly implementation (oomph-lib's built-in variants, e.g. "default","single_thread","openmp_...")
     std::string get_sparse_assembly_method();
+
+    // --- Structural (value-independent) sparsity, see dev_docs/structural_assembly.md ---
+    // By default, oomph-lib drops any Jacobian entry that evaluates to exactly zero, which makes the
+    // emitted CSR pattern depend on the current dof values: it can (and does) change from one Newton
+    // step to the next. Keeping structural zeros makes the pattern depend on the equation numbering
+    // alone, so it is stable until the next assign_eqn_numbers() - which is what lets linear solvers
+    // reuse their symbolic phase (Pardiso phase 11, a PETSc Mat's preallocation) across solves. It
+    // also guarantees an entry on every diagonal, since every dof sits in an element whose block
+    // contains (i,i) - replacing the manual MatShift(0.0) some PETSc backends need.
+    // Applies to the Jacobian / main matrix only; the mass matrix keeps its own, much tighter pattern
+    // (see numerical_zero_for_sparse_assembly() in the .cpp).
+    void set_keep_structural_zeros(bool yesno);
+    bool get_keep_structural_zeros() const { return keep_structural_zeros; }
+    // Opt in to structural zeros for the secondary matrices of a multi-matrix assembly too (the mass
+    // matrix of the eigenproblem assembly). Off by default, and usually should stay off.
+    void set_keep_structural_zeros_in_secondary_matrices(bool yesno);
+    bool get_keep_structural_zeros_in_secondary_matrices() const { return keep_structural_zeros_in_secondary_matrices; }
+    // Per-matrix "treat as zero and do not store" threshold used by every sparse assembly routine.
+    double numerical_zero_for_sparse_assembly(const unsigned &matrix_index) const override;
+    // Per-element structural sparsity mask, built from the code generator's symbolic field-coupling
+    // tables. See the base declaration in oomph-lib's problem.h and dev_docs/structural_assembly.md.
+    const char *sparsity_mask_for_element(const unsigned &matrix_index, oomph::GeneralisedElement *const &elem_pt, const unsigned &nvar) override;
+    // Whether the value-independent pattern is pruned to the field pairs the code generator proves can
+    // contribute (tight, "Tier B"), or is the full element-connectivity pattern ("Tier A"). Pruning is
+    // strictly better where it applies -- it reproduced the numerical pattern exactly on every problem
+    // measured, against up to 1.37x for connectivity -- so it is on by default.
+    void set_prune_structural_zeros_by_field_coupling(bool yesno);
+    bool get_prune_structural_zeros_by_field_coupling() const { return prune_structural_zeros_by_field_coupling; }
+    // Whether every diagonal entry is forced into the pattern even where no field pair contributes to
+    // it. Off by default: only some PETSc factorisations require it (MUMPS does not), and the stored
+    // zeros perturb a direct solver's pivoting. Turn it on for a solver that needs it -- with pruning
+    // on, Taylor-Hood's pressure-pressure diagonal is exactly such a case.
+    void set_force_jacobian_diagonal_entries(bool yesno); // Explicit override; disables the automatic answer
+    bool get_force_jacobian_diagonal_entries() const { return diagonal_entries_are_forced(); } // The EFFECTIVE value
+    void set_force_jacobian_diagonal_entries_auto(); // Go back to asking the solver
+    bool get_force_jacobian_diagonal_entries_is_auto() const { return force_jacobian_diagonal_entries_auto; }
+    // Pushed down from the Python solver layer before assembling; only consulted in auto mode.
+    void set_solver_requires_explicit_diagonal(bool yesno);
+    bool get_solver_requires_explicit_diagonal() const { return solver_requires_explicit_diagonal; }
+    // Whether assembly may write straight into a preallocated CSR using a precomputed scatter map,
+    // skipping the accumulate-into-a-container-then-compress work entirely. Requires a value-independent
+    // pattern; falls back to oomph-lib's assembly automatically whenever it cannot apply (distributed
+    // runs, augmented systems, compressed-column output, any element without a symbolic mask).
+    void set_use_frozen_sparsity(bool yesno);
+    bool get_use_frozen_sparsity() const { return use_frozen_sparsity; }
+    // Whether each element's block is checked against the frozen pattern during assembly (see the
+    // assembly loop). Cheap relative to the scatter, and it is the only thing standing between a
+    // hypothetical code-generation bug and a silently truncated Jacobian, so it defaults to on.
+    void set_verify_frozen_sparsity(bool yesno) { verify_frozen_sparsity = yesno; }
+    bool get_verify_frozen_sparsity() const { return verify_frozen_sparsity; }
+    // Diagnostics/tests. nnz of the cached pattern for the CURRENT pattern id, or 0 if none is held --
+    // a positive value is the only direct evidence the preallocated path engaged rather than falling back.
+    unsigned get_frozen_sparsity_nnz(unsigned matrix_index=0);
+    unsigned long get_frozen_sparsity_rebuild_count() const { return frozen_sparsity_rebuilds; } // Watch for cache thrashing
+    unsigned get_frozen_sparsity_cache_capacity() const { return frozen_sparsity_cache_capacity; }
+#ifdef OOMPH_HAS_MPI
+    void set_use_frozen_distributed_sparsity(bool yesno) { use_frozen_distributed_sparsity = yesno; if (!yesno) { distributed_frozen_sparsity.clear(); distributed_residual_plan.clear(); } }
+    bool get_use_frozen_distributed_sparsity() const { return use_frozen_distributed_sparsity; }
+    unsigned long get_distributed_frozen_rebuild_count() const { return distributed_frozen_rebuilds; }
+    unsigned long get_distributed_residual_rebuild_count() const { return distributed_residual_rebuilds; }
+#else
+    void set_use_frozen_distributed_sparsity(bool yesno) {}
+    bool get_use_frozen_distributed_sparsity() const { return false; }
+    unsigned long get_distributed_frozen_rebuild_count() const { return 0; }
+    unsigned long get_distributed_residual_rebuild_count() const { return 0; }
+#endif
+    void set_frozen_sparsity_cache_capacity(unsigned n) { frozen_sparsity_cache_capacity = (n < 1 ? 1 : n); frozen_sparsity_cache.clear(); }
+    // Identifies the current Jacobian sparsity pattern. Changes whenever the pattern may have
+    // changed. Solvers may reuse anything derived from the pattern (a symbolic factorisation, a
+    // preallocated PETSc Mat) while this value is unchanged and non-zero.
+    // Only meaningful while keep_structural_zeros is set - otherwise the pattern is value-dependent
+    // and no id can describe it, so this returns 0 ("unusable"). It is deliberately NOT const: it
+    // re-validates lazily against the state the pattern depends on (see the .cpp), so that a state
+    // change nobody remembered to hook cannot silently hand a solver a stale pattern. A missed
+    // invalidation is a wrong answer, not a crash, so this must not rely on call-site discipline alone.
+    unsigned long get_jacobian_structure_id();
+    // Declare every pattern seen so far dead. assign_eqn_numbers() is the main caller.
+    void invalidate_jacobian_structure() { jacobian_structure_ids.clear(); frozen_sparsity_cache.clear();
+#ifdef OOMPH_HAS_MPI
+      distributed_frozen_sparsity.clear(); distributed_residual_plan.clear();
+#endif
+    }
+
+    // Phase-0 instrumentation: run the elemental part of the assembly (get_all_vectors_and_matrices
+    // for every non-halo element) n_repeat times without scattering anything into a matrix, and
+    // return the average seconds per pass. Subtracting this from a full assembly gives the cost of
+    // the scatter + CSR compression, which is what the structural-assembly work removes.
+    double benchmark_elemental_assembly(unsigned n_repeat, bool with_jacobian, bool with_mass_matrix);
 
     void set_dist_problem_matrix_distribution(const std::string & mode); // Controls how the distributed Jacobian matrix is partitioned across MPI ranks
     std::string get_dist_problem_matrix_distribution() ;
@@ -534,6 +870,25 @@ namespace pyoomph
     // normal elemental assembly and the custom-residual-Jacobian path (use_custom_residual_jacobian),
     // and additionally apply the matrix-manipulation Dirichlet enforcement when that strategy is active.
     void get_residuals(oomph::DoubleVector &residuals) override;
+    // Abort the Newton solve currently running, without touching the dofs.
+    //
+    // Replaces the old mechanism, which multiplied the whole dof vector by 1e40 and added noise so
+    // that the NEXT residual evaluation would exceed max_residuals and make oomph-lib throw. Three
+    // things were wrong with that: it destroyed the state, so nothing could be inspected or recovered
+    // afterwards; it went through get_current_dofs()/set_current_dofs(), which redistribute and are
+    // therefore COLLECTIVE, while the decision to reject is typically partition-dependent -- so a
+    // rejection seen by only some ranks deadlocked; and it paid for a full extra residual assembly to
+    // communicate one bit. This sets a flag that the next get_residuals() consumes, agreeing it across
+    // ranks first. The reason is reported when it fires.
+    void request_newton_abort(const std::string &reason);
+    bool newton_abort_requested() const { return newton_abort_flag; }
+  protected:
+    bool newton_abort_flag = false;
+    std::string newton_abort_reason;
+    // True (having reported the reason) if an abort was requested on ANY rank, in which case the
+    // caller must not assemble. Clears the request, so it fires once.
+    bool consume_newton_abort_request();
+  public:
     void get_jacobian(oomph::DoubleVector &residuals,oomph::CRDoubleMatrix &jacobian) override;
     void get_derivative_wrt_global_parameter(double* const& parameter_pt,oomph::DoubleVector& result) override;
     virtual void remove_dirichlets_by_matrix_manipulation(oomph::DoubleVector &residuals,oomph::CRDoubleMatrix *jacobian=NULL); // Zeroes out rows/columns of Dirichlet-pinned dofs and sets the residual to the constraint violation, in-place on residuals/jacobian

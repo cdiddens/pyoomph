@@ -27,6 +27,7 @@ from __future__ import annotations
 # ========================================================================
  
 from .generic import GenericLinearSystemSolver, GenericEigenSolver, EigenSolverWhich,DefaultMatrixType
+import hashlib
 from collections import OrderedDict
 import petsc4py #type:ignore
 import sys
@@ -61,10 +62,134 @@ class PETSCSolver(GenericLinearSystemSolver):
 
         self._dofs_to_field_info=None
 
+        # Keep the Mat (and the KSP built on it) across solves whenever the Jacobian sparsity pattern is
+        # unchanged, updating only the values. This is what lets PETSc detect SAME_NONZERO_PATTERN and
+        # reuse the symbolic factorisation / preconditioner setup instead of redoing it every Newton
+        # step. Requires problem.keep_structural_zeros; without it jacobian_structure_id is 0 and this
+        # switches itself off, so the behaviour is unchanged for existing scripts.
+        self.reuse_matrix_structure=True
+        self._structure_id:int=0   # Pattern the current Mat/KSP were built for; 0 = none
+        self._structure_nnz:int=-1
+        self._structure_nrow_local:int=-1
+        self._structure_digest:bytes | None=None   # Fingerprint of the pattern the Mat was built for
+
     #		opts=PETSc.Options().getAll()
     #		if "add_zero_diagonal" in opts.keys():
     #			problem.set_diagonal_zero_entries(True)
-    
+
+    # Factorisation preconditioners whose PETSc-native implementation walks the diagonal explicitly and
+    # errors out if an entry is missing (MatLUFactorSymbolic_SeqAIJ and friends). Iterative and
+    # multigrid PCs are not listed: they do not factorise the matrix themselves.
+    _FACTORISING_PC_TYPES = ("lu", "ilu", "cholesky", "icc")
+    # Third-party factorisation packages, which build their own internal structure from the CSR and do
+    # not require the caller to have supplied a diagonal. MUMPS in particular does not.
+    _EXTERNAL_FACTOR_PACKAGES = ("mumps", "superlu", "superlu_dist", "pastix", "cholmod", "umfpack",
+                                 "klu", "mkl_pardiso", "mkl_cpardiso", "strumpack", "sparseelemental")
+
+    def requires_explicit_diagonal(self)->bool:
+        """True only when PETSc's OWN factorisation is in play.
+
+        Deciding this from the options database rather than hard-coding it per solver class is what
+        makes ``petsc_mumps`` and a hand-configured ``-pc_type lu -pc_factor_mat_solver_type mumps``
+        give the same (correct) answer. Every ``*pc_type`` option is scanned, not just the top-level
+        one, so a factorisation sitting under a fieldsplit is still seen.
+
+        Erring towards False is the safe direction: an unnecessary yes costs stored zeros on every
+        diagonal and perturbs the factoriser's pivoting, whereas a wrong no surfaces as PETSc's own
+        explicit "Matrix is missing diagonal entry" error, which the user can answer with
+        ``problem.force_jacobian_diagonal_entries = True``.
+        """
+        opts = PETSc.Options().getAll() #type:ignore
+        factor_package = None
+        for key, val in opts.items(): #type:ignore
+            if key.endswith("pc_factor_mat_solver_type"):
+                factor_package = str(val).lower()
+                break
+        if factor_package is not None and factor_package in self._EXTERNAL_FACTOR_PACKAGES:
+            return False  # An external package builds its own structure; MUMPS is the common case here
+        for key, val in opts.items(): #type:ignore
+            if key.endswith("pc_type") and str(val).lower() in self._FACTORISING_PC_TYPES:
+                return True
+        # setup_solver() falls back to pc_type "lu" when nothing has been configured, and with no
+        # factor package that is PETSc's own LU, which does need the diagonal.
+        if not self._do_not_set_any_args and factor_package is None:
+            return True
+        return False
+
+    def _force_zero_diagonal(self,mat:Any)->None:
+        # Deliberately does nothing to the matrix. The diagonal, when this solver needs one, is supplied
+        # by the ASSEMBLY (problem.force_jacobian_diagonal_entries, driven by requires_explicit_diagonal
+        # above) rather than patched in afterwards.
+        #
+        # The historical approach was mat.shift(0.0), which does not work: MatShift returns early on a
+        # zero shift, so it never inserted anything -- verified on every combination of matrix options,
+        # including MAT_NEW_NONZERO_ALLOCATION_ERR=False. Kept as a named hook so the intent is
+        # documented at the two call sites rather than being a silent omission.
+        return
+
+    def _remember_structure(self,indptr:Any,indices:Any)->None:
+        """Keep a fingerprint of the pattern the current Mat was preallocated for.
+
+        A hash rather than the arrays themselves: PETSc already stores the indices internally, so
+        keeping a second copy would add (nnz + nrow) integers to a Mat that is often the largest
+        object in the run, for insurance that is only ever read once per solve. blake2b over the two
+        index arrays runs at memory bandwidth -- microseconds against the milliseconds a numeric
+        factorisation takes -- and a 128-bit digest makes an undetected change not a practical concern.
+        """
+        h = hashlib.blake2b(digest_size=16)
+        h.update(numpy.ascontiguousarray(indptr).view(numpy.uint8))
+        h.update(numpy.ascontiguousarray(indices).view(numpy.uint8))
+        self._structure_digest = h.digest()
+
+    def _structure_matches(self,indptr:Any,indices:Any)->bool:
+        """Whether the pattern about to be written is the one the Mat was preallocated for.
+
+        Verified rather than trusted, for the same reason the Pardiso path verifies it: a stale
+        jacobian_structure_id would otherwise be a silently wrong matrix, not a crash. It is worse
+        here than for a factorisation, because setValuesCSR only writes the entries it is given --
+        anything the previous pattern had and this one does not keeps its OLD value -- and pyoomph
+        disables NEW_NONZERO_ALLOCATION_ERR, so PETSc will not object to the ones it has never seen
+        either. Neither the nnz nor the size check catches a pattern that changed shape without
+        changing its nonzero count, which is exactly what an augmented (bifurcation-tracking) system
+        can do: there the elemental block is larger than the field description, so no symbolic mask
+        applies and the pattern falls back to being value-filtered.
+        """
+        if self._structure_digest is None:
+            return False
+        h = hashlib.blake2b(digest_size=16)
+        h.update(numpy.ascontiguousarray(indptr).view(numpy.uint8))
+        h.update(numpy.ascontiguousarray(indices).view(numpy.uint8))
+        if h.digest() == self._structure_digest:
+            return True
+        print("WARNING: the Jacobian sparsity pattern changed although problem.jacobian_structure_id "
+              "did not. Rebuilding the PETSc matrix instead of reusing it. This is a bug in the "
+              "pattern invalidation -- please report it.")
+        return False
+
+    def _can_reuse_structure(self,n:int,nnz:int,indptr:Any=None,indices:Any=None)->bool:
+        structure_id = self.problem.jacobian_structure_id
+        if not (self.reuse_matrix_structure and structure_id != 0
+                and structure_id == self._structure_id
+                and self.petsc_mat is not None
+                and self._structure_nnz == nnz
+                and self.petsc_mat.getSize()[0] == n): #type:ignore
+            return False
+        if indptr is None:
+            return True
+        return self._structure_matches(indptr,indices)
+
+    def _can_reuse_structure_distributed(self,nrow_local:int,nnz_local:int,indptr:Any=None,indices:Any=None)->bool:
+        structure_id = self.problem.jacobian_structure_id
+        if not (self.reuse_matrix_structure and structure_id != 0
+                and structure_id == self._structure_id
+                and self.petsc_mat is not None
+                and self._structure_nnz == nnz_local
+                and self._structure_nrow_local == nrow_local):
+            return False
+        if indptr is None:
+            return True
+        return self._structure_matches(indptr,indices)
+
     def _before_assigning_equation_numbers(self):
         if self._dofs_to_field_info is not None:
             if len(self._dofs_to_field_info)>2:
@@ -77,6 +202,23 @@ class PETSCSolver(GenericLinearSystemSolver):
         if not PETSc.Sys.hasExternalPackage("mumps"): #type:ignore
             raise RuntimeError("Your PETSc installation was not compiled with MUMPS support (--download-mumps=yes). Please recompile PETSc with MUMPS or use a different linear solver.")
         _SetDefaultPetscOption("mat_mumps_icntl_6",5)
+        # ICNTL(24)=1 -- detect and handle null pivots.
+        #
+        # Needed because pyoomph deliberately stores STRUCTURAL zeros (problem.keep_structural_zeros),
+        # so that the sparsity pattern is a function of the equation numbering alone and can be reused
+        # across Newton steps. On a saddle-point system that turns a genuinely absent diagonal into a
+        # diagonal entry that is present and exactly zero -- interface Lagrange multipliers and
+        # pressure dofs, whose self-coupling is zero by construction. MUMPS chooses its elimination
+        # order from the STRUCTURE, so those stored zeros invite it to plan an elimination that then
+        # hits a zero pivot at factorisation time; with detection off (the default) it divides by it
+        # and returns a silently wrong solution, and Newton diverges from a nearly converged state.
+        # Measured on the two-domain ALE case: INFOG(28) reports 8 null pivots encountered.
+        #
+        # Costs nothing on a matrix that has no null pivots, and only ever replaces a garbage answer
+        # with a usable one. Note the flip side: on a genuinely singular system MUMPS now returns a
+        # pseudo-solution rather than producing nonsense, so a singular problem shows up as a Newton
+        # that fails to converge rather than one that diverges spectacularly.
+        _SetDefaultPetscOption("mat_mumps_icntl_24",1)
         _SetDefaultPetscOption("ksp_type","preonly")
         _SetDefaultPetscOption("pc_type","lu")
         _SetDefaultPetscOption("pc_factor_mat_solver_type","mumps")
@@ -217,7 +359,19 @@ class PETSCSolver(GenericLinearSystemSolver):
             raise RuntimeError("Requested field split "+splitname+" not found. Available splits: "+str(self._dofs_to_field_info[2].keys()))
         return self._dofs_to_field_info[2][splitname]
 
-    def setup_solver(self):                
+    def _setup_solver_if_needed(self):
+        # setup_solver() builds a brand new KSP (and PC) on every call, which throws away any
+        # factorisation or preconditioner PETSc has already computed. When the matrix structure is being
+        # reused, the Mat object survives across solves, so the KSP built on it stays valid too and
+        # PETSc can reuse the symbolic factorisation -- keep it. Without structure reuse this falls back
+        # to the previous behaviour (a fresh KSP per solve) exactly, so that options set between solves
+        # and subclasses overriding setup_solver() keep behaving as before.
+        if self.ksp is not None and self.reuse_matrix_structure and self._structure_id != 0 \
+                and self._structure_id == self.problem.jacobian_structure_id:
+            return
+        self.setup_solver()
+
+    def setup_solver(self):
         #print("Setting up solver")
         opts = PETSc.Options().getAll() #type:ignore
         #if "add_zero_diagonal" in opts.keys(): #type:ignore
@@ -248,6 +402,12 @@ class PETSCSolver(GenericLinearSystemSolver):
 
     def solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPIntArray,colptr:NPIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
         if op_flag == 1:
+            if self._can_reuse_structure(n,nnz,colptr,rowind):
+                # Same nonzero pattern, new values. Overwriting them in place (rather than destroying
+                # and rebuilding the Mat) keeps the KSP's factorisation/preconditioner reusable.
+                self.petsc_mat.setValuesCSR(colptr.astype(PETSc.IntType, copy=False), rowind.astype(PETSc.IntType, copy=False), values.astype(PETSc.ScalarType, copy=False)) #type:ignore
+                self.petsc_mat.assemble() #type:ignore
+                return 0
             if self.petsc_mat is not None:
                 self.petsc_mat.destroy()
                 self.petsc_mat=None
@@ -273,15 +433,18 @@ class PETSCSolver(GenericLinearSystemSolver):
             # MatCreateSeqAIJWithArrays was tried but silently breaks hypre/BoomerAMG -- CG diverges
             # with KSP reason DIVERGED_ITS -- so we keep the safe, universally-correct copying path.)
             self.petsc_mat = PETSc.Mat().createAIJ(size=(n, n), csr=(colptr.astype(PETSc.IntType, copy=False), rowind.astype(PETSc.IntType, copy=False), values.astype(PETSc.ScalarType, copy=False)),comm=get_mpi_world_comm()) #type:ignore
-            
+
             self.petsc_mat.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False) #type:ignore
             # Force diagonal:
             #diag = self.petsc_mat.getDiagonal()
             #self.petsc_mat.setDiagonal(diag, addv=PETSc.InsertMode.INSERT_VALUES)
-            self.petsc_mat.shift(0.0)
-            
+            self._force_zero_diagonal(self.petsc_mat)
+
             self.petsc_mat.assemble()
-            
+            self._structure_id = self.problem.jacobian_structure_id
+            self._structure_nnz = nnz
+            self._remember_structure(colptr,rowind)
+
             self.x = PETSc.Vec().createSeq(n) #type:ignore
         elif op_flag == 2:
             #print("Solving linear system with PETSc", op_flag, n, nnz, nrhs, transpose, "SPLIT INFO",self._dofs_to_field_info)
@@ -292,8 +455,8 @@ class PETSCSolver(GenericLinearSystemSolver):
                 self.setup_field_split()
             bv = PETSc.Vec().createWithArray(b) #type:ignore
             self.petsc_rhs=bv
-            self.setup_solver()
-            
+            self._setup_solver_if_needed()
+
             if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine():
                 raise RuntimeError("Cannot use custom solve routine with PETSc yet. Also, iterative solving might require different handling here")
             else:
@@ -319,6 +482,15 @@ class PETSCSolver(GenericLinearSystemSolver):
     def solve_distributed(self, op_flag: int, allow_permutations: int, n: int, nnz_local: int, nrow_local: int, first_row: int, values: NPFloatArray, col_index: NPIntArray, row_start: NPIntArray, b: NPFloatArray, nprow: int, npcol: int, doc: int, data: NPUInt64Array, info: NPIntArray)->None:
         #print("solve distributed with flag ",op_flag)
         if op_flag == 1:
+            # Same reuse logic as solve_serial. jacobian_structure_id is bumped inside the collective
+            # assign_eqn_numbers(), so every rank agrees on it and either all reuse or all rebuild --
+            # which matters, because rebuilding the Mat is itself collective and a split decision would
+            # deadlock. _can_reuse_structure compares the LOCAL row count and local nnz, both of which
+            # are per-rank quantities derived from the same global pattern.
+            if self._can_reuse_structure_distributed(nrow_local,nnz_local,row_start,col_index):
+                self.petsc_mat.setValuesCSR(row_start.astype(PETSc.IntType, copy=False), col_index.astype(PETSc.IntType, copy=False), values.astype(PETSc.ScalarType, copy=False)) #type:ignore
+                self.petsc_mat.assemble() #type:ignore
+                return
             if self.petsc_mat is not None:
                 self.petsc_mat.destroy()
                 self.petsc_mat=None
@@ -332,16 +504,28 @@ class PETSCSolver(GenericLinearSystemSolver):
             # invalidated in _before_assigning_equation_numbers (on reassignment), not on every matrix rebuild.
             #print("PETSCINF",nrow_local,n)
             #print("Creating petsc mat ")
-            self.petsc_mat = PETSc.Mat().createAIJ(size=((nrow_local, n), (nrow_local, n),),csr=(row_start, col_index, values)) #type:ignore
-            
+            # astype(..., copy=False) rather than the raw arrays: on a PETSc built with 64-bit indices
+            # (or complex scalars) the int32/float64 arrays oomph hands over are the wrong dtype, and
+            # this is the only createAIJ in the file that was still passing them through unconverted --
+            # so the distributed path disagreed with both the serial one and its own update call below.
+            # On a matching build every conversion is a no-op returning the same view.
+            self.petsc_mat = PETSc.Mat().createAIJ(size=((nrow_local, n), (nrow_local, n),),
+                                                   csr=(row_start.astype(PETSc.IntType, copy=False),
+                                                        col_index.astype(PETSc.IntType, copy=False),
+                                                        values.astype(PETSc.ScalarType, copy=False))) #type:ignore
+
             self.petsc_mat.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False) #type:ignore
             # Force diagonal:
             #diag = self.petsc_mat.getDiagonal()
             #self.petsc_mat.setDiagonal(diag, addv=PETSc.InsertMode.INSERT_VALUES)
-            self.petsc_mat.shift(0.0)
-            
+            self._force_zero_diagonal(self.petsc_mat)
+
             self.petsc_mat.assemble()
-            
+            self._structure_id = self.problem.jacobian_structure_id
+            self._structure_nnz = nnz_local
+            self._structure_nrow_local = nrow_local
+            self._remember_structure(row_start,col_index)
+
             #print("OWNERSHIP RANGE",self.petsc_mat.getOwnershipRange()) #type:ignore
         #			print("PROCESSOR Ns",get_mpi_rank(),nrow_local,n)
         #			print("PROCESSOR RS",get_mpi_rank(),row_start)
@@ -358,9 +542,9 @@ class PETSCSolver(GenericLinearSystemSolver):
             bv = PETSc.Vec().createWithArray(b) #type:ignore
             self.petsc_rhs=bv
             self.x = self.petsc_rhs.duplicate()
-            
-            self.setup_solver()
-            
+
+            self._setup_solver_if_needed()
+
             if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine():
                 raise RuntimeError("Cannot use custom solve routine with PETSc yet. Also, iterative solving might require different handling here")
             else:
@@ -383,10 +567,22 @@ class PETSCSolver(GenericLinearSystemSolver):
 
 
     def assemble_matrix(self,which_one:str):
-        res, n, _nzz, nrow_local, values, col_index, row_start=self.problem._assemble_residual_jacobian(which_one)                                
+        """Assemble a second matrix -- typically for building a preconditioner -- from the named
+        residual/Jacobian combination.
+
+        Note this is a DIFFERENT sparsity pattern from the main Jacobian's, because a different
+        residual has different field couplings and different pinning. The problem's pattern cache holds
+        several patterns at once precisely so that alternating between the two does not rebuild either
+        (see dev_docs/structural_assembly.md 7d A5); if a workflow alternates between more distinct
+        patterns than the cache holds, raise ``problem._frozen_sparsity_cache_capacity``.
+        """
+        res, n, _nzz, nrow_local, values, col_index, row_start=self.problem._assemble_residual_jacobian(which_one)
         res=PETSc.Mat().createAIJ(size=((nrow_local, n), (n, n),),csr=(row_start.astype(PETSc.IntType, copy=False), col_index.astype(PETSc.IntType, copy=False), values.astype(PETSc.ScalarType, copy=False)), comm=PETSc.COMM_WORLD) #type:ignore
         res.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False) #type:ignore
-        res.shift(0.0)
+        # No shift(0.0) here: it is a no-op in PETSc (verified on every combination of matrix options,
+        # see the dev doc), so it never inserted the diagonal entries it appeared to be there for. Use
+        # the same policy as the main solve path instead.
+        self._force_zero_diagonal(res)
         res.assemble()
         return res
 
@@ -440,6 +636,7 @@ class SlepcEigenSolver(GenericEigenSolver):
         _SetDefaultPetscOption("st_pc_type","lu")
         _SetDefaultPetscOption("st_pc_factor_mat_solver_type","mumps")
         _SetDefaultPetscOption("st_mat_mumps_icntl_6",5)
+        _SetDefaultPetscOption("st_mat_mumps_icntl_24",1)  # null pivots; see PETSCSolver.use_mumps
         if mumps_param14 is not None:
             _SetDefaultPetscOption("st_mat_mumps_icntl_14",mumps_param14)
         return self
@@ -826,7 +1023,11 @@ class FieldSplitPETSCSolver(PETSCSolver):
 
     def assemble_preconditioner(self,name:str,restrict_on_field_split:int | None=None)->Any:               
         _res, n, _M_nzz, nrow_local, M_values_arr, M_colindex_arr, M_row_start_arr=self.problem._assemble_residual_jacobian(name)
-        P=PETSc.Mat().createAIJ(size=((nrow_local, n), (nrow_local, n),), csr=( M_row_start_arr,M_colindex_arr, M_values_arr)) #type:ignore # TODO: Must be destroyed!
+        # Same dtype conversion as everywhere else in this file; see solve_distributed().
+        P=PETSc.Mat().createAIJ(size=((nrow_local, n), (nrow_local, n),),
+                                csr=(M_row_start_arr.astype(PETSc.IntType, copy=False),
+                                     M_colindex_arr.astype(PETSc.IntType, copy=False),
+                                     M_values_arr.astype(PETSc.ScalarType, copy=False))) #type:ignore # TODO: Must be destroyed!
         if restrict_on_field_split is not None:
             assert self._fieldsplit is not None
             ps = self._fieldsplit[restrict_on_field_split][1] #type:ignore

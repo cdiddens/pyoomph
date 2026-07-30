@@ -403,6 +403,21 @@ void PyReg_Solvers(nb::module_ &m)
              "Re-solve A x = b against a new rhs, reusing the cached factorization "
              "(equivalent to solve(), provided under a distinct name for API parity with other "
              "factorize/solve/resolve-style sparse solvers)")
+        .def(
+            "refactorize_values_only", [](pyoomph::MacAccelerateSparseSolver &self,
+                                          const std::vector<long long> &indptr, const std::vector<long long> &indices,
+                                          const std::vector<double> &data)
+            { return self.refactorize_values_only(indptr, indices, data); },
+            nb::arg("indptr"), nb::arg("indices"), nb::arg("data"),
+            "Recompute only the numerical factorization, keeping the symbolic one Accelerate already built "
+            "(SparseRefactor). Valid only while the sparsity pattern is unchanged, which is verified here by "
+            "comparing the index arrays. Returns False without touching anything if it cannot apply, in which "
+            "case the caller must call factorize() instead.")
+        .def("num_symbolic_factorizations", &pyoomph::MacAccelerateSparseSolver::num_symbolic_factorizations,
+             "How many full factorizations (symbolic + numeric) have been performed. With a stable sparsity "
+             "pattern this should stop growing while num_numeric_refactorizations() keeps climbing.")
+        .def("num_numeric_refactorizations", &pyoomph::MacAccelerateSparseSolver::num_numeric_refactorizations,
+             "How many numeric-only refactorizations (SparseRefactor) have been performed.")
         .def("is_factorized", &pyoomph::MacAccelerateSparseSolver::isFactorized)
         .def_prop_ro("rows", &pyoomph::MacAccelerateSparseSolver::rows)
         .def_prop_ro("cols", &pyoomph::MacAccelerateSparseSolver::cols)

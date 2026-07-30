@@ -1146,6 +1146,23 @@ namespace pyoomph
 
 	}
 
+    bool FiniteElementField::has_mass_matrix_contribution_for_code(FiniteElementCode *code,unsigned residual_index, FiniteElementField *other)
+	{
+		return this->mass_matrix_contribution_for_code.count(code) > 0 && this->mass_matrix_contribution_for_code[code].count(residual_index) > 0 && this->mass_matrix_contribution_for_code[code][residual_index].count(other) > 0;
+	}
+    void FiniteElementField::mark_mass_matrix_contribution_for_code(FiniteElementCode *code,unsigned residual_index, FiniteElementField *other)
+	{
+		if (!this->mass_matrix_contribution_for_code.count(code))
+		{
+			this->mass_matrix_contribution_for_code[code]=std::map<unsigned,std::set<FiniteElementField*,FiniteElementFieldPtrLess>>();
+		}
+		if (!this->mass_matrix_contribution_for_code[code].count(residual_index))
+		{
+			this->mass_matrix_contribution_for_code[code][residual_index]=std::set<FiniteElementField*,FiniteElementFieldPtrLess>();
+		}
+		this->mass_matrix_contribution_for_code[code][residual_index].insert(other);
+	}
+
 	// If a field is already defined on a bulk domain and merely re-exposed on an interface/corner
 	// domain, returns the top-level (bulk) field it is equivalent to; otherwise returns itself.
 	FiniteElementField * FiniteElementField::get_defined_on_domain_equivalent_field()
@@ -2433,6 +2450,14 @@ namespace pyoomph
 			GiNaC::ex mass_part = GiNaC::diff(diffpart, pyoomph::expressions::__partial_t_mass_matrix);
 			if (!mass_part.is_zero())
 			{
+				// Same bookkeeping as the Jacobian marking above, but for the mass-matrix half of this
+				// contribution. "mass_part is not zero" is exactly "this (row field, column field) pair
+				// can appear in the mass matrix", decided symbolically and therefore a superset of
+				// whatever the numbers turn out to be - which is what a sparsity pattern must be. The
+				// information was already computed here and discarded; recording it is what lets the
+				// mass matrix get a tight, value-independent pattern of its own instead of either
+				// inheriting the Jacobian's (3x too dense) or being value-filtered (not reusable).
+				residual_field->mark_mass_matrix_contribution_for_code(for_code,for_code->get_current_residual_index(),f);
 				os << indent << "    ADD_TO_MASS_MATRIX_" << (hanging_eqns ? "HANG" : "NOHANG") << "_" << (hang ? "HANG" : "NOHANG") << "(";
 				//		    mass_part.evalf().print(GiNaC::print_csrc_FEM(os,&csrc_opts));
 				//          GiNaC::factor(GiNaC::normal(GiNaC::expand(GiNaC::expand(mass_part).evalf()))).print(GiNaC::print_csrc_FEM(os,&csrc_opts));
@@ -7455,6 +7480,12 @@ namespace pyoomph
 	void FiniteElementCode::write_code_info(std::ostream &os)
 	{
 	   std::ostringstream init,cleanup;
+	   // Which functable SpaceInfo slot each field ends up in, recorded while the per-space field names
+	   // are emitted below. Read further down - once the contribution indices have been assigned - to
+	   // emit the slot -> contribution-index map, so that the per-space index arithmetic (which differs
+	   // between the continuous and the discontinuous branch) lives in exactly one place.
+	   // Entries are (SpaceInfo member name, index within that space, field).
+	   std::vector<std::tuple<std::string,unsigned,FiniteElementField*>> field_contribution_slots;
 		init << "JIT_API void JIT_ELEMENT_init(JITFuncSpec_Table_FiniteElement_t *functable)" << std::endl;
 		init << "{" << std::endl;
 
@@ -7521,6 +7552,12 @@ namespace pyoomph
 								
 				init << " functable->info_" << space->get_name() << ".numfields=" << numfields << ";" << std::endl;
 				init << " functable->info_" << space->get_name() << ".fieldnames=(char **)malloc(sizeof(char*)*functable->info_" << space->get_name() << ".numfields);" << std::endl;				
+				// Allocated here, alongside fieldnames and with exactly the same count, so the two can never
+				// disagree: the element walk indexes it by the space's field count, and sizing it from the
+				// slots recorded below would under-allocate whenever a field takes part in no contribution.
+				init << " functable->info_" << space->get_name() << ".field_contribution_index=(int*)malloc(sizeof(int)*functable->info_" << space->get_name() << ".numfields);" << std::endl;
+				init << " for (unsigned int _i=0;_i<functable->info_" << space->get_name() << ".numfields;_i++) { functable->info_" << space->get_name() << ".field_contribution_index[_i]=-2; }" << std::endl; // -2: present but contributes to nothing; see jitbridge.h
+				cleanup << " pyoomph_tested_free(functable->info_" << space->get_name() << ".field_contribution_index); functable->info_" << space->get_name() << ".field_contribution_index=PYOOMPH_NULL; " << std::endl;
 				for (auto &f : myfields)
 				{
 					if (f->get_space() != space)
@@ -7531,6 +7568,7 @@ namespace pyoomph
 					
 					init << " SET_INTERNAL_FIELD_NAME(functable->info_" << space->get_name() << ".fieldnames," << (f->index - index_offset) << ", \"" << f->get_name() << "\" );" << std::endl;										
 					cleanup << " pyoomph_tested_free(functable->info_" << space->get_name() << ".fieldnames[" << (f->index - index_offset) << "]); functable->info_" << space->get_name() << ".fieldnames[" << (f->index - index_offset) << "]=PYOOMPH_NULL; " << std::endl;
+					field_contribution_slots.push_back(std::make_tuple("info_"+space->get_name(), f->index - index_offset, f));
 				}
 								
 				cleanup << " pyoomph_tested_free(functable->info_" << space->get_name() << ".fieldnames); functable->info_" << space->get_name() << ".fieldnames=PYOOMPH_NULL; " << std::endl;
@@ -7689,6 +7727,10 @@ namespace pyoomph
 					}
 				}
 				init << " functable->" << info_name << ".fieldnames=(char **)malloc(sizeof(char*)*functable->" << info_name << ".numfields);" << std::endl;
+				// Same count as fieldnames; see the note at the other emission site.
+				init << " functable->" << info_name << ".field_contribution_index=(int*)malloc(sizeof(int)*functable->" << info_name << ".numfields);" << std::endl;
+				init << " for (unsigned int _i=0;_i<functable->" << info_name << ".numfields;_i++) { functable->" << info_name << ".field_contribution_index[_i]=-2; }" << std::endl; // -2: present but contributes to nothing; see jitbridge.h
+				cleanup << " pyoomph_tested_free(functable->" << info_name << ".field_contribution_index); functable->" << info_name << ".field_contribution_index=PYOOMPH_NULL; " << std::endl;
 				std::map<unsigned, FiniteElementField *> reindex;
 				for (auto &f : myfields)
 				{
@@ -7709,6 +7751,7 @@ namespace pyoomph
 					unsigned contiindex = reindex2[f->index];
 					init << " SET_INTERNAL_FIELD_NAME(functable->" << info_name << ".fieldnames," << contiindex << ", \"" << f->get_name() << "\" );" << std::endl;					
 					cleanup << " pyoomph_tested_free(functable->" << info_name << ".fieldnames[" << (contiindex) <<"]); functable->" << info_name << ".fieldnames[" <<(contiindex) << "]=PYOOMPH_NULL; " << std::endl;
+					field_contribution_slots.push_back(std::make_tuple(info_name, contiindex, f));
 				}
 				cleanup << " pyoomph_tested_free(functable->" << info_name << ".fieldnames); functable->" << info_name << ".fieldnames=PYOOMPH_NULL; " << std::endl;
 				index_offset += numfields;
@@ -8058,6 +8101,7 @@ namespace pyoomph
 		*/
 	  init << " functable->contributes_to_residual=(bool**)calloc(functable->num_res_jacs,sizeof(*functable->contributes_to_residual));" << std::endl;
 	  init << " functable->contributes_to_jacobian=(bool***)calloc(functable->num_res_jacs,sizeof(*functable->contributes_to_jacobian));" << std::endl;
+	  init << " functable->contributes_to_mass_matrix=(bool***)calloc(functable->num_res_jacs,sizeof(*functable->contributes_to_mass_matrix));" << std::endl;
 	  init << " functable->contribution_entries_size=" << contribution_names.size() << ";" << std::endl;
 	  if (contribution_names.size()>0)
 	  {
@@ -8076,8 +8120,11 @@ namespace pyoomph
 				init << " functable->contributes_to_residual[" << resiind << "]=(bool*)calloc("<< contribution_names.size() <<",sizeof(bool));" << std::endl;				
 				init << " functable->contributes_to_jacobian[" << resiind << "]=(bool**)calloc("<< contribution_names.size() <<",sizeof(**functable->contributes_to_jacobian));" << std::endl;				
 				init << " for (unsigned int _i=0;_i<"<< contribution_names.size() <<";_i++) { functable->contributes_to_jacobian[" << resiind << "][_i]=(bool*)calloc("<< contribution_names.size() <<",sizeof(bool)); }" << std::endl;				
+				init << " functable->contributes_to_mass_matrix[" << resiind << "]=(bool**)calloc("<< contribution_names.size() <<",sizeof(**functable->contributes_to_mass_matrix));" << std::endl;				
+				init << " for (unsigned int _i=0;_i<"<< contribution_names.size() <<";_i++) { functable->contributes_to_mass_matrix[" << resiind << "][_i]=(bool*)calloc("<< contribution_names.size() <<",sizeof(bool)); }" << std::endl;				
 				std::vector<bool> written_residual_contribution(contribution_names.size(), false);
 				std::vector<std::vector<bool>> written_jacobian_contribution(contribution_names.size(), std::vector<bool>(contribution_names.size(), false));
+				std::vector<std::vector<bool>> written_mass_matrix_contribution(contribution_names.size(), std::vector<bool>(contribution_names.size(), false));
 				for (auto &pair1 : to_where_it_was_defined)
 				{
 					FiniteElementField *f = pair1.first;					
@@ -8099,17 +8146,46 @@ namespace pyoomph
 							init << " functable->contributes_to_jacobian[" << resiind << "][" << i1 << "][" << i2 << "]=true; //" << contribution_names[i1] << " vs " << contribution_names[i2] << std::endl;
 							written_jacobian_contribution[i1][i2] = true;
 						}
+						if ((f->has_mass_matrix_contribution_for_code(this,resiind,f2) || f->has_mass_matrix_contribution_for_code(this,resiind,pair2.second)) && !written_mass_matrix_contribution[i1][i2])
+						{
+							init << " functable->contributes_to_mass_matrix[" << resiind << "][" << i1 << "][" << i2 << "]=true; //" << contribution_names[i1] << " vs " << contribution_names[i2] << std::endl;
+							written_mass_matrix_contribution[i1][i2] = true;
+						}
 					}
 				}
 				cleanup << " for (unsigned int _i=0;_i<functable->contribution_entries_size;_i++) { pyoomph_tested_free(functable->contributes_to_jacobian[" << resiind << "][_i]); functable->contributes_to_jacobian[" << resiind << "][_i]=PYOOMPH_NULL; }" << std::endl;
 				cleanup << " pyoomph_tested_free(functable->contributes_to_jacobian[" << resiind << "]); functable->contributes_to_jacobian[" << resiind << "]=PYOOMPH_NULL; " << std::endl;
+				cleanup << " for (unsigned int _i=0;_i<functable->contribution_entries_size;_i++) { pyoomph_tested_free(functable->contributes_to_mass_matrix[" << resiind << "][_i]); functable->contributes_to_mass_matrix[" << resiind << "][_i]=PYOOMPH_NULL; }" << std::endl;
+				cleanup << " pyoomph_tested_free(functable->contributes_to_mass_matrix[" << resiind << "]); functable->contributes_to_mass_matrix[" << resiind << "]=PYOOMPH_NULL; " << std::endl;
 				cleanup << " pyoomph_tested_free(functable->contributes_to_residual[" << resiind << "]); functable->contributes_to_residual[" << resiind << "]=PYOOMPH_NULL; " << std::endl;
 	  
 	  	}
 
 	  	cleanup << " pyoomph_tested_free(functable->contributes_to_residual); functable->contributes_to_residual=PYOOMPH_NULL; " << std::endl;
 	  	cleanup << " pyoomph_tested_free(functable->contributes_to_jacobian); functable->contributes_to_jacobian=PYOOMPH_NULL; " << std::endl;
+	  	cleanup << " pyoomph_tested_free(functable->contributes_to_mass_matrix); functable->contributes_to_mass_matrix=PYOOMPH_NULL; " << std::endl;
 	   }
+
+	  // Emit, per space, the map from that space's field slot to the contribution index used by
+	  // contributes_to_jacobian / contributes_to_mass_matrix. The elements need it to translate a LOCAL
+	  // DOF (which they know as "field f of space s at node n") into the row/column class those tables
+	  // are indexed by, and hence to decide which entries of their dense elemental block are
+	  // structurally present. -2 means the field is known to take part in NO contribution of this code,
+	  // so its row and column of the elemental block are empty; -1 (never written here) is reserved for
+	  // "not attributed", which the reader must treat as coupled to everything.
+	  // Cannot be emitted next to the field names above: the contribution indices are only assigned
+	  // here, from the set of fields that turned out to contribute.
+	  {
+		// The arrays themselves are allocated next to fieldnames above, with the space's own field count,
+		// so only the values are filled in here.
+		for (auto &slot : field_contribution_slots)
+		{
+			FiniteElementField *f = std::get<2>(slot);
+			if (!contribution_field_to_index.count(f)) continue; // Field contributes to nothing: stays -1
+			init << " functable->" << std::get<0>(slot) << ".field_contribution_index[" << std::get<1>(slot)
+				 << "]=" << contribution_field_to_index[f] << "; //" << contribution_names[contribution_field_to_index[f]] << std::endl;
+		}
+	  }
 
 	   init << " functable->dirichlet_field_index_to_global_field_index=(int*)calloc(functable->Dirichlet_set_size,sizeof(int)); // Filling is done in the problem once all fields are defined" << std::endl;
 	   init << " for (unsigned int i=0;i<functable->Dirichlet_set_size;i++) { functable->dirichlet_field_index_to_global_field_index[i]=-1; }" << std::endl;

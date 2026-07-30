@@ -352,6 +352,16 @@ typedef struct JITFuncSpec_Table_FiniteElement_SpaceInfo
 
  unsigned int * interface_dof_indices; // For continuous fields (C2TB-C1), this is of length numfields-numfields_basebulk and gives the index for additional dofs on interface nodes. Created at problem level
 
+ // Parallel to fieldnames: the index into contribution_names (and hence the row/column class of
+ // contributes_to_jacobian / contributes_to_mass_matrix) that each field of this space belongs to.
+ // -2 for a field that is present but takes part in NO contribution of this code, which is a
+ // POSITIVE statement: that field's row and column of this element's block are empty, so nothing has
+ // to be stored for them. Distinguished from -1, which means "could not be attributed" and must be
+ // read as coupled to everything -- conflating the two is what forced a structural zero onto the
+ // diagonal of every unclassifiable dof. Lets an element translate a local dof into the class the
+ // symbolic coupling tables are indexed by; see dev_docs/structural_assembly.md.
+ int * field_contribution_index;
+
  unsigned space_index; // Index to the arrays [4]
  bool is_dominant; // Is this the dominant space for the element, i.e. the geometric space where also the coordinates live? (e.g. C2TB>C2>C1TB>C1) // Set during problem level 
 
@@ -476,6 +486,12 @@ typedef struct JITFuncSpec_Table_FiniteElement
   char **contribution_names;
   bool ARRAY_DECL_RESIDUAL_DESTINATION(ARRAY_DECL_NFIELDS(contributes_to_residual));
   bool ARRAY_DECL_RESIDUAL_DESTINATION(ARRAY_DECL_NFIELDS(ARRAY_DECL_NFIELDS(contributes_to_jacobian)));
+  // Same shape as contributes_to_jacobian, but restricted to the mass-matrix half of each Jacobian
+  // contribution (the part carrying a time derivative of the column field). Always a subset of
+  // contributes_to_jacobian. Decided symbolically at code generation time, so it is a superset of
+  // whatever entries turn out to be numerically nonzero -- i.e. a valid sparsity pattern. Used to give
+  // the mass matrix its own tight, value-independent pattern; see dev_docs/structural_assembly.md.
+  bool ARRAY_DECL_RESIDUAL_DESTINATION(ARRAY_DECL_NFIELDS(ARRAY_DECL_NFIELDS(contributes_to_mass_matrix)));
   // Fields defined on this domain (i.e. without taking over from parent)
   unsigned num_defined_fields_on_this_domain;
   char **defined_field_names_on_this_domain;

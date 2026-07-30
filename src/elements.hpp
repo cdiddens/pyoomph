@@ -653,6 +653,23 @@ namespace pyoomph
     virtual void connect_periodic_tree(BulkElementBase *other, const int &mydir, const int &otherdir);
 
     virtual std::vector<std::string> get_dof_names(bool not_a_root_call = false);
+
+    // For each of this element's local dofs, the index into the code's contribution_names -- i.e. the
+    // row/column class that contributes_to_jacobian / contributes_to_mass_matrix are indexed by. Lets
+    // the sparsity machinery decide which entries of the dense elemental block can ever be nonzero,
+    // without evaluating anything. Cached; rebuilt after fill_element_info() (i.e. after every local
+    // equation renumbering).
+    // -1 means "could not be attributed to a field" and must be read CONSERVATIVELY, as "assume this
+    // dof couples to everything". Under-reporting a coupling is safe (the entry then falls back to the
+    // value filter), whereas wrongly claiming a dof is decoupled would silently truncate the Jacobian.
+    const std::vector<int> &get_local_dof_contribution_indices();
+
+  protected:
+    std::vector<int> local_dof_contribution_indices;
+    bool local_dof_contribution_indices_valid = false;
+    virtual void fill_local_dof_contribution_indices(std::vector<int> &dest); // Overridden by InterfaceElementBase for its extra interface dofs
+
+  public:
     // Compares the analytically assembled Jacobian (from fill_in_generic_residual_contribution_jit)
     // against a finite-difference approximation with step diff_eps, for debugging generated code.
     virtual void debug_analytical_jacobian(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian, double diff_eps);
@@ -2684,7 +2701,21 @@ namespace pyoomph
         if (functable->merged_required_shapes.opposite_shapes->bulk_shapes)
         {
           //        std::cout << "INTERFACE ELEM MERGED BULK " <<  functable->merged_required_shapes.opposite_shapes->bulk_shapes->psi_D0 << std::endl;
-          add_required_external_data(functable->merged_required_shapes.opposite_shapes->bulk_shapes, dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(opposite_side)->bulk_element_pt()));
+          auto *opp_blk = dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(opposite_side)->bulk_element_pt());
+          add_required_external_data(functable->merged_required_shapes.opposite_shapes->bulk_shapes, opp_blk);
+          // ...and register the same data on the OPPOSITE element as well.
+          //
+          // Reaching the opposite side's bulk goes through the opposite INTERFACE element: its shape
+          // info is filled by remapping the bulk's local equations through that element's own
+          // bulk_eqn_map, which can only resolve dofs that are among ITS dofs. That map is built from
+          // the opposite element's own requirements, and those need not mention the bulk at all -- the
+          // requirement lives here, on the side that wrote the expression.
+          //
+          // A droplet/gas interface makes it concrete: writing grad(c) of the gas domain in a droplet
+          // interface condition needs the gas bulk element's C2 dofs, but the gas-side interface
+          // element may only carry a Dirichlet condition on c, which needs no bulk shapes whatsoever.
+          // Without this the remap yields "not found" for exactly those dofs.
+          opposite_side->add_required_external_data(functable->merged_required_shapes.opposite_shapes->bulk_shapes, opp_blk);
         }
       }
 

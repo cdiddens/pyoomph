@@ -59,6 +59,11 @@ class MacAccelerateLinearSolver(GenericLinearSystemSolver):
         super().__init__(problem)
         self.solver=_pyoomph.MacAccelerateSparseSolver()
         self.method:MacAccelerateMethod=method
+        # Reuse Accelerate's symbolic factorization across solves while the Jacobian sparsity pattern is
+        # unchanged. Requires problem.keep_structural_zeros; without it jacobian_structure_id is 0 and
+        # this switches itself off, leaving the previous behaviour untouched.
+        self.reuse_symbolic_factorization=True
+        self._structure_id:int=0
 
     def set_method(self,method:MacAccelerateMethod)->None:
         """Select the factorization method used on the next factorize (i.e. the next Newton/time
@@ -86,7 +91,20 @@ class MacAccelerateLinearSolver(GenericLinearSystemSolver):
             # indptr/indices genuinely need int32->int64 for the Accelerate C++ wrapper, so those
             # astype calls copy. A.data is already float64, so astype(...,copy=False) is a no-op that
             # avoids a redundant ~nnz*8 byte copy.
-            self.solver.factorize(n,n,A.indptr.astype("int64"),A.indices.astype("int64"),A.data.astype("float64",copy=False),self.method)
+            indptr=A.indptr.astype("int64"); indices=A.indices.astype("int64")
+            data=A.data.astype("float64",copy=False)
+            # Skip Accelerate's symbolic factorization (the fill-reducing ordering and elimination
+            # structure) whenever the sparsity pattern is unchanged since the last one -- SparseRefactor
+            # recomputes only the numbers. problem.jacobian_structure_id promises the pattern is the
+            # same; refactorize_values_only() verifies it against the stored indices before acting, so a
+            # stale id costs a full factorization rather than a wrong answer.
+            structure_id=self.problem.jacobian_structure_id
+            if (self.reuse_symbolic_factorization and structure_id!=0 and structure_id==self._structure_id
+                    and self.solver.is_factorized()
+                    and self.solver.refactorize_values_only(indptr,indices,data)):
+                return 0
+            self._structure_id=structure_id
+            self.solver.factorize(n,n,indptr,indices,data,self.method)
         elif op_flag==2:
             if nrhs != 1:
                 raise NotImplementedError("Only single right-hand side is supported")

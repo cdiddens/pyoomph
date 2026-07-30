@@ -936,6 +936,43 @@ void PyReg_Mesh(nb::module_ &m)
 			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);
 			if (!be) return std::vector<std::string>();
 			else return be->get_dof_names(); }, "Returns the names of all degrees of freedom (fields) of this element")
+		.def("_get_dof_contribution_indices", [](oomph::GeneralisedElement *self)
+			 {
+			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);
+			if (!be) return std::vector<int>();
+			else return be->get_local_dof_contribution_indices(); },
+			 "For each local degree of freedom, the index into the element code's contribution names (see "
+			 "``_get_contribution_names``), or -1 if it could not be attributed to a field. Used by the structural "
+			 "sparsity machinery to decide which entries of the elemental block can ever be nonzero; exposed for testing.")
+		.def("_get_contribution_tables", [](oomph::GeneralisedElement *self)
+			 {
+			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);
+			std::vector<std::string> names;
+			std::vector<std::vector<bool>> jac, mass;
+			if (be)
+			{
+				auto *ft=be->get_code_instance()->get_func_table();
+				int r=ft->current_res_jac;
+				for (unsigned i=0;i<ft->contribution_entries_size;i++) names.push_back(ft->contribution_names[i]);
+				if (r>=0 && ft->contributes_to_jacobian && ft->contributes_to_mass_matrix)
+				{
+					for (unsigned i=0;i<ft->contribution_entries_size;i++)
+					{
+						std::vector<bool> jrow, mrow;
+						for (unsigned j=0;j<ft->contribution_entries_size;j++)
+						{
+							jrow.push_back(ft->contributes_to_jacobian[r][i][j]);
+							mrow.push_back(ft->contributes_to_mass_matrix[r][i][j]);
+						}
+						jac.push_back(jrow); mass.push_back(mrow);
+					}
+				}
+			}
+			return std::make_tuple(names,jac,mass); },
+			 "The symbolic field-coupling tables of this element's code for the currently active residual: "
+			 "``(contribution_names, contributes_to_jacobian, contributes_to_mass_matrix)``. Both tables are "
+			 "``[row_field][column_field]`` and are supersets of whatever entries turn out to be numerically "
+			 "nonzero. Exposed for testing the structural sparsity machinery.")
 		.def(
 			"get_father_element", [](oomph::GeneralisedElement *self) -> oomph::GeneralisedElement *
 			{

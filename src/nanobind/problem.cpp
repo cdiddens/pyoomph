@@ -776,6 +776,91 @@ void PyReg_Problem(nb::module_ &m)
 			"Whether an improved (but more expensive) pitchfork bifurcation tracking scheme is used, required for some unstructured meshes.")
 		.def_prop_rw("sparse_assembly_method", &pyoomph::Problem::get_sparse_assembly_method, &pyoomph::Problem::set_sparse_assembly_method,
 					  "Method used to assemble the sparse Jacobian matrix: one of \"vectors_of_pairs\", \"two_vectors\", \"maps\", \"lists\" or \"two_arrays\" (see oomph-lib for details).")
+		.def_prop_rw("keep_structural_zeros", &pyoomph::Problem::get_keep_structural_zeros, &pyoomph::Problem::set_keep_structural_zeros,
+					  "Whether the assembled Jacobian keeps entries that evaluate to exactly zero. By default they are dropped, which makes the sparsity "
+					  "pattern depend on the current degrees of freedom and hence change between Newton steps. Keeping them makes the pattern depend on the "
+					  "equation numbering alone, so linear solvers can reuse their symbolic phase across solves (see ``jacobian_structure_id``), and every "
+					  "diagonal entry is guaranteed to be present. Costs a few percent more nonzeros for single-physics problems, more for weakly coupled "
+					  "multi-physics ones.")
+		.def_prop_rw("keep_structural_zeros_in_mass_matrix", &pyoomph::Problem::get_keep_structural_zeros_in_secondary_matrices, &pyoomph::Problem::set_keep_structural_zeros_in_secondary_matrices,
+					  "Whether ``keep_structural_zeros`` also applies to the secondary matrices of a multi-matrix assembly, i.e. to the mass matrix of the "
+					  "eigenproblem assembly. Off by default and usually best left off: the mass matrix is typically several times sparser than the Jacobian "
+					  "(only fields carrying a time derivative contribute), so giving it the Jacobian's pattern inflates it for no benefit -- what a stable "
+					  "pattern buys is symbolic-factorisation reuse, and the operator being factorised is the Jacobian.")
+		.def_prop_rw("prune_structural_zeros_by_field_coupling", &pyoomph::Problem::get_prune_structural_zeros_by_field_coupling, &pyoomph::Problem::set_prune_structural_zeros_by_field_coupling,
+					  "Whether the value-independent sparsity pattern is pruned to the field pairs the code generator proves can contribute at all, rather than "
+					  "being the full element-connectivity pattern. On by default: pruning reproduced the numerical pattern exactly on every problem measured, "
+					  "against up to 1.37x more nonzeros for plain connectivity on weakly coupled multi-physics. Only has an effect together with "
+					  "``keep_structural_zeros``. Incompatible with ``sparse_assembly_method=\"lists\"``.")
+		.def("_set_solver_requires_explicit_diagonal", &pyoomph::Problem::set_solver_requires_explicit_diagonal, nb::arg("yesno"),
+			 "Tell the problem whether the active linear solver needs an explicit entry on every diagonal. Pushed down from the Python solver layer before "
+			 "assembling (see GenericLinearSystemSolver.requires_explicit_diagonal); only consulted while ``force_jacobian_diagonal_entries`` has not been "
+			 "set explicitly.")
+		.def("_set_force_jacobian_diagonal_entries_auto", &pyoomph::Problem::set_force_jacobian_diagonal_entries_auto,
+			 "Undo an explicit ``force_jacobian_diagonal_entries`` setting and go back to asking the active linear solver.")
+		.def_prop_ro("_force_jacobian_diagonal_entries_is_auto", &pyoomph::Problem::get_force_jacobian_diagonal_entries_is_auto,
+			 "Whether the diagonal policy is still being taken from the linear solver rather than from an explicit setting.")
+		.def_prop_rw("force_jacobian_diagonal_entries", &pyoomph::Problem::get_force_jacobian_diagonal_entries, &pyoomph::Problem::set_force_jacobian_diagonal_entries,
+					  "Whether an entry is kept on every diagonal of the Jacobian, even where no field pair contributes to it -- as a Taylor-Hood "
+					  "pressure-pressure block does not, once the pattern is pruned by field coupling.\n\n"
+					  "Reading it gives the EFFECTIVE value. By default that is whatever the active linear solver asks for via "
+					  "``requires_explicit_diagonal()``, since needing a diagonal is a property of the factorisation and not of the problem: only some PETSc "
+					  "factorisations require one, MUMPS does not. Assigning to it overrides the solver in either direction and stops it being consulted "
+					  "(call ``_set_force_jacobian_diagonal_entries_auto()`` to undo). Stored zeros are not free -- they change the matrix a direct solver "
+					  "sees, hence its pivoting. Only has an effect together with ``keep_structural_zeros``.")
+#ifdef OOMPH_HAS_MPI
+		// oomph-lib only declares this inside its own OOMPH_HAS_MPI guard, so a build configured with
+		// PYOOMPH_USE_MPI=OFF does not have it at all.
+		.def("_enable_doc_imbalance_in_parallel_assembly", &oomph::Problem::enable_doc_imbalance_in_parallel_assembly,
+			 "Make the distributed assembly report its local-stage time and the load imbalance across ranks. Diagnostics for the MPI assembly work. "
+			 "Only present in an MPI-enabled build.")
+#endif
+		.def_prop_rw("use_frozen_sparsity", &pyoomph::Problem::get_use_frozen_sparsity, &pyoomph::Problem::set_use_frozen_sparsity,
+					  "Whether assembly writes straight into a preallocated CSR through a precomputed scatter map, instead of accumulating into a searchable "
+					  "container and compressing it afterwards. Requires a value-independent pattern (``keep_structural_zeros``), and falls back to oomph-lib's "
+					  "assembly by itself whenever it cannot apply -- distributed runs, augmented systems (bifurcation tracking), compressed-column output, or "
+					  "any element the code generator cannot describe symbolically.")
+		.def_prop_rw("use_frozen_distributed_sparsity", &pyoomph::Problem::get_use_frozen_distributed_sparsity, &pyoomph::Problem::set_use_frozen_distributed_sparsity,
+					  "The distributed counterpart of ``use_frozen_sparsity``: on a ``--distribute``\\ d run, freeze the whole assembly plan -- which rows this rank "
+					  "touches, which rank owns each of them, the column indices, and how the pieces arriving from several ranks merge into one row -- so that only "
+					  "values and residuals travel per assembly. oomph-lib redoes all of it every time, and its owner-side merge rescans the row built so far for "
+					  "every incoming entry. Falls back to oomph-lib's routine by itself whenever it cannot apply: a replicated problem whose elements are merely "
+					  "split across ranks (its element ranges are re-tuned from measured timings, so they are not a function of the equation numbering), a "
+					  "residual-only assembly, an augmented system, or a pattern the code generator cannot describe symbolically. Always False in a non-MPI build.")
+		.def("_request_newton_abort", &pyoomph::Problem::request_newton_abort, nb::arg("reason"),
+			 "Abandon the Newton solve that is currently running. The next residual evaluation raises the same error an ordinary divergence would, so callers "
+			 "that already recover from a failed solve (an adaptive time-stepper cutting dt, for instance) need no change. Unlike the mechanism this replaces it "
+			 "leaves the dofs untouched, so the rejected state can still be inspected or written out, and it agrees the request across MPI ranks -- the decision "
+			 "to reject is usually only visible on the ranks holding the relevant part of the mesh. The reason is printed when the abort fires.")
+		.def("_newton_abort_requested", &pyoomph::Problem::newton_abort_requested,
+			 "Whether an abort has been requested on THIS rank and not yet consumed. Note that the abort actually fires if any rank has requested one.")
+		.def("_get_distributed_residual_rebuild_count", &pyoomph::Problem::get_distributed_residual_rebuild_count,
+			 "How many distributed RESIDUAL plans have been built since the problem was created (the equation/exchange half only, used by get_residuals() under "
+			 "MPI -- see ``use_frozen_distributed_sparsity``). Counted separately from the matrix plans because get_residuals() installs its own assembly handler "
+			 "and would otherwise appear to be a different pattern. Should settle to a small number; zero after a distributed solve means the route never engaged.")
+		.def("_get_distributed_frozen_rebuild_count", &pyoomph::Problem::get_distributed_frozen_rebuild_count,
+			 "How many distributed assembly plans have been built since the problem was created. A plan costs a round of communication on top of two passes over "
+			 "the mesh, so this should settle: if it keeps rising, the pattern is being invalidated every assembly and the frozen route is a pure loss. Zero after "
+			 "a distributed solve means the route never engaged at all.")
+		.def("_get_frozen_sparsity_rebuild_count", &pyoomph::Problem::get_frozen_sparsity_rebuild_count,
+			 "How many frozen sparsity patterns have been built since the problem was created. It should stop growing once a workflow settles: a count that "
+			 "keeps rising assembly after assembly means the pattern cache is thrashing (too small for the number of distinct patterns in play), which is "
+			 "slower than not caching at all.")
+		.def_prop_rw("_frozen_sparsity_cache_capacity", &pyoomph::Problem::get_frozen_sparsity_cache_capacity, &pyoomph::Problem::set_frozen_sparsity_cache_capacity,
+			 "How many frozen sparsity patterns are kept at once, keyed by (pattern id, matrix index). Needs to be at least the number of DISTINCT patterns a "
+			 "workflow alternates between -- the Jacobian, a preconditioner matrix built from another residual, the mass matrix -- or each will evict the "
+			 "others. Raised automatically if a single assembly needs more. Changing it clears the cache.")
+		.def("_get_frozen_sparsity_nnz", &pyoomph::Problem::get_frozen_sparsity_nnz, nb::arg("matrix_index") = 0,
+			 "Number of nonzeros in the frozen sparsity pattern currently held for the given matrix of a multi-matrix assembly, or 0 if none is built. "
+			 "A positive value is the only direct evidence that the preallocated-CSR assembly path actually engaged rather than quietly falling back, "
+			 "which is worth checking before believing any benchmark of it.")
+		.def_prop_ro("jacobian_structure_id", &pyoomph::Problem::get_jacobian_structure_id,
+					  "Identifier of the current Jacobian sparsity pattern. Anything derived from the pattern stays valid as long as this value is unchanged "
+					  "and non-zero. It is 0 whenever ``keep_structural_zeros`` is off, since the pattern is then value-dependent and cannot be reused.")
+		.def("_benchmark_elemental_assembly", &pyoomph::Problem::benchmark_elemental_assembly,
+			 nb::arg("n_repeat"), nb::arg("with_jacobian") = true, nb::arg("with_mass_matrix") = false,
+			 "Time only the elemental part of an assembly (evaluating each element's residual/Jacobian, discarding the result), averaged over ``n_repeat`` "
+			 "passes. Subtracting this from a full assembly isolates the cost of scattering into the sparse matrix. Instrumentation, not a solver routine.")
 		.def_prop_rw("dist_problem_matrix_distribution", &pyoomph::Problem::get_dist_problem_matrix_distribution, &pyoomph::Problem::set_dist_problem_matrix_distribution,
 					  "How the Jacobian matrix rows are distributed across MPI processes in a distributed problem: one of \"default\", \"problem\" or \"uniform\". No-op without MPI support.")
 		.def("adaptive_unsteady_newton_solve", (double(pyoomph::Problem::*)(const double &, const double &)) & pyoomph::Problem::adaptive_unsteady_newton_solve,

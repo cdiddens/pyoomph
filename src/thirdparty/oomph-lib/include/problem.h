@@ -483,7 +483,11 @@ namespace oomph
     /// be uniform over all processors.
     LinearAlgebraDistribution* Dof_distribution_pt;
 
-  private:
+    // FOR PYOOMPH: get_my_eqns() and parallel_sparse_assemble() were private; they are now protected
+    // and the latter is virtual, so that a derived Problem can substitute its own distributed
+    // assembly. Nothing else changed -- in particular the default implementations are untouched, so
+    // a class that does not override sees exactly the previous behaviour.
+  protected:
 #ifdef OOMPH_HAS_MPI
 
     /// Helper method that returns the (unique) global equations to which
@@ -496,13 +500,18 @@ namespace oomph
 
     /// Helper method to assemble CRDoubleMatrices from distributed
     /// on multiple processors.
-    void parallel_sparse_assemble(
+    virtual void parallel_sparse_assemble( // FOR PYOOMPH: made virtual
       const LinearAlgebraDistribution* const& dist_pt,
       Vector<int*>& column_or_row_index,
       Vector<int*>& row_or_column_start,
       Vector<double*>& value,
       Vector<unsigned>& nnz,
       Vector<double*>& residuals);
+
+#endif
+
+  private:
+#ifdef OOMPH_HAS_MPI
 
     /// A private helper function to
     /// copy the haloed equation numbers into the halo equation numbers,
@@ -706,6 +715,43 @@ namespace oomph
     /// A tolerance used to determine whether the entry in a sparse
     /// matrix is zero. If it is then storage need not be allocated.
     double Numerical_zero_for_sparse_assembly;
+
+    //FOR PYOOMPH
+    /// The tolerance above to use for the matrix_index-th matrix of a multi-matrix assembly (the
+    /// sparse assembly routines can build several matrices in one pass over the elements, e.g. the
+    /// Jacobian AND the mass matrix for an eigenproblem). Defaults to the single problem-wide value,
+    /// so behaviour is unchanged unless a derived Problem overrides this. It is virtual so that a
+    /// derived problem can apply a different sparsity policy per matrix: pyoomph keeps structurally
+    /// zero entries in the Jacobian, which makes its pattern depend on the equation numbering alone
+    /// and hence reusable by the linear solver, but must NOT do so for the mass matrix, which is
+    /// several times sparser and would otherwise be inflated to the Jacobian's pattern.
+    virtual double numerical_zero_for_sparse_assembly(const unsigned& matrix_index) const
+    {
+      return Numerical_zero_for_sparse_assembly;
+    }
+
+    //FOR PYOOMPH
+    /// Optional structural sparsity mask for one element's contribution to the matrix_index-th matrix
+    /// of a multi-matrix assembly: an nvar*nvar array of 0/1 in row-major order, or NULL for "no mask"
+    /// (the default, which reproduces the original behaviour exactly). Fetched once per element, so a
+    /// derived problem may return a pointer into a scratch buffer rather than allocating -- but note
+    /// that the masks for ALL matrices of an element are fetched before any of them is used, so the
+    /// pointers returned for different matrix_index must remain valid simultaneously (i.e. one scratch
+    /// buffer per matrix, not one shared buffer).
+    ///
+    /// A set entry means "this position of the elemental block is STRUCTURALLY present": store it even
+    /// if it currently evaluates to zero. The mask is applied with OR, never instead of, the numerical
+    /// test -- so it can only ever ADD entries. That asymmetry is deliberate: a mask that over-reports
+    /// merely stores explicit zeros, whereas one that under-reported would silently drop real entries
+    /// from the assembled matrix. pyoomph uses it to give the Jacobian a sparsity pattern that depends
+    /// on the equation numbering alone (and is hence reusable by the linear solver across Newton
+    /// steps) without paying for the entries its symbolic analysis proves can never be nonzero.
+    virtual const char* sparsity_mask_for_element(const unsigned& matrix_index,
+                                                  GeneralisedElement* const& elem_pt,
+                                                  const unsigned& nvar)
+    {
+      return 0;
+    }
 
     /// Protected helper function that is used to assemble the Jacobian
     /// matrix in the case when the storage is row or column compressed.

@@ -353,7 +353,13 @@ class pardisoSolver(object):
     def factor(self):
         #print("PARDISO FACTOR")
         out = self.run_pardiso(phase=12) #type:ignore
-    
+
+    def factor_numeric_only(self):
+        # Phase 22 = numerical factorisation only, reusing the fill-reducing ordering and the symbolic
+        # factorisation computed by an earlier phase 11 (or 12). Only valid while ia/ja are unchanged;
+        # the caller must have established that (see PardisoSolver._reuse_symbolic_factorisation).
+        out = self.run_pardiso(phase=22) #type:ignore
+
     def refactor(self):
         out = self.run_pardiso(phase=23) #type:ignore
 
@@ -440,6 +446,21 @@ class PardisoSolver(GenericLinearSystemSolver):
         self.try_to_reuse_solver=False
         self.verbose=verbose
         self.iparm_override:dict[int,int]={}
+        # Skip Pardiso's reordering/symbolic phase (11) whenever the Jacobian sparsity pattern is
+        # unchanged since the last factorisation, i.e. run phase 22 instead of phase 12. This requires
+        # problem.keep_structural_zeros to be on -- otherwise the pattern follows the dof values and
+        # jacobian_structure_id is 0, which disables this automatically. Distinct from
+        # try_to_reuse_solver, which gambles on reusing the *numerical* factorisation as well; that is
+        # only sometimes valid and is checked a posteriori, whereas symbolic reuse is always exact.
+        self.reuse_symbolic_factorisation=True
+        self._structure_id:int=0 # Pattern the current symbolic factorisation was computed for; 0 = none
+        self._lastA:Any=None
+        self._pattern_verified:bool=False # Whether the values now in Pardiso sit on the SAME pattern it was factorised for
+        # Which path each op_flag==1 took. Counters rather than timings, so a benchmark cannot mistake a
+        # silent fallback for a win (see dev_docs/structural_assembly.md, Phase 2).
+        self.n_full_factorisations:int=0    # phase 12: reordering + symbolic + numeric
+        self.n_numeric_factorisations:int=0 # phase 22: numeric only, symbolic reused
+        self.n_numeric_reuses:int=0         # factors kept entirely, used as a CGS preconditioner
 
     def set_num_threads(self,nthreads:int | None):
         if nthreads is None or nthreads==0:
@@ -471,6 +492,38 @@ class PardisoSolver(GenericLinearSystemSolver):
     def get_b(self,n:int,b:NPFloatArray):
         return b
 
+    def _reuse_symbolic_factorisation(self,A:Any)->bool:
+        """Feed a re-assembled Jacobian into the existing factorisation object without redoing the
+        symbolic phase. Returns False if that is not possible, in which case the caller must build a
+        fresh solver.
+
+        The pattern is *verified* rather than merely trusted. problem.jacobian_structure_id already
+        promises it is unchanged, but a stale id would mean Pardiso applies an old elimination tree to
+        a new pattern -- a silently wrong answer rather than a crash. Comparing the index arrays costs
+        O(nnz) integer compares (~1 ms for 1.8M nonzeros) against the ~180 ms the symbolic phase takes,
+        so the insurance is essentially free.
+        """
+        if not self.reuse_symbolic_factorisation:
+            return False
+        ps = self._current_pardiso
+        if ps is None or self._structure_id == 0:
+            return False
+        if ps.n != A.shape[0] or len(ps.a) != len(A.data):
+            return False
+        # oomph-lib does not emit the column indices of a row in ascending order, and pardisoSolver
+        # sorts them in its constructor. Sort here too, or ps.ja (sorted) and A.indices (as assembled)
+        # would compare unequal even for an identical pattern -- and, worse, copying A.data into the
+        # sorted ps.a would scramble the values. Sorting permutes indices and data together.
+        if not A.has_sorted_indices:
+            A.sort_indices()
+        if not numpy.array_equal(ps.ia, A.indptr) or not numpy.array_equal(ps.ja, A.indices):
+            print("WARNING: the Jacobian sparsity pattern changed although problem.jacobian_structure_id "
+                  "did not. Falling back to a full factorisation. This is a bug in the pattern "
+                  "invalidation -- please report it.")
+            return False
+        ps.a[:] = A.data[:]
+        return True
+
     def solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPIntArray,colptr:NPIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
         #print("CALL WITH OP FLAG ",op_flag,ldb,transpose)
         #print("PARDISO ", op_flag)
@@ -478,25 +531,50 @@ class PardisoSolver(GenericLinearSystemSolver):
 #            print("INFO",len(values),len(rowind),len(colptr))
             A = self.get_jacobian_matrix(n,values, rowind, colptr)  # That is not optimal, of course
             mode = 11
+            structure_id = self.problem.jacobian_structure_id
+            if (not self.try_to_reuse_solver) and structure_id != 0 and structure_id == self._structure_id \
+                    and self._reuse_symbolic_factorisation(A):
+                # Same pattern, new values: only the numerical factorisation has to be redone.
+                self._lastA = A
+                self._current_pardiso.factor_numeric_only() #type:ignore
+                self.n_numeric_factorisations+=1
+                if self.verbose:
+                    print("PARDISO reused symbolic factorisation (structure id "+str(structure_id)+")")
+                return 0
+            self._structure_id = structure_id
             if self.try_to_reuse_solver:
                 self._lastA=A
                 if self._current_pardiso is None:    
                     self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=self.verbose,iparm_override=self.iparm_override)
-                    print("CREATED NEW PARDISO AND FACTOR")
+                    if self.verbose: print("CREATED NEW PARDISO AND FACTOR")
                     self._current_pardiso.factor()
+                    self.n_full_factorisations+=1
+                    self._pattern_verified=True
+                elif self._reuse_symbolic_factorisation(A):
+                    # Values copied in, factors deliberately left alone: this branch is the numeric
+                    # reuse, and op_flag==2 will use those factors as a CGS preconditioner. The call
+                    # above also VERIFIED the pattern, which is what lets the fallback there be a
+                    # phase-22 refactorisation instead of a full rebuild.
+                    self._pattern_verified=True
+                    self.n_numeric_reuses+=1
+                elif self._current_pardiso.update_matrix_values(A):
+                    # Same sizes but the pattern was not verified (or symbolic reuse is off), so the
+                    # cheap fallback in op_flag==2 is not available.
+                    self._pattern_verified=False
+                    self.n_numeric_reuses+=1
                 else:
-                    if not self._current_pardiso.update_matrix_values(A):
-                        self._current_pardiso.clear()  # TODO: Only if matrix is entirely changed                
-                        self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=self.verbose,iparm_override=self.iparm_override)
-                        print("CREATED NEW PARDISO AND FACTOR")
-                        self._current_pardiso.factor()                    
-                        
-                   
+                    self._current_pardiso.clear()  # TODO: Only if matrix is entirely changed                
+                    self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=self.verbose,iparm_override=self.iparm_override)
+                    if self.verbose: print("CREATED NEW PARDISO AND FACTOR")
+                    self._current_pardiso.factor()                    
+                    self.n_full_factorisations+=1
+                    self._pattern_verified=True
             else:
                 if self._current_pardiso:
                     self._current_pardiso.clear()  # TODO: Only if matrix is entirely changed                
                 self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=self.verbose,iparm_override=self.iparm_override)
                 self._current_pardiso.factor()
+                self.n_full_factorisations+=1
                 if self.verbose:
                     print("PARDISO FACTOR IPARM",self._current_pardiso.iparm)                
         elif op_flag == 2:
@@ -515,14 +593,27 @@ class PardisoSolver(GenericLinearSystemSolver):
                 #self._current_pardiso.iparm[3] = 0
                 err=numpy.amax(numpy.absolute(self._lastA*sol-bv))
                 if self._current_pardiso.iparm[6]==maxiters or err>1e-10:
-                    print("MUST RECOMPUTE FACTORIZATION","ITER",self._current_pardiso.iparm[6],"ERR",err)
-                    if self._current_pardiso:
-                        self._current_pardiso.clear() 
-                    mode=11
-                    self._current_pardiso = pardisoSolver(self._lastA, mtype=mode, verbose=self.verbose,iparm_override=self.iparm_override)
-                    self._current_pardiso.factor()
+                    if self.verbose:
+                        print("MUST RECOMPUTE FACTORIZATION","ITER",self._current_pardiso.iparm[6],"ERR",err)
+                    # The two reuse tiers compose here. Reusing the numerical factors as a
+                    # preconditioner has just failed, but that says nothing about the SPARSITY, so when
+                    # the pattern is known unchanged the fallback only has to redo the numbers (phase
+                    # 22) rather than the reordering and symbolic factorisation as well (phase 12).
+                    # Before, a stalled numeric reuse always paid for a full rebuild -- which on the 3D
+                    # benchmark is ~180 ms of reordering thrown away every time it happens.
+                    if self._pattern_verified and self.reuse_symbolic_factorisation:
+                        self._current_pardiso.iparm[3] = 0  # plain solve, not CGS, for the retry
+                        self._current_pardiso.factor_numeric_only()
+                        self.n_numeric_factorisations+=1
+                    else:
+                        if self._current_pardiso:
+                            self._current_pardiso.clear()
+                        mode=11
+                        self._current_pardiso = pardisoSolver(self._lastA, mtype=mode, verbose=self.verbose,iparm_override=self.iparm_override)
+                        self._current_pardiso.factor()
+                        self.n_full_factorisations+=1
                     sol=self._current_pardiso.solve(bv)
-                else:
+                elif self.verbose:
                     print("REUSE PARDISO AND REFACTOR DONE, ERROR",err,"IN ",self._current_pardiso.iparm[6],"ITERATIONS")
                 b[:]=sol[:]
             else:
