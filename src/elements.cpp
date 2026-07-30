@@ -1662,10 +1662,19 @@ namespace pyoomph
 									hangbuffer[l].masters[m].local_eqn = eqn_remap[hangbuffer[l].masters[m].local_eqn];
 									if (hangbuffer[l].masters[m].local_eqn == -666)
 									{
+										// Name the FIELD. Whether this is a real defect or an over-strict check
+										// turns entirely on whether the interface residual actually uses this
+										// field, and a bare "space C2, index 0" gives the reader no way to tell.
 										std::ostringstream oss;
-										oss << this;
-										oss << " node: " << l << ", master " << m << " of " << hangbuffer[l].nummaster  << ", index " << f << ", " << foffs << " of " << space_info->numfields_basebulk;
-										throw_runtime_error("MISSING EXTERNAL DEPENDENCY ON SPACE '"+std::string(space_info->space_name)+"' ON ELEM PTR: " + oss.str());
+										oss << "field '" << (space_info->fieldnames && space_info->fieldnames[foffs] ? space_info->fieldnames[foffs] : "?")
+											<< "' on space '" << space_info->space_name << "'"
+											<< " (node " << l << ", master " << m << " of " << hangbuffer[l].nummaster
+											<< ", field index " << f << " of " << space_info->numfields_basebulk << ")";
+										throw_runtime_error("MISSING EXTERNAL DEPENDENCY: " + oss.str() + ". The opposite/bulk element "
+															"holds this dof, but it is not registered as external data of this interface "
+															"element, so its equation cannot be remapped. Element " +
+															std::string(this->get_code_instance() && this->get_code_instance()->get_code()
+																			? this->get_code_instance()->get_code()->get_file_name() : "?"));
 									}
 								}
 							}

@@ -2701,7 +2701,21 @@ namespace pyoomph
         if (functable->merged_required_shapes.opposite_shapes->bulk_shapes)
         {
           //        std::cout << "INTERFACE ELEM MERGED BULK " <<  functable->merged_required_shapes.opposite_shapes->bulk_shapes->psi_D0 << std::endl;
-          add_required_external_data(functable->merged_required_shapes.opposite_shapes->bulk_shapes, dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(opposite_side)->bulk_element_pt()));
+          auto *opp_blk = dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(opposite_side)->bulk_element_pt());
+          add_required_external_data(functable->merged_required_shapes.opposite_shapes->bulk_shapes, opp_blk);
+          // ...and register the same data on the OPPOSITE element as well.
+          //
+          // Reaching the opposite side's bulk goes through the opposite INTERFACE element: its shape
+          // info is filled by remapping the bulk's local equations through that element's own
+          // bulk_eqn_map, which can only resolve dofs that are among ITS dofs. That map is built from
+          // the opposite element's own requirements, and those need not mention the bulk at all -- the
+          // requirement lives here, on the side that wrote the expression.
+          //
+          // A droplet/gas interface makes it concrete: writing grad(c) of the gas domain in a droplet
+          // interface condition needs the gas bulk element's C2 dofs, but the gas-side interface
+          // element may only carry a Dirichlet condition on c, which needs no bulk shapes whatsoever.
+          // Without this the remap yields "not found" for exactly those dofs.
+          opposite_side->add_required_external_data(functable->merged_required_shapes.opposite_shapes->bulk_shapes, opp_blk);
         }
       }
 
