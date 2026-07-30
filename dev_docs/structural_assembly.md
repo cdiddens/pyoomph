@@ -1010,6 +1010,33 @@ The important structural point is that this does not rest on the audit being exh
 reuse path *verifies* `ia`/`ja` by comparison before reusing (§5b), so anything that did modify them
 produces a full refactorisation, not a wrong answer. Any future backend reuse must keep that property.
 
+**And for MPIAIJ (the distributed path)?** Same answer, more strongly — tested on 2 ranks by
+scribbling over the input arrays after `createAIJ` and re-reading the matrix:
+
+```
+rank 0 aliased=False (diag [1 1 1] -> [1 1 1])  stored_cols=[0 1 2]
+rank 1 aliased=False (diag [2 2 2] -> [2 2 2])  stored_cols=[3 4 5]
+```
+
+It cannot be otherwise: an MPIAIJ matrix splits the *global* column indices it is handed into
+diagonal and off-diagonal blocks with its own local numbering, so it must transform them, and a
+transform implies a copy. `MatMPIAIJSetPreallocationCSR` documents the arrays as not retained.
+
+Two further MPIAIJ-specific points that had to be checked because the reuse path depends on them:
+
+* **`setValuesCSR` on MPIAIJ is ownership-range relative**, not global-row-indexed. Handing it an `I`
+  array of length `nrow_local + 1` writes *this rank's* rows, which is what
+  `PETSCSolver.solve_distributed` does. Verified on 2 ranks: rank 1's update landed on global rows
+  3-5 and left rank 0's values untouched. Had it been global-row-indexed, every rank above 0 would
+  have silently written into rank 0's rows via the stash — a wrong answer, not a crash, so this was
+  worth confirming rather than assuming.
+* **Latent dtype inconsistency, pre-existing.** The distributed *creation* call passes the raw arrays
+  (`csr=(row_start, col_index, values)`) while the serial one converts with
+  `.astype(PETSc.IntType, copy=False)`. On a 64-bit-index PETSc build the distributed path would hand
+  int32 where int64 is expected. The Phase 1 reuse path added the conversion on the update call, so
+  creation and update now disagree. Harmless on this build (32-bit indices, real scalars); should be
+  made consistent.
+
 ### A2. Is MUMPS/PETSc symbolic reuse actually happening? — **verified**
 
 Yes. With `-info`, a Mat kept across two solves with only its values changed emits
