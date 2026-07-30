@@ -547,6 +547,54 @@ def test_structure_id_is_stable_when_returning_to_a_configuration():
         assert p.jacobian_structure_id not in (0, first)
 
 
+def test_multiassembly_matches_with_and_without_the_frozen_pattern():
+    """The multi-quantity assembly behind the Python-level bifurcation trackers goes through
+    sparse_assemble_row_or_column_compressed_base_problem, which accumulates into a std::map per row --
+    the slowest container in the codebase. Every matrix it builds is a derivative of the same residual
+    w.r.t. the dofs, so they all share the Jacobian's pattern and one frozen pattern serves all of them.
+
+    This checks the fast path against the map-based one: same pattern, same values, same converged fold.
+    """
+    results = []
+    for frozen in (False, True):
+        with _BratuProblem() as p:
+            p.quiet()
+            p.setup_for_stability_analysis(analytic_hessian=True)
+            p.initialise()
+            p.use_frozen_sparsity = frozen
+            lam = p.get_global_parameter("lam")
+            lam.value = 3.0
+            p.solve()
+            p.solve_eigenproblem(1)
+            from pyoomph.generic.bifurcation_tools import FoldTracker
+            tracker = FoldTracker(p, "lam", eigenvector=0)
+            p.set_custom_assembler(tracker)
+            p.solve()
+            # Contract the Hessian with a FIXED vector, not the eigenvector guess. An eigenvector is
+            # only defined up to sign and the solver picks either, so the two runs would be handed
+            # opposite vectors -- and the Hessian-vector product is linear in it, so dJdU would come
+            # back exactly negated and the comparison would report a bug that is not there.
+            fixed = numpy.cos(numpy.arange(p.ndof(), dtype=float))
+            R, J, dRdp, dJdp, HV = (tracker.start_multiassembly()
+                                    .R().J().dRdp("lam").dJdp("lam").dJdU(fixed).assemble())
+            results.append((float(lam.value), R.copy(), J.copy(), dRdp.copy(), dJdp.copy(), HV.copy()))
+
+    slow, fast = results
+    assert fast[0] == pytest.approx(slow[0], rel=0, abs=1e-9), "the tracked fold moved"
+    assert numpy.allclose(fast[1], slow[1], rtol=1e-12, atol=1e-12)
+    for a, b, what in ((fast[2], slow[2], "J"), (fast[3], slow[3], "dRdp"),
+                       (fast[4], slow[4], "dJdp"), (fast[5], slow[5], "dJdU")):
+        if hasattr(a, "nnz"):
+            assert a.nnz == b.nnz, "%s: %d vs %d nonzeros" % (what, a.nnz, b.nnz)
+            d = abs(a - b)
+            scale = max(abs(b).max(), 1e-30)
+            assert d.max() <= 1e-12 * scale, \
+                "%s differs between the frozen and the map-based multi-assembly by %.3e (scale %.3e)" % (
+                    what, d.max(), scale)
+        else:
+            assert numpy.allclose(a, b, rtol=0, atol=1e-12), what
+
+
 def test_frozen_sparsity_falls_back_where_it_cannot_apply():
     """It must decline, not misbehave, when the pattern route does not fit -- here an augmented dof
     vector from bifurcation tracking, whose elemental blocks are indexed by the handler's own numbering

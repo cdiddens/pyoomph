@@ -3041,7 +3041,7 @@ namespace pyoomph
 	// two different patterns -- a PETSc preconditioner matrix assembled from another residual, or any
 	// multi-residual problem -- and with a single slot each assembly would evict the other's pattern and
 	// rebuild, which costs two passes over the mesh plus a sort. That is worse than no cache at all.
-	int Problem::acquire_frozen_sparsity(unsigned matrix_index, unsigned long generation, unsigned nd, const std::vector<int> &pinned)
+	int Problem::acquire_frozen_sparsity(unsigned matrix_index, unsigned long generation, unsigned nd, const std::vector<int> &pinned, unsigned mask_matrix_index_override)
 	{
 		if (frozen_sparsity_cache_capacity < 1) frozen_sparsity_cache_capacity = 1;
 		frozen_sparsity_clock++;
@@ -3087,7 +3087,8 @@ namespace pyoomph
 		}
 
 		FrozenSparsity &sp = frozen_sparsity_cache[slot];
-		if (!build_frozen_sparsity(matrix_index, sp)) { sp.clear(); return -1; }
+		const unsigned mask_m = (mask_matrix_index_override == (unsigned)-1 ? matrix_index : mask_matrix_index_override);
+		if (!build_frozen_sparsity(mask_m, sp, nd)) { sp.clear(); return -1; }
 		sp.generation = generation;
 		sp.matrix_index = matrix_index;
 		sp.last_used = frozen_sparsity_clock;
@@ -3114,11 +3115,12 @@ namespace pyoomph
 	// Returns false - and leaves sp cleared - if any element has no symbolic mask. That is not a
 	// failure: it means the pattern for this problem is only knowable from the values, so the caller
 	// must fall back to oomph-lib's assembly.
-	bool Problem::build_frozen_sparsity(unsigned matrix_index, FrozenSparsity &sp)
+	bool Problem::build_frozen_sparsity(unsigned mask_matrix_index, FrozenSparsity &sp, unsigned nd_override)
 	{
 		sp.clear();
 		const unsigned long n_element = mesh_pt()->nelement();
-		const unsigned nd = this->ndof();
+		const unsigned nd = (nd_override ? nd_override : this->ndof());
+		const unsigned matrix_index = mask_matrix_index;
 		oomph::AssemblyHandler *const assembly_handler_pt = this->assembly_handler_pt();
 
 		// Pass 1: which columns can appear in each row, and how much scatter space each element needs.
@@ -3378,7 +3380,89 @@ namespace pyoomph
 		const unsigned n_vector = residuals.size();    
 		const unsigned n_matrix = column_or_row_index.size();    		
 		oomph::AssemblyHandler* const assembly_handler_pt = this->assembly_handler_pt();
-				
+
+		// Fast path. Every matrix this routine builds is a derivative of the SAME residual with respect
+		// to the dofs -- the Jacobian, its parameter derivative, a Hessian-vector product -- so they all
+		// live on the Jacobian's sparsity pattern. ONE frozen pattern therefore serves all of them and the
+		// scatter writes the same slots into several value arrays. That pays off here more than anywhere
+		// else: this routine accumulates into a std::map per row, the slowest container in the codebase,
+		// and it is what a multi-quantity bifurcation assembly goes through on every Newton step.
+		//
+		// The mask comes from matrix 0 (the Jacobian) for every matrix: exact for the Jacobian-derived
+		// ones, a superset for any mass-matrix-derived one, which is the safe direction -- and the
+		// per-element verification below would catch it if it were not.
+		if (use_frozen_sparsity && keep_structural_zeros && prune_structural_zeros_by_field_coupling && compressed_row_flag)
+		{
+			bool parallel = false;
+#ifdef OOMPH_HAS_MPI
+			if (Problem_has_been_distributed || (Communicator_pt && Communicator_pt->nproc() > 1)) parallel = true;
+#endif
+			const unsigned long gen = this->get_jacobian_structure_id();
+			std::vector<int> pinned;
+			const int slot = (parallel || !gen) ? -1 : this->acquire_frozen_sparsity(0, gen, ndof, pinned, 0);
+			if (slot >= 0)
+			{
+				const FrozenSparsity &sp = frozen_sparsity_cache[slot];
+				for (unsigned m = 0; m < n_matrix; m++)
+				{
+					nnz[m] = sp.nnz();
+					row_or_column_start[m] = new int[ndof + 1];
+					std::copy(sp.row_start.begin(), sp.row_start.end(), row_or_column_start[m]);
+					column_or_row_index[m] = new int[nnz[m] ? nnz[m] : 1];
+					std::copy(sp.column_index.begin(), sp.column_index.end(), column_or_row_index[m]);
+					value[m] = new double[nnz[m] ? nnz[m] : 1];
+					std::fill(value[m], value[m] + nnz[m], 0.0);
+				}
+				for (unsigned v = 0; v < n_vector; v++)
+				{
+					residuals[v] = new double[ndof ? ndof : 1];
+					std::fill(residuals[v], residuals[v] + ndof, 0.0);
+				}
+				oomph::Vector<oomph::Vector<double>> el_res(n_vector);
+				oomph::Vector<oomph::DenseMatrix<double>> el_jac(n_matrix);
+				for (unsigned long e = el_lo; e <= el_hi; e++)
+				{
+					oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
+#ifdef OOMPH_HAS_MPI
+					if (elem_pt->is_halo()) continue;
+#endif
+					const unsigned nvar = assembly_handler_pt->ndof(elem_pt);
+					if (!nvar) continue;
+					for (unsigned v = 0; v < n_vector; v++) el_res[v].resize(nvar);
+					for (unsigned m = 0; m < n_matrix; m++) el_jac[m].resize(nvar);
+					assembly_handler_pt->get_all_vectors_and_matrices(elem_pt, el_res, el_jac);
+					for (unsigned i = 0; i < nvar; i++)
+					{
+						const unsigned eqn = assembly_handler_pt->eqn_number(elem_pt, i);
+						for (unsigned v = 0; v < n_vector; v++) residuals[v][eqn] += el_res[v][i];
+					}
+					const int lo = sp.element_offset[e], hi = sp.element_offset[e + 1];
+					const int *slotp = &sp.scatter_slot[0];
+					const int *src = &sp.scatter_source[0];
+					for (unsigned m = 0; m < n_matrix; m++)
+					{
+						double *val = value[m];
+						const double *flat = &el_jac[m](0, 0);
+						for (int k = lo; k < hi; k++) val[slotp[k]] += flat[src[k]];
+						if (verify_frozen_sparsity)
+						{
+							unsigned all = 0, taken = 0;
+							const size_t nblock = (size_t)nvar * nvar;
+							for (size_t q = 0; q < nblock; q++) all += (flat[q] != 0.0);
+							for (int k = lo; k < hi; k++) taken += (flat[src[k]] != 0.0);
+							if (all > taken)
+							{
+								throw_runtime_error("A multi-assembly entry appeared outside the symbolic sparsity pattern (matrix " +
+													std::to_string(m) + ", element " + std::to_string(e) + "). Refusing rather than "
+													"truncating the matrix. Workaround: problem.use_frozen_sparsity=False.");
+							}
+						}
+					}
+				}
+				return;
+			}
+		}
+
 #ifdef OOMPH_HAS_MPI
     	bool doing_residuals = false;
 		if (dynamic_cast<oomph::ParallelResidualsHandler*>(this->assembly_handler_pt()) != 0)

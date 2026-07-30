@@ -373,10 +373,12 @@ namespace pyoomph
     // Index into frozen_sparsity_cache of a usable pattern for (matrix_index, generation), building it
     // if necessary. `pinned` lists slots the current assembly is already using, which must not be
     // evicted. Returns -1 if the pattern cannot be built (see build_frozen_sparsity).
-    int acquire_frozen_sparsity(unsigned matrix_index, unsigned long generation, unsigned ndof, const std::vector<int> &pinned);
+    int acquire_frozen_sparsity(unsigned matrix_index, unsigned long generation, unsigned ndof, const std::vector<int> &pinned, unsigned mask_matrix_index_override=(unsigned)-1);
     // Builds the frozen pattern and scatter map for matrix matrix_index. Returns false if this problem
     // cannot be described that way (any element without a symbolic mask), leaving sp cleared.
-    bool build_frozen_sparsity(unsigned matrix_index, FrozenSparsity &sp);
+    // `nd_override` is the row/column count to build for, or 0 for this->ndof(). The base-problem
+    // assembly needs the UNAUGMENTED count, which differs from ndof() while an augmentation is active.
+    bool build_frozen_sparsity(unsigned mask_matrix_index, FrozenSparsity &sp, unsigned nd_override=0);
     // The fast assembly path: fills the output arrays directly from the frozen pattern. Returns false
     // without touching them if the pattern route does not apply, so the caller falls back to oomph-lib.
     bool assemble_with_frozen_sparsity(oomph::Vector<int*>& column_or_row_index, oomph::Vector<int*>& row_or_column_start, oomph::Vector<double*>& value, oomph::Vector<unsigned>& nnz, oomph::Vector<double*>& residuals, bool compressed_row_flag);

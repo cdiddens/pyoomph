@@ -636,7 +636,42 @@ defaulting it on is the natural next step — but it should wait until the tutor
 and until remeshing invalidation and interface-heavy problems are covered, since flipping it also
 turns on solver symbolic reuse for every user.
 
-### Phase 4 — eigenproblems and bifurcation tracking
+### Phase 4 — eigenproblems and bifurcation tracking — **multi-assembly DONE**
+
+`sparse_assemble_row_or_column_compressed_base_problem` — the routine behind
+`assemble_multiassembly`, and so behind every Python-level bifurcation tracker — now has a frozen
+fast path. It was the worst assembly in the codebase: a `std::map` per row, with 30–86 % of its time
+outside the elemental evaluation (the range is wide because `_benchmark_elemental_assembly` measures a
+single-matrix Jacobian while this pass evaluates five quantities per element).
+
+The key structural fact is that **all of its matrices share one pattern**: the Jacobian, its parameter
+derivative and a Hessian-vector product are all derivatives of the same residual w.r.t. the dofs, so
+one frozen pattern serves all of them and the scatter writes the same slots into several value arrays.
+The mask is taken from matrix 0 for every matrix — exact for the Jacobian-derived ones, a superset for
+any mass-matrix-derived one, which is the safe direction and is checked per element anyway.
+
+Bratu fold tracking, `R + J + dRdp + dJdp + dJdU` in one pass:
+
+| | map-based | frozen | |
+|---|---|---|---|
+| multi-assembly, `N=30` (ndof 6963) | 60.2 ms | 42.0 ms | **−30 %** |
+| multi-assembly, `N=50` (ndof 19603) | 182.1 ms | 119.4 ms | **−34 %** |
+| full fold solve, `N=40` | 0.763 s | 0.546 s | **−28 %** |
+
+with the tracked fold identical to 10 digits.
+
+**A false alarm worth recording, because it will recur.** The first comparison said the
+Hessian-vector product was exactly *negated* by the fast path — `max|A + B| = 3.5e-17`, all 1521
+entries wrong. It was the test, not the code: it contracted the Hessian with
+`get_real_eigenvector_guess()`, and an eigenvector is only defined up to sign, so the two runs were
+handed opposite vectors. The product is linear in that vector, hence the exact negation, while every
+quantity not depending on it agreed to round-off. Anything comparing Hessian-vector products across
+two runs must contract with a **fixed** vector.
+
+Still open in Phase 4: whether a values-only `J − σM` update is worth a dedicated path for
+shift-and-invert sweeps.
+
+### Phase 4 (original plan) — eigenproblems and bifurcation tracking
 
 Only after Phases 1–3 are validated on the plain Newton path.
 
