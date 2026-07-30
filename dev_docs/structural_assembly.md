@@ -896,14 +896,12 @@ the noise. It is not free at scale — for the 3D Taylor-Hood benchmark (2.7 M r
 ~21 MB per matrix — so it remains worth watching on genuinely large 3D problems, where
 `use_frozen_sparsity=False` is the escape hatch.
 
-### Not yet done from Phase 1
+### Not yet done from Phase 1 — **both since closed**
 
-* `problem.force_jacobian_diagonal_entries` is not implemented as a separate switch. Under Tier A it
-  would be a no-op (the diagonal is already complete, verified by test), so it only becomes
-  meaningful together with Phase 3's pruning — it is deferred to there rather than added as a
-  no-op knob now.
-* Invalidation after **remeshing** is not covered by a test. It goes through `assign_eqn_numbers()`
-  like adaptation does, so it should be covered by construction, but "should be" is not a test.
+* `problem.force_jacobian_diagonal_entries` was deferred as a no-op knob. It is now a tri-state
+  (`on` / `off` / `auto`) defaulting to **off**, with `auto` answered per solve by the solver itself
+  through `requires_explicit_diagonal()` — see §7b.
+* Invalidation after **remeshing** had no test. It has one now (`test_structural_assembly.py`).
 
 ---
 
@@ -1127,76 +1125,6 @@ and the `MatShift(0.0)` it used to call never inserted anything (§7d A6).
 
 ---
 
-## 7c. Open regression: `test_moving_mesh_distributed`
-
-**Status: open. Read the retraction below before trusting anything previously written here.**
-
-One test, one case (`ale-tri_crossed-12-level`). Everything else is green: 39 structural tests,
-`test_mpi_adaptivity_3d`, the other 27 MPI tests, the fast suite (543 passed), all 126 tutorial scripts.
-
-### Retraction
-
-Two explanations were recorded in this section and **both were wrong**, because both were built on
-single runs of a reproduction that turns out not to be reliable:
-
-1. *"Any extra stored zero tips this knife-edge case."* The flag bisection behind that was run on the
-   single test in isolation, where it passes regardless.
-2. *"It fails only after a predecessor in the same pytest process."* Later the same standalone case
-   failed with no predecessor at all.
-
-The manual reproduction — running `mpi_worker.py` under `mpirun -n 2` with the single
-`tri_crossed / ale / (1,2,"level")` spec — gives **batches** of consistent passes and batches of
-consistent failures with no change to the build in between: 12 consecutive passes, then 3 consecutive
-failures, with the JIT cache warm both times (clearing it changed nothing). Whatever switches it is
-not yet identified, and until it is, no attribution from a single manual run is worth anything.
-
-### What is solid
-
-* The pytest module fails **consistently**: 4 out of 4 whole-module runs, `1 failed / 11 passed`.
-* With the structural pattern forced off, the same module passes: `12 passed`, twice.
-* So the feature is implicated, but *which part* is not established — the flag bisection that appeared
-  to show it was unsound.
-* It is not the JIT cache: `PYOOMPH_JIT_CACHE=0` and a physically removed cache both behave the same.
-* It is not the accumulation order: feature off with `sparse_assembly_method="maps"` passes.
-
-### Where to pick it up
-
-Use the **pytest module** as the reproduction, not the manual worker — the module is the only form
-that has been consistent. Then bisect with the `sitecustomize.py`-on-`PYTHONPATH` trick (there are
-ready-made ones in the session scratchpad) *inside that harness*, repeating each configuration several
-times before believing it. The first question to settle is what makes the manual and the pytest
-reproductions disagree, since that is the same question as what makes the manual one bistable.
-
-## 7b. TODO: the forced diagonal belongs to the solver, not the problem
-
-`force_jacobian_diagonal_entries` now defaults to **off**, and the flag is in the wrong place.
-
-Why off: an explicit diagonal is required by *some* PETSc factorisations only. MUMPS does not need it,
-and where PETSc does, PETSc can insert the entries itself. Storing zeros nobody asked for is not free
-— they change the matrix a direct solver sees, hence its pivoting, hence the solution at round-off
-level. That is enough to matter: with the diagonal forced on, the adaptation decisions of
-`tests/test_mpi_interface_coupling.py::test_moving_mesh_distributed` (`ale-tri_crossed-12-level`) shift
-and the adaptive Newton solver runs out of adaptations. Isolated by bisecting the flags — see the
-table in §7c. The Jacobian *values* are bit-identical throughout; only which zeros are stored differs.
-
-**What is still needed.** Whether the diagonal must be present is a property of the *linear solver*,
-not of the problem, so `problem.force_jacobian_diagonal_entries` is the wrong owner. The right shape:
-
-* `GenericLinearSystemSolver` grows something like `requires_explicit_diagonal()`, default `False`.
-* `PETSCSolver` returns `True` only when the configured factorisation actually needs it — i.e. keyed
-  on `pc_factor_mat_solver_type` / the PC type. `petsc_mumps` returns `False`; PETSc's own
-  `pc_type lu` (`MatLUFactorSymbolic_SeqAIJ`, which rejects a missing diagonal outright) returns
-  `True`. Pardiso and the SuperLU path return `False`.
-* The problem consults the active solver when building the pattern, instead of carrying a global flag
-  the user has to know to set. `force_jacobian_diagonal_entries` then becomes an override for the
-  cases the solver cannot introspect.
-
-Until that exists, a user hitting "Matrix is missing diagonal entry 0" must set the flag by hand.
-Note the historical alternative does **not** work: `MatShift(0.0)` is a no-op in PETSc 3.22 (§5b), so
-the diagonal cannot be patched up after assembly the way pyoomph used to attempt.
-
----
-
 ## 7d. Review of the reuse contract with each backend
 
 Six concerns raised in review, investigated. Two are real gaps that change the plan (**A5**, **A4**);
@@ -1402,24 +1330,45 @@ returns early regardless of allocation policy. The conclusion of §5b stands, no
 
 ## 8. Open questions
 
-* Does the residual-only assembly path (`get_residuals`, 55 ms on Benchmark A) share enough with the
-  Jacobian path to also benefit? It has no structure at all, so probably not, but 55 ms of a 675 ms
-  Newton step is worth a look once §4 is resolved.
-* Is `scatter_index` (10.8 MB on Benchmark A, scaling with raw entries) acceptable for the large 3D
-  problems people actually run, or does it need the binary-search fallback as the default?
-* Should the pattern be exposed to Python (`problem.get_jacobian_sparsity()` → `(indptr, indices)`)?
-  It would let `CustomAssemblyBase` implementors and the eigen matrix manipulators
-  (`pyoomph/solvers/generic.py:160-350`, which currently do `csr` surgery row by row) work on a
-  fixed pattern too.
-* Do any *numerical* entries fall outside the connectivity pattern in exotic setups — external data
-  coupling across domains, `add_interior_facet_terms`, tracer/ODE couplings, `DofAugmentations`?
-  Gate (1) run over a broad problem set is the way to find out.
-* Under MPI, is it worth freezing the pattern of the *local* block only (cheap, self-contained) as an
-  intermediate step, before also freezing the exchange (§7.2)? The local binary searches and linear
-  row scans may already be the bulk of the distributed assembly cost — Phase 0's per-rank timers
-  will say.
-* Does `Sparse_assemble_with_arrays_previous_allocation` (oomph `problem.h:708` region, reset at
-  `problem.cc:2151`/`:2481`) interact badly with `keep_structural_zeros`? It sizes rows from the
-  previous assembly; a first assembly at `U = 0` under the old value filter would under-allocate for
-  every later one. With structural zeros kept, allocations stabilise immediately — likely a small
-  side benefit, worth confirming.
+### Closed by the work
+
+* ~~Under MPI, is it worth freezing the *local* block only as an intermediate step, before also
+  freezing the exchange?~~ Both are done (Phase 2b), and the premise was wrong: the local scatter is
+  only about a third of the distributed overhead, the exchange and owner-side merge are the rest.
+* ~~Do numerical entries fall outside the connectivity pattern in exotic setups?~~ Not answered
+  exhaustively, but the question is now defended rather than open: `verify_frozen_sparsity` (on by
+  default) counts, per element per matrix, the nonzeros of the whole elemental block against those
+  the scatter actually took, and refuses the assembly if anything was dropped. So an unmodelled
+  coupling produces a loud error naming the element, not a silently truncated Jacobian.
+
+### Still open
+
+* **The residual-only assembly path** (`get_residuals`, 55 ms of a 675 ms Newton step on
+  Benchmark A). It has no sparsity structure at all, so the pattern machinery buys nothing directly;
+  what it might reuse is the elemental loop and the dof-gather. Under MPI it is a separate
+  `ParallelResidualsHandler` route that Phase 2b deliberately does not touch. Untouched, and the
+  clearest remaining assembly-side item after the JIT work.
+* **Memory footprint of the scatter map on large 3D problems.** The compact slot-sorted form
+  (`scatter_source`/`scatter_slot`) is much smaller than the per-position table it replaced, and
+  Phase 2b adds a per-rank plan (`merge_perm`, `final_col`, `local_col`, the scatter map) of order a
+  few times nnz in `int`s. Never measured on a problem large enough to care. The binary-search
+  fallback exists if it turns out to matter.
+* **Exposing the pattern to Python** (`problem.get_jacobian_sparsity()` → `(indptr, indices)`), so
+  `CustomAssemblyBase` implementors and the eigen matrix manipulators
+  (`pyoomph/solvers/generic.py:160-350`, which do `csr` surgery row by row) can work on a fixed
+  pattern too. Nice-to-have; nothing depends on it.
+* **`Sparse_assemble_with_arrays_previous_allocation`** (oomph `problem.h:708` region, reset at
+  `problem.cc:2151`/`:2481`) sizes rows from the previous assembly. With structural zeros kept,
+  allocations should stabilise immediately — likely a small side benefit, still unconfirmed. Note
+  the frozen paths bypass this allocator entirely, so it only matters where they fall back.
+
+### Found on the way, not part of this work
+
+* **Distributed eigensolving is broken in the Python layer**, independent of anything here.
+  `GenericEigenSolver.get_J_M_n_and_type()` (`pyoomph/solvers/generic.py:449`) wraps the *row-local*
+  CSR that `assemble_eigenproblem_matrices()` returns in a `csr_matrix` of *global* shape, and scipy
+  rejects it (`index pointer size (584) should be (1227)`). It fails identically with the frozen
+  route on or off. The C++ side is fine — the two-matrix distributed assembly was verified below
+  this layer (§ Phase 2b) — so this is a wrapper bug, not an assembly one.
+* Also worth knowing when testing that layer: the arrays `assemble_eigenproblem_matrices()` returns
+  are **views** into `eigen_{Mass,Jacobian}MatrixPt`, which the next call deletes and reallocates.
