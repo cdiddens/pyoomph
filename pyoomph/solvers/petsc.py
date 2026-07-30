@@ -27,6 +27,7 @@ from __future__ import annotations
 # ========================================================================
  
 from .generic import GenericLinearSystemSolver, GenericEigenSolver, EigenSolverWhich,DefaultMatrixType
+import hashlib
 from collections import OrderedDict
 import petsc4py #type:ignore
 import sys
@@ -70,6 +71,7 @@ class PETSCSolver(GenericLinearSystemSolver):
         self._structure_id:int=0   # Pattern the current Mat/KSP were built for; 0 = none
         self._structure_nnz:int=-1
         self._structure_nrow_local:int=-1
+        self._structure_digest:bytes | None=None   # Fingerprint of the pattern the Mat was built for
 
     #		opts=PETSc.Options().getAll()
     #		if "add_zero_diagonal" in opts.keys():
@@ -125,21 +127,68 @@ class PETSCSolver(GenericLinearSystemSolver):
         # documented at the two call sites rather than being a silent omission.
         return
 
-    def _can_reuse_structure(self,n:int,nnz:int)->bool:
+    def _remember_structure(self,indptr:Any,indices:Any)->None:
+        """Keep a fingerprint of the pattern the current Mat was preallocated for.
+
+        A hash rather than the arrays themselves: PETSc already stores the indices internally, so
+        keeping a second copy would add (nnz + nrow) integers to a Mat that is often the largest
+        object in the run, for insurance that is only ever read once per solve. blake2b over the two
+        index arrays runs at memory bandwidth -- microseconds against the milliseconds a numeric
+        factorisation takes -- and a 128-bit digest makes an undetected change not a practical concern.
+        """
+        h = hashlib.blake2b(digest_size=16)
+        h.update(numpy.ascontiguousarray(indptr).view(numpy.uint8))
+        h.update(numpy.ascontiguousarray(indices).view(numpy.uint8))
+        self._structure_digest = h.digest()
+
+    def _structure_matches(self,indptr:Any,indices:Any)->bool:
+        """Whether the pattern about to be written is the one the Mat was preallocated for.
+
+        Verified rather than trusted, for the same reason the Pardiso path verifies it: a stale
+        jacobian_structure_id would otherwise be a silently wrong matrix, not a crash. It is worse
+        here than for a factorisation, because setValuesCSR only writes the entries it is given --
+        anything the previous pattern had and this one does not keeps its OLD value -- and pyoomph
+        disables NEW_NONZERO_ALLOCATION_ERR, so PETSc will not object to the ones it has never seen
+        either. Neither the nnz nor the size check catches a pattern that changed shape without
+        changing its nonzero count, which is exactly what an augmented (bifurcation-tracking) system
+        can do: there the elemental block is larger than the field description, so no symbolic mask
+        applies and the pattern falls back to being value-filtered.
+        """
+        if self._structure_digest is None:
+            return False
+        h = hashlib.blake2b(digest_size=16)
+        h.update(numpy.ascontiguousarray(indptr).view(numpy.uint8))
+        h.update(numpy.ascontiguousarray(indices).view(numpy.uint8))
+        if h.digest() == self._structure_digest:
+            return True
+        print("WARNING: the Jacobian sparsity pattern changed although problem.jacobian_structure_id "
+              "did not. Rebuilding the PETSc matrix instead of reusing it. This is a bug in the "
+              "pattern invalidation -- please report it.")
+        return False
+
+    def _can_reuse_structure(self,n:int,nnz:int,indptr:Any=None,indices:Any=None)->bool:
         structure_id = self.problem.jacobian_structure_id
-        return (self.reuse_matrix_structure and structure_id != 0
+        if not (self.reuse_matrix_structure and structure_id != 0
                 and structure_id == self._structure_id
                 and self.petsc_mat is not None
                 and self._structure_nnz == nnz
-                and self.petsc_mat.getSize()[0] == n) #type:ignore
+                and self.petsc_mat.getSize()[0] == n): #type:ignore
+            return False
+        if indptr is None:
+            return True
+        return self._structure_matches(indptr,indices)
 
-    def _can_reuse_structure_distributed(self,nrow_local:int,nnz_local:int)->bool:
+    def _can_reuse_structure_distributed(self,nrow_local:int,nnz_local:int,indptr:Any=None,indices:Any=None)->bool:
         structure_id = self.problem.jacobian_structure_id
-        return (self.reuse_matrix_structure and structure_id != 0
+        if not (self.reuse_matrix_structure and structure_id != 0
                 and structure_id == self._structure_id
                 and self.petsc_mat is not None
                 and self._structure_nnz == nnz_local
-                and self._structure_nrow_local == nrow_local)
+                and self._structure_nrow_local == nrow_local):
+            return False
+        if indptr is None:
+            return True
+        return self._structure_matches(indptr,indices)
 
     def _before_assigning_equation_numbers(self):
         if self._dofs_to_field_info is not None:
@@ -353,7 +402,7 @@ class PETSCSolver(GenericLinearSystemSolver):
 
     def solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPIntArray,colptr:NPIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
         if op_flag == 1:
-            if self._can_reuse_structure(n,nnz):
+            if self._can_reuse_structure(n,nnz,colptr,rowind):
                 # Same nonzero pattern, new values. Overwriting them in place (rather than destroying
                 # and rebuilding the Mat) keeps the KSP's factorisation/preconditioner reusable.
                 self.petsc_mat.setValuesCSR(colptr.astype(PETSc.IntType, copy=False), rowind.astype(PETSc.IntType, copy=False), values.astype(PETSc.ScalarType, copy=False)) #type:ignore
@@ -394,6 +443,7 @@ class PETSCSolver(GenericLinearSystemSolver):
             self.petsc_mat.assemble()
             self._structure_id = self.problem.jacobian_structure_id
             self._structure_nnz = nnz
+            self._remember_structure(colptr,rowind)
 
             self.x = PETSc.Vec().createSeq(n) #type:ignore
         elif op_flag == 2:
@@ -437,7 +487,7 @@ class PETSCSolver(GenericLinearSystemSolver):
             # which matters, because rebuilding the Mat is itself collective and a split decision would
             # deadlock. _can_reuse_structure compares the LOCAL row count and local nnz, both of which
             # are per-rank quantities derived from the same global pattern.
-            if self._can_reuse_structure_distributed(nrow_local,nnz_local):
+            if self._can_reuse_structure_distributed(nrow_local,nnz_local,row_start,col_index):
                 self.petsc_mat.setValuesCSR(row_start.astype(PETSc.IntType, copy=False), col_index.astype(PETSc.IntType, copy=False), values.astype(PETSc.ScalarType, copy=False)) #type:ignore
                 self.petsc_mat.assemble() #type:ignore
                 return
@@ -474,6 +524,7 @@ class PETSCSolver(GenericLinearSystemSolver):
             self._structure_id = self.problem.jacobian_structure_id
             self._structure_nnz = nnz_local
             self._structure_nrow_local = nrow_local
+            self._remember_structure(row_start,col_index)
 
             #print("OWNERSHIP RANGE",self.petsc_mat.getOwnershipRange()) #type:ignore
         #			print("PROCESSOR Ns",get_mpi_rank(),nrow_local,n)
