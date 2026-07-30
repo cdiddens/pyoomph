@@ -4723,6 +4723,16 @@ namespace pyoomph
 		pyoomph::CustomMultiAssembleHandler * new_handler=new pyoomph::CustomMultiAssembleHandler(this,what,contributions,params,hessian_vectors,hessian_vector_indices,return_indices);
 	    ndof = this->get_n_unaugmented_dofs();
 		this->assembly_handler_pt()=new_handler;
+		// Restore the handler, delete it, and put the transposed flag back to its safe default even if
+		// the assembly throws -- which it does whenever the sparsity verification refuses an element.
+		// Without this a caught error left the Problem with a deleted-or-custom assembly handler still
+		// installed, and left the flag saying "no transposed products" for every LATER caller of the
+		// base-problem assembly, including ones that have nothing to do with a multi-assembly.
+		struct RestoreOnExit
+		{
+			pyoomph::Problem *p; oomph::AssemblyHandler *old; oomph::AssemblyHandler *own;
+			~RestoreOnExit() { p->assembly_handler_pt() = old; delete own; p->multiassembly_wants_transposed = true; }
+		} restore_on_exit{this, old_handler, new_handler};
 		unsigned nvector=new_handler->n_vector();
 		unsigned nmatrix=new_handler->n_matrix();
 		column_or_row_index.resize(nmatrix);
@@ -4731,7 +4741,6 @@ namespace pyoomph
 		nnz.resize(nmatrix);
 		residuals.resize(nvector);
 		this->sparse_assemble_row_or_column_compressed_base_problem(column_or_row_index,row_or_column_start,value,nnz,residuals,true);
-		this->assembly_handler_pt()=old_handler;
 		data.resize(nvector+nmatrix);
 		csrdata.resize(2*nmatrix);
 		for (unsigned int i=0;i<nvector;i++) 
