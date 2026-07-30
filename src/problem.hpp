@@ -622,6 +622,16 @@ namespace pyoomph
     // Tiles an AUGMENTED elemental block's mask from the raw ones, using the description the assembly
     // handler provides (see AugmentedBlockSpec). NULL if it cannot be described, so the caller falls back.
     const char *augmented_sparsity_mask_for_element(const unsigned &matrix_index, oomph::GeneralisedElement *const &elem_pt, const unsigned &nvar, unsigned raw_nvar);
+    // The core of both: fills `out` with the field-coupling mask of one (matrix, residual) pair.
+    // `residual_override` < 0 means "the residual the element is currently assembling"; anything else
+    // names a specific one, which is what a tracker mixing several residuals in one augmented block
+    // needs (azimuthal: base + real + imaginary azimuthal; pitchfork: base + mass-matrix residual).
+    bool field_coupling_mask_for_element(unsigned matrix_index, int residual_override, oomph::GeneralisedElement *const &elem_pt, const unsigned &nvar, std::vector<char> &out);
+    // Raw masks for the augmented tiling, one per (matrix, residual) pair needed by the spec. Kept as a
+    // member so the buffers survive between elements; indices into it stay stable for one call because
+    // the whole set of keys is collected before any of them is filled.
+    struct AugmentedRawMask { unsigned matrix = 0; int residual = -1; std::vector<char> data; };
+    std::vector<AugmentedRawMask> augmented_raw_masks;
     // Whether the value-independent pattern is pruned to the field pairs the code generator proves can
     // contribute (tight, "Tier B"), or is the full element-connectivity pattern ("Tier A"). Pruning is
     // strictly better where it applies -- it reproduced the numerical pattern exactly on every problem

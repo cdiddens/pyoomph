@@ -77,15 +77,27 @@ namespace pyoomph
     // raw dof set or a single scalar (the parameter, a normalisation multiplier).
     std::vector<bool> group_is_scalar;
     std::vector<Kind> blocks; // n_groups * n_groups, row-major
+    // Which RESIDUAL each block's pattern comes from; -1 means "the one currently being assembled".
+    // Fold and Hopf build every block from a single residual and leave these at -1. The azimuthal and
+    // pitchfork trackers do not: they hold {base, real azimuthal, imaginary azimuthal} and
+    // {base, mass-matrix residual} respectively, live at the same time, and a spec that could not name
+    // which one a block belongs to would silently describe them all with whichever was active.
+    std::vector<int> block_residual;
 
     unsigned n_groups() const { return (unsigned)group_is_scalar.size(); }
     void resize(unsigned n)
     {
       group_is_scalar.assign(n, false);
       blocks.assign((size_t)n * n, Empty);
+      block_residual.assign((size_t)n * n, -1);
     }
-    void set(unsigned r, unsigned c, Kind k) { blocks[(size_t)r * n_groups() + c] = k; }
+    void set(unsigned r, unsigned c, Kind k, int residual_index = -1)
+    {
+      blocks[(size_t)r * n_groups() + c] = k;
+      block_residual[(size_t)r * n_groups() + c] = residual_index;
+    }
     Kind at(unsigned r, unsigned c) const { return blocks[(size_t)r * n_groups() + c]; }
+    int residual_at(unsigned r, unsigned c) const { return block_residual[(size_t)r * n_groups() + c]; }
   };
 
   // Mixin giving an assembly handler the chance to describe its augmented block. The default says

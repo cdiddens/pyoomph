@@ -2056,11 +2056,10 @@ namespace pyoomph
 		}
 		BulkElementBase *be = dynamic_cast<BulkElementBase *>(elem_pt);
 		if (!be) return NULL;
-		const JITFuncSpec_Table_FiniteElement_t *ft = be->get_code_instance()->get_func_table();
-		// The augmented dispatch must come BEFORE the "no active residual" shortcut below. An element
-		// with no residual contributes nothing to the BASE Jacobian, so an all-zero mask is right for
-		// its raw block -- but a bifurcation handler still writes the border of the augmented block for
-		// every element regardless (the fold normalisation row is Phi/Count over the element's dofs,
+		// The augmented dispatch must come BEFORE the "no active residual" shortcut inside the core. An
+		// element with no residual contributes nothing to the BASE Jacobian, so an all-zero mask is right
+		// for its raw block -- but a bifurcation handler still writes the border of the augmented block
+		// for every element regardless (the fold normalisation row is Phi/Count over the element's dofs,
 		// a property of the handler, not of the element's residual). Taking the shortcut first produced
 		// an all-zero mask for the whole augmented block and lost exactly those border entries.
 		{
@@ -2076,49 +2075,55 @@ namespace pyoomph
 		// ~4 billion entries -- which is exactly what happened, surfacing as a std::bad_alloc in an
 		// ordinary continuation step rather than anywhere near the sparsity code.
 		const unsigned scratch_index = (matrix_index == MASK_HESSIAN ? 2u : (matrix_index == MASK_MASS ? 3u : matrix_index));
+		if (sparsity_mask_scratch.size() <= scratch_index) sparsity_mask_scratch.resize(scratch_index + 1);
+		std::vector<char> &scratch = sparsity_mask_scratch[scratch_index];
+		if (!this->field_coupling_mask_for_element(matrix_index, -1, elem_pt, nvar, scratch)) return NULL;
+		return scratch.data();
+	}
 
-		int resind = ft->current_res_jac;
+
+	// See the declaration. Fills `out` with the field-coupling mask of ONE (matrix, residual) pair.
+	bool Problem::field_coupling_mask_for_element(unsigned matrix_index, int residual_override, oomph::GeneralisedElement *const &elem_pt, const unsigned &nvar, std::vector<char> &out)
+	{
+		BulkElementBase *be = dynamic_cast<BulkElementBase *>(elem_pt);
+		if (!be) return false;
+		const JITFuncSpec_Table_FiniteElement_t *ft = be->get_code_instance()->get_func_table();
+		const int resind = (residual_override >= 0 ? residual_override : ft->current_res_jac);
+		if (resind >= 0 && (unsigned)resind >= ft->num_res_jacs) return false; // Not a residual this code has
 		if (resind < 0)
 		{
 			// This code has no contribution to the residual currently being solved, so its assembly
 			// routine returns before writing anything: the element's block is identically zero. An
-			// all-zero mask says exactly that. Returning NULL ("no symbolic description") instead would
+			// all-zero mask says exactly that. Returning false ("no symbolic description") instead would
 			// be equally correct for the OR-filter, but would deny the frozen-sparsity path a complete
 			// description of the mesh and force it to give up on the whole problem.
-			if (sparsity_mask_scratch.size() <= scratch_index) sparsity_mask_scratch.resize(scratch_index + 1);
-			std::vector<char> &empty = sparsity_mask_scratch[scratch_index];
-			empty.assign((size_t)nvar * nvar, 0);
-			return empty.data();
+			out.assign((size_t)nvar * nvar, 0);
+			return true;
 		}
-		if (!ft->contributes_to_jacobian || !ft->contributes_to_mass_matrix) return NULL;
-		if (matrix_index == MASK_HESSIAN && !ft->contributes_to_hessian) return NULL;
+		if (!ft->contributes_to_jacobian || !ft->contributes_to_mass_matrix) return false;
+		if (matrix_index == MASK_HESSIAN && !ft->contributes_to_hessian) return false;
 		bool **table = (matrix_index == MASK_HESSIAN ? ft->contributes_to_hessian[resind]
 													 : (matrix_index == 0 ? ft->contributes_to_jacobian[resind]
 																		  : ft->contributes_to_mass_matrix[resind]));
-		if (!table) return NULL;
+		if (!table) return false;
 		const unsigned nclass = ft->contribution_entries_size;
 		const std::vector<int> &cidx = be->get_local_dof_contribution_indices();
-		// Sizes already agree here: the augmented case was dispatched above.
+		if (cidx.size() != nvar) return false;
 
-		if (sparsity_mask_scratch.size() <= scratch_index) sparsity_mask_scratch.resize(scratch_index + 1);
-		std::vector<char> &scratch = sparsity_mask_scratch[scratch_index];
-		scratch.assign((size_t)nvar * nvar, 0);
+		out.assign((size_t)nvar * nvar, 0);
 		for (unsigned i = 0; i < nvar; i++)
 		{
 			const int fi = cidx[i];
-			char *row = &scratch[(size_t)i * nvar];
+			char *row = &out[(size_t)i * nvar];
 			for (unsigned j = 0; j < nvar; j++)
 			{
 				const int fj = cidx[j];
 				// -2 is a POSITIVE statement: the field takes part in no contribution of this code, so
 				// this element writes nothing in its row or column and there is nothing to store. -1 is
 				// the absence of information ("not attributed") and must be read as coupled to
-				// everything, since under-reporting would drop real entries.
-				//
-				// Conflating the two is what put a structural zero on the DIAGONAL of every
-				// unclassifiable dof -- "coupled to everything" includes itself. On a saddle-point
-				// system those stored zero diagonals are not free: they invite MUMPS's analysis to plan
-				// an elimination that then hits a null pivot (see section 7c).
+				// everything, since under-reporting would drop real entries. Conflating the two put a
+				// structural zero on the DIAGONAL of every unclassifiable dof, which on a saddle-point
+				// system is what invites MUMPS onto a null pivot (see section 7c).
 				if (fi == -2 || fj == -2)
 					row[j] = 0;
 				else if (fi < 0 || fj < 0 || (unsigned)fi >= nclass || (unsigned)fj >= nclass)
@@ -2128,18 +2133,17 @@ namespace pyoomph
 			}
 			if (matrix_index == 0 && diagonal_entries_are_forced()) row[i] = 1;
 		}
-		return scratch.data();
+		return true;
 	}
+
 
 	// Builds the mask of an AUGMENTED elemental block by tiling the raw ones.
 	//
-	// A bifurcation-tracking handler presents a block several times larger than the element's dof
-	// count and fills it by hand, so the field description cannot describe it -- but it is built out of
-	// blocks the field description CAN describe. The handler says which (see AugmentedBlockSpec) and
-	// this assembles the result. Returns NULL, so the caller falls back exactly as before, whenever the
+	// A bifurcation-tracking handler presents a block several times larger than the element's dof count
+	// and fills it by hand, so the field description cannot describe it -- but it is built out of blocks
+	// the field description CAN describe. The handler says which (see AugmentedBlockSpec) and this
+	// assembles the result. Returns NULL, so the caller falls back exactly as before, whenever the
 	// handler declines or the spec does not fit the block it is describing.
-	static inline BulkElementBase *be_of(oomph::GeneralisedElement *const &e) { return dynamic_cast<BulkElementBase *>(e); }
-
 	const char *Problem::augmented_sparsity_mask_for_element(const unsigned &matrix_index, oomph::GeneralisedElement *const &elem_pt, const unsigned &nvar, unsigned raw_nvar)
 	{
 		// On by default; set problem._use_frozen_sparsity_for_bifurcation_tracking = False to revert.
@@ -2153,51 +2157,67 @@ namespace pyoomph
 		const unsigned ng = spec.n_groups();
 		if (!ng) return NULL;
 		// Where each group starts in the augmented numbering, and check the total matches the block.
-		std::vector<unsigned> start(ng + 1, 0);
-		for (unsigned g = 0; g < ng; g++) start[g + 1] = start[g] + (spec.group_is_scalar[g] ? 1u : raw_nvar);
-		if (start[ng] != nvar) return NULL; // Spec describes a different layout than we were handed
+		std::vector<unsigned> gstart(ng + 1, 0);
+		for (unsigned g = 0; g < ng; g++) gstart[g + 1] = gstart[g] + (spec.group_is_scalar[g] ? 1u : raw_nvar);
+		if (gstart[ng] != nvar) return NULL; // Spec describes a different layout than we were handed
 
-		// The raw masks this spec refers to. Fetched into local buffers rather than the shared scratch,
-		// which is what we are about to write the answer into.
-		std::vector<char> rawJ, rawM, rawH;
-		bool needJ = false, needM = false, needH = false;
-		for (size_t k = 0; k < spec.blocks.size(); k++)
+		BulkElementBase *be = dynamic_cast<BulkElementBase *>(elem_pt);
+		if (!be) return NULL;
+		const bool have_hessian_code = be->get_code_instance()->get_func_table()->hessian_generated;
+
+		// Collect the distinct (matrix, residual) pairs the spec refers to BEFORE filling any of them, so
+		// that the buffer indices stay valid while several are held at once. A tracker can mix residuals
+		// within one augmented block -- azimuthal uses the base plus the real and imaginary azimuthal
+		// residuals -- so the pair, not the matrix alone, is the key.
+		std::vector<std::pair<unsigned, int>> keys;
+		auto key_index = [&keys](unsigned mat, int resid) -> int {
+			for (size_t k = 0; k < keys.size(); k++)
+				if (keys[k].first == mat && keys[k].second == resid) return (int)k;
+			keys.push_back(std::make_pair(mat, resid));
+			return (int)keys.size() - 1;
+		};
+		auto matrix_of = [](AugmentedBlockSpec::Kind kd) -> unsigned {
+			switch (kd)
+			{
+			case AugmentedBlockSpec::Jacobian:
+			case AugmentedBlockSpec::JacobianT: return 0u;
+			case AugmentedBlockSpec::MassMatrix:
+			case AugmentedBlockSpec::MassMatrixT: return Problem::MASK_MASS;
+			default: return Problem::MASK_HESSIAN; // Hessian / HessianT
+			}
+		};
+		for (unsigned gr = 0; gr < ng; gr++)
 		{
-			const AugmentedBlockSpec::Kind kd = spec.blocks[k];
-			needJ |= (kd == AugmentedBlockSpec::Jacobian || kd == AugmentedBlockSpec::JacobianT);
-			needM |= (kd == AugmentedBlockSpec::MassMatrix || kd == AugmentedBlockSpec::MassMatrixT);
-			needH |= (kd == AugmentedBlockSpec::Hessian || kd == AugmentedBlockSpec::HessianT);
+			for (unsigned gc = 0; gc < ng; gc++)
+			{
+				const AugmentedBlockSpec::Kind kd = spec.at(gr, gc);
+				if (kd == AugmentedBlockSpec::Empty || kd == AugmentedBlockSpec::Dense) continue;
+				if ((kd == AugmentedBlockSpec::Hessian || kd == AugmentedBlockSpec::HessianT) && !have_hessian_code)
+				{
+					// No generated Hessian means no coupling table, and the handler finite-differences the
+					// second derivatives instead. Refuse the whole augmented pattern rather than guess:
+					// the Jacobian bounds an ANALYTIC Hessian, but nothing bounds what a finite-differenced
+					// one writes, so the frozen path has no business here. Falling back costs the speedup
+					// and nothing else.
+					return NULL;
+				}
+				key_index(matrix_of(kd), spec.residual_at(gr, gc));
+			}
 		}
-		if (needJ)
+
+		if (augmented_raw_masks.size() < keys.size()) augmented_raw_masks.resize(keys.size());
+		for (size_t k = 0; k < keys.size(); k++)
 		{
-			const char *m = this->sparsity_mask_for_element(0, elem_pt, raw_nvar);
-			if (!m) return NULL;
-			rawJ.assign(m, m + (size_t)raw_nvar * raw_nvar);
-		}
-		if (needM)
-		{
-			const char *m = this->sparsity_mask_for_element(MASK_MASS, elem_pt, raw_nvar);
-			if (!m) return NULL;
-			rawM.assign(m, m + (size_t)raw_nvar * raw_nvar);
-		}
-		if (needH)
-		{
-			// Without generated Hessian code there is no coupling table to read, and the handler falls
-			// back to finite-differencing the second derivatives -- which fills the same block, so an
-			// empty table would silently under-report it. (The fold normal form makes it concrete:
-			// d2R/dx2 = 2 is the whole Hessian block, and with no analytic Hessian the table says
-			// nothing couples.) Use the Jacobian pattern there, which is the safe superset the Hessian
-			// is a subset of; the tightening is simply not available in that mode.
-			const bool have_table = be_of(elem_pt) && be_of(elem_pt)->get_code_instance()->get_func_table()->hessian_generated;
-			const char *m = this->sparsity_mask_for_element(have_table ? MASK_HESSIAN : 0u, elem_pt, raw_nvar);
-			if (!m) return NULL;
-			rawH.assign(m, m + (size_t)raw_nvar * raw_nvar);
+			if (!this->field_coupling_mask_for_element(keys[k].first, keys[k].second, elem_pt, raw_nvar,
+													   augmented_raw_masks[k].data))
+				return NULL;
+			augmented_raw_masks[k].matrix = keys[k].first;
+			augmented_raw_masks[k].residual = keys[k].second;
 		}
 
 		if (sparsity_mask_scratch.size() <= matrix_index) sparsity_mask_scratch.resize(matrix_index + 1);
 		std::vector<char> &scratch = sparsity_mask_scratch[matrix_index];
 		scratch.assign((size_t)nvar * nvar, 0);
-
 
 		for (unsigned gr = 0; gr < ng; gr++)
 		{
@@ -2209,31 +2229,23 @@ namespace pyoomph
 				// A scalar group has no raw indexing to inherit, so only Empty and Dense make sense there.
 				if (scalar_pair && kd != AugmentedBlockSpec::Dense) return NULL;
 				const std::vector<char> *src = 0;
-				bool transposed = false;
-				switch (kd)
-				{
-				case AugmentedBlockSpec::Jacobian: src = &rawJ; break;
-				case AugmentedBlockSpec::JacobianT: src = &rawJ; transposed = true; break;
-				case AugmentedBlockSpec::MassMatrix: src = &rawM; break;
-				case AugmentedBlockSpec::MassMatrixT: src = &rawM; transposed = true; break;
-				case AugmentedBlockSpec::Hessian: src = &rawH; break;
-				case AugmentedBlockSpec::HessianT: src = &rawH; transposed = true; break;
-				default: break; // Dense
-				}
+				const bool transposed = (kd == AugmentedBlockSpec::JacobianT || kd == AugmentedBlockSpec::MassMatrixT ||
+										 kd == AugmentedBlockSpec::HessianT);
+				if (kd != AugmentedBlockSpec::Dense)
+					src = &augmented_raw_masks[key_index(matrix_of(kd), spec.residual_at(gr, gc))].data;
 				const unsigned nr = spec.group_is_scalar[gr] ? 1u : raw_nvar;
 				const unsigned nc = spec.group_is_scalar[gc] ? 1u : raw_nvar;
 				for (unsigned i = 0; i < nr; i++)
 				{
-					char *row = &scratch[(size_t)(start[gr] + i) * nvar + start[gc]];
+					char *row = &scratch[(size_t)(gstart[gr] + i) * nvar + gstart[gc]];
 					for (unsigned j = 0; j < nc; j++)
-					{
 						row[j] = src ? (*src)[transposed ? (size_t)j * raw_nvar + i : (size_t)i * raw_nvar + j] : 1;
-					}
 				}
 			}
 		}
 		return scratch.data();
 	}
+
 
 	void Problem::set_prune_structural_zeros_by_field_coupling(bool yesno)
 	{

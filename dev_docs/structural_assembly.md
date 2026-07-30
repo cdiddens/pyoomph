@@ -1434,12 +1434,24 @@ found, the builder returns NULL and both fall back exactly as before. Their `ndo
 `2*raw+2`) can never equal `raw` either, so the augmented dispatch always fires and always declines --
 there is no path by which they could pick up a *wrong* mask rather than none.
 
-**So the fix is not needed until one of those specs is written -- and is then a prerequisite, not an
-afterthought.** The shape of it: give `Kind` (or the block entry) a residual index alongside the
-matrix choice, and have `augmented_sparsity_mask_for_element` fetch
-`contributes_to_{jacobian,mass_matrix,hessian}[that index]` rather than `[current_res_jac]`. The raw
-masks would then have to be fetched per (matrix, residual) pair instead of the three buffers used now,
-which is why it is better done before the first such spec than retrofitted around one.
+**Done ahead of the specs**, rather than retrofitted around one. Each block entry now carries a
+residual index (`-1` = "the one currently being assembled", which is what fold and Hopf use
+throughout), `field_coupling_mask_for_element(matrix, residual, ...)` is the shared core that both the
+plain and the augmented path call, and the builder collects the distinct **(matrix, residual)** pairs
+its spec refers to *before* filling any of them -- so the buffer indices stay valid while several are
+held at once, which a per-matrix scheme could not guarantee once a block mixes residuals.
+
+Writing the azimuthal or pitchfork spec is now a matter of naming the residual per block; nothing in
+the machinery has to change.
+
+### Without an analytic Hessian, refuse rather than approximate
+
+The first version fell back to the Jacobian pattern for Hessian blocks when no analytic Hessian had
+been generated. That is wrong-headed: the Jacobian bounds an *analytic* Hessian, but nothing bounds
+what a *finite-differenced* one writes, and the handler finite-differences precisely when codegen has
+emitted no Hessian. The builder now returns NULL in that case, so the whole augmented pattern is
+declined and assembly falls back to oomph-lib's. It costs the speedup for problems that have not
+called `setup_for_stability_analysis(analytic_hessian=True)`, and nothing else.
 
 ### Three defects this exposed, all worth remembering
 
