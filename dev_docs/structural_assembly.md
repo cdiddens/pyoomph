@@ -1155,12 +1155,15 @@ Two further MPIAIJ-specific points that had to be checked because the reuse path
   3-5 and left rank 0's values untouched. Had it been global-row-indexed, every rank above 0 would
   have silently written into rank 0's rows via the stash — a wrong answer, not a crash, so this was
   worth confirming rather than assuming.
-* **Latent dtype inconsistency, pre-existing.** The distributed *creation* call passes the raw arrays
-  (`csr=(row_start, col_index, values)`) while the serial one converts with
-  `.astype(PETSc.IntType, copy=False)`. On a 64-bit-index PETSc build the distributed path would hand
-  int32 where int64 is expected. The Phase 1 reuse path added the conversion on the update call, so
-  creation and update now disagree. Harmless on this build (32-bit indices, real scalars); should be
-  made consistent.
+* **Latent dtype inconsistency, pre-existing — fixed.** The distributed *creation* call passed the raw
+  arrays (`csr=(row_start, col_index, values)`) while the serial one converted with
+  `.astype(PETSc.IntType, copy=False)`, so on a 64-bit-index (or complex-scalar) PETSc build the
+  distributed path would have handed int32/float64 where int64/complex was expected. Phase 1 added the
+  conversion to the update call, which left creation and update disagreeing with each other.
+  `assemble_preconditioner()` had the same gap. Both now convert; every `csr=` in the file does.
+  On a matching build each conversion is a no-op returning the same view, so this costs nothing here —
+  it only shows up on a PETSc configured differently from this machine's, which is exactly why it had
+  survived.
 
 ### A2. Is MUMPS/PETSc symbolic reuse actually happening? — **verified**
 

@@ -437,7 +437,15 @@ class PETSCSolver(GenericLinearSystemSolver):
             # invalidated in _before_assigning_equation_numbers (on reassignment), not on every matrix rebuild.
             #print("PETSCINF",nrow_local,n)
             #print("Creating petsc mat ")
-            self.petsc_mat = PETSc.Mat().createAIJ(size=((nrow_local, n), (nrow_local, n),),csr=(row_start, col_index, values)) #type:ignore
+            # astype(..., copy=False) rather than the raw arrays: on a PETSc built with 64-bit indices
+            # (or complex scalars) the int32/float64 arrays oomph hands over are the wrong dtype, and
+            # this is the only createAIJ in the file that was still passing them through unconverted --
+            # so the distributed path disagreed with both the serial one and its own update call below.
+            # On a matching build every conversion is a no-op returning the same view.
+            self.petsc_mat = PETSc.Mat().createAIJ(size=((nrow_local, n), (nrow_local, n),),
+                                                   csr=(row_start.astype(PETSc.IntType, copy=False),
+                                                        col_index.astype(PETSc.IntType, copy=False),
+                                                        values.astype(PETSc.ScalarType, copy=False))) #type:ignore
 
             self.petsc_mat.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False) #type:ignore
             # Force diagonal:
@@ -946,7 +954,11 @@ class FieldSplitPETSCSolver(PETSCSolver):
 
     def assemble_preconditioner(self,name:str,restrict_on_field_split:int | None=None)->Any:               
         _res, n, _M_nzz, nrow_local, M_values_arr, M_colindex_arr, M_row_start_arr=self.problem._assemble_residual_jacobian(name)
-        P=PETSc.Mat().createAIJ(size=((nrow_local, n), (nrow_local, n),), csr=( M_row_start_arr,M_colindex_arr, M_values_arr)) #type:ignore # TODO: Must be destroyed!
+        # Same dtype conversion as everywhere else in this file; see solve_distributed().
+        P=PETSc.Mat().createAIJ(size=((nrow_local, n), (nrow_local, n),),
+                                csr=(M_row_start_arr.astype(PETSc.IntType, copy=False),
+                                     M_colindex_arr.astype(PETSc.IntType, copy=False),
+                                     M_values_arr.astype(PETSc.ScalarType, copy=False))) #type:ignore # TODO: Must be destroyed!
         if restrict_on_field_split is not None:
             assert self._fieldsplit is not None
             ps = self._fieldsplit[restrict_on_field_split][1] #type:ignore
