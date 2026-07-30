@@ -808,8 +808,13 @@ void PyReg_Problem(nb::module_ &m)
 					  "factorisations require one, MUMPS does not. Assigning to it overrides the solver in either direction and stops it being consulted "
 					  "(call ``_set_force_jacobian_diagonal_entries_auto()`` to undo). Stored zeros are not free -- they change the matrix a direct solver "
 					  "sees, hence its pivoting. Only has an effect together with ``keep_structural_zeros``.")
+#ifdef OOMPH_HAS_MPI
+		// oomph-lib only declares this inside its own OOMPH_HAS_MPI guard, so a build configured with
+		// PYOOMPH_USE_MPI=OFF does not have it at all.
 		.def("_enable_doc_imbalance_in_parallel_assembly", &oomph::Problem::enable_doc_imbalance_in_parallel_assembly,
-			 "Make the distributed assembly report its local-stage time and the load imbalance across ranks. Diagnostics for the MPI assembly work.")
+			 "Make the distributed assembly report its local-stage time and the load imbalance across ranks. Diagnostics for the MPI assembly work. "
+			 "Only present in an MPI-enabled build.")
+#endif
 		.def_prop_rw("use_frozen_sparsity", &pyoomph::Problem::get_use_frozen_sparsity, &pyoomph::Problem::set_use_frozen_sparsity,
 					  "Whether assembly writes straight into a preallocated CSR through a precomputed scatter map, instead of accumulating into a searchable "
 					  "container and compressing it afterwards. Requires a value-independent pattern (``keep_structural_zeros``), and falls back to oomph-lib's "
