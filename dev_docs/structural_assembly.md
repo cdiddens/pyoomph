@@ -1351,9 +1351,50 @@ returns early regardless of allocation policy. The conclusion of §5b stands, no
 
 ---
 
-## 7e. PLAN: freezing the bifurcation trackers
+## 7e. Freezing the bifurcation trackers
 
-**Status: design only, nothing implemented.**
+**Status: infrastructure and the fold spec implemented, OFF BY DEFAULT
+(`problem._use_frozen_sparsity_for_bifurcation_tracking`). One unexplained failure, below.**
+
+### What the first attempt showed
+
+`AugmentedBlockSpec` + the `AugmentedSparsityProvider` no-op mixin are in `src/bifurcation.hpp`,
+`MyFoldHandler::get_sparsity_pattern` describes the fold layout, and
+`Problem::augmented_sparsity_mask_for_element` tiles the raw masks into the augmented one. It works:
+on a PDE fold tracking (Kuramoto-Sivashinsky, ndof 15 229 augmented) the frozen pattern is built
+(`_get_frozen_sparsity_nnz` 0 -> 735 462) and the augmented assembly drops from **114.6 ms to 63.1 ms
+(-45 %)**, finding the same fold point to 12 digits.
+
+**The cost, stated properly.** Against the *default* (value-filtered) augmented pattern the frozen one
+stores **549 693 -> 735 462 nonzeros, +34 %**. An earlier note here said "identical nnz"; that
+compared frozen against unfrozen with the structural mask applied in both, which is not the
+comparison a user experiences. The -45 % assembly saving is bought with 34 % more stored zeros, and
+those reach the factorisation of the augmented system, which was not measured. Whether it pays
+overall is therefore still open.
+
+### The unexplained failure
+
+`Advanced_Linear_Dynamics/hanging_droplet.py` (a fold tracker on a moving mesh) trips the per-element
+verification with the switch on:
+
+```
+element 898, nvar 7, raw_ndof 3 -- positions missing: (3,4), (3,5), (3,6)
+```
+
+nvar 7 with raw 3 is the fold layout `[base(3) | param(1) | eig(3)]`, so those three are the
+**parameter row against the eigenvector columns** -- which the spec declares `Dense`, and which the
+tiling demonstrably writes. Printing the spec the builder actually receives confirms it
+(`(1,2)=Dense`, starts `0 3 4 7`), yet re-fetching the mask at the point of failure returns 0 there.
+Not resolved. The guard is doing its job -- a refusal, not a truncated Jacobian -- but until the
+contradiction is explained the switch must stay off.
+
+Worth noting the failure only appears now because the frozen path never engaged for tracking before,
+so this is an existing behaviour being exposed rather than a new defect; whether the fault is in the
+spec or in something the augmented pattern reuses is exactly what is unresolved.
+
+### The original plan follows.
+
+
 
 ### Where the two tracker families stand today
 

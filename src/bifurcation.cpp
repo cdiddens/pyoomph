@@ -1305,6 +1305,41 @@ namespace pyoomph
   // augmented system carries the original dofs plus the eigenvector Y plus the parameter
   // (2*raw_ndof+1); the "augmented J" block carries the original dofs plus the parameter only
   // (raw_ndof+1); the plain "J" block carries only the original dofs.
+  // The augmented block of a fold tracker, read off get_jacobian() below.
+  //
+  // Layout (Full_augmented, see eqn_number): [ base (raw) | parameter (1) | eigenvector (raw) ].
+  //
+  //                  base cols        param col      eig cols
+  //   base rows      J                 dense          -           get_jacobian(residuals, jacobian)
+  //   param row      -                 -              dense       jacobian(raw, raw+1+n) = Phi[..]
+  //   eig  rows      J (dJdU . Y)      dense          J           jacobian(raw+1+m, n) = dJduPhiH(m,n)
+  //                                                               jacobian(raw+1+n, raw+1+m) = jacobian(n,m)
+  //
+  // The eigenvector-row/base-column block is the Hessian contracted with Y, which is Jacobian-
+  // patterned and NOT transposed: the fold condition J.Y = 0 uses the RIGHT null vector, so
+  // d(J.Y)_m/du_n contracts over the third index and keeps the (m,n) orientation of J.
+  //
+  // The parameter row's diagonal is deliberately Empty. The normalisation equation Phi.Y = 1 does not
+  // involve the parameter, so nothing is written there today either -- and declaring it Dense would
+  // manufacture a stored zero on the diagonal, which section 7c showed is exactly what invites MUMPS
+  // to plan an elimination onto a null pivot.
+  bool MyFoldHandler::get_sparsity_pattern(GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const
+  {
+    if (Solve_which_system != Full_augmented) return false; // Block_J needs no spec (it IS the raw block)
+    typedef AugmentedBlockSpec S;
+    spec.resize(3);
+    spec.group_is_scalar[0] = false; // base dofs
+    spec.group_is_scalar[1] = true;  // the bifurcation parameter
+    spec.group_is_scalar[2] = false; // the eigenvector
+    spec.set(0, 0, S::Jacobian);
+    spec.set(0, 1, S::Dense);
+    spec.set(2, 0, S::Jacobian);
+    spec.set(2, 1, S::Dense);
+    spec.set(2, 2, S::Jacobian);
+    spec.set(1, 2, S::Dense);
+    return true;
+  }
+
   unsigned MyFoldHandler::ndof(GeneralisedElement *const &elem_pt)
   {
     unsigned raw_ndof = elem_pt->ndof();

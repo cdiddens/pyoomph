@@ -842,6 +842,11 @@ void PyReg_Problem(nb::module_ &m)
 			 "How many distributed assembly plans have been built since the problem was created. A plan costs a round of communication on top of two passes over "
 			 "the mesh, so this should settle: if it keeps rising, the pattern is being invalidated every assembly and the frozen route is a pure loss. Zero after "
 			 "a distributed solve means the route never engaged at all.")
+		.def_prop_rw("_use_frozen_sparsity_for_bifurcation_tracking", &pyoomph::Problem::get_use_frozen_sparsity_for_bifurcation_tracking, &pyoomph::Problem::set_use_frozen_sparsity_for_bifurcation_tracking,
+			 "EXPERIMENTAL, off by default. Lets a bifurcation-tracking assembly handler describe its augmented elemental block (see AugmentedBlockSpec) so that the "
+			 "frozen-sparsity assembly can apply to bifurcation tracking as well, which it otherwise cannot: the block is several times larger than the element's own "
+			 "field description. Measured -45% on a PDE fold tracking with a bit-identical pattern, but it currently trips the per-element verification on one "
+			 "moving-mesh tutorial, so it is not enabled by default.")
 		.def("_get_frozen_sparsity_rebuild_count", &pyoomph::Problem::get_frozen_sparsity_rebuild_count,
 			 "How many frozen sparsity patterns have been built since the problem was created. It should stop growing once a workflow settles: a count that "
 			 "keeps rising assembly after assembly means the pattern cache is thrashing (too small for the number of distinct patterns in play), which is "

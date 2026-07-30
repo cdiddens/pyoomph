@@ -473,6 +473,11 @@ namespace pyoomph
 
     bool verify_frozen_sparsity=true; // Check per element that nothing nonzero fell outside the frozen pattern
     bool use_frozen_sparsity=true; // Assemble straight into a preallocated CSR when the pattern allows it (see assemble_with_frozen_sparsity)
+    // Experimental (section 7e): let a bifurcation-tracking assembly handler describe its AUGMENTED
+    // elemental block so the frozen path can apply to it too. Measured -45% on a PDE fold tracking,
+    // with a bit-identical pattern -- but it trips the verification on one tutorial that is not yet
+    // explained, so it is off until that is resolved.
+    bool use_frozen_sparsity_for_bifurcation_tracking=false;
     // Several frozen patterns are kept at once, keyed by (pattern id, matrix index). A single slot per
     // matrix index is not enough: a workflow that alternates between two DIFFERENT patterns -- most
     // obviously a PETSc preconditioner matrix assembled from another residual via
@@ -607,6 +612,9 @@ namespace pyoomph
     // Per-element structural sparsity mask, built from the code generator's symbolic field-coupling
     // tables. See the base declaration in oomph-lib's problem.h and dev_docs/structural_assembly.md.
     const char *sparsity_mask_for_element(const unsigned &matrix_index, oomph::GeneralisedElement *const &elem_pt, const unsigned &nvar) override;
+    // Tiles an AUGMENTED elemental block's mask from the raw ones, using the description the assembly
+    // handler provides (see AugmentedBlockSpec). NULL if it cannot be described, so the caller falls back.
+    const char *augmented_sparsity_mask_for_element(const unsigned &matrix_index, oomph::GeneralisedElement *const &elem_pt, const unsigned &nvar, unsigned raw_nvar);
     // Whether the value-independent pattern is pruned to the field pairs the code generator proves can
     // contribute (tight, "Tier B"), or is the full element-connectivity pattern ("Tier A"). Pruning is
     // strictly better where it applies -- it reproduced the numerical pattern exactly on every problem
@@ -630,6 +638,8 @@ namespace pyoomph
     // runs, augmented systems, compressed-column output, any element without a symbolic mask).
     void set_use_frozen_sparsity(bool yesno);
     bool get_use_frozen_sparsity() const { return use_frozen_sparsity; }
+    void set_use_frozen_sparsity_for_bifurcation_tracking(bool yesno) { use_frozen_sparsity_for_bifurcation_tracking = yesno; invalidate_jacobian_structure(); }
+    bool get_use_frozen_sparsity_for_bifurcation_tracking() const { return use_frozen_sparsity_for_bifurcation_tracking; }
     // Whether each element's block is checked against the frozen pattern during assembly (see the
     // assembly loop). Cheap relative to the scatter, and it is the only thing standing between a
     // hypothetical code-generation bug and a silently truncated Jacobian, so it defaults to on.

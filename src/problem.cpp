@@ -2075,9 +2075,13 @@ namespace pyoomph
 		if (!table) return NULL;
 		const unsigned nclass = ft->contribution_entries_size;
 		const std::vector<int> &cidx = be->get_local_dof_contribution_indices();
-		// The element's map is indexed by ITS local dofs; if the handler presents a different number,
-		// the two indexings are unrelated and the mask would be nonsense.
-		if (cidx.size() != nvar) return NULL;
+		// The element's map is indexed by ITS local dofs. If the handler presents a different number it
+		// is assembling an AUGMENTED block, which the field description cannot describe directly -- but
+		// the handler may be able to describe it in terms of blocks that it can. See section 7e.
+		if (cidx.size() != nvar)
+		{
+			return augmented_sparsity_mask_for_element(matrix_index, elem_pt, nvar, (unsigned)cidx.size());
+		}
 
 		if (sparsity_mask_scratch.size() <= matrix_index) sparsity_mask_scratch.resize(matrix_index + 1);
 		std::vector<char> &scratch = sparsity_mask_scratch[matrix_index];
@@ -2106,6 +2110,96 @@ namespace pyoomph
 					row[j] = (table[fi][fj] ? 1 : 0);
 			}
 			if (matrix_index == 0 && diagonal_entries_are_forced()) row[i] = 1;
+		}
+		return scratch.data();
+	}
+
+	// Builds the mask of an AUGMENTED elemental block by tiling the raw ones.
+	//
+	// A bifurcation-tracking handler presents a block several times larger than the element's dof
+	// count and fills it by hand, so the field description cannot describe it -- but it is built out of
+	// blocks the field description CAN describe. The handler says which (see AugmentedBlockSpec) and
+	// this assembles the result. Returns NULL, so the caller falls back exactly as before, whenever the
+	// handler declines or the spec does not fit the block it is describing.
+	const char *Problem::augmented_sparsity_mask_for_element(const unsigned &matrix_index, oomph::GeneralisedElement *const &elem_pt, const unsigned &nvar, unsigned raw_nvar)
+	{
+		// OFF BY DEFAULT. The mechanism works and pays (see section 7e), but enabling it turns the frozen
+		// path on for bifurcation tracking, where it is currently unproven: hanging_droplet.py trips the
+		// per-element verification with three entries of the parameter row missing, and that is not yet
+		// explained -- the spec and the tiling both look right, and the same positions are declared
+		// Dense. Until that is understood, the default must not change behaviour for anyone.
+		if (!use_frozen_sparsity_for_bifurcation_tracking) return NULL;
+		if (matrix_index > 0) return NULL; // Only the Jacobian of an augmented system has a meaning here
+		auto *provider = dynamic_cast<AugmentedSparsityProvider *>(this->assembly_handler_pt());
+		if (!provider || !raw_nvar) return NULL;
+		AugmentedBlockSpec spec;
+		if (!provider->get_sparsity_pattern(elem_pt, spec)) return NULL;
+
+		const unsigned ng = spec.n_groups();
+		if (!ng) return NULL;
+		// Where each group starts in the augmented numbering, and check the total matches the block.
+		std::vector<unsigned> start(ng + 1, 0);
+		for (unsigned g = 0; g < ng; g++) start[g + 1] = start[g] + (spec.group_is_scalar[g] ? 1u : raw_nvar);
+		if (start[ng] != nvar) return NULL; // Spec describes a different layout than we were handed
+
+		// The raw masks this spec refers to. Fetched into local buffers rather than the shared scratch,
+		// which is what we are about to write the answer into.
+		std::vector<char> rawJ, rawM;
+		bool needJ = false, needM = false;
+		for (size_t k = 0; k < spec.blocks.size(); k++)
+		{
+			const AugmentedBlockSpec::Kind kd = spec.blocks[k];
+			needJ |= (kd == AugmentedBlockSpec::Jacobian || kd == AugmentedBlockSpec::JacobianT);
+			needM |= (kd == AugmentedBlockSpec::MassMatrix || kd == AugmentedBlockSpec::MassMatrixT);
+		}
+		if (needJ)
+		{
+			const char *m = this->sparsity_mask_for_element(0, elem_pt, raw_nvar);
+			if (!m) return NULL;
+			rawJ.assign(m, m + (size_t)raw_nvar * raw_nvar);
+		}
+		if (needM)
+		{
+			const char *m = this->sparsity_mask_for_element(1, elem_pt, raw_nvar);
+			if (!m) return NULL;
+			rawM.assign(m, m + (size_t)raw_nvar * raw_nvar);
+		}
+
+		if (sparsity_mask_scratch.size() <= matrix_index) sparsity_mask_scratch.resize(matrix_index + 1);
+		std::vector<char> &scratch = sparsity_mask_scratch[matrix_index];
+		scratch.assign((size_t)nvar * nvar, 0);
+
+
+		for (unsigned gr = 0; gr < ng; gr++)
+		{
+			for (unsigned gc = 0; gc < ng; gc++)
+			{
+				const AugmentedBlockSpec::Kind kd = spec.at(gr, gc);
+				if (kd == AugmentedBlockSpec::Empty) continue;
+				const bool scalar_pair = spec.group_is_scalar[gr] || spec.group_is_scalar[gc];
+				// A scalar group has no raw indexing to inherit, so only Empty and Dense make sense there.
+				if (scalar_pair && kd != AugmentedBlockSpec::Dense) return NULL;
+				const std::vector<char> *src = 0;
+				bool transposed = false;
+				switch (kd)
+				{
+				case AugmentedBlockSpec::Jacobian: src = &rawJ; break;
+				case AugmentedBlockSpec::JacobianT: src = &rawJ; transposed = true; break;
+				case AugmentedBlockSpec::MassMatrix: src = &rawM; break;
+				case AugmentedBlockSpec::MassMatrixT: src = &rawM; transposed = true; break;
+				default: break; // Dense
+				}
+				const unsigned nr = spec.group_is_scalar[gr] ? 1u : raw_nvar;
+				const unsigned nc = spec.group_is_scalar[gc] ? 1u : raw_nvar;
+				for (unsigned i = 0; i < nr; i++)
+				{
+					char *row = &scratch[(size_t)(start[gr] + i) * nvar + start[gc]];
+					for (unsigned j = 0; j < nc; j++)
+					{
+						row[j] = src ? (*src)[transposed ? (size_t)j * raw_nvar + i : (size_t)i * raw_nvar + j] : 1;
+					}
+				}
+			}
 		}
 		return scratch.data();
 	}
@@ -3457,11 +3551,25 @@ namespace pyoomph
 					for (int k = lo; k < hi; k++) taken += (flat[src[k]] != 0.0);
 					if (all > taken)
 					{
+						// Name the offending positions: which part of the block escaped decides what is
+						// wrong. On an AUGMENTED (bifurcation-tracking) block the row and column say which
+						// sub-block of the handler's spec is at fault, which "element 898" alone does not.
+						std::string where;
+						unsigned shown = 0;
+						std::vector<bool> covered(nblock, false);
+						for (int k = lo; k < hi; k++) covered[src[k]] = true;
+						for (size_t q = 0; q < nblock && shown < 6; q++)
+						{
+							if (flat[q] == 0.0 || covered[q]) continue;
+							where += (shown ? ", " : "") + std::string("(") + std::to_string(q / nvar) + "," +
+									 std::to_string(q % nvar) + ")=" + std::to_string(flat[q]);
+							shown++;
+						}
 						throw_runtime_error("A Jacobian entry appeared outside the symbolic sparsity pattern (matrix " +
-											std::to_string(m) + ", element " + std::to_string(e) + "). Silently dropping "
-											"it would truncate the Jacobian, so assembly is refused. This is a bug in the "
-											"field-coupling analysis -- please report it. Workaround: set "
-											"problem.use_frozen_sparsity=False.");
+											std::to_string(m) + ", element " + std::to_string(e) + ", nvar " +
+											std::to_string(nvar) + "). Positions missing from the pattern: " + where +
+											". Silently dropping them would truncate the Jacobian, so assembly is "
+											"refused. Workaround: set problem.use_frozen_sparsity=False.");
 					}
 				}
 			}
