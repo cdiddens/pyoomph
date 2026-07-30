@@ -1394,6 +1394,51 @@ all of it the two border columns, which are dense per element and not worth chas
 including the factorisation **-31 %** (171.6 -> 118.1 ms), and a full fold-tracking solve **-24 %**
 (0.70 -> 0.53 s), with the same fold point to 12 digits.
 
+### Hopf
+
+`MyHopfHandler::get_sparsity_pattern` describes the five-group layout
+`[ base | Phi | Psi | parameter | Omega ]`:
+
+|  | base | Phi | Psi | param | Omega |
+| --- | --- | --- | --- | --- | --- |
+| **base rows** | J | - | - | dense | - |
+| **Phi rows** | H | J | M | dense | dense |
+| **Psi rows** | H | M | J | dense | dense |
+| **param row** | - | dense | - | - | - |
+| **Omega row** | - | - | dense | - | - |
+
+Both eigenvector-row base blocks are Hessians (`dJdU_Eig` and `dMdU_Eig`); `contributes_to_hessian`
+covers the mass-matrix one too, because it is marked whenever *either* the Jacobian or the mass part
+of the second derivative is non-zero. Neither scalar row has a diagonal, deliberately -- `C.Phi - 1 = 0`
+involves neither the parameter nor Omega, and declaring those `Dense` would manufacture the stored
+zero diagonal of §7c.
+
+Verified on the Lorenz Hopf: the frozen pattern engages (`_get_frozen_sparsity_nnz` 0 -> 59), every
+structural block is **identical** to the value-filtered one, and the Hopf point is unchanged
+(`rho = 24.7368421053`). The only differences are the three `Dense` border columns, 1 -> 3 each,
+because only one of the three Lorenz equations depends on rho.
+
+### Three defects this exposed, all worth remembering
+
+1. **The mass table was unreachable.** `sparsity_mask_for_element` refuses `matrix_index > 0` unless
+   an `EigenProblemHandler` is active. That guard is about the second matrix of a multi-matrix
+   *assembly*; using the mass *coupling table* as a pattern source is meaningful whatever is
+   assembling. Until a `MASK_MASS` sentinel was added, every Hopf spec silently fell back and the
+   frozen path never engaged -- and a first "every block identical" reading was worthless, because
+   both sides of the comparison had fallen back. **Check that the fast path engaged before believing
+   a comparison**; this is the Phase 2 false negative in a new costume.
+2. **Finite-differenced Hessians have no table.** The plan said the FD path "fills the same block
+   positions, so the spec is independent of it -- but that must be verified rather than assumed". It
+   is not independent: with no analytic Hessian, codegen emits none, `contributes_to_hessian` is
+   empty, and the block is masked away while the handler fills it by finite differences. The fold
+   normal form makes it concrete -- `d2R/dx2 = 2` is the entire Hessian block. The builder now checks
+   `hessian_generated` and falls back to the Jacobian pattern, which is the superset the Hessian is a
+   subset of.
+3. **Sentinel values as array indices.** The `resind < 0` shortcut sized its scratch buffer with
+   `resize(matrix_index + 1)`, and `matrix_index` can now be `(unsigned)-5`. That asks for ~4 billion
+   entries and surfaced as `std::bad_alloc` in an ordinary continuation step, nowhere near the
+   sparsity code.
+
 ### The failure that was unexplained, and what it was
 
 `Advanced_Linear_Dynamics/hanging_droplet.py` tripped the per-element verification at element 898

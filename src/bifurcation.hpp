@@ -110,7 +110,7 @@ namespace pyoomph
   //   C . Phi - 1                   = 0                     (normalization, prevents Phi=Psi=0)
   //   C . Psi                       = 0
   // where C is a fixed vector picked so the normalization equations are non-degenerate.
-  class MyHopfHandler : public oomph::AssemblyHandler
+  class MyHopfHandler : public oomph::AssemblyHandler, public AugmentedSparsityProvider
   {
   protected:
     unsigned Solve_which_system;   // Selects which sub-block of the augmented system is currently assembled (full, standard, or complex block; see solve_*_system())
@@ -211,6 +211,9 @@ namespace pyoomph
     void solve_full_system();
 
     void realign_C_vector(); // Reset the C-vector (which enforces the non-triviality of the eigenvector)
+
+    // Describes the augmented block for the frozen sparsity machinery; see AugmentedBlockSpec.
+    bool get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const override;
   };
 
   //////////////////////////////////////////////////////////

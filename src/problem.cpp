@@ -2047,7 +2047,7 @@ namespace pyoomph
 		if (!keep_structural_zeros || !prune_structural_zeros_by_field_coupling) return NULL;
 		if (!nvar) return NULL; // Element contributes nothing; there is no block to describe
 		// Tier A (no pruning) is expressed through the threshold instead, so no mask is needed there.
-		if (matrix_index != MASK_HESSIAN && matrix_index > 0 && !dynamic_cast<oomph::EigenProblemHandler *>(this->assembly_handler_pt()))
+		if (matrix_index != MASK_HESSIAN && matrix_index != MASK_MASS && matrix_index > 0 && !dynamic_cast<oomph::EigenProblemHandler *>(this->assembly_handler_pt()))
 		{
 			// Only the eigenproblem assembly has a known meaning for a secondary matrix (index 1 = mass
 			// matrix). For anything else - e.g. the several matrices of a multi-assembly - we have no
@@ -2071,6 +2071,12 @@ namespace pyoomph
 			}
 		}
 
+		// Which scratch buffer this call writes into. MUST be computed before any use: MASK_HESSIAN and
+		// MASK_MASS are huge sentinel values, and indexing the buffer vector by them directly asks for
+		// ~4 billion entries -- which is exactly what happened, surfacing as a std::bad_alloc in an
+		// ordinary continuation step rather than anywhere near the sparsity code.
+		const unsigned scratch_index = (matrix_index == MASK_HESSIAN ? 2u : (matrix_index == MASK_MASS ? 3u : matrix_index));
+
 		int resind = ft->current_res_jac;
 		if (resind < 0)
 		{
@@ -2079,12 +2085,13 @@ namespace pyoomph
 			// all-zero mask says exactly that. Returning NULL ("no symbolic description") instead would
 			// be equally correct for the OR-filter, but would deny the frozen-sparsity path a complete
 			// description of the mesh and force it to give up on the whole problem.
-			if (sparsity_mask_scratch.size() <= matrix_index) sparsity_mask_scratch.resize(matrix_index + 1);
-			std::vector<char> &empty = sparsity_mask_scratch[matrix_index];
+			if (sparsity_mask_scratch.size() <= scratch_index) sparsity_mask_scratch.resize(scratch_index + 1);
+			std::vector<char> &empty = sparsity_mask_scratch[scratch_index];
 			empty.assign((size_t)nvar * nvar, 0);
 			return empty.data();
 		}
 		if (!ft->contributes_to_jacobian || !ft->contributes_to_mass_matrix) return NULL;
+		if (matrix_index == MASK_HESSIAN && !ft->contributes_to_hessian) return NULL;
 		bool **table = (matrix_index == MASK_HESSIAN ? ft->contributes_to_hessian[resind]
 													 : (matrix_index == 0 ? ft->contributes_to_jacobian[resind]
 																		  : ft->contributes_to_mass_matrix[resind]));
@@ -2093,7 +2100,6 @@ namespace pyoomph
 		const std::vector<int> &cidx = be->get_local_dof_contribution_indices();
 		// Sizes already agree here: the augmented case was dispatched above.
 
-		const unsigned scratch_index = (matrix_index == MASK_HESSIAN ? 2u : matrix_index);
 		if (sparsity_mask_scratch.size() <= scratch_index) sparsity_mask_scratch.resize(scratch_index + 1);
 		std::vector<char> &scratch = sparsity_mask_scratch[scratch_index];
 		scratch.assign((size_t)nvar * nvar, 0);
@@ -2132,6 +2138,8 @@ namespace pyoomph
 	// blocks the field description CAN describe. The handler says which (see AugmentedBlockSpec) and
 	// this assembles the result. Returns NULL, so the caller falls back exactly as before, whenever the
 	// handler declines or the spec does not fit the block it is describing.
+	static inline BulkElementBase *be_of(oomph::GeneralisedElement *const &e) { return dynamic_cast<BulkElementBase *>(e); }
+
 	const char *Problem::augmented_sparsity_mask_for_element(const unsigned &matrix_index, oomph::GeneralisedElement *const &elem_pt, const unsigned &nvar, unsigned raw_nvar)
 	{
 		// On by default; set problem._use_frozen_sparsity_for_bifurcation_tracking = False to revert.
@@ -2168,13 +2176,20 @@ namespace pyoomph
 		}
 		if (needM)
 		{
-			const char *m = this->sparsity_mask_for_element(1, elem_pt, raw_nvar);
+			const char *m = this->sparsity_mask_for_element(MASK_MASS, elem_pt, raw_nvar);
 			if (!m) return NULL;
 			rawM.assign(m, m + (size_t)raw_nvar * raw_nvar);
 		}
 		if (needH)
 		{
-			const char *m = this->sparsity_mask_for_element(MASK_HESSIAN, elem_pt, raw_nvar);
+			// Without generated Hessian code there is no coupling table to read, and the handler falls
+			// back to finite-differencing the second derivatives -- which fills the same block, so an
+			// empty table would silently under-report it. (The fold normal form makes it concrete:
+			// d2R/dx2 = 2 is the whole Hessian block, and with no analytic Hessian the table says
+			// nothing couples.) Use the Jacobian pattern there, which is the safe superset the Hessian
+			// is a subset of; the tightening is simply not available in that mode.
+			const bool have_table = be_of(elem_pt) && be_of(elem_pt)->get_code_instance()->get_func_table()->hessian_generated;
+			const char *m = this->sparsity_mask_for_element(have_table ? MASK_HESSIAN : 0u, elem_pt, raw_nvar);
 			if (!m) return NULL;
 			rawH.assign(m, m + (size_t)raw_nvar * raw_nvar);
 		}

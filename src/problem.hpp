@@ -504,6 +504,10 @@ namespace pyoomph
     static constexpr unsigned MASK_UNION_SYMMETRIC = (unsigned)-3;
     // Sentinel matrix index selecting the HESSIAN coupling table rather than the Jacobian or mass one.
     static constexpr unsigned MASK_HESSIAN = (unsigned)-5;
+    // Likewise for the MASS-MATRIX coupling table. Distinct from matrix index 1, which additionally
+    // means "the second matrix of a multi-matrix assembly" and is only meaningful under an
+    // EigenProblemHandler; this one only selects the table, which is meaningful whatever is assembling.
+    static constexpr unsigned MASK_MASS = (unsigned)-6;
     std::vector<char> union_mask_scratch;
     // Whether the multi-assembly currently being built asks for a TRANSPOSED product, whose pattern is
     // J^T rather than J. Set from the request list; true by default so that any other caller of the

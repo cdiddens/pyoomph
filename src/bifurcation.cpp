@@ -414,6 +414,60 @@ namespace pyoomph
   //=============================================================
   /// Get the number of elemental degrees of freedom
   //=============================================================
+  // The augmented block of a Hopf tracker, read off get_jacobian() below.
+  //
+  // Layout (Solve_which_system == 0, see eqn_number):
+  //   [ base (raw) | Phi (raw) | Psi (raw) | parameter (1) | Omega (1) ]
+  //
+  // The augmented equations are
+  //   R(u,p) = 0,   J.Phi - Omega M.Psi = 0,   J.Psi + Omega M.Phi = 0,   C.Phi - 1 = 0,   C.Psi = 0
+  //
+  //                  base        Phi         Psi         param    Omega
+  //   base rows      J           -           -           dense    -
+  //   Phi  rows      H           J           M           dense    dense
+  //   Psi  rows      H           M           J           dense    dense
+  //   param row      -           dense       -           -        -
+  //   Omega row      -           -           dense       -        -
+  //
+  // The two base-column blocks of the eigenvector rows are Hessians: dJdU_Eig and dMdU_Eig, both of
+  // which contributes_to_hessian covers -- it is marked whenever EITHER the Jacobian or the mass part
+  // of the second derivative is non-zero, so a mass-matrix Hessian needs no separate kind.
+  //
+  // The (Phi,Phi) and (Psi,Psi) blocks are J, and pick up a further (*Parameter_pt)*M term in the
+  // mass-augmented variant; that stays within the Jacobian pattern on the same grounds Phase 4 relies
+  // on, that the mass matrix couples no field pair the Jacobian does not. If that ever fails, the
+  // per-element verification says so rather than truncating.
+  //
+  // Neither scalar row has a diagonal: C.Phi - 1 involves neither the parameter nor Omega, so those
+  // positions are Empty rather than Dense. Declaring them Dense would manufacture exactly the stored
+  // zero diagonal that section 7c showed leads MUMPS onto a null pivot.
+  bool MyHopfHandler::get_sparsity_pattern(GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const
+  {
+    if (Solve_which_system != 0) return false; // Only the full augmented system needs describing
+    typedef AugmentedBlockSpec S;
+    spec.resize(5);
+    spec.group_is_scalar[0] = false; // u
+    spec.group_is_scalar[1] = false; // Phi
+    spec.group_is_scalar[2] = false; // Psi
+    spec.group_is_scalar[3] = true;  // the bifurcation parameter
+    spec.group_is_scalar[4] = true;  // Omega
+    spec.set(0, 0, S::Jacobian);
+    spec.set(0, 3, S::Dense);
+    spec.set(1, 0, S::Hessian);
+    spec.set(1, 1, S::Jacobian);
+    spec.set(1, 2, S::MassMatrix);
+    spec.set(1, 3, S::Dense);
+    spec.set(1, 4, S::Dense);
+    spec.set(2, 0, S::Hessian);
+    spec.set(2, 1, S::MassMatrix);
+    spec.set(2, 2, S::Jacobian);
+    spec.set(2, 3, S::Dense);
+    spec.set(2, 4, S::Dense);
+    spec.set(3, 1, S::Dense);
+    spec.set(4, 2, S::Dense);
+    return true;
+  }
+
   unsigned MyHopfHandler::ndof(GeneralisedElement *const &elem_pt)
   {
     unsigned raw_ndof = elem_pt->ndof();
