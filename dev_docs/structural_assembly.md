@@ -994,6 +994,94 @@ ready-made ones in the session scratchpad) *inside that harness*, repeating each
 times before believing it. The first question to settle is what makes the manual and the pytest
 reproductions disagree, since that is the same question as what makes the manual one bistable.
 
+## 7b. The forced diagonal belongs to the solver — **DONE**
+
+Needing a stored diagonal is a property of the *factorisation*, not of the problem, so
+`problem.force_jacobian_diagonal_entries` was the wrong owner. It is now decided by the active linear
+solver, with the flag surviving as an override:
+
+* `GenericLinearSystemSolver.requires_explicit_diagonal()` — default `False`.
+* `PETSCSolver` answers it **from the options database**, not from its class. Every `*pc_type` option
+  is scanned (so a factorisation under a fieldsplit is seen), and a
+  `*pc_factor_mat_solver_type` naming an external package (MUMPS, SuperLU, PaStiX, CHOLMOD, UMFPACK,
+  MKL Pardiso, STRUMPACK…) answers `False`, because those build their own structure from the CSR.
+  PETSc's own LU/ILU/Cholesky/ICC answers `True`. Deciding from the options rather than the class is
+  what makes `petsc_mumps` and a hand-configured `-pc_type lu -pc_factor_mat_solver_type mumps` agree.
+* Pardiso, SuperLU and scipy inherit the `False` default.
+* `Problem._sync_diagonal_requirement_from_solver()`, called from `actions_before_newton_solve`, pushes
+  the answer down before each solve — re-asked every time, because PETSc options can change at any
+  point. Changing the answer invalidates the pattern, so a solver that *starts* needing a diagonal
+  cannot keep being handed one assembled without it.
+* The flag is now tri-state: reading it gives the effective value, assigning overrides the solver and
+  stops it being consulted, and `_set_force_jacobian_diagonal_entries_auto()` hands control back.
+
+Verified, each in a clean process:
+
+| solver | `requires_explicit_diagonal()` | rows without a diagonal | outcome |
+|---|---|---|---|
+| `pardiso` | False | 48 | converged |
+| `petsc_mumps` | False | 48 | converged |
+| `petsc` (PETSc's own LU) | **True** | **0** | fails on a zero pivot |
+
+The last row is the point. PETSc's LU used to reject the matrix outright with
+`MatLUFactorSymbolic_SeqAIJ … Matrix is missing diagonal entry 0`; that message is now **gone** — the
+structural obstacle is removed and the diagonal arrives from the assembly. What remains is the
+pre-existing numerical limitation of non-pivoting LU on a Taylor-Hood saddle-point system, which
+reproduces identically on `main`. Erring towards `False` is deliberate: an unnecessary `True` costs a
+stored zero on every diagonal and perturbs pivoting, whereas a wrong `False` surfaces as PETSc's own
+explicit complaint, which the user answers with `force_jacobian_diagonal_entries = True`.
+
+**Caveat worth knowing.** PETSc's options database is global and sticky within a process, so a solver
+configured earlier changes what a later one reports. Constructing `petsc_mumps` and then `petsc` in one
+process leaves `pc_factor_mat_solver_type=mumps` in the database, and the second solver then both
+reports `False` *and* actually runs MUMPS. That is PETSc's design, not something this layer can fix;
+it is why the table above was measured one solver per process.
+
+`PETSCSolver._force_zero_diagonal()` is now a documented no-op: the diagonal comes from the assembly,
+and the `MatShift(0.0)` it used to call never inserted anything (§7d A6).
+
+---
+
+## 7c. Open regression: `test_moving_mesh_distributed`
+
+**Status: open. Read the retraction below before trusting anything previously written here.**
+
+One test, one case (`ale-tri_crossed-12-level`). Everything else is green: 39 structural tests,
+`test_mpi_adaptivity_3d`, the other 27 MPI tests, the fast suite (543 passed), all 126 tutorial scripts.
+
+### Retraction
+
+Two explanations were recorded in this section and **both were wrong**, because both were built on
+single runs of a reproduction that turns out not to be reliable:
+
+1. *"Any extra stored zero tips this knife-edge case."* The flag bisection behind that was run on the
+   single test in isolation, where it passes regardless.
+2. *"It fails only after a predecessor in the same pytest process."* Later the same standalone case
+   failed with no predecessor at all.
+
+The manual reproduction — running `mpi_worker.py` under `mpirun -n 2` with the single
+`tri_crossed / ale / (1,2,"level")` spec — gives **batches** of consistent passes and batches of
+consistent failures with no change to the build in between: 12 consecutive passes, then 3 consecutive
+failures, with the JIT cache warm both times (clearing it changed nothing). Whatever switches it is
+not yet identified, and until it is, no attribution from a single manual run is worth anything.
+
+### What is solid
+
+* The pytest module fails **consistently**: 4 out of 4 whole-module runs, `1 failed / 11 passed`.
+* With the structural pattern forced off, the same module passes: `12 passed`, twice.
+* So the feature is implicated, but *which part* is not established — the flag bisection that appeared
+  to show it was unsound.
+* It is not the JIT cache: `PYOOMPH_JIT_CACHE=0` and a physically removed cache both behave the same.
+* It is not the accumulation order: feature off with `sparse_assembly_method="maps"` passes.
+
+### Where to pick it up
+
+Use the **pytest module** as the reproduction, not the manual worker — the module is the only form
+that has been consistent. Then bisect with the `sitecustomize.py`-on-`PYTHONPATH` trick (there are
+ready-made ones in the session scratchpad) *inside that harness*, repeating each configuration several
+times before believing it. The first question to settle is what makes the manual and the pytest
+reproductions disagree, since that is the same question as what makes the manual one bistable.
+
 ## 7b. TODO: the forced diagonal belongs to the solver, not the problem
 
 `force_jacobian_diagonal_entries` now defaults to **off**, and the flag is in the wrong place.

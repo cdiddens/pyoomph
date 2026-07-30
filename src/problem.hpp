@@ -346,12 +346,16 @@ namespace pyoomph
     bool keep_structural_zeros=true; // See set_keep_structural_zeros()
     bool keep_structural_zeros_in_secondary_matrices=false; // Same, but for the mass matrix / other non-primary matrices of a multi-matrix assembly
     bool prune_structural_zeros_by_field_coupling=true; // Use the codegen field-coupling tables to keep the structural pattern tight (see the setter)
-    // OFF by default. Only some PETSc factorisations need an explicit diagonal; MUMPS does not, and
-    // PETSc can insert the entries itself where it does. Storing zeros nobody asked for is not free:
-    // they change the matrix handed to the direct solver, hence its pivoting, hence the solution at
-    // round-off level -- enough to flip the adaptation decisions of a marginal ALE problem into
-    // non-convergence (see dev_docs/structural_assembly.md).
-    bool force_jacobian_diagonal_entries=false;
+    // Whether an explicit diagonal is needed is a property of the LINEAR SOLVER, not of the problem:
+    // only some PETSc factorisations require one, MUMPS does not, and the stored zeros are not free --
+    // they change the matrix a direct solver sees, hence its pivoting, hence the solution at round-off
+    // level (see dev_docs/structural_assembly.md). So this is a tri-state: by default the problem asks
+    // the active solver (solver_requires_explicit_diagonal, pushed down from Python before each solve),
+    // and setting the flag explicitly overrides that answer in either direction.
+    bool force_jacobian_diagonal_entries=false;      // The override value; only consulted when not auto
+    bool force_jacobian_diagonal_entries_auto=true;  // Cleared by set_force_jacobian_diagonal_entries()
+    bool solver_requires_explicit_diagonal=false;    // What the active linear solver last reported
+    bool diagonal_entries_are_forced() const { return force_jacobian_diagonal_entries_auto ? solver_requires_explicit_diagonal : force_jacobian_diagonal_entries; }
     // One scratch buffer PER MATRIX INDEX, not one shared buffer: a multi-matrix assembly fetches the
     // masks for all matrices of an element before using any of them, so the pointers handed out for
     // different matrix_index must stay valid simultaneously. Sharing one buffer silently aliased the
@@ -468,8 +472,13 @@ namespace pyoomph
     // it. Off by default: only some PETSc factorisations require it (MUMPS does not), and the stored
     // zeros perturb a direct solver's pivoting. Turn it on for a solver that needs it -- with pruning
     // on, Taylor-Hood's pressure-pressure diagonal is exactly such a case.
-    void set_force_jacobian_diagonal_entries(bool yesno);
-    bool get_force_jacobian_diagonal_entries() const { return force_jacobian_diagonal_entries; }
+    void set_force_jacobian_diagonal_entries(bool yesno); // Explicit override; disables the automatic answer
+    bool get_force_jacobian_diagonal_entries() const { return diagonal_entries_are_forced(); } // The EFFECTIVE value
+    void set_force_jacobian_diagonal_entries_auto(); // Go back to asking the solver
+    bool get_force_jacobian_diagonal_entries_is_auto() const { return force_jacobian_diagonal_entries_auto; }
+    // Pushed down from the Python solver layer before assembling; only consulted in auto mode.
+    void set_solver_requires_explicit_diagonal(bool yesno);
+    bool get_solver_requires_explicit_diagonal() const { return solver_requires_explicit_diagonal; }
     // Whether assembly may write straight into a preallocated CSR using a precomputed scatter map,
     // skipping the accumulate-into-a-container-then-compress work entirely. Requires a value-independent
     // pattern; falls back to oomph-lib's assembly automatically whenever it cannot apply (distributed

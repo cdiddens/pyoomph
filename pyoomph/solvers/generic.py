@@ -102,6 +102,22 @@ class GenericLinearSystemSolver:
 	def problem(self,p:"Problem | None"):
 		self._problem_wr=weakref.ref(p) if p is not None else (lambda:None)
 
+	def requires_explicit_diagonal(self)->bool:
+		"""Whether this solver needs an entry stored on every diagonal of the Jacobian, including where
+		the equations put nothing there.
+
+		Needing one is a property of the factorisation, not of the problem: PETSc's own LU rejects a
+		matrix with a missing diagonal outright ("Matrix is missing diagonal entry i"), while MUMPS,
+		Pardiso and SuperLU do not care. It is not free to say yes -- the extra stored zeros change the
+		matrix the solver sees and therefore its pivoting -- so the default is no, and a solver should
+		override this only when its configured factorisation genuinely requires it.
+
+		A solver that answers wrongly in the "no" direction is not silently broken: the user gets the
+		factoriser's own clear complaint and can force the issue with
+		``problem.force_jacobian_diagonal_entries = True``.
+		"""
+		return False
+
 	def setup_solver(self)->None:
 		pass
 

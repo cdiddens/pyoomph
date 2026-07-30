@@ -427,6 +427,54 @@ def test_tier_b_assembles_exactly_the_masked_pattern(with_scalar):
         assert M.nnz < J.nnz / 2, "the mass matrix must not have been given the Jacobian's pattern"
 
 
+def test_diagonal_requirement_comes_from_the_linear_solver():
+    """Needing a stored diagonal is a property of the FACTORISATION, not of the problem, so the answer
+    comes from the active solver via requires_explicit_diagonal() -- MUMPS and Pardiso do not need one,
+    PETSc's own LU rejects a matrix without one.
+
+    Note PETSc's options database is global and sticky within a process, so a solver configured earlier
+    can change what a later one reports; this test therefore only exercises the solvers whose answer is
+    unambiguous here, and checks the override machinery rather than the PETSc option parsing."""
+    with _CavityProblem(N=6) as p:
+        p.quiet()
+        p.set_linear_solver("pardiso")
+        p.initialise()
+        assert p.get_la_solver().requires_explicit_diagonal() is False
+        p.solve()
+        assert p._force_jacobian_diagonal_entries_is_auto, "should still be taking the solver's answer"
+        assert p.force_jacobian_diagonal_entries is False
+        assert _rows_without_diagonal(p.assemble_jacobian(with_residual=False)) > 0
+
+        # An explicit setting overrides the solver in either direction...
+        p.force_jacobian_diagonal_entries = True
+        assert not p._force_jacobian_diagonal_entries_is_auto
+        assert _rows_without_diagonal(p.assemble_jacobian(with_residual=False)) == 0
+        # ...and can be handed back.
+        p._set_force_jacobian_diagonal_entries_auto()
+        assert p._force_jacobian_diagonal_entries_is_auto
+        assert _rows_without_diagonal(p.assemble_jacobian(with_residual=False)) > 0
+
+
+def test_a_solver_asking_for_the_diagonal_gets_it():
+    """The other half: a solver that answers True must actually receive the diagonal, and the pattern
+    must be invalidated when the answer changes -- otherwise a solver that starts needing a diagonal
+    would keep being handed a pattern assembled without one."""
+    class _Fussy:
+        def requires_explicit_diagonal(self):
+            return True
+
+    with _CavityProblem(N=6) as p:
+        p.quiet()
+        p.initialise()
+        p.solve()
+        assert _rows_without_diagonal(p.assemble_jacobian(with_residual=False)) > 0
+        before = p.jacobian_structure_id
+        p._set_solver_requires_explicit_diagonal(True)
+        assert p.force_jacobian_diagonal_entries is True, "auto mode must follow the solver"
+        assert p.jacobian_structure_id != before, "changing the answer changes the pattern"
+        assert _rows_without_diagonal(p.assemble_jacobian(with_residual=False)) == 0
+
+
 def test_forced_diagonal_adds_exactly_the_missing_diagonals():
     with _CavityProblem(N=6) as p:
         p.quiet()

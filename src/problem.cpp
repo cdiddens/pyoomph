@@ -2012,7 +2012,7 @@ namespace pyoomph
 				else
 					row[j] = (table[fi][fj] ? 1 : 0);
 			}
-			if (force_jacobian_diagonal_entries && matrix_index == 0) row[i] = 1;
+			if (matrix_index == 0 && diagonal_entries_are_forced()) row[i] = 1;
 		}
 		return scratch.data();
 	}
@@ -2027,8 +2027,33 @@ namespace pyoomph
 
 	void Problem::set_force_jacobian_diagonal_entries(bool yesno)
 	{
-		if (yesno == force_jacobian_diagonal_entries) return;
+		const bool before = diagonal_entries_are_forced();
 		force_jacobian_diagonal_entries = yesno;
+		force_jacobian_diagonal_entries_auto = false; // An explicit answer overrides the solver's
+		if (diagonal_entries_are_forced() == before) return;
+		Sparse_assemble_with_arrays_previous_allocation.resize(0);
+		this->invalidate_jacobian_structure();
+	}
+
+	void Problem::set_force_jacobian_diagonal_entries_auto()
+	{
+		if (force_jacobian_diagonal_entries_auto) return;
+		const bool before = diagonal_entries_are_forced();
+		force_jacobian_diagonal_entries_auto = true;
+		if (diagonal_entries_are_forced() == before) return;
+		Sparse_assemble_with_arrays_previous_allocation.resize(0);
+		this->invalidate_jacobian_structure();
+	}
+
+	// Called from the Python solver layer before assembling. Changing the answer changes the sparsity
+	// pattern, so it has to invalidate exactly like an explicit change would -- otherwise a solver that
+	// starts needing the diagonal would silently keep assembling without it.
+	void Problem::set_solver_requires_explicit_diagonal(bool yesno)
+	{
+		if (yesno == solver_requires_explicit_diagonal) return;
+		const bool before = diagonal_entries_are_forced();
+		solver_requires_explicit_diagonal = yesno;
+		if (diagonal_entries_are_forced() == before) return;
 		Sparse_assemble_with_arrays_previous_allocation.resize(0);
 		this->invalidate_jacobian_structure();
 	}

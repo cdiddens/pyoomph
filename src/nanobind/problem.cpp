@@ -792,12 +792,22 @@ void PyReg_Problem(nb::module_ &m)
 					  "being the full element-connectivity pattern. On by default: pruning reproduced the numerical pattern exactly on every problem measured, "
 					  "against up to 1.37x more nonzeros for plain connectivity on weakly coupled multi-physics. Only has an effect together with "
 					  "``keep_structural_zeros``. Incompatible with ``sparse_assembly_method=\"lists\"``.")
+		.def("_set_solver_requires_explicit_diagonal", &pyoomph::Problem::set_solver_requires_explicit_diagonal, nb::arg("yesno"),
+			 "Tell the problem whether the active linear solver needs an explicit entry on every diagonal. Pushed down from the Python solver layer before "
+			 "assembling (see GenericLinearSystemSolver.requires_explicit_diagonal); only consulted while ``force_jacobian_diagonal_entries`` has not been "
+			 "set explicitly.")
+		.def("_set_force_jacobian_diagonal_entries_auto", &pyoomph::Problem::set_force_jacobian_diagonal_entries_auto,
+			 "Undo an explicit ``force_jacobian_diagonal_entries`` setting and go back to asking the active linear solver.")
+		.def_prop_ro("_force_jacobian_diagonal_entries_is_auto", &pyoomph::Problem::get_force_jacobian_diagonal_entries_is_auto,
+			 "Whether the diagonal policy is still being taken from the linear solver rather than from an explicit setting.")
 		.def_prop_rw("force_jacobian_diagonal_entries", &pyoomph::Problem::get_force_jacobian_diagonal_entries, &pyoomph::Problem::set_force_jacobian_diagonal_entries,
 					  "Whether an entry is kept on every diagonal of the Jacobian, even where no field pair contributes to it -- as a Taylor-Hood "
-					  "pressure-pressure block does not, once the pattern is pruned by field coupling. **Off by default**: only some PETSc factorisations "
-					  "require an explicit diagonal (MUMPS does not, and PETSc can insert the entries itself where it does), and the stored zeros are not "
-					  "free -- they change the matrix a direct solver sees, hence its pivoting, hence the solution at round-off level. Turn it on for a "
-					  "solver that needs it. Only has an effect together with ``keep_structural_zeros``.")
+					  "pressure-pressure block does not, once the pattern is pruned by field coupling.\n\n"
+					  "Reading it gives the EFFECTIVE value. By default that is whatever the active linear solver asks for via "
+					  "``requires_explicit_diagonal()``, since needing a diagonal is a property of the factorisation and not of the problem: only some PETSc "
+					  "factorisations require one, MUMPS does not. Assigning to it overrides the solver in either direction and stops it being consulted "
+					  "(call ``_set_force_jacobian_diagonal_entries_auto()`` to undo). Stored zeros are not free -- they change the matrix a direct solver "
+					  "sees, hence its pivoting. Only has an effect together with ``keep_structural_zeros``.")
 		.def("_enable_doc_imbalance_in_parallel_assembly", &oomph::Problem::enable_doc_imbalance_in_parallel_assembly,
 			 "Make the distributed assembly report its local-stage time and the load imbalance across ranks. Diagnostics for the MPI assembly work.")
 		.def_prop_rw("use_frozen_sparsity", &pyoomph::Problem::get_use_frozen_sparsity, &pyoomph::Problem::set_use_frozen_sparsity,

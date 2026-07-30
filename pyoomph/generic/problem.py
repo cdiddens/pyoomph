@@ -2439,7 +2439,31 @@ class Problem(_pyoomph.Problem):
             hook.actions_after_remeshing()
 
 
+    def _sync_diagonal_requirement_from_solver(self):
+        """Ask the active linear solver whether it needs an explicit diagonal, and tell the assembly.
+
+        Whether a stored diagonal is required is a property of the factorisation, not of the problem --
+        PETSc's own LU rejects a matrix without one, MUMPS does not care -- so the answer has to come
+        from the solver, and it has to be re-asked before each solve because PETSc options (and the
+        solver itself) can change at any time. Ignored while the user has set
+        ``force_jacobian_diagonal_entries`` explicitly; see that property.
+        """
+        if not self._force_jacobian_diagonal_entries_is_auto:
+            return
+        try:
+            solver = self.get_la_solver()
+        except Exception:
+            return  # No solver yet (or it cannot be constructed); the assembly default stands
+        try:
+            required = bool(solver.requires_explicit_diagonal())
+        except Exception as e:
+            print("WARNING: " + type(solver).__name__ + ".requires_explicit_diagonal() raised (" + str(e)
+                  + "); assuming the solver does not need an explicit Jacobian diagonal.")
+            required = False
+        self._set_solver_requires_explicit_diagonal(required)
+
     def actions_before_newton_solve(self):
+        self._sync_diagonal_requirement_from_solver()
         self._domains_to_remesh.clear()
         for ism in range(self.nsub_mesh()):
             submesh=self.mesh_pt(ism)

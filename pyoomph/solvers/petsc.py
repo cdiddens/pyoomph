@@ -75,17 +75,55 @@ class PETSCSolver(GenericLinearSystemSolver):
     #		if "add_zero_diagonal" in opts.keys():
     #			problem.set_diagonal_zero_entries(True)
 
+    # Factorisation preconditioners whose PETSc-native implementation walks the diagonal explicitly and
+    # errors out if an entry is missing (MatLUFactorSymbolic_SeqAIJ and friends). Iterative and
+    # multigrid PCs are not listed: they do not factorise the matrix themselves.
+    _FACTORISING_PC_TYPES = ("lu", "ilu", "cholesky", "icc")
+    # Third-party factorisation packages, which build their own internal structure from the CSR and do
+    # not require the caller to have supplied a diagonal. MUMPS in particular does not.
+    _EXTERNAL_FACTOR_PACKAGES = ("mumps", "superlu", "superlu_dist", "pastix", "cholmod", "umfpack",
+                                 "klu", "mkl_pardiso", "mkl_cpardiso", "strumpack", "sparseelemental")
+
+    def requires_explicit_diagonal(self)->bool:
+        """True only when PETSc's OWN factorisation is in play.
+
+        Deciding this from the options database rather than hard-coding it per solver class is what
+        makes ``petsc_mumps`` and a hand-configured ``-pc_type lu -pc_factor_mat_solver_type mumps``
+        give the same (correct) answer. Every ``*pc_type`` option is scanned, not just the top-level
+        one, so a factorisation sitting under a fieldsplit is still seen.
+
+        Erring towards False is the safe direction: an unnecessary yes costs stored zeros on every
+        diagonal and perturbs the factoriser's pivoting, whereas a wrong no surfaces as PETSc's own
+        explicit "Matrix is missing diagonal entry" error, which the user can answer with
+        ``problem.force_jacobian_diagonal_entries = True``.
+        """
+        opts = PETSc.Options().getAll() #type:ignore
+        factor_package = None
+        for key, val in opts.items(): #type:ignore
+            if key.endswith("pc_factor_mat_solver_type"):
+                factor_package = str(val).lower()
+                break
+        if factor_package is not None and factor_package in self._EXTERNAL_FACTOR_PACKAGES:
+            return False  # An external package builds its own structure; MUMPS is the common case here
+        for key, val in opts.items(): #type:ignore
+            if key.endswith("pc_type") and str(val).lower() in self._FACTORISING_PC_TYPES:
+                return True
+        # setup_solver() falls back to pc_type "lu" when nothing has been configured, and with no
+        # factor package that is PETSc's own LU, which does need the diagonal.
+        if not self._do_not_set_any_args and factor_package is None:
+            return True
+        return False
+
     def _force_zero_diagonal(self,mat:Any)->None:
-        # Several PETSc backends (LU/ILU factorisations, MUMPS, some AMG setups) require an explicit
-        # entry on every diagonal, including where the Jacobian is structurally zero -- for a Taylor-Hood
-        # Navier-Stokes problem that is the whole pressure-pressure block. MatShift(0.0) inserts them,
-        # but it does so by growing the AIJ storage after the fact, on every single assembly.
-        # problem.keep_structural_zeros makes the assembled pattern the element-connectivity pattern,
-        # which contains (i,i) for every dof by construction, so the shift is then pure overhead --
-        # and, worse, it would defeat structure reuse by changing the Mat's nonzero pattern.
-        if self.problem.keep_structural_zeros:
-            return
-        mat.shift(0.0)
+        # Deliberately does nothing to the matrix. The diagonal, when this solver needs one, is supplied
+        # by the ASSEMBLY (problem.force_jacobian_diagonal_entries, driven by requires_explicit_diagonal
+        # above) rather than patched in afterwards.
+        #
+        # The historical approach was mat.shift(0.0), which does not work: MatShift returns early on a
+        # zero shift, so it never inserted anything -- verified on every combination of matrix options,
+        # including MAT_NEW_NONZERO_ALLOCATION_ERR=False. Kept as a named hook so the intent is
+        # documented at the two call sites rather than being a silent omission.
+        return
 
     def _can_reuse_structure(self,n:int,nnz:int)->bool:
         structure_id = self.problem.jacobian_structure_id
