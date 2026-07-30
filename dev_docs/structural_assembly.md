@@ -1351,6 +1351,135 @@ returns early regardless of allocation policy. The conclusion of §5b stands, no
 
 ---
 
+## 7e. PLAN: freezing the bifurcation trackers
+
+**Status: design only, nothing implemented.**
+
+### Where the two tracker families stand today
+
+There are two, and they are frozen to very different degrees.
+
+**The C++ handlers** (`src/bifurcation.{cpp,hpp}`: `MyFoldHandler`, `MyHopfHandler`,
+`MyPitchForkHandler`, `AzimuthalSymmetryBreakingHandler`, `PeriodicOrbitHandler`) are oomph-lib
+`AssemblyHandler`s. They present an *augmented elemental block* — `2·raw+1` for fold, `3·raw+2` for
+Hopf, `raw·nT+1` for a periodic orbit — and fill it by hand, then let oomph's generic sparse assembly
+scatter it. **Nothing about them is frozen.** `Problem::sparsity_mask_for_element` refuses at
+
+```cpp
+const std::vector<int> &cidx = be->get_local_dof_contribution_indices();
+if (cidx.size() != nvar) return NULL;   // nvar = handler->ndof(elem) = augmented size
+```
+
+because the element's field description covers `raw_ndof` dofs and the handler is asking about a
+block several times larger. Confirmed by measurement: under fold tracking
+`_get_frozen_sparsity_nnz(0)` is 0, against 1 for the same problem without tracking.
+
+**The Python trackers** (`pyoomph/generic/bifurcation_tools.py`: `FoldTracker`, `HopfTracker`,
+`PitchForkTracker`, `NormalModeBifurcationTracker`) are the other way round. Their *constituent*
+matrices already go through the frozen multi-assembly (Phase 4) — `R().J().dRdp().dJdp().dJdU(V)` is
+one frozen pass. What is not frozen is the **bordering**, which is redone in scipy on every step:
+
+```python
+Jaug = scipy.sparse.block_array(
+    [[J,    None,     col(dRdP)],
+     [HV,   J,        col(dJdP@V)],
+     [None, row(...), None]]).tocsr()
+```
+
+`block_array(...).tocsr()` rebuilds the whole augmented CSR — a COO build, a sort and a duplicate
+merge — every Newton step, from blocks whose patterns are already known and fixed.
+
+### The proposal
+
+A no-op `get_sparsity_pattern` on a base class, overridden per tracker, describing the augmented
+block in terms of the patterns it is *made of* rather than as an opaque dense block.
+
+The vocabulary needs exactly six entries, because every sub-block of every tracker is one of them:
+
+| kind | meaning |
+| --- | --- |
+| `Empty` | structurally absent |
+| `Jacobian` / `JacobianT` | the base Jacobian pattern, or its transpose |
+| `MassMatrix` / `MassMatrixT` | the base mass-matrix pattern, or its transpose |
+| `Dense` | a border row/column (the parameter column, the normalisation row) |
+
+Hessian-contracted blocks (`dJdU·Φ`, `dMdU·Φ`) do **not** need their own kind: contracting the
+Hessian over one index cannot produce an `(i,j)` that the Jacobian lacks, because
+`∂²R_i/∂u_j∂u_k ≠ 0` implies `∂R_i/∂u_j ≢ 0`. So they are `Jacobian`/`MassMatrix` — **or their
+transposes**, and that is exactly where "left or right eigenvector" enters: a left-eigenvector
+tracker assembles `Hᵀ·V`, whose pattern is `Jᵀ`. This is the same distinction that Phase 4 got wrong
+and had to fix by symmetrising; here it can be stated exactly instead of over-approximated.
+
+Read off the code, `MyFoldHandler` in `Full_augmented` (layout `[base | param | eigenvector]`,
+from `jacobian(raw+1+n, ...)` and `jacobian(n, raw_ndof)`) is:
+
+|  | base cols | param col | eig cols |
+| --- | --- | --- | --- |
+| **base rows** | `Jacobian` | `Dense` | `Empty` |
+| **param row** | `Empty` | `Empty` | `Dense` |
+| **eig rows** | `Jacobian` (from `dJduPhiH`) | `Dense` | `Jacobian` |
+
+Hopf adds the imaginary eigenvector group and the `MassMatrix` blocks; the periodic-orbit handler is
+`nT` diagonal `Jacobian` blocks plus coupling blocks and one border row/column.
+
+### C++ side
+
+1. `virtual bool get_sparsity_pattern(GeneralisedElement*, AugmentedBlockSpec&) const { return false; }`
+   on `oomph::AssemblyHandler` — vendored, one line, no-op, so every handler that does not override it
+   behaves exactly as now.
+2. `AugmentedBlockSpec` carries the group layout (how the augmented dofs partition into `raw`-sized
+   groups plus scalar border dofs) and the `n_groups × n_groups` matrix of kinds above.
+3. `Problem::sparsity_mask_for_element` gains a branch *before* the `cidx.size() != nvar` refusal: if
+   the active handler fills a spec, build the `nvar × nvar` mask by tiling the base masks
+   (`sparsity_mask_for_element(0, ...)` for `Jacobian`, `(1, ...)` for `MassMatrix`, transposed where
+   asked, all-ones for `Dense`, all-zeros for `Empty`).
+4. `get_jacobian_structure_id()` already keys on the assembly handler's *type*, which is necessary but
+   no longer sufficient: `MyFoldHandler` changes its own block layout with `Solve_which_system`, and
+   `MyHopfHandler` likewise. The key must include whatever the spec depends on.
+
+From there `build_frozen_sparsity` and `assemble_with_frozen_sparsity` work unchanged, and the
+trackers get the full frozen path.
+
+### Python side
+
+1. `AugmentedAssemblyHandler.get_sparsity_pattern()` — no-op returning `None`.
+2. Each tracker returns the same block description, in the same vocabulary, for its `block_array`
+   layout. It is a direct transcription of the literal already written there.
+3. A frozen bordered assembly replaces `block_array(...).tocsr()`: build the augmented `indptr`/
+   `indices` once per structure id, together with a scatter map from each constituent block's value
+   array into the augmented one, then per step copy values only.
+
+**One trap on this side.** The border blocks are built as `csr_matrix(dense_array.reshape(-1,1))`,
+which *drops the zeros of a dense vector*. So the border column's pattern today depends on the values
+of `dRdP` — it is not stable, and a frozen version must declare those blocks structurally dense
+rather than inheriting whatever `csr_matrix` happened to keep.
+
+### Risks
+
+* **Under-reporting is the dangerous direction**, as everywhere in this work. It is guarded: the
+  per-element verification refuses rather than truncates, and in oomph-lib's ordinary assembly the
+  mask can only ever add. A wrong spec is therefore loud, not silent.
+* **§7c will bite harder.** The augmented pattern introduces stored zeros on the border rows and
+  columns, and the normalisation row's diagonal is structurally zero by construction. §7c showed what
+  stored zero diagonals do to MUMPS's analysis — `ICNTL(24)=1` is already on, and §7d's measurement
+  that the remaining legitimate zero diagonals *still* trip it with the option off says this needs
+  checking on a real tracking run, not assuming.
+* **`Dense` really is dense**, so the border column adds `raw_ndof` stored entries per augmented
+  dof. For a fold that is one column and one row; for a periodic orbit with large `nT` it is worth
+  measuring before assuming it pays.
+* The C++ handlers also run a **finite-difference path** when no analytic Hessian is set. That path
+  fills the same block positions, so the spec is independent of it — but that must be verified rather
+  than assumed, since it is exactly the kind of assumption that produced the Phase 4 bug.
+
+### Suggested order
+
+1. C++ `MyFoldHandler` alone, behind the no-op default, with the verification on. Smallest augmented
+   layout, and the one with a ready-made regression case in the tutorials.
+2. Measure. If a fold tracking step does not improve materially, stop — the rest of the family shares
+   the same cost structure and there is no point paying the complexity.
+3. `MyHopfHandler` (adds the mass-matrix and transpose kinds), then the remaining C++ handlers.
+4. The Python bordering, which is a separate mechanism and can be judged on its own.
+
 ## 8. Open questions
 
 ### Closed by the work
