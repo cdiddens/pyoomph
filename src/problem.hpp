@@ -473,11 +473,12 @@ namespace pyoomph
 
     bool verify_frozen_sparsity=true; // Check per element that nothing nonzero fell outside the frozen pattern
     bool use_frozen_sparsity=true; // Assemble straight into a preallocated CSR when the pattern allows it (see assemble_with_frozen_sparsity)
-    // Experimental (section 7e): let a bifurcation-tracking assembly handler describe its AUGMENTED
-    // elemental block so the frozen path can apply to it too. Measured -45% on a PDE fold tracking,
-    // with a bit-identical pattern -- but it trips the verification on one tutorial that is not yet
-    // explained, so it is off until that is resolved.
-    bool use_frozen_sparsity_for_bifurcation_tracking=false;
+    // Section 7e: let a bifurcation-tracking assembly handler describe its AUGMENTED elemental block
+    // (see AugmentedBlockSpec) so the frozen path can apply to it too -- it otherwise cannot, the block
+    // being several times larger than the element's own field description. Only handlers that provide a
+    // description are affected; the rest fall back exactly as before. Measured -22% on a full PDE fold
+    // tracking solve and -31% per re-solve, same fold point to 12 digits.
+    bool use_frozen_sparsity_for_bifurcation_tracking=true;
     // Several frozen patterns are kept at once, keyed by (pattern id, matrix index). A single slot per
     // matrix index is not enough: a workflow that alternates between two DIFFERENT patterns -- most
     // obviously a PETSc preconditioner matrix assembled from another residual via
@@ -500,7 +501,9 @@ namespace pyoomph
     // Sentinel mask index: not a matrix, but "the union of the Jacobian and mass-matrix masks together
     // with their TRANSPOSES". Needed by the multi-assembly, which builds transposed Hessian-vector
     // products (bifurcation tracking on a LEFT eigenvector) whose pattern is J^T, not J.
-    static const unsigned MASK_UNION_SYMMETRIC = (unsigned)-3;
+    static constexpr unsigned MASK_UNION_SYMMETRIC = (unsigned)-3;
+    // Sentinel matrix index selecting the HESSIAN coupling table rather than the Jacobian or mass one.
+    static constexpr unsigned MASK_HESSIAN = (unsigned)-5;
     std::vector<char> union_mask_scratch;
     // Whether the multi-assembly currently being built asks for a TRANSPOSED product, whose pattern is
     // J^T rather than J. Set from the request list; true by default so that any other caller of the

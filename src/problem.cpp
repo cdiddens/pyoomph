@@ -2047,7 +2047,7 @@ namespace pyoomph
 		if (!keep_structural_zeros || !prune_structural_zeros_by_field_coupling) return NULL;
 		if (!nvar) return NULL; // Element contributes nothing; there is no block to describe
 		// Tier A (no pruning) is expressed through the threshold instead, so no mask is needed there.
-		if (matrix_index > 0 && !dynamic_cast<oomph::EigenProblemHandler *>(this->assembly_handler_pt()))
+		if (matrix_index != MASK_HESSIAN && matrix_index > 0 && !dynamic_cast<oomph::EigenProblemHandler *>(this->assembly_handler_pt()))
 		{
 			// Only the eigenproblem assembly has a known meaning for a secondary matrix (index 1 = mass
 			// matrix). For anything else - e.g. the several matrices of a multi-assembly - we have no
@@ -2057,6 +2057,20 @@ namespace pyoomph
 		BulkElementBase *be = dynamic_cast<BulkElementBase *>(elem_pt);
 		if (!be) return NULL;
 		const JITFuncSpec_Table_FiniteElement_t *ft = be->get_code_instance()->get_func_table();
+		// The augmented dispatch must come BEFORE the "no active residual" shortcut below. An element
+		// with no residual contributes nothing to the BASE Jacobian, so an all-zero mask is right for
+		// its raw block -- but a bifurcation handler still writes the border of the augmented block for
+		// every element regardless (the fold normalisation row is Phi/Count over the element's dofs,
+		// a property of the handler, not of the element's residual). Taking the shortcut first produced
+		// an all-zero mask for the whole augmented block and lost exactly those border entries.
+		{
+			const std::vector<int> &cidx_early = be->get_local_dof_contribution_indices();
+			if (cidx_early.size() != nvar)
+			{
+				return augmented_sparsity_mask_for_element(matrix_index, elem_pt, nvar, (unsigned)cidx_early.size());
+			}
+		}
+
 		int resind = ft->current_res_jac;
 		if (resind < 0)
 		{
@@ -2071,20 +2085,17 @@ namespace pyoomph
 			return empty.data();
 		}
 		if (!ft->contributes_to_jacobian || !ft->contributes_to_mass_matrix) return NULL;
-		bool **table = (matrix_index == 0 ? ft->contributes_to_jacobian[resind] : ft->contributes_to_mass_matrix[resind]);
+		bool **table = (matrix_index == MASK_HESSIAN ? ft->contributes_to_hessian[resind]
+													 : (matrix_index == 0 ? ft->contributes_to_jacobian[resind]
+																		  : ft->contributes_to_mass_matrix[resind]));
 		if (!table) return NULL;
 		const unsigned nclass = ft->contribution_entries_size;
 		const std::vector<int> &cidx = be->get_local_dof_contribution_indices();
-		// The element's map is indexed by ITS local dofs. If the handler presents a different number it
-		// is assembling an AUGMENTED block, which the field description cannot describe directly -- but
-		// the handler may be able to describe it in terms of blocks that it can. See section 7e.
-		if (cidx.size() != nvar)
-		{
-			return augmented_sparsity_mask_for_element(matrix_index, elem_pt, nvar, (unsigned)cidx.size());
-		}
+		// Sizes already agree here: the augmented case was dispatched above.
 
-		if (sparsity_mask_scratch.size() <= matrix_index) sparsity_mask_scratch.resize(matrix_index + 1);
-		std::vector<char> &scratch = sparsity_mask_scratch[matrix_index];
+		const unsigned scratch_index = (matrix_index == MASK_HESSIAN ? 2u : matrix_index);
+		if (sparsity_mask_scratch.size() <= scratch_index) sparsity_mask_scratch.resize(scratch_index + 1);
+		std::vector<char> &scratch = sparsity_mask_scratch[scratch_index];
 		scratch.assign((size_t)nvar * nvar, 0);
 		for (unsigned i = 0; i < nvar; i++)
 		{
@@ -2123,11 +2134,7 @@ namespace pyoomph
 	// handler declines or the spec does not fit the block it is describing.
 	const char *Problem::augmented_sparsity_mask_for_element(const unsigned &matrix_index, oomph::GeneralisedElement *const &elem_pt, const unsigned &nvar, unsigned raw_nvar)
 	{
-		// OFF BY DEFAULT. The mechanism works and pays (see section 7e), but enabling it turns the frozen
-		// path on for bifurcation tracking, where it is currently unproven: hanging_droplet.py trips the
-		// per-element verification with three entries of the parameter row missing, and that is not yet
-		// explained -- the spec and the tiling both look right, and the same positions are declared
-		// Dense. Until that is understood, the default must not change behaviour for anyone.
+		// On by default; set problem._use_frozen_sparsity_for_bifurcation_tracking = False to revert.
 		if (!use_frozen_sparsity_for_bifurcation_tracking) return NULL;
 		if (matrix_index > 0) return NULL; // Only the Jacobian of an augmented system has a meaning here
 		auto *provider = dynamic_cast<AugmentedSparsityProvider *>(this->assembly_handler_pt());
@@ -2144,13 +2151,14 @@ namespace pyoomph
 
 		// The raw masks this spec refers to. Fetched into local buffers rather than the shared scratch,
 		// which is what we are about to write the answer into.
-		std::vector<char> rawJ, rawM;
-		bool needJ = false, needM = false;
+		std::vector<char> rawJ, rawM, rawH;
+		bool needJ = false, needM = false, needH = false;
 		for (size_t k = 0; k < spec.blocks.size(); k++)
 		{
 			const AugmentedBlockSpec::Kind kd = spec.blocks[k];
 			needJ |= (kd == AugmentedBlockSpec::Jacobian || kd == AugmentedBlockSpec::JacobianT);
 			needM |= (kd == AugmentedBlockSpec::MassMatrix || kd == AugmentedBlockSpec::MassMatrixT);
+			needH |= (kd == AugmentedBlockSpec::Hessian || kd == AugmentedBlockSpec::HessianT);
 		}
 		if (needJ)
 		{
@@ -2163,6 +2171,12 @@ namespace pyoomph
 			const char *m = this->sparsity_mask_for_element(1, elem_pt, raw_nvar);
 			if (!m) return NULL;
 			rawM.assign(m, m + (size_t)raw_nvar * raw_nvar);
+		}
+		if (needH)
+		{
+			const char *m = this->sparsity_mask_for_element(MASK_HESSIAN, elem_pt, raw_nvar);
+			if (!m) return NULL;
+			rawH.assign(m, m + (size_t)raw_nvar * raw_nvar);
 		}
 
 		if (sparsity_mask_scratch.size() <= matrix_index) sparsity_mask_scratch.resize(matrix_index + 1);
@@ -2187,6 +2201,8 @@ namespace pyoomph
 				case AugmentedBlockSpec::JacobianT: src = &rawJ; transposed = true; break;
 				case AugmentedBlockSpec::MassMatrix: src = &rawM; break;
 				case AugmentedBlockSpec::MassMatrixT: src = &rawM; transposed = true; break;
+				case AugmentedBlockSpec::Hessian: src = &rawH; break;
+				case AugmentedBlockSpec::HessianT: src = &rawH; transposed = true; break;
 				default: break; // Dense
 				}
 				const unsigned nr = spec.group_is_scalar[gr] ? 1u : raw_nvar;

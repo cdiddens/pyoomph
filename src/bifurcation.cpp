@@ -1312,12 +1312,13 @@ namespace pyoomph
   //                  base cols        param col      eig cols
   //   base rows      J                 dense          -           get_jacobian(residuals, jacobian)
   //   param row      -                 -              dense       jacobian(raw, raw+1+n) = Phi[..]
-  //   eig  rows      J (dJdU . Y)      dense          J           jacobian(raw+1+m, n) = dJduPhiH(m,n)
+  //   eig  rows      H (dJdU . Y)      dense          J           jacobian(raw+1+m, n) = dJduPhiH(m,n)
   //                                                               jacobian(raw+1+n, raw+1+m) = jacobian(n,m)
   //
-  // The eigenvector-row/base-column block is the Hessian contracted with Y, which is Jacobian-
-  // patterned and NOT transposed: the fold condition J.Y = 0 uses the RIGHT null vector, so
-  // d(J.Y)_m/du_n contracts over the third index and keeps the (m,n) orientation of J.
+  // The eigenvector-row/base-column block is the Hessian contracted with Y. It is NOT transposed: the
+  // fold condition J.Y = 0 uses the RIGHT null vector, so d(J.Y)_m/du_n keeps the (m,n) orientation.
+  // It gets the Hessian pattern rather than the Jacobian's, which is a subset relation but a loose one
+  // -- linear terms of the residual are all of J and none of the Hessian.
   //
   // The parameter row's diagonal is deliberately Empty. The normalisation equation Phi.Y = 1 does not
   // involve the parameter, so nothing is written there today either -- and declaring it Dense would
@@ -1333,7 +1334,7 @@ namespace pyoomph
     spec.group_is_scalar[2] = false; // the eigenvector
     spec.set(0, 0, S::Jacobian);
     spec.set(0, 1, S::Dense);
-    spec.set(2, 0, S::Jacobian);
+    spec.set(2, 0, S::Hessian); // d(J.Y)/du: second derivatives only, hence far sparser than J itself
     spec.set(2, 1, S::Dense);
     spec.set(2, 2, S::Jacobian);
     spec.set(1, 2, S::Dense);

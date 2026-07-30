@@ -1365,14 +1365,53 @@ on a PDE fold tracking (Kuramoto-Sivashinsky, ndof 15 229 augmented) the frozen 
 (`_get_frozen_sparsity_nnz` 0 -> 735 462) and the augmented assembly drops from **114.6 ms to 63.1 ms
 (-45 %)**, finding the same fold point to 12 digits.
 
-**The cost, stated properly.** Against the *default* (value-filtered) augmented pattern the frozen one
-stores **549 693 -> 735 462 nonzeros, +34 %**. An earlier note here said "identical nnz"; that
-compared frozen against unfrozen with the structural mask applied in both, which is not the
-comparison a user experiences. The -45 % assembly saving is bought with 34 % more stored zeros, and
-those reach the factorisation of the augmented system, which was not measured. Whether it pays
-overall is therefore still open.
+**The cost, and where it went.** The first version stored **549 693 -> 735 462 nonzeros, +34 %** against
+the value-filtered pattern. Breaking that down by block showed the augmented *structure* costs
+essentially nothing -- `base x base`, `eig x eig` and `param x eig` were bit-identical -- and that
+**96 % of the excess sat in one block**, `eig x base`, the Hessian-vector product:
 
-### The unexplained failure
+| block | value-filtered | Jacobian-patterned | with `contributes_to_hessian` |
+| --- | --- | --- | --- |
+| base x base | 237 540 | 237 540 | 237 540 |
+| **eig x base** | **59 385** | **237 540** | **59 385** |
+| eig x eig | 237 540 | 237 540 | 237 540 |
+| base/eig x param | 3 807 each | 7 614 each | 7 614 each |
+| **total** | **549 693** | 735 462 (+34 %) | **557 307 (+1.4 %)** |
+
+Declaring Hessian blocks `Jacobian`-patterned is *true but loose*: `d2R_i/du_j du_k != 0` implies
+`dR_i/du_j` is not identically zero, so it is a subset -- but every LINEAR term of the residual is in
+J and in no Hessian at all. On Kuramoto-Sivashinsky the biharmonic and Laplacian carry most of J and
+none of the Hessian, so the contracted block is **four times sparser**.
+
+The fix is the move Phase 3 already made for the mass matrix: codegen now emits
+`contributes_to_hessian[res][fi][fj]` alongside the other two, marked where the second derivative is
+generated (both `(res,f)` and `(res,f2)`, since `d2R/df df2` is symmetric and a contraction sums over
+one of the two indices). `AugmentedBlockSpec` gains `Hessian`/`HessianT`, and the fold's `eig x base`
+block uses it. That leaves the augmented frozen pattern within **1.4 %** of the numerically exact one,
+all of it the two border columns, which are dense per element and not worth chasing.
+
+**Measured, with the tighter table:** augmented assembly **-45 %** (113.3 -> 62.5 ms), a re-solve
+including the factorisation **-31 %** (171.6 -> 118.1 ms), and a full fold-tracking solve **-24 %**
+(0.70 -> 0.53 s), with the same fold point to 12 digits.
+
+### The failure that was unexplained, and what it was
+
+`Advanced_Linear_Dynamics/hanging_droplet.py` tripped the per-element verification at element 898
+(`nvar 7`, `raw 3`) with the parameter row against the eigenvector columns missing -- a block the spec
+declares `Dense` and the tiling demonstrably writes. Instrumenting the *build* rather than the failure
+settled it: the mask for that element was entirely zero (`npairs=0`).
+
+The cause is the "no active residual" shortcut in `sparsity_mask_for_element`, which returns an
+all-zero mask and sat **before** the augmented dispatch. That is correct for the raw block -- such an
+element contributes nothing to the base Jacobian -- but a bifurcation handler still writes the border
+of the augmented block for *every* element, because the normalisation row is a property of the
+handler, not of the element's residual. Hoisting the dispatch above the shortcut fixed it.
+
+The lesson is the same one as Phase 2: the contradiction was only resolvable by instrumenting where
+the pattern is BUILT, not where it is used. Reasoning about the spec and the tiling -- both of which
+were correct -- could not have found it.
+
+### Superseded: the failure as first recorded
 
 `Advanced_Linear_Dynamics/hanging_droplet.py` (a fold tracker on a moving mesh) trips the per-element
 verification with the switch on:

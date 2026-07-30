@@ -587,7 +587,7 @@ namespace pyoomph
       virtual void write_nodal_time_interpolation(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, std::set<ShapeExpansion> &required_shapeexps);
       virtual bool write_generic_RJM_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hessian);
       virtual void write_generic_RJM_jacobian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns,FiniteElementField * residual_field);
-      virtual bool write_generic_Hessian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns);
+      virtual bool write_generic_Hessian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns, FiniteElementField *residual_field);
       FiniteElementSpace(FiniteElementCode *_code, const std::string &_name) : code(_code), name(_name), Basis(new BasisFunction(this)), creation_index(next_creation_index++) {}
       virtual ~FiniteElementSpace()
       {
@@ -627,7 +627,7 @@ namespace pyoomph
       std::string get_eqn_number_str(FiniteElementCode *forcode) const override;
       PositionFiniteElementSpace(FiniteElementCode *_code, const std::string &_name) : ContinuousFiniteElementSpace(_code, _name) {}
       void write_generic_RJM_jacobian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns,FiniteElementField * residual_field) override;
-      bool write_generic_Hessian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns) override;
+      bool write_generic_Hessian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns, FiniteElementField *residual_field) override;
    };
 
    // Discontinuous-Galerkin space; keeps a pointer to its "shadow" continuous counterpart space of the
@@ -712,6 +712,12 @@ namespace pyoomph
       std::map<FiniteElementCode *, std::set<unsigned>> residual_contribution_for_code; // For each code, the residual indices for which this field has a contribution
       std::map<FiniteElementCode *, std::map<unsigned ,std::set<FiniteElementField*,FiniteElementFieldPtrLess> >> jacobian_contribution_for_code; // For each code, the residual indices for which this field has a contribution
       std::map<FiniteElementCode *, std::map<unsigned ,std::set<FiniteElementField*,FiniteElementFieldPtrLess> >> mass_matrix_contribution_for_code; // Same, but only for the mass-matrix part (the d/d(dU/dt) piece) of that contribution, which is a strict subset
+      // Same again, but for the SECOND derivative: the field pairs for which d2(residual)/d(this)d(other)
+      // is not identically zero. A Hessian contracted with a vector lives on this pattern, which can be
+      // far tighter than the Jacobian's -- everything linear in the residual drops out. Measured on
+      // Kuramoto-Sivashinsky, where the biharmonic and Laplacian carry most of the Jacobian and none of
+      // the Hessian, the contracted block is four times sparser than J.
+      std::map<FiniteElementCode *, std::map<unsigned ,std::set<FiniteElementField*,FiniteElementFieldPtrLess> >> hessian_contribution_for_code;
       FiniteElementField * defined_on_domain_equivalent=NULL; // If a field is already defined on a bulk domain, it is transferred to interfaces and corners. This goes to the top level, i.e. where it is defined
       static unsigned next_creation_index;
       unsigned creation_index;
@@ -761,6 +767,8 @@ namespace pyoomph
       void mark_residual_contribution_for_code(FiniteElementCode *code,unsigned residual_index);
       void mark_jacobian_contribution_for_code(FiniteElementCode *code,unsigned residual_index, FiniteElementField *other);
       void mark_mass_matrix_contribution_for_code(FiniteElementCode *code,unsigned residual_index, FiniteElementField *other);
+      bool has_hessian_contribution_for_code(FiniteElementCode *code,unsigned residual_index, FiniteElementField *other);
+      void mark_hessian_contribution_for_code(FiniteElementCode *code,unsigned residual_index, FiniteElementField *other);
       FiniteElementField * get_defined_on_domain_equivalent_field();
       void set_defined_on_domain_equivalent_field(FiniteElementField *equiv_field);
    };

@@ -1150,6 +1150,14 @@ namespace pyoomph
 	{
 		return this->mass_matrix_contribution_for_code.count(code) > 0 && this->mass_matrix_contribution_for_code[code].count(residual_index) > 0 && this->mass_matrix_contribution_for_code[code][residual_index].count(other) > 0;
 	}
+    bool FiniteElementField::has_hessian_contribution_for_code(FiniteElementCode *code,unsigned residual_index, FiniteElementField *other)
+	{
+		return this->hessian_contribution_for_code.count(code) > 0 && this->hessian_contribution_for_code[code].count(residual_index) > 0 && this->hessian_contribution_for_code[code][residual_index].count(other) > 0;
+	}
+    void FiniteElementField::mark_hessian_contribution_for_code(FiniteElementCode *code,unsigned residual_index, FiniteElementField *other)
+	{
+		this->hessian_contribution_for_code[code][residual_index].insert(other);
+	}
     void FiniteElementField::mark_mass_matrix_contribution_for_code(FiniteElementCode *code,unsigned residual_index, FiniteElementField *other)
 	{
 		if (!this->mass_matrix_contribution_for_code.count(code))
@@ -1855,11 +1863,11 @@ namespace pyoomph
 	// Jacobian/Hessian rows/columns of its own) when the mesh coordinates are themselves unknowns
 	// being solved for (moving-mesh/ALE problems with coordinates_as_dofs); otherwise positions are
 	// prescribed data and there is nothing to differentiate w.r.t. them.
-	bool PositionFiniteElementSpace::write_generic_Hessian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns)
+	bool PositionFiniteElementSpace::write_generic_Hessian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns, FiniteElementField *residual_field)
 	{
 		// Only do it if the coordinates are Dofs
 		if (for_code->coordinates_as_dofs)
-			return FiniteElementSpace::write_generic_Hessian_contribution(for_code, os, indent, for_what, hanging_eqns);
+			return FiniteElementSpace::write_generic_Hessian_contribution(for_code, os, indent, for_what, hanging_eqns, residual_field);
 		else
 			return false;
 	}
@@ -1896,7 +1904,7 @@ namespace pyoomph
 	// GiNaC structures' derivative() implementations know which index of the double loop is being
 	// derived, and so the caller can later learn which shape expansions/spaces/fields must have their
 	// interpolation code emitted to support this Hessian.
-	bool FiniteElementSpace::write_generic_Hessian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns)
+	bool FiniteElementSpace::write_generic_Hessian_contribution(FiniteElementCode *for_code, std::ostream &os, const std::string &indent, GiNaC::ex for_what, bool hanging_eqns, FiniteElementField *residual_field)
 	{
 		GiNaC::print_FEM_options csrc_opts;
 		csrc_opts.for_code = for_code;
@@ -2133,6 +2141,16 @@ namespace pyoomph
 					__derive_shapes_by_second_index = false;
 					if (diffpart2.is_zero() && masspart2.is_zero()) // &&  masspart2.is_zero()
 						continue;
+
+					// Record the second-derivative coupling. BOTH directions are marked: d2R/df df2 is
+					// symmetric in (f,f2), and a Hessian contracted with a vector sums over one of the two
+					// indices, so the surviving (row, column) pattern is the union over both.
+					if (residual_field)
+					{
+						const unsigned ri = for_code->get_current_residual_index();
+						residual_field->mark_hessian_contribution_for_code(for_code, ri, f);
+						residual_field->mark_hessian_contribution_for_code(for_code, ri, f2);
+					}
 
 					auto shapeexps = for_code->get_all_shape_expansions_in(diffpart2);
 					auto shapeexpsM = for_code->get_all_shape_expansions_in(masspart2);
@@ -2693,7 +2711,7 @@ namespace pyoomph
 					{
 						std::ostringstream hessian_inner;
 						//        	    std::cout << "HESSIAN INNER " << var_part <<std::endl;
-						bool has_hessian = s->write_generic_Hessian_contribution(for_code, hessian_inner, indent + "        ", var_part, can_have_hanging);
+						bool has_hessian = s->write_generic_Hessian_contribution(for_code, hessian_inner, indent + "        ", var_part, can_have_hanging, field);
 						if (has_hessian)
 						{
 							has_contribs = true;
@@ -8102,6 +8120,7 @@ namespace pyoomph
 	  init << " functable->contributes_to_residual=(bool**)calloc(functable->num_res_jacs,sizeof(*functable->contributes_to_residual));" << std::endl;
 	  init << " functable->contributes_to_jacobian=(bool***)calloc(functable->num_res_jacs,sizeof(*functable->contributes_to_jacobian));" << std::endl;
 	  init << " functable->contributes_to_mass_matrix=(bool***)calloc(functable->num_res_jacs,sizeof(*functable->contributes_to_mass_matrix));" << std::endl;
+	  init << " functable->contributes_to_hessian=(bool***)calloc(functable->num_res_jacs,sizeof(*functable->contributes_to_hessian));" << std::endl;
 	  init << " functable->contribution_entries_size=" << contribution_names.size() << ";" << std::endl;
 	  if (contribution_names.size()>0)
 	  {
@@ -8122,9 +8141,13 @@ namespace pyoomph
 				init << " for (unsigned int _i=0;_i<"<< contribution_names.size() <<";_i++) { functable->contributes_to_jacobian[" << resiind << "][_i]=(bool*)calloc("<< contribution_names.size() <<",sizeof(bool)); }" << std::endl;				
 				init << " functable->contributes_to_mass_matrix[" << resiind << "]=(bool**)calloc("<< contribution_names.size() <<",sizeof(**functable->contributes_to_mass_matrix));" << std::endl;				
 				init << " for (unsigned int _i=0;_i<"<< contribution_names.size() <<";_i++) { functable->contributes_to_mass_matrix[" << resiind << "][_i]=(bool*)calloc("<< contribution_names.size() <<",sizeof(bool)); }" << std::endl;				
+				init << " functable->contributes_to_hessian[" << resiind << "]=(bool**)calloc("<< contribution_names.size() <<",sizeof(**functable->contributes_to_hessian));" << std::endl;
+				init << " for (unsigned int _i=0;_i<"<< contribution_names.size() <<";_i++) { functable->contributes_to_hessian[" << resiind << "][_i]=(bool*)calloc("<< contribution_names.size() <<",sizeof(bool)); }" << std::endl;
+
 				std::vector<bool> written_residual_contribution(contribution_names.size(), false);
 				std::vector<std::vector<bool>> written_jacobian_contribution(contribution_names.size(), std::vector<bool>(contribution_names.size(), false));
 				std::vector<std::vector<bool>> written_mass_matrix_contribution(contribution_names.size(), std::vector<bool>(contribution_names.size(), false));
+				std::vector<std::vector<bool>> written_hessian_contribution(contribution_names.size(), std::vector<bool>(contribution_names.size(), false));
 				for (auto &pair1 : to_where_it_was_defined)
 				{
 					FiniteElementField *f = pair1.first;					
@@ -8146,6 +8169,11 @@ namespace pyoomph
 							init << " functable->contributes_to_jacobian[" << resiind << "][" << i1 << "][" << i2 << "]=true; //" << contribution_names[i1] << " vs " << contribution_names[i2] << std::endl;
 							written_jacobian_contribution[i1][i2] = true;
 						}
+						if ((f->has_hessian_contribution_for_code(this,resiind,f2) || f->has_hessian_contribution_for_code(this,resiind,pair2.second)) && !written_hessian_contribution[i1][i2])
+						{
+							init << " functable->contributes_to_hessian[" << resiind << "][" << i1 << "][" << i2 << "]=true; //" << contribution_names[i1] << " vs " << contribution_names[i2] << std::endl;
+							written_hessian_contribution[i1][i2] = true;
+						}
 						if ((f->has_mass_matrix_contribution_for_code(this,resiind,f2) || f->has_mass_matrix_contribution_for_code(this,resiind,pair2.second)) && !written_mass_matrix_contribution[i1][i2])
 						{
 							init << " functable->contributes_to_mass_matrix[" << resiind << "][" << i1 << "][" << i2 << "]=true; //" << contribution_names[i1] << " vs " << contribution_names[i2] << std::endl;
@@ -8153,6 +8181,8 @@ namespace pyoomph
 						}
 					}
 				}
+				cleanup << " for (unsigned int _i=0;_i<functable->contribution_entries_size;_i++) { pyoomph_tested_free(functable->contributes_to_hessian[" << resiind << "][_i]); functable->contributes_to_hessian[" << resiind << "][_i]=PYOOMPH_NULL; }" << std::endl;
+				cleanup << " pyoomph_tested_free(functable->contributes_to_hessian[" << resiind << "]); functable->contributes_to_hessian[" << resiind << "]=PYOOMPH_NULL; " << std::endl;
 				cleanup << " for (unsigned int _i=0;_i<functable->contribution_entries_size;_i++) { pyoomph_tested_free(functable->contributes_to_jacobian[" << resiind << "][_i]); functable->contributes_to_jacobian[" << resiind << "][_i]=PYOOMPH_NULL; }" << std::endl;
 				cleanup << " pyoomph_tested_free(functable->contributes_to_jacobian[" << resiind << "]); functable->contributes_to_jacobian[" << resiind << "]=PYOOMPH_NULL; " << std::endl;
 				cleanup << " for (unsigned int _i=0;_i<functable->contribution_entries_size;_i++) { pyoomph_tested_free(functable->contributes_to_mass_matrix[" << resiind << "][_i]); functable->contributes_to_mass_matrix[" << resiind << "][_i]=PYOOMPH_NULL; }" << std::endl;
@@ -8163,6 +8193,7 @@ namespace pyoomph
 
 	  	cleanup << " pyoomph_tested_free(functable->contributes_to_residual); functable->contributes_to_residual=PYOOMPH_NULL; " << std::endl;
 	  	cleanup << " pyoomph_tested_free(functable->contributes_to_jacobian); functable->contributes_to_jacobian=PYOOMPH_NULL; " << std::endl;
+	  	cleanup << " pyoomph_tested_free(functable->contributes_to_hessian); functable->contributes_to_hessian=PYOOMPH_NULL; " << std::endl;
 	  	cleanup << " pyoomph_tested_free(functable->contributes_to_mass_matrix); functable->contributes_to_mass_matrix=PYOOMPH_NULL; " << std::endl;
 	   }
 

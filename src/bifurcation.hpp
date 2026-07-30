@@ -49,12 +49,15 @@ namespace pyoomph
   // It does not have to be described from scratch, though: every sub-block of every tracker is one of
   // a handful of things, and all of them are already known to the element.
   //
-  // Hessian-contracted sub-blocks need no kind of their own. Contracting the Hessian over one index
-  // cannot produce an (i,j) the Jacobian lacks, since d2R_i/du_j du_k != 0 implies dR_i/du_j is not
-  // identically zero -- so dJdU.V is Jacobian-patterned, and dMdU.V mass-matrix-patterned. What DOES
-  // change is the orientation: a tracker working on a LEFT eigenvector assembles the transposed
-  // product, whose pattern is J^T. That is the one distinction the caller cannot guess, which is why
-  // it is stated here rather than approximated by symmetrising.
+  // Hessian-contracted sub-blocks are a SUBSET of the Jacobian -- d2R_i/du_j du_k != 0 implies
+  // dR_i/du_j is not identically zero -- but calling them Jacobian-patterned, as this first did, is
+  // far too loose: every LINEAR term of the residual contributes to J and nothing to the Hessian. On
+  // Kuramoto-Sivashinsky, where the biharmonic and Laplacian carry most of J, the contracted block is
+  // four times sparser, and using J for it accounted for 96% of the excess nonzeros. Hence its own
+  // kind, backed by contributes_to_hessian.
+  //
+  // The orientation is the other thing the caller cannot guess: a tracker working on a LEFT
+  // eigenvector assembles the transposed product, whose pattern is the transpose.
   class AugmentedBlockSpec
   {
   public:
@@ -65,6 +68,8 @@ namespace pyoomph
       JacobianT,    // its transpose (left-eigenvector products)
       MassMatrix,   // the base mass-matrix pattern
       MassMatrixT,  // its transpose
+      Hessian,      // a Hessian contracted with a vector: d2R/du du, which is a SUBSET of the Jacobian
+      HessianT,     // its transpose (left-eigenvector products)
       Dense         // a border row/column: the parameter column, a normalisation row
     };
 
