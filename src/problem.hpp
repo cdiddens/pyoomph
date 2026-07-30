@@ -492,6 +492,12 @@ namespace pyoomph
     // `nd_override` is the row/column count to build for, or 0 for this->ndof(). The base-problem
     // assembly needs the UNAUGMENTED count, which differs from ndof() while an augmentation is active.
     bool build_frozen_sparsity(unsigned mask_matrix_index, FrozenSparsity &sp, unsigned nd_override=0);
+    // Sentinel mask index: not a matrix, but "the union of the Jacobian and mass-matrix masks together
+    // with their TRANSPOSES". Needed by the multi-assembly, which builds transposed Hessian-vector
+    // products (bifurcation tracking on a LEFT eigenvector) whose pattern is J^T, not J.
+    static const unsigned MASK_UNION_SYMMETRIC = (unsigned)-3;
+    std::vector<char> union_mask_scratch;
+    const char *symmetrised_union_mask(oomph::GeneralisedElement *elem_pt, unsigned nvar);
     // The fast assembly path: fills the output arrays directly from the frozen pattern. Returns false
     // without touching them if the pattern route does not apply, so the caller falls back to oomph-lib.
     bool assemble_with_frozen_sparsity(oomph::Vector<int*>& column_or_row_index, oomph::Vector<int*>& row_or_column_start, oomph::Vector<double*>& value, oomph::Vector<unsigned>& nnz, oomph::Vector<double*>& residuals, bool compressed_row_flag);

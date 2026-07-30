@@ -3225,6 +3225,38 @@ namespace pyoomph
 	// Returns false - and leaves sp cleared - if any element has no symbolic mask. That is not a
 	// failure: it means the pattern for this problem is only knowable from the values, so the caller
 	// must fall back to oomph-lib's assembly.
+	// The Jacobian and mass-matrix masks OR'd together with their transposes.
+	//
+	// A multi-assembly does not only build derivatives of the residual with respect to the dofs; it can
+	// also be asked for TRANSPOSED Hessian-vector products, which bifurcation tracking on a left
+	// eigenvector does. The transpose of a matrix does not live on that matrix's pattern unless the
+	// pattern happens to be symmetric, so a single Jacobian mask is not a superset of everything the
+	// routine writes -- which is exactly how the Lorenz Hopf case ended up with (H^T V)[0][2] nonzero
+	// while the Jacobian has no (0,2) at all (row 0 is sigma*(y-x), so it cannot depend on z).
+	//
+	// Symmetrising covers both orientations at once, which keeps the "one pattern serves every matrix"
+	// structure that makes this path fast. The price is the entries of J^T that J lacks; on a symmetric
+	// coupling graph that is nothing, and this is the augmented-system path, which was the slowest in
+	// the codebase before it was frozen.
+	const char *Problem::symmetrised_union_mask(oomph::GeneralisedElement *elem_pt, unsigned nvar)
+	{
+		const char *mj = this->sparsity_mask_for_element(0, elem_pt, nvar);
+		if (!mj) return 0; // No symbolic description: the caller falls back, as with any single mask
+		const char *mm = this->sparsity_mask_for_element(1, elem_pt, nvar);
+		const size_t n = (size_t)nvar * nvar;
+		union_mask_scratch.assign(n, 0);
+		for (unsigned i = 0; i < nvar; i++)
+		{
+			for (unsigned j = 0; j < nvar; j++)
+			{
+				const size_t ij = (size_t)i * nvar + j, ji = (size_t)j * nvar + i;
+				if (mj[ij] || mj[ji] || (mm && (mm[ij] || mm[ji]))) union_mask_scratch[ij] = 1;
+			}
+		}
+		return union_mask_scratch.data();
+	}
+
+
 	bool Problem::build_frozen_sparsity(unsigned mask_matrix_index, FrozenSparsity &sp, unsigned nd_override)
 	{
 		sp.clear();
@@ -3239,7 +3271,9 @@ namespace pyoomph
 		{
 			oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
 			const unsigned nvar = assembly_handler_pt->ndof(elem_pt);
-			const char *mask = this->sparsity_mask_for_element(matrix_index, elem_pt, nvar);
+			const char *mask = (matrix_index == MASK_UNION_SYMMETRIC)
+								   ? this->symmetrised_union_mask(elem_pt, nvar)
+								   : this->sparsity_mask_for_element(matrix_index, elem_pt, nvar);
 			if (!mask && nvar)
 			{
 				sp.clear();
@@ -3290,7 +3324,9 @@ namespace pyoomph
 			pairs.clear();
 			if (nvar)
 			{
-				const char *mask = this->sparsity_mask_for_element(matrix_index, elem_pt, nvar);
+				const char *mask = (matrix_index == MASK_UNION_SYMMETRIC)
+									   ? this->symmetrised_union_mask(elem_pt, nvar)
+									   : this->sparsity_mask_for_element(matrix_index, elem_pt, nvar);
 				if (!mask) { sp.clear(); return false; }
 				for (unsigned i = 0; i < nvar; i++)
 				{
@@ -4292,16 +4328,19 @@ namespace pyoomph
 		const unsigned n_matrix = column_or_row_index.size();    		
 		oomph::AssemblyHandler* const assembly_handler_pt = this->assembly_handler_pt();
 
-		// Fast path. Every matrix this routine builds is a derivative of the SAME residual with respect
-		// to the dofs -- the Jacobian, its parameter derivative, a Hessian-vector product -- so they all
-		// live on the Jacobian's sparsity pattern. ONE frozen pattern therefore serves all of them and the
-		// scatter writes the same slots into several value arrays. That pays off here more than anywhere
-		// else: this routine accumulates into a std::map per row, the slowest container in the codebase,
-		// and it is what a multi-quantity bifurcation assembly goes through on every Newton step.
+		// Fast path. Every matrix this routine builds is a derivative of the same residual with respect to
+		// the dofs -- the Jacobian, its parameter derivative, a Hessian-vector product, and the mass
+		// matrix equivalents -- so ONE frozen pattern can serve all of them, with the scatter writing the
+		// same slots into several value arrays. That pays off here more than anywhere else: this routine
+		// accumulates into a std::map per row, the slowest container in the codebase, and it is what a
+		// multi-quantity bifurcation assembly goes through on every Newton step.
 		//
-		// The mask comes from matrix 0 (the Jacobian) for every matrix: exact for the Jacobian-derived
-		// ones, a superset for any mass-matrix-derived one, which is the safe direction -- and the
-		// per-element verification below would catch it if it were not.
+		// The pattern is the SYMMETRISED union of the Jacobian and mass-matrix masks, not the Jacobian
+		// mask alone. The original version used the latter and was wrong: the routine is also asked for
+		// TRANSPOSED Hessian-vector products (bifurcation tracking on a left eigenvector), whose pattern
+		// is J^T. On the Lorenz Hopf case that put a nonzero at (0,2) where the Jacobian has no entry at
+		// all, and the per-element verification below refused the assembly -- correctly, but only because
+		// that check exists. See symmetrised_union_mask().
 		if (use_frozen_sparsity && keep_structural_zeros && prune_structural_zeros_by_field_coupling && compressed_row_flag)
 		{
 			bool parallel = false;
@@ -4310,7 +4349,9 @@ namespace pyoomph
 #endif
 			const unsigned long gen = this->get_jacobian_structure_id();
 			std::vector<int> pinned;
-			const int slot = (parallel || !gen) ? -1 : this->acquire_frozen_sparsity(0, gen, ndof, pinned, 0);
+			const int slot = (parallel || !gen) ? -1
+											   : this->acquire_frozen_sparsity(MASK_UNION_SYMMETRIC, gen, ndof, pinned,
+																			   MASK_UNION_SYMMETRIC);
 			if (slot >= 0)
 			{
 				const FrozenSparsity &sp = frozen_sparsity_cache[slot];
@@ -4363,9 +4404,26 @@ namespace pyoomph
 							for (int k = lo; k < hi; k++) taken += (flat[src[k]] != 0.0);
 							if (all > taken)
 							{
+								// Name the offending positions. "matrix 4, element 0" alone leaves the reader
+								// no way to tell an over-tight mask from a genuinely wider matrix, and the two
+								// need opposite fixes.
+								std::string where;
+								unsigned shown = 0;
+								std::vector<bool> covered(nblock, false);
+								for (int k = lo; k < hi; k++) covered[src[k]] = true;
+								for (size_t q = 0; q < nblock && shown < 6; q++)
+								{
+									if (flat[q] == 0.0 || covered[q]) continue;
+									const unsigned qi = (unsigned)(q / nvar), qj = (unsigned)(q % nvar);
+									where += (shown ? ", " : "") + std::string("(") + std::to_string(qi) + "," +
+											 std::to_string(qj) + ")=" + std::to_string(flat[q]);
+									shown++;
+								}
 								throw_runtime_error("A multi-assembly entry appeared outside the symbolic sparsity pattern (matrix " +
-													std::to_string(m) + ", element " + std::to_string(e) + "). Refusing rather than "
-													"truncating the matrix. Workaround: problem.use_frozen_sparsity=False.");
+													std::to_string(m) + " of " + std::to_string(n_matrix) + ", element " +
+													std::to_string(e) + ", nvar " + std::to_string(nvar) + "). Positions missing "
+													"from the pattern: " + where + ". Refusing rather than truncating the matrix. "
+													"Workaround: problem.use_frozen_sparsity=False.");
 							}
 						}
 					}
