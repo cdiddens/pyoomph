@@ -489,6 +489,14 @@ namespace pyoomph
     unsigned frozen_sparsity_cache_capacity = 8; // Raised on the fly if a single assembly needs more
     unsigned long frozen_sparsity_clock = 0;     // Monotonic source for the LRU stamps
     unsigned long frozen_sparsity_rebuilds = 0;  // How many patterns have been built; a test can watch this for thrashing
+    // How many matrix slots the frozen patterns reserved, summed over every frozen assembly, and how
+    // many of those ended up holding exactly zero. A frozen pattern is deliberately a SUPERSET of the
+    // numerically nonzero entries -- it has to be, or it would not be reusable -- so the ratio is the
+    // price of freezing: extra stored zeros the solver still has to carry. Cheap to keep (one pass
+    // over the values already in cache at the end of an assembly) and the only way to tell a tight
+    // pattern from a wasteful one without dumping matrices.
+    unsigned long long frozen_sparsity_stored_entries = 0;
+    unsigned long long frozen_sparsity_zero_entries = 0;
     // Index into frozen_sparsity_cache of a usable pattern for (matrix_index, generation), building it
     // if necessary. `pinned` lists slots the current assembly is already using, which must not be
     // evicted. Returns -1 if the pattern cannot be built (see build_frozen_sparsity).
@@ -666,6 +674,9 @@ namespace pyoomph
     // a positive value is the only direct evidence the preallocated path engaged rather than falling back.
     unsigned get_frozen_sparsity_nnz(unsigned matrix_index=0);
     unsigned long get_frozen_sparsity_rebuild_count() const { return frozen_sparsity_rebuilds; } // Watch for cache thrashing
+    unsigned long long get_frozen_sparsity_stored_entries() const { return frozen_sparsity_stored_entries; }
+    unsigned long long get_frozen_sparsity_zero_entries() const { return frozen_sparsity_zero_entries; }
+    void reset_frozen_sparsity_fill_stats() { frozen_sparsity_stored_entries = 0; frozen_sparsity_zero_entries = 0; }
     unsigned get_frozen_sparsity_cache_capacity() const { return frozen_sparsity_cache_capacity; }
 #ifdef OOMPH_HAS_MPI
     void set_use_frozen_distributed_sparsity(bool yesno) { use_frozen_distributed_sparsity = yesno; if (!yesno) { distributed_frozen_sparsity.clear(); distributed_residual_plan.clear(); } }

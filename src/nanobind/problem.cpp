@@ -855,6 +855,15 @@ void PyReg_Problem(nb::module_ &m)
 			 "How many frozen sparsity patterns are kept at once, keyed by (pattern id, matrix index). Needs to be at least the number of DISTINCT patterns a "
 			 "workflow alternates between -- the Jacobian, a preconditioner matrix built from another residual, the mass matrix -- or each will evict the "
 			 "others. Raised automatically if a single assembly needs more. Changing it clears the cache.")
+		.def("_get_frozen_sparsity_fill_stats", [](pyoomph::Problem &self) {
+				 return std::make_pair(self.get_frozen_sparsity_stored_entries(), self.get_frozen_sparsity_zero_entries());
+			 },
+			 "``(stored, zero)`` summed over every assembly that went through the frozen path since the problem was created (or since "
+			 "``_reset_frozen_sparsity_fill_stats()``): how many matrix slots the frozen patterns reserved, and how many of those held exactly zero when the "
+			 "assembly finished. A frozen pattern has to be a SUPERSET of the numerically nonzero entries or it could not be reused, so ``zero`` is never 0 in "
+			 "general; ``zero/stored`` is the price of freezing -- stored zeros the linear solver still has to carry. Both are 0 if the frozen path never engaged.")
+		.def("_reset_frozen_sparsity_fill_stats", &pyoomph::Problem::reset_frozen_sparsity_fill_stats,
+			 "Zero the counters behind ``_get_frozen_sparsity_fill_stats()``, so a measurement can exclude setup assemblies.")
 		.def("_get_frozen_sparsity_nnz", &pyoomph::Problem::get_frozen_sparsity_nnz, nb::arg("matrix_index") = 0,
 			 "Number of nonzeros in the frozen sparsity pattern currently held for the given matrix of a multi-matrix assembly, or 0 if none is built. "
 			 "A positive value is the only direct evidence that the preallocated-CSR assembly path actually engaged rather than quietly falling back, "

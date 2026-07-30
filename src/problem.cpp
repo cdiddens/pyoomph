@@ -3646,6 +3646,18 @@ namespace pyoomph
 				}
 			}
 		}
+		// Price of freezing: how many of the slots the pattern reserved actually ended up zero. The
+		// pattern must be a superset of the nonzeros to be reusable at all, so this is never 0 in
+		// general; a large fraction means the symbolic description is far looser than the matrix and
+		// the solver is carrying stored zeros for nothing. One pass over values still in cache.
+		for (unsigned m = 0; m < n_matrix; m++)
+		{
+			const double *val = value[m];
+			unsigned long long zeros = 0;
+			for (unsigned k = 0; k < nnz[m]; k++) zeros += (val[k] == 0.0);
+			frozen_sparsity_stored_entries += nnz[m];
+			frozen_sparsity_zero_entries += zeros;
+		}
 		return true;
 	}
 
