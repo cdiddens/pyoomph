@@ -514,6 +514,13 @@ Better than the −33 % this section predicted, and it settles the other finding
 assembly used to be *slower than serial* at two ranks (49.1 vs 36.4 ms — the overhead ate the whole
 parallel gain). It now pays for itself from two ranks up, and scales.
 
+**End to end**, re-solving the same converged problem (one assembly plus one MUMPS solve per Newton
+step, six repeats, identical solutions to all digits): **−12 % at 2 ranks** (148.8 → 131.2 ms) and
+**−41 % at 4 ranks** (274.0 → 161.3 ms). The solve dominates the step at 2 ranks, which is why the
+assembly's −57 % shows up as −12 % there; at 4 ranks assembly is a much larger share. These absolute
+numbers are on an oversubscribed machine and should be read as ratios at a fixed rank count, not
+across rank counts.
+
 The reason it beat the estimate is that freezing does not merely remove the exchange *traffic*, it
 removes the owner-side *merge*. oomph-lib merges each incoming entry into the row built so far by
 **linearly rescanning that row** — quadratic in the row length, on every assembly, with chunked
