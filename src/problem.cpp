@@ -2147,22 +2147,25 @@ namespace pyoomph
 	const char *Problem::augmented_sparsity_mask_for_element(const unsigned &matrix_index, oomph::GeneralisedElement *const &elem_pt, const unsigned &nvar, unsigned raw_nvar)
 	{
 		// On by default; set problem._use_frozen_sparsity_for_bifurcation_tracking = False to revert.
-		if (!use_frozen_sparsity_for_bifurcation_tracking) return NULL;
-		if (matrix_index > 0) return NULL; // Only the Jacobian of an augmented system has a meaning here
+		const bool dbg = getenv("PYOOMPH_DBG_AUG") != 0;
+		auto decline = [&](const char *why) -> const char * { if (dbg) std::cout << "AUGDECLINE " << why << std::endl; return NULL; };
+		if (!use_frozen_sparsity_for_bifurcation_tracking) return decline("switch off");
+		if (matrix_index > 0) return decline("matrix_index>0");
 		auto *provider = dynamic_cast<AugmentedSparsityProvider *>(this->assembly_handler_pt());
-		if (!provider || !raw_nvar) return NULL;
+		if (!provider) return decline("handler provides no spec");
+		if (!raw_nvar) return decline("raw_nvar==0");
 		AugmentedBlockSpec spec;
-		if (!provider->get_sparsity_pattern(elem_pt, spec)) return NULL;
+		if (!provider->get_sparsity_pattern(elem_pt, spec)) return decline("get_sparsity_pattern declined");
 
 		const unsigned ng = spec.n_groups();
-		if (!ng) return NULL;
+		if (!ng) return decline("empty spec");
 		// Where each group starts in the augmented numbering, and check the total matches the block.
 		std::vector<unsigned> gstart(ng + 1, 0);
 		for (unsigned g = 0; g < ng; g++) gstart[g + 1] = gstart[g] + (spec.group_is_scalar[g] ? 1u : raw_nvar);
-		if (gstart[ng] != nvar) return NULL; // Spec describes a different layout than we were handed
+		if (gstart[ng] != nvar) { if (dbg) std::cout << "AUGDECLINE layout " << gstart[ng] << " vs nvar " << nvar << " raw " << raw_nvar << std::endl; return NULL; }
 
 		BulkElementBase *be = dynamic_cast<BulkElementBase *>(elem_pt);
-		if (!be) return NULL;
+		if (!be) return decline("not a BulkElementBase");
 		const bool have_hessian_code = be->get_code_instance()->get_func_table()->hessian_generated;
 
 		// Collect the distinct (matrix, residual) pairs the spec refers to BEFORE filling any of them, so
@@ -2190,18 +2193,21 @@ namespace pyoomph
 		{
 			for (unsigned gc = 0; gc < ng; gc++)
 			{
-				const AugmentedBlockSpec::Kind kd = spec.at(gr, gc);
-				if (kd == AugmentedBlockSpec::Empty || kd == AugmentedBlockSpec::Dense) continue;
-				if ((kd == AugmentedBlockSpec::Hessian || kd == AugmentedBlockSpec::HessianT) && !have_hessian_code)
+				for (const auto &t : spec.terms_at(gr, gc))
 				{
-					// No generated Hessian means no coupling table, and the handler finite-differences the
-					// second derivatives instead. Refuse the whole augmented pattern rather than guess:
-					// the Jacobian bounds an ANALYTIC Hessian, but nothing bounds what a finite-differenced
-					// one writes, so the frozen path has no business here. Falling back costs the speedup
-					// and nothing else.
-					return NULL;
+					if (t.kind == AugmentedBlockSpec::Empty || t.kind == AugmentedBlockSpec::Dense ||
+						t.kind == AugmentedBlockSpec::Diagonal) continue; // Need no coupling table
+					if ((t.kind == AugmentedBlockSpec::Hessian || t.kind == AugmentedBlockSpec::HessianT) && !have_hessian_code)
+					{
+						// No generated Hessian means no coupling table, and the handler finite-differences
+						// the second derivatives instead. Refuse the whole augmented pattern rather than
+						// guess: the Jacobian bounds an ANALYTIC Hessian, but nothing bounds what a
+						// finite-differenced one writes, so the frozen path has no business here. Falling
+						// back costs the speedup and nothing else.
+						return decline("Hessian needed but none generated");
+					}
+					key_index(matrix_of(t.kind), t.residual);
 				}
-				key_index(matrix_of(kd), spec.residual_at(gr, gc));
 			}
 		}
 
@@ -2210,7 +2216,7 @@ namespace pyoomph
 		{
 			if (!this->field_coupling_mask_for_element(keys[k].first, keys[k].second, elem_pt, raw_nvar,
 													   augmented_raw_masks[k].data))
-				return NULL;
+			{ if (dbg) std::cout << "AUGDECLINE raw mask (matrix " << (int)keys[k].first << ", residual " << keys[k].second << ")" << std::endl; return NULL; }
 			augmented_raw_masks[k].matrix = keys[k].first;
 			augmented_raw_masks[k].residual = keys[k].second;
 		}
@@ -2223,23 +2229,40 @@ namespace pyoomph
 		{
 			for (unsigned gc = 0; gc < ng; gc++)
 			{
-				const AugmentedBlockSpec::Kind kd = spec.at(gr, gc);
-				if (kd == AugmentedBlockSpec::Empty) continue;
+				const std::vector<AugmentedBlockSpec::Term> &terms = spec.terms_at(gr, gc);
+				if (terms.empty()) continue;
 				const bool scalar_pair = spec.group_is_scalar[gr] || spec.group_is_scalar[gc];
-				// A scalar group has no raw indexing to inherit, so only Empty and Dense make sense there.
-				if (scalar_pair && kd != AugmentedBlockSpec::Dense) return NULL;
-				const std::vector<char> *src = 0;
-				const bool transposed = (kd == AugmentedBlockSpec::JacobianT || kd == AugmentedBlockSpec::MassMatrixT ||
-										 kd == AugmentedBlockSpec::HessianT);
-				if (kd != AugmentedBlockSpec::Dense)
-					src = &augmented_raw_masks[key_index(matrix_of(kd), spec.residual_at(gr, gc))].data;
 				const unsigned nr = spec.group_is_scalar[gr] ? 1u : raw_nvar;
 				const unsigned nc = spec.group_is_scalar[gc] ? 1u : raw_nvar;
-				for (unsigned i = 0; i < nr; i++)
+				for (const auto &t : terms)
 				{
-					char *row = &scratch[(size_t)(gstart[gr] + i) * nvar + gstart[gc]];
-					for (unsigned j = 0; j < nc; j++)
-						row[j] = src ? (*src)[transposed ? (size_t)j * raw_nvar + i : (size_t)i * raw_nvar + j] : 1;
+					if (t.kind == AugmentedBlockSpec::Empty) continue;
+					// A scalar group has no raw indexing to inherit, so only Dense makes sense there.
+					if (scalar_pair && t.kind != AugmentedBlockSpec::Dense) return decline("non-Dense kind on a scalar group");
+					if (t.kind == AugmentedBlockSpec::Diagonal)
+					{
+						// Only (i,i) of a square block. Used where a row is overwritten with an identity,
+						// which no coupling table can know about because it does not come from a residual.
+						if (gr == gc)
+							for (unsigned i = 0; i < nr; i++) scratch[(size_t)(gstart[gr] + i) * nvar + gstart[gc] + i] = 1;
+						continue;
+					}
+					const std::vector<char> *src = 0;
+					const bool transposed = (t.kind == AugmentedBlockSpec::JacobianT ||
+											 t.kind == AugmentedBlockSpec::MassMatrixT ||
+											 t.kind == AugmentedBlockSpec::HessianT);
+					if (t.kind != AugmentedBlockSpec::Dense)
+						src = &augmented_raw_masks[key_index(matrix_of(t.kind), t.residual)].data;
+					for (unsigned i = 0; i < nr; i++)
+					{
+						char *row = &scratch[(size_t)(gstart[gr] + i) * nvar + gstart[gc]];
+						for (unsigned j = 0; j < nc; j++)
+						{
+							// OR: several terms can contribute to one block.
+							if (src ? (*src)[transposed ? (size_t)j * raw_nvar + i : (size_t)i * raw_nvar + j] : 1)
+								row[j] = 1;
+						}
+					}
 				}
 			}
 		}

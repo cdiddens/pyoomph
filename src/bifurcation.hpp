@@ -70,34 +70,49 @@ namespace pyoomph
       MassMatrixT,  // its transpose
       Hessian,      // a Hessian contracted with a vector: d2R/du du, which is a SUBSET of the Jacobian
       HessianT,     // its transpose (left-eigenvector products)
-      Dense         // a border row/column: the parameter column, a normalisation row
+      Dense,        // a border row/column: the parameter column, a normalisation row
+      Diagonal      // the diagonal of a square block only: an identity written over a constrained row
     };
 
     // The augmented dofs partition into consecutive groups, each either a full copy of the element's
     // raw dof set or a single scalar (the parameter, a normalisation multiplier).
+    // One block can be built from SEVERAL patterns at once, so each carries a list of terms that are
+    // OR'd together. Pitchfork needs it: with improved_pitchfork_tracking_on_unstructured_meshes the
+    // base block is the base Jacobian PLUS a Hessian of the symmetry residual.
+    //
+    // Each term also names which RESIDUAL its pattern comes from; -1 means "the one currently being
+    // assembled". Fold and Hopf use -1 throughout, since every block of theirs comes from one residual.
+    // The azimuthal and pitchfork trackers do not -- they hold {base, real azimuthal, imaginary
+    // azimuthal} and {base, mass-matrix residual} live at the same time, and a spec that could not name
+    // which one a block belongs to would silently describe them all with whichever happened to be active.
+    struct Term
+    {
+      Kind kind = Empty;
+      int residual = -1;
+      Term() {}
+      Term(Kind k, int r) : kind(k), residual(r) {}
+    };
+
     std::vector<bool> group_is_scalar;
-    std::vector<Kind> blocks; // n_groups * n_groups, row-major
-    // Which RESIDUAL each block's pattern comes from; -1 means "the one currently being assembled".
-    // Fold and Hopf build every block from a single residual and leave these at -1. The azimuthal and
-    // pitchfork trackers do not: they hold {base, real azimuthal, imaginary azimuthal} and
-    // {base, mass-matrix residual} respectively, live at the same time, and a spec that could not name
-    // which one a block belongs to would silently describe them all with whichever was active.
-    std::vector<int> block_residual;
+    std::vector<std::vector<Term>> block_terms; // n_groups * n_groups, row-major; empty list = Empty
 
     unsigned n_groups() const { return (unsigned)group_is_scalar.size(); }
     void resize(unsigned n)
     {
       group_is_scalar.assign(n, false);
-      blocks.assign((size_t)n * n, Empty);
-      block_residual.assign((size_t)n * n, -1);
+      block_terms.assign((size_t)n * n, std::vector<Term>());
     }
+    // Replaces whatever the block had.
     void set(unsigned r, unsigned c, Kind k, int residual_index = -1)
     {
-      blocks[(size_t)r * n_groups() + c] = k;
-      block_residual[(size_t)r * n_groups() + c] = residual_index;
+      block_terms[(size_t)r * n_groups() + c] = std::vector<Term>(1, Term(k, residual_index));
     }
-    Kind at(unsigned r, unsigned c) const { return blocks[(size_t)r * n_groups() + c]; }
-    int residual_at(unsigned r, unsigned c) const { return block_residual[(size_t)r * n_groups() + c]; }
+    // ORs another pattern into the block.
+    void add(unsigned r, unsigned c, Kind k, int residual_index = -1)
+    {
+      block_terms[(size_t)r * n_groups() + c].push_back(Term(k, residual_index));
+    }
+    const std::vector<Term> &terms_at(unsigned r, unsigned c) const { return block_terms[(size_t)r * n_groups() + c]; }
   };
 
   // Mixin giving an assembly handler the chance to describe its augmented block. The default says
@@ -256,7 +271,7 @@ namespace pyoomph
   // where Psi is a fixed symmetry (anti-symmetry) vector distinguishing the symmetric branch
   // from the bifurcating asymmetric one, and Sigma measures the amplitude of the broken-symmetry
   // component of u (Sigma=0 on the symmetric branch, at the pitchfork itself).
-  class MyPitchForkHandler : public oomph::AssemblyHandler
+  class MyPitchForkHandler : public oomph::AssemblyHandler, public AugmentedSparsityProvider
   {
   protected:
     Problem *Problem_pt;
@@ -306,6 +321,9 @@ namespace pyoomph
     void get_eigenfunction(oomph::Vector<oomph::DoubleVector> &eigenfunction) override;
     // Switches back to assembling the full augmented system (see MyHopfHandler::solve_full_system for the analogous pattern).
     void solve_full_system();
+
+    // Describes the augmented block for the frozen sparsity machinery; see AugmentedBlockSpec.
+    bool get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const override;
   };
 
   //////////////////////////////////////////////////////////
@@ -405,7 +423,7 @@ namespace pyoomph
   };
 
   // Actual assembly handler class for axial symmetry breaking systems
-  class AzimuthalSymmetryBreakingHandler : public oomph::AssemblyHandler
+  class AzimuthalSymmetryBreakingHandler : public oomph::AssemblyHandler, public AugmentedSparsityProvider
   {
     Problem *Problem_pt;                    // Pointer to the problem class
     unsigned Ndof;                          // Degrees of freedom of the original problem (non-augmented)
@@ -508,6 +526,9 @@ namespace pyoomph
     void solve_full_system();
 
     //  void realign_C_vector(); //Reset the C-vector (which enforces the non-triviality of the eigenvector)
+
+    // Describes the augmented block for the frozen sparsity machinery; see AugmentedBlockSpec.
+    bool get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const override;
   };
 
 

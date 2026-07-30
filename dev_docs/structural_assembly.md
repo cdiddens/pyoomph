@@ -1453,6 +1453,40 @@ emitted no Hessian. The builder now returns NULL in that case, so the whole augm
 declined and assembly falls back to oomph-lib's. It costs the speedup for problems that have not
 called `setup_for_stability_analysis(analytic_hessian=True)`, and nothing else.
 
+### Pitchfork and azimuthal
+
+Both are now described, and both needed the vocabulary extended beyond what fold and Hopf used.
+
+**Pitchfork**, `[ base | parameter | Y | Sigma ]`. Its base block is the base Jacobian *plus*, when
+`improved_pitchfork_tracking_on_unstructured_meshes` is on, a Hessian of the symmetry residual --
+so a block needs to be **several patterns OR'd together**, not one. `AugmentedBlockSpec` therefore
+holds a list of `Term{kind, residual}` per block rather than a single kind. Note also that the
+residual map only exists in that improved mode; without it there is a single residual, the active
+one, which is what `-1` already means.
+
+**Azimuthal**, `[ base | real eig | imag eig | parameter | Omega ]` (or `[ base | eig | parameter ]`
+without an imaginary part). This is the case the (matrix, residual) keying was built for: the
+eigenvector blocks mix all three residuals -- `jacobian_real(m,n) - Omega*M_imag(m,n)` is the real
+azimuthal Jacobian OR'd with the imaginary azimuthal mass matrix -- and nothing about it could be
+said in a one-kind-per-block vocabulary.
+
+Two things it taught, both about *declining*:
+
+* **A negative residual index means "this element has no such contribution", not "undescribable".**
+  Returning false there abandoned the pattern for the whole MESH, because `build_frozen_sparsity`
+  gives up as soon as one element cannot be described. On Rayleigh-Benard that was every element:
+  33 012 declines and no frozen path at all -- while the script still passed, because falling back is
+  silent. Those blocks are simply empty, and saying so is a perfectly good description.
+* **The axis boundary conditions write an identity** over the rows of dofs in
+  `base_dofs_forced_zero` / `eigen_dofs_forced_zero`. Those entries come from no residual at all, so
+  no coupling table can predict them, and the verification caught them immediately once the spec was
+  actually being used. Hence a `Diagonal` kind: the diagonal of a square block only.
+
+**`PeriodicOrbitHandler` is not described** and still falls back. Its layout is `nT` copies of the raw
+block plus a scalar, so it is describable in principle -- `nT` diagonal `Jacobian` groups, mass-matrix
+coupling between time levels, and the period border -- but it is a different shape from the other four
+and was not attempted here.
+
 ### Three defects this exposed, all worth remembering
 
 1. **The mass table was unreachable.** `sparsity_mask_for_element` refuses `matrix_index > 0` unless

@@ -2090,6 +2090,56 @@ namespace pyoomph
   }
 
   // Augmented dofs of the element: original dofs + eigenvector Y + parameter + Sigma.
+  // The augmented block of a pitchfork tracker, read off get_jacobian() below.
+  //
+  // Layout (see eqn_number): [ base (raw) | parameter (1) | Y (raw) | Sigma (1) ]
+  //
+  //                base         param       Y           Sigma
+  //   base rows    J (+H_sym)   dense       -           dense
+  //   param row    dense        -           -           -
+  //   Y    rows    H            dense       J           -
+  //   Sigma row    -            -           dense       -
+  //
+  // Two residuals are in play, which is why every term names one: the base state and the symmetry
+  // constraint that PitchForkResidualContributionList calls the "mass matrix" residual. With
+  // improved_pitchfork_tracking_on_unstructured_meshes the base block picks up
+  // Sigma * symmetryDADU_times_Psi, a Hessian of that second residual, ON TOP of the base Jacobian --
+  // the case the single-kind spec could not express.
+  bool MyPitchForkHandler::get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const
+  {
+    auto *el = dynamic_cast<pyoomph::BulkElementBase *>(elem_pt);
+    if (!el) return false;
+    // The residual map only exists when improved_pitchfork_tracking_on_unstructured_meshes is on --
+    // that is the only mode with a separate symmetry residual. Without it there is one residual, the
+    // one the element is already assembling, which is what -1 means.
+    int r_base = -1, r_sym = -1;
+    auto it = residual_contribution_indices.find(el->get_code_instance()->get_code());
+    if (it != residual_contribution_indices.end())
+    {
+      r_base = it->second.residual_indices[0];
+      r_sym = it->second.residual_indices[1];
+      if (r_base < 0) return false; // This element has no base contribution to describe
+    }
+
+    typedef AugmentedBlockSpec S;
+    spec.resize(4);
+    spec.group_is_scalar[0] = false; // u
+    spec.group_is_scalar[1] = true;  // the bifurcation parameter
+    spec.group_is_scalar[2] = false; // Y
+    spec.group_is_scalar[3] = true;  // Sigma
+    spec.set(0, 0, S::Jacobian, r_base);
+    if (Problem_pt && Problem_pt->improved_pitchfork_tracking_on_unstructured_meshes && r_sym >= 0)
+      spec.add(0, 0, S::Hessian, r_sym); // Sigma * d(A.Psi)/dU, on top of the base Jacobian
+    spec.set(0, 1, S::Dense);
+    spec.set(0, 3, S::Dense);
+    spec.set(1, 0, S::Dense);
+    spec.set(2, 0, S::Hessian, r_base);
+    spec.set(2, 1, S::Dense);
+    spec.set(2, 2, S::Jacobian, r_base);
+    spec.set(3, 2, S::Dense);
+    return true;
+  }
+
   unsigned MyPitchForkHandler::ndof(oomph::GeneralisedElement *const &elem_pt)
   {
     unsigned raw_ndof = elem_pt->ndof();
@@ -2543,6 +2593,106 @@ namespace pyoomph
 
   // This will return the degrees of freedom of a single element of the augmented system
   // We will have to take the degrees of freedom of the original element and add a few more for the eigenvector values (Re and Im)
+  // The augmented block of the azimuthal symmetry-breaking tracker, read off get_jacobian() below.
+  //
+  // Layout with an imaginary part (see eqn_number):
+  //   [ base (raw) | real eig (raw) | imag eig (raw) | parameter (1) | Omega (1) ]
+  // and without it:
+  //   [ base (raw) | real eig (raw) | parameter (1) ]
+  //
+  // THREE residuals are live at once -- base, real azimuthal, imaginary azimuthal -- and the
+  // eigenvector blocks mix them: jacobian_real(m,n) - Omega*M_imag(m,n) is the real azimuthal
+  // Jacobian OR'd with the imaginary azimuthal mass matrix. That is what the per-term residual index
+  // and the OR'd term lists exist for; nothing here could be said in a one-kind-per-block vocabulary.
+  //
+  // The eigenvector-row base-column blocks combine JHess and MHess of both azimuthal residuals, all of
+  // which contributes_to_hessian covers -- it is marked whenever either the Jacobian or the mass part
+  // of a second derivative is non-zero.
+  bool AzimuthalSymmetryBreakingHandler::get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const
+  {
+    auto *el = dynamic_cast<pyoomph::BulkElementBase *>(elem_pt);
+    if (!el) return false;
+    auto it = residual_contribution_indices.find(el->get_code_instance()->get_code());
+    if (it == residual_contribution_indices.end()) return false;
+    const int r_base = it->second.residual_indices[0];
+    const int r_re = it->second.residual_indices[1];
+    const int r_im = it->second.residual_indices[2];
+
+    // A negative index means this element has NO contribution to that residual -- not that the block
+    // is undescribable. Its blocks are then structurally empty, which is a perfectly good description,
+    // so the terms are simply omitted. Returning false instead would abandon the pattern for the whole
+    // MESH, because build_frozen_sparsity gives up as soon as one element cannot be described: on the
+    // Rayleigh-Benard azimuthal case that was every element, 33012 declines and no frozen path at all.
+    auto addT = [&spec](unsigned r, unsigned c, AugmentedBlockSpec::Kind k, int resid) {
+      if (resid >= 0) spec.add(r, c, k, resid);
+    };
+
+    typedef AugmentedBlockSpec S;
+    if (!has_imaginary_part)
+    {
+      spec.resize(3);
+      spec.group_is_scalar[0] = false; // u
+      spec.group_is_scalar[1] = false; // the (real) eigenvector
+      spec.group_is_scalar[2] = true;  // the bifurcation parameter
+    // The axis boundary conditions for the azimuthal mode overwrite whole rows with an identity, for
+    // dofs in base_dofs_forced_zero / eigen_dofs_forced_zero. Those entries come from no residual at
+    // all, so no coupling table can predict them; the diagonals of the base and eigenvector blocks are
+    // therefore declared explicitly. It is a per-dof decision at runtime and a per-block statement
+    // here, so a diagonal entry may be stored for dofs that are not forced -- a handful of explicit
+    // zeros, and the section 7c hazard they carry is why MUMPS null-pivot detection stays on.
+      addT(0, 0, S::Jacobian, r_base);
+      spec.add(0, 0, S::Diagonal);
+      spec.set(0, 2, S::Dense);
+      addT(1, 0, S::Hessian, r_re);
+      addT(1, 1, S::Jacobian, r_re);
+      spec.add(1, 1, S::Diagonal);
+      spec.set(1, 2, S::Dense);
+      spec.set(2, 1, S::Dense); // the normalisation row
+      return true;
+    }
+
+    spec.resize(5);
+    spec.group_is_scalar[0] = false; // u
+    spec.group_is_scalar[1] = false; // real part of the eigenvector
+    spec.group_is_scalar[2] = false; // imaginary part
+    spec.group_is_scalar[3] = true;  // the bifurcation parameter
+    spec.group_is_scalar[4] = true;  // Omega
+    // The axis boundary conditions for the azimuthal mode overwrite whole rows with an identity, for
+    // dofs in base_dofs_forced_zero / eigen_dofs_forced_zero. Those entries come from no residual at
+    // all, so no coupling table can predict them; the diagonals of the base and eigenvector blocks are
+    // therefore declared explicitly. It is a per-dof decision at runtime and a per-block statement
+    // here, so a diagonal entry may be stored for dofs that are not forced -- a handful of explicit
+    // zeros, and the section 7c hazard they carry is why MUMPS null-pivot detection stays on.
+    addT(0, 0, S::Jacobian, r_base);
+    spec.add(0, 0, S::Diagonal);
+    spec.set(0, 3, S::Dense);
+    // Real eigenvector rows
+    addT(1, 0, S::Hessian, r_re);
+    addT(1, 0, S::Hessian, r_im);
+    addT(1, 1, S::Jacobian, r_re);
+    addT(1, 1, S::MassMatrix, r_im);
+    spec.add(1, 1, S::Diagonal);
+    addT(1, 2, S::Jacobian, r_im);
+    addT(1, 2, S::MassMatrix, r_re);
+    spec.set(1, 3, S::Dense);
+    spec.set(1, 4, S::Dense);
+    // Imaginary eigenvector rows
+    addT(2, 0, S::Hessian, r_re);
+    addT(2, 0, S::Hessian, r_im);
+    addT(2, 1, S::Jacobian, r_im);
+    addT(2, 1, S::MassMatrix, r_re);
+    addT(2, 2, S::Jacobian, r_re);
+    addT(2, 2, S::MassMatrix, r_im);
+    spec.add(2, 2, S::Diagonal);
+    spec.set(2, 3, S::Dense);
+    spec.set(2, 4, S::Dense);
+    // The two normalisation rows. Neither has a diagonal, deliberately: they constrain the
+    // eigenvector only, and a Dense entry there would manufacture the stored zero diagonal of §7c.
+    spec.set(3, 1, S::Dense);
+    spec.set(4, 2, S::Dense);
+    return true;
+  }
+
   unsigned AzimuthalSymmetryBreakingHandler::ndof(oomph::GeneralisedElement *const &elem_pt)
   {
     // This does not change if considering m contributions are incorporated already
