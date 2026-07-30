@@ -153,6 +153,23 @@ class PETSCSolver(GenericLinearSystemSolver):
         if not PETSc.Sys.hasExternalPackage("mumps"): #type:ignore
             raise RuntimeError("Your PETSc installation was not compiled with MUMPS support (--download-mumps=yes). Please recompile PETSc with MUMPS or use a different linear solver.")
         _SetDefaultPetscOption("mat_mumps_icntl_6",5)
+        # ICNTL(24)=1 -- detect and handle null pivots.
+        #
+        # Needed because pyoomph deliberately stores STRUCTURAL zeros (problem.keep_structural_zeros),
+        # so that the sparsity pattern is a function of the equation numbering alone and can be reused
+        # across Newton steps. On a saddle-point system that turns a genuinely absent diagonal into a
+        # diagonal entry that is present and exactly zero -- interface Lagrange multipliers and
+        # pressure dofs, whose self-coupling is zero by construction. MUMPS chooses its elimination
+        # order from the STRUCTURE, so those stored zeros invite it to plan an elimination that then
+        # hits a zero pivot at factorisation time; with detection off (the default) it divides by it
+        # and returns a silently wrong solution, and Newton diverges from a nearly converged state.
+        # Measured on the two-domain ALE case: INFOG(28) reports 8 null pivots encountered.
+        #
+        # Costs nothing on a matrix that has no null pivots, and only ever replaces a garbage answer
+        # with a usable one. Note the flip side: on a genuinely singular system MUMPS now returns a
+        # pseudo-solution rather than producing nonsense, so a singular problem shows up as a Newton
+        # that fails to converge rather than one that diverges spectacularly.
+        _SetDefaultPetscOption("mat_mumps_icntl_24",1)
         _SetDefaultPetscOption("ksp_type","preonly")
         _SetDefaultPetscOption("pc_type","lu")
         _SetDefaultPetscOption("pc_factor_mat_solver_type","mumps")
@@ -568,6 +585,7 @@ class SlepcEigenSolver(GenericEigenSolver):
         _SetDefaultPetscOption("st_pc_type","lu")
         _SetDefaultPetscOption("st_pc_factor_mat_solver_type","mumps")
         _SetDefaultPetscOption("st_mat_mumps_icntl_6",5)
+        _SetDefaultPetscOption("st_mat_mumps_icntl_24",1)  # null pivots; see PETSCSolver.use_mumps
         if mumps_param14 is not None:
             _SetDefaultPetscOption("st_mat_mumps_icntl_14",mumps_param14)
         return self

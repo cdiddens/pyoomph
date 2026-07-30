@@ -5,8 +5,7 @@ Branch: `structural_assembly`. Status: **all planned phases implemented, tested 
 (commit `d03a562`) on this machine; §6 records what the implemented work actually moved. All
 file/line references are to the tree state at the time of writing.
 
-One open item remains, unrelated to the phases: the bistable `test_moving_mesh_distributed`
-regression of §7c, deferred to a fresh agent.
+All tests pass: the `test_moving_mesh_distributed` regression of §7c is resolved (§7c).
 
 **Goal.** Today every Jacobian assembly rebuilds the CSR structure (row starts + column indices)
 from scratch, and every linear solve therefore re-does its symbolic phase (Pardiso phase 11, PETSc
@@ -1037,45 +1036,69 @@ for `nproc > 1`. Making them distributed means giving the augmented rows/columns
 adding them to the exchange — a genuinely separate project. Recorded here so the Phase 4 work does
 not silently assume MPI support it does not have.
 
-## 7c. Open regression: `test_moving_mesh_distributed`
+## 7c. `test_moving_mesh_distributed` — **RESOLVED**
 
-**Status: open. Read the retraction below before trusting anything previously written here.**
+One test, one case (`ale-tri_crossed-12-level`). Root cause found, fixed, and the whole MPI suite is
+green (67 passed).
 
-One test, one case (`ale-tri_crossed-12-level`). Everything else is green: 39 structural tests,
-`test_mpi_adaptivity_3d`, the other 27 MPI tests, the fast suite (543 passed), all 126 tutorial scripts.
+### What it was
 
-### Retraction
+`keep_structural_zeros` turns a **structurally absent** diagonal into a diagonal entry that is
+**present and exactly zero**. On this case that happens for 158 rows, and they are not arbitrary:
 
-Two explanations were recorded in this section and **both were wrong**, because both were built on
-single runs of a reproduction that turns out not to be reliable:
+| dofs gaining a stored-zero diagonal | count |
+| --- | --- |
+| `<added interface dof>` — Lagrange multipliers of the interface coupling | 124 |
+| `pressure__C1__*` | 35 |
 
-1. *"Any extra stored zero tips this knife-edge case."* The flag bisection behind that was run on the
-   single test in isolation, where it passes regardless.
-2. *"It fails only after a predecessor in the same pytest process."* Later the same standalone case
-   failed with no predecessor at all.
+Both are **saddle-point constraint rows** whose self-coupling is zero *by construction*, not by
+coincidence at this state. So the field-coupling mask over-reports a coupling that can never be
+nonzero.
 
-The manual reproduction — running `mpi_worker.py` under `mpirun -n 2` with the single
-`tri_crossed / ale / (1,2,"level")` spec — gives **batches** of consistent passes and batches of
-consistent failures with no change to the build in between: 12 consecutive passes, then 3 consecutive
-failures, with the JIT cache warm both times (clearing it changed nothing). Whatever switches it is
-not yet identified, and until it is, no attribution from a single manual run is worth anything.
+MUMPS chooses its elimination order from the **structure**, in the analysis phase, before it sees a
+single value. Those stored zeros invite it to plan an elimination that then hits a zero pivot at
+factorisation time — `INFOG(28)` reports **8 null pivots encountered**. With null-pivot detection off
+(`ICNTL(24) = 0`, the MUMPS default) it divides by them and returns a silently wrong solution. Newton
+then *diverges from a nearly converged state*: 3.6e-07 → 2e-05 → 0.03 → 4350 → 1e18, which is the
+give-away — a correct Jacobian cannot amplify like that from 1e-7.
 
-### What is solid
+### The fix
 
-* The pytest module fails **consistently**: 4 out of 4 whole-module runs, `1 failed / 11 passed`.
-* With the structural pattern forced off, the same module passes: `12 passed`, twice.
-* So the feature is implicated, but *which part* is not established — the flag bisection that appeared
-  to show it was unsound.
-* It is not the JIT cache: `PYOOMPH_JIT_CACHE=0` and a physically removed cache both behave the same.
-* It is not the accumulation order: feature off with `sparse_assembly_method="maps"` passes.
+`PETSCSolver.use_mumps()` now sets `ICNTL(24) = 1` by default (and the SLEPc spectral transform does
+the same). It costs nothing on a matrix with no null pivots and only ever replaces a garbage answer
+with a usable one. Set through `_SetDefaultPetscOption`, so anyone who configures it explicitly keeps
+control. Flip side worth knowing: a genuinely singular system now yields a pseudo-solution, so it
+shows up as a Newton that fails to converge rather than one that explodes.
 
-### Where to pick it up
+### Why it took so long, and what to do differently
 
-Use the **pytest module** as the reproduction, not the manual worker — the module is the only form
-that has been consistent. Then bisect with the `sitecustomize.py`-on-`PYTHONPATH` trick (there are
-ready-made ones in the session scratchpad) *inside that harness*, repeating each configuration several
-times before believing it. The first question to settle is what makes the manual and the pytest
-reproductions disagree, since that is the same question as what makes the manual one bistable.
+Every earlier attribution was wrong, and the reason is worth recording:
+
+* the failure is a **knife-edge**, and whether MUMPS's ordering reaches a null pivot shifts with tiny
+  perturbations. That made it look nondeterministic and produced apparent *batches* of passes and
+  failures;
+* one such perturbation is absurd but real: putting an **empty directory on `PYTHONPATH`** flipped
+  the result reproducibly, 10 out of 10 interleaved runs. Not because pyoomph reads `PYTHONPATH` —
+  it does not — but because `problem.py` logs `str(sys.path)`, so a longer path changes an allocation
+  and shifts the heap. Setting an unrelated variable of the same length (`FOOBAR=...`) did *not* flip
+  it, which is what ruled out "environment size" and pointed at the log line;
+* consequently **no single run means anything**, which is exactly how the two retracted explanations
+  came about. I nearly recorded a third ("it's `PYTHONPATH`") before interleaving disproved it.
+
+What finally worked was refusing to bisect until there was a *deterministic* failing configuration,
+and then bisecting the feature flags inside it, injecting them through the case module rather than a
+`sitecustomize` on `PYTHONPATH` — because the harness itself was one of the perturbations. That gave
+`keep_structural_zeros` = fail 3/3, off = pass 3/3, and the frozen-assembly flags irrelevant, in one
+clean table. From there the diagnosis is three measurements: the two matrices are identical
+(all 8 235 / 11 260 extra entries exactly `0.0`), the diagonal census, and `INFOG(28)`.
+
+### Loose end
+
+The mask **over-reports**: a correct field-coupling analysis would not add `(λ, λ)` or `(p, p)` for
+these rows at all, since those blocks are structurally absent. §3's safety argument — "a mask that
+over-reports merely stores explicit zeros" — is now known to be too optimistic: over-reporting on the
+diagonal of a saddle-point system is what created this. Tightening it would also cut nnz. Worth doing,
+but it is an optimisation now rather than a correctness fix.
 
 ## 7b. The forced diagonal belongs to the solver — **DONE**
 
