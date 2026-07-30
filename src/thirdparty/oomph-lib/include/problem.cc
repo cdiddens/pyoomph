@@ -2619,14 +2619,19 @@ namespace oomph
   //================================================================
   void Problem::get_dofs(DoubleVector& dofs) const
   {
-    // Find number of dofs
-    const unsigned long n_dof = ndof();
-
     // Resize the vector
     dofs.build(Dof_distribution_pt, 0.0);
 
+    // FOR PYOOMPH: loop over the LOCAL rows, not ndof().
+    // On a distributed problem ndof() is the GLOBAL dof count, while `dofs` holds only nrow_local()
+    // doubles and Dof_pt only this rank's dofs -- newton_solve() indexes Dof_pt by local index for
+    // exactly that reason. Looping to ndof() therefore ran off the end of both buffers and corrupted
+    // the heap on every call (silently: the abort typically came much later, in an unrelated malloc).
+    // Serially nrow_local() == ndof(), so this is unchanged there.
+    const unsigned long n_dof_local = Dof_distribution_pt->nrow_local();
+
     // Copy dofs into vector
-    for (unsigned long l = 0; l < n_dof; l++)
+    for (unsigned long l = 0; l < n_dof_local; l++)
     {
       dofs[l] = *Dof_pt[l];
     }
@@ -3564,9 +3569,14 @@ namespace oomph
         error_stream.str(), OOMPH_CURRENT_FUNCTION, OOMPH_EXCEPTION_LOCATION);
     }
 #endif
-    for (unsigned long l = 0; l < n_dof; l++)
+    // FOR PYOOMPH: loop over the LOCAL rows, for the same reason as in get_dofs() above -- n_dof is
+    // the GLOBAL count while Dof_pt holds only this rank's dofs. `dofs` may arrive either already
+    // distributed over the dof distribution or replicated on every rank, so index it accordingly.
+    const unsigned long n_dof_local = Dof_distribution_pt->nrow_local();
+    const unsigned long first = dofs.distributed() ? 0 : Dof_distribution_pt->first_row();
+    for (unsigned long l = 0; l < n_dof_local; l++)
     {
-      *Dof_pt[l] = dofs[l];
+      *Dof_pt[l] = dofs[first + l];
     }
   }
 

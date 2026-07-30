@@ -58,6 +58,19 @@ Included <initializer_list> for clang compilation on Mac
 
 
 
+problem.cc (Changed on 30th July 2026, second change):
+Fixed two out-of-bounds writes on the distributed path, in Problem::get_dofs(DoubleVector&) and
+Problem::set_dofs(const DoubleVector&). Both looped to ndof(), which is the GLOBAL number of dofs,
+while the DoubleVector holds only nrow_local() doubles and Dof_pt only this rank's dofs -- as
+newton_solve() itself acknowledges by indexing Dof_pt with a local index. Every call on a distributed
+problem therefore ran off the end of two buffers and corrupted the heap; silently, since the abort
+usually came much later in an unrelated allocation. Both now loop over the local rows, and set_dofs
+additionally handles being handed a replicated rather than a distributed vector. Serially
+nrow_local() == ndof(), so nothing changes there. Note that oomph-lib guards the corresponding
+HISTORY overloads, get_dofs(t,...) and set_dofs(t,...), with a PARANOID "Not designed for distributed
+problems" throw; these two had no such guard. pyoomph reaches them through get_current_dofs() and
+set_current_dofs(). See pyoomph's tests/test_mpi_newton_abort.py.
+
 problem.h (Changed on 30th July 2026):
 Moved get_my_eqns() and parallel_sparse_assemble() from the private to the protected section and made
 the latter virtual, so that a derived Problem can substitute its own distributed assembly. No
