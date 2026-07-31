@@ -84,15 +84,25 @@ mkdir -p "$LOG_DIR" || exit 1
 NIGHTLY_LOG="$LOG_DIR/nightly.log"
 STATE_FILE="$LOG_DIR/last_tested.sha"
 
-note() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$NIGHTLY_LOG"; }
+# Under cron there is no terminal and the log is the only record. Run by hand, a silent
+# script is indistinguishable from a broken one, so the same lines go to stderr.
+note() {
+    local msg
+    msg="$(date '+%Y-%m-%d %H:%M:%S') $*"
+    printf '%s\n' "$msg" >>"$NIGHTLY_LOG"
+    [ -t 2 ] && printf '%s\n' "$msg" >&2
+    return 0
+}
 
 # ------------------------------------------------------------------------ mail ---
 
 # smtplib if SMTP_HOST is configured, otherwise the local mail/sendmail command. Most
 # workstations have no working MTA, hence the SMTP path; but a machine that does have one
 # should not need credentials in a config file, hence the fallback.
+MAIL_TRANSPORT=""
 send_mail() {
-    local subject="$1" bodyfile="$2" rc
+    local subject="$1" bodyfile="$2" rc out
+    MAIL_TRANSPORT=""
 
     if [ -n "$SMTP_HOST" ]; then
         MAIL_SUBJECT="$subject" MAIL_BODY_FILE="$bodyfile" \
@@ -130,17 +140,23 @@ except Exception as e:
 PYEOF
         rc=$?
         if [ $rc -eq 0 ]; then
-            note "mail sent via smtplib: $subject"
+            MAIL_TRANSPORT="smtplib"
+            note "mail sent via smtplib to $SMTP_HOST: $subject"
             return 0
         fi
-        note "smtplib failed, trying local mailer"
+        note "smtplib failed, trying the local mailer"
     fi
 
+    # Both fallbacks only prove that a local MTA ACCEPTED the message. On a workstation
+    # with no relay configured that is where it stops -- accepted, queued, never delivered,
+    # exit status 0. Hence the wording of the note, and the advice under --test-mail.
     if command -v mail >/dev/null 2>&1; then
-        if mail -s "$subject" "$MAIL_TO" <"$bodyfile"; then
-            note "mail sent via mail(1): $subject"
+        if out="$(mail -s "$subject" "$MAIL_TO" <"$bodyfile" 2>&1)"; then
+            MAIL_TRANSPORT="mail"
+            note "handed to mail(1) (accepted locally, delivery not confirmed): $subject"
             return 0
         fi
+        [ -n "$out" ] && note "mail(1) failed: $out"
     fi
 
     local sendmail=""
@@ -149,7 +165,8 @@ PYEOF
     if [ -n "$sendmail" ]; then
         if { printf 'To: %s\nFrom: %s\nSubject: %s\n\n' "$MAIL_TO" "$MAIL_FROM" "$subject"
              cat "$bodyfile"; } | "$sendmail" -t; then
-            note "mail sent via sendmail: $subject"
+            MAIL_TRANSPORT="sendmail"
+            note "handed to sendmail (accepted locally, delivery not confirmed): $subject"
             return 0
         fi
     fi
@@ -159,10 +176,59 @@ PYEOF
 }
 
 if [ "$TEST_MAIL" = 1 ]; then
+    echo "pyoomph nightly -- mail check"
+    echo
+    if [ -f "$CONFIG" ]; then
+        echo "  config    : $CONFIG"
+    else
+        echo "  config    : $CONFIG  *** DOES NOT EXIST -- built-in defaults are in use ***"
+    fi
+    echo "  to        : $MAIL_TO"
+    echo "  from      : $MAIL_FROM"
+    # A sender whose domain does not resolve is rejected or silently dropped by most
+    # relays, and the default here is built from `hostname`, which on a workstation is
+    # usually a bare name with no domain at all.
+    case "${MAIL_FROM#*@}" in
+        *.*) ;;
+        *) echo "              ^^ that domain has no dot and will not resolve. Most relays drop"
+           echo "                 such a sender without a word. Set MAIL_FROM in the config to a"
+           echo "                 real mailbox, e.g. $MAIL_TO" ;;
+    esac
+    if [ -n "$SMTP_HOST" ]; then
+        echo "  smtp      : $SMTP_HOST:$SMTP_PORT ($SMTP_SECURITY), user=${SMTP_USER:-<none>}," \
+             "password $([ -n "$SMTP_PASSWORD" ] && echo set || echo 'NOT set')"
+    else
+        echo "  smtp      : SMTP_HOST is empty -- falling back to the local mail/sendmail command"
+    fi
+    echo "  mail(1)   : $(command -v mail || echo 'not installed')"
+    echo "  sendmail  : $(command -v sendmail || { [ -x /usr/sbin/sendmail ] && echo /usr/sbin/sendmail; } || echo 'not installed')"
+    echo
     t="$(mktemp)"
     printf 'pyoomph nightly test mail from %s at %s.\n' "$(hostname)" "$(date)" >"$t"
     send_mail "[pyoomph nightly] test mail" "$t"; rc=$?
     rm -f "$t"
+    echo
+    case "${MAIL_TRANSPORT:-none}" in
+        smtplib)
+            echo "Accepted by $SMTP_HOST, so the message did leave this machine."
+            echo "If it does not arrive, look in the spam folder and at the mail server's logs."
+            ;;
+        mail|sendmail)
+            echo "Handed to the local '$MAIL_TRANSPORT' command. That only means a local MTA accepted"
+            echo "it -- NOT that it was delivered. A workstation with no relay configured queues or"
+            echo "drops it silently and still exits 0, which is the usual reason no mail arrives."
+            echo
+            echo "    mailq                 # is it stuck in the queue?"
+            echo "    tail /var/log/mail.log /var/log/maillog"
+            echo
+            echo "Setting SMTP_HOST in $CONFIG avoids the local MTA entirely and is the more reliable"
+            echo "option on a machine that is not a mail server."
+            ;;
+        *)
+            echo "No mail transport worked at all. Set SMTP_HOST (and SMTP_USER/SMTP_PASSWORD) in"
+            echo "$CONFIG -- that path needs nothing installed beyond Python."
+            ;;
+    esac
     exit $rc
 fi
 

@@ -46,6 +46,11 @@ TIMEOUT_TUTORIALS=28800  # 8 h  (a full tutorial pass is over an hour when healt
 # ------------------------------------------------------------------------ mail ----
 
 MAIL_TO="c.diddens@utwente.nl"
+
+# Set this to a real mailbox. The default below is built from `hostname`, which on a
+# workstation is usually a bare name with no domain; a sender whose domain does not resolve
+# is rejected or silently dropped by most relays, and an authenticating relay will normally
+# insist the sender match the account anyway. `--test-mail` warns about it.
 MAIL_FROM="pyoomph-nightly@$(hostname -f 2>/dev/null || hostname)"
 
 # If SMTP_HOST is set the report is sent with Python's smtplib; otherwise the script falls
