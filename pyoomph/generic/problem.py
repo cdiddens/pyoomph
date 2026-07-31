@@ -1633,7 +1633,30 @@ class Problem(_pyoomph.Problem):
         else:
             self._output_step += 1
 
-        
+
+
+
+    def output_every_step_outputs(self, stage: str = "") -> None:
+        """
+        Invoke only those Output objects that were created with ``output_every_step=True`` (e.g.
+        :py:class:`~pyoomph.output.generic.ODEFileOutput` and
+        :py:class:`~pyoomph.output.generic.IntegralObservableOutput`). Called by
+        :py:meth:`run` after every successful transient step that is not already an output step, so
+        that these line-per-call files resolve the whole trajectory instead of just the output times.
+
+        Deliberately none of the rest of :py:meth:`output`: no state dump, no plot, no "OUTPUT at t=..."
+        line, and in particular no increment of the output step counter - the numbered outputs (mesh
+        files, states, plots) must stay in step with the requested output times.
+
+        Args:
+            stage (str): The stage of the output, at the moment, only "" is meaningful.
+
+        Returns:
+            None
+        """
+        if not self.is_initialised():
+            return
+        self._equation_system._do_output(self._output_step, stage, only_every_step=True)
 
 
     def init_output(self,redefined:bool=False):
@@ -6034,7 +6057,7 @@ class Problem(_pyoomph.Problem):
             if isinstance(outstep,bool) and outstep == True:
                 self.output()
                 if nextdt_was_clamped_for_output is not None:
-                        nextdt=max(1.0,float(nextdt_was_clamped_for_output/nextdt))*nextdt 
+                        nextdt=max(1.0,float(nextdt_was_clamped_for_output/nextdt))*nextdt
                         nextdt_was_clamped_for_output=None
             elif outstep != False:
                 tndnew = self.get_current_time(as_float=True, dimensional=False)
@@ -6043,9 +6066,13 @@ class Problem(_pyoomph.Problem):
                 if nextind > currind: #type:ignore
                     self.output()
                     if nextdt_was_clamped_for_output is not None:
-                        nextdt=max(1.0,float(nextdt_was_clamped_for_output/nextdt))*nextdt 
+                        nextdt=max(1.0,float(nextdt_was_clamped_for_output/nextdt))*nextdt
                         nextdt_was_clamped_for_output=None
                 else:
+                    # Not an output time, so the outputs marked output_every_step still get their line
+                    # here. Guarded by the else branch rather than done unconditionally: on an output
+                    # time the full output() above has already written them, and they would be doubled.
+                    self.output_every_step_outputs()
                     #  Finally check whether the next dt would be very close to the next output. If so, better do two smaller steps
                     # TODO: This needs to be checked further
                     tnext = tndnew + float(nextdt / TS) * 1.15

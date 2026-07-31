@@ -869,6 +869,12 @@ class _ODEFileOutput(_BaseODEOutput):
 ######################
 
 class GenericOutput(BaseEquations):
+    # Whether this output also writes on every successful transient step, not only at the output times
+    # of Problem.run. Only cheap line-per-call outputs (ODE and integral observable files) set it; for
+    # a full mesh output it would mean one file per time step. Declared at class level, not only in
+    # __init__, so that a subclass which does not chain up still answers the question.
+    output_every_step:bool=False
+
     def __init__(self):
         super(GenericOutput, self).__init__()
         self._outputter:dict["EquationTree",_BaseOutputter]={} #Map from eqtree node to an outputter object
@@ -908,9 +914,11 @@ class GenericOutput(BaseEquations):
         self._outputter[eqtree].init(eqtree,continue_info,rank)
 
 
-    def _do_output(self, eqtree:"EquationTree", step:int,stage:str):
+    def _do_output(self, eqtree:"EquationTree", step:int,stage:str,only_every_step:bool=False):
+        if only_every_step and not self.output_every_step:
+            return
         self._outputter[eqtree].output(step)
-        
+
     def change_output_directory(self, newdir:str,eqtree:"EquationTree"):
         self._outputter[eqtree].change_output_directory(newdir,eqtree)
 
@@ -924,11 +932,13 @@ class ODEFileOutput(GenericOutput):
         first_column: The value(s) to be written in the first column of the output file. Default is "time".
         in_units: A dictionary specifying the units of the variables to be written in the output file. Default is an empty dictionary, i.e. base SI units.
         hide_underscore: A flag indicating whether to hide variable names starting with an underscore in the output file. Default is False.
+        output_every_step: Write a line after every successful transient step of :py:meth:`~pyoomph.generic.problem.Problem.run`, not only at the output times. Default is True. Has no effect when ``outstep=False`` was passed to ``run``, i.e. when no output at all was requested.
     """
-    
-    def __init__(self,filename:str | None=None,first_column:str | GlobalParameter | list[str | GlobalParameter] | None="time",in_units:dict[str,ExpressionOrNum]={},hide_underscore:bool=False):
+
+    def __init__(self,filename:str | None=None,first_column:str | GlobalParameter | list[str | GlobalParameter] | None="time",in_units:dict[str,ExpressionOrNum]={},hide_underscore:bool=False,output_every_step:bool=True):
         super(ODEFileOutput, self).__init__()
-        self.filename=filename        
+        self.filename=filename
+        self.output_every_step=output_every_step
         self.in_units=in_units
         self.hide_underscore=hide_underscore
         if not isinstance(first_column,list):
@@ -1358,13 +1368,15 @@ class IntegralObservableOutput(GenericOutput):
     Args:
         filename: The name of the output file (without extension). Default is None, meaning that the output file will be named after the domain.
         file_ext: The file extension. Default is None, meaning that the default file extension from the problem will be used.
-        first_column: The value(s) to be written in the first column of the output file. Default is ``"time"``.        
+        first_column: The value(s) to be written in the first column of the output file. Default is ``"time"``.
+        output_every_step: Write a line after every successful transient step of :py:meth:`~pyoomph.generic.problem.Problem.run`, not only at the output times. Default is True. Has no effect when ``outstep=False`` was passed to ``run``, i.e. when no output at all was requested.
     """
-    def __init__(self, filename:str | None=None, file_ext:str | list[str] | None=None,first_column:list[str]=["time"]):
+    def __init__(self, filename:str | None=None, file_ext:str | list[str] | None=None,first_column:list[str]=["time"],output_every_step:bool=True):
         super(IntegralObservableOutput, self).__init__()
         self.filename = filename
         self.file_ext = file_ext
         self.first_column=first_column
+        self.output_every_step=output_every_step
 
     def _construct_outputter_for_eq_tree(self, eqtree:"EquationTree", continue_info:dict[str, Any] | None, mpirank:int) -> _IntegralObservableOutput:
         fn = self._expand_filename(eqtree, self.filename,  "_IntObsv")

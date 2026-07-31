@@ -607,7 +607,7 @@ class BaseEquations(_pyoomph.Equations):
     def _init_output(self,eqtree:"EquationTree",continue_info:dict[str, Any] | None,rank:int):
         pass
 
-    def _do_output(self, eqtree:"EquationTree", step:int,stage:str):
+    def _do_output(self, eqtree:"EquationTree", step:int,stage:str,only_every_step:bool=False):
         pass
 
     def _is_ode(self)->bool | None:
@@ -1778,14 +1778,14 @@ class EquationTree:
             res.update(child._get_forced_zero_dofs_for_eigenproblem(eigensolver,angular_mode,normal_k))
         return res
 
-    def _do_output(self,step:int,stage:str):
+    def _do_output(self,step:int,stage:str,only_every_step:bool=False):
         if self._equations:
             oldcg = self._equations._get_current_codegen()
             self._equations._set_current_codegen(self._codegen)
-            self._equations._do_output(self,step,stage) 
+            self._equations._do_output(self,step,stage,only_every_step)
             self._equations._set_current_codegen(oldcg)
         for _,child in self._children.items():
-            child._do_output(step,stage)
+            child._do_output(step,stage,only_every_step)
 
     def _has_sub_equations_defined(self):
         if self._equations is not None:
@@ -2690,10 +2690,10 @@ class CombinedEquations(Equations):
             if isinstance(e,BaseEquations): #type:ignore
                 e._init_output(eqtree,continue_info,rank)
 
-    def _do_output(self,eqtree:"EquationTree",step:int,stage:str):
+    def _do_output(self,eqtree:"EquationTree",step:int,stage:str,only_every_step:bool=False):
         for e in self._subelements:
             if isinstance(e,BaseEquations): #type:ignore
-                e._do_output(eqtree,step,stage)
+                e._do_output(eqtree,step,stage,only_every_step)
 
     def _before_stationary_or_transient_solve(self, eqtree:"EquationTree", stationary:bool)->bool:
         must_reapply=False
