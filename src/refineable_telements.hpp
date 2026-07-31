@@ -255,23 +255,41 @@ namespace oomph
     void tess_register_on_coarser_for_numpy(std::vector<std::vector<std::set<Node *>>> &add_nodes);
 
   protected:
-    // Reuse a node that an EDGE-NEIGHBOUR element has already built, located via the tri tree (which
-    // persists across adaptation rounds), like oomph's RefineableQElement::node_created_by_neighbour for
-    // quads. This closes the cross-round gap of the per-round Shared_edge_node_registry: during transient
-    // re-adaptation a son built this round must reuse a coincident node an equal-sized neighbour built in
-    // an EARLIER round (else the shared vertex is duplicated and the moving mesh tears apart). s_son is
+    // Reuse a node that a NEIGHBOUR element has already built, located via the tri tree (which persists
+    // across adaptation rounds), like oomph's RefineableQElement::node_created_by_neighbour for quads.
+    // This closes the cross-round gap of the per-round Shared_edge_node_registry: during transient
+    // re-adaptation a son built this round must reuse a node an already-built neighbour holds at the same
+    // topological point (else the shared vertex is duplicated and the moving mesh tears apart). s_son is
     // node i's local coordinate in THIS (son) element. Returns the shared node, or 0 if none.
+    //
+    // The search is over the WHOLE of this element's own tree root plus, if the point lies on a root edge,
+    // the adjacent root(s) -- not just the >=-sized leaf neighbour that tri_edge_neighbour returns. That
+    // matters because the holder of the node can be at any level and need not be a leaf: a neighbour that
+    // was split earlier in this same round is not a leaf any more but still owns its nodes, and a neighbour
+    // FINER than this element holds the point as a vertex several levels down. Both cases used to fall
+    // through to a coordinate-based fallback. See node_in_subtree_at_local_coordinate.
     Node *node_created_by_neighbour(const Vector<double> &s_son) const;
-    // Given a coordinate in THIS TREE's ROOT-element local frame, descend the tree to the LEAF that
-    // contains it (topological point-in-simplex descent: at each level pick the son whose barycentric
-    // coords are all >=0 via father_to_son_local -- no geometry), then return the leaf's node at that
-    // coordinate (get_node_at_local_coordinate) or null. Used for cross-shape (mixed quad+tri) node-
-    // sharing: a quad finds the coincident node an adjacent refined tri already built. Call on the root.
-    // Public because the quad node-sharing path (BulkElementBase::mixed_quad_shared_node) calls it.
+    // Search a whole subtree for a node sitting at the point `s` (given in the local frame of the subtree's
+    // OWN root element), and return it, or 0. Purely topological: it recurses into every son that contains
+    // the point (`father_to_son_local` + a barycentric containment test, so a point on a son boundary
+    // follows BOTH sons), and asks each element on the way for a node at the corresponding local coordinate
+    // via get_node_at_local_coordinate -- which compares LOCAL coordinates, never physical positions.
+    // Elements are tested at every level, not only at the leaves, because whether the point is a node
+    // depends on the level: it is a mid-edge node of the element at this element's own level and a vertex
+    // of that element's sons. Elements whose nodes are not built yet are skipped (their node_pt array is
+    // still null) -- their built ancestor is tested first and holds the same node.
+    static Node *node_in_subtree_at_local_coordinate(Tree *subtree, const Vector<double> &s);
+    // Given a coordinate in THIS TREE's ROOT-element local frame, return the node sitting there, or null --
+    // node_in_subtree_at_local_coordinate over this element's whole tree (so the holder may be at any
+    // level, not only in the leaf the point falls in, and on a son boundary may be on either side). Used
+    // for cross-shape (mixed quad+tri) node-sharing: a quad finds the node an adjacent refined tri already
+    // built. Call on the root. Public because the quad node-sharing path
+    // (BulkElementBase::mixed_quad_shared_node) calls it.
   public:
     Node *node_at_root_coordinate(const Vector<double> &s_root) const;
-    // As above but returns the LEAF element and the coordinate in its own frame (for cross-shape HANGING:
-    // the quad hangs on this tri leaf's interpolating_basis at s_leaf). null if not resolvable.
+    // Descend to the LEAF containing a root-frame coordinate, returning it and the coordinate in its own
+    // frame (for cross-shape HANGING: the quad hangs on this tri leaf's interpolating_basis at s_leaf).
+    // Same topological point-in-simplex descent (father_to_son_local, no geometry); null if not resolvable.
     RefineableElement *leaf_at_root_coordinate(const Vector<double> &s_root, Vector<double> &s_leaf) const;
 
   protected:
@@ -298,19 +316,6 @@ namespace oomph
     // Clear the shared-node registry (call once before each refinement round). See below.
     static void clear_shared_edge_node_registry() { Shared_edge_node_registry.clear(); }
 
-    // Snapshot every existing mesh node's position (call once before each refinement round, after
-    // clearing). Used by build() as the FINAL node-sharing fallback: a son node built this round must
-    // reuse a coincident node that already exists -- notably one created by a FINER neighbour in an
-    // earlier round, which node_created_by_neighbour (only >=-sized neighbours) cannot find. Without
-    // this the shared vertex is duplicated and a moving mesh tears apart at a refine/coarsen interface.
-    static void clear_existing_node_positions() { Existing_node_by_position.clear(); }
-    static void register_existing_node_position(oomph::Node *n);
-    // Look up a snapshot node coincident with position x (dim coords). Shared by the 2d triangle and 3d
-    // tetrahedron build() fallbacks (the snapshot is stored here and populated for meshes of either dim).
-    static oomph::Node *find_existing_node_at_position(const double *x, unsigned dim);
-    // Position-string key (rounded to ~12 sig figs), 1/2/3-d. Public so RefineableTElement<3> can share it.
-    static std::string position_key(const double *x, unsigned dim);
-
   protected:
     // --- Geometric node-sharing during triangle refinement (Phase 2, branch mixed_adapt) ---
     // Instead of oomph's quad compass neighbour finding (geometrically wrong for triangles), a
@@ -325,11 +330,6 @@ namespace oomph
     // father-local coordinate s_in_father; empty if it is not the midpoint of a father-node pair.
     std::set<Node *> father_edge_node_key(const Vector<double> &s_in_father, RefineableTElement<2> *father_el_pt) const;
 
-    // Position -> node snapshot of the mesh at the start of the current refinement round (see
-    // clear/register_existing_node_position). Keyed by a rounded-coordinate string so a coincident
-    // position matches to ~12 significant figures. Looked up in build() when both the tree
-    // (node_created_by_neighbour) and the per-round registry miss.
-    static std::map<std::string, oomph::Node *> Existing_node_by_position;
   };
 
   template <>
@@ -472,15 +472,27 @@ namespace oomph
     // Reflect/Rotate tables and the octahedron inner sons are handled naturally. (Same-root only for now;
     // cross-root + the descent land in a later step.)
     TetFaceNeighbour tet_face_neighbour(int my_face) const;
-    // Reuse a node an already-built FACE-neighbour has created, located via the OcTree (persists across
+    // Reuse a node an already-built NEIGHBOUR has created, located via the OcTree (which persists across
     // adaptation rounds), the 3d analogue of RefineableTElement<2>::node_created_by_neighbour. Closes the
-    // cross-round gap of the per-round Shared_edge_node_registry for face-shared nodes: during transient
-    // re-adaptation a son built this round must reuse a coincident node an equal-sized neighbour built in an
-    // earlier round (else the shared node is duplicated and a moving tet mesh tears apart). s_son is node j's
-    // local coordinate in THIS (son) element. Returns the shared node, or 0 if none (falls through to the
-    // position snapshot, which still covers the finer-neighbour and edge-only-shared cases). Same signature
-    // clash note as 2d: this hides the oomph base node_created_by_neighbour(s_fraction,is_periodic).
+    // cross-round gap of the per-round Shared_edge_node_registry: during transient re-adaptation a son built
+    // this round must reuse the node a neighbour built in an earlier round, else the shared node is
+    // duplicated and a moving tet mesh tears apart. s_son is node j's local coordinate in THIS (son)
+    // element. Same signature clash note as 2d: this hides the oomph base
+    // node_created_by_neighbour(s_fraction,is_periodic).
+    //
+    // Purely topological, and complete for a pure tet forest: it searches this element's WHOLE tree root
+    // (so the holder may sit at any level, need not be a leaf, and may be reached across an edge rather
+    // than a face) and then walks out through root FACE neighbours, hopping barycentric weights from
+    // corner NODE to corner NODE. The walk is transitive, which is what covers a node on a root EDGE: the
+    // roots in the fan around that edge are reached by chaining face hops, even though most of them share
+    // no face with this one. Returns 0 in a pyramid-rooted (mixed) forest -- see in_pyramid_forest().
     Node *node_created_by_neighbour(const Vector<double> &s_son) const;
+    // Search a whole tet subtree for a node at the point `s` (in the local frame of the subtree's own root
+    // element). Exactly RefineableTElement<2>::node_in_subtree_at_local_coordinate one dimension up: it
+    // recurses into every son containing the point (father_to_son_local + a barycentric containment test,
+    // so a point on a shared son face follows all of them) and asks every BUILT element on the way for a
+    // node at the corresponding LOCAL coordinate. No physical position is ever compared.
+    static Node *node_in_subtree_at_local_coordinate(Tree *subtree, const Vector<double> &s);
 
     // --- Per-element topological hanging (the tet tree route; 3d analogue of RefineableTElement<2>::
     // tri_hang_helper) --- Hang this element's interpolating nodes for `value_id` that lie on face

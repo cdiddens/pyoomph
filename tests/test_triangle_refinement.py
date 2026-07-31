@@ -482,3 +482,70 @@ def test_moving_mesh_readapt_no_torn_nodes():
         for _ in range(8):
             p.solve(timestep=0.1, spatial_adapt=2)
             assert _count_coincident_nodes(p.get_mesh("domain")) == 0, "duplicate (torn) shared nodes after re-adaptation"
+
+
+# NODE IDENTIFICATION MUST BE PURELY TOPOLOGICAL. When a son node is built, the element it must be
+# shared with is found through the tree (son_type ascent + the affine son/father maps + shared vertex
+# NODE POINTERS across roots), never by comparing physical node positions. The distinction is not
+# academic: a hanging node's stored position is only a CACHE of its masters, refreshed by an assembly
+# or output pass, so anything that writes the dof vector from outside the Newton solver leaves it
+# stale. That is what used to tear the mesh when adapting on an eigenfunction -- the error estimator
+# had pushed the eigenfunction's geometry into every hanging node, and the position-keyed sharing
+# fallback then failed to recognise them, so the neighbouring sons built duplicate nodes on top.
+#
+# The test states the invariant directly rather than reproducing that machinery: displace every
+# hanging node's stored position before each adapt (which is exactly what a stale cache looks like,
+# and is physically harmless because those values are recomputed at the next assembly) and require
+# the resulting mesh TOPOLOGY to be bit-identical to the undisplaced run. The refinement pattern is
+# keyed on the LAGRANGIAN midpoint so that the displacement cannot change what gets refined -- any
+# difference in the counts is then necessarily a node-sharing decision that looked at a position.
+class _ReadaptPositionIndependence(Problem):
+    def __init__(self, N=4):
+        super().__init__()
+        self._N = N
+        self.threshold = 0.5  # moved between adapts to force refinement AND unrefinement
+
+    def define_problem(self):
+        self += RectangularQuadMesh(split_in_tris="left", N=self._N)
+        eqs = LaplaceSmoothedMesh() + ElementSpace("C1")
+        eqs += DirichletBC(mesh_x=True, mesh_y=0) @ "bottom"
+        eqs += NeumannBC(mesh_y=-var("time")) @ "top"
+        # prevent_unrefinement=False so that moving the threshold coarsens as well as refines: the
+        # cross-round sharing the invariant is about is exercised hardest at a refine/coarsen interface.
+        eqs += RefineAccordingToElement(
+            level_func=lambda e: 2 if e.get_Lagrangian_midpoint()[1] > self.threshold else 0,
+            prevent_unrefinement=False)
+        self += eqs @ "domain"
+
+
+def _readapt_topology(displace_hanging):
+    """Returns the (nnode, nelement) history over a refine/unrefine sequence, and how many hanging
+    nodes were displaced along the way (so the test can assert the perturbation was not vacuous)."""
+    history = []
+    ndisplaced = 0
+    with _ReadaptPositionIndependence(N=4) as p:
+        p.max_refinement_level = 2
+        p.initial_adaption_steps = 0
+        p.solve()
+        m = p.get_mesh("domain")
+        for threshold in (0.3, 0.7, 0.2, 0.6):
+            p.threshold = threshold
+            if displace_hanging:
+                for n in m.nodes():
+                    if n.is_hanging():
+                        ndisplaced += 1
+                        n.set_x(0, n.x(0) + 0.037)  # >> any element size at these levels
+                        n.set_x(1, n.x(1) - 0.041)
+            p.adapt()
+            p.solve()
+            history.append((m.nnode(), m.nelement()))
+    return history, ndisplaced
+
+
+def test_node_sharing_ignores_node_positions():
+    clean, _ = _readapt_topology(displace_hanging=False)
+    stale, ndisplaced = _readapt_topology(displace_hanging=True)
+    assert ndisplaced > 0, "no hanging nodes were displaced -- the test would be vacuous"
+    assert clean == stale, (
+        "adapting with stale hanging-node positions changed the mesh topology, so node "
+        f"identification still depends on positions: clean={clean} stale={stale}")

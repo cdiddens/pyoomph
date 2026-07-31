@@ -429,3 +429,59 @@ def test_moving_tet_refinement_identity_residual(where):
         # No solve: the mesh has not moved, so the identity is the exact state; the residual is machine zero
         # only if the position (and field) hanging installed during refinement is exact.
         assert _max_abs_residual(problem) < 1e-10
+
+
+# NODE IDENTIFICATION MUST BE PURELY TOPOLOGICAL -- the 3d statement of the invariant tested for
+# triangles in test_triangle_refinement.py::test_node_sharing_ignores_node_positions. A hanging node's
+# stored position is only a CACHE of its masters, so anything writing the dof vector from outside the
+# Newton solver leaves it stale; a sharing decision that consults positions then duplicates nodes and
+# tears the mesh. Displacing every hanging node before each adapt is exactly what that stale cache
+# looks like (and is harmless, since the values are recomputed at the next assembly), so the resulting
+# mesh topology must be unchanged. The refinement pattern is keyed on the element's LAGRANGIAN
+# midpoint, which the displacement does not touch, so what gets refined cannot change.
+class _TetPositionIndependence(Problem):
+    def __init__(self, N=3):
+        super().__init__()
+        self._N = N
+        self.threshold = 0.45
+
+    def define_problem(self):
+        self += TetCubeMesh(N=self._N)
+        eqs = PoissonEquation(source=1, space="C1")
+        eqs += DirichletBC(u=0) @ ["bottom", "top", "left", "right", "front", "back"]
+        eqs += RefineAccordingToElement(
+            level_func=lambda e: 2 if e.get_Lagrangian_midpoint()[2] > self.threshold else 0,
+            prevent_unrefinement=False)
+        self += eqs @ "domain"
+
+
+def _tet_readapt_topology(displace_hanging):
+    history = []
+    ndisplaced = 0
+    with _TetPositionIndependence(N=3) as p:
+        p.max_refinement_level = 2
+        p.initial_adaption_steps = 0
+        p.solve(spatial_adapt=2)
+        m = p.get_mesh("domain")
+        for threshold in (0.3, 0.7, 0.25):
+            p.threshold = threshold
+            if displace_hanging:
+                for n in m.nodes():
+                    if n.is_hanging():
+                        ndisplaced += 1
+                        n.set_x(0, n.x(0) + 0.031)  # >> any element size at these levels
+                        n.set_x(1, n.x(1) - 0.027)
+                        n.set_x(2, n.x(2) + 0.019)
+            p.adapt()
+            p.solve()
+            history.append((m.nnode(), m.nelement()))
+    return history, ndisplaced
+
+
+def test_tet_node_sharing_ignores_node_positions():
+    clean, _ = _tet_readapt_topology(displace_hanging=False)
+    stale, ndisplaced = _tet_readapt_topology(displace_hanging=True)
+    assert ndisplaced > 0, "no hanging nodes were displaced -- the test would be vacuous"
+    assert clean == stale, (
+        "adapting with stale hanging-node positions changed the mesh topology, so node "
+        f"identification still depends on positions: clean={clean} stale={stale}")

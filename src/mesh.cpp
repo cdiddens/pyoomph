@@ -1647,6 +1647,16 @@ namespace pyoomph
     return res;
   }
 
+  // See the declaration for why the positions matter as much as the values here.
+  void Mesh::interpolate_hanging_values()
+  {
+    for (unsigned int i = 0; i < this->nelement(); i++)
+    {
+      if (BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(i)))
+        be->interpolate_hang_values();
+    }
+  }
+
   // Export the entire mesh into flat, pre-allocated buffers suitable for wrapping as numpy arrays
   // (used by the Python output/plotting layer). All buffers must already be sized according to a
   // prior call to get_num_numpy_elemental_indices()/count_nnode(discontinuous) etc.

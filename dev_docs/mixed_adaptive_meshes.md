@@ -1229,6 +1229,89 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
        * Not yet covered by an automated MPI test in `tests/` (the pytest suite runs serially). Verified via
          `Scratchpad/mpi_fam.py` (parametrised by `MESHKIND`/`MODE`), `mpi_nonlinear.py`, `mpi_collapse.py`.
 
+   - **§4.18 — `refine_eigenfunction` tore the mesh: stale hanging POSITIONS, serial [FIXED].** The serial
+     analogue of §4.17's Fix 2, and the same root cause one level worse — it corrupts the *geometry*, not
+     just displayed values. `Problem._adapt_with_interfacial_errors`, when adapting on an eigenfunction
+     (`refine_eigenfunction` / bifurcation tracking), writes the eigenfunction into the dof vector, runs the
+     Z2 estimator on it, and restores the base dofs with `set_all_values_at_current_time`. Evaluating an
+     element calls `interpolate_hang_values()`, which pushes the *perturbed* master interpolation into each
+     hanging node's raw storage; the restore puts the MASTERS back but a hanging node has no dof, so its raw
+     position stays where the eigenfunction put it. Measured on the KitchenSink azimuthal-stability run: 364
+     hanging nodes, max position error 6.8e-3 (in units of the domain scale) surviving the restore.
+     Refinement then runs on that mesh. `RefineableTElement<2>::build`'s cross-round node sharing looks a
+     candidate son node up in a start-of-round *position* snapshot, so the displaced hanging nodes were not
+     recognised and the coarse element's son built a SECOND node on top of each: 14 duplicate node pairs, all
+     inside the small region where the eigenfunction peaks. The fine-side copy then hung on the coarse-side
+     copy with a single weight-1 master (the classic torn-node signature), the mesh had 14 nodes more than
+     the stored refinement pattern reproduces, and `load_state` of the resulting dump died with
+     `Expected 5988 in state file, but read 6002`. Fix: re-establish the invariant right after the restore,
+     via a new `Mesh::interpolate_hanging_values()` (`Mesh._interpolate_hanging_values()`) that runs every
+     element's `interpolate_hang_values()` — unlike `collapse_hanging_node_values` (§4.17) this covers the
+     nodal POSITIONS as well, which is what the node sharing depends on.
+     * **The deeper defect: node identification was falling back on POSITIONS at all.** The only mechanism
+       that caught this configuration was the position snapshot; `node_created_by_neighbour` returned 0 for
+       every one of the 14, even though the neighbour's node existed and was reachable topologically. That
+       is now fixed — see §4.19 — and with it the tear disappears even with the stale positions left in
+       place (verified by disabling the repair above: 0 duplicates, node count 5988, i.e. exactly what the
+       stored refinement pattern reproduces). Both fixes are kept: the stale hanging state was wrong on its
+       own account (it is also what new nodes inherit their values from), and the topological node finding
+       is the standing requirement.
+
+   - **§4.19 — Node identification is now purely topological (2d tris + 3d tets) [DONE].** The rule for this
+     branch is that a node is *never* identified by comparing physical positions — only by tree topology:
+     the son_type ascent, the exact affine son/father maps, shared vertex/face-corner NODE POINTERS across
+     roots, and `get_node_at_local_coordinate`, which compares LOCAL coordinates. Positions are an output of
+     the mesh, not an index into it, and (§4.18) they are not even reliable for hanging nodes.
+     * **What was wrong.** `RefineableTElement<2>::node_created_by_neighbour` asked `tri_edge_neighbour` for
+       the ONE >=-sized LEAF neighbour across each son edge. That returns nothing in two common situations:
+       the neighbour is FINER (the descent straddles), or the neighbour is at the right level but is no
+       longer a LEAF — which is what happens whenever it was split earlier in the SAME round, since
+       `split_elements_if_required` creates every son tree before any `build()` runs. Both fell through to
+       the start-of-round position snapshot. The 3d tet version had the same shape plus a third gap: it only
+       looked across FACES, so a node shared only along an edge was never found.
+     * **What replaces it.** `node_in_subtree_at_local_coordinate` (2d and 3d): recurse into every son that
+       CONTAINS the point (`father_to_son_local` + a barycentric containment test, so a point on a son
+       boundary follows all of them) and ask every element on the way — not just the leaf, since whether the
+       point is a node depends on the level — for a node at that local coordinate, skipping elements whose
+       nodes are not built yet (their built ancestor is tested first and holds the same node).
+       `node_created_by_neighbour` then searches this element's WHOLE tree root and hops outwards: in 2d to
+       the root(s) across the edge the point lies on, in 3d breadth-first through root FACE neighbours,
+       carrying the point by its barycentric weights on shared corner NODE POINTERS. The 3d walk is
+       transitive, which is what covers a node on a root EDGE: the fan of roots around it is reached by
+       chaining face hops even though most share no face with the starting root.
+       `quad_node_at_root_coordinate` / `node_at_root_coordinate` (the mixed quad<->tri sharing) got the same
+       every-level, every-containing-son treatment.
+     * **The position snapshot is gone from the 2d tri build and from the pure-tet build.** En route,
+       gating the tet fallback on `in_pyramid_forest()` alone turned out NOT to be enough and cost a red
+       `test_mixed_3d.py` run: in a three-way (tet+wedge+pyramid) forest a tet can be rooted in a WEDGE and
+       have neighbours of any shape across a face, which the tet tree walk does not reach. The right
+       predicate is the one the shared-node registry already uses,
+       `in_pyramid_forest() || RefineablePyramidElement::Mixed_forest_active`.
+     * **The MIXED 3d families keep their key and got a cross-round snapshot OF THAT KEY [DONE].** Wedge,
+       pyramid, brick-as-son and tet-in-a-mixed-forest do not share by a tree walk but by the
+       `(father node, rounded father-shape weight)` key of `RefineablePyramidElement::Shared_node_registry`,
+       which is already topological -- only its LIFETIME was the problem, since it is cleared every round,
+       and the cross-round half was being done by position. So a node now remembers the key it was born
+       with (`pyoomph::Node::refinement_generating_key`) and `Mesh::split_elements_if_required` rebuilds a
+       `Shared_node_snapshot` from the live mesh each round. Both sides of a facet compute the same key,
+       because both compute it from their own element at the level where the node is born and those two
+       elements share the facet's nodes -- including the cross-level case, since a node on a facet between
+       a level-L and a level-(L+1) element was born when the finer side's FATHER, also at level L, split.
+       Rebuilding from the live mesh rather than keeping a registry alive across rounds is what makes the
+       pointers safe: every node in the list is alive, and so are its generating nodes, because
+       unrefinement removes the finer nodes before the coarser ones they were built from.
+       `RefineableTElement<2>::Existing_node_by_position` and its `position_key` helpers are deleted, so
+       **no build identifies a node by its position any more, in any dimension or shape.**
+     * **Validated.** `tests/test_triangle_refinement.py::test_node_sharing_ignores_node_positions`,
+       `tests/test_tet_refinement.py::test_tet_node_sharing_ignores_node_positions` and
+       `tests/test_mixed_3d.py::test_mixed_node_sharing_ignores_node_positions` (all five mixed layouts)
+       state the invariant directly: displace every hanging node's stored position before each adapt (exactly what a stale cache
+       looks like) over a refine/unrefine sequence whose pattern is keyed on the LAGRANGIAN midpoint, and
+       require the mesh topology to come out bit-identical. Plus the pre-existing suites unchanged.
+     * **Gotcha worth remembering:** the 3d root walk held a `const Vector<double>&` into the work queue
+       while pushing to it — the reallocation left a dangling reference and segfaulted on the first
+       multi-root hop. Copy the point out of the queue.
+
 5. **Variable / anisotropic schemes** (§5): quad 1→2 (both directions), simplex
    bisection; directional error estimator; generalised balance rule.
 6. **MPI hardening** across all shapes; distributed adaptivity tests. [Distributed adaptive SOLVES done — see

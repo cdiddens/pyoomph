@@ -368,6 +368,50 @@ class pardisoSolver(object):
         x = self.run_pardiso(phase=33, rhs=rhs)
         return x
 
+    # Backward error ||A x - rhs||_inf / ||rhs||_inf of a computed solution, or None when it cannot be
+    # formed cheaply. Only mtype 11/13 store the whole matrix; the symmetric mtypes keep the upper
+    # triangle alone (see __init__), for which this would be wrong rather than merely unavailable.
+    def _backward_error(self, x:Any, rhs:Any)->float | None:
+        if self.mtype not in (11, 13):
+            return None
+        scale = float(np.amax(np.absolute(rhs))) if rhs.size else 0.0
+        if not (scale > 0.0):
+            return None
+        A = sp.csr_matrix((self.a, self.ja, self.ia), shape=(self.n, self.n))
+        return float(np.amax(np.absolute(A * x - rhs))) / scale
+
+    # Solve, giving the solver enough iterative refinement when its own factorisation says it needs it.
+    #
+    # MKL Pardiso factorises with STATIC pivoting: a pivot that comes out too small is perturbed instead
+    # of exchanged, and repairing the damage is left to iterative refinement. Left to itself
+    # (iparm[7] == 0) it refines only when it perturbed a pivot, and then for AT MOST TWO STEPS. That is
+    # not always enough: on a Taylor-Hood Stokes saddle-point system on a moving mesh (the 3d hex+pyramid
+    # ALE box of tests/test_adaptive_3d_campaign.py) two steps stop at a backward error of ~7e-8, so the
+    # Newton step built on that solution stalls at a residual of 1e-8 instead of reaching machine zero.
+    # Eight steps get there. The matrix is not to blame -- its condition number is 1.8e4, and SuperLU and
+    # UMFPACK both solve it to 1e-15.
+    #
+    # The trigger is Pardiso's own report of how many pivots it perturbed (IPARM(14), an output of the
+    # factorisation that survives until the next one). It is exactly the condition MKL itself uses to
+    # decide whether to refine at all, so this only overrides HOW FAR it refines, and it costs nothing on
+    # a factorisation that perturbed nothing -- which is every other layout of that same family. Raising
+    # iparm[7] unconditionally would not be free: given an explicit cap MKL abandons the
+    # "only if perturbed" rule and refines until its own criterion is met, which on the healthy layouts
+    # means 4 extra triangular solves per solve where none were needed at all.
+    def solve_checked(self, rhs:Any, max_steps:int=20)->Any:
+        if self.iparm[13] <= 0:  # IPARM(14): no pivot was perturbed, so the factors are trustworthy
+            return self.solve(rhs)
+        old = self.iparm[7]
+        self.iparm[7] = max_steps
+        try:
+            x = self.solve(rhs)
+        finally:
+            self.iparm[7] = old
+        if self.msglvl:
+            print("PARDISO: %d perturbed pivot(s), refined the solve in %d step(s), backward error %s"
+                  % (self.iparm[13], self.iparm[6], self._backward_error(x, rhs)))
+        return x
+
     # MKL's documented meanings for the `error` output. Every value is a hard failure -- Pardiso has no
     # "converged badly but usable" answer to report, so anything nonzero means the contents of x are
     # not a solution.
@@ -669,11 +713,14 @@ class PardisoSolver(GenericLinearSystemSolver):
                     print("REUSE PARDISO AND REFACTOR DONE, ERROR",err,"IN ",self._current_pardiso.iparm[6],"ITERATIONS")
                 b[:]=sol[:]
             else:
+                # solve_checked, not solve: this branch has no accuracy check of its own (unlike the
+                # try_to_reuse_solver branch above, which verifies its reused factors and refactorises),
+                # so an under-refined Pardiso solve would be returned silently. See solve_checked.
                 if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine():
                     pd = self._current_pardiso
-                    sol=self.problem._custom_assembler.custom_solve_routine(lambda rhs : pd.solve(rhs), b) #type:ignore
+                    sol=self.problem._custom_assembler.custom_solve_routine(lambda rhs : pd.solve_checked(rhs), b) #type:ignore
                 else:
-                    sol = self._current_pardiso.solve(self.get_b(n,b))
+                    sol = self._current_pardiso.solve_checked(self.get_b(n,b))
             if self.verbose:
                 print("PARDISO SOLVE IPARM",self._current_pardiso.iparm)
             b[:] = sol[:]
@@ -748,10 +795,11 @@ class PardisoSolver(GenericLinearSystemSolver):
                 pd = self._current_pardiso
                 if self.try_to_reuse_solver:
                     raise NotImplementedError("try_to_reuse_solver not implemented yet when running with MPI")
+                # solve_checked for the same reason as the serial branch: nothing else verifies this one.
                 if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine():
-                    sol=self.problem._custom_assembler.custom_solve_routine(lambda rhs : pd.solve(rhs), b) #type:ignore
+                    sol=self.problem._custom_assembler.custom_solve_routine(lambda rhs : pd.solve_checked(rhs), b) #type:ignore
                 else:
-                    sol = self._current_pardiso.solve(self.get_b(n,b_global))
+                    sol = self._current_pardiso.solve_checked(self.get_b(n,b_global))
 
             if rank == 0:
                 assert sol is not None

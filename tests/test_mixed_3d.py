@@ -395,3 +395,69 @@ def test_mixed_multilevel_quadratic(label, mesh, lf):
         assert max(lvls) - min(lvls) <= 1, f"{label}: unbalanced jump >2:1 (levels {lvls})"  # balancing worked
         assert _dup(m) == 0, f"{label}: torn nodes at the multi-level interface (cross-round sharing failed)"
         assert _err(m, "quadratic") < 1e-10, f"{label}: quadratic not reproduced at multi-level (err {_err(m, 'quadratic'):.2e})"
+
+
+# NODE IDENTIFICATION MUST BE PURELY TOPOLOGICAL -- the mixed-3d statement of the invariant tested for
+# triangles and tetrahedra in test_triangle_refinement.py / test_tet_refinement.py. These families share
+# nodes by the (father node, rounded father-shape weight) key rather than by a tree walk, and the
+# cross-round half of that -- reusing a node an earlier round built -- used to be done by matching node
+# POSITIONS. That is only as good as the positions are, and a hanging node's position is a cache of its
+# masters which goes stale whenever something writes the dof vector from outside the Newton solver (see
+# dev_docs/mixed_adaptive_meshes.md 4.18/4.19). It is now the same key, snapshotted from the live nodes.
+#
+# Displacing every hanging node before each adapt is exactly what that stale cache looks like, and is
+# harmless because the values are recomputed at the next assembly. The refinement pattern is keyed on the
+# element's LAGRANGIAN midpoint, which the displacement does not touch, so what gets refined cannot change
+# and any difference in the resulting topology is a sharing decision that consulted a position.
+# axis/sign/thresholds follow the same band each layout is refined in by test_mixed_multilevel_quadratic
+# (z for the tet/hex families, y for the wedge+pyramid ones), so the band really straddles the mixed
+# interface and hanging nodes actually appear -- the test asserts that it is not vacuous.
+@pytest.mark.parametrize("label,mesh,axis,sign,thresholds", [
+    ("tet_wedge", lambda: TetWedgeMesh(), 2, +1, (0.6, 1.4, 0.4)),
+    ("wedge_pyr", lambda: WedgePyrMesh(), 1, -1, (-0.3, 0.3, -0.1)),
+    ("three_way", lambda: WedgePyrMesh(three_way=True), 1, -1, (-0.3, 0.3, -0.1)),
+    ("hex_pyr", lambda: HexMixMesh(other="pyr"), 2, +1, (0.6, 1.4, 0.4)),
+    ("hex_wedge", lambda: HexMixMesh(other="wedge"), 2, +1, (0.6, 1.4, 0.4)),
+])
+def test_mixed_node_sharing_ignores_node_positions(label, mesh, axis, sign, thresholds):
+    x, y, z = var("coordinate")[0], var("coordinate")[1], var("coordinate")[2]
+
+    class _P(Problem):
+        def __init__(self):
+            super().__init__()
+            self.threshold = thresholds[0]
+
+        def define_problem(self):
+            eqs = PoissonEquation(source=-12, space="C2") + DirichletBC(u=x * x + 2 * y * y + 3 * z * z) @ "outer"
+            eqs += RefineAccordingToElement(
+                level_func=lambda e: 2 if sign * (e.get_Lagrangian_midpoint()[axis] - self.threshold) > 0 else 0,
+                prevent_unrefinement=False)
+            self += mesh()
+            self += eqs @ "domain"
+
+    def run(displace):
+        history, ndisplaced = [], 0
+        with _P() as p:
+            p.max_refinement_level = 2
+            p.solve(spatial_adapt=3)
+            m = p.get_mesh("domain")
+            for threshold in thresholds:
+                p.threshold = threshold
+                if displace:
+                    for n in m.nodes():
+                        if n.is_hanging():
+                            ndisplaced += 1
+                            n.set_x(0, n.x(0) + 0.083)  # >> any element size at these levels
+                            n.set_x(1, n.x(1) - 0.071)
+                            n.set_x(2, n.x(2) + 0.067)
+                p.adapt()
+                p.solve()
+                history.append((m.nnode(), m.nelement()))
+        return history, ndisplaced
+
+    clean, _ = run(False)
+    stale, ndisplaced = run(True)
+    assert ndisplaced > 0, f"{label}: no hanging nodes were displaced -- the test would be vacuous"
+    assert clean == stale, (
+        f"{label}: adapting with stale hanging-node positions changed the mesh topology, so node "
+        f"identification still depends on positions: clean={clean} stale={stale}")
