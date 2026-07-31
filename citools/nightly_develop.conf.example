@@ -55,13 +55,28 @@ MAIL_FROM="pyoomph-nightly@$(hostname -f 2>/dev/null || hostname)"
 
 # If SMTP_HOST is set the report is sent with Python's smtplib; otherwise the script falls
 # back to the local `mail`/`sendmail` command. Setting it is the more portable option --
-# most workstations have no working MTA.
-SMTP_HOST=""
-SMTP_PORT=587
+# most workstations have no working MTA at all.
+#
+# The settings below need NO credentials, which matters on a shared machine: anything you
+# put in this file is readable by anyone with root, whatever the file mode says. They talk
+# straight to the MX that handles utwente.nl, and an MX accepts mail FOR its own domain
+# without authentication -- that is how the rest of the internet delivers to it. It offers
+# no AUTH at all, so there is no password to leak. The catch is that it will only accept
+# recipients at utwente.nl, which is all this script needs.
+#
+# Re-derive the host if it ever changes:  dig +short MX utwente.nl
+SMTP_HOST="utwente-nl.mail.protection.outlook.com"
+SMTP_PORT=25
 SMTP_USER=""
 SMTP_PASSWORD=""
-# starttls (usual for port 587), ssl (port 465), or none (port 25 relay).
+# starttls (usual for port 587 and offered by the MX above), ssl (port 465), or none.
 SMTP_SECURITY="starttls"
+#
+# If mail is accepted but never arrives, it is the receiving spam filter, not this script:
+# the machine's IP is not in utwente.nl's SPF record, so the report can land in quarantine.
+# Check the junk folder first, and if it is a persistent problem ask ICTS to let the host
+# through, or use a submission server with credentials on a machine you trust alone:
+#   SMTP_HOST="smtp.office365.com"; SMTP_PORT=587; SMTP_USER/SMTP_PASSWORD set.
 
 # Number of lines of each failing log that is quoted in the mail body. The full logs stay
 # in LOG_DIR on the test machine.
