@@ -15,9 +15,8 @@ That applies to the full `tests/` suite, the MPI suites, and the tutorial harnes
 passes for an A/B comparison take most of an afternoon. Batch changes up and run once, rather than
 after each fix. Targeted single scripts and small benchmarks are fine without asking.
 
-When you do commit on request, commit all changes found, including those from other agents or the user.
-
-The main branch should be always quite stable. If you start a new implementation or any structural/functional edits and you are still on main, ask the user to perform it on a new branch instead.
+The main branch should be always quite stable. Development happens on the branch "develop", which is merged into main regularly.
+Urgent direct fixes can be implemented directly in "main" and have to be included into "develop".
 
 ## Building
 
@@ -42,6 +41,8 @@ Run scratch scripts, benchmarks and diagnostics from the session scratchpad, **n
 user's own folders under `pyoomph_runs/` - every run creates an output directory next to the script.
 
 You can work in the Scratchpad subfolder!
+
+Fast tests of existing tutorials can be achieved by adding --quick-test to the command line. It will stop after the first Newton solve and provides a single output.
 
 Give each run its own fresh working directory. Many tutorials write dump/restart files and take a
 shortcut when they find them, so a second run in the same directory measures something entirely
@@ -78,7 +79,7 @@ identical numbers and looks like a perfect result.
   comment *and* described in `src/thirdparty/INFO_oomph-lib`. Both, every time.
 - **Comments explain why.** The codebase documents reasoning and rejected alternatives, not
   restatements of the code. Match that: when a piece of code exists because of a specific failure,
-  say what the failure was.
+  say what the failure was. However, keep it brief.
 - **Correct the record.** Several long-standing comments in this codebase turned out to describe
   behaviour that had since changed (a default flipped, a bug fixed, a code path `#define`d out). If
   you find one, fix it in the same commit rather than working around it.
