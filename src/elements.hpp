@@ -667,7 +667,7 @@ namespace pyoomph
   protected:
     std::vector<int> local_dof_contribution_indices;
     bool local_dof_contribution_indices_valid = false;
-    virtual void fill_local_dof_contribution_indices(std::vector<int> &dest); // Overridden by InterfaceElementBase for its extra interface dofs
+    virtual void fill_local_dof_contribution_indices(std::vector<int> &dest); // Overridden by InterfaceElementBase for the dofs it borrows from other elements
 
   public:
     // Compares the analytically assembled Jacobian (from fill_in_generic_residual_contribution_jit)
@@ -2620,6 +2620,9 @@ namespace pyoomph
     // maps, complementing BulkElementBase::fill_element_info for the inherited bulk part.
     virtual void fill_element_info_interface_part(bool without_equations=false);
     std::vector<std::string> get_dof_names(bool not_a_root_call = false) override;
+    // Additionally attributes the dofs this element BORROWS from other elements (its own bulk, the
+    // opposite interface element, the opposite's bulk), which the base walk cannot see.
+    void fill_local_dof_contribution_indices(std::vector<int> &dest) override;
     void get_dnormal_dcoords_at_s(const oomph::Vector<double> &s, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dnormal_dcoord, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2normal_dcoord2) const override;
 
     // Maps a local coordinate s on this interface element to the corresponding local coordinate on

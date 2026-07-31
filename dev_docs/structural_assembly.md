@@ -1351,6 +1351,530 @@ returns early regardless of allocation policy. The conclusion of §5b stands, no
 
 ---
 
+## 7e. Freezing the bifurcation trackers
+
+**Status: infrastructure and the fold spec implemented, OFF BY DEFAULT
+(`problem._use_frozen_sparsity_for_bifurcation_tracking`). One unexplained failure, below.**
+
+### What the first attempt showed
+
+`AugmentedBlockSpec` + the `AugmentedSparsityProvider` no-op mixin are in `src/bifurcation.hpp`,
+`MyFoldHandler::get_sparsity_pattern` describes the fold layout, and
+`Problem::augmented_sparsity_mask_for_element` tiles the raw masks into the augmented one. It works:
+on a PDE fold tracking (Kuramoto-Sivashinsky, ndof 15 229 augmented) the frozen pattern is built
+(`_get_frozen_sparsity_nnz` 0 -> 735 462) and the augmented assembly drops from **114.6 ms to 63.1 ms
+(-45 %)**, finding the same fold point to 12 digits.
+
+**The cost, and where it went.** The first version stored **549 693 -> 735 462 nonzeros, +34 %** against
+the value-filtered pattern. Breaking that down by block showed the augmented *structure* costs
+essentially nothing -- `base x base`, `eig x eig` and `param x eig` were bit-identical -- and that
+**96 % of the excess sat in one block**, `eig x base`, the Hessian-vector product:
+
+| block | value-filtered | Jacobian-patterned | with `contributes_to_hessian` |
+| --- | --- | --- | --- |
+| base x base | 237 540 | 237 540 | 237 540 |
+| **eig x base** | **59 385** | **237 540** | **59 385** |
+| eig x eig | 237 540 | 237 540 | 237 540 |
+| base/eig x param | 3 807 each | 7 614 each | 7 614 each |
+| **total** | **549 693** | 735 462 (+34 %) | **557 307 (+1.4 %)** |
+
+Declaring Hessian blocks `Jacobian`-patterned is *true but loose*: `d2R_i/du_j du_k != 0` implies
+`dR_i/du_j` is not identically zero, so it is a subset -- but every LINEAR term of the residual is in
+J and in no Hessian at all. On Kuramoto-Sivashinsky the biharmonic and Laplacian carry most of J and
+none of the Hessian, so the contracted block is **four times sparser**.
+
+The fix is the move Phase 3 already made for the mass matrix: codegen now emits
+`contributes_to_hessian[res][fi][fj]` alongside the other two, marked where the second derivative is
+generated (both `(res,f)` and `(res,f2)`, since `d2R/df df2` is symmetric and a contraction sums over
+one of the two indices). `AugmentedBlockSpec` gains `Hessian`/`HessianT`, and the fold's `eig x base`
+block uses it. That leaves the augmented frozen pattern within **1.4 %** of the numerically exact one,
+all of it the two border columns, which are dense per element and not worth chasing.
+
+**Measured, with the tighter table:** augmented assembly **-45 %** (113.3 -> 62.5 ms), a re-solve
+including the factorisation **-31 %** (171.6 -> 118.1 ms), and a full fold-tracking solve **-24 %**
+(0.70 -> 0.53 s), with the same fold point to 12 digits.
+
+### Hopf
+
+`MyHopfHandler::get_sparsity_pattern` describes the five-group layout
+`[ base | Phi | Psi | parameter | Omega ]`:
+
+|  | base | Phi | Psi | param | Omega |
+| --- | --- | --- | --- | --- | --- |
+| **base rows** | J | - | - | dense | - |
+| **Phi rows** | H | J | M | dense | dense |
+| **Psi rows** | H | M | J | dense | dense |
+| **param row** | - | dense | - | - | - |
+| **Omega row** | - | - | dense | - | - |
+
+Both eigenvector-row base blocks are Hessians (`dJdU_Eig` and `dMdU_Eig`); `contributes_to_hessian`
+covers the mass-matrix one too, because it is marked whenever *either* the Jacobian or the mass part
+of the second derivative is non-zero. Neither scalar row has a diagonal, deliberately -- `C.Phi - 1 = 0`
+involves neither the parameter nor Omega, and declaring those `Dense` would manufacture the stored
+zero diagonal of §7c.
+
+Verified on the Lorenz Hopf: the frozen pattern engages (`_get_frozen_sparsity_nnz` 0 -> 59), every
+structural block is **identical** to the value-filtered one, and the Hopf point is unchanged
+(`rho = 24.7368421053`). The only differences are the three `Dense` border columns, 1 -> 3 each,
+because only one of the three Lorenz equations depends on rho.
+
+### Before writing the azimuthal or pitchfork spec: the vocabulary is not yet enough
+
+`AugmentedBlockSpec::Kind` names *which matrix* a block's pattern comes from, but not *which residual
+index*. The builder reads a single `ft->current_res_jac` and indexes `contributes_to_jacobian[resind]`
+with it, which is correct for fold and Hopf: every block of those comes from one residual.
+
+It is not correct for the other two. `AzimuthalSymmetryBreakingResidualContributionList` holds
+**three** indices at once -- `{base (axisymmetric), real azimuthal, imag azimuthal}` -- and
+`PitchForkResidualContributionList` holds two (`{base, mass-matrix residual}`). A spec written in
+today's vocabulary would describe every block with whichever residual happened to be active, silently.
+
+Neither handler is affected today: neither inherits `AugmentedSparsityProvider`, so no provider is
+found, the builder returns NULL and both fall back exactly as before. Their `ndof` (`3*raw+2`,
+`2*raw+2`) can never equal `raw` either, so the augmented dispatch always fires and always declines --
+there is no path by which they could pick up a *wrong* mask rather than none.
+
+**Done ahead of the specs**, rather than retrofitted around one. Each block entry now carries a
+residual index (`-1` = "the one currently being assembled", which is what fold and Hopf use
+throughout), `field_coupling_mask_for_element(matrix, residual, ...)` is the shared core that both the
+plain and the augmented path call, and the builder collects the distinct **(matrix, residual)** pairs
+its spec refers to *before* filling any of them -- so the buffer indices stay valid while several are
+held at once, which a per-matrix scheme could not guarantee once a block mixes residuals.
+
+Writing the azimuthal or pitchfork spec is now a matter of naming the residual per block; nothing in
+the machinery has to change.
+
+### Without an analytic Hessian, refuse rather than approximate
+
+The first version fell back to the Jacobian pattern for Hessian blocks when no analytic Hessian had
+been generated. That is wrong-headed: the Jacobian bounds an *analytic* Hessian, but nothing bounds
+what a *finite-differenced* one writes, and the handler finite-differences precisely when codegen has
+emitted no Hessian. The builder now returns NULL in that case, so the whole augmented pattern is
+declined and assembly falls back to oomph-lib's. It costs the speedup for problems that have not
+called `setup_for_stability_analysis(analytic_hessian=True)`, and nothing else.
+
+### Pitchfork and azimuthal
+
+Both are now described, and both needed the vocabulary extended beyond what fold and Hopf used.
+
+**Pitchfork**, `[ base | parameter | Y | Sigma ]`. Its base block is the base Jacobian *plus*, when
+`improved_pitchfork_tracking_on_unstructured_meshes` is on, a Hessian of the symmetry residual --
+so a block needs to be **several patterns OR'd together**, not one. `AugmentedBlockSpec` therefore
+holds a list of `Term{kind, residual}` per block rather than a single kind. Note also that the
+residual map only exists in that improved mode; without it there is a single residual, the active
+one, which is what `-1` already means.
+
+**Azimuthal**, `[ base | real eig | imag eig | parameter | Omega ]` (or `[ base | eig | parameter ]`
+without an imaginary part). This is the case the (matrix, residual) keying was built for: the
+eigenvector blocks mix all three residuals -- `jacobian_real(m,n) - Omega*M_imag(m,n)` is the real
+azimuthal Jacobian OR'd with the imaginary azimuthal mass matrix -- and nothing about it could be
+said in a one-kind-per-block vocabulary.
+
+Two things it taught, both about *declining*:
+
+* **A negative residual index means "this element has no such contribution", not "undescribable".**
+  Returning false there abandoned the pattern for the whole MESH, because `build_frozen_sparsity`
+  gives up as soon as one element cannot be described. On Rayleigh-Benard that was every element:
+  33 012 declines and no frozen path at all -- while the script still passed, because falling back is
+  silent. Those blocks are simply empty, and saying so is a perfectly good description.
+* **The axis boundary conditions write an identity** over the rows of dofs in
+  `base_dofs_forced_zero` / `eigen_dofs_forced_zero`. Those entries come from no residual at all, so
+  no coupling table can predict them, and the verification caught them immediately once the spec was
+  actually being used. Hence a `Diagonal` kind: the diagonal of a square block only.
+
+**`PeriodicOrbitHandler` is deliberately NOT described, and a spec for it would do nothing.** Periodic
+orbits never form the augmented elemental block at all -- the routine says so:
+
+```
+// Periodic orbits would have very huge elemental Jacobians, so we must assemble them with block jacobians
+```
+
+They have their own assembly, `sparse_assemble_row_or_column_compressed_for_periodic_orbit`, which is
+`std::map`-per-row. So `get_sparsity_pattern` would never be consulted; freezing them means a new fast
+path in that routine, which is the Phase 2 item ("extend to ..._for_periodic_orbit") rather than a
+tracker spec.
+
+**It is worth doing.** Measured on `tests/benchmarks/bench_periodic_orbit_1d.py`, a 1D Brusselator
+(validated against theory: Hopf at `b = 1 + a^2 = 2`, `omega = a = 1`, found at `b = 1.99999996`,
+`omega = 1`):
+
+| N | NT | orbit ndof | nnz | density | assembly | orbit solve | assembly share |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 20 | 20 | 1 805 | 57 786 | 1.77 % | 7.3 ms | 0.01 s | 64 % |
+| 40 | 30 | 5 023 | 164 286 | 0.65 % | 25.3 ms | 0.03 s | 74 % |
+| 40 | 60 | 9 883 | 328 086 | 0.34 % | 55.6 ms | 0.08 s | 72 % |
+| 80 | 60 | 19 643 | 654 966 | 0.17 % | 113.4 ms | 0.16 s | 70 % |
+
+The assembly is **64-74 % of an orbit solve**, far above the 30-50 % typical elsewhere, and the table
+shows why: the orbit matrix is so sparse that the factorisation is cheap and the map-based assembly
+dominates. Freezing it therefore targets ~70 % of the runtime.
+
+Note this could not be judged from the tutorials. All three that use periodic orbits drive them from a
+3-dof ODE where the entire solve is sub-millisecond; extrapolating from those suggested it did not
+matter, which is why the PDE case was written.
+
+### Three defects this exposed, all worth remembering
+
+1. **The mass table was unreachable.** `sparsity_mask_for_element` refuses `matrix_index > 0` unless
+   an `EigenProblemHandler` is active. That guard is about the second matrix of a multi-matrix
+   *assembly*; using the mass *coupling table* as a pattern source is meaningful whatever is
+   assembling. Until a `MASK_MASS` sentinel was added, every Hopf spec silently fell back and the
+   frozen path never engaged -- and a first "every block identical" reading was worthless, because
+   both sides of the comparison had fallen back. **Check that the fast path engaged before believing
+   a comparison**; this is the Phase 2 false negative in a new costume.
+2. **Finite-differenced Hessians have no table.** The plan said the FD path "fills the same block
+   positions, so the spec is independent of it -- but that must be verified rather than assumed". It
+   is not independent: with no analytic Hessian, codegen emits none, `contributes_to_hessian` is
+   empty, and the block is masked away while the handler fills it by finite differences. The fold
+   normal form makes it concrete -- `d2R/dx2 = 2` is the entire Hessian block. The builder now checks
+   `hessian_generated` and falls back to the Jacobian pattern, which is the superset the Hessian is a
+   subset of.
+3. **Sentinel values as array indices.** The `resind < 0` shortcut sized its scratch buffer with
+   `resize(matrix_index + 1)`, and `matrix_index` can now be `(unsigned)-5`. That asks for ~4 billion
+   entries and surfaced as `std::bad_alloc` in an ordinary continuation step, nowhere near the
+   sparsity code.
+
+### The failure that was unexplained, and what it was
+
+`Advanced_Linear_Dynamics/hanging_droplet.py` tripped the per-element verification at element 898
+(`nvar 7`, `raw 3`) with the parameter row against the eigenvector columns missing -- a block the spec
+declares `Dense` and the tiling demonstrably writes. Instrumenting the *build* rather than the failure
+settled it: the mask for that element was entirely zero (`npairs=0`).
+
+The cause is the "no active residual" shortcut in `sparsity_mask_for_element`, which returns an
+all-zero mask and sat **before** the augmented dispatch. That is correct for the raw block -- such an
+element contributes nothing to the base Jacobian -- but a bifurcation handler still writes the border
+of the augmented block for *every* element, because the normalisation row is a property of the
+handler, not of the element's residual. Hoisting the dispatch above the shortcut fixed it.
+
+The lesson is the same one as Phase 2: the contradiction was only resolvable by instrumenting where
+the pattern is BUILT, not where it is used. Reasoning about the spec and the tiling -- both of which
+were correct -- could not have found it.
+
+### Superseded: the failure as first recorded
+
+`Advanced_Linear_Dynamics/hanging_droplet.py` (a fold tracker on a moving mesh) trips the per-element
+verification with the switch on:
+
+```
+element 898, nvar 7, raw_ndof 3 -- positions missing: (3,4), (3,5), (3,6)
+```
+
+nvar 7 with raw 3 is the fold layout `[base(3) | param(1) | eig(3)]`, so those three are the
+**parameter row against the eigenvector columns** -- which the spec declares `Dense`, and which the
+tiling demonstrably writes. Printing the spec the builder actually receives confirms it
+(`(1,2)=Dense`, starts `0 3 4 7`), yet re-fetching the mask at the point of failure returns 0 there.
+Not resolved. The guard is doing its job -- a refusal, not a truncated Jacobian -- but until the
+contradiction is explained the switch must stay off.
+
+Worth noting the failure only appears now because the frozen path never engaged for tracking before,
+so this is an existing behaviour being exposed rather than a new defect; whether the fault is in the
+spec or in something the augmented pattern reuses is exactly what is unresolved.
+
+### The original plan follows.
+
+
+
+### Where the two tracker families stand today
+
+There are two, and they are frozen to very different degrees.
+
+**The C++ handlers** (`src/bifurcation.{cpp,hpp}`: `MyFoldHandler`, `MyHopfHandler`,
+`MyPitchForkHandler`, `AzimuthalSymmetryBreakingHandler`, `PeriodicOrbitHandler`) are oomph-lib
+`AssemblyHandler`s. They present an *augmented elemental block* — `2·raw+1` for fold, `3·raw+2` for
+Hopf, `raw·nT+1` for a periodic orbit — and fill it by hand, then let oomph's generic sparse assembly
+scatter it. **Nothing about them is frozen.** `Problem::sparsity_mask_for_element` refuses at
+
+```cpp
+const std::vector<int> &cidx = be->get_local_dof_contribution_indices();
+if (cidx.size() != nvar) return NULL;   // nvar = handler->ndof(elem) = augmented size
+```
+
+because the element's field description covers `raw_ndof` dofs and the handler is asking about a
+block several times larger. Confirmed by measurement: under fold tracking
+`_get_frozen_sparsity_nnz(0)` is 0, against 1 for the same problem without tracking.
+
+**The Python trackers** (`pyoomph/generic/bifurcation_tools.py`: `FoldTracker`, `HopfTracker`,
+`PitchForkTracker`, `NormalModeBifurcationTracker`) are the other way round. Their *constituent*
+matrices already go through the frozen multi-assembly (Phase 4) — `R().J().dRdp().dJdp().dJdU(V)` is
+one frozen pass. What is not frozen is the **bordering**, which is redone in scipy on every step:
+
+```python
+Jaug = scipy.sparse.block_array(
+    [[J,    None,     col(dRdP)],
+     [HV,   J,        col(dJdP@V)],
+     [None, row(...), None]]).tocsr()
+```
+
+`block_array(...).tocsr()` rebuilds the whole augmented CSR — a COO build, a sort and a duplicate
+merge — every Newton step, from blocks whose patterns are already known and fixed.
+
+### The proposal
+
+A no-op `get_sparsity_pattern` on a base class, overridden per tracker, describing the augmented
+block in terms of the patterns it is *made of* rather than as an opaque dense block.
+
+The vocabulary needs exactly six entries, because every sub-block of every tracker is one of them:
+
+| kind | meaning |
+| --- | --- |
+| `Empty` | structurally absent |
+| `Jacobian` / `JacobianT` | the base Jacobian pattern, or its transpose |
+| `MassMatrix` / `MassMatrixT` | the base mass-matrix pattern, or its transpose |
+| `Dense` | a border row/column (the parameter column, the normalisation row) |
+
+Hessian-contracted blocks (`dJdU·Φ`, `dMdU·Φ`) do **not** need their own kind: contracting the
+Hessian over one index cannot produce an `(i,j)` that the Jacobian lacks, because
+`∂²R_i/∂u_j∂u_k ≠ 0` implies `∂R_i/∂u_j ≢ 0`. So they are `Jacobian`/`MassMatrix` — **or their
+transposes**, and that is exactly where "left or right eigenvector" enters: a left-eigenvector
+tracker assembles `Hᵀ·V`, whose pattern is `Jᵀ`. This is the same distinction that Phase 4 got wrong
+and had to fix by symmetrising; here it can be stated exactly instead of over-approximated.
+
+Read off the code, `MyFoldHandler` in `Full_augmented` (layout `[base | param | eigenvector]`,
+from `jacobian(raw+1+n, ...)` and `jacobian(n, raw_ndof)`) is:
+
+|  | base cols | param col | eig cols |
+| --- | --- | --- | --- |
+| **base rows** | `Jacobian` | `Dense` | `Empty` |
+| **param row** | `Empty` | `Empty` | `Dense` |
+| **eig rows** | `Jacobian` (from `dJduPhiH`) | `Dense` | `Jacobian` |
+
+Hopf adds the imaginary eigenvector group and the `MassMatrix` blocks; the periodic-orbit handler is
+`nT` diagonal `Jacobian` blocks plus coupling blocks and one border row/column.
+
+### C++ side
+
+1. `virtual bool get_sparsity_pattern(GeneralisedElement*, AugmentedBlockSpec&) const { return false; }`
+   on `oomph::AssemblyHandler` — vendored, one line, no-op, so every handler that does not override it
+   behaves exactly as now.
+2. `AugmentedBlockSpec` carries the group layout (how the augmented dofs partition into `raw`-sized
+   groups plus scalar border dofs) and the `n_groups × n_groups` matrix of kinds above.
+3. `Problem::sparsity_mask_for_element` gains a branch *before* the `cidx.size() != nvar` refusal: if
+   the active handler fills a spec, build the `nvar × nvar` mask by tiling the base masks
+   (`sparsity_mask_for_element(0, ...)` for `Jacobian`, `(1, ...)` for `MassMatrix`, transposed where
+   asked, all-ones for `Dense`, all-zeros for `Empty`).
+4. `get_jacobian_structure_id()` already keys on the assembly handler's *type*, which is necessary but
+   no longer sufficient: `MyFoldHandler` changes its own block layout with `Solve_which_system`, and
+   `MyHopfHandler` likewise. The key must include whatever the spec depends on.
+
+From there `build_frozen_sparsity` and `assemble_with_frozen_sparsity` work unchanged, and the
+trackers get the full frozen path.
+
+### Python side
+
+1. `AugmentedAssemblyHandler.get_sparsity_pattern()` — no-op returning `None`.
+2. Each tracker returns the same block description, in the same vocabulary, for its `block_array`
+   layout. It is a direct transcription of the literal already written there.
+3. A frozen bordered assembly replaces `block_array(...).tocsr()`: build the augmented `indptr`/
+   `indices` once per structure id, together with a scatter map from each constituent block's value
+   array into the augmented one, then per step copy values only.
+
+**One trap on this side.** The border blocks are built as `csr_matrix(dense_array.reshape(-1,1))`,
+which *drops the zeros of a dense vector*. So the border column's pattern today depends on the values
+of `dRdP` — it is not stable, and a frozen version must declare those blocks structurally dense
+rather than inheriting whatever `csr_matrix` happened to keep.
+
+### Risks
+
+* **Under-reporting is the dangerous direction**, as everywhere in this work. It is guarded: the
+  per-element verification refuses rather than truncates, and in oomph-lib's ordinary assembly the
+  mask can only ever add. A wrong spec is therefore loud, not silent.
+* **§7c will bite harder.** The augmented pattern introduces stored zeros on the border rows and
+  columns, and the normalisation row's diagonal is structurally zero by construction. §7c showed what
+  stored zero diagonals do to MUMPS's analysis — `ICNTL(24)=1` is already on, and §7d's measurement
+  that the remaining legitimate zero diagonals *still* trip it with the option off says this needs
+  checking on a real tracking run, not assuming.
+* **`Dense` really is dense**, so the border column adds `raw_ndof` stored entries per augmented
+  dof. For a fold that is one column and one row; for a periodic orbit with large `nT` it is worth
+  measuring before assuming it pays.
+* The C++ handlers also run a **finite-difference path** when no analytic Hessian is set. That path
+  fills the same block positions, so the spec is independent of it — but that must be verified rather
+  than assumed, since it is exactly the kind of assumption that produced the Phase 4 bug.
+
+### Suggested order
+
+1. C++ `MyFoldHandler` alone, behind the no-op default, with the verification on. Smallest augmented
+   layout, and the one with a ready-made regression case in the tutorials.
+2. Measure. If a fold tracking step does not improve materially, stop — the rest of the family shares
+   the same cost structure and there is no point paying the complexity.
+3. `MyHopfHandler` (adds the mass-matrix and transpose kinds), then the remaining C++ handlers.
+4. The Python bordering, which is a separate mechanism and can be judged on its own.
+
+## 7f. Freezing the periodic-orbit assembly
+
+The orbit handler was the last tracker left, and the most valuable one: on the 1D Brusselator
+(`tests/benchmarks/bench_periodic_orbit_1d.py`) the assembly is 64-74% of an orbit solve, because the
+orbit matrix is so sparse (0.17% at N=80/NT=60) that the factorisation is cheap next to it.
+
+### Two things I had wrong
+
+I had recorded that "periodic orbits never form the augmented elemental block, so a spec would never
+be consulted", on the strength of the comment in
+`sparse_assemble_row_or_column_compressed_for_periodic_orbit`:
+
+> Periodic orbits would have very huge elemental Jacobians, so we must assemble them with block jacobians
+
+That comment describes the band-matrix path, which is `#define`d **out** (`//#define
+PYOOMPH_PERIODIC_ORBIT_BAND_MATRIX`) and never implemented -- its body is
+`//throw_runtime_error("TODO: Fill it in")`. The path that actually runs builds a dense
+`nvar x nvar` `oomph::DenseMatrix` with `nvar = raw*nT+1` and scans all of it into a
+`std::map<unsigned,double>` per row. So the augmented block is formed after all, and
+`AugmentedBlockSpec` applies exactly as it does to Fold/Hopf/Pitchfork/azimuthal.
+
+The reason a spec would nonetheless never have been consulted was something else entirely: the
+dispatcher tried the orbit routine *before* `assemble_with_frozen_sparsity`. Reordering it is the
+whole enabling change; the frozen path declines on its own when it cannot apply, so the orbit routine
+stays as the fallback.
+
+### The spec: nT raw-sized groups plus the period
+
+The augmented unknowns are nT copies of the raw dof set followed by the scalar period T, so the block
+is an (nT+1)x(nT+1) grid. Within a coupled pair of time nodes the pattern is just the base Jacobian
+and mass matrix, so the only thing the spec has to describe is **which time nodes couple** -- and that
+is what differs between the five discretisations. All of it is read off the same data the assembly
+loops use rather than re-derived:
+
+| mode | coupling |
+|---|---|
+| collocation (default) | pairs within a time element of `time_mesh`, via `TimeNode::get_index()` |
+| B-spline | pairs supported on a common basis element, via `get_integration_info()`'s `indices` |
+| Floquet | `t -> t` and `t -> t+1` (J and M), last row flushed and replaced by the wrap identity |
+| central, BDF2 | `t -> t` (J and M), plus the `dU/ds` stencil `FD_ds_inds[t]` -- **mass matrix only** |
+
+### Two subtleties, both caught by measurement rather than by reading
+
+**Rows and columns do not run over the same node set.** A collocation time element with `nnode()`
+nodes carries only `nnode()-1` collocation points, and the equation of collocation point `inode` is
+written into the row of node `inode`. So only the *first* `nnode()-1` nodes of an element are equation
+rows, while all of them appear as columns. Declaring the last node as a row too is legal -- it only
+stores zeros -- but it cost +25% nnz, and the give-away was that blocks (3,0), (6,3), (9,6), (12,9)
+came out **100%** structural zeros, i.e. exactly the element-boundary nodes at order 3. The period
+column has the same asymmetry, so it is gated on whether a time node carries an equation at all.
+
+**The FD stencil multiplies the mass matrix alone.** The first version of that branch guessed
+`t, t+-1, FD_ds_inds[t]` with both J and M. It was correct but cost +44% nnz for central and +89% for
+BDF2. The nodal modes have no `t -> t+1` term at all -- the spatial operator is evaluated at the node
+itself -- and the stencil carries only M.
+
+`AugmentedBlockSpec::Diagonal` also had to stop requiring `gr == gc`: the wrap-around
+`u(nT-1) - u(0) = 0` that closes the orbit is an identity landing on the diagonal of an *off-diagonal*
+block. That is the second consumer of `Diagonal`, after the azimuthal axis boundary conditions.
+
+### Verified
+
+Frozen vs unfrozen assembled at the **identical state** (toggling the flag between two assemblies in
+one run, rather than comparing two independent runs -- those drift, and a 7.5e-03 difference that
+looked like a defect was just that). Brusselator N=20, NT=12:
+
+| mode | order | engaged | nnz off | nnz on | d nnz | max abs dJ |
+|---|---|---|---|---|---|---|
+| collocation | 3 | yes | 33126 | 33127 | +0.00% | 0 |
+| collocation | 2 | yes | 25398 | 25399 | +0.00% | 0 |
+| floquet | 0 | yes | 17670 | 17671 | +0.01% | 0 |
+| central | 2 | yes | 17424 | 17425 | +0.01% | 0 |
+| BDF2 | 2 | yes | 17424 | 17507 | +0.48% | 0 |
+| bspline | 3 | yes | 56064 | 56065 | +0.00% | 0 |
+
+Bit-identical in every mode. The one extra entry is the (T,T) diagonal, declared deliberately so the
+period row has a stored diagonal (see the null-pivot discussion in 7d). BDF2's +0.48% is the wrap
+identity, which that mode does not use.
+
+Speedup, collocation, frozen vs unfrozen:
+
+| N / NT | orbit ndof | nnz | assembly | orbit solve |
+|---|---|---|---|---|
+| 20 / 12 | 1067 | 33k | 3.29 -> 0.95 ms (-71%) | -69% |
+| 40 / 30 | 5023 | 164k | 24.8 -> 5.8 ms (-77%) | -71% |
+| 80 / 60 | 19643 | 655k | 116.1 -> 29.0 ms (-75%) | -66% |
+
+`docs/.../orbit/hopf_switch.py` produces identical output with the flag forced on and off.
+`langford_floquet.py` fails identically both ways with `TypeError: must be real number, not complex`
+-- a pre-existing Python-side bug in that tutorial, unrelated to this work.
+
+A stray `std::cout << "Sparse assembly for periodic orbit:"` that printed on every fallback orbit
+assembly, even under `quiet()`, was removed while here.
+
+## 7g. What the stored zeros in a frozen pattern actually are
+
+A frozen pattern must be a superset of the numerically nonzero entries or it could not be reused, so
+it always carries some stored zeros. `_get_frozen_sparsity_fill_stats()` measures how many; across the
+tutorial suite it is 6.0% of 8.6e9 slots, median **0.000%** per script -- most patterns are exactly
+tight -- with a few scripts far above (rivulet 39.8%, rising_bubble 29.1%, eigendynamics 28.4%).
+
+`_get_frozen_fill_breakdown()` (only filled when `PYOOMPH_FROZEN_FILL_BREAKDOWN` is set) attributes
+every scattered entry to its (row class, column class) pair. That is what separates the two causes,
+which want opposite treatment.
+
+### Cause 1: unattributed dofs -- a real defect, fixed
+
+On the DG convection-diffusion tutorial 33% of the pattern was stored zeros, and every one of them
+sat in a row or column of an `<unattributed>` dof of the `_internal_facets_` element, while the
+properly attributed `domain/c` block was exactly tight. An interface element works on dofs belonging
+to other elements and the attribution walk could not see them, so they kept the -1 sentinel, which the
+mask must read as "coupled to everything". Fixed by adopting the source element's own attribution
+through the equation map that already exists (rivulet 39.8% -> 37.0%, eigendynamics 28.4% -> 27.2%).
+
+### Cause 2: a field that is identically zero -- inherent, and must NOT be pruned
+
+What remains is concentrated in blocks like
+
+    domain/velocity_phi x domain/velocity_y     87.4% zero
+    domain/velocity_phi x domain/coordinate_y   90.0% zero
+    liquid/velocity_normal x liquid/coordinate_x 67.1% zero
+
+My first reading of this was that it is azimuthal-mode-dependent coupling, and that folding the mode
+number into `jacobian_structure_id` would let the pattern be tightened per mode. **That was wrong.**
+Measuring the base state settles it:
+
+    domain/velocity_phi        691 dofs   max|value| = 0.000e+00   100% exactly zero
+    liquid/velocity_normal     591 dofs   max|value| = 0.000e+00   100% exactly zero
+
+The blocks are empty because the base state has no swirl and no normal flow, so `velocity_phi` and
+`velocity_normal` are identically zero and appear as a multiplicative factor in exactly those Jacobian
+terms. The coupling is structurally real; it is the VALUE that vanishes.
+
+So these stored zeros are the correct price of a value-independent pattern and must be left alone.
+Pruning them would be actively unsafe: the moment the solution develops swirl or normal flow -- which
+in a stability analysis is precisely what is being looked for, since the perturbation lives in those
+components -- the entries become nonzero, and a pattern pruned on the current values would truncate
+the Jacobian (or, with the verification on, refuse to assemble at all).
+
+The general rule this illustrates: a block that is 100% zero because a coupling was never written is
+a table defect worth fixing; a block that is mostly zero because a field currently happens to vanish
+is not, and the two are indistinguishable without the per-block breakdown.
+
+### Possible future feature: let the user declare a field zero in the base state
+
+The framework cannot know that `velocity_phi` or `velocity_normal` stays zero -- nothing in the
+residuals forbids it, and in the perturbation problem those components are exactly what is nonzero.
+The USER often does know, and knows it for a structural reason rather than by accident. In the rivulet
+case the slip-length condition at the bottom prevents any non-zero `velocity_normal` in the base
+solution at all; in a stability analysis of a non-swirling flow the same holds for `velocity_phi`.
+
+So there is room for an opt-in declaration -- something like "this field is identically zero in the
+base state" -- which would let the BASE-state block drop the rows and columns of the declared fields
+from its pattern. Measured above, that is 87-90% of those blocks, and they are the bulk of what is
+left after the attribution fix, so the payoff is real: rivulet and eigendynamics would go from ~37%
+and ~27% stored zeros to close to the median of 0%.
+
+Three things it would have to respect, all of which the current design already provides for:
+
+* **Base state only.** The declaration applies to the base Jacobian, not to the perturbation or
+  eigenproblem matrices, where those components carry the whole solution. Patterns are already keyed
+  per matrix, so this is a per-matrix property, not a global one.
+* **Part of the pattern key.** `jacobian_structure_id` would have to include the declaration, or a
+  pattern built with it could be handed to an assembly running without it.
+* **Opt-in, never inferred.** Deriving it from observed values would be exactly the unsafe pruning
+  described above -- a field that happens to be zero at the current point is not a field that must be.
+  The declaration has to be a statement about the problem, made by whoever set it up.
+
+What makes this safe to offer at all is that the per-element verification already exists: a wrong
+declaration does not silently truncate the Jacobian, it refuses to assemble and names the positions
+that escaped the pattern. That turns a subtle correctness hazard into a loud, immediate error.
+
+Not implemented; recorded here because the measurement that motivates it is above and would otherwise
+have to be redone.
+
 ## 8. Open questions
 
 ### Closed by the work

@@ -756,10 +756,11 @@ def test_structure_id_changes_on_remeshing():
     element -> dof attribution surviving a mesh rebuild would produce a mask that no longer covers the
     numerical pattern, which is the silent-truncation failure mode.
 
-    NOTE: this test makes the suite print "nanobind: leaked N instances!" at interpreter exit. That is
-    NOT caused by the test or by the structural-sparsity work -- remeshing leaks in pyoomph regardless:
-    a plain tutorial-style remeshing script (docs/source/tutorial/ale/remeshing.py) leaks ~187
-    instances on its own. Recorded here so nobody spends an afternoon blaming this file."""
+    NOTE: this test used to make the suite print "nanobind: leaked N instances!" at interpreter exit,
+    which was never caused by the test or by the structural-sparsity work: a superseded mesh kept its
+    _templatemesh reference, closing an uncollectable Problem -> mesh -> template -> remesher -> Problem
+    cycle, so any remeshing script leaked its whole Problem. Fixed in _destroy_superseded_mesh() (see
+    generic/problem.py); if leak reports ever reappear here, look there first."""
     gmsh = pytest.importorskip("gmsh", reason="remeshing needs gmsh")  # noqa: F841
     from pyoomph.equations.ALE import LaplaceSmoothedMesh
     from pyoomph.meshes.remesher import Remesher2d

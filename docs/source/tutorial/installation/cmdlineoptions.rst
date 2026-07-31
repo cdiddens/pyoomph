@@ -46,10 +46,10 @@ Likewise, the eigensolver flags are mutually exclusive:
       Use `SLEPc <https://slepc.upv.es/>`__ as eigensolver, see :numref:`petscslepc`. You still have to specify a linear solver (e.g. together with ``--slepc_mumps``, or via :py:meth:`~pyoomph.generic.problem.Problem.set_eigensolver` in your script) for the matrix inversion during the eigensolve.
 
 ``--slepc_mumps``
-      Use SLEPc as eigensolver with MUMPS as backend.
+      Use SLEPc as eigensolver with MUMPS as backend. This is the default whenever PETSc/SLEPc with MUMPS support is installed, so the flag is only required to override an eigensolver selected in the driver code itself.
 
 ``--arpack``
-      Use scipy's ARPACK-based eigensolver.
+      Use scipy's ARPACK-based eigensolver. Note that this is scipy's own backend, not the ARPACK-with-Pardiso combination which pyoomph selects by default when SLEPc/MUMPS is missing but MKL Pardiso is present.
 
 And the C compiler backend used to build the just-in-time generated code is likewise mutually exclusive between:
 

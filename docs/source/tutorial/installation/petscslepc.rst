@@ -3,8 +3,8 @@
 Optional installation of PETSc/SLEPc
 ------------------------------------
 
-If you want to solve for eigenvalue problems, pyoomph by default will invoke `scipy's eigensolver <https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.linalg.eigs.html>`__ based on `ARPACK <https://github.com/opencollab/arpack-ng>`__.
-However, for unsymmetric matrices which usually arise in complicated problems, `SLEPc <https://slepc.upv.es/>`__ provides a much more stable alternative, since it also supports nonsymmetric mass matrices.
+If you want to solve for eigenvalue problems, pyoomph selects the best eigensolver it can find on your machine: `SLEPc <https://slepc.upv.es/>`__ with MUMPS if PETSc/SLEPc are installed with MUMPS support, otherwise `ARPACK <https://github.com/opencollab/arpack-ng>`__ with MKL Pardiso as backend, otherwise `scipy's eigensolver <https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.linalg.eigs.html>`__, which is ARPACK as well, but with a plain scipy backend.
+SLEPc comes first because, for the unsymmetric matrices which usually arise in complicated problems, it is a much more stable alternative, since it also supports nonsymmetric mass matrices.
 So whenever you want to investigate linear stability, you should consider performing the following steps. In any case, it is advised to occasionally check your eigenvalues by adding ``report_accuracy=True`` to calls of :py:meth:`~pyoomph.generic.problem.Problem.solve_eigenproblem`. 
 
 Also on Mac arm64, we recommend using PETSc with MUMPS as linear solver backend for the linear solves during Newton's method, since the default MKL Pardiso backend is not yet fully supported on arm64.
@@ -92,7 +92,7 @@ To use one of the two builds within pyoomph, ``PETSC_DIR``, ``PETSC_ARCH`` and `
 
 or, analogously, with ``pyoomph_petsc_arch_complex`` for the complex build. Since only one of the two can be active in a given terminal/process, do **not** put both blocks unconditionally into your ``.bashrc``/``.zshrc`` -- the second one would just shadow the first on ``PYTHONPATH``. Instead, either export the variables for the arch you currently need right before running your script, or wrap each block in a shell function (e.g. ``pyoomph_petsc_real()`` / ``pyoomph_petsc_complex()``) that you call as needed. If you only installed one arch, it is fine to export it unconditionally in your shell startup file as before.
 
-To use SLEPc with MUMPS as eigensolver, either set it in python during your driver code, e.g.
+Once installed, SLEPc with MUMPS is picked automatically as eigensolver, so nothing has to be done to activate it. To select it explicitly anyhow, e.g. to override a different choice made in the driver code, either set it in python during your driver code, e.g.
 
 .. code:: python
 

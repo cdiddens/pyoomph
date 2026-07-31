@@ -44,6 +44,7 @@ CoreEigenSolverEnum:TypeAlias=Literal["scipy","pardiso","slepc","accelerate","sl
 EigenSolverWhich:TypeAlias=Literal["LM","SM","LR","SR","SI"]
 _default_la_solver:"GenericLinearSystemSolver | CoreLinearSolverEnum | None"=None
 _default_eigen_solver:"GenericEigenSolver | CoreEigenSolverEnum | None"=None
+_default_eigen_solver_resolver:"Callable[[],GenericEigenSolver | CoreEigenSolverEnum] | None"=None
 
 if TYPE_CHECKING:
     from ..generic.problem import Problem
@@ -75,10 +76,26 @@ def get_default_linear_solver()->"GenericLinearSystemSolver | CoreLinearSolverEn
 
 
 def set_default_eigen_solver(solv:"GenericEigenSolver | CoreEigenSolverEnum"):
-	global _default_eigen_solver
+	global _default_eigen_solver,_default_eigen_solver_resolver
 	_default_eigen_solver=solv
+	_default_eigen_solver_resolver=None # an explicit choice wins over the autodetection below
+
+def set_default_eigen_solver_resolver(resolver:Callable[[],"GenericEigenSolver | CoreEigenSolverEnum"]):
+	"""Register a callable that picks the default eigensolver the first time one is actually needed.
+
+	The autodetection in pyoomph/__init__.py has to import petsc4py/slepc4py to find out whether SLEPc
+	with MUMPS is usable, which costs more time than the entire rest of `import pyoomph` and is wasted
+	on the majority of scripts, which never solve an eigenproblem. Deferring the probe keeps the import
+	cheap without changing which solver is eventually selected.
+	"""
+	global _default_eigen_solver,_default_eigen_solver_resolver
+	_default_eigen_solver=None
+	_default_eigen_solver_resolver=resolver
 
 def get_default_eigen_solver()->"GenericEigenSolver | CoreEigenSolverEnum | None":
+	global _default_eigen_solver
+	if _default_eigen_solver is None and _default_eigen_solver_resolver is not None:
+		_default_eigen_solver=_default_eigen_solver_resolver()
 	return _default_eigen_solver
 
 class GenericLinearSystemSolver:

@@ -5786,6 +5786,59 @@ namespace pyoomph
 		}
 	}
 
+	// An interface or facet element works on dofs that belong to OTHER elements: its own bulk element,
+	// and on a DG interior facet also the opposite interface element and the opposite's bulk. The base
+	// walk only knows about this element's own nodes and internal data, so all of those stayed "not
+	// attributed" (-1), which the sparsity mask has to read conservatively as "coupled to everything".
+	// That is not academic: on the DG convection-diffusion tutorial 33% of the frozen pattern was
+	// stored zeros, and the breakdown put every single one of them in a row or column of an
+	// unattributed facet dof, while the properly attributed domain/c block was exactly tight.
+	//
+	// Each source element already knows its own attribution, and update_equation_remapping_from_element
+	// has already built the map from its local equation numbers into ours -- the same map the generated
+	// code uses to address this external data. So the attribution is simply adopted through it.
+	// Contribution class indices are per-code, so they are translated by NAME: both codes call the same
+	// class "<domain>/<field>", which is exactly how the coupling tables are keyed.
+	void InterfaceElementBase::fill_local_dof_contribution_indices(std::vector<int> &dest)
+	{
+		BulkElementBase::fill_local_dof_contribution_indices(dest);
+
+		const JITFuncSpec_Table_FiniteElement_t *ft = codeinst->get_func_table();
+		if (!ft || !ft->contribution_names || !ft->contribution_entries_size) return;
+		std::map<std::string, int> my_class;
+		for (unsigned c = 0; c < ft->contribution_entries_size; c++)
+			if (ft->contribution_names[c]) my_class[std::string(ft->contribution_names[c])] = (int)c;
+
+		auto adopt = [&](BulkElementBase *src, const std::vector<int> &eqn_map)
+		{
+			if (!src || eqn_map.empty() || src == this) return;
+			const JITFuncSpec_Table_FiniteElement_t *sft = src->get_code_instance()->get_func_table();
+			if (!sft || !sft->contribution_names) return;
+			const std::vector<int> &sidx = src->get_local_dof_contribution_indices();
+			const size_t n = std::min(eqn_map.size(), sidx.size());
+			for (size_t sl = 0; sl < n; sl++)
+			{
+				const int my_le = eqn_map[sl];
+				if (my_le < 0 || (size_t)my_le >= dest.size()) continue;
+				if (dest[my_le] != -1) continue; // Already attributed by the walk above; leave it alone
+				const int sc = sidx[sl];
+				if (sc == -2) { dest[my_le] = -2; continue; } // "Part of no contribution" carries over
+				if (sc < 0 || (unsigned)sc >= sft->contribution_entries_size) continue;
+				const char *nm = sft->contribution_names[sc];
+				if (!nm) continue;
+				auto it = my_class.find(std::string(nm));
+				if (it != my_class.end()) dest[my_le] = it->second;
+			}
+		};
+
+		adopt(dynamic_cast<BulkElementBase *>(this->bulk_element_pt()), bulk_eqn_map);
+		if (opposite_side && !Is_internal_facet_opposite_dummy)
+		{
+			adopt(dynamic_cast<BulkElementBase *>(opposite_side), opp_interf_eqn_map);
+			adopt(dynamic_cast<BulkElementBase *>(opposite_side->bulk_element_pt()), opp_bulk_eqn_map);
+		}
+	}
+
 	const std::vector<int> &BulkElementBase::get_local_dof_contribution_indices()
 	{
 		if (!local_dof_contribution_indices_valid)

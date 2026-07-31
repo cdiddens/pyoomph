@@ -842,6 +842,13 @@ void PyReg_Problem(nb::module_ &m)
 			 "How many distributed assembly plans have been built since the problem was created. A plan costs a round of communication on top of two passes over "
 			 "the mesh, so this should settle: if it keeps rising, the pattern is being invalidated every assembly and the frozen route is a pure loss. Zero after "
 			 "a distributed solve means the route never engaged at all.")
+		.def_prop_rw("_use_frozen_sparsity_for_bifurcation_tracking", &pyoomph::Problem::get_use_frozen_sparsity_for_bifurcation_tracking, &pyoomph::Problem::set_use_frozen_sparsity_for_bifurcation_tracking,
+			 "On by default. Lets a bifurcation-tracking assembly handler describe its augmented elemental block (see AugmentedBlockSpec) so that the frozen-sparsity "
+			 "assembly can apply to bifurcation tracking as well, which it otherwise cannot: the block is several times larger than the element's own field "
+			 "description, so no field-coupling table describes it directly. Measured -45% assembly on a PDE fold tracking and -75% on a periodic orbit (-66% for "
+			 "the whole orbit solve), with a bit-identical pattern in both cases. Falls back by itself whenever a handler cannot describe its block -- notably when "
+			 "the Hessian is finite-differenced rather than generated, since nothing then bounds what it writes. Turn it off to isolate whether a bifurcation-tracking "
+			 "problem is affected by the augmented pattern at all.")
 		.def("_get_frozen_sparsity_rebuild_count", &pyoomph::Problem::get_frozen_sparsity_rebuild_count,
 			 "How many frozen sparsity patterns have been built since the problem was created. It should stop growing once a workflow settles: a count that "
 			 "keeps rising assembly after assembly means the pattern cache is thrashing (too small for the number of distinct patterns in play), which is "
@@ -850,6 +857,34 @@ void PyReg_Problem(nb::module_ &m)
 			 "How many frozen sparsity patterns are kept at once, keyed by (pattern id, matrix index). Needs to be at least the number of DISTINCT patterns a "
 			 "workflow alternates between -- the Jacobian, a preconditioner matrix built from another residual, the mass matrix -- or each will evict the "
 			 "others. Raised automatically if a single assembly needs more. Changing it clears the cache.")
+		.def("_get_frozen_sparsity_fill_stats", [](pyoomph::Problem &self) {
+				 return std::make_pair(self.get_frozen_sparsity_stored_entries(), self.get_frozen_sparsity_zero_entries());
+			 },
+			 "``(stored, zero)`` summed over every assembly that went through the frozen path since the problem was created (or since "
+			 "``_reset_frozen_sparsity_fill_stats()``): how many matrix slots the frozen patterns reserved, and how many of those held exactly zero when the "
+			 "assembly finished. A frozen pattern has to be a SUPERSET of the numerically nonzero entries or it could not be reused, so ``zero`` is never 0 in "
+			 "general; ``zero/stored`` is the price of freezing -- stored zeros the linear solver still has to carry. Both are 0 if the frozen path never engaged.")
+		.def("_get_frozen_fill_breakdown", [](pyoomph::Problem &self) {
+				 std::vector<std::tuple<std::string, std::string, unsigned long long, unsigned long long>> out;
+				 for (const auto &kv : self.get_frozen_fill_breakdown())
+					 out.push_back(std::make_tuple(kv.first.first, kv.first.second, kv.second.first, kv.second.second));
+				 return out;
+			 },
+			 "Diagnostic: ``(row class, column class, scattered, of which zero)`` for every field-coupling block the frozen assembly wrote. Only filled when the "
+			 "environment variable ``PYOOMPH_FROZEN_FILL_BREAKDOWN`` is set. A block reading 100% zero means the symbolic coupling table over-marks; zeros spread "
+			 "through otherwise-nonzero blocks are terms that vanish numerically at the current parameter values.")
+		.def("_get_frozen_sparsity_fill_stats_by_matrix", [](pyoomph::Problem &self) {
+				 const auto &st = self.get_frozen_sparsity_stored_by_matrix();
+				 const auto &ze = self.get_frozen_sparsity_zero_by_matrix();
+				 std::vector<std::pair<unsigned long long, unsigned long long>> out;
+				 for (size_t m = 0; m < st.size(); m++) out.push_back(std::make_pair(st[m], m < ze.size() ? ze[m] : 0ull));
+				 return out;
+			 },
+			 "``_get_frozen_sparsity_fill_stats()`` split by matrix index of a multi-matrix assembly: a list of ``(stored, zero)``, one per matrix. "
+			 "Matrix 0 is the Jacobian, 1 the mass matrix in an eigenvalue assembly. The aggregate cannot tell a loose Jacobian pattern from a mass "
+			 "matrix carried in a pattern that was never meant for it, and those call for different fixes.")
+		.def("_reset_frozen_sparsity_fill_stats", &pyoomph::Problem::reset_frozen_sparsity_fill_stats,
+			 "Zero the counters behind ``_get_frozen_sparsity_fill_stats()``, so a measurement can exclude setup assemblies.")
 		.def("_get_frozen_sparsity_nnz", &pyoomph::Problem::get_frozen_sparsity_nnz, nb::arg("matrix_index") = 0,
 			 "Number of nonzeros in the frozen sparsity pattern currently held for the given matrix of a multi-matrix assembly, or 0 if none is built. "
 			 "A positive value is the only direct evidence that the preallocated-CSR assembly path actually engaged rather than quietly falling back, "

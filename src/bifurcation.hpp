@@ -37,6 +37,93 @@ namespace pyoomph
   class Problem;
   class DynamicBulkElementCode; // Forward decl.
 
+  // A description of an augmented elemental block in terms of the patterns it is MADE of.
+  //
+  // A bifurcation-tracking assembly handler presents an elemental block several times larger than the
+  // element's own dof count -- 2*raw+1 for a fold, 3*raw+2 for a Hopf -- and fills it by hand. The
+  // frozen-sparsity machinery describes an elemental block from the element's FIELD structure, which
+  // only covers raw_ndof dofs, so it cannot describe such a block at all and refuses (see
+  // Problem::sparsity_mask_for_element). That refusal costs bifurcation tracking the whole frozen
+  // assembly path.
+  //
+  // It does not have to be described from scratch, though: every sub-block of every tracker is one of
+  // a handful of things, and all of them are already known to the element.
+  //
+  // Hessian-contracted sub-blocks are a SUBSET of the Jacobian -- d2R_i/du_j du_k != 0 implies
+  // dR_i/du_j is not identically zero -- but calling them Jacobian-patterned, as this first did, is
+  // far too loose: every LINEAR term of the residual contributes to J and nothing to the Hessian. On
+  // Kuramoto-Sivashinsky, where the biharmonic and Laplacian carry most of J, the contracted block is
+  // four times sparser, and using J for it accounted for 96% of the excess nonzeros. Hence its own
+  // kind, backed by contributes_to_hessian.
+  //
+  // The orientation is the other thing the caller cannot guess: a tracker working on a LEFT
+  // eigenvector assembles the transposed product, whose pattern is the transpose.
+  class AugmentedBlockSpec
+  {
+  public:
+    enum Kind
+    {
+      Empty = 0,    // structurally absent
+      Jacobian,     // the base Jacobian pattern
+      JacobianT,    // its transpose (left-eigenvector products)
+      MassMatrix,   // the base mass-matrix pattern
+      MassMatrixT,  // its transpose
+      Hessian,      // a Hessian contracted with a vector: d2R/du du, which is a SUBSET of the Jacobian
+      HessianT,     // its transpose (left-eigenvector products)
+      Dense,        // a border row/column: the parameter column, a normalisation row
+      Diagonal      // the diagonal of a square block only: an identity written over a constrained row
+    };
+
+    // The augmented dofs partition into consecutive groups, each either a full copy of the element's
+    // raw dof set or a single scalar (the parameter, a normalisation multiplier).
+    // One block can be built from SEVERAL patterns at once, so each carries a list of terms that are
+    // OR'd together. Pitchfork needs it: with improved_pitchfork_tracking_on_unstructured_meshes the
+    // base block is the base Jacobian PLUS a Hessian of the symmetry residual.
+    //
+    // Each term also names which RESIDUAL its pattern comes from; -1 means "the one currently being
+    // assembled". Fold and Hopf use -1 throughout, since every block of theirs comes from one residual.
+    // The azimuthal and pitchfork trackers do not -- they hold {base, real azimuthal, imaginary
+    // azimuthal} and {base, mass-matrix residual} live at the same time, and a spec that could not name
+    // which one a block belongs to would silently describe them all with whichever happened to be active.
+    struct Term
+    {
+      Kind kind = Empty;
+      int residual = -1;
+      Term() {}
+      Term(Kind k, int r) : kind(k), residual(r) {}
+    };
+
+    std::vector<bool> group_is_scalar;
+    std::vector<std::vector<Term>> block_terms; // n_groups * n_groups, row-major; empty list = Empty
+
+    unsigned n_groups() const { return (unsigned)group_is_scalar.size(); }
+    void resize(unsigned n)
+    {
+      group_is_scalar.assign(n, false);
+      block_terms.assign((size_t)n * n, std::vector<Term>());
+    }
+    // Replaces whatever the block had.
+    void set(unsigned r, unsigned c, Kind k, int residual_index = -1)
+    {
+      block_terms[(size_t)r * n_groups() + c] = std::vector<Term>(1, Term(k, residual_index));
+    }
+    // ORs another pattern into the block.
+    void add(unsigned r, unsigned c, Kind k, int residual_index = -1)
+    {
+      block_terms[(size_t)r * n_groups() + c].push_back(Term(k, residual_index));
+    }
+    const std::vector<Term> &terms_at(unsigned r, unsigned c) const { return block_terms[(size_t)r * n_groups() + c]; }
+  };
+
+  // Mixin giving an assembly handler the chance to describe its augmented block. The default says
+  // "cannot describe it", so a handler that does not override behaves exactly as before.
+  class AugmentedSparsityProvider
+  {
+  public:
+    virtual ~AugmentedSparsityProvider() {}
+    virtual bool get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const { return false; }
+  };
+
   // Reimplementation of the Hopf-Handler with some changes
   // Assembly handler that augments the original residuals R(u,p) (p being the bifurcation
   // parameter) with the equations tracking a Hopf bifurcation, i.e. a pair of complex
@@ -50,7 +137,7 @@ namespace pyoomph
   //   C . Phi - 1                   = 0                     (normalization, prevents Phi=Psi=0)
   //   C . Psi                       = 0
   // where C is a fixed vector picked so the normalization equations are non-degenerate.
-  class MyHopfHandler : public oomph::AssemblyHandler
+  class MyHopfHandler : public oomph::AssemblyHandler, public AugmentedSparsityProvider
   {
   protected:
     unsigned Solve_which_system;   // Selects which sub-block of the augmented system is currently assembled (full, standard, or complex block; see solve_*_system())
@@ -151,6 +238,9 @@ namespace pyoomph
     void solve_full_system();
 
     void realign_C_vector(); // Reset the C-vector (which enforces the non-triviality of the eigenvector)
+
+    // Describes the augmented block for the frozen sparsity machinery; see AugmentedBlockSpec.
+    bool get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const override;
   };
 
   //////////////////////////////////////////////////////////
@@ -181,7 +271,7 @@ namespace pyoomph
   // where Psi is a fixed symmetry (anti-symmetry) vector distinguishing the symmetric branch
   // from the bifurcating asymmetric one, and Sigma measures the amplitude of the broken-symmetry
   // component of u (Sigma=0 on the symmetric branch, at the pitchfork itself).
-  class MyPitchForkHandler : public oomph::AssemblyHandler
+  class MyPitchForkHandler : public oomph::AssemblyHandler, public AugmentedSparsityProvider
   {
   protected:
     Problem *Problem_pt;
@@ -231,6 +321,9 @@ namespace pyoomph
     void get_eigenfunction(oomph::Vector<oomph::DoubleVector> &eigenfunction) override;
     // Switches back to assembling the full augmented system (see MyHopfHandler::solve_full_system for the analogous pattern).
     void solve_full_system();
+
+    // Describes the augmented block for the frozen sparsity machinery; see AugmentedBlockSpec.
+    bool get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const override;
   };
 
   //////////////////////////////////////////////////////////
@@ -245,7 +338,7 @@ namespace pyoomph
   // where Phi is a fixed vector chosen so the normalization is non-degenerate. Unlike Hopf/
   // pitchfork tracking, no oscillation frequency or symmetry constraint is needed here since
   // a fold has a single real critical eigenvalue crossing zero.
-  class MyFoldHandler : public oomph::AssemblyHandler
+  class MyFoldHandler : public oomph::AssemblyHandler, public AugmentedSparsityProvider
   {
     // Selects which part of the augmented system get_residuals()/get_jacobian() currently
     // assemble: the full augmented system, only the plain Jacobian block (for a Newton step
@@ -312,6 +405,9 @@ namespace pyoomph
     // Sets Solve_which_system = Full_augmented (assemble the complete augmented system).
     void solve_full_system();
     void realign_C_vector(); // Reset the C-vector (which enforces the non-triviality of the eigenvector)
+
+    // Describes the augmented block for the frozen sparsity machinery; see AugmentedBlockSpec.
+    bool get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const override;
   };
 
   //////////////////////////////
@@ -327,7 +423,7 @@ namespace pyoomph
   };
 
   // Actual assembly handler class for axial symmetry breaking systems
-  class AzimuthalSymmetryBreakingHandler : public oomph::AssemblyHandler
+  class AzimuthalSymmetryBreakingHandler : public oomph::AssemblyHandler, public AugmentedSparsityProvider
   {
     Problem *Problem_pt;                    // Pointer to the problem class
     unsigned Ndof;                          // Degrees of freedom of the original problem (non-augmented)
@@ -430,6 +526,9 @@ namespace pyoomph
     void solve_full_system();
 
     //  void realign_C_vector(); //Reset the C-vector (which enforces the non-triviality of the eigenvector)
+
+    // Describes the augmented block for the frozen sparsity machinery; see AugmentedBlockSpec.
+    bool get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const override;
   };
 
 
@@ -454,7 +553,7 @@ namespace pyoomph
   // constraint fixes the phase/translation invariance of the orbit along time (T_constraint_mode
   // selects either a Poincare-plane constraint through (x0,n0,d_plane) or a period constraint),
   // and T itself is an unknown solved for as part of the augmented system.
-  class PeriodicOrbitHandler : public oomph::AssemblyHandler
+  class PeriodicOrbitHandler : public oomph::AssemblyHandler, public AugmentedSparsityProvider
   {
   protected:
     Problem *Problem_pt;                    // Pointer to the problem class
@@ -507,6 +606,9 @@ namespace pyoomph
     // Destructor (used for cleaning up memory)
     ~PeriodicOrbitHandler() override;
     unsigned n_tsteps() const { return 1 + Tadd.size(); }
+
+    // Describes the augmented block for the frozen sparsity machinery; see AugmentedBlockSpec.
+    bool get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const override;
     unsigned long eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local) override;
     unsigned ndof(oomph::GeneralisedElement *const &elem_pt) override;
     // Dispatches to the residual assembly routine matching the active discretization mode.

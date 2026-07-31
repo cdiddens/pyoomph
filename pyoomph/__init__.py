@@ -176,45 +176,63 @@ solver_cb=GeneralSolverCallback()
 _pyoomph.set_Solver_callback(solver_cb)
 
 #Set best solver as default
-from .solvers.generic import set_default_linear_solver,set_default_eigen_solver
+# set_default_eigen_solver is not used here anymore (the eigensolver default is resolved lazily, see
+# below), but stays imported: it has been reachable as pyoomph.set_default_eigen_solver for a long
+# time and user scripts call it that way.
+from .solvers.generic import CoreEigenSolverEnum,set_default_linear_solver,set_default_eigen_solver,set_default_eigen_solver_resolver
 
 
-def _set_accelerate_solver() -> bool:
+# Availability probes. Linear solver and eigensolver are picked by separate cascades below (the best
+# linear solver on a machine is not necessarily the backend of the best eigensolver), so these only
+# answer "is it there", they do not select anything.
+def _have_accelerate() -> bool:
 	try:
 		from .solvers import accelerate as _accelerate #type:ignore
-		set_default_linear_solver("accelerate")
-		set_default_eigen_solver("accelerate")
 		return True
 	except:
 		return False
 
 
-def _set_pardiso_solver() -> bool:
+def _have_pardiso() -> bool:
 	try:
 		from .solvers.pardiso import PardisoSolver #type:ignore
-		set_default_linear_solver("pardiso")
-		set_default_eigen_solver("pardiso")
 		return True
 	except:
 		return False
 
 
-def _set_petsc_mumps_solver() -> bool:
+def _have_petsc_mumps() -> bool:
 	try:
 		from .solvers.petsc import PETSc,PETSCMUMPSSolver,SlepcMUMPSEigenSolver #type:ignore
-		if not PETSc.Sys.hasExternalPackage("mumps"): #type:ignore
-			return False
-		set_default_linear_solver("petsc_mumps")
-		set_default_eigen_solver("slepc_mumps")
-		return True
+		return bool(PETSc.Sys.hasExternalPackage("mumps")) #type:ignore
 	except:
 		return False
 
 
-def _set_superlu_fallback() -> None:
-	from .solvers.scipy import SuperLUSerial,ScipyEigenSolver #type:ignore
+def _set_accelerate_linear_solver() -> bool:
+	if not _have_accelerate():
+		return False
+	set_default_linear_solver("accelerate")
+	return True
+
+
+def _set_pardiso_linear_solver() -> bool:
+	if not _have_pardiso():
+		return False
+	set_default_linear_solver("pardiso")
+	return True
+
+
+def _set_petsc_mumps_linear_solver() -> bool:
+	if not _have_petsc_mumps():
+		return False
+	set_default_linear_solver("petsc_mumps")
+	return True
+
+
+def _set_superlu_linear_fallback() -> None:
+	from .solvers.scipy import SuperLUSerial #type:ignore
 	set_default_linear_solver("superlu")
-	set_default_eigen_solver("scipy")
 
 
 
@@ -261,28 +279,51 @@ def _warn_no_mpi_capable_solver(name:str) -> None:
 # only distributed-capable direct solver pyoomph ships, so it becomes the default whenever it is present,
 # regardless of platform. Falls through to the normal serial cascade (with a warning) if it is missing,
 # so that a run without PETSc still starts and can be steered explicitly from the command line.
-if _running_under_mpi() and _set_petsc_mumps_solver():
+if _running_under_mpi() and _set_petsc_mumps_linear_solver():
 	pass
 elif _is_macos and _is_arm64:
-	if not _set_petsc_mumps_solver():
-		if _set_accelerate_solver():
+	if not _set_petsc_mumps_linear_solver():
+		if _set_accelerate_linear_solver():
 			_warn_suboptimal_solver("accelerate")
 		else:
-			_set_superlu_fallback()
+			_set_superlu_linear_fallback()
 			_warn_suboptimal_solver("superlu")
 elif _is_macos:
-	if not _set_pardiso_solver():
-		if not _set_petsc_mumps_solver():
-			if _set_accelerate_solver():
+	if not _set_pardiso_linear_solver():
+		if not _set_petsc_mumps_linear_solver():
+			if _set_accelerate_linear_solver():
 				_warn_suboptimal_solver("accelerate")
 			else:
-				_set_superlu_fallback()
+				_set_superlu_linear_fallback()
 				_warn_suboptimal_solver("superlu")
 else:
-	if not _set_pardiso_solver():
-		if not _set_petsc_mumps_solver():
-			_set_superlu_fallback()
+	if not _set_pardiso_linear_solver():
+		if not _set_petsc_mumps_linear_solver():
+			_set_superlu_linear_fallback()
 			_warn_suboptimal_solver("superlu")
+
+
+# Eigensolver default: SLEPc with MUMPS first, then Pardiso, then ARPACK (i.e. what --arpack selects,
+# scipy's ARPACK, rather than the ARPACK shipped with Pardiso). Accelerate stays ahead of scipy on
+# macOS, where it is the platform-native option and the only fast one left once Pardiso is out - on
+# arm64 Macs there is no MKL at all.
+#
+# This deliberately does not follow the linear solver chosen above: on Linux, Pardiso is the better
+# linear solver but SLEPc/MUMPS is the better eigensolver, so the two defaults now differ there.
+#
+# Registered as a resolver rather than evaluated here, because _have_petsc_mumps() imports
+# petsc4py/slepc4py (~0.4 s, more than the rest of `import pyoomph` together) and most scripts never
+# solve an eigenproblem. The probe therefore runs on the first Problem.get_eigen_solver() call.
+def _autodetect_eigen_solver() -> CoreEigenSolverEnum:
+	if _have_petsc_mumps():
+		return "slepc_mumps"
+	if _have_pardiso():
+		return "pardiso"
+	if _is_macos and _have_accelerate():
+		return "accelerate"
+	return "scipy"
+
+set_default_eigen_solver_resolver(_autodetect_eigen_solver)
 
 if _running_under_mpi():
 	from .solvers.generic import get_default_linear_solver as _get_default_linear_solver

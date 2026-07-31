@@ -473,6 +473,12 @@ namespace pyoomph
 
     bool verify_frozen_sparsity=true; // Check per element that nothing nonzero fell outside the frozen pattern
     bool use_frozen_sparsity=true; // Assemble straight into a preallocated CSR when the pattern allows it (see assemble_with_frozen_sparsity)
+    // Section 7e: let a bifurcation-tracking assembly handler describe its AUGMENTED elemental block
+    // (see AugmentedBlockSpec) so the frozen path can apply to it too -- it otherwise cannot, the block
+    // being several times larger than the element's own field description. Only handlers that provide a
+    // description are affected; the rest fall back exactly as before. Measured -22% on a full PDE fold
+    // tracking solve and -31% per re-solve, same fold point to 12 digits.
+    bool use_frozen_sparsity_for_bifurcation_tracking=true;
     // Several frozen patterns are kept at once, keyed by (pattern id, matrix index). A single slot per
     // matrix index is not enough: a workflow that alternates between two DIFFERENT patterns -- most
     // obviously a PETSc preconditioner matrix assembled from another residual via
@@ -483,6 +489,21 @@ namespace pyoomph
     unsigned frozen_sparsity_cache_capacity = 8; // Raised on the fly if a single assembly needs more
     unsigned long frozen_sparsity_clock = 0;     // Monotonic source for the LRU stamps
     unsigned long frozen_sparsity_rebuilds = 0;  // How many patterns have been built; a test can watch this for thrashing
+    // How many matrix slots the frozen patterns reserved, summed over every frozen assembly, and how
+    // many of those ended up holding exactly zero. A frozen pattern is deliberately a SUPERSET of the
+    // numerically nonzero entries -- it has to be, or it would not be reusable -- so the ratio is the
+    // price of freezing: extra stored zeros the solver still has to carry. Cheap to keep (one pass
+    // over the values already in cache at the end of an assembly) and the only way to tell a tight
+    // pattern from a wasteful one without dumping matrices.
+    unsigned long long frozen_sparsity_stored_entries = 0;
+    unsigned long long frozen_sparsity_zero_entries = 0;
+    // The same, split by matrix index of a multi-matrix assembly. The aggregate cannot distinguish a
+    // loose Jacobian pattern from a mass matrix riding on one, and those want different fixes.
+    std::vector<unsigned long long> frozen_sparsity_stored_by_matrix;
+    std::vector<unsigned long long> frozen_sparsity_zero_by_matrix;
+    // (row class, column class) -> (entries scattered, of which zero). Diagnostic only; filled solely
+    // when PYOOMPH_FROZEN_FILL_BREAKDOWN is set, since it costs a second pass over the scatter map.
+    std::map<std::pair<std::string, std::string>, std::pair<unsigned long long, unsigned long long>> frozen_fill_breakdown;
     // Index into frozen_sparsity_cache of a usable pattern for (matrix_index, generation), building it
     // if necessary. `pinned` lists slots the current assembly is already using, which must not be
     // evicted. Returns -1 if the pattern cannot be built (see build_frozen_sparsity).
@@ -495,7 +516,13 @@ namespace pyoomph
     // Sentinel mask index: not a matrix, but "the union of the Jacobian and mass-matrix masks together
     // with their TRANSPOSES". Needed by the multi-assembly, which builds transposed Hessian-vector
     // products (bifurcation tracking on a LEFT eigenvector) whose pattern is J^T, not J.
-    static const unsigned MASK_UNION_SYMMETRIC = (unsigned)-3;
+    static constexpr unsigned MASK_UNION_SYMMETRIC = (unsigned)-3;
+    // Sentinel matrix index selecting the HESSIAN coupling table rather than the Jacobian or mass one.
+    static constexpr unsigned MASK_HESSIAN = (unsigned)-5;
+    // Likewise for the MASS-MATRIX coupling table. Distinct from matrix index 1, which additionally
+    // means "the second matrix of a multi-matrix assembly" and is only meaningful under an
+    // EigenProblemHandler; this one only selects the table, which is meaningful whatever is assembling.
+    static constexpr unsigned MASK_MASS = (unsigned)-6;
     std::vector<char> union_mask_scratch;
     // Whether the multi-assembly currently being built asks for a TRANSPOSED product, whose pattern is
     // J^T rather than J. Set from the request list; true by default so that any other caller of the
@@ -607,6 +634,19 @@ namespace pyoomph
     // Per-element structural sparsity mask, built from the code generator's symbolic field-coupling
     // tables. See the base declaration in oomph-lib's problem.h and dev_docs/structural_assembly.md.
     const char *sparsity_mask_for_element(const unsigned &matrix_index, oomph::GeneralisedElement *const &elem_pt, const unsigned &nvar) override;
+    // Tiles an AUGMENTED elemental block's mask from the raw ones, using the description the assembly
+    // handler provides (see AugmentedBlockSpec). NULL if it cannot be described, so the caller falls back.
+    const char *augmented_sparsity_mask_for_element(const unsigned &matrix_index, oomph::GeneralisedElement *const &elem_pt, const unsigned &nvar, unsigned raw_nvar);
+    // The core of both: fills `out` with the field-coupling mask of one (matrix, residual) pair.
+    // `residual_override` < 0 means "the residual the element is currently assembling"; anything else
+    // names a specific one, which is what a tracker mixing several residuals in one augmented block
+    // needs (azimuthal: base + real + imaginary azimuthal; pitchfork: base + mass-matrix residual).
+    bool field_coupling_mask_for_element(unsigned matrix_index, int residual_override, oomph::GeneralisedElement *const &elem_pt, const unsigned &nvar, std::vector<char> &out);
+    // Raw masks for the augmented tiling, one per (matrix, residual) pair needed by the spec. Kept as a
+    // member so the buffers survive between elements; indices into it stay stable for one call because
+    // the whole set of keys is collected before any of them is filled.
+    struct AugmentedRawMask { unsigned matrix = 0; int residual = -1; std::vector<char> data; };
+    std::vector<AugmentedRawMask> augmented_raw_masks;
     // Whether the value-independent pattern is pruned to the field pairs the code generator proves can
     // contribute (tight, "Tier B"), or is the full element-connectivity pattern ("Tier A"). Pruning is
     // strictly better where it applies -- it reproduced the numerical pattern exactly on every problem
@@ -630,6 +670,8 @@ namespace pyoomph
     // runs, augmented systems, compressed-column output, any element without a symbolic mask).
     void set_use_frozen_sparsity(bool yesno);
     bool get_use_frozen_sparsity() const { return use_frozen_sparsity; }
+    void set_use_frozen_sparsity_for_bifurcation_tracking(bool yesno) { use_frozen_sparsity_for_bifurcation_tracking = yesno; invalidate_jacobian_structure(); }
+    bool get_use_frozen_sparsity_for_bifurcation_tracking() const { return use_frozen_sparsity_for_bifurcation_tracking; }
     // Whether each element's block is checked against the frozen pattern during assembly (see the
     // assembly loop). Cheap relative to the scatter, and it is the only thing standing between a
     // hypothetical code-generation bug and a silently truncated Jacobian, so it defaults to on.
@@ -639,6 +681,13 @@ namespace pyoomph
     // a positive value is the only direct evidence the preallocated path engaged rather than falling back.
     unsigned get_frozen_sparsity_nnz(unsigned matrix_index=0);
     unsigned long get_frozen_sparsity_rebuild_count() const { return frozen_sparsity_rebuilds; } // Watch for cache thrashing
+    unsigned long long get_frozen_sparsity_stored_entries() const { return frozen_sparsity_stored_entries; }
+    unsigned long long get_frozen_sparsity_zero_entries() const { return frozen_sparsity_zero_entries; }
+    void reset_frozen_sparsity_fill_stats() { frozen_sparsity_stored_entries = 0; frozen_sparsity_zero_entries = 0;
+                                              frozen_sparsity_stored_by_matrix.clear(); frozen_sparsity_zero_by_matrix.clear(); }
+    const std::vector<unsigned long long> &get_frozen_sparsity_stored_by_matrix() const { return frozen_sparsity_stored_by_matrix; }
+    const std::vector<unsigned long long> &get_frozen_sparsity_zero_by_matrix() const { return frozen_sparsity_zero_by_matrix; }
+    const std::map<std::pair<std::string, std::string>, std::pair<unsigned long long, unsigned long long>> &get_frozen_fill_breakdown() const { return frozen_fill_breakdown; }
     unsigned get_frozen_sparsity_cache_capacity() const { return frozen_sparsity_cache_capacity; }
 #ifdef OOMPH_HAS_MPI
     void set_use_frozen_distributed_sparsity(bool yesno) { use_frozen_distributed_sparsity = yesno; if (!yesno) { distributed_frozen_sparsity.clear(); distributed_residual_plan.clear(); } }

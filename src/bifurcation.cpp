@@ -414,6 +414,60 @@ namespace pyoomph
   //=============================================================
   /// Get the number of elemental degrees of freedom
   //=============================================================
+  // The augmented block of a Hopf tracker, read off get_jacobian() below.
+  //
+  // Layout (Solve_which_system == 0, see eqn_number):
+  //   [ base (raw) | Phi (raw) | Psi (raw) | parameter (1) | Omega (1) ]
+  //
+  // The augmented equations are
+  //   R(u,p) = 0,   J.Phi - Omega M.Psi = 0,   J.Psi + Omega M.Phi = 0,   C.Phi - 1 = 0,   C.Psi = 0
+  //
+  //                  base        Phi         Psi         param    Omega
+  //   base rows      J           -           -           dense    -
+  //   Phi  rows      H           J           M           dense    dense
+  //   Psi  rows      H           M           J           dense    dense
+  //   param row      -           dense       -           -        -
+  //   Omega row      -           -           dense       -        -
+  //
+  // The two base-column blocks of the eigenvector rows are Hessians: dJdU_Eig and dMdU_Eig, both of
+  // which contributes_to_hessian covers -- it is marked whenever EITHER the Jacobian or the mass part
+  // of the second derivative is non-zero, so a mass-matrix Hessian needs no separate kind.
+  //
+  // The (Phi,Phi) and (Psi,Psi) blocks are J, and pick up a further (*Parameter_pt)*M term in the
+  // mass-augmented variant; that stays within the Jacobian pattern on the same grounds Phase 4 relies
+  // on, that the mass matrix couples no field pair the Jacobian does not. If that ever fails, the
+  // per-element verification says so rather than truncating.
+  //
+  // Neither scalar row has a diagonal: C.Phi - 1 involves neither the parameter nor Omega, so those
+  // positions are Empty rather than Dense. Declaring them Dense would manufacture exactly the stored
+  // zero diagonal that section 7c showed leads MUMPS onto a null pivot.
+  bool MyHopfHandler::get_sparsity_pattern(GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const
+  {
+    if (Solve_which_system != 0) return false; // Only the full augmented system needs describing
+    typedef AugmentedBlockSpec S;
+    spec.resize(5);
+    spec.group_is_scalar[0] = false; // u
+    spec.group_is_scalar[1] = false; // Phi
+    spec.group_is_scalar[2] = false; // Psi
+    spec.group_is_scalar[3] = true;  // the bifurcation parameter
+    spec.group_is_scalar[4] = true;  // Omega
+    spec.set(0, 0, S::Jacobian);
+    spec.set(0, 3, S::Dense);
+    spec.set(1, 0, S::Hessian);
+    spec.set(1, 1, S::Jacobian);
+    spec.set(1, 2, S::MassMatrix);
+    spec.set(1, 3, S::Dense);
+    spec.set(1, 4, S::Dense);
+    spec.set(2, 0, S::Hessian);
+    spec.set(2, 1, S::MassMatrix);
+    spec.set(2, 2, S::Jacobian);
+    spec.set(2, 3, S::Dense);
+    spec.set(2, 4, S::Dense);
+    spec.set(3, 1, S::Dense);
+    spec.set(4, 2, S::Dense);
+    return true;
+  }
+
   unsigned MyHopfHandler::ndof(GeneralisedElement *const &elem_pt)
   {
     unsigned raw_ndof = elem_pt->ndof();
@@ -1305,6 +1359,42 @@ namespace pyoomph
   // augmented system carries the original dofs plus the eigenvector Y plus the parameter
   // (2*raw_ndof+1); the "augmented J" block carries the original dofs plus the parameter only
   // (raw_ndof+1); the plain "J" block carries only the original dofs.
+  // The augmented block of a fold tracker, read off get_jacobian() below.
+  //
+  // Layout (Full_augmented, see eqn_number): [ base (raw) | parameter (1) | eigenvector (raw) ].
+  //
+  //                  base cols        param col      eig cols
+  //   base rows      J                 dense          -           get_jacobian(residuals, jacobian)
+  //   param row      -                 -              dense       jacobian(raw, raw+1+n) = Phi[..]
+  //   eig  rows      H (dJdU . Y)      dense          J           jacobian(raw+1+m, n) = dJduPhiH(m,n)
+  //                                                               jacobian(raw+1+n, raw+1+m) = jacobian(n,m)
+  //
+  // The eigenvector-row/base-column block is the Hessian contracted with Y. It is NOT transposed: the
+  // fold condition J.Y = 0 uses the RIGHT null vector, so d(J.Y)_m/du_n keeps the (m,n) orientation.
+  // It gets the Hessian pattern rather than the Jacobian's, which is a subset relation but a loose one
+  // -- linear terms of the residual are all of J and none of the Hessian.
+  //
+  // The parameter row's diagonal is deliberately Empty. The normalisation equation Phi.Y = 1 does not
+  // involve the parameter, so nothing is written there today either -- and declaring it Dense would
+  // manufacture a stored zero on the diagonal, which section 7c showed is exactly what invites MUMPS
+  // to plan an elimination onto a null pivot.
+  bool MyFoldHandler::get_sparsity_pattern(GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const
+  {
+    if (Solve_which_system != Full_augmented) return false; // Block_J needs no spec (it IS the raw block)
+    typedef AugmentedBlockSpec S;
+    spec.resize(3);
+    spec.group_is_scalar[0] = false; // base dofs
+    spec.group_is_scalar[1] = true;  // the bifurcation parameter
+    spec.group_is_scalar[2] = false; // the eigenvector
+    spec.set(0, 0, S::Jacobian);
+    spec.set(0, 1, S::Dense);
+    spec.set(2, 0, S::Hessian); // d(J.Y)/du: second derivatives only, hence far sparser than J itself
+    spec.set(2, 1, S::Dense);
+    spec.set(2, 2, S::Jacobian);
+    spec.set(1, 2, S::Dense);
+    return true;
+  }
+
   unsigned MyFoldHandler::ndof(GeneralisedElement *const &elem_pt)
   {
     unsigned raw_ndof = elem_pt->ndof();
@@ -2000,6 +2090,56 @@ namespace pyoomph
   }
 
   // Augmented dofs of the element: original dofs + eigenvector Y + parameter + Sigma.
+  // The augmented block of a pitchfork tracker, read off get_jacobian() below.
+  //
+  // Layout (see eqn_number): [ base (raw) | parameter (1) | Y (raw) | Sigma (1) ]
+  //
+  //                base         param       Y           Sigma
+  //   base rows    J (+H_sym)   dense       -           dense
+  //   param row    dense        -           -           -
+  //   Y    rows    H            dense       J           -
+  //   Sigma row    -            -           dense       -
+  //
+  // Two residuals are in play, which is why every term names one: the base state and the symmetry
+  // constraint that PitchForkResidualContributionList calls the "mass matrix" residual. With
+  // improved_pitchfork_tracking_on_unstructured_meshes the base block picks up
+  // Sigma * symmetryDADU_times_Psi, a Hessian of that second residual, ON TOP of the base Jacobian --
+  // the case the single-kind spec could not express.
+  bool MyPitchForkHandler::get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const
+  {
+    auto *el = dynamic_cast<pyoomph::BulkElementBase *>(elem_pt);
+    if (!el) return false;
+    // The residual map only exists when improved_pitchfork_tracking_on_unstructured_meshes is on --
+    // that is the only mode with a separate symmetry residual. Without it there is one residual, the
+    // one the element is already assembling, which is what -1 means.
+    int r_base = -1, r_sym = -1;
+    auto it = residual_contribution_indices.find(el->get_code_instance()->get_code());
+    if (it != residual_contribution_indices.end())
+    {
+      r_base = it->second.residual_indices[0];
+      r_sym = it->second.residual_indices[1];
+      if (r_base < 0) return false; // This element has no base contribution to describe
+    }
+
+    typedef AugmentedBlockSpec S;
+    spec.resize(4);
+    spec.group_is_scalar[0] = false; // u
+    spec.group_is_scalar[1] = true;  // the bifurcation parameter
+    spec.group_is_scalar[2] = false; // Y
+    spec.group_is_scalar[3] = true;  // Sigma
+    spec.set(0, 0, S::Jacobian, r_base);
+    if (Problem_pt && Problem_pt->improved_pitchfork_tracking_on_unstructured_meshes && r_sym >= 0)
+      spec.add(0, 0, S::Hessian, r_sym); // Sigma * d(A.Psi)/dU, on top of the base Jacobian
+    spec.set(0, 1, S::Dense);
+    spec.set(0, 3, S::Dense);
+    spec.set(1, 0, S::Dense);
+    spec.set(2, 0, S::Hessian, r_base);
+    spec.set(2, 1, S::Dense);
+    spec.set(2, 2, S::Jacobian, r_base);
+    spec.set(3, 2, S::Dense);
+    return true;
+  }
+
   unsigned MyPitchForkHandler::ndof(oomph::GeneralisedElement *const &elem_pt)
   {
     unsigned raw_ndof = elem_pt->ndof();
@@ -2453,6 +2593,106 @@ namespace pyoomph
 
   // This will return the degrees of freedom of a single element of the augmented system
   // We will have to take the degrees of freedom of the original element and add a few more for the eigenvector values (Re and Im)
+  // The augmented block of the azimuthal symmetry-breaking tracker, read off get_jacobian() below.
+  //
+  // Layout with an imaginary part (see eqn_number):
+  //   [ base (raw) | real eig (raw) | imag eig (raw) | parameter (1) | Omega (1) ]
+  // and without it:
+  //   [ base (raw) | real eig (raw) | parameter (1) ]
+  //
+  // THREE residuals are live at once -- base, real azimuthal, imaginary azimuthal -- and the
+  // eigenvector blocks mix them: jacobian_real(m,n) - Omega*M_imag(m,n) is the real azimuthal
+  // Jacobian OR'd with the imaginary azimuthal mass matrix. That is what the per-term residual index
+  // and the OR'd term lists exist for; nothing here could be said in a one-kind-per-block vocabulary.
+  //
+  // The eigenvector-row base-column blocks combine JHess and MHess of both azimuthal residuals, all of
+  // which contributes_to_hessian covers -- it is marked whenever either the Jacobian or the mass part
+  // of a second derivative is non-zero.
+  bool AzimuthalSymmetryBreakingHandler::get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const
+  {
+    auto *el = dynamic_cast<pyoomph::BulkElementBase *>(elem_pt);
+    if (!el) return false;
+    auto it = residual_contribution_indices.find(el->get_code_instance()->get_code());
+    if (it == residual_contribution_indices.end()) return false;
+    const int r_base = it->second.residual_indices[0];
+    const int r_re = it->second.residual_indices[1];
+    const int r_im = it->second.residual_indices[2];
+
+    // A negative index means this element has NO contribution to that residual -- not that the block
+    // is undescribable. Its blocks are then structurally empty, which is a perfectly good description,
+    // so the terms are simply omitted. Returning false instead would abandon the pattern for the whole
+    // MESH, because build_frozen_sparsity gives up as soon as one element cannot be described: on the
+    // Rayleigh-Benard azimuthal case that was every element, 33012 declines and no frozen path at all.
+    auto addT = [&spec](unsigned r, unsigned c, AugmentedBlockSpec::Kind k, int resid) {
+      if (resid >= 0) spec.add(r, c, k, resid);
+    };
+
+    typedef AugmentedBlockSpec S;
+    if (!has_imaginary_part)
+    {
+      spec.resize(3);
+      spec.group_is_scalar[0] = false; // u
+      spec.group_is_scalar[1] = false; // the (real) eigenvector
+      spec.group_is_scalar[2] = true;  // the bifurcation parameter
+    // The axis boundary conditions for the azimuthal mode overwrite whole rows with an identity, for
+    // dofs in base_dofs_forced_zero / eigen_dofs_forced_zero. Those entries come from no residual at
+    // all, so no coupling table can predict them; the diagonals of the base and eigenvector blocks are
+    // therefore declared explicitly. It is a per-dof decision at runtime and a per-block statement
+    // here, so a diagonal entry may be stored for dofs that are not forced -- a handful of explicit
+    // zeros, and the section 7c hazard they carry is why MUMPS null-pivot detection stays on.
+      addT(0, 0, S::Jacobian, r_base);
+      spec.add(0, 0, S::Diagonal);
+      spec.set(0, 2, S::Dense);
+      addT(1, 0, S::Hessian, r_re);
+      addT(1, 1, S::Jacobian, r_re);
+      spec.add(1, 1, S::Diagonal);
+      spec.set(1, 2, S::Dense);
+      spec.set(2, 1, S::Dense); // the normalisation row
+      return true;
+    }
+
+    spec.resize(5);
+    spec.group_is_scalar[0] = false; // u
+    spec.group_is_scalar[1] = false; // real part of the eigenvector
+    spec.group_is_scalar[2] = false; // imaginary part
+    spec.group_is_scalar[3] = true;  // the bifurcation parameter
+    spec.group_is_scalar[4] = true;  // Omega
+    // The axis boundary conditions for the azimuthal mode overwrite whole rows with an identity, for
+    // dofs in base_dofs_forced_zero / eigen_dofs_forced_zero. Those entries come from no residual at
+    // all, so no coupling table can predict them; the diagonals of the base and eigenvector blocks are
+    // therefore declared explicitly. It is a per-dof decision at runtime and a per-block statement
+    // here, so a diagonal entry may be stored for dofs that are not forced -- a handful of explicit
+    // zeros, and the section 7c hazard they carry is why MUMPS null-pivot detection stays on.
+    addT(0, 0, S::Jacobian, r_base);
+    spec.add(0, 0, S::Diagonal);
+    spec.set(0, 3, S::Dense);
+    // Real eigenvector rows
+    addT(1, 0, S::Hessian, r_re);
+    addT(1, 0, S::Hessian, r_im);
+    addT(1, 1, S::Jacobian, r_re);
+    addT(1, 1, S::MassMatrix, r_im);
+    spec.add(1, 1, S::Diagonal);
+    addT(1, 2, S::Jacobian, r_im);
+    addT(1, 2, S::MassMatrix, r_re);
+    spec.set(1, 3, S::Dense);
+    spec.set(1, 4, S::Dense);
+    // Imaginary eigenvector rows
+    addT(2, 0, S::Hessian, r_re);
+    addT(2, 0, S::Hessian, r_im);
+    addT(2, 1, S::Jacobian, r_im);
+    addT(2, 1, S::MassMatrix, r_re);
+    addT(2, 2, S::Jacobian, r_re);
+    addT(2, 2, S::MassMatrix, r_im);
+    spec.add(2, 2, S::Diagonal);
+    spec.set(2, 3, S::Dense);
+    spec.set(2, 4, S::Dense);
+    // The two normalisation rows. Neither has a diagonal, deliberately: they constrain the
+    // eigenvector only, and a Dense entry there would manufacture the stored zero diagonal of §7c.
+    spec.set(3, 1, S::Dense);
+    spec.set(4, 2, S::Dense);
+    return true;
+  }
+
   unsigned AzimuthalSymmetryBreakingHandler::ndof(oomph::GeneralisedElement *const &elem_pt)
   {
     // This does not change if considering m contributions are incorporated already
@@ -3598,6 +3838,156 @@ namespace pyoomph
   // (tindex = which time point, local_eqn = which raw dof; the global numbering groups all
   // dofs of one time point together, offset by Ndof*tindex), and the final local dof is the
   // shared unknown period T (T_global_eqn).
+  // Describes the augmented block of a periodic-orbit solve for the frozen sparsity machinery.
+  //
+  // The augmented unknowns are nT copies of the raw dof set -- one per time node around the orbit --
+  // followed by the single scalar period T, so the block is an (nT+1)x(nT+1) grid of groups. Within a
+  // pair of coupled time nodes the pattern is just the base Jacobian and mass matrix of the underlying
+  // element, so the only thing this has to describe is WHICH TIME NODES COUPLE. That is what differs
+  // between the discretisations (see the class comment), and both answers are read off the very data
+  // the assembly loops use rather than re-derived here:
+  //
+  //   * B-spline / collocation (basis != NULL): two time nodes couple iff they are supported on a
+  //     common basis element. get_integration_info() reports that support as `indices`, exactly as
+  //     get_jacobian_bspline_mode() consumes it.
+  //   * Floquet / plain finite differences (basis == NULL): a node couples to itself, to its
+  //     neighbours, and to whatever the ds stencil FD_ds_inds[t] reaches.
+  //
+  // Deliberately conservative in two places, because over-describing only costs stored zeros while
+  // under-describing would be wrong: the wrap-around identity that closes the orbit is declared for
+  // every mode (it is written only in Floquet mode, where the last block row is flushed first), and
+  // the base coupling is left on that flushed row too rather than special-cased per mode.
+  bool PeriodicOrbitHandler::get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const
+  {
+    pyoomph::BulkElementBase *pyoomph_elem_pt = dynamic_cast<pyoomph::BulkElementBase *>(elem_pt);
+    if (!pyoomph_elem_pt) return false;
+    auto *ft = pyoomph_elem_pt->get_code_instance()->get_func_table();
+    if (!ft) return false;
+    // The orbit assembles J and M together from this residual in a single multi-assemble pass; if the
+    // element does not have it, we cannot say what its pattern is.
+    const int resind = (int)ft->current_res_jac;
+    if (resind < 0) return false;
+
+    const unsigned nT = this->n_tsteps();
+    if (nT < 2) return false;
+    const unsigned Tgrp = nT; // the scalar period
+
+    spec.resize(nT + 1);
+    for (unsigned t = 0; t < nT; t++) spec.group_is_scalar[t] = false;
+    spec.group_is_scalar[Tgrp] = true;
+
+    // Couples time node a to time node b with the base Jacobian and mass-matrix patterns. Both are
+    // needed: the residual carries J*u from the spatial operator and M*du/ds from the time derivative.
+    // Also records that a carries an equation at all, which the period column below is gated on --
+    // not every time node does (see the collocation branch).
+    std::vector<bool> is_eqn_row(nT, false);
+    auto couple = [&](unsigned a, unsigned b)
+    {
+      if (a >= nT || b >= nT) return;
+      is_eqn_row[a] = true;
+      spec.add(a, b, AugmentedBlockSpec::Jacobian, resind);
+      spec.add(a, b, AugmentedBlockSpec::MassMatrix, resind);
+    };
+
+    // Same priority order as get_residuals()/get_jacobian(): collocation, Floquet, nodal FD, B-spline.
+    if (!this->basis)
+    {
+      if (this->time_mesh)
+      {
+        // Collocation (the default). Rows and columns do NOT run over the same node set, which is the
+        // whole subtlety here: a time element with nnode() nodes carries only nnode()-1 collocation
+        // points, and get_jacobian_collocation_mode() writes the equation of collocation point `inode`
+        // into the row of node `inode` -- so only the FIRST nnode()-1 nodes of an element are equation
+        // rows, while all nnode() of them are interpolated and hence appear as columns. Declaring the
+        // last node as a row too is what made every element-boundary block (3,0), (6,3), (9,6), ...
+        // come out 100% structural zeros. The time index a node stands for is TimeNode::get_index(),
+        // which is what the assembly indexes the block with.
+        for (unsigned ie = 0; ie < this->time_mesh->nelement(); ie++)
+        {
+          oomph::FiniteElement *el = dynamic_cast<oomph::FiniteElement *>(this->time_mesh->element_pt(ie));
+          if (!el || el->nnode() < 2) return false;
+          const unsigned nn = el->nnode();
+          for (unsigned in = 0; in + 1 < nn; in++) // rows: collocation points only
+          {
+            TimeNode *ni = dynamic_cast<TimeNode *>(el->node_pt(in));
+            if (!ni) return false;
+            for (unsigned in2 = 0; in2 < nn; in2++) // columns: every node of the element
+            {
+              TimeNode *nj = dynamic_cast<TimeNode *>(el->node_pt(in2));
+              if (!nj) return false;
+              couple(ni->get_index(), nj->get_index());
+            }
+          }
+        }
+      }
+      else if (this->floquet_mode)
+      {
+        // Floquet: trapezoidal between consecutive time nodes, so a node couples to itself and to its
+        // successor only -- both through J and M. The last block row carries no equation of its own;
+        // it is flushed and replaced by the wrap-around identity declared below, which is also why it
+        // must not be marked as an equation row here (it has no period column either).
+        for (unsigned t = 0; t + 1 < nT; t++)
+        {
+          couple(t, t);
+          couple(t, t + 1);
+        }
+      }
+      else
+      {
+        // Plain nodal finite differences (central, BDF2). Unlike Floquet there is NO t -> t+1 term:
+        // the spatial operator is evaluated at the node itself, and the only coupling to other time
+        // nodes is the dU/ds stencil, whose reach is FD_ds_inds[t]. That stencil multiplies the MASS
+        // matrix alone, so declaring the Jacobian pattern there as well would be pure over-inclusion
+        // (it cost +44% nnz for central and +89% for BDF2 when this branch was a guess).
+        for (unsigned t = 0; t < nT; t++)
+        {
+          couple(t, t);
+          if (t < this->FD_ds_inds.size())
+            for (unsigned k = 0; k < this->FD_ds_inds[t].size(); k++)
+            {
+              const unsigned b = this->FD_ds_inds[t][k];
+              if (b < nT) { is_eqn_row[t] = true; spec.add(t, b, AugmentedBlockSpec::MassMatrix, resind); }
+            }
+        }
+      }
+    }
+    else
+    {
+      // B-spline: two time nodes couple iff they are supported on a common basis element, which the
+      // basis reports as `indices` -- exactly what get_jacobian_bspline_mode() indexes the block with.
+      for (unsigned ie = 0; ie < this->basis->get_num_elements(); ie++)
+      {
+        std::vector<double> w;
+        std::vector<unsigned> indices;
+        std::vector<std::vector<double>> psi_s, dpsi_ds;
+        this->basis->get_integration_info(ie, w, indices, psi_s, dpsi_ds);
+        for (unsigned l = 0; l < indices.size(); l++)
+          for (unsigned l2 = 0; l2 < indices.size(); l2++)
+            couple(indices[l], indices[l2]);
+      }
+    }
+
+    // The period column dR/dT (from the M*dU/ds terms, which carry a 1/T), and the phase/plane
+    // constraint row that pins the orbit's time origin. Neither has a pattern of its own.
+    for (unsigned t = 0; t < nT; t++)
+    {
+      // dR/dT comes from the M*dU/ds term, so it exists exactly where there is an equation to
+      // differentiate; a time node that is only ever interpolated (collocation's element-boundary
+      // node) has no period column.
+      if (is_eqn_row[t]) spec.set(t, Tgrp, AugmentedBlockSpec::Dense);
+      spec.set(Tgrp, t, AugmentedBlockSpec::Dense);
+    }
+    spec.set(Tgrp, Tgrp, AugmentedBlockSpec::Dense);
+
+    // The wrap-around u(nT-1) - u(0) = 0 closing the orbit in Floquet mode. It is an identity, so it
+    // lands on the DIAGONAL of the off-diagonal block (nT-1, 0) -- not on a Jacobian pattern, and not
+    // on a square block, which is why AugmentedBlockSpec::Diagonal is not restricted to gr == gc.
+    spec.add(nT - 1, nT - 1, AugmentedBlockSpec::Diagonal);
+    spec.add(nT - 1, 0, AugmentedBlockSpec::Diagonal);
+
+    return true;
+  }
+
   unsigned long PeriodicOrbitHandler::eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local)
   {
     unsigned raw_ndof = elem_pt->ndof();

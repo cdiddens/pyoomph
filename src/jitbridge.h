@@ -492,6 +492,10 @@ typedef struct JITFuncSpec_Table_FiniteElement
   // whatever entries turn out to be numerically nonzero -- i.e. a valid sparsity pattern. Used to give
   // the mass matrix its own tight, value-independent pattern; see dev_docs/structural_assembly.md.
   bool ARRAY_DECL_RESIDUAL_DESTINATION(ARRAY_DECL_NFIELDS(ARRAY_DECL_NFIELDS(contributes_to_mass_matrix)));
+  // Same again for the SECOND derivative: whether d2(residual)/d(field_i)d(field_j) is not
+  // identically zero. A Hessian contracted with a vector lives on THIS pattern, which is typically far
+  // tighter than the Jacobian's -- every linear term of the residual drops out of it.
+  bool ***contributes_to_hessian;
   // Fields defined on this domain (i.e. without taking over from parent)
   unsigned num_defined_fields_on_this_domain;
   char **defined_field_names_on_this_domain;
