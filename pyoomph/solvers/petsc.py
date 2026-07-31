@@ -73,6 +73,12 @@ class PETSCSolver(GenericLinearSystemSolver):
         self._structure_nrow_local:int=-1
         self._structure_digest:bytes | None=None   # Fingerprint of the pattern the Mat was built for
 
+        # Whether a factorisation that has failed twice (see _ksp_solve_checked) raises, rather than
+        # letting the untouched solution vector travel on as if it were an answer. Only ever consulted
+        # for a genuine factorisation failure -- an iterative KSP that merely stops on its iteration
+        # limit is never affected by this, whichever way it is set.
+        self.raise_on_failed_solve=True
+
     #		opts=PETSc.Options().getAll()
     #		if "add_zero_diagonal" in opts.keys():
     #			problem.set_diagonal_zero_entries(True)
@@ -371,6 +377,148 @@ class PETSCSolver(GenericLinearSystemSolver):
             return
         self.setup_solver()
 
+    # MUMPS INFOG(1) values that all mean the same thing: an internal work array was sized from the
+    # analysis phase's fill-in prediction and numerical pivoting then needed more room than that.
+    # MUMPS stops rather than reallocating, and its own answer is to raise ICNTL(14) and rerun.
+    _MUMPS_WORKSPACE_ERRORS = (-8, -9, -11, -12, -14, -15, -17, -19, -20)
+
+    # The only two failures worth acting on. Both mean the vector PETSc handed back is not a solution
+    # of anything, and both can be cured by factorising again from scratch.
+    #
+    # Everything else a KSP can report negative is deliberately left alone, DIVERGED_MAX_IT above all:
+    # an iterative solver stopping on its iteration limit has produced a real, merely inaccurate,
+    # iterate, and Newton is often perfectly happy with it. Rebuilding the KSP there would throw away a
+    # preconditioner (a hypre/GAMG setup is not cheap) and re-run the same solve to reach the same
+    # place, and aborting on it would break any hand-configured iterative solver that has always been
+    # allowed to return early. Those cases get a warning and their iterate, exactly as before.
+    _RECOVERABLE_KSP_FAILURES = (PETSc.KSP.ConvergedReason.DIVERGED_PCSETUP_FAILED, #type:ignore
+                                 PETSc.KSP.ConvergedReason.DIVERGED_NANORINF)       #type:ignore
+
+    def _mumps_infog(self,which:int)->int | None:
+        """MUMPS' INFOG(which) from the current factorisation, or None if MUMPS did not do it.
+
+        Two gates before anything MUMPS-specific is touched, because neither PETSc nor petsc4py need
+        have MUMPS at all:
+
+        * the installation must have been built with it -- ``PETSc.Sys.hasExternalPackage``, the same
+          check ``use_mumps()`` makes before configuring it;
+        * and this PC must actually be running it. getFactorSolverType() answers that without raising:
+          it is None for a PC that has no factor matrix in the first place (jacobi, gamg, hypre, none),
+          where getFactorMatrix() would raise PETSc error 56, and it names the package for the ones
+          that do, so a SuperLU or UMFPACK factorisation is turned away here rather than being asked
+          for an INFOG it does not have.
+
+        Everything MUMPS-specific in this class hangs off a non-None answer from this method, so on a
+        PETSc without MUMPS none of it is ever reached.
+        """
+        if self.ksp is None:
+            return None
+        if not PETSc.Sys.hasExternalPackage("mumps"): #type:ignore
+            return None
+        try:
+            pc = self.ksp.getPC() #type:ignore
+            if str(pc.getFactorSolverType()).lower() != "mumps": #type:ignore
+                return None
+            return int(pc.getFactorMatrix().getMumpsInfog(which)) #type:ignore
+        except Exception:
+            return None   # No factor matrix yet, or a petsc4py too old for the MUMPS accessors
+
+    def _increase_mumps_workspace(self)->None:
+        """Double MUMPS' ICNTL(14), the percentage of slack it adds to its predicted workspace.
+
+        Set for the rest of the run rather than just the retry: a matrix that needed the extra room
+        once will need it again at the next continuation step, and re-failing once per solve to
+        rediscover that is pure waste.
+        """
+        opts = PETSc.Options() #type:ignore
+        current = 20   # MUMPS' own default, which PETSc does not override
+        if opts.hasName("mat_mumps_icntl_14"): #type:ignore
+            try:
+                current = int(opts.getInt("mat_mumps_icntl_14")) #type:ignore
+            except Exception:
+                pass
+        new_value = min(max(2*current, 40), 1000)
+        if new_value == current:
+            return
+        _SetDefaultPetscOption("mat_mumps_icntl_14", new_value, force=True)
+        if not self.problem.is_quiet():
+            print("MUMPS ran out of working space; retrying with -mat_mumps_icntl_14 " + str(new_value))
+
+    def _ksp_solve_checked(self,bv:Any)->None:
+        """Solve, and turn a failed *factorisation* into a retry, and then into an error.
+
+        PETSc reports a failed factorisation by setting a negative KSPConvergedReason and returning
+        immediately, leaving the solution vector exactly as it found it. Nothing downstream can tell
+        that apart from a real solution, so it used to reach the Newton solver as an ``inf`` residual
+        with nothing to say where it came from.
+
+        Only the two reasons in _RECOVERABLE_KSP_FAILURES are acted on; every other way a KSP can end
+        negative keeps its old behaviour and merely gains a warning.
+
+        The retry is not cosmetic; it is what makes the failure recoverable at all. Keeping the KSP
+        alive across solves (see _setup_solver_if_needed) means PETSc sees SAME_NONZERO_PATTERN and
+        reuses MUMPS' *analysis* -- and with ICNTL(6)=5 that analysis is value-dependent: it fixes a
+        maximum-transversal permutation and a scaling from the matrix it first saw. As a continuation
+        walks the values away from that matrix the ordering stops being a good one, off-diagonal
+        pivoting grows (INFOG(12) went 288 -> 2638 on the case this was written for) and the fill-in
+        finally exceeds the workspace that stale analysis predicted: INFOG(1) = -9. Discarding the KSP
+        forces a fresh analysis for the values actually on hand, which is what makes the retry work.
+
+        Without that, the failure is permanent, not transient: the failed PC stays cached, so every
+        later solve returns in microseconds with the same error. An arclength continuation then halves
+        its step against a solver that can no longer solve anything, all the way down to its minimum
+        step, and reports a spurious "arc-length step has fallen below minimum tolerance".
+
+        Rebuilding rather than switching the reuse off is deliberate: on that same case the reused
+        symbolic factorisation was worth 2.7x on the in-process KSP solve time (2.4 s against 6.5 s
+        over the run), so the fast path is worth keeping and paying for a rebuild when it goes stale.
+
+        Safe under MPI: KSPSolve reduces the PC failure across the communicator, so getConvergedReason
+        agrees on every rank and all of them take the same (collective) rebuild branch.
+        """
+        assert self.ksp is not None
+        self.ksp.solve(bv, self.x) #type:ignore
+        reason:int = self.ksp.getConvergedReason() #type:ignore
+        if reason >= 0:
+            return
+
+        def described(r:int)->str:
+            infog1 = self._mumps_infog(1)
+            return ("KSPConvergedReason " + str(r)
+                    + (" (MUMPS INFOG(1)=" + str(infog1) + ")" if infog1 is not None else ""))
+
+        if reason not in self._RECOVERABLE_KSP_FAILURES:
+            # An unconverged iterate, not a failed factorisation. Say so and hand it on unchanged --
+            # this is the behaviour every configuration had before the check existed.
+            print("WARNING: the PETSc linear solve did not converge (" + described(reason)
+                  + "). The solution it returned is being used as it is.")
+            return
+
+        if not self.problem.is_quiet():
+            print("PETSc linear solve failed (" + described(reason)
+                  + "); discarding the cached factorisation and retrying")
+        infog1 = self._mumps_infog(1)
+        if infog1 is not None and infog1 in self._MUMPS_WORKSPACE_ERRORS:
+            self._increase_mumps_workspace()
+
+        self.ksp.destroy() #type:ignore
+        self.ksp = None
+        self.setup_solver()
+        assert self.ksp is not None
+        self.ksp.solve(bv, self.x) #type:ignore
+        reason = self.ksp.getConvergedReason() #type:ignore
+        if reason >= 0:
+            return
+
+        msg = ("The PETSc linear solver failed: " + described(reason)
+               + ", also on a retry with a freshly built factorisation. The solution vector is "
+                 "meaningless, so the solve is aborted here rather than handing it to the Newton "
+                 "solver as an inf/nan residual. Set "
+                 "problem.get_la_solver().raise_on_failed_solve=False to downgrade this to a warning.")
+        if self.raise_on_failed_solve:
+            raise RuntimeError(msg)
+        print("WARNING: " + msg)
+
     def setup_solver(self):
         #print("Setting up solver")
         opts = PETSc.Options().getAll() #type:ignore
@@ -462,7 +610,7 @@ class PETSCSolver(GenericLinearSystemSolver):
             else:
                 import time
                 start_time = time.time()
-                self.ksp.solve(bv, self.x) #type:ignore
+                self._ksp_solve_checked(bv)
                 end_time = time.time()
                 if not self.problem.is_quiet():
                     print("PETSc KSP solve time:", end_time - start_time, "seconds")
@@ -471,10 +619,10 @@ class PETSCSolver(GenericLinearSystemSolver):
 
             #print('Converged in', self.ksp.getIterationNumber(), 'iterations.') #type:ignore
 
-            
+
             self.petsc_rhs=None
             bv.destroy() #type:ignore
-            
+
         else:
             raise RuntimeError("Cannot handle Petsc mode " + str(op_flag) + " yet")
         return 0  # TODO: Return sign of Jacobian
@@ -550,7 +698,7 @@ class PETSCSolver(GenericLinearSystemSolver):
             else:
                 import time
                 start_time = time.time()
-                self.ksp.solve(bv, self.x) #type:ignore
+                self._ksp_solve_checked(bv)
                 end_time = time.time()
                 if not self.problem.is_quiet():
                     print("PETSc KSP solve time:", end_time - start_time, "seconds")
@@ -559,7 +707,7 @@ class PETSCSolver(GenericLinearSystemSolver):
 
             #print('Converged in', self.ksp.getIterationNumber(), 'iterations.') #type:ignore
 
-            
+
             self.petsc_rhs=None
             bv.destroy() #type:ignore
         else:
