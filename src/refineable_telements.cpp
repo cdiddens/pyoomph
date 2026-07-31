@@ -814,28 +814,22 @@ namespace oomph
               // the node across the edge-sharing neighbour father's sons AND the other sons of
               // this father, so no duplicate mid-edge nodes are created.
               bool is_periodic = false;
-              // First, the oomph-quad way: reuse a node an EDGE-NEIGHBOUR already built, found via the tri
-              // tree (which persists across adaptation rounds). This is what closes the cross-round gap --
-              // during transient re-adaptation a son built this round must reuse a coincident node an
-              // equal-sized neighbour built in an EARLIER round, else the shared vertex is duplicated and
-              // the moving mesh tears apart. The per-round Shared_edge_node_registry below only dedupes
-              // nodes built within THIS round (e.g. sibling sons not yet visited by the tree search).
+              // First, the oomph-quad way: reuse a node a NEIGHBOUR already holds at this point, found via
+              // the tri tree (which persists across adaptation rounds). This is what closes the cross-round
+              // gap -- during transient re-adaptation a son built this round must reuse the node a
+              // neighbour built in an EARLIER round, else the shared vertex is duplicated and the moving
+              // mesh tears apart. The search covers this element's whole tree root plus the adjacent
+              // root(s) and does not care what LEVEL the holder is at or whether it is still a leaf, so it
+              // also covers a neighbour that is finer than this element, and one that was split earlier in
+              // this very round. It is purely topological -- no node is ever identified by its position.
               created_node_pt = this->node_created_by_neighbour(s_fraction);
+              // Then the per-round registry, which dedupes nodes built within THIS round against a father
+              // node-pointer pair: sibling sons, and sons of the edge-sharing neighbour father, that the
+              // tree search above cannot see yet because neither side has built its nodes.
               if (created_node_pt == 0 && !reg_key.empty())
               {
                 std::map<std::set<Node *>, Node *>::iterator reg_it = Shared_edge_node_registry.find(reg_key);
                 if (reg_it != Shared_edge_node_registry.end()) created_node_pt = reg_it->second;
-              }
-              // Final fallback: a coincident node may already exist from an EARLIER round -- notably one
-              // built by a FINER neighbour's son, which node_created_by_neighbour (>=-sized neighbours only)
-              // cannot reach. Match it by position against the start-of-round snapshot. Only for genuine
-              // father-edge nodes (reg_key non-empty), so interior/vertex nodes are unaffected.
-              if (created_node_pt == 0 && !reg_key.empty() && !Existing_node_by_position.empty())
-              {
-                Vector<double> x_new(father_el_pt->nodal_dimension(), 0.0);
-                father_el_pt->interpolated_x(s, x_new);
-                std::map<std::string, Node *>::iterator pit = Existing_node_by_position.find(position_key(&x_new[0], x_new.size()));
-                if (pit != Existing_node_by_position.end()) created_node_pt = pit->second;
               }
 
 
@@ -1681,75 +1675,114 @@ namespace oomph
     return true;
   }
 
+  // See declaration. Walks a subtree, testing every BUILT element for a node at the given local point and
+  // recursing into every son that contains it. Nothing here looks at a physical position: containment is a
+  // barycentric test on the affine son<->father map, and the node test compares LOCAL coordinates.
+  Node *RefineableTElement<2>::node_in_subtree_at_local_coordinate(Tree *node, const Vector<double> &s)
+  {
+    if (!node) return 0;
+    FiniteElement *fe = dynamic_cast<FiniteElement *>(node->object_pt());
+    RefineableElement *re = dynamic_cast<RefineableElement *>(node->object_pt());
+    // An element whose nodes are not built yet has a null node_pt array -- skip it (its already-built
+    // ancestor was tested on the way down and holds the same node).
+    if (fe && re && re->nodes_built())
+    {
+      if (Node *n = fe->get_node_at_local_coordinate(s)) return n;
+    }
+    if (node->is_leaf()) return 0;
+    const double tol = 1e-9;
+    for (int c = 0; c < 4; c++) // tri 1->4 sons, son_type 0..3
+    {
+      Tree *ch = node->son_pt(c);
+      if (!ch) continue;
+      Vector<double> sc(2);
+      father_to_son_local(s, c, sc);
+      const double b = 1.0 - sc[0] - sc[1];
+      if (sc[0] < -tol || sc[1] < -tol || b < -tol) continue; // point is outside this son
+      // No early break: a point on the boundary between two sons is contained in both, and only one of
+      // them may hold the node (the other side can be coarser).
+      if (Node *n = node_in_subtree_at_local_coordinate(ch, sc)) return n;
+    }
+    return 0;
+  }
+
   Node *RefineableTElement<2>::node_created_by_neighbour(const Vector<double> &s_son) const
   {
     using namespace QuadTreeNames;
     if (!this->Tree_pt) return 0;
-    // Son edges the node lies on (S=v2-v0 at y=0, W=v1-v2 at x=0, E=v0-v1 at x+y=1); a vertex lies on two.
-    const double x = s_son[0], y = s_son[1];
+    TreeRoot *root = this->Tree_pt->root_pt();
+    RefineableTElement<2> *my_root = dynamic_cast<RefineableTElement<2> *>(root->object_pt());
+    if (!my_root) return 0;
+
+    // The point, once and for all, in this element's own ROOT frame. Exact (the affine son/father maps are
+    // exact by construction, refinement being defined in local coordinates), and it is the frame in which
+    // both the same-root search and the cross-root hop are expressed.
+    Vector<double> s_root(2);
+    this->local_coordinate_in_ancestor(s_son, my_root, s_root);
+
+    // (1) Anything inside my own root: siblings, cousins, uncles -- at any level, leaf or not.
+    if (Node *n = node_in_subtree_at_local_coordinate(root, s_root)) return n;
+
+    // (2) Root edges the point lies on (S=v2-v0 at y=0, W=v1-v2 at x=0, E=v0-v1 at x+y=1). A point strictly
+    // inside the root has none and is done; an edge point has one; a root vertex has two.
+    const double tol = 1e-12;
     int es[2], ne = 0;
-    if (std::abs(y) < 1e-12) es[ne++] = S;
-    if (std::abs(x) < 1e-12) es[ne++] = W;
-    if (std::abs(x + y - 1.0) < 1e-12) es[ne++] = E;
+    if (std::abs(s_root[1]) < tol) es[ne++] = S;
+    if (std::abs(s_root[0]) < tol) es[ne++] = W;
+    if (std::abs(s_root[0] + s_root[1] - 1.0) < tol) es[ne++] = E;
     for (int k = 0; k < ne; k++)
     {
-      TriEdgeNeighbour nb = this->tri_edge_neighbour(es[k]);
-      // Cross-shape (mixed quad+tri interface): reuse a coincident node an adjacent QUAD already built,
-      // found topologically -- map the son node's shared-edge parameter into the quad ROOT frame (blend of
-      // the shared corner nodes' quad-root local coords) and descend the quad tree to the leaf there. This
-      // is the quad-neighbour counterpart of the tri branch below and mirrors oomph's quad node_created_by_
-      // neighbour (get_node_at_local_coordinate on the neighbour leaf), never using positions/locate_zeta.
-      if (nb.cross_shape_root != nullptr)
+      const int my_D = es[k];
+      TreeRoot *nr = root->neighbour_pt(my_D);
+      if (!nr) continue; // domain boundary
+      const double t = param_on_edge(my_D, s_root);
+
+      RefineableTElement<2> *nr_root_el = dynamic_cast<RefineableTElement<2> *>(nr->object_pt());
+      if (nr_root_el)
       {
-        pyoomph::BulkElementBase *qroot = dynamic_cast<pyoomph::BulkElementBase *>(nb.cross_shape_root);
-        RefineableTElement<2> *my_root = dynamic_cast<RefineableTElement<2> *>(this->Tree_pt->root_pt()->object_pt());
-        FiniteElement *qroot_fe = dynamic_cast<FiniteElement *>(nb.cross_shape_root);
-        if (qroot && my_root && qroot_fe && nb.cross_shape_root->nodes_built())
+        // Tri neighbour root: match the shared edge by its two VERTEX NODE POINTERS (pure topology), which
+        // also tells us whether the neighbour parametrises the edge in the opposite sense.
+        int ea, eb;
+        edge_local_vertices(my_D, ea, eb);
+        Node *na = my_root->vertex_node_pt(ea);
+        Node *nbv = my_root->vertex_node_pt(eb);
+        int ca = -1, cb = -1;
+        for (int j = 0; j < 3; j++)
         {
-          int ea, eb;
-          edge_local_vertices(nb.my_edge_dir, ea, eb);
-          Node *Pb = my_root->vertex_node_pt(ea); // t=0
-          Node *Qb = my_root->vertex_node_pt(eb); // t=1
-          Vector<double> s_root(2);
-          this->local_coordinate_in_ancestor(s_son, my_root, s_root);
-          const double t = param_on_edge(nb.my_edge_dir, s_root);
-          const int iP = qroot_fe->get_node_number(Pb), iQ = qroot_fe->get_node_number(Qb);
-          if (iP >= 0 && iQ >= 0)
-          {
-            Vector<double> sP(2), sQ(2), s_qroot(2);
-            qroot_fe->local_coordinate_of_node(iP, sP);
-            qroot_fe->local_coordinate_of_node(iQ, sQ);
-            for (int d = 0; d < 2; d++) s_qroot[d] = (1.0 - t) * sP[d] + t * sQ[d];
-            Node *nn = qroot->quad_node_at_root_coordinate(s_qroot);
-            if (nn) return nn;
-          }
+          Node *vj = nr_root_el->vertex_node_pt(j);
+          if (vj == na) ca = j;
+          if (vj == nbv) cb = j;
         }
-        continue;
-      }
-      if (!nb.el) continue;
-      if (!nb.el->nodes_built()) continue; // neighbour built in an earlier round (or earlier this round)
-      // Map the son-node's local coordinate into the neighbour (exact affine map; same route as the hang
-      // helper). A coarser neighbour has no node at this interior position -> get_node returns 0.
-      Vector<double> s_neigh(2);
-      bool ok;
-      if (!nb.cross_root)
-      {
-        ok = this->local_coordinate_in_other_leaf(s_son, nb.el, s_neigh);
+        if (ca < 0 || cb < 0) continue; // roots not actually edge-sharing (should not happen)
+        const int nr_D = edge_from_local_vertices(ca, cb);
+        if (nr_D < 0) continue;
+        int nca, ncb;
+        edge_local_vertices(nr_D, nca, ncb);
+        const double tn = (nca != ca) ? 1.0 - t : t;
+        Vector<double> s_nrroot(2);
+        point_on_edge(nr_D, tn, s_nrroot);
+        if (Node *n = node_in_subtree_at_local_coordinate(nr, s_nrroot)) return n;
       }
       else
       {
-        RefineableTElement<2> *my_root = dynamic_cast<RefineableTElement<2> *>(this->Tree_pt->root_pt()->object_pt());
-        if (!my_root) continue;
-        Vector<double> s_root(2), s_nrroot(2);
-        this->local_coordinate_in_ancestor(s_son, my_root, s_root);
-        double t = param_on_edge(nb.my_edge_dir, s_root);
-        if (nb.reversed) t = 1.0 - t;
-        point_on_edge(nb.nr_edge_dir, t, s_nrroot);
-        ok = root_coord_to_leaf(s_nrroot, nb.el, s_neigh);
+        // Cross-SHAPE neighbour root (a QUAD at a mixed quad+tri interface): the tri son tables do not
+        // apply, so the shared-edge parameter is carried over by blending the quad-root LOCAL coordinates
+        // of the two shared corner NODES -- again node pointers and local coordinates only.
+        pyoomph::BulkElementBase *qroot = dynamic_cast<pyoomph::BulkElementBase *>(nr->object_pt());
+        FiniteElement *qroot_fe = dynamic_cast<FiniteElement *>(nr->object_pt());
+        RefineableElement *qroot_re = dynamic_cast<RefineableElement *>(nr->object_pt());
+        if (!qroot || !qroot_fe || !qroot_re || !qroot_re->nodes_built()) continue;
+        int ea, eb;
+        edge_local_vertices(my_D, ea, eb);
+        const int iP = qroot_fe->get_node_number(my_root->vertex_node_pt(ea)); // t=0
+        const int iQ = qroot_fe->get_node_number(my_root->vertex_node_pt(eb)); // t=1
+        if (iP < 0 || iQ < 0) continue;
+        Vector<double> sP(2), sQ(2), s_qroot(2);
+        qroot_fe->local_coordinate_of_node(iP, sP);
+        qroot_fe->local_coordinate_of_node(iQ, sQ);
+        for (int d = 0; d < 2; d++) s_qroot[d] = (1.0 - t) * sP[d] + t * sQ[d];
+        if (Node *n = qroot->quad_node_at_root_coordinate(s_qroot)) return n;
       }
-      if (!ok) continue;
-      Node *nn = nb.el->get_node_at_local_coordinate(s_neigh);
-      if (nn) return nn;
     }
     return 0;
   }
@@ -1873,11 +1906,10 @@ namespace oomph
 
   Node *RefineableTElement<2>::node_at_root_coordinate(const Vector<double> &s_root) const
   {
-    Vector<double> s_leaf(2);
-    RefineableElement *leaf = this->leaf_at_root_coordinate(s_root, s_leaf);
-    FiniteElement *leaf_fe = dynamic_cast<FiniteElement *>(leaf);
-    if (!leaf_fe) return 0;
-    return leaf_fe->get_node_at_local_coordinate(s_leaf);
+    // Search the whole subtree, not just the leaf the point falls in: the holder of the node can sit at
+    // any level (see node_in_subtree_at_local_coordinate), and on a son boundary it can be on either side.
+    if (!this->Tree_pt) return 0;
+    return node_in_subtree_at_local_coordinate(this->Tree_pt->root_pt(), s_root);
   }
 
   //=================================================================
@@ -1912,8 +1944,9 @@ namespace oomph
         if (!sib) return res;
         // Return the sibling if it is a leaf: climbs==0 => EQUAL-sized neighbour (diff_level 0), climbs>=1
         // => strictly coarser (diff_level<0). The hang helper acts only on diff_level<0, so returning the
-        // equal neighbour is behaviour-preserving there; node-sharing (node_created_by_neighbour) needs
-        // the equal neighbour too. A non-leaf sibling is equal-or-finer -> leave res.el null.
+        // equal neighbour is behaviour-preserving there. A non-leaf sibling is equal-or-finer -> leave
+        // res.el null. (Node-sharing no longer comes through here: it needs holders at any level, leaf or
+        // not, and does its own subtree search -- see node_created_by_neighbour.)
         if (sib->is_leaf() || climbs == 0)
         {
           // Leaf sibling (or the immediate equal sibling): return it directly.
@@ -2539,11 +2572,13 @@ namespace oomph
         for (Node *nd : reg_key) gen.push_back(nd);
       }
 
-      // (1.5) Topological: reuse a node an already-built FACE-NEIGHBOUR created, found via the OcTree
-      // (which persists across adaptation rounds). This closes the cross-round gap for face-shared nodes --
-      // an equal-sized COUSIN built in an EARLIER round -- so a moving tet mesh does not tear at a
-      // refine/coarsen interface (the 3d analogue of the triangle node_created_by_neighbour). The per-round
-      // registry below only dedupes nodes built within THIS round. Only for genuine shared nodes.
+      // (1.5) Topological: reuse a node an already-built NEIGHBOUR holds at this point, found via the
+      // OcTree (which persists across adaptation rounds). This closes the cross-round gap -- a neighbour
+      // built in an EARLIER round -- so a moving tet mesh does not tear at a refine/coarsen interface
+      // (the 3d analogue of the triangle node_created_by_neighbour). It searches this element's whole tree
+      // root and then out through root face neighbours, so the holder may be at any level, need not be a
+      // leaf, and may share only an edge with this element. The per-round registry below only dedupes
+      // nodes built within THIS round. Only for genuine shared nodes.
       if (!reg_key.empty())
       {
         Node *nbn = this->node_created_by_neighbour(s_son);
@@ -2586,15 +2621,26 @@ namespace oomph
         }
       }
 
-      // (2b) Final fallback: reuse a coincident node that already existed at the START of this refinement
-      // round -- notably one built by a FINER neighbour in an EARLIER round. The per-round registry above
-      // only dedupes within THIS round, so without this a shared node is DUPLICATED under transient
-      // re-adaptation and a moving tet mesh tears apart at the refine/coarsen interface (the 3d analogue
-      // of the triangle case; tets have no tree neighbour finder yet, so this position snapshot -- shared
-      // with the triangle build via RefineableTElement<2> -- is the sole cross-round dedupe). The new
-      // node sits at the average (centroid/midpoint) of its generating nodes, which is where the existing
-      // coincident node also sits. Only for genuine shared (father-edge / face-bubble) nodes.
-      if (!reg_key.empty() && !gen.empty())
+      // (2b) Fallback for a PYRAMID-ROOTED (mixed 3d) forest only: reuse a coincident node that already
+      // existed at the START of this refinement round -- notably one built by a FINER neighbour in an
+      // EARLIER round. The per-round registry above only dedupes within THIS round, so without this a
+      // shared node is DUPLICATED under transient re-adaptation and a moving mixed mesh tears apart at the
+      // refine/coarsen interface. The new node sits at the average of its generating nodes, which is where
+      // the existing coincident node also sits.
+      //
+      // A pure tet forest does NOT come here: step (1.5) above now finds the holder topologically at any
+      // level and across edges as well as faces. Identifying a node by its POSITION is only as good as the
+      // positions are, and a hanging node's stored position is a cache of its masters that anything writing
+      // the dof vector from outside the Newton solver leaves stale -- which is exactly how adapting on an
+      // eigenfunction used to tear a 2d mesh. The remaining mixed-3d shapes (pyramid/wedge/brick-as-son)
+      // still need the same treatment as the tets got here.
+      //
+      // "Mixed" has to be tested with the same predicate the registry above uses, not just
+      // in_pyramid_forest(): in a three-way (tet+wedge+pyramid) forest a tet can be rooted in a WEDGE, and
+      // its neighbours across a face can be of any shape -- neither the tet tree walk nor its root hops
+      // reach those, so the fallback is still load-bearing there.
+      const bool mixed_3d_forest = in_pyramid_forest() || oomph::RefineablePyramidElement::Mixed_forest_active;
+      if (mixed_3d_forest && !reg_key.empty() && !gen.empty())
       {
         const unsigned dim = gen[0]->ndim();
         double x_new[3] = {0.0, 0.0, 0.0};
@@ -3141,52 +3187,110 @@ namespace oomph
   }
 
   //=================================================================
-  /// Reuse a node an already-built FACE-neighbour created (topological, via the OcTree). The 3d analogue
-  /// of RefineableTElement<2>::node_created_by_neighbour: for each father-face the son node lies on, find
-  /// the face-neighbour, map the node's local coordinate into it (exact affine map / shared-face corner
-  /// relabel), and return its node there if one exists. Covers same-root cousins and cross-root neighbours,
-  /// coarser and equal. A node shared ONLY across an edge (no common face) or built by a strictly-finer
-  /// neighbour is not found here -- the position snapshot in build() still covers those.
+  /// See declaration. Walks a tet subtree, testing every BUILT element for a node at the given local
+  /// point and recursing into every son that contains it. Containment is a barycentric test on the exact
+  /// affine son/father map and the node test compares LOCAL coordinates -- no positions anywhere.
   //=================================================================
+  Node *RefineableTElement<3>::node_in_subtree_at_local_coordinate(Tree *node, const Vector<double> &s)
+  {
+    if (!node) return 0;
+    FiniteElement *fe = dynamic_cast<FiniteElement *>(node->object_pt());
+    RefineableElement *re = dynamic_cast<RefineableElement *>(node->object_pt());
+    // An element whose nodes are not built yet has a null node_pt array -- skip it; its already-built
+    // ancestor was tested on the way down and holds the same node.
+    if (fe && re && re->nodes_built())
+    {
+      if (Node *n = fe->get_node_at_local_coordinate(s)) return n;
+    }
+    if (node->is_leaf()) return 0;
+    const double tol = 1e-9;
+    for (int c = 0; c < 8; c++) // tet 1->8 sons (4 corner tets + the 4 from the inner octahedron)
+    {
+      Tree *ch = node->son_pt(c);
+      if (!ch) continue;
+      Vector<double> sc(3);
+      father_to_son_local(s, c, sc);
+      const double b3 = 1.0 - sc[0] - sc[1] - sc[2];
+      if (sc[0] < -tol || sc[1] < -tol || sc[2] < -tol || b3 < -tol) continue; // outside this son
+      // No early break: a point on a face/edge shared by several sons lies in all of them, and only one
+      // of them may hold the node (the others can be coarser).
+      if (Node *n = node_in_subtree_at_local_coordinate(ch, sc)) return n;
+    }
+    return 0;
+  }
+
+  namespace
+  {
+    // Relabel a point given by its barycentric weights in tet root A's frame into root B's frame, by
+    // matching the corners that CARRY WEIGHT via their NODE POINTERS. Corners with zero weight need not be
+    // shared, which is exactly what lets a point on a shared EDGE hop between roots that have only that
+    // edge in common. Returns false if a weight-carrying corner is not a corner of B.
+    inline bool tet_point_into_other_root(oomph::RefineableTElement<3> *A, const oomph::Vector<double> &sA,
+                                          oomph::RefineableTElement<3> *B, oomph::Vector<double> &sB)
+    {
+      if (!A || !B) return false;
+      const double b[4] = {sA[0], sA[1], sA[2], 1.0 - sA[0] - sA[1] - sA[2]};
+      double nb[4] = {0.0, 0.0, 0.0, 0.0};
+      for (int d = 0; d < 4; d++)
+      {
+        if (std::abs(b[d]) < 1e-12) continue; // corner carries no weight -> irrelevant to this point
+        oomph::Node *nd = A->vertex_node_pt(d);
+        int j = -1;
+        for (int k = 0; k < 4; k++)
+          if (B->vertex_node_pt(k) == nd) { j = k; break; }
+        if (j < 0) return false;
+        nb[j] = b[d];
+      }
+      sB[0] = nb[0]; sB[1] = nb[1]; sB[2] = nb[2];
+      return true;
+    }
+  } // namespace
+
   Node *RefineableTElement<3>::node_created_by_neighbour(const Vector<double> &s_son) const
   {
+    using namespace oomph::OcTreeNames;
     if (!this->Tree_pt) return 0;
-    // In a pyramid-rooted forest the tet neighbour tree-walk (tet_face_neighbour -> son_vertices_in_father)
-    // does not apply: the ancestry above a tet son of a pyramid is not the tet-in-tet map (son_type 6..9).
-    // Cross-parent node sharing there is handled instead by the father-edge-node registry (a node on a face
-    // shared by two adjacent parents keys identically from both), so this fallback is not needed -- and would
-    // throw on son_vertices_in_father(6..9). Return 0 to defer to the registry.
+    // In a pyramid-rooted forest the tet tree-walk (son_vertices_in_father) does not apply: the ancestry
+    // above a tet son of a pyramid is not the tet-in-tet map (son_type 6..9). Cross-parent node sharing
+    // there is handled by the father-node registry instead, so defer to it.
     if (in_pyramid_forest()) return 0;
-    // Father-faces the node lies on: face f (opposite vertex f) is the plane barycentric_f == 0.
-    const double b[4] = {s_son[0], s_son[1], s_son[2], 1.0 - s_son[0] - s_son[1] - s_son[2]};
-    for (int f = 0; f < 4; f++)
+
+    TreeRoot *root = this->Tree_pt->root_pt();
+    RefineableTElement<3> *my_root = dynamic_cast<RefineableTElement<3> *>(root->object_pt());
+    if (!my_root) return 0;
+    // The point in my own ROOT frame, once (the affine son/father maps are exact -- refinement is defined
+    // in local coordinates), which is the frame every hop below starts from.
+    Vector<double> s_root(3);
+    this->local_coordinate_in_ancestor(s_son, my_root, s_root);
+
+    // Breadth-first over roots: my own first, then out through root FACE neighbours, carrying the point
+    // along by its barycentric weights on the shared corner NODES. Transitive, so a point on a root EDGE
+    // reaches the whole fan of roots around that edge -- including those sharing no face with this one.
+    static const int FACE_SLOT[4] = {L, R, D, U};
+    std::vector<std::pair<Tree *, Vector<double>>> queue;
+    std::set<Tree *> seen;
+    queue.push_back(std::make_pair(static_cast<Tree *>(root), s_root));
+    seen.insert(root);
+    for (unsigned qi = 0; qi < queue.size(); qi++)
     {
-      if (std::abs(b[f]) > 1e-12) continue; // node not on this face
-      TetFaceNeighbour nb = this->tet_face_neighbour(f);
-      if (!nb.el || !nb.el->nodes_built()) continue;
-      Vector<double> s_neigh(3);
-      bool ok;
-      if (!nb.cross_root)
+      Tree *rt = queue[qi].first;
+      const Vector<double> s = queue[qi].second; // by value: the push_back below can reallocate `queue`
+      if (Node *n = node_in_subtree_at_local_coordinate(rt, s)) return n;
+      RefineableTElement<3> *rt_el = dynamic_cast<RefineableTElement<3> *>(rt->object_pt());
+      if (!rt_el) continue;
+      const double b[4] = {s[0], s[1], s[2], 1.0 - s[0] - s[1] - s[2]};
+      for (int f = 0; f < 4; f++)
       {
-        ok = this->local_coordinate_in_other_leaf(s_son, nb.el, s_neigh);
+        if (std::abs(b[f]) > 1e-12) continue; // the point is not on root face f (opposite vertex f)
+        Tree *nr = rt->root_pt()->neighbour_pt(FACE_SLOT[f]);
+        if (!nr || seen.count(nr)) continue;
+        RefineableTElement<3> *nr_el = dynamic_cast<RefineableTElement<3> *>(nr->object_pt());
+        if (!nr_el) continue; // a foreign shape (mixed forest) -- handled by the registry, not here
+        Vector<double> s_nr(3);
+        if (!tet_point_into_other_root(rt_el, s, nr_el, s_nr)) continue;
+        seen.insert(nr);
+        queue.push_back(std::make_pair(nr, s_nr));
       }
-      else
-      {
-        RefineableTElement<3> *my_root = dynamic_cast<RefineableTElement<3> *>(this->Tree_pt->root_pt()->object_pt());
-        if (!my_root) continue;
-        Vector<double> s_root(3);
-        this->local_coordinate_in_ancestor(s_son, my_root, s_root);
-        const double br[4] = {s_root[0], s_root[1], s_root[2], 1.0 - s_root[0] - s_root[1] - s_root[2]};
-        double nb_bary[4] = {0, 0, 0, 0};
-        for (int d = 0; d < 4; d++)
-          if (nb.corner_map[d] >= 0) nb_bary[nb.corner_map[d]] = br[d];
-        Vector<double> s_nrroot(3);
-        s_nrroot[0] = nb_bary[0]; s_nrroot[1] = nb_bary[1]; s_nrroot[2] = nb_bary[2];
-        ok = root_coord_to_leaf(s_nrroot, nb.el, s_neigh);
-      }
-      if (!ok) continue;
-      Node *nn = nb.el->get_node_at_local_coordinate(s_neigh);
-      if (nn) return nn;
     }
     return 0;
   }

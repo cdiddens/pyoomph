@@ -690,13 +690,46 @@ namespace pyoomph
 		return dynamic_cast<oomph::RefineableElement *>(node->object_pt());
 	}
 
+	// Search a quad subtree for a node at the point `s` (in the local frame of the subtree's own root
+	// element). The counterpart of RefineableTElement<2>::node_in_subtree_at_local_coordinate, and
+	// topological for the same reasons: the descent is the exact axis-aligned son-box map and the test is
+	// get_node_at_local_coordinate, which compares LOCAL coordinates. Every level is tested, not just the
+	// leaf (whether the point is a node depends on the level), and every son containing the point is
+	// followed (a point on a son boundary belongs to both, and only one side may hold the node).
+	static oomph::Node *quad_node_in_subtree(oomph::Tree *node, const oomph::Vector<double> &s)
+	{
+		using namespace oomph::QuadTreeNames;
+		if (!node) return nullptr;
+		oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(node->object_pt());
+		oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(node->object_pt());
+		// Skip an element whose nodes are not built yet: its node_pt array is still null, and its built
+		// ancestor (tested on the way down) holds the same node anyway.
+		if (fe && re && re->nodes_built())
+		{
+			if (oomph::Node *n = fe->get_node_at_local_coordinate(s)) return n;
+		}
+		if (node->is_leaf()) return nullptr;
+		const double tol = 1e-9;
+		for (int st = 0; st < 4; st++)
+		{
+			oomph::Tree *ch = node->son_pt(st);
+			if (!ch) continue;
+			const double xoff = (st == SE || st == NE) ? 0.5 : -0.5;
+			const double yoff = (st == NW || st == NE) ? 0.5 : -0.5;
+			oomph::Vector<double> sc(2);
+			sc[0] = 2.0 * (s[0] - xoff); // inverse of the son box map s_father = off + 0.5*s_son
+			sc[1] = 2.0 * (s[1] - yoff);
+			if (std::fabs(sc[0]) > 1.0 + tol || std::fabs(sc[1]) > 1.0 + tol) continue; // outside this son
+			if (oomph::Node *n = quad_node_in_subtree(ch, sc)) return n;
+		}
+		return nullptr;
+	}
+
 	oomph::Node *BulkElementBase::quad_node_at_root_coordinate(const oomph::Vector<double> &s_root)
 	{
-		oomph::Vector<double> s_leaf(2);
-		oomph::RefineableElement *leaf = this->quad_leaf_at_root_coordinate(s_root, s_leaf);
-		oomph::FiniteElement *leaf_fe = dynamic_cast<oomph::FiniteElement *>(leaf);
-		if (!leaf_fe) return nullptr;
-		return leaf_fe->get_node_at_local_coordinate(s_leaf);
+		oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(this);
+		if (!re || !re->tree_pt()) return nullptr;
+		return quad_node_in_subtree(re->tree_pt()->root_pt(), s_root);
 	}
 
 	oomph::Node *BulkElementBase::mixed_quad_shared_node(const oomph::Vector<double> &s_fraction)
