@@ -29,6 +29,7 @@ from __future__ import annotations
 
 
 import math
+import warnings
 
 from ..typings import *
 import numpy
@@ -37,7 +38,7 @@ import numpy
 from .. import _pyoomph_core as _pyoomph
 
 from .gmsh import GmshTemplate, Point, Line,Spline
-from .mesh import MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d,MeshTemplate
+from .mesh import MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d,MeshTemplate,MeshedMeshTemplate
 
 from ..typings import *
 if TYPE_CHECKING:
@@ -508,6 +509,12 @@ class Remesher2d(RemesherBase):
 
 
 class RemesherViaRecreation(RemesherBase):
+    """
+    Remesher of a :py:class:`~pyoomph.meshes.mesh.MeshedMeshTemplate`, which just calls the
+    :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.define_geometry` method of the template again. It is attached by
+    default to any :py:class:`~pyoomph.meshes.mesh.MeshedMeshTemplate`, i.e. also to any
+    :py:class:`~pyoomph.meshes.gmsh.GmshTemplate`, so it usually does not have to be created manually.
+    """
     def __init__(self,template:MeshTemplate):
         super().__init__(template)
         self.base_trunk=None
@@ -532,7 +539,7 @@ class RemesherViaRecreation(RemesherBase):
                     self._old_meshes[k]=m
 
         self.template._reset()
-        assert isinstance(self.template,GmshTemplate) # RemesherViaRecreation is only ever attached to a GmshTemplate (see RemeshableGmshTemplate2d), whose _do_define_geometry accepts the extra filename_trunk argument
+        assert isinstance(self.template,MeshedMeshTemplate) # Only a MeshedMeshTemplate recreates its geometry, and only its _do_define_geometry accepts the extra filename_trunk argument
         self.template._do_define_geometry(self.template.get_problem(),fnformat.format(self._cnt))
         self._cnt+=1
         
@@ -577,60 +584,12 @@ class ParametricGmshMeshRemesher2d(Remesher2d):
 
 class RemeshableGmshTemplate2d(GmshTemplate):
     """
-    An upgrade GmshTemplate, which allows remeshing via recreation. In the define_geometry() method, you will define both the initial mesh (if is_first_time() is False) and your remeshed mesh (is_first_time() is False).
-    For the latter case, you can obtain the previous boundary coordinates by get_boundary_coordinates(), etc.
-    
+    .. deprecated::
+        Just use a plain :py:class:`~pyoomph.meshes.gmsh.GmshTemplate` instead. Remeshing via recreation, together with
+        :py:meth:`~pyoomph.meshes.mesh.MeshedMeshTemplate.is_remeshing` and
+        :py:meth:`~pyoomph.meshes.mesh.MeshedMeshTemplate.get_boundary_coordinates`, is the default of any
+        :py:class:`~pyoomph.meshes.mesh.MeshedMeshTemplate` by now, so this class does not add anything anymore.
     """
     def __init__(self,loaded_from_mesh_file:str | None=None):
         super().__init__(loaded_from_mesh_file=loaded_from_mesh_file)
-        self.remesher=RemesherViaRecreation(self)
-    
-    def is_first_time(self):
-        """Will return True, if the mesh is being generated for the first time. Otherwise, it will return False, which means that the mesh is being remeshed. You can use this to define different geometries for the initial mesh and the remeshed mesh.
-
-        Returns:
-            Whether it is the first time the mesh is generated or not. True means first time, False means remeshing.
-        """
-        return not self.get_problem().is_initialised()
-    
-    def get_boundary_coordinates(self,name:str,sort_along_axis:Literal["x+", "x-", "y+", "y-"] | None=None,start_near_point:tuple["ExpressionOrNum", "ExpressionOrNum"] | None=None,nondimensional:bool=False)->list[list[tuple[float,float]]]:        
-        """Returns a list of boundary segments, which are lists of (x,y) coordinates (dimensional or not can be controlled by the nondimensional argument). The segments are sorted and reversed based on the sort_along_axis or start_near_point arguments. If both are None, the order is arbitrary.
-
-        Args:
-            name: Name of the boundary, e.g. "domain1/boundary1"
-            sort_along_axis: Sort the segments along a given axis, e.g. "x+" means sort along x in increasing order, "y-" means sort along y in decreasing order. Defaults to None.
-            start_near_point: Start near point for sorting segments. Defaults to None.
-            nondimensional: Whether to return nondimensional coordinates. Defaults to False.
-        
-        Returns:
-            A list of boundary segments, which are each a list of (x,y) coordinates.
-        """
-        if self.is_first_time():
-            raise RuntimeError("Cannot get boundary coordinates before the first mesh is generated")
-        data=self.get_problem().get_cached_mesh_data(name,nondimensional=True)
-        pts=data.get_coordinates()
-        segs,_=data.get_interface_line_segments()
-        
-         # Sort and reverse the segments based on the settings
-        if sort_along_axis is not None:
-            index,sign=({"x+":(0,1),"x-":(0,-1),"y+":(1,1),"y-":(1,-1)})[sort_along_axis]
-            for i,seg in enumerate(segs):
-                diff=pts[index,seg[-1]]-pts[index,seg[0]]
-                if diff*sign<0:
-                    segs[i]=list(reversed(seg))
-            segs=sorted(segs,key=lambda s: sign*pts[index,s[0]])
-        elif start_near_point is not None:
-            stp=start_near_point
-            for i,seg in enumerate(segs):
-                d1=(pts[0,seg[0]]-stp[0])**2+(pts[1,seg[0]]-stp[1])**2
-                d2=(pts[0,seg[-1]]-stp[0])**2+(pts[1,seg[-1]]-stp[1])**2
-                if d2>d1:
-                    segs[i]=list(reversed(seg))
-            segs=sorted(segs,key=lambda s: (pts[0,s[0]]-stp[0])**2+(pts[1,s[0]]-stp[1])**2 )
-        
-        res=[]
-        
-        SS=1 if nondimensional else self.get_problem().get_scaling("spatial")        
-        for seg in segs:
-            res.append([(pts[0,i]*SS,pts[1,i]*SS) for i in seg])
-        return res
+        warnings.warn("RemeshableGmshTemplate2d is deprecated. Use a plain GmshTemplate instead, which remeshes by recreation by default.",DeprecationWarning,stacklevel=2)

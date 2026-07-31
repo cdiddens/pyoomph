@@ -1,12 +1,14 @@
+.. _secalegmshfields:
+
 Remeshing by reconstruction, gmsh size fields & zeta coordinates
 ----------------------------------------------------------------
 
 As explained in :numref:`secaleremeshing`, remeshing can be treated quite automatically. However, sometimes, it is required to have more control over the local mesh size in this procedure. Also, sometimes you know the exact location of some boundaries, e.g. solid walls will always stay in place and an axis of symmetry will always be located at :math:`r=0`. 
 
-Both of these aspects are tackled with the class :py:class:`~pyoomph.meshes.remesher.RemeshableGmshTemplate2d`. This class behaves like a normal :py:class:`~pyoomph.meshes.gmsh.GmshTemplate`, but its :py:meth:`~pyoomph.meshes.gmsh.GmshTemplate.define_geometry` method will be called again for each remeshing event. Of course, the free surface will have moved by then, so we require two ingredients to realize this approach: 
+Both of these aspects are covered by the default remeshing strategy of the :py:class:`~pyoomph.meshes.gmsh.GmshTemplate`, namely remeshing by recreation: its :py:meth:`~pyoomph.meshes.gmsh.GmshTemplate.define_geometry` method will be called again for each remeshing event. Of course, the free surface will have moved by then, so we require two ingredients to realize this approach: 
 
-* Within the method :py:meth:`~pyoomph.meshes.gmsh.GmshTemplate.define_geometry`, we must be able to find out whether we are constructing the initial mesh or whether we are remeshing. This can be checked with the method :py:meth:`~pyoomph.meshes.remesher.RemeshableGmshTemplate2d.is_first_time`. For the initial mesh, this yields ``True``, i.e. we can mesh the initial shape of the free surface. If it is ``False``, we are remeshing, so we must reconstruct the current shape of each free surface.
-* In the latter case, we must find the points defining the current shape, so that a new boundary of the same shape can be created, typically a spline. The points of the current boundary, i.e. the one we want to reconstruct, are accessible via the method :py:meth:`~pyoomph.meshes.remesher.RemeshableGmshTemplate2d.get_boundary_coordinates`.
+* Within the method :py:meth:`~pyoomph.meshes.gmsh.GmshTemplate.define_geometry`, we must be able to find out whether we are constructing the initial mesh or whether we are remeshing. This can be checked with the method :py:meth:`~pyoomph.meshes.mesh.MeshedMeshTemplate.is_first_time`. For the initial mesh, this yields ``True``, i.e. we can mesh the initial shape of the free surface. If it is ``False``, we are remeshing, so we must reconstruct the current shape of each free surface.
+* In the latter case, we must find the points defining the current shape, so that a new boundary of the same shape can be created, typically a spline. The points of the current boundary, i.e. the one we want to reconstruct, are accessible via the method :py:meth:`~pyoomph.meshes.mesh.MeshedMeshTemplate.get_boundary_coordinates`.
 
 In the following, we will examplify this approach by the well-known Rayleigh-Plateau instability of a liquid cylinder.
 
@@ -15,18 +17,18 @@ In the following, we will examplify this approach by the well-known Rayleigh-Pla
    :start-at: from pyoomph import *
    :end-at: self.gmsh_options["Mesh.MeshSizeFromCurvature"]=8*pr.min_elements_per_radius
 
-We inherit from the class :py:class:`~pyoomph.meshes.remesher.RemeshableGmshTemplate2d` and override the method :py:meth:`~pyoomph.meshes.gmsh.GmshTemplate.define_geometry` as usual.
+We inherit from the class :py:class:`~pyoomph.meshes.gmsh.GmshTemplate` and override the method :py:meth:`~pyoomph.meshes.gmsh.GmshTemplate.define_geometry` as usual.
 However, we now give additional mesh size control to Gmsh by setting several values via the ``gmsh_options``. In particular, we set a minimum mesh size depending on the desired resolution and the minimum radius of the problem class (specified later therein), a maximum mesh size and enhance strongly curved parts of the interface by finer resolution.
 All available Gmsh options can be found in the `documentation <https://gmsh.info/doc/texinfo/#Gmsh-options>`__ .
 
-Then, we perform the steps mentioned at the top, i.e. create an initial mesh or reconstruct the interface by a spline, depending on whether :py:meth:`~pyoomph.meshes.remesher.RemeshableGmshTemplate2d.is_first_time` is ``True`` or ``False``:
+Then, we perform the steps mentioned at the top, i.e. create an initial mesh or reconstruct the interface by a spline, depending on whether :py:meth:`~pyoomph.meshes.mesh.MeshedMeshTemplate.is_first_time` is ``True`` or ``False``:
 
 .. literalinclude:: rayleigh_plateau.py
    :language: python
    :start-at: # The end points on the axis are always the same
    :end-at: self.plane_surface("bottom","axisymm", "top","interface",name="liquid")
 
-The axis of symmetry is always the same in this case, so we can always create these points. We do not set any mesh size here, since it will be treated in another way soon. For the initial mesh, we just make a box, for the remeshing steps, we get the coordinates of the current interface by :py:meth:`~pyoomph.meshes.remesher.RemeshableGmshTemplate2d.get_boundary_coordinates`. This results in a list of boundary segments. Here, however, we only have a single segment, since the interface will always be a single connected curve. We can sort the points along the boundary automatically with the argument ``sort_along_axis="y+"``. Even in case of overhangs, the order is still following the curve, i.e. this sorting is performed based on the end points only. We then construct the points, pass them to a spline and extract the start and end points of the surface at the bottom and top, before meshing the domain as usual in both scenarios, the initial mesh and each reconstructed mesh.
+The axis of symmetry is always the same in this case, so we can always create these points. We do not set any mesh size here, since it will be treated in another way soon. For the initial mesh, we just make a box, for the remeshing steps, we get the coordinates of the current interface by :py:meth:`~pyoomph.meshes.mesh.MeshedMeshTemplate.get_boundary_coordinates`. This results in a list of boundary segments. Here, however, we only have a single segment, since the interface will always be a single connected curve. We can sort the points along the boundary automatically with the argument ``sort_along_axis="y+"``. Even in case of overhangs, the order is still following the curve, i.e. this sorting is performed based on the end points only. We then construct the points, pass them to a spline and extract the start and end points of the surface at the bottom and top, before meshing the domain as usual in both scenarios, the initial mesh and each reconstructed mesh.
 
 For the mesh size, we use `gmsh's mesh size fields <https://gmsh.info/doc/texinfo/#Gmsh-mesh-size-fields>`__, which can be added with :py:meth:`~pyoomph.meshes.gmsh.GmshTemplate.add_mesh_size_field` method:
 

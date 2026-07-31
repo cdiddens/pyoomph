@@ -29,13 +29,11 @@ from pyoomph import *
 # Using the predefined Navier-Stokes and ALE equations from pyoomph
 from pyoomph.equations.navier_stokes import *
 from pyoomph.equations.ALE import *
-# We require the remeshing utities from pyoomph
-from pyoomph.meshes.remesher import *
-# And the interface zeta coordinate utilities to get smooth interpolation of the interface upon remeshing
+# The interface zeta coordinate utilities to get smooth interpolation of the interface upon remeshing
 from pyoomph.meshes.zeta import *
 
         
-class DomainMeshAxi(RemeshableGmshTemplate2d):                  
+class DomainMeshAxi(GmshTemplate):                  
     def define_geometry(self):
         self.mesh_mode="tris"
         

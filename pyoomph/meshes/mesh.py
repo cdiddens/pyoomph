@@ -573,10 +573,14 @@ class MeshTemplate(_pyoomph.MeshTemplate):
 #            print("Writing meshfile "+found_mshfile)
 
         has_remesher = 1 if self.remesher is not None else 0
-        state.int_data(lambda: has_remesher,
-                       lambda r: state.assert_equal(has_remesher, r))
+        # We must follow the flag stored in the file here, not our own: since MeshedMeshTemplate attaches a
+        # RemesherViaRecreation by default, a template can now have a remesher while an older state file - written
+        # when the same script had none - does not contain the remesher counter. Asserting equality would make all
+        # those files unloadable, and reading the counter unconditionally would desynchronize the entire file.
+        has_remesher = state.int_data(lambda: has_remesher, lambda r: r)
         if has_remesher:
-            assert self.remesher is not None
+            if self.remesher is None:
+                raise RuntimeError("The state file was written with a remesher attached to the mesh template, but the template does not have one anymore")
             self.remesher._cnt = state.int_data(
                 lambda: self.remesher._cnt, lambda s: s)  # type:ignore
         if found_mshfile != mshfile:
@@ -633,6 +637,11 @@ class MeshTemplate(_pyoomph.MeshTemplate):
         This method must be specialized in a derived class to define the geometry, i.e. the nodes, domains and elements of the mesh.
         """
         raise RuntimeError("Please implement the function define_geometry")
+
+    def _remeshing_can_change_the_mesh(self) -> bool:
+        # Whether remeshing this template can give a mesh different from the current one. Only a
+        # MeshedMeshTemplate can tell (see there), any other remesher is always taken at face value.
+        return True
 
     def available_domains(self) -> set[str]:
         """
@@ -798,6 +807,131 @@ class MeshTemplate(_pyoomph.MeshTemplate):
         if store_entity:
             self._macrobounds.append(res)
         return res
+
+
+class MeshedMeshTemplate(MeshTemplate):
+    """
+    Base class of all :py:class:`MeshTemplate` classes that let an external mesh generator (e.g. Gmsh) create the mesh
+    from a geometry description given in :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.define_geometry`.
+
+    Since the geometry is described by a method that can be called again at any time, remeshing is done by recreation:
+    a :py:class:`~pyoomph.meshes.remesher.RemesherViaRecreation` is attached by default, which calls
+    :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.define_geometry` again whenever remeshing is required. It is therefore
+    up to you to describe both the initial and the remeshed geometry in that single method: use :py:meth:`is_remeshing`
+    (or its complement :py:meth:`is_first_time`) to distinguish the two cases and
+    :py:meth:`get_boundary_coordinates` to reconstruct the boundaries that have moved meanwhile.
+
+    A :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.define_geometry` that never asks either of the two would describe the
+    very same geometry again, i.e. recreating it cannot give a different mesh. Such a template is therefore skipped
+    when :py:meth:`~pyoomph.generic.problem.Problem.force_remesh` gathers the meshes to remesh by itself, but not when
+    it is asked for this particular mesh, e.g. by a :py:class:`~pyoomph.equations.generic.RemeshWhen`.
+
+    If you prefer the mesh generator to reconstruct the geometry automatically from the deformed mesh, overwrite the
+    :py:attr:`~pyoomph.meshes.mesh.MeshTemplate.remesher` attribute by e.g. a
+    :py:class:`~pyoomph.meshes.remesher.Remesher2d` instead.
+    """
+
+    def __init__(self):
+        super().__init__()
+        # Deferred import: remesher.py imports gmsh.py, which imports this module, so importing it at module level
+        # would be circular.
+        from .remesher import RemesherViaRecreation
+        self.remesher = RemesherViaRecreation(self)
+        # Remember the remesher we attached ourselves, so that we can tell it from one the user has chosen deliberately
+        self._auto_remesher = self.remesher
+        self._within_define_geometry = False
+        # Set by is_first_time(), i.e. whenever define_geometry asks whether it is remeshing. A define_geometry that
+        # never asks will describe the very same geometry again, so recreating it cannot give a different mesh
+        self._has_remeshing_path = False
+
+    def is_first_time(self) -> bool:
+        """Will return ``True``, if the mesh is being generated for the first time. Otherwise, it will return ``False``, which means that the mesh is being remeshed. You can use this to define different geometries for the initial mesh and the remeshed mesh.
+
+        May only be called from within :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.define_geometry`, since only there the answer is meaningful.
+
+        Returns:
+            Whether it is the first time the mesh is generated or not. ``True`` means first time, ``False`` means remeshing.
+        """
+        self._assert_within_define_geometry("is_first_time() and is_remeshing()")
+        # Asking the question is what tells us that this template describes a different geometry when remeshed
+        self._has_remeshing_path = True
+        return not self.get_problem().is_initialised()
+
+    def _assert_within_define_geometry(self, what: str):
+        if not self._within_define_geometry:
+            raise RuntimeError(what+" may only be called from within the define_geometry method of the mesh template. Elsewhere, no mesh is being created, so there is nothing to tell apart. If you require the information later on, store it in an attribute during define_geometry.")
+
+    def _remeshing_can_change_the_mesh(self) -> bool:
+        # Used by Problem.force_remesh() when it collects the meshes to remesh on its own: since we attach a
+        # RemesherViaRecreation to every meshed template, remeshing all of them would also rebuild those templates
+        # whose define_geometry does not react on remeshing at all - which just burns time to arrive at the same mesh.
+        # A remesher the user has set deliberately is of course never skipped.
+        if self.remesher is not self._auto_remesher:
+            return True
+        return self._has_remeshing_path
+
+    def is_remeshing(self) -> bool:
+        """Complement of :py:meth:`is_first_time`, i.e. ``True`` whenever :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.define_geometry` is called to remesh an already existing mesh.
+
+        Returns:
+            Whether the mesh is currently being recreated for remeshing.
+        """
+        return not self.is_first_time()
+
+    def get_boundary_coordinates(self, name: str, sort_along_axis: Literal["x+", "x-", "y+", "y-"] | None = None, start_near_point: tuple["ExpressionOrNum", "ExpressionOrNum"] | None = None, nondimensional: bool = False) -> list[list[tuple[float, float]]]:
+        """Returns a list of boundary segments, which are lists of (x,y) coordinates (dimensional or not can be controlled by the nondimensional argument). The segments are sorted and reversed based on the sort_along_axis or start_near_point arguments. If both are None, the order is arbitrary.
+
+        Args:
+            name: Name of the boundary, e.g. "domain1/boundary1"
+            sort_along_axis: Sort the segments along a given axis, e.g. "x+" means sort along x in increasing order, "y-" means sort along y in decreasing order. Defaults to None.
+            start_near_point: Start near point for sorting segments. Defaults to None.
+            nondimensional: Whether to return nondimensional coordinates. Defaults to False.
+
+        Returns:
+            A list of boundary segments, which are each a list of (x,y) coordinates.
+        """
+        self._assert_within_define_geometry("get_boundary_coordinates()")
+        self._has_remeshing_path = True # The geometry obviously depends on the mesh we are replacing
+        if not self.get_problem().is_initialised():
+            raise RuntimeError("Cannot get boundary coordinates before the first mesh is generated")
+        data = self.get_problem().get_cached_mesh_data(name, nondimensional=True)
+        pts = data.get_coordinates()
+        segs, _ = data.get_interface_line_segments()
+
+        # Sort and reverse the segments based on the settings
+        if sort_along_axis is not None:
+            index, sign = ({"x+": (0, 1), "x-": (0, -1), "y+": (1, 1), "y-": (1, -1)})[sort_along_axis]
+            for i, seg in enumerate(segs):
+                diff = pts[index, seg[-1]]-pts[index, seg[0]]
+                if diff*sign < 0:
+                    segs[i] = list(reversed(seg))
+            segs = sorted(segs, key=lambda s: sign*pts[index, s[0]])
+        elif start_near_point is not None:
+            stp = start_near_point
+            for i, seg in enumerate(segs):
+                d1 = (pts[0, seg[0]]-stp[0])**2+(pts[1, seg[0]]-stp[1])**2
+                d2 = (pts[0, seg[-1]]-stp[0])**2+(pts[1, seg[-1]]-stp[1])**2
+                if d2 > d1:
+                    segs[i] = list(reversed(seg))
+            segs = sorted(segs, key=lambda s: (pts[0, s[0]]-stp[0])**2+(pts[1, s[0]]-stp[1])**2)
+
+        res = []
+
+        SS = 1 if nondimensional else self.get_problem().get_scaling("spatial")
+        for seg in segs:
+            res.append([(pts[0, i]*SS, pts[1, i]*SS) for i in seg])
+        return res
+
+    def _do_define_geometry(self, problem: "Problem", filename_trunk: str | None = None):
+        # RemesherViaRecreation passes a fresh file name trunk for each remeshing round, so that the meshes written by
+        # the backend do not overwrite each other. Backends that do not write any file can simply ignore it.
+        if filename_trunk is not None:
+            self._fntrunk = filename_trunk
+        self._within_define_geometry = True
+        try:
+            super()._do_define_geometry(problem)
+        finally:
+            self._within_define_geometry = False
 
 
 class MeshFromTemplateBase(BaseMesh):

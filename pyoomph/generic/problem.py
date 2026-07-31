@@ -6310,8 +6310,11 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                 if t.remesher is not None:
                     remeshers.append(t.remesher)
         else:
+            # Without a given selection, we remesh everything that can actually give a different mesh. The latter
+            # matters since every MeshedMeshTemplate carries a remesher by default: a define_geometry that does not
+            # react on remeshing at all would just be rebuilt identically here (see _remeshing_can_change_the_mesh).
             for t in self._meshtemplate_list:
-                if t.remesher is not None:
+                if t.remesher is not None and t._remeshing_can_change_the_mesh():
                     remeshers.append(t.remesher)
 
         if len(remeshers)==0:
