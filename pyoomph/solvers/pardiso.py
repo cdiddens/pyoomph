@@ -368,8 +368,59 @@ class pardisoSolver(object):
         x = self.run_pardiso(phase=33, rhs=rhs)
         return x
 
+    # MKL's documented meanings for the `error` output. Every value is a hard failure -- Pardiso has no
+    # "converged badly but usable" answer to report, so anything nonzero means the contents of x are
+    # not a solution.
+    _ERROR_MEANINGS = {
+        -1: "input inconsistent",
+        -2: "not enough memory",
+        -3: "reordering problem",
+        -4: "zero pivot, numerical factorisation or iterative refinement problem "
+            "(the matrix is singular or nearly so at this state)",
+        -5: "unclassified (internal) error",
+        -6: "reordering failed",
+        -7: "diagonal matrix is singular",
+        -8: "32-bit integer overflow",
+        -9: "not enough memory for out-of-core",
+        -10: "error opening out-of-core files",
+        -11: "read/write error with out-of-core files",
+        -12: "pardiso_64 called from the 32-bit library",
+        -13: "interrupted by the mkl_progress function",
+        -14: "internal error, e.g. no license file found",
+        -15: "internal error, e.g. from the weighted matching (try iparm[12]=0)",
+    }
+
+    _PHASE_NAMES = {-1: "release of internal memory", 11: "reordering and symbolic factorisation",
+                    12: "reordering, symbolic and numerical factorisation",
+                    22: "numerical factorisation", 23: "numerical factorisation and solve",
+                    33: "solve and iterative refinement"}
+
+    def _check_pardiso_error(self,phase:int,code:int)->None:
+        """Turn MKL's `error` output into an exception, rather than into a silently wrong solution.
+
+        This check used to exist but could never fire: the argument was passed as
+        ``byref(c_int(ERR))``, which builds a throwaway ctypes object from the Python int, so MKL wrote
+        its code into a temporary that was discarded on the very next line and the ``if ERR != 0``
+        below it compared the untouched Python int against zero. Pardiso has therefore never been able
+        to report any of its own errors here, for as long as the call has existed.
+
+        The release phase is the one exception, and it is deliberate: clear() is called from __del__,
+        where raising only produces an "Exception ignored in __del__" and there is nothing left to
+        salvage anyway -- the OS reclaims MKL's memory at process exit regardless.
+        """
+        if code == 0:
+            return
+        what = self._ERROR_MEANINGS.get(code, "undocumented error code")
+        where = self._PHASE_NAMES.get(phase, "phase " + str(phase))
+        msg = ("MKL Pardiso failed during the " + where + ": error " + str(code) + " (" + what + ")")
+        if phase == -1:
+            print("WARNING: " + msg)
+            return
+        raise RuntimeError(msg + ". The solution vector is meaningless, so the solve is aborted here "
+                                 "rather than handing it on as an answer.")
+
     def run_pardiso(self, phase:int, rhs:NPFloatArray | NPComplexArray | None=None)->NPFloatArray | NPComplexArray:
-        
+
         if rhs is None:
             nrhs = 0
             x = np.zeros(1) #type:ignore
@@ -387,7 +438,9 @@ class pardisoSolver(object):
 
         MKL_rhs = rhs.ctypes.data_as(self.ctypes_dtype) #type:ignore
         MKL_x = x.ctypes.data_as(self.ctypes_dtype)
-        ERR = 0
+        # A named ctypes object, not byref(c_int(0)): the argument is an OUTPUT, so the object MKL
+        # writes into has to outlive the call for its value to be readable afterwards.
+        error = c_int(0)
 
         pardiso(self._MKL_pt,  # pt
                 byref(c_int(self.maxfct)),  # maxfct
@@ -404,10 +457,9 @@ class pardisoSolver(object):
                 byref(c_int(self.msglvl)),  # msglvl
                 MKL_rhs,  # b
                 MKL_x,  # x
-                byref(c_int(ERR)))  # error
-        
-        if ERR!=0:
-            print("ERROR IN PARDISO",ERR)
+                byref(error))  # error
+
+        self._check_pardiso_error(phase, error.value)
 
         if self._MKL_iparm[14]!=0 or self._MKL_iparm[15]!=0 or self._MKL_iparm[16]!=0:
             self.last_mem_used_in_kb=max(self._MKL_iparm[14],self._MKL_iparm[15]+self._MKL_iparm[16])
