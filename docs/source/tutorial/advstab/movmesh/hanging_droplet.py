@@ -28,18 +28,27 @@
 from pyoomph import *
 from pyoomph.equations.navier_stokes import * # Navier-Stokes for the flow
 from pyoomph.equations.ALE import * # Moving mesh equations
-from pyoomph.meshes.remesher import Remesher2d # Remeshing
 from pyoomph.utils.num_text_out import NumericalTextOutputFile # Tool to write a file with numbers
 
 # Make a mesh of a hanging hemispherical droplet with radius 1
+# Remeshing is done by recreation, i.e. define_geometry is called again for each remeshing event
 class HangingDropletMesh(GmshTemplate):
     def define_geometry(self):
         self.default_resolution=0.05
         self.mesh_mode="tris"
-        self.create_lines((0,-1),"axis",(0,0),"wall",(1,0))
-        self.circle_arc((0,-1),(1,0),center=(0,0),name="interface")
+        if self.is_remeshing():
+            # Remeshing: the interface has deformed meanwhile, so we rebuild it from the current mesh.
+            # The interface is a single connected curve from the apex (on the axis) to the contact line
+            interface_coords=self.get_boundary_coordinates("droplet/interface",sort_along_axis="x+")[0]
+            interface_pts=[self.point(x,y) for x,y in interface_coords]
+            self.spline(interface_pts,name="interface")
+            p_apex,p_contact_line=interface_pts[0],interface_pts[-1]
+        else:
+            # Initial mesh: a hemisphere
+            p_apex,p_contact_line=self.point(0,-1),self.point(1,0)
+            self.circle_arc(p_apex,p_contact_line,center=(0,0),name="interface")
+        self.create_lines(p_apex,"axis",(0,0),"wall",p_contact_line)
         self.plane_surface("axis","wall","interface",name="droplet")
-        self.remesher=Remesher2d(self) # attach a remesher
 
 
 class HangingDropletProblem(Problem):

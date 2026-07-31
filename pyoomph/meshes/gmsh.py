@@ -34,7 +34,7 @@ import numpy
 
 from ..expressions.generic import Expression, ExpressionNumOrNone, ExpressionOrNum
 
-from .mesh import MeshTemplate
+from .mesh import MeshTemplate, MeshedMeshTemplate
 
 # from .meshio import MeshioMesh2d
 from .. import _pyoomph_core as _pyoomph
@@ -308,9 +308,11 @@ def generate_mesh_to_file(geom:pygmsh.geo.Geometry | pygmsh.occ.Geometry, outdir
 
 
 
-class GmshTemplate(MeshTemplate):
+class GmshTemplate(MeshedMeshTemplate):
     """
     A template for creating a mesh using Gmsh as backend. Specify the geometry in an overridden :py:meth:`define_geometry` method, using the :py:meth:`point`, :py:meth:`line`, :py:meth:`spline`, :py:meth:`circle_arc`, :py:meth:`plane_surface` and other methods.
+
+    Remeshing is done by recreation, i.e. :py:meth:`define_geometry` is called again whenever remeshing is required. Use :py:meth:`~pyoomph.meshes.mesh.MeshedMeshTemplate.is_remeshing` there to tell the initial mesh from a remeshed one and :py:meth:`~pyoomph.meshes.mesh.MeshedMeshTemplate.get_boundary_coordinates` to rebuild the boundaries that have moved in the meantime.
     """
     def __init__(self,loaded_from_mesh_file:str | None=None):
         super(GmshTemplate, self).__init__()
