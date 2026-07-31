@@ -45,6 +45,12 @@ TIMEOUT_TUTORIALS=28800  # 8 h  (a full tutorial pass is over an hour when healt
 
 # ------------------------------------------------------------------------ mail ----
 
+# Leave MAIL_TO empty to switch mail off entirely: the run still writes its full report to
+# a dated directory under LOG_DIR, which is then simply where you read it. Worth doing on a
+# host that cannot send mail at all rather than letting every night end in two doomed SMTP
+# attempts and a message queued forever by a local MTA. UT lists its roaming workstation
+# range on the Spamhaus PBL, so a machine on it is refused by the MX as a matter of policy;
+# check with `citools/nightly_develop.sh --test-mail` before assuming mail works.
 MAIL_TO="c.diddens@utwente.nl"
 
 # Set this to a real mailbox. The default below is built from `hostname`, which on a

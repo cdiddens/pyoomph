@@ -105,6 +105,17 @@ send_mail() {
     local subject="$1" bodyfile="$2" rc out
     MAIL_TRANSPORT=""
 
+    # An empty MAIL_TO turns mail off. Worth having: on a host that cannot send at all
+    # (UT lists its roaming workstation range on the Spamhaus PBL, so direct-to-MX is
+    # refused by policy) the alternative is two doomed SMTP attempts every night followed
+    # by a report handed to a local MTA that queues it forever. The reports are on disk
+    # either way -- that is where they are read from.
+    if [ -z "$MAIL_TO" ]; then
+        MAIL_TRANSPORT="disabled"
+        note "mail disabled (MAIL_TO is empty) -- report kept at $bodyfile"
+        return 0
+    fi
+
     if [ -n "$SMTP_HOST" ]; then
         out="$(MAIL_SUBJECT="$subject" MAIL_BODY_FILE="$bodyfile" \
         MAIL_TO="$MAIL_TO" MAIL_FROM="$MAIL_FROM" \
@@ -215,25 +226,32 @@ if [ "$TEST_MAIL" = 1 ]; then
     else
         echo "  config    : $CONFIG  *** DOES NOT EXIST -- built-in defaults are in use ***"
     fi
-    echo "  to        : $MAIL_TO"
-    echo "  from      : $MAIL_FROM"
-    # A sender whose domain does not resolve is rejected or silently dropped by most
-    # relays, and the default here is built from `hostname`, which on a workstation is
-    # usually a bare name with no domain at all.
-    case "${MAIL_FROM#*@}" in
-        *.*) ;;
-        *) echo "              ^^ that domain has no dot and will not resolve. Most relays drop"
-           echo "                 such a sender without a word. Set MAIL_FROM in the config to a"
-           echo "                 real mailbox, e.g. $MAIL_TO" ;;
-    esac
-    if [ -n "$SMTP_HOST" ]; then
-        echo "  smtp      : $SMTP_HOST:$SMTP_PORT ($SMTP_SECURITY), user=${SMTP_USER:-<none>}," \
-             "password $([ -n "$SMTP_PASSWORD" ] && echo set || echo 'NOT set')"
+    if [ -z "$MAIL_TO" ]; then
+        echo "  to        : (MAIL_TO is empty -- mail is switched off, reports stay in $LOG_DIR)"
     else
-        echo "  smtp      : SMTP_HOST is empty -- falling back to the local mail/sendmail command"
+        echo "  to        : $MAIL_TO"
     fi
-    echo "  mail(1)   : $(command -v mail || echo 'not installed')"
-    echo "  sendmail  : $(command -v sendmail || { [ -x /usr/sbin/sendmail ] && echo /usr/sbin/sendmail; } || echo 'not installed')"
+    # The rest only describes how mail would be sent, which is noise once it is off.
+    if [ -n "$MAIL_TO" ]; then
+        echo "  from      : $MAIL_FROM"
+        # A sender whose domain does not resolve is rejected or silently dropped by most
+        # relays, and the default here is built from `hostname`, which on a workstation is
+        # usually a bare name with no domain at all.
+        case "${MAIL_FROM#*@}" in
+            *.*) ;;
+            *) echo "              ^^ that domain has no dot and will not resolve. Most relays drop"
+               echo "                 such a sender without a word. Set MAIL_FROM in the config to a"
+               echo "                 real mailbox, e.g. $MAIL_TO" ;;
+        esac
+        if [ -n "$SMTP_HOST" ]; then
+            echo "  smtp      : $SMTP_HOST:$SMTP_PORT ($SMTP_SECURITY), user=${SMTP_USER:-<none>}," \
+                 "password $([ -n "$SMTP_PASSWORD" ] && echo set || echo 'NOT set')"
+        else
+            echo "  smtp      : SMTP_HOST is empty -- falling back to the local mail/sendmail command"
+        fi
+        echo "  mail(1)   : $(command -v mail || echo 'not installed')"
+        echo "  sendmail  : $(command -v sendmail || { [ -x /usr/sbin/sendmail ] && echo /usr/sbin/sendmail; } || echo 'not installed')"
+    fi
     echo
     t="$(mktemp)"
     printf 'pyoomph nightly test mail from %s at %s.\n' "$(hostname)" "$(date)" >"$t"
@@ -241,6 +259,11 @@ if [ "$TEST_MAIL" = 1 ]; then
     rm -f "$t"
     echo
     case "${MAIL_TRANSPORT:-none}" in
+        disabled)
+            echo "Mail is switched off. Each run still writes its full report to a dated directory"
+            echo "under $LOG_DIR, and $LOG_DIR/nightly.log records"
+            echo "every wake-up including the nights nothing was pushed."
+            ;;
         smtplib)
             echo "Accepted by $SMTP_HOST, so the message did leave this machine."
             echo "If it does not arrive, look in the spam folder and at the mail server's logs."
