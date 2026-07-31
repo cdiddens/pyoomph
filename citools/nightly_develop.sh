@@ -61,6 +61,7 @@ SMTP_PORT=587
 SMTP_USER=""
 SMTP_PASSWORD=""
 SMTP_SECURITY="starttls"
+SMTP_FORCE_IPV4=""
 MAIL_LOG_TAIL=60
 BRANCH="develop"
 
@@ -105,12 +106,13 @@ send_mail() {
     MAIL_TRANSPORT=""
 
     if [ -n "$SMTP_HOST" ]; then
-        MAIL_SUBJECT="$subject" MAIL_BODY_FILE="$bodyfile" \
+        out="$(MAIL_SUBJECT="$subject" MAIL_BODY_FILE="$bodyfile" \
         MAIL_TO="$MAIL_TO" MAIL_FROM="$MAIL_FROM" \
         SMTP_HOST="$SMTP_HOST" SMTP_PORT="$SMTP_PORT" SMTP_USER="$SMTP_USER" \
         SMTP_PASSWORD="$SMTP_PASSWORD" SMTP_SECURITY="$SMTP_SECURITY" \
-        "$PYTHON" - <<'PYEOF'
-import os, smtplib, sys
+        SMTP_FORCE_IPV4="$SMTP_FORCE_IPV4" \
+        "$PYTHON" - 2>&1 <<'PYEOF'
+import os, smtplib, socket, sys
 from email.message import EmailMessage
 
 msg = EmailMessage()
@@ -123,7 +125,20 @@ with open(os.environ["MAIL_BODY_FILE"], "r", encoding="utf-8", errors="replace")
 host = os.environ["SMTP_HOST"]
 port = int(os.environ.get("SMTP_PORT") or 0)
 security = (os.environ.get("SMTP_SECURITY") or "starttls").lower()
-try:
+
+# Microsoft rejects IPv6 senders that have no reverse-DNS record ("4.7.25 ... must have
+# reverse DNS record (S820)") while accepting the same machine over IPv4, and a host with
+# a AAAA route will pick IPv6 by itself. Filtering getaddrinfo rather than connecting to a
+# literal address keeps the hostname for EHLO and for the TLS handshake.
+_getaddrinfo = socket.getaddrinfo
+
+def _ipv4_only(*a, **kw):
+    infos = [ai for ai in _getaddrinfo(*a, **kw) if ai[0] == socket.AF_INET]
+    if not infos:
+        raise OSError("%s has no IPv4 address" % (a[0],))
+    return infos
+
+def deliver():
     if security == "ssl":
         server = smtplib.SMTP_SSL(host, port or 465, timeout=120)
     else:
@@ -134,11 +149,28 @@ try:
         if os.environ.get("SMTP_USER"):
             server.login(os.environ["SMTP_USER"], os.environ.get("SMTP_PASSWORD", ""))
         server.send_message(msg)
-except Exception as e:
-    print("smtplib failed: %s" % e, file=sys.stderr)
-    sys.exit(1)
+
+forced = os.environ.get("SMTP_FORCE_IPV4", "") not in ("", "0", "false", "False")
+errors = []
+for ipv4_only in ([True] if forced else [False, True]):
+    socket.getaddrinfo = _ipv4_only if ipv4_only else _getaddrinfo
+    try:
+        deliver()
+    except Exception as e:
+        errors.append(("IPv4-only" if ipv4_only else "default", e))
+        continue
+    if ipv4_only and not forced:
+        print("note: the default route failed and IPv4 worked; set SMTP_FORCE_IPV4=1 in the "
+              "config to stop retrying the failing one every time")
+    sys.exit(0)
+
+for label, e in errors:
+    print("smtplib failed (%s): %s" % (label, e))
+sys.exit(1)
 PYEOF
+)"
         rc=$?
+        [ -n "$out" ] && note "$out"
         if [ $rc -eq 0 ]; then
             MAIL_TRANSPORT="smtplib"
             note "mail sent via smtplib to $SMTP_HOST: $subject"

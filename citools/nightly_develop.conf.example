@@ -71,6 +71,12 @@ SMTP_USER=""
 SMTP_PASSWORD=""
 # starttls (usual for port 587 and offered by the MX above), ssl (port 465), or none.
 SMTP_SECURITY="starttls"
+
+# Microsoft rejects IPv6 senders whose address has no reverse-DNS record ("4.7.25 ...
+# must have reverse DNS record (S820)") while accepting the very same machine over IPv4,
+# and a host with an IPv6 route will pick IPv6 by itself. The script notices this and
+# retries over IPv4 on its own; setting this to 1 skips the attempt that is known to fail.
+SMTP_FORCE_IPV4=1
 #
 # If mail is accepted but never arrives, it is the receiving spam filter, not this script:
 # the machine's IP is not in utwente.nl's SPF record, so the report can land in quarantine.
