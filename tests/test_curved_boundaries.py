@@ -528,6 +528,27 @@ class _ArcSector(Problem):
         self += eqs @ "domain"
 
 
+class _MovingGmshDiskTemplate(GmshTemplate):
+    # A gmsh triangular disc, rim on circle arcs. Gmsh-based on purpose: only a template that
+    # records a .msh file in the state can come back from load_state as a *different* template
+    # (MeshTemplate.define_state_file), which is what makes the meshes be rebuilt there.
+    def define_geometry(self):
+        self.default_resolution = 0.4
+        self.mesh_mode = "tris"
+        self.create_circle_lines((0, 0), _R, line_name="circumference")
+        self.plane_surface("circumference", name="domain")
+
+
+class _MovingGmshDisk(Problem):
+    # ALE: the nodal positions are dofs, so the macro elements must not survive setup.
+    def define_problem(self):
+        from pyoomph.equations.ALE import LaplaceSmoothedMesh
+        self += _MovingGmshDiskTemplate()
+        eqs = PoissonEquation(source=1, space="C2") + DirichletBC(u=0) @ "circumference"
+        eqs += LaplaceSmoothedMesh()
+        self += eqs @ "domain"
+
+
 # --------------------------------------------------------------------------------------------
 # Child-process driver
 # --------------------------------------------------------------------------------------------
@@ -642,6 +663,42 @@ def _worker_main(argv):
             print("RESULT", worst)
             print("IDENTICAL", 1 if sets[0] == sets[1] and sets[0] else 0)
             print("NIFACE", len(sets[0]))
+        return
+    elif kind == "statereload":
+        # save and load run in separate interpreters under separate output directories, because the
+        # .msh path recorded in the state is relative to the state file and it is precisely a
+        # *changed* path that makes load_state rebuild the meshes -- the same thing a remesh does.
+        phase = argv[2]
+        statefile = os.path.join(outdir, "state.dump")
+        with _MovingGmshDisk() as problem:
+            problem.set_output_directory(os.path.join(outdir, phase))
+            problem.initialise()
+            if phase == "save":
+                problem.save_state(statefile)
+                print("SAVED 1")
+                return
+            problem.load_state(statefile)
+            mesh = problem.get_mesh("domain")
+            print("NMACRO", sum(1 for e in mesh.elements() if e.get_macro_element() is not None))
+            # Move the free surface, as an ALE solve would: scale the whole disc up by 20%.
+            scale = 1.2
+            for i in range(mesh.nnode()):
+                nd = mesh.node_pt(i)
+                for t in range(nd.ntstorage()):
+                    nd.set_x_at_t(t, 0, nd.x_at_t(t, 0) * scale)
+                    nd.set_x_at_t(t, 1, nd.x_at_t(t, 1) * scale)
+            problem.refine_uniformly()
+            bidx = mesh.get_boundary_index("circumference")
+            moved, frozen = 0.0, 1.0e30
+            for i in range(mesh.nnode()):
+                nd = mesh.node_pt(i)
+                if not nd.is_on_boundary(bidx):
+                    continue
+                r = math.hypot(nd.x(0), nd.x(1))
+                moved = max(moved, abs(r - scale * _R))
+                frozen = min(frozen, abs(r - _R))
+            print("RESULT", moved)
+            print("FROZEN", frozen)
         return
     elif kind == "seam":
         problem = _SeamRing()
@@ -1141,6 +1198,37 @@ def test_boundary_node_membership_is_wrong_when_a_boundary_wraps_an_element(whic
     out = _worker_lines(tmp_path, "overmark", which, nref)
     assert int(out["SPURIOUS"]) == 0, "%s at nref=%d: %s spurious (was %d)" % (
         which, nref, out["SPURIOUS"], expected)
+
+
+# --------------------------------------------------------------------------------------------
+# T15 -- macro elements must not survive a state load onto a moving mesh
+# --------------------------------------------------------------------------------------------
+
+def test_state_load_drops_macro_elements_on_a_moving_mesh(tmp_path):
+    # A macro element freezes the geometry of the template it was built from. That is exactly right
+    # while the nodes are fixed, and exactly wrong once they are dofs: refinement takes every new
+    # node's position from father->get_x(), which goes through the macro map whenever one is
+    # attached, so on an ALE mesh a new node gets placed on the *template's* boundary rather than on
+    # the boundary the solve has moved the mesh to. That is why initialise() and force_remesh() both
+    # end with remove_macro_elements().
+    #
+    # load_state is the third place that hands a problem a freshly built mesh -- when the state
+    # carries a different mesh template, which is what a state written after a remesh does -- and it
+    # used to be the one that forgot. The symptom is undramatic enough to be missed: the mesh does
+    # not throw or invert, the new boundary nodes are simply somewhere else, and on a free surface
+    # they land off the interface entirely (found on a remeshed axisymmetric free-surface run, where
+    # a refined interface node sat several elements away from the segment it was inserted into).
+    #
+    # Here the disc is blown up by 20% after the load, so the two answers are 0.2 apart and no
+    # tolerance argument is needed: 4.2e-5 (the FE chord error of this mesh) if the new rim nodes
+    # follow the mesh, 2.0e-1 if they snap back onto the template circle -- which is what they did,
+    # exactly, with FROZEN measuring 0.0 because the macro map put them on r = 1 to machine
+    # precision.
+    _worker_lines(tmp_path, "statereload", "save")
+    out = _worker_lines(tmp_path, "statereload", "load")
+    assert int(out["NMACRO"]) == 0
+    assert float(out["RESULT"]) < 1e-3, "new rim nodes do not follow the moved mesh"
+    assert float(out["FROZEN"]) > 0.1, "a rim node sits on the template circle, i.e. on the macro map"
 
 
 # --------------------------------------------------------------------------------------------

@@ -95,8 +95,14 @@ class RemesherBase:
     def actions_after_remeshing(self):
         self._line_entries = []
         self._unique_pts = []
+        # Everything gathered from the mesh being replaced must go here, at the end of the
+        # remeshing process: right after this, Problem.force_remesh() destroys the superseded
+        # meshes for good (_destroy_superseded_mesh(), see generic/problem.py), so any Node,
+        # element or mesh wrapper still cached here would be left pointing into freed C++
+        # memory until the next remesh happens to overwrite it - and merely touching one from
+        # a script (or a debugger) segfaults.
+        self._old_meshes={}
         #self._domain_points:Dict[str,Dict[str,List[Node]]] = {}
-        pass
 
     def remesh(self):
         pass
@@ -321,9 +327,14 @@ class Remesher2d(RemesherBase):
     def actions_after_remeshing(self):
         super(Remesher2d, self).actions_after_remeshing()
         self.gmsh = GmshRemesher2d(self) #Recreate the intenral gmsh remesher
-        self._old_meshes={}
         self._meshbounds:dict[str,list[str]]={}
         self._unique_pts = []
+        # The per-boundary node/element bookkeeping of the mesh just replaced - see the base
+        # class for why none of it may outlive the remeshing process. All of it is rebuilt from
+        # scratch by the next remesh() anyway.
+        self._boundary_nodes={}
+        self._ptsizes={}
+        self._corner_size_map = None
 
     def get_new_template(self)->MeshTemplate:
         return self.gmsh

@@ -6516,7 +6516,33 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                 self.rebuild_global_mesh_from_list(rebuild=True)
                 self.reapply_boundary_conditions()
 
+                # These meshes are brand new: they were built from the state file's own template,
+                # long after initialise() stripped the macro elements off the meshes it had built
+                # (remove_macro_elements_after_initial_adaption). So they arrive carrying macro
+                # elements again, and on a moving mesh those are actively wrong - the macro element
+                # freezes the geometry of the template it was built from, while the nodal positions
+                # are dofs that have since moved. Adaptive refinement positions every new node
+                # through father->get_x(), which goes through the macro map whenever one is
+                # attached, so refining after such a load snapped new nodes back onto the geometry
+                # the template was generated with. force_remesh() drops them for exactly this
+                # reason; do the same here. mode="auto" keeps them on meshes whose coordinates are
+                # not dofs, where the macro map is still the right (and only) source of the curved
+                # geometry between the nodes.
+                self.remove_macro_elements()
 
+            # Loading a state whose mesh template differs from the current one replaces the
+            # meshes wholesale, exactly like remeshing does (see force_remesh()), so the
+            # superseded ones must be torn down here for the same reasons - and they are of no
+            # further use: unlike after a remesh, nothing is interpolated from them (all dof
+            # values come from the state file), and previous_mesh above is only read inside
+            # MeshFromTemplate.__init__(). Without this they stayed pinned alive by the
+            # unrevokable nb::keep_alive from the Problem for the rest of the session, which not
+            # only leaked their nodes/elements (plus the whole Problem, via the
+            # _templatemesh -> remesher -> Problem cycle described in _destroy_superseded_mesh())
+            # but crashed at interpreter shutdown: their elements were then destructed after
+            # release() had already dlclose()'d the equation code they point into.
+            for _name, oldmesh in old_meshes.items():
+                _destroy_superseded_mesh(oldmesh)
 
         # Time stepper dts
         time = self.timestepper.time_pt()
