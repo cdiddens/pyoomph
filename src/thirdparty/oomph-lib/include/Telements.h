@@ -1492,7 +1492,7 @@ namespace oomph
                             FaceElement* face_element_pt) override;
   };
 
-  // Defined out-of-line in Telements.cc; suppress implicit
+  //FOR PYOOMPH: defined out-of-line in Telements.cc; suppress implicit
   // instantiation elsewhere.
   extern template TGauss<1, 2> TElement<1, 2>::Default_integration_scheme;
   extern template TGauss<1, 3> TElement<1, 3>::Default_integration_scheme;
@@ -1921,12 +1921,12 @@ namespace oomph
                             FaceElement* face_element_pt) override;
   };
 
-  // Defined out-of-line in Telements.cc; suppress implicit
+  //FOR PYOOMPH: defined out-of-line in Telements.cc; suppress implicit
   // instantiation elsewhere.
   extern template TGauss<2, 2> TElement<2, 2>::Default_integration_scheme;
   extern template TGauss<2, 3> TElement<2, 3>::Default_integration_scheme;
   extern template TGauss<2, 4> TElement<2, 4>::Default_integration_scheme;
-  // Node_on_face is explicitly specialized (not a generic template
+  //FOR PYOOMPH: Node_on_face is explicitly specialized (not a generic template
   // member) in Telements.cc; declare the specializations here so
   // other translation units don't implicitly instantiate them.
   template<> const unsigned TElement<2, 2>::Node_on_face[3][2];
@@ -3569,11 +3569,11 @@ namespace oomph
                             FaceElement* face_element_pt) override;
   };
 
-  // Defined out-of-line in Telements.cc; suppress implicit
+  //FOR PYOOMPH: defined out-of-line in Telements.cc; suppress implicit
   // instantiation elsewhere.
   extern template TGauss<3, 2> TElement<3, 2>::Default_integration_scheme;
   extern template TGauss<3, 3> TElement<3, 3>::Default_integration_scheme;
-  // Node_on_face is explicitly specialized (not a generic template
+  //FOR PYOOMPH: Node_on_face is explicitly specialized (not a generic template
   // member) in Telements.cc; declare the specializations here so
   // other translation units don't implicitly instantiate them.
   template<> const unsigned TElement<3, 2>::Node_on_face[4][3];

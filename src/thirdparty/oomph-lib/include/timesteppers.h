@@ -888,7 +888,7 @@ namespace oomph
     static Time Dummy_time;
   };
 
-  // Explicitly instantiated in timesteppers.cc; suppress implicit
+  //FOR PYOOMPH: explicitly instantiated in timesteppers.cc; suppress implicit
   // instantiation of One/Zero/Dummy_time elsewhere.
   extern template class Steady<0>;
   extern template class Steady<1>;

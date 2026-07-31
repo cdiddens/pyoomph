@@ -814,7 +814,7 @@ namespace oomph
     }
   };
 
-  // Explicitly instantiated in Qelements.cc; suppress implicit
+  //FOR PYOOMPH: explicitly instantiated in Qelements.cc; suppress implicit
   // instantiation of Default_integration_scheme elsewhere.
   extern template class QElement<1, 2>;
   extern template class QElement<1, 3>;
@@ -1232,7 +1232,7 @@ namespace oomph
     }
   };
 
-  // Explicitly instantiated in Qelements.cc; suppress implicit
+  //FOR PYOOMPH: explicitly instantiated in Qelements.cc; suppress implicit
   // instantiation of Default_integration_scheme elsewhere.
   extern template class QElement<2, 2>;
   extern template class QElement<2, 3>;
@@ -1743,7 +1743,7 @@ namespace oomph
     }
   };
 
-  // Explicitly instantiated in Qelements.cc; suppress implicit
+  //FOR PYOOMPH: explicitly instantiated in Qelements.cc; suppress implicit
   // instantiation of Default_integration_scheme elsewhere.
   extern template class QElement<3, 2>;
   extern template class QElement<3, 3>;

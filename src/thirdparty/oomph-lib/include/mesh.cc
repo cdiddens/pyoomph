@@ -5160,7 +5160,7 @@ namespace oomph
     // up
     Vector<FiniteElement*> backed_up_f_el_pt(nelem);
 
-    // TriangleMeshBase support was removed from this build of pyoomph, so
+    //FOR PYOOMPH: TriangleMeshBase support was removed from this build of pyoomph, so
     // this mesh is never treated as an unstructured triangle/tet mesh here.
     bool is_a_triangle_mesh_base_mesh = false;
 

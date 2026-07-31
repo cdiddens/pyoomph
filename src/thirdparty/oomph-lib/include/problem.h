@@ -1863,24 +1863,24 @@ namespace oomph
 
     /// Return the vector of dofs, i.e. a vector containing the current
     /// values of all unknowns.
-    // FOR_PYOOMPH: made virtual (this is required to patch the missing positional dofs)
+    //FOR PYOOMPH: made virtual (this is required to patch the missing positional dofs)
     void get_dofs(DoubleVector& dofs) const override;
 
     /// Return vector of the t'th history value of all dofs.
-    // FOR_PYOOMPH: made virtual (this is required to patch the missing positional dofs)
+    //FOR PYOOMPH: made virtual (this is required to patch the missing positional dofs)
     void get_dofs(const unsigned& t, DoubleVector& dofs) const override;
 
     /// Set the values of the dofs
-    // FOR_PYOOMPH: made virtual (this is required to patch the missing positional dofs)
+    //FOR PYOOMPH: made virtual (this is required to patch the missing positional dofs)
     void set_dofs(const DoubleVector& dofs) override;
 
     /// Set the history values of the dofs
-    // FOR_PYOOMPH: made virtual (this is required to patch the missing positional dofs)
+    //FOR PYOOMPH: made virtual (this is required to patch the missing positional dofs)
     virtual void set_dofs(const unsigned& t, DoubleVector& dofs);
 
     /// Set history values of dofs from the type of vector stored in
     /// problem::Dof_pt.
-    // FOR_PYOOMPH: made virtual (this is required to patch the missing positional dofs)
+    //FOR PYOOMPH: made virtual (this is required to patch the missing positional dofs)
     virtual void set_dofs(const unsigned& t, Vector<double*>& dof_pt);
 
     /// Add lambda x incremenet_dofs[l] to the l-th dof
@@ -3103,7 +3103,7 @@ namespace oomph
     /// update global mesh, and re-assign equation numbers.
     /// Return # of refined/unrefined elements. On return from this
     /// function, Problem can immediately be solved again.
-    //PYOOMPH made virtual
+    //FOR PYOOMPH: made virtual
     virtual void adapt(unsigned& n_refined, unsigned& n_unrefined);
 
     /// Adapt problem:

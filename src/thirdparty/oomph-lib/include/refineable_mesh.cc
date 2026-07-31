@@ -3861,7 +3861,7 @@ namespace oomph
                       el_pt->get_x(t, s, x_exp);
 
                       // Get actual position
-                      // NOTE(pyoomph): compare like-for-like at the SAME
+                      //FOR PYOOMPH: compare like-for-like at the SAME
                       // history level t. The original oomph-lib code read the
                       // current position nod_pt->x(dir) here while x_exp is
                       // interpolated at history level t via get_x(t,...). On

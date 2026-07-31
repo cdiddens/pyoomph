@@ -4751,7 +4751,7 @@ namespace oomph
 #endif
 
 
-  // FOR_PYOOMPH - suppress some warnings
+  //FOR PYOOMPH: suppress some warnings
     using FiniteElement::face_to_bulk_coordinate_fct_pt;
     using FiniteElement::bulk_coordinate_derivatives_fct_pt;
 

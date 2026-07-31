@@ -857,7 +857,7 @@ namespace oomph
         // need to check here the type of mesh
         if (n_mesh == 0)
         {
-          // TriangleMeshBase support was removed from this build of
+          //FOR PYOOMPH: TriangleMeshBase support was removed from this build of
           // pyoomph, so the only mesh is always treated as structured.
           {
             const unsigned n_ele = global_mesh_pt->nelement();
@@ -881,7 +881,7 @@ namespace oomph
           std::vector<bool> is_structured_mesh(n_mesh);
           for (unsigned i_mesh = 0; i_mesh < n_mesh; i_mesh++)
           {
-            // TriangleMeshBase support was removed from this build of
+            //FOR PYOOMPH: TriangleMeshBase support was removed from this build of
             // pyoomph, so every submesh is always treated as structured.
             is_structured_mesh[i_mesh] = true;
             // Check if mesh is an structured mesh
@@ -1402,7 +1402,7 @@ namespace oomph
         nel = 0;
         for (unsigned i_mesh = 0; i_mesh < n_meshes; i_mesh++)
         {
-          // TriangleMeshBase support was removed from this build of
+          //FOR PYOOMPH: TriangleMeshBase support was removed from this build of
           // pyoomph, so every mesh is always treated as structured.
           is_structured_mesh[i_mesh] = true;
           nel += mesh_pt(i_mesh)->nelement();
@@ -2315,7 +2315,7 @@ namespace oomph
       // Call assign equation numbers on the global mesh
       n_dof = Mesh_pt->assign_global_eqn_numbers(Dof_pt,Block_dof_pt_start);
 
-      // SpineMesh support was removed from this build of pyoomph, so there
+      //FOR PYOOMPH: SpineMesh support was removed from this build of pyoomph, so there
       // is no additional spine equation numbering to deal with here.
 
       if (Global_timings::Doc_comprehensive_timings)
@@ -2585,7 +2585,7 @@ namespace oomph
       Mesh_pt->describe_dofs(out, in);
     }
 
-    // SpineMesh support was removed from this build of pyoomph, so there
+    //FOR PYOOMPH: SpineMesh support was removed from this build of pyoomph, so there
     // is no additional spine equation numbering to describe here.
 
     out << std::string(80, '\\') << std::endl;
@@ -3753,7 +3753,7 @@ namespace oomph
     LinearAlgebraDistribution dist(this->communicator_pt(), n_dof, false);
     Mres.build(&dist, 0.0);
 
-    // Discontinuous Galerkin (DG) element formulation support was removed
+    //FOR PYOOMPH: Discontinuous Galerkin (DG) element formulation support was removed
     // from this build of pyoomph, so the discontinuous fast path is gone;
     // we always invert the full mass matrix via a global linear solve.
     if (Discontinuous_element_formulation)
@@ -6740,7 +6740,11 @@ namespace oomph
     Vector<unsigned> my_eqns;
     if (n_elements != 0)
     {
-      if (el_hi_plus_one>0) // TODO: Patch to avoid underflow when el_hi_plus_one is unsigned and el_hi is 0, which somehow happens if you only have one element
+      //FOR PYOOMPH: guard against unsigned underflow. el_hi_plus_one is unsigned and
+      // get_my_eqns() takes the INCLUSIVE upper element index, so el_hi_plus_one - 1
+      // wraps to a huge number when the range is empty -- which happens on a rank that
+      // ends up with a single element. The original code had no guard.
+      if (el_hi_plus_one > 0)
       {
         this->get_my_eqns(assembly_handler_pt, el_lo, el_hi_plus_one - 1, my_eqns);
       }
@@ -10170,7 +10174,7 @@ namespace oomph
       return true;
     }
 
-    // SpineMesh support was removed from this build of pyoomph, so there
+    //FOR PYOOMPH: SpineMesh support was removed from this build of pyoomph, so there
     // is no spine data to check here.
 
     // If we have got here then the data is not stored in the problem, so return
@@ -10748,7 +10752,7 @@ namespace oomph
     Mesh_pt->set_consistent_pinned_values_for_continuation(
       &Continuation_time_stepper);
 
-    // SpineMesh support was removed from this build of pyoomph, so there
+    //FOR PYOOMPH: SpineMesh support was removed from this build of pyoomph, so there
     // is no additional spine numbering to deal with here.
 
     // Also set time stepper for global data
@@ -12112,7 +12116,7 @@ namespace oomph
     Mass_matrix_reuse_is_enabled = true;
     Mass_matrix_has_been_computed = false;
 
-    // Discontinuous Galerkin (DG) element formulation support was removed
+    //FOR PYOOMPH: Discontinuous Galerkin (DG) element formulation support was removed
     // from this build of pyoomph, so there is no element-level mass matrix
     // reuse to enable here.
   }
@@ -12126,7 +12130,7 @@ namespace oomph
     Mass_matrix_reuse_is_enabled = false;
     Mass_matrix_has_been_computed = false;
 
-    // Discontinuous Galerkin (DG) element formulation support was removed
+    //FOR PYOOMPH: Discontinuous Galerkin (DG) element formulation support was removed
     // from this build of pyoomph, so there is no element-level mass matrix
     // reuse to disable here.
   }
@@ -14033,7 +14037,7 @@ namespace oomph
             }
             else
             {
-              // TriangleMeshBase support was removed from this build of
+              //FOR PYOOMPH: TriangleMeshBase support was removed from this build of
               // pyoomph, so there is no unstructured-mesh path here.
               oomph_info << "Info/Warning: Mesh cannot be adapted in copy."
                          << std::endl;
@@ -14083,7 +14087,7 @@ namespace oomph
               }
               else
               {
-                // TriangleMeshBase support was removed from this build of
+                //FOR PYOOMPH: TriangleMeshBase support was removed from this build of
                 // pyoomph, so there is no unstructured-mesh path here.
                 oomph_info << "Info/Warning: Mesh cannot be adapted in copy."
                            << std::endl;
@@ -17629,7 +17633,7 @@ namespace oomph
       // The load balancing strategy acts in the structured meshes and
       // then acts in the unstructured meshes
 
-      // TriangleMeshBase support was removed from this build of pyoomph,
+      //FOR PYOOMPH: TriangleMeshBase support was removed from this build of pyoomph,
       // so every mesh/submesh is always treated as structured here.
       std::vector<bool> is_unstructured_mesh(std::max(n_mesh, 1u), false);
 
@@ -18302,7 +18306,7 @@ namespace oomph
       send_data_to_be_sent_during_load_balancing(
         send_n, send_data, send_displacement);
 
-      // TriangleMeshBase support was removed from this build of pyoomph,
+      //FOR PYOOMPH: TriangleMeshBase support was removed from this build of pyoomph,
       // so there are never any unstructured meshes to load-balance here.
 
       if (report_stats)
@@ -18405,7 +18409,7 @@ namespace oomph
         my_mesh_pt = mesh_pt(i_mesh);
       }
 
-      // TriangleMeshBase support was removed from this build of pyoomph,
+      //FOR PYOOMPH: TriangleMeshBase support was removed from this build of pyoomph,
       // so every mesh here is always treated as structured.
       {
         // Loop over processors to find haloed elements -- need to
@@ -19398,7 +19402,7 @@ namespace oomph
     // Go for the nonhalo elements only in the TreeBaseMeshes
     for (unsigned i_mesh = 0; i_mesh < n_mesh; i_mesh++)
     {
-      // TriangleMeshBase support was removed from this build of pyoomph,
+      //FOR PYOOMPH: TriangleMeshBase support was removed from this build of pyoomph,
       // so every mesh here is always treated as structured.
       {
         const unsigned nele = mesh_pt(i_mesh)->nelement();
@@ -19884,7 +19888,7 @@ namespace oomph
     // Go for the nonhalo elements only in the TreeBaseMeshes
     for (unsigned i_mesh = 0; i_mesh < n_mesh; i_mesh++)
     {
-      // TriangleMeshBase support was removed from this build of pyoomph,
+      //FOR PYOOMPH: TriangleMeshBase support was removed from this build of pyoomph,
       // so every mesh here is always treated as structured.
       {
         const unsigned nele_submesh = mesh_pt(i_mesh)->nelement();
@@ -20151,7 +20155,7 @@ namespace oomph
         my_mesh_pt = mesh_pt(i_mesh);
       }
 
-      // TriangleMeshBase support was removed from this build of pyoomph,
+      //FOR PYOOMPH: TriangleMeshBase support was removed from this build of pyoomph,
       // so every mesh here is always treated as structured.
       {
         // Storage for number of data to be sent to each processor

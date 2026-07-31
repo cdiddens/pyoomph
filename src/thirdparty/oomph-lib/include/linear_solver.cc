@@ -929,7 +929,8 @@ namespace oomph
         // Storage for the residuals vector
         // A non-distriubted residuals vector
         LinearAlgebraDistribution dist(
-          problem_pt->communicator_pt(), problem_pt->ndof(), /*problem_pt->is_block_dof_arrangement_used() ? problem_pt->block_dof_pt_start() : Vector<unsigned long>(),*/ false);
+          problem_pt->communicator_pt(), problem_pt->ndof(),
+          /*FOR PYOOMPH: block-dof arrangement, see problem.h*/ false);
         DoubleVector residuals(&dist, 0.0);
         CRDoubleMatrix jacobian(&dist);
 
@@ -979,7 +980,8 @@ namespace oomph
     {
       // set the solver distribution
       LinearAlgebraDistribution dist(
-        problem_pt->communicator_pt(), problem_pt->ndof(), /*problem_pt->is_block_dof_arrangement_used() ? problem_pt->block_dof_pt_start() : Vector<unsigned long>(),*/ false);
+        problem_pt->communicator_pt(), problem_pt->ndof(),
+        /*FOR PYOOMPH: block-dof arrangement, see problem.h*/ false);
       this->build_distribution(dist);
 
       // Allocate storage for the residuals vector
