@@ -1794,6 +1794,55 @@ Speedup, collocation, frozen vs unfrozen:
 A stray `std::cout << "Sparse assembly for periodic orbit:"` that printed on every fallback orbit
 assembly, even under `quiet()`, was removed while here.
 
+## 7g. What the stored zeros in a frozen pattern actually are
+
+A frozen pattern must be a superset of the numerically nonzero entries or it could not be reused, so
+it always carries some stored zeros. `_get_frozen_sparsity_fill_stats()` measures how many; across the
+tutorial suite it is 6.0% of 8.6e9 slots, median **0.000%** per script -- most patterns are exactly
+tight -- with a few scripts far above (rivulet 39.8%, rising_bubble 29.1%, eigendynamics 28.4%).
+
+`_get_frozen_fill_breakdown()` (only filled when `PYOOMPH_FROZEN_FILL_BREAKDOWN` is set) attributes
+every scattered entry to its (row class, column class) pair. That is what separates the two causes,
+which want opposite treatment.
+
+### Cause 1: unattributed dofs -- a real defect, fixed
+
+On the DG convection-diffusion tutorial 33% of the pattern was stored zeros, and every one of them
+sat in a row or column of an `<unattributed>` dof of the `_internal_facets_` element, while the
+properly attributed `domain/c` block was exactly tight. An interface element works on dofs belonging
+to other elements and the attribution walk could not see them, so they kept the -1 sentinel, which the
+mask must read as "coupled to everything". Fixed by adopting the source element's own attribution
+through the equation map that already exists (rivulet 39.8% -> 37.0%, eigendynamics 28.4% -> 27.2%).
+
+### Cause 2: a field that is identically zero -- inherent, and must NOT be pruned
+
+What remains is concentrated in blocks like
+
+    domain/velocity_phi x domain/velocity_y     87.4% zero
+    domain/velocity_phi x domain/coordinate_y   90.0% zero
+    liquid/velocity_normal x liquid/coordinate_x 67.1% zero
+
+My first reading of this was that it is azimuthal-mode-dependent coupling, and that folding the mode
+number into `jacobian_structure_id` would let the pattern be tightened per mode. **That was wrong.**
+Measuring the base state settles it:
+
+    domain/velocity_phi        691 dofs   max|value| = 0.000e+00   100% exactly zero
+    liquid/velocity_normal     591 dofs   max|value| = 0.000e+00   100% exactly zero
+
+The blocks are empty because the base state has no swirl and no normal flow, so `velocity_phi` and
+`velocity_normal` are identically zero and appear as a multiplicative factor in exactly those Jacobian
+terms. The coupling is structurally real; it is the VALUE that vanishes.
+
+So these stored zeros are the correct price of a value-independent pattern and must be left alone.
+Pruning them would be actively unsafe: the moment the solution develops swirl or normal flow -- which
+in a stability analysis is precisely what is being looked for, since the perturbation lives in those
+components -- the entries become nonzero, and a pattern pruned on the current values would truncate
+the Jacobian (or, with the verification on, refuse to assemble at all).
+
+The general rule this illustrates: a block that is 100% zero because a coupling was never written is
+a table defect worth fixing; a block that is mostly zero because a field currently happens to vanish
+is not, and the two are indistinguishable without the per-block breakdown.
+
 ## 8. Open questions
 
 ### Closed by the work

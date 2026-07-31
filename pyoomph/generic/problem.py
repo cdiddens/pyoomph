@@ -453,13 +453,24 @@ def _destroy_superseded_mesh(m:"AnySpatialMesh") -> None:
     # bulk mesh's via _exchange_mesh(), each interface mesh's because MeshFromTemplateBase's own
     # interface-mesh construction reuses the *same* child eqtree from self._eqtree.get_children()
     # for the new interface mesh at that position) - clearing them crashed/broke the next
-    # mesh-construction or remesh call. Only _parent/_opposite_interface_mesh are safe to clear
-    # (there is no Python-level "_problem" attribute left to clear at all - get_problem()
-    # resolves it live via a non-owning C++-side lookup, see mesh.py), plus forcing immediate
-    # destruction of the underlying C++ object (freeing the bulk of the memory - nodes,
+    # mesh-construction or remesh call. So only _parent/_opposite_interface_mesh/_templatemesh
+    # are cleared here (there is no Python-level "_problem" attribute left to clear at all -
+    # get_problem() resolves it live via a non-owning C++-side lookup, see mesh.py), plus forcing
+    # immediate destruction of the underlying C++ object (freeing the bulk of the memory - nodes,
     # elements, matrices - even though the lightweight Python wrapper itself remains pinned
     # alive by nb::keep_alive until the owning Problem is; see _teardown_spatial_mesh() for that
     # mechanism).
+    # Dropping _templatemesh is what keeps the whole Problem collectible at all: unlike the
+    # replacement mesh (which release() eventually tears down via _teardown_spatial_mesh), a
+    # superseded mesh is never seen by release() again, yet stays pinned alive by the
+    # unrevokable nb::keep_alive from the Problem. Its MeshTemplate in turn reaches the Problem
+    # again through the template's remesher (RemesherBase.problem, see meshes/remesher.py),
+    # closing a Problem -> (invisible keep_alive) -> superseded mesh -> _templatemesh ->
+    # MeshTemplate -> remesher -> Problem cycle that gc cannot break, so every remeshing script
+    # leaked its entire Problem - meshes, nodes, elements, equations and all. Only this mesh's
+    # reference to the template is dropped; the template itself lives on (it is what the
+    # replacement mesh was built from), and it must NOT be _set_problem(None)'d the way
+    # _teardown_spatial_mesh() does, since it is still in active use.
     for im in m._interfacemeshes.values():
         _destroy_superseded_mesh(im)
     m._interfacemeshes.clear()
@@ -467,6 +478,8 @@ def _destroy_superseded_mesh(m:"AnySpatialMesh") -> None:
         m._parent=None #type:ignore
     if hasattr(m,"_opposite_interface_mesh"):
         m._opposite_interface_mesh=None #type:ignore
+    if getattr(m,"_templatemesh",None) is not None:
+        m._templatemesh=None #type:ignore
     m._destroy_now()
 
 
@@ -6414,9 +6427,9 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         # C++ object (and its elements/nodes) would remain permanently pinned alive by
         # nb::keep_alive on the C++ side for the rest of this Problem's lifetime, once per
         # remesh event, since dropping it from self._meshdict earlier does not revoke that.
-        # See _destroy_superseded_mesh() for why oldmesh's _templatemesh/_eqtree/_codegen (and,
-        # recursively, the same for its interface meshes) must NOT be touched here, unlike
-        # Problem.release()'s teardown.
+        # See _destroy_superseded_mesh() for why oldmesh's _eqtree/_codegen (and, recursively,
+        # the same for its interface meshes) must NOT be touched here, unlike Problem.release()'s
+        # teardown - and why its _templatemesh, in contrast, must be.
         for name, oldmesh in old_meshes.items():
             _destroy_superseded_mesh(oldmesh)
         
