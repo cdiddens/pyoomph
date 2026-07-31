@@ -747,6 +747,17 @@ void PyReg_Problem(nb::module_ &m)
 			"Minimum allowed decrease factor of the time step dt between successive time steps in adaptive time stepping; "
 			"a proposed reduction below this factor causes the time step to be rejected and retried with a smaller dt.")
 		.def_prop_rw(
+			"target_error_safety_factor",
+			[](pyoomph::Problem &p)
+			{ return p.target_error_safety_factor(); },
+			[](pyoomph::Problem &p, const double &r)
+			{ p.target_error_safety_factor() = r; },
+			"Safety factor for adaptive time stepping: the next dt is predicted so that the temporal error hits "
+			"this factor times the requested tolerance, rather than the tolerance itself. Must be <= 1. "
+			"With the default of 1.0 the prediction aims exactly at the tolerance, so about half of the steps "
+			"exceed it and are rejected; values around 0.25-0.40 are usually the most efficient, and values up "
+			"to 0.95 mainly improve robustness of the dt prediction.")
+		.def_prop_rw(
 			"minimum_arclength_ds",
 			[](pyoomph::Problem &p)
 			{ return p.minimum_ds(); },

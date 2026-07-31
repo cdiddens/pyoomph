@@ -822,6 +822,10 @@ namespace pyoomph
     double &newton_relaxation_factor() { return Relaxation_factor; }
     double &DTSF_max_increase_factor() { return DTSF_max_increase; }
     double &DTSF_min_decrease_factor() { return DTSF_min_decrease; }
+    // Adaptive time stepping aims at target_error_safety_factor*epsilon instead of the
+    // tolerance epsilon itself. With the default of 1.0 the predicted dt lands right on
+    // the tolerance, so roughly half of the steps overshoot it and get rejected.
+    double &target_error_safety_factor() { return Target_error_safety_factor; }
     double &minimum_ds() { return Minimum_ds; }
 
     // Sets the (single) top-level mesh pointer; note the debug prints below are intentionally left in

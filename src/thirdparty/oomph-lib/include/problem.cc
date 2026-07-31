@@ -223,6 +223,7 @@ namespace oomph
       Maximum_dt(1.0e12),
       DTSF_max_increase(4.0),
       DTSF_min_decrease(0.8),
+      Target_error_safety_factor(1.0), //FOR PYOOMPH: see problem.h
       Minimum_dt_but_still_proceed(-1.0),
       Scale_arc_length(true),
       Desired_proportion_of_arc_length(0.5),
@@ -11468,9 +11469,14 @@ namespace oomph
         // but use absolute value just in case.
         double error = std::max(std::abs(global_temporal_error_norm()), 1e-12);
 
+        //FOR PYOOMPH: aim at Target_error_safety_factor * epsilon rather than at
+        // epsilon itself, backported from a later oomph-lib (see INFO_oomph-lib).
+        // The factor defaults to 1.0, which reproduces the previous line exactly.
+        double target_error = Target_error_safety_factor * epsilon;
+
         // Calculate the scaling  factor
         dt_rescaling_factor = std::pow(
-          (epsilon / error), (1.0 / (1.0 + time_stepper_pt()->order())));
+          (target_error / error), (1.0 / (1.0 + time_stepper_pt()->order())));
 
         oomph_info << "Timestep scaling factor is  " << dt_rescaling_factor
                    << std::endl;
@@ -11497,6 +11503,21 @@ namespace oomph
             << "boolean" << std::endl
             << std::endl
             << "    Problem::Keep_temporal_error_below_tolerance" << std::endl;
+          //FOR PYOOMPH: part of the Target_error_safety_factor backport.
+          if (Target_error_safety_factor >= 1.0)
+          {
+            oomph_info
+              << std::endl
+              << "If many of your timesteps are rejected this way, try aiming "
+              << "for a target" << std::endl
+              << "error below the tolerance by reducing" << std::endl
+              << std::endl
+              << "    Problem::Target_error_safety_factor" << std::endl
+              << std::endl
+              << "(currently " << Target_error_safety_factor
+              << "); values around 0.25-0.40 are often the most efficient."
+              << std::endl;
+          }
         }
 
 
