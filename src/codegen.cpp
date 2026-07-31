@@ -8077,15 +8077,25 @@ namespace pyoomph
 	  std::map<std::string, unsigned> contribution_name_to_index;	  
 	  std::map<FiniteElementField*, unsigned,FiniteElementFieldPtrLess> contribution_field_to_index;
 	  std::map<FiniteElementField*,FiniteElementField*,FiniteElementFieldPtrLess> to_where_it_was_defined;
-	  for (auto *f : contributing_fields)
+	  // The name of the contribution CLASS a field belongs to: the domain it is DEFINED on plus its
+	  // name. Deliberately not the code the field is seen from -- an interface or facet element refers
+	  // to bulk fields, and those must land in the same class as in the bulk code, or the two
+	  // descriptions of the same dof would disagree. Used both to register the classes below and to
+	  // resolve field_contribution_index further down; they must not drift apart.
+	  auto contribution_class_name = [](FiniteElementField *f) -> std::string
 	  {
 		FiniteElementField *wheredef = f->get_defined_on_domain_equivalent_field();
-		to_where_it_was_defined[f] = wheredef;
 		std::string nn=wheredef->get_name();
 		if (nn=="mesh_x") nn="coordinate_x";
 		else if (nn=="mesh_y") nn="coordinate_y";
 		else if (nn=="mesh_z") nn="coordinate_z";
-		std::string n=wheredef->get_space()->get_code()->get_full_domain_name()+"/"+nn;
+		return wheredef->get_space()->get_code()->get_full_domain_name()+"/"+nn;
+	  };
+	  for (auto *f : contributing_fields)
+	  {
+		FiniteElementField *wheredef = f->get_defined_on_domain_equivalent_field();
+		to_where_it_was_defined[f] = wheredef;
+		std::string n=contribution_class_name(f);
 		//std::cout << "CONTRIBUTING FIELD " << f->get_space()->get_code()->get_full_domain_name() << "/" << f->get_name() << " defined on " << n << std::endl;
 		//std::cout << "  name already in there " << n << " ? " << (contribution_name_to_index.count(n) ? "YES" : "NO") << std::endl;
 		if (contribution_name_to_index.count(n)==0)
@@ -8212,9 +8222,25 @@ namespace pyoomph
 		for (auto &slot : field_contribution_slots)
 		{
 			FiniteElementField *f = std::get<2>(slot);
-			if (!contribution_field_to_index.count(f)) continue; // Field contributes to nothing: stays -1
+			int idx = -1;
+			auto it = contribution_field_to_index.find(f);
+			if (it != contribution_field_to_index.end()) idx = (int)it->second;
+			else
+			{
+				// contributing_fields holds the field object as the RESIDUALS refer to it, which for an
+				// interface or facet code is the bulk code's object; field_contribution_slots holds this
+				// code's own object for the same dof. Those are different pointers, so the lookup above
+				// misses and the index used to stay at the -2 sentinel -- "contributes to nothing" -- for
+				// every field of every facet element. That made the whole elemental block read as
+				// structurally empty, which the frozen-sparsity verification then (correctly) refused:
+				// "A Jacobian entry appeared outside the symbolic sparsity pattern". Matching on the
+				// contribution class instead is what the coupling table itself is keyed by.
+				auto nit = contribution_name_to_index.find(contribution_class_name(f));
+				if (nit != contribution_name_to_index.end()) idx = (int)nit->second;
+			}
+			if (idx < 0) continue; // Genuinely part of no contribution of this code: stays -2
 			init << " functable->" << std::get<0>(slot) << ".field_contribution_index[" << std::get<1>(slot)
-				 << "]=" << contribution_field_to_index[f] << "; //" << contribution_names[contribution_field_to_index[f]] << std::endl;
+				 << "]=" << idx << "; //" << contribution_names[idx] << std::endl;
 		}
 	  }
 
