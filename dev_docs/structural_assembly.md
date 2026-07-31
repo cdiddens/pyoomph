@@ -1843,6 +1843,38 @@ The general rule this illustrates: a block that is 100% zero because a coupling 
 a table defect worth fixing; a block that is mostly zero because a field currently happens to vanish
 is not, and the two are indistinguishable without the per-block breakdown.
 
+### Possible future feature: let the user declare a field zero in the base state
+
+The framework cannot know that `velocity_phi` or `velocity_normal` stays zero -- nothing in the
+residuals forbids it, and in the perturbation problem those components are exactly what is nonzero.
+The USER often does know, and knows it for a structural reason rather than by accident. In the rivulet
+case the slip-length condition at the bottom prevents any non-zero `velocity_normal` in the base
+solution at all; in a stability analysis of a non-swirling flow the same holds for `velocity_phi`.
+
+So there is room for an opt-in declaration -- something like "this field is identically zero in the
+base state" -- which would let the BASE-state block drop the rows and columns of the declared fields
+from its pattern. Measured above, that is 87-90% of those blocks, and they are the bulk of what is
+left after the attribution fix, so the payoff is real: rivulet and eigendynamics would go from ~37%
+and ~27% stored zeros to close to the median of 0%.
+
+Three things it would have to respect, all of which the current design already provides for:
+
+* **Base state only.** The declaration applies to the base Jacobian, not to the perturbation or
+  eigenproblem matrices, where those components carry the whole solution. Patterns are already keyed
+  per matrix, so this is a per-matrix property, not a global one.
+* **Part of the pattern key.** `jacobian_structure_id` would have to include the declaration, or a
+  pattern built with it could be handed to an assembly running without it.
+* **Opt-in, never inferred.** Deriving it from observed values would be exactly the unsafe pruning
+  described above -- a field that happens to be zero at the current point is not a field that must be.
+  The declaration has to be a statement about the problem, made by whoever set it up.
+
+What makes this safe to offer at all is that the per-element verification already exists: a wrong
+declaration does not silently truncate the Jacobian, it refuses to assemble and names the positions
+that escaped the pattern. That turns a subtle correctness hazard into a loud, immediate error.
+
+Not implemented; recorded here because the measurement that motivates it is above and would otherwise
+have to be redone.
+
 ## 8. Open questions
 
 ### Closed by the work
