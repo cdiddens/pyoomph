@@ -67,7 +67,27 @@ namespace pyoomph
     // makes ConstrainFieldsToC1Space / ConstrainPositionsToC1Space compose with genuine adaptive
     // hanging nodes. See dev_docs/hanging_nodes_redesign.md section 5.5.
     std::vector<std::pair<oomph::Node*, double>> c1_constraint_corners;
+    // Where this node came from, as TOPOLOGY: the (father node, rounded father-shape weight) pairs of the
+    // point at which a refinement created it -- exactly the key the per-round shared-node registries use
+    // (RefineablePyramidElement::Shared_node_registry and friends). Empty for a node that was not born of
+    // a refinement, and for the element families whose sharing is resolved by a tree walk instead
+    // (2d triangles, tets outside a mixed forest).
+    //
+    // The point of storing it is the CROSS-ROUND case. Two elements meeting at a facet compute the same
+    // key for a node on it, because both compute it from their own element at the level where the node is
+    // born and those two elements share the facet's nodes -- but only if they are split in the SAME round
+    // does the per-round registry see both. When one side was refined rounds ago, the key it used is gone.
+    // Keeping it ON the node lets the snapshot be rebuilt from the live mesh at the start of every round
+    // (Mesh::split_elements_if_required), which is safe by construction: a node that is still in the mesh
+    // cannot have generating nodes that are not, since unrefinement removes the finer nodes first.
+    // This replaces matching by POSITION, which is only as good as the positions are -- and a hanging
+    // node's position is a cache of its masters that goes stale whenever something writes the dof vector
+    // from outside the Newton solver.
+    std::vector<std::pair<oomph::Node*, long long>> refinement_generating_key;
   public:
+    // See refinement_generating_key. Set once, when a refinement creates the node.
+    virtual void set_refinement_generating_key(const std::vector<std::pair<oomph::Node*, long long>> &k) { refinement_generating_key = k; }
+    virtual const std::vector<std::pair<oomph::Node*, long long>> &get_refinement_generating_key() const { return refinement_generating_key; }
     virtual void add_additional_dof_constraint(unsigned index, AdditionalDofConstraintMode mode);
     virtual void remove_additional_dof_constraint(unsigned index, AdditionalDofConstraintMode mode);
     virtual const AdditionalDofConstrainingInfo *get_additional_dof_constraints() const { return additional_dof_constraints; }

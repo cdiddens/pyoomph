@@ -447,16 +447,15 @@ const double PyramidGaussC2::Weight[27] =
         if (it != reg.end()) { node_pt(j) = it->second; continue; }
       }
 
-      // (2b) Cross-round: reuse a node coincident at the START of this round (built by a finer neighbour in an
-      // EARLIER round; the per-round registry only dedupes within THIS round). Without it a shared node is
-      // duplicated under multi-level (non-uniform) refinement. Mirrors the tet build -- the position snapshot
-      // on RefineableTElement<2> is populated for every node by Mesh::split_elements_if_required.
+      // (2b) Cross-round: reuse a node built in an EARLIER round -- notably by a neighbour refined before
+      // this one -- which the per-round registry above cannot see. Same key, looked up in the snapshot
+      // rebuilt from the live mesh at the start of the round (the nodes carry the key they were born with,
+      // see pyoomph::Node::refinement_generating_key). Both sides of a facet compute the same key because
+      // both compute it from their own element at the level where the node is born, and those two elements
+      // share the facet's nodes.
       if (!reg_key.empty())
       {
-        Vector<double> xq(3);
-        father_el_pt->get_x(0, s, xq);
-        double xn[3] = {xq[0], xq[1], xq[2]};
-        if (Node *ex = oomph::RefineableTElement<2>::find_existing_node_at_position(xn, 3)) { node_pt(j) = ex; continue; }
+        if (Node *ex = RefineablePyramidElement::find_node_in_snapshot(reg_key)) { node_pt(j) = ex; continue; }
       }
 
       // (3) Build a new node. It lies on a mesh boundary iff ALL its generating nodes share one; pinned
@@ -538,7 +537,15 @@ const double PyramidGaussC2::Weight[27] =
         for (unsigned k = 0; k < nv; k++) created_node_pt->set_value(t, k, prev[k]);
       }
       mesh_pt->add_node_pt(created_node_pt);
-      if (!reg_key.empty()) reg[reg_key] = created_node_pt;
+      if (!reg_key.empty())
+      {
+        reg[reg_key] = created_node_pt;
+        // Remember the key ON the node, so the next round's snapshot can find it again (see
+        // pyoomph::Node::refinement_generating_key). This is what makes the sharing work ACROSS rounds
+        // without ever comparing positions.
+        if (pyoomph::NodeWithFieldIndicesBase *pn = dynamic_cast<pyoomph::NodeWithFieldIndicesBase *>(created_node_pt))
+          pn->set_refinement_generating_key(std::vector<std::pair<oomph::Node *, long long>>(reg_key.begin(), reg_key.end()));
+      }
     }
   }
 
@@ -826,6 +833,19 @@ const double PyramidGaussC2::Weight[27] =
   // a node on a pyramid<->tet shared face is created once. Topological -> MPI-safe.
   std::map<RefineablePyramidElement::SharedNodeKey, Node *> RefineablePyramidElement::Shared_node_registry;
   bool RefineablePyramidElement::Mixed_forest_active = false;
+
+  // See the declaration. The snapshot is keyed exactly like the per-round registry, so a node built in an
+  // earlier round is found by the same key the builds compute now.
+  std::map<RefineablePyramidElement::SharedNodeKey, Node *> RefineablePyramidElement::Shared_node_snapshot;
+
+  void RefineablePyramidElement::register_node_in_snapshot(oomph::Node *n)
+  {
+    pyoomph::NodeWithFieldIndicesBase *pn = dynamic_cast<pyoomph::NodeWithFieldIndicesBase *>(n);
+    if (!pn) return;
+    const std::vector<std::pair<oomph::Node *, long long>> &k = pn->get_refinement_generating_key();
+    if (k.empty()) return; // not born of a refinement (or a family that shares by tree walk instead)
+    Shared_node_snapshot[SharedNodeKey(k.begin(), k.end())] = n;
+  }
 
   
 

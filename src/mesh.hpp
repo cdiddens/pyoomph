@@ -496,12 +496,17 @@ namespace pyoomph
 				oomph::RefineablePyramidElement::Mixed_forest_active =
 					((has_brick ? 1 : 0) + (has_tet ? 1 : 0) + (has_wedge ? 1 : 0) + (has_pyr ? 1 : 0)) >= 2;
 			}
-			// Snapshot existing node positions so build() can reuse a coincident node created in an
-			// EARLIER round (e.g. by a finer neighbour) instead of duplicating it -- which would tear a
-			// moving mesh apart at a refine/coarsen interface. See RefineableTElement<2>::build.
-			oomph::RefineableTElement<2>::clear_existing_node_positions();
+			// Snapshot the live nodes by the TOPOLOGICAL key they were born with, so a build() in this round
+			// can reuse a node an earlier round created (e.g. by a neighbour that was refined before this
+			// one) instead of duplicating it -- which would tear a moving mesh apart at a refine/coarsen
+			// interface. Used by the mixed-3d builds (wedge/pyramid/brick-as-son, and tets inside a mixed
+			// forest); the 2d triangle and pure-tet builds resolve the same question by walking the tree.
+			// Rebuilding it here rather than keeping a registry alive across rounds is what makes the
+			// pointers safe: every node in the list is alive, and so are its generating nodes, because
+			// unrefinement removes the finer nodes before the coarser ones they were built from.
+			oomph::RefineablePyramidElement::clear_shared_node_snapshot();
 			for (unsigned long in = 0; in < this->nnode(); in++)
-				oomph::RefineableTElement<2>::register_existing_node_position(this->node_pt(in));
+				oomph::RefineablePyramidElement::register_node_in_snapshot(this->node_pt(in));
 			// Find the number of trees in the forest
 			if (!this->Forest_pt)
 			{

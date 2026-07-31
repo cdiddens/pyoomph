@@ -316,25 +316,6 @@ namespace oomph
     // Clear the shared-node registry (call once before each refinement round). See below.
     static void clear_shared_edge_node_registry() { Shared_edge_node_registry.clear(); }
 
-    // Snapshot every existing mesh node's position (call once before each refinement round, after
-    // clearing). Node-sharing fallback for the 3d builds ONLY (tetrahedron, wedge, pyramid, brick-as-son):
-    // a son node built this round must reuse a coincident node that already exists -- notably one created
-    // by a FINER neighbour in an earlier round -- or the shared vertex is duplicated and a moving mesh
-    // tears apart at a refine/coarsen interface.
-    //
-    // The 2d triangle build does NOT use this any more and must not: identifying a node by its POSITION is
-    // only as good as the positions are, and a hanging node's stored position is a cache of its masters
-    // that anything writing the dof vector from outside the Newton solver leaves stale (that is exactly
-    // how adapting on an eigenfunction used to tear the mesh). node_created_by_neighbour now finds the
-    // holder topologically at any level. The 3d builds still need the same treatment.
-    static void clear_existing_node_positions() { Existing_node_by_position.clear(); }
-    static void register_existing_node_position(oomph::Node *n);
-    // Look up a snapshot node coincident with position x (dim coords). Shared by the 2d triangle and 3d
-    // tetrahedron build() fallbacks (the snapshot is stored here and populated for meshes of either dim).
-    static oomph::Node *find_existing_node_at_position(const double *x, unsigned dim);
-    // Position-string key (rounded to ~12 sig figs), 1/2/3-d. Public so RefineableTElement<3> can share it.
-    static std::string position_key(const double *x, unsigned dim);
-
   protected:
     // --- Geometric node-sharing during triangle refinement (Phase 2, branch mixed_adapt) ---
     // Instead of oomph's quad compass neighbour finding (geometrically wrong for triangles), a
@@ -349,11 +330,6 @@ namespace oomph
     // father-local coordinate s_in_father; empty if it is not the midpoint of a father-node pair.
     std::set<Node *> father_edge_node_key(const Vector<double> &s_in_father, RefineableTElement<2> *father_el_pt) const;
 
-    // Position -> node snapshot of the mesh at the start of the current refinement round (see
-    // clear/register_existing_node_position). Keyed by a rounded-coordinate string so a coincident
-    // position matches to ~12 significant figures. Looked up by the 3d builds when both the tree and the
-    // per-round registry miss; the 2d triangle build no longer consults it at all (see above).
-    static std::map<std::string, oomph::Node *> Existing_node_by_position;
   };
 
   template <>

@@ -992,6 +992,22 @@ class RefineablePyramidElement : public virtual RefineableElement, public virtua
     static std::map<SharedNodeKey, Node *> Shared_node_registry;
     static void clear_shared_node_registry() { Shared_node_registry.clear(); }
 
+    // CROSS-ROUND counterpart of the registry above: the same key, but rebuilt at the start of every
+    // refinement round from the keys the live nodes carry (pyoomph::Node::refinement_generating_key),
+    // so a node built rounds ago -- notably by a neighbour that was refined earlier -- is still found.
+    // The registry above only ever sees what THIS round built. Purely topological; it replaced a
+    // start-of-round snapshot of node POSITIONS, which broke as soon as a hanging node's cached
+    // position went stale. Populated by Mesh::split_elements_if_required (mesh.hpp).
+    static std::map<SharedNodeKey, Node *> Shared_node_snapshot;
+    static void clear_shared_node_snapshot() { Shared_node_snapshot.clear(); }
+    static void register_node_in_snapshot(oomph::Node *n);
+    static Node *find_node_in_snapshot(const SharedNodeKey &key)
+    {
+      if (Shared_node_snapshot.empty()) return 0;
+      std::map<SharedNodeKey, Node *>::iterator it = Shared_node_snapshot.find(key);
+      return (it != Shared_node_snapshot.end()) ? it->second : 0;
+    }
+
     // True during the refinement of a MIXED 3d mesh (>=2 of {tet,wedge,pyramid} present). When set, the tet,
     // wedge and pyramid builds all route their new interface nodes into THIS registry with the weight-augmented
     // key (RefineableWedgeElement::SharedNodeKey and SharedNodeKey are the same underlying type), so a tet and

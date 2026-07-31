@@ -1281,16 +1281,31 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
        chaining face hops even though most share no face with the starting root.
        `quad_node_at_root_coordinate` / `node_at_root_coordinate` (the mixed quad<->tri sharing) got the same
        every-level, every-containing-son treatment.
-     * **The position snapshot is gone from the 2d tri build and from the pure-tet build.** It remains for
-       MIXED 3d forests (gated on `in_pyramid_forest() || RefineablePyramidElement::Mixed_forest_active`,
-       the same predicate the shared-node registry uses) and for the wedge/pyramid/brick-as-son builds
-       (`src/elements.cpp`, `src/wedges_and_pyramids.cpp`), which still need the same treatment. Gating it
-       on `in_pyramid_forest()` alone is NOT enough and cost a red `test_mixed_3d.py` run: in a three-way
-       (tet+wedge+pyramid) forest a tet can be rooted in a WEDGE and have neighbours of any shape across a
-       face, and neither the tet tree walk nor its root hops reach those.
-     * **Validated.** `tests/test_triangle_refinement.py::test_node_sharing_ignores_node_positions` and
-       `tests/test_tet_refinement.py::test_tet_node_sharing_ignores_node_positions` state the invariant
-       directly: displace every hanging node's stored position before each adapt (exactly what a stale cache
+     * **The position snapshot is gone from the 2d tri build and from the pure-tet build.** En route,
+       gating the tet fallback on `in_pyramid_forest()` alone turned out NOT to be enough and cost a red
+       `test_mixed_3d.py` run: in a three-way (tet+wedge+pyramid) forest a tet can be rooted in a WEDGE and
+       have neighbours of any shape across a face, which the tet tree walk does not reach. The right
+       predicate is the one the shared-node registry already uses,
+       `in_pyramid_forest() || RefineablePyramidElement::Mixed_forest_active`.
+     * **The MIXED 3d families keep their key and got a cross-round snapshot OF THAT KEY [DONE].** Wedge,
+       pyramid, brick-as-son and tet-in-a-mixed-forest do not share by a tree walk but by the
+       `(father node, rounded father-shape weight)` key of `RefineablePyramidElement::Shared_node_registry`,
+       which is already topological -- only its LIFETIME was the problem, since it is cleared every round,
+       and the cross-round half was being done by position. So a node now remembers the key it was born
+       with (`pyoomph::Node::refinement_generating_key`) and `Mesh::split_elements_if_required` rebuilds a
+       `Shared_node_snapshot` from the live mesh each round. Both sides of a facet compute the same key,
+       because both compute it from their own element at the level where the node is born and those two
+       elements share the facet's nodes -- including the cross-level case, since a node on a facet between
+       a level-L and a level-(L+1) element was born when the finer side's FATHER, also at level L, split.
+       Rebuilding from the live mesh rather than keeping a registry alive across rounds is what makes the
+       pointers safe: every node in the list is alive, and so are its generating nodes, because
+       unrefinement removes the finer nodes before the coarser ones they were built from.
+       `RefineableTElement<2>::Existing_node_by_position` and its `position_key` helpers are deleted, so
+       **no build identifies a node by its position any more, in any dimension or shape.**
+     * **Validated.** `tests/test_triangle_refinement.py::test_node_sharing_ignores_node_positions`,
+       `tests/test_tet_refinement.py::test_tet_node_sharing_ignores_node_positions` and
+       `tests/test_mixed_3d.py::test_mixed_node_sharing_ignores_node_positions` (all five mixed layouts)
+       state the invariant directly: displace every hanging node's stored position before each adapt (exactly what a stale cache
        looks like) over a refine/unrefine sequence whose pattern is keyed on the LAGRANGIAN midpoint, and
        require the mesh topology to come out bit-identical. Plus the pre-existing suites unchanged.
      * **Gotcha worth remembering:** the 3d root walk held a `const Vector<double>&` into the work queue

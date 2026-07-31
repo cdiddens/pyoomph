@@ -7965,17 +7965,16 @@ namespace pyoomph
 				if (it != RefineablePyramidElement::Shared_node_registry.end()) { this->node_pt(j) = it->second; continue; }
 			}
 
-			// (2b) Cross-round: reuse a node coincident at the START of this round -- notably one built by a
-			// FINER neighbour in an EARLIER round, which the per-round registry above cannot see. Without this a
-			// shared node is DUPLICATED under multi-level (non-uniform) refinement, tearing the mesh. Mirrors
-			// the tet build; the position snapshot lives on RefineableTElement<2> and is populated for every
-			// node (2d/3d) by Mesh::split_elements_if_required. Only for genuine shared (non-interior) nodes.
+			// (2b) Cross-round: reuse a node built in an EARLIER round -- notably by a neighbour refined
+			// before this one -- which the per-round registry above cannot see. Without this a shared node is
+			// DUPLICATED under multi-level (non-uniform) refinement, tearing the mesh. Same key, looked up in
+			// the snapshot rebuilt from the live mesh at the start of the round: the nodes carry the key they
+			// were born with (pyoomph::Node::refinement_generating_key), and both sides of a facet compute the
+			// same key, because both compute it from their own element at the level where the node is born and
+			// those two elements share the facet's nodes. Only for genuine shared (non-interior) nodes.
 			if (!reg_key.empty())
 			{
-				oomph::Vector<double> xq(3);
-				father_el_pt->get_x(0, s, xq);
-				double xn[3] = {xq[0], xq[1], xq[2]};
-				if (oomph::Node *ex = oomph::RefineableTElement<2>::find_existing_node_at_position(xn, 3)) { this->node_pt(j) = ex; continue; }
+				if (oomph::Node *ex = oomph::RefineablePyramidElement::find_node_in_snapshot(reg_key)) { this->node_pt(j) = ex; continue; }
 			}
 
 			// (3) Build a new node (boundary iff all generating nodes share a boundary; pinned iff all pinned).
@@ -8055,7 +8054,14 @@ namespace pyoomph
 				for (unsigned k = 0; k < nv; k++) created_node_pt->set_value(t, k, prev[k]);
 			}
 			mesh_pt->add_node_pt(created_node_pt);
-			if (!reg_key.empty()) RefineablePyramidElement::Shared_node_registry[reg_key] = created_node_pt;
+			if (!reg_key.empty())
+			{
+				RefineablePyramidElement::Shared_node_registry[reg_key] = created_node_pt;
+				// Key remembered on the node for the next round's snapshot -- see
+				// pyoomph::Node::refinement_generating_key and step (2b) above.
+				if (pyoomph::NodeWithFieldIndicesBase *pn = dynamic_cast<pyoomph::NodeWithFieldIndicesBase *>(created_node_pt))
+					pn->set_refinement_generating_key(std::vector<std::pair<oomph::Node *, long long>>(reg_key.begin(), reg_key.end()));
+			}
 		}
 	}
 
@@ -8152,17 +8158,16 @@ namespace pyoomph
 				if (it != RefineablePyramidElement::Shared_node_registry.end()) { this->node_pt(j) = it->second; continue; }
 			}
 
-			// (2b) Cross-round: reuse a node coincident at the START of this round -- notably one built by a
-			// FINER neighbour in an EARLIER round, which the per-round registry above cannot see. Without this a
-			// shared node is DUPLICATED under multi-level (non-uniform) refinement, tearing the mesh. Mirrors
-			// the tet build; the position snapshot lives on RefineableTElement<2> and is populated for every
-			// node (2d/3d) by Mesh::split_elements_if_required. Only for genuine shared (non-interior) nodes.
+			// (2b) Cross-round: reuse a node built in an EARLIER round -- notably by a neighbour refined
+			// before this one -- which the per-round registry above cannot see. Without this a shared node is
+			// DUPLICATED under multi-level (non-uniform) refinement, tearing the mesh. Same key, looked up in
+			// the snapshot rebuilt from the live mesh at the start of the round: the nodes carry the key they
+			// were born with (pyoomph::Node::refinement_generating_key), and both sides of a facet compute the
+			// same key, because both compute it from their own element at the level where the node is born and
+			// those two elements share the facet's nodes. Only for genuine shared (non-interior) nodes.
 			if (!reg_key.empty())
 			{
-				oomph::Vector<double> xq(3);
-				father_el_pt->get_x(0, s, xq);
-				double xn[3] = {xq[0], xq[1], xq[2]};
-				if (oomph::Node *ex = oomph::RefineableTElement<2>::find_existing_node_at_position(xn, 3)) { this->node_pt(j) = ex; continue; }
+				if (oomph::Node *ex = oomph::RefineablePyramidElement::find_node_in_snapshot(reg_key)) { this->node_pt(j) = ex; continue; }
 			}
 
 			// (3) Build a new node (boundary iff all generating nodes share a boundary; pinned iff all pinned).
@@ -8242,7 +8247,14 @@ namespace pyoomph
 				for (unsigned k = 0; k < nv; k++) created_node_pt->set_value(t, k, prev[k]);
 			}
 			mesh_pt->add_node_pt(created_node_pt);
-			if (!reg_key.empty()) RefineablePyramidElement::Shared_node_registry[reg_key] = created_node_pt;
+			if (!reg_key.empty())
+			{
+				RefineablePyramidElement::Shared_node_registry[reg_key] = created_node_pt;
+				// Key remembered on the node for the next round's snapshot -- see
+				// pyoomph::Node::refinement_generating_key and step (2b) above.
+				if (pyoomph::NodeWithFieldIndicesBase *pn = dynamic_cast<pyoomph::NodeWithFieldIndicesBase *>(created_node_pt))
+					pn->set_refinement_generating_key(std::vector<std::pair<oomph::Node *, long long>>(reg_key.begin(), reg_key.end()));
+			}
 		}
 	}
 

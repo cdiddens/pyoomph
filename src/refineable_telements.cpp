@@ -2308,36 +2308,6 @@ namespace oomph
   // Shared-node registry for geometric node-sharing during triangle refinement (see header).
   std::map<std::set<Node *>, Node *> RefineableTElement<2>::Shared_edge_node_registry;
 
-  // Position -> node snapshot for the cross-round (finer-neighbour) node-sharing fallback (see header).
-  std::map<std::string, Node *> RefineableTElement<2>::Existing_node_by_position;
-
-  std::string RefineableTElement<2>::position_key(const double *x, unsigned dim)
-  {
-    char buf[128];
-    if (dim >= 3) std::snprintf(buf, sizeof(buf), "%.12g|%.12g|%.12g", x[0], x[1], x[2]);
-    else if (dim == 2) std::snprintf(buf, sizeof(buf), "%.12g|%.12g", x[0], x[1]);
-    else std::snprintf(buf, sizeof(buf), "%.12g", x[0]);
-    return std::string(buf);
-  }
-
-  void RefineableTElement<2>::register_existing_node_position(Node *n)
-  {
-    if (!n) return;
-    const unsigned dim = n->ndim();
-    double x[3] = {0, 0, 0};
-    for (unsigned i = 0; i < dim && i < 3; i++) x[i] = n->x(i);
-    Existing_node_by_position[position_key(x, dim)] = n;
-  }
-
-  // Shared (2d + 3d) lookup: the start-of-round snapshot is stored on RefineableTElement<2> and reused by
-  // both the triangle and tetrahedron build() fallbacks (mesh.hpp registers every node here, 2d or 3d).
-  Node *RefineableTElement<2>::find_existing_node_at_position(const double *x, unsigned dim)
-  {
-    if (Existing_node_by_position.empty()) return 0;
-    std::map<std::string, Node *>::iterator it = Existing_node_by_position.find(position_key(x, dim));
-    return (it != Existing_node_by_position.end()) ? it->second : 0;
-  }
-
   // Registry key for a new son node at father-local coordinate s_in_father: every node created by
   // a 1->4 triangle refinement is the midpoint of exactly two father nodes (two corners for a
   // linear triangle; a corner+mid-edge or two mid-edge nodes for a quadratic one). The key is that
@@ -2621,34 +2591,21 @@ namespace oomph
         }
       }
 
-      // (2b) Fallback for a PYRAMID-ROOTED (mixed 3d) forest only: reuse a coincident node that already
-      // existed at the START of this refinement round -- notably one built by a FINER neighbour in an
-      // EARLIER round. The per-round registry above only dedupes within THIS round, so without this a
-      // shared node is DUPLICATED under transient re-adaptation and a moving mixed mesh tears apart at the
-      // refine/coarsen interface. The new node sits at the average of its generating nodes, which is where
-      // the existing coincident node also sits.
+      // (2b) Cross-round sharing for a MIXED 3d forest: reuse a node built in an EARLIER round, which the
+      // per-round registry above cannot see. Same (father node, rounded weight) key, looked up in the
+      // snapshot rebuilt from the live mesh at the start of the round -- the nodes carry the key they were
+      // born with (pyoomph::Node::refinement_generating_key). Without it a shared node is DUPLICATED under
+      // transient re-adaptation and a moving mixed mesh tears apart at the refine/coarsen interface.
       //
-      // A pure tet forest does NOT come here: step (1.5) above now finds the holder topologically at any
-      // level and across edges as well as faces. Identifying a node by its POSITION is only as good as the
-      // positions are, and a hanging node's stored position is a cache of its masters that anything writing
-      // the dof vector from outside the Newton solver leaves stale -- which is exactly how adapting on an
-      // eigenfunction used to tear a 2d mesh. The remaining mixed-3d shapes (pyramid/wedge/brick-as-son)
-      // still need the same treatment as the tets got here.
-      //
-      // "Mixed" has to be tested with the same predicate the registry above uses, not just
-      // in_pyramid_forest(): in a three-way (tet+wedge+pyramid) forest a tet can be rooted in a WEDGE, and
-      // its neighbours across a face can be of any shape -- neither the tet tree walk nor its root hops
-      // reach those, so the fallback is still load-bearing there.
+      // A pure tet forest does not come here at all: step (1.5) above finds the holder by walking the tree,
+      // at any level and across edges as well as faces. "Mixed" is tested with the same predicate the
+      // registry above uses, not just in_pyramid_forest(): in a three-way (tet+wedge+pyramid) forest a tet
+      // can be rooted in a WEDGE and have neighbours of any shape across a face, which the tet tree walk
+      // does not reach.
       const bool mixed_3d_forest = in_pyramid_forest() || oomph::RefineablePyramidElement::Mixed_forest_active;
-      if (mixed_3d_forest && !reg_key.empty() && !gen.empty())
+      if (mixed_3d_forest && !pyr_key.empty())
       {
-        const unsigned dim = gen[0]->ndim();
-        double x_new[3] = {0.0, 0.0, 0.0};
-        for (Node *g : gen)
-          for (unsigned i = 0; i < dim && i < 3; i++) x_new[i] += g->x(i);
-        for (unsigned i = 0; i < dim && i < 3; i++) x_new[i] /= double(gen.size());
-        Node *ex = RefineableTElement<2>::find_existing_node_at_position(x_new, dim);
-        if (ex) { node_pt(j) = ex; continue; }
+        if (Node *ex = oomph::RefineablePyramidElement::find_node_in_snapshot(pyr_key)) { node_pt(j) = ex; continue; }
       }
 
       // (3) Build a new node. It lies on a mesh boundary iff ALL its generating nodes do (their
@@ -2743,7 +2700,14 @@ namespace oomph
       mesh_pt->add_node_pt(created_node_pt);
       if (!reg_key.empty())
       {
-        if (pyr_forest) oomph::RefineablePyramidElement::Shared_node_registry[pyr_key] = created_node_pt;
+        if (pyr_forest)
+        {
+          oomph::RefineablePyramidElement::Shared_node_registry[pyr_key] = created_node_pt;
+          // Key remembered on the node for the next round's snapshot -- see
+          // pyoomph::Node::refinement_generating_key and step (2b) above.
+          if (pyoomph::NodeWithFieldIndicesBase *pn = dynamic_cast<pyoomph::NodeWithFieldIndicesBase *>(created_node_pt))
+            pn->set_refinement_generating_key(std::vector<std::pair<oomph::Node *, long long>>(pyr_key.begin(), pyr_key.end()));
+        }
         else Shared_edge_node_registry[reg_key] = created_node_pt;
       }
     }
