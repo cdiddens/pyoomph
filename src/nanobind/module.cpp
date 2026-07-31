@@ -44,7 +44,8 @@ void PyReg_Solvers(nb::module_ &m);
 void PyReg_GeomObjects(nb::module_ &m);
 void PyReg_Vector(nb::module_ &m);
 #ifdef PYOOMPH_HAS_TQMESH
-// Bindings for the vendored TQMesh mesh generator (src/nanobind/tqmesh, src/thirdparty/tqmesh).
+// Bindings for the TQMesh mesh generator (src/nanobind/tqmesh; the library itself is downloaded by
+// cmake/ThirdPartyTQMesh.cmake).
 // Optional: the build option PYOOMPH_HAS_TQMESH can leave TQMesh out entirely, in which case
 // neither this function nor its translation unit exists.
 void PyReg_TQMesh(nb::module_ &m);

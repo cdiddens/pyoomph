@@ -69,11 +69,11 @@ option(PYOOMPH_ASSUME_GINAC_HASH_PATCHED "Assert that a system-supplied GiNaC (P
 # override an OFF set here. Independent of PYOOMPH_GINAC_HASH_PATCHED below: that one governs
 # whether caching is *safe*; this one governs whether it exists at all in this build.
 option(PYOOMPH_ENABLE_JIT_CACHE "Enable the JIT code cache at build time" ON)
-# TQMesh (src/thirdparty/tqmesh, see src/thirdparty/INFO_tqmesh) is a header-only 2d
-# triangle/quad mesh generator, exposed to python by src/nanobind/tqmesh/*.cpp. Switching this
-# OFF drops both from the build; the extension module then reports has_tqmesh == False and none
-# of the TQMesh* classes exist.
-option(PYOOMPH_HAS_TQMESH "Build with the vendored TQMesh two-dimensional mesh generator" ON)
+# TQMesh is a header-only 2d triangle/quad mesh generator, downloaded by
+# cmake/ThirdPartyTQMesh.cmake and exposed to python by src/nanobind/tqmesh/*.cpp. Switching this
+# OFF skips the download and drops those sources from the build; the extension module then reports
+# has_tqmesh == False and none of the TQMesh* classes exist.
+option(PYOOMPH_HAS_TQMESH "Build with the TQMesh two-dimensional mesh generator" ON)
 
 # Left empty by default: ginac.de only ever hosts the *current* release
 # tarball, so a version pinned here goes dead as soon as a new release is
@@ -116,6 +116,9 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 include(cmake/ThirdPartyGiNaC.cmake)
+if(PYOOMPH_HAS_TQMESH)
+  include(cmake/ThirdPartyTQMesh.cmake)
+endif()
 
 # ----------------------------------------------------------------------------
 # nanobind, via CMake.
@@ -298,14 +301,10 @@ target_compile_definitions(_pyoomph_core PRIVATE
 )
 
 if(PYOOMPH_HAS_TQMESH)
-  # TQMesh includes its headers unqualified ("Mesh.h", <TQMeshConfig.h>, ...), so each of the
-  # vendored directories has to be on the include path. Kept PRIVATE and off pyoomph_core: nothing
-  # outside src/nanobind/tqmesh sees TQMesh.
-  target_include_directories(_pyoomph_core PRIVATE
-    "${CMAKE_SOURCE_DIR}/src/thirdparty/tqmesh"
-    "${CMAKE_SOURCE_DIR}/src/thirdparty/tqmesh/algorithm"
-    "${CMAKE_SOURCE_DIR}/src/thirdparty/tqmesh/utils"
-  )
+  # Kept PRIVATE and off pyoomph_core: nothing outside src/nanobind/tqmesh sees TQMesh. The sources
+  # are only there once tqmesh_external has run, hence the dependency.
+  target_include_directories(_pyoomph_core PRIVATE ${PYOOMPH_TQMESH_INCLUDE_DIRS})
+  add_dependencies(_pyoomph_core tqmesh_external)
 endif()
 
 if(PYOOMPH_USE_MPI)

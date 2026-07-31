@@ -19,11 +19,11 @@ The main author may be contacted at c.diddens@utwente.nl
 
 ================================================================================*/
 
-// Python bindings for TQMesh, the two-dimensional triangle/quad mesh generator vendored in
-// src/thirdparty/tqmesh (see src/thirdparty/INFO_tqmesh). Only compiled into _pyoomph_core when
-// PYOOMPH_HAS_TQMESH is on (the default, see CMakeLists.txt), which is also the only place in
-// pyoomph that may include TQMesh's headers - the rest of the C++ core must keep building without
-// them.
+// Python bindings for TQMesh, the two-dimensional triangle/quad mesh generator that
+// cmake/ThirdPartyTQMesh.cmake downloads and prepares (see citools/patches/patch_tqmesh.cmake for
+// the two changes made to its sources). Only compiled into _pyoomph_core when PYOOMPH_HAS_TQMESH is
+// on (the default, see CMakeLists.txt), which is also the only place in pyoomph that may include
+// TQMesh's headers - the rest of the C++ core must keep building without them.
 //
 // The bindings follow TQMesh's own three-step workflow - describe a Domain, hand it to a
 // MeshGenerator, run meshing algorithms on the resulting Mesh - but hand out handles instead of
