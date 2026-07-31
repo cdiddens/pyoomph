@@ -41,6 +41,8 @@ it and the results become a mixture of two builds.
 Run scratch scripts, benchmarks and diagnostics from the session scratchpad, **never** from the
 user's own folders under `pyoomph_runs/` - every run creates an output directory next to the script.
 
+You can work in the Scratchpad subfolder!
+
 Give each run its own fresh working directory. Many tutorials write dump/restart files and take a
 shortcut when they find them, so a second run in the same directory measures something entirely
 different from the first.
