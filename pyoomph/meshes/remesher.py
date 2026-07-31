@@ -525,11 +525,12 @@ class RemesherViaRecreation(RemesherBase):
     def remesh(self):
         if self.base_trunk is None:
             self.base_trunk=self.template._fntrunk
-        if self.base_trunk is not None:
-            fnformat:str=self.base_trunk+"_REMESH_{:06d}"
-        else:
-            print(self.template)
-            raise RuntimeError("TODO: Good trunk name here. Set _fntrunk of the MeshTemplate")
+        if self.base_trunk is None:
+            # A backend that writes no files of its own never sets a trunk (only the GmshTemplate does, for its
+            # .msh files). The trunk is merely the base name of whatever files the recreated mesh may produce, so
+            # deriving one from the class name is enough to keep the rounds apart.
+            self.base_trunk=type(self.template).__name__
+        fnformat:str=self.base_trunk+"_REMESH_{:06d}"
 
 
         self._old_meshes={}

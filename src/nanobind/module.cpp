@@ -43,6 +43,13 @@ void PyReg_Mesh(nb::module_ &m);
 void PyReg_Solvers(nb::module_ &m);
 void PyReg_GeomObjects(nb::module_ &m);
 void PyReg_Vector(nb::module_ &m);
+#ifdef PYOOMPH_HAS_TQMESH
+// Bindings for the TQMesh mesh generator (src/nanobind/tqmesh; the library itself is downloaded by
+// cmake/ThirdPartyTQMesh.cmake).
+// Optional: the build option PYOOMPH_HAS_TQMESH can leave TQMesh out entirely, in which case
+// neither this function nor its translation unit exists.
+void PyReg_TQMesh(nb::module_ &m);
+#endif
 
 // Compiled and installed as pyoomph/_pyoomph_core*.so, i.e. importable as pyoomph._pyoomph_core.
 #define PYOOMPH_MODULE_NAME _pyoomph_core
@@ -70,4 +77,13 @@ NB_MODULE(PYOOMPH_MODULE_NAME, m)
     PyReg_Mesh(m);
     PyReg_Solvers(m);
     PyReg_Vector(m);
+
+    // Lets python find out whether this build can mesh with TQMesh, without having to probe for
+    // the classes registered by PyReg_TQMesh().
+#ifdef PYOOMPH_HAS_TQMESH
+    m.attr("has_tqmesh") = true;
+    PyReg_TQMesh(m);
+#else
+    m.attr("has_tqmesh") = false;
+#endif
 }

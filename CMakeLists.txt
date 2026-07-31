@@ -43,9 +43,10 @@ endif()
 # ----------------------------------------------------------------------------
 # Build options
 #
-# These mirror the old PYOOMPH_* environment variables read by setup.py, and
-# are what the `configure` wrapper script (see ./configure) sets via
-# `-DPYOOMPH_...=...` / `pip install --config-settings=cmake.define.X=Y`.
+# These mirror the old PYOOMPH_* environment variables read by setup.py. They are set either
+# straight on the cmake command line (`-DPYOOMPH_...=...`) or, when building through pip/
+# scikit-build-core as ./build_for_develop.sh does, via
+# `pip install --config-settings=cmake.define.PYOOMPH_...=...`.
 # ----------------------------------------------------------------------------
 option(PYOOMPH_USE_MPI       "Build with MPI support (defines OOMPH_HAS_MPI)"        OFF)
 option(PYOOMPH_PARANOID      "Build with extra runtime sanity checks (defines PARANOID)" OFF)
@@ -68,6 +69,11 @@ option(PYOOMPH_ASSUME_GINAC_HASH_PATCHED "Assert that a system-supplied GiNaC (P
 # override an OFF set here. Independent of PYOOMPH_GINAC_HASH_PATCHED below: that one governs
 # whether caching is *safe*; this one governs whether it exists at all in this build.
 option(PYOOMPH_ENABLE_JIT_CACHE "Enable the JIT code cache at build time" ON)
+# TQMesh is a header-only 2d triangle/quad mesh generator, downloaded by
+# cmake/ThirdPartyTQMesh.cmake and exposed to python by src/nanobind/tqmesh/*.cpp. Switching this
+# OFF skips the download and drops those sources from the build; the extension module then reports
+# has_tqmesh == False and none of the TQMesh* classes exist.
+option(PYOOMPH_HAS_TQMESH "Build with the TQMesh two-dimensional mesh generator" ON)
 
 # Left empty by default: ginac.de only ever hosts the *current* release
 # tarball, so a version pinned here goes dead as soon as a new release is
@@ -110,6 +116,9 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 include(cmake/ThirdPartyGiNaC.cmake)
+if(PYOOMPH_HAS_TQMESH)
+  include(cmake/ThirdPartyTQMesh.cmake)
+endif()
 
 # ----------------------------------------------------------------------------
 # nanobind, via CMake.
@@ -143,7 +152,7 @@ find_package(nanobind CONFIG REQUIRED)
 # care of the ordering automatically, no manual sequencing needed).
 #
 # Python-independent: built once, reused unchanged across every Python
-# version when iterating with `./configure && make` for multiple wheels.
+# version when iterating with `cmake --build` for multiple wheels.
 # ----------------------------------------------------------------------------
 file(GLOB_RECURSE OOMPH_GENERIC_SOURCES CONFIGURE_DEPENDS
      "${CMAKE_SOURCE_DIR}/src/thirdparty/oomph-lib/include/*.cc")
@@ -225,6 +234,18 @@ endif()
 # ----------------------------------------------------------------------------
 file(GLOB PYOOMPH_NANOBIND_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/nanobind/*.cpp")
 
+# The TQMesh bindings live in their own subdirectory rather than next to the other binding
+# sources, since they are the only translation units that may include TQMesh's headers - and the
+# only ones that must not be compiled at all when PYOOMPH_HAS_TQMESH is off.
+if(PYOOMPH_HAS_TQMESH)
+  file(GLOB PYOOMPH_TQMESH_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/nanobind/tqmesh/*.cpp")
+  if(NOT PYOOMPH_TQMESH_SOURCES)
+    message(FATAL_ERROR "PYOOMPH_HAS_TQMESH is ON, but no .cpp sources were found under "
+                        "src/nanobind/tqmesh - pass -DPYOOMPH_HAS_TQMESH=OFF to build without TQMesh.")
+  endif()
+  list(APPEND PYOOMPH_NANOBIND_SOURCES ${PYOOMPH_TQMESH_SOURCES})
+endif()
+
 if(NOT PYOOMPH_NANOBIND_SOURCES)
   message(FATAL_ERROR "No .cpp sources found under src/nanobind - "
                        "cannot build the Python extension module.")
@@ -276,7 +297,15 @@ endif()
 target_compile_definitions(_pyoomph_core PRIVATE
   $<$<BOOL:${PYOOMPH_USE_MPI}>:OOMPH_HAS_MPI>
   $<$<BOOL:${PYOOMPH_PARANOID}>:PARANOID>
+  $<$<BOOL:${PYOOMPH_HAS_TQMESH}>:PYOOMPH_HAS_TQMESH>
 )
+
+if(PYOOMPH_HAS_TQMESH)
+  # Kept PRIVATE and off pyoomph_core: nothing outside src/nanobind/tqmesh sees TQMesh. The sources
+  # are only there once tqmesh_external has run, hence the dependency.
+  target_include_directories(_pyoomph_core PRIVATE ${PYOOMPH_TQMESH_INCLUDE_DIRS})
+  add_dependencies(_pyoomph_core tqmesh_external)
+endif()
 
 if(PYOOMPH_USE_MPI)
   target_link_libraries(_pyoomph_core PRIVATE MPI::MPI_CXX)

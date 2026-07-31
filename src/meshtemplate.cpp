@@ -2440,6 +2440,7 @@ Index : Local coordinates (s0,s1,s2)
 	// doesn't converge to tolerance, refine the sample table (double its resolution) and retry recursively.
 	void CurvedEntityCatmullRomSpline::position_to_parametric(const unsigned &t, const std::vector<double> &position, std::vector<double> &parametric)
 	{
+		// Closest precomputed sample as the initial guess
 		double mindist = 1.0e20;
 		int minind = -1;
 		for (unsigned i = 0; i < samplepos.size(); i++)
@@ -2454,70 +2455,56 @@ Index : Local coordinates (s0,s1,s2)
 				minind = i;
 			}
 		}
-		double t0 = samples[minind];
-		std::vector<double> tang;
-		dinterpolate(t0, tang);
-		int maxind = -1;
-		double besttang = -1.0;
-		for (unsigned int i = 0; i < std::min(position.size(), tang.size()); i++)
-		{
-			if (tang[i] * tang[i] > besttang)
-			{
-				besttang = tang[i] * tang[i];
-				maxind = i;
-			}
-		}
-		// Optimize via newton
-		double troot = t0;
-		mindist = sqrt(mindist);
-		unsigned iter = 0;
-		double eps = 1e-10;
-		std::vector<double> current, J;
 
-		while (mindist > eps)
+		// Project onto the spline, i.e. solve (c(t) - position).c'(t) = 0 by Gauss-Newton (the second
+		// derivative of the curve, which the exact Newton step would need, is not available here; near the
+		// curve its contribution is negligible anyway). This used to be a Newton iteration on the single
+		// coordinate with the largest tangent component, which inverts the curve exactly but only works for
+		// a position that actually lies on it - it gave up with "Cannot invert spline" otherwise. Mesh nodes
+		// are only guaranteed to lie on the spline when the mesh generator placed them there: gmsh does, a
+		// generator that is handed the spline as a polygonal chain (see pyoomph/meshes/tqmesh.py) does not,
+		// and the nearest point on the curve is the right answer for those as well - it is what the circle
+		// arc's inverse, a plain atan2 around the center, has always returned.
+		const unsigned dim = std::min(position.size(), pts.front().size());
+		double troot = samples[minind];
+		std::vector<double> current, J;
+		bool converged = false;
+		for (unsigned iter = 0; iter < 100; iter++)
 		{
 			interpolate(troot, current);
-			mindist = current[maxind] - position[maxind];
 			dinterpolate(troot, J);
-			troot -= mindist / J[maxind];
-			mindist = fabs(mindist);
-			if (iter++ > 1000)
+			double f = 0.0, g = 0.0;
+			for (unsigned int j = 0; j < dim; j++)
+			{
+				f += (current[j] - position[j]) * J[j];
+				g += J[j] * J[j];
+			}
+			if (g < 1e-30)
+			{
+				converged = true; // stationary point of the parametrization, nothing to improve here
 				break;
+			}
+			double dt = f / g;
+			troot = std::min(std::max(troot - dt, 0.0), N - 1.0);
+			if (fabs(dt) < 1e-12 * std::max(1.0, N - 1.0))
+			{
+				converged = true;
+				break;
+			}
 		}
-		if (mindist > eps)
+
+		if (!converged)
 		{
+			// A wiggly spline can have several local minima of the distance, so a poor initial guess may
+			// send the iteration back and forth between them - a finer sample table fixes that.
 			if (samples.size() < 10000)
 			{
 				gen_samples(2 * samples.size());
 				position_to_parametric(t, position, parametric);
 				return;
 			}
-			else
-			{
-				throw_runtime_error("Cannot invert spline");
-			}
+			throw_runtime_error("Cannot invert spline");
 		}
-		else
-		{
-			interpolate(troot, current);
-			double dist = 0.0;
-			for (unsigned int j = 0; j < std::min(position.size(), current.size()); j++)
-				dist += (position[j] - current[j]) * (position[j] - current[j]);
-			if (sqrt(dist) > 100 * eps)
-			{
-				if (samples.size() < 10000)
-				{
-					gen_samples(2 * samples.size());
-					position_to_parametric(t, position, parametric);
-					return;
-				}
-				else
-				{
-					throw_runtime_error("Cannot invert spline");
-				}
-			}
-		}
-		// TODO: Also a dist check
 		parametric[0] = troot;
 	}
 
