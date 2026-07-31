@@ -1,0 +1,55 @@
+In the subdirectory tqmesh, you find a partial copy of TQMesh by Florian Setzwein, a header-only
+two-dimensional mesh generator for triangular and quadrilateral elements.
+
+See tqmesh/LICENSE.md for the original licence of TQMesh (MIT).
+
+TQMesh is hosted at https://github.com/FloSewn/TQMesh
+
+Copied from TQMesh 1.4.0, commit d77ad3084d4c8746ef99bd03c2dd156532dd7178 (31st July 2026).
+
+TQMesh is exposed to python by src/nanobind/tqmesh/, which is the only place in pyoomph that
+includes these headers. Both are dropped from the build by -DPYOOMPH_HAS_TQMESH=OFF.
+
+##########################################################################
+Following changes were made with respect to the original TQMesh files:
+These changes are indicated by a comment start with "//FOR PYOOMPH"
+##########################################################################
+1) Only the header-only library itself was copied, i.e. TQMesh's src/algorithm and the part of its
+   src/utils that the former requires. Left out were TQMesh's command line application (src/app),
+   its examples and unit tests (src/examples, src/tests), its build system, its documentation and
+   its bundled copy of exprtk (src/extern_libs), which only serves the command line application to
+   parse mesh size functions from its input files - pyoomph passes a python callable instead.
+
+   From src/utils, the following files were not copied, since nothing in src/algorithm or in the
+   remaining src/utils refers to them:
+
+   ParaReader.h, StringOps.h:  parser for the input files of the command line application
+   Testing.h:                  assertion macros of the unit tests
+   Timer.h:                    timing utility used by the examples
+   Matrix.h:                   unused
+
+2) Following files have been changed and the positions marked with "//FOR PYOOMPH"
+
+CppUtils.h (Changed on 31st July 2026):
+Removed the includes of Timer.h, Testing.h and ParaReader.h, which are not copied (see above).
+
+Helpers.h (Changed on 31st July 2026):
+Made ASSERT/assert_msg and TERMINATE throw a std::runtime_error rather than calling assert() (a
+debug build), doing nothing at all (a release build) or exit(EXIT_FAILURE). Both conditions do fire
+on input that is merely unsuitable rather than wrong - a mesh size function returning zero, or a
+quad layer requested between positions not connected by boundary edges - and inside a python
+session neither aborting the process nor carrying on with a violated invariant is acceptable: the
+latter is what turned a failed quad layer into a segmentation fault. The assertions are hence also
+active in release builds now.
+
+QuadTree.h (Changed on 31st July 2026):
+Replaced the ASSERT in ~QuadTree() by a plain null check, since throwing from a destructor (see
+Helpers.h above) would call std::terminate.
+
+3) Following file was added, i.e. it is NOT part of TQMesh:
+
+TQMeshConfig.h:
+Several TQMesh headers include <TQMeshConfig.h> unconditionally. Upstream generates it from
+auxiliary/TQMeshConfig.h.in with configure_file() in its own CMakeLists.txt, which pyoomph does not
+run - it compiles the vendored headers directly. The replacement only reproduces the version
+macros; see the comment in the file itself.

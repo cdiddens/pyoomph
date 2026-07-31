@@ -17,6 +17,7 @@ Submodules
    pyoomph.meshes.meshdatacache
    pyoomph.meshes.remesher
    pyoomph.meshes.simplemeshes
+   pyoomph.meshes.tqmesh
    pyoomph.meshes.zeta
 
 Module contents
