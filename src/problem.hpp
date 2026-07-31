@@ -478,7 +478,13 @@ namespace pyoomph
     // being several times larger than the element's own field description. Only handlers that provide a
     // description are affected; the rest fall back exactly as before. Measured -22% on a full PDE fold
     // tracking solve and -31% per re-solve, same fold point to 12 digits.
-    bool use_frozen_sparsity_for_bifurcation_tracking=true;
+    // OFF by default nonetheless. Every other frozen pattern is derived from the code generator's own
+    // field-coupling table; the augmented one is a spec each handler writes by hand (get_sparsity_pattern),
+    // so it is the one part of the path whose correctness is not a property of generated code. A wrong
+    // spec is caught rather than silent -- verify_frozen_sparsity throws on an entry outside the pattern
+    // -- but the failure lands mid-continuation, on the runs that are hardest to repeat. Bifurcation
+    // tracking therefore stays on the long-standing assembly path unless its cost is actually a problem.
+    bool use_frozen_sparsity_for_bifurcation_tracking=false;
     // Several frozen patterns are kept at once, keyed by (pattern id, matrix index). A single slot per
     // matrix index is not enough: a workflow that alternates between two DIFFERENT patterns -- most
     // obviously a PETSc preconditioner matrix assembled from another residual via

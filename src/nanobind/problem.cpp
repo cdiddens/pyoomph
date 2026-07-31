@@ -843,12 +843,12 @@ void PyReg_Problem(nb::module_ &m)
 			 "the mesh, so this should settle: if it keeps rising, the pattern is being invalidated every assembly and the frozen route is a pure loss. Zero after "
 			 "a distributed solve means the route never engaged at all.")
 		.def_prop_rw("_use_frozen_sparsity_for_bifurcation_tracking", &pyoomph::Problem::get_use_frozen_sparsity_for_bifurcation_tracking, &pyoomph::Problem::set_use_frozen_sparsity_for_bifurcation_tracking,
-			 "On by default. Lets a bifurcation-tracking assembly handler describe its augmented elemental block (see AugmentedBlockSpec) so that the frozen-sparsity "
+			 "Off by default. Lets a bifurcation-tracking assembly handler describe its augmented elemental block (see AugmentedBlockSpec) so that the frozen-sparsity "
 			 "assembly can apply to bifurcation tracking as well, which it otherwise cannot: the block is several times larger than the element's own field "
 			 "description, so no field-coupling table describes it directly. Measured -45% assembly on a PDE fold tracking and -75% on a periodic orbit (-66% for "
 			 "the whole orbit solve), with a bit-identical pattern in both cases. Falls back by itself whenever a handler cannot describe its block -- notably when "
-			 "the Hessian is finite-differenced rather than generated, since nothing then bounds what it writes. Turn it off to isolate whether a bifurcation-tracking "
-			 "problem is affected by the augmented pattern at all.")
+			 "the Hessian is finite-differenced rather than generated, since nothing then bounds what it writes. Left off by default because the augmented pattern is the "
+			 "one the handler describes by hand rather than one derived from generated code; turn it on when the assembly time of a tracking run actually matters.")
 		.def("_get_frozen_sparsity_rebuild_count", &pyoomph::Problem::get_frozen_sparsity_rebuild_count,
 			 "How many frozen sparsity patterns have been built since the problem was created. It should stop growing once a workflow settles: a count that "
 			 "keeps rising assembly after assembly means the pattern cache is thrashing (too small for the number of distinct patterns in play), which is "

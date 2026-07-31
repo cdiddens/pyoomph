@@ -2146,7 +2146,7 @@ namespace pyoomph
 	// handler declines or the spec does not fit the block it is describing.
 	const char *Problem::augmented_sparsity_mask_for_element(const unsigned &matrix_index, oomph::GeneralisedElement *const &elem_pt, const unsigned &nvar, unsigned raw_nvar)
 	{
-		// On by default; set problem._use_frozen_sparsity_for_bifurcation_tracking = False to revert.
+		// Off by default; set problem._use_frozen_sparsity_for_bifurcation_tracking = True to enable.
 		const bool dbg = getenv("PYOOMPH_DBG_AUG") != 0;
 		auto decline = [&](const char *why) -> const char * { if (dbg) std::cout << "AUGDECLINE " << why << std::endl; return NULL; };
 		if (!use_frozen_sparsity_for_bifurcation_tracking) return decline("switch off");
