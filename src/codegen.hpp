@@ -25,6 +25,7 @@ The main author may be contacted at c.diddens@utwente.nl
 #include "pyginacstruct.hpp"
 #include <vector>
 #include <set>
+#include <unordered_map>
 #include "expressions.hpp"
 #include "jitbridge.h"
 
@@ -435,6 +436,24 @@ namespace pyoomph
       GiNaC::ex extra_test_scale;
       ReplaceFieldsToNonDimFields(FiniteElementCode *code_, std::string _where) : code(code_), where(_where), repl_count(0), extra_test_scale(1) {}
       GiNaC::ex operator()(const GiNaC::ex &inp) override;
+
+   protected:
+      // The actual rewrite; operator() is a memoising wrapper around it. GiNaC expressions are
+      // reference-counted DAGs, but ex::map traverses them as trees, so a subexpression shared k
+      // times is rewritten k times. Measured on the solid_oscillations tutorial: 1.53 million
+      // entries into this mapper covering only ~400 distinct subexpressions.
+      GiNaC::ex do_replace(const GiNaC::ex &inp);
+      // Bumped by every branch that calls into user-overridable Python; operator() refuses to cache
+      // any node whose expansion moved it. See the comment on operator().
+      unsigned long python_hook_calls = 0;
+      struct MemoEntry
+      {
+         GiNaC::ex key, value;
+         unsigned repl_delta;
+      };
+      // Keyed by GiNaC's cached expression hash; the bucket is scanned with ex::is_equal, which
+      // short-circuits on pointer identity - the common case for a shared subtree.
+      std::unordered_map<unsigned, std::vector<MemoEntry>> memo;
    };
 
    // GiNaC::map_function that replaces "derived" (bare, un-summed) ShapeExpansions by 1, optionally only
@@ -920,7 +939,11 @@ namespace pyoomph
          reference_pos_for_IC_and_DBC[5] = ny;
          reference_pos_for_IC_and_DBC[6] = nz;
       }
-      GiNaC::archive archive; // Accumulates every expression passed through print_simplest_form(), for later inspection/debugging/serialization
+      // Every expression passed through print_simplest_form(), for later inspection. Nothing reads
+      // it - the only consumer, the .gar dump in generate_and_compile_bulk_element_code(), is
+      // commented out - yet archiving recursively walks every residual/Jacobian/Hessian expression
+      // and retains it (~14% of emission time). Opt-in via PYOOMPH_ARCHIVE_EXPRESSIONS.
+      GiNaC::archive archive;
       std::map<std::string, GiNaC::ex> expanded_scales;
       GiNaC::ex expand_placeholders(GiNaC::ex inp, std::string where, bool raise_error = true);
       // To prevent tons of Python callbacks in e.g. UNIFAC to substitute molefraction by subexpressions, we cache the expanded callbacks
