@@ -1,0 +1,63 @@
+# Configuration for citools/nightly_develop.sh -- copy to ~/.pyoomph_nightly.conf on the
+# machine that runs the nightly and edit. It is sourced by bash, so it is shell syntax.
+#
+# Only REPO_DIR is really mandatory; everything else has a default that works on a machine
+# where pyoomph is already set up for interactive use.
+
+# ---------------------------------------------------------------- what to test ----
+
+# The existing checkout the nightly uses. It is left on the develop branch after a run,
+# and the run is aborted (with a mail) if the working tree is dirty, so do not point this
+# at a checkout you also work in by hand.
+REPO_DIR="$HOME/code/pyoomph"
+
+# Where the run logs and the "last tested commit" marker are kept. One dated subdirectory
+# per run; older ones are pruned (see KEEP_RUNS).
+LOG_DIR="$HOME/pyoomph_nightly_logs"
+KEEP_RUNS=30
+
+# ------------------------------------------------------------------ environment ----
+#
+# cron starts with almost no environment: no conda, no venv, often no /usr/local/bin in
+# PATH. Anything you normally have in .bashrc has to be re-established here.
+
+# Either a path to a file that is sourced before the build, or the commands themselves.
+# Typical contents:
+#   ENV_SETUP='source "$HOME/miniconda3/etc/profile.d/conda.sh"; conda activate pyoomph'
+#   ENV_SETUP="$HOME/venvs/pyoomph/bin/activate"
+# It runs after the git update, so it can also be used to pick up anything the checkout
+# itself provides. (This config file is sourced by bash too, so putting the activation
+# here directly works as well -- it just happens earlier.)
+ENV_SETUP=""
+
+PYTHON="python3"
+
+# The tutorial pipeline and every eigenvalue/stability example need a PETSc built with
+# complex scalars; test_all_tutorial_scripts.py refuses to start without one. This is
+# prepended to PYTHONPATH. Leave empty only if the default python already sees a complex
+# petsc4py.
+PETSC_PYTHONPATH="$HOME/code/packages/petsc_pyoomph/pyoomph_petsc_opt/lib"
+
+# Hard limits, in seconds. A hung solve otherwise keeps the lock until the next night.
+TIMEOUT_BUILD=7200       # 2 h
+TIMEOUT_PYTEST=7200      # 2 h  (the full suite is ~11 min when healthy)
+TIMEOUT_TUTORIALS=28800  # 8 h  (a full tutorial pass is over an hour when healthy)
+
+# ------------------------------------------------------------------------ mail ----
+
+MAIL_TO="c.diddens@utwente.nl"
+MAIL_FROM="pyoomph-nightly@$(hostname -f 2>/dev/null || hostname)"
+
+# If SMTP_HOST is set the report is sent with Python's smtplib; otherwise the script falls
+# back to the local `mail`/`sendmail` command. Setting it is the more portable option --
+# most workstations have no working MTA.
+SMTP_HOST=""
+SMTP_PORT=587
+SMTP_USER=""
+SMTP_PASSWORD=""
+# starttls (usual for port 587), ssl (port 465), or none (port 25 relay).
+SMTP_SECURITY="starttls"
+
+# Number of lines of each failing log that is quoted in the mail body. The full logs stay
+# in LOG_DIR on the test machine.
+MAIL_LOG_TAIL=60
