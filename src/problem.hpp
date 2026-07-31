@@ -497,6 +497,13 @@ namespace pyoomph
     // pattern from a wasteful one without dumping matrices.
     unsigned long long frozen_sparsity_stored_entries = 0;
     unsigned long long frozen_sparsity_zero_entries = 0;
+    // The same, split by matrix index of a multi-matrix assembly. The aggregate cannot distinguish a
+    // loose Jacobian pattern from a mass matrix riding on one, and those want different fixes.
+    std::vector<unsigned long long> frozen_sparsity_stored_by_matrix;
+    std::vector<unsigned long long> frozen_sparsity_zero_by_matrix;
+    // (row class, column class) -> (entries scattered, of which zero). Diagnostic only; filled solely
+    // when PYOOMPH_FROZEN_FILL_BREAKDOWN is set, since it costs a second pass over the scatter map.
+    std::map<std::pair<std::string, std::string>, std::pair<unsigned long long, unsigned long long>> frozen_fill_breakdown;
     // Index into frozen_sparsity_cache of a usable pattern for (matrix_index, generation), building it
     // if necessary. `pinned` lists slots the current assembly is already using, which must not be
     // evicted. Returns -1 if the pattern cannot be built (see build_frozen_sparsity).
@@ -676,7 +683,11 @@ namespace pyoomph
     unsigned long get_frozen_sparsity_rebuild_count() const { return frozen_sparsity_rebuilds; } // Watch for cache thrashing
     unsigned long long get_frozen_sparsity_stored_entries() const { return frozen_sparsity_stored_entries; }
     unsigned long long get_frozen_sparsity_zero_entries() const { return frozen_sparsity_zero_entries; }
-    void reset_frozen_sparsity_fill_stats() { frozen_sparsity_stored_entries = 0; frozen_sparsity_zero_entries = 0; }
+    void reset_frozen_sparsity_fill_stats() { frozen_sparsity_stored_entries = 0; frozen_sparsity_zero_entries = 0;
+                                              frozen_sparsity_stored_by_matrix.clear(); frozen_sparsity_zero_by_matrix.clear(); }
+    const std::vector<unsigned long long> &get_frozen_sparsity_stored_by_matrix() const { return frozen_sparsity_stored_by_matrix; }
+    const std::vector<unsigned long long> &get_frozen_sparsity_zero_by_matrix() const { return frozen_sparsity_zero_by_matrix; }
+    const std::map<std::pair<std::string, std::string>, std::pair<unsigned long long, unsigned long long>> &get_frozen_fill_breakdown() const { return frozen_fill_breakdown; }
     unsigned get_frozen_sparsity_cache_capacity() const { return frozen_sparsity_cache_capacity; }
 #ifdef OOMPH_HAS_MPI
     void set_use_frozen_distributed_sparsity(bool yesno) { use_frozen_distributed_sparsity = yesno; if (!yesno) { distributed_frozen_sparsity.clear(); distributed_residual_plan.clear(); } }

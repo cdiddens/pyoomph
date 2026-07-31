@@ -862,6 +862,25 @@ void PyReg_Problem(nb::module_ &m)
 			 "``_reset_frozen_sparsity_fill_stats()``): how many matrix slots the frozen patterns reserved, and how many of those held exactly zero when the "
 			 "assembly finished. A frozen pattern has to be a SUPERSET of the numerically nonzero entries or it could not be reused, so ``zero`` is never 0 in "
 			 "general; ``zero/stored`` is the price of freezing -- stored zeros the linear solver still has to carry. Both are 0 if the frozen path never engaged.")
+		.def("_get_frozen_fill_breakdown", [](pyoomph::Problem &self) {
+				 std::vector<std::tuple<std::string, std::string, unsigned long long, unsigned long long>> out;
+				 for (const auto &kv : self.get_frozen_fill_breakdown())
+					 out.push_back(std::make_tuple(kv.first.first, kv.first.second, kv.second.first, kv.second.second));
+				 return out;
+			 },
+			 "Diagnostic: ``(row class, column class, scattered, of which zero)`` for every field-coupling block the frozen assembly wrote. Only filled when the "
+			 "environment variable ``PYOOMPH_FROZEN_FILL_BREAKDOWN`` is set. A block reading 100% zero means the symbolic coupling table over-marks; zeros spread "
+			 "through otherwise-nonzero blocks are terms that vanish numerically at the current parameter values.")
+		.def("_get_frozen_sparsity_fill_stats_by_matrix", [](pyoomph::Problem &self) {
+				 const auto &st = self.get_frozen_sparsity_stored_by_matrix();
+				 const auto &ze = self.get_frozen_sparsity_zero_by_matrix();
+				 std::vector<std::pair<unsigned long long, unsigned long long>> out;
+				 for (size_t m = 0; m < st.size(); m++) out.push_back(std::make_pair(st[m], m < ze.size() ? ze[m] : 0ull));
+				 return out;
+			 },
+			 "``_get_frozen_sparsity_fill_stats()`` split by matrix index of a multi-matrix assembly: a list of ``(stored, zero)``, one per matrix. "
+			 "Matrix 0 is the Jacobian, 1 the mass matrix in an eigenvalue assembly. The aggregate cannot tell a loose Jacobian pattern from a mass "
+			 "matrix carried in a pattern that was never meant for it, and those call for different fixes.")
 		.def("_reset_frozen_sparsity_fill_stats", &pyoomph::Problem::reset_frozen_sparsity_fill_stats,
 			 "Zero the counters behind ``_get_frozen_sparsity_fill_stats()``, so a measurement can exclude setup assemblies.")
 		.def("_get_frozen_sparsity_nnz", &pyoomph::Problem::get_frozen_sparsity_nnz, nb::arg("matrix_index") = 0,

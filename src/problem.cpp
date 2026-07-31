@@ -3646,6 +3646,53 @@ namespace pyoomph
 				}
 			}
 		}
+		// Diagnostic breakdown, off unless PYOOMPH_FROZEN_FILL_BREAKDOWN is set: attribute every scattered
+		// entry to the (row class, column class) pair it came from and count how many were zero. That
+		// distinguishes the two reasons a frozen pattern carries zeros, which want opposite fixes: an
+		// entire (class,class) block reading 100% zero means the symbolic coupling table over-marks and
+		// can be tightened, while zeros spread thinly through blocks that are mostly nonzero are terms
+		// that are symbolically real but numerically vanish at these parameter values -- inherent to a
+		// pattern that must stay valid when the parameters change.
+		if (getenv("PYOOMPH_FROZEN_FILL_BREAKDOWN"))
+		{
+			for (unsigned long e = 0; e < n_element; e++)
+			{
+				oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
+				BulkElementBase *be = dynamic_cast<BulkElementBase *>(elem_pt);
+				if (!be) continue;
+				const unsigned nvar = assembly_handler_pt->ndof(elem_pt);
+				if (!nvar) continue;
+				const JITFuncSpec_Table_FiniteElement_t *ft = be->get_code_instance()->get_func_table();
+				const std::vector<int> &cidx = be->get_local_dof_contribution_indices();
+				if (cidx.size() != nvar) continue;
+				for (unsigned m = 0; m < n_matrix; m++)
+				{
+					const FrozenSparsity &sp = frozen_sparsity_cache[slots[m]];
+					const int lo = sp.element_offset[e], hi = sp.element_offset[e + 1];
+					for (int k = lo; k < hi; k++)
+					{
+						const int src = sp.scatter_source[k];
+						const int ci = cidx[src / nvar], cj = cidx[src % nvar];
+						// Unattributed/none dofs are labelled with the CODE they belong to: knowing which
+						// element type fails to attribute its dofs is the whole point of the breakdown.
+						auto name = [&](int c) -> std::string {
+							if (c < 0)
+							{
+								std::string who = (ft->domain_name ? std::string(ft->domain_name) : std::string("?"));
+								return who + (c == -2 ? " <contributes to nothing>" : " <unattributed>");
+							}
+							if (ft->contribution_names && (unsigned)c < ft->contribution_entries_size)
+								return std::string(ft->contribution_names[c]);
+							return std::string("<out of range>");
+						};
+						auto &cell = frozen_fill_breakdown[std::make_pair(name(ci), name(cj))];
+						cell.first++;
+						if (value[m][sp.scatter_slot[k]] == 0.0) cell.second++;
+					}
+				}
+			}
+		}
+
 		// Price of freezing: how many of the slots the pattern reserved actually ended up zero. The
 		// pattern must be a superset of the nonzeros to be reusable at all, so this is never 0 in
 		// general; a large fraction means the symbolic description is far looser than the matrix and
@@ -3657,6 +3704,13 @@ namespace pyoomph
 			for (unsigned k = 0; k < nnz[m]; k++) zeros += (val[k] == 0.0);
 			frozen_sparsity_stored_entries += nnz[m];
 			frozen_sparsity_zero_entries += zeros;
+			if (frozen_sparsity_stored_by_matrix.size() <= m)
+			{
+				frozen_sparsity_stored_by_matrix.resize(m + 1, 0);
+				frozen_sparsity_zero_by_matrix.resize(m + 1, 0);
+			}
+			frozen_sparsity_stored_by_matrix[m] += nnz[m];
+			frozen_sparsity_zero_by_matrix[m] += zeros;
 		}
 		return true;
 	}
