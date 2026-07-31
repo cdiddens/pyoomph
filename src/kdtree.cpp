@@ -296,6 +296,14 @@ namespace pyoomph
 	void KDTree::reset(unsigned _dim)
 	{
 		delete tree;
+		// dim must follow the tree we build here, and static_tree the fact that it is a dynamic one.
+		// add_point() upgrades the tree to 2d/3d only while dim is still lower, so leaving a stale
+		// (higher) dim behind means every subsequent point silently lands in this 1d tree, where
+		// point_present() matches anything sharing its x coordinate: MeshTemplate::reset() resets to
+		// dimension 1, so a 2d template rebuilt afterwards (which is what remeshing by recreation does,
+		// see RemesherViaRecreation) collapsed every add_node_unique() of a vertical line onto one node.
+		dim = _dim;
+		static_tree = false;
 		if (_dim == 3)
 			tree = new DynamicImplementedKDTree3d();
 		else if (_dim == 2)

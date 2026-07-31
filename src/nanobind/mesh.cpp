@@ -366,8 +366,10 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("get_intrinsic_dimension", &pyoomph::MeshTemplateCurvedEntity::get_intrinsic_dimension, "Dimension of the entity as a manifold (1 for a curve, 2 for a surface). May be smaller than the parametric dimension when the chart is deliberately redundant, e.g. a sphere charted by a unit normal")
 		.doc()="A generic class representing a relation for a curved boundary representation";
 
-	nb::class_<pyoomph::CurvedEntityCircleArc, pyoomph::MeshTemplateCurvedEntity>(m, "CurvedEntityCircleArc", "A curved entity representing an arc of a circle, defined by its center, a point on the circle and a tangent direction")
-		.def(nb::init<const std::vector<double> &, const std::vector<double> &, const std::vector<double> &>(), nb::arg("center"), nb::arg("point_on_circle"), nb::arg("tangent"));
+	// The constructor takes the center and the two end points of the arc (see meshtemplate.hpp); the names
+	// "point_on_circle"/"tangent" used here before described the CurvedEntityCylinderArc below, not this class.
+	nb::class_<pyoomph::CurvedEntityCircleArc, pyoomph::MeshTemplateCurvedEntity>(m, "CurvedEntityCircleArc", "A curved entity representing an arc of a circle, defined by its center and the two end points of the arc. It charts the circle by the polar angle around the center.")
+		.def(nb::init<const std::vector<double> &, const std::vector<double> &, const std::vector<double> &>(), nb::arg("center"), nb::arg("start_point"), nb::arg("end_point"));
 
 	nb::class_<pyoomph::CurvedEntityCylinderArc, pyoomph::MeshTemplateCurvedEntity>(m, "CurvedEntityCylinderArc", "A curved entity representing an arc on the mantle of a cylinder, defined by its axis, a point on the cylinder and a tangent direction")
 		.def(nb::init<const std::vector<double> &, const std::vector<double> &, const std::vector<double> &>(), nb::arg("axis"), nb::arg("point_on_cylinder"), nb::arg("tangent"));
