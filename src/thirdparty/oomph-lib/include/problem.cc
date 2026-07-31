@@ -10979,6 +10979,16 @@ namespace oomph
             oomph_info << "STEP REJECTED --- TRYING AGAIN with Ds=" << Ds_current << std::endl;         //FOR PYOOMPH: Output current Ds
           }
         }
+        //FOR PYOOMPH: backported from a later oomph-lib, counterpart of the catch
+        // in adaptive_unsteady_newton_solve (see INFO_oomph-lib).
+        catch (InvertedElementError& error)
+        {
+          STEP_REJECTED = true;
+          // Let's take a smaller step
+          Ds_current *= (2.0 / 3.0);
+          oomph_info << "STEP REJECTED DUE TO INVERTED ELEMENTS --- TRYING "
+                        "AGAIN with Ds=" << Ds_current << std::endl;
+        }
       } while (STEP_REJECTED); // continue until a step is accepted
 
       // Set the maximum count
@@ -11438,6 +11448,23 @@ namespace oomph
           // Half the time step
           dt_rescaling_factor = Timestep_reduction_factor_after_nonconvergence;
         }
+      }
+      //FOR PYOOMPH: backported from a later oomph-lib (see INFO_oomph-lib).
+      // An element that inverts part-way through the step is a symptom of dt
+      // being too large, not of an ill-posed problem, so it is worth retrying
+      // with a smaller step rather than aborting. pyoomph raises this from
+      // BulkElementBase::fill_shape_buffer_for_integration_point() when the
+      // SIGNED determinant of the Eulerian mapping dx/ds turns non-positive;
+      // that detection is off by default and switched on with pyoomph's
+      // set_detect_inverted_elements(True), so nothing throws unless asked for.
+      catch (InvertedElementError& error)
+      {
+        // Reject the timestep, if we have an exception
+        oomph_info << "TIMESTEP REJECTED DUE TO INVERTED ELEMENTS" << std::endl;
+        reject_timestep = 1;
+
+        // Half the time step
+        dt_rescaling_factor = Timestep_reduction_factor_after_nonconvergence;
       }
 
       // Run the individual timesteppers actions, these need to be before the

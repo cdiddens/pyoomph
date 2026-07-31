@@ -310,6 +310,21 @@ namespace pyoomph
 
     // --- Cross-shape (mixed-mesh) hanging (topological, no geometry) ---
   public:
+    // When true, fill_shape_buffer_for_integration_point() raises oomph::InvertedElementError as soon
+    // as the SIGNED determinant of the Eulerian mapping dx/ds at an integration point is not strictly
+    // positive, i.e. the element has turned inside out or collapsed. Note this is deliberately not the
+    // J that the same function turns into dx: that one is sqrt(det(g_ab)), which is what lets pyoomph
+    // integrate over elements of lower dimension than the nodal space, and which is non-negative by
+    // construction and blind to orientation. Consequently the check only applies where the mapping is
+    // square (element dimension == nodal dimension); interface elements have no orientation to lose
+    // and are skipped. The adaptive time stepper and the arclength continuation in oomph-lib catch the
+    // exception and retry with a smaller step, which is the whole point: on a moving mesh an inverted
+    // element is normally a symptom of too large a step, not of an ill-posed problem. Global rather
+    // than per-Problem, following use_eigen_error_estimators and interpolate_new_interface_dofs; off
+    // by default, since without a catching solver an inversion would turn a survivable garbage step
+    // into an abort.
+    static bool detect_inverted_elements;
+
     // Hang node X (one of THIS fine element's edge interpolating nodes for value_id) on the strictly
     // COARSER neighbour nb_re of a DIFFERENT shape, given X's fraction t along the shared coarse edge
     // whose real corner nodes are Pb (t=0) and Qb (t=1). The neighbour-local coordinate is the affine

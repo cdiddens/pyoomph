@@ -5264,6 +5264,21 @@ namespace oomph
   /// ////////////////////////////////////////////////////////////////////
   /// ////////////////////////////////////////////////////////////////////
 
+  //FOR PYOOMPH: backported verbatim from a later oomph-lib (see INFO_oomph-lib).
+  //=======================================================================
+  /// A class to specify when the error is caused by an inverted element.
+  //=======================================================================
+  class InvertedElementError : public OomphLibError
+  {
+  public:
+    InvertedElementError(const std::string& error_description,
+                         const std::string& function_name,
+                         const char* location)
+      : OomphLibError(error_description, function_name, location)
+    {
+    }
+  };
+
 } // namespace oomph
 
 #endif

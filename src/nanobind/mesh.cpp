@@ -1744,6 +1744,10 @@ void PyReg_Mesh(nb::module_ &m)
 		  { pyoomph::InterfaceElementBase::interpolate_new_interface_dofs = on; }, nb::arg("on"), "Globally controls whether newly created interface degrees of freedom (e.g. after refinement) are interpolated from the neighbouring nodes or initialized to zero");
 	m.def("set_use_eigen_Z2_error_estimators", [](bool on)
 		  { pyoomph::BulkElementBase::use_eigen_error_estimators = on; }, nb::arg("on"), "Globally controls whether the Eigen-based implementation is used for the Zienkiewicz-Zhu (Z2) spatial error estimator");
+	m.def("set_detect_inverted_elements", [](bool on)
+		  { pyoomph::BulkElementBase::detect_inverted_elements = on; }, nb::arg("on"), "Globally controls whether an element that has turned inside out raises an error while its shape buffer is filled, i.e. whether the signed determinant of the Eulerian mapping dx/ds is required to be strictly positive at every integration point. Only applies where that mapping is square (element dimension equal to nodal dimension); interface elements have no orientation and are skipped. Off by default. When on, adaptive time stepping and arclength continuation catch the error and retry with a smaller step instead of continuing on a folded mesh; the check costs roughly 2% of the assembly time while enabled and nothing while disabled");
+	m.def("get_detect_inverted_elements", []()
+		  { return pyoomph::BulkElementBase::detect_inverted_elements; }, "Whether an inverted element raises an error during assembly (see set_detect_inverted_elements)");
 
 	// --- Conforming refinement across coupled domain interfaces (see refinement_coupling.hpp) ------
 	// Both entry points take the coupled interfaces as a plain list of
