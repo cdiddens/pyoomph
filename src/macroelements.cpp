@@ -288,14 +288,36 @@ namespace pyoomph
     std::vector<double> curved(dim, 0.0);
     entity->parametric_to_position(t, parametric, curved);
 
-    // ... minus the straight image of the same point.
-    std::vector<double> xv;
+    // ... minus the straight image of the same point, taken through the entity's OWN images of the
+    // sub-entity's vertices, C(p_k), and not through the vertex positions X_k. Mathematically the same
+    // thing, since a node on a curved entity satisfies X_k = C(p_k); the difference is that with C(p_k)
+    // the deviation vanishes *exactly* at each vertex (sigma is 1 there and 0 at the others, so the two
+    // terms are the identical double), which makes macro_map reproduce X_v to the last bit at every
+    // vertex of the element.
+    //
+    // That exactness is the whole point. X_k = C(p_k) only up to round-off: a node lands where the mesh
+    // generator put it, while C(p_k) is recomputed from the stored parametric coordinate (for a circle
+    // arc, through atan2 and back). Subtracting X_k left a residue of that round-off at the vertices,
+    // and there it is not harmless, because it is entity-dependent: an element evaluates a shared corner
+    // through whichever curved entity IT owns. Two entities that meet at a node - three circle_arc()
+    // calls describing one droplet, each fitting its own centre and radius through its own point triple -
+    // then disagree about where that node is, and the two elements meeting there return positions ~1e-12
+    // apart. oomph's QuadTreeForest::check_all_neighbours compares exactly those two numbers against an
+    // absolute 1e-14, so initialise() died with "Max. error in quadtree neighbour finding ... is too big"
+    // on a mesh that is perfectly fine. It also made map_nodes_on_macro_element() order-dependent: each
+    // element snapped a shared node onto its own entity, and the last one to run won.
+    //
+    // Note this is not a licence for the mesh to drift off the entity. Everything that is not a vertex -
+    // a C2 mid-side node, every node inserted by refinement - still comes from C(sigma) and lands on the
+    // curve; only the vertices, which the mesh generator already placed there, are now left alone.
+    std::vector<double> vertex_image;
     deviation.assign(dim, 0.0);
     for (unsigned int k = 0; k < nfv; k++)
     {
-      vertex_position(cf.local_vertices[k], dim, xv);
-      for (unsigned int i = 0; i < dim; i++)
-        deviation[i] -= sigma[k] * xv[i];
+      vertex_image.assign(dim, 0.0);
+      entity->parametric_to_position(t, cf.facet->parametrics[cf.parametric_index[k]], vertex_image);
+      for (unsigned int i = 0; i < dim && i < vertex_image.size(); i++)
+        deviation[i] -= sigma[k] * vertex_image[i];
     }
     for (unsigned int i = 0; i < dim && i < curved.size(); i++)
       deviation[i] += curved[i];

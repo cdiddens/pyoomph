@@ -45,6 +45,11 @@ The main author may be contacted at c.diddens@utwente.nl
 //   sigma_S,v = lambda_v(s) / w_S(s)                          (the facet-local coordinate, when s is on S)
 //   d_S       = C_S(sigma) - L_S(sigma)                       (curved image minus straight image)
 //
+// where L_S is the straight image of S built from the *entity's* images of S's vertices, C_S(p_k), not
+// from the vertex positions X_k. The two agree to round-off (a node on the entity has X_k = C(p_k)) but
+// only the former makes d_S vanish exactly at the vertices, which is what lets neighbouring elements
+// agree bit-for-bit on a shared corner -- see subentity_deviation() for the failure that forced this.
+//
 // the macro map is
 //
 //   x(s) = sum_v lambda_v X_v  +  sum over curved facets F of w_F d_F  -  sum over edges E of (m_E - 1) w_E d_E

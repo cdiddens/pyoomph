@@ -428,6 +428,64 @@ class _GmshBall(Problem):
         self += eqs @ "domain"
 
 
+_SEAM_CENTRE = 160.0  # the reported droplet sat this far up the axis, measured in its own radii
+_SEAM_R = 2.0
+
+
+def _circumcircle(p0, p1, p2):
+    # Centre of the circle through three points, fitted the way GmshTemplate.circle_arc(through_point=)
+    # does it: solve a*(x^2+y^2) + b*x + c*y + 1 = 0 and read off (-b/2a, -c/2a).
+    m = numpy.array([[x * x + y * y, x, y] for x, y in (p0, p1, p2)])
+    a, b, c = numpy.linalg.solve(m, -numpy.ones(3))
+    return [-b / (2 * a), -c / (2 * a), 0.0]
+
+
+class _SeamRingTemplate(MeshTemplate):
+    # A half annulus whose outer rim is described by SEVERAL circle arcs, each fitted through its own
+    # three points, with the whole thing sitting far from the origin. Both halves matter and both come
+    # straight from the reported case: a droplet interface declared by three circle_arc(through_point=)
+    # calls, 80 radii up the axis of an axisymmetric domain.
+    #
+    # Three fits of one circle do not produce one circle. They produce three circles whose centres and
+    # radii differ in the last bits, so at each seam node the two arcs meeting there disagree about
+    # where that node is -- by ~1e-16 relative, which the distance to the origin turns into ~1e-12
+    # absolute. The elements on either side of the seam must not inherit that disagreement.
+    def __init__(self, nseg=6, narcs=3):
+        super().__init__()
+        self._nseg, self._narcs = nseg, narcs
+        self._entities = []
+
+    def define_geometry(self):
+        domain = self.new_domain("domain")
+        ang = [-0.5 * math.pi + math.pi * i / self._nseg for i in range(self._nseg + 1)]
+        pos = lambda r, t: (r * math.cos(t), _SEAM_CENTRE + r * math.sin(t))
+        inner = [self.add_node_unique(*pos(0.5 * _SEAM_R, t)) for t in ang]
+        outer = [self.add_node_unique(*pos(_SEAM_R, t)) for t in ang]
+        for i in range(self._nseg):
+            # Same orientation as _ArcSectorTemplate: rim on the north edge, positive Jacobian.
+            domain.add_quad_2d_C1(inner[i + 1], inner[i], outer[i + 1], outer[i])
+        per = self._nseg // self._narcs
+        for a in range(self._narcs):
+            lo, hi = a * per, (a + 1) * per
+            arc = _pyoomph.CurvedEntityCircleArc(
+                _circumcircle(pos(_SEAM_R, ang[lo]), pos(_SEAM_R, ang[(lo + hi) // 2]), pos(_SEAM_R, ang[hi])),
+                self.get_node_position(outer[lo]), self.get_node_position(outer[hi]))
+            self._entities.append(arc)
+            for i in range(lo, hi):
+                self.add_facet_to_boundary("rim", [outer[i], outer[i + 1]], [outer[i], outer[i + 1]], arc)
+
+
+class _SeamRing(Problem):
+    def __init__(self):
+        super().__init__()
+
+    def define_problem(self):
+        self += _SeamRingTemplate()
+        eqs = PoissonEquation(source=1, coefficient=1, space="C2") + DirichletBC(u=0) @ "rim"
+        eqs += SpatialErrorEstimator(u=1)
+        self += eqs @ "domain"
+
+
 class _ArcSectorTemplate(MeshTemplate):
     # One quad annulus sector spanning [a0, a1] degrees with its outer edge on a circular arc, used
     # to sweep the arc across the atan2 branch cut at +-pi. keep_entity=False deliberately drops the
@@ -584,6 +642,32 @@ def _worker_main(argv):
             print("RESULT", worst)
             print("IDENTICAL", 1 if sets[0] == sets[1] and sets[0] else 0)
             print("NIFACE", len(sets[0]))
+        return
+    elif kind == "seam":
+        problem = _SeamRing()
+        problem.set_output_directory(outdir)
+        problem.check_mesh_integrity = False  # measured below instead, so a failure is a number
+        problem.initialise()
+        mesh = problem.get_mesh("domain")
+        # 1. Does the macro map reproduce the element's own vertex positions? Everything else follows
+        #    from this: two elements meeting at a node hold the same Node, so if each returns exactly
+        #    what the node says, they cannot disagree.
+        worst = 0.0
+        for e in mesh.elements():
+            if e.get_macro_element() is None:
+                continue
+            for (s0, s1), ln in (((-1, -1), 0), ((1, -1), 2), ((-1, 1), 6), ((1, 1), 8)):
+                x = e.get_macro_element_position_at_s([float(s0), float(s1)])
+                nd = e.node_pt(ln)
+                worst = max(worst, abs(x[0] - nd.x(0)), abs(x[1] - nd.x(1)))
+        print("VERTEXDEV", worst)
+        # 2. And the end-to-end consequence: oomph compares neighbouring elements' get_x() at the
+        #    shared corners against an absolute 1e-14 and takes the run down if they differ.
+        try:
+            mesh.check_integrity()
+            print("INTEGRITY 1")
+        except RuntimeError:
+            print("INTEGRITY 0")
         return
     elif kind == "normaldisk":
         renormalise, nref = argv[2] == "1", int(argv[3])
@@ -1057,3 +1141,30 @@ def test_boundary_node_membership_is_wrong_when_a_boundary_wraps_an_element(whic
     out = _worker_lines(tmp_path, "overmark", which, nref)
     assert int(out["SPURIOUS"]) == 0, "%s at nref=%d: %s spurious (was %d)" % (
         which, nref, out["SPURIOUS"], expected)
+
+
+# --------------------------------------------------------------------------------------------
+# T14 -- the macro map must reproduce the element's own vertex positions exactly
+# --------------------------------------------------------------------------------------------
+
+def test_arcs_meeting_at_a_node_do_not_move_it(tmp_path):
+    # The blend is x = sum_v lambda_v X_v + sum_F w_F d_F, and it only reproduces X_v at a vertex if
+    # d_F vanishes there exactly. Measuring d_F against the vertex node positions X_k did not achieve
+    # that: X_k and the entity's own image C(p_k) of the same vertex agree only to round-off, so the
+    # residue survived -- and it is entity-dependent, because an element evaluates a shared corner
+    # through whichever curved entity it owns. Two arcs meeting at a node then place that node in two
+    # places at once.
+    #
+    # Round-off is not too small to matter here. It is relative to the coordinate, and a feature far
+    # from the origin (see _SEAM_CENTRE) has coordinates much larger than itself, while oomph's
+    # neighbour check is an absolute 1e-14. On the reported case -- an axisymmetric droplet 80 radii up
+    # the axis, its interface declared by three circle_arc(through_point=) calls -- that came to
+    # 7.7e-13 and initialise() died in QuadTreeForest::check_all_neighbours before the first solve.
+    #
+    # Measuring d_F against C(p_k) instead makes the deviation vanish at the vertices to the last bit.
+    # Before that fix this geometry gave VERTEXDEV 2.5e-13 and INTEGRITY 0; the assertion is on exactly
+    # zero rather than on a tolerance because that is the property being claimed -- a tolerance here
+    # would just be a second, smaller number to regress past.
+    out = _worker_lines(tmp_path, "seam")
+    assert float(out["VERTEXDEV"]) == 0.0, "the macro map does not reproduce its own vertex positions"
+    assert int(out["INTEGRITY"]) == 1
