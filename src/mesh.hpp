@@ -137,6 +137,20 @@ namespace pyoomph
 			}
 		}
 
+		// Push every hanging node's master-interpolated POSITION and value into its own raw storage, by
+		// running each element's interpolate_hang_values(). Unlike collapse_hanging_node_values above,
+		// this also covers the nodal positions, and it goes through the elements because that is where
+		// the hang flattening (constraints composed with genuine hangs) lives.
+		//
+		// A hanging node's raw storage is a cache of its masters; only an assembly/output pass refreshes
+		// it. Anything that writes the dof vector from outside the Newton solver therefore leaves it
+		// stale, and a stale hanging POSITION is not merely cosmetic: the triangle/tetrahedron
+		// node-sharing in RefineableTElement<2>/<3>::build matches a new son node against a snapshot of
+		// the existing node positions, so a hanging node sitting in the wrong place makes the son
+		// duplicate it instead of reusing it -- the mesh tears and the node count no longer matches what
+		// the stored refinement pattern reproduces on reload.
+		void interpolate_hanging_values();
+
 		// Diagnostic: cross-check that all processes agree about the elements they share (positions,
 		// refinement levels, pending refinement flags). Returns the number of inconsistencies found, 0 if
 		// the processes agree; no-op and 0 unless the mesh is distributed over more than one process.

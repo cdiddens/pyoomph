@@ -1752,6 +1752,25 @@ class Problem(_pyoomph.Problem):
             #print(backup)
             #print(backup_pinned)
             self.set_all_values_at_current_time(backup,backup_pinned,False)
+            # Restoring the dof vector puts the MASTERS back, but a hanging node has no dof: its position
+            # and values live in its own raw storage, which the error estimation above has meanwhile
+            # overwritten with the eigenfunction state (evaluating an element calls interpolate_hang_values).
+            # Nothing refreshes that storage before the refinement that follows, and a stale hanging
+            # POSITION is not just cosmetic: the triangle/tetrahedron node-sharing in
+            # RefineableTElement<2>/<3>::build looks a candidate son node up in a snapshot of the existing
+            # node positions, so a hanging node sitting where the eigenfunction put it is not recognised
+            # and the son builds a SECOND node on top of it. That tears the mesh at those nodes and leaves
+            # it with more nodes than the stored refinement pattern reproduces, so the saved state can no
+            # longer be loaded. Push the restored state back into the hanging nodes. The interface meshes
+            # are included because their elements own the hangs of the dofs an interface ADDS to a node,
+            # which the bulk pass does not touch (see InterfaceElementBase::interpolate_hang_values_at_interface).
+            def repair_hanging(mesh:AnySpatialMesh):
+                mesh._interpolate_hanging_values()
+                for _n,imesh in mesh._interfacemeshes.items():
+                    repair_hanging(imesh)
+            for _name,mesh in self._meshdict.items():
+                if isinstance(mesh,ODEStorageMesh): continue
+                repair_hanging(mesh)
             _pyoomph.set_use_eigen_Z2_error_estimators(False)
             #print("RESET")
             
