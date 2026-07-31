@@ -628,7 +628,10 @@ class Problem(_pyoomph.Problem):
         self._lasolver=get_default_linear_solver()
 
         self._num_threads:int | None=None # Default
-        self._eigensolver=get_default_eigen_solver()
+        # Left unset on purpose: get_eigen_solver() below falls back to get_default_eigen_solver(),
+        # and asking for the default here would trigger its autodetection (which imports SLEPc) for
+        # every problem, including the many that never solve an eigenproblem.
+        self._eigensolver=None
 
         self._runmode="delete"
         self._continue_initialized=False
