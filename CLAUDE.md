@@ -15,9 +15,9 @@ That applies to the full `tests/` suite, the MPI suites, and the tutorial harnes
 passes for an A/B comparison take most of an afternoon. Batch changes up and run once, rather than
 after each fix. Targeted single scripts and small benchmarks are fine without asking.
 
-When you do commit, commit only what you changed. Check `git status` first: the working tree often
-carries the user's own in-progress edits, and sweeping them into your commit is worse than leaving
-them alone.
+When you do commit on request, commit all changes found, including those from other agents or the user.
+
+The main branch should be always quite stable. If you start a new implementation or any structural/functional edits and you are still on main, ask the user to perform it on a new branch instead.
 
 ## Building
 
