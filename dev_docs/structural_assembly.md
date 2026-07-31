@@ -1972,14 +1972,75 @@ scaling here — is now decided once, for a matrix that is no longer the one bei
 whose symbolic phase is purely structural (Pardiso's phase 11) do not have this failure mode, which is
 exactly why `pardiso` was unaffected. Worth remembering before extending the reuse to another backend.
 
-### Loose end, not fixed here
+### Pardiso could not report its own errors either — **FIXED**
 
-`pyoomph/solvers/pardiso.py:407` passes MKL's `error` argument as `byref(c_int(ERR))` — a temporary
-built from the Python int, so the code MKL writes lands in an object that is discarded on the next
-line and the `if ERR != 0` check below it can never fire. Pardiso has been unable to report its own
-errors for as long as that line has existed. Same class of bug as the one above (a solver failure
-that cannot be seen), but a different backend and no evidence it is firing, so it is recorded rather
-than changed.
+`run_pardiso()` passed MKL's `error` argument as `byref(c_int(ERR))`. That builds a throwaway ctypes
+object from the Python int, so MKL wrote its code into a temporary that was discarded on the next
+line, and the `if ERR != 0` below it compared the untouched Python int against zero. Pardiso has
+therefore never been able to report any of its own errors, for as long as the call has existed — same
+class of bug as the KSP reason nobody read, different backend.
+
+Now a named `c_int` whose `.value` is checked, against MKL's documented table (`-1` input
+inconsistent … `-15` internal error), raising with the phase named (`reordering and symbolic
+factorisation`, `numerical factorisation`, `solve and iterative refinement`, …). The release phase is
+the deliberate exception: `clear()` runs from `__del__`, where raising only produces an "Exception
+ignored in `__del__`" and there is nothing to salvage anyway, so it warns.
+
+Verified by forcing a real MKL failure (`error -1` from a corrupted `n`), which is now reported with
+the right phase and message; a healthy factor/solve stays silent, and the reported script under
+`pardiso` runs unchanged with no error reported anywhere. Worth knowing for anyone testing this: a
+structurally singular matrix does **not** provoke an error, because MKL replaces the tiny pivot and
+returns success with a huge solution — that is MKL's documented behaviour, not a gap in the check.
+
+## 7i. The same question for SLEPc + MUMPS — escalation added, the rest does not apply
+
+Asked directly: should the eigensolver get the same treatment? Investigated; the answer is a third of
+it, and the reasons the other two thirds do not apply are worth recording.
+
+**The stale analysis cannot happen here.** `SlepcEigenSolver.solve()` builds `J`, `M` and the `EPS`
+from scratch on every call and destroys all three at the end, so the ST's KSP, its PC and the MUMPS
+instance inside it are new each time and MUMPS always re-runs its analysis on the matrix actually
+being factorised. There is nothing cached to go stale, and nothing to discard and rebuild. §7h's
+retry-with-a-fresh-KSP would be pure overhead.
+
+**The silent garbage cannot happen here either.** SLEPc's `STSetDefaultKSP`
+(`src/sys/classes/st/interface/stsles.c`) calls `KSPSetErrorIfNotConverged(st->ksp, PETSC_TRUE)`, so a
+failed solve inside the spectral transform raises out of `EPSSolve` rather than returning an untouched
+vector — the opposite of the bare `KSPSolve` in the linear solver. `STMatSolve` itself never checks the
+reason, but it does not need to. And PETSc's MUMPS wrapper already names the failure:
+
+```
+[0] MUMPS error in numerical factorization: INFOG(1)=-19, INFO(2)=933361
+    (see users manual https://mumps-solver.org/... "Error and warning diagnostics")
+```
+
+So no convergence check was added: the library performs it, and better.
+
+**The escalation is worth having.** A shift-and-invert factorises `J − σM`, commonly denser than `J`
+alone, so it exhausts MUMPS' workspace more readily than the linear solver does — and pyoomph never
+sets `st_mat_mumps_icntl_14` unless `use_mumps()` was handed an explicit `mumps_param14`, which asks
+the user to have foreseen the whole thing. `_eps_solve_with_workspace_retry()` doubles it and rebuilds
+the EPS once. Rebuilding, not re-solving: a PETSc option is consumed when the object it configures is
+set up, so a raised `ICNTL(14)` is only seen by a KSP/PC that has not been set up yet, and the spectral
+transform's has. The EPS construction moved into a closure for exactly this.
+
+**`INFOG(1) = -19` is not in the escalation list**, in either solver — a correction to §7h as first
+written, which had it there. It means the factorisation exceeded `ICNTL(23)`, the hard cap on working
+memory in MB, and doubling `ICNTL(14)` against a cap asks for more of something already forbidden. The
+lever is `ICNTL(23)`, which is the user's to set (pyoomph never does), so both solvers now say so and
+re-raise instead of spending a retry that cannot work.
+
+Verified on four configurations, on the complex PETSc build, `LineMesh(N=20000)`, 80 002 dofs:
+
+| provocation | INFOG(1) | outcome |
+| --- | --- | --- |
+| none | 0 | unchanged; same eigenvalues as before the patch |
+| `st_mat_mumps_icntl_14 = -95` | −9 family | `retrying with -st_mat_mumps_icntl_14 40`, then the correct spectrum |
+| `st_mat_mumps_icntl_23 = 1` | −19 | names the cap, re-raises, no retry spent |
+| an ST KSP that cannot converge | n/a | re-raised untouched (PETSc error 91), exactly as before |
+
+The MUMPS plumbing both solvers share — the INFOG accessor with its two gates, the `ICNTL(14)` doubling,
+and the two error-code lists — is now module-level in `pyoomph/solvers/petsc.py` rather than duplicated.
 
 ## 8. Open questions
 

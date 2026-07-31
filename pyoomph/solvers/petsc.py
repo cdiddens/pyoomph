@@ -48,6 +48,72 @@ if TYPE_CHECKING:
     from ..generic.problem import Problem
 
 
+# MUMPS INFOG(1) codes that all say the same thing: an internal work array was sized from the fill-in
+# the analysis phase predicted, numerical pivoting then needed more room than that, and MUMPS stopped
+# instead of reallocating. Its own manual's answer is to raise ICNTL(14) -- the percentage of slack
+# added to the prediction -- and rerun.
+_MUMPS_ICNTL14_ERRORS = (-8, -9, -11, -12, -14, -15, -17, -20)
+
+# INFOG(1) = -19 is deliberately NOT in that list although it reads like a memory error. It means the
+# factorisation exceeded ICNTL(23), the hard cap on working memory in MB, and raising ICNTL(14) against
+# a cap only asks for more of something already forbidden. The lever there is ICNTL(23) itself, which
+# is the user's to set (pyoomph never does), so this is reported rather than escalated.
+_MUMPS_ICNTL23_ERROR = -19
+
+
+def _mumps_infog_from_pc(pc:Any,which:int)->int | None:
+    """MUMPS' INFOG(which) from a PC's factor matrix, or None if MUMPS did not do the factorisation.
+
+    Two gates before anything MUMPS-specific is touched, because neither PETSc nor petsc4py need have
+    MUMPS at all:
+
+    * the installation must have been built with it -- ``PETSc.Sys.hasExternalPackage``, the same check
+      ``use_mumps()`` makes before configuring it;
+    * and this PC must actually be running it. getFactorSolverType() answers that without raising: it
+      is None for a PC that has no factor matrix in the first place (jacobi, gamg, hypre, none), where
+      getFactorMatrix() raises PETSc error 56, and it names the package for the ones that do, so a
+      SuperLU or UMFPACK factorisation is turned away rather than being asked for an INFOG it does not
+      have.
+
+    Everything MUMPS-specific in this file hangs off a non-None answer from here, so on a PETSc without
+    MUMPS none of it is ever reached.
+    """
+    if pc is None:
+        return None
+    if not PETSc.Sys.hasExternalPackage("mumps"): #type:ignore
+        return None
+    try:
+        if str(pc.getFactorSolverType()).lower() != "mumps": #type:ignore
+            return None
+        return int(pc.getFactorMatrix().getMumpsInfog(which)) #type:ignore
+    except Exception:
+        return None   # No factor matrix yet, or a petsc4py too old for the MUMPS accessors
+
+
+def _increase_mumps_icntl14(option:str,quiet:bool)->bool:
+    """Double the ICNTL(14) held under `option`, and report whether it actually moved.
+
+    Set for the rest of the run rather than only for the retry: a matrix that needed the extra room
+    once will need it again at the next step, and re-failing each time to rediscover that is waste.
+    The option name differs per caller -- ``mat_mumps_icntl_14`` for the linear solver, and the
+    ``st_``-prefixed one for the KSP that lives inside SLEPc's spectral transform.
+    """
+    opts = PETSc.Options() #type:ignore
+    current = 20   # MUMPS' own default, which PETSc does not override
+    if opts.hasName(option): #type:ignore
+        try:
+            current = int(opts.getInt(option)) #type:ignore
+        except Exception:
+            pass
+    new_value = min(max(2*current, 40), 1000)
+    if new_value == current:
+        return False
+    _SetDefaultPetscOption(option, new_value, force=True)
+    if not quiet:
+        print("MUMPS ran out of working space; retrying with -" + option + " " + str(new_value))
+    return True
+
+
 @GenericLinearSystemSolver.register_solver()
 class PETSCSolver(GenericLinearSystemSolver):
     idname = "petsc"
@@ -377,11 +443,6 @@ class PETSCSolver(GenericLinearSystemSolver):
             return
         self.setup_solver()
 
-    # MUMPS INFOG(1) values that all mean the same thing: an internal work array was sized from the
-    # analysis phase's fill-in prediction and numerical pivoting then needed more room than that.
-    # MUMPS stops rather than reallocating, and its own answer is to raise ICNTL(14) and rerun.
-    _MUMPS_WORKSPACE_ERRORS = (-8, -9, -11, -12, -14, -15, -17, -19, -20)
-
     # The only two failures worth acting on. Both mean the vector PETSc handed back is not a solution
     # of anything, and both can be cured by factorising again from scratch.
     #
@@ -395,54 +456,8 @@ class PETSCSolver(GenericLinearSystemSolver):
                                  PETSc.KSP.ConvergedReason.DIVERGED_NANORINF)       #type:ignore
 
     def _mumps_infog(self,which:int)->int | None:
-        """MUMPS' INFOG(which) from the current factorisation, or None if MUMPS did not do it.
-
-        Two gates before anything MUMPS-specific is touched, because neither PETSc nor petsc4py need
-        have MUMPS at all:
-
-        * the installation must have been built with it -- ``PETSc.Sys.hasExternalPackage``, the same
-          check ``use_mumps()`` makes before configuring it;
-        * and this PC must actually be running it. getFactorSolverType() answers that without raising:
-          it is None for a PC that has no factor matrix in the first place (jacobi, gamg, hypre, none),
-          where getFactorMatrix() would raise PETSc error 56, and it names the package for the ones
-          that do, so a SuperLU or UMFPACK factorisation is turned away here rather than being asked
-          for an INFOG it does not have.
-
-        Everything MUMPS-specific in this class hangs off a non-None answer from this method, so on a
-        PETSc without MUMPS none of it is ever reached.
-        """
-        if self.ksp is None:
-            return None
-        if not PETSc.Sys.hasExternalPackage("mumps"): #type:ignore
-            return None
-        try:
-            pc = self.ksp.getPC() #type:ignore
-            if str(pc.getFactorSolverType()).lower() != "mumps": #type:ignore
-                return None
-            return int(pc.getFactorMatrix().getMumpsInfog(which)) #type:ignore
-        except Exception:
-            return None   # No factor matrix yet, or a petsc4py too old for the MUMPS accessors
-
-    def _increase_mumps_workspace(self)->None:
-        """Double MUMPS' ICNTL(14), the percentage of slack it adds to its predicted workspace.
-
-        Set for the rest of the run rather than just the retry: a matrix that needed the extra room
-        once will need it again at the next continuation step, and re-failing once per solve to
-        rediscover that is pure waste.
-        """
-        opts = PETSc.Options() #type:ignore
-        current = 20   # MUMPS' own default, which PETSc does not override
-        if opts.hasName("mat_mumps_icntl_14"): #type:ignore
-            try:
-                current = int(opts.getInt("mat_mumps_icntl_14")) #type:ignore
-            except Exception:
-                pass
-        new_value = min(max(2*current, 40), 1000)
-        if new_value == current:
-            return
-        _SetDefaultPetscOption("mat_mumps_icntl_14", new_value, force=True)
-        if not self.problem.is_quiet():
-            print("MUMPS ran out of working space; retrying with -mat_mumps_icntl_14 " + str(new_value))
+        """MUMPS' INFOG(which) from the current factorisation, or None if MUMPS did not do it."""
+        return _mumps_infog_from_pc(self.ksp.getPC() if self.ksp is not None else None, which) #type:ignore
 
     def _ksp_solve_checked(self,bv:Any)->None:
         """Solve, and turn a failed *factorisation* into a retry, and then into an error.
@@ -498,8 +513,11 @@ class PETSCSolver(GenericLinearSystemSolver):
             print("PETSc linear solve failed (" + described(reason)
                   + "); discarding the cached factorisation and retrying")
         infog1 = self._mumps_infog(1)
-        if infog1 is not None and infog1 in self._MUMPS_WORKSPACE_ERRORS:
-            self._increase_mumps_workspace()
+        if infog1 is not None and infog1 in _MUMPS_ICNTL14_ERRORS:
+            _increase_mumps_icntl14("mat_mumps_icntl_14", self.problem.is_quiet())
+        elif infog1 == _MUMPS_ICNTL23_ERROR:
+            print("MUMPS hit the working-memory cap set by -mat_mumps_icntl_23. Raise or remove that "
+                  "cap; ICNTL(14) cannot buy room a cap forbids.")
 
         self.ksp.destroy() #type:ignore
         self.ksp = None
@@ -764,7 +782,8 @@ class SlepcEigenSolver(GenericEigenSolver):
         self.spectral_transformation:str | None="sinvert"
         self.store_basis:bool=False
         self._last_basis:NPComplexArray | NPFloatArray | None=None
-        
+        self._last_eps_attempt:Any=None   # See _eps_solve_with_workspace_retry
+
     def supports_target(self):
         return True
         
@@ -788,6 +807,51 @@ class SlepcEigenSolver(GenericEigenSolver):
         if mumps_param14 is not None:
             _SetDefaultPetscOption("st_mat_mumps_icntl_14",mumps_param14)
         return self
+
+    def _eps_solve_with_workspace_retry(self,build_and_solve:Callable[[],Any])->Any:
+        """Run an EPS solve, retrying once with more MUMPS workspace if that is what it ran out of.
+
+        Deliberately much smaller than PETSCSolver._ksp_solve_checked, because only one of the two
+        problems that method exists for is present here.
+
+        *Not* the stale-analysis problem. Every call to solve() builds J, M and the EPS from scratch
+        and destroys all three at the end, so the ST's KSP, its PC and the MUMPS instance inside it are
+        new each time and MUMPS always re-runs its analysis on the matrix actually being factorised.
+        The value-dependent ordering that goes stale when a KSP is kept alive (dev_docs 7h) cannot
+        arise; there is nothing here to discard and rebuild.
+
+        *Not* the silent-garbage problem either. SLEPc's STSetDefaultKSP calls
+        KSPSetErrorIfNotConverged(st->ksp, PETSC_TRUE), so a failed solve inside the spectral transform
+        raises out of EPSSolve instead of returning an untouched vector, and PETSc's MUMPS wrapper
+        already names the code: "MUMPS error in numerical factorization: INFOG(1)=-9". No reason to
+        add a convergence check the library performs itself.
+
+        What *is* worth having is the escalation. A shift-and-invert factorises J - sigma*M, which is
+        commonly denser than J alone, so it runs out of MUMPS workspace more readily than the linear
+        solver does -- and pyoomph never sets st_mat_mumps_icntl_14 unless use_mumps() was given an
+        explicit mumps_param14, which asks the user to have foreseen the whole thing. Doubling it and
+        running once more is MUMPS' own prescription, and it turns a dead run into a slower one.
+
+        Anything that is not a MUMPS workspace error is re-raised untouched, so a genuinely singular
+        shifted matrix, a bad target or a non-MUMPS factorisation fails exactly as it did before.
+        """
+        try:
+            return build_and_solve()
+        except Exception as first_error:
+            E = getattr(self, "_last_eps_attempt", None)
+            infog1 = _mumps_infog_from_pc(E.getST().getKSP().getPC(), 1) if E is not None else None #type:ignore
+            if infog1 == _MUMPS_ICNTL23_ERROR:
+                print("MUMPS hit the working-memory cap set by -st_mat_mumps_icntl_23. Raise or remove "
+                      "that cap; ICNTL(14) cannot buy room a cap forbids.")
+                raise
+            if infog1 is None or infog1 not in _MUMPS_ICNTL14_ERRORS:
+                raise
+            if not _increase_mumps_icntl14("st_mat_mumps_icntl_14", False):
+                raise
+            if E is not None:
+                E.destroy() #type:ignore
+                self._last_eps_attempt = None
+            return build_and_solve()
 
     def solve(self, neval:int, shift:float | None | complex=None,sort:bool=True,which:EigenSolverWhich="LM",OPpart:Literal["r", "i"] | None=None,v0:NPComplexArray | NPFloatArray | None=None,target:complex | None=None,custom_J_and_M:tuple["DefaultMatrixType","DefaultMatrixType"] | None=None,with_left_eigenvectors:bool=False,quiet:bool=True)->tuple[NPComplexArray,NPComplexArray,"DefaultMatrixType","DefaultMatrixType"]:
         if which!="LM":
@@ -848,55 +912,63 @@ class SlepcEigenSolver(GenericEigenSolver):
             _SetDefaultPetscOption("st_ksp_type", "preonly")
             _SetDefaultPetscOption("st_type", self.spectral_transformation)
                             
-        E = SLEPc.EPS()  #type:ignore
-        E.create() #type:ignore
-        if target is not None:
-            E.setTarget(target)
-            E.setWhichEigenpairs(SLEPc.EPS.Which.TARGET_MAGNITUDE) #type:ignore
-        else:
-            E.setTarget(0)
-            E.setWhichEigenpairs(SLEPc.EPS.Which.TARGET_REAL) #type:ignore
-            
-            
-        
-            
-            #trgt=PETSc.toScalar(target)
-            #print(trgt)
-            #E.setTarget(trgt)
-        E.setOperators(J, M) #type:ignore
-        E.setProblemType(SLEPc.EPS.ProblemType.GNHEP) #type:ignore
-        
         if neval==0:
             neval=1
         #E.setProblemType(SLEPc.EPS.ProblemType.PGNHEP)
         #ncv=max(2 * neval + 1, 5 + neval)
         ncv=self.ncv if self.ncv is not None else max(2 * neval + 1, 5 + neval)
         mdp=ncv #TODO: Can be smaller for higher
-        
-        E.setDimensions(neval,ncv,mdp) #type:ignore
-        
-        if v0 is not None:
-            if len(v0.shape)==1:
-                _v0=PETSc.Vec().createWithArray(v0) #type:ignore
-                E.setInitialSpace(_v0)
-                _v0.destroy()
-            else:
-                ispace=[]
-                for i in range(min(v0.shape[0],ncv)):
-                    ispace.append(PETSc.Vec().createWithArray(v0[i,:])) #type:ignore
-                E.setInitialSpace(ispace)
-                for _v0 in ispace:
-                    _v0.destroy()
-        
-        #print(dir(E))
-        #exit()
-        # E.setProblemType(SLEPc.EPS.ProblemType.PGNHEP)
-        E.setFromOptions() #type:ignore
 
-        if self.spectral_transformation and shift:
-            E.getST().setShift(shift)
-        self.further_setup(E) #type:ignore
-        E.solve() #type:ignore
+        # Built in a closure so the whole thing can simply be run twice. The retry has to rebuild the
+        # EPS rather than re-solve the existing one: a PETSc option is consumed when the object it
+        # configures is set up, so a raised ICNTL(14) is only seen by a KSP/PC that has not been set up
+        # yet, and the spectral transform's was.
+        def build_and_solve()->Any:
+            E = SLEPc.EPS()  #type:ignore
+            E.create() #type:ignore
+            # Kept on self so that _eps_solve_with_workspace_retry can still reach the ST's PC to read
+            # MUMPS' INFOG after a failure -- by then the exception has unwound past this local.
+            self._last_eps_attempt = E
+            if target is not None:
+                E.setTarget(target)
+                E.setWhichEigenpairs(SLEPc.EPS.Which.TARGET_MAGNITUDE) #type:ignore
+            else:
+                E.setTarget(0)
+                E.setWhichEigenpairs(SLEPc.EPS.Which.TARGET_REAL) #type:ignore
+
+                #trgt=PETSc.toScalar(target)
+                #print(trgt)
+                #E.setTarget(trgt)
+            E.setOperators(J, M) #type:ignore
+            E.setProblemType(SLEPc.EPS.ProblemType.GNHEP) #type:ignore
+
+            E.setDimensions(neval,ncv,mdp) #type:ignore
+
+            if v0 is not None:
+                if len(v0.shape)==1:
+                    _v0=PETSc.Vec().createWithArray(v0) #type:ignore
+                    E.setInitialSpace(_v0)
+                    _v0.destroy()
+                else:
+                    ispace=[]
+                    for i in range(min(v0.shape[0],ncv)):
+                        ispace.append(PETSc.Vec().createWithArray(v0[i,:])) #type:ignore
+                    E.setInitialSpace(ispace)
+                    for _v0 in ispace:
+                        _v0.destroy()
+
+            #print(dir(E))
+            #exit()
+            # E.setProblemType(SLEPc.EPS.ProblemType.PGNHEP)
+            E.setFromOptions() #type:ignore
+
+            if self.spectral_transformation and shift:
+                E.getST().setShift(shift)
+            self.further_setup(E) #type:ignore
+            E.solve() #type:ignore
+            return E
+
+        E = self._eps_solve_with_workspace_retry(build_and_solve)
 
         if quiet:
             Print = lambda *pargs,**kwargs: None
