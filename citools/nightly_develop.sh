@@ -154,7 +154,7 @@ PYEOF
         fi
     fi
 
-    note "NO WORKING MAILER -- report kept at $bodyfile"
+    note "NO WORKING MAILER for \"$subject\" -- report kept at $bodyfile"
     return 1
 }
 
@@ -320,15 +320,21 @@ fi
 PYTEST_RC=0
 PYTEST_SECS=0
 PYTEST_FAILURES=""
+PYTEST_SKIPS=""
 PYTEST_SUMMARY=""
 if [ "$BUILD_RC" -eq 0 ]; then
     # The documented invocation is `python -m pytest *.py --full` from inside tests/
     # (see tests/README.md); --full is what adds the slow 3D campaign and the MPI modules.
+    # -rfEs: failures, errors AND skips. The skips matter -- the six test_mpi_* modules
+    # skipif() themselves out when mpirun or an MPI-capable solver is missing, so a cron
+    # environment without mpirun turns the entire MPI half into a silent green. They are
+    # reported even on a PASS for that reason.
     run_step pytest "$RUN_DIR/pytest.log" "$TIMEOUT_PYTEST" \
-        "cd $(printf '%q' "$REPO_DIR")/tests && $(printf '%q' "$PYTHON") -m pytest *.py --full -rfE"
+        "cd $(printf '%q' "$REPO_DIR")/tests && $(printf '%q' "$PYTHON") -m pytest *.py --full -rfEs"
     PYTEST_RC=$STEP_RC
     PYTEST_SECS=$STEP_SECS
     PYTEST_FAILURES="$(grep -E '^(FAILED|ERROR) ' "$RUN_DIR/pytest.log" 2>/dev/null)"
+    PYTEST_SKIPS="$(grep -E '^SKIPPED ' "$RUN_DIR/pytest.log" 2>/dev/null | sort -u)"
     PYTEST_SUMMARY="$(grep -E '^=+.*(passed|failed|error|no tests ran).*=+$' "$RUN_DIR/pytest.log" 2>/dev/null | tail -n 1)"
     if [ "$PYTEST_RC" -ne 0 ]; then
         FAILED_STEPS+=("pytest")
@@ -383,9 +389,18 @@ fi
 
 # --------------------------------------------------------------------- report ---
 
+# A run where the MPI modules skipped themselves is not a green run, it is an untested
+# one, and it must not look identical to a real pass in the subject line.
+MPI_SKIPPED=0
+printf '%s' "$PYTEST_SKIPS" | grep -q 'test_mpi_' && MPI_SKIPPED=1
+
 if [ ${#FAILED_STEPS[@]} -eq 0 ]; then
     VERDICT="PASS"
-    SUBJECT="[pyoomph nightly] $BRANCH ${REMOTE_SHA:0:12} PASS"
+    if [ "$MPI_SKIPPED" -ne 0 ]; then
+        SUBJECT="[pyoomph nightly] $BRANCH ${REMOTE_SHA:0:12} PASS -- but the MPI tests were SKIPPED"
+    else
+        SUBJECT="[pyoomph nightly] $BRANCH ${REMOTE_SHA:0:12} PASS"
+    fi
 else
     VERDICT="FAIL"
     SUBJECT="[pyoomph nightly] $BRANCH ${REMOTE_SHA:0:12} FAILED: $(IFS=', '; echo "${FAILED_STEPS[*]}")"
@@ -408,6 +423,27 @@ say ""
 say "New commits"
 say "-----------"
 printf '%s\n' "${NEW_COMMITS:-(none)}" >>"$REPORT"
+
+# Reported whatever the verdict: what was NOT run is as much a part of the result as what
+# failed. pytest --full selects the whole suite, but the MPI modules still skipify
+# themselves out when mpirun or an MPI-capable solver is missing.
+if [ "$BUILD_RC" -eq 0 ]; then
+    say ""
+    say "Coverage"
+    say "--------"
+    if command -v mpirun >/dev/null 2>&1; then
+        say "  mpirun: $(command -v mpirun)"
+    else
+        say "  mpirun: NOT ON PATH -- every MPI test skipped itself. Fix ENV_SETUP in $CONFIG;"
+        say "          cron does not read your .bashrc."
+    fi
+    if [ -n "$PYTEST_SKIPS" ]; then
+        say "  skipped by pytest:"
+        printf '%s\n' "$PYTEST_SKIPS" | sed 's/^/    /' >>"$REPORT"
+    else
+        say "  skipped by pytest: nothing"
+    fi
+fi
 
 if [ "$VERDICT" = "PASS" ]; then
     say ""
