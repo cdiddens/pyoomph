@@ -1875,6 +1875,112 @@ that escaped the pattern. That turns a subtle correctness hazard into a loud, im
 Not implemented; recorded here because the measurement that motivates it is above and would otherwise
 have to be redone.
 
+## 7h. A reused KSP freezes MUMPS' *analysis*, not just its symbolic factorisation — **FIXED**
+
+Reported from a user script (an axisymmetric two-phase ALE continuation, `WaterEthanol_Air_QS`
+family): runs fine under `pardiso`, and under `--petsc_mumps` collapses to `Maximum residuals inf`
+partway through an arclength continuation, from which it never recovers — the step keeps halving
+until oomph aborts with `DESIRED ARC-LENGTH STEP … HAS FALLEN BELOW MINIMUM TOLERANCE`.
+
+### What it was
+
+Nothing to do with the matrix. Instrumenting `PETSCSolver.solve_serial` gives the whole story in one
+line per solve:
+
+| solve | `INFOG(12)` (off-diagonal pivots) | `INFOG(1)` | KSP reason | ‖x‖ |
+| --- | --- | --- | --- | --- |
+| first, ndof 12474 | 288 | 0 | 4 (converged) | 2.5 |
+| a few continuation steps later | 1648 → 1682 → 1776 | 0 | 4 | fine |
+| the one that breaks | 2638 | **−9** | **−11** (`DIVERGED_PC_FAILED`) | **inf** |
+| every solve after it | 2638 (frozen) | −9 | −11 | inf, in ~30 µs |
+
+`INFOG(1) = -9` is "the main internal real workarray is too small". §5b's KSP reuse is what caused
+it. Keeping the KSP alive across solves is the whole point of `_setup_solver_if_needed`, but PETSc
+then sees `SAME_NONZERO_PATTERN` and skips `MatLUFactorSymbolic` — which for MUMPS means skipping the
+**analysis phase**, and `use_mumps()` sets `ICNTL(6) = 5`, so that analysis is *value-dependent*: it
+fixes a maximum-transversal column permutation and a scaling from the matrix it first saw. A
+continuation walks the values away from that matrix, the frozen ordering stops putting large entries
+on the diagonal, numerical pivoting grows an order of magnitude, and the fill-in finally exceeds the
+workspace the stale analysis had predicted.
+
+Three A/B runs of the same script, each carried to the same point, isolate it:
+
+| arm | failures | `INFOG(12)` | in-process KSP time (25 solves) |
+| --- | --- | --- | --- |
+| as shipped (Mat + KSP reused) | fails, unrecoverably | 288 → 2638 | — |
+| Mat reused, **KSP rebuilt each solve** | none | ~250, flat | 6.53 s |
+| Mat + KSP reused, `ICNTL(14) = 200` | none | ~2900 | 2.43 s |
+| no reuse at all (`reuse_matrix_structure = False`) | none | ~238, flat | 7.61 s |
+
+The middle row is the diagnosis: rebuilding *only* the KSP, on the very same `Mat` object, is enough
+to fix it. So it is the analysis being frozen, not the matrix being reused.
+
+The last column is why the fix is not "stop reusing". The stale analysis is *worse numerically* and
+still **2.7× faster** than redoing the analysis every solve, because the analysis phase dominates. The
+reuse is worth keeping.
+
+### The fix
+
+`PETSCSolver._ksp_solve_checked()` replaces the bare `ksp.solve()` in both `solve_serial` and
+`solve_distributed`:
+
+1. Read `getConvergedReason()`. **Nothing did this before**, which is the reason the failure presented
+   as an `inf` residual rather than an error: on a PC failure PETSc returns immediately and leaves the
+   solution vector untouched, and pyoomph handed that straight to Newton.
+2. Act only on `DIVERGED_PCSETUP_FAILED` (−11) and `DIVERGED_NANORINF` (−9) — the two that mean the
+   returned vector is not a solution of anything. Destroy the KSP and rebuild it (a fresh PC means a
+   fresh analysis for the values actually on hand) and solve again. If MUMPS reported one of the
+   workspace codes (`INFOG(1) ∈ {−8, −9, −11, −12, −14, −15, −17, −19, −20}`), double `ICNTL(14)`
+   first and keep the larger value for the rest of the run.
+3. If the retry also fails, raise, naming the reason and `INFOG(1)`.
+   `raise_on_failed_solve = False` downgrades that to a warning.
+4. Every *other* negative reason warns and hands the iterate on unchanged, which is what every
+   configuration did before the check existed. `DIVERGED_MAX_IT` is the one that matters: an iterative
+   KSP stopping on its iteration limit has produced a real, merely inaccurate, answer that Newton is
+   often happy with. Retrying there would discard a hypre/GAMG setup and redo the same solve to reach
+   the same place, and raising would break any hand-configured iterative solver that has always been
+   allowed to return early.
+
+Nothing MUMPS-specific is reached unless MUMPS is both present and in use: `_mumps_infog()` gates on
+`PETSc.Sys.hasExternalPackage("mumps")` and then on `pc.getFactorSolverType() == "mumps"`, and every
+MUMPS branch hangs off a non-None answer from it. `getFactorSolverType()` is what makes the second gate
+free of side effects — it answers None for a PC with no factor matrix at all (jacobi, gamg, hypre,
+none), where `getFactorMatrix()` raises PETSc error 56, and it names the package for the ones that do,
+so SuperLU or UMFPACK is turned away rather than being asked for an `INFOG` it does not have.
+
+Collective under MPI: `KSPSolve` reduces the PC failure across the communicator, so every rank sees
+the same reason and takes the same rebuild branch.
+
+Checked on four configurations besides the reported script: PETSc's own LU and SuperLU (both
+`_mumps_infog(1) → None`, converged, no MUMPS call made), GMRES+Jacobi capped at one iteration
+(`DIVERGED_MAX_IT` every solve: warned, no retry, no raise, Newton still creeps down 3.1e-3 → 2.3e-3
+and then hits oomph's own max-iteration abort exactly as it does without the patch), and
+`mpi_structural_worker` on `petsc_mumps` at 1 and 2 ranks. A synthetic raise from inside the callback
+was also confirmed to unwind cleanly through oomph's C++ Newton loop, be catchable in Python, and
+leave the `Problem` usable for further solves.
+
+On the reported script this turns the run into one recovered failure —
+`KSPConvergedReason -11, MUMPS INFOG(1) -9 … retrying with -mat_mumps_icntl_14 40` — after which the
+continuation completes and reproduces the `pardiso` trajectory (the arclength derivative agrees to 15
+digits). Total in-process KSP time 1.58 s, i.e. the fast reuse path is kept.
+
+### The general point
+
+Reusing a factorisation object across solves silently changes *which* factorisation you get, not just
+how long it takes to get it. Anything the first call decided from values — MUMPS' transversal and
+scaling here — is now decided once, for a matrix that is no longer the one being solved. Backends
+whose symbolic phase is purely structural (Pardiso's phase 11) do not have this failure mode, which is
+exactly why `pardiso` was unaffected. Worth remembering before extending the reuse to another backend.
+
+### Loose end, not fixed here
+
+`pyoomph/solvers/pardiso.py:407` passes MKL's `error` argument as `byref(c_int(ERR))` — a temporary
+built from the Python int, so the code MKL writes lands in an object that is discarded on the next
+line and the `if ERR != 0` check below it can never fire. Pardiso has been unable to report its own
+errors for as long as that line has existed. Same class of bug as the one above (a solver failure
+that cannot be seen), but a different backend and no evidence it is firing, so it is recorded rather
+than changed.
+
 ## 8. Open questions
 
 ### Closed by the work
