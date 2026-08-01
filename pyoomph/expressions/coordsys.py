@@ -1357,11 +1357,82 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
                 mycomps=posscompos[:dim]        
                 return vector(*mycomps)
             else:
-                return cg._get_normal_component(component)            
-            
+                return cg._get_normal_component(component)
+
 
     def tensor_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
-        raise RuntimeError("Implement the tensor_divergence for this coordinate system. Occured upon taking the div of " + str(arg))
+        """
+        Divergence of a second order tensor, i.e. ``(div T)_j = d_i T_ij``, contracting the FIRST index
+        (the convention of the Cartesian and the plain axisymmetric coordinate system).
+
+        The mesh coordinates (x,y) and the angle phi are mapped to the physical cylindrical coordinates by
+        ``r = x + eps*x_eigen*exp(I*m*phi)`` and ``z = y + eps*y_eigen*exp(I*m*phi)``, with phi itself
+        unperturbed. The orthonormal frame (e_r(phi), e_z, e_phi(phi)) therefore does not move at all, so
+        the physical components are the usual ones and the connection terms below are exactly those of the
+        unperturbed cylindrical system. All the perturbation does is change what the derivative operators
+        and the 1/r factor mean once written in the mesh coordinates. Inverting the mapping to first order
+        in eps gives, for any scalar q,
+
+            d/dr|_(z,phi)  =  q_x - (x_e_x*q_x + y_e_x*q_y)
+            d/dz|_(r,phi)  =  q_y - (x_e_y*q_x + y_e_y*q_y)
+            d/dphi|_(r,z)  =  q_phi - I*m*(x_e*q_x + y_e*q_y)
+            1/r            =  1/x - x_e/x**2
+
+        The same four rules reproduce scalar_gradient and vector_divergence above term by term, which is
+        what makes this implementation checkable against them. Feeding them into the cylindrical tensor
+        divergence is then all that is left to do.
+        """
+        if lagrangian:
+            return super().tensor_divergence(arg, ndim, edim, with_scales, lagrangian)
+        if ndim != edim or ndim not in (1, 2):
+            raise RuntimeError("Tensor divergence in the axisymmetry-breaking coordinate system is only implemented on a bulk mesh, not for ndim=" + str(ndim) + ", edim=" + str(edim))
+        T = arg
+        coords = self.get_coords(3, with_scales, lagrangian)
+        x = self.map_to_zero_epsilon(coords[0])
+        Xp = self.map_to_first_order_epsilon(coords[0])
+        mm = _pyoomph.GiNaC_EvalFlag("moving_mesh")
+        m, I, phi = self.m_angular_symbol, self.imaginary_i, self.phi
+        if ndim == 2:
+            y = self.map_to_zero_epsilon(coords[1])
+            Yp = self.map_to_first_order_epsilon(coords[1])
+        else:
+            # A one-dimensional radial mesh has no axial direction at all, so nothing is perturbed
+            # along y and the operators below reduce to the plane-polar ones.
+            y, Yp = None, None
+
+        def d_dr(q:Expression)->Expression:  # d/dr at fixed z and phi
+            corr = diff(Xp, x)*diff(q, x) + (diff(Yp, x)*diff(q, y) if y is not None else 0)
+            return diff(q, x) - mm*corr
+
+        def d_dz(q:Expression)->Expression:  # d/dz at fixed r and phi
+            return diff(q, y) - mm*(diff(Xp, y)*diff(q, x) + diff(Yp, y)*diff(q, y))
+
+        def d_dphi_over_r(q:Expression)->Expression:  # (1/r)*d/dphi at fixed r and z
+            conv = Xp*diff(q, x) + (Yp*diff(q, y) if y is not None else 0)
+            return diff(q, phi)/x - mm*(I*m*conv/x + Xp*diff(q, phi)/x**2)
+
+        def over_r(q:Expression)->Expression:  # q/r
+            return q/x - mm*Xp*q/x**2
+
+        # The connection terms are those of the cylindrical frame, where e_r and e_phi rotate with phi:
+        # (T_rr-T_phiphi)/r on the radial row, T_rz/r on the axial one, (T_rphi+T_phir)/r on the azimuthal
+        # one. The PLUS on the last is what the identity div(dyadic(a,b)) = div(a)*b + (a.grad)b requires
+        # here, checked against vector_divergence and vector_gradient of this class, which do carry all
+        # three components. AxisymmetricCoordinateSystem.tensor_divergence has a minus in that spot, but
+        # that is not a contradiction: its vector_gradient is swirl-free (the a_phi entries are hard
+        # zeros), so a tensor with T_phir != 0 is outside what that coordinate system describes anyway.
+        if ndim == 2:
+            div_r = d_dr(T[0,0]) + d_dz(T[1,0]) + d_dphi_over_r(T[2,0]) + over_r(T[0,0] - T[2,2])
+            div_z = d_dr(T[0,1]) + d_dz(T[1,1]) + d_dphi_over_r(T[2,1]) + over_r(T[0,1])
+            div_phi = d_dr(T[0,2]) + d_dz(T[1,2]) + d_dphi_over_r(T[2,2]) + over_r(T[0,2] + T[2,0])
+            return vector(div_r, div_z, div_phi)
+        else:
+            # On a radial mesh the components are ordered [r, phi] rather than [r, z, phi] -- that is
+            # what define_vector_field, scalar_gradient and vector_divergence use for ndim==1 -- so the
+            # azimuthal slot is index 1 here and index 2 is unused.
+            div_r = d_dr(T[0,0]) + d_dphi_over_r(T[1,0]) + over_r(T[0,0] - T[1,1])
+            div_phi = d_dr(T[0,1]) + d_dphi_over_r(T[1,1]) + over_r(T[0,1] + T[1,0])
+            return vector(div_r, div_phi, 0)
 
     def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int,with_scales:bool)->Expression:
         raise RuntimeError("Implement the directional tensor derivative for this coordinate system")
