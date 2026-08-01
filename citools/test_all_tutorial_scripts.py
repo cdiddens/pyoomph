@@ -8,12 +8,21 @@ parser.add_argument("--tcc", help="Used TCC", action="store_true")
 parser.add_argument("--no-petsc", help="Ignore PETSc check", action="store_true")
 parser.add_argument("--keep-logs", help="Keep log files also of successful tests", action="store_true")
 parser.add_argument("--keep-outdirs", help="Do not delete each script's output directory after it runs. Useful for comparing generated code across repeated runs (e.g. for determinism testing)", action="store_true")
+# Folders to skip used to be read from sys.argv directly, which stopped working when argparse was
+# added - argparse rejects any positional argument it does not know about.
+parser.add_argument("skips", nargs="*", help="Bundle folders to skip, e.g. Temporal_ODEs")
 args = parser.parse_args()
 
 os.chdir(Path(__file__).parent)
 
-import zipfile,glob,subprocess
+import glob,subprocess
 import shutil
+
+# The bundle of tutorial scripts is no longer a committed zip file - it is assembled from the
+# tutorial sources, both here and during the documentation build (see docs/source/conf.py).
+# So this pipeline tests the scripts as they currently are in the tree.
+sys.path.insert(0, str(Path("../docs/source/tutorial").resolve()))
+import tutorial_bundle
 
 
 if not args.no_petsc:
@@ -26,21 +35,22 @@ if not args.no_petsc:
   assert PETSc.ScalarType is numpy.complex128, "PETSc does not support complex numbers, cannot run tests with eigenvalue solvers. Please install a version of PETSc with complex support and make sure petsc4py is using that version."
   
 
+problems=tutorial_bundle.check_consistency()
+for problem in problems:
+  print("PROBLEM:",problem)
+
 if Path("pyoomph_tutorial_scripts").exists():
   print("Removing old pyoomph_tutorial_scripts folder")
-  shutil.rmtree("pyoomph_tutorial_scripts",ignore_errors=True)
 
-bundle= Path("../docs/source/tutorial/tutorial_example_scripts.zip")
+bundle=tutorial_bundle.export_tree(Path("."))
+print("Gathered",len(tutorial_bundle.collect()),"tutorial files into",bundle)
 
-with zipfile.ZipFile(str(bundle), 'r') as zipf:
-    zipf.extractall(".")
-    
 os.chdir("pyoomph_tutorial_scripts")
 basedir=Path(".").absolute()
 
-all_okay=True
+all_okay=not problems # inconsistent duplicated scripts already count as a failure
 
-skips=sys.argv[1:]
+skips=args.skips
 
 
 for d in glob.glob("./*/"):

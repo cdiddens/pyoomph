@@ -219,7 +219,7 @@ if __name__=="__main__":
         # Relax to the base state, then solve for the stationary solution
         problem.run(10,startstep=0.1,outstep=False,temporal_error=1)
         problem.solve(max_newton_iterations=20,spatial_adapt=4)
-        
+               
         # Now we can start the eigenanalysis        
         outfile=problem.create_text_file_output("m1_instability.txt",header=["Bo","ReLambda","ImLambda"])
             

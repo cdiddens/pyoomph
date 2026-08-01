@@ -3,8 +3,13 @@ import sys,os
 
 os.chdir(Path(__file__).parent)
 
-import zipfile,glob,subprocess
+import glob,subprocess
 import shutil
+
+# See test_all_tutorial_scripts.py: the script bundle is assembled from the tutorial sources
+# rather than unpacked from a committed zip.
+sys.path.insert(0, str(Path("../docs/source/tutorial").resolve()))
+import tutorial_bundle
 
 
 try:
@@ -17,15 +22,17 @@ assert PETSc.ScalarType is numpy.complex128, "PETSc does not support complex num
   
 
 
-bundle= Path("../docs/source/tutorial/tutorial_example_scripts.zip")
+problems=tutorial_bundle.check_consistency()
+for problem in problems:
+  print("PROBLEM:",problem)
 
-with zipfile.ZipFile(str(bundle), 'r') as zipf:
-    zipf.extractall(".")
-    
+bundle=tutorial_bundle.export_tree(Path("."))
+print("Gathered",len(tutorial_bundle.collect()),"tutorial files into",bundle)
+
 os.chdir("pyoomph_tutorial_scripts")
 basedir=Path(".").absolute()
 
-all_okay=True
+all_okay=not problems # inconsistent duplicated scripts already count as a failure
 
 skips=sys.argv[1:]
 

@@ -148,6 +148,23 @@ latex_toplevel_sectioning = 'chapter'
 #bibtex_reference_style = 'author_year_round'
 
 
+# tutorial_example_scripts.zip is offered as a ":download:" in nearly every tutorial chapter. It
+# is not kept in git: it is assembled from the tutorial sources here, before the sources are read,
+# so it can never be out of date with respect to the scripts the text explains. This runs on Read
+# the Docs as well - it only needs conf.py to be executed on a repository checkout, and uses no
+# external tools (the former generate_tutorial_zip.sh needed a shell, find and zip).
+def build_tutorial_zip(app):
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "tutorial")))
+    import tutorial_bundle
+    from sphinx.util import logging as sphinx_logging
+    logger = sphinx_logging.getLogger(__name__)
+    for problem in tutorial_bundle.check_consistency():
+        logger.warning("tutorial example scripts: %s", problem)
+    changed = tutorial_bundle.build_zip()
+    logger.info("tutorial example scripts: %s tutorial_example_scripts.zip",
+                "regenerated" if changed else "up to date")
+
+
 def set_master_doc(app):
     if app.tags.has("latex"):
         app.config.master_doc = "latex_tutorial"
@@ -157,6 +174,7 @@ def set_master_doc(app):
 
 def setup(app):
     app.connect('builder-inited', set_master_doc)
+    app.connect('builder-inited', build_tutorial_zip)
 
 
 from sphinx.builders.html import StandaloneHTMLBuilder
