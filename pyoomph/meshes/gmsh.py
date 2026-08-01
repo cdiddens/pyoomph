@@ -364,6 +364,11 @@ class GmshTemplate(MeshedMeshTemplate):
         self.mesh_mode:Literal["quads","tris","SV","only_quads"]="quads"
         #: The default order of the elements. Can be 1 or 2. Note that if only first order (``"C1"``) elements are created, the mesh will be reduced to first order, even if the mesh is set to second order. Likewise, a first order mesh will be split to second order if second order elements (``"C2"``) are created on it.
         self.order = 2
+        #: If True (default), planar 2d elements that come out of Gmsh clockwise are relabelled during construction so that every element has a positive ``det(dx/ds)``. Gmsh orients the elements after the surface normal, i.e. after the winding of the curve loop, which for a loop assembled programmatically (e.g. by a :py:class:`~pyoomph.meshes.remesher.Remesher2d`) can come out either way. pyoomph integrates with ``sqrt(det(g_ab))``, which is non-negative, so an inside-out mesh used to be harmless - but it makes ``set_detect_inverted_elements(True)`` flag the entire mesh. Also fixes the mirrored half of a :py:attr:`mirror_mesh`.
+        self.fix_2d_orientation:bool=True
+        #: How many elements the last mesh construction had to flip (see :py:attr:`fix_2d_orientation`)
+        self.num_flipped_2d_elements:int=0
+        self._node_xy_cache:dict[int,list[float]]={}
         self._maxdim = 0
 
         self.consider_spatial_scale:bool=True
@@ -1379,7 +1384,10 @@ class GmshTemplate(MeshedMeshTemplate):
                 _nodal_dim = 3
         self._max_nodal_dim = _nodal_dim
         self._nodeinds = numpy.array(self._nodeinds) #type:ignore
-        
+        # Node indices are handed out afresh here, so any cached position is stale now
+        self._node_xy_cache = {}
+        self.num_flipped_2d_elements = 0
+
         if self.extrude_generated_mesh is not None:
             self._post_extrude_mesh()
 
@@ -1575,7 +1583,48 @@ class GmshTemplate(MeshedMeshTemplate):
 
 
 
-    def _construct_template_domain_2d(self, name:str, entry:Any):    
+    # Local corner cycles and the relabelling that reverses an element, per node ordering
+    # expected by the add_*_2d_* methods. Reversing a quad means transposing its (s0,s1)
+    # index pair; reversing a triangle means swapping corners 1 and 2, which also swaps the
+    # mid-side nodes mid(0,1) and mid(0,2) while mid(1,2) stays put.
+    _ORIENTATION_2D = {
+        "quad":      ([0, 1, 3, 2], [0, 2, 1, 3]),
+        "quad9":     ([0, 2, 8, 6], [0, 3, 6, 1, 4, 7, 2, 5, 8]),
+        "triangle":  ([0, 1, 2],    [0, 2, 1]),
+        "triangle6": ([0, 1, 2],    [0, 2, 1, 5, 4, 3]),
+    }
+
+    def _is_negatively_oriented_2d(self, nodeinds:Any, corner_cycle:list[int])->bool:
+        """Whether the corners of this element run clockwise, i.e. whether det(dx/ds) < 0."""
+        cache = self._node_xy_cache
+        twice_area = 0.0
+        for k in range(len(corner_cycle)):
+            i = int(nodeinds[corner_cycle[k]])
+            j = int(nodeinds[corner_cycle[(k + 1) % len(corner_cycle)]])
+            pi = cache.get(i)
+            if pi is None:
+                pi = cache[i] = self.get_node_position(i)
+            pj = cache.get(j)
+            if pj is None:
+                pj = cache[j] = self.get_node_position(j)
+            twice_area += pi[0] * pj[1] - pj[0] * pi[1]
+        return twice_area < 0.0
+
+    def _orient_2d(self, nodeinds:Any, celltype:str)->Any:
+        """Relabel the nodes of a planar element so that it comes out counter-clockwise.
+
+        A mesh in a 3d nodal space is a surface with no orientation to fix, so it is left
+        alone - the same case the C++ inversion check skips for not having a square mapping.
+        """
+        if (not self.fix_2d_orientation) or self._max_nodal_dim != 2:
+            return nodeinds
+        corner_cycle, reverse = self._ORIENTATION_2D[celltype]
+        if not self._is_negatively_oriented_2d(nodeinds, corner_cycle):
+            return nodeinds
+        self.num_flipped_2d_elements += 1
+        return nodeinds[reverse]
+
+    def _construct_template_domain_2d(self, name:str, entry:Any):
         domain = self.new_domain(name)
         if self.all_nodes_as_boundary_nodes:
             domain.set_all_nodes_as_boundary_nodes()
@@ -1587,31 +1636,27 @@ class GmshTemplate(MeshedMeshTemplate):
                 if cells.type == "quad":
                     perm = [0, 1, 3, 2]
                     for q in mycells:
-                        domain.add_quad_2d_C1(*self._nodeinds[q[perm]]) #type:ignore
+                        domain.add_quad_2d_C1(*self._orient_2d(self._nodeinds[q[perm]],"quad")) #type:ignore
                 elif cells.type == "quad9":
                     perm = [0, 4, 1, 7, 8, 5, 3, 6, 2]
 
                     for q in mycells:
-                        domain.add_quad_2d_C2(*self._nodeinds[q[perm]]) #type:ignore
+                        domain.add_quad_2d_C2(*self._orient_2d(self._nodeinds[q[perm]],"quad9")) #type:ignore
                 elif cells.type == "triangle":
                     perm = [0, 1, 2]
                     if self.mesh_mode!="SV":
                         for t in mycells:
-                            domain.add_tri_2d_C1(*self._nodeinds[t[perm]]) #type:ignore
+                            domain.add_tri_2d_C1(*self._orient_2d(self._nodeinds[t[perm]],"triangle")) #type:ignore
                     else:
+                        # The Scott-Vogelius split keeps the orientation of its parent, so
+                        # flipping the parent is enough for all three sub-triangles.
                         for t in mycells:
-                            domain.add_SV_tri_2d_C1(*self._nodeinds[t[perm]]) #type:ignore
-                            #c1,c2,c3=self._nodeinds[t[perm]]                            
-                            #bc_pos=(numpy.array(self.get_node_position(c1))+numpy.array(self.get_node_position(c2))+numpy.array(self.get_node_position(c3)))/3.0
-                            #bc=self.add_node_unique(*bc_pos)
-                            #domain.add_tri_2d_C1(c1,c2,bc) #type:ignore
-                            #domain.add_tri_2d_C1(c2,c3,bc) #type:ignore
-                            #domain.add_tri_2d_C1(c3,c1,bc) #type:ignore
-                elif cells.type == "triangle6":                    
+                            domain.add_SV_tri_2d_C1(*self._orient_2d(self._nodeinds[t[perm]],"triangle")) #type:ignore
+                elif cells.type == "triangle6":
 
                     perm = [0, 1, 2,3,4,5]
                     for t in mycells:
-                        domain.add_tri_2d_C2(*self._nodeinds[t[perm]]) #type:ignore
+                        domain.add_tri_2d_C2(*self._orient_2d(self._nodeinds[t[perm]],"triangle6")) #type:ignore
                 else:
                     raise RuntimeError("Unsupported cell type: " + cells.type)
 
