@@ -253,7 +253,7 @@ namespace pyoomph
     virtual void prepare_shape_buffer_for_integration(const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag);
     // Fills in element-size-related entries (e.g. element diameter) of the shape buffer that are
     // needed by the generated code but do not depend on the integration point.
-    virtual void fill_shape_info_element_sizes(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, unsigned flag) const;
+    virtual void fill_shape_info_element_sizes(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, unsigned flag, unsigned history_index = 0) const;
     // Evaluates shape functions, their derivatives, and the (Lagrangian/Eulerian) Jacobian of the
     // geometric mapping at local coordinate s, storing the results into the internal shape_info
     // buffer (the overload below writes into a caller-supplied buffer instead). "index" selects
@@ -504,7 +504,7 @@ namespace pyoomph
     // Public wrapper around get_dnormal_dcoords_at_s: computes the outer unit normal n at s, and
     // (if the output pointers are non-NULL) its first and second derivatives w.r.t. the nodal
     // coordinates, for use by generated code implementing normal-dependent boundary conditions.
-    virtual void get_normal_at_s(const oomph::Vector<double> &s, oomph::Vector<double> &n, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dnormal_dcoord, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2normal_dcoord2) const;
+    virtual void get_normal_at_s(const oomph::Vector<double> &s, oomph::Vector<double> &n, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dnormal_dcoord, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2normal_dcoord2, unsigned history_index = 0) const;
 
     // Discontinuous fields are stored as internal_data, on interfaces possibly also on external_data
     virtual oomph::Data *get_D0_nodal_data(const unsigned &fieldindex);
@@ -2869,9 +2869,23 @@ namespace pyoomph
       }
     }
 
-    void get_normal_at_s(const oomph::Vector<double> &s, oomph::Vector<double> &n, double *  PYOOMPH_RESTRICT  *  PYOOMPH_RESTRICT *  PYOOMPH_RESTRICT  dnormal_dcoord, double *  PYOOMPH_RESTRICT  *  PYOOMPH_RESTRICT  *  PYOOMPH_RESTRICT  *  PYOOMPH_RESTRICT *  PYOOMPH_RESTRICT d2normal_dcoord2) const override
+    void get_normal_at_s(const oomph::Vector<double> &s, oomph::Vector<double> &n, double *  PYOOMPH_RESTRICT  *  PYOOMPH_RESTRICT *  PYOOMPH_RESTRICT  dnormal_dcoord, double *  PYOOMPH_RESTRICT  *  PYOOMPH_RESTRICT  *  PYOOMPH_RESTRICT  *  PYOOMPH_RESTRICT *  PYOOMPH_RESTRICT d2normal_dcoord2, unsigned history_index = 0) const override
     {
       this->outer_unit_normal(s, n);
+      if (history_index > 0)
+      {
+        // outer_unit_normal() only knows the current nodal positions, so the normal of a previous
+        // configuration is built from that configuration's tangents instead. Those give the normal
+        // only up to a sign; the orientation is taken from the current outer normal, which is safe
+        // because the mesh motion over one step cannot turn the element inside out (an inverted
+        // element is detected and rejected elsewhere).
+        oomph::Vector<double> n_hist(n.size(), 0.0);
+        this->BulkElementBase::get_normal_at_s(s, n_hist, NULL, NULL, history_index);
+        double dot = 0.0;
+        for (unsigned d = 0; d < n.size(); d++) dot += n_hist[d] * n[d];
+        double sign = (dot < 0.0 ? -1.0 : 1.0);
+        for (unsigned d = 0; d < n.size(); d++) n[d] = sign * n_hist[d];
+      }
       if (dnormal_dcoord)
       {
         this->get_dnormal_dcoords_at_s(s, dnormal_dcoord, d2normal_dcoord2);

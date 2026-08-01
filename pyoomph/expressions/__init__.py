@@ -578,7 +578,7 @@ def div(arg:ExpressionOrNum,lagrangian:bool=False,matrix:bool | None=None,nondim
 	return _pyoomph.GiNaC_div(arg,_pyoomph.Expression(-1),_pyoomph.Expression(-1),coordsysE,_pyoomph.Expression(flag))
 
 
-def time_derivative_of_integral(expr:ExpressionOrNum,scheme:Literal["BDF1","BDF2","Newmark2","BDF2_degr","Newmark2_degr","TPZ","MPT","Simpson","Boole","trapezoidal","Kepler","Milne","midpoint"]="BDF2_degr")->Expression:
+def time_derivative_of_integral(expr:ExpressionOrNum,scheme:Literal["BDF1","BDF2","Newmark2","BDF2_degr","Newmark2_degr","TPZ","MPT","Simpson","Boole","trapezoidal","Kepler","Milne","midpoint"]="BDF2_degr",apply_on_others:bool=True)->Expression:
     """
     Computes the time derivative of an integral expression using a given time stepping scheme.
     For moving meshes, this can be different, i.e. ``weak(partial_t(u),v) != d_by_dt_of_integral(weak(u,v))``.
@@ -587,6 +587,7 @@ def time_derivative_of_integral(expr:ExpressionOrNum,scheme:Literal["BDF1","BDF2
     Args:
         expr: The expression to differentiate.
         scheme: The time stepping scheme to apply ("BDF1","BDF2","Newmark2","BDF2_degr","Newmark2_degr"). Defaults to "BDF2_degr", "_degr" means that the time derivative is approximated with a lower order scheme in the first step, since initial conditions might not have history values.
+        apply_on_others: Whether the history evaluations also take the normal, the Eulerian element sizes and the Eulerian spatial derivatives in grad/div from the mesh of the corresponding history step. Defaults to True: this is a derivative of the integral over the moving element, so each history term belongs to the configuration the element had then. Has no effect unless the mesh moves.
     """        
     if scheme in ["TPZ","MPT","Simpson","Boole","trapezoidal","Kepler","Milne","midpoint"]:
         scheme="BDF1" # These schemes are not supported for time derivatives of integrals, since they are not linear multistep methods. We just use BDF1 instead, which is the same as the trapezoidal rule for linear functions.    
@@ -596,7 +597,7 @@ def time_derivative_of_integral(expr:ExpressionOrNum,scheme:Literal["BDF1","BDF2
     res:ExpressionOrNum=0
     # Time derivatives are just approximated as d/dt(expr) = sum_i weight_i * expr(t=t_i), where t0=t, t1=t-dt_0, t2=t1-dt_1, etc. The weights are given by the timestepper_weight function.
     for i in range(numterms[scheme]):
-        res+=timestepper_weight(1,i,scheme=cast("TimeSteppingScheme",scheme))*evaluate_in_past(expr,i,apply_on_integral_dx=True)
+        res+=timestepper_weight(1,i,scheme=cast("TimeSteppingScheme",scheme))*evaluate_in_past(expr,i,apply_on_integral_dx=True,apply_on_others=apply_on_others)
     # The finite difference above is a difference of integrals, not a partial_t of a field, so the code
     # generator would find no mass-matrix contribution in it whatsoever: the __partial_t_mass_matrix probe
     # only responds to derived first-order time derivatives, and history terms differentiate to zero.

@@ -107,6 +107,7 @@ namespace pyoomph
       int deriv_direction2;
 
    public:
+      unsigned history_step = 0; // For evaluations in past: the element size of a previous configuration
       bool is_lagrangian() const { return lagrangian; }
       bool is_with_coordsys() const { return consider_coordsys; } // If true, it will be the integral including terms like 2*pi*r for axisymm, otherwise not
       bool is_derived() const { return derived; }
@@ -154,6 +155,7 @@ namespace pyoomph
    public:
       //bool is_eigenexpansion = false; // Used for symmetry breaking: It gives then dn_i/dX^{0l}_j* X^{ml}_j
       int expansion_mode = 0;         // For mode expansions
+      unsigned history_step = 0;      // For evaluations in past: the normal of a previous configuration
       bool no_jacobian = false;
       bool no_hessian = false;
       bool is_derived_by_lshape2() const { return derived_by_second_index; }
@@ -188,6 +190,10 @@ namespace pyoomph
       int nodal_coord_dir;         // If this is !=-1, it means that it is the derivative d(dpsidx(l,i)*u^l)/d(nodal_coordinate_X_j^k)
       int nodal_coord_dir2;        // Second coordinate derivatives
       int time_history_index;
+      // Whether the EULERIAN shape derivative should also be taken on the mesh of that history level.
+      // Separate from time_history_index on purpose: a plain evaluate_in_past() moves only the nodal
+      // VALUES into the past and must keep using the present geometry, which is what it always did.
+      bool history_geometry = false;
       bool no_jacobian, no_hessian;
       int expansion_mode; // For mode expansions
 
@@ -201,6 +207,10 @@ namespace pyoomph
       // Full form including the second nodal coordinate direction, for mixed second-order (Hessian) nodal-coordinate derivatives
       ShapeExpansion(FiniteElementField *_field, unsigned _dt_order, BasisFunction *_basis, std::string ts, bool _is_derived, int _nodal_coord_dir, bool _is_derived_other_index, int _nodal_coord_dir2) : field(_field), dt_order(_dt_order), dt_scheme(ts), basis(_basis), is_derived(_is_derived), is_derived_other_index(_is_derived_other_index), nodal_coord_dir(_nodal_coord_dir), nodal_coord_dir2(_nodal_coord_dir2), time_history_index(0), no_jacobian(false), no_hessian(false), expansion_mode(0) {}
 
+      // "G" when this expansion's Eulerian shape derivative is taken on the history geometry: the same
+      // field at the same history level interpolated on two different meshes are two different values
+      // and must not share a C variable. Must be appended wherever such a variable name is built.
+      std::string get_history_geometry_suffix() const { return history_geometry ? "G" : ""; }
       virtual std::string get_dt_values_name(FiniteElementCode *forcode) const;
       virtual std::string get_timedisc_scheme(FiniteElementCode *forcode) const;
       virtual std::string get_spatial_interpolation_name(FiniteElementCode *forcode) const;
@@ -1083,6 +1093,10 @@ namespace pyoomph
       virtual int classify_space_type(const FiniteElementSpace *s);
       virtual std::string get_owner_prefix(const FiniteElementSpace *sp); // C++ expression prefix to access data owned by the element that "sp" belongs to (self/bulk/opposite/external), based on classify_space_type()
       virtual std::string get_shape_info_str(const FiniteElementSpace *sp);
+      // True only where a history configuration can actually differ from the current one, i.e. on a
+      // moving mesh. Everywhere else the history slots are never filled and the symbols must fall
+      // back to the current geometry.
+      bool history_geometry_is_relevant() const;
       virtual std::string get_elem_info_str(const FiniteElementSpace *sp);
       virtual std::string get_nodal_data_string(const FiniteElementSpace *sp);
       virtual void finalise(); // Locks in the residual definitions and prepares the code for write_code() (space/field discovery, index assignment, etc.)

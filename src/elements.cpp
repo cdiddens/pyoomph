@@ -2137,7 +2137,7 @@ namespace pyoomph
 	// dimensionally a face (e.g. called directly on an interface element, as opposed to going
 	// through oomph-lib's FaceElement::outer_unit_normal). Delegates the derivative computation to
 	// get_dnormal_dcoords_at_s if requested.
-	void BulkElementBase::get_normal_at_s(const oomph::Vector<double> &s, oomph::Vector<double> &n, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT* PYOOMPH_RESTRICT dnormal_dcoord, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2normal_dcoord2) const
+	void BulkElementBase::get_normal_at_s(const oomph::Vector<double> &s, oomph::Vector<double> &n, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT* PYOOMPH_RESTRICT dnormal_dcoord, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2normal_dcoord2, unsigned history_index) const
 	{
 		unsigned nodal_dim = this->nodal_dimension();
 		unsigned eldim = this->dim();
@@ -2153,7 +2153,7 @@ namespace pyoomph
 			{
 				for (unsigned d = 0; d < nodal_dim; d++)
 				{
-					dxds[d] += this->nodal_position(l, d) * dpsi(l, 0);
+					dxds[d] += this->nodal_position(history_index, l, d) * dpsi(l, 0);
 				}
 			}
 			double l = 0.0;
@@ -2176,8 +2176,8 @@ namespace pyoomph
 			{
 				for (unsigned d = 0; d < nodal_dim; d++)
 				{
-					dxds1[d] += this->nodal_position(l, d) * dpsi(l, 0);
-					dxds2[d] += this->nodal_position(l, d) * dpsi(l, 1);
+					dxds1[d] += this->nodal_position(history_index, l, d) * dpsi(l, 0);
+					dxds2[d] += this->nodal_position(history_index, l, d) * dpsi(l, 1);
 				}
 			}
 			n[0]=dxds1[1]*dxds2[2]-dxds1[2]*dxds2[1];
@@ -3043,18 +3043,21 @@ namespace pyoomph
 		{
 			my_alloc_or_free(do_alloc, (*buff)->shapes[i], MAX_NODES);
 			my_alloc_or_free(do_alloc, (*buff)->nodal_shapes[i], MAX_NODES, MAX_NODES);
-			my_alloc_or_free(do_alloc, (*buff)->dx_shapes[i], MAX_NODES, MAX_NODAL_DIM);
+			for (unsigned k = 0; k < 3; k++)
+				my_alloc_or_free(do_alloc, (*buff)->dx_shapes[k][i], MAX_NODES, MAX_NODAL_DIM);
 			my_alloc_or_free(do_alloc, (*buff)->dX_shapes[i], MAX_NODES, MAX_NODAL_DIM);
 			my_alloc_or_free(do_alloc, (*buff)->dS_shapes[i], MAX_NODES, MAX_NODAL_DIM);
 		}
 
 		my_alloc_or_free(do_alloc, (*buff)->shape_DL, MAX_NODES);
 		my_alloc_or_free(do_alloc, (*buff)->nodal_shape_DL, MAX_NODES, MAX_NODES);
-		my_alloc_or_free(do_alloc, (*buff)->dx_shape_DL, MAX_NODES, MAX_NODAL_DIM);
+		for (unsigned k = 0; k < 3; k++)
+			my_alloc_or_free(do_alloc, (*buff)->dx_shape_DL[k], MAX_NODES, MAX_NODAL_DIM);
 		my_alloc_or_free(do_alloc, (*buff)->dX_shape_DL, MAX_NODES, MAX_NODAL_DIM);
 		my_alloc_or_free(do_alloc, (*buff)->dS_shape_DL, MAX_NODES, MAX_NODAL_DIM);
 
-		my_alloc_or_free(do_alloc, (*buff)->normal, MAX_NODAL_DIM);
+		for (unsigned k = 0; k < 3; k++)
+			my_alloc_or_free(do_alloc, (*buff)->normal[k], MAX_NODAL_DIM);
 
 		my_alloc_or_free(do_alloc, (*buff)->timestepper_weights_dt_BDF1, MAX_TIME_WEIGHTS);
 		my_alloc_or_free(do_alloc, (*buff)->timestepper_weights_dt_BDF2, MAX_TIME_WEIGHTS);
@@ -3940,7 +3943,7 @@ namespace pyoomph
 	// (and, if flag indicates a Hessian is required, second derivatives). These are needed
 	// because element-size expressions in the generated code are not assembled point-wise like
 	// normal residuals but require a pre-integrated scalar (and its coordinate sensitivities).
-	void BulkElementBase::fill_shape_info_element_sizes(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info,unsigned flag) const
+	void BulkElementBase::fill_shape_info_element_sizes(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info,unsigned flag, unsigned history_index) const
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
 		bool require_hessian = flag > 2;
@@ -4030,10 +4033,22 @@ namespace pyoomph
 		
 		
 		
+		// For a previous configuration the determinant has to be rebuilt from the old nodal positions.
+		// fill_shape_info_at_s already does exactly that and returns it; it also writes that history
+		// slot of the buffer as it goes, which is harmless because the per-integration-point pass
+		// rewrites the slot afterwards at the point that actually matters.
+		JITFuncSpec_RequiredShapes_FiniteElement_t minimal_for_history;
+		memset(&minimal_for_history, 0, sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t));
+		auto eulerian_J_at_s = [&](const oomph::Vector<double> &s_at, unsigned ipt_at, unsigned hist) -> double
+		{
+			if (hist == 0) return J_eulerian_at_knot(ipt_at);
+			double JLagr_dummy_hist;
+			return fill_shape_info_at_s(s_at, ipt_at, minimal_for_history, shape_info, JLagr_dummy_hist, 0, NULL, hist);
+		};
 		if (required.elemsize_Eulerian || required.elemsize_Lagrangian)
 		{
         //TODO: A bit redundant to do this for each integration point -> Move it in some other routine
-		  shape_info->elemsize_Eulerian=0.0;
+		  shape_info->elemsize_Eulerian[history_index]=0.0;
 		  shape_info->elemsize_Lagrangian=0.0;		  
         for(unsigned ipt_for_esize=0;ipt_for_esize<integral_pt()->nweight();ipt_for_esize++)
         {
@@ -4043,9 +4058,9 @@ namespace pyoomph
           oomph::Vector<double> x_for_esize(this->nodal_dimension(),0.0);
           if (required.elemsize_Eulerian)
           {          
-            this->interpolated_x(s_for_esize,x_for_esize);
-            double J = J_eulerian_at_knot(ipt_for_esize);            
-            shape_info->elemsize_Eulerian += w*J*functable->JacobianForElementSize(&eleminfo, &(x_for_esize[0]));
+            this->interpolated_x(history_index,s_for_esize,x_for_esize);
+            double J = eulerian_J_at_s(s_for_esize,ipt_for_esize,history_index);
+            shape_info->elemsize_Eulerian[history_index] += w*J*functable->JacobianForElementSize(&eleminfo, &(x_for_esize[0]));
           }
           if (required.elemsize_Lagrangian)
           {
@@ -4057,7 +4072,7 @@ namespace pyoomph
 		}
 		if (required.elemsize_Eulerian_cartesian || required.elemsize_Lagrangian_cartesian)
 		{
-		  shape_info->elemsize_Eulerian_cartesian=0.0;
+		  shape_info->elemsize_Eulerian_cartesian[history_index]=0.0;
 		  shape_info->elemsize_Lagrangian_cartesian=0.0;		  
         for(unsigned ipt_for_esize=0;ipt_for_esize<integral_pt()->nweight();ipt_for_esize++)
         {
@@ -4067,9 +4082,9 @@ namespace pyoomph
           oomph::Vector<double> x_for_esize(this->nodal_dimension(),0.0);
           if (required.elemsize_Eulerian_cartesian)
           {          
-            this->interpolated_x(s_for_esize,x_for_esize);
-            double J = J_eulerian_at_knot(ipt_for_esize);            
-            shape_info->elemsize_Eulerian_cartesian += w*J;
+            this->interpolated_x(history_index,s_for_esize,x_for_esize);
+            double J = eulerian_J_at_s(s_for_esize,ipt_for_esize,history_index);
+            shape_info->elemsize_Eulerian_cartesian[history_index] += w*J;
           }
           if (required.elemsize_Lagrangian_cartesian)
           {
@@ -4085,13 +4100,13 @@ namespace pyoomph
 			if (required.bulk_shapes)
 			{
 			 const BulkElementBase *bel = dynamic_cast<const BulkElementBase *>(dynamic_cast<const InterfaceElementBase *>(this)->bulk_element_pt());
-			 bel->fill_shape_info_element_sizes(*(required.bulk_shapes),shape_info->bulk_shapeinfo,flag);		 
+			 bel->fill_shape_info_element_sizes(*(required.bulk_shapes),shape_info->bulk_shapeinfo,flag,history_index);		 
 			}
 			
 			if (required.opposite_shapes)
 			{
 			 const BulkElementBase *opp = dynamic_cast<const BulkElementBase *>(dynamic_cast<const InterfaceElementBase *>(this)->get_opposite_side());
-			 opp->fill_shape_info_element_sizes(*(required.opposite_shapes),shape_info->opposite_shapeinfo,flag);		 
+			 opp->fill_shape_info_element_sizes(*(required.opposite_shapes),shape_info->opposite_shapeinfo,flag,history_index);		 
 			}
 	   }	   
 	}
@@ -4267,7 +4282,7 @@ namespace pyoomph
 				{
 					shape_info->shapes[ispace][l] = 1.0;
 					for (unsigned int i = 0; i < n_dim; i++)					
-						shape_info->dx_shapes[ispace][l][i] = 0.0;
+						shape_info->dx_shapes[history_index][ispace][l][i] = 0.0;
 					for (unsigned int i = 0; i < n_lagr; i++)
 						shape_info->dX_shapes[ispace][l][i] = 0.0;
 					for (unsigned int i = 0; i < el_dim; i++)
@@ -4278,7 +4293,7 @@ namespace pyoomph
 			{
 				shape_info->shape_DL[l] = 1.0;
 				for (unsigned int i = 0; i < n_dim; i++)
-					shape_info->dx_shape_DL[l][i] = 0.0;
+					shape_info->dx_shape_DL[history_index][l][i] = 0.0;
 				for (unsigned int i = 0; i < n_lagr; i++)
 					shape_info->dX_shape_DL[l][i] = 0.0;
 				for (unsigned int i = 0; i < el_dim; i++)
@@ -4393,10 +4408,10 @@ namespace pyoomph
 					shape_info->shapes[ispace][l] = psi[l];
 					for (unsigned int i = 0; i < n_dim; i++)
 					{
-						shape_info->dx_shapes[ispace][l][i] = 0.0;
+						shape_info->dx_shapes[history_index][ispace][l][i] = 0.0;
 						for (unsigned b = 0; b < el_dim; b++)
 						{
-							shape_info->dx_shapes[ispace][l][i] += gab_gai[b][i] * dpsids(l, b);
+							shape_info->dx_shapes[history_index][ispace][l][i] += gab_gai[b][i] * dpsids(l, b);
 						}
 					}
 
@@ -4468,10 +4483,10 @@ namespace pyoomph
 				shape_info->shape_DL[l] = psi[l];
 				for (unsigned int i = 0; i < n_dim; i++)
 				{
-					shape_info->dx_shape_DL[l][i] = 0.0;
+					shape_info->dx_shape_DL[history_index][l][i] = 0.0;
 					for (unsigned b = 0; b < el_dim; b++)
 					{
-						shape_info->dx_shape_DL[l][i] += gab_gai[b][i] * dpsids(l, b);
+						shape_info->dx_shape_DL[history_index][l][i] += gab_gai[b][i] * dpsids(l, b);
 					}
 				}
 
@@ -4531,9 +4546,9 @@ namespace pyoomph
 		if (required.normal) // TODO: Better normal
 		{
 			oomph::Vector<double> unit_normal(this->nodal_dimension());
-			this->get_normal_at_s(s, unit_normal, (require_dxdshape ? shape_info->d_normal_dcoord : NULL), ((require_hessian && require_dxdshape) ? shape_info->d2_normal_d2coord : NULL));
+			this->get_normal_at_s(s, unit_normal, (require_dxdshape ? shape_info->d_normal_dcoord : NULL), ((require_hessian && require_dxdshape) ? shape_info->d2_normal_d2coord : NULL), history_index);
 			for (unsigned int i = 0; i < nodal_dimension(); i++)
-				shape_info->normal[i] = unit_normal[i];
+				shape_info->normal[history_index][i] = unit_normal[i];
 		}
 		
 		if (D2X2_dshape) delete D2X2_dshape;
@@ -4557,7 +4572,7 @@ namespace pyoomph
 		if (required_C2TB)
 		{
 			shape_info->shape_Pos = shape_info->shapes[SPACE_INDEX_C2TB];
-			shape_info->dx_shape_Pos = shape_info->dx_shapes[SPACE_INDEX_C2TB];
+			for (unsigned k = 0; k < 3; k++) shape_info->dx_shape_Pos[k] = shape_info->dx_shapes[k][SPACE_INDEX_C2TB];
 			shape_info->dX_shape_Pos = shape_info->dX_shapes[SPACE_INDEX_C2TB];
 			shape_info->dS_shape_Pos = shape_info->dS_shapes[SPACE_INDEX_C2TB];
 			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord[SPACE_INDEX_C2TB];
@@ -4566,7 +4581,7 @@ namespace pyoomph
 		else if (this->eleminfo.nnode_of_space[SPACE_INDEX_C2])
 		{
 			shape_info->shape_Pos = shape_info->shapes[SPACE_INDEX_C2];
-			shape_info->dx_shape_Pos = shape_info->dx_shapes[SPACE_INDEX_C2];
+			for (unsigned k = 0; k < 3; k++) shape_info->dx_shape_Pos[k] = shape_info->dx_shapes[k][SPACE_INDEX_C2];
 			shape_info->dX_shape_Pos = shape_info->dX_shapes[SPACE_INDEX_C2];
 			shape_info->dS_shape_Pos = shape_info->dS_shapes[SPACE_INDEX_C2];
 			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord[SPACE_INDEX_C2];
@@ -4575,7 +4590,7 @@ namespace pyoomph
 		else if (required_C1TB)
 		{
 			shape_info->shape_Pos = shape_info->shapes[SPACE_INDEX_C1TB];
-			shape_info->dx_shape_Pos = shape_info->dx_shapes[SPACE_INDEX_C1TB];
+			for (unsigned k = 0; k < 3; k++) shape_info->dx_shape_Pos[k] = shape_info->dx_shapes[k][SPACE_INDEX_C1TB];
 			shape_info->dX_shape_Pos = shape_info->dX_shapes[SPACE_INDEX_C1TB];
 			shape_info->dS_shape_Pos = shape_info->dS_shapes[SPACE_INDEX_C1TB];
 			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord[SPACE_INDEX_C1TB];		
@@ -4585,7 +4600,7 @@ namespace pyoomph
 		{
 		  
 			shape_info->shape_Pos = shape_info->shapes[SPACE_INDEX_C1];
-			shape_info->dx_shape_Pos = shape_info->dx_shapes[SPACE_INDEX_C1];
+			for (unsigned k = 0; k < 3; k++) shape_info->dx_shape_Pos[k] = shape_info->dx_shapes[k][SPACE_INDEX_C1];
 			shape_info->dX_shape_Pos = shape_info->dX_shapes[SPACE_INDEX_C1];
 			shape_info->dS_shape_Pos = shape_info->dS_shapes[SPACE_INDEX_C1];
 			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord[SPACE_INDEX_C1];
@@ -4619,6 +4634,21 @@ namespace pyoomph
 			  double Jhistory = fill_shape_info_at_s(s, ipt, simplified_required_shapes, JLagr_dummy, 0,NULL,2);
 			  shape_info->int_pt_weight[2] = w * Jhistory;
 			}
+		}
+
+		// Same integration point, but on the mesh as it was one or two steps ago. fill_shape_info_at_s
+		// builds all the geometry from the nodal positions at the requested history level and writes the
+		// configuration-dependent arrays into that level's slot, so these calls do not disturb the
+		// current-time fill below - everything they share with it (the undifferentiated shapes, the
+		// Lagrangian and local-coordinate derivatives) does not move with the mesh. Interfaces are
+		// covered too: the nested calls carry the same history level, so each element of the chain ends
+		// up with its own history slots filled.
+		for (unsigned k = 1; k <= 2; k++)
+		{
+			bool wanted = (k == 1 ? required_shapes.history_geometry1 : required_shapes.history_geometry2);
+			if (!wanted) continue;
+			double JLagr_hist;
+			fill_shape_info_at_s(s, ipt, required_shapes, JLagr_hist, 0, NULL, k);
 		}
 
 		double JLagr;
@@ -4767,6 +4797,17 @@ namespace pyoomph
 		
       // Should be fine here!
       this->fill_shape_info_element_sizes(required_shapes,shape_info,flag);
+
+		// Element sizes on the mesh as it was one or two steps ago. Unlike the shape derivatives these
+		// are per element rather than per integration point, so they are done here. Each call writes only
+		// its own history slot; the dx_shapes it clobbers in passing (it sweeps the integration points
+		// internally) are rewritten by the per-integration-point fill that follows.
+		for (unsigned k = 1; k <= 2; k++)
+		{
+			bool wanted = (k == 1 ? required_shapes.history_geometry1 : required_shapes.history_geometry2);
+			if (!wanted) continue;
+			this->fill_shape_info_element_sizes(required_shapes, shape_info, 0, k);
+		}
 		
 	}
 
@@ -13989,13 +14030,13 @@ namespace pyoomph
 		{
 			oomph::Vector<double> sbulk = this->local_coordinate_in_bulk(s);
 			double JLagrBulk;
-			dynamic_cast<BulkElementBase *>(this->bulk_element_pt())->fill_shape_info_at_s(sbulk, index, *(required.bulk_shapes), shape_info->bulk_shapeinfo, JLagrBulk, flag);
+			dynamic_cast<BulkElementBase *>(this->bulk_element_pt())->fill_shape_info_at_s(sbulk, index, *(required.bulk_shapes), shape_info->bulk_shapeinfo, JLagrBulk, flag, NULL, history_index);
 			if (required.bulk_shapes->bulk_shapes)
 			{
 				InterfaceElementBase *bulk_as_inter = dynamic_cast<InterfaceElementBase *>(this->bulk_element_pt());
 				oomph::Vector<double> sbulkbulk = bulk_as_inter->local_coordinate_in_bulk(sbulk);
 				double JLagrBulkBulk;
-				dynamic_cast<BulkElementBase *>(bulk_as_inter->bulk_element_pt())->fill_shape_info_at_s(sbulkbulk, index, *(required.bulk_shapes->bulk_shapes), shape_info->bulk_shapeinfo->bulk_shapeinfo, JLagrBulkBulk, flag);
+				dynamic_cast<BulkElementBase *>(bulk_as_inter->bulk_element_pt())->fill_shape_info_at_s(sbulkbulk, index, *(required.bulk_shapes->bulk_shapes), shape_info->bulk_shapeinfo->bulk_shapeinfo, JLagrBulkBulk, flag, NULL, history_index);
 			}
 		}
 		if (required.opposite_shapes)
@@ -14006,13 +14047,13 @@ namespace pyoomph
 			}
 			oomph::Vector<double> sopp = this->local_coordinate_in_opposite_side(s);
 			double JLagrOpp;
-			dynamic_cast<InterfaceElementBase *>(opposite_side)->fill_shape_info_at_s(sopp, index, *(required.opposite_shapes), shape_info->opposite_shapeinfo, JLagrOpp, flag);
+			dynamic_cast<InterfaceElementBase *>(opposite_side)->fill_shape_info_at_s(sopp, index, *(required.opposite_shapes), shape_info->opposite_shapeinfo, JLagrOpp, flag, NULL, history_index);
 			if (required.opposite_shapes->bulk_shapes)
 			{
 				oomph::Vector<double> sopp_blk = dynamic_cast<InterfaceElementBase *>(opposite_side)->local_coordinate_in_bulk(sopp);
 				double JLagrOppBlk;
 				// std::cout << "FILLING OPPBLK HERE " << index << std::endl;
-				dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(opposite_side)->bulk_element_pt())->fill_shape_info_at_s(sopp_blk, index, *(required.opposite_shapes->bulk_shapes), shape_info->opposite_shapeinfo->bulk_shapeinfo, JLagrOppBlk, flag);
+				dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(opposite_side)->bulk_element_pt())->fill_shape_info_at_s(sopp_blk, index, *(required.opposite_shapes->bulk_shapes), shape_info->opposite_shapeinfo->bulk_shapeinfo, JLagrOppBlk, flag, NULL, history_index);
 			}
 		}
 

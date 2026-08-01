@@ -86,6 +86,8 @@ namespace pyoomph
 
 		dest->history_integral_dx1 |= src->history_integral_dx1;
 		dest->history_integral_dx2 |= src->history_integral_dx2;
+		dest->history_geometry1 |= src->history_geometry1;
+		dest->history_geometry2 |= src->history_geometry2;
 
 		if (src->bulk_shapes)
 		{

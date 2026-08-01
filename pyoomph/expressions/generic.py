@@ -1131,7 +1131,7 @@ def evaluate_in_domain(expr:ExpressionOrNum,domain:str | _pyoomph.FiniteElementC
 	return _pyoomph.GiNaC_eval_in_domain(expr,domain,tags)
 
 
-def evaluate_in_past(expr:ExpressionOrNum,timestep_offset:int | float=1,apply_on_integral_dx:bool=False)->Expression:
+def evaluate_in_past(expr:ExpressionOrNum,timestep_offset:int | float=1,apply_on_integral_dx:bool=False,apply_on_others:bool=False)->Expression:
 	"""
 	Evaluate the given expression in the past at a specified time offset.
 
@@ -1139,6 +1139,7 @@ def evaluate_in_past(expr:ExpressionOrNum,timestep_offset:int | float=1,apply_on
 		expr: The expression to be evaluated.
 		timestep_offset: The time offset in the past. Defaults to 1, i.e. the previously converged solution.
 		apply_on_integral_dx: Whether to apply the evaluation on dx symbols. Defaults to False.
+		apply_on_others: Whether to also evaluate the remaining mesh-dependent quantities at the old configuration, i.e. the normal, the Eulerian element sizes and the Eulerian spatial derivatives in grad/div. On a moving mesh these depend on where the nodes were, not only on the history of the nodal values, so without this a past gradient mixes old nodal values with the present geometry. Defaults to False.
 
 	Returns:
 		The evaluated expression in the past.
@@ -1156,11 +1157,14 @@ def evaluate_in_past(expr:ExpressionOrNum,timestep_offset:int | float=1,apply_on
 		expr=_pyoomph.Expression(expr)
 	if timestep_offset<0:
 		raise RuntimeError("Cannot evaluate in future, i.e. time offset needs to be >=0")
+	# The last argument is a bit field: bit 0 moves the integration measure dx into the past, bit 1 the
+	# remaining geometry (normal, element size, Eulerian shape derivatives)
+	apply_flags=(1 if apply_on_integral_dx else 0)|(2 if apply_on_others else 0)
 	if round(timestep_offset)==timestep_offset:
 		if timestep_offset==0:
 			return expr
 		else:			
-			return 0+_pyoomph.GiNaC_eval_in_past(expr,_pyoomph.Expression(int(timestep_offset)),_pyoomph.Expression(0),_pyoomph.Expression(apply_on_integral_dx))
+			return 0+_pyoomph.GiNaC_eval_in_past(expr,_pyoomph.Expression(int(timestep_offset)),_pyoomph.Expression(0),_pyoomph.Expression(apply_flags))
 	elif isinstance(timestep_offset,float):
 		tlow:int=math.floor(timestep_offset)
 		thigh:int=math.ceil(timestep_offset)
@@ -1169,14 +1173,14 @@ def evaluate_in_past(expr:ExpressionOrNum,timestep_offset:int | float=1,apply_on
 		if tlow==0:
 			low=expr
 		else:
-			low=_pyoomph.GiNaC_eval_in_past(expr,_pyoomph.Expression(tlow),_pyoomph.Expression(0),_pyoomph.Expression(apply_on_integral_dx))
-		high=_pyoomph.GiNaC_eval_in_past(expr,_pyoomph.Expression(thigh),_pyoomph.Expression(0),_pyoomph.Expression(apply_on_integral_dx))
+			low=_pyoomph.GiNaC_eval_in_past(expr,_pyoomph.Expression(tlow),_pyoomph.Expression(0),_pyoomph.Expression(apply_flags))
+		high=_pyoomph.GiNaC_eval_in_past(expr,_pyoomph.Expression(thigh),_pyoomph.Expression(0),_pyoomph.Expression(apply_flags))
 		return low*frac_low+high*frac_high
 	else:
 		raise RuntimeError("cannot yet evaluate at a variable step. But you can use e.g. (1-theta)*evaluate_at_past(expr,1)+theta*expr for some variable theta to blend between current and previous time step")
 
 
-def evaluate_at_midpoint(expr:ExpressionOrNum, midpt:float | int=0.5,apply_on_integral_dx:bool=False)->Expression:
+def evaluate_at_midpoint(expr:ExpressionOrNum, midpt:float | int=0.5,apply_on_integral_dx:bool=False,apply_on_others:bool=True)->Expression:
 	"""
 	Evaluates the given expression by replacing each var by a blending between the history values.
 
@@ -1184,6 +1188,7 @@ def evaluate_at_midpoint(expr:ExpressionOrNum, midpt:float | int=0.5,apply_on_in
 		expr: The expression to be evaluated.
 		midpt: The blending at which to evaluate the var statements. Defaults to 0.5, i.e. all variables are evaluated at the average between current and previous time step (midpoint rule)
 		apply_on_integral_dx: Whether to apply the evaluation on dx symbols. Defaults to False.
+		apply_on_others: Whether the history evaluations also take the normal, the Eulerian element sizes and the Eulerian spatial derivatives in grad/div from the mesh of the corresponding history step. Defaults to True, for the same reason as in :py:func:`~pyoomph.expressions.generic.time_scheme`. Has no effect unless the mesh moves.
 
 	Returns:
 		The evaluated expression.
@@ -1201,13 +1206,13 @@ def evaluate_at_midpoint(expr:ExpressionOrNum, midpt:float | int=0.5,apply_on_in
 		if midpt == 0:
 			return expr
 		else:
-			return _pyoomph.GiNaC_eval_in_past(expr, _pyoomph.Expression(int(midpt)),_pyoomph.Expression(0), _pyoomph.Expression(int(apply_on_integral_dx)))
+			return _pyoomph.GiNaC_eval_in_past(expr, _pyoomph.Expression(int(midpt)),_pyoomph.Expression(0), _pyoomph.Expression((1 if apply_on_integral_dx else 0)|(2 if apply_on_others else 0)))
 	elif isinstance(midpt, float):
-		return _pyoomph.GiNaC_eval_in_past(expr, _pyoomph.Expression(midpt),_pyoomph.Expression(0), _pyoomph.Expression(int(apply_on_integral_dx)))
+		return _pyoomph.GiNaC_eval_in_past(expr, _pyoomph.Expression(midpt),_pyoomph.Expression(0), _pyoomph.Expression((1 if apply_on_integral_dx else 0)|(2 if apply_on_others else 0)))
 	else:
 		raise RuntimeError("cannot yet evaluate at a variable midpoint fraction")
 
-def time_scheme(scheme:TimeSteppingScheme,expr:ExpressionOrNum,only_implicit_terms:bool=False,apply_on_integral_dx:bool=False)->Expression:
+def time_scheme(scheme:TimeSteppingScheme,expr:ExpressionOrNum,only_implicit_terms:bool=False,apply_on_integral_dx:bool=False,apply_on_others:bool=True)->Expression:
 	"""
 	Selects a time stepping scheme for the given expression by replacing all partial_t terms by the corresponding time stepping and expanding all other terms by appropriate evalulations in the past.
 
@@ -1216,6 +1221,7 @@ def time_scheme(scheme:TimeSteppingScheme,expr:ExpressionOrNum,only_implicit_ter
 		expr: The expression to apply the time stepping scheme to.
 		only_implicit_terms: Whether to only evaluate the implicit terms (history terms will be not affected). Defaults to False.
 		apply_on_integral_dx: Whether to apply the evaluation on dx symbols. Defaults to False.
+		apply_on_others: Whether the history evaluations also take the normal, the Eulerian element sizes and the Eulerian spatial derivatives in grad/div from the mesh of the corresponding history step. Defaults to True, since a term evaluated at an earlier time should be evaluated on the mesh of that time throughout. Has no effect unless the mesh moves.
 
 	Returns:
 		The result of applying the time stepping scheme to the expression.
@@ -1229,13 +1235,13 @@ def time_scheme(scheme:TimeSteppingScheme,expr:ExpressionOrNum,only_implicit_ter
 	def ev(expr:Expression,where:float,taction:int)->Expression:
 		if only_implicit_terms:
 			if where==0:
-				return _pyoomph.GiNaC_eval_in_past(expr, _pyoomph.Expression(where), _pyoomph.Expression(taction), _pyoomph.Expression(int(apply_on_integral_dx)))
+				return _pyoomph.GiNaC_eval_in_past(expr, _pyoomph.Expression(where), _pyoomph.Expression(taction), _pyoomph.Expression((1 if apply_on_integral_dx else 0)|(2 if apply_on_others else 0)))
 			elif where!=1 and where!=2:
 				raise RuntimeError("Cannot do this right now")
 			else:
 				return Expression(0)
 		else:
-			return _pyoomph.GiNaC_eval_in_past(expr, _pyoomph.Expression(where),_pyoomph.Expression(taction),_pyoomph.Expression(int(apply_on_integral_dx)))
+			return _pyoomph.GiNaC_eval_in_past(expr, _pyoomph.Expression(where),_pyoomph.Expression(taction),_pyoomph.Expression((1 if apply_on_integral_dx else 0)|(2 if apply_on_others else 0)))
 	if scheme=="BDF1":
 		return ev(expr, 0,1)
 	elif scheme=="BDF2":

@@ -195,7 +195,7 @@ typedef struct JITShapeInfo
   double ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(int_pt_weights_d_coords)); // Weights derived by coordinates, [i_dim,l_node], i.e. w*dJ_Eulerian/dX^l_i
   double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT int_pt_weights_d2_coords; // Weights derived by coordinates, [i_dim,j_dim,l_node_i,l_node_j], i.e. w*d2J_Eulerian/(dX^l_i*dX^l_j)
   
-  double elemsize_Eulerian,elemsize_Eulerian_cartesian;            // Eulerian element size, with e.g. 2*pi*r in integration or not
+  double elemsize_Eulerian[3],elemsize_Eulerian_cartesian[3];      // Eulerian element size (history index), with e.g. 2*pi*r in integration or not
   double elemsize_Lagrangian,elemsize_Lagrangian_cartesian; // Lagrangian element size
   double ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(elemsize_d_coords)); // Eulerian element size derived by coordinates, [i_dim,l_node], i.e. sum(w*dJ_Eulerian)/dX^l_i
   double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT elemsize_d2_coords; // Weights derived by coordinates, [i_dim,j_dim,l_node_i,l_node_j], i.e. sum(w*d2J_Eulerian)/(dX^l_i*dX^l_j)      
@@ -205,7 +205,11 @@ typedef struct JITShapeInfo
 
 
   double ARRAY_DECL_NNODE(shapes)[NUM_CONTINUOUS_SPACES];               // non-derived shapes
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dx_shapes))[NUM_CONTINUOUS_SPACES]; // Derived shapes (node index, coord index)
+  // First index is the history level, exactly like int_pt_weight[] above: 0 is the current
+  // configuration, 1 and 2 are the previous ones, used by evaluate_in_past(...,apply_on_others=True).
+  // Only the EULERIAN derivative needs this - the undifferentiated shapes and the Lagrangian/local
+  // coordinate derivatives are properties of the reference element and do not move with the mesh.
+  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dx_shapes))[3][NUM_CONTINUOUS_SPACES]; // Derived shapes (history, space, node index, coord index)
   double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dX_shapes))[NUM_CONTINUOUS_SPACES]; // Corresponding Lagrangian version
   double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dS_shapes))[NUM_CONTINUOUS_SPACES]; // Corresponding local coordinate version
   double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(d_dx_shape_dcoord))))[NUM_CONTINUOUS_SPACES]; // derivative of dx_shape w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index)
@@ -213,7 +217,7 @@ typedef struct JITShapeInfo
   double ARRAY_DECL_NNODE(ARRAY_DECL_NNODE(nodal_shapes))[NUM_CONTINUOUS_SPACES]; // shapes (node index, node index). In principle just delta_{i,j}
 
   double ARRAY_DECL_NNODE(shape_DL);                // DL shapes (node index)
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dx_shape_DL));            // DL shapes (node index, coord index)
+  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dx_shape_DL))[3];         // DL shapes (history, node index, coord index)
   double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dX_shape_DL));            // Corresponding Lagrangian derivatives
   double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dS_shape_DL));            // Corresponding local coordinate version
   double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(d_dx_shape_dcoord_DL)))); // derivative of dx_shape_DL w/r to nodal coords (intpt,node index, coord index, deriv. coord node index, deriv coord dir index)
@@ -224,13 +228,13 @@ typedef struct JITShapeInfo
   
   #ifdef FIXED_SIZE_SHAPE_BUFFER
   double *shape_Pos; // Pos space shapes. These will be mapped to the dominant element space
-  double (*dx_shape_Pos)[MAX_NODAL_DIM];
+  double (*dx_shape_Pos[3])[MAX_NODAL_DIM];
   double (*dX_shape_Pos)[MAX_NODAL_DIM];
   double (*dS_shape_Pos)[MAX_NODAL_DIM];
   double (*d_dx_shape_dcoord_Pos)[MAX_NODAL_DIM][MAX_NODES][MAX_NODAL_DIM];
   #else
   double * PYOOMPH_RESTRICT shape_Pos; // Pos space shapes. These will be mapped to the dominant element space
-  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dx_shape_Pos;
+  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dx_shape_Pos[3];
   double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dX_shape_Pos;
   double * PYOOMPH_RESTRICT* PYOOMPH_RESTRICT dS_shape_Pos;
   double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d_dx_shape_dcoord_Pos;  
@@ -243,7 +247,7 @@ typedef struct JITShapeInfo
   unsigned int jacobian_size;
   unsigned int mass_matrix_size;
 
-  double ARRAY_DECL_NDIM(normal);            // direction //TODO: This does not allow for divergence of the normal etc.
+  double ARRAY_DECL_NDIM(normal)[3];         // (history, direction) //TODO: This does not allow for divergence of the normal etc.
   double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT* PYOOMPH_RESTRICT d_normal_dcoord; // Derivative of the normal wrt. nodal coordinates [ipt][dir][coord node][coord dir]
   double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_normal_d2coord; // Second order derivative of the normal wrt. nodal coordinates [ipt][dir][coord node 1][coord dir 1][coord node 2][coord dir 2]
 
@@ -307,6 +311,10 @@ typedef struct JITFuncSpec_RequiredShapes_FiniteElement
 
   bool history_integral_dx1;
   bool history_integral_dx2;
+  // Whether the geometry itself (Eulerian shape derivatives, normal, element size) is needed on the
+  // mesh as it was 1 or 2 steps ago, i.e. whether the [1]/[2] slots have to be filled at all.
+  bool history_geometry1;
+  bool history_geometry2;
   struct JITFuncSpec_RequiredShapes_FiniteElement *bulk_shapes;
   struct JITFuncSpec_RequiredShapes_FiniteElement *opposite_shapes;
   // struct JITFuncSpec_RequiredShapes_FiniteElement * otherbulk_shapes;

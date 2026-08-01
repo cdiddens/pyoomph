@@ -370,10 +370,17 @@ class BaseEquations(_pyoomph.Equations):
         self.add_residual(weak(a,b,dimensional_dx=dimensional_dx,coordinate_system=coordinate_system,lagrangian=lagrangian),destination=destination)
         return self
     
-    def add_dweak_dt(self,a:"ExpressionOrNum",b:"str | ExpressionOrNum",*,dimensional_dx:bool=False,lagrangian:bool=False,coordinate_system:"OptionalCoordinateSystem"=None,destination:str | None=None,scheme:"TimeSteppingScheme"="BDF1"):
+    def add_dweak_dt(self,a:"ExpressionOrNum",b:"str | ExpressionOrNum",*,dimensional_dx:bool=False,lagrangian:bool=False,coordinate_system:"OptionalCoordinateSystem"=None,destination:str | None=None,scheme:"TimeSteppingScheme"="BDF1",apply_on_others:bool=True):
+        """
+        Adds d/dt of the weak contribution ``(a, b)``, i.e. the time derivative of the whole integral, so
+        that the change of the integration domain of a moving mesh is taken into account as well.
+
+        Args:
+            apply_on_others: Whether the history terms also take the normal, the Eulerian element sizes and the Eulerian spatial derivatives in grad/div from the mesh of the corresponding history step. Defaults to True, since each history term belongs to the configuration the element had then. Has no effect unless the mesh moves.
+        """
         if isinstance(b,str):
             b=testfunction(b)
-        self.add_residual(time_derivative_of_integral(weak(a,b,dimensional_dx=dimensional_dx,coordinate_system=coordinate_system,lagrangian=lagrangian),scheme=scheme),destination=destination)
+        self.add_residual(time_derivative_of_integral(weak(a,b,dimensional_dx=dimensional_dx,coordinate_system=coordinate_system,lagrangian=lagrangian),scheme=scheme,apply_on_others=apply_on_others),destination=destination)
         return self
     
     def add_functional_minimization(self,F:"ExpressionOrNum",with_respect_to:Expression | list[Expression] | None=None,*,dimensional_dx:bool=False,dimensional_testfunctions:bool=True,lagrangian:bool=False,coordinate_system:"OptionalCoordinateSystem"=None,destination:str | None=None):

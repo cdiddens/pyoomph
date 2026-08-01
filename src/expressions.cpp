@@ -2356,15 +2356,16 @@ namespace pyoomph
 			double frac_part;
 			int partial_t_action; // 0: No change, 1: change all partial_t schemes of first order to BDF1
 			bool apply_on_integral_dx; // If true, also apply on the integral_dx symbols (for ALE)
+			bool apply_on_others;      // If true, also on the normal, the element size and the Eulerian shape derivatives
 		public:
-			EvaluateShapeExpansionsInPast(int _index, int tstep_action,bool _apply_on_integral_dx) : index(_index), is_int(true), frac_part(0), partial_t_action(tstep_action), apply_on_integral_dx(_apply_on_integral_dx)
+			EvaluateShapeExpansionsInPast(int _index, int tstep_action,bool _apply_on_integral_dx,bool _apply_on_others=false) : index(_index), is_int(true), frac_part(0), partial_t_action(tstep_action), apply_on_integral_dx(_apply_on_integral_dx), apply_on_others(_apply_on_others)
 			{
 				if (index > 2)
 				{
 					throw_runtime_error("Cannot evaluate earlier in past than two steps");
 				}
 			}
-			EvaluateShapeExpansionsInPast(double frac, int tstep_action,bool _apply_on_integral_dx) : index(std::floor(frac)), is_int(false), frac_part(frac - std::floor(frac)), partial_t_action(tstep_action), apply_on_integral_dx(_apply_on_integral_dx)
+			EvaluateShapeExpansionsInPast(double frac, int tstep_action,bool _apply_on_integral_dx,bool _apply_on_others=false) : index(std::floor(frac)), is_int(false), frac_part(frac - std::floor(frac)), partial_t_action(tstep_action), apply_on_integral_dx(_apply_on_integral_dx), apply_on_others(_apply_on_others)
 			{
 				if (index > 2 || (index > 1 && frac > 0))
 				{
@@ -2414,6 +2415,16 @@ namespace pyoomph
 						return GiNaC::GiNaCShapeExpansion(sp_past);
 					}
 					sp_past.time_history_index = index;
+					// Only with apply_on_others does the EULERIAN shape derivative follow the mesh back in
+					// time as well; on its own, evaluate_in_past moves the nodal values and nothing else.
+					// The flag is set only where it can change anything: at history level 0 the geometry is
+					// the current one anyway, and shapes other than the Eulerian derivative do not depend on
+					// where the nodes are. Setting it more widely would be harmless numerically but would
+					// split every affected interpolation into two identical C variables - and since
+					// time_scheme() asks for apply_on_others at level 0 for the plain BDF schemes, that
+					// would duplicate interpolations throughout ordinary residuals.
+					bool geom_matters = apply_on_others && dynamic_cast<pyoomph::D1XBasisFunction *>(sp.basis) && !dynamic_cast<pyoomph::D1XBasisFunctionLagr *>(sp.basis);
+					sp_past.history_geometry = geom_matters && (index > 0);
 					if (is_int)
 					{
 						return GiNaC::GiNaCShapeExpansion(sp_past);
@@ -2422,6 +2433,7 @@ namespace pyoomph
 					{
 						ShapeExpansion sp_past1 = sp;
 						sp_past1.time_history_index = index + 1;
+						sp_past1.history_geometry = geom_matters && (index + 1 > 0);
 						return (1 - frac_part) * GiNaC::GiNaCShapeExpansion(sp_past) + frac_part * GiNaC::GiNaCShapeExpansion(sp_past1);
 					}
 				}
@@ -2461,6 +2473,41 @@ namespace pyoomph
 						return (1 - frac_part) * GiNaC::GiNaCSpatialIntegralSymbol(sp_past) + frac_part * GiNaC::GiNaCSpatialIntegralSymbol(sp_past1);
 					}
 				}
+				// The geometry itself also belongs to the configuration the mesh had back then: the normal,
+				// the element size and (through the shape expansions above) the Eulerian shape derivatives.
+				else if (apply_on_others && index > 0 && GiNaC::is_a<GiNaC::GiNaCNormalSymbol>(inp))
+				{
+					pyoomph::NormalSymbol sp_past = GiNaC::ex_to<GiNaC::GiNaCNormalSymbol>(inp).get_struct();
+					if (is_int)
+					{
+						sp_past.history_step = index;
+						return GiNaC::GiNaCNormalSymbol(sp_past);
+					}
+					else
+					{
+						pyoomph::NormalSymbol sp_past1 = sp_past;
+						sp_past.history_step = index;
+						sp_past1.history_step = index + 1;
+						return (1 - frac_part) * GiNaC::GiNaCNormalSymbol(sp_past) + frac_part * GiNaC::GiNaCNormalSymbol(sp_past1);
+					}
+				}
+				else if (apply_on_others && index > 0 && GiNaC::is_a<GiNaC::GiNaCElementSizeSymbol>(inp))
+				{
+					pyoomph::ElementSizeSymbol sp_past = GiNaC::ex_to<GiNaC::GiNaCElementSizeSymbol>(inp).get_struct();
+					if (sp_past.is_lagrangian()) return inp.map(*this); // The Lagrangian size does not move
+					if (is_int)
+					{
+						sp_past.history_step = index;
+						return GiNaC::GiNaCElementSizeSymbol(sp_past);
+					}
+					else
+					{
+						pyoomph::ElementSizeSymbol sp_past1 = sp_past;
+						sp_past.history_step = index;
+						sp_past1.history_step = index + 1;
+						return (1 - frac_part) * GiNaC::GiNaCElementSizeSymbol(sp_past) + frac_part * GiNaC::GiNaCElementSizeSymbol(sp_past1);
+					}
+				}
 				else
 				{
 					return inp.map(*this);
@@ -2490,19 +2537,25 @@ namespace pyoomph
 			}
 			GiNaC::numeric index_n = GiNaC::ex_to<GiNaC::numeric>(index);
 			GiNaC::numeric index_ts = GiNaC::ex_to<GiNaC::numeric>(tstep_action);
-			bool apply_on_integral_dx_bool = !GiNaC::is_zero(apply_on_integral_dx);
+			// The last argument is a bit field rather than a plain bool, so that a second kind of
+			// "move this into the past as well" could be added without changing the arity of
+			// eval_in_past (and hence every held expression already carrying it):
+			//   bit 0 -> the integration measure dx,  bit 1 -> normal, element size, Eulerian shape derivatives
+			int apply_flags = GiNaC::ex_to<GiNaC::numeric>(apply_on_integral_dx).to_int();
+			bool apply_on_integral_dx_bool = (apply_flags & 1);
+			bool apply_on_others_bool = (apply_flags & 2);
 			if (index_n.is_zero() && index_ts.is_zero())
 			{
 				return expr;
 			}
 			else if (index_n.is_pos_integer())
 			{
-				EvaluateShapeExpansionsInPast in_past(index_n.to_int(), index_ts.to_int(),apply_on_integral_dx_bool);
+				EvaluateShapeExpansionsInPast in_past(index_n.to_int(), index_ts.to_int(),apply_on_integral_dx_bool,apply_on_others_bool);
 				return in_past(expr);
 			}
 			else if (!index_n.is_negative())
 			{
-				EvaluateShapeExpansionsInPast in_past(index_n.to_double(), index_ts.to_int(),apply_on_integral_dx_bool);
+				EvaluateShapeExpansionsInPast in_past(index_n.to_double(), index_ts.to_int(),apply_on_integral_dx_bool,apply_on_others_bool);
 				return in_past(expr);
 			}
 			else

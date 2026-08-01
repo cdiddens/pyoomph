@@ -760,6 +760,12 @@ class IntegralObservables(Equations):
     Here, _denom will be the integral over 1 and _u_integral will be the integral over "u". The function u_avg will be evaluated as average.
     The parameter names in the lambda function must match the names of the integral observables. The underscore prevents writing the helper observables to output.
 
+    Note that the integration measure of an integral observable is always the current one: the
+    ``apply_on_integral_dx`` of :py:func:`~pyoomph.expressions.generic.evaluate_in_past` has no effect
+    here, so an integrand evaluated in the past is still integrated over the present mesh. History
+    evaluation of the integrand itself, including ``apply_on_others`` for the geometry entering it,
+    does work.
+
     Parameters:
         _coordinate_system (Optional[BaseCoordinateSystem]): The coordinate system to use. Defaults to None, i.e. the one of the equations or the problem.
         **integral_observables (Union[ExpressionOrNum, Callable[..., ExpressionOrNum]]): Integral observables to be added.
