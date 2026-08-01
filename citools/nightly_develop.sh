@@ -63,6 +63,7 @@ SMTP_PASSWORD=""
 SMTP_SECURITY="starttls"
 SMTP_FORCE_IPV4=""
 MAIL_LOG_TAIL=60
+PYTEST_DETAIL_LINES=150
 BRANCH="develop"
 
 CONFIG="${PYOOMPH_NIGHTLY_CONF:-$HOME/.pyoomph_nightly.conf}"
@@ -594,6 +595,19 @@ else
         say ""
         if [ -n "$PYTEST_FAILURES" ]; then
             printf '%s\n' "$PYTEST_FAILURES" >>"$REPORT"
+            # The summary lines truncate the reason to "AssertionError: ...", which is not
+            # enough to act on -- and when a whole subsystem fails at once, the first
+            # traceback usually explains all of it. Quote the head of the FAILURES section.
+            if [ "$PYTEST_DETAIL_LINES" -gt 0 ] 2>/dev/null; then
+                detail="$(sed -n '/^=\+ FAILURES =\+$/,/^=\+ \(short test summary\|warnings summary\|[0-9]\)/p' \
+                          "$RUN_DIR/pytest.log" 2>/dev/null | head -n "$PYTEST_DETAIL_LINES")"
+                if [ -n "$detail" ]; then
+                    say ""
+                    say "--- first $PYTEST_DETAIL_LINES lines of the pytest FAILURES section ---"
+                    printf '%s\n' "$detail" >>"$REPORT"
+                    say "--- end (the whole section is in $RUN_DIR/pytest.log) ---"
+                fi
+            fi
         else
             say "(no FAILED/ERROR lines -- pytest itself did not get that far)"
             quote_log "$RUN_DIR/pytest.log" "pytest"
