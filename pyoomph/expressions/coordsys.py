@@ -544,8 +544,14 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
                 div_theta=diff(T[0,2],coords[0])+diff(T[1,2],coords[1])+(T[1,2] - T[2,1]) / coords[1]
             return vector(div_x,div_y,div_theta)
         elif ndim==1:
-            div_x=diff(T[0,0],coords[0])+(T[0,0] - T[2,2]) / coords[0]
-            div_theta=diff(T[0,1],coords[0])+(2*T[0,1] - T[1,0]) / coords[0]            
+            # On a radial mesh the components are ordered [r, phi], not [r, z, phi]: define_tensor_field
+            # puts the azimuthal "aa" entry at [1][1] and define_vector_field/vector_gradient likewise use
+            # index 1 for the azimuthal slot, while index 2 is unused and therefore identically zero.
+            # Reading the azimuthal diagonal from T[2,2] consequently dropped the hoop term -T_phiphi/r
+            # from the radial row altogether. Checked against the same expression evaluated on a
+            # two-dimensional axisymmetric mesh, where the azimuthal diagonal is T[2,2].
+            div_x=diff(T[0,0],coords[0])+(T[0,0] - T[1,1]) / coords[0]
+            div_theta=diff(T[0,1],coords[0])+(2*T[0,1] - T[1,0]) / coords[0]
             return vector(div_x,  div_theta,0)
         else:
             div_x=diff(T[0,0],coords[0])+ diff(T[1,0],coords[1]) + (T[0,0] - T[2,2]) / coords[0]
