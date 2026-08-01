@@ -378,6 +378,18 @@ namespace pyoomph
 		}
 	};
 
+	// Removes the __partial_t_mass_matrix probe from an expression. A term carrying that symbol as a
+	// factor (added by time_derivative_of_integral, i.e. by add_dweak_dt) exists only so that
+	// diff(., __partial_t_mass_matrix) below finds dI/dU, which is what d/dt of an integral
+	// differentiates to. The symbol has no value, so it has to be substituted away before the
+	// residual or the Jacobian half is printed or tested for being zero.
+	static inline GiNaC::ex strip_mass_matrix_marker(const GiNaC::ex &e)
+	{
+		if (!e.has(pyoomph::expressions::__partial_t_mass_matrix))
+			return e;
+		return e.subs(pyoomph::expressions::__partial_t_mass_matrix == 0);
+	}
+
 	// GiNaC tree-mapper that rewrites a residual to its "steady" form: any shape expansion or
 	// spatial-integral symbol that explicitly references a past time-history slot (time_history_index
 	// / history_step > 0) but has no actual time derivative is redirected to the current-time value.
@@ -2081,15 +2093,17 @@ namespace pyoomph
 			for_code->subexpressions = __SE_to_struct_hessian->subexpressions;
 			//			std::cout << "HESSIAN  CONTRIBU " << for_what << std::endl;
 			//			std::cout << "DHESSIAN  CONTRIBU " << diffpart << std::endl;
-			if (diffpart.is_zero())
+			// Same split as in write_generic_RJM_jacobian_contribution: take the mass half off the
+			// derivative first, then strip the probe, so the Hessian half never carries it.
+			GiNaC::ex masspart = strip_mass_matrix_marker(GiNaC::diff(diffpart, pyoomph::expressions::__partial_t_mass_matrix));
+			diffpart = strip_mass_matrix_marker(diffpart);
+			if (diffpart.is_zero() && masspart.is_zero())
 			{
 				for_code->Hessian_symmetric_fields_completed.insert(f);
 				continue;
 			}
 			if (pyoomph_verbose)
 				std::cout << "DIFF PART IS " << diffpart << std::endl;
-
-			GiNaC::ex masspart = GiNaC::diff(diffpart, pyoomph::expressions::__partial_t_mass_matrix);
 			//			  std::cout << "00 POTENTIAL MASS CONTRIB " << f->get_symbol() << " : " << for_what << std::endl;
 			//			  std::cout << "00 DERIV " << diffpart << std::endl;
 			//				if (!masspart.is_zero())
@@ -2117,6 +2131,13 @@ namespace pyoomph
 			}
 
 			std::set<ShapeExpansion> hessian_shapes = for_code->get_all_shape_expansions_in(diffpart);
+			{
+				// The mass half can depend on fields the Hessian half does not (a pure mass
+				// contribution has an empty Hessian half altogether), so its second derivative has to
+				// be taken with respect to those fields as well.
+				std::set<ShapeExpansion> mass_shapes = for_code->get_all_shape_expansions_in(masspart);
+				hessian_shapes.insert(mass_shapes.begin(), mass_shapes.end());
+			}
 			std::set<FiniteElementSpace *,FiniteElementSpacePtrLess> hessian_spaces;
 
 			// TODO: This is only necessary if a dx portion or dxdpsi is present
@@ -2537,16 +2558,25 @@ namespace pyoomph
 			__derive_only_by_expansion_mode=NULL;
 			__ignore_dpsi_coord_diffs_in_jacobian=false;
 
-		
-			if (diffpart.is_zero())
+			// Split the derivative into its mass-matrix and its Jacobian half before doing anything
+			// else with it. The mass half is whatever multiplies the __partial_t_mass_matrix probe -
+			// either because a partial_t shape expansion responded to it, or because the term was
+			// flagged as a pure mass contribution by add_dweak_dt. Only the remainder is the Jacobian,
+			// so the probe has to be stripped from diffpart; leaving it in would print an undefined
+			// symbol and would mark Jacobian couplings that do not exist.
+			GiNaC::ex mass_part = strip_mass_matrix_marker(GiNaC::diff(diffpart, pyoomph::expressions::__partial_t_mass_matrix));
+			diffpart = strip_mass_matrix_marker(diffpart);
+
+			if (diffpart.is_zero() && mass_part.is_zero())
 				continue;
 			if (pyoomph_verbose)
 				std::cout << "DIFF PART IS " << diffpart << std::endl;
 			std::string eqn_index = f->get_equation_str(for_code, l_shape);
-			
+
 			for_code->add_contributing_field(residual_field);
 			for_code->add_contributing_field(f);
-			residual_field->mark_jacobian_contribution_for_code(for_code,for_code->get_current_residual_index(),f);
+			if (!diffpart.is_zero())
+				residual_field->mark_jacobian_contribution_for_code(for_code,for_code->get_current_residual_index(),f);
 			if (hang)
 			{
 				std::string hang_info = f->get_hanginfo_str(for_code);
@@ -2569,13 +2599,13 @@ namespace pyoomph
 				print_simplest_form(diffpart, os, csrc_opts);
 				os << indent << ")" << std::endl;
 			}
-			os << indent << "    ADD_TO_JACOBIAN_" << (hanging_eqns ? "HANG" : "NOHANG") << "_" << (hang ? "HANG" : "NOHANG") << "()" << std::endl;
+			if (!diffpart.is_zero()) // A pure mass contribution still needs the block, but adds no Jacobian
+				os << indent << "    ADD_TO_JACOBIAN_" << (hanging_eqns ? "HANG" : "NOHANG") << "_" << (hang ? "HANG" : "NOHANG") << "()" << std::endl;
 			// diffpart.evalf().print(GiNaC::print_csrc_FEM(os,&csrc_opts));
 			// GiNaC::factor(GiNaC::normal(GiNaC::expand(GiNaC::expand(diffpart).evalf()))).print(GiNaC::print_csrc_FEM(os,&csrc_opts));
 
 			//	    os <<")" <<std::endl;
 
-			GiNaC::ex mass_part = GiNaC::diff(diffpart, pyoomph::expressions::__partial_t_mass_matrix);
 			if (!mass_part.is_zero())
 			{
 				// Same bookkeeping as the Jacobian marking above, but for the mass-matrix half of this
@@ -2684,6 +2714,9 @@ namespace pyoomph
 			GiNaC::ex var_part = var_mapper(mypart);
 			if (var_part.is_zero())
 				continue;
+			// var_part keeps the __partial_t_mass_matrix probe, because the Jacobian/mass split below
+			// is derived from it; the residual itself only ever sees the part without the probe.
+			GiNaC::ex res_part = strip_mass_matrix_marker(var_part);
 			FiniteElementField *field = var_mapper.get_field();
 			//if (hessian) std::cout << "HESSIAN TEST: " << test_name << std::endl;
 			std::string eqn_index = field->get_equation_str(for_code, l_test);
@@ -2705,7 +2738,7 @@ namespace pyoomph
 					}
 					//else
 					//{
-						print_simplest_form(var_part, oss, csrc_opts);
+						print_simplest_form(res_part, oss, csrc_opts);
 					//}
 					if (for_code->is_current_residual_assembly_ignored())
 					{
@@ -2714,7 +2747,7 @@ namespace pyoomph
 					if (for_code->latex_printer)
 					{
 						std::map<std::string, std::string> latexinfo = {{"typ", "final_residual"}, {"test_name", test_name}};
-						for_code->latex_printer->print(latexinfo, var_part, csrc_opts);
+						for_code->latex_printer->print(latexinfo, res_part, csrc_opts);
 					}
 					oss << ", " << hang_info << "," << l_test << ")" << std::endl;
 					oss << indent << "      ADD_TO_RESIDUAL_CONTINUOUS_SPACE()" << std::endl;
@@ -2728,7 +2761,7 @@ namespace pyoomph
 					}
 					/*else
 					{*/
-						print_simplest_form(var_part, oss, csrc_opts);
+						print_simplest_form(res_part, oss, csrc_opts);
 					//}
 					if (for_code->is_current_residual_assembly_ignored())
 					{

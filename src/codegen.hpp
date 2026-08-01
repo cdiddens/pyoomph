@@ -730,7 +730,12 @@ namespace pyoomph
       GiNaC::symbol symb; // Plain GiNaC symbol identifying this field, used e.g. as a key in nondimensionalization/substitution maps
       std::map<FiniteElementCode *, std::set<unsigned>> residual_contribution_for_code; // For each code, the residual indices for which this field has a contribution
       std::map<FiniteElementCode *, std::map<unsigned ,std::set<FiniteElementField*,FiniteElementFieldPtrLess> >> jacobian_contribution_for_code; // For each code, the residual indices for which this field has a contribution
-      std::map<FiniteElementCode *, std::map<unsigned ,std::set<FiniteElementField*,FiniteElementFieldPtrLess> >> mass_matrix_contribution_for_code; // Same, but only for the mass-matrix part (the d/d(dU/dt) piece) of that contribution, which is a strict subset
+      // Same, but for the mass-matrix part (the d/d(dU/dt) piece) of that contribution. Usually a subset
+      // of the Jacobian's pattern, but not always: a term flagged as a pure mass contribution (the
+      // __partial_t_mass_matrix probe added by add_dweak_dt) has no Jacobian half at all, so it can
+      // occupy a (row, column) pair that jacobian_contribution_for_code does not. Both tables are
+      // therefore consumed independently.
+      std::map<FiniteElementCode *, std::map<unsigned ,std::set<FiniteElementField*,FiniteElementFieldPtrLess> >> mass_matrix_contribution_for_code;
       // Same again, but for the SECOND derivative: the field pairs for which d2(residual)/d(this)d(other)
       // is not identically zero. A Hessian contracted with a vector lives on this pattern, which can be
       // far tighter than the Jacobian's -- everything linear in the residual drops out. Measured on

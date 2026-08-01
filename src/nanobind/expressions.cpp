@@ -1064,6 +1064,16 @@ void PyReg_Expressions(nb::module_ &m)
 		  nb::arg("arg"), nb::arg("fields"), nb::arg("nondimfields"), nb::arg("globalparams"),
 		  "Substitute named fields/nondimensional fields/global parameters occurring in ``arg`` by the given replacement expressions.");
 
+	m.def("GiNaC_mass_matrix_marker", []()
+		  { return 0 + pyoomph::expressions::__partial_t_mass_matrix; },
+		  "Return the probe symbol that flags a term as a pure mass-matrix contribution.\n\n"
+		  "Multiplying an expression by this marker adds nothing to the residual and nothing to the\n"
+		  "Jacobian (it is substituted by zero before either is written), but it makes the code\n"
+		  "generator take the expression's derivative with respect to every unknown as the term's\n"
+		  "d(residual)/d(dU/dt), i.e. as its mass matrix. This is what a time derivative of an\n"
+		  "integral needs: it is a finite difference of the integral and carries no partial_t, so\n"
+		  "without the marker it would leave no mass-matrix contribution at all.");
+
 	m.def("GiNaC_time_stepper_weight", [](const int &order, const int index, std::string scheme)
 		  {
 	  	  if (!pyoomph::__field_name_cache.count(scheme)) pyoomph::__field_name_cache.insert(std::make_pair(scheme,GiNaC::realsymbol(scheme)));

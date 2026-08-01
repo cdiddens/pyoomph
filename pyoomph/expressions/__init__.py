@@ -597,4 +597,14 @@ def time_derivative_of_integral(expr:ExpressionOrNum,scheme:Literal["BDF1","BDF2
     # Time derivatives are just approximated as d/dt(expr) = sum_i weight_i * expr(t=t_i), where t0=t, t1=t-dt_0, t2=t1-dt_1, etc. The weights are given by the timestepper_weight function.
     for i in range(numterms[scheme]):
         res+=timestepper_weight(1,i,scheme=cast("TimeSteppingScheme",scheme))*evaluate_in_past(expr,i,apply_on_integral_dx=True)
+    # The finite difference above is a difference of integrals, not a partial_t of a field, so the code
+    # generator would find no mass-matrix contribution in it whatsoever: the __partial_t_mass_matrix probe
+    # only responds to derived first-order time derivatives, and history terms differentiate to zero.
+    # The marker term supplies it. d/dt I(U) = sum_j dI/dU_j * dU_j/dt, hence d(residual)/d(dU/dt) = dI/dU,
+    # and that is exactly what differentiating the marked expression by every unknown gives - including
+    # the mesh positions (through dx) and, if the density is a field, its dofs. The marker term is
+    # substituted by zero in the residual and in the Jacobian, so it changes neither. It sits inside the
+    # same division by the temporal scale as the difference, so that the mass matrix stays consistent with
+    # the residual it belongs to.
+    res+=_pyoomph.GiNaC_mass_matrix_marker()*expr
     return res/scale_factor("temporal") # And we divide by the temporal scaling, since the time derivative is scaled with the temporal scaling
