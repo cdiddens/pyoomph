@@ -2103,6 +2103,23 @@ Renaming a status string therefore cannot silently stop the retry. None of it is
 macOS, so the classification is exercised by `citools/check_accelerate_reuse.py` (check [4]) under the
 `test_mac_accelerate` workflow -- it is checked there or nowhere.
 
+**What that check actually establishes is less than it first looks, and the reason is worth recording.**
+Apple's `SparseFactor` does not return a status for a structurally singular matrix: it traps the
+process (`SIGTRAP`, "Trace/BPT trap: 5", exit 133), with no exception, no message and no traceback.
+The first version of check [4] probed it in-process and therefore killed the whole check before it
+could report anything -- which, since the surviving output ended at check [1], looked exactly like a
+regression in the solver path and cost a bisect across four macOS runs to place. `faulthandler` does
+not cover `SIGTRAP` by default; registering it explicitly (`faulthandler.register(signal.SIGTRAP)`)
+is what finally named the line. Note that registering it with `chain=False` makes the trapping
+instruction re-execute forever rather than dying -- 358 000 stack dumps in one run.
+
+The probe now runs in a subprocess, so a trap is contained and reported. Consequently the singular
+case is best-effort: `SOLVER_ERROR` passes, an actual misclassification fails, and "Accelerate trapped"
+or "Accelerate accepted it" is reported as a note. The two things pyoomph genuinely controls -- that
+`AccelerateSolverError` is a `SolverError`, and that a malformed call does NOT become a retryable one
+-- are hard assertions. Whether a real Accelerate factorization ever reports `SparseMatrixIsSingular`
+in a pyoomph run is, on this evidence, unconfirmed.
+
 The `cktso` wrapper was removed rather than given the same treatment. It was reachable only by name
 through `factory_solver`'s `import_module("pyoomph.solvers." + name)`, nothing else in the tree
 referred to it, and none of its error codes could be classified without a copy of the library to test

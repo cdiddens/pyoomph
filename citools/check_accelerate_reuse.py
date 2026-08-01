@@ -115,43 +115,96 @@ def solve_with(solver_name, reuse):
         return dofs, residual, counts
 
 
+# Probed in a SUBPROCESS, and this is not defensiveness for its own sake: Apple's SparseFactor does
+# not return a status for a structurally singular matrix, it traps the process outright (SIGTRAP,
+# "Trace/BPT trap: 5", exit 133). Run in-process it took the whole check down before check [1] could
+# report, with no traceback and no message -- which is how it was first mistaken for a solver
+# regression. A child process contains that, and lets the outcome be reported instead of ending the run.
+_SINGULAR_PROBE = r"""
+import sys
+import numpy
+from pyoomph import _pyoomph_core as core
+from pyoomph.solvers.accelerate import AccelerateSolverError
+
+method = sys.argv[1]
+if method == "qr":
+    # 3x3, one entirely zero row: structurally present, numerically singular.
+    n, indptr, indices, data = 3, [0, 1, 1, 2], [0, 2], [1.0, 1.0]
+else:
+    # 2x2 all-ones: symmetric, singular, and not positive definite, which is the case Accelerate
+    # documents SparseMatrixIsSingular / SparseFactorizationFailed for.
+    n, indptr, indices, data = 2, [0, 2, 4], [0, 1, 0, 1], [1.0, 1.0, 1.0, 1.0]
+
+try:
+    core.MacAccelerateSparseSolver().factorize(
+        n, n, numpy.array(indptr, dtype="int64"), numpy.array(indices, dtype="int64"),
+        numpy.array(data, dtype="float64"), method)
+except AccelerateSolverError as e:
+    print("SOLVER_ERROR " + str(e)[:120])
+except BaseException as e:
+    print("OTHER " + type(e).__name__ + ": " + str(e)[:120])
+else:
+    print("NO_STATUS")
+"""
+
+
+def _probe_singular(method):
+    """Returns (outcome, detail). outcome is one of SOLVER_ERROR / NO_STATUS / OTHER / TRAPPED."""
+    import subprocess
+    try:
+        r = subprocess.run([sys.executable, "-c", _SINGULAR_PROBE, method],
+                           capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        return "TRAPPED", "the probe timed out"
+    out = (r.stdout or "").strip().splitlines()
+    line = out[-1] if out else ""
+    if r.returncode != 0 or not line:
+        # Negative returncode is death by signal; SIGTRAP arrives as -5 (or 133 through a shell).
+        return "TRAPPED", "exit %d, stderr: %s" % (r.returncode, (r.stderr or "").strip()[-120:])
+    kind, _, detail = line.partition(" ")
+    return kind, detail
+
+
 def check_singular_is_a_solver_error():
-    """A singular matrix must arrive as AccelerateSolverError, i.e. as something a step can retry."""
+    """A numerical failure must arrive as AccelerateSolverError, i.e. as something a step can retry."""
     from pyoomph.solvers.accelerate import AccelerateSolverError
     from pyoomph.solvers.generic import SolverError
     from pyoomph import _pyoomph_core as core
 
+    # The wiring, which is what the pyoomph side controls and which must always hold.
     check(issubclass(AccelerateSolverError, SolverError),
           "AccelerateSolverError is a SolverError (otherwise a singular Jacobian ends the run)")
 
-    # A 3x3 matrix with an entirely zero row: structurally present, numerically singular.
-    indptr = numpy.array([0, 1, 1, 2], dtype="int64")
-    indices = numpy.array([0, 2], dtype="int64")
-    data = numpy.array([1.0, 1.0], dtype="float64")
-    solver = core.MacAccelerateSparseSolver()
+    # The other half of the split: a bad argument must NOT become a retryable SolverError. Safe to run
+    # in-process -- it is rejected by pyoomph's own bounds check before Accelerate ever sees it.
     try:
-        solver.factorize(3, 3, indptr, indices, data, "qr")
-    except AccelerateSolverError as e:
-        check(True, "a singular matrix raises AccelerateSolverError (%s)" % str(e)[:60])
-    except Exception as e:
-        check(False, "a singular matrix raised %s instead of AccelerateSolverError: %s"
-                     % (type(e).__name__, str(e)[:80]))
-    else:
-        # Not a failure of the classification: QR can factorize a rank-deficient matrix without
-        # complaining. Say so rather than claiming a pass that did not happen.
-        print("  note   Accelerate accepted the singular matrix without reporting a status; "
-              "the classification could not be exercised", flush=True)
-
-    # The other half of the split: a bad argument must NOT become a retryable SolverError.
-    try:
-        core.MacAccelerateSparseSolver().factorize(3, 3, numpy.array([0, 1], dtype="int64"),
-                                                   indices, data, "qr")
+        core.MacAccelerateSparseSolver().factorize(
+            3, 3, numpy.array([0, 1], dtype="int64"), numpy.array([0], dtype="int64"),
+            numpy.array([1.0], dtype="float64"), "qr")
     except SolverError:
         check(False, "a malformed call was reported as a retryable SolverError")
     except Exception:
         check(True, "a malformed call stays an ordinary error, not a retryable SolverError")
     else:
         check(False, "a malformed call was not reported at all")
+
+    # And the numerical path, best-effort: whether Accelerate ever RETURNS a status for a singular
+    # matrix is Accelerate's business, not pyoomph's, so this reports rather than fails. Only an
+    # actual misclassification -- a numerical failure arriving as something other than a SolverError --
+    # is treated as a defect.
+    for method in ("qr", "cholesky"):
+        outcome, detail = _probe_singular(method)
+        if outcome == "SOLVER_ERROR":
+            check(True, "%s: a singular matrix raises AccelerateSolverError (%s)" % (method, detail[:60]))
+        elif outcome == "OTHER":
+            check(False, "%s: a singular matrix raised %s instead of AccelerateSolverError"
+                         % (method, detail[:80]))
+        elif outcome == "NO_STATUS":
+            print("  note   %s: Accelerate factorized the singular matrix without reporting a status; "
+                  "the classification was not exercised" % method, flush=True)
+        else:
+            print("  note   %s: Accelerate TRAPPED the process instead of returning a status (%s); "
+                  "the classification cannot be exercised this way" % (method, detail), flush=True)
 
 
 def main():
