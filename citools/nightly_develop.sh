@@ -246,6 +246,14 @@ if [ "$TEST_MAIL" = 1 ]; then
         if [ -n "$SMTP_HOST" ]; then
             echo "  smtp      : $SMTP_HOST:$SMTP_PORT ($SMTP_SECURITY), user=${SMTP_USER:-<none>}," \
                  "password $([ -n "$SMTP_PASSWORD" ] && echo set || echo 'NOT set')"
+            # Submission servers generally insist the From match the account that
+            # authenticated, and reject or silently rewrite it otherwise.
+            case "$SMTP_USER" in
+                "" | "$MAIL_FROM") ;;
+                *@*) echo "              ^^ this does not match MAIL_FROM ($MAIL_FROM). Most submission"
+                     echo "                 servers require the sender to be the account that logged in;"
+                     echo "                 set MAIL_FROM to $SMTP_USER and MAIL_TO to where you read it." ;;
+            esac
         else
             echo "  smtp      : SMTP_HOST is empty -- falling back to the local mail/sendmail command"
         fi

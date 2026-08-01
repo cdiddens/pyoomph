@@ -84,11 +84,38 @@ SMTP_SECURITY="starttls"
 # retries over IPv4 on its own; setting this to 1 skips the attempt that is known to fail.
 SMTP_FORCE_IPV4=1
 #
-# If mail is accepted but never arrives, it is the receiving spam filter, not this script:
-# the machine's IP is not in utwente.nl's SPF record, so the report can land in quarantine.
-# Check the junk folder first, and if it is a persistent problem ask ICTS to let the host
-# through, or use a submission server with credentials on a machine you trust alone:
-#   SMTP_HOST="smtp.office365.com"; SMTP_PORT=587; SMTP_USER/SMTP_PASSWORD set.
+# THAT ROUTE DOES NOT WORK FROM EVERY MACHINE. UT lists its roaming workstation range on
+# the Spamhaus PBL -- a policy statement by UT that those hosts must not send mail directly
+# -- and the MX then refuses with "5.7.1 ... blocked using Spamhaus". Run --test-mail to
+# find out; if it is refused, use the submission route below instead.
+#
+# ---- authenticated submission, with a mailbox that exists only for this ----
+#
+# The PBL applies to direct-to-MX on port 25 only; authenticated submission on port 587 is
+# precisely what it tells you to use instead, so this works from a listed host.
+#
+# On a shared machine, make the credential one you do not care about: a free mailbox
+# created for nothing but sending these reports. Anyone with root here can read this file
+# whatever its mode, so the question is not whether the password leaks but what it is worth
+# when it does -- and the answer should be "it can send pyoomph nightly reports". Never a
+# password that is reused anywhere, and never a UT account.
+#
+#   SMTP_HOST="smtp.gmail.com"          # Gmail: enable 2FA, then create an App Password
+#   SMTP_PORT=587                       # (a 16-character token, revocable on its own)
+#   SMTP_SECURITY="starttls"
+#   SMTP_USER="pyoomph.nightly@gmail.com"
+#   SMTP_PASSWORD="xxxxxxxxxxxxxxxx"
+#   MAIL_FROM="pyoomph.nightly@gmail.com"   # MUST match SMTP_USER; see below
+#   MAIL_TO="c.diddens@utwente.nl"          # where you actually read it
+#
+# Transactional senders (Brevo, SMTP2GO, Mailjet) work the same way and are a better fit
+# still: the credential is a send-only API key that cannot read anything, and revoking it
+# takes one click. All of them have a free tier far above one mail a night.
+#
+# MAIL_FROM must equal SMTP_USER. Submission servers require the sender to be the account
+# that authenticated and will reject or rewrite anything else -- and a From of
+# @utwente.nl sent through Gmail fails UT's own DMARC policy on arrival. --test-mail warns
+# about the mismatch.
 
 # Number of lines of each failing log that is quoted in the mail body. The full logs stay
 # in LOG_DIR on the test machine.
