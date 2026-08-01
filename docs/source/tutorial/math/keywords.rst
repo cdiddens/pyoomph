@@ -1,3 +1,5 @@
+.. _seckeywordvars:
+
 Keyword variables
 -----------------
 
