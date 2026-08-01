@@ -435,13 +435,28 @@ class StokesEquations(Equations):
         else:
             Dv=grad(u_test)
         self.add_residual(weak(time_scheme(self.momentum_scheme,stress_tensor), Dv))  # total stress
-        self.add_residual(weak(time_scheme(self.continuity_scheme,div(u)), p_test))  # Incompressibility
+        # The conservative (GCL) continuity equation below is complete on its own: d/dt(int rho*q) +
+        # int div(rho*(u-w))*q is exactly int (dt_rho + div(rho*u))*q, so it already contains div(rho*u).
+        # Adding div(u) on top of it would be a second, independently weighted copy of the same
+        # constraint (the pressure row of the Jacobian came out exactly twice as large).
+        GCL_continuity = self.GCL and not self.boussinesq and self.mass_density is not None
+        if not GCL_continuity:
+            self.add_residual(weak(time_scheme(self.continuity_scheme,div(u)), p_test))  # Incompressibility
         if not self.boussinesq and self.mass_density is not None:
             rho = self.mass_density
             if self.GCL:
+                # Note the weight: the non-GCL branch below tests the continuity equation divided by the
+                # local rho, this one by the density scale. 1/rho cannot be moved inside d/dt(int rho*q),
+                # that would turn it into d/dt(int q) and lose the mass balance.
                 self.add_dweak_dt(rho,p_test/scale_factor("mass_density"),scheme=self.continuity_scheme).add_weak((div(rho*(u-mesh_velocity(scheme=self.continuity_scheme)))),p_test/scale_factor("mass_density"))
             else:
-                self.add_residual(weak(time_scheme(self.continuity_scheme,partial_t(rho, ALE=False) / rho + dot(u, grad(rho)) / rho), p_test))  # Incompressibility
+                # ALE, not ALE=False: the continuity equation wants d(rho)/dt at a fixed point in space,
+                # whereas ALE=False gives it at fixed nodal values, which on a moving mesh differs by
+                # w.grad(rho). Each keyword variable already defines its own nodal time derivative --
+                # zero for "coordinate_*", the mesh velocity for "mesh_*" -- so the ALE correction turns
+                # any of them into the Eulerian one. Note that a density meant to be attached to
+                # laboratory space must therefore be written with var("mesh_y"), not var("coordinate_y").
+                self.add_residual(weak(time_scheme(self.continuity_scheme,partial_t(rho, ALE="auto") / rho + dot(u, grad(rho)) / rho), p_test))  # Incompressibility
 
         if self.bulkforce is not None:
             self.add_residual(-weak(time_scheme(self.momentum_scheme,self.bulkforce), u_test))  # bulk force
