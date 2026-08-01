@@ -26,7 +26,7 @@ from __future__ import annotations
 #
 # ========================================================================
  
-from .generic import GenericLinearSystemSolver, GenericEigenSolver, EigenSolverWhich,DefaultMatrixType
+from .generic import GenericLinearSystemSolver, GenericEigenSolver, EigenSolverWhich,DefaultMatrixType, SolverError
 import hashlib
 from collections import OrderedDict
 import petsc4py #type:ignore
@@ -46,6 +46,17 @@ import numpy
 
 if TYPE_CHECKING:
     from ..generic.problem import Problem
+
+
+class PETScSolverError(SolverError):
+    """PETSc could not solve the system -- a failed factorisation, an iterative solve that gave up.
+
+    A SolverError rather than a plain RuntimeError, so that an adaptive time step or an arclength step
+    rejects and retries with a smaller one instead of the run ending here. Deliberately NOT used for
+    the configuration errors in this module (no MUMPS in this PETSc build, an unmatched field-split
+    name): no smaller step fixes those, and retrying would bury the message.
+    """
+
 
 
 # MUMPS INFOG(1) codes that all say the same thing: an internal work array was sized from the fill-in
@@ -534,7 +545,7 @@ class PETSCSolver(GenericLinearSystemSolver):
                  "solver as an inf/nan residual. Set "
                  "problem.get_la_solver().raise_on_failed_solve=False to downgrade this to a warning.")
         if self.raise_on_failed_solve:
-            raise RuntimeError(msg)
+            raise PETScSolverError(msg)
         print("WARNING: " + msg)
 
     def setup_solver(self):

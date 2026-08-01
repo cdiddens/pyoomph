@@ -132,7 +132,15 @@ import numpy as np
 import scipy.sparse as sp #type:ignore
 from numpy import ctypeslib
 
-from .generic import GenericLinearSystemSolver, GenericEigenSolver
+from .generic import GenericLinearSystemSolver, GenericEigenSolver, SolverError
+
+
+class PardisoError(SolverError):
+    """MKL Pardiso reported one of its documented `error` codes, i.e. it did not solve the system.
+
+    A SolverError rather than a plain RuntimeError, so that a caller able to retry with a smaller step
+    does so instead of the run ending here -- see the note in _check_pardiso_error.
+    """
 
 ####
 
@@ -448,6 +456,13 @@ class pardisoSolver(object):
         below it compared the untouched Python int against zero. Pardiso has therefore never been able
         to report any of its own errors here, for as long as the call has existed.
 
+        Raising does not end a run that could have recovered. This is a PardisoError, i.e. a
+        SolverError, and the solver shim (src/nanobind/solver.cpp) reports those to oomph-lib as a
+        failed Newton solve, so an adaptive time step or an arclength step rejects and retries with a
+        smaller one -- which matters here because solve_checked() makes a singular matrix report
+        error -4 rather than return a huge solution. Note this deliberately does not extend to the MPI
+        rejection in PardisoSolver.__init__: no smaller step makes Pardiso MPI-parallel.
+
         The release phase is the one exception, and it is deliberate: clear() is called from __del__,
         where raising only produces an "Exception ignored in __del__" and there is nothing left to
         salvage anyway -- the OS reclaims MKL's memory at process exit regardless.
@@ -460,7 +475,7 @@ class pardisoSolver(object):
         if phase == -1:
             print("WARNING: " + msg)
             return
-        raise RuntimeError(msg + ". The solution vector is meaningless, so the solve is aborted here "
+        raise PardisoError(msg + ". The solution vector is meaningless, so the solve is aborted here "
                                  "rather than handing it on as an answer.")
 
     def run_pardiso(self, phase:int, rhs:NPFloatArray | NPComplexArray | None=None)->NPFloatArray | NPComplexArray:

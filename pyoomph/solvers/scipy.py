@@ -26,7 +26,7 @@ from __future__ import annotations
 #
 # ========================================================================
  
-from .generic import GenericLinearSystemSolver,GenericEigenSolver,DefaultMatrixType,EigenSolverWhich
+from .generic import GenericLinearSystemSolver,GenericEigenSolver,DefaultMatrixType,EigenSolverWhich,SolverError
 import scipy #type:ignore
 import scipy.linalg #type:ignore
 from scipy.sparse import csc_matrix #type:ignore
@@ -37,6 +37,14 @@ import numpy,numpy.typing
 from ..typings import *
 if TYPE_CHECKING:
     from ..generic.problem import Problem
+
+
+class ScipySolverError(SolverError):
+	"""SuperLU/UMFPACK could not factorise the matrix.
+
+	A SolverError rather than the plain RuntimeError scipy raises, so that an adaptive time step or an
+	arclength step rejects and retries with a smaller one instead of the run ending here.
+	"""
 
 
 @GenericLinearSystemSolver.register_solver()
@@ -89,6 +97,11 @@ class SuperLUSerial(GenericLinearSystemSolver):
 							nsplead=nspv[maxi] #type:ignore
 							descs=[self.problem.describe_equation(eq) for eq in maxi] #type:ignore
 							print(k,nsplead,maxi,":\n\t\t"+"\n\t\t".join(descs)) #type:ignore
+					# Re-raised as a SolverError: a singular factorisation is exactly the state an
+					# adaptive time step or an arclength step should back away from, and scipy's plain
+					# RuntimeError would end the run instead. Any OTHER RuntimeError from splu is a
+					# genuine error and keeps its type.
+					raise ScipySolverError("SuperLU could not factorise the matrix: "+str(re.args[0])) from re
 				raise
 #			print("det","DET",self._current_LU.L.diagonal().prod()*self._current_LU.U.diagonal().prod())
 		elif op_flag==2:

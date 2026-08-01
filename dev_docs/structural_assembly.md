@@ -1988,9 +1988,16 @@ ignored in `__del__`" and there is nothing to salvage anyway, so it warns.
 
 Verified by forcing a real MKL failure (`error -1` from a corrupted `n`), which is now reported with
 the right phase and message; a healthy factor/solve stays silent, and the reported script under
-`pardiso` runs unchanged with no error reported anywhere. Worth knowing for anyone testing this: a
-structurally singular matrix does **not** provoke an error, because MKL replaces the tiny pivot and
-returns success with a huge solution — that is MKL's documented behaviour, not a gap in the check.
+`pardiso` runs unchanged with no error reported anywhere.
+
+Worth knowing for anyone testing this, and **corrected since first written**: whether a singular
+matrix provokes an error depends on which solve path it takes. Through the bare `solve()`, it does
+not — MKL replaces the tiny pivot and returns success with a huge solution, its documented static-
+pivoting behaviour, not a gap in the check. Through `solve_checked()` it does: that path raises
+`iparm[7]` to 20 whenever the factorisation reports a perturbed pivot (§7g), and the refinement then
+fails with `error -4`. Measured on a 6×6 diagonal matrix with one zero pivot: `solve()` returns
+`|x|_max = 3e13` and `error 0`, `solve_checked()` raises. Since `solve_checked()` is what both serial
+branches call, a singular Jacobian now raises in normal use — which is what made §7j necessary.
 
 ## 7i. The same question for SLEPc + MUMPS — escalation added, the rest does not apply
 
@@ -2041,6 +2048,120 @@ Verified on four configurations, on the complex PETSc build, `LineMesh(N=20000)`
 
 The MUMPS plumbing both solvers share — the INFOG accessor with its two gates, the `ICNTL(14)` doubling,
 and the two error-code lists — is now module-level in `pyoomph/solvers/petsc.py` rather than duplicated.
+
+## 7j. A solver that reports its failure must not end the run — **FIXED**
+
+Giving the backends a voice (§7h, §7i and the Pardiso half of it) created a second problem, and it is
+the more serious of the two: a solver that reports a failure **killed the simulation outright**, where
+before it merely returned nonsense that the caller recovered from.
+
+The recovery paths in oomph-lib catch `NewtonSolverError` and `InvertedElementError`, nothing else:
+`adaptive_unsteady_newton_solve` halves `dt` and retries (`problem.cc:11433`), the arclength
+continuation scales `Ds` by 2/3 and retries (`problem.cc:10963`). A Python exception raised inside a
+solver backend becomes an `nb::python_error`, which unwinds through the `superlu()` shim in
+`src/nanobind/solver.cpp`, past both handlers, and out of `run()` / `arclength_continuation()`.
+
+The regression that made this urgent: a singular Jacobian is exactly the state adaptivity exists to
+back away from, and it used to come back as a huge solution (§7h above), which tripped `max_residuals`
+and was rejected as an ordinary divergence. Confirmed both ways by injecting a failure at the *n*-th
+factorisation of a 1D nonlinear diffusion problem:
+
+| what the backend does | adaptive transient | arclength |
+| --- | --- | --- |
+| returns a huge solution (pre-§7h Pardiso) | `TIMESTEP REJECTED`, run completes | — |
+| raises (§7h Pardiso, PETSc, MUMPS) — before the fix | **run killed** | **killed at step 4** |
+| raises — after the fix | `TIMESTEP REJECTED`, run completes | `STEP REJECTED --- Ds=0.1333`, completes |
+
+The shim now catches `nb::python_error`, and *if the backend declared the failure* prints the Python
+message and traceback and throws `oomph::NewtonSolverError(0, DBL_MAX)`.
+
+**The retry is opt-in, via `SolverError`.** A backend raises for two quite different reasons and only
+one of them is worth retrying. MKL reporting a zero pivot is a property of *this* Jacobian at *this*
+step; "your PETSc was not built with MUMPS", "no field matches `velocity`", a missing MKL runtime or a
+plain typo in a custom backend will fail identically on every retry, and treating those as a rejected
+step would shrink `dt` until it fell under `Minimum_dt` and then blame the time step -- burying the
+message that says what is actually wrong under fifty hopeless solves. So
+`pyoomph.solvers.generic.SolverError` (deriving from `RuntimeError`, so an existing `except
+RuntimeError` around a solve keeps working) is the marker, with one subclass per backend:
+
+| backend | raises | on |
+| --- | --- | --- |
+| `pardiso` | `PardisoError` | any of MKL's documented `error` codes |
+| `petsc`, `petsc_mumps` | `PETScSolverError` | a KSP failure that survived the retry with a fresh factorisation |
+| `superlu`, `umfpack` | `ScipySolverError` | `splu` reporting "Factor is exactly singular" |
+
+Everything else propagates untouched, `KeyboardInterrupt` included -- which is also why it needs no
+special case of its own. Deliberately *not* converted: Pardiso's refusal to run under MPI, PETSc's
+missing-MUMPS and field-split errors, every "unknown mode" internal check. No smaller step makes
+Pardiso MPI-parallel.
+
+The type is defined in Python rather than created in C++ and exported, so that it lives where users
+find and subclass it and appears in the stubs like any other class; the shim resolves it once, lazily,
+on the first failed solve. If it cannot be resolved, nothing counts as retryable -- the safe direction,
+since an exception then propagates rather than being swallowed.
+
+Verified by injecting each in turn at the 4th factorisation of an adaptive run:
+
+| injected | outcome |
+| --- | --- |
+| `PardisoError` | run completes, `t = 1.000` |
+| `FileNotFoundError` / plain `RuntimeError` / `TypeError` / `KeyboardInterrupt` | propagates as itself |
+
+and end to end with real MKL, by zeroing one column of the assembled Jacobian so Pardiso has a
+genuinely singular matrix to report: `error -4` -> `TIMESTEP REJECTED` -> run completes.
+
+Two further things are load-bearing, each arrived at the hard way:
+
+* **`NewtonSolverError(0, DBL_MAX)`, not `NewtonSolverError(true)`.** Reporting it *honestly* as a
+  linear-solver failure does not work: the one-argument constructor sets `linear_solver_error`, and
+  both recovering callers rethrow that as a fatal `OomphLibError` ("ERROR IN THE LINEAR SOLVER") rather
+  than rejecting the step (`problem.cc:11437` and `:10967`). The two-argument constructor leaves the
+  flag false, i.e. reports what an ordinary divergence reports, which is what gets the step retried.
+* **The distributed shim agrees across the ranks first,** with one `MPI_Allreduce`, exactly as
+  `Problem::consume_newton_abort_request()` does. Rejecting the step changes the control flow of every
+  rank, so a `NewtonSolverError` on some and not others leaves the rest in the next collective forever;
+  a backend that gathers onto one rank sees the failure there alone. It cannot rescue a backend that
+  raises halfway through its *own* sequence of collectives -- those ranks are already lost.
+
+A `SolverError` that turns out not to be transient after all does not spin: the retrying callers raise
+once the step they are shrinking falls below `Minimum_dt` (1e-12) or `Minimum_ds`. And a failure with
+nothing to retry it -- a stationary solve -- stays fatal, which is the honest outcome;
+`oomph::NewtonSolverError` is not a `std::exception`, so a nanobind exception translator was added to
+keep the few paths that let one escape from reporting "Caught an unknown exception!".
+
+### The sliver step at the end of a run -- **FIXED**, and it was never solver-specific
+
+Found while checking that `before_newton_convergence_check` returning `False` takes the same route.
+It does -- `Problem::request_newton_abort()` has always thrown this very `NewtonSolverError`, and the
+step was duly rejected. The run then died anyway:
+
+```
+SOLVE CALL timestep=0.1 at t=0.89999999999999991
+SOLVE CALL timestep=1.1102341268554029E-16 at t=0.99999999999999989
+Oomph-lib ERROR: Tried to reduce dt to 5.55117e-17, less than the minimum dt (1e-12).
+```
+
+Once *any* step is rejected the accepted `dt` is not the requested one, so the accumulated time misses
+`endtime` by an ulp or two. `Problem.run()` then clamped the next step to the ~1e-16 that was left; at
+that `dt` the mass term swamps the Jacobian, Newton cannot converge, oomph-lib halves it repeatedly and
+kills the run -- at the very end of a simulation that was otherwise finished. This hits every rejection
+mechanism (convergence check, inverted element, and the new solver route); the solver tests above pass
+only because their rejection happened to land back on an exact grid.
+
+`run()` now treats a gap eight orders of magnitude below the step it was about to take as arrival
+rather than as a time step. No legitimate final step is lost: for one to be skipped, `dt` would have to
+have been planned 1e8 times larger than the time actually left.
+
+All of it is covered by `tests/test_solver_failure_recovery.py` (9 tests, ~2 s), which asserts on
+*behaviour*, not on the rejection message: pytest's `capfd` reads its temp file while oomph-lib's
+output is still in the C stdio buffer, so `TIMESTEP REJECTED` only appears once the process exits, long
+after `readouterr()`. Instead the transient test compares against an undisturbed reference run (they
+agree to 1.5e-6 on a solution of order 0.13 — the rejected step was retried, not skipped or
+half-applied); the arclength test re-solves at the parameter it stopped at and checks the dofs do not
+move (3e-10), i.e. the recovered continuation ended on the solution branch; a parametrised test pins
+that the four non-`SolverError` exceptions come out of `run()` as themselves; one test drives the
+`before_newton_convergence_check` rejection to `endtime`; and one pins the premise, that
+`solve_checked` really does raise `error -4` where plain `solve()` returns `|x| = 3e13`.
 
 ## 8. Open questions
 

@@ -6126,8 +6126,22 @@ class Problem(_pyoomph.Problem):
             currentdt = nextdt
             if maxstep is not None:
                 currentdt=TS*min(float(currentdt/TS),float(maxstep/TS))
-            if self.get_current_time(as_float=True, dimensional=False)+float(currentdt/TS) > float(endtime / TS):
-                currentdt=1.00001*float(endtime/TS-self.get_current_time(as_float=True, dimensional=False))*TS
+            remaining=float(endtime/TS)-self.get_current_time(as_float=True, dimensional=False)
+            # A rounding sliver must not become a time step. Whenever a step is REJECTED -- by
+            # before_newton_convergence_check, by an inverted element, by a solver failure -- the
+            # accepted dt is not the requested one, so the accumulated time misses endtime by an ulp
+            # or two. The clamp below would then ask for a dt of ~1e-16, which the Newton solver
+            # cannot converge (1/dt swamps the Jacobian); oomph-lib halves it, again, until it falls
+            # under Problem::Minimum_dt and kills the run with "Tried to reduce dt to 5.55e-17 which
+            # is less than the minimum dt" -- at the very end of a simulation that was otherwise
+            # finished. A gap eight orders of magnitude below the step we were about to take is
+            # rounding, not physics, so treat endtime as reached. No legitimate final step is lost:
+            # for one to be skipped, dt would have to have been planned 1e8 times larger than the
+            # time actually left.
+            if remaining<1e-8*float(currentdt/TS):
+                break
+            if remaining<float(currentdt/TS):
+                currentdt=1.00001*remaining*TS
 
         self._nondim_time_after_last_run_statement=float(self.get_current_time()/TS)
         return currentdt

@@ -25,6 +25,8 @@ The main author may be contacted at c.diddens@utwente.nl
 #endif
 
 #include <iostream>
+#include <limits>
+#include <string>
 
 #include <functional>
 
@@ -135,6 +137,83 @@ namespace pyoomph
     GeneralSolverCallback *g_solver_cb = NULL;
     void set_Solver_callback(GeneralSolverCallback *cb) { g_solver_cb = cb; }
 
+    // The Python exception type a solver backend raises to say "this system could not be solved":
+    // pyoomph.solvers.generic.SolverError, with one subclass per backend (PardisoError,
+    // PETScSolverError, ScipySolverError, ...).
+    //
+    // It exists to keep the retry below OPT-IN. A backend raises for two quite different reasons, and
+    // only one of them is worth retrying with a smaller step: MKL reporting a zero pivot is a property
+    // of this Jacobian at this step, whereas "your PETSc was not built with MUMPS", "no field matches
+    // 'velocity'", or a plain typo in a custom backend will fail identically on every retry. Treating
+    // those as a rejected step would shrink dt until it fell below Problem::Minimum_dt and then report
+    // a timestep problem, burying the actual message under fifty retries of a hopeless solve.
+    // Anything that is not a SolverError therefore propagates untouched -- including KeyboardInterrupt,
+    // which must keep interrupting a long run rather than being retried.
+    //
+    // Derived from RuntimeError, so the scripts that already catch RuntimeError around a solve keep
+    // working.
+    //
+    // Resolved from Python rather than created here so that the class lives where users find it, can
+    // be subclassed by a custom backend, and appears in the stubs like any other Python class. Looked
+    // up once, on the first failed solve -- the module is long since imported by then, since nothing
+    // can reach this code without a solver. If it cannot be resolved, nothing counts as retryable,
+    // which is the safe direction: an exception propagates instead of being silently swallowed.
+    static PyObject *solver_error_type()
+    {
+        static PyObject *cached = nullptr;
+        static bool resolved = false;
+        if (!resolved)
+        {
+            resolved = true;
+            if (PyObject *mod = PyImport_ImportModule("pyoomph.solvers.generic"))
+            {
+                cached = PyObject_GetAttrString(mod, "SolverError"); // kept for the process lifetime
+                Py_DECREF(mod);
+            }
+            if (!cached)
+                PyErr_Clear();
+        }
+        return cached;
+    }
+
+    static bool is_declared_solver_failure(const nb::python_error &e)
+    {
+        PyObject *type = solver_error_type();
+        return type && e.matches(nb::handle(type));
+    }
+
+    // Report a Python-side solver failure as the failure oomph-lib knows how to recover from,
+    // instead of letting it unwind the entire run.
+    //
+    // The callers that CAN recover -- adaptive_unsteady_newton_solve, which halves dt, and the
+    // arclength continuation, which scales Ds by 2/3 -- only ever catch oomph::NewtonSolverError (and
+    // InvertedElementError). A nb::python_error raised by a solver backend is caught nowhere on that
+    // path, so it escapes run()/arclength_continuation() and ends the simulation. That became a real
+    // regression the moment MKL Pardiso learned to report its own errors: a singular Jacobian used to
+    // come back as a huge solution, which tripped max_residuals and *was* rejected as an ordinary
+    // divergence, so reporting the error honestly made a recoverable state fatal.
+    //
+    // NewtonSolverError(0, DBL_MAX) -- the two-argument constructor -- and NOT
+    // NewtonSolverError(true): the linear_solver_error flag the one-argument constructor sets makes
+    // both recovering callers rethrow a fatal OomphLibError ("ERROR IN THE LINEAR SOLVER") rather
+    // than reject the step. Reporting what an ordinary divergence reports is precisely what gets the
+    // step retried. The message is printed rather than carried, since NewtonSolverError has no room
+    // for one; the same applies to Problem::consume_newton_abort_request(), which throws this same
+    // exception for the same reason.
+    //
+    // A SolverError that turns out not to be transient after all does not spin forever either: the
+    // retrying callers stop and raise once the step they are shrinking falls below
+    // Problem::Minimum_dt (1e-12) or Minimum_ds.
+    [[noreturn]] static void throw_solver_failure_as_newton_error(const std::string &what)
+    {
+        std::cout << "THE LINEAR SOLVER FAILED:" << std::endl
+                  << what << std::endl
+                  << "Reporting this as a failed Newton solve, so that a caller able to retry with a "
+                     "smaller step -- an adaptive time step, an arclength continuation step -- gets "
+                     "the chance to. Where nothing can retry, it stays fatal." << std::endl;
+        throw oomph::NewtonSolverError(0, std::numeric_limits<double>::max());
+    }
+
 }
 
 // C-linkage functions with the exact names/signatures oomph-lib's linear solver / mesh
@@ -178,7 +257,23 @@ extern "C"
         if (ldb)
             ldb_val = *ldb;
 
-        int res = pyoomph::g_solver_cb->solve_la_system_serial(*op_flag, *n, nnz_val, nrhs_val, values_arr, rowind_arr, colptr_arr, b_arr, ldb_val, (transpose ? 1 : 0));
+        int res = 0;
+        // The message is copied out and the throw happens after the catch block, so that the
+        // python_error (and the Python objects it owns) is destroyed while the GIL is still
+        // unambiguously ours, rather than during the unwinding of the replacement exception.
+        std::string failure;
+        try
+        {
+            res = pyoomph::g_solver_cb->solve_la_system_serial(*op_flag, *n, nnz_val, nrhs_val, values_arr, rowind_arr, colptr_arr, b_arr, ldb_val, (transpose ? 1 : 0));
+        }
+        catch (nb::python_error &e)
+        {
+            if (!pyoomph::is_declared_solver_failure(e))
+                throw;
+            failure = e.what();
+        }
+        if (!failure.empty())
+            pyoomph::throw_solver_failure_as_newton_error(failure);
 
         *info = 0; // XXX Hack. Really check for errors here
 
@@ -239,9 +334,31 @@ extern "C"
         if (info)
             Py_Info = nb::ndarray<nb::numpy, int>(info, {(size_t)1}, nb::capsule(info, [](void *f) noexcept {}));
 
-        pyoomph::g_solver_cb->solve_la_system_distributed(opt_flag, allow_permutations, n, nnz_local, nrow_local, first_row, Py_values, Py_col_index, Py_row_start, Py_b, nprow, npcol, doc, Py_Data, Py_Info); //,comm
+        std::string failure;
+        try
+        {
+            pyoomph::g_solver_cb->solve_la_system_distributed(opt_flag, allow_permutations, n, nnz_local, nrow_local, first_row, Py_values, Py_col_index, Py_row_start, Py_b, nprow, npcol, doc, Py_Data, Py_Info); //,comm
+        }
+        catch (nb::python_error &e)
+        {
+            if (!pyoomph::is_declared_solver_failure(e))
+                throw;
+            failure = e.what();
+        }
 
-
+        // Agree across the ranks before throwing, exactly as Problem::consume_newton_abort_request()
+        // does and for the same reason: rejecting the step changes the control flow of every rank, so
+        // a NewtonSolverError raised on some and not others would have the rest sitting in the next
+        // collective forever. A backend that gathers the system onto one rank sees the failure there
+        // alone. One int, on a path that has just done a distributed solve.
+        // This can only keep the ranks in step if the backend itself left them there -- one that
+        // raises halfway through its own sequence of collectives has already lost them, and nothing
+        // here can recover that.
+        int failed_here = failure.empty() ? 0 : 1, failed_anywhere = 0;
+        MPI_Allreduce(&failed_here, &failed_anywhere, 1, MPI_INT, MPI_MAX, comm);
+        if (failed_anywhere)
+            pyoomph::throw_solver_failure_as_newton_error(
+                failed_here ? failure : std::string("(reported on another MPI rank)"));
     }
 
     // Shim for SuperLU_DIST's compressed-row-to-compressed-column conversion helper; not
@@ -316,6 +433,29 @@ extern "C"
 
 void PyReg_Solvers(nb::module_ &m)
 {
+    // oomph::NewtonSolverError is a plain class, not a std::exception, so nanobind's default handler
+    // reports it as "Caught an unknown exception!". Almost always it is caught inside oomph-lib and
+    // never gets here, but not quite always: a linear solve outside any Newton solve (the arclength
+    // continuation's derivative resolve, for one) can let one through, and since
+    // throw_solver_failure_as_newton_error() above now reports backend failures this way too, the
+    // message a user sees there should say what happened.
+    nb::register_exception_translator(
+        [](const std::exception_ptr &p, void *)
+        {
+            try
+            {
+                std::rethrow_exception(p);
+            }
+            catch (const oomph::NewtonSolverError &)
+            {
+                PyErr_SetString(PyExc_RuntimeError,
+                                "The Newton solve failed and no caller was in a position to retry it with a "
+                                "smaller step (see the reason printed above). A stationary solve, or a linear "
+                                "solve outside any Newton solve, has nothing to fall back on.");
+            }
+        },
+        nullptr);
+
     nb::class_<pyoomph::GeneralSolverCallback, pyoomph::PyGeneralSolverCallback /* <--- trampoline*/>(
         m, "GeneralSolverCallback",
         "Base class, to be subclassed in Python, that implements the actual sparse linear solves "

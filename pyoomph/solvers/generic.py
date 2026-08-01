@@ -35,6 +35,26 @@ import weakref
 
 import scipy.sparse #type:ignore
 
+
+class SolverError(RuntimeError):
+	"""Raised by a linear solver backend when a system could not be solved: a singular matrix, a
+	factorisation that ran out of memory, an iterative solve that gave up.
+
+	What separates it from an ordinary ``RuntimeError`` (which it derives from, so existing ``except
+	RuntimeError`` around a solve keeps working) is what pyoomph does with it. The solver shim
+	(``src/nanobind/solver.cpp``) reports a ``SolverError`` to oomph-lib as a failed Newton solve, so an
+	adaptive time step halves ``dt`` and an arclength step scales ``Ds`` by 2/3 and both retry, instead
+	of the exception unwinding the whole run.
+
+	Raise it only for failures a smaller step could plausibly fix. A solver that is misconfigured or
+	unavailable -- no MUMPS in this PETSc build, an unmatched field-split name, Pardiso under MPI --
+	must stay an ordinary error: it would fail identically on every retry, and the run would shrink its
+	step until it underflowed and then blame the time step rather than showing the real message.
+
+	Backends subclass it one per backend (``PardisoError``, ``PETScSolverError``, ``ScipySolverError``),
+	so a caller can still tell which one gave up.
+	"""
+
 DefaultMatrixType=scipy.sparse.csr_matrix
 _TypeGenericLASolver=TypeVar("_TypeGenericLASolver",bound=type["GenericLinearSystemSolver"])
 _TypeGenericEigenSolver=TypeVar("_TypeGenericEigenSolver",bound=type["GenericEigenSolver"])
