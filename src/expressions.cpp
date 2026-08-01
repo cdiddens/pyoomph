@@ -2742,9 +2742,35 @@ namespace pyoomph
 			}
 		}
 
+		// A time-stepping weight is a real number by construction, but since the function always stays held
+		// GiNaC cannot see that: without the hooks below it treats it as potentially complex and leaves
+		// real_part()/imag_part() of it standing. That is fatal for the normal-mode (azimuthal/Cartesian-k)
+		// analysis, which splits the residual into real and imaginary parts: the generated C then calls
+		// imag_part(shapeinfo->timestepper_weights_dt_BDF2[0]), which does not exist and the JIT module
+		// fails to link. It is reached by every time_derivative_of_integral(), i.e. by every add_dweak_dt().
+		static ex time_stepper_weight_real_part(const ex &order, const ex &index, const ex &scheme)
+		{
+			return time_stepper_weight(order, index, scheme).hold();
+		}
+
+		static ex time_stepper_weight_imag_part(const ex &, const ex &, const ex &)
+		{
+			return 0;
+		}
+
+		// Same statement once more, in the form the rest of the codebase uses to declare a quantity real
+		// (see pyginacstruct::conjugate).
+		static ex time_stepper_weight_conjugate(const ex &order, const ex &index, const ex &scheme)
+		{
+			return time_stepper_weight(order, index, scheme).hold();
+		}
+
 		REGISTER_FUNCTION(time_stepper_weight, eval_func(time_stepper_weight_eval)
 												   .print_func<print_csrc_float>(time_stepper_weight_eval_csrc_float)
 												   .print_func<print_csrc_double>(time_stepper_weight_eval_csrc_float)
+												   .real_part_func(time_stepper_weight_real_part)
+												   .imag_part_func(time_stepper_weight_imag_part)
+												   .conjugate_func(time_stepper_weight_conjugate)
 												   .set_return_type(GiNaC::return_types::commutative))
 
 		// heaviside(): the Heaviside step function. Numeric arguments are evaluated directly (with heaviside(0)=1/2, the
