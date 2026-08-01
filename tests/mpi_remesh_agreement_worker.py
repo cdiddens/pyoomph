@@ -31,12 +31,6 @@ import argparse
 import sys
 import traceback
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--outdir", required=True)
-parser.add_argument("--ask-on-rank", type=int, default=0, help="the only rank asking for a remesh")
-args, rest = parser.parse_known_args()
-sys.argv = [sys.argv[0]] + rest
-
 from pyoomph import Problem, DirichletBC
 from pyoomph.equations.poisson import PoissonEquation
 from pyoomph.meshes.simplemeshes import RectangularQuadMesh
@@ -56,22 +50,38 @@ class Pois(Problem):
         self.add_equations(eqs @ "domain")
 
 
-p = Pois()
-try:
-    with p:
-        p.set_output_directory(args.outdir)
-        p.quiet()
-        p.initialise()
-        p.solve()
-        # Stand-in for the criterion firing only where the distorted elements happen to live.
-        if get_mpi_rank() == args.ask_on_rank:
-            p._domains_to_remesh.add(p.mesh_template)
-        asked = len(p._domains_to_remesh)
-        did = p.remesh_if_necessary()
-        p.solve()  # collective: a rank that skipped the remesh would already be stuck by now
-    print("PYOOMPH_MPI_RESULT rank=%d asked=%d remeshed=%s" % (get_mpi_rank(), asked, did))
-except BaseException as e:  # noqa: BLE001
-    print("PYOOMPH_MPI_RESULT rank=%d raised %s: %s" % (get_mpi_rank(), type(e).__name__, e))
-    traceback.print_exc()
-    sys.stdout.flush()
-    sys.exit(3)
+# Everything that runs lives in main(), like the other mpi_*_worker.py files. The suite is
+# invoked as `pytest *.py`, so pytest imports every file in this directory during collection --
+# and argparse at module scope then exits with "the following arguments are required: --outdir",
+# which surfaces as an INTERNALERROR that collects zero tests and aborts the entire run.
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--outdir", required=True)
+    parser.add_argument("--ask-on-rank", type=int, default=0,
+                        help="the only rank asking for a remesh")
+    args, rest = parser.parse_known_args()
+    sys.argv = [sys.argv[0]] + rest
+
+    p = Pois()
+    try:
+        with p:
+            p.set_output_directory(args.outdir)
+            p.quiet()
+            p.initialise()
+            p.solve()
+            # Stand-in for the criterion firing only where the distorted elements happen to live.
+            if get_mpi_rank() == args.ask_on_rank:
+                p._domains_to_remesh.add(p.mesh_template)
+            asked = len(p._domains_to_remesh)
+            did = p.remesh_if_necessary()
+            p.solve()  # collective: a rank that skipped the remesh would already be stuck by now
+        print("PYOOMPH_MPI_RESULT rank=%d asked=%d remeshed=%s" % (get_mpi_rank(), asked, did))
+    except BaseException as e:  # noqa: BLE001
+        print("PYOOMPH_MPI_RESULT rank=%d raised %s: %s" % (get_mpi_rank(), type(e).__name__, e))
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.exit(3)
+
+
+if __name__ == "__main__":
+    main()

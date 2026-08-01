@@ -31,29 +31,12 @@ import argparse
 import sys
 import traceback
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--outdir", required=True)
-parser.add_argument("--fail-write", choices=["none", "geo", "msh"], default="none")
-args, rest = parser.parse_known_args()
-sys.argv = [sys.argv[0]] + rest
-
 import gmsh  # type:ignore
 
 from pyoomph import Problem, DirichletBC
 from pyoomph.equations.poisson import PoissonEquation
 from pyoomph.meshes.gmsh import GmshTemplate
 from pyoomph.generic.mpi import get_mpi_rank, get_mpi_any
-
-if args.fail_write != "none":
-    _suffix = ".geo_unrolled" if args.fail_write == "geo" else ".msh"
-    _orig_write = gmsh.write
-
-    def _write(path, *a, **k):
-        if path.endswith(_suffix) and get_mpi_rank() == 0:
-            raise RuntimeError("simulated failure while writing " + path)
-        return _orig_write(path, *a, **k)
-
-    gmsh.write = _write
 
 
 class Disc(GmshTemplate):
@@ -79,19 +62,45 @@ class Pois(Problem):
         self.add_equations(eqs @ "domain")
 
 
-p = Pois()
-try:
-    with p:
-        p.set_output_directory(args.outdir)
-        p.quiet()
-        p.initialise()
-    # The primitive that keeps the ranks from disagreeing about whether to (re)generate the mesh,
-    # which would call the collectives in generate_mesh_to_file() on a subset of them.
-    print("PYOOMPH_MPI_ANY rank=%d one=%s none=%s" % (
-        get_mpi_rank(), get_mpi_any(get_mpi_rank() == 0), get_mpi_any(False)))
-    print("PYOOMPH_MPI_RESULT rank=%d completed" % get_mpi_rank())
-except BaseException as e:  # noqa: BLE001
-    print("PYOOMPH_MPI_RESULT rank=%d raised %s: %s" % (get_mpi_rank(), type(e).__name__, e))
-    traceback.print_exc()
-    sys.stdout.flush()
-    sys.exit(3)
+# Everything that runs lives in main(), like the other mpi_*_worker.py files. The suite is
+# invoked as `pytest *.py`, so pytest imports every file in this directory during collection --
+# and argparse at module scope then exits with "the following arguments are required: --outdir",
+# which surfaces as an INTERNALERROR that collects zero tests and aborts the entire run.
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--outdir", required=True)
+    parser.add_argument("--fail-write", choices=["none", "geo", "msh"], default="none")
+    args, rest = parser.parse_known_args()
+    sys.argv = [sys.argv[0]] + rest
+
+    if args.fail_write != "none":
+        suffix = ".geo_unrolled" if args.fail_write == "geo" else ".msh"
+        orig_write = gmsh.write
+
+        def _write(path, *a, **k):
+            if path.endswith(suffix) and get_mpi_rank() == 0:
+                raise RuntimeError("simulated failure while writing " + path)
+            return orig_write(path, *a, **k)
+
+        gmsh.write = _write
+
+    p = Pois()
+    try:
+        with p:
+            p.set_output_directory(args.outdir)
+            p.quiet()
+            p.initialise()
+        # The primitive that keeps the ranks from disagreeing about whether to (re)generate the
+        # mesh, which would call the collectives in generate_mesh_to_file() on a subset of them.
+        print("PYOOMPH_MPI_ANY rank=%d one=%s none=%s" % (
+            get_mpi_rank(), get_mpi_any(get_mpi_rank() == 0), get_mpi_any(False)))
+        print("PYOOMPH_MPI_RESULT rank=%d completed" % get_mpi_rank())
+    except BaseException as e:  # noqa: BLE001
+        print("PYOOMPH_MPI_RESULT rank=%d raised %s: %s" % (get_mpi_rank(), type(e).__name__, e))
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.exit(3)
+
+
+if __name__ == "__main__":
+    main()
