@@ -52,7 +52,7 @@ from pygmsh.common.surface import Surface #type:ignore
 
 from pygmsh.common.volume import Volume #type:ignore
 
-from ..generic.mpi import get_mpi_rank, mpi_barrier, get_mpi_nproc
+from ..generic.mpi import mpi_barrier, get_mpi_any, run_on_rank_zero
 
 import gmsh #type:ignore
 import os
@@ -276,9 +276,11 @@ def generate_mesh_to_file(geom:pygmsh.geo.Geometry | pygmsh.occ.Geometry, outdir
             gmsh.option.setNumber(n,v) #type:ignore
             
     mpi_barrier()
-    if get_mpi_rank() == 0 or get_mpi_nproc()<=1:        
-        gmsh.write(os.path.join(outdir, trunk + ".geo_unrolled")) #type:ignore
-    mpi_barrier()
+    # Written by rank 0 alone, so a failure (unwritable output directory, full disk, a gmsh error)
+    # must be shared: raising it here would leave every other rank waiting for a rank that has
+    # already unwound. run_on_rank_zero ends in a collective, so it replaces the trailing barrier.
+    geofile=os.path.join(outdir, trunk + ".geo_unrolled")
+    run_on_rank_zero(lambda: gmsh.write(geofile), "writing "+geofile) #type:ignore
 
     
 
@@ -299,9 +301,8 @@ def generate_mesh_to_file(geom:pygmsh.geo.Geometry | pygmsh.occ.Geometry, outdir
         postgen_cb()
 
     mpi_barrier()
-    if get_mpi_rank() == 0 or get_mpi_nproc()<=1:
-        gmsh.write(os.path.join(outdir, trunk + ".msh")) #type:ignore
-    mpi_barrier()
+    mshfile=os.path.join(outdir, trunk + ".msh")
+    run_on_rank_zero(lambda: gmsh.write(mshfile), "writing "+mshfile) #type:ignore
     gmsh.clear()
 
 
@@ -1446,7 +1447,13 @@ class GmshTemplate(MeshedMeshTemplate):
                         geom.add_physical(objlist, label=name) #type:ignore
 
                     self._meshfile=os.path.join(mshdir, mshtrunk + ".msh")
-                    if ((self.get_problem()._runmode!="continue" or self.get_problem()._continue_initialized) and self.get_problem()._runmode!="replot") or not os.path.exists(self._meshfile): #type:ignore
+                    must_generate=((self.get_problem()._runmode!="continue" or self.get_problem()._continue_initialized) and self.get_problem()._runmode!="replot") or not os.path.exists(self._meshfile) #type:ignore
+                    # generate_mesh_to_file() contains collectives, so the decision to call it has
+                    # to be unanimous - a rank that does not yet see the existing .msh file (an
+                    # output directory that is not shared, or not yet in sync) would otherwise run
+                    # them alone and hang. Regenerating when only some ranks ask for it is the safe
+                    # side of the disagreement: the file is rewritten with the same content.
+                    if get_mpi_any(must_generate):
                         generate_mesh_to_file(geom, mshdir, mshtrunk, mesher=self, dim=self._maxdim, order=self.order,
                                           algorithm=self.gmsh_options.get("algorithm",None),
                                           recombine_algo=self.gmsh_options.get("recombine_algo",None),

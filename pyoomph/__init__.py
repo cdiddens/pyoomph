@@ -134,6 +134,25 @@ class GeneralSolverCallback(_pyoomph.GeneralSolverCallback):
 		return problem.get_la_solver().solve_distributed(op_flag,allow_permutations,n,nnz_local,nrow_local,first_row,values,col_index,row_start,b,nprow,npcol,doc,data,info) #,comm
 
 	def metis_partgraph_kway(self, nvertex,nconnection, xadj, adjacency_vector, vwgt, nparts, options, edgecut, part):
+		# oomph-lib partitions on rank 0 only and scatters the result, so all other ranks are already
+		# sitting in the collective that follows this call. An exception escaping here would unwind
+		# rank 0 alone and leave the rest of the job hanging forever (a missing pymetis used to do
+		# exactly that). There is no way to hand the failure over to the other ranks from inside a
+		# call they never make, so report it and take the whole job down instead.
+		try:
+			return self._metis_partgraph_kway(nvertex,nconnection, xadj, adjacency_vector, vwgt, nparts, options, edgecut, part)
+		except BaseException:
+			from .generic.mpi import get_mpi_nproc as _get_mpi_nproc, get_mpi_rank as _get_mpi_rank, mpi_abort as _mpi_abort #type:ignore
+			if _get_mpi_nproc()<=1:
+				raise  # serial run: nobody is waiting, a normal traceback is the friendlier failure
+			import traceback
+			traceback.print_exc()
+			sys.stderr.write("pyoomph: mesh partitioning failed on rank "+str(_get_mpi_rank())+" (see the traceback above); aborting all MPI processes.\n")
+			sys.stderr.flush()
+			_mpi_abort(1)
+			raise # not reached, Abort() does not return
+
+	def _metis_partgraph_kway(self, nvertex,nconnection, xadj, adjacency_vector, vwgt, nparts, options, edgecut, part):
 		#print("IN PYMETIS")
 		#print("nvertex",nvertex)
 		#print("nconnection",nconnection)
@@ -146,9 +165,10 @@ class GeneralSolverCallback(_pyoomph.GeneralSolverCallback):
 		#print("part",part)
 		
 		try:
-			import pymetis #type:ignore			
-		except:
-			raise ImportError("PyMetis is not installed, cannot perform graph partitioning for distributed meshes. Please install PyMetis via e.g. 'pip install pymetis'")
+			import pymetis #type:ignore
+		except ImportError:
+			from .generic.mpi import PYMETIS_MISSING_MESSAGE #type:ignore
+			raise ImportError(PYMETIS_MISSING_MESSAGE)
 		adj=pymetis.CSRAdjacency(xadj, adjacency_vector) #type:ignore
 		# nanobind converts the C++-side null vwgt pointer (no vertex weights, the common case)
 		# to None rather than an empty array, unlike pybind11 before it.

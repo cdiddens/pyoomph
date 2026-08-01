@@ -2543,11 +2543,12 @@ class Problem(_pyoomph.Problem):
     def actions_after_newton_solve(self):
         if self.last_newton_step_failed():
             return # Don't do this if it has not converged
-        self._equation_system._after_newton_solve() 
+        self._equation_system._after_newton_solve()
         for ism in range(self.nsub_mesh()):
             submesh=self.mesh_pt(ism)
             if isinstance(submesh,MeshFromTemplateBase):
-                submesh._solves_since_remesh+=1 
+                submesh._solves_since_remesh+=1
+        self._agree_on_domains_to_remesh()
         if len(self._domains_to_remesh)>0:
             if (self._solve_in_arclength_conti is None) and self.do_call_remeshing_when_necessary:
                 self.force_remesh(self._domains_to_remesh)
@@ -2567,7 +2568,30 @@ class Problem(_pyoomph.Problem):
             self.release()
             sys.exit(0)
 
-    def remeshing_necessary(self):        
+    def _agree_on_domains_to_remesh(self):
+        """Make the pending remeshing requests unanimous over the MPI processes.
+
+        RemeshWhen (and the pinch-off/coalescence handler) judge the elements this rank happens to
+        hold, so on a distributed mesh only the ranks owning the distorted part of the mesh ask for
+        a remesh. force_remesh() is collective throughout - it rebuilds the mesh (gmsh, with its own
+        collectives), interpolates and reassigns the equation numbers - so a request has to be
+        answered by all ranks or by none, otherwise the ranks that abstain wait for the others
+        forever. Any rank asking carries all of them, which is the safe side: a mesh nobody needed
+        to rebuild is merely rebuilt.
+        """
+        if get_mpi_nproc()<=1:
+            return
+        templates=self._meshtemplate_list
+        if not any(t.remesher is not None for t in templates):
+            return  # nothing can ever ask, so do not pay for a collective after every solve
+        # _meshtemplate_list is built by define_problem(), i.e. in the same order on every rank.
+        agreed=get_mpi_any_list([t in self._domains_to_remesh for t in templates])
+        wanted={t for t,w in zip(templates,agreed) if w}
+        # Anything not registered as a template of this problem cannot be matched up across the
+        # ranks; keep it rather than silently dropping the request.
+        self._domains_to_remesh=wanted | (self._domains_to_remesh-set(templates))
+
+    def remeshing_necessary(self):
         """
         Checks whether any RemeshWhen object indicates that remeshing should be done.
 
@@ -2586,6 +2610,9 @@ class Problem(_pyoomph.Problem):
             bool: True if remeshing was performed, False otherwise.
         """
         res=False
+        # Collective, like the remeshing it may trigger: call it on all ranks, not from a
+        # rank-dependent branch.
+        self._agree_on_domains_to_remesh()
         if len(self._domains_to_remesh)>0:
             self.force_remesh(self._domains_to_remesh)
             res=True
@@ -3337,6 +3364,19 @@ class Problem(_pyoomph.Problem):
                 print("REBUILDING GLOBAL MESH")
             self.rebuild_global_mesh()
         self.invalidate_cached_mesh_data()
+
+
+    def distribute(self):
+        """Distribute the problem's meshes over the MPI processes.
+
+        Only checks the prerequisites here - the distribution itself is done by oomph-lib. The check
+        must happen on all ranks (see :py:func:`~pyoomph.generic.mpi.ensure_pymetis_available`).
+        """
+        # On a single process oomph-lib ignores the request entirely and never calls METIS, so do
+        # not make PyMetis a requirement for running the same script without mpirun.
+        if get_mpi_nproc()>1:
+            ensure_pymetis_available()
+        super().distribute()
 
 
     def actions_before_distribute(self):
