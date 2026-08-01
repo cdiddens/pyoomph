@@ -30,11 +30,26 @@ The main author may be contacted at c.diddens@utwente.nl
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <stdexcept>
 
 #include <Accelerate/Accelerate.h>
 
 namespace pyoomph
 {
+
+    // A factorization that failed for NUMERICAL reasons -- Accelerate reporting SparseMatrixIsSingular
+    // or SparseFactorizationFailed -- as opposed to a misuse of the API (SparseParameterError), an
+    // internal fault, or a released object. Given its own type rather than being told apart by its
+    // message so that the nanobind layer can turn it into pyoomph's SolverError, which an adaptive time
+    // step or an arclength step rejects and retries with a smaller step instead of ending the run.
+    // Everything else stays an ordinary RuntimeError: no smaller step fixes a wrong argument, and
+    // retrying one would shrink dt to underflow and then blame the time step.
+    // See pyoomph/solvers/generic.py and the translator in src/nanobind/solver.cpp.
+    class MacAccelerateNumericalFailure : public std::runtime_error
+    {
+    public:
+        using std::runtime_error::runtime_error;
+    };
 
     // Subset of Accelerate's SparseFactorization_t that is meaningful for the matrices pyoomph
     // hands over (real, either general or symmetric, sparse matrices). Kept as pyoomph's own type

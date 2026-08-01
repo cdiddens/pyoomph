@@ -61,10 +61,14 @@ namespace pyoomph
 
         void checkStatus(SparseStatus_t status, const char *where)
         {
-            if (status != SparseStatusOK)
-            {
-                throw std::runtime_error(std::string(where) + " failed: " + statusToString(status));
-            }
+            if (status == SparseStatusOK) return;
+            const std::string msg = std::string(where) + " failed: " + statusToString(status);
+            // Only these two say something about the MATRIX, and only those are worth retrying with a
+            // smaller step; the rest say something about the call or about Accelerate itself, where a
+            // retry would only hide the message. See MacAccelerateNumericalFailure in the header.
+            if (status == SparseMatrixIsSingular || status == SparseFactorizationFailed)
+                throw MacAccelerateNumericalFailure(msg);
+            throw std::runtime_error(msg);
         }
 
         // Every symmetric method requires a square matrix and only ever looks at one stored

@@ -26,7 +26,7 @@ from __future__ import annotations
 #
 # ========================================================================
 
-from .generic import GenericLinearSystemSolver, GenericEigenSolver
+from .generic import GenericLinearSystemSolver, GenericEigenSolver, SolverError
 import sys
 import numpy
 from scipy.sparse import csr_matrix
@@ -50,6 +50,17 @@ if not hasattr(_pyoomph,"MacAccelerateSparseSolver"):
 # "ldlt_unpivoted"/"ldlt_sbk"/"ldlt_tpp" (symmetric, square matrices only - only the upper
 # triangle of the given matrix is used), "cholesky_at_a" (least-squares via A^T A).
 MacAccelerateMethod:TypeAlias = Literal["qr", "cholesky", "ldlt", "ldlt_unpivoted", "ldlt_sbk", "ldlt_tpp", "cholesky_at_a"]
+
+
+class AccelerateSolverError(SolverError):
+    """Accelerate could not factorize the matrix: SparseMatrixIsSingular or SparseFactorizationFailed.
+
+    Raised from C++ rather than from here -- checkStatus() in src/mac_accelerate.cpp throws a
+    MacAccelerateNumericalFailure for exactly those two statuses, and the nanobind translator in
+    src/nanobind/solver.cpp turns it into this class (see the SolverError docstring for what that
+    buys). Accelerate's other statuses describe the call, not the matrix, and keep arriving as plain
+    RuntimeErrors; so do the argument checks in this module, e.g. refactorize() before any factorize.
+    """
 
 
 @GenericLinearSystemSolver.register_solver()

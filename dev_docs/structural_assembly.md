@@ -2089,11 +2089,24 @@ RuntimeError` around a solve keeps working) is the marker, with one subclass per
 | `pardiso` | `PardisoError` | any of MKL's documented `error` codes |
 | `petsc`, `petsc_mumps` | `PETScSolverError` | a KSP failure that survived the retry with a fresh factorisation |
 | `superlu`, `umfpack` | `ScipySolverError` | `splu` reporting "Factor is exactly singular" |
+| `accelerate` | `AccelerateSolverError` | `SparseMatrixIsSingular` / `SparseFactorizationFailed` |
 
 Everything else propagates untouched, `KeyboardInterrupt` included -- which is also why it needs no
 special case of its own. Deliberately *not* converted: Pardiso's refusal to run under MPI, PETSc's
-missing-MUMPS and field-split errors, every "unknown mode" internal check. No smaller step makes
-Pardiso MPI-parallel.
+missing-MUMPS and field-split errors, Accelerate's `SparseParameterError` and `SparseInternalError`,
+every "unknown mode" internal check. No smaller step makes Pardiso MPI-parallel.
+
+Accelerate is the one that raises from C++, and it is split by exception TYPE rather than by parsing
+the message: `checkStatus()` throws a `MacAccelerateNumericalFailure` for exactly the two statuses
+that describe the matrix, and a translator in the bindings turns that into `AccelerateSolverError`.
+Renaming a status string therefore cannot silently stop the retry. None of it is compiled outside
+macOS, so the classification is exercised by `citools/check_accelerate_reuse.py` (check [4]) under the
+`test_mac_accelerate` workflow -- it is checked there or nowhere.
+
+The `cktso` wrapper was removed rather than given the same treatment. It was reachable only by name
+through `factory_solver`'s `import_module("pyoomph.solvers." + name)`, nothing else in the tree
+referred to it, and none of its error codes could be classified without a copy of the library to test
+against. Asking for it now gives the standard unavailable-solver message.
 
 The type is defined in Python rather than created in C++ and exported, so that it lives where users
 find and subclass it and appears in the stubs like any other class; the shim resolves it once, lazily,

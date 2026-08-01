@@ -39,6 +39,11 @@ What is actually being checked, in order of how much it matters:
      afternoon once in this project (see dev_docs/structural_assembly.md, Phase 2).
   3. It is invalidated when it must be. Re-solving on an unchanged pattern must take no new symbolic
      factorization, and renumbering the equations must force one.
+  4. A singular matrix is reported as a SolverError. Not about reuse at all, but this script is the
+     only place the Accelerate backend is ever executed -- everything in it is behind #ifdef __APPLE__
+     and a Linux or Windows build never compiles it, let alone runs it. If the classification in
+     checkStatus() or the nanobind translator regresses, an adaptive time step silently stops backing
+     away from a singular Jacobian and the run dies instead. Checked here or nowhere.
 """
 
 import sys
@@ -110,6 +115,45 @@ def solve_with(solver_name, reuse):
         return dofs, residual, counts
 
 
+def check_singular_is_a_solver_error():
+    """A singular matrix must arrive as AccelerateSolverError, i.e. as something a step can retry."""
+    from pyoomph.solvers.accelerate import AccelerateSolverError
+    from pyoomph.solvers.generic import SolverError
+    from pyoomph import _pyoomph_core as core
+
+    check(issubclass(AccelerateSolverError, SolverError),
+          "AccelerateSolverError is a SolverError (otherwise a singular Jacobian ends the run)")
+
+    # A 3x3 matrix with an entirely zero row: structurally present, numerically singular.
+    indptr = numpy.array([0, 1, 1, 2], dtype="int64")
+    indices = numpy.array([0, 2], dtype="int64")
+    data = numpy.array([1.0, 1.0], dtype="float64")
+    solver = core.MacAccelerateSparseSolver()
+    try:
+        solver.factorize(3, 3, indptr, indices, data, "qr")
+    except AccelerateSolverError as e:
+        check(True, "a singular matrix raises AccelerateSolverError (%s)" % str(e)[:60])
+    except Exception as e:
+        check(False, "a singular matrix raised %s instead of AccelerateSolverError: %s"
+                     % (type(e).__name__, str(e)[:80]))
+    else:
+        # Not a failure of the classification: QR can factorize a rank-deficient matrix without
+        # complaining. Say so rather than claiming a pass that did not happen.
+        print("  note   Accelerate accepted the singular matrix without reporting a status; "
+              "the classification could not be exercised", flush=True)
+
+    # The other half of the split: a bad argument must NOT become a retryable SolverError.
+    try:
+        core.MacAccelerateSparseSolver().factorize(3, 3, numpy.array([0, 1], dtype="int64"),
+                                                   indices, data, "qr")
+    except SolverError:
+        check(False, "a malformed call was reported as a retryable SolverError")
+    except Exception:
+        check(True, "a malformed call stays an ordinary error, not a retryable SolverError")
+    else:
+        check(False, "a malformed call was not reported at all")
+
+
 def main():
     print("pyoomph macOS Accelerate symbolic-factorization reuse check", flush=True)
 
@@ -174,6 +218,9 @@ def main():
         sym_after = la.solver.num_symbolic_factorizations()
         check(sym_after > sym_same,
               "a new symbolic factorization is taken after renumbering (%d -> %d)" % (sym_same, sym_after))
+
+    print("\n[4] a singular matrix is reported as a retryable SolverError", flush=True)
+    check_singular_is_a_solver_error()
 
     print("")
     if FAILURES:

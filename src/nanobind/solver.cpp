@@ -158,16 +158,15 @@ namespace pyoomph
     // up once, on the first failed solve -- the module is long since imported by then, since nothing
     // can reach this code without a solver. If it cannot be resolved, nothing counts as retryable,
     // which is the safe direction: an exception propagates instead of being silently swallowed.
-    static PyObject *solver_error_type()
+    static PyObject *lookup_python_type_once(const char *module_name, const char *attribute,
+                                             PyObject *&cached, bool &resolved)
     {
-        static PyObject *cached = nullptr;
-        static bool resolved = false;
         if (!resolved)
         {
             resolved = true;
-            if (PyObject *mod = PyImport_ImportModule("pyoomph.solvers.generic"))
+            if (PyObject *mod = PyImport_ImportModule(module_name))
             {
-                cached = PyObject_GetAttrString(mod, "SolverError"); // kept for the process lifetime
+                cached = PyObject_GetAttrString(mod, attribute); // kept for the process lifetime
                 Py_DECREF(mod);
             }
             if (!cached)
@@ -175,6 +174,26 @@ namespace pyoomph
         }
         return cached;
     }
+
+    static PyObject *solver_error_type()
+    {
+        static PyObject *cached = nullptr;
+        static bool resolved = false;
+        return lookup_python_type_once("pyoomph.solvers.generic", "SolverError", cached, resolved);
+    }
+
+#ifdef __APPLE__
+    // The per-backend subclass, so a caller can still tell which solver gave up. Falls back to the
+    // base class if it cannot be resolved -- the retry, not the exact type, is the point.
+    static PyObject *accelerate_solver_error_type()
+    {
+        static PyObject *cached = nullptr;
+        static bool resolved = false;
+        PyObject *specific = lookup_python_type_once("pyoomph.solvers.accelerate",
+                                                     "AccelerateSolverError", cached, resolved);
+        return specific ? specific : solver_error_type();
+    }
+#endif
 
     static bool is_declared_solver_failure(const nb::python_error &e)
     {
@@ -514,6 +533,27 @@ void PyReg_Solvers(nb::module_ &m)
         "length ``nnz`` in coordinate (COO) format, i.e. one entry per non-zero giving its (``first_row``-offset) row index.");
 
 #ifdef __APPLE__
+    // Accelerate reporting a singular or failed factorization is a statement about the matrix, so it
+    // is reported to Python as a SolverError (AccelerateSolverError) and an adaptive time step or an
+    // arclength step retries with a smaller one. Its sibling statuses -- a wrong argument, an internal
+    // fault -- stay ordinary std::runtime_errors and reach Python as plain RuntimeErrors, since no
+    // smaller step fixes those. The split is made by exception TYPE in mac_accelerate.cpp rather than
+    // by parsing the message here, so renaming a status string cannot silently stop the retry.
+    nb::register_exception_translator(
+        [](const std::exception_ptr &p, void *)
+        {
+            try
+            {
+                std::rethrow_exception(p);
+            }
+            catch (const pyoomph::MacAccelerateNumericalFailure &e)
+            {
+                PyObject *type = pyoomph::accelerate_solver_error_type();
+                PyErr_SetString(type ? type : PyExc_RuntimeError, e.what());
+            }
+        },
+        nullptr);
+
     // Exposes pyoomph::MacAccelerateSparseSolver (src/mac_accelerate.hpp), a thin wrapper around
     // Apple's Accelerate "Sparse Solvers" framework, only built/registered on macOS.
     nb::class_<pyoomph::MacAccelerateSparseSolver>(m, "MacAccelerateSparseSolver",
