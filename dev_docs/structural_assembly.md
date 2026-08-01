@@ -2113,12 +2113,24 @@ not cover `SIGTRAP` by default; registering it explicitly (`faulthandler.registe
 is what finally named the line. Note that registering it with `chain=False` makes the trapping
 instruction re-execute forever rather than dying -- 358 000 stack dumps in one run.
 
-The probe now runs in a subprocess, so a trap is contained and reported. Consequently the singular
-case is best-effort: `SOLVER_ERROR` passes, an actual misclassification fails, and "Accelerate trapped"
-or "Accelerate accepted it" is reported as a note. The two things pyoomph genuinely controls -- that
-`AccelerateSolverError` is a `SolverError`, and that a malformed call does NOT become a retryable one
--- are hard assertions. Whether a real Accelerate factorization ever reports `SparseMatrixIsSingular`
-in a pyoomph run is, on this evidence, unconfirmed.
+The probe now runs in a subprocess, so a trap is contained and reported, and it tries `cholesky` as
+well as `qr`. That second method is what makes the check worth having, because the two methods behave
+completely differently on the same kind of input:
+
+| method | singular matrix |
+| --- | --- |
+| `qr` | traps the process (`SIGTRAP`), no status, nothing to classify |
+| `cholesky` | returns `SparseFactorizationFailed`, which arrives in Python as `AccelerateSolverError` |
+
+So the translation **is** confirmed end to end, by the `cholesky` case -- a real Accelerate status,
+through `checkStatus`, through the nanobind translator, to a `SolverError` in Python. Had the probe
+only ever used `qr`, this would have stayed a plausible but untested claim.
+
+The singular case is nonetheless reported best-effort: `SOLVER_ERROR` passes, an actual
+misclassification fails, and "trapped" or "accepted without a status" is a note -- whether a given
+Accelerate method reports a status is Accelerate's business, not pyoomph's. The two things pyoomph
+does control -- that `AccelerateSolverError` is a `SolverError`, and that a malformed call does NOT
+become a retryable one -- are hard assertions.
 
 The `cktso` wrapper was removed rather than given the same treatment. It was reachable only by name
 through `factory_solver`'s `import_module("pyoomph.solvers." + name)`, nothing else in the tree
