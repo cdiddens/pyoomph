@@ -629,7 +629,12 @@ class NavierStokesEquations(StokesEquations):
             self.add_residual(weak(time_scheme(self.momentum_scheme,rho*material_derivative(u,u,dt_factor=self.dt_factor,advection_factor=self.nonlinear_factor)), u_test))
         else:
             w=mesh_velocity(scheme=self.momentum_scheme)
-            self.add_dweak_dt(rho*u,u_test,scheme=self.momentum_scheme).add_weak(time_scheme(self.momentum_scheme, div(rho*dyadic(u,u-w))),u_test)
+            # dyadic(u-w,u), not dyadic(u,u-w): div contracts the FIRST index, and the momentum flux of
+            # the conservative ALE form is the mass flux rho*(u-w) carrying the momentum u, i.e.
+            # F_ij = rho*(u_i-w_i)*u_j. Written the other way round it does not even preserve a uniform
+            # flow on a moving mesh: the free-stream error then stays at 3e-2 however far dt is refined,
+            # whereas this ordering converges away at first order, as the discrete GCL error should.
+            self.add_dweak_dt(rho*u,u_test,scheme=self.momentum_scheme).add_weak(time_scheme(self.momentum_scheme, div(rho*dyadic(u-w,u))),u_test)
 
 
 
