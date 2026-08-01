@@ -395,7 +395,19 @@ void PyReg_Mesh(nb::module_ &m)
 
 	nb::class_<pyoomph::LagrZ2ErrorEstimator>(m, "Z2ErrorEstimator", "Zienkiewicz-Zhu spatial error estimator used to drive adaptive mesh refinement")
 		.def(nb::init<>())
-		.def_rw("use_Lagrangian", &pyoomph::LagrZ2ErrorEstimator::use_Lagrangian, "If True, the error is estimated based on the Lagrangian (undeformed) coordinates instead of the Eulerian (current) ones");
+		.def_rw("use_Lagrangian", &pyoomph::LagrZ2ErrorEstimator::use_Lagrangian, "If True, the error is estimated based on the Lagrangian (undeformed) coordinates instead of the Eulerian (current) ones")
+		.def_rw("use_local_recovery_frame_in_codim", &pyoomph::LagrZ2ErrorEstimator::use_local_recovery_frame_in_codim,
+				"If True (default), the flux recovery on a mesh with a co-dimension (an interface: a curve in 2D, a surface in 3D) is fitted in a patch-local tangent frame instead of in global coordinates. Setting it to False restores the old behaviour, which is singular whenever the interface is not a graph over the first coordinate axes")
+		.def_rw("force_local_recovery_frame", &pyoomph::LagrZ2ErrorEstimator::force_local_recovery_frame,
+				"If True, the patch-local recovery frame is used even for ordinary bulk meshes, where it is only a conditioning improvement (it recovers the same field). Off by default, so that bulk error estimates stay bit-for-bit unchanged")
+		.def_rw("normalize_relative", &pyoomph::LagrZ2ErrorEstimator::normalize_relative,
+				"How much of the mesh-global flux norm is divided out of the elemental errors: 1 (default) gives the fully relative error each element's share of this mesh's total, 0 the fully absolute one (the raw integrated flux jump, comparable across meshes and adaptation steps but on a scale that needs its own permitted-error thresholds), and values in between divide by norm**normalize_relative, the geometric blend of the two")
+		.def_prop_rw(
+			"reference_flux_norm", [](pyoomph::LagrZ2ErrorEstimator &self)
+			{ return self.reference_flux_norm(); },
+			[](pyoomph::LagrZ2ErrorEstimator &self, double v)
+			{ self.reference_flux_norm() = v; },
+			"Reference norm the elemental errors are divided by. If 0 (default), the mesh's own recovered-flux norm is computed and used, which makes the errors relative to the current solution on that mesh; setting it pins the normalisation, making the errors absolute and comparable across meshes and across adaptation steps");
 
 	py_decl_OomphData->def("set_time_stepper", &oomph::Data::set_time_stepper, nb::arg("time_stepper"), nb::arg("preserve_existing_data"), "Assigns a time stepper to this data object, allocating the required storage for the time history of its values")
 		.def("pin", &oomph::Data::pin, nb::arg("value_index"), "Pins (Dirichlet-constrains) the given value index, i.e. removes it from the unknowns of the linear system")

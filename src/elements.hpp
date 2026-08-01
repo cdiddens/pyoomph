@@ -886,6 +886,15 @@ namespace pyoomph
     // Number of independent flux quantities used by oomph-lib's Z2 error estimator for this
     // element type (drives the size of get_Z2_flux's output).
     unsigned num_Z2_flux_terms() override;
+    // Compound-flux grouping: how the flux terms are partitioned into groups that are normalised
+    // independently (and then combined by taking the maximum). One group unless the generated code
+    // says otherwise. See dev_docs/spatial_error_estimators.md.
+    unsigned ncompound_fluxes() override;
+    void get_Z2_compound_flux_indices(oomph::Vector<unsigned> &flux_index) override;
+    // Per-group normalisation exponent (1 = relative, 0 = absolute) and weight, read by
+    // LagrZ2ErrorEstimator after the mesh-global norms have been assembled.
+    virtual double Z2_compound_flux_normalize_relative(const unsigned &g);
+    virtual double Z2_compound_flux_weight(const unsigned &g);
     // Evaluates the Z2-recovery flux vector (typically the gradient of the dominant field) at local
     // coordinate s, used by the Z2 error estimator to drive adaptive mesh refinement.
     void get_Z2_flux(const oomph::Vector<double> &s, oomph::Vector<double> &flux) override;

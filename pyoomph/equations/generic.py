@@ -190,15 +190,64 @@ class SpatialErrorEstimator(Equations):
 
     so that the jump in "u" is used, after weighting by the factor 5, as error estimator.
     Error estimators expressions must be nondimensional.
-    
+
     for_which controls whether these error estimators are used for the base solution, potential eigenfunctions or both.
+
+    normalize_relative selects what the resulting numbers mean, i.e. what
+    :py:attr:`~pyoomph.generic.problem.Problem.max_permitted_error` is compared against:
+
+    * ``1`` (default) gives the **relative** error: each element's error is divided by the recovered
+      flux norm of the whole mesh, so it is that element's share of this mesh's total. Dimensionless,
+      but blind to how well resolved the mesh is overall -- a well resolved and a badly resolved
+      domain report errors of similar magnitude, and refining the mesh does not by itself make the
+      numbers smaller.
+    * ``0`` gives the **absolute** error: the raw integrated flux jump, which really does shrink as
+      the mesh is refined and is comparable between meshes and between adaptation steps. In exchange,
+      its magnitude depends on the element size and on the field's own scale, so
+      ``max_permitted_error``/``min_permitted_error`` have to be chosen for the problem at hand
+      rather than left at the defaults.
+    * values in between divide by ``norm**normalize_relative``, which is the geometric blend of the
+      two (``err/norm**p`` is exactly ``(err/norm)**p * err**(1-p)``).
+
+    Note that ``normalize_relative`` is the only knob that can change the *scale* of the errors of a
+    group: a common factor on the estimator expressions themselves cancels out of the relative
+    normalisation exactly (``SpatialErrorEstimator(u=2)`` is identical to
+    ``SpatialErrorEstimator(u=1)``); only the ratios between the fields *within one group* matter
+    there. To scale a group against the others, use ``weight``, which is applied after the
+    normalisation and therefore does not cancel.
+
+    The norm being divided out is a whole-group quantity, so ``normalize_relative`` and ``weight``
+    belong to the group rather than to the individual expressions. That is what ``group`` is for:
+
+            eqs += SpatialErrorEstimator(u=1)                                        # group ""
+            eqs += SpatialErrorEstimator(Gamma=1, group="surf", normalize_relative=0, weight=3)
+
+    Each group gets its **own** recovered-flux norm, and the elemental error is the **maximum** over
+    the groups. Two criteria in different groups can therefore neither dilute nor mask each other,
+    and adding a group can only ever cause more refinement and less unrefinement, never the reverse
+    -- which is what makes it safe for independent pieces of a model to contribute error criteria
+    without knowing about each other. Everything lands in the single unnamed group ``""`` unless a
+    group is named, which is the historical behaviour of one joint norm over all fields.
+
+    Vetoes ("refine this regardless", "do not unrefine this") deliberately do *not* live here: they
+    would have to lower an element's error and so break the monotonicity that makes the maximum safe.
+    Use :py:class:`RefineToLevel`, :py:class:`RefineMaxElementSize` or
+    :py:class:`RefineAccordingToElement` for those.
     """
 
-    def __init__(self,*fluxes:str | Expression,for_which:Literal["both","base","eigen"]="both",**kwargs:ExpressionOrNum):
+    def __init__(self,*fluxes:str | Expression,for_which:Literal["both","base","eigen"]="both",group:str="",normalize_relative:float=1.0,weight:float=1.0,**kwargs:ExpressionOrNum):
         super(SpatialErrorEstimator, self).__init__()
         self.fluxes:dict[str | Expression,ExpressionOrNum]={x:1.0 for x in fluxes}
         for lhs,rhs in kwargs.items():
             self.fluxes[lhs]=rhs
+        normalize_relative=float(normalize_relative)
+        if not (0.0<=normalize_relative<=1.0):
+            raise ValueError("normalize_relative must be between 0 (absolute error) and 1 (relative error), got "+str(normalize_relative))
+        if float(weight)<=0.0:
+            raise ValueError("weight must be positive, got "+str(weight))
+        self.group=group
+        self.normalize_relative=normalize_relative
+        self.weight=float(weight)
         if for_which=="both":
             self.for_base_solution=True
             self.for_eigenfunction=True
@@ -222,10 +271,25 @@ class SpatialErrorEstimator(Equations):
                     jflux=grad(nondim(flux),nondim=True)
             else:
                 jflux=flux
-            self.add_spatial_error_estimator(factor*jflux,for_base=self.for_base_solution,for_eigen=self.for_eigenfunction)
+            # No uniqueness guard here any more: the group carries the settings, so several
+            # SpatialErrorEstimators on one domain just contribute several criteria, combined by the
+            # maximum. Two objects that name the SAME group but disagree about how it is normalised
+            # are still a mistake, and FiniteElementCode::add_Z2_flux rejects that.
+            self.add_spatial_error_estimator(factor*jflux,for_base=self.for_base_solution,for_eigen=self.for_eigenfunction,
+                                             group=self.group,normalize_relative=self.normalize_relative,weight=self.weight)
 
     def get_information_string(self) -> str:
-        return ", ".join(map(str,self.fluxes))
+        res=", ".join(map(str,self.fluxes))
+        extra=[]
+        if self.group!="":
+            extra.append("group='"+self.group+"'")
+        if self.normalize_relative!=1.0:
+            extra.append("normalize_relative="+str(self.normalize_relative))
+        if self.weight!=1.0:
+            extra.append("weight="+str(self.weight))
+        if extra:
+            res+=" ("+", ".join(extra)+")"
+        return res
 
 
 class SpatialIntegrationOrder(Equations):

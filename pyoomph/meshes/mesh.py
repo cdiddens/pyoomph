@@ -1546,6 +1546,13 @@ class InterfaceMesh(_InterfaceMeshTypingBase):
         self._error_estimator.use_Lagrangian = False
         self.ignore_initial_condition = False
         self.set_spatial_error_estimator_pt(self._error_estimator)
+        # Inherit the refinement thresholds from the bulk mesh this interface hangs off (which in
+        # turn got them from the template or the Problem). Only MeshFromTemplate* used to set them,
+        # so an interface silently ran on oomph-lib's own defaults, 1e-3/1e-5 - the max coinciding
+        # with pyoomph's default and the min not (1e-4). Nobody chose that, and it only started to
+        # matter once an interface could estimate its own error. Settable afterwards per interface.
+        self.min_permitted_error = parent.min_permitted_error
+        self.max_permitted_error = parent.max_permitted_error
         if previous_mesh is not None:
             self._setup_information_from_old_mesh(previous_mesh)
 

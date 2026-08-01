@@ -43,6 +43,9 @@ This file strongly based on the file error_estimator.h from the oomph-lib librar
 #include "mpi.h"
 #endif
 
+#include <algorithm>
+#include <cmath>
+
 #include "lagr_error_estimator.hpp"
 #include "refineable_quad_element.h"
 #include "error_estimator.h"
@@ -55,10 +58,106 @@ namespace pyoomph
 {
 
   //====================================================================
-  /// Recovery shape functions as functions of the global, Eulerian
-  /// coordinate x of dimension dim.
-  /// The recovery shape functions are  complete polynomials of
-  /// the order specified by Recovery_order.
+  /// Maps a global coordinate into the patch-local recovery frame. When the frame is inactive
+  /// this is the historical behaviour: take the first dim components of the global coordinate
+  /// and fit a polynomial in those.
+  //====================================================================
+  void LagrZ2ErrorEstimator::RecoveryFrame::to_local(const Vector<double> &x, const unsigned &dim,
+                                                     Vector<double> &xlocal) const
+  {
+    if (!active)
+    {
+      for (unsigned i = 0; i < dim; i++) xlocal[i] = x[i];
+      return;
+    }
+    for (unsigned i = 0; i < dim; i++)
+    {
+      double s = 0.0;
+      for (unsigned j = 0; j < nodal_dim; j++) s += axes[i][j] * (x[j] - origin[j]);
+      xlocal[i] = s * inv_scale;
+    }
+  }
+
+  //====================================================================
+  /// Eigen-decomposition of a small symmetric matrix by cyclic Jacobi rotations. Written out here
+  /// rather than pulled from a library because both users are tiny (3x3 for the patch frame, at
+  /// most 20x20 for the recovery system) and because the result has to be bit-reproducible across
+  /// MPI ranks -- a non-distributed parallel job rebuilds a remote patch's frame instead of
+  /// broadcasting it, and the two must agree exactly.
+  //====================================================================
+  void LagrZ2ErrorEstimator::symmetric_eigen(const DenseMatrix<double> &A, const unsigned &n,
+                                             Vector<double> &evals, DenseMatrix<double> &evecs)
+  {
+    DenseMatrix<double> a(n, n);
+    evecs.resize(n, n);
+    for (unsigned i = 0; i < n; i++)
+      for (unsigned j = 0; j < n; j++)
+      {
+        a(i, j) = A(i, j);
+        evecs(i, j) = (i == j ? 1.0 : 0.0);
+      }
+
+    for (unsigned sweep = 0; sweep < 100; sweep++)
+    {
+      double off = 0.0;
+      for (unsigned i = 0; i < n; i++)
+        for (unsigned j = i + 1; j < n; j++) off += a(i, j) * a(i, j);
+      if (off <= 1e-30) break;
+
+      for (unsigned p = 0; p < n; p++)
+      {
+        for (unsigned q = p + 1; q < n; q++)
+        {
+          if (std::fabs(a(p, q)) < 1e-300) continue;
+          const double theta = (a(q, q) - a(p, p)) / (2.0 * a(p, q));
+          const double t = (theta >= 0.0 ? 1.0 : -1.0) / (std::fabs(theta) + std::sqrt(theta * theta + 1.0));
+          const double c = 1.0 / std::sqrt(t * t + 1.0);
+          const double s = t * c;
+          for (unsigned k = 0; k < n; k++)
+          {
+            const double akp = a(k, p), akq = a(k, q);
+            a(k, p) = c * akp - s * akq;
+            a(k, q) = s * akp + c * akq;
+          }
+          for (unsigned k = 0; k < n; k++)
+          {
+            const double apk = a(p, k), aqk = a(q, k);
+            a(p, k) = c * apk - s * aqk;
+            a(q, k) = s * apk + c * aqk;
+          }
+          for (unsigned k = 0; k < n; k++)
+          {
+            const double vkp = evecs(k, p), vkq = evecs(k, q);
+            evecs(k, p) = c * vkp - s * vkq;
+            evecs(k, q) = s * vkp + c * vkq;
+          }
+        }
+      }
+    }
+
+    evals.resize(n);
+    for (unsigned i = 0; i < n; i++) evals[i] = a(i, i);
+
+    // Descending order, by selection sort: n is tiny and the swap pattern must not depend on
+    // anything but the values themselves (see the reproducibility note above).
+    for (unsigned i = 0; i < n; i++)
+    {
+      unsigned imax = i;
+      for (unsigned j = i + 1; j < n; j++)
+        if (evals[j] > evals[imax]) imax = j;
+      if (imax != i)
+      {
+        std::swap(evals[i], evals[imax]);
+        for (unsigned k = 0; k < n; k++) std::swap(evecs(k, i), evecs(k, imax));
+      }
+    }
+  }
+
+  //====================================================================
+  /// Recovery shape functions as functions of the coordinate x of dimension dim: the global
+  /// (Eulerian or Lagrangian) coordinate, or the patch-local one when a RecoveryFrame is in use.
+  /// The recovery shape functions are complete polynomials of the order specified by
+  /// Recovery_order.
   //====================================================================
   void LagrZ2ErrorEstimator::shape_rec(const Vector<double> &x,
                                        const unsigned &dim,
@@ -674,6 +773,148 @@ namespace pyoomph
   }
 
   //======================================================================
+  /// Whether the recovery for this mesh is to be fitted in a patch-local frame. The decision is
+  /// per mesh, not per patch: every patch of one mesh has the same co-dimension, and the driver
+  /// has to be able to ask the same question the per-patch code answers.
+  //======================================================================
+  bool LagrZ2ErrorEstimator::recovery_frame_wanted(const unsigned &nodal_dim,
+                                                   const unsigned &dim) const
+  {
+    if (force_local_recovery_frame) return true;
+    if (!use_local_recovery_frame_in_codim) return false;
+    return nodal_dim != dim;
+  }
+
+  //======================================================================
+  /// Build the local frame a patch's recovery polynomial is fitted in: origin at the centroid of
+  /// the patch's nodes, axes along the dim dominant directions of their covariance, scaled so the
+  /// local coordinates are O(1).
+  ///
+  /// Why the dominant directions rather than the global axes: on a mesh with a co-dimension the
+  /// patch is (a piece of) a curve or a surface, and the global axes do not parametrise it. A
+  /// boundary at x=const collapses every sampling point onto the same value of the single local
+  /// coordinate the old code used, which is what made the normal matrix exactly singular.
+  ///
+  /// A patch that folds - one spanning a sharp geometric corner - still projects two arms onto
+  /// overlapping local coordinates, so the fit there is poor and the corner tends to over-refine.
+  /// That is accepted: it is the safe direction to err in, and the alternative (parametrising by
+  /// arclength from the patch's vertex node) works for curves but not for surfaces in 3D.
+  //======================================================================
+  void LagrZ2ErrorEstimator::build_recovery_frame(
+      const Vector<ElementWithZ2ErrorEstimator *> &patch_el_pt,
+      const unsigned &dim, RecoveryFrame &frame)
+  {
+    frame.active = false;
+    if (patch_el_pt.empty()) return;
+    const unsigned nodal_dim = patch_el_pt[0]->nodal_dimension();
+    if (nodal_dim < dim) return; // nothing sensible to project onto
+
+    // The node positions, gathered in patch order then element-local node order. Shared nodes are
+    // counted once per element that owns them; that only weights the centroid, and keeping the
+    // loop free of any pointer-ordered container is what makes the result reproducible on another
+    // rank rebuilding the same patch.
+    Vector<Vector<double>> pos;
+    for (unsigned e = 0; e < patch_el_pt.size(); e++)
+    {
+      ElementWithZ2ErrorEstimator *el_pt = patch_el_pt[e];
+      for (unsigned n = 0; n < el_pt->nnode(); n++)
+      {
+        oomph::Node *nod_pt = el_pt->node_pt(n);
+        pyoomph::Node *pnod_pt = (use_Lagrangian ? dynamic_cast<pyoomph::Node *>(nod_pt) : NULL);
+        Vector<double> p(nodal_dim, 0.0);
+        for (unsigned i = 0; i < nodal_dim; i++)
+        {
+          p[i] = ((pnod_pt && i < pnod_pt->nlagrangian()) ? pnod_pt->xi(i) : nod_pt->x(i));
+        }
+        pos.push_back(p);
+      }
+    }
+    if (pos.size() < 2) return;
+
+    frame.nodal_dim = nodal_dim;
+    frame.origin.resize(nodal_dim, 0.0);
+    for (unsigned k = 0; k < pos.size(); k++)
+      for (unsigned i = 0; i < nodal_dim; i++) frame.origin[i] += pos[k][i];
+    for (unsigned i = 0; i < nodal_dim; i++) frame.origin[i] /= double(pos.size());
+
+    DenseMatrix<double> cov(nodal_dim, nodal_dim, 0.0);
+    for (unsigned k = 0; k < pos.size(); k++)
+      for (unsigned i = 0; i < nodal_dim; i++)
+        for (unsigned j = 0; j < nodal_dim; j++)
+          cov(i, j) += (pos[k][i] - frame.origin[i]) * (pos[k][j] - frame.origin[j]);
+
+    Vector<double> evals;
+    DenseMatrix<double> evecs;
+    symmetric_eigen(cov, nodal_dim, evals, evecs);
+
+    // Keep the dim dominant directions. An eigenvector is defined only up to a sign, so pin it:
+    // the entry of largest magnitude is made positive (lowest index wins a tie). Without this,
+    // two ranks solving the same eigenproblem could disagree on the sign and hence on the sign of
+    // every odd-order recovery coefficient.
+    frame.axes.resize(dim);
+    for (unsigned i = 0; i < dim; i++)
+    {
+      frame.axes[i].resize(nodal_dim, 0.0);
+      unsigned imax = 0;
+      for (unsigned j = 0; j < nodal_dim; j++)
+      {
+        frame.axes[i][j] = evecs(j, i);
+        if (std::fabs(frame.axes[i][j]) > std::fabs(frame.axes[i][imax])) imax = j;
+      }
+      if (frame.axes[i][imax] < 0.0)
+        for (unsigned j = 0; j < nodal_dim; j++) frame.axes[i][j] = -frame.axes[i][j];
+    }
+    frame.active = true;
+
+    // Scale by the patch's own extent, so the monomials of the recovery basis are all O(1) and the
+    // normal matrix is not artificially ill-conditioned by the mesh's absolute position or size.
+    frame.inv_scale = 1.0;
+    double maxabs = 0.0;
+    Vector<double> xl(dim, 0.0);
+    for (unsigned k = 0; k < pos.size(); k++)
+    {
+      frame.to_local(pos[k], dim, xl);
+      for (unsigned i = 0; i < dim; i++) maxabs = std::max(maxabs, std::fabs(xl[i]));
+    }
+    if (maxabs > 0.0) frame.inv_scale = 1.0 / maxabs;
+  }
+
+  //======================================================================
+  /// Solve the recovery system by truncated pseudo-inverse. The matrix is the mass matrix of the
+  /// recovery basis over the patch, so it is symmetric positive semi-definite; where the patch
+  /// does not excite a basis function (a single-element patch, an exactly straight surface patch,
+  /// a degenerate direction left over from the projection) the corresponding eigenvalue is zero
+  /// and that direction is simply dropped, which is the same as fitting the lower-order polynomial
+  /// the patch can actually support. The LU solve this replaces threw "Singular Matrix" instead.
+  //======================================================================
+  void LagrZ2ErrorEstimator::solve_recovery_system(const DenseMatrix<double> &recovery_mat,
+                                                  const unsigned &n,
+                                                  Vector<Vector<double>> &rhs)
+  {
+    Vector<double> evals;
+    DenseMatrix<double> evecs;
+    symmetric_eigen(recovery_mat, n, evals, evecs);
+
+    double lmax = 0.0;
+    for (unsigned i = 0; i < n; i++) lmax = std::max(lmax, std::fabs(evals[i]));
+    const double cutoff = 1.0e-10 * lmax;
+
+    for (unsigned irhs = 0; irhs < rhs.size(); irhs++)
+    {
+      Vector<double> sol(n, 0.0);
+      for (unsigned k = 0; k < n; k++)
+      {
+        if (std::fabs(evals[k]) <= cutoff) continue;
+        double proj = 0.0;
+        for (unsigned i = 0; i < n; i++) proj += evecs(i, k) * rhs[irhs][i];
+        proj /= evals[k];
+        for (unsigned i = 0; i < n; i++) sol[i] += proj * evecs(i, k);
+      }
+      rhs[irhs] = sol;
+    }
+  }
+
+  //======================================================================
   /// Given the vector of elements that make up a patch,
   /// the number of recovery and flux terms, and the
   /// spatial dimension of the problem, compute
@@ -685,8 +926,14 @@ namespace pyoomph
       const unsigned &num_recovery_terms,
       const unsigned &num_flux_terms,
       const unsigned &dim,
-      DenseMatrix<double> *&recovered_flux_coefficient_pt)
+      DenseMatrix<double> *&recovered_flux_coefficient_pt,
+      RecoveryFrame &frame)
   {
+    frame = RecoveryFrame();
+    if (!patch_el_pt.empty() && recovery_frame_wanted(patch_el_pt[0]->nodal_dimension(), dim))
+    {
+      build_recovery_frame(patch_el_pt, dim, frame);
+    }
     // Create/initialise matrix for linear system
     DenseDoubleMatrix recovery_mat(num_recovery_terms, num_recovery_terms, 0.0);
 
@@ -755,11 +1002,6 @@ namespace pyoomph
         if (use_Lagrangian)
         {
           dynamic_cast<SolidFiniteElement *>(el_pt)->interpolated_xi(s, x);
-          // TODO: Leftover debug output -- dumps the interpolated coordinate at every integration point
-          std::cout << "IPT " << ipt << "  x ";
-          for (unsigned i = 0; i < el_pt->nodal_dimension(); i++)
-            std::cout << x[i] << " , ";
-          std::cout << std::endl;
         }
         else
         {
@@ -771,8 +1013,12 @@ namespace pyoomph
         // and spherical coordinate systems)
         double W = w * J * (el_pt->geometric_jacobian(x));
 
-        // Recovery shape functions at global (Eulerian) coordinate
-        shape_rec(x, dim, psi_r);
+        // Recovery shape functions at the coordinate the recovery is fitted in: the global one,
+        // or the patch-local one when the mesh has a co-dimension (frame.to_local is the identity
+        // on the first dim components when the frame is inactive).
+        Vector<double> xrec(dim);
+        frame.to_local(x, dim, xrec);
+        shape_rec(xrec, dim, psi_r);
 
         // Get FE estimates for Z2 flux:
         Vector<double> fe_flux(num_flux_terms);
@@ -810,13 +1056,26 @@ namespace pyoomph
 
     // Linear system is now assembled: Solve recovery system
 
-    // LU decompose the recovery matrix
-    recovery_mat.ludecompose();
-
-    // Back-substitute (and overwrite for all rhs
-    for (unsigned irhs = 0; irhs < num_flux_terms; irhs++)
+    if (frame.active)
     {
-      recovery_mat.lubksub(rhs[irhs]);
+      // A co-dimensional patch cannot be assumed to excite every recovery monomial - it may be
+      // exactly straight, or degenerate in one of the projected directions - so solve by truncated
+      // pseudo-inverse, which drops the unexcited directions instead of failing on them. Only on
+      // this path: the LU below is kept for ordinary bulk meshes so that their error estimates,
+      // and hence every refinement decision that has ever been baselined against them, stay
+      // bit-for-bit unchanged.
+      solve_recovery_system(recovery_mat, num_recovery_terms, rhs);
+    }
+    else
+    {
+      // LU decompose the recovery matrix
+      recovery_mat.ludecompose();
+
+      // Back-substitute (and overwrite for all rhs
+      for (unsigned irhs = 0; irhs < num_flux_terms; irhs++)
+      {
+        recovery_mat.lubksub(rhs[irhs]);
+      }
     }
 
     // Now create a matrix to store the flux recovery coefficients.
@@ -1007,12 +1266,17 @@ namespace pyoomph
     // Initialise local values for all processes on mesh
     unsigned num_flux_terms_local = 0;
     unsigned dim_local = 0;
+    unsigned nodal_dim_local = 0;
     unsigned recovery_order_local = 0;
 #endif
 
     // Global variables
     unsigned num_flux_terms = 0;
     unsigned dim = 0;
+    // The dimension of the space the mesh is embedded in. Equal to dim for an ordinary bulk mesh;
+    // larger for an interface mesh, which is what selects the patch-local recovery frame below.
+    // Reduced like dim, because a distributed submesh may hold no elements at all on some rank.
+    unsigned nodal_dim = 0;
 
 #ifdef OOMPH_HAS_MPI
     // It may be possible that a submesh contains no elements on a
@@ -1040,6 +1304,7 @@ namespace pyoomph
 
       // Determine spatial dimension of all elements from first element
       dim_local = el_pt->dim();
+      nodal_dim_local = el_pt->nodal_dimension();
 
       // Do we need to determine the recovery order from first element?
       if (Recovery_order_from_first_element)
@@ -1062,6 +1327,7 @@ namespace pyoomph
       MPI_Allreduce(&num_flux_terms_local, &num_flux_terms, 1, MPI_UNSIGNED,
                     MPI_MAX, comm_pt->mpi_comm());
       MPI_Allreduce(&dim_local, &dim, 1, MPI_INT, MPI_MAX, comm_pt->mpi_comm());
+      MPI_Allreduce(&nodal_dim_local, &nodal_dim, 1, MPI_UNSIGNED, MPI_MAX, comm_pt->mpi_comm());
       MPI_Allreduce(&recovery_order_local, &recovery_order, 1, MPI_UNSIGNED,
                     MPI_MAX, comm_pt->mpi_comm());
     }
@@ -1069,6 +1335,7 @@ namespace pyoomph
     {
       num_flux_terms = num_flux_terms_local;
       dim = dim_local;
+      nodal_dim = nodal_dim_local;
       recovery_order = recovery_order_local;
     }
 
@@ -1098,6 +1365,7 @@ namespace pyoomph
 
     // Determine spatial dimension of all elements from first element
     dim = el_pt->dim();
+    nodal_dim = el_pt->nodal_dimension();
 
     // Do we need to determine the recovery order from first element?
     if (Recovery_order_from_first_element)
@@ -1127,6 +1395,13 @@ namespace pyoomph
     // We store the pointers to the recovered flux coefficient matrices for
     // various patches in a vector so we can delete them later
     Vector<DenseMatrix<double> *> vector_of_recovered_flux_coefficient_pt;
+
+    // The frame each of those coefficient matrices is expressed in. Empty when the recovery is
+    // done in global coordinates, in which case all patches share one (implicit) frame and the
+    // nodal averaging below can average the COEFFICIENTS. When the frames differ per patch that is
+    // meaningless, and the averaging has to happen on the evaluated fluxes instead.
+    std::map<DenseMatrix<double> *, RecoveryFrame> frame_of_coefficients;
+    const bool frames_in_use = recovery_frame_wanted(nodal_dim, dim);
 
     typedef std::map<oomph::Node *, Vector<ElementWithZ2ErrorEstimator *> *>::iterator IT;
 
@@ -1210,8 +1485,10 @@ namespace pyoomph
         // the matrix of recovered flux coefficients and return
         // a pointer to it.
         DenseMatrix<double> *recovered_flux_coefficient_pt = 0;
+        RecoveryFrame frame;
         get_recovered_flux_in_patch(*el_vec_pt, num_recovery_terms, num_flux_terms,
-                                    dim, recovered_flux_coefficient_pt);
+                                    dim, recovered_flux_coefficient_pt, frame);
+        frame_of_coefficients[recovered_flux_coefficient_pt] = frame;
 
         // Store pointer to recovered flux coefficients for
         // current patch in vector so we can send and then delete it later
@@ -1281,12 +1558,14 @@ namespace pyoomph
           // Loop over elements in patch (work out nelements again after bcast)
           nelements = elements.size();
 
+          Vector<ElementWithZ2ErrorEstimator *> patch_el_pt;
           for (unsigned e = 0; e < nelements; e++)
           {
             // Get pointer to element
             ElementWithZ2ErrorEstimator *el_pt =
                 dynamic_cast<ElementWithZ2ErrorEstimator *>(
                     mesh_pt->element_pt(elements[e]));
+            patch_el_pt.push_back(el_pt);
 
             // Loop over all nodes in element
             unsigned num_nod = el_pt->nnode();
@@ -1299,6 +1578,19 @@ namespace pyoomph
               // Mesh not distributed here so nod_pt cannot be halo
               flux_coeff_pt[nod_pt].insert(recovered_flux_coefficient_pt);
             }
+          }
+
+          // The coefficients that were just broadcast are expressed in the sending rank's
+          // patch-local frame, so this rank needs that frame to evaluate them. Rebuild it rather
+          // than broadcast it: the mesh is not distributed here, so every rank holds all the
+          // elements of the patch, the element list has just been broadcast in the sender's order,
+          // and build_recovery_frame is deterministic given that list. Cheaper than serialising a
+          // frame per patch, and it cannot drift out of sync with the sender.
+          if (frames_in_use && my_rank != iproc)
+          {
+            RecoveryFrame frame;
+            build_recovery_frame(patch_el_pt, dim, frame);
+            frame_of_coefficients[recovered_flux_coefficient_pt] = frame;
           }
 
         } // end loop over patches on current processor
@@ -1380,6 +1672,53 @@ namespace pyoomph
 
       // How many patches is this node a member of?
       unsigned npatches = flux_coeff_pt[nod_pt].size();
+
+      if (frames_in_use)
+      {
+        // Each patch fitted its polynomial in its OWN frame, so the coefficients from different
+        // patches are not in a common basis and adding them is meaningless. Evaluate each patch's
+        // recovered flux at the node in that patch's frame first, and average the values. Where the
+        // frames do coincide this is algebraically the same thing (the evaluation is linear in the
+        // coefficients) - which is why the global-frame path below is left exactly as it was rather
+        // than folded into this one: same result, but a different summation order, and every
+        // baselined bulk refinement decision depends on the rounding.
+        Vector<double> xglob(nodal_dim, 0.0);
+        for (unsigned i = 0; i < nodal_dim; i++)
+        {
+          pyoomph::Node *pnod_pt = (use_Lagrangian ? dynamic_cast<pyoomph::Node *>(nod_pt) : NULL);
+          xglob[i] = ((pnod_pt && i < pnod_pt->nlagrangian()) ? pnod_pt->xi(i) : nod_pt->x(i));
+        }
+
+        for (unsigned i = 0; i < num_flux_terms; i++) rec_flux_map(nod_pt, i) = 0.0;
+
+        typedef std::set<DenseMatrix<double> *>::iterator IT;
+        for (IT it = flux_coeff_pt[nod_pt].begin(); it != flux_coeff_pt[nod_pt].end(); it++)
+        {
+          // Loudly, not silently: a missing frame would otherwise default-construct to an inactive
+          // one and evaluate this patch's coefficients in global coordinates, which is not merely
+          // less accurate but meaningless - they were fitted in a different basis.
+          std::map<DenseMatrix<double> *, RecoveryFrame>::const_iterator fit =
+              frame_of_coefficients.find(*it);
+          if (fit == frame_of_coefficients.end())
+          {
+            throw OomphLibError("No recovery frame recorded for a patch's flux coefficients",
+                                OOMPH_CURRENT_FUNCTION, OOMPH_EXCEPTION_LOCATION);
+          }
+          const RecoveryFrame &frame = fit->second;
+          Vector<double> xrec(dim, 0.0);
+          frame.to_local(xglob, dim, xrec);
+          Vector<double> psi_r(num_recovery_terms);
+          shape_rec(xrec, dim, psi_r);
+          for (unsigned i = 0; i < num_flux_terms; i++)
+            for (unsigned icoeff = 0; icoeff < num_recovery_terms; icoeff++)
+              rec_flux_map(nod_pt, i) += (*(*it))(icoeff, i) * psi_r[icoeff];
+        }
+
+        if (npatches > 0)
+          for (unsigned i = 0; i < num_flux_terms; i++) rec_flux_map(nod_pt, i) /= double(npatches);
+
+        continue;
+      }
 
       // Matrix of averaged coefficients for this node
       DenseMatrix<double> averaged_flux_coeff(num_recovery_terms, num_flux_terms, 0.0);
@@ -1487,6 +1826,21 @@ namespace pyoomph
       } // end if (!el_pt->is_halo())
 #endif
     }
+
+#ifdef OOMPH_HAS_MPI
+    // Every rank has to agree, because n_compound_flux is the element count of the MPI_Allreduce on
+    // flux_norm below and of the halo error exchange above it. Before compound-flux grouping existed
+    // this was academic - every element answered 1, so a rank with no elements of this submesh
+    // reached the same 1 by the initialiser. With grouping it is not: a rank holding none of a
+    // grouped domain would reduce over 1 entry while its neighbours reduce over several.
+    if (mesh_pt->is_mesh_distributed())
+    {
+      int global_n_compound_flux = n_compound_flux;
+      MPI_Allreduce(&n_compound_flux, &global_n_compound_flux, 1, MPI_INT, MPI_MAX,
+                    mesh_pt->communicator_pt()->mpi_comm());
+      n_compound_flux = global_n_compound_flux;
+    }
+#endif
 
     // Initialise a vector of flux norms
     Vector<double> flux_norm(n_compound_flux, 0.0);
@@ -1774,6 +2128,36 @@ namespace pyoomph
 
     // Now loop over (all!) elements again and
     // normalise errors by global flux norm
+    //
+    // normalize_relative interpolates between dividing by that norm (=1, the historical behaviour:
+    // each element's error is its share of THIS mesh's total, so the number is dimensionless but
+    // says nothing about how well resolved the mesh is overall) and not dividing at all (=0: the
+    // raw integrated flux jump, which is comparable between meshes and between adaptation steps but
+    // whose magnitude depends on the element size and the field's own scale, so the permitted-error
+    // thresholds have to be rechosen for it).
+    //
+    // Dividing by norm^p is the geometric blend of the two, since err/norm^p is exactly
+    // (err/norm)^p * err^(1-p). A linear blend of the divisors would need an arbitrary absolute
+    // unit to interpolate towards, which is precisely what "absolute" is trying to avoid.
+    // Per group: the exponent and the weight the equations asked for. Read off an element rather
+    // than held on the estimator, because the grouping is declared by the equations compiled into
+    // the element code, so this is the only place that knows the mapping from a criterion to a
+    // group index. The estimator's own normalize_relative still applies on top, so a mesh can be
+    // switched to absolute errors from Python without touching the equations.
+    Vector<double> group_exponent(n_compound_flux, normalize_relative);
+    Vector<double> group_weight(n_compound_flux, 1.0);
+    if (mesh_pt->nelement() > 0)
+    {
+      BulkElementBase *be = dynamic_cast<BulkElementBase *>(mesh_pt->element_pt(0));
+      if (be)
+      {
+        for (int i = 0; i < n_compound_flux; i++)
+        {
+          group_exponent[i] = normalize_relative * be->Z2_compound_flux_normalize_relative(i);
+          group_weight[i] = be->Z2_compound_flux_weight(i);
+        }
+      }
+    }
 
     nelem = mesh_pt->nelement();
     for (unsigned e = 0; e < nelem; e++)
@@ -1782,16 +2166,24 @@ namespace pyoomph
       Vector<double> normalised_compound_flux_error(n_compound_flux);
       for (int i = 0; i < n_compound_flux; i++)
       {
-        if (flux_norm[i] != 0.0)
+        const double norm_exponent = group_exponent[i];
+        if (flux_norm[i] != 0.0 && norm_exponent != 0.0)
         {
-          normalised_compound_flux_error[i] =
-              elemental_compound_flux_error(e, i) / (flux_norm[i] + 1.0e-9); // CHANGE C. Diddens add a little offset here
+          // CHANGE C. Diddens add a little offset here
+          const double denom = (norm_exponent == 1.0 ? flux_norm[i] + 1.0e-9
+                                                     : std::pow(flux_norm[i] + 1.0e-9, norm_exponent));
+          // The p==1 branch is not just an optimisation: it keeps the default path bit-identical,
+          // which every baselined refinement decision in the test suite depends on.
+          normalised_compound_flux_error[i] = elemental_compound_flux_error(e, i) / denom;
         }
         else
         {
           normalised_compound_flux_error[i] =
               elemental_compound_flux_error(e, i);
         }
+        // Left out of the default path entirely rather than multiplied by 1.0, so that a mesh
+        // without grouping keeps producing bit-identical numbers.
+        if (group_weight[i] != 1.0) normalised_compound_flux_error[i] *= group_weight[i];
       }
 
       // calculate the combined error estimate

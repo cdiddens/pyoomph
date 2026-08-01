@@ -320,7 +320,10 @@ void PyReg_CodeGen(nb::module_ &m)
         .def("_add_residual", &pyoomph::FiniteElementCode::add_residual, nb::arg("contribution"), nb::arg("allow_contributions_without_dx"),
              "Add ``contribution`` (a weak-form residual term, typically of the form weak(...,...)) to the currently active residual. ``allow_contributions_without_dx`` permits terms not already wrapped in an integration measure.")
         .def("_add_Z2_flux", &pyoomph::FiniteElementCode::add_Z2_flux, nb::arg("flux"), nb::arg("for_eigen"),
-             "Register ``flux`` as a contribution to the Z2 (flux-recovery) spatial error estimator used for adaptive refinement; ``for_eigen`` selects whether it applies to the base state or an eigenmode.")
+             nb::arg("group") = "", nb::arg("normalize_relative") = 1.0, nb::arg("weight") = 1.0,
+             "Register ``flux`` as a contribution to the Z2 (flux-recovery) spatial error estimator used for adaptive refinement; ``for_eigen`` selects whether it applies to the base state or an eigenmode. "
+             "``group`` names the compound-flux group the term belongs to: each group is normalised by its own recovered-flux norm and the groups are combined by taking the maximum, so criteria in different groups cannot dilute one another. "
+             "``normalize_relative`` is the power that group's norm is raised to before dividing (1 = relative, 0 = absolute) and ``weight`` scales the group's error afterwards; both must agree across all terms of one group.")
         .def("_register_field", &pyoomph::FiniteElementCode::register_field, nb::rv_policy::reference, nb::arg("name"), nb::arg("spacename"),
              "Declare a new field ``name`` living in the finite element space ``spacename`` (e.g. \"C2\", \"C1\", \"D0\").")
         .def_rw("_coordinates_as_dofs", &pyoomph::FiniteElementCode::coordinates_as_dofs,

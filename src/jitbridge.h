@@ -468,6 +468,18 @@ typedef struct JITFuncSpec_Table_FiniteElement
   JITFuncSpec_GetZ2Fluxes_FiniteElement GetZ2Fluxes,GetZ2FluxesForEigen;
   JITFuncSpec_RequiredShapes_FiniteElement_t shapes_required_Z2Fluxes;
 
+  /* Compound-flux grouping for the Z2 error estimator. oomph-lib normalises each group by its own
+     recovered-flux norm and combines the groups by taking the maximum, so two error criteria added
+     independently to one domain coexist without either diluting the other.
+     All four pointers stay NULL and num_Z2_compound_fluxes stays 0 for the historical case of a
+     single, fully relative, unweighted group; the estimator checks that to keep its old code path
+     (and hence bit-identical errors) for everything that does not ask for grouping.
+     Z2_flux_group_index has num_Z2_flux_terms entries, the other two num_Z2_compound_fluxes. */
+  unsigned num_Z2_compound_fluxes,num_Z2_compound_fluxes_for_eigen;
+  unsigned *Z2_flux_group_index,*Z2_flux_group_index_for_eigen;
+  double *Z2_group_normalize_relative,*Z2_group_normalize_relative_for_eigen;
+  double *Z2_group_weight,*Z2_group_weight_for_eigen;
+
   JITFuncSpec_InitialCondition_FiniteElement *InitialConditionFunc;
   unsigned num_ICs;
   char **IC_names;

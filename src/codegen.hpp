@@ -900,6 +900,19 @@ namespace pyoomph
       std::map<std::string, std::map<FiniteElementSpace *, std::map<std::string, bool>, FiniteElementSpacePtrLess>> required_shapes; // [func_type][space][shape/dx flavor] -> required; tracks which shape-function tables must be filled for which generated routine
       unsigned max_dt_order = 0; // Highest time-derivative order appearing in any residual of this code
       std::vector<GiNaC::ex> Z2_fluxes,Z2_fluxes_for_eigen; // Flux expressions used for the Zienkiewicz-Zhu (Z2) error estimator, registered via add_Z2_flux()
+      // Which compound-flux group each of the above belongs to. oomph-lib gives every group its own
+      // recovered-flux norm and combines the groups' errors by taking the maximum, which is what lets
+      // two independently added error criteria on one domain coexist without either diluting the
+      // other. Everything lands in group 0 unless a group is named, which is the historical single-
+      // norm behaviour. See dev_docs/spatial_error_estimators.md.
+      std::vector<unsigned> Z2_flux_groups,Z2_flux_groups_for_eigen;
+      std::vector<std::string> Z2_group_names,Z2_group_names_for_eigen; // group index -> name, for diagnostics
+      // Per group: the exponent the mesh-global norm is raised to before dividing (1 = relative,
+      // 0 = absolute, in between the geometric blend) and a multiplicative weight applied afterwards.
+      std::vector<double> Z2_group_normalize_relative,Z2_group_normalize_relative_for_eigen;
+      std::vector<double> Z2_group_weight,Z2_group_weight_for_eigen;
+      // Resolves a group name to its index, creating the group (with default settings) if new.
+      unsigned get_Z2_group_index(const std::string &name,bool for_eigen);
       std::map<std::string, GiNaC::ex> integral_expressions; // Named domain-integral output expressions, registered via register_integral_function()
       std::map<std::string, GiNaC::ex> integral_expression_units;
 
@@ -1012,7 +1025,7 @@ namespace pyoomph
       virtual void mark_shapes_required(std::string func_type, FiniteElementSpace *space, BasisFunction *bf);
       virtual GiNaC::ex get_scaling(std::string , bool  = false) { return 1; } // Nondimensionalization scale factor for field/parameter "name"; overloaded in Python, default is unscaled (1)
 
-      virtual void add_Z2_flux(GiNaC::ex flux,bool for_eigen); // Registers a flux expression for the Z2 error estimator (expands vector/matrix expressions into one entry per component)
+      virtual void add_Z2_flux(GiNaC::ex flux,bool for_eigen,const std::string &group="",double normalize_relative=1.0,double weight=1.0); // Registers a flux expression for the Z2 error estimator (expands vector/matrix expressions into one entry per component) in the named compound-flux group
       virtual int get_dimension() const { return element_dim; }
       void set_nodal_dimension(unsigned d) { nodal_dim = d; }
       unsigned nodal_dimension() const { return nodal_dim; }

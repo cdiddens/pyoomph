@@ -53,7 +53,9 @@ from ..typings import *
 # whenever this cache's key composition changes. Old cache entries simply
 # become permanent misses (never read, eventually evicted) after a bump -
 # there is no migration.
-FORMAT_VERSION = 3
+# 4: JITFuncSpec_Table_FiniteElement_t gained the Z2 compound-flux grouping fields, so a .so
+#    compiled against the older struct would be read with the wrong layout by a newer core.
+FORMAT_VERSION = 4
 
 
 def _platform_runtime_tag() -> str:

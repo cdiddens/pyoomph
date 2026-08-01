@@ -3672,11 +3672,44 @@ namespace pyoomph
 	// mesh adaptation). The (possibly matrix/vector-valued, after evalm()) expression is expanded and
 	// every non-constant scalar component is stored, either in the normal flux list or, if `for_eigen`,
 	// in the separate list used for eigenproblem/azimuthal error estimation.
-	void FiniteElementCode::add_Z2_flux(GiNaC::ex flux,bool for_eigen)
+	unsigned FiniteElementCode::get_Z2_group_index(const std::string &name,bool for_eigen)
+	{
+		auto &names = (for_eigen ? Z2_group_names_for_eigen : Z2_group_names);
+		for (unsigned int i = 0; i < names.size(); i++)
+			if (names[i] == name) return i;
+		names.push_back(name);
+		// New groups start at the historical settings: fully relative, unweighted. add_Z2_flux
+		// overwrites them with what the caller asked for.
+		(for_eigen ? Z2_group_normalize_relative_for_eigen : Z2_group_normalize_relative).push_back(1.0);
+		(for_eigen ? Z2_group_weight_for_eigen : Z2_group_weight).push_back(1.0);
+		return names.size() - 1;
+	}
+
+	void FiniteElementCode::add_Z2_flux(GiNaC::ex flux,bool for_eigen,const std::string &group,double normalize_relative,double weight)
 	{
 		if (stage > 1)
 			throw_runtime_error("Cannot add error estimators any more");
 		GiNaC::ex expanded = this->expand_placeholders(flux, "Z2Flux");
+
+		const unsigned grp = this->get_Z2_group_index(group, for_eigen);
+		// Every flux of one group has to agree about how that group is normalised - the norm being
+		// divided out is a property of the group, not of the individual expression. Disagreement is
+		// a mistake worth reporting rather than silently resolving to whichever was registered last.
+		auto &normrel = (for_eigen ? Z2_group_normalize_relative_for_eigen : Z2_group_normalize_relative);
+		auto &wgt = (for_eigen ? Z2_group_weight_for_eigen : Z2_group_weight);
+		auto &fluxlist = (for_eigen ? Z2_fluxes_for_eigen : Z2_fluxes);
+		auto &grouplist = (for_eigen ? Z2_flux_groups_for_eigen : Z2_flux_groups);
+		const bool group_is_new = (std::count(grouplist.begin(), grouplist.end(), grp) == 0);
+		if (!group_is_new && (normrel[grp] != normalize_relative || wgt[grp] != weight))
+		{
+			throw_runtime_error("Conflicting normalization for spatial error estimator group '" + group +
+								"': got normalize_relative=" + std::to_string(normalize_relative) + ", weight=" + std::to_string(weight) +
+								" but the group was already registered with normalize_relative=" + std::to_string(normrel[grp]) +
+								", weight=" + std::to_string(wgt[grp]) +
+								". Use a different group name to normalize them independently.");
+		}
+		normrel[grp] = normalize_relative;
+		wgt[grp] = weight;
 
 		GiNaC::ex evm = expanded.evalm();
 		if (GiNaC::is_a<GiNaC::matrix>(evm))
@@ -3688,28 +3721,16 @@ namespace pyoomph
 				{
 					if (!GiNaC::is_a<GiNaC::numeric>(m(i, j)))
 					{
-						if (for_eigen)
-						{
-							this->Z2_fluxes_for_eigen.push_back(m(i, j));
-						}
-						else
-						{
-							this->Z2_fluxes.push_back(m(i, j));
-						}
+						fluxlist.push_back(m(i, j));
+						grouplist.push_back(grp);
 					}
 				}
 			}
 		}
 		else if (!GiNaC::is_a<GiNaC::numeric>(evm))
 		{
-			if (for_eigen)
-			{
-				this->Z2_fluxes_for_eigen.push_back(evm);
-			}
-			else
-			{
-				this->Z2_fluxes.push_back(evm);
-			}
+			fluxlist.push_back(evm);
+			grouplist.push_back(grp);
 		}
 	}
 
@@ -8324,6 +8345,40 @@ namespace pyoomph
 		{
 			init << " functable->GetZ2FluxesForEigen=&GetZ2FluxesForEigen;" << std::endl;
 		}
+
+		// The compound-flux grouping and its per-group normalisation. Emitted as calloc'd arrays in
+		// the same style as temporal_error_scales above, rather than as static tables, so that the
+		// cleanup path can free them uniformly. The arrays are only emitted when there is something
+		// to say: a single group with the default settings is exactly the historical behaviour and
+		// leaves the pointers null, which is what the estimator checks to take its old fast path.
+		auto write_group_arrays = [&](bool for_eigen)
+		{
+			const auto &groups = (for_eigen ? this->Z2_flux_groups_for_eigen : this->Z2_flux_groups);
+			const auto &normrel = (for_eigen ? this->Z2_group_normalize_relative_for_eigen : this->Z2_group_normalize_relative);
+			const auto &wgt = (for_eigen ? this->Z2_group_weight_for_eigen : this->Z2_group_weight);
+			const std::string sfx = (for_eigen ? "_for_eigen" : "");
+			if (groups.empty()) return;
+			bool nondefault = (normrel.size() > 1);
+			for (unsigned int g = 0; g < normrel.size(); g++)
+				if (normrel[g] != 1.0 || wgt[g] != 1.0) nondefault = true;
+			if (!nondefault) return; // one group, relative, unweighted: nothing the estimator needs to know
+			init << " functable->num_Z2_compound_fluxes" << sfx << " = " << normrel.size() << ";" << std::endl;
+			init << " functable->Z2_flux_group_index" << sfx << "=calloc(" << groups.size() << ",sizeof(unsigned));" << std::endl;
+			cleanup << " pyoomph_tested_free(functable->Z2_flux_group_index" << sfx << "); functable->Z2_flux_group_index" << sfx << "=PYOOMPH_NULL; " << std::endl;
+			for (unsigned int i = 0; i < groups.size(); i++)
+				if (groups[i]) init << "  functable->Z2_flux_group_index" << sfx << "[" << i << "] = " << groups[i] << ";" << std::endl;
+			init << " functable->Z2_group_normalize_relative" << sfx << "=calloc(" << normrel.size() << ",sizeof(double));" << std::endl;
+			cleanup << " pyoomph_tested_free(functable->Z2_group_normalize_relative" << sfx << "); functable->Z2_group_normalize_relative" << sfx << "=PYOOMPH_NULL; " << std::endl;
+			init << " functable->Z2_group_weight" << sfx << "=calloc(" << wgt.size() << ",sizeof(double));" << std::endl;
+			cleanup << " pyoomph_tested_free(functable->Z2_group_weight" << sfx << "); functable->Z2_group_weight" << sfx << "=PYOOMPH_NULL; " << std::endl;
+			for (unsigned int g = 0; g < normrel.size(); g++)
+			{
+				init << "  functable->Z2_group_normalize_relative" << sfx << "[" << g << "] = " << std::to_string(normrel[g]) << ";" << std::endl;
+				init << "  functable->Z2_group_weight" << sfx << "[" << g << "] = " << std::to_string(wgt[g]) << ";" << std::endl;
+			}
+		};
+		write_group_arrays(false);
+		write_group_arrays(true);
 
 		if (this->Z2_fluxes.size() || this->Z2_fluxes_for_eigen.size())
 		{

@@ -7637,6 +7637,41 @@ namespace pyoomph
 		else return codeinst->get_func_table()->num_Z2_flux_terms;
 	}
 
+	// The compound-flux grouping of this element's Z2 fluxes. Everything below returns the
+	// single-group answer (which is also oomph-lib's own default) unless the generated code declared
+	// groups, i.e. unless some error criterion on this domain asked to be normalised on its own.
+	unsigned BulkElementBase::ncompound_fluxes()
+	{
+		auto *ft = codeinst->get_func_table();
+		const unsigned n = (BulkElementBase::use_eigen_error_estimators ? ft->num_Z2_compound_fluxes_for_eigen : ft->num_Z2_compound_fluxes);
+		return (n ? n : 1);
+	}
+
+	void BulkElementBase::get_Z2_compound_flux_indices(oomph::Vector<unsigned> &flux_index)
+	{
+		auto *ft = codeinst->get_func_table();
+		const unsigned *idx = (BulkElementBase::use_eigen_error_estimators ? ft->Z2_flux_group_index_for_eigen : ft->Z2_flux_group_index);
+		if (!idx) return; // caller initialised the vector to all-zero, which is the single-group case
+		for (unsigned int i = 0; i < flux_index.size(); i++) flux_index[i] = idx[i];
+	}
+
+	// Per-group normalisation exponent and weight, read by LagrZ2ErrorEstimator once the mesh-global
+	// flux norms are known. Defaults reproduce the historical behaviour exactly: divide by the full
+	// norm, no weighting.
+	double BulkElementBase::Z2_compound_flux_normalize_relative(const unsigned &g)
+	{
+		auto *ft = codeinst->get_func_table();
+		const double *v = (BulkElementBase::use_eigen_error_estimators ? ft->Z2_group_normalize_relative_for_eigen : ft->Z2_group_normalize_relative);
+		return (v ? v[g] : 1.0);
+	}
+
+	double BulkElementBase::Z2_compound_flux_weight(const unsigned &g)
+	{
+		auto *ft = codeinst->get_func_table();
+		const double *v = (BulkElementBase::use_eigen_error_estimators ? ft->Z2_group_weight_for_eigen : ft->Z2_group_weight);
+		return (v ? v[g] : 1.0);
+	}
+
 	// Evaluates the Z2-error-estimator flux vector at local coordinate s via the JIT-generated
 	// GetZ2Fluxes (or GetZ2FluxesForEigen) function, used by oomph-lib's Z2 error estimator to
 	// drive adaptive mesh refinement.
