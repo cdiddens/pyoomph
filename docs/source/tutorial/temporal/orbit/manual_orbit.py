@@ -43,18 +43,33 @@ if __name__=="__main__":
         problem.perturb_dofs(100*problem.get_last_eigenvectors()[0])
         # First run without any outputs
         problem.run(endtime=10,maxstep=0.0125,outstep=False,startstep=0.0001,temporal_error=0.005,do_not_set_IC=True)
-        # Then write the dynamics from t=10 to t=13 to the output
-        problem.run(endtime=13,startstep=0.0125,outstep=True,do_not_set_IC=True)
-        
-        # Load the output 
+        # Then write the dynamics from t=10 to t=60 to the output. A long stretch is required, since we
+        # need an almost closed part of the trajectory in it (see below)
+        problem.run(endtime=60,startstep=0.0125,outstep=True,do_not_set_IC=True)
+
+        # Load the output
         data=numpy.loadtxt(problem.get_output_directory("lorenz.txt"))
-        Tguess=data[-1,0]-data[0,0] # Get a guess for the period (will be T=3)
+        dt=data[1,0]-data[0,0]
+        # It matters a lot which stretch of the chaos we take as guess. A fixed window, e.g. just
+        # t=10 to t=13, lands wherever the chaos happens to be and is then typically far from closing
+        # on itself. So we search for the best almost closed stretch of the trajectory.
+        # The period range restricts the search to the orbit family we are after here (T close to 3).
+        X=data[:,1:]
+        best=None
+        for k in range(int(round(2.8/dt)),int(round(3.4/dt))+1):
+            dist=numpy.linalg.norm(X[k:]-X[:-k],axis=1)
+            i=int(numpy.argmin(dist))
+            if best is None or dist[i]<best[0]:
+                best=(dist[i],i,k)
+        _,istart,nT=best
+        segment=data[istart:istart+nT] # The almost closed stretch of the trajectory
+        Tguess=nT*dt # Get a guess for the period (will be T~3)
         # Apply a low pass filter to make the guess periodic
-        fft=numpy.fft.rfft(data[:,1:],axis=0) 
-        freqs=numpy.fft.rfftfreq(data.shape[0],d=Tguess/data.shape[0])
+        fft=numpy.fft.rfft(segment[:,1:],axis=0)
         fft[fft.shape[0]//16:,:]=0.0   # Just let only 1/16 of the frequencies pass
-        smoothed=numpy.fft.irfft(fft,axis=0)
-        numpy.savetxt(problem.get_output_directory("lorenz_smoothed.txt"),numpy.column_stack([data[:,0],smoothed]),header="t x y z")
+        # n must be passed, otherwise irfft silently drops the last sample for an odd segment length
+        smoothed=numpy.fft.irfft(fft,n=nT,axis=0)
+        numpy.savetxt(problem.get_output_directory("lorenz_smoothed.txt"),numpy.column_stack([segment[:,0],smoothed]),header="t x y z")
         # Start with the smoothed data
         problem.set_current_dofs(smoothed[0])        
         # And give the smoothed recorded time history as orbit guess
