@@ -48,10 +48,10 @@ TIMEOUT_TUTORIALS=28800  # 8 h  (a full tutorial pass is over an hour when healt
 # Leave MAIL_TO empty to switch mail off entirely: the run still writes its full report to
 # a dated directory under LOG_DIR, which is then simply where you read it. Worth doing on a
 # host that cannot send mail at all rather than letting every night end in two doomed SMTP
-# attempts and a message queued forever by a local MTA. UT lists its roaming workstation
-# range on the Spamhaus PBL, so a machine on it is refused by the MX as a matter of policy;
-# check with `citools/nightly_develop.sh --test-mail` before assuming mail works.
-MAIL_TO="c.diddens@utwente.nl"
+# attempts and a message queued forever by a local MTA. Networks commonly forbid the hosts
+# in their workstation ranges from delivering mail directly, so run
+# `citools/nightly_develop.sh --test-mail` before assuming this machine can send at all.
+MAIL_TO="...@..."
 
 # Set this to a real mailbox. The default below is built from `hostname`, which on a
 # workstation is usually a bare name with no domain; a sender whose domain does not resolve
@@ -62,20 +62,11 @@ MAIL_FROM="pyoomph-nightly@$(hostname -f 2>/dev/null || hostname)"
 # If SMTP_HOST is set the report is sent with Python's smtplib; otherwise the script falls
 # back to the local `mail`/`sendmail` command. Setting it is the more portable option --
 # most workstations have no working MTA at all.
-#
-# The settings below need NO credentials, which matters on a shared machine: anything you
-# put in this file is readable by anyone with root, whatever the file mode says. They talk
-# straight to the MX that handles utwente.nl, and an MX accepts mail FOR its own domain
-# without authentication -- that is how the rest of the internet delivers to it. It offers
-# no AUTH at all, so there is no password to leak. The catch is that it will only accept
-# recipients at utwente.nl, which is all this script needs.
-#
-# Re-derive the host if it ever changes:  dig +short MX utwente.nl
-SMTP_HOST="utwente-nl.mail.protection.outlook.com"
+SMTP_HOST="..@.."
 SMTP_PORT=25
 SMTP_USER=""
 SMTP_PASSWORD=""
-# starttls (usual for port 587 and offered by the MX above), ssl (port 465), or none.
+# starttls (usual for port 587), ssl (port 465), or none (a port 25 relay).
 SMTP_SECURITY="starttls"
 
 # Microsoft rejects IPv6 senders whose address has no reverse-DNS record ("4.7.25 ...
@@ -83,22 +74,17 @@ SMTP_SECURITY="starttls"
 # and a host with an IPv6 route will pick IPv6 by itself. The script notices this and
 # retries over IPv4 on its own; setting this to 1 skips the attempt that is known to fail.
 SMTP_FORCE_IPV4=1
-#
-# THAT ROUTE DOES NOT WORK FROM EVERY MACHINE. UT lists its roaming workstation range on
-# the Spamhaus PBL -- a policy statement by UT that those hosts must not send mail directly
-# -- and the MX then refuses with "5.7.1 ... blocked using Spamhaus". Run --test-mail to
-# find out; if it is refused, use the submission route below instead.
-#
+
 # ---- authenticated submission, with a mailbox that exists only for this ----
 #
-# The PBL applies to direct-to-MX on port 25 only; authenticated submission on port 587 is
-# precisely what it tells you to use instead, so this works from a listed host.
+# Where a network refuses direct delivery, it will normally still allow an authenticated
+# submission server on port 587 -- that is what such a restriction expects you to use.
 #
 # On a shared machine, make the credential one you do not care about: a free mailbox
-# created for nothing but sending these reports. Anyone with root here can read this file
+# created for nothing but sending these reports. Anyone with root there can read this file
 # whatever its mode, so the question is not whether the password leaks but what it is worth
 # when it does -- and the answer should be "it can send pyoomph nightly reports". Never a
-# password that is reused anywhere, and never a UT account.
+# password that is reused anywhere.
 #
 #   SMTP_HOST="smtp.gmail.com"          # Gmail: enable 2FA, then create an App Password
 #   SMTP_PORT=587                       # (a 16-character token, revocable on its own)
@@ -106,15 +92,15 @@ SMTP_FORCE_IPV4=1
 #   SMTP_USER="pyoomph.nightly@gmail.com"
 #   SMTP_PASSWORD="xxxxxxxxxxxxxxxx"
 #   MAIL_FROM="pyoomph.nightly@gmail.com"   # MUST match SMTP_USER; see below
-#   MAIL_TO="c.diddens@utwente.nl"          # where you actually read it
+#   MAIL_TO="...@..."          # where you actually read it
 #
 # Transactional senders (Brevo, SMTP2GO, Mailjet) work the same way and are a better fit
 # still: the credential is a send-only API key that cannot read anything, and revoking it
 # takes one click. All of them have a free tier far above one mail a night.
 #
 # MAIL_FROM must equal SMTP_USER. Submission servers require the sender to be the account
-# that authenticated and will reject or rewrite anything else -- and a From of
-# @utwente.nl sent through Gmail fails UT's own DMARC policy on arrival. --test-mail warns
+# that authenticated and will reject or rewrite anything else, and a From at a domain the
+# relay is not authorised to send for fails DMARC on arrival instead. --test-mail warns
 # about the mismatch.
 
 # Number of lines of each failing log that is quoted in the mail body. The full logs stay

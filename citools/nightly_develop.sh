@@ -54,7 +54,7 @@ PETSC_PYTHONPATH=""
 TIMEOUT_BUILD=7200
 TIMEOUT_PYTEST=7200
 TIMEOUT_TUTORIALS=28800
-MAIL_TO="c.diddens@utwente.nl"
+MAIL_TO=""   # empty means "do not send"; set it in the config file, not here
 MAIL_FROM="pyoomph-nightly@$(hostname -f 2>/dev/null || hostname)"
 SMTP_HOST=""
 SMTP_PORT=587
@@ -105,11 +105,11 @@ send_mail() {
     local subject="$1" bodyfile="$2" rc out
     MAIL_TRANSPORT=""
 
-    # An empty MAIL_TO turns mail off. Worth having: on a host that cannot send at all
-    # (UT lists its roaming workstation range on the Spamhaus PBL, so direct-to-MX is
-    # refused by policy) the alternative is two doomed SMTP attempts every night followed
-    # by a report handed to a local MTA that queues it forever. The reports are on disk
-    # either way -- that is where they are read from.
+    # An empty MAIL_TO turns mail off. Worth having: on a host that cannot send at all --
+    # networks commonly refuse direct delivery from their workstation ranges as a matter of
+    # policy -- the alternative is two doomed SMTP attempts every night followed by a report
+    # handed to a local MTA that queues it forever. The reports are on disk either way, and
+    # that is then where they are read from.
     if [ -z "$MAIL_TO" ]; then
         MAIL_TRANSPORT="disabled"
         note "mail disabled (MAIL_TO is empty) -- report kept at $bodyfile"
