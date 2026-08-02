@@ -71,10 +71,19 @@ at all.
 
 **Eigenvectors are gathered back to full global length on every rank**
 (`_vector_to_global_array`, via `PETSc.Scatter.toAll`). This is the decision that keeps the change
-small: `set_eigenfunction_as_dofs()`, the mesh data cache, the VTK output and
-`refine_eigenfunction()` all index eigenvectors by global equation number and reach the dofs through
-`get_current_dofs()`/`set_current_dofs()`, which already gather and scatter. Nothing downstream had
-to change. The cost is `neval` vectors, not a matrix.
+small: `set_eigenfunction_as_dofs()`, the mesh data cache and the VTK output all index eigenvectors
+by global equation number and reach the dofs through `get_current_dofs()`/`set_current_dofs()`, which
+already gather and scatter. Nothing on that path had to change. The cost is `neval` vectors, not a
+matrix.
+
+`refine_eigenfunction()` is the exception, and it is worth being precise about why, because it looks
+like it should work: it too only ever handles a global eigenvector. But `adapt()` carries the
+eigenfunction across the adaption in **history levels 3 and 4**, and the history dof accessors refuse
+on a distributed problem — an equation number there is global while the vector holds only this rank's
+rows, so oomph-lib declares them unsupported and pyoomph throws rather than corrupt the heap
+(`Problem::get_dofs(t,...)`, `src/problem.cpp`). The same is true of `adapt()` during arclength
+continuation, which uses levels 5 and 6; that is pre-existing and unrelated to eigenproblems.
+Distributed history dofs are the prerequisite for both.
 
 **Manipulators move to the backend.** `EigenMatrixManipulatorBase.apply_on_distributed_J_and_M`
 takes the eigensolver's own matrices; `EigenMatrixSetDofsToZero` implements it as
@@ -120,6 +129,7 @@ through `Problem._require_non_distributed`:
 - the multi-assembly tensor cache
 - Lyapunov exponents
 - the periodic driving response
+- `refine_eigenfunction()` — for the history-dof reason in §3, not for an assembly reason
 
 Bifurcation tracking in parallel is a separate project: the augmented handlers in
 `src/bifurcation.cpp` are serial by construction.

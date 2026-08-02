@@ -4565,11 +4565,17 @@ class Problem(_pyoomph.Problem):
             Tuple[float, NPFloatArray]: The eigenvalue and eigenvector of the adapted eigenproblem.
             
         """
+        # Unlike plain eigenvalue solving, this one is NOT available distributed: adapt() carries the
+        # eigenfunction across the adaption in history levels 3 and 4, and the history dof accessors
+        # refuse on a distributed problem (an equation number there is global while the vector holds
+        # only this rank's rows -- see Problem::get_dofs(t,...) in src/problem.cpp). Raising here names
+        # the feature instead of failing several frames into adapt().
+        self._require_non_distributed("Mesh adaptation to an eigenfunction (refine_eigenfunction)")
         if eigenindex<0:
             raise ValueError("Eigenindex must be non-negative")
         elif eigenindex>=len(self.get_last_eigenvalues()):
             raise ValueError("Eigenindex must be smaller than the number of calculated eigenvalues")
-        
+
         self._adapt_eigenindex=eigenindex
         for i in range(numadapt):
             

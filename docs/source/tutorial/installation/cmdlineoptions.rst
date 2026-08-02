@@ -88,7 +88,8 @@ Output and code generation
       process, exactly as in a serial run, so plotting and output of eigenmodes need no changes.
 
       Bifurcation tracking, eigenbranch continuation, periodic orbit tracking / Floquet analysis,
-      Lyapunov exponents and the periodic driving response are **not** available under
+      Lyapunov exponents, the periodic driving response and adapting the mesh to an eigenfunction
+      (:py:meth:`~pyoomph.generic.problem.Problem.refine_eigenfunction`) are **not** available under
       ``--distribute`` and stop with an explanatory error. Run those without ``--distribute`` (plain
       eigenvalue solving is unaffected).
 
