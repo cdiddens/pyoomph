@@ -3691,6 +3691,39 @@ class Problem(_pyoomph.Problem):
         return res
 
 
+    def solve_auxiliary_residual(self, residual_name: str, **solve_kwargs) -> None:
+        """
+        Solve an auxiliary residual on its own, leaving the main solution untouched.
+
+        Equations may be added to a named residual instead of the default one, by passing
+        ``destination`` to :py:meth:`~pyoomph.generic.codegen.BaseEquations.add_residual`. Anything
+        that is only ever postprocessed - a projection of some expression onto a field for output,
+        say - belongs there rather than in the residual the Newton solver works on: on the main
+        residual those unknowns have no Jacobian row at all, so they are pinned automatically and
+        cost nothing, and this method solves for them when they are actually wanted. While it runs,
+        the roles are reversed and the unknowns of the main residual are the pinned ones.
+
+        Switching the residual is not sufficient by itself. :py:meth:`_set_solved_residual` only
+        *marks* which fields have an empty Jacobian row; the pinning takes effect when the equation
+        numbers are reassigned, which is what :py:meth:`reapply_boundary_conditions` does. Both are
+        therefore done here, on the way in and on the way back out - the latter even if the solve
+        raises, since leaving the problem on the auxiliary residual would silently corrupt every
+        subsequent solve.
+
+        Args:
+            residual_name: name of the residual to solve, i.e. the ``destination`` the equations
+                were added with.
+            **solve_kwargs: passed on to :py:meth:`solve`.
+        """
+        previous = self._get_solved_residual()
+        self._set_solved_residual(residual_name, True, True)
+        self.reapply_boundary_conditions()
+        try:
+            self.solve(**solve_kwargs)
+        finally:
+            self._set_solved_residual(previous, False, True)
+            self.reapply_boundary_conditions()
+
     def reapply_boundary_conditions(self):
         # Additional dof constraints (ConstrainFieldsToC1Space / ConstrainPositionsToC1Space) may live
         # on interface fields, whose elements sit in the (nested) interface meshes rather than the

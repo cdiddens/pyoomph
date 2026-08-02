@@ -1169,6 +1169,9 @@ void PyReg_Problem(nb::module_ &m)
 			 "Activate the residual/Jacobian combination named ``name`` as the one assembled by subsequent get_residuals()/get_jacobian() calls. Raises an error if "
 			 "no equation contributes to it and ``raise_error`` is True. If ``remove_dofs_without_jacobian_row`` is True, degrees of freedom without a corresponding "
 			 "Jacobian row/column for this residual are pinned to keep the Jacobian non-singular.")
+		.def("_get_solved_residual", &pyoomph::Problem::_get_solved_residual,
+			 "Return the name of the currently active residual/Jacobian combination; \"\" is the default combined residual. "
+			 "Counterpart of _set_solved_residual(), so that a caller can restore whatever was active before it switched.")
 		.def(
 			"set_analytic_hessian_products", [](pyoomph::Problem *self, bool active, bool use_symmetry)
 			{ if (active) self->set_analytic_hessian_products();  else self->unset_analytic_hessian_products(); self->set_symmetric_hessian_assembly(use_symmetry); },

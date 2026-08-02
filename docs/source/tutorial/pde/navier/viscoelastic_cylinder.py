@@ -191,7 +191,7 @@ class FlowDirectedStresses(ProjectExpression):
     get_polymer_stress() needs the code generator's scope to resolve the fields it is made of.
     """
 
-    def __init__(self, space="C1"):
+    def __init__(self, space="C2"):
         # Placeholder values: only the names are needed to define the fields, and define_residuals
         # replaces them below before the parent builds the projection
         super().__init__(space=space, S1=0, S2=0)
@@ -218,22 +218,6 @@ class FlowDirectedStresses(ProjectExpression):
             self.add_residual(weak(-expression, test), destination=PROJECTION_RESIDUAL)
 
 
-def solve_projection(problem):
-    """
-    Solve for the projected stresses alone, leaving the flow solution untouched.
-
-    Switching the active residual only MARKS which fields have no Jacobian row in it; the pinning
-    itself happens when the equation numbers are reassigned, which is what reapply_boundary_conditions
-    does. Both calls are therefore needed, and both times - the same pattern pyoomph uses internally
-    when it projects initial conditions.
-    """
-    problem._set_solved_residual(PROJECTION_RESIDUAL, True, True)
-    problem.reapply_boundary_conditions()
-    problem.solve()
-    problem._set_solved_residual("", False, True)
-    problem.reapply_boundary_conditions()
-
-
 class FlowStressPlotter(MatplotlibPlotter):
     """One panel of Fig. 12: a flow-directed stress around the cylinder"""
 
@@ -246,13 +230,18 @@ class FlowStressPlotter(MatplotlibPlotter):
 
     def define_plot(self):
         self.background_color = "white"
-        self.set_view(-3.0, 0.0, 6.0, 2.05)      # the half that is actually solved
+        # The domain is the upper half only, so the strip below y=0 is empty: the view is extended
+        # into it to give the colorbar somewhere to sit that is not on top of the cylinder
+        self.set_view(-3.0, -0.62, 6.0, 2.05)
         # "jet" to match the discrete rainbow scale of the reference figure. vmin/vmax would only
         # widen the range, never clip it, so the scale is left to the data - which is the point of
         # the comparison, since the reference quotes its own extrema panel by panel
-        cb = self.add_colorbar(self.title, cmap="jet", position="top center",
-                               vmin=self.vmin, vmax=self.vmax, length=0.6, thickness=0.05)
-        cb.textcolor, cb.textsize = "black", 13
+        # No title on the bar itself: the assembled figure labels the columns. Everything is drawn
+        # oversized because each panel is shrunk by about a factor of three into the 3x2 grid, which
+        # is what made the original colorbar illegible
+        cb = self.add_colorbar("", cmap="jet", position="bottom center",
+                               vmin=self.vmin, vmax=self.vmax, length=0.85, thickness=0.09)
+        cb.textcolor, cb.textsize, cb.ticsize = "black", 26, 26
         self.add_plot("fluid/" + self.field, colorbar=cb)
         self.add_plot("fluid/cylinder", linecolor="black", linewidths=1.2)
 
@@ -346,7 +335,9 @@ if __name__ == "__main__":
             print("  %.1f     %9.4f       %s" % (Wi, problem.drag(),
                                                  "%9.3f" % reference if reference else "        -"))
             if Wi in (0.1, 0.5, 0.7):        # the three rows of their Fig. 12
-                solve_projection(problem)
+                # S1 and S2 live on their own residual, so they are pinned and cost nothing while the
+                # flow is being solved; this is where they are actually wanted
+                problem.solve_auxiliary_residual(PROJECTION_RESIDUAL)
                 files = []
                 for field, title, lo, hi in (("S1", "$S_1$", -11.0, 15.0), ("S2", "$S_2$", -8.0, 55.0)):
                     plotter = FlowStressPlotter(problem, filetrunk="%s_Wi%02d" % (field, round(10 * Wi)))
