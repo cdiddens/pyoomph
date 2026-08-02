@@ -544,6 +544,7 @@ class ViscoelasticEquations(Equations):
             # only root has a strictly positive argument and a bounded derivative everywhere.
             tau = self.supg_factor / square_root(4 * dot(wind, wind) / h ** 2
                                                  + (1 / self.relaxation_time) ** 2)
+            tau=subexpression(tau) if self.use_subexpression else tau
             supg_test = self._assemble(lambda c: tau * dot(wind, grad(testfunction(name + "_" + c))))
             self.add_residual(weak(residual, supg_test))
 

@@ -54,8 +54,8 @@ class ConfinedCylinderMesh(GmshTemplate):
         R, Ro = 1.0, 1.6                                   # cylinder radius and outer radius of the O-grid
         centre = self.point(0, 0)
         angles = [0.0, pi / 2, pi]                         # only the upper half of the cylinder
-        inner = [self.point(R * cos(a), R * sin(a)) for a in angles]
-        outer = [self.point(Ro * cos(a), Ro * sin(a)) for a in angles]
+        inner = [self.point(R * cos(a), R * sin(a),size=pr.near_resolution) for a in angles]
+        outer = [self.point(Ro * cos(a), Ro * sin(a),size=0.5*pr.near_resolution) for a in angles]
         wall = [self.circle_arc(inner[i], inner[i + 1], center=centre, name="cylinder") for i in range(2)]
         ring = [self.circle_arc(outer[i], outer[i + 1], center=centre) for i in range(2)]
         # The radial lines at angle 0 and pi lie on the symmetry plane
@@ -77,9 +77,9 @@ class ConfinedCylinderMesh(GmshTemplate):
         # downstream, where nothing happens
         L, H = pr.channel_length, 2.0
         top_centre = self.point(0, H, size=pr.near_resolution)
-        box = self.create_lines(outer[0], "symmetry", self.point(L, 0), "outlet", self.point(L, H), "top",
+        box = self.create_lines(outer[0], "symmetry", self.point(3,0,size=0.5*pr.near_resolution), "symmetry", self.point(L, 0), "outlet", self.point(L, H), "top",
                                 top_centre, "top", self.point(-L, H), "inlet",
-                                self.point(-L, 0), "symmetry", outer[2])
+                                self.point(-L, 0), "symmetry", self.point(-3,0,size=pr.near_resolution), "symmetry", outer[2])
         self.plane_surface(*box, ring[1], ring[0], name="fluid")
 
 
@@ -310,7 +310,7 @@ if __name__ == "__main__":
                     plotter.field, plotter.title = field, title
                     plotter.vmin, plotter.vmax = lo, hi
                     problem.plotter = [plotter]
-                    problem.output()
+                    problem.output_at_increased_time()
                     files.append(problem.get_output_directory("_plots/" + plotter.file_trunk + ".png"))
                 panels[Wi] = files
         plot_stress_profiles(profiles, "viscoelastic_stress")
