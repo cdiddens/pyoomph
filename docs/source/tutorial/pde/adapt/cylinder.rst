@@ -41,21 +41,12 @@ without any further ado -- a quadrilateral is split into four quadrilaterals, a 
 triangles, and the hanging nodes on the interface between the two families are taken care of
 automatically.
 
-.. note::
-
-   gmsh also offers a ``"BoundaryLayer"`` mesh size field, which grows such layers automatically and
-   is registered with :py:meth:`~pyoomph.meshes.gmsh.GmshTemplate.set_mesh_size_boundary_layer_field`
-   rather than as a background field. It produces a very similar initial mesh with considerably less
-   code. It is not used here because the elements it generates stop converging in the Newton solver
-   after the second adaptation of this problem, whereas the transfinite construction above adapts
-   without complaint.
-
 ..  figure:: cylinder_mixed.*
 	:name: figpdeadaptcylmixed
 	:align: center
 	:alt: Mixed mesh with quadrilaterals in the boundary layer and triangles outside
 	:class: with-shadow
-	:width: 60%
+	:width: 40%
 
 	The initial mixed mesh around the cylinder: a structured, radially graded O-grid of
 	quadrilaterals in the boundary layer, unstructured triangles in the far field.
@@ -135,47 +126,13 @@ to the outlet.
 	(left) and the grouped (right) criterion. The temperature is unaffected by the choice; the
 	tracer filament is smeared by the joint criterion and sharp under the grouped one.
 
-The last column is the one to be careful with. The mean Nusselt numbers are :math:`6.662` and
+One issue is noteworthy: The mean Nusselt numbers are :math:`6.662` and
 :math:`7.070`, a difference of six percent -- so the choice of error criterion does not merely
-rearrange the picture, it changes a physically meaningful output. Which of the two is closer to the
-truth is a harder question than it looks. A grouped computation on 188 830 degrees of freedom gives
-:math:`6.7825`, i.e. it has itself moved by four percent relative to the 74 146-dof result and is
-plainly not converged either -- unsurprisingly, since it spends its extra budget on the filament as
-well and ends up with fewer elements at the cylinder than the joint run does. Settling the question
-would need a convergence study aimed at the wall rather than at the tracer, which is a different
-computation from the one being done here.
+rearrange the picture, it changes a physically meaningful output.
 
-The sound conclusion is therefore the weaker one, and it is the important one: at a fixed cost, what
-you ask the estimator to look at changes what you get. The grouped criterion is not "more accurate";
-it resolves the tracer, and it pays for that out of the only purse available.
-
-.. note::
-
-   The wall heat flux is sensitive here because the boundary layer is only four elements deep
-   (``n_radial``), so the O-grid does not resolve the thermal layer at the wall on its own and the
-   adaptivity has to make up the difference. Making the structured layer deeper is the cheaper fix:
-   with nine nodes across it, and without the ``weight`` on the tracer group, the two criteria were
-   found to agree on the Nusselt number to within :math:`0.1\:\mathrm{\%}` while still differing
-   sharply in where they put the rest of the mesh. A boundary-layer mesh good enough for the wall
-   quantity makes that quantity robust against how the remaining budget is allocated.
-
-.. note::
-
-   Without the grouping, no amount of budget would have resolved the filament at all: a field a
-   thousand times weaker contributes a millionth of the summed error and simply never registers.
-   What the grouping buys is not accuracy in general, but the ability to say which fields deserve to
-   be looked at on their own terms.
-
-Finally, two practical remarks. An under-resolved advection-dominated field makes for a badly
-conditioned matrix, and on some meshes MKL Pardiso hits a zero pivot on it where UMFPACK does not;
-if the run dies in the linear solver rather than in the Newton iteration,
-``problem.set_linear_solver("umfpack")`` is worth trying before anything else.
-
-The fields above are plotted without velocity arrows or streamlines, and that is not an oversight.
-Both are sampled on a regular grid, which requires matplotlib's ``TriFinder``, and that rejects the
-triangulation of a deeply refined mesh: the coarse side of a 2:1 interface overlaps its finer
-neighbours, which ``tricontourf`` tolerates but the trapezoid-map search structure does not. Colour
-plots of a scalar are unaffected.
+The sound conclusion is therefore: at a fixed cost, what you ask the estimator to look at changes
+what you get. The grouped criterion is not "more accurate"; it resolves the tracer, and it pays for
+that out of the only purse available.
 
 .. only:: html
 
