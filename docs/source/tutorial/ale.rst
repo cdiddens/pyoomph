@@ -17,7 +17,8 @@ We will develop this method in the following and address the necessary correctio
    ale/remesh.rst
    ale/freesurf.rst         
    ale/gmshfields.rst
-   ale/spread.rst            
+   ale/beadsonstring.rst
+   ale/spread.rst
    ale/solid.rst      
 
 
