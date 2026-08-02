@@ -41,6 +41,10 @@ import numpy
 BETA = 0.59
 
 #: Drag coefficients of Claus & Phillips, J. Non-Newtonian Fluid Mech. 200 (2013), Table 3
+#: Name of the residual the stress projection lives on, kept out of the main one so that its unknowns
+#: cost nothing while the flow is being solved.
+PROJECTION_RESIDUAL = "projected_stresses"
+
 REFERENCE_DRAG = {0.1: 130.364, 0.2: 126.626, 0.3: 123.192, 0.4: 120.593,
                   0.5: 118.826, 0.6: 117.776, 0.7: 117.316}
 
@@ -204,8 +208,30 @@ class FlowDirectedStresses(ProjectExpression):
         speed = square_root(dot(u, u) + 1e-12)
         par = vector(u[0] / speed, u[1] / speed)
         perp = vector(-par[1], par[0])
-        self.projs = {"S1": dot(perp, matproduct(T0, par)), "S2": dot(par, matproduct(T0, par))}
-        super().define_residuals()
+        projs = {"S1": dot(perp, matproduct(T0, par)), "S2": dot(par, matproduct(T0, par))}
+        # The parent's define_residuals would put these on the default residual, so the two weak forms
+        # of the projection, (S, S_test) - (expression, S_test) = 0, are written out here instead in
+        # order to direct them elsewhere
+        for name, expression in projs.items():
+            test = testfunction(name, dimensional=False) / scale_factor(name)
+            self.add_residual(weak(var(name), test), destination=PROJECTION_RESIDUAL)
+            self.add_residual(weak(-expression, test), destination=PROJECTION_RESIDUAL)
+
+
+def solve_projection(problem):
+    """
+    Solve for the projected stresses alone, leaving the flow solution untouched.
+
+    Switching the active residual only MARKS which fields have no Jacobian row in it; the pinning
+    itself happens when the equation numbers are reassigned, which is what reapply_boundary_conditions
+    does. Both calls are therefore needed, and both times - the same pattern pyoomph uses internally
+    when it projects initial conditions.
+    """
+    problem._set_solved_residual(PROJECTION_RESIDUAL, True, True)
+    problem.reapply_boundary_conditions()
+    problem.solve()
+    problem._set_solved_residual("", False, True)
+    problem.reapply_boundary_conditions()
 
 
 class FlowStressPlotter(MatplotlibPlotter):
@@ -320,6 +346,7 @@ if __name__ == "__main__":
             print("  %.1f     %9.4f       %s" % (Wi, problem.drag(),
                                                  "%9.3f" % reference if reference else "        -"))
             if Wi in (0.1, 0.5, 0.7):        # the three rows of their Fig. 12
+                solve_projection(problem)
                 files = []
                 for field, title, lo, hi in (("S1", "$S_1$", -11.0, 15.0), ("S2", "$S_2$", -8.0, 55.0)):
                     plotter = FlowStressPlotter(problem, filetrunk="%s_Wi%02d" % (field, round(10 * Wi)))
