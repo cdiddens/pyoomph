@@ -329,7 +329,7 @@ class ViscoelasticEquations(Equations):
         space: the finite element space of the conformation (or log-conformation) components.
         field_name: the name of the tensor field. Defaults to "log_conformation" or "conformation" depending on the formulation.
         velocity_name: the name of the velocity field to advect with and to add the polymer stress to.
-        wind: the advection velocity. Defaults to ``var(velocity_name)``.
+        wind: the velocity that transports and deforms the conformation tensor. Defaults to ``var(velocity_name)``. It supplies both the advection and the velocity gradient, since a convected derivative is defined with respect to a single velocity field.
         add_polymer_stress_to_momentum: whether to add the polymer stress to the momentum equation. Disable to drive the constitutive equation by an imposed velocity field.
         solve_out_of_plane_component: whether to solve for the out-of-plane component in a planar flow. "auto" (default) leaves that to the constitutive model. Has no effect in axisymmetric coordinates, where the azimuthal component is always an unknown.
         stabilization: None (default) for plain Galerkin, or "SUPG" for streamline-upwind Petrov-Galerkin on the constitutive equation. The latter is residual-based and hence consistent, so it does not change a converged solution, but it damps the oscillations that pure advection with no diffusion produces on an under-resolved mesh.
@@ -498,20 +498,20 @@ class ViscoelasticEquations(Equations):
         field = self._assemble(lambda c: var(name + "_" + c), absent_diagonal=absent)
         field_test = self._assemble(lambda c: testfunction(name + "_" + c))
 
-        u = var(self.velocity_name)
-        wind = self.wind if self.wind is not None else u
-        gradu = grad(u)
-
-        # Advection and the time derivative are both built component by component: grad() of a
-        # matrix does not give the rank-3 object that would be needed here. Each component is a
-        # plain scalar field, for which both operations are well defined.
-        advection = self._assemble(lambda c: dot(wind, grad(var(name + "_" + c))))
-        dt_field = self._assemble(lambda c: partial_t(var(name + "_" + c)))
+        wind = self.wind if self.wind is not None else var(self.velocity_name)
+        gradu = grad(wind)
 
         if self.formulation == "log-conf":
-            residual, C, trC = self._log_conformation_residual(field, gradu, dt_field, advection, identity)
+            # dt(Psi) + (u.grad)Psi. The rest of the equation is the Fattal-Kupferman decomposition
+            # of grad(u), which is not an upper-convected derivative, so only the transport part
+            # comes from the library here.
+            transported = material_derivative(field, wind, ALE="auto", dt_scheme=self.time_scheme)
+            residual, C, trC = self._log_conformation_residual(field, gradu, transported, identity)
         else:
-            residual, C, trC = self._conformation_residual(field, gradu, dt_field, advection, identity)
+            # dt(C) + (u.grad)C - grad(u)*C - C*grad(u)^t, exactly what upper_convected_derivative
+            # gives with pyoomph's grad(u)[i,j] = d(u_i)/d(x_j) convention.
+            transported = upper_convected_derivative(field, wind, ALE="auto", dt_scheme=self.time_scheme)
+            residual, C, trC = self._conformation_residual(field, transported, identity)
 
         if self.time_scheme is not None:
             residual = time_scheme(self.time_scheme, residual)
@@ -569,15 +569,11 @@ class ViscoelasticEquations(Equations):
             # The first normal stress difference, the quantity most rheological measurements report.
             self.add_local_function("polymer_N1", stress[0, 0] - stress[1, 1])
 
-    # Plain conformation formulation: the upper-convected derivative written out. With pyoomph's
-    # convention grad(u)[i,j]=d(u_i)/d(x_j), the upper-convected derivative of C is
-    # dt(C) + (u.grad)C - grad(u)*C - C*grad(u)^t.
-    def _conformation_residual(self, C: Expression, gradu: Expression, dt_field: Expression, advection: Expression, identity: Expression):
+    # Plain conformation formulation: upper_convected_derivative(C, u) + g(C)/lambda = 0.
+    def _conformation_residual(self, C: Expression, transported: Expression, identity: Expression):
         trC = trace(C)
-        stretch = matproduct(gradu, C) + matproduct(C, transpose(gradu))
         relax = self.model.relaxation_matrix(C, trC, identity) / self.relaxation_time
-        residual = dt_field + advection - stretch + relax
-        return residual, C, trC
+        return transported + relax, C, trC
 
     # Exponential of the in-plane block of a symmetric tensor, as a 2x2 list of entries. This uses
     # SymmetricMatrixExponential rather than the eigendecomposition on purpose, and that choice is
@@ -622,7 +618,7 @@ class ViscoelasticEquations(Equations):
         Cinv = self._se(matrix([[expCinv[0, 0], expCinv[0, 1], 0], [expCinv[1, 0], expCinv[1, 1], 0], [0, 0, third_inverse]]))
         return C, Cinv, third
 
-    def _log_conformation_residual(self, psi: Expression, gradu: Expression, dt_field: Expression, advection: Expression, identity: Expression):
+    def _log_conformation_residual(self, psi: Expression, gradu: Expression, transported: Expression, identity: Expression):
         axisym = self._is_axisymmetric()
 
         C, Cinv, third = self._conformation_from_log(psi)
@@ -655,8 +651,7 @@ class ViscoelasticEquations(Equations):
 
         relax = self.model.log_relaxation_matrix(C, Cinv, trC, identity) / self.relaxation_time
         rotation = matproduct(Omega, psi) - matproduct(psi, Omega)
-        residual = dt_field + advection - rotation - 2 * B + relax
-        return residual, C, trC
+        return transported - rotation - 2 * B + relax, C, trC
 
     def _polymer_stress(self, C: Expression, trC: ExpressionOrNum, identity: Expression) -> Expression:
         return self.polymer_viscosity / self.relaxation_time * self.model.stress_matrix(C, trC, identity)

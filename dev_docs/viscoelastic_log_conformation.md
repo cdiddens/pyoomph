@@ -201,16 +201,18 @@ Three hardcoded, regardless of the size of `T`. It is reached from the ALE corre
 `partial_t`, so `partial_t(M)` raises `ValueError: matrix::operator(): index out of range` for any
 matrix that is not 3x3. Since `define_tensor_field` had no users, this had never been exercised.
 
-Worked around by taking the time derivative component-wise, `partial_t(var(name + "_xx"))` and so
-on, which goes through the scalar path. The advection term is built the same way, for an unrelated
-reason: `grad()` of a matrix does not produce the rank-3 object the term needs.
+This was first worked around by taking the time derivative component-wise, which goes through the
+scalar path.
 
-**Fixed at source**: the size is now read off `T`, whose `nops()` is rows*cols, and the result is no
-longer padded to 3x3 since it is subtracted from the plain time derivative and has to keep `T`'s
-shape. `viscoelastic.py` keeps its component-wise form regardless, because the advection term next to
-it has to be built that way anyway. Covered by `tests/test_tensor_fields.py`, on a static mesh (where
-the original failure happened, since the correction is assembled whether or not the mesh moves) and
-on a genuinely moving one.
+**Not fixed, and it no longer needs to be.** The right answer was that `viscoelastic.py` should not
+have been hand-rolling this at all: `material_derivative(A, u)` is `dt(A) + (u.grad)A` for a tensor
+argument, and `upper_convected_derivative(A, u)` is that minus `grad(u)*A + A*grad(u)^t` - exactly
+the conformation equation's transport term, in pyoomph's own `grad(u)[i,j] = d(u_i)/d(x_j)`
+convention. Both are used now, which also removed the component-wise assembly of the advection term.
+They produce and consume the padded 3x3 form, which is the convention everywhere else, so the 2x2
+case never arises. The limitation stands for anyone who assembles a tensor with
+`fill_to_max_vector_dim=False` and hands it to `partial_t`; `tests/test_tensor_fields.py` documents
+that and covers the 3x3 path on a static and a genuinely moving mesh.
 
 ### 6.2 `DiagonalizeSymmetricTensor` zeroes its whole Jacobian on the near-diagonal branch
 
@@ -790,7 +792,8 @@ that defect is "converges without X, diverges with X, for X that should be harml
 1. ~~Fix 6.2~~ - done, see 6.2.1. The workaround in `_in_plane_exponential` stays: the fix does not
    make the genuinely degenerate rest state differentiable, because nothing can.
 2. ~~Promote the cylinder benchmark~~ - done, `tests/test_viscoelastic_cylinder.py`.
-3. ~~Fix 6.1 and 6.4~~ - done. 6.3 and 6.3.1 remain: the debug facility and the
-   nondeterministic assembly, neither of which this work depends on.
+3. ~~6.1 and 6.4~~ - 6.4 fixed, 6.1 sidestepped by using the library's convected derivatives.
+   6.3 and 6.3.1 remain: the debug facility and the nondeterministic assembly, neither of which this
+   work depends on.
 4. The wake experiment of section 8.4, which is the one open question about the numbers.
 5. Tutorial page and bibliography.
