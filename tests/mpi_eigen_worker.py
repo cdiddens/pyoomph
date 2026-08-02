@@ -1,0 +1,262 @@
+#  @file
+#  @author Christian Diddens <c.diddens@utwente.nl>
+#
+#  @section LICENSE
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+#  The main author may be contacted at c.diddens@utwente.nl
+#
+# ========================================================================
+
+# Worker for tests/test_mpi_eigenvalues.py -- launched under `mpirun ...`, with and without
+# --distribute. Solves a generalized eigenproblem through SLEPc and prints one PYOOMPH_MPI_RESULT
+# line per rank.
+#
+# The eigenvalues alone are a weak certificate: SLEPc computes them collectively, so every rank
+# necessarily reports the same numbers whether or not pyoomph handed it the right matrix rows or
+# gathered the eigenvectors into the right global slots. What pins those down is "eigfunc_l2", the
+# integral of the squared eigenfunction over the mesh. Getting there runs the eigenvector back
+# through set_eigenfunction_as_dofs() -> set_current_dofs(), which scatters BY GLOBAL EQUATION
+# NUMBER, and then integrates over non-halo elements with an MPI_Allreduce. A gathered eigenvector
+# whose entries landed in the wrong order still has the right 2-norm and still solves nothing
+# visible in the eigenvalues, but it puts the eigenfunction in the wrong place on the mesh and this
+# integral moves.
+#
+# Note the dof numbering is NOT comparable between a serial and a distributed run -- distribute()
+# renumbers so that each rank owns a contiguous block -- so every quantity compared across the two
+# has to be numbering-independent. Eigenvalues and mesh integrals are; a dof vector is not.
+
+import argparse
+import json
+import traceback
+
+import numpy
+
+from pyoomph import *
+from pyoomph.expressions import *
+from pyoomph.equations.navier_stokes import NavierStokesEquations, NoSlipBC
+from pyoomph.equations.advection_diffusion import AdvectionDiffusionEquations
+from pyoomph.meshes.bcs import AxisymmetryBC
+from pyoomph.meshes.simplemeshes import RectangularQuadMesh
+from pyoomph.generic.mpi import get_mpi_rank, get_mpi_nproc
+
+
+class DiffusionEquations(Equations):
+    """-laplace(u) with a first-order time derivative, i.e. the plainest possible mass matrix."""
+
+    def define_fields(self):
+        self.define_scalar_field("u", "C2")
+
+    def define_residuals(self):
+        u, v = var_and_test("u")
+        self.add_residual(weak(partial_t(u), v) + weak(grad(u), grad(v)))
+
+
+class DiffusionProblem(Problem):
+    """Dirichlet in x, Neumann in y, so the spectrum is -(n^2+m^2)*pi^2 with n>=1, m>=0.
+
+    The leading eigenvalue -pi^2 is non-degenerate, which is what makes an eigenVECTOR comparison
+    meaningful: at a repeated eigenvalue any basis of the eigenspace is a valid answer, and serial
+    and distributed runs would be free to return different ones.
+    """
+
+    def __init__(self, N=8):
+        super().__init__()
+        self.N = N
+
+    def define_problem(self):
+        self += RectangularQuadMesh(N=self.N)
+        eqs = DiffusionEquations()
+        eqs += DirichletBC(u=0) @ "left"
+        eqs += DirichletBC(u=0) @ "right"
+        # Partition-independent: evaluate_integral_function skips halo elements and MPI_Allreduce-sums.
+        eqs += IntegralObservables(usqr=var("u") ** 2)
+        self += eqs @ "domain"
+
+
+class AzimuthalProblem(Problem):
+    """Axisymmetric diffusion set up for azimuthal stability, i.e. the COMPLEX eigenproblem path.
+
+    m != 0 is what brings the imaginary residual contribution into play, and with it the branch in
+    get_J_M_n_and_type() that decides whether the eigenproblem is complex -- a decision made from a
+    per-rank nonzero count, so it is exactly the branch that can make two ranks disagree.
+    """
+
+    def __init__(self, N=8):
+        super().__init__()
+        self.N = N
+
+    def define_problem(self):
+        self.set_coordinate_system(axisymmetric)
+        self += RectangularQuadMesh(N=self.N)
+        eqs = DiffusionEquations()
+        eqs += DirichletBC(u=0) @ "right"
+        eqs += DirichletBC(u=0) @ "top"
+        eqs += DirichletBC(u=0) @ "bottom"
+        eqs += IntegralObservables(usqr=var("u") ** 2)
+        self += eqs @ "domain"
+
+
+class AxisymmetricFlowProblem(Problem):
+    """Axisymmetric Boussinesq-free flow with an AxisymmetryBC, i.e. the MATRIX-MANIPULATOR path.
+
+    At m != 0 the axis conditions are imposed by rewriting rows of J and M rather than by pinning:
+    setup_forced_zero_dof_list_for_eigenproblems() installs an EigenMatrixSetDofsToZero for
+    domain/left/{velocity_y,pressure,T} and the corner interfaces below it. Distributed, that
+    surgery cannot be done on the assembled global matrix any more -- no rank has one -- so it moves
+    onto the PETSc matrices, and this is the problem that exercises it.
+
+    The corner interfaces (domain/bottom/left) are the reason resolve_equations_by_name() has to
+    tolerate a locally absent submesh: a corner is one point and belongs to a single partition.
+    """
+
+    def __init__(self, N=6):
+        super().__init__()
+        self.N = N
+
+    def define_problem(self):
+        self.set_coordinate_system(axisymmetric)
+        self += RectangularQuadMesh(N=self.N)
+        eqs = NavierStokesEquations(mass_density=1, dynamic_viscosity=1)
+        eqs += AdvectionDiffusionEquations(fieldnames="T", diffusivity=1, space="C1")
+        eqs += DirichletBC(T=0) @ "bottom"
+        eqs += DirichletBC(T=-1) @ "top"
+        eqs += NoSlipBC() @ ["top", "right", "bottom"]
+        eqs += AxisymmetryBC() @ "left"
+        eqs += DirichletBC(pressure=0) @ "bottom/right"
+        eqs += IntegralObservables(usqr=var("T") ** 2 + dot(var("velocity"), var("velocity")))
+        self += eqs @ "domain"
+
+
+def _eigenfunction_observables(p, index=0):
+    """Integral observables of eigenfunction ``index``, with the dofs restored afterwards.
+
+    mode="abs", i.e. the entrywise |v|, because an eigenvector is only determined up to a complex
+    phase: SLEPc is free to return e^{i*phi}*v for any phi, and serial and distributed runs do pick
+    different ones. mode="real" would then keep only cos(phi) of the eigenfunction and this integral
+    would differ between the two runs by that factor alone -- a real effect with nothing wrong
+    underneath, which is exactly what it looked like the first time this test was run. |v| is
+    invariant under the phase, so what is left is the shape, which is what we want to certify.
+    """
+    backup_dofs, backup_pinned = p.set_eigenfunction_as_dofs(index, mode="abs")
+    try:
+        obs = p.get_mesh("domain").evaluate_all_observables()
+        return {("eigfunc_" + k): float(v) for k, v in obs.items()}
+    finally:
+        p.set_all_values_at_current_time(backup_dofs, backup_pinned, False)
+
+
+_PROBLEMS = {"diffusion": DiffusionProblem, "azimuthal": AzimuthalProblem,
+             "axiflow": AxisymmetricFlowProblem}
+
+
+def solve_case(N=8, neigen=3, eigensolver="slepc", azimuthal_m=None, problem="diffusion",
+               outdir=None):
+    prob = _PROBLEMS[problem](N=N)
+    with prob as p:
+        if outdir is not None:
+            p.set_output_directory(outdir)
+        p.quiet()
+        p.set_linear_solver("petsc_mumps")
+        p.set_eigensolver(eigensolver)
+        if azimuthal_m is not None:
+            p.setup_for_stability_analysis(azimuthal_stability=True, analytic_hessian=False)
+        p.initialise()
+        p.solve()
+        if azimuthal_m is not None:
+            evals, evects = p.solve_eigenproblem(neigen, azimuthal_m=azimuthal_m, quiet=True)
+        else:
+            evals, evects = p.solve_eigenproblem(neigen, quiet=True)
+
+        # Zero here means the matrix-manipulator path never ran, so a test relying on it proved
+        # nothing. Per-rank on purpose: only the ranks owning part of the axis have rows to zero.
+        zeroed = 0
+        for manip in p.get_eigen_solver().matrix_manipulators:
+            zeroed += len(getattr(manip, "zeromap", ()))
+
+        res = {
+            "zeromap_size": int(zeroed),
+            # Which branch get_J_M_n_and_type() took. False in an azimuthal case would mean the
+            # imaginary contribution never materialised and the complex path went untested.
+            "complex_assembly": bool(p.get_eigen_solver().last_assembly_was_complex),
+            "ndof": int(p.ndof()),
+            "distributed": bool(p.is_distributed()),
+            "nconv": int(len(evals)),
+            "evals_re": [float(numpy.real(e)) for e in evals],
+            "evals_im": [float(numpy.imag(e)) for e in evals],
+            # Full global length on every rank, or the gather did not happen.
+            "evect_len": int(evects.shape[1]) if len(evals) else 0,
+            # A sum over all entries, so it is invariant under the dof PERMUTATION -- which is exactly
+            # why it says nothing about where on the mesh the eigenvector landed, and why the test
+            # only uses it to check that the ranks returned the same vector rather than each its own
+            # row block. eigfunc_* below is what constrains the placement.
+            "evect0_absum": float(numpy.sum(numpy.abs(evects[0]))) if len(evals) else 0.0,
+            "evect0_norm": float(numpy.linalg.norm(evects[0])) if len(evals) else 0.0,
+        }
+        if len(evals):
+            res.update(_eigenfunction_observables(p, 0))
+        return res
+
+
+def guard_case(N=8, eigensolver="scipy", outdir=None):
+    """A backend that cannot see a partitioned matrix must SAY so rather than answer wrongly."""
+    prob = DiffusionProblem(N=N)
+    with prob as p:
+        if outdir is not None:
+            p.set_output_directory(outdir)
+        p.quiet()
+        p.set_linear_solver("petsc_mumps")
+        p.set_eigensolver(eigensolver)
+        p.initialise()
+        p.solve()
+        try:
+            p.solve_eigenproblem(2, quiet=True)
+        except RuntimeError as e:
+            return {"raised": True, "message": str(e), "distributed": bool(p.is_distributed())}
+        return {"raised": False, "message": "", "distributed": bool(p.is_distributed())}
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--size", type=int, default=8)
+    ap.add_argument("--neigen", type=int, default=3)
+    ap.add_argument("--eigensolver", default="slepc")
+    ap.add_argument("--azimuthal-m", type=int, default=-1)
+    ap.add_argument("--problem", default="diffusion", choices=sorted(_PROBLEMS))
+    ap.add_argument("--mode", default="eigen", choices=["eigen", "guard"])
+    ap.add_argument("--outdir", required=True)
+    args, _ = ap.parse_known_args()
+
+    azi = None if args.azimuthal_m < 0 else args.azimuthal_m
+    payload = {"rank": get_mpi_rank(), "nproc": get_mpi_nproc(),
+               "case": "%s_N%d_%s_m%s" % (args.problem, args.size, args.eigensolver, str(azi))}
+    try:
+        if args.mode == "guard":
+            payload.update(guard_case(N=args.size, eigensolver=args.eigensolver, outdir=args.outdir))
+        else:
+            payload.update(solve_case(N=args.size, neigen=args.neigen,
+                                      eigensolver=args.eigensolver, azimuthal_m=azi,
+                                      problem=args.problem, outdir=args.outdir))
+    except Exception as e:
+        payload["error"] = type(e).__name__ + ": " + str(e)
+        payload["traceback"] = traceback.format_exc()[-2000:]
+    print("PYOOMPH_MPI_RESULT " + json.dumps(payload), flush=True)
+
+
+if __name__ == "__main__":
+    main()

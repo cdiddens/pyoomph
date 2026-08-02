@@ -80,6 +80,18 @@ Output and code generation
 ``--distribute``
       Distribute the mesh in parallel (MPI).
 
+      Eigenvalue problems work under ``--distribute``, but only with the SLEPc eigensolver (``slepc``
+      or ``slepc_mumps``), and the PETSc it is built against must provide a parallel direct solver
+      (MUMPS or SuperLU_DIST) for the shift-and-invert transform. The ``scipy`` eigensolver cannot be
+      used, since it would only ever see one process' share of the matrices; it refuses with an error
+      rather than returning a wrong answer. Eigenvectors are returned at full length on every
+      process, exactly as in a serial run, so plotting and output of eigenmodes need no changes.
+
+      Bifurcation tracking, eigenbranch continuation, periodic orbit tracking / Floquet analysis,
+      Lyapunov exponents and the periodic driving response are **not** available under
+      ``--distribute`` and stop with an explanatory error. Run those without ``--distribute`` (plain
+      eigenvalue solving is unaffected).
+
 Run control
 ~~~~~~~~~~~
 

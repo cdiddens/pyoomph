@@ -80,6 +80,17 @@ _SOLVER_INSTALL_HINTS:dict[str,tuple[str,str]]={
 	"accelerate":("the macOS Accelerate framework",_PYPA_INSTALL_URL),
 }
 
+def _mpi_any_rank(flag:bool)->bool:
+	"""True if ``flag`` holds on ANY rank.
+
+	Imported lazily, and short-circuited on a single process: pyoomph.generic.mpi initialises MPI on
+	import, and this module is imported by every script including the ones that never touch a solver.
+	"""
+	from ..generic.mpi import get_mpi_nproc,get_mpi_any
+	if get_mpi_nproc()<=1:
+		return bool(flag)
+	return get_mpi_any(bool(flag))
+
 def _unavailable_solver_message(kind:str,name:str,available:list[str],e:Exception)->str:
 	msg=kind+" '"+name+"' is not available ("+type(e).__name__+": "+str(e)+"). Available: "+str(available)+"."
 	hint=_SOLVER_INSTALL_HINTS.get(name)
@@ -215,14 +226,38 @@ class EigenMatrixManipulatorBase:
 		super(EigenMatrixManipulatorBase, self).__init__()
 		self.problem=problem
 
+	def _not_present_locally(self,mesh:Any=None)->bool:
+		"""Whether a named part of the mesh is simply absent from THIS rank.
+
+		Only ever true on a distributed problem. A corner interface such as ``domain/bottom/left`` is a
+		single point and so belongs to exactly one partition; on the others the submesh is either
+		missing or present but empty, and asking it for its fields reports none.
+
+		Distinguishing that from a mistyped field name is not possible from here, so a distributed run
+		trades the typo diagnostic for the ability to run at all. It has to: raising on the ranks that
+		do not hold the piece is not a clean error but a SPLIT, with those ranks unwinding while the
+		owner walks into the next collective alone. That is how this surfaced -- as MPI_ERR_BUFFER out
+		of PETSc, several stack frames away from the name that could not be resolved.
+		"""
+		if not self.problem.is_distributed():
+			return False
+		return mesh is None or mesh.nelement()==0
+
 	def resolve_equations_by_name(self,name:str) -> set[int]:
+		"""The global equation numbers of the dofs named by e.g. ``domain/left/velocity_y``.
+
+		On a distributed problem this returns only what the CALLING RANK can see, which is the whole
+		point: the caller restricts itself to the rows it owns anyway, and every owned row is reachable
+		from a local non-halo element. A part of the mesh that lives entirely on another rank must
+		therefore resolve to nothing here rather than to an error -- see _not_present_locally().
+		"""
 		from ..generic.problem import Problem
 		from .. import _pyoomph_core as _pyoomph
 		splt=name.split("/")
 		root=self.problem
 		fieldname=None
 		#print("IN ",name)
-		for i,k in enumerate(splt):			
+		for i,k in enumerate(splt):
 			if not isinstance(root,ODEStorageMesh):
 				nextone=root.get_mesh(k,return_None_if_not_found=True)
 				if nextone is None and root==self.problem:
@@ -237,7 +272,9 @@ class EigenMatrixManipulatorBase:
 				nextone=None
 			if nextone is None:
 				if i<len(splt)-1:
-					print("Splitted is :",splt)					
+					if self._not_present_locally():
+						return set()
+					print("Splitted is :",splt)
 					raise RuntimeError("Cannot access the mesh "+str("/".join(splt[0:i-1]))+" to access the degrees of freedom "+str(name))
 				else:
 					fieldname=splt[-1]
@@ -249,6 +286,10 @@ class EigenMatrixManipulatorBase:
 		assert isinstance(root,_pyoomph.Mesh)
 		fi = root.get_field_information()
 		if fieldname not in fi.keys():
+			# An EMPTY submesh reports no fields at all, which is not the same as the user naming a
+			# field that does not exist.
+			if self._not_present_locally(root):
+				return set()
 			raise RuntimeError("Cannot find field "+str(fieldname)+" in mesh "+root.get_full_name())
 		res:set[int]=set()
 		if  isinstance(root,ODEStorageMesh):
@@ -299,12 +340,26 @@ class EigenMatrixManipulatorBase:
 	def apply_on_J_and_M(self,solver:"GenericEigenSolver",J:DefaultMatrixType,M:DefaultMatrixType)->tuple[DefaultMatrixType,DefaultMatrixType]:
 		return J,M
 
+	def apply_on_distributed_J_and_M(self,solver:"GenericEigenSolver",J:Any,M:Any)->tuple[Any,Any]:
+		"""Counterpart of apply_on_J_and_M for a row-partitioned eigenproblem.
+
+		J and M are the eigensolver backend's own matrices (a petsc4py ``Mat`` for the SLEPc solver),
+		not scipy ones: on a distributed problem no rank holds the whole matrix, so the row surgery
+		apply_on_J_and_M does has to happen where the ownership range is known. Only the backend's
+		matrix interface is used here, so this module still does not import PETSc.
+
+		Manipulators that have no distributed equivalent inherit this and stop the run with a clear
+		message rather than silently leaving the constraint unapplied.
+		"""
+		raise RuntimeError(type(self).__name__+" cannot be applied to a distributed (MPI) eigenproblem yet. Run the eigenproblem without --distribute, or drop the manipulator.")
+
 
 class EigenMatrixSetDofsToZero(EigenMatrixManipulatorBase):
 	def __init__(self,problem:"Problem",*doflist:str | int):
 		super(EigenMatrixSetDofsToZero, self).__init__(problem)
 		self.doflist:set[str | int]=set(doflist)
 		self.zeromap:set[int]=set()
+		self.last_zeroed_rows:int=0
 
 
 	def setcsrrow2id(self,amat:DefaultMatrixType, rowind:int):
@@ -353,9 +408,10 @@ class EigenMatrixSetDofsToZero(EigenMatrixManipulatorBase):
 
 		return A
 
-	def apply_on_J_and_M(self,solver:"GenericEigenSolver",J:DefaultMatrixType,M:DefaultMatrixType) -> tuple[DefaultMatrixType, DefaultMatrixType]:
-		self.zeromap:set[int]=set()
+	def _resolve_zeromap(self)->set[int]:
+		"""The global equation numbers this manipulator constrains."""
 		from .. import _pyoomph_core as _pyoomph
+		zeromap:set[int]=set()
 		for d in self.doflist:
 			if isinstance(d,str):
 				eqs=self.resolve_equations_by_name(d)
@@ -363,7 +419,30 @@ class EigenMatrixSetDofsToZero(EigenMatrixManipulatorBase):
 				eqs=set([d])
 			if  _pyoomph.get_verbosity_flag() != 0:
 				print("INFO ",d,eqs)
-			self.zeromap=self.zeromap.union(eqs)
+			zeromap=zeromap.union(eqs)
+		return zeromap
+
+	def apply_on_distributed_J_and_M(self,solver:"GenericEigenSolver",J:Any,M:Any) -> tuple[Any, Any]:
+		# Same constraint as the scipy version below -- J's row becomes delta_ij and M's becomes zero --
+		# expressed as the backend's own row operation, which knows the ownership range.
+		#
+		# Restricted to locally owned rows on purpose. resolve_equations_by_name() walks the local
+		# elements, which on a distributed mesh includes halo elements, so it also reports equation
+		# numbers this rank does not own; those rows belong to the rank that does own them, and that rank
+		# reaches them through its own non-halo elements. Filtering here is therefore complete as well as
+		# safe, and it keeps the call free of off-process row communication.
+		_,nrow_local,first_row,_=solver.get_eigen_row_layout()
+		zeromap=self._resolve_zeromap()
+		self.zeromap=zeromap
+		rows=sorted(r for r in zeromap if first_row<=r<first_row+nrow_local)
+		self.last_zeroed_rows=len(rows)   # so a test can tell "applied nothing here" from "never ran"
+		# Collective on both matrices, so every rank calls them even with nothing of its own to zero.
+		J.zeroRows(rows,diag=1.0)
+		M.zeroRows(rows,diag=0.0)
+		return J,M
+
+	def apply_on_J_and_M(self,solver:"GenericEigenSolver",J:DefaultMatrixType,M:DefaultMatrixType) -> tuple[DefaultMatrixType, DefaultMatrixType]:
+		self.zeromap:set[int]=self._resolve_zeromap()
 		#print("GOING TO SET TO ZERO",self.zeromap)
 		N=J.shape[0]
 		Adiag=numpy.ones(N)
@@ -411,6 +490,7 @@ class GenericEigenSolver:
 		self.real_contribution:str=""
 		self.imag_contribution:str | None=None
 		self.ncv:int | None=None
+		self.last_assembly_was_complex:bool=False
 
 	@property
 	def problem(self)->"Problem":
@@ -478,40 +558,80 @@ class GenericEigenSolver:
 		self.matrix_manipulators.clear()
 
 
+	def get_eigen_row_layout(self)->tuple[int,int,int,bool]:
+		"""Row layout ``(n, nrow_local, first_row, distributed)`` of the eigenproblem matrices.
+
+		They are assembled on the problem's dof distribution, which is row-partitioned once the problem
+		has been distributed: each rank then holds only rows ``first_row .. first_row+nrow_local-1``,
+		with GLOBAL column indices. Serially, and under MPI without ``--distribute`` (where oomph-lib
+		redistributes the assembled matrices back to a globally replicated form), ``nrow_local == n``,
+		``first_row == 0`` and ``distributed`` is False.
+		"""
+		return self.problem._get_dof_distribution_info() #type:ignore
+
 	def get_J_M_n_and_type(self)->tuple[DefaultMatrixType,DefaultMatrixType,int,bool]:
+		"""Assemble the eigenproblem's J and M and report the global size and whether they are complex.
+
+		The matrices are ``(nrow_local, n)`` rather than square whenever the problem is distributed;
+		see get_eigen_row_layout(). Every caller that has to know the difference asks for the layout
+		itself, so that the serial shape stays exactly what it always was.
+		"""
 		from scipy.sparse import csr_matrix #type:ignore
 		if not self.problem._set_solved_residual(self.real_contribution,True,False):
 			raise RuntimeError("Cannot set the residual "+self.real_contribution+" for eigen calculation since it has no contribution at all")
-		n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = self.problem.assemble_eigenproblem_matrices(0) #type:ignore		
-		matM=csr_matrix((M_val, M_ci, M_rs), shape=(n, n))	#TODO: Is csr or csc?
-		matJ=csr_matrix((-J_val, J_ci, J_rs), shape=(n, n))
+		n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = self.problem.assemble_eigenproblem_matrices(0) #type:ignore
+		# shape=(M_nr, n), not (n, n): M_nr is the LOCAL row count, and on a distributed problem it is
+		# smaller than n. Passing (n,n) with a short indptr is what made every distributed eigen solve
+		# die inside scipy before the eigensolver was ever reached.
+		matM=csr_matrix((M_val, M_ci, M_rs), shape=(M_nr, n))	#TODO: Is csr or csc?
+		matJ=csr_matrix((-J_val, J_ci, J_rs), shape=(J_nr, n))
 		is_complex=False
-		if self.imag_contribution is not None:      
-			if self.problem._set_solved_residual(self.imag_contribution,False,False):					
+		if self.imag_contribution is not None:
+			if self.problem._set_solved_residual(self.imag_contribution,False,False):
 				matM=cast(csr_matrix,matM.copy())
 				matJ=cast(csr_matrix,matJ.copy())
 				n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = self.problem.assemble_eigenproblem_matrices(0) #type:ignore
-				matMi = csr_matrix((M_val, M_ci, M_rs), shape=(n, n))  # TODO: Is csr or csc?
-				matJi = csr_matrix((-J_val, J_ci, J_rs), shape=(n, n))
-				if M_nzz>0:
+				matMi = csr_matrix((M_val, M_ci, M_rs), shape=(M_nr, n))  # TODO: Is csr or csc?
+				matJi = csr_matrix((-J_val, J_ci, J_rs), shape=(J_nr, n))
+				# Both counts are per-rank, so on a distributed problem a partition whose local block
+				# happens to carry no imaginary entries would answer differently from the others -- and
+				# they would then disagree about whether this is a complex eigenproblem, which is not a
+				# wrong answer but a deadlock, since the two branches issue different collectives
+				# downstream. Decide it globally.
+				has_Mi=_mpi_any_rank(M_nzz>0)
+				has_Ji=_mpi_any_rank(J_nzz>0)
+				if has_Mi:
 					matM=cast(csr_matrix,matM+complex(0,1)*matMi)
 					is_complex = True
-				if J_nzz>0:
+				if has_Ji:
 					matJ =cast(csr_matrix,matJ+ complex(0, 1) * matJi)
 					is_complex=True
 
 		self.problem._set_solved_residual("",True,True)
 
 		#print("Applying Matrix manipulators")
-		for manip in self.matrix_manipulators:
-			#print("APPLY MANIP",manip)
-			#if isinstance(manip,EigenMatrixSetDofsToZero):      
-				#print("APPLY MANIP",manip,manip.doflist)
-			matJ,matM=manip.apply_on_J_and_M(self,matJ,matM)
+		# Skipped, NOT refused, when distributed: these manipulators rewrite whole rows of a square
+		# global matrix, which is not what a rank holds here. The eigensolver applies them afterwards to
+		# its own distributed matrices, where the ownership range is known -- see
+		# apply_on_distributed_J_and_M() and SlepcEigenSolver.solve(). A backend that neither handles
+		# them there nor can work distributed at all is stopped earlier, by distributed_possible().
+		if self.matrix_manipulators and not self.get_eigen_row_layout()[3]:
+			for manip in self.matrix_manipulators:
+				#print("APPLY MANIP",manip)
+				#if isinstance(manip,EigenMatrixSetDofsToZero):
+					#print("APPLY MANIP",manip,manip.doflist)
+				matJ,matM=manip.apply_on_J_and_M(self,matJ,matM)
 
-		if matM.nnz==0: #type:ignore
+		if not _mpi_any_rank(matM.nnz>0): #type:ignore
 			raise RuntimeError("The mass matrix has no entries. This likely means that you do not have any time derivatives in your system")
 
 		if not self.problem.is_quiet():
-			print("Matrices assembled ("+str(matJ.shape[0])+" x "+str(matJ.shape[1])+"). Invoking eigensolver")
+			# Rank 0 only, and the GLOBAL shape: every rank reaching this line would otherwise print its
+			# own local row count, which reads like a much smaller problem than the one being solved.
+			from ..generic.mpi import get_mpi_rank
+			if get_mpi_rank()==0:
+				print("Matrices assembled ("+str(n)+" x "+str(n)+"). Invoking eigensolver")
+		# Recorded so a caller (in practice tests/mpi_eigen_worker.py) can tell which branch was taken.
+		# Under MPI it is agreed across ranks by construction, see the allreduce above.
+		self.last_assembly_was_complex=is_complex
 		return matJ,matM,n,is_complex

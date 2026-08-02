@@ -89,6 +89,7 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
     
 
 
+    problem._require_non_distributed("Bifurcation tracking")
     n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = problem.assemble_eigenproblem_matrices(0) #type:ignore
     M=csr_matrix((M_val, M_ci, M_rs), shape=(n, n))	#TODO: Is csr or csc?
     A=csr_matrix((-J_val, J_ci, J_rs), shape=(n, n))
@@ -1607,7 +1608,8 @@ class NormalFormCalculator:
             res=scipy.sparse.linalg.lsqr(A,rhs)[0] #type:ignore
         return res
             
-      def get_left_eigenvector(self,lamb):            
+      def get_left_eigenvector(self,lamb):
+            self.problem._require_non_distributed("Left eigenvector calculation")
             n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = self.problem.assemble_eigenproblem_matrices(0) #type:ignore
             M=csr_matrix((M_val, M_ci, M_rs), shape=(n, n))	#TODO: Is csr or csc?
             A=csr_matrix((-J_val, J_ci, J_rs), shape=(n, n))
@@ -1659,6 +1661,7 @@ class NormalFormCalculator:
             self.problem.deactivate_bifurcation_tracking()
             self.problem.timestepper.make_steady()
             
+            self.problem._require_non_distributed("Bifurcation branch switching")
             n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = self.problem.assemble_eigenproblem_matrices(0) #type:ignore
             M=csr_matrix((M_val, M_ci, M_rs), shape=(n, n)).copy()	#TODO: Is csr or csc?
             

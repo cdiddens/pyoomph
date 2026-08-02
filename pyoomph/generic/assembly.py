@@ -198,6 +198,7 @@ class FixedMeshMaxQuadraticNonlinearAssembly(CustomAssemblyBase):
 
         t1=time.time()
         print("UPDATING TENSOR CACHE")
+        self.problem._require_non_distributed("The multi-assembly tensor cache")
         self._R0=numpy.array(self.problem.get_residuals()) #type:ignore # Initial residual
         n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = self.problem.assemble_eigenproblem_matrices(0.0) #type:ignore # Mass and zero Jacobian
         self._M0=csr_matrix((M_val, M_ci, M_rs), shape=(n, n)).copy()	#type:ignore

@@ -1230,6 +1230,23 @@ namespace pyoomph
 		// inp is indexed by GLOBAL equation number; the dof distribution may be row-partitioned under MPI.
 		scatter_global_to_double_vector(inp, dofs, this->dof_distribution_pt());
 		this->set_dofs(dofs);
+#ifdef OOMPH_HAS_MPI
+		// set_dofs() writes only Dof_pt, i.e. this rank's OWNED dofs; the copies living on halo nodes
+		// keep whatever they held before. Every oomph-lib routine that updates the dofs itself (the
+		// Newton step, unsteady_newton_solve, arc-length) follows it with this call for exactly that
+		// reason -- but set_current_dofs() is reached from Python, so nothing else does it here.
+		//
+		// Found via the eigenfunction: pushing an eigenvector into the dofs and integrating it over the
+		// mesh gave a smaller answer under --distribute than serially, because elements touching a halo
+		// node were integrating the stale (base-state) values there.
+		//
+		// Collective, so set_current_dofs() is now collective too. That is not a new constraint in
+		// practice -- it is reached from output, eigenfunction plotting and the solve loop, all of which
+		// every rank already runs together -- but a rank-0-only call to it would now hang rather than
+		// merely leave the halos wrong.
+		if (this->distributed())
+			this->synchronise_all_dofs();
+#endif
 	}
 
 

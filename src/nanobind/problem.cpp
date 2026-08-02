@@ -1250,6 +1250,21 @@ void PyReg_Problem(nb::module_ &m)
 			 "Hook, overridable in Python, used to (re-)build the problem's mesh when required for load balancing in a distributed (MPI) problem.")
 		.def("is_distributed", &pyoomph::Problem::distributed, "Return whether the problem's meshes are currently distributed across multiple MPI processes.")
 		.def(
+			"_get_dof_distribution_info", [](pyoomph::Problem *self)
+			{
+				// The row layout of everything assembled on dof_distribution_pt(), which includes the
+				// eigenproblem matrices (see Problem::assemble_eigenproblem_matrices). assemble_eigenproblem_matrices()
+				// hands back nrow_local but not first_row, and PETSc needs the ownership range to build an
+				// MPIAIJ; deriving it from an MPI prefix sum in Python would work but only because oomph's
+				// distribution happens to be contiguous, so ask the distribution itself instead.
+				auto *dist = self->dof_distribution_pt();
+				return std::make_tuple((unsigned)dist->nrow(), (unsigned)dist->nrow_local(),
+									   (unsigned)dist->first_row(), (bool)dist->distributed());
+			},
+			"Row layout of the problem's dof distribution as (nrow, nrow_local, first_row, distributed). "
+			"This is the distribution the eigenproblem matrices are assembled on, so it gives the ownership "
+			"range needed to hand their local CSR blocks to a distributed linear algebra backend.")
+		.def(
 			"_redistribute_local_to_global_double_vector", [](pyoomph::Problem *self, const nb::ndarray<nb::numpy, double> &local_v)
 			{
 				double *in_ptr = local_v.data();

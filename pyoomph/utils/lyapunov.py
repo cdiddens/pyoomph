@@ -102,6 +102,7 @@ class LyapunovExponentCalculator(GenericProblemHooks):
                 
 
         # --- Matrices ---
+        problem._require_non_distributed("Lyapunov exponent calculation")
         was_steady=[problem.time_stepper_pt(i).is_steady() for i in range(problem.ntime_stepper())]
         for i in range(problem.ntime_stepper()):
             problem.time_stepper_pt(i).make_steady()
@@ -261,6 +262,7 @@ class LyapunovExponentCalculatorBDF2(GenericProblemHooks):
         
 
         # Get the mass matrix and the Jacobian
+        problem._require_non_distributed("Lyapunov exponent calculation")
         matM,matJ=None,None
         custom_assm=problem.get_custom_assembler()
         if custom_assm is not None:

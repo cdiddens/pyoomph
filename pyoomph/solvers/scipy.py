@@ -164,6 +164,11 @@ class ScipyEigenSolver(GenericEigenSolver):
 	def get_OPInv(self,M:DefaultMatrixType,J:DefaultMatrixType,shift:float | complex)->object | None:
 		return None
 
+	def distributed_possible(self) -> bool:
+		# ARPACK through scipy only ever sees one process' matrices, so on a distributed problem it would
+		# solve each rank's row block as if it were the whole eigenproblem. SLEPc is the way to do this.
+		return False
+
 
 	def solve(self,neval:int,shift:float | complex | None=None,sort:bool=True,which:EigenSolverWhich="LM",OPpart:Literal["r", "i"] | None=None,v0:NPComplexArray | NPFloatArray | None=None,target:complex | None=None,custom_J_and_M:tuple[DefaultMatrixType,DefaultMatrixType] | None=None,with_left_eigenvectors:bool=False,quiet:bool=True)->tuple[NPComplexArray,NPComplexArray,DefaultMatrixType,DefaultMatrixType]:
 		if shift is None:

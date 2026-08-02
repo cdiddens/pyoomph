@@ -210,6 +210,7 @@ class PeriodicDrivingResponse():
         return
 
     def new_solve_driving_response(self,*,omega:ExpressionNumOrNone=None,freq:ExpressionNumOrNone=None):
+        self.problem._require_non_distributed("The periodic driving response")
         if omega is not None and freq is not None:
             raise RuntimeError("Cannot set both omega and frequency")
         elif omega is not None:
@@ -270,6 +271,7 @@ class PeriodicDrivingResponse():
 
 
     def solve_driving_response(self,*,omega:ExpressionNumOrNone=None,freq:ExpressionNumOrNone=None,with_eigenvector_guess:bool=False,numeigen=4,eigen_thresh=1e-7,by_hopf_tracking:bool=False,use_target:bool=False):
+        self.problem._require_non_distributed("The periodic driving response")
         if omega is not None and freq is not None:
             raise RuntimeError("Cannot set both omega and frequency")
         elif omega is not None:

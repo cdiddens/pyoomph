@@ -797,7 +797,65 @@ class SlepcEigenSolver(GenericEigenSolver):
 
     def supports_target(self):
         return True
-        
+
+    def _eigen_comm(self,distributed:bool)->Any:
+        """The communicator the EPS and its matrices live on.
+
+        Two genuinely different situations end up here under MPI:
+
+        - ``--distribute``: each rank holds a row block of J and M, so the eigenproblem is one parallel
+          problem on COMM_WORLD and SLEPc's spectral transform factorises it with whatever parallel
+          direct solver PETSc resolves ``-st_pc_type lu`` to (MUMPS or SuperLU_DIST).
+        - plain ``mpirun`` without ``--distribute``: oomph-lib redistributes the assembled matrices back
+          to a globally replicated form, so every rank already holds the entire matrix. That is a
+          COMM_SELF problem which each rank solves redundantly -- no speedup, but the same answer on
+          every rank with no communication, and it is what makes an MPI run that merely happens to call
+          solve_eigenproblem() work at all. Building it on COMM_WORLD instead declared an n-row local
+          block on each of nproc ranks, i.e. an (nproc*n)-row matrix, which is what used to fail with
+          "Row too large".
+        """
+        return PETSc.COMM_WORLD if distributed else PETSc.COMM_SELF #type:ignore
+
+    def _create_petsc_matrix(self,mat:"DefaultMatrixType",n:int,nrow_local:int,distributed:bool)->Any:
+        """Build a PETSc Mat from one CSR block of the eigenproblem.
+
+        astype(..., copy=False) for the same reason as everywhere else in this file: the CSR arrays may
+        be zero-copy views onto oomph-lib's CRDoubleMatrix buffers, and the conversion is a no-op unless
+        this PETSc has 64-bit indices or complex scalars.
+        """
+        comm=self._eigen_comm(distributed)
+        size=((nrow_local,n),(nrow_local,n)) if distributed else ((n,n),(n,n))
+        return PETSc.Mat().createAIJ(size=size, #type:ignore
+                                     csr=(mat.indptr.astype(PETSc.IntType, copy=False), #type:ignore
+                                          mat.indices.astype(PETSc.IntType, copy=False), #type:ignore
+                                          mat.data.astype(PETSc.ScalarType, copy=False)), #type:ignore
+                                     comm=comm)
+
+    def _create_petsc_vector(self,arr:NPComplexArray | NPFloatArray,n:int,nrow_local:int,first_row:int,distributed:bool)->Any:
+        """A PETSc Vec on the eigenproblem's comm from a GLOBALLY indexed numpy array."""
+        if distributed:
+            local=numpy.ascontiguousarray(arr[first_row:first_row+nrow_local])
+            return PETSc.Vec().createWithArray(local,size=(nrow_local,n),comm=PETSc.COMM_WORLD) #type:ignore
+        return PETSc.Vec().createWithArray(numpy.ascontiguousarray(arr),comm=PETSc.COMM_SELF) #type:ignore
+
+    def _vector_to_global_array(self,v:Any,distributed:bool)->NPComplexArray | NPFloatArray:
+        """A distributed Vec as a full-length array on EVERY rank.
+
+        Replicating rather than keeping the eigenvectors distributed is deliberate. Everything
+        downstream of the eigensolver -- set_eigenfunction_as_dofs(), the mesh data cache, the VTK
+        output, refine_eigenfunction() -- indexes eigenvectors by GLOBAL equation number and reaches the
+        dofs through get_current_dofs()/set_current_dofs(), which already gather and scatter. With a
+        replicated eigenvector none of that has to change, and the cost is neval vectors, not a matrix.
+        """
+        if not distributed:
+            return 0+v.getArray() #type:ignore
+        scatter,full=PETSc.Scatter.toAll(v) #type:ignore
+        scatter.scatter(v,full,PETSc.InsertMode.INSERT,PETSc.ScatterMode.FORWARD) #type:ignore
+        res=0+full.getArray() #type:ignore
+        full.destroy() #type:ignore
+        scatter.destroy() #type:ignore
+        return res #type:ignore
+
     def get_last_basis(self)->NPComplexArray | NPFloatArray | None:
         return self._last_basis
 
@@ -878,34 +936,35 @@ class SlepcEigenSolver(GenericEigenSolver):
             Jin=custom_J_and_M[0]
             Min=custom_J_and_M[1]
             n=Jin.shape[0]
+            # A caller-supplied pair is a plain global matrix -- the augmented systems that pass one
+            # (bifurcation tracking, Floquet, the driving response) are serial-only anyway, and
+            # Problem._solve_eigenproblem_helper refuses them under --distribute before we get here.
+            nrow_local,first_row,distributed=n,0,False
             if not isinstance(Jin,DefaultMatrixType):
                 Jin=Jin.tocsr()
                 assert isinstance(Jin,DefaultMatrixType)
             if not isinstance(Min,DefaultMatrixType):
                 Min=Min.tocsr()
                 assert isinstance(Min,DefaultMatrixType)
-                
-            # Min/Jin's CSR arrays may be zero-copy views onto oomph-lib's CRDoubleMatrix buffers
-            # (see get_J_M_n_and_type() / src/nanobind/problem.cpp). astype(..., copy=False) is a
-            # no-op when the dtypes already match PETSc's own (the common case) and only allocates a
-            # converted copy on a 64-bit-index or complex PETSc build; mirrors the fix applied to
-            # PETSCSolver.solve_serial()/assemble_matrix() above.
-            M=PETSc.Mat().createAIJ(size=((n, n), (n, n),), csr=(Min.indptr.astype(PETSc.IntType, copy=False), Min.indices.astype(PETSc.IntType, copy=False), Min.data.astype(PETSc.ScalarType, copy=False))) #type:ignore
-            J=PETSc.Mat().createAIJ(size=((n, n), (n, n),), csr=(Jin.indptr.astype(PETSc.IntType, copy=False), Jin.indices.astype(PETSc.IntType, copy=False), Jin.data.astype(PETSc.ScalarType, copy=False))) #type:ignore
+
+            M=self._create_petsc_matrix(Min,n,nrow_local,distributed)
+            J=self._create_petsc_matrix(Jin,n,nrow_local,distributed)
 
         else:
             Jin,Min,n,complex_mat=self.get_J_M_n_and_type()
+            _,nrow_local,first_row,distributed=self.get_eigen_row_layout()
             upscale_to_complex=complex_mat and (PETSc.ScalarType in {numpy.float64,numpy.float128,numpy.float32}) #type:ignore
             if upscale_to_complex:
                 raise RuntimeError("Your PETSc/SLEPc installation cannot handle a complex eigenvalue problem. Please compile another PETSc/SLEPc version with complex number and adjust the PYTHONPATH accordingly so that the complex petsc4py / slepc4py is used.")
-            M=PETSc.Mat().createAIJ(size=((n, n), (n, n),), csr=(Min.indptr.astype(PETSc.IntType, copy=False), Min.indices.astype(PETSc.IntType, copy=False), Min.data.astype(PETSc.ScalarType, copy=False))) #type:ignore
-            J=PETSc.Mat().createAIJ(size=((n, n), (n, n),), csr=(Jin.indptr.astype(PETSc.IntType, copy=False), Jin.indices.astype(PETSc.IntType, copy=False), Jin.data.astype(PETSc.ScalarType, copy=False))) #type:ignore
-            
-        #if self.imag_contribution is not None:
-        #    raise RuntimeError("Cannot have imaginary matrix contributions yet here")
-#        for manip in self.matrix_manipulators:
-#            raise RuntimeError("Cannot have MatrixManipulators yet here: "+str(manip))
-            #J, M = manip.apply_on_J_and_M(self, J, M)
+            M=self._create_petsc_matrix(Min,n,nrow_local,distributed)
+            J=self._create_petsc_matrix(Jin,n,nrow_local,distributed)
+
+            # On a distributed problem get_J_M_n_and_type() leaves the manipulators alone (it has no
+            # ownership range to apply them with) and they are applied here instead, on the PETSc
+            # matrices. Serially they have already been folded into Jin/Min.
+            if distributed:
+                for manip in self.matrix_manipulators:
+                    J,M=manip.apply_on_distributed_J_and_M(self,J,M)
 
         # TODO: Working example
         ##--petsc -st_pc_type lu -st_pc_factor_mat_solver_type umfpack
@@ -936,7 +995,7 @@ class SlepcEigenSolver(GenericEigenSolver):
         # yet, and the spectral transform's was.
         def build_and_solve()->Any:
             E = SLEPc.EPS()  #type:ignore
-            E.create() #type:ignore
+            E.create(comm=self._eigen_comm(distributed)) #type:ignore
             # Kept on self so that _eps_solve_with_workspace_retry can still reach the ST's PC to read
             # MUMPS' INFOG after a failure -- by then the exception has unwound past this local.
             self._last_eps_attempt = E
@@ -956,14 +1015,16 @@ class SlepcEigenSolver(GenericEigenSolver):
             E.setDimensions(neval,ncv,mdp) #type:ignore
 
             if v0 is not None:
+                # v0 arrives globally indexed (it is typically a previous eigenvector, which pyoomph
+                # keeps replicated); _create_petsc_vector slices out this rank's rows when distributed.
                 if len(v0.shape)==1:
-                    _v0=PETSc.Vec().createWithArray(v0) #type:ignore
+                    _v0=self._create_petsc_vector(v0,n,nrow_local,first_row,distributed)
                     E.setInitialSpace(_v0)
                     _v0.destroy()
                 else:
                     ispace=[]
                     for i in range(min(v0.shape[0],ncv)):
-                        ispace.append(PETSc.Vec().createWithArray(v0[i,:])) #type:ignore
+                        ispace.append(self._create_petsc_vector(v0[i,:],n,nrow_local,first_row,distributed))
                     E.setInitialSpace(ispace)
                     for _v0 in ispace:
                         _v0.destroy()
@@ -984,7 +1045,13 @@ class SlepcEigenSolver(GenericEigenSolver):
         if quiet:
             Print = lambda *pargs,**kwargs: None
         else:
-            Print = PETSc.Sys.Print #type:ignore
+            # PETSc.Sys.Print prints once per communicator, so on the COMM_SELF (replicated) path every
+            # rank would print the same report. Restrict that one to rank 0; the COMM_WORLD path already
+            # prints exactly once.
+            if distributed or get_mpi_rank()==0:
+                Print = PETSc.Sys.Print #type:ignore
+            else:
+                Print = lambda *pargs,**kwargs: None
         Print()
         Print("******************************")
         Print("*** SLEPc Solution Results ***")
@@ -1021,7 +1088,10 @@ class SlepcEigenSolver(GenericEigenSolver):
                 #E.getEigenvector(i, vr, vi) #type:ignore
                 error = E.computeError(i) #type:ignore
                 evals.append(k) #type:ignore
-                _vr = 0+vr.getArray() #type:ignore
+                # Gathered to full global length here, once per eigenpair, so that everything after this
+                # point -- the sorting, the caller, the whole output stack -- sees the same globally
+                # indexed eigenvectors it sees in a serial run. See _vector_to_global_array().
+                _vr = self._vector_to_global_array(vr,distributed) #type:ignore
                 #_vi=0+vi.getArray() #type:ignore
                 # TODO: Something seems to be wrong in complex SLEPc. At least here, with complex shift, it can be messed up
                 #Print("IN K %9f%+9f j"%(k.real,k.imag)+" error: %12g" % error) #type:ignore
@@ -1041,7 +1111,7 @@ class SlepcEigenSolver(GenericEigenSolver):
                             #lastev = k
                         
                     else:
-                        evects.append(0+_vr+vi.getArray()*1j) #type:ignore
+                        evects.append(0+_vr+self._vector_to_global_array(vi,distributed)*1j) #type:ignore
                         Print(" %9f%+9f j %12g" % (k.real, k.imag, error))
                 else:
                     #lastev = None
@@ -1074,7 +1144,8 @@ class SlepcEigenSolver(GenericEigenSolver):
             for i in range(nbasis):
                 bv=basis.createVec()
                 basis.copyVec(i,bv)
-                last_basis_list.append(bv.getArray())
+                # Gathered like the eigenvectors: get_last_basis()'s consumers index it globally.
+                last_basis_list.append(self._vector_to_global_array(bv,distributed))
                 bv.destroy()
             self._last_basis=numpy.array(last_basis_list)
         else:

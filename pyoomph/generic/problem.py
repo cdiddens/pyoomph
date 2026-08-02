@@ -1432,8 +1432,21 @@ class Problem(_pyoomph.Problem):
         return self._eigensolver
 
 
+    def _require_non_distributed(self,what:str)->None:
+        """Stop with a clear message if ``what`` is being attempted on a distributed problem.
+
+        These callers assemble the eigenproblem matrices themselves and read the result as a square
+        global matrix, which it stops being once the rows are partitioned across ranks -- scipy then
+        raises about an indptr length, several frames away from the feature the user asked for. The
+        augmented-system ones (bifurcation tracking, periodic orbits) additionally sit on top of
+        sparse_assemble_row_or_column_compressed_base_problem, which throws "This likely does not work
+        in distributed parallel" from C++. Failing here names the feature instead.
+        """
+        if self.is_distributed():
+            raise RuntimeError(what+" is not supported on a distributed (--distribute) problem yet. Run it without --distribute (plain eigenvalue solving via SLEPc does work distributed).")
+
     def get_la_solver(self)->"GenericLinearSystemSolver":
-        
+
         """Get the linear solver instance.
 
         Returns:
@@ -4494,6 +4507,12 @@ class Problem(_pyoomph.Problem):
         self.invalidate_cached_mesh_data(only_eigens=True)
         self.setup_forced_zero_dof_list_for_eigenproblems()
         eigen_solver=self.get_eigen_solver()
+        # distributed_possible() has been on both solver base classes for a long time without anything
+        # ever asking it. Ask it here: on a distributed problem each rank assembles only its own row
+        # block, and a backend that cannot see that would quietly solve the block as if it were the
+        # whole eigenproblem and return plausible, wrong eigenvalues.
+        if self.is_distributed() and not eigen_solver.distributed_possible():
+            raise RuntimeError("The eigensolver '"+str(getattr(eigen_solver,"idname",type(eigen_solver).__name__))+"' cannot solve an eigenproblem on a distributed (--distribute) problem. Use SLEPc instead, e.g. problem.set_eigensolver('slepc_mumps'), or run without --distribute.")
         if ncv is not None:
             eigen_solver.ncv=ncv
         self._last_eigenvalues,self._last_eigenvectors,J,M=eigen_solver.solve(n,shift=shift,sort=sort,which=which,OPpart=OPpart,v0=v0,target=target)
@@ -4505,13 +4524,18 @@ class Problem(_pyoomph.Problem):
 
         #self._last_eigenvectors=numpy.transpose(self._last_eigenvectors)
         if (not self.is_quiet()) and (not quiet) :
-            if report_accuracy:                
+            if report_accuracy:
                 for i,l in enumerate(self._last_eigenvalues):
                     v=self._last_eigenvectors[i,:]
+                    # J and M are (nrow_local x n) on a distributed problem while v is replicated at full
+                    # length, so these products give this rank's rows of the residual and the max over
+                    # them is a partial one. norm(v) needs no reduction -- v is already global.
                     lhs =l*(M@v) #type:ignore
                     rhs=J@v #type:ignore
                     diff=lhs-rhs #type:ignore
-                    abs_err=numpy.max(numpy.absolute(diff))
+                    abs_err=numpy.max(numpy.absolute(diff)) if diff.shape[0]>0 else 0.0 #type:ignore
+                    if get_mpi_nproc()>1:
+                        abs_err=get_mpi_max(abs_err)
                     rel_err=abs_err/numpy.linalg.norm(v)
                     print("Eigenvalue",i,":",l,"Error (abs/rel):",abs_err,rel_err) #type:ignore
                 pass
@@ -5208,8 +5232,9 @@ class Problem(_pyoomph.Problem):
             eigenvector (Optional[Union[NPFloatArray, NPComplexArray, int]]): The eigenvector to use for tracking. Defaults to None, which means the eigenvector corresponding to the eigenvalue with largest real part. Can be either an index or a custom vector.
             omega (Optional[float]): The omega value for Hopf bifurcation tracking. Defaults to None, then it will be Im(lambda).
             azimuthal_mode (Optional[int]): The azimuthal mode for azimuthal bifurcation tracking. Defaults to None.
-        """        
-        
+        """
+
+        self._require_non_distributed("Bifurcation tracking")
         self.reset_arc_length_parameters()
 
         if parameter is None:
@@ -5513,7 +5538,8 @@ class Problem(_pyoomph.Problem):
         Returns:
             PeriodicOrbit: The resulting periodic orbit. Note that it still must be solved, i.e. it is only the provided guess at this stage.
         """
-        self.deactivate_bifurcation_tracking()        
+        self._require_non_distributed("Periodic orbit tracking")
+        self.deactivate_bifurcation_tracking()
         self.time_stepper_pt().make_steady()
         if len(history_dofs)==0:
             raise ValueError("No history dofs provided")
