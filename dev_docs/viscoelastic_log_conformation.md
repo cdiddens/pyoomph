@@ -205,8 +205,12 @@ Worked around by taking the time derivative component-wise, `partial_t(var(name 
 on, which goes through the scalar path. The advection term is built the same way, for an unrelated
 reason: `grad()` of a matrix does not produce the rank-3 object the term needs.
 
-A fix would read the size from `T` rather than assuming 3. Low risk, but it is shared code with no
-other caller to regress against, so it is left as a note.
+**Fixed at source**: the size is now read off `T`, whose `nops()` is rows*cols, and the result is no
+longer padded to 3x3 since it is subtracted from the plain time derivative and has to keep `T`'s
+shape. `viscoelastic.py` keeps its component-wise form regardless, because the advection term next to
+it has to be built that way anyway. Covered by `tests/test_tensor_fields.py`, on a static mesh (where
+the original failure happened, since the correction is assembled whether or not the mesh moves) and
+on a genuinely moving one.
 
 ### 6.2 `DiagonalizeSymmetricTensor` zeroes its whole Jacobian on the near-diagonal branch
 
@@ -309,6 +313,31 @@ Worth knowing because the facility is otherwise the natural way to validate hand
 currently cannot be trusted in the affirmative *or* the negative without a control. Deliberately
 corrupting the emitted C does make it fire, so it is not inert - just wrong about which side is which.
 
+### 6.3.1 Nondeterministic residual assembly with a literal constant vector
+
+Found while writing the regression tests for 6.1 and 6.4, and unrelated to either. Building a
+tensor-valued term out of `dot(wind, grad(...))` entries fails **intermittently** during
+`_add_residual` with
+
+    RuntimeError: Not a 32-bit integer: 136610024783872
+
+- a pointer-sized value - on roughly 8 runs in 10, at both 2x2 and 3x3. It is not a shape problem and
+not caused by the fixes here: the 3x3 case, whose code path is untouched, fails slightly *more* often
+than the 2x2 one.
+
+The trigger is a **literal constant** vector. Over 10 runs each:
+
+| wind | 2x2 | 3x3 |
+|------|-----|-----|
+| `vector(1.0, 0.0)` | 7/10 fail | 9/10 fail |
+| `vector(var("coordinate_y"), 0)` | 0/10 | 0/10 |
+| a substituted field | 0/10 | 0/10 |
+
+`partial_t` is irrelevant - on its own it never fails - so it really is the advection term alone.
+`ViscoelasticEquations` is not exposed to this, because its wind is `var(velocity_name)`, which is
+why 35 tests and dozens of benchmark runs never tripped over it. `tests/test_tensor_fields.py` routes
+its wind through a substituted field for the same reason, and says so.
+
 ### 6.4 `SpatialErrorEstimator` cannot be given a tensor field
 
 `SpatialErrorEstimator(log_conformation=1)` raises `ValueError: matrix::operator(): index out of
@@ -321,8 +350,10 @@ SpatialErrorEstimator(log_conformation_xx=1, log_conformation_xy=1, log_conforma
 ```
 
 Same root cause as 6.1 — tensor fields are a path nothing else in the repository exercises.
-`ViscoelasticEquations` does the componentwise thing itself when
-`spatial_error_estimators=True`, so this only bites a caller who names the field by hand.
+
+**Fixed at source**: a named tensor field is now expanded into one criterion per component, all in
+the same group, which is what naming the components by hand would have done. The component names come
+from `_tensorfields` on the combined element, which `define_tensor_field` populates.
 
 ### 6.5 Minor: local function names collide with field names
 
@@ -759,6 +790,7 @@ that defect is "converges without X, diverges with X, for X that should be harml
 1. ~~Fix 6.2~~ - done, see 6.2.1. The workaround in `_in_plane_exponential` stays: the fix does not
    make the genuinely degenerate rest state differentiable, because nothing can.
 2. ~~Promote the cylinder benchmark~~ - done, `tests/test_viscoelastic_cylinder.py`.
-3. Fix 6.1 and 6.4, and 6.3 if the debug facility is worth having.
+3. ~~Fix 6.1 and 6.4~~ - done. 6.3 and 6.3.1 remain: the debug facility and the
+   nondeterministic assembly, neither of which this work depends on.
 4. The wake experiment of section 8.4, which is the one open question about the numbers.
 5. Tutorial page and bibliography.

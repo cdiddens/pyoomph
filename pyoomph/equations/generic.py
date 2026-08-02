@@ -261,12 +261,24 @@ class SpatialErrorEstimator(Equations):
             raise ValueError("Unsupported value for for_which: "+str(for_which))
 
     def define_error_estimators(self):
+        # Tensor fields have to be taken apart: grad() of one is not a vector gradient, so naming it
+        # here used to raise "matrix::operator(): index out of range" from vector_gradient. Each
+        # component contributes its own criterion to the same group, which is what naming the
+        # components by hand would have done anyway.
+        combined=self._get_combined_element()
+        tensorfields=getattr(combined,"_tensorfields",{}) if isinstance(combined,Equations) else {}
         for flux,factor in self.fluxes.items():
             if isinstance(flux,str):
                 if flux=="normal":
                     jflux=nondim("normal") #Normal is not derived
                 elif flux=="mesh":
                     jflux=grad(nondim("mesh"),nondim=True,lagrangian=True)
+                elif flux in tensorfields:
+                    for component in sorted({c for row in tensorfields[flux] for c in row if c}):
+                        self.add_spatial_error_estimator(factor*grad(nondim(component),nondim=True),
+                                                         for_base=self.for_base_solution,for_eigen=self.for_eigenfunction,
+                                                         group=self.group,normalize_relative=self.normalize_relative,weight=self.weight)
+                    continue
                 else:
                     jflux=grad(nondim(flux),nondim=True)
             else:

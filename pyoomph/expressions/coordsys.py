@@ -377,13 +377,24 @@ class CartesianCoordinateSystem(BaseCoordinateSystem):
         return vector(res)
 
     def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int,with_scales:bool)->Expression:
-        res:list[list[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
+        # The size is read off T rather than assumed to be 3. It used to loop over a hardcoded
+        # range(3), so this raised "matrix::operator(): index out of range" for any smaller tensor -
+        # and it is reached from the ALE correction inside partial_t(), which is built whether or not
+        # the mesh actually moves, so partial_t() of a 2x2 tensor field failed even on a static mesh.
+        # nops() of a GiNaC matrix is rows*cols and there is no rows/cols accessor, but a tensor
+        # derivative is square, so the side length is its square root.
+        n=int(round(T.nops()**0.5))
+        if n*n!=T.nops():
+            raise RuntimeError("directional_tensor_derivative expects a square tensor, but got one with "+str(T.nops())+" entries")
+        res:list[list[ExpressionOrNum]] = [[0]*n for _x in range(n)]
         coords=self.get_coords(ndim, with_scales, lagrangian)
-        for i in range(3):
-            for j in range(3):
-                for k,coord in enumerate(coords):                       
+        for i in range(n):
+            for j in range(n):
+                for k,coord in enumerate(coords):
                     res[i][j]+=diff(T[i,j],coord)*direct[k]
-        return matrix(res)
+        # Not padded to 3x3: the result is subtracted from the plain time derivative of T, so it has
+        # to keep T's own shape.
+        return matrix(res,fill_to_max_vector_dim=False)
 
 
 
