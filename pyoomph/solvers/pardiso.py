@@ -236,6 +236,32 @@ def mkl_set_num_threads(num_threads:int):
     _mkl_set_num_threads(c_int(num_threads))
 
 
+# MKL factorises with STATIC pivoting, and on hard systems that fails in two ways -- only one of which
+# it reports. Both were measured on the heated-cylinder tutorial (docs/source/tutorial/pde/adapt) at a
+# desired_ndof above ~170k, where the joint error criterion deliberately leaves an advection-dominated
+# tracer under-resolved:
+#
+#   * it perturbs pivots, iterative refinement cannot repair them, and phase 33 returns error -4; or
+#   * it reports a perfectly clean factorisation (IPARM(14) == 0), therefore does no refinement at
+#     all, and returns a solution whose backward error is O(1) -- 7.6 was measured. Newton is then
+#     fed nonsense and stops at its iteration limit, which from the outside looks like a physics or
+#     continuation problem rather than a linear-solver one. This is the more dangerous of the two.
+#
+# The matrices are not singular, whatever MKL's message for -4 says: UMFPACK, which pivots
+# dynamically, solves every one of them. These two settings cure both failure modes. IPARM(13)=2 is
+# MKL's two-level weighted matching, its own first recommendation for -4; IPARM(10)=8 perturbs a
+# doubtful pivot earlier instead of using it. Neither changed any solution that already worked -- the
+# tutorial's dofs came back bit-identical, and the recovered runs reproduce UMFPACK's answer exactly
+# (ndof 240172) about six times faster.
+_ESCALATED_IPARM = {12: 2, 9: 8}  # 0-based indices, i.e. IPARM(13) and IPARM(10)
+
+# Backward error above which a solve is disbelieved and the escalation above is tried. Healthy solves
+# of that same tutorial peak at 1e-6 while the broken ones sit at 1e0, so any threshold in between
+# separates them. 1e-4 keeps two orders of margin on the side that must not fire, because a false
+# positive costs a full refactorisation.
+_BACKWARD_ERROR_LIMIT = 1e-4
+
+
 class pardisoSolver(object):
     
     def __init__(self, matA:Any, mtype:int=11, verbose:bool=False,iparm_override:dict[int,int]={}):
@@ -307,6 +333,13 @@ class pardisoSolver(object):
           
         for k,v in iparm_override.items():
             self.iparm[k-1]=v
+
+        # Whether _escalate_pivoting has already been spent. It is one-shot: there is only one
+        # stronger setting to fall back to, so a second attempt would repeat the first and turn a
+        # failure into an infinite loop. Starting True when the caller already asked for any part of
+        # it (via iparm_override, including the carry-over in PardisoSolver.solve) both skips the
+        # pointless retry and leaves a deliberate choice of these two knobs alone.
+        self._escalated_iparm = any(self.iparm[k] == v for k, v in _ESCALATED_IPARM.items())
 
         self.last_mem_used_in_kb:int | None=None
 
@@ -406,19 +439,68 @@ class pardisoSolver(object):
     # iparm[7] unconditionally would not be free: given an explicit cap MKL abandons the
     # "only if perturbed" rule and refines until its own criterion is met, which on the healthy layouts
     # means 4 extra triangular solves per solve where none were needed at all.
-    def solve_checked(self, rhs:Any, max_steps:int=20)->Any:
-        if self.iparm[13] <= 0:  # IPARM(14): no pivot was perturbed, so the factors are trustworthy
+    # IPARM(14) == 0 means MKL perturbed no pivot. That is NOT the same as the answer being right --
+    # see _ESCALATED_IPARM, where the worst solves measured came out of factorisations that reported
+    # exactly this -- so the result is checked against the residual either way, and the refinement
+    # below is only the cheap repair that is worth attempting first.
+    def _solve_refined(self, rhs:Any, max_steps:int)->Any:
+        if self.iparm[13] <= 0:
             return self.solve(rhs)
         old = self.iparm[7]
         self.iparm[7] = max_steps
         try:
-            x = self.solve(rhs)
+            return self.solve(rhs)
         finally:
             self.iparm[7] = old
+
+    # Rebuild the factorisation with MKL's stronger pivoting (_ESCALATED_IPARM). IPARM(13) is read by
+    # the REORDERING phase, so this cannot reuse the existing analysis -- it has to go back through
+    # phase 12, and the handle must be released first or MKL leaks its internal workspace. Returns
+    # False when the escalation has already been spent, so callers stop instead of looping.
+    def _escalate_pivoting(self)->bool:
+        if self._escalated_iparm:
+            return False
+        self._escalated_iparm = True
+        self.run_pardiso(phase=-1)
+        for k, v in _ESCALATED_IPARM.items():
+            self.iparm[k] = v
+        self.factor()
+        if self.msglvl:
+            print("PARDISO: escalated to IPARM(13)=2, IPARM(10)=8 and refactorised")
+        return True
+
+    def solve_checked(self, rhs:Any, max_steps:int=20)->Any:
+        try:
+            x = self._solve_refined(rhs, max_steps)
+        except PardisoError:
+            # A hard failure leaves nothing usable, so there is no fallback answer to keep: either
+            # the escalation produces one or the original exception stands.
+            if not self._escalate_pivoting():
+                raise
+            return self._solve_refined(rhs, max_steps)
+
+        err = self._backward_error(x, rhs)
         if self.msglvl:
             print("PARDISO: %d perturbed pivot(s), refined the solve in %d step(s), backward error %s"
-                  % (self.iparm[13], self.iparm[6], self._backward_error(x, rhs)))
-        return x
+                  % (self.iparm[13], self.iparm[6], err))
+        if err is None or err <= _BACKWARD_ERROR_LIMIT:
+            return x
+        if not self._escalate_pivoting():
+            return x
+
+        x2 = self._solve_refined(rhs, max_steps)
+        err2 = self._backward_error(x2, rhs)
+        if err2 is not None and err2 > _BACKWARD_ERROR_LIMIT:
+            # Warn rather than raise: before this check existed such a solve was returned silently,
+            # and refusing it outright would turn a badly-converging run into a crashing one on
+            # problems that never reported anything wrong. Whichever answer is less wrong is still
+            # the best available, and now it says so.
+            print("PARDISO WARNING: backward error %.3e after escalation (was %.3e); the solution is "
+                  "not trustworthy. A dynamically pivoting solver (umfpack) may be needed here."
+                  % (err2, err))
+            if err2 > err:
+                return x
+        return x2
 
     # MKL's documented meanings for the `error` output. Every value is a hard failure -- Pardiso has no
     # "converged badly but usable" answer to report, so anything nonzero means the contents of x are
@@ -736,6 +818,13 @@ class PardisoSolver(GenericLinearSystemSolver):
                     sol=self.problem._custom_assembler.custom_solve_routine(lambda rhs : pd.solve_checked(rhs), b) #type:ignore
                 else:
                     sol = self._current_pardiso.solve_checked(self.get_b(n,b))
+                # Once a factorisation has had to escalate its pivoting, the next one on this problem
+                # almost certainly will too -- under spatial adaptivity the mesh only gets harder from
+                # here. Folding it into iparm_override means the following pardisoSolver starts there
+                # instead of rediscovering it through another failed solve and refactorisation.
+                if self._current_pardiso._escalated_iparm:
+                    for k, v in _ESCALATED_IPARM.items():
+                        self.iparm_override[k + 1] = v  # iparm_override is 1-based, _ESCALATED_IPARM is not
             if self.verbose:
                 print("PARDISO SOLVE IPARM",self._current_pardiso.iparm)
             b[:] = sol[:]
