@@ -700,7 +700,7 @@ class ViscoelasticEquations(Equations):
 # Utilities
 ##############################################################################
 
-def symmetric_2x2_matrix_log(M: Expression) -> Expression:
+def symmetric_2x2_matrix_log(M: Expression, epsilon: float = 1e-30) -> Expression:
     r"""
     Analytic matrix logarithm of a symmetric positive definite 2x2 matrix.
 
@@ -709,13 +709,25 @@ def symmetric_2x2_matrix_log(M: Expression) -> Expression:
     :math:`a=\log\Lambda_+-b\Lambda_+`, which follows from the fact that any function of a 2x2
     matrix is a linear combination of the identity and the matrix itself (Cayley-Hamilton).
     This is a purely symbolic expression, so it can be used e.g. to prescribe the
-    log-conformation tensor on an inflow boundary. It is singular for degenerate eigenvalues.
+    log-conformation tensor on an inflow boundary.
+
+    Degenerate eigenvalues are handled, which matters because the obvious use of this function hits
+    them: prescribing the inflow conformation of a channel makes it isotropic on the symmetry line,
+    where the shear rate vanishes. The b coefficient is then 0/0. Regularising the denominator sends
+    b to 0 there, and that happens to be exactly right rather than merely safe -- for an isotropic
+    M = Lambda*I the result collapses to a*I = log(Lambda)*I, which is the correct logarithm. The
+    epsilon only degrades the answer when the two eigenvalues are separated by an amount comparable
+    to it, which for the default is far below anything representable in the surrounding computation.
+
+    Args:
+        M: the matrix, assumed symmetric and positive definite.
+        epsilon: regularisation of the eigenvalue difference in the denominator.
     """
     t = M[0, 0] + M[1, 1]
     d = M[0, 0] * M[1, 1] - M[0, 1] * M[1, 0]
     root = square_root(t ** 2 / 4 - d)
     lp, lm = t / 2 + root, t / 2 - root
-    b = (log(lp) - log(lm)) / (lp - lm)
+    b = (log(lp) - log(lm)) / (lp - lm + epsilon)
     a = log(lp) - b * lp
     return matrix([[a + b * M[0, 0], b * M[0, 1]], [b * M[1, 0], a + b * M[1, 1]]], fill_to_max_vector_dim=False)
 

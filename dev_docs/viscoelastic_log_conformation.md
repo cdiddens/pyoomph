@@ -424,7 +424,10 @@ of Alves, Oliveira & Pinho (2001) and Fan, Tanner & Phan-Thien (1999). Their own
 DEVSS-G/DG with spectral/hp elements at polynomial order 12-18, i.e. nothing like what is used here,
 which is what makes the agreement worth something.
 
-The script lives in the session scratchpad, not yet in the repository — see section 10.
+It lives in `tests/test_viscoelastic_cylinder.py`. That runs a cheaper version of what is
+reported below - 23k dofs for the Newtonian case, 60k for the viscoelastic one, about 20 s in total -
+and is deliberately *not* marked slow, since a validation against external references is worth
+little if it is skipped by default. The numbers in 8.2 onwards come from the fuller meshes.
 
 ### 8.1 Setup, and the mapping onto these classes
 
@@ -730,9 +733,9 @@ that defect is "converges without X, diverges with X, for X that should be harml
 
 ## 10. Not done
 
-* **Promoting the cylinder benchmark into the repository.** It runs in the scratchpad only. It is
-  too slow for the fast test suite, so it wants either a `slow`-marked test over a short Wi range or
-  a tutorial page, or both.
+* **A tutorial page for the benchmark.** The validation itself is now a test (section 8), but there
+  is no narrative version, and no `refs.bib` entries - the bibliography still contains nothing
+  viscoelastic.
 * **The wake.** Section 8.4 cannot separate the O-grid from the far field, because the estimator
   redistributes the far field whenever the O-grid changes. Pinning the wake - estimator restricted
   to the cylinder and near wake, or adaptivity off - is the experiment that would settle it, and the
@@ -755,7 +758,7 @@ that defect is "converges without X, diverges with X, for X that should be harml
 
 1. ~~Fix 6.2~~ - done, see 6.2.1. The workaround in `_in_plane_exponential` stays: the fix does not
    make the genuinely degenerate rest state differentiable, because nothing can.
-2. Fix 6.1 and 6.4, and 6.3 if the debug facility is worth having.
-3. Promote the cylinder benchmark into the repository, and add the pointwise `du/dy` check from
-   section 10 - it is the one that would actually catch an under-resolved boundary layer.
-4. Tutorial page and bibliography.
+2. ~~Promote the cylinder benchmark~~ - done, `tests/test_viscoelastic_cylinder.py`.
+3. Fix 6.1 and 6.4, and 6.3 if the debug facility is worth having.
+4. The wake experiment of section 8.4, which is the one open question about the numbers.
+5. Tutorial page and bibliography.

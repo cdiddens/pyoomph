@@ -459,8 +459,14 @@ def test_poiseuille_flow_converges_under_refinement(tmp_path):
 # ----------------------------------------------------------------------------------------------
 
 def test_symmetric_2x2_matrix_log_inverts_the_exponential():
-    """The symbolic matrix logarithm used to prescribe inflow values of the log-conformation tensor."""
-    for weissenberg in (0.3, 1.0, 4.0):
+    """
+    The symbolic matrix logarithm used to prescribe inflow values of the log-conformation tensor.
+
+    Wi=0 is in the list on purpose: it makes the conformation tensor isotropic, so the eigenvalues
+    coincide and the b coefficient of a*I + b*M is 0/0. That is not a corner case to be tolerated but
+    the ordinary situation on a channel's symmetry line, which is exactly where this helper gets used.
+    """
+    for weissenberg in (0.0, 1e-8, 0.3, 1.0, 4.0):
         C = numpy.array([[1 + 2 * weissenberg ** 2, weissenberg], [weissenberg, 1.0]])
         expression = symmetric_2x2_matrix_log(oldroyd_b_shear_conformation(weissenberg))
         got = numpy.array([[float(expression[i, j]) for j in range(2)] for i in range(2)])
