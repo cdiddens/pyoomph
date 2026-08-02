@@ -3,7 +3,7 @@
 Implementation notes for `pyoomph/equations/viscoelastic.py` and `tests/test_viscoelastic.py`, both
 added by this work. Nothing outside those two files was changed, but building them turned up a
 series of defects and gotchas in code they sit on top of; those are recorded in sections 6, 8.6 and
-9.3 with what was done instead of fixing them at source.
+9.3 with what was done about them; the main one, 6.2, has since been fixed at source.
 
 The starting point was that `pyoomph/expressions/tensor_funcs.py` already contained everything hard
 about log-conformation — an eigendecomposition with analytic derivatives, the Fattal-Kupferman
@@ -251,12 +251,65 @@ axisymmetric branch is never reached. It is constructed with an explicitly Carte
 system even in the axisymmetric case, since the exponential of a plain symmetric 2x2 block is the
 same operation either way; `_in_plane_exponential` says so.
 
-A real fix in `tensor_funcs.py` would make the branch condition compare `M12` against `M11-M22`
-rather than against an absolute constant, and report the true derivatives when the eigenvalues are
-distinct. That would also help the Fattal-Kupferman decomposition, whose degenerate branch has the
-same shape of problem.
+**This has since been fixed at source** - see section 6.2.1. The workaround above stays, because the
+fix does not make the rest state differentiable; nothing can.
 
-### 6.3 `SpatialErrorEstimator` cannot be given a tensor field
+#### 6.2.1 The fix
+
+`DiagonalizeSymmetricTensor` now branches on the eigenvalue **gap** rather than on the off-diagonal
+entry, which is the quantity that actually decides whether the eigenvectors are well conditioned. The
+gap can be tiny with a large off-diagonal entry, or huge with a zero one, so the old test decided the
+wrong thing in both directions: it sent well-behaved matrices into the zero-Jacobian fallback, and it
+let near-degenerate ones through to the general branch, where the correct derivatives are of order
+1/gap and reach 1.8e5 for a gap of 2e-6.
+
+Widening the old condition is not enough on its own. At `M12=0` with `M11>M22` the general branch
+builds its eigenvector as `(M12, Lx-M11) = (0,0)` and divides by a zero norm - which is *why* the
+special case existed. The repair is to note that the eigenvector of the larger eigenvalue can be
+written either as `(r+D2, b)` or as `(b, r-D2)`, with `D2=(a-d)/2` and `r=sqrt(D2^2+b^2)`. The two
+are parallel, since `b^2=(r+D2)(r-D2)`, but their squared norms are `2r(r+D2)` and `2r(r-D2)`, so
+whichever carries `|D2|` with a plus sign has norm bounded below by `2r^2` and is fine whenever the
+eigenvalues are distinct at all. Selecting between them by `sign(D2)` also moves the unavoidable
+branch cut - an eigenvector field around a degeneracy has a topological obstruction, so a cut cannot
+be removed, only relocated - from `b=0` onto `D2=0, b<0`. That matters because `b=0` is exactly where
+symmetry lines and extensional flows sit, whereas `D2=0` is not a set the solutions occupy. Across
+the cut `R`'s first column changes sign, and `C=R*D*R^t`, `B` and `Omega` are all invariant to that.
+
+The derivatives are hand-derived rather than regenerated with sympy, which replaced ~300 lines of
+CSE'd machine output with about 25 lines that read like the mathematics; the file lost 172 lines net.
+Both coordinate systems now share one routine, which also removed a second inconsistency: the
+axisymmetric branch had been using the opposite sign convention for `R` from the Cartesian one.
+
+Verified against finite differences at 1e-8 relative on both variants, over symmetry lines
+(`b=0` with `a>d` and `a<d`), generic tensors of both signs, large `Psi`, and equal diagonals. Two
+cases deviate and both are expected: near-degeneracy, where the mismatch tracks FD truncation and
+falls as `O(h^2)` to a 1.2e-8 relative floor; and the branch cut itself, where one-sided derivatives
+agree on each side and reconstruction stays exact.
+
+**What it bought, measured rather than assumed: nothing, on this benchmark.** The cylinder needs 21
+Newton steps over Wi=0.1...0.7 with the fix and 21 without, and the drag is identical to every digit
+- as it must be, since only the Jacobian was ever wrong. The affected set here is just the nodes
+sitting exactly on the symmetry line, a few percent of the mesh. It would matter for a problem living
+in that regime, a purely extensional flow being the obvious one. The value of the change is that a
+silently wrong Jacobian is gone, not that this particular case got faster.
+
+### 6.3 The C-vs-Python debug facility reports false differences
+
+`set_debug_python_vs_c_epsilon` cross-checks the emitted C against the Python `eval`. Turning it on
+produces thousands of messages of the form
+
+    MULTI-RET Python Vs C difference (flag=0):  Result 0 is 0 (Python) and 0.707107 (C) at arguments: ...
+
+where the Python value is reported as 0. Calling the Python `eval` directly at those very arguments
+returns 0.707107, i.e. exactly what the C produced - so the two implementations agree and the
+harness is comparing against a buffer the Python side has not written. It is **pre-existing**: the
+unmodified file emits 14448 such messages on a small channel run, the repaired one 14160.
+
+Worth knowing because the facility is otherwise the natural way to validate hand-written C, and it
+currently cannot be trusted in the affirmative *or* the negative without a control. Deliberately
+corrupting the emitted C does make it fire, so it is not inert - just wrong about which side is which.
+
+### 6.4 `SpatialErrorEstimator` cannot be given a tensor field
 
 `SpatialErrorEstimator(log_conformation=1)` raises `ValueError: matrix::operator(): index out of
 range`. It takes `grad()` of whatever it is handed, and `grad()` of a tensor field is not a vector
@@ -271,7 +324,7 @@ Same root cause as 6.1 — tensor fields are a path nothing else in the reposito
 `ViscoelasticEquations` does the componentwise thing itself when
 `spatial_error_estimators=True`, so this only bites a caller who names the field by hand.
 
-### 6.4 Minor: local function names collide with field names
+### 6.5 Minor: local function names collide with field names
 
 `add_local_function("conformation_xx", ...)` raises when the conformation formulation is in use,
 because `conformation_xx` is then a field. Guarded: those outputs are only added in the
@@ -700,9 +753,9 @@ that defect is "converges without X, diverges with X, for X that should be harml
 
 ## 11. Order of work, if this is picked up again
 
-1. Fix 6.2 in `tensor_funcs.py` properly, and delete the workaround in `_in_plane_exponential` if the
-   fix makes the eigendecomposition route safe again. The test suite here is the regression net.
-2. Fix 6.1 and 6.3 while in the area.
+1. ~~Fix 6.2~~ - done, see 6.2.1. The workaround in `_in_plane_exponential` stays: the fix does not
+   make the genuinely degenerate rest state differentiable, because nothing can.
+2. Fix 6.1 and 6.4, and 6.3 if the debug facility is worth having.
 3. Promote the cylinder benchmark into the repository, and add the pointwise `du/dy` check from
    section 10 - it is the one that would actually catch an under-resolved boundary layer.
 4. Tutorial page and bibliography.

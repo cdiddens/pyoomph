@@ -40,8 +40,13 @@ from .generic import matrix,ExpressionOrNum,Expression, scale_factor
 # If you use dimensions, you must set the scale of the tensor entries as 'scale' argument.
 # This scale will be in D, whereas R does not have any physical dimensions
 class DiagonalizeSymmetricTensor(CustomMultiReturnExpression):
-    def __init__(self,coordinate_system:BaseCoordinateSystem,dim:int,scale:ExpressionOrNum | str=1,fill_to_max_vector_dim:bool=True,use_FD:bool | float=False) -> None:
+    def __init__(self,coordinate_system:BaseCoordinateSystem,dim:int,scale:ExpressionOrNum | str=1,fill_to_max_vector_dim:bool=True,use_FD:bool | float=False,degeneracy_epsilon:float=1e-12) -> None:
         super().__init__()
+        # Eigenvalues closer together than this (relative to the size of the tensor) are treated as
+        # degenerate. It replaces a hardcoded test on the off-diagonal entry alone, which decided the
+        # wrong thing: what makes the eigenvectors ill-conditioned is a small eigenvalue GAP, and the
+        # gap can be tiny with a large off-diagonal entry or huge with a zero one.
+        self.degeneracy_epsilon=degeneracy_epsilon
         if isinstance(coordinate_system,AxisymmetricCoordinateSystem):
             if isinstance(coordinate_system,AxisymmetryBreakingCoordinateSystem):
                 raise RuntimeError("Not implemented for this coordinate system: "+str(coordinate_system))
@@ -126,372 +131,195 @@ class DiagonalizeSymmetricTensor(CustomMultiReturnExpression):
             return R,D
         
     # 2d Cartesian case, evaluation and Jacobian
-    def eval_2d_cartesian(self,flag:int,arg_list:NPFloatArray,result_list:NPFloatArray,derivative_matrix:NPFloatArray):
-        M11=arg_list[0]
-        M12=arg_list[1]
-        M22=arg_list[2]
+    # The eigendecomposition of the in-plane 2x2 block, shared by both coordinate systems.
+    #
+    # For M=[[a,b],[b,d]] write the half-difference D2=(a-d)/2 and the half-gap r=sqrt(D2^2+b^2), so
+    # the eigenvalues are T/2 +- r. The eigenvector of the larger one can be written either as
+    # (r+D2, b) or as (b, r-D2); the two are parallel, since b^2=(r+D2)(r-D2), but their squared
+    # norms are 2r(r+D2) and 2r(r-D2), so whichever carries |D2| with a PLUS sign has norm bounded
+    # below by 2r^2 and is well conditioned whenever the eigenvalues are distinct at all.
+    #
+    # Choosing between them by the sign of D2 is what this used to get wrong. The old code instead
+    # tested |b| against an absolute 1e-15 and, in that branch, reported EVERY derivative of R as
+    # zero. The true value is finite and nonzero - d(R)/d(b) is of order 1/(a-d) - so the Jacobian
+    # was silently wrong on the whole set b=0, a!=d. That set is not exotic: it is every symmetry
+    # line (where the off-diagonal component vanishes by symmetry while the normal components
+    # differ) and every purely extensional flow.
+    #
+    # A branch cut cannot be removed altogether - an eigenvector field around a degeneracy has a
+    # topological obstruction - but it can be moved. Selecting on sign(D2) puts it on D2=0 with b<0
+    # and leaves b=0 smooth, which is the case that actually occurs. Across the cut R's first column
+    # changes sign; C=R*D*R^t and the B/Omega decomposition built from R are invariant to that, so
+    # nothing downstream sees it.
+    #
+    # Genuine degeneracy, r=0, is different in kind: the eigenvectors really are undefined and no
+    # derivative exists. There the identity is returned with a zeroed Jacobian, which is an honest
+    # approximation rather than a wrong one. Callers that need a smooth function of the tensor near
+    # r=0 - the conformation tensor exp(Psi) at rest, say - must not route it through this class at
+    # all; see SymmetricMatrixExponential.
+    def _diagonalize_2x2(self, a: float, b: float, d: float, flag: int):
+        T = a + d
+        D2 = 0.5 * (a - d)
+        r = numpy.sqrt(D2 * D2 + b * b)
+        if r <= self.degeneracy_epsilon * (1.0 + 0.5 * abs(T)):
+            return 1.0, 0.0, 0.5 * T, 0.5 * T, numpy.zeros((6, 3))
 
-        if M12*M12<1e-15:
-            Rxx=Ryy=1.0
-            Rxy=Ryx=0.0
-            Lx,Ly=M11,M22
+        dr = (D2 / (2 * r), b / r, -D2 / (2 * r))        # d(r)/d(a), d(r)/d(b), d(r)/d(d)
+        if D2 >= 0.0:
+            w1, w2 = r + D2, b
+            dw1 = (dr[0] + 0.5, dr[1], dr[2] - 0.5)
+            dw2 = (0.0, 1.0, 0.0)
         else:
-            T=M11+M22
-            D=M11*M22-M12*M12
-            Rxx=Rxy=M12
-            Ryx=Ryy=-M11
-            Lx=T/2+numpy.sqrt(T**2/4-D)
-            Ryx+=Lx
-            mod=numpy.sqrt(Rxx**2+Ryx**2)
-            Rxx/=mod
-            Ryx/=mod
+            w1, w2 = b, r - D2
+            dw1 = (0.0, 1.0, 0.0)
+            dw2 = (dr[0] - 0.5, dr[1], dr[2] + 0.5)
+        n = numpy.sqrt(w1 * w1 + w2 * w2)
+        v1, v2 = w1 / n, w2 / n
 
-            Ly=T/2-numpy.sqrt(T**2/4-D)
-            Ryy+=Ly
-            mod=numpy.sqrt(Rxy**2+Ryy**2)
-            Rxy/=mod
-            Ryy/=mod
+        J = numpy.zeros((6, 3))
+        if flag:
+            for k in range(3):
+                dn = (w1 * dw1[k] + w2 * dw2[k]) / n
+                dv1 = (dw1[k] - v1 * dn) / n
+                dv2 = (dw2[k] - v2 * dn) / n
+                J[0, k], J[1, k], J[2, k], J[3, k] = dv1, -dv2, dv2, dv1
+            J[4, :] = (0.5 + dr[0], dr[1], 0.5 + dr[2])
+            J[5, :] = (0.5 - dr[0], -dr[1], 0.5 - dr[2])
+        return v1, v2, 0.5 * T + r, 0.5 * T - r, J
 
-            Ryy*=-1
-            Ryx*=-1
+    # The C form of _diagonalize_2x2. Fills v1, v2, Lp, Lm and, if flag, the 6x3 block dR[i][j]
+    # holding d(result i)/d(arg j) for the six in-plane results.
+    _C_DIAGONALIZE_2X2 = r"""
+  const double T = a + d;
+  const double D2 = 0.5*(a - d);
+  const double r = sqrt(D2*D2 + b*b);
+  double v1, v2, Lp, Lm;
+  double dR[6][3];
+  for (unsigned i=0; i<6; i++) for (unsigned j=0; j<3; j++) dR[i][j]=0.0;
+  if (r <= DEGENERACY_EPSILON*(1.0 + 0.5*fabs(T)))
+  {
+     v1 = 1.0; v2 = 0.0; Lp = 0.5*T; Lm = 0.5*T;
+  }
+  else
+  {
+     const double dr[3] = { D2/(2.0*r), b/r, -D2/(2.0*r) };
+     double w1, w2, dw1[3], dw2[3];
+     if (D2 >= 0.0)
+     {
+        w1 = r + D2; w2 = b;
+        dw1[0] = dr[0] + 0.5; dw1[1] = dr[1]; dw1[2] = dr[2] - 0.5;
+        dw2[0] = 0.0;         dw2[1] = 1.0;   dw2[2] = 0.0;
+     }
+     else
+     {
+        w1 = b; w2 = r - D2;
+        dw1[0] = 0.0;         dw1[1] = 1.0;   dw1[2] = 0.0;
+        dw2[0] = dr[0] - 0.5; dw2[1] = dr[1]; dw2[2] = dr[2] + 0.5;
+     }
+     const double n = sqrt(w1*w1 + w2*w2);
+     v1 = w1/n; v2 = w2/n;
+     Lp = 0.5*T + r; Lm = 0.5*T - r;
+     if (flag)
+     {
+        for (unsigned k=0; k<3; k++)
+        {
+           const double dn = (w1*dw1[k] + w2*dw2[k])/n;
+           const double dv1 = (dw1[k] - v1*dn)/n;
+           const double dv2 = (dw2[k] - v2*dn)/n;
+           dR[0][k] = dv1; dR[1][k] = -dv2; dR[2][k] = dv2; dR[3][k] = dv1;
+        }
+        dR[4][0] = 0.5 + dr[0]; dR[4][1] =  dr[1]; dR[4][2] = 0.5 + dr[2];
+        dR[5][0] = 0.5 - dr[0]; dR[5][1] = -dr[1]; dR[5][2] = 0.5 - dr[2];
+     }
+  }
+"""
 
-        result_list[:]=numpy.array([Rxx,Rxy,Ryx,Ryy,Lx,Ly])[:]        
-
+    # 2d Cartesian case, evaluation and Jacobian
+    def eval_2d_cartesian(self,flag:int,arg_list:NPFloatArray,result_list:NPFloatArray,derivative_matrix:NPFloatArray):
+        v1, v2, Lp, Lm, J = self._diagonalize_2x2(arg_list[0], arg_list[1], arg_list[2], flag)
+        # R = [v+ | v-] with v- perpendicular to v+, i.e. a proper rotation with det=1.
+        result_list[:] = numpy.array([v1, -v2, v2, v1, Lp, Lm])[:]
         if flag:
             if self.use_FD:
                 self.fill_python_derivatives_by_FD(arg_list,result_list,derivative_matrix,self.FD_epsilon)
             else:
-                if M12*M12<1e-15:
-                    derivative_matrix[:,:]=numpy.array([[0.0,0.0,0.0], [0.0,0.0,0.0], [0.0,0.0,0.0], [0.0,0.0,0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])[:]
-                else:
-                    x0 = M11/4 - M22/4
-                    x1 = M12**2
-                    x2 = numpy.sqrt(-M11*M22 + x1 + (M11 + M22)**2/4)
-                    x3 = 1/x2
-                    x4 = x0*x3
-                    x5 = 2*x4
-                    x6 = x5 - 1
-                    x7 = M11/2
-                    x8 = M22/2 + x2 - x7
-                    x9 = x8**2
-                    x10 = x1 + x9
-                    x11 = x10**(-3/2)
-                    x12 = x11/2
-                    x13 = M12*x12*x8
-                    x14 = 1/numpy.sqrt(x10)
-                    x15 = M12*x3
-                    x16 = x11*(-M12 - x15*x8)
-                    x17 = -x0*x3
-                    x18 = 2*x17
-                    x19 = x18 + 1
-                    x20 = -x5 - 1
-                    x21 = M22/2 - x2 - x7
-                    x22 = x21**2
-                    x23 = x1 + x22
-                    x24 = x23**(-3/2)
-                    x25 = x24/2
-                    x26 = M12*x21*x25
-                    x27 = 1/numpy.sqrt(x23)
-                    x28 = -M12 + x15*x21
-                    x29 = 1 - x18
-                    x30 = x4 - 1/2
-                    x31 = x12*x9
-                    x32 = x17 + 1/2
-                    x33 = x4 + 1/2
-                    x34 = x22*x25
-                    x35 = 1/2 - x17
-                    derivative_matrix[:,:]=numpy.array([[-x13*x6, M12*x16 + x14, -x13*x19], [-x20*x26, M12*x24*x28 + x27, -x26*x29], [x14*x30 - x31*x6, x14*x15 + x16*x8, x14*x32 - x19*x31], [-x20*x34 - x27*x33, -x15*x27 + x21*x24*x28, x27*x35 - x29*x34], [x33, x15, x32], [-x30, -x15, x35]])[:]
-
-            #self.debug_python_derivatives_with_FD(arg_list,result_list,derivative_matrix,error_threshold=1e-6)
+                derivative_matrix[:, :] = J[:, :]
 
     def generate_c_code_2d_cartesian(self) -> str:
-        ccode= """
+        ccode = """
 // 2d Cartesian version of DiagonalizeSymmetricTensor
-const double M11=arg_list[0];
-const double M12=arg_list[1];
-const double M22=arg_list[2];
-double Rxx,Ryy,Rxy,Ryx,Lx,Ly;
-if (M12*M12<1e-15)
-{
-   Rxx=Ryy=1.0;
-   Rxy=Ryx=0.0;
-   Lx=M11; Ly=M22;
-}
-else
-{
-   double T=M11+M22;
-   double D=M11*M22-M12*M12;
-   Rxx=Rxy=M12;
-   Ryx=Ryy=-M11;
-   Lx=T/2.0+sqrt(T*T/4.0-D);
-   Ryx+=Lx;
-   double mod=sqrt(Rxx*Rxx+Ryx*Ryx);
-   Rxx/=mod;
-   Ryx/=mod;
-   Ly=T/2.0-sqrt(T*T/4.0-D);
-   Ryy+=Ly;
-   mod=sqrt(Rxy*Rxy+Ryy*Ryy);
-   Rxy/=mod;
-   Ryy/=mod;
-}
-result_list[0]=Rxx;
-result_list[1]=Rxy;
-result_list[2]=Ryx;
-result_list[3]=Ryy;
-result_list[4]=Lx;
-result_list[5]=Ly;
+const double a=arg_list[0];
+const double b=arg_list[1];
+const double d=arg_list[2];
+#define DEGENERACY_EPSILON """ + str(self.degeneracy_epsilon) + """
+""" + self._C_DIAGONALIZE_2X2 + """
+result_list[0]=v1;
+result_list[1]=-v2;
+result_list[2]=v2;
+result_list[3]=v1;
+result_list[4]=Lp;
+result_list[5]=Lm;
 """
         if self.use_FD:
-            ccode+="""
-FILL_MULTI_RET_JACOBIAN_BY_FD("""+str(self.FD_epsilon)+ """)            
+            ccode += """
+FILL_MULTI_RET_JACOBIAN_BY_FD(""" + str(self.FD_epsilon) + """)
 """
         else:
-            ccode+="""
+            ccode += """
 if (flag)
 {
-   if (M12*M12<1e-15)
-   {
-      derivative_matrix[0]=derivative_matrix[1]=derivative_matrix[2]=0.0;
-      derivative_matrix[3]=derivative_matrix[4]=derivative_matrix[5]=0.0;
-      derivative_matrix[6]=derivative_matrix[7]=derivative_matrix[8]=0.0;
-      derivative_matrix[9]=derivative_matrix[10]=derivative_matrix[11]=0.0;
-		derivative_matrix[12]=1.0; derivative_matrix[13]=derivative_matrix[14]=0.0;
-		derivative_matrix[15]=derivative_matrix[16]=0.0; derivative_matrix[17]=1.0;      		      
-   }
-   else
-   {
-       const double x0 = M11/4.0 - M22/4.0;
-       const double x1 = M12*M12;
-       const double x2 = sqrt(-M11*M22 + x1 + pow(M11 + M22,2)/4.0);
-       const double x3 = 1.0/x2;
-       const double x4 = x0*x3;
-       const double x5 = 2.0*x4;
-       const double x6 = x5 - 1.0;
-       const double x7 = M11/2.0;
-       const double x8 = M22/2.0 + x2 - x7;
-       const double x9 = x8*x8;
-       const double x10 = x1 + x9;
-       const double x11 = pow(x10,-3.0/2.0);
-       const double x12 = x11/2.0;
-       const double x13 = M12*x12*x8;
-       const double x14 = 1.0/sqrt(x10);
-       const double x15 = M12*x3;
-       const double x16 = x11*(-M12 - x15*x8);
-       const double x17 = -x0*x3;
-       const double x18 = 2*x17;
-       const double x19 = x18 + 1.0;
-       const double x20 = -x5 - 1.0;
-       const double x21 = M22/2.0 - x2 - x7;
-       const double x22 = x21*x21;
-       const double x23 = x1 + x22;
-       const double x24 = pow(x23,-3.0/2.0);
-       const double x25 = x24/2.0;
-       const double x26 = M12*x21*x25;
-       const double x27 = 1.0/sqrt(x23);
-       const double x28 = -M12 + x15*x21;
-       const double x29 = 1.0 - x18;
-       const double x30 = x4 - 1.0/2.0;
-       const double x31 = x12*x9;
-       const double x32 = x17 + 1.0/2.0;
-       const double x33 = x4 + 1.0/2.0;
-       const double x34 = x22*x25;
-       const double x35 = 1.0/2.0 - x17;
-       derivative_matrix[0]=-x13*x6; derivative_matrix[1]=M12*x16 + x14;derivative_matrix[2]= -x13*x19; 
-       derivative_matrix[3]=-x20*x26;derivative_matrix[4]= M12*x24*x28 + x27;derivative_matrix[5]= -x26*x29;
-       derivative_matrix[6]=x14*x30 - x31*x6;derivative_matrix[7]= x14*x15 + x16*x8;derivative_matrix[8]= x14*x32 - x19*x31;
-       derivative_matrix[9]=-x20*x34 - x27*x33; derivative_matrix[10]=-x15*x27 + x21*x24*x28;derivative_matrix[11]= x27*x35 - x29*x34;
-       derivative_matrix[12]=x33;derivative_matrix[13]= x15;derivative_matrix[14]= x32;
-       derivative_matrix[15]=-x30;derivative_matrix[16]= -x15;derivative_matrix[17]= x35;
-    }
+   for (unsigned i=0; i<6; i++) for (unsigned j=0; j<3; j++) derivative_matrix[i*3+j]=dR[i][j];
 }
-        """
-        return ccode
+"""
+        return ccode + "#undef DEGENERACY_EPSILON\n"
 
 # Axisymmetric case, evaluation and Jacobian
     def eval_axisymmetric(self,flag:int,arg_list:NPFloatArray,result_list:NPFloatArray,derivative_matrix:NPFloatArray):
-        M11=arg_list[0]
-        M12=arg_list[1]
-        M22=arg_list[2]
-        M33=arg_list[3]
-
-        if M12*M12<1e-15:
-            Rxx=Ryy=1.0
-            Rxy=Ryx=0.0
-            Lx,Ly=M11,M22
-        else:
-            T=M11+M22
-            D=M11*M22-M12*M12
-            Rxx=Rxy=M12
-            Ryx=Ryy=-M11
-            Lx=T/2+numpy.sqrt(T**2/4-D)
-            Ryx+=Lx
-            mod=numpy.sqrt(Rxx**2+Ryx**2)
-            Rxx/=mod
-            Ryx/=mod
-
-            Ly=T/2-numpy.sqrt(T**2/4-D)
-            Ryy+=Ly
-            mod=numpy.sqrt(Rxy**2+Ryy**2)
-            Rxy/=mod
-            Ryy/=mod
-
-        result_list[:]=numpy.array([Rxx,Rxy,Ryx,Ryy,Lx,Ly,M33])[:]        
-
+        # The azimuthal direction is an eigendirection already, so M33 is passed straight through and
+        # only the in-plane block is diagonalized. Note this used to use the opposite sign convention
+        # for R from the 2d Cartesian branch; both now return the same proper rotation.
+        v1, v2, Lp, Lm, J = self._diagonalize_2x2(arg_list[0], arg_list[1], arg_list[2], flag)
+        result_list[:] = numpy.array([v1, -v2, v2, v1, Lp, Lm, arg_list[3]])[:]
         if flag:
             if self.use_FD:
                 self.fill_python_derivatives_by_FD(arg_list,result_list,derivative_matrix,self.FD_epsilon)
             else:
-                if M12*M12<1e-15:
-                    derivative_matrix[:,:]=numpy.array([[0.0,0.0,0.0,0.0], [0.0,0.0,0.0,0.0], [0.0,0.0,0.0,0.0], [0.0,0.0,0.0,0.0], [1.0,0.0,0.0,0.0], [0.0,0.0,1.0,0.0], [0.0,0.0,0.0,1.0]])[:]    
-                else:
-                    x0=M12**2
-                    x1=4*x0
-                    x2=M11*M22
-                    x3=numpy.sqrt(x1 - 4*x2 + (M11 + M22)**2)
-                    x4=-M11 + M22
-                    x5=x3 + x4
-                    x6=x5**2
-                    x7=x1 + x6
-                    x8=x7**(-3/2)
-                    x9=1/x3
-                    x10=2*x9
-                    x11=M12*x10
-                    x12=x11*x6*x8
-                    x13=2*x3
-                    x14=M11 - M22
-                    x15=x14 + x3
-                    x16=x15**2
-                    x17=x1 + x16
-                    x18=x17**(-3/2)
-                    x19=x11*x18
-                    x20=M11**2 + M22**2 + x1 - 2*x2
-                    x21=numpy.sqrt(x20)
-                    x22=M22*x21
-                    x23=M11*x21
-                    x24=1/numpy.sqrt(x20 + x22 - x23)
-                    x25=numpy.sqrt(2)/x20
-                    x26=x0*x25
-                    x27=x24*x26
-                    x28=M12*x14*x25
-                    x29=1/numpy.sqrt(x20 - x22 + x23)
-                    x30=x9/2
-                    x31=x15*x30
-                    x32=x30*x5
-                    derivative_matrix[:,:]=numpy.array([[x12, x10*x8*(-x1*(x13 + x4) + x3*x7), -x12, 0], [-x16*x19, x10*x18*(-x1*(x13 + x14) + x17*x3), x15**2*x19, 0], [-x27, x24*x28, x27, 0], [-x26*x29, x28*x29, x1*x15*x18*x9, 0], [x31, x11, x32, 0], [x32, -x11, x31, 0], [0, 0, 0, 1]])[:]
-
-            #self.debug_python_derivatives_with_FD(arg_list,result_list,derivative_matrix,error_threshold=1e-6)
-
+                derivative_matrix[:, :] = 0.0
+                derivative_matrix[:6, :3] = J[:, :]
+                derivative_matrix[6, 3] = 1.0
 
     def generate_c_code_axisymmetric(self) -> str:
-        ccode="""
+        ccode = """
 // Axisymmetric version of DiagonalizeSymmetricTensor
-const double M11=arg_list[0];
-const double M12=arg_list[1];
-const double M22=arg_list[2];
+const double a=arg_list[0];
+const double b=arg_list[1];
+const double d=arg_list[2];
 const double M33=arg_list[3];
-double Rxx,Ryy,Rxy,Ryx,Lx,Ly;
-if (M12*M12<1e-15)
-{
-   Rxx=Ryy=1.0;
-   Rxy=Ryx=0.0;
-   Lx=M11; Ly=M22;
-}
-else
-{
-   double T=M11+M22;
-   double D=M11*M22-M12*M12;
-   Rxx=Rxy=M12;
-   Ryx=Ryy=-M11;
-   Lx=T/2.0+sqrt(T*T/4.0-D);
-   Ryx+=Lx;
-   double mod=sqrt(Rxx*Rxx+Ryx*Ryx);
-   Rxx/=mod;
-   Ryx/=mod;
-   Ly=T/2.0-sqrt(T*T/4.0-D);
-   Ryy+=Ly;
-   mod=sqrt(Rxy*Rxy+Ryy*Ryy);
-   Rxy/=mod;
-   Ryy/=mod;
-}
-result_list[0]=Rxx;
-result_list[1]=Rxy;
-result_list[2]=Ryx;
-result_list[3]=Ryy;
-result_list[4]=Lx;
-result_list[5]=Ly;
+#define DEGENERACY_EPSILON """ + str(self.degeneracy_epsilon) + """
+""" + self._C_DIAGONALIZE_2X2 + """
+result_list[0]=v1;
+result_list[1]=-v2;
+result_list[2]=v2;
+result_list[3]=v1;
+result_list[4]=Lp;
+result_list[5]=Lm;
 result_list[6]=M33;
 """
         if self.use_FD:
-            ccode+="""
-FILL_MULTI_RET_JACOBIAN_BY_FD("""+str(self.FD_epsilon)+""")
+            ccode += """
+FILL_MULTI_RET_JACOBIAN_BY_FD(""" + str(self.FD_epsilon) + """)
 """
         else:
-            ccode+="""
+            ccode += """
 if (flag)
 {
-   if (M12*M12<1e-15)
-   {
-      derivative_matrix[0]=derivative_matrix[1]=derivative_matrix[2]=derivative_matrix[3]=0.0;
-      derivative_matrix[4]=derivative_matrix[5]=derivative_matrix[6]=derivative_matrix[7]=0.0;
-      derivative_matrix[8]=derivative_matrix[9]=derivative_matrix[10]=derivative_matrix[11]=0.0;
-      derivative_matrix[12]=derivative_matrix[13]=derivative_matrix[14]=derivative_matrix[15]=0.0;
-	  derivative_matrix[16]=1.0; derivative_matrix[17]=derivative_matrix[18]=derivative_matrix[19]=0.0;
-      derivative_matrix[22]=1.0; derivative_matrix[20]=derivative_matrix[21]=derivative_matrix[23]=0.0;    		      
-      derivative_matrix[27]=1.0; derivative_matrix[24]=derivative_matrix[25]=derivative_matrix[26]=0.0;
-   }
-   else
-   {    
-        const double x0 = pow(M12, 2);
-        const double x1 = 4.0*x0;
-        const double x2 = M11*M22;
-        const double x3 = sqrt(x1 - 4*x2 + pow(M11 + M22, 2));
-        const double x4 = -M11 + M22;
-        const double x5 = x3 + x4;
-        const double x6 = pow(x5, 2);
-        const double x7 = x1 + x6;
-        const double x8 = pow(x7, -3.0/2.0);
-        const double x9 = 1.0/x3;
-        const double x10 = 2*x9;
-        const double x11 = M12*x10;
-        const double x12 = x11*x6*x8;
-        const double x13 = 2*x3;
-        const double x14 = M11 - M22;
-        const double x15 = x14 + x3;
-        const double x16 = pow(x15, 2);
-        const double x17 = x1 + x16;
-        const double x18 = pow(x17, -3.0/2.0);
-        const double x19 = x11*x18;
-        const double x20 = pow(M11, 2) + pow(M22, 2) + x1 - 2*x2;
-        const double x21 = sqrt(x20);
-        const double x22 = M22*x21;
-        const double x23 = M11*x21;
-        const double x24 = pow(x20 + x22 - x23, -1.0/2.0);
-        const double x25 = sqrt(2)/x20;
-        const double x26 = x0*x25;
-        const double x27 = x24*x26;
-        const double x28 = M12*x14*x25;
-        const double x29 = pow(x20 - x22 + x23, -1.0/2.0);
-        const double x30 = (1.0/2.0)*x9;
-        const double x31 = x15*x30;
-        const double x32 = x30*x5;
-        derivative_matrix[0]=x12; derivative_matrix[1]=x10*x8*(-x1*(x13 + x4) + x3*x7); derivative_matrix[2]=-x12; derivative_matrix[3]=0.0;
-        derivative_matrix[4]=-x16*x19; derivative_matrix[5]=x10*x18*(-x1*(x13 + x14) + x17*x3); derivative_matrix[6]=pow(x15, 2)*x19; derivative_matrix[7]=0.0;
-        derivative_matrix[8]=-x27; derivative_matrix[9]=x24*x28; derivative_matrix[10]=x27; derivative_matrix[11]=0.0;
-        derivative_matrix[12]=-x26*x29; derivative_matrix[13]=x28*x29; derivative_matrix[14]=x1*x15*x18*x9; derivative_matrix[15]=0.0;
-        derivative_matrix[16]=x31; derivative_matrix[17]=x11; derivative_matrix[18]=x32; derivative_matrix[19]=0.0;
-        derivative_matrix[20]=x32; derivative_matrix[21]=-x11; derivative_matrix[22]=x31; derivative_matrix[23]=0.0;
-        derivative_matrix[24]=0.0; derivative_matrix[25]=0.0; derivative_matrix[26]=0.0; derivative_matrix[27]=1.0;
-    }
+   for (unsigned i=0; i<7; i++) for (unsigned j=0; j<4; j++) derivative_matrix[i*4+j]=0.0;
+   for (unsigned i=0; i<6; i++) for (unsigned j=0; j<3; j++) derivative_matrix[i*4+j]=dR[i][j];
+   derivative_matrix[6*4+3]=1.0;
 }
-        """
-        return ccode
-        
+"""
+        return ccode + "#undef DEGENERACY_EPSILON\n"
 
-# Expects the diagonalizing tensor R, the velocity gradient grad(u) and the diagonal matrix ev
-# Only works in 2d Cartesian!
-# Returns B tensor and Omega tensor with case distinguishment
-# if the eigenvalues are degenerate, return B=1/2*sym(grad(u)), Omega=0
-# Else perform the transformation of the paper
 class LogConfTensorDecompositionCartesian2d(CustomMultiReturnExpression):
     def __init__(self,epsilon=1e-7,use_subexpression:bool=True) -> None:
         super().__init__()
