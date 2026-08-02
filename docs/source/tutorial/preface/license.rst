@@ -107,6 +107,8 @@ A `copy of the license <https://github.com/pyoomph/pyoomph/blob/main/COPYING>`__
 
    -  `CLN <https://www.ginac.de/CLN>`__, `[GPL v2 or later license] <https://www.ginac.de/CLN/cln.git/?p=cln.git;a=blob_plain;f=COPYING;hb=HEAD>`__, also statically linked in the distribution as python wheels
 
+   -  `TQMesh <https://github.com/FloSewn/TQMesh>`__, `[MIT license] <https://github.com/FloSewn/TQMesh/blob/main/LICENSE.md>`__, a two-dimensional mesh generator for triangular and quadrilateral elements. It is not part of the pyoomph repository, but downloaded at build time and statically linked in the distribution as python wheels. Minor modifications as mentioned in `src/thirdparty/INFO_tqmesh <https://github.com/pyoomph/pyoomph/blob/main/src/thirdparty/INFO_tqmesh>`__ are applied to the downloaded sources. It is optional, see the cmake option ``PYOOMPH_HAS_TQMESH``.
+
    -  MPI, depending on the system e.g. `OpenMPI <https://www.open-mpi.org>`__ `[3-clause BSD license] <https://www.open-mpi.org/community/license.php>`__, `MPICH <https://www.mpich.org/>`__ `[MPICH license] <https://github.com/pmodels/mpich/blob/main/COPYRIGHT>`__, `Microsoft MPI <https://github.com/Microsoft/Microsoft-MPI>`__ `[MIT license] <https://github.com/microsoft/Microsoft-MPI/blob/master/LICENSE.txt>`__, note that MPI support is experimental and deactivated in the python wheels
 
    -  `python3.10\ + <https://www.python.org/>`__, `[PSF license] <https://docs.python.org/3/license.html>`__, also dynamically linked in the distribution as python wheels
