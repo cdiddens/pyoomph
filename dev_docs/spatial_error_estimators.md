@@ -14,6 +14,10 @@ third fell out of writing up §7 and turned a documented constraint into a knob.
 3. **Per-criterion error normalisation** (compound-flux groups) — grew out of §7, which was written
    as a constraint to design around. Status: **implemented**; see §7.2.
 
+§7.5 covers the user-facing tutorial section the three features are documented in, including two
+framings that were abandoned on evidence. Mesh-construction and plotting findings from building it
+live in [dev_docs/boundary_layer_meshes.md](dev_docs/boundary_layer_meshes.md).
+
 ---
 
 ## 1. The pipeline as it stands
@@ -591,6 +595,52 @@ Several `ErrorCombination`s on one domain would compose the same way groups do �
 rule stays uniform.
 
 Not built. The parametric family covers what has actually been asked for so far.
+
+---
+
+## 7.5 The tutorial section
+
+`docs/source/tutorial/pde/adapt.rst` documents all of this for users, in two examples that were
+each built to demonstrate one thing and ended up demonstrating something more useful.
+
+**Moffatt eddies in a wedge** (`adapt/moffatt.rst`). Stokes flow in a sharp corner has an infinite
+sequence of counter-rotating eddies, so no tolerance can be chosen -- there is always another eddy
+below it. That is the cleanest available motivation for `desired_ndof`. The page's real lesson is
+the one that was not planned: the plain energy-norm estimator **ignores the corner entirely**. At
+5 000, 20 000 and 80 000 dofs the mesh reaches `r = 9.91e-3` every single time, which is just the
+initial spacing at the apex, and the elemental errors are nearly uniform (median 9.7e-7 against max
+4.4e-6) because Moffatt eddies carry almost no energy. Handing the estimator
+`sym(grad(u))/r**3` instead -- the cascade is self-similar in `log r` -- reaches `6.19e-4` at the
+same cost. §2 of this document says the flux is a modelling choice; that page is what it looks like
+when the choice is made badly.
+
+**A heated cylinder** (`adapt/cylinder.rst`). Flow past a cylinder with a temperature field and a
+trace species a thousand times weaker, entering as a filament away from the cylinder. It is the
+worked example for §7.2: under one group the tracer contributes a millionth of the summed error and
+never registers; one group per field rescues it. Same budget, 376 vs 1433 elements on the filament.
+
+The cylinder page also carries a negative result worth keeping. It does **not** claim the grouping
+is more accurate: the two criteria give Nusselt numbers 6.662 and 7.070, and a larger grouped
+computation gives 6.7825 while still moving by four percent, so which is closer to the truth is not
+settled by anything done there. Establishing it would need a convergence study aimed at the wall
+rather than at the tracer. What is demonstrable, and what the page claims, is that at fixed cost
+what you ask the estimator to look at changes what you get.
+
+Two earlier framings of that page were abandoned on evidence, which is worth recording so they are
+not re-attempted. Momentum-vs-thermal criteria on the same wake do **not** separate: at Pe=200 and
+Pe=4000, `joint`, `grouped` and `temperature`-only agree to four digits, because a joint norm is
+dominated by whichever field has the sharper gradients and the two fields want the same region. And
+a trace species released *from the cylinder* does not separate either, for the same reason. The
+separation needs the weak field to be structured somewhere the strong one is not -- hence the
+filament entering away from the body.
+
+Building those pages turned up a set of mesh-construction and plotting findings that have nothing to
+do with error estimation; they are written up separately in
+[dev_docs/boundary_layer_meshes.md](dev_docs/boundary_layer_meshes.md). The short version: use a
+transfinite O-grid for a wall-bounded problem that will be adapted, because Gmsh's `BoundaryLayer`
+field produces a nicer initial mesh but stops converging after the second refinement; and velocity
+streamlines cannot be drawn over a deeply refined mesh, because matplotlib's `TriFinder` rejects the
+non-conforming triangulation that hanging nodes produce.
 
 ---
 
