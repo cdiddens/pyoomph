@@ -48,6 +48,9 @@ Give each run its own fresh working directory. Many tutorials write dump/restart
 shortcut when they find them, so a second run in the same directory measures something entirely
 different from the first.
 
+MPI should be run with maximum 8 cores (and then smaller problems, less than 40000 dofs)
+Maximum number of dofs should be 200000.
+
 ### Eigenvalue and stability problems need a complex PETSc
 
 The default `PYTHONPATH` points at a real-scalar PETSc build. Anything using eigensolvers, azimuthal
