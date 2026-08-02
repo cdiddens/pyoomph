@@ -1,8 +1,9 @@
 # Viscoelastic flow with the log-conformation representation
 
 Implementation notes for `pyoomph/equations/viscoelastic.py` and `tests/test_viscoelastic.py`, both
-added by this work. Nothing outside those two files was changed, but building them turned up three
-defects in code they sit on top of; those are recorded in section 6 with what was done instead.
+added by this work. Nothing outside those two files was changed, but building them turned up a
+series of defects and gotchas in code they sit on top of; those are recorded in sections 6, 8.6 and
+9.3 with what was done instead of fixing them at source.
 
 The starting point was that `pyoomph/expressions/tensor_funcs.py` already contained everything hard
 about log-conformation — an eigendecomposition with analytic derivatives, the Fattal-Kupferman
@@ -165,7 +166,7 @@ a time, which makes the residual integrand dimensionless; this mirrors what
 
 * **Default space is `C2`**, matching Taylor-Hood velocity. Configurable. No DEVSS-G or SUPG
   stabilisation is added; the constitutive equation is pure advection with no diffusion, so this
-  will need revisiting for advection-dominated flows (sections 8.2 and 9).
+  is available but off by default (section 9).
 * **PTT rejects a nonzero slip parameter** rather than ignoring it. `xi != 0` replaces the
   upper-convected derivative by the Gordon-Schowalter one, for which the decomposition in
   `tensor_funcs.py` is simply not the right object. Raising `NotImplementedError` seemed better than
@@ -370,7 +371,7 @@ of Alves, Oliveira & Pinho (2001) and Fan, Tanner & Phan-Thien (1999). Their own
 DEVSS-G/DG with spectral/hp elements at polynomial order 12-18, i.e. nothing like what is used here,
 which is what makes the agreement worth something.
 
-The script lives in the session scratchpad, not yet in the repository — see section 9.
+The script lives in the session scratchpad, not yet in the repository — see section 10.
 
 ### 8.1 Setup, and the mapping onto these classes
 
@@ -596,7 +597,85 @@ inflection rather than offered as benchmark values.
 
 ---
 
-## 9. Not done
+## 9. Stabilisation
+
+### 9.1 Past the end of the reference table, without any
+
+The Wi sweep of section 8.2 stops at 0.7 because that is where Claus & Phillips stop having
+mesh-converged values. Continuing it on the 60/18/1.30 O-grid, with plain Galerkin and no
+stabilisation whatsoever:
+
+| Wi | K here | Claus & Phillips | Alves | Fan |
+|------|----------|----------|----------|--------|
+| 0.75 | 117.3838 | - | - | - |
+| 0.80 | 117.4510 | 117.368 *(D)* | 117.357 | 117.36 |
+| 0.85 | 117.6121 | - | - | - |
+| 0.90 | 117.8759 | 117.812 *(D)* | 117.851 | 117.79 |
+| 0.95 | 118.2736 | - | - | - |
+| 1.00 | 118.7975 | 118.550 *(D)* | 118.518 | 118.49 |
+
+*(D)* is their marker for "computations diverge after an apparent converged drag value is reached".
+At Wi = 1.0 every column of their Table 3 carries it, for all four codes they compare. This
+formulation - fully coupled, continuous C2 log-conformation, no stabilisation - reaches a steady
+solution there without difficulty, and is within +0.02% of Alves at Wi = 0.9 and +0.24% at Wi = 1.0.
+The drag minimum comes out near Wi = 0.75, which matches the upturn their table shows.
+
+Whether the run would keep going past 1.0 was not tested. The point of the exercise was that
+stabilisation turned out not to be needed to cover the benchmark range at all.
+
+### 9.2 SUPG, and what it cost to get right
+
+It is implemented anyway, off by default, because the equation genuinely has no diffusion - the only
+spatial operator is `u.grad(Psi)` - so plain Galerkin is unstabilised advection and will oscillate
+once the element Peclet number gets large enough. On a coarser mesh, or further up in Wi, it should
+matter.
+
+    h   = var("cartesian_element_length_h")
+    tau = supg_factor / sqrt(4*dot(u,u)/h^2 + (1/lambda)^2)
+
+Three things about that, each of which had a reason:
+
+* **`cartesian_element_length_h`, not `element_length_h`.** The latter raises the *Eulerian* element
+  size to the power 1/dim, and in axisymmetric coordinates that size carries the 2*pi*r factor, so it
+  is not a length and tau would pick up a spurious radius dependence.
+* **tau falls back on the relaxation time, not on a velocity floor.** The textbook `h/(2|u|)` blows
+  up at stagnation points and on the no-slip cylinder - exactly where this problem is hardest. The
+  form above gives `h/(2|u|)` where advection dominates and `lambda` where the flow is slow, and
+  `1/lambda` is this equation's own reaction rate, so no arbitrary epsilon has to be invented.
+* **`dot(u,u)` under the single root, not `(2*|u|/h)^2`.** Same number, different expression:
+  squaring `square_root(dot(u,u))` leaves the inner root in place for GiNaC to differentiate, and
+  `d|u|/du = u/|u|` is 0/0 at a stagnation point. That put NaNs in the Jacobian and the first Newton
+  step on the cylinder went to 1e105.
+
+The scheme is residual-based, so it perturbs the test function along the streamline but multiplies
+the *strong* residual, which vanishes at the exact solution. Switching it on at full strength moves
+the cylinder drag by 4e-6.
+
+**The test that should have caught the third point did not.** `test_supg_does_not_move_a_converged_solution`
+runs channel flow, and a channel has no stagnation point: `u.grad(w)` vanishes wherever `u` does, so
+the singular factor is always multiplied by zero. `test_supg_survives_a_stagnation_point` was added
+for it, using planar extension on the unit square, which puts an exact stagnation point at a corner.
+
+### 9.3 A failure that was not the stabilisation's fault
+
+Even with tau fixed, a stationary solve *from rest* fails for `supg_factor >= 0.1`, while the same
+solve converges without stabilisation. A factor scan separates magnitude from structure: 1e-4 and
+1e-2 converge to a drag identical to the unstabilised one, 0.1 and above fail. So the term is
+correct and consistent, just fatal at strength.
+
+Making `supg_factor` a global parameter and ramping it from 0 on an already-converged solution
+reaches 1.0 without trouble - 0.01, 0.03, 0.1, 0.3, 0.5, 1.0 all converge, with the drag drifting
+from 130.3686 to 130.3681. That identifies the cause, and it is section 6.2 again: at rest the
+decomposition of grad(u) runs entirely through its degenerate branch, whose reported Jacobian is
+truncated, and SUPG multiplies that same residual by `tau*(u.grad w)`, amplifying an error that was
+already there rather than introducing one of its own.
+
+So the workaround is to ramp, and the real fix is 6.2. Worth remembering that the fingerprint of
+that defect is "converges without X, diverges with X, for X that should be harmless".
+
+---
+
+## 10. Not done
 
 * **Promoting the cylinder benchmark into the repository.** It runs in the scratchpad only. It is
   too slow for the fast test suite, so it wants either a `slow`-marked test over a short Wi range or
@@ -609,9 +688,8 @@ inflection rather than offered as benchmark values.
 * **The `du/dy` discrepancy of section 8.5**, +0.5% to +2.0% and growing with Wi, is unexplained.
 * **Giesekus against their Table 5** (alpha = 0.001, 0.01, 0.1), for which the parameter mapping is
   already worked out in section 8.1.
-* **Stabilisation.** No DEVSS-G, no SUPG. Deferred on purpose, and section 8.2 suggests it may not
-  be needed below Wi ~ 0.7 at all. `ElementSizeForSUPG` (`pyoomph/equations/SUPG.py:38`) already
-  provides the element size when it is wanted.
+* **DEVSS-G.** SUPG exists (section 9) but DEVSS-G does not, and it is the other half of what the
+  reference uses. Section 9.1 suggests neither is needed to cover the benchmark range.
 * **The two source-level fixes** of sections 6.1 and 6.2.
 * **Documentation.** No tutorial page, no `refs.bib` entries (the bibliography currently contains
   nothing viscoelastic).
@@ -620,11 +698,11 @@ inflection rather than offered as benchmark values.
   `oldroyd_b_shear_conformation`, which together give the fully developed log-conformation tensor for
   a prescribed shear rate. Nothing assembles a channel inflow profile from them yet.
 
-## 10. Order of work, if this is picked up again
+## 11. Order of work, if this is picked up again
 
 1. Fix 6.2 in `tensor_funcs.py` properly, and delete the workaround in `_in_plane_exponential` if the
    fix makes the eigendecomposition route safe again. The test suite here is the regression net.
 2. Fix 6.1 and 6.3 while in the area.
 3. Promote the cylinder benchmark into the repository, and add the pointwise `du/dy` check from
-   section 9 - it is the one that would actually catch an under-resolved boundary layer.
+   section 10 - it is the one that would actually catch an under-resolved boundary layer.
 4. Tutorial page and bibliography.
