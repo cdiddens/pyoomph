@@ -49,41 +49,77 @@ The standard benchmark for viscoelastic flow solvers is creeping flow past a cyl
    :start-at: class ConfinedCylinderProblem(Problem):
    :end-at: return float(self.get_mesh("fluid/cylinder").evaluate_observable("drag"))
 
-Three details are worth pointing out.
+Four details are worth pointing out.
 
 The inflow condition has to prescribe not only the velocity but also the *stress* the polymer has in fully developed channel flow, otherwise the solution spends the entire upstream length relaxing towards it. The two helpers :py:func:`~pyoomph.equations.viscoelastic.oldroyd_b_shear_conformation` and :py:func:`~pyoomph.equations.viscoelastic.symmetric_2x2_matrix_log` build that condition: the first gives :math:`\mathbf{C}` for a prescribed local shear rate, the second takes its logarithm analytically. On the symmetry line the shear rate vanishes and :math:`\mathbf{C}` becomes isotropic, which is a degenerate case for a matrix logarithm; the helper handles it.
 
 The Weissenberg number enters as a :py:meth:`~pyoomph.generic.problem.Problem.define_global_parameter`, because the solution has to be *continued* in it. Starting a stationary solve directly at a larger :math:`\mathrm{Wi}` overshoots into a conformation tensor so stretched that :math:`\exp\boldsymbol{\Psi}` overflows on the very first Newton step. Stepping up from a converged solution at a smaller :math:`\mathrm{Wi}` costs nothing and works.
 
-Finally, the mesh around the cylinder is a structured, graded O-grid of quadrilaterals. This is not decoration: the polymer stress forms a thin boundary layer on the cylinder, and that layer is what sets the accuracy of the drag. The spatial error estimator will happily refine the far field instead, where the flow is fully developed and nothing is gained, so the layer is resolved by hand through the number of nodes across it.
+The conformation tensor needs a symmetry condition of its own. Its shear component is odd under :math:`y\to-y`, so :math:`\Psi_{xy}=0` on the centreline, and imposing that is not optional: the constitutive equation contains no diffusion, so nothing else damps an odd mode in that component.
+
+Finally, the mesh is graded by hand rather than by an error estimator, and stabilised. Both deserve a section of their own.
+
+Resolution, and why not to leave it to the error estimator
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A :py:class:`~pyoomph.equations.generic.SpatialErrorEstimator` is the obvious thing to reach for here, and it is a poor choice. Far up- and downstream the flow is fully developed: :math:`\boldsymbol{\Psi}` no longer varies along the channel, so the advection term vanishes, the constitutive equation degenerates to a pointwise algebraic relation with no spatial derivatives at all, and it is satisfied exactly at every node on any mesh whatsoever. Refining there buys nothing. The Z2 estimator cannot know that -- it sees a nonzero recovered-flux error, because :math:`\log\mathbf{C}` is not a polynomial in :math:`y` -- and spends most of the mesh on it.
+
+Two numbers steer the mesh instead: a coarse ``far_resolution`` for the channel, and a much finer ``near_resolution`` attached to a single extra point on the top wall directly above the cylinder, from which gmsh grades outwards. Together with the O-grid this is both cheaper and more accurate than the adaptive version -- about 82 000 degrees of freedom against 150 000, and a drag error several times smaller.
+
+The O-grid itself is what resolves the thin polymer stress boundary layer on the cylinder, and the estimator would never have refined it anyway: those structured quadrilaterals come out at exactly their nominal transfinite count.
+
+Stabilisation
+~~~~~~~~~~~~~
+
+The constitutive equation has no diffusion whatsoever -- its only spatial operator is :math:`\left(\vec{u}\cdot\nabla\right)\boldsymbol{\Psi}` -- and just behind the rear stagnation point the polymer stress grows exponentially. Plain Galerkin answers that with a node-to-node sawtooth running the length of the wake. It barely touches the drag, which is an integral over the cylinder, but it destroys any profile taken through the wake. Passing ``stabilization="SUPG"`` to :py:class:`~pyoomph.equations.viscoelastic.ViscoelasticEquations` removes it; the reference stabilises as well, with a DEVSS-G/DG scheme.
+
+Comparing against the reference
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:numref:`figpdeviscoelasticstress` reproduces Fig. 6 of :cite:`Claus2013`: the polymer stress :math:`\tau_{xx}` along a path that runs up the centreline, over the cylinder surface and away down the wake, one curve per Weissenberg number. The axes are theirs, so the two can be laid side by side.
 
 ..  figure:: viscoelastic_stress.*
 	:name: figpdeviscoelasticstress
 	:align: center
-	:alt: Polymer stress around a confined cylinder.
+	:alt: Polymer stress along the centreline and cylinder surface.
+	:class: with-shadow
+	:width: 80%
+
+	:math:`\tau_{xx}` along the centreline and around the cylinder, for :math:`\mathrm{Wi}=0.1` to :math:`0.9`; compare Fig. 6 of :cite:`Claus2013`. The large peak at :math:`X=0` is the top of the cylinder, where the fluid is sheared hardest, and it grows from about 18 to about 127 over this range. The second, smaller peak just downstream of :math:`X=1` is the *birefringent strand* in the wake. The stress is not a degree of freedom here -- the unknown is :math:`\boldsymbol{\Psi}=\log\mathbf{C}` -- so the script rebuilds it from the nodal values as :math:`\boldsymbol{\tau}_\mathrm{p}=\eta_\mathrm{p}/\lambda\left(\exp\boldsymbol{\Psi}-\mathbf{I}\right)`.
+
+Their Fig. 12 shows a different decomposition, due to Bollada and Phillips: the Cauchy stress is made traceless and then projected onto the streamline direction and its normal, giving a flow-directed shear stress :math:`S_1` and normal stress :math:`S_2`. Both are added to the output as :py:meth:`~pyoomph.generic.codegen.Equations.add_local_function` expressions. Note that the pressure drops out of the traceless part identically, so only the solvent rate of strain and the polymer stress contribute.
+
+..  figure:: viscoelastic_flowstress.*
+	:name: figpdeviscoelasticflowstress
+	:align: center
+	:alt: Flow-directed shear and normal stress around the cylinder.
 	:class: with-shadow
 	:width: 100%
 
-	The polymer stress :math:`\tau_{xx}` at :math:`\mathrm{Wi}=0.7`, mirrored about the symmetry line. The stress is concentrated in a thin layer on the cylinder, where the flow shears the polymer strongly, and is then convected downstream into a narrow *birefringent strand* along the wake. Resolving both is what makes this benchmark demanding: the colour scale is set by the peak on the cylinder, so the strand looks faint even though it decays only slowly with distance.
+	The flow-directed stresses :math:`S_1` and :math:`S_2`; compare Fig. 12 of :cite:`Claus2013`, whose colour scale is used here. Only the upper half is solved and only the upper half is shown. The colour range is held fixed across the three rows, so the comparison between them is meaningful: :math:`S_1` barely changes with :math:`\mathrm{Wi}`, while :math:`S_2` grows strongly on the cylinder surface. The dark region ahead of the cylinder is the low normal stress at the front stagnation point that the reference also notes.
 
-The quantity everyone reports is the dimensionless drag on the cylinder, :math:`K=F_x/(\eta_0\langle u\rangle)`, obtained here by integrating the total traction over the cylinder surface. Running the script continues from :math:`\mathrm{Wi}=0.1` to :math:`0.7` and prints it next to the values of Claus and Phillips :cite:`Claus2013`:
+The quantity everyone reports is the dimensionless drag on the cylinder, :math:`K=F_x/(\eta_0\langle u\rangle)`, obtained here by integrating the total traction over the cylinder surface. The script walks up in :math:`\mathrm{Wi}` with :py:meth:`~pyoomph.generic.problem.Problem.go_to_param`, which halves its step whenever Newton fails, and prints the drag next to the values of Claus and Phillips :cite:`Claus2013`:
 
 .. code:: none
 
      Wi      K (pyoomph)   K (Claus & Phillips)
-     0.1      130.3756         130.364
-     0.2      126.6489         126.626
-     0.3      123.2321         123.192
-     0.4      120.6569         120.593
-     0.5      118.9242         118.826
-     0.6      117.9109         117.776
-     0.7      117.4789         117.316
+     0.1      130.3738         130.364
+     0.2      126.6362         126.626
+     0.3      123.2013         123.192
+     0.4      120.6020         120.593
+     0.5      118.8428         118.826
+     0.6      117.7993         117.776
+     0.7      117.3327         117.316
+     0.8      117.3237               -
+     0.9      117.6783               -
 
-The agreement is within :math:`0.01\,\%` at low :math:`\mathrm{Wi}` and :math:`0.14\,\%` at :math:`\mathrm{Wi}=0.7`, on a mesh coarse enough to run in well under a minute. That is comfortably inside the spread between the published values themselves, which disagree with each other by about :math:`0.02\,\%`. The drag falls with elasticity, reaches a minimum near :math:`\mathrm{Wi}\approx0.7` and rises again, which is the behaviour the literature reports.
+The agreement is within :math:`0.01\,\%` over the whole range for which the reference has mesh-converged values, which is comfortably inside the spread between the published values themselves -- the three independent codes they compare disagree with each other by about :math:`0.02\,\%`. The drag falls with elasticity, reaches a minimum near :math:`\mathrm{Wi}\approx0.8` and rises again, which is the behaviour the literature reports. The last two rows have no entry to compare against: at :math:`\mathrm{Wi}=0.8` and above, every column of their table is marked as diverging.
 
 .. note::
 
-   This benchmark is where the log-conformation approach earns its keep. Formulations that discretise :math:`\mathbf{C}` directly typically lose convergence somewhere around :math:`\mathrm{Wi}\approx0.7`, and at :math:`\mathrm{Wi}=1` every column of the comparison table in :cite:`Claus2013` is marked as diverging. Solving for :math:`\log\mathbf{C}` instead reaches a steady solution there without any stabilisation at all.
+   This benchmark is where the log-conformation approach earns its keep. Formulations that discretise :math:`\mathbf{C}` directly typically lose convergence somewhere around :math:`\mathrm{Wi}\approx0.7`, and at :math:`\mathrm{Wi}=1` every column of the comparison table in :cite:`Claus2013` is marked as diverging.
+
+   Do not read the last two rows as evidence that this formulation is immune, though. Whether the continuation gets that far depends on the mesh, and it depends on it the wrong way round: a *finer* mesh loses convergence *earlier*, which is exactly what :cite:`Claus2013` report for every scheme they compare. The drag is also the least sensitive thing one could monitor -- it is an integral over the cylinder, and it stays smooth long after the wake has stopped converging.
 
 
 .. only:: html

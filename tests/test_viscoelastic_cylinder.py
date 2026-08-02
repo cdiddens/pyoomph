@@ -190,6 +190,11 @@ class _CylinderProblem(Problem):
             # grad() of a tensor field is not a vector gradient.
             eqs += SpatialErrorEstimator(log_conformation_xx=1, log_conformation_xy=1,
                                          log_conformation_yy=1, group="stress")
+            # The shear component of the conformation tensor is odd under y -> -y, so it vanishes on
+            # the symmetry line. Imposing it matters: the constitutive equation has no diffusion, so
+            # nothing else damps an odd mode in that component, and leaving it free lets a
+            # node-to-node sawtooth grow along the wake.
+            eqs += DirichletBC(log_conformation_xy=0) @ "symmetry"
         else:
             eqs += SpatialErrorEstimator(velocity=1)
 

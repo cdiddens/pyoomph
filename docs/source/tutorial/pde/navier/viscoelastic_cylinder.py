@@ -27,13 +27,13 @@
 from pyoomph import *
 from pyoomph.expressions import *
 from pyoomph.equations.navier_stokes import StokesEquations, NoSlipBC
-from pyoomph.equations.generic import SpatialErrorEstimator
 # The viscoelastic equations and the Oldroyd-B model, plus two helpers for the inflow condition
 from pyoomph.equations.viscoelastic import (ViscoelasticEquations, OldroydB,
                                             symmetric_2x2_matrix_log, oldroyd_b_shear_conformation)
 from pyoomph.meshes.gmsh import GmshTemplate
 from pyoomph.output.plotting import MatplotlibPlotter
 from math import pi, cos, sin
+import numpy
 
 # Everything is nondimensionalised with the total viscosity, the cylinder radius and the mean inlet
 # velocity, so beta is the solvent fraction of the viscosity and Wi is numerically the relaxation time
@@ -50,7 +50,7 @@ class ConfinedCylinderMesh(GmshTemplate):
     def define_geometry(self):
         self.mesh_mode = "tris"
         pr = self.get_problem()
-        self.default_resolution = 0.5
+        self.default_resolution = pr.far_resolution
         R, Ro = 1.0, 1.6                                   # cylinder radius and outer radius of the O-grid
         centre = self.point(0, 0)
         angles = [0.0, pi / 2, pi]                         # only the upper half of the cylinder
@@ -71,10 +71,15 @@ class ConfinedCylinderMesh(GmshTemplate):
             self.make_surface_transfinite(sector, corners=[inner[i], inner[i + 1], outer[i + 1], outer[i]])
         self.set_recombined_surfaces(sectors)
 
-        # The outer boundary is a single loop, closed by the outer ring of the O-grid
+        # The outer boundary is a single loop, closed by the outer ring of the O-grid. The top wall is
+        # split by an extra point directly above the cylinder, carrying a much smaller target size:
+        # gmsh grades away from it, so the elements are fine in the gap and coarse far up- and
+        # downstream, where nothing happens
         L, H = pr.channel_length, 2.0
+        top_centre = self.point(0, H, size=pr.near_resolution)
         box = self.create_lines(outer[0], "symmetry", self.point(L, 0), "outlet", self.point(L, H), "top",
-                                self.point(-L, H), "inlet", self.point(-L, 0), "symmetry", outer[2])
+                                top_centre, "top", self.point(-L, H), "inlet",
+                                self.point(-L, 0), "symmetry", outer[2])
         self.plane_surface(*box, ring[1], ring[0], name="fluid")
 
 
@@ -101,10 +106,15 @@ class ConfinedCylinderProblem(Problem):
     def __init__(self):
         super().__init__()
         self.channel_length = 20.0                          # upstream and downstream length
-        # The O-grid resolution decides the accuracy: the error estimator will not refine these
-        # structured quadrilaterals, so the stress boundary layer has to be resolved by hand
-        self.n_circumferential, self.n_radial, self.layer_growth = 60, 18, 1.30
-        self.max_refinement_level = 4
+        # Resolution is set by hand rather than by an error estimator. A Z2 estimator is of little use
+        # here: far up- and downstream the flow is fully developed, so the constitutive equation has
+        # no spatial derivatives left and is satisfied exactly at every node whatever the mesh, yet
+        # the estimator still sees a nonzero recovered-flux error there and spends most of the budget
+        # on it. These two numbers put the elements where the physics is instead
+        self.far_resolution, self.near_resolution = 1.5, 0.09
+        # The O-grid: the polymer stress forms a thin boundary layer on the cylinder, and this is
+        # what resolves it
+        self.n_circumferential, self.n_radial, self.layer_growth = 80, 20, 1.25
 
     def define_problem(self):
         self += ConfinedCylinderMesh()
@@ -114,7 +124,15 @@ class ConfinedCylinderProblem(Problem):
 
         # Wi enters as a global parameter so that we can continue in it later on
         self.Wi = self.define_global_parameter(Wi=0.1)
-        eqs += ViscoelasticEquations(model=OldroydB(), relaxation_time=self.Wi, polymer_viscosity=1 - BETA)
+        # SUPG is not decoration here. The constitutive equation has no diffusion at all - its only
+        # spatial operator is the advection u.grad(Psi) - and the polymer stress grows exponentially
+        # just behind the rear stagnation point. Plain Galerkin answers that with a node-to-node
+        # sawtooth all along the wake, which leaves the drag almost untouched (it is an integral over
+        # the cylinder) but ruins any profile plotted through the wake. The reference stabilises too,
+        # with DEVSS-G/DG
+        viscoelastic = ViscoelasticEquations(model=OldroydB(), relaxation_time=self.Wi,
+                                             polymer_viscosity=1 - BETA, stabilization="SUPG")
+        eqs += viscoelastic
 
         # Fully developed inflow: a parabola with mean velocity 1 and the matching Oldroyd-B stress.
         # The shear rate du/dy vanishes on the symmetry line, where the conformation tensor becomes
@@ -128,14 +146,16 @@ class ConfinedCylinderProblem(Problem):
         eqs += DirichletBC(velocity_x=inflow, velocity_y=0) @ "outlet"
         eqs += DirichletBC(velocity_x=0, velocity_y=0) @ "top"
         eqs += DirichletBC(velocity_y=0) @ "symmetry"        # no penetration, free tangentially
+        # ... and the shear component of the conformation tensor vanishes on the symmetry line too,
+        # being odd under y -> -y. This is not optional: the constitutive equation has no diffusion,
+        # so nothing else damps an odd mode in that component, and leaving it free lets a node-to-node
+        # sawtooth grow along the whole wake
+        eqs += DirichletBC(log_conformation_xy=0) @ "symmetry"
         eqs += NoSlipBC() @ "cylinder"
         # The velocity is prescribed on the entire boundary, so the pressure needs a datum
         eqs += stokes.create_pressure_fixation(value=0) @ "inlet"
 
-        eqs += SpatialErrorEstimator(velocity=1, group="flow")
-        # Component by component: SpatialErrorEstimator takes grad() of what it is given
-        eqs += SpatialErrorEstimator(log_conformation_xx=1, log_conformation_xy=1,
-                                     log_conformation_yy=1, group="stress")
+        eqs += FlowDirectedStresses()
         eqs += CylinderDrag() @ "cylinder"
         self += eqs @ "fluid"
 
@@ -143,33 +163,156 @@ class ConfinedCylinderProblem(Problem):
         return float(self.get_mesh("fluid/cylinder").evaluate_observable("drag"))
 
 
-class StressPlotter(MatplotlibPlotter):
-    """The polymer stress tau_xx around the cylinder and in the wake"""
+class FlowDirectedStresses(Equations):
+    """
+    The flow-directed shear and normal stress of Bollada & Phillips, as output fields.
+
+    These are what Claus & Phillips contour in their Fig. 12: the Cauchy stress is made traceless,
+    T0 = sigma - 1/2*tr(sigma)*I, and then projected onto the streamline direction and its normal.
+    The pressure drops out of T0 identically - in an incompressible plane flow tr(sigma) is
+    -2p + tr(tau_p) - so only the solvent rate of strain and the polymer stress survive.
+
+    It has to be an Equations rather than a plain expression built in define_problem, because
+    get_polymer_stress() needs the code generator's scope to resolve the fields it is made of.
+    """
+
+    def define_residuals(self):
+        combined = self._get_combined_element()
+        stokes = combined.get_equation_of_type(StokesEquations)
+        viscoelastic = combined.get_equation_of_type(ViscoelasticEquations)
+        u = var("velocity")
+        T0 = 2 * stokes.dynamic_viscosity * sym(grad(u)) + viscoelastic.get_polymer_stress()
+        T0 = T0 - 0.5 * (T0[0, 0] + T0[1, 1]) * identity_matrix(3)
+        # Unit vectors along and across the streamline. The regularisation keeps them finite at the
+        # stagnation points fore and aft of the cylinder, where the velocity vanishes
+        speed = square_root(dot(u, u) + 1e-12)
+        par = vector(u[0] / speed, u[1] / speed)
+        perp = vector(-par[1], par[0])
+        self.add_local_function("S1", dot(perp, matproduct(T0, par)))
+        self.add_local_function("S2", dot(par, matproduct(T0, par)))
+
+
+class FlowStressPlotter(MatplotlibPlotter):
+    """One panel of Fig. 12: a flow-directed stress around the cylinder"""
+
+    field = "S1"
+    title = "$S_1$"
+    #: Fixed across the rows so that the three Weissenberg numbers are comparable, and matching the
+    #: ranges of the reference figure. vmin/vmax can only WIDEN the range, never clip it, which is
+    #: exactly what is wanted here: every panel ends up on (at least) this common scale
+    vmin, vmax = -11.0, 15.0
 
     def define_plot(self):
         self.background_color = "white"
-        self.set_view(-2.5, -2.05, 9.0, 2.05)            # the cylinder and its wake
-        # Note vmin/vmax only widen the range, they cannot clip it: the colour scale is set by
-        # the peak stress in the thin layer on the cylinder, so the wake looks faint by comparison
-        cb = self.add_colorbar("polymer stress $\\tau_{xx}$", cmap="viridis", position="top center",
-                               vmin=0, length=0.7, thickness=0.05)
-        cb.textcolor, cb.textsize = "black", 14
-        # Only the upper half is solved, so each plot is drawn twice: once as it is and once
-        # mirrored about the symmetry line
-        self.add_plot("fluid/polymer_stress_xx", colorbar=cb, transform=[None, "mirror_y"])
-        self.add_plot("fluid/cylinder", linecolor="black", linewidths=1.5, transform=[None, "mirror_y"])
+        self.set_view(-3.0, 0.0, 6.0, 2.05)      # the half that is actually solved
+        # "jet" to match the discrete rainbow scale of the reference figure. vmin/vmax would only
+        # widen the range, never clip it, so the scale is left to the data - which is the point of
+        # the comparison, since the reference quotes its own extrema panel by panel
+        cb = self.add_colorbar(self.title, cmap="jet", position="top center",
+                               vmin=self.vmin, vmax=self.vmax, length=0.6, thickness=0.05)
+        cb.textcolor, cb.textsize = "black", 13
+        self.add_plot("fluid/" + self.field, colorbar=cb)
+        self.add_plot("fluid/cylinder", linecolor="black", linewidths=1.2)
+
+
+def stress_profile(problem, Wi):
+    """
+    tau_xx along the path used in Fig. 6 of Claus & Phillips: up the centreline, over the cylinder
+    surface, and away down the wake.
+
+    The polymer stress is not a degree of freedom - the unknown is Psi = log(C) - so it is rebuilt
+    here from the nodal values, exactly as the equations do internally: C = exp(Psi) and then
+    tau_xx = eta_p/lambda*(C_xx - 1).
+    """
+    mesh = problem.get_mesh("fluid")
+    idx = mesh.get_nodal_field_indices()
+    ixx, ixy, iyy = idx["log_conformation_xx"], idx["log_conformation_xy"], idx["log_conformation_yy"]
+    xs, taus = [], []
+    for node in mesh.nodes():
+        x, y = node.x(0), node.x(1)
+        on_cylinder = abs(numpy.hypot(x, y) - 1.0) < 1e-9
+        on_centreline = abs(y) < 1e-9 and abs(x) >= 1.0
+        if not (on_cylinder or on_centreline):
+            continue
+        psi = numpy.array([[node.value(ixx), node.value(ixy)],
+                           [node.value(ixy), node.value(iyy)]])
+        w, Q = numpy.linalg.eigh(psi)
+        C = Q @ numpy.diag(numpy.exp(w)) @ Q.T
+        xs.append(x)
+        taus.append((1 - BETA) / Wi * (C[0, 0] - 1.0))
+    order = numpy.argsort(xs)
+    return numpy.array(xs)[order], numpy.array(taus)[order]
+
+
+def plot_stress_profiles(profiles, filename):
+    """Fig. 6 of Claus & Phillips, with their axes, for direct visual comparison"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(7, 5))
+    cmap = matplotlib.colormaps["viridis"]
+    for i, (Wi, (x, tau)) in enumerate(sorted(profiles.items())):
+        ax.plot(x, tau, color=cmap(i / max(1, len(profiles) - 1)), lw=1.4, label="Wi=%.1f" % Wi)
+    ax.set_xlim(-3, 5)                     # the ranges of their Fig. 6
+    ax.set_ylim(0, 130)
+    ax.set_xlabel("$X$")
+    ax.set_ylabel(r"$\tau_{xx}$")
+    ax.legend(loc="upper right", fontsize=9, ncol=2, frameon=False)
+    ax.grid(alpha=0.25)
+    fig.tight_layout()
+    for ext in ("pdf", "png"):
+        fig.savefig(filename + "." + ext, dpi=150)
+    plt.close(fig)
+
+
+def assemble_panels(panels, filename, titles):
+    """Stack the individual S1/S2 panels into the 3x2 grid of Fig. 12"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.image as mpimg
+    fig, axes = plt.subplots(len(panels), 2, figsize=(11, 1.3 * len(panels)))
+    for row, (Wi, files) in enumerate(sorted(panels.items())):
+        for col in range(2):
+            ax = axes[row][col]
+            ax.imshow(mpimg.imread(files[col]))
+            ax.set_axis_off()
+            if row == 0:
+                ax.set_title(titles[col], fontsize=12)
+            if col == 0:
+                ax.text(-0.02, 0.5, "Wi = %.1f" % Wi, transform=ax.transAxes,
+                        rotation=90, va="center", ha="right", fontsize=11)
+    fig.tight_layout()
+    for ext in ("pdf", "png"):
+        fig.savefig(filename + "." + ext, dpi=150)
+    plt.close(fig)
 
 
 if __name__ == "__main__":
     with ConfinedCylinderProblem() as problem:
         problem.initialise()
+        problem.solve()              # the solution at the initial Wi, which go_to_param starts from
         print("  Wi      K (pyoomph)   K (Claus & Phillips)")
-        # Continuation in Wi: starting cold at a larger Wi would overshoot into a conformation
-        # tensor so stretched that exp(Psi) overflows on the very first Newton step
-        for Wi in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]:
-            problem.Wi.value = Wi
-            problem.solve()
-            print("  %.1f     %9.4f       %9.3f" % (Wi, problem.drag(), REFERENCE_DRAG[Wi]))
-        # A snapshot of the birefringent strand at the largest Wi reached
-        problem.plotter = [StressPlotter(problem, filetrunk="viscoelastic_stress", fileext=["pdf", "png"])]
-        problem.output()
+        profiles, panels = {}, {}
+        for Wi in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]:
+            # go_to_param continues towards the target and halves its step whenever Newton fails,
+            # which is more robust than stepping by hand: a cold start at larger Wi would overshoot
+            # into a conformation tensor so stretched that exp(Psi) overflows on the first step
+            problem.go_to_param(Wi=Wi)
+            profiles[Wi] = stress_profile(problem, Wi)
+            reference = REFERENCE_DRAG.get(Wi)
+            print("  %.1f     %9.4f       %s" % (Wi, problem.drag(),
+                                                 "%9.3f" % reference if reference else "        -"))
+            if Wi in (0.1, 0.5, 0.7):        # the three rows of their Fig. 12
+                files = []
+                for field, title, lo, hi in (("S1", "$S_1$", -11.0, 15.0), ("S2", "$S_2$", -8.0, 55.0)):
+                    plotter = FlowStressPlotter(problem, filetrunk="%s_Wi%02d" % (field, round(10 * Wi)))
+                    plotter.field, plotter.title = field, title
+                    plotter.vmin, plotter.vmax = lo, hi
+                    problem.plotter = [plotter]
+                    problem.output()
+                    files.append(problem.get_output_directory("_plots/" + plotter.file_trunk + ".png"))
+                panels[Wi] = files
+        plot_stress_profiles(profiles, "viscoelastic_stress")
+        assemble_panels(panels, "viscoelastic_flowstress", ["$S_1$ (flow-directed shear)",
+                                                            "$S_2$ (flow-directed normal)"])
